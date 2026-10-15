@@ -1,0 +1,6 @@
+:root{
+--bg:#14100c;--surface:#241a10;--ink:#f5ead6;--muted:#c9b896;
+--accent:#e08a2d;--on-accent:#14100c;--chip-bg:#241a10;--chip-ink:#f5ead6;
+--accent-ink:#ffb35c;--line:#3c2f22;
+--font-display:Georgia,"Times New Roman",serif;--font-body:system-ui,Segoe UI,Arial,sans-serif;
+}

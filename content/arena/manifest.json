@@ -1,0 +1,140 @@
+{
+  "files": {
+    "src/sand_floor.gltf": {
+      "sha256": "6814d73a28e3882eaa978b401d01d63cc6fa81b454b975515948da3794023f74",
+      "bytes": 1791278
+    },
+    "src/stands.gltf": {
+      "sha256": "66167f3522d0b84becdcdd9572d9118690823b7a1beb8f2d02f5c241ae50d98e",
+      "bytes": 5763553
+    },
+    "src/walls.gltf": {
+      "sha256": "4f5ae00ad614e44b3b10e273844669504aa398e888bc578fccc700ea9d413936",
+      "bytes": 5763593
+    },
+    "src/gate_tunnel.gltf": {
+      "sha256": "5a6303835a452930cdab437a95762a632342bc1642d123d3653ee25f2fbbccc6",
+      "bytes": 5736073
+    },
+    "src/torch.gltf": {
+      "sha256": "b04cde0a248a1ea269559736dafe5994dcc756b1eb155daa6f5343d37162f090",
+      "bytes": 6821759
+    },
+    "src/banner.gltf": {
+      "sha256": "40046652694c2976be5443f4d2462ff24eeb3fb7d662e68fbb75a5667abf5226",
+      "bytes": 7837265
+    },
+    "src/crate.gltf": {
+      "sha256": "322d4cf3a807ab572ce6d9af25b0707c7793752238fd0eeaa27d5436fd84b1b7",
+      "bytes": 6879480
+    },
+    "src/debris.gltf": {
+      "sha256": "0f2da95df0f61b52963b3368bd42a604dde3fae866231dd914339802fa06027b",
+      "bytes": 5736589
+    },
+    "textures/sand_albedo.png": {
+      "sha256": "2ad063f80afd58215d29736c9b6eb42077323307f4694dcb8fc9c3ed946883d4",
+      "bytes": 683758
+    },
+    "textures/stone_albedo.png": {
+      "sha256": "3b8c40c0d3a97977d8dd107404ddc0e229d4cbe0bfed870ce7bf0db2cb057ff3",
+      "bytes": 461761
+    },
+    "textures/wood_albedo.png": {
+      "sha256": "955c214f801e3dbed8bc5583f0ffa48893ab457fa7eaf68755c10684c344f56d",
+      "bytes": 325492
+    },
+    "textures/cloth_albedo.png": {
+      "sha256": "4ca086c800cda30b0db00cfd576d45c9930a6288e0fe183cd23aab5c367ffbdb",
+      "bytes": 240096
+    },
+    "textures/metal_roughness.png": {
+      "sha256": "90de097ec1c4df53bed4d2bece19625511e467a452caaf4596074b391a0c2df1",
+      "bytes": 18236
+    },
+    "textures/flat_normal.png": {
+      "sha256": "3a178f739ed3841560b6c743e7606da64ecc3f3c0b7552728dc2a99dad844ab1",
+      "bytes": 663
+    },
+    "hdri/arena_day.hdr": {
+      "sha256": "c3ddb9860a308449718f1187bf988638f09eb155ad1eed45ac7ab6607eda47c0",
+      "bytes": 22384990
+    },
+    "hdri/arena_sunset.hdr": {
+      "sha256": "f243a060f84df1437705d2e50bbdbcce66aa55ddb2d913c18eb3f87873213b10",
+      "bytes": 22841596
+    },
+    "hdri/arena_night.hdr": {
+      "sha256": "66452c13b77cd8dbdd44b8ff9837d304c64d5d095ef3c93b31465024a2fb0d07",
+      "bytes": 27968841
+    },
+    "placement.json": {
+      "sha256": "c310b0697c5230da33da047632940505ee543e4cb589e1f993d483cd155ca167",
+      "bytes": 2935
+    },
+    "textures/sand_albedo_2k.jpg": {
+      "sha256": "1803d7e2861b304bea6d2e124dcd4c657fcb93843b84c17bb2db98ce48a87e4e",
+      "bytes": 457152
+    },
+    "textures/sand_normal_2k.jpg": {
+      "sha256": "0f35185b7225fe2027897bb7e4586c7deb048817524f1ed104fdae7ce80bdc06",
+      "bytes": 863847
+    },
+    "textures/sand_roughness_2k.jpg": {
+      "sha256": "318b440c109de7411f9e7443f38ae3cf873f34e90afd762c931bae3b23426da2",
+      "bytes": 505596
+    },
+    "textures/stone_albedo_2k.jpg": {
+      "sha256": "4571ff357e041bacb75ab06ad1958e74a0b396e0f3d8b9dc9d4717f704996304",
+      "bytes": 2066659
+    },
+    "textures/stone_normal_2k.jpg": {
+      "sha256": "b367bdae7a75df039f3425a6eb9d395cd390a7a67b581bec89a44d2a31a8dbdc",
+      "bytes": 2182355
+    },
+    "textures/stone_roughness_2k.jpg": {
+      "sha256": "98495e70e919ea892f2119100e64d8d5a5accb9982703fdd923477e7f2a346fb",
+      "bytes": 1607004
+    },
+    "textures/wood_albedo_2k.jpg": {
+      "sha256": "02a124390e368fe7ae4bb98235fd02113cd4159fd5a7ea580ccba3e319b3577b",
+      "bytes": 1940468
+    },
+    "textures/wood_normal_2k.jpg": {
+      "sha256": "a7ff9954729e7d4dd678b1e35a2edacef9246e45d25a714c000ce95e3cc4e436",
+      "bytes": 3135183
+    },
+    "textures/wood_roughness_2k.jpg": {
+      "sha256": "6b9761d9955a6405e73d0040348cf856bfa3d94127baab3b177cdd8d27390f95",
+      "bytes": 1010429
+    },
+    "textures/cloth_albedo_2k.jpg": {
+      "sha256": "7c81a1577f50a023825d8d5e26ec7f8596e47534d8ff601aa0b074980833e875",
+      "bytes": 3195339
+    },
+    "textures/cloth_normal_2k.jpg": {
+      "sha256": "20207c7b1e4328f8b8b635435d33d5adf23c44f045d1f711b4105999d1883745",
+      "bytes": 2656496
+    },
+    "textures/cloth_roughness_2k.jpg": {
+      "sha256": "23f0b2bfdf7f88bff072878bb763c6e825ab154da50b51040b607911b74154c3",
+      "bytes": 3891940
+    },
+    "textures/sand_orm.png": {
+      "sha256": "dab40fa6e1cf645b0418f6fe3dbaf95bc6c6839677eea15026a2cfb2ab57baaa",
+      "bytes": 664
+    },
+    "textures/stone_orm.png": {
+      "sha256": "55c28331a119efccdd555460024a179d7427894f11c7d06d4a9c9cc1a56fb39f",
+      "bytes": 664
+    },
+    "textures/wood_orm.png": {
+      "sha256": "3ff77c78f00914c17c68484d728acc6e4c0b6d0a269f0606fac74126173a34c0",
+      "bytes": 664
+    },
+    "textures/cloth_orm.png": {
+      "sha256": "ee00980f79c991be07c3015869efd6478388e3fa3e08240b7625f59986b246f1",
+      "bytes": 664
+    }
+  }
+}

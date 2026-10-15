@@ -1,0 +1,7 @@
+{
+  "manifest": {"id": 15450099637529898780, "sha": "d669c7c31f5c6f1c", "license": "CC0-1.0"},
+  "cook": {"class": "Prop", "meshes": 1, "base_tris": 108, "lods": 4, "chunks": 0, "digest": "83f26ccf6e88f50a", "deterministic_x2": true},
+  "spatial": {"verdict": "clean", "new_findings": 0, "hash": "cbf29ce484222325"},
+  "placement": {"name": "ct4_prop", "position_m": [3.0, 0.25, 0.0], "extents_m": [0.5, 0.5, 0.5], "yaw_rad": 0.0},
+  "provenance_receipt": "992bda85bf5452a0"
+}

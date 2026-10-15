@@ -1,0 +1,1035 @@
+{
+ "task": "CT7 hero and fighters",
+ "skeleton": "human_male 43-bone rig (engine joints=45 incl. armature + mesh nodes), one skeleton for all 4 bodies",
+ "scale": "assembled at 1.8m hero (male bind); female parts bound to the male armature (documented cook transform)",
+ "materials": "4 quadrant materials per character (atlas quadrants of one 2048 composite); textures 1024 sRGB baseColor",
+ "sources": [
+  {
+   "file": "incoming/modular_rpg_characters.7z",
+   "url": "https://opengameart.org/sites/default/files/modular_rpg_characters.7z",
+   "page": "https://opengameart.org/content/modular-rpg-characters",
+   "spdx": "CC0-1.0",
+   "author": "System G6 (aka Qoma)",
+    "sha256": "ef53003c6b29798a634fb27a3f9fc3181a2c02b217689744f2944fc5fcc0fd99",
+    "bytes": 16600670,
+    "license_read_live": "2026-09-27 (page badge + \"License(s): CC0\", re-read live; both 7z still listed, 16.6 MB + 1.2 MB)"
+   },
+  {
+   "file": "incoming/modular_rpg_characters_ik_rig_for_animating.7z",
+   "url": "https://opengameart.org/sites/default/files/modular_rpg_characters_ik_rig_for_animating.7z",
+   "page": "https://opengameart.org/content/modular-rpg-characters",
+   "spdx": "CC0-1.0",
+   "author": "System G6 (aka Qoma)",
+   "sha256": "5e97fcbb17c23c6d84e085a54ea32c8a4fe0ee471a1d9b41bff9dead40e75aaf",
+   "bytes": 1239677,
+    "license_read_live": "2026-09-27 (same page, same CC0, re-read live)",
+    "note": "IK rig reference only; shipped clips are the baked FK actions from the .blend files"
+   }
+  ],
+  "incoming_files": [
+   {
+    "path": "incoming/modular_rpg_characters.7z",
+    "spdx": "CC0-1.0",
+    "author": "System G6 (aka Qoma)",
+    "page": "https://opengameart.org/content/modular-rpg-characters",
+    "sha256": "ef53003c6b29798a634fb27a3f9fc3181a2c02b217689744f2944fc5fcc0fd99",
+    "bytes": 16600670,
+    "license_read_live": "2026-09-27",
+    "change": "none: upstream bytes as downloaded"
+   },
+   {
+    "path": "incoming/modular_rpg_characters_ik_rig_for_animating.7z",
+    "spdx": "CC0-1.0",
+    "author": "System G6 (aka Qoma)",
+    "page": "https://opengameart.org/content/modular-rpg-characters",
+    "sha256": "5e97fcbb17c23c6d84e085a54ea32c8a4fe0ee471a1d9b41bff9dead40e75aaf",
+    "bytes": 1239677,
+    "license_read_live": "2026-09-27",
+    "change": "none: upstream bytes as downloaded; IK reference only"
+   },
+   {
+    "path": "incoming/staged/hero.blend",
+    "spdx": "CC0-1.0",
+    "author": "System G6 (aka Qoma), staged by engine2040 CT19 lane, re-grafted by CT21 lane",
+    "sha256": "bc73a5a7fd46c8170a06c80eef5d210b68648666d5924d76c5774fb489d6a3fa",
+    "bytes": 1407456,
+    "license_read_live": "2026-09-27 (derived from the CC0 7z above)",
+    "change": "assembled hero on the male bind via tools/assemble.py (9 parts, joined_verts 2934, scale 0.4294); weapons re-grafted via fixed tools/weapons.py (CT21: STAGE_SCALE meter fix, unparented head bake, verts 2934 -> 3049)"
+   },
+   {
+    "path": "incoming/staged/hero.blend1",
+    "spdx": "CC0-1.0",
+    "author": "System G6 (aka Qoma), staged by engine2040 CT19 lane",
+    "sha256": "24de66d628562a961ec249c35158fe728e7d00ffd7c4da1fed325d47d5ca69d4",
+    "bytes": 1285045,
+    "license_read_live": "2026-09-27 (derived from the CC0 7z above)",
+    "change": "Blender backup of the pre-weapon staged hero; not cooked directly"
+   },
+   {
+    "path": "incoming/staged/hero.parts.json",
+    "spdx": "CC0-1.0",
+    "author": "engine2040 CT19 lane (part list over System G6 parts)",
+    "sha256": "3d29b13820cb1305f77aeff7307a309064b447e24d6b27350fcdadec082c2ce2",
+    "bytes": 2239,
+    "license_read_live": "2026-09-27 (names CC0 pack parts only)",
+    "change": "emitted by tools/assemble.py: 9 roles with atlas tiles"
+   },
+   {
+    "path": "incoming/staged/hero.weapon.json",
+    "spdx": "CC0-1.0",
+    "author": "engine2040 CT21 lane (cook report over System G6 parts)",
+    "sha256": "c8c0a9c303d513035e23f51b32026e8e45e074a6f92291657861ecf5c329d14c",
+    "bytes": 137,
+    "license_read_live": "2026-09-27 (names CC0 pack parts only)",
+    "change": "emitted by fixed tools/weapons.py: main-hand sword + shield graft at staged bone heads (verts 2934 -> 3049)"
+   },
+   {
+    "path": "incoming/modular/",
+    "spdx": "CC0-1.0",
+    "author": "System G6 (aka Qoma)",
+    "license_read_live": "2026-09-27 (extraction of the CC0 7z above)",
+    "change": "53-file 7z extraction, cook intermediate; re-extractable from the pinned 7z, no per-file SHA kept"
+   },
+   {
+    "path": "incoming/ikrig/",
+    "spdx": "CC0-1.0",
+    "author": "System G6 (aka Qoma)",
+    "license_read_live": "2026-09-27 (extraction of the CC0 IK 7z above)",
+    "change": "3-file 7z extraction, weapon-offset reference only; re-extractable from the pinned 7z"
+   }
+  ],
+ "texture_substitutions": [
+  "male heavy_armor/boots/gloves + light_boots + medium_boots/gloves have no male PNG in the pack; same-pack female PNGs used (documented per-part in *.parts.json)"
+ ],
+ "refused": [
+  "Quaternius Universal Base Characters / Animation Library: pack pages still badge CC0 (read live 2026-09-25) but quaternius.com/license.html now serves QAL v1.0 (2026-08-28, no-redistribution-as-assets); downloads gated behind itch.io checkout, no anonymous fetch. NOT used: no bytes obtained, no license ambiguity shipped. Retry when operator provides files.",
+  "Mixamo: excluded per packet. Geno mesh / LAFAN1 / Fab: excluded (non-commercial / UE-only).",
+  "light_helmet (wide-brim wizard hat) on both light variants: refused by eyes gate (fiction break); variants ship bareheaded.",
+  "female light_armor_2 (bare chest): refused by eyes gate; switched to base light_armor."
+ ],
+ "variants": [
+  {
+    "name": "hero",
+    "joints": 45,
+    "tris_lod0": 5850,
+    "lods": "[[1448, 662, 288, 135], [2232, 1098, 555, 273], [1434, 603, 243, 93], [736, 358, 162, 70]]",
+    "prims": 4,
+    "skin_rows": 3933,
+    "texture": "1024x1024mips=11",
+    "clips": 14,
+    "entries": 42,
+    "bundle_bytes": 90364971,
+    "load_ms": 44,
+    "bundle_sha256": "522e78a82eef3e8b63cd353de89e6889e5c73ea311f0b9c18107185e53b9ea2b",
+    "body_glb_sha256": "4bdc600a7acb1fa057f33e5c680bff9f74d047f5d2de22df6a8addc1e94bbbd5",
+   "parts": [
+    {
+     "role": "armor",
+     "object": "human_male_heavy_armor",
+     "texture": "tex_human_female_heavy_armor.png",
+     "tile": [
+      0,
+      0,
+      1024
+     ]
+    },
+    {
+     "role": "body",
+     "object": "human_male_body_default",
+     "texture": "tex_human_male_body_1.png",
+     "tile": [
+      1024,
+      0,
+      512
+     ]
+    },
+    {
+     "role": "boots",
+     "object": "human_male_heavy_boots",
+     "texture": "tex_human_female_heavy_boots.png",
+     "tile": [
+      1536,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "feet",
+     "object": "human_male_feet_default",
+     "texture": "tex_human_male_feet_1.png",
+     "tile": [
+      1024,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "gloves",
+     "object": "human_male_heavy_gloves",
+     "texture": "tex_human_female_heavy_gloves.png",
+     "tile": [
+      0,
+      1536,
+      512
+     ]
+    },
+    {
+     "role": "hair",
+     "object": "human_male_hair_1",
+     "texture": "tex_human_male_hair_1.png",
+     "tile": [
+      1024,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "hands",
+     "object": "human_male_hands_default",
+     "texture": "tex_human_male_hands_1.png",
+     "tile": [
+      1536,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "head",
+     "object": "human_male_head_default",
+     "texture": "tex_human_male_head_1.png",
+     "tile": [
+      1536,
+      0,
+      512
+     ]
+    },
+    {
+     "role": "helmet",
+     "object": "human_male_heavy_helmet",
+     "texture": "tex_human_female_heavy_helmet.png",
+     "tile": [
+      512,
+      1536,
+      512
+     ]
+    }
+   ]
+  },
+  {
+   "name": "opp_male_light",
+   "joints": 45,
+   "tris_lod0": 5014,
+   "lods": "[[1060, 495, 229, 108], [2406, 1162, 583, 281], [740, 366, 90, 90], [808, 388, 172, 72]]",
+   "prims": 4,
+   "skin_rows": 3191,
+   "texture": "1024x1024mips=11",
+   "clips": 14,
+   "entries": 42,
+   "bundle_bytes": 90271167,
+   "load_ms": 46,
+   "bundle_sha256": "0c1b528c56f0e9d12d6ebda793cef19b9e463919f9f89db6e0d25f67c742e89b",
+   "body_glb_sha256": "9f4d71e67365af68d85ad2e17541ca22a87956e7a235171e27953c32a04a7ce1",
+   "parts": [
+    {
+     "role": "armor",
+     "object": "human_male_light_armor",
+     "texture": "tex_human_male_light_armor.png",
+     "tile": [
+      0,
+      0,
+      1024
+     ]
+    },
+    {
+     "role": "body",
+     "object": "human_male_body_default",
+     "texture": "tex_human_male_body_1.png",
+     "tile": [
+      1024,
+      0,
+      512
+     ]
+    },
+    {
+     "role": "boots",
+     "object": "human_male_light_boots",
+     "texture": "tex_human_female_light_boots.png",
+     "tile": [
+      1536,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "feet",
+     "object": "human_male_feet_default",
+     "texture": "tex_human_male_feet_1.png",
+     "tile": [
+      1024,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "gloves",
+     "object": "human_male_light_gloves",
+     "texture": "tex_human_male_light_gloves.png",
+     "tile": [
+      0,
+      1536,
+      512
+     ]
+    },
+    {
+     "role": "hair",
+     "object": "human_male_hair_4",
+     "texture": "tex_human_male_hair_4.png",
+     "tile": [
+      1024,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "hands",
+     "object": "human_male_hands_default",
+     "texture": "tex_human_male_hands_1.png",
+     "tile": [
+      1536,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "head",
+     "object": "human_male_head_3",
+     "texture": "tex_human_male_head_3.png",
+     "tile": [
+      1536,
+      0,
+      512
+     ]
+    }
+   ]
+  },
+  {
+   "name": "opp_female_medium",
+   "joints": 45,
+   "tris_lod0": 5916,
+   "lods": "[[1404, 662, 313, 136], [2396, 1189, 589, 278], [1292, 636, 322, 152], [824, 396, 192, 82]]",
+   "prims": 4,
+   "skin_rows": 3672,
+   "texture": "1024x1024mips=11",
+   "clips": 14,
+   "entries": 42,
+   "bundle_bytes": 90353121,
+   "load_ms": 87,
+   "bundle_sha256": "9a341a41d4aa42f27171800865dcd12a06c62c4e8e6773ae114355072c72a632",
+   "body_glb_sha256": "08427dd6aaef4bdb9a317c023306778555503c1ea16d82747aaea9ef84cb6886",
+   "parts": [
+    {
+     "role": "armor",
+     "object": "human_female_medium_armor",
+     "texture": "tex_human_female_medium_armor.png",
+     "tile": [
+      0,
+      0,
+      1024
+     ]
+    },
+    {
+     "role": "body",
+     "object": "human_female_body_default",
+     "texture": "tex_human_female_body_1.png",
+     "tile": [
+      1024,
+      0,
+      512
+     ]
+    },
+    {
+     "role": "boots",
+     "object": "human_female_medium_boots",
+     "texture": "tex_human_female_medium_boots.png",
+     "tile": [
+      1536,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "feet",
+     "object": "human_female_feet_default",
+     "texture": "tex_human_female_feet_1.png",
+     "tile": [
+      1024,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "gloves",
+     "object": "human_female_medium_gloves",
+     "texture": "tex_human_female_medium_gloves.png",
+     "tile": [
+      0,
+      1536,
+      512
+     ]
+    },
+    {
+     "role": "hair",
+     "object": "human_female_hair_2",
+     "texture": "tex_human_female_hair_2.png",
+     "tile": [
+      1024,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "hands",
+     "object": "human_female_hands_default",
+     "texture": "tex_human_female_hands_1.png",
+     "tile": [
+      1536,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "head",
+     "object": "human_female_head_default",
+     "texture": "tex_human_female_head_1.png",
+     "tile": [
+      1536,
+      0,
+      512
+     ]
+    },
+    {
+     "role": "helmet",
+     "object": "human_female_medium_helmet",
+     "texture": "tex_human_female_medium_helmet.png",
+     "tile": [
+      512,
+      1536,
+      512
+     ]
+    }
+   ]
+  },
+  {
+   "name": "opp_female_light",
+   "joints": 45,
+   "tris_lod0": 5184,
+   "lods": "[[1108, 535, 251, 121], [2528, 1227, 601, 282], [740, 364, 178, 76], [808, 384, 176, 72]]",
+   "prims": 4,
+   "skin_rows": 3272,
+   "texture": "1024x1024mips=11",
+   "clips": 14,
+   "entries": 42,
+   "bundle_bytes": 90286695,
+   "load_ms": 81,
+   "bundle_sha256": "a9d1f3f97dffd89e90bc54fcccad01b6ec349e5bde93b081a36fcf9b5da0c99e",
+   "body_glb_sha256": "ef908b0fa2b4af5e9880dc87ccbd77002178c64bae4dfebec06b78e5e6595bd2",
+   "parts": [
+    {
+     "role": "armor",
+     "object": "human_female_light_armor",
+     "texture": "tex_human_female_light_armor.png",
+     "tile": [
+      0,
+      0,
+      1024
+     ]
+    },
+    {
+     "role": "body",
+     "object": "human_female_body_default",
+     "texture": "tex_human_female_body_1.png",
+     "tile": [
+      1024,
+      0,
+      512
+     ]
+    },
+    {
+     "role": "boots",
+     "object": "human_female_light_boots_2",
+     "texture": "tex_human_female_light_boots_2.png",
+     "tile": [
+      1536,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "feet",
+     "object": "human_female_feet_default",
+     "texture": "tex_human_female_feet_1.png",
+     "tile": [
+      1024,
+      1024,
+      512
+     ]
+    },
+    {
+     "role": "gloves",
+     "object": "human_female_light_gloves_3",
+     "texture": "tex_human_female_light_gloves_3.png",
+     "tile": [
+      0,
+      1536,
+      512
+     ]
+    },
+    {
+     "role": "hair",
+     "object": "human_female_hair_1",
+     "texture": "tex_human_female_hair_1.png",
+     "tile": [
+      1024,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "hands",
+     "object": "human_female_hands_default",
+     "texture": "tex_human_female_hands_1.png",
+     "tile": [
+      1536,
+      512,
+      512
+     ]
+    },
+    {
+     "role": "head",
+     "object": "human_female_head_3",
+     "texture": "tex_human_female_head_3.png",
+     "tile": [
+      1536,
+      0,
+      512
+     ]
+    }
+   ]
+  }
+ ],
+ "clips": [
+  {
+   "variant": "hero",
+   "short": "idle",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "185e70c7034759e2",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "run",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "3ea8557d0d3aec49",
+   "loop": "true",
+   "root_motion": "true"
+  },
+  {
+   "variant": "hero",
+   "short": "jump",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "a2e04e8655f597bb",
+   "loop": "false",
+   "root_motion": "true"
+  },
+  {
+   "variant": "hero",
+   "short": "death",
+   "duration_s": "0.833",
+   "keys": 862,
+   "digest": "9d1cea58b0889137",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "idle_combat_1h",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "143b54df62b7441a",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "idle_combat_unarmed",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "f76a98cfcf0a9866",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "attack_1h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "1696e44a049e5f7f",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "attack_1h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "8f8ffa50539f3657",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "attack_1h_3",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4274703f355d99c3",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "attack_2h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "e4497f7576e75611",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "attack_2h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "0e6beb775c1f2e22",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "block_shield",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "a52bcd35da54bd52",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "attack_dual_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "f24f6072ccb699d2",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "hero",
+   "short": "taunt",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4f322525c7970901",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "idle",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "185e70c7034759e2",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "run",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "3ea8557d0d3aec49",
+   "loop": "true",
+   "root_motion": "true"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "jump",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "a2e04e8655f597bb",
+   "loop": "false",
+   "root_motion": "true"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "death",
+   "duration_s": "0.833",
+   "keys": 862,
+   "digest": "9d1cea58b0889137",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "idle_combat_1h",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "143b54df62b7441a",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "idle_combat_unarmed",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "f76a98cfcf0a9866",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "attack_1h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "1696e44a049e5f7f",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "attack_1h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "8f8ffa50539f3657",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "attack_1h_3",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4274703f355d99c3",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "attack_2h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "e4497f7576e75611",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "attack_2h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "0e6beb775c1f2e22",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "block_shield",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "a52bcd35da54bd52",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "attack_dual_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "f24f6072ccb699d2",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_male_light",
+   "short": "taunt",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4f322525c7970901",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "idle",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "185e70c7034759e2",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "run",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "3ea8557d0d3aec49",
+   "loop": "true",
+   "root_motion": "true"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "jump",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "a2e04e8655f597bb",
+   "loop": "false",
+   "root_motion": "true"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "death",
+   "duration_s": "0.833",
+   "keys": 862,
+   "digest": "9d1cea58b0889137",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "idle_combat_1h",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "143b54df62b7441a",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "idle_combat_unarmed",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "f76a98cfcf0a9866",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "attack_1h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "1696e44a049e5f7f",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "attack_1h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "8f8ffa50539f3657",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "attack_1h_3",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4274703f355d99c3",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "attack_2h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "e4497f7576e75611",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "attack_2h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "0e6beb775c1f2e22",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "block_shield",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "a52bcd35da54bd52",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "attack_dual_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "f24f6072ccb699d2",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_medium",
+   "short": "taunt",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4f322525c7970901",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "idle",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "185e70c7034759e2",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "run",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "3ea8557d0d3aec49",
+   "loop": "true",
+   "root_motion": "true"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "jump",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "a2e04e8655f597bb",
+   "loop": "false",
+   "root_motion": "true"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "death",
+   "duration_s": "0.833",
+   "keys": 862,
+   "digest": "9d1cea58b0889137",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "idle_combat_1h",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "143b54df62b7441a",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "idle_combat_unarmed",
+   "duration_s": "0.792",
+   "keys": 819,
+   "digest": "f76a98cfcf0a9866",
+   "loop": "true",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "attack_1h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "1696e44a049e5f7f",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "attack_1h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "8f8ffa50539f3657",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "attack_1h_3",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4274703f355d99c3",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "attack_2h_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "e4497f7576e75611",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "attack_2h_2",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "0e6beb775c1f2e22",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "block_shield",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "a52bcd35da54bd52",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "attack_dual_1",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "f24f6072ccb699d2",
+   "loop": "false",
+   "root_motion": "false"
+  },
+  {
+   "variant": "opp_female_light",
+   "short": "taunt",
+   "duration_s": "0.417",
+   "keys": 432,
+   "digest": "4f322525c7970901",
+   "loop": "false",
+   "root_motion": "false"
+  }
+ ],
+ "cook_gates": {
+  "ct1_identical_twice": true,
+  "ct2_identical_twice": true,
+  "texture_identical_twice": true,
+  "bundle_identical_twice": true,
+  "bundle_loads_win1_path": true,
+  "budgets_hold": true,
+   "eyes_pass": "12/12 previews read + CT21 hero re-eyes PASS (rest+wire, sword in right hand + shield on left arm, 1.8 m pole)"
+ }
+}

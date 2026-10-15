@@ -1,0 +1,14 @@
+{
+  "clip": "idle_combat_1h",
+  "loop": true,
+  "root_motion": false,
+  "tags": [
+    "idle",
+    "combat"
+  ],
+  "ground_y": 0.02,
+  "feet": {
+    "left": "foot_l",
+    "right": "foot_r"
+  }
+}

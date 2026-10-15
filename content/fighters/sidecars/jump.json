@@ -1,0 +1,13 @@
+{
+  "clip": "jump",
+  "loop": false,
+  "root_motion": true,
+  "tags": [
+    "jump"
+  ],
+  "ground_y": 0.02,
+  "feet": {
+    "left": "foot_l",
+    "right": "foot_r"
+  }
+}

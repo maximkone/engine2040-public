@@ -1,0 +1,67 @@
+{
+  "hints": [
+    {
+      "asset": "insula",
+      "edge": "parapet_s",
+      "height_m": 1,
+      "action": "vault",
+      "note": "roof parapet, both faces"
+    },
+    {
+      "asset": "insula",
+      "edge": "balcony",
+      "height_m": 3.25,
+      "action": "climb",
+      "note": "balcony slab from street; rail 0.5 above slab is vault"
+    },
+    {
+      "asset": "insula",
+      "edge": "roof_slab",
+      "height_m": 6.3,
+      "action": "climb",
+      "note": "from balcony via upper windows ledge (WD9 measures)"
+    },
+    {
+      "asset": "street_wall",
+      "edge": "crest",
+      "height_m": 3.2,
+      "action": "climb",
+      "note": "merlons 0.7 above crest are vault once up"
+    },
+    {
+      "asset": "siege_wall",
+      "edge": "walk",
+      "height_m": 6.3,
+      "action": "climb",
+      "note": "ladders in WD4; freesolo refused (over TV1 climb bound)"
+    },
+    {
+      "asset": "arch_gate",
+      "edge": "cap",
+      "height_m": 6.3,
+      "action": "none",
+      "note": "no route; pylon faces are shear (WD9 must not link)"
+    },
+    {
+      "asset": "fountain",
+      "edge": "rim",
+      "height_m": 0.95,
+      "action": "vault",
+      "note": "basin rim, low training vault"
+    },
+    {
+      "asset": "market_stall",
+      "edge": "counter",
+      "height_m": 0.95,
+      "action": "vault",
+      "note": "counter top, low vault"
+    },
+    {
+      "asset": "barracks",
+      "edge": "parapet",
+      "height_m": 4.4,
+      "action": "climb",
+      "note": "ludus roof access for WD2 vertical drills"
+    }
+  ]
+}

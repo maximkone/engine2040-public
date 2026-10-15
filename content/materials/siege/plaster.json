@@ -1,0 +1,50 @@
+{
+  "material": "plaster",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.86, 0.84, 0.78],
+    "base_metalness": 0,
+    "specular_roughness": 0.9,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1
+  },
+  "layers": [
+    {
+      "kind": "wet",
+      "driver": "wetness",
+      "darken": 0.35,
+      "roughness_to": 0.08
+    },
+    {
+      "kind": "blood",
+      "driver": "blood",
+      "tint": [0.35, 0.02, 0.02]
+    },
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "crack"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 1.5,
+    "brittleness": 0.7,
+    "shard": "dust",
+    "burn": 0
+  },
+  "sound": {
+    "impact": "crack"
+  },
+  "fx": {
+    "dust": "pale",
+    "spark": "none",
+    "decal": "crack"
+  }
+}

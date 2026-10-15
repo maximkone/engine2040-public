@@ -1,0 +1,60 @@
+# Hard-systems cards (center, 2026-09-29) — for the research merge seat
+
+Plan: `docs/plan/hard-systems.md` (HS) and `docs/plan/body-and-break.md` (BX).
+Owner word 2026-09-29: cover every hard system for an AI-native game engine,
+research arXiv and repos for ideas that can land. These are LADDER-format
+`CARD` lines: the merge seat deduplicates them into `LADDER.md`, the lead picks
+the first spike. Every source was surfaced by a web search on 2026-09-29 and its
+title or abstract read; nothing is a proof. Licenses are UNVERIFIED unless a line
+says otherwise: read the LICENSE file live before any code, weight or data is
+used. Pillars: P1 spatial, P2 AI-native and AI-agnostic, P3 fast, P4 looks, P5 AI
+builds the game (`LADDER.md`).
+
+Line format: `- CARD | P<n> | idea | source | fixture, baseline -> candidate, numbers | row`
+
+## Rivals and public benchmarks (facts that move our claims)
+
+- CARD | P2 | Unreal Engine 5.8 experimental MCP server in the editor (local only, no auth layer per reviews): the door alone is no longer a moat | Puget Systems hands-on 2026-07-09, vp-land and Epic coverage (web search 2026-09-29) | not run: our door vs UE 5.8 on the same 20 tasks | HS20, HS21 | REJECTED 2026-09-29: rival fact, no runnable proof (not run same-20-tasks); re-open with mock/local/remote vs UE parity table
+- CARD | P2 | Unity AI open beta (2026-05-04): in-editor Ask and Agent modes, AI Gateway (bring your own key), Unity MCP server | unity.com blog "unity-ai-mcp-how-to-get-started", Unity Discussions beta thread | not run: same tasks | HS20 | REJECTED 2026-09-29: rival fact, no runnable proof (not run); re-open with same-task numbers, license read before any code
+- CARD | P3 | Godot 4.6 made Jolt the default 3D physics engine for new projects | godotengine.org/releases/4.6 | our Physics row estimate 55 for Godot to re-check | VISION scorecard | REJECTED 2026-09-29: scorecard note, no engine home + no runnable proof; re-open with re-check numbers
+- CARD | P5 | GameDevBench: 333 Godot game-dev tasks, ICML 2026; visual feedback lifted GPT-5.4 from 41.1% to 52.0% | arXiv 2602.11103, github.com/waynchi/gamedevbench | mirror 30 tasks shaped like these on our door, deterministic checks | HS20 | REJECTED 2026-09-29: no runnable proof (not run 30-task mirror) + UNVERIFIED dataset license; spike first with deterministic checks + SPDX
+- CARD | P5 | CraftBench-UE: 70 Unreal tasks with deterministic build, asset and runtime checks; passing asset checks still failed runtime tests 42-50% for Blueprint | arXiv 2609.23142 (2026-09-19) | same shape on our tapes | HS20 | REJECTED 2026-09-29: no runnable proof (not run tape-shape mirror); spike first with build+asset+runtime check numbers
+- CARD | P5 | GameLogicBench: tick-level state assertions for coding agents on runtime game logic | arXiv 2609.21562 | our tapes give tick-level truth for free | HS20 | REJECTED 2026-09-29: no runnable proof (not run); spike first with a tick-assertion harness + seeded-bug numbers
+- CARD | P5 | GameCraft-Bench, SWE-Game, GameASG-Bench, GameXpert-Bench: end-to-end playable-game benchmarks | arXiv 2606.17861, 2609.33678, 2609.21293 | list only, read protocols before choosing | HS20 | REJECTED 2026-09-29: list only, protocols unread + no runnable proof; re-open after reading protocols with one chosen shape + numbers
+- CARD | P2 | GBQA: LLMs as QA engineers, still weak on long-horizon state-dependent bugs; TITAN deployed in 8 game QA pipelines | arXiv 2604.02648, 2509.22170 | seed 30 bugs, agent files each with a replaying tape | HS19 | REJECTED 2026-09-29: no runnable proof (not run 30-bug seed) + TITAN shape already HELD as BET-QA4; spike first with catch + replay x2
+- CARD | P2 | MCP security bench and MCP design-choice studies: scope, budget and injection matter | arXiv 2510.15994, 2602.15945 | 20 adversarial briefs on our door | HS21 | REJECTED 2026-09-29: no runnable proof (not run 20 adversarial briefs); spike first with refusal + FP numbers
+
+## Physics, destruction, bodies
+
+- CARD | P3 | Augmented Vertex Block Descent: hard constraints, high stiffness ratios, over a million objects on GPU in demos | AVBD (SIGGRAPH 2025, Giles, Roblox), VBD arXiv 2403.06321, savant117/avbd-demo3d MIT (read 2026-09-29) | 10k-vertex cloth 0.5 ms CPU vs Q16 verlet, stable at 100:1 | HS1 | REJECTED 2026-09-29: no runnable proof (not run cloth-vs-Q16 fixture); closest to spike-ready; re-open with ms + stability + hash x2
+- CARD | P3 | Newton 1.0 physics (Linux Foundation, Disney Research, Google DeepMind, NVIDIA): Apache-2.0, VBD solver, SDF collision, hydroelastic contact | github.com/newton-physics/newton (GA 2026-03 per search) | ideas for solver design only; Warp stays out | HS1, HS3 | REJECTED 2026-09-29: no runnable proof + Warp dep excluded + no home for a second backend; ideas-only until solver numbers land
+- CARD | P3 | Jolt cross-platform determinism costs about 8% and needed fixes for `push_heap` tie order and ARM64 vs x64 doubles | Jolt 5.3-5.5 release notes | our golden on x86-64 Windows, Linux and aarch64 | HS2 | REJECTED 2026-09-29: release-note claim, no runnable proof on our golden; re-open with push_heap tie-order probe + hash x2 Win/Linux
+- CARD | P4 | Persistent-cut soft body via total-Lagrangian MPM, cut history on material points, GPU | BladeMaster arXiv 2609.27342 (2026-09-23) | presentation-only limb cut beside BX7 | HS5 | REJECTED 2026-09-29: no runnable proof (not run); GPU path needs O5 numbers + 0 tick drift; spike first beside BX7
+- CARD | P4 | Neural clustering for prefractured meshes, learned brittle fracture | arXiv 2502.04615, DeepFracture 2310.13344 | 20 walls, panel A/B vs seeded Voronoi | HS4 | REJECTED 2026-09-29: no runnable proof (not run 20-wall A/B) + learned weights UNVERIFIED; spike first with panel + replay x2 + SPDX
+- CARD | P1 | Graph network predicts progressive collapse mode in under 1 s (94% vs finite element, 6900x faster) | 2026 progressive-collapse graph network (PMC13475598), arXiv 2506.18724 | agree with BX13 on 90% of 200 removals | HS6 | REJECTED 2026-09-29: no runnable proof (not run 200-removal agreement) + model UNVERIFIED, never in tick; re-open with 90% agreement + replay x2
+- CARD | P4 | Physics-based contact-rich character tracking, behavior foundation models, diffusion policies | arXiv 2604.07984, BFM-Zero, SCRIPT 2605.22894, BFMTrack 2606.25056 | student follows 10 clips, recovers 5 shoves, replay x2 | HS8 | REJECTED 2026-09-29: no runnable proof (not run 10-clip follow) + diffusion policy never in tick; spike first offline-only
+- CARD | P4 | Autoregressive motion diffusion, latent motion bricks for real-time controllable motion | ARDY 2607.08741, DartControl 2410.05260, MotionBricks 2604.24833, DiscoForcing 2605.28491 | 20 prompts to baked clips, foot slide under LM1 bar | HS7 | REJECTED 2026-09-29: no runnable proof (not run 20-prompt bake); spike first with baked clips + slide + replay x2
+- CARD | P5 | Auto-rig and skin any character | UniRig arXiv 2504.12451, SkinTokens repo, AniGen 2604.08746, Puppeteer 2508.10898 | 20 meshes, weights sum to one, sever cook passes | HS9 | REJECTED 2026-09-29: no runnable proof (not run 20-mesh) + repos UNVERIFIED; spike first with weight-sum + cook numbers + SPDX
+
+## Rendering and assets
+
+- CARD | P4 | Neural radiance cache trained while rendering, ReSTIR at the first vertex (about 2.6 ms at full HD in the paper) | arXiv 2106.12372, Neural Two-Level Monte Carlo 2412.04634 | 3 ms at 1080p on O5 or reject on wgpu limits | HS10 | REJECTED 2026-09-29: no runnable proof on O5 + per-frame training/VRAM/converge-lag limits; re-open with 3ms@1080p + identical pixels or reject on wgpu limits
+- CARD | P4 | Neural texture compression with thread-efficient shared decoders; hypernetwork variant | arXiv 2608.27888, 2606.26913, 2305.17105 | offline encode only, VRAM down 3x at equal PSNR | HS11 | REJECTED 2026-09-29: no runnable proof (not run offline encode); decoder-in-tick needs ms + PSNR + hash x2; spike first offline-only
+- CARD | P3 | Compute-shader software rasterization of billions of triangles (2-5x over Vulkan on hundreds of millions) | CuRast arXiv 2604.21749; Aokana 2505.02017 | wgpu compute plus meshoptimizer clusters, 100M no pop on O5 | HS12 | REJECTED 2026-09-29: no runnable proof on O5 (100M no-pop unmeasured); spike first with compute + cluster numbers + bytes x2
+- CARD | P4 | Cluster-LOD virtualized Gaussians for composed scenes | arXiv 2505.06523 | one licensed capture at 60 fps | HS13 | REJECTED 2026-09-29: no runnable proof (no licensed capture at 60fps) + VX7 LATER-until-WD3; re-open with capture + ms + bytes x2
+- CARD | P3 | wgpu status 2026-09-29: ray query and mesh shaders experimental, cooperative matrix 8x8 f32 only, no work graphs | docs.rs wgpu Features, gfx-rs/wgpu issue 7197 | dated feature watch | HS14 | REJECTED 2026-09-29: watch note, no engine home + no runnable proof; re-open when a gated feature has a consumer + numbers
+- CARD | P5 | Image-to-3D with PBR: Hunyuan3D 2.1, native structured latents (TRELLIS 2 per search text); license and territory terms to read | arXiv 2506.15442, 2512.14692, 2509.12815 | gated `asset.generate` with validators | HS26 | REJECTED 2026-09-29: no runnable proof + licenses/territory unread (UNVERIFIED weights) + no asset.generate home; re-open with SPDX + validator numbers
+- CARD | P4 | Modal impact sound from shape and material, differentiable acoustic radiance transfer | arXiv 2509.15946, 2108.07425 | 10 clips blind A/B vs banks | HS24 | REJECTED 2026-09-29: no runnable proof (not run 10-clip blind A/B); spike first with bank comparison + ms
+
+## Agents, worlds, memory
+
+- CARD | P2 | Engine as teacher: action-conditioned world models train on engine footage (Unreal-based pipeline, Matrix-Game 3.0, 3.5, GameWAM, ForgeWM); we export replay-exact tapes with hashes | arXiv 2609.03557, 2604.08995, 2608.29910, 2608.26200, 2608.14022 | 1 h of tapes exports and re-verifies x2 | HS15, HS28 | REJECTED 2026-09-29: no runnable proof (not run 1h export + re-verify x2); spike first with hash-x2 numbers
+- CARD | P2 | Engine as gym: vectorized deterministic headless environments with typed observation and actions | Newton and Isaac-style robot-learning stacks (ideas), NavIsaacLab arXiv 2606.26265 | 64 envs lockstep hash x2, 1,000 steps per second per core | HS27 | REJECTED 2026-09-29: no runnable proof (not run 64-env lockstep); spike first with hash x2 + steps/s numbers
+- CARD | P5 | Physics-grounded generated scenes with critic loops | PhyScensis (ICLR 2026), SAGE arXiv 2602.10116, Cutscene Agent 2604.25318 (MCP into an engine) | settle-test flags 90% of seeded bad placements | HS22 | REJECTED 2026-09-29: no runnable proof (not run settle-test on seeded bad placements); spike first with flag rate + bytes x2
+- CARD | P2 | Local NPC memory: incremental maintenance on quantized hybrid models; small models for dialogue | arXiv 2609.18935, 2601.23206 | recall 50 facts at 90% after 1 h, async, replay never calls it | HS16 | REJECTED 2026-09-29: no runnable proof (not run 50-fact recall) + model async-only, never on the replay path; spike first with recall + 0-drift numbers
+- CARD | P2 | LLM-guided RL for combat NPCs, embodied crowd agents | arXiv 2609.02931, 2604.05525 | UW fixture 3 seeds, orders obeyed 99% | HS17 | REJECTED 2026-09-29: no runnable proof (not run UW 3-seed) + model never in tick; spike first offline-only
+- CARD | P3 | Neural crowd navigation in dense crowds | arXiv 2603.06729, 2606.26265 | collisions down at equal p99 vs NV4 | HS18 | REJECTED 2026-09-29: no runnable proof (no NV4 p99 comparison); spike first with collisions + p99 + replay x2
+
+## Verification
+
+- CARD | P2 | Kani model checker for Rust: found 11 bugs missed by tests and fuzzing in industrial code; function and loop contracts | arXiv 2607.01504 | 20 harnesses on Q16 math, cut quantization, bond arithmetic, tape decode | HS23 | REJECTED 2026-09-29: no runnable proof (not run 20 harnesses); closest verification spike; re-open with harness greens + bug count

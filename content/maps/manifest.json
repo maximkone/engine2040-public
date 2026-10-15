@@ -1,0 +1,160 @@
+{
+  "files": {
+    "src/yard_floor.gltf": {
+      "sha256": "1199bb94c7956c8e2d9254d0abb5193698d871c1854993965e405b5422921230",
+      "bytes": 69494
+    },
+    "src/barracks.gltf": {
+      "sha256": "879035aab7298820bc2f36f985d8ec180f04de0e7d6524879449f81933e547c8",
+      "bytes": 151679
+    },
+    "src/blacksmith.gltf": {
+      "sha256": "9ddc5c6be68eb01e4bcab13c91dd7b2b554a26d1e632366aa6db587bf8c63d1d",
+      "bytes": 96548
+    },
+    "src/notice_board.gltf": {
+      "sha256": "0a230c58902613ab54671c1fbedb372ad90c9c4851f0b15af5acb81bd671d624",
+      "bytes": 96671
+    },
+    "src/training_post.gltf": {
+      "sha256": "f2b8e36c5cf31cb8cc3b07cc325890b0863ef2294af5b966a5416224c4f629a4",
+      "bytes": 41554
+    },
+    "src/weapon_rack.gltf": {
+      "sha256": "866d4fb7f29baea0b614366a8c8e808db81ed3ebe5f4108cfd7ae78c23e88084",
+      "bytes": 137828
+    },
+    "src/insula.gltf": {
+      "sha256": "448c12e8a757ce0cf85b2f2211d063003040b313dad560631184303114a01e3e",
+      "bytes": 151552
+    },
+    "src/market_stall.gltf": {
+      "sha256": "5914368ac6c666e79fe99e1e6b1e2ceeaa09fad5e53b64f97e7555373ecfd456",
+      "bytes": 122120
+    },
+    "src/arch_gate.gltf": {
+      "sha256": "fb54fbd73b6da9e4b9129a445d1561b5b3e45e0fb531eb7a2c54d334a18d848d",
+      "bytes": 137976
+    },
+    "src/street_wall.gltf": {
+      "sha256": "ad2b2fd884fb89ef1ab081e1800958e18fe0b4dc7fc413d79c1174b6973b6361",
+      "bytes": 110475
+    },
+    "src/fountain.gltf": {
+      "sha256": "c6f79a5cdd2cd3597d8144bd65d23d9d3755e8ce042926db2ce0f0c887a504da",
+      "bytes": 110337
+    },
+    "src/siege_wall.gltf": {
+      "sha256": "675eef85af8ef9a6e78897a930c7c311cd70e1bc548b135029c65fd3470d5ec5",
+      "bytes": 137723
+    },
+    "src/palisade.gltf": {
+      "sha256": "724d4ce24347d8354833491eb3f2cc427999949d6c132bf42080cdaf4099eed0",
+      "bytes": 234131
+    },
+    "src/tent.gltf": {
+      "sha256": "b12820757b714df5592368a15be1d7c32a4f33fe514722461350329497e21c08",
+      "bytes": 96492
+    },
+    "src/ballista.gltf": {
+      "sha256": "d2a506ac335ac505badfdf8108e1e3f1e0f98baa806b48a51fda8da7bcb81460",
+      "bytes": 165495
+    },
+    "src/polyhaven-acoustic-guitar.gltf": {
+      "sha256": "b7c2df263d6a692a6b97d1781f04dccd36b67493261ce106e7160b6c9c6cd852",
+      "bytes": 315
+    },
+    "src/polyhaven-ceramic-vase.gltf": {
+      "sha256": "d018998b81f63c41dcf33390aebd93fb8934b55dc876852edfee60e5e6ab85f5",
+      "bytes": 306
+    },
+    "src/polyhaven-desk-lamp.gltf": {
+      "sha256": "554b44cd2179008ee43f433541535070e879920511275e6c6531c71a1385f9ad",
+      "bytes": 297
+    },
+    "src/polyhaven-iron-anvil.gltf": {
+      "sha256": "eaf02f0ba4b18d0648cc46d3786bc0f9cb9f665a30f16571975a2a0969c75584",
+      "bytes": 300
+    },
+    "src/polyhaven-leather-backpack.gltf": {
+      "sha256": "b5c86b13f3c6f24a538bcc5e674eaac436b2d64ee771f8a5935425d02ba9c1c0",
+      "bytes": 318
+    },
+    "src/polyhaven-oak-barrel.gltf": {
+      "sha256": "40e41f848c625d23215e45e4c87bc7f75639d7555840ebc4be6966905ecdc2a7",
+      "bytes": 300
+    },
+    "src/polyhaven-paper-lantern.gltf": {
+      "sha256": "1c7be63456447ec904f24688d13b88f17493dabfeaa01c37461d03083f2b8549",
+      "bytes": 309
+    },
+    "src/polyhaven-potted-plant.gltf": {
+      "sha256": "66c9c70dcd40f4286fa041106c3daa2281ae71c540270f577213faa9633b0f96",
+      "bytes": 306
+    },
+    "src/polyhaven-road-bicycle.gltf": {
+      "sha256": "9a19516f428d88b4f9fa10698bb3a72b751eae4771d7e513691c20e798b9ff19",
+      "bytes": 306
+    },
+    "src/polyhaven-vintage-camera.gltf": {
+      "sha256": "5ebcd1205ca063be5fe2db184a916879760820358a28c25c0caa163b8a3df2b6",
+      "bytes": 312
+    },
+    "src/polyhaven-wooden-chair.gltf": {
+      "sha256": "f901d0ef3a042d2bbf9e325aa60e5ad22af34472a0ecd756245747aeecb87426",
+      "bytes": 306
+    },
+    "src/polyhaven-wooden-crate.gltf": {
+      "sha256": "dabba4d37e03bef8f31be2bc57e3d5eeb165cf9a86e4f0fd7b5f5cbaadcdafab",
+      "bytes": 306
+    },
+    "textures/plaster_albedo.png": {
+      "sha256": "0176ee13ac28296c39c72a6cad829c1269ce03607025b20febdab3b9cdd1d577",
+      "bytes": 111186
+    },
+    "textures/timber_albedo.png": {
+      "sha256": "f1ed27645848f3378d4156e93a5b35cda21d2d42e0fc596edaa8dec2a5e14758",
+      "bytes": 121553
+    },
+    "textures/stone_albedo.png": {
+      "sha256": "4d598902d9148f8f8e898045d267e74aa7c81be4afbe3cb062a3b05ca3b66430",
+      "bytes": 146931
+    },
+    "textures/ground_albedo.png": {
+      "sha256": "2cb2ede3085dbd9abb4ad5d3106edccf4ca80472b28d1f1b70896219ef4bee73",
+      "bytes": 151911
+    },
+    "textures/canvas_albedo.png": {
+      "sha256": "46569e19964e8820e5e6e404a1696c421c8fe6bb9da603e9df9ed135735af4f8",
+      "bytes": 120807
+    },
+    "textures/metal_roughness.png": {
+      "sha256": "90de097ec1c4df53bed4d2bece19625511e467a452caaf4596074b391a0c2df1",
+      "bytes": 18236
+    },
+    "textures/flat_normal.png": {
+      "sha256": "3a178f739ed3841560b6c743e7606da64ecc3f3c0b7552728dc2a99dad844ab1",
+      "bytes": 663
+    },
+    "hdri/maps_day.hdr": {
+      "sha256": "6af66d73a108f77634ae5a7102a57731f6591b5a2fc718406e04fc58316743e2",
+      "bytes": 32850
+    },
+    "placement_ludus.json": {
+      "sha256": "131fd5809547462b711a1396afbcd25cc6d5e61063842d47c831503dedad9505",
+      "bytes": 2189
+    },
+    "placement_district.json": {
+      "sha256": "9320e092170e598d897977a2d4abcf9bdeffb038dd5335832dc0a628e3735d5e",
+      "bytes": 1912
+    },
+    "placement_siege.json": {
+      "sha256": "df6c5ab4ce0ce7db0583d79cd15ea00d524d729e93fe0fd98f339c6f7af52779",
+      "bytes": 1908
+    },
+    "traversal_hints.json": {
+      "sha256": "b8b4b02363377b568b0700a9985a9487205f01aaa9ad756185c430161aa3a701",
+      "bytes": 1552
+    }
+  }
+}

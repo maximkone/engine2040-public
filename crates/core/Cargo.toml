@@ -1,0 +1,13 @@
+[package]
+name = "engine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Test utilities for other crates' dev-dependencies (zero-allocation probe).
+test-util = []
+
+[lints]
+workspace = true

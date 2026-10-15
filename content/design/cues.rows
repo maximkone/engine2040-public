@@ -1,0 +1,26 @@
+# Cue table: one sound cue per fight event, inside the sound budget.
+# Designers pick the cue here without a Rust edit; the audio seat (EG21)
+# reads this file when it wires FightEvent playback through the CueBank,
+# and the HUD seat reads the latency budget beside docs/design/HUD.md.
+# Row ids are the FightEvent variant names in snake_case
+# (crates/combat/src/fight.rs: Hit, Blocked, Parried, Dodged, StaminaOut,
+# Knockdown). `cue` names one of the ARENA_CUES in crates/audio/src/cue.rs;
+# `bus` is 0 Sfx, 1 Music, 2 Dialogue; `priority` is the steal rank
+# (higher survives, mirroring the bank); `latency_ms` is milliseconds from
+# event to audible cue, at most 40 (combat feels worse as cue delay rises;
+# 100 ms is loose). The visual answer (HUD flash) rides the next frame, at
+# most 25 ms, and lives in docs/design/HUD.md, not here.
+# Hit, block, parry and knockdown play their same-named cues (the mapping
+# the game uses today: crates/game/src/lib.rs map_cue into FightCue, then
+# crates/game/src/audio_director.rs into the mix). A dodge negates the hit,
+# so only the swing whoosh plays; stamina-out starts nothing, so it reuses
+# the swing whoosh quietly until a dedicated whiff cue lands (EG21 remainder).
+# Every numeric key is whole numbers; `cue` is a bank-name reference;
+# `#` comments, no floats.
+table cues version 1
+hit cue=hit bus=0 priority=180 latency_ms=12
+blocked cue=block bus=0 priority=160 latency_ms=12
+parried cue=parry bus=0 priority=170 latency_ms=12
+dodged cue=swing bus=0 priority=100 latency_ms=16
+stamina_out cue=swing bus=0 priority=40 latency_ms=20
+knockdown cue=knockdown bus=0 priority=200 latency_ms=16

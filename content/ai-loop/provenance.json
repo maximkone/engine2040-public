@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "generator": "ct4-manual-prop",
+  "license": "CC0-1.0",
+  "source": "Script(ct4-ai-loop)",
+  "request_digest": "790755b9d46023f2b41ad3a6b39d5f08e82373825690ffd3d9497bb009446736",
+  "artifact_digest": "e68750980da80c8caff9fe320ebaa03f7c3ed68605677d41137351bb446dda58",
+  "verifiers": [
+    {"verifier": "license_gate", "passed": true, "detail": "ct4-manual-prop CC0-1.0 readable"},
+    {"verifier": "ct2_cook", "passed": true, "detail": "prop digest 83f26ccf6e88f50a"},
+    {"verifier": "sp1_staged", "passed": true, "detail": "clean hash cbf29ce484222325"}
+  ],
+  "receipt": "992bda85bf5452a0",
+  "encoding_hex": "0100010b006374342d61692d6c6f6f70790755b9d46023f2b41ad3a6b39d5f08e82373825690ffd3d9497bb009446736e68750980da80c8caff9fe320ebaa03f7c3ed68605677d41137351bb446dda58030c006c6963656e73655f676174650120006374342d6d616e75616c2d70726f70204343302d312e30207265616461626c6508006374325f636f6f6b011c0070726f702064696765737420383366323663636636653838663530610a007370315f737461676564011b00636c65616e2068617368206362663239636534383432323233323500"
+}

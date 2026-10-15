@@ -1,0 +1,201 @@
+{
+  "note": "O-032 tiles.",
+  "assets": [
+    {
+      "file": "assets/t_cloth_albedo.png",
+      "what": "albedo 2k crop",
+      "from": "engine cloth set CC0 (see CLOTH-PROVENANCE.md)",
+      "bytes": 128305,
+      "sha256": "e3b0610dddc32336392342ca0b512cc40b260a7a981e4b10bf2bf42a8a036692"
+    },
+    {
+      "file": "assets/t_cloth_normal.png",
+      "what": "normal 2k crop",
+      "from": "engine cloth set CC0",
+      "bytes": 125021,
+      "sha256": "b0ceddfe63d5cd9948e80067f721959d75415ad33073e2cb216010ec2ea3b921"
+    },
+    {
+      "file": "assets/t_cloth_orm.png",
+      "what": "ORM (255,217,0)",
+      "from": "authored CC0 ORM-PROVENANCE.md",
+      "bytes": 860,
+      "sha256": "87df21d402f408decaf879a9f8839a9a2c3835b9e67c1fa3326bec1de5a0be5c"
+    },
+    {
+      "file": "assets/t_cloth_rough.png",
+      "what": "roughness 2k crop",
+      "from": "engine cloth set CC0",
+      "bytes": 100614,
+      "sha256": "91a4e44b580560a6793eb4a1dc763a65b94c2cdbc6fedc19815c615a1c154024"
+    },
+    {
+      "file": "assets/t_day_sky.png",
+      "what": "day sky wash",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 1034,
+      "sha256": "8729da5eaf052e7baecc6ae050d41d8272ea416f05d667727936375fe92562ff"
+    },
+    {
+      "file": "assets/t_day_sun.png",
+      "what": "sun bounce",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 1030,
+      "sha256": "2c00062e08b76acf375ae6de11c0b1624c0532768c887e35570735510f8b39a6"
+    },
+    {
+      "file": "assets/t_marble_albedo.png",
+      "what": "albedo 2k crop",
+      "from": "Poly Haven sandstone_blocks_04 diff CC0 (marble stand-in)",
+      "bytes": 128452,
+      "sha256": "730df492747a614c24a0369e5053b6c54eab657f69a4173d2f3a175f1f8115ec"
+    },
+    {
+      "file": "assets/t_marble_normal.png",
+      "what": "normal 2k crop",
+      "from": "Poly Haven sandstone_blocks_04 nor_gl CC0",
+      "bytes": 130803,
+      "sha256": "95b2f9c5bdcfa7776f03440c0f67a6b15ccf358eb6ff04bac55f59bdb2109661"
+    },
+    {
+      "file": "assets/t_marble_orm.png",
+      "what": "ORM (255,230,0)",
+      "from": "authored CC0 ORM-PROVENANCE.md",
+      "bytes": 860,
+      "sha256": "8fcc48b4bf09d3461c688027cbe550a7bf60ca4cfb5abff36cb36d7a1c19e1dd"
+    },
+    {
+      "file": "assets/t_marble_rough.png",
+      "what": "roughness 2k crop",
+      "from": "Poly Haven sandstone_blocks_04 rough CC0",
+      "bytes": 71617,
+      "sha256": "2f7a4eb5e4a002e624a7430ae3e5d452a4748a265d82133c80704986c7beb15f"
+    },
+    {
+      "file": "assets/t_night_glow.png",
+      "what": "torch glow pool",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 24395,
+      "sha256": "79d263519e7e1ecc0f5d40fa1cf07621d9508af174a623dc06f6708ad5e7138e"
+    },
+    {
+      "file": "assets/t_night_sky.png",
+      "what": "night wash",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 928,
+      "sha256": "834ad9642adc80c9959bb1c6010fbd5c5a81823c93cc6e8a2441c846528feda6"
+    },
+    {
+      "file": "assets/t_sand_albedo.png",
+      "what": "albedo 2k crop",
+      "from": "Poly Haven aerial_beach_01 diff CC0",
+      "bytes": 103585,
+      "sha256": "156020979c5e7d03122a77166909117b6fea47dfc94d6a106c8cda303ce99468"
+    },
+    {
+      "file": "assets/t_sand_normal.png",
+      "what": "normal 2k crop",
+      "from": "Poly Haven aerial_beach_01 nor_gl CC0",
+      "bytes": 153090,
+      "sha256": "1ad96a6196910e00ea43da83a42416116a467e02a1bb2e383db6bd16f711afd0"
+    },
+    {
+      "file": "assets/t_sand_orm.png",
+      "what": "ORM (255,242,0)",
+      "from": "authored CC0 ORM-PROVENANCE.md",
+      "bytes": 860,
+      "sha256": "15b74c5810b714e332a55fa83190943334bc6848bdb8014e7fb90821333b6edc"
+    },
+    {
+      "file": "assets/t_sand_rough.png",
+      "what": "roughness 2k crop",
+      "from": "Poly Haven aerial_beach_01 rough CC0",
+      "bytes": 60972,
+      "sha256": "3aca3ff05ea38034ad2be38cd4df98950bef090b6f69dcc57700c5802cc7037a"
+    },
+    {
+      "file": "assets/t_skin_deep.png",
+      "what": "deep tone rough~0.6",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 71170,
+      "sha256": "7634dc678226395bed2973895bf7b95c88aa7d20e6262a4b2711a930b1d566aa"
+    },
+    {
+      "file": "assets/t_skin_light.png",
+      "what": "light tone rough~0.6",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 71212,
+      "sha256": "62585829d6ac251a6b6f595d00a4f06a0e772c9db3df62ff0c288c9c78df5eb2"
+    },
+    {
+      "file": "assets/t_skin_mid.png",
+      "what": "mid tone rough~0.6",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 71128,
+      "sha256": "08ea21ce3c162b3514a87e5769b267bbc73ad78faae4c483d19e7b6ba2b78155"
+    },
+    {
+      "file": "assets/t_skin_shadow.png",
+      "what": "shadow tone rough~0.6",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 71144,
+      "sha256": "a7e8da5ad7630439c65c8d55b7f44401439b1fdfce4eb4d1ec1713382b2f6b8b"
+    },
+    {
+      "file": "assets/t_steel_brushed1.png",
+      "what": "brushed highlight",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 63727,
+      "sha256": "ff43aec6e87d07fdd90b2d851bc1a2f8fce1a47f5092fb4fc2973675f9bf4c25"
+    },
+    {
+      "file": "assets/t_steel_brushed2.png",
+      "what": "brushed mid",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 63727,
+      "sha256": "ff43aec6e87d07fdd90b2d851bc1a2f8fce1a47f5092fb4fc2973675f9bf4c25"
+    },
+    {
+      "file": "assets/t_steel_cuporm.png",
+      "what": "cup ORM G~0.37 B=0.9",
+      "from": "generator CC0 content/arena/tools/gen.mjs",
+      "bytes": 17107,
+      "sha256": "ba72bb88277469d49431be562d73b68f739c163c77494653180da1b3c526b7d8"
+    },
+    {
+      "file": "assets/t_steel_soot.png",
+      "what": "soot wear",
+      "from": "authored CC0 original (this lane)",
+      "bytes": 93603,
+      "sha256": "4d32b5a6777425a07c48d04f069254a3da8c2abb262ce37c5684351ec856c5fc"
+    },
+    {
+      "file": "assets/t_wood_albedo.png",
+      "what": "albedo 2k crop",
+      "from": "engine wood set CC0 (see provenance)",
+      "bytes": 91419,
+      "sha256": "b48c7aa9cfcd76762826eb88826c109019a9e3aebf65ee557dd6a641fd9184f5"
+    },
+    {
+      "file": "assets/t_wood_normal.png",
+      "what": "normal 2k crop",
+      "from": "engine wood set CC0",
+      "bytes": 113463,
+      "sha256": "0612b2f9e8d699c6907942c250ae9473583641f8dedcd307712ffa011e868533"
+    },
+    {
+      "file": "assets/t_wood_orm.png",
+      "what": "ORM (255,211,0)",
+      "from": "authored CC0 ORM-PROVENANCE.md",
+      "bytes": 860,
+      "sha256": "d2a997f3fc1b014390d111efce6304e63c1137c904618947bc55936e859041b4"
+    },
+    {
+      "file": "assets/t_wood_rough.png",
+      "what": "roughness 2k crop",
+      "from": "engine wood set CC0",
+      "bytes": 24716,
+      "sha256": "5d24cfd26b92606007781feb6086a9121781a4786f97e2ef19e6089ef2cde67f"
+    }
+  ]
+}

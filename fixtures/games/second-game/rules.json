@@ -1,0 +1,1 @@
+{"fixture":"second-game","version":2,"mode":"tag","seed":77,"ticks":120,"runners":4,"goal_m":[8,6],"goal_radius_m":1.5,"half_extent_m":20,"camera":{"height_m":12,"lead_m":2},"inputs":[{"tick":10,"body":0,"vx":3,"vy":2},{"tick":40,"body":1,"vx":-2,"vy":1},{"tick":60,"body":2,"vx":1,"vy":-3}]}

@@ -1,0 +1,34 @@
+{
+  "row": "CT29",
+  "layer": "window-bind",
+  "based_on": "content/fighters/manifest.json (CT7 pin bundle, CT30 receipt 2026-10-02)",
+  "frozen": ["content/fighters/manifest.json", "content/fighters/glb/", "content/arena/establishing.json"],
+  "license": "CC0-1.0 original CT7 kit only; this file stages existing CT7 bundle SHAs with spawn placements (no new bytes, no downloads, no donor code).",
+  "intent": "Bind the CT7 hero plus two CT15 staged fighters into the WIN1 window twin draw list, so the owner/player frame shows fighters instead of the lone twin cube. Slots stage the scripted-fight opening triangle: hero west, two opponents east, all inside the 20 m half-extent, pairwise >= 1.5 m apart.",
+  "slots": [
+    {
+      "slot": 0,
+      "variant": "hero",
+      "bundle_sha256": "522e78a82eef3e8b63cd353de89e6889e5c73ea311f0b9c18107185e53b9ea2b",
+      "x": -2.0,
+      "z": 0.0,
+      "yaw_deg": 90.0
+    },
+    {
+      "slot": 1,
+      "variant": "opp_male_light",
+      "bundle_sha256": "0c1b528c56f0e9d12d6ebda793cef19b9e463919f9f89db6e0d25f67c742e89b",
+      "x": 2.0,
+      "z": -1.5,
+      "yaw_deg": -90.0
+    },
+    {
+      "slot": 2,
+      "variant": "opp_female_medium",
+      "bundle_sha256": "9a341a41d4aa42f27171800865dcd12a06c62c4e8e6773ae114355072c72a632",
+      "x": 2.0,
+      "z": 1.5,
+      "yaw_deg": -90.0
+    }
+  ]
+}

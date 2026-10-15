@@ -1,0 +1,137 @@
+{
+  "session_version": 1,
+  "user_goal": "CT4: model a 0.5 m beveled crate prop and export it as GLB",
+  "safe_mode": true,
+  "telemetry": "disable requested; addon prefs unreadable in headless bridge (no collection channel opened, no network use past the local tool install)",
+  "blender": "Blender 5.2.0 LTS",
+  "generator": {
+    "name": "ct4-manual-prop",
+    "license": "CC0-1.0",
+    "license_source": "content/ai-loop/run_session.py: operator-authored Blender build code, output dedicated to CC0-1.0",
+    "tool": "mcp-for-blender over Blender 5.2 LTS (tool GPL; model output is artist bytes)"
+  },
+  "license_tag": "CC0-1.0",
+  "steps": [
+    {
+      "seq": 1,
+      "tool": "probe",
+      "arguments": {
+        "exe": "blender"
+      },
+      "ok": true,
+      "summary": {
+        "present": true,
+        "first_line": "Blender 5.2.0 LTS"
+      }
+    },
+    {
+      "seq": 2,
+      "tool": "probe",
+      "arguments": {
+        "exe": "uvx"
+      },
+      "ok": true,
+      "summary": {
+        "present": true,
+        "first_line": "uvx 0.11.32 (3010295ae 2026-07-23 x86_64-pc-windows-msvc)"
+      }
+    },
+    {
+      "seq": 3,
+      "tool": "license_gate",
+      "arguments": {
+        "generator": "ct4-manual-prop"
+      },
+      "ok": true,
+      "summary": "CC0-1.0"
+    },
+    {
+      "seq": 4,
+      "tool": "bridge_start",
+      "arguments": {
+        "port": 9876
+      },
+      "ok": true,
+      "summary": "socket open"
+    },
+    {
+      "seq": 5,
+      "tool": "mcp_initialize",
+      "arguments": {},
+      "ok": true,
+      "summary": "{'name': 'BlenderMCP', 'version': '1.30.0'}"
+    },
+    {
+      "seq": 6,
+      "tool": "mcp_tools_list",
+      "arguments": {},
+      "ok": true,
+      "summary": "bpy_api_lookup,describe_node_type,disable_telemetry,download_polyhaven_asset,download_polypizza_model,download_sketchfab_model,execute_blender_code,export_scene,generate_hunyuan3d_model,generate_hyper3d_model_via_images,generate_hyper3d_model_via_text,get_addon_status,get_hunyuan3d_status,get_hyper3d_status,get_object_info,get_polyhaven_asset_preview,get_polyhaven_categories,get_polyhaven_status,get_polypizza_status,get_scene_info,get_sketchfab_model_preview,get_sketchfab_status,get_viewport_screenshot,import_generated_asset,import_generated_asset_hunyuan,poll_hunyuan_job_status,poll_rodin_job_status,record_trajectory_feedback,search_polyhaven_assets,search_polypizza_models,search_sketchfab_models,set_texture"
+    },
+    {
+      "seq": 7,
+      "tool": "disable_telemetry",
+      "arguments": {},
+      "ok": true,
+      "summary": "Could not turn off data collection: Could not read addon preferences"
+    },
+    {
+      "seq": 8,
+      "tool": "get_addon_status",
+      "arguments": {},
+      "ok": true,
+      "summary": "{\n  \"up_to_date\": true,\n  \"protocol_version\": 9,\n  \"expected_protocol_version\": 9,\n  \"addon_version\": [\n    1,\n    7\n  ],\n  \"capabilities\": [\n    \"bpy_api_lookup\",\n    \"describe_node_type\",\n    \"drain_human_activity\",\n    \"execute_code\",\n    \"get_addon_info\",\n    \"get_object_info\",\n    \"get_scene_in"
+    },
+    {
+      "seq": 9,
+      "tool": "get_scene_info",
+      "arguments": {},
+      "ok": true,
+      "summary": "{\n  \"name\": \"Scene\",\n  \"object_count\": 3,\n  \"objects\": [\n    {\n      \"name\": \"Cube\",\n      \"type\": \"MESH\",\n      \"location\": [\n        0.0,\n        0.0,\n        0.0\n      ]\n    },\n    {\n      \"name\": \"Light\",\n      \"type\": \"LIGHT\",\n      \"location\": [\n        4.08,\n        1.01,\n        5.9\n      ]\n"
+    },
+    {
+      "seq": 10,
+      "tool": "execute_blender_code",
+      "arguments": {
+        "file": "build_prop.py"
+      },
+      "ok": true,
+      "summary": "Code executed successfully: built CT4_Crate: verts=56 loops=324 polys=108 mats=1 selected=True\n"
+    },
+    {
+      "seq": 11,
+      "tool": "get_object_info",
+      "arguments": {
+        "object": "CT4_Crate"
+      },
+      "ok": true,
+      "summary": "{\n  \"name\": \"CT4_Crate\",\n  \"type\": \"MESH\",\n  \"location\": [\n    0.0,\n    0.0,\n    0.0\n  ],\n  \"rotation\": [\n    0.0,\n    0.0,\n    0.0\n  ],\n  \"scale\": [\n    1.0,\n    1.0,\n    1.0\n  ],\n  \"visible\": true,\n  \"materials\": [\n    \"CT4_Mat\"\n  ],\n  \"world_bounding_box\": [\n    [\n      -0.25,\n      -0.25,\n      "
+    },
+    {
+      "seq": 12,
+      "tool": "export_scene",
+      "arguments": {
+        "filepath": "C:\\engine2040\\.lanes\\ct4\\content\\ai-loop\\fixture\\prop.glb"
+      },
+      "ok": true,
+      "summary": "{\"path\": \"C:\\\\engine2040\\\\.lanes\\\\ct4\\\\content\\\\ai-loop\\\\fixture\\\\prop.glb\", \"bytes\": 10244, \"selection_only\": true, \"exported\": [\"CT4_Crate\"]}"
+    },
+    {
+      "seq": 13,
+      "tool": "artifact_hash",
+      "arguments": {
+        "path": "fixture/prop.glb",
+        "bytes": 10244,
+        "sha256": "e68750980da80c8caff9fe320ebaa03f7c3ed68605677d41137351bb446dda58"
+      },
+      "ok": true,
+      "summary": "e68750980da80c8c"
+    }
+  ],
+  "artifact": {
+    "path": "fixture/prop.glb",
+    "bytes": 10244,
+    "sha256": "e68750980da80c8caff9fe320ebaa03f7c3ed68605677d41137351bb446dda58"
+  },
+  "elapsed_s": 7.3
+}

@@ -1,0 +1,9 @@
+profile:release
+version:0.1.0
+binary:STUB
+bundle:STUB
+bin/arena.exe 72 90b0709691b30b5d
+content/arena-bundle.bin 16 4a4630a2fcbefda3
+content/contents.txt 46 01d35b295d0aeb8c
+saves/progress-schema-v1.txt 42 de4666ccb2c6e219
+launch.txt 163 67037af22b82c258

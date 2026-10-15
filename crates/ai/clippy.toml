@@ -1,0 +1,35 @@
+# Simulation crate (docs/HASH-LAW.md): authoritative state replays bit-exact
+# on every player's machine. Clippy reads only the nearest clippy.toml, so
+# each simulation crate carries a byte-identical copy of tools/sim-clippy.toml
+# (checked by `node tools/rust-quality.mjs`). Test-only uses take a scoped
+# `#[expect(clippy::disallowed_methods, reason = "...")]`.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is seeded per process: use BTreeMap, a sorted Vec or an index arena" },
+    { path = "std::collections::HashSet", reason = "iteration order is seeded per process: use BTreeSet or a sorted Vec" },
+    { path = "std::time::Instant", reason = "wall clock never enters the tick: use engine_core::Tick" },
+    { path = "std::time::SystemTime", reason = "wall clock never enters the tick: use engine_core::Tick" },
+]
+disallowed-methods = [
+    { path = "f32::sin", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f32::cos", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f32::tan", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f32::sin_cos", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f32::asin", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f32::acos", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f32::atan", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f32::atan2", reason = "libm rounding differs across platforms: use engine_core::fixed::Fixed::atan2" },
+    { path = "f32::exp", reason = "libm rounding differs across platforms: use a deterministic table or integer math" },
+    { path = "f32::ln", reason = "libm rounding differs across platforms: use a deterministic table or integer math" },
+    { path = "f32::powf", reason = "libm rounding differs across platforms: use powi or integer math" },
+    { path = "f32::hypot", reason = "libm rounding differs across platforms: use sqrt of the sum of squares" },
+    { path = "f32::mul_add", reason = "fused rounding depends on FMA availability: write a * b + c" },
+    { path = "f64::sin", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f64::cos", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },
+    { path = "f64::atan2", reason = "libm rounding differs across platforms: use engine_core::fixed::Fixed::atan2" },
+    { path = "f64::exp", reason = "libm rounding differs across platforms: use a deterministic table or integer math" },
+    { path = "f64::ln", reason = "libm rounding differs across platforms: use a deterministic table or integer math" },
+    { path = "f64::powf", reason = "libm rounding differs across platforms: use powi or integer math" },
+    { path = "f64::mul_add", reason = "fused rounding depends on FMA availability: write a * b + c" },
+    { path = "std::time::Instant::now", reason = "wall clock never enters the tick: use engine_core::Tick" },
+    { path = "std::time::SystemTime::now", reason = "wall clock never enters the tick: use engine_core::Tick" },
+]

@@ -1,0 +1,8 @@
+# History-slim 2026-10-02: keep the ~73 MB live arena binaries out of text-diff/pack churn.
+# B3 2026-10-02: gltf/glb/bin + image textures under LFS for NEW commits only
+# (no further rewrite; pre-slim regular blobs already in history stay as-is).
+# Trailer audio 2026-10-08: music-bed.wav 5.05 MB over the 5 MB guard.
+# Test fixtures included byte-for-byte by tests (lengths pinned in EVIDENCE.md): never convert line endings.
+fixtures/khronos/*.gltf -text
+# engine-geo vendored xatlas: byte-exact, never converted.
+crates/geo/vendor/** -text

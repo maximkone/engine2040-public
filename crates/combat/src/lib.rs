@@ -1,0 +1,349 @@
+//! combat: frame-data combat. Timing as data (hitstop, cancel/parry windows, trauma). Never tick-coupled.
+
+/// Anatomy graph plus tissue and armor tables for deterministic cuts:
+/// joint parents, per-segment Q16 toughness, per-joint armor coverage and
+/// the Rome gladiator row. Std-only, no heap, integer math only.
+pub mod anatomy;
+/// Match-step wiring over the exchange and sweep resolvers: the arena
+/// call-site shape, integer ticks, caller buffers, no heap. Std-only.
+pub mod arena;
+/// Ludus Magnus gladiator rows as `Tables` presets: integer permille only.
+/// Caller: `crate::fight::class_tables`.
+pub mod classes;
+/// Deterministic blade-vs-limb sever resolver: swept edge vs joint
+/// capsules in integers, edge sharpness and wear, one 16-byte cut per joint
+/// per swing. Std-only, no heap.
+pub mod cut;
+/// Combat-depth cores over the base fight table core: hit resolver,
+/// stamina, poise and combo chains. Integer ticks, no heap. Std-only.
+pub mod depth;
+/// Parry/riposte + clash over the base fight table core: timed answers,
+/// integer ticks, versioned data. Std-only.
+pub mod exchange;
+/// Pichlmair feel-survey schemas: tuning/juicing/streamlining rows.
+pub mod feel;
+/// Impact-feel instrumentation over the feel rows: 20-scenario
+/// hit-stop + camera ablation and the balance-survey entry. Harness-only.
+pub mod feel_instrument;
+pub mod fight;
+pub mod gore;
+/// Hit simulation: one blade state against every severable joint over many
+/// clean hits, as a seeded distribution (the door's `hit.simulate`). Std-only.
+pub mod hitsim;
+/// Per-kind hit-stop freeze rows: light taps, heavy lands, parry answers
+/// longest. V2 kind-to-ticks map; V1 keeps its single row. Std-only.
+pub mod hitstop_kind;
+/// Life after a cut or a heavy wound: stump states, venous and arterial
+/// bleeding, shock, faint, surrender and exsanguination as versioned
+/// tables. Integer, no heap. Std-only.
+pub mod limbloss;
+/// Nerve meter beside the feel survey: u8 resolve/break/dread/anchor levels.
+pub mod nerve;
+pub mod projectile;
+pub mod reaction;
+/// Continuous swept detection: segment-vs-capsule, shield cones,
+/// reach and facing decide. Std-only.
+pub mod sweep;
+pub mod tables;
+/// Designer rows text loader: `content/design/combat.rows` into `SwapInput`.
+/// Std-only, cold path; game wiring lands in EG29.
+pub mod tables_text;
+
+pub use anatomy::{
+    validate as validate_anatomy, AnatomyError, AnatomyTable, JointId, TissueRow,
+    ANATOMY_VERSION_V1, ARMOR_ALL, ARMOR_GALEA, ARMOR_GREAVE, ARMOR_LORICA, ARMOR_MANICA,
+    ARMOR_SCUTUM, BONE_Q16, FLESH_Q16, JOINT_TOTAL, MAX_TOUGHNESS_Q16, NO_PARENT,
+    SEVERABLE_JOINT_COUNT, SKIN_Q16,
+};
+pub use cut::{
+    chance_q16, cut_for_version, cut_one, digest_cuts, effective_q16, resolve_swing, roll_q16,
+    saturate_q16, try_cut_one, try_resolve_swing, validate_cut_tables, validate_swing,
+    validate_target, BladeSwing, Cut, CutError, CutMiss, CutOutcome, CutTableSet, CutTables,
+    JointTarget, CUT_BLADE_HALF_MAX_MM, CUT_JOINT_RADIUS_MAX_MM, CUT_POS_BOUND_MM, CUT_Q16,
+    CUT_SLACK_MM_V1, CUT_SWING_LEN_MM_V1, CUT_V1, CUT_VERSION_V1, MAX_CUTS_PER_SWING,
+    MAX_ENERGY_Q16, MAX_SHARPNESS_Q16, MAX_TARGETS_PER_SWING, MAX_WEAR_Q16, SEVER_SPAN_Q16_V1,
+};
+pub use fight::{
+    step, step_into, step_with_tables, step_with_tables_into, try_step, try_step_into,
+    try_step_v2_with_cues_into, try_step_with_tables, try_step_with_tables_into, validate_inputs,
+    AttackStarted, CombatError, FightEvent, FightState, FighterState, Tables,
+    MAX_ATTACK_STARTED_PER_TICK, MAX_EVENTS_PER_TICK, TABLES_V1, TABLES_V2,
+};
+pub use gore::{
+    decal_pos_cm, gore_for_events, gore_for_events_with_tables, severity_for_damage, spray_pos_cm,
+    GoreEvent, GoreKind, JITTER_CM, SLOT_SPACING_CM, SPRAY_HEIGHT_CM,
+};
+pub use tables::{
+    step_for_version, tables_for_version, try_step_for_version, validate_tables, MoveTableSet,
+    SwapInput, TABLES_VERSION_V1,
+};
+
+// The one counting allocator of this test binary: zero-allocation tests read
+// it through `engine_core::alloc_probe::measure`.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOC: engine_core::alloc_probe::CountingAlloc =
+    engine_core::alloc_probe::CountingAlloc;
+
+/// One move's timing row: startup/active/recovery frames plus the
+/// cancel-into list. All strings are borrowed statics, so rows hold no heap
+/// and tick code can keep them freely. Deterministic: plain integer compares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveData {
+    /// Move name, e.g. `"jab"`.
+    pub name: &'static str,
+    /// Startup frames before the active window.
+    pub startup: u32,
+    /// Active frames.
+    pub active: u32,
+    /// Recovery frames.
+    pub recovery: u32,
+    /// Moves this one may cancel into, matched by name.
+    pub cancel: &'static [&'static str],
+}
+
+impl MoveData {
+    pub fn total(&self) -> u32 {
+        self.startup + self.active + self.recovery
+    }
+    pub fn can_cancel(&self, into_move: &str, frame: u32) -> bool {
+        frame >= self.startup && self.cancel.contains(&into_move)
+    }
+}
+
+/// Hitstop freeze clock: 60-90ms at 60Hz = 4-6 ticks. Deterministic countdown.
+#[derive(Clone, Debug)]
+pub struct HitstopClock {
+    pub frozen: u32,
+}
+
+impl HitstopClock {
+    pub fn new() -> Self {
+        Self { frozen: 0 }
+    }
+    /// Trigger freeze for ms (clamped 0..=90). 60Hz: ticks = ms*60/1000.
+    pub fn trigger(&mut self, ms: u32) {
+        self.frozen = (ms.min(90) * 60 / 1000).max(1);
+    }
+    /// Returns true while frozen (tick skipped), counts down.
+    pub fn held(&mut self) -> bool {
+        if self.frozen > 0 {
+            self.frozen -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for HitstopClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Camera trauma in permille, `0..=1000` (0 steady, 1000 full shake).
+/// Presentation-only: shake offsets never enter hashed state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trauma(u16);
+
+impl Trauma {
+    /// Builds trauma from permille, clamping past `1000` to full shake.
+    pub fn from_permille(permille: u16) -> Self {
+        Self(permille.min(1000))
+    }
+
+    /// Trauma as a `0.0..=1.0` amplitude scale.
+    pub fn amplitude(self) -> f32 {
+        f32::from(self.0) / 1000.0
+    }
+}
+
+/// Trauma shake pure fn: seeded, no alloc. Amplitude decays quadratically;
+/// same seed plus tick always gives the same offsets on every PC for one
+/// build (presentation-only; the offsets never reach the state hash).
+pub fn trauma_shake(seed: u64, trauma: Trauma, tick: u64) -> (f32, f32) {
+    let t = trauma.amplitude();
+    if t <= 0.0 {
+        return (0.0, 0.0);
+    }
+    // Seeded noise from the shared SplitMix64 step (no rand crate); the two
+    // halves of one mixed word give the two axes, so one tick is one sample.
+    let z = engine_core::splitmix64(seed.wrapping_add(tick)) | 1;
+    let (a, b) = (
+        (z >> 32) as f32 / u32::MAX as f32 * 2.0 - 1.0,
+        (z as u32 as f32) / u32::MAX as f32 * 2.0 - 1.0,
+    );
+    let amp = t * t; // trauma^2 response
+    (a * amp, b * amp)
+}
+
+/// Shipped jab row: the production constructor tick code reads.
+pub const MOVE_JAB: MoveData = MoveData {
+    name: "jab",
+    startup: 4,
+    active: 2,
+    recovery: 8,
+    cancel: &["cross"],
+};
+
+/// Shipped cross row: cancel target of the jab.
+pub const MOVE_CROSS: MoveData = MoveData {
+    name: "cross",
+    startup: 6,
+    active: 3,
+    recovery: 12,
+    cancel: &["uppercut"],
+};
+
+/// Shipped uppercut row: terminal move, cancels into nothing.
+pub const MOVE_UPPERCUT: MoveData = MoveData {
+    name: "uppercut",
+    startup: 9,
+    active: 3,
+    recovery: 16,
+    cancel: &[],
+};
+
+/// Shipped timing table every cancel check reads: the in-tree constructors
+/// for [`MoveData`]. Tick code copies rows out, never borrows across ticks.
+/// Deterministic: plain row order, no heap.
+pub const MOVES_V1: &[MoveData] = &[MOVE_JAB, MOVE_CROSS, MOVE_UPPERCUT];
+
+/// Look up a shipped move row by name. Pure, no heap, `O(rows)`.
+/// Returns `None` for an unknown name instead of panicking.
+#[must_use]
+pub fn move_row(name: &str) -> Option<MoveData> {
+    let mut i = 0;
+    while i < MOVES_V1.len() {
+        if MOVES_V1[i].name == name {
+            return Some(MOVES_V1[i]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Shake offsets for a trauma permille at a tick: the named presentation
+/// bridge for callers that hold only a `0..=1000` permille (the camera feed
+/// records permille in-sim and shakes presentation-side). Same seed plus
+/// tick plus permille always gives the same offsets on every PC for one
+/// build; offsets never reach the state hash. No heap.
+#[must_use]
+pub fn shake_for_trauma(seed: u64, trauma_permille: u16, tick: u64) -> (f32, f32) {
+    trauma_shake(seed, Trauma::from_permille(trauma_permille), tick)
+}
+
+/// Parry window check: frame within [start,end] inclusive (data, e.g. 2f/4f/6f/10f).
+pub fn parry_open(frame: u32, start: u32, end: u32) -> bool {
+    frame >= start && frame <= end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jab() -> MoveData {
+        MoveData {
+            name: "jab",
+            startup: 4,
+            active: 2,
+            recovery: 8,
+            cancel: &["cross"],
+        }
+    }
+
+    #[test]
+    fn cancel_windows_as_data() {
+        let m = jab();
+        assert_eq!(m.total(), 14);
+        assert!(!m.can_cancel("cross", 2)); // startup, too early
+        assert!(m.can_cancel("cross", 5));
+        assert!(!m.can_cancel("uppercut", 5));
+    }
+
+    #[test]
+    fn hitstop_60_90ms() {
+        let mut c = HitstopClock::new();
+        assert!(!c.held());
+        c.trigger(80); // 80ms -> 4 ticks @60Hz
+        assert_eq!(c.frozen, 4);
+        for _ in 0..4 {
+            assert!(c.held());
+        }
+        assert!(!c.held());
+        c.trigger(999); // clamped 90ms -> 5 ticks
+        assert_eq!(c.frozen, 5);
+    }
+
+    #[test]
+    fn trauma_seeded() {
+        assert_eq!(Trauma::from_permille(2000), Trauma::from_permille(1000));
+        assert_eq!(Trauma::from_permille(500).amplitude(), 0.5);
+        assert_eq!(trauma_shake(7, Trauma::from_permille(0), 99), (0.0, 0.0));
+        let (a, b) = (
+            trauma_shake(7, Trauma::from_permille(1000), 3),
+            trauma_shake(7, Trauma::from_permille(1000), 3),
+        );
+        assert_eq!(a, b);
+        assert_ne!(
+            trauma_shake(7, Trauma::from_permille(1000), 3),
+            trauma_shake(7, Trauma::from_permille(1000), 4)
+        );
+    }
+
+    #[test]
+    fn shipped_moves_feed_cancel_checks() {
+        let jab = move_row("jab").expect("jab ships");
+        assert_eq!(jab, MOVE_JAB);
+        assert_eq!(jab.total(), 14);
+        assert!(jab.can_cancel("cross", 5));
+        let cross = move_row("cross").expect("cross ships");
+        assert!(cross.can_cancel("uppercut", 6));
+        assert_eq!(move_row("nope"), None);
+        assert_eq!(MOVES_V1.len(), 3);
+    }
+
+    #[test]
+    fn shake_bridge_matches_shake_and_clamps() {
+        assert_eq!(shake_for_trauma(7, 0, 99), (0.0, 0.0));
+        assert_eq!(
+            shake_for_trauma(7, 1000, 3),
+            trauma_shake(7, Trauma::from_permille(1000), 3)
+        );
+        assert_eq!(
+            shake_for_trauma(7, 2000, 3),
+            trauma_shake(7, Trauma::from_permille(1000), 3)
+        );
+    }
+
+    #[test]
+    fn parry_windows() {
+        assert!(parry_open(2, 2, 4));
+        assert!(parry_open(4, 2, 4));
+        assert!(!parry_open(5, 2, 4));
+        assert!(!parry_open(1, 2, 4));
+    }
+
+    #[test]
+    fn attack_started_reachable_via_crate_root() {
+        // EG19b: the press-tick cue entry is public via the crate root so the
+        // arena game leg names it without reaching into `fight::`.
+        let cue = crate::AttackStarted { attacker: 0 };
+        assert_eq!(cue.attacker, 0);
+        assert_eq!(
+            crate::MAX_ATTACK_STARTED_PER_TICK,
+            crate::fight::MAX_ATTACK_STARTED_PER_TICK
+        );
+        assert_eq!(crate::TABLES_V2, crate::fight::TABLES_V2);
+        let _ = crate::try_step_v2_with_cues_into
+            as fn(
+                &[engine_input::FighterInput],
+                &[crate::fight::StrikePose],
+                &mut crate::FightState,
+                &crate::Tables,
+                &mut Vec<crate::FightEvent>,
+                &mut Vec<crate::AttackStarted>,
+            ) -> Result<(), crate::CombatError>;
+    }
+}

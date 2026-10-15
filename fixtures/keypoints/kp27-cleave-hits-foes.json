@@ -1,0 +1,1 @@
+{"version":1,"id":"kp27-cleave-hits-foes","claim":"one attack impacts every idle foe for 240 total","seed":2027,"fighters":3,"half_extent_m":20.0,"prefix_ticks":0,"window_ticks":8,"setup":[],"window":[{"tick":0,"fighter":0,"mx":0,"mz":0,"facing":0,"buttons":1}],"assert":{"hp":[[0,1000],[1,880],[2,880]],"damage":[[0,240],[1,0],[2,0]],"killed":false,"damage_ticks":[4]}}

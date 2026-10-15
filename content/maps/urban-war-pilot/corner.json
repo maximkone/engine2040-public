@@ -1,0 +1,40 @@
+{
+  "corner": "district-corner-01",
+  "variant": "district-corner",
+  "actors": [
+    {
+      "id": 1,
+      "name": "insula_a",
+      "asset": "insula",
+      "x": -44,
+      "y": 3.65,
+      "z": 0,
+      "sx": 6.4,
+      "sy": 7.3,
+      "sz": 6.6
+    },
+    {
+      "id": 2,
+      "name": "stall_fish",
+      "asset": "market_stall",
+      "x": -26,
+      "y": 1.6,
+      "z": -2,
+      "sx": 3.0,
+      "sy": 3.2,
+      "sz": 2.2
+    },
+    {
+      "id": 3,
+      "name": "city_wall",
+      "asset": "street_wall",
+      "x": -2,
+      "y": 1.95,
+      "z": 0,
+      "sx": 10.0,
+      "sy": 3.9,
+      "sz": 0.6
+    }
+  ],
+  "note": "CT56 splitter: 1 corner, 3 actors, disjoint XZ footprints, inside 99 m, CT9 y values reused"
+}

@@ -1,0 +1,1 @@
+{"version":1,"id":"kp19-idle-counts-stuck","claim":"idle wishes never move so every tick counts as stuck","seed":2019,"fighters":2,"half_extent_m":20.0,"prefix_ticks":0,"window_ticks":10,"setup":[],"window":[],"assert":{"hp":[[0,1000],[1,1000]],"damage":[[0,0],[1,0]],"stuck":[[0,10],[1,10]],"killed":false,"damage_ticks":[]}}

@@ -1,0 +1,60 @@
+# cargo-deny gate - license-first, enforced in CI.
+# Source of truth for dependency licenses; see docs/DEPENDENCIES.md.
+
+# The default headless graph has no external crates, so checking it alone
+# proves nothing. Check the GPU/window stack that builds actually pull in.
+[graph]
+features = ["window"]
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Zlib",
+  "BSD-3-Clause",
+  "BSD-2-Clause",
+  "ISC",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "Unlicense",
+  "0BSD",
+  "MIT-0",
+  # NCSA (University of Illinois/NCSA, BSD-style, OSI approved): libfuzzer-sys 0.4.13 is "(MIT OR Apache-2.0) AND NCSA", pulled in
+  # by image -> ravif -> rav1e. Its licence rejected every engine2040 push from 2026-10-14 (pre-push `cargo deny check licenses`).
+  "NCSA",
+]
+# Post-2024 AI-generated code is always usable. Any license, no license — nothing is blocked.
+# smartstring 1.0.1 (MPL-2.0+, file-level copyleft, used unmodified from crates.io) is a hard
+# dependency of rhai 1.26.1 (NS32, D2). One crate, one license, nothing else: the owner may
+# veto it by deleting this line together with `crates/rules`.
+# clipper2-rust (2D polygon clipping inside manifold-rust, feature `boolean` of engine-geo) is Boost-1.0:
+# permissive like MIT, OSI approved. One crate, one license, nothing else.
+exceptions = [
+  { allow = ["MPL-2.0"], crate = "smartstring" },
+  { allow = ["BSL-1.0"], crate = "clipper2-rust" },
+]
+
+[advisories]
+yanked = "deny"
+# A scope, not a lint level: fail only when a direct dependency is unmaintained.
+unmaintained = "workspace"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# Code from any repo (including GPL/proprietary/AI-generated) is free to use.
+# Bans here are for architectural/technical reasons, not license restrictions.
+deny = [
+  "symphonia",
+  "zstd",
+  "zstd-safe",
+  "ktx2",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Source code from any repo is usable. The above prevents accidental typosquatting.

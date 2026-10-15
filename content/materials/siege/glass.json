@@ -1,0 +1,44 @@
+{
+  "material": "glass",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.95, 0.97, 0.98],
+    "base_metalness": 0,
+    "specular_roughness": 0.05,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1,
+    "transmission": {
+      "weight": 1,
+      "thickness": 0.01,
+      "attenuation_color": [1, 1, 1]
+    }
+  },
+  "layers": [
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "shatter"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 0.5,
+    "brittleness": 1,
+    "shard": "shards",
+    "burn": 0
+  },
+  "sound": {
+    "impact": "glass"
+  },
+  "fx": {
+    "dust": "none",
+    "spark": "none",
+    "decal": "shatter"
+  }
+}

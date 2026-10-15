@@ -1,0 +1,79 @@
+{
+  "_credit": "Idea-only port of mozilla/sccache (Apache-2.0, allow-listed in deny.toml): warm-cache compile plan. Content-hash keys over compiler + lang + sorted flags + input digest, local-disk tier before remote, LRU eviction under a size cap, warm build order so shared deps compile once. Fixture data, no donor bytes. Target: tools/compile-cache.mjs (OPT9).",
+  "version": 1,
+  "key_fields": ["compiler", "lang", "flags(sorted, space-joined)", "input_sha256"],
+  "key_recipe": "sha256(compiler + LF + lang + LF + flags + LF + input_sha256 + LF), first 16 hex chars",
+  "tiers": ["local-disk", "remote"],
+  "size_cap_mb": 512,
+  "eviction": "lru",
+  "entries": [
+    {
+      "crate": "engine-core",
+      "compiler": "rustc 1.90.0",
+      "lang": "rust",
+      "flags": ["--edition=2021", "-Copt-level=2"],
+      "input_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "key": "9889068c9e35e011",
+      "bytes": 38000000,
+      "last_used": 4,
+      "hits": 212
+    },
+    {
+      "crate": "engine-hash",
+      "compiler": "rustc 1.90.0",
+      "lang": "rust",
+      "flags": ["--edition=2021", "-Copt-level=2"],
+      "input_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "key": "8687e7256d2f35ad",
+      "bytes": 12500000,
+      "last_used": 1,
+      "hits": 96
+    },
+    {
+      "crate": "engine-geo",
+      "compiler": "rustc 1.90.0",
+      "lang": "rust",
+      "flags": ["--edition=2021", "-Copt-level=3"],
+      "input_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "key": "ac96a1dd657e519f",
+      "bytes": 47000000,
+      "last_used": 3,
+      "hits": 154
+    },
+    {
+      "crate": "engine-physics",
+      "compiler": "rustc 1.90.0",
+      "lang": "rust",
+      "flags": ["--edition=2021", "-Copt-level=3"],
+      "input_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "key": "f9cc903f42eca0bd",
+      "bytes": 61000000,
+      "last_used": 5,
+      "hits": 301
+    },
+    {
+      "crate": "engine-render",
+      "compiler": "rustc 1.90.0",
+      "lang": "rust",
+      "flags": ["--edition=2021", "-Copt-level=3", "-Ctarget-cpu=native"],
+      "input_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "key": "21a7a3870d0fb7e1",
+      "bytes": 88000000,
+      "last_used": 2,
+      "hits": 178
+    },
+    {
+      "crate": "engine-game",
+      "compiler": "rustc 1.90.0",
+      "lang": "rust",
+      "flags": ["--edition=2021", "-Copt-level=2", "--test"],
+      "input_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "key": "d95de69b11c4ee72",
+      "bytes": 52000000,
+      "last_used": 6,
+      "hits": 143
+    }
+  ],
+  "warm_order": ["engine-core", "engine-hash", "engine-geo", "engine-physics", "engine-render", "engine-game"],
+  "lru_victim": "engine-hash"
+}

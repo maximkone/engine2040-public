@@ -1,0 +1,9 @@
+# combat design rows: copy of compiled TABLES_V1 (v1) and v2_rows (v2).
+# Designers change numbers here without a Rust edit; practice reload swaps
+# the header version row at the next tick boundary. Whole numbers only,
+# unit in the key, `#` comments, no floats. Range checks are validate_tables;
+# v1 (parry == startup == 4) is grandfathered reference only, new swaps must
+# keep parry below startup, so start from v2.
+table combat version 2
+v1 attack_damage=120 attack_startup_ticks=4 attack_recovery_ticks=8 attack_stamina_cost=25 dodge_stamina_cost=20 block_hold_cost_per_tick=1 stamina_regen_per_tick=2 dodge_duration_ticks=10 dodge_iframes_ticks=6 block_chip_num=1 block_chip_den=5 parry_window_ticks=4 parry_stagger_ticks=12 hit_react_ticks=6 hitstop_ticks=4 knockdown_ticks=30
+v2 attack_damage=120 attack_startup_ticks=15 attack_recovery_ticks=8 attack_stamina_cost=25 dodge_stamina_cost=20 block_hold_cost_per_tick=1 stamina_regen_per_tick=2 dodge_duration_ticks=10 dodge_iframes_ticks=6 block_chip_num=1 block_chip_den=5 parry_window_ticks=7 parry_stagger_ticks=12 hit_react_ticks=6 hitstop_ticks=4 knockdown_ticks=30

@@ -1,0 +1,16 @@
+{
+  "name": "duel_seed95",
+  "seed": 95,
+  "tags": ["determinism", "duel"],
+  "steps": [
+    { "input": "jab", "ticks": 6 },
+    { "wait": 30 },
+    { "input": "jab", "ticks": 6 },
+    { "wait": 30 },
+    { "input": "block", "ticks": 12 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "seed95-x2-identical" },
+    { "check": "jab_flash", "expect": "visible" }
+  ]
+}

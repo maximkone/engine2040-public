@@ -1,0 +1,22 @@
+[package]
+name = "engine-nn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# Conversion lane: ONNX (int8 QDQ) reference through tract, opt-in so the
+# integer runtime stays std-only (engine-core only) by default.
+[features]
+convert = ["dep:tract-onnx"]
+
+[dependencies]
+# engine-core is std-only: the one content hash for `Model::digest`.
+engine-core = { workspace = true }
+tract-onnx = { workspace = true, optional = true }
+
+[dev-dependencies]
+engine-core = { workspace = true, features = ["test-util"] }

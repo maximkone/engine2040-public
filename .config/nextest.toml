@@ -1,0 +1,30 @@
+# Proof profile for `node tools/proof.mjs` (STEAL-speed OPT6).
+# Discipline adapted from the nextest-rs/nextest repo profile shape
+# (.config/nextest.toml at pinned commit d643f89, 2026-10-01, MIT;
+# reimplemented here, no donor bytes): fail-fast off so one failure never
+# hides the next, slow-timeout with terminate-after so a hung leg names
+# itself, bounded fixed-backoff retries (count 2, delay 2s) scoped to the
+# proof profile only so a planted flaky passes after at most 2 retries and
+# still prints `<n> retried` (never silent), and junit receipts per profile
+# for the lane log. Partitioned run splits the suite without dropping a test:
+# `cargo nextest run --profile proof --partition count:1/2` then `count:2/2`,
+# junit to `target/nextest-junit/proof-1-2.xml` plus `proof-2-2.xml` merged to
+# `target/nextest-junit/proof.xml`. Flaky loopback-socket/timing legs
+# quarantine via the E12 list in tools/proof.mjs plus
+# tools/flaky-quarantine.mjs (threshold 2, fail-closed) and run under --perf.
+# Kept only if faster with the same failures visible
+# (OPT6 accept: flake counts before/after ride the proof log).
+
+[profile.proof]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.proof.retries]
+backoff = "fixed"
+count = 2
+delay = "2s"
+
+[profile.proof.junit]
+path = "target/nextest-junit/proof.xml"
+store-success-output = true
+store-failure-output = true

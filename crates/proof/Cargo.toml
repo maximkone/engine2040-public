@@ -1,0 +1,50 @@
+[package]
+name = "engine-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-arena = { workspace = true, optional = true }
+engine-assets = { workspace = true, features = ["import", "registry"], optional = true }
+engine-combat.workspace = true
+engine-core.workspace = true
+engine-ecs.workspace = true
+engine-editor = { workspace = true, optional = true }
+engine-net.workspace = true
+engine-observe.workspace = true
+engine-physics.workspace = true
+engine-render = { workspace = true, features = ["v1"], optional = true }
+engine-scene = { workspace = true, optional = true }
+# Keyed evidence seal for the a9 writer: HMAC-SHA256 over the manifest under
+# the operator key (`hmac` 0.12 + `sha2` 0.10, both MIT/Apache-2.0, pure Rust).
+# Optional like the m1 harness above so the headless default graph pulls no
+# external package; sealed evidence builds under `--features seal` /
+# `--all-features`.
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+[features]
+fuzz = ["dep:engine-arena"]
+scene-museum = ["dep:engine-scene"]
+# MV1 harness (tests/m1_workflow.rs) runs the real workflow through the
+# assets/editor/scene/render APIs. These stay OPTIONAL normal deps (the
+# fuzz/scene-museum precedent: dev-deps cannot be optional) so the headless
+# default graph pulls no external package; the harness builds only under
+# `--features m1` / `--all-features`. The orchestrator records the
+# proof -> assets/editor/render edges in tools/workspace-check.mjs.
+m1 = [
+    "dep:engine-assets",
+    "dep:engine-editor",
+    "dep:engine-scene",
+    "dep:engine-render",
+]
+seal = ["dep:hmac", "dep:sha2"]
+
+[[test]]
+name = "m1_workflow"
+required-features = ["m1"]

@@ -1,0 +1,13 @@
+[package]
+name = "ludus-proof"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+engine-assets = { version = "0.1.0", path = "../../../../crates/assets", features = ["import", "registry"] }
+engine-spatial = { version = "0.1.0", path = "../../../../crates/spatial" }
+engine-nav = { version = "0.1.0", path = "../../../../crates/nav" }
+engine-world = { version = "0.1.0", path = "../../../../crates/world" }
+
+[workspace]

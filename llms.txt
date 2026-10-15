@@ -1,0 +1,37 @@
+# engine2040
+
+> Rust engine, AI-native, deterministic. Game: Rome at war. Golden `d57b5c8ae3096614`.
+
+## Start here
+
+- [README](README.md): status and run
+- [AGENTS.md](AGENTS.md): execution policy
+- [docs/INDEX.md](docs/INDEX.md): doc map
+- [docs/VISION.md](docs/VISION.md): where the engine is going
+- [docs/ROADMAP.md](docs/ROADMAP.md): the boss file for what gets built
+- [CONTRIBUTING.md](CONTRIBUTING.md): setup, gates, delivery
+
+## Work
+
+- [docs/SPRINT.md](docs/SPRINT.md): the work board
+- [docs/EMPIRE-INBOX.md](docs/EMPIRE-INBOX.md): work asked from center
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crate layers
+
+## Folders
+
+- [crates](crates): rust crates by job
+- [docs](docs): canonical docs and plans
+- [tools](tools): node gates and lane scripts
+- [content](content): game data and arena source
+
+## Entry points
+
+- [Cargo.toml](Cargo.toml): workspace root and crate list
+- [docs/CODELAW.md](docs/CODELAW.md): engineering rules
+- [docs/HASH-LAW.md](docs/HASH-LAW.md): golden hash scope
+
+## Optional
+
+- [LICENSE-MIT](LICENSE-MIT): MIT
+- [LICENSE-APACHE](LICENSE-APACHE): Apache 2.0
+- [SECURITY.md](SECURITY.md): supported track and disclosure

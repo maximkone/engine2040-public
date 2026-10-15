@@ -1,0 +1,17 @@
+[package]
+name = "engine-combat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-core.workspace = true
+engine-input.workspace = true
+
+[dev-dependencies]
+# Zero-allocation probe owner for tests.
+engine-core = { workspace = true, features = ["test-util"] }

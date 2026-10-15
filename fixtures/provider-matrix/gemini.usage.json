@@ -1,0 +1,1 @@
+{"candidates": [{"content": {"parts": [{"text": "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"matrix:canon\"]}"}], "role": "model"}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 17, "candidatesTokenCount": 6}}

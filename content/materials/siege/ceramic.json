@@ -1,0 +1,44 @@
+{
+  "material": "ceramic",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.9, 0.88, 0.84],
+    "base_metalness": 0,
+    "specular_roughness": 0.25,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1,
+    "coat": {
+      "weight": 0.8,
+      "roughness": 0.1,
+      "ior": 1.5
+    }
+  },
+  "layers": [
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "shatter"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 2.5,
+    "brittleness": 0.95,
+    "shard": "shards",
+    "burn": 0
+  },
+  "sound": {
+    "impact": "glass"
+  },
+  "fx": {
+    "dust": "pale",
+    "spark": "none",
+    "decal": "shatter"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "material": "brick",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.62, 0.33, 0.26],
+    "base_metalness": 0,
+    "specular_roughness": 0.8,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1
+  },
+  "layers": [
+    {
+      "kind": "wet",
+      "driver": "wetness",
+      "darken": 0.35,
+      "roughness_to": 0.08
+    },
+    {
+      "kind": "blood",
+      "driver": "blood",
+      "tint": [0.35, 0.02, 0.02]
+    },
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "crack"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 5,
+    "brittleness": 0.8,
+    "shard": "mixed",
+    "burn": 0
+  },
+  "sound": {
+    "impact": "stone"
+  },
+  "fx": {
+    "dust": "brick",
+    "spark": "none",
+    "decal": "crack"
+  }
+}

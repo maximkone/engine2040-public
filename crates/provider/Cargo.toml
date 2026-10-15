@@ -1,0 +1,27 @@
+[package]
+name = "engine-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# One owner for the FNV-1a fold behind the presentation checkpoints.
+engine-core.workspace = true
+serde_json.workspace = true
+# NOTE(headless-gate, 2026-10-15): serde_json is REQUIRED here — OPT24/OPT25/EG17
+# committed code uses it in pins/cassette/ladder/stream/stub/ollama (ToolDef
+# carries serde_json::Value in public API). workspace-check scopes the headless
+# graph to runtime (non-dev) edges, so arena's dev-only edge to provider for
+# the AL1 test does not pull this into the headless closure. Do NOT remove
+# without cfg-gating every use site (my 2026-10-14 removal broke the build on
+# a vacuous grep).
+# `tls`: opt-in HTTPS for cloud LLMs (rustls/ring + platform roots). Default stays std-only plain HTTP.
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "ring"] }
+rustls-native-certs = { version = "0.8", optional = true }
+
+[features]
+tls = ["dep:rustls", "dep:rustls-native-certs"]

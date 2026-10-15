@@ -1,0 +1,14 @@
+{
+  "name": "night",
+  "kind": "sky_ibl",
+  "sun_elevation_deg": -14.0,
+  "sun_azimuth_deg": 40.0,
+  "turbidity": 2.0,
+  "exposure_ev100": 6.0,
+  "sh_order": 2,
+  "sh_coeffs": 9,
+  "capture_w": 64,
+  "capture_h": 32,
+  "budget_ms": 0.4,
+  "albedo_ground": 0.22
+}

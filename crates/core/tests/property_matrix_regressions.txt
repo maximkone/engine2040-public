@@ -1,0 +1,8 @@
+# property-matrix regressions: `seed <n> # <bug>` per line.
+# Shape ported from proptest FileFailurePersistence seed lines
+# (proptest-rs/proptest@4b0594eb07c53695dc3c24d3fa06bdceb98540e9, Apache-2.0).
+# The runner replays these first, then runs 256 fresh cases; all four still catch.
+seed 1 # TruncHash
+seed 2 # OddHex
+seed 3 # ShortHex4
+seed 13 # XorDigest

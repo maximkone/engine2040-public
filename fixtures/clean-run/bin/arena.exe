@@ -1,0 +1,5 @@
+E2040ARENABIN
+version:0.1.0
+profile:release
+run:bin/arena.exe
+kind:STUB

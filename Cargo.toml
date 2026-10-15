@@ -1,0 +1,292 @@
+[package]
+name = "engine2040"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# Bare `cargo build/test/check` resolves the default set only: the root
+# package. Full gates use `cargo ... --workspace` (see CONTRIBUTING.md);
+# single-crate iteration uses `cargo check/test -p <crate>` (AGENTS.md;
+# for example `cargo test -p engine-editor` or
+# `cargo build -p engine-endpoint --features mcp`).
+# Every other member stays on `-p`/feature use, including the eight outside
+# the prior default: distill, engine-chaos, perf and playtest (dev
+# harnesses), geo and rules (optional deps behind engine-endpoint
+# --features geo/rules), editor (egui shell, `ui` feature) and endpoint
+# (MCP door, `mcp` feature). Root deps still compile as libraries; their test
+# suites run on `-p` or `--workspace`, not on a bare command.
+default-members = ["."]
+
+[features]
+default = []
+window = ["engine-render/window"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.97.1"
+
+# Top-tier Rust bar (docs/RUST-QUALITY.md, layer 1). Every lint here was at
+# zero when enabled, so a new hit is a regression: `clippy -D warnings` fails
+# the packet, the proof gate and CI. Lints with open debt are ratcheted by
+# `node tools/rust-quality.mjs` and join this list when their count hits zero.
+# Exceptions use `#[expect(lint, reason = "...")]`, never a bare `allow`.
+[workspace.lints.rust]
+# Five scoped, reasoned `#[expect(unsafe_code)]` sites exist: engine-core's
+# counting allocator, engine-provider's test-only environment writer,
+# engine-ecs's `Scope::spawn` (lifetime erase for scoped jobs on the persistent pool),
+# engine-geo's xatlas FFI wrapper, and engine-render's Windows DXGI VRAM read (`backend.rs`).
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+redundant_lifetimes = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+# Placeholders, debug leftovers and soundness hazards never ship.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+await_holding_lock = "deny"
+debug_assert_with_mut_call = "deny"
+useless_transmute = "warn"
+fallible_impl_from = "warn"
+# Every exception states why; `expect` fails once the exception goes stale.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+ignore_without_reason = "warn"
+# Memory and hot-path cost: stack blowups, hidden clones, needless allocation.
+large_stack_arrays = "warn"
+large_types_passed_by_value = "warn"
+large_futures = "warn"
+large_const_arrays = "warn"
+inefficient_to_string = "warn"
+linkedlist = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+mutex_integer = "warn"
+needless_collect = "warn"
+implicit_clone = "warn"
+iter_with_drain = "warn"
+stable_sort_primitive = "warn"
+cloned_instead_of_copied = "warn"
+or_fun_call = "warn"
+assigning_clones = "warn"
+clone_on_ref_ptr = "warn"
+collection_is_never_read = "warn"
+unused_peekable = "warn"
+string_add_assign = "warn"
+manual_string_new = "warn"
+inline_always = "warn"
+unnecessary_box_returns = "warn"
+# Conversions and pointers say what they mean.
+checked_conversions = "warn"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+ref_as_ptr = "warn"
+as_pointer_underscore = "warn"
+fn_to_numeric_cast_any = "warn"
+invalid_upcast_comparisons = "warn"
+lossy_float_literal = "warn"
+# Idioms with one obvious form.
+explicit_into_iter_loop = "warn"
+flat_map_option = "warn"
+from_iter_instead_of_collect = "warn"
+macro_use_imports = "warn"
+missing_enforced_import_renames = "warn"
+mut_mut = "warn"
+option_option = "warn"
+same_functions_in_if_condition = "warn"
+string_lit_as_bytes = "warn"
+verbose_file_reads = "warn"
+explicit_deref_methods = "warn"
+needless_borrow = "warn"
+filter_map_next = "warn"
+manual_ok_or = "warn"
+empty_enums = "warn"
+enum_glob_use = "warn"
+large_digit_groups = "warn"
+path_buf_push_overwrite = "warn"
+ref_option_ref = "warn"
+trait_duplication_in_bounds = "warn"
+fn_params_excessive_bools = "warn"
+redundant_else = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+empty_enum_variants_with_brackets = "warn"
+needless_bitwise_bool = "warn"
+semicolon_if_nothing_returned = "warn"
+unnested_or_patterns = "warn"
+match_wildcard_for_single_variants = "warn"
+needless_for_each = "warn"
+iter_on_single_items = "warn"
+expl_impl_clone_on_copy = "warn"
+manual_assert = "warn"
+bool_to_int_with_if = "warn"
+deref_by_slicing = "warn"
+ignored_unit_patterns = "warn"
+# Never enable: `mul_add` changes rounding with FMA availability, which
+# breaks cross-platform simulation hashes (HASH-LAW.md).
+suboptimal_flops = "allow"
+
+# Docs-only bar: rustdoc lints never fire under clippy/test gates, only
+# under `cargo doc`. Verify with `cargo doc --no-deps -D warnings` first.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+
+[workspace.dependencies]
+engine-core = { version = "0.1.0", path = "crates/core" }
+engine-ecs = { version = "0.1.0", path = "crates/ecs" }
+engine-render = { version = "0.1.0", path = "crates/render" }
+engine-physics = { version = "0.1.0", path = "crates/physics" }
+engine-nav = { version = "0.1.0", path = "crates/nav" }
+engine-audio = { version = "0.1.0", path = "crates/audio" }
+engine-net = { version = "0.1.0", path = "crates/net" }
+engine-assets = { version = "0.1.0", path = "crates/assets" }
+engine-destruction = { version = "0.1.0", path = "crates/destruction" }
+engine-material = { version = "0.1.0", path = "crates/material" }
+engine-ai = { version = "0.1.0", path = "crates/ai" }
+engine-proof = { version = "0.1.0", path = "crates/proof" }
+engine-scene = { version = "0.1.0", path = "crates/scene" }
+engine-input = { version = "0.1.0", path = "crates/input" }
+engine-arena = { version = "0.1.0", path = "crates/arena" }
+engine-rules = { version = "0.1.0", path = "crates/rules" }
+engine-app = { version = "0.1.0", path = "crates/app" }
+engine-game = { version = "0.1.0", path = "crates/game" }
+engine-world = { version = "0.1.0", path = "crates/world" }
+engine-combat = { version = "0.1.0", path = "crates/combat" }
+engine-anim = { version = "0.1.0", path = "crates/anim" }
+engine-observe = { version = "0.1.0", path = "crates/observe" }
+engine-nn = { version = "0.1.0", path = "crates/nn" }
+engine-geo = { version = "0.1.0", path = "crates/geo" }
+tract-onnx = "0.23"
+burn = "0.21"
+engine-save = { version = "0.1.0", path = "crates/save" }
+engine-ui = { version = "0.1.0", path = "crates/ui" }
+engine-editor = { version = "0.1.0", path = "crates/editor" }
+engine-spatial = { version = "0.1.0", path = "crates/spatial" }
+engine-provider = { version = "0.1.0", path = "crates/provider" }
+glam = "0.33"
+gltf = "1"
+image = "0.25"
+egui = "0.36"
+egui-wgpu = "0.36"
+egui-winit = "0.36"
+egui_dock = "0.21"
+transform-gizmo = "0.11"
+transform-gizmo-egui = "0.11"
+rapier3d = { version = "0.36", default-features = false, features = ["dim3", "f32", "std", "enhanced-determinism"] }
+serde_json = "1"
+cpal = "0.18"
+lewton = "0.10"
+hound = "3.5"
+rmcp = { version = "3.4", default-features = false, features = ["server", "transport-io", "macros", "schemars"] }
+winit = "0.30"
+wgpu = "30.0.1"
+pollster = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+puffin = "0.20"
+
+[dependencies]
+engine-core.workspace = true
+engine-ecs.workspace = true
+engine-render.workspace = true
+engine-physics.workspace = true
+engine-nav.workspace = true
+engine-audio.workspace = true
+engine-net.workspace = true
+engine-assets.workspace = true
+engine-ai.workspace = true
+engine-proof.workspace = true
+
+# Release profile: LTO fat + one codegen unit (measured A/B over PF1
+# workloads; PGO and panic=abort pending game-exe evidence).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+overflow-checks = true
+
+# Dev and test builds: the sim-core crates run the deterministic hot loops of most tests (600-tick
+# sessions, siege, camera feed) and were compiled at opt-level 0, so single tests took 25-67 s.
+# Measured 2026-09-29 (cold `cargo test -p engine-game --all-features`, lib tests): 78 s -> 28 s; an
+# edit to a sim-core crate rebuilds in the same 15 s; the default workspace test leg passes (3216
+# tests). Results do not change (no fast-math, overflow checks and debug assertions stay on).
+# Cost: a cold pool build takes about 5 min longer, which auto-clean.ps1 no longer causes by wiping
+# pools. Undo: delete this block.
+# OPT3: workspace dev opt-level 1 keeps iteration fast; dependencies build
+# at opt-level 3 for a playable dev window while the 12 per-crate
+# opt-level 2 lines below stay (explicit lines override "*").
+# Measured 2026-10-03 (touch crates/combat/src/lib.rs, cargo check):
+# before (no "*" line): -p engine-combat 0.94/0.44/0.36 s, touch-to-game
+# 5.22/2.31/1.31 s; after ("*" opt-level 3): -p engine-combat 0.35 s,
+# touch-to-game 2.48/1.15/1.17 s (one 3m43 s sample excluded: shared-pool
+# file-lock queue, not rebuild work). After-mean within the +10% gate, so
+# the "*" line stays. No fast-math; overflow checks and debug assertions
+# stay on (dev defaults). Undo: delete the package."*" block.
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
+[profile.dev.package.engine-core]
+opt-level = 2
+[profile.dev.package.engine-ecs]
+opt-level = 2
+[profile.dev.package.engine-physics]
+opt-level = 2
+[profile.dev.package.engine-combat]
+opt-level = 2
+[profile.dev.package.engine-spatial]
+opt-level = 2
+[profile.dev.package.engine-nav]
+opt-level = 2
+[profile.dev.package.engine-ai]
+opt-level = 2
+[profile.dev.package.engine-anim]
+opt-level = 2
+[profile.dev.package.engine-world]
+opt-level = 2
+[profile.dev.package.engine-arena]
+opt-level = 2
+[profile.dev.package.engine-destruction]
+opt-level = 2
+[profile.dev.package.engine-input]
+opt-level = 2
+[profile.dev.package.engine-rules]
+opt-level = 2
+
+# OPT5: one job per profile (needs OPT1, PF3, PF11). Existing profiles
+# untouched: [profile.release] stays the proof/release leg; OPT3 owns the
+# [profile.dev] block above. If timings shift, PF1 baselines are re-recorded
+# append-only per PF11 (not in this packet).
+[profile.profiling]
+inherits = "release"
+lto = "thin"
+debug = "line-tables-only"
+
+[profile.perf-test]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
+# Ship keeps panic=unwind and no PGO until the unwind audit and a
+# recorded-tape PGO A/B per PF3 land (PF3 wave 32: LTO-fat + CGU-1 kept,
+# abort/PGO pending game-exe evidence).
+[profile.ship]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

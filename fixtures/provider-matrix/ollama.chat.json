@@ -1,0 +1,1 @@
+{"done": true, "message": {"content": "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"matrix:canon\"]}", "role": "assistant"}, "model": "llama-fixture"}

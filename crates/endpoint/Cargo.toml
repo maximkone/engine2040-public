@@ -1,0 +1,68 @@
+[package]
+name = "engine-endpoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# NM1 MCP lane: official rmcp stdio server pieces, opt-in so headless and the
+# window graph stay clean until MCP1. MCP5 adds the tokio runtime for the
+# `e2040-mcp` stdio binary (MIT, 1.53.1 in lock via rmcp; workspace tokio).
+# EA1e drives the local/remote provider adapters on recorded fixtures.
+[features]
+mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json", "dep:engine-arena", "dep:engine-spatial", "dep:tokio", "dep:engine-provider", "dep:engine-observe", "dep:engine-game", "dep:engine-destruction", "dep:engine-combat", "dep:engine-anim", "dep:engine-material", "dep:engine-ai", "dep:engine-net"]
+
+# The geo pack's modeling ops (boolean, unwrap, lod, collision) run on the cook-time engine-geo crate:
+# off by default so the default build has neither the donor libraries nor the xatlas C++ step.
+geo = ["mcp", "dep:engine-geo", "engine-geo/boolean", "engine-geo/uv", "engine-geo/lod", "engine-geo/collision"]
+# Generated-prop intake: `asset.intake` cooks a generated GLB through engine-assets
+# (glTF import, repair, prop cook, bundle). Off by default; no tick crate depends on it.
+intake = ["mcp", "dep:engine-assets"]
+
+# The scripted-rules verbs (`rules.set/test/explain`) over a per-session worker thread.
+# Off by default: the default build carries no scripting engine (no rhai).
+rules = ["mcp", "dep:engine-rules"]
+
+# Opt-in HTTPS for cloud LLMs: forwards to engine-provider `tls`
+# (rustls/ring plus platform roots). Default stays plain HTTP.
+tls = ["dep:engine-provider", "engine-provider/tls"]
+
+# MCP5: the stdio door binary. Gated on the feature so headless and window
+# graphs without `mcp` never build it.
+[[bin]]
+name = "e2040-mcp"
+path = "src/bin/e2040-mcp.rs"
+required-features = ["mcp"]
+
+[dependencies]
+# Shared hash/stream primitives (Fnv64, hash_bytes, SplitMix): engine-core is
+# the one owner, so endpoint imports instead of re-deriving them.
+engine-core = { workspace = true }
+engine-editor = { workspace = true, optional = true }
+engine-scene = { workspace = true, optional = true }
+engine-arena = { workspace = true, optional = true, features = ["spine"] }
+# Rule scripts that drive arena slots (feature `rules` only).
+engine-rules = { workspace = true, optional = true, features = ["arena"] }
+engine-spatial = { workspace = true, optional = true }
+engine-provider = { workspace = true, optional = true }
+# OB3 log tools read observe events (std-only).
+engine-observe = { workspace = true, optional = true }
+# AB8 door bind calls WD6 lobby boot/session verbs (consumed, never mirrored).
+engine-game = { workspace = true, optional = true }
+# The break pack (door verbs) calls the destruction and combat crates: std-only, read-only verbs.
+engine-destruction = { workspace = true, optional = true }
+engine-combat = { workspace = true, optional = true }
+# The anim verb pack wraps the state machine door state (JSON feature, cook/author time only).
+engine-anim = { workspace = true, optional = true, features = ["json"] }
+engine-material = { workspace = true, optional = true }
+engine-ai = { workspace = true, optional = true }
+engine-net = { workspace = true, optional = true }
+# Cook-time geometry (feature `geo`); never in the tick graph.
+engine-geo = { workspace = true, optional = true }
+# The intake verb cooks generated meshes (cook-time only).
+engine-assets = { workspace = true, optional = true, features = ["import", "registry"] }
+rmcp = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }

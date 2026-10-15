@@ -1,0 +1,126 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the older run and its billed minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_CACHE_SIZE: "5G"
+  # sccache cannot cache incremental artifacts, so CI (cold every run)
+  # disables them for hit rate. Local dev keeps incremental on; lanes pass
+  # CARGO_INCREMENTAL=0 per cold command only (see tools/lanes.mjs COLD_HINT).
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  gates:
+    # Full suite runs once on ubuntu; windows coverage is the smoke job below.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - name: rust-cache
+        uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: workspace and dependency boundaries
+        run: node tools/workspace-check.mjs
+      - name: rust quality ratchet (docs/RUST-QUALITY.md)
+        run: node tools/rust-quality.mjs
+      - name: gate tool tests
+        shell: bash
+        run: node --test tools/*.test.mjs
+      - name: build
+        run: cargo build --locked --workspace --release
+      - name: test
+        run: cargo test --locked --workspace --all-targets
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: real seed and recorded-input replay proofs
+        run: node tools/proof.mjs --skip-build
+      - name: install cargo-deny (cached)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.18.7
+      - name: dependency policy
+        if: runner.os == 'Linux'
+        run: cargo deny check
+      - name: legacy null fixture (golden and two-run equality)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p engine2040 --locked --release --quiet | tee "$RUNNER_TEMP/null-a.log"
+          cargo run -p engine2040 --locked --release --quiet | tee "$RUNNER_TEMP/null-b.log"
+          grep -Fx "  ticks=600 final_hash=d57b5c8ae3096614" "$RUNNER_TEMP/null-a.log" > "$RUNNER_TEMP/hash-a"
+          grep -Fx "  ticks=600 final_hash=d57b5c8ae3096614" "$RUNNER_TEMP/null-b.log" > "$RUNNER_TEMP/hash-b"
+          diff "$RUNNER_TEMP/hash-a" "$RUNNER_TEMP/hash-b"
+      - name: upload legacy proof logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-proof-${{ matrix.os }}
+          path: ${{ runner.temp }}/null-*.log
+
+  window-compile:
+    # Windows smoke: window-feature check only; the full suite lives in gates.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: compile actual window feature (not GPU execution)
+        run: cargo check --locked --workspace --all-targets --features window
+
+  arm-golden:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - name: legacy golden on ARM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p engine2040 --locked --release --quiet | tee "$RUNNER_TEMP/arm.log"
+          grep -Fx "  ticks=600 final_hash=d57b5c8ae3096614" "$RUNNER_TEMP/arm.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arm-golden-${{ matrix.os }}
+          path: ${{ runner.temp }}/arm.log
+
+  # Real GPU simulation parity still needs a scene-consuming GPU runner.
+  # The window-compile job intentionally claims compilation only.

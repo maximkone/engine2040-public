@@ -1,0 +1,38 @@
+[package]
+name = "engine-arena"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-core.workspace = true
+engine-input.workspace = true
+engine-anim.workspace = true
+engine-combat.workspace = true
+engine-ai.workspace = true
+engine-destruction.workspace = true
+# Std-only by default: EG20 integer fighter collision reuses `controller2`.
+# The Rapier settling track lives behind `sim` (AR2-fix): `sim` turns on
+# `engine-physics/rapier` for gravity settling plus wall collision.
+engine-physics.workspace = true
+# ARC3/ARC4: the spine step and parity harness (`spine` flag, off by default).
+engine-ecs = { workspace = true, optional = true }
+
+[features]
+sim = ["engine-physics/rapier"]
+spine = ["dep:engine-ecs"]
+
+[dev-dependencies]
+# Zero-allocation probe owner for tests (CODELAW 15); SL27R3 recorder:910.
+engine-core = { workspace = true, features = ["test-util"] }
+# AL1: the mock provider adapter drives the stamped-reply test. engine-provider
+# depends on engine-core only, so this dev edge closes no cycle.
+engine-provider.workspace = true
+
+[[bench]]
+name = "headless_ticks"
+harness = false

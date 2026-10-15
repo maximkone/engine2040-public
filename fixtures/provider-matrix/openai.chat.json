@@ -1,0 +1,1 @@
+{"choices": [{"index": 0, "message": {"content": "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"matrix:canon\"]}", "role": "assistant"}, "finish_reason": "stop"}], "id": "matrix-1", "object": "chat.completion"}

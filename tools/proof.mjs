@@ -1,0 +1,589 @@
+// Local gate runner, from the repository root: workspace audit, fmt, build,
+// default and all-features tests and lint, cargo-deny when installed, then the
+// real seed/input-tape proofs. --skip-build runs only the proof fixtures (CI
+// runs the other steps itself). --perf runs only the timing tests, which are
+// #[ignore]d in the default suite because parallel load makes them flaky, and
+// on Linux the instruction-count budget. --mutants mutation-tests this tree's
+// crate changes against HEAD (tools/mutants.mjs). --help prints usage plus
+// nextest, gungraun and fuzz examples and exits 0.
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Pure CLI arg validation (exported for tests): throws the usage line on
+// anything but [] or one of the flags, mirroring the old exit(2).
+export function parseProofArgs(argv) {
+  if (argv.length > 1 || argv.some((arg) => !["--skip-build", "--perf", "--mutants"].includes(arg))) {
+    throw new Error("Usage: node tools/proof.mjs [--skip-build | --perf | --mutants]\nTry 'node tools/proof.mjs --help' for the gate map and copy-paste examples.");
+  }
+  return argv;
+}
+
+// Help text for `--help` (docs only; no gate logic lives here). Examples are
+// the exact commands the gates run, so copy-paste stays true.
+export const PROOF_HELP = [
+  "Usage: node tools/proof.mjs [--skip-build | --perf | --mutants]",
+  "       node tools/proof.mjs --help | -h",
+  "",
+  "Full gate (default): workspace audit, fmt/build/test/clippy/deny, proof fixtures.",
+  "  node tools/proof.mjs",
+  "Fixture-only (CI runs the other steps itself):",
+  "  node tools/proof.mjs --skip-build",
+  "Timing + instruction gate (release, one thread; Linux adds Callgrind):",
+  "  node tools/proof.mjs --perf",
+  "Mutation gate for this tree's crate changes against HEAD:",
+  "  node tools/proof.mjs --mutants",
+  "",
+  "Examples:",
+  "  nextest (proof profile; opt-in when `cargo nextest` and",
+  "  .config/nextest.toml [profile.proof] both exist, else plain cargo test):",
+  "    cargo nextest run --profile proof --cargo-profile fast-test --locked --workspace --all-targets",
+  "  receipt: target/nextest-junit/proof.xml; retries print as `<n> retried` per leg.",
+  "  gungraun (Linux only, 2% Ir budget over the perf_gate baseline):",
+  "    cargo install --locked --version 0.20.0 gungraun-runner",
+  "    cargo bench --locked -p engine-perf --bench instructions -- --save-baseline=perf_gate",
+  "    cargo bench --locked -p engine-perf --bench instructions -- --baseline=perf_gate",
+  "  fuzz (deterministic arena corpus, engine-proof `fuzz` feature):",
+  "    cargo test --locked -p engine-proof --all-features --lib a9",
+  "    cargo test --locked -p engine-proof --all-features --lib fuzz_corpus_runs_clean_and_reproduces",
+].join("\n");
+
+// Benches in crates/perf/benches/instructions.rs: arena, physics, ECS spine.
+export const IR_BENCHES = 3;
+const IR_SETUP = "the instruction gate needs valgrind, `cargo install --locked --version 0.20.0 gungraun-runner` and a baseline saved on master: `cargo bench --locked -p engine-perf --bench instructions -- --save-baseline=perf_gate`";
+
+// E12 quarantine list (docs/research/speed-2026-10-06-E12-gates.md).
+// Default gate never runs these. They run in --perf, nightly, soak, or by
+// hand. A fail here never blocks a logic packet. Each entry names where it
+// runs and why it stays out of the default gate.
+export const E12_QUARANTINE = [
+  { name: '#[ignore = "timing: ..."]', runner: "--perf", reason: "wall clock flakes under load; needs release, one thread, quiet box" },
+  { name: "game netgame UDP loopback", runner: "--perf", reason: "passes alone, flakes to empty under full load" },
+  { name: "render GPU submit and window execution", runner: "--perf", reason: "compile is must-pass, run on GPU is not; needs reference GPU at boost clocks" },
+  { name: "PQ1 input latency (engine-perf latency)", runner: "--perf", reason: "needs release clocks and headless report lines" },
+  { name: "instruction counts (gungraun, Callgrind)", runner: "--perf on Linux", reason: "Linux only; needs valgrind, saved perf_gate baseline, 2% budget" },
+  { name: "gpu_live truth gate", runner: "report-only", reason: "report-only until GX2-GX5 and GX7-GX10 land; logs, never fails" },
+  { name: "--mutants gate", runner: "--mutants", reason: "slow; fails closed per crate; changed-crate or nightly, not per packet" },
+  { name: "live provider tests", runner: "by hand", reason: "needs tokens or servers; secrets never gate a local run" },
+  { name: "provider transport TLS stub", runner: "by hand", reason: "needs a test CA; no minter in the graph" },
+  { name: "rules tests/data writer", runner: "by hand", reason: "writes gold once by hand on purpose; not a per-run check" },
+  { name: "rules budget probe and strict timing", runner: "by hand", reason: "tuning charts for a quiet PC; not a gate" },
+  { name: "intake_verb real props (E2040_MAKE_RUN)", runner: "manual", reason: "needs external Kaggle output" },
+  { name: "hour-long online soak and 10 min siege p99", runner: "soak lane", reason: "too long for a packet gate" },
+  { name: "game practice 1s shader-edit visibility", runner: "by hand", reason: "wall clock demo; run once by hand" },
+];
+
+// Pure verdict over `cargo bench --bench instructions -- --baseline=perf_gate`
+// (exported for tests). Green needs exit 0 and every bench reporting a nonzero
+// count against a stored baseline: a zero count (Callgrind measured nothing)
+// or `N/A` (no baseline) is red, never a silent pass.
+export function irGateVerdict(run) {
+  const out = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+  const rows = [...out.matchAll(/^\s*Instructions:\s+(\d+)\|(\d+|N\/A)/gm)].map(([, now, was]) => ({ now: Number(now), was }));
+  let why = "";
+  if (run.error) why = run.error.message;
+  else if (/exceeds limit/.test(out)) why = `Ir over the budget: ${/Instructions \((\d+ -> \d+)\): (\S+)/.exec(out)?.slice(1).join(", ") ?? "see the bench output"}`;
+  else if (run.status !== 0) why = `cargo bench exited ${run.status}`;
+  else if (rows.length < IR_BENCHES) why = `${rows.length} of ${IR_BENCHES} benches reported a count`;
+  else if (rows.some((r) => r.now === 0)) why = "a bench counted 0 instructions";
+  else if (rows.some((r) => r.was === "N/A")) why = "no perf_gate baseline to compare against";
+  const ok = why === "";
+  return { ok, rows, line: ok ? `[PASS] instruction counts inside the 2% Ir budget (${rows.map((r) => r.now).join(", ")})` : `[FAIL] instruction counts: ${why}` };
+}
+
+// Pure verdict over the frame-time CSV text (exported for tests). Only the
+// wall_ms column is required, looked up by header name so order and extra
+// columns do not matter. Blank lines are skipped, CRLF is handled.
+export const FRAME_P95_BAR_MS = 50;
+export const FRAME_CSV_PATH = "target/perf/frame-times.csv";
+
+export function frameCsvVerdict(csvText, barMs = FRAME_P95_BAR_MS) {
+  const text = `${csvText ?? ""}`;
+  const lines = text.split(/\r?\n/);
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== "") {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx < 0) {
+    return { ok: false, frames: 0, p50: null, p95: null, line: "[FAIL] frame times: empty csv" };
+  }
+  const header = lines[headerIdx].split(",").map((c) => c.trim());
+  const wallIdx = header.indexOf("wall_ms");
+  if (wallIdx < 0) {
+    return { ok: false, frames: 0, p50: null, p95: null, line: "[FAIL] frame times: missing wall_ms column" };
+  }
+  const values = [];
+  for (let i = headerIdx + 1; i < lines.length; i += 1) {
+    const raw = lines[i];
+    if (raw.trim() === "") {
+      continue;
+    }
+    const cols = raw.split(",");
+    const cell = (cols[wallIdx] ?? "").trim();
+    const n = Number(cell);
+    if (cell === "" || !Number.isFinite(n) || n < 0) {
+      return { ok: false, frames: values.length, p50: null, p95: null, line: `[FAIL] frame times: bad wall_ms value on row ${values.length + 1}` };
+    }
+    values.push(n);
+  }
+  if (values.length === 0) {
+    return { ok: false, frames: 0, p50: null, p95: null, line: "[FAIL] frame times: zero data rows" };
+  }
+  values.sort((a, b) => a - b);
+  const n = values.length;
+  const p50 = values[Math.ceil(0.5 * n) - 1];
+  const p95 = values[Math.ceil(0.95 * n) - 1];
+  const ok = p95 <= barMs;
+  const tag = ok ? "PASS" : "FAIL";
+  return { ok, frames: n, p50, p95, line: `[${tag}] frame times: frames=${n} p50=${p50.toFixed(3)} ms p95=${p95.toFixed(3)} ms (bar ${barMs} ms)` };
+}
+
+// Crate directories whose `src/` a git diff touches (exported for tests).
+export function changedCrateDirs(diff) {
+  return [...new Set([...`${diff}`.matchAll(/^\+\+\+ b\/crates\/([^/\s]+)\/src\//gm)].map((m) => m[1]))].sort();
+}
+
+// The `[package]` name of a Cargo.toml (exported for tests); bin, bench and
+// lib sections carry names of their own.
+export function packageNameOf(manifest) {
+  let inPackage = false;
+  for (const line of `${manifest}`.split(/\r?\n/)) {
+    const header = /^\s*\[\[?([^\]]+)\]\]?\s*$/.exec(line);
+    if (header) {
+      inPackage = header[1].trim() === "package";
+      continue;
+    }
+    const name = inPackage ? /^\s*name\s*=\s*"([^"]+)"/.exec(line) : null;
+    if (name) return name[1];
+  }
+  return "";
+}
+
+// Pure summary of a `node --test` run's stdout (exported for tests): the
+// "# pass / # fail" lines the proof gate reports.
+export function toolTestSummary(output) {
+  return `${output ?? ""}`.split("\n").filter((l) => /^# (pass|fail)/.test(l)).join(", ");
+}
+
+// Nextest profile discipline (STEAL-speed OPT6, donor nextest-rs/nextest
+// @d643f89 .config/nextest.toml, MIT, reimplemented, no donor bytes).
+// `.config/nextest.toml` holds `[profile.proof]` (fail-fast=false,
+// 60s slow-timeout with terminate-after, fixed-backoff retries, junit
+// receipt); the proof test legs run under it per the
+// `.cargo/config.toml` fast-test comment, with retries reported never hidden.
+export const NEXTEST_PROFILE = "proof";
+export const NEXTEST_CONFIG = ".config/nextest.toml";
+
+// Pure check over the profile file text (exported for tests): true when the
+// proof profile the legs run under is present.
+export function hasNextestProfile(tomlText) {
+  return /^\s*\[profile\.proof\]/m.test(`${tomlText ?? ""}`);
+}
+
+// Pure map from a `cargo test ...` leg to its `cargo nextest run ...`
+// equivalent (exported for tests): non-test legs map to null, `-j4`/`-j N`
+// are dropped (nextest owns threads via the profile), and the cargo
+// fast-test profile rides `--cargo-profile` per `.cargo/config.toml`.
+export function nextestTestCommand(cargoArgs) {
+  const args = [...(cargoArgs ?? [])];
+  if (args[0] !== "test") return null;
+  const rest = [];
+  for (let i = 1; i < args.length; i += 1) {
+    if (args[i] === "-j4") continue;
+    if (args[i] === "-j" || args[i] === "--jobs") {
+      i += 1;
+      continue;
+    }
+    rest.push(args[i]);
+  }
+  return ["nextest", "run", "--profile", NEXTEST_PROFILE, "--cargo-profile", "fast-test", ...rest];
+}
+
+// Pure flake count over a finished leg's combined output (exported for
+// tests): nextest prints `retry`/`retried`/`flaky` lines per retried test,
+// so the proof log prints `<n> retried` beside every leg verdict and the
+// OPT6 before/after counts stay visible. Zero retries prints `0 retried`,
+// never an empty string that could hide a flake-free run.
+export function nextestFlakeSummary(output) {
+  const lines = `${output ?? ""}`.split("\n");
+  let n = 0;
+  for (const line of lines) {
+    if (/\bretries?\b|\bretried\b|\bflaky\b/i.test(line)) {
+      const m = /(\d+)\s+retr(?:y|ied|ies)/i.exec(line);
+      n += m ? Number(m[1]) : 1;
+    }
+  }
+  return `${n} retried`;
+}
+
+// Per-packet fixture-only discipline: the golden receipt verifies once; the
+// seed double-runs below still prove determinism, so a second 600-tick verify
+// is duplicate work. Tool self-tests run in CI nightly only
+// (`node --test tools/*.test.mjs` in .github/workflows/ci.yml), never in the
+// proof gate: 155 files reran in every full gate with no signal the cargo
+// legs do not already give, so per-packet proof stays fixtures plus ledgers.
+export const GOLDEN_VERIFY_RUNS = 1;
+export function runsToolTests(argv, env = process.env) {
+  return env.E2040_NIGHTLY === "1" && !argv.includes("--skip-build");
+}
+
+// Single-receipt golden verdict (exported for tests): the hash law plus the
+// version pin, so a stale-version receipt with the right hash still FAILs.
+export function goldenVerdict(receipt, workspaceVersion) {
+  return (
+    receipt?.final_hash === "d57b5c8ae3096614" &&
+    !!receipt?.golden_checked &&
+    !!receipt?.verified &&
+    workspaceVersion !== "" &&
+    receipt?.engine_version === workspaceVersion
+  );
+}
+
+function main() {
+const raw = process.argv.slice(2);
+if (raw.includes("--help") || raw.includes("-h")) {
+  console.log(PROOF_HELP);
+  process.exit(0);
+}
+let args;
+try {
+  args = parseProofArgs(raw);
+} catch (error) {
+  console.error(error.message);
+  process.exit(2);
+}
+
+if (args.includes("--mutants")) {
+  // Tracked edits come from `git diff HEAD`, new source files as /dev/null
+  // diffs. tools/mutants.mjs fails closed per crate on a missed mutant, a red
+  // unmutated baseline, an overrun budget or a tool error.
+  const git = (gitArgs) => spawnSync("git", gitArgs, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout ?? "";
+  let diff = git(["diff", "HEAD", "--", "crates/"]);
+  const fresh = git(["ls-files", "--others", "--exclude-standard", "--", "crates/"]).split("\n").filter((p) => /^crates\/[^/]+\/src\/.+\.rs$/.test(p));
+  for (const path of fresh) diff += git(["diff", "--no-index", "--", "/dev/null", path]);
+  const dirs = changedCrateDirs(diff);
+  if (!dirs.length) {
+    console.log("RESULT PASS (mutants: no crate src/ change against HEAD)");
+    process.exit(0);
+  }
+  let green = true;
+  for (const dir of dirs) {
+    const name = packageNameOf(readFileSync(join("crates", dir, "Cargo.toml"), "utf8"));
+    const run = spawnSync(process.execPath, ["tools/mutants.mjs", "--patch", "-", "-p", name], { input: diff, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, stdio: ["pipe", "pipe", "inherit"] });
+    const passed = !run.error && run.status === 0;
+    console.log(`[${passed ? "PASS" : "FAIL"}] mutants ${name}`);
+    process.stdout.write(run.stdout ?? "");
+    green &&= passed;
+  }
+  console.log(green ? "RESULT PASS (mutants)" : "RESULT FAIL (mutants)");
+  process.exit(green ? 0 : 1);
+}
+
+if (args.includes("--perf")) {
+  // Release build, one test thread: numbers are only meaningful without contention.
+  const result = spawnSync("cargo", ["test", "--locked", "--workspace", "--release", "--all-features", "--", "--ignored", "--test-threads=1"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024 });
+  const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  for (const line of out.split("\n").filter((l) => /^test .* \.\.\. |panicked/.test(l))) console.log(line);
+  // PQ1 input-latency leg (wave-44 judge FAIL-to-tick: headless_report
+  // unwired): run the engine-perf latency suite and print its
+  // headless_report lines (sim/present p50/p95 + GPU-PENDING marker) into
+  // the proof log. Leg passes iff the latency tests pass; a latency
+  // failure exits non-zero here so the --perf gate cannot pass without it.
+  // Collected wave 45: root-relative cargo (lane prefixes rewritten).
+  const latency = spawnSync("cargo", ["test", "--locked", "-p", "engine-perf", "latency", "--", "--nocapture"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024 });
+  const latencyOut = `${latency.stdout ?? ""}${latency.stderr ?? ""}`;
+  for (const line of latencyOut.split("\n").filter((l) => /input_latency|reference_gpu|sim_p50|sim_p95|present_p50|present_p95|GPU-PENDING|PENDING/.test(l))) console.log(line);
+  const latencyOk = !latency.error && latency.status === 0;
+  console.log(latencyOk ? "[PASS] PQ1 input latency (headless_report in proof log)" : "[FAIL] PQ1 input latency (engine-perf latency suite)");
+  if (!latencyOk) {
+    console.log("RESULT FAIL (PQ1 input latency)");
+    process.exit(1);
+  }
+  if (existsSync(FRAME_CSV_PATH)) {
+    const verdict = frameCsvVerdict(readFileSync(FRAME_CSV_PATH, "utf8"));
+    console.log(verdict.line);
+    if (!verdict.ok) {
+      console.log("RESULT FAIL (frame times)");
+      process.exit(1);
+    }
+  } else {
+    console.log("[SKIP] frame times: no target/perf/frame-times.csv yet (arena --frames N --exit --timed-smoke writes it)");
+  }
+  if (process.platform === "linux") {
+    // Callgrind counts repeat exactly, so the 2% Ir budget set in
+    // crates/perf/benches/instructions.rs gates where wall clock cannot.
+    const ir = spawnSync("cargo", ["bench", "--locked", "-p", "engine-perf", "--bench", "instructions", "--", "--baseline=perf_gate"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024 });
+    const verdict = irGateVerdict(ir);
+    console.log(verdict.line);
+    if (!verdict.ok) {
+      console.log(`[INFO] ${IR_SETUP}`);
+      console.log("RESULT FAIL (instruction counts)");
+      process.exit(1);
+    }
+  } else {
+    console.log("[SKIP] instruction counts: Callgrind runs on Linux only");
+  }
+  const ok = !result.error && result.status === 0;
+  console.log(ok ? "RESULT PASS (timing tests, release, one thread)" : "RESULT FAIL (timing tests)");
+  process.exit(ok ? 0 : 1);
+}
+
+function cargo(args, timeoutMs = 1_800_000) {
+  // Suite growth (wave 21): the all-features workspace leg exceeds 10 min on
+  // the reference laptop, so the harness budget is 30 min, not 10.
+  // Sentinel 2026-09-28T13:30Z: the monolithic all-features workspace leg hit
+  // spawnSync ETIMEDOUT (60 min) while the default-features leg passed, so no
+  // single default test hangs; the timeout driver is the all-features-only
+  // expansion (engine-render window/GPU chart tests with wait_indefinitely
+  // submits plus the proof m1_workflow suite) compounded by -j4 contention
+  // (BLOCKERS wave-32 proof-lib flake, wave-55 package-cache lock). Each leg
+  // keeps its own 30 min budget; the split below gives the same coverage two
+  // budgets instead of one. Timeout details keep the output tail so the next
+  // hang names its package instead of printing ETIMEDOUT alone.
+  const result = spawnSync("cargo", args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 });
+  if (result.error) {
+    const tail = `${result.stdout ?? ""}${result.stderr ?? ""}`.split("\n").filter(Boolean).slice(-8).join(" | ");
+    const detail = `${result.error.message}${tail ? ` | tail: ${tail.slice(0, 2000)}` : ""}`;
+    return { ok: false, out: result.stdout ?? "", error: detail };
+  }
+  return { ok: result.status === 0, out: result.stdout ?? "", error: result.stderr ?? "" };
+}
+
+// Nextest runner for the `cargo test` legs (exported shape tested via the
+// pure helpers above): when `cargo nextest` and `.config/nextest.toml`
+// `[profile.proof]` both exist the leg runs as
+// `cargo nextest run --profile proof --cargo-profile fast-test ...` with its
+// junit receipt and visible retry count; otherwise it falls back to the
+// plain `cargo test` leg with the same failures visible and `0 retried`.
+let nextestProbe = null;
+function useNextest() {
+  if (nextestProbe !== null) return nextestProbe;
+  try {
+    const probe = spawnSync("cargo", ["nextest", "--version"], { encoding: "utf8", timeout: 30_000 });
+    const bin = !probe.error && probe.status === 0;
+    const text = existsSync(NEXTEST_CONFIG) ? readFileSync(NEXTEST_CONFIG, "utf8") : "";
+    nextestProbe = bin && hasNextestProfile(text);
+  } catch {
+    nextestProbe = false;
+  }
+  return nextestProbe;
+}
+
+function cargoTest(command) {
+  const mapped = nextestTestCommand(command);
+  if (!mapped || !useNextest()) {
+    const fallback = cargo(command);
+    return { ...fallback, flake: nextestFlakeSummary(`${fallback.out ?? ""}\n${fallback.error ?? ""}`), via: "cargo" };
+  }
+  const run = cargo(mapped);
+  return { ...run, flake: nextestFlakeSummary(`${run.out ?? ""}\n${run.error ?? ""}`), via: "nextest" };
+}
+
+// GPU tests with no adapter print `SKIPPED <test>: <why>` (render's
+// test_gpu::require_or_skip). Counting those lines lets the RESULT line name
+// the GPU tests that did not run.
+function countSkipped(text) {
+  return text.split("\n").filter((line) => /^SKIPPED \S/.test(line.trim())).length;
+}
+
+let renderSkipped = null;
+let failed = false;
+function check(name, passed, detail = "") {
+  console.log(`[${passed ? "PASS" : "FAIL"}] ${name}${detail ? ` — ${detail}` : ""}`);
+  if (!passed) failed = true;
+}
+
+function proof(args) {
+  const result = cargo(["run", "-p", "engine2040", "--locked", "--release", "--quiet", "--", ...args, "--format", "json"]);
+  if (!result.ok) throw new Error(result.error || result.out || "proof process failed");
+  return JSON.parse(result.out);
+}
+
+if (!args.includes("--skip-build")) {
+  const audit = spawnSync(process.execPath, ["tools/workspace-check.mjs"], { encoding: "utf8" });
+  check("workspace metadata, dependency edges and compiled modules", !audit.error && audit.status === 0, audit.status === 0 ? "" : audit.stderr || audit.stdout);
+  for (const command of [
+    ["fmt", "--all", "--", "--check"],
+    ["build", "--locked", "--workspace", "--release"],
+    // Default features prove the headless std-only build on its own.
+    // -j4 caps concurrent test binaries: full parallelism saturates this
+    // machine and flakes the loopback-socket/timing tests (provider, game,
+    // net) that all pass alone; assertions are unchanged, only pressure.
+    ["test", "-j4", "--locked", "--workspace", "--all-targets"],
+    ["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"],
+    // Feature-gated lanes (window, import, registry, math) must be tested and
+    // linted too. Window code compiles here; this is not GPU execution.
+    // Split 2026-09-28 (sentinel ETIMEDOUT on the monolithic leg): the two
+    // test legs partition the workspace exactly once (exclude + single =
+    // workspace), so no test is skipped and no flag is weakened. Render GPU
+    // chart tests run alone instead of contending with net/provider socket
+    // tests; each leg keeps its own 30 min budget (60 min total).
+    ["test", "-j4", "--locked", "--workspace", "--exclude", "engine-render", "--all-targets", "--all-features"],
+    ["test", "-j4", "--locked", "-p", "engine-render", "--all-targets", "--all-features"],
+    ["clippy", "--locked", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"],
+  ]) {
+    const isTest = command[0] === "test";
+    const result = isTest ? cargoTest(command) : cargo(command);
+    if (isTest && command.includes("engine-render")) {
+      renderSkipped = countSkipped(`${result.out ?? ""}\n${result.error ?? ""}`);
+    }
+    const flake = isTest ? `, ${result.flake} via ${result.via}` : "";
+    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? (isTest ? `${result.flake} via ${result.via}` : "") : `${result.error || result.out}${flake}`);
+  }
+  // Named consumer gates (wave 21): RV1 red-team tapes replay every wave;
+  // PQ2 balance-tournament gate reproduces its report x2 (GA3 consumes the
+  // pinned stuck legs); VK1 keypoint suite runs 30 gameplay specs (ARC8
+  // spine specs join it). Wave 24 adds PV5 provider matrix + LW4 living
+  // eval. Wave 30 adds SP12 spatial-gold eval. Wave 34 adds PQ10
+  // exploit-gate replay (the proof-shape sweep consumed by HR6). All run inside the
+  // workspace gates above too; the names here are the acceptance hooks.
+  for (const command of [
+    ["test", "--locked", "-p", "engine-endpoint", "--test", "it", "redteam::"],
+    ["test", "--locked", "-p", "engine-playtest", "tournament::tests::proof_gate_reproduces"],
+    ["test", "--locked", "-p", "engine-playtest", "keypoint"],
+    ["test", "--locked", "-p", "engine-provider", "--test", "matrix"],
+    ["test", "--locked", "-p", "engine-playtest", "living"],
+    ["test", "--locked", "-p", "engine-playtest", "exploit_gate_replays"],
+    ["test", "--locked", "-p", "engine-playtest", "spatial_eval"],
+    // BX28 Bodies proof: 10,000 seeded cuts through the cut resolver, one
+    // pinned digest (GOLDEN_CUT_DIGEST), run twice in the test itself.
+    ["test", "--locked", "-p", "engine-proof", "--lib", "break_corpus"],
+  ]) {
+    const result = cargoTest(command);
+    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? `${result.flake} via ${result.via}` : `${result.error || result.out}, ${result.flake} via ${result.via}`);
+  }
+  const deny = cargo(["deny", "check"]);
+  check("cargo deny check", deny.ok, deny.ok ? "" : deny.error || deny.out);
+} else {
+  console.log("[INFO] compilation/test/lint gates skipped; running proof fixtures");
+}
+
+let temp;
+try {
+  const a = proof(["--verify"]);
+  // Version pin folds into the golden check: a stale-version receipt with the
+  // right hash still FAILs, and the seed double-runs below prove determinism.
+  const workspaceVersion = (readFileSync("Cargo.toml", "utf8").split("[workspace.package]")[1] ?? "").match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1] ?? "";
+  check("legacy golden", goldenVerdict(a, workspaceVersion), `${a.final_hash} engine=${a.engine_version ?? "missing"} workspace=${workspaceVersion || "missing"}`);
+
+  // Seeds 2k and 2k+1 share a legacy trajectory, so these differ above bit 0.
+  // Receipts fold in the raw seed; engine-proof's unit tests assert that these
+  // seeds also simulate differently. Keep both seed lists in sync.
+  const hashes = new Set();
+  for (const seed of ["0", "2", "2040", "999983"]) {
+    const a = proof(["--seed", seed, "--ticks", "40", "--verify"]);
+    const b = proof(["--seed", seed, "--ticks", "40", "--verify"]);
+    check(`seed ${seed} repeated`, a.seed === seed && b.seed === seed && a.ticks === 40 && b.ticks === 40 && a.final_hash === b.final_hash && a.state_hash === b.state_hash && a.verified && b.verified, a.final_hash);
+    hashes.add(a.final_hash);
+  }
+  check("different seeds give different receipts", hashes.size === 4);
+
+  // EV13 record-path policy (wave 47): the proof CLI refuses absolute
+  // tape paths, so keep the roundtrip tape inside the repo worktree
+  // (gitignored target/, relative path) instead of the OS tmpdir.
+  temp = join("target", "proof-tape");
+  mkdirSync(temp, { recursive: true });
+  const path = join(temp, "actions.e2040");
+  const recorded = proof(["--seed", "19", "--ticks", "120", "--input", "3:0:-8:4", "--input", "40:1:2:6", "--record", path, "--verify"]);
+  const replayed = proof(["--replay", path]);
+  check("saved nonempty input tape replay", recorded.inputs === 2 && replayed.inputs === 2 && replayed.mode === "replay" && replayed.verified && recorded.final_hash === replayed.final_hash && recorded.state_hash === replayed.state_hash, replayed.final_hash);
+
+  const bytes = readFileSync(path);
+  bytes[bytes.length - 1] ^= 1;
+  writeFileSync(path, bytes);
+  const corrupted = cargo(["run", "-p", "engine2040", "--locked", "--release", "--quiet", "--", "--replay", path]);
+  check("corrupted checkpoint fails with first divergent tick", !corrupted.ok && corrupted.error.includes("diverged at tick 119"));
+  const unsupported = cargo(["run", "-p", "engine2040", "--locked", "--release", "--quiet", "--", "--backend", "wgpu"]);
+  check("unsupported proof backend cannot fall back silently", !unsupported.ok && unsupported.error.includes("unsupported proof backend"));
+
+  // GX6 truth gate (report-only): the gpu_live registry in engine-proof
+  // names ticked render rows whose GPU submit still refuses on a device.
+  // It turns enforcing (failing this gate) only when every registry entry
+  // is live; until GX2-GX5 and GX7-GX10 land it reports without failing.
+  const gpuLive = cargo(["test", "--locked", "--quiet", "-p", "engine-proof", "--lib", "gpu_live"]);
+  const gpuLine = gpuLive.out.split("\n").filter((line) => line.includes("test result")).join("; ");
+  console.log(`[INFO] gpu-live truth gate (report-only): ${gpuLive.ok ? gpuLine : `gate did not execute: ${gpuLive.error}`}`);
+} catch (error) {
+  check("proof execution", false, error.message);
+} finally {
+  if (temp) rmSync(temp, { recursive: true, force: true });
+}
+
+// GE9 generality ratchet (check, not refactor): runs every wave, in both
+// full and --skip-build modes, so generality never rots while fixtures move.
+// (a) GE2 genre-ledger grep gate: re-runs tools/workspace-check.mjs, which
+// fails on any Fighter|Gladiator token outside the ledger/arena/game.
+// (b) GP5 engine-diff-empty gate: fails on any crates/ working-tree diff,
+// so a fixture that needs an engine edit cannot pass proof.
+// (c) GE1 fixtures stay listed: the four fixture rule sets must exist; the
+// full (non-skip-build) run additionally replays the ge1_genres and
+// second_game harnesses as named hooks (they also run inside the
+// workspace test legs above; the names here keep them listed until green).
+try {
+  const audit = spawnSync(process.execPath, ["tools/workspace-check.mjs"], { encoding: "utf8" });
+  check("generality ratchet: GE2 genre ledger (workspace-check)", !audit.error && audit.status === 0, audit.status === 0 ? "" : (audit.stderr || audit.stdout || "workspace-check failed").split("\n").filter(Boolean).slice(-3).join(" | "));
+} catch (error) {
+  check("generality ratchet: GE2 genre ledger (workspace-check)", false, error.message);
+}
+try {
+  const diff = spawnSync("git", ["diff", "--name-only", "--", "crates/"], { encoding: "utf8" });
+  const status = spawnSync("git", ["status", "--porcelain", "--", "crates/"], { encoding: "utf8" });
+  const diffFiles = `${diff.stdout ?? ""}`.split("\n").map((l) => l.trim()).filter(Boolean);
+  const statusFiles = `${status.stdout ?? ""}`.split("\n").map((l) => l.trim()).filter(Boolean);
+  const dirty = [...new Set([...diffFiles, ...statusFiles])];
+  const ok = !diff.error && !status.error && diff.status === 0 && status.status === 0 && dirty.length === 0;
+  check("generality ratchet: engine diff empty (GP5)", ok, ok ? "" : dirty.length ? `crates/ dirty: ${dirty.slice(0, 5).join(", ")}${dirty.length > 5 ? ` (+${dirty.length - 5} more)` : ""}` : "git gate did not execute");
+} catch (error) {
+  check("generality ratchet: engine diff empty (GP5)", false, error.message);
+}
+// Rust quality ratchet (docs/RUST-QUALITY.md, layer 3): static, about 2 s,
+// so it runs in both modes. No crate's debt count may rise over the
+// baseline, and simulation crates keep the canonical clippy config.
+{
+  const quality = spawnSync(process.execPath, ["tools/rust-quality.mjs"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const lines = `${quality.stdout ?? ""}${quality.stderr ?? ""}`.split("\n");
+  const score = lines.find((l) => l.startsWith("WORKSPACE")) ?? "";
+  const fails = lines.filter((l) => l.startsWith("[FAIL]") || l.startsWith("RESULT FAIL"));
+  check("rust quality ratchet (tools/rust-quality.mjs)", !quality.error && quality.status === 0, quality.status === 0 ? score.replace(/\s+/g, " ") : fails.slice(0, 4).join(" | "));
+}
+// The gate tools gate themselves in CI nightly only (`node --test
+// tools/*.test.mjs` in .github/workflows/ci.yml, E2040_NIGHTLY=1); the proof
+// gate never reruns them, so per-packet proof stays fixtures only.
+if (runsToolTests(args)) {
+  const tests = readdirSync("tools").filter((f) => f.endsWith(".test.mjs")).map((f) => `tools/${f}`);
+  const run = spawnSync(process.execPath, ["--test", ...tests], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const summary = toolTestSummary(`${run.stdout ?? ""}`);
+  check(`tool tests (${tests.length} files)`, !run.error && run.status === 0, summary);
+}
+for (const fixture of ["fixtures/games/twin-stick/rules.json", "fixtures/games/vehicle-course/rules.json", "fixtures/games/traversal-course/rules.json", "fixtures/games/second-game/rules.json"]) {
+  check(`generality ratchet: fixture listed (${fixture})`, existsSync(fixture), existsSync(fixture) ? "" : "missing fixture rules");
+}
+// SP12 spatial-gold generator: the checked-in TSV must match its generator
+// (16 fix bases plus order, gold kept, capture_hex recomputed).
+{
+  const gen = spawnSync(process.execPath, ["fixtures/spatial-gold/generate.mjs", "--check"], { encoding: "utf8" });
+  const out = `${gen.stdout ?? ""}${gen.stderr ?? ""}`.trim().split("\n").filter(Boolean).slice(-1).join(" ");
+  check("spatial-gold generator matches tasks.tsv", !gen.error && gen.status === 0, out);
+}
+if (!args.includes("--skip-build")) {
+  for (const command of [
+    ["test", "--locked", "--test", "ge1_genres"],
+    ["test", "--locked", "--test", "second_game"],
+  ]) {
+    const result = cargo(command);
+    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? "" : result.error || result.out);
+  }
+}
+
+const skippedNote = renderSkipped === null ? "" : `; engine-render GPU tests SKIPPED: ${renderSkipped}`;
+console.log((failed ? "RESULT FAIL" : args.includes("--skip-build") ? "RESULT PASS (proof fixtures only)" : "RESULT PASS (all local gates)") + skippedNote);
+process.exitCode = failed ? 1 : 0;
+} // main
+
+if (import.meta.main) {
+  main();
+}

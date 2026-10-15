@@ -1,0 +1,14 @@
+{
+  "clip": "block_shield",
+  "loop": false,
+  "root_motion": false,
+  "tags": [
+    "block",
+    "shield"
+  ],
+  "ground_y": 0.02,
+  "feet": {
+    "left": "foot_l",
+    "right": "foot_r"
+  }
+}

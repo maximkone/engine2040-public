@@ -1,0 +1,47 @@
+{
+  "kit": "ct25-crowd-kit-split1",
+  "generator": "engine2040-ct25-gen",
+  "license": "CC0-1.0",
+  "files": {
+    "src/crowd_impostor_01.gltf": {
+      "sha256": "21295d4413a4a61224a52ffb4fb0fa7eaf3835a7c1e61d4491b7dbc6d6824f7c",
+      "bytes": 27869
+    },
+    "src/crowd_impostor_02.gltf": {
+      "sha256": "bd59050fe8eb178c39ef60e28597628838d77dec860e00e840b252a3c74eb334",
+      "bytes": 27838
+    }
+  },
+  "specimens": [
+    {
+      "name": "crowd_impostor_01",
+      "meshes": [
+        {
+          "name": "Body_torso",
+          "verts": 150,
+          "tris": 192
+        },
+        {
+          "name": "Body_head",
+          "verts": 150,
+          "tris": 192
+        }
+      ]
+    },
+    {
+      "name": "crowd_impostor_02",
+      "meshes": [
+        {
+          "name": "Body_torso",
+          "verts": 150,
+          "tris": 192
+        },
+        {
+          "name": "Body_head",
+          "verts": 150,
+          "tris": 192
+        }
+      ]
+    }
+  ]
+}

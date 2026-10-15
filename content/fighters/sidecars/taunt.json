@@ -1,0 +1,13 @@
+{
+  "clip": "taunt",
+  "loop": false,
+  "root_motion": false,
+  "tags": [
+    "taunt"
+  ],
+  "ground_y": 0.02,
+  "feet": {
+    "left": "foot_l",
+    "right": "foot_r"
+  }
+}

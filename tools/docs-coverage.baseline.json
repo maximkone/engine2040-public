@@ -1,0 +1,192 @@
+{
+ "version": 1,
+ "note": "Ratchet for tools/docs-coverage.mjs: per-crate doc coverage never drops; --update-baseline re-records after a deliberate docs change.",
+ "crates": {
+  "engine-ai": {
+   "total": 514,
+   "documented": 493,
+   "undocumented": 21,
+   "coverage": 95.91439688715953
+  },
+  "engine-anim": {
+   "total": 546,
+   "documented": 497,
+   "undocumented": 49,
+   "coverage": 91.02564102564102
+  },
+  "engine-app": {
+   "total": 67,
+   "documented": 62,
+   "undocumented": 5,
+   "coverage": 92.53731343283582
+  },
+  "engine-arena": {
+   "total": 68,
+   "documented": 64,
+   "undocumented": 4,
+   "coverage": 94.11764705882354
+  },
+  "engine-assets": {
+   "total": 499,
+   "documented": 475,
+   "undocumented": 24,
+   "coverage": 95.19038076152304
+  },
+  "engine-audio": {
+   "total": 388,
+   "documented": 372,
+   "undocumented": 16,
+   "coverage": 95.87628865979381
+  },
+  "engine-combat": {
+   "total": 362,
+   "documented": 356,
+   "undocumented": 6,
+   "coverage": 98.34254143646409
+  },
+  "engine-core": {
+   "total": 144,
+   "documented": 136,
+   "undocumented": 8,
+   "coverage": 94.44444444444444
+  },
+  "engine-destruction": {
+   "total": 244,
+   "documented": 187,
+   "undocumented": 57,
+   "coverage": 76.63934426229508
+  },
+  "engine-distill": {
+   "total": 44,
+   "documented": 44,
+   "undocumented": 0,
+   "coverage": 100
+  },
+  "engine-ecs": {
+   "total": 116,
+   "documented": 91,
+   "undocumented": 25,
+   "coverage": 78.44827586206897
+  },
+  "engine-editor": {
+   "total": 789,
+   "documented": 777,
+   "undocumented": 12,
+   "coverage": 98.47908745247149
+  },
+  "engine-endpoint": {
+   "total": 929,
+   "documented": 860,
+   "undocumented": 69,
+   "coverage": 92.57265877287406
+  },
+  "engine-game": {
+   "total": 762,
+   "documented": 756,
+   "undocumented": 6,
+   "coverage": 99.21259842519684
+  },
+  "engine-input": {
+   "total": 100,
+   "documented": 97,
+   "undocumented": 3,
+   "coverage": 97
+  },
+  "engine-nav": {
+   "total": 192,
+   "documented": 181,
+   "undocumented": 11,
+   "coverage": 94.27083333333333
+  },
+  "engine-net": {
+   "total": 767,
+   "documented": 704,
+   "undocumented": 63,
+   "coverage": 91.78617992177314
+  },
+  "engine-nn": {
+   "total": 63,
+   "documented": 62,
+   "undocumented": 1,
+   "coverage": 98.41269841269842
+  },
+  "engine-observe": {
+   "total": 98,
+   "documented": 96,
+   "undocumented": 2,
+   "coverage": 97.95918367346938
+  },
+  "engine-perf": {
+   "total": 197,
+   "documented": 189,
+   "undocumented": 8,
+   "coverage": 95.93908629441624
+  },
+  "engine-physics": {
+   "total": 275,
+   "documented": 239,
+   "undocumented": 36,
+   "coverage": 86.9090909090909
+  },
+  "engine-playtest": {
+   "total": 392,
+   "documented": 378,
+   "undocumented": 14,
+   "coverage": 96.42857142857143
+  },
+  "engine-proof": {
+   "total": 164,
+   "documented": 155,
+   "undocumented": 9,
+   "coverage": 94.51219512195122
+  },
+  "engine-provider": {
+   "total": 324,
+   "documented": 308,
+   "undocumented": 16,
+   "coverage": 95.06172839506173
+  },
+  "engine-render": {
+   "total": 1602,
+   "documented": 1519,
+   "undocumented": 83,
+   "coverage": 94.81897627965044
+  },
+  "engine-save": {
+   "total": 22,
+   "documented": 22,
+   "undocumented": 0,
+   "coverage": 100
+  },
+  "engine-scene": {
+   "total": 102,
+   "documented": 96,
+   "undocumented": 6,
+   "coverage": 94.11764705882354
+  },
+  "engine-spatial": {
+   "total": 196,
+   "documented": 171,
+   "undocumented": 25,
+   "coverage": 87.24489795918367
+  },
+  "engine-ui": {
+   "total": 153,
+   "documented": 151,
+   "undocumented": 2,
+   "coverage": 98.69281045751634
+  },
+  "engine-world": {
+   "total": 79,
+   "documented": 61,
+   "undocumented": 18,
+   "coverage": 77.21518987341773
+  },
+  "engine2040": {
+   "total": 3,
+   "documented": 0,
+   "undocumented": 3,
+   "coverage": 0
+  }
+ }
+}

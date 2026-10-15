@@ -1,0 +1,2 @@
+content/arena-bundle.bin
+content/contents.txt

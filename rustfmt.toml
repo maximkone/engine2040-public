@@ -1,0 +1,5 @@
+# Deterministic fmt: edition matches workspace.package.edition
+# (Cargo.toml line 55). Newlines Auto: git (core.autocrlf) stores LF and checks out CRLF,
+# so a --check never fails on line endings alone and the repo never diffs on them.
+edition = "2021"
+newline_style = "Auto"

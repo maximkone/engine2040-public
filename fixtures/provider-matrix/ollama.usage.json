@@ -1,0 +1,1 @@
+{"done": true, "eval_count": 3, "message": {"content": "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"matrix:canon\"]}", "role": "assistant"}, "model": "llama-fixture", "prompt_eval_count": 7}

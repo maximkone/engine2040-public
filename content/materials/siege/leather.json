@@ -1,0 +1,44 @@
+{
+  "material": "leather",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.35, 0.2, 0.12],
+    "base_metalness": 0,
+    "specular_roughness": 0.6,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1,
+    "sheen": {
+      "weight": 0.15,
+      "color": [0.4, 0.3, 0.2],
+      "roughness": 0.6
+    }
+  },
+  "layers": [
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "tear"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 2,
+    "brittleness": 0.05,
+    "shard": "sheets",
+    "burn": 0.5
+  },
+  "sound": {
+    "impact": "soft"
+  },
+  "fx": {
+    "dust": "fiber",
+    "spark": "none",
+    "decal": "tear"
+  }
+}

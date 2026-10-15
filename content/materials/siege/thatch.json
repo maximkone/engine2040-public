@@ -1,0 +1,44 @@
+{
+  "material": "thatch",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.6, 0.5, 0.28],
+    "base_metalness": 0,
+    "specular_roughness": 0.95,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1,
+    "sheen": {
+      "weight": 0.3,
+      "color": [0.6, 0.5, 0.3],
+      "roughness": 0.8
+    }
+  },
+  "layers": [
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "tear"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 0.5,
+    "brittleness": 0.1,
+    "shard": "sheets",
+    "burn": 4
+  },
+  "sound": {
+    "impact": "soft"
+  },
+  "fx": {
+    "dust": "fiber",
+    "spark": "none",
+    "decal": "tear"
+  }
+}

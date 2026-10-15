@@ -1,0 +1,16 @@
+[package]
+name = "ct7proof"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+engine-assets = { path = "C:/engine2040/crates/assets", features = ["import", "registry"] }
+engine-anim = { path = "C:/engine2040/crates/anim" }
+engine-scene = { path = "C:/engine2040/crates/scene" }
+gltf = "1"
+
+[[bin]]
+name = "ct7proof"
+path = "src/main.rs"
+
+[workspace]

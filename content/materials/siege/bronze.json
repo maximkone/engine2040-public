@@ -1,0 +1,39 @@
+{
+  "material": "bronze",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.8, 0.55, 0.3],
+    "base_metalness": 1,
+    "specular_roughness": 0.4,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1
+  },
+  "layers": [
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "dent"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 24,
+    "brittleness": 0.08,
+    "shard": "few_large",
+    "burn": 0
+  },
+  "sound": {
+    "impact": "metal"
+  },
+  "fx": {
+    "dust": "none",
+    "spark": "shower",
+    "decal": "dent"
+  }
+}

@@ -1,0 +1,52 @@
+[package]
+name = "engine-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# NE1 editor lane: egui dock shell, opt-in so headless stays std-only.
+# ED1 extends it with the winit window and the RA1 viewport texture: `ui`
+# also enables `engine-render/window` (RA1 Presenter plus the `v1` draw list
+# it renders) so the editor binary draws snapshots through the same forward
+# PBR path as the game. No new crates: winit, wgpu, pollster, glam, image
+# and serde_json are already in the workspace lock via RA1. `egui-wgpu/winit`
+# stays off: it would pull a new package into the lock.
+[features]
+ui = ["dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:egui_dock", "dep:transform-gizmo", "dep:transform-gizmo-egui", "dep:winit", "engine-render/window", "dep:engine-spatial", "dep:engine-combat", "dep:engine-ai", "dep:engine-app"]
+
+# ED1: the editor executable, gated on `ui` so headless stays std-only.
+[[bin]]
+name = "e2040-editor"
+path = "src/bin/e2040-editor.rs"
+required-features = ["ui"]
+
+[dependencies]
+# Pose stamps hash through the engine-core FNV owner (one hash owner).
+engine-core.workspace = true
+engine-scene.workspace = true
+# SP2 findings panel consumes spatial's public API (one direction only).
+engine-spatial = { workspace = true, optional = true }
+# TU1 live tuning reads combat/brain validated-swap schemas (data only).
+engine-combat = { workspace = true, optional = true }
+engine-ai = { workspace = true, optional = true }
+# ED4 play-in-editor hosts the tick driver through the RC1 lifecycle (one
+# direction only: editor -> app -> arena; headless default graph unchanged).
+engine-app = { workspace = true, optional = true }
+engine-render = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }
+egui = { workspace = true, optional = true }
+egui-wgpu = { workspace = true, optional = true }
+egui-winit = { workspace = true, optional = true }
+egui_dock = { workspace = true, optional = true }
+transform-gizmo = { workspace = true, optional = true }
+transform-gizmo-egui = { workspace = true, optional = true }
+
+# PR1 tests only: the C5 JSON codec leg for receipts and chains. No new
+# dependency (serde_json is already approved under NJ1); test-only features
+# never enter the headless default graph.
+[dev-dependencies]
+engine-scene = { workspace = true, features = ["json"] }

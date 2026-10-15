@@ -1,0 +1,1 @@
+{"fixture":"traversal-course","version":3,"mode":"course","seed":47,"ticks":600,"runners":1,"run_speed_mps":4,"camera":{"distance_m":6,"height_m":3},"ledges":[{"x":8,"top_mm":900},{"x":16,"top_mm":1500},{"x":24,"top_mm":2500}],"moves":[{"tick":100,"body":0,"vx":5,"vy":0},{"tick":300,"body":0,"vx":4,"vy":0}]}

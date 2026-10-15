@@ -1,0 +1,11 @@
+{
+  "half_extent_m": 10.0,
+  "tick_hz": 60,
+  "max_ticks": 600,
+  "damage_hp": 25,
+  "cooldown_ticks": 30,
+  "range_mm": 2000,
+  "spawn_a_m": [-4.0, 0.0, 0.0],
+  "spawn_b_m": [4.0, 0.0, 0.0],
+  "seed": 2040
+}

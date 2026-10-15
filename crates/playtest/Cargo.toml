@@ -1,0 +1,35 @@
+[package]
+name = "engine-playtest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# QA2 frame checks run RA1 offscreen captures on llvmpipe, opt-in so the
+# headless default stays std-only (render `v1` is glam/image PNG-only).
+[features]
+capture = ["dep:engine-render"]
+# Opt-in HTTPS for cloud LLMs: forwards to engine-provider `tls`
+# (rustls/ring plus platform roots). Default stays plain HTTP.
+tls = ["engine-provider/tls"]
+
+[dependencies]
+engine-arena.workspace = true
+# Keyed evidence seal for the a6/a7 writers: HMAC-SHA256 over the manifest
+# under the operator key (`hmac` 0.12 + `sha2` 0.10, both MIT/Apache-2.0,
+# pure Rust). Unconditional: this crate sits outside the headless default
+# graph, so the workspace check stays green. Per-file digests reuse the
+# engine-core FNV owner instead of local copies.
+engine-core.workspace = true
+hmac = "0.12"
+sha2 = "0.10"
+# EV1 eval harness drives mock/local/remote providers (std + serde_json).
+engine-provider.workspace = true
+engine-spatial.workspace = true
+engine-render = { workspace = true, optional = true, features = ["v1"] }
+# Look judge PNG decode (MIT/Apache-2.0): the same `image` 0.25 the render and
+# assets crates already resolve, PNG codec only, so the lock gains no package.
+image = { version = "0.25", default-features = false, features = ["png"] }

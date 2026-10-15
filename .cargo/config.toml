@@ -1,0 +1,47 @@
+# Fast-iteration config. Stock Windows safe: plain `cargo build` works here.
+# No new tools required. Opt-ins are commented below.
+
+[profile.dev]
+codegen-units = 256
+debug = "line-tables-only"
+incremental = true
+
+# Build scripts and proc macros: optimize them (they run at compile time, so
+# faster code here shortens every build). The workspace opt-levels (1, with 13
+# sim crates at 2 and every dependency at 3) live in the root Cargo.toml.
+[profile.dev.build-override]
+opt-level = 2
+codegen-units = 256
+
+# Gate profile: same speedups as dev, separate name so gate flags never
+# drift dev defaults. Run: `cargo test --profile fast-test`
+# (nextest users: `cargo nextest run --cargo-profile fast-test`).
+# debug = 0: gate runs need no debug info (panic messages still show file:line).
+# Measured 2026-10-11 on the engine-physics test build: -17% user CPU, -24% wall.
+# Dev keeps line-tables-only for backtraces.
+[profile.fast-test]
+inherits = "dev"
+# codegen-units + incremental ride from dev via inherits (same values); only overrides live here.
+debug = 0
+opt-level = 0
+
+[profile.fast-test.build-override]
+opt-level = 2
+codegen-units = 256
+
+# Windows link speedup: rust-lld.exe ships inside the toolchain sysroot and rustc finds it there,
+# no PATH entry or VS component needed (measured 2026-09-29 on this PC, cold `cargo test -p
+# engine-game --all-features --no-run`: 121 s with link.exe, 79 s with rust-lld; unit tests, bins,
+# `cargo run` and an env RUSTFLAGS all link and run). Flavor is inferred from the name, so no
+# rustflags are needed. If a machine lacks it, delete these two lines: nothing else depends on them.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+# No rustc wrapper. sccache is opt-in per run (OPT9, 2026-10-01: cold
+# `cargo check -p engine-arena` 20.2 s -> 1.1 s at 100% hits). A cold lane gets
+# it from `node tools/lanes.mjs flags`, which prints the hint RUSTC_WRAPPER=sccache
+# plus CARGO_INCREMENTAL=0 for that one command. sccache cannot cache incremental
+# artifacts, so incremental stays on. The old batch wrapper ran through cmd.exe,
+# whose 8191-character limit broke windows-sys (rustc line 9419 chars, 2026-10-13);
+# the old file is kept as .cargo/sccache-pool.cmd.bak-20261013. Do not add a global
+# rustc-wrapper here: it would wrap every build (.cargo/config.test.mjs guards it).

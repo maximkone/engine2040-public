@@ -1,0 +1,110 @@
+{
+  "tool": "tools/cook-char.mjs",
+  "rows": ["CT37", "CT23"],
+  "notes": "Manifest + script only. No large binaries live here: real locomotion bytes stay in git-ignored content/local/ and ship only as cooked output; combat GLBs stay under content/fighters/. Digests below are copied from the frozen receipts, never invented.",
+  "locomotion": {
+    "record_100style": {
+      "dataset": "100STYLE (Mason, Starke, Komura 2022)",
+      "record": "https://zenodo.org/records/8127870",
+      "spdx": "CC-BY-4.0",
+      "file": "100STYLE.zip",
+      "bytes": 1468515354,
+      "md5": "3cf627852fd8192024c04a8d0ef49583",
+      "scope": "motions only, with credit",
+      "fetched": false
+    },
+    "cmu": {
+      "source": "CMU Graphics Lab mocap (http://mocap.cs.cmu.edu/faqs.php)",
+      "spdx": "CMU-permissive (custom, not CC0/CC-BY)",
+      "rule": "originals stay in git-ignored content/local/, ship only as cooked output",
+      "registry_hunk_needed": true,
+      "fetched": false
+    },
+    "synthetic_bake": {
+      "file": "content/locomotion/bake.json",
+      "db_digest": "0x8f7dc23e91f52395",
+      "clips": 8,
+      "frames": 360,
+      "entries": 360,
+      "identical_twice": true,
+      "clip_digests": {
+        "idle_stand": "0xf3497b3b844f48ed",
+        "walk_forward": "0x0b4038167dc9c8a6",
+        "run_forward": "0x5f4ea413a160279e",
+        "start_walk": "0xcddbf202c3030b81",
+        "stop_walk": "0xc783bba11cff2b51",
+        "pivot_turn": "0x6926f3e84f8a4f03",
+        "strafe_left": "0xdfa91ab2a76f9ddf",
+        "turn_in_place": "0xead9ddc03cb419cd"
+      }
+    },
+    "first_16": {
+      "status": "planned",
+      "fetched": false,
+      "names": "TBD at fetch from the 100STYLE.zip listing",
+      "gate": "CT1 retarget: rotations within 1e-4 per component, scaled offsets within 1e-5; validate_bind green on source and target",
+      "evidence": "one EVIDENCE row per file (URL + SPDX + author + SHA) rides the fetch piece"
+    }
+  },
+  "combat": {
+    "target": 80,
+    "landed": 30,
+    "canonical_14": [
+      { "short": "idle", "source_action": "human_male_idle", "glb_bytes": 69532, "glb_sha16": "a2b0cfa670722e2e", "cook_digest": "185e70c7034759e2", "dur_s": 0.792, "keys": 819, "loop": true, "root_motion": false },
+      { "short": "run", "source_action": "human_male_run", "glb_bytes": 69532, "glb_sha16": "d70d936ef077de8d", "cook_digest": "3ea8557d0d3aec49", "dur_s": 0.792, "keys": 819, "loop": true, "root_motion": true },
+      { "short": "jump", "source_action": "human_male_jump", "glb_bytes": 69532, "glb_sha16": "616bae7ea3976f22", "cook_digest": "a2e04e8655f597bb", "dur_s": 0.792, "keys": 819, "loop": false, "root_motion": true },
+      { "short": "death", "source_action": "human_male_death", "glb_bytes": 71260, "glb_sha16": "1893e5cb2e2494901", "cook_digest": "9d1cea58b0889137", "dur_s": 0.833, "keys": 862, "loop": false, "root_motion": false },
+      { "short": "idle_combat_1h", "source_action": "human_male_idle_combat_main_hand_melee", "glb_bytes": 69556, "glb_sha16": "a936e4a6d12961ea", "cook_digest": "143b54df62b7441a", "dur_s": 0.792, "keys": 819, "loop": true, "root_motion": false },
+      { "short": "idle_combat_unarmed", "source_action": "human_male_idle_combat_unarmed", "glb_bytes": 69548, "glb_sha16": "36f6c97144f8a47e3", "cook_digest": "f76a98cfcf0a9866", "dur_s": 0.792, "keys": 819, "loop": true, "root_motion": false },
+      { "short": "attack_1h_1", "source_action": "human_male_cast_main_hand_melee", "glb_bytes": 53996, "glb_sha16": "29afa8abbb1a8f13e", "cook_digest": "1696e44a049e5f7f", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_1h_2", "source_action": "human_male_cast_main_hand_melee_2", "glb_bytes": 53996, "glb_sha16": "54283fa8fd025e2b", "cook_digest": "8f8ffa50539f3657", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_1h_3", "source_action": "human_male_cast_main_hand_melee_3", "glb_bytes": 53996, "glb_sha16": "ccc80face7b028b29", "cook_digest": "4274703f355d99c3", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_2h_1", "source_action": "human_male_cast_two_handed_melee", "glb_bytes": 53996, "glb_sha16": "e157db55608e07974", "cook_digest": "e4497f7576e75611", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_2h_2", "source_action": "human_male_cast_two_handed_melee_2", "glb_bytes": 53996, "glb_sha16": "d3a5d5c287b4ce6ec", "cook_digest": "0e6beb775c1f2e22", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "block_shield", "source_action": "human_male_cast_off_hand_shield", "glb_bytes": 53996, "glb_sha16": "9c356f894fc8047a", "cook_digest": "a52bcd35da54bd52", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_dual_1", "source_action": "human_male_cast_dual_wield_melee", "glb_bytes": 53996, "glb_sha16": "0f5eea98b4ea71ca", "cook_digest": "f24f6072ccb699d2", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "taunt", "source_action": "human_male_power_up", "glb_bytes": 53984, "glb_sha16": "e58392df62208740", "cook_digest": "4f322525c7970901", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false }
+    ],
+    "batch_a_16": [
+      { "short": "attack_dual_2", "source_action": "human_male_cast_dual_wield_melee_2", "glb_bytes": 54052, "glb_sha16": "2009192052bc9219", "cook_digest": "abddab3a78895c56", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_dual_3", "source_action": "human_male_cast_dual_wield_melee_3", "glb_bytes": 55764, "glb_sha16": "3951a985d1da422b", "cook_digest": "27f8b7f5968ad6c7", "dur_s": 0.417, "keys": 475, "loop": false, "root_motion": false },
+      { "short": "attack_dual_4", "source_action": "human_male_cast_dual_wield_melee_4", "glb_bytes": 54052, "glb_sha16": "93a39d3de5314791", "cook_digest": "e4f414cfcb5a316c", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_2h_3", "source_action": "human_male_cast_two_handed_melee_3", "glb_bytes": 54052, "glb_sha16": "1b7e5755fd8423ed", "cook_digest": "12d35aeb55546991", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_2h_4", "source_action": "human_male_cast_two_handed_melee_4", "glb_bytes": 54052, "glb_sha16": "0b5f5a9af2b42997", "cook_digest": "db7d8fc406632b39", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_2h_5", "source_action": "human_male_cast_two_handed_melee_5", "glb_bytes": 54052, "glb_sha16": "94ce6013c15968e7", "cook_digest": "11f05faaf7103797", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_bow_1", "source_action": "human_male_cast_two_handed_bow", "glb_bytes": 54048, "glb_sha16": "0513f6c78860de1d", "cook_digest": "27757541ee501c2a", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_bow_2", "source_action": "human_male_cast_two_handed_bow_2", "glb_bytes": 54052, "glb_sha16": "8d136204eb63203b", "cook_digest": "c4ab161dc864997e", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_xbow_1", "source_action": "human_male_cast_two_handed_crossbow", "glb_bytes": 54000, "glb_sha16": "566bd890d1a82eda", "cook_digest": "eb67ceeb8d16cc02", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_staff_1", "source_action": "human_male_cast_two_handed_staff", "glb_bytes": 53996, "glb_sha16": "312dc145957fa364", "cook_digest": "c9ef7e932135d20b", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_wand_1", "source_action": "human_male_cast_main_hand_wand", "glb_bytes": 53992, "glb_sha16": "1352db0f65a92758", "cook_digest": "16d3bb6544e3022c", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_unarmed_1", "source_action": "human_male_cast_unarmed_magic", "glb_bytes": 53992, "glb_sha16": "2a723ce776758d0a", "cook_digest": "088df2afa4627669", "dur_s": 0.417, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "attack_unarmed_2", "source_action": "human_male_cast_unarmed_magic_2", "glb_bytes": 53964, "glb_sha16": "db6ba03b817954dc", "cook_digest": "0c7c230e161374c3", "dur_s": 0.375, "keys": 432, "loop": false, "root_motion": false },
+      { "short": "idle_combat_dual", "source_action": "human_male_idle_combat_dual_wield_melee", "glb_bytes": 69556, "glb_sha16": "25ca9f18e74c48fa", "cook_digest": "0a1b66f185a22832", "dur_s": 0.792, "keys": 819, "loop": true, "root_motion": false },
+      { "short": "idle_combat_2h", "source_action": "human_male_idle_combat_two_handed_melee", "glb_bytes": 69556, "glb_sha16": "43d046d559bc4b9c", "cook_digest": "ce829c5930905657", "dur_s": 0.792, "keys": 819, "loop": true, "root_motion": false },
+      { "short": "power_up_2", "source_action": "human_male_power_up_2", "glb_bytes": 55696, "glb_sha16": "5ad92945611324f2", "cook_digest": "9917b956e8407d4f", "dur_s": 0.417, "keys": 475, "loop": false, "root_motion": false }
+    ],
+    "remaining": {
+      "batch_b_16": "CT47 open",
+      "batch_c_16": "CT54 open",
+      "batch_d_16": "CT68 open",
+      "finisher_2": "CT55 open",
+      "open_count": 50
+    },
+    "cook": "CT1 retarget_cook_with_sidecar on the CT7 hero bind (validate_bind green), cook x2 identical, dedupe clean vs the 14 canonical digests + pairwise",
+    "budgets": "clip GLB bytes hold the canonical family 53984-71260; keys in {432, 475, 819, 862}"
+  },
+  "refused": [
+    "Geno.fbx mesh (non-commercial, never ships; bake refuses with BakeError::Unlicensed)",
+    "LAFAN1 (CC BY-NC 4.0, never ships; bake refuses with BakeError::UnknownSource)",
+    "Mixamo (excluded per packet; bake refuses with BakeError::UnknownSource)",
+    "Quaternius QAL v1.0 (no-redistribution-as-assets; no bytes obtained)",
+    "Unreal-only content (no-derivatives / UE-only; never ships)"
+  ],
+  "provenance": {
+    "locomotion_attribution": "content/locomotion/ATTRIBUTION.md (100STYLE CC-BY-4.0 motions only with credit, Zenodo 8127870; Quaternius synthetic CC0-1.0)",
+    "combat_source": "https://opengameart.org/sites/default/files/modular_rpg_characters.7z (CC0-1.0, System G6, sha256 ef53003c6b29798a634fb27a3f9fc3181a2c02b217689744f2944fc5fcc0fd99, 16600670 bytes, pinned in content/fighters/manifest.json)",
+    "canonical_receipt": "content/fighters/DEDUPE-MANIFEST.md (14 canonical digests + before/after MB)",
+    "batch_a_receipt": "content/fighters/incoming/batch-a/BATCH-A-RECEIPT.md (16 of 16, cook x2 identical)",
+    "intake_gate": "content/locomotion/real/INTAKE-MANIFEST.md (CT37 piece A: license reads + fetch manifest)"
+  }
+}

@@ -1,0 +1,36 @@
+<!doctype html>
+<html dir="ltr" lang="en">
+<head><meta charset="utf-8"><title>Material reference sheets</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+body{background:var(--bg);color:var(--ink);font-family:var(--font-body);margin:0;padding:28px 32px}
+.kicker{color:var(--accent-ink);font-size:15px;letter-spacing:3px;margin:0}
+h1{font-family:var(--font-display);font-size:52px;margin:6px 0 4px;color:var(--ink)}
+.sub{color:var(--muted);font-size:17px;margin:0 0 18px;max-width:70ch}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.card{background:var(--chip-bg);border:1px solid var(--line);border-radius:10px;padding:12px}
+.card img{width:100%;display:block;border-radius:6px}
+.card h2{font-size:19px;margin:10px 0 4px;color:var(--ink)}
+.card p{font-size:13px;color:var(--muted);margin:0}
+.cta{display:inline-block;margin-top:16px;background:var(--accent);color:var(--on-accent);
+font-weight:700;font-size:16px;padding:10px 22px;border-radius:8px}
+.note{margin-top:12px;font-size:13px;color:var(--muted)}
+</style></head>
+<body>
+<p class="kicker">ENGINE2040 REFERENCE SHEETS</p>
+<h1>Material reference sheets</h1>
+<p class="sub">Six materials plus the arena at day and at torch-lit night. Real tiles are CC0 crops of the staged engine sets; authored tiles are CC0 look targets. Full sheets: out-1200x*.png.</p>
+<div class="grid">
+<div class="card"><img src="assets/t_sand_albedo.png" alt="sand albedo"><h2>Sand</h2><p>Wind-rippled tan; rough 0.95; dry.</p></div>
+<div class="card"><img src="assets/t_steel_brushed1.png" alt="steel"><h2>Steel</h2><p>Forged grey; rough 0.37; soot wear.</p></div>
+<div class="card"><img src="assets/t_skin_mid.png" alt="skin"><h2>Skin</h2><p>Look target; no engine asset yet.</p></div>
+<div class="card"><img src="assets/t_marble_albedo.png" alt="marble"><h2>Marble</h2><p>Sandstone stand-in; rough 0.9.</p></div>
+<div class="card"><img src="assets/t_wood_albedo.png" alt="wood"><h2>Wood</h2><p>Mid brown; rough 0.8-0.85.</p></div>
+<div class="card"><img src="assets/t_cloth_albedo.png" alt="cloth"><h2>Cloth</h2><p>Dyed weave; rough 0.85.</p></div>
+<div class="card"><img src="assets/t_day_sky.png" alt="arena day"><h2>Arena day</h2><p>arena_day.hdr; hard shadows.</p></div>
+<div class="card"><img src="assets/t_night_glow.png" alt="torch night"><h2>Torch night</h2><p>Warm pools, deep shadow.</p></div>
+</div>
+<span class="cta">Eight sheets, 28 tiles, all CC0</span>
+<p class="note">Sources and licenses: SOURCES.md. Engine bindings: content/arena/manifest.json.</p>
+</body>
+</html>

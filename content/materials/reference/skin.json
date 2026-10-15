@@ -1,0 +1,39 @@
+{
+  "material": "skin",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.8, 0.56, 0.47],
+    "base_metalness": 0,
+    "specular_roughness": 0.5,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1,
+    "subsurface": {
+      "weight": 0.8,
+      "radius": [0.012, 0.004, 0.002],
+      "color": [0.9, 0.4, 0.3]
+    }
+  },
+  "layers": [
+    {
+      "kind": "blood",
+      "driver": "blood",
+      "tint": [0.35, 0.02, 0.02]
+    }
+  ],
+  "body": {
+    "toughness": 1,
+    "brittleness": 0.02,
+    "shard": "sheets",
+    "burn": 0.5
+  },
+  "sound": {
+    "impact": "soft"
+  },
+  "fx": {
+    "dust": "none",
+    "spark": "none",
+    "decal": "tear"
+  }
+}

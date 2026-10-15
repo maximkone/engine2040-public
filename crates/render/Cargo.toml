@@ -1,0 +1,48 @@
+[package]
+name = "engine-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Headless-first: default build pulls zero external deps. `v1` (glam camera
+# math + image PNG capture + manifest JSON) and `window` (GPU lane, implies
+# `v1` because `v1_gpu` renders the `v1` scene) are opt-in. image is
+# PNG-only (no defaults): the avif chain (ravif/rav1e/libfuzzer-sys, NCSA)
+# fails the license gate. serde_json rides `v1`, never dev-deps: the audit
+# traverses dev-deps of reachable crates, so no reachable crate takes an
+# external dev-dep.
+v1 = ["dep:glam", "dep:image", "dep:serde_json"]
+window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:windows", "v1"]
+
+[dependencies]
+# AH2 device-loss heal runs through the observe supervisor (both std-only
+# on the default graph; wgpu stays behind `window`).
+engine-observe.workspace = true
+# Hash constants (FNV offset/prime, golden gamma): engine-core is the one
+# hash owner, the streaming digests name its constants (same values).
+engine-core.workspace = true
+glam = { workspace = true, optional = true }
+# Fully specified (not workspace-inherited): cargo ignores default-features
+# = false combined with `workspace = true`, which would re-enable image
+# defaults incl. the NCSA-licensed avif chain. Keep version in sync with the
+# workspace `image` entry. `jpeg` decodes the CC0 2k arena albedo sets
+# (zune-jpeg is already in Cargo.lock through the workspace `image`).
+image = { version = "0.25", default-features = false, features = ["png", "hdr", "jpeg"], optional = true }
+serde_json = { version = "1", optional = true }
+winit = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# `backend::read_vram`: DXGI video-memory budget and usage. The same crate
+# version and features already ride in through wgpu-hal's DX12 backend, so
+# this adds no new package to the graph; gated behind `window`.
+windows = { version = "0.62", optional = true, default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
+
+[dev-dependencies]
+engine-core = { workspace = true, features = ["test-util"] }

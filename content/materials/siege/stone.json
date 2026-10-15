@@ -1,0 +1,50 @@
+{
+  "material": "stone",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.55, 0.53, 0.5],
+    "base_metalness": 0,
+    "specular_roughness": 0.85,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1
+  },
+  "layers": [
+    {
+      "kind": "wet",
+      "driver": "wetness",
+      "darken": 0.35,
+      "roughness_to": 0.08
+    },
+    {
+      "kind": "blood",
+      "driver": "blood",
+      "tint": [0.35, 0.02, 0.02]
+    },
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "crack"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 8,
+    "brittleness": 0.85,
+    "shard": "few_large",
+    "burn": 0
+  },
+  "sound": {
+    "impact": "stone"
+  },
+  "fx": {
+    "dust": "stone",
+    "spark": "few",
+    "decal": "crack"
+  }
+}

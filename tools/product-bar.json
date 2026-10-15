@@ -1,0 +1,27 @@
+{
+  "note": "Product floors and finish targets read by tools/product-check.mjs (owner 2026-10-11). A broken floor files a bug: packet by itself; a target is the finish line the board climbs toward (docs/FOCUS.md Now). Raise targets when they are met; never lower a floor to make a check green. view_* floors read the `arena view:` line: every drawn body as numbers from the CPU skin, no image (crates/game/src/view_truth.rs).",
+  "floors": {
+    "framing_empty": 0,
+    "tinted_share_max": 0.25,
+    "validation_errors": 0,
+    "blank_frames": 0,
+    "frozen_pairs": 0,
+    "stall_p99_ms_max": 1500,
+    "fps_drop_max": 0.3,
+    "view_nonfinite": 0,
+    "view_error_parts": 0,
+    "view_eye_in_body": 0,
+    "view_eye_below_ground": 0,
+    "view_sunk_cm_max": 3,
+    "view_first_tick_max": 30,
+    "view_sim_span_min": 60
+  },
+  "targets": {
+    "fps_p50": "60 at 1080p on the RTX 3050 (FC3 asks 30 first)",
+    "live_passes": "sky, IBL, sun shadow, GTAO, bloom, TAA, particles, decals (each changes pixels when on, EG8; rows LF1-LF7, EG11)",
+    "look_score": "machine look score vs references (LJ1, EG30) at or above the bar Q1 sets",
+    "strobe": "tinted_share under 0.10 in an 8-fighter brawl",
+    "pops": "0 joint pops per 300 frames (view line `pops`; 35-55 today, up to 1 m, at attack and idle switches): EG18 crossfade, then LF9",
+    "sunk_cm": "under 2 cm (the death clip sinks 12-15 cm into the sand today)"
+  }
+}

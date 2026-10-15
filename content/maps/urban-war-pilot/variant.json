@@ -1,0 +1,6 @@
+{
+  "variant": "district-corner",
+  "kit": "CT9 frozen",
+  "assets": ["insula", "street_wall", "market_stall"],
+  "note": "CT56 splitter: 1 variant reusing frozen CT9 kit, no new geometry, no engine hunk"
+}

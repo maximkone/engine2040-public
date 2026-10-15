@@ -1,0 +1,1 @@
+{"content": [{"text": "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"matrix:canon\"]}", "type": "text"}], "id": "matrix-msg-1", "model": "claude-fixture", "stop_reason": "end_turn", "type": "message", "usage": {"input_tokens": 13, "output_tokens": 4}}

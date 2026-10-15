@@ -1,0 +1,24 @@
+[package]
+name = "engine-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# Device output plus vorbis/WAV decode, opt-in so headless stays std-only.
+[features]
+device = ["dep:cpal", "dep:lewton", "dep:hound"]
+
+[dependencies]
+engine-core.workspace = true
+# Device-loss heal runs through the observe supervisor (both std-only).
+engine-observe.workspace = true
+cpal = { workspace = true, optional = true }
+lewton = { workspace = true, optional = true }
+hound = { workspace = true, optional = true }
+
+[dev-dependencies]
+engine-core = { workspace = true, features = ["test-util"] }

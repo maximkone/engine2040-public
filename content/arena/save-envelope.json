@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "slots": 16,
+  "max_payload_bytes": 1048576,
+  "max_total_bytes": 1048605
+}

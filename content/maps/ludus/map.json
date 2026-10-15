@@ -1,0 +1,252 @@
+{
+  "map": "ludus",
+  "version": 1,
+  "seed": 20260925,
+  "sky": "../hdri/maps_day.hdr",
+  "kit_manifest_sha256": "9A1AF61993D7A4167688B47CFF0F0F398003D79B5DAA521F90D26D09059FDF1A",
+  "actors": [
+    {
+      "id": 1,
+      "name": "yard",
+      "asset": "yard_floor",
+      "x": -52,
+      "y": 0.15,
+      "z": 0,
+      "sx": 20,
+      "sy": 0.3,
+      "sz": 14,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 2,
+      "name": "barracks",
+      "asset": "barracks",
+      "x": -30,
+      "y": 2.2,
+      "z": 0,
+      "sx": 10.6,
+      "sy": 4.4,
+      "sz": 5.1,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 3,
+      "name": "blacksmith",
+      "asset": "blacksmith",
+      "x": -19,
+      "y": 2.5,
+      "z": 0,
+      "sx": 4.5,
+      "sy": 5,
+      "sz": 4,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 4,
+      "name": "party_board",
+      "asset": "notice_board",
+      "x": -13,
+      "y": 1.4,
+      "z": 0,
+      "sx": 2.1,
+      "sy": 2.8,
+      "sz": 0.6,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 5,
+      "name": "pell_west",
+      "asset": "training_post",
+      "x": -9,
+      "y": 1.1,
+      "z": -2,
+      "sx": 1.2,
+      "sy": 2.2,
+      "sz": 1.2,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 6,
+      "name": "pell_east",
+      "asset": "training_post",
+      "x": -9,
+      "y": 1.1,
+      "z": 2,
+      "sx": 1.2,
+      "sy": 2.2,
+      "sz": 1.2,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 7,
+      "name": "rack",
+      "asset": "weapon_rack",
+      "x": -5,
+      "y": 0.9,
+      "z": 0,
+      "sx": 2.4,
+      "sy": 1.8,
+      "sz": 0.6,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    },
+    {
+      "id": 8,
+      "name": "ludus_wall",
+      "asset": "street_wall",
+      "x": 4,
+      "y": 1.95,
+      "z": 0,
+      "sx": 10,
+      "sy": 3.9,
+      "sz": 0.6,
+      "parent": null,
+      "physical": true,
+      "vx": 0,
+      "vz": 0,
+      "yaw": 0
+    }
+  ],
+  "zones": [
+    {
+      "name": "practice_yard",
+      "rect": {
+        "x0": -62,
+        "x1": -2,
+        "z0": -7,
+        "z1": 7
+      },
+      "members": [
+        "yard",
+        "pell_west",
+        "pell_east",
+        "rack"
+      ],
+      "note": "the whole training ground: drill floor, both pells and the rack"
+    },
+    {
+      "name": "blacksmith",
+      "rect": {
+        "x0": -24,
+        "x1": -15.6,
+        "z0": -5,
+        "z1": 5
+      },
+      "members": [
+        "blacksmith"
+      ],
+      "note": "workshop corner inside the grounds: hut, forge, stump and anvil",
+      "interact": {
+        "name": "forge",
+        "x": -16.2,
+        "z": 1
+      }
+    },
+    {
+      "name": "party_board",
+      "rect": {
+        "x0": -14.6,
+        "x1": -10,
+        "z0": -3,
+        "z1": 3
+      },
+      "members": [
+        "party_board"
+      ],
+      "note": "board corner inside the grounds: posts, panel and three slips",
+      "interact": {
+        "name": "board",
+        "x": -13,
+        "z": 1.2
+      }
+    }
+  ],
+  "spawns": [
+    {
+      "name": "player",
+      "x": -48,
+      "z": 0,
+      "yaw_deg": 90,
+      "note": "on the drill floor, facing the pells"
+    },
+    {
+      "name": "drill_a",
+      "x": -20,
+      "z": -4,
+      "yaw_deg": 45,
+      "note": "south drill mark"
+    },
+    {
+      "name": "drill_b",
+      "x": -20,
+      "z": 4,
+      "yaw_deg": 135,
+      "note": "north drill mark"
+    },
+    {
+      "name": "drill_c",
+      "x": -38,
+      "z": 0,
+      "yaw_deg": 90,
+      "note": "west drill mark between floor and hall"
+    }
+  ],
+  "nav": {
+    "x0": -62,
+    "x1": -2,
+    "z0": -7,
+    "z1": 7,
+    "cell_m": 1,
+    "routes": [
+      {
+        "from": "player",
+        "to": "pell_west_stand",
+        "to_x": -8,
+        "to_z": -2
+      },
+      {
+        "from": "player",
+        "to": "pell_east_stand",
+        "to_x": -8,
+        "to_z": 2
+      },
+      {
+        "from": "player",
+        "to": "rack_stand",
+        "to_x": -5,
+        "to_z": 1.2
+      }
+    ]
+  },
+  "stream": {
+    "size": 16,
+    "frame_bytes": 311
+  }
+}

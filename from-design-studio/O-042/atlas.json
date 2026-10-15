@@ -1,0 +1,315 @@
+{
+  "name": "ds-pixel-ui-v1",
+  "license": "CC0 1.0 (authored for design-studio)",
+  "image": "atlas.png",
+  "size": {
+    "w": 256,
+    "h": 64
+  },
+  "filter": "nearest (point), no mipmaps, no premultiply",
+  "scale": "integer only: x2 for 1280x720, x3 for 1920x1080, x4 for 2560x1440 from the 640x360 reference",
+  "slice": "slice = [left, top, right, bottom] in atlas pixels; corners keep their size times scale, edges and center stretch",
+  "pieces": [
+    {
+      "id": "panel",
+      "x": 1,
+      "y": 1,
+      "w": 24,
+      "h": 24,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "panel"
+    },
+    {
+      "id": "panel-raised",
+      "x": 26,
+      "y": 1,
+      "w": 24,
+      "h": 24,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "panel"
+    },
+    {
+      "id": "button-normal",
+      "x": 195,
+      "y": 1,
+      "w": 48,
+      "h": 20,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "button",
+      "state": "normal"
+    },
+    {
+      "id": "button-hover",
+      "x": 146,
+      "y": 1,
+      "w": 48,
+      "h": 20,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "button",
+      "state": "hover"
+    },
+    {
+      "id": "button-pressed",
+      "x": 1,
+      "y": 26,
+      "w": 48,
+      "h": 20,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "button",
+      "state": "pressed"
+    },
+    {
+      "id": "button-disabled",
+      "x": 97,
+      "y": 1,
+      "w": 48,
+      "h": 20,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "button",
+      "state": "disabled"
+    },
+    {
+      "id": "button-primary-normal",
+      "x": 99,
+      "y": 26,
+      "w": 48,
+      "h": 20,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "button-primary",
+      "state": "normal"
+    },
+    {
+      "id": "button-primary-hover",
+      "x": 50,
+      "y": 26,
+      "w": 48,
+      "h": 20,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "button-primary",
+      "state": "hover"
+    },
+    {
+      "id": "button-primary-pressed",
+      "x": 148,
+      "y": 26,
+      "w": 48,
+      "h": 20,
+      "slice": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "group": "button-primary",
+      "state": "pressed"
+    },
+    {
+      "id": "bar-frame",
+      "x": 137,
+      "y": 47,
+      "w": 40,
+      "h": 8,
+      "slice": [
+        3,
+        3,
+        3,
+        3
+      ],
+      "group": "bar",
+      "fillInset": 2
+    },
+    {
+      "id": "bar-fill-hp",
+      "x": 187,
+      "y": 47,
+      "w": 8,
+      "h": 4,
+      "group": "bar-fill",
+      "colorToken": "hp"
+    },
+    {
+      "id": "bar-fill-mana",
+      "x": 196,
+      "y": 47,
+      "w": 8,
+      "h": 4,
+      "group": "bar-fill",
+      "colorToken": "mana"
+    },
+    {
+      "id": "bar-fill-stamina",
+      "x": 205,
+      "y": 47,
+      "w": 8,
+      "h": 4,
+      "group": "bar-fill",
+      "colorToken": "stamina"
+    },
+    {
+      "id": "bar-fill-gold",
+      "x": 178,
+      "y": 47,
+      "w": 8,
+      "h": 4,
+      "group": "bar-fill",
+      "colorToken": "accent"
+    },
+    {
+      "id": "slot",
+      "x": 51,
+      "y": 1,
+      "w": 22,
+      "h": 22,
+      "slice": [
+        5,
+        5,
+        5,
+        5
+      ],
+      "group": "slot"
+    },
+    {
+      "id": "slot-selected",
+      "x": 74,
+      "y": 1,
+      "w": 22,
+      "h": 22,
+      "slice": [
+        5,
+        5,
+        5,
+        5
+      ],
+      "group": "slot"
+    },
+    {
+      "id": "icon-heart",
+      "x": 18,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-shield",
+      "x": 69,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-sword",
+      "x": 103,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-star",
+      "x": 86,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-coin",
+      "x": 231,
+      "y": 26,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-timer",
+      "x": 120,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-pause",
+      "x": 35,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-play",
+      "x": 52,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-gear",
+      "x": 1,
+      "y": 47,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-close",
+      "x": 214,
+      "y": 26,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    },
+    {
+      "id": "icon-arrow",
+      "x": 197,
+      "y": 26,
+      "w": 16,
+      "h": 16,
+      "group": "icon"
+    }
+  ],
+  "order": "O-042 (engine2040 UI-1; same 27 pieces as O-023)"
+}

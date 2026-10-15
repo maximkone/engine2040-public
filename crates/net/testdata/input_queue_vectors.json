@@ -1,0 +1,59 @@
+{
+  "_credit": "Fresh data shaped by the idea of gschup/ggrs (Apache-2.0, https://github.com/gschup/ggrs); no vendor bytes copied.",
+  "_note": "Mirrors crates/net/src/rollback.rs Frame { hash: u64, input: u32 }, FrameLog cap MAX_ROLLBACK, InputQueue 128 slots per player, discard_confirmed_frames tail-advance.",
+  "constants": {
+    "INPUT_QUEUE_LEN": 128,
+    "MAX_ROLLBACK": 128,
+    "PLAYERS": 2
+  },
+  "vectors": [
+    {
+      "id": "slot-wrap-mod128",
+      "kind": "slot_wrap",
+      "frames": [0, 1, 127, 128, 129, 255, 256],
+      "expected_slots": [0, 1, 127, 0, 1, 127, 0]
+    },
+    {
+      "id": "slot-wrap-eviction-window",
+      "kind": "slot_wrap",
+      "capacity": 128,
+      "pushed_start": 0,
+      "pushed_count": 130,
+      "expected_retained_start": 2,
+      "expected_retained_count": 128,
+      "expected_retained_end": 129
+    },
+    {
+      "id": "predictor-fill-repeat-last",
+      "kind": "predictor",
+      "last_confirmed_input": 10,
+      "missing_frames": [11, 12, 13],
+      "expected_predicted": [10, 10, 10]
+    },
+    {
+      "id": "first-incorrect-frame",
+      "kind": "first_incorrect",
+      "start_frame": 20,
+      "predicted": [5, 6, 7, 8],
+      "confirmed": [5, 6, 9, 8],
+      "expected_first_incorrect": 22
+    },
+    {
+      "id": "first-incorrect-none-when-equal",
+      "kind": "first_incorrect",
+      "start_frame": 30,
+      "predicted": [1, 2, 3],
+      "confirmed": [1, 2, 3],
+      "expected_first_incorrect": null
+    },
+    {
+      "id": "discard-confirmed-tail",
+      "kind": "discard",
+      "start_frame": 10,
+      "confirmed_through": 15,
+      "discard_through": 13,
+      "expected_tail": 14,
+      "expected_retained": [14, 15]
+    }
+  ]
+}

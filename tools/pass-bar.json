@@ -1,0 +1,13 @@
+{
+  "note": "Look pass floors read by tools/product-check.mjs (GS3). Each look pass is required or pending. A required pass with no ms or 0 ms over the run is red and files bug:product-pass-<name>. Pending only prints. Each LF row flips its own pass to required in its own Accept.",
+  "passes": {
+    "sky": "pending",
+    "ibl": "pending",
+    "shadow": "pending",
+    "gtao": "pending",
+    "bloom": "pending",
+    "taa": "pending",
+    "particles": "pending",
+    "decals": "pending"
+  }
+}

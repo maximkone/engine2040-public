@@ -1,0 +1,27 @@
+[package]
+name = "engine-physics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# NP1 physics lane: Rapier adapter, opt-in so headless stays std-only.
+# enhanced-determinism only: no SIMD/parallel features.
+# PH3: engine-anim is opt-in with rapier so the default build stays std-only;
+# the ragdoll consumes C4 Skeleton/LocalPose types only (never arena/combat).
+[features]
+rapier = ["dep:rapier3d", "dep:engine-anim"]
+
+[dependencies]
+engine-core = { workspace = true }
+# The persistent job pool `step_islands` runs its lanes on.
+engine-ecs = { workspace = true }
+rapier3d = { workspace = true, optional = true }
+engine-anim = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Zero-allocation probe owner for tests; the release budget leg measures casts.
+engine-core = { workspace = true, features = ["test-util"] }

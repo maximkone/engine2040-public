@@ -1,0 +1,27 @@
+[package]
+name = "engine-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Server-authoritative arena match plus client prediction (default kinematic
+# track; the arena `sim` physics track stays off - see session docs).
+# Reconnect/desync heal runs through the observe supervisor (std-only).
+engine-arena.workspace = true
+engine-core.workspace = true
+engine-input.workspace = true
+engine-observe.workspace = true
+# QUIC transport (optional; the headless default stays std-only).
+quinn = { version = "0.11", optional = true }
+
+[features]
+# `--features quic` builds the quinn transport behind Transport.
+quic = ["dep:quinn"]
+
+[dev-dependencies]
+engine-core = { workspace = true, features = ["test-util"] }

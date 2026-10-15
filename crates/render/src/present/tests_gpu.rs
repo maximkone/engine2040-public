@@ -1,0 +1,1333 @@
+//! tests_gpu: windowed presenter tests plus submit audits.
+//! Inner modules keep their own feature gates.
+// ---------------------------------------------------------------------------
+// GPU tests behind `window`: offscreen twin, multi-draw, resize/minimize.
+// Skip (pass) with no adapter, exactly like the `v1_gpu` receipt test.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "window")]
+#[cfg(test)]
+mod gpu_tests {
+    use super::super::*;
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => Err(NoAdapter("no wgpu adapter on this machine".into())),
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        require_or_skip(test, probe)
+    }
+
+    fn cube_list(key: MeshKey, width: u32, height: u32) -> DrawList {
+        let scene = crate::v1::default_scene(width, height).expect("default scene is valid");
+        DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+            }],
+        }
+    }
+
+    fn covered_pixels(png: &[u8]) -> usize {
+        let img = image::load_from_memory(png)
+            .expect("capture is a valid PNG")
+            .to_rgba8();
+        let mut covered = 0usize;
+        for p in img.pixels() {
+            let off = (p[0] as f32 - 7.0)
+                .abs()
+                .max((p[1] as f32 - 8.0).abs())
+                .max((p[2] as f32 - 15.0).abs());
+            if off > 5.0 {
+                covered += 1;
+            }
+        }
+        covered
+    }
+
+    #[test]
+    fn evidence_ms_to_us_scales_and_saturates() {
+        // Named conversion for the receipt rows: exact scale, zero floor,
+        // saturation ceiling. Would fail on a truncating float cast.
+        assert_eq!(Presenter::ms_to_us(0.8), 800, "ms scale to whole us");
+        assert_eq!(Presenter::ms_to_us(0.0), 0, "zero reads zero");
+        assert_eq!(Presenter::ms_to_us(-2.0), 0, "negative clamps to zero");
+        assert_eq!(Presenter::ms_to_us(f64::NAN), 0, "non-finite reads zero");
+        assert_eq!(Presenter::ms_to_us(1.0e16), u64::MAX, "overflow saturates");
+    }
+
+    #[test]
+    fn offscreen_twin_renders_clean() {
+        let Some(mut presenter) = init_or_skip("offscreen_twin_renders_clean") else {
+            return;
+        };
+        assert!(
+            !presenter.adapter_name().is_empty(),
+            "receipt names the adapter"
+        );
+        assert!(
+            !presenter.adapter_driver().is_empty(),
+            "receipt names the driver"
+        );
+        let key = MeshKey::new(1, [0xA1; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        assert_eq!(presenter.mesh_count(), 1);
+        assert_eq!(presenter.mesh_keys(), vec![key]);
+        // Hand-built meshes cannot sneak past the validator.
+        let mut broken = crate::v1::cube();
+        broken.indices.push(9999);
+        match presenter.upload_mesh(MeshKey::new(9, [0; 32]), &broken) {
+            Err(PresentError::InvalidMesh(_)) => {}
+            other => panic!("out-of-range index must be refused, got {other:?}"),
+        }
+        presenter.resize(160, 120).expect("valid size applies");
+        let out = presenter
+            .render_offscreen(&cube_list(key, 160, 120))
+            .expect("twin renders");
+        let png = out.png.expect("live frame has pixels");
+        assert_eq!(&png[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+        assert!(
+            out.manifest.is_clean(),
+            "validation errors must be 0, got {:?}",
+            out.manifest
+        );
+        assert!(out.receipt.is_clean() && out.receipt.presented);
+        assert_eq!((out.receipt.width, out.receipt.height), (160, 120));
+        assert_eq!(out.receipt.draws, 1);
+        assert_eq!(presenter.frames_presented(), 1);
+        assert!(
+            covered_pixels(&png) > 100,
+            "lit cube must cover pixels through HDR plus blit"
+        );
+    }
+
+    #[test]
+    fn multi_draw_two_materials_cover_more() {
+        let Some(mut presenter) = init_or_skip("multi_draw_two_materials_cover_more") else {
+            return;
+        };
+        let key = MeshKey::new(2, [0xB2; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(128, 128).expect("valid size applies");
+        let mut list = cube_list(key, 128, 128);
+        let mut dielectric = list.items[0].material.clone();
+        dielectric.metallic = 0.0;
+        dielectric.base_color = [0.8, 0.1, 0.1];
+        list.items.push(DrawItem {
+            mesh: key,
+            material: dielectric,
+            base_color: None,
+        });
+        let out = presenter.render_offscreen(&list).expect("two draws render");
+        assert!(out.manifest.is_clean(), "two draws stay validation-clean");
+        assert_eq!(out.receipt.draws, 2);
+        // Unknown mesh keys fail the frame with their draw index, not a panic.
+        let mut bad = list.clone();
+        bad.items[1].mesh = MeshKey::new(999, [0x00; 32]);
+        match presenter.render_offscreen(&bad) {
+            Err(PresentError::InvalidDraw { index, .. }) => assert_eq!(index, 1),
+            other => panic!("unknown mesh must fail at draw 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resize_and_minimize_survive_with_last_good() {
+        let Some(mut presenter) = init_or_skip("resize_and_minimize_survive_with_last_good") else {
+            return;
+        };
+        let key = MeshKey::new(3, [0xC3; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(160, 120).expect("valid size applies");
+        let first = presenter
+            .render_offscreen(&cube_list(key, 160, 120))
+            .expect("first size renders");
+        assert!(first.receipt.presented && first.manifest.is_clean());
+        // Resize rebuilds HDR, depth and twin targets (generation bumps).
+        let gen = presenter.generation();
+        presenter.resize(96, 96).expect("valid size applies");
+        assert!(presenter.generation() > gen, "resize reconfigures");
+        let second = presenter
+            .render_offscreen(&cube_list(key, 96, 96))
+            .expect("resized frame renders");
+        assert!((second.receipt.width, second.receipt.height) == (96, 96));
+        assert!(second.manifest.is_clean(), "resized frame is clean");
+        // Minimize suspends: no pixels, no panic, last-good kept.
+        presenter.resize(0, 0).expect("minimize suspends");
+        assert!(presenter.suspended());
+        let held = presenter
+            .render_offscreen(&cube_list(key, 96, 96))
+            .expect("suspended frame never errors");
+        assert!(held.png.is_none() && !held.receipt.presented);
+        assert_eq!((held.receipt.width, held.receipt.height), (96, 96));
+        assert!(held.manifest.is_clean());
+        // Restore renders again on fresh targets.
+        presenter.resize(64, 64).expect("restore applies");
+        assert!(!presenter.suspended());
+        let restored = presenter
+            .render_offscreen(&cube_list(key, 64, 64))
+            .expect("restored frame renders");
+        assert!(restored.receipt.presented && restored.manifest.is_clean());
+        assert!(covered_pixels(&restored.png.expect("pixels")) > 10);
+        // Over-bound sizes are refused with last-good untouched.
+        match presenter.resize(MAX_FRAME_DIM + 1, 64) {
+            Err(PresentError::InvalidSize { width, height }) => {
+                assert_eq!((width, height), (MAX_FRAME_DIM + 1, 64));
+            }
+            other => panic!("over-bound resize must be refused, got {other:?}"),
+        }
+        assert_eq!(presenter.size(), (64, 64));
+    }
+
+    #[test]
+    fn texture_residency_reports_and_rejects() {
+        let Some(mut presenter) = init_or_skip("texture_residency_reports_and_rejects") else {
+            return;
+        };
+        let key = TextureKey::new(11, [0xD4; 32]);
+        presenter
+            .upload_texture(
+                key,
+                &TextureUpload {
+                    width: 4,
+                    height: 4,
+                    rgba: vec![200u8; 64],
+                },
+            )
+            .expect("4x4 texture uploads");
+        assert_eq!(presenter.texture_keys(), vec![key]);
+        let (view, w, h) = presenter.texture_view(&key).expect("resident view");
+        assert_eq!((w, h), (4, 4));
+        let _ = view;
+        assert!(presenter.texture_handle(&key).is_some());
+        assert!(
+            presenter
+                .upload_texture(
+                    TextureKey::new(12, [0x00; 32]),
+                    &TextureUpload {
+                        width: 4,
+                        height: 4,
+                        rgba: vec![0u8; 63],
+                    },
+                )
+                .is_err(),
+            "short pixels are refused before the GPU"
+        );
+        assert!(presenter.evict_texture(&key));
+        assert!(presenter.texture_keys().is_empty());
+    }
+
+    #[test]
+    fn missing_texture_ship_path_refuses_and_receipt_quotes_budgets() {
+        let Some(mut presenter) = init_or_skip("missing_texture_ship_path_refuses_and_receipt_quotes_budgets") else {
+            return;
+        };
+        assert_eq!(
+            (presenter.mesh_capacity(), presenter.texture_capacity()),
+            (MAX_CACHED_MESHES, MAX_CACHED_TEXTURES)
+        );
+        let key = TextureKey::new(21, [0xE2; 32]);
+        presenter
+            .upload_texture(
+                key,
+                &TextureUpload {
+                    width: 4,
+                    height: 4,
+                    rgba: vec![200u8; 64],
+                },
+            )
+            .expect("4x4 texture uploads");
+        assert_eq!(presenter.texture_count(), 1);
+        assert_eq!(presenter.texture_high_water(), 1);
+        assert!(presenter.require_texture_view(&key).is_ok());
+        // The preview path returns `None`; only the ship path refuses loudly.
+        let absent = TextureKey::new(22, [0x00; 32]);
+        assert!(presenter.texture_view(&absent).is_none());
+        match presenter.require_texture_view(&absent) {
+            Err(PresentError::MissingTexture { id, .. }) => assert_eq!(id, 22),
+            other => panic!("ship path must refuse loudly, got {other:?}"),
+        }
+        // Manual drops feed the same eviction telemetry the receipt quotes.
+        assert!(presenter.evict_texture(&key));
+        assert_eq!(presenter.texture_evicted(), 1);
+        assert_eq!(presenter.last_evicted_texture_id(), Some(21));
+        let mesh = MeshKey::new(23, [0xA3; 32]);
+        presenter
+            .upload_mesh(mesh, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let out = presenter
+            .render_offscreen(&cube_list(mesh, 64, 64))
+            .expect("frame renders");
+        assert_eq!((out.receipt.mesh_count, out.receipt.texture_count), (1, 0));
+        assert_eq!(out.receipt.mesh_high_water, 1);
+        assert_eq!(out.receipt.texture_evicted, 1);
+        assert_eq!(out.receipt.evicted_texture_id, Some(21));
+        assert_eq!(out.receipt.evicted_mesh_id, None);
+        let summary = out.receipt.cache_summary();
+        assert!(
+            summary.contains("21"),
+            "telemetry names the evicted asset id: {summary}"
+        );
+    }
+
+    #[test]
+    fn device_loss_fails_loudly_until_rebuilt() {
+        let Some(mut presenter) = init_or_skip("device_loss_fails_loudly_until_rebuilt") else {
+            return;
+        };
+        presenter.mark_device_lost("test loss".into());
+        match presenter.render_offscreen(&cube_list(MeshKey::new(1, [0; 32]), 64, 64)) {
+            Err(PresentError::DeviceLost(_)) => {}
+            other => panic!("lost device must fail loudly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn surface_render_without_surface_is_typed() {
+        let Some(mut presenter) = init_or_skip("surface_render_without_surface_is_typed") else {
+            return;
+        };
+        presenter.resize(64, 64).expect("valid size applies");
+        match presenter.render_surface(&cube_list(MeshKey::new(1, [0; 32]), 64, 64)) {
+            Err(PresentError::NoSurface) => {}
+            other => panic!("missing surface must be typed, got {other:?}"),
+        }
+    }
+
+    /// Pixels reading clearly red vs clearly green (margin over the other
+    /// channels, so fog/tonemap survivors still sort by hue).
+    fn hue_counts(png: &[u8]) -> (usize, usize) {
+        let img = image::load_from_memory(png)
+            .expect("capture is a valid PNG")
+            .to_rgba8();
+        let (mut red, mut green) = (0usize, 0usize);
+        for p in img.pixels() {
+            let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+            if r > 110 && r > g + 40 && r > b + 40 {
+                red += 1;
+            } else if g > 110 && g > r + 40 && g > b + 40 {
+                green += 1;
+            }
+        }
+        (red, green)
+    }
+
+    /// Behavior: a 2x2 red/green checker bound as `base_color` renders both
+    /// colors in the offscreen frame, 0 validation errors.
+    #[test]
+    fn textured_draw_renders_both_checker_colors() {
+        let Some(mut presenter) = init_or_skip("textured_draw_renders_both_checker_colors") else {
+            return;
+        };
+        let mesh = MeshKey::new(41, [0xA4; 32]);
+        presenter
+            .upload_mesh(mesh, &crate::v1::cube())
+            .expect("cube uploads");
+        // 2x2 checker: red, green / green, red.
+        let tex = TextureKey::new(42, [0xB4; 32]);
+        presenter
+            .upload_texture(
+                tex,
+                &TextureUpload {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![
+                        255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255,
+                    ],
+                },
+            )
+            .expect("checker uploads");
+        presenter.resize(128, 128).expect("valid size applies");
+        let scene = crate::v1::default_scene(128, 128).expect("default scene is valid");
+        let list = DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![DrawItem {
+                mesh,
+                material: crate::v1::PbrMaterial {
+                    base_color: [1.0, 1.0, 1.0],
+                    metallic: 0.0,
+                    roughness: 0.5,
+                    exposure: 1.0,
+                },
+                base_color: Some(tex),
+            }],
+        };
+        let out = presenter
+            .render_offscreen(&list)
+            .expect("textured frame renders");
+        assert!(
+            out.manifest.is_clean(),
+            "textured frame is validation-clean"
+        );
+        assert!(out.receipt.is_clean() && out.receipt.presented);
+        let png = out.png.expect("live frame has pixels");
+        let (red, green) = hue_counts(&png);
+        eprintln!("VS2 checker: red {red} green {green}");
+        assert!(red > 100, "checker red renders, got {red}");
+        assert!(green > 100, "checker green renders, got {green}");
+        // Receipt outside the repo (temp dir, never git dirt).
+        let dir = std::env::temp_dir().join("engine2040-vs2");
+        std::fs::create_dir_all(&dir).expect("temp receipt dir");
+        std::fs::write(dir.join("vs2-textured.png"), &png).expect("textured png writes");
+    }
+
+    /// Parity: every draw with `None` renders the same bytes as before —
+    /// the white fallback is an identity multiply, so `None` pixels equal
+    /// white-textured pixels and fresh presenters agree byte for byte.
+    /// Fresh presenters per render (not consecutive frames) so the
+    /// per-frame particle step cannot drift the comparison.
+    #[test]
+    fn none_draw_matches_white_textured_bytes() {
+        fn fresh_textured_pair(textured: bool) -> Vec<u8> {
+            let Some(mut presenter) = init_or_skip("none_draw_matches_white_textured_bytes") else {
+                return Vec::new();
+            };
+            let mesh = MeshKey::new(43, [0xC4; 32]);
+            presenter
+                .upload_mesh(mesh, &crate::v1::cube())
+                .expect("cube uploads");
+            let mut list = cube_list(mesh, 96, 96);
+            if textured {
+                let white = TextureKey::new(44, [0xD4; 32]);
+                presenter
+                    .upload_texture(
+                        white,
+                        &TextureUpload {
+                            width: 1,
+                            height: 1,
+                            rgba: vec![255, 255, 255, 255],
+                        },
+                    )
+                    .expect("white uploads");
+                list.items[0].base_color = Some(white);
+            }
+            presenter.resize(96, 96).expect("valid size applies");
+            let out = presenter.render_offscreen(&list).expect("frame renders");
+            assert!(out.manifest.is_clean(), "p2p frame is clean");
+            let png = out.png.expect("live frame has pixels");
+            let dir = std::env::temp_dir().join("engine2040-vs2");
+            std::fs::create_dir_all(&dir).expect("temp receipt dir");
+            std::fs::write(
+                dir.join(if textured {
+                    "vs2-white.png"
+                } else {
+                    "vs2-plain.png"
+                }),
+                &png,
+            )
+            .expect("p2p png writes");
+            png
+        }
+        let plain_a = fresh_textured_pair(false);
+        if plain_a.is_empty() {
+            return;
+        }
+        let plain_b = fresh_textured_pair(false);
+        assert_eq!(plain_a, plain_b, "untextured repeats are byte-identical");
+        let white = fresh_textured_pair(true);
+        assert_eq!(plain_a, white, "white fallback keeps every byte");
+    }
+
+    /// Failure: an unresident texture key fails the frame with its
+    /// draw index, mirroring the unknown-mesh path, never a panic.
+    #[test]
+    fn unknown_texture_fails_with_draw_index() {
+        let Some(mut presenter) = init_or_skip("unknown_texture_fails_with_draw_index") else {
+            return;
+        };
+        let mesh = MeshKey::new(45, [0xE4; 32]);
+        presenter
+            .upload_mesh(mesh, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let mut list = cube_list(mesh, 64, 64);
+        list.items[0].base_color = Some(TextureKey::new(46, [0x00; 32]));
+        match presenter.render_offscreen(&list) {
+            Err(PresentError::InvalidDraw { index, .. }) => assert_eq!(index, 0),
+            other => panic!("unknown texture must fail at draw 0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_path_runs_all_four_look_passes() {
+        let Some(mut presenter) = init_or_skip("forward_path_runs_all_four_look_passes") else {
+            return;
+        };
+        let key = MeshKey::new(31, [0xF1; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        // Two live frames: sky, layers, particles and decals record under
+        // one shared look bind before the forward draws, 0 errors, and the
+        // particle pool advances between frames.
+        let first = presenter
+            .render_offscreen(&cube_list(key, 64, 64))
+            .expect("first frame renders");
+        assert!(first.receipt.presented && first.manifest.is_clean());
+        assert_eq!(first.receipt.look_passes, 4, "sky+layers+particles+decals");
+        assert_eq!(first.receipt.look_validation_errors, 0);
+        let second = presenter
+            .render_offscreen(&cube_list(key, 64, 64))
+            .expect("second frame renders");
+        assert_eq!(second.receipt.look_passes, 4);
+        assert_eq!(second.receipt.look_validation_errors, 0);
+        assert!(
+            covered_pixels(&second.png.expect("pixels")) > 10,
+            "look tranche leaves the lit cube intact"
+        );
+        // Suspended frames record nothing and stay clean.
+        presenter.resize(0, 0).expect("minimize suspends");
+        let held = presenter
+            .render_offscreen(&cube_list(key, 64, 64))
+            .expect("suspended frame never errors");
+        assert_eq!(
+            (
+                held.receipt.look_passes,
+                held.receipt.look_validation_errors
+            ),
+            (0, 0)
+        );
+        assert!(held.manifest.is_clean());
+    }
+
+    #[test]
+    fn acquire_outcomes_bridge_to_surface_events() {
+        // Pure mapping, no GPU needed: the windowed presenter feeds every
+        // `CurrentSurfaceTexture` through this bridge.
+        use wgpu::CurrentSurfaceTexture;
+        assert_eq!(
+            SurfaceEvent::from(&CurrentSurfaceTexture::Outdated),
+            SurfaceEvent::Outdated
+        );
+        assert_eq!(
+            SurfaceEvent::from(&CurrentSurfaceTexture::Lost),
+            SurfaceEvent::Lost
+        );
+        assert_eq!(
+            SurfaceEvent::from(&CurrentSurfaceTexture::Timeout),
+            SurfaceEvent::Timeout
+        );
+        assert_eq!(
+            SurfaceEvent::from(&CurrentSurfaceTexture::Occluded),
+            SurfaceEvent::Occluded
+        );
+        assert_eq!(
+            SurfaceEvent::from(&CurrentSurfaceTexture::Validation),
+            SurfaceEvent::ValidationError
+        );
+        // The bridge agrees with the headless policy table.
+        for event in [
+            SurfaceEvent::Outdated,
+            SurfaceEvent::Lost,
+            SurfaceEvent::Timeout,
+            SurfaceEvent::Occluded,
+            SurfaceEvent::ValidationError,
+        ] {
+            assert_ne!(
+                surface_action(event),
+                SurfaceAction::Render,
+                "{event:?} never renders"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RL9 GPU tests behind `window`: the fog tranche runs per live frame with 0
+// validation errors, the blit composite shows height fog plus contact
+// shadows, and the kill switch restores the clear frame. Skip (pass) with no
+// adapter, exactly like the RA1 twin tests.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "window")]
+#[cfg(test)]
+mod rl9_gpu_tests {
+    use super::super::*;
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+    use crate::fog;
+
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => Err(NoAdapter("no wgpu adapter on this machine".into())),
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        require_or_skip(test, probe)
+    }
+
+    fn cube_key() -> MeshKey {
+        MeshKey::new(0xF09, [0xF9; 32])
+    }
+
+    /// Level arena camera: eye and target level at 1.2 m so the view-top
+    /// looks over the horizon (high rays, clear) and the view-bottom looks
+    /// into the ground haze (low rays, fogged). View terms: the offscreen
+    /// file runs upright (see the composite test), so file-bottom bands
+    /// hold the haze and file-top bands the clear.
+    fn level_camera() -> crate::v1::Camera {
+        crate::v1::Camera::new(
+            [0.0, 2.0, 5.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 1.0, 0.0],
+            40.0f32.to_radians(),
+        )
+    }
+
+    fn level_list(width: u32, height: u32, items: Vec<DrawItem>) -> DrawList {
+        let scene = crate::v1::default_scene(width, height).expect("default scene is valid");
+        DrawList {
+            camera: level_camera(),
+            light: scene.light,
+            items,
+        }
+    }
+
+    fn level_cube_list(key: MeshKey, width: u32, height: u32) -> DrawList {
+        let scene = crate::v1::default_scene(width, height).expect("default scene is valid");
+        level_list(
+            width,
+            height,
+            vec![DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+            }],
+        )
+    }
+
+    #[test]
+    fn fog_tranche_runs_clean_with_zero_validation() {
+        let Some(mut presenter) = init_or_skip("fog_tranche_runs_clean_with_zero_validation") else {
+            return;
+        };
+        assert!(presenter.fog_enabled(), "fog ships on");
+        let key = cube_key();
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let out = presenter
+            .render_offscreen(&level_cube_list(key, 64, 64))
+            .expect("frame renders");
+        assert!(out.receipt.presented && out.manifest.is_clean());
+        assert_eq!(
+            out.receipt.fog_passes, 2,
+            "height fog plus contact run per live frame"
+        );
+        assert_eq!(
+            out.receipt.fog_validation_errors, 0,
+            "0 fog validation errors"
+        );
+        assert_eq!(out.receipt.look_passes, 4, "look tranche intact");
+        assert_eq!(out.receipt.look_validation_errors, 0);
+        let plan = presenter
+            .fog_plan()
+            .expect("fog wiring compiles on the live frame");
+        assert!(
+            plan.order_names_match(&[fog::FOG_PASS, fog::CONTACT_PASS, "forward"]),
+            "presenter executes the declared wiring"
+        );
+        // Level camera: the top half looks over the horizon (clear) while
+        // the bottom half looks into the haze (fogged). A vertical flip in
+        // the feed would read the other way around.
+        let (top, bottom) = presenter.fog_means();
+        assert!(
+            top.is_finite() && bottom.is_finite(),
+            "fog evidence is finite"
+        );
+        assert!(
+            bottom - top > 0.1,
+            "height fog grades with frame height: top {top} bottom {bottom}"
+        );
+        let contact_min = presenter.fog_contact_min();
+        assert!(
+            (0.0..=1.0).contains(&contact_min),
+            "contact evidence bounded: {contact_min}"
+        );
+        assert!(
+            contact_min < 0.999,
+            "cube edges shadow their neighbors: min {contact_min}"
+        );
+        eprintln!(
+            "RL9 fog on {}: fog+contact submit {} us vs bars {}+{} ms",
+            presenter.adapter_name(),
+            presenter.fog_submit_us(),
+            fog::FOG_BUDGET_MS,
+            fog::CONTACT_BUDGET_MS,
+        );
+    }
+
+    #[test]
+    fn ibl_chart_submits_clean_after_forward() {
+        let Some(mut presenter) = init_or_skip("ibl_chart_submits_clean_after_forward") else {
+            return;
+        };
+        presenter.resize(64, 64).expect("valid size applies");
+        let out = presenter
+            .render_offscreen(&level_list(64, 64, Vec::new()))
+            .expect("frame renders");
+        assert!(out.receipt.presented && out.manifest.is_clean());
+        // The chart is no longer a pre-forward look pass (that tranche is
+        // exactly sky, layers, particles, decals), but it still submits on
+        // every live frame: one post-forward pass, 0 validation errors,
+        // counted on its own receipt rows.
+        assert_eq!(out.receipt.look_passes, 4, "forward look tranche");
+        assert_eq!(out.receipt.look_validation_errors, 0);
+        assert_eq!(out.receipt.ibl_passes, 1, "chart submits post-forward");
+        assert_eq!(out.receipt.ibl_validation_errors, 0);
+        eprintln!(
+            "RL2 chart on {}: submit vs chart budget {} ms",
+            presenter.adapter_name(),
+            crate::ibl::gpu::IBL_SUBMIT_BUDGET_MS,
+        );
+    }
+
+    #[test]
+    fn gtao_tranche_runs_clean_on_live_depth() {
+        let Some(mut presenter) = init_or_skip("gtao_tranche_runs_clean_on_live_depth") else {
+            return;
+        };
+        let key = cube_key();
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let out = presenter
+            .render_offscreen(&level_cube_list(key, 64, 64))
+            .expect("frame renders");
+        assert!(out.receipt.presented && out.manifest.is_clean());
+        assert_eq!(
+            out.receipt.gtao_passes, 2,
+            "half-res GTAO plus bilateral upsample run per live frame"
+        );
+        assert_eq!(out.receipt.gtao_validation_errors, 0);
+        eprintln!(
+            "RL3 gtao on {}: submit {} us vs bar {} ms",
+            presenter.adapter_name(),
+            presenter.gtao_submit_us(),
+            crate::gtao::GTAO_BUDGET_MS,
+        );
+    }
+
+    #[test]
+    fn gtao_config_rejects_bad_sizes() {
+        let cfg = Presenter::gtao_config_for_frame(64, 64).expect("live size configures");
+        assert_eq!(
+            (
+                cfg.width_px,
+                cfg.height_px,
+                cfg.radius_px,
+                cfg.falloff_m,
+                cfg.intensity
+            ),
+            (64, 64, 8.0, 2.0, 1.0),
+            "presenter runs the arena kernel"
+        );
+        assert!(
+            matches!(
+                Presenter::gtao_config_for_frame(0, 64),
+                Err(PresentError::InvalidSize { .. })
+            ),
+            "zero-area frames have no GTAO feed"
+        );
+        assert!(
+            matches!(
+                Presenter::gtao_config_for_frame(4096, 64),
+                Err(PresentError::InvalidSize { .. })
+            ),
+            "over-bound frames (above 2048) have no GTAO feed"
+        );
+    }
+
+}
+
+// ---------------------------------------------------------------------------
+// SL21 window-submit allocation audit (headless slice of the RA1 submit
+// path): the per-frame CPU work every window submit runs (`decode_depth_feed`
+// plus the zero-alloc pack/config helpers), counted through the crate's one
+// test allocator, `engine_core::alloc_probe`. The `window` build runs the
+// same audit in `graph.rs`.
+// ---------------------------------------------------------------------------
+/// Headless SL21 gate: the RA1 submit decodes one depth feed per live frame
+/// (N/A for zero-alloc, 4-buffer floor), while the uniform pack plus contact
+/// config on the same path allocate nothing.
+#[cfg(all(test, not(feature = "window")))]
+mod sl21_submit_audit {
+    use super::super::*;
+
+    /// Identity inverse for the audit fixture (world equals NDC, eye at the
+    /// origin), mirroring `rl9_tests`.
+    const IDENT: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    #[test]
+    fn sl21_window_submit_alloc_audit_reports_na_floor() {
+        // Warmup outside counting (contract: steady state is post-warmup);
+        // the decode owns no caches, so warmup only settles lazy state.
+        let raw = vec![0.5f32; 16 * 16];
+        let warm = decode_depth_feed(&raw, 16, 16, IDENT, [0.0, 0.0, 0.0]).expect("warms");
+        assert_eq!(warm.texels(), 256);
+        std::hint::black_box(&warm);
+
+        // The submit slice: one live frame decodes its depth feed once.
+        let (feed, heap) = engine_core::alloc_probe::measure(|| {
+            decode_depth_feed(&raw, 16, 16, IDENT, [0.0, 0.0, 0.0]).expect("decodes")
+        });
+        let (count, bytes) = (heap.calls, heap.bytes);
+        // Behavior first: exact distance plus orientation, so a broken
+        // decode fails here instead of passing the gate quietly.
+        // Texel (0,0) of the 16x16 identity fixture unprojects to
+        // (-0.9375, +0.9375, 0.5); the distance is exact Euclid.
+        let want = (0.9375f64 * 0.9375 + 0.9375 * 0.9375 + 0.5 * 0.5).sqrt() as f32;
+        assert!(
+            (feed.depth_m[0] - want).abs() < 1e-6,
+            "exact distance: {} vs {want}",
+            feed.depth_m[0]
+        );
+        assert_eq!(feed.texels(), 256);
+        assert_eq!(
+            (feed.depth_m.len(), feed.height_m.len(), feed.normals.len()),
+            (256, 256, 256)
+        );
+        // N/A floor (JAN28-1): four buffers per frame (`world`, `depth_m`,
+        // `height_m`, `normals`); the window submit path cannot post 0.
+        assert_eq!(
+            count, 4,
+            "decode floor is 4 buffers per frame (JAN28-1 N/A)"
+        );
+        let want_bytes = 256u64
+            * (std::mem::size_of::<[f64; 3]>() as u64
+                + 4
+                + 4
+                + std::mem::size_of::<[f32; 3]>() as u64);
+        assert_eq!(bytes, want_bytes, "decode bytes are the four buffers");
+        eprintln!("SL21 submit audit (decode 16x16): {count} allocs, {bytes} bytes (floor 4/11264: world+depth+height+normals)");
+
+        // Zero-alloc helpers on the same submit path: the fog-composite
+        // uniform packs stack bytes, the contact config validates scalars.
+        let (_, pack) = engine_core::alloc_probe::measure(|| {
+            std::hint::black_box(fog_blit_uniform_bytes([0.5, 0.25, 1.0], 64, 32))
+        });
+        assert_eq!(
+            (pack.calls, pack.bytes),
+            (0, 0),
+            "uniform pack allocates nothing"
+        );
+        let (_, cfg) = engine_core::alloc_probe::measure(|| {
+            contact_for_frame(64, 64).expect("live size builds")
+        });
+        assert_eq!(
+            (cfg.calls, cfg.bytes),
+            (0, 0),
+            "contact config allocates nothing"
+        );
+        assert!(fog_fits_frame(64, 64), "audit frame fits the fog budget");
+
+        // Failure case (outside counting): ragged depth still refuses with
+        // the retry-frame error, never a half-decoded feed.
+        assert!(
+            matches!(
+                decode_depth_feed(&raw[..10], 16, 16, IDENT, [0.0, 0.0, 0.0]),
+                Err(PresentError::Readback(_))
+            ),
+            "ragged depth is refused"
+        );
+        // Counter-case: distinct depth decodes distinctly, so the gate is
+        // not measuring a constant.
+        let flat = vec![0.0f32; 16 * 16];
+        let other = decode_depth_feed(&flat, 16, 16, IDENT, [0.0, 0.0, 0.0]).expect("redecodes");
+        assert_ne!(
+            feed.depth_m, other.depth_m,
+            "distinct depth decodes distinctly"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live window frame tests behind `window`: no map and no poll-wait on a live
+// frame, probe frames tallied apart, the sky and the forward fog matching the
+// CPU twin of the closed form, and pass timestamps read without waiting.
+// Skip (pass) with no adapter, like the RA1 twin tests.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "window")]
+#[cfg(test)]
+mod live_frame_tests {
+    use super::super::*;
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => Err(NoAdapter("no wgpu adapter on this machine".into())),
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        require_or_skip(test, probe)
+    }
+
+    fn cube_key() -> MeshKey {
+        MeshKey::new(0x11FE, [0x1F; 32])
+    }
+
+    fn list_with(camera: crate::v1::Camera, items: Vec<DrawItem>) -> DrawList {
+        let scene = crate::v1::default_scene(128, 128).expect("default scene is valid");
+        DrawList {
+            camera,
+            light: scene.light,
+            items,
+        }
+    }
+
+    fn cube_item() -> DrawItem {
+        let scene = crate::v1::default_scene(128, 128).expect("default scene is valid");
+        DrawItem {
+            mesh: cube_key(),
+            material: scene.material,
+            base_color: None,
+        }
+    }
+
+    /// Camera looking at the origin from `z` meters out, in fogged air.
+    fn camera_at(z: f32) -> crate::v1::Camera {
+        crate::v1::Camera::new(
+            [0.0, 0.0, z],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            40.0f32.to_radians(),
+        )
+    }
+
+    /// Copy the LDR twin to the CPU. Test only: this waits on the GPU.
+    fn read_twin(presenter: &Presenter) -> (Vec<u8>, u32, u32) {
+        let targets = presenter.targets.as_ref().expect("twin targets exist");
+        let (w, h) = (targets.width, targets.height);
+        let padded = (w * 4).div_ceil(256) * 256;
+        let buffer = presenter.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test-twin-readback"),
+            size: u64::from(padded) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = presenter
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &targets.out_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        presenter.queue.submit(Some(enc.finish()));
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| {
+            r.expect("test readback maps");
+        });
+        presenter
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("test readback polls");
+        let row = (w * 4) as usize;
+        let mut rgba = vec![0u8; row * h as usize];
+        {
+            let mapped = buffer.slice(..).get_mapped_range().expect("mapped");
+            for (y, dst) in rgba.chunks_exact_mut(row).enumerate() {
+                let off = y * padded as usize;
+                dst.copy_from_slice(&mapped[off..off + row]);
+            }
+        }
+        buffer.unmap();
+        (rgba, w, h)
+    }
+
+    fn pixel(rgba: &[u8], w: u32, x: u32, y: u32) -> [f32; 3] {
+        let i = ((y * w + x) * 4) as usize;
+        [rgba[i] as f32, rgba[i + 1] as f32, rgba[i + 2] as f32]
+    }
+
+    #[test]
+    fn live_frames_never_map_or_wait_on_the_gpu() {
+        let Some(mut presenter) = init_or_skip("live_frames_never_map_or_wait_on_the_gpu") else {
+            return;
+        };
+        presenter
+            .upload_mesh(cube_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(96, 96).expect("valid size applies");
+        assert!(!presenter.look_probes(), "probes ship off");
+        for _ in 0..6 {
+            let receipt = presenter
+                .render_live_offscreen(&list_with(camera_at(6.0), vec![cube_item()]))
+                .expect("live frame renders");
+            assert!(receipt.presented && receipt.is_clean());
+            assert_eq!(receipt.look_passes, 0, "no probe on a live frame");
+            assert_eq!(
+                receipt.fog_passes + receipt.gtao_passes + receipt.ibl_passes,
+                0
+            );
+        }
+        let stats = presenter.wait_stats();
+        assert_eq!(stats.live_frames, 6);
+        assert_eq!(stats.live_maps, 0, "a live frame never maps and waits");
+        assert_eq!(stats.live_waits, 0, "a live frame never poll-waits");
+        assert_eq!(stats.live_blocking(), 0);
+        assert_eq!((stats.probe_frames, stats.capture_frames), (0, 0));
+    }
+
+    #[test]
+    fn capture_frames_block_by_design_and_stay_off_the_live_tally() {
+        let Some(mut presenter) = init_or_skip("capture_frames_block_by_design_and_stay_off_the_live_tally") else {
+            return;
+        };
+        presenter
+            .upload_mesh(cube_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let out = presenter
+            .render_offscreen(&list_with(camera_at(6.0), vec![cube_item()]))
+            .expect("capture renders");
+        assert!(out.receipt.presented && out.manifest.is_clean());
+        let stats = presenter.wait_stats();
+        assert_eq!(stats.capture_frames, 1);
+        // Depth readback, color readback, four look submits, chart, fog and
+        // gtao submits: every one is a counted map plus wait.
+        assert_eq!(stats.capture_maps, 9, "the counter sees every readback");
+        assert_eq!(stats.capture_waits, 9);
+        assert_eq!(stats.live_blocking(), 0);
+    }
+
+    #[test]
+    fn probe_frames_are_tallied_apart_from_live_frames() {
+        let Some(mut presenter) = init_or_skip("probe_frames_are_tallied_apart_from_live_frames") else {
+            return;
+        };
+        presenter
+            .upload_mesh(cube_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        presenter.set_look_probes(true);
+        presenter.set_probe_every(1000);
+        presenter.set_fog_every(1000);
+        let list = list_with(camera_at(6.0), vec![cube_item()]);
+        // Frame 0 probes (first frame, fresh targets); the next ones hold.
+        let first = presenter.render_live_offscreen(&list).expect("probe frame");
+        assert_eq!(first.look_passes, 4, "opt-in probes run on the first frame");
+        assert_eq!(first.fog_passes, 2);
+        for _ in 0..3 {
+            let held = presenter.render_live_offscreen(&list).expect("held frame");
+            assert_eq!(held.look_passes, 0);
+        }
+        let stats = presenter.wait_stats();
+        assert_eq!(stats.probe_frames, 1);
+        assert!(stats.probe_waits >= 7, "probe frame waits: {stats:?}");
+        assert_eq!(stats.live_frames, 3, "held frames count as live");
+        assert_eq!(stats.live_blocking(), 0, "held frames still never wait");
+        // Back to the default: the next live frame resets the stale pair.
+        presenter.set_look_probes(false);
+        let live = presenter.render_live_offscreen(&list).expect("live frame");
+        assert_eq!(live.look_passes, 0);
+        assert_eq!(presenter.wait_stats().live_blocking(), 0);
+    }
+
+    #[test]
+    fn gpu_timestamps_resolve_late_without_waiting() {
+        let Some(mut presenter) = init_or_skip("gpu_timestamps_resolve_late_without_waiting") else {
+            return;
+        };
+        if !presenter.gpu_timing_supported() {
+            crate::test_gpu::note_skip(
+                "gpu_timestamps_resolve_late_without_waiting",
+                "adapter lacks TIMESTAMP_QUERY",
+            );
+            assert!(presenter.gpu_timing_report().is_none());
+            return;
+        }
+        presenter
+            .upload_mesh(cube_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(128, 128).expect("valid size applies");
+        let list = list_with(camera_at(6.0), vec![cube_item()]);
+        for round in 0..6 {
+            for _ in 0..4 {
+                presenter.render_live_offscreen(&list).expect("live frame");
+            }
+            if round % 2 == 1 {
+                // Test only: let the device finish so the late maps land.
+                presenter
+                    .device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .expect("test poll");
+            }
+        }
+        let report = presenter.gpu_timing_report().expect("timestamps resolved");
+        assert!(report.frames >= 4, "late reads landed: {report:?}");
+        assert!(
+            report.total.p50.is_finite() && report.total.p50 > 0.0,
+            "{report:?}"
+        );
+        assert!(report.total.p99 >= report.total.p50);
+        assert!(
+            report.forward.p50 > 0.0 && report.blit.p50 > 0.0,
+            "{report:?}"
+        );
+        assert_eq!(presenter.wait_stats().live_blocking(), 0);
+    }
+
+    /// Cube positions shifted along x: the world-space mesh a draw list
+    /// carries (draws have no transform).
+    fn shifted_cube(dx: f32) -> crate::v1::MeshData {
+        let mut cube = crate::v1::cube();
+        for p in &mut cube.positions {
+            p[0] += dx;
+        }
+        cube
+    }
+
+    fn material(rgb: [f32; 3]) -> crate::v1::PbrMaterial {
+        crate::v1::PbrMaterial {
+            base_color: rgb,
+            metallic: 0.0,
+            roughness: 0.8,
+            exposure: 1.0,
+        }
+    }
+
+    #[test]
+    fn refresh_rewrites_the_resident_buffer_and_refuses_bad_input() {
+        let Some(mut presenter) = init_or_skip("refresh_rewrites_the_resident_buffer_and_refuses_bad_input") else {
+            return;
+        };
+        presenter.resize(128, 128).expect("valid size applies");
+        let key = cube_key();
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        let list = list_with(camera_at(6.0), vec![cube_item()]);
+        presenter.render_live_offscreen(&list).expect("first frame");
+        let (before, w, _) = read_twin(&presenter);
+        let centre_before = pixel(&before, w, 64, 64);
+        let created = presenter.gpu_create_totals();
+
+        // Move the cube 1.5 m right by rewriting its vertices in place.
+        let moved = shifted_cube(1.5);
+        let wrote = presenter
+            .refresh_mesh_vertices(key, &moved.positions, &moved.normals, &moved.uvs)
+            .expect("refresh succeeds");
+        assert!(wrote, "a resident mesh is rewritten in place");
+        assert_eq!(
+            presenter.gpu_create_totals(),
+            created,
+            "a refresh creates no buffer"
+        );
+        presenter.render_live_offscreen(&list).expect("moved frame");
+        let (after, _, _) = read_twin(&presenter);
+        let centre_after = pixel(&after, w, 64, 64);
+        let right_after = pixel(&after, w, 64 + 43, 64);
+        let right_before = pixel(&before, w, 64 + 43, 64);
+        let swing = |a: [f32; 3], b: [f32; 3]| (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>();
+        assert!(
+            swing(centre_before, centre_after) > 60.0,
+            "the cube left the centre: {centre_before:?} -> {centre_after:?}"
+        );
+        assert!(
+            swing(right_before, right_after) > 60.0,
+            "the cube arrived on the right: {right_before:?} -> {right_after:?}"
+        );
+
+        // Refusals write nothing and say why.
+        assert!(
+            !presenter
+                .refresh_mesh_vertices(
+                    MeshKey::new(0xDEAD, [1; 32]),
+                    &moved.positions,
+                    &moved.normals,
+                    &moved.uvs
+                )
+                .expect("unknown key is not an error"),
+            "an absent mesh asks the caller for the one-time upload"
+        );
+        let short = presenter.refresh_mesh_vertices(
+            key,
+            &moved.positions[..3],
+            &moved.normals[..3],
+            &moved.uvs[..3],
+        );
+        assert!(
+            matches!(short, Err(PresentError::InvalidMesh(_))),
+            "{short:?}"
+        );
+        let mut nan = moved.positions.clone();
+        nan[2][1] = f32::NAN;
+        let bad = presenter.refresh_mesh_vertices(key, &nan, &moved.normals, &moved.uvs);
+        assert!(matches!(bad, Err(PresentError::InvalidMesh(_))), "{bad:?}");
+        let mut flat = moved.normals.clone();
+        flat[0] = [0.0, 0.0, 0.0];
+        let degenerate = presenter.refresh_mesh_vertices(key, &moved.positions, &flat, &moved.uvs);
+        assert!(
+            matches!(degenerate, Err(PresentError::InvalidMesh(_))),
+            "{degenerate:?}"
+        );
+        assert!(
+            presenter
+                .refresh_mesh_vertices(key, &moved.positions, &moved.normals, &moved.uvs)
+                .expect("still refreshes after refusals"),
+            "refusals left the buffer writable"
+        );
+    }
+
+    #[test]
+    fn steady_live_frames_create_no_buffers_or_bind_groups() {
+        let Some(mut presenter) = init_or_skip("steady_live_frames_create_no_buffers_or_bind_groups") else {
+            return;
+        };
+        presenter.resize(96, 96).expect("valid size applies");
+        let key = cube_key();
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        let tex = TextureKey::new(0x7E57, [0x3C; 32]);
+        presenter
+            .upload_texture(
+                tex,
+                &TextureUpload {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![
+                        255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255,
+                    ],
+                },
+            )
+            .expect("checker uploads");
+        let twin_key = MeshKey::new(0x11FF, [0x2F; 32]);
+        presenter
+            .upload_mesh(twin_key, &shifted_cube(2.0))
+            .expect("second cube uploads");
+        let scene = crate::v1::default_scene(96, 96).expect("default scene is valid");
+        let list = DrawList {
+            camera: camera_at(7.0),
+            light: scene.light,
+            items: vec![
+                cube_item(),
+                DrawItem {
+                    mesh: twin_key,
+                    material: material([1.0, 1.0, 1.0]),
+                    base_color: Some(tex),
+                },
+            ],
+        };
+        // Frame 1 builds the targets; the next ten animate the first cube
+        // by rewriting its vertices and must create nothing at all.
+        presenter.render_live_offscreen(&list).expect("frame 1");
+        let after_first = presenter.gpu_create_totals();
+        for step in 1..=10u8 {
+            let moved = shifted_cube(-0.1 * f32::from(step));
+            let wrote = presenter
+                .refresh_mesh_vertices(key, &moved.positions, &moved.normals, &moved.uvs)
+                .expect("refresh");
+            assert!(wrote);
+            presenter
+                .render_live_offscreen(&list)
+                .expect("steady frame");
+        }
+        assert_eq!(
+            presenter.gpu_create_totals(),
+            after_first,
+            "no buffer or bind group after frame 1"
+        );
+        let stats = presenter.wait_stats();
+        assert_eq!(stats.live_frames, 11);
+        assert_eq!(
+            (stats.steady_buffers, stats.steady_bind_groups),
+            (0, 0),
+            "{}",
+            stats.summary()
+        );
+        assert!(
+            stats.live_buffers >= 1 && stats.live_bind_groups >= 1,
+            "frame 1 owns the target builds: {}",
+            stats.summary()
+        );
+        // The counter is live: a buffer made between frames lands on the
+        // next frame's tally instead of vanishing.
+        presenter
+            .upload_mesh(MeshKey::new(0x22, [9; 32]), &crate::v1::cube())
+            .expect("late upload");
+        presenter.render_live_offscreen(&list).expect("frame 13");
+        assert_eq!(
+            presenter.wait_stats().steady_buffers,
+            2,
+            "vertex plus index"
+        );
+    }
+
+    #[test]
+    fn each_draw_reads_its_own_material_from_the_ring() {
+        let Some(mut presenter) = init_or_skip("each_draw_reads_its_own_material_from_the_ring") else {
+            return;
+        };
+        presenter.resize(128, 128).expect("valid size applies");
+        let scene = crate::v1::default_scene(128, 128).expect("default scene is valid");
+        let colors = [[1.0, 0.05, 0.05], [0.05, 1.0, 0.05], [0.05, 0.05, 1.0]];
+        let mut items = Vec::new();
+        for (index, (rgb, dx)) in colors.iter().zip([-1.6f32, 0.0, 1.6]).enumerate() {
+            let key = MeshKey::new(0x500 + index as u64, [0x50; 32]);
+            presenter
+                .upload_mesh(key, &shifted_cube(dx))
+                .expect("cube uploads");
+            items.push(DrawItem {
+                mesh: key,
+                material: material(*rgb),
+                base_color: None,
+            });
+        }
+        let list = DrawList {
+            camera: camera_at(6.0),
+            light: scene.light,
+            items,
+        };
+        presenter.render_live_offscreen(&list).expect("three draws");
+        let (rgba, w, _) = read_twin(&presenter);
+        // View width at 6 m with a 40 degree fov is about 4.4 m: 1.6 m is
+        // about 47 px off centre.
+        for (index, x) in [64 - 47, 64, 64 + 47].into_iter().enumerate() {
+            let px = pixel(&rgba, w, x, 64);
+            let dominant = (0..3)
+                .max_by(|a, b| px[*a].total_cmp(&px[*b]))
+                .expect("three channels");
+            assert_eq!(
+                dominant, index,
+                "draw {index} shows its own material, got {px:?}"
+            );
+        }
+    }
+}

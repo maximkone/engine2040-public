@@ -1,0 +1,39 @@
+[Dd]ebug/
+[Rr]elease/
+target/
+*.pdb
+# Lane worktrees from tools/lanes.mjs.
+.lanes/
+# Content track — all content is usable regardless of original license.
+content/local/
+# Cooked bundles are reproducible from the cook (EVIDENCE.md track B/C): never track them.
+content/fighters/bundle/
+content/arena/bundle/
+# Blender / editor backups: never track (rot tracked-junk).
+*.blend1
+# History-slim 2026-10-02: external dropboxes purged from history, never track again.
+content/incoming/
+content/fighters/incoming/
+*.7z
+# tools/pack-clean.mjs writes its logs at the repo root: never track them.
+/pack-build.log
+/pack-clean.log
+# Packaged-build outputs (GM3 row): never track them.
+/build/
+# AW3 shell-safe research: pwsh once sprayed these redirect droppings at the root.
+/=*
+/1
+/Null
+chk-*.out
+.opencode/bin/
+# Python bytecode: never track it (two .pyc files were tracked until 2026-10-03).
+__pycache__/
+*.pyc
+# Speed-pack: repo-local tool binaries (cargo-nextest) live here, never tracked.
+tools/bin/
+# Repo-local Rust tools (cargo install --root .tools): never track them.
+.tools/
+# frame-moved donors (pixelmatch ISC, pngjs MIT) install locally, never track.
+tools/vendor/
+# Local env secrets: never track.
+.env

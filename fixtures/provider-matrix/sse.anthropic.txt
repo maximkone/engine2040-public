@@ -1,0 +1,8 @@
+event: content_block_delta
+data: {"delta": {"text": "Steel "}}
+
+event: content_block_delta
+data: {"delta": {"text": "glints!"}}
+
+event: message_stop
+data: {"type": "message_stop"}

@@ -1,0 +1,21 @@
+# matchups: hero plus T1 recruit plus T2 veteran, 3 types in an odd cycle.
+# Sword base is rome-spec: 25 damage, 0.5 s cooldown, 200 cm range; hero 100 hp.
+# Tiers are skill first: stats stay in a narrow 90-110 hp band (900-1100 permille),
+# edge comes from hit_rate_permille, not from stats. Engine V1 base (120 permille)
+# stays untouched; Rome numbers land as a preset beside V1.
+# Trials 200 per difficulty stated before any rate (tournament standard
+# MATCHES_PER_DIFFICULTY); TTKs below are analytic from hp, damage, cooldown and
+# hit rate, to be checked by the GA13 tournament into rome-matchups.csv with an
+# odd-cycle check. One change per run; before and after go in balance-log.md.
+# Cycle: hero beats recruit, recruit beats veteran, veteran beats hero; no dominant row.
+# One currency is glory; gold, crowd favor: not in this slice.
+attacker,defender,hp_defender,damage_hp,cooldown_s,hit_rate_permille,hits_to_kill,ttk_s,winner
+hero,hero,100,25,0.5,500,4,4.00,draw
+hero,recruit_T1,90,25,0.5,600,4,3.33,attacker
+hero,veteran_T2,110,25,0.5,400,5,6.25,defender
+recruit_T1,hero,100,25,0.5,400,4,5.00,defender
+recruit_T1,recruit_T1,90,25,0.5,500,4,4.00,draw
+recruit_T1,veteran_T2,110,25,0.5,600,5,4.17,attacker
+veteran_T2,hero,100,25,0.5,600,4,3.33,attacker
+veteran_T2,recruit_T1,90,25,0.5,400,4,5.00,defender
+veteran_T2,veteran_T2,110,25,0.5,500,5,5.00,draw

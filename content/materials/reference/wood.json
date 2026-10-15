@@ -1,0 +1,39 @@
+{
+  "material": "wood",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.45, 0.3, 0.17],
+    "base_metalness": 0,
+    "specular_roughness": 0.7,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1
+  },
+  "layers": [
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "chip"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 4,
+    "brittleness": 0.25,
+    "shard": "splinters",
+    "burn": 1
+  },
+  "sound": {
+    "impact": "wood"
+  },
+  "fx": {
+    "dust": "wood",
+    "spark": "none",
+    "decal": "chip"
+  }
+}

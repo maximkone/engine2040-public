@@ -1,0 +1,21 @@
+{
+  "clip": "attack_1h_2",
+  "loop": false,
+  "root_motion": false,
+  "tags": [
+    "attack",
+    "melee"
+  ],
+  "ground_y": 0.02,
+  "feet": {
+    "left": "foot_l",
+    "right": "foot_r"
+  },
+  "hit_windows": [
+    {
+      "socket": "SOCKET_wep_R",
+      "start_s": 0.1,
+      "end_s": 0.28
+    }
+  ]
+}

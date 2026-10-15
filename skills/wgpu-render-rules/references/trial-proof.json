@@ -1,0 +1,25 @@
+{
+  "skill": "wgpu-render-rules",
+  "runs": 12,
+  "with_rate": 1.0,
+  "without_rate": 0.3333,
+  "lift": 0.6667,
+  "spread": 0.6667,
+  "with_median": 1.0,
+  "with_p10": 1.0,
+  "without_median": 0.0,
+  "without_p10": 0.0,
+  "fingerprint": "e6ec3c675499e371d6d8747f0036c0f81802c09e0fbfb04991c27b4faf2d7fcc",
+  "sheet": "evals/wgpu-render-rules_trials.jsonl",
+  "at": "2026-10-11T09:20Z",
+  "ok": true,
+  "provenance": {
+    "with": {
+      "model": 12
+    },
+    "without": {
+      "model": 12
+    },
+    "live": true
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "map": "ludus", "version": 1, "seed": 20260925,
+  "actors": 8, "zones": 3, "spawns": 4, "routes": 3,
+  "total_lod0_tris": 9840,
+  "assets": [
+    {"asset": "yard_floor", "lod0_tris": 1008, "digest": "a3c217660801dc4e", "identical_twice": true},
+    {"asset": "barracks", "lod0_tris": 2112, "digest": "8a6efb92452be532", "identical_twice": true},
+    {"asset": "blacksmith", "lod0_tris": 1344, "digest": "6571bd10ff7c64aa", "identical_twice": true},
+    {"asset": "notice_board", "lod0_tris": 1344, "digest": "5adca90f15e003e0", "identical_twice": true},
+    {"asset": "training_post", "lod0_tris": 576, "digest": "ea49097f4fec4be7", "identical_twice": true},
+    {"asset": "weapon_rack", "lod0_tris": 1920, "digest": "b1871e0526ed8ab1", "identical_twice": true},
+    {"asset": "street_wall", "lod0_tris": 1536, "digest": "a34910ddfa7a9d63", "identical_twice": true}
+  ],
+  "bundle": {"bytes": 919236, "entries": 211, "meshes": 204, "materials": 7, "load_ms": 2, "identical_twice": true, "corrupt_refused": true},
+  "spatial": {"hash": "cbf29ce484222325", "findings": 0, "verdict": "clean", "identical_twice": true},
+  "nav": {"digest": "9ac76ba1bf06ea07", "walkable": 840, "routes_ok": 3, "roundtrip": true, "identical_twice": true, "shuffled_identical": true},
+  "cells": [
+    {"cell": [0, 0], "digest": "37dbe03cee1e16cf", "identical_twice": true},
+    {"cell": [1, 0], "digest": "a67e53c9c8f3e9ef", "identical_twice": true},
+    {"cell": [0, 1], "digest": "c96217c02b394705", "identical_twice": true},
+    {"cell": [1, 1], "digest": "330727f201d82252", "identical_twice": true}
+  ],
+  "stream": {"live": 4, "hitches": 0, "refused": 0, "route_steps": 63, "seams_join": true, "rebake_identical": true, "unloaded_refuses": true, "sim_hash": "58d261df54586808"},
+  "replay": {"identical_twice": true}
+}

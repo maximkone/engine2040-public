@@ -1,0 +1,30 @@
+[package]
+name = "engine-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# Headless default stays std-only (workspace-check.mjs enforces it): the
+# identity registry rides the non-default `registry` feature until a consumer
+# needs it (new crates sit behind features).
+[features]
+registry = ["engine-scene"]
+# Import lane: real glTF + texture decoding, opt-in so headless stays std-only.
+# It also covers skinned/skeleton/clip import into the anim contract
+# (assets -> anim; anim never imports assets back).
+import = ["dep:gltf", "dep:image", "dep:engine-anim"]
+
+[dependencies]
+engine-core.workspace = true
+engine-scene = { version = "0.1.0", path = "../scene", optional = true }
+engine-anim = { workspace = true, optional = true }
+gltf = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+
+[[example]]
+name = "ct35_lod_bake"
+required-features = ["import"]

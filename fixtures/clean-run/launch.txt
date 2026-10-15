@@ -1,0 +1,8 @@
+version:0.1.0
+profile:release
+binary:bin/arena.exe
+bundle:content/arena-bundle.bin
+binary_kind:STUB
+bundle_kind:STUB
+args:
+smoke:bin/arena.exe --frames 120 --exit

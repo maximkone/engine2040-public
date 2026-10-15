@@ -1,0 +1,10 @@
+[package]
+name = "ct25-proof"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+engine-assets = { version = "0.1.0", path = "../../../crates/assets", features = ["import"] }
+
+[workspace]

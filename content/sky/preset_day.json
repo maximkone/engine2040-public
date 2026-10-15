@@ -1,0 +1,14 @@
+{
+  "name": "day",
+  "kind": "sky_ibl",
+  "sun_elevation_deg": 48.0,
+  "sun_azimuth_deg": 135.0,
+  "turbidity": 2.5,
+  "exposure_ev100": 13.0,
+  "sh_order": 2,
+  "sh_coeffs": 9,
+  "capture_w": 64,
+  "capture_h": 32,
+  "budget_ms": 0.4,
+  "albedo_ground": 0.3
+}

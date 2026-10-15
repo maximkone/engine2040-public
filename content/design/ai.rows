@@ -1,0 +1,3 @@
+# AI curves v1: scripted defaults as designer rows. Units: aggression/caution/morale 0..=1000 biases, engage_range_cm centimetres.
+table ai version 1
+v1 aggression0=0 aggression1=125 aggression2=250 aggression3=375 aggression4=500 aggression5=625 aggression6=750 aggression7=1000 caution0=500 caution1=500 caution2=500 caution3=500 caution4=500 caution5=500 caution6=500 caution7=500 engage_range_cm=250 morale_default=500

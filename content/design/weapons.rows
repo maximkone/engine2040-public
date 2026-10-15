@@ -1,0 +1,20 @@
+# weapons design rows: Rome hand weapons as designer data (Bycer ch3 ch8 tells and commit; Sellers ch9-10 resource and gates).
+# Designers change numbers here without a Rust edit; the game test in
+# crates/game/tests/it/design_combat.rs checks them. Whole numbers only,
+# `#` comments, no floats. Units live in the key: `_permille` is parts per
+# thousand, `_ticks` is fixed ticks at 60 Hz. Stamina costs are points,
+# hands and counter and type are plain counts.
+# Columns: type (1 dagger thrust, 2 sword cut, 3 spear thrust), damage_permille,
+# speed_ticks (startup ticks, fewer is faster), hands (1 or 2),
+# stagger_permille (poise hold 0-1000, higher holds longer),
+# stamina_cost (points, heavy above light), counter (1 parry, 2 dodge,
+# 3 block: the answer from the player's own kit that beats this weapon).
+# House numbers: readable startups sit in 12-24 ticks (dagger 12, gladius 15
+# matches v2 startup, spatha 18, pilum 24 heavy windup); fast weapons hit for
+# less (damage rises with speed_ticks); every weapon has one counter.
+# Book notes: weapons as data rows `[handsrust | Damage from Weapons and Claws]`.
+table weapons version 1
+pugio type=1 damage_permille=80 speed_ticks=12 hands=1 stagger_permille=300 stamina_cost=10 counter=2
+gladius type=2 damage_permille=120 speed_ticks=15 hands=1 stagger_permille=400 stamina_cost=15 counter=1
+spatha type=2 damage_permille=150 speed_ticks=18 hands=1 stagger_permille=500 stamina_cost=20 counter=3
+pilum type=3 damage_permille=180 speed_ticks=24 hands=2 stagger_permille=600 stamina_cost=30 counter=2

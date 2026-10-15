@@ -1,0 +1,1466 @@
+//! Incremental live match (EG1) and presentation (EG1b): one `Sim` step
+//! per fixed tick.
+//!
+//! A fixed-step loop must cost the same every tick (Gregory, Game Engine
+//! Architecture 7.2 and 7.5.2.2). The prefix runners ([`run_prefix`],
+//! [`run_events`], [`run_dataset`]) rebuild the match from tick 0 on every
+//! call, so a session that asks them once per tick pays O(n) per tick and
+//! O(n^2) per match. [`LiveMatch`] owns one cold authority `Sim` and steps
+//! it exactly once per call through the same recorder leg as
+//! [`run_dataset`] (`DatasetLeg`), returning that tick's checkpoint, combat
+//! event row and dataset rows: byte-identical to the prefix runners' last
+//! tick, at constant cost. [`LivePresentation`] does the same for the
+//! presentation legs ([`run_loco_poses`], [`run_presentation`]) over its own
+//! recording sim.
+//!
+//! Consumer: the packaged game session (`engine-game` `App`), one call per
+//! accepted tick. Data owner: the live match owns its sim; the caller owns
+//! the tape and hands in one tick's inputs per call. Units: fixed ticks at
+//! [`TICK_HZ`](crate::TICK_HZ). Determinism scope: same as [`run`]; the
+//! checkpoint hash path is the shared `Sim::step`, untouched. Error policy:
+//! a rejected input slice returns `None` and steps nothing; a step failure
+//! (unreachable for validated inputs) poisons the match, and the caller
+//! rebuilds from tick 0.
+//!
+//! [`run`]: crate::run
+//! [`run_prefix`]: crate::run_prefix
+//! [`run_events`]: crate::run_events
+//! [`run_dataset`]: crate::run_dataset
+//! [`run_loco_poses`]: crate::run_loco_poses
+//! [`run_presentation`]: crate::run_presentation
+
+use engine_anim::contract::{LocalPose, RootDelta, RootTable};
+use engine_anim::pose::extract_root;
+use engine_input::{FighterInput, FighterTape};
+
+use crate::recorder::{on_fork_step, DamageLedger, Row, StepRecord};
+use crate::{
+    ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, Sim, TickBreaks, TickEvents,
+    MAX_SLOTS,
+};
+
+/// Dataset recorder leg: pre-step poses, fight state and damage counters
+/// around one `Sim::step`, then one [`Row`] per fighter. Shared by
+/// [`run_dataset`](crate::run_dataset) (whole match) and [`LiveMatch`] (one
+/// tick per call), so both record through the same per-tick code. Scratch is
+/// hoisted: the steady path allocates nothing beyond the sim's own tick log.
+pub(crate) struct DatasetLeg {
+    ledger: DamageLedger,
+    before_states: Vec<FighterState>,
+    before_damage: Vec<u16>,
+}
+
+impl DatasetLeg {
+    /// Fresh leg for `fighters` slots (zero damage dealt).
+    pub(crate) fn new(fighters: usize) -> Self {
+        Self {
+            ledger: DamageLedger::new(fighters),
+            before_states: Vec::with_capacity(fighters),
+            before_damage: Vec::with_capacity(fighters),
+        }
+    }
+
+    /// Step `sim` one tick over `tape` and append that tick's rows (one per
+    /// fighter, slot order) to `rows`. `None` when the step or a row fails.
+    pub(crate) fn step(
+        &mut self,
+        sim: &mut Sim,
+        tape: &FighterTape,
+        rows: &mut Vec<Row>,
+    ) -> Option<()> {
+        let tick = sim.tick;
+        self.before_states.clear();
+        self.before_states.extend_from_slice(sim.states.as_slice());
+        let before_fight = sim.fight;
+        self.ledger.snapshot_into(&mut self.before_damage);
+        sim.step(tape)?;
+        let inputs = sim.last_inputs();
+        let tick_row = sim.events.last()?;
+        let killed = self.ledger.apply(&tick_row.events);
+        for (slot, cell) in inputs.iter().enumerate().take(sim.fighters) {
+            rows.push(on_fork_step(&StepRecord {
+                tick,
+                states: &self.before_states,
+                fight: &before_fight,
+                input: (*cell)?,
+                damage_before: self.before_damage.get(slot).copied()?,
+                damage_after: self.ledger.damage(slot),
+                killed,
+            })?);
+        }
+        Some(())
+    }
+}
+
+/// One stepped tick, borrowed from the [`LiveMatch`] until the next step.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LiveTick<'a> {
+    /// Post-step checkpoint: the last row of [`run_prefix`](crate::run_prefix)
+    /// over `0..=tick`.
+    pub checkpoint: Checkpoint,
+    /// Combat events of the tick: the last row of
+    /// [`run_events`](crate::run_events) over `0..=tick`.
+    pub events: &'a TickEvents,
+    /// Destruction breaks of the tick: the last row of
+    /// [`run_breaks`](crate::run_breaks) over `0..=tick`.
+    pub breaks: &'a TickBreaks,
+    /// The tick's dataset rows, one per fighter in slot order: the last
+    /// `fighters` rows of [`run_dataset`](crate::run_dataset) over `0..=tick`.
+    pub rows: &'a [Row],
+}
+
+/// Incremental live match: one cold authority `Sim` stepped exactly once per
+/// [`LiveMatch::step`] call (see the module docs). The tick log stays one row
+/// deep, so memory is flat over any match length.
+pub struct LiveMatch {
+    sim: Sim,
+    leg: DatasetLeg,
+    /// One-tick tape scratch: the caller's inputs for the stepped tick only.
+    tape: FighterTape,
+    /// Provider replies staged by [`LiveMatch::stamp`], drained at the tick
+    /// boundary into the stepped tick; ticks already stepped never linger.
+    staged: Vec<FighterInput>,
+    /// Inputs that actually ran, in tick order: the replay tape read through
+    /// [`LiveMatch::recorded_tape`].
+    recorded: Vec<FighterInput>,
+    /// Merge scratch for one tick's staged plus live inputs; cleared and
+    /// refilled by [`LiveMatch::step`] so steady ticks allocate nothing new.
+    merge: Vec<FighterInput>,
+    rows: Vec<Row>,
+    checkpoint: Checkpoint,
+    events: TickEvents,
+    breaks: TickBreaks,
+    steps: u64,
+    poisoned: bool,
+}
+
+impl LiveMatch {
+    /// Fresh match at tick 0 over a validated `config` under the frozen v1
+    /// rules; `None` when the config is invalid (same rule as
+    /// [`run`](crate::run)).
+    pub fn new(config: &ArenaConfig) -> Option<Self> {
+        Self::with_rules(config, ArenaRules::V1)
+    }
+
+    /// Fresh match at tick 0 under explicit fight rules (EG3); `None` when
+    /// the config is invalid or the rules version is unknown.
+    pub fn with_rules(config: &ArenaConfig, rules: ArenaRules) -> Option<Self> {
+        let mut sim = Sim::build(config, &FighterTape::default(), false, false)?;
+        if !sim.set_rules(rules) {
+            return None;
+        }
+        // The live log keeps one row: drop the whole-match reservations.
+        sim.checkpoints = Vec::with_capacity(1);
+        sim.events = Vec::with_capacity(1);
+        sim.breaks = Vec::with_capacity(1);
+        let fighters = sim.fighters;
+        Some(Self {
+            sim,
+            leg: DatasetLeg::new(fighters),
+            tape: FighterTape(Vec::with_capacity(MAX_SLOTS)),
+            staged: Vec::new(),
+            recorded: Vec::new(),
+            merge: Vec::new(),
+            rows: Vec::with_capacity(fighters),
+            checkpoint: Checkpoint { tick: 0, hash: 0 },
+            events: TickEvents {
+                tick: 0,
+                events: Vec::new(),
+            },
+            breaks: TickBreaks {
+                tick: 0,
+                events: Vec::new(),
+            },
+            steps: 0,
+            poisoned: false,
+        })
+    }
+
+    /// Match configuration.
+    #[must_use]
+    pub const fn config(&self) -> ArenaConfig {
+        self.sim.config
+    }
+
+    /// Fight rules this match runs under.
+    #[must_use]
+    pub const fn rules(&self) -> ArenaRules {
+        self.sim.rules
+    }
+
+    /// Next tick [`LiveMatch::step`] simulates (ticks stepped so far).
+    #[must_use]
+    pub const fn tick(&self) -> u32 {
+        self.sim.tick
+    }
+
+    /// `Sim` steps performed since construction: exactly one per
+    /// [`LiveMatch::step`] call that passed input validation (EG1 cost proof).
+    #[must_use]
+    pub const fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// True after a step failed mid-tick; every later step returns `None`
+    /// and the caller rebuilds from tick 0.
+    #[must_use]
+    pub const fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// Read-only integer balance verdict for `slot`: the slot entry or `None`
+    /// for a bad slot. Forwards to [`Sim::balance`](crate::Sim::balance),
+    /// which owns the per-slot states. Presentation only; the digest path
+    /// never reads this, so the hash cannot move.
+    ///
+    /// Consumer: the window fighter look polls this each tick and feeds
+    /// `fighter_look::observe_balance`. Data owner:
+    /// [`Sim::balance`](crate::Sim::balance). Units: slot index.
+    /// Determinism scope: same-machine read of hashed state, never hashed here.
+    #[must_use]
+    pub fn balance(&self, slot: u8) -> Option<&BalanceState> {
+        self.sim.balance(slot)
+    }
+
+    /// Read-only press-tick attack cues from the last stepped tick (EG19b):
+    /// one `AttackStarted` per fresh attack start in fighter-ID order under
+    /// tables v2; empty under v1 rows, on quiet ticks and past the press
+    /// tick. Forwards to [`Sim::cues`](crate::Sim::cues), which owns the
+    /// per-tick cue buffer. Presentation only; the digest path never reads
+    /// this, so the hash cannot move.
+    ///
+    /// Caller: `crates/game/src/lib.rs::App::simulate_tick` reads these each
+    /// accepted tick and maps each cue into an audio `FightCue` (EG19c starts
+    /// the swing clip from them). Data owner:
+    /// [`Sim::cues`](crate::Sim::cues). Units: fighter slots in press order.
+    /// Determinism scope: same-machine read of tick output, never hashed here.
+    #[must_use]
+    pub fn cues(&self) -> &[engine_combat::fight::AttackStarted] {
+        self.sim.cues()
+    }
+
+    /// Step tick [`LiveMatch::tick`] with `inputs`: the human inputs for that
+    /// tick, `(fighter)`-sorted with no duplicates, every `input.tick` equal
+    /// to the stepped tick and every slot below `config.fighters` (brains
+    /// fill the rest, exactly as in the prefix runners). Replies staged with
+    /// [`LiveMatch::stamp`] for this tick merge in: staged slots the caller
+    /// does not drive run as recorded, so stepping with an empty slice replays
+    /// a fully stamped tick. A slice breaking those rules, a finished match
+    /// or a poisoned one returns `None` and steps nothing.
+    pub fn step(&mut self, inputs: &[FighterInput]) -> Option<LiveTick<'_>> {
+        if self.poisoned || self.sim.tick >= self.sim.config.ticks {
+            return None;
+        }
+        if !accepts_tick(&self.sim, inputs) {
+            return None;
+        }
+        let tick = self.sim.tick;
+        let Self {
+            sim,
+            tape,
+            staged,
+            recorded,
+            merge,
+            ..
+        } = self;
+        merge.clear();
+        for staged_input in staged.iter() {
+            if staged_input.tick == tick
+                && !inputs
+                    .iter()
+                    .any(|live| live.fighter.0 == staged_input.fighter.0)
+            {
+                merge.push(staged_input.clone());
+            }
+        }
+        merge.extend_from_slice(inputs);
+        merge.sort_by_key(|input| input.fighter.0);
+        if !accepts_tick(sim, merge) {
+            return None;
+        }
+        // Ticks already stepped never linger: everything staged for this
+        // tick either ran or was superseded by a live call driving its slot.
+        staged.retain(|staged_input| staged_input.tick != tick);
+        load_tick(sim, tape, merge);
+        recorded.extend_from_slice(merge);
+        self.rows.clear();
+        self.steps += 1;
+        if self.advance().is_none() {
+            self.poisoned = true;
+            return None;
+        }
+        Some(LiveTick {
+            checkpoint: self.checkpoint,
+            events: &self.events,
+            breaks: &self.breaks,
+            rows: &self.rows,
+        })
+    }
+
+    /// Stage one provider reply for its tick. True when staged: the tick is
+    /// the next one or a later one inside the match, the slot is live and
+    /// the fields validate. Past-due ticks, out-of-range ticks, bad slots
+    /// and invalid fields refuse with false and change nothing; refusals
+    /// never poison the match. A second reply for the same tick and slot
+    /// replaces the first, so the newest provider answer wins.
+    /// Caller: the AL1 live-mind loop stages each validated provider reply
+    /// here one or more ticks ahead; [`LiveMatch::step`] drains them at the
+    /// tick boundary.
+    pub fn stamp(&mut self, input: FighterInput) -> bool {
+        if input.tick < self.sim.tick
+            || input.tick >= self.sim.config.ticks
+            || usize::from(input.fighter.0) >= self.sim.fighters
+            || input.validate().is_err()
+        {
+            return false;
+        }
+        if let Some(slot) = self
+            .staged
+            .iter_mut()
+            .find(|staged| staged.tick == input.tick && staged.fighter.0 == input.fighter.0)
+        {
+            *slot = input;
+        } else {
+            self.staged.push(input);
+        }
+        true
+    }
+
+    /// Inputs that ran so far, in tick order: staged replies plus live calls
+    /// merged per tick by [`LiveMatch::step`]. Replaying them through
+    /// [`run`](crate::run) reproduces the stepped checkpoints.
+    /// Caller: the AL1 verifier replays with the provider off.
+    #[must_use]
+    pub fn recorded_tape(&self) -> FighterTape {
+        FighterTape(self.recorded.clone())
+    }
+
+    /// One shared-leg step plus the one-row log rotation.
+    fn advance(&mut self) -> Option<()> {
+        self.leg.step(&mut self.sim, &self.tape, &mut self.rows)?;
+        self.checkpoint = self.sim.checkpoints.pop()?;
+        self.events = self.sim.events.pop()?;
+        self.breaks = self.sim.breaks.pop()?;
+        Some(())
+    }
+}
+
+/// Same per-input rules the prefix runners apply to the tape, scoped to one
+/// tick: valid fields, strict fighter order, slot in range, tick equal to
+/// the sim's next tick. Shared by both live steppers.
+fn accepts_tick(sim: &Sim, inputs: &[FighterInput]) -> bool {
+    let mut prev: Option<u8> = None;
+    for input in inputs {
+        if input.tick != sim.tick
+            || usize::from(input.fighter.0) >= sim.fighters
+            || input.validate().is_err()
+            || prev.is_some_and(|last| input.fighter.0 <= last)
+        {
+            return false;
+        }
+        prev = Some(input.fighter.0);
+    }
+    true
+}
+
+/// Load one accepted tick's inputs into the one-tick tape scratch and rewind
+/// the sim's tape cursor onto it (no allocation once the scratch is sized).
+fn load_tick(sim: &mut Sim, tape: &mut FighterTape, inputs: &[FighterInput]) {
+    tape.0.clear();
+    tape.0.extend_from_slice(inputs);
+    sim.cursor = 0;
+}
+
+/// One fighter's root sample after a tick: planar `[x, z]` plus yaw, the
+/// same values `Sim::root_tables` reads from the recorded trajectory.
+type RootSample = ([f32; 2], f32);
+
+/// One fighter's pending root-table edit for a stepped tick: the corrected
+/// previous delta (it used to wrap to tick 0) plus the new wrap delta.
+type RootEdit = (Option<RootDelta>, RootDelta);
+
+/// Incremental presentation (EG1b): one recording `Sim` stepped exactly once
+/// per [`LivePresentation::step_into`] call, appending that tick to
+/// caller-held pose tracks and root tables. Byte-equal to
+/// [`run_loco_poses`](crate::run_loco_poses) plus
+/// [`run_presentation`](crate::run_presentation) over `0..=tick`, which stay
+/// the parity oracle, at constant cost per tick.
+///
+/// Pose tracks are prefix-stable, so each tick appends one pose per fighter.
+/// Root tables are loops ([`extract_root`]: delta `k` spans sample `k` to
+/// `(k + 1) % n`), so a new sample only rewrites the old wrap delta into a
+/// plain step and appends the new wrap; both come from `extract_root` over a
+/// two-sample window, so the bytes match the whole-table extraction.
+///
+/// Consumer: the packaged game's rolling presentation cursor. Data owner: the
+/// caller owns the tracks and tables; this owns one recording sim whose own
+/// history stays one tick deep. Presentation only: never hashed, and the
+/// authority sim ([`LiveMatch`]) is a separate sim.
+pub struct LivePresentation {
+    sim: Sim,
+    tape: FighterTape,
+    first: Vec<RootSample>,
+    last: Vec<RootSample>,
+    edits: Vec<RootEdit>,
+    steps: u64,
+    poisoned: bool,
+}
+
+impl LivePresentation {
+    /// Fresh recording sim at tick 0 over a validated `config` under the
+    /// frozen v1 rules; `None` when the config is invalid (same rule as
+    /// [`run`](crate::run)).
+    pub fn new(config: &ArenaConfig) -> Option<Self> {
+        Self::with_rules(config, ArenaRules::V1)
+    }
+
+    /// Fresh recording sim under explicit fight rules (EG3): presentation
+    /// must run the authority's rules, since hits move fighters. `None` when
+    /// the config is invalid or the rules version is unknown.
+    pub fn with_rules(config: &ArenaConfig, rules: ArenaRules) -> Option<Self> {
+        let mut sim = Sim::build(config, &FighterTape::default(), true, false)?;
+        if !sim.set_rules(rules) {
+            return None;
+        }
+        let fighters = sim.fighters;
+        // Logs and histories stay one tick deep: drop the whole-match
+        // reservations (the recorded pose tracks live with the caller).
+        sim.checkpoints = Vec::with_capacity(1);
+        sim.events = Vec::with_capacity(1);
+        sim.breaks = Vec::with_capacity(1);
+        sim.history = Some(Vec::with_capacity(1));
+        sim.loco_history = Some((0..fighters).map(|_| Vec::with_capacity(2)).collect());
+        Some(Self {
+            sim,
+            tape: FighterTape(Vec::with_capacity(MAX_SLOTS)),
+            first: Vec::with_capacity(fighters),
+            last: Vec::with_capacity(fighters),
+            edits: Vec::with_capacity(fighters),
+            steps: 0,
+            poisoned: false,
+        })
+    }
+
+    /// Next tick [`LivePresentation::step_into`] simulates.
+    #[must_use]
+    pub const fn tick(&self) -> u32 {
+        self.sim.tick
+    }
+
+    /// `Sim` steps performed since construction: one per accepted
+    /// [`LivePresentation::step_into`] call (EG1b cost proof).
+    #[must_use]
+    pub const fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// Step tick [`LivePresentation::tick`] with `inputs` (same rules as
+    /// [`LiveMatch::step`]) and append it: one pose onto each
+    /// `pose_tracks[slot]`, one root edit onto each `root_tables[slot]`.
+    /// Both slices hold one entry per fighter, each covering exactly the
+    /// ticks stepped so far; otherwise (or on rejected inputs, a finished or
+    /// poisoned sim) nothing steps and nothing is touched. A failed step
+    /// poisons the sim and leaves the caller's data untouched.
+    pub fn step_into(
+        &mut self,
+        inputs: &[FighterInput],
+        pose_tracks: &mut [Vec<LocalPose>],
+        root_tables: &mut [RootTable],
+    ) -> Option<()> {
+        let fighters = self.sim.fighters;
+        let covered = usize::try_from(self.sim.tick).ok()?;
+        if self.poisoned
+            || self.sim.tick >= self.sim.config.ticks
+            || !accepts_tick(&self.sim, inputs)
+            || pose_tracks.len() != fighters
+            || root_tables.len() != fighters
+            || pose_tracks.iter().any(|track| track.len() != covered)
+            || root_tables
+                .iter()
+                .any(|table| table.deltas.len() != covered)
+        {
+            return None;
+        }
+        load_tick(&mut self.sim, &mut self.tape, inputs);
+        self.steps += 1;
+        if self.advance().is_none() {
+            self.poisoned = true;
+            return None;
+        }
+        // Every fallible read happened in `advance`: apply all or nothing.
+        let poses = self.sim.loco_history.as_ref()?;
+        for ((track, table), ((fix, wrap), history)) in pose_tracks
+            .iter_mut()
+            .zip(root_tables.iter_mut())
+            .zip(self.edits.iter().zip(poses))
+        {
+            track.push(history.last()?.clone());
+            if let (Some(fix), Some(old)) = (fix, table.deltas.last_mut()) {
+                *old = *fix;
+            }
+            table.deltas.push(*wrap);
+        }
+        Some(())
+    }
+
+    /// One recording step, then the per-fighter root edits and the one-tick
+    /// trims. `None` on any failure (the caller poisons).
+    fn advance(&mut self) -> Option<()> {
+        let tick = self.sim.tick;
+        self.sim.step(&self.tape)?;
+        self.sim.checkpoints.clear();
+        self.sim.events.clear();
+        self.sim.breaks.clear();
+        if let Some(history) = self.sim.history.as_mut() {
+            history.clear();
+        }
+        let poses = self.sim.loco_history.as_mut()?;
+        for track in poses.iter_mut() {
+            let keep_from = track.len().checked_sub(1)?;
+            track.drain(..keep_from);
+        }
+        self.edits.clear();
+        for (slot, state) in self.sim.states.iter().enumerate().take(self.sim.fighters) {
+            let sample = ([state.pos[0], state.pos[2]], state.yaw);
+            let edit = if tick == 0 {
+                self.first.push(sample);
+                self.last.push(sample);
+                (None, window_delta(sample, sample, 0, true)?)
+            } else {
+                let prev = *self.last.get(slot)?;
+                let first = *self.first.get(slot)?;
+                let fix = window_delta(prev, sample, tick - 1, false)?;
+                let wrap = window_delta(sample, first, tick, false)?;
+                *self.last.get_mut(slot)? = sample;
+                (Some(fix), wrap)
+            };
+            self.edits.push(edit);
+        }
+        (self.edits.len() == self.sim.fighters).then_some(())
+    }
+}
+
+/// The delta from sample `a` to sample `b` stamped `tick`, through
+/// [`extract_root`] itself so the float bytes match the whole-table run.
+/// `single` extracts the one-sample loop (tick 0: zero motion).
+fn window_delta(a: RootSample, b: RootSample, tick: u32, single: bool) -> Option<RootDelta> {
+    let table = if single {
+        extract_root(&[a.0], &[a.1], tick).ok()?
+    } else {
+        extract_root(&[a.0, b.0], &[a.1, b.1], tick).ok()?
+    };
+    table.deltas.first().copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{run_breaks, run_dataset, run_events, run_prefix};
+    use engine_input::{fighter::ATTACK, Buttons, FighterId};
+
+    /// Human slot 0 circle-strafes and swings every 30 ticks; brains fill
+    /// the rest. Inputs grouped per tick for the live stepper.
+    fn script(config: &ArenaConfig) -> FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            let (mx, mz) = match (tick / 15) % 4 {
+                0 => (100, 0),
+                1 => (0, 100),
+                2 => (-100, 0),
+                _ => (0, -100),
+            };
+            let buttons = if tick.is_multiple_of(30) {
+                Buttons(ATTACK)
+            } else {
+                Buttons::NONE
+            };
+            inputs.push(FighterInput {
+                tick,
+                fighter: FighterId(0),
+                mx,
+                mz,
+                facing: 0,
+                buttons,
+            });
+            if tick.is_multiple_of(7) {
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId(1),
+                    mx: -50,
+                    mz: 25,
+                    facing: 9_000,
+                    buttons: Buttons::NONE,
+                });
+            }
+        }
+        FighterTape(inputs)
+    }
+
+    fn tick_inputs(tape: &FighterTape, tick: u32) -> &[FighterInput] {
+        let start = tape.0.partition_point(|input| input.tick < tick);
+        let end = tape.0.partition_point(|input| input.tick <= tick);
+        &tape.0[start..end]
+    }
+
+    #[test]
+    fn live_match_equals_whole_match_runners_tick_for_tick() {
+        for fighters in [2u8, 8] {
+            let config = ArenaConfig::try_new(2040, 600, fighters, 20.0).expect("valid config");
+            let tape = script(&config);
+            let (_, checkpoints) = run_prefix(&config, &tape, config.ticks).expect("prefix");
+            let events = run_events(&config, &tape);
+            let breaks = run_breaks(&config, &tape);
+            let dataset = run_dataset(&config, &tape).expect("dataset");
+            let stride = usize::from(fighters);
+            let mut live = LiveMatch::new(&config).expect("live match");
+            for tick in 0..config.ticks {
+                let index = tick as usize;
+                let stepped = live.step(tick_inputs(&tape, tick)).expect("live step");
+                assert_eq!(stepped.checkpoint, checkpoints[index], "checkpoint {tick}");
+                assert_eq!(stepped.events, &events[index], "events {tick}");
+                assert_eq!(stepped.breaks, &breaks[index], "breaks {tick}");
+                assert_eq!(
+                    stepped.rows,
+                    &dataset.rows[index * stride..(index + 1) * stride],
+                    "rows {tick}"
+                );
+            }
+            assert!(
+                events.iter().any(|row| !row.events.is_empty()),
+                "match fights"
+            );
+            assert_eq!(
+                live.steps(),
+                u64::from(config.ticks),
+                "one sim step per tick"
+            );
+            assert_eq!(live.tick(), config.ticks);
+            assert!(live.step(&[]).is_none(), "finished match steps nothing");
+            assert_eq!(live.steps(), u64::from(config.ticks));
+        }
+    }
+
+    #[test]
+    fn live_presentation_equals_prefix_presentation_runners_tick_for_tick() {
+        // EG1b parity: after every tick the appended tracks and tables equal
+        // run_loco_poses plus run_presentation over 0..=tick (root tables
+        // are not prefix-stable, so each tick checks against a fresh replay).
+        for fighters in [2u8, 8] {
+            let config = ArenaConfig::try_new(2040, 600, fighters, 20.0).expect("valid config");
+            let tape = script(&config);
+            let stride = usize::from(fighters);
+            let mut live = LivePresentation::new(&config).expect("live presentation");
+            let mut tracks: Vec<Vec<LocalPose>> = vec![Vec::new(); stride];
+            let mut tables: Vec<RootTable> = vec![RootTable::default(); stride];
+            for tick in 0..config.ticks {
+                live.step_into(tick_inputs(&tape, tick), &mut tracks, &mut tables)
+                    .expect("presentation step");
+                let short = ArenaConfig {
+                    ticks: tick + 1,
+                    ..config
+                };
+                // The runners reject tape rows past `short.ticks`: replay
+                // the tape prefix the session held at this tick.
+                let held = tape.0.partition_point(|input| input.tick <= tick);
+                let prefix = FighterTape(tape.0[..held].to_vec());
+                let poses = crate::run_loco_poses(&short, &prefix);
+                assert_eq!(poses.len(), stride, "oracle replays at {tick}");
+                assert_eq!(tracks, poses, "poses {tick}");
+                assert_eq!(
+                    tables,
+                    crate::run_presentation(&short, &prefix),
+                    "roots {tick}"
+                );
+            }
+            assert_eq!(
+                live.steps(),
+                u64::from(config.ticks),
+                "one sim step per tick"
+            );
+            assert!(live.step_into(&[], &mut tracks, &mut tables).is_none());
+        }
+    }
+
+    #[test]
+    fn live_presentation_rejects_mismatched_buffers_untouched() {
+        let config = ArenaConfig::try_new(7, 8, 2, 12.0).expect("valid config");
+        let mut live = LivePresentation::new(&config).expect("live presentation");
+        let mut tracks: Vec<Vec<LocalPose>> = vec![Vec::new(); 2];
+        let mut short_tables: Vec<RootTable> = vec![RootTable::default(); 1];
+        assert!(live
+            .step_into(&[], &mut tracks, &mut short_tables)
+            .is_none());
+        assert_eq!((live.tick(), live.steps()), (0, 0));
+        let mut tables: Vec<RootTable> = vec![RootTable::default(); 2];
+        live.step_into(&[], &mut tracks, &mut tables)
+            .expect("tick 0");
+        // A caller cache that fell behind is refused, never half-appended.
+        let mut stale_tracks: Vec<Vec<LocalPose>> = vec![Vec::new(); 2];
+        assert!(live
+            .step_into(&[], &mut stale_tracks, &mut tables)
+            .is_none());
+        assert_eq!((live.tick(), live.steps()), (1, 1));
+        assert!(stale_tracks.iter().all(Vec::is_empty));
+        assert_eq!(tables[0].deltas.len(), 1);
+    }
+    /// Whole-match v2 run through one sim (the oracle for the live stepper).
+    fn whole_v2(config: &ArenaConfig, tape: &FighterTape, rules: ArenaRules) -> Sim {
+        let mut sim = Sim::build(config, tape, false, false).expect("valid build");
+        assert!(sim.set_rules(rules));
+        while sim.tick < config.ticks {
+            sim.step(tape).expect("valid step");
+        }
+        sim
+    }
+
+    fn hits(events: &[TickEvents]) -> usize {
+        events
+            .iter()
+            .flat_map(|row| row.events.iter())
+            .filter(|event| matches!(event, crate::FightEvent::Hit { .. }))
+            .count()
+    }
+
+    #[test]
+    fn v2_live_match_digest_twice_equal_and_apart_from_v1() {
+        // EG3: v2 digest x2 equal, the live stepper equals the whole-match
+        // v2 sim tick for tick, and v1 checkpoints never collide with v2.
+        for fighters in [2u8, 8] {
+            let config = ArenaConfig::try_new(2040, 600, fighters, 20.0).expect("valid config");
+            let tape = script(&config);
+            let rules = ArenaRules::v2_free_for_all();
+            let oracle = whole_v2(&config, &tape, rules);
+            let run_live = || {
+                let mut live = LiveMatch::with_rules(&config, rules).expect("v2 match");
+                let mut checkpoints = Vec::new();
+                for tick in 0..config.ticks {
+                    let stepped = live.step(tick_inputs(&tape, tick)).expect("v2 step");
+                    assert_eq!(stepped.events, &oracle.events[tick as usize]);
+                    checkpoints.push(stepped.checkpoint);
+                }
+                checkpoints
+            };
+            let (first, second) = (run_live(), run_live());
+            assert_eq!(first, second, "v2 digest x2");
+            assert_eq!(first, oracle.checkpoints);
+            let v1 = crate::run(&config, &tape);
+            assert!(first.iter().zip(&v1).all(|(a, b)| a.hash != b.hash));
+        }
+    }
+
+    #[test]
+    fn v2_arena_far_foe_untouched_while_v1_hits_across_the_arena() {
+        // Two idle humans at their spawns; slot 0 swings on tick 0.
+        let config = ArenaConfig::try_new(2040, 12, 2, 20.0).expect("valid config");
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for slot in 0..2u8 {
+                let buttons = if tick == 0 && slot == 0 {
+                    Buttons(ATTACK)
+                } else {
+                    Buttons::NONE
+                };
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId(slot),
+                    mx: 0,
+                    mz: 0,
+                    facing: 0,
+                    buttons,
+                });
+            }
+        }
+        let tape = FighterTape(inputs);
+        let spawn = crate::spawn_states(config.seed, config.fighters, config.half_extent_m);
+        let (dx, dz) = (
+            spawn[1].pos[0] - spawn[0].pos[0],
+            spawn[1].pos[2] - spawn[0].pos[2],
+        );
+        assert!(dx * dx + dz * dz > 4.0, "spawns stand over 2 m apart");
+        assert_eq!(
+            hits(&crate::run_events(&config, &tape)),
+            1,
+            "v1 hits anyway"
+        );
+        let v2 = whole_v2(&config, &tape, ArenaRules::v2_free_for_all());
+        assert_eq!(hits(&v2.events), 0, "v2 needs reach");
+    }
+
+    #[test]
+    fn v2_teammates_never_strike_each_other_in_a_brain_match() {
+        let config = ArenaConfig::try_new(2040, 600, 4, 20.0).expect("valid config");
+        let tape = FighterTape::default();
+        let ffa = whole_v2(&config, &tape, ArenaRules::v2_free_for_all());
+        assert!(hits(&ffa.events) > 0, "brains still land v2 hits");
+        let one_team = whole_v2(&config, &tape, ArenaRules::v2_teams([0; MAX_SLOTS]));
+        assert_eq!(hits(&one_team.events), 0, "one team, no hits");
+        let mut bad = ArenaRules::v2_free_for_all();
+        bad.version = 3;
+        assert!(LiveMatch::with_rules(&config, bad).is_none());
+    }
+    /// Winner of a v2 brain duel from the sim's spawns: the slot still up on
+    /// the first knockdown tick, `None` for no knockdown or a double
+    /// knockout on one tick; plus the per-tick hp pairs.
+    fn v2_duel(seed: u64, ticks: u32) -> (Option<u8>, Vec<(u16, u16)>) {
+        let config = ArenaConfig::try_new(seed, ticks, 2, 20.0).expect("valid config");
+        let tape = FighterTape::default();
+        let mut sim = Sim::build(&config, &tape, false, false).expect("build");
+        assert!(sim.set_rules(ArenaRules::v2_free_for_all()));
+
+        let mut hp = Vec::with_capacity(ticks as usize);
+        let mut winner = None;
+        let mut decided = false;
+        while sim.tick < config.ticks {
+            sim.step(&tape).expect("step");
+            let mut down = [false; 2];
+            for event in &sim.events.last().expect("row").events {
+                if let crate::FightEvent::Knockdown { victim, .. } = *event {
+                    down[usize::from(victim)] = true;
+                }
+            }
+            if !decided && (down[0] || down[1]) {
+                decided = true;
+                winner = match down {
+                    [true, false] => Some(1),
+                    [false, true] => Some(0),
+                    _ => None,
+                };
+            }
+            hp.push((
+                sim.fight.fighters[0].hp_permille,
+                sim.fight.fighters[1].hp_permille,
+            ));
+        }
+        (winner, hp)
+    }
+
+    #[test]
+    fn v2_brains_close_distance_and_land_hits() {
+        // EG3 brain axes: the depth brain's wish is facing-relative; read as
+        // world axes both fighters walked east into the wall. V2 actuates
+        // it in the foe frame, so two brains meet and trade within 20 s.
+        let config = ArenaConfig::try_new(2040, 1200, 2, 20.0).expect("valid config");
+        let duel = whole_v2(
+            &config,
+            &FighterTape::default(),
+            ArenaRules::v2_free_for_all(),
+        );
+        assert!(hits(&duel.events) > 0, "v2 brains land hits");
+        let landed = duel
+            .events
+            .iter()
+            .position(|row| {
+                row.events
+                    .iter()
+                    .any(|event| matches!(event, crate::FightEvent::Hit { .. }))
+            })
+            .expect("a hit lands");
+        assert!(landed < 1200, "first hit at tick {landed}");
+    }
+
+    #[test]
+    fn v2_mirrored_duel_is_symmetric_tick_for_tick() {
+        // EG3 symmetric resolution: two scripted fighters, point-mirrored
+        // and pressing mirrored inputs (close in, then swing every 20 ticks
+        // with a guard between swings), keep identical hp and stun on both
+        // slots every tick. v1 resolves the trades in slot order.
+        let config = ArenaConfig::try_new(2040, 240, 2, 20.0).expect("valid config");
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            let (wish, buttons) = if tick < 40 {
+                (50, Buttons::NONE)
+            } else if tick % 20 == 0 {
+                (0, Buttons(ATTACK))
+            } else if tick % 20 >= 10 {
+                (0, Buttons(engine_input::fighter::BLOCK))
+            } else {
+                (0, Buttons::NONE)
+            };
+            for (slot, sign, facing) in [(0u8, 1i8, 9_000i16), (1, -1, -9_000)] {
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId(slot),
+                    mx: wish * sign,
+                    mz: 0,
+                    facing,
+                    buttons,
+                });
+            }
+        }
+        let tape = FighterTape(inputs);
+        let place = |slot: usize| {
+            if slot == 0 {
+                [-2.0, 0.0, 0.0]
+            } else {
+                [2.0, 0.0, 0.0]
+            }
+        };
+        let mut hits = 0;
+        let mirrored = |sim: &Sim| {
+            let (a, b) = (sim.fight.fighters[0], sim.fight.fighters[1]);
+            (a.hp_permille, a.react, a.knockdown) == (b.hp_permille, b.react, b.knockdown)
+        };
+        placed_run(
+            &config,
+            &tape,
+            ArenaRules::v2_free_for_all(),
+            place,
+            |sim| {
+                assert!(mirrored(sim), "v2 diverged at tick {}", sim.tick);
+                hits += sim.events.last().map_or(0, |row| row.events.len());
+            },
+        );
+        assert!(hits > 0, "the duel trades blows");
+        let mut v1_split = false;
+        placed_run(&config, &tape, ArenaRules::V1, place, |sim| {
+            v1_split |= !mirrored(sim)
+        });
+        assert!(v1_split, "v1 favours a slot");
+    }
+    #[test]
+    #[ignore = "slow: 400 brain duels; run with --ignored for the win-split bar"]
+    fn v2_win_split_over_seeds_has_no_slot_advantage() {
+        // Binomial bar over decisive duels: |slot-0 wins - n/2| stays inside
+        // the two-sided p > 0.01 band (2.576 * sqrt(n) / 2). Measured
+        // 2026-10-10: v1 slot 0 took about 99% of decisive bouts purely
+        // from slot-order resolution; under v2 the identical brains close
+        // in lockstep and every duel ends in a same-tick double knockout
+        // (no slot ever wins alone). A real win split needs brain diversity.
+        let (mut slot0, mut decisive, mut draws) = (0u32, 0u32, 0u32);
+        for seed in 0..400u64 {
+            match v2_duel(seed, 3600) {
+                (Some(won), _) => {
+                    decisive += 1;
+                    slot0 += u32::from(won == 0);
+                }
+                (None, hp) => {
+                    draws += u32::from(hp.last().is_some_and(|(a, b)| *a == 0 && *b == 0))
+                }
+            }
+        }
+        println!("v2 duels: slot 0 won {slot0} of {decisive} decisive, {draws} double knockouts");
+        let n = f64::from(decisive);
+        let off = (f64::from(slot0) - n / 2.0).abs();
+        assert!(
+            off <= 2.576 * n.sqrt() / 2.0,
+            "slot 0 won {slot0} of {decisive}"
+        );
+        assert!(decisive + draws > 0, "duels must finish");
+    }
+    /// Every slot human and idle (or walking `+x` at full wish for slot 0
+    /// when `walk`) for `config.ticks` ticks: no brains move anyone.
+    fn still_tape(config: &ArenaConfig, walk: bool) -> FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for slot in 0..config.fighters {
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId(slot),
+                    mx: if walk && slot == 0 { 100 } else { 0 },
+                    mz: 0,
+                    facing: 0,
+                    buttons: Buttons::NONE,
+                });
+            }
+        }
+        FighterTape(inputs)
+    }
+
+    /// Run `rules` over `tape` from spawns overridden by `place`, checking
+    /// `each` after every tick; returns the sim.
+    fn placed_run(
+        config: &ArenaConfig,
+        tape: &FighterTape,
+        rules: ArenaRules,
+        place: impl Fn(usize) -> [f32; 3],
+        mut each: impl FnMut(&Sim),
+    ) -> Sim {
+        let mut sim = Sim::build(config, tape, false, false).expect("valid build");
+        assert!(sim.set_rules(rules));
+        for (slot, state) in sim.states.iter_mut().enumerate() {
+            state.pos = place(slot);
+        }
+        while sim.tick < config.ticks {
+            sim.step(tape).expect("valid step");
+            each(&sim);
+        }
+        sim
+    }
+
+    fn min_gap_m(states: &[FighterState]) -> f32 {
+        let mut best = f32::INFINITY;
+        for (i, a) in states.iter().enumerate() {
+            for b in &states[i + 1..] {
+                let (dx, dz) = (b.pos[0] - a.pos[0], b.pos[2] - a.pos[2]);
+                best = best.min((dx * dx + dz * dz).sqrt());
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn push_apart_spreads_eight_fighters_from_one_point_in_30_ticks() {
+        let config = ArenaConfig::try_new(2040, 30, 8, 20.0).expect("valid config");
+        let tape = still_tape(&config, false);
+        let two_radii = 2.0 * crate::COLLIDE_RADIUS_MM as f32 / 1000.0;
+        let v2 = placed_run(
+            &config,
+            &tape,
+            ArenaRules::v2_free_for_all(),
+            |_| [1.0, 0.0, 2.0],
+            |_| {},
+        );
+        let gap = min_gap_m(&v2.states);
+        assert!(gap >= two_radii - 0.002, "closest pair {gap} m apart");
+        // F2P: without collision (v1) the eight stay on one point.
+        let v1 = placed_run(&config, &tape, ArenaRules::V1, |_| [1.0, 0.0, 2.0], |_| {});
+        assert_eq!(min_gap_m(&v1.states), 0.0);
+    }
+
+    #[test]
+    fn push_apart_keeps_every_centre_out_of_the_pillars() {
+        let pillar = crate::Pillar::new([-1_000, -1_000], [1_000, 1_000]);
+        let side = crate::Pillar::new([-6_000, 3_000], [-5_000, 4_000]);
+        let rules = ArenaRules::v2_free_for_all()
+            .with_pillar(pillar)
+            .and_then(|rules| rules.with_pillar(side))
+            .expect("room for two pillars");
+        let inside = |state: &FighterState| {
+            let mm = crate::match_wire::pos_mm(state.pos);
+            [pillar, side].iter().any(|p| {
+                mm[0] > p.min_mm[0]
+                    && mm[0] < p.max_mm[0]
+                    && mm[2] > p.min_mm[1]
+                    && mm[2] < p.max_mm[1]
+            })
+        };
+        // Slot 0 walks +x straight at the centre pillar for 2 s.
+        let config = ArenaConfig::try_new(7, 120, 2, 20.0).expect("valid config");
+        let walk = still_tape(&config, true);
+        let place = |slot: usize| {
+            if slot == 0 {
+                [-4.0, 0.0, 0.0]
+            } else {
+                [8.0, 0.0, 8.0]
+            }
+        };
+        let walked = placed_run(&config, &walk, rules, place, |sim| {
+            assert!(!sim.states.iter().any(inside), "a centre entered a pillar");
+        });
+        assert!(
+            walked.states[0].pos[0] < -1.0,
+            "the pillar blocked the walk"
+        );
+        // Eight brains brawl around both pillars for 10 s.
+        let brawl = ArenaConfig::try_new(2040, 600, 8, 20.0).expect("valid config");
+        whole_v2_checked(&brawl, rules, |sim| {
+            assert!(!sim.states.iter().any(inside), "a brain entered a pillar");
+        });
+    }
+
+    /// Whole-match v2 over the default (brain-filled) tape, checking `each`.
+    fn whole_v2_checked(
+        config: &ArenaConfig,
+        rules: ArenaRules,
+        mut each: impl FnMut(&Sim),
+    ) -> Sim {
+        let tape = FighterTape::default();
+        let mut sim = Sim::build(config, &tape, false, false).expect("valid build");
+        assert!(sim.set_rules(rules));
+        while sim.tick < config.ticks {
+            sim.step(&tape).expect("valid step");
+            each(&sim);
+        }
+        sim
+    }
+
+    #[test]
+    fn push_apart_digest_twice_equal_and_tagged() {
+        let config = ArenaConfig::try_new(2040, 600, 8, 20.0).expect("valid config");
+        let rules = ArenaRules::v2_free_for_all()
+            .with_pillar(crate::Pillar::new([-500, -500], [500, 500]))
+            .expect("room for a pillar");
+        let run = |rules: ArenaRules| whole_v2_checked(&config, rules, |_| {}).checkpoints;
+        let (first, second) = (run(rules), run(rules));
+        assert_eq!(first, second, "collision digest x2");
+        let open = ArenaRules {
+            collision: false,
+            ..rules
+        };
+        assert_ne!(first.last(), run(open).last(), "the collision tag folds");
+    }
+    /// Slot 0 holds attack facing +x; slot 1 stands 1 m ahead facing it and
+    /// tries to walk away (+x) the whole time.
+    fn combo_tape(config: &ArenaConfig) -> FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            inputs.push(FighterInput {
+                tick,
+                fighter: FighterId(0),
+                mx: 0,
+                mz: 0,
+                facing: 9_000,
+                buttons: Buttons(ATTACK),
+            });
+            inputs.push(FighterInput {
+                tick,
+                fighter: FighterId(1),
+                mx: 40,
+                mz: 0,
+                facing: -9_000,
+                buttons: Buttons::NONE,
+            });
+        }
+        FighterTape(inputs)
+    }
+
+    #[test]
+    fn balance_wire_combo_floors_the_victim_and_hashes_twice() {
+        // EG34: integer balance in the v2 step. The first hit stumbles slot 1,
+        // the follow-up inside the stagger window floors it, and a fallen or
+        // catching fighter cannot move even while it pushes its wish.
+        let config = ArenaConfig::try_new(2040, 120, 2, 20.0).expect("valid config");
+        let tape = combo_tape(&config);
+        let place = |slot: usize| {
+            if slot == 0 {
+                [0.0, 0.0, 0.0]
+            } else {
+                [1.0, 0.0, 0.0]
+            }
+        };
+        let rules = ArenaRules {
+            collision: false,
+            ..ArenaRules::v2_free_for_all()
+        };
+        let mut fell = false;
+        let mut last = None;
+        let first = placed_run(&config, &tape, rules, place, |sim| {
+            let down = matches!(
+                sim.balance[1].gait(),
+                engine_physics::balance::GaitPhase::Fallen
+                    | engine_physics::balance::GaitPhase::Catching
+            );
+            let pos = sim.states[1].pos;
+            if down && last.is_some_and(|was: (bool, [f32; 3])| was.0) {
+                assert_eq!(Some(pos), last.map(|was| was.1), "down fighters hold still");
+            }
+            fell |= down;
+            last = Some((down, pos));
+        });
+        assert!(fell, "the combo floors slot 1");
+        assert!(first.balance[1].fall_count() >= 1);
+        let second = placed_run(&config, &tape, rules, place, |_| {});
+        assert_eq!(first.checkpoints, second.checkpoints, "balance digest x2");
+        let unwired = placed_run(
+            &config,
+            &tape,
+            ArenaRules {
+                balance: false,
+                ..rules
+            },
+            place,
+            |_| {},
+        );
+        assert_ne!(
+            first.checkpoints, unwired.checkpoints,
+            "the balance tag folds"
+        );
+        // V1 never wires balance: the frozen hashes cannot see it.
+        let v1 = placed_run(&config, &tape, ArenaRules::V1, place, |_| {});
+        assert!(v1.balance.iter().all(|state| state.shove_count() == 0));
+    }
+
+    #[test]
+    fn live_balance_forwards_sim_verdict() {
+        // EG45: the live read forwards the authority verdict. A v2 combo
+        // floors slot 1, so the live read reports Fallen or Catching, a bad
+        // slot reads None, and two runs agree.
+        let config = ArenaConfig::try_new(2040, 120, 2, 20.0).expect("valid config");
+        let tape = combo_tape(&config);
+        let rules = ArenaRules {
+            collision: false,
+            ..ArenaRules::v2_free_for_all()
+        };
+        let place = |slot: usize| {
+            if slot == 0 {
+                [0.0, 0.0, 0.0]
+            } else {
+                [1.0, 0.0, 0.0]
+            }
+        };
+        let oracle = placed_run(&config, &tape, rules, place, |_| {});
+        let oracle_gait = oracle.balance[1].gait();
+        assert!(
+            matches!(
+                oracle_gait,
+                engine_physics::balance::GaitPhase::Fallen
+                    | engine_physics::balance::GaitPhase::Catching
+            ),
+            "the combo floors slot 1"
+        );
+        let run = || {
+            let mut live = LiveMatch::with_rules(&config, rules).expect("v2 match");
+            live.sim.states[0].pos = [0.0, 0.0, 0.0];
+            live.sim.states[1].pos = [1.0, 0.0, 0.0];
+            let mut checkpoints = Vec::with_capacity(config.ticks as usize);
+            let mut fell = false;
+            for tick in 0..config.ticks {
+                let stepped = live.step(tick_inputs(&tape, tick)).expect("live step");
+                checkpoints.push(stepped.checkpoint);
+                let gait = live.balance(1).expect("slot 1 verdict").gait();
+                fell |= matches!(
+                    gait,
+                    engine_physics::balance::GaitPhase::Fallen
+                        | engine_physics::balance::GaitPhase::Catching
+                );
+                assert!(live.balance(99).is_none(), "bad slot reads None");
+            }
+            let final_gait = live.balance(1).expect("final verdict").gait();
+            (final_gait, checkpoints, fell)
+        };
+        let (first_gait, first_checks, first_fell) = run();
+        assert!(first_fell, "the live combo floors slot 1");
+        assert_eq!(first_gait, oracle_gait, "live forwards the sim gait");
+        let (second_gait, second_checks, _) = run();
+        assert_eq!(first_gait, second_gait, "balance x2");
+        assert_eq!(first_checks, second_checks, "digest x2");
+    }
+
+    #[test]
+    fn live_match_surfaces_press_cues_in_fighter_id_order() {
+        use engine_combat::fight::AttackStarted;
+        use engine_combat::tables::TABLES_VERSION_V2;
+        use engine_input::fighter::ATTACK;
+
+        let base = ArenaConfig::try_new(2040, 32, 2, 20.0).expect("valid config");
+        let config = ArenaConfig {
+            table_version: TABLES_VERSION_V2,
+            ..base
+        };
+        let rules = ArenaRules::v2_free_for_all();
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for fighter in 0..config.fighters {
+                let buttons = if tick == 0 {
+                    Buttons(ATTACK)
+                } else {
+                    Buttons::NONE
+                };
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId(fighter),
+                    mx: 0,
+                    mz: 0,
+                    facing: 0,
+                    buttons,
+                });
+            }
+        }
+        let tape = FighterTape(inputs);
+        let mut live = LiveMatch::with_rules(&config, rules).expect("v2 match");
+        live.step(tick_inputs(&tape, 0)).expect("live step");
+        assert_eq!(
+            live.cues(),
+            [AttackStarted { attacker: 0 }, AttackStarted { attacker: 1 }].as_slice(),
+            "press tick surfaces both cues in fighter-ID order"
+        );
+        live.step(tick_inputs(&tape, 1)).expect("live step");
+        assert!(live.cues().is_empty(), "cues never linger a tick");
+        let v1 = ArenaConfig::try_new(2040, 32, 2, 20.0).expect("valid config");
+        let mut live_v1 = LiveMatch::new(&v1).expect("live match");
+        live_v1.step(tick_inputs(&tape, 0)).expect("live step");
+        assert!(live_v1.cues().is_empty(), "v1 stream stays frozen");
+    }
+
+    #[test]
+    fn live_match_rejects_bad_slices_without_stepping() {
+        let config = ArenaConfig::try_new(7, 8, 2, 12.0).expect("valid config");
+        let mut live = LiveMatch::new(&config).expect("live match");
+        let good = FighterInput {
+            tick: 0,
+            fighter: FighterId(0),
+            mx: 10,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        };
+        let wrong_tick = FighterInput { tick: 1, ..good };
+        let bad_slot = FighterInput {
+            fighter: FighterId(2),
+            ..good
+        };
+        let bad_wish = FighterInput { mx: 101, ..good };
+        for bad in [
+            &[wrong_tick][..],
+            &[bad_slot][..],
+            &[bad_wish][..],
+            &[good, good][..],
+        ] {
+            assert!(live.step(bad).is_none());
+            assert_eq!((live.tick(), live.steps()), (0, 0));
+            assert!(!live.is_poisoned());
+        }
+        assert!(live.step(&[good]).is_some());
+        assert_eq!((live.tick(), live.steps()), (1, 1));
+        assert!(LiveMatch::new(&ArenaConfig {
+            fighters: 1,
+            ..config
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn live_mind_stamped_replay_matches_tape() {
+        // AL1 slice 1: provider replies are validated, stamped for tick N+k
+        // and drained at the tick boundary; replay with the provider off
+        // reads the recorded tape to the same hash.
+        let config = ArenaConfig::try_new(2040, 600, 2, 20.0).expect("valid config");
+        let latency = 3u32;
+        let mut live = LiveMatch::new(&config).expect("live match");
+        let reply_for = |tick: u32| FighterInput {
+            tick,
+            fighter: FighterId(0),
+            mx: match (tick / 15) % 4 {
+                0 => 100,
+                2 => -100,
+                _ => 0,
+            },
+            mz: match (tick / 15) % 4 {
+                1 => 100,
+                3 => -100,
+                _ => 0,
+            },
+            facing: 0,
+            buttons: if tick % 30 == 0 {
+                Buttons(ATTACK)
+            } else {
+                Buttons::NONE
+            },
+        };
+        for tick in 0..latency.min(config.ticks) {
+            assert!(live.stamp(reply_for(tick)), "stamp tick {tick}");
+        }
+        let mut checkpoints = Vec::with_capacity(config.ticks as usize);
+        for tick in 0..config.ticks {
+            let future = tick + latency;
+            if future < config.ticks {
+                assert!(live.stamp(reply_for(future)), "stamp tick {future}");
+            }
+            let stepped = live.step(&[]).expect("live step");
+            checkpoints.push(stepped.checkpoint);
+        }
+        let past_due = FighterInput {
+            tick: 0,
+            fighter: FighterId(0),
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        };
+        assert!(!live.stamp(past_due), "past-due stamp refused");
+        let out_of_range = FighterInput {
+            tick: config.ticks,
+            fighter: FighterId(0),
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        };
+        assert!(!live.stamp(out_of_range), "out-of-range stamp refused");
+        assert!(!live.is_poisoned(), "refusals never poison");
+        let tape = live.recorded_tape();
+        assert_eq!(
+            tape.0.len(),
+            config.ticks as usize,
+            "one stamped input per tick"
+        );
+        let replay = crate::run(&config, &tape);
+        assert_eq!(checkpoints, replay, "replay with provider off matches");
+        assert_eq!(replay, crate::run(&config, &tape), "replay x2");
+    }
+
+    use engine_provider::{
+        fixtures, validate_proposal, MockAdapter, MockOutcome, ProviderAdapter,
+    };
+
+    /// AL1 reply mapping: a validated mock reply becomes one fighter-0 input
+    /// for `tick`. The mock's canned proposal has no fighter fields, so the
+    /// request id picks the canned move (ids 1..=4). Pure: no clock, no state.
+    fn mind_input(outcome: &MockOutcome, tick: u32) -> Option<FighterInput> {
+        let proposal = outcome.result.as_ref().ok()?.proposal.as_ref()?;
+        validate_proposal(proposal).ok()?;
+        let (mx, mz, buttons) = match proposal.request.0 {
+            1 => (100, 0, Buttons::NONE),
+            2 => (0, 100, Buttons(ATTACK)),
+            3 => (-100, 0, Buttons::NONE),
+            4 => (0, -100, Buttons::NONE),
+            _ => return None,
+        };
+        Some(FighterInput {
+            tick,
+            fighter: FighterId(0),
+            mx,
+            mz,
+            facing: 0,
+            buttons,
+        })
+    }
+
+    #[test]
+    fn live_mind_provider_replay_matches_live_hash() {
+        // AL1 slice 1 on the mock adapter: three provider replies at different
+        // delays are stamped at issue and drained at the tick boundary. The
+        // recorded tape replays with the provider off to the live hash, twice.
+        // A late reply (its tick already run) is refused, leaves no tape row
+        // and the bout equals the on-time bout. Gap: nothing logs the fallback
+        // (AL1b, engine-observe reason); the refusal is the only record.
+        let config = ArenaConfig::try_new(2040, 600, 2, 20.0).expect("valid config");
+        // One bout driven by the mock provider. Canned reply n (request id n + 1)
+        // is issued at tick issue and stamped for issue + delay, with (issue,
+        // delay) from the plan. With late, one more reply (id 4) is issued at
+        // tick at for tick target, which already ran, and must be refused.
+        let provider_bout = |late: Option<(u32, u32)>| -> (Vec<Checkpoint>, FighterTape) {
+            let plan = [(0u32, 2u32), (40, 3), (80, 5)];
+            let policy = fixtures::policy();
+            let caps = fixtures::caps();
+            let mut provider = MockAdapter::new(Vec::new());
+            let mut live = LiveMatch::new(&config).expect("live match");
+            let mut checkpoints = Vec::with_capacity(config.ticks as usize);
+            for tick in 0..config.ticks {
+                for (n, &(issue, delay)) in plan.iter().enumerate() {
+                    if issue == tick {
+                        let request = fixtures::request(n as u64 + 1, 0);
+                        let outcome = provider.call(&request, &policy, &caps);
+                        let input = mind_input(&outcome, issue + delay).expect("canned reply");
+                        assert!(live.stamp(input), "stamp for tick {}", issue + delay);
+                    }
+                }
+                if let Some((at, target)) = late.filter(|&(at, _)| at == tick) {
+                    let request = fixtures::request(4, 0);
+                    let outcome = provider.call(&request, &policy, &caps);
+                    let input = mind_input(&outcome, target).expect("canned late reply");
+                    assert!(!live.stamp(input), "late reply at {at} for tick {target} refused");
+                }
+                let stepped = live.step(&[]).expect("live step");
+                checkpoints.push(stepped.checkpoint);
+            }
+            assert!(!live.is_poisoned(), "refusals never poison");
+            (checkpoints, live.recorded_tape())
+        };
+        let (live_checks, tape) = provider_bout(None);
+        assert_eq!(
+            tape.0.iter().map(|input| input.tick).collect::<Vec<_>>(),
+            [2u32, 43, 85],
+            "each reply drains at issue + delay"
+        );
+        let live_hash = live_checks.last().expect("600 ticks").hash;
+        let first = crate::run(&config, &tape);
+        let second = crate::run(&config, &tape);
+        assert_eq!(first, second, "replay x2");
+        assert_eq!(first, live_checks, "replay with provider off matches live");
+        assert_eq!(first.last().expect("600 ticks").hash, live_hash);
+        let (late_checks, late_tape) = provider_bout(Some((50, 10)));
+        assert_eq!(late_tape.0, tape.0, "late reply leaves no tape row");
+        assert_eq!(late_checks, live_checks, "late fallback equals the on-time bout");
+    }
+}

@@ -1,0 +1,37 @@
+{
+  "row": "CT35",
+  "source": ".lanes/ct35/content/fighters/glb/hero_body.glb",
+  "source_bytes": 2072320,
+  "class": "Hero",
+  "class_max_tris": 40000,
+  "cook_x2_identical": true,
+  "asset_digest": "fcc2708f5643c9ef",
+  "consumer": "CT41 LOD ms/VRAM table + lod_swap picker",
+  "gate": "check_chain:ok",
+  "meshes": [
+    {"index": 0, "base_tris": 1448, "digest": "2ea9b9b1b504edc2", "lods": [
+      {"level": 0, "tris": 1448, "bytes": 61536, "hull_contains": true, "hull_support": 14},
+      {"level": 1, "tris": 723, "bytes": 32340, "hull_contains": true, "hull_support": 14},
+      {"level": 2, "tris": 362, "bytes": 17208, "hull_contains": true, "hull_support": 14},
+      {"level": 3, "tris": 180, "bytes": 9504, "hull_contains": true, "hull_support": 14}
+    ]},
+    {"index": 1, "base_tris": 2232, "digest": "cc1d9ea78c322a9f", "lods": [
+      {"level": 0, "tris": 2232, "bytes": 92736, "hull_contains": true, "hull_support": 14},
+      {"level": 1, "tris": 1115, "bytes": 46740, "hull_contains": true, "hull_support": 14},
+      {"level": 2, "tris": 558, "bytes": 23880, "hull_contains": true, "hull_support": 14},
+      {"level": 3, "tris": 279, "bytes": 12468, "hull_contains": true, "hull_support": 14}
+    ]},
+    {"index": 2, "base_tris": 1434, "digest": "06e81b6c8ee1b370", "lods": [
+      {"level": 0, "tris": 1434, "bytes": 73704, "hull_contains": true, "hull_support": 12},
+      {"level": 1, "tris": 717, "bytes": 32316, "hull_contains": true, "hull_support": 14},
+      {"level": 2, "tris": 359, "bytes": 17316, "hull_contains": true, "hull_support": 13},
+      {"level": 3, "tris": 180, "bytes": 8496, "hull_contains": true, "hull_support": 13}
+    ]},
+    {"index": 3, "base_tris": 736, "digest": "a898fb422d898f35", "lods": [
+      {"level": 0, "tris": 736, "bytes": 31008, "hull_contains": true, "hull_support": 14},
+      {"level": 1, "tris": 368, "bytes": 16128, "hull_contains": true, "hull_support": 14},
+      {"level": 2, "tris": 184, "bytes": 8544, "hull_contains": true, "hull_support": 14},
+      {"level": 3, "tris": 92, "bytes": 4800, "hull_contains": true, "hull_support": 14}
+    ]}
+  ]
+}

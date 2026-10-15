@@ -1,0 +1,15 @@
+{
+  "name": "mirror_seed7",
+  "seed": 7,
+  "tags": ["determinism", "mirror"],
+  "steps": [
+    { "input": "jab", "ticks": 4 },
+    { "wait": 20 },
+    { "input": "retreat", "ticks": 10 },
+    { "wait": 20 },
+    { "input": "jab", "ticks": 4 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "mirror-x2-identical" }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "gauntlet_seed7",
+  "seed": 7,
+  "tags": ["determinism", "gauntlet"],
+  "steps": [
+    { "input": "jab", "ticks": 4 },
+    { "wait": 20 },
+    { "input": "step_in", "ticks": 10 },
+    { "wait": 20 },
+    { "input": "jab", "ticks": 4 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "seed7-x2-identical" }
+  ]
+}

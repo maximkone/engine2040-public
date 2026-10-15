@@ -1,0 +1,6 @@
+id = "c1"
+question = "a bot with human noise lands a parry in its first bout"
+run = "bot_parry_first_bout"
+pass = "parry landed in first bout"
+fail = "no parry in first bout"
+sev = "B"

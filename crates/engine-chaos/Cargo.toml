@@ -1,0 +1,13 @@
+[package]
+name = "engine-chaos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-observe.workspace = true
+engine-proof.workspace = true

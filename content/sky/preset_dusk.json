@@ -1,0 +1,14 @@
+{
+  "name": "dusk",
+  "kind": "sky_ibl",
+  "sun_elevation_deg": 9.0,
+  "sun_azimuth_deg": 262.0,
+  "turbidity": 6.0,
+  "exposure_ev100": 10.5,
+  "sh_order": 2,
+  "sh_coeffs": 9,
+  "capture_w": 64,
+  "capture_h": 32,
+  "budget_ms": 0.4,
+  "albedo_ground": 0.28
+}

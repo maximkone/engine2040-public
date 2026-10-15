@@ -1,0 +1,53 @@
+[package]
+name = "engine-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# PF2 profiler leg, opt-in so the headless default stays dependency-light
+# (puffin 0.20 MIT/Apache-2.0, verified via crates.io API 2026-09-24).
+[features]
+profile = ["dep:puffin"]
+
+[[bin]]
+name = "perf"
+path = "src/main.rs"
+
+[dependencies]
+# `test-util` is a normal feature here: the budget gate measures allocations in
+# production code with the shared `alloc_probe`, not only under `cfg(test)`.
+engine-core = { workspace = true, features = ["test-util"] }
+engine-ecs.workspace = true
+engine-physics.workspace = true
+engine-render.workspace = true
+engine-arena.workspace = true
+engine-ai.workspace = true
+engine-destruction.workspace = true
+# SL17: server_budget reuses the ON3 snapshot/starve cadence owned by
+# engine-net::interest (never mirrors it); game/siege.rs follows the same
+# pattern. Intra-workspace std-only edge, no new external dependency.
+engine-net.workspace = true
+puffin = { workspace = true, optional = true }
+
+# Instruction-count benches: Gungraun (Apache-2.0 OR MIT) drives Callgrind from
+# `cargo bench`. Callgrind is Linux-only, so the dependency exists only for
+# Linux dev builds of this harness crate and never enters the default headless
+# graph. The runner binary must match the library version:
+# `cargo install --locked --version 0.20.0 gungraun-runner`.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun = "0.20"
+
+[[bench]]
+name = "instructions"
+path = "benches/instructions.rs"
+harness = false
+
+# P6 steal bench: puffin@c81e9bb off-path gate cost, std-only, no new dep.
+[[bench]]
+name = "off_path"
+path = "benches/off_path.rs"
+harness = false

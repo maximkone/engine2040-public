@@ -1,0 +1,195 @@
+{
+  "title": "Material reference sheets",
+  "size": {
+    "w": 1280,
+    "h": 720
+  },
+  "sizes": [
+    {
+      "w": 1280,
+      "h": 720,
+      "name": "overview"
+    },
+    {
+      "w": 1200,
+      "h": 800,
+      "name": "sheet-sand",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 4
+    },
+    {
+      "w": 1200,
+      "h": 820,
+      "name": "sheet-steel",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 5
+    },
+    {
+      "w": 1200,
+      "h": 840,
+      "name": "sheet-skin",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 4
+    },
+    {
+      "w": 1200,
+      "h": 860,
+      "name": "sheet-marble",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 6
+    },
+    {
+      "w": 1200,
+      "h": 880,
+      "name": "sheet-wood",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 4
+    },
+    {
+      "w": 1200,
+      "h": 900,
+      "name": "sheet-cloth",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 5
+    },
+    {
+      "w": 1200,
+      "h": 920,
+      "name": "sheet-arena-day",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 5
+    },
+    {
+      "w": 1200,
+      "h": 940,
+      "name": "sheet-torch-night",
+      "title_px": 64,
+      "title_box": [
+        0.04,
+        0.03,
+        0.92,
+        0.14
+      ],
+      "title_longest": 5
+    }
+  ],
+  "dir": "ltr",
+  "tokens": "tokens.css",
+  "page": "page.html",
+  "image": "out.png",
+  "text": [
+    {
+      "label": "title",
+      "fg": "var(--ink)",
+      "bg": "var(--bg)",
+      "min": 4.5
+    },
+    {
+      "label": "subtitle",
+      "fg": "var(--muted)",
+      "bg": "var(--bg)",
+      "min": 4.5
+    },
+    {
+      "label": "cta",
+      "fg": "var(--on-accent)",
+      "bg": "var(--accent)",
+      "min": 4.5
+    },
+    {
+      "label": "chip",
+      "fg": "var(--chip-ink)",
+      "bg": "var(--chip-bg)",
+      "min": 4.5
+    },
+    {
+      "label": "kicker",
+      "fg": "var(--accent-ink)",
+      "bg": "var(--bg)",
+      "min": 3
+    }
+  ],
+  "title_box": [
+    0.05,
+    0.05,
+    0.6,
+    0.25
+  ],
+  "title_px": 104,
+  "title_longest": 9,
+  "order": "O-032",
+  "product": "order:reference-sheets-for-engine2040-material",
+  "system": "fantasy",
+  "assets": [
+    "assets/t_cloth_albedo.png",
+    "assets/t_cloth_normal.png",
+    "assets/t_cloth_orm.png",
+    "assets/t_cloth_rough.png",
+    "assets/t_day_sky.png",
+    "assets/t_day_sun.png",
+    "assets/t_marble_albedo.png",
+    "assets/t_marble_normal.png",
+    "assets/t_marble_orm.png",
+    "assets/t_marble_rough.png",
+    "assets/t_night_glow.png",
+    "assets/t_night_sky.png",
+    "assets/t_sand_albedo.png",
+    "assets/t_sand_normal.png",
+    "assets/t_sand_orm.png",
+    "assets/t_sand_rough.png",
+    "assets/t_skin_deep.png",
+    "assets/t_skin_light.png",
+    "assets/t_skin_mid.png",
+    "assets/t_skin_shadow.png",
+    "assets/t_steel_brushed1.png",
+    "assets/t_steel_brushed2.png",
+    "assets/t_steel_cuporm.png",
+    "assets/t_steel_soot.png",
+    "assets/t_wood_albedo.png",
+    "assets/t_wood_normal.png",
+    "assets/t_wood_orm.png",
+    "assets/t_wood_rough.png"
+  ]
+}

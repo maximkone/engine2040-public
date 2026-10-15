@@ -1,0 +1,6 @@
+# ripgrep (and the OpenCode grep and glob tools) skip these: old text lives here, Read by path still works.
+docs/archive/
+docs/research/archive/
+docs/SPRINT-ARCHIVE.md
+# single-line glTF files of 2-8 MB break every grep (Ripgrep JSON record exceeded 65536 bytes, 19 a day)
+content/arena/src/*.gltf

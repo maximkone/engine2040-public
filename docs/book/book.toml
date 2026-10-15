@@ -1,0 +1,8 @@
+[book]
+title = "engine2040 Manual (API2)"
+authors = ["engine2040"]
+language = "en"
+src = "."
+
+[build]
+create-missing = false

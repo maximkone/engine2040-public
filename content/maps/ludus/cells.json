@@ -1,0 +1,32 @@
+{
+  "map": "ludus",
+  "seed": 20260925,
+  "size": 16,
+  "frame_bytes": 311,
+  "cells": [
+    {
+      "x": 0,
+      "z": 0,
+      "priority": 9,
+      "cost_bytes": 311
+    },
+    {
+      "x": 1,
+      "z": 0,
+      "priority": 8,
+      "cost_bytes": 311
+    },
+    {
+      "x": 0,
+      "z": 1,
+      "priority": 8,
+      "cost_bytes": 311
+    },
+    {
+      "x": 1,
+      "z": 1,
+      "priority": 7,
+      "cost_bytes": 311
+    }
+  ]
+}

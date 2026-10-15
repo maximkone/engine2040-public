@@ -1,0 +1,44 @@
+[package]
+name = "engine-distill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# Student trainer: burn runs offline behind `train`, so the headless default
+# build stays std-only (spec + dataset + student + runtime-shaped export).
+#
+# Backend policy (pure-Rust CPU only):
+# - `ndarray` pulls burn-ndarray, the pure-Rust CPU backend (no C toolchain,
+#   no GPU runtime). `train` pulls burn-train plus autodiff and the dataset
+#   helpers; the trainer drives a plain sequential loop, never a DataLoader
+#   worker pool.
+# - `fusion` is deliberately NOT enabled: in burn 0.21 it only fuses CubeCL
+#   kernels (wgpu/cuda backends), so it is a no-op for NdArray and would only
+#   add the burn-ir dependency.
+# - NEVER enabled: `tch` (needs the libtorch C++ runtime), `wgpu`/`cuda`/
+#   `rocm` (need a GPU), `candle` (optional native BLAS). See lib.rs for the
+#   reproducibility scope this choice buys.
+[features]
+train = ["dep:burn"]
+
+[dependencies]
+engine-core = { workspace = true }
+engine-nn = { workspace = true }
+# The fighter teacher and the strength gate run real arena duels through the
+# public controller seam (`run_controlled`); ai and input supply the percept
+# lane scales, intent dims and button bits the net must agree with. All
+# path crates: the offline tool pulls no external package by default.
+engine-ai = { workspace = true }
+engine-arena = { workspace = true }
+engine-input = { workspace = true }
+# NOTE: `default-features = false` cannot live here: cargo ignores a
+# member-level `default-features` when the workspace table does not set it
+# (future hard error). If the orchestrator slims the workspace `burn` entry
+# to `default-features = false`, this crate inherits the lean closure
+# unchanged; until then the train build carries burn's own defaults
+# (burn-train tui/metrics/rl) on top of the pure-Rust CPU backend below.
+burn = { workspace = true, optional = true, features = ["std", "ndarray", "train"] }

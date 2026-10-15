@@ -1,0 +1,20 @@
+[package]
+name = "engine-destruction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-core.workspace = true
+# NV3 break-to-nav handoff: the dirty-set record names tiles through the
+# nav break set, and the WD9 cooker entry names the links to recook.
+# Runtime edge (the contract test also drives it); std-only like nav.
+engine-nav.workspace = true
+
+[dev-dependencies]
+# Zero-allocation probe owner for tests.
+engine-core = { workspace = true, features = ["test-util"] }

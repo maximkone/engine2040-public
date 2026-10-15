@@ -1,0 +1,37 @@
+#!/bin/sh
+# engine2040 pre-commit: ratchet debt never lands silently.
+# A commit whose tree raises the rust-quality ratchet is refused unless the
+# same landing stages tools/rust-quality.baseline.json (--accept/--tighten).
+# This covers every land path, including auto-backup commits that never pass
+# through a packet review. Install: copy to .git/hooks/pre-commit.
+# One shared tree, many writers: a commit answers only for the crates it
+# stages, measured from the index (what lands), never from another writer's
+# unstaged or untracked files on disk. Root-only Cargo or baseline commits
+# change no crate's counts, so they pass. Only a staged .rs or crate Cargo.toml
+# names a crate: a shader, a text baseline or a doc under crates/ changes no
+# rust-quality count (2026-10-12: a .wgsl and a heap_peak.txt in a backup made
+# the hook measure render and perf, whose HEAD debt then refused the backup).
+staged=$(git diff --cached --name-only)
+crates=$(printf '%s\n' "$staged" | sed -n 's#^crates/\([^/]*\)/.*\.rs$#\1#p; s#^crates/\([^/]*\)/Cargo\.toml$#\1#p' | sort -u)
+if [ -z "$crates" ]; then
+  exit 0
+fi
+repo=$(git rev-parse --show-toplevel)
+snap=$(mktemp -d)
+trap 'rm -rf "$snap"' EXIT
+args=""
+specs="tools/rust-quality.baseline.json docs/SPRINT.md"
+for c in $crates; do args="$args --crate $c"; specs="$specs crates/$c"; done
+# Land scope (EB-2026-10-14-S2): judge only the regressions the commit's own crate files touch, as land.mjs --owned does.
+for p in $(printf '%s\n' "$staged" | sed -n 's#^\(crates/[^/]*/.*\.rs\|crates/[^/]*/Cargo\.toml\)$#\1#p'); do args="$args --owned $p"; done
+# shellcheck disable=SC2086
+git ls-files -z -- $specs | xargs -0 git checkout-index --prefix="$snap/" --
+if (cd "$snap" && node "$repo/tools/rust-quality.mjs" $args >/dev/null 2>&1); then
+  exit 0
+fi
+if git diff --cached --quiet -- tools/rust-quality.baseline.json; then
+  echo "refused: rust-quality ratchet regresses (staged files of:$crates) and tools/rust-quality.baseline.json is not staged;" >&2
+  echo "see: (cd <snapshot> && node tools/rust-quality.mjs$args); land the debt with node tools/rust-quality.mjs --accept <crate> --reason \"<why>\" (or --tighten) in the same commit" >&2
+  exit 1
+fi
+exit 0

@@ -1,0 +1,18 @@
+[package]
+name = "engine-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# RC1 engine-app lifecycle: startup order, registration, extraction.
+# Wires core/ecs/scene/arena explicitly (all std-only path deps);
+# never steps combat or physics itself.
+[dependencies]
+engine-core.workspace = true
+engine-ecs.workspace = true
+engine-scene.workspace = true
+engine-arena.workspace = true

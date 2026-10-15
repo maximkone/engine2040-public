@@ -1,0 +1,18 @@
+# Controls table: one row per verb, one key, one pad button, feedback always.
+# Designers rebind here without a Rust edit; the gamepad seat (EG27/UIX14)
+# and the gesture seat (GP46) read this file. Whole numbers only, `#`
+# comments, no floats. Key codes address map::Key storage (F=8, SHIFT=1,
+# SPACE=0, W=3, S=5, A=4, D=6); pad codes are gamepad button indices.
+# Hand 1 left, 2 right: attack rides right, block and dodge ride left
+# (Bycer ch3, Rogers L6). Flags are 0/1: every verb carries at least one
+# feedback channel; hold=1 needs a hold, toggle_ok=1 offers a toggle, and
+# no row sets both (Basic a11y: no hold where a toggle works).
+# Columns: primary key pad hand fb_sound fb_anim fb_camera fb_ui hold toggle_ok.
+table controls version 1
+attack primary=1 key=8 pad=0 hand=2 fb_sound=1 fb_anim=1 fb_camera=1 fb_ui=0 hold=0 toggle_ok=0
+block primary=1 key=1 pad=4 hand=1 fb_sound=1 fb_anim=1 fb_camera=0 fb_ui=1 hold=0 toggle_ok=1
+dodge primary=1 key=0 pad=1 hand=1 fb_sound=1 fb_anim=1 fb_camera=0 fb_ui=0 hold=0 toggle_ok=0
+move_forward primary=1 key=3 pad=11 hand=1 fb_sound=0 fb_anim=1 fb_camera=0 fb_ui=0 hold=0 toggle_ok=0
+move_back primary=1 key=5 pad=12 hand=1 fb_sound=0 fb_anim=1 fb_camera=0 fb_ui=0 hold=0 toggle_ok=0
+move_left primary=1 key=4 pad=13 hand=1 fb_sound=0 fb_anim=1 fb_camera=0 fb_ui=0 hold=0 toggle_ok=0
+move_right primary=1 key=6 pad=14 hand=1 fb_sound=0 fb_anim=1 fb_camera=0 fb_ui=0 hold=0 toggle_ok=0

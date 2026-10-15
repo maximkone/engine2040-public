@@ -1,0 +1,22 @@
+[package]
+name = "engine-material"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `validate` parses and validates the generated WGSL with naga (pure Rust,
+# already in the graph through wgpu); off by default so the headless graph
+# stays std-only. Consumers: the record compiler tests and the live swap.
+validate = ["dep:naga"]
+
+[dependencies]
+# Hash owner (digests) and the one material row owner (the sim half of the
+# record is `engine_destruction::material::MaterialRow`, never a mirror).
+engine-core.workspace = true
+engine-destruction.workspace = true
+naga = { version = "30", default-features = false, features = ["wgsl-in"], optional = true }

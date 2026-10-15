@@ -1,0 +1,67 @@
+{
+  "bundle": "urban-war-pilot",
+  "corner": "district-corner-01",
+  "cook": {
+    "budget_verdict": "hold",
+    "identical_twice": true,
+    "prop_max_tris": 5000,
+    "src_bytes": 384147,
+    "lod0_tris": 5376,
+    "worst_asset": "insula@2112"
+  },
+  "engine_fork": "none",
+  "game": "urban-war",
+  "kit": "CT9 frozen",
+  "note": "CT56/RC34 pilot: 1 corner through the same engine-app pipeline, no new geometry, no engine edits",
+  "pipeline": "engine-app",
+  "placement": {
+    "actors": 3,
+    "findings": 0,
+    "inside_m": 99,
+    "verdict": "clean"
+  },
+  "receipt": "headless-boot",
+  "runtime": {
+    "frames": 2,
+    "journal_capacity": 256,
+    "quality": "medium",
+    "seed": 2040,
+    "tick_hz": 60,
+    "verify_ticks": 8,
+    "worker_deadline_ms": 2000
+  },
+  "variant": "district-corner",
+  "version": 1,
+  "actors": [
+    {
+      "asset": "insula",
+      "name": "insula_a",
+      "sx": 6.4,
+      "sy": 7.3,
+      "sz": 6.6,
+      "x": -44,
+      "y": 3.65,
+      "z": 0
+    },
+    {
+      "asset": "market_stall",
+      "name": "stall_fish",
+      "sx": 3.0,
+      "sy": 3.2,
+      "sz": 2.2,
+      "x": -26,
+      "y": 1.6,
+      "z": -2
+    },
+    {
+      "asset": "street_wall",
+      "name": "city_wall",
+      "sx": 10.0,
+      "sy": 3.9,
+      "sz": 0.6,
+      "x": -2,
+      "y": 1.95,
+      "z": 0
+    }
+  ]
+}

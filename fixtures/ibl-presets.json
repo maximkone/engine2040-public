@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "capture_w": 64,
+  "capture_h": 32,
+  "presets": [
+    {
+      "name": "arena-day",
+      "sun_dir": [-0.62, 0.55, 0.45],
+      "turbidity": 3.0,
+      "ground_albedo": [0.42, 0.32, 0.2],
+      "ibl_bake": "arena-day-ibl"
+    },
+    {
+      "name": "sunset",
+      "sun_dir": [0.9, 0.18, 0.25],
+      "turbidity": 6.0,
+      "ground_albedo": [0.4, 0.3, 0.2],
+      "ibl_bake": "sunset-ibl"
+    },
+    {
+      "name": "overcast",
+      "sun_dir": [0.3, 1.0, 0.2],
+      "turbidity": 8.5,
+      "ground_albedo": [0.35, 0.35, 0.35],
+      "ibl_bake": "overcast-ibl"
+    }
+  ]
+}
+

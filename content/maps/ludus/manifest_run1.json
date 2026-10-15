@@ -1,0 +1,16 @@
+{
+  "files": {
+    "map.json": {
+      "sha256": "3d1c0e6962167baeb392b52f4915721d2711e4b38b02fb0b8ff8832f8c51f0c7",
+      "bytes": 4481
+    },
+    "cells.json": {
+      "sha256": "80149bc831906102f34dfa99a608b30ce180e3f81068a560be45d214ac412897",
+      "bytes": 438
+    },
+    "tools/map_data.rs": {
+      "sha256": "09e2b6513c8dd8bc2118d137fd508a613c4ac99e74d70fdac5c000ac2d2f6fac",
+      "bytes": 2884
+    }
+  }
+}

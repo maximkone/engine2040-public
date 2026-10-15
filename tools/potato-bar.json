@@ -1,0 +1,6 @@
+{
+  "note": "Potato proposal bars for the same arena on this PC's Intel UHD with downlevel limits (owner 2026-10-11, gate G9, row GS16). p50 50 ms, p99 80 ms, working set 3072 MB (3 GB). Heap peak (GS14) and asset caps (GS15) are separate rows; this file holds only the three numbers potato-check prints PASS/FAIL per number for. Raise only with a receipt; never lower to make a check green.",
+  "p50_ms": 50,
+  "p99_ms": 80,
+  "working_set_mb": 3072
+}

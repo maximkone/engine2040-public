@@ -1,0 +1,6 @@
+id = "c2"
+question = "a light hit shakes the camera at most a quarter of a heavy"
+run = "camera_shake_light_vs_heavy"
+pass = "light shake at most quarter of heavy"
+fail = "light shake over quarter of heavy"
+sev = "B"

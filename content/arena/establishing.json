@@ -1,0 +1,39 @@
+{
+  "row": "CT22",
+  "layer": "establishing",
+  "based_on": "content/arena/placement.json (11-actor parade, CT8 kit) + content/arena/dressing.json (6-actor CT53 layer)",
+  "frozen": ["content/arena/placement.json", "content/arena/dressing.json"],
+  "placement_sha256": "e7982f89395368dbdc507f46c31e91ab85501c624e189315624a86813d5cd372",
+  "dressing_sha256": "ea4886e3eab80424ed7602c72098cd72c49b134cb5586c1305f6e29adf4da970",
+  "license": "CC0-1.0 original CT8 kit only; this file composes existing kit assets (sand, stands, walls, gate, torch, banner, crate, debris) with no new bytes, no downloads, no donor code.",
+  "budgets": "0 new tris, 0 new textures, 0 new materials. Reuses the 7472-tri CT8 kit (props <= 5k LOD0 each).",
+  "intent": "Art-directed composition target for the RA14/WIN6 establishing view: sand disc foreground, stands ring midground, gate tunnel mouth as the vanishing point on the walls->gate axis, torches and banners layering the silhouette instead of the lone twin cube. Camera pinned to the twin establishing camera in crates/game/src/windowed.rs (dressing_camera). Capture proof rides CT60 pilot-only on the reference GPU, never re-shot in a headless lane.",
+  "camera": {
+    "eye_m": [-14.0, 5.0, 0.0],
+    "target_m": [14.0, 1.0, 0.0],
+    "fov_deg": 50.0,
+    "owner": "crates/game/src/windowed.rs dressing_camera (DRESSING_EYE_M, DRESSING_TARGET_M, DRESSING_FOV_DEG)"
+  },
+  "composition": {
+    "layers": [
+      {
+        "file": "content/arena/placement.json",
+        "actors": 11,
+        "ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+      },
+      {
+        "file": "content/arena/dressing.json",
+        "actors": 6,
+        "ids": [101, 102, 103, 104, 105, 106]
+      }
+    ],
+    "total_actors": 17,
+    "beats": [
+      {"beat": "sand disc", "actor": 1, "asset": "sand_floor"},
+      {"beat": "stands ring", "actor": 2, "asset": "stands"},
+      {"beat": "gate tunnel mouth", "actor": 5, "asset": "gate_tunnel"},
+      {"beat": "enclosure walls", "actor": [3, 4], "asset": "walls"},
+      {"beat": "silhouette accents", "actor": [6, 7, 8, 9, 10, 11, 101, 102, 103, 104, 105, 106], "asset": "torch+ banner + crate + debris"}
+    ]
+  }
+}

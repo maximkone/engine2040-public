@@ -1,0 +1,38 @@
+[package]
+name = "engine-geo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+# Cook-time geometry tools (decision D4). Never a dependency of the tick crates: nothing in
+# the default build depends on this crate, and every donor library sits behind its own
+# feature that is off by default. `cargo tree -p engine-game -e normal` shows no geo.
+[features]
+default = []
+# Mesh booleans (union, difference, intersection) on the Manifold kernel, pure Rust.
+boolean = ["dep:manifold-rust"]
+# UV unwrap and chart packing: vendored xatlas (MIT) compiled by build.rs with the cc crate.
+uv = ["dep:cc"]
+# Attribute-aware simplification with a seam lock (meshoptimizer).
+lod = ["dep:meshopt"]
+# Convex decomposition for collision (parry3d V-HACD).
+collision = ["dep:parry3d"]
+# The kit tests read the arena glTF files through the engine importer; a feature (not a
+# dev-dependency) so the workspace graph the headless check walks never sees assets' import feature.
+kit = ["dep:engine-assets", "engine-assets/import"]
+all = ["boolean", "uv", "lod", "collision", "kit"]
+
+[dependencies]
+engine-core.workspace = true
+engine-assets = { workspace = true, optional = true }
+manifold-rust = { version = "0.16.0", optional = true }
+meshopt = { version = "0.6.2", optional = true }
+parry3d = { version = "0.30.2", optional = true, default-features = false, features = ["dim3", "f32", "std", "alloc", "enhanced-determinism"] }
+
+[build-dependencies]
+cc = { version = "1", optional = true }

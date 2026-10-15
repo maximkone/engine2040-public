@@ -1,0 +1,39 @@
+{
+  "material": "rope",
+  "version": 1,
+  "domain": "surface",
+  "look": {
+    "base_color": [0.55, 0.45, 0.3],
+    "base_metalness": 0,
+    "specular_roughness": 0.85,
+    "specular_ior": 1.5,
+    "normal_scale": 1,
+    "occlusion_strength": 1
+  },
+  "layers": [
+    {
+      "kind": "damage",
+      "driver": "strain",
+      "decal": "tear"
+    },
+    {
+      "kind": "burn",
+      "driver": "heat",
+      "decal": "scorch"
+    }
+  ],
+  "body": {
+    "toughness": 3,
+    "brittleness": 0.05,
+    "shard": "splinters",
+    "burn": 2
+  },
+  "sound": {
+    "impact": "soft"
+  },
+  "fx": {
+    "dust": "fiber",
+    "spark": "none",
+    "decal": "tear"
+  }
+}

@@ -1,0 +1,80 @@
+[package]
+name = "engine-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Presentation leg: windowed play (render window + device audio Able to be
+# enabled). The headless default stays std-only; shipped play uses `app`.
+# `app` intentionally does NOT enable `engine-arena/sim`: both legs run the
+# same kinematic AR2 match (locomotion + combat + brains), so headless
+# checkpoints replay exactly under the window.
+app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets"]
+
+# WIN1: the `arena` window binary, gated on `app` so the headless default
+# stays std-only. winit is already wired (MIT/Apache, window stack).
+[[bin]]
+name = "arena"
+path = "src/bin/arena.rs"
+required-features = ["app"]
+
+# WIN6: the staged fight frames are drawn by the app-leg raster (windowed), so
+# the CT15 receipt binary builds with `--features app`.
+[[bin]]
+name = "staged_fight"
+path = "src/bin/staged_fight.rs"
+required-features = ["app"]
+
+[dependencies]
+# Workspace-form path deps (orchestrator-normalized from the MV1-packet path
+# form; versions centralized in the root table). No unconditional external
+# dependency: every crate below is std-only on its default features.
+engine-arena.workspace = true
+# Arena kit glTF import rides the `app` leg only (the `import` feature pulls
+# `gltf`/`image`), so the headless default graph stays std-only.
+engine-assets = { workspace = true, features = ["import"], optional = true }
+engine-input.workspace = true
+engine-save.workspace = true
+engine-ui.workspace = true
+engine-audio.workspace = true
+engine-render.workspace = true
+# Read-only consumers of lower-lane event/pose types: combat `FightEvent` maps
+# 1:1 into audio `FightCue` (the shape crowd.rs documents for GM1) and backs
+# exact hp accounting; anim `LocalPose`/`RootTable` carry the LOC2 movement
+# path for presentation. Authority stays in arena: game never steps combat or
+# physics itself, and never depends on engine-physics directly.
+engine-combat.workspace = true
+engine-anim.workspace = true
+# SL1: practice rules snapshots read HR4 curve schemas (consts + error type
+# only; validation runs through these canonical items, never copies).
+engine-ai.workspace = true
+# GM2 LAN multiplayer: server-authoritative session, client prediction with
+# rollback/resimulate, versioned wire codec and redundancy windows are reused
+# from engine-net (never reimplemented here). std::net only, so the headless
+# default stays std-only; networking joins the headless leg, not the `app` leg.
+engine-net.workspace = true
+# WD10 siege ballistics: Fixed Q16 flight math from core plus bonded/spread/
+# budget walls from destruction (consumed, never mirrored).
+engine-core.workspace = true
+engine-destruction.workspace = true
+# WD6 mode framework: district cell window over the WD1 CellCoord range
+# (consumed, never mirrored).
+engine-world.workspace = true
+# Hero-framing rank owner: the auto director picks its presented focus
+# through `engine-spatial::compose::best_shot` (advisory totals in, shot id
+# out), never a local re-derivation. Spatial stays std-only, so the headless
+# default graph is unchanged and the edge is acyclic.
+engine-spatial.workspace = true
+# SHOW1: per-frame SHA-256 for capture manifests (tamper binding the stitch
+# validator cross-checks; no hand-rolled crypto).
+sha2 = { version = "0.10" }
+winit = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Zero-allocation probe owner: the unit tests' counting allocator.
+engine-core = { workspace = true, features = ["test-util"] }

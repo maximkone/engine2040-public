@@ -1,0 +1,38 @@
+[package]
+name = "engine-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "NS32: game rules as integer-only Rhai text, sandboxed, replay-exact, hot-swappable"
+
+[lints]
+workspace = true
+
+[features]
+# The real-arena adapter (`arena::RulesController`); off by default so the scripting engine
+# stays out of every build that does not ask for it.
+arena = ["dep:engine-arena"]
+
+[dependencies]
+engine-core.workspace = true
+engine-arena = { workspace = true, optional = true }
+# Pinned exactly: operation counts (and so budget refusals) are part of the replay
+# contract, so a Rhai bump is a deliberate ABI change (`RULES_ABI`), never a drift.
+# `only_i64` + `no_float`: integers only. `no_time`: no clock. `no_module`, `no_closure`,
+# `no_custom_syntax`: no import, capture or syntax extension. `internals`: the AST walk
+# that refuses unknown host calls at `rules.set` time (read-only; adds no behaviour).
+rhai = { version = "=1.26.1", default-features = false, features = [
+  "std",
+  "only_i64",
+  "no_float",
+  "no_time",
+  "no_module",
+  "no_closure",
+  "no_custom_syntax",
+  "internals",
+] }
+
+[dev-dependencies]
+# The arena integration test also runs the spine step (`run_spine_controlled`).
+engine-arena = { workspace = true, features = ["spine"] }

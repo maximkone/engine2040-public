@@ -1,0 +1,1 @@
+{"fixture":"arena-knobs","version":1,"seed":2040,"ticks":600,"knobs":[{"knob":"agents","value":2},{"knob":"enemies","value":3},{"knob":"half_extent_m","value":16},{"knob":"kill_target","value":2},{"knob":"camera_height_m","value":14},{"knob":"camera_lead_m","value":1.5}]}
