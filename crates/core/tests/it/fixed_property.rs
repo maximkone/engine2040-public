@@ -202,7 +202,7 @@ fn seed_corpus_fixed_cmp_matches_reference() {
     }
     assert_eq!(first, second, "seed corpus must replay x2 identical");
     assert!(
-        first.iter().any(|&o| o == Ordering::Less) && first.iter().any(|&o| o == Ordering::Greater),
+        first.contains(&Ordering::Less) && first.contains(&Ordering::Greater),
         "corpus must cover both sides of the oracle"
     );
 }
@@ -248,9 +248,9 @@ fn seed_corpus_scalar_matches_reference() {
     }
     assert_eq!(first, second, "scalar corpus must replay x2 identical");
     assert!(
-        first.iter().any(|&o| o == Ordering::Less)
-            && first.iter().any(|&o| o == Ordering::Greater)
-            && first.iter().any(|&o| o == Ordering::Equal),
+        first.contains(&Ordering::Less)
+            && first.contains(&Ordering::Greater)
+            && first.contains(&Ordering::Equal),
         "scalar corpus must cover less, greater, and equal"
     );
 }
