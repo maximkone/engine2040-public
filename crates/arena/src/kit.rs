@@ -183,7 +183,7 @@ fn field_raw<'a>(block: &'a str, needle: &str) -> Result<&'a str, KitError> {
 /// One finite `f32` field; missing, unparsable and non-finite fail loudly.
 fn parse_f32(block: &str, needle: &str) -> Result<f32, KitError> {
     let rest = field_raw(block, needle)?;
-    let end = rest.find(|c| c == ',' || c == '}').unwrap_or(rest.len());
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
     let token = rest
         .get(..end)
         .ok_or(KitError::Parse("kit actor number unparsable"))?;
@@ -201,7 +201,7 @@ fn parse_f32(block: &str, needle: &str) -> Result<f32, KitError> {
 /// flag never silently drops collision.
 fn parse_physical(block: &str) -> Result<bool, KitError> {
     let rest = field_raw(block, "\"physical\"")?;
-    let end = rest.find(|c| c == ',' || c == '}').unwrap_or(rest.len());
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
     let token = rest
         .get(..end)
         .ok_or(KitError::Parse("kit actor physical unparsable"))?;

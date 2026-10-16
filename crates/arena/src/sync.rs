@@ -130,7 +130,7 @@ pub fn system_tagged_bytes(
     let name = SYSTEM_NAMES.iter().find(|name| **name == system)?;
     Some(TaggedDump {
         tick: steps,
-        system: *name,
+        system: name,
         offset: 0,
         len: bytes.len(),
         bytes,
