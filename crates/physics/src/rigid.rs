@@ -359,51 +359,89 @@ pub fn restore(dst: &mut [Body], src: &[Body]) {
     dst[..n].copy_from_slice(&src[..n]);
 }
 
+/// Cached FNV-1a prime powers for zero-word folding beside [`state_hash`].
+///
+/// `n` zero bytes (`(h ^ 0) * P == h * P`) collapse to one multiply by `P^n`,
+/// so a settled 8-byte zero word pays one multiply (little-endian, same bytes).
+/// Same digest, no hash change. No allocation.
+const FNV_P2: u64 = FNV64_PRIME.wrapping_mul(FNV64_PRIME);
+/// `P^3` for the three zero bytes of `y == 0.5`.
+const FNV_P3: u64 = FNV_P2.wrapping_mul(FNV64_PRIME);
+/// `P^4` intermediate for `P^8`.
+const FNV_P4: u64 = FNV_P2.wrapping_mul(FNV_P2);
+/// `P^8` for the 8 zero bytes of `vx == vy == +0`.
+const FNV_P8: u64 = FNV_P4.wrapping_mul(FNV_P4);
+/// `0.5f32` bits: settled sprite `y` (`y == hy == 0.5`, little-endian
+/// bytes `00 00 00 3F`), so three zeros fold to `P^3` plus the tail byte.
+const HALF_BITS: u32 = 0x3F00_0000;
+/// Tail byte of `0.5f32` little-endian.
+const HALF_TAIL: u64 = 0x3F;
+
+/// One `u32` little-endian word through FNV-1a beside [`state_hash`].
+///
+/// Same 4 bytes and order as `Fnv64::write_u32`, one multiply per byte.
+/// Units: bits. Determinism: LE order, no allocation.
+#[inline]
+fn fold_u32(mut h: u64, word: u32) -> u64 {
+    let w = u64::from(word);
+    h = (h ^ (w & 0xFF)).wrapping_mul(FNV64_PRIME);
+    h = (h ^ ((w >> 8) & 0xFF)).wrapping_mul(FNV64_PRIME);
+    h = (h ^ ((w >> 16) & 0xFF)).wrapping_mul(FNV64_PRIME);
+    h = (h ^ ((w >> 24) & 0xFF)).wrapping_mul(FNV64_PRIME);
+    h
+}
+
+/// One `u64` little-endian word through FNV-1a beside [`state_hash`].
+///
+/// LE bytes are `lo` then `hi`, same order as two `write_u32`, so digests
+/// stay bit-identical. A zero word folds to one multiply by `FNV_P8`, same
+/// 8 zero bytes; a non-zero word folds as two `fold_u32` (8 multiplies).
+/// Units: bits. Determinism: LE order, no allocation.
+#[inline]
+fn fold_u64_word(h: u64, lo: u32, hi: u32) -> u64 {
+    let word = u64::from(lo) | (u64::from(hi) << 32);
+    if word == 0 {
+        h.wrapping_mul(FNV_P8)
+    } else {
+        fold_u32(fold_u32(h, lo), hi)
+    }
+}
+
 /// Deterministic FNV-1a hash over body bits (bytes via the shared owner).
 ///
 /// Same bytes and order as `write_u32` (little-endian per word), so digests
 /// stay bit-identical while the 11k loop keeps one `u64` accumulator in a
 /// register with no array or slice loop ([geaen | 3.4.2.7 Avoiding Cache Misses]).
+/// Fold: each body is two `u64` words (`x|y` lo `x` hi `y`, `vx|vy` lo
+/// `vx` hi `vy`); a zero word folds to one multiply by the cached power,
+/// so the 10k settled suffix (`is_settled` implies `vx == vy == +0`,
+/// checked directly to skip `hy` loads) pays 7 multiplies for `y == 0.5`
+/// else 9, vs 16 dynamic, with one predictable branch per body
+/// ([geaen | 3.4.3.2 Branch Prediction]). A settled-suffix digest cache
+/// would need the harness split (`crates/perf/src/main.rs`) or shared
+/// state, so it stays out of this one-file fold (no hash change).
 /// Units: bits. Determinism: index order, no allocation.
+/// Caller: `Space::state_hash` in `crates/physics/src/lib.rs`.
 pub fn state_hash(bodies: &[Body]) -> u64 {
     let mut h = FNV64_OFFSET;
     for b in bodies {
-        let mut w = u64::from(b.x.to_bits());
-        h ^= w & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 8) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 16) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 24) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        w = u64::from(b.y.to_bits());
-        h ^= w & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 8) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 16) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 24) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        w = u64::from(b.vx.to_bits());
-        h ^= w & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 8) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 16) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 24) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        w = u64::from(b.vy.to_bits());
-        h ^= w & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 8) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 16) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
-        h ^= (w >> 24) & 0xFF;
-        h = h.wrapping_mul(FNV64_PRIME);
+        let xb = b.x.to_bits();
+        let yb = b.y.to_bits();
+        let vxb = b.vx.to_bits();
+        let vyb = b.vy.to_bits();
+        if (vxb | vyb) == 0 {
+            h = fold_u32(h, xb);
+            if yb == HALF_BITS {
+                h = h.wrapping_mul(FNV_P3);
+                h = (h ^ HALF_TAIL).wrapping_mul(FNV64_PRIME);
+            } else {
+                h = fold_u32(h, yb);
+            }
+            h = h.wrapping_mul(FNV_P8);
+        } else {
+            h = fold_u64_word(h, xb, yb);
+            h = fold_u64_word(h, vxb, vyb);
+        }
     }
     h
 }
@@ -493,6 +531,42 @@ mod tests {
         }
         let moved = vec![Body::new(0.001, 0.5, 0.0, 0.0, 0.5, 0.5)];
         assert_ne!(state_hash(&cases[1]), state_hash(&moved));
+    }
+
+    #[test]
+    fn u64_words_match_le_bytes_and_suffix_needs_prefix() {
+        use engine_core::hash::{FNV64_OFFSET, FNV64_PRIME};
+        let settled = Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 0.5);
+        let xb = settled.x.to_bits();
+        let yb = settled.y.to_bits();
+        let h = FNV64_OFFSET;
+        assert_eq!(
+            fold_u64_word(h, xb, yb),
+            fold_u32(fold_u32(h, xb), yb),
+            "u64 x|y must match two u32 LE"
+        );
+        assert_eq!(
+            fold_u64_word(h, 0, 0),
+            h.wrapping_mul(FNV_P8),
+            "zero u64 word is one multiply"
+        );
+        let packed = u64::from(xb) | (u64::from(yb) << 32);
+        let single = (h ^ packed).wrapping_mul(FNV64_PRIME);
+        assert_ne!(
+            single,
+            fold_u64_word(h, xb, yb),
+            "one multiply per non-zero word would move the hash"
+        );
+        let prefix_a = Body::new(0.0, 5.0, 1.0, 0.0, 0.5, 0.5);
+        let prefix_c = Body::new(2.0, 5.0, 1.0, 0.0, 0.5, 0.5);
+        let whole_a = state_hash(&[prefix_a, settled]);
+        let whole_c = state_hash(&[prefix_c, settled]);
+        let suffix_alone = state_hash(&[settled]);
+        assert_ne!(whole_a, whole_c, "same suffix needs its prefix hash");
+        assert_ne!(
+            whole_a, suffix_alone,
+            "suffix alone is not the suffix segment"
+        );
     }
 
     fn mixed_11k(seed: u64) -> Vec<Body> {

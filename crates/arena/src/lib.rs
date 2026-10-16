@@ -1169,6 +1169,13 @@ impl Sim {
             TABLES_V1
         };
         let depth = DepthSet::new(depth_tables, config.fighters);
+        // Heap gate: presize the limb pool plus the cue buffer to the active
+        // fighter count. At most one cue per fighter per tick, so `fighters`
+        // never reallocates on the steady path; the V1 authority never cuts,
+        // so a fighter-scaled limb pool bills `fighters` bodies instead of
+        // `MAX_LIMBS` (17408 B) while V2 cuts for this count still fit.
+        let cue_cap = fighters.min(MAX_ATTACK_STARTED_PER_TICK);
+        let limb_cap = fighters.clamp(1, MAX_LIMBS);
         let mut sim = Self {
             config: *config,
             fighters,
@@ -1188,7 +1195,7 @@ impl Sim {
             checkpoints: Vec::with_capacity(ticks),
             events: Vec::with_capacity(ticks),
             combat_scratch: Vec::with_capacity(MAX_EVENTS_PER_TICK),
-            last_cues: Vec::with_capacity(MAX_ATTACK_STARTED_PER_TICK),
+            last_cues: Vec::with_capacity(cue_cap),
             breaks: Vec::with_capacity(ticks),
             // Cold authority sims keep no match rows at all: even the outer
             // reservation would bill 600 rows of `Vec` pairs into the
@@ -1208,7 +1215,7 @@ impl Sim {
                 .collect(),
             stagger: (0..fighters).map(|_| StaggerMemory::new()).collect(),
             depth,
-            limbs: LimbPool::new(MAX_LIMBS).ok()?,
+            limbs: LimbPool::new(limb_cap).ok()?,
             #[cfg(test)]
             trace: None,
         };
