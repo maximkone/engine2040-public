@@ -84,6 +84,12 @@ impl DbSlice {
         self.len
     }
 
+    /// Empty windows are refused by [`DbSlice::new`], so this stays false
+    /// for a built slice; provided for [`DbSlice::len`] callers.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Resolve to a `[start, end)` index range over a database of `db_len`
     /// entries. Windows past the end are refused, never clamped, so a stale
     /// window cannot silently rank the wrong clip.

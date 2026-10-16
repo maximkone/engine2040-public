@@ -1555,13 +1555,15 @@ function sanitizePath(pathValue) {
 }
 
 // Child env from the allowlist only; dev and model vars fall out by shape.
-function buildCleanEnv(sanitizedPath) {
+// Dry-run runs the Node launcher, never the Windows exe, so it does not
+// need SystemRoot; the full run still does.
+function buildCleanEnv(sanitizedPath, { needSystemRoot = true } = {}) {
   const env = {};
   for (const key of CHILD_ENV_KEEP) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   env.PATH = sanitizedPath;
-  if (!env.SystemRoot) throw { reason: "DEPENDENCY_MISSING", detail: "SystemRoot absent; cannot run Windows exe" };
+  if (needSystemRoot && !env.SystemRoot) throw { reason: "DEPENDENCY_MISSING", detail: "SystemRoot absent; cannot run Windows exe" };
   for (const key of Object.keys(env)) {
     if (MODEL_ENV_PATTERNS.some((re) => re.test(key))) {
       throw { reason: "MODEL_ACCOUNT_VISIBLE", detail: `model env leaked into clean room: ${key}` };
@@ -1719,7 +1721,7 @@ function main() {
     log.push(`$ PATH strip: removed ${removed.length} entr${removed.length === 1 ? "y" : "ies"}${removed.length > 0 ? ` (${removed.join(" | ")})` : " (already clean)"}`);
     let cleanEnv;
     try {
-      cleanEnv = buildCleanEnv(clean);
+      cleanEnv = buildCleanEnv(clean, { needSystemRoot: false });
       log.push(`$ clean env: ${Object.keys(cleanEnv).length} keys, PATH has ${clean.split(";").filter((e) => e).length} entries`);
     } catch (error) {
       done(true, error.reason ?? "DEV_ENV_VISIBLE", error.detail ?? String(error));
