@@ -619,4 +619,156 @@ mod tests {
         .to_string()
         .contains('3'));
     }
+
+    /// ED16 short-fight tape: 90 deterministic ticks (lane sweep).
+    fn short_fight_tape() -> Vec<RoundInput> {
+        input_tape(90)
+    }
+
+    /// ED16 long-soak tape: past the 30 s window, still divisible by the
+    /// 3-tick viewport chunk so chunked frames never pad with neutral.
+    fn long_soak_tape() -> Vec<RoundInput> {
+        input_tape(REPLAY_WINDOW_TICKS + 99)
+    }
+
+    /// ED16 tuned-fight tape: 120 ticks driven with a tune at tick 8.
+    fn tuned_fight_tape() -> Vec<RoundInput> {
+        input_tape(120)
+    }
+
+    /// Child path: the bare instant-play sim the arena child steps.
+    fn child_checkpoints(doc: &Document, inputs: &[RoundInput], at: &[u64]) -> Vec<PlayCheckpoint> {
+        let mut play = InstantPlay::new(doc.clone(), stub_entry());
+        let mut out = Vec::new();
+        for input in inputs {
+            play.push_input(*input);
+            if at.contains(&play.tick()) {
+                out.push(PlayCheckpoint::from(&play.snapshot_round()));
+            }
+        }
+        out
+    }
+
+    /// Viewport path: the same tape tick-by-tick through `PlayInSession`.
+    fn viewport_checkpoints(
+        doc: &Document,
+        inputs: &[RoundInput],
+        at: &[u64],
+    ) -> Vec<PlayCheckpoint> {
+        let mut session = PlayInSession::start(doc.clone(), stub_entry(), 2040).unwrap();
+        let dt = AppConfig::new(2040).dt();
+        let mut out = Vec::new();
+        for input in inputs {
+            let receipt = session.frame(dt, std::slice::from_ref(input)).unwrap();
+            assert_eq!(receipt.steps, 1);
+            if at.contains(&session.tick()) {
+                out.push(session.checkpoint().unwrap());
+            }
+        }
+        out
+    }
+
+    /// Viewport chunked across 3-tick frames: same end as straight play.
+    fn viewport_chunked_end(doc: &Document, inputs: &[RoundInput]) -> RoundSnapshot {
+        let mut session = PlayInSession::start(doc.clone(), stub_entry(), 2040).unwrap();
+        let dt = AppConfig::new(2040).dt();
+        let mut pos = 0usize;
+        while pos < inputs.len() {
+            let receipt = session.frame(3.0 * dt, &inputs[pos..]).unwrap();
+            assert!((1..=5).contains(&receipt.steps));
+            pos += receipt.steps as usize;
+        }
+        assert_eq!(pos, inputs.len());
+        session.snapshot().unwrap()
+    }
+
+    /// Child end state for one tape.
+    fn child_end(doc: &Document, inputs: &[RoundInput]) -> RoundSnapshot {
+        let mut play = InstantPlay::new(doc.clone(), stub_entry());
+        for input in inputs {
+            play.push_input(*input);
+        }
+        play.snapshot_round()
+    }
+
+    /// Tuned viewport path: same 120-tick tape with a parry tune staged at
+    /// tick 8 between frames; tuning never moves the round by design.
+    fn tuned_viewport_checkpoints(
+        doc: &Document,
+        inputs: &[RoundInput],
+        at: &[u64],
+    ) -> Vec<PlayCheckpoint> {
+        let mut session = PlayInSession::start(doc.clone(), stub_entry(), 2040).unwrap();
+        let dt = AppConfig::new(2040).dt();
+        let mut child = LoopbackChild::new();
+        let mut panel = TuningPanel::new();
+        panel
+            .set_combat(CombatField::ParryWindowTicks, 3)
+            .expect("parry below startup stages");
+        let mut out = Vec::new();
+        for (index, input) in inputs.iter().enumerate() {
+            let receipt = session.frame(dt, std::slice::from_ref(input)).unwrap();
+            assert_eq!(receipt.steps, 1);
+            child.tick();
+            if session.tick() == 8 && index == 7 {
+                panel.stage(session.tick() as u32).unwrap();
+                let applied = panel.apply(&mut child).unwrap();
+                assert_eq!(applied.at_tick, 8);
+            }
+            if at.contains(&session.tick()) {
+                out.push(session.checkpoint().unwrap());
+            }
+        }
+        assert!(panel.replay_exact(), "tuned timeline replays exactly");
+        out
+    }
+
+    #[test]
+    fn three_tapes_child_and_viewport_seal_same_checkpoints_twice() {
+        let doc = fixture_doc();
+        let short = short_fight_tape();
+        let long = long_soak_tape();
+        let tuned = tuned_fight_tape();
+        let short_at = [30, 60, 90];
+        let long_at = [600, 1200, 1899];
+        let tuned_at = [40, 80, 120];
+        for _ in 0..2 {
+            assert_eq!(
+                child_checkpoints(&doc, &short, &short_at),
+                viewport_checkpoints(&doc, &short, &short_at),
+                "short fight parity"
+            );
+            assert_eq!(
+                child_checkpoints(&doc, &long, &long_at),
+                viewport_checkpoints(&doc, &long, &long_at),
+                "long soak parity"
+            );
+            assert_eq!(
+                child_checkpoints(&doc, &tuned, &tuned_at),
+                tuned_viewport_checkpoints(&doc, &tuned, &tuned_at),
+                "tuned fight parity"
+            );
+            assert_eq!(child_end(&doc, &short), viewport_chunked_end(&doc, &short));
+            assert_eq!(child_end(&doc, &long), viewport_chunked_end(&doc, &long));
+            assert_eq!(child_end(&doc, &tuned), viewport_chunked_end(&doc, &tuned));
+        }
+        let mut soaked = PlayInSession::start(doc.clone(), stub_entry(), 2040).unwrap();
+        for input in &long {
+            soaked.step_once(*input).unwrap();
+        }
+        assert_eq!(soaked.tape_len(), REPLAY_WINDOW_TICKS);
+        assert_eq!(soaked.window_start(), 99);
+        assert_ne!(
+            child_end(&doc, &short).digest,
+            child_end(&doc, &long).digest,
+            "oracle: different tapes diverge"
+        );
+        let mut flipped = short.clone();
+        flipped[10] = RoundInput::new(2, 2);
+        assert_ne!(
+            child_end(&doc, &short).digest,
+            child_end(&doc, &flipped).digest,
+            "oracle: one input flips the checkpoint"
+        );
+    }
 }

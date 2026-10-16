@@ -23,6 +23,8 @@ use std::collections::BTreeMap;
 
 use engine_render::v1::Camera;
 
+use super::camera_arm::Aabb;
+
 /// Sand top: the pit floor every body stands on, in meters.
 pub const GROUND_Y: f32 = 0.0;
 /// A joint that misses its constant-velocity prediction by more than this
@@ -108,7 +110,8 @@ impl BodyTruth {
     /// True once at least one finite vertex folded in.
     #[must_use]
     pub fn has_bounds(&self) -> bool {
-        (0..3).all(|axis| self.min[axis] <= self.max[axis])
+        let bounds = Aabb::new(self.min, self.max);
+        bounds.is_finite() && bounds.is_ordered()
     }
 }
 
@@ -155,7 +158,8 @@ pub struct FrameLight {
 /// camera stays off screen and a body around the eye fills it.
 #[must_use]
 pub fn screen_rect(camera: &Camera, min: [f32; 3], max: [f32; 3]) -> Option<[f32; 4]> {
-    if !(0..3).all(|axis| min[axis] <= max[axis]) {
+    let bounds = Aabb::new(min, max);
+    if !bounds.is_finite() || !bounds.is_ordered() {
         return None;
     }
     let view = camera.view_matrix().ok()?;
@@ -500,13 +504,26 @@ pub fn light_ok(light: &FrameLight) -> bool {
     true
 }
 
-/// True when the body root sits inside the prop bounds on all axes.
+/// True when the body root (feet) sits inside the prop volume: X and Z
+/// within bounds, Y from the base face up to but below the top face. A
+/// fighter standing on the ring floor or atop a prop is on it, not in it;
+/// one clipped into the volume counts as inside.
 ///
 /// View only; feeds the brief text, never the sim hash. Units: meters.
-/// Errors: none; a non-finite root never counts as inside.
+/// Errors: none; a non-finite root or prop bound never counts as inside.
 #[must_use]
 pub fn fighter_in_prop(body: &BodyTruth, prop: &PropTruth) -> bool {
-    (0..3).all(|axis| prop.min[axis] <= body.root[axis] && body.root[axis] <= prop.max[axis])
+    let feet = body.root;
+    if !feet.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    if !prop.min.iter().all(|v| v.is_finite()) || !prop.max.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let in_xz = [0usize, 2]
+        .iter()
+        .all(|&axis| prop.min[axis] <= feet[axis] && feet[axis] <= prop.max[axis]);
+    in_xz && prop.min[1] <= feet[1] && feet[1] < prop.max[1]
 }
 
 /// One frame of the `--view-brief` JSONL with props and light: the bodies
@@ -612,6 +629,37 @@ mod tests {
             screen_rect(&cam, [8.0, 0.0, 5.0], [8.6, 1.8, 7.0]),
             None,
             "beside the eye"
+        );
+    }
+
+    #[test]
+    fn bounds_reuse_the_camera_arm_owner() {
+        // `has_bounds` and `screen_rect` read through the shared `Aabb`
+        // owner: finite ordered bounds pass, anything else refuses.
+        let mut fresh = BodyTruth::new(0, "idle", [0.0; 3], 0.0, Vec::new());
+        assert!(!fresh.has_bounds(), "no vertices, no bounds");
+        fresh.fold_vertices(&[[0.0, 0.0, 0.0], [1.0, 1.8, 0.6]]);
+        assert!(fresh.has_bounds(), "folded vertices bound");
+        // Non-finite bounds never count, even when ordered: no finite
+        // vertex folded in, so there is nothing to draw.
+        fresh.min = [f32::INFINITY; 3];
+        fresh.max = [f32::INFINITY; 3];
+        assert!(!fresh.has_bounds(), "infinite bounds are not bounds");
+        // Unordered bounds never count either.
+        fresh.min = [1.0, 0.0, 0.0];
+        fresh.max = [0.0, 1.0, 1.0];
+        assert!(!fresh.has_bounds(), "min above max is not bounds");
+        // The rect refuses the same inputs instead of projecting them.
+        let cam = camera();
+        assert_eq!(
+            screen_rect(&cam, [0.0, 0.0, 0.0], [f32::INFINITY, 1.8, 0.6]),
+            None,
+            "infinite extent has no rect"
+        );
+        assert_eq!(
+            screen_rect(&cam, [1.0, 0.0, 0.0], [0.0, 1.0, 1.0]),
+            None,
+            "unordered bounds have no rect"
         );
     }
 
@@ -769,6 +817,28 @@ mod tests {
     }
 
     #[test]
+    fn fighter_in_prop_refuses_nonfinite() {
+        let pillar = PropTruth {
+            kind: "pillar",
+            min: [-0.5, 0.0, -0.5],
+            max: [0.5, 3.0, 0.5],
+        };
+        let finite = body(0, "idle", [0.0, 1.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        assert!(fighter_in_prop(&finite, &pillar));
+        let wild = body(0, "idle", [f32::NAN, 1.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        assert!(!fighter_in_prop(&wild, &pillar), "NaN root stays outside");
+        let infinite = PropTruth {
+            kind: "pillar",
+            min: [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            max: [f32::INFINITY, f32::INFINITY, f32::INFINITY],
+        };
+        assert!(
+            !fighter_in_prop(&finite, &infinite),
+            "infinite prop never contains"
+        );
+    }
+
+    #[test]
     fn brief_with_props_lists_every_kit_draw_once_and_repeats() {
         use crate::arena_kit::kit_prop_rows;
         use crate::fight_ring::ring_prop_row;
@@ -806,7 +876,11 @@ mod tests {
         for (kind, _) in &kit {
             let needle = format!("\"kind\":\"{kind}\"");
             let draws = kit.iter().filter(|(other, _)| other == kind).count();
-            assert_eq!(a.matches(&needle).count(), draws, "kit draw {kind} lists once per draw");
+            assert_eq!(
+                a.matches(&needle).count(),
+                draws,
+                "kit draw {kind} lists once per draw"
+            );
         }
         assert!(
             a.contains("\"kind\":\"ring_floor\""),
@@ -845,5 +919,189 @@ mod tests {
             d.contains("\"inside_props\":0"),
             "far fighter sits in no prop: {d}"
         );
+    }
+
+    #[test]
+    fn brief_lists_both_ring_draws_once_each_and_repeats() {
+        // SP64: the ring draws twice per frame (floor plus wall/tiers), so
+        // the brief lists both rows once each, byte-equal x2.
+        use crate::fight_ring::{ring_prop_row, ring_wall_row};
+        let cam = camera();
+        let floor = ring_prop_row();
+        let wall = ring_wall_row();
+        assert_ne!(floor.0, wall.0, "two draws, two kinds");
+        let props = [
+            PropTruth {
+                kind: floor.0,
+                min: floor.1[0],
+                max: floor.1[1],
+            },
+            PropTruth {
+                kind: wall.0,
+                min: wall.1[0],
+                max: wall.1[1],
+            },
+        ];
+        let bodies = [body(0, "idle", [0.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]])];
+        let light = FrameLight {
+            sun_dir: [0.0, 1.0, 0.0],
+            sun_elev: 0.5,
+            exposure: 1.0,
+            fog: 0.0,
+            passes: 1,
+        };
+        let a = brief_line_with_props(3, 9.0, &cam, &bodies, &props, &light);
+        assert_eq!(
+            a,
+            brief_line_with_props(3, 9.0, &cam, &bodies, &props, &light),
+            "same inputs give same brief bytes"
+        );
+        for kind in [floor.0, wall.0] {
+            let needle = format!("\"kind\":\"{kind}\"");
+            assert_eq!(
+                a.matches(&needle).count(),
+                1,
+                "ring draw {kind} lists once: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn fighter_on_the_floor_or_atop_a_prop_is_on_it_not_in_it() {
+        let floor = PropTruth {
+            kind: "ring_floor",
+            min: [-21.0, 0.0, -21.0],
+            max: [21.0, 0.0, 21.0],
+        };
+        let standing = body(0, "idle", [0.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        assert!(
+            !fighter_in_prop(&standing, &floor),
+            "feet on the floor plane are on it, not in it"
+        );
+        let crate_prop = PropTruth {
+            kind: "crate.gltf",
+            min: [28.5, 0.0, -0.5],
+            max: [29.5, 1.0, 0.5],
+        };
+        let atop = body(1, "idle", [29.0, 1.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        assert!(
+            !fighter_in_prop(&atop, &crate_prop),
+            "feet on the top face are on the crate, not in it"
+        );
+        let at_base = body(2, "idle", [29.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        assert!(
+            fighter_in_prop(&at_base, &crate_prop),
+            "feet at the base footprint stay inside"
+        );
+    }
+
+    #[test]
+    fn brief_standing_fighter_on_real_kit_counts_no_inside() {
+        use crate::arena_kit::kit_prop_rows;
+        use crate::fight_ring::ring_prop_row;
+        let cam = camera();
+        let kit = kit_prop_rows();
+        let ring = ring_prop_row();
+        let mut props: Vec<PropTruth> = kit
+            .iter()
+            .map(|(kind, bounds)| PropTruth {
+                kind,
+                min: bounds[0],
+                max: bounds[1],
+            })
+            .collect();
+        props.push(PropTruth {
+            kind: ring.0,
+            min: ring.1[0],
+            max: ring.1[1],
+        });
+        let light = FrameLight {
+            sun_dir: [0.0, 1.0, 0.0],
+            sun_elev: 0.5,
+            exposure: 1.0,
+            fog: 0.0,
+            passes: 1,
+        };
+        let standing = [body(0, "idle", [0.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]])];
+        let line = brief_line_with_props(3, 9.0, &cam, &standing, &props, &light);
+        assert!(
+            line.contains("\"inside_props\":0"),
+            "a fighter standing on the floor is on it, not in a prop: {line}"
+        );
+    }
+
+    #[test]
+    fn brief_ten_frame_lists_every_kit_draw_once_per_frame_x2() {
+        use crate::arena_kit::kit_prop_rows;
+        use crate::fight_ring::{ring_prop_row, ring_wall_row};
+        let cam = camera();
+        let kit = kit_prop_rows();
+        assert!(!kit.is_empty(), "placement stages kit draws");
+        let floor = ring_prop_row();
+        let wall = ring_wall_row();
+        let mut props: Vec<PropTruth> = kit
+            .iter()
+            .map(|(kind, bounds)| PropTruth {
+                kind,
+                min: bounds[0],
+                max: bounds[1],
+            })
+            .collect();
+        props.push(PropTruth {
+            kind: floor.0,
+            min: floor.1[0],
+            max: floor.1[1],
+        });
+        props.push(PropTruth {
+            kind: wall.0,
+            min: wall.1[0],
+            max: wall.1[1],
+        });
+        let bodies = [body(0, "idle", [0.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]])];
+        let light = FrameLight {
+            sun_dir: [0.0, 1.0, 0.0],
+            sun_elev: 0.5,
+            exposure: 1.0,
+            fog: 0.0,
+            passes: 1,
+        };
+        for frame in 0..10u32 {
+            let t = 9.0 + f64::from(frame);
+            let a = brief_line_with_props(frame, t, &cam, &bodies, &props, &light);
+            assert_eq!(
+                a,
+                brief_line_with_props(frame, t, &cam, &bodies, &props, &light)
+            );
+            for (kind, _) in &kit {
+                let needle = format!("\"kind\":\"{kind}\"");
+                let draws = kit.iter().filter(|(other, _)| other == kind).count();
+                assert_eq!(a.matches(&needle).count(), draws);
+            }
+            for kind in [floor.0, wall.0] {
+                assert_eq!(a.matches(&format!("\"kind\":\"{kind}\"")).count(), 1);
+            }
+            assert!(a.contains("\"light_ok\":true"));
+        }
+        let bad = FrameLight {
+            sun_elev: -0.1,
+            ..light
+        };
+        let good = brief_line_with_props(0, 9.0, &cam, &bodies, &props, &light);
+        let bad_line = brief_line_with_props(0, 9.0, &cam, &bodies, &props, &bad);
+        assert!(bad_line.contains("\"light_ok\":false"));
+        assert_ne!(good, bad_line);
+    }
+
+    #[test]
+    fn headless_view_run_is_public_and_needs_no_presenter() {
+        // SP61: the headless bout runs with no `Presenter`: zero ticks fold
+        // no frame, so no content loads and the line reads `""` twice.
+        let first = crate::fighter_look::FighterLook::view_run(2040, 0, 8)
+            .expect("zero ticks fold no frame");
+        let second =
+            crate::fighter_look::FighterLook::view_run(2040, 0, 8).expect("zero ticks repeat");
+        assert_eq!(first, "", "zero ticks fold no frame");
+        assert_eq!(second, "", "same seed repeats");
+        assert_eq!(first, second, "same inputs repeat bit for bit");
     }
 }

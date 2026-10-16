@@ -2,7 +2,9 @@
 //!
 //! Consumer: [`crate::fighter_look`] (window frames and their captures).
 //! Data owner: this module owns the ring geometry, sized from the match
-//! half-extent so the drawn walls sit where the match clamps the fighters.
+//! half-extent so the drawn walls sit where the match clamps the fighters,
+//! plus the GP36 zone classifier (`zone_at`, `ZoneTally`) that names where
+//! each tick happens for the tournament metric.
 //! Textures are the CC0 arena albedo sets under `content/arena/textures`
 //! (provenance in `SAND-PROVENANCE.md` / `STONE-PROVENANCE.md`).
 //! Units: meters, unit normals, per-tile UVs in `0..=1` (the presenter
@@ -50,6 +52,128 @@ const RING_FLOOR_WALL_M: f32 = 21.0;
 pub fn ring_prop_row() -> (&'static str, [[f32; 3]; 2]) {
     let wall = RING_FLOOR_WALL_M;
     ("ring_floor", [[-wall, 0.0, -wall], [wall, 0.0, wall]])
+}
+
+/// One view row for the ring wall-plus-tiers draw: kind plus fixed bounds.
+///
+/// The tiers draw rises [`WALL_HEIGHT_M`] plus one [`TIER_RISE_M`] per tier
+/// and runs out one [`TIER_RUN_M`] per side step (wall face plus tiers, so
+/// [`TIERS`] + 1 runs), over the same fixed span as [`ring_prop_row`].
+/// Same fixed-duel default (half-extent 20 m): a custom-extent ring keeps
+/// its own mesh while this row names the duel default, exactly like the
+/// floor row. Pure reader: fixed bounds only, no presenter, no file IO.
+/// View only; feeds the brief text via `crate::view_truth::prop_row`, never
+/// the sim hash. Units: meters. Determinism: same call, same bytes. Budget:
+/// one flat row per frame, built on demand for the brief.
+///
+/// Caller: `crates/game/src/bin/arena.rs` `--view-brief` writer, which
+/// pushes this beside [`ring_prop_row`] so every ring draw lists once.
+#[must_use]
+pub fn ring_wall_row() -> (&'static str, [[f32; 3]; 2]) {
+    let span = RING_FLOOR_WALL_M + count_f32(TIERS + 1) * TIER_RUN_M;
+    let top = WALL_HEIGHT_M + count_f32(TIERS) * TIER_RISE_M;
+    ("ring_tiers", [[-span, 0.0, -span], [span, top, span]])
+}
+
+/// Arena zones (GP36): where a fight happens, as a pure classifier.
+///
+/// Centre is `r < 3 m`, the ring is `3..=8 m`, the wall band is over 8 m,
+/// the gate mouth is a square around the gate anchor and wins over the
+/// radial band. The tournament metric (time share per zone,
+/// `entrance_share`, kills per zone) reads this; the rows file
+/// `content/design/arena-zones.rows` holds the hand-placed layout.
+/// Units: meters. Determinism: same inputs, same zone, no heap, no IO.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArenaZone {
+    /// Within 3 m of the centre.
+    Centre,
+    /// Between 3 m and 8 m out.
+    Ring,
+    /// Past 8 m, against the wall.
+    Wall,
+    /// Inside the gate mouth square.
+    Gate,
+}
+
+/// Centre radius in meters: inside this is [`ArenaZone::Centre`].
+pub const CENTRE_R_M: f32 = 3.0;
+/// Ring outer radius in meters: inside this (past centre) is [`ArenaZone::Ring`].
+pub const RING_R_M: f32 = 8.0;
+
+/// Classify a floor point into its zone. `gate` is the gate anchor
+/// `(x, z)` in meters, `gate_half_m` is the mouth half-edge. The gate
+/// mouth wins ties so camping the entrance always counts as entrance.
+#[must_use]
+pub fn zone_at(x_m: f32, z_m: f32, gate: [f32; 2], gate_half_m: f32) -> ArenaZone {
+    if (x_m - gate[0]).abs() <= gate_half_m && (z_m - gate[1]).abs() <= gate_half_m {
+        return ArenaZone::Gate;
+    }
+    let r = (x_m * x_m + z_m * z_m).sqrt();
+    if r < CENTRE_R_M {
+        ArenaZone::Centre
+    } else if r <= RING_R_M {
+        ArenaZone::Ring
+    } else {
+        ArenaZone::Wall
+    }
+}
+
+/// Running zone counts for one tournament: feeds the time-share and
+/// `entrance_share` metrics. Plain counters, no heap. Determinism: same
+/// add order gives the same shares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ZoneTally {
+    /// Ticks with a fighter in the centre.
+    pub centre: u64,
+    /// Ticks with a fighter in the ring.
+    pub ring: u64,
+    /// Ticks with a fighter at the wall.
+    pub wall: u64,
+    /// Ticks with a fighter holding the gate mouth.
+    pub gate: u64,
+}
+
+impl ZoneTally {
+    /// Add one tick in `zone`.
+    pub fn add(&mut self, zone: ArenaZone) {
+        match zone {
+            ArenaZone::Centre => self.centre += 1,
+            ArenaZone::Ring => self.ring += 1,
+            ArenaZone::Wall => self.wall += 1,
+            ArenaZone::Gate => self.gate += 1,
+        }
+    }
+
+    /// Ticks counted so far, saturating.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.centre
+            .saturating_add(self.ring)
+            .saturating_add(self.wall)
+            .saturating_add(self.gate)
+    }
+
+    /// Share of one zone in permille (0 on empty).
+    #[must_use]
+    pub fn permille(&self, zone: ArenaZone) -> u32 {
+        let total = self.total();
+        if total == 0 {
+            return 0;
+        }
+        let count = match zone {
+            ArenaZone::Centre => self.centre,
+            ArenaZone::Ring => self.ring,
+            ArenaZone::Wall => self.wall,
+            ArenaZone::Gate => self.gate,
+        };
+        u32::try_from(count.saturating_mul(1000) / total).unwrap_or(u32::MAX)
+    }
+
+    /// Gate-mouth time share in permille: the GP36 bar keeps this under 250.
+    #[must_use]
+    pub fn entrance_share(&self) -> u32 {
+        self.permille(ArenaZone::Gate)
+    }
 }
 
 /// Ring build or stage failure; the text names the file or mesh.
@@ -292,6 +416,7 @@ impl FightRing {
                     exposure: 1.0,
                 },
                 base_color: Some(texture),
+                normal_map: None,
             });
             pushed += 1;
         }
@@ -348,6 +473,89 @@ mod tests {
             .positions
             .iter()
             .all(|p| p[0].abs().max(p[2].abs()) >= wall - 1e-3));
+    }
+
+    #[test]
+    fn tiers_row_holds_the_second_ring_draw() {
+        // SP64: the ring draws twice per frame (floor plus wall/tiers) but
+        // the brief row covered only the floor. The tiers row must hold
+        // every wall/tiers vertex of the default duel ring, snugly.
+        let (kind, [min, max]) = ring_wall_row();
+        assert_eq!(kind, "ring_tiers");
+        let tiers = tiers_mesh(RING_FLOOR_WALL_M).expect("tiers build");
+        assert!(!tiers.positions.is_empty(), "tiers draw is real");
+        for p in &tiers.positions {
+            assert!(
+                (0..3).all(|k| min[k] - 1e-3 <= p[k] && p[k] <= max[k] + 1e-3),
+                "tiers vertex {p:?} outside {min:?}..{max:?}"
+            );
+        }
+        let top = tiers
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (max[1] - top).abs() < 1e-2,
+            "row top {} hugs the mesh top {top}",
+            max[1]
+        );
+        let span = tiers
+            .positions
+            .iter()
+            .map(|p| p[0].abs().max(p[2].abs()))
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (max[0] - span).abs() < 1e-2 && (max[2] - span).abs() < 1e-2,
+            "row span {} hugs the mesh span {span}",
+            max[0]
+        );
+    }
+
+    #[test]
+    fn zones_follow_the_3_8_bands() {
+        let gate = [50.0, 50.0];
+        assert_eq!(zone_at(0.0, 0.0, gate, 1.5), ArenaZone::Centre);
+        assert_eq!(zone_at(2.9, 0.0, gate, 1.5), ArenaZone::Centre);
+        assert_eq!(zone_at(3.0, 0.0, gate, 1.5), ArenaZone::Ring);
+        assert_eq!(zone_at(0.0, -5.0, gate, 1.5), ArenaZone::Ring);
+        assert_eq!(zone_at(8.0, 0.0, gate, 1.5), ArenaZone::Ring);
+        assert_eq!(zone_at(8.1, 0.0, gate, 1.5), ArenaZone::Wall);
+        assert_eq!(zone_at(-15.0, 15.0, gate, 1.5), ArenaZone::Wall);
+    }
+
+    #[test]
+    fn gate_mouth_wins_over_the_radial_band() {
+        let gate = [5.0, 0.0];
+        assert_eq!(zone_at(5.0, 0.0, gate, 1.5), ArenaZone::Gate);
+        assert_eq!(zone_at(6.5, 1.5, gate, 1.5), ArenaZone::Gate);
+        // Just past the mouth edge: radial band decides again.
+        assert_eq!(zone_at(5.0, 1.6, gate, 1.5), ArenaZone::Ring);
+        assert_eq!(zone_at(3.4, 0.0, gate, 1.5), ArenaZone::Ring);
+    }
+
+    #[test]
+    fn tally_shares_sum_to_1000_and_names_the_entrance() {
+        let mut tally = ZoneTally::default();
+        assert_eq!(tally.total(), 0);
+        assert_eq!(tally.entrance_share(), 0);
+        for zone in [
+            ArenaZone::Centre,
+            ArenaZone::Ring,
+            ArenaZone::Wall,
+            ArenaZone::Gate,
+        ] {
+            tally.add(zone);
+        }
+        assert_eq!(tally.total(), 4);
+        let shares = [
+            tally.permille(ArenaZone::Centre),
+            tally.permille(ArenaZone::Ring),
+            tally.permille(ArenaZone::Wall),
+            tally.entrance_share(),
+        ];
+        assert_eq!(shares, [250, 250, 250, 250]);
+        assert_eq!(shares.iter().sum::<u32>(), 1000);
     }
 
     #[test]

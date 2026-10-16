@@ -45,6 +45,10 @@ use crate::templates::{TemplateError, TemplateItem, TemplateKind, TemplateServic
 use crate::tuning::{CombatField, LoopbackChild, TuneError, TuneReceipt, TuningPanel};
 use crate::viewport::Viewport;
 
+/// Self-registering dock panel inventory over [`Panel`].
+#[path = "panels.rs"]
+pub mod panels;
+
 /// Default message capacity for [`Shell`]'s log panel.
 pub const LOG_CAP: usize = 200;
 
@@ -82,16 +86,8 @@ impl Panel {
     }
 
     /// Every panel, in default dock order.
-    pub fn all() -> [Self; 7] {
-        [
-            Self::Hierarchy,
-            Self::Inspector,
-            Self::Viewport,
-            Self::Findings,
-            Self::Tuning,
-            Self::Templates,
-            Self::Log,
-        ]
+    pub fn all() -> Vec<Self> {
+        panels::builtin_registry().panels()
     }
 }
 
@@ -312,7 +308,7 @@ impl Shell {
     /// Empty document at revision zero with every panel open.
     pub fn new() -> Self {
         Self {
-            open_panels: Panel::all().to_vec(),
+            open_panels: Panel::all(),
             selection: None,
             viewport: Viewport::default_panel(),
             doc: Document::new(),

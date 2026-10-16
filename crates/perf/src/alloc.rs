@@ -5,6 +5,7 @@
 //! exactly like `System`.
 
 use engine_core::alloc_probe::{self, CountingAlloc};
+use std::fmt::{self, Display, Formatter};
 
 #[global_allocator]
 static GLOBAL_ALLOC: CountingAlloc = CountingAlloc;
@@ -20,7 +21,10 @@ pub struct AllocSnapshot {
 
 /// Run `f` with counting enabled on the calling thread and return its value
 /// plus the allocations it made. Nested calls restart the inner count and
-/// restore the outer window, so helper nesting stays balanced.
+/// restore the outer window, so helper nesting stays balanced. Transient
+/// scratch follows the bump-reset discipline: presize once at setup, rewind
+/// each frame with `reset` instead of freeing, and the steady path makes
+/// zero heap calls inside this window.
 pub fn measure<T>(f: impl FnOnce() -> T) -> (T, AllocSnapshot) {
     let (value, seen) = alloc_probe::measure(f);
     let observed = AllocSnapshot {
@@ -89,11 +93,98 @@ pub fn peak_of(samples: &[u64]) -> u64 {
 /// Units: bytes in, boolean out. Determinism: pure integer math, same inputs
 /// give the same answer twice. Errors: none; a zero baseline allows only a
 /// zero peak.
+/// Caller: `crates/perf/src/main.rs --heap-peak` plus the `heap_peak`
+/// integration test.
 pub fn allows(peak_bytes: u64, baseline_bytes: u64) -> bool {
-    if baseline_bytes == 0 {
-        return peak_bytes == 0;
+    peak_assert(peak_bytes, baseline_bytes).is_ok()
+}
+
+/// Peak-budget failure carrying both sides for the one-line failure detail.
+///
+/// Owner: this module owns the pure verdict; the binary prints it.
+/// Units: bytes in, typed error out. Determinism: pure integer math, same
+/// inputs give the same verdict twice. Errors: `OverBudget` only.
+/// Caller: `crates/perf/src/alloc.rs` `peak_assert` builds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeakGateError {
+    /// Peak exceeded the 10 percent headroom above the baseline.
+    OverBudget {
+        /// Largest live-heap sample in bytes.
+        peak_bytes: u64,
+        /// Recorded baseline in bytes.
+        baseline_bytes: u64,
+    },
+}
+
+impl Display for PeakGateError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::OverBudget {
+                peak_bytes,
+                baseline_bytes,
+            } => write!(
+                f,
+                "{}",
+                subsystem_peak_line("heap", peak_bytes, baseline_bytes)
+            ),
+        }
     }
-    u128::from(peak_bytes) * 100 <= u128::from(baseline_bytes) * 110
+}
+
+impl std::error::Error for PeakGateError {}
+
+/// Assert `peak_bytes` fits within 10 percent above `baseline_bytes`.
+///
+/// Reimplements the donor heap-testing shape against the counting
+/// allocator: the peak-under-budget assert fails with peak, baseline,
+/// limit and verdict numbers on one line, so a red gate names both sides.
+/// PORT(nnethercote/dhat-rs@30e041bbf5bc1d160366494a9489d0ca340db3a8:src/lib.rs
+/// heap-testing pattern, zero bytes vendored, no new dependency).
+/// Units: bytes in, unit or typed error out. Determinism: pure integer
+/// math, same inputs give the same verdict twice. Errors: `OverBudget`
+/// when the peak exceeds the headroom.
+/// Caller: `crates/perf/src/alloc.rs` `allows` consumes the verdict.
+pub fn peak_assert(peak_bytes: u64, baseline_bytes: u64) -> Result<(), PeakGateError> {
+    if baseline_bytes == 0 {
+        if peak_bytes == 0 {
+            return Ok(());
+        }
+        return Err(PeakGateError::OverBudget {
+            peak_bytes,
+            baseline_bytes,
+        });
+    }
+    if u128::from(peak_bytes) * 100 <= u128::from(baseline_bytes) * 110 {
+        Ok(())
+    } else {
+        Err(PeakGateError::OverBudget {
+            peak_bytes,
+            baseline_bytes,
+        })
+    }
+}
+
+/// Format one per-subsystem peak line for the ad-hoc profile.
+///
+/// The binary prints one line per subsystem; the budget gate still compares
+/// through `check_report`. Discipline: transient frame scratch is presized
+/// once and rewound each frame with `reset`, never freed per frame, so the
+/// steady path holds zero heap calls (bump-reset method, no dependency).
+/// PORT(fitzgen/bumpalo method only: per-frame bump-reset discipline).
+/// Units: bytes in, one `subsystem peak=.. baseline=.. limit=.. verdict=..`
+/// line out. Determinism: pure integer math plus string join, same inputs
+/// give the same line twice. Errors: none.
+/// Caller: `crates/perf/src/alloc.rs` `PeakGateError` display prints it.
+pub fn subsystem_peak_line(subsystem: &str, peak_bytes: u64, baseline_bytes: u64) -> String {
+    let limit = u128::from(baseline_bytes) * 110 / 100;
+    let verdict = if allows(peak_bytes, baseline_bytes) {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    format!(
+        "{subsystem} peak={peak_bytes} baseline={baseline_bytes} limit={limit} verdict={verdict}"
+    )
 }
 
 /// CSV header for the heap-peak report (`target/reports/heap-peak.csv`).

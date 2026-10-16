@@ -11,11 +11,15 @@
 //!
 //! The landed `LookFrame` shape (`gtao.rs`) arrives as plain fn args on the
 //! headless twin — never mirrored — so the bake stays std-only with zero
-//! crate imports; only the `window` device bind reads `gtao` plus the graph
-//! byte pack, the same split the RL3/RL2 passes landed.
+//! crate imports; only the `window` device bind reads `gtao`, the shared
+//! compute entries from `decals.rs`, plus the graph byte pack, the same
+//! split the RL3/RL2 passes landed.
 
 use std::fmt;
 use std::time::Instant;
+
+#[cfg(feature = "window")]
+use crate::decals::{compute_storage_entry, compute_uniform_entry};
 
 // ---------------------------------------------------------------------------
 // Bounds: every external size is validated before allocation.
@@ -717,6 +721,119 @@ pub fn look_fog_color(bake: &SkyLookBake) -> [f32; 3] {
     bake.fog
 }
 
+/// Live sky-view upload (LF1 slice 1): the row-major sky texels plus the
+/// EV100 anchor for the one init-time texture upload. Clones the bound
+/// bake texels in fixed row order so the same bake gives the same bytes
+/// twice; validates the backing, every texel and the anchor loudly. Bake
+/// math is untouched; the forward sky entry samples these texels. The
+/// anchor rides along so fog and exposure never drift apart.
+pub fn sky_view_upload(
+    bake: &SkyLookBake,
+    exposure_ev100: f32,
+) -> Result<(Vec<[f32; 3]>, f32), SkyError> {
+    if bake.width_px == 0 || bake.height_px == 0 {
+        return Err(SkyError::Invalid("sky upload bake is empty".into()));
+    }
+    let w = usize::try_from(bake.width_px)
+        .map_err(|_| SkyError::Invalid("sky upload width exceeds usize".into()))?;
+    let h = usize::try_from(bake.height_px)
+        .map_err(|_| SkyError::Invalid("sky upload height exceeds usize".into()))?;
+    let want = w
+        .checked_mul(h)
+        .ok_or_else(|| SkyError::Invalid("sky upload dimensions overflow usize".into()))?;
+    if bake.texels.len() != want {
+        return Err(SkyError::Invalid(format!(
+            "sky upload backing {} mismatches {}x{}",
+            bake.texels.len(),
+            bake.width_px,
+            bake.height_px
+        )));
+    }
+    for t in &bake.texels {
+        if !t.iter().all(|c| c.is_finite()) || t.iter().any(|c| *c < 0.0) {
+            return Err(SkyError::Invalid(
+                "sky upload holds non-finite or negative radiance".into(),
+            ));
+        }
+    }
+    if !exposure_ev100.is_finite() {
+        return Err(SkyError::Invalid(format!(
+            "sky upload ev100 {exposure_ev100} is not finite"
+        )));
+    }
+    let exposure = ev100_to_exposure(exposure_ev100)?;
+    if !exposure.is_finite() || exposure <= 0.0 {
+        return Err(SkyError::Invalid(format!(
+            "sky upload ev100 {exposure_ev100} maps outside positive finite exposure"
+        )));
+    }
+    Ok((bake.texels.clone(), exposure_ev100))
+}
+
+#[expect(
+    clippy::type_complexity,
+    reason = "packet LF1 names the four-tuple feed; a named struct lands with the presenter field next slice"
+)]
+/// Live forward feed (LF1 exposure slice): one init call gives the forward
+/// path its four sky numbers from the same bake: row-major texels, horizon
+/// fog, zenith sample and the EV100 exposure scale. Init-only clone like
+/// the upload, never per frame; same bake plus anchor gives same bytes
+/// twice. Bake math untouched; bad backing, texels or anchors fail as
+/// [`SkyError::Invalid`], same as [`sky_view_upload`].
+pub fn sky_forward_feed(
+    bake: &SkyLookBake,
+    exposure_ev100: f32,
+) -> Result<(Vec<[f32; 3]>, [f32; 3], [f32; 3], f32), SkyError> {
+    let (texels, anchor) = sky_view_upload(bake, exposure_ev100)?;
+    let horizon = look_fog_color(bake);
+    let zenith = sample_look_skybox(bake, [0.0, 1.0, 0.0])?;
+    let exposure = ev100_to_exposure(anchor)?;
+    if !exposure.is_finite() || exposure <= 0.0 {
+        return Err(SkyError::Invalid(format!(
+            "sky forward feed ev100 {anchor} maps outside positive finite exposure"
+        )));
+    }
+    Ok((texels, horizon, zenith, exposure))
+}
+
+/// Live on-vs-off gap (LF1 receipt oracle): max channel gap between the baked
+/// sky sample at `[-0.5, 0.45, -0.6]` and the analytic fog-to-zenith ramp the
+/// old path drew, same probe `sky_off_vs_on_differs` uses. Init-time oracle
+/// only, never per frame, never hashed. Ragged backing fails as
+/// [`SkyError::Invalid`], same as [`sky_forward_feed`].
+pub fn sky_live_on_off_gap(bake: &SkyLookBake) -> Result<f32, SkyError> {
+    if bake.width_px == 0 || bake.height_px == 0 {
+        return Err(SkyError::Invalid("sky live gap bake is empty".into()));
+    }
+    let w = usize::try_from(bake.width_px)
+        .map_err(|_| SkyError::Invalid("sky live gap width exceeds usize".into()))?;
+    let h = usize::try_from(bake.height_px)
+        .map_err(|_| SkyError::Invalid("sky live gap height exceeds usize".into()))?;
+    let want = w
+        .checked_mul(h)
+        .ok_or_else(|| SkyError::Invalid("sky live gap dimensions overflow usize".into()))?;
+    if bake.texels.len() != want {
+        return Err(SkyError::Invalid(format!(
+            "sky live gap backing {} mismatches {}x{}",
+            bake.texels.len(),
+            bake.width_px,
+            bake.height_px
+        )));
+    }
+    let fog = look_fog_color(bake);
+    let zenith = sample_look_skybox(bake, [0.0, 1.0, 0.0])?;
+    let dir = [-0.5, 0.45, -0.6];
+    let on = sample_look_skybox(bake, dir)?;
+    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    let t = (dir[1] / len).clamp(0.0, 1.0).sqrt();
+    let mut gap = 0.0f32;
+    for c in 0..3 {
+        let off = fog[c] + (zenith[c] - fog[c]) * t;
+        gap = gap.max((on[c] - off).abs());
+    }
+    Ok(gap)
+}
+
 /// What the look worker hands back: the bake, or its typed failure.
 type LookBakeResult = Result<(SkyLookBake, f64), SkyError>;
 
@@ -901,9 +1018,9 @@ impl SkySubmitter {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rl4-sky-bind-layout"),
             entries: &[
-                bind_uniform_entry(0),
-                bind_storage_entry(1, true),
-                bind_storage_entry(2, false),
+                compute_uniform_entry(0),
+                compute_storage_entry(1, true),
+                compute_storage_entry(2, false),
             ],
         });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -945,71 +1062,11 @@ impl SkySubmitter {
     }
 }
 
-/// Uniform bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn bind_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-/// Storage bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn bind_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
 /// Map a readback buffer and wait for it. One poll covers every pending map.
+/// Shared [`crate::accel`] core with the `sky` error prefix kept.
 #[cfg(feature = "window")]
 fn sky_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("sky poll: {e}"))?;
-    rx.recv()
-        .map_err(|e| format!("sky map channel: {e}"))?
-        .map_err(|e| format!("sky map: {e}"))?;
-    Ok(())
-}
-
-/// Read `count` little-endian f32 values from a mapped readback buffer.
-#[cfg(feature = "window")]
-fn sky_readback_f32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<f32>, String> {
-    let mapped = buffer
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|e| format!("sky mapped range: {e}"))?;
-    if mapped.len() < count * 4 {
-        return Err(format!(
-            "sky readback {} bytes holds fewer than {count} f32 values",
-            mapped.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for chunk in mapped[..count * 4].chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(out)
+    crate::accel::map_readback(device, buffer, "sky")
 }
 
 /// Window submit over the day capture (RL4 live): bind the capture texels
@@ -1131,7 +1188,8 @@ pub fn submit_gpu_sky(
     encoder.copy_buffer_to_buffer(dst_buf, 0, readback, 0, byte_len);
     queue.submit(Some(encoder.finish()));
     sky_map_and_wait(device, readback).map_err(SkyError::Device)?;
-    let back = sky_readback_f32(readback, words as usize).map_err(SkyError::Device)?;
+    let back =
+        crate::accel::readback_f32(readback, words as usize, "sky").map_err(SkyError::Device)?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(SkyError::Validation(format!(
@@ -1858,5 +1916,313 @@ mod tests {
             ms <= SKYBOX_LOOK_BUDGET_MS,
             "seeded bake over budget: {ms:.3} ms vs {SKYBOX_LOOK_BUDGET_MS} ms"
         );
+    }
+
+    // ----- Live sky-view upload (one accessor beside the skybox sampler) -----
+
+    /// Day-rig fixture: one fixed sun direction with the same air, ground
+    /// and exposure anchor the window presenter bakes once at init.
+    fn sky_live_params() -> SkyParams {
+        SkyParams {
+            sun_dir: [-0.62, 0.55, 0.45],
+            turbidity: 3.0,
+            ground_albedo: [0.42, 0.32, 0.20],
+            exposure_ev100: 12.0,
+        }
+    }
+
+    fn sky_live_bake() -> SkyLookBake {
+        let params = sky_live_params();
+        let (capture, _) = bake_sky(&params, SKY_CAPTURE_W, SKY_CAPTURE_H).expect("day-rig bakes");
+        let (bake, _) = bake_look_from_day(&capture).expect("look bakes");
+        bake
+    }
+
+    fn sky_upload_bytes(texels: &[[f32; 3]], ev100: f32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(texels.len() * 12 + 4);
+        for t in texels {
+            for c in t {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&ev100.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn sky_live_sample_matches_bake() {
+        // Upload parity: the upload texels equal the CPU bake texels, and a
+        // bilinear sample at a texel center round-trips to the bound texel.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let (texels, ev100) = sky_view_upload(&bake, anchor).expect("upload reads");
+        assert_eq!(texels, bake.texels, "upload equals the CPU bake");
+        assert_eq!(ev100, anchor, "anchor rides the upload");
+        for (x, y) in [(0, 0), (63, 0), (0, 31), (63, 31), (17, 9)] {
+            let u = (f64::from(x) + 0.5) / f64::from(bake.width_px);
+            let v = (f64::from(y) + 0.5) / f64::from(bake.height_px);
+            let elev = std::f64::consts::FRAC_PI_2 - std::f64::consts::PI * v;
+            let (sin_e, cos_e) = elev.sin_cos();
+            let phi = 2.0 * std::f64::consts::PI * u;
+            let dir = [
+                (cos_e * phi.cos()) as f32,
+                sin_e as f32,
+                (cos_e * phi.sin()) as f32,
+            ];
+            let sampled = sample_look_skybox(&bake, dir).expect("center samples");
+            let bound = texels[(y * bake.width_px + x) as usize];
+            for c in 0..3 {
+                assert!(
+                    (sampled[c] - bound[c]).abs() <= SKYBOX_SAMPLE_PARITY_TOL,
+                    "upload texel ({x},{y}) ch{c}: {sampled:?} vs {bound:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sky_off_vs_on_differs() {
+        // The old analytic ramp (fog-to-zenith mix) must differ from the
+        // baked sample in the sky region, or the live switch moves no pixel.
+        let bake = sky_live_bake();
+        let fog = look_fog_color(&bake);
+        let zenith = sample_look_skybox(&bake, [0.0, 1.0, 0.0]).expect("zenith samples");
+        let dir = [-0.5, 0.45, -0.6];
+        let on = sample_look_skybox(&bake, dir).expect("sky samples");
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let t = (dir[1] / len).clamp(0.0, 1.0).sqrt();
+        let mut gap = 0.0f32;
+        for c in 0..3 {
+            let off = fog[c] + (zenith[c] - fog[c]) * t;
+            gap = gap.max((on[c] - off).abs());
+        }
+        assert!(
+            gap > 1e-2,
+            "live sample must move sky pixels: on {on:?} vs ramp gap {gap}"
+        );
+    }
+
+    #[test]
+    fn sky_bake_bytes_x2() {
+        // Same day-rig capture twice gives equal upload bytes (row-major
+        // texels plus the anchor); a moved sun moves them.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let (a_tex, a_ev) = sky_view_upload(&bake, anchor).expect("first uploads");
+        let again = sky_live_bake();
+        let (b_tex, b_ev) = sky_view_upload(&again, anchor).expect("second uploads");
+        assert_eq!(
+            sky_upload_bytes(&a_tex, a_ev),
+            sky_upload_bytes(&b_tex, b_ev),
+            "upload bytes stable x2"
+        );
+        assert_eq!(a_tex.len(), SKY_CAPTURE_W as usize * SKY_CAPTURE_H as usize);
+        let sunny = SkyParams {
+            sun_dir: [0.9, 0.2, 0.1],
+            ..sky_live_params()
+        };
+        let (moved_cap, _) = bake_sky(&sunny, SKY_CAPTURE_W, SKY_CAPTURE_H).expect("moved bakes");
+        let (moved, _) = bake_look_from_day(&moved_cap).expect("moved look bakes");
+        let (m_tex, m_ev) = sky_view_upload(&moved, anchor).expect("moved uploads");
+        assert_ne!(
+            sky_upload_bytes(&a_tex, a_ev),
+            sky_upload_bytes(&m_tex, m_ev),
+            "bytes follow the sun"
+        );
+        let mut ragged = bake.clone();
+        ragged.texels.truncate(5);
+        assert!(matches!(
+            sky_view_upload(&ragged, anchor),
+            Err(SkyError::Invalid(_))
+        ));
+        let mut nan_tex = bake;
+        nan_tex.texels[0] = [f32::NAN, 0.1, 0.1];
+        assert!(matches!(
+            sky_view_upload(&nan_tex, anchor),
+            Err(SkyError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn sky_ev100_exposure_finite() {
+        // The fixture anchor maps to a finite positive exposure for the fog
+        // and exposure feeds; unusable anchors fail loudly at upload.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let (_, ev100) = sky_view_upload(&bake, anchor).expect("upload reads");
+        let exposure = ev100_to_exposure(ev100).expect("fixture anchor maps");
+        assert!(
+            exposure.is_finite() && exposure > 0.0,
+            "exposure scales: {exposure}"
+        );
+        assert!(
+            (exposure - 2f32.powi(-12)).abs() < 1e-9,
+            "EV100 12 halves twelve times: {exposure}"
+        );
+        for bad in [f32::NAN, f32::INFINITY, 200.0] {
+            assert!(
+                matches!(sky_view_upload(&bake, bad), Err(SkyError::Invalid(_))),
+                "anchor {bad} must fail loudly"
+            );
+        }
+    }
+
+    #[test]
+    fn sky_forward_feed_matches_its_parts() {
+        // One feed equals its four parts read separately from the same bake.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let (tex, horizon, zenith, exposure) = sky_forward_feed(&bake, anchor).expect("feed reads");
+        let (up_tex, up_anchor) = sky_view_upload(&bake, anchor).expect("upload reads");
+        assert_eq!(tex, up_tex, "texels equal upload");
+        assert_eq!(up_anchor, anchor, "anchor rides");
+        assert_eq!(horizon, look_fog_color(&bake), "horizon equals fog color");
+        assert_eq!(
+            zenith,
+            sample_look_skybox(&bake, [0.0, 1.0, 0.0]).expect("zenith samples"),
+            "zenith equals straight-up sample"
+        );
+        assert_eq!(
+            exposure,
+            ev100_to_exposure(anchor).expect("anchor maps"),
+            "exposure equals ev100 mapping"
+        );
+    }
+
+    #[test]
+    fn sky_forward_feed_bytes_x2() {
+        // Same fixture twice gives equal upload bytes; a moved sun moves them.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let (tex_a, _, _, exp_a) = sky_forward_feed(&bake, anchor).expect("first feeds");
+        let again = sky_live_bake();
+        let (tex_b, _, _, exp_b) = sky_forward_feed(&again, anchor).expect("second feeds");
+        assert_eq!(exp_a, exp_b, "exposure stable x2");
+        assert_eq!(
+            sky_upload_bytes(&tex_a, anchor),
+            sky_upload_bytes(&tex_b, anchor),
+            "feed bytes stable x2"
+        );
+        let sunny = SkyParams {
+            sun_dir: [0.9, 0.2, 0.1],
+            ..sky_live_params()
+        };
+        let (cap, _) = bake_sky(&sunny, SKY_CAPTURE_W, SKY_CAPTURE_H).expect("moved bakes");
+        let (moved, _) = bake_look_from_day(&cap).expect("moved look bakes");
+        let (moved_tex, _, _, _) = sky_forward_feed(&moved, anchor).expect("moved feeds");
+        assert_ne!(
+            sky_upload_bytes(&tex_a, anchor),
+            sky_upload_bytes(&moved_tex, anchor),
+            "bytes follow the sun"
+        );
+    }
+
+    #[test]
+    fn sky_forward_feed_rejects_ragged_bake() {
+        // Truncated backing fails the same loud way as the upload.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let mut ragged = bake;
+        ragged.texels.truncate(5);
+        assert!(matches!(
+            sky_forward_feed(&ragged, anchor),
+            Err(SkyError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn sky_forward_feed_rejects_bad_ev() {
+        // Unusable anchors fail loudly, including the subnormal EV100 200.
+        let bake = sky_live_bake();
+        for bad in [f32::NAN, f32::INFINITY, 200.0] {
+            assert!(
+                matches!(sky_forward_feed(&bake, bad), Err(SkyError::Invalid(_))),
+                "anchor {bad} must fail loudly"
+            );
+        }
+    }
+
+    #[test]
+    fn sky_forward_feed_wires_presenter_init() {
+        // LF1 wiring gate: presenter init builds sky state from one feed
+        // call so upload, horizon, zenith and exposure never drift. Fails
+        // while init reads three separate calls with the feed unwired.
+        let src = include_str!("present/gpu_present/presenter.rs");
+        assert!(
+            src.contains("sky::sky_forward_feed(&sky_look"),
+            "presenter init must call sky_forward_feed once"
+        );
+        assert!(
+            !src.contains("sky::sky_view_upload"),
+            "presenter init must not read sky_view_upload separately"
+        );
+        assert!(
+            !src.contains("sky::look_fog_color(&sky_look)"),
+            "presenter init must not read look_fog_color separately"
+        );
+        assert!(
+            src.contains("FogFwd::day(sky_horizon, sky_zenith)"),
+            "fog must use the feed horizon and zenith"
+        );
+        assert!(
+            src.contains("sky_exposure"),
+            "EV100 check must use the feed exposure"
+        );
+    }
+
+    #[test]
+    fn fs_sky_samples_baked_sky_view() {
+        // F2P live-sky text gate: `fs_sky` must fetch the uploaded bake by
+        // ray direction (not the old analytic ramp) while keeping the
+        // infinite fog mix in linear HDR for the blit.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        let head = "fn fs_sky(";
+        let start = wgsl.find(head).expect("fs_sky exists");
+        let rest = &wgsl[start..];
+        let end = rest.find("\n}\n").expect("fs_sky closes");
+        let sky = &rest[..end];
+        assert!(
+            sky.contains("sky_view_sample") || sky.contains("sky_view"),
+            "fs_sky must sample the uploaded sky-view texture"
+        );
+        assert!(
+            wgsl.contains("textureLoad") || wgsl.contains("textureSample"),
+            "sky-view fetch must read bake texels on the device"
+        );
+        assert!(
+            sky.contains("fog_factor_infinite"),
+            "fs_sky keeps the infinite-distance fog mix"
+        );
+        assert!(
+            !sky.contains("aces_fitted") && !sky.contains("linear_to_srgb_term"),
+            "fs_sky stays linear HDR, tone map lives in the blit"
+        );
+        assert!(
+            wgsl.contains("@binding(15)") && wgsl.contains("sky_view"),
+            "sky-view binds on free forward 15 (9-12 IBL, 13-14 sun)"
+        );
+    }
+
+    #[test]
+    fn sky_live_gate_counts_only_when_bound_and_moved() {
+        // Caller: `present_frame_live` receipt via `live_sky_should_count`.
+        // Behavior: day-rig gap above EG8 epsilon counts, flat zero gap
+        // refuses, ragged backing fails loudly same as the feed.
+        let bake = sky_live_bake();
+        let gap = sky_live_on_off_gap(&bake).expect("day-rig gaps");
+        assert!(gap > 0.01, "bound plus moved counts, got {gap}");
+        let mut flat = bake.clone();
+        let flat_len = flat.texels.len();
+        flat.texels = vec![[0.5, 0.5, 0.5]; flat_len];
+        flat.ambient = [0.5, 0.5, 0.5];
+        flat.fog = [0.5, 0.5, 0.5];
+        let flat_gap = sky_live_on_off_gap(&flat).expect("flat gaps");
+        assert!(flat_gap <= 0.01, "zero gap refuses, got {flat_gap}");
+        let mut ragged = bake;
+        ragged.texels.truncate(5);
+        assert!(matches!(
+            sky_live_on_off_gap(&ragged),
+            Err(SkyError::Invalid(_))
+        ));
     }
 }

@@ -1244,8 +1244,7 @@ mod matrix_tests {
             let mut slices = Vec::with_capacity(2);
             for prefix in [300_u32, 600] {
                 let ((_, checkpoints), snap) = alloc::measure(|| {
-                    engine_arena::run_prefix(&config, &tape, prefix)
-                        .expect("canonical prefix runs")
+                    engine_arena::run_prefix(&config, &tape, prefix).expect("canonical prefix runs")
                 });
                 std::hint::black_box(fold_checkpoints(&checkpoints));
                 slices.push((snap.bytes, snap.count));
@@ -1255,10 +1254,7 @@ mod matrix_tests {
         let first = measured();
         let second = measured();
         assert_eq!(first, second, "steady slice replays exactly");
-        let (bytes, count) = (
-            first[1].0 - first[0].0,
-            first[1].1 - first[0].1,
-        );
+        let (bytes, count) = (first[1].0 - first[0].0, first[1].1 - first[0].1);
         assert!(
             bytes <= 1_024,
             "steady 300-tick slice holds its byte budget: {bytes}"

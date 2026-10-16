@@ -19,8 +19,10 @@
 //! [`ModeSession::digest`] is O(ticks) integer folds with no allocation.
 
 use crate::ladder::{Ladder, LadderError, LadderRecord, Outcome};
+use crate::ludus_npcs::{ludus_contains, ludus_route, ludus_zone};
 use crate::siege::{fold_word, run_siege, SiegeConfig, SiegeError, SiegeReport, SIEGE_SLOTS};
 use crate::{App, GameConfig, GameError};
+use engine_anim::traversal::{Probe, TraversalPlan, TraverseAction};
 use engine_arena::Checkpoint;
 use engine_core::hash::FNV64_OFFSET;
 use engine_input::{FighterInput, MAX_PARTICIPANTS};
@@ -33,6 +35,74 @@ pub const DISTRICT_CELL_SIZE: u16 = 32;
 /// Ticks a bot-filled siege test may run without slowing the gate.
 pub const SIEGE_SMOKE_TICKS: u32 = 200;
 
+/// District crossing TV1 length: links 1-3 in `content/maps/district/route_tv1.json`.
+pub const DISTRICT_ROUTE_LEN: usize = 3;
+
+/// Plan one TV1 link by id (`1..=3`) through the traversal chooser.
+/// Caller: [`district_route_plans`] plus district tests. Units: meters.
+pub fn district_plan_link(id: u8) -> Result<TraversalPlan, WorldModeError> {
+    let (probe, edge_m, want) = match id {
+        1 => (
+            Probe {
+                height_m: 0.95,
+                depth_m: 0.6,
+                gap_m: 0.4,
+                speed_m_s: 2.0,
+                has_hold: false,
+            },
+            [-27.5, -2.0],
+            TraverseAction::Vault,
+        ),
+        2 => (
+            Probe {
+                height_m: 1.40,
+                depth_m: 1.0,
+                gap_m: 0.3,
+                speed_m_s: 1.2,
+                has_hold: false,
+            },
+            [-26.0, 0.9],
+            TraverseAction::Mantle,
+        ),
+        3 => (
+            Probe {
+                height_m: 2.40,
+                depth_m: 0.6,
+                gap_m: 0.2,
+                speed_m_s: 0.8,
+                has_hold: true,
+            },
+            [-2.0, 0.3],
+            TraverseAction::Climb,
+        ),
+        _ => return Err(WorldModeError::BadConfig("route_link")),
+    };
+    let planned = engine_anim::traversal::plan(&probe, edge_m)?;
+    if planned.action != want {
+        return Err(WorldModeError::ReplayMismatch("district"));
+    }
+    Ok(planned)
+}
+
+/// Plan the three TV1 links in route order and pin the TV1 bounds.
+/// Caller: `ModeSession::boot` plus `ModeSession::replay` (District).
+pub fn district_route_plans() -> Result<[TraversalPlan; DISTRICT_ROUTE_LEN], WorldModeError> {
+    if engine_anim::traversal::VAULT_MAX_MM != 1250 {
+        return Err(WorldModeError::BadConfig("vault_max"));
+    }
+    if engine_anim::traversal::MANTLE_MAX_MM != 1700 {
+        return Err(WorldModeError::BadConfig("mantle_max"));
+    }
+    if engine_anim::traversal::CLIMB_MAX_MM != 2600 {
+        return Err(WorldModeError::BadConfig("climb_max"));
+    }
+    Ok([
+        district_plan_link(1)?,
+        district_plan_link(2)?,
+        district_plan_link(3)?,
+    ])
+}
+
 /// Playable mode, selected in the lobby. One byte on the wire.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum WorldMode {
@@ -42,15 +112,18 @@ pub enum WorldMode {
     Siege,
     /// Free-roam over a 3x3 district cell window with ladder practice.
     District,
+    /// Ludus hub practice: drill floor plus pells plus rack over the ladder.
+    Ludus,
 }
 
 impl WorldMode {
-    /// Decode `0` (arena), `1` (siege) or `2` (district); anything else fails.
+    /// Decode `0` (arena), `1` (siege), `2` (district) or `3` (ludus); else fails.
     pub fn decode(byte: u8) -> Result<Self, WorldModeError> {
         match byte {
             0 => Ok(Self::Arena),
             1 => Ok(Self::Siege),
             2 => Ok(Self::District),
+            3 => Ok(Self::Ludus),
             other => Err(WorldModeError::BadMode(other)),
         }
     }
@@ -62,6 +135,7 @@ impl WorldMode {
             Self::Arena => 0,
             Self::Siege => 1,
             Self::District => 2,
+            Self::Ludus => 3,
         }
     }
 }
@@ -181,6 +255,70 @@ impl DistrictWalk {
     }
 }
 
+/// Walker over the ludus practice yard in meters. Steps off the yard or
+/// past one cell fail loudly. Caller: [`ModeSession`] ludus arms. Pure.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LudusWalk {
+    /// East position in meters, inside the practice yard.
+    x: f32,
+    /// South position in meters, inside the practice yard.
+    z: f32,
+    /// Accepted single-cell steps so far.
+    steps: u32,
+}
+
+impl LudusWalk {
+    /// Start at `(x, z)` meters inside the practice yard. Pure.
+    pub fn new(x: f32, z: f32) -> Result<Self, WorldModeError> {
+        let yard = ludus_zone("practice_yard").ok_or(WorldModeError::BadConfig("ludus_zone"))?;
+        if !ludus_contains(yard, x, z) {
+            return Err(WorldModeError::BadCoord);
+        }
+        Ok(Self { x, z, steps: 0 })
+    }
+
+    /// Drill-floor position in meters.
+    #[must_use]
+    pub fn pos(self) -> (f32, f32) {
+        (self.x, self.z)
+    }
+
+    /// Accepted steps so far.
+    #[must_use]
+    pub fn steps(self) -> u32 {
+        self.steps
+    }
+
+    /// Step one cell (`dx, dz` in `-1..=1`, not both zero). Pure.
+    pub fn walk(&mut self, dx: i32, dz: i32) -> Result<(), WorldModeError> {
+        let step_x = match dx {
+            -1 => -1.0,
+            0 => 0.0,
+            1 => 1.0,
+            _ => return Err(WorldModeError::NotLive),
+        };
+        let step_z = match dz {
+            -1 => -1.0,
+            0 => 0.0,
+            1 => 1.0,
+            _ => return Err(WorldModeError::NotLive),
+        };
+        if dx == 0 && dz == 0 {
+            return Err(WorldModeError::NotLive);
+        }
+        let next_x = self.x + step_x;
+        let next_z = self.z + step_z;
+        let yard = ludus_zone("practice_yard").ok_or(WorldModeError::BadConfig("ludus_zone"))?;
+        if !ludus_contains(yard, next_x, next_z) {
+            return Err(WorldModeError::BadCoord);
+        }
+        self.x = next_x;
+        self.z = next_z;
+        self.steps = self.steps.saturating_add(1);
+        Ok(())
+    }
+}
+
 /// One arena/district match tape: the [`App`] plus its recorded human inputs
 /// so the session rebuilds identically on replay. Opaque: only
 /// [`ModeSession`] builds these; all fields stay private.
@@ -242,7 +380,7 @@ impl MatchTape {
 pub enum WorldModeError {
     /// Config row outside its range, row name carried.
     BadConfig(&'static str),
-    /// Mode byte outside `0..=2`, byte carried.
+    /// Mode byte outside `0..=3`, byte carried.
     BadMode(u8),
     /// Cell coordinate past the map rim.
     BadCoord,
@@ -254,6 +392,8 @@ pub enum WorldModeError {
     Siege(SiegeError),
     /// Ladder snapshot failure from the ladder table.
     Ladder(LadderError),
+    /// District traversal plan failure from the TV1 crossing.
+    Traversal(engine_anim::traversal::TraverseError),
     /// Replay diverged; the static names the mode that moved.
     ReplayMismatch(&'static str),
 }
@@ -268,6 +408,7 @@ impl core::fmt::Display for WorldModeError {
             Self::Game(err) => write!(f, "arena session error ({err})"),
             Self::Siege(err) => write!(f, "siege error ({err})"),
             Self::Ladder(err) => write!(f, "ladder error ({err})"),
+            Self::Traversal(err) => write!(f, "district traversal error ({err})"),
             Self::ReplayMismatch(mode) => write!(f, "replay diverged ({mode})"),
         }
     }
@@ -293,11 +434,17 @@ impl From<LadderError> for WorldModeError {
     }
 }
 
-/// One booted mode session over the ladder: arena, siege or district
-/// free-roam. Boot validates the [`LobbyBoot`] per mode; [`ModeSession::tick`]
-/// drives arena/district matches, [`ModeSession::finish_siege`] authors the
-/// bot-filled siege, and [`ModeSession::replay`] re-runs the recorded session
-/// and fails loudly on any divergence.
+impl From<engine_anim::traversal::TraverseError> for WorldModeError {
+    fn from(err: engine_anim::traversal::TraverseError) -> Self {
+        Self::Traversal(err)
+    }
+}
+
+/// One booted mode session over the ladder: arena, siege, district
+/// free-roam or ludus hub practice. Boot validates the [`LobbyBoot`] per
+/// mode; [`ModeSession::tick`] drives arena/district/ludus matches,
+/// [`ModeSession::finish_siege`] authors the bot-filled siege, and
+/// [`ModeSession::replay`] re-runs the recorded session and fails loudly.
 pub enum ModeSession {
     /// Single arena match plus its recorded tape.
     Arena {
@@ -328,12 +475,25 @@ pub enum ModeSession {
         /// Ladder folded by [`ModeSession::settle`].
         ladder: Ladder,
     },
+    /// Ludus hub practice: arena match plus the drill-floor walk.
+    Ludus {
+        /// Recorded match tape.
+        tape: MatchTape,
+        /// Drill-floor walk over the practice yard.
+        walk: LudusWalk,
+        /// Boot position (player spawn); replay rebuilds from here.
+        origin: (f32, f32),
+        /// Recorded single-cell steps in order; replay re-applies them.
+        walks: Vec<(i32, i32)>,
+        /// Ladder folded by [`ModeSession::settle`].
+        ladder: Ladder,
+    },
 }
 
 impl ModeSession {
     /// Boot one mode from the lobby: validates ticks/extent for every mode,
-    /// fighters `2..=16` for arena/district and exactly 64 for siege. The
-    /// district center derives deterministically from the seed. Modes only
+    /// fighters `2..=16` for arena/district/ludus and exactly 64 for siege.
+    /// The district center derives deterministically from the seed. Modes only
     /// construct validated configs and call public entry points — they never
     /// mutate engine state outside their own session.
     pub fn boot(lobby: LobbyBoot) -> Result<Self, WorldModeError> {
@@ -393,10 +553,37 @@ impl ModeSession {
                 let x = (lobby.seed % span) as i32 - rim;
                 let z = ((lobby.seed / span) % span) as i32 - rim;
                 let center = CellCoord::new(x, z).map_err(|_| WorldModeError::BadCoord)?;
+                // The crossing is part of the boot: a bound move refuses here.
+                district_route_plans()?;
                 Ok(Self::District {
                     tape: MatchTape::boot(config)?,
                     walk: DistrictWalk::new(center)?,
                     origin: center,
+                    walks: Vec::new(),
+                    ladder: Ladder::new(),
+                })
+            }
+            WorldMode::Ludus => {
+                if lobby.fighters < 2 || lobby.fighters > MAX_PARTICIPANTS {
+                    return Err(WorldModeError::BadConfig("fighters"));
+                }
+                let config = GameConfig {
+                    seed: lobby.seed,
+                    ticks: lobby.ticks,
+                    fighters: lobby.fighters,
+                    half_extent_m: lobby.half_extent_m,
+                };
+                // Drill routes are part of the boot: a missing route refuses here.
+                ludus_route("pell_west_stand").ok_or(WorldModeError::BadConfig("ludus_route"))?;
+                let spawn = crate::ludus_npcs::LUDUS_SPAWNS
+                    .iter()
+                    .find(|spot| spot.name == "player")
+                    .ok_or(WorldModeError::BadConfig("ludus_spawn"))?;
+                let walk = LudusWalk::new(spawn.x, spawn.z)?;
+                Ok(Self::Ludus {
+                    tape: MatchTape::boot(config)?,
+                    walk,
+                    origin: (spawn.x, spawn.z),
                     walks: Vec::new(),
                     ladder: Ladder::new(),
                 })
@@ -411,10 +598,11 @@ impl ModeSession {
             Self::Arena { .. } => WorldMode::Arena,
             Self::Siege { .. } => WorldMode::Siege,
             Self::District { .. } => WorldMode::District,
+            Self::Ludus { .. } => WorldMode::Ludus,
         }
     }
 
-    /// Fixed-tick cursor for arena/district; authored siege ticks for siege.
+    /// Fixed-tick cursor for arena/district/ludus; authored siege ticks for siege.
     #[must_use]
     pub fn cursor(&self) -> u32 {
         match self {
@@ -427,6 +615,7 @@ impl ModeSession {
                 }
             }
             Self::District { tape, .. } => tape.app.cursor(),
+            Self::Ludus { tape, .. } => tape.app.cursor(),
         }
     }
 
@@ -437,6 +626,7 @@ impl ModeSession {
             Self::Arena { ladder, .. } => ladder,
             Self::Siege { ladder, .. } => ladder,
             Self::District { ladder, .. } => ladder,
+            Self::Ludus { ladder, .. } => ladder,
         }
     }
 
@@ -453,28 +643,35 @@ impl ModeSession {
             Self::Arena { ladder, .. } => ladder,
             Self::Siege { ladder, .. } => ladder,
             Self::District { ladder, .. } => ladder,
+            Self::Ludus { ladder, .. } => ladder,
         };
         ladder.apply(outcome, tick);
     }
 
-    /// Advance one fixed tick on a human input (arena/district). True when
+    /// Advance one fixed tick on a human input (arena/district/ludus). True when
     /// the input was accepted and recorded for replay. Siege is bot-filled:
     /// ticking it fails loudly; drive it with [`ModeSession::finish_siege`].
     pub fn tick(&mut self, input: FighterInput) -> Result<bool, WorldModeError> {
         match self {
             Self::Arena { tape, .. } => tape.tick(input),
             Self::District { tape, .. } => tape.tick(input),
+            Self::Ludus { tape, .. } => tape.tick(input),
             Self::Siege { .. } => Err(WorldModeError::BadConfig("tick")),
         }
     }
 
-    /// Step the district roam center one cell (district only); arena and
-    /// siege sessions refuse loudly. Accepted steps are recorded for replay.
+    /// Step one cell (district roam or ludus drill walk); arena and siege
+    /// sessions refuse loudly. Accepted steps are recorded for replay.
     pub fn walk(&mut self, dx: i32, dz: i32) -> Result<(), WorldModeError> {
         match self {
             Self::District { walk, walks, .. } => {
                 walk.walk(dx, dz)?;
                 walks.push((dx as i8, dz as i8));
+                Ok(())
+            }
+            Self::Ludus { walk, walks, .. } => {
+                walk.walk(dx, dz)?;
+                walks.push((dx, dz));
                 Ok(())
             }
             _ => Err(WorldModeError::BadConfig("walk")),
@@ -527,17 +724,18 @@ impl ModeSession {
         }
     }
 
-    /// Arena checkpoints for every simulated tick (arena/district).
+    /// Arena checkpoints for every simulated tick (arena/district/ludus).
     pub fn checkpoints(&self) -> Result<&[Checkpoint], WorldModeError> {
         match self {
             Self::Arena { tape, .. } => Ok(tape.app.checkpoints()),
             Self::District { tape, .. } => Ok(tape.app.checkpoints()),
+            Self::Ludus { tape, .. } => Ok(tape.app.checkpoints()),
             Self::Siege { .. } => Err(WorldModeError::BadConfig("checkpoints")),
         }
     }
 
     /// Converged digest of the recorded session: checkpoint folds for
-    /// arena/district (plus the district center and step count), the siege
+    /// arena/district/ludus (plus the walk position and step count), the
     /// hash for a finished siege. Integer ops only, no allocation.
     #[must_use]
     pub fn digest(&self) -> u64 {
@@ -549,14 +747,20 @@ impl ModeSession {
                 let hash = fold_word(hash, center.z as u64);
                 fold_word(hash, walk.steps() as u64)
             }
+            Self::Ludus { tape, walk, .. } => {
+                let (x, z) = walk.pos();
+                let hash = fold_word(tape.digest(), u64::from(x.to_bits()));
+                let hash = fold_word(hash, u64::from(z.to_bits()));
+                fold_word(hash, u64::from(walk.steps()))
+            }
             Self::Siege { report, .. } => report.as_ref().map_or(0, |done| done.hash),
         }
     }
 
     /// Replay the recorded session from its lobby params and fail loudly on
-    /// any divergence: arena/district re-run the recorded inputs through a
-    /// fresh match, siege re-authors the bot-filled war. Returns the replay
-    /// digest, which must equal [`ModeSession::digest`].
+    /// any divergence: arena/district/ludus re-run the recorded inputs
+    /// through a fresh match, siege re-authors the bot-filled war. Returns
+    /// the replay digest, which must equal [`ModeSession::digest`].
     pub fn replay(&self) -> Result<u64, WorldModeError> {
         match self {
             Self::Arena { tape, .. } => {
@@ -585,12 +789,41 @@ impl ModeSession {
                 if rewound != *walk {
                     return Err(WorldModeError::ReplayMismatch("district"));
                 }
+                // The crossing replays too: a bound move diverges here.
+                district_route_plans()?;
                 let center = walk.center();
                 let hash = fold_word(again, center.x as u64);
                 let hash = fold_word(hash, center.z as u64);
                 let hash = fold_word(hash, walk.steps() as u64);
                 if hash != self.digest() {
                     return Err(WorldModeError::ReplayMismatch("district"));
+                }
+                Ok(hash)
+            }
+            Self::Ludus {
+                tape,
+                walk,
+                origin,
+                walks,
+                ..
+            } => {
+                let again = tape.replay()?;
+                let mut rewound = LudusWalk::new(origin.0, origin.1)?;
+                for (dx, dz) in walks.iter() {
+                    rewound
+                        .walk(*dx, *dz)
+                        .map_err(|_| WorldModeError::ReplayMismatch("ludus"))?;
+                }
+                if rewound != *walk {
+                    return Err(WorldModeError::ReplayMismatch("ludus"));
+                }
+                ludus_route("pell_west_stand").ok_or(WorldModeError::ReplayMismatch("ludus"))?;
+                let (x, z) = walk.pos();
+                let hash = fold_word(again, u64::from(x.to_bits()));
+                let hash = fold_word(hash, u64::from(z.to_bits()));
+                let hash = fold_word(hash, u64::from(walk.steps()));
+                if hash != self.digest() {
+                    return Err(WorldModeError::ReplayMismatch("ludus"));
                 }
                 Ok(hash)
             }
@@ -643,6 +876,10 @@ mod tests {
         LobbyBoot::new(WorldMode::District, 9182, 64, 2, 24.0)
     }
 
+    fn ludus_boot() -> LobbyBoot {
+        LobbyBoot::new(WorldMode::Ludus, 20260925, 64, 2, 20.0)
+    }
+
     fn siege_boot() -> LobbyBoot {
         LobbyBoot::new(WorldMode::Siege, 777, SIEGE_SMOKE_TICKS, 64, 20.0)
     }
@@ -690,6 +927,26 @@ mod tests {
     fn district_boots_roams_and_replays() {
         let mut session = ModeSession::boot(district_boot()).expect("valid district boot");
         assert_eq!(session.mode(), WorldMode::District);
+        // TV1 crossing: links 1-3 plan vault/mantle/climb against the bounds.
+        let plans = district_route_plans().expect("TV1 route plans");
+        assert_eq!(
+            plans[0].action,
+            TraverseAction::Vault,
+            "link 1 vaults 0.95 m"
+        );
+        assert_eq!(
+            plans[1].action,
+            TraverseAction::Mantle,
+            "link 2 mantles 1.40 m"
+        );
+        assert_eq!(
+            plans[2].action,
+            TraverseAction::Climb,
+            "link 3 climbs 2.40 m hold"
+        );
+        assert_eq!(engine_anim::traversal::VAULT_MAX_MM, 1250);
+        assert_eq!(engine_anim::traversal::MANTLE_MAX_MM, 1700);
+        assert_eq!(engine_anim::traversal::CLIMB_MAX_MM, 2600);
         drive(&mut session, 64);
         session.walk(1, 0).expect("step east");
         session.walk(0, 1).expect("step north");
@@ -716,6 +973,24 @@ mod tests {
     }
 
     #[test]
+    fn district_route_refuses_bad_links() {
+        assert!(district_plan_link(0).is_err(), "unknown link must refuse");
+        assert!(district_plan_link(4).is_err(), "link past TV1 must refuse");
+        let holdless = Probe {
+            height_m: 2.40,
+            depth_m: 0.6,
+            gap_m: 0.2,
+            speed_m_s: 0.8,
+            has_hold: false,
+        };
+        assert_eq!(
+            engine_anim::traversal::plan(&holdless, [-2.0, 0.3]),
+            Err(engine_anim::traversal::TraverseError::NoHold),
+            "holdless climb must refuse"
+        );
+    }
+
+    #[test]
     fn lobby_rejects_bad_boots() {
         for bad in [
             LobbyBoot::new(WorldMode::Arena, 1, 0, 2, 20.0),
@@ -736,7 +1011,12 @@ mod tests {
             Err(WorldModeError::BadMode(99)),
             "unknown mode byte must fail loudly"
         );
-        for mode in [WorldMode::Arena, WorldMode::Siege, WorldMode::District] {
+        for mode in [
+            WorldMode::Arena,
+            WorldMode::Siege,
+            WorldMode::District,
+            WorldMode::Ludus,
+        ] {
             assert_eq!(WorldMode::decode(mode.encode()), Ok(mode));
         }
     }
@@ -794,6 +1074,49 @@ mod tests {
             "stepping off the map must refuse"
         );
         assert_eq!(walk.center(), edge, "refused step keeps the center");
+    }
+
+    #[test]
+    fn ludus_boots_drills_and_replays() {
+        let mut session = ModeSession::boot(ludus_boot()).expect("ludus boots from lobby");
+        assert_eq!(session.mode(), WorldMode::Ludus);
+        assert_eq!(WorldMode::decode(3), Ok(WorldMode::Ludus));
+        assert_eq!(WorldMode::Ludus.encode(), 3);
+        // Player spawn -48,0 yaw 90 on the drill floor inside the nav rect.
+        match session {
+            ModeSession::Ludus { walk, origin, .. } => {
+                assert_eq!(walk.pos(), (-48.0, 0.0));
+                assert_eq!(origin, (-48.0, 0.0));
+            }
+            _ => panic!("ludus boots"),
+        }
+        drive(&mut session, 64);
+        // Drill route to pell_west_stand -8,-2: 40 east plus 2 south.
+        for _ in 0..40 {
+            session.walk(1, 0).expect("step east toward the pell");
+        }
+        for _ in 0..2 {
+            session.walk(0, -1).expect("step south to the stand");
+        }
+        match session {
+            ModeSession::Ludus { walk, .. } => assert_eq!(walk.pos(), (-8.0, -2.0)),
+            _ => panic!("ludus boots"),
+        }
+        assert_eq!(session.walk(2, 0), Err(WorldModeError::NotLive));
+        assert_eq!(session.walk(0, 0), Err(WorldModeError::NotLive));
+        let digest = session.digest();
+        assert_eq!(session.replay().expect("ludus replays"), digest);
+        let mut twin = ModeSession::boot(ludus_boot()).expect("ludus boots");
+        drive(&mut twin, 64);
+        for _ in 0..40 {
+            twin.walk(1, 0).expect("twin east");
+        }
+        for _ in 0..2 {
+            twin.walk(0, -1).expect("twin south");
+        }
+        assert_eq!(twin.digest(), digest);
+        session.settle(Outcome::Win);
+        assert_eq!(session.ladder().wins, 1);
     }
 
     #[test]

@@ -47,6 +47,8 @@ pub mod anim;
 pub mod asset;
 pub mod break_;
 pub mod geo;
+/// Door grammar gate (constrained decoding stays typed).
+pub mod grammar;
 pub mod gym;
 pub mod material;
 pub mod net;

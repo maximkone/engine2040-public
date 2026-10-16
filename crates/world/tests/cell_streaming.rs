@@ -12,11 +12,20 @@ use engine_world::cells;
 mod as2;
 
 #[path = "../../nav/src/mesh.rs"]
-mod nv1;
+mod mesh;
 
-/// The byte cursor `nv1` decodes through, addressed there as `crate::cursor`.
+/// The byte cursor `mesh` decodes through, addressed there as `crate::cursor`.
 #[path = "../../nav/src/cursor.rs"]
 mod cursor;
+
+#[path = "../../nav/src/flow.rs"]
+mod flow;
+
+#[path = "../../nav/src/tiles.rs"]
+mod tiles;
+
+#[path = "../../nav/src/rebake.rs"]
+mod rebake;
 
 use as2::{StreamBudget, StreamJob, StreamKind};
 use cells::{
@@ -314,18 +323,18 @@ fn cell_streaming_nine_cell_walk_zero_hitches() {
         [[0.0, 0.0, 0.0], [0.0, 0.0, 16.0], [16.0, 0.0, 16.0]],
         [[0.0, 0.0, 0.0], [16.0, 0.0, 16.0], [16.0, 0.0, 0.0]],
     ];
-    let config = nv1::BakeConfig {
+    let config = mesh::BakeConfig {
         cell_size: 1.0,
         walkable_normal_y: 0.7,
     };
-    let first = nv1::bake(&tris, &config).expect("hub footprint bakes");
-    let second = nv1::bake(&tris, &config).expect("hub footprint bakes");
+    let first = mesh::bake(&tris, &config).expect("hub footprint bakes");
+    let second = mesh::bake(&tris, &config).expect("hub footprint bakes");
     assert_eq!(first.to_bytes(), second.to_bytes());
     assert_eq!(first.digest(), second.digest());
     let mut shuffled = tris.to_vec();
     shuffled.reverse();
     assert_eq!(
-        nv1::bake(&shuffled, &config)
+        mesh::bake(&shuffled, &config)
             .expect("shuffled bakes")
             .to_bytes(),
         first.to_bytes(),
@@ -336,7 +345,7 @@ fn cell_streaming_nine_cell_walk_zero_hitches() {
         first.query([0.5, 0.0, 0.5], [15.5, 0.0, 15.5]).is_ok(),
         "hub query walks"
     );
-    let via_method = nv1::NavMesh::bake(&tris, &config).expect("method bakes");
+    let via_method = mesh::NavMesh::bake(&tris, &config).expect("method bakes");
     assert_eq!(via_method.to_bytes(), first.to_bytes());
     assert_eq!(first.cell_size_m(), 1.0);
     assert!(
@@ -344,7 +353,7 @@ fn cell_streaming_nine_cell_walk_zero_hitches() {
         "grid dims held"
     );
     assert_eq!(first.polygon_count(), first.polygons().len());
-    let poly0 = first.polygon(nv1::PolyId(0)).expect("polygon zero held");
+    let poly0 = first.polygon(mesh::PolyId(0)).expect("polygon zero held");
     assert_eq!(poly0.area(), 0);
     assert!(!poly0.cells().is_empty());
     assert!(!first
@@ -721,9 +730,9 @@ fn cell_streaming_unloaded_queries_never_guess() {
         [[6.0, 0.0, 6.0], [6.0, 0.0, 8.0], [8.0, 0.0, 8.0]],
         [[6.0, 0.0, 6.0], [8.0, 0.0, 8.0], [8.0, 0.0, 6.0]],
     ]);
-    let mesh = nv1::bake(
+    let mesh = mesh::bake(
         &island,
-        &nv1::BakeConfig {
+        &mesh::BakeConfig {
             cell_size: 0.5,
             walkable_normal_y: 0.7,
         },
@@ -731,7 +740,7 @@ fn cell_streaming_unloaded_queries_never_guess() {
     .expect("islands bake");
     assert_eq!(
         mesh.query([0.5, 0.0, 0.5], [7.0, 0.0, 7.0]),
-        Err(nv1::NavError::Unreachable)
+        Err(mesh::NavError::Unreachable)
     );
 }
 

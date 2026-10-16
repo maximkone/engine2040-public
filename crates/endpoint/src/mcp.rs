@@ -1472,6 +1472,20 @@ impl McpServer {
         })
     }
 
+    /// Route one shim batch through the group lane: one gesture id per batch, seal at batch end.
+    pub fn brp_batch(
+        &self,
+        batch: &[crate::remote_shim::BrpRequest],
+        gesture_key: u64,
+    ) -> crate::discover::BatchExecuteOutput {
+        let _ = (
+            crate::remote_shim::BRP_DEFAULT_ADDR,
+            crate::remote_shim::BRP_DEFAULT_PORT,
+        );
+        let _ = crate::remote_shim::preview_via_shim(self, batch);
+        crate::remote_shim::execute_via_shim(self, batch, gesture_key)
+    }
+
     /// Serve one stdio session until the client closes stdin. The caller
     /// provides the async runtime (tokio): `server.run_stdio().await`.
     pub async fn run_stdio(self) -> Result<String, String> {

@@ -53,11 +53,17 @@ impl core::fmt::Display for EightFightError {
             Self::BadFighters(n) => write!(f, "eight-fight gate needs 8 fighters, got {n}"),
             Self::BadTicks(n) => write!(f, "bad eight-fight ticks ({n})"),
             Self::BadExtent => write!(f, "bad eight-fight half-extent"),
-            Self::P50Blown { measured_us, bar_us } => write!(
+            Self::P50Blown {
+                measured_us,
+                bar_us,
+            } => write!(
                 f,
                 "eight-fight p50 blew bar ({measured_us}us over {bar_us}us)"
             ),
-            Self::P99Blown { measured_us, bar_us } => write!(
+            Self::P99Blown {
+                measured_us,
+                bar_us,
+            } => write!(
                 f,
                 "eight-fight p99 blew bar ({measured_us}us over {bar_us}us)"
             ),
@@ -155,18 +161,12 @@ mod tests {
             fighters: 2,
             ..EightFightConfig::standard()
         };
-        assert_eq!(
-            bad.validate(),
-            Err(EightFightError::BadFighters(2))
-        );
+        assert_eq!(bad.validate(), Err(EightFightError::BadFighters(2)));
         let bad_ticks = EightFightConfig {
             ticks: 0,
             ..EightFightConfig::standard()
         };
-        assert_eq!(
-            bad_ticks.validate(),
-            Err(EightFightError::BadTicks(0))
-        );
+        assert_eq!(bad_ticks.validate(), Err(EightFightError::BadTicks(0)));
         let bad_extent = EightFightConfig {
             half_extent_m: f32::NAN,
             ..EightFightConfig::standard()

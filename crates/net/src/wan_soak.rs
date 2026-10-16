@@ -142,6 +142,16 @@ pub enum WanError {
         /// Server tick offered.
         tick: u32,
     },
+    /// The delivery ledger splits wrong: scheduled snapshots must each land
+    /// as delivered or dropped, so the loss/distribution posts stay honest.
+    Ledger {
+        /// Snapshots scheduled across all viewers.
+        scheduled: u32,
+        /// Snapshots that arrived.
+        delivered: u32,
+        /// Snapshots dropped by loss or disconnect.
+        dropped: u32,
+    },
     /// A timing sample is NaN, infinite or negative.
     NonFiniteSample {
         /// What carried the bad timing.
@@ -166,6 +176,14 @@ impl Display for WanError {
                 write!(f, "wan converge {got} ticks over the {bar}-tick bar")
             }
             Self::Cadence { tick } => write!(f, "wan snapshot tick {tick} outside the cadence"),
+            Self::Ledger {
+                scheduled,
+                delivered,
+                dropped,
+            } => write!(
+                f,
+                "wan ledger split wrong: scheduled {scheduled} != delivered {delivered} + dropped {dropped}"
+            ),
             Self::NonFiniteSample { what } => {
                 write!(f, "{what} sample is not finite non-negative ms")
             }
@@ -244,8 +262,17 @@ pub struct FaultReport {
 impl FaultReport {
     /// Check the four budget bars plus the interest starve bar. Fails loudly
     /// with both sides; a checkpoint divergence never reaches here because
-    /// the harness builds the hash through the clean tape path.
+    /// the harness builds the hash through the clean tape path. The ledger
+    /// splits first: every scheduled snapshot is delivered or dropped, so
+    /// the loss/latency distributions post from honest counts.
     pub fn check(&self) -> Result<(), WanError> {
+        if u64::from(self.delivered) + u64::from(self.dropped) != u64::from(self.scheduled) {
+            return Err(WanError::Ledger {
+                scheduled: self.scheduled,
+                delivered: self.delivered,
+                dropped: self.dropped,
+            });
+        }
         if self.rollback_max > MAX_ROLLBACK as u32 {
             return Err(WanError::OverRollback {
                 got: self.rollback_max,
@@ -766,6 +793,31 @@ mod tests {
                 bar: CONVERGE_BAR_TICKS,
             }),
             "a slow converge must fail loudly with both sides"
+        );
+    }
+
+    #[test]
+    fn wan_soak_ledger_split_fails_loudly() {
+        // ON30 posts loss/latency distributions from this ledger: every
+        // scheduled snapshot is delivered or dropped, never both, never lost.
+        let good = run_fault(7, Fault::Loss, 60).expect("short soak must converge");
+        assert_eq!(
+            u64::from(good.delivered) + u64::from(good.dropped),
+            u64::from(good.scheduled),
+            "the harness keeps a split ledger"
+        );
+        good.check().expect("a split ledger must pass its bars");
+        // A forged report that drops a snapshot from the ledger fails loudly.
+        let mut bad = good;
+        bad.delivered = bad.delivered.saturating_add(1);
+        assert_eq!(
+            bad.check(),
+            Err(WanError::Ledger {
+                scheduled: bad.scheduled,
+                delivered: bad.delivered,
+                dropped: bad.dropped,
+            }),
+            "a split ledger must fail loudly with all three sides"
         );
     }
 

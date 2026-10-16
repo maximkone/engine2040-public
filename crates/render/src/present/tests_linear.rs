@@ -157,6 +157,7 @@ mod device {
                     exposure,
                 },
                 base_color: None,
+                normal_map: None,
             }],
         }
     }
@@ -697,4 +698,27 @@ mod device {
         }
         assert!(worst < 6.0, "fog off restores the clear frame: {worst}");
     }
+}
+
+/// LF4 slice 2: the live blit blooms linear HDR before the one tone map.
+/// No adapter needed: reads `blit.wgsl` text. Fails before the bloom lands.
+#[test]
+fn the_blit_blooms_before_the_one_tone_map() {
+    let blit = include_str!("../shaders/blit.wgsl");
+    assert!(
+        blit.contains("fn blit_bloom("),
+        "live blit holds the LF4 bloom"
+    );
+    assert!(
+        blit.contains("BLIT_BLOOM_THRESHOLD"),
+        "bloom threshold is named"
+    );
+    assert!(
+        blit.contains("blit_bloom(lit.rgb"),
+        "fs blooms the composite"
+    );
+    assert!(
+        blit.contains("display_tonemap(bloomed)"),
+        "tone map reads the bloomed HDR"
+    );
 }

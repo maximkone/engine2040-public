@@ -436,10 +436,7 @@ impl RelayTransport {
     /// nonblocking receive.
     pub fn new(sock: UdpSocket, leg: RelayLeg) -> io::Result<Self> {
         sock.set_nonblocking(true)?;
-        let (a, b) = (
-            mix64(leg.me).to_le_bytes(),
-            mix64(!leg.me).to_le_bytes(),
-        );
+        let (a, b) = (mix64(leg.me).to_le_bytes(), mix64(!leg.me).to_le_bytes());
         let mut stun_tx = [0u8; 12];
         stun_tx[..8].copy_from_slice(&a);
         stun_tx[8..].copy_from_slice(&b[..4]);
@@ -524,9 +521,7 @@ impl RelayTransport {
     #[must_use]
     pub fn unwrap(leg: &RelayLeg, msg: &[u8]) -> Option<Vec<u8>> {
         match RelayMsg::decode(msg) {
-            Ok(RelayMsg::Forward { from, to, payload })
-                if (from, to) == (leg.peer, leg.me) =>
-            {
+            Ok(RelayMsg::Forward { from, to, payload }) if (from, to) == (leg.peer, leg.me) => {
                 Some(payload)
             }
             _ => None,
@@ -578,21 +573,15 @@ impl Transport for RelayTransport {
                                 frame: classify(&payload),
                             });
                         }
-                        Ok(RelayMsg::Registered { client_id })
-                            if client_id == self.leg.me =>
-                        {
+                        Ok(RelayMsg::Registered { client_id }) if client_id == self.leg.me => {
                             self.registered = true;
                         }
-                        Ok(RelayMsg::Denied { client_id, code })
-                            if client_id == self.leg.me =>
-                        {
+                        Ok(RelayMsg::Denied { client_id, code }) if client_id == self.leg.me => {
                             self.denied = Some(code);
                         }
                         Ok(_) => {}
                         Err(_) => {
-                            if let Ok(addr) =
-                                decode_binding_response(&buf[..n], self.stun_tx)
-                            {
+                            if let Ok(addr) = decode_binding_response(&buf[..n], self.stun_tx) {
                                 self.srflx = Some(addr);
                             }
                         }
@@ -2026,10 +2015,7 @@ mod relay_transport_tests {
         assert_eq!(transport.denied(), None);
         assert_eq!(transport.srflx(), None);
         transport.send_register();
-        assert!(
-            transport.recv().is_empty(),
-            "no relay answers on loopback"
-        );
+        assert!(transport.recv().is_empty(), "no relay answers on loopback");
         assert!(!transport.registered());
         let payload = vec![3u8; 16];
         let stranger = PeerId(SocketAddr::from(([127, 0, 0, 1], 9)));
@@ -2123,5 +2109,52 @@ mod relay_transport_tests {
             "forged registered leaves state unchanged"
         );
         let _ = host_leg;
+    }
+}
+
+#[cfg(test)]
+mod on30_spike_tests {
+    /// ON30 spike: the relay leg through the invite/punch path converges with
+    /// full checkpoint equality under the WAN soak 150 ms / 2 pct loss profile.
+    /// Metric: relay-leg digest equals the one-process twin x2, punch-or-fallback
+    /// inside 300 ticks, rejoin inside 300 ticks. Kill: digest divergence twice
+    /// in a row, or either bound blown, kills the QUIC-relay leg and keeps the
+    /// UDP courier (ON30 already counts it).
+    #[test]
+    fn on30_spike_relay_leg_matches_twin_with_punch_and_rejoin_inside_300() {
+        use crate::online::{run_online, HOP_LATENCY_TICKS};
+        use crate::relay::{NatKind, PUNCH_TIMEOUT_TICKS};
+        use crate::wan_soak::{run_fault, Fault, CONVERGE_BAR_TICKS};
+        // The soak half: 150 ms / 2 pct loss still converges inside 300 ticks.
+        let soak = run_fault(7, Fault::Loss, 240).expect("loss must converge");
+        soak.check().expect("loss report must pass its bars");
+        assert!(
+            soak.converge_ticks <= CONVERGE_BAR_TICKS,
+            "rejoin converges inside 300 ticks, got {}",
+            soak.converge_ticks
+        );
+        // The relay half: loopback pair through the relay hub, digest x2.
+        let nats = [NatKind::Cone, NatKind::Symmetric];
+        let first = run_online(2040, nats, HOP_LATENCY_TICKS).expect("online bout runs");
+        let second = run_online(2040, nats, HOP_LATENCY_TICKS).expect("twin runs");
+        assert!(first.passed(), "relay bout passes: {}", first.bout);
+        assert_eq!(
+            first.bout.digest(),
+            second.bout.digest(),
+            "relay-leg digest equals the one-process twin x2"
+        );
+        assert!(
+            first.punch.decided_after <= PUNCH_TIMEOUT_TICKS,
+            "punch-or-fallback inside 300 ticks, got {}",
+            first.punch.decided_after
+        );
+        let rejoin = first
+            .bout
+            .rejoin_ticks()
+            .expect("the scripted drop rejoins");
+        assert!(
+            rejoin <= CONVERGE_BAR_TICKS,
+            "rejoin inside 300 ticks, got {rejoin}"
+        );
     }
 }

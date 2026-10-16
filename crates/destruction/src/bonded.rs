@@ -715,11 +715,7 @@ impl BondedCollection {
         }
         let without = self.support_flood_oracle(Some(chunk));
         let mut out = Vec::new();
-        for (i, (supported, missing)) in self
-            .support_scratch
-            .iter()
-            .zip(without.iter())
-            .enumerate()
+        for (i, (supported, missing)) in self.support_scratch.iter().zip(without.iter()).enumerate()
         {
             if i != chunk && *supported && !*missing {
                 out.push(wire(i));

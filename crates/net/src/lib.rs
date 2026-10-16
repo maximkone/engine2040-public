@@ -1,6 +1,8 @@
 //! net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta. No transport.
 
 pub mod anticheat;
+/// Tick-budgeted pre-cooked map-cell streaming (district/siege cells).
+pub mod cells;
 /// Real-UDP link between the two machines of a split bout: lockstep slot
 /// exchange with resends, relay registration, STUN echo, hole punch, probes.
 pub mod courier;

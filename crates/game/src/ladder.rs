@@ -1,4 +1,4 @@
-//! ladder: arena ladder table, glory ranks and repair hook (LIGHT slice).
+//! ladder: arena ladder table, glory ranks, per-rung beats, repair hook (LIGHT slice).
 //!
 //! Consumer: display modes (`modes.rs`) reads [`LadderRecord`]; the
 //! session loop folds match outcomes into [`Ladder`] and stores the record
@@ -28,6 +28,23 @@ pub const RANK_NAMES: [&str; 5] = ["Tiro", "Gladiator", "Primus", "Champion", "L
 /// Exact record length: version (1) + wins (4) + losses (4) + glory (4) +
 /// rung (1) + loops (4) + pending repairs (4) + last tick (4).
 pub const RECORD_BYTES: usize = 26;
+/// Rungs on the table: `0..=MAX_RUNG`, so this many beat rows.
+pub const RUNG_COUNT: usize = MAX_RUNG as usize + 1;
+/// Enemy tier per rung, 1 recruit through 4 boss. Never falls; boss is last.
+pub const RUNG_ENEMY_TIER: [u8; RUNG_COUNT] = [1, 1, 2, 2, 3, 3, 3, 4];
+/// New elements (a move, a rule, an arena variant) taught per rung. At most
+/// [`MAX_NEW_ELEMENTS_PER_RUNG`] each, so no rung clumps.
+pub const RUNG_NEW_ELEMENTS: [u8; RUNG_COUNT] = [2, 1, 2, 1, 2, 1, 2, 1];
+/// Expected minutes per rung bout, counts.
+pub const RUNG_MINUTES: [u32; RUNG_COUNT] = [2, 2, 3, 3, 4, 4, 5, 6];
+/// Boss tier id, always the last rung.
+pub const BOSS_TIER: u8 = 4;
+/// Most new elements one rung may teach.
+pub const MAX_NEW_ELEMENTS_PER_RUNG: u8 = 3;
+/// Seconds from launch to the first bout start.
+pub const FIRST_BOUT_START_SECS: u32 = 45;
+/// Last legal second for the first bout start.
+pub const FIRST_BOUT_START_LIMIT_SECS: u32 = 60;
 
 /// Ladder failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -238,6 +255,18 @@ impl Ladder {
             .unwrap_or(RANK_NAMES[RANK_NAMES.len() - 1])
     }
 
+    /// Beat row for the current rung: enemy tier, new elements, minutes.
+    /// The rung pins at [`MAX_RUNG`], so this always reads a chart row. Pure.
+    #[must_use]
+    pub fn beat(&self) -> RungBeat {
+        let index = usize::from(self.rung.min(MAX_RUNG));
+        RungBeat {
+            enemy_tier: RUNG_ENEMY_TIER[index],
+            new_elements: RUNG_NEW_ELEMENTS[index],
+            minutes: RUNG_MINUTES[index],
+        }
+    }
+
     /// Repairs owed by completed loops.
     #[must_use]
     pub fn pending_repairs(&self) -> u32 {
@@ -285,6 +314,64 @@ impl Ladder {
             last_tick: record.last_tick,
         })
     }
+}
+
+/// One rung beat: who stands there, what is new, how long it runs.
+/// Plain integers only, so the chart replays exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RungBeat {
+    /// Enemy tier id for this rung.
+    pub enemy_tier: u8,
+    /// New elements taught on this rung, at most 3.
+    pub new_elements: u8,
+    /// Expected minutes for the bout, counts.
+    pub minutes: u32,
+}
+
+/// Beat row for `rung`; `None` past [`MAX_RUNG`]. Pure.
+#[must_use]
+pub fn rung_beat(rung: u8) -> Option<RungBeat> {
+    if rung > MAX_RUNG {
+        return None;
+    }
+    let index = usize::from(rung);
+    Some(RungBeat {
+        enemy_tier: RUNG_ENEMY_TIER[index],
+        new_elements: RUNG_NEW_ELEMENTS[index],
+        minutes: RUNG_MINUTES[index],
+    })
+}
+
+/// First rung index breaking the chart rules over the given columns: new
+/// elements above the cap, or a tier below the rung before. A length
+/// mismatch fails too. `None` when the columns hold. Pure.
+#[must_use]
+pub fn first_chart_issue(tiers: &[u8], new_elements: &[u8]) -> Option<usize> {
+    let mut prev_tier: u8 = 0;
+    let mut index: usize = 0;
+    for (tier, fresh) in tiers.iter().zip(new_elements.iter()) {
+        if *fresh > MAX_NEW_ELEMENTS_PER_RUNG {
+            return Some(index);
+        }
+        if *tier < prev_tier {
+            return Some(index);
+        }
+        prev_tier = *tier;
+        index += 1;
+    }
+    if tiers.len() != new_elements.len() {
+        return Some(index);
+    }
+    None
+}
+
+/// True when the compiled beat chart holds: no clumped rung, the tier
+/// never falls, the boss is last, the first bout starts within 60 s. Pure.
+#[must_use]
+pub fn is_beat_chart_clean() -> bool {
+    first_chart_issue(&RUNG_ENEMY_TIER, &RUNG_NEW_ELEMENTS).is_none()
+        && RUNG_ENEMY_TIER[RUNG_COUNT - 1] == BOSS_TIER
+        && FIRST_BOUT_START_SECS <= FIRST_BOUT_START_LIMIT_SECS
 }
 
 /// Storable ladder snapshot: plain integers in a fixed little-endian layout
@@ -467,6 +554,42 @@ mod tests {
     #[test]
     fn rank_name_pins_out_of_range_to_top() {
         assert_eq!(Ladder::rank_name(u8::MAX), "Legend");
+    }
+
+    #[test]
+    fn beat_chart_covers_every_rung() {
+        assert_eq!(RUNG_COUNT, usize::from(MAX_RUNG) + 1);
+        for rung in 0..=MAX_RUNG {
+            let beat = rung_beat(rung).expect("every rung has a beat row");
+            assert_eq!(beat.enemy_tier, RUNG_ENEMY_TIER[usize::from(rung)]);
+            assert_eq!(beat.new_elements, RUNG_NEW_ELEMENTS[usize::from(rung)]);
+            assert_eq!(beat.minutes, RUNG_MINUTES[usize::from(rung)]);
+        }
+        assert_eq!(rung_beat(MAX_RUNG + 1), None);
+        assert_eq!(Ladder::new().beat(), rung_beat(0).unwrap());
+        let top = Ladder::run_script(&wins(usize::from(MAX_RUNG)));
+        assert_eq!(top.beat().enemy_tier, BOSS_TIER);
+    }
+
+    #[test]
+    fn beat_chart_rules_hold_and_clumps_fail() {
+        assert!(is_beat_chart_clean());
+        assert_eq!(
+            first_chart_issue(&RUNG_ENEMY_TIER, &RUNG_NEW_ELEMENTS),
+            None
+        );
+        // Clumped rung: 6 new elements on one rung fails at that rung.
+        let mut clumped = RUNG_NEW_ELEMENTS;
+        clumped[2] = MAX_NEW_ELEMENTS_PER_RUNG + 3;
+        assert_eq!(first_chart_issue(&RUNG_ENEMY_TIER, &clumped), Some(2));
+        // Falling tier fails at the rung that drops.
+        let mut fallen = RUNG_ENEMY_TIER;
+        fallen[5] = 1;
+        assert_eq!(first_chart_issue(&fallen, &RUNG_NEW_ELEMENTS), Some(5));
+        // Boss is last and the first bout starts within 60 s.
+        assert_eq!(RUNG_ENEMY_TIER[RUNG_COUNT - 1], BOSS_TIER);
+        assert!(FIRST_BOUT_START_SECS <= FIRST_BOUT_START_LIMIT_SECS);
+        assert_eq!(FIRST_BOUT_START_LIMIT_SECS, 60);
     }
 
     #[test]

@@ -79,6 +79,88 @@ pub mod slot {
     pub const EMISSIVE: u8 = 8;
 }
 
+/// One lobe entry in the six-lobe registry: its bit plus its document name.
+///
+/// Why a registry: RL48-51 code to one shape instead of re-listing bits.
+/// Units: bit flags plus names. Determinism: fixed array order on every
+/// host. Errors: none; unknown bits resolve to `None`.
+///
+/// Consumer: [`lobe_def`] and [`resolve_lobes`] read it;
+/// [`Structure::has_lobe`] routes the fragment build through it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LobeDef {
+    /// Bit in [`Structure::lobes`].
+    pub bit: u8,
+    /// Document name (`coat`, `sheen`, ...).
+    pub name: &'static str,
+}
+
+/// Lobe count: the registry holds exactly six entries.
+pub const LOBE_COUNT: usize = 6;
+
+/// All six lobe bits set: the mask a full structure carries.
+pub const LOBE_ALL_BITS: u8 = lobe::COAT
+    | lobe::SHEEN
+    | lobe::ANISOTROPY
+    | lobe::TRANSMISSION
+    | lobe::SUBSURFACE
+    | lobe::EMISSION;
+
+/// The six lobes in bit order: the shape RL48-51 code to.
+///
+/// Consumer: [`lobe_def`] and [`resolve_lobes`] read it;
+/// [`Structure::has_lobe`] routes the fragment build through it.
+/// Units: bit flags plus names. Determinism: fixed order on every host.
+/// Errors: none.
+pub const LOBE_REGISTRY: [LobeDef; LOBE_COUNT] = [
+    LobeDef {
+        bit: lobe::COAT,
+        name: "coat",
+    },
+    LobeDef {
+        bit: lobe::SHEEN,
+        name: "sheen",
+    },
+    LobeDef {
+        bit: lobe::ANISOTROPY,
+        name: "anisotropy",
+    },
+    LobeDef {
+        bit: lobe::TRANSMISSION,
+        name: "transmission",
+    },
+    LobeDef {
+        bit: lobe::SUBSURFACE,
+        name: "subsurface",
+    },
+    LobeDef {
+        bit: lobe::EMISSION,
+        name: "emission",
+    },
+];
+
+/// Resolve one lobe bit to its registry entry.
+///
+/// Units: bit flags. Determinism: fixed order, same answer on every host.
+/// Errors: none; zero, combined or unknown bits give `None`.
+///
+/// Consumer: [`Structure::has_lobe`] routes the fragment build through it.
+#[must_use]
+pub fn lobe_def(bit: u8) -> Option<&'static LobeDef> {
+    LOBE_REGISTRY.iter().find(|d| d.bit == bit)
+}
+
+/// Resolve a lobe mask to its entries in registry order.
+///
+/// Units: bit flags. Determinism: registry order on every host.
+/// Errors: none; unknown bits are ignored.
+///
+/// Consumer: [`Structure::has_lobe`] routes the fragment build through it.
+#[must_use]
+pub fn resolve_lobes(bits: u8) -> impl Iterator<Item = &'static LobeDef> {
+    LOBE_REGISTRY.iter().filter(move |d| bits & d.bit != 0)
+}
+
 /// What the shader text depends on. Equal structures give equal WGSL.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Structure {
@@ -140,6 +222,10 @@ impl Structure {
         if look.textures.emissive.is_some() {
             textures |= slot::EMISSIVE;
         }
+        debug_assert!(
+            lobes & !LOBE_ALL_BITS == 0,
+            "structure builds only registry lobes"
+        );
         Self {
             lobes,
             textures,
@@ -147,11 +233,23 @@ impl Structure {
         }
     }
 
+    /// True when `bit` is a known lobe and this structure carries it.
+    /// Routes through [`lobe_def`] plus [`resolve_lobes`] so unknown bits
+    /// never count. Units: bit flags. Determinism: same answer on every
+    /// host. Errors: none.
+    ///
+    /// Consumer: [`wgsl_for`] plus the fragment build read it; the door
+    /// `material` pack and RL48-51 read it through [`compile`].
+    #[must_use]
+    pub fn has_lobe(&self, bit: u8) -> bool {
+        lobe_def(bit).is_some() && resolve_lobes(self.lobes).any(|d| d.bit == bit)
+    }
+
     /// True when the record's alpha is below one: the host must draw it in
     /// the blended pass.
     #[must_use]
     pub fn blended(&self) -> bool {
-        self.lobes & lobe::TRANSMISSION != 0
+        self.has_lobe(lobe::TRANSMISSION)
     }
 
     /// Group-1 binding numbers of the used texture slots, in slot order:
@@ -345,10 +443,10 @@ pub fn wgsl_for(structure: &Structure) -> String {
     out.push_str(CHUNK_IO);
     out.push_str(brdf_wgsl());
     out.push_str(&crate::dfg::wgsl());
-    if structure.lobes & lobe::SHEEN != 0 {
+    if structure.has_lobe(lobe::SHEEN) {
         out.push_str(CHUNK_SHEEN);
     }
-    if structure.lobes & lobe::ANISOTROPY != 0 {
+    if structure.has_lobe(lobe::ANISOTROPY) {
         out.push_str(CHUNK_ANISO);
     }
     if structure.textures & slot::NORMAL != 0 {
@@ -905,6 +1003,137 @@ mod tests {
         assert!(text.contains("@group(1) @binding(1) var tex_orm"));
         assert!(text.contains("@group(1) @binding(2) var tex_emissive"));
         assert!(!text.contains("tex_base"));
+    }
+
+    #[test]
+    fn lobe_registry_resolves_six_lobes() {
+        assert_eq!(LOBE_COUNT, 6, "six lobes");
+        assert_eq!(LOBE_REGISTRY.len(), LOBE_COUNT);
+        assert_eq!(LOBE_ALL_BITS, 63, "1|2|4|8|16|32");
+        let names: Vec<&str> = LOBE_REGISTRY.iter().map(|d| d.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "coat",
+                "sheen",
+                "anisotropy",
+                "transmission",
+                "subsurface",
+                "emission"
+            ]
+        );
+        let bits: Vec<u8> = LOBE_REGISTRY.iter().map(|d| d.bit).collect();
+        assert_eq!(
+            bits,
+            vec![
+                lobe::COAT,
+                lobe::SHEEN,
+                lobe::ANISOTROPY,
+                lobe::TRANSMISSION,
+                lobe::SUBSURFACE,
+                lobe::EMISSION
+            ]
+        );
+        for def in &LOBE_REGISTRY {
+            assert_eq!(
+                lobe_def(def.bit).map(|d| d.name),
+                Some(def.name),
+                "{} resolves",
+                def.name
+            );
+        }
+        assert!(lobe_def(0).is_none(), "zero is not one lobe");
+        assert!(lobe_def(64).is_none(), "unknown bit refuses");
+        assert!(lobe_def(0xFF).is_none(), "combined bits refuse");
+        assert!(
+            lobe_def(lobe::COAT | lobe::SHEEN).is_none(),
+            "two bits refuse"
+        );
+        assert_eq!(resolve_lobes(0).count(), 0, "empty mask resolves empty");
+        assert_eq!(
+            resolve_lobes(LOBE_ALL_BITS).count(),
+            6,
+            "full mask resolves six"
+        );
+        let full: Vec<&str> = resolve_lobes(LOBE_ALL_BITS).map(|d| d.name).collect();
+        assert_eq!(full, names, "registry order");
+        let two: Vec<&str> = resolve_lobes(lobe::COAT | lobe::SHEEN)
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(two, vec!["coat", "sheen"]);
+        assert_eq!(resolve_lobes(0xFF).count(), 6, "unknown bits are ignored");
+        for record in MaterialSet::siege_kit().records() {
+            let lobes = Structure::of(record).lobes;
+            assert_eq!(
+                lobes & !LOBE_ALL_BITS,
+                0,
+                "{} builds only registry lobes",
+                record.name
+            );
+        }
+    }
+
+    #[test]
+    fn structure_has_lobe_routes_through_registry() {
+        let s = Structure {
+            lobes: lobe::COAT | lobe::SHEEN,
+            textures: 0,
+            layers: Vec::new(),
+        };
+        assert!(s.has_lobe(lobe::COAT));
+        assert!(s.has_lobe(lobe::SHEEN));
+        assert!(!s.has_lobe(lobe::ANISOTROPY));
+        assert!(!s.has_lobe(lobe::TRANSMISSION));
+        assert!(!s.has_lobe(lobe::SUBSURFACE));
+        assert!(!s.has_lobe(lobe::EMISSION));
+        assert!(!s.has_lobe(0), "zero never counts");
+        assert!(!s.has_lobe(64), "unknown bit never counts");
+        assert!(!s.has_lobe(0xFF), "combined mask never counts as one lobe");
+        // Raw `&` would count bit 64 here; the registry refuses it.
+        let unknown = Structure {
+            lobes: 64,
+            textures: 0,
+            layers: Vec::new(),
+        };
+        assert!(!unknown.has_lobe(64));
+        assert_eq!(resolve_lobes(unknown.lobes).count(), 0);
+        assert!(!unknown.blended(), "unknown bit is not transmission");
+        let glass = Structure {
+            lobes: lobe::TRANSMISSION,
+            textures: 0,
+            layers: Vec::new(),
+        };
+        assert!(glass.blended(), "transmission draws blended");
+        assert!(!s.blended(), "coat plus sheen stays opaque");
+        // The fragment build reads through the registry: sheen adds the
+        // Charlie chunk, anisotropy adds its chunk, plain adds neither.
+        let plain = wgsl_for(&Structure {
+            lobes: 0,
+            textures: 0,
+            layers: Vec::new(),
+        });
+        assert!(!plain.contains("d_charlie"));
+        assert!(!plain.contains("d_ggx_anisotropic"));
+        let sheen = wgsl_for(&Structure {
+            lobes: lobe::SHEEN,
+            textures: 0,
+            layers: Vec::new(),
+        });
+        assert!(sheen.contains("d_charlie"));
+        let aniso = wgsl_for(&Structure {
+            lobes: lobe::ANISOTROPY,
+            textures: 0,
+            layers: Vec::new(),
+        });
+        assert!(aniso.contains("d_ggx_anisotropic"));
+        // A shipped record routes the same way: marble layers imply a coat.
+        let marble = MaterialSet::siege_kit()
+            .get("marble")
+            .cloned()
+            .expect("shipped marble");
+        let built = Structure::of(&marble);
+        assert!(built.has_lobe(lobe::COAT));
+        assert!(!built.has_lobe(lobe::SHEEN));
     }
 
     /// One text, one compile, two slices: the FPS viewmodel slice

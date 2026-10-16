@@ -7,8 +7,12 @@
 //! no steady per tick work here.
 
 use engine_anim::hit_react::hit_mask;
-use engine_anim::injured::{digest as single_digest, rebuild_single, stance_contains, Loss, STANCE_MIN};
-use engine_anim::injured_double::{digest as double_digest, rebuild_double, rebuild_double_from_joints, rebuild_many};
+use engine_anim::injured::{
+    digest as single_digest, rebuild_single, stance_contains, Loss, STANCE_MIN,
+};
+use engine_anim::injured_double::{
+    digest as double_digest, rebuild_double, rebuild_double_from_joints, rebuild_many,
+};
 use engine_anim::lod::{assign_tiers, tier_for, LodError, Tier};
 use engine_anim::{blend, clip_hash, dequantize, quantize, sample, Clip, Track};
 
@@ -137,10 +141,7 @@ fn lod_rejects_bad_input_pin() {
         tier_for(f32::NAN, 0.01),
         Err(LodError::NonFinite("distance_m"))
     );
-    assert_eq!(
-        tier_for(-1.0, 0.01),
-        Err(LodError::NegativeDistance(-1.0))
-    );
+    assert_eq!(tier_for(-1.0, 0.01), Err(LodError::NegativeDistance(-1.0)));
     assert_eq!(tier_for(10.0, 2.0), Err(LodError::BadScreen(2.0)));
     let dists = vec![10.0; 4];
     let screens = vec![0.01; 3];
@@ -193,8 +194,7 @@ fn rebuild_single_golden_pin() {
     assert!(!stance_contains(true, true, [5.0, 5.0]));
     assert!(!stance_contains(true, true, [f32::NAN, 0.0]));
     let hit = hit_mask();
-    let both =
-        engine_anim::injured::compose(leg.mask(), &hit).expect("masks compose");
+    let both = engine_anim::injured::compose(leg.mask(), &hit).expect("masks compose");
     assert_eq!(both.weight(1), 0);
 }
 
@@ -226,7 +226,11 @@ fn lib_sample_blend_quant_pin() {
         [1.0, 2.0, 3.0]
     );
     assert_eq!(
-        quantize([3.25, -7.5, 9.99], [-10.0, -10.0, -10.0], [10.0, 10.0, 10.0]),
+        quantize(
+            [3.25, -7.5, 9.99],
+            [-10.0, -10.0, -10.0],
+            [10.0, 10.0, 10.0]
+        ),
         [43417, 8192, 65502]
     );
     assert_eq!(
@@ -234,7 +238,11 @@ fn lib_sample_blend_quant_pin() {
         [32768, 32768, 32768]
     );
     let back = dequantize(
-        quantize([3.25, -7.5, 9.99], [-10.0, -10.0, -10.0], [10.0, 10.0, 10.0]),
+        quantize(
+            [3.25, -7.5, 9.99],
+            [-10.0, -10.0, -10.0],
+            [10.0, 10.0, 10.0],
+        ),
         [-10.0, -10.0, -10.0],
         [10.0, 10.0, 10.0],
     );

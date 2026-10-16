@@ -40,6 +40,9 @@ export const PROOF_HELP = [
   "  .config/nextest.toml [profile.proof] both exist, else plain cargo test):",
   "    cargo nextest run --profile proof --cargo-profile fast-test --locked --workspace --all-targets",
   "  receipt: target/nextest-junit/proof.xml; retries print as `<n> retried` per leg.",
+  "  partitioned (same suite split, no test dropped; merge proof-1-2.xml + proof-2-2.xml to proof.xml):",
+  "    cargo nextest run --profile proof --partition count:1/2 --cargo-profile fast-test --locked --workspace --all-targets",
+  "    cargo nextest run --profile proof --partition count:2/2 --cargo-profile fast-test --locked --workspace --all-targets",
   "  gungraun (Linux only, 2% Ir budget over the perf_gate baseline):",
   "    cargo install --locked --version 0.20.0 gungraun-runner",
   "    cargo bench --locked -p engine-perf --bench instructions -- --save-baseline=perf_gate",
@@ -172,11 +175,28 @@ export function toolTestSummary(output) {
 // Nextest profile discipline (STEAL-speed OPT6, donor nextest-rs/nextest
 // @d643f89 .config/nextest.toml, MIT, reimplemented, no donor bytes).
 // `.config/nextest.toml` holds `[profile.proof]` (fail-fast=false,
-// 60s slow-timeout with terminate-after, fixed-backoff retries, junit
-// receipt); the proof test legs run under it per the
+// 60s slow-timeout with terminate-after, bounded fixed-backoff retries
+// count 2 delay 2s, junit receipt); the proof test legs run under it per the
 // `.cargo/config.toml` fast-test comment, with retries reported never hidden.
+// Partitioned run splits the suite without dropping a test:
+// `cargo nextest run --profile proof --partition count:1/2` then `count:2/2`,
+// junit `target/nextest-junit/proof-1-2.xml` plus `proof-2-2.xml` merged to
+// `target/nextest-junit/proof.xml`; persistent flakes (>=2) quarantine via
+// tools/flaky-quarantine.mjs threshold 2 to `--perf`, never hidden.
 export const NEXTEST_PROFILE = "proof";
 export const NEXTEST_CONFIG = ".config/nextest.toml";
+export const NEXTEST_JUNIT = "target/nextest-junit/proof.xml";
+
+// Pure junit path for a leg (exported for tests): unpartitioned legs post
+// `target/nextest-junit/proof.xml`; partitioned legs post
+// `target/nextest-junit/proof-M-N.xml` merged to proof.xml, so every leg
+// posts one junit artifact beside the merged receipt.
+export function nextestJunitPath(partition = null) {
+  if (partition === null || partition === undefined || partition === "") return NEXTEST_JUNIT;
+  const raw = String(partition).startsWith("count:") ? String(partition).slice(6) : String(partition);
+  const [m, n] = raw.split("/");
+  return `target/nextest-junit/proof-${m}-${n}.xml`;
+}
 
 // Pure check over the profile file text (exported for tests): true when the
 // proof profile the legs run under is present.
@@ -188,7 +208,10 @@ export function hasNextestProfile(tomlText) {
 // equivalent (exported for tests): non-test legs map to null, `-j4`/`-j N`
 // are dropped (nextest owns threads via the profile), and the cargo
 // fast-test profile rides `--cargo-profile` per `.cargo/config.toml`.
-export function nextestTestCommand(cargoArgs) {
+// Default legs run unpartitioned; pass partition `M/N` (or `count:M/N`) for
+// the partitioned run `cargo nextest run --profile proof --partition
+// count:M/N`, which splits the suite without dropping a test.
+export function nextestTestCommand(cargoArgs, partition = null) {
   const args = [...(cargoArgs ?? [])];
   if (args[0] !== "test") return null;
   const rest = [];
@@ -200,7 +223,16 @@ export function nextestTestCommand(cargoArgs) {
     }
     rest.push(args[i]);
   }
-  return ["nextest", "run", "--profile", NEXTEST_PROFILE, "--cargo-profile", "fast-test", ...rest];
+  const base = ["nextest", "run", "--profile", NEXTEST_PROFILE];
+  if (partition !== null && partition !== undefined && partition !== "") {
+    const raw = String(partition);
+    const spec = raw.startsWith("count:") ? raw : `count:${raw}`;
+    if (!/^count:\d+\/\d+$/.test(spec)) throw new Error(`bad partition ${partition}: want M/N like 1/2`);
+    const [m, n] = spec.slice(6).split("/").map(Number);
+    if (!(m >= 1 && n >= 1 && m <= n)) throw new Error(`bad partition ${partition}: want 1 <= M <= N`);
+    base.push("--partition", spec);
+  }
+  return [...base, "--cargo-profile", "fast-test", ...rest];
 }
 
 // Pure flake count over a finished leg's combined output (exported for
@@ -359,6 +391,10 @@ function cargo(args, timeoutMs = 1_800_000) {
 // `cargo nextest run --profile proof --cargo-profile fast-test ...` with its
 // junit receipt and visible retry count; otherwise it falls back to the
 // plain `cargo test` leg with the same failures visible and `0 retried`.
+// Partitioned legs add `--partition count:M/N` (default legs run
+// unpartitioned) and post the per-partition junit artifact
+// (`target/nextest-junit/proof-M-N.xml`) beside the merged `proof.xml`, so
+// every leg line names its junit path and its `<n> retried` count.
 let nextestProbe = null;
 function useNextest() {
   if (nextestProbe !== null) return nextestProbe;
@@ -373,14 +409,15 @@ function useNextest() {
   return nextestProbe;
 }
 
-function cargoTest(command) {
-  const mapped = nextestTestCommand(command);
+function cargoTest(command, partition = null) {
+  const mapped = nextestTestCommand(command, partition);
+  const junit = nextestJunitPath(partition);
   if (!mapped || !useNextest()) {
     const fallback = cargo(command);
-    return { ...fallback, flake: nextestFlakeSummary(`${fallback.out ?? ""}\n${fallback.error ?? ""}`), via: "cargo" };
+    return { ...fallback, flake: nextestFlakeSummary(`${fallback.out ?? ""}\n${fallback.error ?? ""}`), via: "cargo", junit, partition: partition ?? null };
   }
   const run = cargo(mapped);
-  return { ...run, flake: nextestFlakeSummary(`${run.out ?? ""}\n${run.error ?? ""}`), via: "nextest" };
+  return { ...run, flake: nextestFlakeSummary(`${run.out ?? ""}\n${run.error ?? ""}`), via: "nextest", junit, partition: partition ?? null };
 }
 
 // GPU tests with no adapter print `SKIPPED <test>: <why>` (render's
@@ -431,8 +468,8 @@ if (!args.includes("--skip-build")) {
     if (isTest && command.includes("engine-render")) {
       renderSkipped = countSkipped(`${result.out ?? ""}\n${result.error ?? ""}`);
     }
-    const flake = isTest ? `, ${result.flake} via ${result.via}` : "";
-    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? (isTest ? `${result.flake} via ${result.via}` : "") : `${result.error || result.out}${flake}`);
+    const flake = isTest ? `, ${result.flake} via ${result.via} junit ${result.junit}` : "";
+    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? (isTest ? `${result.flake} via ${result.via} junit ${result.junit}` : "") : `${result.error || result.out}${flake}`);
   }
   // Named consumer gates (wave 21): RV1 red-team tapes replay every wave;
   // PQ2 balance-tournament gate reproduces its report x2 (GA3 consumes the
@@ -454,7 +491,7 @@ if (!args.includes("--skip-build")) {
     ["test", "--locked", "-p", "engine-proof", "--lib", "break_corpus"],
   ]) {
     const result = cargoTest(command);
-    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? `${result.flake} via ${result.via}` : `${result.error || result.out}, ${result.flake} via ${result.via}`);
+    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? `${result.flake} via ${result.via} junit ${result.junit}` : `${result.error || result.out}, ${result.flake} via ${result.via} junit ${result.junit}`);
   }
   const deny = cargo(["deny", "check"]);
   check("cargo deny check", deny.ok, deny.ok ? "" : deny.error || deny.out);

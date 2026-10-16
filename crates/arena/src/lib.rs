@@ -82,6 +82,8 @@ pub use collide::{Pillar, COLLIDE_RADIUS_MM, MAX_PILLARS};
 pub use controller::{ControlView, ScriptEffect, SlotController, SlotView};
 pub use engine_combat::fight::{FIGHT_RULES_V1, FIGHT_RULES_V2};
 pub use engine_input::{BoutTape, FighterId, FighterInput, FighterTape, MAX_PARTICIPANTS};
+/// Neutral body names for below-arena ledgers: aliases of the input types.
+pub use engine_input::{FighterId as BodyId, FighterInput as BodyInput, FighterTape as BodyTape};
 pub use gym::{
     initial_state, legal_mask_of, observe_state, reward_of, vec_step, BatchEnv, GymFighterState,
     GymSnapshot, GYM_ACTION_ATTACK, GYM_ACTION_BLOCK, GYM_ACTION_DODGE, GYM_NUM_ACTIONS,
@@ -506,6 +508,12 @@ pub struct FighterState {
 }
 
 /// Post-step checkpoint: tick plus the match state hash.
+///
+/// Small per-tick handle (`Copy`, tick plus hash) for the rollback pattern:
+/// the [`MatchSnapshot`] owner holds the full restore state while handles
+/// name where to resume, so an 8-tick rewind restores the snapshot then
+/// replays instead of rebuilding from tick zero. No new snapshot format:
+/// see [`run_prefix`] plus [`resume`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Checkpoint {
     /// Zero-based fixed tick.
@@ -545,6 +553,10 @@ pub struct TickBreaks {
 /// part of the public snapshot — so resuming into rebuilt controllers would
 /// diverge on the first step. Moving the live controllers through the
 /// snapshot keeps the continuation bit-identical.
+///
+/// Checkpoint pairing: [`Checkpoint`] handles stay small (tick plus hash)
+/// while this snapshot stays the single restore owner for the net rollback
+/// consumer; handles name the resume point, never a second format.
 pub struct MatchSnapshot {
     config: ArenaConfig,
     tick: u32,
@@ -2371,6 +2383,27 @@ mod tests {
     #[test]
     fn valid_config_passes() {
         config().validate().unwrap();
+    }
+
+    #[test]
+    fn body_aliases_resolve_to_input_types() {
+        let id: BodyId = FighterId::new(0).expect("slot 0 inside cap");
+        let back: FighterId = id;
+        assert_eq!(back, FighterId::new(0).expect("slot 0 inside cap"));
+        let input: BodyInput = FighterInput {
+            tick: 0,
+            fighter: id,
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        };
+        let back_input: FighterInput = input;
+        assert_eq!(back_input.fighter, back);
+        let tape: BodyTape = FighterTape(vec![input]);
+        let back_tape: FighterTape = tape;
+        assert_eq!(back_tape.0.len(), 1);
+        assert_eq!(back_tape.0[0], back_input);
     }
 
     #[test]

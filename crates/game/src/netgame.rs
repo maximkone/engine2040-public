@@ -114,6 +114,73 @@ pub fn remote_pose_checkpoints(authority: &[NetPose], start_tick: u32) -> Vec<(u
     out
 }
 
+/// Lobby slot rows for the windowed screen: one row per fighter in lobby order.
+/// Pure; same lobby plus same `me` token gives same rows. No sockets, no
+/// addresses; the game layer maps senders to tokens elsewhere.
+/// Caller: [`windowed_lobby_entry`] below wires the live screen.
+#[must_use]
+pub fn lobby_slot_rows(
+    lobby: &engine_net::lobby::Lobby,
+    me: u64,
+) -> Vec<engine_ui::lobby_ui::SlotRow> {
+    use engine_net::lobby::Slot as NetSlot;
+    use engine_ui::lobby_ui::SlotRow;
+    lobby.slots()[..usize::from(lobby.fighters())]
+        .iter()
+        .map(|slot| match *slot {
+            NetSlot::Closed => SlotRow::Closed,
+            NetSlot::Open => SlotRow::Open,
+            NetSlot::Ai => SlotRow::Ai,
+            NetSlot::Human { token, ready } => SlotRow::Human {
+                you: token == me,
+                ready,
+            },
+        })
+        .collect()
+}
+
+/// Windowed loop lobby step: one press plus one command run.
+/// Feeds `input` to `screen`, runs `FillAi`/`SetReady`/`Start` against `lobby`,
+/// refreshes the screen slots via [`lobby_slot_rows`], and returns the command
+/// the loop saw. Sockets stay in the caller and no address is typed: hosts are
+/// [`engine_ui::lobby_ui::HostId`] positions the caller maps to senders.
+/// Pure glue; presentation only, ticks and checkpoints never see it.
+/// Errors: [`engine_ui::lobby_ui::LobbyUiError`] when the press or the slot
+/// refresh refuses; a refused lobby post leaves the screen as-is.
+/// Caller: `windowed::windowed_lobby_frame` drives it from the live redraw.
+pub fn windowed_lobby_entry(
+    screen: &mut engine_ui::lobby_ui::LobbyScreen,
+    lobby: &mut engine_net::lobby::Lobby,
+    input: engine_ui::lobby_ui::LobbyInput,
+    me: u64,
+) -> Result<Option<engine_ui::lobby_ui::LobbyCommand>, engine_ui::lobby_ui::LobbyUiError> {
+    use engine_ui::lobby_ui::LobbyCommand;
+    let command = screen.input(input)?;
+    match command {
+        Some(LobbyCommand::FillAi) => {
+            lobby.ai_fill();
+            let rows = lobby_slot_rows(lobby, me);
+            screen.set_slots(&rows)?;
+        }
+        Some(LobbyCommand::SetReady(on)) => {
+            if lobby.set_ready(me, on).is_ok() {
+                let rows = lobby_slot_rows(lobby, me);
+                screen.set_slots(&rows)?;
+            }
+        }
+        Some(LobbyCommand::Start) => {
+            if let Ok(params) = lobby.try_start() {
+                screen.started(engine_ui::menus::FightRequest {
+                    seed: params.seed,
+                    fighters: params.fighters,
+                })?;
+            }
+        }
+        _ => {}
+    }
+    Ok(command)
+}
+
 /// What [`NetGame::on_net_event`] applied for one datagram.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NetApplied {
@@ -1284,8 +1351,25 @@ mod tests {
         assert_eq!(host.cursor(), 1, "late inputs must not move authority");
     }
 
+    /// Reliable receive: loopback UDP has no arrival guarantee by the time
+    /// a single non-blocking `poll()` runs, so a lone `poll()` flakes to
+    /// `[]` under full-workspace load. Drain until `want` items arrive or
+    /// the deadline hits; arrivals are asserted, never timing.
+    fn poll_until(host: &mut NetGame, want: usize) -> Vec<NetApplied> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut out = Vec::new();
+        while out.len() < want {
+            let mut got = host.poll().expect("polls");
+            out.append(&mut got);
+            if out.len() >= want || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        out
+    }
+
     #[test]
-    #[ignore = "timing: wall-clock UDP loopback delivery; flakes to `[]` under full-workspace load, passes alone; run in --perf"]
     fn real_sockets_deliver_both_directions() {
         let (code, mut host) = NetGame::host(small_config()).unwrap();
         let mut guest = NetGame::join(host.local_addr().unwrap(), &code).unwrap();
@@ -1293,7 +1377,7 @@ mod tests {
         // Guest input over the real socket; the host learns the guest.
         assert!(guest.tick_local(guest_input(0)).input_accepted);
         assert_eq!(guest.flush().expect("flush inputs"), 1);
-        let staged = host.poll().expect("host polls");
+        let staged = poll_until(&mut host, 1);
         assert_eq!(staged.len(), 1);
         assert_eq!(host.peer(), Some(guest.local_addr().unwrap()));
         // Host state over the real socket; the guest names the tick where its
@@ -1301,7 +1385,7 @@ mod tests {
         // converges exactly through rollback.
         assert!(host.tick_local(host_input(0)).input_accepted);
         assert_eq!(host.flush().expect("flush states"), 1);
-        match guest.poll().expect("guest polls").as_slice() {
+        match poll_until(&mut guest, 1).as_slice() {
             [NetApplied::StateApplied {
                 mispredicts,
                 desync,

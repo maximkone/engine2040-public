@@ -27,7 +27,8 @@ pub const FULL_SLOT_LEN: usize = SNAPSHOT_SLOT_LEN;
 pub const DELTA_HEADER_LEN: usize = STATE_DELTA_HEADER_LEN;
 /// Largest single snapshot datagram in bytes (loopback UDP, no fragmentation).
 pub const MAX_DATAGRAM_BYTES: usize = 1200;
-/// Resimulation cap in ticks per frame (authoritative rule, owned copy).
+/// Resimulation cap in ticks per frame (authoritative rule, owned copy,
+/// measured by the posted MP6 distributions, see `MP6_POSTED_*` below).
 pub const RESIM_CAP_TICKS: u32 = 8;
 /// Adaptive input delay for a bout hold (MP24): the round-trip worst minus
 /// the resim window, saturating at zero.
@@ -42,6 +43,42 @@ pub const RESIM_CAP_TICKS: u32 = 8;
 pub const fn adaptive_input_delay_for_hold(hold: u32) -> u32 {
     let worst = hold.saturating_sub(1);
     worst.saturating_add(hold).saturating_sub(RESIM_CAP_TICKS)
+}
+
+/// Posted MP6 live distributions sizing the resim window and the input
+/// delay (seed 2040 `net-bout mp6`, `target/mp6/distributions.json`):
+/// LAN live rollback max 6, WAN live rollback max 8, WAN one-way delay
+/// max 9, live states deeper than the window 0 on both seats, LAN hold 3,
+/// WAN hold 10. Digest is FNV-1a over the six posted `u32` words in order
+/// `[lan_max, wan_max, wan_delay_max, deeper, lan_hold, wan_hold]`
+/// (`engine_core::Fnv64::write_u32`); the sizing test below recomputes it,
+/// so fresh hardware data moves the digest and fails the fixture. Units:
+/// whole ticks. Determinism: integer max only, no clock.
+#[cfg(test)]
+const MP6_POSTED_LAN_ROLLBACK_MAX: u32 = 6;
+#[cfg(test)]
+const MP6_POSTED_WAN_ROLLBACK_MAX: u32 = 8;
+#[cfg(test)]
+const MP6_POSTED_WAN_DELAY_MAX: u32 = 9;
+#[cfg(test)]
+const MP6_POSTED_DEEPER_THAN_WINDOW: u32 = 0;
+#[cfg(test)]
+const MP6_POSTED_LAN_HOLD: u32 = 3;
+#[cfg(test)]
+const MP6_POSTED_WAN_HOLD: u32 = 10;
+#[cfg(test)]
+const MP6_POSTED_DISTRIBUTIONS_DIGEST: u64 = 0x9fc9_f9b2_6e90_4e0b;
+
+/// Measured resim window in ticks: the deeper of the posted LAN/WAN live
+/// rollback maxima. Integer max only, so the same postings size the same
+/// window on every run.
+#[cfg(test)]
+const fn measured_resim_window(lan_max: u32, wan_max: u32) -> u32 {
+    if lan_max > wan_max {
+        lan_max
+    } else {
+        wan_max
+    }
 }
 /// Headless 16-bot soak length in ticks (the proof bar).
 pub const SOAK_TICKS: u32 = 600;
@@ -1218,6 +1255,39 @@ mod tests {
     }
 
     #[test]
+    fn combat_inputs_never_starve_under_snapshot_flood() {
+        // 16-fighter shape stays within 1200 bytes, never fragments.
+        let full = full_wire_len(16);
+        assert_eq!(full, 313);
+        assert!(full <= MAX_DATAGRAM_BYTES);
+        within_cap(16, full).expect("16 must fit");
+        assert!(full <= crate::session::IOQ3_FRAGMENT_SIZE);
+        // Flood: every non-viewer slot combat-changed; budget is the cap.
+        let base = lineup(16);
+        let mut now = base.clone();
+        for view in now.iter_mut().skip(1) {
+            view.hp = view.hp.saturating_sub(120);
+        }
+        let mut first = [0u8; 16];
+        let mut second = [0u8; 16];
+        let a =
+            select_priority(&now, &base, 0, 9, 8, MAX_DATAGRAM_BYTES, &mut first).expect("select");
+        let b =
+            select_priority(&now, &base, 0, 9, 8, MAX_DATAGRAM_BYTES, &mut second).expect("select");
+        assert_eq!((a, &first[..a]), (b, &second[..b]), "twice equal");
+        assert_eq!(a, 16, "zero combat starvation");
+        assert_eq!(
+            &first[..a],
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+        // Table order: combat inputs outrank state outranks snapshot bulk.
+        let (_, ip) = crate::netcode::kind_channel(crate::session::KIND_INPUT).expect("input");
+        let (_, sp) = crate::netcode::kind_channel(crate::session::KIND_STATE).expect("state");
+        let (_, bp) = crate::netcode::kind_channel(crate::session::KIND_SNAPSHOT).expect("bulk");
+        assert!(ip < sp && sp < bp, "inputs outrank state outranks bulk");
+    }
+
+    #[test]
     fn oversize_snapshot_refuses_both_gates() {
         assert_eq!(
             within_cap(2, MAX_DATAGRAM_BYTES + 1),
@@ -1638,5 +1708,45 @@ mod tests {
             "worst up plus hold minus the window"
         );
         assert!(adaptive_input_delay_for_hold(3) <= RESIM_CAP_TICKS + 3);
+    }
+
+    #[test]
+    fn mp14_window_and_delay_sized_by_posted_mp6() {
+        // MP14: the 8-tick window and both delays are measured values sized
+        // by the posted MP6 live distributions, referenced by digest. Fresh
+        // hardware data moves the digest or the maxima and fails here.
+        let mut posting = engine_core::Fnv64::new();
+        posting.write_u32(MP6_POSTED_LAN_ROLLBACK_MAX);
+        posting.write_u32(MP6_POSTED_WAN_ROLLBACK_MAX);
+        posting.write_u32(MP6_POSTED_WAN_DELAY_MAX);
+        posting.write_u32(MP6_POSTED_DEEPER_THAN_WINDOW);
+        posting.write_u32(MP6_POSTED_LAN_HOLD);
+        posting.write_u32(MP6_POSTED_WAN_HOLD);
+        assert_eq!(
+            posting.finish(),
+            MP6_POSTED_DISTRIBUTIONS_DIGEST,
+            "posted MP6 distributions digest must match target/mp6/distributions.json"
+        );
+        assert_eq!(
+            measured_resim_window(MP6_POSTED_LAN_ROLLBACK_MAX, MP6_POSTED_WAN_ROLLBACK_MAX),
+            RESIM_CAP_TICKS,
+            "window is the deeper posted live rollback max"
+        );
+        assert_eq!(
+            MP6_POSTED_DEEPER_THAN_WINDOW, 0,
+            "no posted live state sat deeper than the window"
+        );
+        assert_eq!(adaptive_input_delay_for_hold(MP6_POSTED_LAN_HOLD), 0);
+        assert_eq!(adaptive_input_delay_for_hold(MP6_POSTED_WAN_HOLD), 11);
+        assert_eq!(
+            adaptive_input_delay_for_hold(MP6_POSTED_WAN_HOLD),
+            MP6_POSTED_WAN_DELAY_MAX + MP6_POSTED_WAN_HOLD - RESIM_CAP_TICKS,
+            "WAN delay is posted worst plus hold minus the window"
+        );
+        assert!(
+            MP6_POSTED_WAN_ROLLBACK_MAX > RESIM_CAP_TICKS - 1,
+            "window minus one would not cover the posted WAN max"
+        );
+        assert_eq!(HUMAN_BURST_LEN, RESIM_CAP_TICKS);
     }
 }

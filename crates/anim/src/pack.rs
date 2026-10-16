@@ -7,7 +7,7 @@
 //! field order, little-endian bytes, `+ - * /` and `round` only, no clock.
 //! Errors: [`PackError`]; corrupt bytes name the fault, never panic.
 
-use super::clip::{QClip, QTrack, TICK_DT, clamp01};
+use super::clip::{clamp01, QClip, QTrack, TICK_DT};
 use super::loco_bake::{bake_hero_set, ClipSpec, HERO_SET};
 
 /// Wire magic for every packed clip and fighter blob.

@@ -1269,8 +1269,9 @@ impl AccelSubmitter {
         }
         encoder.copy_buffer_to_buffer(&flag_buf, 0, &readback, 0, flag_bytes);
         queue.submit(Some(encoder.finish()));
-        map_readback(device, &readback).map_err(AccelSubmitError::Device)?;
-        let flags = readback_u32(&readback, total).map_err(AccelSubmitError::Device)?;
+        map_readback(device, &readback, "accel").map_err(AccelSubmitError::Device)?;
+        let flags =
+            readback_u32(&readback, total, "accel", "flags").map_err(AccelSubmitError::Device)?;
         readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(AccelSubmitError::Validation(format!("{err:?}")));
@@ -1299,8 +1300,13 @@ impl AccelSubmitter {
 }
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
+/// `prefix` keeps each caller's error text identical (`accel`, `decal`, ...).
 #[cfg(feature = "window")]
-fn map_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
+pub(crate) fn map_readback(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    prefix: &str,
+) -> Result<(), String> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -1308,23 +1314,30 @@ fn map_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), Stri
     });
     device
         .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("accel poll: {e}"))?;
+        .map_err(|e| format!("{prefix} poll: {e}"))?;
     rx.recv()
-        .map_err(|e| format!("accel map channel: {e}"))?
-        .map_err(|e| format!("accel map: {e}"))?;
+        .map_err(|e| format!("{prefix} map channel: {e}"))?
+        .map_err(|e| format!("{prefix} map: {e}"))?;
     Ok(())
 }
 
 /// Read `count` little-endian u32 values from a mapped readback buffer.
+/// `prefix` plus `unit` keep each caller's error text identical
+/// (`accel` plus `flags`, `decal` plus `words`, ...).
 #[cfg(feature = "window")]
-fn readback_u32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<u32>, String> {
+pub(crate) fn readback_u32(
+    buffer: &wgpu::Buffer,
+    count: usize,
+    prefix: &str,
+    unit: &str,
+) -> Result<Vec<u32>, String> {
     let mapped = buffer
         .slice(..)
         .get_mapped_range()
-        .map_err(|e| format!("accel mapped range: {e}"))?;
+        .map_err(|e| format!("{prefix} mapped range: {e}"))?;
     if mapped.len() < count * 4 {
         return Err(format!(
-            "accel readback {} bytes holds fewer than {count} u32 flags",
+            "{prefix} readback {} bytes holds fewer than {count} u32 {unit}",
             mapped.len()
         ));
     }
@@ -1333,6 +1346,42 @@ fn readback_u32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<u32>, String>
         out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Ok(out)
+}
+
+/// Read `count` little-endian f32 values from a mapped readback buffer.
+/// `prefix` keeps each caller's error text identical (`fog`, `layer`, `sky`).
+#[cfg(feature = "window")]
+pub(crate) fn readback_f32(
+    buffer: &wgpu::Buffer,
+    count: usize,
+    prefix: &str,
+) -> Result<Vec<f32>, String> {
+    let mapped = buffer
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|e| format!("{prefix} mapped range: {e}"))?;
+    if mapped.len() < count * 4 {
+        return Err(format!(
+            "{prefix} readback {} bytes holds fewer than {count} f32 values",
+            mapped.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(count);
+    for chunk in mapped[..count * 4].chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(out)
+}
+
+/// Little-endian bytes of `values` in order: the one f32 byte writer for CPU
+/// golden buffers, so every caller writes the same bits on every run.
+#[must_use]
+pub(crate) fn f32_le_bytes(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
 }
 
 #[cfg(test)]

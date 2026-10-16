@@ -999,4 +999,130 @@ mod tests {
         assert!(Theater::new(forged_tuned).is_err());
         assert_eq!(TICK_HZ, 60);
     }
+
+    #[test]
+    fn ten_seeded_bugs_attribute_to_exact_tick_and_input() {
+        let cfg = config(200);
+        let baseline: Vec<FighterInput> = Vec::new();
+        let recording = record_tape(cfg, &baseline).expect("record baseline");
+        let seeds = [
+            FighterInput {
+                tick: 5,
+                fighter: FighterId::new(0).expect("slot fits"),
+                mx: 100,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons::NONE,
+            },
+            FighterInput {
+                tick: 17,
+                fighter: FighterId::new(1).expect("slot fits"),
+                mx: -100,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons::NONE,
+            },
+            FighterInput {
+                tick: 29,
+                fighter: FighterId::new(0).expect("slot fits"),
+                mx: 0,
+                mz: 100,
+                facing: 0,
+                buttons: Buttons::NONE,
+            },
+            FighterInput {
+                tick: 41,
+                fighter: FighterId::new(1).expect("slot fits"),
+                mx: 0,
+                mz: -100,
+                facing: 0,
+                buttons: Buttons::NONE,
+            },
+            FighterInput {
+                tick: 53,
+                fighter: FighterId::new(0).expect("slot fits"),
+                mx: 0,
+                mz: 0,
+                facing: 9000,
+                buttons: Buttons::NONE,
+            },
+            FighterInput {
+                tick: 67,
+                fighter: FighterId::new(1).expect("slot fits"),
+                mx: 0,
+                mz: 0,
+                facing: -9000,
+                buttons: Buttons::NONE,
+            },
+            FighterInput {
+                tick: 79,
+                fighter: FighterId::new(0).expect("slot fits"),
+                mx: 0,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons(1),
+            },
+            FighterInput {
+                tick: 93,
+                fighter: FighterId::new(1).expect("slot fits"),
+                mx: 0,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons(2),
+            },
+            FighterInput {
+                tick: 107,
+                fighter: FighterId::new(0).expect("slot fits"),
+                mx: 50,
+                mz: 50,
+                facing: 4500,
+                buttons: Buttons(4),
+            },
+            FighterInput {
+                tick: 129,
+                fighter: FighterId::new(1).expect("slot fits"),
+                mx: -50,
+                mz: 50,
+                facing: -4500,
+                buttons: Buttons(3),
+            },
+        ];
+        let mut first = Vec::new();
+        for seed in &seeds {
+            let probe = vec![*seed];
+            let report = recording.attribute_probe(&probe).expect("probe diverges");
+            assert_eq!(report.divergent_tick, seed.tick, "tick: {report}");
+            assert_eq!(report.causes.len(), 1, "one cause: {report}");
+            assert_eq!(
+                (report.causes[0].tick, report.causes[0].fighter),
+                (seed.tick, seed.fighter.0),
+                "cause: {report}"
+            );
+            assert_eq!(report.causes[0].input, *seed, "input: {report}");
+            assert_ne!(report.expected, report.observed, "digests: {report}");
+            first.push(report);
+        }
+        let mut second = Vec::new();
+        for seed in &seeds {
+            let probe = vec![*seed];
+            let report = recording.attribute_probe(&probe).expect("probe diverges");
+            second.push(report);
+        }
+        assert_eq!(first, second, "sweep repeats byte for byte");
+    }
+
+    #[test]
+    fn capture_fits_64_bytes_per_checkpoint() {
+        let per_tick = std::mem::size_of::<Checkpoint>();
+        assert!(per_tick <= 64, "checkpoint {per_tick} bytes over 64 cap");
+        let per_keyframe = std::mem::size_of::<Keyframe>();
+        assert!(
+            per_keyframe <= 64,
+            "keyframe {per_keyframe} bytes over 64 cap"
+        );
+        let tape = record_tape(config(64), &[]).expect("record");
+        assert_eq!(tape.checkpoints.len(), 64);
+        let stored = std::mem::size_of_val(&tape.checkpoints[0]);
+        assert!(stored <= 64, "stored checkpoint {stored} bytes over 64 cap");
+    }
 }

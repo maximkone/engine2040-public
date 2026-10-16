@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use engine_arena::seed as arena_seed;
+use engine_core::adler::adler32;
 use engine_core::hash::{FNV64_OFFSET, GOLDEN_GAMMA};
 use engine_core::{hash_bytes, Fnv64};
 use engine_input::{Buttons, FighterId, FighterInput, FighterTape};
@@ -52,8 +53,6 @@ const MAX_CAPTURE_INPUTS: usize = MAX_TICKS as usize;
 const MAX_TAPE_FILE_BYTES: usize = HEADER_BYTES + MAX_CAPTURE_INPUTS * INPUT_BYTES;
 /// Largest stored-deflate block in the PNG writer (zlib ceiling).
 const PNG_BLOCK_MAX: usize = 65535;
-/// Adler-32 chunking bound from zlib (block sums stay below 2^32).
-const ADLER_CHUNK: usize = 5552;
 
 /// Capture failures: bounded diagnostics, never panics.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -341,7 +340,11 @@ pub fn encode_tape_bytes(inputs: &[FighterInput]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER_BYTES + inputs.len() * INPUT_BYTES);
     bytes.extend_from_slice(TAPE_MAGIC);
     bytes.extend_from_slice(&CAPTURE_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&(inputs.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(
+        &u32::try_from(inputs.len() & 0xffff_ffff)
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
     for input in inputs {
         input.append_bytes(&mut bytes);
     }
@@ -356,7 +359,7 @@ pub fn load_tape_file(path: &Path) -> Result<LoadedTape, CaptureError> {
     {
         use std::io::Read as _;
         file.by_ref()
-            .take(MAX_TAPE_FILE_BYTES as u64 + 1)
+            .take(u64::try_from(MAX_TAPE_FILE_BYTES).unwrap_or(u64::MAX) + 1)
             .read_to_end(&mut bytes)
             .map_err(|err| io_err(path, err))?;
     }
@@ -394,11 +397,11 @@ fn decode_tape_bytes(bytes: &[u8]) -> Result<Vec<FighterInput>, CaptureError> {
             "unsupported tape version {version}"
         )));
     }
-    let count = u32::from_le_bytes(
-        bytes[10..14]
-            .try_into()
-            .map_err(|_| CaptureError::BadTape("truncated tape header".to_string()))?,
-    ) as usize;
+    let count =
+        usize::try_from(u32::from_le_bytes(bytes[10..14].try_into().map_err(
+            |_| CaptureError::BadTape("truncated tape header".to_string()),
+        )?))
+        .unwrap_or(usize::MAX);
     if count > MAX_CAPTURE_INPUTS {
         return Err(CaptureError::BadTape("too many tape inputs".to_string()));
     }
@@ -425,8 +428,8 @@ fn decode_tape_bytes(bytes: &[u8]) -> Result<Vec<FighterInput>, CaptureError> {
         let input = FighterInput {
             tick,
             fighter,
-            mx: chunk[5] as i8,
-            mz: chunk[6] as i8,
+            mx: i8::from_ne_bytes([chunk[5]]),
+            mz: i8::from_ne_bytes([chunk[6]]),
             facing,
             buttons: Buttons(chunk[9]),
         };
@@ -512,7 +515,7 @@ fn crc32_table() -> &'static [u32; 256] {
     TABLE.get_or_init(|| {
         let mut table = [0u32; 256];
         for (index, cell) in table.iter_mut().enumerate() {
-            let mut c = index as u32;
+            let mut c = u32::try_from(index & 0xffff_ffff).unwrap_or(0);
             for _ in 0..8 {
                 c = if c & 1 == 1 {
                     0xEDB88320 ^ (c >> 1)
@@ -528,33 +531,23 @@ fn crc32_table() -> &'static [u32; 256] {
 
 fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for byte in data {
-        crc = crc32_table()[((crc ^ u32::from(*byte)) & 0xFF) as usize] ^ (crc >> 8);
+        crc = crc32_table()[usize::try_from((crc ^ u32::from(*byte)) & 0xFF).unwrap_or(usize::MAX)]
+            ^ (crc >> 8);
     }
     crc
 }
 
 fn write_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(
+        &u32::try_from(data.len() & 0xffff_ffff)
+            .unwrap_or(0)
+            .to_be_bytes(),
+    );
     out.extend_from_slice(tag);
     out.extend_from_slice(data);
     let mut crc = crc32_update(0xFFFF_FFFF, tag);
     crc = crc32_update(crc, data);
     out.extend_from_slice(&(crc ^ 0xFFFF_FFFF).to_be_bytes());
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    const MOD: u32 = 65521;
-    let mut a: u32 = 1;
-    let mut b: u32 = 0;
-    for piece in data.chunks(ADLER_CHUNK) {
-        for byte in piece {
-            a += u32::from(*byte);
-            b += a;
-        }
-        a %= MOD;
-        b %= MOD;
-    }
-    (b << 16) | a
 }
 
 /// Encode RGBA bytes as a PNG (8-bit, filter 0, stored deflate): the same
@@ -565,11 +558,11 @@ fn encode_png_rgba8(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, C
             "capture size {width}x{height} rejected"
         )));
     }
-    let stride = width as usize * 4;
-    if pixels.len() != stride * height as usize {
+    let stride = usize::try_from(width).unwrap_or(usize::MAX) * 4;
+    if pixels.len() != stride * usize::try_from(height).unwrap_or(usize::MAX) {
         return Err(CaptureError::BadPng("pixel length mismatch".to_string()));
     }
-    let mut raw = Vec::with_capacity(pixels.len() + height as usize);
+    let mut raw = Vec::with_capacity(pixels.len() + usize::try_from(height).unwrap_or(usize::MAX));
     for row in pixels.chunks_exact(stride) {
         raw.push(0u8);
         raw.extend_from_slice(row);
@@ -580,7 +573,7 @@ fn encode_png_rgba8(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, C
     while let Some(block) = blocks.next() {
         let last = blocks.peek().is_none();
         zlib.push(u8::from(last));
-        let len = block.len() as u16;
+        let len = u16::try_from(block.len() & 0xffff).unwrap_or(0);
         zlib.extend_from_slice(&len.to_le_bytes());
         zlib.extend_from_slice(&(!len).to_le_bytes());
         zlib.extend_from_slice(block);
@@ -659,7 +652,8 @@ fn headless_frame_png(
             "capture size {width}x{height} rejected"
         )));
     }
-    let count = width as usize * height as usize;
+    let count = usize::try_from(width).unwrap_or(usize::MAX)
+        * usize::try_from(height).unwrap_or(usize::MAX);
     let mut pixels = vec![0u8; count * 4];
     let mut state = seed
         .wrapping_add(checkpoint_hash.rotate_left(7))
@@ -667,9 +661,10 @@ fn headless_frame_png(
     // Per-frame stream from sim state: no wall clock, no pointer values.
     for pixel in pixels.chunks_exact_mut(4) {
         let word = arena_seed::next(&mut state);
-        pixel[0] = word as u8;
-        pixel[1] = (word >> 8) as u8;
-        pixel[2] = (word >> 16) as u8;
+        let word_bytes = word.to_le_bytes();
+        pixel[0] = word_bytes[0];
+        pixel[1] = word_bytes[1];
+        pixel[2] = word_bytes[2];
         pixel[3] = 255;
     }
     encode_png_rgba8(&pixels, width, height)
@@ -703,6 +698,53 @@ pub struct ManifestMeta {
     pub sha: String,
     /// Playback fps (`1..=120`).
     pub fps: u32,
+}
+
+/// Window look tap: the window host owns one tap and notes each validated
+/// capture PNG once; refusals count as faults, never as calls.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct LookTap {
+    calls: u32,
+    bytes: u64,
+    faults: u32,
+}
+
+impl LookTap {
+    /// Empty tap with no notes yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            calls: 0,
+            bytes: 0,
+            faults: 0,
+        }
+    }
+
+    /// Note one validated PNG: one call plus its byte count, saturating.
+    /// Refusals (short magic, empty, truncated) count one fault and leave
+    /// calls plus bytes untouched; validated frames still count once each.
+    pub fn note(&mut self, png: &[u8]) {
+        if png.len() < 8 || png[0..8] != [137, 80, 78, 71, 13, 10, 26, 10] {
+            self.faults = self.faults.saturating_add(1);
+            return;
+        }
+        self.calls = self.calls.saturating_add(1);
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(png.len()).unwrap_or(u64::MAX));
+    }
+
+    /// Notes so far (one per validated frame).
+    #[must_use]
+    pub fn calls(&self) -> u32 {
+        self.calls
+    }
+
+    /// Refusals so far (one per non-PNG note, never a call).
+    #[must_use]
+    pub fn faults(&self) -> u32 {
+        self.faults
+    }
 }
 
 /// Frame sink: created up front (bad dirs fail fast), frames appended in
@@ -823,6 +865,19 @@ impl CaptureSink {
         checkpoint_hash: u64,
         png: &[u8],
     ) -> Result<(), CaptureError> {
+        self.write_frame_with_hook(tick, checkpoint_hash, png, None)
+    }
+
+    /// Write one frame then notify `hook` once with the validated bytes.
+    /// Units: ticks, bytes. Errors: [`CaptureError::BadPng`] or `Io`;
+    /// refusal never calls the hook. Determinism: same inputs, same files.
+    pub fn write_frame_with_hook(
+        &mut self,
+        tick: u32,
+        checkpoint_hash: u64,
+        png: &[u8],
+        hook: Option<&mut dyn FnMut(&[u8])>,
+    ) -> Result<(), CaptureError> {
         use sha2::{Digest, Sha256};
         let (width, height) = parse_png_dims(png)?;
         check_png_complete(png)?;
@@ -849,9 +904,12 @@ impl CaptureSink {
             checkpoint: format!("{checkpoint_hash:016x}"),
             png_fnv: fnv_hex(png),
             sha256: format!("{:x}", digest.finalize()),
-            bytes: png.len() as u64,
+            bytes: u64::try_from(png.len()).unwrap_or(u64::MAX),
         });
         self.frames += 1;
+        if let Some(hook) = hook {
+            hook(png);
+        }
         Ok(())
     }
 
@@ -1105,6 +1163,8 @@ pub fn run_headless_capture(
         HEADLESS_RENDERER,
         &meta,
     )?;
+    // Host tap counts each validated PNG once; refusals are faults.
+    let mut tap = LookTap::new();
     let mut app = App::new(config).map_err(map_config_error)?;
     let human = FighterId::new(HUMAN_SLOT).ok_or(CaptureError::BadConfig("fighters"))?;
     let mut cursor = TapeInputs::new(inputs.to_vec());
@@ -1125,8 +1185,19 @@ pub fn run_headless_capture(
         if sink.should_capture(tick + 1) {
             let hash = outcome.checkpoint.map(|point| point.hash).unwrap_or(0);
             let png = headless_frame_png(config.seed, hash, tick, req.width, req.height)?;
-            sink.write_frame(tick, hash, &png)?;
+            sink.write_frame_with_hook(tick, hash, &png, Some(&mut |bytes| tap.note(bytes)))?;
         }
+    }
+    // Headless PNGs always validate, so any fault is a writer defect.
+    if tap.faults() != 0 {
+        return Err(CaptureError::BadPng(
+            "headless tap refused a PNG".to_string(),
+        ));
+    }
+    if tap.calls() != sink.frames() {
+        return Err(CaptureError::BadPng(
+            "headless tap missed a frame".to_string(),
+        ));
     }
     // The session drove its spectator camera from the same ticks: file the
     // canonical cut log beside the frames, with the digest computed over
@@ -1177,18 +1248,22 @@ fn read_receipt_file(path: &Path) -> Result<String, CaptureError> {
         .map_err(|_| CaptureError::BadCutlog("receipt file must be UTF-8".to_string()))
 }
 
+/// Borrow the bytes after `key` in a receipt sidecar.
+fn receipt_field_rest<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let after = text.find(key)? + key.len();
+    text.get(after..)
+}
+
 /// Borrow the string filed as `"key":"value"` in a receipt sidecar.
 fn manifest_string_field(text: &str, key: &str) -> Option<String> {
-    let after = text.find(key)? + key.len();
-    let rest = text.get(after..)?;
+    let rest = receipt_field_rest(text, key)?;
     let end = rest.find('"')?;
     rest.get(..end).map(str::to_string)
 }
 
 /// Read the decimal number filed as `"key":digits` in a receipt sidecar.
 fn manifest_number_field(text: &str, key: &str) -> Option<u32> {
-    let after = text.find(key)? + key.len();
-    let rest = text.get(after..)?;
+    let rest = receipt_field_rest(text, key)?;
     let len = rest.bytes().take_while(u8::is_ascii_digit).count();
     if len == 0 || len > 10 {
         return None;
@@ -1972,6 +2047,126 @@ mod tests {
             CaptureSink::create(&dir, 1, 2040, None, "", &meta),
             Err(CaptureError::BadArgs(_))
         ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn capture_hook_runs_once_per_validated_frame() {
+        let dir = temp_dir("hook-once");
+        let meta = ManifestMeta {
+            rows: vec!["SHOW1".to_string()],
+            sha: "deadbeef1234".to_string(),
+            fps: 30,
+        };
+        let mut sink = CaptureSink::create(&dir, 1, 2040, None, HEADLESS_RENDERER, &meta).unwrap();
+        let mut calls = 0u32;
+        for tick in 0..3u32 {
+            let png = headless_frame_png(2040, 9, tick, 8, 8).unwrap();
+            let mut hook = |_: &[u8]| calls += 1;
+            sink.write_frame_with_hook(tick, 9, &png, Some(&mut hook))
+                .unwrap();
+            assert_eq!(calls, tick + 1);
+            assert_eq!(sink.frames(), tick + 1);
+        }
+        let mut hook = |_: &[u8]| calls += 1;
+        assert!(sink
+            .write_frame_with_hook(3, 9, b"not a png", Some(&mut hook))
+            .is_err());
+        assert_eq!(calls, 3);
+        assert_eq!(sink.frames(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn capture_look_tap_notes_once_per_validated_frame() {
+        let dir = temp_dir("look-tap");
+        let meta = ManifestMeta {
+            rows: vec!["SHOW1".to_string()],
+            sha: "deadbeef1234".to_string(),
+            fps: 30,
+        };
+        let mut sink = CaptureSink::create(&dir, 1, 2040, None, HEADLESS_RENDERER, &meta).unwrap();
+        let mut tap = LookTap::new();
+        assert_eq!(tap.calls(), 0);
+        for tick in 0..3u32 {
+            let png = headless_frame_png(2040, 9, tick, 8, 8).unwrap();
+            sink.write_frame_with_hook(tick, 9, &png, Some(&mut |bytes| tap.note(bytes)))
+                .unwrap();
+            assert_eq!(tap.calls(), tick + 1);
+            assert_eq!(sink.frames(), tick + 1);
+        }
+        assert!(sink
+            .write_frame_with_hook(3, 9, b"not a png", Some(&mut |bytes| tap.note(bytes)))
+            .is_err());
+        assert_eq!(tap.calls(), 3);
+        assert_eq!(sink.frames(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn look_tap_refuses_non_png_bytes() {
+        let mut tap = LookTap::new();
+        tap.note(b"not a png");
+        assert_eq!(tap.calls(), 0, "non-PNG must not count");
+        tap.note(b"");
+        assert_eq!(tap.calls(), 0, "empty must not count");
+        tap.note(&[137, 80, 78, 71, 13, 10, 26]);
+        assert_eq!(tap.calls(), 0, "truncated magic must not count");
+        let png = headless_frame_png(2040, 9, 0, 8, 8).expect("valid PNG");
+        tap.note(&png);
+        assert_eq!(tap.calls(), 1, "validated PNG counts once");
+    }
+
+    #[test]
+    fn look_tap_counts_faults_on_refused_png() {
+        let mut tap = LookTap::new();
+        assert_eq!((tap.calls(), tap.faults()), (0, 0));
+        tap.note(b"not a png");
+        assert_eq!(tap.calls(), 0, "refusal adds no call");
+        assert_eq!(tap.faults(), 1, "non-PNG counts one fault");
+        tap.note(b"");
+        assert_eq!(tap.calls(), 0, "empty adds no call");
+        assert_eq!(tap.faults(), 2, "empty counts a second fault");
+        tap.note(&[137, 80, 78, 71, 13, 10, 26]);
+        assert_eq!(tap.calls(), 0, "truncated magic adds no call");
+        assert_eq!(tap.faults(), 3, "truncated magic counts a third fault");
+        let png = headless_frame_png(2040, 9, 0, 8, 8).expect("valid PNG");
+        tap.note(&png);
+        assert_eq!((tap.calls(), tap.faults()), (1, 3));
+        let again = headless_frame_png(2040, 9, 0, 8, 8).expect("valid PNG");
+        tap.note(&again);
+        assert_eq!((tap.calls(), tap.faults()), (2, 3));
+    }
+
+    #[test]
+    fn capture_window_tap_counts_once_per_frame() {
+        // Window pin: `capture_offscreen` hands each validated PNG to
+        // `tap.note` once via `write_frame_with_hook`, same as headless.
+        let dir = temp_dir("window-tap");
+        let meta = ManifestMeta {
+            rows: vec!["SHOW1".to_string()],
+            sha: "deadbeef1234".to_string(),
+            fps: 30,
+        };
+        let mut sink = CaptureSink::create(&dir, 1, 2040, None, TWIN_RENDERER, &meta).unwrap();
+        let mut tap = LookTap::new();
+        for tick in 0..3u32 {
+            let png = headless_frame_png(2040, 9, tick, 8, 8).expect("valid PNG");
+            sink.write_frame_with_hook(tick, 9, &png, Some(&mut |bytes| tap.note(bytes)))
+                .unwrap();
+            assert_eq!(tap.calls(), tick + 1, "one tap call per window frame");
+            assert_eq!(tap.faults(), 0, "validated frames add no fault");
+            assert_eq!(sink.frames(), tick + 1, "one sink frame per write");
+            assert_eq!(tap.calls(), sink.frames(), "tap tracks sink");
+        }
+        assert!(sink
+            .write_frame_with_hook(3, 9, b"not a png", Some(&mut |bytes| tap.note(bytes)))
+            .is_err());
+        assert_eq!(tap.calls(), 3, "refusal adds no call");
+        assert_eq!(sink.frames(), 3, "refusal adds no frame");
+        tap.note(b"not a png");
+        assert_eq!(tap.calls(), 3, "non-PNG still adds no call");
+        assert_eq!(tap.faults(), 1, "non-PNG counts one fault");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

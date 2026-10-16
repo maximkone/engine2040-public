@@ -2,11 +2,11 @@
 //! Owner: `engine-world`; production caller: the map assembler, which drives
 //! `Cells::stream`/`publish` through the `engine-assets` `StreamQueue` adapter
 //! (request/publish/evict parity asserted in-test) and gates publish via the
-//! publish check.
+//! dual ahead-agent publish gate (seam scan plus walk).
 //! Units: bytes for budgets/costs, frames for load time, meters for seams.
 //! Determinism: integer math only, `BTreeMap` order, priority-then-coord publish;
 //! the sim hash covers live cell bytes only, so presentation never enters it.
-//! Errors: typed `CellError`; corrupt and seam-broken cells refuse with the check named.
+//! Errors: typed `CellError`; corrupt, seam-broken and island cells refuse with the check named.
 //! Budget: each `publish` moves at most `frame_bytes`; memory never tops `bytes`;
 //! per-cell bake cost and peak bytes are posted per cell by the test report.
 //!
@@ -566,6 +566,49 @@ pub fn seam_joins(west_or_north: &CellData, east_or_south: &CellData) -> Result<
     Ok(())
 }
 
+/// True when walkable texels connect the forced-free endpoints of one cell.
+/// Units: texels in, bool out. Determinism: fixed 4-dir order, visits bounded
+/// by `size * size`.
+fn cell_endpoints_connect(data: &CellData) -> bool {
+    let n = usize::from(data.size);
+    if n == 0 {
+        return false;
+    }
+    let walk = data.walkable();
+    if walk.len() != n * n || !walk[0] {
+        return false;
+    }
+    if !walk[n * n - 1] {
+        return false;
+    }
+    let mut seen = vec![false; n * n];
+    let mut queue = VecDeque::new();
+    queue.push_back((0usize, 0usize));
+    seen[0] = true;
+    while let Some((x, y)) = queue.pop_front() {
+        if x + 1 == n && y + 1 == n {
+            return true;
+        }
+        if x + 1 < n && !seen[y * n + x + 1] && walk[y * n + x + 1] {
+            seen[y * n + x + 1] = true;
+            queue.push_back((x + 1, y));
+        }
+        if x > 0 && !seen[y * n + x - 1] && walk[y * n + x - 1] {
+            seen[y * n + x - 1] = true;
+            queue.push_back((x - 1, y));
+        }
+        if y + 1 < n && !seen[(y + 1) * n + x] && walk[(y + 1) * n + x] {
+            seen[(y + 1) * n + x] = true;
+            queue.push_back((x, y + 1));
+        }
+        if y > 0 && !seen[(y - 1) * n + x] && walk[(y - 1) * n + x] {
+            seen[(y - 1) * n + x] = true;
+            queue.push_back((x, y - 1));
+        }
+    }
+    false
+}
+
 /// One pending slot: reservation plus in-memory progress markers.
 #[derive(Clone, Debug)]
 struct PendingCell {
@@ -786,6 +829,33 @@ impl Cells {
         Ok(CellEvent::Queued { coord })
     }
 
+    /// Dual ahead-agent publish gate: geometric seam scan plus navigational walk.
+    /// Units: cells in, unit out. Errors: `SeamMismatch` with the failing seam
+    /// check named, `Unreachable` when the walkable endpoints disconnect.
+    /// Determinism: `BTreeMap` order, integer math only, bounded flood.
+    pub fn gate_for_live(&self, candidate: &CellData) -> Result<(), CellError> {
+        if candidate.seed != self.seed {
+            return Err(CellError::SeamMismatch("seed"));
+        }
+        for (coord, live) in self.live.iter() {
+            let dx = candidate.coord.x.wrapping_sub(coord.x);
+            let dz = candidate.coord.z.wrapping_sub(coord.z);
+            if !((dx == 1 || dx == -1) && dz == 0 || dx == 0 && (dz == 1 || dz == -1)) {
+                continue;
+            }
+            let neighbour = parse_cell(&live.bytes).map_err(|_| CellError::Corrupt("live"))?;
+            if dx == 1 || dz == 1 {
+                seam_joins(&neighbour, candidate)?;
+            } else {
+                seam_joins(candidate, &neighbour)?;
+            }
+        }
+        if !cell_endpoints_connect(candidate) {
+            return Err(CellError::Unreachable);
+        }
+        Ok(())
+    }
+
     /// Advance queued cells by at most `frame_bytes` at a frame boundary, in
     /// deterministic publish order. Partial cells emit `Progress` and stay
     /// pending; finished cells bake, bind nav plus physics, and go live with
@@ -841,26 +911,41 @@ impl Cells {
                 // Bake at the frame boundary from the registry seed: pure and
                 // byte-identical twice, so publish timing never forks content.
                 match bake_cell(self.seed, coord, size) {
-                    Ok(bytes) => {
-                        let (walkable, colliders) = match parse_cell(&bytes) {
-                            Ok(parsed) => {
+                    Ok(bytes) => match parse_cell(&bytes) {
+                        Ok(parsed) => match self.gate_for_live(&parsed) {
+                            Ok(()) => {
+                                let walkable = parsed.walkable();
                                 let colliders = parsed.collider_count();
-                                (parsed.walkable(), colliders)
+                                self.live.insert(
+                                    coord,
+                                    LiveCell {
+                                        size,
+                                        bytes,
+                                        walkable,
+                                        colliders,
+                                        load_frames: touches,
+                                    },
+                                );
+                                events.push(CellEvent::Completed { coord });
                             }
-                            Err(_) => (Vec::new(), 0),
-                        };
-                        self.live.insert(
-                            coord,
-                            LiveCell {
-                                size,
-                                bytes,
-                                walkable,
-                                colliders,
-                                load_frames: touches,
-                            },
-                        );
-                        events.push(CellEvent::Completed { coord });
-                    }
+                            Err(gate_err) => {
+                                self.used_bytes = self.used_bytes.saturating_sub(total);
+                                self.refused_count = self.refused_count.saturating_add(1);
+                                events.push(CellEvent::Refused {
+                                    coord,
+                                    reason: refuse_name(&gate_err),
+                                });
+                            }
+                        },
+                        Err(parse_err) => {
+                            self.used_bytes = self.used_bytes.saturating_sub(total);
+                            self.refused_count = self.refused_count.saturating_add(1);
+                            events.push(CellEvent::Refused {
+                                coord,
+                                reason: refuse_name(&parse_err),
+                            });
+                        }
+                    },
                     Err(reason) => {
                         self.used_bytes = self.used_bytes.saturating_sub(total);
                         self.refused_count = self.refused_count.saturating_add(1);
@@ -1047,6 +1132,8 @@ fn refuse_name(reason: &CellError) -> &'static str {
         CellError::BadSize { .. } => "bad-size",
         CellError::BadCoord => "bad-coord",
         CellError::Corrupt(check) => check,
+        CellError::SeamMismatch(check) => check,
+        CellError::Unreachable => "unreachable",
         _ => "bake",
     }
 }
@@ -1100,6 +1187,23 @@ mod bound_tests {
         assert!(top < CELL_MAX_BYTES / 1024, "biggest bake costs {top}");
         let bottom = cell_cost_bytes(CELL_MIN_SIZE).expect("min side valid");
         assert!(bottom <= top);
+    }
+
+    #[test]
+    fn cell_cost_bytes_match_the_header_layout_exactly() {
+        // Hand-computed: header(23) + n*n heights + ceil(n*n/8) hole bits.
+        assert_eq!(cell_cost_bytes(4).expect("min side valid"), 23 + 16 + 2);
+        assert_eq!(
+            cell_cost_bytes(64).expect("max side valid"),
+            23 + 4096 + 512
+        );
+        assert_eq!(
+            cell_cost_bytes(16).expect("16 valid"),
+            23 + 256 + 32,
+            "16-texel cost pins the header plus heights plus hole bits"
+        );
+        assert!(cell_cost_bytes(3).is_err(), "below the min side refuses");
+        assert!(cell_cost_bytes(65).is_err(), "past the max side refuses");
     }
 
     #[test]
@@ -1231,5 +1335,109 @@ mod bound_tests {
             solo.route(a, (0, 0), b, (0, 0)),
             Err(CellError::Unreachable)
         );
+    }
+
+    #[test]
+    fn dual_gate_refuses_broken_seam_with_named_check() {
+        let cost = cell_cost_bytes(16).expect("16 valid");
+        let budget = CellBudget::new(4 * cost, 4, u64::MAX).expect("budget");
+        let mut cells = Cells::new(12345, budget);
+        let hub = CellCoord::new(0, 0).expect("hub");
+        cells.stream(hub, 16, 9).expect("hub fits");
+        cells.publish(u64::MAX);
+        assert!(cells.is_live(&hub), "hub goes live through the gate");
+        let east_coord = CellCoord::new(1, 0).expect("east");
+        let honest =
+            parse_cell(&bake_cell(12345, east_coord, 16).expect("east bakes")).expect("parses");
+        assert_eq!(
+            cells.gate_for_live(&honest),
+            Ok(()),
+            "honest neighbour passes"
+        );
+        let west = parse_cell(&bake_cell(12345, hub, 16).expect("hub bakes")).expect("parses");
+        let mut cliff = honest.clone();
+        for k in 0..16usize {
+            cliff.heights[k * 16] = west.heights[k * 16 + 15] ^ 0x80;
+        }
+        assert_eq!(
+            seam_joins(&west, &cliff),
+            Err(CellError::SeamMismatch("step"))
+        );
+        assert_eq!(
+            cells.gate_for_live(&cliff),
+            Err(CellError::SeamMismatch("step")),
+            "cliff names its check"
+        );
+        let mut wrong_seed = honest.clone();
+        wrong_seed.seed = 12345 + 1;
+        assert_eq!(
+            cells.gate_for_live(&wrong_seed),
+            Err(CellError::SeamMismatch("seed"))
+        );
+    }
+
+    #[test]
+    fn dual_gate_refuses_unreachable_island_with_named_check() {
+        let cost = cell_cost_bytes(16).expect("16 valid");
+        let budget = CellBudget::new(4 * cost, 4, u64::MAX).expect("budget");
+        let mut cells = Cells::new(12345, budget);
+        let hub = CellCoord::new(0, 0).expect("hub");
+        cells.stream(hub, 16, 9).expect("hub fits");
+        cells.publish(u64::MAX);
+        let east_coord = CellCoord::new(1, 0).expect("east");
+        let honest =
+            parse_cell(&bake_cell(12345, east_coord, 16).expect("east bakes")).expect("parses");
+        assert!(
+            cell_endpoints_connect(&honest),
+            "honest cell walks end to end"
+        );
+        assert_eq!(cells.gate_for_live(&honest), Ok(()));
+        let hub_data = parse_cell(&bake_cell(12345, hub, 16).expect("hub bakes")).expect("parses");
+        let mut walled = honest.clone();
+        for x in 0..16usize {
+            walled.holes[8 * 16 + x] = true;
+        }
+        assert_eq!(
+            seam_joins(&hub_data, &walled),
+            Ok(()),
+            "holes carry no seam, heights still join"
+        );
+        assert!(
+            !cell_endpoints_connect(&walled),
+            "middle wall cuts the walk"
+        );
+        assert_eq!(
+            cells.gate_for_live(&walled),
+            Err(CellError::Unreachable),
+            "island names its check"
+        );
+    }
+
+    #[test]
+    fn dual_gate_nine_cell_walk_holds_budgets() {
+        let cost = cell_cost_bytes(16).expect("16 valid");
+        let budget = CellBudget::new(9 * cost, 9, u64::MAX).expect("budget");
+        let mut cells = Cells::new(12345, budget);
+        for z in -1..=1 {
+            for x in -1..=1 {
+                let coord = CellCoord::new(x, z).expect("block coord");
+                cells.stream(coord, 16, 1).expect("block fits");
+            }
+        }
+        while cells.pending_count() > 0 {
+            cells.publish(u64::MAX);
+        }
+        assert_eq!(cells.live_count(), 9, "all nine pass the dual gate");
+        assert_eq!(cells.refused_count(), 0, "honest block never refuses");
+        assert_eq!(cells.used_bytes(), 9 * cost);
+        assert_eq!(cells.high_water_bytes(), 9 * cost);
+        assert_eq!(cells.remaining_bytes(), 0);
+        assert_eq!(cells.remaining_jobs(), 0);
+        let from = CellCoord::new(-1, -1).expect("corner");
+        let to = CellCoord::new(1, 1).expect("corner");
+        let steps = cells
+            .route(from, (0, 0), to, (15, 15))
+            .expect("live block routes");
+        assert!(steps > 16, "route crosses cells, got {steps} steps");
     }
 }

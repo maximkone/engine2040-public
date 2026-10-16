@@ -1,4 +1,4 @@
-//! time: integer 60Hz accumulator beside f32 `FixedAcc`.
+//! time: integer 60Hz accumulator, the only sim clock.
 //! Owner: engine-core. Units: ns, thirds-of-ns, ticks.
 //! Determinism: tick index u64 is truth; wall quantized at poll only,
 //! never hashed. Errors: `TimeError`, no unwrap on input.
@@ -53,7 +53,7 @@ impl std::error::Error for TimeError {}
 /// `acc_ns * 3 + rem_thirds` thirds of a ns, so three steps consume
 /// exactly 50_000_000ns with zero drift. Input is clamped at
 /// `MAX_FRAME_NS` and at most `MAX_STEPS` steps are taken per push,
-/// mirroring the `FixedAcc` anti-spiral contract. When the step cap is
+/// with the anti-spiral cap. When the step cap is
 /// hit, banked whole steps are forgiven (only a sub-step remainder is
 /// kept), so a hitch burst never builds catch-up debt. `tick` is the
 /// truth; wall input never enters a hash.
@@ -236,7 +236,6 @@ where
 mod tests {
     use super::*;
     use crate::alloc_probe::measure;
-    use crate::tick::LegacyFixedAcc;
 
     #[test]
     fn step_constants_exact() {
@@ -248,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn soak_10m_int_zero_drift_f32_residual_measured() {
+    fn soak_10m_int_zero_drift() {
         // 10M x 10ms = 100_000s = exactly 6_000_000 ticks; 10ms is exact in ns.
         let mut acc = IntAcc::new();
         let mut steps: u64 = 0;
@@ -259,65 +258,27 @@ mod tests {
         assert_eq!(acc.tick(), 6_000_000);
         assert_eq!(acc.buffered_ns(), 0, "integer residual must be zero");
         assert_eq!(acc.buffered_thirds(), 0, "integer remainder must be zero");
-
-        // Legacy f32 path on the same tape: 0.01f32 is short of 10ms, so it drifts.
-        let mut fixed = LegacyFixedAcc::fixed();
-        let mut f32_steps: u64 = 0;
-        for _ in 0..10_000_000 {
-            f32_steps += u64::from(fixed.push(0.01));
-        }
-        assert!(
-            f32_steps != steps,
-            "f32 must show measured drift: f32_steps={f32_steps} int_steps={steps} residual={}",
-            fixed.acc
-        );
     }
 
     #[test]
-    #[ignore = "timing: IntAcc-vs-f32 push cost A/B; run under --perf in release"]
-    fn intacc_vs_f32_push_cost() {
-        // Cost A/B on one tape: 1M x 10ms pushes through IntAcc
-        // (integer ns) vs FixedAcc (f32 seconds); best-of-5 each, paired ratio.
-        const N: u64 = 1_000_000;
-        #[expect(
-            clippy::disallowed_types,
-            clippy::disallowed_methods,
-            reason = "timing test reads the wall clock; it never enters the tick"
-        )]
-        fn best(mut f: impl FnMut()) -> u128 {
-            let mut top = u128::MAX;
-            for _ in 0..5 {
-                let t = std::time::Instant::now();
-                f();
-                top = top.min(t.elapsed().as_nanos());
-            }
-            top
+    fn fixedacc_retired() {
+        // Retirement quarantine: integer ns is the only sim clock.
+        // 6000 x 10ms is exactly 60s = 3600 ticks with zero residual.
+        let mut acc = IntAcc::new();
+        assert_eq!(acc.tick(), 0);
+        assert_eq!(acc.buffered_ns(), 0);
+        assert_eq!(acc.buffered_thirds(), 0);
+        let mut steps: u64 = 0;
+        for _ in 0..6000 {
+            steps += u64::from(acc.push_ns(10_000_000).expect("10ms bounded"));
         }
-        let f32_ns = best(|| {
-            let mut acc = LegacyFixedAcc::fixed();
-            let mut steps = 0u64;
-            for _ in 0..N {
-                steps += u64::from(acc.push(0.01));
-                std::hint::black_box(steps);
-            }
-            std::hint::black_box(steps);
-        });
-        let int_ns = best(|| {
-            let mut acc = IntAcc::new();
-            let mut steps = 0u64;
-            for _ in 0..N {
-                steps += u64::from(acc.push_ns(10_000_000).expect("10ms bounded"));
-                std::hint::black_box(steps);
-            }
-            std::hint::black_box(steps);
-        });
-        let ratio = int_ns as f64 / f32_ns as f64;
-        println!(
-            "intacc {int_ns}ns vs f32 {f32_ns}ns per {N} pushes: ratio {ratio:.2} \
-             (int {:.1}ns/push, f32 {:.1}ns/push)",
-            int_ns as f64 / N as f64,
-            f32_ns as f64 / N as f64
-        );
+        assert_eq!(steps, 3_600);
+        assert_eq!(acc.tick(), 3_600);
+        assert_eq!(acc.buffered_ns(), 0, "integer residual must be zero");
+        assert_eq!(acc.buffered_thirds(), 0, "integer remainder must be zero");
+        assert_eq!(acc.alpha(), 0.0);
+        assert_eq!(crate::TICK_HZ, 60);
+        assert_eq!(crate::MAX_STEPS, 5);
     }
 
     #[test]

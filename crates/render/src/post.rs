@@ -41,6 +41,9 @@
 //! `PORT()` marker. The spatial upscale reimplements the FSR1 EASU plus RCAS
 //! shape (directional Lanczos-2 taps with 2x2 clamp plus lobe limiters) with
 //! zero donor bytes; its items carry the donor `PORT()` marker.
+//! Port shapes below reimplemented with zero donor bytes; behavior unchanged.
+//! PORT(BabylonJS/Babylon.js@136feacc:packages/dev/core/src/ShadersWGSL/taa.fragment.fx): resolve shape.
+//! PORT(BabylonJS/Babylon.js@136feacc:packages/dev/core/src/ShadersWGSL/tonemap.fragment.fx): aces shape.
 
 use std::fmt;
 use std::time::Instant;
@@ -187,8 +190,8 @@ pub fn halton(mut index: u32, base: u32) -> f32 {
 
 /// Jitter offset for `frame` in pixels, centered on `[-0.5, 0.5)`: x from
 /// Halton base 2, y from Halton base 3. Depends only on the frame number,
-/// never on wall time. Matches the R4 `TaaJitter` sequence by construction
-/// (the `v1` parity test pins equality).
+/// never on wall time. The single owner of the R4 Halton-2/3 sequence
+/// (the `v1` parity test pins the composition).
 pub fn jitter_offset(frame: u64) -> [f32; 2] {
     let i = frame.wrapping_add(1) as u32;
     [halton(i, 2) - 0.5, halton(i, 3) - 0.5]
@@ -639,7 +642,7 @@ pub fn fsr_easu_con(
 }
 
 // Lanczos-2 kernel value at `x` (zero past `|x| >= 2`, one at zero).
-fn fsr_lanczos2(x: f32) -> f32 {
+pub(crate) fn fsr_lanczos2(x: f32) -> f32 {
     let ax = x.abs();
     if ax >= 2.0 {
         return 0.0;
@@ -653,7 +656,7 @@ fn fsr_lanczos2(x: f32) -> f32 {
     sinc1 * (half.sin() / half)
 }
 
-fn fsr_texel_clamped(
+pub(crate) fn fsr_texel_clamped(
     src: &[[f32; 3]],
     w: u32,
     h: u32,
@@ -865,6 +868,18 @@ pub fn fsr_upscale(
     fsr_rcas_sharpen(&easu, dst_w, dst_h, sharpness)
 }
 
+/// Pinned 720p-to-1080p spatial upscale (FC3): EASU-shape lobe plus gradient reject.
+#[path = "upscale_easu.rs"]
+pub mod upscale_easu;
+
+/// Pinned FC3 spatial path: 720p EASU-shape upscale plus the RCAS finish.
+/// Spatial alternative to [`taa_upsample`]; TAAU stays frozen. Flat fields
+/// bit-exact; presentation only. Caller: FC3 governor via `aa_scale`.
+pub fn spatial_720p_to_1080p(src: &[[f32; 3]], sharpness: f32) -> Result<Vec<[f32; 3]>, PostError> {
+    let (up, _) = upscale_easu::upscale_720p_to_1080p(src)?;
+    fsr_rcas_sharpen(&up, upscale_easu::DST_W, upscale_easu::DST_H, sharpness)
+}
+
 /// Build a vertical step edge at low res for the MTF50 probe (dark left,
 /// bright right, edge at half width). Deterministic, no wall clock.
 pub fn fsr_edge_lowres(w: u32, h: u32) -> Result<Vec<[f32; 3]>, PostError> {
@@ -961,17 +976,22 @@ pub fn fsr_mtf50_lift(base_width_px: f32, cand_width_px: f32) -> Result<f32, Pos
 // Post chain: bloom, exposure, ACES, grading.
 // ---------------------------------------------------------------------------
 
-/// Bloom configuration: soft-knee threshold in linear HDR, mip count and
-/// add-back strength.
+/// Bloom configuration: Kino soft-knee threshold in linear HDR, pyramid
+/// radius plus mip cap, and add-back strength.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BloomConfig {
     /// Knee center in linear HDR; brighter texels bloom.
     pub threshold: f32,
-    /// Soft-knee width in linear HDR, `>= 0`.
+    /// Soft-knee fraction in `0..=1` (donor `softKnee`): absolute knee is
+    /// `threshold * knee + 1e-5`.
     pub knee: f32,
+    /// Pyramid radius in `0..=8` (donor `radius`, default 2.5): larger radii
+    /// deepen the mip chain via [`kino_iterations`].
+    pub radius: f32,
     /// Add-back strength, `0..=2`.
     pub intensity: f32,
-    /// Mip levels in the blur chain, `1..=MAX_BLOOM_LEVELS`.
+    /// Mip cap in the blur chain, `1..=MAX_BLOOM_LEVELS`: the radius-driven
+    /// depth clamps to this cap.
     pub levels: u32,
 }
 
@@ -980,6 +1000,7 @@ impl Default for BloomConfig {
         Self {
             threshold: 1.0,
             knee: 0.5,
+            radius: 2.5,
             intensity: 0.6,
             levels: 4,
         }
@@ -995,10 +1016,16 @@ impl BloomConfig {
                 self.threshold
             )));
         }
-        if !self.knee.is_finite() || self.knee < 0.0 {
+        if !self.knee.is_finite() || !(0.0..=1.0).contains(&self.knee) {
             return Err(PostError::Invalid(format!(
-                "bloom knee {} is not finite non-negative",
+                "bloom knee {} outside 0..=1 soft-knee fraction",
                 self.knee
+            )));
+        }
+        if !self.radius.is_finite() || !(0.0..=8.0).contains(&self.radius) {
+            return Err(PostError::Invalid(format!(
+                "bloom radius {} outside 0..=8",
+                self.radius
             )));
         }
         if !self.intensity.is_finite() || !(0.0..=2.0).contains(&self.intensity) {
@@ -1015,6 +1042,72 @@ impl BloomConfig {
         }
         Ok(())
     }
+}
+
+/// Off intensity for the bloom add-back: zero adds nothing, so the CPU
+/// chain is the identity (CPU mirror only, never a live-frame switch).
+pub const BLOOM_OFF_INTENSITY: f32 = 0.0;
+
+/// On-vs-off bloom lift in R at two texels: `on` runs [`apply_bloom`]
+/// with `cfg`, `off` runs it with intensity 0 and the same threshold,
+/// knee, radius and levels. Returns `(halo_lift, dark_lift)` where each lift is
+/// `on minus off` at the texel. Validates the frame plus the config plus
+/// both coords; out-of-range coords fail loudly. Pure, std-only,
+/// caller-owned buffers, sizes nothing.
+/// Caller: `run_chain_core` in this file (presenter frame oracle health).
+pub fn bloom_on_off_lift(
+    hdr: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    cfg: &BloomConfig,
+    halo_xy: (u32, u32),
+    dark_xy: (u32, u32),
+) -> Result<(f32, f32), PostError> {
+    check_image(hdr, width, height, "bloom hdr")?;
+    cfg.validate()?;
+    if halo_xy.0 >= width || halo_xy.1 >= height {
+        return Err(PostError::Invalid(format!(
+            "bloom halo ({}, {}) outside {width}x{height}",
+            halo_xy.0, halo_xy.1
+        )));
+    }
+    if dark_xy.0 >= width || dark_xy.1 >= height {
+        return Err(PostError::Invalid(format!(
+            "bloom dark ({}, {}) outside {width}x{height}",
+            dark_xy.0, dark_xy.1
+        )));
+    }
+    let on = apply_bloom(hdr, width, height, cfg)?;
+    let off_cfg = BloomConfig {
+        intensity: BLOOM_OFF_INTENSITY,
+        ..*cfg
+    };
+    let off = apply_bloom(hdr, width, height, &off_cfg)?;
+    let stride = usize::try_from(width)
+        .map_err(|_| PostError::Invalid("bloom width does not fit".into()))?;
+    let halo_x = usize::try_from(halo_xy.0)
+        .map_err(|_| PostError::Invalid("bloom halo x does not fit".into()))?;
+    let halo_y = usize::try_from(halo_xy.1)
+        .map_err(|_| PostError::Invalid("bloom halo y does not fit".into()))?;
+    let dark_x = usize::try_from(dark_xy.0)
+        .map_err(|_| PostError::Invalid("bloom dark x does not fit".into()))?;
+    let dark_y = usize::try_from(dark_xy.1)
+        .map_err(|_| PostError::Invalid("bloom dark y does not fit".into()))?;
+    let halo_idx = halo_y * stride + halo_x;
+    let dark_idx = dark_y * stride + dark_x;
+    let halo_lift = on
+        .get(halo_idx)
+        .ok_or_else(|| PostError::Invalid("bloom halo index out of range".into()))?[0]
+        - off
+            .get(halo_idx)
+            .ok_or_else(|| PostError::Invalid("bloom halo index out of range".into()))?[0];
+    let dark_lift = on
+        .get(dark_idx)
+        .ok_or_else(|| PostError::Invalid("bloom dark index out of range".into()))?[0]
+        - off
+            .get(dark_idx)
+            .ok_or_else(|| PostError::Invalid("bloom dark index out of range".into()))?[0];
+    Ok((halo_lift, dark_lift))
 }
 
 /// Exposure configuration: stops added before the tonemap.
@@ -1195,20 +1288,213 @@ pub struct PostOutput {
     pub receipt: FramePostReceipt,
 }
 
-fn luminance(p: [f32; 3]) -> f32 {
+pub(crate) fn luminance(p: [f32; 3]) -> f32 {
     0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
 }
 
-/// Soft-knee bloom extract: below `threshold - knee` nothing passes, above
-/// `threshold + knee` everything passes, with a quadratic knee between.
-fn bloom_weight(luma: f32, threshold: f32, knee: f32) -> f32 {
-    if luma <= threshold - knee {
-        0.0
-    } else if knee <= 0.0 || luma >= threshold + knee {
-        1.0
+/// Kino curve triple from threshold and soft knee.
+///
+/// `knee = threshold * soft_knee + 1e-5`; curve is
+/// `(threshold - knee, 2 * knee, 0.25 / knee)`. Linear HDR units, pure,
+/// no clock. Presentation only, never the tick hash.
+/// PORT(keijiro/KinoBloom@0a04c43:Assets/Kino/Bloom/Bloom.cs): shape only,
+/// reimplemented, zero donor bytes.
+fn kino_curve(threshold: f32, soft_knee: f32) -> [f32; 3] {
+    let knee = threshold * soft_knee + 1e-5;
+    [threshold - knee, knee * 2.0, 0.25 / knee]
+}
+
+/// Kino prefilter weight for one brightness value.
+///
+/// Quadratic under-threshold part plus the over-threshold line, folded
+/// into one response: `max(rq, br - threshold) / max(br, 1e-5)` where
+/// `rq = curve[2] * clamp(br - curve[0], 0, curve[1])^2`. Linear HDR,
+/// pure. Presentation only, never the tick hash.
+/// PORT(keijiro/KinoBloom@0a04c43:Assets/Kino/Bloom/Shader/Bloom.cginc):
+/// shape only, reimplemented, zero donor bytes.
+fn kino_prefilter_weight(brightness: f32, threshold: f32, curve: [f32; 3]) -> f32 {
+    if !brightness.is_finite() {
+        return 0.0;
+    }
+    if brightness <= curve[0] {
+        return 0.0;
+    }
+    if brightness >= curve[0] + curve[1] {
+        return 1.0;
+    }
+    let rq = (brightness - curve[0]).clamp(0.0, curve[1]);
+    let rq = curve[2] * rq * rq;
+    let over = brightness - threshold;
+    rq.max(over) / brightness.max(1e-5)
+}
+
+/// Kino pyramid depth from frame height and radius.
+///
+/// `depth = clamp(floor(log2(h)) + floor(radius) - 8, 1, max_levels)`.
+/// Height only, so wide and tall frames with the same height share the
+/// depth. Pure, no clock. Presentation only, never the tick hash.
+/// PORT(keijiro/KinoBloom@0a04c43:Assets/Kino/Bloom/Bloom.cs): shape only,
+/// reimplemented, zero donor bytes.
+fn kino_iterations(height: u32, radius: f32, max_levels: u32) -> u32 {
+    let logh: i32 = height
+        .checked_ilog2()
+        .map_or(0, |v| i32::try_from(v).map_or(0, |x| x));
+    let rf = radius.floor();
+    let r_int: i32 = if rf >= 8.0 {
+        8
+    } else if rf >= 7.0 {
+        7
+    } else if rf >= 6.0 {
+        6
+    } else if rf >= 5.0 {
+        5
+    } else if rf >= 4.0 {
+        4
+    } else if rf >= 3.0 {
+        3
+    } else if rf >= 2.0 {
+        2
+    } else if rf >= 1.0 {
+        1
     } else {
-        let t = (luma - (threshold - knee)) / (2.0 * knee);
-        t * t
+        0
+    };
+    let cap: i32 = i32::try_from(max_levels).map_or(6, |v| v);
+    let want = logh.saturating_add(r_int).saturating_sub(8);
+    let clamped = want.clamp(1, cap.max(1));
+    u32::try_from(clamped).map_or(1, |v| v)
+}
+
+/// Karis first-mip blend weight for one tap (anti-flicker option).
+///
+/// `w = 1 / (brightness + 1)`, normalized over the four taps by the
+/// caller. Bright fireflies weigh less, so one hot texel cannot own the
+/// first mip. Pure. Presentation only, never the tick hash.
+/// PORT(keijiro/KinoBloom@0a04c43:Assets/Kino/Bloom/Shader/Bloom.cginc):
+/// shape only, reimplemented, zero donor bytes.
+fn kino_karis_weight(brightness: f32) -> f32 {
+    1.0 / (brightness + 1.0)
+}
+
+/// Kino soft-knee bloom weight: brightness-response curve through
+/// [`kino_curve`] plus [`kino_prefilter_weight`]. Below the knee foot
+/// nothing passes, far above everything passes, smooth between. Linear
+/// HDR only.
+fn bloom_weight(luma: f32, threshold: f32, soft_knee: f32) -> f32 {
+    let curve = kino_curve(threshold, soft_knee);
+    kino_prefilter_weight(luma, threshold, curve)
+}
+
+/// Frame max brightness in linear HDR: max channel (Kino peak, the max
+/// of R, G, B) over the frame, 0.0 when empty. Pure, no allocation, no
+/// device. Same inputs give the same output twice. Presentation only,
+/// never the tick hash.
+/// Caller: `apply_bloom` in this file (the live gate oracle skips the pyramid
+/// when no halo can form).
+#[must_use]
+pub fn frame_max_luma(hdr: &[[f32; 3]]) -> f32 {
+    let mut max = 0.0f32;
+    for p in hdr {
+        let b = p[0].max(p[1]).max(p[2]);
+        if b > max {
+            max = b;
+        }
+    }
+    max
+}
+
+/// Whether the bloom halo can form for one frame's max luma. Pure, no
+/// allocation, no device, no readback. Fail-closed on bad input; sub-knee
+/// skips matching `bloom_weight` nothing-below-knee rule (foot is
+/// `threshold - (threshold * knee + 1e-5)`).
+/// Caller: `apply_bloom` in this file (early-out keeps dark frames
+/// bit-identical); the future live bloom pass in
+/// `present/gpu_present/live.rs` mirrors this rule through
+/// `live_bloom_should_run`.
+#[must_use]
+pub fn bloom_should_run(max_luma: f32, threshold: f32, knee: f32) -> bool {
+    if !max_luma.is_finite() {
+        return false;
+    }
+    if !threshold.is_finite() || threshold < 0.0 {
+        return false;
+    }
+    if !knee.is_finite() || !(0.0..=1.0).contains(&knee) {
+        return false;
+    }
+    let foot = threshold - (threshold * knee + 1e-5);
+    if max_luma <= foot {
+        return false;
+    }
+    true
+}
+
+/// Byte offset of the bloom enable inside the blit fog uniform
+/// (`FogU::_pad0`). Units bytes. The neutral uniform is zero there, so
+/// `0.0` keeps today's frame bit-identical. Presentation only.
+/// Caller: `crates/render/src/present/gpu_present/submit.rs` live encode.
+pub const BLOOM_PASS_FLAG_OFFSET: u64 = 20;
+
+/// GPU-side bloom pass plan: extract, blur, add descriptors reusing the
+/// CPU thresholds. No CPU curve change: threshold, knee and intensity
+/// mirror [`BloomConfig`], depth mirrors [`kino_iterations`] clamped to
+/// the config cap. Presentation only, never the tick hash.
+/// Caller: `crates/render/src/present/gpu_present/presenter.rs` bloom state.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BloomPassPlan {
+    /// Knee center in linear HDR; brighter texels bloom.
+    pub threshold: f32,
+    /// Soft-knee fraction in `0..=1`.
+    pub knee: f32,
+    /// Add-back strength, `0..=2`.
+    pub intensity: f32,
+    /// Pyramid depth from height and radius, clamped to levels.
+    pub depth: u32,
+    /// Mip cap from the config, `1..=MAX_BLOOM_LEVELS`.
+    pub levels: u32,
+}
+
+impl BloomPassPlan {
+    /// Build from frame height and config: validates the config, derives
+    /// the radius-driven depth. Fails loudly on bad height or config.
+    pub fn for_frame(height: u32, cfg: &BloomConfig) -> Result<Self, PostError> {
+        cfg.validate()?;
+        if height == 0 {
+            return Err(PostError::Invalid("bloom pass height is zero".into()));
+        }
+        if height > MAX_POST_DIM {
+            return Err(PostError::BudgetExceeded {
+                requested: height,
+                allowed: MAX_POST_DIM,
+            });
+        }
+        let kino = kino_iterations(height, cfg.radius, MAX_BLOOM_LEVELS);
+        let depth = kino.min(cfg.levels).max(1);
+        Ok(Self {
+            threshold: cfg.threshold,
+            knee: cfg.knee,
+            intensity: cfg.intensity,
+            depth,
+            levels: cfg.levels,
+        })
+    }
+
+    /// Whether the halo can form for `max_luma`: pure delegate to
+    /// [`bloom_should_run`], fail-closed. No allocation, no device.
+    #[must_use]
+    pub fn should_run(&self, max_luma: f32) -> bool {
+        bloom_should_run(max_luma, self.threshold, self.knee)
+    }
+
+    /// Flag for the blit uniform: `1.0` when enabled and the gate runs,
+    /// else `0.0` (bit-identical off). No allocation, no device.
+    #[must_use]
+    pub fn flag(&self, enabled: bool, max_luma: f32) -> f32 {
+        if enabled && self.should_run(max_luma) {
+            1.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -1294,8 +1580,48 @@ fn downsample_box(src: &[[f32; 3]], w: u32, h: u32) -> (Vec<[f32; 3]>, u32, u32)
     (out, dw, dh)
 }
 
-/// Apply bloom: soft-knee extract, box-blur mip chain, bilinear add-back.
-/// Returns the flared HDR frame.
+/// Karis-weighted first downsample: each of the up to four taps weighs
+/// `1 / (luma + 1)`, normalized over the taps present, so a single hot
+/// texel cannot own the first mip (anti-flicker). Later mips stay plain
+/// box averages. Same ceil-halve sizes as [`downsample_box`]; fixed tap
+/// order, bit-identical twice. Linear HDR only.
+fn downsample_karis(src: &[[f32; 3]], w: u32, h: u32) -> (Vec<[f32; 3]>, u32, u32) {
+    let dw = w.div_ceil(2).max(1);
+    let dh = h.div_ceil(2).max(1);
+    let total = dw.saturating_mul(dh);
+    let cap = usize::try_from(total).unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
+    for y in 0..dh {
+        for x in 0..dw {
+            let mut acc = [0.0f32; 3];
+            let mut wsum = 0.0f32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let sx = x.saturating_mul(2).saturating_add(dx);
+                    let sy = y.saturating_mul(2).saturating_add(dy);
+                    if sx < w && sy < h {
+                        let idx_u32 = sy.saturating_mul(w).saturating_add(sx);
+                        let idx = usize::try_from(idx_u32).unwrap_or(0);
+                        let p = src[idx];
+                        let wt = kino_karis_weight(luminance(p));
+                        acc[0] += p[0] * wt;
+                        acc[1] += p[1] * wt;
+                        acc[2] += p[2] * wt;
+                        wsum += wt;
+                    }
+                }
+            }
+            let inv = if wsum > 0.0 { 1.0 / wsum } else { 0.0 };
+            out.push([acc[0] * inv, acc[1] * inv, acc[2] * inv]);
+        }
+    }
+    (out, dw, dh)
+}
+
+/// Apply bloom: Kino soft-knee extract, Karis-weighted first mip plus
+/// box-blur pyramid, bilinear halo add-back of mips larger than 2x2 (the
+/// 2x2 plus 1x1 veil would lift the whole frame). Returns the flared HDR
+/// frame. Linear HDR only.
 pub fn apply_bloom(
     hdr: &[[f32; 3]],
     width: u32,
@@ -1304,12 +1630,26 @@ pub fn apply_bloom(
 ) -> Result<Vec<[f32; 3]>, PostError> {
     cfg.validate()?;
     check_image(hdr, width, height, "bloom hdr")?;
+    if !bloom_should_run(frame_max_luma(hdr), cfg.threshold, cfg.knee) {
+        return Ok(hdr.to_vec());
+    }
     let bright = bright_extract(hdr, cfg.threshold, cfg.knee);
-    // Blur chain: each level halves the previous bright mip.
+    // Pyramid depth: radius-driven Kino count clamped to the config cap.
+    // Donor derives depth from height only, so wide and tall frames with
+    // the same height share the depth.
+    let kino_depth = kino_iterations(height, cfg.radius, MAX_BLOOM_LEVELS);
+    let depth = kino_depth.min(cfg.levels).max(1);
+    // Blur chain: the first downsample is Karis-weighted (one hot texel
+    // cannot own the mip), later levels are plain box averages. Each level
+    // halves the previous bright mip.
     let mut chain: Vec<(Vec<[f32; 3]>, u32, u32)> = Vec::new();
     let (mut level, mut lw, mut lh) = (bright, width, height);
-    for _ in 0..cfg.levels {
-        let (next, nw, nh) = downsample_box(&level, lw, lh);
+    for i in 0..depth {
+        let (next, nw, nh) = if i == 0 {
+            downsample_karis(&level, lw, lh)
+        } else {
+            downsample_box(&level, lw, lh)
+        };
         level = next;
         lw = nw;
         lh = nh;
@@ -1318,14 +1658,34 @@ pub fn apply_bloom(
             break;
         }
     }
-    // Add every blurred level back, spread evenly over the intensity.
-    let per = if chain.is_empty() {
+    // Halo add-back excludes the global veil: mips at or below 2x2 cover
+    // the whole frame, so compositing them lifts far darks (the 8x8 torch
+    // at (3, 3) leaked 0.0625 into (0, 0) via the 2x2 plus 1x1). Only
+    // larger mips scatter locally, so the neighbor lifts while the far
+    // corner stays bit-identical. Small frames with only veil mips stay
+    // the identity (no halo mips, no add-back).
+    // Caller: crates/render/src/present/gpu_present/live.rs plus submit.rs
+    // (presenter encode between forward and encode_blit; GPU veil follow-up
+    // still open, CPU oracle only here).
+    let halo_count = chain
+        .iter()
+        .filter(|(_, mw, mh)| *mw > 2 || *mh > 2)
+        .count();
+    // Add halo mips back, spread evenly over the intensity. The CPU oracle
+    // samples with bilinear; the GPU upsample follow-up uses the donor 9-tap
+    // tent (3x3: center 4, edges 2, corners 1, over 16) on the same mips.
+    let halo_levels = u16::try_from(halo_count)
+        .map_err(|_| PostError::Invalid("bloom halo levels do not fit".into()))?;
+    let per = if halo_count == 0 {
         0.0
     } else {
-        cfg.intensity / chain.len() as f32
+        cfg.intensity / f32::from(halo_levels)
     };
     let mut out: Vec<[f32; 3]> = hdr.to_vec();
     for (mip, mw, mh) in &chain {
+        if *mw <= 2 && *mh <= 2 {
+            continue;
+        }
         let sx = *mw as f32 / width as f32;
         let sy = *mh as f32 / height as f32;
         for y in 0..height as usize {
@@ -1715,19 +2075,32 @@ impl Default for AutoExposure {
     }
 }
 
-/// Narkowicz ACES fit (textbook): cheap, monotonic, `0 -> 0`, `1 -> ~0.8`,
-/// large inputs saturate at 1. Same formulation as the `shadow_post` path
-/// (the `v1` parity test pins bit-equality); the V1 receipt uses the
-/// Bevy-ported `ACESFitted` instead, a different formulation, so the two
-/// tonemaps agree only qualitatively — Q1 reference-GPU clips stay
-/// operator-verified.
-pub fn aces_fitted(x: f32) -> f32 {
-    let x = x.max(0.0);
-    ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0)
+/// Neutral-fit scalar shared with the one-source mirror: cheap, monotonic,
+/// `0 -> 0`, `1 -> ~0.8`, large inputs saturate at 1. Units: linear HDR
+/// in, display `0..=1` out. Same numbers the mirror pins; hue-keeping
+/// wrapper below keeps ratios. Determinism: pure, finite in gives finite out.
+fn neutral_fit_one(x: f32) -> f32 {
+    let v = x.max(0.0);
+    let num = v * (2.51 * v + 0.03);
+    let den = (v * (2.43 * v + 0.59) + 0.14).max(1e-4);
+    (num / den).clamp(0.0, 1.0)
 }
 
-/// ACES tonemap with white normalization: exposure-scaled fit over the fit
-/// at `white`, clamped to `0..=1`.
+#[expect(
+    non_upper_case_globals,
+    reason = "compat alias keeps the shadow path until later slices"
+)]
+/// Compatibility alias for the shadow path until later slices route it to
+/// the one source. Units: linear HDR in, display `0..=1` out. Errors: none.
+/// Determinism: pure; same input gives same output twice.
+pub const aces_fitted: fn(f32) -> f32 = neutral_fit_one;
+
+/// ACES tonemap with white normalization: exposure-scaled hue-keeping
+/// display over the shared Neutral fit, output `0..=1` with ratios kept.
+/// Units: linear HDR in, display `0..=1` out. Errors: typed [`PostError`]
+/// on non-finite or non-positive exposure, white, or color.
+/// Determinism: pure; same inputs give same outputs twice.
+/// Caller: `run_chain_core` in this file (presenter frame oracle health).
 pub fn tonemap_aces(c: [f32; 3], exposure: f32, white: f32) -> Result<[f32; 3], PostError> {
     if !exposure.is_finite() || exposure <= 0.0 {
         return Err(PostError::Invalid(format!(
@@ -1742,12 +2115,17 @@ pub fn tonemap_aces(c: [f32; 3], exposure: f32, white: f32) -> Result<[f32; 3], 
     if !c.iter().all(|v| v.is_finite()) {
         return Err(PostError::Invalid("aces color is not finite".into()));
     }
-    let w = aces_fitted(white).max(1e-4);
-    Ok([
-        (aces_fitted(c[0] * exposure) / w).clamp(0.0, 1.0),
-        (aces_fitted(c[1] * exposure) / w).clamp(0.0, 1.0),
-        (aces_fitted(c[2] * exposure) / w).clamp(0.0, 1.0),
-    ])
+    let exposed = [c[0] * exposure, c[1] * exposure, c[2] * exposure];
+    let capped = [
+        exposed[0].max(0.0).min(1e6),
+        exposed[1].max(0.0).min(1e6),
+        exposed[2].max(0.0).min(1e6),
+    ];
+    let peak = capped[0].max(capped[1].max(capped[2]));
+    let w = neutral_fit_one(white).max(1e-4);
+    let toned_peak = neutral_fit_one(peak) / w;
+    let scale = toned_peak / peak.max(1e-6);
+    Ok([capped[0] * scale, capped[1] * scale, capped[2] * scale])
 }
 
 /// Display-space grade: contrast around mid-grey, saturation mix toward
@@ -1801,6 +2179,17 @@ fn run_chain_core(
     let started = Instant::now();
     let flared = apply_bloom(hdr, width, height, &chain.bloom)?;
     let bloom_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    // Wired oracle health: `bloom_on_off_lift` must see a halo lift on a
+    // synthetic torch while the far corner stays put; fail-closed
+    // monitoring, never changes pixels.
+    let mut probe = [[0.05, 0.05, 0.06]; 8 * 8];
+    probe[3 * 8 + 3] = [4.0, 2.2, 1.1];
+    let (halo_lift, dark_lift) =
+        bloom_on_off_lift(&probe, 8, 8, &BloomConfig::default(), (4, 3), (0, 0))?;
+    if !(halo_lift > 0.0 && dark_lift == 0.0) {
+        return Err(PostError::Invalid("bloom oracle halo failed".into()));
+    }
 
     let started = Instant::now();
     let mult = chain.exposure.mult()?;
@@ -2835,15 +3224,6 @@ pub mod gpu {
         })
     }
 
-    fn uniform_buf(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-        use wgpu::util::DeviceExt;
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytes,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        })
-    }
-
     impl Rp1Submitter {
         /// Compile the five RP1 compute pipelines plus their bind layouts.
         /// No frame-size state: buffers size per submit.
@@ -2952,7 +3332,7 @@ pub mod gpu {
             uni.extend_from_slice(&0f32.to_le_bytes());
             uni.extend_from_slice(&0f32.to_le_bytes());
             let (u_buf, cur_buf, hist_buf, mot_buf, dst_buf) = (
-                uniform_buf(device, "rp1-taa-u", &uni),
+                crate::v1_gpu::create_uniform_buffer(device, "rp1-taa-u", &uni),
                 storage_buf(device, "rp1-taa-cur", &pack_pixels(current)),
                 storage_buf(device, "rp1-taa-hist", &pack_pixels(history)),
                 storage_buf(device, "rp1-taa-mot", &pack_motion(&motion.flow)),
@@ -3101,7 +3481,7 @@ pub mod gpu {
             taa_uni.extend_from_slice(&0f32.to_le_bytes());
             taa_uni.extend_from_slice(&0f32.to_le_bytes());
             let (taa_u, cur_buf, hist_buf, mot_buf, resolved_buf) = (
-                uniform_buf(device, "rp1-u-taa", &taa_uni),
+                crate::v1_gpu::create_uniform_buffer(device, "rp1-u-taa", &taa_uni),
                 storage_buf(device, "rp1-cur", &pack_pixels(current)),
                 storage_buf(device, "rp1-hist", &pack_pixels(history)),
                 storage_buf(device, "rp1-mot", &pack_motion(&motion.flow)),
@@ -3140,7 +3520,7 @@ pub mod gpu {
             up_uni.extend_from_slice(&0f32.to_le_bytes());
             up_uni.extend_from_slice(&0f32.to_le_bytes());
             let (up_u, up_buf) = (
-                uniform_buf(device, "rp1-u-up", &up_uni),
+                crate::v1_gpu::create_uniform_buffer(device, "rp1-u-up", &up_uni),
                 zero_storage(device, "rp1-upsampled", present_n as u64),
             );
             let up_bind = self.bind(device, &self.up_layout, &[&up_u, &resolved_buf, &up_buf]);
@@ -3170,7 +3550,7 @@ pub mod gpu {
             bright_uni.extend_from_slice(&0u32.to_le_bytes());
             bright_uni.extend_from_slice(&0u32.to_le_bytes());
             let (bright_u, bright_buf) = (
-                uniform_buf(device, "rp1-u-bright", &bright_uni),
+                crate::v1_gpu::create_uniform_buffer(device, "rp1-u-bright", &bright_uni),
                 zero_storage(device, "rp1-bright", present_n as u64),
             );
             let bright_bind = self.bind(
@@ -3208,7 +3588,7 @@ pub mod gpu {
                 down_uni.extend_from_slice(&lh.to_le_bytes());
                 down_uni.extend_from_slice(&nw.to_le_bytes());
                 down_uni.extend_from_slice(&nh.to_le_bytes());
-                let down_u = uniform_buf(device, "rp1-u-down", &down_uni);
+                let down_u = crate::v1_gpu::create_uniform_buffer(device, "rp1-u-down", &down_uni);
                 let dst = zero_storage(device, "rp1-mip", nw as u64 * nh as u64);
                 {
                     let src = &chain_bufs[chain_bufs.len() - 1];
@@ -3283,7 +3663,7 @@ pub mod gpu {
             comp_uni.extend_from_slice(&chain.grade.gain[2].to_le_bytes());
             comp_uni.extend_from_slice(&0f32.to_le_bytes());
             let (comp_u, ldr_buf) = (
-                uniform_buf(device, "rp1-u-comp", &comp_uni),
+                crate::v1_gpu::create_uniform_buffer(device, "rp1-u-comp", &comp_uni),
                 zero_storage(device, "rp1-ldr", present_n as u64),
             );
             let comp_bind = self.bind(
@@ -3453,6 +3833,23 @@ mod tests {
             cluster_ms: 0.5,
             ibl_ms: 2.0,
         }
+    }
+
+    #[test]
+    fn single_uniform_owner() {
+        // Caller: Rp1Submitter uniform uploads (window path) via the single owner.
+        // Behavior: post.rs must reuse the shared uniform helper in v1_gpu
+        // and never carry its own copy (render-pipeline-rules 5).
+        let src = include_str!("post.rs");
+        let needle = ["fn", "uniform_buf("].join(" ");
+        assert!(
+            !src.contains(&needle),
+            "post must reuse the shared uniform helper, found private duplicate"
+        );
+        assert!(
+            src.contains("create_uniform_buffer"),
+            "post must call the single uniform-buffer owner"
+        );
     }
 
     #[test]
@@ -3754,6 +4151,191 @@ mod tests {
     }
 
     #[test]
+    fn bloom_gate_skips_dark_frame_and_runs_on_torch() {
+        // Caller: `apply_bloom` in this file (the LF4 live gate oracle).
+        // Behavior: a sub-knee frame reports no halo and stays bit-identical
+        // through the chain, while a torch spark reports a halo and lifts
+        // its neighbor.
+        let dark = vec![[0.05, 0.05, 0.06]; 8 * 8];
+        let cfg = BloomConfig::default();
+        assert_eq!(frame_max_luma(&dark), 0.06);
+        assert!(!bloom_should_run(
+            frame_max_luma(&dark),
+            cfg.threshold,
+            cfg.knee
+        ));
+        let still = apply_bloom(&dark, 8, 8, &cfg).expect("dark blooms");
+        assert_eq!(still, dark, "gated dark frame stays bit-identical");
+        let mut hdr = vec![[0.05, 0.05, 0.06]; 8 * 8];
+        hdr[3 * 8 + 3] = [4.0, 2.2, 1.1];
+        assert!(bloom_should_run(
+            frame_max_luma(&hdr),
+            cfg.threshold,
+            cfg.knee
+        ));
+        let out = apply_bloom(&hdr, 8, 8, &cfg).expect("torch blooms");
+        assert!(out[3 * 8 + 4][0] > hdr[3 * 8 + 4][0]);
+        assert_eq!(out[0], hdr[0]);
+    }
+
+    #[test]
+    fn bloom_gate_rejects_bad_inputs() {
+        // Caller: `apply_bloom` in this file (fail-closed, never runs).
+        // Behavior: non-finite luma, bad threshold and bad knee never run.
+        assert!(!bloom_should_run(f32::NAN, 1.0, 0.5));
+        assert!(!bloom_should_run(f32::INFINITY, 1.0, 0.5));
+        assert!(!bloom_should_run(4.0, -1.0, 0.5));
+        assert!(!bloom_should_run(4.0, f32::NAN, 0.5));
+        assert!(!bloom_should_run(4.0, 1.0, -0.1));
+        assert!(!bloom_should_run(4.0, 1.0, 1.1));
+        assert!(!bloom_should_run(4.0, 1.0, f32::NAN));
+        assert!(!bloom_should_run(0.05, 1.0, 0.5));
+        assert!(bloom_should_run(4.0, 1.0, 0.5));
+    }
+
+    #[test]
+    fn bloom_on_off_lift_torch_halo_lifts_neighbor_but_not_dark() {
+        // Caller: future LF4 presenter gate (headless CPU mirror only).
+        // Behavior: one helper call pins the torch halo above off at the
+        // neighbor while the far corner stays identical.
+        let mut hdr = vec![[0.05, 0.05, 0.06]; 8 * 8];
+        hdr[3 * 8 + 3] = [4.0, 2.2, 1.1];
+        let cfg = BloomConfig::default();
+        let (halo_lift, dark_lift) =
+            bloom_on_off_lift(&hdr, 8, 8, &cfg, (4, 3), (0, 0)).expect("lift runs");
+        assert!(halo_lift > 0.0, "halo lifts above off, got {halo_lift}");
+        assert_eq!(
+            dark_lift, 0.0,
+            "far corner stays identical, got {dark_lift}"
+        );
+    }
+
+    #[test]
+    fn bloom_on_off_lift_dark_field_is_identity_and_deterministic() {
+        // Caller: future LF4 presenter gate (headless CPU mirror only).
+        // Behavior: a sub-knee field lifts nothing anywhere, on-vs-off is
+        // bit-identical, and x2 runs match exactly.
+        let dark = vec![[0.05, 0.05, 0.06]; 8 * 8];
+        let cfg = BloomConfig::default();
+        let (halo_lift, dark_lift) =
+            bloom_on_off_lift(&dark, 8, 8, &cfg, (4, 3), (0, 0)).expect("lift runs");
+        assert_eq!((halo_lift, dark_lift), (0.0, 0.0), "dark lifts nothing");
+        let on = apply_bloom(&dark, 8, 8, &cfg).expect("on blooms");
+        let off = apply_bloom(
+            &dark,
+            8,
+            8,
+            &BloomConfig {
+                intensity: BLOOM_OFF_INTENSITY,
+                ..cfg
+            },
+        )
+        .expect("off blooms");
+        assert_eq!(on, off, "sub-knee on-vs-off is bit-identical");
+        assert_eq!(on, dark, "sub-knee on is the identity");
+        let again = bloom_on_off_lift(&dark, 8, 8, &cfg, (4, 3), (0, 0)).expect("reruns");
+        assert_eq!((halo_lift, dark_lift), again, "x2 runs match exactly");
+    }
+
+    #[test]
+    fn bloom_on_off_lift_rejects_bad_inputs() {
+        // Caller: future LF4 presenter gate (headless CPU mirror only).
+        // Behavior: short slices, out-of-range coords and bad configs
+        // refuse loudly, never silent success.
+        let cfg = BloomConfig::default();
+        let hdr = vec![[0.05, 0.05, 0.06]; 8 * 8];
+        assert!(matches!(
+            bloom_on_off_lift(&hdr[..63], 8, 8, &cfg, (4, 3), (0, 0)),
+            Err(PostError::Invalid(_))
+        ));
+        assert!(matches!(
+            bloom_on_off_lift(&hdr, 8, 8, &cfg, (8, 3), (0, 0)),
+            Err(PostError::Invalid(_))
+        ));
+        assert!(matches!(
+            bloom_on_off_lift(&hdr, 8, 8, &cfg, (4, 3), (0, 8)),
+            Err(PostError::Invalid(_))
+        ));
+        assert!(matches!(
+            bloom_on_off_lift(
+                &hdr,
+                8,
+                8,
+                &BloomConfig {
+                    intensity: 3.0,
+                    ..cfg
+                },
+                (4, 3),
+                (0, 0)
+            ),
+            Err(PostError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn kino_curve_matches_donor_setup() {
+        // Curve triple pins the donor setup at threshold 1.0, soft knee 0.5.
+        let c = kino_curve(1.0, 0.5);
+        assert!((c[0] - 0.5).abs() < 1e-4, "curve.x is threshold minus knee");
+        assert!((c[1] - 1.0).abs() < 1e-4, "curve.y is twice the knee");
+        assert!((c[2] - 0.5).abs() < 1e-3, "curve.z is 0.25 over knee");
+    }
+
+    #[test]
+    fn kino_weight_is_zero_low_one_high() {
+        // Weight is 0 below the knee foot, 1 far above, smooth between.
+        let c = kino_curve(1.0, 0.5);
+        assert_eq!(kino_prefilter_weight(0.2, 1.0, c), 0.0);
+        let mid = kino_prefilter_weight(1.0, 1.0, c);
+        assert!(mid > 0.0 && mid < 1.0, "mid knee is partial, got {mid}");
+        let hi = kino_prefilter_weight(4.0, 1.0, c);
+        assert!((hi - 1.0).abs() < 1e-4, "far above is full, got {hi}");
+    }
+
+    #[test]
+    fn kino_iterations_clamp_to_cap() {
+        // Depth grows with height and clamps to the cap.
+        assert_eq!(kino_iterations(8, 2.5, 6), 1);
+        assert_eq!(kino_iterations(1080, 2.5, 6), 4);
+        assert_eq!(kino_iterations(4096, 7.0, 6), 6);
+    }
+
+    #[test]
+    fn kino_karis_weight_favors_dim_taps() {
+        // Karis weight falls as brightness rises.
+        let dim = kino_karis_weight(0.1);
+        let hot = kino_karis_weight(10.0);
+        assert!(dim > hot, "dim tap must outweigh the firefly");
+    }
+
+    #[test]
+    fn bloom_on_off_lift_kino_curve_torch_halo_and_subknee_identity() {
+        // Caller: crates/render/src/present/gpu_present/live.rs plus submit.rs
+        // Behavior: Kino curve lifts the torch neighbor above off while the
+        // far corner stays bit-identical, and a sub-knee field stays the
+        // identity. Pins the donor curve at threshold 1.0 alongside the lift.
+        let c = kino_curve(1.0, 0.5);
+        assert!((c[0] - 0.5).abs() < 1e-4, "curve.x pins the donor setup");
+        assert!((c[2] - 0.5).abs() < 1e-3, "curve.z pins the donor setup");
+        let mut hdr = vec![[0.05, 0.05, 0.06]; 8 * 8];
+        hdr[3 * 8 + 3] = [4.0, 2.2, 1.1];
+        let cfg = BloomConfig::default();
+        let (halo_lift, dark_lift) =
+            bloom_on_off_lift(&hdr, 8, 8, &cfg, (4, 3), (0, 0)).expect("lift runs");
+        assert!(halo_lift > 0.0, "halo lifts above off, got {halo_lift}");
+        assert_eq!(
+            dark_lift, 0.0,
+            "far corner stays identical, got {dark_lift}"
+        );
+        let dark = vec![[0.05, 0.05, 0.06]; 8 * 8];
+        let (halo_dark, dark_dark) =
+            bloom_on_off_lift(&dark, 8, 8, &cfg, (4, 3), (0, 0)).expect("dark lifts");
+        assert_eq!((halo_dark, dark_dark), (0.0, 0.0), "sub-knee lifts nothing");
+        let on = apply_bloom(&dark, 8, 8, &cfg).expect("on blooms");
+        assert_eq!(on, dark, "sub-knee on is the identity");
+    }
+
+    #[test]
     fn exposure_aces_grade_are_monotonic_and_bounded() {
         assert!(approx(exposure_mult(1.0).expect("ev"), 2.0, 1e-6));
         assert!(approx(exposure_mult(-1.0).expect("ev"), 0.5, 1e-6));
@@ -4014,22 +4596,26 @@ mod tests {
     #[test]
     fn jitter_and_aces_match_r4_r1_references() {
         for frame in [0u64, 1, 7, 123] {
-            assert_eq!(
-                jitter_offset(frame),
-                crate::v1_lighting::TaaJitter::offset(frame),
-                "frame {frame} pixels reuse the R4 offset"
-            );
-            assert_eq!(
-                jitter_ndc(frame, 1280, 720),
-                crate::v1_lighting::TaaJitter::ndc(frame, 1280, 720),
-                "frame {frame} NDC reuses the R4 scaling"
-            );
+            // Single owner: the R4 sequence is defined once, here. Pixel
+            // anchors are pinned against textbook fractions in
+            // `v1_lighting::tests::taa_jitter_matches_halton_values`; this
+            // pins the NDC/projection composition on top of them.
+            let px = jitter_offset(frame);
             let ndc = jitter_ndc(frame, 1280, 720);
             assert_eq!(
-                jitter_projection_glam(glam::Mat4::IDENTITY, ndc),
-                crate::v1_lighting::TaaJitter::apply_to_proj(glam::Mat4::IDENTITY, ndc),
-                "frame {frame} projection wiring matches R4"
+                ndc,
+                [px[0] * 2.0 / 1280.0, px[1] * 2.0 / 720.0],
+                "frame {frame} NDC is offset * 2 / res"
             );
+            let proj = jitter_projection_glam(glam::Mat4::IDENTITY, ndc);
+            assert_eq!(
+                (proj.z_axis.x, proj.z_axis.y),
+                (ndc[0], ndc[1]),
+                "frame {frame} projection carries the NDC jitter"
+            );
+            assert_eq!(proj.x_axis, glam::Mat4::IDENTITY.x_axis);
+            assert_eq!(proj.y_axis, glam::Mat4::IDENTITY.y_axis);
+            assert_eq!(proj.w_axis, glam::Mat4::IDENTITY.w_axis);
         }
         for x in [0.0, 0.25, 1.0, 4.0] {
             assert_eq!(

@@ -6,5 +6,6 @@
 //! `cargo test -p engine-combat --test it <name>::`.
 
 mod breakbench_shatter;
+mod design_wired;
 mod p2_feel_latency;
 mod telegraph_floor;

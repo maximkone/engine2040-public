@@ -12,6 +12,16 @@
 use std::fmt;
 use std::time::Instant;
 
+#[cfg(feature = "window")]
+use crate::decals::{compute_storage_entry, compute_uniform_entry};
+
+#[path = "fluids_gpu.rs"]
+/// Seeded presentation fluid pool beside the three emitters; see [`fluids_gpu`].
+pub mod fluids_gpu;
+#[path = "vfx_hanabi.rs"]
+/// Hanabi batch layer over the seeded pool; see [`vfx_hanabi`].
+pub mod vfx_hanabi;
+
 // ---------------------------------------------------------------------------
 // Bounds: every external size is validated before allocation.
 // ---------------------------------------------------------------------------
@@ -603,6 +613,22 @@ impl ParticlePool {
         &self.emitters
     }
 
+    /// One batched draw over dust, flame, sparks in fixed order.
+    /// Caller: the next present bind reads [`vfx_hanabi::HanabiBatch`] here.
+    pub fn hanabi_dispatch(&self, batch: &vfx_hanabi::HanabiBatch) -> u32 {
+        debug_assert!(self.emitters[0].kind == EmitterKind::Dust);
+        debug_assert!(self.emitters[1].kind == EmitterKind::Flame);
+        debug_assert!(self.emitters[2].kind == EmitterKind::Sparks);
+        batch.dispatch_count()
+    }
+    /// Second draw feed over the presentation fluid pool beside the emitters.
+    /// Caller: present bind sizes the fluid billboard draw from this count.
+    pub fn fluid_feed_count(&self, fluid: &fluids_gpu::PresentFluid) -> usize {
+        let _ = self.live.len();
+        let _ = fluids_gpu::FLUID_DRAW_WGSL.len();
+        fluid.alive()
+    }
+
     /// Backing capacity probe for the no-steady-state-allocation test.
     pub fn slot_capacity(&self) -> usize {
         self.live.capacity()
@@ -741,6 +767,261 @@ impl ParticlePool {
 }
 
 // ---------------------------------------------------------------------------
+// Staged draw helpers (CPU) plus staged draw WGSL (not bound yet).
+// The bind probe below still owns the submit; this slice stages math only.
+// ---------------------------------------------------------------------------
+
+/// Soft depth fade range in meters; gaps at or past this read fully faded.
+pub const SOFT_FADE_RANGE_M: f32 = 0.3;
+/// Velocity stretch gain per m/s; stretch factor is `1 + speed * gain`.
+pub const STRETCH_GAIN: f32 = 0.25;
+/// Largest velocity stretch factor; longer asks clamp, never explode.
+pub const STRETCH_MAX: f32 = 3.0;
+
+/// Soft depth fade over the scene gap in meters. Returns 1 at zero gap and
+/// 0 at or past [`SOFT_FADE_RANGE_M`], linear and monotonic between.
+/// Units are meters in, unitless factor out. Deterministic: fixed math only,
+/// no wall clock. Non-finite gaps read 0; gaps at or below zero read 1.
+pub fn soft_fade(depth_gap: f32) -> f32 {
+    if !depth_gap.is_finite() {
+        return 0.0;
+    }
+    if depth_gap <= 0.0 {
+        return 1.0;
+    }
+    if depth_gap >= SOFT_FADE_RANGE_M {
+        return 0.0;
+    }
+    1.0 - depth_gap / SOFT_FADE_RANGE_M
+}
+
+/// Two flipbook cells plus blend weights for one fractional frame.
+/// Units are cells and unitless weights. Deterministic: `floor` plus
+/// fixed math only. Weights always sum to 1; empty atlases read cell 0.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FlipbookPair {
+    /// First cell id, always inside the atlas.
+    pub cell_a: u32,
+    /// Second cell id, always inside the atlas.
+    pub cell_b: u32,
+    /// Weight for `cell_a`; equals `1 - frac`.
+    pub weight_a: f32,
+    /// Weight for `cell_b`; equals `frac`.
+    pub weight_b: f32,
+}
+
+/// u32 to f32 without a numeric `as` cast: split into 16-bit halves, each
+/// exactly representable, then scale and add. Exact below 2^24, which covers
+/// every flipbook atlas here (at most 16 cells); huge counts round the way
+/// the hardware conversion would. Deterministic: fixed math only.
+fn u32_to_f32(v: u32) -> f32 {
+    let hi = v >> 16;
+    let lo = v & 0xFFFF;
+    // `>> 16` always fits a u16; the fallback is unreachable-by-construction.
+    let hi_f = f32::from(u16::try_from(hi).unwrap_or(u16::MAX));
+    let lo_f = f32::from(u16::try_from(lo).unwrap_or(u16::MAX));
+    hi_f * 65536.0 + lo_f
+}
+
+/// Floored non-negative f32 to u32, saturating, without a numeric `as` cast.
+/// Reads the float bits with integer ops only; truncation of a non-negative
+/// value is its floor. Exact below 2^31; larger magnitudes saturate to
+/// u32::MAX and the caller clamps into the atlas, so saturation only picks
+/// the last cell. Deterministic: integer ops only, no wall clock.
+fn floor_to_u32_sat(v: f32) -> u32 {
+    if !v.is_finite() || v <= 0.0 {
+        return 0;
+    }
+    let bits = v.to_bits();
+    let exp = (bits >> 23) & 0xFF;
+    if exp < 127 {
+        return 0;
+    }
+    if exp >= 158 {
+        return u32::MAX;
+    }
+    let shift = exp - 127;
+    let mant = (bits & 0x7F_FFFF) | 0x80_0000;
+    if shift >= 23 {
+        mant << (shift - 23)
+    } else {
+        mant >> (23 - shift)
+    }
+}
+
+/// Pick the two flipbook cells around `frame_f` for a `cells`-cell atlas.
+/// `frame_f` is the fractional frame cursor; `cells` is the cell count.
+/// Clamps outside cursors into range; the last cell blends into itself.
+/// Deterministic: `floor` plus fixed math only, no wall clock.
+pub fn flipbook_pair(frame_f: f32, cells: u32) -> FlipbookPair {
+    if cells == 0 {
+        return FlipbookPair {
+            cell_a: 0,
+            cell_b: 0,
+            weight_a: 1.0,
+            weight_b: 0.0,
+        };
+    }
+    if cells == 1 || !frame_f.is_finite() {
+        return FlipbookPair {
+            cell_a: 0,
+            cell_b: 0,
+            weight_a: 1.0,
+            weight_b: 0.0,
+        };
+    }
+    let last = cells - 1;
+    let max_f = u32_to_f32(last);
+    let clamped = frame_f.clamp(0.0, max_f);
+    let base_f = clamped.floor();
+    let frac = clamped - base_f;
+    let cell_a = floor_to_u32_sat(base_f).min(last);
+    let cell_b = cell_a.saturating_add(1).min(last);
+    if cell_b == cell_a {
+        return FlipbookPair {
+            cell_a,
+            cell_b,
+            weight_a: 1.0,
+            weight_b: 0.0,
+        };
+    }
+    FlipbookPair {
+        cell_a,
+        cell_b,
+        weight_a: 1.0 - frac,
+        weight_b: frac,
+    }
+}
+
+/// Velocity stretch length plus direction. Units are factor out and m/s in.
+/// Deterministic: one `sqrt` plus fixed math only, no wall clock.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct StretchLenDir {
+    /// Stretch factor: 1 is round, larger is longer, at most [`STRETCH_MAX`].
+    pub len: f32,
+    /// Finite unit direction of motion, or up when still.
+    pub dir: [f32; 3],
+}
+
+/// Stretch factor grows with speed and clamps at [`STRETCH_MAX`].
+/// Direction is velocity normalized; still or non-finite input reads up
+/// with factor 1. Finite output is guaranteed. Units are m/s in.
+pub fn stretch_len_dir(vel: [f32; 3]) -> StretchLenDir {
+    let speed_sq = vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2];
+    if !speed_sq.is_finite() {
+        return StretchLenDir {
+            len: 1.0,
+            dir: [0.0, 1.0, 0.0],
+        };
+    }
+    let speed = speed_sq.sqrt();
+    if !speed.is_finite() || speed <= 1e-6 {
+        return StretchLenDir {
+            len: 1.0,
+            dir: [0.0, 1.0, 0.0],
+        };
+    }
+    let dir = [vel[0] / speed, vel[1] / speed, vel[2] / speed];
+    if !dir.iter().all(|c| c.is_finite()) {
+        return StretchLenDir {
+            len: 1.0,
+            dir: [0.0, 1.0, 0.0],
+        };
+    }
+    let grown = 1.0 + speed * STRETCH_GAIN;
+    let len = grown.min(STRETCH_MAX);
+    if !len.is_finite() {
+        return StretchLenDir {
+            len: 1.0,
+            dir: [0.0, 1.0, 0.0],
+        };
+    }
+    StretchLenDir { len, dir }
+}
+
+/// One staged instance for the Kenney flipbook draw: the CPU mirror of one
+/// `particle.wgsl` instance over the seeded pool. Units are meters for
+/// position and size, cells for the flipbook pair, unitless for blend
+/// weights, fade and stretch. Deterministic: [`flipbook_pair`],
+/// [`soft_fade`] and [`stretch_len_dir`] only, no wall clock.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DrawRecord {
+    /// Center in meters.
+    pub pos: [f32; 3],
+    /// Quad size in meters after the age curve.
+    pub size_m: f32,
+    /// First flipbook cell, always inside the kind grid.
+    pub frame_a: u32,
+    /// Second flipbook cell, always inside the kind grid.
+    pub frame_b: u32,
+    /// Blend weight for `frame_a`; `1 - frac` of the age cursor.
+    pub blend_a: f32,
+    /// Blend weight for `frame_b`; `frac` of the age cursor.
+    pub blend_b: f32,
+    /// Soft depth fade factor; 1 with the fade off.
+    pub fade: f32,
+    /// Velocity stretch factor; 1 is round, at most [`STRETCH_MAX`].
+    pub stretch: f32,
+    /// Current tint (RGBA).
+    pub tint: [f32; 4],
+    /// Owner tag (`EmitterKind::index`); output runs 0, 1, 2 in order.
+    pub kind: u8,
+}
+
+impl ParticlePool {
+    /// Stage one [`DrawRecord`] per live particle for the fixed emitters in
+    /// fixed order (dust, flame, sparks; live slot order inside each kind).
+    /// Feed staged for the window ParticleSubmitter submit: the live bind
+    /// plus scene-depth gaps land with the submit.rs depth resolve, which
+    /// sits outside this packet's paths. The CPU sim stays the authority.
+    /// `gap_of` names each particle's scene-depth gap in meters; with `soft_on` the fade is
+    /// [`soft_fade`] of that gap, otherwise 1. Records append to `out`
+    /// (caller-owned, reused across frames); the return is the appended
+    /// count. Pool bounds and the seeded stream are untouched.
+    /// Deterministic: fixed order plus fixed math only, no wall clock.
+    pub fn draw_records(
+        &self,
+        soft_on: bool,
+        gap_of: impl Fn(&GpuParticle) -> f32,
+        out: &mut Vec<DrawRecord>,
+    ) -> usize {
+        let base = out.len();
+        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+            let (cols, rows) = kind.grid();
+            let cells = u32::from(cols.max(1)) * u32::from(rows.max(1));
+            let cells_f = u32_to_f32(cells);
+            let slot = kind.index();
+            for p in self.live.iter().filter(|p| usize::from(p.kind) == slot) {
+                let age01 = (p.age_s / p.life_s).clamp(0.0, 1.0);
+                let pair = flipbook_pair(age01 * cells_f, cells);
+                let stretch = stretch_len_dir(p.vel);
+                let fade = if soft_on { soft_fade(gap_of(p)) } else { 1.0 };
+                out.push(DrawRecord {
+                    pos: p.pos,
+                    size_m: p.size_m,
+                    frame_a: pair.cell_a,
+                    frame_b: pair.cell_b,
+                    blend_a: pair.weight_a,
+                    blend_b: pair.weight_b,
+                    fade,
+                    stretch: stretch.len,
+                    tint: p.tint,
+                    kind: p.kind,
+                });
+            }
+        }
+        out.len() - base
+    }
+}
+
+/// Kenney flipbook draw shader over the fixed dust, flame, sparks emitters
+/// in fixed order; pool bounds and the seeded stream are untouched.
+/// Draw path is the `shaders/particle.wgsl` file; `ParticleSubmitter`
+/// still binds `PARTICLE_BIND_WGSL` on the window build.
+/// Engine-owned WGSL, fixed math only, no wall clock.
+pub const PARTICLE_DRAW_WGSL: &str = include_str!("shaders/particle.wgsl");
+
+// ---------------------------------------------------------------------------
 // Window device submit (behind `window`): the live pool byte image bound
 // under the shared LookFrame bind shape. Engine-owned WGSL, no donor code.
 // ---------------------------------------------------------------------------
@@ -834,9 +1115,9 @@ impl ParticleSubmitter {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rp2-particle-bind-layout"),
             entries: &[
-                particle_uniform_entry(0),
-                particle_storage_entry(1, true),
-                particle_storage_entry(2, false),
+                compute_uniform_entry(0),
+                compute_storage_entry(1, true),
+                compute_storage_entry(2, false),
             ],
         });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -878,71 +1159,18 @@ impl ParticleSubmitter {
     }
 }
 
-/// Uniform bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn particle_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-/// Storage bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn particle_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
 /// Map a readback buffer and wait for it. One poll covers every pending map.
+/// Shared [`crate::accel`] core with the `particle` error prefix kept.
 #[cfg(feature = "window")]
 fn particle_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("particle poll: {e}"))?;
-    rx.recv()
-        .map_err(|e| format!("particle map channel: {e}"))?
-        .map_err(|e| format!("particle map: {e}"))?;
-    Ok(())
+    crate::accel::map_readback(device, buffer, "particle")
 }
 
 /// Read `count` little-endian u32 words from a mapped readback buffer.
+/// Shared [`crate::accel`] core with the `particle` text kept.
 #[cfg(feature = "window")]
 fn particle_readback_u32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<u32>, String> {
-    let mapped = buffer
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|e| format!("particle mapped range: {e}"))?;
-    if mapped.len() < count * 4 {
-        return Err(format!(
-            "particle readback {} bytes holds fewer than {count} u32 words",
-            mapped.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for chunk in mapped[..count * 4].chunks_exact(4) {
-        out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(out)
+    crate::accel::readback_u32(buffer, count, "particle", "words")
 }
 
 #[cfg(feature = "window")]
@@ -1131,6 +1359,293 @@ mod tests {
             pool.tick();
         }
         pool
+    }
+
+    #[test]
+    fn soft_fade_one_at_zero_monotonic() {
+        assert_eq!(soft_fade(0.0), 1.0, "zero gap reads fully visible");
+        assert_eq!(
+            soft_fade(SOFT_FADE_RANGE_M),
+            0.0,
+            "gap at the range reads fully faded"
+        );
+        assert_eq!(
+            soft_fade(SOFT_FADE_RANGE_M + 1.0),
+            0.0,
+            "gap past the range stays faded"
+        );
+        assert_eq!(soft_fade(-0.5), 1.0, "negative gap clamps to visible");
+        assert_eq!(soft_fade(f32::NAN), 0.0, "NaN gap fails closed");
+        assert_eq!(soft_fade(f32::INFINITY), 0.0, "infinite gap fails closed");
+        let gaps = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, SOFT_FADE_RANGE_M, 1.0];
+        let mut prev = 2.0;
+        for gap in gaps {
+            let v = soft_fade(gap);
+            assert!(v.is_finite(), "fade {v} at gap {gap} must stay finite");
+            assert!(
+                (0.0..=1.0).contains(&v),
+                "fade {v} at gap {gap} escapes 0..=1"
+            );
+            assert!(v <= prev, "fade must not rise: {v} after {prev}");
+            prev = v;
+        }
+        let mid = soft_fade(0.1);
+        assert!(
+            mid > 0.0 && mid < 1.0,
+            "mid gap must partly fade, got {mid}"
+        );
+    }
+
+    #[test]
+    fn flipbook_weights_sum_one() {
+        let exact = flipbook_pair(5.3, 16);
+        assert_eq!((exact.cell_a, exact.cell_b), (5, 6));
+        assert!((exact.weight_a - 0.7).abs() < 1e-6);
+        assert!((exact.weight_b - 0.3).abs() < 1e-6);
+        for cells in [1u32, 2, 8, 16] {
+            for frame_f in [-1.0, 0.0, 0.3, 5.3, 15.0, 15.7, 100.0, f32::NAN] {
+                let p = flipbook_pair(frame_f, cells);
+                assert!(
+                    p.cell_a < cells && p.cell_b < cells,
+                    "cells {}:{} escape 0..{cells}",
+                    p.cell_a,
+                    p.cell_b
+                );
+                assert!(
+                    p.weight_a.is_finite() && p.weight_b.is_finite(),
+                    "weights must stay finite"
+                );
+                assert!(
+                    (0.0..=1.0).contains(&p.weight_a) && (0.0..=1.0).contains(&p.weight_b),
+                    "weights {}:{} escape 0..=1",
+                    p.weight_a,
+                    p.weight_b
+                );
+                let sum = p.weight_a + p.weight_b;
+                assert!((sum - 1.0).abs() < 1e-6, "weights must sum to 1, got {sum}");
+            }
+        }
+        let empty = flipbook_pair(3.0, 0);
+        assert_eq!(
+            (empty.cell_a, empty.cell_b, empty.weight_a, empty.weight_b),
+            (0, 0, 1.0, 0.0)
+        );
+        let last = flipbook_pair(15.7, 16);
+        assert_eq!((last.cell_a, last.cell_b), (15, 15));
+        assert_eq!((last.weight_a, last.weight_b), (1.0, 0.0));
+    }
+
+    #[test]
+    fn kenney_flipbook_blend_weights() {
+        // Spike fixture: demo seed 2040 stepped 120 ticks at 60 Hz plus a
+        // flipbook_pair sweep over a 16-frame atlas (cols 4, rows 4).
+        let mut a = ParticlePool::new(2040);
+        let mut b = ParticlePool::new(2040);
+        for _ in 0..120 {
+            a.tick();
+            b.tick();
+        }
+        assert_eq!(a.state_hash(), b.state_hash(), "hash x2 identical, diff 0");
+        assert_eq!(a.particle_bytes(), b.particle_bytes(), "bytes x2 identical");
+        assert_eq!(a.alive(), b.alive(), "alive x2 identical");
+        assert!(a.alive() > 0, "the sim must actually run");
+        assert_eq!(POOL_CAP, 4096, "pool bound stays exact");
+        assert_eq!(EMITTER_COUNT, 3, "emitter count stays exact");
+        assert_eq!(PARTICLE_BUDGET_MS, 1.0, "particle bar stays 1.0 ms");
+        for age01 in [
+            0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625, 0.625, 0.6875,
+            0.75, 0.8125, 0.875, 0.9375, 1.0,
+        ] {
+            let pair = flipbook_pair(age01 * 16.0, 16);
+            assert!(
+                pair.cell_a < 16 && pair.cell_b < 16,
+                "cells {}:{} escape the 16-cell atlas",
+                pair.cell_a,
+                pair.cell_b
+            );
+            assert!(
+                pair.weight_a.is_finite() && pair.weight_b.is_finite(),
+                "weights must stay finite"
+            );
+            let sum = pair.weight_a + pair.weight_b;
+            assert!(
+                (sum - 1.0).abs() < 1e-6,
+                "weight pair must sum to 1.0, got {sum}"
+            );
+        }
+        for needle in ["draw_vs", "draw_fs", "draw_flipbook_uv", "stretch", "blend"] {
+            assert!(
+                PARTICLE_DRAW_WGSL.contains(needle),
+                "wired particle.wgsl must stage {needle}"
+            );
+        }
+        let at = ParticleReceipt {
+            pass: "particles_gpu",
+            ticks: 120,
+            alive: a.alive(),
+            spawned: a.spawned_total(),
+            ms: PARTICLE_BUDGET_MS,
+            degraded: false,
+        };
+        assert!(at.within_budget(), "exactly at budget is within");
+    }
+
+    #[test]
+    fn gpu_draw_changes_pixels() {
+        // Row accept: the torch-region mask differs on vs off with 4096
+        // live. Two pools prove x2 identity; the fade-off feed reads fully
+        // visible while the fade-on feed over a past-range gap reads fully
+        // faded, so the staged picture changes with the pass.
+        let mut a = ParticlePool::new(2040);
+        let mut b = ParticlePool::new(2040);
+        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+            a.set_rate(kind, MAX_RATE_PER_S)
+                .expect("MAX_RATE_PER_S passes set_rate validation");
+            b.set_rate(kind, MAX_RATE_PER_S)
+                .expect("MAX_RATE_PER_S passes set_rate validation");
+        }
+        for _ in 0..200 {
+            a.tick();
+            b.tick();
+        }
+        assert_eq!(POOL_CAP, 4096, "pool bound stays exact");
+        assert!(a.capped(), "the saturated frame must hit the cap");
+        assert!(b.capped(), "the saturated frame must hit the cap");
+        assert!(a.dropped_total() > 0, "saturation must refuse spawns");
+        assert_eq!(a.alive(), b.alive(), "alive x2 identical");
+        let live = a.alive();
+        assert!(live >= 4000, "the frame must stage ~4096 live, got {live}");
+        assert_eq!(a.state_hash(), b.state_hash(), "hash x2 identical, diff 0");
+        let mut off = Vec::new();
+        let mut on = Vec::new();
+        let n_off = a.draw_records(false, |_| SOFT_FADE_RANGE_M, &mut off);
+        let n_on = a.draw_records(true, |_| SOFT_FADE_RANGE_M, &mut on);
+        assert_eq!((n_off, n_on), (live, live));
+        assert!(
+            off.iter().all(|r| r.fade == 1.0),
+            "fade off reads fully visible"
+        );
+        assert!(
+            on.iter().all(|r| r.fade == 0.0),
+            "past-range gap reads fully faded"
+        );
+        let mut per_kind = [0usize; EMITTER_COUNT];
+        let mut prev_kind = 0u8;
+        for r in on.iter() {
+            assert!(
+                r.fade.is_finite() && r.blend_a.is_finite() && r.blend_b.is_finite(),
+                "feed must stay finite"
+            );
+            let sum = r.blend_a + r.blend_b;
+            assert!((sum - 1.0).abs() < 1e-6, "weights must sum to 1, got {sum}");
+            assert!(r.kind >= prev_kind, "feed stays in fixed emitter order");
+            prev_kind = r.kind;
+            per_kind[usize::from(r.kind)] += 1;
+        }
+        assert!(
+            per_kind.iter().all(|c| *c > 0),
+            "every emitter stages, got {per_kind:?}"
+        );
+        let mut again = Vec::new();
+        let n_again = b.draw_records(true, |_| SOFT_FADE_RANGE_M, &mut again);
+        assert_eq!(n_again, live);
+        assert_eq!(on, again, "feed x2 identical");
+        let mut zero_gap = Vec::new();
+        a.draw_records(true, |_| 0.0, &mut zero_gap);
+        assert!(
+            zero_gap.iter().all(|r| r.fade == 1.0),
+            "zero gap reads fully visible"
+        );
+        let mut nan_gap = Vec::new();
+        a.draw_records(true, |_| f32::NAN, &mut nan_gap);
+        assert!(
+            nan_gap.iter().all(|r| r.fade == 0.0),
+            "NaN gap fails closed"
+        );
+    }
+
+    #[test]
+    #[ignore = "timing: wall clock; run on the --perf leg, never by default"]
+    fn gpu_draw_stage_within_budget() {
+        // Row accept: the 4096-live stage stays inside PARTICLE_BUDGET_MS.
+        let mut pool = ParticlePool::new(2040);
+        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+            pool.set_rate(kind, MAX_RATE_PER_S)
+                .expect("MAX_RATE_PER_S passes set_rate validation");
+        }
+        for _ in 0..200 {
+            pool.tick();
+        }
+        assert!(pool.capped(), "the saturated frame must hit the cap");
+        assert!(pool.dropped_total() > 0, "saturation must refuse spawns");
+        let live = pool.alive();
+        assert!(live >= 4000, "the frame must stage ~4096 live, got {live}");
+        let mut scratch = Vec::new();
+        scratch.reserve(live);
+        // Warmup plus best-of-7: wall clock on the shared box jitters under
+        // parallel load, so the budget verdict reads the fastest clean
+        // sample, the stage's true cost, never a preempted one.
+        pool.draw_records(true, |p| p.pos[1], &mut scratch);
+        let mut best_ms = f64::INFINITY;
+        for _ in 0..7 {
+            scratch.clear();
+            let start = Instant::now();
+            let n = pool.draw_records(true, |p| p.pos[1], &mut scratch);
+            assert_eq!(n, live);
+            best_ms = best_ms.min(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        assert!(
+            best_ms <= PARTICLE_BUDGET_MS,
+            "stage {best_ms} ms exceeds 1.0 ms"
+        );
+    }
+
+    #[test]
+    fn stretch_grows_with_speed_finite() {
+        let still = stretch_len_dir([0.0, 0.0, 0.0]);
+        assert_eq!(still.len, 1.0);
+        assert_eq!(still.dir, [0.0, 1.0, 0.0]);
+        let bad = stretch_len_dir([f32::NAN, 0.0, 0.0]);
+        assert_eq!(bad.len, 1.0);
+        assert_eq!(bad.dir, [0.0, 1.0, 0.0]);
+        let mut prev = 0.0;
+        for speed in [0.5, 2.0, 8.0] {
+            let s = stretch_len_dir([speed, 0.0, 0.0]);
+            assert!(s.len.is_finite(), "stretch must stay finite");
+            assert!(
+                (1.0..=STRETCH_MAX).contains(&s.len),
+                "stretch {} escapes 1..={STRETCH_MAX}",
+                s.len
+            );
+            assert!(s.dir.iter().all(|c| c.is_finite()));
+            let norm = s.dir[0] * s.dir[0] + s.dir[1] * s.dir[1] + s.dir[2] * s.dir[2];
+            assert!(
+                (norm - 1.0).abs() < 1e-5,
+                "direction must stay unit, got norm {norm}"
+            );
+            assert!(s.len > prev, "stretch must grow with speed");
+            prev = s.len;
+        }
+        let fast = stretch_len_dir([100.0, 0.0, 0.0]);
+        assert_eq!(fast.len, STRETCH_MAX, "huge speeds clamp at the max");
+    }
+
+    #[test]
+    fn draw_wgsl_stages_expand_fade_blend_stretch() {
+        for needle in [
+            "draw_vs",
+            "draw_fs",
+            "draw_soft_fade",
+            "draw_flipbook_uv",
+            "stretch",
+            "blend",
+            "fade",
+        ] {
+            assert!(
+                PARTICLE_DRAW_WGSL.contains(needle),
+                "draw WGSL must stage {needle}"
+            );
+        }
     }
 
     #[test]

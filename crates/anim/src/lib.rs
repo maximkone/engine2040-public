@@ -15,6 +15,9 @@ pub mod contract;
 /// Per-slot clip crossfade over integer ticks: the fade count plus the
 /// new-clip weight over the leaving pose. Std-only; the game bridge drives it.
 pub mod crossfade;
+/// Thousand-agent crowd tape over the LOD tiers: seeded build, global
+/// nearest-eight assign, far-ring impostor handoff and per-tier cost post.
+pub mod crowd_scale;
 /// Dual-quaternion skinning option for twist-heavy joints (shoulders,
 /// upper arms): volume-preserving blend beside the default linear path.
 pub mod dq;

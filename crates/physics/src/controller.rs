@@ -47,6 +47,88 @@ pub const SLIP_SPEED_M_S: f32 = 4.0;
 /// Comparison epsilon, meters.
 const EPS: f32 = 1e-6;
 
+/// Autostep lane: max rise plus minimum tread width after the step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Autostep {
+    /// Max step height, meters.
+    pub max_height: f32,
+    /// Minimum free tread width after the step, meters.
+    pub min_width: f32,
+}
+
+/// Snap length: absolute meters or fraction of capsule total height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SnapLength {
+    /// Absolute meters.
+    Absolute(f32),
+    /// Fraction of capsule total height (`2 * half`).
+    Relative(f32),
+}
+
+impl SnapLength {
+    /// Resolve to meters (HASH-LAW ops only); bad input maps to zero.
+    pub fn resolve(self, character_height: f32) -> f32 {
+        let (v, m) = match self {
+            Self::Absolute(v) => (v, 1.0),
+            Self::Relative(f) => (f, character_height),
+        };
+        if v.is_finite() && v > 0.0 && m.is_finite() && m > 0.0 {
+            v * m
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Rapier `move_shape` pattern (PORT dimforge/rapier@475caa3:src/control/character_controller.rs).
+/// Caller: `Controller::move_and_slide` (legacy frozen tuning via `MoveShape::legacy`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoveShape {
+    /// Slide along walls when true; stop dead with `wall_normal` when false.
+    pub slide: bool,
+    /// Autostep lane when `Some`, off when `None`.
+    pub autostep: Option<Autostep>,
+    /// Snap-to-ground length when `Some`, off when `None`.
+    pub snap: Option<SnapLength>,
+    /// Max climbable grade (rise/run, 1.0 is 45 deg by definition).
+    pub max_climb_grade: f32,
+    /// Min grade that slides (rise/run, 1.0 is 45 deg by definition).
+    pub min_slide_grade: f32,
+    /// Contact skin offset, meters.
+    pub offset: f32,
+}
+
+impl Default for MoveShape {
+    /// Donor defaults: slide on, autostep off, snap 0.2 relative, 45 deg gates, skin 0.01.
+    fn default() -> Self {
+        Self {
+            slide: true,
+            autostep: None,
+            snap: Some(SnapLength::Relative(0.2)),
+            max_climb_grade: 1.0,
+            min_slide_grade: 1.0,
+            offset: 0.01,
+        }
+    }
+}
+
+impl MoveShape {
+    /// Frozen legacy tuning: slide on, 0.5 m step, 0.4 m snap, 45 deg gate, skin 0.02.
+    pub fn legacy() -> Self {
+        Self {
+            slide: true,
+            autostep: Some(Autostep {
+                max_height: STEP_HEIGHT,
+                min_width: 0.0,
+            }),
+            snap: Some(SnapLength::Absolute(GROUND_SNAP_DISTANCE)),
+            max_climb_grade: MAX_SLOPE_GRADE,
+            min_slide_grade: MAX_SLOPE_GRADE,
+            offset: SKIN,
+        }
+    }
+}
+
 /// Per-tick resolution report: the requested delta against what moved.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Resolved {
@@ -64,6 +146,8 @@ pub struct Resolved {
     pub stepped: bool,
     /// True when over-steep ground pushed the character downhill this tick.
     pub slipped: bool,
+    /// True when on a slope steeper than `min_slide_grade` (donor `is_sliding_down_slope`).
+    pub sliding_down_slope: bool,
 }
 
 /// Owned snapshot: the Rapier mirror plus the kinematic extras (vertical
@@ -255,17 +339,26 @@ impl Controller {
     }
 
     /// Resolve ONE tick from the requested horizontal delta `wish_dp`
-    /// (x, z in meters for this tick). Horizontal axes resolve x-then-z so a
-    /// blocked axis keeps the tangential part (wall slide); vertical
-    /// integrates gravity with ground snap, autostep and a ceiling clamp.
-    /// Coyote and the jump buffer tick in integer milliseconds from the same
-    /// fixed `dt` (canonical [`FIXED_DT`]); over-steep ground applies a
-    /// downhill slip vector after the vertical pass.
+    /// (x, z in meters for this tick). Legacy frozen tuning via
+    /// [`MoveShape::legacy`]; new behavior uses [`Controller::move_and_slide_with`].
     pub fn move_and_slide(&mut self, wish_dp: [f32; 2], dt: f32) -> Resolved {
+        self.move_and_slide_with(wish_dp, dt, &MoveShape::legacy())
+    }
+
+    /// Resolve ONE tick with explicit Rapier `move_shape` params. Horizontal
+    /// axes resolve x-then-z; `slide=false` stops dead on a wall, `slide=true`
+    /// keeps the tangential part. Autostep needs grounded-before-step plus
+    /// `min_width` tread; snap resolves from [`SnapLength`]; slip reports both
+    /// `slipped` and `sliding_down_slope` from `min_slide_grade`.
+    pub fn move_and_slide_with(
+        &mut self,
+        wish_dp: [f32; 2],
+        dt: f32,
+        shape: &MoveShape,
+    ) -> Resolved {
         let requested = sanitize2(wish_dp);
         let start = self.pos;
         let was_grounded = self.grounded;
-        // Clamp the request length (one `sqrt`, allowed sim math).
         let mut clamped = requested;
         let len2 = clamped[0] * clamped[0] + clamped[1] * clamped[1];
         if len2 > MAX_WISH_PER_TICK * MAX_WISH_PER_TICK {
@@ -282,20 +375,16 @@ impl Controller {
                 wall_normal: None,
                 stepped: false,
                 slipped: false,
+                sliding_down_slope: false,
             };
         }
         let dt_ms = dt_to_ms(dt);
-        // Integer-millisecond timers: coyote refreshes on ground, the buffered
-        // take-off fires inside either window and overrides gravity below.
         let fired = self.tick_timers(was_grounded, dt_ms);
-        // Air control limit: airborne wishes move less.
         let mut wish = clamped;
         if !was_grounded {
             wish[0] *= AIR_CONTROL_SCALE;
             wish[1] *= AIR_CONTROL_SCALE;
         }
-        // Fixed-dt gravity, bounded fall speed. A buffered take-off that fired
-        // above already set the velocity, so gravity resumes next tick.
         if !fired {
             self.vel_y += GRAVITY_Y * dt;
             if self.vel_y < MAX_FALL_SPEED {
@@ -304,13 +393,9 @@ impl Controller {
         }
         let dy = self.vel_y * dt;
         let half = self.height * 0.5 + self.radius;
-
-        let (wall, stepped) = self.horizontal_pass(wish, half);
-        self.vertical_pass(dy, was_grounded, half);
-        let slipped = self.slip_pass(dt, half);
-
-        // Mirror the resolved translation into the Rapier world so its
-        // snapshot and hash track the kinematic state bit-for-bit.
+        let (wall, stepped) = self.horizontal_pass(wish, half, shape, was_grounded);
+        self.vertical_pass(dy, was_grounded, half, shape);
+        let slipped = self.slip_pass(dt, half, shape);
         self.world.set_body_translation(self.body, self.pos);
         Resolved {
             requested,
@@ -320,35 +405,43 @@ impl Controller {
             wall_normal: wall,
             stepped,
             slipped,
+            sliding_down_slope: slipped,
         }
     }
 
-    /// X-then-Z horizontal slide: each axis moves, steps or stops once.
-    /// Returns the outward wall normal plus whether a step was taken.
-    fn horizontal_pass(&mut self, wish: [f32; 2], half: f32) -> (Option<[f32; 2]>, bool) {
+    /// X-then-Z slide with `MoveShape` gates.
+    fn horizontal_pass(
+        &mut self,
+        wish: [f32; 2],
+        half: f32,
+        shape: &MoveShape,
+        was_grounded: bool,
+    ) -> (Option<[f32; 2]>, bool) {
+        let max_step = shape.autostep.map_or(0.0, |a| a.max_height);
+        let min_width = shape.autostep.map_or(0.0, |a| a.min_width);
         let mut wall: Option<[f32; 2]> = None;
         let mut stepped = false;
         if wish[0] != 0.0 {
             let feet = self.pos[1] - half;
             let head = self.pos[1] + half;
             let nx = self.pos[0] + wish[0];
-            match self.classify(nx, self.pos[2], feet, head) {
+            let s = if wish[0] > 0.0 { 1.0 } else { -1.0 };
+            match self.classify(nx, self.pos[2], feet, head, shape) {
                 Hit::Free => self.pos[0] = nx,
-                Hit::Step(top) => {
+                Hit::Step(top)
+                    if shape.autostep.is_some()
+                        && was_grounded
+                        && self.tread_holds(nx, self.pos[2], top, 0, s, min_width, max_step) =>
+                {
                     self.pos[0] = nx;
                     self.pos[1] = top + half;
                     stepped = true;
                 }
-                Hit::Wall => {
-                    let s = if wish[0] > 0.0 { 1.0 } else { -1.0 };
-                    if let Some(face) = self.face_ahead(0, s, feet, head) {
-                        let c = face - s * (self.radius + SKIN);
-                        self.pos[0] = if s > 0.0 {
-                            self.pos[0].max(c.min(nx))
-                        } else {
-                            self.pos[0].min(c.max(nx))
-                        };
+                _ => {
+                    if !shape.slide {
+                        return (Some([-s, 0.0]), stepped);
                     }
+                    self.pos[0] = self.slide_block(0, s, self.pos[0], nx, feet, head, shape);
                     wall = Some([-s, 0.0]);
                 }
             }
@@ -357,25 +450,28 @@ impl Controller {
             let feet = self.pos[1] - half;
             let head = self.pos[1] + half;
             let nz = self.pos[2] + wish[1];
-            match self.classify(self.pos[0], nz, feet, head) {
+            let s = if wish[1] > 0.0 { 1.0 } else { -1.0 };
+            match self.classify(self.pos[0], nz, feet, head, shape) {
                 Hit::Free => self.pos[2] = nz,
-                Hit::Step(top) => {
+                Hit::Step(top)
+                    if shape.autostep.is_some()
+                        && was_grounded
+                        && self.tread_holds(self.pos[0], nz, top, 2, s, min_width, max_step) =>
+                {
                     self.pos[2] = nz;
                     self.pos[1] = top + half;
                     stepped = true;
                 }
-                Hit::Wall => {
-                    let s = if wish[1] > 0.0 { 1.0 } else { -1.0 };
-                    if let Some(face) = self.face_ahead(2, s, feet, head) {
-                        let c = face - s * (self.radius + SKIN);
-                        self.pos[2] = if s > 0.0 {
-                            self.pos[2].max(c.min(nz))
-                        } else {
-                            self.pos[2].min(c.max(nz))
+                _ => {
+                    if !shape.slide {
+                        let w = match wall {
+                            Some([wx, _]) => [wx, -s],
+                            None => [0.0, -s],
                         };
+                        return (Some(w), stepped);
                     }
+                    self.pos[2] = self.slide_block(2, s, self.pos[2], nz, feet, head, shape);
                     wall = Some(match wall {
-                        // Corner hit: report the diagonal outward normal.
                         Some([wx, _]) => [wx, -s],
                         None => [0.0, -s],
                     });
@@ -385,18 +481,68 @@ impl Controller {
         (wall, stepped)
     }
 
+    /// Clamp `cur` toward `target` at the wall face plus skin.
+    fn slide_block(
+        &self,
+        axis: usize,
+        sign: f32,
+        cur: f32,
+        target: f32,
+        feet: f32,
+        head: f32,
+        shape: &MoveShape,
+    ) -> f32 {
+        if let Some(face) = self.face_ahead(axis, sign, feet, head, shape) {
+            let c = face - sign * (self.radius + shape.offset);
+            if sign > 0.0 {
+                cur.max(c.min(target))
+            } else {
+                cur.min(c.max(target))
+            }
+        } else {
+            cur
+        }
+    }
+
+    /// Tread check: step top must continue `min_width` ahead.
+    fn tread_holds(
+        &self,
+        x: f32,
+        z: f32,
+        top: f32,
+        axis: usize,
+        sign: f32,
+        min_width: f32,
+        max_step: f32,
+    ) -> bool {
+        if !(min_width.is_finite() && min_width > EPS) {
+            return true;
+        }
+        let (ax, az) = if axis == 0 {
+            (x + sign * min_width, z)
+        } else {
+            (x, z + sign * min_width)
+        };
+        match self.ground_height(ax, az, top, max_step) {
+            Some(g) => (g - top).abs() <= 0.05,
+            None => false,
+        }
+    }
+
     /// Land, snap down, or clamp against the ceiling from `dy` this tick.
-    fn vertical_pass(&mut self, dy: f32, was_grounded: bool, half: f32) {
+    fn vertical_pass(&mut self, dy: f32, was_grounded: bool, half: f32, shape: &MoveShape) {
         let feet = self.pos[1] - half;
         let head = self.pos[1] + half;
+        let max_rise = shape.autostep.map_or(0.0, |a| a.max_height);
+        let snap_dist = shape.snap.map_or(0.0, |s| s.resolve(2.0 * half));
         if dy <= 0.0 {
-            match self.ground_height(self.pos[0], self.pos[2], feet) {
+            match self.ground_height(self.pos[0], self.pos[2], feet, max_rise) {
                 Some(g) if feet + dy <= g => {
                     self.pos[1] = g + half;
                     self.vel_y = 0.0;
                     self.grounded = true;
                 }
-                Some(g) if was_grounded && feet - g >= 0.0 && feet - g <= GROUND_SNAP_DISTANCE => {
+                Some(g) if was_grounded && feet - g >= 0.0 && feet - g <= snap_dist => {
                     self.pos[1] = g + half;
                     self.vel_y = 0.0;
                     self.grounded = true;
@@ -406,10 +552,10 @@ impl Controller {
                     self.grounded = false;
                 }
             }
-        } else if let Some(c) = self.ceiling_height(self.pos[0], self.pos[2], head) {
+        } else if let Some(c) = self.ceiling_height(self.pos[0], self.pos[2], head, shape.offset) {
             if head + dy >= c {
                 // Ceiling blocks upward motion; velocity is consumed.
-                self.pos[1] = c - half - SKIN;
+                self.pos[1] = c - half - shape.offset;
                 self.vel_y = 0.0;
                 self.grounded = false;
             } else {
@@ -422,15 +568,22 @@ impl Controller {
         }
     }
 
-    /// Slope-gated downhill slip on over-steep ground (grade above
-    /// `MAX_SLOPE_GRADE`). Grade is rise-over-run, so no trigonometric
-    /// call is needed. Returns true when slip moved the capsule.
-    fn slip_pass(&mut self, dt: f32, half: f32) -> bool {
+    /// Slope-gated downhill slip (grade above `min_slide_grade`).
+    /// Grade is rise-over-run, so no trigonometric call is needed.
+    /// Returns true when slip moved the capsule (`slipped` and `sliding_down_slope`).
+    fn slip_pass(&mut self, dt: f32, half: f32, shape: &MoveShape) -> bool {
         if !self.grounded {
             return false;
         }
         let feet = self.pos[1] - half;
-        let Some(grade) = self.steep_grade_at(self.pos[0], self.pos[2], feet) else {
+        let snap_dist = shape.snap.map_or(0.0, |s| s.resolve(2.0 * half));
+        let Some(grade) = self.steep_grade_at(
+            self.pos[0],
+            self.pos[2],
+            feet,
+            shape.min_slide_grade,
+            snap_dist,
+        ) else {
             return false;
         };
         let downhill = if grade > 0.0 { -1.0 } else { 1.0 };
@@ -507,19 +660,26 @@ impl Controller {
         false
     }
 
-    /// Over-steep ramp grade under the grounded footprint, if the capsule
-    /// stands on one. Grade is rise-over-run; `Some` only when the surface is
-    /// within snap distance below the feet and steeper than the walk gate.
-    fn steep_grade_at(&self, x: f32, z: f32, feet: f32) -> Option<f32> {
+    /// Over-steep ramp grade under the footprint, if the capsule stands on
+    /// one. `Some` only when the surface is within snap distance below the
+    /// feet and steeper than `min_grade`.
+    fn steep_grade_at(
+        &self,
+        x: f32,
+        z: f32,
+        feet: f32,
+        min_grade: f32,
+        snap_dist: f32,
+    ) -> Option<f32> {
         for r in &self.ramps {
             let Some((h, grade)) = ramp_height_at(r, x, z) else {
                 continue;
             };
-            if grade <= MAX_SLOPE_GRADE {
+            if grade <= min_grade {
                 continue;
             }
             // Standing contact: surface at or just below the feet.
-            if h <= feet + 0.05 && h >= feet - GROUND_SNAP_DISTANCE - 0.05 {
+            if h <= feet + 0.05 && h >= feet - snap_dist - 0.05 {
                 return Some(grade);
             }
         }
@@ -527,11 +687,12 @@ impl Controller {
     }
 
     /// Classify the capsule footprint at `(x, z)` with the given feet/head.
-    fn classify(&self, x: f32, z: f32, feet: f32, head: f32) -> Hit {
+    fn classify(&self, x: f32, z: f32, feet: f32, head: f32, shape: &MoveShape) -> Hit {
+        let max_step = shape.autostep.map_or(0.0, |a| a.max_height);
         let mut wall = false;
         let mut step_top: Option<f32> = None;
         // Wedge ramps: grade gate first, so steep faces block even in slices
-        // thinner than STEP_HEIGHT; climbable slices step up gradually.
+        // thinner than max step; climbable slices step up gradually.
         for r in &self.ramps {
             let Some((h, grade)) = ramp_height_at(r, x, z) else {
                 continue;
@@ -539,7 +700,7 @@ impl Controller {
             if h <= feet + EPS {
                 continue;
             }
-            if h - feet > STEP_HEIGHT + EPS || grade > MAX_SLOPE_GRADE {
+            if h - feet > max_step + EPS || grade > shape.max_climb_grade {
                 wall = true;
             } else {
                 step_top = Some(step_top.map_or(h, |t: f32| t.max(h)));
@@ -557,7 +718,7 @@ impl Controller {
             if bottom >= head - EPS {
                 continue; // Overhead; the ceiling pass owns it.
             }
-            if top - feet <= STEP_HEIGHT + EPS && self.headroom_free(x, z, top) {
+            if top - feet <= max_step + EPS && self.headroom_free(x, z, top, shape.offset) {
                 step_top = Some(step_top.map_or(top, |t: f32| t.max(top)));
             } else {
                 wall = true;
@@ -575,7 +736,15 @@ impl Controller {
     /// Nearest strict-wall face ahead on `axis` (0 = x, 2 = z) in direction
     /// `sign`, for slide-to-contact. Steppable boxes are skipped: the caller
     /// steps onto those instead of stopping.
-    fn face_ahead(&self, axis: usize, sign: f32, feet: f32, head: f32) -> Option<f32> {
+    fn face_ahead(
+        &self,
+        axis: usize,
+        sign: f32,
+        feet: f32,
+        head: f32,
+        shape: &MoveShape,
+    ) -> Option<f32> {
+        let max_step = shape.autostep.map_or(0.0, |a| a.max_height);
         let here = if axis == 0 { self.pos[0] } else { self.pos[2] };
         let mut face: Option<f32> = None;
         for b in &self.boxes {
@@ -588,7 +757,7 @@ impl Controller {
             if !(other + self.radius > omin && other - self.radius < omax) {
                 continue;
             }
-            if !(b.min[1] < head - SKIN && b.max[1] > feet + STEP_HEIGHT) {
+            if !(b.min[1] < head - shape.offset && b.max[1] > feet + max_step) {
                 continue; // Not a strict wall (ground, step or ceiling).
             }
             let f = if axis == 0 { b.min[0] } else { b.min[2] };
@@ -611,7 +780,7 @@ impl Controller {
     }
 
     /// Highest reachable ground top under the footprint, if any.
-    fn ground_height(&self, x: f32, z: f32, feet: f32) -> Option<f32> {
+    fn ground_height(&self, x: f32, z: f32, feet: f32, max_rise: f32) -> Option<f32> {
         let mut g: Option<f32> = None;
         let m = self.radius * 0.5;
         for b in &self.boxes {
@@ -619,13 +788,13 @@ impl Controller {
                 continue;
             }
             let top = b.max[1];
-            if top <= feet + STEP_HEIGHT + EPS {
+            if top <= feet + max_rise + EPS {
                 g = Some(g.map_or(top, |v: f32| v.max(top)));
             }
         }
         for r in &self.ramps {
             if let Some((h, _)) = ramp_height_at(r, x, z) {
-                if h <= feet + STEP_HEIGHT + EPS {
+                if h <= feet + max_rise + EPS {
                     g = Some(g.map_or(h, |v: f32| v.max(h)));
                 }
             }
@@ -634,7 +803,7 @@ impl Controller {
     }
 
     /// Lowest ceiling bottom above the head overlapping the footprint, if any.
-    fn ceiling_height(&self, x: f32, z: f32, head: f32) -> Option<f32> {
+    fn ceiling_height(&self, x: f32, z: f32, head: f32, offset: f32) -> Option<f32> {
         let mut c: Option<f32> = None;
         let m = self.radius * 0.5;
         for b in &self.boxes {
@@ -642,7 +811,7 @@ impl Controller {
                 continue;
             }
             let bottom = b.min[1];
-            if bottom >= head - SKIN && b.max[1] > head {
+            if bottom >= head - offset && b.max[1] > head {
                 c = Some(c.map_or(bottom, |v: f32| v.min(bottom)));
             }
         }
@@ -650,13 +819,13 @@ impl Controller {
     }
 
     /// Headroom check for stepping onto `top`: no box may cap the new head.
-    fn headroom_free(&self, x: f32, z: f32, top: f32) -> bool {
+    fn headroom_free(&self, x: f32, z: f32, top: f32, offset: f32) -> bool {
         let new_head = top + 2.0 * (self.height * 0.5 + self.radius);
         for b in &self.boxes {
             if !footprint_overlaps(b, x, z, self.radius) {
                 continue;
             }
-            if b.min[1] < new_head - SKIN && b.max[1] > top + SKIN {
+            if b.min[1] < new_head - offset && b.max[1] > top + offset {
                 return false;
             }
         }
@@ -1164,5 +1333,96 @@ mod tests {
         assert!(pressed, "must press inside the fall");
         assert!(fired, "buffered press must take off after landing");
         assert!(c.buffer_ms() == 0, "buffer clears on fire");
+    }
+
+    #[test]
+    fn slide_flag_stops_vs_slides() {
+        let mk = || {
+            let mut c = Controller::spawn([2.0, HALF, 0.0], RADIUS, HEIGHT).expect("spawn");
+            c.add_static_box([10.0, 0.5, 10.0], [0.0, -0.5, 0.0])
+                .expect("floor");
+            c.add_static_box([0.25, 2.0, 10.0], [5.0, 2.0, 0.0])
+                .expect("wall");
+            c.move_and_slide([0.0, 0.0], FIXED_DT);
+            c
+        };
+        let mut a = mk();
+        for _ in 0..40 {
+            a.move_and_slide_with([0.2, 0.2], FIXED_DT, &MoveShape::legacy());
+        }
+        assert!(
+            a.position()[2] > 4.0,
+            "slide keeps tangential, {:?}",
+            a.position()
+        );
+        let mut b = mk();
+        let mut noslide = MoveShape::legacy();
+        noslide.slide = false;
+        for _ in 0..40 {
+            b.move_and_slide_with([0.2, 0.2], FIXED_DT, &noslide);
+        }
+        assert!(
+            b.position()[2] < 3.0,
+            "no slide stops dead, {:?}",
+            b.position()
+        );
+        let r = b.move_and_slide_with([0.2, 0.0], FIXED_DT, &noslide);
+        assert!(r.displacement[0].abs() < 1e-6, "{r:?}");
+        assert!(r.wall_normal.is_some(), "{r:?}");
+    }
+
+    #[test]
+    fn autostep_snap_grades() {
+        let mkledge = || {
+            let mut c = Controller::spawn([-1.0, HALF, 0.0], RADIUS, HEIGHT).expect("spawn");
+            c.add_static_box([10.0, 0.5, 3.0], [0.0, -0.5, 0.0])
+                .expect("floor");
+            c.add_static_box([1.0, 0.15, 3.0], [3.0, 0.15, 0.0])
+                .expect("ledge");
+            c.move_and_slide([0.0, 0.0], FIXED_DT);
+            c
+        };
+        let mut off = mkledge();
+        for _ in 0..40 {
+            off.move_and_slide_with([0.15, 0.0], FIXED_DT, &MoveShape::default());
+        }
+        assert!(
+            off.position()[0] < 2.0,
+            "autostep off blocks, {:?}",
+            off.position()
+        );
+        let mut on = mkledge();
+        let mut stepped = false;
+        for _ in 0..40 {
+            stepped = on
+                .move_and_slide_with([0.15, 0.0], FIXED_DT, &MoveShape::legacy())
+                .stepped
+                || stepped;
+        }
+        assert!(stepped, "legacy autostep climbs");
+        let mut narrow = mkledge();
+        let mut wide = MoveShape::legacy();
+        wide.autostep = Some(Autostep {
+            max_height: STEP_HEIGHT,
+            min_width: 5.0,
+        });
+        for _ in 0..40 {
+            narrow.move_and_slide_with([0.15, 0.0], FIXED_DT, &wide);
+        }
+        assert!(narrow.position()[0] < 2.0, "min_width blocks narrow tread");
+        let mut c = Controller::spawn([0.5, 0.53 + HALF, 0.0], RADIUS, HEIGHT).expect("spawn");
+        c.add_static_box([5.0, 0.5, 3.0], [0.0, -0.5, 0.0])
+            .expect("floor");
+        c.add_ramp(0.0, 1.0, 0.0, 1.06, 3.0, 0.0).expect("steep");
+        let r = c.move_and_slide_with([0.0, 0.0], FIXED_DT, &MoveShape::legacy());
+        assert!(r.slipped && r.sliding_down_slope, "{r:?}");
+        assert!(
+            SnapLength::Relative(0.2).resolve(1.4) > 0.27,
+            "snap resolves"
+        );
+        assert!(
+            SnapLength::Absolute(f32::NAN).resolve(1.4) == 0.0,
+            "bad snap maps to zero"
+        );
     }
 }

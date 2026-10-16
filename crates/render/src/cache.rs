@@ -8,12 +8,11 @@
 //! Blocking file IO runs at startup/shutdown; the per-frame path only
 //! borrows through [`PipelineCache::get`] and [`PipelineCache::poll_ready`].
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::{Condvar, Mutex, PoisonError};
 
 /// On-disk format version this module writes. Loads accept exactly this
 /// version; anything else fails as [`CacheError::UnsupportedVersion`].
@@ -97,12 +96,13 @@ impl From<std::io::Error> for CacheError {
 // Key: shader hash + sorted defines + layout id, deterministically ordered.
 // ---------------------------------------------------------------------------
 
-/// Cache key: `std` hash of the full shader bytes, the caller's opaque
-/// layout id, and the sorted static define set. Derives `Ord` so the map
-/// (and therefore every save) iterates in one deterministic order.
+/// Cache key: `engine_core::hash_bytes` (FNV-1a) hash of the full shader
+/// bytes, the caller's opaque layout id, and the sorted static define set.
+/// Derives `Ord` so the map (and therefore every save) iterates in one
+/// deterministic order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PipelineKey {
-    /// `std` hash of the full shader source bytes.
+    /// FNV-1a hash of the full shader source bytes.
     pub shader_hash: u64,
     /// Opaque pipeline-layout id from the caller.
     pub layout: u64,
@@ -115,8 +115,6 @@ impl PipelineKey {
     /// Define order never matters: pairs sort here, so callers may pass
     /// any order and still hit the same entry.
     pub fn new(shader_bytes: &[u8], defines: &[(&str, &str)], layout: u64) -> Self {
-        let mut hasher = DefaultHasher::new();
-        shader_bytes.hash(&mut hasher);
         let mut owned: Vec<(String, String)> = defines
             .iter()
             .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
@@ -124,7 +122,7 @@ impl PipelineKey {
         owned.sort();
         owned.dedup();
         Self {
-            shader_hash: hasher.finish(),
+            shader_hash: engine_core::hash_bytes(shader_bytes),
             layout,
             defines: owned,
         }
@@ -232,6 +230,199 @@ impl WarmSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Creation counters by cause: which load path built each pipeline.
+// ---------------------------------------------------------------------------
+
+/// Why one pipeline was built. Owner: render lane; consumer is the
+/// presenter load path (`present/gpu_present/presenter.rs` holds the
+/// `PipelineCache` and warms every scene variant before the first frame)
+/// plus the `pipeline_counter` walk test. Units: counts per cause.
+/// Determinism: pure counts, no wall clock. Errors: none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CreationCause {
+    /// Mesh-input layout or vertex-format change.
+    Mesh,
+    /// Surface or target-format change.
+    Surface,
+    /// Draw-state or blend-state change.
+    Draw,
+    /// Shader specialization (`name=value` defines or layout id).
+    Specialization,
+}
+
+impl CreationCause {
+    /// Every cause in fixed order, so reports iterate deterministically.
+    pub const ALL: [CreationCause; 4] = [
+        CreationCause::Mesh,
+        CreationCause::Surface,
+        CreationCause::Draw,
+        CreationCause::Specialization,
+    ];
+}
+
+/// Pipelines built per cause. Owner: render lane; consumer is the same
+/// load path that owns the `PipelineCache` (it reads these after warm)
+/// plus the `pipeline_counter` walk test. Units: pipeline counts.
+/// Determinism: insertion-order independent, sums only. Errors: none.
+/// Budget: four `usize` adds on insert (load path only, never per frame).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CreationCounters {
+    /// Pipelines built for a mesh-input cause.
+    pub mesh: usize,
+    /// Pipelines built for a surface-format cause.
+    pub surface: usize,
+    /// Pipelines built for a draw-state cause.
+    pub draw: usize,
+    /// Pipelines built for a specialization (defines/layout) cause.
+    pub specialization: usize,
+}
+
+impl CreationCounters {
+    /// Count one built pipeline for `cause`. Load path only.
+    pub fn record(&mut self, cause: CreationCause) {
+        match cause {
+            CreationCause::Mesh => self.mesh += 1,
+            CreationCause::Surface => self.surface += 1,
+            CreationCause::Draw => self.draw += 1,
+            CreationCause::Specialization => self.specialization += 1,
+        }
+    }
+
+    /// Built pipelines for one cause.
+    pub fn get(&self, cause: CreationCause) -> usize {
+        match cause {
+            CreationCause::Mesh => self.mesh,
+            CreationCause::Surface => self.surface,
+            CreationCause::Draw => self.draw,
+            CreationCause::Specialization => self.specialization,
+        }
+    }
+
+    /// All pipelines built across every cause.
+    pub fn total(&self) -> usize {
+        self.mesh + self.surface + self.draw + self.specialization
+    }
+}
+
+/// Driver backend that sets how many pipeline creations may run at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// D3D12: pipeline creation is held to one at a time.
+    Dx12,
+    /// Vulkan: pipeline creation may run in parallel.
+    Vulkan,
+    /// OpenGL fallback: pipeline creation may run in parallel.
+    Gl,
+}
+
+/// Max pipeline creations that may run at once for one backend: Dx12 holds
+/// one at a time (wgpu #10547 FXC cache race), Vulkan and Gl run parallel
+/// (no cap). Pure mapping, no lock, no allocation; same backend gives the
+/// same cap twice.
+///
+/// Caller: [`PipelineGate::new`] (same file) builds its cap from this, so
+/// the gate and this test read one mapping.
+#[must_use]
+pub fn max_in_flight(backend: Backend) -> Option<usize> {
+    match backend {
+        Backend::Dx12 => Some(1),
+        Backend::Vulkan | Backend::Gl => None,
+    }
+}
+
+/// Caps concurrent pipeline creations for one backend.
+/// Invariant: `live` never passes the cap. `peak` keeps the highest `live`
+/// seen, so a test can prove the cap held.
+#[derive(Debug)]
+pub struct PipelineGate {
+    cap: Option<usize>,
+    state: Mutex<GateState>,
+    freed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    live: usize,
+    peak: usize,
+}
+
+impl PipelineGate {
+    /// Gate for one backend: Dx12 holds one creation at a time, others have no cap.
+    #[must_use]
+    pub fn new(backend: Backend) -> Self {
+        let cap = max_in_flight(backend);
+        Self {
+            cap,
+            state: Mutex::new(GateState::default()),
+            freed: Condvar::new(),
+        }
+    }
+
+    /// Try one slot without waiting; None when Dx12 is full.
+    /// Wires the async path: callers that cannot block take the slot only
+    /// when free. [`PipelineGate::enter`] takes its fast path through here,
+    /// so every blocking creation also counts in `live` and `peak`.
+    pub fn try_enter(&self) -> Option<GateGuard<'_>> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.cap.is_some_and(|cap| state.live >= cap) {
+            return None;
+        }
+        state.live += 1;
+        state.peak = state.peak.max(state.live);
+        Some(GateGuard { gate: self })
+    }
+
+    /// Wait for a free slot; the slot is released when the guard drops.
+    pub fn enter(&self) -> GateGuard<'_> {
+        loop {
+            if let Some(guard) = self.try_enter() {
+                return guard;
+            }
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let _unused = self
+                .freed
+                .wait_while(state, |s| self.cap.is_some_and(|cap| s.live >= cap))
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Creations running right now.
+    pub fn live(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .live
+    }
+
+    /// Highest number of creations that ran at once.
+    pub fn peak(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .peak
+    }
+}
+
+/// One held creation slot. Dropping it frees the slot and wakes one waiter.
+#[must_use = "the slot is released as soon as the guard drops"]
+#[derive(Debug)]
+pub struct GateGuard<'a> {
+    gate: &'a PipelineGate,
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.live = state.live.saturating_sub(1);
+        self.gate.freed.notify_one();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cache: ready blobs (the last-good map) + in-flight set + diagnostics.
 // ---------------------------------------------------------------------------
 
@@ -239,6 +430,8 @@ impl WarmSummary {
 /// compiles add a diagnostic and never delete from it, so the renderer
 /// keeps serving the previous blob. Steady-state use (`get`, `poll_ready`)
 /// only borrows; allocation happens on variant change, save and load.
+/// `creations` counts every blob that landed through `insert` by cause;
+/// file loads restore blobs without counting them as builds.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PipelineCache {
     /// Ready blobs keyed deterministically; iterated in order on save.
@@ -247,6 +440,8 @@ pub struct PipelineCache {
     pending: BTreeSet<PipelineKey>,
     /// Bounded newest-last failure history.
     diagnostics: Vec<CacheDiagnostic>,
+    /// Pipelines built through `insert`, by cause. Load path only.
+    creations: CreationCounters,
 }
 
 /// Reject empty or over-bound blobs before they enter the map or a file.
@@ -306,14 +501,60 @@ impl PipelineCache {
         self.diagnostics.len()
     }
 
+    /// Built pipelines for one cause. Never allocates; load-path counts only.
+    /// Caller: `present/gpu_present/presenter.rs` reads these after warm
+    /// (it holds the `PipelineCache`); test `pipeline_counter_*` proves them.
+    pub fn creation_count(&self, cause: CreationCause) -> usize {
+        self.creations.get(cause)
+    }
+
+    /// All built-pipeline counts by cause. Never allocates.
+    pub fn creation_counters(&self) -> CreationCounters {
+        self.creations
+    }
+
+    /// All pipelines built across every cause. Late (post-load) builds stay
+    /// zero when the walk stays on hits; see [`PipelineCache::walk_ready`].
+    pub fn creation_total(&self) -> usize {
+        self.creations.total()
+    }
+
     /// Store a compiled blob as the last-good for this key, replacing any
     /// previous blob. Rejects empty or over-bound blobs and keys loudly.
+    /// Counts one `Specialization` build on success; callers that know a
+    /// mesh, surface or draw cause use [`PipelineCache::insert_caused`].
+    /// Direct `device.create_*_pipeline` sites bypass these counters today
+    /// and are listed for the next slice: `gpu.rs`, `v1_gpu.rs`,
+    /// `v1_skin.rs`, `graph.rs`, `shadow_cluster.rs`, `ibl.rs`, `fog.rs`,
+    /// `gtao.rs`, `accel.rs`, `decals.rs`, `material_layer.rs`,
+    /// `particles_gpu.rs`, `post.rs`, `aa_scale.rs`, `gpu_cull.rs`,
+    /// `baked_gi.rs`, `sky.rs`, `present/gpu_present/sun_shadow.rs` and
+    /// `present/gpu_present/submit.rs`. The per-frame path never inserts,
+    /// so frame behavior is unchanged.
     pub fn insert(&mut self, key: PipelineKey, blob: Vec<u8>) -> Result<(), CacheError> {
+        self.insert_caused(key, blob, CreationCause::Specialization)
+    }
+
+    /// Store a compiled blob for an explicit cause, counting one build for
+    /// that cause on success only. Failed inserts record no build and leave
+    /// every counter unchanged. A refresh that replaces one blob still built
+    /// one pipeline, so it counts again. Caller: [`PipelineCache::insert`]
+    /// (the `Specialization` default, hit by `warm_keys` and the presenter
+    /// load path) plus future mesh/surface/draw wiring; test
+    /// `pipeline_counter_material_walk_counts_four_causes_with_late_zero`
+    /// proves the four causes and the late-zero walk.
+    pub fn insert_caused(
+        &mut self,
+        key: PipelineKey,
+        blob: Vec<u8>,
+        cause: CreationCause,
+    ) -> Result<(), CacheError> {
         key.check()?;
         check_blob(&blob)?;
         if !self.entries.contains_key(&key) && self.entries.len() >= MAX_ENTRIES {
             return Err(CacheError::TooLarge("entry count"));
         }
+        self.creations.record(cause);
         self.entries.insert(key, blob);
         Ok(())
     }
@@ -424,6 +665,58 @@ impl PipelineCache {
         }
     }
 
+    /// [`PipelineCache::get_or_compile`] that holds one creation slot from
+    /// `gate` for the whole compile. The slot frees on success and on failure.
+    pub fn get_or_compile_gated<E: fmt::Display>(
+        &mut self,
+        key: PipelineKey,
+        gate: &PipelineGate,
+        compile: impl FnOnce() -> Result<Vec<u8>, E>,
+    ) -> WarmResult<'_> {
+        let _slot = gate.enter();
+        self.get_or_compile(key, compile)
+    }
+
+    /// Warm every pipeline variant through `gate`: the same counts as
+    /// [`PipelineCache::warm_keys`] with each compile holding one gate
+    /// slot. Caller: [`PipelineCache::warm_keys`] (uncapped Vulkan gate,
+    /// behavior unchanged) and the presenter load path next slice (Dx12
+    /// gate, one creation at a time). Load-path only.
+    pub fn warm_keys_gated(
+        &mut self,
+        keys: &[PipelineKey],
+        gate: &PipelineGate,
+        compile: impl Fn(&PipelineKey) -> Result<Vec<u8>, CacheError>,
+    ) -> WarmSummary {
+        let mut summary = WarmSummary::default();
+        for key in keys {
+            match self.get_or_compile_gated(key.clone(), gate, || compile(key)) {
+                WarmResult::Hit(_) => summary.hits += 1,
+                WarmResult::Compiled(_) => summary.compiled += 1,
+                WarmResult::Failed => summary.failed += 1,
+            }
+        }
+        summary
+    }
+
+    /// Warm every pipeline variant for one backend through its gate: Dx12
+    /// holds one creation at a time, Vulkan and Gl run parallel.
+    ///
+    /// Caller: [`PipelineCache::warm_keys`] (same file) keeps Vulkan
+    /// behavior unchanged; the presenter Dx12 load path calls this directly
+    /// next slice. Load-path only.
+    pub fn warm_keys_for(
+        &mut self,
+        keys: &[PipelineKey],
+        backend: Backend,
+        compile: impl Fn(&PipelineKey) -> Result<Vec<u8>, CacheError>,
+    ) -> WarmSummary {
+        let gate = PipelineGate::new(backend);
+        let summary = self.warm_keys_gated(keys, &gate, compile);
+        debug_assert_eq!(gate.live(), 0, "warming releases every gate slot");
+        summary
+    }
+
     /// Warm every pipeline variant a scene can use during load.
     ///
     /// Owner: render lane; consumer is the presenter load path, which passes
@@ -439,15 +732,11 @@ impl PipelineCache {
         keys: &[PipelineKey],
         compile: impl Fn(&PipelineKey) -> Result<Vec<u8>, CacheError>,
     ) -> WarmSummary {
-        let mut summary = WarmSummary::default();
-        for key in keys {
-            match self.get_or_compile(key.clone(), || compile(key)) {
-                WarmResult::Hit(_) => summary.hits += 1,
-                WarmResult::Compiled(_) => summary.compiled += 1,
-                WarmResult::Failed => summary.failed += 1,
-            }
-        }
-        summary
+        debug_assert!(
+            keys.len() <= MAX_ENTRIES,
+            "warming at most the map cap in one load"
+        );
+        self.warm_keys_for(keys, Backend::Vulkan, compile)
     }
 
     /// True when a camera walk over `keys` would create zero pipelines:
@@ -999,5 +1288,214 @@ mod tests {
         assert_eq!(bad.failed, 1);
         assert_eq!(cold.diagnostic_count(), 1);
         assert!(!cold.walk_ready(&keys[..1]));
+    }
+
+    #[test]
+    fn cache_gate_dx12_serializes_eight_threads() {
+        use std::sync::{Arc, Barrier};
+        use std::time::Duration;
+        let gate = Arc::new(PipelineGate::new(Backend::Dx12));
+        let start = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let gate = Arc::clone(&gate);
+            let start = Arc::clone(&start);
+            handles.push(std::thread::spawn(move || {
+                start.wait();
+                let _guard = gate.enter();
+                std::thread::sleep(Duration::from_millis(5));
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("dx12 worker joins");
+        }
+        assert_eq!(gate.peak(), 1, "dx12 holds at most one pipeline creation");
+        assert_eq!(gate.live(), 0, "dx12 gate releases every guard");
+    }
+
+    #[test]
+    fn cache_gate_vulkan_allows_parallel_eight_threads() {
+        use std::sync::{Arc, Barrier};
+        let gate = Arc::new(PipelineGate::new(Backend::Vulkan));
+        let start = Arc::new(Barrier::new(8));
+        let held = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let gate = Arc::clone(&gate);
+            let start = Arc::clone(&start);
+            let held = Arc::clone(&held);
+            handles.push(std::thread::spawn(move || {
+                start.wait();
+                let _guard = gate.enter();
+                held.wait();
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("vulkan worker joins");
+        }
+        assert_eq!(gate.peak(), 8, "vulkan holds all eight creations at once");
+        assert_eq!(gate.live(), 0, "vulkan gate releases every guard");
+    }
+
+    #[test]
+    fn cache_gate_gl_allows_parallel_eight_threads() {
+        use std::sync::{Arc, Barrier};
+        let gate = Arc::new(PipelineGate::new(Backend::Gl));
+        let start = Arc::new(Barrier::new(8));
+        let held = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let gate = Arc::clone(&gate);
+            let start = Arc::clone(&start);
+            let held = Arc::clone(&held);
+            handles.push(std::thread::spawn(move || {
+                start.wait();
+                let _guard = gate.enter();
+                held.wait();
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("gl worker joins");
+        }
+        assert_eq!(gate.peak(), 8, "gl holds all eight creations at once");
+        assert_eq!(gate.live(), 0, "gl gate releases every guard");
+    }
+
+    #[test]
+    fn cache_gate_releases_on_failed_compile() {
+        let gate = PipelineGate::new(Backend::Dx12);
+        let mut cache = PipelineCache::new();
+        let result: WarmResult<'_> =
+            cache.get_or_compile_gated(key_a(), &gate, || Err("backend down".to_string()));
+        assert_eq!(result, WarmResult::Failed);
+        assert_eq!(cache.diagnostic_count(), 1);
+        assert_eq!(gate.live(), 0, "failed compile still releases the gate");
+    }
+
+    #[test]
+    fn warm_keys_gated_routes_compiles_through_gate() {
+        let gate = PipelineGate::new(Backend::Dx12);
+        let mut cache = PipelineCache::new();
+        let keys = [key_a(), key_b()];
+        let first = cache.warm_keys_gated(&keys, &gate, |_| Ok(vec![9; 4]));
+        assert_eq!(first.compiled, 2);
+        assert_eq!(first.hits, 0);
+        assert_eq!(gate.peak(), 1, "sequential gated warm holds one slot");
+        assert_eq!(gate.live(), 0, "gated warm releases every slot");
+        let second = cache.warm_keys_gated(&keys, &gate, |_| Ok(vec![9; 4]));
+        assert_eq!(second.compiled, 0);
+        assert_eq!(second.hits, 2);
+        assert_eq!(gate.live(), 0);
+    }
+
+    #[test]
+    fn warm_keys_for_routes_backend_gate() {
+        let keys = [key_a(), key_b()];
+        let mut dx = PipelineCache::new();
+        let first = dx.warm_keys_for(&keys, Backend::Dx12, |_| Ok(vec![9; 4]));
+        assert_eq!(first.compiled, 2);
+        assert_eq!(first.hits, 0);
+        let second = dx.warm_keys_for(&keys, Backend::Dx12, |_| Ok(vec![9; 4]));
+        assert_eq!(second.compiled, 0);
+        assert_eq!(second.hits, 2);
+        let mut vk = PipelineCache::new();
+        let vfirst = vk.warm_keys_for(&keys, Backend::Vulkan, |_| Ok(vec![9; 4]));
+        assert_eq!(vfirst.compiled, 2);
+        assert_eq!(vfirst.hits, 0);
+    }
+
+    #[test]
+    fn cache_gate_try_enter_nonblocking() {
+        for _ in 0..2 {
+            let gate = PipelineGate::new(Backend::Dx12);
+            let held = gate.try_enter();
+            assert!(held.is_some(), "dx12 first try holds one slot");
+            assert!(
+                gate.try_enter().is_none(),
+                "dx12 second try refuses while full"
+            );
+            assert_eq!(gate.live(), 1);
+            drop(held);
+            let again = gate.try_enter();
+            assert!(again.is_some(), "dx12 try succeeds after release");
+            assert_eq!(gate.live(), 1);
+            drop(again);
+            assert_eq!(gate.live(), 0);
+            assert_eq!(gate.peak(), 1, "dx12 try never exceeds one");
+        }
+        let vgate = PipelineGate::new(Backend::Vulkan);
+        let a = vgate.try_enter();
+        let b = vgate.try_enter();
+        assert!(a.is_some() && b.is_some(), "vulkan try always succeeds");
+        assert_eq!(vgate.peak(), 2);
+        drop(a);
+        drop(b);
+        assert_eq!(vgate.live(), 0);
+    }
+
+    #[test]
+    fn backend_cap_dx12_is_one_others_uncapped() {
+        // GS5: Dx12 serializes pipeline creation (one at a time);
+        // Vulkan and Gl run creations in parallel (no cap).
+        assert_eq!(max_in_flight(Backend::Dx12), Some(1));
+        assert_eq!(max_in_flight(Backend::Vulkan), None);
+        assert_eq!(max_in_flight(Backend::Gl), None);
+    }
+
+    #[test]
+    fn pipeline_counter_material_walk_counts_four_causes_with_late_zero() {
+        let keys = [
+            PipelineKey::new(b"forward-pbr-shader", &[], 7),
+            PipelineKey::new(b"forward-pbr-shader", &[("SHADOWS", "1")], 7),
+            PipelineKey::new(b"forward-pbr-shader", &[("IBL", "1")], 7),
+            PipelineKey::new(b"forward-pbr-shader", &[("IBL", "1"), ("SHADOWS", "1")], 7),
+        ];
+        let causes = [
+            CreationCause::Mesh,
+            CreationCause::Surface,
+            CreationCause::Draw,
+            CreationCause::Specialization,
+        ];
+        let mut cache = PipelineCache::new();
+        for (index, (key, cause)) in keys.iter().zip(causes.iter()).enumerate() {
+            let blob = vec![(index as u8) + 1; 4];
+            cache
+                .insert_caused(key.clone(), blob, *cause)
+                .expect("caused insert lands");
+        }
+        assert_eq!(cache.creation_count(CreationCause::Mesh), 1);
+        assert_eq!(cache.creation_count(CreationCause::Surface), 1);
+        assert_eq!(cache.creation_count(CreationCause::Draw), 1);
+        assert_eq!(cache.creation_count(CreationCause::Specialization), 1);
+        assert_eq!(cache.creation_total(), 4);
+        assert_eq!(cache.creation_counters().total(), 4);
+        assert!(cache.walk_ready(&keys), "warm walk stays on hits");
+        fn compile(key: &PipelineKey) -> Result<Vec<u8>, CacheError> {
+            Ok(vec![key.shader_hash.to_le_bytes()[0]; 8])
+        }
+        let second = cache.warm_keys(&keys, compile);
+        assert_eq!(second.compiled, 0, "late builds stay zero after load");
+        assert_eq!(second.hits, 4);
+        assert_eq!(cache.creation_total(), 4, "warm hits build nothing late");
+        println!(
+            "late=0 mesh={} surface={} draw={} specialization={} total={}",
+            cache.creation_count(CreationCause::Mesh),
+            cache.creation_count(CreationCause::Surface),
+            cache.creation_count(CreationCause::Draw),
+            cache.creation_count(CreationCause::Specialization),
+            cache.creation_total(),
+        );
+    }
+
+    #[test]
+    fn pipeline_counter_failed_insert_counts_no_build() {
+        let mut cache = PipelineCache::new();
+        assert_eq!(
+            cache.insert_caused(key_a(), Vec::new(), CreationCause::Mesh),
+            Err(CacheError::EmptyBlob)
+        );
+        assert_eq!(cache.creation_count(CreationCause::Mesh), 0);
+        assert_eq!(cache.creation_total(), 0);
+        assert!(cache.is_empty());
     }
 }

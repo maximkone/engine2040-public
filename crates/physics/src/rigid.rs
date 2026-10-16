@@ -176,7 +176,9 @@ fn step_with_h_fast(b: &mut Body, h: f32, gh: f32) {
 /// negative zero (so `x + 0.0` keeps bits), and `|hy|` below 32768 so
 /// `hy - GRAVITY*h*h` moves at least one ulp when `h >= FIXED_DT`.
 /// Single-branch integer fast path with the same truth table as float
-/// compares: `y == hy` via bits ORed into the same `bad` mask, so the 10k
+/// compares: `y == hy` via `(y_bits ^ hy_bits)` ORed into the same `bad`
+/// mask (zero iff bit-equal, same table as `u32::from(y_bits != hy_bits)`
+/// with one fewer compare per settled body), so the 10k
 /// settled slice pays one predictable not-taken branch per body instead of
 /// two ([geaen | 3.4.3.2 Branch Prediction]). Falling bodies still fail on
 /// the `y != hy` bit; both velocities `+0` via one OR of exact bits (so
@@ -202,7 +204,7 @@ pub fn is_settled(b: &Body) -> bool {
     let hy_bits = b.hy.to_bits();
     let hm = hy_bits & 0x7FFF_FFFF;
     let x_bits = b.x.to_bits();
-    let bad = u32::from(y_bits != hy_bits)
+    let bad = (y_bits ^ hy_bits)
         | u32::from(hm >= 0x4700_0000)
         | u32::from(x_bits == 0x8000_0000)
         | u32::from((x_bits & 0x7F80_0000) == 0x7F80_0000);
@@ -239,38 +241,78 @@ fn chunk_all_settled8(chunk: &[Body]) -> bool {
     chunk.iter().all(is_settled)
 }
 
+/// Slice-settled predicate beside [`is_settled`], owner for the narrow family.
+///
+/// Bit-identical to `slice.iter().all(is_settled)`: true only when every lane
+/// keeps every bit through one Euler step plus ground clamp. Velocity
+/// fast-fail short-circuits in index order with no per-lane bounds checks
+/// (sequential scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache
+/// Misses]); settled lanes accumulate bit checks branchlessly into one mask
+/// with a single skip branch per call (one predictable branch
+/// [geaen | 3.4.3.2 Branch Prediction]). `y == hy` folds via
+/// `(y_bits ^ hy_bits)` ORed into the mask (zero iff equal), same truth table
+/// as `u32::from(y_bits != hy_bits)` with one fewer compare per settled body.
+/// Same slot order, same float order, no allocation. Caller: [`integrate`]
+/// remainder fast path plus [`chunk_all_settled32`] only.
+/// Units: metres, m/s. Determinism: bit compares, no allocation.
+#[expect(clippy::inline_always, reason = "11k hot predicate")]
+#[inline(always)]
+fn slice_all_settled(slice: &[Body]) -> bool {
+    let mut acc: u32 = 0;
+    for b in slice.iter() {
+        if (b.vx.to_bits() | b.vy.to_bits()) != 0 {
+            return false;
+        }
+        let y_bits = b.y.to_bits();
+        let hy_bits = b.hy.to_bits();
+        let hm = hy_bits & 0x7FFF_FFFF;
+        let x_bits = b.x.to_bits();
+        acc |= (y_bits ^ hy_bits)
+            | u32::from(hm >= 0x4700_0000)
+            | u32::from(x_bits == 0x8000_0000)
+            | u32::from((x_bits & 0x7F80_0000) == 0x7F80_0000);
+    }
+    acc == 0
+}
+
 /// Thirty-two-wide settled predicate beside [`is_settled`].
 ///
-/// True only when all thirty-two keep every bit, so `integrate` pays one skip
-/// branch per 32-wide group while the 10k settled slice keeps its skip.
-/// Iterator short-circuits on the first awake body in index order, so an
-/// all-awake 10k slice fails after one `is_settled` (two loads) per 32 bodies
-/// instead of per 8 with no per-lane bounds checks, cutting the render-10k
-/// predicate overhead to one quarter. Stepping a settled lane keeps bits, so
-/// running all thirty-two on a mixed group stays bit-identical
-/// ([geaen | 3.4.3.2 Branch Prediction]).
+/// Bit-identical to `chunk.iter().all(is_settled)`: true only when all
+/// thirty-two keep every bit, so `integrate` pays one skip branch per
+/// 32-wide group while the 10k settled slice keeps its skip. Delegates to
+/// [`slice_all_settled`] (same mask, same order) so the 1k dynamic prefix
+/// still fails after one `vx|vy` check with no `y`/`hy`/`x` loads and settled
+/// lanes keep one predictable branch per group
+/// ([geaen | 3.4.3.2 Branch Prediction]). Same slot order, same float order,
+/// no allocation. The scalar tail in [`integrate`] stays the fallback for
+/// remainders and tiny `h`. Caller: [`integrate`] fast path only.
 /// Units: metres, m/s. Determinism: bit compares, no allocation.
 #[expect(clippy::inline_always, reason = "11k hot predicate")]
 #[inline(always)]
 fn chunk_all_settled32(chunk: &[Body]) -> bool {
-    chunk.iter().all(is_settled)
+    debug_assert_eq!(chunk.len(), 32, "32-wide groups only");
+    slice_all_settled(chunk)
 }
 
 /// Advance all bodies by `dt` in index order (deterministic).
 ///
-/// Chunked thirty-two-wide path with a scalar tail beside [`step_body`]: the same
-/// [`step_with_h_fast`] body (same ops as [`step_with_h`] with `h >= FIXED_DT`
-/// hoisted), so outputs are bit-identical while the loop pays one
-/// `min` plus one multiply total and the compiler fuses each group into SIMD
-/// lanes (8 x `f32` fills one AVX2 lane, four lanes per 32-group, sequential
-/// scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache Misses]). One
-/// [`chunk_all_settled32`] iterator check per group skips resting ground bodies
-/// when `h >= FIXED_DT`, so the 10k settled slice of the 11k mixed fixture pays
-/// only the predicate and the all-awake 10k render slice pays one fast-fail
-/// `is_settled` (two loads) plus one predictable branch per 32 bodies instead
-/// of per 8 ([geaen | 3.4.3.2 Branch Prediction]). The stepping loop is an
-/// iterator with no per-lane bounds checks in index order. The skip flag fans
-/// into two loops so the hot path carries no per-group flag branch.
+/// Chunked thirty-two-wide path with a single-branch remainder tail beside
+/// [`step_body`]: the same [`step_with_h_fast`] body (same ops as
+/// [`step_with_h`] with `h >= FIXED_DT` hoisted), so outputs are bit-identical
+/// while the loop pays one `min` plus one multiply total and the compiler
+/// fuses each group into SIMD lanes (8 x `f32` fills one AVX2 lane, four lanes
+/// per 32-group, sequential scan keeps cache misses low
+/// [geaen | 3.4.2.7 Avoiding Cache Misses]). One [`chunk_all_settled32`]
+/// narrowed check per group skips resting ground bodies when `h >= FIXED_DT`,
+/// so the 10k settled slice of the 11k mixed fixture pays only the predicate
+/// and the 1k dynamic prefix pays one velocity fast-fail (`vx|vy` two loads)
+/// plus one predictable branch per 32 bodies instead of per 8
+/// ([geaen | 3.4.3.2 Branch Prediction]). The remainder tail takes one
+/// [`slice_all_settled`] branch for its settled lanes (stepping a settled lane
+/// via the fast path keeps every bit, so the batch-fail fallback may step all
+/// remainder lanes with no per-body skip); the stepping loop is an iterator
+/// with no per-lane bounds checks in index order. The skip flag fans into two
+/// loops so the hot path carries no per-group flag branch.
 /// Units: metres, m/s, seconds. Determinism: index order, same float ops,
 /// no allocation, no wall clock. Errors: bad `dt` steps nothing.
 pub fn integrate(bodies: &mut [Body], dt: f32) {
@@ -289,8 +331,13 @@ pub fn integrate(bodies: &mut [Body], dt: f32) {
                 step_with_h_fast(b, h, gh);
             }
         }
-        for b in chunks.into_remainder().iter_mut() {
-            if !is_settled(b) {
+        let rem = chunks.into_remainder();
+        // Single skip branch for the settled tail (hot 24-lane remainder):
+        // stepping a settled lane via the fast path keeps every bit, so the
+        // batch-fail fallback steps all remainder lanes with no per-body
+        // skip; the scalar loop stays the fallback for tiny `h`.
+        if !slice_all_settled(rem) {
+            for b in rem.iter_mut() {
                 step_with_h_fast(b, h, gh);
             }
         }
@@ -782,6 +829,63 @@ mod tests {
                     "33-wide tail diverged at lane {i}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn slice_remainder_matches_all_and_skips_tail() {
+        // Failure: batch remainder predicate diverges from `all(is_settled)`
+        // or stepping a settled lane via fast changes bits, so the
+        // single-branch tail skip would move the hash.
+        let settled = Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 0.5);
+        let awake = Body::new(0.0, 5.0, 1.0, 0.0, 0.5, 0.5);
+        let empty: Vec<Body> = Vec::new();
+        assert!(slice_all_settled(&empty));
+        assert_eq!(slice_all_settled(&empty), empty.iter().all(is_settled));
+        assert!(slice_all_settled(&[settled; 24]));
+        assert!(!slice_all_settled(&[awake; 24]));
+        for lane in [0, 7, 23] {
+            let mut tail = [settled; 24];
+            tail[lane] = awake;
+            assert!(!slice_all_settled(&tail));
+            assert_eq!(slice_all_settled(&tail), tail.iter().all(is_settled));
+        }
+        for edge in [
+            Body::new(-0.0, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(f32::INFINITY, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, -0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, 0.0, -0.0, 0.5, 0.5),
+            Body::new(1.25, 5.0, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 100_000.0),
+        ] {
+            let mut tail = [settled; 24];
+            tail[17 % 24] = edge;
+            assert!(!slice_all_settled(&tail));
+            assert_eq!(slice_all_settled(&tail), tail.iter().all(is_settled));
+        }
+        let h = FIXED_DT;
+        let gh = GRAVITY * h;
+        for base in [settled, Body::new(-3.5, 0.5, 0.0, 0.0, 0.5, 0.5)] {
+            assert!(is_settled(&base), "fixture must be settled: {base:?}");
+            let mut stepped = [base];
+            for body in stepped.iter_mut() {
+                step_with_h_fast(body, h, gh);
+            }
+            assert_eq!(
+                (
+                    stepped[0].x.to_bits(),
+                    stepped[0].y.to_bits(),
+                    stepped[0].vx.to_bits(),
+                    stepped[0].vy.to_bits()
+                ),
+                (
+                    base.x.to_bits(),
+                    base.y.to_bits(),
+                    base.vx.to_bits(),
+                    base.vy.to_bits()
+                ),
+                "fast on settled must keep bits like a skip: {base:?}"
+            );
         }
     }
 

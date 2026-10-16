@@ -34,6 +34,7 @@
 pub mod agent;
 pub mod agreement;
 pub mod bench_mirror;
+pub mod bot_harness;
 pub mod brief_eval;
 pub mod budgets;
 pub mod causal;
@@ -87,6 +88,21 @@ pub use living::{living_gate, LivingGateOutcome, LIVING_GATE_NAME};
 /// removed or renamed entry fails the build on the proof side instead of
 /// silently unwiring the gate.
 pub use tournament::{proof_gate, GateOutcome, GATE_NAME};
+
+/// Fixture aggregate for mirror rows: 2 bouts, hold 2, delay 4.
+pub fn bot_harness_fixture() -> bot_harness::HarnessAggregate {
+    let harness = bot_harness::BotHarness {
+        hold_ticks: 2,
+        delay_frames: 4,
+        bouts: 2,
+        ticks_per_bout: 60,
+        base_seed: 2040,
+    };
+    match harness.run() {
+        Ok(report) => report,
+        Err(_) => Default::default(),
+    }
+}
 
 /// One blocking or decorative prop in meters. Sizes are full extents.
 /// `physical` props block movement in reachability; all props cost budget.

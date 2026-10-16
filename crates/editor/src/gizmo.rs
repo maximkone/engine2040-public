@@ -25,6 +25,8 @@
 //! PORT(urholaukkarinen/transform-gizmo@07a951ec17ebff2de4608b711ee0544ff2c8063c:
 //! config modes + gizmo session + egui frame): keep the ui bridge as-is and
 //! route interact output through grouped commits, one drag is one undo step.
+//! Merge-lane route: one translate sweep folds via `merge_key` plus
+//! `apply_coalesced` (one `pose.px` lane, seal on release) to one entry.
 
 use engine_core::quat_mul;
 use engine_scene::ids::ObjectId;

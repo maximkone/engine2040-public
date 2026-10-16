@@ -291,8 +291,16 @@ fn distance_match_holds_the_window() {
     let mut warp = GroundWarp::new();
     warp.begin_transient(LocoState::Pivot, 12, 1.5, 4.0)
         .expect("window");
-    assert!((warp.rate() - 4.0 / 1.5).abs() < 1e-6, "rate={}", warp.rate());
-    assert!((warp.stride() - 1.0).abs() < 1e-6, "stride={}", warp.stride());
+    assert!(
+        (warp.rate() - 4.0 / 1.5).abs() < 1e-6,
+        "rate={}",
+        warp.rate()
+    );
+    assert!(
+        (warp.stride() - 1.0).abs() < 1e-6,
+        "stride={}",
+        warp.stride()
+    );
     assert!(!warp.settled());
     assert_eq!(warp.window_ticks(), 12);
     assert!((warp.target_speed() - 1.5).abs() < 1e-6);
@@ -311,7 +319,10 @@ fn distance_match_holds_the_window() {
     // Ticks past the window leave the accounts alone.
     let (capsule, clip) = (warp.capsule_travel_m(), warp.clip_travel_m());
     warp.tick([0.0, 4.0 * TICK_DT]).expect("late tick");
-    assert_eq!((warp.capsule_travel_m(), warp.clip_travel_m()), (capsule, clip));
+    assert_eq!(
+        (warp.capsule_travel_m(), warp.clip_travel_m()),
+        (capsule, clip)
+    );
     // Stationary ends hold rate 1.0: no division, no teleport.
     let mut still = GroundWarp::new();
     still
@@ -353,7 +364,10 @@ fn root_passes_through_bit_identical() {
         warp.warp_output(&mut warped, capsule, [0.0, 1.0], &LEGS)
             .expect("warp");
         assert_eq!(warped.root.dp, plain.root.dp, "root delta untouched t={t}");
-        assert_eq!(warped.root.dyaw, plain.root.dyaw, "root yaw untouched t={t}");
+        assert_eq!(
+            warped.root.dyaw, plain.root.dyaw,
+            "root yaw untouched t={t}"
+        );
         assert_eq!(warped.contacts, plain.contacts, "contacts untouched t={t}");
     }
 }
@@ -486,18 +500,49 @@ fn rejected_warp_output_mutates_nothing() {
     };
     let cases: [(LocoOutput, f32, [f32; 2], &[usize], WarpError); 7] = [
         (good.clone(), 1.5, [0.0, 0.0], &LEGS, WarpError::BadWishDir),
-        (good.clone(), 1.5, [0.0, 1.0], &[3, 99], WarpError::BadJoint(99)),
-        (good.clone(), -1.0, [0.0, 1.0], &LEGS, WarpError::NegativeSpeed(-1.0)),
-        (bad_dp, 1.5, [0.0, 1.0], &LEGS, WarpError::NonFinite("root delta")),
+        (
+            good.clone(),
+            1.5,
+            [0.0, 1.0],
+            &[3, 99],
+            WarpError::BadJoint(99),
+        ),
+        (
+            good.clone(),
+            -1.0,
+            [0.0, 1.0],
+            &LEGS,
+            WarpError::NegativeSpeed(-1.0),
+        ),
+        (
+            bad_dp,
+            1.5,
+            [0.0, 1.0],
+            &LEGS,
+            WarpError::NonFinite("root delta"),
+        ),
         (ragged, 1.5, [0.0, 1.0], &LEGS, ragged_err),
         (empty, 1.5, [0.0, 1.0], &LEGS, WarpError::EmptyPose),
-        (nan_pose, 1.5, [0.0, 1.0], &LEGS, WarpError::NonFinite("pose positions")),
+        (
+            nan_pose,
+            1.5,
+            [0.0, 1.0],
+            &LEGS,
+            WarpError::NonFinite("pose positions"),
+        ),
     ];
     for (mut target, speed, wish, legs, expect) in cases {
         // Debug text, not `==`: NaN lanes never compare equal to themselves.
         let snapshot = format!("{target:?}");
-        assert_eq!(warp.warp_output(&mut target, speed, wish, legs), Err(expect));
-        assert_eq!(format!("{target:?}"), snapshot, "{expect:?} touched the output");
+        assert_eq!(
+            warp.warp_output(&mut target, speed, wish, legs),
+            Err(expect)
+        );
+        assert_eq!(
+            format!("{target:?}"),
+            snapshot,
+            "{expect:?} touched the output"
+        );
         assert_eq!(warp, before_warp, "{expect:?} touched the warp");
     }
 }

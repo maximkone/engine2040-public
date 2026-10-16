@@ -481,6 +481,35 @@ impl Spine {
         }
     }
 
+    /// Spawn one RC4 prefab bundle over the spine columns. Setup path only;
+    /// delegates to [`crate::views::SpawnBundle::spawn_into`]. Errors: the
+    /// views bundle error (full store or unknown component). Determinism:
+    /// slot order only.
+    pub fn spawn_bundle(
+        &mut self,
+        bundle: &crate::views::SpawnBundle,
+    ) -> Result<usize, crate::views::BundleError> {
+        bundle.spawn_into(self)
+    }
+
+    /// Spawn every bundle in order, then count live slots on one optional
+    /// pass. Setup path only; delegates to
+    /// [`crate::views::spawn_prefab_batch`]. Returns the live-slot total.
+    /// Errors: the first refused bundle. Determinism: slot order only.
+    pub fn spawn_bundles(
+        &mut self,
+        bundles: &[crate::views::SpawnBundle],
+    ) -> Result<usize, crate::views::BundleError> {
+        crate::views::spawn_prefab_batch(self, bundles)
+    }
+
+    /// Visit every live slot through the optional view (absent prefab
+    /// columns read as `None`). Tick path: borrows in place, no heap use.
+    /// Delegates to [`crate::views::for_each_optional`].
+    pub fn for_each_optional(&mut self, f: impl FnMut(usize, crate::views::OptionalSlot<'_>)) {
+        crate::views::for_each_optional(self, f);
+    }
+
     /// Per-column digests over live slots in index order (slot index plus
     /// the column bytes), so a divergence names its column. Streams, no
     /// allocation.
@@ -824,6 +853,45 @@ mod tests {
     fn column_names_and_order_are_stable() {
         let names: Vec<&str> = Column::ORDER.iter().map(|c| c.name()).collect();
         assert_eq!(names, ["transform", "body", "vitals", "ai", "anim"]);
+    }
+
+    #[test]
+    fn spine_bundles_wire_the_optional_views() {
+        use crate::views::SpawnBundle;
+        let mut spine = Spine::with_capacity(4);
+        let bundles = [
+            SpawnBundle {
+                transform: Some(Transform {
+                    pos: [1.0, 0.0, -1.0],
+                    yaw: 0.5,
+                }),
+                body: Some(body()),
+                vitals: Some(Vitals {
+                    hp_permille: 900,
+                    stamina: 80,
+                    poise: 0,
+                    state: 0,
+                }),
+                ai: None,
+                anim: None,
+            },
+            SpawnBundle::default(),
+        ];
+        let slot = spine.spawn_bundle(&bundles[0]).expect("fits");
+        assert_eq!(slot, 0);
+        assert_eq!(spine.live(), 1);
+        let live = spine.spawn_bundles(&bundles[1..]).expect("fits");
+        assert_eq!((live, spine.live()), (2, 2));
+        let (mut seen, mut ai_seen) = (0usize, 0usize);
+        spine.for_each_optional(|_, view| {
+            seen += 1;
+            ai_seen += usize::from(view.ai.is_some());
+        });
+        assert_eq!((seen, ai_seen), (2, 0));
+        // Failure path stays loud through the wrapper.
+        let mut full = Spine::with_capacity(1);
+        full.spawn_bundle(&bundles[0]).expect("fits");
+        assert!(full.spawn_bundle(&bundles[1]).is_err());
     }
 
     #[test]

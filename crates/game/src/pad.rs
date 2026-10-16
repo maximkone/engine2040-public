@@ -12,7 +12,7 @@
 
 use engine_input::fighter::WISH_RANGE;
 use engine_input::{
-    apply_deadzone, Bindings, FighterError, FighterId, FighterInput, PhysicalButton,
+    apply_deadzone, Bindings, BoundAction, FighterError, FighterId, FighterInput, PhysicalButton,
 };
 
 /// One gamepad snapshot as plain data: no device handles, no threads.
@@ -174,6 +174,84 @@ pub fn combine_wish(button: (i8, i8), stick: (i8, i8)) -> (i8, i8) {
     (mx, mz)
 }
 
+/// One recorded pad event in backend-neutral form: the gilrs poll call
+/// will emit these once per frame, and tests feed them by hand.
+///
+/// Units: button codes are pad indices `0..=255`, axes in `-1.0..=1.0`.
+/// Ownership: caller-owned values. Threading: `Send + Sync`.
+/// Determinism: the same list folds to the same snapshot twice.
+/// Errors: none; every event maps to some state, never panics.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum RecordedPadEvent {
+    /// Pad code went down.
+    ButtonDown(u8),
+    /// Pad code went up.
+    ButtonUp(u8),
+    /// Stick pair replaced wholesale; the last axis event wins.
+    Axis { lx: f32, ly: f32 },
+}
+
+/// Fold a recorded event list into one snapshot: downs set bits, ups clear
+/// them, the last axis event sets the sticks. Button codes above 255 cannot
+/// exist (`u8`), so every code maps to a bit; non-finite axes rest at zero
+/// once quantized downstream.
+///
+/// Units: as in [`RecordedPadEvent`]. Ownership: borrows the list, returns
+/// an owned snapshot. Threading: caller thread only, no locks.
+/// Determinism: pure fold in list order; the same list gives the same bytes
+/// twice. Budget: one pass over the list, no heap. Errors: none, never
+/// panics.
+#[must_use]
+pub fn snapshot_from_recorded(events: &[RecordedPadEvent]) -> PadFrame {
+    let mut lx = 0.0f32;
+    let mut ly = 0.0f32;
+    let mut buttons = [0u64, 0u64, 0u64, 0u64];
+    for event in events {
+        match *event {
+            RecordedPadEvent::ButtonDown(code) => {
+                let word = usize::from(code / 64);
+                let bit = code % 64;
+                if let Some(slot) = buttons.get_mut(word) {
+                    *slot |= 1u64 << bit;
+                }
+            }
+            RecordedPadEvent::ButtonUp(code) => {
+                let word = usize::from(code / 64);
+                let bit = code % 64;
+                if let Some(slot) = buttons.get_mut(word) {
+                    *slot &= !(1u64 << bit);
+                }
+            }
+            RecordedPadEvent::Axis { lx: x, ly: y } => {
+                lx = x;
+                ly = y;
+            }
+        }
+    }
+    let mut frame = PadFrame::snapshot(lx, ly, &[]);
+    frame.buttons = buttons;
+    frame
+}
+
+/// Fold one device poll into a snapshot: the backend drains its pending
+/// events into a list once per frame, and this folds that list through
+/// [`snapshot_from_recorded`].
+///
+/// Units: as in [`RecordedPadEvent`]. Ownership: takes the drained list by
+/// value (the caller moves its per-frame drain in) and returns an owned
+/// snapshot. Threading: caller thread only, no locks, no threads.
+/// Determinism: pure over the drained list; the same list gives the same
+/// bytes twice, and stick clamping happens at quantize time through
+/// [`PadFrame::stick_wish`] exactly like [`PadFrame::snapshot`], so an
+/// out-of-range or non-finite axis rests the same way. Budget: one pass
+/// over the list, no heap beyond the moved-in drain. Errors: none, never
+/// panics.
+#[must_use]
+pub fn poll_gilrs_once(read: impl FnOnce() -> Vec<RecordedPadEvent>) -> PadFrame {
+    let events = read();
+    snapshot_from_recorded(&events)
+}
+
 /// Merge keyboard and pad buttons into one pressed list with no duplicates.
 ///
 /// The caller holds `out` across ticks: clear it, copy the keyboard slice in
@@ -216,11 +294,68 @@ pub fn fighter_input_from_pad(
     bindings.to_fighter_input(tick, fighter, pressed, wish, 0)
 }
 
+/// FPS input map: WASD movement, mouse fire/aim, everything rebindable.
+///
+/// Starts from the default table (the move rows are WASD already) and moves
+/// the two aim rows onto the mouse: the primary button fires (attack), the
+/// secondary aims (block). Dodge and the deadzone keep their defaults. Look
+/// itself stays presentation-side in the camera director: facing is pinned
+/// to zero here exactly like the keyboard path, so replays never depend on
+/// a camera angle. Every row stays rebindable through [`Bindings::rebind`].
+///
+/// Units: buttons as [`PhysicalButton`] codes. Ownership: returns an owned
+/// table. Threading: caller thread only, no locks. Determinism: the same
+/// call builds the same table twice. Errors: none; every row names a valid
+/// button, never panics.
+#[must_use]
+pub fn fps_bindings() -> Bindings {
+    let mut bindings = Bindings::new();
+    bindings.rebind(BoundAction::Attack, PhysicalButton::Mouse(0));
+    bindings.rebind(BoundAction::Block, PhysicalButton::Mouse(1));
+    bindings
+}
+
+/// Poll one frame of pad events and build the tick input: the once-per-frame
+/// backend poll folds `pad_events` into a [`PadFrame`], pad codes merge with
+/// the keyboard `pressed` list in fixed order, the stick wish adds onto the
+/// button wish with saturation, and the table validates the result.
+///
+/// `pad_events` is the frame's drained backend event slice: empty while no
+/// device backend is linked (sticks centered, no buttons held), one backend
+/// drain per frame once the gilrs poll lands. Facing stays pinned at zero
+/// like the keyboard path, so the same events give the same input twice.
+/// The windowed leg calls this once per tick and reuses its pressed buffer.
+///
+/// Units: wishes in `-100..=100`, facing in centidegrees (always zero here),
+/// ticks are zero-based. Ownership: borrows both inputs plus the table and
+/// reuses the caller's `scratch` buffer, which keeps its capacity.
+/// Threading: caller thread only, no locks. Determinism: pure over the
+/// inputs plus the table; index order, never hash order. Budget: one pass
+/// over each input; no heap use beyond the caller's buffer growth. Errors:
+/// [`FighterError`] when the fighter slot is bad; the table refuses loudly,
+/// never clamps silently.
+pub fn tick_input_with_pad(
+    tick: u32,
+    fighter: FighterId,
+    keyboard: &[PhysicalButton],
+    pad_events: &[RecordedPadEvent],
+    bindings: &Bindings,
+    scratch: &mut Vec<PhysicalButton>,
+) -> Result<FighterInput, FighterError> {
+    let pad: PadFrame = snapshot_from_recorded(pad_events);
+    merge_pressed(keyboard, &pad, scratch);
+    let stick = pad.stick_wish(bindings.deadzone());
+    fighter_input_from_pad(tick, fighter, scratch, stick, bindings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine_core::alloc_probe;
-    use engine_input::{fighter::ATTACK, Bindings, BoundAction, Buttons};
+    use engine_input::{
+        fighter::{ATTACK, BLOCK},
+        Bindings, BoundAction, Buttons,
+    };
 
     fn fighter() -> FighterId {
         FighterId::new(0).expect("slot zero is always valid")
@@ -326,6 +461,169 @@ mod tests {
         assert!(pad.is_pressed(7));
         assert!(!pad.is_pressed(4));
         assert_eq!(PadFrame::empty(), PadFrame::snapshot(0.0, 0.0, &[]));
+    }
+
+    #[test]
+    fn pad_gilrs_recorded_events_give_equal_bytes() {
+        use RecordedPadEvent::{Axis, ButtonDown, ButtonUp};
+        let events = [
+            Axis { lx: 0.5, ly: -0.25 },
+            ButtonDown(0),
+            ButtonDown(7),
+            ButtonDown(7),
+            ButtonUp(0),
+            ButtonDown(3),
+            Axis { lx: 1.0, ly: 0.5 },
+        ];
+        let first = snapshot_from_recorded(&events);
+        let second = snapshot_from_recorded(&events);
+        // Byte equality: axis bits plus button words match exactly.
+        assert_eq!(first.lx.to_bits(), second.lx.to_bits());
+        assert_eq!(first.ly.to_bits(), second.ly.to_bits());
+        assert_eq!(first.buttons, second.buttons);
+        assert_eq!(first, second);
+        // Press-then-release clears; duplicates collapse; last axis wins.
+        assert!(!first.is_pressed(0));
+        assert!(first.is_pressed(3));
+        assert!(first.is_pressed(7));
+        assert_eq!((first.lx, first.ly), (1.0, 0.5));
+        // Same tape through `snapshot` gives the same button bytes.
+        let direct = PadFrame::snapshot(1.0, 0.5, &[3, 7]);
+        assert_eq!(first.buttons, direct.buttons);
+        // Once-per-frame drain is pure: the same recorded list folds to
+        // the same bytes twice through the poll helper.
+        let polled_first = poll_gilrs_once(|| events.to_vec());
+        let polled_second = poll_gilrs_once(|| events.to_vec());
+        assert_eq!(polled_first.lx.to_bits(), polled_second.lx.to_bits());
+        assert_eq!(polled_first.ly.to_bits(), polled_second.ly.to_bits());
+        assert_eq!(polled_first.buttons, polled_second.buttons);
+        assert_eq!(polled_first, polled_second);
+        assert_eq!(polled_first, first);
+        // Empty drain rests at the empty snapshot.
+        assert_eq!(poll_gilrs_once(Vec::new), PadFrame::empty());
+        assert_eq!(snapshot_from_recorded(&[]), PadFrame::empty());
+    }
+
+    #[test]
+    fn fps_map_fires_aims_moves_and_rebinds() {
+        let bindings = fps_bindings();
+        // WASD movement rows keep their defaults; only the aim rows move.
+        for action in [
+            BoundAction::MoveForward,
+            BoundAction::MoveBack,
+            BoundAction::MoveLeft,
+            BoundAction::MoveRight,
+        ] {
+            assert_eq!(bindings.button(action), Bindings::new().button(action));
+        }
+        // Primary button fires, secondary aims.
+        assert_eq!(
+            bindings.button(BoundAction::Attack),
+            PhysicalButton::Mouse(0)
+        );
+        assert_eq!(
+            bindings.button(BoundAction::Block),
+            PhysicalButton::Mouse(1)
+        );
+        assert_eq!(
+            bindings.button_bits(&[PhysicalButton::Mouse(0)]),
+            Buttons(ATTACK)
+        );
+        assert_eq!(
+            bindings.button_bits(&[PhysicalButton::Mouse(1)]),
+            Buttons(BLOCK)
+        );
+        // Every row stays rebindable: move fire to a pad code and the
+        // mouse button stops firing through the same table.
+        let mut rebound = bindings;
+        rebound.rebind(BoundAction::Attack, PhysicalButton::Pad(9));
+        assert_eq!(
+            rebound.button_bits(&[PhysicalButton::Mouse(0)]),
+            Buttons::NONE
+        );
+        assert_eq!(
+            rebound.button_bits(&[PhysicalButton::Pad(9)]),
+            Buttons(ATTACK)
+        );
+        // The same call builds the same table twice.
+        assert_eq!(fps_bindings(), bindings);
+    }
+
+    #[test]
+    fn pad_poll_merges_stick_and_buttons_deterministically() {
+        let mut bindings = fps_bindings();
+        bindings.rebind(BoundAction::Attack, PhysicalButton::Pad(0));
+        let human = FighterId::new(0).expect("slot zero is always valid");
+        let keyboard = [bindings.button(BoundAction::MoveForward)];
+        let events = [
+            RecordedPadEvent::Axis { lx: 1.0, ly: 0.0 },
+            RecordedPadEvent::ButtonDown(0),
+            RecordedPadEvent::ButtonDown(0),
+            RecordedPadEvent::ButtonUp(1),
+        ];
+        let mut scratch = Vec::with_capacity(16);
+        let first = tick_input_with_pad(0, human, &keyboard, &events, &bindings, &mut scratch)
+            .expect("scripted poll input validates");
+        let second = tick_input_with_pad(0, human, &keyboard, &events, &bindings, &mut scratch)
+            .expect("scripted poll input validates");
+        // Same events give the same input twice: bits hash into the tick.
+        assert_eq!(first, second);
+        first.validate().expect("polled input validates");
+        // Keyboard forward plus full-right stick: a saturated diagonal.
+        assert_eq!((first.mx, first.mz), (100, 100));
+        // The rebound pad code fires through the poll path; the released
+        // code and the duplicate press leave no trace.
+        assert_eq!(first.buttons, Buttons(ATTACK));
+        assert_eq!(first.tick, 0);
+        // Empty frame emits exactly the idle input the headless leg
+        // replays tick for tick, so the golden never moves.
+        let idle = tick_input_with_pad(9, human, &[], &[], &bindings, &mut scratch)
+            .expect("idle poll input validates");
+        assert_eq!(
+            idle,
+            FighterInput {
+                tick: 9,
+                fighter: human,
+                mx: 0,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons::NONE,
+            }
+        );
+        // A bad fighter slot fails loudly instead of stamping a bad input.
+        let bad = tick_input_with_pad(
+            0,
+            FighterId(99),
+            &keyboard,
+            &events,
+            &bindings,
+            &mut scratch,
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn pad_poll_reuses_scratch_without_growing() {
+        // Calibration: the shared probe must see a real allocation first.
+        let (_, probe) = alloc_probe::measure(|| std::hint::black_box(vec![0u8; 64]));
+        assert!(probe.calls >= 1, "allocation probe is blind");
+
+        let bindings = fps_bindings();
+        let human = FighterId::new(0).expect("slot zero is always valid");
+        let keyboard = [bindings.button(BoundAction::MoveForward)];
+        let events = [RecordedPadEvent::Axis { lx: 0.5, ly: -0.25 }];
+        let mut scratch = Vec::with_capacity(16);
+        // Warmup sizes the buffer; the measured pass must not grow it.
+        tick_input_with_pad(0, human, &keyboard, &events, &bindings, &mut scratch)
+            .expect("warmup poll input validates");
+        let (input, steady) = alloc_probe::measure(|| {
+            tick_input_with_pad(0, human, &keyboard, &events, &bindings, &mut scratch)
+        });
+        assert!(input.is_ok());
+        assert_eq!(
+            steady.calls, 0,
+            "pad poll plus build must not allocate per tick"
+        );
     }
 
     #[test]

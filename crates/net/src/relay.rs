@@ -31,6 +31,14 @@ pub const INVITE_BYTES: usize = 6;
 pub const INVITE_TTL_TICKS: u32 = 36_000;
 /// Hole-punch budget in ticks: 5 s at 60 Hz, then relay fallback.
 pub const PUNCH_TIMEOUT_TICKS: u32 = 300;
+/// Relay protocol id every invite ticket carries: the netcode-style handshake
+/// shape (protocol id, create/expire timestamps, opaque user bytes) with a
+/// challenge round before the punch budget starts. Tickets minted elsewhere
+/// (wrong protocol) refuse at the join decision, deny by default.
+pub const RELAY_PROTOCOL_ID: u64 = 0xE204_0A11_CE00_0001;
+/// Domain salt for the relay challenge round: keeps challenge answers off
+/// the invite-code and relay-id streams.
+const CHALLENGE_SALT: u64 = 0x51A7_C4A1_1E69_0A30;
 /// STUN magic cookie (RFC 5389 fixed word, checked on decode).
 pub const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
 /// STUN binding request type word.
@@ -192,7 +200,9 @@ impl InviteCode {
 }
 
 /// One issued invite: code plus the build it joins plus its lifetime.
-/// Expiry is tick counts, never wall time, so replays stay exact.
+/// Expiry is tick counts, never wall time, so replays stay exact. The
+/// protocol id plus opaque user bytes are the netcode-style token fields:
+/// the host verifies them deny-by-default at the join decision.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct InviteTicket {
     /// Secret the joiner must present.
@@ -205,6 +215,10 @@ pub struct InviteTicket {
     pub issued_at: u32,
     /// Lifetime in ticks.
     pub ttl_ticks: u32,
+    /// Relay protocol this ticket joins; must equal [`RELAY_PROTOCOL_ID`].
+    pub protocol: u64,
+    /// Opaque user bytes bound to the code (shape only, never crypto here).
+    pub user: u64,
 }
 
 impl InviteTicket {
@@ -213,12 +227,18 @@ impl InviteTicket {
         if version == 0 {
             return Err(RelayError::BadInput);
         }
+        let key = code
+            .as_bytes()
+            .iter()
+            .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte));
         Ok(Self {
             code,
             version,
             rules,
             issued_at: now,
             ttl_ticks: INVITE_TTL_TICKS,
+            protocol: RELAY_PROTOCOL_ID,
+            user: mix64(key ^ RELAY_PROTOCOL_ID),
         })
     }
 
@@ -478,6 +498,9 @@ impl Candidate {
         }
         let kind = CandidateKind::from_u8(bytes[0]).ok_or(RelayError::BadKind(bytes[0]))?;
         let port = u16::from_le_bytes([bytes[2], bytes[3]]);
+        if port == 0 {
+            return Err(RelayError::BadInput); // port zero never gathers, so wire bytes carrying it are junk too
+        }
         let ip = match (bytes[1], bytes.len()) {
             (4, 8) => {
                 let mut octets = [0u8; 4];
@@ -1345,8 +1368,9 @@ impl Signal {
     }
 }
 
-/// Host-side join decision: check the presented code, lifetime and build,
-/// then accept into `slot` or refuse with the exact reason plus digest pair.
+/// Host-side join decision: check the protocol, the presented code, lifetime
+/// and build, then accept into `slot` or refuse with the exact reason plus
+/// digest pair.
 pub fn decide_join(
     ticket: &InviteTicket,
     code: [u8; INVITE_BYTES],
@@ -1356,6 +1380,16 @@ pub fn decide_join(
     slot: u8,
     now: u32,
 ) -> Signal {
+    if ticket.protocol != RELAY_PROTOCOL_ID {
+        return Signal::Refuse {
+            token,
+            reason: RefuseCode::VersionMismatch,
+            want_version: ticket.version,
+            got_version: version,
+            want_rules: ticket.rules,
+            got_rules: rules,
+        };
+    }
     if token == 0 || version == 0 {
         return Signal::Refuse {
             token,
@@ -1387,6 +1421,29 @@ pub fn decide_join(
         };
     }
     Signal::Accept { token, slot }
+}
+
+/// Mint the relay challenge for `client_id` from `server_seed`: integer-only
+/// and seeded, no clock and no hash input. The punch budget starts only after
+/// the answer verifies, so the challenge round orders before the first probe.
+pub(crate) fn mint_challenge(server_seed: u64, client_id: u64) -> u64 {
+    mix64(
+        server_seed
+            .wrapping_add(client_id)
+            .wrapping_add(CHALLENGE_SALT),
+    )
+}
+
+/// Answer a challenge with the relay token. The token stands in for the
+/// encrypted user bytes: shape only, never crypto here.
+pub(crate) fn answer_challenge(challenge: u64, token: u64) -> u64 {
+    mix64(challenge ^ token)
+}
+
+/// Verify an answer deny-by-default: wrong answers and zero tokens refuse.
+/// Pure integer check, so the same pair always gives the same verdict.
+pub(crate) fn verify_answer(challenge: u64, token: u64, answer: u64) -> bool {
+    token != 0 && answer == answer_challenge(challenge, token)
 }
 
 #[cfg(test)]
@@ -1645,6 +1702,30 @@ mod tests {
     }
 
     #[test]
+    fn candidate_decode_refuses_port_zero() {
+        // Port zero never gathers, so wire bytes carrying it are junk too:
+        // the punch must never try a zero-port candidate.
+        let zero_v4 = Candidate {
+            kind: CandidateKind::Host,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        };
+        assert_eq!(
+            Candidate::decode(&zero_v4.encode()),
+            Err(RelayError::BadInput),
+            "port-zero wire candidates refuse"
+        );
+        let zero_v6 = Candidate {
+            kind: CandidateKind::Srflx,
+            addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+        };
+        assert_eq!(
+            Candidate::decode(&zero_v6.encode()),
+            Err(RelayError::BadInput),
+            "v6 port-zero wire candidates refuse"
+        );
+    }
+
+    #[test]
     fn relay_register_forward_drain_fifo() {
         let mut server = RelayServer::new(RelayConfig::default());
         assert_eq!(server.peer_count(), 0);
@@ -1881,5 +1962,72 @@ mod tests {
         let mut bad_kind = encoded;
         bad_kind[3] = 0x7F;
         assert_eq!(Signal::decode(&bad_kind), Err(RelayError::BadKind(0x7F)));
+    }
+
+    #[test]
+    fn ticket_carries_protocol_and_user_bound_to_the_code() {
+        let mut state = 4242u64;
+        let ticket =
+            InviteTicket::issue(InviteCode::mint(&mut state), 3, 0x1234_5678, 50).expect("issue");
+        assert_eq!(
+            ticket.protocol, RELAY_PROTOCOL_ID,
+            "issued tickets pin the relay"
+        );
+        let mut twin_state = 4242u64;
+        let twin = InviteTicket::issue(InviteCode::mint(&mut twin_state), 3, 0x1234_5678, 50)
+            .expect("issue");
+        assert_eq!((twin.protocol, twin.user), (ticket.protocol, ticket.user));
+        let mut other_state = 4243u64;
+        let other = InviteTicket::issue(InviteCode::mint(&mut other_state), 3, 0x1234_5678, 50)
+            .expect("issue");
+        assert_ne!(other.user, ticket.user, "user bytes follow the code");
+    }
+
+    #[test]
+    fn foreign_protocol_tickets_refuse_as_version_mismatch() {
+        let mut state = 4242u64;
+        let mut ticket =
+            InviteTicket::issue(InviteCode::mint(&mut state), 3, 0x1234_5678, 50).expect("issue");
+        ticket.protocol = 0xDEAD_BEEF;
+        match decide_join(&ticket, ticket.code.as_bytes(), 3, 0x1234_5678, 11, 1, 60) {
+            Signal::Refuse {
+                reason,
+                want_version,
+                got_version,
+                ..
+            } => {
+                assert_eq!(reason, RefuseCode::VersionMismatch);
+                assert_eq!((want_version, got_version), (3, 3));
+            }
+            other => panic!("foreign protocol must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn challenge_roundtrips_per_pair_and_refuses_loudly() {
+        let challenge = mint_challenge(0x0A30_2040, 7);
+        assert_eq!(
+            mint_challenge(0x0A30_2040, 7),
+            challenge,
+            "same pair, same challenge"
+        );
+        assert_ne!(
+            mint_challenge(0x0A30_2040, 8),
+            challenge,
+            "another client mints another challenge"
+        );
+        let answer = answer_challenge(challenge, 0xBEEF);
+        assert!(
+            verify_answer(challenge, 0xBEEF, answer),
+            "honest answers verify"
+        );
+        assert!(
+            !verify_answer(challenge, 0xBEEF, answer.wrapping_add(1)),
+            "forged answers refuse"
+        );
+        assert!(
+            !verify_answer(challenge, 0, answer_challenge(challenge, 0)),
+            "zero tokens refuse even with matching math"
+        );
     }
 }

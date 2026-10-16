@@ -44,7 +44,10 @@ pub struct Schema {
 }
 
 fn bad(path: &str, reason: &str) -> Refusal {
-    Refusal { path: path.into(), reason: reason.into() }
+    Refusal {
+        path: path.into(),
+        reason: reason.into(),
+    }
 }
 
 fn str_of(v: &Value) -> Option<&str> {
@@ -55,12 +58,19 @@ fn str_of(v: &Value) -> Option<&str> {
 }
 
 fn join(path: &str, key: &str) -> String {
-    if path.is_empty() { key.into() } else { format!("{path}.{key}") }
+    if path.is_empty() {
+        key.into()
+    } else {
+        format!("{path}.{key}")
+    }
 }
 
 /// Parse designer JSON text into a Value; malformed docs refuse, never panic.
 pub fn parse(doc: &str) -> Result<Value, Refusal> {
-    let mut p = P { b: doc.as_bytes(), i: 0 };
+    let mut p = P {
+        b: doc.as_bytes(),
+        i: 0,
+    };
     p.ws();
     let v = p.value(0)?;
     p.ws();
@@ -111,7 +121,12 @@ impl<'a> P<'a> {
     }
     fn number(&mut self) -> Result<Value, Refusal> {
         let s = self.i;
-        while self.i < self.b.len() && matches!(self.b[self.i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
+        while self.i < self.b.len()
+            && matches!(
+                self.b[self.i],
+                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
+            )
+        {
             self.i += 1;
         }
         let t = core::str::from_utf8(&self.b[s..self.i]).map_err(|_| bad("$", "bad number"))?;
@@ -125,7 +140,8 @@ impl<'a> P<'a> {
         if self.b.len().saturating_sub(self.i) < 4 {
             return Err(bad("$", "bad unicode"));
         }
-        let t = core::str::from_utf8(&self.b[self.i..self.i + 4]).map_err(|_| bad("$", "bad unicode"))?;
+        let t = core::str::from_utf8(&self.b[self.i..self.i + 4])
+            .map_err(|_| bad("$", "bad unicode"))?;
         let u = u32::from_str_radix(t, 16).map_err(|_| bad("$", "bad unicode"))?;
         self.i += 4;
         Ok(char::from_u32(u).unwrap_or('\u{FFFD}'))
@@ -134,12 +150,20 @@ impl<'a> P<'a> {
         self.i += 1;
         let mut s = String::new();
         loop {
-            let c = self.b.get(self.i).copied().ok_or_else(|| bad("$", "unterminated string"))?;
+            let c = self
+                .b
+                .get(self.i)
+                .copied()
+                .ok_or_else(|| bad("$", "unterminated string"))?;
             self.i += 1;
             match c {
                 b'"' => return Ok(s),
                 b'\\' => {
-                    let e = self.b.get(self.i).copied().ok_or_else(|| bad("$", "bad escape"))?;
+                    let e = self
+                        .b
+                        .get(self.i)
+                        .copied()
+                        .ok_or_else(|| bad("$", "bad escape"))?;
                     self.i += 1;
                     match e {
                         b'"' => s.push('"'),
@@ -156,7 +180,8 @@ impl<'a> P<'a> {
                 }
                 0..=31 => return Err(bad("$", "control in string")),
                 _ => {
-                    let rest = core::str::from_utf8(&self.b[self.i - 1..]).map_err(|_| bad("$", "bad utf8"))?;
+                    let rest = core::str::from_utf8(&self.b[self.i - 1..])
+                        .map_err(|_| bad("$", "bad utf8"))?;
                     let ch = rest.chars().next().ok_or_else(|| bad("$", "bad utf8"))?;
                     self.i += ch.len_utf8() - 1;
                     s.push(ch);
@@ -222,24 +247,42 @@ impl<'a> P<'a> {
 }
 
 fn rule_shape(r: &Value, path: String) -> Result<(), Refusal> {
-    let Value::Obj(o) = r else { return Err(Refusal { path, reason: "rule must be an object".into() }) };
+    let Value::Obj(o) = r else {
+        return Err(Refusal {
+            path,
+            reason: "rule must be an object".into(),
+        });
+    };
     if let Some(t) = o.get("type") {
         match str_of(t) {
             Some("string" | "integer" | "number" | "boolean" | "array" | "object" | "null") => {}
-            _ => return Err(Refusal { path, reason: "unknown type".into() }),
+            _ => {
+                return Err(Refusal {
+                    path,
+                    reason: "unknown type".into(),
+                })
+            }
         }
     }
     for k in ["minimum", "maximum"] {
         if let Some(n) = o.get(k) {
             match n {
                 Value::Num(x) if x.is_finite() => {}
-                _ => return Err(Refusal { path, reason: "range bound must be a number".into() }),
+                _ => {
+                    return Err(Refusal {
+                        path,
+                        reason: "range bound must be a number".into(),
+                    })
+                }
             }
         }
     }
     if let Some(e) = o.get("enum") {
         if !matches!(e, Value::Arr(_)) {
-            return Err(Refusal { path, reason: "enum must be an array".into() });
+            return Err(Refusal {
+                path,
+                reason: "enum must be an array".into(),
+            });
         }
     }
     if let Some(p) = o.get("properties") {
@@ -249,7 +292,12 @@ fn rule_shape(r: &Value, path: String) -> Result<(), Refusal> {
                     rule_shape(v, join(&path, k))?;
                 }
             }
-            _ => return Err(Refusal { path, reason: "properties must be an object".into() }),
+            _ => {
+                return Err(Refusal {
+                    path,
+                    reason: "properties must be an object".into(),
+                })
+            }
         }
     }
     Ok(())
@@ -390,18 +438,48 @@ mod tests {
         let scene = schema(SCENE);
         let rules = schema(RULES);
         let cases: [(&Schema, &str, bool, &str); 12] = [
-            (&scene, "{\"name\":\"arena\",\"count\":4,\"mode\":\"day\",\"transform\":{\"x\":1.5}}", true, ""),
+            (
+                &scene,
+                "{\"name\":\"arena\",\"count\":4,\"mode\":\"day\",\"transform\":{\"x\":1.5}}",
+                true,
+                "",
+            ),
             (&scene, "{\"count\":4}", false, "name"),
-            (&scene, "{\"name\":\"arena\",\"count\":\"four\"}", false, "count"),
+            (
+                &scene,
+                "{\"name\":\"arena\",\"count\":\"four\"}",
+                false,
+                "count",
+            ),
             (&scene, "{\"name\":\"arena\",\"count\":99}", false, "count"),
-            (&scene, "{\"name\":\"arena\",\"count\":4,\"mode\":\"dusk\"}", false, "mode"),
-            (&scene, "{\"name\":\"arena\",\"count\":4,\"fog\":true}", false, "fog"),
+            (
+                &scene,
+                "{\"name\":\"arena\",\"count\":4,\"mode\":\"dusk\"}",
+                false,
+                "mode",
+            ),
+            (
+                &scene,
+                "{\"name\":\"arena\",\"count\":4,\"fog\":true}",
+                false,
+                "fog",
+            ),
             (&rules, "{\"seed\":2040,\"rounds\":600}", true, ""),
             (&rules, "{\"seed\":2040}", false, "rounds"),
             (&rules, "{\"seed\":\"2040\",\"rounds\":10}", false, "seed"),
             (&rules, "{\"seed\":2040,\"rounds\":601}", false, "rounds"),
-            (&rules, "{\"seed\":1,\"rounds\":10,\"tier\":\"ps5\"}", false, "tier"),
-            (&rules, "{\"seed\":1,\"rounds\":10,\"cheat\":true}", false, "cheat"),
+            (
+                &rules,
+                "{\"seed\":1,\"rounds\":10,\"tier\":\"ps5\"}",
+                false,
+                "tier",
+            ),
+            (
+                &rules,
+                "{\"seed\":1,\"rounds\":10,\"cheat\":true}",
+                false,
+                "cheat",
+            ),
         ];
         for (s, doc, ok, path) in cases {
             let v = parse(doc).expect("doc parses");
@@ -416,7 +494,10 @@ mod tests {
         }
         let v = parse("{\"name\":\"a\",\"count\":1,\"transform\":{}}").expect("doc parses");
         let r = validate(&scene, &v);
-        assert!(r.iter().any(|x| x.path == "transform.x"), "nested path: {r:?}");
+        assert!(
+            r.iter().any(|x| x.path == "transform.x"),
+            "nested path: {r:?}"
+        );
         let mut big = String::from("{\"name\":\"a\",\"count\":1");
         for i in 0..24 {
             big.push_str(&format!(",\"k{i}\":1"));

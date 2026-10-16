@@ -17,6 +17,7 @@
 //! Consumer: the windowed leg (wired as `pub mod camera`); the
 //! mode framework boots [`FixtureMode`] from rule-set text.
 
+use crate::camera_arm::Aabb;
 use engine_core::hash::{FNV64_OFFSET, GOLDEN_GAMMA};
 use engine_core::{mix64, splitmix64};
 
@@ -151,6 +152,10 @@ pub struct DirectorParams {
     /// Boom pull-back per meter of distance (eye sits `boom_back * dist`
     /// behind on `+z`).
     pub boom_back: f32,
+    /// Sphere sweep radius in meters for pillar/wall boom collision.
+    pub boom_radius_m: f32,
+    /// Godot SpringArm margin in meters subtracted after a sweep hit.
+    pub boom_margin_m: f32,
     /// Shake offset cap in meters at full trauma.
     pub max_shake_m: f32,
     /// Trauma permille decayed per tick; `0` never decays.
@@ -190,6 +195,12 @@ impl DirectorParams {
         {
             return Err(CameraError::BadParam("boom"));
         }
+        if !self.boom_radius_m.is_finite() || self.boom_radius_m < 0.0 {
+            return Err(CameraError::BadParam("boom_radius"));
+        }
+        if !self.boom_margin_m.is_finite() || self.boom_margin_m < 0.0 {
+            return Err(CameraError::BadParam("boom_margin"));
+        }
         if !self.max_shake_m.is_finite() || self.max_shake_m < 0.0 {
             return Err(CameraError::BadParam("max_shake_m"));
         }
@@ -198,10 +209,21 @@ impl DirectorParams {
 }
 
 /// Version of the [`DirectorParams`] data-table codec below.
-pub const DIRECTOR_TABLE_VERSION: u8 = 1;
-/// Exact byte length of [`DirectorParams::encode`]: version (1) plus eight
-/// `f32` rows (32) plus the integer decay row (4).
-pub const DIRECTOR_TABLE_BYTES: usize = 37;
+pub const DIRECTOR_TABLE_VERSION: u8 = 2;
+/// Table bytes: version (1) plus ten `f32` rows (40) plus decay (4).
+pub const DIRECTOR_TABLE_BYTES: usize = 45;
+/// SpringArm sphere sweep radius default in meters (Godot shape cast).
+pub const BOOM_RADIUS_M: f32 = 0.3;
+/// SpringArm margin default in meters (subtracted after a hit).
+pub const BOOM_MARGIN_M: f32 = 0.01;
+/// Arena pillar slab for boom collision: face at x 3.0 m.
+pub const ARENA_PILLAR_BOX: Aabb = Aabb::new([3.0, -5.0, -5.0], [7.0, 5.0, 5.0]);
+/// Arena wall slab behind the pillar for boom collision.
+pub const ARENA_WALL_BOX: Aabb = Aabb::new([10.0, -5.0, -5.0], [10.5, 5.0, 5.0]);
+/// Pillar plus wall boxes for the boom sweep.
+pub fn arena_boom_obstacles() -> [Aabb; 2] {
+    [ARENA_PILLAR_BOX, ARENA_WALL_BOX]
+}
 
 /// Write one little-endian `f32` into a table slice at a fixed offset.
 fn put_table_f32(out: &mut [u8], at: usize, value: f32) {
@@ -237,14 +259,11 @@ impl DirectorParams {
             boom_back: 0.9,
             max_shake_m: 0.25,
             decay_permille_per_tick: 45,
+            ..Self::default()
         }
     }
 
-    /// Encode every tuning row as a versioned little-endian table: version
-    /// (1) then `fov_y_rad`, `fit_margin_m`, `base_dist_m`, `min_dist_m`,
-    /// `max_dist_m`, `boom_up`, `boom_back`, `max_shake_m` (8 x `f32`) then
-    /// `decay_permille_per_tick` (`u32`). Same params give the same bytes
-    /// twice; `decode(encode(p))` is `p`. Budget: 37 stack bytes, no heap.
+    /// Encode rows: version (2), ten `f32`, decay `u32`; `decode(encode(p))` is `p`; budget 45 bytes, no heap.
     #[must_use]
     pub fn encode(self) -> [u8; DIRECTOR_TABLE_BYTES] {
         let mut out = [0u8; DIRECTOR_TABLE_BYTES];
@@ -257,7 +276,9 @@ impl DirectorParams {
         put_table_f32(&mut out, 21, self.boom_up);
         put_table_f32(&mut out, 25, self.boom_back);
         put_table_f32(&mut out, 29, self.max_shake_m);
-        out[33..37].copy_from_slice(&self.decay_permille_per_tick.to_le_bytes());
+        put_table_f32(&mut out, 33, self.boom_radius_m);
+        put_table_f32(&mut out, 37, self.boom_margin_m);
+        out[41..45].copy_from_slice(&self.decay_permille_per_tick.to_le_bytes());
         out
     }
 
@@ -273,7 +294,7 @@ impl DirectorParams {
             return Err(CameraError::FutureVersion(bytes[0]));
         }
         let mut decay = [0u8; 4];
-        decay.copy_from_slice(&bytes[33..37]);
+        decay.copy_from_slice(&bytes[41..45]);
         let params = Self {
             fov_y_rad: get_table_f32(bytes, 1),
             fit_margin_m: get_table_f32(bytes, 5),
@@ -283,6 +304,8 @@ impl DirectorParams {
             boom_up: get_table_f32(bytes, 21),
             boom_back: get_table_f32(bytes, 25),
             max_shake_m: get_table_f32(bytes, 29),
+            boom_radius_m: get_table_f32(bytes, 33),
+            boom_margin_m: get_table_f32(bytes, 37),
             decay_permille_per_tick: u32::from_le_bytes(decay),
         };
         params.validate()?;
@@ -302,6 +325,8 @@ impl Default for DirectorParams {
             max_dist_m: 30.0,
             boom_up: 0.45,
             boom_back: 1.0,
+            boom_radius_m: BOOM_RADIUS_M,
+            boom_margin_m: BOOM_MARGIN_M,
             max_shake_m: 0.35,
             decay_permille_per_tick: 60,
         }
@@ -1979,6 +2004,7 @@ impl CourseCamera {
             boom_back: 1.0,
             max_shake_m: 0.25,
             decay_permille_per_tick: 45,
+            ..DirectorParams::default()
         }
     }
 }
@@ -2279,304 +2305,9 @@ impl CoursePlayback {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Staged rig, intent/smoothed damping and trauma-curve shake:
-// named, ordered, bypassable presentation stages beside the frozen
-// director. Tick math stays integer permille; all `f32` pose/shake/smoothing
-// math is presentation-only and never feeds simulation state. Zero heap
-// bytes per update; same inputs replay byte-exact twice. Consumer:
-// `camera_feed` (`PresentationFeed`, `SmoothedFeed`) under the window loop.
-// ---------------------------------------------------------------------------
-
-/// GP19 rig stage: one named pure map in the follow -> lock -> shake chain.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RigStage {
-    /// Frame focus plus anchor (pose without lock choice or shake).
-    Follow,
-    /// Nearest-in-frustum lock selection from the unshaken pose.
-    Lock,
-    /// Trauma-squared shake offset on the presented eye only.
-    Shake,
-}
-
-impl RigStage {
-    /// Short stable name for receipts and reorder logs.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Follow => "follow",
-            Self::Lock => "lock",
-            Self::Shake => "shake",
-        }
-    }
-}
-
-/// Ordered rig chain: follow feeds lock, lock feeds shake.
-pub const RIG_STAGES: [RigStage; 3] = [RigStage::Follow, RigStage::Lock, RigStage::Shake];
-/// Bypass bit that drops lock reporting (framing keeps the anchor).
-pub const BYPASS_LOCK: u8 = 0x01;
-/// Bypass bit that drops shake (the eye reports the unshaken pose).
-pub const BYPASS_SHAKE: u8 = 0x02;
-
-/// Follow stage as a pure map: frame `focus_m` plus `anchor_m`.
-pub fn follow_stage(
-    focus_m: Vec3,
-    anchor_m: Option<Vec3>,
-    params: &DirectorParams,
-) -> Result<CameraPose, CameraError> {
-    frame_pair(focus_m, anchor_m, params)
-}
-
-/// Lock stage as a pure map: nearest-in-frustum target from the pose.
-pub fn lock_stage(
-    eye_m: Vec3,
-    forward: Vec3,
-    params: &DirectorParams,
-    focus_id: u8,
-    fighters: &[FighterView],
-) -> Result<Option<u8>, CameraError> {
-    select_lock_target(
-        eye_m,
-        forward,
-        params.fov_y_rad * 0.5,
-        params.max_dist_m,
-        focus_id,
-        fighters,
-    )
-}
-
-/// Shake stage as a pure map: trauma-squared offset for (`trauma`, `tick`).
-#[must_use]
-pub fn shake_stage(trauma_permille: u32, tick: u32, max_m: f32) -> Vec3 {
-    shake_offset(trauma_permille, tick, max_m)
-}
-
-/// GP19 staged rig: the frozen [`Director`] driven as named ordered stages.
-/// With no bypass the frames are byte-identical to the director; each bypass
-/// bit drops one reporting stage while framing still holds, so a stage
-/// reorder or removal needs only builder order, never new math.
-#[derive(Clone, Debug)]
-pub struct StagedRig {
-    director: Director,
-    bypass: u8,
-}
-
-impl StagedRig {
-    /// Build a rig following `focus_id` under `params`, no stage bypassed.
-    pub fn new(focus_id: u8, params: DirectorParams) -> Result<Self, CameraError> {
-        Ok(Self {
-            director: Director::new(focus_id, params)?,
-            bypass: 0,
-        })
-    }
-
-    /// Set the bypass mask (`BYPASS_LOCK | BYPASS_SHAKE`); unknown bits are
-    /// kept but ignored, so newer stages never break older callers.
-    pub fn set_bypass(&mut self, mask: u8) {
-        self.bypass = mask;
-    }
-
-    /// Current bypass mask.
-    #[must_use]
-    pub fn bypass(&self) -> u8 {
-        self.bypass
-    }
-
-    /// Ordered stage names served this update (follow, lock, shake).
-    #[must_use]
-    pub fn stage_names(&self) -> [&'static str; 3] {
-        [
-            RigStage::Follow.name(),
-            RigStage::Lock.name(),
-            RigStage::Shake.name(),
-        ]
-    }
-
-    /// Followed fighter id.
-    #[must_use]
-    pub fn focus_id(&self) -> u8 {
-        self.director.focus_id()
-    }
-
-    /// Active tuning table (copy).
-    #[must_use]
-    pub fn params(&self) -> DirectorParams {
-        self.director.params()
-    }
-
-    /// Swap tuning at a tick boundary; validates first like the director.
-    pub fn retune(&mut self, params: DirectorParams) -> Result<(), CameraError> {
-        self.director.retune(params)
-    }
-
-    /// Current lock-on target (`None` while the lock stage is bypassed).
-    #[must_use]
-    pub fn lock(&self) -> Option<u8> {
-        if self.bypass & BYPASS_LOCK != 0 {
-            None
-        } else {
-            self.director.lock()
-        }
-    }
-
-    /// Current trauma permille after decay.
-    #[must_use]
-    pub fn trauma_permille(&self) -> u32 {
-        self.director.trauma_permille()
-    }
-
-    /// Record a hit: saturating add, clamped to `0..=1000`.
-    pub fn add_trauma(&mut self, amount_permille: u32) {
-        self.director.add_trauma(amount_permille);
-    }
-
-    /// Present one tick through the ordered stages: the director serves the
-    /// follow-plus-lock core (frozen API), then the named shake stage
-    /// re-derives the offset for audit (bit-exact: same pure inputs).
-    /// Bypassed stages report neutral values while the unshaken pose still
-    /// frames, so dropping lock or shake loses no framed tick.
-    pub fn update(
-        &mut self,
-        fighters: &[FighterView],
-        tick: u32,
-    ) -> Result<CameraFrame, CameraError> {
-        let mut frame = self.director.update(fighters, tick)?;
-        let audited = shake_stage(
-            frame.trauma_permille,
-            tick,
-            self.director.params().max_shake_m,
-        );
-        debug_assert_eq!(audited, frame.shake_m, "shake stage matches director");
-        if self.bypass & BYPASS_SHAKE != 0 {
-            frame.eye_m = frame.eye_m - frame.shake_m;
-            frame.shake_m = Vec3::ZERO;
-        }
-        if self.bypass & BYPASS_LOCK != 0 {
-            frame.lock = None;
-        }
-        Ok(frame)
-    }
-}
-
-/// GP20 look intent: where the camera wants to be this tick (raw rig output,
-/// unsmoothed). Presentation data only, never sim input.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct LookIntent {
-    /// Wanted eye in meters (shaken, as presented).
-    pub eye_m: Vec3,
-    /// Wanted look point in meters.
-    pub look_m: Vec3,
-}
-
-impl LookIntent {
-    /// Capture the raw intent from a presented frame (no smoothing).
-    #[must_use]
-    pub fn from_frame(frame: &CameraFrame) -> Self {
-        Self {
-            eye_m: frame.eye_m,
-            look_m: frame.look_m,
-        }
-    }
-}
-
-/// GP20 damped sync: the smoothed scene transform kept apart from the raw
-/// intent. The frame rate only decides how many `sync` calls run between
-/// ticks, never the sim bytes. Gain is integer permille per sync call; the
-/// `f32` approach math is presentation-only. Zero heap bytes per call.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct DampedSync {
-    eye_m: Vec3,
-    look_m: Vec3,
-    gain_permille: u32,
-    ready: bool,
-}
-
-impl DampedSync {
-    /// Build a sync with per-call gain `1..=1000` (1000 snaps every call).
-    pub fn new(gain_permille: u32) -> Result<Self, CameraError> {
-        if !(1..=1000).contains(&gain_permille) {
-            return Err(CameraError::BadParam("damping_gain"));
-        }
-        Ok(Self {
-            eye_m: Vec3::ZERO,
-            look_m: Vec3::ZERO,
-            gain_permille,
-            ready: false,
-        })
-    }
-
-    /// Per-call gain permille.
-    #[must_use]
-    pub fn gain_permille(&self) -> u32 {
-        self.gain_permille
-    }
-
-    /// Smoothed pose so far, if any intent synced yet.
-    #[must_use]
-    pub fn smoothed(&self) -> Option<LookIntent> {
-        if self.ready {
-            Some(LookIntent {
-                eye_m: self.eye_m,
-                look_m: self.look_m,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Intent bypass: the raw intent passes through untouched (identical).
-    #[must_use]
-    pub fn bypass(intent: &LookIntent) -> LookIntent {
-        *intent
-    }
-
-    /// Fold one intent into the smoothed transform: the first call snaps,
-    /// later calls approach by `gain_permille / 1000` per call (full gain
-    /// snaps, bit-exact). The same intent sequence gives the same smoothed
-    /// bytes twice. No heap.
-    pub fn sync(&mut self, intent: &LookIntent) -> LookIntent {
-        if !self.ready || self.gain_permille == 1000 {
-            self.eye_m = intent.eye_m;
-            self.look_m = intent.look_m;
-            self.ready = true;
-            return *intent;
-        }
-        let t = (self.gain_permille as f32) / 1000.0;
-        self.eye_m = self.eye_m + (intent.eye_m - self.eye_m) * t;
-        self.look_m = self.look_m + (intent.look_m - self.look_m) * t;
-        LookIntent {
-            eye_m: self.eye_m,
-            look_m: self.look_m,
-        }
-    }
-}
-
-/// Jab trauma: one landed light hit (matches the feed `TRAUMA_HIT`).
-pub const TRAUMA_JAB_PERMILLE: u32 = 180;
-/// Super trauma: a full-meter super (saturated trauma).
-pub const TRAUMA_SUPER_PERMILLE: u32 = 1000;
-
-/// Trauma response curve: squared trauma gain (`t^2`), so a jab moves
-/// far less than a super. Pure presentation math, never sim state.
-#[must_use]
-pub fn trauma_gain(trauma_permille: u32) -> f32 {
-    let t = trauma_permille.min(TRAUMA_SCALE) as f32 / TRAUMA_SCALE as f32;
-    t * t
-}
-
-/// Restore the unshaken pose eye from a presented frame: the shake offset is
-/// presentation-only, so removing it returns the pose eye the next tick
-/// selects from (within one float rounding step).
-#[must_use]
-pub fn unshaken_eye(frame: &CameraFrame) -> Vec3 {
-    frame.eye_m - frame.shake_m
-}
-
-/// Presented shake displacement in meters for one frame.
-#[must_use]
-pub fn shake_displacement_m(frame: &CameraFrame) -> f32 {
-    frame.shake_m.len()
-}
+#[path = "camera_rig.rs"]
+pub mod camera_rig;
+pub use self::camera_rig::*;
 
 #[cfg(test)]
 mod tests {

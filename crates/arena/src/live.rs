@@ -109,6 +109,23 @@ pub struct LiveTick<'a> {
     pub rows: &'a [Row],
 }
 
+/// Engine-observe reason name for a past-deadline provider reply. Names, not
+/// raw codes: the provider loop resolves this through the real
+/// `engine-observe` registry (`provider.timeout`), so this crate never
+/// mirrors that registry (provider `fallback.rs` precedent).
+const PROVIDER_TIMEOUT_REASON: &str = "provider.timeout";
+
+/// One past-deadline provider reply refused without ever applying late. The
+/// tick already ran the scripted brain; this row is diagnostics only and
+/// never enters the tick or the hash.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct LateFallback {
+    /// The refused reply's tick, already stepped when the reply arrived.
+    tick: u32,
+    /// Engine-observe reason name (`PROVIDER_TIMEOUT_REASON`).
+    reason: &'static str,
+}
+
 /// Incremental live match: one cold authority `Sim` stepped exactly once per
 /// [`LiveMatch::step`] call (see the module docs). The tick log stays one row
 /// deep, so memory is flat over any match length.
@@ -132,6 +149,9 @@ pub struct LiveMatch {
     breaks: TickBreaks,
     steps: u64,
     poisoned: bool,
+    /// Past-deadline replies refused in arrival order, one row per late
+    /// reply. Diagnostics only; never enters the tick or the hash.
+    fallbacks: Vec<LateFallback>,
 }
 
 impl LiveMatch {
@@ -173,6 +193,7 @@ impl LiveMatch {
             },
             steps: 0,
             poisoned: false,
+            fallbacks: Vec::new(),
         })
     }
 
@@ -299,16 +320,27 @@ impl LiveMatch {
 
     /// Stage one provider reply for its tick. True when staged: the tick is
     /// the next one or a later one inside the match, the slot is live and
-    /// the fields validate. Past-due ticks, out-of-range ticks, bad slots
-    /// and invalid fields refuse with false and change nothing; refusals
-    /// never poison the match. A second reply for the same tick and slot
-    /// replaces the first, so the newest provider answer wins.
+    /// the fields validate. Past-due ticks refuse with false and log the
+    /// fallback with its engine-observe reason (`provider.timeout`); that
+    /// tick already ran the scripted brain and never applies late.
+    /// Out-of-range ticks, bad slots and invalid fields refuse with false
+    /// and change nothing; refusals never poison the match. A second reply
+    /// for the same tick and slot replaces the first, so the newest provider
+    /// answer wins.
     /// Caller: the AL1 live-mind loop stages each validated provider reply
     /// here one or more ticks ahead; [`LiveMatch::step`] drains them at the
     /// tick boundary.
     pub fn stamp(&mut self, input: FighterInput) -> bool {
-        if input.tick < self.sim.tick
-            || input.tick >= self.sim.config.ticks
+        if input.tick < self.sim.tick {
+            if usize::from(input.fighter.0) < self.sim.fighters && input.validate().is_ok() {
+                self.fallbacks.push(LateFallback {
+                    tick: input.tick,
+                    reason: PROVIDER_TIMEOUT_REASON,
+                });
+            }
+            return false;
+        }
+        if input.tick >= self.sim.config.ticks
             || usize::from(input.fighter.0) >= self.sim.fighters
             || input.validate().is_err()
         {
@@ -1379,9 +1411,7 @@ mod tests {
         assert_eq!(replay, crate::run(&config, &tape), "replay x2");
     }
 
-    use engine_provider::{
-        fixtures, validate_proposal, MockAdapter, MockOutcome, ProviderAdapter,
-    };
+    use engine_provider::{fixtures, validate_proposal, MockAdapter, MockOutcome, ProviderAdapter};
 
     /// AL1 reply mapping: a validated mock reply becomes one fighter-0 input
     /// for `tick`. The mock's canned proposal has no fighter fields, so the
@@ -1439,7 +1469,10 @@ mod tests {
                     let request = fixtures::request(4, 0);
                     let outcome = provider.call(&request, &policy, &caps);
                     let input = mind_input(&outcome, target).expect("canned late reply");
-                    assert!(!live.stamp(input), "late reply at {at} for tick {target} refused");
+                    assert!(
+                        !live.stamp(input),
+                        "late reply at {at} for tick {target} refused"
+                    );
                 }
                 let stepped = live.step(&[]).expect("live step");
                 checkpoints.push(stepped.checkpoint);
@@ -1461,6 +1494,90 @@ mod tests {
         assert_eq!(first.last().expect("600 ticks").hash, live_hash);
         let (late_checks, late_tape) = provider_bout(Some((50, 10)));
         assert_eq!(late_tape.0, tape.0, "late reply leaves no tape row");
-        assert_eq!(late_checks, live_checks, "late fallback equals the on-time bout");
+        assert_eq!(
+            late_checks, live_checks,
+            "late fallback equals the on-time bout"
+        );
+    }
+
+    #[test]
+    fn live_mind_late() {
+        // AL1b slice 1: a mock provider 3 ticks late never applies late. Each
+        // past-deadline reply is refused, logged as fallback with its
+        // engine-observe reason, and the bout equals the scripted-only bout
+        // plus its provider-off replay.
+        let config = ArenaConfig::try_new(2040, 600, 2, 20.0).expect("valid config");
+        let policy = fixtures::policy();
+        let caps = fixtures::caps();
+        let scripted_checks = {
+            let mut live = LiveMatch::new(&config).expect("live match");
+            let mut checks = Vec::with_capacity(config.ticks as usize);
+            for tick in 0..config.ticks {
+                let stepped = live.step(&[]).expect("live step");
+                assert_eq!(stepped.checkpoint.tick, tick, "checkpoint {tick}");
+                checks.push(stepped.checkpoint);
+            }
+            assert!(live.fallbacks.is_empty(), "scripted bout logs nothing");
+            checks
+        };
+        let mut provider = MockAdapter::new(Vec::new());
+        let mut live = LiveMatch::new(&config).expect("live match");
+        let mut checks = Vec::with_capacity(config.ticks as usize);
+        let mut expected_fallbacks = 0usize;
+        for tick in 0..config.ticks {
+            if tick >= 3 {
+                let target = tick - 3;
+                let request = fixtures::request(u64::from(target % 4 + 1), 0);
+                let outcome = provider.call(&request, &policy, &caps);
+                let input = mind_input(&outcome, target).expect("canned late reply");
+                assert!(
+                    !live.stamp(input),
+                    "reply 3 ticks late at {tick} for tick {target} refused"
+                );
+                expected_fallbacks += 1;
+                assert_eq!(
+                    live.fallbacks.len(),
+                    expected_fallbacks,
+                    "late reply logged as fallback each time"
+                );
+                let logged = live.fallbacks.last().expect("logged fallback");
+                assert_eq!(logged.tick, target, "fallback names the refused tick");
+                assert_eq!(
+                    logged.reason, PROVIDER_TIMEOUT_REASON,
+                    "fallback carries its engine-observe reason"
+                );
+                assert_eq!(
+                    logged.reason, "provider.timeout",
+                    "reason is the engine-observe code name"
+                );
+            }
+            let stepped = live.step(&[]).expect("live step");
+            checks.push(stepped.checkpoint);
+        }
+        assert!(!live.is_poisoned(), "refusals never poison");
+        assert_eq!(
+            live.fallbacks.len(),
+            expected_fallbacks,
+            "every late reply logged once"
+        );
+        assert!(
+            live.fallbacks
+                .iter()
+                .all(|fallback| fallback.reason == PROVIDER_TIMEOUT_REASON),
+            "every fallback carries the engine-observe reason"
+        );
+        assert_eq!(
+            checks, scripted_checks,
+            "late bout equals the scripted-only bout"
+        );
+        let tape = live.recorded_tape();
+        assert!(tape.0.is_empty(), "late replies leave no tape rows");
+        let first = crate::run(&config, &tape);
+        assert_eq!(first, checks, "provider-off replay matches the late bout");
+        assert_eq!(first, crate::run(&config, &tape), "replay x2");
+        assert_eq!(
+            first, scripted_checks,
+            "replay equals the scripted-only bout"
+        );
     }
 }

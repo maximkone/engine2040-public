@@ -27,7 +27,7 @@ pub use play_ext::{
     InputInjectArgs, InputInjectOutput, InputInjectTool, StateDigestArgs, StateDigestOutput,
     StateDigestTool, TOOL_INPUT_INJECT, TOOL_STATE_DIGEST,
 };
-pub use rival::RIVAL_PARITY;
+pub use rival::{rival_for, verb_for_rival, RIVAL_PARITY};
 
 /// The play pack, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {

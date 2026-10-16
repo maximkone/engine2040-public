@@ -23,6 +23,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock,
 };
 
+use engine_editor::commands::{begin_group, cancel_group, end_group, CommandMeta};
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::model::ToolAnnotations;
 use rmcp::schemars::JsonSchema;
@@ -1433,6 +1434,74 @@ fn live_revision(server: &McpServer, base: u64) -> u64 {
     }
 }
 
+/// Fyrox group-seal predicate: one node, one value kind, single-op writes only.
+/// PORT(Fyrox@048d395 editor/src/command/mod.rs CommandGroup execute-in-order plus end_group merge) -> seal-at-batch-end shape only, idea only. Structural ops never fold.
+pub fn gesture_sealable(items: &[PreviewItem]) -> bool {
+    if items.is_empty() {
+        return false;
+    }
+    let (first_id, first_kind) = match &items[0].ops[..] {
+        [OpDto::SetLocal { id, .. }] => (id, 0u8),
+        [OpDto::SetMaterial { id, .. }] => (id, 1u8),
+        _ => return false,
+    };
+    for item in items {
+        if map_method(&item.method).is_err() {
+            return false;
+        }
+        match &item.ops[..] {
+            [OpDto::SetLocal { id, .. }] if id == first_id && first_kind == 0 => {}
+            [OpDto::SetMaterial { id, .. }] if id == first_id && first_kind == 1 => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Batch tagged as one gesture folds to a single undo entry on the session path.
+/// Caller: `crate::remote_shim::execute_via_shim`. Keeps first inverse via `end_group`, forward ends at newest value; zero-delta annuls; pinned lane (key 0 or journaled key) never folds.
+pub fn batch_execute_grouped(
+    server: &McpServer,
+    items: &[PreviewItem],
+    gesture_key: u64,
+) -> BatchExecuteOutput {
+    if gesture_key == 0 || !gesture_sealable(items) {
+        return batch_execute(server, items);
+    }
+    if let Ok(state) = server.lock() {
+        if state.journal.past.iter().any(|e| e.key == gesture_key) {
+            drop(state);
+            return batch_execute(server, items);
+        }
+    }
+    if items.first().map(|i| &i.ops) == items.last().map(|i| &i.ops) {
+        let dry = preview_batch(server, items);
+        return BatchExecuteOutput {
+            results: dry,
+            applied: 0,
+            revision: live_revision(server, 0),
+        };
+    }
+    if let Ok(mut state) = server.lock() {
+        begin_group(
+            &mut state.journal,
+            &CommandMeta::significant("gesture drag"),
+            gesture_key,
+        );
+    } else {
+        return batch_execute(server, items);
+    }
+    let out = batch_execute(server, items);
+    if out.applied == items.len() {
+        if let Ok(mut state) = server.lock() {
+            let _ = end_group(&mut state.journal);
+        }
+    } else if let Ok(mut state) = server.lock() {
+        cancel_group(&mut state.journal);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::mcp::{
@@ -2796,5 +2865,79 @@ mod tests {
         assert!(refused.results[1].error.is_some());
         let page = SceneReadTool::invoke(&server, SceneReadArgs::default()).expect("reads");
         assert!(page.objects.is_empty(), "denied batch writes nothing");
+    }
+
+    #[test]
+    fn batch_preview_remote_shim_coalesced_drag_is_one_undo() {
+        use super::super::remote_shim::{preview_via_shim, BrpRequest};
+        use engine_editor::commands as cmds;
+        let server = test_server();
+        let node = ObjectId::new();
+        let seed = vec![OpDto::Insert {
+            id: node.to_string(),
+            parent: ObjectId::NIL.to_string(),
+            local: super::super::mcp::PoseDto {
+                pos: [0.0, 0.0, 0.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+        }];
+        let rev = revision_of(&server);
+        let draft = TxPreviewTool::invoke(
+            &server,
+            TxPreviewArgs {
+                expected_revision: rev,
+                idempotency_key: 9001,
+                ops: seed.clone(),
+            },
+        )
+        .expect("seed preview");
+        TxApplyTool::invoke(
+            &server,
+            TxApplyArgs {
+                expected_revision: rev,
+                idempotency_key: 9001,
+                ops: seed,
+                approval: draft.approval,
+            },
+        )
+        .expect("seed apply");
+        let base = revision_of(&server);
+        let pre = server.lock().expect("lock").doc.hierarchy.clone();
+        let base_past = server.lock().expect("lock").journal.past_len();
+        let mut batch = Vec::new();
+        for i in 0..50u64 {
+            let x = 0.02 * (i + 1) as f32;
+            batch.push(BrpRequest {
+                method: "set".to_owned(),
+                expected_revision: base,
+                idempotency_key: 9100 + i,
+                ops: vec![OpDto::SetLocal {
+                    id: node.to_string(),
+                    local: super::super::mcp::PoseDto {
+                        pos: [x, 0.0, 0.0],
+                        rot: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                }],
+            });
+        }
+        let dry = preview_via_shim(&server, &batch);
+        assert!(dry.len() == 50 && dry.iter().all(|r| r.ok.is_some()));
+        assert_eq!(revision_of(&server), base);
+        let out = server.brp_batch(&batch, 9999);
+        assert_eq!(out.applied, 50);
+        let past = server.lock().expect("lock").journal.past_len();
+        assert_eq!(past, base_past + 1);
+        let landed = server.lock().expect("lock").doc.hierarchy.clone();
+        let x = landed.local(node).expect("node").position[0];
+        assert!((x - 1.0).abs() <= 1e-3, "folded value is +1.00m, got {x}");
+        TxUndoTool::invoke(&server, TxUndoArgs { undo_token: None }).expect("undo");
+        assert_eq!(server.lock().expect("lock").doc.hierarchy, pre);
+        let mut s = server.lock().expect("lock");
+        let state = &mut *s;
+        cmds::redo(&mut state.doc, &mut state.journal).expect("redo");
+        drop(s);
+        assert_eq!(server.lock().expect("lock").doc.hierarchy, landed);
     }
 }

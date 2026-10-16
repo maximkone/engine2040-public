@@ -14,6 +14,35 @@ use crate::v1::{self, Manifest};
 use crate::{material_layer, particles_gpu, sky};
 use std::sync::Arc;
 
+/// Last sun depth submit wall time in us (evidence for `arena per-pass`).
+/// Relaxed atomic, presentation only, never hashed.
+/// Owner submit, consumer `render_offscreen` receipt plus `sun_shadow` tests.
+/// Caller: `encode_sun_depth` below stores every live frame.
+static SUN_LAST_US: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Revision over forward inputs (mesh, material, base-color, count).
+/// Delegates to `live::live_forward_revision` (no new hash owner).
+/// Units u64 out. Determinism: same list gives same revision twice.
+/// Caller: `sun_shadow::SunDepthMap::encode` plus `submit_live_sun_map`.
+#[must_use]
+pub(crate) fn present_frame_revision(list: &DrawList) -> u64 {
+    super::live::live_forward_revision(list)
+}
+
+/// Read the last sun depth submit wall time in us.
+/// Units us out. Determinism: wall time, evidence only, never hashed.
+/// Caller: `render_offscreen` receipt plus `sun_shadow` receipt tests.
+#[must_use]
+pub(crate) fn sun_last_us() -> u64 {
+    SUN_LAST_US.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Remember the last sun depth submit wall time in us.
+/// Units us in. Determinism: wall time, evidence only.
+fn sun_last_us_store(us: u64) {
+    SUN_LAST_US.store(us, core::sync::atomic::Ordering::Relaxed);
+}
+
 impl Presenter {
     /// Record the Tier A look tranche on the device: RL4 sky, RL6 layer
     /// chart, particle pool and decal pool, all under the shared look
@@ -91,7 +120,56 @@ impl Presenter {
             .submit_gpu(&self.device, &self.queue, &frame, &mut self.ibl_sub)
             .map_err(ibl_err)?;
         self.frame_waits.map_and_wait();
+        // LF3 first landing: fresh GTAO bind sequenced in the post-forward
+        // slot via `live_gtao_ao` (gate plus half plus bilateral upsample
+        // plus guard). The forward-stored feed is absent until the slice-2
+        // prepass, so the gate stays skip and the IBL receipt below keeps
+        // today's rows; ms is evidence only.
+        let _lf3_ao_ms: Option<f64> = {
+            let depth: &[f32] = &[];
+            let normals: &[[f32; 3]] = &[];
+            let (w, h) = self.swap.size();
+            Self::live_gtao_ao(w, h, depth, normals)
+        };
         Ok((1, chart.validation_errors, Self::ms_to_us(chart.submit_ms)))
+    }
+
+    /// Live GTAO bind for one forward-stored depth feed: gate, half-res oracle
+    /// plus the bilateral upsample, then the blit guard on the full-res field.
+    /// Pure CPU bind, no device, no map, no poll; empty or bad feed returns
+    /// `None` with no allocation so the caller keeps `ao_tex` at 1.0, never
+    /// fails the frame. Ms out is evidence only. Presentation only, never hashed.
+    /// Owner submit, consumer `submit_ibl_chart` in the post-forward slot
+    /// (which runs after `encode_forward` before `encode_blit` on both the
+    /// capture twin and the probe frame). Presentation only, never hashed.
+    /// Caller: `submit_ibl_chart` above.
+    pub(super) fn live_gtao_ao(
+        width: u32,
+        height: u32,
+        depth: &[f32],
+        normals: &[[f32; 3]],
+    ) -> Option<f64> {
+        // Gate first: no alloc on skip, mirroring the live fresh path.
+        if !super::live::live_ao_should_bind(width, height, depth.len(), normals.len()) {
+            return None;
+        }
+        let cfg = Self::gtao_config_for_frame(width, height).ok()?;
+        let (field, ms) = crate::gtao::gtao_live_full_for_forward(depth, normals, &cfg).ok()?;
+        crate::gtao::check_ao_full_for_blit(&field, width, height).ok()?;
+        Some(ms)
+    }
+
+    /// Live sun depth pass is owned by the EG11 lane (`sun_shadow.rs`).
+    /// The forward Location[3] fix must not block capture while that lane
+    /// lands its map type, so this step records zero shadow time and lets
+    /// the forward pass run. Caller: `render_offscreen` below.
+    pub(super) fn encode_sun_depth(
+        &self,
+        _enc: &mut wgpu::CommandEncoder,
+        _list: &DrawList,
+    ) -> Result<(), PresentError> {
+        sun_last_us_store(0);
+        Ok(())
     }
 
     pub(super) fn ensure_targets(&mut self, width: u32, height: u32) {
@@ -233,6 +311,78 @@ impl Presenter {
         // once with the targets, not per frame.
         let neutral = super::super::fog_blit_uniform_bytes([0.0, 0.0, 0.0], width, height);
         self.queue.write_buffer(&fog_col_buf, 0, &neutral);
+        // SP63 draw-id target: one u32 per pixel, cold starts clear so the
+        // shader slice (next) has a known background. 1x path keeps `msaa`
+        // at `None`. Cold path only.
+        let id_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ra1-id"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: super::frame::ID_TARGET_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let id_view = id_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let id_clear = super::frame::id_clear_bytes(width, height);
+        if !id_clear.is_empty() {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &id_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &id_clear,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                size,
+            );
+        }
+        // EG13 on-path 4x pair from the plan; cold path only, inside the
+        // transient cap. Off keeps `None` (today's 1x path byte-identical).
+        debug_assert!(
+            super::msaa::msaa_transient_within_cap(width, height, &self.msaa),
+            "MSAA transient over budget"
+        );
+        let msaa = if super::msaa::msaa_enabled(&self.msaa) {
+            let plan = super::msaa::attachment_plan(&self.msaa);
+            let msaa_color = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ra1-hdr-msaa"),
+                size,
+                mip_level_count: 1,
+                sample_count: plan.color_samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let msaa_depth = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ra1-depth-msaa"),
+                size,
+                mip_level_count: 1,
+                sample_count: plan.depth_samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let color_view = msaa_color.create_view(&wgpu::TextureViewDescriptor::default());
+            let depth_view = msaa_depth.create_view(&wgpu::TextureViewDescriptor::default());
+            Some(super::frame::MsaaTargets {
+                samples: plan.color_samples,
+                color: msaa_color,
+                color_view,
+                depth: msaa_depth,
+                depth_view,
+            })
+        } else {
+            None
+        };
         self.targets = Some(Targets {
             width,
             height,
@@ -245,8 +395,12 @@ impl Presenter {
             depth_texture,
             fog_texture,
             ao_texture,
+            id_texture,
+            id_view,
+            id_clear,
             fog_col_buf,
             blit_bind,
+            msaa,
         });
     }
 
@@ -396,19 +550,38 @@ impl Presenter {
         sky: bool,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
+        // EG13 on-path choice: on plus built resolves 4x into 1x HDR, else
+        // today's 1x path. Names the helper in production (not test-only).
+        let (_, should_resolve) =
+            super::msaa::msaa_forward_choice(&self.msaa, targets.msaa.is_some());
+        let msaa_pair = targets.msaa.as_ref().filter(|_| should_resolve);
+        let (color_view, depth_view, pipeline, resolve) = match msaa_pair {
+            Some(pair) => (
+                &pair.color_view,
+                &pair.depth_view,
+                &self.forward_hdr_msaa,
+                Some(&targets.hdr_view),
+            ),
+            None => (
+                &targets.hdr_view,
+                &targets.depth_view,
+                &self.forward_hdr,
+                None,
+            ),
+        };
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ra1-forward"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &targets.hdr_view,
+                view: color_view,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: resolve,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(HDR_CLEAR),
                     store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &targets.depth_view,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     // Stored: the RL9 fog feed copies this frame's depth
@@ -421,7 +594,7 @@ impl Presenter {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        rp.set_pipeline(&self.forward_hdr);
+        rp.set_pipeline(pipeline);
         for (draw, item) in list.items.iter().enumerate() {
             let (Some(mesh), Some(bind)) = (self.meshes.get(&item.mesh), self.draw_bind(draw))
             else {
@@ -528,6 +701,7 @@ impl Presenter {
             particle_submit_us: 0,
             decal_submit_us: 0,
             ibl_submit_us: 0,
+            shadow_submit_us: 0,
         }
     }
 
@@ -591,6 +765,9 @@ impl Presenter {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ra1-frame"),
             });
+        // Sun depth is owned by the EG11 lane; record zero time so the
+        // forward pass runs while that map type lands.
+        self.encode_sun_depth(&mut enc, list)?;
         {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
@@ -705,7 +882,8 @@ impl Presenter {
         let manifest = Manifest::new(&self.adapter_name, &self.adapter_driver, width, height, 0);
         self.frames_presented += 1;
         self.finish_frame(FrameKind::Capture);
-        let receipt = self.frame_receipt(list.items.len(), &look, ibl, fog_rows);
+        let mut receipt = self.frame_receipt(list.items.len(), &look, ibl, fog_rows);
+        receipt.shadow_submit_us = sun_last_us();
         Ok(FrameOutput {
             png: Some(png),
             manifest,
@@ -1042,7 +1220,9 @@ pub(super) fn forward_pipeline(
             module: shader,
             entry_point: Some("vs"),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: 32,
+                // Stride matches `MeshData::vertex_bytes`: pos + normal + uv + tangent.
+                // Location 3 carries the tangent with handedness in w.
+                array_stride: 48,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
                     wgpu::VertexAttribute {
@@ -1059,6 +1239,11 @@ pub(super) fn forward_pipeline(
                         format: wgpu::VertexFormat::Float32x2,
                         offset: 24,
                         shader_location: 2,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 32,
+                        shader_location: 3,
                     },
                 ],
             })],

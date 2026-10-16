@@ -289,10 +289,9 @@ impl TournamentReport {
             self.exchange.clash_seen,
             self.discovered_moves,
         ));
-        let charter_line = crate::charter::run_c1(crate::charter::first_bout_log(
-            self.exchange.parry_seen,
-        ))
-        .map_or_else(|error| format!("FAIL c1: {error}"), |verdict| verdict.line);
+        let charter_line =
+            crate::charter::run_c1(crate::charter::first_bout_log(self.exchange.parry_seen))
+                .map_or_else(|error| format!("FAIL c1: {error}"), |verdict| verdict.line);
         out.push_str(&format!("charter_c1 {charter_line}\n"));
         for spot in &self.spotlight {
             out.push_str(&format!(

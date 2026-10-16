@@ -338,7 +338,10 @@ impl ReplayBuffer {
     /// and actions below `config.classes`, and the episode count must equal
     /// `config.episodes`. The digest is the same content hash
     /// [`collect`](Self::collect) stamps. Pure; never panics.
-    pub fn from_episodes(config: ReplayConfig, episodes: Vec<Episode>) -> Result<Self, ReplayError> {
+    pub fn from_episodes(
+        config: ReplayConfig,
+        episodes: Vec<Episode>,
+    ) -> Result<Self, ReplayError> {
         if episodes.len() != config.episodes {
             return Err(ReplayError::BadEpisodes(episodes.len()));
         }
@@ -354,7 +357,9 @@ impl ReplayBuffer {
                 episode.features.iter().zip(&episode.actions).enumerate()
             {
                 if row.len() != config.input_dim
-                    || !row.iter().all(|v| v.is_finite() && v.abs() <= MAX_FEATURE_ABS)
+                    || !row
+                        .iter()
+                        .all(|v| v.is_finite() && v.abs() <= MAX_FEATURE_ABS)
                 {
                     return Err(ReplayError::BadInputDim(row.len()));
                 }
@@ -583,7 +588,10 @@ mod tests {
             ReplayBuffer::collect(0x00BE_5500, config(), teacher_class).expect("fixture collects");
         let adopted = ReplayBuffer::from_episodes(config(), collected.episodes.clone())
             .expect("collected episodes adopt");
-        assert_eq!(adopted, collected, "same rows give the same buffer and digest");
+        assert_eq!(
+            adopted, collected,
+            "same rows give the same buffer and digest"
+        );
 
         let mut short = collected.episodes.clone();
         short.pop();

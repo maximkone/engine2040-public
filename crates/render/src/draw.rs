@@ -460,6 +460,49 @@ pub fn fade_for_lod(distance_m: f32, lod: u8, table: &LodTable) -> u8 {
     }
 }
 
+/// One weapon-trail strip vertex: position plus age fade.
+///
+/// Consumer: the next slice's `present/**` strip draw reads these verts.
+/// Units: meters for `pos_m`, unit share 0..=1 for `alpha`. Determinism:
+/// pure data, so identical slices give identical verts x2. Errors: none.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrailStripVert {
+    /// Strip position in meters.
+    pub pos_m: [f32; 3],
+    /// Opacity share 0..=1, `1 - age/11` clamped.
+    pub alpha: f32,
+}
+
+/// Build weapon-trail strip verts from oldest-first base/tip pairs.
+///
+/// One base vert plus one tip vert per pair in input order, so the output
+/// feeds a triangle strip directly. Alpha is `1 - age/11` clamped 0..=1,
+/// the same fade the game ring uses. Empty input gives empty out;
+/// non-finite coordinates are skipped, never stored; input past 12 pairs
+/// is capped, so the output holds at most 24 verts. Pure and deterministic
+/// x2; the one small bounded allocation is the returned strip.
+#[must_use]
+pub fn trail_strip_verts(
+    base: &[[f32; 3]],
+    tip: &[[f32; 3]],
+    age_ticks: &[u8],
+) -> Vec<TrailStripVert> {
+    let pairs = base.len().min(tip.len()).min(age_ticks.len()).min(12);
+    let mut out = Vec::with_capacity(pairs.saturating_mul(2));
+    let mut i = 0;
+    while i < pairs {
+        let b = base[i];
+        let t = tip[i];
+        if is_finite3(b) && is_finite3(t) {
+            let alpha = (1.0 - f32::from(age_ticks[i]) / 11.0).clamp(0.0, 1.0);
+            out.push(TrailStripVert { pos_m: b, alpha });
+            out.push(TrailStripVert { pos_m: t, alpha });
+        }
+        i += 1;
+    }
+    out
+}
+
 /// One node through validation, frustum cull and LOD pick; `None` means
 /// culled. Shared by the per-draw list and the instanced grouping so the
 /// two never drift apart.
@@ -1691,5 +1734,60 @@ mod tests {
             CULL_WGSL.contains("-radius"),
             "shader keeps the -radius rule"
         );
+    }
+
+    #[test]
+    fn trail_strip_fades_alpha_by_age_and_skips_idle() {
+        // Twelve-pair swing, oldest first: oldest age 11 (clear) down to
+        // newest age 0 (opaque).
+        let mut base = [[0.0_f32; 3]; 12];
+        let mut tip = [[0.0_f32; 3]; 12];
+        let mut age_ticks = [0u8; 12];
+        for step in 0u8..12 {
+            let i = usize::from(step);
+            let x = f32::from(step);
+            base[i] = [x, 1.0, 0.0];
+            tip[i] = [x, 1.0, 1.0];
+            age_ticks[i] = 11 - step;
+        }
+        let first = trail_strip_verts(&base, &tip, &age_ticks);
+        assert_eq!(first.len(), 24, "12 pairs give 24 strip verts");
+        assert_eq!(first[0].pos_m, base[0], "base leads each pair");
+        assert_eq!(first[1].pos_m, tip[0], "tip follows its base");
+        assert_eq!(first[22].pos_m, base[11], "newest pair stays last");
+        assert_eq!(first[23].pos_m, tip[11], "strip ends on newest tip");
+        assert_eq!(first[0].alpha, 0.0, "oldest is clear");
+        assert_eq!(first[23].alpha, 1.0, "newest is opaque");
+        for pair in 0usize..11 {
+            let older = first[pair.saturating_mul(2)].alpha;
+            let newer = first[(pair + 1).saturating_mul(2)].alpha;
+            assert!(older < newer, "alpha rises oldest to newest");
+            assert_eq!(
+                first[pair.saturating_mul(2)].alpha,
+                first[pair.saturating_mul(2) + 1].alpha,
+                "base and tip share one age fade"
+            );
+        }
+        assert!(
+            trail_strip_verts(&[], &[], &[]).is_empty(),
+            "idle slots draw none"
+        );
+        let mut bad_base = base;
+        bad_base[5] = [f32::NAN, 0.0, 0.0];
+        let skipped = trail_strip_verts(&bad_base, &tip, &age_ticks);
+        assert_eq!(skipped.len(), 22, "one NaN pair drops two verts");
+        assert_eq!(skipped[10].pos_m, base[4], "order holds past the gap");
+        assert_eq!(skipped[11].pos_m, tip[4], "tip order holds past the gap");
+        assert_eq!(skipped[12].pos_m, base[6], "gap skips only the NaN pair");
+        let big_base = [[0.0_f32; 3]; 13];
+        let big_tip = [[1.0_f32; 3]; 13];
+        let big_age = [0u8; 13];
+        assert_eq!(
+            trail_strip_verts(&big_base, &big_tip, &big_age).len(),
+            24,
+            "past 12 pairs caps at 24 verts"
+        );
+        let second = trail_strip_verts(&base, &tip, &age_ticks);
+        assert_eq!(first, second, "same bytes give same verts x2");
     }
 }

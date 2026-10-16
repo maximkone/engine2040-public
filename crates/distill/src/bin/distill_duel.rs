@@ -64,7 +64,11 @@ fn parse_num<T: std::str::FromStr>(flag: &str, value: Option<String>) -> Result<
     let parsed = if raw.starts_with("0x") {
         u64::from_str_radix(digits, 16)
             .map_err(|e| e.to_string())
-            .and_then(|v| v.to_string().parse::<T>().map_err(|_| "out of range".to_string()))
+            .and_then(|v| {
+                v.to_string()
+                    .parse::<T>()
+                    .map_err(|_| "out of range".to_string())
+            })
     } else {
         raw.parse::<T>().map_err(|_| "not a number".to_string())
     };
@@ -107,7 +111,12 @@ fn distill(args: &Args) -> Result<Vec<u8>, String> {
         let mut actions = Vec::with_capacity(rows.len());
         for (lanes, class) in rows {
             class_counts[usize::from(class)] += 1;
-            features.push(lanes.iter().map(|q| f32::from(*q) / INPUT_QUANT_SCALE).collect());
+            features.push(
+                lanes
+                    .iter()
+                    .map(|q| f32::from(*q) / INPUT_QUANT_SCALE)
+                    .collect(),
+            );
             actions.push(class);
         }
         episodes.push(Episode {
@@ -117,7 +126,8 @@ fn distill(args: &Args) -> Result<Vec<u8>, String> {
         });
         seed = seed.wrapping_add(1);
     }
-    let buffer = ReplayBuffer::from_episodes(config, episodes).map_err(|e| format!("buffer: {e}"))?;
+    let buffer =
+        ReplayBuffer::from_episodes(config, episodes).map_err(|e| format!("buffer: {e}"))?;
     println!(
         "teacher: {} duels x {} ticks, {} rows, classes [attack block dodge advance retreat] = {class_counts:?}, buffer digest {:016x}",
         args.episodes,
@@ -132,9 +142,11 @@ fn distill(args: &Args) -> Result<Vec<u8>, String> {
         "duel-intent-policy",
     )
     .map_err(|e| format!("manifest: {e}"))?;
-    let student = StudentSpec::new(DUEL_LANES, DUEL_CLASSES, args.seed)
-        .map_err(|e| format!("spec: {e}"))?;
-    let samples = buffer.to_samples(&student).map_err(|e| format!("samples: {e}"))?;
+    let student =
+        StudentSpec::new(DUEL_LANES, DUEL_CLASSES, args.seed).map_err(|e| format!("spec: {e}"))?;
+    let samples = buffer
+        .to_samples(&student)
+        .map_err(|e| format!("samples: {e}"))?;
     let spec = MlpSpec {
         student,
         hidden: args.hidden,
@@ -186,15 +198,28 @@ fn run() -> Result<(), String> {
         println!("wrote {}", args.out);
     }
     for opponent in [Opponent::BrainIntents, Opponent::ArenaBrain] {
-        let report = strength_gate(&bytes, opponent, args.gate_seed, args.bouts, args.bout_ticks)
-            .map_err(|e| format!("gate: {e}"))?;
+        let report = strength_gate(
+            &bytes,
+            opponent,
+            args.gate_seed,
+            args.bouts,
+            args.bout_ticks,
+        )
+        .map_err(|e| format!("gate: {e}"))?;
         println!("{report}");
         if args.repeat {
-            let again =
-                strength_gate(&bytes, opponent, args.gate_seed, args.bouts, args.bout_ticks)
-                    .map_err(|e| format!("gate: {e}"))?;
+            let again = strength_gate(
+                &bytes,
+                opponent,
+                args.gate_seed,
+                args.bouts,
+                args.bout_ticks,
+            )
+            .map_err(|e| format!("gate: {e}"))?;
             if again != report {
-                return Err(format!("strength gate vs {opponent:?} differs on the second run"));
+                return Err(format!(
+                    "strength gate vs {opponent:?} differs on the second run"
+                ));
             }
             println!("repeat: second table vs {opponent:?} identical");
         }

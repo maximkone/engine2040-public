@@ -900,14 +900,8 @@ impl Tactics {
         } else {
             // Clamped to `-100..=100`, inside `i8`; the refused arm holds
             // still and never panics.
-            let mx = match i8::try_from((dx * 100 / n).clamp(-100, 100)) {
-                Ok(b) => b,
-                Err(_) => 0,
-            };
-            let mz = match i8::try_from((dz * 100 / n).clamp(-100, 100)) {
-                Ok(b) => b,
-                Err(_) => 0,
-            };
+            let mx = i8::try_from((dx * 100 / n).clamp(-100, 100)).unwrap_or_default();
+            let mz = i8::try_from((dz * 100 / n).clamp(-100, 100)).unwrap_or_default();
             (mx, mz)
         }
     }

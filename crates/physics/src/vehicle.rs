@@ -14,6 +14,8 @@
 //! Signed zeros are preserved through the odd helpers; non-finite inputs map
 //! to a fixed guard (0.0 for sine/arc tangent, 1.0 for cosine) so a NaN can
 //! never leak platform-specific bits into the hash.
+//! Build pins: no fast-math, `-C llvm-args=-ffp-contract=off`; refuses
+//! fast-math: hashed path never calls `sin`/`cos`/`atan2`/`mul_add`.
 
 // Q16 trig tables, integer-only evaluation past the f32 scale step.
 use engine_core::Fnv64;
@@ -155,6 +157,13 @@ fn det_atan_f32(z: f32) -> f32 {
     } else {
         s
     }
+}
+
+/// Hinge frame for the island/sleep path: `(cos, sin)` via integer tables.
+/// Units: radians in. Determinism: no `sinf`/`cosf`/`atan2f`. Errors: none.
+/// Caller: [`step`] chassis heading.
+pub fn det_hinge_frame(yaw: f32) -> (f32, f32) {
+    (det_cos_f32(yaw), det_sin_f32(yaw))
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 /// 3D vector, y-up, yaw about +Y.
@@ -352,8 +361,7 @@ pub fn step(t: &Tune, s: &mut VState, i: &VInput, dt: f32, ground: fn(f32, f32) 
     let st_ = i.steer.clamp(-1.0, 1.0);
     // Chassis heading from deterministic integer-table trig.
     // Bound: each component within 0.0046 of the true heading.
-    let c = det_cos_f32(s.yaw);
-    let sn = det_sin_f32(s.yaw);
+    let (c, sn) = det_hinge_frame(s.yaw);
     let fwd = V3::new(c, 0.0, sn);
     let rgt = V3::new(-sn, 0.0, c);
     let hb = t.wheelbase * 0.5;

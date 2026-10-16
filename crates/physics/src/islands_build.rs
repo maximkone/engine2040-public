@@ -3,6 +3,8 @@
 //! Canonical union-find over contact pairs plus the order-independent space
 //! hash. Same pairs in any order give the same islands and the same bytes.
 //! Re-exported through [`crate::islands`] so existing callers keep one path.
+//! Build pins: no fast-math, `-C llvm-args=-ffp-contract=off`; refuses
+//! fast-math: hashed paths use only `+ - * /`, integer math and tables.
 #![forbid(unsafe_code)]
 
 use engine_core::hash::{FNV64_PRIME, GOLDEN_GAMMA};
@@ -49,10 +51,43 @@ pub fn roots(n: usize, pairs: &[(usize, usize)]) -> Vec<usize> {
     p
 }
 
+/// OR-merge contacts: per-worker bits set locally, OR on main, scan order.
+/// Units: contact indices. Determinism: OR commutes, no atomics, no sort.
+/// PORT(erincatto/box2d@post-2024-08-27:determinism OR-merge, idea-only).
+pub fn or_merge_contacts(
+    contacts: &[(usize, usize)],
+    workers: &[Vec<usize>],
+) -> Vec<(usize, usize)> {
+    let mut merged = vec![0u64; contacts.len().saturating_add(63) / 64];
+    for touched in workers {
+        for idx in touched.iter().copied() {
+            if idx < contacts.len() {
+                let shift = u32::try_from(idx % 64).unwrap_or(0);
+                if let Some(slot) = merged.get_mut(idx / 64) {
+                    *slot |= 1u64.wrapping_shl(shift);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, pair) in contacts.iter().enumerate() {
+        let shift = u32::try_from(i % 64).unwrap_or(0);
+        if merged
+            .get(i / 64)
+            .is_some_and(|w| (w.wrapping_shr(shift) & 1) == 1)
+        {
+            out.push(*pair);
+        }
+    }
+    out
+}
+
 /// Canonical islands: every body appears in exactly one island; isolated bodies
 /// yield singleton islands. Sorted output, deterministic for any input order.
 pub fn build_islands(n: usize, pairs: &[(usize, usize)]) -> Vec<Vec<usize>> {
-    let r = roots(n, pairs);
+    let touched: Vec<usize> = (0..pairs.len()).collect();
+    let ordered = or_merge_contacts(pairs, &[touched]);
+    let r = roots(n, &ordered);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| (r[i], i));
     let mut out: Vec<Vec<usize>> = Vec::new();

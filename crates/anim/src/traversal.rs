@@ -360,7 +360,7 @@ pub fn loco_gate(
     speed_m_s: f32,
     airborne: bool,
 ) -> Result<(), TraverseError> {
-    if !speed_m_s.is_finite() || speed_m_s < 0.0 || speed_m_s > PROBE_SPEED_RANGE_M_S {
+    if !speed_m_s.is_finite() || !(0.0..=PROBE_SPEED_RANGE_M_S).contains(&speed_m_s) {
         return Err(TraverseError::BadProbe("speed"));
     }
     if airborne && action != TraverseAction::Drop {

@@ -189,6 +189,46 @@ pub const LUDUS_SPAWNS: [SpawnPoint; 4] = [
     },
 ];
 
+/// One ludus drill route in meters. Values repeat `content/maps/ludus/map.json`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LudusRoute {
+    /// Spawn the route starts from (`player`).
+    pub from: &'static str,
+    /// Stand the route ends at (`pell_west_stand`, `pell_east_stand`, `rack_stand`).
+    pub to: &'static str,
+    /// East end in meters.
+    pub to_x: f32,
+    /// South end in meters.
+    pub to_z: f32,
+}
+
+/// Canonical ludus drill routes: every end stands on the practice yard.
+pub const LUDUS_ROUTES: [LudusRoute; 3] = [
+    LudusRoute {
+        from: "player",
+        to: "pell_west_stand",
+        to_x: -8.0,
+        to_z: -2.0,
+    },
+    LudusRoute {
+        from: "player",
+        to: "pell_east_stand",
+        to_x: -8.0,
+        to_z: 2.0,
+    },
+    LudusRoute {
+        from: "player",
+        to: "rack_stand",
+        to_x: -5.0,
+        to_z: 1.2,
+    },
+];
+
+/// Look up a ludus drill route by stand name; unknown names read `None`.
+pub fn ludus_route(to: &str) -> Option<&'static LudusRoute> {
+    LUDUS_ROUTES.iter().find(|route| route.to == to)
+}
+
 /// Look up a ludus zone by name; unknown names read `None`.
 pub fn ludus_zone(name: &str) -> Option<&'static ZoneRect> {
     LUDUS_ZONES.iter().find(|zone| zone.name == name)
@@ -944,6 +984,31 @@ mod tests {
         assert!(ludus_contains(forge, -19.0, 0.0));
         assert!(ludus_contains(board, -13.0, 0.0));
         assert!(!ludus_contains(board, -48.0, 0.0), "yard is not the board");
+        // Hub boot binding: yard nav rect, player spawn and drill routes.
+        assert_eq!(
+            (yard.x0, yard.x1, yard.z0, yard.z1),
+            (-62.0, -2.0, -7.0, 7.0)
+        );
+        assert_eq!(
+            LUDUS_SPAWNS[0],
+            SpawnPoint {
+                name: "player",
+                x: -48.0,
+                z: 0.0,
+                yaw_deg: 90
+            }
+        );
+        assert_eq!(LUDUS_ROUTES.len(), 3);
+        for route in LUDUS_ROUTES {
+            assert!(
+                ludus_contains(yard, route.to_x, route.to_z),
+                "route {} stands in the yard",
+                route.to
+            );
+        }
+        assert!(ludus_route("pell_west_stand").is_some());
+        assert!(ludus_route("rack_stand").is_some());
+        assert!(ludus_route("colosseum_stand").is_none());
     }
 
     #[test]

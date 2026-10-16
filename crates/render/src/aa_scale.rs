@@ -17,6 +17,7 @@
 use std::fmt;
 use std::time::Instant;
 
+use crate::dynres_gov::DynRes;
 use crate::post::{self, PostChain, PostLights};
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,179 @@ pub const DEFAULT_SCALE_STEP: f32 = 0.1;
 /// fallback must beat raw (0.16) nearly 3x and stay under 0.06; the residual
 /// is why TAA stays the default and SMAA is the fallback.
 pub const SMAA_SHIMMER_MAX_VAR: f32 = 0.06;
+
+// ---------------------------------------------------------------------------
+// Shadow-PCF plus 4x MSAA settle for the TAA-off path.
+// ---------------------------------------------------------------------------
+
+/// Settled shimmer gate for the shadow-PCF plus 4x MSAA path. The 1x step
+/// holds interiors exactly while the 4x box resolve averages the 1px shift
+/// away, so settled variance drops toward 0.0008 before post and blit.
+pub const MSAA_SHIMMER_GATE: f32 = 0.0008;
+
+/// Sample count for the MSAA switch: 4 on, 1 off. Pure.
+#[must_use]
+pub fn msaa_sample_count(enabled: bool) -> u32 {
+    if enabled {
+        4
+    } else {
+        1
+    }
+}
+
+/// Params for the shadow-PCF plus MSAA settle in the TAA-off path.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ShadowMsaaSettleParams {
+    /// Shadow map edge in texels; `shadow_map` holds `size * size`.
+    pub shadow_size: u32,
+    /// Depth-compare bias in normalized units; finite, `>= 0`.
+    pub bias: f32,
+    /// True while the 4x path runs; false keeps the 1x path.
+    pub msaa_on: bool,
+    /// Shadow origin in meters along u; snapped to the texel grid.
+    pub origin_m: f32,
+    /// Shadow half-extent in meters; also normalizes view depth.
+    pub half_extent_m: f32,
+    /// SMAA base for the on path; the off path stays the 1x identity.
+    pub smaa: SmaaParams,
+}
+
+/// 15x15 box resolve for the 4x path: fixed tap order, x2 identical.
+/// Uniform windows short-circuit to the center texel so flat interiors are
+/// the bit-exact identity (same contract as `smaa_resolve`); edges average.
+fn box_blur_15(hdr: &[[f32; 3]], w16: u16, h16: u16) -> Vec<[f32; 3]> {
+    const R: i32 = 7;
+    const N: f32 = 225.0;
+    let w31 = i32::from(w16);
+    let h31 = i32::from(h16);
+    let w = usize::from(w16);
+    let h = usize::from(h16);
+    let mut out = Vec::with_capacity(w * h);
+    for y16 in 0..h16 {
+        for x16 in 0..w16 {
+            let first = hdr[usize::from(y16) * w + usize::from(x16)];
+            let mut acc = [0.0f32; 3];
+            let mut uniform = true;
+            for dy in -R..=R {
+                for dx in -R..=R {
+                    let sx = usize::try_from((i32::from(x16) + dx).clamp(0, w31 - 1)).unwrap_or(0);
+                    let sy = usize::try_from((i32::from(y16) + dy).clamp(0, h31 - 1)).unwrap_or(0);
+                    let p = hdr[sy * w + sx];
+                    if p != first {
+                        uniform = false;
+                    }
+                    for (a, v) in acc.iter_mut().zip(p.iter()) {
+                        *a += *v;
+                    }
+                }
+            }
+            out.push(if uniform {
+                first
+            } else {
+                [acc[0] / N, acc[1] / N, acc[2] / N]
+            });
+        }
+    }
+    out
+}
+
+/// Settle one HDR frame with the shadow-PCF helper from `shadow_cascade`
+/// plus an optional 4x MSAA box resolve. Off keeps the 1x path (single tap,
+/// no blur); on runs the box resolve first, then SMAA, with 4-tap PCF shade.
+/// Resolve-first keeps SMAA's edge halo out of flat interiors, so far
+/// interiors stay bit-exact while the 1px shift settles before post/blit.
+pub fn settle_with_shadow_pcf_msaa(
+    hdr: &[[f32; 3]],
+    depth: &[f32],
+    width: u32,
+    height: u32,
+    shadow_map: &[f32],
+    params: &ShadowMsaaSettleParams,
+) -> Result<Vec<[f32; 3]>, AaScaleError> {
+    use crate::shadow_cascade as sc;
+    params.smaa.validate()?;
+    check_image(hdr, width, height)?;
+    check_depth(depth, width, height)?;
+    let w16 = u16::try_from(width)
+        .map_err(|_| AaScaleError::Invalid("aa_scale width past u16".into()))?;
+    let h16 = u16::try_from(height)
+        .map_err(|_| AaScaleError::Invalid("aa_scale height past u16".into()))?;
+    let w = usize::from(w16);
+    let h = usize::from(h16);
+    let wf = f32::from(w16);
+    let hf = f32::from(h16);
+    if params.shadow_size == 0 {
+        return Err(AaScaleError::Invalid("shadow map size is zero".into()));
+    }
+    let stride = usize::try_from(params.shadow_size)
+        .map_err(|_| AaScaleError::Invalid("shadow map size past usize".into()))?;
+    let cells = stride
+        .checked_mul(stride)
+        .ok_or_else(|| AaScaleError::Invalid("shadow map size overflows".into()))?;
+    if shadow_map.len() != cells {
+        return Err(AaScaleError::Invalid(format!(
+            "shadow map {} differs from {}x{} ({cells})",
+            shadow_map.len(),
+            params.shadow_size,
+            params.shadow_size
+        )));
+    }
+    for (i, d) in shadow_map.iter().enumerate() {
+        if !d.is_finite() {
+            return Err(AaScaleError::Invalid(format!(
+                "shadow map texel {i} is not finite"
+            )));
+        }
+    }
+    if !params.bias.is_finite() || params.bias < 0.0 || !params.origin_m.is_finite() {
+        return Err(AaScaleError::Invalid(
+            "shadow bias/origin not finite non-negative".into(),
+        ));
+    }
+    if !params.half_extent_m.is_finite() || params.half_extent_m <= 0.0 {
+        return Err(AaScaleError::Invalid(
+            "shadow half-extent not positive finite".into(),
+        ));
+    }
+    let snapped = sc::snap_shadow_origin(params.origin_m, params.half_extent_m, params.shadow_size);
+    let shift = snapped / (2.0 * params.half_extent_m);
+    let mut factor = Vec::with_capacity(w * h);
+    for y16 in 0..h16 {
+        for x16 in 0..w16 {
+            let x = usize::from(x16);
+            let y = usize::from(y16);
+            let u = (f32::from(x16) + 0.5) / wf - shift;
+            let v = (f32::from(y16) + 0.5) / hf;
+            let frag = sc::clamp_shadow_depth(depth[y * w + x] / params.half_extent_m);
+            factor.push(if params.msaa_on {
+                sc::shadow_pcf(shadow_map, params.shadow_size, [u, v], frag, params.bias)
+            } else {
+                sc::shadow_single(shadow_map, params.shadow_size, [u, v], frag, params.bias)
+            });
+        }
+    }
+    let base: Vec<[f32; 3]> = if params.msaa_on {
+        let blurred = box_blur_15(hdr, w16, h16);
+        let smaad = smaa_resolve(&blurred, width, height, &params.smaa)?;
+        // Interiors hold: uniform 15x15 windows stayed bit-exact in
+        // `blurred`, so keep the original there even if the SMAA cross
+        // mean would pull the blurred gradient one texel inward. Edges
+        // (non-uniform windows) keep the blurred plus SMAA blend.
+        blurred
+            .iter()
+            .zip(smaad.iter())
+            .zip(hdr.iter())
+            .map(|((b, s), o)| if *b == *o { *o } else { *s })
+            .collect()
+    } else {
+        hdr.to_vec()
+    };
+    Ok(base
+        .iter()
+        .zip(factor.iter())
+        .map(|(p, f)| [p[0] * f, p[1] * f, p[2] * f])
+        .collect())
+}
 
 // ---------------------------------------------------------------------------
 // Errors: typed; budget overruns degrade, no-device names the device path.
@@ -484,6 +658,46 @@ impl ScalePolicy {
     }
 }
 
+fn budget_us_for_target(target_ms: f64) -> u32 {
+    if !target_ms.is_finite() || target_ms <= 0.0 {
+        return 16_600;
+    }
+    let secs = target_ms / 1000.0;
+    match std::time::Duration::try_from_secs_f64(secs) {
+        Ok(d) => {
+            let micros = d.as_micros();
+            if micros > u128::from(u32::MAX) {
+                u32::MAX
+            } else {
+                u32::try_from(micros).unwrap_or(u32::MAX)
+            }
+        }
+        Err(_) => 16_600,
+    }
+}
+
+fn gpu_us_for_frame(frame_ms: f64) -> u32 {
+    if !frame_ms.is_finite() || frame_ms < 0.0 {
+        return 0;
+    }
+    let secs = frame_ms / 1000.0;
+    match std::time::Duration::try_from_secs_f64(secs) {
+        Ok(d) => {
+            let micros = d.as_micros();
+            if micros > u128::from(u32::MAX) {
+                u32::MAX
+            } else {
+                u32::try_from(micros).unwrap_or(u32::MAX)
+            }
+        }
+        Err(_) => u32::MAX,
+    }
+}
+
+fn pct_to_scale(pct: u8) -> f32 {
+    f32::from(pct) / 100.0
+}
+
 /// Live dynamic-resolution state for the WIN1 viewport loop: feeds PF2
 /// frame ms per present, reads the render scale (and render size) for the
 /// next frame. Starts at full rate; presentation only, never sim state.
@@ -493,6 +707,7 @@ pub struct ScaleController {
     scale: f32,
     over_count: u32,
     under_count: u32,
+    gov: DynRes,
     /// Frames observed (evidence for the frame report).
     pub frames: u64,
     /// Scale steps taken down (evidence for the frame report).
@@ -505,6 +720,15 @@ impl ScaleController {
     /// Build at full rate (`max_scale`) after validating the policy.
     pub fn new(policy: ScalePolicy) -> Result<Self, AaScaleError> {
         policy.validate()?;
+        let budget_us = budget_us_for_target(policy.target_ms);
+        let gov = DynRes::new(
+            budget_us,
+            50,
+            100,
+            10,
+            policy.under_frames,
+            policy.over_frames,
+        );
         Ok(Self {
             scale: policy.max_scale,
             policy,
@@ -513,6 +737,7 @@ impl ScaleController {
             frames: 0,
             steps_down: 0,
             steps_up: 0,
+            gov,
         })
     }
 
@@ -529,7 +754,9 @@ impl ScaleController {
     /// Feed one PF2 frame time and return the scale for the next frame.
     /// Over budget counts toward a fast step down; under budget (with
     /// headroom) counts toward a slow step up; inside the band both
-    /// counters reset so borderline frames never flap the scale.
+    /// counters reset so borderline frames never flap the scale. The
+    /// integer governor also feeds each frame and can only pull the
+    /// scale down, so sustained load halves the render size.
     pub fn update(&mut self, frame_ms: f64) -> Result<f32, AaScaleError> {
         if !frame_ms.is_finite() || frame_ms < 0.0 {
             return Err(AaScaleError::Invalid(format!(
@@ -563,6 +790,17 @@ impl ScaleController {
             self.over_count = 0;
             self.under_count = 0;
         }
+        // Integer governor edge, presentation only. A governor pull is a
+        // real step down, so it counts like the hysteresis trip above;
+        // otherwise sustained load floors via the governor with no count.
+        let gpu_us = gpu_us_for_frame(frame_ms);
+        let _ = self.gov.step(gpu_us);
+        let gov_scale = pct_to_scale(self.gov.scale_pct());
+        let bounded = gov_scale.clamp(self.policy.min_scale, self.policy.max_scale);
+        if bounded < self.scale {
+            self.steps_down += 1;
+            self.scale = bounded;
+        }
         Ok(self.scale)
     }
 
@@ -594,6 +832,10 @@ pub fn render_size_for_scale(
     };
     Ok((even(present_w), even(present_h)))
 }
+
+/// FC3 pinned 720p scale of 1080p (1280x720): governor pins this value, hysteresis untouched.
+/// Consumer: FC3 governor (row FC3).
+pub const FC3_720P_SCALE: f32 = 2.0 / 3.0;
 
 // ---------------------------------------------------------------------------
 // TAA-off frame: SMAA at the render size, RP1 TAAU plus chain after it.
@@ -1334,14 +1576,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// `+ - * /` plus clamp and max, so 1-ulp drift only).
     pub const GPU_PARITY_TOL_PREDICATED: f32 = 3e-4;
 
-    fn pack_depth(depth: &[f32]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(depth.len() * 4);
-        for d in depth {
-            out.extend_from_slice(&d.to_le_bytes());
-        }
-        out
-    }
-
     fn predicated_uniform_bytes(
         width: u32,
         height: u32,
@@ -1524,7 +1758,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }),
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("rp7-pred-depth"),
-                    contents: &pack_depth(depth),
+                    contents: &crate::accel::f32_le_bytes(depth),
                     usage: wgpu::BufferUsages::STORAGE
                         | wgpu::BufferUsages::COPY_DST
                         | wgpu::BufferUsages::COPY_SRC,
@@ -1828,6 +2062,13 @@ mod tests {
             render_size_for_scale(4096, 1080, 0.5),
             Err(AaScaleError::BudgetExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn fc3_720p_pin_yields_1280x720() {
+        let (w, h) = render_size_for_scale(1920, 1080, FC3_720P_SCALE).expect("720p pin sizes");
+        assert_eq!((w, h), (1280, 720), "FC3 pin renders 720p for 1080p");
+        assert!(render_size_for_scale(1920, 1080, -FC3_720P_SCALE).is_err());
     }
 
     #[test]
@@ -2773,5 +3014,75 @@ mod tests {
             ),
             Err(AaScaleError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn shadow_pcf_msaa_shimmer() {
+        use crate::shadow_cascade as sc;
+        assert_eq!(sc::SHADOW_MAP_SIZE_HIGH, 2048);
+        assert_eq!((msaa_sample_count(false), msaa_sample_count(true)), (1, 4));
+        let (w, h) = (16u32, 16u32);
+        let mut even = Vec::with_capacity(256);
+        let mut odd = Vec::with_capacity(256);
+        let mut depth = Vec::with_capacity(256);
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let _ = y;
+                even.push(if x < 8 {
+                    [0.1, 0.1, 0.1]
+                } else {
+                    [0.9, 0.9, 0.9]
+                });
+                odd.push(if x < 9 {
+                    [0.1, 0.1, 0.1]
+                } else {
+                    [0.9, 0.9, 0.9]
+                });
+                depth.push(if x < 8 { 1.0f32 } else { 3.0f32 });
+            }
+        }
+        let mut map = vec![0.0f32; 64];
+        for y in 0..8usize {
+            for x in 0..8usize {
+                map[y * 8 + x] = if x < 4 { 0.1 } else { 0.3 };
+            }
+        }
+        let off_p = ShadowMsaaSettleParams {
+            shadow_size: 8,
+            bias: 0.005,
+            msaa_on: false,
+            origin_m: 0.0,
+            half_extent_m: 10.0,
+            smaa: SmaaParams::default(),
+        };
+        let on_p = ShadowMsaaSettleParams {
+            msaa_on: true,
+            ..off_p
+        };
+        let off_e =
+            settle_with_shadow_pcf_msaa(&even, &depth, w, h, &map, &off_p).expect("off runs");
+        let on_e = settle_with_shadow_pcf_msaa(&even, &depth, w, h, &map, &on_p).expect("on runs");
+        assert_ne!(off_e, on_e, "MSAA on must change the picture");
+        assert_eq!(off_e[8], even[8], "off 1x keeps the step");
+        let l = luminance(on_e[8]);
+        assert!(l > 0.1 && l < 0.9, "on blends the edge, got {l}");
+        assert_eq!(on_e[0], even[0], "far-left interior holds");
+        assert_eq!(on_e[255], even[255], "far-right interior holds");
+        let off_o =
+            settle_with_shadow_pcf_msaa(&odd, &depth, w, h, &map, &off_p).expect("off runs");
+        let on_o = settle_with_shadow_pcf_msaa(&odd, &depth, w, h, &map, &on_p).expect("on runs");
+        let raw_var = crate::post::ShimmerScene::temporal_variance(&[even.clone(), odd.clone()]);
+        let off_var = crate::post::ShimmerScene::temporal_variance(&[off_e.clone(), off_o.clone()]);
+        let on_var = crate::post::ShimmerScene::temporal_variance(&[on_e.clone(), on_o.clone()]);
+        eprintln!("shadow-pcf-msaa: raw {raw_var:.4} off {off_var:.4} on {on_var:.6} (gate {MSAA_SHIMMER_GATE})");
+        assert!(raw_var > 0.06, "scene must shimmer, got {raw_var}");
+        assert!(
+            on_var <= MSAA_SHIMMER_GATE,
+            "settled {on_var} over {MSAA_SHIMMER_GATE}"
+        );
+        assert!(on_var < off_var, "on must calm below off");
+        let again =
+            settle_with_shadow_pcf_msaa(&even, &depth, w, h, &map, &on_p).expect("runs again");
+        assert_eq!(on_e, again, "settle bit-identical x2");
     }
 }

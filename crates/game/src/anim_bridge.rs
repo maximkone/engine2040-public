@@ -184,6 +184,17 @@ impl FighterSlot {
         self.fade
     }
 
+    /// Atomic look read: the current cue plus the fade driver together.
+    ///
+    /// Caller: `crates/game/src/fighter_look_acts.rs` (`fold_acts` drives one
+    /// bridge slot per seen fighter, then samples both clips while the fade
+    /// runs). Same bytes as `pick` plus `fade` read together, so the look
+    /// never mixes a new pick with an old fade.
+    #[must_use]
+    pub fn look_pick(&self) -> (ClipPick, SlotFade) {
+        (self.pick, self.fade)
+    }
+
     /// First tick the slot runs free again (exclusive). The look records the
     /// impact pair's expiry here; `fold_acts` freezes exactly that pair.
     #[must_use]
@@ -199,10 +210,11 @@ impl FighterSlot {
 
     /// March the pick clock with the tick while the act stays held: the swing
     /// window survives the freeze, so the resume tick still maps the held
-    /// clip instead of an expired swing. Presentation only.
+    /// clip instead of an expired swing. The phase stays put while held; the
+    /// start marches so the resume tick recomputes the same phase.
+    /// Presentation only.
     pub(crate) fn march_hold(&mut self, elapsed: u32) {
         self.pick.act_start = self.pick.act_start.saturating_add(elapsed);
-        self.pick.phase_ticks = self.pick.phase_ticks.saturating_sub(elapsed);
     }
 
     /// Fold one tick of sim state into the pick: advance the fade clock,
@@ -295,9 +307,11 @@ impl FighterSlot {
         self.pos_m = view.pos_m;
     }
 
-    /// FNV over the slot id, the whole integer pick, the swing counter and
-    /// the fade digest: the replay proof. Float positions are excluded by
-    /// construction, so the digest never depends on presentation rounding.
+    /// FNV over the slot id, the whole integer pick, the swing counter, the
+    /// hold expiry and the fade digest: the replay proof. Float positions are
+    /// excluded by construction, so the digest never depends on presentation
+    /// rounding. The hold expiry enters because it drives the hitstop freeze;
+    /// the same pick with a different freeze must not digest the same.
     #[must_use]
     pub fn digest(&self) -> u64 {
         let mut h = Fnv64::new();
@@ -308,6 +322,7 @@ impl FighterSlot {
         h.write_i64(self.pick.rate_q8);
         h.write_u8(self.swings);
         h.write_u8(u8::from(self.seen));
+        h.write_u32(self.hold_until);
         h.write_u64(self.fade.digest());
         h.finish()
     }
@@ -787,5 +802,70 @@ mod tests {
         march_look_sequence(&mut twin);
         assert_eq!(twin.pick(), running);
         assert_eq!(twin.digest(), driven.digest());
+    }
+
+    #[test]
+    fn fighter_anim_bridge_look_pick_is_atomic() {
+        // EG18 caller wire: the fold path reads the cue plus the fade
+        // together, so a new pick never pairs with an old fade.
+        let mut slot = FighterSlot::new(0);
+        let idle = tick_march(&mut slot, 0, -1.0, 1000, &[]);
+        assert_eq!(idle, slot.look_pick().0);
+        assert_eq!(slot.fade(), slot.look_pick().1);
+        let strike = [hit(0, 1)];
+        let swung = tick_march(&mut slot, 1, -1.0, 1000, &strike);
+        let (pick, fade) = slot.look_pick();
+        assert_eq!((pick, fade), (swung, slot.fade()));
+        assert_eq!(pick.clip, BridgeClip::Attack0);
+        assert!(fade.blending());
+    }
+
+    #[test]
+    fn fighter_anim_bridge_hold_enters_digest() {
+        // EG18 slice: the hold expiry drives the hitstop freeze, so the replay
+        // proof must include it; otherwise a held slot and a free slot with the
+        // same pick digest identically yet freeze differently.
+        let mut held = FighterSlot::new(0);
+        let mut free = FighterSlot::new(0);
+        for tick in 0..=4u32 {
+            tick_march(&mut held, tick, -1.0, 1000, &[]);
+            tick_march(&mut free, tick, -1.0, 1000, &[]);
+        }
+        assert_eq!(held.digest(), free.digest(), "same ticks digest the same");
+        held.hold_through(8);
+        assert_ne!(
+            held.digest(),
+            free.digest(),
+            "hold expiry must enter the digest"
+        );
+        let mut twin = FighterSlot::new(0);
+        for tick in 0..=4u32 {
+            tick_march(&mut twin, tick, -1.0, 1000, &[]);
+        }
+        twin.hold_through(8);
+        assert_eq!(held.digest(), twin.digest(), "same hold digests the same");
+    }
+
+    #[test]
+    fn fighter_anim_bridge_hold_freezes_phase() {
+        // EG18 slice: the hitstop hold marches the start so the clip phase
+        // stays put (the look promises the phase stays put while held).
+        let mut slot = FighterSlot::new(0);
+        for tick in 0..=8u32 {
+            tick_march(&mut slot, tick, -1.0, 1000, &[]);
+        }
+        let frozen = slot.pick();
+        slot.hold_through(12);
+        slot.march_hold(2);
+        assert_eq!(
+            slot.pick().phase_ticks,
+            frozen.phase_ticks,
+            "hold keeps the phase put"
+        );
+        assert_eq!(
+            slot.pick().act_start,
+            frozen.act_start.saturating_add(2),
+            "start marches so resume recomputes the same phase"
+        );
     }
 }

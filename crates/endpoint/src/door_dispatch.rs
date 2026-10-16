@@ -116,7 +116,8 @@ impl McpServer {
 
     /// Audited dispatch seam with a pre-run payload gate: the versioned
     /// scope-policy name gate first, then `sandbox::check_before_run` over the serialized
-    /// args, then the locked run. A gate refusal converts with
+    /// args, then the `packs::grammar` verb gate for payloads claiming verbs,
+    /// then the locked run. A gate refusal converts with
     /// [`McpToolError::new`] (the refusal already carries a `&'static str`
     /// code plus a message with one `re-run` recovery) and seals one
     /// `Refused` record through the existing [`Self::seal_refusal`] path, so
@@ -136,6 +137,11 @@ impl McpServer {
         }
         if let Err(refusal) = super::sandbox::check_before_run(tool, payload) {
             return Err(self.seal_refusal(tool, McpToolError::new(refusal.code, refusal.message)));
+        }
+        if payload.contains("\"actions\"") {
+            if let Err(refusal) = super::packs::grammar::check_verbs(payload) {
+                return Err(self.seal_refusal(tool, refusal));
+            }
         }
         self.dispatch_locked(tool, op)
     }

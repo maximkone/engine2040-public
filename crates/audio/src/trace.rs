@@ -22,8 +22,9 @@ pub const MAX_ECHO: f32 = 0.26;
 /// BVH leaf size.
 const LEAF_SIZE: usize = 4;
 /// Echo merge edges in milliseconds (donor TAP_EDGES_MS shape).
-const TAP_EDGES_MS: [f32; 12] =
-    [0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 60.0, 80.0, 120.0, 180.0, 250.0];
+const TAP_EDGES_MS: [f32; 12] = [
+    0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 60.0, 80.0, 120.0, 180.0, 250.0,
+];
 
 /// Closed shape an occluder is made of.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,8 +78,16 @@ fn dir_dot(a: V3, b: V3) -> f32 {
 fn shape_bounds(shape: &Shape) -> (V3, V3) {
     match *shape {
         Shape::Box { center, half } => (
-            [center[0] - half[0], center[1] - half[1], center[2] - half[2]],
-            [center[0] + half[0], center[1] + half[1], center[2] + half[2]],
+            [
+                center[0] - half[0],
+                center[1] - half[1],
+                center[2] - half[2],
+            ],
+            [
+                center[0] + half[0],
+                center[1] + half[1],
+                center[2] + half[2],
+            ],
         ),
         Shape::Sphere { center, radius } => (
             [center[0] - radius, center[1] - radius, center[2] - radius],
@@ -140,7 +149,11 @@ fn shape_interval(shape: &Shape, o: V3, d: V3) -> Option<(f32, f32, V3)> {
             }
             let l = (dir_dot(m, m) + t0 * (2.0 * b + t0)).max(0.0).sqrt();
             let n = if l > 1e-12 {
-                [(m[0] + d[0] * t0) / l, (m[1] + d[1] * t0) / l, (m[2] + d[2] * t0) / l]
+                [
+                    (m[0] + d[0] * t0) / l,
+                    (m[1] + d[1] * t0) / l,
+                    (m[2] + d[2] * t0) / l,
+                ]
             } else {
                 [0.0, 1.0, 0.0]
             };
@@ -176,7 +189,11 @@ fn cosine_direction(n: V3, seed: u64) -> V3 {
     let r = u1.sqrt();
     let phi = core::f32::consts::TAU * u2;
     let (x, y, z) = (r * phi.cos(), r * phi.sin(), (1.0 - u1).max(0.0).sqrt());
-    let helper: V3 = if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let helper: V3 = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
     let t = [
         helper[1] * n[2] - helper[2] * n[1],
         helper[2] * n[0] - helper[0] * n[2],
@@ -184,8 +201,16 @@ fn cosine_direction(n: V3, seed: u64) -> V3 {
     ];
     let tl = dir_dot(t, t).sqrt().max(1e-12);
     let tu = [t[0] / tl, t[1] / tl, t[2] / tl];
-    let b = [n[1] * tu[2] - n[2] * tu[1], n[2] * tu[0] - n[0] * tu[2], n[0] * tu[1] - n[1] * tu[0]];
-    let v = [tu[0] * x + b[0] * y + n[0] * z, tu[1] * x + b[1] * y + n[1] * z, tu[2] * x + b[2] * y + n[2] * z];
+    let b = [
+        n[1] * tu[2] - n[2] * tu[1],
+        n[2] * tu[0] - n[0] * tu[2],
+        n[0] * tu[1] - n[1] * tu[0],
+    ];
+    let v = [
+        tu[0] * x + b[0] * y + n[0] * z,
+        tu[1] * x + b[1] * y + n[1] * z,
+        tu[2] * x + b[2] * y + n[2] * z,
+    ];
     let l = dir_dot(v, v).sqrt().max(1e-12);
     [v[0] / l, v[1] / l, v[2] / l]
 }
@@ -193,10 +218,19 @@ fn cosine_direction(n: V3, seed: u64) -> V3 {
 impl Scene {
     /// Build the BVH over `occluders`.
     pub fn new(occluders: Vec<Occluder>) -> Self {
-        let mut scene = Self { order: (0..occluders.len()).collect(), nodes: Vec::new(), occluders };
+        let mut scene = Self {
+            order: (0..occluders.len()).collect(),
+            nodes: Vec::new(),
+            occluders,
+        };
         if !scene.occluders.is_empty() {
             let n = scene.occluders.len();
-            scene.nodes.push(Node { min: [0.0; 3], max: [0.0; 3], left: 0, count: 0 });
+            scene.nodes.push(Node {
+                min: [0.0; 3],
+                max: [0.0; 3],
+                left: 0,
+                count: 0,
+            });
             scene.build_into(0, 0, n);
         }
         scene
@@ -228,7 +262,12 @@ impl Scene {
     fn build_into(&mut self, slot: usize, from: usize, to: usize) {
         let (min, max) = self.range_bounds(from, to);
         if to - from <= LEAF_SIZE {
-            self.nodes[slot] = Node { min, max, left: from, count: to - from };
+            self.nodes[slot] = Node {
+                min,
+                max,
+                left: from,
+                count: to - from,
+            };
             return;
         }
         let mut clo: V3 = [f32::INFINITY; 3];
@@ -259,11 +298,26 @@ impl Scene {
         });
         let mid = from + (to - from) / 2;
         let left = self.nodes.len();
-        self.nodes.push(Node { min, max, left: 0, count: 0 });
-        self.nodes.push(Node { min, max, left: 0, count: 0 });
+        self.nodes.push(Node {
+            min,
+            max,
+            left: 0,
+            count: 0,
+        });
+        self.nodes.push(Node {
+            min,
+            max,
+            left: 0,
+            count: 0,
+        });
         self.build_into(left, from, mid);
         self.build_into(left + 1, mid, to);
-        self.nodes[slot] = Node { min, max, left, count: 0 };
+        self.nodes[slot] = Node {
+            min,
+            max,
+            left,
+            count: 0,
+        };
     }
 
     fn hit_box(min: V3, max: V3, o: V3, inv: V3, far: f32) -> Option<f32> {
@@ -312,7 +366,11 @@ impl Scene {
                 for &oi in &self.order[node.left..node.left + node.count] {
                     if let Some((t0, _, n)) = shape_interval(&self.occluders[oi].shape, o, d) {
                         if t0 > 1e-4 && t0 <= limit && best.is_none_or(|h: Hit| t0 < h.t) {
-                            best = Some(Hit { index: oi, t: t0, normal: n });
+                            best = Some(Hit {
+                                index: oi,
+                                t: t0,
+                                normal: n,
+                            });
                         }
                     }
                 }
@@ -339,7 +397,10 @@ impl Scene {
                 let (enter, leave) = (t0.max(0.0), t1.min(len));
                 if leave - enter >= 0.0 && enter < len - 0.02 && leave > 0.02 && t1 >= t0 {
                     let chord = (leave - enter).max(REFERENCE_THICKNESS);
-                    t *= occ.transmission.clamp(0.0, 1.0).powf(chord / REFERENCE_THICKNESS);
+                    t *= occ
+                        .transmission
+                        .clamp(0.0, 1.0)
+                        .powf(chord / REFERENCE_THICKNESS);
                 }
             }
         }
@@ -359,7 +420,10 @@ pub struct Room {
 /// Measure the room with fixed rays plus mirror and matte bounces.
 pub fn analyse_room(scene: &Scene, listener: V3, rays: usize, bounces: usize) -> Room {
     if scene.is_empty() || rays == 0 || bounces == 0 {
-        return Room { rt60: 0.0, closedness: 0.0 };
+        return Room {
+            rt60: 0.0,
+            closedness: 0.0,
+        };
     }
     let mut events: Vec<(f32, f32)> = Vec::new();
     let mut closed = 0usize;
@@ -369,7 +433,9 @@ pub fn analyse_room(scene: &Scene, listener: V3, rays: usize, bounces: usize) ->
         let mut e = 1.0f32;
         let mut travelled = 0.0f32;
         for b in 0..bounces {
-            let Some(h) = scene.nearest(o, d, OPEN_DISTANCE) else { break };
+            let Some(h) = scene.nearest(o, d, OPEN_DISTANCE) else {
+                break;
+            };
             travelled += h.t;
             if b == 0 {
                 closed += 1;
@@ -400,7 +466,10 @@ pub fn analyse_room(scene: &Scene, listener: V3, rays: usize, bounces: usize) ->
     }
     let rays_f = crate::f32_of(u32::try_from(rays).unwrap_or(1)).max(1.0);
     let closed_f = crate::f32_of(u32::try_from(closed).unwrap_or(0));
-    let mut room = Room { rt60: 0.0, closedness: (closed_f / rays_f).clamp(0.0, 1.0) };
+    let mut room = Room {
+        rt60: 0.0,
+        closedness: (closed_f / rays_f).clamp(0.0, 1.0),
+    };
     if events.is_empty() {
         return room;
     }
@@ -417,7 +486,11 @@ pub fn analyse_room(scene: &Scene, listener: V3, rays: usize, bounces: usize) ->
             let db = 10.0 * (tail / total).max(1e-12).log10();
             if db <= level {
                 let a = 10.0 * (prev.1 / total).max(1e-12).log10();
-                let w = if a > db { (a - level) / (a - db).max(1e-9) } else { 0.0 };
+                let w = if a > db {
+                    (a - level) / (a - db).max(1e-9)
+                } else {
+                    0.0
+                };
                 return Some(prev.0 + (t - prev.0) * w);
             }
             prev = (t, tail);
@@ -468,8 +541,18 @@ pub struct RoomSettings {
 }
 
 /// Trace one source to the listener: direct plus merged first echoes.
-pub fn trace_source(scene: &Scene, listener: V3, source: V3, rays: usize, radius: f32) -> Acoustics {
-    let to = [source[0] - listener[0], source[1] - listener[1], source[2] - listener[2]];
+pub fn trace_source(
+    scene: &Scene,
+    listener: V3,
+    source: V3,
+    rays: usize,
+    radius: f32,
+) -> Acoustics {
+    let to = [
+        source[0] - listener[0],
+        source[1] - listener[1],
+        source[2] - listener[2],
+    ];
     let distance = dir_dot(to, to).sqrt();
     let r = radius.max(0.0);
     let aim: [V3; 7] = [
@@ -487,7 +570,12 @@ pub fn trace_source(scene: &Scene, listener: V3, source: V3, rays: usize, radius
         sum += scene.transmittance(listener, aim[k]);
     }
     let direct = sum / crate::f32_of(u32::try_from(count).unwrap_or(1)).max(1.0);
-    let mut out = Acoustics { direct_gain: direct.clamp(0.0, 1.0), direct_cutoff: 20_000.0, send: 0.5, taps: Vec::new() };
+    let mut out = Acoustics {
+        direct_gain: direct.clamp(0.0, 1.0),
+        direct_cutoff: 20_000.0,
+        send: 0.5,
+        taps: Vec::new(),
+    };
     if scene.is_empty() || rays == 0 {
         return out;
     }
@@ -500,7 +588,9 @@ pub fn trace_source(scene: &Scene, listener: V3, source: V3, rays: usize, radius
         let mut o = listener;
         let (mut len, mut rho) = (0.0f32, 1.0f32);
         for _ in 0..2 {
-            let Some(h) = scene.nearest(o, d, OPEN_DISTANCE) else { break };
+            let Some(h) = scene.nearest(o, d, OPEN_DISTANCE) else {
+                break;
+            };
             len += h.t;
             let p = [o[0] + d[0] * h.t, o[1] + d[1] * h.t, o[2] + d[2] * h.t];
             let n = if dir_dot(h.normal, d) > 0.0 {
@@ -549,7 +639,11 @@ pub fn trace_source(scene: &Scene, listener: V3, source: V3, rays: usize, radius
     for (power, delay_sum, dir_sum) in buckets {
         if power > 1e-12 {
             let inv = 1.0 / power;
-            out.taps.push(Tap { delay: delay_sum * inv, gain: power.sqrt(), dir: [dir_sum[0] * inv, dir_sum[1] * inv, dir_sum[2] * inv] });
+            out.taps.push(Tap {
+                delay: delay_sum * inv,
+                gain: power.sqrt(),
+                dir: [dir_sum[0] * inv, dir_sum[1] * inv, dir_sum[2] * inv],
+            });
         }
     }
     if out.taps.len() > MAX_TAPS {
@@ -564,7 +658,11 @@ mod tests {
 
     fn stone_room() -> Vec<Occluder> {
         let (hw, hh, hl, t) = (4.0f32, 2.5, 2.0, 0.1);
-        let wall = |c: V3, h: V3| Occluder { shape: Shape::Box { center: c, half: h }, absorption: 0.1, transmission: 0.0 };
+        let wall = |c: V3, h: V3| Occluder {
+            shape: Shape::Box { center: c, half: h },
+            absorption: 0.1,
+            transmission: 0.0,
+        };
         vec![
             wall([0.0, -hh - t, 0.0], [hw + 0.2, t, hl + 0.2]),
             wall([0.0, hh + t, 0.0], [hw + 0.2, t, hl + 0.2]),

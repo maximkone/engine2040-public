@@ -6,6 +6,14 @@ use crate::arena::{ArenaError, PhaseArena};
 use crate::snapshot::hash_bytes;
 use engine_core::Fnv64;
 
+/// Sparse marker storage plus `StorageKind`/`Added`/`Changed` (see `sparse.rs`).
+/// Caller: [`World`] holds one [`SparseSet`] for markers; tables stay default.
+#[path = "sparse.rs"]
+pub mod sparse;
+
+/// Sparse storage discipline and change filters over table stamps.
+pub use sparse::{Added, Changed, Marker, SparseSet, StorageKind};
+
 /// SoA position column.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Position {
@@ -166,6 +174,27 @@ struct Table {
     vel_changed: Vec<Tick>,
 }
 
+/// DOTS-layout contract (buyer-expectation pin, ideas only): one dense SoA
+/// column set per component mask, same-mask rows packed contiguous, queries
+/// visit exactly the matching rows and never cross tables. Store semantics
+/// unchanged; this only asserts the landed shape in debug builds.
+/// Determinism: table order, no allocation.
+fn assert_table_for_mask(mask: u8, table: &Table) {
+    let n = table.entities.len();
+    if has_bit(mask, P) {
+        debug_assert_eq!(table.pos.len(), n);
+        debug_assert_eq!(table.pos_changed.len(), n);
+    } else {
+        debug_assert!(table.pos.is_empty() && table.pos_changed.is_empty());
+    }
+    if has_bit(mask, V) {
+        debug_assert_eq!(table.vel.len(), n);
+        debug_assert_eq!(table.vel_changed.len(), n);
+    } else {
+        debug_assert!(table.vel.is_empty() && table.vel_changed.is_empty());
+    }
+}
+
 /// Per-id slot: table location plus generation for stale-handle rejection.
 #[derive(Clone, Copy, Debug)]
 struct Loc {
@@ -209,6 +238,8 @@ pub struct World {
     free: Vec<u32>,
     tables: Vec<Table>,
     pending: Vec<Entity>,
+    /// Sparse markers (visibility-like churn): no table moves, never hashed.
+    markers: SparseSet,
 }
 
 impl Default for World {
@@ -232,6 +263,7 @@ impl World {
                 Table::default(),
             ],
             pending: vec![],
+            markers: SparseSet::new(),
         }
     }
     /// Current change tick.
@@ -268,6 +300,7 @@ impl World {
                 }
             }
         }
+        clamped += self.markers.check_change_ticks(now, MAX_CHANGE_AGE);
         self.last_scan = now;
         clamped
     }
@@ -302,6 +335,7 @@ impl World {
         self.locs.reserve(entities);
         self.free.reserve(entities);
         self.pending.reserve(entities);
+        self.markers.reserve(entities);
         for table in &mut self.tables {
             table.entities.reserve(entities);
             table.pos.reserve(entities);
@@ -395,6 +429,7 @@ impl World {
         let id = e.slot();
         let (mask, row) = (self.locs[id].mask, self.locs[id].row_index());
         swap_remove_row(&mut self.tables, &mut self.locs, mask, row);
+        self.markers.remove_id(e.id);
         self.locs[id].alive = false;
         self.locs[id].gen = self.locs[id].gen.wrapping_add(1);
         self.free.push(e.id);
@@ -546,6 +581,60 @@ impl World {
         self.move_to(e, dst, None, None);
         true
     }
+    /// Storage discipline for table kinds (P/V): always [`StorageKind::Table`].
+    pub fn table_kind() -> StorageKind {
+        StorageKind::Table
+    }
+    /// Live sparse-marker count.
+    pub fn marker_count(&self) -> usize {
+        self.markers.len()
+    }
+    /// Add the sparse [`Marker`] without moving tables. Units: ticks at
+    /// `tick`. Determinism: dense order, never hashed.
+    pub fn add_marker(&mut self, e: Entity) -> bool {
+        if !self.ok(e) {
+            return false;
+        }
+        let tick = self.tick;
+        self.markers.insert(e, tick)
+    }
+    /// Remove the sparse [`Marker`]; no table move. False when absent/stale.
+    pub fn remove_marker(&mut self, e: Entity) -> bool {
+        if !self.ok(e) {
+            return false;
+        }
+        self.markers.remove(e)
+    }
+    /// True for a live entity carrying the sparse [`Marker`].
+    pub fn has_marker(&self, e: Entity) -> bool {
+        self.ok(e) && self.markers.contains(e)
+    }
+    /// True when the marker was added after `last_run` per [`is_newer_than`].
+    pub fn added_marker_since(&self, e: Entity, last_run: Tick, this_run: Tick) -> bool {
+        self.ok(e) && self.markers.added_since(e, last_run, this_run)
+    }
+    /// True when the marker changed after `last_run` per [`is_newer_than`].
+    pub fn changed_marker_since(&self, e: Entity, last_run: Tick, this_run: Tick) -> bool {
+        self.ok(e) && self.markers.changed_since(e, last_run, this_run)
+    }
+    /// Visit added markers in dense order (the [`Added`] filter shape).
+    pub fn for_each_marker_added_since(
+        &self,
+        last_run: Tick,
+        this_run: Tick,
+        f: impl FnMut(Entity),
+    ) {
+        self.markers.for_each_added_since(last_run, this_run, f);
+    }
+    /// Visit changed markers in dense order (the [`Changed`] filter shape).
+    pub fn for_each_marker_changed_since(
+        &self,
+        last_run: Tick,
+        this_run: Tick,
+        f: impl FnMut(Entity),
+    ) {
+        self.markers.for_each_changed_since(last_run, this_run, f);
+    }
     /// True when [`Position`] changed after `since`.
     pub fn changed_pos(&self, e: Entity, since: Tick) -> bool {
         if !self.has_pos(e) {
@@ -580,6 +669,9 @@ impl World {
     }
     /// Visit every entity carrying [`Position`].
     pub fn for_each_p(&self, mut f: impl FnMut(Entity, Position)) {
+        debug_assert_eq!(self.tables.len(), 4);
+        assert_table_for_mask(1, &self.tables[1]);
+        assert_table_for_mask(3, &self.tables[3]);
         for m in [1u8, 3] {
             let t = &self.tables[usize::from(m)];
             for i in 0..t.entities.len() {
@@ -589,6 +681,8 @@ impl World {
     }
     /// Visit every entity carrying [`Position`] plus [`Velocity`].
     pub fn for_each_pv(&self, mut f: impl FnMut(Entity, Position, Velocity)) {
+        debug_assert_eq!(self.tables.len(), 4);
+        assert_table_for_mask(3, &self.tables[3]);
         let t = &self.tables[3];
         for i in 0..t.entities.len() {
             f(t.entities[i], t.pos[i], t.vel[i]);
@@ -1235,5 +1329,96 @@ mod tests {
         // The gated scan rests below the threshold.
         let mut w = World::new();
         assert_eq!((w.last_scan(), w.check_change_ticks_if_due()), (0, 0));
+    }
+    #[test]
+    fn sparse_markers_leave_hash_and_tables_alone() {
+        let mut w = World::new();
+        w.reserve(16);
+        let mut ids = Vec::with_capacity(8);
+        for i in 0..8 {
+            let f = i as f32;
+            ids.push(w.spawn(
+                Some(Position { x: f, y: -f }),
+                Some(Velocity { x: 0.5, y: 0.25 }),
+            ));
+        }
+        let before = w.state_hash();
+        let mut pv = 0;
+        w.for_each_pv(|_, _, _| pv += 1);
+        for (k, e) in ids.iter().enumerate() {
+            if k % 2 == 0 {
+                assert!(w.add_marker(*e));
+            }
+        }
+        assert_eq!(w.marker_count(), 4);
+        let mut pv_after = 0;
+        w.for_each_pv(|_, _, _| pv_after += 1);
+        assert_eq!((pv, pv_after), (8, 8));
+        assert_eq!(w.state_hash(), before);
+        assert!(w.despawn(ids[0]));
+        assert!(!w.has_marker(ids[0]));
+        assert_ne!(w.state_hash(), before, "despawn moves the hash");
+    }
+    #[test]
+    fn sparse_world_added_fires_once_changed_tracks_stamp() {
+        let mut w = World::new();
+        let e = w.spawn(Some(Position { x: 1.0, y: 0.0 }), None);
+        let t0 = w.tick();
+        w.advance();
+        let t1 = w.tick();
+        assert!(w.add_marker(e));
+        assert!(w.added_marker_since(e, t0, t1));
+        assert!(!w.added_marker_since(e, t1, t1));
+        w.advance();
+        let t2 = w.tick();
+        assert!(!w.added_marker_since(e, t1, t2));
+        assert!(!w.changed_marker_since(e, t2, t2));
+        let mut seen = 0;
+        w.for_each_marker_added_since(t0, t1, |_| seen += 1);
+        assert_eq!(seen, 1);
+        let mut changed = 0;
+        w.for_each_marker_changed_since(t2, t2, |_| changed += 1);
+        assert_eq!(changed, 0);
+        assert!(w.remove_marker(e));
+        assert!(!w.has_marker(e));
+    }
+    #[test]
+    #[ignore = "timing: spike receipt, run with --ignored (release, one thread)"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn sparse_spike_receipt() {
+        let mut w = World::new();
+        w.reserve(10_000);
+        let mut ids = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let f = i as f32;
+            ids.push(w.spawn(
+                Some(Position { x: f, y: -f }),
+                Some(Velocity { x: 0.5, y: 0.25 }),
+            ));
+        }
+        let t = std::time::Instant::now();
+        let mut n = 0;
+        w.for_each_pv(|_, _, _| n += 1);
+        let iter = t.elapsed();
+        let denom = u128::try_from(n).unwrap_or(1);
+        std::println!("table_iter_ns_entity={}", iter.as_nanos() / denom);
+        let t = std::time::Instant::now();
+        for e in ids.iter().step_by(10) {
+            let _ = w.add_marker(*e);
+        }
+        let sadd = t.elapsed();
+        let t = std::time::Instant::now();
+        for e in ids.iter().step_by(10) {
+            let _ = w.remove_marker(*e);
+        }
+        let srem = t.elapsed();
+        let ops = u128::try_from(ids.len() / 10).unwrap_or(1);
+        std::println!("sparse_add_ns_op={}", sadd.as_nanos() / ops);
+        std::println!("sparse_remove_ns_op={}", srem.as_nanos() / ops);
+        assert_eq!((n, w.marker_count()), (10_000, 0));
     }
 }

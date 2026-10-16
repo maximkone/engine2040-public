@@ -47,11 +47,34 @@ export function parseTape(buf) {
   }
   return { format: format, fixture: fixture, seed: seed, ticks: ticks, inputs: inputs, checkpoints: checkpoints };
 }
-export function causeNote(tick) {
-  if (tick === 0) {
-    return 'start state differs: seed, init order or struct layout';
+export function classifyCause(a, b) {
+  const x = BigInt(a) ^ BigInt(b);
+  if (x === 0n) {
+    return null;
   }
-  return 'tick ' + tick + ' differs after ' + (tick - 1) + ' matched: bisect that tick\'s systems for sort ties, libm calls or fused multiply-add';
+  const bigA = BigInt(a);
+  const bigB = BigInt(b);
+  const d = bigA > bigB ? bigA - bigB : bigB - bigA;
+  let pop = 0;
+  let v = x;
+  while (v > 0n) {
+    pop += Number(v & 1n);
+    v >>= 1n;
+  }
+  if (d <= 2n && pop <= 2) {
+    return 'fma';
+  }
+  if (x < 256n || d < 1024n) {
+    return 'libm';
+  }
+  return 'sort-tie';
+}
+export function causeNote(tick, cause) {
+  const tag = cause ? ' [cause=' + cause + ']' : '';
+  if (tick === 0) {
+    return 'start state differs: seed, init order or struct layout' + tag;
+  }
+  return 'tick ' + tick + ' differs after ' + (tick - 1) + ' matched: bisect that tick\'s systems for sort ties, libm calls or fused multiply-add' + tag;
 }
 export function compareTapes(base, other) {
   if (base.format !== other.format || base.fixture !== other.fixture) {
@@ -78,7 +101,15 @@ export function compareTapes(base, other) {
     const stateDiff = a.state !== b.state;
     if (legacyDiff || stateDiff) {
       const lane = legacyDiff && stateDiff ? 'both' : (legacyDiff ? 'legacy' : 'state');
-      return { equal: false, comparable: true, firstDivergentTick: t, lane: lane, note: causeNote(t) };
+      let cause = null;
+      if (legacyDiff && stateDiff) {
+        const cs = classifyCause(a.state, b.state);
+        const cl = classifyCause(a.legacy, b.legacy);
+        cause = (cs === 'sort-tie' || cl === 'sort-tie') ? 'sort-tie' : ((cs === 'libm' || cl === 'libm') ? 'libm' : 'fma');
+      } else {
+        cause = classifyCause(lane === 'legacy' ? a.legacy : a.state, lane === 'legacy' ? b.legacy : b.state);
+      }
+      return { equal: false, comparable: true, firstDivergentTick: t, lane: lane, cause: cause, note: causeNote(t, cause) };
     }
   }
   return { equal: true, comparable: true, firstDivergentTick: null, lane: null, note: '' };
@@ -104,7 +135,7 @@ export function formatMatrix(entries, results) {
     } else if (r.equal) {
       lines.push('MATCH ' + name + ' vs ' + first);
     } else {
-      lines.push('DIVERGE ' + name + ' vs ' + first + ': first bad tick ' + r.firstDivergentTick + ' (' + r.lane + ' lane) - ' + r.note);
+      lines.push('DIVERGE ' + name + ' vs ' + first + ': first bad tick ' + r.firstDivergentTick + ' (' + r.lane + ' lane) cause=' + r.cause + ' - ' + r.note);
     }
   }
   const pass = results.every(function (r) { return r.equal; });

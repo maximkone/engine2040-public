@@ -233,6 +233,7 @@ pub fn push_fight_draws(
                 mesh: key,
                 material,
                 base_color: None,
+                normal_map: None,
             });
             pushed += 1;
         }
@@ -264,6 +265,7 @@ pub fn staged_fight_frame_list(
             mesh: cube,
             material: scene.material,
             base_color: None,
+            normal_map: None,
         });
     }
     let _ = push_dressing_draws(&mut list, resident)?;
@@ -385,6 +387,16 @@ const FRAME_FLASH: [u8; 3] = [255, 255, 255];
 const FRAME_DOWN: [u8; 3] = [90, 90, 90];
 /// Outline color for CPU body rects.
 const FRAME_EDGE: [u8; 3] = [20, 16, 12];
+/// HP bar color for CPU frames (green steps with remaining health).
+const FRAME_HP: [u8; 3] = [34, 177, 76];
+/// Hit-mark color for CPU frames (cyan square under a hit body).
+const FRAME_HITMARK: [u8; 3] = [0, 220, 220];
+/// HP bar size in pixels: fixed width, filled left to right by health.
+const HP_BAR_W: usize = 12;
+/// HP bar height in pixels.
+const HP_BAR_H: usize = 2;
+/// Hit-mark square edge in pixels.
+const HIT_MARK: usize = 3;
 
 /// Linear position of a finite non-negative `f32` in 1/64 units, decoded
 /// from the bit pattern with integer math only (no float-to-int cast):
@@ -416,8 +428,10 @@ fn map_axis(value_m: f32, half_extent_m: f32, pixels: u32) -> u32 {
 }
 
 /// Raw RGBA pixels for one staged frame: sand background plus one body rect
-/// per dot (standing, or lying when knocked down; white when hit). The same
-/// dots give the same pixels twice. Bad sizes fail loudly.
+/// per dot (standing, or lying when knocked down; white when hit), one HP
+/// bar above each body (green width tracks health), and one cyan hit mark
+/// below each hit body. The same dots give the same pixels twice.
+/// Bad sizes fail loudly.
 pub fn staged_fight_frame_rgba(
     dots: &[StagedFighterDot],
     width: u32,
@@ -473,6 +487,45 @@ pub fn staged_fight_frame_rgba(
                 pixels[at + 1] = color[1];
                 pixels[at + 2] = color[2];
                 pixels[at + 3] = 255;
+            }
+        }
+        // HP bar above the body: filled width tracks health in permille,
+        // so full health fills more green than low health. Empty for
+        // knocked-down bodies. Same dots give the same bar twice.
+        let filled = (usize::from(dot.hp) * HP_BAR_W + 999) / 1000;
+        let filled = filled.min(HP_BAR_W);
+        let bar_x0 = center_x.saturating_sub(HP_BAR_W / 2);
+        let bar_y0 = y0.saturating_sub(HP_BAR_H + 2);
+        for dy in 0..HP_BAR_H {
+            for dx in 0..filled {
+                let (x, y) = (bar_x0 + dx, bar_y0 + dy);
+                if x >= w || y >= h {
+                    continue;
+                }
+                let at = (y * w + x) * 4;
+                pixels[at] = FRAME_HP[0];
+                pixels[at + 1] = FRAME_HP[1];
+                pixels[at + 2] = FRAME_HP[2];
+                pixels[at + 3] = 255;
+            }
+        }
+        // Hit mark below the body: a cyan square only when the hit flag
+        // is set, so hit frames differ from calm frames at a glance.
+        if dot.hit {
+            let mark_x0 = center_x.saturating_sub(HIT_MARK / 2);
+            let mark_y0 = y0.saturating_add(rh).saturating_add(1);
+            for dy in 0..HIT_MARK {
+                for dx in 0..HIT_MARK {
+                    let (x, y) = (mark_x0 + dx, mark_y0 + dy);
+                    if x >= w || y >= h {
+                        continue;
+                    }
+                    let at = (y * w + x) * 4;
+                    pixels[at] = FRAME_HITMARK[0];
+                    pixels[at + 1] = FRAME_HITMARK[1];
+                    pixels[at + 2] = FRAME_HITMARK[2];
+                    pixels[at + 3] = 255;
+                }
             }
         }
     }
@@ -989,6 +1042,126 @@ mod tests {
             tick += 1;
         }
         assert!(map_axis(f32::NAN, 20.0, width) <= width);
+    }
+
+    #[test]
+    fn staged_frames_paint_hp_step_and_hit_mark() {
+        // Oracle: a landed hit shows a victim flash plus an hp step on a
+        // per-fighter bar. Dots mirror manifest tick 44 (slot 0 hp 1000
+        // unhit, slots 1..=3 hp 760 hit) at spread positions so bars never
+        // overlap; integer-only raster must paint green HP steps plus cyan
+        // hit marks.
+        let hit_damaged = [
+            StagedFighterDot {
+                slot: 0,
+                pos_m: [-10.0, 0.0, 0.0],
+                hp: 1000,
+                hit: false,
+            },
+            StagedFighterDot {
+                slot: 1,
+                pos_m: [-3.0, 0.0, 0.0],
+                hp: 760,
+                hit: true,
+            },
+            StagedFighterDot {
+                slot: 2,
+                pos_m: [3.0, 0.0, 0.0],
+                hp: 760,
+                hit: true,
+            },
+            StagedFighterDot {
+                slot: 3,
+                pos_m: [10.0, 0.0, 0.0],
+                hp: 760,
+                hit: true,
+            },
+        ];
+        let pixels = staged_fight_frame_rgba(&hit_damaged, SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)
+            .expect("hit raster builds");
+        let green = pixels
+            .chunks_exact(4)
+            .filter(|px| px[0] == 34 && px[1] == 177 && px[2] == 76)
+            .count();
+        let cyan = pixels
+            .chunks_exact(4)
+            .filter(|px| px[0] == 0 && px[1] == 220 && px[2] == 220)
+            .count();
+        assert!(green > 0, "damaged hp paints no HP bar pixels");
+        assert!(cyan > 0, "hit flag paints no hit-mark pixels");
+        // HP step: full hp fills more green than near-zero hp at the same
+        // spots with no hit marks in either raster.
+        let full = [
+            StagedFighterDot {
+                slot: 1,
+                pos_m: [-3.0, 0.0, 0.0],
+                hp: 1000,
+                hit: false,
+            },
+            StagedFighterDot {
+                slot: 2,
+                pos_m: [3.0, 0.0, 0.0],
+                hp: 1000,
+                hit: false,
+            },
+        ];
+        let low = [
+            StagedFighterDot {
+                slot: 1,
+                pos_m: [-3.0, 0.0, 0.0],
+                hp: 40,
+                hit: false,
+            },
+            StagedFighterDot {
+                slot: 2,
+                pos_m: [3.0, 0.0, 0.0],
+                hp: 40,
+                hit: false,
+            },
+        ];
+        let full_px = staged_fight_frame_rgba(&full, SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)
+            .expect("full-hp raster builds");
+        let low_px = staged_fight_frame_rgba(&low, SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)
+            .expect("low-hp raster builds");
+        let full_green = full_px
+            .chunks_exact(4)
+            .filter(|px| px[0] == 34 && px[1] == 177 && px[2] == 76)
+            .count();
+        let low_green = low_px
+            .chunks_exact(4)
+            .filter(|px| px[0] == 34 && px[1] == 177 && px[2] == 76)
+            .count();
+        assert!(
+            full_green > low_green,
+            "hp 1000 ({full_green} px) must fill more than hp 40 ({low_green} px)"
+        );
+        // Hit mark isolates the flag: same hp, only the flag differs.
+        let hit = [StagedFighterDot {
+            slot: 1,
+            pos_m: [-3.0, 0.0, 0.0],
+            hp: 760,
+            hit: true,
+        }];
+        let calm = [StagedFighterDot {
+            slot: 1,
+            pos_m: [-3.0, 0.0, 0.0],
+            hp: 760,
+            hit: false,
+        }];
+        let hit_px = staged_fight_frame_rgba(&hit, SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)
+            .expect("hit raster builds");
+        let calm_px = staged_fight_frame_rgba(&calm, SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)
+            .expect("calm raster builds");
+        let hit_cyan = hit_px
+            .chunks_exact(4)
+            .filter(|px| px[0] == 0 && px[1] == 220 && px[2] == 220)
+            .count();
+        let calm_cyan = calm_px
+            .chunks_exact(4)
+            .filter(|px| px[0] == 0 && px[1] == 220 && px[2] == 220)
+            .count();
+        assert!(hit_cyan > 0, "hit true paints no mark");
+        assert_eq!(calm_cyan, 0, "hit false must paint no mark");
     }
 
     #[test]

@@ -142,7 +142,11 @@ impl Subtitle {
             FightNote::StaminaOut { fighter } => ("No stamina", fighter),
             FightNote::Knockdown { victim, .. } => ("Knockdown", victim),
         };
-        Self { tick, text, subject }
+        Self {
+            tick,
+            text,
+            subject,
+        }
     }
 }
 
@@ -274,12 +278,47 @@ mod tests {
     fn every_fight_cue_gets_a_short_caption_on_the_right_fighter() {
         let (a, v) = (fighter(0), fighter(1));
         let cases = [
-            (FightNote::Hit { attacker: a, victim: v }, "Hit", v),
-            (FightNote::Blocked { attacker: a, victim: v }, "Blocked", v),
-            (FightNote::Parried { attacker: a, victim: v }, "Parried", a),
-            (FightNote::Dodged { attacker: a, victim: v }, "Dodged", v),
+            (
+                FightNote::Hit {
+                    attacker: a,
+                    victim: v,
+                },
+                "Hit",
+                v,
+            ),
+            (
+                FightNote::Blocked {
+                    attacker: a,
+                    victim: v,
+                },
+                "Blocked",
+                v,
+            ),
+            (
+                FightNote::Parried {
+                    attacker: a,
+                    victim: v,
+                },
+                "Parried",
+                a,
+            ),
+            (
+                FightNote::Dodged {
+                    attacker: a,
+                    victim: v,
+                },
+                "Dodged",
+                v,
+            ),
             (FightNote::StaminaOut { fighter: a }, "No stamina", a),
-            (FightNote::Knockdown { attacker: a, victim: v }, "Knockdown", v),
+            (
+                FightNote::Knockdown {
+                    attacker: a,
+                    victim: v,
+                },
+                "Knockdown",
+                v,
+            ),
         ];
         for (note, text, subject) in cases {
             let line = Subtitle::from_note(42, note);
@@ -330,7 +369,9 @@ mod tests {
                 attacker: fighter(2),
                 victim: fighter(3),
             },
-            FightNote::StaminaOut { fighter: fighter(2) },
+            FightNote::StaminaOut {
+                fighter: fighter(2),
+            },
         ];
         let mut first = SubtitleFeed::new(DEFAULT_SUBTITLE_LINES).expect("default cap is valid");
         let mut second = first.clone();

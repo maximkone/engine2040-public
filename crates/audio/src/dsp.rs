@@ -340,6 +340,79 @@ impl OnePole {
     }
 }
 
+/// Resonant body: 2-pole resonant lowpass (RBJ biquad).
+/// PORT(SamiPerttu/fundsp@5595840: src/svf.rs + src/rez.rs idea, std-only).
+/// Caller: `crate::bank::Bank::synth` via hit/footstep/friction bakes. Units: Hz, Q permille.
+/// Determinism: same inputs give same samples; coeffs once at `new`, step uses `+ - * /` only.
+pub struct ResonantBody {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl ResonantBody {
+    /// Build at `sample_rate` Hz with `cutoff_hz` and Q permille (1000 = 1.0).
+    pub fn new(sample_rate: u32, cutoff_hz: u32, q_permille: u16) -> Self {
+        let sr = crate::f32_of(sample_rate.max(1));
+        let nyquist = (sr / 2.0 * 0.45).max(1.0);
+        let fc = crate::f32_of(cutoff_hz.max(1)).clamp(1.0, nyquist);
+        let q = (f32::from(q_permille) / 1000.0).clamp(0.1, 4.0);
+        let w0 = 2.0 * std::f32::consts::PI * fc / sr;
+        let (sin_w0, cos_w0) = w0.sin_cos();
+        let alpha = sin_w0 / (2.0 * q);
+        let (b0, b1, b2) = ((1.0 - cos_w0) / 2.0, 1.0 - cos_w0, (1.0 - cos_w0) / 2.0);
+        let (a0, a1, a2) = (1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha);
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+    /// Step one sample, returns filtered value.
+    pub fn step(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// Waveshaper grit: rational soft clip (fundsp shape idea, std-only).
+/// Caller: `crate::bank::Bank::synth` via friction bake. Units: linear in, `[-1, 1]` out.
+pub struct Shape {
+    drive: f32,
+}
+
+impl Shape {
+    /// Build with `drive` 0..=4 (0 is passthrough). Never panics.
+    pub fn new(drive: f32) -> Self {
+        Self {
+            drive: drive.clamp(0.0, 4.0),
+        }
+    }
+    /// Step one sample through the drive curve.
+    pub fn step(&self, x: f32) -> f32 {
+        let k = 1.0 + self.drive;
+        (x * k / (1.0 + self.drive * x.abs())).clamp(-1.0, 1.0)
+    }
+}
+
 /// Beat grid: BPM + offset (seconds). Bake-only metronome.
 pub struct BeatGrid {
     /// Beats per minute.

@@ -18,8 +18,8 @@
 pub const MIN_DELAY: u32 = 0;
 /// Largest input delay in ticks (keeps the knob inside the rollback window).
 pub const MAX_DELAY: u32 = 8;
-/// Starting input delay in ticks (matches the `DelayBuffer` soak default).
-pub const DEFAULT_DELAY: u32 = 2;
+/// Starting input delay in ticks (wired through `session::INPUT_DELAY_TICKS`).
+pub const DEFAULT_DELAY: u32 = super::session::INPUT_DELAY_TICKS;
 /// Starting frame-advantage target: drive local and remote frames even.
 pub const DEFAULT_TARGET_ADVANTAGE: i32 = 0;
 /// Clamp bound for an advantage target (keeps the knob from chasing noise).
@@ -129,6 +129,73 @@ impl Default for FixedDelay {
     }
 }
 
+/// Genre-neutral integer probe for the delay reaction table.
+#[derive(Clone, Default)]
+struct DelayProbe {
+    acc: u64,
+}
+
+impl super::rollback::SimTick for DelayProbe {
+    fn advance(&mut self, inputs: [u32; super::rollback::PLAYERS]) {
+        let mix = u64::from(inputs[0])
+            .wrapping_mul(31)
+            .wrapping_add(u64::from(inputs[1]).wrapping_mul(131))
+            .wrapping_add(7);
+        self.acc = self
+            .acc
+            .wrapping_add(mix)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15 & 0x00FF_FFFF_FFFF_FFFF);
+    }
+
+    fn state_hash(&self) -> u64 {
+        let mut fold = engine_core::Fnv64::new();
+        fold.write_u64(self.acc);
+        fold.finish()
+    }
+}
+
+fn probe_pair(n: usize) -> (Vec<u32>, Vec<u32>) {
+    let mut local = Vec::with_capacity(n);
+    let mut remote = Vec::with_capacity(n);
+    for f in 0..n {
+        local.push((f as u32).wrapping_mul(3).wrapping_add(2) % 5);
+        remote.push((f as u32).wrapping_mul(5).wrapping_add(1) % 5);
+    }
+    (local, remote)
+}
+
+fn count_rollbacks(delay: u32) -> u64 {
+    let (local, remote) = probe_pair(48);
+    let mut session = super::rollback::P2pSession::new(DelayProbe::default());
+    session.enable_sparse_saving(false);
+    assert!(session.verify_full_window(0).is_ok());
+    for (f, (&l, &r)) in local.iter().zip(remote.iter()).enumerate() {
+        let lost = f as u32 % 5 == 4 && delay < 2;
+        let avail = if lost { None } else { Some(r) };
+        session.advance_frame(l, avail);
+        if f >= 2 {
+            let late = (f - 2) as u32;
+            if late % 5 == 4 && delay < 2 {
+                let _ = session.confirm_frame(late, remote[f - 2]);
+            }
+        }
+    }
+    for (f, &r) in remote.iter().enumerate() {
+        if f as u32 % 5 == 4 && delay < 2 {
+            let _ = session.confirm_frame(f as u32, r);
+        }
+    }
+    session.rollback_count()
+}
+
+fn reaction_table() -> [(u32, u64); 3] {
+    [
+        (0, count_rollbacks(0)),
+        (2, count_rollbacks(2)),
+        (4, count_rollbacks(4)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +268,31 @@ mod tests {
         assert_eq!(knob.delay(), MAX_DELAY);
         knob.set_target(i32::MAX);
         assert_eq!(knob.target(), MAX_TARGET_ABS);
+    }
+
+    #[test]
+    fn default_delay_matches_session_ticks() {
+        assert_eq!(DEFAULT_DELAY, crate::session::INPUT_DELAY_TICKS);
+        assert_eq!(DEFAULT_DELAY, 2);
+    }
+
+    #[test]
+    fn delay_reaction_table_posts_counts() {
+        let table = reaction_table();
+        assert_eq!([table[0].0, table[1].0, table[2].0], [0, 2, 4]);
+        assert!(table[0].1 > 0, "delay 0 must resim on seeded loss");
+        assert!(
+            table[1].1 < table[0].1,
+            "delay 2 hides the 2-tick lateness: {:?}",
+            table
+        );
+        assert_eq!(table[1].1, 0, "delay 2 covers seeded lateness: {:?}", table);
+        assert_eq!(table[2].1, 0, "delay 4 stays covered: {:?}", table);
+        let per_1000 = table[1].1 * 1000 / 48;
+        assert!(per_1000 < 3, "delay 2 under 3 per 1000: {per_1000}");
+        println!(
+            "delay-reaction: d0={} d2={} d4={} per48",
+            table[0].1, table[1].1, table[2].1
+        );
     }
 }

@@ -71,11 +71,23 @@ fn phase_order_pinned_and_in_schedule_hash() {
 fn identical_tapes_share_state_hash_while_substeps_move_it() {
     let (b1, s1) = run_tape(DEFAULT_SUBSTEPS, 120);
     let (b2, s2) = run_tape(DEFAULT_SUBSTEPS, 120);
-    assert_eq!(s1.state_hash(&b1), s2.state_hash(&b2), "same tape twice hashes equal");
+    assert_eq!(
+        s1.state_hash(&b1),
+        s2.state_hash(&b2),
+        "same tape twice hashes equal"
+    );
     let (b3, s3) = run_tape(2, 120);
-    assert_ne!(s1.state_hash(&b1), s3.state_hash(&b3), "substep count recorded in state hash");
+    assert_ne!(
+        s1.state_hash(&b1),
+        s3.state_hash(&b3),
+        "substep count recorded in state hash"
+    );
     let (b4, s4) = run_tape(DEFAULT_SUBSTEPS, 121);
-    assert_eq!(s1.state_hash(&b1), s4.state_hash(&b4), "settled tape holds its hash one tick on");
+    assert_eq!(
+        s1.state_hash(&b1),
+        s4.state_hash(&b4),
+        "settled tape holds its hash one tick on"
+    );
 }
 
 #[test]
@@ -146,8 +158,14 @@ fn config_edges_refused_or_clamped() {
     ));
     ScheduleConfig::new(MAX_SUBSTEPS, MAX_ITERATIONS, MAX_GRAVITY).expect("max edge valid");
     ScheduleConfig::new(1, 1, -MAX_GRAVITY).expect("min edge valid");
-    assert_eq!(Joint::new(1, 1, 1.0).unwrap_err(), ScheduleError::BadJoint(1, 1));
-    assert_eq!(Joint::new(0, 1, 0.0).unwrap_err(), ScheduleError::BadRest(0.0));
+    assert_eq!(
+        Joint::new(1, 1, 1.0).unwrap_err(),
+        ScheduleError::BadJoint(1, 1)
+    );
+    assert_eq!(
+        Joint::new(0, 1, 0.0).unwrap_err(),
+        ScheduleError::BadRest(0.0)
+    );
     assert!(matches!(
         Joint::new(0, 1, MAX_REST_M + 1.0).unwrap_err(),
         ScheduleError::BadRest(_)
@@ -164,17 +182,25 @@ fn dt_and_empty_edges_step_nothing() {
     schedule.step(&mut [], DT);
     assert_eq!(schedule.sleeping_count(), 0);
     let mut bodies = linked_pair();
-    let before = bodies.iter().map(|b| (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits())).collect::<Vec<_>>();
+    let before = bodies
+        .iter()
+        .map(|b| (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()))
+        .collect::<Vec<_>>();
     let hash_before = schedule.state_hash(&bodies);
     for bad_dt in [f32::NAN, f32::INFINITY, 0.0, -DT] {
         schedule.step(&mut bodies, bad_dt);
     }
-    let after = bodies.iter().map(|b| (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits())).collect::<Vec<_>>();
+    let after = bodies
+        .iter()
+        .map(|b| (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()))
+        .collect::<Vec<_>>();
     assert_eq!(before, after, "bad dt leaves bodies bit-identical");
     assert_eq!(hash_before, schedule.state_hash(&bodies));
     assert_eq!(schedule.sleeping_count(), 0);
     let mut sparse = Schedule::new();
-    sparse.add_joint(Joint::new(0, 9, 1.0).expect("valid joint")).expect("add joint");
+    sparse
+        .add_joint(Joint::new(0, 9, 1.0).expect("valid joint"))
+        .expect("add joint");
     let mut two = linked_pair();
     sparse.step(&mut two, DT);
     assert!(two.iter().all(|b| b.x.is_finite() && b.y.is_finite()));

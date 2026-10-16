@@ -79,10 +79,25 @@ const CAMERA_UNIFORM_BYTES: u64 = 80;
 const LIGHT_UNIFORM_BYTES: u64 = 32;
 /// Byte size of the material uniform (16 B base/metallic + 16 B factors).
 const MATERIAL_UNIFORM_BYTES: u64 = 32;
-/// Interleaved vertex stride: pos(3) + normal(3) + uv(2) f32.
-const VERTEX_STRIDE: u64 = 32;
+/// Interleaved vertex stride: pos(3) + normal(3) + uv(2) + tangent(4) f32.
+const VERTEX_STRIDE: u64 = 48;
 /// `copy_texture_to_buffer` rows must be 256-byte aligned.
 const ROW_ALIGN: u32 = 256;
+
+/// Shared uniform-buffer helper: single owner for the `UNIFORM | COPY_DST`
+/// init pattern used by the forward and skinned offscreen passes.
+pub(crate) fn create_uniform_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    bytes: &[u8],
+) -> wgpu::Buffer {
+    use wgpu::util::DeviceExt;
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytes,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
+}
 
 /// Offscreen V1 forward renderer: pipeline compiled once, color/depth
 /// targets rebuilt per capture size (the recreate path).
@@ -190,6 +205,11 @@ impl GpuForward {
                             offset: 24,
                             shader_location: 2,
                         },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 32,
+                            shader_location: 3,
+                        },
                     ],
                 })],
                 compilation_options: Default::default(),
@@ -228,13 +248,7 @@ impl GpuForward {
     }
 
     fn uniform_buffer(&self, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-        use wgpu::util::DeviceExt;
-        self.device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytes,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            })
+        create_uniform_buffer(&self.device, label, bytes)
     }
 
     /// Render `scene` offscreen at `width` x `height`, read the frame back

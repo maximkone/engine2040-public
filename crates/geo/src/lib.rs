@@ -29,6 +29,8 @@ pub mod ops;
 pub mod primitives;
 pub mod recipe;
 
+#[cfg(feature = "bake")]
+pub mod bake;
 #[cfg(feature = "boolean")]
 pub mod boolean;
 #[cfg(feature = "collision")]

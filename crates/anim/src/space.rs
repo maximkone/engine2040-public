@@ -389,7 +389,8 @@ impl SpacePlayer {
         }
         self.accumulate_samples(space, clips, out)?;
         normalize_quats(&mut out.rotations);
-        self.rot_limit.limit_in_place(&mut out.rotations, 1.0 / 60.0);
+        self.rot_limit
+            .limit_in_place(&mut out.rotations, 1.0 / 60.0);
         let scale = i64::from(WEIGHT_SCALE);
         for joint in 0..joints {
             self.target[joint][0] = (self.acc[joint][0] / scale) as i32;

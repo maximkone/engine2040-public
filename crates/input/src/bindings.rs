@@ -164,6 +164,119 @@ impl BoundAction {
     }
 }
 
+/// Action set: which layer owns the buttons this tick.
+///
+/// Duel carries the fight; Menu and Pause carry UI. Only the top of the
+/// [`ActionSetStack`] is active, so menu keys never reach the duel tape.
+/// Units: unitless enum. Determinism: fixed order in [`ActionSet::ALL`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ActionSet {
+    /// Fight layer; the only set that writes duel button bits.
+    Duel,
+    /// Menu layer; duel evaluation is gated to zero while active.
+    Menu,
+    /// Pause layer; duel evaluation is gated to zero while active.
+    Pause,
+}
+
+impl ActionSet {
+    /// Every set in fixed stack order (also the index order).
+    pub const ALL: [Self; 3] = [Self::Duel, Self::Menu, Self::Pause];
+
+    /// Table index of this set.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Duel => 0,
+            Self::Menu => 1,
+            Self::Pause => 2,
+        }
+    }
+
+    /// Set for a table index; `None` when out of range.
+    pub const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::Duel),
+            1 => Some(Self::Menu),
+            2 => Some(Self::Pause),
+            _ => None,
+        }
+    }
+}
+
+/// Stack of action sets; the top is active.
+///
+/// Push Menu over Duel to suspend the fight; pop to resume. Fixed capacity
+/// 3, no heap, no clock. Consumer: the game/app layer pushes Menu/Pause
+/// around UI and calls [`Bindings::button_bits_for_set`] each fixed tick;
+/// v2 only, the v1 [`Bindings::button_bits`] path never reads the stack.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ActionSetStack {
+    slots: [Option<ActionSet>; 3],
+    len: usize,
+}
+
+impl ActionSetStack {
+    /// Blank stack with Duel active.
+    pub fn new() -> Self {
+        Self {
+            slots: [Some(ActionSet::ALL[0]), None, None],
+            len: 1,
+        }
+    }
+
+    /// Active set; `None` only when the stack was fully popped.
+    pub fn active(self) -> Option<ActionSet> {
+        if self.len == 0 {
+            None
+        } else {
+            self.slots[self.len - 1]
+        }
+    }
+
+    /// Count of pushed sets.
+    pub fn len(self) -> usize {
+        self.len
+    }
+
+    /// True when no set is pushed.
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Push a set; returns false and keeps the stack when full.
+    pub fn push(&mut self, set: ActionSet) -> bool {
+        if self.len >= 3 {
+            return false;
+        }
+        self.slots[self.len] = Some(set);
+        self.len += 1;
+        true
+    }
+
+    /// Pop the top; `None` when empty.
+    pub fn pop(&mut self) -> Option<ActionSet> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        let out = self.slots[self.len];
+        self.slots[self.len] = None;
+        out
+    }
+
+    /// True when the active set is Duel, so fight input flows.
+    pub fn is_duel_active(self) -> bool {
+        matches!(self.active(), Some(ActionSet::Duel))
+    }
+}
+
+impl Default for ActionSetStack {
+    /// Blank stack with Duel active (see [`ActionSetStack::new`]).
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One table row: which button drives an action.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Binding {
@@ -299,6 +412,366 @@ pub fn apply_deadzone(mx: i8, mz: i8, deadzone: u8) -> (i8, i8) {
         (0, 0)
     } else {
         (mx, mz)
+    }
+}
+
+/// Tick-counted gesture conditions before the tape, v2 only.
+///
+/// Shape reimplemented from the `bevy_enhanced_input` condition shape
+/// (tap plus hold-and-release) and the `daInput` action-set shape: a
+/// condition is a small state machine over `(pressed, ticks held)` counted
+/// in integer fixed ticks. Consumer: [`Bindings::gesture_bits_for_tick`]
+/// feeds one `pressed` bool per fixed tick and ORs the emissions into
+/// [`GestureBits`](conditions::GestureBits); the game layer records the
+/// resulting [`FighterInput`] into a tape. Data owner:
+/// [`ConditionTracker`](conditions::ConditionTracker) owns its tick
+/// counters. Units: ticks (integer fixed steps). Determinism: pure tick
+/// function, no alloc, no clock, same script gives same emissions. Errors:
+/// never fails; out-of-window presses yield `None`. V2 only:
+/// [`GestureBits`](conditions::GestureBits) never enter [`FighterInput`]
+/// bytes, so v1 tapes stay byte-equal and the golden hash never moves.
+pub mod conditions {
+    /// Minimum held ticks for a tap (shorter is noise, ignored).
+    pub const TAP_MIN_HELD_TICKS: u32 = 2;
+    /// Maximum held ticks for a tap (longer is a hold candidate or dead zone).
+    pub const TAP_MAX_HELD_TICKS: u32 = 12;
+    /// Minimum held ticks for a hold, emitted while still held.
+    pub const HOLD_MIN_HELD_TICKS: u32 = 30;
+    /// Minimum held ticks for a hold-and-release, emitted on release.
+    pub const HOLD_RELEASE_MIN_HELD_TICKS: u32 = 30;
+
+    const _: () = assert!(
+        TAP_MIN_HELD_TICKS <= TAP_MAX_HELD_TICKS
+            && TAP_MAX_HELD_TICKS < HOLD_MIN_HELD_TICKS
+            && TAP_MIN_HELD_TICKS > 0
+    );
+
+    /// Tick-window gesture emitted by [`ConditionTracker::tick`].
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub enum GestureKind {
+        /// Short press released inside the tap window.
+        Tap,
+        /// Long press reaching the hold threshold while still held.
+        Hold,
+        /// Long press released after the hold threshold.
+        HoldAndRelease,
+        /// Two buttons held on the same tick.
+        Chord,
+    }
+
+    /// V2-only gesture bitset; never enters [`FighterInput`](super::fighter::FighterInput) bytes.
+    ///
+    /// The tape keeps the v1 button bits only, so v1 bytes stay equal.
+    /// Units: bit per [`GestureKind`] (see [`gesture_bit`]). Determinism:
+    /// pure OR in fixed order (tracker emission, then chord).
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    pub struct GestureBits(pub u8);
+
+    impl GestureBits {
+        /// Empty bitset.
+        pub const NONE: Self = Self(0);
+    }
+
+    /// Tick-counted tracker for tap, hold and hold-and-release.
+    ///
+    /// Feed one `pressed` bool per fixed tick with [`ConditionTracker::tick`];
+    /// it returns one emission at most per tick. Budget: O(1) per tick, no heap.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct ConditionTracker {
+        held: u32,
+        hold_fired: bool,
+    }
+
+    impl ConditionTracker {
+        /// Blank tracker: nothing held, no hold fired.
+        pub fn new() -> Self {
+            Self {
+                held: 0,
+                hold_fired: false,
+            }
+        }
+
+        /// Clear counters to the blank state.
+        pub fn reset(&mut self) {
+            self.held = 0;
+            self.hold_fired = false;
+        }
+
+        /// Advance one fixed tick; `pressed` is held this tick.
+        ///
+        /// Returns [`GestureKind::Hold`] on the tick held reaches
+        /// [`HOLD_MIN_HELD_TICKS`], [`GestureKind::HoldAndRelease`] on release
+        /// after that threshold, [`GestureKind::Tap`] on release inside
+        /// `TAP_MIN..=TAP_MAX`. Noise and dead-zone presses return `None`.
+        pub fn tick(&mut self, pressed: bool) -> Option<GestureKind> {
+            if pressed {
+                self.held = self.held.saturating_add(1);
+                if self.held == HOLD_MIN_HELD_TICKS && !self.hold_fired {
+                    self.hold_fired = true;
+                    return Some(GestureKind::Hold);
+                }
+                return None;
+            }
+            if self.held > 0 {
+                let held = self.held;
+                self.held = 0;
+                if self.hold_fired {
+                    self.hold_fired = false;
+                    if held >= HOLD_RELEASE_MIN_HELD_TICKS {
+                        return Some(GestureKind::HoldAndRelease);
+                    }
+                    return None;
+                }
+                if held >= TAP_MIN_HELD_TICKS && held <= TAP_MAX_HELD_TICKS {
+                    return Some(GestureKind::Tap);
+                }
+                return None;
+            }
+            None
+        }
+    }
+
+    impl Default for ConditionTracker {
+        /// Blank tracker (see [`ConditionTracker::new`]).
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// All-of chord: true only when both sides are held this same tick.
+    ///
+    /// Units: bools. Determinism: pure AND. Errors: never fails.
+    pub fn chord_fires(first_held: bool, second_held: bool) -> bool {
+        first_held && second_held
+    }
+
+    /// Bit for one gesture kind in [`GestureBits`].
+    ///
+    /// Units: `u8` bit. Determinism: fixed match. Errors: never fails.
+    pub const fn gesture_bit(kind: GestureKind) -> u8 {
+        match kind {
+            GestureKind::Tap => 0x01,
+            GestureKind::Hold => 0x02,
+            GestureKind::HoldAndRelease => 0x04,
+            GestureKind::Chord => 0x08,
+        }
+    }
+
+    /// Gesture bits for one fixed tick from a tracker plus a chord pair.
+    ///
+    /// Calls [`ConditionTracker::tick`] for tap/hold/hold-and-release and
+    /// [`chord_fires`] for the chord, ORed in fixed order. Units: ticks.
+    /// Determinism: same inputs give same bits. Errors: never fails.
+    /// Budget: O(1), no heap.
+    pub fn bits_for_tick(
+        tracker: &mut ConditionTracker,
+        pressed: bool,
+        chord_first: bool,
+        chord_second: bool,
+    ) -> GestureBits {
+        let mut bits: u8 = 0;
+        if let Some(kind) = tracker.tick(pressed) {
+            bits |= gesture_bit(kind);
+        }
+        if chord_fires(chord_first, chord_second) {
+            bits |= gesture_bit(GestureKind::Chord);
+        }
+        GestureBits(bits)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::super::super::bindings::{
+            ActionSet, ActionSetStack, Bindings, BoundAction, ACTION_COUNT,
+        };
+        use super::super::super::fighter::{ATTACK, BLOCK, DODGE, KNOWN_BUTTONS};
+        use super::*;
+
+        fn run_hold(held_ticks: u32) -> Vec<GestureKind> {
+            let mut tracker = ConditionTracker::new();
+            let mut out = Vec::new();
+            for _ in 0..held_ticks {
+                if let Some(kind) = tracker.tick(true) {
+                    out.push(kind);
+                }
+            }
+            if let Some(kind) = tracker.tick(false) {
+                out.push(kind);
+            }
+            out
+        }
+
+        #[test]
+        fn conditions_tap_fires_within_window_and_ignores_noise() {
+            assert_eq!(run_hold(2), vec![GestureKind::Tap]);
+            assert_eq!(run_hold(5), vec![GestureKind::Tap]);
+            assert_eq!(run_hold(12), vec![GestureKind::Tap]);
+            assert!(run_hold(1).is_empty(), "1-tick blip is noise");
+            assert!(run_hold(13).is_empty(), "13 ticks is past the tap window");
+            assert!(run_hold(15).is_empty(), "dead zone emits nothing");
+        }
+
+        #[test]
+        fn conditions_hold_fires_once_at_threshold_while_held() {
+            let mut tracker = ConditionTracker::new();
+            let mut hits: Vec<u32> = Vec::new();
+            for tick in 0..35u32 {
+                if tracker.tick(true) == Some(GestureKind::Hold) {
+                    hits.push(tick);
+                }
+            }
+            assert_eq!(hits.len(), 1, "hold fires exactly once, got {hits:?}");
+            assert_eq!(hits[0], 29, "30th held tick is index 29");
+            let mut short = ConditionTracker::new();
+            for _ in 0..29 {
+                assert_ne!(
+                    short.tick(true),
+                    Some(GestureKind::Hold),
+                    "29 held ticks must not hold yet"
+                );
+            }
+        }
+
+        #[test]
+        fn conditions_hold_and_release_fires_on_release_after_hold() {
+            assert_eq!(
+                run_hold(30).len(),
+                2,
+                "hold then release gives two emissions"
+            );
+            assert_eq!(run_hold(30)[1], GestureKind::HoldAndRelease);
+            assert_eq!(run_hold(35)[1], GestureKind::HoldAndRelease);
+            assert_ne!(
+                run_hold(5).get(0),
+                Some(&GestureKind::HoldAndRelease),
+                "short tap is never a hold-release"
+            );
+            assert!(
+                run_hold(29)
+                    .iter()
+                    .all(|k| *k != GestureKind::HoldAndRelease),
+                "29 ticks must not hold-release"
+            );
+            let mut tracker = ConditionTracker::new();
+            for _ in 0..30 {
+                tracker.tick(true);
+            }
+            tracker.reset();
+            assert_eq!(tracker.tick(false), None, "reset clears the hold");
+        }
+
+        #[test]
+        fn conditions_chord_needs_both_buttons_same_tick() {
+            assert!(chord_fires(true, true));
+            assert!(!chord_fires(true, false));
+            assert!(!chord_fires(false, true));
+            assert!(!chord_fires(false, false));
+            let mut tracker = ConditionTracker::new();
+            let both = bits_for_tick(&mut tracker, false, true, true);
+            assert_eq!(both, GestureBits(gesture_bit(GestureKind::Chord)));
+            let mut single = ConditionTracker::new();
+            let one = bits_for_tick(&mut single, false, true, false);
+            assert_eq!(one, GestureBits::NONE, "single side is no chord");
+        }
+
+        #[test]
+        fn conditions_menu_presses_never_reach_duel() {
+            let bindings = Bindings::new();
+            let attack = bindings.button(BoundAction::Attack);
+            let pressed = [attack];
+            let duel_bits = bindings.button_bits_for_set(&pressed, ActionSet::Duel);
+            assert_ne!(duel_bits.0, 0, "duel must see the attack");
+            let menu_bits = bindings.button_bits_for_set(&pressed, ActionSet::Menu);
+            let pause_bits = bindings.button_bits_for_set(&pressed, ActionSet::Pause);
+            assert_eq!(menu_bits, super::super::super::fighter::Buttons::NONE);
+            assert_eq!(pause_bits, super::super::super::fighter::Buttons::NONE);
+            let mut menu_tracker = ConditionTracker::new();
+            let menu_gestures = Bindings::gesture_bits_for_tick(
+                &mut menu_tracker,
+                true,
+                true,
+                true,
+                ActionSet::Menu,
+            );
+            assert_eq!(menu_gestures, GestureBits::NONE, "menu leaks 0 gestures");
+            let mut stack = ActionSetStack::new();
+            assert!(stack.is_duel_active());
+            assert!(stack.push(ActionSet::Menu));
+            assert!(!stack.is_duel_active());
+            assert_eq!(stack.active(), Some(ActionSet::Menu));
+            assert_eq!(stack.pop(), Some(ActionSet::Menu));
+            assert!(stack.is_duel_active());
+            let menu_leaks = if menu_bits.0 == 0 && menu_gestures.0 == 0 {
+                0
+            } else {
+                1
+            };
+            assert_eq!(menu_leaks, 0, "0 menu presses leak into the duel");
+        }
+
+        #[test]
+        fn conditions_same_script_gives_same_tape_bytes_x2() {
+            assert_eq!(ACTION_COUNT, 7, "7 rebindable actions stay");
+            assert_eq!(KNOWN_BUTTONS, ATTACK | BLOCK | DODGE);
+            assert_eq!(KNOWN_BUTTONS, 0x07, "v1 keeps 3 bits");
+            let bindings = Bindings::new();
+            let attack = bindings.button(BoundAction::Attack);
+            let run = || {
+                let mut bytes = Vec::new();
+                let fighter = super::super::super::fighter::FighterId::new(0).unwrap();
+                let script: Vec<Vec<super::super::PhysicalButton>> =
+                    vec![vec![attack], vec![attack], vec![], vec![attack], vec![]];
+                for (i, pressed) in script.iter().enumerate() {
+                    let tick = u32::try_from(i).unwrap();
+                    let input = bindings
+                        .to_fighter_input(tick, fighter, pressed, (0, 0), 0)
+                        .unwrap();
+                    input.append_bytes(&mut bytes);
+                }
+                bytes
+            };
+            let first = run();
+            let second = run();
+            assert_eq!(first, second, "same script gives same tape bytes x2");
+            assert_eq!(first.len(), 5 * 10, "v1 record stays 10 bytes");
+            let duel = bindings.button_bits_for_set(&[attack], ActionSet::Duel);
+            assert_eq!(duel, bindings.button_bits(&[attack]));
+        }
+    }
+}
+
+impl Bindings {
+    /// Button bits gated by the active set: Duel flows, Menu/Pause give none.
+    ///
+    /// V2 only; the v1 [`Bindings::button_bits`] path is untouched. Caller:
+    /// the game layer each fixed tick with [`ActionSetStack::active`].
+    /// Determinism: pure over fixed [`BoundAction::ALL`] order. Errors: never fails.
+    pub fn button_bits_for_set(self, pressed: &[PhysicalButton], set: ActionSet) -> Buttons {
+        if set == ActionSet::Duel {
+            self.button_bits(pressed)
+        } else {
+            Buttons::NONE
+        }
+    }
+
+    /// Gesture bits for one fixed tick, gated by the active set.
+    ///
+    /// Feeds `pressed` plus the chord pair into
+    /// [`conditions::bits_for_tick`] when Duel is active, else
+    /// [`conditions::GestureBits::NONE`]. V2 only, never in tape bytes.
+    /// Caller: the game layer each fixed tick. Determinism: same inputs give
+    /// same bits. Errors: never fails. Budget: O(1), no heap.
+    pub fn gesture_bits_for_tick(
+        tracker: &mut conditions::ConditionTracker,
+        pressed: bool,
+        chord_first: bool,
+        chord_second: bool,
+        set: ActionSet,
+    ) -> conditions::GestureBits {
+        if set != ActionSet::Duel {
+            return conditions::GestureBits::NONE;
+        }
+        conditions::bits_for_tick(tracker, pressed, chord_first, chord_second)
     }
 }
 

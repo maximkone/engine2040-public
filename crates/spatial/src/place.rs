@@ -42,6 +42,7 @@ use super::index3::{probe_of, Index3};
 use super::navcheck::octant;
 use super::relation::{Relation, FACING_RANGE_CM, NEXT_TO_CM, SUPPORT_GAP_CM};
 use super::Actor;
+use engine_core::Fnv64;
 use std::collections::BTreeMap;
 
 /// Search grid pitch in centimeters.
@@ -973,6 +974,58 @@ pub fn audit_identical(a: &ConflictSet, b: &ConflictSet) -> bool {
         j += 1;
     }
     true
+}
+
+/// Canonical audit digest, perm-stable integer-only; consumer harness; spike `05b20def` x2.
+pub fn canonical_audit_digest(conflicts: &[ConflictSet]) -> u32 {
+    fn want(h: &mut Fnv64, w: &Want) {
+        h.write(w.relation.name().as_bytes());
+        match w.target {
+            Target::Wall(x) => {
+                h.write_u8(0);
+                h.write_u8(match x {
+                    Wall::North => 0,
+                    Wall::South => 1,
+                    Wall::East => 2,
+                    _ => 3,
+                });
+            }
+            Target::Object(id) => {
+                h.write_u8(1);
+                h.write_u32(id);
+            }
+            Target::Point { x_cm, z_cm } => {
+                h.write_u8(2);
+                h.write_i32(x_cm);
+                h.write_i32(z_cm);
+            }
+        }
+        match w.distance_cm {
+            None => h.write_u8(0),
+            Some((a, b)) => {
+                h.write_u8(1);
+                h.write_i32(a);
+                h.write_i32(b);
+            }
+        }
+    }
+    let mut h = Fnv64::new();
+    h.write(b"e2placeaudit1");
+    h.write_u64(u64::try_from(conflicts.len()).unwrap_or(u64::MAX));
+    for c in conflicts {
+        h.write_u64(u64::try_from(c.unmet.len()).unwrap_or(u64::MAX));
+        for w in &c.unmet {
+            want(&mut h, w);
+        }
+        h.write_u64(u64::try_from(c.hints.len()).unwrap_or(u64::MAX));
+        for x in &c.hints {
+            h.write_u64(u64::try_from(x.dropped).unwrap_or(u64::MAX));
+            want(&mut h, &x.dropped_want);
+            h.write_i32(x.move_cm[0]);
+            h.write_i32(x.move_cm[1]);
+        }
+    }
+    u32::try_from(h.finish() & 0xffff_ffff).unwrap_or(u32::MAX)
 }
 
 /// Solve one placement intent over an actor snapshot.
@@ -2035,5 +2088,32 @@ mod tests {
             surfaces2,
             super::enumerate_support_surfaces(&placed, 9, &idx2)
         );
+    }
+
+    #[test]
+    fn canonical_audit_digest_repeats_x2() {
+        let mut fwd_all = Vec::new();
+        let mut rev_all = Vec::new();
+        for seed in 0..60 {
+            let actors = room();
+            let intent = audit_seed(seed);
+            let err = solve(&intent, &actors).expect_err("tape must conflict");
+            let got = super::audit_subset(&intent, &err);
+            assert_eq!(got, Some(super::ConflictAudit::Minimal), "seed {seed}");
+            fwd_all.push(err);
+            let mut rev = actors.clone();
+            rev.reverse();
+            let perr = solve(&intent, &rev).expect_err("perm must conflict");
+            rev_all.push(perr);
+            if seed < 20 {
+                let a = &fwd_all[seed];
+                let b = &rev_all[seed];
+                assert!(super::audit_identical(a, b), "seed {seed}");
+            }
+        }
+        let d0 = super::canonical_audit_digest(&fwd_all);
+        assert_eq!(d0, super::canonical_audit_digest(&fwd_all), "digest x2");
+        assert_ne!(d0, 0);
+        assert_eq!(d0, super::canonical_audit_digest(&rev_all), "perm digest");
     }
 }

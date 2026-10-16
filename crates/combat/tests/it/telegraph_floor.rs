@@ -5,25 +5,12 @@
 //! twice. Default mode only reports; `TELEGRAPH_STRICT=1` turns the floor
 //! into a failure. Report only: no sim state changes, no hash input.
 
-use engine_combat::exchange::PHASED_V1;
+use engine_combat::exchange::{signal_attack_ms, PHASED_V1};
 
 // Readable-attack floors in milliseconds: full telegraph, bait, end pose.
 const FLOOR_MS: u32 = 340;
 const BAIT_MS: u32 = 240;
 const END_POSE_MS: u32 = 170;
-// Ticks per second of the fixed clock; units stay in integers.
-const TICKS_PER_SEC: u32 = 60;
-const MS_PER_SEC: u32 = 1_000;
-
-// Signal-plus-attack time for one move: startup plus live steel in ms.
-// Saturating math keeps unvalidated rows panic-free; validation rejects
-// such rows before they ever step.
-fn signal_attack_ms(startup_ticks: u32, active_ticks: u32) -> u32 {
-    startup_ticks
-        .saturating_add(active_ticks)
-        .saturating_mul(MS_PER_SEC)
-        / TICKS_PER_SEC
-}
 
 // One printed row per live move: id, startup, active, signal-plus-attack ms.
 // Reads only `moves[0..count]`; spare slots hold placeholders, never steps.
@@ -110,4 +97,23 @@ fn tables_v1_signal_matches_fight_cadence() {
             "move {id} at {ms} ms must sit below {FLOOR_MS} ms while heavies stay unreadable"
         );
     }
+}
+
+#[test]
+fn signal_attack_ms_saturates_without_panic() {
+    // Report-only ms must never panic, even on unvalidated rows, and must
+    // clamp to u32::MAX when the exact (startup + active) * 1000 / 60
+    // overflows u32 (validation rejects such rows before they ever step).
+    assert_eq!(signal_attack_ms(4, 2), 100, "jab stays 100 ms");
+    assert_eq!(signal_attack_ms(6, 3), 150, "cross stays 150 ms");
+    assert_eq!(
+        signal_attack_ms(u32::MAX, u32::MAX),
+        u32::MAX,
+        "saturated rows clamp to u32::MAX"
+    );
+    assert_eq!(
+        signal_attack_ms(u32::MAX, 0),
+        u32::MAX,
+        "single saturated row clamps to u32::MAX"
+    );
 }

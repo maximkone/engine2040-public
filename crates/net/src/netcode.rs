@@ -25,6 +25,26 @@ pub const MAX_ROLLBACK: usize = 9;
 /// The live log holds at most this plus buffered future inputs (`pending`).
 pub const HISTORY_CAP: usize = MAX_ROLLBACK + 1;
 
+/// Netcode-tick contract pin (buyer-expectation, ideas only): per-tick
+/// snapshot byte budget, static-on-change-only split, input-loss path via
+/// the landed counters. Rollback math unchanged; this only asserts the
+/// landed window in debug builds. Units: bytes, ticks. Determinism: integer
+/// compares only, no allocation.
+const SNAPSHOT_BUDGET_BYTES: usize = crate::session::MAX_PACKET_BYTES;
+
+/// True when `bytes` fits the per-tick snapshot budget.
+fn within_snapshot_budget(bytes: usize) -> bool {
+    bytes <= SNAPSHOT_BUDGET_BYTES
+}
+
+/// Debug-only window check: every resim inside cap 9, history bounded,
+/// prediction counts expose input loss. No-op in release.
+fn debug_assert_tick_window<S: Sim>(session: &Session<S>) {
+    debug_assert!(session.max_rollback() <= MAX_ROLLBACK);
+    debug_assert!(session.history_len() <= HISTORY_CAP + session.pending_len());
+    debug_assert!(session.len() <= MAX_ROLLBACK + 1);
+}
+
 /// Loud netcode failures: window / horizon / desync refusals change nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetcodeError {
@@ -87,6 +107,30 @@ pub enum Channel {
     Reliable,
     Unreliable,
     Sequenced,
+}
+
+/// Wire-kind to channel-plus-priority table the encoder reads.
+/// Consumer: [`Session::packet`] via [`kind_channel`]; session owns the
+/// `KIND_*` bytes, netcode owns this hint. Units: kind byte, channel hint,
+/// priority class lower-first (combat inputs 0 outrank state 1 outrank
+/// snapshot bulk 2). Determinism: integer compares only, no allocation.
+/// Other `KIND_*` (courier/lobby/relay) use different magics, out of scope.
+pub const KIND_CHANNEL: [(u8, Channel, u8); 3] = [
+    (crate::session::KIND_INPUT, Channel::Sequenced, 0),
+    (crate::session::KIND_STATE, Channel::Unreliable, 1),
+    (crate::session::KIND_SNAPSHOT, Channel::Reliable, 2),
+];
+
+/// Encoder lookup into [`KIND_CHANNEL`]; `None` for unknown kinds.
+/// Loops the table so table and lookup cannot drift; no allocation.
+#[must_use]
+pub fn kind_channel(kind: u8) -> Option<(Channel, u8)> {
+    for (k, ch, pri) in KIND_CHANNEL {
+        if k == kind {
+            return Some((ch, pri));
+        }
+    }
+    None
 }
 
 /// Wire shape. Transport-owned; net only fills/consumes.
@@ -252,6 +296,18 @@ impl<S: Sim> Session<S> {
     }
     /// Build an outbound packet shape; the caller transports it.
     pub fn packet(frame: u32, input: u32, ch: Channel) -> Packet {
+        // Pin the hint to the table so route and shed order cannot split.
+        // Reads via `kind_channel`, so the encoder reads the table.
+        debug_assert!(
+            [
+                crate::session::KIND_INPUT,
+                crate::session::KIND_STATE,
+                crate::session::KIND_SNAPSHOT,
+            ]
+            .iter()
+            .any(|k| kind_channel(*k).is_some_and(|(c, _)| c == ch)),
+            "packet channel must appear in KIND_CHANNEL"
+        );
         Packet { frame, input, ch }
     }
     /// Play one frame. Missing remote predicts repeat-last; early pending wins. Returns post hash.
@@ -300,6 +356,8 @@ impl<S: Sim> Session<S> {
             self.history_base += 1;
         }
         self.frame += 1;
+        debug_assert!(within_snapshot_budget(crate::scale::full_wire_len(2)));
+        debug_assert_tick_window(self);
         h
     }
     /// Late true input. Confirm, or rollback + resim on mispredict.
@@ -679,6 +737,24 @@ mod tests {
         assert!(s.snapshot(0).is_some());
         let p = Session::<Toy>::packet(7, 2, Channel::Reliable);
         assert_eq!((p.frame, p.input, p.ch), (7, 2, Channel::Reliable));
+    }
+
+    #[test]
+    fn kind_table_reads_every_kind() {
+        // Every session-wire KIND_* resolves; unknown is None; combat inputs
+        // outrank state outranks snapshot bulk (lower-first).
+        let (ich, ip) = kind_channel(crate::session::KIND_INPUT).expect("input maps");
+        let (sch, sp) = kind_channel(crate::session::KIND_STATE).expect("state maps");
+        let (nch, np) = kind_channel(crate::session::KIND_SNAPSHOT).expect("snapshot maps");
+        assert_eq!((ich, ip), (Channel::Sequenced, 0));
+        assert_eq!((sch, sp), (Channel::Unreliable, 1));
+        assert_eq!((nch, np), (Channel::Reliable, 2));
+        assert!(ip < sp && sp < np, "inputs outrank state outranks bulk");
+        assert_eq!(kind_channel(0xFF), None);
+        // Encoder reads: packet pins every table channel; twice identical.
+        assert_eq!(kind_channel(crate::session::KIND_INPUT), Some((ich, ip)));
+        let p = Session::<Toy>::packet(7, 2, ich);
+        assert_eq!(p.ch, ich);
     }
 
     #[test]

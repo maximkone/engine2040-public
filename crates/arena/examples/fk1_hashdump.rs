@@ -65,7 +65,8 @@ fn tick_inputs(tape: &FighterTape, tick: u32) -> &[FighterInput] {
 }
 
 fn usage() -> String {
-    "usage: fk1_hashdump [--seed <u64>] [--ticks <1..100000>] [--fighters <2..8>] [--extent <m>]".to_string()
+    "usage: fk1_hashdump [--seed <u64>] [--ticks <1..100000>] [--fighters <2..8>] [--extent <m>]"
+        .to_string()
 }
 
 fn take_value(raw: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
@@ -77,8 +78,12 @@ fn take_value(raw: &[String], index: &mut usize, flag: &str) -> Result<String, S
 }
 
 fn parse_args(raw: &[String]) -> Result<(u64, u32, u8, f32), String> {
-    let (mut seed, mut ticks, mut fighters, mut extent) =
-        (DEFAULT_SEED, DEFAULT_TICKS, DEFAULT_FIGHTERS, DEFAULT_EXTENT);
+    let (mut seed, mut ticks, mut fighters, mut extent) = (
+        DEFAULT_SEED,
+        DEFAULT_TICKS,
+        DEFAULT_FIGHTERS,
+        DEFAULT_EXTENT,
+    );
     let mut index = 1usize;
     while index < raw.len() {
         match raw[index].as_str() {
@@ -156,7 +161,11 @@ fn main() {
     // checkpoint hash over the same config plus tape.
     let points = run(&config, &tape);
     if points.len() != ticks as usize {
-        eprintln!("fk1_hashdump: run gave {}/{} checkpoints", points.len(), ticks);
+        eprintln!(
+            "fk1_hashdump: run gave {}/{} checkpoints",
+            points.len(),
+            ticks
+        );
         std::process::exit(1);
     }
     let final_hash = points.last().map_or(0, |point| point.hash);

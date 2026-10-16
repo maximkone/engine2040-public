@@ -47,6 +47,8 @@ pub struct FogFwd {
     pub slope_per_m2: f32,
     /// Fog plane `(a, b, c, d)`; `a x + b y + c z + d < 0` is fogged.
     pub plane: [f32; 4],
+    /// Live-sky switch the truth gate reads: true samples the bake.
+    pub sky_on: bool,
 }
 
 impl FogFwd {
@@ -60,7 +62,19 @@ impl FogFwd {
             zenith: radiance(zenith_linear),
             slope_per_m2: FOG_FWD_GROUND_DENSITY_PER_M / FOG_FWD_TOP_M,
             plane: [0.0, 1.0, 0.0, -FOG_FWD_TOP_M],
+            sky_on: true,
         }
+    }
+
+    /// Sky switch: false collapses the sky to the fog color.
+    #[must_use]
+    pub fn with_sky_on(self, on: bool) -> Self {
+        Self { sky_on: on, ..self }
+    }
+
+    /// Current sky switch.
+    pub fn sky_on(self) -> bool {
+        self.sky_on
     }
 
     /// Same colors with the fog switched off (density slope zero).
@@ -85,7 +99,7 @@ impl FogFwd {
         words[16..19].copy_from_slice(&eye);
         words[19] = self.slope_per_m2;
         words[20..23].copy_from_slice(&self.color);
-        words[23] = 1.0;
+        words[23] = if self.sky_on { 1.0 } else { 0.0 };
         words[24..27].copy_from_slice(&self.zenith);
         words[28..32].copy_from_slice(&self.plane);
         let mut out = [0u8; FOG_FWD_UNIFORM_BYTES];
@@ -145,6 +159,9 @@ impl FogFwd {
     /// at `eye`, as linear radiance (the blit tone-maps it).
     #[must_use]
     pub fn sky_color(&self, eye: [f32; 3], dir: [f32; 3]) -> [f32; 3] {
+        if !self.sky_on {
+            return self.color;
+        }
         let t = dir[1].clamp(0.0, 1.0).sqrt();
         let f = self.factor_infinite(eye, dir);
         let mut out = [0.0f32; 3];
@@ -293,5 +310,55 @@ mod tests {
         for c in 0..3 {
             assert!((up[c] - f.zenith[c]).abs() < 1.0e-4, "{up:?}");
         }
+    }
+
+    #[test]
+    fn uniform_bytes_carry_sky_on_off_flag() {
+        let f = fog();
+        let inv = [0.0f32; 16];
+        let eye = [1.0, 2.0, 3.0];
+        let word = |b: &[u8], i: usize| {
+            f32::from_le_bytes([b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]])
+        };
+        let on = f.to_bytes(&inv, eye);
+        let off_b = f.with_sky_on(false).to_bytes(&inv, eye);
+        assert_eq!(word(&on, 23), 1.0);
+        assert_eq!(word(&off_b, 23), 0.0);
+        assert!(f.sky_on());
+        assert!(!f.with_sky_on(false).sky_on());
+        assert!(f.off().sky_on());
+        assert!(!f.with_sky_on(false).off().sky_on());
+        for i in 0..32 {
+            if i != 23 {
+                assert_eq!(word(&on, i), word(&off_b, i), "word {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_bytes_sky_off_collapses_to_fog() {
+        let f = fog();
+        let off = f.with_sky_on(false);
+        for dir in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]] {
+            assert_eq!(off.sky_color([0.0, 1.0, 0.0], dir), f.color);
+        }
+        let up = f.sky_color([0.0, 30.0, 0.0], [0.0, 1.0, 0.0]);
+        for c in 0..3 {
+            assert!((up[c] - f.zenith[c]).abs() < 1.0e-4, "{up:?}");
+        }
+    }
+
+    #[test]
+    fn uniform_bytes_fs_sky_reads_sky_on_flag() {
+        const WGSL: &str = include_str!("../shaders/forward.wgsl");
+        let at = WGSL.find("fn fs_sky").expect("fs_sky exists");
+        let body = &WGSL[at..];
+        let end = body.find("\n}\n").expect("fs_sky closes");
+        let sky = &body[..end];
+        assert!(sky.contains("sky_on"), "{sky}");
+        assert!(sky.contains("sky_view_sample"), "{sky}");
+        assert!(sky.contains("fog_factor_infinite"), "{sky}");
+        assert!(!sky.contains("aces_fitted"), "{sky}");
+        assert!(!sky.contains("linear_to_srgb"), "{sky}");
     }
 }

@@ -152,7 +152,11 @@ impl Biquad {
 fn k_stages(sample_rate: u32) -> (Biquad, Biquad) {
     if sample_rate == 48_000 {
         let shelf = Biquad {
-            b: [1.535_124_859_586_97, -2.691_696_189_406_38, 1.198_392_810_852_85],
+            b: [
+                1.535_124_859_586_97,
+                -2.691_696_189_406_38,
+                1.198_392_810_852_85,
+            ],
             a1: -1.690_659_293_182_41,
             a2: 0.732_480_774_215_85,
         };
@@ -212,7 +216,11 @@ pub fn integrated_lufs_at(samples: &[f32], sample_rate: u32) -> f32 {
     if samples.is_empty() {
         return SILENCE_LUFS;
     }
-    let rate = if sample_rate == 0 { 48_000 } else { sample_rate };
+    let rate = if sample_rate == 0 {
+        48_000
+    } else {
+        sample_rate
+    };
     let (shelf, rlb) = k_stages(rate);
     let (mut shelf_st, mut rlb_st) = (BiquadState::default(), BiquadState::default());
     let mut sum = 0f64;

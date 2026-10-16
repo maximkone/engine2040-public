@@ -836,7 +836,7 @@ mod tests {
         let m = quad_mesh().expect("unit quad is valid");
         assert_eq!((m.positions.len(), m.indices.len()), (4, 6));
         assert!(!m.vertex_bytes().is_empty());
-        assert_eq!(m.vertex_bytes().len(), 4 * 32);
+        assert_eq!(m.vertex_bytes().len(), 4 * 48);
         // Instance strides match the declared stride on both uploads.
         let mut p = Particles::new();
         assert!(p.spawn([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 1.0, ParticleKind::Dust));

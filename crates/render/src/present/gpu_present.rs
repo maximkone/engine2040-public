@@ -47,12 +47,115 @@ pub(super) const BLIT_WGSL: &str = concat!(
     include_str!("../shaders/blit.wgsl")
 );
 
+mod fog_tranche;
+mod forward_bind;
 mod frame;
 mod live;
+mod msaa;
 mod presenter;
 mod submit;
+mod sun_shadow;
 mod timing;
 
 pub use frame::{FrameOutput, FrameReceipt, LookPassReceipt};
+pub use msaa::{
+    edge_has_intermediate, msaa_enabled, msaa_sample_count, msaa_target_desc, MsaaConfig,
+    MsaaTargetDesc, MSAA_SAMPLE_COUNT,
+};
 pub use presenter::Presenter;
 pub use submit::create_surface;
+
+#[cfg(test)]
+mod root_wiring_tests {
+    //! Crate-root wiring vectors: the window loop reaches every shared
+    //! target through this root (`HDR_FORMAT`, `OUTPUT_FORMAT`,
+    //! `DEPTH_FORMAT`, `HDR_CLEAR`, the presenter plus frame re-exports).
+    //!
+    //! Consumer: WIN1 window loop plus ED1 viewport next, via
+    //! `crate::present::gpu_present::{HDR_FORMAT, Presenter, ...}`.
+    //! Units: GPU formats plus linear radiance clears. Determinism: pure
+    //! constants plus string contains, no device, no clock.
+    //!
+    //! Why this file exists: `crates/render/src/present/gpu_present.rs`
+    //! changed 4 times in 30 days yet held zero `#[test]` and no
+    //! `tests/it` module named it, so a dropped `pub use` or a format
+    //! swap would compile the crate but break every caller at their
+    //! `use` line. Each vector below names the root path, so removing
+    //! or retargeting one fails here first.
+
+    use super::*;
+
+    /// The window loop's shared targets stay half-float linear HDR plus
+    /// 8-bit LDR twin plus 32-bit depth, with a 256-byte row pitch and a
+    /// non-empty studio bake behind the IBL chart.
+    #[test]
+    fn window_targets_keep_hdr_contract_through_root() {
+        assert_eq!(
+            HDR_FORMAT,
+            wgpu::TextureFormat::Rgba16Float,
+            "forward HDR stays half float via root"
+        );
+        assert_eq!(
+            OUTPUT_FORMAT,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "LDR twin stays 8-bit via root"
+        );
+        assert_eq!(
+            DEPTH_FORMAT,
+            wgpu::TextureFormat::Depth32Float,
+            "depth stays 32-bit float via root"
+        );
+        assert_ne!(HDR_FORMAT, OUTPUT_FORMAT, "HDR and LDR never alias");
+        assert_ne!(HDR_FORMAT, DEPTH_FORMAT, "color and depth never alias");
+        assert_eq!(ROW_ALIGN, 256, "copy rows stay 256-byte aligned");
+        assert_eq!(HDR_CLEAR.a, 1.0, "clear stays opaque via root");
+        for (got, name) in [(HDR_CLEAR.r, "r"), (HDR_CLEAR.g, "g"), (HDR_CLEAR.b, "b")] {
+            assert!(
+                got > 0.0 && got < 0.1,
+                "clear {name} stays dim linear radiance, got {got}"
+            );
+        }
+        assert!(
+            !IBL_STUDIO_HDRI_BYTES.is_empty(),
+            "studio bake stays embedded via root"
+        );
+        assert!(
+            IBL_STUDIO_HDRI_BYTES.len() > 1_000,
+            "studio bake stays a real HDRI, got {} bytes",
+            IBL_STUDIO_HDRI_BYTES.len()
+        );
+    }
+
+    /// The blit carries the frame's one tone map and the root re-exports
+    /// keep the window loop's `use` lines compiling.
+    #[test]
+    fn blit_and_reexports_stay_wired_for_window_loop() {
+        assert!(
+            BLIT_WGSL.contains("fn aces_fitted("),
+            "blit keeps the display transform via root"
+        );
+        assert!(
+            BLIT_WGSL.contains("fn fs("),
+            "blit keeps the LDR-twin entry via root"
+        );
+        assert!(
+            BLIT_WGSL.contains("fn fs_hw_srgb("),
+            "blit keeps the hardware-sRGB entry via root"
+        );
+        // Re-exports the window loop names: mentioning each type here
+        // fails at the `use` line when the `pub use` above is dropped.
+        assert!(
+            core::any::type_name::<Presenter>().contains("Presenter"),
+            "presenter stays re-exported via root"
+        );
+        assert!(
+            core::any::type_name::<FrameOutput>().contains("FrameOutput"),
+            "frame output stays re-exported via root"
+        );
+        assert!(
+            core::any::type_name::<MsaaConfig>().contains("MsaaConfig"),
+            "MSAA config stays re-exported via root"
+        );
+        let _ = super::create_surface;
+    }
+}

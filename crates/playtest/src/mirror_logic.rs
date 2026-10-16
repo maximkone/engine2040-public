@@ -372,6 +372,14 @@ fn kill_flag_matches_health(frames: &[Frame]) -> Result<(), Violation> {
             });
         }
     }
+    if let Some(last) = frames.last() {
+        if last.killed {
+            return Err(Violation {
+                tick: last.tick,
+                why: "kill flag disagrees with health",
+            });
+        }
+    }
     Ok(())
 }
 
@@ -852,6 +860,28 @@ mod tests {
                 .expect_err("early flag")
                 .tick,
             0
+        );
+    }
+
+    #[test]
+    fn kill_flag_rule_rejects_a_spurious_flag_on_the_final_tick() {
+        let mut frames = vec![
+            frame(0, [100, 100], HERE),
+            frame(1, [0, 100], HERE),
+            frame(2, [0, 100], HERE),
+        ];
+        frames[0].killed = true;
+        assert!(
+            kill_flag_matches_health(&frames).is_ok(),
+            "the clean knockout must hold: {:?}",
+            kill_flag_matches_health(&frames)
+        );
+        frames[2].killed = true;
+        assert_eq!(
+            kill_flag_matches_health(&frames)
+                .expect_err("a kill flag on the last tick has no next tick to explain it")
+                .tick,
+            2
         );
     }
 

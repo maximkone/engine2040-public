@@ -372,6 +372,9 @@ impl Bombardment {
     /// quiet ticks never touch the allocator.
     pub fn new(config: BallisticConfig) -> Result<Self, BallisticError> {
         config.validate()?;
+        // `ballista_one` fires through `SOCKET_muzzle` at the 60 m wall plane.
+        let _ =
+            crate::siege::siege_field().map_err(|_| BallisticError::BadConfig("siege_field"))?;
         let wall_seeds = arena_seed::expand(config.seed ^ 0x5EED_B411, WALL_SECTIONS);
         let shot_seeds = arena_seed::expand(config.seed ^ 0xB411_15ED, SIEGE_ENGINES);
         let mut sections = Vec::with_capacity(WALL_SECTIONS);

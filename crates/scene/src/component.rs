@@ -21,9 +21,9 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::schema::{Schema, SchemaError, SchemaRegistry};
 #[cfg(feature = "json")]
 use crate::schema::VersionedComponent;
+use crate::schema::{Schema, SchemaError, SchemaRegistry};
 
 /// Version every shipped component kind starts at.
 pub const SCHEMA_VERSION: u32 = 1;

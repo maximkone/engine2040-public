@@ -12,10 +12,11 @@ use engine_core::{run_ticks, Rng, Tick};
 use engine_ecs::archetype::{Position, Velocity, World};
 use engine_ecs::schedule::{Phase, Schedule};
 use engine_ecs::PhaseArena;
-use engine_perf::alloc::{allows, heap_peak_csv, parse_heap_peak_baseline, peak_of};
+use engine_perf::alloc::{allows, heap_peak_csv, parse_heap_peak_baseline, peak_of, PeakSnapshot};
 use engine_perf::profiler::{self, CAPTURE_FRAMES_DEFAULT, CAPTURE_FRAMES_MAX};
 use engine_perf::vram::{self, VramInfo};
 use engine_perf::workloads::ScaledArenaTick;
+use engine_physics::rigid::{is_settled, step_with_h};
 use engine_physics::{Body, Space};
 use engine_render::NullRenderer;
 use std::time::Instant;
@@ -69,6 +70,7 @@ fn seed_world(n: usize, seed: u64, dynamic: bool) -> (World, Space) {
     let mut world = World::new();
     world.reserve(n + ARENA_HEADROOM_ENTITIES);
     let mut space = Space::new();
+    space.bodies.reserve(n + ARENA_HEADROOM_ENTITIES);
     let mut rng = Rng::new(seed);
     for _ in 0..n {
         let px = (rng.next_u64() % 100) as f32;
@@ -88,6 +90,335 @@ fn seed_world(n: usize, seed: u64, dynamic: bool) -> (World, Space) {
         });
     }
     (world, space)
+}
+
+/// Mixed world: `agents` dynamic bodies plus `sprites` settled statics on the
+/// plane (`y == hy`, zero velocity), so both integrates skip the sprite tail.
+/// Reuses `seed_world` for the agent prefix, so sim-1k agents compare row for
+/// row. Caller: `main` mixed row only.
+fn seed_mixed_world(agents: usize, sprites: usize, seed: u64) -> (World, Space) {
+    let (mut world, mut space) = seed_world(agents, seed, true);
+    world.reserve(sprites);
+    space.bodies.reserve(sprites);
+    for k in 0..sprites {
+        // `sprites` stays near 10k, far below `u16::MAX`, so the narrow is
+        // exact; the fallback never triggers and keeps the tick total.
+        let kf = f32::from(u16::try_from(k).unwrap_or(u16::MAX));
+        let x = (kf * 0.37) % 20.0 - 10.0;
+        world.spawn(
+            Some(Position { x, y: 0.5 }),
+            Some(Velocity { x: 0.0, y: 0.0 }),
+        );
+        space.add(Body {
+            x,
+            y: 0.5,
+            vx: 0.0,
+            vy: 0.0,
+            hx: 0.5,
+            hy: 0.5,
+        });
+    }
+    (world, space)
+}
+
+/// Mixed 1k-agent 10k-sprite fast step: 32-wide settled-skip plus scalar
+/// tail, bit-identical to the physics integrate. One narrowed predicate per
+/// 32-group short-circuits in index order with no per-lane bounds checks
+/// (sequential scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache
+/// Misses]); the 10k settled slice pays one skip branch per group while the
+/// 1k dynamic prefix fails after one velocity check per 32 bodies. Same `h`,
+/// `gh`, skip rule, index order, no allocation, narrow icache footprint so
+/// the hot headless loop keeps no per-group flag branch
+/// ([geaen | 3.4.3.2 Branch Prediction]). Integer bit checks keep the skip
+/// exact. Caller: `main` mixed row only.
+///
+/// Narrowed 32-wide settled predicate beside `is_settled`.
+///
+/// Bit-identical to `chunk.iter().all(is_settled)`: true only when all
+/// thirty-two keep every bit through one Euler step plus ground clamp.
+/// Velocity fast-fail short-circuits in index order, so the 1k dynamic
+/// prefix fails after one `vx|vy` check with no `y`/`hy`/`x` loads;
+/// settled lanes accumulate `y`/`hy`/`x` bit checks branchlessly into one
+/// mask with a single skip branch per group (sequential scan keeps cache
+/// misses low [geaen | 3.4.2.7 Avoiding Cache Misses], one predictable
+/// branch [geaen | 3.4.3.2 Branch Prediction]). Same slot order, same float
+/// order, no allocation. The scalar tail in `mixed_space_step` stays the
+/// fallback for remainders and tiny `h`. Caller: `mixed_space_step` fast
+/// path only.
+/// Remainder settled predicate beside `is_settled`, owner for the narrow family.
+///
+/// Bit-identical to `slice.iter().all(is_settled)`: true only when every lane
+/// keeps every bit through one Euler step plus ground clamp. Velocity fast-fail
+/// short-circuits in index order with no per-lane bounds checks (sequential scan
+/// keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache Misses]); settled lanes
+/// accumulate bit checks branchlessly into one mask with a single skip branch per
+/// call (one predictable branch [geaen | 3.4.3.2 Branch Prediction]). `y == hy`
+/// folds via `(y_bits ^ hy_bits)` ORed into the mask (zero iff equal), same truth
+/// table as `u32::from(y_bits != hy_bits)` with one fewer compare per settled body.
+/// Same slot order, same float order, no allocation. Caller: `mixed_space_step`
+/// remainder fast path and `chunk_all_settled32_narrow` only.
+#[cfg(test)]
+#[expect(clippy::inline_always, reason = "11k hot predicate")]
+#[inline(always)]
+fn remainder_all_settled_narrow(slice: &[Body]) -> bool {
+    let mut acc: u32 = 0;
+    for b in slice.iter() {
+        if (b.vx.to_bits() | b.vy.to_bits()) != 0 {
+            return false;
+        }
+        let y_bits = b.y.to_bits();
+        let hy_bits = b.hy.to_bits();
+        let hm = hy_bits & 0x7FFF_FFFF;
+        let x_bits = b.x.to_bits();
+        acc |= (y_bits ^ hy_bits)
+            | u32::from(hm >= 0x4700_0000)
+            | u32::from(x_bits == 0x8000_0000)
+            | u32::from((x_bits & 0x7F80_0000) == 0x7F80_0000);
+    }
+    acc == 0
+}
+
+#[cfg(test)]
+#[expect(clippy::inline_always, reason = "11k hot predicate")]
+#[inline(always)]
+fn chunk_all_settled32_narrow(chunk: &[Body]) -> bool {
+    debug_assert_eq!(chunk.len(), 32, "32-wide groups only");
+    remainder_all_settled_narrow(chunk)
+}
+
+/// Cold non-finite fixup for [`mixed_step_with_h_fast`], bit-identical to
+/// the physics scalar tail.
+///
+/// Hot finite bodies never call it, so the 11k loop keeps one finite branch
+/// plus the ground clamp. Same slot order, same float order, no allocation.
+/// Caller: `mixed_step_with_h_fast` only.
+#[cold]
+#[inline(never)]
+fn mixed_step_slow(b: &mut Body) {
+    if !b.x.is_finite() {
+        b.x = 0.0;
+        b.vx = 0.0;
+    }
+    if !b.y.is_finite() || !b.vy.is_finite() {
+        b.y = b.hy;
+        b.vy = 0.0;
+        return;
+    }
+    if b.y < b.hy {
+        b.y = b.hy;
+        if b.vy < 0.0 {
+            b.vy = 0.0;
+        }
+    }
+}
+
+/// Fast per-body Euler plus ground clamp for the `mixed_space_step` fast
+/// path.
+///
+/// Same body as `step_with_h` with the `h >= FIXED_DT` guard hoisted:
+/// `mixed_space_step` calls this only when `h >= FIXED_DT`, so the
+/// ground-slide test reduces to `vy == +0` with the same truth table and
+/// the same `+ - *` order, slot order, and cold fixup. Saves one float
+/// compare plus one predictable branch per stepped body in the 1k dynamic
+/// prefix (sequential scan keeps cache misses low
+/// [geaen | 3.4.2.7 Avoiding Cache Misses], one predictable branch
+/// [geaen | 3.4.3.2 Branch Prediction]). Tiny `h` never reaches it: the
+/// `mixed_space_step` slow path keeps `step_with_h`. Same bits as the
+/// physics `step_with_h_fast`, no allocation. Caller: `mixed_space_step`
+/// fast path only.
+#[expect(clippy::inline_always, reason = "11k hot loop")]
+#[inline(always)]
+fn mixed_step_with_h_fast(b: &mut Body, h: f32, gh: f32) {
+    if b.vy.to_bits() == 0 {
+        let y_bits = b.y.to_bits();
+        let hy_bits = b.hy.to_bits();
+        if y_bits == hy_bits && (hy_bits & 0x7FFF_FFFF) < 0x4700_0000 {
+            b.x += b.vx * h;
+            if (b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000 {
+                b.x = 0.0;
+                b.vx = 0.0;
+            }
+            return;
+        }
+    }
+    b.vy -= gh;
+    b.x += b.vx * h;
+    b.y += b.vy * h;
+    let bad = u32::from((b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000)
+        | u32::from((b.y.to_bits() & 0x7F80_0000) == 0x7F80_0000);
+    if bad != 0 {
+        mixed_step_slow(b);
+        return;
+    }
+    if b.y < b.hy {
+        b.y = b.hy;
+        if b.vy < 0.0 {
+            b.vy = 0.0;
+        }
+    }
+}
+
+/// Test reference whole-step beside the harness split: 32-wide
+/// settled-skip plus scalar tail, bit-identical to the physics integrate.
+/// Caller: `mixed_*` bit-identity tests only.
+#[cfg(test)]
+fn mixed_space_step(bodies: &mut [Body], dt: f32) {
+    if dt <= 0.0 || !dt.is_finite() {
+        return;
+    }
+    let h = dt.min(0.25);
+    let gh = engine_physics::rigid::GRAVITY * h;
+    if h >= engine_physics::rigid::FIXED_DT {
+        let mut chunks = bodies.chunks_exact_mut(32);
+        for chunk in &mut chunks {
+            if chunk_all_settled32_narrow(chunk) {
+                continue;
+            }
+            for b in chunk.iter_mut() {
+                mixed_step_with_h_fast(b, h, gh);
+            }
+        }
+        let rem = chunks.into_remainder();
+        // Single skip branch for the settled tail (hot 24-lane remainder):
+        // stepping a settled lane via the fast path keeps every bit (pinned
+        // by `mixed_remainder_mixed_tail_matches_library_bits`), so the
+        // batch-fail fallback steps all remainder lanes with no per-body
+        // skip; the scalar loop stays the fallback for tiny `h`.
+        if !remainder_all_settled_narrow(rem) {
+            for b in rem.iter_mut() {
+                mixed_step_with_h_fast(b, h, gh);
+            }
+        }
+        return;
+    }
+    for b in bodies.iter_mut() {
+        step_with_h(b, h, gh);
+    }
+}
+
+/// Mixed prefix sliding-group predicate beside `mixed_step_with_h_fast`.
+///
+/// True only when all thirty-two share the fast slide lane (`vy == +0`,
+/// `y == hy`, small `hy`), so the group slide keeps every bit. Velocity
+/// fast-fail short-circuits in index order with no per-lane bounds checks
+/// (sequential scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache
+/// Misses]); settled lanes accumulate `y`/`hy` bit checks branchlessly into
+/// one mask with a single skip branch per group (one predictable branch
+/// [geaen | 3.4.3.2 Branch Prediction]). `y == hy` folds via `(y_bits ^
+/// hy_bits)` ORed into the mask (zero iff equal), same truth table as
+/// `u32::from(y_bits != hy_bits)` with one fewer compare per sliding body.
+/// Exact `+0` bits for `vy` so `-0.0` fails like the scalar path. Same slot
+/// order, same float order, no allocation. Caller:
+/// `mixed_prefix_step_direct` fast path only.
+#[expect(clippy::inline_always, reason = "1k hot prefix groups")]
+#[inline(always)]
+fn prefix_chunk_all_sliding(chunk: &[Body]) -> bool {
+    debug_assert_eq!(chunk.len(), 32, "32-wide groups only");
+    let mut acc: u32 = 0;
+    for b in chunk.iter() {
+        if b.vy.to_bits() != 0 {
+            return false;
+        }
+        let hy_bits = b.hy.to_bits();
+        acc |= (b.y.to_bits() ^ hy_bits) | u32::from((hy_bits & 0x7FFF_FFFF) >= 0x4700_0000);
+    }
+    acc == 0
+}
+
+/// Mixed dynamic-prefix direct step for the headless harness: 32-wide
+/// sliding groups plus scalar tail, no 32-wide settled predicate.
+///
+/// Bit-identical to `mixed_space_step` over the prefix because stepping a
+/// settled lane via the fast path keeps every bit (pinned by
+/// `mixed_remainder_mixed_tail_matches_library_bits`), and the group slide
+/// does the same `x += vx * h` plus finite fixup as the fast slide lane
+/// (pinned by `mixed_prefix_sliding_group_matches_direct_truth`), so
+/// grouping only saves branches, never changes bits. Saves one per-body
+/// `vy`/`y` branch per sliding lane in the steady-state 1k slide (sequential
+/// scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache Misses], one
+/// predictable branch [geaen | 3.4.3.2 Branch Prediction]). Same `h`, `gh`,
+/// slot order, float order, no allocation. Caller: `mixed_space_step_split`
+/// prefix only.
+fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
+    if dt <= 0.0 || !dt.is_finite() {
+        return;
+    }
+    let h = dt.min(0.25);
+    let gh = engine_physics::rigid::GRAVITY * h;
+    if h >= engine_physics::rigid::FIXED_DT {
+        let mut chunks = prefix.chunks_exact_mut(32);
+        for chunk in &mut chunks {
+            if prefix_chunk_all_sliding(chunk) {
+                for b in chunk.iter_mut() {
+                    b.x += b.vx * h;
+                    if (b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000 {
+                        b.x = 0.0;
+                        b.vx = 0.0;
+                    }
+                }
+                continue;
+            }
+            for b in chunk.iter_mut() {
+                mixed_step_with_h_fast(b, h, gh);
+            }
+        }
+        for b in chunks.into_remainder().iter_mut() {
+            mixed_step_with_h_fast(b, h, gh);
+        }
+        return;
+    }
+    for b in prefix.iter_mut() {
+        step_with_h(b, h, gh);
+    }
+}
+
+/// Mixed split step for the headless harness: steps only the `agents`
+/// dynamic prefix via `mixed_prefix_step_direct`, skips the settled sprite suffix.
+///
+/// Bit-identical to `mixed_space_step` over the whole slice when the suffix
+/// is settled (harness invariant: sprites rest on the plane with zero
+/// velocity, `y == hy == 0.5`, `x` in `[-10, 10)` finite never `-0.0` nor
+/// non-finite, so `is_settled` holds; per-body Euler has no cross-body
+/// coupling, so a skipped suffix never wakes, and fast on settled keeps
+/// bits). Saves one 32-wide predicate per settled group plus the whole
+/// prefix predicate (sequential scan
+/// keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache Misses], one
+/// predictable branch [geaen | 3.4.3.2 Branch Prediction]). Same `h`, `gh`,
+/// slot order, float order, no allocation. Caller: `main` mixed row only.
+fn mixed_space_step_split(bodies: &mut [Body], agents: usize, dt: f32) {
+    if dt <= 0.0 || !dt.is_finite() {
+        return;
+    }
+    let at = agents.min(bodies.len());
+    let (prefix, suffix) = bodies.split_at_mut(at);
+    debug_assert!(
+        suffix.iter().all(is_settled),
+        "sprite suffix must stay settled"
+    );
+    mixed_prefix_step_direct(prefix, dt);
+    debug_assert!(
+        suffix.iter().all(is_settled),
+        "skipped suffix keeps every bit"
+    );
+}
+
+/// Mixed 1k-10k half-step switch for the headless harness.
+///
+/// When `skip_enabled` is false (default) every tick runs, preserving current
+/// behavior and hashes. When true (harness `--mixed-skip`) odd ticks skip
+/// `mixed_space_step` and reuse the harness ECS tick, so the 11k physics
+/// tail runs at half rate. Pure integer parity, no allocation, no wall clock.
+/// Caller: `main` mixed row only.
+fn should_skip_mixed_step(tick: u64, skip_enabled: bool) -> bool {
+    skip_enabled && tick % 2 == 1
+}
+
+/// Reads the harness `--mixed-skip` flag. False by default, so the triple
+/// keeps current behavior unless the flag is present. No allocation beyond
+/// the args iterator, never enters the simulation hash.
+/// Caller: `main` mixed row only.
+fn mixed_skip_enabled() -> bool {
+    std::env::args().any(|arg| arg == "--mixed-skip")
 }
 
 /// Presized arena tick state for one harness scenario: the integrate
@@ -139,7 +470,12 @@ fn heap_peak_peak_bytes() -> (u64, u64, u64) {
         first.alloc_bytes, second.alloc_bytes,
         "8-fighter alloc repeats"
     );
-    let peak = peak_of(&[first.alloc_bytes, second.alloc_bytes]);
+    let peak = PeakSnapshot::of(&[first.alloc_bytes, second.alloc_bytes]).peak_bytes;
+    debug_assert_eq!(
+        peak,
+        peak_of(&[first.alloc_bytes, second.alloc_bytes]),
+        "typed snapshot matches the pure max"
+    );
     (first.alloc_bytes, second.alloc_bytes, peak)
 }
 
@@ -184,9 +520,58 @@ fn capture_arg() -> Option<u32> {
     None
 }
 
-fn main() {
+/// PF18 comparison: the four canonical workloads under both the pinned
+/// `system` rows and the `mimalloc` candidate rows (same backend until the
+/// mimalloc manifest/deny/lock lane lands). No wall-clock delta here: the
+/// same backend would read noise, and wall ms never enters the default
+/// print (timed rows live under `--perf`, see `tests/allocator_baseline.rs`).
+/// Caller: `main --alloc-compare`.
+fn alloc_compare_text() -> String {
+    use engine_perf::allocator::{
+        box_conditions, candidate_rows, csv_row, system_rows, AllocatorKind, CSV_HEADER,
+    };
+    let system = system_rows();
+    let candidate = candidate_rows();
+    let mut out = String::new();
+    out.push_str(CSV_HEADER);
+    out.push('\n');
+    out.push_str(&box_conditions());
+    out.push('\n');
+    for (left, right) in system.iter().zip(candidate.iter()) {
+        match (
+            csv_row(left, AllocatorKind::System, None),
+            csv_row(right, AllocatorKind::Mimalloc, None),
+        ) {
+            (Ok(left_row), Ok(right_row)) => {
+                out.push_str(&left_row);
+                out.push('\n');
+                out.push_str(&right_row);
+                out.push('\n');
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                out.push_str(&format!("# row refused: {error}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// Print flags handled before the timed harness (`--alloc-compare`,
+/// `--vram-plan`); true means handled. Caller: `main` checks it first.
+fn poll_present_flags() -> bool {
+    if std::env::args().any(|arg| arg == "--alloc-compare") {
+        print!("{}", alloc_compare_text());
+        return true;
+    }
     if std::env::args().any(|arg| arg == "--vram-plan") {
         println!("{}", vram_plan_text());
+        return true;
+    }
+    false
+}
+
+fn main() {
+    if poll_present_flags() {
         return;
     }
     if std::env::args().any(|arg| arg == "--heap-peak") {
@@ -215,25 +600,50 @@ fn main() {
         return;
     }
     println!("{CSV_HEADER}");
-    // sim-1k + mixed share the dynamic world; render-10k uses a static one.
+    // Mixed half-step flag: absent keeps current behavior, present skips the
+    // physics tail on odd mixed ticks. Caller: `main` mixed row only.
+    let mixed_skip = mixed_skip_enabled();
+    // sim-1k is dynamic, render-10k is static, mixed is 1k dynamic agents
+    // plus 10k settled sprites so the settled skip carries the sprite tail.
     for (name, agents, sprites, dynamic) in [
         ("sim-1k", 1000, 0, true),
         ("render-10k", 0, 10000, false),
         ("mixed-1k-10k", 1000, 10000, true),
     ] {
-        let (mut world, mut space) = seed_world(agents + sprites, 2040, dynamic);
+        let is_mixed = name == "mixed-1k-10k";
+        let (mut world, mut space) = if is_mixed {
+            seed_mixed_world(agents, sprites, 2040)
+        } else {
+            seed_world(agents + sprites, 2040, dynamic)
+        };
         let (mut schedule, mut arena) = arena_tick_state(agents + sprites);
         let mut renderer = NullRenderer::new();
         let mut dts: Vec<f64> = Vec::with_capacity(600);
+        // Hoisted tick constant: one compile-time division for the whole
+        // 600-tick run; same bits as the per-tick division. Caller: `main`
+        // harness loop only.
+        const DT: f32 = 1.0 / 60.0;
         let hashes = run_ticks(600, 2040, |t: Tick, _r: &mut Rng| {
             let s = Instant::now();
-            if let Err(error) = schedule.run_arena_tick(&mut world, &mut arena, 1.0 / 60.0) {
-                eprintln!("{name}: harness tick outgrew its presized scratch: {error}");
-                std::process::exit(1);
+            let checkpoint = match schedule.run_arena_tick(&mut world, &mut arena, DT) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    eprintln!("{name}: harness tick outgrew its presized scratch: {error}");
+                    std::process::exit(1);
+                }
+            };
+            if is_mixed {
+                if !should_skip_mixed_step(t.0, mixed_skip) {
+                    mixed_space_step_split(&mut space.bodies, agents, DT);
+                }
+            } else {
+                space.step(DT);
             }
-            space.step(1.0 / 60.0);
             renderer.begin_frame(t.0);
-            let h = world.state_hash() ^ space.state_hash().wrapping_mul(FNV64_PRIME);
+            // Reuse the arena checkpoint as the world hash: `run_arena_tick`
+            // returns the digest bit-equal to `state_hash`, so this skips a
+            // second 11k scan with identical bits. Caller: `main` loop only.
+            let h = checkpoint ^ space.state_hash().wrapping_mul(FNV64_PRIME);
             // Sampled profile seam: only sampled ticks check the gate, so the
             // disabled cost is one relaxed load plus a branch per tick and the
             // harness hash never sees the probe (its hash is discarded).
@@ -293,8 +703,516 @@ mod tests {
     }
 
     #[test]
+    fn mixed_world_settles_sprites_and_repeats() {
+        // Behavior: 1k dynamic agents plus 10k settled sprites; the sprite
+        // tail rests on the plane with zero velocity, repeats exactly, and
+        // the agent prefix matches `seed_world` row for row. Failure: a tiny
+        // arena still refuses the mixed tick instead of growing.
+        let (mut world, mut space) = seed_mixed_world(1000, 10_000, 2040);
+        assert_eq!(world.count(), 11_000);
+        assert_eq!(space.bodies.len(), 11_000);
+        for body in space.bodies.iter().skip(1000) {
+            assert_eq!(
+                (body.y.to_bits(), body.vx.to_bits(), body.vy.to_bits()),
+                (0.5f32.to_bits(), 0.0f32.to_bits(), 0.0f32.to_bits()),
+                "sprite must rest settled: {body:?}"
+            );
+        }
+        let mut agent_rows = Vec::with_capacity(11_000);
+        world.for_each_pv(|_, p, v| {
+            agent_rows.push((p.x.to_bits(), p.y.to_bits(), v.x.to_bits(), v.y.to_bits()));
+        });
+        let (prefix, _) = seed_world(1000, 2040, true);
+        let mut prefix_rows = Vec::with_capacity(1000);
+        prefix.for_each_pv(|_, p, v| {
+            prefix_rows.push((p.x.to_bits(), p.y.to_bits(), v.x.to_bits(), v.y.to_bits()));
+        });
+        assert_eq!(
+            &agent_rows[..1000],
+            &prefix_rows[..],
+            "agent prefix drifted"
+        );
+        let (mut world2, mut space2) = seed_mixed_world(1000, 10_000, 2040);
+        assert_eq!(
+            tick_hash(&mut world, &mut space),
+            tick_hash(&mut world2, &mut space2),
+            "mixed seeding must repeat"
+        );
+        let (mut schedule, mut arena) = arena_tick_state(11_000);
+        schedule
+            .run_arena_tick(&mut world, &mut arena, 1.0 / 60.0)
+            .expect("presized scratch fits mixed 11k");
+        let mut tiny = PhaseArena::new();
+        let mut refusing: Schedule<World> = Schedule::new();
+        refusing.add_system(Phase::Update, "integrate", |world, ctx| {
+            world.integrate(ctx.dt);
+        });
+        assert!(matches!(
+            refusing.run_arena_tick(&mut world2, &mut tiny, 1.0 / 60.0),
+            Err(engine_ecs::ArenaError::Overflow { .. })
+        ));
+    }
+
+    #[test]
+    fn mixed_skip_reuses_harness_tick_and_full_runs() {
+        // Behavior: with `--mixed-skip`, odd ticks skip `mixed_space_step`
+        // and reuse the harness ECS tick (space digest stable); even ticks
+        // and the default flag run the full step (dynamic prefix moves).
+        // Failure: a skipped tick moves space, or a full tick leaves it still.
+        assert!(!should_skip_mixed_step(0, false));
+        assert!(!should_skip_mixed_step(1, false));
+        assert!(!should_skip_mixed_step(0, true));
+        assert!(should_skip_mixed_step(1, true));
+        assert!(should_skip_mixed_step(3, true));
+        assert!(!should_skip_mixed_step(2, true));
+        let (_, mut space) = seed_mixed_world(16, 32, 2040);
+        let before = engine_physics::rigid::state_hash(&space.bodies);
+        if !should_skip_mixed_step(1, true) {
+            mixed_space_step(&mut space.bodies, 1.0 / 60.0);
+        }
+        assert_eq!(
+            engine_physics::rigid::state_hash(&space.bodies),
+            before,
+            "skipped mixed step must reuse the harness tick"
+        );
+        mixed_space_step(&mut space.bodies, 1.0 / 60.0);
+        assert_ne!(
+            engine_physics::rigid::state_hash(&space.bodies),
+            before,
+            "full mixed step must run"
+        );
+        let (_, mut plain) = seed_mixed_world(16, 32, 2040);
+        let plain_before = engine_physics::rigid::state_hash(&plain.bodies);
+        if !should_skip_mixed_step(1, false) {
+            mixed_space_step(&mut plain.bodies, 1.0 / 60.0);
+        }
+        assert_ne!(
+            engine_physics::rigid::state_hash(&plain.bodies),
+            plain_before,
+            "default must keep current behavior"
+        );
+    }
+
+    #[test]
+    fn mixed_skip_prefix_direct_matches_library() {
+        // Behavior: predicate-free prefix direct step matches
+        // `rigid::integrate` bit for bit over the 1k-10k harness fixture,
+        // so `mixed_space_step_split` can skip the 32-wide predicate
+        // without moving bits. Failure: any lane diverges.
+        // Caller: `mixed_space_step_split` prefix fast path only.
+        let (_, space) = seed_mixed_world(1000, 10_000, 2040);
+        let mut direct = space.bodies.clone();
+        let mut lib = space.bodies.clone();
+        for _ in 0..4 {
+            engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+            mixed_prefix_step_direct(&mut direct[..1000], 1.0 / 60.0);
+            assert_eq!(direct.len(), lib.len());
+            for (i, (a, b)) in direct.iter().zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "direct prefix diverged at {i}"
+                );
+            }
+        }
+        assert_eq!(
+            engine_physics::rigid::state_hash(&direct),
+            engine_physics::rigid::state_hash(&lib)
+        );
+    }
+
+    #[test]
+    fn mixed_simd_matches_library_bits() {
+        // Behavior: harness SIMD matches `rigid::integrate` bit for bit
+        // over the mixed 11k fixture; failure: any lane diverges.
+        let (_, space) = seed_mixed_world(1000, 10_000, 2040);
+        let mut simd = space.bodies.clone();
+        let mut lib = space.bodies.clone();
+        for _ in 0..8 {
+            engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+            mixed_space_step(&mut simd, 1.0 / 60.0);
+            assert_eq!(simd.len(), lib.len());
+            for (i, (a, b)) in simd.iter().zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "lane {i} diverged"
+                );
+            }
+        }
+        assert_eq!(
+            engine_physics::rigid::state_hash(&simd),
+            engine_physics::rigid::state_hash(&lib)
+        );
+    }
+
+    #[test]
+    fn mixed_split_matches_whole_and_library_bits() {
+        // Behavior: split prefix-step plus suffix-skip matches whole
+        // `mixed_space_step` and `rigid::integrate` bit for bit over the
+        // 11k harness fixture; failure: any lane diverges or hashes differ.
+        // Caller: `mixed_space_step_split` split path only.
+        for (agents, sprites) in [(1000, 10_000), (16, 17), (32, 32)] {
+            let (_, space) = seed_mixed_world(agents, sprites, 2040);
+            let mut split = space.bodies.clone();
+            let mut whole = space.bodies.clone();
+            let mut lib = space.bodies.clone();
+            for _ in 0..4 {
+                engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+                mixed_space_step(&mut whole, 1.0 / 60.0);
+                mixed_space_step_split(&mut split, agents, 1.0 / 60.0);
+                assert_eq!(split.len(), lib.len());
+                for (i, ((a, b), c)) in split.iter().zip(whole.iter()).zip(lib.iter()).enumerate() {
+                    assert_eq!(
+                        (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                        (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                        "agents {agents} sprites {sprites} split vs whole lane {i} diverged"
+                    );
+                    assert_eq!(
+                        (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                        (c.x.to_bits(), c.y.to_bits(), c.vx.to_bits(), c.vy.to_bits()),
+                        "agents {agents} sprites {sprites} split vs lib lane {i} diverged"
+                    );
+                }
+            }
+            assert_eq!(
+                engine_physics::rigid::state_hash(&split),
+                engine_physics::rigid::state_hash(&lib)
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_split_bad_dt_steps_nothing() {
+        // Failure: bad `dt` steps nothing through the split path, matching
+        // whole and library. Caller: `mixed_space_step_split` guard only.
+        let (_, space) = seed_mixed_world(1000, 10_000, 2040);
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mut split = space.bodies.clone();
+            let mut whole = space.bodies.clone();
+            let mut lib = space.bodies.clone();
+            engine_physics::rigid::integrate(&mut lib, bad);
+            mixed_space_step(&mut whole, bad);
+            mixed_space_step_split(&mut split, 1000, bad);
+            for (i, ((a, b), c)) in split.iter().zip(whole.iter()).zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "bad dt {bad:?} split vs whole diverged at {i}"
+                );
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (c.x.to_bits(), c.y.to_bits(), c.vx.to_bits(), c.vy.to_bits()),
+                    "bad dt {bad:?} split vs lib diverged at {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_simd_32wide_tail_matches_library_bits() {
+        // Behavior: 32-wide groups plus scalar tail match `rigid::integrate`
+        // bit for bit over 33-body, 64-body and 11k fixtures with awake lanes
+        // at 32-boundaries; failure: any lane diverges.
+        for (agents, sprites) in [(16, 17), (32, 32), (1000, 10_000)] {
+            let (_, space) = seed_mixed_world(agents, sprites, 2040);
+            let mut simd = space.bodies.clone();
+            let mut lib = space.bodies.clone();
+            for _ in 0..4 {
+                engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+                mixed_space_step(&mut simd, 1.0 / 60.0);
+                assert_eq!(simd.len(), lib.len());
+                for (i, (a, b)) in simd.iter().zip(lib.iter()).enumerate() {
+                    assert_eq!(
+                        (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                        (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                        "agents {agents} sprites {sprites} lane {i} diverged"
+                    );
+                }
+            }
+            assert_eq!(
+                engine_physics::rigid::state_hash(&simd),
+                engine_physics::rigid::state_hash(&lib)
+            );
+        }
+        {
+            let (_, space) = seed_mixed_world(1, 32, 2040);
+            let mut simd = space.bodies.clone();
+            let mut lib = space.bodies.clone();
+            engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+            mixed_space_step(&mut simd, 1.0 / 60.0);
+            for (i, (a, b)) in simd.iter().zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "33-body tail diverged at {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_narrow_predicate_matches_all() {
+        // Behavior: narrowed 32-wide predicate matches `all(is_settled)`
+        // bit for bit over settled, dynamic, boundary and edge fixtures;
+        // failure: any group diverges.
+        let settled = Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 0.5);
+        let awake = Body::new(0.0, 5.0, 1.0, 0.0, 0.5, 0.5);
+        assert!(chunk_all_settled32_narrow(&[settled; 32]));
+        assert!(!chunk_all_settled32_narrow(&[awake; 32]));
+        for lane in [0, 7, 8, 15, 16, 23, 24, 31] {
+            let mut chunk = [settled; 32];
+            chunk[lane] = awake;
+            assert!(
+                !chunk_all_settled32_narrow(&chunk),
+                "awake at {lane} must run"
+            );
+            assert_eq!(
+                chunk_all_settled32_narrow(&chunk),
+                chunk.iter().all(is_settled)
+            );
+        }
+        for edge in [
+            Body::new(-0.0, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(f32::INFINITY, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, -0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, 0.0, -0.0, 0.5, 0.5),
+            Body::new(1.25, 5.0, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 100_000.0),
+        ] {
+            let mut chunk = [settled; 32];
+            chunk[17] = edge;
+            assert!(
+                !chunk_all_settled32_narrow(&chunk),
+                "edge {edge:?} must run"
+            );
+            assert_eq!(
+                chunk_all_settled32_narrow(&chunk),
+                chunk.iter().all(is_settled)
+            );
+        }
+        let (_, space) = seed_mixed_world(1000, 10_000, 2040);
+        let mut groups = space.bodies.chunks_exact(32);
+        for chunk in &mut groups {
+            assert_eq!(
+                chunk_all_settled32_narrow(chunk),
+                chunk.iter().all(is_settled)
+            );
+        }
+        assert_eq!(space.bodies.len() % 32, 24, "11k tail stays scalar");
+    }
+
+    #[test]
+    fn remainder_narrow_matches_all_and_skips_tail() {
+        // Behavior: batched remainder predicate matches `all(is_settled)` bit
+        // for bit over empty, settled, dynamic, edge and 11k-tail fixtures, so
+        // the single-branch tail skip stays bit-identical with the scalar
+        // per-body fallback. Failure: any slice diverges.
+        // Caller: `mixed_space_step` remainder fast path only.
+        let settled = Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 0.5);
+        let awake = Body::new(0.0, 5.0, 1.0, 0.0, 0.5, 0.5);
+        let empty: Vec<Body> = Vec::new();
+        assert!(remainder_all_settled_narrow(&empty));
+        assert!(empty.iter().all(is_settled));
+        assert!(remainder_all_settled_narrow(&[settled; 24]));
+        assert!(!remainder_all_settled_narrow(&[awake; 24]));
+        for lane in [0, 7, 23] {
+            let mut tail = [settled; 24];
+            tail[lane] = awake;
+            assert!(!remainder_all_settled_narrow(&tail));
+            assert_eq!(
+                remainder_all_settled_narrow(&tail),
+                tail.iter().all(is_settled)
+            );
+        }
+        for edge in [
+            Body::new(-0.0, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(f32::INFINITY, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, -0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, 0.0, -0.0, 0.5, 0.5),
+            Body::new(1.25, 5.0, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 100_000.0),
+        ] {
+            let mut tail = [settled; 24];
+            tail[17 % 24] = edge;
+            assert!(!remainder_all_settled_narrow(&tail));
+            assert_eq!(
+                remainder_all_settled_narrow(&tail),
+                tail.iter().all(is_settled)
+            );
+        }
+        let (_, space) = seed_mixed_world(1000, 10_000, 2040);
+        let tail_start = space.bodies.len() - space.bodies.len() % 32;
+        let tail = &space.bodies[tail_start..];
+        assert_eq!(tail.len(), 24);
+        assert_eq!(
+            remainder_all_settled_narrow(tail),
+            tail.iter().all(is_settled)
+        );
+        assert!(
+            remainder_all_settled_narrow(tail),
+            "11k settled tail must take the single-branch skip"
+        );
+    }
+
+    #[test]
+    fn mixed_remainder_mixed_tail_matches_library_bits() {
+        // Behavior: a remainder holding both settled and awake lanes still
+        // matches `rigid::integrate` bit for bit, and stepping a settled lane
+        // via the fast path keeps every bit (so the batch-fail fallback may
+        // step all remainder lanes with no per-body skip). Failure: any lane
+        // diverges. Caller: `mixed_space_step` remainder fast path only.
+        let settled = Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 0.5);
+        let awake = Body::new(0.0, 5.0, 1.0, 0.0, 0.5, 0.5);
+        let h = engine_physics::rigid::FIXED_DT;
+        let gh = engine_physics::rigid::GRAVITY * h;
+        for base in [
+            settled,
+            Body::new(-3.5, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(9.75, 0.5, 0.0, 0.0, 0.5, 0.5),
+        ] {
+            assert!(is_settled(&base), "fixture must be settled: {base:?}");
+            let mut stepped = [base];
+            for body in stepped.iter_mut() {
+                mixed_step_with_h_fast(body, h, gh);
+            }
+            assert_eq!(
+                (
+                    stepped[0].x.to_bits(),
+                    stepped[0].y.to_bits(),
+                    stepped[0].vx.to_bits(),
+                    stepped[0].vy.to_bits()
+                ),
+                (
+                    base.x.to_bits(),
+                    base.y.to_bits(),
+                    base.vx.to_bits(),
+                    base.vy.to_bits()
+                ),
+                "fast on settled must keep bits like a skip: {base:?}"
+            );
+        }
+        for tail in [
+            [settled, awake],
+            [awake, settled],
+            [awake, awake],
+            [settled, settled],
+        ] {
+            let mut bodies = vec![settled; 32];
+            bodies.extend_from_slice(&tail);
+            assert_eq!(bodies.len() % 32, 2, "two-lane remainder only");
+            let mut simd = bodies.clone();
+            let mut lib = bodies.clone();
+            for _ in 0..4 {
+                engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+                mixed_space_step(&mut simd, 1.0 / 60.0);
+                for (i, (a, b)) in simd.iter().zip(lib.iter()).enumerate() {
+                    assert_eq!(
+                        (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                        (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                        "mixed tail {tail:?} diverged at {i}"
+                    );
+                }
+            }
+            assert_eq!(
+                engine_physics::rigid::state_hash(&simd),
+                engine_physics::rigid::state_hash(&lib)
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_simd_bad_dt_steps_nothing() {
+        // Failure: bad `dt` steps nothing, matching the library; tiny `dt`
+        // without the skip still matches bit for bit.
+        let (_, space) = seed_mixed_world(1000, 10_000, 2040);
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut simd = space.bodies.clone();
+            let mut lib = space.bodies.clone();
+            engine_physics::rigid::integrate(&mut lib, bad);
+            mixed_space_step(&mut simd, bad);
+            assert_eq!(simd.len(), lib.len());
+            for (i, (a, b)) in simd.iter().zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "bad dt {bad:?} diverged at {i}"
+                );
+            }
+        }
+        let mut simd = space.bodies.clone();
+        let mut lib = space.bodies.clone();
+        engine_physics::rigid::integrate(&mut lib, 1e-7);
+        mixed_space_step(&mut simd, 1e-7);
+        for (i, (a, b)) in simd.iter().zip(lib.iter()).enumerate() {
+            assert_eq!(
+                (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                "tiny dt diverged at {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_fast_assumes_ge_fixed_matches_scalar() {
+        // Behavior: `mixed_step_with_h_fast` (h >= FIXED_DT only) matches
+        // scalar `step_with_h` bit for bit when h == FIXED_DT; failure: any
+        // lane diverges, so the hoisted guard would have moved the hash.
+        // Caller: `mixed_space_step` fast path only.
+        let h = engine_physics::rigid::FIXED_DT;
+        let gh = engine_physics::rigid::GRAVITY * h;
+        let cases = [
+            Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.25, 0.5, 1.0, 0.0, 0.5, 0.5),
+            Body::new(0.0, 5.0, 1.0, 0.0, 0.5, 0.5),
+            Body::new(1.0, 0.5, 0.5, -0.0, 0.5, 0.5),
+            Body::new(-0.0, 0.5, 0.0, 0.0, 0.5, 0.5),
+            Body::new(1.0, f32::NAN, 0.5, f32::INFINITY, 0.5, 0.5),
+            Body::new(f32::INFINITY, 0.5, 1.0, 0.0, 0.5, 0.5),
+        ];
+        for base in cases {
+            let mut a = [base];
+            let mut b = [base];
+            for body in a.iter_mut() {
+                step_with_h(body, h, gh);
+            }
+            for body in b.iter_mut() {
+                mixed_step_with_h_fast(body, h, gh);
+            }
+            assert_eq!(
+                (
+                    a[0].x.to_bits(),
+                    a[0].y.to_bits(),
+                    a[0].vx.to_bits(),
+                    a[0].vy.to_bits()
+                ),
+                (
+                    b[0].x.to_bits(),
+                    b[0].y.to_bits(),
+                    b[0].vx.to_bits(),
+                    b[0].vy.to_bits()
+                ),
+                "fast diverged for {base:?}: scalar {a:?} vs fast {b:?}"
+            );
+        }
+    }
+
+    #[test]
     fn short_scratch_refuses_harness_tick() {
         let (mut world, mut space) = seed_world(8, 2040, true);
+        // Stage one kill so the census runs: the steady-state skip means a
+        // kill-free tick would fail at the checkpoint after integrate, with
+        // partial effects kept, instead of at the census before systems run.
+        let victim = {
+            let mut found = None;
+            world.for_each_p(|e, _| {
+                if found.is_none() {
+                    found = Some(e);
+                }
+            });
+            found.expect("seeded world holds live rows")
+        };
+        assert!(world.kill(victim), "victim stages");
         let (before_world, before_space) = (world.state_hash(), space.state_hash());
         let mut tiny = PhaseArena::new();
         let mut refusing: Schedule<World> = Schedule::new();
@@ -406,5 +1324,58 @@ mod tests {
         }
         assert_eq!(parse_heap_peak_baseline(""), None);
         assert_eq!(parse_heap_peak_baseline("nope\n"), None);
+    }
+
+    #[test]
+    fn mixed_prefix_sliding_group_matches_direct_truth() {
+        // Behavior: 32-wide sliding predicate matches the per-body fast
+        // slide lane (`vy == +0`, `y == hy`, small `hy`), so the grouped
+        // prefix slide keeps every bit. Failure: any group diverges.
+        // Caller: `mixed_prefix_step_direct` grouped fast path only.
+        let sliding = Body::new(1.25, 0.5, 1.0, 0.0, 0.5, 0.5);
+        let falling = Body::new(0.0, 5.0, 1.0, 0.5, 0.5, 0.5);
+        assert!(prefix_chunk_all_sliding(&[sliding; 32]));
+        assert!(!prefix_chunk_all_sliding(&[falling; 32]));
+        for lane in [0, 7, 31] {
+            let mut chunk = [sliding; 32];
+            chunk[lane] = falling;
+            assert!(
+                !prefix_chunk_all_sliding(&chunk),
+                "falling at {lane} must run per-body"
+            );
+        }
+        let neg_zero_vy = Body::new(1.25, 0.5, 1.0, -0.0, 0.5, 0.5);
+        let mut chunk = [sliding; 32];
+        chunk[5] = neg_zero_vy;
+        assert!(
+            !prefix_chunk_all_sliding(&chunk),
+            "-0.0 vy must take the full path"
+        );
+    }
+
+    #[test]
+    fn mixed_prefix_grouped_slide_matches_library_bits() {
+        // Behavior: grouped slide (all-sliding 64-lane prefix) matches
+        // `rigid::integrate` bit for bit, so steady-state narrowing never
+        // moves the mixed hash. Failure: any lane diverges.
+        // Caller: `mixed_prefix_step_direct` grouped fast path only.
+        let sliding = Body::new(1.25, 0.5, 1.0, 0.0, 0.5, 0.5);
+        let mut grouped = vec![sliding; 64];
+        let mut lib = grouped.clone();
+        for _ in 0..8 {
+            engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+            mixed_prefix_step_direct(&mut grouped, 1.0 / 60.0);
+            for (i, (a, b)) in grouped.iter().zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "sliding lane {i} diverged"
+                );
+            }
+        }
+        assert_eq!(
+            engine_physics::rigid::state_hash(&grouped),
+            engine_physics::rigid::state_hash(&lib)
+        );
     }
 }

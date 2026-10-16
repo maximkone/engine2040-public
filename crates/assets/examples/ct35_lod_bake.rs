@@ -32,8 +32,7 @@ fn bake(args: &[String]) -> Result<String, String> {
         return Err("want <hero_body.glb> <out hero.json>".to_string());
     }
     let bytes = std::fs::read(&args[0]).map_err(|e| format!("read {}: {e}", args[0]))?;
-    let first =
-        cook_gltf_bytes(&bytes, MeshClass::Hero).map_err(|e| format!("cook hero: {e}"))?;
+    let first = cook_gltf_bytes(&bytes, MeshClass::Hero).map_err(|e| format!("cook hero: {e}"))?;
     let second =
         cook_gltf_bytes(&bytes, MeshClass::Hero).map_err(|e| format!("recook hero: {e}"))?;
     if first != second {
@@ -143,12 +142,17 @@ fn render_json(source: &str, source_bytes: usize, asset: &engine_assets::CookedA
 mod tests {
     use super::*;
     use engine_assets::lod_swap::LodSwapError;
-    use engine_assets::{CookedMesh, MeshCookOutput, cook_mesh};
+    use engine_assets::{cook_mesh, CookedMesh, MeshCookOutput};
 
     /// One quad, two triangles, `+Z` normals, `0..=1` UVs.
     fn quad_mesh() -> CookedMesh {
         CookedMesh {
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             uv0: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 4],
@@ -236,7 +240,10 @@ mod tests {
             digest: 7,
         };
         let json = render_json("weird\"name\\hero.glb", 3, &asset);
-        assert!(json.contains("weird\\\"name\\\\hero.glb"), "source unescaped");
+        assert!(
+            json.contains("weird\\\"name\\\\hero.glb"),
+            "source unescaped"
+        );
         assert!(json.contains("\"consumer\": \"CT41 LOD ms/VRAM table + lod_swap picker\""));
         assert!(json.contains("\"gate\": \"check_chain:ok\""));
         assert!(json.contains("\"hull_contains\": true"));

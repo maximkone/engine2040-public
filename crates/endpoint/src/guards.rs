@@ -43,6 +43,46 @@ pub const ARGS_MAX_OPS: usize = 256;
 /// Session tier that may run destructive verbs (mirrors the door tier, 3).
 pub const DESTRUCTIVE_TIER: u8 = 3;
 
+/// Hint verbosity: every refusal names rule, path and fix.
+pub fn hint_for(code: &str) -> &'static str {
+    match code {
+        "missing_intent" => "name 1..=2048 bytes of intent, then re-run",
+        "intent_too_long" => "shorten intent to 2048 bytes or split writes",
+        "bad_dry_run_id" => "preview via tx.preview, re-run with rcpt_ id",
+        "dry_run_id_too_long" => "re-preview for a fresh rcpt_ id",
+        "empty_batch" => "send 1..=256 ops in one tx.preview call",
+        "too_many_ops" => "split into smaller batches",
+        "destructive_tier" => "ask for an elevated session for deletes",
+        "hostile_text" => "discard the injected line, then re-run",
+        "unknown_tool" => "re-run with a manifest-listed tool name",
+        "over_cap" => "shrink payload within caps, then re-run",
+        _ => "re-run with legal values",
+    }
+}
+
+/// Rule path for a refusal code.
+pub fn refusal_path(code: &str) -> &'static str {
+    match code {
+        "missing_intent" | "intent_too_long" => "door.check/intent",
+        "bad_dry_run_id" | "dry_run_id_too_long" => "door.check/dry_run",
+        "empty_batch" | "too_many_ops" => "door.check/args",
+        "destructive_tier" => "door.check/policy",
+        "hostile_text" | "unknown_tool" | "over_cap" => "door.check/scan",
+        _ => "door.check",
+    }
+}
+
+/// One-line hint suffix: rule, path and fix.
+pub fn hint_line(code: &str) -> String {
+    format!(
+        "rule={code} path={} hint={}",
+        refusal_path(code),
+        hint_for(code)
+    )
+}
+
+#[path = "packs/check_profile.rs"]
+pub mod check_profile;
 /// Write class of one door verb: what the policy gate demands of it.
 ///
 /// ```

@@ -61,8 +61,8 @@
 //! fixed recorded fixture.
 
 use crate::data::MAX_FEATURE_ABS;
-use crate::export::quantize_input;
 use crate::duel::{play_bout, BoutOutcome, DuelError, Opponent};
+use crate::export::quantize_input;
 
 /// Default matches per tournament: the neural-policy proof counts wins over
 /// 100 fork matches.
@@ -1187,7 +1187,10 @@ mod tests {
     #[test]
     fn wilson_interval_brackets_the_rate() {
         let (lo, hi) = wilson95(53, 100);
-        assert!((lo - 0.4328).abs() < 1e-3 && (hi - 0.6248).abs() < 1e-3, "{lo} {hi}");
+        assert!(
+            (lo - 0.4328).abs() < 1e-3 && (hi - 0.6248).abs() < 1e-3,
+            "{lo} {hi}"
+        );
         let (lo, hi) = wilson95(0, 10);
         assert_eq!(lo, 0.0);
         assert!(hi > 0.25 && hi < 0.35, "{hi}");
@@ -1208,8 +1211,10 @@ mod tests {
     #[test]
     fn strength_gate_swaps_sides_and_repeats_exactly() {
         let bytes = always_attack_bytes();
-        let first = strength_gate(&bytes, Opponent::BrainIntents, 0x5EED, 4, 240).expect("short gate runs");
-        let second = strength_gate(&bytes, Opponent::BrainIntents, 0x5EED, 4, 240).expect("short gate runs again");
+        let first =
+            strength_gate(&bytes, Opponent::BrainIntents, 0x5EED, 4, 240).expect("short gate runs");
+        let second = strength_gate(&bytes, Opponent::BrainIntents, 0x5EED, 4, 240)
+            .expect("short gate runs again");
         assert_eq!(first, second, "same seeds give the same table");
         assert_eq!(first.to_string(), second.to_string());
         assert_eq!(first.bouts, 4);
@@ -1219,7 +1224,10 @@ mod tests {
             assert_eq!(first.wins[slot] + first.losses[slot] + first.draws[slot], 2);
         }
         let table = first.to_string();
-        assert!(table.contains("as slot 0") && table.contains("binomial p"), "{table}");
+        assert!(
+            table.contains("as slot 0") && table.contains("binomial p"),
+            "{table}"
+        );
     }
 
     #[test]

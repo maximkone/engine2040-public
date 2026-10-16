@@ -680,8 +680,8 @@ mod tests {
     fn flush_phase_delivers_and_records() {
         let mut queue = seed_queue(12);
         let mut handlers = HandlerSet::new();
-        handlers.register(None);
-        handlers.register(Some(EventCode::SIM_TICK));
+        let _ = handlers.register(None);
+        let _ = handlers.register(Some(EventCode::SIM_TICK));
         let mut ring = RingBuffer::new(32);
         let flushed = flush_phase(&mut queue, &mut handlers, &mut ring).expect("flushes");
         assert_eq!(flushed.len(), 12);

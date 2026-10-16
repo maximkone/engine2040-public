@@ -774,6 +774,14 @@ impl CassetteStore {
         image: &RequestImage,
         answer: &Answer,
     ) -> Result<PathBuf, CassetteError> {
+        // Content address: the file name serves `key.digest()`, and `load`
+        // revalidates the stored image against it, so an image filed under
+        // another digest could never replay as a hit. Refuse it loudly and
+        // write nothing instead of leaving a file that only ever loads back
+        // as corrupt.
+        if key.digest() != image.digest() {
+            return Err(CassetteError::Corrupt);
+        }
         let entry = Entry {
             label: key.label.clone(),
             model: key.model.clone(),
@@ -2098,5 +2106,35 @@ mod tests {
         assert_eq!(rep.last_miss(), Some(want), "replay refuses with reason");
         assert_eq!(rep.inner().script_remaining(), 4, "inner never called");
         assert!(!out.mutated && !out.dispatched_remote);
+    }
+
+    #[test]
+    fn save_refuses_a_key_image_digest_mismatch() {
+        // Content address: the file name carries the image digest, and `load`
+        // revalidates it, so an image filed under another digest could never
+        // replay as a hit. Refuse it at write time instead of leaving a file
+        // that only ever loads as corrupt.
+        let dir = TempDir::new("save-mismatch");
+        let store = dir.store();
+        let ask = fixtures::request(7, 3);
+        let image = RequestImage::of(&ask, None);
+        let key = CassetteKey::new("mock", &ask, &image).expect("key");
+        let mut revised = ask.clone();
+        revised.base_revision = 4;
+        let revised_image = RequestImage::of(&revised, None);
+        assert_ne!(
+            image.digest(),
+            revised_image.digest(),
+            "the revised prompt digests differently"
+        );
+        assert_eq!(
+            store.save(&key, ask.id, &revised_image, &Answer::Malformed),
+            Err(CassetteError::Corrupt),
+            "filing an image under another digest must fail loudly"
+        );
+        assert!(
+            dir.files().is_empty(),
+            "the refused write leaves no file behind"
+        );
     }
 }

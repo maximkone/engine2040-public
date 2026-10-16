@@ -14,6 +14,7 @@
 use std::fmt;
 
 use crate::fog::FogParams;
+use crate::shadow_cascade::{cascade_map_size, checked_ranges, CascadeRange, FIRST_CASCADE_FAR_M};
 use crate::sky::{SkyCapture, SkyLookBake, SkyParams};
 
 /// Sun direction for the arena day rig (any nonzero finite length).
@@ -39,6 +40,37 @@ pub const ARENA_DAY_FOG_FALLOFF_M: f32 = 8.0;
 pub const ARENA_DAY_FOG_BASE_M: f32 = 0.0;
 /// Fog cutoff distance in meters (reuses the shared day feed value).
 pub const ARENA_DAY_FOG_MAX_DIST_M: f32 = 500.0;
+/// Day-rig cascade camera near in meters: the day-sweep fixture range open.
+pub const ARENA_DAY_CASCADE_NEAR_M: f32 = 0.5;
+/// Day-rig cascade camera far in meters: the day-sweep fixture range close.
+pub const ARENA_DAY_CASCADE_FAR_M: f32 = 120.0;
+
+// PORT(FyroxEngine/Fyrox:fyrox-impl/src/renderer/shadow/csm.rs, MIT):
+// cascade-split selection plus per-cascade map sizing for one directional
+// sun. Adapted, no bytes pasted: Fyrox's CSM split plus per-cascade size
+// becomes `shadow_cascade::checked_ranges` (overlap-aware log intervals
+// from `FIRST_CASCADE_FAR_M`) plus `shadow_cascade::cascade_map_size`
+// (`CASCADE_MAP_SIZES`); this file only feeds the day-rig sun range
+// through those three intervals instead of a single split.
+
+/// Day-rig sun cascades: three overlap-aware intervals over
+/// `ARENA_DAY_CASCADE_NEAR_M..ARENA_DAY_CASCADE_FAR_M` plus one map edge
+/// per cascade from `cascade_map_size`. Pure; same rig gives the same
+/// intervals and sizes twice. Fails loudly when the frozen range refuses.
+pub fn arena_day_cascades() -> Result<([CascadeRange; 3], [u32; 3]), ArenaDayError> {
+    let ranges = checked_ranges(
+        ARENA_DAY_CASCADE_NEAR_M,
+        FIRST_CASCADE_FAR_M,
+        ARENA_DAY_CASCADE_FAR_M,
+    )
+    .map_err(|e| ArenaDayError::Invalid(format!("arena day cascades: {e}")))?;
+    let maps = [
+        cascade_map_size(0).map_err(|e| ArenaDayError::Invalid(format!("arena day map 0: {e}")))?,
+        cascade_map_size(1).map_err(|e| ArenaDayError::Invalid(format!("arena day map 1: {e}")))?,
+        cascade_map_size(2).map_err(|e| ArenaDayError::Invalid(format!("arena day map 2: {e}")))?,
+    ];
+    Ok((ranges, maps))
+}
 
 /// Arena day-rig failures. Bad preset data fails loudly; device faults
 /// never arise here because the bake is the std-only sky headless twin.
@@ -114,14 +146,21 @@ pub struct ArenaDayRig {
     pub fog: FogParams,
     /// Stops-to-scale exposure from the EV100 anchor.
     pub exposure: f32,
+    /// Day-sun cascade intervals in meters: three overlap-aware ranges
+    /// from `arena_day_cascades`, replacing the old single split.
+    pub sun_cascades: [CascadeRange; 3],
+    /// Shadow map edge per cascade in texels from `cascade_map_size`.
+    pub sun_cascade_maps: [u32; 3],
 }
 
 impl ArenaDayRig {
     /// Deterministic little-endian bytes: preset floats, capture bytes,
-    /// ambient triple, fog triple, fog extinction, exposure. Same preset
-    /// baked twice gives bit-identical bytes.
+    /// ambient triple, fog triple, fog extinction, exposure, cascade
+    /// intervals plus map sizes. Same preset baked twice gives
+    /// bit-identical bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 + self.capture.texels.len() * 12 + 24 + 20 + 4);
+        let mut out =
+            Vec::with_capacity(32 + self.capture.texels.len() * 12 + 24 + 20 + 4 + 24 + 12);
         for c in self.params.sun_dir {
             out.extend_from_slice(&c.to_le_bytes());
         }
@@ -144,6 +183,13 @@ impl ArenaDayRig {
             out.extend_from_slice(&c.to_le_bytes());
         }
         out.extend_from_slice(&self.exposure.to_le_bytes());
+        for range in self.sun_cascades {
+            out.extend_from_slice(&range.near_m.to_le_bytes());
+            out.extend_from_slice(&range.far_m.to_le_bytes());
+        }
+        for size in self.sun_cascade_maps {
+            out.extend_from_slice(&size.to_le_bytes());
+        }
         out
     }
 }
@@ -185,6 +231,7 @@ pub fn bake_preset(params: &SkyParams) -> Result<ArenaDayRig, ArenaDayError> {
     )
     .map_err(fog_err)?;
     let exposure = crate::sky::ev100_to_exposure(params.exposure_ev100).map_err(sky_err)?;
+    let (sun_cascades, sun_cascade_maps) = arena_day_cascades()?;
     Ok(ArenaDayRig {
         params: *params,
         capture,
@@ -193,6 +240,8 @@ pub fn bake_preset(params: &SkyParams) -> Result<ArenaDayRig, ArenaDayError> {
         fog_color,
         fog,
         exposure,
+        sun_cascades,
+        sun_cascade_maps,
     })
 }
 
@@ -259,5 +308,60 @@ mod tests {
         let mut params = arena_day_params();
         params.turbidity = 99.0;
         assert!(bake_preset(&params).is_err(), "haze outside range refused");
+    }
+
+    #[test]
+    fn day_rig_feeds_three_cascades() {
+        let (ranges, maps) = arena_day_cascades().expect("day cascades build");
+        assert_eq!(ranges.len(), 3, "day sun rides three cascades");
+        assert_eq!(ranges[0].near_m, ARENA_DAY_CASCADE_NEAR_M);
+        assert!(
+            (ranges[0].far_m - 10.0).abs() < 0.05,
+            "far {}",
+            ranges[0].far_m
+        );
+        assert!(
+            (ranges[1].near_m - 8.0).abs() < 0.05,
+            "near {}",
+            ranges[1].near_m
+        );
+        assert!(
+            (ranges[2].near_m - 27.71).abs() < 0.05,
+            "near {}",
+            ranges[2].near_m
+        );
+        assert_eq!(ranges[2].far_m, ARENA_DAY_CASCADE_FAR_M);
+        assert!(ranges[1].near_m < ranges[0].far_m, "seam 0 blends");
+        assert!(ranges[2].near_m < ranges[1].far_m, "seam 1 blends");
+        assert_eq!(maps, [512, 256, 128], "sizes ride cascade_map_size");
+        for (i, size) in maps.iter().enumerate() {
+            assert_eq!(
+                cascade_map_size(i).expect("cascade in range"),
+                *size,
+                "map {i} comes from the helper"
+            );
+        }
+        let rig = bake_arena_day().expect("rig bakes");
+        assert_eq!(rig.sun_cascades, ranges, "bake carries the intervals");
+        assert_eq!(rig.sun_cascade_maps, maps, "bake carries the sizes");
+        let again = bake_arena_day().expect("second bake holds");
+        assert_eq!(rig.sun_cascades, again.sun_cascades, "cascades x2");
+        assert_eq!(
+            rig.to_bytes(),
+            again.to_bytes(),
+            "rig bytes x2 with cascades"
+        );
+    }
+
+    #[test]
+    fn day_maps_refuse_a_fourth_cascade() {
+        assert!(
+            cascade_map_size(3).is_err(),
+            "fourth cascade has no map size"
+        );
+        assert!(
+            checked_ranges(0.5, ARENA_DAY_CASCADE_FAR_M, ARENA_DAY_CASCADE_FAR_M).is_err(),
+            "first far at far refused"
+        );
     }
 }

@@ -102,3 +102,55 @@ fn heap_peak_8fighter_match_same_x2_and_gate() {
         "baseline plus 64 MiB trips the 10 percent rule"
     );
 }
+
+use engine_perf::alloc::{measure, peak_assert, subsystem_peak_line};
+
+#[test]
+fn alloc_peak_assert_names_both_sides_x2() {
+    const BASE: u64 = 58198;
+    const OVER: u64 = BASE + (64 << 20);
+    assert!(
+        peak_assert(BASE, BASE).is_ok(),
+        "baseline passes its own gate"
+    );
+    for _ in 0..2 {
+        let err = peak_assert(OVER, BASE).expect_err("64 MiB over trips");
+        assert_eq!(err, peak_assert(OVER, BASE).expect_err("same error twice"));
+        let text = err.to_string();
+        assert!(text.contains(&OVER.to_string()), "names peak: {text}");
+        assert!(text.contains(&BASE.to_string()), "names baseline: {text}");
+        assert!(text.contains("FAIL"), "names verdict: {text}");
+        assert!(!allows(OVER, BASE), "bool gate agrees with assert");
+    }
+    let line = subsystem_peak_line("heap", BASE, BASE);
+    assert_eq!(
+        line,
+        subsystem_peak_line("heap", BASE, BASE),
+        "same line twice"
+    );
+    assert!(line.contains("PASS"), "{line}");
+    assert!(
+        subsystem_peak_line("heap", OVER, BASE).contains("FAIL"),
+        "over line fails"
+    );
+}
+
+#[test]
+fn alloc_steady_window_reads_zero_and_cooks_x2() {
+    let ((), probe) = measure(|| {
+        std::hint::black_box(vec![0u8; 64]);
+    });
+    assert_eq!((probe.count, probe.bytes), (1, 64), "probe is not blind");
+    for _ in 0..2 {
+        let ((), empty) = measure(|| {});
+        assert_eq!(
+            (empty.bytes, empty.count),
+            (0, 0),
+            "empty window reads zero"
+        );
+        let peak = peak_of(&[58198, 58198]);
+        assert_eq!(peak, 58198, "peak is max sample");
+        let csv = heap_peak_csv("arena_tick_8", peak);
+        assert!(csv.contains("arena_tick_8,58198"), "{csv}");
+    }
+}

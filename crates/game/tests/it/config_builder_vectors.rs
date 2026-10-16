@@ -13,6 +13,7 @@
 //! layer fills its gaps from a lower layer. Fresh std-only Rust here; no
 //! bytes copied and no new dependency.
 
+use crate::config_rows::row_of;
 use engine_core::splitmix64;
 use engine_game::{GameConfig, MAX_TICKS};
 use engine_input::MAX_PARTICIPANTS;
@@ -158,13 +159,6 @@ fn parse_extent(raw: &str) -> Option<f32> {
     raw.parse()
         .ok()
         .filter(|value: &f32| value.is_finite() && (5.0..=100.0).contains(value))
-}
-
-/// Look up one named row; `None` when absent. Pure.
-fn row_of<'x>(rows: &[(&'x str, &'x str)], key: &str) -> Option<&'x str> {
-    rows.iter()
-        .find(|entry| entry.0 == key)
-        .map(|entry| entry.1)
 }
 
 /// Parse one layer into a builder: bad or missing rows stay `None`. Pure.

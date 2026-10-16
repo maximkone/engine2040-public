@@ -154,7 +154,10 @@ fn victim_buttons(kind: Kind, press: u32, startup: u32, t: u32) -> u8 {
 /// Step one scripted bout and record the tick of each effect. `delay` is the
 /// seeded fault: it moves every emitted effect later by that many ticks.
 fn run_bout(kind: Kind, press: u32, tables: &Tables, delay: u32) -> Sample {
-    let poses = [pose(0, 0, 0, (1000, 0), 0), pose(1, 1_000, 0, (-1_000, 0), 1)];
+    let poses = [
+        pose(0, 0, 0, (1000, 0), 0),
+        pose(1, 1_000, 0, (-1_000, 0), 1),
+    ];
     let mut state = FightState::new(2).expect("two fighters");
     let startup = tables.attack_startup_ticks;
     let mut out: Vec<FightEvent> = Vec::with_capacity(MAX_EVENTS_PER_TICK);

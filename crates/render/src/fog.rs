@@ -13,6 +13,9 @@
 use std::fmt;
 use std::time::Instant;
 
+#[cfg(feature = "window")]
+use crate::decals::{compute_storage_entry, compute_uniform_entry};
+
 // ---------------------------------------------------------------------------
 // Pass names, resources and budgets: the WIN1 forward-pass contract.
 // ---------------------------------------------------------------------------
@@ -693,11 +696,7 @@ impl ContactAo {
 
     /// Deterministic little-endian bytes: row-major f32 values.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.values.len() * 4);
-        for v in &self.values {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        out
+        crate::accel::f32_le_bytes(&self.values)
     }
 
     /// Bind seam for the RA1 forward contact bind on the headless twin:
@@ -1176,71 +1175,11 @@ fn contact_uniform_bytes(config: &ContactConfig) -> [u8; 32] {
     out
 }
 
-/// Uniform bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn fog_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-/// Storage bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn fog_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
 /// Map a readback buffer and wait for it. One poll covers every pending map.
+/// Shared [`crate::accel`] core with the `fog` error prefix kept.
 #[cfg(feature = "window")]
 fn fog_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("fog poll: {e}"))?;
-    rx.recv()
-        .map_err(|e| format!("fog map channel: {e}"))?
-        .map_err(|e| format!("fog map: {e}"))?;
-    Ok(())
-}
-
-/// Read `count` little-endian f32 values from a mapped readback buffer.
-#[cfg(feature = "window")]
-fn fog_readback_f32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<f32>, String> {
-    let mapped = buffer
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|e| format!("fog mapped range: {e}"))?;
-    if mapped.len() < count * 4 {
-        return Err(format!(
-            "fog readback {} bytes holds fewer than {count} f32 values",
-            mapped.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for chunk in mapped[..count * 4].chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(out)
+    crate::accel::map_readback(device, buffer, "fog")
 }
 
 /// Run the bind probe over one baked buffer: upload, copy on the device,
@@ -1319,7 +1258,7 @@ fn submit_bind_probe(
     encoder.copy_buffer_to_buffer(&dst_buf, 0, &readback, 0, byte_len);
     queue.submit(Some(encoder.finish()));
     fog_map_and_wait(device, &readback).map_err(FogError::Device)?;
-    let back = fog_readback_f32(&readback, texels).map_err(FogError::Device)?;
+    let back = crate::accel::readback_f32(&readback, texels, "fog").map_err(FogError::Device)?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(FogError::Validation(format!(
@@ -1356,9 +1295,9 @@ fn bind_probe_pipeline(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::C
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("fog-bind-layout"),
         entries: &[
-            fog_uniform_entry(0),
-            fog_storage_entry(1, true),
-            fog_storage_entry(2, false),
+            compute_uniform_entry(0),
+            compute_storage_entry(1, true),
+            compute_storage_entry(2, false),
         ],
     });
     let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1480,21 +1419,21 @@ impl FogSubmitter {
         let fog_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fog-height-layout"),
             entries: &[
-                fog_uniform_entry(0),
-                fog_uniform_entry(1),
-                fog_storage_entry(2, true),
-                fog_storage_entry(3, true),
-                fog_storage_entry(4, false),
+                compute_uniform_entry(0),
+                compute_uniform_entry(1),
+                compute_storage_entry(2, true),
+                compute_storage_entry(3, true),
+                compute_storage_entry(4, false),
             ],
         });
         let contact_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fog-contact-layout"),
             entries: &[
-                fog_uniform_entry(0),
-                fog_uniform_entry(1),
-                fog_storage_entry(2, true),
-                fog_storage_entry(3, true),
-                fog_storage_entry(4, false),
+                compute_uniform_entry(0),
+                compute_uniform_entry(1),
+                compute_storage_entry(2, true),
+                compute_storage_entry(3, true),
+                compute_storage_entry(4, false),
             ],
         });
         let fog_pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1797,8 +1736,9 @@ impl FogSubmitter {
         queue.submit(Some(encoder.finish()));
         fog_map_and_wait(device, fog_rb).map_err(FogError::Device)?;
         fog_map_and_wait(device, contact_rb).map_err(FogError::Device)?;
-        let fog_values = fog_readback_f32(fog_rb, n).map_err(FogError::Device)?;
-        let contact_values = fog_readback_f32(contact_rb, n).map_err(FogError::Device)?;
+        let fog_values = crate::accel::readback_f32(fog_rb, n, "fog").map_err(FogError::Device)?;
+        let contact_values =
+            crate::accel::readback_f32(contact_rb, n, "fog").map_err(FogError::Device)?;
         fog_rb.unmap();
         contact_rb.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {

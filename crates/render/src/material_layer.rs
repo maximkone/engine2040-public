@@ -12,9 +12,13 @@
 //! `v_smith_ggx_correlated`, `f_schlick_vec`, `fd_burley`) is composed,
 //! never mirrored. Its evaluated lobes arrive as plain arrays in the
 //! new [`BaseTerms`] type (`v1` defines no such struct), layer shapes
-//! are new param types below, and this module imports no crate items.
+//! are new param types below; only the `window` device bind imports crate
+//! items (the shared compute entries from `decals.rs`).
 
 use std::fmt;
+
+#[cfg(feature = "window")]
+use crate::decals::{compute_storage_entry, compute_uniform_entry};
 
 // ---------------------------------------------------------------------------
 // Bounds: every external scalar is validated before use.
@@ -580,9 +584,9 @@ impl LayerSubmitter {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rl6-layer-bind-layout"),
             entries: &[
-                layer_uniform_entry(0),
-                layer_storage_entry(1, true),
-                layer_storage_entry(2, false),
+                compute_uniform_entry(0),
+                compute_storage_entry(1, true),
+                compute_storage_entry(2, false),
             ],
         });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -620,36 +624,6 @@ impl LayerSubmitter {
     /// reuse test: flat across submits).
     pub fn created_buffers(&self) -> u64 {
         self.created_buffers
-    }
-}
-
-/// Uniform bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn layer_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-/// Storage bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn layer_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
     }
 }
 
@@ -767,7 +741,8 @@ pub fn submit_chart_gpu(
     encoder.copy_buffer_to_buffer(dst_buf, 0, readback, 0, byte_len);
     queue.submit(Some(encoder.finish()));
     layer_map_and_wait(device, readback).map_err(MaterialError::Device)?;
-    let back = layer_readback_f32(readback, words as usize).map_err(MaterialError::Device)?;
+    let back = crate::accel::readback_f32(readback, words as usize, "layer")
+        .map_err(MaterialError::Device)?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(MaterialError::Validation(format!(
@@ -797,40 +772,10 @@ pub fn submit_chart_gpu(
 }
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
+/// Shared [`crate::accel`] core with the `layer` error prefix kept.
 #[cfg(feature = "window")]
 fn layer_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("layer poll: {e}"))?;
-    rx.recv()
-        .map_err(|e| format!("layer map channel: {e}"))?
-        .map_err(|e| format!("layer map: {e}"))?;
-    Ok(())
-}
-
-/// Read `count` little-endian f32 values from a mapped readback buffer.
-#[cfg(feature = "window")]
-fn layer_readback_f32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<f32>, String> {
-    let mapped = buffer
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|e| format!("layer mapped range: {e}"))?;
-    if mapped.len() < count * 4 {
-        return Err(format!(
-            "layer readback {} bytes holds fewer than {count} f32 values",
-            mapped.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for chunk in mapped[..count * 4].chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(out)
+    crate::accel::map_readback(device, buffer, "layer")
 }
 
 #[cfg(test)]

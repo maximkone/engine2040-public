@@ -96,8 +96,8 @@ export function diffRows(expected, actual, limit = MAX_DIFF_ROWS) {
 }
 
 // Write the Factorio-style report dir and return its summary. Always writes
-// report.json plus both dumps; diff.txt lists the first diverging offsets.
-export function writeDesyncReport({ outDir, tick, system, expectedBytes, actualBytes, expectedHash, actualHash }) {
+// report.json plus dumps plus reference/desynced pair plus inputs.json.
+export function writeDesyncReport({ outDir, tick, system, expectedBytes, actualBytes, expectedHash, actualHash, inputs = [] }) {
   const expected = expectedBytes instanceof Uint8Array ? Buffer.from(expectedBytes) : Buffer.from(expectedBytes);
   const actual = actualBytes instanceof Uint8Array ? Buffer.from(actualBytes) : Buffer.from(actualBytes);
   const offset = firstDivergingByte(expected, actual);
@@ -106,6 +106,8 @@ export function writeDesyncReport({ outDir, tick, system, expectedBytes, actualB
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "expected.bin"), expected);
   writeFileSync(join(outDir, "actual.bin"), actual);
+  writeFileSync(join(outDir, "reference.bin"), expected);
+  writeFileSync(join(outDir, "desynced.bin"), actual);
   const rows = offset === -1 ? [] : diffRows(expected, actual);
   const diffText = offset === -1
     ? `tick ${tick} system ${system}: identical (${expected.length} bytes)\n`
@@ -130,6 +132,7 @@ export function writeDesyncReport({ outDir, tick, system, expectedBytes, actualB
     first_byte: offset,
   };
   writeFileSync(join(outDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+  writeFileSync(join(outDir, "inputs.json"), `${JSON.stringify({ tick: Number(tick), system, inputs }, null, 2)}\n`);
   return { offset, report };
 }
 

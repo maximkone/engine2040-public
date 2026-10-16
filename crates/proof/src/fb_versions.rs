@@ -162,8 +162,8 @@ pub const VERSION_ROWS: &[VersionRow] = &[
         id: "save",
         owner: "editor/src/save.rs",
         constant: "SAVE_VERSION",
-        expr: "3",
-        value: 3,
+        expr: "4",
+        value: 4,
         role: Role::Current,
     },
     VersionRow {
@@ -194,9 +194,15 @@ const OWNER_SOURCES: &[(&str, &str)] = &[
         "assets/src/bundle.rs",
         include_str!("../../assets/src/bundle.rs"),
     ),
-    ("editor/src/save.rs", include_str!("../../editor/src/save.rs")),
+    (
+        "editor/src/save.rs",
+        include_str!("../../editor/src/save.rs"),
+    ),
     ("proof/src/tape.rs", include_str!("tape.rs")),
-    ("scene/src/codec.rs", include_str!("../../scene/src/codec.rs")),
+    (
+        "scene/src/codec.rs",
+        include_str!("../../scene/src/codec.rs"),
+    ),
     (
         "scene/src/component.rs",
         include_str!("../../scene/src/component.rs"),
@@ -389,7 +395,11 @@ pub fn build_report() -> Result<String, ReceiptError> {
         format!("tier {tier}"),
         format!(
             "golden {golden:016x} {}",
-            if golden == GOLDEN_600 { "ok" } else { "CHANGED" }
+            if golden == GOLDEN_600 {
+                "ok"
+            } else {
+                "CHANGED"
+            }
         ),
         format!(
             "fixture tape-v1 bytes {} digest {:016x}",
@@ -603,8 +613,7 @@ mod owner {
 
     /// The typed refusal checks, one line each.
     fn refusal_checks(scratch: &Path, first: &[u8]) -> Result<Vec<String>, ReceiptError> {
-        let stub =
-            cook_bundle_bytes(&StagedCooked::new()).map_err(at("cook empty stub"))?;
+        let stub = cook_bundle_bytes(&StagedCooked::new()).map_err(at("cook empty stub"))?;
         let mut bad_magic = first.to_vec();
         bad_magic[0] ^= 0xFF;
         let mut future = first.to_vec();
@@ -676,8 +685,7 @@ mod owner {
         ensure_parent(&from)?;
         write_bundle_file(first, &from, false).map_err(at("write demo bundle"))?;
         carry(&from, &to)?;
-        let (moved, receipt) =
-            load_bundle_file(&to, false).map_err(at("load moved bundle"))?;
+        let (moved, receipt) = load_bundle_file(&to, false).map_err(at("load moved bundle"))?;
         let on_disk = fs::read(&to).map_err(at("read moved bundle"))?;
         Ok((
             on_disk == first && receipt.bytes == first.len(),
@@ -735,16 +743,12 @@ mod owner {
                 prefab_node("hall/plinth", Some("hall"), 1.0, "Plinth"),
             ],
         };
-        prefab
-            .validate(&registry)
-            .map_err(at("validate prefab"))?;
+        prefab.validate(&registry).map_err(at("validate prefab"))?;
         let mut tree = Hierarchy::new();
         let instance = prefab
             .instantiate(&mut tree, &registry)
             .map_err(at("instantiate prefab"))?;
-        let back = Scene::encode(&tree)
-            .decode()
-            .map_err(at("decode scene"))?;
+        let back = Scene::encode(&tree).decode().map_err(at("decode scene"))?;
         let future_scene = Scene {
             version: CURRENT_VERSION + 1,
             nodes: Vec::new(),
@@ -833,8 +837,7 @@ mod owner {
         use super::*;
 
         fn scratch() -> std::path::PathBuf {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/evidence/b/versions/scratch")
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/evidence/b/versions/scratch")
         }
 
         #[test]

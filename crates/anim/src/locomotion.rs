@@ -23,7 +23,7 @@
 //! twice gives identical outputs. Invalid external input returns
 //! [`LocoError`], never panics, and leaves state untouched.
 
-use super::clip::{TICK_DT, clamp01};
+use super::clip::{clamp01, TICK_DT};
 use super::contract::{Contact, ContactTable, Joint, LocalPose, RootDelta, Skeleton};
 use super::pose::blend_poses;
 

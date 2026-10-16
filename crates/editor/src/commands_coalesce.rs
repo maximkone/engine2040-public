@@ -81,6 +81,9 @@ fn foldable(journal: &Journal, doc: &Document, key: u64, batch: &Batch) -> bool 
     if cursor.lane != key {
         return false;
     }
+    if journal.merge_force_keep.contains(&key) {
+        return false;
+    }
     let Some(entry) = journal.past.last() else {
         return false;
     };
@@ -152,6 +155,11 @@ fn fold_tick(
         Ok(staged) => staged,
         Err(error) => return Some(Err(error)),
     };
+    debug_assert!(
+        batch.ops.len() != 1
+            || do_undo_pair(doc, batch.ops[0]).is_some()
+            || matches!(batch.ops[0], Op::SetMaterial { .. })
+    );
     // Pop the gesture entry while the fresh receipt builds: its previous
     // receipt is superseded by the fold, not a parent of it.
     let top = journal.past.pop()?;
@@ -284,6 +292,11 @@ pub fn apply_coalesced(
     // Fresh gesture: the old one seals, then the tick commits like any apply.
     seal_coalescing(journal);
     let staged = stage(doc, batch)?;
+    if batch.ops == staged.inverse {
+        seal_coalescing(journal);
+        #[rustfmt::skip]
+        return Ok(Applied { revision: doc.revision, effects: staged.effects, key: batch.idempotency_key, provenance: build_record(batch, doc.revision, journal), journal_index: journal.past.len().saturating_sub(1) });
+    }
     let result_revision = doc.revision + 1;
     let provenance = build_record(batch, result_revision, journal);
     let applied = commit_staged(doc, journal, batch, meta, staged, provenance);

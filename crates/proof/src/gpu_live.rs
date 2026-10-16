@@ -418,6 +418,22 @@ pub fn pass_truth_report(date: &str, passes: &[PassGate]) -> String {
     out
 }
 
+/// Writes the dated pass-truth report for the ticked rows into its row file.
+/// Caller: the row's `target/reports/pass-truth-<date>.md` step reuses these bytes.
+/// Units: none (boolean flags to a text file). Determinism: same date gives
+/// the same bytes twice; creates `dir` when missing, never touches the tick.
+/// Errors: filesystem failures from creating `dir` or writing the file.
+pub fn write_pass_truth_report(
+    dir: &std::path::Path,
+    date: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let report = pass_truth_report(date, &ticked_passes());
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("pass-truth-{date}.md"));
+    std::fs::write(&path, report.as_bytes())?;
+    Ok(path)
+}
+
 /// Live gate over the ticked rows; sky and decals stay PROBE until captures move.
 /// Caller: `crates/proof/src/lib.rs` re-export for the headless proof harness.
 /// Units: none (boolean liveness flags). Determinism: pure, no IO or clock.
@@ -547,11 +563,33 @@ mod tests {
 
     #[test]
     fn live_gate_caller_reports_sky_and_decals_probe() {
-        let on = [0u8, 0, 0, 0];
-        let off = [0u8, 0, 0, 200];
-        let moved = frame_diff_count(&on, &off, 1, 1, None, 199).expect("spike frames compare");
-        assert_eq!(moved, 1);
+        // 2x2 frames (not a 1x1 spike): one pixel moves wide, the rest match.
+        let on = [
+            0u8, 0, 0, 0, 10, 10, 10, 255, 10, 10, 10, 255, 10, 10, 10, 255,
+        ];
+        let off = [
+            0u8, 0, 0, 200, 10, 10, 10, 255, 10, 10, 10, 255, 10, 10, 10, 255,
+        ];
+        let moved = frame_diff_count(&on, &off, 2, 2, None, 199).expect("frames compare");
+        assert_eq!(moved, 1, "exactly the spiked pixel differs");
         assert!(pass_verdict(moved, 0));
+        assert!(
+            !pass_verdict(moved, 1),
+            "floor of 1 keeps a single pixel at PROBE"
+        );
+        // Same pair under a full-ignore mask stays PROBE and counts ignored.
+        assert_eq!(
+            frame_diff_count(&on, &off, 2, 2, Some(&[1, 1, 1, 1]), 199),
+            Ok(0)
+        );
+        assert_eq!(
+            count_masked_ignored(&on, &off, 2, 2, Some(&[1, 1, 1, 1]), 199),
+            Ok(1)
+        );
+        // Epsilon at/above the 200-step spike absorbs the diff.
+        assert_eq!(frame_diff_count(&on, &off, 2, 2, None, 200), Ok(0));
+        assert!(!resolve_pass_live(&on, &off, 2, 2, None, 200, 0).expect("frames compare"));
+        assert!(resolve_pass_live(&on, &off, 2, 2, None, 199, 0).expect("frames compare"));
         let err = crate::live_gate_report().expect_err("sky and decals stay PROBE");
         assert_eq!(err.refused, vec!["sky", "decals"]);
     }
@@ -690,6 +728,27 @@ mod tests {
             first,
             format!("# pass truth {date}\n\n{}", truth_table_markdown(&passes))
         );
+    }
+
+    #[test]
+    fn live_pass_truth_report_file_reproduces_x2() {
+        let dir = std::env::temp_dir().join(format!("e2040-pass-truth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let date = "2026-10-15";
+        let first_path = write_pass_truth_report(&dir, date).expect("first report writes");
+        let first_bytes = std::fs::read(&first_path).expect("first report reads");
+        let second_path = write_pass_truth_report(&dir, date).expect("second report writes");
+        let second_bytes = std::fs::read(&second_path).expect("second report reads");
+        assert_eq!(first_bytes, second_bytes);
+        assert_eq!(first_path, second_path);
+        assert_eq!(
+            first_path.file_name().and_then(|name| name.to_str()),
+            Some("pass-truth-2026-10-15.md")
+        );
+        let text = String::from_utf8(first_bytes).expect("report is utf8");
+        assert!(text.starts_with("# pass truth 2026-10-15"));
+        assert_eq!(text, pass_truth_report(date, &ticked_passes()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

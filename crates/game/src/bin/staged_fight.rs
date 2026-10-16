@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use engine_audio::FightCue;
+use engine_game::bench::{BenchConfig, Policy};
 use engine_game::capture::fnv_hex;
 use engine_game::fighter_bind::{self, FighterBinding, VARIANTS};
 use engine_game::windowed::{run_staged_fight_frames, StagedFightFrame};
@@ -95,11 +96,16 @@ fn fold_cues(stats: &mut FightStats, cues: &[FightCue]) {
     }
 }
 
+/// Bare flag that runs the offline PQ2 balance screen and exits before any
+/// staged fight ticks. Never enters the fixed tick; fork-based only.
+const BALANCE_SCREEN_FLAG: &str = "--balance-screen";
+
 /// Parsed CLI: content dir, receipt root and fight length.
 struct Args {
     content_dir: PathBuf,
     out_dir: PathBuf,
     ticks: u32,
+    balance_screen: bool,
 }
 
 /// Resolve the fighters content dir: explicit flag first, then
@@ -128,12 +134,14 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut content: Option<String> = None;
     let mut out: Option<String> = None;
     let mut ticks: Option<String> = None;
+    let mut balance_screen = false;
     let mut index = 1usize;
     while index < raw.len() {
         match raw[index].as_str() {
             "--content-dir" => content = Some(take_value(raw, &mut index, "--content-dir")?),
             "--out-dir" => out = Some(take_value(raw, &mut index, "--out-dir")?),
             "--ticks" => ticks = Some(take_value(raw, &mut index, "--ticks")?),
+            flag if flag == BALANCE_SCREEN_FLAG => balance_screen = true,
             other => return Err(format!("unknown flag {other}")),
         }
         index += 1;
@@ -155,6 +163,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT_DIR)),
         ticks,
+        balance_screen,
     })
 }
 
@@ -261,6 +270,19 @@ fn run(args: &Args) -> Result<i32, String> {
         .map(|point| point.hash)
         .unwrap_or(0);
     let hp: Vec<u16> = app.hp()[..VARIANTS.len()].to_vec();
+    // Crowd wire: export the reacting room's 64 levels so the built
+    // `export_levels` has a live caller outside its own tests. Presentation
+    // only, hash untouched; a short buffer fails loudly.
+    let mut crowd_levels = [0u16; engine_game::crowd_gpu::CROWD_BLOCKS];
+    let crowd_exported = app
+        .crowd_levels(&mut crowd_levels)
+        .map_err(|err| format!("crowd: {err}"))?;
+    if crowd_exported != engine_game::crowd_gpu::CROWD_BLOCKS {
+        return Err(format!(
+            "crowd: exported {crowd_exported}, want {}",
+            engine_game::crowd_gpu::CROWD_BLOCKS
+        ));
+    }
 
     // The frames come from the staged fight raster (bodies drawn, hits
     // flashing). It runs the same script through the arena authority, so its
@@ -340,6 +362,90 @@ fn write_frames(dir: &Path, frames: &[StagedFightFrame]) -> Result<(u32, String,
     Ok((count, FRAMES_MANIFEST_NAME.to_string(), fnv_hex(&sequence)))
 }
 
+/// Offline PQ2 balance screen: the bloodless anchor must hold the per-move
+/// bar while the poke lever (every kill on the strike byte) must trip it.
+/// Fork-based, integer-only, keyboard-out; never enters the fixed tick, so
+/// the golden hash cannot move. Reuses the live 350 bar, never a second gate.
+fn check_balance_pair(anchor_share: u16, lever_share: u16) -> Result<(), String> {
+    use engine_game::bench::{check_pq2_kill_share, PQ2_KILL_SHARE_MAX_PERMILLE};
+    if check_pq2_kill_share(anchor_share).is_err() {
+        return Err(format!(
+            "balance: bloodless anchor tripped bar {anchor_share} over {PQ2_KILL_SHARE_MAX_PERMILLE}"
+        ));
+    }
+    if check_pq2_kill_share(lever_share).is_ok() {
+        return Err(format!(
+            "balance: lopsided lever held bar {lever_share} at {PQ2_KILL_SHARE_MAX_PERMILLE}"
+        ));
+    }
+    Ok(())
+}
+
+/// Agreement gate over the 5% contract bound: anchor (bloodless) and lever (poke kills)
+/// must disagree, proving `BenchReport::agrees_with` plus `divergence_permille` live.
+/// Returns the distance; refuses an agreeing pair loudly. Pure, offline, never the tick.
+/// Caller: `run_balance_screen` behind `BALANCE_SCREEN_FLAG`.
+fn agreement_gate(
+    anchor: &engine_game::bench::BenchReport,
+    lever: &engine_game::bench::BenchReport,
+) -> Result<u16, String> {
+    let divergence = anchor.divergence_permille(lever);
+    if anchor.agrees_with(lever) {
+        return Err(format!(
+            "balance: anchor agrees with lever (divergence {divergence})"
+        ));
+    }
+    Ok(divergence)
+}
+
+/// Run the offline screen: anchor plus lever through `bench::run`, per-move
+/// pin plus the 350 bar exercised outside tests. Same configs twice give the
+/// same line; anchor drift or a vacuous lever fails loudly.
+fn run_balance_screen() -> Result<String, String> {
+    use engine_game::bench::{
+        check_pq2_kill_share, kill_share_permille, move_kill_share_permille,
+        PQ2_KILL_SHARE_MAX_PERMILLE,
+    };
+    let anchor_cfg = BenchConfig::standard(Policy::Idle, Policy::Idle);
+    let lever_cfg = BenchConfig::standard(Policy::Poke, Policy::Idle);
+    let anchor =
+        engine_game::bench::run(&anchor_cfg).map_err(|err| format!("balance anchor: {err}"))?;
+    let lever =
+        engine_game::bench::run(&lever_cfg).map_err(|err| format!("balance lever: {err}"))?;
+    let anchor_share = kill_share_permille(&anchor);
+    let lever_share = kill_share_permille(&lever);
+    let lever_move = move_kill_share_permille(&lever, lever.strike_byte);
+    if lever_move != lever_share {
+        return Err(format!(
+            "balance: per-move share drifted (move {lever_move} vs kill {lever_share})"
+        ));
+    }
+    for byte in 0..=7u8 {
+        if byte != lever.strike_byte && move_kill_share_permille(&lever, byte) != 0 {
+            return Err(format!(
+                "balance: byte {byte} owns kills outside the strike"
+            ));
+        }
+    }
+    check_balance_pair(anchor_share, lever_share)?;
+    let anchor_ok = check_pq2_kill_share(anchor_share).is_ok();
+    let lever_trips = check_pq2_kill_share(lever_share).is_err();
+    if !anchor_ok || !lever_trips {
+        return Err("balance: bar wiring drifted".to_string());
+    }
+    let divergence = agreement_gate(&anchor, &lever)?;
+    Ok(format!(
+        "balance-screen anchor_share={} lever_share={} move_byte={} bar={} anchor=PASS lever=TRIP kills_a={}/{} divergence={} agree=false",
+        anchor_share,
+        lever_share,
+        lever.strike_byte,
+        PQ2_KILL_SHARE_MAX_PERMILLE,
+        lever.kills_a,
+        lever.matches,
+        divergence,
+    ))
+}
+
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
     let args = match parse_args(&raw) {
@@ -349,6 +455,18 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if args.balance_screen {
+        match run_balance_screen() {
+            Ok(line) => {
+                println!("{line}");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("staged_fight: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
     match run(&args) {
         Ok(code) => std::process::exit(code),
         Err(err) => {
@@ -637,5 +755,86 @@ mod tests {
                 colours.len()
             );
         }
+    }
+
+    #[test]
+    fn balance_screen_exercises_pq2_bar_offline() {
+        // Behavior: the offline screen runs anchor plus lever through
+        // `bench::run`, pins the per-move share and reports the 350 bar with
+        // anchor PASS and lever TRIP. Same configs twice give the same line.
+        let first = run_balance_screen().expect("balance screen runs");
+        let second = run_balance_screen().expect("balance screen replays");
+        assert_eq!(first, second, "screen is not deterministic");
+        assert!(
+            first.contains("anchor_share=0"),
+            "bloodless anchor drifted: {first}"
+        );
+        assert!(first.contains("anchor=PASS"), "anchor must hold: {first}");
+        assert!(first.contains("lever=TRIP"), "lever must trip: {first}");
+        assert!(
+            first.contains("bar=350"),
+            "screen must reuse the 350 bar: {first}"
+        );
+        // The flag reaches the screen without touching the staged fight.
+        let flagged = parse_args(&["staged_fight".to_string(), BALANCE_SCREEN_FLAG.to_string()])
+            .expect("balance flag parses");
+        assert!(flagged.balance_screen, "flag must arm the screen");
+        let plain = parse_args(&["staged_fight".to_string()]).expect("defaults parse");
+        assert!(!plain.balance_screen, "screen stays off by default");
+    }
+
+    #[test]
+    fn balance_screen_pair_fails_loudly_on_drift() {
+        // Failure: a tripped anchor or a held lever fails instead of filing a
+        // vacuous PASS, so a drifted harness cannot report green.
+        assert!(
+            check_balance_pair(0, 1000).is_ok(),
+            "lopsided must pass the pair"
+        );
+        assert!(
+            check_balance_pair(400, 1000).is_err(),
+            "tripped anchor must fail"
+        );
+        assert!(check_balance_pair(0, 0).is_err(), "held lever must fail");
+        assert!(
+            parse_args(&["staged_fight".to_string(), "--nope".to_string()]).is_err(),
+            "unknown flag must fail"
+        );
+    }
+
+    #[test]
+    fn balance_screen_reports_agreement() {
+        // Behavior: the screen wires `BenchReport::agrees_with` plus
+        // `divergence_permille` behind `--balance-screen`, so the filed line
+        // proves the anchor and lever disagree on the 5% contract bound.
+        let line = run_balance_screen().expect("balance screen runs");
+        assert!(
+            line.contains("divergence="),
+            "screen must report the contract distance: {line}"
+        );
+        assert!(
+            line.contains("agree=false"),
+            "anchor and lever must disagree: {line}"
+        );
+    }
+
+    #[test]
+    fn balance_screen_agreement_gate_rejects_identical() {
+        // Failure: the agreement gate refuses an agreeing pair, so a vacuous
+        // lever that mirrors the anchor cannot file green.
+        let anchor_cfg = BenchConfig::standard(Policy::Idle, Policy::Idle);
+        let anchor = engine_game::bench::run(&anchor_cfg).expect("anchor runs");
+        let again = engine_game::bench::run(&anchor_cfg).expect("anchor replays");
+        assert!(
+            agreement_gate(&anchor, &again).is_err(),
+            "identical reports must trip the agreement gate"
+        );
+        let lever_cfg = BenchConfig::standard(Policy::Poke, Policy::Idle);
+        let lever = engine_game::bench::run(&lever_cfg).expect("lever runs");
+        let divergence = agreement_gate(&anchor, &lever).expect("anchor vs lever disagrees");
+        assert!(
+            divergence > engine_game::bench::AGREE_TOL_PERMILLE,
+            "lever must stand outside the 5% bound: {divergence}"
+        );
     }
 }

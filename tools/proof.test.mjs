@@ -198,3 +198,13 @@ test("frameCsvVerdict: bar is inclusive at 50 ms", () => {
   assert.equal(verdict.ok, true);
   assert.match(verdict.line, /^\[PASS\]/);
 });
+
+test("frameCsvVerdict: real timed-smoke header parses", () => {
+  const csv = ["frame,wall_ms,input_to_present_ms", "0,16.667,12.000", "1,20.000,12.100"].join("\n");
+  const verdict = frameCsvVerdict(csv);
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.frames, 2);
+  assert.equal(verdict.p50, 16.667);
+  assert.equal(verdict.p95, 20);
+  assert.match(verdict.line, /^\[PASS\]/);
+});

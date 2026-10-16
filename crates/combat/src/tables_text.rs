@@ -70,16 +70,11 @@ fn parse_header(line: &str, lineno: u32) -> Result<u32, CombatError> {
     let _ = again.next();
     let token = again.next().unwrap_or("");
     match decimal(token) {
-        Some(0) | None => {
-            if decimal(token).is_none() {
-                Err(CombatError::BadTableValue {
-                    field: "table",
-                    value: lineno,
-                })
-            } else {
-                Err(CombatError::BadTableVersion(0))
-            }
-        }
+        Some(0) => Err(CombatError::BadTableVersion(0)),
+        None => Err(CombatError::BadTableValue {
+            field: "table",
+            value: lineno,
+        }),
         Some(version) => Ok(version),
     }
 }

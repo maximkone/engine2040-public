@@ -190,3 +190,65 @@ fn timing_rebake_tile_p95_under_50ms() {
         samples[samples.len() - 1]
     );
 }
+
+#[test]
+fn obstacle_rebuild_touches_only_its_tiles() {
+    use engine_nav::rebake::update;
+    use engine_nav::tiles::{ObstacleCache, TileId};
+    let (w, h) = (24usize, 16usize);
+    let (start, goal) = ((0usize, 8usize), (23usize, 8usize));
+    let mut nav = TiledNav::bake(&walled(w, h, 12, Some(8)), w, h, 8).expect("door bakes");
+    nav.bake_goal(goal).expect("goal bakes");
+    assert!(nav.find_path(start, goal).expect("query").is_some());
+    let mut cache = ObstacleCache::default();
+    let door = [12, 8, 12, 8];
+    let rubble = cache.add_box_obstacle(&nav, door).expect("queues");
+    assert_eq!(nav.dirty_count(), 0, "add only queues");
+    let want = vec![nav.tile_of(12, 8).expect("door cell")];
+    let before: Vec<u32> = (0..nav.tile_count() as u32)
+        .map(|t| nav.version(TileId(t)).expect("v"))
+        .collect();
+    assert_eq!(update(&mut nav, &mut cache, 1), want.len());
+    assert_eq!(update(&mut nav, &mut cache, 1), 0, "queue drained");
+    nav.bake_goal(goal).expect("field refreshes");
+    let sealed = nav.find_path(start, goal).expect("query");
+    assert!(sealed.is_none(), "rubble seals");
+    for (i, v) in before.iter().enumerate() {
+        let now = nav.version(TileId(i as u32)).expect("v");
+        let next = v + u32::from(want.contains(&TileId(i as u32)));
+        assert_eq!(now, next, "only touched tiles bump");
+    }
+    assert_eq!(cache.remove_obstacle(rubble), Ok(()));
+    let mut ticks = 0u32;
+    while nav.find_path(start, goal).expect("query").is_none() {
+        update(&mut nav, &mut cache, 1);
+        nav.bake_goal(goal).expect("refresh");
+        ticks += 1;
+        assert!(ticks < TICKS_PER_SECOND, "breach opens in one second");
+    }
+    let walk = nav.find_path(start, goal).expect("query");
+    let walk = walk.expect("breach connects");
+    assert!(walk.cells().contains(&(12, 8)));
+    assert_eq!(nav.to_bytes(), nav.to_bytes(), "digest x2");
+    let stale = cache.remove_obstacle(rubble);
+    assert!(matches!(stale, Err(TileError::UnknownObstacle(..))));
+}
+
+#[test]
+fn obstacle_requests_refuse_loudly() {
+    use engine_nav::tiles::{ObstacleCache, MAX_OBSTACLE_REQUESTS};
+    let (w, h) = (32usize, 32usize);
+    let nav = TiledNav::bake(&vec![false; w * h], w, h, 4).expect("grid bakes");
+    let mut cache = ObstacleCache::default();
+    let e = cache.add_box_obstacle(&nav, [5, 5, 2, 2]);
+    assert_eq!(e, Err(TileError::BadBounds));
+    let e = cache.add_box_obstacle(&nav, [w + 1, 0, w + 9, 3]);
+    assert_eq!(e, Err(TileError::BadBounds));
+    let big = cache.add_box_obstacle(&nav, [0, 0, w - 1, h - 1]);
+    assert!(matches!(big, Err(TileError::TooManyTiles { .. })));
+    for _ in 0..MAX_OBSTACLE_REQUESTS {
+        assert!(cache.add_box_obstacle(&nav, [0, 0, 0, 0]).is_ok());
+    }
+    let full = cache.add_box_obstacle(&nav, [1, 1, 1, 1]);
+    assert_eq!(full, Err(TileError::QueueFull));
+}

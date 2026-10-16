@@ -840,6 +840,219 @@ fn test_swept_box_i(candidate: &BoxMm, cast: &Cast, half_mm: &[u32; 3]) -> Optio
     })
 }
 
+/// Slide tuning for the cast-driven move below, all integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlideConfig {
+    /// Highest repeats; rest travel in whole millimetres.
+    pub max_iterations: u8,
+    pub max_residual_mm: u32,
+    /// Tallest stepped rise in whole millimetres.
+    pub step_height_mm: i32,
+    /// Walkable floor gate, Q16 normal height.
+    pub walkable_y_q16: i32,
+}
+
+/// Remainder of `vel_mm` after removing approach into `normal_mm`.
+/// Integer only with widened dots; a zero normal or a separating
+/// velocity passes through untouched.
+pub fn project_velocity_mm(vel_mm: [i32; 3], normal_mm: [i32; 3]) -> [i32; 3] {
+    let mut dot = 0i64;
+    let mut norm2 = 0i64;
+    for axis in 0..3 {
+        dot += i64::from(vel_mm[axis]) * i64::from(normal_mm[axis]);
+        norm2 += i64::from(normal_mm[axis]) * i64::from(normal_mm[axis]);
+    }
+    if dot >= 0 || norm2 <= 0 {
+        return vel_mm;
+    }
+    let mut kept = [0i32; 3];
+    for axis in 0..3 {
+        let cut = i64::from(normal_mm[axis]) * dot / norm2;
+        kept[axis] = narrow(i64::from(vel_mm[axis]) - cut);
+    }
+    kept
+}
+
+/// Push `pos_mm` out of overlapped boxes, smallest face shift.
+///
+/// Integer only saturated at the `i32` edge; touching faces stay put.
+/// Callers pass id-sorted slices so ties decide identically everywhere.
+pub fn depenetrate_point_mm(
+    mut pos_mm: [i32; 3],
+    half_mm: [u32; 3],
+    boxes: &[BoxMm],
+    skin_mm: i32,
+) -> [i32; 3] {
+    for candidate in boxes {
+        let mut pen = [0i64; 3];
+        let mut hit = true;
+        for axis in 0..3 {
+            let lo = i64::from(pos_mm[axis]) - i64::from(half_mm[axis]);
+            let hi = i64::from(pos_mm[axis]) + i64::from(half_mm[axis]);
+            if hi <= i64::from(candidate.min_mm[axis]) || lo >= i64::from(candidate.max_mm[axis]) {
+                hit = false;
+                break;
+            }
+            pen[axis] = (hi - i64::from(candidate.min_mm[axis]))
+                .min(i64::from(candidate.max_mm[axis]) - lo);
+        }
+        if !hit {
+            continue;
+        }
+        let mut axis = 0usize;
+        for rest in 1..3 {
+            if pen[rest] < pen[axis] {
+                axis = rest;
+            }
+        }
+        let lo = i64::from(pos_mm[axis]) - i64::from(half_mm[axis]);
+        let hi = i64::from(pos_mm[axis]) + i64::from(half_mm[axis]);
+        let near_min =
+            hi - i64::from(candidate.min_mm[axis]) <= i64::from(candidate.max_mm[axis]) - lo;
+        let push = if near_min {
+            -(pen[axis] + i64::from(skin_mm))
+        } else {
+            pen[axis] + i64::from(skin_mm)
+        };
+        let at = i64::from(pos_mm[axis]) + push;
+        pos_mm[axis] = narrow(at);
+    }
+    pos_mm
+}
+
+fn narrow(v: i64) -> i32 {
+    i32::try_from(v).unwrap_or_else(|_| if v < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// Grown face holding `entry_mm`: per axis -1 on the low face, 1 on the
+/// high face, 0 inside. Integer only; the caller decides the interior case.
+fn grown_face_mm(candidate: &BoxMm, entry_mm: &[i32; 3], half_mm: &[u32; 3]) -> [i32; 3] {
+    let mut face = [0i32; 3];
+    for axis in 0..3 {
+        let glo = i64::from(candidate.min_mm[axis]) - i64::from(half_mm[axis]);
+        let ghi = i64::from(candidate.max_mm[axis]) + i64::from(half_mm[axis]);
+        if i64::from(entry_mm[axis]) == glo {
+            face[axis] = -1;
+        } else if i64::from(entry_mm[axis]) == ghi {
+            face[axis] = 1;
+        }
+    }
+    face
+}
+
+/// True when the centre already rests on the grown face and the rest of the
+/// move runs along it or away from it, so the contact must not block.
+/// Integer dot only; approaching faces stay false and still win by distance.
+fn rests_without_approach(
+    candidate: &BoxMm,
+    entry_mm: &[i32; 3],
+    dest_mm: &[i32; 3],
+    half_mm: &[u32; 3],
+) -> bool {
+    let face = grown_face_mm(candidate, entry_mm, half_mm);
+    if face == [0, 0, 0] {
+        return false;
+    }
+    let mut dot = 0i64;
+    for axis in 0..3 {
+        dot += (i64::from(dest_mm[axis]) - i64::from(entry_mm[axis])) * i64::from(face[axis]);
+    }
+    dot >= 0
+}
+
+/// Cast-driven move: depenetrate, sweep to contact, project, repeat.
+///
+/// Integer only over the slab helpers above; `hook` sees each contact
+/// with its face normal. Low rises step, tall faces slide.
+pub fn slide_move_mm(
+    boxes: &[BoxMm],
+    cfg: &SlideConfig,
+    from_mm: [i32; 3],
+    vel_mm: [i32; 3],
+    half_mm: [u32; 3],
+    hook: &mut impl FnMut(&HitMm, [i32; 3]),
+) -> [i32; 3] {
+    let mut pos_mm = depenetrate_point_mm(from_mm, half_mm, boxes, 1);
+    let mut remaining = vel_mm;
+    let mut done = 0u8;
+    while done < cfg.max_iterations {
+        if dist_norm(&[0, 0, 0], &remaining) <= u64::from(cfg.max_residual_mm) {
+            break;
+        }
+        let mut dest = [0i32; 3];
+        for axis in 0..3 {
+            dest[axis] = narrow(i64::from(pos_mm[axis]) + i64::from(remaining[axis]));
+        }
+        let cast = Cast::of(&SegmentMm {
+            from_mm: pos_mm,
+            to_mm: dest,
+        });
+        let mut best: Option<HitMm> = None;
+        for candidate in boxes {
+            if let Some(hit) = test_swept_box_i(candidate, &cast, &half_mm) {
+                // A resting centre must not block tangential travel: keeping
+                // the entry-point hit would pin the drive on every repeat.
+                if hit.entry_mm == pos_mm
+                    && rests_without_approach(candidate, &hit.entry_mm, &dest, &half_mm)
+                {
+                    continue;
+                }
+                let take = match best {
+                    None => true,
+                    Some(prev) => hit < prev,
+                };
+                if take {
+                    best = Some(hit);
+                }
+            }
+        }
+        let hit = match best {
+            None => {
+                pos_mm = dest;
+                break;
+            }
+            Some(found) => found,
+        };
+        let mut face = [0i32; 3];
+        let mut top = 0i32;
+        let mut found_box = false;
+        for candidate in boxes {
+            if candidate.collider == hit.collider {
+                top = candidate.max_mm[1];
+                found_box = true;
+                face = grown_face_mm(candidate, &hit.entry_mm, &half_mm);
+                break;
+            }
+        }
+        if !found_box {
+            pos_mm = hit.entry_mm;
+            break;
+        }
+        if face == [0, 0, 0] {
+            face = [0, 1, 0];
+        }
+        hook(&hit, face);
+        let mut rest = [0i32; 3];
+        for axis in 0..3 {
+            rest[axis] = narrow(i64::from(dest[axis]) - i64::from(hit.entry_mm[axis]));
+        }
+        let feet = i64::from(pos_mm[1]) - i64::from(half_mm[1]);
+        let rise = i64::from(top) - feet;
+        let walkable = i64::from(face[1]) * 65536 >= i64::from(cfg.walkable_y_q16);
+        if face[1] == 0 && !walkable && rise > 0 && rise <= i64::from(cfg.step_height_mm) {
+            let lifted = i64::from(top) + i64::from(half_mm[1]) + 1;
+            pos_mm = [hit.entry_mm[0], narrow(lifted), hit.entry_mm[2]];
+            rest[1] = 0;
+            remaining = rest;
+        } else {
+            pos_mm = hit.entry_mm;
+            remaining = project_velocity_mm(rest, face);
+        }
+        done += 1;
+    }
+    depenetrate_point_mm(pos_mm, half_mm, boxes, 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1144,6 +1357,125 @@ mod tests {
         );
         assert_eq!(out[0].dist_mm, out[1].dist_mm);
         assert!(out[1].dist_mm < out[2].dist_mm);
+    }
+
+    #[test]
+    fn slide_matrix_steps_slopes_platforms_hash_x2() {
+        let cfg = SlideConfig {
+            max_iterations: 4,
+            max_residual_mm: 1,
+            step_height_mm: 500,
+            walkable_y_q16: 46340,
+        };
+        let half = [150u32, 800u32, 150u32];
+        let step_box = BoxMm::from_mm([2000, 0, -1000], [3000, 250, 1000], 1, 0).expect("ordered");
+        let wall_box = BoxMm::from_mm([2000, 0, -1000], [3000, 2000, 1000], 2, 0).expect("ordered");
+        let floor = BoxMm::from_mm([-4000, -500, -4000], [4000, 0, 4000], 3, 0).expect("ordered");
+        let mut hook = |_: &HitMm, _: [i32; 3]| {};
+        let stepped = slide_move_mm(
+            &[step_box],
+            &cfg,
+            [0, 800, 0],
+            [3000, 0, 0],
+            half,
+            &mut hook,
+        );
+        assert_eq!(stepped, [3000, 1051, 0], "low rise steps, {stepped:?}");
+        let mut face_seen = [0i32; 3];
+        let mut wall_hook = |_: &HitMm, normal: [i32; 3]| {
+            face_seen = normal;
+        };
+        let blocked = slide_move_mm(
+            &[wall_box],
+            &cfg,
+            [0, 800, 0],
+            [3000, 0, 0],
+            half,
+            &mut wall_hook,
+        );
+        assert_eq!(face_seen, [-1, 0, 0], "wall face");
+        assert_eq!(blocked, [1850, 800, 0], "tall face slides, {blocked:?}");
+        let floored = slide_move_mm(
+            &[floor],
+            &cfg,
+            [0, 1500, 0],
+            [2000, -1500, 0],
+            half,
+            &mut hook,
+        );
+        assert_eq!(floored, [2000, 800, 0], "floor keeps drive, {floored:?}");
+        let steep = slide_move_mm(
+            &[wall_box],
+            &cfg,
+            [0, 800, 0],
+            [3000, -500, 0],
+            half,
+            &mut hook,
+        );
+        assert_eq!(steep, [1850, 300, 0], "over-steep keeps falling, {steep:?}");
+        let plats = [
+            BoxMm::from_mm([1000, 0, -500], [2000, 1000, 500], 11, 0).expect("ordered"),
+            BoxMm::from_mm([3000, 0, -500], [4000, 1000, 500], 22, 0).expect("ordered"),
+            BoxMm::from_mm([5000, 0, -500], [6000, 1000, 500], 33, 0).expect("ordered"),
+        ];
+        let seg = SegmentMm {
+            from_mm: [-500, 500, 0],
+            to_mm: [6500, 500, 0],
+        };
+        let index = QueryBvh::build(&plats);
+        let mut out = [HitMm::EMPTY; 8];
+        let n = index.cast_into(&plats, seg, &mut out).expect("fits");
+        assert_eq!(n, 3);
+        assert_eq!(
+            [out[0].collider, out[1].collider, out[2].collider],
+            [11, 22, 33]
+        );
+        let rev = [plats[2], plats[1], plats[0]];
+        let rebuilt = QueryBvh::build(&rev);
+        let mut again = [HitMm::EMPTY; 8];
+        let m = rebuilt.cast_into(&rev, seg, &mut again).expect("fits");
+        assert_eq!(m, 3);
+        assert_eq!(
+            [again[0].collider, again[1].collider, again[2].collider],
+            [11, 22, 33]
+        );
+        let world = [step_box, wall_box, floor];
+        let run = |fork: u64| {
+            let seed = Rng::new(2040);
+            let mut rng = seed.fork(fork);
+            let mut hasher = Fnv64::new();
+            let mut contacts = 0u32;
+            let mut i = 0usize;
+            while i < 1000 {
+                let from = [
+                    draw_mm(&mut rng, -4000, 4000),
+                    draw_mm(&mut rng, 0, 3000),
+                    draw_mm(&mut rng, -2000, 2000),
+                ];
+                let vel = [
+                    draw_mm(&mut rng, -3000, 3000),
+                    draw_mm(&mut rng, -3000, 3000),
+                    draw_mm(&mut rng, -500, 500),
+                ];
+                let mut hook = |hit: &HitMm, normal: [i32; 3]| {
+                    contacts += 1;
+                    hasher.write_u32(hit.collider);
+                    for axis in 0..3 {
+                        hasher.write_i32(normal[axis]);
+                    }
+                };
+                let end = slide_move_mm(&world, &cfg, from, vel, half, &mut hook);
+                for axis in 0..3 {
+                    hasher.write_i32(end[axis]);
+                }
+                i += 1;
+            }
+            (hasher.finish(), contacts)
+        };
+        let (h1, c1) = run(31);
+        let (h2, c2) = run(31);
+        assert_eq!((h1, c1), (h2, c2), "seeded matrix hashes twice");
+        assert!(c1 > 100, "matrix must land contacts, got {c1}");
     }
 
     #[test]

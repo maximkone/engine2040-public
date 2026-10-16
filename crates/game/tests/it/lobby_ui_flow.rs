@@ -306,3 +306,45 @@ fn the_screen_never_asks_for_a_refresh_faster_than_the_net_browser_allows() {
     // 4 Hz is 40 refreshes in 10 s; frame steps of 16 ms land on 256 ms.
     assert!((38..=41).contains(&asked), "{asked} refreshes in 10 s");
 }
+
+#[test]
+fn windowed_loop_reaches_lobby_screen_through_its_own_entry() {
+    use engine_game::netgame::{lobby_slot_rows, windowed_lobby_entry};
+
+    let mut lobby = Lobby::new(BUILD, FIGHTERS, SEED).expect("lobby");
+    assert_eq!(lobby.join(HOST_TOKEN, BUILD), Ok(0));
+    let mut screen = LobbyScreen::new(limits()).expect("screen");
+    assert_eq!(screen.input(LobbyInput::Host), Ok(Some(LobbyCommand::Host)));
+    let rows = lobby_slot_rows(&lobby, HOST_TOKEN);
+    assert_eq!(rows, host_rows(&lobby, HOST_TOKEN));
+    assert_eq!(rows.len(), usize::from(FIGHTERS));
+    screen.joined(&rows, true).expect("host in lobby");
+    assert_eq!(screen.hosts().len(), 0);
+    assert_eq!(screen.slots().len(), usize::from(FIGHTERS));
+    assert_eq!(
+        windowed_lobby_entry(&mut screen, &mut lobby, LobbyInput::ToggleReady, HOST_TOKEN),
+        Ok(Some(LobbyCommand::SetReady(true)))
+    );
+    assert_eq!(lobby.join(GUEST_TOKEN, BUILD), Ok(1));
+    lobby.set_ready(GUEST_TOKEN, true).expect("guest ready");
+    screen
+        .set_slots(&lobby_slot_rows(&lobby, HOST_TOKEN))
+        .expect("rows after guest");
+    assert_eq!(
+        windowed_lobby_entry(&mut screen, &mut lobby, LobbyInput::FillAi, HOST_TOKEN),
+        Ok(Some(LobbyCommand::FillAi))
+    );
+    assert!(screen.can_start());
+    let mut guest = LobbyScreen::new(limits()).expect("guest screen");
+    guest
+        .joined(&guest_rows(1, FIGHTERS, true), false)
+        .expect("guest in lobby");
+    assert_eq!(guest.input(LobbyInput::Start), Err(LobbyUiError::NotHost));
+    assert_eq!(
+        windowed_lobby_entry(&mut screen, &mut lobby, LobbyInput::Start, HOST_TOKEN),
+        Ok(Some(LobbyCommand::Start))
+    );
+    let fight = screen.take_fight().expect("host fight");
+    assert_eq!(fight.seed, SEED);
+    assert_eq!(fight.fighters, FIGHTERS);
+}

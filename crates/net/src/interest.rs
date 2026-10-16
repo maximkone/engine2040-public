@@ -14,7 +14,9 @@
 //! [`measure_rate_lod`]. Crate edge: reuses `scale.rs` header/budget
 //! constants, never mirrors them.
 
+use super::delta::{ioq3_encode_fields, ioq3_fields_wire_len, BodySnap, FullSnap, Ioq3SnapFields};
 use super::scale::{DELTA_HEADER_LEN, MAX_DATAGRAM_BYTES, SOAK_TICKS_MAX, TICK_HZ};
+use super::session::{ioq3_fragment_message, NetError};
 
 /// Largest entity population one selection handles (64 fighters plus 500
 /// AI soldiers plus headroom for promoted directors).
@@ -39,6 +41,18 @@ pub const SIEGE_SNAPSHOT_HZ: u64 = 10;
 pub const SIEGE_BUDGET_BYTES: usize = MAX_DATAGRAM_BYTES;
 /// Sentinel for "never sent to this connection" (forces a full first send).
 pub const NEVER_SENT: u32 = u32::MAX;
+/// Room word (pattern): id-derived `id % 8`, integer-only, stable across runs.
+pub(crate) const fn entity_room(id: u32) -> u32 {
+    id % 8
+}
+/// Mask bit for one room.
+pub(crate) const fn room_mask(room: u32) -> u64 {
+    1u64 << (room & 63)
+}
+/// Scope view: true when `room` is in per-connection `mask`.
+pub(crate) const fn room_in_scope(room: u32, mask: u64) -> bool {
+    (mask & room_mask(room)) != 0
+}
 
 /// Relevancy of one entity to one viewer: distance ring plus view hemisphere.
 /// Combat-dirty entities are never culled; that is the no-desync rule.
@@ -379,6 +393,7 @@ pub struct ConnectionInterest {
     bytes_sent: u64,
     snapshots: u64,
     starve_max: u32,
+    rooms: u64,
 }
 
 impl ConnectionInterest {
@@ -405,6 +420,7 @@ impl ConnectionInterest {
             bytes_sent: 0,
             snapshots: 0,
             starve_max: 0,
+            rooms: u64::MAX,
         })
     }
 
@@ -432,6 +448,16 @@ impl ConnectionInterest {
     #[must_use]
     pub const fn viewer(&self) -> u32 {
         self.viewer
+    }
+
+    /// Scope mask (default all rooms; send-only filter, never sim).
+    pub(crate) const fn rooms(&self) -> u64 {
+        self.rooms
+    }
+
+    /// Set scope mask (room membership; send-only).
+    pub(crate) fn set_rooms(&mut self, mask: u64) {
+        self.rooms = mask;
     }
 
     /// Last acked baseline tick (the delta baseline the receiver holds).
@@ -611,6 +637,10 @@ impl ConnectionInterest {
         let age = age_ticks(sent, now);
         let pose_dirty = e.x_mm != self.xs[index] || e.z_mm != self.zs[index];
         let combat_dirty = e.combat != self.combat[index];
+        // Room gate first: out-of-scope clean stays culled; combat still ships.
+        if !room_in_scope(entity_room(e.id), self.rooms) && !combat_dirty {
+            return Decision::skip();
+        }
         let d2 = dist2_mm(e.x_mm, e.z_mm, viewer_x_mm, viewer_z_mm);
         let front = in_front(
             i64::from(e.x_mm) - i64::from(viewer_x_mm),
@@ -663,8 +693,11 @@ impl ConnectionInterest {
         let viewer_id = entities[viewer_pos].id;
         let (dir_x, dir_z) = octant_dir(viewer_yaw_ddeg);
         let mut starve_seen = 0u32;
-        for s in &self.sent {
-            let age = age_ticks(*s, now);
+        for (i, e) in entities.iter().enumerate() {
+            if e.id != viewer_id && !room_in_scope(entity_room(e.id), self.rooms) {
+                continue;
+            }
+            let age = age_ticks(self.sent[i], now);
             if age != u32::MAX && age > starve_seen {
                 starve_seen = age;
             }
@@ -836,6 +869,124 @@ impl ConnectionInterest {
         self.combat[index] = entities[index].combat;
         self.sent[index] = now;
     }
+}
+
+/// ioq3 per-client snapshot beside the KIND path (pattern only): the
+/// `select()` set diffed against the acked baseline, with pending reliable
+/// commands piggybacked ahead of the snapshot bytes. Genre-neutral: entity
+/// ids only, no bout rules. Units: ticks, bytes. Determinism: ascending id
+/// order, integer math, no map iteration. Errors: [`NetError`], never panics.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ioq3ClientView {
+    /// Acked baseline tick the fields diff against.
+    pub lastframe: u32,
+    /// Authoritative tick being sent.
+    pub server_time: u32,
+    /// Selected entity count; equals the `select()` count by construction.
+    pub entity_count: usize,
+    /// Pending reliable commands, oldest first, ahead of the snapshot.
+    pub reliable: Vec<Vec<u8>>,
+    /// Field-masked delta for exactly the selected set.
+    pub fields: Ioq3SnapFields,
+    /// Fragment datagrams over reliable bytes plus area bytes, one sequence.
+    /// Empty when both inputs are empty; the delta still travels in `fields`.
+    pub datagrams: Vec<Vec<u8>>,
+}
+
+impl Ioq3ClientView {
+    /// Receipt: lastframe, server time, entity count, reliable count.
+    #[must_use]
+    pub const fn receipt(&self) -> (u32, u32, usize, usize) {
+        (
+            self.lastframe,
+            self.server_time,
+            self.entity_count,
+            self.reliable.len(),
+        )
+    }
+
+    /// Wire bytes: the reliable prefix first, then the field wire.
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
+        self.reliable
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_add(ioq3_fields_wire_len(&self.fields))
+    }
+}
+
+/// Parameters for [`ioq3_client_view`]: one struct over seven arguments.
+pub struct Ioq3ViewParams<'a> {
+    /// Ascending selected ids from `select()`.
+    pub selected: &'a [u32],
+    /// Full snapshot at `server_time`.
+    pub full: &'a FullSnap,
+    /// Acked baseline snapshot at `lastframe`.
+    pub baseline: &'a FullSnap,
+    /// Acked baseline tick; must equal `baseline.tick`.
+    pub lastframe: u32,
+    /// Authoritative tick; must equal `full.tick`.
+    pub server_time: u32,
+    /// Snapshot flags carried beside the delta.
+    pub snap_flags: u8,
+    /// Visible-area bytes for the viewer.
+    pub area_bytes: Vec<u8>,
+    /// Pending reliable commands, oldest first.
+    pub reliable: Vec<Vec<u8>>,
+    /// Fragment sequence for the datagram group.
+    pub sequence: u32,
+    /// Port slot for the datagram group.
+    pub qport: u16,
+}
+
+/// Build the per-client view: filter both snapshots to the selected slots,
+/// diff against the acked baseline, fragment reliable plus area bytes under
+/// one sequence. Empty or unsorted selections, unknown slots and stale
+/// baselines refuse with [`NetError::BadState`]; the KIND path is untouched.
+pub fn ioq3_client_view(params: Ioq3ViewParams<'_>) -> Result<Ioq3ClientView, NetError> {
+    if params.selected.is_empty() {
+        return Err(NetError::BadState);
+    }
+    if params.selected.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(NetError::BadState);
+    }
+    let mut slots = Vec::with_capacity(params.selected.len());
+    for id in params.selected {
+        slots.push(u8::try_from(*id).map_err(|_| NetError::BadState)?);
+    }
+    let pick = |src: &[BodySnap]| -> Vec<BodySnap> {
+        src.iter()
+            .filter(|f| slots.binary_search(&f.slot).is_ok())
+            .copied()
+            .collect()
+    };
+    let sub_full = FullSnap::new(params.full.tick, pick(&params.full.fighters))
+        .map_err(|_| NetError::BadState)?;
+    let sub_base = FullSnap::new(params.baseline.tick, pick(&params.baseline.fighters))
+        .map_err(|_| NetError::BadState)?;
+    let fields = ioq3_encode_fields(
+        params.lastframe,
+        params.server_time,
+        params.snap_flags,
+        params.area_bytes.clone(),
+        &sub_full,
+        &sub_base,
+    )?;
+    let mut image = Vec::new();
+    for cmd in &params.reliable {
+        image.extend_from_slice(cmd);
+    }
+    image.extend_from_slice(&params.area_bytes);
+    let datagrams = ioq3_fragment_message(params.sequence, params.qport, &image);
+    Ok(Ioq3ClientView {
+        lastframe: params.lastframe,
+        server_time: params.server_time,
+        entity_count: params.selected.len(),
+        reliable: params.reliable,
+        fields,
+        datagrams,
+    })
 }
 
 /// Squared ring edges in mm^2, computed once per select from the tuning.
@@ -1408,7 +1559,7 @@ pub fn measure_rate_lod(seed: u64, ticks: u32) -> Result<RateLodReport, Interest
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{decode_delta, encode_delta, FighterSnap, FullSnap};
+    use crate::delta::{decode_delta, encode_delta, BodySnap, FullSnap};
 
     /// Small deterministic roster: viewer 0 plus near/far/behind entities.
     fn roster() -> Vec<InterestEntity> {
@@ -1461,6 +1612,25 @@ mod tests {
         let cfg = InterestCfg::default_64();
         conn.select(&cfg, entities, 0, 0, 0, -1800, now, MAX_DATAGRAM_BYTES, out)
             .expect("select")
+    }
+
+    #[test]
+    fn interest_names_snapshots_through_neutral_bodysnap() {
+        // GE2 genre gate: code in this file must name snapshot slots through
+        // the neutral alias from delta.rs so the workspace ledger never
+        // grows. The needle is built at runtime so these lines never spell
+        // the banned identifier themselves; only code counts (a // comment
+        // tail never counts).
+        let needle = format!("{}{}", "Fighter", "Snap");
+        let src = include_str!("interest.rs");
+        let mut bad = 0;
+        for line in src.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains(&needle) {
+                bad += 1;
+            }
+        }
+        assert_eq!(bad, 0, "name snapshot slots through BodySnap");
     }
 
     #[test]
@@ -1619,8 +1789,8 @@ mod tests {
     fn replication_reads_interest_without_desync() {
         // Consumer wire-in-test: session replication consults interest, then
         // the real delta codec carries the snapshot; decode stays exact.
-        let base_fighters: Vec<FighterSnap> = (0..16)
-            .map(|slot| FighterSnap {
+        let base_fighters: Vec<BodySnap> = (0..16)
+            .map(|slot| BodySnap {
                 slot,
                 x_mm: 1_000 + i32::from(slot) * 500,
                 y_mm: 0,
@@ -2138,8 +2308,8 @@ mod tests {
         assert!(out[..report.selected].contains(&1), "{report:?}");
         assert_eq!(report.combat, 1, "{report:?}");
         // The codec path stays exact for the combat take: no desync.
-        let base_fighters: Vec<FighterSnap> = (0..2)
-            .map(|slot| FighterSnap {
+        let base_fighters: Vec<BodySnap> = (0..2)
+            .map(|slot| BodySnap {
                 slot,
                 x_mm: if slot == 1 { 500_000 } else { 0 },
                 y_mm: 0,
@@ -2156,6 +2326,170 @@ mod tests {
         let delta = encode_delta(&full, &baseline).expect("encode");
         let decoded = decode_delta(&delta, &baseline).expect("decode");
         assert_eq!(decoded, full);
+    }
+
+    #[test]
+    fn interest_64_room_converges() {
+        let cfg = InterestCfg::default_siege();
+        let run = || {
+            let base: Vec<InterestEntity> = (0..64)
+                .map(|id| InterestEntity {
+                    id,
+                    x_mm: i32::try_from(id).expect("id fits") * 1_000,
+                    z_mm: 0,
+                    combat: 1_000,
+                })
+                .collect();
+            let mut fighting = base.clone();
+            fighting[7].combat = 900;
+            let mut conns = Vec::new();
+            for v in 0..64u32 {
+                let mut c = ConnectionInterest::for_entities(v, 64).expect("c");
+                c.set_rooms(room_mask(v % 8));
+                c.register_baseline(&base).expect("base");
+                conns.push(c);
+            }
+            let mut out = vec![0u32; 64];
+            let (mut bytes, mut starve) = (0u64, 0u32);
+            for (v, c) in conns.iter_mut().enumerate() {
+                let viewer = u32::try_from(v).expect("v fits");
+                let viewer_x = i32::try_from(v).expect("v fits") * 1_000;
+                let r = c
+                    .select(
+                        &cfg,
+                        &fighting,
+                        viewer,
+                        viewer_x,
+                        0,
+                        0,
+                        6,
+                        SIEGE_BUDGET_BYTES,
+                        &mut out,
+                    )
+                    .expect("sel");
+                assert!(r.bytes <= SIEGE_BUDGET_BYTES);
+                assert!(out[..r.selected]
+                    .iter()
+                    .all(|id| room_in_scope(entity_room(*id), c.rooms()) || *id == viewer));
+                assert!(v != 0 || out[..r.selected].contains(&7));
+                bytes += u64::try_from(r.bytes).expect("bytes fit");
+                starve = starve.max(r.starve_seen);
+            }
+            (bytes, starve)
+        };
+        let (ba, sa) = run();
+        assert_eq!((ba, sa), run());
+        assert!(sa <= STARVE_TICKS);
+        assert!(ba * 8 * 100 * TICK_HZ / (6 * 1_000) <= ON9_CAP_KBPS_X100);
+    }
+
+    #[test]
+    fn ioq3_per_client_view_matches_select() {
+        let cfg = InterestCfg::default_siege();
+        let entities: Vec<InterestEntity> = (0..8)
+            .map(|id| InterestEntity {
+                id,
+                x_mm: i32::try_from(id).expect("id fits") * 1_000,
+                z_mm: 0,
+                combat: 1_000,
+            })
+            .collect();
+        let mut conn = ConnectionInterest::for_entities(0, 8).expect("conn");
+        conn.set_rooms(room_mask(0) | room_mask(3));
+        conn.register_baseline(&entities).expect("baseline");
+        let mut out = [0u32; 8];
+        let report = conn
+            .select(&cfg, &entities, 0, 0, 0, 0, 6, SIEGE_BUDGET_BYTES, &mut out)
+            .expect("select");
+        assert_eq!(report.selected, 2, "{report:?}");
+        assert_eq!(out[..report.selected], [0, 3]);
+        let base_fighters: Vec<BodySnap> = (0..8)
+            .map(|slot| BodySnap {
+                slot,
+                x_mm: i32::try_from(slot).expect("slot fits") * 1_000,
+                y_mm: 0,
+                z_mm: 0,
+                yaw_ddeg: 0,
+                hp: 1_000,
+                stamina: 100,
+            })
+            .collect();
+        let mut now_fighters = base_fighters.clone();
+        now_fighters[3].x_mm += 500;
+        now_fighters[3].hp = 880;
+        let baseline = FullSnap::new(100, base_fighters).expect("baseline");
+        let full = FullSnap::new(106, now_fighters).expect("full");
+        let reliable = vec![vec![0xC0, 0x01], vec![0xC0, 0x02, 0x03]];
+        let view = ioq3_client_view(Ioq3ViewParams {
+            selected: &out[..report.selected],
+            full: &full,
+            baseline: &baseline,
+            lastframe: 100,
+            server_time: 106,
+            snap_flags: 0,
+            area_bytes: vec![0xA5, 0x5A],
+            reliable: reliable.clone(),
+            sequence: 9,
+            qport: 3,
+        })
+        .expect("view");
+        assert_eq!(
+            view.entity_count, report.selected,
+            "per-client count must equal select count"
+        );
+        assert_eq!(
+            view.receipt(),
+            (100, 106, 2, 2),
+            "receipt names lastframe + serverTime"
+        );
+        let sub = |tick: u32, src: &FullSnap| {
+            FullSnap::new(
+                tick,
+                src.fighters
+                    .iter()
+                    .filter(|f| f.slot == 0 || f.slot == 3)
+                    .copied()
+                    .collect(),
+            )
+            .expect("subset")
+        };
+        assert_eq!(
+            crate::delta::ioq3_decode_fields(&view.fields, &sub(100, &baseline)).expect("decode"),
+            sub(106, &full),
+            "decode against the acked baseline equals full"
+        );
+        let mut image = Vec::new();
+        for cmd in &reliable {
+            image.extend_from_slice(cmd);
+        }
+        image.extend_from_slice(&[0xA5, 0x5A]);
+        assert_eq!(
+            crate::session::ioq3_reassemble(&view.datagrams).expect("reassemble"),
+            image,
+            "reliable ahead of snapshot reassembles byte-exact"
+        );
+        assert!(
+            view.wire_len() < full.full_wire_len(),
+            "view wire {} must beat full {}",
+            view.wire_len(),
+            full.full_wire_len()
+        );
+        let empty: [u32; 0] = [];
+        assert_eq!(
+            ioq3_client_view(Ioq3ViewParams {
+                selected: &empty,
+                full: &full,
+                baseline: &baseline,
+                lastframe: 100,
+                server_time: 106,
+                snap_flags: 0,
+                area_bytes: Vec::new(),
+                reliable: Vec::new(),
+                sequence: 9,
+                qport: 3,
+            }),
+            Err(crate::session::NetError::BadState)
+        );
     }
 
     #[test]

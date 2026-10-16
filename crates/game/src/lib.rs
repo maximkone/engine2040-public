@@ -19,6 +19,9 @@
 //! hook ([`PoseSource::ImportedFighter`]): presentation poses come from the
 //! arena movement path ([`App::presentation`]); authored content is the visual gate.
 
+/// Sim state to clip cues with a per-slot crossfade: the act pick plus the
+/// fade driver the fighter look samples. Std-only, presentation only.
+pub mod anim_bridge;
 /// Arena glTF kit: placement parse, AABB fit and presenter staging.
 /// Std-only parse plus fit on the default leg; file import plus upload join
 /// the `app` leg so headless builds pull no `gltf`.
@@ -29,6 +32,7 @@ pub mod audio_director;
 /// Reverb-send plus occlusion-gain bridge: game-thread mix over
 /// the frozen audio brains, tunnel preset on, voice floor at -12 dB.
 pub mod audio_mix;
+pub mod balance_verdict;
 pub mod ballistics;
 /// Balance harness: falsifiable spacing experiments over
 /// the arena fork path for balance tuning. Std-only.
@@ -42,12 +46,27 @@ pub mod camera_arm;
 /// Presentation feed: drives the camera director from the frame
 /// loop with in-sim trauma and presentation-side shake. Std-only.
 pub mod camera_feed;
+/// Flax-style follow rig plus rate-independent damping, impulse dispatch
+/// and transition cores. Tick is integer-only; floats are presentation only.
+pub mod camera_feel;
+/// Priority shot table plus eased handoff over the frozen director frames.
+/// Std-only, presentation only.
+pub mod camera_stack;
 /// Showcase clip capture: tape-bound PNG sequence plus manifest.
 /// Headless-safe: flags, tape codec, std-only PNG writer and frame sink.
 pub mod capture;
+/// Cinematic sequence player: intro/outro takes beside the auto-cut
+/// director. Presentation only; the flow shell aliases its handback.
+pub mod cine;
 /// Crash reports to a local file: version, adapter, tape tail,
 /// checkpoint, loud exit. Std-only.
 pub mod crash;
+/// Reacting crowd sim: 20k-seat integer state feeding the instanced
+/// stands through the render staging. Std-only; consumer is [`App`].
+pub mod crowd_gpu;
+/// Dev-only hot-patch seam for one gameplay point (practice tuning).
+/// Std-only; consumer is the window `arena.rs::poll_hot_reload`.
+pub mod dev_hotpatch;
 /// Auto spectator camera (trailer cuts from fight beats): shot choice over
 /// fixed-tick cues with continuity rules, presentation only. Std-only.
 pub mod director;
@@ -67,6 +86,11 @@ pub mod fighter_look;
 /// Window match shell: Title, Match, Paused, Result over the arena match.
 /// Std-only, pure transitions; pause holds the tick cursor.
 pub mod flow;
+/// First-person eye pose beside camera: look clamp plus interp eye.
+pub mod fps_view;
+/// Sim freeze mirror for the look: the hitstop count combat sets on impact,
+/// read-only for clip-clock holds. Std-only.
+pub mod hitstop;
 /// Engine-owned window input codes (game-agnostic key/mouse maps). Std-only.
 pub mod input;
 /// Ladder, glory ranks, repair-craft hooks LIGHT slice: integer
@@ -88,13 +112,23 @@ pub mod netgame;
 pub mod package;
 /// Gamepad sticks plus buttons through the shared bindings table. Std-only.
 pub mod pad;
+/// Clip-clock hold: which fighter slots freeze while sim hitstop is above
+/// zero. Std-only.
+pub mod pose_hold;
+/// Practice swap: staged combat tuning applied at a tick boundary. Std-only.
 pub mod practice;
 pub mod progress;
+/// Quest chain: ordered objectives with ordered tasks over the ladder.
+pub mod quest;
+/// Hot-reload gate: staged generations applied at frame boundaries. Std-only.
+pub mod reload;
 /// Best-of-5 duel rounds over one-round arena sessions. Pure folds,
 /// no hash input. Std-only.
 pub mod rounds;
 /// Siege mode: 32v32 over four arena shards on a dedicated server (WD4).
 pub mod siege;
+/// CPU pose step of the fighter look: clip sample plus joint bounds, no GPU.
+pub mod stage_bodies;
 /// Steamworks backend: achievements, stats, cloud generations and presence.
 /// Std-only until the orchestrator lands the `steam` feature.
 pub mod steam;
@@ -102,8 +136,9 @@ pub mod steam;
 /// `app` only, beside the look that fills it.
 #[cfg(feature = "app")]
 pub mod view_truth;
-/// Weapon trail ring: the last 12 blade samples per slot with an age fade.
-/// View only, std-only.
+/// Weapon trail: per-slot blade base-plus-tip ring, view only.
+/// Holds the last 12 pairs per slot; idle slots stay empty.
+/// Age ticks fade alpha from 1 at age 0 to 0 at age 11.
 pub mod weapon_trail;
 /// Window bind: hero + 2 staged fighters for the window twin.
 /// Std-only.
@@ -112,6 +147,7 @@ pub mod window_bind;
 pub mod windowed;
 
 use crate::audio_director::{drive, Director, DirectorError, DirectorState, Layers, TensionTable};
+use crate::crowd_gpu::CrowdGpuSim;
 use crate::director::{Director as CutDirector, DirectorConfig, FighterLateral, MIN_SHOT_TICKS};
 use engine_anim::contract::{LocalPose, RootTable};
 use engine_arena::recorder::Row;
@@ -257,6 +293,109 @@ fn parse_layer_extent(raw: &str) -> Option<f32> {
         .filter(|value: &f32| value.is_finite() && (5.0..=100.0).contains(value))
 }
 
+// Resolve one layered row: env wins, then file, then the default.
+// Returns the winning value plus true when a present row refused to parse.
+// Pure.
+fn resolve_layer_row<T: Copy>(
+    env_raw: Option<&str>,
+    file_raw: Option<&str>,
+    parse: fn(&str) -> Option<T>,
+    default: T,
+) -> (T, bool) {
+    if let Some(raw) = env_raw {
+        if let Some(value) = parse(raw) {
+            return (value, false);
+        }
+        if let Some(raw) = file_raw {
+            if let Some(value) = parse(raw) {
+                return (value, true);
+            }
+        }
+        return (default, true);
+    }
+    if let Some(raw) = file_raw {
+        if let Some(value) = parse(raw) {
+            return (value, false);
+        }
+        return (default, true);
+    }
+    (default, false)
+}
+
+// True when a layer holds a key outside the four known rows. Pure.
+fn has_unknown_layer_key(rows: &[(&str, &str)]) -> bool {
+    rows.iter().any(|row| {
+        row.0 != "seed" && row.0 != "ticks" && row.0 != "fighters" && row.0 != "half_extent_m"
+    })
+}
+
+/// Merge file plus env rows over defaults and collect every refused row name.
+/// Precedence per row is env over file over defaults with fall-through; a
+/// present but unparsable row falls back one layer and its name is collected.
+/// Units: seed is an opaque `u64`, ticks and fighters are counts, extent is
+/// meters. Determinism: same rows give the same merge and the same report, no
+/// IO and no clock. The report names rows in refusal order: `seed`, `ticks`,
+/// `fighters`, `half_extent_m`, then `unknown` once when either layer holds
+/// an outside key. Caller: [`layered_extract`] (production wrapper below).
+#[must_use]
+pub fn layered_extract_report(
+    defaults: GameConfig,
+    file_rows: &[(&str, &str)],
+    env_rows: &[(&str, &str)],
+) -> (GameConfig, Vec<&'static str>) {
+    let mut refused: Vec<&'static str> = Vec::new();
+    let (seed, seed_refused) = resolve_layer_row(
+        extract_inner(env_rows, "seed").as_deref(),
+        extract_inner(file_rows, "seed").as_deref(),
+        parse_layer_seed,
+        defaults.seed,
+    );
+    if seed_refused {
+        refused.push("seed");
+    }
+    let (ticks, ticks_refused) = resolve_layer_row(
+        extract_inner(env_rows, "ticks").as_deref(),
+        extract_inner(file_rows, "ticks").as_deref(),
+        parse_layer_ticks,
+        defaults.ticks,
+    );
+    if ticks_refused {
+        refused.push("ticks");
+    }
+    let (fighters, fighters_refused) = resolve_layer_row(
+        extract_inner(env_rows, "fighters").as_deref(),
+        extract_inner(file_rows, "fighters").as_deref(),
+        parse_layer_fighters,
+        defaults.fighters,
+    );
+    if fighters_refused {
+        refused.push("fighters");
+    }
+    let (half_extent_m, extent_refused) = resolve_layer_row(
+        extract_inner(env_rows, "half_extent_m").as_deref(),
+        extract_inner(file_rows, "half_extent_m").as_deref(),
+        parse_layer_extent,
+        defaults.half_extent_m,
+    );
+    if extent_refused {
+        refused.push("half_extent_m");
+    }
+    if has_unknown_layer_key(file_rows) || has_unknown_layer_key(env_rows) {
+        refused.push("unknown");
+    }
+    let merged = GameConfig {
+        seed,
+        ticks,
+        fighters,
+        half_extent_m,
+    };
+    if merged.validate().is_ok() {
+        (merged, refused)
+    } else {
+        (defaults, refused)
+    }
+}
+
 /// Merge file plus env rows over defaults, one row at a time: env wins, then
 /// file, then the default; a missing or unparsable row falls back to the next
 /// layer. A fully unusable stack keeps the valid defaults. Pure, never fails.
@@ -266,40 +405,7 @@ pub fn layered_extract(
     file_rows: &[(&str, &str)],
     env_rows: &[(&str, &str)],
 ) -> GameConfig {
-    let seed = extract_inner(env_rows, "seed")
-        .and_then(|raw| parse_layer_seed(raw.as_str()))
-        .or_else(|| extract_inner(file_rows, "seed").and_then(|raw| parse_layer_seed(raw.as_str())))
-        .unwrap_or(defaults.seed);
-    let ticks = extract_inner(env_rows, "ticks")
-        .and_then(|raw| parse_layer_ticks(raw.as_str()))
-        .or_else(|| {
-            extract_inner(file_rows, "ticks").and_then(|raw| parse_layer_ticks(raw.as_str()))
-        })
-        .unwrap_or(defaults.ticks);
-    let fighters = extract_inner(env_rows, "fighters")
-        .and_then(|raw| parse_layer_fighters(raw.as_str()))
-        .or_else(|| {
-            extract_inner(file_rows, "fighters").and_then(|raw| parse_layer_fighters(raw.as_str()))
-        })
-        .unwrap_or(defaults.fighters);
-    let half_extent_m = extract_inner(env_rows, "half_extent_m")
-        .and_then(|raw| parse_layer_extent(raw.as_str()))
-        .or_else(|| {
-            extract_inner(file_rows, "half_extent_m")
-                .and_then(|raw| parse_layer_extent(raw.as_str()))
-        })
-        .unwrap_or(defaults.half_extent_m);
-    let merged = GameConfig {
-        seed,
-        ticks,
-        fighters,
-        half_extent_m,
-    };
-    if merged.validate().is_ok() {
-        merged
-    } else {
-        defaults
-    }
+    layered_extract_report(defaults, file_rows, env_rows).0
 }
 
 /// Game failures: bounded diagnostics, never panics.
@@ -385,6 +491,11 @@ pub struct TickOutcome {
     pub audio: Vec<AudioCommand>,
     /// Fight cues mapped 1:1 from the tick's combat events.
     pub cues: Vec<FightCue>,
+    /// Slots that began an attack on this tick (TABLES_V2 press tell, EG19b);
+    /// empty under v1 rows, on quiet ticks and past the press tick.
+    /// Presentation only: the swing clip starts from these (EG19c), so no
+    /// hp, audio, crowd or hash contact. Fighter slots in press order.
+    pub started: Vec<u8>,
     /// Crowd reaction per cue, in the same order as [`TickOutcome::cues`].
     pub reactions: Vec<Reaction>,
     /// Crowd-bed gain multiplier `0.0..=1.0` after the tick.
@@ -414,6 +525,7 @@ impl Default for TickOutcome {
             ),
             audio: Vec::new(),
             cues: Vec::new(),
+            started: Vec::new(),
             reactions: Vec::new(),
             bed_gain: 1.0,
             layers: Layers {
@@ -499,6 +611,9 @@ pub struct App {
     rounds: crate::rounds::MatchState,
     hud: Hud,
     crowd: Crowd,
+    /// Reacting crowd visual state: 20k-seat integer sim driven once per
+    /// accepted tick beside the audio clock. Presentation only, never hashed.
+    crowd_gpu: CrowdGpuSim,
     /// Tension director: driven once per accepted tick from the tick's
     /// fight cues (presentation only, never hashed). The window plays
     /// `director_layers` through the crowd/music buses.
@@ -564,7 +679,8 @@ impl App {
         }
         self.arena.table_version = engine_combat::tables::TABLES_VERSION_V2;
         self.rules = self.arena.rules();
-        self.live = LiveMatch::with_rules(&self.arena, self.rules).ok_or(GameError::BadConfig("arena"))?;
+        self.live =
+            LiveMatch::with_rules(&self.arena, self.rules).ok_or(GameError::BadConfig("arena"))?;
         Ok(self)
     }
 
@@ -615,6 +731,7 @@ impl App {
                 0,
             ),
             crowd: Crowd::new(),
+            crowd_gpu: CrowdGpuSim::rich(config.seed),
             director: Director::scripted(),
             cut_director,
             laterals: Vec::with_capacity(usize::from(config.fighters)),
@@ -678,6 +795,23 @@ impl App {
     #[must_use]
     pub fn director_updates(&self) -> u64 {
         self.director.tick_count()
+    }
+
+    /// Reacting crowd visual state: integer excitement plus the room clock,
+    /// driven once per accepted tick. The window stages it through
+    /// [`CrowdGpuSim::feed_frame`]; presentation only, never hashed.
+    #[must_use]
+    pub fn crowd_gpu(&self) -> &CrowdGpuSim {
+        &self.crowd_gpu
+    }
+
+    /// Copy the reacting room's 64 block levels into a caller buffer for the
+    /// offline evidence: returns the entries written. The buffer must hold
+    /// 64. Presentation only, never hashed; same script gives the same levels
+    /// twice. Caller: `crates/game/src/bin/staged_fight.rs` (staged run
+    /// exports after the fight, failing loudly on a short buffer).
+    pub fn crowd_levels(&self, out: &mut [u16]) -> Result<usize, crate::crowd_gpu::CrowdGpuError> {
+        self.crowd_gpu.export_levels(out)
     }
 
     /// Last director mix answer (crowd beds plus music scalar).
@@ -750,7 +884,7 @@ impl App {
     /// count; the look calls it with [`App::hitstop_remaining`].
     #[must_use]
     fn hitstop_holds(remaining: u32) -> bool {
-        remaining > 0
+        hitstop::holds(remaining)
     }
 
     /// Current round verdict from live hp, without scoring. Pure.
@@ -825,7 +959,7 @@ impl App {
         // by construction as long as every stage goes through `stage_input`.
         self.stage_input(stamped);
         let tick = self.cursor;
-        let Some((checkpoint, cues)) = self.simulate_tick(tick) else {
+        let Some((checkpoint, cues, started)) = self.simulate_tick(tick) else {
             // Unreachable for validated configs/tapes (arena rejects a run
             // instead of skipping); stay put rather than diverge.
             self.unstage_input(stamped);
@@ -834,7 +968,7 @@ impl App {
         };
         self.checkpoints.push(checkpoint);
         self.cursor += 1;
-        self.observe_into(tick, &cues, checkpoint, out);
+        self.observe_into(tick, &cues, &started, checkpoint, out);
         self.extend_presentation();
     }
 
@@ -899,12 +1033,12 @@ impl App {
             return self.rejected();
         }
         let tick = self.cursor;
-        let Some((checkpoint, cues)) = self.simulate_tick(tick) else {
+        let Some((checkpoint, cues, started)) = self.simulate_tick(tick) else {
             return self.rejected();
         };
         self.checkpoints.push(checkpoint);
         self.cursor += 1;
-        let out = self.observe(tick, &cues, checkpoint);
+        let out = self.observe(tick, &cues, &started, checkpoint);
         self.extend_presentation();
         out
     }
@@ -927,6 +1061,7 @@ impl App {
         out.audio.clear();
         out.cues.clear();
         out.reactions.clear();
+        out.started.clear();
         out.bed_gain = self.crowd.bed_gain();
         out.layers = self.director_layers;
     }
@@ -939,22 +1074,28 @@ impl App {
     /// reads real geometry; a row miss keeps the previous laterals. A stale
     /// live match (poisoned by a failed step, unreachable for validated
     /// tapes) rebuilds from tick 0 first: the only replay path.
-    fn simulate_tick(&mut self, tick: u32) -> Option<(Checkpoint, Vec<FightCue>)> {
+    fn simulate_tick(&mut self, tick: u32) -> Option<(Checkpoint, Vec<FightCue>, Vec<u8>)> {
         if self.live.is_poisoned() || self.live.tick() != tick {
             self.rebuild_live(tick)?;
         }
         let inputs = tick_inputs(&self.tape, tick);
         let stepped = self.live.step(inputs)?;
         let current = self.hitstop_remaining;
-        self.hitstop_remaining = hitstop_next(current, &stepped.events.events);
+        self.hitstop_remaining = hitstop::next(current, &stepped.events.events);
         let cues = stepped.events.events.iter().map(map_cue).collect();
+        let checkpoint = stepped.checkpoint;
         if let Some(rows) = laterals_for_tick(stepped.rows, tick, self.config.fighters) {
             self.laterals = rows;
         }
         if let Some(views) = views_for_tick(stepped.rows, tick, self.config.fighters) {
             self.views = views;
         }
-        Some((stepped.checkpoint, cues))
+        // First production read of the press-tick tell (EG19b): one starter
+        // slot per fresh v2 attack, in fighter-ID order; empty under v1 rows
+        // and on quiet ticks. `stepped` is dead past this line, so the live
+        // match lends its cue buffer again. Presentation only, never hashed.
+        let started = self.live.cues().iter().map(|cue| cue.attacker).collect();
+        Some((checkpoint, cues, started))
     }
 
     /// Rare path: replace the live match with a fresh one stepped through
@@ -965,7 +1106,7 @@ impl App {
         let mut hitstop = 0u32;
         for tick in 0..ticks {
             let stepped = live.step(tick_inputs(&self.tape, tick))?;
-            hitstop = hitstop_next(hitstop, &stepped.events.events);
+            hitstop = hitstop::next(hitstop, &stepped.events.events);
         }
         // The fresh match counts its own replay steps; bill the old one here.
         self.retired_steps = self.retired_steps.saturating_add(self.live.steps());
@@ -978,10 +1119,94 @@ impl App {
     /// progression. All integers; the crowd clock advances exactly once per
     /// accepted tick, so the same cue script gives the same reactions twice.
     /// Fresh-buffer wrapper over [`App::observe_into`].
-    fn observe(&mut self, tick: u32, cues: &[FightCue], checkpoint: Checkpoint) -> TickOutcome {
+    fn observe(
+        &mut self,
+        tick: u32,
+        cues: &[FightCue],
+        started: &[u8],
+        checkpoint: Checkpoint,
+    ) -> TickOutcome {
         let mut out = TickOutcome::default();
-        self.observe_into(tick, cues, checkpoint, &mut out);
+        self.observe_into(tick, cues, started, checkpoint, &mut out);
         out
+    }
+
+    /// Fold one fight cue into hp, kill feed, audio and crowd reactions, in
+    /// cue emission order. The crowd clock still advances once per accepted
+    /// tick in [`App::observe_into`], so the same cue script gives the same
+    /// reactions twice. Budget: O(1) time, no heap growth at steady state
+    /// (the caller sizes `out` once).
+    fn fold_cue_into(&mut self, tick: u32, cue: FightCue, out: &mut TickOutcome) {
+        match cue {
+            FightCue::Hit { victim, damage, .. } => {
+                let slot = usize::from(victim);
+                if slot < self.hp.len() {
+                    self.hp[slot] = self.hp[slot].saturating_sub(damage);
+                }
+                out.audio.push(AudioCommand {
+                    tick,
+                    sound: BankSound::Hit,
+                    gain: 1.0,
+                });
+            }
+            FightCue::Blocked { victim, chip, .. } => {
+                let slot = usize::from(victim);
+                if slot < self.hp.len() {
+                    self.hp[slot] = self.hp[slot].saturating_sub(chip);
+                }
+                out.audio.push(AudioCommand {
+                    tick,
+                    sound: BankSound::Hit,
+                    gain: 0.4,
+                });
+            }
+            FightCue::Parried { .. } => {
+                out.audio.push(AudioCommand {
+                    tick,
+                    sound: BankSound::Hit,
+                    gain: 0.7,
+                });
+            }
+            FightCue::Dodged { .. } | FightCue::StaminaOut { .. } => {}
+            FightCue::Knockdown { attacker, victim } => {
+                let slot = usize::from(victim);
+                if slot < self.hp.len() {
+                    self.hp[slot] = 0;
+                }
+                out.audio.push(AudioCommand {
+                    tick,
+                    sound: BankSound::Hit,
+                    gain: 1.0,
+                });
+                // Arena slots are always valid fighter IDs by
+                // construction; a corrupt index skips the feed entry
+                // rather than panicking.
+                if let (Some(killer), Some(dead)) =
+                    (FighterId::new(attacker), FighterId::new(victim))
+                {
+                    let entry = KillEntry {
+                        tick: u64::from(tick),
+                        killer: Some(killer),
+                        victim: dead,
+                        cause: KillCause::Strike,
+                    };
+                    self.kills.push(entry);
+                    let _ = self.hud.push_kill(entry);
+                }
+                if !self.decided {
+                    self.decided = true;
+                    self.matches_completed = self.matches_completed.saturating_add(1);
+                }
+                if attacker == HUMAN_SLOT {
+                    self.wins = self.wins.saturating_add(1);
+                }
+                if victim == HUMAN_SLOT {
+                    self.losses = self.losses.saturating_add(1);
+                }
+            }
+        }
+        out.reactions.push(self.crowd.on_fight_event(cue));
+        self.crowd_gpu.on_cue(cue);
     }
 
     /// Refill a caller-held outcome for one accepted tick: clears its buffers
@@ -993,87 +1218,24 @@ impl App {
         &mut self,
         tick: u32,
         cues: &[FightCue],
+        started: &[u8],
         checkpoint: Checkpoint,
         out: &mut TickOutcome,
     ) {
         out.audio.clear();
         out.reactions.clear();
         out.cues.clear();
+        out.started.clear();
         out.audio.reserve(cues.len());
         out.reactions.reserve(cues.len());
         out.cues.reserve(cues.len());
+        out.started.reserve(started.len());
+        out.started.extend_from_slice(started);
         for cue in cues {
-            match *cue {
-                FightCue::Hit { victim, damage, .. } => {
-                    let slot = victim as usize;
-                    if slot < self.hp.len() {
-                        self.hp[slot] = self.hp[slot].saturating_sub(damage);
-                    }
-                    out.audio.push(AudioCommand {
-                        tick,
-                        sound: BankSound::Hit,
-                        gain: 1.0,
-                    });
-                }
-                FightCue::Blocked { victim, chip, .. } => {
-                    let slot = victim as usize;
-                    if slot < self.hp.len() {
-                        self.hp[slot] = self.hp[slot].saturating_sub(chip);
-                    }
-                    out.audio.push(AudioCommand {
-                        tick,
-                        sound: BankSound::Hit,
-                        gain: 0.4,
-                    });
-                }
-                FightCue::Parried { .. } => {
-                    out.audio.push(AudioCommand {
-                        tick,
-                        sound: BankSound::Hit,
-                        gain: 0.7,
-                    });
-                }
-                FightCue::Dodged { .. } | FightCue::StaminaOut { .. } => {}
-                FightCue::Knockdown { attacker, victim } => {
-                    let slot = victim as usize;
-                    if slot < self.hp.len() {
-                        self.hp[slot] = 0;
-                    }
-                    out.audio.push(AudioCommand {
-                        tick,
-                        sound: BankSound::Hit,
-                        gain: 1.0,
-                    });
-                    // Arena slots are always valid fighter IDs by
-                    // construction; a corrupt index skips the feed entry
-                    // rather than panicking.
-                    if let (Some(killer), Some(dead)) =
-                        (FighterId::new(attacker), FighterId::new(victim))
-                    {
-                        let entry = KillEntry {
-                            tick: u64::from(tick),
-                            killer: Some(killer),
-                            victim: dead,
-                            cause: KillCause::Strike,
-                        };
-                        self.kills.push(entry);
-                        let _ = self.hud.push_kill(entry);
-                    }
-                    if !self.decided {
-                        self.decided = true;
-                        self.matches_completed = self.matches_completed.saturating_add(1);
-                    }
-                    if attacker == HUMAN_SLOT {
-                        self.wins = self.wins.saturating_add(1);
-                    }
-                    if victim == HUMAN_SLOT {
-                        self.losses = self.losses.saturating_add(1);
-                    }
-                }
-            }
-            out.reactions.push(self.crowd.on_fight_event(*cue));
+            self.fold_cue_into(tick, *cue, out);
         }
         self.crowd.tick();
+        self.crowd_gpu.tick();
         self.director_layers = drive(&mut self.director, cues);
         self.drive_cut_director(tick, cues);
         self.hud.tick = u64::from(tick);
@@ -1177,6 +1339,14 @@ impl App {
     #[must_use]
     pub fn fighter_views(&self) -> &[FighterView] {
         &self.views
+    }
+
+    /// Read-only live match for presentation polling: the window look reads
+    /// the per-slot integer verdicts through here and never writes match
+    /// state, so the tick hash cannot move.
+    #[must_use]
+    pub fn live_match(&self) -> &LiveMatch {
+        &self.live
     }
 
     /// Movement-path legs over the first `ticks` of the tape: the full
@@ -1399,21 +1569,6 @@ fn map_cue(event: &FightEvent) -> FightCue {
         FightEvent::Dodged { attacker, victim } => FightCue::Dodged { attacker, victim },
         FightEvent::StaminaOut { fighter } => FightCue::StaminaOut { fighter },
         FightEvent::Knockdown { attacker, victim } => FightCue::Knockdown { attacker, victim },
-    }
-}
-
-/// Next hitstop count from the tick's combat events: a Hit or Parried sets
-/// [`engine_combat::fight::HITSTOP_TICKS`], anything else (Blocked, Dodged,
-/// quiet) counts down by one, never below zero. Pure over the events; the
-/// sim stays the authority, this only mirrors its freeze for the look.
-fn hitstop_next(current: u32, events: &[FightEvent]) -> u32 {
-    if events
-        .iter()
-        .any(|event| matches!(event, FightEvent::Hit { .. } | FightEvent::Parried { .. }))
-    {
-        engine_combat::fight::HITSTOP_TICKS
-    } else {
-        current.saturating_sub(1)
     }
 }
 
@@ -1690,6 +1845,43 @@ mod tests {
     }
 
     #[test]
+    fn attack_started_tell_surfaces_on_duel_press_tick() {
+        // EG19b remainder: the game surfaces the v2 press tell on the tick
+        // outcome (the swing clip starts from these); v1 sessions stay silent.
+        use engine_input::fighter::ATTACK;
+        let mut v1 = App::new(small_config()).unwrap();
+        let pressed = v1.tick(human(0, 0, 0, Buttons(ATTACK)));
+        assert!(pressed.input_accepted, "press accepted");
+        assert!(
+            pressed.started.is_empty(),
+            "v1 rows cue nothing: {:?}",
+            pressed.started
+        );
+        let mut duel = App::new(small_config()).unwrap().into_duel().unwrap();
+        let first = duel.tick(human(0, 0, 0, Buttons(ATTACK)));
+        assert!(first.input_accepted, "duel press accepted");
+        assert_eq!(
+            first.started,
+            vec![HUMAN_SLOT],
+            "press tick tells its starter once"
+        );
+        for slot in &first.started {
+            assert!(*slot < small_config().fighters, "tell names a live slot");
+        }
+        let second = duel.tick(idle(1));
+        assert!(second.input_accepted, "idle accepted");
+        assert!(
+            !second.started.contains(&HUMAN_SLOT),
+            "the tell never lingers: {:?}",
+            second.started
+        );
+        // Same duel script tells the same starter twice.
+        let mut replay = App::new(small_config()).unwrap().into_duel().unwrap();
+        let again = replay.tick(human(0, 0, 0, Buttons(ATTACK)));
+        assert_eq!(again.started, first.started, "tell replays");
+    }
+
+    #[test]
     fn hitstop_hold_sets_four_on_hit_then_counts_down() {
         // Feel LF10: the sim freezes 4 ticks on impact; the app mirrors the
         // count read-only so the look can hold clip clocks (presentation
@@ -1735,38 +1927,6 @@ mod tests {
         let fresh = App::new(small_config()).unwrap();
         assert_eq!(fresh.hitstop_remaining(), 0);
         assert!(!App::hitstop_holds(fresh.hitstop_remaining()));
-    }
-
-    #[test]
-    fn hitstop_hold_ignores_blocked_and_dodged_sets_on_parry() {
-        // Pure fold unit: Hit/Parried set 4, Blocked/Dodged and quiet ticks
-        // decrement, never below zero.
-        let hit = FightEvent::Hit {
-            attacker: 0,
-            victim: 1,
-            damage: 120,
-        };
-        let parried = FightEvent::Parried {
-            attacker: 0,
-            victim: 1,
-        };
-        let blocked = FightEvent::Blocked {
-            attacker: 0,
-            victim: 1,
-            chip: 10,
-        };
-        let dodged = FightEvent::Dodged {
-            attacker: 0,
-            victim: 1,
-        };
-        assert_eq!(hitstop_next(0, &[hit]), 4);
-        assert_eq!(hitstop_next(0, &[parried]), 4);
-        assert_eq!(hitstop_next(0, &[blocked]), 0);
-        assert_eq!(hitstop_next(0, &[dodged]), 0);
-        assert_eq!(hitstop_next(4, &[]), 3);
-        assert_eq!(hitstop_next(1, &[]), 0);
-        assert_eq!(hitstop_next(0, &[]), 0);
-        assert_eq!(hitstop_next(4, &[blocked]), 3);
     }
 
     #[test]
@@ -2024,6 +2184,7 @@ mod tests {
         assert_eq!(out.tick, 0);
         assert_eq!(out.checkpoint, None);
         assert!(out.audio.is_empty() && out.cues.is_empty() && out.reactions.is_empty());
+        assert!(out.started.is_empty(), "fresh outcome tells nothing");
         assert_eq!(out.bed_gain, 1.0);
         assert_eq!(out.layers.murmur, 1.0);
         // A fresh session's first rejection carries the same shape.
@@ -2059,8 +2220,9 @@ mod tests {
             assert!(fresh.input_accepted, "assault inputs validate");
             let checkpoint = fresh.checkpoint.unwrap();
             let cues = fresh.cues.clone();
+            let started = fresh.started.clone();
             total_cues += cues.len();
-            refill_app.observe_into(fresh.tick, &cues, checkpoint, &mut reused);
+            refill_app.observe_into(fresh.tick, &cues, &started, checkpoint, &mut reused);
             assert_eq!(reused, fresh, "refilled outcome diverged at tick {tick}");
         }
         assert!(
@@ -2102,9 +2264,9 @@ mod tests {
         // ends on a full burst so the steady-state shape asserts below.
         for tick in 1..=24u32 {
             let cues = if tick % 4 == 0 { &[][..] } else { &*burst };
-            app.observe_into(tick, cues, checkpoint, &mut out);
+            app.observe_into(tick, cues, &[], checkpoint, &mut out);
         }
-        app.observe_into(25, &burst, checkpoint, &mut out);
+        app.observe_into(25, &burst, &[], checkpoint, &mut out);
         std::hint::black_box(&out);
         assert_eq!(out.cues.len(), burst.len());
         assert_eq!(out.audio.len(), 6);
@@ -2116,7 +2278,7 @@ mod tests {
         let measured: [&[FightCue]; 5] = [&[], &burst[..1], &burst[..6], (&*burst), &burst[6..]];
         for (round, cues) in measured.iter().enumerate() {
             let ((), steady) = alloc_probe::measure(|| {
-                app.observe_into(1000 + round as u32, cues, checkpoint, &mut out);
+                app.observe_into(1000 + round as u32, cues, &[], checkpoint, &mut out);
                 std::hint::black_box(&out);
             });
             assert_eq!(
@@ -2387,6 +2549,60 @@ mod tests {
         assert_eq!(merged.ticks, 64);
         assert_eq!(merged.fighters, 4);
         assert_eq!(merged.half_extent_m, 12.0);
+        assert!(merged.validate().is_ok());
+        assert!(App::new(merged).is_ok());
+    }
+
+    #[test]
+    fn layered_extract_report_names_every_refused_row() {
+        let defaults = GameConfig::default();
+        let file_rows = [
+            ("seed", "7"),
+            ("ticks", "64"),
+            ("fighters", "4"),
+            ("half_extent_m", "12.0"),
+        ];
+        let env_rows = [
+            ("seed", "not-a-number"),
+            ("ticks", "not-a-number"),
+            ("fighters", "99"),
+            ("half_extent_m", "NaN"),
+            ("mode", "arena"),
+        ];
+        let (merged, refused) = layered_extract_report(defaults, &file_rows, &env_rows);
+        assert_eq!(merged.seed, 7);
+        assert_eq!(merged.ticks, 64);
+        assert_eq!(merged.fighters, 4);
+        assert_eq!(merged.half_extent_m, 12.0);
+        assert_eq!(
+            refused,
+            vec!["seed", "ticks", "fighters", "half_extent_m", "unknown"]
+        );
+        assert!(merged.validate().is_ok());
+        assert!(App::new(merged).is_ok());
+    }
+
+    #[test]
+    fn layered_extract_report_empty_when_layers_clean() {
+        let defaults = GameConfig::default();
+        let file_rows = [
+            ("seed", "7"),
+            ("ticks", "64"),
+            ("fighters", "4"),
+            ("half_extent_m", "12.0"),
+        ];
+        let env_rows = [
+            ("seed", "99"),
+            ("ticks", "120"),
+            ("fighters", "5"),
+            ("half_extent_m", "30.0"),
+        ];
+        let (merged, refused) = layered_extract_report(defaults, &file_rows, &env_rows);
+        assert_eq!(merged.seed, 99);
+        assert_eq!(merged.ticks, 120);
+        assert_eq!(merged.fighters, 5);
+        assert_eq!(merged.half_extent_m, 30.0);
+        assert!(refused.is_empty());
         assert!(merged.validate().is_ok());
         assert!(App::new(merged).is_ok());
     }
@@ -2703,5 +2919,44 @@ mod tests {
             far_elapsed <= near_elapsed * 2 + std::time::Duration::from_millis(50),
             "18k frame reads took {far_elapsed:?} vs 10-tick {near_elapsed:?}"
         );
+    }
+
+    #[test]
+    fn crowd_levels_export_64_in_range_and_repeat() {
+        // Behavior: the staged helper copies the room's 64 levels through the
+        // new `crowd_levels` caller; levels sit in 300..=1000 and repeat.
+        let mut app = App::new(small_config()).unwrap();
+        for tick in 0..3u32 {
+            assert!(app.tick(idle(tick)).input_accepted);
+        }
+        let mut first = [0u16; crate::crowd_gpu::CROWD_BLOCKS];
+        let n = app.crowd_levels(&mut first).expect("64 fit");
+        assert_eq!(n, crate::crowd_gpu::CROWD_BLOCKS);
+        for level in first.iter() {
+            assert!(
+                (*level >= crate::crowd_gpu::BASELINE_PERMILLE)
+                    && (*level <= crate::crowd_gpu::PEAK_PERMILLE),
+                "level {level} outside murmur..peak"
+            );
+        }
+        let mut again = [0u16; crate::crowd_gpu::CROWD_BLOCKS];
+        let m = app.crowd_levels(&mut again).expect("64 fit twice");
+        assert_eq!(m, n);
+        assert_eq!(first, again, "same room exports the same levels");
+    }
+
+    #[test]
+    fn crowd_levels_short_buffer_refuses_loudly() {
+        // Failure: a short caller buffer refuses with the want/got sizes,
+        // never a truncation; the staged run maps this into `crowd: ...`.
+        let app = App::new(small_config()).unwrap();
+        let mut short = [0u16; 7];
+        match app.crowd_levels(&mut short) {
+            Err(crate::crowd_gpu::CrowdGpuError::BadBuffer { want, got }) => {
+                assert_eq!(want, crate::crowd_gpu::CROWD_BLOCKS);
+                assert_eq!(got, 7);
+            }
+            other => panic!("short crowd buffer must refuse, got {other:?}"),
+        }
     }
 }

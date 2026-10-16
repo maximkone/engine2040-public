@@ -61,7 +61,10 @@ mod tests {
             } else {
                 v
             };
-            assert_eq!(clamp_narrow_to_i32(v, -1_000_000, 1_000_000), clamped as i32);
+            assert_eq!(
+                clamp_narrow_to_i32(v, -1_000_000, 1_000_000),
+                clamped as i32
+            );
         }
     }
 

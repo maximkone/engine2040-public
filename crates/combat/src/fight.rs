@@ -253,12 +253,14 @@ pub fn poise_regen_delay_for_tables(tables: &Tables) -> u32 {
 /// Freeze ticks for one strike kind under explicit rows, at 60 Hz.
 ///
 /// Caller: [`resolve_strike`] hit branch reads the strike kind. Units:
-/// ticks. Determinism: pure match on `tables == TABLES_V2` plus kind; same
-/// tables plus same kind give same freeze. Errors: none; V1 rows give the
-/// single [`HITSTOP_TICKS`], unknown kinds give 0 under V2, never panic.
+/// ticks. Determinism: pure match on V2 timing plus kind; same
+/// timing plus same kind give same freeze. Errors: none; non-V2 timing gives
+/// the single [`HITSTOP_TICKS`], unknown kinds give 0 under V2, never panic.
 pub fn hitstop_for_kind(tables: &Tables, kind: u8) -> u32 {
     use crate::depth::{INPUT_HEAVY, INPUT_LIGHT};
-    if *tables != TABLES_V2 {
+    if tables.attack_startup_ticks != TABLES_V2.attack_startup_ticks
+        || tables.parry_window_ticks != TABLES_V2.parry_window_ticks
+    {
         return tables.hitstop_ticks;
     }
     if kind == INPUT_LIGHT {
@@ -273,10 +275,12 @@ pub fn hitstop_for_kind(tables: &Tables, kind: u8) -> u32 {
 /// Freeze ticks for one parry under explicit rows, at 60 Hz.
 ///
 /// Caller: [`resolve_strike`] parry branch. Units: ticks. Determinism: pure
-/// compare; V2 gives 8, every other row gives the single row, so V1 replays
-/// stay byte-identical. Errors: none.
+/// compare on V2 timing; V2 timing gives 8, every other timing gives the
+/// single row, so V1 replays stay byte-identical. Errors: none.
 pub fn hitstop_for_parry(tables: &Tables) -> u32 {
-    if *tables == TABLES_V2 {
+    if tables.attack_startup_ticks == TABLES_V2.attack_startup_ticks
+        && tables.parry_window_ticks == TABLES_V2.parry_window_ticks
+    {
         crate::tables::PARRY_HITSTOP_TICKS_V2
     } else {
         tables.hitstop_ticks
@@ -1132,8 +1136,7 @@ fn dodge_step(
         return false;
     }
     if let Some(streamlining) = commit {
-        if f.is_attacking
-            && !streamlining.cancel_allowed(f.attack_age, tables.attack_startup_ticks)
+        if f.is_attacking && !streamlining.cancel_allowed(f.attack_age, tables.attack_startup_ticks)
         {
             return true;
         }
@@ -2203,6 +2206,51 @@ mod tests {
         }
         assert!(hit_out.iter().any(|e| matches!(e, FightEvent::Hit { .. })));
         assert_eq!(v2hit.hitstop, 3);
+    }
+
+    #[test]
+    fn hitstop_kinds_class_v2_gives_per_kind() {
+        use crate::classes::Class;
+        use crate::depth::{INPUT_HEAVY, INPUT_LIGHT};
+        // Class rows over V2 keep V2 timing with scaled damage; they freeze
+        // per-kind like V2, not the single row, so feel surveys read the same
+        // freeze as the base timing.
+        for class in Class::all() {
+            let row = class_tables(class);
+            assert_eq!(hitstop_for_kind(&row, INPUT_LIGHT), 3, "{class:?} light");
+            assert_eq!(hitstop_for_kind(&row, INPUT_HEAVY), 6, "{class:?} heavy");
+            assert_eq!(hitstop_for_parry(&row), 8, "{class:?} parry");
+            assert_eq!(
+                hitstop_for_impact(&row, INPUT_LIGHT, false),
+                3,
+                "{class:?} impact light"
+            );
+            assert_eq!(
+                hitstop_for_impact(&row, INPUT_HEAVY, false),
+                6,
+                "{class:?} impact heavy"
+            );
+            assert_eq!(
+                hitstop_for_impact(&row, INPUT_LIGHT, true),
+                8,
+                "{class:?} impact parry"
+            );
+        }
+        // Class rows over V1 keep V1 timing; they keep the single row.
+        for class in Class::all() {
+            let row = crate::classes::tables(class, TABLES_V1);
+            assert_eq!(
+                hitstop_for_kind(&row, INPUT_LIGHT),
+                HITSTOP_TICKS,
+                "{class:?} v1 light"
+            );
+            assert_eq!(
+                hitstop_for_kind(&row, INPUT_HEAVY),
+                HITSTOP_TICKS,
+                "{class:?} v1 heavy"
+            );
+            assert_eq!(hitstop_for_parry(&row), HITSTOP_TICKS, "{class:?} v1 parry");
+        }
     }
 
     #[test]

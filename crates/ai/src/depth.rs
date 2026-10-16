@@ -346,7 +346,7 @@ impl TierRow {
             .strip_prefix("tier_")
             .ok_or(TierError::RowId { line: line_no })?;
         let tier = parse_tier_no(num).ok_or(TierError::RowId { line: line_no })?;
-        if tier < 1 || tier > 4 {
+        if !(1..=4).contains(&tier) {
             return Err(TierError::RowId { line: line_no });
         }
         let mut hp: Option<u16> = None;
@@ -390,7 +390,7 @@ impl TierRow {
         let tell = tell.ok_or(TierError::MissingKey { line: line_no })?;
         let stagger = stagger.ok_or(TierError::MissingKey { line: line_no })?;
         let counter = counter.ok_or(TierError::MissingKey { line: line_no })?;
-        if hp < 900 || hp > 1_200 {
+        if !(900..=1_200).contains(&hp) {
             return Err(TierError::OutOfFence {
                 line: line_no,
                 field: "hp_permille",
@@ -398,7 +398,7 @@ impl TierRow {
             });
         }
         let tell_i = i32::try_from(tell).map_err(|_| TierError::BadInt { line: line_no })?;
-        if tell_i < 15 || tell_i > 60 {
+        if !(15..=60).contains(&tell_i) {
             return Err(TierError::OutOfFence {
                 line: line_no,
                 field: "tell_ticks",
@@ -412,7 +412,7 @@ impl TierRow {
                 value: i32::from(stagger),
             });
         }
-        if counter < 1 || counter > 3 {
+        if !(1..=3).contains(&counter) {
             return Err(TierError::OutOfFence {
                 line: line_no,
                 field: "counter",

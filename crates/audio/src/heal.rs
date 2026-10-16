@@ -271,7 +271,7 @@ impl DeviceHeal {
     }
 
     /// Reopen the real default device through the supervisor: pulls stereo
-    /// frames from `mixer` on the audio callback once open. Headless hosts
+    /// frames from `source` on the audio callback once open. Headless hosts
     /// observe `Err` (typed refusal or quarantine) and keep mixing offline.
     ///
     /// # Errors
@@ -279,12 +279,12 @@ impl DeviceHeal {
     /// Same as [`Self::try_reopen`]; a missing device degrades, it never
     /// panics.
     #[cfg(feature = "device")]
-    pub fn reopen_live(
+    pub fn reopen_live<S: crate::FrameSource>(
         &mut self,
         tick: u64,
-        mixer: std::sync::Arc<std::sync::Mutex<Mixer>>,
+        source: S,
     ) -> Result<(crate::device::DeviceOutput, HealReport), AudioHealError> {
-        self.try_reopen(tick, || crate::device::DeviceOutput::open_default(mixer))
+        self.try_reopen(tick, || crate::device::DeviceOutput::open_default(source))
     }
 
     /// Record one device fault with the supervisor and route its decision.

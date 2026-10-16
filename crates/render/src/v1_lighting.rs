@@ -1,6 +1,8 @@
-//! v1 V2 lighting (R4): cascaded shadows, baked probe GI, bloom factors, TAA
-//! jitter and color grading — all CPU-side data tables and pure functions
-//! behind the `v1` feature, so the headless default stays std-only.
+//! v1 V2 lighting (R4): cascaded shadows, baked probe GI, bloom factors and
+//! color grading — all CPU-side data tables and pure functions
+//! behind the `v1` feature, so the headless default stays std-only. TAA
+//! jitter is consumed from its single owner in `crate::post`, never
+//! re-derived here.
 //!
 //! Consumer: R6/PA1 (temporal upscaling, performance autopilot), GM1 (game
 //! frame assembly) and Q1 (visual reference captures). Data owner:
@@ -17,7 +19,7 @@
 //! GPU application (projection jitter, grade uniforms, bloom add) is consumed
 //! by `v1_gpu`; the wgpu pass wiring itself lands with the temporal upscaler.
 //!
-//! Provenance: cascade practical splits, Halton-2/3 jitter, trilinear probe
+//! Provenance: cascade practical splits, trilinear probe
 //! lookup, box-filter bloom mips and exposure/contrast/saturation grading are
 //! textbook formulations implemented directly (no upstream copy), so they
 //! carry no `PORT()` marker. The tonemap they feed stays Bevy-ported in
@@ -744,58 +746,10 @@ impl BloomMipChain {
     }
 }
 
-// ---------------------------------------------------------------------------
-// TAA jitter: Halton-2/3 sequence offsets per frame index.
-// ---------------------------------------------------------------------------
-
-/// Radical inverse of `index` in `base` (1-indexed callers pass `frame + 1`
-/// so frame 0 leaves the origin). Pure textbook math, deterministic.
-pub fn halton(mut index: u32, base: u32) -> f32 {
-    debug_assert!(base >= 2, "halton base must be >= 2");
-    let (b, mut denom) = (f64::from(base), 1.0f64);
-    let mut out = 0.0f64;
-    while index > 0 {
-        denom *= b;
-        out += f64::from(index % base) / denom;
-        index /= base;
-    }
-    out as f32
-}
-
-/// Per-frame TAA jitter in pixel units, centered on `[-0.5, 0.5)`: x from
-/// Halton base 2, y from Halton base 3 (the standard 2D low-discrepancy
-/// pairing). Index wraps every `u32::MAX` frames; the sequence position
-/// depends only on the frame number, never on wall time.
-pub struct TaaJitter;
-
-impl TaaJitter {
-    /// Jitter offset for `frame` in pixels, centered on `[-0.5, 0.5)`.
-    pub fn offset(frame: u64) -> [f32; 2] {
-        let i = frame.wrapping_add(1) as u32;
-        [halton(i, 2) - 0.5, halton(i, 3) - 0.5]
-    }
-
-    /// Jitter for `frame` in DirectX/WebGPU NDC units (`offset * 2 / res`):
-    /// the value [`TaaJitter::apply_to_proj`] adds to the projection matrix.
-    /// Zero resolution (suspended swap path) yields zero jitter.
-    pub fn ndc(frame: u64, width: u32, height: u32) -> [f32; 2] {
-        if width == 0 || height == 0 {
-            return [0.0, 0.0];
-        }
-        let [jx, jy] = Self::offset(frame);
-        [jx * 2.0 / width as f32, jy * 2.0 / height as f32]
-    }
-
-    /// Apply an NDC jitter to a projection matrix for the `v1_gpu` TAA pass:
-    /// offsets the third-column x/y (the `m[2][0]`, `m[2][1]` perspective
-    /// terms), leaving everything else bit-identical.
-    pub fn apply_to_proj(proj: glam::Mat4, ndc: [f32; 2]) -> glam::Mat4 {
-        let mut out = proj;
-        out.z_axis.x += ndc[0];
-        out.z_axis.y += ndc[1];
-        out
-    }
-}
+// NOTE: TAA jitter (Halton-2/3 offsets, NDC scaling, the projection hook)
+// lives in `crate::post` (`jitter_offset`, `jitter_ndc`,
+// `jitter_projection_glam`): this module consumes that single owner instead
+// of keeping a second copy.
 
 // ---------------------------------------------------------------------------
 // Grading: exposure/contrast/saturation applied in the tonemap path.
@@ -1160,22 +1114,22 @@ mod tests {
         // [-0.5, 0.5). Frame 0 -> (1/2 - 1/2, 1/3 - 1/2) = (0, -1/6);
         // frame 1 -> (1/4 - 1/2, 2/3 - 1/2) = (-1/4, 1/6);
         // frame 2 -> (3/4 - 1/2, 1/9 - 1/2) = (1/4, -7/18).
-        assert!(approx(halton(1, 2), 0.5, 1e-7));
-        assert!(approx(halton(2, 2), 0.25, 1e-7));
-        assert!(approx(halton(3, 2), 0.75, 1e-7));
-        assert!(approx(halton(1, 3), 1.0 / 3.0, 1e-7));
-        assert!(approx(halton(2, 3), 2.0 / 3.0, 1e-7));
-        assert!(approx(halton(3, 3), 1.0 / 9.0, 1e-7));
-        let j0 = TaaJitter::offset(0);
+        assert!(approx(crate::post::halton(1, 2), 0.5, 1e-7));
+        assert!(approx(crate::post::halton(2, 2), 0.25, 1e-7));
+        assert!(approx(crate::post::halton(3, 2), 0.75, 1e-7));
+        assert!(approx(crate::post::halton(1, 3), 1.0 / 3.0, 1e-7));
+        assert!(approx(crate::post::halton(2, 3), 2.0 / 3.0, 1e-7));
+        assert!(approx(crate::post::halton(3, 3), 1.0 / 9.0, 1e-7));
+        let j0 = crate::post::jitter_offset(0);
         assert!(approx(j0[0], 0.0, 1e-6) && approx(j0[1], -1.0 / 6.0, 1e-6));
-        let j1 = TaaJitter::offset(1);
+        let j1 = crate::post::jitter_offset(1);
         assert!(approx(j1[0], -0.25, 1e-6) && approx(j1[1], 1.0 / 6.0, 1e-6));
-        let j2 = TaaJitter::offset(2);
+        let j2 = crate::post::jitter_offset(2);
         assert!(approx(j2[0], 0.25, 1e-6) && approx(j2[1], -7.0 / 18.0, 1e-6));
         // The 16-frame sequence stays inside the pixel and is non-repeating.
         let mut seen = Vec::new();
         for f in 0..16u64 {
-            let j = TaaJitter::offset(f);
+            let j = crate::post::jitter_offset(f);
             assert!(
                 (-0.5..0.5).contains(&j[0]) && (-0.5..0.5).contains(&j[1]),
                 "frame {f} jitter {j:?} stays in the pixel"
@@ -1184,18 +1138,18 @@ mod tests {
             seen.push(j);
         }
         // NDC scaling is offset * 2 / res; zero res (suspended) is zero.
-        let ndc = TaaJitter::ndc(1, 1920, 1080);
+        let ndc = crate::post::jitter_ndc(1, 1920, 1080);
         assert!(approx(ndc[0], j1[0] * 2.0 / 1920.0, 1e-9));
         assert!(approx(ndc[1], j1[1] * 2.0 / 1080.0, 1e-9));
-        assert_eq!(TaaJitter::ndc(1, 0, 1080), [0.0, 0.0]);
+        assert_eq!(crate::post::jitter_ndc(1, 0, 1080), [0.0, 0.0]);
         // Projection application touches only the perspective terms.
         let proj = glam::Mat4::IDENTITY;
-        let j = TaaJitter::apply_to_proj(proj, [0.01, -0.02]);
+        let j = crate::post::jitter_projection_glam(proj, [0.01, -0.02]);
         assert_eq!((j.z_axis.x, j.z_axis.y), (0.01, -0.02));
         assert_eq!(j.x_axis, proj.x_axis);
         assert_eq!(j.y_axis, proj.y_axis);
         assert_eq!(j.w_axis, proj.w_axis);
-        assert_eq!(TaaJitter::apply_to_proj(proj, [0.0, 0.0]), proj);
+        assert_eq!(crate::post::jitter_projection_glam(proj, [0.0, 0.0]), proj);
     }
 
     #[test]
@@ -1286,8 +1240,11 @@ mod tests {
             c1.composite().expect("composites"),
             c2.composite().expect("composites")
         );
-        assert_eq!(TaaJitter::offset(7), TaaJitter::offset(7));
-        assert_eq!(TaaJitter::ndc(7, 1920, 1080), TaaJitter::ndc(7, 1920, 1080));
+        assert_eq!(crate::post::jitter_offset(7), crate::post::jitter_offset(7));
+        assert_eq!(
+            crate::post::jitter_ndc(7, 1920, 1080),
+            crate::post::jitter_ndc(7, 1920, 1080)
+        );
         let grade = GradeSettings::new(1.5, 1.2, 0.8).expect("grade valid");
         assert_eq!(
             grade.apply_linear([0.4, 0.3, 0.2]),

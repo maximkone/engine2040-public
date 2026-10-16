@@ -7,12 +7,12 @@
 //! game thread; here an id picks a seeded variant and starts a voice that
 //! shares the clip's samples.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::cue::{CueBank, VariantPicker};
 use crate::feed::{feed, Command, FeedRx, FeedTx, MixCounts};
 use crate::playlist::{MusicBed, MusicState};
-use crate::{Mixer, SpatialMixer};
+use crate::SpatialMixer;
 
 /// Most commands one render call applies, so a flooding producer cannot
 /// stretch a callback; the rest wait for the next buffer.
@@ -165,20 +165,6 @@ impl FrameSource for AudioEngine {
                 culled: self.mixer.culled(),
             },
         );
-    }
-}
-
-/// Shared-mixer source kept so callers that still hand the device an
-/// `Arc<Mutex<Mixer>>` compile until they move to [`AudioEngine`]: the
-/// callback renders silence for a chunk whenever the game thread holds the
-/// lock, which is exactly the lossy hand-off the feed replaces. New code
-/// should not use it; it goes away with its last caller.
-impl FrameSource for Arc<Mutex<Mixer>> {
-    fn render_stereo_into(&mut self, out: &mut [f32]) {
-        match self.try_lock() {
-            Ok(mut mixer) => mixer.render_stereo_into(out),
-            Err(_) => out.fill(0.0),
-        }
     }
 }
 
@@ -347,21 +333,56 @@ mod tests {
     }
 
     #[test]
-    fn shared_mixer_adapter_goes_silent_under_contention() {
-        let mut shared = Arc::new(Mutex::new(Mixer::new(RATE)));
-        let clip = Pcm::new(RATE, 1, vec![0.5; 8]);
-        shared.lock().expect("fresh lock").play(&clip, 1.0);
-        let mut out = [9.0f32; 4];
-        let guard = shared.lock().expect("game thread holds the mixer");
-        let mut contended = Arc::clone(&shared);
-        contended.render_stereo_into(&mut out);
+    fn contended_feed_loses_nothing() {
+        // The tick-stamped feed owns the device path: 1000 commands with
+        // room for all of them drain to empty with nothing dropped, so a
+        // busy callback defers work instead of silencing it like the
+        // deleted `try_lock` hand-off did.
+        const COMMANDS: u64 = 1_000;
+        let (mut tx, mut engine) = AudioEngine::with_feed(test_bank(), 1_024, RATE, 2040);
+        for tick in 0..u32::try_from(COMMANDS).unwrap_or(0) {
+            tx.play(tick, "clack", 1.0, None)
+                .expect("room for all 1000");
+        }
+        let mut total = 0usize;
+        loop {
+            let n = engine.drain();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
         assert_eq!(
-            out, [0.0; 4],
-            "locked mixer: the legacy hand-off drops audio"
+            u64::try_from(total).unwrap_or(0),
+            COMMANDS,
+            "every queued command applied"
         );
-        drop(guard);
-        shared.render_stereo_into(&mut out);
-        assert_eq!(out, [0.5; 4], "unlocked mixer renders");
+        assert_eq!(engine.applied(), COMMANDS);
+        // Publish the counts so the game thread sees them, then check.
+        let mut out = [0.0f32; 4];
+        engine.render_stereo_into(&mut out);
+        let stats = tx.stats();
+        assert_eq!((stats.sent, stats.dropped_full), (COMMANDS, 0));
+        assert_eq!(
+            (stats.applied, stats.last_applied_tick),
+            (COMMANDS, u32::try_from(COMMANDS - 1).unwrap_or(0))
+        );
+        // Seeded variant picks repeat per seed: the same seed replays the
+        // same takes, another seed picks another sequence.
+        let run = |seed: u64| {
+            let (mut tx, mut engine) = AudioEngine::with_feed(test_bank(), 64, RATE, seed);
+            let mut heard = Vec::new();
+            for t in 0..24 {
+                tx.play(t, "clack", 1.0, None).expect("room");
+                let mut out = [0.0f32; 128];
+                engine.render_stereo_into(&mut out);
+                heard.push(out[0].to_bits());
+            }
+            heard
+        };
+        let first = run(2040);
+        assert_eq!(first, run(2040), "same seed replays the same takes");
+        assert_ne!(first, run(2041), "another seed picks another sequence");
     }
 
     #[test]

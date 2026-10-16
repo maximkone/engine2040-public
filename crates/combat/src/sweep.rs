@@ -509,6 +509,107 @@ pub fn resolve_tick(
     n
 }
 
+// ---- LF11 per-swing once-per-target gate ------------------------------------
+// Ember swept-hit rule, integer port: the blade still sweeps every tick (no
+// tunneling), but one swing contacts each victim once. Caller-owned beside
+// `resolve_tick`, which stays frozen so the golden hash never moves.
+
+/// Caller-owned per-swing once-per-target gate: one swing of one attacker
+/// plus its contacted victims. Slots are fighter IDs; the table lives on
+/// the caller stack, zero heap bytes per update.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SwingGate {
+    /// Caller swing sequence number; a new id re-arms the hit-set.
+    pub swing: u32,
+    /// Attacking slot this gate tracks; foreign attackers pass through.
+    pub attacker: u8,
+    /// Contacted victim slots in first-contact order.
+    seen: [u8; SLOT_COUNT],
+    /// Live entries in `seen`, always `<= SLOT_COUNT`.
+    seen_n: u8,
+}
+
+impl SwingGate {
+    /// Fresh gate: nothing contacted yet under (`swing`, `attacker`).
+    #[must_use]
+    pub const fn fresh(swing: u32, attacker: u8) -> Self {
+        Self {
+            swing,
+            attacker,
+            seen: [0; SLOT_COUNT],
+            seen_n: 0,
+        }
+    }
+
+    /// Claim `victim` for this swing: true on first contact (now marked),
+    /// false when already contacted or past the table. Never traps.
+    pub fn claim(&mut self, victim: u8) -> bool {
+        let mut i = 0;
+        while i < self.seen_n {
+            if self.seen[usize::from(i)] == victim {
+                return false;
+            }
+            i += 1;
+        }
+        let n = usize::from(self.seen_n);
+        if n < self.seen.len() {
+            self.seen[n] = victim;
+            self.seen_n += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Re-arm for a new swing: clears every contact.
+    pub fn reset(&mut self, swing: u32, attacker: u8) {
+        self.swing = swing;
+        self.attacker = attacker;
+        self.seen = [0; SLOT_COUNT];
+        self.seen_n = 0;
+    }
+}
+
+/// Resolve one tick through a [`SwingGate`]: each victim of (`swing`,
+/// `attacker`) emits once, later ticks skip; a new id re-arms, foreign
+/// attackers pass through. Order and replay match [`resolve_tick`].
+pub fn resolve_swing_tick(
+    fighters: &[SweepParticipant],
+    sweeps: &[WeaponSweep],
+    tables: &SweepTables,
+    swing: u32,
+    attacker: u8,
+    gate: &mut SwingGate,
+    out: &mut [SweepEvent; MAX_SWEEP_EVENTS_PER_TICK],
+) -> usize {
+    if gate.swing != swing || gate.attacker != attacker {
+        gate.reset(swing, attacker);
+    }
+    let mut tmp = [SweepEvent::Hit {
+        attacker: 0,
+        victim: 0,
+    }; MAX_SWEEP_EVENTS_PER_TICK];
+    let n = resolve_tick(fighters, sweeps, tables, &mut tmp);
+    let mut kept: usize = 0;
+    let mut i = 0;
+    while i < n {
+        let (hit_attacker, victim) = match tmp[i] {
+            SweepEvent::Hit { attacker, victim } => (attacker, victim),
+            SweepEvent::Blocked { attacker, victim } => (attacker, victim),
+        };
+        if hit_attacker == gate.attacker {
+            if gate.claim(victim) && kept < out.len() {
+                out[kept] = tmp[i];
+                kept += 1;
+            }
+        } else if kept < out.len() {
+            out[kept] = tmp[i];
+            kept += 1;
+        }
+        i += 1;
+    }
+    kept
+}
+
 /// Fighter reservoir: the (id, slice index) pairs of up to [`SLOT_COUNT`]
 /// fighters, sorted by id. Smallest ids win and the first-in-slice wins
 /// duplicates; returns the table and how many entries are live.
@@ -1033,6 +1134,13 @@ mod tests {
         }; MAX_SWEEP_EVENTS_PER_TICK];
         let n = resolve_tick(fighters, sweeps, &t, &mut out);
         (out[..n].to_vec(), n)
+    }
+
+    fn pair(e: SweepEvent) -> (u8, u8, bool) {
+        match e {
+            SweepEvent::Hit { attacker, victim } => (attacker, victim, false),
+            SweepEvent::Blocked { attacker, victim } => (attacker, victim, true),
+        }
     }
 
     #[test]
@@ -1740,5 +1848,76 @@ mod tests {
         assert!(c.iter().any(|tick| !tick.is_empty()));
         // The numbers decide: the two rows answer the same tape differently.
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn swing_gate_hits_each_victim_once_across_six_ticks() {
+        // LF11 spike (b): one swing arc over 6 ticks vs 3 victims; each
+        // takes exactly one Hit in ID order, replayed byte-equal twice.
+        let t = tables();
+        let fighters = [
+            pose(0, -1000, 0, 1, 0, 800, 60, false),
+            pose(1, 0, 0, -1, 0, 800, 60, false),
+            pose(2, 0, 0, -1, 0, 800, 60, false),
+            pose(3, 0, 0, -1, 0, 800, 60, false),
+        ];
+        let arc = sweep(0, [-100, 0, 0], [100, 0, 0], 10);
+        let run = || {
+            let mut gate = SwingGate::fresh(7, 0);
+            let mut all = Vec::new();
+            let mut tick = 0;
+            while tick < 6 {
+                let mut out = [SweepEvent::Hit {
+                    attacker: 0,
+                    victim: 0,
+                }; MAX_SWEEP_EVENTS_PER_TICK];
+                let n = resolve_swing_tick(&fighters, &[arc], &t, 7, 0, &mut gate, &mut out);
+                all.push(out[..n].to_vec());
+                tick += 1;
+            }
+            all
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a, b, "same swing ticks replay byte-equal x2");
+        let total: usize = a.iter().map(Vec::len).sum();
+        assert_eq!(
+            total, 3,
+            "3 victims take exactly one Hit per swing, got {a:?}"
+        );
+        assert_eq!(a[0].len(), 3, "first tick hits all 3 victims: {a:?}");
+        assert_eq!(pair(a[0][0]), (0, 1, false));
+        assert_eq!(pair(a[0][1]), (0, 2, false));
+        assert_eq!(pair(a[0][2]), (0, 3, false));
+        assert!(
+            a[1..].iter().all(Vec::is_empty),
+            "later ticks of the same swing skip: {a:?}"
+        );
+    }
+
+    #[test]
+    fn swing_gate_blocked_marks_and_fresh_gate_reemits() {
+        // First contact wins, shielded or not; a new id re-arms, and a
+        // gate never suppresses another attacker.
+        let t = tables();
+        let fighters = [
+            pose(0, -1000, 0, 1, 0, 800, 60, false),
+            pose(1, 0, 0, -1, 0, 800, 60, true),
+        ];
+        let arc = sweep(0, [-100, 0, 0], [100, 0, 0], 10);
+        let mut gate = SwingGate::fresh(7, 0);
+        let mut out = [SweepEvent::Hit {
+            attacker: 0,
+            victim: 0,
+        }; MAX_SWEEP_EVENTS_PER_TICK];
+        let n0 = resolve_swing_tick(&fighters, &[arc], &t, 7, 0, &mut gate, &mut out);
+        assert_eq!(n0, 1);
+        assert_eq!(pair(out[0]), (0, 1, true));
+        let n1 = resolve_swing_tick(&fighters, &[arc], &t, 7, 0, &mut gate, &mut out);
+        assert_eq!(n1, 0, "blocked contact still marks the swing");
+        let n2 = resolve_swing_tick(&fighters, &[arc], &t, 8, 0, &mut gate, &mut out);
+        assert_eq!(n2, 1, "a new swing id re-arms every victim");
+        let n3 = resolve_swing_tick(&fighters, &[arc], &t, 8, 1, &mut gate, &mut out);
+        assert_eq!(n3, 1, "a gate tracks only its own attacker");
     }
 }

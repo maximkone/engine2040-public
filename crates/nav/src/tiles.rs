@@ -26,6 +26,10 @@ pub const MAX_GRID_CELLS: usize = 1_048_576;
 pub const MAX_FLOW_FIELDS: usize = 8;
 /// Fixed tick rate a breach must open inside of (one second of ticks).
 pub const TICKS_PER_SECOND: u32 = 60;
+/// Largest queued obstacle request count; further requests refuse loudly.
+pub const MAX_OBSTACLE_REQUESTS: usize = 64;
+/// Largest tile set one box obstacle may touch; wider boxes refuse loudly.
+pub const MAX_TOUCHED_TILES: usize = 8;
 /// Wire magic (`E2TIL1`) at the head of every blob.
 const WIRE_MAGIC: [u8; 6] = *b"E2TIL1";
 /// Wire version; bump on any layout change, refuse anything else.
@@ -119,6 +123,98 @@ impl BreakSet {
     }
 }
 
+/// Salt-versioned obstacle handle; high 16 bits salt, low 16 slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObstacleRef(pub u32);
+/// Bounded box-obstacle queue; add/remove enqueue, drain applies touched tiles only.
+/// Caller: `rebake::update`. PORT(recastnavigation/recastnavigation@9f4ce64:DetourTileCache).
+#[derive(Clone, Debug, Default)]
+pub struct ObstacleCache {
+    slots: Vec<ObstacleSlot>,
+    pending: Vec<(bool, usize)>,
+}
+/// One box slot: clamped bounds, reuse salt, live flag.
+#[derive(Clone, Copy, Debug)]
+struct ObstacleSlot([usize; 4], u16, bool);
+impl ObstacleCache {
+    /// Queues a rubble box over cells `b`; cells flip on drain.
+    /// Errors: [`TileError::BadBounds`], [`TileError::TooManyTiles`], [`TileError::QueueFull`].
+    pub fn add_box_obstacle(
+        &mut self,
+        nav: &TiledNav,
+        b: [usize; 4],
+    ) -> Result<ObstacleRef, TileError> {
+        let bounds = clamp_box(nav, b)?;
+        if self.pending.len() >= MAX_OBSTACLE_REQUESTS {
+            return Err(TileError::QueueFull);
+        }
+        let mut slot = self.slots.len();
+        if let Some(i) = self.slots.iter().position(|s| !s.2) {
+            slot = i;
+        } else {
+            if slot >= 0xFFFF {
+                return Err(TileError::QueueFull);
+            }
+            self.slots.push(ObstacleSlot(bounds, 1, false));
+        }
+        self.slots[slot].0 = bounds;
+        self.slots[slot].2 = true;
+        self.pending.push((true, slot));
+        let salt = u32::from(self.slots[slot].1);
+        let low = u32::try_from(slot).map_err(|_| TileError::QueueFull)?;
+        Ok(ObstacleRef((salt << 16) | low))
+    }
+    /// Queues removal of a live box; cells clear on drain.
+    /// Errors: [`TileError::UnknownObstacle`], [`TileError::QueueFull`].
+    pub fn remove_obstacle(&mut self, obstacle: ObstacleRef) -> Result<(), TileError> {
+        let slot = usize::try_from(obstacle.0 & 0xFFFF)
+            .map_err(|_| TileError::UnknownObstacle(obstacle.0))?;
+        let salt =
+            u16::try_from(obstacle.0 >> 16).map_err(|_| TileError::UnknownObstacle(obstacle.0))?;
+        let known = matches!(self.slots.get(slot), Some(s) if s.2 && s.1 == salt);
+        if !known {
+            return Err(TileError::UnknownObstacle(obstacle.0));
+        }
+        if self.pending.len() >= MAX_OBSTACLE_REQUESTS {
+            return Err(TileError::QueueFull);
+        }
+        self.slots[slot].2 = false;
+        self.slots[slot].1 = self.slots[slot].1.wrapping_add(1).max(1);
+        self.pending.push((false, slot));
+        Ok(())
+    }
+    /// Applies queued flips in order; rebake happens in `rebake::update`.
+    pub(crate) fn drain(&mut self, nav: &mut TiledNav) {
+        for (add, slot) in std::mem::take(&mut self.pending) {
+            let [x0, y0, x1, y1] = self.slots[slot].0;
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let _ = nav.set_blocked(x, y, add);
+                }
+            }
+        }
+    }
+}
+/// Clamped box bounds; inversion, off-grid, or touching over 8 tiles refuses.
+fn clamp_box(nav: &TiledNav, b: [usize; 4]) -> Result<[usize; 4], TileError> {
+    if b[0] > b[2] || b[1] > b[3] || b[0] >= nav.width() || b[1] >= nav.height() {
+        return Err(TileError::BadBounds);
+    }
+    let x1 = b[2].min(nav.width() - 1);
+    let y1 = b[3].min(nav.height() - 1);
+    let c = [b[0], b[1], x1, y1];
+    let (cols, _) = nav.tile_dims();
+    let edge = nav.edge();
+    let n = (c[2] / edge - c[0] / edge + 1) * (c[3] / edge - c[1] / edge + 1);
+    if n > MAX_TOUCHED_TILES {
+        return Err(TileError::TooManyTiles {
+            got: n,
+            max: MAX_TOUCHED_TILES,
+        });
+    }
+    Ok(c)
+}
+
 /// Typed tile failures; bad sets refuse, never half-apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TileError {
@@ -204,6 +300,12 @@ pub enum TileError {
         /// Byte count offered.
         got: usize,
     },
+    /// Obstacle request queue is full.
+    QueueFull,
+    /// Stale or unknown obstacle handle value.
+    UnknownObstacle(u32),
+    /// Box bounds are inverted or off the grid.
+    BadBounds,
 }
 
 impl fmt::Display for TileError {
@@ -235,6 +337,9 @@ impl fmt::Display for TileError {
             Self::TrailingBytes { got } => write!(f, "tiles: {got} trailing bytes"),
             Self::NotCanonical(why) => write!(f, "tiles: blob not canonical ({why})"),
             Self::TooLarge { got } => write!(f, "tiles: {got} bytes over decode bound"),
+            Self::QueueFull => write!(f, "tiles: obstacle queue full"),
+            Self::UnknownObstacle(o) => write!(f, "tiles: obstacle {o} unknown"),
+            Self::BadBounds => write!(f, "tiles: box bounds refused"),
         }
     }
 }

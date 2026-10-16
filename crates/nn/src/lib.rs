@@ -67,6 +67,11 @@ mod spike;
 pub use spike::{
     spike_infer, spike_tick, SpikeErr, SPIKE_BIAS, SPIKE_INPUT_DIM, SPIKE_OUTPUT_DIM, SPIKE_WEIGHTS,
 };
+mod qat;
+pub use qat::{
+    determinism_report, export_qat, simulate_quantize, train_student, QatConfig, QatErr,
+    ToolchainReport, QAT_INPUT_STEPS, QAT_LR, QAT_MAX_EPOCHS, QAT_MAX_SAMPLES,
+};
 
 /// The only file version this runtime reads.
 pub const VERSION: u8 = 1;

@@ -91,8 +91,15 @@ fn sweep_and_bvh_match_exact_x_overlaps() {
     assert_eq!(bvh_pairs(&mins, &maxs), want);
     assert_eq!(sweep_pairs(&mins, &maxs), bvh_pairs(&mins, &maxs));
     let moving = step_bodies();
-    assert_eq!(brute_pairs(&moving), vec![(0, 1)], "strict oracle pins the pair");
-    assert!(!brute_pairs(&moving).iter().any(|(a, b)| *a >= 2 || *b >= 2), "far body leaked");
+    assert_eq!(
+        brute_pairs(&moving),
+        vec![(0, 1)],
+        "strict oracle pins the pair"
+    );
+    assert!(
+        !brute_pairs(&moving).iter().any(|(a, b)| *a >= 2 || *b >= 2),
+        "far body leaked"
+    );
 }
 
 #[test]
@@ -118,7 +125,10 @@ fn broadphase_path_leaves_step_hash_untouched() {
             assert_eq!(sweep, bvh, "sweep and BVH must agree each tick");
             let brute = brute_pairs(&bodies);
             for pair in &brute {
-                assert!(candidates.contains(pair), "grid dropped true pair {pair:?}: {candidates:?}");
+                assert!(
+                    candidates.contains(pair),
+                    "grid dropped true pair {pair:?}: {candidates:?}"
+                );
                 assert!(sweep.contains(pair), "sweep dropped true pair {pair:?}");
             }
             solver.step(&mut bodies, DT);
@@ -128,9 +138,26 @@ fn broadphase_path_leaves_step_hash_untouched() {
     }
     let (plain_bodies, plain_hash) = reference();
     let (probe_bodies, probe_hash) = probed();
-    assert_eq!(plain_hash, probe_hash, "broadphase queries must not move the step hash");
+    assert_eq!(
+        plain_hash, probe_hash,
+        "broadphase queries must not move the step hash"
+    );
     for (i, (plain, probe)) in plain_bodies.iter().zip(probe_bodies.iter()).enumerate() {
-        assert_eq!((plain.x.to_bits(), plain.y.to_bits(), plain.vx.to_bits(), plain.vy.to_bits()), (probe.x.to_bits(), probe.y.to_bits(), probe.vx.to_bits(), probe.vy.to_bits()), "body {i} drifted under the broadphase path");
+        assert_eq!(
+            (
+                plain.x.to_bits(),
+                plain.y.to_bits(),
+                plain.vx.to_bits(),
+                plain.vy.to_bits()
+            ),
+            (
+                probe.x.to_bits(),
+                probe.y.to_bits(),
+                probe.vx.to_bits(),
+                probe.vy.to_bits()
+            ),
+            "body {i} drifted under the broadphase path"
+        );
     }
     let (_, again) = reference();
     assert_eq!(plain_hash, again, "step hash must repeat");

@@ -1707,3 +1707,80 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod brief_snapshot {
+    use super::{brief, brief_text};
+    const NAME: &str = "brief_snapshot_rejects_unedited_change";
+    const REFERENCE: &str = "digest 9003630263813481348\nobject prop_00 [0]\nobject prop_01 [1]\ngroup arena 1\ngroup object 0\nrelation 0 facing 1\n";
+    fn redact_brief(text: &str) -> String {
+        let flat = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut out = String::with_capacity(flat.len());
+        for line in flat.split_inclusive('\n') {
+            let (body, nl) = match line.strip_suffix('\n') {
+                Some(s) => (s, "\n"),
+                None => (line, ""),
+            };
+            let mut red = body.replace("...", "[tail]").replace('…', "[tail]");
+            for word in ["truncated", "Truncated", "TRUNCATED"] {
+                red = red.replace(word, "[tail]");
+            }
+            let low = red.to_ascii_lowercase();
+            let vol = ["bytes", "budget", "truncat", "short by"]
+                .iter()
+                .any(|k| low.contains(k));
+            if vol {
+                let mut masked = String::with_capacity(red.len());
+                let mut chars = red.chars().peekable();
+                while let Some(ch) = chars.next() {
+                    if ch.is_ascii_digit() {
+                        while chars.peek().is_some_and(|n| n.is_ascii_digit()) {
+                            chars.next();
+                        }
+                        masked.push_str("[n]");
+                    } else {
+                        masked.push(ch);
+                    }
+                }
+                red = masked;
+            }
+            out.push_str(&red);
+            out.push_str(nl);
+        }
+        out
+    }
+    fn pending_path() -> std::path::PathBuf {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("src");
+        path.push(format!("{NAME}.pending"));
+        path
+    }
+    #[rustfmt::skip]
+    fn room() -> Vec<super::super::Actor> {
+        vec![
+            super::super::Actor { id: 0, name: "prop_00".into(), x: 0.0, y: 0.225, z: 0.0, sx: 0.45, sy: 0.45, sz: 0.45, parent: None, physical: true, vx: 0.0, vz: 0.0, yaw: 0.0 },
+            super::super::Actor { id: 1, name: "prop_01".into(), x: 6.0, y: 1.5, z: 0.0, sx: 0.5, sy: 3.0, sz: 4.0, parent: None, physical: true, vx: 0.0, vz: 0.0, yaw: 0.0 },
+        ]
+    }
+    #[test]
+    fn brief_snapshot_rejects_unedited_change() {
+        let actors = room();
+        let graph = super::super::relation::build(&actors);
+        let report = super::super::run(&actors);
+        let text = brief_text(&brief(&actors, &graph, &report, usize::MAX));
+        let redacted = redact_brief(&text);
+        let mut rev = actors.clone();
+        rev.reverse();
+        let graph2 = super::super::relation::build(&rev);
+        let report2 = super::super::run(&rev);
+        let text2 = brief_text(&brief(&rev, &graph2, &report2, usize::MAX));
+        assert_eq!(text, text2, "input order never moves brief text");
+        assert_eq!(redacted, redact_brief(&text2));
+        let pending = pending_path();
+        if redacted != REFERENCE {
+            std::fs::write(&pending, &redacted).expect("pending writes");
+            panic!("brief snapshot mismatch: wrote {} for review; blessed update copies it into REFERENCE, never auto-accepts", pending.display());
+        }
+        let _ = std::fs::remove_file(&pending);
+    }
+}

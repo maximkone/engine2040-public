@@ -73,7 +73,6 @@ pub use uv2_chart::{
     pack_uv2, provenance_for_chart, provenance_row_for_chart, ChartOptions, PackOptions, Uv2Chart,
     Uv2Error, Uv2Options,
 };
-pub mod vat;
 #[cfg(feature = "import")]
 pub mod mesh_import;
 pub mod meshlet;
@@ -90,6 +89,7 @@ pub mod texture;
 /// Traversal and finisher intake: edge markers plus sidecar audit over retarget cooks.
 #[cfg(feature = "import")]
 pub mod traversal_cook;
+pub mod vat;
 pub mod watcher;
 #[cfg(feature = "import")]
 pub use cooked::{

@@ -1073,4 +1073,18 @@ mod tests {
         assert!(RenderHeal::default().is_live());
         assert_eq!(RenderHeal::default().quality(), QualityLevel::Full);
     }
+
+    #[test]
+    fn bound_notice_truncates_on_char_boundary() {
+        assert_eq!(bound_notice("ok"), "ok");
+        let exact = "a".repeat(MAX_NOTICE_LEN);
+        assert_eq!(bound_notice(&exact), exact);
+        let long = "a".repeat(MAX_NOTICE_LEN + 10);
+        assert_eq!(bound_notice(&long), exact);
+        let prefix = "a".repeat(MAX_NOTICE_LEN - 1);
+        let split = format!("{prefix}éx");
+        let out = bound_notice(&split);
+        assert_eq!(out, prefix);
+        assert_eq!(out.len(), MAX_NOTICE_LEN - 1);
+    }
 }

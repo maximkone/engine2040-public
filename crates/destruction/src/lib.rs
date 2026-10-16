@@ -2,6 +2,10 @@
 
 pub mod bake;
 pub mod bake3d;
+/// Graded per-bond breaking strain from contact area, mass, anchor
+/// distance and seeded jitter, plus density cuts and sliver reject.
+/// Bake only; the arena tick stays frozen. Std-only.
+pub mod bond_grade;
 pub mod bonded;
 /// Debris budgets at 8-fighter scale: per-event caps, sleep islands,
 /// distance LOD. Std-only.

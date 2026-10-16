@@ -12,9 +12,9 @@
 //! swallowed.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use crate::{clip_sample, AudioEngine, CueBank, FeedTx, FrameSource};
+use crate::{clip_sample, AudioEngine, CueBank, FeedTx, FrameSource, Mixer};
 
 /// Cap for backend error strings carried in [`DeviceError`].
 pub const MAX_BACKEND_MSG: usize = 256;
@@ -421,12 +421,31 @@ pub fn levels(samples: &[f32]) -> Levels {
         }
     }
     let frames = crate::f32_of(u32::try_from(samples.len() / 2).unwrap_or(1)).max(1.0);
-    Levels { peak, rms_left: (sl / frames).sqrt(), rms_right: (sr / frames).sqrt(), clipped }
+    Levels {
+        peak,
+        rms_left: (sl / frames).sqrt(),
+        rms_right: (sr / frames).sqrt(),
+        clipped,
+    }
 }
 
 impl FrameSource for crate::Mixer {
     fn render_stereo_into(&mut self, out: &mut [f32]) {
         crate::Mixer::render_stereo_into(self, out);
+    }
+}
+
+/// Shared-mixer source for the windowed `open_audio` and heal `reopen_live`
+/// callers that still hand the device an `Arc<Mutex<Mixer>>`: the callback
+/// renders silence for a chunk whenever the game thread holds the lock,
+/// which is exactly the lossy hand-off the feed replaces. New code uses
+/// [`AudioEngine`]; this stays only for the shared mixer.
+impl FrameSource for Arc<Mutex<Mixer>> {
+    fn render_stereo_into(&mut self, out: &mut [f32]) {
+        match self.try_lock() {
+            Ok(mut mixer) => mixer.render_stereo_into(out),
+            Err(_) => out.fill(0.0),
+        }
     }
 }
 
@@ -448,7 +467,12 @@ pub fn record_audio<S: FrameSource>(
     source.render_stereo_into(&mut buf);
     let room = crate::trace::analyse_room(scene, listener, 64, 16);
     let ac = crate::trace::trace_source(scene, listener, source_pos, 32, 0.1);
-    let settings = crate::trace::RoomSettings { rt60: room.rt60, damping: 0.5, wet: room.closedness, predelay: 0.0 };
+    let settings = crate::trace::RoomSettings {
+        rt60: room.rt60,
+        damping: 0.5,
+        wet: room.closedness,
+        predelay: 0.0,
+    };
     let wet = settings.wet.clamp(0.0, 1.0);
     let dg = ac.direct_gain.clamp(0.0, 1.0);
     for s in buf.iter_mut() {
@@ -524,14 +548,24 @@ mod tests {
             let mut mixer = crate::Mixer::new(48_000);
             let pcm = crate::Pcm::new(48_000, 1, vec![0.4; 4_800]);
             mixer.play(&pcm, 1.0);
-            record_audio(&mut mixer, 48_000, 4_800, &scene, [0.0, 0.0, 0.0], [2.0, 0.0, 0.0])
+            record_audio(
+                &mut mixer,
+                48_000,
+                4_800,
+                &scene,
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+            )
         };
         let (a_bytes, a_rep) = run();
         let (b_bytes, b_rep) = run();
         assert_eq!(a_bytes, b_bytes, "offline bytes are deterministic");
         assert_eq!(a_rep, b_rep, "report repeats");
         assert!(a_rep.peak <= 1.0 && a_rep.peak > 0.0, "peak={}", a_rep.peak);
-        assert!(a_rep.rms_left.is_finite() && a_rep.rms_right.is_finite(), "rms finite");
+        assert!(
+            a_rep.rms_left.is_finite() && a_rep.rms_right.is_finite(),
+            "rms finite"
+        );
         let pcm = crate::decode_wav(&a_bytes).expect("wav parses as 16-bit PCM");
         assert_eq!((pcm.sample_rate, pcm.channels), (48_000, 2));
         assert_eq!(pcm.frames(), 4_800);
@@ -627,6 +661,38 @@ mod tests {
             assert!(!e.to_string().is_empty(), "{e:?} must describe itself");
         }
         assert!(cap_message(&"x".repeat(1024)).len() <= MAX_BACKEND_MSG + 3);
+    }
+
+    #[test]
+    fn shared_mixer_renders_audible_frames_through_frame_source() {
+        // Behavior the windowed `open_audio` caller needs: the shared mixer
+        // behind `Arc<Mutex<Mixer>>` renders through `FrameSource` when the
+        // game thread is not holding it.
+        let shared = Arc::new(Mutex::new(Mixer::new(48_000)));
+        let clip = crate::Pcm::new(48_000, 1, vec![0.5; 8]);
+        shared.lock().expect("fresh lock").play(&clip, 1.0);
+        let mut source = Arc::clone(&shared);
+        let mut out = [0.0f32; 4];
+        source.render_stereo_into(&mut out);
+        assert_eq!(out, [0.5; 4], "unlocked mixer renders its voice");
+    }
+
+    #[test]
+    fn shared_mixer_goes_silent_while_the_game_holds_it() {
+        // Failure case for the same caller: a contended lock never panics
+        // and never blocks the callback; it renders silence for the chunk.
+        let shared = Arc::new(Mutex::new(Mixer::new(48_000)));
+        let clip = crate::Pcm::new(48_000, 1, vec![0.5; 8]);
+        shared.lock().expect("fresh lock").play(&clip, 1.0);
+        let guard = shared.lock().expect("game thread holds the mixer");
+        let mut contended = Arc::clone(&shared);
+        let mut out = [9.0f32; 4];
+        contended.render_stereo_into(&mut out);
+        assert_eq!(out, [0.0; 4], "locked mixer renders silence, not a panic");
+        drop(guard);
+        let mut free = Arc::clone(&shared);
+        free.render_stereo_into(&mut out);
+        assert_eq!(out, [0.5; 4], "unlocked mixer renders again");
     }
 
     /// Source that numbers its frames: left `n/100`, right `-n/100`.

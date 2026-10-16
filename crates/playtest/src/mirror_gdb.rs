@@ -151,14 +151,36 @@ pub fn green_count(report: &SliceReport) -> usize {
         .count()
 }
 
+/// Task ids in report order; the 30-task aggregate checks disjointness
+/// across slices from these spans. Units: static ids in [`TASKS`] order.
+/// Determinism: fixed order, no clock. Caller: [`notes`] (same file) plus
+/// the uniqueness test.
+#[must_use]
+pub fn task_ids() -> [&'static str; 10] {
+    [
+        TASKS[0].id,
+        TASKS[1].id,
+        TASKS[2].id,
+        TASKS[3].id,
+        TASKS[4].id,
+        TASKS[5].id,
+        TASKS[6].id,
+        TASKS[7].id,
+        TASKS[8].id,
+        TASKS[9].id,
+    ]
+}
+
 /// Feedback lift: reference runs whose first attempt failed and whose retry
 /// from the named fault passed.
 fn notes(report: &SliceReport) -> Vec<String> {
     let lifted = lifted_count(report);
     let green = green_count(report);
+    let ids = task_ids();
     vec![
         format!("visual feedback: {lifted} task(s) fail blind and pass after one retry"),
         format!("green: {green} task(s) solve with weak rejected on every backend"),
+        format!("tasks: {} ({}..{})", ids.len(), ids[0], ids[9]),
     ]
 }
 
@@ -464,6 +486,33 @@ mod tests {
         let second = run();
         assert_eq!(second.to_text(), text, "report repeats x2");
         assert_eq!(super::lifted_count(&second), lifted, "lift repeats");
+    }
+
+    #[test]
+    fn task_ids_are_unique_in_report_order_and_notes_names_them() {
+        let ids = super::task_ids();
+        assert_eq!(
+            ids,
+            [
+                "gdb01", "gdb02", "gdb03", "gdb04", "gdb05", "gdb06", "gdb07", "gdb08", "gdb09",
+                "gdb10"
+            ],
+            "report order carries ten unique task ids"
+        );
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 10, "ids stay unique for the aggregate");
+        let text = super::run().to_text();
+        assert!(
+            text.contains("tasks: 10 (gdb01..gdb10)"),
+            "notes names the ordered id span: {text}"
+        );
+        assert_eq!(
+            super::run().to_text(),
+            super::run().to_text(),
+            "report repeats x2"
+        );
     }
 
     #[test]

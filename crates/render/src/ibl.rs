@@ -142,6 +142,49 @@ pub fn assert_forward_wgsl_binds_ibl(forward_wgsl: &str) -> Result<(), IblError>
     Ok(())
 }
 
+/// Assert the live window forward scales baked diffuse by occlusion only.
+///
+/// Owner: render lane; consumer: the EG12 wiring gate plus the live forward
+/// frame through the same rule. Units: none (string scan). Threading: pure
+/// with no IO, locks or clock; safe on any thread. Determinism: the same
+/// string gives the same verdict on every run. Errors: [`IblError::Invalid`]
+/// when the window `fs` is missing, when it multiplies the combined `ibl`
+/// by occlusion, when no diffuse-by-occlusion scale is found, or when the
+/// open specular term is missing. Mirrors CPU [`ambient_occluded`] plus
+/// `shade_ibl_occluded` (diffuse times occlusion, specular open).
+pub fn assert_forward_ibl_scales_diffuse_only(forward_wgsl: &str) -> Result<(), IblError> {
+    let start = forward_wgsl.find("fn fs(in: VOut)").ok_or_else(|| {
+        IblError::Invalid("forward pass misses window fs: inline FORWARD_IBL_WGSL".into())
+    })?;
+    let rest = &forward_wgsl[start..];
+    let end = rest.find("\n}\n").ok_or_else(|| {
+        IblError::Invalid("forward fs misses closing brace: inline FORWARD_IBL_WGSL".into())
+    })?;
+    let body = &rest[..end];
+    if body.contains("ibl * occlusion")
+        || body.contains("ibl*occlusion")
+        || body.contains("ibl *occlusion")
+        || body.contains("ibl* occlusion")
+    {
+        return Err(IblError::Invalid(
+            "forward fs scales combined ibl by occlusion: scale the diffuse irradiance by occlusion and leave specular open".into(),
+        ));
+    }
+    let has_diffuse = body.contains("ibl_diffuse") || body.contains("ibl_irradiance");
+    let scales = body.contains("* occlusion") || body.contains("*occlusion");
+    if !(has_diffuse && scales) {
+        return Err(IblError::Invalid(
+            "forward fs misses diffuse-by-occlusion scale: scale ibl_diffuse by occlusion".into(),
+        ));
+    }
+    if !body.contains("ibl_spec") {
+        return Err(IblError::Invalid(
+            "forward fs misses open specular: keep ibl_specular unscaled by occlusion".into(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Errors: typed; missing HDRI refuses, bad input names the cause, device
 // failures name the call or the validation scope.
@@ -466,6 +509,29 @@ pub fn eval_sh(sh: &IrradianceSh, normal: [f32; 3]) -> Result<[f32; 3], IblError
     Ok([rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0)])
 }
 
+/// Baked ambient scaled by occlusion: `eval_sh` times `occlusion`.
+///
+/// Owner: render lane; consumer: [`shade_ibl`] (open 1.0 here) plus the
+/// forward shader's baked term, which the live full-res value scales the
+/// same way. Units: linear irradiance with `occlusion` unitless `0..=1`
+/// (`1` open, `0` fully shadowed). Determinism: same inputs give the same
+/// triple on every run; no allocation, no clock. Errors:
+/// [`IblError::Invalid`] when `occlusion` is outside `0..=1` or not finite,
+/// or when `normal` is not a finite nonzero direction.
+pub fn ambient_occluded(
+    sh: &IrradianceSh,
+    normal: [f32; 3],
+    occlusion: f32,
+) -> Result<[f32; 3], IblError> {
+    if !occlusion.is_finite() || !(0.0..=1.0).contains(&occlusion) {
+        return Err(IblError::Invalid(format!(
+            "ibl occlusion {occlusion} outside 0..=1"
+        )));
+    }
+    let e = eval_sh(sh, normal)?;
+    Ok([e[0] * occlusion, e[1] * occlusion, e[2] * occlusion])
+}
+
 // ---------------------------------------------------------------------------
 // BRDF LUT: GGX split-sum scale/bias over (NdotV, roughness).
 // ---------------------------------------------------------------------------
@@ -775,18 +841,30 @@ fn project_sh(env: &crate::v1_ibl_shadow::EnvMap) -> IrradianceSh {
     IrradianceSh { coeffs }
 }
 
-/// Forward-pass IBL shade in linear space: diffuse from the irradiance SH
-/// plus split-sum specular from the prefiltered cubemap and the BRDF LUT.
-/// `base_color` is linear `0..=1`, `metallic`/`roughness` in `0..=1`.
+/// Forward-pass IBL shade with ambient-only occlusion: diffuse from the
+/// irradiance SH scaled by `occlusion`, specular left open (pipeline rule 4:
+/// AO scales ambient, never the final color; mirrors `eg12_ambient` in
+/// `shaders/forward_maps.wgsl`). Owner: render lane; consumer: [`shade_ibl`]
+/// (open 1.0) plus the live forward frame through the same rule. Units:
+/// linear radiance, `occlusion` unitless `0..=1` (`1` open, `0` shut).
+/// Determinism: same inputs give the same triple on every run; no
+/// allocation, no clock. Errors: [`IblError::Invalid`] for a bad direction,
+/// color, metallic, roughness or occlusion outside `0..=1`.
 #[cfg(feature = "v1")]
-pub fn shade_ibl(
+pub fn shade_ibl_occluded(
     bake: &IblBake,
     normal: [f32; 3],
     view_dir: [f32; 3],
     base_color: [f32; 3],
     metallic: f32,
     roughness: f32,
+    occlusion: f32,
 ) -> Result<[f32; 3], IblError> {
+    if !occlusion.is_finite() || !(0.0..=1.0).contains(&occlusion) {
+        return Err(IblError::Invalid(format!(
+            "ibl occlusion {occlusion} outside 0..=1"
+        )));
+    }
     let n = check_unit_dir(normal, "shade normal")?;
     let v = check_unit_dir(view_dir, "shade view direction")?;
     if !base_color.iter().all(|c| c.is_finite()) {
@@ -803,7 +881,10 @@ pub fn shade_ibl(
         )));
     }
     let r = check_roughness(roughness)?;
-    let e = eval_sh(&bake.sh, n)?;
+    if !bake_has_light(bake) {
+        return Ok([0.0, 0.0, 0.0]);
+    }
+    let e = ambient_occluded(&bake.sh, n, occlusion)?;
     let diffuse = [
         (1.0 - metallic) * base_color[0] * e[0] / PI,
         (1.0 - metallic) * base_color[1] * e[1] / PI,
@@ -832,6 +913,161 @@ pub fn shade_ibl(
         (diffuse[1] + spec[1]).max(0.0),
         (diffuse[2] + spec[2]).max(0.0),
     ])
+}
+
+/// Forward-pass IBL shade in linear space: diffuse from the irradiance SH
+/// plus split-sum specular from the prefiltered cubemap and the BRDF LUT.
+/// `base_color` is linear `0..=1`, `metallic`/`roughness` in `0..=1`.
+#[cfg(feature = "v1")]
+pub fn shade_ibl(
+    bake: &IblBake,
+    normal: [f32; 3],
+    view_dir: [f32; 3],
+    base_color: [f32; 3],
+    metallic: f32,
+    roughness: f32,
+) -> Result<[f32; 3], IblError> {
+    shade_ibl_occluded(bake, normal, view_dir, base_color, metallic, roughness, 1.0)
+}
+
+/// Flat ambient floor the off path adds when the bake is off: CPU mirror
+/// of the `AMBIENT_FLOOR` constant in `forward.wgsl` (linear RGB).
+/// Units: linear radiance factor. Determinism: same triple on every run.
+/// This item sizes nothing and allocates nothing.
+#[cfg(feature = "v1")]
+pub const IBL_OFF_FLOOR: [f32; 3] = [0.20, 0.18, 0.16];
+
+/// On-vs-off gap for one material probe: the baked shade minus the flat
+/// floor term the off path adds.
+///
+/// Owner: render lane; consumer: the on-vs-off gate plus the live forward
+/// frame that samples the same bake. Units: linear RGB radiance. Threading:
+/// pure with no IO, locks or clock; safe on any thread. Determinism: the
+/// same bake and inputs give the same triple on every run; no allocation,
+/// no clock. Errors: [`IblError::Invalid`] from [`shade_ibl`] for a bad
+/// direction, color, metallic or roughness; no new validation here.
+#[cfg(feature = "v1")]
+pub fn ibl_on_off_diff(
+    bake: &IblBake,
+    normal: [f32; 3],
+    view_dir: [f32; 3],
+    base_color: [f32; 3],
+    metallic: f32,
+    roughness: f32,
+) -> Result<[f32; 3], IblError> {
+    let on = shade_ibl(bake, normal, view_dir, base_color, metallic, roughness)?;
+    let keep = 1.0 - metallic;
+    Ok([
+        on[0] - keep * base_color[0] * IBL_OFF_FLOOR[0],
+        on[1] - keep * base_color[1] * IBL_OFF_FLOOR[1],
+        on[2] - keep * base_color[2] * IBL_OFF_FLOOR[2],
+    ])
+}
+
+/// Live-frame IBL decision: sample the bake only when the forward pass is
+/// bound and the bake carries light; otherwise keep the flat floor.
+///
+/// Owner: render lane; consumer: the live forward frame (timing lands next;
+/// this slice names the rule only). Units: none (two booleans in, one out).
+/// Threading: pure with no IO, locks, clock, allocation or device; safe on
+/// any thread. Determinism: the same inputs give the same verdict on every
+/// run. Fail-closed: unbound forward keeps the floor even with a bright
+/// bake; a zero bake keeps the floor even when bound. Bound means
+/// [`assert_forward_wgsl_binds_ibl`] on the shipped forward file is ok;
+/// light means the bake carries nonzero radiance; zero means the zero
+/// fixture.
+pub fn live_ibl_should_sample(forward_binds_ibl: bool, bake_has_light: bool) -> bool {
+    forward_binds_ibl && bake_has_light
+}
+
+/// Bake carries light: the missing accessor the live decision needs.
+///
+/// Owner: render lane; consumer: [`shade_ibl`] (exact-zero early-out below)
+/// plus the live forward frame through [`live_ibl_should_sample`].
+/// Units: linear radiance in `source_average`, SH and cube texels; out is a
+/// verdict. Threading: pure with no IO, locks, clock, allocation or device;
+/// safe on any thread. Determinism: the same bake gives the same verdict on
+/// every run. Fail-closed: non-finite or non-positive radiance reads as no
+/// light, so the frame keeps the flat floor. Light means any finite
+/// `source_average` channel above 1e-6; zero means the zero fixture.
+#[cfg(feature = "v1")]
+pub fn bake_has_light(bake: &IblBake) -> bool {
+    bake.source_average
+        .iter()
+        .any(|c| c.is_finite() && *c > 1e-6)
+}
+
+/// Live on-vs-off diffuse gap for one albedo probe: baked `ibl_diffuse`
+/// against the flat `AMBIENT_FLOOR` path, as a single max-channel gap.
+///
+/// Owner: render lane; consumer: `present/gpu_present/live.rs`
+/// `live_ibl_should_count` plus the live forward frame that samples the
+/// same bake. Units: linear RGB gap for dielectric `albedo` in `0..=1`
+/// with `normal` unit. Threading: pure with no IO, locks, clock or device;
+/// safe on any thread. Determinism: the same bake and inputs give the same
+/// gap on every run. Errors: [`IblError::Invalid`] when the bake carries
+/// no light (same rule as [`bake_has_light`]), when `normal` is not a
+/// finite nonzero direction via [`eval_sh`], or when `albedo` is not finite
+/// `0..=1`. Mirrors `ibl_diffuse` in `shaders/forward.wgsl` with metallic
+/// 0 (dielectric); init-time oracle only, never per frame, never hashed.
+#[cfg(feature = "v1")]
+pub fn live_ibl_on_off_gap(
+    bake: &IblBake,
+    normal: [f32; 3],
+    albedo: [f32; 3],
+) -> Result<f32, IblError> {
+    if !bake_has_light(bake) {
+        return Err(IblError::Invalid(
+            "ibl live gap bake carries no light: keeps the flat floor".into(),
+        ));
+    }
+    if !albedo.iter().all(|c| c.is_finite()) {
+        return Err(IblError::Invalid("ibl gap albedo is not finite".into()));
+    }
+    if albedo.iter().any(|c| *c < 0.0 || *c > 1.0) {
+        return Err(IblError::Invalid(format!(
+            "ibl gap albedo {albedo:?} outside 0..=1"
+        )));
+    }
+    let e = eval_sh(&bake.sh, normal)?;
+    let mut gap = 0.0f32;
+    for c in 0..3 {
+        let on = albedo[c] * e[c] / PI;
+        let off = albedo[c] * IBL_OFF_FLOOR[c];
+        gap = gap.max((on - off).abs());
+    }
+    Ok(gap)
+}
+
+/// Live-frame IBL receipt: CPU wall-clock ms for the forward IBL-bound
+/// encode, reported as `ibl.2` submit us on the live receipt.
+///
+/// Owner: render lane; consumer: `present_frame_live` in
+/// `present/gpu_present/live.rs` with the measured encode time. Units: ms in,
+/// pixels for sizes, microseconds out as `(passes, errors, submit_us)`.
+/// Threading: pure with no IO, locks, clock, allocation or device; safe on
+/// any thread. Determinism: the same inputs give the same tuple on every run.
+/// Fail-closed: zero-size stays skipped at `(0, 0, 0)`; a live encode floors
+/// to 1 us so the per-pass table shows `ibl` above 0 ms when the forward
+/// bound the bake. `passes` stays 0: it counts the chart tranche, and the
+/// live IBL rides forward; `errors` stays 0 on live frames.
+pub fn live_ibl_receipt(ibl_ms: f64, width: u32, height: u32) -> (u32, u32, u64) {
+    if width == 0 || height == 0 {
+        return (0, 0, 0);
+    }
+    let floored = if !ibl_ms.is_finite() || ibl_ms <= 0.0 {
+        0.001
+    } else {
+        ibl_ms.max(0.001)
+    };
+    if floored >= 1.0e15 {
+        return (0, 0, u64::MAX);
+    }
+    // Mirrors `Presenter::ms_to_us` so the window receipt reads the same
+    // 1 us floor; presentation timing only, never hashed.
+    let us = u64::try_from(std::time::Duration::from_secs_f64(floored / 1000.0).as_micros())
+        .unwrap_or(u64::MAX);
+    (0, 0, us.max(1))
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,6 +1415,218 @@ pub mod gpu {
             }
         }
         Ok(())
+    }
+
+    /// Upload the live forward bake once: prefilter array, BRDF LUT and
+    /// SH uniform buffer packed by the bake owner. Cold init only;
+    /// steady-state frames reuse the returned handles.
+    pub fn upload_live_bake(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bake: &super::IblBake,
+    ) -> Result<(wgpu::Texture, wgpu::Texture, wgpu::Buffer), super::IblError> {
+        let levels = u32::try_from(super::IBL_LEVELS)
+            .map_err(|_| super::IblError::Invalid("ibl levels exceed u32".into()))?;
+        let pre = device.create_texture(&prefilter_array_desc(super::IBL_CUBE_SIZE, levels));
+        let layer_len = layer_byte_len(&bake.cube)?;
+        let mut scratch = vec![0u8; layer_len];
+        for level in 0..super::IBL_LEVELS {
+            for face in 0..super::IBL_FACES {
+                prefilter_layer_bytes_into(&bake.cube, level, face, &mut scratch)?;
+                let layer = u32::try_from(level * super::IBL_FACES + face)
+                    .map_err(|_| super::IblError::Invalid("ibl layer exceeds u32".into()))?;
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &pre,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &scratch,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(super::IBL_CUBE_SIZE * 16),
+                        rows_per_image: Some(super::IBL_CUBE_SIZE),
+                    },
+                    wgpu::Extent3d {
+                        width: super::IBL_CUBE_SIZE,
+                        height: super::IBL_CUBE_SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        let lut_tex = device.create_texture(&brdf_lut_desc(super::BRDF_LUT_SIZE));
+        let mut lut_scratch = vec![0u8; bake.brdf.data.len() * 8];
+        brdf_upload_bytes_into(&bake.brdf, &mut lut_scratch);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &lut_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &lut_scratch,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(super::BRDF_LUT_SIZE * 8),
+                rows_per_image: Some(super::BRDF_LUT_SIZE),
+            },
+            wgpu::Extent3d {
+                width: super::BRDF_LUT_SIZE,
+                height: super::BRDF_LUT_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        let mut sh_bytes = [0u8; 144];
+        super::sh_uniform_bytes_into(&bake.sh, &mut sh_bytes);
+        let sh_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ra1-u-ibl-sh"),
+            size: 144,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&sh_buf, 0, &sh_bytes);
+        Ok((pre, lut_tex, sh_buf))
+    }
+
+    /// Layout entries for live forward lighting (bindings 9-12):
+    /// prefilter array, BRDF LUT, sampler, SH uniform. Cold layout only.
+    pub fn forward_ibl_layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
+        [
+            wgpu::BindGroupLayoutEntry {
+                binding: 9,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 10,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 11,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 12,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]
+    }
+
+    /// Parts for one live forward bind group in the forward group.
+    /// Owner: render lane; consumer: presenter forward binds.
+    /// Units: GPU handles; determinism: same handles give the same bind.
+    pub struct ForwardLiveParts<'a> {
+        /// Forward bind-group layout (group 0 with lighting entries).
+        pub layout: &'a wgpu::BindGroupLayout,
+        /// Camera uniform buffer.
+        pub cam: &'a wgpu::Buffer,
+        /// Light uniform buffer.
+        pub light: &'a wgpu::Buffer,
+        /// Material ring buffer (one stride window per draw).
+        pub material: &'a wgpu::Buffer,
+        /// Material window size in bytes.
+        pub material_bytes: u64,
+        /// Shadow uniform buffer.
+        pub shadow: &'a wgpu::Buffer,
+        /// Base-color texture view for this draw.
+        pub base_view: &'a wgpu::TextureView,
+        /// Filtering sampler shared by base and lighting.
+        pub sampler: &'a wgpu::Sampler,
+        /// Fog uniform buffer.
+        pub fog: &'a wgpu::Buffer,
+        /// Prefilter array view (30 layers).
+        pub pre_view: &'a wgpu::TextureView,
+        /// BRDF LUT view.
+        pub brdf_view: &'a wgpu::TextureView,
+        /// SH uniform buffer (144 bytes).
+        pub sh_buf: &'a wgpu::Buffer,
+    }
+
+    /// One live forward bind group over `parts`: group 0 uniforms plus
+    /// lighting entries bound every frame. Cold bind creation only.
+    pub fn forward_live_bind(
+        device: &wgpu::Device,
+        parts: &ForwardLiveParts<'_>,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ra1-forward-bind"),
+            layout: parts.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: parts.cam.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: parts.light.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: parts.material,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(parts.material_bytes),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: parts.shadow.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(parts.base_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(parts.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: parts.fog.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(parts.pre_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(parts.brdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::Sampler(parts.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: parts.sh_buf.as_entire_binding(),
+                },
+            ],
+        })
     }
 
     /// Posted encode + submit + readback budget for the chart pass in ms
@@ -2681,6 +3129,296 @@ mod tests {
     }
 
     #[test]
+    fn forward_ibl_live_replaces_ambient_floor() {
+        // Live forward samples the bake every frame: the shipped forward
+        // file carries every bind marker and its `fs` calls the sampling
+        // entry with no flat floor term left.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        assert!(
+            assert_forward_wgsl_binds_ibl(wgsl).is_ok(),
+            "live forward binds the bake"
+        );
+        for marker in FORWARD_IBL_MARKERS {
+            assert!(wgsl.contains(marker), "live forward carries {marker}");
+        }
+        let start = wgsl.find("fn fs(in: VOut)").expect("live forward has fs");
+        let rest = &wgsl[start..];
+        let end = rest.find("\n}\n").expect("fs closes");
+        let body = &rest[..end];
+        assert!(
+            body.contains("ibl_sample")
+                || (body.contains("ibl_diffuse") && body.contains("ibl_spec")),
+            "fs samples the bake via ibl_sample or the diffuse/specular split"
+        );
+        assert!(
+            !body.contains("AMBIENT_FLOOR"),
+            "fs keeps no flat floor term"
+        );
+        assert!(
+            !body.contains("diffuse_color_term(albedo, mat.metallic) * AMBIENT_FLOOR"),
+            "flat add is gone from fs"
+        );
+    }
+
+    #[test]
+    fn forward_ibl_diffuse_only_occlusion() {
+        // EG12: window fs scales baked diffuse by occlusion, specular open.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        assert!(
+            assert_forward_ibl_scales_diffuse_only(wgsl).is_ok(),
+            "live fs scales diffuse only"
+        );
+        let bad = "fn fs(in: VOut) -> FsOut {\n let ibl = ibl_sample(n, v, f0, r, a, m);\n let o = 1.0;\n let lit = ibl * occlusion;\n}\n";
+        match assert_forward_ibl_scales_diffuse_only(bad) {
+            Err(IblError::Invalid(detail)) => {
+                assert!(detail.contains("combined ibl"), "names whole-ibl: {detail}");
+            }
+            other => panic!("whole-ibl fixture must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_ibl_samples_bake_only_when_bound_and_nonzero() {
+        // Decision rule only: unbound keeps the floor even with a bright
+        // bake; a zero bake keeps the floor even when bound.
+        assert!(!live_ibl_should_sample(false, true));
+        assert!(!live_ibl_should_sample(true, false));
+        assert!(live_ibl_should_sample(true, true));
+        // LF2 accept: a live 64x64 encode floors to 1 us so the per-pass
+        // table shows `ibl` above 0 ms with 0 validation errors; zero-size
+        // stays skipped at 0. CPU-only, no adapter, deterministic.
+        let live = live_ibl_receipt(0.0, 64, 64);
+        assert_eq!(live.0, 0, "live IBL rides forward; chart count stays 0");
+        assert_eq!(live.1, 0, "live IBL keeps 0 validation errors");
+        assert_eq!(live.2, 1, "live encode floors to 1 us, got {live:?}");
+        let timed = live_ibl_receipt(0.42, 64, 64);
+        assert!(timed.2 > 0, "timed live encode stays above 0 us");
+        assert_eq!(live_ibl_receipt(0.42, 0, 64), (0, 0, 0));
+        assert_eq!(live_ibl_receipt(0.42, 64, 0), (0, 0, 0));
+        // The tuple feeds `FrameReceipt::per_pass_us` as `ibl.2`: a floored
+        // 1 us formats above `0.000ms`, while skipped `(0, 0, 0)` is `0.000ms`.
+        let live_ms = format!("{}.{:03}", live.2 / 1000, live.2 % 1000);
+        assert_ne!(live_ms, "0.000", "live ibl reads above 0 ms");
+        let skipped = live_ibl_receipt(0.42, 0, 64);
+        let skipped_ms = format!("{}.{:03}", skipped.2 / 1000, skipped.2 % 1000);
+        assert_eq!(skipped_ms, "0.000", "skipped ibl stays at 0 ms");
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn bake_has_light_separates_zero_from_lit() {
+        // Missing accessor for the live decision: a lit bake samples, a
+        // zero bake keeps the flat floor. Fails before the accessor lands.
+        assert!(super::bake_has_light(&nonzero_on_off_bake()));
+        assert!(!super::bake_has_light(&zero_on_off_bake()));
+    }
+
+    #[test]
+    fn forward_ibl_skinned_replaces_ambient_floor() {
+        // Skinned capture samples the live bake like the window frame: the
+        // shipped forward file's `fs_skinned` calls the sampling entry with
+        // no flat floor term left; magenta stays the missing-skin signal.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        let start = wgsl
+            .find("fn fs_skinned(in: VOut)")
+            .expect("skinned capture has fs_skinned");
+        let rest = &wgsl[start..];
+        let end = rest.find("\n}\n").expect("fs_skinned closes");
+        let body = &rest[..end];
+        assert!(body.contains("ibl_sample"), "fs_skinned samples the bake");
+        assert!(
+            !body.contains("AMBIENT_FLOOR"),
+            "fs_skinned keeps no flat floor term"
+        );
+        assert!(
+            !body.contains("diffuse_color_term(albedo, mat.metallic) * AMBIENT_FLOOR"),
+            "flat add is gone from fs_skinned"
+        );
+        assert!(
+            body.contains("has_skin == 0u"),
+            "fs_skinned keeps the missing-skin guard"
+        );
+        assert!(
+            body.contains("1.0, 0.0, 1.0"),
+            "missing skin still shades magenta"
+        );
+    }
+
+    #[test]
+    fn forward_ibl_skinned_scales_diffuse_only() {
+        // LF2 rule-4 parity for the skinned capture: baked diffuse scales by
+        // occlusion, specular stays open (mirrors window `fs` plus CPU
+        // `shade_ibl_occluded`). Fails before the split lands.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        let start = wgsl
+            .find("fn fs_skinned(in: VOut)")
+            .expect("skinned capture has fs_skinned");
+        let rest = &wgsl[start..];
+        let end = rest.find("\n}\n").expect("fs_skinned closes");
+        let body = &rest[..end];
+        assert!(
+            !body.contains("ibl * occlusion")
+                && !body.contains("ibl*occlusion")
+                && !body.contains("ibl *occlusion")
+                && !body.contains("ibl* occlusion"),
+            "fs_skinned scales combined ibl by occlusion: scale diffuse only"
+        );
+        let has_diffuse = body.contains("ibl_diffuse") || body.contains("ibl_irradiance");
+        let scales = body.contains("* occlusion") || body.contains("*occlusion");
+        assert!(
+            has_diffuse && scales,
+            "fs_skinned misses diffuse-by-occlusion scale"
+        );
+        assert!(body.contains("ibl_spec"), "fs_skinned misses open specular");
+    }
+
+    #[cfg(feature = "v1")]
+    fn nonzero_on_off_bake() -> IblBake {
+        // Nonzero fixture: uniform prefilter radiance plus unit
+        // irradiance plus a real small BRDF table, so both probes
+        // see baked light well above the flat floor.
+        let mut cube = PrefilterCube::new(4, IBL_LEVELS);
+        cube.faces.fill([0.8, 0.7, 0.6]);
+        let mut coeffs = [[0.0; 3]; IBL_SH_COEFFS];
+        coeffs[0] = [3.544_908, 3.544_908, 3.544_908];
+        IblBake {
+            cube,
+            sh: IrradianceSh { coeffs },
+            brdf: brdf_lut_build(8).expect("small lut builds"),
+            source_average: [0.8, 0.7, 0.6],
+        }
+    }
+
+    #[cfg(feature = "v1")]
+    fn zero_on_off_bake() -> IblBake {
+        IblBake {
+            cube: PrefilterCube::new(4, IBL_LEVELS),
+            sh: IrradianceSh::zero(),
+            brdf: BrdfLut::new(4),
+            source_average: [0.0; 3],
+        }
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn ibl_on_off_diff_armor_differs_above_epsilon() {
+        // Armor-like metal: gray base, full metal, mid roughness.
+        let bake = nonzero_on_off_bake();
+        let diff = ibl_on_off_diff(
+            &bake,
+            [0.0, 1.0, 0.0],
+            [0.4, 0.6, 0.5],
+            [0.5, 0.5, 0.5],
+            1.0,
+            0.35,
+        )
+        .expect("armor diffs");
+        assert!(
+            diff.iter().any(|c| c.abs() > 1e-3),
+            "armor bake moves above floor, got {diff:?}"
+        );
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn ibl_on_off_diff_sand_differs_above_epsilon() {
+        // Sand-like dielectric: sand base, no metal, rough.
+        let bake = nonzero_on_off_bake();
+        let diff = ibl_on_off_diff(
+            &bake,
+            [0.0, 1.0, 0.0],
+            [0.4, 0.6, 0.5],
+            [0.76, 0.62, 0.42],
+            0.0,
+            0.9,
+        )
+        .expect("sand diffs");
+        assert!(
+            diff.iter().any(|c| c.abs() > 1e-3),
+            "sand bake moves above floor, got {diff:?}"
+        );
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn ibl_on_off_diff_runs_match_exactly() {
+        // Same complete inputs twice give bit-identical gaps.
+        let bake = nonzero_on_off_bake();
+        let armor = || {
+            ibl_on_off_diff(
+                &bake,
+                [0.0, 1.0, 0.0],
+                [0.4, 0.6, 0.5],
+                [0.5, 0.5, 0.5],
+                1.0,
+                0.35,
+            )
+            .expect("armor diffs")
+        };
+        let sand = || {
+            ibl_on_off_diff(
+                &bake,
+                [0.0, 1.0, 0.0],
+                [0.4, 0.6, 0.5],
+                [0.76, 0.62, 0.42],
+                0.0,
+                0.9,
+            )
+            .expect("sand diffs")
+        };
+        assert_eq!(armor(), armor(), "armor gap is deterministic");
+        assert_eq!(sand(), sand(), "sand gap is deterministic");
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn ibl_on_off_diff_zero_bake_is_floor_without_refusal() {
+        // Zero bake shades black, so the gap is the negated floor term:
+        // zero for full metal, negative floor for dielectric. No refusal.
+        let bake = zero_on_off_bake();
+        let armor = ibl_on_off_diff(
+            &bake,
+            [0.0, 1.0, 0.0],
+            [0.4, 0.6, 0.5],
+            [0.5, 0.5, 0.5],
+            1.0,
+            0.35,
+        )
+        .expect("zero armor diffs");
+        assert_eq!(armor, [0.0, 0.0, 0.0], "metal gap is zero, got {armor:?}");
+        let sand = ibl_on_off_diff(
+            &bake,
+            [0.0, 1.0, 0.0],
+            [0.4, 0.6, 0.5],
+            [0.76, 0.62, 0.42],
+            0.0,
+            0.9,
+        )
+        .expect("zero sand diffs");
+        assert!(
+            sand.iter().all(|c| *c < 0.0),
+            "dielectric gap is negated floor, got {sand:?}"
+        );
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn ibl_on_off_diff_bad_normal_refuses_loudly() {
+        let bake = nonzero_on_off_bake();
+        assert!(matches!(
+            ibl_on_off_diff(
+                &bake,
+                [0.0, 0.0, 0.0],
+                [0.4, 0.6, 0.5],
+                [0.5, 0.5, 0.5],
+                1.0,
+                0.35,
+            ),
+            Err(IblError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn bake_counts_quote_texels() {
         // The receipt quotes honest texel counts for the frame report; the
         // live submit path is covered by the chart tests behind `window`.
@@ -2700,7 +3438,8 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[cfg(feature = "v1")]
-    const HDRI_BYTES: &[u8] = include_bytes!("../../../content/incoming/studio_small_09_1k.hdr");
+    const HDRI_BYTES: &[u8] =
+        include_bytes!("../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr");
 
     #[cfg(feature = "v1")]
     #[test]
@@ -2958,6 +3697,185 @@ mod tests {
         // Same complete inputs twice give identical shades.
         let again = shade_ibl(&bake, n, v, [0.5, 0.5, 0.5], 0.0, 0.5).expect("shades again");
         assert_eq!(diel, again, "forward shade is deterministic");
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn shade_occluded_scales_diffuse_only() {
+        // AO dims the SH diffuse term only; specular stays open
+        // (pipeline rule 4: AO scales ambient, never the final color).
+        let bake = nonzero_on_off_bake();
+        let n = [0.0, 1.0, 0.0];
+        let v = [0.4, 0.6, 0.5];
+        let albedo = [0.5, 0.5, 0.5];
+        let open = shade_ibl_occluded(&bake, n, v, albedo, 0.0, 0.5, 1.0).expect("open shades");
+        let half = shade_ibl_occluded(&bake, n, v, albedo, 0.0, 0.5, 0.5).expect("half shades");
+        let shut = shade_ibl_occluded(&bake, n, v, albedo, 0.0, 0.5, 0.0).expect("shut shades");
+        let plain = shade_ibl(&bake, n, v, albedo, 0.0, 0.5).expect("plain shades");
+        assert_eq!(open, plain, "occlusion 1.0 matches the open shade");
+        let e = ambient_occluded(&bake.sh, n, 1.0).expect("irradiance reads");
+        let diffuse_open = [
+            albedo[0] * e[0] / PI,
+            albedo[1] * e[1] / PI,
+            albedo[2] * e[2] / PI,
+        ];
+        for c in 0..3 {
+            assert!(
+                shut[c].is_finite() && shut[c] >= 0.0,
+                "shut keeps finite specular, got {shut:?}"
+            );
+            assert!(
+                (open[c] - shut[c] - diffuse_open[c]).abs() < 1e-5,
+                "open minus shut is the diffuse term, got open {open:?} shut {shut:?}"
+            );
+            assert!(
+                (half[c] - shut[c] - 0.5 * diffuse_open[c]).abs() < 1e-5,
+                "half occlusion halves diffuse only, got half {half:?} shut {shut:?}"
+            );
+        }
+        assert!(
+            matches!(
+                shade_ibl_occluded(&bake, n, v, albedo, 0.0, 0.5, 2.0),
+                Err(IblError::Invalid(_))
+            ),
+            "occlusion above 1 refuses"
+        );
+        assert!(
+            matches!(
+                shade_ibl_occluded(&bake, n, v, albedo, 0.0, 0.5, f32::NAN),
+                Err(IblError::Invalid(_))
+            ),
+            "non-finite occlusion refuses"
+        );
+        assert!(
+            matches!(
+                shade_ibl_occluded(&bake, [0.0, 0.0, 0.0], v, albedo, 0.0, 0.5, 0.5),
+                Err(IblError::Invalid(_))
+            ),
+            "zero normal refuses"
+        );
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn ambient_on_off_gap_separates_lit_from_unlit() {
+        // Lit bake reads above the flat floor through the live gap oracle;
+        // unlit bake keeps the floor by refusing a gap.
+        let bake = nonzero_on_off_bake();
+        let normal = [0.0, 1.0, 0.0];
+        let albedo = [0.5, 0.5, 0.5];
+        let gap = live_ibl_on_off_gap(&bake, normal, albedo).expect("lit bake gaps");
+        assert!(gap > 0.002, "lit bake moves above floor, got {gap}");
+        let again = live_ibl_on_off_gap(&bake, normal, albedo).expect("lit bake gaps again");
+        assert_eq!(gap, again, "gap is deterministic");
+        let zero = zero_on_off_bake();
+        assert!(
+            matches!(
+                live_ibl_on_off_gap(&zero, normal, albedo),
+                Err(IblError::Invalid(_))
+            ),
+            "unlit bake keeps the floor"
+        );
+        assert!(matches!(
+            live_ibl_on_off_gap(&bake, [0.0, 0.0, 0.0], albedo),
+            Err(IblError::Invalid(_))
+        ));
+        assert!(matches!(
+            live_ibl_on_off_gap(&bake, normal, [2.0, 0.5, 0.5]),
+            Err(IblError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn ambient_sh9_on_off_differs_in_masked_region() {
+        // EG12(a) pixel test: 4x4 raster, center 2x2 mask, baked SH9 ambient
+        // at the (bent) normal times AO vs the constant floor, ambient only.
+        // Direct sun stays untouched (diffuse scales, no combined scale);
+        // fails when ambient is constant (gap 0), passes with live SH9.
+        // No `v1` gate: runs in the default lib suite (the F2P proof).
+        let mut coeffs = [[0.0f32; 3]; IBL_SH_COEFFS];
+        coeffs[0] = [3.544_908, 3.544_908, 3.544_908];
+        let sh = IrradianceSh { coeffs };
+        let zero = IrradianceSh::zero();
+        // CPU mirror of `AMBIENT_FLOOR` in `shaders/forward.wgsl` (linear).
+        let floor = [0.20f32, 0.18, 0.16];
+        let albedo = [0.5, 0.5, 0.5];
+        let normal = [0.0, 1.0, 0.0];
+        let mut max_gap = 0.0f32;
+        let mut masked = 0u32;
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let in_mask = (1..3).contains(&x) && (1..3).contains(&y);
+                if !in_mask {
+                    continue;
+                }
+                masked += 1;
+                let occlusion = 0.5;
+                let e_on = ambient_occluded(&sh, normal, occlusion).expect("masked ambient evals");
+                let on_diffuse = [
+                    albedo[0] * e_on[0] / PI,
+                    albedo[1] * e_on[1] / PI,
+                    albedo[2] * e_on[2] / PI,
+                ];
+                let off_diffuse = [
+                    albedo[0] * floor[0] * occlusion,
+                    albedo[1] * floor[1] * occlusion,
+                    albedo[2] * floor[2] * occlusion,
+                ];
+                for c in 0..3 {
+                    max_gap = max_gap.max((on_diffuse[c] - off_diffuse[c]).abs());
+                }
+            }
+        }
+        assert_eq!(masked, 4, "mask covers the center 2x2");
+        assert!(
+            max_gap > 0.002,
+            "masked SH ambient moves above the floor, got {max_gap}"
+        );
+        let mut again = 0.0f32;
+        for y in 1..3u32 {
+            for x in 1..3u32 {
+                let e_on = ambient_occluded(&sh, normal, 0.5).expect("ambient evals");
+                let _ = (x, y);
+                for c in 0..3 {
+                    let on = albedo[c] * e_on[c] / PI;
+                    let off = albedo[c] * floor[c] * 0.5;
+                    again = again.max((on - off).abs());
+                }
+            }
+        }
+        assert_eq!(max_gap, again, "masked gap is deterministic");
+        // Zero bake keeps the floor: zero SH evals to zero irradiance.
+        let e_zero = ambient_occluded(&zero, normal, 0.5).expect("zero ambient evals");
+        assert_eq!(e_zero, [0.0, 0.0, 0.0], "zero SH stays black");
+        // AO scales ambient linearly: half occlusion halves the irradiance.
+        let e_open = ambient_occluded(&sh, normal, 1.0).expect("open ambient evals");
+        let e_half = ambient_occluded(&sh, normal, 0.5).expect("half ambient evals");
+        for c in 0..3 {
+            assert!(
+                (e_half[c] * 2.0 - e_open[c]).abs() < 1e-6,
+                "occlusion halves ambient, got open {e_open:?} half {e_half:?}"
+            );
+        }
+        assert!(
+            matches!(
+                ambient_occluded(&sh, [0.0, 0.0, 0.0], 0.5),
+                Err(IblError::Invalid(_))
+            ),
+            "zero normal refuses loudly"
+        );
+        // Per-frame hand-off moves: lit vs zero SH uniform images differ in
+        // the tail, so rewriting `sh_buf` each frame changes the ambient.
+        let mut lit_image = [0u8; FORWARD_IBL_BIND_BYTES];
+        forward_ibl_bind_image(&sh, &mut lit_image);
+        let mut zero_image = [0u8; FORWARD_IBL_BIND_BYTES];
+        forward_ibl_bind_image(&zero, &mut zero_image);
+        assert_ne!(lit_image, zero_image, "live SH uniform differs on vs off");
+        assert_eq!(
+            lit_image[0..8],
+            FORWARD_IBL_CHUNK_HASH.to_le_bytes(),
+            "bind head stays the pinned chunk hash"
+        );
     }
 
     #[cfg(feature = "v1")]

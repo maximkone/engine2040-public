@@ -17,6 +17,7 @@ use engine_arena::{ArenaConfig, Checkpoint};
 use engine_input::{FighterInput, MAX_PARTICIPANTS};
 
 use crate::heal::{DesyncPlan, NetHeal, NetHealError, QuarantineNotice, ReconnectPlan};
+use crate::replay::{record_tape, DivergenceReport, ReplayError, ReplayTape, Theater};
 use crate::session::{SnapshotDelta, WIRE_VERSION};
 use engine_observe::supervisor::AppliedHeal;
 
@@ -60,6 +61,8 @@ pub enum ServerError {
     NoSnapshot,
     /// The match already authored `config.ticks` ticks.
     MatchOver,
+    /// The match has not yet authored `config.ticks` ticks; theater is only at match end.
+    NotFinished,
 }
 
 impl std::fmt::Display for ServerError {
@@ -75,6 +78,7 @@ impl std::fmt::Display for ServerError {
             ),
             Self::NoSnapshot => write!(f, "no authoritative snapshot yet"),
             Self::MatchOver => write!(f, "match already ran its configured ticks"),
+            Self::NotFinished => write!(f, "match not yet finished"),
         }
     }
 }
@@ -205,8 +209,13 @@ pub struct HeadlessServer {
     pending: Vec<FighterInput>,
     tape: Vec<FighterInput>,
     checkpoints: Vec<Checkpoint>,
+    auto_theater: Option<ReplayTape>,
     last_ai_filled: usize,
     heal: NetHeal,
+    cells: crate::cells::CellQueue,
+    cell_packets: Vec<crate::cells::CellPacket>,
+    cell_receipts: Vec<crate::cells::CellReceipt>,
+    cell_bytes_last: usize,
 }
 
 impl HeadlessServer {
@@ -232,8 +241,13 @@ impl HeadlessServer {
             pending: Vec::new(),
             tape: Vec::new(),
             checkpoints: Vec::new(),
+            auto_theater: None,
             last_ai_filled: 0,
             heal: NetHeal::new(),
+            cells: crate::cells::CellQueue::new(),
+            cell_packets: Vec::with_capacity(crate::cells::CELL_COUNT),
+            cell_receipts: Vec::with_capacity(crate::cells::CELL_COUNT),
+            cell_bytes_last: 0,
         })
     }
 
@@ -342,10 +356,40 @@ impl HeadlessServer {
         Ok(())
     }
 
+    /// True when the match authored `config.ticks` ticks and the auto-theater is available.
+    pub fn is_finished(&self) -> bool {
+        self.tick_now() >= self.config.ticks
+    }
+
+    /// Build one theater tape from the authoritative tape and check it against
+    /// server truth. Shared by the tick auto-write and the on-demand path.
+    fn build_theater_tape(&self) -> Result<ReplayTape, ServerError> {
+        let tape = record_tape(self.config, &self.tape).map_err(|_| ServerError::BadInput)?;
+        if tape.checkpoints == self.checkpoints {
+            Ok(tape)
+        } else {
+            Err(ServerError::BadInput)
+        }
+    }
+
+    /// Write the match-end theater once from inside [`Self::tick`]; the named
+    /// consumer that wires the new theater API with no operator step.
+    /// Match-end only: one arena run plus the tape clone on the final tick,
+    /// nothing per tick before that.
+    fn write_auto_theater(&mut self) {
+        if !self.is_finished() || self.auto_theater.is_some() {
+            return;
+        }
+        if let Ok(tape) = self.build_theater_tape() {
+            self.auto_theater = Some(tape);
+        }
+    }
+
     /// Author one fixed tick with the submitted human inputs, returning the
     /// authoritative checkpoint plus the full [`SnapshotDelta`]. Slots
     /// without an input AI-fill. Rejects the whole tick past
-    /// `config.ticks`.
+    /// `config.ticks`. The final tick writes the auto-theater so match end
+    /// needs no operator step.
     pub fn tick(&mut self) -> Result<(Checkpoint, SnapshotDelta), ServerError> {
         if self.tick_now() >= self.config.ticks {
             return Err(ServerError::MatchOver);
@@ -359,7 +403,42 @@ impl HeadlessServer {
         self.tape.extend_from_slice(&submitted);
         self.checkpoints.push(checkpoint);
         self.last_ai_filled = self.slots.len().saturating_sub(submitted.len());
+        self.write_auto_theater();
+        self.cell_packets.clear();
+        self.cell_receipts.clear();
+        let _ = self.cells.drain(
+            checkpoint.tick,
+            crate::cells::TICK_BUDGET_BYTES,
+            &mut self.cell_packets,
+            &mut self.cell_receipts,
+        );
+        self.cell_bytes_last = self.cell_receipts.len() * crate::cells::PACKET_BYTES;
         Ok((checkpoint, delta))
+    }
+
+    /// Borrow the tick-driven cell send queue. Caller: `cells.rs` priority drain.
+    pub fn cell_queue(&self) -> &crate::cells::CellQueue {
+        &self.cells
+    }
+
+    /// Mutably borrow the cell send queue (subscribe plus combat marks).
+    pub fn cell_queue_mut(&mut self) -> &mut crate::cells::CellQueue {
+        &mut self.cells
+    }
+
+    /// Cell packets authored on the last tick (receipts prove the budget).
+    pub fn cell_packets_last_tick(&self) -> &[crate::cells::CellPacket] {
+        &self.cell_packets
+    }
+
+    /// Cell receipts for the last tick: tick, cell, bytes, hash.
+    pub fn cell_receipts_last_tick(&self) -> &[crate::cells::CellReceipt] {
+        &self.cell_receipts
+    }
+
+    /// Cell wire bytes sent on the last tick, within the per-tick budget.
+    pub fn cell_bytes_last_tick(&self) -> usize {
+        self.cell_bytes_last
     }
 
     /// Latest authoritative snapshot, or `None` before the first tick.
@@ -371,6 +450,57 @@ impl HeadlessServer {
             hash: checkpoint.hash,
             tape: self.tape.clone(),
         })
+    }
+
+    /// Theater tape for a finished match, written automatically at match end
+    /// with no operator step. Reuses the MP4 [`ReplayTape`] shape (no parallel
+    /// system): inputs are the authoritative tape, checkpoints must equal the
+    /// server truth. Units: fixed ticks. Determinism: same config plus same
+    /// tape gives the identical tape. Budget: match-end only, one clone of
+    /// the cached tape per call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFinished`] before the final tick and
+    /// [`ServerError::BadInput`] when the stored tape cannot replay exactly.
+    pub fn theater_tape(&self) -> Result<ReplayTape, ServerError> {
+        if !self.is_finished() {
+            return Err(ServerError::NotFinished);
+        }
+        if let Some(cached) = self.auto_theater.as_ref() {
+            return Ok(cached.clone());
+        }
+        self.build_theater_tape()
+    }
+
+    /// Playable theater over the finished match: play, pause and frame-step
+    /// plus full verification, reusing the MP4 [`Theater`] shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFinished`] before the final tick and
+    /// [`ServerError::BadInput`] when the stored tape cannot replay exactly.
+    pub fn theater(&self) -> Result<Theater, ServerError> {
+        let tape = self.theater_tape()?;
+        Theater::new(tape).map_err(|_| ServerError::BadInput)
+    }
+
+    /// CR1 divergence report for `probe` against the finished theater tape:
+    /// first divergent tick plus minimal causes, reusing the MP7/CR1
+    /// attribution with no parallel system. Matches
+    /// `crate::replay::attribute` tick-for-tick by construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplayError::BadTape`] before the final tick,
+    /// [`ReplayError::BadInput`] for out-of-range probes and
+    /// [`ReplayError::NoFailure`] when the probe agrees.
+    pub fn divergence_report(
+        &self,
+        probe: &[FighterInput],
+    ) -> Result<DivergenceReport, ReplayError> {
+        let tape = self.theater_tape().map_err(|_| ReplayError::BadTape)?;
+        tape.attribute_probe(probe)
     }
 
     /// Resync path for a connected client: the latest authoritative
@@ -1126,5 +1256,102 @@ mod tests {
             let (_, _) = session.tick(&[]).expect("session tick");
         }
         assert_eq!(session.checkpoints(), reference.checkpoints());
+    }
+
+    #[test]
+    fn dedicated_auto_theater_ends_playable_with_cr1_parity() {
+        // Scripted dedicated match to the final tick: human slot 0 submits,
+        // slot 1 AI-fills. Caller: HeadlessServer::tick writes the auto-theater.
+        let cfg = config(2);
+        let mut server = HeadlessServer::new(cfg).expect("server");
+        assert!(!server.is_finished());
+        assert_eq!(server.theater_tape(), Err(ServerError::NotFinished));
+        let token = 0xA11CE;
+        assert_eq!(server.connect(token), Ok(0));
+        for step in 0..MATCH_TICKS {
+            server.submit(token, wish(step, 0)).expect("submit");
+            server.tick().expect("tick");
+        }
+        assert!(server.is_finished());
+        assert_eq!(server.tick_now(), MATCH_TICKS);
+        assert_eq!(server.tick(), Err(ServerError::MatchOver));
+        // No operator step: the finished server already holds a playable tape.
+        let tape = server.theater_tape().expect("theater tape");
+        assert_eq!(tape.config, cfg);
+        assert_eq!(tape.checkpoints, server.checkpoints());
+        assert_eq!(tape.checkpoints.len(), MATCH_TICKS as usize);
+        let theater = server.theater().expect("theater");
+        theater.verify().expect("playable");
+        let point = crate::replay::play_tape(&tape, MATCH_TICKS - 1).expect("play");
+        assert_eq!(point, tape.checkpoints[(MATCH_TICKS - 1) as usize]);
+        // A second read is identical: the auto-write cached the same bytes.
+        assert_eq!(server.theater_tape().expect("again"), tape);
+        // One diverted probe input attributes to its tick, matching CR1 exactly.
+        let mut probe = tape.inputs.clone();
+        let probe_tick = engine_core::Rng::new(2040)
+            .fork(15)
+            .next_range(0, u64::from(MATCH_TICKS)) as u32;
+        let at = probe
+            .iter()
+            .position(|input| input.tick == probe_tick && input.fighter.0 == 0)
+            .expect("probe slot");
+        let mut diverted = probe[at];
+        diverted.mx = if diverted.mx == 100 { -100 } else { 100 };
+        probe[at] = diverted;
+        let report = server.divergence_report(&probe).expect("report");
+        let expected = crate::replay::attribute(&cfg, &tape.inputs, &probe).expect("CR1 oracle");
+        assert_eq!(report, expected, "auto report must match CR1");
+        assert_ne!(report.expected, report.observed);
+        assert_eq!(report.causes.len(), 1);
+        assert_eq!(
+            (report.causes[0].tick, report.causes[0].fighter),
+            (probe_tick, 0)
+        );
+        // A clean probe agrees: nothing to attribute.
+        assert_eq!(
+            server.divergence_report(&tape.inputs),
+            Err(crate::replay::ReplayError::NoFailure)
+        );
+    }
+
+    #[test]
+    fn dedicated_auto_theater_refuses_before_finish_and_bad_probe() {
+        let cfg = config(2);
+        let mut server = HeadlessServer::new(cfg).expect("server");
+        assert!(!server.is_finished());
+        assert_eq!(server.theater_tape(), Err(ServerError::NotFinished));
+        assert_eq!(server.theater().map(|_| ()), Err(ServerError::NotFinished));
+        assert_eq!(
+            server.divergence_report(&[]),
+            Err(crate::replay::ReplayError::BadTape)
+        );
+        // One tick is still not finished.
+        server.tick().expect("first tick");
+        assert!(!server.is_finished());
+        assert_eq!(server.theater_tape(), Err(ServerError::NotFinished));
+        // Finish the match with pure AI fill, then bad probes refuse loudly.
+        for _ in 1..MATCH_TICKS {
+            server.tick().expect("tick");
+        }
+        assert!(server.is_finished());
+        let tape = server.theater_tape().expect("tape");
+        assert_eq!(tape.checkpoints, server.checkpoints());
+        let mut wild = tape.inputs.clone();
+        wild.push(FighterInput {
+            tick: 0,
+            fighter: FighterId::new(1).expect("slot"),
+            mx: 101,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        });
+        assert_eq!(
+            server.divergence_report(&wild),
+            Err(crate::replay::ReplayError::BadInput)
+        );
+        assert_eq!(
+            ServerError::NotFinished.to_string(),
+            "match not yet finished"
+        );
     }
 }

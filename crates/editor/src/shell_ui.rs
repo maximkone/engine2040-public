@@ -124,6 +124,7 @@ impl ShellUi {
     }
 
     fn show_inner(&mut self, shell: &mut Shell, ui: &mut egui::Ui) {
+        crate::shell::panels::ensure_builtin_panels(shell);
         for panel in shell.open_panels.clone() {
             let present = self.dock.iter_all_tabs().any(|(_, tab)| *tab == panel);
             if !present {

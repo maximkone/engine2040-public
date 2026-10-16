@@ -504,6 +504,16 @@ pub struct TemporalReport {
     pub digest: u64,
 }
 
+/// Cell fill output: counts, offsets, indices, reservoirs, error, hits.
+type TemporalFill = (
+    Vec<u32>,
+    Vec<u32>,
+    Vec<u32>,
+    Vec<TemporalReservoir>,
+    f64,
+    u32,
+);
+
 // Falloff proxy for one light center vs the cell center.
 fn temporal_contrib(lx: f32, ly: f32, cx: f32, cy: f32) -> f32 {
     let dx = lx - cx;
@@ -608,17 +618,7 @@ fn temporal_fill_cells(
     all: &[ScreenLight],
     prior_map: &[Option<usize>],
     seed: u64,
-) -> Result<
-    (
-        Vec<u32>,
-        Vec<u32>,
-        Vec<u32>,
-        Vec<TemporalReservoir>,
-        f64,
-        u32,
-    ),
-    LightError,
-> {
+) -> Result<TemporalFill, LightError> {
     let cfg = &tight.config;
     let cells = cfg.cells();
     let tx_n = cfg.tiles_x();

@@ -155,6 +155,7 @@ impl Bank {
         match kind {
             Synth::Hit => Self::bake_hit(sr, variant),
             Synth::Footstep => Self::bake_footstep(sr, variant),
+            Synth::Friction => Self::bake_friction(sr, variant),
             Synth::Crowd => Self::bake_crowd(sr),
             Synth::Swing => Self::bake_swing(sr, variant),
             Synth::Kill => Self::bake_kill(sr),
@@ -163,13 +164,14 @@ impl Bank {
     }
 
     /// Hit: 180 Hz thump (+14 Hz per variant) with quadratic decay plus a 5
-    /// ms noise click.
+    /// ms noise click, through a resonant body (900 Hz +150 per variant, Q 1.2).
     fn bake_hit(sr: u32, variant: u8) -> Pcm {
         let n = frames_for(sr, HIT_SECS);
         let mut rng: u64 = seeded(0x68_69_74_20_32_30_34_30, variant);
         let mut out = Vec::with_capacity(n);
         let click_len = usize::try_from((sr / 200).max(1)).unwrap_or(1);
         let freq = 180.0 + 14.0 * f32::from(variant);
+        let mut body = crate::dsp::ResonantBody::new(sr, 900 + 150 * u32::from(variant), 1200);
         for i in 0..n {
             let t = ratio(i, sr);
             let d = 1.0 - ratio(i, n);
@@ -179,19 +181,20 @@ impl Bank {
             } else {
                 0.0
             };
-            out.push((thump + click).clamp(-1.0, 1.0));
+            out.push(body.step(thump + click).clamp(-1.0, 1.0));
         }
         Pcm::new(sr, 1, out)
     }
 
     /// Footstep: 90 Hz low thump (+9 Hz per variant) with cubic decay plus
-    /// soft noise onset.
+    /// soft noise onset, through a resonant body (500 Hz +80 per variant, Q 0.9).
     fn bake_footstep(sr: u32, variant: u8) -> Pcm {
         let n = frames_for(sr, FOOTSTEP_SECS);
         let mut rng: u64 = seeded(0x66_6f_6f_74_73_74_65_70, variant);
         let mut out = Vec::with_capacity(n);
         let onset_len = usize::try_from((sr / 100).max(1)).unwrap_or(1);
         let freq = 90.0 + 9.0 * f32::from(variant);
+        let mut body = crate::dsp::ResonantBody::new(sr, 500 + 80 * u32::from(variant), 900);
         for i in 0..n {
             let t = ratio(i, sr);
             let d = 1.0 - ratio(i, n);
@@ -201,7 +204,33 @@ impl Bank {
             } else {
                 0.0
             };
-            out.push((thump + tap).clamp(-1.0, 1.0));
+            out.push(body.step(thump + tap).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
+    /// Friction scrape: bandpassed seeded noise through drive grit under a
+    /// swell-and-fall envelope peaking past the midpoint (slide/drag stand-in).
+    fn bake_friction(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, FRICTION_SECS);
+        let mut rng: u64 = seeded(0x66_72_69_63_74_69_6f_6e, variant);
+        let mut out = Vec::with_capacity(n);
+        let mut body = crate::dsp::ResonantBody::new(sr, 1800 + 300 * u32::from(variant), 800);
+        let grit = crate::dsp::Shape::new(1.5);
+        let peak_pos = 0.55 + 0.03 * f32::from(variant);
+        let mut low = 0.0f32;
+        for i in 0..n {
+            let t = ratio(i, n);
+            let warp = if t < peak_pos {
+                t / peak_pos * 0.5
+            } else {
+                0.5 + (t - peak_pos) / (1.0 - peak_pos) * 0.5
+            };
+            let env = (std::f32::consts::PI * warp).sin().powi(2);
+            let raw = noise(&mut rng);
+            low += 0.02 * (raw - low);
+            let band = body.step(raw - low);
+            out.push((grit.step(band * 1.8) * env * 0.9).clamp(-1.0, 1.0));
         }
         Pcm::new(sr, 1, out)
     }
@@ -300,6 +329,8 @@ pub enum Synth {
     Hit,
     /// Footstep tap.
     Footstep,
+    /// Friction scrape (slides and drags).
+    Friction,
     /// Looping crowd wash.
     Crowd,
     /// Weapon whoosh.
@@ -315,13 +346,15 @@ impl Synth {
     pub fn variants(self) -> usize {
         match self {
             Self::Crowd | Self::Kill | Self::Roar => 1,
-            Self::Hit | Self::Footstep | Self::Swing => 3,
+            Self::Hit | Self::Footstep | Self::Swing | Self::Friction => 3,
         }
     }
 }
 
 /// Swing length in seconds (short whoosh).
 pub const SWING_SECS: f32 = 0.3;
+/// Friction scrape length in seconds.
+pub const FRICTION_SECS: f32 = 0.35;
 /// Kill stinger length in seconds.
 pub const KILL_SECS: f32 = 1.0;
 /// Roar stinger length in seconds.
@@ -645,5 +678,36 @@ mod tests {
             crate::dsp::rms(&kill.samples[6_400..]),
         );
         assert!(late < early * 0.2, "a kill decays: {early} then {late}");
+    }
+
+    #[test]
+    fn synth_seeded_identical_x2() {
+        use crate::dsp::{peak, rms};
+        for &rate in &[8_000u32, 48_000] {
+            for kind in [Synth::Hit, Synth::Footstep, Synth::Friction] {
+                assert_eq!(kind.variants(), 3, "{kind:?} offers 3 takes");
+                for v in 0..3u8 {
+                    let (a, b) = (Bank::synth(kind, rate, v), Bank::synth(kind, rate, v));
+                    assert_eq!(a.samples, b.samples, "{kind:?} v{v} @{rate} replays");
+                    assert!(a.samples.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+                    assert!(rms(&a.samples) > 0.01, "{kind:?} v{v} @{rate} audible");
+                    assert!(peak(&a.samples) > 0.05, "{kind:?} v{v} @{rate} peaks");
+                }
+                let takes = [0, 1, 2].map(|v| Bank::synth(kind, rate, v).samples);
+                assert!(takes[0] != takes[1], "{kind:?} differ");
+                assert!(takes[0] != takes[2], "{kind:?} differ");
+            }
+        }
+        let fr = Bank::synth(Synth::Friction, 48_000, 0);
+        let n = fr.samples.len();
+        let (head, mid, tail) = (
+            rms(&fr.samples[..n / 6]),
+            rms(&fr.samples[n / 3..2 * n / 3]),
+            rms(&fr.samples[5 * n / 6..]),
+        );
+        assert!(mid > 0.02, "friction audible at the swell: {mid}");
+        assert!(head < mid * 0.6, "swell head {head} mid {mid}");
+        assert!(tail < mid * 0.6, "swell tail {tail} mid {mid}");
+        assert!(Bank::synth(Synth::Friction, 0, 0).frames() > 0);
     }
 }

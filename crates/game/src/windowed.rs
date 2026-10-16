@@ -14,9 +14,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use engine_assets::lod_swap::{distance_mm_between, target_lod};
-use engine_assets::mesh_cook::MAX_LOD_LEVELS;
-use engine_audio::{device::DeviceOutput, Bank, Mixer};
+use engine_arena::GaitPhase;
+use engine_audio::{device::DeviceOutput, Bank, BankSound, CueBank, FeedTx, Mixer};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
 use engine_render::{
     backend::{BackendChoice, BackendError},
@@ -31,12 +30,16 @@ use engine_ui::{
 use super::audio_mix::{Material, MixBridge, MixVoice, VoiceSeed, Wall, MAX_MIX_VOICES};
 use super::camera::DirectorParams;
 use super::camera_feed::PresentationFeed;
+use super::pad::{fps_bindings, tick_input_with_pad, RecordedPadEvent};
+#[cfg(any(debug_assertions, test))]
+use super::pad::{poll_gilrs_once, snapshot_from_recorded};
 use super::{App, Checkpoint, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
 
 #[path = "windowed_smoke.rs"]
 mod windowed_smoke;
 pub use windowed_smoke::{
-    check_exit_deadline_with_limit, format_timed_smoke, surface_error_is_loud,
+    check_exit_deadline_with_limit, format_timed_smoke, frame_times_csv_row, surface_error_is_loud,
+    FRAME_TIMES_CSV_HEADER,
 };
 
 #[path = "staged_fight_frames.rs"]
@@ -52,6 +55,15 @@ pub use staged_fight_frames::{
     STAGED_FIGHT_TICKS,
 };
 
+#[path = "windowed_dressing.rs"]
+mod windowed_dressing;
+pub use windowed_dressing::{
+    dressing_actors, dressing_actors_from_json, dressing_camera, dressing_lod, dressing_material,
+    dressing_mesh, dressing_mesh_key, push_dressing_draws, stage_dressing, DressingActor,
+    DressingAsset, DRESSING_ACTOR_COUNT, DRESSING_EYE_M, DRESSING_FOV_DEG, DRESSING_JSON,
+    DRESSING_MESH_ID_BASE, DRESSING_TARGET_M,
+};
+
 /// Mixer rate for the windowed leg (the bank bakes at this rate too).
 pub const WINDOWED_SAMPLE_RATE: u32 = 48_000;
 /// Mixer frames rendered per fixed tick (one second of audio per 60 ticks).
@@ -64,8 +76,12 @@ pub const WINDOW_SIZE: (u32, u32) = (1280, 720);
 pub const WIN_FIXED_DT_S: f64 = 1.0 / 60.0;
 /// Fixed step in milliseconds (the accumulator input unit).
 pub const WIN_FIXED_DT_MS: f64 = 1000.0 / 60.0;
-/// Most fixed steps per presented frame (spiral-of-death clamp).
-pub const WIN_MAX_STEPS_PER_FRAME: u32 = 5;
+/// Most fixed steps per presented frame (spiral-of-death clamp, p99 cap):
+/// one 60 Hz frame owes one step, so 2 absorbs a single missed vsync
+/// (~33 ms) while a hitch's excess wall time is dropped instead of repaid
+/// as a multi-tick catch-up burst in the next frame (the vsync-bound
+/// acquire parks the CPU, so hitch elapsed always lands here).
+pub const WIN_MAX_STEPS_PER_FRAME: u32 = 2;
 /// Offscreen smoke frame size (small for fast CI; windowed play uses
 /// [`WINDOW_SIZE`]).
 pub const SMOKE_FRAME_SIZE: (u32, u32) = (128, 96);
@@ -170,344 +186,6 @@ impl SceneSelect {
             Self::Arena => ARENA_SCENE_ID,
         }
     }
-}
-
-/// Dressing staging: `content/arena/dressing.json` torch/banner actors
-/// bound into the window twin forward path (0 new tris: transformed cubes).
-/// Consumer: the `arena` twin (`frame_list`, `init_twin`, headless smoke).
-/// Data owner: this section owns the parse plus mesh/material/camera staging;
-/// the JSON file owns the coordinates. Units: meters, radians. Determinism:
-/// the same file gives the same actors and meshes; pixels never enter the
-/// sim hash. Errors: typed [`WinError`], never panics.
-pub const DRESSING_JSON: &str = include_str!("../../../content/arena/dressing.json");
-/// Dressing actors staged from the file (2 torches + 4 banners).
-pub const DRESSING_ACTOR_COUNT: usize = 6;
-/// Mesh id base for dressing draws (the central cube keeps id 1).
-pub const DRESSING_MESH_ID_BASE: u64 = 0xD2E5_5100;
-/// Twin establishing eye in meters (west of the walls, down the axis).
-pub const DRESSING_EYE_M: [f32; 3] = [-14.0, 5.0, 0.0];
-/// Twin establishing target in meters (the gate court).
-pub const DRESSING_TARGET_M: [f32; 3] = [14.0, 1.0, 0.0];
-/// Twin establishing vertical fov in degrees.
-pub const DRESSING_FOV_DEG: f32 = 50.0;
-
-/// Dressing asset kind: torch approach pair or banner court/far pairs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DressingAsset {
-    /// Approach torch flanking the tunnel mouth.
-    Torch,
-    /// Court or far banner pairing the gate axis.
-    Banner,
-}
-
-/// One staged dressing actor: box center plus full extents in meters.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct DressingActor {
-    /// Stable actor id from the file (101..=106).
-    pub id: u32,
-    /// Which kit prop this stages.
-    pub asset: DressingAsset,
-    /// Box center in meters `[x, y, z]`.
-    pub pos_m: [f32; 3],
-    /// Full extents in meters `[sx, sy, sz]`.
-    pub size_m: [f32; 3],
-}
-
-/// Raw field slice after `"needle":` in one actor block. No heap; the
-/// caller trims the token. Missing needle or colon fails loudly.
-fn dressing_field_raw<'a>(block: &'a str, needle: &str) -> Result<&'a str, WinError> {
-    let at = block
-        .find(needle)
-        .ok_or_else(|| WinError::Render(format!("dressing missing {needle}")))?;
-    let rest = block
-        .get(at + needle.len()..)
-        .ok_or_else(|| WinError::Render(format!("dressing missing {needle}")))?;
-    let colon = rest
-        .find(':')
-        .ok_or_else(|| WinError::Render(format!("dressing missing {needle}")))?;
-    rest.get(colon + 1..)
-        .ok_or_else(|| WinError::Render(format!("dressing missing {needle}")))
-}
-
-/// Parse one finite `f32` field (`"x"`, `"sy"` ...). Rejects missing,
-/// unparsable and non-finite values loudly.
-fn dressing_parse_f32(block: &str, needle: &str) -> Result<f32, WinError> {
-    let rest = dressing_field_raw(block, needle)?;
-    let end = rest.find([',', '}']).unwrap_or(rest.len());
-    let token = rest.get(..end).unwrap_or("").trim();
-    let value: f32 = token
-        .parse()
-        .map_err(|_| WinError::Render(format!("dressing bad {needle}")))?;
-    if !value.is_finite() {
-        return Err(WinError::Render(format!("dressing bad {needle}")));
-    }
-    Ok(value)
-}
-
-/// Parse one `u32` id field. Rejects missing and unparsable values loudly.
-fn dressing_parse_id(block: &str) -> Result<u32, WinError> {
-    let rest = dressing_field_raw(block, "\"id\"")?;
-    let end = rest.find([',', '}']).unwrap_or(rest.len());
-    let token = rest.get(..end).unwrap_or("").trim();
-    token
-        .parse::<u32>()
-        .map_err(|_| WinError::Render("dressing bad \"id\"".to_string()))
-}
-
-/// Parse one asset label (`"torch"` or `"banner"`). Unknown labels fail.
-fn dressing_parse_asset(block: &str) -> Result<DressingAsset, WinError> {
-    let rest = dressing_field_raw(block, "\"asset\"")?;
-    let quote = rest
-        .find('"')
-        .ok_or_else(|| WinError::Render("dressing bad \"asset\"".to_string()))?;
-    let tail = rest.get(quote + 1..).unwrap_or("");
-    let end = tail
-        .find('"')
-        .ok_or_else(|| WinError::Render("dressing bad \"asset\"".to_string()))?;
-    match tail.get(..end).unwrap_or("") {
-        "torch" => Ok(DressingAsset::Torch),
-        "banner" => Ok(DressingAsset::Banner),
-        _ => Err(WinError::Render("dressing bad \"asset\"".to_string())),
-    }
-}
-
-/// Parse one actor object block (no nested objects inside). Validates
-/// ranges: positions inside +/-99 m, sizes in `(0, 10]`, ids nonzero.
-fn dressing_actor_from_block(block: &str) -> Result<DressingActor, WinError> {
-    let id = dressing_parse_id(block)?;
-    if id == 0 {
-        return Err(WinError::Render("dressing bad \"id\"".to_string()));
-    }
-    let asset = dressing_parse_asset(block)?;
-    let x = dressing_parse_f32(block, "\"x\"")?;
-    let y = dressing_parse_f32(block, "\"y\"")?;
-    let z = dressing_parse_f32(block, "\"z\"")?;
-    let sx = dressing_parse_f32(block, "\"sx\"")?;
-    let sy = dressing_parse_f32(block, "\"sy\"")?;
-    let sz = dressing_parse_f32(block, "\"sz\"")?;
-    for (name, v) in [("x", x), ("y", y), ("z", z)] {
-        let _ = name;
-        if !v.is_finite() {
-            return Err(WinError::Render("dressing bad pos".to_string()));
-        }
-    }
-    if !(-99.0..=99.0).contains(&x) || !(-99.0..=99.0).contains(&z) || !(0.0..=10.0).contains(&y) {
-        return Err(WinError::Render("dressing actor out of bounds".to_string()));
-    }
-    for size in [sx, sy, sz] {
-        if !(0.0 < size && size <= 10.0) {
-            return Err(WinError::Render("dressing bad size".to_string()));
-        }
-    }
-    Ok(DressingActor {
-        id,
-        asset,
-        pos_m: [x, y, z],
-        size_m: [sx, sy, sz],
-    })
-}
-
-/// Parse the dressing actor table from JSON text. Expects exactly
-/// [`DRESSING_ACTOR_COUNT`] objects inside the `"actors"` array; any shape
-/// drift (missing array, wrong count, bad actor) fails loudly so a stale
-/// binary never silently renders stale dressing.
-pub fn dressing_actors_from_json(
-    text: &str,
-) -> Result<[DressingActor; DRESSING_ACTOR_COUNT], WinError> {
-    let anchor = text
-        .find("\"actors\"")
-        .ok_or_else(|| WinError::Render("dressing missing \"actors\"".to_string()))?;
-    let tail = text
-        .get(anchor..)
-        .ok_or_else(|| WinError::Render("dressing missing \"actors\"".to_string()))?;
-    let open = tail
-        .find('[')
-        .ok_or_else(|| WinError::Render("dressing missing \"actors\"".to_string()))?;
-    let mut cursor = anchor + open + 1;
-    let mut out: [DressingActor; DRESSING_ACTOR_COUNT] = [DressingActor {
-        id: 1,
-        asset: DressingAsset::Torch,
-        pos_m: [0.0, 0.0, 0.0],
-        size_m: [1.0, 1.0, 1.0],
-    }; DRESSING_ACTOR_COUNT];
-    let mut count = 0usize;
-    while count < DRESSING_ACTOR_COUNT {
-        let rest = text
-            .get(cursor..)
-            .ok_or_else(|| WinError::Render("dressing actor missing".to_string()))?;
-        let open_rel = rest
-            .find('{')
-            .ok_or_else(|| WinError::Render("dressing actor missing".to_string()))?;
-        let body = rest.get(open_rel + 1..).unwrap_or("");
-        let close_rel = body
-            .find('}')
-            .ok_or_else(|| WinError::Render("dressing actor missing".to_string()))?;
-        let block = body.get(..close_rel).unwrap_or("");
-        out[count] = dressing_actor_from_block(block)?;
-        count += 1;
-        cursor += open_rel + 1 + close_rel + 1;
-    }
-    Ok(out)
-}
-
-/// Parse the embedded `content/arena/dressing.json` table. Same bytes give
-/// the same actors; a drifted file fails loudly at staging time.
-pub fn dressing_actors() -> Result<[DressingActor; DRESSING_ACTOR_COUNT], WinError> {
-    dressing_actors_from_json(DRESSING_JSON)
-}
-
-/// Stable mesh key per dressing actor. Never collides with the central
-/// cube key: a distinct base id plus the actor id baked into the digest.
-#[must_use]
-pub fn dressing_mesh_key(actor: &DressingActor) -> MeshKey {
-    MeshKey::new(
-        DRESSING_MESH_ID_BASE + u64::from(actor.id),
-        [actor.id.to_le_bytes()[0]; 32],
-    )
-}
-
-/// Transformed cube mesh for one actor: the unit cube scaled by the full
-/// extents and translated to the box center. Normals stay axis-aligned
-/// (boxes only); UVs and indices ride through. Validation failures are
-/// typed, never panics.
-pub fn dressing_mesh(actor: &DressingActor) -> Result<engine_render::v1::MeshData, WinError> {
-    let cube = engine_render::v1::cube();
-    let mut positions = Vec::with_capacity(cube.positions.len());
-    for p in &cube.positions {
-        positions.push([
-            actor.pos_m[0] + p[0] * actor.size_m[0],
-            actor.pos_m[1] + p[1] * actor.size_m[1],
-            actor.pos_m[2] + p[2] * actor.size_m[2],
-        ]);
-    }
-    engine_render::v1::upload_mesh(&positions, &cube.normals, &cube.uvs, &cube.indices)
-        .map_err(|err| WinError::Render(format!("dressing mesh: {err}")))
-}
-
-/// PBR factors per asset: torches read warm and bright, banners deep red;
-/// both rough dielectrics against the central copper cube. Always valid.
-#[must_use]
-pub fn dressing_material(asset: DressingAsset) -> engine_render::v1::PbrMaterial {
-    match asset {
-        DressingAsset::Torch => engine_render::v1::PbrMaterial {
-            base_color: [0.95, 0.55, 0.20],
-            metallic: 0.0,
-            roughness: 0.6,
-            exposure: 1.0,
-        },
-        DressingAsset::Banner => engine_render::v1::PbrMaterial {
-            base_color: [0.55, 0.08, 0.08],
-            metallic: 0.0,
-            roughness: 0.8,
-            exposure: 1.0,
-        },
-    }
-}
-
-/// Twin establishing camera: west of the walls looking down the
-/// walls-to-gate axis at the gate court. Aspect follows the frame; bad
-/// sizes fail loudly instead of touching the GPU.
-pub fn dressing_camera(width: u32, height: u32) -> Result<engine_render::v1::Camera, WinError> {
-    if SizeClass::classify(width, height) != SizeClass::Sizes {
-        return Err(WinError::Render(format!(
-            "dressing frame size {width}x{height} rejected"
-        )));
-    }
-    let mut camera = engine_render::v1::Camera::new(
-        DRESSING_EYE_M,
-        DRESSING_TARGET_M,
-        [0.0, 1.0, 0.0],
-        DRESSING_FOV_DEG.to_radians(),
-    );
-    let wide =
-        u16::try_from(width).map_err(|_| WinError::Render("dressing camera aspect".to_string()))?;
-    let high = u16::try_from(height)
-        .map_err(|_| WinError::Render("dressing camera aspect".to_string()))?;
-    camera.aspect = f32::from(wide) / f32::from(high);
-    camera.far = 120.0;
-    camera
-        .validate()
-        .map_err(|err| WinError::Render(format!("dressing camera: {err}")))?;
-    Ok(camera)
-}
-
-/// Upload every dressing mesh into the twin. Cold init path only (heap per
-/// mesh here, zero per frame later). Parse failures are loud; a refused
-/// GPU upload skips that actor (like the central cube) so one bad actor
-/// never blanks the frame. Returns staged actors uploaded.
-pub fn stage_dressing(presenter: &mut Presenter) -> Result<usize, WinError> {
-    let actors = dressing_actors()?;
-    let mut uploaded = 0usize;
-    for actor in &actors {
-        let key = dressing_mesh_key(actor);
-        let mesh = dressing_mesh(actor)?;
-        if presenter.upload_mesh(key, &mesh).is_ok() {
-            uploaded += 1;
-        }
-    }
-    Ok(uploaded)
-}
-
-/// LOD plus camera distance of one dressing actor for an eye position: the
-/// distance in whole millimeters through the asset LOD bands ([`target_lod`]
-/// from LOD0, so the band pick is exact). A refused distance (non-finite
-/// position) measures 0 mm and holds LOD0 instead of refusing the frame.
-fn dressing_lod_and_mm(actor: &DressingActor, eye_m: [f32; 3]) -> (usize, u32) {
-    let distance_mm = distance_mm_between(eye_m, actor.pos_m).unwrap_or(0);
-    (target_lod(distance_mm, 0, MAX_LOD_LEVELS), distance_mm)
-}
-
-/// Resident LOD of one dressing actor for an eye position, through the
-/// asset LOD bands. The twin frame path calls this per actor per frame, so
-/// the asset LOD module has a live production caller outside its own tests.
-#[must_use]
-pub fn dressing_lod(actor: &DressingActor, eye_m: [f32; 3]) -> usize {
-    dressing_lod_and_mm(actor, eye_m).0
-}
-
-/// Push one draw per resident dressing mesh, nearest band first: the asset
-/// LOD bands order submission front-to-back, so tiled GPUs shade less
-/// twice. Same set as before (missing keys still draw nothing); order is
-/// the only change, and opaque depth-tested boxes paint identical pixels
-/// in any order. Cold per-frame tail (stack parse, no mesh rebuild).
-/// Returns draws pushed.
-pub fn push_dressing_draws(list: &mut DrawList, resident: &[MeshKey]) -> Result<usize, WinError> {
-    let actors = dressing_actors()?;
-    let eye = list.camera.eye.to_array();
-    // Bounded stack rank, nearest band first; ties keep file order (the
-    // slot breaks them), so the same frame always submits the same order.
-    let mut rank: [(usize, u32, usize); DRESSING_ACTOR_COUNT] = [(0, 0, 0); DRESSING_ACTOR_COUNT];
-    for (slot, actor) in actors.iter().enumerate() {
-        let (lod, distance_mm) = dressing_lod_and_mm(actor, eye);
-        rank[slot] = (lod, distance_mm, slot);
-    }
-    for i in 1..DRESSING_ACTOR_COUNT {
-        let key = rank[i];
-        let mut j = i;
-        while j > 0 && rank[j - 1] > key {
-            rank[j] = rank[j - 1];
-            j -= 1;
-        }
-        rank[j] = key;
-    }
-    let mut pushed = 0usize;
-    for (_, _, slot) in rank {
-        let actor = &actors[slot];
-        let key = dressing_mesh_key(actor);
-        if resident.contains(&key) {
-            let material = dressing_material(actor.asset);
-            material
-                .validate()
-                .map_err(|err| WinError::Render(format!("dressing material: {err}")))?;
-            list.items.push(engine_render::present::DrawItem {
-                mesh: key,
-                material,
-                base_color: None,
-            });
-            pushed += 1;
-        }
-    }
-    Ok(pushed)
 }
 
 /// Fixed seed for the arena600 camera path (mirrors
@@ -1069,6 +747,58 @@ pub fn mix_tick_audio(
     }
 }
 
+/// Stage the arena cue bank from the real clips in `content/audio`.
+///
+/// Consumer: the `arena` binary stages once at startup; the headless smokes
+/// keep the placeholder mixer bank. Data owner: `engine-audio` owns the
+/// decoded takes; this helper only picks the root and marks recorded takes.
+/// Units: `sample_rate` in Hz (48_000 in the window). Determinism: same files
+/// plus same rate give the same takes (presentation only, never hashed).
+/// Errors: fails loudly when clips are missing; the window never falls back
+/// to silent synth.
+/// Caller: `crates/game/src/bin/arena.rs::ArenaApp::new`.
+pub fn stage_arena_bank(sample_rate: u32) -> Result<(Arc<CueBank>, bool), WinError> {
+    let manifest_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/audio");
+    for root in [
+        std::path::Path::new("content/audio"),
+        manifest_root.as_path(),
+    ] {
+        if let Ok((cue_bank, report)) = engine_audio::load_cue_bank(root, sample_rate) {
+            if report.loaded_files > 0 && report.missing_files.is_empty() {
+                return Ok((Arc::new(cue_bank), true));
+            }
+        }
+    }
+    Err(WinError::Render(cap_message("arena bank missing clips")))
+}
+
+/// Cue name for one windowed voice (flat play, gain from the tick).
+fn bank_sound_cue(sound: BankSound) -> &'static str {
+    match sound {
+        BankSound::Hit => engine_audio::cue_names::HIT,
+        BankSound::Footstep => engine_audio::cue_names::FOOTSTEP,
+        BankSound::CrowdBed => engine_audio::cue_names::CROWD,
+    }
+}
+
+/// Queue one tick's voices plus the camera listener through the feed.
+///
+/// Consumer: the `arena` window stages each tick's `TickOutcome::audio` here
+/// instead of the lossy `try_lock` hand-off. Data owner: the feed owns the
+/// queue; this helper only maps voices to cue names. Units: `tick` is the
+/// fixed tick the outcome ran on. Determinism: same outcomes queue the same
+/// commands (presentation only, never hashed). Errors: never fails: a full
+/// ring or an unknown cue is counted in `FeedStats` (`dropped_full`,
+/// `unknown_cue`), never dropped silently.
+/// Caller: `crates/game/src/bin/arena.rs::ArenaApp::tick_and_present`.
+pub fn feed_tick_audio(tx: &mut FeedTx, tick: u32, outcome: &TickOutcome) {
+    let _ = tx.listener(tick, WIN_LISTENER_3CM, 0);
+    for command in &outcome.audio {
+        let _ = tx.play(tick, bank_sound_cue(command.sound), command.gain, None);
+    }
+}
+
 /// HUD text cells plus quads for one snapshot (hp line plus kill-feed lines
 /// through the UI text path: layout cells, then one quad per cell). Pure.
 pub fn hud_cells_quads(hud: &Hud) -> (usize, usize) {
@@ -1084,6 +814,88 @@ pub fn hud_cells_quads(hud: &Hud) -> (usize, usize) {
         quads += indices.len() / 6;
     }
     (cells, quads)
+}
+
+/// HUD text cells plus quads for the live balance verdicts (EG45): one
+/// `slot {slot}: {label}` line per slot through
+/// [`super::balance_verdict::push_verdict_line`] plus one `down {n}` summary
+/// line from [`super::balance_verdict::count_down`], laid out through the
+/// same UI text path as [`hud_cells_quads`]. Pure; presentation only, never
+/// hashed. Caller: the headless smokes fold each tick's cues into gaits with
+/// [`super::balance_verdict::fold_verdict_gaits`] and add these counts to the
+/// HUD receipt, so the built `balance_verdict` text has a live caller
+/// outside its own tests.
+#[must_use]
+pub fn verdict_cells_quads(gaits: &[GaitPhase]) -> (usize, usize) {
+    let atlas = Atlas::new();
+    let mut cells = 0usize;
+    let mut quads = 0usize;
+    let mut line = String::new();
+    for (index, gait) in gaits.iter().enumerate() {
+        line.clear();
+        let Ok(slot) = u8::try_from(index) else {
+            continue;
+        };
+        super::balance_verdict::push_verdict_line(slot, *gait, &mut line);
+        let laid = layout(&line, 32, Align::Left);
+        let (_, _, indices) = emit_quads(&laid, atlas, 1.0);
+        cells += laid.len();
+        quads += indices.len() / 6;
+    }
+    line.clear();
+    line.push_str("down ");
+    line.push_str(&super::balance_verdict::count_down(gaits).to_string());
+    let laid = layout(&line, 32, Align::Left);
+    let (_, _, indices) = emit_quads(&laid, atlas, 1.0);
+    cells += laid.len();
+    quads += indices.len() / 6;
+    (cells, quads)
+}
+
+/// Title line for the window shell boot screen: one static HUD-text row
+/// naming the start key. ASCII-only so the HUD text path lays it out.
+/// Pure; the `arena` binary says it once at boot.
+#[must_use]
+pub fn title_text() -> &'static str {
+    "TITLE press Enter"
+}
+
+/// Cells plus quads for the title line through the UI text path (layout
+/// cells, then one quad per cell), the same path as [`hud_cells_quads`].
+/// Pure; the overlay rows stay parked.
+#[must_use]
+pub fn title_cells_quads() -> (usize, usize) {
+    let laid = layout(title_text(), 32, Align::Left);
+    let (_, _, indices) = emit_quads(&laid, Atlas::new(), 1.0);
+    (laid.len(), indices.len() / 6)
+}
+
+/// Result line for the window shell at match end: the round winner plus
+/// the tick cursor over the session length. ASCII-only so the HUD text
+/// path lays it out. Pure; presentation only, never hashed.
+#[must_use]
+pub fn result_text(app: &App) -> String {
+    let winner = match app.round_winner() {
+        super::rounds::RoundWinner::Slot0 => "P0",
+        super::rounds::RoundWinner::Slot1 => "P1",
+        super::rounds::RoundWinner::Tie => "draw",
+    };
+    format!(
+        "RESULT {winner} ticks={}/{}",
+        app.cursor(),
+        app.config().ticks
+    )
+}
+
+/// Cells plus quads for the result line through the UI text path (layout
+/// cells, then one quad per cell), the same path as [`hud_cells_quads`].
+/// Pure; the overlay rows stay parked.
+#[must_use]
+pub fn result_cells_quads(app: &App) -> (usize, usize) {
+    let line = result_text(app);
+    let laid = layout(&line, 32, Align::Left);
+    let (_, _, indices) = emit_quads(&laid, Atlas::new(), 1.0);
+    (laid.len(), indices.len() / 6)
 }
 
 /// Build the live duel overlay for one app snapshot: tick from the HUD clock,
@@ -1109,6 +921,86 @@ pub fn duel_overlay_for_app(app: &App) -> DuelOverlay {
         }
     }
     overlay
+}
+
+/// (rect, fraction) pairs for each duel overlay row in row order. Pure; heap
+/// on the presentation path only, zero per tick. Rects and fills come from
+/// the render overlay ring owner, so aspect rules live in one place.
+#[must_use]
+pub fn hp_bars_for_overlay(overlay: &DuelOverlay) -> Vec<([f32; 4], f32)> {
+    overlay
+        .rows()
+        .iter()
+        .enumerate()
+        .map(|(slot, row)| {
+            (
+                engine_render::overlay::hp_bar_rect(slot),
+                engine_render::overlay::hp_fraction(row.hp_permille()),
+            )
+        })
+        .collect()
+}
+
+/// Staged quad count for `rows` overlay rows in a ring of `capacity` quads:
+/// two per row (dark back plus fill), capped at capacity. Pure; same inputs
+/// repeat, no heap, no clock. Caller: `stage_hp_bars` below truncates to the
+/// same prefix before pushing, so a full ring stages whole bars and never a
+/// partial back without its fill.
+/// [gems3 | 6.1 Introduction] single quad-ring draw, one call for all cells.
+#[must_use]
+pub fn hp_staging_quads(rows: usize, capacity: usize) -> usize {
+    rows.saturating_mul(2).min(capacity)
+}
+
+/// Windowed lobby frame: host plus slot rows the loop draws this redraw.
+/// Presentation only; ticks and checkpoints never see it.
+/// Caller: [`run_windowed`] drives it once per smoke so the screen has a live caller.
+#[must_use]
+pub fn windowed_lobby_frame(screen: &engine_ui::lobby_ui::LobbyScreen) -> (usize, usize) {
+    (screen.hosts().len(), screen.slots().len())
+}
+
+/// Drive one lobby press from the live loop: draws the host and slot lists,
+/// feeds one press and runs the command against the net lobby; sockets stay in
+/// the caller and no address is typed. Presentation only, discarded by the
+/// caller so ticks and checkpoints never see it.
+fn drive_lobby_once(seed: u64) {
+    use engine_net::lobby::{BuildId, Lobby, MAX_BEACONS, REFRESH_PERIOD_MS};
+    use engine_ui::lobby_ui::{LobbyInput, LobbyLimits, LobbyScreen};
+    let limits = LobbyLimits {
+        refresh_period_ms: REFRESH_PERIOD_MS,
+        max_hosts: MAX_BEACONS,
+    };
+    if let Ok(mut screen) = LobbyScreen::new(limits) {
+        if let Ok(mut lobby) = Lobby::new(
+            BuildId {
+                version: 1,
+                rules: 0,
+            },
+            2,
+            seed,
+        ) {
+            let _ =
+                crate::netgame::windowed_lobby_entry(&mut screen, &mut lobby, LobbyInput::Host, 1);
+            let _ = crate::netgame::lobby_slot_rows(&lobby, 1);
+            let _ = windowed_lobby_frame(&screen);
+        }
+    }
+}
+
+/// Stage one duel overlay frame into the presenter CPU ring: clear, then one
+/// back-plus-fill pair per row in row order; stops when the fixed ring is
+/// full. Presentation only; the tick, the checkpoints and the receipt shape
+/// stay unchanged.
+pub fn stage_hp_bars(presenter: &mut Presenter, overlay: &DuelOverlay) {
+    presenter.clear_overlay();
+    let bars = hp_bars_for_overlay(overlay);
+    let want_rows = hp_staging_quads(bars.len(), engine_render::overlay::OVERLAY_MAX_QUADS) / 2;
+    for (rect, fill) in bars.into_iter().take(want_rows) {
+        if !presenter.push_hp_bar(rect[0], rect[1], rect[2], rect[3], fill) {
+            break;
+        }
+    }
 }
 
 /// Clear-only draw list for one HUD frame: shared camera plus light from
@@ -1189,8 +1081,81 @@ pub struct WinReport {
     pub camera_frames: u32,
 }
 
+/// Map one device button to its recorded pad code (`0..=7`): face buttons
+/// plus pad directions; anything else gives `None` and is skipped below.
+fn gilrs_button_code(button: gilrs::Button) -> Option<u8> {
+    match button {
+        gilrs::Button::South => Some(0),
+        gilrs::Button::East => Some(1),
+        gilrs::Button::North => Some(2),
+        gilrs::Button::West => Some(3),
+        gilrs::Button::DPadUp => Some(4),
+        gilrs::Button::DPadDown => Some(5),
+        gilrs::Button::DPadLeft => Some(6),
+        gilrs::Button::DPadRight => Some(7),
+        _ => None,
+    }
+}
+
+/// Drain one device poll into recorded events: a single `next_event` sweep
+/// per call (the caller runs it once per tick), appending to `out` and
+/// carrying the stick in `stick` so a held deflection survives quiet
+/// frames. A missing backend appends nothing; unknown buttons and axes
+/// are skipped, never panics.
+fn drain_gilrs_once(
+    backend: Option<&mut gilrs::Gilrs>,
+    stick: &mut (f32, f32),
+    out: &mut Vec<RecordedPadEvent>,
+) {
+    let Some(backend) = backend else {
+        return;
+    };
+    let mut moved = false;
+    while let Some(ev) = backend.next_event() {
+        match ev.event {
+            gilrs::EventType::ButtonPressed(button, ..) => {
+                if let Some(code) = gilrs_button_code(button) {
+                    out.push(RecordedPadEvent::ButtonDown(code));
+                }
+            }
+            gilrs::EventType::ButtonReleased(button, ..) => {
+                if let Some(code) = gilrs_button_code(button) {
+                    out.push(RecordedPadEvent::ButtonUp(code));
+                }
+            }
+            gilrs::EventType::AxisChanged(axis, value, ..) => match axis {
+                gilrs::Axis::LeftStickX => {
+                    stick.0 = value;
+                    moved = true;
+                }
+                gilrs::Axis::LeftStickY => {
+                    stick.1 = value;
+                    moved = true;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    if moved {
+        out.push(RecordedPadEvent::Axis {
+            lx: stick.0,
+            ly: stick.1,
+        });
+    }
+}
+
+/// Presented-frame index for the practice swap: the shell draw count
+/// narrowed to `u32` (saturating at `u32::MAX`). Pure; the frame is stamped
+/// beside the tick, read-only otherwise, so the tick never moves here.
+/// Caller: `run_windowed` threads this beside each tick for the swap.
+#[must_use]
+pub fn practice_frame_index(frames_pumped: u64) -> u32 {
+    u32::try_from(frames_pumped).unwrap_or(u32::MAX)
+}
+
 /// Run windowed play headless-safe: open the render window shell, feed one
-/// idle human input per fixed tick through the default input bindings (AI
+/// idle human input per fixed tick through the FPS input map (AI
 /// brains fill every other slot, same as the headless leg), play each tick's
 /// audio commands through the headless mixer, and lay out the HUD text plus
 /// quads. Bounded by `ticks` (and the session length); device audio is
@@ -1200,7 +1165,7 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
     let mut app = App::new(config)?.into_duel()?;
     let mut shell = WindowShell::new();
     shell.open(WINDOW_SIZE.0, WINDOW_SIZE.1);
-    let bindings = Bindings::new();
+    let bindings = fps_bindings();
     let bank = Bank::placeholder(WINDOWED_SAMPLE_RATE);
     let mut mixer = Mixer::new(WINDOWED_SAMPLE_RATE);
     let human = FighterId::new(HUMAN_SLOT).ok_or(GameError::BadConfig("fighters"))?;
@@ -1222,22 +1187,42 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
     // presentation-side inside the director, never in the checkpoints.
     let mut feed = PresentationFeed::new(HUMAN_SLOT, DirectorParams::default())
         .expect("arena camera table is valid");
+    // Live balance verdicts (EG45): folded from each tick's cues, counted below.
+    let mut verdict_gaits = vec![GaitPhase::Steady; usize::from(app.config().fighters)];
+    // Reused pressed buffer (sized once here, zero per tick): the per-tick
+    // pad poll merges into it instead of handing out a fresh list.
+    let mut pad_scratch = Vec::with_capacity(16);
+    // Real pad backend, polled once per tick; missing drivers drain empty.
+    let mut pad_backend = gilrs::Gilrs::new().ok();
+    // Reused device-event cache plus the carried stick across polls.
+    let mut pad_events_cache: Vec<RecordedPadEvent> = Vec::with_capacity(8);
+    let mut pad_stick = (0.0f32, 0.0f32);
     for tick in 0..ticks_run {
-        // Idle wish through the live bindings table (no keys pressed): this
-        // is the bindings-to-FighterInput path windowed play uses, with an
-        // empty frame rather than a scripted tape.
-        let pressed: &[_] = &[];
-        let (mx, mz) = bindings.wish_from_pressed(pressed);
-        let input = FighterInput {
+        // Human wish through the FPS input map, fed by one device drain
+        // per tick; the debug check keeps the poll seam equal to the fold.
+        pad_events_cache.clear();
+        drain_gilrs_once(pad_backend.as_mut(), &mut pad_stick, &mut pad_events_cache);
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            poll_gilrs_once(|| pad_events_cache.clone()),
+            snapshot_from_recorded(&pad_events_cache)
+        );
+        let input = tick_input_with_pad(
             tick,
-            fighter: human,
-            mx,
-            mz,
-            facing: 0,
-            buttons: bindings.button_bits(pressed),
-        };
+            human,
+            &[],
+            &pad_events_cache,
+            &bindings,
+            &mut pad_scratch,
+        )
+        .map_err(|_| GameError::BadConfig("fps-map idle input"))?;
         let outcome = app.tick(input);
         debug_assert!(outcome.input_accepted);
+        // Frame stamped beside the tick for the practice swap, read-only:
+        // the swap needs the presented-frame index, the tick never moves here.
+        let frame = practice_frame_index(shell.draw_count());
+        let _ = (frame, tick);
+        super::balance_verdict::fold_verdict_gaits(&mut verdict_gaits, &outcome.cues);
         let _ = feed.win_frame(&outcome);
         let stats = mix_tick_audio(&mut mixer, &bank, &mut bridge, &walls, &outcome);
         send_sum += stats.send_sum;
@@ -1249,7 +1234,12 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
 
     // HUD presentation: hp line plus kill-feed lines through the UI text
     // path (layout cells, then one quad per cell for the renderer).
-    let (hud_cells, hud_quads) = hud_cells_quads(app.hud());
+    let (base_cells, base_quads) = hud_cells_quads(app.hud());
+    let (vcells, vquads) = verdict_cells_quads(&verdict_gaits);
+    let (hud_cells, hud_quads) = (base_cells + vcells, base_quads + vquads);
+
+    // Lobby wiring (UIX3b): the live loop owns the screen; presentation only.
+    drive_lobby_once(config.seed);
 
     Ok(WindowedReport {
         ticks_run,
@@ -1320,17 +1310,79 @@ fn smoke_twin_list(
             mesh: key,
             material: scene.material,
             base_color: None,
+            normal_map: None,
         });
     }
     let resident = presenter.mesh_keys();
-    let _ = push_dressing_draws(&mut list, &resident)?;
-    // Kit draws in place of nothing: the cube stays lit beside them (the
-    // visible error mesh), so a refused stage still paints a valid frame.
-    let _ = super::arena_kit::push_kit_draws(&mut list, &resident, kit);
+    let dressing_base = list.items.len();
+    let dressing_pushed = push_dressing_draws(&mut list, &resident)?;
+    // Kit draws in place of dressing (VS1): the cube stays lit beside them
+    // (the visible error mesh), so a refused stage still paints a valid frame.
+    let kit_pushed = super::arena_kit::push_kit_draws(&mut list, &resident, kit);
     // Kit prop rows ride the twin frame: physical placement boxes for the
     // brief (presentation only, hash untouched).
     let _ = super::arena_kit::kit_prop_rows().len();
+    // Collision lockstep: the 11 physical placement boxes must collide as a
+    // `MatchWorld`; when they cannot, drop the kit draws just pushed so a
+    // picture never hides a missing wall. Presentation only, hash untouched.
+    let world_ok = super::arena_kit::kit_match_world().is_ok();
+    list.items.truncate(kit_kept_after_collision(
+        list.items.len(),
+        kit_pushed,
+        world_ok,
+    ));
+    // Replacement: kept kit replaces dressing, so drop the dressing range
+    // just pushed; fallback (empty kit or dropped world) keeps dressing.
+    let kit_kept = if world_ok { kit_pushed } else { 0 };
+    if kit_replaces_dressing(kit_kept, world_ok) {
+        let end = dressing_base
+            .saturating_add(dressing_pushed)
+            .min(list.items.len());
+        if dressing_base < end {
+            list.items.drain(dressing_base..end);
+        }
+    }
     Ok(list)
+}
+
+/// Kit replaces dressing when kept (VS1): one kept kit draw with a colliding
+/// world makes the six dressing cubes redundant; empty kit or a dropped world
+/// keeps dressing as the visible fallback. Pure; presentation only, zero per
+/// tick. Determinism: same inputs give same verdict on every run.
+fn kit_replaces_dressing(kit_kept: usize, world_ok: bool) -> bool {
+    world_ok && kit_kept > 0
+}
+
+/// Keep count after the kit collision lockstep: all items when the placement
+/// collides, otherwise the items before the kit draws just pushed. Pure;
+/// presentation only, zero per tick.
+fn kit_kept_after_collision(items_len: usize, pushed: usize, world_ok: bool) -> usize {
+    if world_ok {
+        items_len
+    } else {
+        items_len.saturating_sub(pushed)
+    }
+}
+
+/// Present one smoke twin frame plus its HP-bar staging: build the twin draw
+/// list, stage the live duel overlay rows into the presenter CPU ring, then
+/// render it offscreen. Returns 1 when the frame presented, else 0.
+/// Presentation only; the tick, the checkpoints and the receipt shape stay
+/// unchanged.
+fn smoke_present_once(
+    presenter: &mut Presenter,
+    key: MeshKey,
+    kit: &super::arena_kit::KitReport,
+    frame: u32,
+    path: Option<CameraPath>,
+    app: &App,
+) -> Result<u32, WinError> {
+    let list = smoke_twin_list(presenter, key, kit, frame, path)?;
+    let overlay = duel_overlay_for_app(app);
+    let _ = overlay.to_bytes();
+    stage_hp_bars(presenter, &overlay);
+    let out = presenter.render_offscreen(&list)?;
+    Ok(u32::from(out.receipt.presented))
 }
 
 /// Headless smoke: the `--frames N --exit` path with no display. Feeds
@@ -1398,6 +1450,8 @@ pub fn run_headless_smoke_with_options(
     // per tick with live-cue trauma, presentation-side shake only.
     let mut feed = PresentationFeed::new(HUMAN_SLOT, DirectorParams::default())
         .map_err(|err| WinError::Render(format!("camera table invalid: {err}")))?;
+    // Live balance verdicts (EG45): folded from each tick's cues, counted below.
+    let mut verdict_gaits = vec![GaitPhase::Steady; usize::from(app.config().fighters)];
     for tick in 0..ticks_run {
         // Own wall-clock bound: a wedged device fails the smoke loudly
         // instead of hanging the run past its limit.
@@ -1405,6 +1459,7 @@ pub fn run_headless_smoke_with_options(
         let input = fighter_input_from_pressed(tick, human, &[], &bindings);
         let outcome = app.tick(input);
         debug_assert!(outcome.input_accepted);
+        super::balance_verdict::fold_verdict_gaits(&mut verdict_gaits, &outcome.cues);
         let _ = feed.win_frame(&outcome);
         let stats = mix_tick_audio(&mut mixer, &bank, &mut bridge, &walls, &outcome);
         send_sum += stats.send_sum;
@@ -1415,19 +1470,14 @@ pub fn run_headless_smoke_with_options(
             continue;
         }
         if let Some((ref mut presenter, key, ref kit)) = presenter {
-            let list = smoke_twin_list(presenter, key, kit, frames_presented, camera_path)?;
-            let out = presenter.render_offscreen(&list)?;
-            if out.receipt.presented {
-                frames_presented += 1;
-            }
-            // Duel overlay rides the presented frame: live names plus HP pips
-            // for this tick (presentation only, hash untouched).
-            let presented_overlay = duel_overlay_for_app(&app);
-            let _ = presented_overlay.to_bytes();
+            frames_presented +=
+                smoke_present_once(presenter, key, kit, frames_presented, camera_path, &app)?;
         }
     }
 
-    let (hud_cells, hud_quads) = hud_cells_quads(app.hud());
+    let (base_cells, base_quads) = hud_cells_quads(app.hud());
+    let (vcells, vquads) = verdict_cells_quads(&verdict_gaits);
+    let (hud_cells, hud_quads) = (base_cells + vcells, base_quads + vquads);
     Ok(WinReport {
         ticks_run,
         frames_presented,
@@ -1501,11 +1551,14 @@ pub fn run_headless_smoke(
     // per tick with live-cue trauma, presentation-side shake only.
     let mut feed = PresentationFeed::new(HUMAN_SLOT, DirectorParams::default())
         .expect("arena camera table is valid");
+    // Live balance verdicts (EG45): folded from each tick's cues, counted below.
+    let mut verdict_gaits = vec![GaitPhase::Steady; usize::from(app.config().fighters)];
     for tick in 0..ticks_run {
         check_exit_deadline(started.elapsed().as_secs_f64() * 1000.0)?;
         let input = fighter_input_from_pressed(tick, human, &[], &bindings);
         let outcome = app.tick(input);
         debug_assert!(outcome.input_accepted);
+        super::balance_verdict::fold_verdict_gaits(&mut verdict_gaits, &outcome.cues);
         let _ = feed.win_frame(&outcome);
         let stats = mix_tick_audio(&mut mixer, &bank, &mut bridge, &walls, &outcome);
         send_sum += stats.send_sum;
@@ -1513,15 +1566,14 @@ pub fn run_headless_smoke(
         mixer.render_into(&mut scratch);
         mixed_frames += scratch.len();
         if let Some((ref mut presenter, key, ref kit)) = presenter {
-            let list = smoke_twin_list(presenter, key, kit, frames_presented, camera_path)?;
-            let out = presenter.render_offscreen(&list)?;
-            if out.receipt.presented {
-                frames_presented += 1;
-            }
+            frames_presented +=
+                smoke_present_once(presenter, key, kit, frames_presented, camera_path, &app)?;
         }
     }
 
-    let (hud_cells, hud_quads) = hud_cells_quads(app.hud());
+    let (base_cells, base_quads) = hud_cells_quads(app.hud());
+    let (vcells, vquads) = verdict_cells_quads(&verdict_gaits);
+    let (hud_cells, hud_quads) = (base_cells + vcells, base_quads + vquads);
     Ok(WinReport {
         ticks_run,
         frames_presented,
@@ -1606,6 +1658,28 @@ mod tests {
             10
         )
         .is_err());
+    }
+
+    #[test]
+    fn pad_poll_drains_once_into_equal_bytes() {
+        use RecordedPadEvent::{Axis, ButtonDown, ButtonUp};
+        let events = vec![
+            Axis { lx: 0.5, ly: -0.25 },
+            ButtonDown(2),
+            ButtonDown(6),
+            ButtonUp(2),
+            Axis { lx: -1.0, ly: 1.0 },
+        ];
+        // One drain through the poll helper folds to the same bytes as the
+        // recorded fold directly: buttons plus the last axis win.
+        let polled = poll_gilrs_once(|| events.clone());
+        let direct = snapshot_from_recorded(&events);
+        assert_eq!(polled.lx.to_bits(), direct.lx.to_bits());
+        assert_eq!(polled.ly.to_bits(), direct.ly.to_bits());
+        assert_eq!(polled.buttons, direct.buttons);
+        assert_eq!(polled, direct);
+        assert!(!polled.is_pressed(2));
+        assert!(polled.is_pressed(6));
     }
 
     #[test]
@@ -2114,6 +2188,49 @@ mod tests {
     }
 
     #[test]
+    fn arena_audio_feed_reports_sent_applied() {
+        use engine_audio::FrameSource as _;
+        let (bank, is_real) = stage_arena_bank(WINDOWED_SAMPLE_RATE).expect("arena bank stages");
+        if std::path::Path::new("content/audio").exists() {
+            assert!(is_real, "repo clips stage real takes");
+        }
+        for name in [
+            engine_audio::cue_names::HIT,
+            engine_audio::cue_names::BLOCK,
+            engine_audio::cue_names::FOOTSTEP,
+        ] {
+            assert!(bank.id(name).is_some(), "cue {name} staged");
+        }
+        let (mut tx, mut engine) =
+            engine_audio::AudioEngine::with_feed(Arc::clone(&bank), 64, WINDOWED_SAMPLE_RATE, 2040);
+        let mut app = App::new(config()).expect("app").into_duel().expect("duel");
+        let bindings = Bindings::new();
+        let human = FighterId::new(HUMAN_SLOT).expect("human");
+        for tick in 0..10 {
+            let input = fighter_input_from_pressed(tick, human, &[], &bindings);
+            let outcome = app.tick(input);
+            feed_tick_audio(&mut tx, tick, &outcome);
+            let mut stereo = [0.0f32; 2];
+            engine.render_stereo_into(&mut stereo);
+        }
+        // Explicit cue coverage: hit, block and footstep plus the camera
+        // listener drain through the same feed the window pumps.
+        tx.play(10, engine_audio::cue_names::HIT, 1.0, None)
+            .expect("hit staged");
+        tx.play(11, engine_audio::cue_names::BLOCK, 0.9, None)
+            .expect("block staged");
+        tx.play(12, engine_audio::cue_names::FOOTSTEP, 0.8, None)
+            .expect("footstep staged");
+        for _ in 0..4 {
+            let mut stereo = [0.0f32; 2];
+            engine.render_stereo_into(&mut stereo);
+        }
+        let stats = tx.stats();
+        assert_eq!(stats.sent, stats.applied, "every queued cue applied");
+        assert_eq!(stats.dropped_full, 0, "no command lost");
+    }
+
+    #[test]
     fn hud_draw_list_validates_sizes() {
         hud_draw_list(128, 96).unwrap().validate().unwrap();
         assert!(hud_draw_list(0, 96).is_err());
@@ -2345,8 +2462,14 @@ mod tests {
     fn establishing_json_camera_matches_the_code_pins() {
         let json = include_str!("../../../content/arena/establishing.json");
         assert_eq!(establishing_numbers(json, "\"eye_m\""), DRESSING_EYE_M);
-        assert_eq!(establishing_numbers(json, "\"target_m\""), DRESSING_TARGET_M);
-        assert_eq!(establishing_numbers(json, "\"fov_deg\""), [DRESSING_FOV_DEG]);
+        assert_eq!(
+            establishing_numbers(json, "\"target_m\""),
+            DRESSING_TARGET_M
+        );
+        assert_eq!(
+            establishing_numbers(json, "\"fov_deg\""),
+            [DRESSING_FOV_DEG]
+        );
         // A 1e-3 drift in the file must fail the pin.
         let drifted = json.replace("\"fov_deg\": 50.0", "\"fov_deg\": 50.001");
         assert_ne!(
@@ -2470,6 +2593,83 @@ mod tests {
     }
 
     #[test]
+    fn kit_collision_lockstep_keeps_draws_when_world_collides() {
+        // Behavior: the embedded 11 physical actors collide as one
+        // `MatchWorld`, so the twin frame keeps every kit draw it pushed.
+        let world = crate::arena_kit::kit_match_world().expect("embedded placement collides");
+        assert_eq!(world.obstacles().len(), crate::arena_kit::KIT_ACTOR_COUNT);
+        let rows = crate::arena_kit::kit_prop_rows();
+        assert_eq!(rows.len(), crate::arena_kit::KIT_ACTOR_COUNT);
+        assert_eq!(kit_kept_after_collision(10, 4, true), 10);
+        // Live caller: the twin list builds through the lockstep and keeps
+        // the kit draws when the world collides.
+        let Some((presenter, key, kit)) = smoke_presenter().expect("twin opens or skips") else {
+            return;
+        };
+        let list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("twin list builds");
+        assert!(
+            list.items.len() >= kit.draw_count(),
+            "lockstep keeps kit draws"
+        );
+    }
+
+    #[test]
+    fn kit_collision_lockstep_drops_draws_when_world_fails() {
+        // Failure: a missing wall drops exactly the kit draws just pushed,
+        // never more, never panics; the cube frame stays valid.
+        assert_eq!(kit_kept_after_collision(10, 4, false), 6);
+        assert_eq!(kit_kept_after_collision(3, 9, false), 0);
+        assert_eq!(kit_kept_after_collision(0, 0, false), 0);
+        assert_eq!(kit_kept_after_collision(5, 0, false), 5);
+    }
+
+    #[test]
+    fn kit_replaces_dressing_when_kit_kept() {
+        // Behavior (VS1): the 8-file kit replaces the six dressing cubes
+        // when kept; fallback keeps dressing when kit is empty or dropped.
+        assert!(kit_replaces_dressing(11, true));
+        assert!(!kit_replaces_dressing(0, true));
+        assert!(!kit_replaces_dressing(11, false));
+        assert!(!kit_replaces_dressing(0, false));
+        // Live caller: twin list with kept kit carries no dressing draws;
+        // bare report keeps the six dressing draws. Skips with no adapter.
+        let Some((presenter, key, kit)) = smoke_presenter().expect("twin opens or skips") else {
+            return;
+        };
+        let list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("twin list builds");
+        let actors = dressing_actors().expect("dressing parses");
+        let resident: Vec<MeshKey> = actors.iter().map(dressing_mesh_key).collect();
+        let dressing_in_kit = list
+            .items
+            .iter()
+            .filter(|item| resident.contains(&item.mesh))
+            .count();
+        assert_eq!(
+            dressing_in_kit, 0,
+            "kit frame keeps {} dressing draws, want 0",
+            dressing_in_kit
+        );
+        let bare = smoke_twin_list(
+            &presenter,
+            key,
+            &crate::arena_kit::KitReport::default(),
+            0,
+            None,
+        )
+        .expect("bare list builds");
+        let dressing_in_bare = bare
+            .items
+            .iter()
+            .filter(|item| resident.contains(&item.mesh))
+            .count();
+        assert_eq!(
+            dressing_in_bare, 6,
+            "bare frame keeps {} dressing draws, want 6",
+            dressing_in_bare
+        );
+    }
+
+    #[test]
     fn duel_overlay_tracks_live_hp_and_pips() {
         // Behavior: one named row per live slot, tick plus permille health
         // from the match, pips lit per `hp_pips` so the frame shows health.
@@ -2517,5 +2717,158 @@ mod tests {
             assert_eq!(row.id(), FighterId::new(byte).unwrap());
             assert_eq!(row.name(), format!("F{slot}"));
         }
+    }
+
+    #[test]
+    fn hp_bars_for_overlay_pairs_rows_in_order() {
+        // Behavior: one (rect, fraction) pair per row in row order, using the
+        // render overlay ring owner for rects and fills.
+        let app = App::new(config()).unwrap();
+        let overlay = super::duel_overlay_for_app(&app);
+        let bars = super::hp_bars_for_overlay(&overlay);
+        assert_eq!(bars.len(), overlay.len());
+        for (slot, ((rect, fill), row)) in bars.iter().zip(overlay.rows()).enumerate() {
+            assert_eq!(*rect, engine_render::overlay::hp_bar_rect(slot));
+            assert_eq!(
+                *fill,
+                engine_render::overlay::hp_fraction(row.hp_permille())
+            );
+        }
+        // Failure: an empty overlay stages nothing, never a junk bar.
+        let empty = engine_ui::DuelOverlay::new(7);
+        assert!(super::hp_bars_for_overlay(&empty).is_empty());
+        // Staging rides before the twin render: a fresh presenter holds the
+        // live rows non-empty at render time, and the hp-bar rect differs
+        // from the bare twin. Loud skip with no adapter.
+        let Some((mut presenter, key, kit)) = smoke_presenter().expect("twin opens or skips")
+        else {
+            eprintln!("SKIPPED hp_bars_for_overlay_pairs_rows_in_order: NoAdapter, no twin to stage bars on");
+            return;
+        };
+        // Production path stages before render: one call presents and leaves
+        // the ring non-empty at render time (the old after-render order left
+        // the first frame empty).
+        let staged = smoke_present_once(&mut presenter, key, &kit, 0, None, &app)
+            .expect("smoke stages before render");
+        assert_eq!(staged, 1, "fresh twin presents once");
+        assert!(
+            !presenter.overlay_rects().is_empty(),
+            "staged ring holds bars at render time"
+        );
+        // Bare twin holds no bars: clear, then the ring is empty.
+        presenter.clear_overlay();
+        assert!(
+            presenter.overlay_rects().is_empty(),
+            "bare twin holds no bars"
+        );
+        // Re-stage before render: the first back quad sits in hp_bar_rect(0)
+        // while the bare ring held none.
+        super::stage_hp_bars(&mut presenter, &overlay);
+        let quads = presenter.overlay_rects();
+        assert!(!quads.is_empty(), "re-staged ring holds bars");
+        assert_eq!(quads[0].rect, engine_render::overlay::hp_bar_rect(0));
+        // Pixel truth: the staged twin differs from the bare twin inside
+        // hp_bar_rect(0); validation stays clean.
+        let list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("twin list builds");
+        let out = presenter
+            .render_offscreen(&list)
+            .expect("staged twin renders");
+        assert!(out.manifest.is_clean(), "staged twin validates clean");
+        assert_eq!(out.receipt.validation_errors, 0, "no validation errors");
+        let staged_png = out.png.expect("staged twin has bytes");
+        presenter.clear_overlay();
+        let bare_list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("bare list builds");
+        let bare_out = presenter
+            .render_offscreen(&bare_list)
+            .expect("bare twin renders");
+        let bare_png = bare_out.png.expect("bare twin has bytes");
+        let staged_img = engine_render::present::TextureUpload::from_encoded(&staged_png)
+            .expect("staged png decodes");
+        let bare_img = engine_render::present::TextureUpload::from_encoded(&bare_png)
+            .expect("bare png decodes");
+        let rect = engine_render::overlay::hp_bar_rect(0);
+        let width = staged_img.width as usize;
+        let height = staged_img.height as usize;
+        assert_eq!(
+            (staged_img.width, staged_img.height),
+            (bare_img.width, bare_img.height)
+        );
+        let cx = (((rect[0] + rect[2]) / 2.0) * staged_img.width as f32) as usize;
+        let cy = (((rect[1] + rect[3]) / 2.0) * staged_img.height as f32) as usize;
+        let cx = cx.min(width.saturating_sub(1));
+        let cy = cy.min(height.saturating_sub(1));
+        let at = (cy * width + cx) * 4;
+        let staged_px = &staged_img.rgba[at..at + 4];
+        let bare_px = &bare_img.rgba[at..at + 4];
+        assert_ne!(
+            staged_px, bare_px,
+            "hp-bar rect holds scene pixels, want bars"
+        );
+    }
+
+    #[test]
+    fn hp_staging_quads_caps_pairs_and_reports_empty() {
+        // Behavior: two quads per row (back plus fill), capped at capacity so
+        // one draw holds all cells; empty stays empty and full stays capped.
+        assert_eq!(super::hp_staging_quads(0, 128), 0);
+        assert_eq!(super::hp_staging_quads(1, 128), 2);
+        assert_eq!(super::hp_staging_quads(16, 128), 32);
+        assert_eq!(
+            super::hp_staging_quads(16, 128),
+            super::hp_staging_quads(16, 128)
+        );
+        // Failure: overflow stages a prefix, never a partial bar; huge stays capped.
+        assert_eq!(super::hp_staging_quads(100, 128), 128);
+        assert_eq!(super::hp_staging_quads(3, 5), 5);
+        assert_eq!(super::hp_staging_quads(3, 5) / 2, 2);
+        assert_eq!(super::hp_staging_quads(usize::MAX, 128), 128);
+    }
+
+    #[test]
+    fn title_and_result_ride_hud_text_with_rows_parked() {
+        // Behavior: the title names its start key and the finished bout
+        // names its winner plus ticks, both through the HUD text path with
+        // one quad per cell while the overlay rows never move for either.
+        let app = App::new(config()).unwrap();
+        let overlay = super::duel_overlay_for_app(&app);
+        assert_eq!(super::title_text(), "TITLE press Enter");
+        let (cells, quads) = super::title_cells_quads();
+        assert_eq!(quads, cells);
+        assert!(cells >= super::title_text().len());
+        // Failure guard: a fresh bout is an exact-tie draw at tick zero.
+        let fresh = super::result_text(&app);
+        assert_eq!(fresh, format!("RESULT draw ticks=0/{}", config().ticks));
+        let (cells, quads) = super::result_cells_quads(&app);
+        assert_eq!(quads, cells);
+        assert!(cells >= fresh.len());
+        assert_eq!(super::duel_overlay_for_app(&app), overlay);
+    }
+
+    #[test]
+    fn verdict_lines_count_through_the_hud_path() {
+        // Behavior: one verdict line per live slot plus the down summary,
+        // all ASCII through the HUD text path with one quad per cell.
+        use engine_arena::GaitPhase;
+        let gaits = [GaitPhase::Steady, GaitPhase::Fallen];
+        let (cells, quads) = super::verdict_cells_quads(&gaits);
+        assert_eq!(quads, cells);
+        assert!(cells > "slot 1: fallen".len() + "down 1".len());
+        // Failure guard: no slots still prints the summary, never panics.
+        let (solo_cells, solo_quads) = super::verdict_cells_quads(&[]);
+        assert_eq!(solo_quads, solo_cells);
+        assert!(solo_cells > 0);
+    }
+
+    #[test]
+    fn verdict_lines_skip_unrepresentable_slots() {
+        // Failure: slot numbers past `u8` never print, so an over-long gait
+        // slice counts exactly like its first 256 slots.
+        use engine_arena::GaitPhase;
+        let long = vec![GaitPhase::Steady; 300];
+        let short = vec![GaitPhase::Steady; 256];
+        assert_eq!(
+            super::verdict_cells_quads(&long),
+            super::verdict_cells_quads(&short)
+        );
     }
 }

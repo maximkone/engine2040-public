@@ -23,8 +23,8 @@ use engine_core::mix64;
 
 use crate::played::BoutError;
 use crate::relay::{
-    decode_binding_response, encode_binding_request, Candidate, HolePunch, NatKind, RelayError,
-    RelayHub, RelayMsg,
+    answer_challenge, decode_binding_response, encode_binding_request, mint_challenge,
+    verify_answer, Candidate, HolePunch, NatKind, RelayError, RelayHub, RelayMsg,
 };
 
 /// Split wire magic, `b"SP"` little-endian: the first two bytes of every datagram.
@@ -987,6 +987,14 @@ impl Courier {
     /// socket fails.
     pub fn punch(&mut self, theirs: &[Candidate]) -> Result<PunchReport, SplitError> {
         let leg = self.relay.ok_or(SplitError::NoRoad)?;
+        // Challenge round before the punch budget starts: the relay token
+        // must answer the leg-bound challenge, deny by default. The peer half
+        // of the exchange rides the candidate trade; this local gate proves
+        // the order and refuses zero tokens before the first probe.
+        let challenge = mint_challenge(leg.me ^ leg.peer, leg.me);
+        if !verify_answer(challenge, leg.token, answer_challenge(challenge, leg.token)) {
+            return Err(SplitError::Relay(RelayError::Unauthorized));
+        }
         let mut machine = HolePunch::new(NatKind::Cone);
         machine.on_gathered();
         let start = wall_us();
@@ -1269,5 +1277,23 @@ mod tests {
         );
         assert!(opens_session(&pieces(0, b"hi").expect("piece")[0]));
         assert!(!opens_session(&pieces(1, b"hi").expect("piece")[0]));
+    }
+
+    #[test]
+    fn courier_punch_refuses_zero_token_before_probing() {
+        let relay = SocketAddr::from(([127, 0, 0, 1], 9));
+        let leg = RelayLeg {
+            addr: relay,
+            token: 0,
+            me: 10,
+            peer: 11,
+        };
+        let mut side = Courier::via_relay(local(), leg).expect("bind");
+        assert_eq!(
+            side.punch(&[]),
+            Err(SplitError::Relay(RelayError::Unauthorized)),
+            "the challenge gate refuses before the punch budget starts"
+        );
+        assert_eq!(side.stats().datagrams_sent, 0, "no probe leaves first");
     }
 }

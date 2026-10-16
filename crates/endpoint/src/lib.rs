@@ -41,6 +41,9 @@ pub mod plan_goals;
 #[cfg(feature = "mcp")]
 pub mod play;
 pub mod receipts;
+/// BRP-shaped loopback shim over the verb table (in-process, no socket).
+#[cfg(feature = "mcp")]
+pub mod remote_shim;
 pub mod sandbox;
 #[cfg(feature = "mcp")]
 pub mod scene_query;

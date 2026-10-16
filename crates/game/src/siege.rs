@@ -78,6 +78,102 @@ pub const ENGINE_DAMAGE: u32 = 150;
 /// Tracked replication viewers sampling the interest path.
 pub const INTEREST_VIEWERS: usize = 8;
 
+/// Actors in the siege placement probe (`placement_siege.json`).
+pub const SIEGE_FIELD_ACTORS: usize = 7;
+/// Gate x in meters (`fort_gate` in the probe).
+pub const SIEGE_FIELD_GATE_X: f32 = -10.0;
+/// Engine x in meters (`ballista_one` in the probe, firing through `SOCKET_muzzle`).
+pub const SIEGE_FIELD_BALLISTA_X: f32 = 16.0;
+/// Embedded siege placement probe bytes.
+pub const SIEGE_PLACEMENT_JSON: &str = include_str!("../../../content/maps/placement_siege.json");
+
+/// Validated siege field probe: gate plus engine x and actor count.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SiegeField {
+    /// Gate x in meters.
+    pub gate_x: f32,
+    /// Engine x in meters.
+    pub ballista_x: f32,
+    /// Actors in the probe.
+    pub actors: usize,
+}
+
+impl SiegeField {
+    /// True when the gate sits inside the half-extent on the x axis.
+    #[must_use]
+    pub const fn gate_reachable(self, half_extent_m: f32) -> bool {
+        self.gate_x >= -half_extent_m && self.gate_x <= half_extent_m
+    }
+}
+
+/// Parse the x value following `"name": "<wanted>"` in placement text.
+fn field_x_for(text: &str, wanted: &str) -> Result<f32, SiegeError> {
+    let name_at = text
+        .find(wanted)
+        .ok_or(SiegeError::BadConfig("siege_field"))?;
+    let tail = text
+        .get(name_at..)
+        .ok_or(SiegeError::BadConfig("siege_field"))?;
+    let x_at = tail
+        .find("\"x\"")
+        .ok_or(SiegeError::BadConfig("siege_field"))?;
+    let after = tail
+        .get(x_at + 3..)
+        .ok_or(SiegeError::BadConfig("siege_field"))?;
+    let colon = after
+        .find(':')
+        .ok_or(SiegeError::BadConfig("siege_field"))?;
+    let num = after
+        .get(colon + 1..)
+        .ok_or(SiegeError::BadConfig("siege_field"))?;
+    let trimmed = num.trim_start();
+    let mut end = trimmed.len();
+    for (index, ch) in trimmed.char_indices() {
+        if ch == ',' || ch == '}' {
+            end = index;
+            break;
+        }
+    }
+    let token = trimmed
+        .get(..end)
+        .ok_or(SiegeError::BadConfig("siege_field"))?;
+    let value: f32 = token
+        .trim()
+        .parse()
+        .map_err(|_| SiegeError::BadConfig("siege_field"))?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(SiegeError::BadConfig("siege_field"))
+    }
+}
+
+/// Validate one probe: 7 actors, gate at -10 plus engine at 16.
+pub fn siege_field_from_json(text: &str) -> Result<SiegeField, SiegeError> {
+    if text.match_indices("\"id\"").count() != SIEGE_FIELD_ACTORS {
+        return Err(SiegeError::BadConfig("siege_field"));
+    }
+    let gate_x = field_x_for(text, "fort_gate")?;
+    let ballista_x = field_x_for(text, "ballista_one")?;
+    if (gate_x - SIEGE_FIELD_GATE_X).abs() > 0.001 {
+        return Err(SiegeError::BadConfig("siege_field"));
+    }
+    if (ballista_x - SIEGE_FIELD_BALLISTA_X).abs() > 0.001 {
+        return Err(SiegeError::BadConfig("siege_field"));
+    }
+    Ok(SiegeField {
+        gate_x,
+        ballista_x,
+        actors: SIEGE_FIELD_ACTORS,
+    })
+}
+
+/// Validate the embedded siege placement probe.
+/// Same bytes give the same field; drift fails loudly at construction time.
+pub fn siege_field() -> Result<SiegeField, SiegeError> {
+    siege_field_from_json(SIEGE_PLACEMENT_JSON)
+}
+
 /// Siege configuration: one bot-filled war.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct SiegeConfig {
@@ -505,6 +601,7 @@ impl SiegeServer {
     /// shard matches and registers the replication sample baselines.
     pub fn new(config: SiegeConfig) -> Result<Self, SiegeError> {
         config.validate()?;
+        let _ = siege_field()?;
         let mut shards = Vec::with_capacity(SIEGE_SHARDS);
         for shard in 0..SIEGE_SHARDS {
             shards.push(HeadlessServer::new(config.shard_config(shard))?);
@@ -677,6 +774,7 @@ impl SiegeServer {
 /// tick-by-tick authoring.
 pub fn run_siege(config: SiegeConfig) -> Result<SiegeReport, SiegeError> {
     config.validate()?;
+    let _ = siege_field()?;
     let mut streams = Vec::with_capacity(SIEGE_SHARDS);
     for shard in 0..SIEGE_SHARDS {
         let checkpoints = arena_run(&config.shard_config(shard), &FighterTape::default());
@@ -843,6 +941,24 @@ mod tests {
             "starve guard fired: {}",
             first.starve_max
         );
+    }
+
+    #[test]
+    fn siege_field_probe_matches_placement_and_boots_192() {
+        let field = siege_field().unwrap();
+        assert_eq!(field.actors, SIEGE_FIELD_ACTORS);
+        assert_eq!(field.gate_x, SIEGE_FIELD_GATE_X);
+        assert_eq!(field.ballista_x, SIEGE_FIELD_BALLISTA_X);
+        assert!(field.gate_reachable(20.0));
+        assert!(!field.gate_reachable(5.0));
+        assert!(siege_field_from_json("{\"actors\": []}").is_err());
+        assert_eq!(SIEGE_SHARDS * usize::from(SHARD_FIGHTERS), SIEGE_SLOTS);
+        let cfg = SiegeConfig {
+            seed: 2040,
+            ticks: 192,
+            half_extent_m: 20.0,
+        };
+        assert!(SiegeServer::new(cfg).is_ok());
     }
 
     #[test]

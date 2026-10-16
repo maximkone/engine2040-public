@@ -252,9 +252,10 @@ impl GpuState {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let aspect = self.config.width as f32 / self.config.height as f32;
         let data = [time_s, sprite_count as f32, aspect, 0.0];
-        let mut bytes = Vec::with_capacity(16);
-        for v in data {
-            bytes.extend_from_slice(&v.to_le_bytes());
+        // Fixed-size uniform upload: no per-frame heap allocation.
+        let mut bytes = [0u8; 16];
+        for (i, v) in data.into_iter().enumerate() {
+            bytes[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
         }
         self.queue.write_buffer(&self.globals, 0, &bytes);
 
@@ -401,5 +402,44 @@ impl ApplicationHandler for App {
         if let Some(state) = self.state.as_ref() {
             state.window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod shader_contract {
+    use super::SHADER;
+
+    /// The sprite pipeline (`GpuState::new`) binds `Globals` at group 0 /
+    /// binding 0 with a 16-byte uniform upload per frame, enters the vertex
+    /// stage at `vs` (6 vertices per instance) and the fragment stage at
+    /// `fs`. A WGSL rename without the matching descriptor edit fails
+    /// device creation at runtime on a real GPU, so the shared names are
+    /// pinned here where a headless `cargo test` sees them.
+    #[test]
+    fn sprite_shader_matches_pipeline_contract() {
+        assert!(
+            SHADER.contains("@group(0) @binding(0)"),
+            "globals uniform stays at group 0 binding 0"
+        );
+        for field in ["time: f32", "count: f32", "aspect: f32", "_pad: f32"] {
+            assert!(
+                SHADER.contains(field),
+                "uniform keeps field {field} (16-byte upload)"
+            );
+        }
+        assert!(SHADER.contains("fn vs("), "vertex entry stays `vs`");
+        assert!(
+            SHADER.contains("@builtin(vertex_index)"),
+            "vertex stage keeps its corner index"
+        );
+        assert!(
+            SHADER.contains("@builtin(instance_index)"),
+            "vertex stage keeps its sprite index"
+        );
+        assert!(SHADER.contains("fn fs("), "fragment entry stays `fs`");
+        assert!(
+            SHADER.contains("@location(0) vec4<f32>"),
+            "fragment stage keeps its color target"
+        );
     }
 }

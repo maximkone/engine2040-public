@@ -723,6 +723,10 @@ pub struct GpuSkinned {
     adapter_driver: String,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    ibl_prefilter: wgpu::Texture,
+    ibl_brdf: wgpu::Texture,
+    ibl_sh_buf: wgpu::Buffer,
+    ibl_sampler: wgpu::Sampler,
 }
 
 #[cfg(feature = "window")]
@@ -748,65 +752,84 @@ impl GpuSkinned {
             ..Default::default()
         }))
         .map_err(|e| GpuSkinError::Device(format!("request_device: {e}")))?;
+        // Skinned capture samples the same studio bake as the live frame, so
+        // the R3 fighter capture lifts with the live IBL instead of the flat
+        // floor. A failed bake fails init loudly, never a silent dark frame.
+        let (ibl_bake, _) = crate::ibl::bake(include_bytes!(
+            "../../../content/incoming/studio_small_09_1k.hdr"
+        ))
+        .map_err(|e| GpuSkinError::Device(format!("look ibl bake: {e}")))?;
+        let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
+            crate::ibl::gpu::upload_live_bake(&device, &queue, &ibl_bake)
+                .map_err(|e| GpuSkinError::Device(format!("live ibl bake: {e}")))?;
+        let ibl_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("r3-ibl-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("r3-skinned-pbr"),
             source: wgpu::ShaderSource::Wgsl(crate::v1_gpu::FORWARD_PBR_WGSL.into()),
         });
+        let mut layout_entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ];
+        layout_entries.extend(crate::ibl::gpu::forward_ibl_layout_entries());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("r3-skin-uniforms"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+            entries: &layout_entries,
         });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("r3-skinned-layout"),
@@ -883,6 +906,10 @@ impl GpuSkinned {
             adapter_driver: format!("{} {}", info.driver, info.driver_info),
             pipeline,
             layout,
+            ibl_prefilter,
+            ibl_brdf,
+            ibl_sh_buf,
+            ibl_sampler,
         })
     }
 
@@ -1030,9 +1057,12 @@ impl GpuSkinned {
                 contents: &scene.mesh.index_bytes(),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        let cam_buf = self.uniform_buffer("r3-u-camera", &cam_u.to_bytes());
-        let light_buf = self.uniform_buffer("r3-u-light", &light_u.to_bytes());
-        let mat_buf = self.uniform_buffer("r3-u-material", &mat_u.to_bytes());
+        let cam_buf =
+            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-camera", &cam_u.to_bytes());
+        let light_buf =
+            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-light", &light_u.to_bytes());
+        let mat_buf =
+            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-material", &mat_u.to_bytes());
         // Storage joints: AN1 rows uploaded verbatim as WGSL columns (see
         // `SkinningUniform::to_bytes`), zero-filled past the joint count.
         let mut joint_bytes = vec![0u8; SKIN_STORAGE_BYTES as usize];
@@ -1050,7 +1080,19 @@ impl GpuSkinned {
         params.extend_from_slice(&(skin.is_some() as u32).to_le_bytes());
         params.extend_from_slice(&0u32.to_le_bytes());
         params.extend_from_slice(&0u32.to_le_bytes());
-        let param_buf = self.uniform_buffer("r3-u-params", &params);
+        let param_buf = crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-params", &params);
+        let ibl_prefilter_view = self
+            .ibl_prefilter
+            .create_view(&wgpu::TextureViewDescriptor {
+                label: Some("r3-ibl-prefilter-view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+        let ibl_brdf_view = self.ibl_brdf.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("r3-ibl-brdf-view"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            ..Default::default()
+        });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("r3-skin-uniforms"),
             layout: &self.layout,
@@ -1074,6 +1116,22 @@ impl GpuSkinned {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: param_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&ibl_prefilter_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&ibl_brdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::Sampler(&self.ibl_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.ibl_sh_buf.as_entire_binding(),
                 },
             ],
         });
@@ -1178,16 +1236,6 @@ impl GpuSkinned {
             crate::v1::encode_png_rgba8(&rgba, width, height).map_err(GpuSkinError::Capture)?;
         let manifest = Manifest::new(&self.adapter_name, &self.adapter_driver, width, height, 0);
         Ok((png, manifest))
-    }
-
-    fn uniform_buffer(&self, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-        use wgpu::util::DeviceExt;
-        self.device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytes,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            })
     }
 }
 
@@ -1360,12 +1408,13 @@ mod tests {
                 ],
             )
             .expect("scripted rows upload");
-        let mesh = MeshData {
-            positions: vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
-            normals: vec![[0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
-            uvs: vec![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
-            indices: vec![0, 1, 2],
-        };
+        let mesh = crate::v1::upload_mesh(
+            &[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            &[[0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            &[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+            &[0, 1, 2],
+        )
+        .expect("scripted triangle is valid");
         let frame = pipe
             .render_skinned(&mesh, Some(&skin), &uniform)
             .expect("scripted pose skins");

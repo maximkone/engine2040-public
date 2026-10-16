@@ -17,6 +17,9 @@ pub mod cut;
 /// Combat-depth cores over the base fight table core: hit resolver,
 /// stamina, poise and combo chains. Integer ticks, no heap. Std-only.
 pub mod depth;
+/// Duel timing patterns as data: hit-stop, cancel and reaction windows.
+/// Integer ticks at sixty hertz, no heap, never tick-coupled. Std-only.
+pub mod design;
 /// Parry/riposte + clash over the base fight table core: timed answers,
 /// integer ticks, versioned data. Std-only.
 pub mod exchange;

@@ -41,7 +41,7 @@ pub(crate) mod capture {
 
     use std::time::Instant;
 
-    use engine_game::capture::{self, CaptureSink, TapeInputs};
+    use engine_game::capture::{self, CaptureSink, LookTap, TapeInputs};
     use engine_game::windowed::{
         cap_message as capped, dressing_camera, format_timed_smoke, hud_draw_list,
         push_dressing_draws, run_headless_smoke_with_options, stage_dressing, SceneSelect, WinArgs,
@@ -49,7 +49,7 @@ pub(crate) mod capture {
     };
     use engine_game::{App, GameConfig, HUMAN_SLOT};
     use engine_input::FighterId;
-    use engine_render::present::{DrawList, MeshKey, Presenter};
+    use engine_render::present::{DrawList, MeshKey, Presenter, TextureKey};
 
     /// Chart flags: `--chart` runs the material-chart path synchronously
     /// (no window), `--chart-dir <path>` picks the output directory (default
@@ -637,6 +637,31 @@ pub(crate) mod capture {
         }
     }
 
+    /// Textured kit triples from a staged [`KitReport`](engine_game::arena_kit::KitReport):
+    /// one `(key, material, base_color)` per draw in placement order, preserving
+    /// [`KitDraw::base_color`](engine_game::arena_kit::KitDraw) (`None` stays
+    /// `None`, so untextured draws bind the 1x1 white fallback). Pure, no GPU,
+    /// no file IO; the caller owns residency (missing keys draw nothing).
+    /// Units: meters for meshes, 0..=1 factors for materials. Determinism: the
+    /// same report gives the same triples in the same order; pixels stay
+    /// presentation (HASH-LAW).
+    ///
+    /// Consumer: `twin_headless_capture` (headless, staged once) plus the window
+    /// `frame_list` (shared twin list, imported once per call); both bind through
+    /// `push_twin_arena_textured` with cube-swap semantics.
+    ///
+    /// Caller: `twin_headless_capture` plus `frame_list` (same file) keep the
+    /// base-color lane live, so the twin draws the recooked kit textured.
+    pub(crate) fn kit_triples(
+        report: &engine_game::arena_kit::KitReport,
+    ) -> Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)> {
+        report
+            .draws
+            .iter()
+            .map(|draw| (draw.key, draw.material.clone(), draw.base_color))
+            .collect()
+    }
+
     /// Headless twin capture: the same session over the tape with every due tick
     /// rendered through the offscreen twin under `camera_path` (the orbit eye is
     /// the captured-frame count, so the flags run moves while the baseline stays
@@ -682,12 +707,9 @@ pub(crate) mod capture {
             .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
         // Recooked arena kit (CT8): staged once; the per-frame bind swaps
         // the cube for the kit draws when resident, else the cube stays.
+        // Textured triples keep `base_color` so the kit draws textured.
         let kit_report = engine_game::arena_kit::stage_kit_or_default(&mut presenter);
-        let kit_draws: Vec<(MeshKey, engine_render::v1::PbrMaterial)> = kit_report
-            .draws
-            .iter()
-            .map(|draw| (draw.key, draw.material.clone()))
-            .collect();
+        let kit_draws = kit_triples(&kit_report);
         let mut app = App::new(config)?;
         let human = FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))?;
         let mut cursor = TapeInputs::new(tape.map(|loaded| loaded.inputs).unwrap_or_default());
@@ -716,12 +738,15 @@ pub(crate) mod capture {
                     presented,
                 )?;
                 // Arena kit bind: cube leaves when a kit draw is resident.
-                engine_render::twin_arena::push_twin_arena(
+                // Textured cutover keeps `base_color` on every triple.
+                engine_render::twin_arena::push_twin_arena_textured(
                     &mut list,
                     &presenter.mesh_keys(),
                     &kit_draws,
                 )
                 .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
+                let overlay = engine_game::windowed::duel_overlay_for_app(&app);
+                engine_game::windowed::stage_hp_bars(&mut presenter, &overlay);
                 let out = presenter.render_offscreen(&list)?;
                 if !out.manifest.is_clean() {
                     return Err(WinError::Render("twin frame failed validation".to_string()));
@@ -748,6 +773,7 @@ pub(crate) mod capture {
     pub(crate) struct CaptureSlot {
         pub(crate) sink: CaptureSink,
         pub(crate) tape: TapeInputs,
+        pub(crate) look_tap: LookTap,
     }
 
     /// Arm the window capture: load the tape, validate it against the session
@@ -783,6 +809,7 @@ pub(crate) mod capture {
         Ok(Some(CaptureSlot {
             sink,
             tape: TapeInputs::new(tape.map(|loaded| loaded.inputs).unwrap_or_default()),
+            look_tap: LookTap::new(),
         }))
     }
 
@@ -886,6 +913,7 @@ pub(crate) mod capture {
                 mesh: key,
                 material: scene.material,
                 base_color: None,
+                normal_map: None,
             });
         }
         let resident = presenter.mesh_keys();
@@ -893,6 +921,168 @@ pub(crate) mod capture {
         // Twin fighters (RL26): unstaged slots draw nothing.
         engine_render::twin_fighters::push_twin_fighters(&mut list, &resident)
             .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
+        // Arena kit for the window twin (RL21 slice 1): textured cube-swap when
+        // resident, cube stays on miss. Imported once per call (CPU only, no GPU
+        // upload here; the window/headless init already uploaded); a refused
+        // import fails loudly, never a fake frame. `None` lanes draw untextured.
+        let tex_resident = presenter.texture_keys();
+        let imported =
+            engine_game::arena_kit::import_kit(&engine_game::arena_kit::kit_content_dir())
+                .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
+        let kit_binds: Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)> =
+            imported
+                .baked
+                .iter()
+                .map(|baked| {
+                    (
+                        baked.key,
+                        baked.material.clone(),
+                        baked.texture.filter(|key| tex_resident.contains(key)),
+                    )
+                })
+                .collect();
+        engine_render::twin_arena::push_twin_arena_textured(&mut list, &resident, &kit_binds)
+            .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
         Ok(list)
+    }
+
+    #[cfg(test)]
+    mod chart_unit_tests {
+        use super::*;
+
+        #[test]
+        fn chart_gamma_oracle_holds_ends_and_monotonic() {
+            // Oracle: evidence gamma maps 0 to 0 and 1 to 255.
+            assert_eq!(chart_linear_to_srgb_u8(0.0), 0);
+            assert_eq!(chart_linear_to_srgb_u8(1.0), 255);
+            // Clamps hold outside 0..=1 so bad linear never wraps.
+            assert_eq!(chart_linear_to_srgb_u8(-0.5), 0);
+            assert_eq!(chart_linear_to_srgb_u8(2.0), 255);
+            // Monotonic rise proves the curve bends the right way.
+            let steps = [0.0, 0.25, 0.5, 0.75, 1.0];
+            let mapped: Vec<u8> = steps.iter().map(|v| chart_linear_to_srgb_u8(*v)).collect();
+            for pair in mapped.windows(2) {
+                assert!(pair[0] < pair[1], "gamma rises: {mapped:?}");
+            }
+        }
+
+        #[test]
+        fn chart_adler32_empty_is_one_and_stable() {
+            // Standard Adler-32: empty input is 1.
+            assert_eq!(chart_adler32(&[]), 1);
+            let bytes = [1u8, 2, 3, 4];
+            assert_eq!(chart_adler32(&bytes), chart_adler32(&bytes));
+            assert_ne!(chart_adler32(&bytes), chart_adler32(&[]));
+        }
+
+        #[test]
+        fn chart_crc32_table_is_ieee_and_update_stable() {
+            // IEEE polynomial table anchors the PNG checksums.
+            let table = chart_crc32_table();
+            assert_eq!(table[0], 0);
+            assert_eq!(table[1], 0x7707_3096);
+            let tag = *b"IHDR";
+            let first = chart_crc32_update(0xFFFF_FFFF, &tag);
+            assert_eq!(first, chart_crc32_update(0xFFFF_FFFF, &tag));
+            assert_ne!(first, 0xFFFF_FFFF);
+        }
+
+        #[test]
+        fn chart_png_bytes_are_png_and_deterministic() {
+            // Caller files these bytes beside the manifest, so magic plus
+            // determinism is the contract.
+            let pixels = [
+                255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ];
+            let first = chart_encode_png_rgba8(&pixels, 2, 2).expect("2x2 encodes");
+            let second = chart_encode_png_rgba8(&pixels, 2, 2).expect("2x2 encodes x2");
+            assert_eq!(first, second);
+            assert_eq!(&first[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+            assert!(chart_encode_png_rgba8(&pixels, 2, 0).is_err());
+            assert!(chart_encode_png_rgba8(&pixels[..4], 2, 2).is_err());
+        }
+
+        #[test]
+        fn chart_manifest_json_carries_viewport_target_seed() {
+            let rows = engine_render::material_layer::chart();
+            let live: Vec<[f32; 3]> = rows.iter().map(|row| row.expected).collect();
+            let json = chart_manifest_json(&rows, &live, 256, 144, 0.0, 1e-5, 2040);
+            let again = chart_manifest_json(&rows, &live, 256, 144, 0.0, 1e-5, 2040);
+            assert_eq!(json, again);
+            assert!(
+                json.contains("\"viewport\":[1600,900]"),
+                "viewport pinned: {json}"
+            );
+            assert!(
+                json.contains("\"target\":[256,144]"),
+                "target pinned: {json}"
+            );
+            assert!(json.contains("\"seed\":2040"), "seed pinned: {json}");
+            assert!(json.contains("cloth/front"), "rows named: {json}");
+        }
+
+        #[test]
+        fn split_chart_args_passes_plain_flags_through_in_order() {
+            // Arena splits chart flags before WinArgs, so plain flags ride through untouched.
+            let raw = [
+                "arena".to_string(),
+                "--frames".to_string(),
+                "3".to_string(),
+                "--exit".to_string(),
+            ];
+            let (chart, rest) = split_chart_args(&raw).expect("plain flags pass");
+            assert!(!chart.enabled);
+            assert_eq!(chart.dir, std::path::PathBuf::from(CHART_DEFAULT_DIR));
+            assert_eq!(rest, raw);
+        }
+
+        #[test]
+        fn kit_triples_carry_base_color() {
+            // Triples preserve `KitDraw.base_color` in placement order; `None`
+            // stays `None` so untextured draws bind the 1x1 white fallback.
+            // A dropped lane would render every kit draw flat grey.
+            use engine_game::arena_kit::{KitDraw, KitReport};
+            use engine_render::present::{MeshKey as BinMeshKey, TextureKey as BinTextureKey};
+            let material = engine_render::v1::PbrMaterial {
+                base_color: [0.5, 0.5, 0.5],
+                metallic: 0.0,
+                roughness: 0.9,
+                exposure: 1.0,
+            };
+            let tex_a = BinTextureKey::new(0xB001, [0xA1; 32]);
+            let tex_b = BinTextureKey::new(0xB002, [0xA2; 32]);
+            let report = KitReport {
+                draws: vec![
+                    KitDraw {
+                        key: BinMeshKey::new(0x4717_0001, [0x11; 32]),
+                        material: material.clone(),
+                        base_color: Some(tex_a),
+                    },
+                    KitDraw {
+                        key: BinMeshKey::new(0x4717_0002, [0x22; 32]),
+                        material: material.clone(),
+                        base_color: None,
+                    },
+                    KitDraw {
+                        key: BinMeshKey::new(0x4717_0003, [0x33; 32]),
+                        material: material.clone(),
+                        base_color: Some(tex_b),
+                    },
+                ],
+                assets_staged: 2,
+                triangles: 100,
+                skipped: 0,
+                material_fallbacks: 0,
+            };
+            let triples = kit_triples(&report);
+            assert_eq!(triples.len(), 3, "one triple per draw");
+            assert_eq!(triples[0].0, report.draws[0].key, "order stable");
+            assert_eq!(triples[1].0, report.draws[1].key, "order stable");
+            assert_eq!(triples[2].0, report.draws[2].key, "order stable");
+            assert_eq!(triples[0].2, Some(tex_a), "textured lane kept");
+            assert_eq!(triples[1].2, None, "untextured lane stays None");
+            assert_eq!(triples[2].2, Some(tex_b), "textured lane kept");
+            assert_eq!(triples[0].1, material, "factors ride with the key");
+        }
     }
 }

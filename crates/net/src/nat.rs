@@ -35,12 +35,7 @@ pub enum QuicRole {
 /// machines call this with mirrored roles; the ids never collide and never
 /// read the wall clock, so the same code always maps the same pair.
 #[must_use]
-pub fn invite_leg(
-    code: &InviteCode,
-    relay: SocketAddr,
-    token: u64,
-    role: QuicRole,
-) -> RelayLeg {
+pub fn invite_leg(code: &InviteCode, relay: SocketAddr, token: u64, role: QuicRole) -> RelayLeg {
     let (host_id, join_id) = invite_ids(code);
     let (me, peer) = match role {
         QuicRole::Host => (host_id, join_id),
@@ -227,9 +222,16 @@ mod tests {
     fn ticket_mint_repeats_per_seed() {
         let (code, ticket) = mint_ticket(&mut 77u64, 3, 0x1234_5678, 100).expect("issues");
         let (twin_code, twin) = mint_ticket(&mut 77u64, 3, 0x1234_5678, 100).expect("issues");
-        assert_eq!((twin_code, twin), (code, ticket), "same seed mints same ticket");
+        assert_eq!(
+            (twin_code, twin),
+            (code, ticket),
+            "same seed mints same ticket"
+        );
         assert!(ticket.is_live(100 + INVITE_TTL_TICKS));
-        assert!(mint_ticket(&mut 77u64, 0, 1, 0).is_err(), "version zero refuses");
+        assert!(
+            mint_ticket(&mut 77u64, 0, 1, 0).is_err(),
+            "version zero refuses"
+        );
     }
 
     #[test]
@@ -242,8 +244,16 @@ mod tests {
             Ok(Signal::Accept { token: 11, slot: 1 }),
             "matching builds accept"
         );
-        assert_eq!(accept_slot(&reply, 11), Some(1), "echoed token grants the slot");
-        assert_eq!(accept_slot(&reply, 12), None, "foreign tokens grant nothing");
+        assert_eq!(
+            accept_slot(&reply, 11),
+            Some(1),
+            "echoed token grants the slot"
+        );
+        assert_eq!(
+            accept_slot(&reply, 12),
+            None,
+            "foreign tokens grant nothing"
+        );
     }
 
     #[test]
@@ -289,9 +299,17 @@ mod tests {
             }
             other => panic!("build drift must refuse with digests, got {other:?}"),
         }
-        assert!(join_request(&ticket, 3, 0x1234_5678, 0).is_err(), "zero token refuses");
-        assert!(answer_join(&ticket, b"junk", 1, 60).is_err(), "junk refuses");
-        let accept = Signal::Accept { token: 11, slot: 1 }.encode().expect("accept encodes");
+        assert!(
+            join_request(&ticket, 3, 0x1234_5678, 0).is_err(),
+            "zero token refuses"
+        );
+        assert!(
+            answer_join(&ticket, b"junk", 1, 60).is_err(),
+            "junk refuses"
+        );
+        let accept = Signal::Accept { token: 11, slot: 1 }
+            .encode()
+            .expect("accept encodes");
         assert_eq!(
             answer_join(&ticket, &accept, 1, 60),
             Err(RelayError::BadInput),
@@ -314,8 +332,14 @@ mod tests {
         assert_eq!(path_for_nats(NatKind::Open, NatKind::Open), Road::Direct);
         assert_eq!(path_for_nats(NatKind::Open, NatKind::Cone), Road::Direct);
         assert_eq!(path_for_nats(NatKind::Cone, NatKind::Cone), Road::Direct);
-        assert_eq!(path_for_nats(NatKind::Open, NatKind::Symmetric), Road::Relay);
-        assert_eq!(path_for_nats(NatKind::Symmetric, NatKind::Cone), Road::Relay);
+        assert_eq!(
+            path_for_nats(NatKind::Open, NatKind::Symmetric),
+            Road::Relay
+        );
+        assert_eq!(
+            path_for_nats(NatKind::Symmetric, NatKind::Cone),
+            Road::Relay
+        );
         assert_eq!(
             path_for_nats(NatKind::Symmetric, NatKind::Symmetric),
             Road::Relay
@@ -336,7 +360,10 @@ mod tests {
             NatKind::Symmetric,
         )
         .expect("valid addrs plan");
-        assert_eq!(plan.leg, invite_leg(&code(), addr(7041), token, QuicRole::Host));
+        assert_eq!(
+            plan.leg,
+            invite_leg(&code(), addr(7041), token, QuicRole::Host)
+        );
         assert_eq!(plan.candidates.len(), 2, "host plus server-reflexive");
         assert!(plan.candidates[0].priority() > plan.candidates[1].priority());
         assert_eq!(plan.road, Road::Relay, "symmetric remotes predict relay");

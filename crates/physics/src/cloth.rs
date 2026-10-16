@@ -1678,7 +1678,13 @@ mod tests {
                 // March the shoulder line +X each script block, like bones would.
                 debug_assert!(i32::try_from(round).is_ok());
                 let bones: Vec<[i32; 3]> = (0..6)
-                    .map(|c| [i32::try_from(round).unwrap_or(0) * 200 + c * SPACING, ORIGIN[1], 0])
+                    .map(|c| {
+                        [
+                            i32::try_from(round).unwrap_or(0) * 200 + c * SPACING,
+                            ORIGIN[1],
+                            0,
+                        ]
+                    })
                     .collect();
                 w.bind_top_row(&bones).expect("march bones");
                 step_cloth(&mut w, 30);
@@ -1935,7 +1941,13 @@ mod tests {
         for round in 0..4u32 {
             debug_assert!(i32::try_from(round).is_ok());
             let bones: Vec<[i32; 3]> = (0..6)
-                .map(|c| [i32::try_from(round).unwrap_or(0) * 50 + c * SPACING, ORIGIN[1], 0])
+                .map(|c| {
+                    [
+                        i32::try_from(round).unwrap_or(0) * 50 + c * SPACING,
+                        ORIGIN[1],
+                        0,
+                    ]
+                })
                 .collect();
             w.bind_top_row(&bones).expect("march");
             step_cloth(&mut w, 30);

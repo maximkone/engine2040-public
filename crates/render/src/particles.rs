@@ -1,23 +1,33 @@
 //! particles: seeded CPU mirror of GPU FX at 60Hz. Fixed emitter order, hashed.
 use crate::particles_gpu::throttle_spawn;
 pub const FIXED_DT: f32 = 1.0 / 60.0;
-struct Rng(u64);
+/// Reference byte image for the fluid pool on the CPU mirror path.
+/// Caller: off-tick check compares this image against the pool bytes.
+pub fn fluid_mirror_bytes(pool: &crate::particles_gpu::fluids_gpu::PresentFluid) -> Vec<u8> {
+    let bytes = pool.sim_bytes();
+    let mut check = engine_core::Fnv64::new();
+    check.write(&bytes);
+    let _ = check.finish();
+    bytes
+}
+/// Largest deterministic CPU-mirror pool: 60k live particles. Fixed emitter
+/// order plus [`FIXED_DT`] stepping gives byte-equal hashes x2; the spawn
+/// throttle shares owner [`throttle_spawn`] with the GPU pool for parity.
+/// Caller: [`ParticleEffect::new`] clamps every build into this cap.
+/// PORT(AizenKai1001/lunaris@56cc7e30:examples/particle_fx `particle_fx.rs` seeded emitter graph, fixed-order update, hash).
+pub const MAX_PARTICLES_60K: usize = 60_000;
+struct Rng(engine_core::Rng);
 impl Rng {
     fn new(seed: u64) -> Self {
         // splitmix init (NOT seed|1: consecutive seeds must diverge —
         // 2040|1 == 2041|1 collapsed two streams into one).
-        let mut z = seed.wrapping_add(0x9e3779b97f4a7c15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-        Self(z ^ (z >> 31) | 1)
+        // Owner engine-core `splitmix64` plus `Rng::from_state`; the xorshift
+        // body lives in one place, this wrapper keeps particle seeding.
+        // Caller: ParticleEffect::new (seeded emitter pool).
+        Self(engine_core::Rng::from_state(engine_core::splitmix64(seed)))
     }
     fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
+        self.0.next_u64()
     }
     fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 32) as u32 as f32 / 4_294_967_300.0
@@ -96,6 +106,17 @@ impl Flipbook {
 }
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+/// Hanabi two-key RGBA gradient over age01 in `[0, 1]`, linear and clamped.
+/// Caller: [`crate::particles_gpu::vfx_hanabi::HanabiEffectDesc::sample_gradient`].
+pub fn hanabi_gradient(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
 }
 /// Emitter node: spawner (rate+burst) + init (cone/life/size) + update params
 /// (gravity/drag/curves/color/flipbook). All plain data, seeded at runtime.
@@ -201,7 +222,7 @@ impl ParticleEffect {
             time: 0.0,
             tick: 0,
             spawned: 0,
-            max: max_particles.clamp(1, 65536),
+            max: max_particles.clamp(1, MAX_PARTICLES_60K),
         }
     }
     pub fn demo(seed: u64) -> Self {
@@ -449,5 +470,77 @@ mod tests {
             .particles()
             .iter()
             .all(|p| p.pos[0].is_finite() && p.size.is_finite() && p.flip < 16));
+    }
+    #[test]
+    fn adjacent_seeds_diverge_2040_2041() {
+        // Consecutive seeds must diverge: 2040|1 == 2041|1 collapsed two
+        // streams into one, so seeding stays splitmix, never seed|1.
+        // Caller: ParticleEffect::new (every emitter shares this seed path).
+        let run = |seed| {
+            let mut e = ParticleEffect::demo(seed);
+            let mut v = Vec::new();
+            for _ in 0..60 {
+                e.tick();
+                v.push(e.state_hash());
+            }
+            v
+        };
+        assert_ne!(run(2040), run(2041), "adjacent seeds share a stream");
+    }
+    #[test]
+    fn rng_matches_core_xorshift_for_same_seed() {
+        // The particle stream reuses the engine-core xorshift body through
+        // splitmix seeding; same seed gives same words as the owner.
+        // Caller: Rng::new/next_u64 (particle spawn jitter).
+        let mut local = Rng::new(2040);
+        let mut owner = engine_core::Rng::from_state(engine_core::splitmix64(2040));
+        for _ in 0..8 {
+            assert_eq!(local.next_u64(), owner.next_u64());
+        }
+    }
+    #[test]
+    fn large_cap_60k_hash_x2_and_finite() {
+        // 60k-cap path: fixed emitter order plus FIXED_DT stepping hashes
+        // byte-equal x2, stays within the cap and stays finite.
+        // Caller: ParticleEffect::new (60k clamp) plus state_hash.
+        let run = || {
+            let mut e = ParticleEffect::new(
+                2040,
+                vec![EmitterDesc::default(), EmitterDesc::sparks()],
+                MAX_PARTICLES_60K,
+            );
+            let mut v = Vec::new();
+            for _ in 0..20 {
+                e.tick();
+                v.push(e.state_hash());
+            }
+            let finite = e
+                .particles()
+                .iter()
+                .all(|p| p.pos.iter().all(|c| c.is_finite()) && p.size.is_finite());
+            (v, e.alive(), finite)
+        };
+        let (a, alive_a, finite_a) = run();
+        let (b, alive_b, _) = run();
+        assert_eq!(a, b);
+        assert!(alive_a <= MAX_PARTICLES_60K && alive_b <= MAX_PARTICLES_60K);
+        assert!(finite_a);
+        assert_ne!(a[0], *a.last().unwrap());
+    }
+    #[test]
+    fn large_cap_clamps_burst_to_60k() {
+        // Over-cap builds clamp: a 70k burst into a 100k ask lands at 60k.
+        let mut e = ParticleEffect::new(
+            2040,
+            vec![EmitterDesc {
+                burst: 70_000,
+                rate: 0.0,
+                life: [5.0, 5.0],
+                ..EmitterDesc::default()
+            }],
+            100_000,
+        );
+        e.tick();
+        assert_eq!(e.alive(), MAX_PARTICLES_60K);
     }
 }

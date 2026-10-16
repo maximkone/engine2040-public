@@ -27,6 +27,19 @@ const WIRE: Wire = Wire {
     rungs: RungSupport::FULL,
 };
 
+fn note_local_outcome(outcome: &AdapterOutcome) {
+    let bad = outcome.result == Err(AiError::MalformedOutput)
+        || outcome.result.as_ref().is_ok_and(|result| {
+            result
+                .proposal
+                .as_ref()
+                .is_some_and(|proposal| super::core::validate_proposal(proposal).is_err())
+        });
+    if bad {
+        super::protocol::note_malformed();
+    }
+}
+
 /// Why a local endpoint was rejected at construction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LocalConfigError {
@@ -112,7 +125,7 @@ impl LocalAdapter {
         policy: &AiSessionPolicy,
         capabilities: &ProviderCapabilities,
     ) -> AdapterOutcome {
-        match admit {
+        let outcome = match admit {
             Admit::Gpu => self.http.call(&WIRE, None, request, policy, capabilities),
             Admit::Cpu(cpu) => {
                 let gpu = std::mem::replace(&mut self.http.endpoint, cpu);
@@ -128,7 +141,9 @@ impl LocalAdapter {
                 mutated: false,
                 discarded: false,
             },
-        }
+        };
+        note_local_outcome(&outcome);
+        outcome
     }
 }
 
@@ -140,7 +155,9 @@ impl ProviderAdapter for LocalAdapter {
         capabilities: &ProviderCapabilities,
     ) -> AdapterOutcome {
         let Some(route) = self.route.as_mut() else {
-            return self.http.call(&WIRE, None, request, policy, capabilities);
+            let outcome = self.http.call(&WIRE, None, request, policy, capabilities);
+            note_local_outcome(&outcome);
+            return outcome;
         };
         // A request already served replays wherever placement now is.
         if let Some(replay) = self.http.core.replay(request.id) {

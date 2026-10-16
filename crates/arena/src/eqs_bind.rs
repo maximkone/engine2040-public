@@ -7,6 +7,7 @@
 
 use engine_ai::eqs::{CoverBoundary, EqContext, EqPoint, Tactics, Vec3Mm};
 
+use crate::controller::SlotView;
 use crate::{ControlView, FighterId, FighterInput, SlotController};
 use engine_input::Buttons;
 
@@ -14,6 +15,36 @@ use engine_input::Buttons;
 const STANDOFF_MM: i32 = 2_000;
 /// Travel budget from the querier, millimetres.
 const MAX_DIST_MM: i32 = 80_000;
+
+/// Nearest other fighter on the ground plane, millimetres.
+///
+/// Scans `slots` in index order and returns the closest entry except
+/// `skip_idx`; ties keep the first index, so the same view ranks the same
+/// foe twice. Units: millimetres in, millimetres out. Determinism: integer
+/// `i128` squared distances only, no float, no clock, no allocation.
+/// Errors: none; `None` when alone, so the caller holds still.
+fn nearest_foe(
+    seen_x_mm: i32,
+    seen_z_mm: i32,
+    slots: &[SlotView],
+    skip_idx: usize,
+) -> Option<Vec3Mm> {
+    let mut foe: Option<Vec3Mm> = None;
+    let mut best: i128 = i128::MAX;
+    for (other, slot) in slots.iter().enumerate() {
+        if other == skip_idx {
+            continue;
+        }
+        let dx = i128::from(slot.x_mm) - i128::from(seen_x_mm);
+        let dz = i128::from(slot.z_mm) - i128::from(seen_z_mm);
+        let dist = dx * dx + dz * dz;
+        if dist < best {
+            best = dist;
+            foe = Some(Vec3Mm::new(slot.x_mm, 0, slot.z_mm));
+        }
+    }
+    foe
+}
 
 /// One live EQS cover bind: aims the claimed slot at the ranked cover spot.
 /// Holds the cover set, slot and tick-boundary dedupe; `request_id` is the
@@ -73,21 +104,7 @@ impl SlotController for EqsCoverController {
         if self.first_self.is_none() {
             self.first_self = Some(self_pos);
         }
-        let mut foe: Option<Vec3Mm> = None;
-        let mut best: i128 = i128::MAX;
-        for (other, slot) in view.slots.iter().enumerate() {
-            if other == idx {
-                continue;
-            }
-            let dx = i128::from(slot.x_mm) - i128::from(seen.x_mm);
-            let dz = i128::from(slot.z_mm) - i128::from(seen.z_mm);
-            let dist = dx * dx + dz * dz;
-            if dist < best {
-                best = dist;
-                foe = Some(Vec3Mm::new(slot.x_mm, 0, slot.z_mm));
-            }
-        }
-        let Some(foe_pos) = foe else {
+        let Some(foe_pos) = nearest_foe(seen.x_mm, seen.z_mm, view.slots, idx) else {
             Self::hold(row, idx, seen.facing_cdeg);
             return;
         };
@@ -191,5 +208,57 @@ mod tests {
         let driven = run_controlled(&config, &tape, &mut silent);
         assert_eq!(driven, plain, "claiming nothing keeps the legacy run");
         assert_eq!(silent.boundary.last_applied(), None);
+    }
+
+    #[test]
+    fn nearest_foe_picks_closest_and_ignores_self() {
+        let slots = [
+            SlotView {
+                x_mm: 0,
+                z_mm: 0,
+                ..SlotView::default()
+            },
+            SlotView {
+                x_mm: 3_000,
+                z_mm: 0,
+                ..SlotView::default()
+            },
+            SlotView {
+                x_mm: 1_000,
+                z_mm: 0,
+                ..SlotView::default()
+            },
+        ];
+        let foe = nearest_foe(0, 0, &slots, 0).expect("a foe exists");
+        assert_eq!((foe.x, foe.z), (1_000, 0), "closest wins, self ignored");
+        let tie = [
+            SlotView {
+                x_mm: 0,
+                z_mm: 0,
+                ..SlotView::default()
+            },
+            SlotView {
+                x_mm: 2_000,
+                z_mm: 0,
+                ..SlotView::default()
+            },
+            SlotView {
+                x_mm: -2_000,
+                z_mm: 0,
+                ..SlotView::default()
+            },
+        ];
+        let first = nearest_foe(0, 0, &tie, 0).expect("a foe exists");
+        assert_eq!((first.x, first.z), (2_000, 0), "ties keep index order");
+    }
+
+    #[test]
+    fn nearest_foe_alone_returns_none() {
+        let slots = [SlotView {
+            x_mm: 0,
+            z_mm: 0,
+            ..SlotView::default()
+        }];
+        assert_eq!(nearest_foe(0, 0, &slots, 0), None, "alone holds still");
     }
 }

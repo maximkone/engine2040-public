@@ -1,4 +1,9 @@
 //! rng: xorshift64 stream + splitmix fork substreams, LE digest.
+//! Seeded contract: authoritative draws come only from `Rng`/`CounterRng`
+//! substreams (`fork`/`fork_named`); unseeded entropy never reaches hashed
+//! state. Hashed state folds through `hash_bytes`/`hash_u64s` (`Fnv64`)
+//! in fixed order, never a default-seeded hasher or map iteration.
+//! Legacy `new`/`next_u64` stays frozen for golden replays.
 use crate::hash::{hash_bytes, hash_u64s, splitmix64, GOLDEN_GAMMA};
 
 /// Legacy xorshift64 stream: 8 bytes, `Copy`, identical on every platform.
@@ -169,5 +174,46 @@ mod tests {
         assert_eq!(Rng::hash_state(&v), Rng::digest(&v));
         assert_eq!(Rng::digest(&v), Rng::digest(&v));
         assert_ne!(Rng::digest(&v), Rng::digest(&v[1..]));
+    }
+    #[test]
+    fn seeded_substreams_rerun_byte_identical() {
+        // Authoritative draws rerun from the seed: the same seed gives zero
+        // differing bytes across independent substreams.
+        for seed in [0u64, 7, 2040] {
+            let root = Rng::new(seed);
+            let (mut a, mut b) = (root.fork_named("ai"), root.fork_named("ai"));
+            let va: [u64; 8] = core::array::from_fn(|_| a.next_u64());
+            let vb: [u64; 8] = core::array::from_fn(|_| b.next_u64());
+            assert_eq!(va, vb);
+            let mut ab = [0u8; 64];
+            let mut bb = [0u8; 64];
+            for (i, w) in va.iter().enumerate() {
+                let bytes = w.to_le_bytes();
+                let at = i * 8;
+                ab[at..at + 8].copy_from_slice(&bytes);
+            }
+            for (i, w) in vb.iter().enumerate() {
+                let bytes = w.to_le_bytes();
+                let at = i * 8;
+                bb[at..at + 8].copy_from_slice(&bytes);
+            }
+            let differing = ab.iter().zip(bb.iter()).filter(|(x, y)| x != y).count();
+            assert_eq!(differing, 0, "seed {seed} rerun differed");
+            assert_ne!(
+                root.fork_named("ai").next_u64(),
+                root.fork_named("world").next_u64()
+            );
+        }
+    }
+    #[test]
+    fn hashed_state_uses_seeded_fnv_in_fixed_order() {
+        // Seeded hasher contract: named substreams fold through hash_bytes,
+        // and digests stay order-sensitive and stable across reruns.
+        let root = Rng::new(2040);
+        assert_eq!(root.fork_named("ai"), root.fork(hash_bytes(b"ai")));
+        let v = [4794064739117914115u64, 16082742265117291817u64];
+        assert_eq!(Rng::digest(&v), hash_u64s(&v));
+        assert_eq!(Rng::digest(&v), Rng::digest(&v));
+        assert_ne!(Rng::digest(&v), Rng::digest(&[v[1], v[0]]));
     }
 }

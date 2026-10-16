@@ -182,6 +182,54 @@ pub fn static_sleep_skip(body: &Body, tier: Tier, asleep: bool, cfg: &LodConfig)
     rigid::is_settled(body)
 }
 
+/// Mark far settled agents asleep for the mixed 1k-agent path.
+///
+/// Slot-order loop over generic `N`: a [`Tier::Capsule`] body that
+/// [`static_sleep_skip`] holds sleeps in one tick with `sleep_steps`, so the
+/// later island fold keeps it asleep; near ([`Tier::Full`]) bodies never
+/// change. A length mismatch is a loud [`LodError::LenMismatch`] so a stale
+/// slice never marks a neighbour. No allocation, `+ *` plus bit compares
+/// only, same bytes as the [`LodWorld::step`] hunk it owns.
+///
+/// Consumer: [`LodWorld::step`] calls it for its capsules; the headless
+/// `mixed_space_step_split` prefix in `crates/perf/src/main.rs` adopts it
+/// next for its 1,000 agents (far to capsule plus sleep, near to the full
+/// path) with no hash move. Units: metres, m/s. Determinism: slot order,
+/// no wall clock.
+pub fn mark_mixed_sleep(
+    bodies: &[Body],
+    tiers: &[Tier],
+    asleep: &mut [bool],
+    timers: &mut [u32],
+    cfg: &LodConfig,
+) -> Result<(), LodError> {
+    if tiers.len() != bodies.len() {
+        return Err(LodError::LenMismatch {
+            want: bodies.len(),
+            got: tiers.len(),
+        });
+    }
+    if asleep.len() != bodies.len() {
+        return Err(LodError::LenMismatch {
+            want: bodies.len(),
+            got: asleep.len(),
+        });
+    }
+    if timers.len() != bodies.len() {
+        return Err(LodError::LenMismatch {
+            want: bodies.len(),
+            got: timers.len(),
+        });
+    }
+    for (i, body) in bodies.iter().enumerate() {
+        if tiers[i] != Tier::Full && !asleep[i] && static_sleep_skip(body, tiers[i], false, cfg) {
+            asleep[i] = true;
+            timers[i] = cfg.sleep.sleep_steps;
+        }
+    }
+    Ok(())
+}
+
 /// Army LOD world: 500 soldier capsules plus preallocated bone sets, 64
 /// fighter bone sets, tier and sleep state per soldier. Buffers are fixed at
 /// construction; [`LodWorld::step`] allocates nothing.
@@ -302,16 +350,15 @@ impl LodWorld {
         // sleep in one tick instead of waiting `sleep_steps`. The skip is
         // idempotent (ground clamp restores the same bytes) so awake bodies
         // hash identically. Island wake runs after, so a kick wakes the whole
-        // island even when mates are still.
-        for (i, body) in self.capsules.iter().enumerate() {
-            if self.tiers[i] != Tier::Full
-                && !self.asleep[i]
-                && static_sleep_skip(body, self.tiers[i], false, &self.cfg)
-            {
-                self.asleep[i] = true;
-                self.timers[i] = self.cfg.sleep.sleep_steps;
-            }
-        }
+        // island even when mates are still. Shared with the mixed 1k-agent
+        // path via `mark_mixed_sleep`: far to capsule plus sleep, near full.
+        mark_mixed_sleep(
+            &self.capsules,
+            &self.tiers,
+            &mut self.asleep,
+            &mut self.timers,
+            &self.cfg,
+        )?;
         islands::update_sleep(
             SOLDIERS,
             &islands,
@@ -650,6 +697,65 @@ mod tests {
         crate::islands::update_sleep(N, &joined, &v2, &mut timers, &mut asleep, cfg.sleep);
         assert!(!asleep[0] && !asleep[1], "kick wakes its island");
         assert!(asleep[2], "rest stays asleep");
+    }
+
+    #[test]
+    fn lod_mixed_1k_mark_sleep_routes_far_to_capsule() {
+        // 1k-agent mixed path: far settled sleeps in one tick via the shared
+        // helper, near (Full) never sleeps, kick wakes its island, hash keeps.
+        let cfg = LodConfig::default();
+        const N: usize = 1_000;
+        let bodies = vec![Body::new(1.0, 0.5, 0.0, 0.0, 0.5, 0.5); N];
+        let tiers = vec![Tier::Capsule; N];
+        let (mut timers, mut asleep) = (vec![0u32; N], vec![false; N]);
+        mark_mixed_sleep(&bodies, &tiers, &mut asleep, &mut timers, &cfg).expect("sizes match");
+        assert!(
+            asleep.iter().all(|&s| s),
+            "1k far still must all mark asleep"
+        );
+        assert!(
+            timers.iter().all(|&t| t == cfg.sleep.sleep_steps),
+            "mark carries the hysteresis count"
+        );
+        // Near agents stay on the full path even at rest.
+        let near_tiers = vec![Tier::Full; N];
+        let (mut near_timers, mut near_asleep) = (vec![0u32; N], vec![false; N]);
+        mark_mixed_sleep(
+            &bodies,
+            &near_tiers,
+            &mut near_asleep,
+            &mut near_timers,
+            &cfg,
+        )
+        .expect("sizes match");
+        assert!(
+            near_asleep.iter().all(|&s| !s),
+            "full tier never marks asleep"
+        );
+        // Idempotent rest keeps the capsule hash through integrate.
+        let before = crate::rigid::state_hash(&bodies);
+        let mut naive = bodies.clone();
+        crate::rigid::integrate(&mut naive, FIXED_DT);
+        assert_eq!(
+            crate::rigid::state_hash(&naive),
+            before,
+            "idempotent rest keeps hash"
+        );
+        // Kick wakes its island, rest stays asleep.
+        let islands = crate::islands::build_islands(N, &[(0, 1)]);
+        let mut v2 = vec![0.0f32; N];
+        v2[0] = cfg.sleep.wake_v2 + 1.0;
+        crate::islands::update_sleep(N, &islands, &v2, &mut timers, &mut asleep, cfg.sleep);
+        assert!(!asleep[0] && !asleep[1], "kick wakes its island");
+        assert!(asleep[2], "rest stays asleep");
+        // Stale slices fail loud instead of marking a neighbour.
+        let short = vec![Tier::Capsule; 8];
+        let mut s_asleep = vec![false; 8];
+        let mut s_timers = vec![0u32; 8];
+        assert_eq!(
+            mark_mixed_sleep(&bodies, &short, &mut s_asleep, &mut s_timers, &cfg),
+            Err(LodError::LenMismatch { want: N, got: 8 })
+        );
     }
 
     #[test]

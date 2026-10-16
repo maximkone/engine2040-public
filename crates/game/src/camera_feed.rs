@@ -176,6 +176,21 @@ impl PresentationFeed {
         self.rig.set_bypass(0);
         self.rig.add_trauma(trauma_for_cues(cues));
         let frame = self.rig.update(views, tick)?;
+        debug_assert_eq!(
+            feed_trauma_gain(frame.trauma_permille),
+            trauma_gain(frame.trauma_permille),
+            "feed curve matches rig"
+        );
+        debug_assert_eq!(
+            feed_shake_displacement_m(&frame),
+            shake_displacement_m(&frame),
+            "feed displacement matches rig"
+        );
+        debug_assert_eq!(
+            feed_restored_eye(&frame),
+            unshaken_eye(&frame),
+            "feed restore matches rig"
+        );
         self.frames.push(frame);
         self.trauma.push(frame.trauma_permille);
         Ok(frame)
@@ -212,6 +227,21 @@ impl PresentationFeed {
         self.rig.set_bypass(bypass & (BYPASS_LOCK | BYPASS_SHAKE));
         self.rig.add_trauma(trauma_for_cues(cues));
         let frame = self.rig.update(views, tick)?;
+        debug_assert_eq!(
+            feed_trauma_gain(frame.trauma_permille),
+            trauma_gain(frame.trauma_permille),
+            "feed curve matches rig"
+        );
+        debug_assert_eq!(
+            feed_shake_displacement_m(&frame),
+            shake_displacement_m(&frame),
+            "feed displacement matches rig"
+        );
+        debug_assert_eq!(
+            feed_restored_eye(&frame),
+            unshaken_eye(&frame),
+            "feed restore matches rig"
+        );
         self.frames.push(frame);
         self.trauma.push(frame.trauma_permille);
         Ok(frame)
@@ -391,7 +421,7 @@ pub fn shake_report(frames: &[CameraFrame]) -> ShakeReport {
     let mut sum = 0.0f64;
     let mut peak_trauma = 0u32;
     for frame in frames {
-        let displacement = shake_displacement_m(frame);
+        let displacement = feed_shake_displacement_m(frame);
         if displacement > peak {
             peak = displacement;
         }
@@ -410,16 +440,36 @@ pub fn shake_report(frames: &[CameraFrame]) -> ShakeReport {
             0.0
         },
         max_trauma_permille: peak_trauma,
-        peak_gain: trauma_gain(peak_trauma),
+        peak_gain: feed_trauma_gain(peak_trauma),
     }
 }
 
-/// Restore the unshaken pose eye from a presented frame (the restore check
-/// at the feed boundary): shake is presentation-only, so the next tick
-/// selects from this eye, never the shaken one.
+/// Feed-local trauma response curve: squared trauma gain (`t * t`), so a jab
+/// moves far less than a super. Owns the GP21 shake stage beside the rig:
+/// same clamped permille math as the staged rig, presentation-only, never
+/// sim state. Same inputs give the same gain twice. Pure, no heap.
 #[must_use]
-pub fn restored_eye(frame: &CameraFrame) -> Vec3 {
-    unshaken_eye(frame)
+pub fn feed_trauma_gain(trauma_permille: u32) -> f32 {
+    let clamped = trauma_permille.min(1000);
+    let t = f32::from(u16::try_from(clamped).unwrap_or(1000)) / 1000.0;
+    t * t
+}
+
+/// Feed-local shake displacement in meters for one presented frame: length
+/// of the presented shake offset. Presentation-only, never sim state.
+/// Same frame gives the same length twice. Pure, no heap.
+#[must_use]
+pub fn feed_shake_displacement_m(frame: &CameraFrame) -> f32 {
+    frame.shake_m.len()
+}
+
+/// Feed-local restore of the unshaken pose eye from a presented frame: the
+/// shake offset is presentation-only, so removing it returns the pose eye
+/// the next tick selects from (within one float rounding step). Same frame
+/// gives the same eye twice. Pure, no heap.
+#[must_use]
+pub fn feed_restored_eye(frame: &CameraFrame) -> Vec3 {
+    frame.eye_m - frame.shake_m
 }
 
 // ---------------------------------------------------------------------------
@@ -1488,8 +1538,8 @@ mod tests {
             let tick = index as u32;
             assert_eq!(noisy.lock, calm.lock, "shake steered lock at tick {tick}");
             assert_eq!(noisy.look_m, calm.look_m, "shake moved look at tick {tick}");
-            let restored = restored_eye(noisy);
-            let calm_eye = restored_eye(calm);
+            let restored = unshaken_eye(noisy);
+            let calm_eye = unshaken_eye(calm);
             assert!(
                 (restored - calm_eye).len() <= 1e-5,
                 "restore drift at tick {tick}"
@@ -1508,6 +1558,43 @@ mod tests {
             second.frames().iter().map(CameraFrame::to_bytes).collect();
         assert_eq!(first_bytes, second_bytes, "shake bytes replay exactly");
         assert_eq!(first.trauma_log(), second.trauma_log());
+    }
+
+    #[test]
+    fn gp21_feed_stage_matches_rig_and_separates_jab_super() {
+        // Squared curve, not linear: 500 permille gains 0.25, never 0.5.
+        assert_eq!(feed_trauma_gain(0), 0.0);
+        assert!(
+            (feed_trauma_gain(500) - 0.25).abs() < 1e-6,
+            "curve must square"
+        );
+        assert!(
+            (feed_trauma_gain(1000) - 1.0).abs() < 1e-6,
+            "saturated gain is 1"
+        );
+        assert_eq!(feed_trauma_gain(2000), 1.0, "over-range clamps at full");
+        // Jab far under super through the feed stage alone.
+        let jab = feed_trauma_gain(TRAUMA_HIT);
+        let sup = feed_trauma_gain(1000);
+        assert!(jab <= 0.25 * sup, "jab gain {jab} vs super gain {sup}");
+        // Bit-exact parity with the staged rig helpers.
+        assert_eq!(feed_trauma_gain(180), trauma_gain(180));
+        assert_eq!(feed_trauma_gain(1000), trauma_gain(1000));
+        let loud = trauma_script_feed(3, 8);
+        for frame in loud.frames() {
+            assert_eq!(
+                feed_shake_displacement_m(frame),
+                shake_displacement_m(frame)
+            );
+            assert_eq!(feed_restored_eye(frame), unshaken_eye(frame));
+            assert!(feed_restored_eye(frame).is_finite(), "restore stays finite");
+        }
+        // Zero trauma displaces nothing and restores the eye itself.
+        let calm = trauma_script_feed(0, 8);
+        for frame in calm.frames() {
+            assert_eq!(feed_shake_displacement_m(frame), 0.0);
+            assert_eq!(feed_restored_eye(frame), frame.eye_m);
+        }
     }
 
     // Staged-rig wiring: the window feed drives the staged rig over the

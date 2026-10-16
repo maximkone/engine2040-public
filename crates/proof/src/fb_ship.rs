@@ -185,7 +185,11 @@ pub fn build_report() -> Result<String, ReceiptError> {
         format!("tier {tier}"),
         format!(
             "golden {golden:016x} {}",
-            if golden == GOLDEN_600 { "ok" } else { "CHANGED" }
+            if golden == GOLDEN_600 {
+                "ok"
+            } else {
+                "CHANGED"
+            }
         ),
         format!("facts {} misses {}", FACTS.len(), misses.len()),
     ];
@@ -395,7 +399,10 @@ mod tests {
     #[test]
     fn pinned_facts_match_owner_source() {
         let misses = fact_misses();
-        assert!(misses.is_empty(), "facts missing from owner source: {misses:?}");
+        assert!(
+            misses.is_empty(),
+            "facts missing from owner source: {misses:?}"
+        );
     }
 
     #[test]

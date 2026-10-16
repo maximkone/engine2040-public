@@ -448,6 +448,10 @@ pub fn collect_crash(tape: &Tape, reason: &'static str) -> BugBundle {
 
 /// Replay the bundle's tape and name the first divergent tick.
 ///
+/// Trace-diff contract: the same seed plus config plus inputs reruns to a
+/// byte-identical TRACE prefix (see `crate::trace::replay_verbose`); any
+/// mismatch reports `first_divergent_tick` here, never a silent pass.
+///
 /// Supported tapes replay to the recorded divergence. An empty tape, an
 /// unsupported bundle/rules/tape version, a corrupt tape or a clean replay
 /// is diagnosed with [`BundleError`], never a silent pass. The stored
@@ -919,5 +923,85 @@ mod tests {
         ] {
             assert!(format!("{error}").len() <= 256, "diagnostic too long");
         }
+    }
+    fn trace_prefix_bytes(tape: &Tape) -> Vec<u8> {
+        let report = crate::trace::replay_verbose(tape).expect("verified tape traces");
+        let mut out = Vec::with_capacity(report.events.len() * 48);
+        for event in &report.events {
+            out.extend_from_slice(&event.tick.to_le_bytes());
+            out.extend_from_slice(event.detail.as_bytes());
+            out.push(0);
+        }
+        out
+    }
+    #[test]
+    fn same_seed_rerun_trace_prefix_is_byte_identical() {
+        let config = Config { seed: 7, ticks: 24 };
+        let inputs = [Input {
+            tick: 5,
+            body: 1,
+            vx: 1.0,
+            vy: 2.0,
+        }];
+        let first = record(config, &inputs).expect("fixture records");
+        let second = record(config, &inputs).expect("rerun records");
+        assert_eq!(first.checkpoints, second.checkpoints);
+        let a = trace_prefix_bytes(&first);
+        let b = trace_prefix_bytes(&second);
+        assert!(!a.is_empty());
+        assert_eq!(a.len(), b.len());
+        let differing = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+        assert_eq!(differing, 0, "same-seed rerun differed");
+    }
+    #[test]
+    fn perturbed_run_names_its_first_divergent_tick_exactly() {
+        let config = Config { seed: 7, ticks: 24 };
+        let inputs = [Input {
+            tick: 5,
+            body: 1,
+            vx: 1.0,
+            vy: 2.0,
+        }];
+        let clean = record(config, &inputs).expect("fixture records");
+        let mut moved_inputs = inputs;
+        moved_inputs[0].vx = 19.0;
+        let moved = record(config, &moved_inputs).expect("moved records");
+        let clean_report = crate::trace::replay_verbose(&clean).expect("clean traces");
+        let moved_report = crate::trace::replay_verbose(&moved).expect("moved traces");
+        let mut first_diff = None;
+        for (index, (a, b)) in clean_report
+            .events
+            .iter()
+            .zip(moved_report.events.iter())
+            .enumerate()
+        {
+            // `state` folds the input context, so it differs from tick 0;
+            // the authoritative tick is the first `legacy` (trajectory)
+            // divergence, matching `replay` precedence in `crate::replay`.
+            let legacy_a = a.detail.split(' ').next().unwrap_or(&a.detail);
+            let legacy_b = b.detail.split(' ').next().unwrap_or(&b.detail);
+            if legacy_a != legacy_b {
+                first_diff = u32::try_from(index).ok();
+                break;
+            }
+        }
+        assert_eq!(first_diff, Some(5));
+        assert_ne!(trace_prefix_bytes(&clean), trace_prefix_bytes(&moved));
+        let mut tampered = clean;
+        tampered.inputs = moved_inputs.to_vec();
+        let error = crate::replay(&tampered).expect_err("altered input must diverge");
+        let Error::Divergence { tick, .. } = error else {
+            panic!("expected a divergence");
+        };
+        assert_eq!(tick, 5);
+        assert_eq!(tick, first_diff.expect("trace diff names a tick"));
+        let bundle = collect(&tampered, &error);
+        assert_eq!(bundle.failure_tick, Some(5));
+        assert_eq!(
+            replay(&bundle)
+                .expect("bundle replays")
+                .first_divergent_tick,
+            5
+        );
     }
 }

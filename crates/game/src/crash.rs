@@ -473,6 +473,28 @@ pub fn write_report(path: &Path, report: &CrashReport) -> Result<(), CrashError>
     Ok(())
 }
 
+// PORT(EmbarkStudios/crash-handling@e7d5067:crash-handler, minidumper): fault
+// hook writes one stub below; the monitor owns the real minidump (`std` only).
+
+/// Sibling `.dmp` path for a `.toml` report path. Pure.
+fn minidump_path(report_path: &Path) -> PathBuf {
+    report_path.with_extension("dmp")
+}
+
+/// Write the fault-path stub dump beside the report (magic, tick, version
+/// length) in one write call; a bad bundle leaves neither file.
+fn write_minidump_stub(path: &Path, report: &CrashReport) -> Result<PathBuf, CrashError> {
+    report.validate()?;
+    let dump = minidump_path(path);
+    let mut header = Vec::with_capacity(16);
+    header.extend_from_slice(b"MDMP");
+    header.extend_from_slice(&report.tick.to_le_bytes());
+    let version_len = u32::try_from(report.version.len()).unwrap_or(u32::MAX);
+    header.extend_from_slice(&version_len.to_le_bytes());
+    std::fs::write(&dump, &header).map_err(|err| CrashError::Io(err.kind()))?;
+    Ok(dump)
+}
+
 /// Char-boundary-safe byte prefix of `text` capped at `max` bytes.
 fn clip_prefix(text: &str, max: usize) -> String {
     let mut end = text.len().min(max);
@@ -620,6 +642,27 @@ pub fn set_adapter(description: &str) {
     state.adapter = clip_prefix(description, MAX_ADAPTER_BYTES);
 }
 
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "dGPU flag must be an exported symbol per GLFW win32_init pattern"
+)]
+#[used]
+#[export_name = "NvOptimusEnablement"]
+/// Optimus dGPU export (PORT(glfw/glfw@master:src/win32_init.c)); ship refuses Intel.
+/// SAFETY: plain u32 flag read only by the OS loader to pick the dGPU; never read or written by Rust.
+pub static NV_OPTIMUS_ENABLEMENT: u32 = 1;
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "dGPU flag must be an exported symbol per GLFW win32_init pattern"
+)]
+#[used]
+#[export_name = "AmdPowerXpressRequestHighPerformance"]
+/// AMD switchable-graphics export (same pattern); ship refuses Intel.
+/// SAFETY: plain u32 flag read only by the OS loader to pick the dGPU; never read or written by Rust.
+pub static AMD_POWER_XPRESS_REQUEST_HIGH_PERFORMANCE: u32 = 1;
+
 /// Append one status line to the run log. The arena binary calls this for
 /// every line it prints, so the log holds what the console showed. The file
 /// is unbuffered and each line is one write call, so a crash keeps every
@@ -749,6 +792,7 @@ fn write_crash_report() -> Result<PathBuf, CrashError> {
         )?,
     };
     write_report(&path, &report)?;
+    write_minidump_stub(&path, &report).ok(); // best-effort stub; the report is the acceptance.
     Ok(path)
 }
 
@@ -826,6 +870,30 @@ mod tests {
             let again = sample(mode);
             assert_eq!(format_report(&report), format_report(&again));
         }
+        std::fs::remove_dir_all(&dir).expect("drill temp cleaned");
+    }
+
+    #[test]
+    fn forced_dump_and_report_leave_one_each() {
+        let dir = drill_dir("dump-pair");
+        let report = sample(CrashMode::Fight);
+        let toml = dir.join("crash-dump-pair.toml");
+        write_report(&toml, &report).expect("report writes");
+        let dump = write_minidump_stub(&toml, &report).expect("dump writes");
+        assert!(toml.is_file() && dump.is_file(), "need 1 dump + 1 report");
+        let bytes = std::fs::read(&dump).expect("dump readable");
+        assert!(bytes.starts_with(b"MDMP"), "dump lacks magic");
+        let bad_toml = dir.join("bad.toml");
+        let bad = CrashReport {
+            version: VERSION.to_string(),
+            adapter: ADAPTER.to_string(),
+            mode: CrashMode::Fight,
+            tick: 1,
+            tape_tail: Vec::new(),
+            checkpoint: vec![0u8; MAX_CHECKPOINT_BYTES + 1],
+        };
+        assert!(write_minidump_stub(&bad_toml, &bad).is_err());
+        assert!(!bad_toml.exists() && !minidump_path(&bad_toml).exists());
         std::fs::remove_dir_all(&dir).expect("drill temp cleaned");
     }
 

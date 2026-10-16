@@ -760,6 +760,8 @@ pub enum Rel {
     Aligned,
     Near,
     Far,
+    Visible,
+    Reachable,
 }
 
 /// V2 relation graph: subject-frame binary edges in frozen
@@ -788,6 +790,8 @@ pub fn rel_name(rel: Rel) -> &'static str {
         Rel::Aligned => "aligned",
         Rel::Near => "near",
         Rel::Far => "far",
+        Rel::Visible => "visible_from",
+        Rel::Reachable => "reachable_from",
     }
 }
 
@@ -1228,11 +1232,87 @@ pub fn blocking_holds(actors: &[Actor], o: u32, a: u32, b: u32) -> bool {
     seg_crosses_box(p1, p2, bo)
 }
 
+/// Line of sight on the ground plane: same story with no blocking
+/// occluder on the center-to-center walk. Any third actor with
+/// [`blocking_holds`] shape (strictly between, box properly crossed,
+/// sharing the story) refuses the pair. Frame-free by design.
+fn visible_holds(view: &V2View<'_>, s: u32, o: u32) -> bool {
+    if s == o {
+        return false;
+    }
+    let (bs, bo) = match (view.boxes.get(&s), view.boxes.get(&o)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return false,
+    };
+    if !y_overlap(bs, bo) {
+        return false;
+    }
+    let (cs, co) = match (view.centers.get(&s), view.centers.get(&o)) {
+        (Some(a), Some(b)) => (*a, *b),
+        _ => return false,
+    };
+    let p1 = (i64::from(cs.0), i64::from(cs.2));
+    let p2 = (i64::from(co.0), i64::from(co.2));
+    for (id, bt) in &view.boxes {
+        let t = *id;
+        if t == s || t == o {
+            continue;
+        }
+        if !y_overlap(bt, bs) || !y_overlap(bt, bo) {
+            continue;
+        }
+        let ct = match view.centers.get(&t) {
+            Some(c) => *c,
+            None => continue,
+        };
+        if strict_between_proj(ct, cs, co).is_none() {
+            continue;
+        }
+        if seg_crosses_box(p1, p2, bt) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Walkable ground: same story with no occluder box crossing the XZ
+/// walk. Any third box the straight center walk properly crosses
+/// refuses the pair, whatever story that box sits on. Grazing touches
+/// never refuse. Frame-free by design.
+fn reachable_holds(view: &V2View<'_>, s: u32, o: u32) -> bool {
+    if s == o {
+        return false;
+    }
+    let (bs, bo) = match (view.boxes.get(&s), view.boxes.get(&o)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return false,
+    };
+    if !y_overlap(bs, bo) {
+        return false;
+    }
+    let (cs, co) = match (view.centers.get(&s), view.centers.get(&o)) {
+        (Some(a), Some(b)) => (*a, *b),
+        _ => return false,
+    };
+    let p1 = (i64::from(cs.0), i64::from(cs.2));
+    let p2 = (i64::from(co.0), i64::from(co.2));
+    for (id, bt) in &view.boxes {
+        if *id == s || *id == o {
+            continue;
+        }
+        if seg_crosses_box(p1, p2, bt) {
+            return false;
+        }
+    }
+    true
+}
+
 /// One vocabulary question: does `rel` hold from `s` to `o` in `frame`?
-/// Frame-free kinds (above/below, against/around/aligned, near/far) ignore
-/// the frame so callers keep one call shape. Degenerate inputs answer
-/// `false`: same id, unknown id, NaN or non-positive bounds, unknown
-/// viewer, or a yawless subject for directional kinds.
+/// Frame-free kinds (above/below, against/around/aligned, near/far,
+/// visible/reachable) ignore the frame so callers keep one call shape.
+/// Degenerate inputs answer `false`: same id, unknown id, NaN or
+/// non-positive bounds, unknown viewer, or a yawless subject for
+/// directional kinds.
 pub fn holds(actors: &[Actor], s: u32, rel: Rel, o: u32, frame: Frame) -> bool {
     if s == o {
         return false;
@@ -1259,6 +1339,8 @@ pub fn holds(actors: &[Actor], s: u32, rel: Rel, o: u32, frame: Frame) -> bool {
         Rel::Aligned => aligned_holds(&view, s, o),
         Rel::Near => band_holds(&view, s, o, NEAR_CM),
         Rel::Far => band_holds(&view, s, o, FAR_CM),
+        Rel::Visible => visible_holds(&view, s, o),
+        Rel::Reachable => reachable_holds(&view, s, o),
     }
 }
 
@@ -1552,6 +1634,31 @@ mod vocab_tests {
         ]
     }
 
+    /// S13: sight corridor — eye west, east target behind a ground
+    /// wall, north target past an off-story loft. The loft splits
+    /// visible from reachable on the eye-north walk.
+    fn s_see() -> Vec<Actor> {
+        vec![
+            mk(210, "eye", -4.0, 0.5, 0.0, 1.0, 1.0, 1.0, 0.0),
+            mk(211, "east", 4.0, 0.5, 0.0, 1.0, 1.0, 1.0, 0.0),
+            mk(212, "north", -4.0, 0.5, 4.0, 1.0, 1.0, 1.0, 0.0),
+            mk(213, "wall", 0.0, 0.5, 0.0, 1.0, 1.0, 1.0, 0.0),
+            mk(214, "loft", -4.01, 3.0, 3.01, 1.0, 1.0, 1.0, 0.0),
+        ]
+    }
+
+    /// S14: walk corridor — walker south, goal north, ground gate
+    /// across the walk, off-story loft over the south leg. The loft
+    /// splits visible from reachable on that leg.
+    fn s_walk() -> Vec<Actor> {
+        vec![
+            mk(220, "walker", 0.0, 0.5, -4.0, 1.0, 1.0, 1.0, 0.0),
+            mk(221, "goal", 0.0, 0.5, 4.0, 1.0, 1.0, 1.0, 0.0),
+            mk(222, "gate", 0.0, 0.5, 0.0, 1.0, 1.0, 1.0, 0.0),
+            mk(223, "loft", 0.0, 3.0, -3.5, 1.0, 1.0, 1.0, 0.0),
+        ]
+    }
+
     struct Gold {
         scene: &'static str,
         s: u32,
@@ -1585,6 +1692,8 @@ mod vocab_tests {
             ("upstairs", s_upstairs()),
             ("cone", s_cone()),
             ("bounds", s_bounds()),
+            ("see", s_see()),
+            ("walk", s_walk()),
         ]
     }
 
@@ -1793,6 +1902,58 @@ mod vocab_tests {
             q("bounds", 196, Rel::Aligned, 201, S, true),
             q("bounds", 200, Rel::Below, 201, S, false),
             q("bounds", 140, Rel::Near, 140, S, false),
+            // --- S13 see: wall blocks east, loft splits north ---
+            q("see", 210, Rel::Visible, 211, W, false),
+            q("see", 210, Rel::Reachable, 211, W, false),
+            q("see", 210, Rel::Visible, 212, W, true),
+            q("see", 210, Rel::Reachable, 212, W, false),
+            q("see", 210, Rel::Visible, 213, W, true),
+            q("see", 210, Rel::Reachable, 213, W, true),
+            q("see", 210, Rel::Visible, 214, W, false),
+            q("see", 210, Rel::Reachable, 214, W, false),
+            q("see", 211, Rel::Visible, 210, W, false),
+            q("see", 211, Rel::Reachable, 210, W, false),
+            q("see", 211, Rel::Visible, 212, W, true),
+            q("see", 211, Rel::Reachable, 212, W, true),
+            q("see", 211, Rel::Visible, 213, W, true),
+            q("see", 211, Rel::Reachable, 213, W, true),
+            q("see", 212, Rel::Visible, 210, W, true),
+            q("see", 212, Rel::Reachable, 210, W, false),
+            q("see", 212, Rel::Visible, 211, W, true),
+            q("see", 212, Rel::Reachable, 211, W, true),
+            q("see", 212, Rel::Visible, 213, W, true),
+            q("see", 212, Rel::Reachable, 213, W, true),
+            q("see", 213, Rel::Visible, 210, W, true),
+            q("see", 213, Rel::Reachable, 210, W, true),
+            q("see", 213, Rel::Visible, 211, W, true),
+            q("see", 213, Rel::Reachable, 211, W, true),
+            q("see", 213, Rel::Visible, 212, W, true),
+            q("see", 213, Rel::Reachable, 212, W, true),
+            q("see", 213, Rel::Visible, 214, W, false),
+            q("see", 213, Rel::Reachable, 214, W, false),
+            q("see", 214, Rel::Visible, 210, W, false),
+            q("see", 214, Rel::Reachable, 210, W, false),
+            // --- S14 walk: gate blocks the walk, loft splits the leg ---
+            q("walk", 220, Rel::Visible, 221, W, false),
+            q("walk", 220, Rel::Reachable, 221, W, false),
+            q("walk", 220, Rel::Visible, 222, W, true),
+            q("walk", 220, Rel::Reachable, 222, W, false),
+            q("walk", 220, Rel::Visible, 223, W, false),
+            q("walk", 220, Rel::Reachable, 223, W, false),
+            q("walk", 221, Rel::Visible, 220, W, false),
+            q("walk", 221, Rel::Reachable, 220, W, false),
+            q("walk", 221, Rel::Visible, 222, W, true),
+            q("walk", 221, Rel::Reachable, 222, W, true),
+            q("walk", 221, Rel::Visible, 223, W, false),
+            q("walk", 221, Rel::Reachable, 223, W, false),
+            q("walk", 222, Rel::Visible, 220, W, true),
+            q("walk", 222, Rel::Reachable, 220, W, false),
+            q("walk", 222, Rel::Visible, 221, W, true),
+            q("walk", 222, Rel::Reachable, 221, W, true),
+            q("walk", 222, Rel::Visible, 223, W, false),
+            q("walk", 222, Rel::Reachable, 223, W, false),
+            q("walk", 223, Rel::Visible, 222, W, false),
+            q("walk", 223, Rel::Reachable, 222, W, false),
         ]
     }
 
@@ -1867,6 +2028,29 @@ mod vocab_tests {
             "{hit}/{total} agree ({pct}%):\n{}",
             miss.join("\n")
         );
+    }
+
+    #[test]
+    fn gold_set_answers_visible_and_reachable_exactly() {
+        let table = gold_set();
+        let scenes: BTreeMap<&str, Vec<Actor>> = scenes().into_iter().collect();
+        let subset: Vec<&Gold> = table
+            .iter()
+            .filter(|g| matches!(g.rel, Rel::Visible | Rel::Reachable))
+            .collect();
+        assert!(subset.len() >= 50, "need 50, hold {}", subset.len());
+        for _ in 0..2 {
+            let mut miss = Vec::new();
+            for g in &subset {
+                let actors = &scenes[g.scene];
+                for f in [g.frame, Frame::Subject] {
+                    if holds(actors, g.s, g.rel, g.o, f) != g.want {
+                        miss.push(format!("{}: ({},{:?},{},{f:?})", g.scene, g.s, g.rel, g.o));
+                    }
+                }
+            }
+            assert!(miss.is_empty(), "miss:\n{}", miss.join("\n"));
+        }
     }
 
     #[test]
@@ -2186,6 +2370,8 @@ mod vocab_tests {
             Rel::Aligned,
             Rel::Near,
             Rel::Far,
+            Rel::Visible,
+            Rel::Reachable,
         ] {
             // Unknown, NaN and flat actors take no edges in any frame.
             assert!(!holds(&actors, 400, rel, 100, Frame::Subject));
@@ -2259,6 +2445,8 @@ mod vocab_tests {
         assert_eq!(rel_name(Rel::Left), "left_of");
         assert_eq!(rel_name(Rel::Near), "near");
         assert_eq!(rel_name(Rel::Far), "far");
+        assert_eq!(rel_name(Rel::Visible), "visible_from");
+        assert_eq!(rel_name(Rel::Reachable), "reachable_from");
         assert_eq!(frame_name(Frame::World), "world");
         assert_eq!(frame_name(Frame::Subject), "subject");
         assert_eq!(frame_name(Frame::Viewer(7)), "viewer");

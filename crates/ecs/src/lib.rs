@@ -9,6 +9,8 @@
 pub mod archetype;
 pub mod arena;
 pub mod bridge;
+/// Wrapping change ticks with per-column summaries.
+pub mod change_tick;
 pub mod jobs;
 pub mod parallel;
 pub mod pool;
@@ -16,11 +18,13 @@ pub mod schedule;
 pub mod snapshot;
 pub mod spine;
 pub mod spine_schedule;
+/// Optional-component iteration plus dynamic spawn bundles over spine columns.
+pub mod views;
 
 pub use archetype::{ComponentId, Entity, Registry};
 pub use arena::{ArenaError, PhaseArena};
-pub use pool::{JobPool, PoolError, Scope};
 use engine_core::Fnv64;
+pub use pool::{JobPool, PoolError, Scope};
 
 // The one counting allocator of this test binary: zero-allocation tests read
 // it through `engine_core::alloc_probe::measure`.

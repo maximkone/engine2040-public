@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use engine_core::vec3::cross3;
 use engine_core::Fnv64;
 
 use std::f32::consts::{FRAC_1_SQRT_2 as SQ, PI};
@@ -123,14 +124,6 @@ fn norm(v: [f32; 3]) -> [f32; 3] {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
     [v[0] / l, v[1] / l, v[2] / l]
 }
-/// cross product.
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
 /// tangent frame about n (deterministic, trig-free).
 fn frame(n: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     let h = if n[1].abs() < 0.99 {
@@ -138,8 +131,8 @@ fn frame(n: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     } else {
         [1.0, 0.0, 0.0]
     };
-    let t = norm(cross(h, n));
-    (t, cross(n, t))
+    let t = norm(cross3(h, n));
+    (t, cross3(n, t))
 }
 /// diffuse direct radiance for a facing (bake-only; the lights loop).
 fn direct(p: [f32; 3], n: [f32; 3], s: &BakeScene<'_>) -> [f32; 3] {
@@ -517,5 +510,33 @@ impl<'a> GiRuntime<'a> {
     /// interpolated SH irradiance at pos for direction d.
     pub fn irradiance(&self, pos: [f32; 3], d: [f32; 3]) -> [f32; 3] {
         sh_irradiance(&self.probes.sample_trilerp(pos), d)
+    }
+    /// Dynamic blend beside the baked lookup: `(1 - w)` baked SH irradiance
+    /// plus `w` live probe-stub sample at `pos` for direction `d`. Weight 0
+    /// keeps today's baked pixels exactly; weight 1 hands the frame to the
+    /// live grid. Units: meters for `pos`, unit-free `d`, unitless `w` in
+    /// `0..=1`. Determinism: same inputs give bit-identical triples twice.
+    /// Errors: [`crate::gi_probe::GiProbeError`] for a weight outside
+    /// `0..=1` or a bad sample pos. Consumer of the `gi_probe` slice.
+    pub fn irradiance_mixed(
+        &self,
+        probes: &crate::gi_probe::ProbeGrid,
+        pos: [f32; 3],
+        d: [f32; 3],
+        dyn_weight: f32,
+    ) -> Result<[f32; 3], crate::gi_probe::GiProbeError> {
+        if !dyn_weight.is_finite() || dyn_weight < 0.0 || dyn_weight > 1.0 {
+            return Err(crate::gi_probe::GiProbeError::Invalid(format!(
+                "gi mixed weight {dyn_weight} leaves 0..=1"
+            )));
+        }
+        let baked = self.irradiance(pos, d);
+        let live = probes.sample_trilerp(pos)?;
+        let base = 1.0 - dyn_weight;
+        Ok([
+            baked[0] * base + live[0] * dyn_weight,
+            baked[1] * base + live[1] * dyn_weight,
+            baked[2] * base + live[2] * dyn_weight,
+        ])
     }
 }

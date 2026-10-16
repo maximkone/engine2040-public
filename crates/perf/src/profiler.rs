@@ -996,7 +996,10 @@ pub fn paired_tick_frame_summary(
     b: &TickFrameSeries,
 ) -> Result<String, ProfileError> {
     if a.hash != b.hash {
-        return Err(ProfileError::DivergedPair { hash_a: a.hash, hash_b: b.hash });
+        return Err(ProfileError::DivergedPair {
+            hash_a: a.hash,
+            hash_b: b.hash,
+        });
     }
     let (ta, tb) = (a.tick_plot.quantiles()?, b.tick_plot.quantiles()?);
     let (fa, fb) = (a.frame_plot.quantiles()?, b.frame_plot.quantiles()?);
@@ -1005,11 +1008,27 @@ pub fn paired_tick_frame_summary(
          tick A p50={:.3}ms p95={:.3}ms p99={:.3}ms | B p50={:.3}ms p95={:.3}ms p99={:.3}ms\n\
          frame A p50={:.3}ms p95={:.3}ms p99={:.3}ms | B p50={:.3}ms p95={:.3}ms p99={:.3}ms\n\
          machine={}-{} profile={}\n",
-        a.ticks, a.hash,
-        ta.p50_ms, ta.p95_ms, ta.p99_ms, tb.p50_ms, tb.p95_ms, tb.p99_ms,
-        fa.p50_ms, fa.p95_ms, fa.p99_ms, fb.p50_ms, fb.p95_ms, fb.p99_ms,
-        std::env::consts::OS, std::env::consts::ARCH,
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        a.ticks,
+        a.hash,
+        ta.p50_ms,
+        ta.p95_ms,
+        ta.p99_ms,
+        tb.p50_ms,
+        tb.p95_ms,
+        tb.p99_ms,
+        fa.p50_ms,
+        fa.p95_ms,
+        fa.p99_ms,
+        fb.p50_ms,
+        fb.p95_ms,
+        fb.p99_ms,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
     ))
 }
 
@@ -1610,8 +1629,11 @@ mod tests {
         let mut tick = PlotSeries::new(MARK_TICK).expect("tick series builds");
         let mut frame = PlotSeries::new(MARK_FRAME).expect("frame series builds");
         for step in 0..4 {
-            tick.push_ms(base + f64::from(step)).expect("finite ms pushes");
-            frame.push_ms(2.0 * base + f64::from(step)).expect("finite ms pushes");
+            tick.push_ms(base + f64::from(step))
+                .expect("finite ms pushes");
+            frame
+                .push_ms(2.0 * base + f64::from(step))
+                .expect("finite ms pushes");
         }
         TickFrameSeries {
             ticks: 4,
@@ -1629,10 +1651,25 @@ mod tests {
         let a = paired_side(0xd791_b72c_1633_5366, 1.0);
         let b = paired_side(0xd791_b72c_1633_5366, 3.0);
         let first = paired_tick_frame_summary(&a, &b).expect("equal hashes receipt");
-        assert!(first.contains("hash_A == hash_B (d791b72c16335366)"), "names both hashes");
-        let lines = ["tick A p50=", "| B p50=", "frame A p50=", "machine=", "profile="];
-        assert!(lines.iter().all(|line| first.contains(line)), "receipt names every row");
-        assert_eq!(first, paired_tick_frame_summary(&a, &b).expect("rerun repeats"));
+        assert!(
+            first.contains("hash_A == hash_B (d791b72c16335366)"),
+            "names both hashes"
+        );
+        let lines = [
+            "tick A p50=",
+            "| B p50=",
+            "frame A p50=",
+            "machine=",
+            "profile=",
+        ];
+        assert!(
+            lines.iter().all(|line| first.contains(line)),
+            "receipt names every row"
+        );
+        assert_eq!(
+            first,
+            paired_tick_frame_summary(&a, &b).expect("rerun repeats")
+        );
         println!("{first}");
     }
 
@@ -1643,7 +1680,10 @@ mod tests {
         let c = paired_side(0x1234_5678_9abc_def0, 1.0);
         assert_eq!(
             paired_tick_frame_summary(&a, &c),
-            Err(ProfileError::DivergedPair { hash_a: a.hash, hash_b: c.hash })
+            Err(ProfileError::DivergedPair {
+                hash_a: a.hash,
+                hash_b: c.hash
+            })
         );
         assert_eq!(capture_paired_tick_frame(), Err(ProfileError::Disabled));
         assert!(!is_enabled(), "this test never flips the flag");

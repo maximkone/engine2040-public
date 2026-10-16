@@ -385,7 +385,6 @@ pub fn fit_mlp(
     Ok(mlp)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,7 +450,10 @@ mod tests {
         assert_eq!(fit_mlp(&rows, &bad, Some(&m)), Err(FitError::BadBatch));
         bad = spec;
         bad.learning_rate = f32::NAN;
-        assert_eq!(fit_mlp(&rows, &bad, Some(&m)), Err(FitError::BadLearningRate));
+        assert_eq!(
+            fit_mlp(&rows, &bad, Some(&m)),
+            Err(FitError::BadLearningRate)
+        );
         let mut wrong = rows.clone();
         wrong[5].target = 9;
         match fit_mlp(&wrong, &spec, Some(&m)) {
@@ -464,8 +466,12 @@ mod tests {
     fn forward_refuses_wrong_lengths() {
         let spec = spec();
         let rows = xor_rows(&spec.student);
-        let mlp = fit_mlp(&rows[..8], &MlpSpec { epochs: 1, ..spec }, Some(&DatasetManifest::fixture()))
-            .expect("fits");
+        let mlp = fit_mlp(
+            &rows[..8],
+            &MlpSpec { epochs: 1, ..spec },
+            Some(&DatasetManifest::fixture()),
+        )
+        .expect("fits");
         let mut h = [0.0f32; 8];
         let mut l = [0.0f32; 2];
         assert_eq!(mlp.forward(&[0.0], &mut h, &mut l), None);

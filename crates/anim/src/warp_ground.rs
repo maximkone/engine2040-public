@@ -306,11 +306,7 @@ pub(crate) fn speed_rate(clip_speed: f32, capsule_speed: f32) -> Result<f32, War
 /// `capsule / (clip * rate)` clamped to [`STRIDE_MIN`]..=[`STRIDE_MAX`]. With
 /// an unclamped rate this is exactly `1.0`; it only bends while the rate
 /// saturates. Rejects bad speeds and non-positive rates loudly.
-pub(crate) fn stride_for(
-    clip_speed: f32,
-    capsule_speed: f32,
-    rate: f32,
-) -> Result<f32, WarpError> {
+pub(crate) fn stride_for(clip_speed: f32, capsule_speed: f32, rate: f32) -> Result<f32, WarpError> {
     check_speed(clip_speed, "clip")?;
     check_speed(capsule_speed, "capsule")?;
     if !rate.is_finite() || rate <= 0.0 {
@@ -675,12 +671,8 @@ mod tester_atomic {
         warp.orient_toward([1.0, 0.0])
             .expect("strafe step builds yaw");
         assert!(warp.warp_yaw() > 0.0, "yaw built: {}", warp.warp_yaw());
-        let (facing, yaw, rate, stride) = (
-            warp.facing(),
-            warp.warp_yaw(),
-            warp.rate(),
-            warp.stride(),
-        );
+        let (facing, yaw, rate, stride) =
+            (warp.facing(), warp.warp_yaw(), warp.rate(), warp.stride());
         assert_eq!(
             warp.sync_facing([0.0, 0.0]),
             Err(WarpError::BadWishDir),
@@ -737,7 +729,11 @@ mod tester_atomic {
             Err(WarpError::SpeedTooHigh(99.0)),
             "over-limit target refuses"
         );
-        assert_eq!(warp.remaining_ticks(), left, "failed begin keeps ticks left");
+        assert_eq!(
+            warp.remaining_ticks(),
+            left,
+            "failed begin keeps ticks left"
+        );
         assert_eq!(warp.window_ticks(), dur, "failed begin keeps window");
         assert_eq!(warp.rate(), rate, "failed begin keeps rate");
         assert_eq!(warp.stride(), stride, "failed begin keeps stride");

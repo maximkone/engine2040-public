@@ -37,7 +37,7 @@ use crate::delta::{decode_delta, BodySnap, Delta, FullSnap, InterpResult, Interp
 use crate::session::NetError;
 use crate::snapshot::{classify_query, tangent_at, ConfirmedHistory, TimelineSampler};
 pub use crate::snapshot::{
-    hermite_scalar, quat_path_for, QueryKind, QuatPath, RenderQuat, MAX_EXTRAPOLATE_TICKS,
+    hermite_scalar, quat_path_for, QuatPath, QueryKind, RenderQuat, MAX_EXTRAPOLATE_TICKS,
     QUAT_NLERP_MAX_DEG,
 };
 

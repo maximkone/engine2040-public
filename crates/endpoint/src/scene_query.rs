@@ -544,15 +544,15 @@ fn cover_name(c: Cover) -> &'static str {
 /// Integer tangent table: `round(tan(d deg) * 1e6)` for `d` in 0..90. Cone and
 /// bearing tests compare integers only, so the answer never touches libm.
 const TAN_E6: [i64; 90] = [
-    0, 17455, 34921, 52408, 69927, 87489, 105104, 122785, 140541, 158384, 176327, 194380,
-    212557, 230868, 249328, 267949, 286745, 305731, 324920, 344328, 363970, 383864, 404026,
-    424475, 445229, 466308, 487733, 509525, 531709, 554309, 577350, 600861, 624869, 649408,
-    674509, 700208, 726543, 753554, 781286, 809784, 839100, 869287, 900404, 932515, 965689,
-    1000000, 1035530, 1072369, 1110613, 1150368, 1191754, 1234897, 1279942, 1327045, 1376382,
-    1428148, 1482561, 1539865, 1600335, 1664279, 1732051, 1804048, 1880726, 1962611, 2050304,
-    2144507, 2246037, 2355852, 2475087, 2605089, 2747477, 2904211, 3077684, 3270853, 3487414,
-    3732051, 4010781, 4331476, 4704630, 5144554, 5671282, 6313752, 7115370, 8144346, 9514364,
-    11430052, 14300666, 19081137, 28636253, 57289962,
+    0, 17455, 34921, 52408, 69927, 87489, 105104, 122785, 140541, 158384, 176327, 194380, 212557,
+    230868, 249328, 267949, 286745, 305731, 324920, 344328, 363970, 383864, 404026, 424475, 445229,
+    466308, 487733, 509525, 531709, 554309, 577350, 600861, 624869, 649408, 674509, 700208, 726543,
+    753554, 781286, 809784, 839100, 869287, 900404, 932515, 965689, 1000000, 1035530, 1072369,
+    1110613, 1150368, 1191754, 1234897, 1279942, 1327045, 1376382, 1428148, 1482561, 1539865,
+    1600335, 1664279, 1732051, 1804048, 1880726, 1962611, 2050304, 2144507, 2246037, 2355852,
+    2475087, 2605089, 2747477, 2904211, 3077684, 3270853, 3487414, 3732051, 4010781, 4331476,
+    4704630, 5144554, 5671282, 6313752, 7115370, 8144346, 9514364, 11430052, 14300666, 19081137,
+    28636253, 57289962,
 ];
 /// Scale of `TAN_E6`: one unit of tangent is 1e6.
 const TAN_SCALE: i64 = 1_000_000;
@@ -688,17 +688,15 @@ type ConeObserver = ((i32, i32), f32, Option<u32>);
 /// Observer for a cone: its plan point in cm, its facing yaw, and the anchor
 /// id to leave out of the rows. An anchor faces its own yaw; an eye point
 /// faces `yaw` (default 0). Exactly one of `anchor` and `eye_m`.
-fn cone_observer(
-    actors: &[Actor],
-    args: &QueryArgs,
-) -> Result<ConeObserver, QueryError> {
+fn cone_observer(actors: &[Actor], args: &QueryArgs) -> Result<ConeObserver, QueryError> {
     match (args.anchor, args.eye_m) {
         (Some(id), None) => {
             let refuse = |code: &'static str, message: String| {
                 QueryError::new(code, message, cone_retry(CONE_ANCHOR_ARG))
             };
-            let anchor = actor_by_id(actors, id)
-                .ok_or_else(|| refuse("unknown_actor", format!("anchor {id} names no scene actor")))?;
+            let anchor = actor_by_id(actors, id).ok_or_else(|| {
+                refuse("unknown_actor", format!("anchor {id} names no scene actor"))
+            })?;
             let (cx, _, cz) = center_cm(anchor).ok_or_else(|| {
                 refuse("unknown_actor", format!("anchor {id} has no finite center"))
             })?;
@@ -728,9 +726,8 @@ fn cone_observer(
 /// it. Integer math only; an actor on the observer reads ahead at 0 cm.
 pub fn cone_rows(actors: &[Actor], args: &QueryArgs) -> Result<Vec<ConeRow>, QueryError> {
     let half = check_cone_half(args.half_angle_deg)?;
-    let radius = check_radius(args.radius_cm.unwrap_or(500)).map_err(|e| {
-        QueryError::new(e.code, e.message, cone_retry(CONE_ANCHOR_ARG))
-    })?;
+    let radius = check_radius(args.radius_cm.unwrap_or(500))
+        .map_err(|e| QueryError::new(e.code, e.message, cone_retry(CONE_ANCHOR_ARG)))?;
     let (origin, yaw, observer) = cone_observer(actors, args)?;
     let (fx, fz) = octant(yaw);
     let (fx, fz) = (i64::from(fx), i64::from(fz));

@@ -13,7 +13,10 @@
 
 /// Shortest boom length in meters: a pivot inside an obstacle (or a
 /// degenerate call) parks the eye here instead of inside geometry.
-pub const MIN_ARM_M: f32 = 0.3;
+pub const FLOOR_LEN: f32 = 0.3;
+
+/// Back-compat alias for the pre-slice name; equal to [`FLOOR_LEN`].
+pub const MIN_ARM_M: f32 = FLOOR_LEN;
 
 /// Axis-aligned obstacle box in meters: `min` below `max` on every axis.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -55,7 +58,7 @@ impl Aabb {
 /// axis (Godot `SpringArm3D` shape). Returns the nearest hit distance, the
 /// floor when the pivot starts inside an inflated box or the call is
 /// degenerate, and `max_len` when nothing blocks the boom. Clamped to
-/// `[MIN_ARM_M, max_len]`. Pure, allocates nothing, presentation only.
+/// `[FLOOR_LEN, max_len]`. Pure, allocates nothing, presentation only.
 #[must_use]
 pub fn arm_length(
     pivot: [f32; 3],
@@ -65,22 +68,21 @@ pub fn arm_length(
     boxes: &[Aabb],
 ) -> f32 {
     if !pivot[0].is_finite() || !pivot[1].is_finite() || !pivot[2].is_finite() {
-        return MIN_ARM_M;
+        return FLOOR_LEN;
     }
     if !dir[0].is_finite() || !dir[1].is_finite() || !dir[2].is_finite() {
-        return MIN_ARM_M;
+        return FLOOR_LEN;
     }
     if !max_len.is_finite() || max_len <= 0.0 {
-        return MIN_ARM_M;
+        return FLOOR_LEN;
     }
-    let radius_m = if radius.is_finite() && radius > 0.0 {
-        radius
-    } else {
-        0.0
-    };
+    if !radius.is_finite() || radius < 0.0 {
+        return FLOOR_LEN;
+    }
+    let radius_m = if radius > 0.0 { radius } else { 0.0 };
     let len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
     if len_sq == 0.0 {
-        return MIN_ARM_M;
+        return FLOOR_LEN;
     }
     let inv_len = 1.0 / len_sq.sqrt();
     let dir_m = [dir[0] * inv_len, dir[1] * inv_len, dir[2] * inv_len];
@@ -136,74 +138,71 @@ pub fn arm_length(
             continue;
         }
         if low_t <= 0.0 {
-            return MIN_ARM_M;
+            return FLOOR_LEN;
         }
         if low_t < best {
             best = low_t;
         }
     }
-    best.max(MIN_ARM_M).min(max_len)
+    best.max(FLOOR_LEN).min(max_len)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{arm_length, Aabb, MIN_ARM_M};
+    use super::{arm_length, Aabb, FLOOR_LEN};
 
     fn pillar_at_face(face_m: f32) -> Aabb {
         Aabb::new([face_m, -5.0, -5.0], [face_m + 4.0, 5.0, 5.0])
     }
 
     #[test]
-    fn camera_arm_blocks_at_inflated_face() {
+    fn arm_camera_face_returns_hit_minus_radius() {
         let boxes = [pillar_at_face(3.0)];
-        let got = arm_length([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 6.0, 0.3, &boxes);
+        let got = arm_length([0.0, 1.5, 0.0], [1.0, 0.0, 0.0], 5.0, 0.3, &boxes);
         assert!((got - 2.7).abs() < 1e-4, "blocked at 2.7 m, got {got}");
     }
 
     #[test]
-    fn camera_arm_open_space_returns_max() {
+    fn arm_camera_no_obstacle_returns_max() {
         let boxes: [Aabb; 0] = [];
         assert_eq!(
-            arm_length([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], 5.0, 0.3, &boxes),
+            arm_length([0.0, 1.5, 0.0], [1.0, 0.0, 0.0], 5.0, 0.3, &boxes),
             5.0
         );
     }
 
     #[test]
-    fn camera_arm_pivot_inside_returns_floor() {
-        let boxes = [Aabb::new([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])];
+    fn arm_camera_inside_returns_floor() {
+        let boxes = [Aabb::new([-1.0, 0.0, -1.0], [1.0, 3.0, 1.0])];
         assert_eq!(
-            arm_length([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 6.0, 0.3, &boxes),
-            MIN_ARM_M
+            arm_length([0.0, 1.5, 0.0], [1.0, 0.0, 0.0], 5.0, 0.3, &boxes),
+            FLOOR_LEN
         );
     }
 
     #[test]
-    fn camera_arm_degenerate_direction_returns_floor() {
+    fn arm_camera_stable_x2() {
+        let boxes = [pillar_at_face(3.0)];
+        let first = arm_length([0.0, 1.5, 0.0], [1.0, 0.0, 0.0], 5.0, 0.3, &boxes);
+        let second = arm_length([0.0, 1.5, 0.0], [1.0, 0.0, 0.0], 5.0, 0.3, &boxes);
+        assert_eq!(first.to_bits(), second.to_bits());
+    }
+
+    #[test]
+    fn arm_camera_degenerate_direction_returns_floor() {
         let boxes: [Aabb; 0] = [];
         assert_eq!(
-            arm_length([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 6.0, 0.3, &boxes),
-            MIN_ARM_M
+            arm_length([0.0, 1.5, 0.0], [0.0, 0.0, 0.0], 5.0, 0.3, &boxes),
+            FLOOR_LEN
         );
     }
 
     #[test]
-    fn camera_arm_hit_beyond_max_returns_max() {
+    fn arm_camera_hit_beyond_max_returns_max() {
         let boxes = [pillar_at_face(30.0)];
         assert_eq!(
-            arm_length([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 6.0, 0.3, &boxes),
-            6.0
+            arm_length([0.0, 1.5, 0.0], [1.0, 0.0, 0.0], 5.0, 0.3, &boxes),
+            5.0
         );
-    }
-
-    #[test]
-    fn camera_arm_same_inputs_give_same_length_twice() {
-        let boxes = [
-            pillar_at_face(3.0),
-            Aabb::new([-9.0, -9.0, 4.0], [-5.0, 9.0, 9.0]),
-        ];
-        let first = arm_length([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 6.0, 0.3, &boxes);
-        let second = arm_length([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 6.0, 0.3, &boxes);
-        assert_eq!(first, second);
     }
 }

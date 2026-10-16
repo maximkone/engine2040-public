@@ -14,10 +14,10 @@
 //! do not load, and refuses an empty or unlicensed dataset list first, so
 //! every emitted `.e2nn` names the datasets it trained on.
 
+use crate::data::Sample;
 use crate::data::{
     check_manifests_for_export, DatasetManifest, ProvenanceError, INPUT_QUANT_SCALE,
 };
-use crate::data::Sample;
 use crate::mlp::Mlp;
 use crate::student::Student;
 use engine_nn::{NnErr, ACT_NONE, ACT_RELU, MAGIC, MAX_DIM, TAG_DENSE, VERSION};
@@ -136,7 +136,11 @@ fn emit_dense_net(in_dim: usize, layers: &[FoldedDense]) -> Result<E2nnBytes, Ex
     for layer in layers {
         debug_assert!(layer.out_dim > 0 && layer.out_dim <= MAX_DIM);
         out.push(TAG_DENSE);
-        out.extend_from_slice(&u16::try_from(layer.out_dim).unwrap_or(u16::MAX).to_le_bytes());
+        out.extend_from_slice(
+            &u16::try_from(layer.out_dim)
+                .unwrap_or(u16::MAX)
+                .to_le_bytes(),
+        );
         out.extend_from_slice(&layer.mult.to_le_bytes());
         out.push(layer.shift);
         out.push(layer.act);
@@ -213,8 +217,16 @@ pub fn export_mlp(
     }
     let (peak_h, peak_o) = calibrate(mlp, calib);
     // An all-dead calibration keeps a unit scale instead of dividing by zero.
-    let h_scale = if peak_h > 0.0 { f64::from(peak_h) / 127.0 } else { 1.0 };
-    let o_scale = if peak_o > 0.0 { f64::from(peak_o) / 127.0 } else { 1.0 };
+    let h_scale = if peak_h > 0.0 {
+        f64::from(peak_h) / 127.0
+    } else {
+        1.0
+    };
+    let o_scale = if peak_o > 0.0 {
+        f64::from(peak_o) / 127.0
+    } else {
+        1.0
+    };
     let in_scale = f64::from(1.0f32 / INPUT_QUANT_SCALE);
     let hidden = fold_dense(&mlp.w1, &mlp.b1, in_scale, h_scale, ACT_RELU)?;
     let output = fold_dense(&mlp.w2, &mlp.b2, h_scale, o_scale, ACT_NONE)?;
@@ -406,7 +418,8 @@ mod tests {
             mlp.forward(&row.quantized_features(), &mut hidden, &mut logits)
                 .expect("fits");
             let want = crate::mlp::first_max_f32(&logits);
-            let got = crate::student::argmax(&engine_nn::infer(&model, &quantize_input(&row.features)));
+            let got =
+                crate::student::argmax(&engine_nn::infer(&model, &quantize_input(&row.features)));
             if got == Some(want) {
                 agree += 1;
             }
@@ -416,7 +429,11 @@ mod tests {
             }
         }
         // Integer rounding may flip only near-tie rows of the 225-row grid.
-        assert!(agree * 100 >= rows.len() * 95, "agree {agree}/{}", rows.len());
+        assert!(
+            agree * 100 >= rows.len() * 95,
+            "agree {agree}/{}",
+            rows.len()
+        );
         // Same student, same calibration: same bytes.
         assert_eq!(
             export_mlp(&mlp, &rows, &[DatasetManifest::fixture()]).expect("exports"),

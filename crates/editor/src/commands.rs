@@ -60,6 +60,8 @@ pub struct Document {
     /// hierarchy may carry entries, remove drops them, undo restores them,
     /// and the save codec writes them in key order so bytes are stable.
     pub components: ComponentTable,
+    /// Node graph for material and VFX authoring; saved in the v4 section.
+    pub graph: crate::graph::Graph,
 }
 
 /// Components per node (id text) and kind, in key order.
@@ -509,6 +511,43 @@ pub struct Journal {
     /// so a reopen starts sealed. A plain apply, a group edit, undo, redo or
     /// an explicit [`seal_coalescing`] closes it.
     coalesce: Option<CoalesceCursor>,
+    /// Pinned merge lanes that never fold (`force_keep_in_merge_ends`).
+    merge_force_keep: Vec<u64>,
+}
+
+/// Group merge discipline (`UndoRedo` `MergeMode`; group-frame merge only).
+/// PORT(godotengine/godot@4d10419cacd6d3009976e8f9fd3abd970fd58018:core/object/undo_redo.h `MergeMode`) -> idea only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MergeMode {
+    /// Never merge: `end_group` leaves steps individual.
+    Disable,
+    /// Merge consecutive value writes on one node; else leave individual.
+    Ends,
+    /// Merge every member (existing gizmo-drag fold).
+    #[default]
+    All,
+}
+
+/// Explicit do/undo op pair for one tick (`add_do_property` shape).
+/// PORT(godotengine/godot@4d10419cacd6d3009976e8f9fd3abd970fd58018:core/object/undo_redo.h `add_do_property`/`add_undo_property`) -> idea only.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DoUndoPair {
+    /// Forward op staged this tick.
+    pub do_op: Op,
+    /// Inverse restoring the pre-tick value.
+    pub undo_op: Op,
+}
+
+/// Stage one `SetLocal` tick as an explicit do/undo pair without mutating.
+pub fn do_undo_pair(doc: &Document, op: Op) -> Option<DoUndoPair> {
+    if let Op::SetLocal { id, local } = op {
+        let old = doc.hierarchy.local(id)?;
+        return Some(DoUndoPair {
+            do_op: Op::SetLocal { id, local },
+            undo_op: Op::SetLocal { id, local: old },
+        });
+    }
+    None
 }
 
 /// One open [`begin_group`] frame: the name, flag and key the merged entry
@@ -523,6 +562,8 @@ struct GroupFrame {
     significant: bool,
     /// Retry identity the merged entry answers.
     key: u64,
+    /// Merge discipline for this frame (nested groups keep innermost tagging).
+    merge_mode: MergeMode,
 }
 
 impl Journal {
@@ -563,6 +604,7 @@ impl Journal {
         self.groups.clear();
         self.next_group = next;
         self.coalesce = None;
+        self.merge_force_keep.clear();
     }
 }
 
@@ -643,6 +685,16 @@ fn bound_name(name: &str) -> String {
 /// into one undo step or [`cancel_group`] releases them. Returns the group
 /// id (never [`NO_GROUP`]).
 pub fn begin_group(journal: &mut Journal, meta: &CommandMeta, idempotency_key: u64) -> u64 {
+    begin_group_with_mode(journal, meta, idempotency_key, MergeMode::All)
+}
+
+/// Open a group with an explicit merge discipline; nested groups tag innermost.
+pub fn begin_group_with_mode(
+    journal: &mut Journal,
+    meta: &CommandMeta,
+    idempotency_key: u64,
+    mode: MergeMode,
+) -> u64 {
     // A grouped gesture supersedes any open slider: seal it first.
     seal_coalescing(journal);
     let id = journal.next_group.max(1);
@@ -652,8 +704,29 @@ pub fn begin_group(journal: &mut Journal, meta: &CommandMeta, idempotency_key: u
         name: meta.name.clone(),
         significant: meta.significant,
         key: idempotency_key,
+        merge_mode: mode,
     });
     id
+}
+
+/// True when every group member is one value write on one node (Ends fold).
+fn group_members_mergeable(members: &[JournalEntry]) -> bool {
+    if members.is_empty() {
+        return false;
+    }
+    let first = match members[0].forward.first() {
+        Some(op) if members[0].forward.len() == 1 => *op,
+        _ => return false,
+    };
+    members.iter().all(|member| {
+        member.forward.len() == 1
+            && member.forward[0].id() == first.id()
+            && std::mem::discriminant(&member.forward[0]) == std::mem::discriminant(&first)
+            && matches!(
+                member.forward[0],
+                Op::SetLocal { .. } | Op::SetMaterial { .. }
+            )
+    })
 }
 
 /// Commit the innermost open group: its entries merge into one entry named
@@ -679,6 +752,12 @@ pub fn end_group(journal: &mut Journal) -> Option<Applied> {
     }
     let members: Vec<JournalEntry> = journal.past.drain(start..).collect();
     if members.is_empty() {
+        return None;
+    }
+    if frame.merge_mode == MergeMode::Disable
+        || (frame.merge_mode == MergeMode::Ends && !group_members_mergeable(&members))
+    {
+        journal.past.extend(members);
         return None;
     }
     let mut forward = Vec::new();
@@ -3277,5 +3356,31 @@ mod tests {
         assert_eq!(doc.hierarchy, start);
         redo(&mut doc, &mut journal).expect("sweep redoes in one step");
         assert!((doc.hierarchy.local(id).expect("pose").position[0] - 1.0).abs() <= 1e-3);
+    }
+
+    #[test]
+    fn grouped_gizmo_drag_merge_ends_annuls_and_keeps_pinned() {
+        use crate::gizmo::drag_batch;
+        let (mut doc, mut journal) = (Document::new(), Journal::new());
+        let id = seed_single_node(&mut doc, &mut journal);
+        let lane = merge_key(id, "pose.px");
+        let meta = CommandMeta::significant("edit");
+        let first = drag_batch(id, pose_at(1.0), doc.revision, 7010);
+        apply_coalesced(&mut doc, &mut journal, &first, &meta, lane).unwrap();
+        let second = slider_tick(id, 2.0, doc.revision, 7011);
+        apply_coalesced(&mut doc, &mut journal, &second, &meta, lane).unwrap();
+        assert_eq!(journal.past.last().expect("fold").forward, second.ops);
+        seal_coalescing(&mut journal);
+        let cur = doc.hierarchy.local(id).expect("live");
+        let same = Batch::new(vec![Op::SetLocal { id, local: cur }], doc.revision, 7012);
+        let (rev, base) = (doc.revision, journal.past_len());
+        apply_coalesced(&mut doc, &mut journal, &same, &meta, lane).unwrap();
+        assert_eq!((journal.past_len(), doc.revision), (base, rev));
+        journal.merge_force_keep.push(lane);
+        let third = slider_tick(id, 3.0, doc.revision, 7013);
+        apply_coalesced(&mut doc, &mut journal, &third, &meta, lane).unwrap();
+        let fourth = slider_tick(id, 4.0, doc.revision, 7014);
+        apply_coalesced(&mut doc, &mut journal, &fourth, &meta, lane).unwrap();
+        assert_eq!(journal.past_len(), base + 2);
     }
 }

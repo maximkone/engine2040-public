@@ -24,6 +24,7 @@ use std::fmt;
 use std::time::Instant;
 
 use crate::gtao::LookFrame;
+use crate::rt_shadows::idx_f32;
 
 /// Default gate: the dynamic path is never on unless the caller opts in.
 pub const GI_DYN_ENABLED_DEFAULT: bool = false;
@@ -73,14 +74,6 @@ impl std::error::Error for GiDynError {}
 /// scalars are clamped to `[0, n-1]` before flooring so they fit; texel
 /// counts stay far below 2^32 so count-to-`f64` is exact. Fallbacks saturate
 /// at the max (never wrap, never panic).
-/// Grid index to `f32` scalar (exact for table sizes).
-fn idx_f32(i: usize) -> f32 {
-    match u16::try_from(i) {
-        Ok(v) => f32::from(v),
-        Err(_) => f32::from(u16::MAX),
-    }
-}
-
 /// Floor a clamped grid scalar to a node index: the axis holds at most 32
 /// nodes, so the bisection walk is exact and cheap (no float-to-int cast).
 /// Returns the largest `k` in `[0, n-1]` with `idx_f32(k) <= v`.

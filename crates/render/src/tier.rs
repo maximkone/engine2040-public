@@ -22,6 +22,7 @@ pub enum Tier {
     /// Any adapter, including software rasterizers without ray queries.
     Base,
     /// Ray-query shadows, ReSTIR DI/GI, reflections plus the denoiser.
+    /// Rt gate: Base keeps clusters, Rt takes reservoirs; reference only.
     Rt,
     /// Rt at higher internal resolution with more bounces (photo converges).
     Ultra,

@@ -31,6 +31,90 @@ pub const MAX_CACHED_MESHES: usize = 512;
 /// Most GPU textures resident; insertion-order eviction above this.
 pub const MAX_CACHED_TEXTURES: usize = 512;
 
+// ---------------------------------------------------------------------------
+// Steady-frame present throttle: skip or half-rate the swapchain acquire.
+//
+// Owner: render lane; consumer is the windowed arena loop, which consults
+// the pure decision before the surface acquire and keeps presenting every
+// frame until it opts into a slower cadence. Units: frames for the counter,
+// frames for the cadence. Determinism: integer math only, same inputs give
+// the same answer on any host. Errors: none, a zero cadence normalizes to
+// every frame. Budget: no allocation, no GPU work, a few integer ops.
+// ---------------------------------------------------------------------------
+
+/// Largest steady-frame cadence: present at most every eighth frame, so a
+/// slower cadence never leaves a stale picture on screen for long.
+pub const MAX_PRESENT_EVERY: u32 = 8;
+
+/// Normalize a steady-frame cadence: zero becomes one (present every frame,
+/// the default-off shape that changes no pixels), above the cap clamps to
+/// the cap. Pure integer math, no allocation.
+pub fn normalize_present_every(every: u32) -> u32 {
+    every.max(1).min(MAX_PRESENT_EVERY)
+}
+
+/// True when steady frame `frame` presents under cadence `every`: every
+/// frame when `every` normalizes to one (default-off), even frames when two
+/// (half-rate), every Nth otherwise. Frame zero always presents so the first
+/// paint never skips. Pure, allocates nothing.
+pub fn steady_should_present(frame: u64, every: u32) -> bool {
+    let every = u64::from(normalize_present_every(every));
+    frame % every == 0
+}
+
+/// Windowed presenter check over the pure decision above, so the arena loop
+/// has one call to consult before the surface acquire. Default-off always
+/// presents; a slower cadence skips the acquire wait on the frames it drops.
+/// Pure over the presented-frame counter plus `every`, no GPU work.
+#[cfg(feature = "window")]
+impl gpu_present::Presenter {
+    /// Whether the next steady frame presents under cadence `every`, from
+    /// the presenter's own presented-frame counter. Default-off (`every`
+    /// one) always presents, so the live picture is unchanged until the
+    /// loop opts into a slower cadence. Pure, no GPU work.
+    pub fn throttle_should_present(&self, every: u32) -> bool {
+        steady_should_present(self.frames_presented, every)
+    }
+}
+
+#[cfg(test)]
+mod present_throttle_tests {
+    use super::*;
+
+    #[test]
+    fn off_always_presents_and_half_rate_alternates() {
+        for frame in 0..8u64 {
+            assert!(
+                steady_should_present(frame, 1),
+                "off presents frame {frame}"
+            );
+        }
+        assert!(steady_should_present(0, 2));
+        assert!(!steady_should_present(1, 2), "half-rate skips odd frames");
+        assert!(steady_should_present(2, 2));
+        assert!(!steady_should_present(3, 2));
+        assert!(steady_should_present(0, 3));
+        assert!(!steady_should_present(1, 3));
+        assert!(steady_should_present(3, 3));
+    }
+
+    #[test]
+    fn zero_normalizes_to_off_and_large_clamps_to_cap() {
+        assert_eq!(normalize_present_every(0), 1, "zero means every frame");
+        assert_eq!(normalize_present_every(1), 1);
+        assert_eq!(normalize_present_every(2), 2);
+        assert_eq!(normalize_present_every(8), 8);
+        assert_eq!(normalize_present_every(9), 8, "above cap clamps");
+        assert_eq!(normalize_present_every(u32::MAX), 8);
+        assert!(steady_should_present(5, 0), "zero cadence never skips");
+        assert!(
+            steady_should_present(16, 9),
+            "clamped cadence presents on cap multiples"
+        );
+        assert!(!steady_should_present(17, 9));
+    }
+}
+
 pub mod aa;
 pub mod cache;
 #[cfg(feature = "window")]
@@ -384,6 +468,66 @@ pub struct DrawItem {
     /// draws render byte-identical pixels to before. Unknown keys fail the
     /// frame with `InvalidDraw`, mirroring meshes.
     pub base_color: Option<TextureKey>,
+    /// Optional resident tangent-space normal map (linear bytes): the
+    /// forward pass perturbs the shading normal through the tangent frame.
+    /// `None` shades with the attribute normal exactly as before. Unknown
+    /// keys fail the frame with `InvalidDraw`, mirroring meshes.
+    pub normal_map: Option<TextureKey>,
+}
+
+// ---------------------------------------------------------------------------
+// RL46a material interface: one shape RL46, RL48-51 code to.
+// ---------------------------------------------------------------------------
+//
+// - Draw side (here): each draw names one material plus four texture
+//   slots. Slot order is base color, ORM, normal, emissive. Only slot 0
+//   is bound today; the rest are `None`.
+// - Shader side: `shaders/forward.wgsl` exposes one lit entry,
+//   `direct_light`. RL46 routes it through the compiled material.
+// - Registry side: `crates/material/src/compile.rs` owns the six-lobe
+//   registry (`lobe::{COAT, SHEEN, ANISOTROPY, TRANSMISSION, SUBSURFACE,
+//   EMISSION}`) plus the four slot bits. This file never duplicates it.
+//
+// Golden stays fixed: the new accessors read the existing fields only.
+#[cfg(feature = "v1")]
+impl DrawItem {
+    /// Texture slots per draw: base color, ORM, normal, emissive.
+    pub const MATERIAL_TEXTURE_SLOTS: usize = 4;
+
+    /// Stable id of this draw's material factors plus slot-0 key.
+    /// Same input gives the same id. Used for pipeline binning.
+    pub fn material_id(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut mix = |w: u64| {
+            h ^= w;
+            h = h.wrapping_mul(0x100000001b3);
+        };
+        for c in self.material.base_color {
+            mix(c.to_bits() as u64);
+        }
+        mix(self.material.metallic.to_bits() as u64);
+        mix(self.material.roughness.to_bits() as u64);
+        mix(self.material.exposure.to_bits() as u64);
+        match &self.base_color {
+            Some(k) => {
+                mix(k.id);
+                for chunk in k.digest.chunks(8) {
+                    let mut w = [0u8; 8];
+                    w[..chunk.len()].copy_from_slice(chunk);
+                    mix(u64::from_le_bytes(w));
+                }
+            }
+            None => mix(0x9e3779b97f4a7c15),
+        }
+        h
+    }
+
+    /// The four texture slots in fixed order. Slot 0 is `base_color`,
+    /// slot 2 is `normal_map`; slots 1 and 3 stay empty until RL46 binds
+    /// ORM and emissive.
+    pub fn texture_slots(&self) -> [Option<TextureKey>; 4] {
+        [self.base_color, None, self.normal_map, None]
+    }
 }
 
 /// One frame of draws: shared camera plus light, per-draw mesh plus material.
@@ -421,6 +565,174 @@ impl DrawList {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RL60 slice 1: pure CPU binning helpers, no GPU wiring yet.
+//
+// Owner: render lane; consumer is the slice-2 submit loop (not wired here).
+// Units: `BinKey` packs four id parts into one u64 sort key; `InstanceRecord`
+// carries one 3x4 row-major model plus material id plus tint. Determinism:
+// `group_into_bins` keeps bins in first-seen key order with index lists in
+// input order; the same multiset in a different input order gives the same
+// bin set in the same key order after the caller sorts by key. Errors: none,
+// inputs are plain ids and rows. Budget: one entry per bin plus one index
+// per item; slice 2 reuses the buffers at submit.
+// ---------------------------------------------------------------------------
+
+/// Packed draw-bin key: pass, pipeline, texture slot, mesh id in one u64.
+///
+/// Bit layout (big end first): pass 8 bits (63..56), pipeline 16 bits
+/// (55..40), texture slot 8 bits (39..32), mesh id 32 bits (31..0). Masks
+/// keep wide inputs inside their lanes. No wgpu use.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct BinKey(pub u64);
+
+impl BinKey {
+    /// Build one bin key from plain u64 parts. Each part is masked to its
+    /// lane, so oversized inputs cannot spill into a neighbour lane.
+    pub fn build(pass: u64, pipeline: u64, texture_slot: u64, mesh_id: u64) -> Self {
+        let packed = ((pass & 0xff) << 56)
+            | ((pipeline & 0xffff) << 40)
+            | ((texture_slot & 0xff) << 32)
+            | (mesh_id & 0xffff_ffff);
+        Self(packed)
+    }
+
+    /// Pass lane (8 bits).
+    pub fn pass(self) -> u64 {
+        (self.0 >> 56) & 0xff
+    }
+
+    /// Pipeline lane (16 bits).
+    pub fn pipeline(self) -> u64 {
+        (self.0 >> 40) & 0xffff
+    }
+
+    /// Texture-slot lane (8 bits).
+    pub fn texture_slot(self) -> u64 {
+        (self.0 >> 32) & 0xff
+    }
+
+    /// Mesh-id lane (32 bits).
+    pub fn mesh_id(self) -> u64 {
+        self.0 & 0xffff_ffff
+    }
+}
+
+/// One CPU instance: 48 model bytes as a 3x4 row-major matrix plus the
+/// material id plus an RGBA tint. Plain data only, no GPU handle.
+#[derive(Clone, PartialEq, Debug)]
+pub struct InstanceRecord {
+    /// 3x4 row-major model matrix (48 bytes as 12 f32 lanes).
+    pub model: [f32; 12],
+    /// Material id for the tint/lobe lookup slice 2 resolves.
+    pub material_id: u32,
+    /// RGBA tint multiplier, linear.
+    pub tint: [f32; 4],
+}
+
+/// Group `(key, record)` pairs into one entry per bin.
+///
+/// Bins keep first-seen key order and each index list keeps input order.
+/// The same multiset in a different input order holds the same bin set;
+/// sort the returned entries by key for a permutation-stable order.
+pub fn group_into_bins(items: &[(BinKey, InstanceRecord)]) -> Vec<(BinKey, Vec<usize>)> {
+    let mut bins: Vec<(BinKey, Vec<usize>)> = Vec::new();
+    for (index, (key, _)) in items.iter().enumerate() {
+        let mut found = false;
+        for (bin_key, indices) in bins.iter_mut() {
+            if *bin_key == *key {
+                indices.push(index);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            bins.push((*key, vec![index]));
+        }
+    }
+    bins
+}
+
+#[cfg(test)]
+mod bins_tests {
+    use super::*;
+
+    fn record(material_id: u32) -> InstanceRecord {
+        InstanceRecord {
+            model: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            material_id,
+            tint: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn bins_single_key_256_copies_give_one_bin_with_256_indices() {
+        let key = BinKey::build(0, 3, 0, 11);
+        let items: Vec<(BinKey, InstanceRecord)> = (0..256).map(|_| (key, record(5))).collect();
+        let bins = group_into_bins(&items);
+        assert_eq!(bins.len(), 1);
+        assert_eq!(bins[0].0, key);
+        assert_eq!(bins[0].1.len(), 256);
+        let expect: Vec<usize> = (0..256).collect();
+        assert_eq!(bins[0].1, expect);
+    }
+
+    #[test]
+    fn bins_mixed_keys_give_one_entry_per_key() {
+        let a = BinKey::build(0, 1, 0, 1);
+        let b = BinKey::build(0, 1, 0, 2);
+        let c = BinKey::build(1, 1, 0, 1);
+        let items = vec![
+            (a, record(1)),
+            (b, record(2)),
+            (a, record(1)),
+            (c, record(3)),
+            (b, record(2)),
+        ];
+        let bins = group_into_bins(&items);
+        assert_eq!(bins.len(), 3);
+        assert_eq!(bins[0].0, a);
+        assert_eq!(bins[0].1, vec![0, 2]);
+        assert_eq!(bins[1].0, b);
+        assert_eq!(bins[1].1, vec![1, 4]);
+        assert_eq!(bins[2].0, c);
+        assert_eq!(bins[2].1, vec![3]);
+    }
+
+    #[test]
+    fn bins_shuffled_input_gives_same_bin_set_after_sort_by_key() {
+        let a = BinKey::build(0, 1, 0, 1);
+        let b = BinKey::build(0, 1, 0, 2);
+        let c = BinKey::build(0, 2, 1, 3);
+        let fwd = vec![
+            (a, record(1)),
+            (b, record(2)),
+            (c, record(3)),
+            (a, record(1)),
+            (b, record(2)),
+        ];
+        let rev = vec![
+            (b, record(2)),
+            (a, record(1)),
+            (b, record(2)),
+            (c, record(3)),
+            (a, record(1)),
+        ];
+        let mut fwd_bins = group_into_bins(&fwd);
+        let mut rev_bins = group_into_bins(&rev);
+        fwd_bins.sort_by_key(|(key, _)| *key);
+        rev_bins.sort_by_key(|(key, _)| *key);
+        assert_eq!(fwd_bins.len(), 3);
+        assert_eq!(rev_bins.len(), 3);
+        for ((fk, fi), (rk, ri)) in fwd_bins.iter().zip(rev_bins.iter()) {
+            assert_eq!(fk, rk);
+            assert_eq!(fi.len(), ri.len());
+        }
+        let keys: Vec<BinKey> = fwd_bins.iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys, vec![a, b, c]);
+    }
+}
+
 #[cfg(feature = "window")]
 mod gpu_present;
 
@@ -435,3 +747,102 @@ mod tests_linear;
 
 #[cfg(test)]
 mod tests_unit;
+
+// Zero-area input suspends; valid sizes build targets.
+#[cfg(test)]
+mod present_smoke {
+    use super::*;
+    #[test]
+    fn zero_area_suspends_but_valid_sizes_build() {
+        assert_eq!(SizeClass::classify(0, 600), SizeClass::Suspend);
+        assert_eq!(SizeClass::classify(800, 600), SizeClass::Sizes);
+    }
+    #[test]
+    fn warm_walk_passes_and_hitch_fails_bar() {
+        assert!(WalkReport {
+            frames: 4,
+            creations: 0,
+            max_over_median: 1.0
+        }
+        .passes());
+        assert!(!WalkReport {
+            frames: 4,
+            creations: 4,
+            max_over_median: 2.0
+        }
+        .passes());
+    }
+}
+
+// RL46a interface: a draw names one material plus four texture slots,
+// the forward shader keeps one lit entry, validation stays clean.
+#[cfg(all(test, feature = "v1"))]
+mod material_interface_tests {
+    use super::*;
+
+    fn sample_item() -> DrawItem {
+        let scene = crate::v1::default_scene(160, 120).expect("default scene is valid");
+        DrawItem {
+            mesh: MeshKey::new(1, [0x11; 32]),
+            material: scene.material,
+            base_color: None,
+            normal_map: None,
+        }
+    }
+
+    #[test]
+    fn material_interface_carries_id_and_four_slots() {
+        let item = sample_item();
+        assert_eq!(DrawItem::MATERIAL_TEXTURE_SLOTS, 4);
+        let slots = item.texture_slots();
+        assert_eq!(slots.len(), 4);
+        assert_eq!(slots[0], None);
+        assert_eq!(slots[1], None);
+        assert_eq!(slots[2], None);
+        assert_eq!(slots[3], None);
+        // Same input gives the same id; a slot-0 bind changes it.
+        let again = sample_item();
+        assert_eq!(item.material_id(), again.material_id());
+        let mut textured = sample_item();
+        textured.base_color = Some(TextureKey::new(7, [0x77; 32]));
+        assert_eq!(textured.texture_slots()[0], textured.base_color);
+        assert_ne!(item.material_id(), textured.material_id());
+        // A draw that names sheen, coat or a normal slot has a place
+        // to put it: slots 1-3 are reserved in fixed order.
+        assert_eq!(DrawItem::MATERIAL_TEXTURE_SLOTS, slots.len());
+    }
+
+    #[test]
+    fn normal_slot_follows_draw_normal_key() {
+        // EG12 slice c: slot 2 carries the draw's normal key; ORM (1) and
+        // emissive (3) stay empty for the next slice.
+        let mut item = sample_item();
+        assert_eq!(item.texture_slots()[2], None);
+        let key = TextureKey::new(9, [0x99; 32]);
+        item.normal_map = Some(key);
+        let slots = item.texture_slots();
+        assert_eq!(slots[2], Some(key));
+        assert_eq!(slots[1], None);
+        assert_eq!(slots[3], None);
+        assert_eq!(slots[0], item.base_color);
+    }
+
+    #[test]
+    fn material_interface_forward_keeps_one_lit_entry() {
+        let src = include_str!("shaders/forward.wgsl");
+        let lit_entries = src.match_indices("fn direct_light").count();
+        assert_eq!(lit_entries, 1, "one lit entry point");
+    }
+
+    #[test]
+    fn material_interface_list_validates_clean() {
+        let scene = crate::v1::default_scene(160, 120).expect("default scene is valid");
+        DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![sample_item()],
+        }
+        .validate()
+        .expect("interface draw validates with 0 errors");
+    }
+}

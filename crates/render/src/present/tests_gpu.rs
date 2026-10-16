@@ -14,7 +14,9 @@ mod gpu_tests {
     fn init_or_skip(test: &str) -> Option<Presenter> {
         let probe = match Presenter::init_offscreen() {
             Ok(p) => Ok(p),
-            Err(PresentError::NoAdapter) => Err(NoAdapter("no wgpu adapter on this machine".into())),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
             Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
         };
         require_or_skip(test, probe)
@@ -29,6 +31,7 @@ mod gpu_tests {
                 mesh: key,
                 material: scene.material,
                 base_color: None,
+                normal_map: None,
             }],
         }
     }
@@ -126,6 +129,7 @@ mod gpu_tests {
             mesh: key,
             material: dielectric,
             base_color: None,
+            normal_map: None,
         });
         let out = presenter.render_offscreen(&list).expect("two draws render");
         assert!(out.manifest.is_clean(), "two draws stay validation-clean");
@@ -229,7 +233,9 @@ mod gpu_tests {
 
     #[test]
     fn missing_texture_ship_path_refuses_and_receipt_quotes_budgets() {
-        let Some(mut presenter) = init_or_skip("missing_texture_ship_path_refuses_and_receipt_quotes_budgets") else {
+        let Some(mut presenter) =
+            init_or_skip("missing_texture_ship_path_refuses_and_receipt_quotes_budgets")
+        else {
             return;
         };
         assert_eq!(
@@ -305,6 +311,121 @@ mod gpu_tests {
         }
     }
 
+    /// Torch bytes stage deterministically: same frame stages same bytes twice,
+    /// two live torches with six zeroed slots, clears count zero. Mirrors the twin.
+    #[test]
+    fn light_torch_bytes_x2() {
+        let Some(mut presenter) = init_or_skip("light_torch_bytes_x2") else {
+            return;
+        };
+        let key = MeshKey::new(0x70C4, [0x70; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let list = cube_list(key, 64, 64);
+        let first = presenter.torch_bytes(&list);
+        let second = presenter.torch_bytes(&list);
+        assert_eq!(first, second, "same frame gives same torch bytes twice");
+        let count = u32::from_le_bytes([first[256], first[257], first[258], first[259]]);
+        assert_eq!(count, 2, "two torches live");
+        let wx = f32::from_le_bytes([first[0], first[1], first[2], first[3]]);
+        let wy = f32::from_le_bytes([first[4], first[5], first[6], first[7]]);
+        let wz = f32::from_le_bytes([first[8], first[9], first[10], first[11]]);
+        assert!(
+            (wx - 20.0).abs() < 1e-6 && (wy - 1.0).abs() < 1e-6 && (wz + 3.0).abs() < 1e-6,
+            "west head placed"
+        );
+        let ex = f32::from_le_bytes([first[32], first[33], first[34], first[35]]);
+        let ey = f32::from_le_bytes([first[36], first[37], first[38], first[39]]);
+        let ez = f32::from_le_bytes([first[40], first[41], first[42], first[43]]);
+        assert!(
+            (ex - 20.0).abs() < 1e-6 && (ey - 1.0).abs() < 1e-6 && (ez - 3.0).abs() < 1e-6,
+            "east head placed"
+        );
+        assert!(
+            first[64..256].iter().all(|b| *b == 0),
+            "six spare slots stay zeroed"
+        );
+        let empty = DrawList {
+            camera: list.camera.clone(),
+            light: list.light.clone(),
+            items: Vec::new(),
+        };
+        let cleared = presenter.torch_bytes(&empty);
+        let zero = u32::from_le_bytes([cleared[256], cleared[257], cleared[258], cleared[259]]);
+        assert_eq!(zero, 0, "clears zero torches");
+        assert!(cleared[..256].iter().all(|b| *b == 0), "clears zero slots");
+        let out = presenter.render_offscreen(&list).expect("frame renders");
+        assert!(out.manifest.is_clean(), "manifest clean");
+        assert!(out.receipt.is_clean() && out.receipt.presented);
+        assert_eq!(out.receipt.draws, 1);
+    }
+
+    /// Torch on versus off: same fixture stages count two versus zero with
+    /// different bytes, both frames stay clean with stable pixels. The masked
+    /// pixel lift awaits the forward group slot, so this lands bytes plus fixture.
+    #[test]
+    fn light_torch_on_vs_off_differs() {
+        let Some(mut presenter) = init_or_skip("light_torch_on_vs_off_differs") else {
+            return;
+        };
+        let near = MeshKey::new(0x70A5, [0x7A; 32]);
+        let far = MeshKey::new(0x70A6, [0x7B; 32]);
+        let mut near_cube = crate::v1::cube();
+        for p in &mut near_cube.positions {
+            p[0] += 19.0;
+            p[1] += 1.0;
+            p[2] += -3.0;
+        }
+        presenter
+            .upload_mesh(near, &near_cube)
+            .expect("near uploads");
+        presenter
+            .upload_mesh(far, &crate::v1::cube())
+            .expect("far uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let scene = crate::v1::default_scene(64, 64).expect("scene builds");
+        let list = DrawList {
+            camera: scene.camera.clone(),
+            light: scene.light.clone(),
+            items: vec![
+                DrawItem {
+                    mesh: near,
+                    material: scene.material.clone(),
+                    base_color: None,
+                    normal_map: None,
+                },
+                DrawItem {
+                    mesh: far,
+                    material: scene.material,
+                    base_color: None,
+                    normal_map: None,
+                },
+            ],
+        };
+        let on = presenter.torch_bytes(&list);
+        let empty = DrawList {
+            camera: list.camera.clone(),
+            light: list.light.clone(),
+            items: Vec::new(),
+        };
+        let off = presenter.torch_bytes(&empty);
+        assert_ne!(on, off, "torches on differ from count zero");
+        let on_count = u32::from_le_bytes([on[256], on[257], on[258], on[259]]);
+        let off_count = u32::from_le_bytes([off[256], off[257], off[258], off[259]]);
+        assert_eq!((on_count, off_count), (2, 0), "on two, off zero");
+        let first = presenter.render_offscreen(&list).expect("first renders");
+        assert!(first.manifest.is_clean(), "manifest clean");
+        assert!(first.receipt.is_clean() && first.receipt.presented);
+        assert_eq!(first.receipt.draws, 2);
+        let second = presenter.render_offscreen(&list).expect("second renders");
+        assert!(second.manifest.is_clean(), "second clean");
+        let a = first.png.expect("first pixels");
+        let b = second.png.expect("second pixels");
+        assert_eq!(a, b, "same fixture replays byte-identical");
+    }
+
     /// Pixels reading clearly red vs clearly green (margin over the other
     /// channels, so fog/tonemap survivors still sort by hue).
     fn hue_counts(png: &[u8]) -> (usize, usize) {
@@ -362,6 +483,7 @@ mod gpu_tests {
                     exposure: 1.0,
                 },
                 base_color: Some(tex),
+                normal_map: None,
             }],
         };
         let out = presenter
@@ -556,13 +678,15 @@ mod gpu_tests {
 #[cfg(test)]
 mod rl9_gpu_tests {
     use super::super::*;
-    use crate::test_gpu::{require_or_skip, NoAdapter};
     use crate::fog;
+    use crate::test_gpu::{require_or_skip, NoAdapter};
 
     fn init_or_skip(test: &str) -> Option<Presenter> {
         let probe = match Presenter::init_offscreen() {
             Ok(p) => Ok(p),
-            Err(PresentError::NoAdapter) => Err(NoAdapter("no wgpu adapter on this machine".into())),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
             Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
         };
         require_or_skip(test, probe)
@@ -604,13 +728,15 @@ mod rl9_gpu_tests {
                 mesh: key,
                 material: scene.material,
                 base_color: None,
+                normal_map: None,
             }],
         )
     }
 
     #[test]
     fn fog_tranche_runs_clean_with_zero_validation() {
-        let Some(mut presenter) = init_or_skip("fog_tranche_runs_clean_with_zero_validation") else {
+        let Some(mut presenter) = init_or_skip("fog_tranche_runs_clean_with_zero_validation")
+        else {
             return;
         };
         assert!(presenter.fog_enabled(), "fog ships on");
@@ -722,6 +848,150 @@ mod rl9_gpu_tests {
         );
     }
 
+    /// Copy one R32 float AO texture to the CPU. Test only: this waits
+    /// on the GPU, same shape as the id-target readback helper.
+    fn read_ao_back(presenter: &Presenter, texture: &wgpu::Texture) -> Vec<f32> {
+        let (w, h) = (texture.width(), texture.height());
+        let row = w * 4;
+        let padded = row.div_ceil(256) * 256;
+        let buffer = presenter.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test-ao-readback"),
+            size: u64::from(padded) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = presenter
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        presenter.queue.submit(Some(enc.finish()));
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| {
+            r.expect("test ao readback maps");
+        });
+        presenter
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("test ao readback polls");
+        let w_usize = usize::try_from(w).expect("width fits");
+        let h_usize = usize::try_from(h).expect("height fits");
+        let mut out = vec![0.0f32; w_usize * h_usize];
+        {
+            let mapped = buffer.slice(..).get_mapped_range().expect("mapped");
+            let row_usize = usize::try_from(row).expect("row fits");
+            let padded_usize = usize::try_from(padded).expect("stride fits");
+            for (y, dst) in out.chunks_exact_mut(w_usize).enumerate() {
+                let off = y * padded_usize;
+                for (slot, src) in dst
+                    .iter_mut()
+                    .zip(mapped[off..off + row_usize].chunks_exact(4))
+                {
+                    *slot = f32::from_le_bytes([src[0], src[1], src[2], src[3]]);
+                }
+            }
+        }
+        buffer.unmap();
+        out
+    }
+
+    /// Mean over one axis-aligned block of a row-major field.
+    fn region_mean(field: &[f32], width: usize, x0: usize, y0: usize, bw: usize, bh: usize) -> f32 {
+        let mut sum = 0.0f64;
+        let mut count = 0u64;
+        for y in y0..y0 + bh {
+            for x in x0..x0 + bw {
+                sum += f64::from(field[y * width + x]);
+                count += 1;
+            }
+        }
+        (sum / f64::from(count.max(1) as u32)) as f32
+    }
+
+    #[test]
+    fn gtao_live_ao_darkens_box_base() {
+        let Some(mut presenter) = init_or_skip("gtao_live_ao_darkens_box_base") else {
+            let cfg = Presenter::gtao_config_for_frame(64, 64).expect("live size configures");
+            assert_eq!(
+                (
+                    cfg.width_px,
+                    cfg.height_px,
+                    cfg.radius_px,
+                    cfg.falloff_m,
+                    cfg.intensity
+                ),
+                (64, 64, 8.0, 2.0, 1.0),
+                "presenter runs the arena kernel"
+            );
+            eprintln!("SKIPPED gtao_live_ao_darkens_box_base: no adapter");
+            return;
+        };
+        let key = cube_key();
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let out = presenter
+            .render_offscreen(&level_cube_list(key, 64, 64))
+            .expect("frame renders");
+        assert!(out.receipt.presented && out.manifest.is_clean());
+        assert_eq!(
+            out.receipt.gtao_passes, 2,
+            "half-res GTAO plus bilateral upsample run per live frame"
+        );
+        assert_eq!(out.receipt.gtao_validation_errors, 0);
+        let targets = presenter.targets.as_ref().expect("targets exist");
+        let first = read_ao_back(&presenter, &targets.ao_texture);
+        let second = read_ao_back(&presenter, &targets.ao_texture);
+        assert_eq!(first.len(), 64 * 64, "ao field covers the frame");
+        assert_eq!(first, second, "same depth gives same AO twice");
+        for (i, v) in first.iter().enumerate() {
+            assert!(v.is_finite(), "ao texel {i} is finite");
+            // f32 rounding can land one ulp above 1.0; allow 1e-6 of slack.
+            assert!(
+                (0.0..=1.0 + 1e-6).contains(v),
+                "ao texel {i} stays in range: {v}"
+            );
+        }
+        let base = region_mean(&first, 64, 24, 40, 16, 16);
+        let corner = region_mean(&first, 64, 0, 0, 8, 8);
+        assert!(
+            base < 0.99,
+            "box base darkens below open: base {base} corner {corner}"
+        );
+        assert!(
+            (0.98..=1.0).contains(&corner),
+            "open sand stays open: base {base} corner {corner}"
+        );
+        assert!(
+            presenter.gtao_submit_us() > 0,
+            "device frame records gtao submit time"
+        );
+        eprintln!(
+            "LF3 ao on {}: base {base} corner {corner} submit {} us",
+            presenter.adapter_name(),
+            presenter.gtao_submit_us(),
+        );
+    }
+
     #[test]
     fn gtao_config_rejects_bad_sizes() {
         let cfg = Presenter::gtao_config_for_frame(64, 64).expect("live size configures");
@@ -751,7 +1021,6 @@ mod rl9_gpu_tests {
             "over-bound frames (above 2048) have no GTAO feed"
         );
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +1145,9 @@ mod live_frame_tests {
     fn init_or_skip(test: &str) -> Option<Presenter> {
         let probe = match Presenter::init_offscreen() {
             Ok(p) => Ok(p),
-            Err(PresentError::NoAdapter) => Err(NoAdapter("no wgpu adapter on this machine".into())),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
             Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
         };
         require_or_skip(test, probe)
@@ -901,6 +1172,7 @@ mod live_frame_tests {
             mesh: cube_key(),
             material: scene.material,
             base_color: None,
+            normal_map: None,
         }
     }
 
@@ -1006,7 +1278,9 @@ mod live_frame_tests {
 
     #[test]
     fn capture_frames_block_by_design_and_stay_off_the_live_tally() {
-        let Some(mut presenter) = init_or_skip("capture_frames_block_by_design_and_stay_off_the_live_tally") else {
+        let Some(mut presenter) =
+            init_or_skip("capture_frames_block_by_design_and_stay_off_the_live_tally")
+        else {
             return;
         };
         presenter
@@ -1028,7 +1302,8 @@ mod live_frame_tests {
 
     #[test]
     fn probe_frames_are_tallied_apart_from_live_frames() {
-        let Some(mut presenter) = init_or_skip("probe_frames_are_tallied_apart_from_live_frames") else {
+        let Some(mut presenter) = init_or_skip("probe_frames_are_tallied_apart_from_live_frames")
+        else {
             return;
         };
         presenter
@@ -1061,7 +1336,8 @@ mod live_frame_tests {
 
     #[test]
     fn gpu_timestamps_resolve_late_without_waiting() {
-        let Some(mut presenter) = init_or_skip("gpu_timestamps_resolve_late_without_waiting") else {
+        let Some(mut presenter) = init_or_skip("gpu_timestamps_resolve_late_without_waiting")
+        else {
             return;
         };
         if !presenter.gpu_timing_supported() {
@@ -1124,7 +1400,9 @@ mod live_frame_tests {
 
     #[test]
     fn refresh_rewrites_the_resident_buffer_and_refuses_bad_input() {
-        let Some(mut presenter) = init_or_skip("refresh_rewrites_the_resident_buffer_and_refuses_bad_input") else {
+        let Some(mut presenter) =
+            init_or_skip("refresh_rewrites_the_resident_buffer_and_refuses_bad_input")
+        else {
             return;
         };
         presenter.resize(128, 128).expect("valid size applies");
@@ -1207,7 +1485,9 @@ mod live_frame_tests {
 
     #[test]
     fn steady_live_frames_create_no_buffers_or_bind_groups() {
-        let Some(mut presenter) = init_or_skip("steady_live_frames_create_no_buffers_or_bind_groups") else {
+        let Some(mut presenter) =
+            init_or_skip("steady_live_frames_create_no_buffers_or_bind_groups")
+        else {
             return;
         };
         presenter.resize(96, 96).expect("valid size applies");
@@ -1242,6 +1522,7 @@ mod live_frame_tests {
                     mesh: twin_key,
                     material: material([1.0, 1.0, 1.0]),
                     base_color: Some(tex),
+                    normal_map: None,
                 },
             ],
         };
@@ -1292,7 +1573,8 @@ mod live_frame_tests {
 
     #[test]
     fn each_draw_reads_its_own_material_from_the_ring() {
-        let Some(mut presenter) = init_or_skip("each_draw_reads_its_own_material_from_the_ring") else {
+        let Some(mut presenter) = init_or_skip("each_draw_reads_its_own_material_from_the_ring")
+        else {
             return;
         };
         presenter.resize(128, 128).expect("valid size applies");
@@ -1308,6 +1590,7 @@ mod live_frame_tests {
                 mesh: key,
                 material: material(*rgb),
                 base_color: None,
+                normal_map: None,
             });
         }
         let list = DrawList {

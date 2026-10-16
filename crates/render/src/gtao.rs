@@ -17,6 +17,9 @@ use std::time::Instant;
 
 use crate::fog::normalize3;
 
+#[cfg(feature = "window")]
+use crate::decals::{compute_storage_entry, compute_uniform_entry};
+
 // ---------------------------------------------------------------------------
 // Bounds: every external size is validated before allocation.
 // ---------------------------------------------------------------------------
@@ -53,6 +56,76 @@ pub const GTAO_UPSAMPLE_PASS: &str = "gtao-upsample";
 pub const GTAO_HALF_RESOURCE: &str = "ao_half";
 /// Graph resource name for the full-res AO buffer the forward pass reads.
 pub const GTAO_FULL_RESOURCE: &str = "ao_full";
+
+/// Live half switch: on (default) routes the live upsample through half
+/// size, off opts out to full neutral. Owner render, consumer the live bind
+/// below. Units boolean flag. Determinism flag only, no wall clock, no
+/// allocation. Presentation only, never hashed.
+/// Caller: `gtao_live_full_for_forward` (same file) wires the live bind
+/// through here.
+static GTAO_LIVE_HALF_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Read the live half switch: true routes the live upsample through half
+/// size (default), false opts out to full. Units boolean out. Determinism
+/// flag only. Presentation only, never hashed.
+pub fn gtao_live_half_enabled() -> bool {
+    GTAO_LIVE_HALF_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set the live half switch: true halves the live upsample (default),
+/// false opts out to full. Units boolean in. Determinism flag only.
+/// Presentation only, never hashed.
+pub fn set_gtao_live_half_enabled(enabled: bool) {
+    GTAO_LIVE_HALF_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Live half size for a full frame: half (ceil) when the switch is on,
+/// full when it is off. Pure, no allocation. Zero area passes through for
+/// the suspend path. Presentation only, never hashed.
+#[must_use]
+pub fn gtao_live_half_size(width_px: u32, height_px: u32) -> [u32; 2] {
+    if !gtao_live_half_enabled() {
+        return [width_px, height_px];
+    }
+    if width_px == 0 || height_px == 0 {
+        return [width_px, height_px];
+    }
+    [
+        width_px.div_ceil(GTAO_HALF_DIV).max(1),
+        height_px.div_ceil(GTAO_HALF_DIV).max(1),
+    ]
+}
+
+/// Live upsample through half size: half on (default) lifts the half buffer
+/// with the bilateral snap plus range weights (`upsample_bilateral`); full
+/// opt-out keeps the probe-only neutral (`GTAO_OPEN`). Units pixels for
+/// sizes, meters for depth. Determinism same slice plus flag gives same
+/// field. Errors [`LookError::Invalid`] on bad shapes or feeds.
+/// Caller: `gtao_live_full_for_forward` (same file) wires the live bind
+/// through here.
+pub fn gtao_live_upsample_for_forward(
+    half: &GtaoAo,
+    depth_full: &[f32],
+    config: &GtaoConfig,
+) -> Result<Vec<f32>, LookError> {
+    if !gtao_live_half_enabled() {
+        check_depth_buffer(depth_full, config.full_texels(), "upsample depth")?;
+        return Ok(vec![GTAO_OPEN; config.full_texels()]);
+    }
+    let want = gtao_live_half_size(config.width_px, config.height_px);
+    let want_w = usize::try_from(want[0])
+        .map_err(|_| LookError::Invalid(format!("live half width {} exceeds usize", want[0])))?;
+    let want_h = usize::try_from(want[1])
+        .map_err(|_| LookError::Invalid(format!("live half height {} exceeds usize", want[1])))?;
+    if half.width_half != want_w || half.height_half != want_h {
+        return Err(LookError::Invalid(format!(
+            "live half {}x{} mismatches live size {}x{}",
+            half.width_half, half.height_half, want[0], want[1]
+        )));
+    }
+    upsample_bilateral(half, depth_full, config)
+}
 
 /// Slice axes in pixel steps: +x, +y and the two diagonals.
 const SLICE_DIRS: [(i32, i32); GTAO_SLICES] = [(1, 0), (0, 1), (1, 1), (1, -1)];
@@ -301,11 +374,7 @@ impl GtaoAo {
     /// Deterministic little-endian bytes: row-major f32 values. Same inputs
     /// give bit-identical bytes on every run.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.values.len() * 4);
-        for v in &self.values {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        out
+        crate::accel::f32_le_bytes(&self.values)
     }
 
     /// Bind seam for the RA1 forward AO bind on the headless twin: validates
@@ -351,80 +420,17 @@ impl GtaoAo {
             .map_err(|_| LookError::Invalid(format!("gtao texels {texels} exceed u32")))?;
         let byte_len = texels as u64 * GTAO_AO_BYTES_PER_TEXEL;
         let started = Instant::now();
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gtao-ao-bind"),
-            source: wgpu::ShaderSource::Wgsl(GTAO_BIND_WGSL.into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("gtao-ao-bind-layout"),
-            entries: &[
-                uniform_entry(0),
-                storage_entry(1, true),
-                storage_entry(2, false),
-            ],
-        });
-        let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("gtao-ao-bind-pipe-layout"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("gtao-ao-bind-pipeline"),
-            layout: Some(&pipe_layout),
-            module: &shader,
-            entry_point: Some("bind_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let look_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gtao-ao-bind-look"),
-            size: crate::graph::LOOK_UNIFORM_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let src_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gtao-ao-bind-src"),
-            size: byte_len,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let dst_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gtao-ao-bind-dst"),
-            size: byte_len,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gtao-ao-bind-readback"),
-            size: byte_len,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gtao-ao-bind-group"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: look_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: src_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: dst_buf.as_entire_binding(),
-                },
-            ],
-        });
-        queue.write_buffer(&look_buf, 0, &crate::graph::look_frame_uniform_bytes(frame));
+        let probe = build_bind_probe(device, byte_len);
+        queue.write_buffer(
+            &probe.look_buf,
+            0,
+            &crate::graph::look_frame_uniform_bytes(frame),
+        );
         let mut src_bytes = Vec::with_capacity(texels * 4);
         for v in &self.values {
             src_bytes.extend_from_slice(&v.to_le_bytes());
         }
-        queue.write_buffer(&src_buf, 0, &src_bytes);
+        queue.write_buffer(&probe.src_buf, 0, &src_bytes);
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -435,15 +441,15 @@ impl GtaoAo {
                 label: Some("gtao-ao-bind-pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_pipeline(&probe.pipeline);
+            pass.set_bind_group(0, &probe.bind, &[]);
             pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
         }
-        encoder.copy_buffer_to_buffer(&dst_buf, 0, &readback, 0, byte_len);
+        encoder.copy_buffer_to_buffer(&probe.dst_buf, 0, &probe.readback, 0, byte_len);
         queue.submit(Some(encoder.finish()));
-        map_and_wait(device, &readback)?;
-        let back = readback_f32(&readback, texels)?;
-        readback.unmap();
+        map_and_wait(device, &probe.readback)?;
+        let back = readback_f32(&probe.readback, texels)?;
+        probe.readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(LookError::Device(format!("gtao bind validation: {err:?}")));
         }
@@ -459,6 +465,239 @@ impl GtaoAo {
             full_texels: u64::from(frame.viewport_px[0]) * u64::from(frame.viewport_px[1]),
             ms: started.elapsed().as_secs_f64() * 1000.0,
         })
+    }
+}
+
+/// Open-field AO: the blit composite neutral (`ao_tex` stays 1.0 live).
+/// CPU mirror only; the bake below must darken the valley against this.
+pub const GTAO_OPEN: f32 = 1.0;
+
+/// Read valley and open probes from a full-res AO field. Pixels for sizes
+/// and coords, row-major `width * height` values in `0..=1`. Pure, std-only;
+/// caller owns `full`, this sizes nothing. Errors: [`LookError::Invalid`]
+/// on zero/oversize dims, length mismatch or out-of-range coords.
+/// Determinism: same slice plus coords give the same pair.
+pub fn ao_on_off_stats(
+    full: &[f32],
+    width_px: u32,
+    height_px: u32,
+    valley_xy: (usize, usize),
+    open_xy: (usize, usize),
+) -> Result<(f32, f32), LookError> {
+    if width_px == 0 || height_px == 0 {
+        return Err(LookError::Invalid(format!(
+            "gtao on/off frame {width_px}x{height_px} is zero"
+        )));
+    }
+    if width_px > MAX_LOOK_DIM || height_px > MAX_LOOK_DIM {
+        return Err(LookError::Invalid(format!(
+            "gtao on/off frame {width_px}x{height_px} exceeds {MAX_LOOK_DIM}"
+        )));
+    }
+    let width = usize::try_from(width_px)
+        .map_err(|_| LookError::Invalid(format!("gtao on/off width {width_px} exceeds usize")))?;
+    let height = usize::try_from(height_px)
+        .map_err(|_| LookError::Invalid(format!("gtao on/off height {height_px} exceeds usize")))?;
+    let want = width * height;
+    if full.len() != want {
+        return Err(LookError::Invalid(format!(
+            "gtao on/off length {} mismatches frame {want}",
+            full.len()
+        )));
+    }
+    if valley_xy.0 >= width || valley_xy.1 >= height {
+        return Err(LookError::Invalid(format!(
+            "gtao valley ({},{}) outside {width_px}x{height_px}",
+            valley_xy.0, valley_xy.1
+        )));
+    }
+    if open_xy.0 >= width || open_xy.1 >= height {
+        return Err(LookError::Invalid(format!(
+            "gtao open ({},{}) outside {width_px}x{height_px}",
+            open_xy.0, open_xy.1
+        )));
+    }
+    Ok((
+        full[valley_xy.1 * width + valley_xy.0],
+        full[open_xy.1 * width + open_xy.0],
+    ))
+}
+
+/// Guard the live blit upload: the full-res AO field behind `ao_tex` must
+/// match the frame and hold finite `0..=1` occlusion. Pixels for dims,
+/// row-major `width * height` values. Pure, std-only; caller owns `full`.
+/// Errors: [`LookError::Invalid`] on zero/oversize dims, length mismatch,
+/// non-finite or out-of-range texels. Called by the live fog tranche before
+/// the `ao_texture` queue write; tests own the step-bake acceptance plus
+/// the loud refusals. Determinism: same slice plus dims give the same verdict.
+pub fn check_ao_full_for_blit(
+    full: &[f32],
+    width_px: u32,
+    height_px: u32,
+) -> Result<(), LookError> {
+    if width_px == 0 || height_px == 0 {
+        return Err(LookError::Invalid(format!(
+            "gtao blit AO frame {width_px}x{height_px} is zero"
+        )));
+    }
+    if width_px > MAX_LOOK_DIM || height_px > MAX_LOOK_DIM {
+        return Err(LookError::Invalid(format!(
+            "gtao blit AO frame {width_px}x{height_px} exceeds {MAX_LOOK_DIM}"
+        )));
+    }
+    let width = usize::try_from(width_px)
+        .map_err(|_| LookError::Invalid(format!("gtao blit AO width {width_px} exceeds usize")))?;
+    let height = usize::try_from(height_px).map_err(|_| {
+        LookError::Invalid(format!("gtao blit AO height {height_px} exceeds usize"))
+    })?;
+    let want = width * height;
+    if full.len() != want {
+        return Err(LookError::Invalid(format!(
+            "gtao blit AO length {} mismatches frame {want}",
+            full.len()
+        )));
+    }
+    for (i, v) in full.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(LookError::Invalid(format!(
+                "gtao blit AO[{i}] value {v} is not finite"
+            )));
+        }
+        if !(0.0..=1.0).contains(v) {
+            return Err(LookError::Invalid(format!(
+                "gtao blit AO[{i}] value {v} escapes 0..=1"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Stale AO reuse gate for the live frame: true only when the cached
+/// full-res field behind `ao_tex` still matches the frame and holds finite
+/// `0..=1` occlusion. Pixels for dims, row-major `width * height` values.
+/// Pure, std-only; caller owns `full`. Determinism same slice plus dims give
+/// same verdict. No allocation, no device, no map, no poll.
+/// Caller: `crates/render/src/present/gpu_present/live.rs` `present_frame_live`
+/// reuses the last probe tranche through here before the `ao_texture` write.
+#[must_use]
+pub fn stale_ao_should_reuse(full: &[f32], width_px: u32, height_px: u32) -> bool {
+    check_ao_full_for_blit(full, width_px, height_px).is_ok()
+}
+
+/// Live GTAO bind for one forward-stored depth feed: half-res oracle plus
+/// the bilateral upsample into the full-res field the blit `ao_tex` samples.
+/// Units: pixels in `config`, meters for depth, ms out (evidence only, never
+/// hashed). Determinism: row-major integer order with f64 accumulation in the
+/// oracle, so the same feed gives the same field. Errors: [`LookError::Invalid`]
+/// on bad sizes or feed values; empty or zero-size is skip (caller keeps the
+/// neutral 1.0, no extra work). CPU-only; no WGSL, no map, no poll.
+/// Caller: `crates/render/src/present/gpu_present/live.rs` `present_frame_live`.
+pub fn gtao_live_full_for_forward(
+    depth_full: &[f32],
+    normals_full: &[[f32; 3]],
+    config: &GtaoConfig,
+) -> Result<(Vec<f32>, f64), LookError> {
+    let started = Instant::now();
+    let (half, _) = gtao_half_res(depth_full, normals_full, config)?;
+    let full = gtao_live_upsample_for_forward(&half, depth_full, config)?;
+    check_ao_full_for_blit(&full, config.width_px, config.height_px)?;
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    Ok((full, ms))
+}
+
+/// Device resources for the baked-AO bind probe: one compute pipeline plus
+/// its four buffers and bind group. Built per `submit_gpu` call; the caller
+/// owns the resources for exactly one probe dispatch.
+#[cfg(feature = "window")]
+struct BindProbe {
+    pipeline: wgpu::ComputePipeline,
+    look_buf: wgpu::Buffer,
+    src_buf: wgpu::Buffer,
+    dst_buf: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+/// Build the bind-probe pipeline, buffers and bind group for `byte_len`
+/// bytes of half AO. Same labels, layouts and usages the inline submitter
+/// used; extracted so `submit_gpu` stays under the line budget. No
+/// validation here; the caller validated shapes before sizing anything.
+#[cfg(feature = "window")]
+fn build_bind_probe(device: &wgpu::Device, byte_len: u64) -> BindProbe {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gtao-ao-bind"),
+        source: wgpu::ShaderSource::Wgsl(GTAO_BIND_WGSL.into()),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gtao-ao-bind-layout"),
+        entries: &[
+            compute_uniform_entry(0),
+            compute_storage_entry(1, true),
+            compute_storage_entry(2, false),
+        ],
+    });
+    let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("gtao-ao-bind-pipe-layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("gtao-ao-bind-pipeline"),
+        layout: Some(&pipe_layout),
+        module: &shader,
+        entry_point: Some("bind_main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let look_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gtao-ao-bind-look"),
+        size: crate::graph::LOOK_UNIFORM_BYTES,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let src_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gtao-ao-bind-src"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let dst_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gtao-ao-bind-dst"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gtao-ao-bind-readback"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gtao-ao-bind-group"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: look_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: src_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: dst_buf.as_entire_binding(),
+            },
+        ],
+    });
+    BindProbe {
+        pipeline,
+        look_buf,
+        src_buf,
+        dst_buf,
+        readback,
+        bind,
     }
 }
 
@@ -877,36 +1116,6 @@ fn bind_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Uniform bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-/// Storage bind-group entry over the compute stage.
-#[cfg(feature = "window")]
-fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
 /// Pack the kernel uniform: full/half sizes, tap step, falloff, intensity
 /// and the occlusion normalizer. Pure bytes; validation stays on the caller.
 #[cfg(feature = "window")]
@@ -1164,21 +1373,21 @@ impl GtaoSubmitter {
         let half_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gtao-half-layout"),
             entries: &[
-                uniform_entry(0),
-                uniform_entry(1),
-                storage_entry(2, true),
-                storage_entry(3, true),
-                storage_entry(4, false),
+                compute_uniform_entry(0),
+                compute_uniform_entry(1),
+                compute_storage_entry(2, true),
+                compute_storage_entry(3, true),
+                compute_storage_entry(4, false),
             ],
         });
         let up_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gtao-upsample-layout"),
             entries: &[
-                uniform_entry(0),
-                uniform_entry(1),
-                storage_entry(2, true),
-                storage_entry(3, true),
-                storage_entry(4, false),
+                compute_uniform_entry(0),
+                compute_uniform_entry(1),
+                compute_storage_entry(2, true),
+                compute_storage_entry(3, true),
+                compute_storage_entry(4, false),
             ],
         });
         let half_pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1830,6 +2039,37 @@ mod tests {
                 "flat upsample reproduces the half value, got {v}"
             );
         }
+        // Live half (default on) routes through half size and keeps the
+        // flat identity; full opt-out keeps the probe-only neutral.
+        let was_live_half = gtao_live_half_enabled();
+        set_gtao_live_half_enabled(true);
+        assert!(gtao_live_half_enabled(), "live half reads on");
+        assert_eq!(
+            gtao_live_half_size(6, 6),
+            [3, 3],
+            "half halves the live size"
+        );
+        let live =
+            gtao_live_upsample_for_forward(&half, &depth, &config).expect("live half upsamples");
+        for v in &live {
+            assert!((*v - 0.35).abs() < 1e-6, "live half keeps flat, got {v}");
+        }
+        set_gtao_live_half_enabled(false);
+        assert!(!gtao_live_half_enabled(), "full opt-out reads back");
+        assert_eq!(gtao_live_half_size(6, 6), [6, 6], "full keeps full size");
+        let full_opt =
+            gtao_live_upsample_for_forward(&half, &depth, &config).expect("full opts out");
+        assert!(
+            full_opt.iter().all(|v| *v == GTAO_OPEN),
+            "full opt-out stays neutral"
+        );
+        set_gtao_live_half_enabled(true);
+        assert_eq!(
+            gtao_live_upsample_for_forward(&half, &depth, &config).expect("half restores"),
+            live,
+            "toggle restores half"
+        );
+        set_gtao_live_half_enabled(was_live_half);
     }
 
     #[test]
@@ -2431,6 +2671,242 @@ mod tests {
             receipt.upload_ms,
             receipt.submit_ms,
             receipt.budget_ms()
+        );
+    }
+
+    #[test]
+    fn ao_on_off_darkens_valley_keeps_open_sand() {
+        // 8x8 step: left near 2 m, right far 6 m, flat up normals.
+        let mut depth = vec![0.0f32; 64];
+        for y in 0..8 {
+            for x in 0..8 {
+                depth[y * 8 + x] = if x < 4 { 2.0 } else { 6.0 };
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; 64];
+        let config = config_8x8();
+        let (half, _) = gtao_half_res(&depth, &normals, &config).expect("step bakes");
+        let full = upsample_bilateral(&half, &depth, &config).expect("step upsamples");
+        let (valley, open) = ao_on_off_stats(&full, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        assert!(valley < GTAO_OPEN, "valley must darken, got {valley}");
+        assert!(
+            GTAO_OPEN - valley > 1e-6,
+            "on differs from off above epsilon, got {valley}"
+        );
+        assert!(
+            (open - GTAO_OPEN).abs() < 0.02,
+            "open sand stays within 2%, got {open}"
+        );
+    }
+
+    #[test]
+    fn ao_on_off_is_deterministic_x2() {
+        let mut depth = vec![0.0f32; 64];
+        for y in 0..8 {
+            for x in 0..8 {
+                depth[y * 8 + x] = if x < 4 { 2.0 } else { 6.0 };
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; 64];
+        let config = config_8x8();
+        let bake = |depth: &[f32]| {
+            let (half, _) = gtao_half_res(depth, &normals, &config).expect("step bakes");
+            upsample_bilateral(&half, depth, &config).expect("step upsamples")
+        };
+        let first = bake(&depth);
+        let second = bake(&depth);
+        assert_eq!(first, second, "bake is bit-identical twice");
+        let a = ao_on_off_stats(&first, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        let b = ao_on_off_stats(&second, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        assert_eq!(a.0.to_bits(), b.0.to_bits(), "valley probe is exact x2");
+        assert_eq!(a.1.to_bits(), b.1.to_bits(), "open probe is exact x2");
+    }
+
+    #[test]
+    fn ao_on_off_flat_is_open() {
+        assert_eq!(GTAO_OPEN, 1.0, "open documents the blit neutral");
+        let full = vec![GTAO_OPEN; 64];
+        let (valley, open) =
+            ao_on_off_stats(&full, 8, 8, (4, 1), (0, 1)).expect("flat probes read");
+        assert_eq!((valley, open), (1.0, 1.0), "flat field stays open");
+    }
+
+    #[test]
+    fn ao_on_off_refuses_short_slice() {
+        let short = vec![GTAO_OPEN; 63];
+        assert!(
+            matches!(
+                ao_on_off_stats(&short, 8, 8, (4, 1), (0, 1)),
+                Err(LookError::Invalid(_))
+            ),
+            "short slice must fail loudly"
+        );
+        let full = vec![GTAO_OPEN; 64];
+        assert!(
+            matches!(
+                ao_on_off_stats(&full, 0, 8, (0, 0), (0, 0)),
+                Err(LookError::Invalid(_))
+            ),
+            "zero dims must fail loudly"
+        );
+    }
+
+    #[test]
+    fn ao_on_off_refuses_out_of_range_coords() {
+        let full = vec![GTAO_OPEN; 64];
+        assert!(
+            matches!(
+                ao_on_off_stats(&full, 8, 8, (8, 1), (0, 1)),
+                Err(LookError::Invalid(_))
+            ),
+            "valley outside must fail loudly"
+        );
+        assert!(
+            matches!(
+                ao_on_off_stats(&full, 8, 8, (4, 1), (0, 8)),
+                Err(LookError::Invalid(_))
+            ),
+            "open outside must fail loudly"
+        );
+    }
+
+    #[test]
+    fn ao_full_for_blit_accepts_step_bake() {
+        let mut depth = vec![0.0f32; 64];
+        for y in 0..8 {
+            for x in 0..8 {
+                depth[y * 8 + x] = if x < 4 { 2.0 } else { 6.0 };
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; 64];
+        let config = config_8x8();
+        let (half, _) = gtao_half_res(&depth, &normals, &config).expect("step bakes");
+        let full = upsample_bilateral(&half, &depth, &config).expect("step upsamples");
+        check_ao_full_for_blit(&full, 8, 8).expect("step bake feeds the blit");
+        let (valley, open) = ao_on_off_stats(&full, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        assert!(valley < GTAO_OPEN, "valley must darken, got {valley}");
+        assert!(
+            (open - GTAO_OPEN).abs() < 0.02,
+            "open sand stays within 2%, got {open}"
+        );
+    }
+
+    #[test]
+    fn ao_full_for_blit_rejects_bad_fields() {
+        let full = vec![GTAO_OPEN; 64];
+        assert!(
+            matches!(
+                check_ao_full_for_blit(&full[..63], 8, 8),
+                Err(LookError::Invalid(_))
+            ),
+            "short slice must fail loudly"
+        );
+        let mut nan = vec![GTAO_OPEN; 64];
+        nan[10] = f32::NAN;
+        assert!(
+            matches!(
+                check_ao_full_for_blit(&nan, 8, 8),
+                Err(LookError::Invalid(_))
+            ),
+            "NaN AO must fail loudly"
+        );
+        let mut over = vec![GTAO_OPEN; 64];
+        over[20] = 1.5;
+        assert!(
+            matches!(
+                check_ao_full_for_blit(&over, 8, 8),
+                Err(LookError::Invalid(_))
+            ),
+            "AO above 1 must fail loudly"
+        );
+    }
+
+    #[test]
+    fn gtao_live_binds_ao_after_forward() {
+        // Forward-stored step depth (left near 2 m, right far 6 m): the live
+        // helper must darken the valley while open sand stays open; empty or
+        // zero-size stays skip (caller keeps neutral 1.0, no extra work).
+        let mut depth = vec![0.0f32; 64];
+        for y in 0..8 {
+            for x in 0..8 {
+                depth[y * 8 + x] = if x < 4 { 2.0 } else { 6.0 };
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; 64];
+        let config = config_8x8();
+        let (full, ms) = gtao_live_full_for_forward(&depth, &normals, &config).expect("step binds");
+        assert_eq!(full.len(), 64, "full field covers the frame");
+        assert!(ms >= 0.0, "live bind records ms");
+        let (valley, open) = ao_on_off_stats(&full, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        assert!(valley < GTAO_OPEN, "valley must darken, got {valley}");
+        assert!(
+            (open - GTAO_OPEN).abs() < 0.02,
+            "open sand stays within 2%, got {open}"
+        );
+        let zero = GtaoConfig {
+            width_px: 0,
+            ..config
+        };
+        assert!(
+            matches!(
+                gtao_live_full_for_forward(&depth, &normals, &zero),
+                Err(LookError::Invalid(_))
+            ),
+            "zero-size stays skip with a loud refusal"
+        );
+        let neutral = vec![GTAO_OPEN; 64];
+        assert!(
+            neutral.iter().all(|v| *v == 1.0),
+            "skipped live bind keeps ao_tex at 1.0"
+        );
+    }
+
+    #[test]
+    fn stale_ao_reuse_darkens_valley_keeps_open_sand() {
+        // Caller: `stale_ao_should_reuse` gate plus `check_ao_full_for_blit`.
+        // Behavior: cached step field validates, valley darkens, open stays.
+        let mut depth = vec![0.0f32; 64];
+        for y in 0..8 {
+            for x in 0..8 {
+                depth[y * 8 + x] = if x < 4 { 2.0 } else { 6.0 };
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; 64];
+        let config = config_8x8();
+        let (first, _) = gtao_live_full_for_forward(&depth, &normals, &config).expect("step binds");
+        let (second, _) =
+            gtao_live_full_for_forward(&depth, &normals, &config).expect("step binds again");
+        assert_eq!(first, second, "same feed gives same field twice");
+        assert!(stale_ao_should_reuse(&first, 8, 8), "step bake reuses");
+        let (valley, open) = ao_on_off_stats(&first, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        assert!(valley < GTAO_OPEN, "valley must darken, got {valley}");
+        assert!(
+            (open - GTAO_OPEN).abs() < 0.02,
+            "open sand stays within 2%, got {open}"
+        );
+        assert!(
+            !stale_ao_should_reuse(&first[..63], 8, 8),
+            "short slice stays skip"
+        );
+        assert!(!stale_ao_should_reuse(&first, 0, 8), "zero size stays skip");
+    }
+
+    #[test]
+    fn live_helper_routes_through_live_bind() {
+        // Caller: `crates/render/src/present/gpu_present/submit.rs` `live_gtao_ao`
+        // after `encode_forward` before `encode_blit`.
+        // Behavior: routes through `gtao_live_full_for_forward` (half plus
+        // bilateral upsample) so valley darkens via the live bind, open sand
+        // stays within 2%, `ao_tex` leaves 1.0. Failure keeps the bypass.
+        let src = include_str!("present/gpu_present/submit.rs");
+        let ao_fn = src.find("fn live_gtao_ao").expect("live helper exists");
+        let ao_end = src[ao_fn..]
+            .find("fn live_ao_upload_for_frame")
+            .map(|i| ao_fn + i)
+            .unwrap_or(src.len());
+        assert!(
+            src[ao_fn..ao_end].contains("gtao_live_full_for_forward"),
+            "live helper routes through the live bind after forward"
         );
     }
 }

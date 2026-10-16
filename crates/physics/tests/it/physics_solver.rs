@@ -67,10 +67,7 @@ fn tick_hash_stable_across_runs() {
             "no tunnel or explosion: {body:?}"
         );
         assert!(
-            body.x.is_finite()
-                && body.y.is_finite()
-                && body.vx.is_finite()
-                && body.vy.is_finite(),
+            body.x.is_finite() && body.y.is_finite() && body.vx.is_finite() && body.vy.is_finite(),
             "no NaN escape: {body:?}"
         );
     }

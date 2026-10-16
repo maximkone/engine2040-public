@@ -29,6 +29,7 @@ pub struct ForwardPlus {
     pub gh: usize,
     pub grid: LightGrid,
     pub draw: Vec<u32>,
+    sort_scratch: Vec<(u32, f32)>,
 }
 
 fn mix(mut h: u64, b: &[u8]) -> u64 {
@@ -49,6 +50,7 @@ impl ForwardPlus {
             gh,
             grid: LightGrid::new(gw * gh),
             draw: Vec::new(),
+            sort_scratch: Vec::new(),
         }
     }
     pub fn tile_count(&self) -> usize {
@@ -98,7 +100,10 @@ impl ForwardPlus {
         self.draw.clear();
         let (vx0, vy0) = (self.view.cam_x, self.view.cam_y);
         let (vx1, vy1) = (vx0 + self.view.w as f32, vy0 + self.view.h as f32);
-        let mut b: Vec<(u32, f32)> = Vec::with_capacity(sprites.len().min(16384));
+        // Reused scratch: no per-frame allocation on the draw path.
+        let b = &mut self.sort_scratch;
+        b.clear();
+        b.reserve(sprites.len().min(16384));
         for s in sprites {
             if !s.x.is_finite()
                 || !s.y.is_finite()
@@ -120,7 +125,7 @@ impl ForwardPlus {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.0.cmp(&b.0))
         });
-        self.draw.extend(b.into_iter().map(|x| x.0));
+        self.draw.extend(b.iter().map(|x| x.0));
     }
     pub fn render(&mut self, sprites: &[Sprite], lights: &[Light]) {
         self.cull_lights(lights);

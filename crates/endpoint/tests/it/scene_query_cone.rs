@@ -9,9 +9,7 @@
 
 use engine_editor::capability::Capability;
 use engine_editor::commands::{self, Batch, Document, Journal, Op};
-use engine_endpoint::mcp::{
-    McpServer, TOOL_LIST_BUDGET_CHARS, TOOL_LIST_MIN_HEADROOM_CHARS,
-};
+use engine_endpoint::mcp::{McpServer, TOOL_LIST_BUDGET_CHARS, TOOL_LIST_MIN_HEADROOM_CHARS};
 use engine_endpoint::scene_query::{
     cone_rows, QueryArgs, SceneQueryArgs, SceneQueryOutput, SceneQueryTool, Side,
 };
@@ -120,7 +118,11 @@ fn door_cone_left_and_right_partition_the_half_plane() {
     assert_eq!(sided(&out, "ahead"), vec![label_of(&server, 1)]);
     assert_eq!(sided(&out, "left"), vec![label_of(&server, 2)]);
     assert_eq!(sided(&out, "right"), vec![label_of(&server, 3)]);
-    assert_eq!(out.hits.len(), 3, "the behind target stays out of a half-plane");
+    assert_eq!(
+        out.hits.len(),
+        3,
+        "the behind target stays out of a half-plane"
+    );
 }
 
 #[test]
@@ -143,7 +145,11 @@ fn door_cone_repeats_are_identical() {
     let again = SceneQueryTool::invoke(&server, cone_args(&observer, 180)).expect("again serves");
     assert_eq!(first.digest, again.digest, "digest is stable");
     assert_eq!(first, again, "bytes and rows are identical");
-    assert_eq!(first.hits.len(), 4, "the full circle holds all four targets");
+    assert_eq!(
+        first.hits.len(),
+        4,
+        "the full circle holds all four targets"
+    );
 }
 
 #[test]

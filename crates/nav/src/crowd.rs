@@ -639,6 +639,11 @@ pub fn far_velocity(
     flow_m_s: [f32; 2],
     config: &CrowdConfig,
 ) -> Result<[f32; 2], CrowdError> {
+    check_config(config)?;
+    check_point(pos_m, "position")?;
+    check_point(goal_m, "goal")?;
+    check_point(flow_m_s, "flow")?;
+    check_speed(max_speed_m_s)?;
     let dx = goal_m[0] - pos_m[0];
     let dz = goal_m[1] - pos_m[1];
     let dist = (dx * dx + dz * dz).sqrt();
@@ -959,6 +964,23 @@ mod tests {
                 vel_m_s: [0.0, 0.0],
                 lod: Lod::Impostor
             }
+        );
+    }
+
+    #[test]
+    fn far_velocity_refuses_bad_flow_even_at_goal() {
+        let cfg = config();
+        assert_eq!(
+            far_velocity([0.0, 0.0], [10.0, 0.0], 3.0, [f32::NAN, 0.0], &cfg),
+            Err(CrowdError::BadValue("flow"))
+        );
+        assert_eq!(
+            far_velocity([0.0, 0.0], [0.05, 0.0], 3.0, [f32::NAN, 0.0], &cfg),
+            Err(CrowdError::BadValue("flow"))
+        );
+        assert_eq!(
+            far_velocity([0.0, 0.0], [10.0, 0.0], 3.0, [1.0, 0.0], &cfg).is_ok(),
+            true
         );
     }
 

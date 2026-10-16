@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use super::interest::{entity_room, room_in_scope};
 use engine_core::Fnv64;
 
 /// Wire version accepted by [`decode_message`]; anything else refuses.
@@ -213,6 +214,7 @@ pub struct ReplicationServer {
     world: BTreeMap<EntityId, FullEntry>,
     history: VecDeque<(u32, BTreeMap<EntityId, FullEntry>)>,
     acked: BTreeMap<u32, u32>,
+    scopes: BTreeMap<u32, u64>,
 }
 
 impl ReplicationServer {
@@ -223,6 +225,7 @@ impl ReplicationServer {
             world: BTreeMap::new(),
             history: VecDeque::new(),
             acked: BTreeMap::new(),
+            scopes: BTreeMap::new(),
         }
     }
 
@@ -314,7 +317,19 @@ impl ReplicationServer {
 
     /// Forget one client's ack cursor (on disconnect). True when held.
     pub fn remove_client(&mut self, client: u32) -> bool {
+        self.scopes.remove(&client);
         self.acked.remove(&client).is_some()
+    }
+
+    /// Scope mask (default all rooms; send-only).
+    pub(crate) fn client_rooms(&self, client: u32) -> u64 {
+        self.scopes.get(&client).copied().unwrap_or(u64::MAX)
+    }
+
+    /// Set scope mask (room membership; send-only; forces resync next emit).
+    pub(crate) fn set_client_rooms(&mut self, client: u32, mask: u64) {
+        self.scopes.insert(client, mask);
+        self.acked.remove(&client);
     }
 
     /// Last tick acked by `client`, if it ever acked.
@@ -341,15 +356,16 @@ impl ReplicationServer {
         }
     }
 
-    /// Build one client's message for the current tick: spawns for entities
-    /// newer than its acked baseline, field-mask deltas for changed ones,
-    /// tombstones for removed ones. Unknown, evicted or older baselines
+    /// Build one client's message: spawns/deltas/tombstones filtered by room
+    /// scope (out-of-scope resync-clear; rejoin full-send). Unknown, evicted
     /// (`tick - acked >= RESYNC_EVERY`), and every [`RESYNC_EVERY`]th tick,
     /// fall back to a full-state resync, which always fits
     /// [`MAX_MESSAGE_BYTES`]; a diff that would overflow the budget degrades
     /// to the same full resync rather than truncating truth. The baseline
     /// only reads the client's last-acked tick, never redefines it.
     pub fn message_for(&self, client: u32) -> Result<ReplicationMessage, ReplicateError> {
+        let mask = self.client_rooms(client);
+        let scoped = |id: EntityId| room_in_scope(entity_room(id.0), mask);
         let acked = self.acked.get(&client).copied();
         let baseline = acked.and_then(|tick| {
             self.history
@@ -360,11 +376,17 @@ impl ReplicationServer {
         let stale = acked.is_some_and(|last| self.tick.wrapping_sub(last) >= RESYNC_EVERY);
         let want_resync = baseline.is_none() || stale || self.tick.is_multiple_of(RESYNC_EVERY);
         if want_resync {
+            let spawns: Vec<FullEntry> = self
+                .world
+                .values()
+                .filter(|e| scoped(e.entity))
+                .copied()
+                .collect();
             return Ok(ReplicationMessage {
                 tick: self.tick,
                 baseline: acked.unwrap_or(self.tick),
                 resync: true,
-                spawns: self.world.values().copied().collect(),
+                spawns,
                 updates: Vec::new(),
                 despawns: Vec::new(),
             });
@@ -374,6 +396,9 @@ impl ReplicationServer {
         let mut spawns = Vec::new();
         let mut updates = Vec::new();
         for entry in self.world.values() {
+            if !scoped(entry.entity) {
+                continue;
+            }
             match base.get(&entry.entity) {
                 None => spawns.push(*entry),
                 Some(old) if *old != *entry => {
@@ -402,13 +427,11 @@ impl ReplicationServer {
                 _ => {}
             }
         }
-        let mut despawns: Vec<EntityId> = base
+        let despawns: Vec<EntityId> = base
             .keys()
-            .filter(|entity| !self.world.contains_key(entity))
+            .filter(|id| scoped(**id) && !self.world.contains_key(id))
             .copied()
             .collect();
-        despawns.sort();
-        despawns.dedup();
         let mut message = ReplicationMessage {
             tick: self.tick,
             baseline: floor,
@@ -422,7 +445,12 @@ impl ReplicationServer {
                 tick: self.tick,
                 baseline: floor,
                 resync: true,
-                spawns: self.world.values().copied().collect(),
+                spawns: self
+                    .world
+                    .values()
+                    .filter(|e| scoped(e.entity))
+                    .copied()
+                    .collect(),
                 updates: Vec::new(),
                 despawns: Vec::new(),
             };
@@ -1421,5 +1449,27 @@ mod tests {
             "mirror must hold full checkpoint equality after rejoin"
         );
         assert!(server.verify_client(mirror.world_hash()).is_ok());
+    }
+
+    #[test]
+    fn room_scope_despawns_and_rejoins() {
+        let mut s = seeded_world();
+        s.set_client_rooms(1, crate::interest::room_mask(0));
+        let m1 = s.message_for(1).expect("m1");
+        assert!(m1.resync && m1.spawns.len() == 1 && m1.spawns[0].entity == EA);
+        s.on_ack(1, m1.tick).expect("ack");
+        s.advance();
+        let m2 = s.message_for(1).expect("m2");
+        assert!(!m2.resync && m2.despawns.is_empty());
+        s.set_client_rooms(
+            1,
+            crate::interest::room_mask(0) | crate::interest::room_mask(1),
+        );
+        s.advance();
+        let m3 = s.message_for(1).expect("m3");
+        assert!(
+            m3.resync && m3.spawns.iter().any(|e| e.entity == EB),
+            "{m3:?}"
+        );
     }
 }

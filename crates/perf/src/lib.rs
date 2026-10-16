@@ -13,6 +13,8 @@ pub mod arena;
 pub mod baselines;
 pub mod budget;
 pub mod core_bench;
+/// Feel quantification: three-domain runs against the latency bar.
+pub mod feel;
 pub mod fight_cost;
 pub mod latency;
 pub mod pgo_harness;

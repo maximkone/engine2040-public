@@ -42,9 +42,10 @@ use crate::commands::{MaterialName, MAX_MATERIAL_NAME_LEN};
 /// magic in `engine-save`: these are authoring documents, not progression.
 pub const SAVE_MAGIC: [u8; 4] = *b"EDOC";
 /// Newest save version this module writes and reads. Version 2 adds the
-/// material section after the nodes and version 3 the component section after
-/// that; older files still open with empty bindings and components.
-pub const SAVE_VERSION: u32 = 3;
+/// material section after the nodes, version 3 the component section after
+/// that, and version 4 the graph section after that; older files still open
+/// with empty bindings, components, and graphs.
+pub const SAVE_VERSION: u32 = 4;
 /// Oldest save version this module still opens. Older saves, and saves newer
 /// than [`SAVE_VERSION`], fail with [`SaveError::UnsupportedVersion`].
 pub const MIN_SAVE_VERSION: u32 = 1;
@@ -120,6 +121,8 @@ pub enum SaveError {
         /// The node holding the bad component.
         id: ObjectId,
     },
+    /// The v4 graph section failed its own checksum or structure gate.
+    BadGraph,
 }
 
 impl fmt::Display for SaveError {
@@ -161,6 +164,7 @@ impl fmt::Display for SaveError {
                      (bad bytes, repeated kind or unknown node)"
                 )
             }
+            Self::BadGraph => f.write_str("document graph section is invalid"),
         }
     }
 }
@@ -259,6 +263,10 @@ pub fn save_to_bytes(doc: &Document) -> Vec<u8> {
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(bytes);
     }
+    let graph_bytes = doc.graph.encode();
+    let graph_len = u32::try_from(graph_bytes.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&graph_len.to_le_bytes());
+    out.extend_from_slice(&graph_bytes);
     let checksum = crc32(&out);
     out.extend_from_slice(&checksum.to_le_bytes());
     out
@@ -287,6 +295,11 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<Document, SaveError> {
     } else {
         Vec::new()
     };
+    let graph = if version >= 4 {
+        canonical_graph(read_graph(bytes, &mut pos)?)
+    } else {
+        crate::graph::Graph::default()
+    };
     if version >= 2 {
         seal_check(bytes, pos)?;
     }
@@ -307,6 +320,7 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<Document, SaveError> {
             .map(|(id, name)| (id.to_string(), name))
             .collect(),
         components: table,
+        graph,
     })
 }
 
@@ -476,6 +490,36 @@ fn read_components(bytes: &[u8], pos: &mut usize) -> Result<Vec<(ObjectId, Compo
         components.push((id, component));
     }
     Ok(components)
+}
+
+/// Parse the v4 graph section: length plus canonical graph bytes. Old saves
+/// carry no section and open with an empty graph; bad bytes fail as BadGraph.
+fn read_graph(bytes: &[u8], pos: &mut usize) -> Result<crate::graph::Graph, SaveError> {
+    let raw_len = take(bytes, pos, 4)?;
+    let len = usize::try_from(u32::from_le_bytes([
+        raw_len[0], raw_len[1], raw_len[2], raw_len[3],
+    ]))
+    .unwrap_or(usize::MAX);
+    if len > crate::graph::MAX_GRAPH_BYTES {
+        return Err(SaveError::TooLarge);
+    }
+    let raw = take(bytes, pos, len)?;
+    crate::graph::Graph::decode(raw).map_err(|_| SaveError::BadGraph)
+}
+
+/// Canonicalize a decoded graph to the document default when empty.
+///
+/// `Document::new()` carries `Graph::default()` (`next` 0) while
+/// `Graph::new()` and `Graph::decode` of empty bytes carry `next` 1; both
+/// allocate id 1 first and behave identically, but `PartialEq` includes the
+/// counter so a naive roundtrip fails. The codec normalizes empty graphs to
+/// the document default so `load(save(doc)) == doc`.
+fn canonical_graph(graph: crate::graph::Graph) -> crate::graph::Graph {
+    if graph.node_count() == 0 && graph.wire_count() == 0 {
+        crate::graph::Graph::default()
+    } else {
+        graph
+    }
 }
 
 /// Check the sealed end and the checksum of a v2 or v3 save: the sections

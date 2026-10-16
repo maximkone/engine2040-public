@@ -978,11 +978,26 @@ mod tests {
     #[test]
     fn snapshot_guard_classify_query_edges() {
         let frac = |num: i64, den: i64| Fixed::from_int(num) / Fixed::from_int(den);
-        assert_eq!(classify_query(2, 6, Fixed::from_int(2)), Some(QueryKind::Interpolate));
-        assert_eq!(classify_query(2, 6, Fixed::from_int(6)), Some(QueryKind::Interpolate));
-        assert_eq!(classify_query(2, 6, frac(9, 2)), Some(QueryKind::Interpolate));
-        assert_eq!(classify_query(2, 6, Fixed::from_int(8)), Some(QueryKind::Extrapolate));
-        assert_eq!(classify_query(2, 6, Fixed::ZERO), Some(QueryKind::Extrapolate));
+        assert_eq!(
+            classify_query(2, 6, Fixed::from_int(2)),
+            Some(QueryKind::Interpolate)
+        );
+        assert_eq!(
+            classify_query(2, 6, Fixed::from_int(6)),
+            Some(QueryKind::Interpolate)
+        );
+        assert_eq!(
+            classify_query(2, 6, frac(9, 2)),
+            Some(QueryKind::Interpolate)
+        );
+        assert_eq!(
+            classify_query(2, 6, Fixed::from_int(8)),
+            Some(QueryKind::Extrapolate)
+        );
+        assert_eq!(
+            classify_query(2, 6, Fixed::ZERO),
+            Some(QueryKind::Extrapolate)
+        );
         assert_eq!(classify_query(2, 6, frac(17, 2)), None);
         assert_eq!(classify_query(2, 6, frac(-1, 2)), None);
     }

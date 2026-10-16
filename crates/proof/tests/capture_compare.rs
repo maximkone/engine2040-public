@@ -179,6 +179,47 @@ pub fn pending_path(golden: &Path) -> PathBuf {
     PathBuf::from(text)
 }
 
+/// Redact volatile brief text before snapshot compare, std-only.
+///
+/// Masks byte counts and budget tails; keeps digest, ids and labels frozen.
+/// Normalizes CRLF to LF. Never reads env: blessed update renames `.pending`.
+pub fn redact_brief(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::with_capacity(normalized.len());
+    for line in normalized.split_inclusive('\n') {
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(stripped) => (stripped, "\n"),
+            None => (line, ""),
+        };
+        let mut redacted = body.replace("...", "[tail]").replace('…', "[tail]");
+        for word in ["truncated", "Truncated", "TRUNCATED"] {
+            redacted = redacted.replace(word, "[tail]");
+        }
+        let lower = redacted.to_ascii_lowercase();
+        let volatile = ["bytes", "budget", "truncat", "short by"]
+            .iter()
+            .any(|key| lower.contains(key));
+        if volatile {
+            let mut masked = String::with_capacity(redacted.len());
+            let mut chars = redacted.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch.is_ascii_digit() {
+                    while chars.peek().is_some_and(|next| next.is_ascii_digit()) {
+                        chars.next();
+                    }
+                    masked.push_str("[n]");
+                } else {
+                    masked.push(ch);
+                }
+            }
+            redacted = masked;
+        }
+        out.push_str(&redacted);
+        out.push_str(newline);
+    }
+    out
+}
+
 /// Check capture bytes against a file golden with the threshold gate.
 ///
 /// Reads the golden file, scores with [`mean_similarity`], and enforces
@@ -648,4 +689,35 @@ fn update_words_match_donor_env() {
     let bad = std::panic::catch_unwind(|| parse_file_update("sometimes"));
     assert!(bad.is_err(), "unknown word must fail loud");
     println!("passed file update words 7/7");
+}
+
+#[test]
+fn redact_masks_byte_counts_and_tails_but_keeps_labels() {
+    let a = "size 123 bytes\nbudget 256 keeps 100 of 200 bytes\nrows truncated...\n";
+    let b = "size 456 bytes\nbudget 512 keeps 150 of 300 bytes\nrows TRUNCATED...\n";
+    let redacted_a = redact_brief(a);
+    assert_eq!(redacted_a, redact_brief(b), "volatile must redact equal");
+    assert!(
+        redacted_a.contains("[n]"),
+        "numbers mask, got: {redacted_a}"
+    );
+    assert!(
+        redacted_a.contains("[tail]"),
+        "tails mask, got: {redacted_a}"
+    );
+    assert_ne!(
+        redact_brief("object a [2]\n"),
+        redact_brief("object b [2]\n")
+    );
+    assert_ne!(redact_brief("digest 1\n"), redact_brief("digest 2\n"));
+    let text = "digest 1\nobject prop_00 [0]\nsize 123 bytes\n";
+    let once = redact_brief(text);
+    assert_eq!(once, redact_brief(text), "same input redacts twice");
+    assert_eq!(once, redact_brief(&once), "redacted output is fixed");
+    assert_eq!(
+        redact_brief(&text.replace('\n', "\r\n")),
+        once,
+        "CRLF to LF"
+    );
+    println!("passed redact masks volatile keeps identity x2");
 }

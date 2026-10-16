@@ -3179,6 +3179,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing: arena edit under 1 ms, release --perf only"]
     #[expect(
         clippy::disallowed_types,
         clippy::disallowed_methods,
@@ -3221,6 +3222,42 @@ mod tests {
         assert!(!scene_minus.overlaps_any(&probe, 5));
         assert!(!Rstar::build(&rest).overlaps_any(&probe, 5));
         // Failure case: a NaN move deletes its row and frees its tiles.
+        let mut gone = moved.clone();
+        gone.x = f32::NAN;
+        tree.apply(std::slice::from_ref(&gone), &[]);
+        assert_eq!(tree.free, rebuild_free(&tree.boxes));
+        assert!(!tree.boxes.contains_key(&5));
+    }
+
+    #[test]
+    fn index3_sp21_free_field_matches_oracle() {
+        // Arena edit refreshes the incremental field; the full rebuild
+        // stays the oracle. Stacking reads through `overlaps_any`.
+        let arena = vec![
+            mk(0, "wall_north", 0.0, 1.0, -5.0, 9.8, 2.0, 0.2),
+            mk(1, "wall_south", 0.0, 1.0, 5.0, 9.8, 2.0, 0.2),
+            mk(2, "wall_west", -5.0, 1.0, 0.0, 0.2, 2.0, 10.0),
+            mk(3, "wall_east", 5.0, 1.0, 0.0, 0.2, 2.0, 10.0),
+            mk(4, "gate", 3.0, 0.5, -4.5, 1.0, 1.0, 0.5),
+            mk(5, "brazier", 0.0, 0.5, 2.0, 0.6, 1.0, 0.6),
+        ];
+        let mut tree = Rstar::build(&arena);
+        assert_eq!(tree.free, rebuild_free(&tree.boxes));
+        let moved = mk(5, "brazier", 1.0, 0.5, 2.0, 0.6, 1.0, 0.6);
+        tree.apply(std::slice::from_ref(&moved), &[]);
+        assert_eq!(tree.revision(), 1);
+        assert_eq!(tree.last_dirty(), vec![5]);
+        let mut expect = arena.clone();
+        expect[5] = moved.clone();
+        let full_tree = Rstar::build(&expect);
+        assert_eq!(tree.free, full_tree.free);
+        assert_eq!(tree.free, rebuild_free(&tree.boxes));
+        assert_eq!(tree.pairs(), full_tree.pairs());
+        assert_eq!(tree.to_bytes(), full_tree.to_bytes());
+        let rest: Vec<Actor> = expect.iter().filter(|a| a.id != 5).cloned().collect();
+        let scene_minus = Rstar::build(&rest);
+        let probe = probe_actor(&moved).expect("valid probe");
+        assert!(!scene_minus.overlaps_any(&probe, 5));
         let mut gone = moved.clone();
         gone.x = f32::NAN;
         tree.apply(std::slice::from_ref(&gone), &[]);

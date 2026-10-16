@@ -1,4 +1,5 @@
 //! fixed: Q47.16 deterministic math, CORDIC atan2 + LUT trig, LE digest.
+use core::cmp::Ordering;
 
 /// Signed Q47.16 fixed-point number: the raw `i64` counts 1/65536 units.
 ///
@@ -272,7 +273,83 @@ impl Fixed {
     pub fn hash_state(vals: &[Self]) -> u64 {
         Self::digest(vals)
     }
+    /// Reference ordering oracle for `Fixed` vs `Fixed`, independent of the derived `Ord`.
+    ///
+    /// Compares raw Q47.16 bits with explicit branches so oracle vectors and
+    /// the seed corpus catch an inverted or truncated compare. Same bits give
+    /// the same ordering on every platform; no allocation.
+    /// PORT(alloy-rs/ruint@c764018b80dce8f0b5a0262cb97846e633acee31:src/cmp.rs) shape only (reference compare oracle), no donor bytes.
+    pub fn reference_cmp(a: Self, b: Self) -> Ordering {
+        if a.0 < b.0 {
+            Ordering::Less
+        } else if a.0 > b.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }
+    /// Reference ordering oracle for `Fixed` vs an integer scalar, via `i128`.
+    ///
+    /// Compares `self.0` against `rhs * SCALE` in `i128`, so scalars whose
+    /// scaled form would overflow `i64` still order correctly and never wrap.
+    /// Fractions order strictly between their neighboring integers. Same
+    /// inputs give the same ordering on every platform; no allocation.
+    pub fn reference_cmp_scalar(self, rhs: i64) -> Ordering {
+        cmp_raw_vs_scalar_i128(self.0, i128::from(rhs))
+    }
 }
+/// Compare raw Q47.16 bits against an integer scalar in `i128`.
+///
+/// The scaled scalar uses checked multiply: an overflow means the scalar
+/// magnitude exceeds every `Fixed` value, so the sign alone decides. Pure
+/// integer math, identical on every platform; no allocation.
+fn cmp_raw_vs_scalar_i128(raw: i64, scalar: i128) -> Ordering {
+    match scalar.checked_mul(i128::from(Fixed::SCALE)) {
+        Some(scaled) => i128::from(raw).cmp(&scaled),
+        None => {
+            if scalar < 0 {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+    }
+}
+// Scalar compare oracle ported from alloy-rs/ruint `impl_for_primitives!`
+// (PartialEq/PartialOrd vs u8..usize,i8..isize) plus the reference-compare
+// shape; reimplemented fresh over Q47.16 raw bits in i128, std-only,
+// no donor bytes vendored.
+// PORT(alloy-rs/ruint@c764018b80dce8f0b5a0262cb97846e633acee31:src/cmp.rs)
+// PORT(alloy-rs/ruint@c764018b80dce8f0b5a0262cb97846e633acee31:proptest-regressions/)
+macro_rules! impl_fixed_for_primitives {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl PartialEq<$t> for Fixed {
+                fn eq(&self, other: &$t) -> bool {
+                    match i128::try_from(*other) {
+                        Ok(s) => cmp_raw_vs_scalar_i128(self.0, s) == Ordering::Equal,
+                        // Only huge u128 positives miss i128; never equal.
+                        Err(_) => false,
+                    }
+                }
+            }
+            impl PartialOrd<$t> for Fixed {
+                fn partial_cmp(&self, other: &$t) -> Option<Ordering> {
+                    Some(match i128::try_from(*other) {
+                        Ok(s) => cmp_raw_vs_scalar_i128(self.0, s),
+                        // Only huge u128 positives miss i128; Fixed is less.
+                        Err(_) => Ordering::Less,
+                    })
+                }
+            }
+        )*
+    };
+}
+#[rustfmt::skip]
+impl_fixed_for_primitives!(
+    u8, u16, u32, u64, u128, usize,
+    i8, i16, i32, i64, i128, isize,
+);
 fn saturating_i128_to_i64(v: i128) -> i64 {
     // Narrow through the i64 window: values outside hold the bound,
     // values inside keep exact bits. The fallback below is unreachable

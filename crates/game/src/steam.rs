@@ -12,6 +12,10 @@
 //! orchestrator step (manifest + `deny.toml` row); until it lands this file
 //! is the only place that may name Steam types, and the file-backed cloud
 //! dir below stands in for the SDK cloud calls.
+//! PORT(Noxime/steamworks-rs@0.13.1:src/lib.rs): achievements, stats,
+//! versioned cloud generations and presence only; networking skipped. The
+//! tick never waits on Steam and hashes never include backend bytes: every
+//! call runs at probe/store time on the calling thread, never in the tick.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -173,23 +177,28 @@ impl SteamBackend {
         self.stats.get(name).copied().ok_or(SteamError::UnknownStat)
     }
 
+    /// File path for one cloud slot under this backend's dir. The SDK client
+    /// behind the `steam` feature replaces this body; callers keep their
+    /// shape so the tick never branches on the feature.
+    fn cloud_path(&self, slot: u8) -> Result<std::path::PathBuf, SteamError> {
+        Ok(self.cloud_dir.join(cloud_name(slot)?))
+    }
+
     /// Store one versioned generation payload in the cloud store.
     pub fn store_generation(&self, slot: u8, payload: &[u8]) -> Result<(), SteamError> {
         if payload.len() > STEAM_MAX_CLOUD_BYTES {
             return Err(SteamError::TooLarge);
         }
-        let name = cloud_name(slot)?;
+        let path = self.cloud_path(slot)?;
         std::fs::create_dir_all(&self.cloud_dir).map_err(|err| SteamError::Io(err.kind()))?;
-        std::fs::write(self.cloud_dir.join(name), payload)
-            .map_err(|err| SteamError::Io(err.kind()))?;
+        std::fs::write(path, payload).map_err(|err| SteamError::Io(err.kind()))?;
         Ok(())
     }
 
     /// Load one versioned generation payload from the cloud store.
     pub fn load_generation(&self, slot: u8) -> Result<Vec<u8>, SteamError> {
-        let name = cloud_name(slot)?;
         let bytes =
-            std::fs::read(self.cloud_dir.join(name)).map_err(|err| SteamError::Io(err.kind()))?;
+            std::fs::read(self.cloud_path(slot)?).map_err(|err| SteamError::Io(err.kind()))?;
         if bytes.is_empty() || bytes.len() > STEAM_MAX_CLOUD_BYTES {
             return Err(SteamError::CloudCorrupt);
         }
@@ -312,6 +321,26 @@ mod tests {
             backend.load_generation(2),
             Err(SteamError::CloudCorrupt),
             "empty cloud bytes refuse"
+        );
+        std::env::remove_var(STEAM_RUNNING_ENV);
+        std::env::remove_var(STEAM_CLOUD_DIR_ENV);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn cloud_path_joins_slot_and_refuses_bad_slot() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let dir = cloud_dir("path");
+        std::env::set_var(STEAM_RUNNING_ENV, "1");
+        std::env::set_var(STEAM_CLOUD_DIR_ENV, &dir);
+        let backend = SteamBackend::probe().expect("backend");
+        assert_eq!(
+            backend.cloud_path(3).expect("slot path"),
+            dir.join("save03.e2040")
+        );
+        assert_eq!(
+            backend.cloud_path(STEAM_CLOUD_SLOTS),
+            Err(SteamError::BadSlot(STEAM_CLOUD_SLOTS))
         );
         std::env::remove_var(STEAM_RUNNING_ENV);
         std::env::remove_var(STEAM_CLOUD_DIR_ENV);

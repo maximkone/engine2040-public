@@ -455,6 +455,7 @@ mod draw_tests {
                 mesh: MeshKey::new(1, [0x11; 32]),
                 material: scene.material,
                 base_color: None,
+                normal_map: None,
             }],
         }
     }
@@ -472,6 +473,7 @@ mod draw_tests {
                 exposure: 1.0,
             },
             base_color: None,
+            normal_map: None,
         });
         match list.validate() {
             Err(PresentError::InvalidDraw { index, reason }) => {

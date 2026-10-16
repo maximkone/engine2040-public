@@ -721,9 +721,15 @@ impl core::fmt::Display for SettingsFileError {
                 "settings file is version {found}; this build reads version {SETTINGS_VERSION}"
             ),
             Self::BadVersion => write!(f, "settings file has no readable version line"),
-            Self::Checksum => write!(f, "settings file check line does not match (edited or torn)"),
+            Self::Checksum => write!(
+                f,
+                "settings file check line does not match (edited or torn)"
+            ),
             Self::Malformed { line } => {
-                write!(f, "settings file line {line} is not key=value or repeats a key")
+                write!(
+                    f,
+                    "settings file line {line} is not key=value or repeats a key"
+                )
             }
             Self::UnknownField { line, key } => {
                 write!(f, "settings file line {line} has unknown field {key}")
@@ -781,12 +787,24 @@ pub fn startup(file: Option<&[u8]>) -> Startup {
 pub fn encode(settings: &Settings) -> Vec<u8> {
     let mut body = String::new();
     push_line(&mut body, "version", SETTINGS_VERSION);
-    push_line(&mut body, "volume.master", settings.volume(VolumeBus::Master));
+    push_line(
+        &mut body,
+        "volume.master",
+        settings.volume(VolumeBus::Master),
+    );
     push_line(&mut body, "volume.music", settings.volume(VolumeBus::Music));
-    push_line(&mut body, "volume.effects", settings.volume(VolumeBus::Effects));
+    push_line(
+        &mut body,
+        "volume.effects",
+        settings.volume(VolumeBus::Effects),
+    );
     push_line(&mut body, "quality", settings.quality.word());
     push_line(&mut body, "render_scale", settings.render_scale_pct);
-    push_line(&mut body, "vsync", if settings.vsync { "on" } else { "off" });
+    push_line(
+        &mut body,
+        "vsync",
+        if settings.vsync { "on" } else { "off" },
+    );
     push_line(&mut body, "deadzone", settings.bindings.deadzone());
     for action in BoundAction::ALL {
         let button = settings.bindings.button(action);
@@ -832,7 +850,10 @@ fn fnv_bytes(bytes: &[u8]) -> u64 {
 /// The first line must name a layout this build reads. Checked before the
 /// check line, so a newer file reports its version, not a checksum.
 fn read_version(bytes: &[u8]) -> Result<(), SettingsFileError> {
-    let first_line = bytes.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    let first_line = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
     let digits = first_line
         .strip_prefix(b"version=")
         .ok_or(SettingsFileError::BadVersion)?;
@@ -941,9 +962,7 @@ fn parse_field(key: &str, value: &str) -> Result<Field, FieldFault> {
             bus: VolumeBus::Effects,
             permille: number(value)?,
         },
-        "quality" => {
-            SettingChange::Quality(Quality::from_word(value).ok_or(FieldFault::BadValue)?)
-        }
+        "quality" => SettingChange::Quality(Quality::from_word(value).ok_or(FieldFault::BadValue)?),
         "render_scale" => SettingChange::RenderScale(number(value)?),
         "vsync" => SettingChange::Vsync(match value {
             "on" => true,
@@ -1010,10 +1029,14 @@ fn snapshot(settings: &Settings) -> Vec<SettingChange> {
     changes.push(SettingChange::RenderScale(settings.render_scale_pct));
     changes.push(SettingChange::Vsync(settings.vsync));
     changes.push(SettingChange::Deadzone(settings.bindings.deadzone()));
-    changes.extend(BoundAction::ALL.iter().map(|&action| SettingChange::Rebind {
-        action,
-        button: settings.bindings.button(action),
-    }));
+    changes.extend(
+        BoundAction::ALL
+            .iter()
+            .map(|&action| SettingChange::Rebind {
+                action,
+                button: settings.bindings.button(action),
+            }),
+    );
     changes
 }
 
@@ -1505,7 +1528,9 @@ mod tests {
         first
             .stage(SettingChange::Quality(Quality::Low))
             .expect("quality stages");
-        first.stage(volume(VolumeBus::Music, 150)).expect("volume stages");
+        first
+            .stage(volume(VolumeBus::Music, 150))
+            .expect("volume stages");
         first
             .stage(SettingChange::Rebind {
                 action: BoundAction::Dodge,
@@ -1520,7 +1545,11 @@ mod tests {
         let mut second = SettingsPanel::from_saved(saved);
         second.advance(12).expect("restart view moves to 12");
         assert_eq!(second.live(), first.live());
-        assert_eq!(encode(second.live()), file, "the file reads back identically");
+        assert_eq!(
+            encode(second.live()),
+            file,
+            "the file reads back identically"
+        );
         for tick in 10..40 {
             assert_eq!(
                 second.tape().settings_at(tick),

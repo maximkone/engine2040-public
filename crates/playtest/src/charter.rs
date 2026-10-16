@@ -336,7 +336,11 @@ mod tests {
         assert!(!verdict.pass);
         assert_eq!(
             verdict.line,
-            format!("FAIL c2: {} (sev {})", charter.fail_line, charter.sev.letter())
+            format!(
+                "FAIL c2: {} (sev {})",
+                charter.fail_line,
+                charter.sev.letter()
+            )
         );
         assert_eq!(verdict, evaluate(&shake_log(15, 40), &charter));
     }
@@ -347,7 +351,8 @@ mod tests {
     fn charter_entry_point_prints_both_lines_with_log_and_sev() {
         let c1 = run_c1(first_bout_log(true)).expect("c1 ships");
         let c2 = run_c2(&shake_log(8, 40)).expect("c2 ships");
-        let lines = print_lines(&run_all(first_bout_log(true), &shake_log(8, 40)).expect("both ship"));
+        let lines =
+            print_lines(&run_all(first_bout_log(true), &shake_log(8, 40)).expect("both ship"));
         assert!(lines.contains(&c1.line));
         assert!(lines.contains(&c2.line));
         assert_eq!(lines.lines().count(), 2);

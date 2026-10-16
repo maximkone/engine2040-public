@@ -36,6 +36,9 @@ pub mod matrix;
 pub mod museum;
 pub mod online_soak;
 pub mod tape;
+/// Tape-decode one-harness fuzz: replay-hash oracle plus shrink (HS23).
+#[cfg(feature = "fuzz")]
+pub mod tape_fuzz;
 pub mod trace;
 
 /// Frozen no-input, seed-2040, 600-tick regression checksum.
@@ -584,6 +587,72 @@ pub fn replay(tape: &Tape) -> Result<(), Error> {
     Ok(())
 }
 
+/// Passive fixed-step plan beside the tick loop.
+/// Caller: `crate::matrix::collect_local_entry` steps one plan per row. Units: integer ms; no wall clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramePlan(u64, u64);
+/// Passive step decision; `alpha` is presentation blend in 0.0..1.0 and never hashed.
+/// Caller: `crate::matrix::collect_local_entry` consumes the decision beside the row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameTick {
+    pub steps: u32,
+    pub dropped: u32,
+    pub tick: u64,
+    pub alpha: f32,
+}
+impl FramePlan {
+    /// Fresh plan with empty accumulator at tick zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(0, 0)
+    }
+    /// Pure clamp-and-discard: add `dt_ms`, run at most `max_steps` of `step_ms`, drop exact excess.
+    pub fn begin_frame(&mut self, dt_ms: u64, step_ms: u64, max_steps: u32) -> FrameTick {
+        let step = step_ms.max(1);
+        self.0 = self.0.saturating_add(dt_ms);
+        let want = u32::try_from(self.0 / step).unwrap_or(u32::MAX);
+        let steps = want.min(max_steps);
+        let dropped = want.saturating_sub(steps);
+        self.0 -= u64::from(steps.saturating_add(dropped)) * step;
+        self.1 += u64::from(steps);
+        FrameTick {
+            steps,
+            dropped,
+            tick: self.1,
+            alpha: (self.0 as f32) / (step as f32),
+        }
+    }
+}
+/// Trace input file bytes: 16 LE bytes per input in tape order.
+/// Caller: `crate::matrix::emit_local_digests` proves file-vs-memory equality.
+#[must_use]
+pub fn encode_trace_inputs(inputs: &[Input]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(inputs.len() * 16);
+    for input in inputs {
+        input.append_bytes(&mut out);
+    }
+    out
+}
+/// Decode trace bytes under `config`; same bytes replay to identical digests.
+/// Caller: `crate::matrix::emit_local_digests` replays the file bytes.
+/// Errors: [`Error::Invalid`] on bad length or failed [`validate`].
+pub fn decode_trace_inputs(config: Config, bytes: &[u8]) -> Result<Vec<Input>, Error> {
+    if bytes.len() % 16 != 0 || bytes.len() / 16 > MAX_INPUTS {
+        return Err(Error::Invalid("bad trace length"));
+    }
+    let mut inputs = Vec::with_capacity(bytes.len() / 16);
+    for chunk in bytes.chunks_exact(16) {
+        inputs.push(Input {
+            tick: u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+            body: u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+            vx: f32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]),
+            vy: f32::from_le_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]),
+        });
+    }
+    validate(config, &inputs)?;
+    Ok(inputs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +671,29 @@ mod tests {
         )
         .unwrap();
         assert_ne!(tape.checkpoints, other.checkpoints);
+    }
+
+    #[test]
+    fn trace_replays_to_identical_digests() {
+        let config = Config::default();
+        let inputs = [Input {
+            tick: 5,
+            body: 1,
+            vx: 1.0,
+            vy: 2.0,
+        }];
+        let mem = record(config, &inputs).unwrap();
+        let bytes = encode_trace_inputs(&inputs);
+        assert_eq!(decode_trace_inputs(config, &bytes).unwrap(), inputs);
+        let file = record(config, &decode_trace_inputs(config, &bytes).unwrap()).unwrap();
+        assert_eq!(file.checkpoints, mem.checkpoints);
+        replay(&file).unwrap();
+        replay(&file).unwrap();
+        assert!(decode_trace_inputs(config, &[0u8; 15]).is_err());
+        let mut plan = FramePlan::new();
+        let decision = plan.begin_frame(100, 16, 5);
+        assert_eq!((decision.steps, decision.dropped, decision.tick), (5, 1, 5));
+        assert!((0.0..1.0).contains(&decision.alpha));
     }
 
     #[test]

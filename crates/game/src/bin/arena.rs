@@ -28,27 +28,31 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use engine_audio::{Bank, FightCue, Mixer};
+use engine_assets::watcher::{WatchSettings, Watcher};
+use engine_audio::{AudioEngine, Bank, FeedTx, FightCue, FrameSource, Mixer};
 use engine_game::arena_kit::{
     kit_prop_rows, live_kit_notice, push_kit_draws, stage_kit_or_default, KitReport,
 };
 use engine_game::capture;
 use engine_game::crash;
-use engine_game::fight_ring::ring_prop_row;
+use engine_game::fight_ring::{ring_prop_row, ring_wall_row};
 use engine_game::fighter_look::{look_down_deg, shot_for_frame, FighterLook, LookFrame};
 use engine_game::flow::{Flow, FlowEvent};
 use engine_game::input::{map_key, map_mouse};
+use engine_game::practice::PracticeSwap;
+use engine_game::reload::{HotReload, ReloadReason};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
 use engine_game::windowed::{
-    cap_message as capped, check_exit_deadline_with_limit, fighter_input_from_pressed,
-    format_timed_smoke, hud_cells_quads, open_audio, push_fight_draws, smoke_muted,
-    split_staged_flag, stage_dressing, stage_fight_bodies, staged_fight_input,
-    staged_session_config, surface_frame_action, StagedFighterDot, StagedTally, SurfaceFrameAction,
-    TickAccumulator, WinArgs, WinError, WINDOWED_SAMPLE_RATE, WINDOW_SIZE,
+    cap_message as capped, check_exit_deadline_with_limit, feed_tick_audio,
+    fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row, hud_cells_quads,
+    open_audio, push_fight_draws, smoke_muted, split_staged_flag, stage_arena_bank, stage_dressing,
+    stage_fight_bodies, staged_fight_input, staged_session_config, surface_frame_action,
+    StagedFighterDot, StagedTally, SurfaceFrameAction, TickAccumulator, WinArgs, WinError,
+    FRAME_TIMES_CSV_HEADER, WINDOWED_SAMPLE_RATE, WINDOW_SIZE,
 };
 use engine_game::{App, GameConfig, TickOutcome, HUMAN_SLOT};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
-use engine_render::present::{DrawList, MeshKey, PresentError, Presenter, WaitStats};
+use engine_render::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter, WaitStats};
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -74,6 +78,7 @@ macro_rules! tell {
 }
 
 mod arena_capture;
+mod arena_frame;
 mod arena_winit;
 
 use arena_capture::capture::{
@@ -218,6 +223,69 @@ fn warmup_steps(steps: u32, ticks_done: u32, ticks_total: u32, shown: bool) -> u
 /// counting it reports an empty picture that was never a fight view. Pure.
 fn framing_should_tally(ticks_done: u32) -> bool {
     ticks_done > 0
+}
+
+/// Whether the surface list needs fresh kit draws: the skinned look clears
+/// the list (`list.items.clear` in `push_fighters`), so a bound look drops
+/// kit draws before submit. Skipping that re-staging saves one `mesh_keys`
+/// allocation plus 11 resident checks per frame; pixels hold because the
+/// cleared draws never reached the submit. Pure.
+fn should_push_kit(look_bound: bool) -> bool {
+    !look_bound
+}
+
+/// Presentation threading for the EG45 balance look: folds one tick's cues
+/// into swings through the look, accepting the authoritative `Sim` when the
+/// live poll exposes it. `None` until the later row owns that edge (the look
+/// mirrors the same integer verdicts from cues today, so the same blows lean
+/// the same roots). Presentation only, never hashed.
+fn observe_tick_with_sim(
+    look: &mut FighterLook,
+    tick: u32,
+    views: &[engine_game::FighterView],
+    hp: &[u16],
+    cues: &[FightCue],
+    _sim: Option<&engine_arena::Sim>,
+) {
+    look.observe_tick(tick, views, hp, cues);
+}
+
+/// Deterministic draw order for the submit: opaque draws sort by mesh then
+/// material then texture, so the same tick gives the same draw list x2 and
+/// the submit reuses pipeline bindings in runs. `sort_unstable` runs in
+/// place, so the steady-state frame allocates nothing. Presentation only,
+/// never hashed [render-pipeline-rules rule 7].
+fn sort_draw_list(list: &mut DrawList) {
+    list.items.sort_unstable_by(|a, b| {
+        a.mesh
+            .cmp(&b.mesh)
+            .then_with(|| a.material_id().cmp(&b.material_id()))
+            .then_with(|| a.base_color.cmp(&b.base_color))
+    });
+}
+
+/// Whether the skinned fighter draws can be reused: the pose tick and the
+/// fighter count match the last skinned frame, so the CPU skin plus upload
+/// would rebuild identical vertices. The camera still re-aims per frame
+/// (slow orbit), so only the skin is cached. Pure.
+fn should_reuse_fighters(
+    cached_tick: Option<u32>,
+    cached_fighters: usize,
+    ticks_done: u32,
+    fighters: usize,
+) -> bool {
+    cached_tick == Some(ticks_done) && cached_fighters == fighters
+}
+
+/// Shell state at boot: automated runs (`--exit`/`--timed-smoke`) stage the
+/// bout at once (Match, ticks run) so captures show fighters; interactive
+/// play boots Title and waits for Enter/Space. Pure over the parsed flags.
+fn initial_flow(args: &WinArgs) -> Flow {
+    if args.exit || args.timed_smoke {
+        Flow::Match
+    } else {
+        Flow::Title
+    }
 }
 
 /// Nearest-rank percentile of an ascending microsecond list, `0` when
@@ -394,7 +462,7 @@ fn run(raw: &[String]) -> i32 {
         }
     };
     app.staged = staged.then(StagedTally::default);
-    app.look_probes = look_probes;
+    app.look_probes = Presenter::look_probes_for_capture(look_probes, app.capture.is_some());
     app.require_framing = require_framing;
     if let Some(path) = view_brief {
         match File::create(&path) {
@@ -424,6 +492,52 @@ fn check_exit_wall_deadline(elapsed_ms: f64, limit_ms: u32) -> Result<(), WinErr
         WinError::Render(msg) => WinError::Timeout(msg),
         other => other,
     })
+}
+
+/// Write the timed-smoke frame-times CSV: header plus one row per presented
+/// frame, so the proof perf mode reads a real run. Wall time rides the
+/// between-frame interval with the frame-body cost as the input-to-present
+/// leg; missing samples fall back to the run average, so a short smoke still
+/// files one row per frame. Creates parent dirs. Presentation only, never
+/// hashed; IO failures fail loudly.
+fn write_frame_times_csv(
+    path: &std::path::Path,
+    frames: u32,
+    work_us: &[u64],
+    interval_us: &[u64],
+    elapsed_ms: f64,
+) -> Result<(), WinError> {
+    if !elapsed_ms.is_finite() || elapsed_ms < 0.0 {
+        return Err(WinError::BadArgs(format!(
+            "frame-times elapsed_ms {elapsed_ms} is not finite nonnegative"
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                WinError::Render(format!("frame-times dir {}: {err}", parent.display()))
+            })?;
+        }
+    }
+    let avg_ms = elapsed_ms / f64::from(frames.max(1));
+    let us_to_ms = |us: u64| {
+        let whole = u32::try_from(us / 1000).unwrap_or(u32::MAX);
+        let frac = u32::try_from(us % 1000).unwrap_or(999);
+        f64::from(whole) + f64::from(frac) / 1000.0
+    };
+    let mut text = String::from(FRAME_TIMES_CSV_HEADER);
+    text.push('\n');
+    for index in 0..frames {
+        let at = usize::try_from(index).unwrap_or(usize::MAX);
+        let wall_ms = interval_us.get(at).map_or(avg_ms, |us| us_to_ms(*us));
+        let present_ms = work_us.get(at).map_or(wall_ms, |us| us_to_ms(*us));
+        let row = frame_times_csv_row(index, wall_ms, present_ms)?;
+        text.push_str(&row);
+        text.push('\n');
+    }
+    std::fs::write(path, text)
+        .map_err(|err| WinError::Render(format!("frame-times {}: {err}", path.display())))?;
+    Ok(())
 }
 
 /// Whole microseconds of a wall duration, saturating (diagnostics only).
@@ -472,6 +586,12 @@ struct ArenaApp {
     bindings: Bindings,
     bank: Bank,
     mixer: Arc<Mutex<Mixer>>,
+    /// Lock-free cue feed (tick-stamped, bounded, `dropped_full` counted).
+    feed_tx: Option<FeedTx>,
+    /// Offline cue engine pumped on the game thread when no device is live.
+    feed_engine: Option<AudioEngine>,
+    /// Reused stereo scratch for the offline feed pump (zero per tick).
+    feed_scratch: Vec<f32>,
     /// Live device stream when one opened; `None` degrades with a notice.
     _device: Option<engine_audio::device::DeviceOutput>,
     audio_notice: String,
@@ -484,6 +604,13 @@ struct ArenaApp {
     fight_draws: usize,
     /// Skinned CT7 fighters; `None` (refused load) draws the staged boxes.
     look: Option<FighterLook>,
+    /// Cached fighter draws for the last skinned tick: items plus draws,
+    /// reused when the pose tick is unchanged so the 8-fighter skin runs
+    /// once per tick instead of once per present. Presentation only.
+    fighter_cache_tick: Option<u32>,
+    fighter_cache_fighters: usize,
+    fighter_cache_draws: usize,
+    fighter_cache_items: Vec<DrawItem>,
     /// Staged-fight cue tally while `--staged-fight` drives the human slot.
     staged: Option<StagedTally>,
     /// Armed capture slot (twin PNG bytes plus tape cursor); `None` idles.
@@ -491,8 +618,12 @@ struct ArenaApp {
     window: Option<Arc<Window>>,
     pressed: Vec<PhysicalButton>,
     acc: TickAccumulator,
-    /// Window shell state; Paused holds the accumulator at zero steps.
+    /// Window shell state; Title, Paused and Result hold the accumulator
+    /// at zero steps while Match runs the bout.
     flow: Flow,
+    /// Whether the Result line already printed for this bout; cleared on
+    /// rematch so the next finished bout announces once.
+    result_announced: bool,
     last: Instant,
     /// Wall start of the session for the `--timed-smoke` fps line.
     started: Instant,
@@ -549,6 +680,14 @@ struct ArenaApp {
     test_panic_at: Option<u32>,
     /// Reused scratch for one tick's canonical input bytes (crash tape).
     crash_bytes: Vec<u8>,
+    /// Content watcher polled once per presented frame (EG29 slice 1).
+    watcher: Watcher,
+    /// Gate settling staged generations at frame boundaries.
+    reload: HotReload,
+    /// Staged combat-tuning swap applied at the tick boundary (EG29 slice 2).
+    practice: PracticeSwap,
+    /// Bout-tape lines for applied tuning generations (presentation log only).
+    bout_tape: Vec<String>,
 }
 
 impl ArenaApp {
@@ -557,14 +696,7 @@ impl ArenaApp {
         args: WinArgs,
         capture: Option<CaptureSlot>,
     ) -> Result<Self, WinError> {
-        let test_panic_at = match std::env::var(TEST_PANIC_ENV) {
-            Ok(text) => Some(
-                text.trim()
-                    .parse::<u32>()
-                    .map_err(|_| WinError::BadConfig(TEST_PANIC_ENV))?,
-            ),
-            Err(_) => None,
-        };
+        let test_panic_at = arena_frame::test_panic_tick()?;
         let app = App::new(config)?.into_duel()?;
         let mixer = Arc::new(Mutex::new(Mixer::new(WINDOWED_SAMPLE_RATE)));
         // Automated smoke never opens a device: `--mute` mutes explicitly,
@@ -579,12 +711,30 @@ impl ArenaApp {
         } else {
             tell!("arena notice: {audio_notice}");
         }
-        Ok(Self {
+        // An armed capture needs measured sky_ms for the per-pass sidecar,
+        // so it arms the blocking look probes even without `--look-probes`;
+        // live without capture stays non-blocking (Game Engine Gems 1 ch 9.6).
+        let capture_armed = capture.is_some();
+        // Automated smoke stages the bout at once; interactive boots Title.
+        let boot = initial_flow(&args);
+        // Hot reload (EG29 slice 1): content files plus shaders, see arena_frame.
+        let watcher = arena_frame::watch_content_roots();
+        // Arena cue bank once at startup: real `content/audio` takes only;
+        // missing clips fail loudly instead of falling back to silent synth.
+        // The feed below plays the real takes; the mixer keeps rendering offline.
+        let bank = Bank::placeholder(WINDOWED_SAMPLE_RATE);
+        let (cue_bank, _) = stage_arena_bank(WINDOWED_SAMPLE_RATE)?;
+        let (feed_tx, feed_engine) = arena_frame::open_cue_feed(Some(cue_bank));
+        let feed_scratch = vec![0.0f32; engine_game::windowed::FRAMES_PER_TICK * 2];
+        let shell = Self {
             config,
             args,
             app,
             bindings: Bindings::new(),
-            bank: Bank::placeholder(WINDOWED_SAMPLE_RATE),
+            bank,
+            feed_tx,
+            feed_engine,
+            feed_scratch,
             mixer,
             _device,
             audio_notice,
@@ -593,12 +743,17 @@ impl ArenaApp {
             kit: KitReport::default(),
             fight_draws: 0,
             look: None,
+            fighter_cache_tick: None,
+            fighter_cache_fighters: 0,
+            fighter_cache_draws: 0,
+            fighter_cache_items: Vec::new(),
             staged: None,
             capture,
             window: None,
             pressed: Vec::new(),
             acc: TickAccumulator::new(),
-            flow: Flow::Match,
+            flow: boot,
+            result_announced: false,
             last: Instant::now(),
             started: Instant::now(),
             ticks_done: 0,
@@ -617,7 +772,7 @@ impl ArenaApp {
             sim_us: 0,
             present_us: 0,
             fighters_us: 0,
-            look_probes: false,
+            look_probes: Presenter::look_probes_for_capture(false, capture_armed),
             require_framing: false,
             framing: Framing::default(),
             view: ViewLaws::default(),
@@ -626,149 +781,48 @@ impl ArenaApp {
             interval_us: Vec::new(),
             test_panic_at,
             crash_bytes: Vec::with_capacity(16),
-        })
+            watcher,
+            reload: HotReload::new(),
+            practice: PracticeSwap::new(),
+            bout_tape: Vec::new(),
+        };
+        // Title boot: the stranger sees the start key before the bout, and
+        // the accumulator holds at zero ticks until `FlowEvent::Start`.
+        // Automated smoke skips the shell and runs the bout at once.
+        arena_frame::announce_title_boot(boot);
+        Ok(shell)
     }
 
     fn human(&self) -> Result<FighterId, WinError> {
         FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))
     }
 
+    /// Clear the finished bout so rematch starts clean: a fresh match, a
+    /// zeroed tick cursor, a drained accumulator and a fresh scratch
+    /// outcome. The staged tally restarts too; the look keeps painting
+    /// (presentation only, never hashed). Loud on a refused rebuild.
+    fn reset_bout(&mut self) -> Result<(), WinError> {
+        self.app = App::new(self.config)?.into_duel()?;
+        self.ticks_done = 0;
+        self.acc = TickAccumulator::new();
+        self.tick_scratch = TickOutcome::default();
+        self.last_alpha = 0.0;
+        self.result_announced = false;
+        self.fighter_cache_tick = None;
+        self.fighter_cache_fighters = 0;
+        self.fighter_cache_draws = 0;
+        self.fighter_cache_items.clear();
+        self.last = Instant::now();
+        if self.staged.is_some() {
+            self.staged = Some(StagedTally::default());
+        }
+        Ok(())
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, err: WinError, code: i32) {
         tell!("arena: {err}");
         self.failure = Some(code);
         event_loop.exit();
-    }
-
-    /// Fold one presented twin receipt into the per-pass means.
-    /// Cold receipt path only; the first frame pins adapter/driver/size.
-    fn note_receipt(&mut self, receipt: &engine_render::present::FrameReceipt) {
-        let table = receipt.per_pass_us();
-        for (index, (_, us)) in table.iter().enumerate() {
-            self.pass_us[index] = self.pass_us[index].saturating_add(*us);
-        }
-        self.pass_validation = self
-            .pass_validation
-            .saturating_add(receipt.total_validation_errors());
-        if self.pass_frames == 0 {
-            self.pass_adapter.clone_from(&receipt.adapter);
-            self.pass_driver.clone_from(&receipt.driver);
-            self.pass_size = (receipt.width, receipt.height);
-        }
-        self.pass_frames = self.pass_frames.saturating_add(1);
-        if receipt.look_passes > 0 {
-            self.pass_probes = self.pass_probes.saturating_add(1);
-        }
-    }
-
-    /// Mean ms of one per-pass column: the probe columns (sky, layers,
-    /// particles, decals, ibl) average over frames that probed, fog, gtao
-    /// and shadow over every folded frame.
-    fn pass_mean(&self, index: usize) -> String {
-        let over = if index < 5 {
-            self.pass_probes
-        } else {
-            self.pass_frames
-        };
-        Self::mean_ms(self.pass_us[index], u64::from(over))
-    }
-
-    /// Format device forward p50 ms with three decimals; pure so tests pin
-    /// live above zero without a window. Non-blocking device timing only,
-    /// never a wait in the frame [render-pipeline-rules rule 2].
-    fn format_forward_ms(p50: f32) -> String {
-        format!("{:.3}", p50)
-    }
-
-    /// Device forward ms from the GPU timestamp ring (p50 over resolved
-    /// frames), honest `0.000` until the first sample lands or when the
-    /// adapter has no timestamp queries. Evidence only, never hashed; the
-    /// live frame runs forward every present while the probe columns stay 0
-    /// without `--look-probes`, so the EG8 gate tells LIVE (forward above 0)
-    /// from PROBE (probe columns above 0).
-    fn forward_ms(&self) -> String {
-        self.presenter
-            .as_ref()
-            .and_then(Presenter::gpu_timing_report)
-            .map_or_else(
-                || "0.000".to_string(),
-                |report| Self::format_forward_ms(report.forward.p50),
-            )
-    }
-
-    /// One-line per-pass means for the smoke log: adapter plus driver
-    /// plus resolution plus mean ms per pass plus device forward ms plus
-    /// total validation errors. `None` until the first presented frame pins
-    /// the adapter.
-    fn per_pass_line(&self) -> Option<String> {
-        if self.pass_frames == 0 || self.pass_adapter.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "arena per-pass: adapter=\"{}\" driver=\"{}\" resolution={}x{} frames={} sky={}ms layers={}ms particles={}ms decals={}ms ibl={}ms fog={}ms gtao={}ms shadow={}ms forward={}ms validation_errors={}",
-            self.pass_adapter,
-            self.pass_driver,
-            self.pass_size.0,
-            self.pass_size.1,
-            self.pass_frames,
-            self.pass_mean(0),
-            self.pass_mean(1),
-            self.pass_mean(2),
-            self.pass_mean(3),
-            self.pass_mean(4),
-            self.pass_mean(5),
-            self.pass_mean(6),
-            self.pass_mean(7),
-            self.forward_ms(),
-            self.pass_validation,
-        ))
-    }
-
-    /// Mean millis with three decimals from summed micros over frames,
-    /// using integer math so the smoke path needs no float cast.
-    fn mean_ms(total_us: u64, frames: u64) -> String {
-        let frames = frames.max(1);
-        let mean_us = total_us / frames;
-        format!("{}.{:03}", mean_us / 1000, mean_us % 1000)
-    }
-
-    /// File the per-pass means beside the capture manifest (`per_pass_ms.json`)
-    /// so the clip-adjacent evidence rides with the clip without touching the
-    /// deterministic `manifest.json` bytes. IO failures print loudly; the
-    /// smoke exit code is owned by the caller.
-    fn write_per_pass_sidecar(&self, manifest: &std::path::Path) {
-        let Some(line) = self.per_pass_line() else {
-            return;
-        };
-        let Some(dir) = manifest.parent() else {
-            return;
-        };
-        let json = format!(
-            "{{\"adapter\":\"{}\",\"driver\":\"{}\",\"resolution\":[{},{}],\"frames\":{},\"sky_ms\":{},\"layers_ms\":{},\"particles_ms\":{},\"decals_ms\":{},\"ibl_ms\":{},\"fog_ms\":{},\"gtao_ms\":{},\"shadow_ms\":{},\"forward_ms\":{},\"validation_errors\":{}}}",
-            self.pass_adapter.replace('"', "'"),
-            self.pass_driver.replace('"', "'"),
-            self.pass_size.0,
-            self.pass_size.1,
-            self.pass_frames,
-            self.pass_mean(0),
-            self.pass_mean(1),
-            self.pass_mean(2),
-            self.pass_mean(3),
-            self.pass_mean(4),
-            self.pass_mean(5),
-            self.pass_mean(6),
-            self.pass_mean(7),
-            self.forward_ms(),
-            self.pass_validation,
-        );
-        let path = dir.join("per_pass_ms.json");
-        if let Err(err) = std::fs::write(&path, json.as_bytes()) {
-            tell!(
-                "arena: per-pass sidecar write failed ({}: {err})",
-                path.display()
-            );
-        } else {
-            say!("arena per-pass manifest=\"{}\" {line}", path.display());
-        }
     }
 
     /// Fixed ticks owed for `elapsed_ms` of wall time. A window that cannot
@@ -809,51 +863,17 @@ impl ArenaApp {
             Ok(human) => human,
             Err(err) => return self.fail(event_loop, err, 2),
         };
-        for _ in 0..steps {
-            if self.ticks_done >= self.config.ticks {
-                break;
-            }
-            let tick = self.app.cursor();
-            let staged = self
-                .capture
-                .as_mut()
-                .and_then(|slot| slot.tape.input_for_tick(tick));
-            let input = match staged {
-                // Tape-bound capture: the tape owns the human slot this tick.
-                Some(input) => input,
-                None if self.staged.is_some() => staged_fight_input(tick, human),
-                None => fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings),
-            };
-            self.check_forced_tick(tick);
-            let outcome = {
-                self.app.tick_into(input, &mut self.tick_scratch);
-                &self.tick_scratch
-            };
-            debug_assert!(outcome.input_accepted);
-            if let Ok(mut mixer) = self.mixer.try_lock() {
-                for command in &outcome.audio {
-                    mixer.play(self.bank.get(command.sound), command.gain);
-                }
-                // Offline render only while no device stream is live: the
-                // device callback pulls voices itself when connected.
-                // Reused buffer keeps the per-tick path heap-free.
-                if self._device.is_none() {
-                    mixer.render_into(&mut self.audio_scratch);
-                }
-            }
-            // Presentation reads the tick after it ran; never writes back.
-            if let Some(tally) = self.staged.as_mut() {
-                tally.observe(&self.tick_scratch.cues);
-            }
-            if let Some(look) = self.look.as_mut() {
-                let (views, hp) = (self.app.fighter_views(), self.app.hp());
-                look.observe_tick(tick, views, hp, &self.tick_scratch.cues);
-            }
-            self.record_crash_tick(input);
-            self.ticks_done += 1;
-        }
+        self.run_sim_ticks(steps, human);
         if self.ticks_done >= self.config.ticks {
             self.flow = self.flow.on(FlowEvent::MatchOver);
+            // Minimal Result: winner plus ticks through the HUD text path
+            // once per bout; the overlay rows stay parked.
+            if self.flow == Flow::Result && !self.result_announced {
+                self.result_announced = true;
+                let line = engine_game::windowed::result_text(&self.app);
+                let (cells, quads) = engine_game::windowed::result_cells_quads(&self.app);
+                say!("arena {line} hud_cells={cells} hud_quads={quads}");
+            }
         }
         self.last_alpha = self.acc.alpha();
         let present_started = Instant::now();
@@ -890,76 +910,6 @@ impl ArenaApp {
         }
     }
 
-    /// The frame-split receipt: mean sim, present and fighter ms, then the
-    /// per-frame work and interval percentiles on the CPU, the GPU pass
-    /// percentiles from the device clock (`gpu_ms=unsupported` when the
-    /// adapter has no timestamp queries), the mean swapchain acquire wait
-    /// and the present mode (a vsync-bound mode parks the CPU in acquire).
-    fn frame_split_line(&self) -> String {
-        let frames = u64::from(self.frames_presented.max(1));
-        let mut work = self.work_us.clone();
-        let mut interval = self.interval_us.clone();
-        work.sort_unstable();
-        interval.sort_unstable();
-        let supported = self
-            .presenter
-            .as_ref()
-            .is_some_and(Presenter::gpu_timing_supported);
-        // Probe frames (`--look-probes`) are not timestamped: supported
-        // but no samples reads `none`, a missing feature reads `unsupported`.
-        let missing = if supported {
-            "gpu_ms=none".to_string()
-        } else {
-            "gpu_ms=unsupported".to_string()
-        };
-        let gpu = self
-            .presenter
-            .as_ref()
-            .and_then(Presenter::gpu_timing_report)
-            .map_or(missing, |report| {
-                format!(
-                    "gpu_ms p50={:.3} p99={:.3} (forward p50={:.3} blit p50={:.3}; {} frames)",
-                    report.total.p50,
-                    report.total.p99,
-                    report.forward.p50,
-                    report.blit.p50,
-                    report.frames,
-                )
-            });
-        let (acquire_us, mode) = self.presenter.as_ref().map_or((0, String::new()), |p| {
-            (
-                p.acquire_mean_us(),
-                p.present_mode_name().unwrap_or_default(),
-            )
-        });
-        format!(
-            "arena frame-split: sim={}ms present={}ms fighters={}ms per frame (mean over {} frames) cpu_ms p50={} p99={} interval_ms p50={} p99={} {} acquire={}ms present_mode={}",
-            Self::mean_ms(self.sim_us, frames),
-            Self::mean_ms(self.present_us, frames),
-            Self::mean_ms(self.fighters_us, frames),
-            self.frames_presented,
-            fmt_us_as_ms(percentile_us(&work, 50)),
-            fmt_us_as_ms(percentile_us(&work, 99)),
-            fmt_us_as_ms(percentile_us(&interval, 50)),
-            fmt_us_as_ms(percentile_us(&interval, 99)),
-            gpu,
-            fmt_us_as_ms(acquire_us),
-            mode,
-        )
-    }
-
-    /// Print the presenter blocking-call tally and return the failure
-    /// code when any live frame mapped a buffer or waited on the GPU.
-    /// Probe frames (`--look-probes`) and captures block by design and are
-    /// counted apart; a live frame that blocks is a regression.
-    fn report_waits(&self) -> Option<i32> {
-        let stats = self.presenter.as_ref()?.wait_stats();
-        say!("arena waits: {}", stats.summary());
-        let message = live_wait_failure(&stats)?;
-        tell!("arena: {message}");
-        Some(1)
-    }
-
     /// Exit-run receipts: smoke line, timed lines, capture manifest plus
     /// per-pass sidecar, staged-fight receipt, then leave the loop.
     fn finish_exit(&mut self, event_loop: &ActiveEventLoop) {
@@ -975,11 +925,30 @@ impl ArenaApp {
             self.audio_notice,
             self.presenter_notice,
         );
+        if let Some(tx) = self.feed_tx.as_ref() {
+            let stats = tx.stats();
+            say!(
+                "arena audio feed: sent={} applied={} dropped_full={}",
+                stats.sent,
+                stats.applied,
+                stats.dropped_full,
+            );
+        }
         if self.args.timed_smoke {
             let elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0;
             match format_timed_smoke(self.frames_presented, self.ticks_done, elapsed_ms) {
                 Ok(line) => say!("{line}"),
                 Err(err) => return self.fail(event_loop, err, 2),
+            }
+            let path = std::path::Path::new("target/perf/frame-times.csv");
+            if let Err(err) = write_frame_times_csv(
+                path,
+                self.frames_presented,
+                &self.work_us,
+                &self.interval_us,
+                elapsed_ms,
+            ) {
+                return self.fail(event_loop, err, 2);
             }
         }
         say!("{}", self.frame_split_line());
@@ -1048,6 +1017,53 @@ impl ArenaApp {
     /// bytes ride a separate explicit offscreen render (see
     /// `capture_offscreen`), never the surface receipt, so an offscreen PNG
     /// can never stand in for the OS window.
+    /// Hot reload (EG29 slice 1): poll the watcher once per presented frame
+    /// and settle staged generations at this boundary with the tick stamped.
+    /// A failed cook keeps last-good and logs its reason; the tick never waits.
+    fn poll_hot_reload(&mut self) {
+        let events = self.watcher.poll();
+        let frame = self.frames_presented;
+        for event in &events {
+            self.reload.note_changed(&event.path);
+        }
+        let report = self.reload.settle(frame, self.ticks_done, |path| {
+            std::fs::read(path)
+                .map(|bytes| engine_core::hash_bytes(&bytes))
+                .map_err(|err| ReloadReason::Cook(err.to_string()))
+        });
+        for applied in &report.applied {
+            say!(
+                "arena reload applied {} gen={} frame={} tick={}",
+                applied.path,
+                applied.generation,
+                applied.frame,
+                applied.tick
+            );
+        }
+        for (path, reason) in &report.failed {
+            say!("arena reload kept last-good {path} reason={reason:?}");
+        }
+        for event in &events {
+            if event.path.contains("combat.rows") {
+                self.practice.note_tuning(&event.path);
+            }
+        }
+        let tick = self.ticks_done;
+        if let Some(applied) =
+            engine_game::dev_hotpatch::apply_practice_at_boundary(&mut self.practice, frame, tick)
+        {
+            say!(
+                "arena practice applied gen={} frame={} tick={}",
+                applied.generation,
+                applied.frame,
+                applied.tick
+            );
+            self.bout_tape.push(applied.tape_line);
+        } else if let Some(reason) = self.practice.last_failure() {
+            say!("arena practice kept last-good reason={reason:?}");
+        }
+    }
+
     fn present_frame(&mut self, event_loop: &ActiveEventLoop) {
         let mut list = {
             let Some(presenter) = self.presenter.as_ref() else {
@@ -1075,11 +1091,15 @@ impl ArenaApp {
         };
         // Kit draws ride the same list as the surface and the offscreen
         // capture, so the window and its PNGs frame the same arena. Missing
-        // keys draw nothing, so an unstaged kit keeps the cube frame.
-        if let Some(presenter) = self.presenter.as_ref() {
-            let resident = presenter.mesh_keys();
-            push_kit_draws(&mut list, &resident, &self.kit);
-        };
+        // keys draw nothing, so an unstaged kit keeps the cube frame. The
+        // skinned look clears the list before its ring draws, so skip the
+        // re-staging while it is bound (static kit, never moved this frame).
+        if should_push_kit(self.look.is_some()) {
+            if let Some(presenter) = self.presenter.as_ref() {
+                let resident = presenter.mesh_keys();
+                push_kit_draws(&mut list, &resident, &self.kit);
+            }
+        }
         let fighters_started = Instant::now();
         if let Err(err) = self.push_fighters(&mut list) {
             return self.fail(event_loop, err, 1);
@@ -1138,6 +1158,7 @@ impl ArenaApp {
             }
         };
         self.frames_presented += 1;
+        self.poll_hot_reload();
         self.note_receipt(&receipt);
         self.capture_offscreen(event_loop, &list);
     }
@@ -1156,13 +1177,40 @@ impl ArenaApp {
                 ),
                 frame: self.frames_presented,
             };
-            // Real bodies stand in their pit: the placeholder cube, the
-            // dressing boxes and the parade kit (laid across the fight
-            // area) leave the frame; the look draws the ring instead.
-            list.items.clear();
-            self.fight_draws = look
-                .present_into(presenter, list, &frame)
-                .map_err(|err| WinError::Render(err.to_string()))?;
+            // Reuse the last skinned draws when the pose tick is unchanged:
+            // vsync parks about two presents per tick, so every second
+            // present skips the 8-fighter CPU skin plus upload and only
+            // re-aims the camera. Cached items stay sorted, so the same
+            // tick submits the same order x2. Presentation only.
+            if should_reuse_fighters(
+                self.fighter_cache_tick,
+                self.fighter_cache_fighters,
+                self.ticks_done,
+                frame.fighters,
+            ) && !self.fighter_cache_items.is_empty()
+            {
+                let base = list.camera.clone();
+                list.items.clear();
+                list.items.extend(self.fighter_cache_items.iter().cloned());
+                self.fight_draws = self.fighter_cache_draws;
+                list.camera = look.fight_camera(&base, frame.shot, frame.fighters, frame.frame);
+            } else {
+                // Real bodies stand in their pit: the placeholder cube, the
+                // dressing boxes and the parade kit (laid across the fight
+                // area) leave the frame; the look draws the ring instead.
+                list.items.clear();
+                self.fight_draws = look
+                    .present_into(presenter, list, &frame)
+                    .map_err(|err| WinError::Render(err.to_string()))?;
+                // Cached order: the same tick sorts to the same submit order x2,
+                // in place with no per-frame allocation.
+                sort_draw_list(list);
+                self.fighter_cache_tick = Some(self.ticks_done);
+                self.fighter_cache_fighters = frame.fighters;
+                self.fighter_cache_draws = self.fight_draws;
+                self.fighter_cache_items.clear();
+                self.fighter_cache_items.extend(list.items.iter().cloned());
+            }
             let in_view = look.fighters_in_view(&list.camera, frame.fighters);
             if framing_should_tally(self.ticks_done) {
                 self.framing
@@ -1183,12 +1231,13 @@ impl ArenaApp {
                         max: bounds[1],
                     })
                     .collect();
-                let ring = ring_prop_row();
-                props.push(PropTruth {
-                    kind: ring.0,
-                    min: ring.1[0],
-                    max: ring.1[1],
-                });
+                for row in [ring_prop_row(), ring_wall_row()] {
+                    props.push(PropTruth {
+                        kind: row.0,
+                        min: row.1[0],
+                        max: row.1[1],
+                    });
+                }
                 let light = FrameLight {
                     sun_dir: [0.0, 1.0, 0.0],
                     sun_elev: 0.5,
@@ -1253,7 +1302,13 @@ impl ArenaApp {
                     return;
                 };
                 if let Some(slot) = self.capture.as_mut() {
-                    if let Err(err) = slot.sink.write_frame(tick, hash, png) {
+                    let (sink, tap) = (&mut slot.sink, &mut slot.look_tap);
+                    if let Err(err) = sink.write_frame_with_hook(
+                        tick,
+                        hash,
+                        png,
+                        Some(&mut |bytes| tap.note(bytes)),
+                    ) {
                         self.fail(event_loop, WinError::Render(capped(&err.to_string())), 1);
                     }
                 }
@@ -1348,9 +1403,14 @@ impl ArenaApp {
         match Presenter::init_for_window(Arc::clone(window), width, height) {
             Ok(mut presenter) => {
                 // The live frame never waits on the GPU: fog is a fragment
-                // function and the probes are off. `--look-probes` brings
-                // the blocking probes back, spaced out so they hitch rarely.
-                presenter.set_look_probes(self.look_probes);
+                // function and the probes are off. `--look-probes` or an
+                // armed capture brings the blocking probes back, spaced out
+                // so they hitch rarely; the capture sidecar needs measured
+                // sky_ms on the reference 300-frame run.
+                presenter.set_look_probes(Presenter::look_probes_for_capture(
+                    self.look_probes,
+                    self.capture.is_some(),
+                ));
                 presenter.set_probe_every(LOOK_PROBE_EVERY);
                 presenter.set_fog_every(LIVE_FOG_EVERY);
                 let key = MeshKey::new(1, [0xA1; 32]);
@@ -1445,6 +1505,32 @@ impl ApplicationHandler for ArenaApp {
                     {
                         self.flow = self.flow.on(FlowEvent::TogglePause);
                     }
+                    // Shell keys without repeat: Title starts on Enter or
+                    // Space, Result rematches on R and returns to title on
+                    // T, both clearing the finished bout first. Escape keeps
+                    // its pause toggle above.
+                    let struck = event.state == ElementState::Pressed && !event.repeat;
+                    if struck
+                        && self.flow == Flow::Title
+                        && (code == winit::keyboard::KeyCode::Enter
+                            || code == winit::keyboard::KeyCode::Space)
+                    {
+                        self.flow = self.flow.on(FlowEvent::Start);
+                    }
+                    if struck && self.flow == Flow::Result && code == winit::keyboard::KeyCode::KeyR
+                    {
+                        if let Err(err) = self.reset_bout() {
+                            return self.fail(event_loop, err, 2);
+                        }
+                        self.flow = self.flow.on(FlowEvent::Rematch);
+                    }
+                    if struck && self.flow == Flow::Result && code == winit::keyboard::KeyCode::KeyT
+                    {
+                        if let Err(err) = self.reset_bout() {
+                            return self.fail(event_loop, err, 2);
+                        }
+                        self.flow = self.flow.on(FlowEvent::ToTitle);
+                    }
                     if let Some(key) = arena_winit::from_winit_key(code) {
                         self.set_pressed(map_key(key), event.state == ElementState::Pressed);
                     }
@@ -1497,6 +1583,126 @@ mod tests {
         assert_eq!(same, strings(&["arena", "--exit"]));
         // The strict parser still refuses the flag if it were not split.
         assert!(WinArgs::parse(&strings(&["arena", "--look-probes"])).is_err());
+    }
+
+    #[test]
+    fn kit_restaging_skips_while_the_look_is_bound() {
+        assert!(
+            !should_push_kit(true),
+            "bound look clears kit draws before submit, so restaging is wasted work"
+        );
+        assert!(
+            should_push_kit(false),
+            "refused look keeps the cube frame, so kit draws still push"
+        );
+    }
+
+    #[test]
+    fn fighter_cache_reuses_only_the_same_pose_tick() {
+        assert!(
+            should_reuse_fighters(Some(7), 8, 7, 8),
+            "same tick plus fighters reuses the skin"
+        );
+        assert!(
+            !should_reuse_fighters(None, 8, 7, 8),
+            "no cached tick skins fresh"
+        );
+        assert!(
+            !should_reuse_fighters(Some(6), 8, 7, 8),
+            "a stepped tick re-skins, never reuses stale vertices"
+        );
+        assert!(
+            !should_reuse_fighters(Some(7), 8, 7, 2),
+            "a fighter-count change re-skins"
+        );
+    }
+
+    #[test]
+    fn draw_order_is_stable_x2_and_keeps_every_draw() {
+        fn item(id: u64, red: f32) -> engine_render::present::DrawItem {
+            engine_render::present::DrawItem {
+                mesh: MeshKey::new(id, [0xA1; 32]),
+                material: engine_render::v1::PbrMaterial {
+                    base_color: [red, 0.5, 0.5],
+                    metallic: 0.0,
+                    roughness: 0.5,
+                    exposure: 1.0,
+                },
+                base_color: None,
+                normal_map: None,
+            }
+        }
+        let mut first = hud_draw_list(1280, 720).expect("HUD list builds for the order probe");
+        first.items.push(item(9, 0.2));
+        first.items.push(item(3, 0.8));
+        first.items.push(item(3, 0.1));
+        let mut second = first.clone();
+        second.items.reverse();
+        sort_draw_list(&mut first);
+        sort_draw_list(&mut second);
+        assert_eq!(first.items.len(), 3, "sorting never drops a draw");
+        assert_eq!(
+            first.items, second.items,
+            "same tick in another input order submits the same list x2"
+        );
+        let ids: Vec<u64> = first.items.iter().map(|draw| draw.mesh.id).collect();
+        assert_eq!(
+            ids,
+            vec![3, 3, 9],
+            "mesh id is the first tie-break, got {ids:?}"
+        );
+        assert!(
+            first.items[0].material.base_color[0] < first.items[1].material.base_color[0],
+            "duplicate mesh ids break ties by material"
+        );
+    }
+
+    #[test]
+    fn draw_order_empty_and_singleton_hold() {
+        let mut empty = hud_draw_list(1280, 720).expect("HUD list builds for the empty probe");
+        sort_draw_list(&mut empty);
+        assert!(
+            empty.items.is_empty(),
+            "empty list stays empty, never panics"
+        );
+    }
+
+    #[test]
+    fn capture_arms_the_look_probes_for_the_sidecar() {
+        // Behavior: the capture per-pass sidecar needs measured sky_ms on
+        // the reference 300-frame run, so an armed capture enables the
+        // blocking probes even when `--look-probes` is off; live without
+        // capture stays non-blocking (Game Engine Gems 1 ch 9.6).
+        assert!(
+            !Presenter::look_probes_for_capture(false, false),
+            "live stays non-blocking"
+        );
+        assert!(
+            Presenter::look_probes_for_capture(true, false),
+            "the flag still enables"
+        );
+        assert!(
+            Presenter::look_probes_for_capture(false, true),
+            "capture needs measured sky_ms"
+        );
+        assert!(Presenter::look_probes_for_capture(true, true));
+    }
+
+    #[test]
+    fn capture_sidecar_means_sky_over_probed_frames() {
+        // Failing-before: live-only averages to 0.000 sky, so the sidecar
+        // would file 0 ms; one probed microsecond must average above 0.
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "2", "--exit"]))
+            .expect("valid smoke fixture parses");
+        let mut app = ArenaApp::new(bin_config(), args, None).expect("test session builds");
+        app.pass_adapter = "RTX".to_string();
+        app.pass_frames = 1;
+        app.pass_probes = 0;
+        app.pass_us = [0; 8];
+        assert_eq!(app.pass_mean(0), "0.000", "live-only sky stays 0");
+        app.pass_us[0] = 1000;
+        app.pass_probes = 1;
+        assert_eq!(app.pass_mean(0), "1.000", "probed sky measures above 0");
     }
 
     #[test]
@@ -1895,6 +2101,34 @@ mod tests {
     }
 
     #[test]
+    fn timed_smoke_writes_frame_times_csv_with_header_and_rows() {
+        // The timed-smoke exit files header plus one row per presented frame,
+        // so the proof perf mode reads a real run. Bad times refuse loudly.
+        let row = frame_times_csv_row(0, 16.667, 16.667).expect("valid row formats");
+        assert!(row.starts_with("0,16.667,16.667"), "{row}");
+        assert!(frame_times_csv_row(1, f64::NAN, 16.0).is_err());
+        assert!(frame_times_csv_row(1, 16.0, -1.0).is_err());
+        assert!(frame_times_csv_row(2, f64::INFINITY, 16.0).is_err());
+        let dir = bin_temp_dir("frame-times");
+        let path = dir.join("frame-times.csv");
+        let work = vec![16_667u64, 16_667, 33_333];
+        let intervals = vec![16_667u64, 16_667, 16_667];
+        write_frame_times_csv(&path, 3, &work, &intervals, 50.0).expect("csv writes");
+        let text = std::fs::read_to_string(&path).expect("csv reads");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some(FRAME_TIMES_CSV_HEADER));
+        let rows: Vec<&str> = lines.collect();
+        assert_eq!(rows.len(), 3, "one row per presented frame:\n{text}");
+        assert!(rows[0].starts_with("0,"), "{}", rows[0]);
+        assert!(rows[1].starts_with("1,"), "{}", rows[1]);
+        assert!(rows[2].starts_with("2,"), "{}", rows[2]);
+        assert!(text.contains("wall_ms"), "{text}");
+        assert!(write_frame_times_csv(&path, 3, &work, &intervals, f64::NAN).is_err());
+        assert!(write_frame_times_csv(&path, 3, &work, &intervals, -5.0).is_err());
+        std::fs::remove_dir_all(&dir).expect("test temp dir cleans");
+    }
+
+    #[test]
     fn exit_smoke_session_opens_no_audio_device() {
         // Automated `--exit` runs mute by construction: the window session
         // opens no audio device while the mixer still renders offline, and
@@ -1937,6 +2171,85 @@ mod tests {
         let app = ArenaApp::new(bin_config(), args, None).expect("muted session builds");
         assert!(app._device.is_none(), "muted smoke opens no audio device");
         assert!(app.audio_notice.contains("muted"), "{}", app.audio_notice);
+    }
+
+    #[test]
+    fn shell_boots_to_title_and_rematch_clears_the_bout() {
+        // Behavior: interactive play boots Title (zero ticks owed), the Start
+        // event opens the bout, and rematch clears the prior bout state.
+        // Automated `--exit` smoke boots Match instead (see the next test).
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "2"]))
+            .expect("valid interactive fixture parses");
+        let mut app = ArenaApp::new(bin_config(), args, None).expect("test session builds");
+        assert_eq!(app.flow, Flow::Title);
+        assert!(!app.flow.ticks_run(), "title holds the accumulator");
+        assert_eq!(app.ticks_done, 0);
+        assert!(!app.result_announced);
+        // The Enter key path: Title plus Start runs the bout.
+        app.flow = app.flow.on(FlowEvent::Start);
+        assert_eq!(app.flow, Flow::Match);
+        assert!(app.flow.ticks_run());
+        // Failure guard: a dirty bout (ticks banked) resets to zero with a
+        // fresh match cursor, ready for a clean rematch.
+        app.ticks_done = 7;
+        app.result_announced = true;
+        app.reset_bout().expect("rematch clears the bout");
+        assert_eq!(app.ticks_done, 0);
+        assert_eq!(app.app.cursor(), 0);
+        assert!(!app.result_announced);
+        assert!(app.app.checkpoints().is_empty());
+    }
+
+    #[test]
+    fn automated_exit_smoke_starts_in_match() {
+        // Regression: `--exit` smoke must stage the bout at once (Match,
+        // ticks run) so `arena.exe --scene arena --fighters 8 --frames 30
+        // --exit` shows fighters; Title is for interactive play only. Fails
+        // while the smoke boots Title and holds ticks at 0 (empty sand).
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "2", "--exit"]))
+            .expect("valid smoke fixture parses");
+        let app = ArenaApp::new(bin_config(), args, None).expect("test session builds");
+        assert_eq!(
+            app.flow,
+            Flow::Match,
+            "exit smoke must boot Match, not Title"
+        );
+        assert!(app.flow.ticks_run(), "exit smoke must tick without Enter");
+        // Pure branches: timed smoke also runs at once, interactive waits.
+        let timed = WinArgs::parse(&strings(&["arena", "--frames", "2", "--timed-smoke"]))
+            .expect("timed fixture parses");
+        assert_eq!(initial_flow(&timed), Flow::Match);
+        let live = WinArgs::parse(&strings(&["arena", "--frames", "2"]))
+            .expect("interactive fixture parses");
+        assert_eq!(initial_flow(&live), Flow::Title);
+    }
+
+    #[test]
+    fn capture_arms_look_probes_for_per_pass_sky() {
+        // Capture needs measured sky ms: an armed capture must arm the
+        // blocking look probes so the per-pass sidecar reports sky above zero.
+        // Without probes every receipt reports sky zero and the sidecar lies.
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "2", "--exit"]))
+            .expect("valid smoke fixture parses");
+        let root = bin_temp_dir("probe-cap");
+        let flags = cap::CaptureFlags {
+            dir: root.join("clip"),
+            every: 1,
+            tape: None,
+            rows: vec!["SHOW1".to_string()],
+            sha: "deadbeef1234".to_string(),
+            fps: 30,
+        };
+        let slot = super::arena_capture::capture::setup_capture(&Some(flags), &bin_config())
+            .expect("capture arms")
+            .expect("slot armed");
+        let app = ArenaApp::new(bin_config(), args, Some(slot)).expect("test session builds");
+        assert!(
+            app.look_probes,
+            "an armed capture must arm look probes so sky_ms measures above zero"
+        );
+        assert!(app.capture.is_some(), "capture stays armed for the sidecar");
+        std::fs::remove_dir_all(&root).expect("test temp dir cleans");
     }
 
     #[test]

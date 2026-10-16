@@ -1,5 +1,4 @@
-use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
+use std::collections::{BTreeMap, VecDeque};
 
 use super::surface::PresentError;
 use super::MAX_TEXTURE_DIM;
@@ -76,9 +75,12 @@ impl_asset_key!(MeshKey);
 impl_asset_key!(TextureKey);
 
 // ---------------------------------------------------------------------------
-// Bounded cache: insertion-order eviction, never HashMap-order dependent.
+// Bounded cache: insertion-order eviction, never map-order dependent.
 // The GPU presenter stores buffers/textures behind this; the policy itself is
-// std-only so the eviction order is unit-tested without a GPU.
+// std-only so the eviction order is unit-tested without a GPU. The map is a
+// `BTreeMap` (sorted, no hashing) so the lib test target never instantiates
+// `RandomState`/`DefaultHasher` for `MeshKey`/`TextureKey` and receipts stay
+// deterministic on any host.
 // ---------------------------------------------------------------------------
 
 /// Bounded key store with insertion-order (FIFO) eviction. Reinserting a live
@@ -86,9 +88,9 @@ impl_asset_key!(TextureKey);
 /// counters (`inserted`, `evicted`, `high_water`, `last_evicted`) are kept
 /// inline so overflow fixtures prove eviction without error and the receipt
 /// names the evicted asset; they never change the eviction order.
-pub struct CpuCache<K: Eq + Hash + Clone, V> {
+pub struct CpuCache<K: Ord + Clone, V> {
     capacity: usize,
-    map: HashMap<K, V>,
+    map: BTreeMap<K, V>,
     order: VecDeque<K>,
     inserted: u64,
     evicted_total: u64,
@@ -96,12 +98,12 @@ pub struct CpuCache<K: Eq + Hash + Clone, V> {
     last_evicted: Option<K>,
 }
 
-impl<K: Eq + Hash + Clone, V> CpuCache<K, V> {
+impl<K: Ord + Clone, V> CpuCache<K, V> {
     /// Build with a nonzero capacity; zero capacity keeps nothing.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            map: HashMap::new(),
+            map: BTreeMap::new(),
             order: VecDeque::new(),
             inserted: 0,
             evicted_total: 0,
@@ -113,7 +115,7 @@ impl<K: Eq + Hash + Clone, V> CpuCache<K, V> {
     /// Insert, evicting the oldest key first when over capacity. Returns the
     /// evicted key, if any, so GPU owners can drop its buffers.
     pub fn insert(&mut self, key: K, value: V) -> Option<K> {
-        use std::collections::hash_map::Entry;
+        use std::collections::btree_map::Entry;
         match self.map.entry(key) {
             Entry::Occupied(mut slot) => {
                 slot.insert(value);
@@ -200,7 +202,7 @@ impl<K: Eq + Hash + Clone, V> CpuCache<K, V> {
     }
 }
 
-impl<K: Eq + Hash + Clone + Ord, V> CpuCache<K, V> {
+impl<K: Ord + Clone, V> CpuCache<K, V> {
     /// Resident keys in sorted order (deterministic receipts).
     pub fn sorted_keys(&self) -> Vec<K> {
         let mut keys: Vec<K> = self.map.keys().cloned().collect();

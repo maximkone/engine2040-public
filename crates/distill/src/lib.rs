@@ -46,8 +46,8 @@
 //! scripted, inside the balance verifier's mirrored bounds.
 
 mod data;
-mod export;
 pub mod duel;
+mod export;
 /// FPS budget gate for the tiny in-tick student: static op/byte caps plus the
 /// offline byte check the ship generator runs. Units, errors and determinism
 /// scope live on the module items.
@@ -65,11 +65,11 @@ pub use data::{
     DatasetManifest, ProvenanceError, Sample, Shipment, INPUT_QUANT_SCALE, MAX_FEATURE_ABS,
     MAX_SAMPLES,
 };
-pub use export::{export, export_mlp, quantize_input, E2nnBytes, ExportError};
 pub use duel::{
     play_bout, teacher_episode, teacher_rows_per_episode, BoutOutcome, DuelError, Opponent,
     StudentController, TeacherDriver, DUEL_CLASSES, DUEL_LANES, DUEL_LANE_STEPS,
 };
+pub use export::{export, export_mlp, quantize_input, E2nnBytes, ExportError};
 pub use fps::{
     check_fps, mlp_tick_ops, FpsError, FpsReport, FPS_CLASSES, FPS_LANES, MAX_FPS_BYTES,
     MAX_FPS_TICK_OPS,
@@ -151,7 +151,10 @@ mod root_wiring_tests {
         assert_eq!(spec.dims.output_dim, 3);
         assert_eq!(spec.seed, 7);
         assert_eq!(spec.weight_count(), 6);
-        assert!(StudentSpec::new(0, 2, 0).is_err(), "zero input refuses via root");
+        assert!(
+            StudentSpec::new(0, 2, 0).is_err(),
+            "zero input refuses via root"
+        );
         assert!(
             StudentSpec::new(2, MAX_SPEC_DIM + 1, 0).is_err(),
             "over-cap output refuses via root"
@@ -213,7 +216,11 @@ mod root_wiring_tests {
             mse_loss(&Student::zeros(one), core::slice::from_ref(&row)),
             Some(0.5)
         );
-        assert_eq!(mse_loss(&Student::zeros(one), &[]), None, "empty set refuses");
+        assert_eq!(
+            mse_loss(&Student::zeros(one), &[]),
+            None,
+            "empty set refuses"
+        );
     }
 
     /// Runtime quantization reads through the root at 16 steps per unit.
@@ -236,7 +243,10 @@ mod root_wiring_tests {
         assert_eq!(score.agree_rate_permille, 666);
         assert_eq!(score.first_divergent_index, Some(1));
         let empty = score_against_teacher(&[], &[]);
-        assert_eq!(empty.agree_rate_permille, 1_000, "empty script agrees vacuously");
+        assert_eq!(
+            empty.agree_rate_permille, 1_000,
+            "empty script agrees vacuously"
+        );
         assert_eq!(empty.first_divergent_index, None);
         assert_eq!(scripted_decide(&[1, 2, 3], 5), 1, "lane sum mod classes");
         assert_eq!(scripted_decide(&[-1], 4), 3, "negative sums wrap");
@@ -248,7 +258,10 @@ mod root_wiring_tests {
         );
         assert_eq!(wilson95(0, 0), (0.0, 1.0), "empty sample spans all");
         let (lo, hi) = wilson95(5, 10);
-        assert!(lo >= 0.0 && lo < 0.5 && 0.5 < hi && hi <= 1.0, "interval holds p");
+        assert!(
+            lo >= 0.0 && lo < 0.5 && 0.5 < hi && hi <= 1.0,
+            "interval holds p"
+        );
         assert_eq!(wilson95(12, 10), wilson95(10, 10), "overshoot clamps");
         assert_eq!(binomial_two_sided_p(0, 0), 1.0, "empty trial is certain");
         assert_eq!(binomial_two_sided_p(5, 10), 1.0, "even split caps at 1");

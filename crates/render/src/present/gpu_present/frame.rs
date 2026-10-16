@@ -6,6 +6,34 @@ use super::super::*;
 use crate::v1::Manifest;
 use crate::{decals, gtao, ibl, material_layer, particles_gpu, sky};
 
+/// Second forward attachment for draw ids: one `u32` per pixel, sized
+/// with the frame. The shader slice writes it; this slice only proves
+/// the target exists and stays clear.
+pub(crate) const ID_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+/// Clear value for the id target: no draw claims this texel.
+pub(crate) const ID_CLEAR: u32 = u32::MAX;
+
+/// Clear bytes for the id target: `width * height` copies of
+/// [`ID_CLEAR`] in little-endian row-major order. Returns empty on
+/// zero size. Pure: same inputs give same bytes twice. No GPU here.
+pub(crate) fn id_clear_bytes(width: u32, height: u32) -> Vec<u8> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let w = usize::try_from(width).unwrap_or(0);
+    let h = usize::try_from(height).unwrap_or(0);
+    let len = w.checked_mul(h).unwrap_or(0).checked_mul(4).unwrap_or(0);
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut out = vec![0u8; len];
+    let word = ID_CLEAR.to_le_bytes();
+    for chunk in out.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&word);
+    }
+    out
+}
+
 /// One presented (or skipped) frame. The cache-budget rows quote the
 /// mesh/texture budgets at frame end: resident counts, high-water marks,
 /// cumulative evictions and the most recently evicted asset id, so an
@@ -92,6 +120,8 @@ pub struct FrameReceipt {
     pub decal_submit_us: u64,
     /// Chart submit wall time in us.
     pub ibl_submit_us: u64,
+    /// Sun depth submit wall time in us.
+    pub shadow_submit_us: u64,
 }
 
 impl FrameReceipt {
@@ -129,10 +159,10 @@ impl FrameReceipt {
     }
 
     /// Per-pass wall-clock in report order: sky, layers,
-    /// particles, decals, chart, fog, occlusion. Evidence only, never
+    /// particles, decals, chart, fog, occlusion, shadow. Evidence only, never
     /// hashed; micros with no allocation.
     #[must_use]
-    pub fn per_pass_us(&self) -> [(&'static str, u64); 7] {
+    pub fn per_pass_us(&self) -> [(&'static str, u64); 8] {
         [
             ("sky", self.sky_submit_us),
             ("layers", self.layer_submit_us),
@@ -141,6 +171,7 @@ impl FrameReceipt {
             ("ibl", self.ibl_submit_us),
             ("fog", self.fog_submit_us),
             ("gtao", self.gtao_submit_us),
+            ("shadow", self.shadow_submit_us),
         ]
     }
 
@@ -156,7 +187,7 @@ impl FrameReceipt {
     #[must_use]
     pub fn per_pass_summary(&self) -> String {
         format!(
-            "adapter={} driver={} resolution={}x{} sky={}ms layers={}ms particles={}ms decals={}ms ibl={}ms fog={}ms gtao={}ms validation_errors={}",
+            "adapter={} driver={} resolution={}x{} sky={}ms layers={}ms particles={}ms decals={}ms ibl={}ms fog={}ms gtao={}ms shadow={}ms validation_errors={}",
             self.adapter,
             self.driver,
             self.width,
@@ -168,6 +199,7 @@ impl FrameReceipt {
             Self::format_ms_us(self.ibl_submit_us),
             Self::format_ms_us(self.fog_submit_us),
             Self::format_ms_us(self.gtao_submit_us),
+            Self::format_ms_us(self.shadow_submit_us),
             self.total_validation_errors(),
         )
     }
@@ -220,11 +252,36 @@ pub(crate) struct Targets {
     pub(crate) fog_texture: wgpu::Texture,
     /// RL9 contact-AO texture the blit multiplies (R32 float).
     pub(crate) ao_texture: wgpu::Texture,
+    /// Draw-id attachment (`R32Uint`): cleared to [`ID_CLEAR`], stays
+    /// clear until the shader slice writes it.
+    pub(crate) id_texture: wgpu::Texture,
+    /// View over `id_texture` for the next slice's forward attachment.
+    pub(crate) id_view: wgpu::TextureView,
+    /// CPU image of the id clear (`ID_CLEAR` bytes), reused to refresh
+    /// the target per frame without a float-clear round trip.
+    pub(crate) id_clear: Vec<u8>,
     /// RL9 fog composite color (sRGB) plus frame size for texel lookup.
     pub(crate) fog_col_buf: wgpu::Buffer,
     /// Blit bind group over `hdr_view` plus the RL9 pair; rebuilt with
     /// the targets.
     pub(crate) blit_bind: wgpu::BindGroup,
+    /// 4x MSAA color plus depth pair when on; `None` keeps the 1x path.
+    pub(crate) msaa: Option<MsaaTargets>,
+}
+
+/// 4x MSAA color plus depth pair when the switch is on; `None` is the 1x
+/// path. `samples` comes from the plan (4 on), color is HDR, depth is DEPTH.
+pub(crate) struct MsaaTargets {
+    /// Samples per pixel from the plan (4 when on).
+    pub(crate) samples: u32,
+    /// Multisampled HDR color (RENDER_ATTACHMENT only).
+    pub(crate) color: wgpu::Texture,
+    /// View over `color` for the resolve slice.
+    pub(crate) color_view: wgpu::TextureView,
+    /// Multisampled depth (RENDER_ATTACHMENT only).
+    pub(crate) depth: wgpu::Texture,
+    /// View over `depth` for the resolve slice.
+    pub(crate) depth_view: wgpu::TextureView,
 }
 
 impl From<&wgpu::CurrentSurfaceTexture> for SurfaceEvent {
@@ -386,5 +443,216 @@ pub(super) fn ibl_err(e: ibl::IblError) -> PresentError {
         ibl::IblError::Validation(reason) => {
             PresentError::Validation(format!("ibl look: {reason}"))
         }
+    }
+}
+
+#[cfg(test)]
+#[path = "frame_id_tests.rs"]
+mod frame_id_tests;
+
+#[cfg(test)]
+mod id_tests {
+    use super::frame_id_tests::read_id_back;
+    use super::*;
+
+    #[test]
+    fn id_target_cleared_to_max() {
+        assert_eq!(ID_CLEAR, u32::MAX);
+        assert_eq!(ID_TARGET_FORMAT, wgpu::TextureFormat::R32Uint);
+        let bytes = id_clear_bytes(2, 1);
+        let word = ID_CLEAR.to_le_bytes();
+        assert_eq!(&bytes[0..4], &word);
+        assert_eq!(&bytes[4..8], &word);
+        assert!(id_clear_bytes(0, 1).is_empty() && id_clear_bytes(1, 0).is_empty());
+        assert_eq!(id_clear_bytes(2, 1), id_clear_bytes(2, 1));
+    }
+
+    #[test]
+    fn id_target_stays_clear_on_offscreen() {
+        let mut presenter = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => p,
+            Err(PresentError::NoAdapter) => {
+                eprintln!("SKIPPED id target readback: no adapter");
+                return;
+            }
+            Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let key = crate::present::MeshKey::new(0x1D1D, [0x1D; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        // Resize drops targets (lazy rebuild on the next render), so
+        // materialize the cold set before the clear readback.
+        presenter.ensure_targets(64, 64);
+        // Cold target starts clear before any forward write.
+        let targets = presenter.targets.as_ref().expect("targets exist");
+        assert_eq!(targets.id_texture.format(), ID_TARGET_FORMAT);
+        let cold = read_id_back(&presenter, &targets.id_texture);
+        assert!(cold.iter().all(|v| *v == ID_CLEAR));
+        let scene = crate::v1::default_scene(64, 64).expect("default scene is valid");
+        let list = crate::present::DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![crate::present::DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+                normal_map: None,
+            }],
+        };
+        let out = presenter
+            .render_offscreen(&list)
+            .expect("box frame renders");
+        assert!(out.receipt.is_clean() && out.manifest.is_clean());
+    }
+
+    #[test]
+    fn id_target_reports_box_id() {
+        let mut presenter = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => p,
+            Err(PresentError::NoAdapter) => {
+                eprintln!("SKIPPED id target readback: no adapter");
+                return;
+            }
+            Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let key = crate::present::MeshKey::new(0x1D1D, [0x1D; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let scene = crate::v1::default_scene(64, 64).expect("default scene is valid");
+        let list = crate::present::DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![crate::present::DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+                normal_map: None,
+            }],
+        };
+        let out = presenter
+            .render_offscreen(&list)
+            .expect("box frame renders");
+        assert!(out.receipt.is_clean() && out.manifest.is_clean());
+        let targets = presenter.targets.as_ref().expect("targets exist");
+        assert_eq!(targets.id_texture.format(), ID_TARGET_FORMAT);
+        let first = read_id_back(&presenter, &targets.id_texture);
+        assert_eq!(first, read_id_back(&presenter, &targets.id_texture));
+        let covered = first.iter().filter(|v| **v == 0).count();
+        let clear = first.iter().filter(|v| **v == ID_CLEAR).count();
+        assert!(
+            covered > 0,
+            "box must claim pixels with id 0, got {covered} covered"
+        );
+        assert!(
+            clear > 0,
+            "background must stay clear {ID_CLEAR}, got {clear} clear"
+        );
+        assert_eq!(
+            covered + clear,
+            first.len(),
+            "single box leaves only id 0 or clear"
+        );
+    }
+
+    #[test]
+    fn id_target_box_readback_holds_box_id_and_clear() {
+        let mut presenter = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => p,
+            Err(PresentError::NoAdapter) => {
+                eprintln!("SKIPPED id target readback: no adapter");
+                return;
+            }
+            Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let box_key = crate::present::MeshKey::new(0xB0E1, [0xB0; 32]);
+        let plane_key = crate::present::MeshKey::new(0x51A0, [0x51; 32]);
+        let plane = crate::v1::MeshData {
+            positions: vec![
+                [-16.0, -0.5, -16.0],
+                [16.0, -0.5, -16.0],
+                [16.0, -0.5, 16.0],
+                [-16.0, -0.5, 16.0],
+            ],
+            normals: vec![[0.0, 1.0, 0.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; 4],
+        };
+        presenter
+            .upload_mesh(box_key, &crate::v1::cube())
+            .expect("box uploads");
+        presenter
+            .upload_mesh(plane_key, &plane)
+            .expect("plane uploads");
+        presenter.resize(64, 64).expect("size applies");
+        let scene = crate::v1::default_scene(64, 64).expect("scene builds");
+        let list = crate::present::DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![
+                crate::present::DrawItem {
+                    mesh: box_key,
+                    material: scene.material.clone(),
+                    base_color: None,
+                    normal_map: None,
+                },
+                crate::present::DrawItem {
+                    mesh: plane_key,
+                    material: scene.material,
+                    base_color: None,
+                    normal_map: None,
+                },
+            ],
+        };
+        let out = presenter
+            .render_offscreen(&list)
+            .expect("box on plane renders");
+        assert!(out.receipt.is_clean(), "receipt clean");
+        assert!(out.manifest.is_clean(), "manifest clean");
+        assert_eq!(out.receipt.validation_errors, 0, "0 validation errors");
+        let targets = presenter.targets.as_ref().expect("targets exist");
+        assert_eq!(targets.id_texture.format(), ID_TARGET_FORMAT);
+        assert_eq!(targets.id_clear, id_clear_bytes(64, 64));
+        let first = read_id_back(&presenter, &targets.id_texture);
+        let second = read_id_back(&presenter, &targets.id_texture);
+        assert_eq!(first, second, "id bytes x2 equal");
+        let mut counts = vec![0u64; 2];
+        let (tallied, skipped, box_hits, plane_hits, partitioned) =
+            crate::draw_id::verify_box_plane_partition(&first, &mut counts);
+        assert!(partitioned, "box plus plane partition through tally");
+        assert!(box_hits > 0, "box claims pixels with id 0");
+        assert!(plane_hits > 0, "plane keeps pixels with id 1");
+        let box_direct = first.iter().filter(|v| **v == 0).count();
+        let plane_direct = first.iter().filter(|v| **v == 1).count();
+        let clear = first.iter().filter(|v| **v == ID_CLEAR).count();
+        assert!(clear > 0, "background stays clear");
+        assert_eq!(
+            u64::try_from(box_direct).expect("box count fits"),
+            box_hits,
+            "oracle box matches direct id 0"
+        );
+        assert_eq!(
+            u64::try_from(plane_direct).expect("plane count fits"),
+            plane_hits,
+            "oracle plane matches direct id 1"
+        );
+        assert_eq!(
+            u64::try_from(clear).expect("clear count fits"),
+            skipped,
+            "clear texels are the skipped ones"
+        );
+        assert_eq!(
+            box_hits.saturating_add(plane_hits),
+            tallied,
+            "tally holds box plus plane"
+        );
+        assert!(
+            first.iter().all(|v| *v == 0 || *v == 1 || *v == ID_CLEAR),
+            "only box, plane or clear appear"
+        );
     }
 }

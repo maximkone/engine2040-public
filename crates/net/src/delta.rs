@@ -393,6 +393,90 @@ pub fn delta_wire_len(delta: &Delta) -> usize {
             .sum::<usize>()
 }
 
+/// Bitstream with overflow flag (MSG discipline, integer only, byte appends).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Ioq3Msg {
+    /// Bytes written so far.
+    pub bytes: Vec<u8>,
+    /// Sticky overflow once a write exceeds the cap.
+    pub overflowed: bool,
+}
+impl Ioq3Msg {
+    /// Append bytes unless over cap; overflow sticks and writes stop.
+    pub fn push_bytes(&mut self, cap: usize, chunk: &[u8]) {
+        if self.overflowed {
+            return;
+        }
+        if self.bytes.len().saturating_add(chunk.len()) > cap {
+            self.overflowed = true;
+            return;
+        }
+        self.bytes.extend_from_slice(chunk);
+    }
+    /// Take bytes when no overflow happened, else refuse loud.
+    pub fn take(self) -> Result<Vec<u8>, NetError> {
+        if self.overflowed {
+            return Err(NetError::TooLarge);
+        }
+        Ok(self.bytes)
+    }
+}
+/// ioq3 per-client delta shape: acked lastframe plus server time, flags,
+/// area bytes, then field-masked entity fields against the acked baseline.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ioq3SnapFields {
+    /// Acked baseline tick (must equal baseline tick and delta base).
+    pub lastframe: u32,
+    /// Authoritative tick being sent.
+    pub server_time: u32,
+    /// Snapshot flags (pattern parity, integer only).
+    pub snap_flags: u8,
+    /// Visible-area bytes for the viewer.
+    pub area_bytes: Vec<u8>,
+    /// Field-masked entity delta against the acked baseline.
+    pub delta: Delta,
+}
+/// Encode ioq3 fields: baseline tick must equal lastframe, else BadState.
+pub fn ioq3_encode_fields(
+    lastframe: u32,
+    server_time: u32,
+    snap_flags: u8,
+    area_bytes: Vec<u8>,
+    full: &FullSnap,
+    baseline: &FullSnap,
+) -> Result<Ioq3SnapFields, NetError> {
+    if baseline.tick != lastframe {
+        return Err(NetError::BadState);
+    }
+    let delta = encode_delta(full, baseline)?;
+    if delta.base_tick != lastframe || delta.tick != server_time {
+        return Err(NetError::BadState);
+    }
+    Ok(Ioq3SnapFields {
+        lastframe,
+        server_time,
+        snap_flags,
+        area_bytes,
+        delta,
+    })
+}
+/// Decode ioq3 fields against the acked baseline; stale baseline is BadState.
+pub fn ioq3_decode_fields(
+    fields: &Ioq3SnapFields,
+    baseline: &FullSnap,
+) -> Result<FullSnap, NetError> {
+    if fields.lastframe != baseline.tick || fields.delta.base_tick != baseline.tick {
+        return Err(NetError::BadState);
+    }
+    decode_delta(&fields.delta, baseline)
+}
+/// Wire bytes for ioq3 fields (delta wire plus lastframe/time/flags/area).
+pub fn ioq3_fields_wire_len(fields: &Ioq3SnapFields) -> usize {
+    delta_wire_len(&fields.delta)
+        .saturating_add(fields.area_bytes.len())
+        .saturating_add(10)
+}
+
 /// Interpolation answer: the blended snapshot plus whether the query hit a
 /// clamp boundary (no extrapolation was performed).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -624,6 +708,44 @@ mod tests {
             decode_delta(&noop, &baseline).expect("noop decode"),
             baseline
         );
+    }
+
+    #[test]
+    fn ioq3_delta_beats_full_by_thirty_percent() {
+        let raws: Vec<(u8, [f32; 3], f32, u16, u16)> = (0..8)
+            .map(|slot| (slot, [f32::from(slot), 0.0, 0.0], 0.0, 1000, 100))
+            .collect();
+        let baseline = snap(100, &raws);
+        let mut changed = raws.clone();
+        changed[5].1 = [5.5, 0.0, 0.0];
+        changed[5].4 = 90;
+        let full = snap(106, &changed);
+        let fields =
+            ioq3_encode_fields(100, 106, 0, vec![0xA5, 0x5A], &full, &baseline).expect("fields");
+        assert_eq!((fields.lastframe, fields.server_time), (100, 106));
+        assert_eq!(
+            ioq3_decode_fields(&fields, &baseline).expect("decode"),
+            full,
+            "decode against the acked baseline equals full"
+        );
+        let wire = ioq3_fields_wire_len(&fields);
+        let budget = full.full_wire_len() * 7 / 10;
+        assert!(
+            wire <= budget,
+            "delta wire {wire} must be 30%+ smaller than full {}",
+            full.full_wire_len()
+        );
+        let stale = snap(99, &raws);
+        assert_eq!(
+            ioq3_encode_fields(100, 106, 0, Vec::new(), &full, &stale),
+            Err(NetError::BadState)
+        );
+        assert_eq!(ioq3_decode_fields(&fields, &stale), Err(NetError::BadState));
+        let mut msg = Ioq3Msg::default();
+        msg.push_bytes(4, &[1, 2, 3]);
+        msg.push_bytes(4, &[4, 5]);
+        assert!(msg.overflowed);
+        assert_eq!(msg.take(), Err(NetError::TooLarge));
     }
 
     #[test]

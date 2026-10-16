@@ -17,6 +17,33 @@ pub const RIVAL_PARITY: [(&str, &str); 3] = [
     ("godot_runtime_state", TOOL_STATE_DIGEST),
 ];
 
+/// One shared core for both lookup directions: the table loop lives here
+/// once, thin callers below only pick which lane to match and which to
+/// return. Pure, no allocation, never panics.
+fn find_parity<F>(matches: F) -> Option<(&'static str, &'static str)>
+where
+    F: FnMut(&(&'static str, &'static str)) -> bool,
+{
+    RIVAL_PARITY.iter().find(matches).copied()
+}
+
+/// Resolve a rival verb name to our play-pack verb, if it is one of the three.
+///
+/// Caller: `crate::insight::mcp_tools::ServerState::api_describe` resolves
+/// rival aliases before the index lookup, so `godot_game_time` reads as
+/// `play.step_until`. Pure, no allocation, never panics.
+pub fn verb_for_rival(rival: &str) -> Option<&'static str> {
+    find_parity(|(name, _)| *name == rival).map(|(_, ours)| ours)
+}
+
+/// Resolve our play-pack verb to its rival alias, if any.
+///
+/// Caller: reviewers checking LF16 parity; the door seeds the index with our
+/// verb names and this maps them back to the rival door. Pure, never panics.
+pub fn rival_for(verb: &str) -> Option<&'static str> {
+    find_parity(|(_, ours)| *ours == verb).map(|(name, _)| name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43,5 +70,27 @@ mod tests {
             );
             assert!(spec.readonly(), "{ours} writes nothing");
         }
+    }
+
+    #[test]
+    fn rival_helpers_resolve_both_ways_and_refuse_unknown() {
+        // Behaviour: each rival reads as its play-pack verb and back.
+        // Caller: `ServerState::api_describe` resolves rivals through
+        // `verb_for_rival`; reviewers map back through `rival_for`.
+        for (rival, ours) in RIVAL_PARITY {
+            assert_eq!(verb_for_rival(rival), Some(ours), "{rival} resolves");
+            assert_eq!(rival_for(ours), Some(rival), "{ours} maps back");
+            assert_eq!(
+                verb_for_rival(rival),
+                verb_for_rival(rival),
+                "resolves twice"
+            );
+        }
+        // Failure: unknown names on either side refuse as `None`, never panic.
+        assert_eq!(verb_for_rival("godot_unknown"), None);
+        assert_eq!(verb_for_rival("play.step_until_extra"), None);
+        assert_eq!(verb_for_rival(""), None);
+        assert_eq!(rival_for("play.step_until_extra"), None);
+        assert_eq!(rival_for(""), None);
     }
 }

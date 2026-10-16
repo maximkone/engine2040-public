@@ -61,6 +61,14 @@ pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Default smoke length in the launch manifest (`--frames N --exit`).
 pub const SMOKE_FRAMES: u32 = 120;
 
+// PORT(velopack/velopack@master:src): installer plus delta CLI pattern; the
+// staged feed carries the shipped version beside the clean folder, and one
+// delta apply bumps patch by one. Missing feed sources fail loudly.
+/// Relative versioned update feed staged beside the payload.
+const UPDATE_FEED_REL: &str = "update-feed.json";
+/// Env override naming an explicit feed file to stage instead of the build's.
+const UPDATE_FEED_ENV_VAR: &str = "E2040_UPDATE_FEED";
+
 /// Maximum files scanned by [`verify_clean`] (bounded buffers; anything more
 /// reports [`CleanViolation::TooManyFiles`]).
 pub const MAX_SCAN_FILES: usize = 4096;
@@ -516,6 +524,37 @@ fn stub_marker(stub: bool) -> &'static str {
     }
 }
 
+/// Apply one delta update to a `major.minor.patch` version: patch plus one.
+/// Anything else fails loudly with [`PackageError::BadManifest`]. Pure.
+fn apply_delta_version(current: &str) -> Result<String, PackageError> {
+    let bad = || PackageError::BadManifest(bound_detail("bad update version"));
+    let (major, rest) = current.split_once('.').ok_or_else(bad)?;
+    let (minor, patch) = rest.split_once('.').ok_or_else(bad)?;
+    let major: u64 = major.parse().map_err(|_| bad())?;
+    let minor: u64 = minor.parse().map_err(|_| bad())?;
+    let patch: u64 = patch.parse().map_err(|_| bad())?;
+    Ok(std::format!("{major}.{minor}.{}", patch.saturating_add(1)))
+}
+
+/// Stage the versioned update feed beside the clean folder: the explicit
+/// `E2040_UPDATE_FEED` file when one is given (unreadable or version-less
+/// sources fail loudly), else this build's version. Never silent.
+fn stage_update_feed(dist_dir: &Path, override_source: Option<&Path>) -> Result<(), PackageError> {
+    if let Some(source) = override_source {
+        let bytes = std::fs::read(source).map_err(|err| PackageError::Io(err.kind()))?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| PackageError::BadManifest(bound_detail("update feed not utf-8")))?;
+        if !text.contains("\"version\"") {
+            return Err(PackageError::BadManifest(bound_detail(
+                "update feed source has no version",
+            )));
+        }
+        return stage_file(dist_dir, UPDATE_FEED_REL, &bytes);
+    }
+    let body = std::format!("{{\"version\":\"{PACKAGE_VERSION}\",\"profile\":\"release\"}}\n");
+    stage_file(dist_dir, UPDATE_FEED_REL, body.as_bytes())
+}
+
 /// Launch manifest bytes: version, profile, binary, bundle, stub markers and
 /// the window CLI (`--frames N --exit` smoke; empty `args:` means interactive
 /// play with the arena defaults). Relative paths only. Pure.
@@ -763,6 +802,8 @@ pub fn assemble_full(
     }
     let manifest_file = manifest_bytes(&manifest);
     stage_file(dist_dir, MANIFEST_REL, &manifest_file)?;
+    let feed_source = std::env::var_os(UPDATE_FEED_ENV_VAR).map(PathBuf::from);
+    stage_update_feed(dist_dir, feed_source.as_deref())?;
     Ok(manifest)
 }
 
@@ -1113,6 +1154,21 @@ mod tests {
         let mut tampered = std::fs::read(join_dist(&dir, &first.name)).unwrap();
         tampered[0] ^= 0xFF;
         assert_ne!(digest_hex(&tampered), first.digest);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delta_update_bumps_patch_and_feed_stages_version() {
+        assert_eq!(apply_delta_version("1.2.3").expect("delta"), "1.2.4");
+        for bad in ["1.2", "a.b.c", "", "1.2.3.4"] {
+            assert!(apply_delta_version(bad).is_err(), "delta accepted: {bad:?}");
+        }
+        let dir = fresh_temp_dir("feed");
+        assemble_inner(&dir, PackageProfile::Release, None).unwrap();
+        let body = std::fs::read_to_string(join_dist(&dir, UPDATE_FEED_REL)).unwrap();
+        assert!(body.contains(PACKAGE_VERSION), "feed lacks version: {body}");
+        let missing = dir.join("no-such-feed.json");
+        assert!(stage_update_feed(&dir, Some(&missing)).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

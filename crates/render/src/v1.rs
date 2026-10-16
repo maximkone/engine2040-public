@@ -126,6 +126,13 @@ pub struct MeshData {
     pub uvs: Vec<[f32; 2]>,
     /// Triangle indices into the attribute arrays.
     pub indices: Vec<u32>,
+    /// Tangents as `[x, y, z, w]` with `w` the handedness (`1.0` or `-1.0`).
+    /// Computed deterministically by [`upload_mesh`] from positions plus UVs;
+    /// degenerate UVs fall back per vertex to `+X` orthogonalized against the
+    /// normal with `w = 1.0`. Carried to the GPU by [`MeshData::vertex_bytes`]
+    /// as 48 bytes per vertex (pos + normal + uv + tangent); normal/ORM
+    /// sampling is the documented remainder.
+    pub tangents: Vec<[f32; 4]>,
 }
 
 fn all_finite_3(field: &'static str, xs: &[[f32; 3]]) -> Result<(), MeshError> {
@@ -136,6 +143,9 @@ fn all_finite_3(field: &'static str, xs: &[[f32; 3]]) -> Result<(), MeshError> {
     }
     Ok(())
 }
+
+/// Tangents are owned by `engine-assets` (ARCHITECTURE C3): [`upload_mesh`] calls
+/// `engine_assets::import_repair::recompute_tangents`; no local mirror.
 
 /// Validate and pack parallel arrays plus indices into a [`MeshData`].
 /// Rejects empty meshes, length mismatches, out-of-range indices,
@@ -203,11 +213,21 @@ pub fn upload_mesh(
             return Err(MeshError::IndexOutOfRange(*i));
         }
     }
-    Ok(MeshData {
+    // CODELAW one-owner: tangents come from the import lane; inputs are already validated above.
+    let proxy = engine_assets::CookedMesh {
         positions: positions.to_vec(),
         normals: normals.to_vec(),
-        uvs: uvs.to_vec(),
+        uv0: uvs.to_vec(),
+        tangents: Vec::new(),
         indices: indices.to_vec(),
+    };
+    let tangents = engine_assets::import_repair::recompute_tangents(&proxy);
+    Ok(MeshData {
+        positions: proxy.positions,
+        normals: proxy.normals,
+        uvs: proxy.uv0,
+        indices: proxy.indices,
+        tangents,
     })
 }
 
@@ -249,9 +269,9 @@ pub fn cube() -> MeshData {
 }
 
 impl MeshData {
-    /// Interleaved vertex bytes for the GPU: pos(3) + normal(3) + uv(2) f32 LE.
+    /// Interleaved vertex bytes for the GPU: pos(3) + normal(3) + uv(2) + tangent(4) f32 LE.
     pub fn vertex_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.positions.len() * 32);
+        let mut out = Vec::with_capacity(self.positions.len() * 48);
         for i in 0..self.positions.len() {
             for c in self.positions[i] {
                 out.extend_from_slice(&c.to_le_bytes());
@@ -260,6 +280,9 @@ impl MeshData {
                 out.extend_from_slice(&c.to_le_bytes());
             }
             for c in self.uvs[i] {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+            for c in self.tangents[i] {
                 out.extend_from_slice(&c.to_le_bytes());
             }
         }
@@ -583,16 +606,23 @@ pub struct CameraUniform {
 impl CameraUniform {
     /// 80-byte little-endian image matching `CameraU` in WGSL.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(80);
-        for col in &self.view_proj_cols {
-            for c in col {
-                out.extend_from_slice(&c.to_le_bytes());
+        self.to_array().to_vec()
+    }
+
+    /// Stack image of the same 80 bytes, reused per draw with no heap.
+    pub(crate) fn to_array(&self) -> [u8; 80] {
+        let mut out = [0u8; 80];
+        for (i, col) in self.view_proj_cols.iter().enumerate() {
+            for (j, c) in col.iter().enumerate() {
+                let at = (i * 4 + j) * 4;
+                out[at..at + 4].copy_from_slice(&c.to_le_bytes());
             }
         }
-        for c in self.camera_pos {
-            out.extend_from_slice(&c.to_le_bytes());
+        for (j, c) in self.camera_pos.iter().enumerate() {
+            let at = 64 + j * 4;
+            out[at..at + 4].copy_from_slice(&c.to_le_bytes());
         }
-        out.extend_from_slice(&0f32.to_le_bytes());
+        out[76..80].copy_from_slice(&0f32.to_le_bytes());
         out
     }
 }
@@ -611,15 +641,22 @@ pub struct LightUniform {
 impl LightUniform {
     /// 32-byte little-endian image matching `LightU` in WGSL.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32);
-        for c in self.dir_to_light {
-            out.extend_from_slice(&c.to_le_bytes());
+        self.to_array().to_vec()
+    }
+
+    /// Stack image of the same 32 bytes, reused per frame with no heap.
+    pub(crate) fn to_array(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, c) in self.dir_to_light.iter().enumerate() {
+            let at = i * 4;
+            out[at..at + 4].copy_from_slice(&c.to_le_bytes());
         }
-        out.extend_from_slice(&0f32.to_le_bytes());
-        for c in self.color {
-            out.extend_from_slice(&c.to_le_bytes());
+        out[12..16].copy_from_slice(&0f32.to_le_bytes());
+        for (i, c) in self.color.iter().enumerate() {
+            let at = 16 + i * 4;
+            out[at..at + 4].copy_from_slice(&c.to_le_bytes());
         }
-        out.extend_from_slice(&self.intensity.to_le_bytes());
+        out[28..32].copy_from_slice(&self.intensity.to_le_bytes());
         out
     }
 }
@@ -640,15 +677,21 @@ pub struct MaterialUniform {
 impl MaterialUniform {
     /// 32-byte little-endian image matching `MaterialU` in WGSL.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32);
-        for c in self.base_color {
-            out.extend_from_slice(&c.to_le_bytes());
+        self.to_array().to_vec()
+    }
+
+    /// Stack image of the same 32 bytes, reused per draw with no heap.
+    pub(crate) fn to_array(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, c) in self.base_color.iter().enumerate() {
+            let at = i * 4;
+            out[at..at + 4].copy_from_slice(&c.to_le_bytes());
         }
-        out.extend_from_slice(&self.metallic.to_le_bytes());
-        out.extend_from_slice(&self.roughness.to_le_bytes());
-        out.extend_from_slice(&self.exposure.to_le_bytes());
-        out.extend_from_slice(&0f32.to_le_bytes());
-        out.extend_from_slice(&0f32.to_le_bytes());
+        out[12..16].copy_from_slice(&self.metallic.to_le_bytes());
+        out[16..20].copy_from_slice(&self.roughness.to_le_bytes());
+        out[20..24].copy_from_slice(&self.exposure.to_le_bytes());
+        out[24..28].copy_from_slice(&0f32.to_le_bytes());
+        out[28..32].copy_from_slice(&0f32.to_le_bytes());
         out
     }
 }
@@ -717,6 +760,18 @@ pub fn build_uniforms(
     ))
 }
 
+/// Build only the material uniform; camera plus light come from the
+/// once-per-frame pack, so per-draw work skips view math and light checks.
+pub(crate) fn build_material(material: &PbrMaterial) -> Result<MaterialUniform, UniformError> {
+    material.validate().map_err(UniformError::Material)?;
+    Ok(MaterialUniform {
+        base_color: material.base_color,
+        metallic: material.metallic,
+        roughness: material.roughness,
+        exposure: material.exposure,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // CPU PBR mirror: the same Bevy-ported math the WGSL runs, used by the
 // software receipt rasterizer and by behavior tests of the port.
@@ -770,7 +825,7 @@ pub fn v_smith_ggx_correlated(roughness: f32, ndot_v: f32, ndot_l: f32) -> f32 {
     let a2 = roughness * roughness;
     let lambda_v = ndot_l * ((ndot_v - a2 * ndot_v) * ndot_v + a2).sqrt();
     let lambda_l = ndot_v * ((ndot_l - a2 * ndot_l) * ndot_l + a2).sqrt();
-    0.5 / (lambda_v + lambda_l)
+    0.50 / (lambda_v + lambda_l)
 }
 
 /// PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): `F_Schlick` (Schlick 1994 via Filament).
@@ -1149,7 +1204,7 @@ impl Manifest {
                 c if (c as u32) < 0x20 => {
                     out.push_str(&format!("\\u{:04x}", c as u32));
                 }
-                c => out.push(c),
+                c => out.push({ c }),
             }
         }
     }
@@ -1799,5 +1854,96 @@ mod tests {
             capture(MAX_CAPTURE_DIM + 1, 8),
             Err(CaptureError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn mesh_tangents_are_orthonormal_with_handedness() {
+        // One quad (two tris) on +Z with standard UVs: tangents run +X.
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let normals = [[0.0, 0.0, 1.0]; 4];
+        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let indices = [0, 1, 2, 0, 2, 3];
+        let mesh = upload_mesh(&positions, &normals, &uvs, &indices).expect("quad is valid");
+        assert_eq!(mesh.tangents.len(), 4, "one tangent per vertex");
+        for (t, n) in mesh.tangents.iter().zip(normals.iter()) {
+            let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "tangent must be unit, got {len}");
+            let dot = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+            assert!(dot.abs() < 1e-5, "tangent must be orthogonal, dot {dot}");
+            assert!(
+                t[3] == 1.0 || t[3] == -1.0,
+                "handedness is +-1, got {}",
+                t[3]
+            );
+            assert!(t.iter().all(|c| c.is_finite()), "tangent must be finite");
+        }
+        // Deterministic: same mesh twice gives bit-identical tangents.
+        let again = upload_mesh(&positions, &normals, &uvs, &indices).expect("quad is valid");
+        assert_eq!(mesh.tangents, again.tangents);
+        // Dominant direction is +X for this UV layout.
+        assert!(
+            mesh.tangents[0][0] > 0.9,
+            "expected +X tangent, got {:?}",
+            mesh.tangents[0]
+        );
+        // GPU channel: 48 bytes per vertex with tangent xyzw round-tripping.
+        let bytes = mesh.vertex_bytes();
+        assert_eq!(
+            bytes.len(),
+            mesh.positions.len() * 48,
+            "stride is 48 with tangents"
+        );
+        for (i, t) in mesh.tangents.iter().enumerate() {
+            let base = i * 48 + 32;
+            for (k, want) in t.iter().enumerate() {
+                let got = f32::from_le_bytes(
+                    bytes[base + k * 4..base + (k + 1) * 4]
+                        .try_into()
+                        .expect("tangent bytes in range"),
+                );
+                assert_eq!(got, *want, "tangent byte {k} round-trips");
+            }
+        }
+        let shader = include_str!("shaders/forward.wgsl");
+        assert!(
+            shader.contains("@location(3) tangent: vec4<f32>"),
+            "shader declares tangent at location 3"
+        );
+    }
+
+    #[test]
+    fn mesh_tangents_fallback_on_degenerate_uvs() {
+        // Mirrored UVs flip handedness; degenerate UVs fall back to +X-like.
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let normals = [[0.0, 0.0, 1.0]; 4];
+        let mirrored = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let flipped = [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let indices = [0, 1, 2, 0, 2, 3];
+        let a = upload_mesh(&positions, &normals, &mirrored, &indices).expect("quad is valid");
+        let b = upload_mesh(&positions, &normals, &flipped, &indices).expect("quad is valid");
+        assert_ne!(
+            a.tangents[0][3], b.tangents[0][3],
+            "mirrored UVs flip handedness"
+        );
+        // Degenerate UV triangle: all UVs equal, no direction to solve.
+        let flat_uvs = [[0.5, 0.5]; 4];
+        let flat =
+            upload_mesh(&positions, &normals, &flat_uvs, &indices).expect("flat uvs still upload");
+        for (t, n) in flat.tangents.iter().zip(normals.iter()) {
+            assert!(t.iter().all(|c| c.is_finite()), "fallback must be finite");
+            assert_eq!(t[3], 1.0, "fallback handedness is +1");
+            let dot = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+            assert!(dot.abs() < 1e-5, "fallback stays orthogonal, dot {dot}");
+        }
     }
 }

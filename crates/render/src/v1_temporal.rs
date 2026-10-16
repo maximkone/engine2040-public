@@ -10,8 +10,8 @@
 
 use std::fmt;
 
+use crate::post::{jitter_ndc, jitter_offset, jitter_projection_glam};
 use crate::v1::MAX_CAPTURE_DIM;
-use crate::v1_lighting::TaaJitter;
 
 // ---------------------------------------------------------------------------
 // Quality presets: plain render-scale fractions, not FSR code.
@@ -233,7 +233,7 @@ impl HistoryBuffer {
 // Jitter uniform wiring: R4 Halton sequence at the render size.
 // ---------------------------------------------------------------------------
 
-/// Per-frame temporal uniform: the R4 [`TaaJitter`] offset evaluated at the
+/// Per-frame temporal uniform: the R4 [`jitter_offset`](crate::post::jitter_offset) evaluated at the
 /// render size, in both pixel and NDC units, plus the projection hook the
 /// `v1_gpu` pass consumes.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -252,14 +252,14 @@ impl TemporalUniform {
     pub fn for_frame(frame: u64, render_w: u32, render_h: u32) -> Self {
         Self {
             frame,
-            jitter_pixels: TaaJitter::offset(frame),
-            jitter_ndc: TaaJitter::ndc(frame, render_w, render_h),
+            jitter_pixels: jitter_offset(frame),
+            jitter_ndc: jitter_ndc(frame, render_w, render_h),
         }
     }
 
     /// Jitter the projection matrix for this frame (R4 perspective terms).
     pub fn apply_to_proj(&self, proj: glam::Mat4) -> glam::Mat4 {
-        TaaJitter::apply_to_proj(proj, self.jitter_ndc)
+        jitter_projection_glam(proj, self.jitter_ndc)
     }
 
     /// GPU uniform `[jx_px, jy_px, jx_ndc, jy_ndc]` for the resolve pass.
@@ -453,25 +453,25 @@ mod tests {
     #[test]
     fn jitter_integrates_with_r4_halton_sequence() {
         // Exact assertion: the uniform IS the R4 sequence at the render
-        // size — pixels equal TaaJitter::offset, NDC equals TaaJitter::ndc,
+        // size — pixels equal jitter_offset, NDC equals jitter_ndc,
         // and projection wiring touches only the perspective terms.
         for frame in [0u64, 1, 2, 7, 15, 10_000] {
             let u = TemporalUniform::for_frame(frame, 1280, 720);
             assert_eq!(u.frame, frame);
             assert_eq!(
                 u.jitter_pixels,
-                TaaJitter::offset(frame),
+                jitter_offset(frame),
                 "frame {frame} pixels reuse the R4 offset"
             );
             assert_eq!(
                 u.jitter_ndc,
-                TaaJitter::ndc(frame, 1280, 720),
+                jitter_ndc(frame, 1280, 720),
                 "frame {frame} NDC reuses the R4 scaling at render size"
             );
             let proj = glam::Mat4::IDENTITY;
             assert_eq!(
                 u.apply_to_proj(proj),
-                TaaJitter::apply_to_proj(proj, u.jitter_ndc),
+                jitter_projection_glam(proj, u.jitter_ndc),
                 "frame {frame} projection wiring matches R4"
             );
             assert_eq!(

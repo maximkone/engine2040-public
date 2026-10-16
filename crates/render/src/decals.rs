@@ -940,6 +940,17 @@ impl DecalPool {
     #[cfg(not(feature = "window"))]
     pub fn submit_gpu(&self, cam: &Pinhole) -> Result<DecalReceipt, DecalError> {
         cam.validate()?;
+        // FC3 skip switch: idle frames carry no decals, so the RP3 pass skips
+        // the bind entirely (0 decals, 0 tiles, 0 ms, 0 errors) instead of
+        // requiring a device. Skipped frames stay inside `DECAL_BUDGET_MS`.
+        if self.decals.is_empty() {
+            return Ok(DecalReceipt {
+                decals: 0,
+                tiles_used: 0,
+                coverage_px: 0,
+                ms: 0.0,
+            });
+        }
         if self.decals.len() != self.atlas.used() {
             return Err(DecalError::Invalid(format!(
                 "decal pool {} differs from atlas {}",
@@ -1054,9 +1065,9 @@ impl DecalSubmitter {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rp3-decal-bind-layout"),
             entries: &[
-                decal_uniform_entry(0),
-                decal_storage_entry(1, true),
-                decal_storage_entry(2, false),
+                compute_uniform_entry(0),
+                compute_storage_entry(1, true),
+                compute_storage_entry(2, false),
             ],
         });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1100,7 +1111,7 @@ impl DecalSubmitter {
 
 /// Uniform bind-group entry over the compute stage.
 #[cfg(feature = "window")]
-fn decal_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn compute_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -1115,7 +1126,7 @@ fn decal_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 /// Storage bind-group entry over the compute stage.
 #[cfg(feature = "window")]
-fn decal_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn compute_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -1129,40 +1140,17 @@ fn decal_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEn
 }
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
+/// Shared [`crate::accel`] core with the `decal` error prefix kept.
 #[cfg(feature = "window")]
 fn decal_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("decal poll: {e}"))?;
-    rx.recv()
-        .map_err(|e| format!("decal map channel: {e}"))?
-        .map_err(|e| format!("decal map: {e}"))?;
-    Ok(())
+    crate::accel::map_readback(device, buffer, "decal")
 }
 
 /// Read `count` little-endian u32 words from a mapped readback buffer.
+/// Shared [`crate::accel`] core with the `decal` text kept.
 #[cfg(feature = "window")]
 fn decal_readback_u32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<u32>, String> {
-    let mapped = buffer
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|e| format!("decal mapped range: {e}"))?;
-    if mapped.len() < count * 4 {
-        return Err(format!(
-            "decal readback {} bytes holds fewer than {count} u32 words",
-            mapped.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for chunk in mapped[..count * 4].chunks_exact(4) {
-        out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(out)
+    crate::accel::readback_u32(buffer, count, "decal", "words")
 }
 
 #[cfg(feature = "window")]
@@ -1662,6 +1650,34 @@ mod tests {
         assert!(matches!(sand.sample(99, 0), Err(DecalError::Invalid(_))));
         assert_eq!(cam.pixels(), 64 * 64);
         assert!(gore_at(5.0, 0.5).validate().is_ok());
+    }
+
+    #[test]
+    #[cfg(not(feature = "window"))]
+    fn fc3_empty_pool_skips_decal_submit() {
+        // FC3 skip switch: idle frames carry no decals, so the RP3 pass skips
+        // the bind entirely (0 decals, 0 tiles, 0 ms, 0 errors) instead of
+        // requiring a device. Placed pools still need the window device.
+        let empty = DecalPool::new();
+        assert!(empty.is_empty(), "new pool carries no decals");
+        let cam = cam_64();
+        let skipped = empty
+            .submit_gpu(&cam)
+            .expect("empty skips without a device");
+        assert_eq!(
+            (skipped.decals, skipped.tiles_used, skipped.coverage_px),
+            (0, 0, 0)
+        );
+        assert_eq!(skipped.ms, 0.0);
+        assert!(skipped.within_budget());
+        let sand = DepthFrame::flat(64, 64, 5.0).expect("sand builds");
+        let mut pool = DecalPool::new();
+        pool.place(&cam, &sand, &gore_at(5.0, 0.5)).expect("lands");
+        assert!(!pool.is_empty(), "placed pool must run the decal pass");
+        assert!(matches!(
+            pool.submit_gpu(&cam),
+            Err(DecalError::NoDevice(_))
+        ));
     }
 
     #[test]

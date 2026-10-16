@@ -41,6 +41,8 @@ pub const WAN_ROLLBACK_CAP: usize = crate::netcode::MAX_ROLLBACK;
 pub const INPUT_QUEUE_LEN: usize = 128;
 /// Player count for the P2P tape (fixed 2-player duel).
 pub const PLAYERS: usize = 2;
+/// Narrow Lunaris-v2 resim window (8 frames, GGRS default, pattern only).
+pub const LUNARIS_WINDOW: usize = 8;
 
 /// One confirmed frame: state hash + compact input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +264,8 @@ pub enum RollbackError {
         /// Peer-claimed hash.
         peer: u64,
     },
+    /// Seat token mismatch on a guarded confirm; state unchanged.
+    BadSeat { frame: u32, want: u64, got: u64 },
 }
 
 impl std::fmt::Display for RollbackError {
@@ -278,6 +282,9 @@ impl std::fmt::Display for RollbackError {
                 f,
                 "desync at frame {frame}: local {local:#016x} != peer {peer:#016x}"
             ),
+            Self::BadSeat { frame, want, got } => {
+                write!(f, "bad seat {frame}: want {want:#x} got {got:#x}")
+            }
         }
     }
 }
@@ -323,6 +330,15 @@ pub struct P2pSession<S: SimTick> {
     predicted: u64,
     max_rollback: usize,
     last_mismatch: Cell<Option<u32>>,
+    frontier: u32,
+    settled: u32,
+    log: Vec<[u32; PLAYERS]>,
+    seat: u64,
+    sparse: bool,
+    confirmed: u32,
+    anchor_frame: u32,
+    anchor: Option<S>,
+    desync_interval: u32,
 }
 
 impl<S: SimTick> P2pSession<S> {
@@ -340,7 +356,70 @@ impl<S: SimTick> P2pSession<S> {
             predicted: 0,
             max_rollback: 0,
             last_mismatch: Cell::new(None),
+            frontier: 0,
+            settled: 0,
+            log: Vec::new(),
+            seat: 0,
+            sparse: false,
+            confirmed: 0,
+            anchor_frame: 0,
+            anchor: None,
+            desync_interval: 10,
         }
+    }
+
+    /// Enable sparse saving (GGRS sparse mode, idea only): the anchor holds
+    /// the last confirmed state, resim replays from there. Caller:
+    /// `crates/net/src/delay.rs` reaction probe.
+    pub fn enable_sparse_saving(&mut self, on: bool) {
+        self.sparse = on;
+        if on {
+            self.anchor_frame = self.confirmed;
+            self.anchor = Some(self.sim.clone());
+            if let Some(state) = self.snapshot_before(self.confirmed) {
+                self.anchor = Some(state);
+            }
+        }
+    }
+
+    /// True when sparse saving is on.
+    fn is_sparse(&self) -> bool {
+        self.sparse
+    }
+
+    /// Last confirmed frame plus one (sparse anchor frame).
+    fn confirmed_frame(&self) -> u32 {
+        self.confirmed
+    }
+
+    /// Desync scan interval in frames (`0` means every frame).
+    fn desync_interval(&self) -> u32 {
+        self.desync_interval
+    }
+
+    /// Set the desync scan interval in frames.
+    fn set_desync_interval(&mut self, interval: u32) {
+        self.desync_interval = interval;
+    }
+
+    /// SyncTest-style full-window check: refuses with `TooFar` when sparse
+    /// is on (GGRS incompatibility, idea only). Caller:
+    /// `crates/net/src/delay.rs` reaction probe.
+    pub fn verify_full_window(&self, check_distance: usize) -> Result<(), RollbackError> {
+        if self.sparse {
+            return Err(RollbackError::TooFar {
+                frame: check_distance as u32,
+                oldest: self.frame,
+            });
+        }
+        let have = self.window.len();
+        if check_distance > have {
+            return Err(RollbackError::TooFar {
+                frame: check_distance as u32,
+                oldest: self.oldest_frame(),
+            });
+        }
+        Ok(())
     }
 
     /// Next frame to author.
@@ -441,6 +520,58 @@ impl<S: SimTick> P2pSession<S> {
         self.window.front().map_or(self.frame, |r| r.frame)
     }
 
+    /// Tip cursor (next frame to author, mirrors `frame`).
+    pub fn frontier(&self) -> u32 {
+        self.frontier
+    }
+    /// Settled cursor (confirmed prefix, advances on discard).
+    pub fn settled(&self) -> u32 {
+        self.settled
+    }
+
+    /// Append-only input log at `frame`, or `None` when absent.
+    pub fn input_at(&self, frame: u32) -> Option<[u32; PLAYERS]> {
+        usize::try_from(frame)
+            .ok()
+            .and_then(|i| self.log.get(i).copied())
+    }
+
+    /// Spectator read path: tape hash at `frame` without mutating.
+    pub fn spectator_hash_at(&self, frame: u32) -> Option<&u64> {
+        usize::try_from(frame)
+            .ok()
+            .and_then(|i| self.history.get(i))
+    }
+    /// Narrow to the Lunaris-v2 8-frame window and bind `seat`.
+    pub fn enable_lunaris_v2(&mut self, seat: u64) {
+        self.seat = seat;
+    }
+    /// Lunaris-v2 confirm: seat guard plus 8-frame window, then resim.
+    pub fn confirm_frame_lunaris(
+        &mut self,
+        frame: u32,
+        remote: u32,
+        token: u64,
+    ) -> Result<usize, RollbackError> {
+        if self.seat != 0 && token != self.seat {
+            return Err(RollbackError::BadSeat {
+                frame,
+                want: self.seat,
+                got: token,
+            });
+        }
+        if self.seat != 0 {
+            let gap = self.frontier().saturating_sub(frame);
+            let cap = u32::try_from(LUNARIS_WINDOW).unwrap_or(u32::MAX);
+            if gap > cap {
+                let oldest = self.frontier().saturating_sub(cap);
+                return Err(RollbackError::TooFar { frame, oldest });
+            }
+        }
+        let _ = self.input_at(frame);
+        self.confirm_frame(frame, remote)
+    }
+
     /// Rollbacks performed so far.
     pub fn rollback_count(&self) -> u64 {
         self.rollbacks
@@ -488,10 +619,12 @@ impl<S: SimTick> P2pSession<S> {
         self.history.push(hash);
         self.queues[0].push_input(f, local, true);
         self.queues[1].push_input(f, r, !predicted);
+        self.log.push([local, r]);
         if self.window.len() > MAX_P2P_ROLLBACK + 1 {
             self.window.pop_front();
         }
         self.frame += 1;
+        self.frontier = self.frame;
         hash
     }
 
@@ -502,6 +635,14 @@ impl<S: SimTick> P2pSession<S> {
     /// confirm (`Ok(0)`) or roll back plus resimulate on mispredict
     /// (`Ok(distance)`). Evicted frames refuse with
     /// [`RollbackError::TooFar`]. Any error changes nothing.
+    ///
+    /// Cheap per-tick checkpoint (the Lunaris `Sim::checkpoint` idea only,
+    /// no vendor bytes): [`Self::advance_frame`] clones the pre-tick sim
+    /// into the window (`save_game_state` shape), so a mispredict restores
+    /// the `before` checkpoint for `frame` and replays the window in frame
+    /// order instead of rebuilding from tick zero. Handles stay small
+    /// (frame plus the 8 B per frame hash log); full state lives only in
+    /// the window owner.
     pub fn confirm_frame(&mut self, frame: u32, remote: u32) -> Result<usize, RollbackError> {
         if frame >= self.frame {
             if u32::try_from(MAX_P2P_ROLLBACK).is_ok_and(|cap| frame - self.frame > cap) {
@@ -528,14 +669,30 @@ impl<S: SimTick> P2pSession<S> {
         if record.inputs[1] == remote {
             record.predicted = false;
             self.queues[1].confirm(frame, remote);
+            self.note_confirmed(frame);
             return Ok(0);
         }
         record.inputs[1] = remote;
         record.predicted = false;
         self.queues[1].confirm(frame, remote);
-        self.sim = record.before.clone();
+        if let Some(entry) = self.log.get_mut(frame as usize) {
+            entry[1] = remote;
+        }
+        let (start_idx, start_state, resim_len) = if self.sparse {
+            match self.anchor.clone() {
+                Some(anchor) if self.anchor_frame <= frame && self.anchor_frame >= oldest => (
+                    (self.anchor_frame - oldest) as usize,
+                    anchor,
+                    (self.frame - self.anchor_frame) as usize,
+                ),
+                _ => (idx, record.before.clone(), distance),
+            }
+        } else {
+            (idx, record.before.clone(), distance)
+        };
+        self.sim = start_state;
         let len = self.window.len();
-        for i in idx..len {
+        for i in start_idx..len {
             let Some(slot) = self.window.get(i) else {
                 break;
             };
@@ -557,8 +714,23 @@ impl<S: SimTick> P2pSession<S> {
             }
         }
         self.rollbacks += 1;
-        self.max_rollback = self.max_rollback.max(distance);
+        self.max_rollback = self.max_rollback.max(resim_len.max(distance));
+        self.note_confirmed(frame);
         Ok(distance)
+    }
+
+    fn note_confirmed(&mut self, frame: u32) {
+        if frame.wrapping_add(1) > self.confirmed {
+            self.confirmed = frame.wrapping_add(1);
+            if self.sparse {
+                self.anchor_frame = self.confirmed;
+                if let Some(state) = self.snapshot_before(self.confirmed) {
+                    self.anchor = Some(state);
+                } else if self.confirmed == self.frame {
+                    self.anchor = Some(self.sim.clone());
+                }
+            }
+        }
     }
 
     /// WAN-checked confirm over [`WAN_ROLLBACK_CAP`] (9: 150 ms at 60 Hz).
@@ -600,6 +772,7 @@ impl<S: SimTick> P2pSession<S> {
             }
             n += 1;
         }
+        self.settled = self.oldest_frame();
         n
     }
 
@@ -607,7 +780,7 @@ impl<S: SimTick> P2pSession<S> {
     /// mismatches and unknown frames refuse loudly and change nothing,
     /// except a mismatch records [`Self::last_mismatch`].
     pub fn check_desync(&self, frame: u32, peer_hash: u64) -> Result<(), RollbackError> {
-        match self.history.get(frame as usize) {
+        match self.spectator_hash_at(frame) {
             None => Err(RollbackError::UnknownFrame(frame)),
             Some(&local) if local == peer_hash => Ok(()),
             Some(&local) => {
@@ -790,6 +963,56 @@ mod tests {
             Some(reference.state_hash()),
             "tape tip must equal the true sim"
         );
+    }
+
+    #[test]
+    fn rollback_cost() {
+        // MP14 spike: the 8-tick mispredict rewind restores the frame-0
+        // checkpoint and replays the window, converging to the true-input
+        // hash inside the 60 Hz frame budget (16.6 ms) with headroom.
+        let (local, remote) = duel_inputs(8);
+        let mut reference = ToyDuel::default();
+        for (&l, &r) in local.iter().zip(remote.iter()) {
+            reference.advance([l, r]);
+        }
+        let mut session = P2pSession::new(ToyDuel::default());
+        for &l in &local {
+            session.advance_frame(l, None);
+        }
+        assert!(
+            session.snapshot_before(0).is_some(),
+            "the rewind restores the frame-0 checkpoint"
+        );
+        #[expect(
+            clippy::disallowed_types,
+            reason = "wall-clock resim sample, never hashed."
+        )]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "wall-clock resim sample, never hashed."
+        )]
+        let started = std::time::Instant::now(); // det-ok: wall-clock resim sample, never hashed.
+        let distance = session
+            .confirm_frame(0, remote[0])
+            .expect("in-window late input must confirm");
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            distance, LUNARIS_WINDOW,
+            "the 8-tick rewind resimulates one window"
+        );
+        assert!(ms < 2.0, "8-tick rewind {ms:.3}ms must stay under 2 ms");
+        for (f, &r) in remote.iter().enumerate().skip(1) {
+            session
+                .confirm_frame(f as u32, r)
+                .expect("in-window late input must confirm");
+        }
+        assert_eq!(session.sim().state_hash(), reference.state_hash());
+        assert_eq!(
+            session.hash_at(7),
+            Some(reference.state_hash()),
+            "tape tip must equal the true sim"
+        );
+        println!("rollback-cost: 8-tick rewind wall={ms:.3}ms budget=2ms frame=16.6ms");
     }
 
     #[test]
@@ -1010,5 +1233,82 @@ mod tests {
         assert_eq!(super::MAX_P2P_ROLLBACK, 128);
         assert_eq!(super::WAN_ROLLBACK_CAP, crate::netcode::MAX_ROLLBACK);
         assert!(super::WAN_ROLLBACK_CAP < super::MAX_P2P_ROLLBACK);
+    }
+
+    #[test]
+    fn lunaris_window8_seat_and_cursors() {
+        let (local, remote) = duel_inputs(10);
+        let mut s = P2pSession::new(ToyDuel::default());
+        s.enable_lunaris_v2(7);
+        for (f, (&l, &r)) in local.iter().zip(remote.iter()).enumerate() {
+            s.advance_frame(l, Some(r));
+            assert_eq!(s.frontier(), s.frame());
+            assert_eq!(s.input_at(f as u32), Some([l, r]));
+        }
+        assert_eq!(s.spectator_hash_at(9).copied(), s.hash_at(9));
+        assert_eq!(s.discard_confirmed_frames(5), 5);
+        assert_eq!(s.settled(), 5);
+        let before = s.stream();
+        let bad = s.confirm_frame_lunaris(9, remote[9], 8);
+        assert!(matches!(bad, Err(RollbackError::BadSeat { .. })));
+        assert!(matches!(
+            s.confirm_frame_lunaris(0, remote[0], 7),
+            Err(RollbackError::TooFar { .. })
+        ));
+        assert_eq!(s.stream(), before);
+    }
+
+    #[test]
+    fn sparse_save_rollback_converges() {
+        let (local, remote) = duel_inputs(48);
+        let dense = run_tape(&local, &remote, 5);
+        let mut sparse = P2pSession::new(ToyDuel::default());
+        sparse.enable_sparse_saving(true);
+        for (f, (&l, &r)) in local.iter().zip(remote.iter()).enumerate() {
+            let avail = if (f as u32) % 5 == 4 { None } else { Some(r) };
+            sparse.advance_frame(l, avail);
+            if f >= 2 && (f as u32 - 2) % 5 == 4 {
+                let late = (f - 2) as u32;
+                sparse
+                    .confirm_frame(late, remote[f - 2])
+                    .expect("late input inside window must confirm");
+            }
+        }
+        for (f, &r) in remote.iter().enumerate() {
+            if sparse.was_predicted(f as u32) == Some(true) {
+                match sparse.confirm_frame(f as u32, r) {
+                    Ok(_) => {}
+                    Err(RollbackError::TooFar { .. }) => {}
+                    Err(other) => panic!("unexpected confirm error: {other}"),
+                }
+            }
+        }
+        assert!(sparse.rollback_count() > 0, "loss must force resim");
+        assert!(sparse.max_rollback() <= MAX_P2P_ROLLBACK);
+        assert_eq!(
+            sparse.stream(),
+            dense.stream(),
+            "sparse tip must equal dense tip"
+        );
+        assert_eq!(sparse.sim().state_hash(), dense.sim().state_hash());
+    }
+
+    #[test]
+    fn sparse_refuses_full_window_check() {
+        let (local, remote) = duel_inputs(8);
+        let mut dense = P2pSession::new(ToyDuel::default());
+        for (&l, &r) in local.iter().zip(remote.iter()) {
+            dense.advance_frame(l, Some(r));
+        }
+        assert!(dense.verify_full_window(8).is_ok());
+        let mut sparse = P2pSession::new(ToyDuel::default());
+        sparse.enable_sparse_saving(true);
+        for (&l, &r) in local.iter().zip(remote.iter()) {
+            sparse.advance_frame(l, Some(r));
+        }
+        assert!(matches!(
+            sparse.verify_full_window(8),
+            Err(RollbackError::TooFar { .. })
+        ));
     }
 }

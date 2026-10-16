@@ -453,6 +453,24 @@ mod tests {
     }
 
     #[test]
+    fn net_loopback_latency_plus_burst_pins_the_seeded_tick() {
+        // DP1 remainder: latency and burst knobs together seal one digest.
+        let lat_only = loopback_report(10, 2040, 8, None, None).expect("latency runs");
+        let lat_burst =
+            loopback_report(10, 2040, 8, Some(100), Some(60)).expect("latency plus burst runs");
+        assert_ne!(
+            lat_only.digest, lat_burst.digest,
+            "burst moves the latency-sealed digest"
+        );
+        let again = loopback_report(10, 2040, 8, Some(100), Some(60)).expect("repeats");
+        assert_eq!(lat_burst, again, "same latency plus burst replays twice");
+        let desync = loopback_report(100, 11, 8, Some(100), Some(60)).expect("seeded desync runs");
+        assert_eq!(desync.first_divergence, Some(0));
+        let desync_again = loopback_report(100, 11, 8, Some(100), Some(60)).expect("repeats");
+        assert_eq!(desync, desync_again, "seeded tick replays twice");
+    }
+
+    #[test]
     fn net_conditioner_deterministic_x2() {
         assert_eq!(ConditionerConfig::with_fixed_loss(1001), None);
         let cfg = ConditionerConfig::with_fixed_loss(100).expect("100 builds");

@@ -21,6 +21,8 @@ pub mod durable;
 #[cfg(feature = "ui")]
 pub mod findings;
 pub mod gizmo;
+/// Data-only node graph for material and VFX graphs; wired to Document.
+pub mod graph;
 /// Schema inspector over registry descriptors: override badging, batched
 /// command edits. Std-only; wired to app.rs next.
 pub mod inspector;
@@ -58,6 +60,27 @@ pub mod viewport;
 pub mod viewport_image;
 /// Crash-safe journal: write-ahead log over the command service.
 pub mod wal;
+
+/// Node layout for graph viewer panels (data only, no draw calls).
+#[cfg(feature = "ui")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphLayout {
+    /// Coiled wire layout.
+    Coil,
+    /// Stacked sandwich layout.
+    Sandwich,
+}
+
+/// Viewer hooks for graph nodes (data only, no draw calls).
+#[cfg(feature = "ui")]
+pub trait GraphViewer {
+    /// Title for a node.
+    fn title(&self, node: &graph::GraphNode) -> String;
+    /// Input pin count for a node.
+    fn in_pins(&self, node: &graph::GraphNode) -> u32;
+    /// Output pin count for a node.
+    fn out_pins(&self, node: &graph::GraphNode) -> u32;
+}
 
 /// Why [`Tree::decode`] refused a layout text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

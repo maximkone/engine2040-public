@@ -8,6 +8,7 @@
 //! `tests/property_matrix_regressions.txt`, found from the crate root.
 
 mod deterministic_replay_vectors;
+mod fixed_property;
 mod fppe_vec3_vectors;
 mod property_matrix;
 mod turn_hash_journal;

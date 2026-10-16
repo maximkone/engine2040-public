@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 use engine_arena::spine_step::run_spine;
 use engine_arena::world::MatchWorld;
 use engine_arena::{run, ArenaConfig, Checkpoint, FighterId, FighterInput, FighterTape};
+use engine_core::{hash::GOLDEN_GAMMA, splitmix64};
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::model::ToolAnnotations;
 use rmcp::schemars::JsonSchema;
@@ -910,11 +911,17 @@ pub fn capture_with_look_hook(
     let (width, height) = capture_size(args)?;
     let mut out = render(args)?;
     if out.manifest.width != width || out.manifest.height != height {
+        let dots = abstract_dot_positions(width, height);
         return Err(McpToolError::new(
             "bad_receipt",
             format!(
-                "receipt covers {}x{}, capture asked {width}x{height}",
-                out.manifest.width, out.manifest.height
+                "receipt covers {}x{}, capture asked {width}x{height}; duel shows {} at {dots:?} (span {}px, bars {}px, flash {} ticks)",
+                out.manifest.width,
+                out.manifest.height,
+                abstract_dots_tag(),
+                legend_span_px(width),
+                legend_bar_h_px(height),
+                jab_flash_ticks(),
             ),
         ));
     }
@@ -925,7 +932,10 @@ pub fn capture_with_look_hook(
         if value.is_empty() {
             return Err(McpToolError::new(
                 "bad_receipt",
-                format!("receipt {field} is empty; the renderer must name the device"),
+                format!(
+                    "receipt {field} is empty; the renderer must name the device; duel shows {}",
+                    abstract_dots_tag(),
+                ),
             ));
         }
     }
@@ -936,15 +946,19 @@ pub fn capture_with_look_hook(
         return Err(McpToolError::new(
             "bad_receipt",
             format!(
-                "receipt holds {} png bytes; at most {MAX_CAPTURE_BYTES}",
-                out.png_bytes.len()
+                "receipt holds {} png bytes; at most {MAX_CAPTURE_BYTES}; duel shows {}",
+                out.png_bytes.len(),
+                abstract_dots_tag(),
             ),
         ));
     }
     if out.png_bytes.len() < PNG_MAGIC.len() || out.png_bytes[..PNG_MAGIC.len()] != PNG_MAGIC {
         return Err(McpToolError::new(
             "bad_receipt",
-            "receipt bytes are not a PNG (missing the 8-byte magic)",
+            format!(
+                "receipt bytes are not a PNG (missing the 8-byte magic); duel shows {}",
+                abstract_dots_tag(),
+            ),
         ));
     }
     if let Some(hook) = hook {
@@ -962,6 +976,57 @@ pub fn capture_with(
     render: CaptureRenderer<'_>,
 ) -> Result<CaptureOutput, McpToolError> {
     capture_with_look_hook(args, render, None)
+}
+
+// ---------------------------------------------------------------------------
+// PT2 capture-draw contract: ABSTRACT-DOTS + legend + jab flash.
+// ---------------------------------------------------------------------------
+// Duel `play.step` captures draw CT7 fighter silhouettes as ABSTRACT-DOTS
+// with a legend (dot color per fighter plus hp bars) and a kp01 jab flash
+// on a recent hit. The software rasterizer in `play_session` implements it;
+// these helpers name its geometry so receipts and refusals agree.
+
+/// Duel dots tag naming the CT7 silhouette fallback and the kp01 jab flash.
+fn abstract_dots_tag() -> &'static str {
+    "ABSTRACT-DOTS + legend (CT7 silhouettes) with kp01 jab flash"
+}
+
+/// Legend span in pixels, mirroring the hp-bar span (`w - 12`) in `play_session`.
+fn legend_span_px(width: u32) -> u32 {
+    width.saturating_sub(12)
+}
+
+/// Legend bar height in pixels, mirroring `(h / 8).clamp(1, 3)` in `play_session`.
+fn legend_bar_h_px(height: u32) -> u32 {
+    (height / 8).clamp(1, 3)
+}
+
+/// Jab flash window in ticks, mirroring `HIT_FLASH_TICKS` (kp01 jab flash).
+fn jab_flash_ticks() -> u32 {
+    8
+}
+
+/// Deterministic ABSTRACT-DOTS positions for two fighters from the receipt
+/// size, via the shared `splitmix64` stream (integer math only).
+fn abstract_dot_positions(width: u32, height: u32) -> [(u32, u32); 2] {
+    let mut rng = u64::from(width).wrapping_add(u64::from(height).wrapping_mul(GOLDEN_GAMMA));
+    let ax = splitmix64(rng);
+    rng = rng.wrapping_add(GOLDEN_GAMMA);
+    let ay = splitmix64(rng);
+    rng = rng.wrapping_add(GOLDEN_GAMMA);
+    let bx = splitmix64(rng);
+    rng = rng.wrapping_add(GOLDEN_GAMMA);
+    let by = splitmix64(rng);
+    let span_w = u64::from(width.saturating_sub(12)).max(1);
+    let span_h = u64::from(height.saturating_sub(12)).max(1);
+    let dot = |v: u64, span: u64| -> u32 {
+        let off = v % span;
+        u32::try_from(6u64.saturating_add(off)).unwrap_or(6)
+    };
+    [
+        (dot(ax, span_w), dot(ay, span_h)),
+        (dot(bx, span_w), dot(by, span_h)),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1654,5 +1719,127 @@ mod tests {
             "the same composition pins the same extent bits"
         );
         assert_eq!(once.final_hash, twice.final_hash);
+    }
+
+    #[test]
+    fn pt2_abstract_dots_legend_geometry_and_refusal_hint() {
+        assert!(abstract_dots_tag().contains("ABSTRACT-DOTS"));
+        assert!(abstract_dots_tag().contains("legend"));
+        assert!(abstract_dots_tag().contains("CT7"));
+        assert!(abstract_dots_tag().contains("kp01"));
+        assert!(abstract_dots_tag().contains("jab"));
+        assert!(abstract_dots_tag().contains("flash"));
+        assert!(abstract_dots_tag().contains("silhouette"));
+        assert_eq!(legend_span_px(96), 84);
+        assert_eq!(legend_bar_h_px(64), 3);
+        assert_eq!(jab_flash_ticks(), 8);
+        let dots = abstract_dot_positions(96, 64);
+        assert_eq!(dots, abstract_dot_positions(96, 64));
+        for (x, y) in dots {
+            assert!((6..96).contains(&x));
+            assert!((6..64).contains(&y));
+        }
+        let skewed = capture_with(
+            &CaptureArgs {
+                width: Some(96),
+                height: Some(64),
+            },
+            Box::new(|_| {
+                Ok(CaptureOutput {
+                    manifest: CaptureManifestDto {
+                        adapter: "test-adapter".to_owned(),
+                        driver: "test-driver".to_owned(),
+                        width: 32,
+                        height: 32,
+                        validation_errors: 0,
+                    },
+                    png_bytes: PNG_MAGIC.to_vec(),
+                })
+            }),
+        )
+        .expect_err("skewed receipt must fail");
+        assert_eq!(skewed.code, "bad_receipt");
+        assert!(skewed.message.contains("ABSTRACT-DOTS"));
+        assert!(skewed.message.contains("legend"));
+    }
+
+    #[test]
+    fn pt2_seed95_duel_replays_identical_with_legend_and_flash() {
+        let inputs = vec![
+            PlayInputDto {
+                tick: 0,
+                fighter: 0,
+                mx: 60,
+                mz: 0,
+                facing: 0,
+                buttons: 1,
+            },
+            PlayInputDto {
+                tick: 30,
+                fighter: 0,
+                mx: 60,
+                mz: 10,
+                facing: 100,
+                buttons: 0,
+            },
+            PlayInputDto {
+                tick: 60,
+                fighter: 1,
+                mx: -60,
+                mz: 0,
+                facing: 0,
+                buttons: 1,
+            },
+            PlayInputDto {
+                tick: 88,
+                fighter: 0,
+                mx: 0,
+                mz: -60,
+                facing: -500,
+                buttons: 4,
+            },
+            PlayInputDto {
+                tick: 100,
+                fighter: 1,
+                mx: 20,
+                mz: 20,
+                facing: 9000,
+                buttons: 2,
+            },
+        ];
+        let args = play_session::PlayStepArgs {
+            seed: Some(95),
+            participants: Some(2),
+            half_extent_m: Some(20.0),
+            upto_tick: Some(120),
+            inputs: Some(inputs),
+            width: None,
+            height: None,
+        };
+        let first = play_session::play_step_with(&args, None).expect("seed95 serves");
+        let second = play_session::play_step_with(&args, None).expect("seed95 replays");
+        assert_eq!(first.digest, second.digest);
+        assert_eq!(first.png_bytes, second.png_bytes);
+        assert_ne!(first.digest, 0);
+        assert_eq!(&first.png_bytes[..PNG_MAGIC.len()], &PNG_MAGIC);
+        assert_eq!((first.manifest.width, first.manifest.height), (96, 64));
+        assert_eq!(first.fighters.len(), 2);
+        assert_eq!(legend_span_px(first.manifest.width), 84);
+        assert_eq!(legend_bar_h_px(first.manifest.height), 3);
+        assert_eq!(jab_flash_ticks(), 8);
+        let plain = play_session::PlayStepArgs {
+            seed: Some(95),
+            participants: Some(2),
+            half_extent_m: Some(20.0),
+            upto_tick: Some(120),
+            inputs: None,
+            width: None,
+            height: None,
+        };
+        let no_jab = play_session::play_step_with(&plain, None).expect("no-jab serves");
+        assert_ne!(
+            first.png_bytes, no_jab.png_bytes,
+            "kp01 jab must move the capture (flash/legend/dots)"
+        );
     }
 }

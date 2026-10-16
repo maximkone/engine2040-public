@@ -100,8 +100,26 @@ export const verdict = (metadata, deny = { allow: [], exceptions: [] }) => {
 
 export const LICENSE_FILES = ["LICENSE-MIT", "LICENSE-APACHE"];
 
+// Required repo licence files derive from the workspace licence in
+// <repo>/Cargo.toml ([workspace.package] license): Apache-2.0 needs
+// LICENSE-APACHE, MIT needs LICENSE-MIT, a dual SPDX keeps both.
+// Unreadable Cargo.toml falls back to both (strict, never skips).
+export const requiredLicenseFiles = (repoDir = ROOT) => {
+  try {
+    const text = readFileSync(join(repoDir, "Cargo.toml"), "utf8");
+    const block = /\[workspace\.package\][\s\S]*?(?=\r?\n\[[^\]]+\]|\s*$)/.exec(text)?.[0] ?? text;
+    const hit = /^\s*license\s*=\s*"([^"]+)"/m.exec(block) ?? /^\s*license\s*=\s*"([^"]+)"/m.exec(text);
+    const tokens = new Set(licenseTokens(hit?.[1] ?? ""));
+    const out = [];
+    if (tokens.has("MIT")) out.push("LICENSE-MIT");
+    if (tokens.has("Apache-2.0")) out.push("LICENSE-APACHE");
+    if (out.length) return out;
+  } catch { /* unreadable manifest: strict fallback below */ }
+  return [...LICENSE_FILES];
+};
+
 export const checkLicenseFiles = (repoDir = ROOT) =>
-  LICENSE_FILES.filter((name) => !existsSync(join(repoDir, name)));
+  requiredLicenseFiles(repoDir).filter((name) => !existsSync(join(repoDir, name)));
 
 const HEADER_LINES = 20;
 

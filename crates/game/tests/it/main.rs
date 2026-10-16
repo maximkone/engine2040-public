@@ -9,8 +9,10 @@
 //! crash hook and re-runs its own executable as a child process.
 
 mod camera_smoke;
+mod camera_stack;
 mod cannae;
 mod config_builder_vectors;
+mod config_rows;
 mod config_vectors;
 mod config_verify_vectors;
 mod design_combat;
@@ -23,4 +25,5 @@ mod ime_vectors;
 mod knob_rules_vectors;
 mod lobby_ui_flow;
 mod package_portable_vectors;
+mod rome_numbers;
 mod rome_spec_drift;

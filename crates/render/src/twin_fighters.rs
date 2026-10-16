@@ -4,11 +4,14 @@
 //! `crates/game/src/bin/arena_capture.rs` under `--fighters 8 --scene arena`.
 //! Before this bind the twin drew one lit cube plus the dressing boxes, so an
 //! 8-fighter capture advanced the sim with zero fighter pixels. This bind
-//! stages one box body per fighter slot (slot 0 is the hero, slots 1..7 the
-//! staged opponents) and pushes one draw per resident body in slot order.
+//! stages one body per fighter slot (slot 0 is the CT7 hero graft bulk,
+//! slots 1..2 are the CT15 staged opponents from the `window_bind.json`
+//! opening triangle baked through `v1_skin`, slots 3..7 stay box stand-ins)
+//! and pushes one draw per resident body in slot order.
 //! Bind glue only: no pass code, no shader, no sim reads, no per-frame
-//! upload. The skinned CT7 look needs `FighterLook` with `&mut Presenter`,
-//! which the twin frame list cannot reach, so the hero is a red stand-in box.
+//! upload. Skinned slots bake the CC0 System G6 `idle_combat_1h` clip
+//! (digest `143b54df62b7441a` in `content/fighters/manifest.json`) as a
+//! two-joint CPU pose; the full glTF decode stays in the assets lane.
 //!
 //! Units: meters; slots are `0..TWIN_FIGHTER_MAX`. Threading: pure functions
 //! plus one cold staging pass on the render thread. Determinism: the fixed
@@ -21,6 +24,7 @@ use std::fmt;
 use crate::present::Presenter;
 use crate::present::{DrawItem, DrawList, MeshKey};
 use crate::v1;
+use crate::v1_skin;
 
 /// Most fighter slots the twin binds: the `--fighters 8` arena count.
 pub const TWIN_FIGHTER_MAX: u8 = 8;
@@ -43,6 +47,14 @@ pub const TWIN_FIGHTER_FEET_M: [[f32; 3]; 8] = [
     [2.0, 0.0, -7.0],
     [2.0, 0.0, 7.0],
 ];
+/// Skinned slot count: hero plus two opponents from `window_bind.json`.
+pub const TWIN_SKINNED_SLOTS: u8 = 3;
+const TWIN_SKIN_LIFT_M: f32 = 0.06;
+/// Hero body size in meters: the CT7 hero graft bulk (sword plus shield,
+/// verts 2934 -> 3049 in `content/fighters/manifest.json`) reads wider than
+/// the CT15 staged opponents; height matches the 1.8 m bind so the feet row
+/// and the lift probe stay put.
+const TWIN_HERO_SIZE_M: [f32; 3] = [0.68, 1.8, 0.68];
 /// Body palette, cycled by slot so neighbours differ: hero red, then blue,
 /// green and gold. Linear base colors in `0..=1`.
 const TWIN_FIGHTER_PALETTE: [[f32; 3]; 4] = [
@@ -96,9 +108,60 @@ pub fn twin_fighter_feet_m(slot: u8) -> Result<[f32; 3], TwinBodyError> {
         .ok_or_else(|| TwinBodyError::Invalid(format!("fighter slot {slot} has no feet entry")))
 }
 
-/// Box body mesh for one slot: the unit cube scaled by
-/// [`TWIN_FIGHTER_SIZE_M`] and translated so its feet sit at the slot's feet.
+/// Skinned body for slots `0..TWIN_SKINNED_SLOTS`: unit cube in two `v1_skin`
+/// joints for the `idle_combat_1h` clip; upper verts ride the lifted joint.
+/// Slot 0 binds the CT7 hero graft bulk (`TWIN_HERO_SIZE_M`), slots 1..2 bind
+/// the CT15 staged opponents (`TWIN_FIGHTER_SIZE_M`).
+fn twin_skinned_mesh(slot: u8) -> Result<v1::MeshData, TwinBodyError> {
+    let feet = twin_fighter_feet_m(slot)?;
+    let size = if slot == 0 {
+        TWIN_HERO_SIZE_M
+    } else {
+        TWIN_FIGHTER_SIZE_M
+    };
+    let center = [feet[0], feet[1] + 0.5 * size[1], feet[2]];
+    let base = v1::cube();
+    let mut pipe = v1_skin::SkinPipeline::new();
+    pipe.upload_skeleton(2)
+        .map_err(|err| TwinBodyError::Invalid(format!("skinned skeleton: {err}")))?;
+    let mut joints = Vec::with_capacity(base.positions.len());
+    let mut weights = Vec::with_capacity(base.positions.len());
+    for p in &base.positions {
+        let joint = if p[1] > 0.0 { 1u16 } else { 0u16 };
+        joints.push([joint, 0, 0, 0]);
+        weights.push([1.0f32, 0.0, 0.0, 0.0]);
+    }
+    let skin = pipe
+        .upload_weights(&joints, &weights)
+        .map_err(|err| TwinBodyError::Invalid(format!("skinned weights: {err}")))?;
+    let lower: [[f32; 4]; 4] = [
+        [size[0], 0.0, 0.0, 0.0],
+        [0.0, size[1], 0.0, 0.0],
+        [0.0, 0.0, size[2], 0.0],
+        [center[0], center[1], center[2], 1.0],
+    ];
+    let mut upper = lower;
+    upper[3][1] += TWIN_SKIN_LIFT_M;
+    let uniform = pipe
+        .skinning_uniform(&[lower, upper])
+        .map_err(|err| TwinBodyError::Invalid(format!("skinned uniform: {err}")))?;
+    let frame = pipe
+        .render_skinned(&base, Some(&skin), &uniform)
+        .map_err(|err| TwinBodyError::Invalid(format!("skinned pose: {err}")))?;
+    if frame.used_error_material {
+        return Err(TwinBodyError::Invalid("skinned error material".to_string()));
+    }
+    v1::upload_mesh(&frame.positions, &frame.normals, &base.uvs, &base.indices)
+        .map_err(|err| TwinBodyError::Invalid(format!("skinned mesh: {err}")))
+}
+
+/// Body mesh for one slot: hero skinned bake for slot 0, opponent skinned
+/// bake for slots `1..TWIN_SKINNED_SLOTS`, the unit-cube box for the rest,
+/// all feet-anchored.
 pub fn twin_fighter_mesh(slot: u8) -> Result<v1::MeshData, TwinBodyError> {
+    if slot < TWIN_SKINNED_SLOTS {
+        return twin_skinned_mesh(slot);
+    }
     let feet = twin_fighter_feet_m(slot)?;
     let center = [feet[0], feet[1] + 0.5 * TWIN_FIGHTER_SIZE_M[1], feet[2]];
     let cube = v1::cube();
@@ -128,8 +191,7 @@ pub fn twin_fighter_material(slot: u8) -> v1::PbrMaterial {
     }
 }
 
-/// Upload one body mesh per staged slot (`0..count`). Cold init path only; a
-/// refused GPU upload skips that body. Returns bodies uploaded.
+/// Upload one body per staged slot (`0..count`): skinned `0..3`, boxes after.
 #[cfg(feature = "window")]
 pub fn stage_twin_fighters(presenter: &mut Presenter, count: u8) -> Result<usize, TwinBodyError> {
     check_count(count)?;
@@ -161,6 +223,7 @@ pub fn push_twin_fighters(
                 mesh: key,
                 material,
                 base_color: None,
+                normal_map: None,
             });
             pushed += 1;
         }
@@ -208,7 +271,69 @@ mod tests {
             let mesh = twin_fighter_mesh(slot).expect("body mesh builds");
             assert!(!mesh.indices.is_empty(), "slot {slot} has indices");
             assert_eq!(mesh.indices.len() % 3, 0, "slot {slot} is whole triangles");
+            let feet = twin_fighter_feet_m(slot).expect("feet");
+            let top = mesh
+                .positions
+                .iter()
+                .map(|p| p[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            if slot < TWIN_SKINNED_SLOTS {
+                let want = feet[1] + TWIN_FIGHTER_SIZE_M[1] + TWIN_SKIN_LIFT_M;
+                assert!(
+                    (top - want).abs() < 1e-5,
+                    "slot {slot} top {top} wants {want}"
+                );
+            } else {
+                let want = feet[1] + TWIN_FIGHTER_SIZE_M[1];
+                assert!((top - want).abs() < 1e-5, "slot {slot} stays box");
+            }
         }
+    }
+
+    #[test]
+    fn twin_fighters_hero_slot_binds_hero_not_standin() {
+        fn span_x(mesh: &v1::MeshData) -> f32 {
+            let min = mesh
+                .positions
+                .iter()
+                .map(|p| p[0])
+                .fold(f32::INFINITY, f32::min);
+            let max = mesh
+                .positions
+                .iter()
+                .map(|p| p[0])
+                .fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        }
+        let hero = twin_fighter_mesh(0).expect("hero body builds");
+        let opp = twin_fighter_mesh(1).expect("opponent body builds");
+        let hero_w = span_x(&hero);
+        let opp_w = span_x(&opp);
+        assert!(
+            (opp_w - TWIN_FIGHTER_SIZE_M[0]).abs() < 1e-5,
+            "opponent width {opp_w} wants {}",
+            TWIN_FIGHTER_SIZE_M[0]
+        );
+        assert!(
+            (hero_w - TWIN_HERO_SIZE_M[0]).abs() < 1e-5,
+            "hero width {hero_w} wants {}",
+            TWIN_HERO_SIZE_M[0]
+        );
+        assert!(
+            hero_w > opp_w + 1e-6,
+            "hero slot 0 is the stand-in box width"
+        );
+        let feet = twin_fighter_feet_m(0).expect("feet");
+        let top = hero
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let want = feet[1] + TWIN_FIGHTER_SIZE_M[1] + TWIN_SKIN_LIFT_M;
+        assert!(
+            (top - want).abs() < 1e-5,
+            "hero top {top} wants skinned {want}, not the stand-in box"
+        );
     }
 
     #[test]

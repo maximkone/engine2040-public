@@ -700,6 +700,18 @@ pub fn build_grid(
     grid
 }
 
+/// Declared fields for the registry panel: the first twelve schemas in order.
+///
+/// Reuses [`field_schemas`] with no new schema kind; rows render through
+/// [`build_declared_grid`] with [`validate_edit`] refusals.
+pub fn registry_panel_grid(
+    registry: &SchemaRegistry,
+    values: &BTreeMap<(String, String), String>,
+) -> AutoGrid {
+    let schemas = field_schemas();
+    build_declared_grid(&schemas[..12], registry, values)
+}
+
 /// Find one grid row by component and field.
 fn find_row<'a>(
     grid: &'a AutoGrid,

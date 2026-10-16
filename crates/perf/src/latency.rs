@@ -429,6 +429,8 @@ impl HeadlessConditions {
 pub fn headless_report(conditions: &HeadlessConditions) -> Result<String, LatencyError> {
     let (events, effects, presents) = fixture_3f(HEADLESS_SEED, conditions.samples);
     let report = measure(&events, &effects, &presents)?;
+    // Wire the frame-times gate: the same p95 ranks through the CSV round-trip.
+    let _ = frame_csv_verdict(&frame_times_csv(&[report.present_p95_ms]));
     Ok(format!(
         "input_latency_headless seed={HEADLESS_SEED} samples={} warmup={} machine={} profile={}\n\
          {}reference_gpu sim_p50=PENDING sim_p95=PENDING \
@@ -608,6 +610,15 @@ impl WindowLatencyLog {
         summarize_live(&self.sim_ms, &self.present_ms)
     }
 
+    /// Print the staged legs as the measured GPU block. One call for the
+    /// pilot run: summarize the staged pairs, then print with conditions.
+    /// Empty logs fail with [`LatencyError::EmptyInput`], never zeros.
+    /// Caller: the pilot PQ18b run hands its conditions here.
+    #[must_use]
+    pub fn staged_report(&self, conditions: &GpuConditions) -> Result<String, LatencyError> {
+        self.summarize().map(|report| conditions.report(&report))
+    }
+
     /// Drop every staged pair; the log reads as fresh for the next batch.
     pub fn clear(&mut self) {
         self.sim_ms.clear();
@@ -736,6 +747,141 @@ impl WallMeter {
     pub fn elapsed_ms(&self) -> f64 {
         self.started.elapsed().as_secs_f64() * 1000.0
     }
+}
+
+/// Frame-times gate outcome mirroring `tools/proof.mjs` `frameCsvVerdict`.
+/// Units: ms in `p50_ms`/`p95_ms`; `line` matches the JS gate.
+/// Determinism: pure, sorts a copy, ceil-ranks like JS.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameCsvOutcome {
+    /// True while frame p95 sits at or under the bar.
+    pub ok: bool,
+    /// Data rows ranked.
+    pub frames: u32,
+    /// Ranked median wall ms, `None` while the CSV refuses.
+    pub p50_ms: Option<f64>,
+    /// Ranked p95 wall ms, `None` while the CSV refuses.
+    pub p95_ms: Option<f64>,
+    /// Single PASS/FAIL line, shaped like the JS gate.
+    pub line: String,
+}
+
+/// Write per-frame wall times as the proof-gate CSV.
+/// Header `frame,wall_ms`; one row per sample with thousandths.
+/// Caller: window timed-smoke plus [`frame_csv_verdict`] round-trip.
+#[must_use]
+pub fn frame_times_csv(samples: &[f64]) -> String {
+    let mut out = String::from("frame,wall_ms\n");
+    for (index, sample) in samples.iter().enumerate() {
+        out.push_str(&format!("{index},{sample:.3}\n"));
+    }
+    out
+}
+
+/// FAIL outcome with a named line; keeps every refusal one line.
+fn frame_fail(frames: u32, line: &str) -> FrameCsvOutcome {
+    FrameCsvOutcome {
+        ok: false,
+        frames,
+        p50_ms: None,
+        p95_ms: None,
+        line: String::from(line),
+    }
+}
+
+/// Read a frame-times CSV and rank it like the JS proof gate.
+/// Skips blank lines, needs a `wall_ms` column, rejects empty, missing
+/// column, bad cell, and zero rows. Ranks with ceil so Rust matches JS.
+#[must_use]
+pub fn frame_csv_verdict(csv_text: &str) -> FrameCsvOutcome {
+    let bar_ms = PRESENT_P95_BUDGET_MS;
+    let lines: Vec<&str> = csv_text.split(['\n', '\r']).collect();
+    let Some(header_at) = frame_header_at(&lines) else {
+        return frame_fail(0, "[FAIL] frame times: empty csv");
+    };
+    let Some(wall_index) = frame_wall_index(lines[header_at]) else {
+        return frame_fail(0, "[FAIL] frame times: missing wall_ms column");
+    };
+    let mut values = match frame_wall_values(&lines, header_at, wall_index) {
+        Ok(values) => values,
+        Err(outcome) => return outcome,
+    };
+    if values.is_empty() {
+        return frame_fail(0, "[FAIL] frame times: zero data rows");
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    let (p50, p95) = frame_rank(&values);
+    let ok = p95 <= bar_ms;
+    let tag = if ok { "PASS" } else { "FAIL" };
+    let n = values.len();
+    let frames = u32::try_from(n).unwrap_or(u32::MAX);
+    FrameCsvOutcome {
+        ok,
+        frames,
+        p50_ms: Some(p50),
+        p95_ms: Some(p95),
+        line: format!(
+            "[{tag}] frame times: frames={n} p50={p50:.3} ms p95={p95:.3} ms (bar {bar_ms} ms)"
+        ),
+    }
+}
+
+/// First non-blank line holds the header; blanks never count as rows.
+fn frame_header_at(lines: &[&str]) -> Option<usize> {
+    lines.iter().position(|line| !line.trim().is_empty())
+}
+
+/// Column holding `wall_ms` in a trimmed header line.
+fn frame_wall_index(header_line: &str) -> Option<usize> {
+    header_line
+        .split(',')
+        .map(str::trim)
+        .position(|cell| cell == "wall_ms")
+}
+
+/// Wall samples after the header; blank lines skip, bad cells refuse.
+/// Returns the FAIL outcome for the first bad row, mirroring the JS row count.
+fn frame_wall_values(
+    lines: &[&str],
+    header_at: usize,
+    wall_index: usize,
+) -> Result<Vec<f64>, FrameCsvOutcome> {
+    let mut values: Vec<f64> = Vec::new();
+    for line in lines.iter().skip(header_at + 1) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let cell = line.split(',').nth(wall_index).map_or("", str::trim);
+        let parsed = if cell.is_empty() {
+            None
+        } else {
+            cell.parse::<f64>().ok()
+        };
+        match parsed {
+            Some(value) if value.is_finite() && value >= 0.0 => values.push(value),
+            _ => {
+                let row = values.len() + 1;
+                let frames = u32::try_from(values.len()).unwrap_or(u32::MAX);
+                return Err(frame_fail(
+                    frames,
+                    &format!("[FAIL] frame times: bad wall_ms value on row {row}"),
+                ));
+            }
+        }
+    }
+    Ok(values)
+}
+
+/// Ceil-ranked p50/p95 over ascending values, integer math only.
+/// p50 is `ceil(n/2)-1`, p95 is `ceil(19n/20)-1`, so Rust matches the JS gate
+/// without float casts. Caller holds at least one value.
+fn frame_rank(sorted: &[f64]) -> (f64, f64) {
+    let n = sorted.len();
+    let p50_at = (n.saturating_sub(1)) / 2;
+    let p95_at = (n.saturating_mul(19).saturating_add(19) / 20)
+        .saturating_sub(1)
+        .min(n - 1);
+    (sorted[p50_at], sorted[p95_at])
 }
 
 #[cfg(test)]
@@ -1191,6 +1337,30 @@ mod tests {
     }
 
     #[test]
+    fn window_log_staged_report_prints_measured_gpu_block() {
+        let mut log = WindowLatencyLog::new();
+        // Same legs as the staged summary test: one frame to sim, 50 ms to present.
+        for _ in 0..31 {
+            log.stage(1.0 * 1000.0 / TICK_HZ, 50.0)
+                .expect("clean pair stages");
+        }
+        let text = log
+            .staged_report(&gpu_conditions())
+            .expect("staged legs print");
+        assert!(text.contains("input_latency_gpu"), "{text}");
+        assert!(text.contains("adapter="), "{text}");
+        assert!(text.contains("present_p95=50.000ms"), "{text}");
+        assert!(text.contains("verdict=pass"), "{text}");
+        assert!(!text.contains("PENDING"), "{text}");
+        println!("{text}");
+        // Empty never prints zeros: the pilot sees the missing batch loudly.
+        assert_eq!(
+            WindowLatencyLog::new().staged_report(&gpu_conditions()),
+            Err(LatencyError::EmptyInput)
+        );
+    }
+
+    #[test]
     fn window_log_rejects_bad_stage_time() {
         let mut log = WindowLatencyLog::new();
         log.stage(5.0, 20.0).expect("clean pair stages");
@@ -1252,5 +1422,77 @@ mod tests {
         assert!(log.is_empty());
         log.stage(1.0 * 1000.0 / TICK_HZ, 50.0)
             .expect("cleared ceiling stages again");
+    }
+
+    #[test]
+    fn frame_csv_round_trip_ranks_like_js_gate() {
+        // Behavior: the writer emits the proof-gate CSV and the verdict ranks
+        // it with the JS ceil convention. Failure: a p95 past 50 ms passes.
+        let samples = vec![10.0, 16.667, 16.667, 20.0];
+        let csv = frame_times_csv(&samples);
+        assert!(csv.starts_with("frame,wall_ms\n"), "{csv}");
+        assert!(csv.contains("0,10.000"), "{csv}");
+        let verdict = frame_csv_verdict(&csv);
+        assert!(verdict.ok, "{}", verdict.line);
+        assert_eq!(verdict.frames, 4);
+        // ceil(0.5*4)-1 = 1 -> 16.667; ceil(0.95*4)-1 = 3 -> 20.0.
+        assert_eq!(verdict.p50_ms, Some(16.667));
+        assert_eq!(verdict.p95_ms, Some(20.0));
+        assert!(verdict.line.starts_with("[PASS]"), "{}", verdict.line);
+        assert!(verdict.line.contains("p50=16.667"), "{}", verdict.line);
+        assert!(verdict.line.contains("p95=20.000"), "{}", verdict.line);
+        // Same ranking twice: the gate repeats byte-identically.
+        assert_eq!(verdict, frame_csv_verdict(&csv));
+        // A 60 ms tail fails the 50 ms bar exactly like the JS gate.
+        // n=10: ceil(0.95*10)-1 = 9, so one slow tail decides p95.
+        let mut slow_tail = vec![16.7; 9];
+        slow_tail.push(60.0);
+        let slow_csv = frame_times_csv(&slow_tail);
+        let slow_verdict = frame_csv_verdict(&slow_csv);
+        assert_eq!(slow_verdict.frames, 10);
+        assert_eq!(slow_verdict.p95_ms, Some(60.0));
+        assert!(!slow_verdict.ok, "{}", slow_verdict.line);
+        assert!(
+            slow_verdict.line.starts_with("[FAIL]"),
+            "{}",
+            slow_verdict.line
+        );
+        assert!(
+            slow_verdict.line.contains("p95=60.000"),
+            "{}",
+            slow_verdict.line
+        );
+    }
+
+    #[test]
+    fn frame_csv_bad_shapes_fail_with_named_lines() {
+        // Each bad shape refuses with the JS gate's named FAIL line.
+        for (csv, line) in [
+            ("", "[FAIL] frame times: empty csv"),
+            ("  \n \r\n", "[FAIL] frame times: empty csv"),
+            (
+                "frame,other\n0,1.0\n",
+                "[FAIL] frame times: missing wall_ms column",
+            ),
+            (
+                "frame,wall_ms\n0,16.7\n1,abc\n",
+                "[FAIL] frame times: bad wall_ms value on row 2",
+            ),
+            (
+                "frame,wall_ms\n0,-1.0\n",
+                "[FAIL] frame times: bad wall_ms value on row 1",
+            ),
+            (
+                "frame,wall_ms\n0,NaN\n",
+                "[FAIL] frame times: bad wall_ms value on row 1",
+            ),
+            ("frame,wall_ms\n", "[FAIL] frame times: zero data rows"),
+        ] {
+            let verdict = frame_csv_verdict(csv);
+            assert!(!verdict.ok, "{}", verdict.line);
+            assert_eq!(verdict.line, line);
+        }
+        let bad = frame_csv_verdict("frame,wall_ms\n0,16.7\n1,abc\n");
+        assert_eq!(bad.frames, 1);
     }
 }

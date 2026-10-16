@@ -1897,6 +1897,7 @@ mod tests {
             revision: 0,
             materials: BTreeMap::new(),
             components: BTreeMap::new(),
+            graph: crate::graph::Graph::new(),
         };
         let nodes = vec![prop_node()];
         let grid = build_grid(&nodes, &selection(&[8]), &BTreeMap::new()).unwrap();

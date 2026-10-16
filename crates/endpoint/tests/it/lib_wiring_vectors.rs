@@ -65,7 +65,10 @@ fn std_transport_wiring_admits_loopback_calls() {
         !transport::validate(&empty_name),
         "empty name refuses via root"
     );
-    assert!(transport::is_loopback("127.0.0.1"), "loopback admits via root");
+    assert!(
+        transport::is_loopback("127.0.0.1"),
+        "loopback admits via root"
+    );
     assert!(
         !transport::is_loopback("192.168.1.2"),
         "remote refuses via root"
@@ -124,10 +127,7 @@ fn std_guards_wiring_fails_closed() {
         guards::check_dry_run_id("7f3a").is_err(),
         "unminted receipt refuses via root"
     );
-    assert!(
-        guards::check_args_ops(1).is_ok(),
-        "one op admits via root"
-    );
+    assert!(guards::check_args_ops(1).is_ok(), "one op admits via root");
     assert!(
         guards::check_args_ops(0).is_err(),
         "empty batch refuses via root"

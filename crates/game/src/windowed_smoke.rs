@@ -96,3 +96,32 @@ pub fn format_timed_smoke(frames: u32, ticks: u32, elapsed_ms: f64) -> Result<St
         "arena timed-smoke: frames={frames} ticks={ticks} elapsed_ms={elapsed_ms:.3} fps={fps:.1}"
     ))
 }
+
+/// CSV header for the timed-smoke frame-times file: one row per presented
+/// frame with wall time plus input-to-present time. Units: milliseconds.
+/// Determinism: pure constant, same bytes on every machine.
+pub const FRAME_TIMES_CSV_HEADER: &str = "frame,wall_ms,input_to_present_ms";
+
+/// Format one frame-times CSV row: `frame,wall_ms,input_to_present_ms`
+/// with three decimals. Non-finite or negative wall or present times fail
+/// loudly naming the leg, so a bad sample never files a fake row. Pure over
+/// its inputs, so tests force bad rows without a run. Presentation only,
+/// never hashed.
+/// Caller: `crates/game/src/bin/arena.rs` files one row per presented frame.
+pub fn frame_times_csv_row(
+    frame: u32,
+    wall_ms: f64,
+    input_to_present_ms: f64,
+) -> Result<String, WinError> {
+    if !wall_ms.is_finite() || wall_ms < 0.0 {
+        return Err(WinError::BadArgs(format!(
+            "frame-times wall_ms {wall_ms} is not finite nonnegative"
+        )));
+    }
+    if !input_to_present_ms.is_finite() || input_to_present_ms < 0.0 {
+        return Err(WinError::BadArgs(format!(
+            "frame-times input_to_present_ms {input_to_present_ms} is not finite nonnegative"
+        )));
+    }
+    Ok(format!("{frame},{wall_ms:.3},{input_to_present_ms:.3}"))
+}

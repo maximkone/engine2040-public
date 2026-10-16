@@ -298,3 +298,86 @@ pub fn fog_blit_uniform_bytes(color: [f32; 3], width_px: u32, height_px: u32) ->
     out[16..20].copy_from_slice(&(height_px as f32).to_le_bytes());
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fog_fits_frame_zero_area_has_no_feed() {
+        assert!(!fog_fits_frame(0, 720));
+        assert!(!fog_fits_frame(1280, 0));
+        assert!(!fog_fits_frame(0, 0));
+    }
+
+    #[test]
+    fn fog_fits_frame_hd_fits_budget() {
+        assert!(fog_fits_frame(1280, 720));
+    }
+
+    #[test]
+    fn fog_fits_frame_over_dim_has_no_feed() {
+        assert!(!fog_fits_frame(4096, 720));
+        assert!(!fog_fits_frame(1280, 4096));
+    }
+
+    #[test]
+    fn fog_fits_frame_full_2048_square_over_budget() {
+        // Doc promise: 2048x2048 needs ~32 MiB over the 20 MiB budget.
+        assert!(!fog_fits_frame(2048, 2048));
+    }
+
+    #[test]
+    fn fog_blit_uniform_round_trips_color_and_size() {
+        let color = [0.25, 0.5, 1.0];
+        let bytes = fog_blit_uniform_bytes(color, 1280, 720);
+        assert_eq!(bytes.len(), FOG_BLIT_UNIFORM_BYTES);
+        let r = f32::from_le_bytes(bytes[0..4].try_into().expect("r bytes"));
+        let g = f32::from_le_bytes(bytes[4..8].try_into().expect("g bytes"));
+        let b = f32::from_le_bytes(bytes[8..12].try_into().expect("b bytes"));
+        let w = f32::from_le_bytes(bytes[12..16].try_into().expect("w bytes"));
+        let h = f32::from_le_bytes(bytes[16..20].try_into().expect("h bytes"));
+        assert_eq!((r, g, b), (color[0], color[1], color[2]));
+        assert_eq!((w, h), (1280.0, 720.0));
+        assert!(bytes[20..32].iter().all(|x| *x == 0));
+    }
+
+    #[test]
+    fn fog_blit_uniform_distinguishes_colors() {
+        let a = fog_blit_uniform_bytes([1.0, 0.0, 0.0], 1280, 720);
+        let b = fog_blit_uniform_bytes([0.0, 1.0, 0.0], 1280, 720);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn contact_for_frame_hd_carries_rl9_kernel() {
+        let contact = contact_for_frame(1280, 720).expect("hd frame builds contact");
+        assert_eq!(contact.width_px, 1280);
+        assert_eq!(contact.height_px, 720);
+        assert_eq!(contact.radius_px, RL9_CONTACT_RADIUS_PX);
+        assert_eq!(contact.thickness_m, RL9_CONTACT_THICKNESS_M);
+        assert_eq!(contact.intensity, RL9_CONTACT_INTENSITY);
+    }
+
+    #[test]
+    fn contact_for_frame_suspended_size_fails() {
+        assert!(contact_for_frame(0, 720).is_err());
+        assert!(contact_for_frame(1280, 0).is_err());
+    }
+
+    #[test]
+    fn contact_for_frame_over_bound_fails() {
+        assert!(contact_for_frame(4096, 720).is_err());
+    }
+
+    #[test]
+    fn fog_err_invalid_carries_rl9_context() {
+        let mapped = fog_err("contact", crate::fog::FogError::Invalid("bad".into()));
+        match mapped {
+            crate::present::surface::PresentError::InvalidDraw { reason, .. } => {
+                assert!(reason.contains("rl9 contact"));
+            }
+            other => panic!("wrong mapping: {other:?}"),
+        }
+    }
+}

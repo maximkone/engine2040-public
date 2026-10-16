@@ -284,6 +284,23 @@ mod tests {
     }
 
     #[test]
+    fn splat_weights_sum_to_255_on_every_corner() {
+        // Pins the `splat_for` contract through its narrowing conversions:
+        // each weight fits `u8` and the three sum to exactly 255, so the
+        // remainder fix-up never pushes a channel past the byte.
+        for hi in [0u8, 1, 64, 127, 128, 200, 254, 255] {
+            for slope in [0u8, 1, 63, 64, 65, 200, 255] {
+                let weights = splat_for(hi, slope);
+                let total: u32 = weights.iter().map(|w| u32::from(*w)).sum();
+                assert_eq!(
+                    total, 255,
+                    "splat weights must sum to 255 for hi={hi} slope={slope}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn forged_oversize_header_parses_to_none() {
         // A header that claims a huge side with a tiny body must not size
         // any buffer from the claim.

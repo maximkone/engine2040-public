@@ -9,11 +9,25 @@
 //! `Copy` and hash through [`FighterInput::append_bytes`] (little-endian).
 
 /// Canonical match slots in one headless match: `2..=MAX_PARTICIPANTS`
-/// (2–16 today; siege scales this tomorrow). Single source: arena, combat,
-/// net, ui and game read this const and declare no private cap. Server
-/// connection capacity (`engine-net` `server::MAX_PLAYERS = 64`) is a
-/// separate transport bound, not match slots; the provider observation
-/// window (`MAX_FIGHTERS_PER_OBSERVATION = 8`) is a separate view bound.
+/// (2–16; siege scales via split-match-32, never by widening this).
+/// Single source: arena, combat, net, ui and game read this const and
+/// declare no private cap. Server connection capacity (`engine-net`
+/// `server::MAX_PLAYERS = 64`) is a separate transport bound, not match
+/// slots; the provider observation window
+/// (`MAX_FIGHTERS_PER_OBSERVATION = 8`) is a separate view bound.
+///
+/// Decision: the cap stays 16. The per-fighter record stays 10 bytes,
+/// little-endian and cap-independent, and the golden fixture never runs
+/// arena, so the golden stays byte-identical. Net consequences (frozen
+/// chart, 1200-byte datagram): 2 fighters map to 47 bytes at 20 Hz, 8 to
+/// 161 bytes at 20 Hz, 16 to 313 bytes at 15 Hz, each under its kbps cap.
+/// A 32-slot snapshot would need 617 bytes at 15 Hz: inside 1200 bytes on
+/// paper, but it breaks the frozen chart, the 800-byte per-snapshot
+/// budget and every fixed `[T; MAX_PARTICIPANTS]` array, so it rides a
+/// later row, never this const. Split-match-32 harness: two 16-slot
+/// tapes (`FighterTape`), halves `0..16` each with their own tick hash;
+/// theater joins the halves, net sends two 16-slot snapshots, never one
+/// 32-slot snapshot.
 pub const MAX_PARTICIPANTS: u8 = 16;
 /// Wish axis range: `-100..=100` (percent of top speed).
 pub const WISH_RANGE: i8 = 100;
@@ -327,6 +341,42 @@ mod tests {
             FighterTape(vec![a, a]).validate(),
             Err(FighterError::DuplicateInput(1))
         );
+    }
+
+    #[test]
+    fn cap_stays_16_and_split_match_32_needs_two_tapes() {
+        assert_eq!(MAX_PARTICIPANTS, 16);
+        let half = |tick: u32| -> FighterTape {
+            FighterTape(
+                (0..MAX_PARTICIPANTS)
+                    .map(|slot| FighterInput {
+                        tick,
+                        fighter: FighterId::new(slot).expect("half slot inside cap"),
+                        mx: 0,
+                        mz: 0,
+                        facing: 0,
+                        buttons: Buttons::NONE,
+                    })
+                    .collect(),
+            )
+        };
+        half(0).validate().expect("first half validates");
+        half(1).validate().expect("second half validates");
+        let mut wide = FighterInput {
+            tick: 0,
+            fighter: FighterId(0),
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        };
+        wide.fighter = FighterId(16);
+        assert_eq!(wide.validate(), Err(FighterError::UnknownFighter(16)));
+        let mut bytes = Vec::new();
+        for input in half(0).0 {
+            input.append_bytes(&mut bytes);
+        }
+        assert_eq!(bytes.len(), 16 * 10);
     }
 
     #[test]

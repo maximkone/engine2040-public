@@ -5,11 +5,12 @@
 //! compiling while every rebake runs through tiles.
 
 pub use crate::tiles::{
-    BreakSet, TileError as RebakeError, TileId, TileRegistry, MAX_BREAK_TILES, MAX_TILES,
+    BreakSet, ObstacleCache, ObstacleRef, TileError as RebakeError, TileId, TileRegistry,
+    MAX_BREAK_TILES, MAX_OBSTACLE_REQUESTS, MAX_TILES, MAX_TOUCHED_TILES,
 };
 
 use crate::mesh::{NavMesh, StackedNav};
-use crate::tiles::TileError;
+use crate::tiles::{TileError, TiledNav};
 
 /// Rebakes the tile a mesh polygon names.
 ///
@@ -25,6 +26,14 @@ pub fn rebake_mesh_tile(
         return Err(TileError::BadTile { tile: tile.0 });
     }
     registry.rebake(tile)
+}
+
+/// Budgeted obstacle drain: applies queued box flips, then rebakes up to
+/// `max_tiles` dirty tiles ascending; returns the rebaked count.
+/// PORT(recastnavigation/recastnavigation@9f4ce64:DetourTileCache `update()`).
+pub fn update(nav: &mut TiledNav, cache: &mut ObstacleCache, max_tiles: usize) -> usize {
+    cache.drain(nav);
+    nav.rebake_budget(max_tiles)
 }
 
 /// Rebakes one tile on one stacked level; wiring caller for [`StackedNav`].

@@ -19,6 +19,7 @@
 //! GPU (GPU, CPU, deferred or a configured remote), and [`LocalAdapter`]
 //! applies that decision on its request path.
 
+pub mod agent_loop;
 pub mod announce;
 pub mod anthropic;
 pub mod arbiter;

@@ -4,9 +4,9 @@
 //! Determinism: fixed dt, seeded streams, little-endian hashes; no wall clock.
 //! Errors: none at crate root; fallible callers use typed errors (e.g. TimeError).
 //! Budget: no per-tick allocation; zero-alloc paths proven by alloc_probe tests.
+pub mod adler;
 #[cfg(any(test, feature = "test-util"))]
 pub mod alloc_probe;
-pub mod adler;
 pub mod arena;
 pub mod checked;
 pub mod config;

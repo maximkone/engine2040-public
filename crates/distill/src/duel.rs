@@ -47,8 +47,7 @@
 use core::f32::consts::PI;
 
 use engine_ai::{
-    FEATURE_DIM, FEATURE_FULL_DIST_M, FEATURE_FULL_GROUND_M, FEATURE_FULL_HEIGHT_M,
-    INTENT_OUT_DIM,
+    FEATURE_DIM, FEATURE_FULL_DIST_M, FEATURE_FULL_GROUND_M, FEATURE_FULL_HEIGHT_M, INTENT_OUT_DIM,
 };
 use engine_arena::controller::{SlotInput, SlotTape};
 use engine_arena::{
@@ -662,10 +661,15 @@ mod tests {
         assert_eq!(a.len(), 400);
         let b = teacher_episode(7, 1200).expect("duel runs again");
         assert_eq!(a, b);
-        assert!(a.iter().all(|(_, class)| usize::from(*class) < DUEL_CLASSES));
+        assert!(a
+            .iter()
+            .all(|(_, class)| usize::from(*class) < DUEL_CLASSES));
         // The actuated duel closes: some rows sit inside 4 m and carry a
         // combat intent (attack, block or dodge).
-        let close = a.iter().filter(|(lanes, _)| lanes[engine_ai::LANE_DIST] < 32).count();
+        let close = a
+            .iter()
+            .filter(|(lanes, _)| lanes[engine_ai::LANE_DIST] < 32)
+            .count();
         let combat = a.iter().filter(|(_, class)| *class <= CLASS_DODGE).count();
         assert!(close > 0 && combat > 0, "close {close}, combat {combat}");
         assert_eq!(
@@ -707,10 +711,21 @@ mod tests {
     #[test]
     fn committed_net_is_pinned_and_bind_ready() {
         let model = engine_nn::load(FIXTURE_NET).expect("fixture net loads");
-        assert_eq!(model.digest(), 0x6ace_b82b_2a85_6f5c, "regenerate with distill_duel");
+        assert_eq!(
+            model.digest(),
+            0x6ace_b82b_2a85_6f5c,
+            "regenerate with distill_duel"
+        );
         assert_eq!(model.layers().len(), 2);
-        assert_eq!((model.input_dim(), model.output_dim()), (DUEL_LANES, DUEL_CLASSES));
-        assert!(FIXTURE_NET.len() < 1024, "tiny net: {} B", FIXTURE_NET.len());
+        assert_eq!(
+            (model.input_dim(), model.output_dim()),
+            (DUEL_LANES, DUEL_CLASSES)
+        );
+        assert!(
+            FIXTURE_NET.len() < 1024,
+            "tiny net: {} B",
+            FIXTURE_NET.len()
+        );
         // The arena-side net policy accepts the exact bytes (6 -> 5).
         engine_ai::NetPolicy::load(SlotId(0), FIXTURE_NET).expect("NetPolicy loads the net");
         // Two short bouts per side against the teacher replay bit-exactly.

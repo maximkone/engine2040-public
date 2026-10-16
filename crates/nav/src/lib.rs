@@ -5,6 +5,9 @@ pub mod bake;
 pub mod crowd;
 mod cursor;
 pub mod flow;
+/// Portal string-pulling over tiled walks with salted refs (NV6).
+pub mod funnel;
+pub mod hpa;
 pub mod links;
 pub mod mesh;
 pub mod neighbors;
@@ -12,6 +15,7 @@ pub mod rebake;
 pub mod tiles;
 
 pub use astar::astar;
+pub use hpa::hpa;
 
 use std::collections::VecDeque;
 

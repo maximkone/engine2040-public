@@ -101,6 +101,42 @@ struct TickHashes {
     systems: SystemHashes,
 }
 
+/// Tagged dump (Factorio `level_with_tags` idea-only): same bytes plus tags.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TaggedDump {
+    pub tick: u32,
+    pub system: &'static str,
+    pub offset: usize,
+    pub len: usize,
+    pub bytes: Vec<u8>,
+}
+
+/// Tagged dump at post-`steps`. `None` on bad config/tape/system/steps.
+pub fn system_tagged_bytes(
+    config: &ArenaConfig,
+    tape: &FighterTape,
+    steps: u32,
+    system: &str,
+) -> Option<TaggedDump> {
+    if steps > config.ticks {
+        return None;
+    }
+    let mut sim = super::Sim::build(config, tape, false, false)?;
+    while sim.tick < steps {
+        sim.step(tape)?;
+    }
+    let mut bytes = Vec::new();
+    append_system_bytes(&sim, system, &mut bytes)?;
+    let name = SYSTEM_NAMES.iter().find(|name| **name == system)?;
+    Some(TaggedDump {
+        tick: steps,
+        system: *name,
+        offset: 0,
+        len: bytes.len(),
+        bytes,
+    })
+}
+
 /// Canonical bytes for one system at the post-`steps` state, rebuilt from
 /// scratch (`steps` ticks stepped from tick 0). `None` on invalid
 /// config/tape, unknown system, or `steps > config.ticks`.
@@ -113,16 +149,7 @@ pub fn system_canonical_bytes(
     steps: u32,
     system: &str,
 ) -> Option<Vec<u8>> {
-    if steps > config.ticks {
-        return None;
-    }
-    let mut sim = super::Sim::build(config, tape, false, false)?;
-    while sim.tick < steps {
-        sim.step(tape)?;
-    }
-    let mut out = Vec::new();
-    append_system_bytes(&sim, system, &mut out)?;
-    Some(out)
+    system_tagged_bytes(config, tape, steps, system).map(|tagged| tagged.bytes)
 }
 
 /// Per-tick system hashes for a full run, post-step per tick. Empty on
@@ -165,17 +192,35 @@ pub fn verify_rollback(
     for (index, (a, b)) in full.iter().zip(rejoined.iter()).enumerate() {
         let tick = index as u32;
         if a.checkpoint != b.checkpoint || a.systems != b.systems {
-            let system = first_diverging_system(&a.systems, &b.systems).unwrap_or("world");
-            return Some(Err(SyncError {
+            return Some(Err(dual_save_report(
                 tick,
-                system,
-                expected: a.checkpoint.hash,
-                actual: b.checkpoint.hash,
-                inputs: inputs_at(tape, tick),
-            }));
+                &a.systems,
+                &b.systems,
+                a.checkpoint.hash,
+                b.checkpoint.hash,
+                tape,
+            )));
         }
     }
     Some(Ok(full.iter().map(|row| row.checkpoint).collect()))
+}
+
+/// Dual-save envelope (Factorio idea-only): reference plus desynced plus inputs.
+fn dual_save_report(
+    tick: u32,
+    reference: &SystemHashes,
+    desynced: &SystemHashes,
+    expected: u64,
+    actual: u64,
+    tape: &FighterTape,
+) -> SyncError {
+    SyncError {
+        tick,
+        system: first_diverging_system(reference, desynced).unwrap_or("world"),
+        expected,
+        actual,
+        inputs: inputs_at(tape, tick),
+    }
 }
 
 /// Drive `steps` ticks from tick 0, collecting per-tick hashes.
@@ -496,6 +541,39 @@ mod tests {
             first_diverging_system(&base[60], &attack_systems[60]),
             Some("world")
         );
+    }
+
+    #[test]
+    fn sync_heavy_mode_clean_reports_zero_false_positives() {
+        let config = config();
+        let tape = idle_tape(&config);
+        for at in 0..config.ticks {
+            verify_rollback(&config, &tape, at)
+                .expect("heavy")
+                .expect("agree");
+        }
+        let tagged = system_tagged_bytes(&config, &tape, 60, "world").expect("tagged");
+        let raw = system_canonical_bytes(&config, &tape, 60, "world").expect("raw");
+        assert_eq!(tagged.bytes, raw);
+        assert!((tagged.tick, tagged.system, tagged.offset) == (60, "world", 0));
+        assert_eq!(tagged.len, raw.len());
+        assert_eq!(hash_bytes(&tagged.bytes), hash_bytes(&raw));
+        let base = run_system_hashes(&config, &tape);
+        let mut altered = tape.clone();
+        let victim = 60 * usize::from(config.fighters);
+        altered.0[victim].mx = 100;
+        let moved = run_system_hashes(&config, &altered);
+        let idle_full = run(&config, &tape);
+        let moved_full = run(&config, &altered);
+        let report = dual_save_report(
+            60,
+            &base[60],
+            &moved[60],
+            idle_full[60].hash,
+            moved_full[60].hash,
+            &altered,
+        );
+        assert!((report.tick, report.system, report.inputs.len()) == (60, "world", 2));
     }
 
     #[test]

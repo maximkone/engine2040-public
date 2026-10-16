@@ -149,3 +149,21 @@ test('same inputs give the same output text twice', function () {
   const second = formatMatrix(g.entries, g.results);
   assert.equal(first, second);
 });
+test('arch digest diverge names tick plus cause class', function () {
+  const ticks = 12;
+  const baseFn = function (t) { return BigInt(5000 + t); };
+  const a = makeTape({ seed: 19n, ticks: ticks, state: baseFn });
+  const fma = makeTape({ seed: 19n, ticks: ticks, state: function (t) { return t < 5 ? BigInt(5000 + t) : BigInt(5000 + t + 1); } });
+  const rf = compareTapes(parseTape(a), parseTape(fma));
+  assert.equal(rf.firstDivergentTick, 5);
+  assert.equal(rf.cause, 'fma');
+  assert.match(rf.note, /cause=fma/);
+  const g = entriesFor([a, fma], ['linux.e2040', 'windows.e2040']);
+  const out = formatMatrix(g.entries, g.results);
+  assert.match(out, /first bad tick 5/);
+  assert.match(out, /cause=fma/);
+  const libm = makeTape({ seed: 19n, ticks: ticks, state: function (t) { return t < 5 ? BigInt(5000 + t) : BigInt(5000 + t + 300); } });
+  assert.equal(compareTapes(parseTape(a), parseTape(libm)).cause, 'libm');
+  const tie = makeTape({ seed: 19n, ticks: ticks, state: function (t) { return t < 5 ? BigInt(5000 + t) : BigInt(5000 + t + 2654435769); } });
+  assert.equal(compareTapes(parseTape(a), parseTape(tie)).cause, 'sort-tie');
+});

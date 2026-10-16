@@ -133,6 +133,8 @@ pub struct KccConfig {
     pub slope_cos: f32,
     /// ground snap distance.
     pub step_down: f32,
+    /// slide along walls when true; stop dead when false.
+    pub slide: bool,
     /// gravity (+down).
     pub gravity: f32,
     /// jump takeoff velocity.
@@ -155,6 +157,7 @@ impl Default for KccConfig {
             max_slides: 4,
             slope_cos: std::f32::consts::FRAC_1_SQRT_2,
             step_down: 0.35,
+            slide: true,
             gravity: 22.0,
             jump_v: 8.0,
             coyote: 0.12,
@@ -184,6 +187,11 @@ pub struct KccState {
     pub grounded: bool,
     pub coyote_t: f32,
     pub buffer_t: f32,
+    /// True when the last tick slid on a slope steeper than walkable.
+    pub sliding_down_slope: bool,
+    /// Caller deck travel (mm); last ride (mm) inherited once on step-off.
+    pub deck_delta_mm: [i32; 3],
+    pub last_ride_mm: [i32; 3],
 }
 impl KccState {
     /// new state at feet pos.
@@ -194,6 +202,9 @@ impl KccState {
             grounded: false,
             coyote_t: 0.0,
             buffer_t: 0.0,
+            sliding_down_slope: false,
+            deck_delta_mm: [0, 0, 0],
+            last_ride_mm: [0, 0, 0],
         }
     }
 }
@@ -404,6 +415,28 @@ fn fps_headroom_free(w: &World, c: V3, r: f32) -> bool {
     }
     true
 }
+/// Integer mm to meters without `as` casts via `i16`.
+fn mm_to_m(mm: i32) -> f32 {
+    let (whole, rem) = (mm / 1000, mm % 1000);
+    let whole16 = i16::try_from(whole).unwrap_or(if whole < 0 { i16::MIN } else { i16::MAX });
+    let rem16 = i16::try_from(rem).unwrap_or(0);
+    f32::from(whole16) + f32::from(rem16) / 1000.0
+}
+/// Deck carry beside snap; PORT(idanarye/bevy-tnua@0f5450e3 + janhohenheim/bevy_ahoy@630a4573 ideas only); caller sets deck mm, rides/inherits once.
+fn apply_deck(s: &mut KccState, grounded_now: bool, dt: f32) {
+    if grounded_now {
+        s.pos.x += mm_to_m(s.deck_delta_mm[0]);
+        s.pos.y += mm_to_m(s.deck_delta_mm[1]);
+        s.pos.z += mm_to_m(s.deck_delta_mm[2]);
+        s.last_ride_mm = s.deck_delta_mm;
+    } else if s.last_ride_mm != [0, 0, 0] {
+        let inv = 1.0 / dt;
+        s.vel.x += mm_to_m(s.last_ride_mm[0]) * inv;
+        s.vel.y += mm_to_m(s.last_ride_mm[1]) * inv;
+        s.vel.z += mm_to_m(s.last_ride_mm[2]) * inv;
+        s.last_ride_mm = [0, 0, 0];
+    }
+}
 /// advance KCC one fixed step (call at fixed dt).
 pub fn step(cfg: &KccConfig, w: &World, s: &mut KccState, inp: &KccInput, dt: f32) {
     if s.grounded {
@@ -435,6 +468,7 @@ pub fn step(cfg: &KccConfig, w: &World, s: &mut KccState, inp: &KccInput, dt: f3
     let mut c = V3::new(s.pos.x, s.pos.y + r, s.pos.z);
     let mut delta = V3::new(s.vel.x * dt, s.vel.y * dt, s.vel.z * dt);
     let mut g = false;
+    s.sliding_down_slope = false;
     for _ in 0..cfg.max_slides {
         if delta.len2() < 1e-12 {
             break;
@@ -471,7 +505,14 @@ pub fn step(cfg: &KccConfig, w: &World, s: &mut KccState, inp: &KccInput, dt: f3
                 s.vel.y = 0.0;
             }
             let rem = delta.scale(1.0 - t);
-            delta = rem.sub(n.scale(rem.dot(n)));
+            if !cfg.slide {
+                delta = V3::zero();
+            } else {
+                delta = rem.sub(n.scale(rem.dot(n)));
+            }
+            if n.y < cfg.slope_cos {
+                s.sliding_down_slope = true;
+            }
             if delta.len2() < 1e-10 {
                 break;
             }
@@ -495,6 +536,7 @@ pub fn step(cfg: &KccConfig, w: &World, s: &mut KccState, inp: &KccInput, dt: f3
     }
     s.pos = V3::new(c.x, c.y - r, c.z);
     s.grounded = g;
+    apply_deck(s, g, dt);
 }
 #[cfg(test)]
 mod tests {
@@ -796,5 +838,61 @@ mod tests {
             "f32 runtime must track the f64 oracle, dx={dx}, x={}, oracle={x}",
             a.pos.x,
         );
+    }
+    #[test]
+    fn platform_ride_matrix() {
+        let cfg = KccConfig::default();
+        let dm = [20, 0, 0];
+        let dx = mm_to_m(dm[0]);
+        let mut hs = [0u64; 2];
+        for rep in 0..2 {
+            let mut w = World::new();
+            w.ground(-0.5);
+            w.push_box(Aabb::new(V3::new(-2.0, -0.2, -1.0), V3::new(2.0, 0.0, 1.0)));
+            let mut s = KccState::new(V3::new(0.0, 0.0, 0.0));
+            s.grounded = true;
+            for t in 0..660 {
+                s.deck_delta_mm = if t < 600 { dm } else { [0, 0, 0] };
+                step(&cfg, &w, &mut s, &KccInput::new(V3::zero(), false), DT);
+                if t < 600 {
+                    w.boxes[0].min.x += dx;
+                    w.boxes[0].max.x += dx;
+                }
+            }
+            hs[rep] = state_hash(&s);
+            let off = s.pos.x - w.boxes[0].min.x;
+            assert!(s.grounded && (off - 2.0).abs() <= 0.01, "station rep {rep}");
+        }
+        assert_eq!(hs[0], hs[1], "ride hash x2");
+        for rep in 0..2 {
+            let mut w = World::new();
+            w.ground(-0.5);
+            w.push_box(Aabb::new(V3::new(-2.0, 0.3, -1.0), V3::new(2.0, 0.5, 1.0)));
+            let mut s = KccState::new(V3::new(0.0, 0.5, 0.0));
+            s.grounded = true;
+            let mut inherited = false;
+            let wish = KccInput::new(V3::new(4.0, 0.0, 0.0), false);
+            for _ in 0..180 {
+                let on_deck = s.grounded && s.pos.y > 0.0;
+                s.deck_delta_mm = if on_deck { dm } else { [0, 0, 0] };
+                step(&cfg, &w, &mut s, &wish, DT);
+                w.boxes[0].min.x += dx;
+                w.boxes[0].max.x += dx;
+                if !s.grounded && s.last_ride_mm == [0, 0, 0] && !inherited {
+                    inherited = true;
+                    assert!(s.vel.x > 4.5, "step-off inherits {:?}", s.vel);
+                }
+            }
+            assert!(s.grounded && inherited, "step-off lands rep {rep}");
+            hs[rep] = state_hash(&s);
+        }
+        assert_eq!(hs[0], hs[1], "step-off x2");
+        let mut w = World::new();
+        w.push_plane(Plane::from_np(V3::new(-0.8660254, 0.5, 0.0), V3::zero()));
+        let mut s = KccState::new(V3::new(0.0, 1.0, 0.0));
+        for _ in 0..60 {
+            step(&cfg, &w, &mut s, &KccInput::new(V3::zero(), false), DT);
+        }
+        assert!(s.sliding_down_slope, "over-steep stays slide");
     }
 }

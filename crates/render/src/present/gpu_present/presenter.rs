@@ -1,21 +1,58 @@
 //! presenter: `Presenter` assembly, lifecycle and cache accessors.
 //!
 //! Units: pixels for sizes, GPU handles for cached entries. Methods that
-//! encode or submit frames live in `submit`; free helpers there too.
+//! encode or submit frames live in `submit`; free helpers there too. The
+//! per-frame fog and GTAO tranche lives in `fog_tranche`.
 use super::super::fog_fwd::{FogFwd, FOG_FWD_UNIFORM_BYTES};
 use super::super::*;
 use super::frame::{gtao_err, sky_err, GpuMesh, GpuTexture, Targets};
+use super::msaa::{msaa_sample_count, msaa_target_desc, msaa_transient_bytes, MsaaConfig};
 use super::submit::{
-    blit_pipeline, forward_bind_group, forward_pipeline, inverse_view_proj_cols, material_entry,
-    padded_depth_row, sky_pipeline, stage_field_bytes, uniform_buffer, uniform_entry, ForwardParts,
-    MATERIAL_RING_BYTES, MATERIAL_RING_LEN,
+    blit_pipeline, forward_pipeline, material_entry, padded_depth_row, sky_pipeline,
+    uniform_buffer, uniform_entry, MATERIAL_RING_BYTES, MATERIAL_RING_LEN,
 };
 use super::timing::GpuTimer;
 use super::{BLIT_WGSL, HDR_FORMAT, IBL_STUDIO_HDRI_BYTES, OUTPUT_FORMAT};
 use crate::v1::{self};
 use crate::v1_gpu::FORWARD_PBR_WGSL;
-use crate::{decals, fog, gtao, ibl, material_layer, particles_gpu, sky};
+use crate::{decals, fog, gtao, ibl, material_layer, overlay, particles_gpu, sky};
 use std::sync::Arc;
+
+/// LF4 slice 1 bloom state: enable flag plus CPU-mirrored thresholds.
+/// Owner presenter, consumer `submit.rs` live encode. Units linear HDR
+/// threshold plus fraction knee plus flag. Determinism pure Copy, no
+/// allocation, no device. Reuses the HDR target, sizes nothing per frame.
+/// Caller: `crates/render/src/present/gpu_present/submit.rs` live encode.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct BloomState {
+    /// Live halo switch: false keeps today's frame bit-identical.
+    pub enabled: bool,
+    /// Bloom thresholds mirroring [`crate::post::BloomConfig`].
+    pub config: crate::post::BloomConfig,
+}
+
+impl BloomState {
+    /// Default on with the CPU oracle thresholds.
+    pub fn on() -> Self {
+        Self {
+            enabled: true,
+            config: crate::post::BloomConfig::default(),
+        }
+    }
+
+    /// Flag for `max_luma`: `1.0` when enabled and the oracle gate runs,
+    /// else `0.0` (bit-identical off). Fail-closed by delegation.
+    #[must_use]
+    pub fn flag(&self, max_luma: f32) -> f32 {
+        if self.enabled
+            && crate::post::bloom_should_run(max_luma, self.config.threshold, self.config.knee)
+        {
+            1.0
+        } else {
+            0.0
+        }
+    }
+}
 
 /// Windowed presenter: surface/swapchain plus HDR, depth and LDR-twin
 /// targets, GPU mesh/texture caches, last-good recovery. Units: pixels
@@ -33,6 +70,9 @@ pub struct Presenter {
     pub(crate) adapter_driver: String,
     pub(crate) forward_layout: wgpu::BindGroupLayout,
     pub(crate) forward_hdr: wgpu::RenderPipeline,
+    /// 4x MSAA forward pipeline for the on path: same shader plus layout
+    /// as `forward_hdr` with count 4; bound when `targets.msaa` is `Some`.
+    pub(crate) forward_hdr_msaa: wgpu::RenderPipeline,
     pub(crate) blit_layout: wgpu::BindGroupLayout,
     pub(crate) blit_shader: wgpu::ShaderModule,
     pub(crate) blit_sampler: wgpu::Sampler,
@@ -67,6 +107,11 @@ pub struct Presenter {
     pub(crate) creates: CreateTally,
     pub(crate) meshes: CpuCache<MeshKey, GpuMesh>,
     pub(crate) textures: CpuCache<TextureKey, GpuTexture>,
+    /// Arena crowd mesh and palette, packed by `ensure_crowd`. They sit
+    /// beside the caches, not in them, so the receipt's cache rows count
+    /// only user uploads. The palette's bind group lives in `texture_binds`.
+    pub(crate) crowd_mesh: Option<GpuMesh>,
+    pub(crate) crowd_palette: Option<GpuTexture>,
     pub(crate) device_lost: Option<String>,
     pub(crate) frames_presented: u64,
     /// Surface frames between look-probe rounds (sky, layer, particle and
@@ -86,6 +131,15 @@ pub struct Presenter {
     /// (BLOCKERS RA1 row) is a blit-UV decision owned by RA1 and is not
     /// reoriented here.
     pub(crate) sky_look: sky::SkyLookBake,
+    /// LF1 live sky: the one init-time sky-view texture (64x32 Rgba32Float,
+    /// row 0 at the zenith) sampled by `fs_sky`. Uploaded once, never per
+    /// frame, same backing the fog horizon reads.
+    pub(crate) sky_view: wgpu::Texture,
+    /// View over `sky_view` bound at forward 15 for the sky pass.
+    pub(crate) sky_view_view: wgpu::TextureView,
+    /// LF1 live exposure: EV100 scale from the one `sky_forward_feed`
+    /// call, staged into frame materials. Presentation only.
+    pub(crate) sky_exposure: f32,
     /// RL4 sky bind state (steady-state submits size nothing).
     pub(crate) sky_sub: sky::SkySubmitter,
     /// RL6 layer chart bind state (steady-state submits size nothing).
@@ -110,6 +164,12 @@ pub struct Presenter {
     /// Lighting bake the chart samples every frame (baked once at
     /// init from the studio fixture; same bytes as the cook reference).
     pub(crate) ibl_bake: ibl::IblBake,
+    /// Live forward prefilter array (30 layers of 64x64 float texels).
+    pub(crate) ibl_prefilter: wgpu::Texture,
+    /// Live forward BRDF LUT (64x64 scale/bias pairs).
+    pub(crate) ibl_brdf: wgpu::Texture,
+    /// Live forward SH uniform (144 bytes, 9 vec4s).
+    pub(crate) ibl_sh_buf: wgpu::Buffer,
     /// RL9 compiled fog -> forward wiring, refreshed only on shape
     /// change so steady-state frames allocate nothing for the graph.
     pub(crate) fog_plan: Option<(u32, u32, crate::graph::CompiledGraph)>,
@@ -152,11 +212,18 @@ pub struct Presenter {
     /// compute tranche, each a blocking GPU readback. Default off: the
     /// live window frame never waits on the GPU.
     pub(crate) look_probes: bool,
+    /// MSAA on/off switch (EG13 slice 1): default off keeps today's 1x
+    /// path. The window leg flips it; slice 2 builds the 4x targets plus
+    /// resolve. Copyable state, no per-frame allocation.
+    pub(crate) msaa: MsaaConfig,
     /// Height fog and sky colors the forward shader evaluates per fragment.
     pub(crate) fog_fwd: FogFwd,
     /// Per-frame fog uniform (group 0 binding 6, read by the forward
     /// fragment and by the sky entry points).
     pub(crate) fog_fwd_buf: wgpu::Buffer,
+    /// Per-frame torch block (group 0 binding 16, EG12 slice 2): two warm
+    /// torches when draws exist, else zeroed. Presentation only.
+    pub(crate) torch_buf: wgpu::Buffer,
     /// Fullscreen far-plane sky draw (`vs_sky`/`fs_sky` of the forward
     /// shader over the forward bind layout; it reads only the fog uniform).
     pub(crate) sky_pipeline: wgpu::RenderPipeline,
@@ -174,11 +241,102 @@ pub struct Presenter {
     /// The fog pair holds stale probe output and must be reset to neutral
     /// before the next live frame blits it.
     pub(crate) neutral_fog_pending: bool,
+    /// CPU HUD quad ring in 0..1 space; drained by the next slice.
+    pub(crate) overlay: overlay::OverlayRing,
+    /// LF4 slice 1 bloom state: enable flag plus pass thresholds, default
+    /// on. Init only, no per-frame allocation; reuses the HDR target.
+    pub(crate) bloom: BloomState,
 }
 
 /// Staged frame uniforms: camera bytes and light bytes (the per-draw
 /// materials go straight into `Presenter::material_scratch`).
 pub(crate) type StagedUniforms = (Vec<u8>, Vec<u8>);
+
+/// LF1 live sky bind: the forward group plus the init-time sky-view
+/// texture at 15. Same buffers the IBL live bind carries, plus the sky
+/// view; cold bind creation only, never per frame. Keeps the binary
+/// uniform layout, adds no pass.
+#[cfg(feature = "window")]
+fn forward_bind_with_sky(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    cam: &wgpu::Buffer,
+    light: &wgpu::Buffer,
+    material: &wgpu::Buffer,
+    material_bytes: u64,
+    shadow: &wgpu::Buffer,
+    base_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    fog: &wgpu::Buffer,
+    torch: &wgpu::Buffer,
+    pre_view: &wgpu::TextureView,
+    brdf_view: &wgpu::TextureView,
+    sh_buf: &wgpu::Buffer,
+    sky_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("ra1-forward-bind-sky"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cam.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: light.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: material,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(material_bytes),
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: shadow.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(base_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: fog.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(pre_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(brdf_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: sh_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 15,
+                resource: wgpu::BindingResource::TextureView(sky_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 16,
+                resource: torch.as_entire_binding(),
+            },
+        ],
+    })
+}
 
 impl Presenter {
     /// 1x1 white sRGB texture (samples to linear 1.0): the identity the
@@ -235,36 +393,54 @@ impl Presenter {
             label: Some("ra1-forward"),
             source: wgpu::ShaderSource::Wgsl(FORWARD_PBR_WGSL.into()),
         });
+        let mut forward_entries = vec![
+            uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
+            uniform_entry(1, wgpu::ShaderStages::FRAGMENT),
+            material_entry(2),
+            uniform_entry(3, wgpu::ShaderStages::FRAGMENT),
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            uniform_entry(6, wgpu::ShaderStages::FRAGMENT),
+            // LF1 live sky: the init-time sky-view texture (Rgba32Float,
+            // unfilterable, manual bilinear in `fs_sky`). Free binding:
+            // 9-12 owned by IBL, 13-14 dead sun shadow, 7-8 skin.
+            wgpu::BindGroupLayoutEntry {
+                binding: 15,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // EG12 slice 2: live torch block, first of 16-19.
+            uniform_entry(16, wgpu::ShaderStages::FRAGMENT),
+        ];
+        forward_entries.extend_from_slice(&ibl::gpu::forward_ibl_layout_entries());
         let forward_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ra1-uniforms"),
-            entries: &[
-                uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
-                uniform_entry(1, wgpu::ShaderStages::FRAGMENT),
-                // Material: one ring buffer, a dynamic offset per draw.
-                material_entry(2),
-                uniform_entry(3, wgpu::ShaderStages::FRAGMENT),
-                // Base-color map plus sampler (bindings 4-5).
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Height fog uniform the fragment evaluates in closed form.
-                uniform_entry(6, wgpu::ShaderStages::FRAGMENT),
-            ],
+            entries: &forward_entries,
         });
         let forward_hdr = forward_pipeline(&device, &forward_shader, &forward_layout, HDR_FORMAT);
+        // EG13 slice 1 keeps the 1x path: the MSAA pipeline reuses the 1x
+        // build until slice 2 wires the 4x targets plus resolve.
+        let forward_hdr_msaa =
+            forward_pipeline(&device, &forward_shader, &forward_layout, HDR_FORMAT);
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ra1-blit"),
             source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
@@ -371,6 +547,75 @@ impl Presenter {
         // day-rig params are fixed valid inputs, so this is unreachable
         // unless the sky contract itself changed.
         let (sky_look, _) = super::super::bake_look_on_worker(sky_capture.clone())?;
+        // LF1 live sky: one feed gives the init-time sky-view texels plus
+        // the horizon, zenith and EV100 exposure from the same bake, so
+        // the upload, fog and exposure can never drift. Row-major 64x32
+        // Rgba32Float (alpha 1.0), row 0 at the zenith; `fs_sky` samples
+        // it by ray direction. Once at init, never per frame; the live
+        // layout carries it at forward 15. SkyError fails init loudly.
+        let (sky_upload_texels, sky_horizon, sky_zenith, sky_exposure) =
+            sky::sky_forward_feed(&sky_look, crate::arena_day::ARENA_DAY_EXPOSURE_EV100)
+                .map_err(sky_err)?;
+        debug_assert_eq!(sky_upload_texels.len(), sky_look.texels.len());
+        if !sky_exposure.is_finite() || sky_exposure <= 0.0 {
+            return Err(sky_err(sky::SkyError::Invalid(format!(
+                "sky forward feed exposure {sky_exposure} is not positive finite"
+            ))));
+        }
+        debug_assert_eq!(
+            (sky_look.width_px, sky_look.height_px),
+            (
+                crate::arena_day::ARENA_DAY_CAPTURE_W,
+                crate::arena_day::ARENA_DAY_CAPTURE_H
+            )
+        );
+        let sky_view = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ra1-sky-view"),
+            size: wgpu::Extent3d {
+                width: sky_look.width_px,
+                height: sky_look.height_px,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        {
+            let mut sky_bytes = Vec::with_capacity(sky_upload_texels.len() * 16);
+            let one = 1.0f32.to_le_bytes();
+            for t in &sky_upload_texels {
+                sky_bytes.extend_from_slice(&t[0].to_le_bytes());
+                sky_bytes.extend_from_slice(&t[1].to_le_bytes());
+                sky_bytes.extend_from_slice(&t[2].to_le_bytes());
+                sky_bytes.extend_from_slice(&one);
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &sky_view,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &sky_bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(sky_look.width_px * 16),
+                    rows_per_image: Some(sky_look.height_px),
+                },
+                wgpu::Extent3d {
+                    width: sky_look.width_px,
+                    height: sky_look.height_px,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let sky_view_view = sky_view.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("ra1-sky-view-view"),
+            ..Default::default()
+        });
         // The studio HDRI bakes once here (same fixture bytes the
         // cook reference bakes); per-frame charts sample this bake, so the
         // steady-state path never cooks. A failed bake fails init loudly:
@@ -378,6 +623,10 @@ impl Presenter {
         // unreachable unless the IBL contract itself changed.
         let (ibl_bake, _) = ibl::bake(IBL_STUDIO_HDRI_BYTES)
             .map_err(|e| PresentError::Device(format!("look ibl bake: {e}")))?;
+        // Live forward bake upload once through the bake owner.
+        let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
+            ibl::gpu::upload_live_bake(&device, &queue, &ibl_bake)
+                .map_err(|e| PresentError::Device(format!("live ibl bake: {e}")))?;
         // Warm every scene variant before the first frame over
         // the real forward shader bytes, so the camera walk never
         // compiles mid-frame. Blobs are cache-residency markers keyed
@@ -391,28 +640,59 @@ impl Presenter {
         let _warm = pipelines.warm_keys(&pipeline_keys, |key| {
             Ok(vec![key.shader_hash.to_le_bytes()[0]; 8])
         });
-        // Fog colors come from the same look bake the old composite used:
+        // Fog colors come from the same feed the sky-view upload used:
         // the horizon ring is the fog color, straight up is the zenith.
-        let zenith = sky::sample_look_skybox(&sky_look, [0.0, 1.0, 0.0]).map_err(sky_err)?;
-        let fog_fwd = FogFwd::day(sky::look_fog_color(&sky_look), zenith);
+        let fog_fwd = FogFwd::day(sky_horizon, sky_zenith);
         let fog_fwd_buf =
             uniform_buffer(&device, "ra1-u-fog-forward", FOG_FWD_UNIFORM_BYTES as u64);
+        // EG12 slice 2: staged torch block, 272 bytes, zeroed for clears.
+        let torch_buf = uniform_buffer(&device, "eg12-u-torch", 272);
         let sky_pipeline = sky_pipeline(&device, &forward_shader, &forward_layout, HDR_FORMAT);
         let material_ring = uniform_buffer(&device, "ra1-u-material-ring", MATERIAL_RING_BYTES);
-        let fallback_bind = forward_bind_group(
+        let ibl_prefilter_view = ibl_prefilter.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("ra1-ibl-prefilter-view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let ibl_brdf_view = ibl_brdf.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("ra1-ibl-brdf-view"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            ..Default::default()
+        });
+        let fallback_bind = forward_bind_with_sky(
             &device,
-            &ForwardParts {
-                layout: &forward_layout,
-                cam: &cam_buf,
-                light: &light_buf,
-                material: &material_ring,
-                shadow: &twin_shadow_buf,
-                sampler: &base_sampler,
-                fog: &fog_fwd_buf,
-            },
+            &forward_layout,
+            &cam_buf,
+            &light_buf,
+            &material_ring,
+            super::submit::MATERIAL_BYTES,
+            &twin_shadow_buf,
             &base_fallback.view,
+            &base_sampler,
+            &fog_fwd_buf,
+            &torch_buf,
+            &ibl_prefilter_view,
+            &ibl_brdf_view,
+            &ibl_sh_buf,
+            &sky_view_view,
         );
         let gpu_timer = GpuTimer::new(&device, &queue);
+        // EG13 slice 1: the MSAA on/off switch. Off (default) keeps
+        // today's 1x HDR plus depth targets and the 1x submit path; on
+        // notes the 4x shape (donor pipeline multisample count 4 with a
+        // view/resolveTarget pair resolved before the blit) while the 1x
+        // path keeps working. Full MSAA textures plus resolve land in
+        // slice 2, so this stays EG2-green. Never waits on the GPU.
+        let msaa = MsaaConfig::default();
+        debug_assert_eq!(
+            msaa_sample_count(&msaa),
+            1,
+            "MSAA defaults off: the 1x path"
+        );
+        // The desc names the HDR plus depth formats with the chosen count;
+        // slice 2 builds the 4x textures from it (resolve before the blit).
+        let msaa_desc = msaa_target_desc(&msaa);
+        debug_assert_eq!(msaa_desc.sample_count, 1);
         Ok(Self {
             material_ring,
             material_scratch: Vec::with_capacity(MATERIAL_RING_LEN),
@@ -422,8 +702,10 @@ impl Presenter {
             draw_binds: Vec::with_capacity(MAX_DRAWS_PER_FRAME),
             creates: CreateTally::default(),
             look_probes: false,
+            msaa,
             fog_fwd,
             fog_fwd_buf,
+            torch_buf,
             sky_pipeline,
             waits: WaitStats::default(),
             frame_waits: FrameWaits::default(),
@@ -431,6 +713,8 @@ impl Presenter {
             acquire_us: 0,
             acquire_frames: 0,
             neutral_fog_pending: false,
+            overlay: overlay::OverlayRing::new(),
+            bloom: BloomState::on(),
             sky_sub: sky::SkySubmitter::new(&device),
             layer_sub: material_layer::LayerSubmitter::new(&device),
             particles: particles_gpu::ParticlePool::new(2040),
@@ -441,6 +725,9 @@ impl Presenter {
             gtao_sub: gtao::GtaoSubmitter::new(&device),
             ibl_sub: ibl::gpu::IblSubmitter::new(&device),
             ibl_bake,
+            ibl_prefilter,
+            ibl_brdf,
+            ibl_sh_buf,
             fog_plan: None,
             depth_rb: None,
             fog_scratch: Vec::new(),
@@ -463,6 +750,7 @@ impl Presenter {
             adapter_driver: format!("{} {}", info.driver, info.driver_info),
             forward_layout,
             forward_hdr,
+            forward_hdr_msaa,
             blit_layout,
             blit_shader,
             blit_sampler,
@@ -477,12 +765,17 @@ impl Presenter {
             light_buf,
             meshes: CpuCache::new(MAX_CACHED_MESHES),
             textures: CpuCache::new(MAX_CACHED_TEXTURES),
+            crowd_mesh: None,
+            crowd_palette: None,
             device_lost: None,
             frames_presented: 0,
             probe_every: 1,
             fog_every: 1,
             sky_capture,
             sky_look,
+            sky_view,
+            sky_view_view,
+            sky_exposure,
         })
     }
 
@@ -498,12 +791,16 @@ impl Presenter {
             backends: crate::backend::wgpu_backends(pick.primary),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
+        // GS6: enumerate and rank-pick the env choice instead of trusting
+        // the driver's power-preference hint, so an Optimus laptop never
+        // lands on the Intel adapter and the CPU rasterizer fails loudly
+        // (NoAdapter) unless E2040_ALLOW_SOFTWARE=1.
+        let want = crate::adapter::choice_from_env();
+        let adapter = pollster::block_on(crate::presenter_pick::pick_adapter(
+            &instance,
+            crate::backend::wgpu_backends(pick.primary),
+            &want,
+        ))
         .map_err(|_| PresentError::NoAdapter)?;
         let info = adapter.get_info();
         let (device, queue) = Self::request_device(&adapter)?;
@@ -539,14 +836,15 @@ impl Presenter {
         }
         // Windowed path uses the caller-built instance; backend selection
         // is reported by the binary via `backend::startup_line`. No
-        // stdout in lib.
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .map_err(|_| PresentError::NoAdapter)?;
+        // stdout in lib. GS6: rank-pick over the surface-compatible
+        // adapters so the env choice wins over the driver's hint.
+        let (bchoice, _) = crate::backend::resolve_from_env(None);
+        let bp = crate::backend::pick_backend(bchoice, None);
+        let adapter = Self::pick_surface_adapter(
+            instance,
+            &surface,
+            crate::backend::wgpu_backends(bp.primary),
+        )?;
         let info = adapter.get_info();
         let (device, queue) = Self::request_device(&adapter)?;
         let mut presenter = Self::build(device, queue, info)?;
@@ -578,6 +876,19 @@ impl Presenter {
         });
         let surface = create_surface(&instance, window)?;
         Self::init_windowed(&instance, surface, width, height)
+    }
+
+    /// Pick the swapchain present mode: the shortest acquire wait the
+    /// driver offers, else the first listed mode. Units: none.
+    /// Caller: `Presenter::attach_surface`.
+    pub fn pick_present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+        if modes.contains(&wgpu::PresentMode::Mailbox) {
+            return wgpu::PresentMode::Mailbox;
+        }
+        if modes.contains(&wgpu::PresentMode::Immediate) {
+            return wgpu::PresentMode::Immediate;
+        }
+        modes.first().copied().unwrap_or(wgpu::PresentMode::Fifo)
     }
 
     /// Attach (or re-attach) a surface, reconfiguring the swapchain and
@@ -614,7 +925,7 @@ impl Presenter {
             color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
-            present_mode: caps.present_modes[0],
+            present_mode: Self::pick_present_mode(&caps.present_modes),
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -638,13 +949,44 @@ impl Presenter {
         instance: &wgpu::Instance,
         surface: &wgpu::Surface<'_>,
     ) -> Result<wgpu::Adapter, PresentError> {
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .map_err(|_| PresentError::NoAdapter)
+        let (bchoice, _) = crate::backend::resolve_from_env(None);
+        let bp = crate::backend::pick_backend(bchoice, None);
+        Self::pick_surface_adapter(instance, surface, crate::backend::wgpu_backends(bp.primary))
+    }
+
+    /// Enumerate `instance`, keep the surface-compatible adapters and
+    /// rank-pick the `E2040_ADAPTER` choice through
+    /// [`crate::adapter::choose_compatible`]. Cold path only; the pick
+    /// never falls back silently: an empty enumerate, a software-only
+    /// list without opt-in, or no compatible adapter is `NoAdapter`.
+    /// Caller: `init_windowed` plus `compatible_adapter` (the GS6 surface
+    /// sites); `init_offscreen` uses `pick_adapter` (no surface to test).
+    fn pick_surface_adapter(
+        instance: &wgpu::Instance,
+        surface: &wgpu::Surface<'_>,
+        backends: wgpu::Backends,
+    ) -> Result<wgpu::Adapter, PresentError> {
+        let want = crate::adapter::choice_from_env();
+        let adapters = pollster::block_on(instance.enumerate_adapters(backends));
+        let list: Vec<crate::adapter::AdapterSummary> = adapters
+            .iter()
+            .map(|found| crate::presenter_pick::summary_of(&found.get_info()))
+            .collect();
+        let compat: Vec<bool> = adapters
+            .iter()
+            .map(|found| found.is_surface_supported(surface))
+            .collect();
+        let index = crate::adapter::choose_compatible(
+            &list,
+            &compat,
+            &want,
+            crate::adapter::allow_software(),
+        )
+        .map_err(|_| PresentError::NoAdapter)?;
+        adapters
+            .into_iter()
+            .nth(index)
+            .ok_or(PresentError::NoAdapter)
     }
 
     /// Resize the backing targets. Zero area suspends (minimize path) and
@@ -666,6 +1008,13 @@ impl Presenter {
                         surface.configure(&self.device, config);
                     }
                 }
+                // EG13 transient budget: 4x HDR plus 4x depth while on stays
+                // under the cap; debug-only so release frames never branch.
+                let (w, h) = self.swap.size();
+                debug_assert!(
+                    msaa_transient_bytes(w, h, &self.msaa) <= super::msaa::MSAA_TRANSIENT_CAP_BYTES,
+                    "MSAA transient over budget"
+                );
                 Ok(outcome)
             }
         }
@@ -682,6 +1031,16 @@ impl Presenter {
     /// packed into GPU buffers. A changed digest replaces the resident
     /// buffers; eviction drops the oldest entry first.
     pub fn upload_mesh(&mut self, key: MeshKey, mesh: &v1::MeshData) -> Result<(), PresentError> {
+        let gpu = self.pack_mesh(mesh)?;
+        if let Some(evicted) = self.meshes.insert(key, gpu) {
+            debug_assert_ne!(evicted, key, "reinsert never evicts itself");
+        }
+        Ok(())
+    }
+
+    /// Pack a mesh into GPU buffers without caching it: `upload_mesh`
+    /// inserts the result, and the arena crowd keeps its own copy.
+    pub(super) fn pack_mesh(&self, mesh: &v1::MeshData) -> Result<GpuMesh, PresentError> {
         use wgpu::util::DeviceExt;
         // Revalidate: `MeshData` fields are public, so only the validator
         // decides what reaches the GPU. Uploads are rare (cached), so the
@@ -706,18 +1065,12 @@ impl Presenter {
         self.creates.buffer();
         let count = u32::try_from(mesh.indices.len()).unwrap_or(u32::MAX);
         let vertices = u32::try_from(mesh.positions.len()).unwrap_or(u32::MAX);
-        if let Some(evicted) = self.meshes.insert(
-            key,
-            GpuMesh {
-                vertex: vb,
-                index: ib,
-                count,
-                vertices,
-            },
-        ) {
-            debug_assert_ne!(evicted, key, "reinsert never evicts itself");
-        }
-        Ok(())
+        Ok(GpuMesh {
+            vertex: vb,
+            index: ib,
+            count,
+            vertices,
+        })
     }
 
     /// Upload validated pixels under `key`. Resident until evicted; held
@@ -727,6 +1080,23 @@ impl Presenter {
         key: TextureKey,
         upload: &TextureUpload,
     ) -> Result<(), PresentError> {
+        let (gpu, bind) = self.pack_texture(upload)?;
+        self.texture_binds.retain(|(known, _)| *known != key);
+        self.texture_binds.push((key, bind));
+        if let Some(evicted) = self.textures.insert(key, gpu) {
+            debug_assert_ne!(evicted, key, "reinsert never evicts itself");
+            self.texture_binds.retain(|(known, _)| *known != evicted);
+        }
+        Ok(())
+    }
+
+    /// Pack validated pixels into a GPU texture and its forward bind group
+    /// without caching either: `upload_texture` caches the pair, and the
+    /// arena crowd keeps its own.
+    pub(super) fn pack_texture(
+        &self,
+        upload: &TextureUpload,
+    ) -> Result<(GpuTexture, wgpu::BindGroup), PresentError> {
         upload.validate()?;
         let size = wgpu::Extent3d {
             width: upload.width,
@@ -786,21 +1156,13 @@ impl Presenter {
         // no frame ever creates one; a re-upload replaces the old group.
         let bind = self.forward_bind(&view);
         self.creates.bind_group();
-        self.texture_binds.retain(|(known, _)| *known != key);
-        self.texture_binds.push((key, bind));
-        if let Some(evicted) = self.textures.insert(
-            key,
-            GpuTexture {
-                texture,
-                view,
-                width: upload.width,
-                height: upload.height,
-            },
-        ) {
-            debug_assert_ne!(evicted, key, "reinsert never evicts itself");
-            self.texture_binds.retain(|(known, _)| *known != evicted);
-        }
-        Ok(())
+        let gpu = GpuTexture {
+            texture,
+            view,
+            width: upload.width,
+            height: upload.height,
+        };
+        Ok((gpu, bind))
     }
 
     /// Borrow a resident texture view plus its size; `None` when absent.
@@ -842,20 +1204,38 @@ impl Presenter {
         evicted
     }
 
-    /// Forward bind group over `view` and the shared frame buffers.
+    /// Forward bind group over `view` and the shared frame buffers plus
+    /// the live baked lighting in the forward group, with the LF1 sky-view
+    /// texture at 15 for the sky pass (opaque `fs` ignores it).
     pub(crate) fn forward_bind(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
-        forward_bind_group(
+        let pre_view = self
+            .ibl_prefilter
+            .create_view(&wgpu::TextureViewDescriptor {
+                label: Some("ra1-ibl-prefilter-view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+        let brdf_view = self.ibl_brdf.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("ra1-ibl-brdf-view"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            ..Default::default()
+        });
+        forward_bind_with_sky(
             &self.device,
-            &ForwardParts {
-                layout: &self.forward_layout,
-                cam: &self.cam_buf,
-                light: &self.light_buf,
-                material: &self.material_ring,
-                shadow: &self.twin_shadow_buf,
-                sampler: &self.base_sampler,
-                fog: &self.fog_fwd_buf,
-            },
+            &self.forward_layout,
+            &self.cam_buf,
+            &self.light_buf,
+            &self.material_ring,
+            super::submit::MATERIAL_BYTES,
+            &self.twin_shadow_buf,
             view,
+            &self.base_sampler,
+            &self.fog_fwd_buf,
+            &self.torch_buf,
+            &pre_view,
+            &brdf_view,
+            &self.ibl_sh_buf,
+            &self.sky_view_view,
         )
     }
 
@@ -1027,6 +1407,31 @@ impl Presenter {
         self.look_probes
     }
 
+    /// Capture-bool for the look probes: `--look-probes` or an armed
+    /// capture enables the blocking probes (the capture sidecar needs
+    /// measured sky_ms); live without capture stays non-blocking. Pure
+    /// over the same inputs, so the binary pins it without a GPU.
+    /// Caller: `crates/game/src/bin/arena.rs`.
+    pub fn look_probes_for_capture(flag: bool, capture: bool) -> bool {
+        flag || capture
+    }
+
+    /// Turn 4x MSAA on or off on the window leg (default off). Off keeps
+    /// today's 1x path; on notes the 4x shape until slice 2 builds the
+    /// MSAA targets plus resolve. Copyable state, no per-frame allocation,
+    /// never waits on the GPU.
+    pub fn set_msaa_enabled(&mut self, on: bool) {
+        if self.msaa.enabled != on {
+            self.msaa.enabled = on;
+            self.targets = None;
+        }
+    }
+
+    /// True while 4x MSAA is on.
+    pub fn msaa_enabled(&self) -> bool {
+        super::msaa::msaa_enabled(&self.msaa)
+    }
+
     /// Blocking-call tally per frame kind since the presenter was built.
     /// A healthy window run reads zero maps and zero waits on live frames;
     /// capture frames (the offscreen twin) block by design.
@@ -1084,6 +1489,24 @@ impl Presenter {
     /// Frames actually presented.
     pub fn frames_presented(&self) -> u64 {
         self.frames_presented
+    }
+
+    /// Stage one HP bar (back plus fill) in 0..1 space; false when full.
+    /// Window leg only; no GPU work this slice.
+    pub fn push_hp_bar(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, fraction: f32) -> bool {
+        self.overlay.push_hp_bar(x0, y0, x1, y1, fraction)
+    }
+
+    /// Drop staged HUD quads; the fixed backing stays for the next frame.
+    /// Window leg only; the smoke stages per presented tick so a long run
+    /// never fills the 128-quad ring. Caller: `crates/game/src/windowed.rs`.
+    pub fn clear_overlay(&mut self) {
+        self.overlay.clear();
+    }
+
+    /// Staged HUD quads in push order in 0..1 space. Window leg only.
+    pub fn overlay_rects(&self) -> &[overlay::Quad] {
+        self.overlay.quads()
     }
 
     /// Adapter name behind this presenter.
@@ -1197,6 +1620,19 @@ impl Presenter {
     /// RL9 kill switch state.
     pub fn fog_enabled(&self) -> bool {
         self.fog_enabled
+    }
+
+    /// LF4 bloom kill switch for A/B evidence: off keeps today's frame
+    /// bit-identical (flag `0.0`), on lets the gate decide per frame.
+    /// Default on. Presentation only, never hashed.
+    /// Caller: `crates/render/src/present/gpu_present/submit.rs` live encode.
+    pub fn set_bloom_enabled(&mut self, on: bool) {
+        self.bloom.enabled = on;
+    }
+
+    /// LF4 bloom switch state.
+    pub fn bloom_enabled(&self) -> bool {
+        self.bloom.enabled
     }
 
     /// RL9 cached fog -> forward wiring (`None` until the first live fog
@@ -1315,212 +1751,50 @@ impl Presenter {
         u64::try_from(std::time::Duration::from_secs_f64(ms / 1000.0).as_micros())
             .unwrap_or(u64::MAX)
     }
+}
 
-    /// Fog tranche plus GTAO: decode this frame's depth readback
-    /// into the fog feed, run the height-fog plus contact passes on the
-    /// device, run half-res GTAO plus its bilateral upsample over the
-    /// same feed, and upload the composite pair plus the sRGB ramp color
-    /// for the blit. Returns (fog passes, fog validation errors, fog
-    /// submit us, gtao passes, gtao validation errors, gtao submit us)
-    /// for the receipt and records the halve-means plus contact minimum
-    /// as evidence.
-    pub(crate) fn run_fog_tranche(
-        &mut self,
-        raw_depth: &[f32],
-        camera: &v1::Camera,
-        width: u32,
-        height: u32,
-    ) -> Result<(u32, u32, u64, u32, u32, u64), PresentError> {
-        let inv = inverse_view_proj_cols(camera)?;
-        let feed =
-            super::super::decode_depth_feed(raw_depth, width, height, inv, camera.eye.to_array())?;
-        let frame = self.look_frame();
-        let params = self.look_fog_params()?;
-        // RL10: sun-scatter tint ahead of plan/submit; forward derived
-        // from eye->target without a camera dependency (no heap, no
-        // new crate). Tinted params flow into both below.
-        let (dx, dy, dz) = (
-            camera.target.x - camera.eye.x,
-            camera.target.y - camera.eye.y,
-            camera.target.z - camera.eye.z,
-        );
-        let len = (dx * dx + dy * dy + dz * dz).sqrt();
-        let forward = if len > 0.0 {
-            [dx / len, dy / len, dz / len]
-        } else {
-            [0.0, 0.0, -1.0]
+#[cfg(test)]
+mod presenter_adapter_tests {
+    #[test]
+    fn msaa_toggle_drops_targets() {
+        let mut presenter = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => p,
+            Err(crate::present::PresentError::NoAdapter) => {
+                eprintln!("SKIPPED msaa toggle: no adapter");
+                return;
+            }
+            Err(e) => panic!("presenter init failed: {e}"),
         };
-        let params = params
-            .with_sun_tint(frame.sun_dir, forward)
-            .map_err(|e| super::super::fog_err("tint", e))?;
-        let contact = super::super::contact_for_frame(width, height)?;
-        self.ensure_fog_plan(&params, &contact, width, height)?;
-        let out = {
-            let device = &self.device;
-            let queue = &self.queue;
-            let submitter = &mut self.fog_sub;
-            submitter
-                .submit(
-                    device,
-                    queue,
-                    &feed.depth_m,
-                    &feed.height_m,
-                    &feed.normals,
-                    &params,
-                    &contact,
-                    &frame,
-                )
-                .map_err(|e| super::super::fog_err("submit", e))?
-        };
-        self.frame_waits.map_and_wait();
-        let w = width as usize;
-        let h = height as usize;
-        let size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let layout = wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width * 4),
-            rows_per_image: Some(height),
-        };
-        let (top, bottom, _) = stage_field_bytes(&mut self.fog_scratch, &out.fog.factor, w, h);
-        {
-            let targets = self.targets.as_ref().expect("fog targets ensured above");
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &targets.fog_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &self.fog_scratch,
-                layout,
-                size,
-            );
-        }
-        let (ao_top, ao_bottom, ao_min) =
-            stage_field_bytes(&mut self.fog_scratch, &out.contact.values, w, h);
-        {
-            let targets = self.targets.as_ref().expect("fog targets ensured above");
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &targets.ao_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &self.fog_scratch,
-                layout,
-                size,
-            );
-            // Linear radiance: the blit mixes it into the linear HDR frame
-            // before the one tone map.
-            let bytes = super::super::fog_blit_uniform_bytes(params.fog_color, width, height);
-            self.queue.write_buffer(&targets.fog_col_buf, 0, &bytes);
-        }
-        self.fog_top_mean = top;
-        self.fog_bottom_mean = bottom;
-        self.fog_contact_min = ao_min;
-        self.fog_ao_top_mean = ao_top;
-        self.fog_ao_bottom_mean = ao_bottom;
-        let us = (out.receipt.submit_ms * 1000.0) as u64;
-        self.fog_submit_us = us;
-        // Half-res GTAO plus its bilateral upsample over this
-        // frame's decoded feed (the decode above guarantees positive
-        // finite depth, so the submit validates exactly like fog's).
-        let gtao_config = Self::gtao_config_for_frame(width, height)?;
-        let gtao = {
-            let device = &self.device;
-            let queue = &self.queue;
-            let submitter = &mut self.gtao_sub;
-            submitter
-                .submit(
-                    device,
-                    queue,
-                    &feed.depth_m,
-                    &feed.normals,
-                    &gtao_config,
-                    &frame,
-                )
-                .map_err(gtao_err)?
-        };
-        self.frame_waits.map_and_wait();
-        let gus = Self::ms_to_us(gtao.submit_ms);
-        self.gtao_submit_us = gus;
-        Ok((
-            2,
-            out.receipt.validation_errors,
-            us,
-            2,
-            gtao.validation_errors,
-            gus,
-        ))
+        assert!(!presenter.msaa_enabled(), "MSAA defaults off");
+        presenter.resize(64, 64).expect("size applies");
+        presenter.ensure_targets(64, 64);
+        assert!(presenter.targets.is_some(), "targets exist before toggle");
+        presenter.set_msaa_enabled(true);
+        assert!(presenter.msaa_enabled(), "switch reads back on");
+        assert!(presenter.targets.is_none(), "toggle on drops targets");
+        presenter.ensure_targets(64, 64);
+        assert!(presenter.targets.is_some(), "targets rebuild after toggle");
+        presenter.set_msaa_enabled(true);
+        assert!(presenter.targets.is_some(), "unchanged flag keeps targets");
+        presenter.set_msaa_enabled(false);
+        assert!(!presenter.msaa_enabled(), "switch reads back off");
+        assert!(presenter.targets.is_none(), "toggle off drops targets");
     }
 
-    /// RL9 neutral path: factor 0 (no tint), AO open, evidence reset.
-    /// Held, fog-off and over-budget frames show the clear forward frame;
-    /// GTAO rides the same gate (no feed, no occlusion pass).
-    pub(crate) fn clear_fog_targets(
-        &mut self,
-        width: u32,
-        height: u32,
-    ) -> (u32, u32, u64, u32, u32, u64) {
-        let n = width as usize * height as usize;
-        if self.fog_scratch.len() != n * 4 {
-            self.fog_scratch.resize(n * 4, 0);
-        }
-        let size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let layout = wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width * 4),
-            rows_per_image: Some(height),
-        };
-        let targets = self.targets.as_ref().expect("fog targets ensured above");
-        self.fog_scratch.fill(0);
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &targets.fog_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &self.fog_scratch,
-            layout,
-            size,
-        );
-        let one = 1.0f32.to_le_bytes();
-        for chunk in self.fog_scratch.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&one);
-        }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &targets.ao_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &self.fog_scratch,
-            layout,
-            size,
-        );
-        // Always upload the frame size: the blit texel clamp needs a
-        // valid range even when the factor stays 0 (a zero-size uniform
-        // is an undefined clamp and blackened fresh presenters).
-        let bytes = super::super::fog_blit_uniform_bytes([0.0, 0.0, 0.0], width, height);
-        self.queue.write_buffer(&targets.fog_col_buf, 0, &bytes);
-        self.fog_top_mean = 0.0;
-        self.fog_bottom_mean = 0.0;
-        self.fog_contact_min = 1.0;
-        self.fog_ao_top_mean = 1.0;
-        self.fog_ao_bottom_mean = 1.0;
-        self.fog_submit_us = 0;
-        self.gtao_submit_us = 0;
-        (0, 0, 0, 0, 0, 0)
+    #[test]
+    fn present_mode_prefers_short_wait_when_ready() {
+        let picked = crate::present::Presenter::pick_present_mode(&[
+            wgpu::PresentMode::Fifo,
+            wgpu::PresentMode::Mailbox,
+        ]);
+        assert_eq!(picked, wgpu::PresentMode::Mailbox);
+    }
+
+    #[test]
+    fn present_mode_keeps_old_path_when_not_ready() {
+        let picked = crate::present::Presenter::pick_present_mode(&[wgpu::PresentMode::Fifo]);
+        assert_eq!(picked, wgpu::PresentMode::Fifo);
+        let picked = crate::present::Presenter::pick_present_mode(&[]);
+        assert_eq!(picked, wgpu::PresentMode::Fifo);
     }
 }

@@ -3,6 +3,8 @@
 
 pub mod blockout;
 pub mod cells;
+pub mod ground;
+pub mod scatter;
 
 pub mod sky;
 pub mod terrain;

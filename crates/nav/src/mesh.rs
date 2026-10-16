@@ -650,6 +650,9 @@ impl StackedNav {
         for tris in level_tris {
             levels.push(bake(tris, config)?);
         }
+        for lvl in &levels {
+            MeshTiles::from_mesh(lvl, MESH_TILE_EDGE)?;
+        }
         Ok(Self { levels })
     }
     /// Floor count.
@@ -742,6 +745,137 @@ impl StackedNav {
     pub fn digest(&self) -> u64 {
         engine_core::hash_bytes(&self.to_bytes())
     }
+}
+
+/// Tile edge in cells for versioned mesh tiles; one NV1 generation per tile.
+/// Caller: `StackedNav::bake_stacked` seeds a table to validate tiling.
+pub const MESH_TILE_EDGE: u32 = 8;
+/// Magic at the head of a tile-version blob; mesh bytes stay `E2NAV1`.
+const TILE_MAGIC: [u8; 6] = *b"E2MTL1";
+
+/// Per-tile NV1 generations stitched on shared edges; versions ride mesh bytes.
+/// Owner nav, consumer rebake.rs follow-up. Units tile ids plus versions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshTiles {
+    edge: u32,
+    cols: u32,
+    rows: u32,
+    versions: Vec<u32>,
+}
+
+impl MeshTiles {
+    /// Tile layout over mesh; versions start at zero. Errors: bad edge/coverage.
+    pub fn from_mesh(mesh: &NavMesh, edge: u32) -> Result<Self, NavError> {
+        if edge == 0 || edge > MAX_SIDE {
+            return Err(NavError::NotCanonical("tile edge"));
+        }
+        let (w, h) = mesh.grid_dims();
+        let (cols, rows) = (w.div_ceil(edge), h.div_ceil(edge));
+        let count = usize::try_from(cols)
+            .map_err(|_| NavError::NotCanonical("tile count"))?
+            .checked_mul(usize::try_from(rows).map_err(|_| NavError::NotCanonical("tile count"))?)
+            .ok_or(NavError::NotCanonical("tile count"))?;
+        if count == 0 || count > MAX_CELLS {
+            return Err(NavError::NotCanonical("tile count"));
+        }
+        Ok(Self {
+            edge,
+            cols,
+            rows,
+            versions: vec![0; count],
+        })
+    }
+    /// Version of one tile. Errors: past-the-table tile.
+    pub fn version(&self, tile: u32) -> Result<u32, NavError> {
+        let index = usize::try_from(tile).map_err(|_| NavError::NotCanonical("tile id"))?;
+        self.versions
+            .get(index)
+            .copied()
+            .ok_or(NavError::NotCanonical("tile id"))
+    }
+    /// Bump exactly `dirty` tiles ascending; untouched keep versions.
+    /// Validates first, so a bad set changes nothing. Errors: bad tile.
+    pub fn bump_exactly(&mut self, dirty: &[u32]) -> Result<Vec<u32>, NavError> {
+        for t in dirty {
+            let index = usize::try_from(*t).map_err(|_| NavError::NotCanonical("tile id"))?;
+            if index >= self.versions.len() {
+                return Err(NavError::NotCanonical("tile id"));
+            }
+        }
+        let mut sorted = dirty.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        for t in &sorted {
+            let index = usize::try_from(*t).map_err(|_| NavError::NotCanonical("tile id"))?;
+            let v = &mut self.versions[index];
+            *v = v
+                .checked_add(1)
+                .ok_or(NavError::NotCanonical("tile version"))?;
+        }
+        Ok(sorted)
+    }
+    /// Canonical bytes; identical tables bake identical bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&TILE_MAGIC);
+        out.extend_from_slice(&MESH_VERSION.to_le_bytes());
+        out.extend_from_slice(&self.edge.to_le_bytes());
+        out.extend_from_slice(&self.cols.to_le_bytes());
+        out.extend_from_slice(&self.rows.to_le_bytes());
+        for v in &self.versions {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+    /// Decode canonical bytes; any non-tile blob refuses with its reason.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, NavError> {
+        if bytes.len() > MAX_BYTES {
+            return Err(NavError::TooLarge { got: bytes.len() });
+        }
+        let mut read = Cursor::new(bytes);
+        let mut magic = [0u8; 6];
+        for s in magic.iter_mut() {
+            *s = read.byte()?;
+        }
+        if magic != TILE_MAGIC {
+            return Err(NavError::BadMagic);
+        }
+        let ver = read.u16()?;
+        if ver != MESH_VERSION {
+            return Err(NavError::VersionMismatch { got: ver });
+        }
+        let (edge, cols, rows) = (read.u32()?, read.u32()?, read.u32()?);
+        if edge == 0 || edge > MAX_SIDE || cols == 0 || rows == 0 {
+            return Err(NavError::NotCanonical("tile dims"));
+        }
+        let count = usize::try_from(cols)
+            .map_err(|_| NavError::NotCanonical("tile count"))?
+            .checked_mul(usize::try_from(rows).map_err(|_| NavError::NotCanonical("tile count"))?)
+            .ok_or(NavError::NotCanonical("tile count"))?;
+        if count == 0 || count > MAX_CELLS {
+            return Err(NavError::NotCanonical("tile count"));
+        }
+        let mut versions = Vec::with_capacity(count);
+        for _ in 0..count {
+            versions.push(read.u32()?);
+        }
+        if read.remaining() != 0 {
+            return Err(NavError::TrailingBytes {
+                got: read.remaining(),
+            });
+        }
+        Ok(Self {
+            edge,
+            cols,
+            rows,
+            versions,
+        })
+    }
+}
+
+/// True when two tile tables share edge and grid, so per-cell NV1 bakes stitch.
+pub fn stitch_shared_edge(a: &MeshTiles, b: &MeshTiles) -> bool {
+    a.edge == b.edge && a.cols == b.cols && a.rows == b.rows
 }
 
 /// Neighbor ids of polygon `id` out of `count`: strictly ascending, in

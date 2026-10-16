@@ -14,13 +14,14 @@ test("proof profile exists with fail-fast off and slow-timeout", () => {
   assert.match(text, /slow-timeout\s*=\s*\{\s*period\s*=\s*"60s"/);
 });
 
-test("retries stay 0: single zero count with zero delay", () => {
+test("retries stay bounded: single fixed-backoff count of 2 with 2s delay", () => {
   const text = load();
   const counts = [...text.matchAll(/^\s*count\s*=\s*(\d+)/gm)].map((m) => m[1]);
-  assert.deepEqual(counts, ["0"], `expected one retries count of 0, found [${counts.join(", ")}]`);
-  assert.match(text, /delay\s*=\s*"0s"/);
-  assert.ok(!/count\s*=\s*[1-9]/m.test(text), "no non-zero retry count may remain");
-  assert.ok(!/delay\s*=\s*"(5s|10s)"/.test(text), "old 5s/10s backoff delays must not remain");
+  assert.deepEqual(counts, ["2"], `expected one retries count of 2, found [${counts.join(", ")}]`);
+  assert.match(text, /backoff\s*=\s*"fixed"/);
+  assert.match(text, /delay\s*=\s*"2s"/);
+  assert.ok(!/count\s*=\s*0/m.test(text), "zero-retry line must be gone");
+  assert.ok(!/delay\s*=\s*"0s"/.test(text), "zero-delay line must be gone");
 });
 
 test("no per-platform retry override hides flakes on Windows", () => {
@@ -40,4 +41,14 @@ test("quarantine path is documented instead of retries", () => {
 test("junit receipt still wired for the lane log", () => {
   const text = load();
   assert.match(text, /path\s*=\s*"target\/nextest-junit\/proof\.xml"/);
+});
+
+test("partitioned run is documented with per-partition junit receipts", () => {
+  const text = load();
+  assert.match(text, /partition/);
+  assert.match(text, /--partition/);
+  assert.match(text, /count:1\/2/);
+  assert.match(text, /count:2\/2/);
+  assert.match(text, /proof-1-2\.xml/);
+  assert.match(text, /proof-2-2\.xml/);
 });

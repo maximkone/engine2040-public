@@ -8,9 +8,9 @@
 //! [`FaceError`]. Budget: per-frame sample plus rig is fifty-two lanes of
 //! lerp and clamps with no allocation; shade cost rides [`morph_cost_us`].
 
+use crate::clip::clamp01;
 use crate::lipsync::{self, BakeError};
 use crate::viseme::{self, VisemeClip};
-use crate::clip::clamp01;
 use std::fmt;
 
 /// Morph lane count; equals the viseme lane count by construction.

@@ -158,13 +158,19 @@ impl ServerState {
 
     /// Full entry for one path: signature, docs, units, file owner and
     /// callers. Unknown paths fail typed with a search-first recovery.
+    /// Rival-door aliases (`godot_game_time` etc.) resolve to their
+    /// play-pack verb first, so another engine's door names still land.
     pub fn api_describe(&self, args: &ApiDescribeArgs) -> Result<ApiDescribeOutput, McpToolError> {
-        let item = self.insight.get(&args.path).ok_or_else(|| {
+        // LF16 rival-door parity: resolve through the play-pack table before
+        // the index lookup. Unknown rivals fall through to the typed refusal.
+        let lookup: &str =
+            crate::packs::play::verb_for_rival(&args.path).unwrap_or(args.path.as_str());
+        let item = self.insight.get(lookup).ok_or_else(|| {
             tool_error(&InsightError::UnknownPath {
                 path: args.path.clone(),
             })
         })?;
-        let callers = callers_of(&self.insight, &args.path).map_err(|error| tool_error(&error))?;
+        let callers = callers_of(&self.insight, lookup).map_err(|error| tool_error(&error))?;
         Ok(ApiDescribeOutput {
             path: item.path.clone(),
             kind: item.kind.as_str().to_owned(),
@@ -437,5 +443,37 @@ mod tests {
         )
         .expect_err("empty index has no paths");
         assert_eq!(missing.code, "unknown_path");
+    }
+
+    #[test]
+    fn rival_alias_describe_resolves_to_play_pack_verb() {
+        // LF16 rival-door parity: `godot_game_time` etc. read as their
+        // play-pack verb, so a model holding another engine's door names
+        // still lands on our verbs. Caller: `ServerState::api_describe`
+        // (resolves via `crate::packs::play::verb_for_rival`).
+        let server = McpServer::new(7, Capability::unrestricted(7));
+        for (rival, ours) in [
+            ("godot_game_time", "play.step_until"),
+            ("godot_input", "input.inject"),
+            ("godot_runtime_state", "state.digest"),
+        ] {
+            let described = ApiDescribeTool::invoke(
+                &server,
+                ApiDescribeArgs {
+                    path: rival.to_owned(),
+                },
+            )
+            .unwrap_or_else(|error| panic!("rival `{rival}` resolves to `{ours}`: {error}"));
+            assert_eq!(described.path, ours, "rival `{rival}` reads as `{ours}`");
+            assert!(!described.docs.is_empty(), "rival `{rival}` carries docs");
+        }
+        let unknown = ApiDescribeTool::invoke(
+            &server,
+            ApiDescribeArgs {
+                path: "godot_unknown".to_owned(),
+            },
+        )
+        .expect_err("unknown rival must fail");
+        assert_eq!(unknown.code, "unknown_path");
     }
 }

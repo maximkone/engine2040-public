@@ -647,6 +647,33 @@ pub const MAX_PHASED_MOVES: usize = 4;
 /// `cancel_into` value for a move with no cancel route.
 pub const NO_MOVE: u8 = u8::MAX;
 
+/// Readable-attack floors in milliseconds (GS32, Jerry Zhang): full
+/// telegraph, bait, end pose. Presentation compares against these;
+/// the sim never reads them, so the golden never moves.
+pub const TELEGRAPH_FLOOR_MS: u32 = 340;
+/// Bait floor in milliseconds.
+pub const TELEGRAPH_BAIT_MS: u32 = 240;
+/// End-pose floor in milliseconds.
+pub const TELEGRAPH_END_POSE_MS: u32 = 170;
+/// Fixed clock the signal math rides on.
+pub const TELEGRAPH_TICKS_PER_SEC: u32 = 60;
+/// Milliseconds per second for the signal math.
+pub const TELEGRAPH_MS_PER_SEC: u32 = 1_000;
+
+/// Signal-plus-attack time for one move in milliseconds: startup plus
+/// live steel at 60 Hz. Split into whole and remainder so the `u32`
+/// path stays exact without a wider intermediate: small rows match
+/// `(startup + active) * 1000 / 60`, huge rows saturate to `u32::MAX`;
+/// validation rejects such rows before they ever step.
+#[must_use]
+pub const fn signal_attack_ms(startup_ticks: u32, active_ticks: u32) -> u32 {
+    let total = startup_ticks.saturating_add(active_ticks);
+    let whole = (total / TELEGRAPH_TICKS_PER_SEC).saturating_mul(TELEGRAPH_MS_PER_SEC);
+    let part = (total % TELEGRAPH_TICKS_PER_SEC).saturating_mul(TELEGRAPH_MS_PER_SEC)
+        / TELEGRAPH_TICKS_PER_SEC;
+    whole.saturating_add(part)
+}
+
 /// One move's phase timing plus its single cancel route, all as data.
 ///
 /// `startup_ticks` whiffs, `active_ticks` is live steel, `endlag_ticks` is
@@ -687,6 +714,14 @@ impl PhasedMoveRow {
         self.startup_ticks
             .saturating_add(self.active_ticks)
             .saturating_add(self.endlag_ticks)
+    }
+
+    /// Signal-plus-attack milliseconds for this row: startup plus live
+    /// steel at 60 Hz. Thin wrapper over [`signal_attack_ms`] so the
+    /// report and the stepped cadence share one integer path.
+    #[must_use]
+    pub const fn signal_ms(self) -> u32 {
+        signal_attack_ms(self.startup_ticks, self.active_ticks)
     }
 }
 
@@ -751,6 +786,15 @@ pub const PHASED_CROSS: PhasedMoveRow = PhasedMoveRow {
     cancel_end: 0,
     cancel_into: NO_MOVE,
 };
+
+/// Pinned signals for the shipped rows, computed on the one shared
+/// path (non-test callers of [`PhasedMoveRow::signal_ms`]).
+pub const PHASED_JAB_SIGNAL_MS: u32 = PHASED_JAB.signal_ms();
+/// Pinned cross signal on the shared path.
+pub const PHASED_CROSS_SIGNAL_MS: u32 = PHASED_CROSS.signal_ms();
+/// Compile-time pins: a retune must re-bless these beside the floors.
+const _: () = assert!(PHASED_JAB_SIGNAL_MS == 100);
+const _: () = assert!(PHASED_CROSS_SIGNAL_MS == 150);
 
 /// Versioned phased rows: nonzero version plus validated move rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -991,6 +1035,14 @@ mod phased_tests {
         assert_eq!(phased_for_version(9), None);
         assert_eq!(phased_row(&PHASED_V1, 0), Some(PHASED_JAB));
         assert_eq!(phased_row(&PHASED_V1, 7), None);
+    }
+
+    #[test]
+    fn phased_signal_ms_pins_jab_cross() {
+        assert_eq!(PHASED_JAB.signal_ms(), 100);
+        assert_eq!(PHASED_CROSS.signal_ms(), 150);
+        assert_eq!(signal_attack_ms(4, 2), 100);
+        assert_eq!(TELEGRAPH_FLOOR_MS, 340);
     }
 
     #[test]

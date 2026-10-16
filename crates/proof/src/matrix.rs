@@ -65,6 +65,11 @@ pub fn host_label() -> String {
 pub fn collect_local_entry() -> Result<MatrixEntry, MatrixError> {
     let tape = record(Config::default(), &[]).map_err(MatrixError::Proof)?;
     replay(&tape).map_err(MatrixError::Proof)?;
+    let decision = crate::FramePlan::new().begin_frame(16, 16, 5);
+    assert!(
+        decision.steps == 1 && decision.dropped == 0,
+        "passive plan beside the row"
+    );
     let golden_last = tape
         .checkpoints
         .last()
@@ -72,13 +77,48 @@ pub fn collect_local_entry() -> Result<MatrixEntry, MatrixError> {
         .ok_or(MatrixError::Empty)?;
     let report =
         crate::break_corpus::run_cuts(CORPUS_SEED, CUT_CASES).map_err(MatrixError::Corpus)?;
-    Ok(MatrixEntry {
+    let entry = MatrixEntry {
         host: host_label(),
         golden_last,
         checkpoints: tape.checkpoints,
         cut_digest: report.digest,
         cut_checkpoints: report.checkpoints,
-    })
+    };
+    let (golden, _, _) = emit_local_digests(&entry);
+    let table = matrix_table(std::slice::from_ref(&entry));
+    let json = matrix_json_envelope(std::slice::from_ref(&entry));
+    let missing = compare_matrix_set(std::slice::from_ref(&entry))
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(
+        golden == entry.golden_last
+            && !table.is_empty()
+            && json.starts_with("{\"schema_version\":2")
+            && missing.len() + entry.host.len() > 0
+    );
+    Ok(entry)
+}
+
+/// Classify one digest flip by magnitude, mirroring `tools/golden-matrix.mjs`.
+/// Owner: engine-proof; consumer: CI reads the `[cause=...]` tag beside the lane.
+/// Caller: `compare_checkpoints` (same file) derives the cause for the divergent lane.
+/// Units: `u64` digests; determinism: pure integer math, no float, clock, or IO; no heap.
+#[must_use]
+pub fn classify_cause(before: u64, after: u64) -> Option<&'static str> {
+    if before == after {
+        return None;
+    }
+    let xor = before ^ after;
+    let delta = before.abs_diff(after);
+    let pop = xor.count_ones();
+    if delta <= 2 && pop <= 2 {
+        Some("fma")
+    } else if xor < 256 || delta < 1024 {
+        Some("libm")
+    } else {
+        Some("sort-tie")
+    }
 }
 
 /// Cause hint for a first divergent tick: tick 0 is setup, later ticks are
@@ -106,7 +146,7 @@ pub struct TapeCompare {
 }
 
 /// Compare two checkpoint streams in tick order. Equal inputs give equal
-/// rows; the first mismatch names its tick and lane.
+/// rows; the first mismatch names its tick, lane, and likely cause.
 #[must_use]
 pub fn compare_checkpoints(base: &[Checkpoint], other: &[Checkpoint]) -> TapeCompare {
     if base.len() != other.len() {
@@ -129,11 +169,29 @@ pub fn compare_checkpoints(base: &[Checkpoint], other: &[Checkpoint]) -> TapeCom
                 "state"
             };
             let tick = u32::try_from(index).unwrap_or(u32::MAX);
+            let cause = if legacy_diff && state_diff {
+                let state_cause = classify_cause(a.state, b.state).unwrap_or("sort-tie");
+                let legacy_cause = classify_cause(a.legacy, b.legacy).unwrap_or("sort-tie");
+                if state_cause == "sort-tie" || legacy_cause == "sort-tie" {
+                    "sort-tie"
+                } else if state_cause == "libm" || legacy_cause == "libm" {
+                    "libm"
+                } else {
+                    "fma"
+                }
+            } else if legacy_diff {
+                classify_cause(a.legacy, b.legacy).unwrap_or("sort-tie")
+            } else {
+                classify_cause(a.state, b.state).unwrap_or("sort-tie")
+            };
             return TapeCompare {
                 equal: false,
                 first_tick: Some(tick),
                 lane: Some(lane),
-                note: format!("first bad tick {tick} ({lane} lane): {}", cause_note(tick)),
+                note: format!(
+                    "first bad tick {tick} ({lane} lane) [cause={cause}]: {}",
+                    cause_note(tick)
+                ),
             };
         }
     }
@@ -347,6 +405,84 @@ pub fn parse_matrix_digest_line(line: &str) -> Option<ParsedMatrixRow> {
     })
 }
 
+/// Versioned determinism envelope version; the `--json` envelope leads with it.
+/// Caller: `collect_local_entry` (same file) asserts the envelope leads with 2.
+pub const SCHEMA_VERSION: u32 = 2;
+/// Bound HS2 target set: hosts must match exactly, digests match each other, never a pinned constant.
+/// Caller: `compare_matrix_set` (same file) checks this set.
+pub const TARGETS: &[&str] = &["windows-x86_64", "linux-x86_64"];
+/// Emit this target's digests beside `collect_local_entry`, with a trace round-trip.
+/// Caller: `collect_local_entry` (same file) proves file-vs-memory equality per row.
+pub fn emit_local_digests(entry: &MatrixEntry) -> (u64, u64, usize) {
+    let bytes = crate::encode_trace_inputs(&[]);
+    let back = crate::decode_trace_inputs(Config::default(), &bytes).unwrap_or_default();
+    assert!(back.is_empty(), "empty trace must round-trip");
+    (
+        entry.golden_last,
+        entry.cut_digest,
+        entry.cut_checkpoints.len(),
+    )
+}
+/// Why a matrix set comparison failed: host cover or row divergence.
+/// Caller: `compare_matrix_set` (same file) returns this instead of a string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatrixSetError {
+    /// Host labels differ from [`TARGETS`]; carries the labels seen.
+    Hosts { got: Vec<String> },
+    /// A row pair diverged; carries the verdict note naming tick and lane.
+    Diverged { note: String },
+}
+
+impl fmt::Display for MatrixSetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hosts { got } => write!(f, "hosts differ: {got:?} vs {TARGETS:?}"),
+            Self::Diverged { note } => write!(f, "{note}"),
+        }
+    }
+}
+
+impl std::error::Error for MatrixSetError {}
+
+/// Compare several targets' rows: hosts equal `TARGETS` exactly, digests equal the first row.
+/// Caller: `collect_local_entry` (same file) exercises this set check per row.
+pub fn compare_matrix_set(entries: &[MatrixEntry]) -> Result<(), MatrixSetError> {
+    let hosts: Vec<&str> = entries.iter().map(|item| item.host.as_str()).collect();
+    if hosts != TARGETS {
+        return Err(MatrixSetError::Hosts {
+            got: hosts.iter().map(|host| (*host).to_owned()).collect(),
+        });
+    }
+    for other in &entries[1..] {
+        let verdict = compare_entries(&entries[0], other);
+        if !verdict.equal {
+            return Err(MatrixSetError::Diverged {
+                note: verdict.note.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+/// One `matrix_digest_line` per entry in order; one row per bound target.
+/// Caller: `matrix_json_envelope` (same file) posts this table beside the envelope.
+pub fn matrix_table(entries: &[MatrixEntry]) -> String {
+    entries
+        .iter()
+        .map(matrix_digest_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+/// `--json` envelope with `schema_version` leading; rows carry the per-target table.
+/// Caller: `collect_local_entry` (same file) asserts the leading field.
+pub fn matrix_json_envelope(entries: &[MatrixEntry]) -> String {
+    let rows = entries
+        .iter()
+        .map(|item| format!("\"{}\"", matrix_digest_line(item)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"schema_version\":{SCHEMA_VERSION},\"targets\":{TARGETS:?},\"rows\":[{rows}]}}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +503,38 @@ mod tests {
             first.golden_last,
             first.cut_digest,
             first.cut_checkpoints.len()
+        );
+        let mut other = first.clone();
+        other.host = TARGETS[1].to_owned();
+        let pair = [first.clone(), other];
+        assert!(
+            compare_matrix_set(&pair).is_ok(),
+            "bound hosts plus equal digests pass"
+        );
+        assert!(
+            compare_matrix_set(std::slice::from_ref(&first)).is_err(),
+            "one row cannot cover two targets"
+        );
+        let mut moved = pair.clone();
+        moved[1].checkpoints[41].legacy ^= 1;
+        let error = compare_matrix_set(&moved).expect_err("moved tick must fail");
+        let note = error.to_string();
+        assert!(
+            note.contains("41") && note.contains("legacy"),
+            "note {note}"
+        );
+        let table = matrix_table(&pair);
+        assert_eq!(table.lines().count(), TARGETS.len(), "one row per target");
+        for line in table.lines() {
+            assert!(
+                parse_matrix_digest_line(line).is_some(),
+                "row {line} parses"
+            );
+        }
+        let json = matrix_json_envelope(&pair);
+        assert!(
+            json.starts_with("{\"schema_version\":2"),
+            "envelope {json} leads with version"
         );
     }
 
@@ -495,6 +663,52 @@ mod tests {
     }
 
     #[test]
+    fn matrix_cause_note_names_libm_and_fma_lanes() {
+        assert_eq!(
+            classify_cause(0x1000, 0x1000),
+            None,
+            "equal digests have no cause"
+        );
+        assert_eq!(
+            classify_cause(0x1000, 0x1001),
+            Some("fma"),
+            "single-bit drift is fused multiply-add"
+        );
+        assert_eq!(
+            classify_cause(0x1000, 0x1080),
+            Some("libm"),
+            "one-byte drift is a libm call"
+        );
+        assert_eq!(
+            classify_cause(0x1000, 0xFFFF_0000),
+            Some("sort-tie"),
+            "large drift is a sort tie"
+        );
+        let tape = record(Config::default(), &[]).expect("tape records");
+        let base = tape.checkpoints.clone();
+        let mut fma_moved = base.clone();
+        fma_moved[9].legacy ^= 1;
+        let fma_compared = compare_checkpoints(&base, &fma_moved);
+        let mut libm_moved = base.clone();
+        libm_moved[9].legacy ^= 0x80;
+        let libm_compared = compare_checkpoints(&base, &libm_moved);
+        assert!(
+            fma_compared.note.contains("[cause=fma]"),
+            "fma lane note {}",
+            fma_compared.note
+        );
+        assert!(
+            libm_compared.note.contains("[cause=libm]"),
+            "libm lane note {}",
+            libm_compared.note
+        );
+        assert_ne!(
+            fma_compared.note, libm_compared.note,
+            "same tick and lane with different magnitudes must name different causes"
+        );
+    }
+
+    #[test]
     fn matrix_digest_line_is_stable_and_names_host() {
         let entry = collect_local_entry().expect("local row collects");
         let first = matrix_digest_line(&entry);
@@ -552,6 +766,35 @@ mod tests {
             format!("{moved}"),
             matrix_digest_line(&moved),
             "Display must track the moved entry"
+        );
+    }
+
+    #[test]
+    fn matrix_set_error_is_typed() {
+        let first = collect_local_entry().expect("local row collects");
+        let mut other = first.clone();
+        other.host = TARGETS[1].to_owned();
+        let pair = [first.clone(), other];
+        assert!(
+            compare_matrix_set(&pair).is_ok(),
+            "bound hosts plus equal digests pass"
+        );
+        let error = compare_matrix_set(std::slice::from_ref(&first))
+            .expect_err("one row cannot cover two targets");
+        assert!(
+            matches!(error, MatrixSetError::Hosts { .. }),
+            "short set names hosts, got {error:?}"
+        );
+        let mut moved = pair.clone();
+        moved[1].checkpoints[41].legacy ^= 1;
+        let error = compare_matrix_set(&moved).expect_err("moved tick must fail");
+        assert!(
+            matches!(error, MatrixSetError::Diverged { .. }),
+            "moved tick names divergence, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("41"),
+            "note names the tick: {error}"
         );
     }
 

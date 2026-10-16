@@ -476,7 +476,14 @@ impl FrameGraph {
         let order = match dag.order() {
             Some(order) => order,
             None => {
-                let mut adj: Vec<Vec<NodeId>> = vec![Vec::new(); n];
+                let mut out_degree = vec![0usize; n];
+                for &(a, _) in &edge_set {
+                    out_degree[a] += 1;
+                }
+                let mut adj: Vec<Vec<NodeId>> = Vec::with_capacity(n);
+                for &degree in &out_degree {
+                    adj.push(Vec::with_capacity(degree));
+                }
                 for &(a, b) in &edge_set {
                     adj[a].push(b);
                 }
@@ -494,7 +501,8 @@ impl FrameGraph {
             pos[id] = index;
         }
         // Transient lifetimes in compiled-order positions.
-        let mut rows: Vec<LifeRow> = Vec::new();
+        let transient_total: usize = self.passes.iter().map(|p| p.transients.len()).sum();
+        let mut rows: Vec<LifeRow> = Vec::with_capacity(transient_total);
         for (owner, p) in self.passes.iter().enumerate() {
             for t in &p.transients {
                 let mut first = pos[owner];
@@ -563,7 +571,7 @@ impl FrameGraph {
                 .then_with(|| rows[a].first.cmp(&rows[b].first))
                 .then_with(|| rows[a].name.cmp(&rows[b].name))
         });
-        let mut slots: Vec<Vec<usize>> = Vec::new();
+        let mut slots: Vec<Vec<usize>> = Vec::with_capacity(rows.len());
         let mut slot_of = vec![0usize; rows.len()];
         for &ri in &seq {
             let mut placed = usize::MAX;

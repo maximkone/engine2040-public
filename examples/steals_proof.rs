@@ -5,7 +5,8 @@ use engine_audio::dsp::{adsr, BeatGrid, OnePole};
 use engine_core::fixed::Fixed;
 use engine_ecs::archetype::{Position as APos, Velocity as AVel, World as AWorld};
 use engine_nav::flow::{bake_flow, flow_hash, follow};
-use engine_net::rollback::{FrameLog, MAX_ROLLBACK};
+use engine_net::netcode::MAX_ROLLBACK;
+use engine_net::rollback::FrameLog;
 use engine_physics::kcc::{self, KccConfig, KccInput, KccState, World as KccWorld, V3};
 use engine_render::graph::Graph;
 
