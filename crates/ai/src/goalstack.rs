@@ -78,6 +78,13 @@ pub struct GoalStack {
     len: usize,
 }
 
+impl Default for GoalStack {
+    /// Empty stack.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GoalStack {
     /// Empty stack.
     pub const fn new() -> Self {
@@ -176,7 +183,7 @@ impl GoalStack {
             if g.id != ltg.id
                 && g.pursuable(now)
                 && via <= direct
-                && best.map_or(true, |b| g.weight > b.weight)
+                && best.is_none_or(|b| g.weight > b.weight)
             {
                 best = Some(g);
             }

@@ -26,6 +26,10 @@ impl<'a> SensorArrayGenerator<'a> {
     pub const fn len(&self) -> usize {
         self.spots.len()
     }
+    /// True when no spots are held.
+    pub const fn is_empty(&self) -> bool {
+        self.spots.is_empty()
+    }
     /// Append spots verbatim; cap-checked.
     pub fn generate_into(&self, out: &mut Vec<EqPoint>) -> Result<(), EqError> {
         for p in self.spots {
@@ -45,6 +49,13 @@ pub struct CompositeGenerator<'a> {
     len: u8,
 }
 
+impl<'a> Default for CompositeGenerator<'a> {
+    /// Empty chain.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> CompositeGenerator<'a> {
     /// Empty chain.
     pub const fn new() -> Self {
@@ -56,6 +67,10 @@ impl<'a> CompositeGenerator<'a> {
     /// Arm count.
     pub fn len(&self) -> usize {
         usize::from(self.len)
+    }
+    /// True when no arms are held.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
     /// Push one arm; refuses past 4.
     pub fn with_arm(mut self, arm: Generator<'a>) -> Result<Self, EqError> {
