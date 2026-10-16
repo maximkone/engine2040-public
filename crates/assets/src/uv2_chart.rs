@@ -94,11 +94,7 @@ fn face_chart(n: [f32; 3]) -> u32 {
     let ay = n[1].abs();
     let az = n[2].abs();
     if ax >= ay && ax >= az {
-        if n[0] >= 0.0 {
-            0
-        } else {
-            1
-        }
+        u32::from((n[0] < 0.0) || n[0].is_nan())
     } else if ay >= ax && ay >= az {
         if n[1] >= 0.0 {
             2

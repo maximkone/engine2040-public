@@ -2589,7 +2589,7 @@ mod tests {
             let parent = skeleton.joints[i].parent.expect("chain parent");
             let ratio = masses[i] / masses[parent];
             assert!(
-                ratio >= MASS_RATIO_LO - 1e-4 && ratio <= MASS_RATIO_HI + 1e-4,
+                (MASS_RATIO_LO - 1e-4..=MASS_RATIO_HI + 1e-4).contains(&ratio),
                 "link {parent}->{i} inside 0.8..1.2: {ratio}"
             );
         }

@@ -1664,8 +1664,10 @@ mod tests {
             v
         }
         fn run(split: bool) -> (Vec<Body>, Solver) {
-            let mut cfg = Config::default();
-            cfg.island_split = split;
+            let cfg = Config {
+                island_split: split,
+                ..Default::default()
+            };
             let mut s = Solver::with_config(cfg);
             let mut b = two_stacks();
             for _ in 0..240 {

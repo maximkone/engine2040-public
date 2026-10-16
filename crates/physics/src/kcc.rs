@@ -845,7 +845,7 @@ mod tests {
         let dm = [20, 0, 0];
         let dx = mm_to_m(dm[0]);
         let mut hs = [0u64; 2];
-        for rep in 0..2 {
+        for (rep, h) in hs.iter_mut().enumerate() {
             let mut w = World::new();
             w.ground(-0.5);
             w.push_box(Aabb::new(V3::new(-2.0, -0.2, -1.0), V3::new(2.0, 0.0, 1.0)));
@@ -859,12 +859,12 @@ mod tests {
                     w.boxes[0].max.x += dx;
                 }
             }
-            hs[rep] = state_hash(&s);
+            *h = state_hash(&s);
             let off = s.pos.x - w.boxes[0].min.x;
             assert!(s.grounded && (off - 2.0).abs() <= 0.01, "station rep {rep}");
         }
         assert_eq!(hs[0], hs[1], "ride hash x2");
-        for rep in 0..2 {
+        for (rep, h) in hs.iter_mut().enumerate() {
             let mut w = World::new();
             w.ground(-0.5);
             w.push_box(Aabb::new(V3::new(-2.0, 0.3, -1.0), V3::new(2.0, 0.5, 1.0)));
@@ -884,7 +884,7 @@ mod tests {
                 }
             }
             assert!(s.grounded && inherited, "step-off lands rep {rep}");
-            hs[rep] = state_hash(&s);
+            *h = state_hash(&s);
         }
         assert_eq!(hs[0], hs[1], "step-off x2");
         let mut w = World::new();

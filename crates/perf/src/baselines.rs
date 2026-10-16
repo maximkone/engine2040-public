@@ -949,7 +949,13 @@ mod audio_budget_tests {
         // The 8-fighter canonical run keeps its exact baseline: the audio lock
         // posts presentation-only time bars and moves no simulation cost.
         let workload = crate::workloads::ScaledArenaTick::canonical_for(8).expect("8 listed");
+        std::hint::black_box(workload.run_hash());
         let report = workload.run_report();
+        let repeat = workload.run_report();
+        assert_eq!(
+            report, repeat,
+            "8-fighter live run repeats identically after warm-up"
+        );
         let recorded = scaled_arena_baseline(8).expect("8-fighter row recorded");
         assert_eq!(report.workload, recorded.workload, "8 names its row");
         check_report(&report, &recorded).expect("8-fighter tick in budget");
@@ -1260,7 +1266,13 @@ mod seal_tests {
     #[test]
     fn committed_tamper_passes_exact_but_trips_operator_seal() {
         let recorded = arena_baseline();
+        std::hint::black_box(ArenaTick::canonical().run_hash());
         let live = ArenaTick::canonical().run_report();
+        let repeat = ArenaTick::canonical().run_report();
+        assert_eq!(
+            live, repeat,
+            "arena live run repeats identically after warm-up"
+        );
         // A committed tamper: the workload regresses one byte and one count
         // while the committed row is widened by the same amounts, so the
         // field-for-field gate goes green on the pair after commit.

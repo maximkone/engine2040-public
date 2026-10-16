@@ -933,7 +933,7 @@ mod tests {
             Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 100_000.0),
         ] {
             let mut tail = [settled; 24];
-            tail[17 % 24] = edge;
+            tail[17] = edge;
             assert!(!slice_all_settled(&tail));
             assert_eq!(slice_all_settled(&tail), tail.iter().all(is_settled));
         }

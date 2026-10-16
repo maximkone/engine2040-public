@@ -19,6 +19,10 @@ use crate::warp_ground::{
 use core::f32::consts::FRAC_1_SQRT_2 as SQ;
 use engine_core::alloc_probe::measure;
 
+/// One rejected `warp_output` case row: target output, speed, wish, leg
+/// joints plus the expected typed error.
+type RejectedCase<'a> = (LocoOutput, f32, [f32; 2], &'a [usize], WarpError);
+
 /// Matched clip per capsule speed, the way motion matching picks a clip near
 /// the speed and the warp covers the residual: walk 1.5, run 4.0, sprint
 /// 6.5 m/s.
@@ -498,7 +502,7 @@ fn rejected_warp_output_mutates_nothing() {
         expected: good.pose.positions.len(),
         got: good.pose.rotations.len() - 1,
     };
-    let cases: [(LocoOutput, f32, [f32; 2], &[usize], WarpError); 7] = [
+    let cases: [RejectedCase<'_>; 7] = [
         (good.clone(), 1.5, [0.0, 0.0], &LEGS, WarpError::BadWishDir),
         (
             good.clone(),

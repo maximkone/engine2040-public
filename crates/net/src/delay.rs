@@ -58,7 +58,7 @@ pub fn delay_for_advantage(current: u32, advantage: i32, target: i32) -> u32 {
     if advantage > target {
         cur.saturating_add(1).min(MAX_DELAY)
     } else if advantage < target {
-        cur.saturating_sub(1).max(MIN_DELAY)
+        cur.saturating_sub(1)
     } else {
         cur
     }

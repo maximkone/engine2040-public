@@ -24,6 +24,9 @@ mod flow;
 #[path = "../../nav/src/tiles.rs"]
 mod tiles;
 
+/// Live-only mesh-tile rebake (`rebake_mesh_tile`); the alias
+/// re-exports, `update` and `rebake_stacked_level` are retired, so this
+/// include now resolves only the kept WD8 path for `mesh` tests.
 #[path = "../../nav/src/rebake.rs"]
 mod rebake;
 
@@ -170,11 +173,22 @@ fn cell_streaming_scales_nest_seamlessly() {
                 );
             }
         }
-        // Nesting holds for holes too: borders stay free at every scale.
+        // Nesting holds for hole interiors: per-cell borders stay free
+        // (parity with `terrain::raw_holes`), so a child border texel is
+        // always free while the parent interior at the same global texel
+        // may hold an isolated hole. Compare interiors, assert borders free.
         for y in 0..16 {
             for x in 0..16 {
                 let px = dx as usize * 16 + x;
                 let py = dz as usize * 16 + y;
+                let child_border = x == 0 || y == 0 || x + 1 == 16 || y + 1 == 16;
+                if child_border {
+                    assert!(
+                        !child.holes[y * 16 + x],
+                        "child border free {child_coord} ({x},{y})"
+                    );
+                    continue;
+                }
                 assert_eq!(
                     parent.holes[py * 32 + px],
                     child.holes[y * 16 + x],

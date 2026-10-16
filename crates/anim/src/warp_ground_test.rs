@@ -255,7 +255,7 @@ fn pivots_strafes_and_stride_scope_flags_match_the_ground_warp() {
         strafe.orient_toward([0.0, -1.0]).expect("strafe step");
     }
     assert!((strafe.warp_yaw() - STRAFE_WARP_MAX_RAD).abs() < 1e-4);
-    assert!(ORIENT_STEP_PIVOT_RAD > ORIENT_STEP_CRUISE_RAD);
+    const { assert!(ORIENT_STEP_PIVOT_RAD > ORIENT_STEP_CRUISE_RAD) };
     let mut stride = GroundWarp::new();
     stride
         .begin_transient(LocoState::Start, 10, 0.5, 7.0)

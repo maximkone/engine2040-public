@@ -21,14 +21,8 @@ fn authority_tape(ticks: usize) -> Vec<NetPose> {
             // Fixture is infallible via unwrap_or_else: phase stays finite in
             // `[0, 1)`, so `from_pick` always succeeds; the assert keeps a
             // loud failure if that ever changes.
-            NetPose::from_pick(clip, tick, phase).unwrap_or_else(|e| {
-                assert!(false, "fixture phase finite: {e}");
-                NetPose {
-                    clip,
-                    tick,
-                    phase_q: 0,
-                }
-            })
+            NetPose::from_pick(clip, tick, phase)
+                .unwrap_or_else(|e| panic!("fixture phase finite: {e}"))
         })
         .collect()
 }

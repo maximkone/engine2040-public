@@ -241,22 +241,12 @@ pub struct ClipCounts {
 /// allocate. A caller that fractures once passes a fresh scratch. Clip counts
 /// stay per call (see [`fracture_counted_with_scratch`]), so a scratch shared
 /// across threads needs one scratch per thread.
+#[derive(Default)]
 pub struct FractureScratch {
     sites: Vec<[f32; 3]>,
     pair_d2: Vec<f32>,
     order: Vec<usize>,
     clip: ClipScratch,
-}
-
-impl Default for FractureScratch {
-    fn default() -> Self {
-        Self {
-            sites: Vec::new(),
-            pair_d2: Vec::new(),
-            order: Vec::new(),
-            clip: ClipScratch::default(),
-        }
-    }
 }
 
 /// Absolute slack of the Voronoi early exit; meters.

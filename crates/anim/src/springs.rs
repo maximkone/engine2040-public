@@ -557,7 +557,7 @@ mod tests {
 
     /// One scripted tape tick: a fixed kick schedule, then the step.
     fn am19_tick(set: &mut SpringSet, anchors: &[[i32; 3]], out: &mut [[i32; 3]], tick: usize) {
-        if tick % 9 == 0 {
+        if tick.is_multiple_of(9) {
             set.kick(tick % out.len(), [0.4, 0.2, -0.3])
                 .expect("script kicks");
         }

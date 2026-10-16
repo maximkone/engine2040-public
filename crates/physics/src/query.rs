@@ -1460,13 +1460,13 @@ mod tests {
                 let mut hook = |hit: &HitMm, normal: [i32; 3]| {
                     contacts += 1;
                     hasher.write_u32(hit.collider);
-                    for axis in 0..3 {
-                        hasher.write_i32(normal[axis]);
+                    for v in &normal {
+                        hasher.write_i32(*v);
                     }
                 };
                 let end = slide_move_mm(&world, &cfg, from, vel, half, &mut hook);
-                for axis in 0..3 {
-                    hasher.write_i32(end[axis]);
+                for v in &end {
+                    hasher.write_i32(*v);
                 }
                 i += 1;
             }

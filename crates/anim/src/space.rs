@@ -745,6 +745,10 @@ mod tests {
     #[test]
     fn ang_limit_space_player_caps_180_deg_step() {
         use std::f32::consts::PI;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only angle oracle; production keeps polynomial helpers"
+        )]
         fn angle_deg(a: [f32; 4], b: [f32; 4]) -> f32 {
             let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
             if !dot.is_finite() {

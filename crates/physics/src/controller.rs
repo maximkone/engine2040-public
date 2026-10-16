@@ -482,6 +482,10 @@ impl Controller {
     }
 
     /// Clamp `cur` toward `target` at the wall face plus skin.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "axis-separated wall clamp keeps its inputs flat until a move params struct lands"
+    )]
     fn slide_block(
         &self,
         axis: usize,
@@ -505,6 +509,10 @@ impl Controller {
     }
 
     /// Tread check: step top must continue `min_width` ahead.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "tread probe keeps its inputs flat until a move params struct lands"
+    )]
     fn tread_holds(
         &self,
         x: f32,

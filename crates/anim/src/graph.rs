@@ -756,7 +756,9 @@ impl Evaluator {
                 }
             }
         }
-        let root = self.root.expect("prepared root");
+        let Some(root) = self.root else {
+            return Err(GraphError::NotPrepared);
+        };
         let root_slot = self.slot_of(root)?;
         out.positions
             .copy_from_slice(&self.slots[root_slot].positions);

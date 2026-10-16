@@ -1469,7 +1469,6 @@ mod tests {
     fn isqrt_holds_square_bracket() {
         // A broken root breaks every rest length, so bracket it directly.
         // SPACING is a small positive test const, so the widenings below never fail.
-        debug_assert!(SPACING >= 0);
         let mut vals = vec![
             0u64,
             1,
@@ -2295,6 +2294,11 @@ mod tests {
         for i in 0..GAP_DRAPES {
             worlds.push(gap_coupled_drape(i).0);
         }
+        assert_eq!(worlds.len(), GAP_DRAPES, "timing harness keeps every drape");
+        assert!(
+            worlds.iter().all(|w| w.tick() == u64::from(GAP_TICKS)),
+            "every timed drape stepped"
+        );
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         std::println!(
             "cloth_couple ms={ms:.1} per_tick_ms={:.4}",

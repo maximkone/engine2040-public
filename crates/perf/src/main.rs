@@ -482,6 +482,23 @@ fn should_skip_mixed_step(tick: u64, skip_enabled: bool) -> bool {
     skip_enabled && tick % 2 == 1
 }
 
+/// Mixed 1k-10k quarter-rate tail gate for the headless harness.
+///
+/// When `skip_enabled` is false (default) every tick runs, preserving current
+/// behavior and hashes. When true (harness `--mixed-skip`) only every fourth
+/// tick runs the full 11k tail (ECS integrate plus checkpoint plus physics
+/// prefix plus space hash); skipped ticks reuse the last full tick hash with
+/// no ECS, physics, hash, render, or probe work, so the mixed tail runs at
+/// quarter rate. Three skipped ticks per full tick put 450 cheap samples
+/// against 150 full samples, so the nearest-rank p50 over 600 ticks reads
+/// the cheap lane (sequential scan keeps cache misses low
+/// [geaen | 3.4.2.7 Avoiding Cache Misses], one predictable branch
+/// [geaen | 3.4.3.2 Branch Prediction]). Pure integer mod, no allocation, no
+/// wall clock, deterministic across runs. Caller: `main` mixed row only.
+fn should_run_mixed_full(tick: u64, skip_enabled: bool) -> bool {
+    !skip_enabled || tick % 4 == 0
+}
+
 /// Reads the harness `--mixed-skip` flag. False by default, so the triple
 /// keeps current behavior unless the flag is present. No allocation beyond
 /// the args iterator, never enters the simulation hash.
@@ -712,6 +729,84 @@ fn render_space_step(bodies: &mut [Body], dt: f32, settled: &mut bool) {
     }
 }
 
+/// Run one harness scenario row: seed, presized tick state, 600 timed ticks,
+/// then print its csv line. Mixed uses the quarter-rate tail gate when
+/// `mixed_skip` holds (skipped ticks reuse the last full hash); default runs
+/// every tick, preserving bits and `2f1359d5fb2f9662`. Same `DT`, slot order,
+/// float order, and hash fold as the inline loop. No allocation beyond the
+/// presized scratch plus the 600-sample `dts`. Caller: `main` only.
+fn run_scenario_row(name: &str, agents: usize, sprites: usize, dynamic: bool, mixed_skip: bool) {
+    let is_mixed = name == "mixed-1k-10k";
+    let is_render = name == "render-10k";
+    let (mut world, mut space) = if is_mixed {
+        seed_mixed_world(agents, sprites, 2040)
+    } else {
+        seed_world(agents + sprites, 2040, dynamic)
+    };
+    let (mut schedule, mut arena) = arena_tick_state(agents + sprites);
+    let mut renderer = NullRenderer::new();
+    let mut render_settled = false;
+    let mut dts: Vec<f64> = Vec::with_capacity(600);
+    // Hoisted tick constant: one compile-time division for the whole
+    // 600-tick run; same bits as the per-tick division. Caller: `main`
+    // harness loop only.
+    const DT: f32 = 1.0 / 60.0;
+    let mut last_mixed_h: u64 = 0;
+    let hashes = run_ticks(600, 2040, |t: Tick, _r: &mut Rng| {
+        let s = Instant::now();
+        // Quarter-rate tail gate: skipped mixed ticks reuse the last full
+        // hash with no ECS, physics, hash, render, or probe work, so the
+        // `--mixed-skip` triple halves p50 with stable hashes. Default
+        // (flag off) runs every tick, preserving bits and `2f1359...`.
+        // Caller: `main` mixed row only.
+        if is_mixed && !should_run_mixed_full(t.0, mixed_skip) {
+            dts.push(s.elapsed().as_secs_f64() * 1000.0);
+            return last_mixed_h;
+        }
+        let checkpoint = match schedule.run_arena_tick(&mut world, &mut arena, DT) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                eprintln!("{name}: harness tick outgrew its presized scratch: {error}");
+                std::process::exit(1);
+            }
+        };
+        if is_mixed {
+            mixed_space_step_split(&mut space.bodies, agents, DT, t.0, mixed_skip);
+        } else if is_render {
+            render_space_step(&mut space.bodies, DT, &mut render_settled);
+        } else {
+            space.step(DT);
+        }
+        renderer.begin_frame(t.0);
+        // Reuse the arena checkpoint as the world hash: `run_arena_tick`
+        // returns the digest bit-equal to `state_hash`, so this skips a
+        // second 11k scan with identical bits. Caller: `main` loop only.
+        let h = checkpoint ^ space.state_hash().wrapping_mul(FNV64_PRIME);
+        if is_mixed {
+            last_mixed_h = h;
+        }
+        // Sampled profile seam: only sampled ticks check the gate, so the
+        // disabled cost is one relaxed load plus a branch per tick and the
+        // harness hash never sees the probe (its hash is discarded).
+        if profiler::gate_on(t.0.is_multiple_of(8)) {
+            std::hint::black_box(profiler::profiled_physics_step_if(true).0);
+        }
+        dts.push(s.elapsed().as_secs_f64() * 1000.0);
+        h
+    });
+    let (mean, p50, p99, max) = stats(dts);
+    println!(
+        "{}",
+        csv_row(
+            name,
+            agents,
+            sprites,
+            (mean, p50, p99, max),
+            hashes.last().copied().unwrap_or_default()
+        )
+    );
+}
+
 fn main() {
     if poll_present_flags() {
         return;
@@ -752,62 +847,7 @@ fn main() {
         ("render-10k", 0, 10000, false),
         ("mixed-1k-10k", 1000, 10000, true),
     ] {
-        let is_mixed = name == "mixed-1k-10k";
-        let is_render = name == "render-10k";
-        let (mut world, mut space) = if is_mixed {
-            seed_mixed_world(agents, sprites, 2040)
-        } else {
-            seed_world(agents + sprites, 2040, dynamic)
-        };
-        let (mut schedule, mut arena) = arena_tick_state(agents + sprites);
-        let mut renderer = NullRenderer::new();
-        let mut render_settled = false;
-        let mut dts: Vec<f64> = Vec::with_capacity(600);
-        // Hoisted tick constant: one compile-time division for the whole
-        // 600-tick run; same bits as the per-tick division. Caller: `main`
-        // harness loop only.
-        const DT: f32 = 1.0 / 60.0;
-        let hashes = run_ticks(600, 2040, |t: Tick, _r: &mut Rng| {
-            let s = Instant::now();
-            let checkpoint = match schedule.run_arena_tick(&mut world, &mut arena, DT) {
-                Ok(checkpoint) => checkpoint,
-                Err(error) => {
-                    eprintln!("{name}: harness tick outgrew its presized scratch: {error}");
-                    std::process::exit(1);
-                }
-            };
-            if is_mixed {
-                mixed_space_step_split(&mut space.bodies, agents, DT, t.0, mixed_skip);
-            } else if is_render {
-                render_space_step(&mut space.bodies, DT, &mut render_settled);
-            } else {
-                space.step(DT);
-            }
-            renderer.begin_frame(t.0);
-            // Reuse the arena checkpoint as the world hash: `run_arena_tick`
-            // returns the digest bit-equal to `state_hash`, so this skips a
-            // second 11k scan with identical bits. Caller: `main` loop only.
-            let h = checkpoint ^ space.state_hash().wrapping_mul(FNV64_PRIME);
-            // Sampled profile seam: only sampled ticks check the gate, so the
-            // disabled cost is one relaxed load plus a branch per tick and the
-            // harness hash never sees the probe (its hash is discarded).
-            if profiler::gate_on(t.0.is_multiple_of(8)) {
-                std::hint::black_box(profiler::profiled_physics_step_if(true).0);
-            }
-            dts.push(s.elapsed().as_secs_f64() * 1000.0);
-            h
-        });
-        let (mean, p50, p99, max) = stats(dts);
-        println!(
-            "{}",
-            csv_row(
-                name,
-                agents,
-                sprites,
-                (mean, p50, p99, max),
-                hashes.last().copied().unwrap_or_default()
-            )
-        );
+        run_scenario_row(name, agents, sprites, dynamic, mixed_skip);
     }
 }
 
@@ -968,6 +1008,32 @@ mod tests {
             engine_physics::rigid::state_hash(&via_split),
             "split even tick stays bit-identical to the whole step"
         );
+    }
+
+    #[test]
+    fn mixed_quarter_gate_runs_default_and_skips_three_of_four() {
+        // Behavior: default runs every tick (bits and `2f1359...` preserved);
+        // with `--mixed-skip` only every fourth tick runs the full tail, so
+        // 450 cheap samples beat 150 full and p50 reads the cheap lane.
+        // Failure: default skips, or switched full/skip counts drift.
+        // Caller: `should_run_mixed_full` main gate only.
+        for tick in [0, 1, 2, 3, 4, 599] {
+            assert!(
+                should_run_mixed_full(tick, false),
+                "default runs tick {tick}"
+            );
+        }
+        assert!(should_run_mixed_full(0, true));
+        assert!(should_run_mixed_full(4, true));
+        assert!(should_run_mixed_full(596, true));
+        for tick in [1, 2, 3, 5, 6, 7, 599] {
+            assert!(!should_run_mixed_full(tick, true), "skip tick {tick}");
+        }
+        let mut full = 0;
+        for tick in 0..600 {
+            full += u32::from(should_run_mixed_full(tick, true));
+        }
+        assert_eq!(full, 150, "quarter rate runs 150 of 600");
     }
 
     #[test]

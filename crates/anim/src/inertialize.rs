@@ -510,7 +510,7 @@ mod tests {
         lim.step(&want, dt, &mut out);
         let first = qangle_deg(ID, out[0]);
         assert!(
-            first <= 19.0 && first >= 17.0,
+            (17.0..=19.0).contains(&first),
             "first step {first} deg, want 18 +-1"
         );
         for _ in 0..9 {
@@ -543,6 +543,10 @@ mod tests {
         assert!(qangle_deg(ID, io[0]) <= 19.0);
     }
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only libm oracle measures polynomial helpers; production keeps sin_unit/acos_unit"
+    )]
     fn poly_trig_matches_libm_oracle() {
         use std::f32::consts::PI;
         // Oracle uses platform libm; allowed here: tests sit after
