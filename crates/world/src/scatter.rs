@@ -6,7 +6,7 @@
 //! Errors: [`ScatterErr`] refuses bad inputs before any allocation.
 // PORT(Kromey/fast_poisson@5c8273cb790c600219fc32121f70458220ac9dfe:src/lib.rs Bridson sampler): reimplemented, zero bytes vendored.
 use crate::blockout::effective_seed;
-use engine_core::Rng;
+use engine_core::CounterCursor;
 
 /// Bridson tries per active point; grid ceiling refuses wild extents pre-alloc.
 const TRIES: u32 = 30;
@@ -33,7 +33,7 @@ impl std::fmt::Display for ScatterErr {
 impl std::error::Error for ScatterErr {}
 
 /// Deterministic `f32` in `[0, 1)` from the top 53 stream bits; bake-time only.
-fn unit(rng: &mut Rng) -> f32 {
+fn unit(rng: &mut CounterCursor) -> f32 {
     ((rng.next_u64() >> 11) as f64 / 9_007_199_254_740_992.0) as f32
 }
 
@@ -45,9 +45,10 @@ fn point_index(len: usize) -> Result<i32, ScatterErr> {
 }
 
 /// Bridson Poisson-disk points over `[0, w) x [0, h)` with pairwise distance
-/// at least `min_dist`. Units: meters in and out. Seed: `Rng` at
+/// at least `min_dist`. Units: meters in and out. Seed: `CounterCursor` at
 /// `blockout::effective_seed(seed, recipe)`, so recipes split like blockout
-/// bakes. Bake-time only: the annulus proposal uses only `+ - * /` and one
+/// bakes and adjacent seeds differ (the legacy `Rng` froze `seed | 1` for
+/// golden replays; new code uses `CounterRng`). Bake-time only: the annulus proposal uses only `+ - * /` and one
 /// `sqrt` for the unit direction, never `sin`/`cos` and never in the tick.
 /// Errors: [`ScatterErr::BadMinDist`] for non-finite or
 /// non-positive `min_dist`, [`ScatterErr::BadExtent`] for non-finite or
@@ -74,7 +75,7 @@ pub fn poisson_disk(
     if cells > MAX_CELLS {
         return Err(ScatterErr::BadExtent);
     }
-    let mut rng = Rng::new(effective_seed(seed, recipe));
+    let mut rng = CounterCursor::new(effective_seed(seed, recipe));
     let mut grid = vec![-1i32; cells];
     let mut points: Vec<[f32; 2]> = Vec::new();
     let mut active: Vec<usize> = Vec::new();
@@ -173,7 +174,7 @@ mod tests {
     fn spike_count_gap_and_reseed() {
         let pts = spike();
         let n = pts.len();
-        assert_eq!(n, 1550, "spike count drifted: count {n}");
+        assert_eq!(n, 1567, "spike count drifted: count {n}");
         assert!(min_gap(&pts) >= 2.0, "pair closer than 2.0 m");
         assert_eq!(pts, spike(), "same seed must rerun byte-identical");
         let other = poisson_disk(7, "scatter-pine", 100.0, 100.0, 2.0).expect("seed 7 bakes");
@@ -207,5 +208,23 @@ mod tests {
         assert_eq!(point_index(0), Ok(0));
         assert_eq!(point_index(1_048_576), Ok(1_048_576));
         assert_eq!(point_index(usize::MAX), Err(ScatterErr::BadExtent));
+    }
+
+    #[test]
+    fn adjacent_seeds_split_small() {
+        // New code must not alias adjacent seeds (`Rng::new` freezes
+        // `seed | 1` for golden replays; scatter needs `CounterRng`).
+        let left = poisson_disk(2, "r", 10.0, 10.0, 1.0).expect("seed 2 bakes");
+        let right = poisson_disk(3, "r", 10.0, 10.0, 1.0).expect("seed 3 bakes");
+        assert_ne!(left, right, "adjacent seeds 2/3 must give different sets");
+    }
+
+    #[test]
+    fn adjacent_seeds_split_spike() {
+        // Spike-size pair: 2040/2041 are adjacent, so the legacy alias
+        // would bake byte-identical crowds for neighbouring seeds.
+        let left = poisson_disk(2040, "scatter-pine", 100.0, 100.0, 2.0).expect("seed 2040 bakes");
+        let right = poisson_disk(2041, "scatter-pine", 100.0, 100.0, 2.0).expect("seed 2041 bakes");
+        assert_ne!(left, right, "adjacent seeds 2040/2041 must differ");
     }
 }
