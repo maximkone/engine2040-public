@@ -1072,19 +1072,19 @@ fn start_actions(
             && !dodging(*intent)
             && !f.is_dodging;
         if f.is_attacking {
-            mid_swing_step(
-                *intent,
-                &mut *f,
+            mid_swing_step(MidSwingStep {
+                intent: *intent,
+                f: &mut *f,
                 tables,
-                &mut *events,
-                &mut cues,
+                events: &mut *events,
+                cues: &mut cues,
                 commit,
                 window,
                 fresh,
                 heavy_press,
                 tick,
                 id,
-            );
+            });
             continue;
         }
         let queued_buttons = if window > 0 && !f.is_dodging && !blocking(*intent) {
@@ -1156,21 +1156,38 @@ fn dodge_step(
     true
 }
 
-/// Mid-swing leg of [`start_actions`]: feint/chain restarts inside their
-/// windows, else buffers the press. Always consumes the tick.
-fn mid_swing_step(
+/// Grouped mid-swing inputs for [`mid_swing_step`]: one struct so the helper
+/// stays under the argument-count lint. Pure grouping, no behavior change.
+struct MidSwingStep<'a, 'b> {
     intent: Buttons,
-    f: &mut FighterState,
-    tables: &Tables,
-    events: &mut Vec<FightEvent>,
-    cues: &mut Option<&mut Vec<AttackStarted>>,
+    f: &'a mut FighterState,
+    tables: &'a Tables,
+    events: &'a mut Vec<FightEvent>,
+    cues: &'a mut Option<&'b mut Vec<AttackStarted>>,
     commit: Option<StreamliningParams>,
     window: u32,
     fresh: bool,
     heavy_press: bool,
     tick: u32,
     id: usize,
-) {
+}
+
+/// Mid-swing leg of [`start_actions`]: feint/chain restarts inside their
+/// windows, else buffers the press. Always consumes the tick.
+fn mid_swing_step(args: MidSwingStep<'_, '_>) {
+    let MidSwingStep {
+        intent,
+        f,
+        tables,
+        events,
+        cues,
+        commit,
+        window,
+        fresh,
+        heavy_press,
+        tick,
+        id,
+    } = args;
     if let Some(streamlining) = commit {
         let feint = streamlining.cancel_allowed(f.attack_age, tables.attack_startup_ticks);
         let chain = streamlining.recovery_cancel_allowed(

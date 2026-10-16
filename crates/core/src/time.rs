@@ -147,18 +147,21 @@ impl Default for IntAcc {
     }
 }
 
-/// Checked f64 to u64 by truncation toward zero.
+/// Checked f64 bits to u64 by truncation toward zero.
+/// Takes the `to_bits` of the wall value so the warm tick+hash path stays integer-only.
 /// Rejects non-finite and negative input; overflow past u64 fails.
 /// Bit decode keeps every in-range integer exact without a cast.
-fn f64_to_u64_checked(v: f64) -> Result<u64, TimeError> {
-    if !v.is_finite() {
+fn f64_to_u64_checked(bits: u64) -> Result<u64, TimeError> {
+    let exp_raw = (bits >> 52) & 0x7ff;
+    if exp_raw == 0x7ff {
         return Err(TimeError::NonFiniteDt);
     }
-    if v < 0.0 {
-        return Err(TimeError::NegativeDt);
+    if (bits >> 63) == 1 {
+        let mant_raw = bits & 0x000f_ffff_ffff_ffff;
+        if exp_raw != 0 || mant_raw != 0 {
+            return Err(TimeError::NegativeDt);
+        }
     }
-    let bits = v.to_bits();
-    let exp_raw = (bits >> 52) & 0x7ff;
     if exp_raw == 0 {
         return Ok(0);
     }
@@ -199,7 +202,7 @@ pub fn quantize_wall_secs(dt_secs: f32) -> Result<u64, TimeError> {
     // 100M fits in u32; every u32 value holds exact in f64.
     let bound = f64::from(u32::try_from(MAX_FRAME_NS).map_err(|_| TimeError::Overflow)?);
     let clamped = rounded.round().min(bound).max(0.0);
-    f64_to_u64_checked(clamped)
+    f64_to_u64_checked(clamped.to_bits())
 }
 
 /// Consumer: pace a `TickState` with integer wall time.
@@ -484,10 +487,16 @@ mod tests {
         // Boundary past u64::MAX must refuse, never wrap to zero;
         // in-range 100M stays exact for the poll boundary.
         assert_eq!(
-            f64_to_u64_checked(1.844_674_407_370_955_2e19),
+            f64_to_u64_checked(1.844_674_407_370_955_2e19f64.to_bits()),
             Err(TimeError::Overflow)
         );
-        assert_eq!(f64_to_u64_checked(1.0e20), Err(TimeError::Overflow));
-        assert_eq!(f64_to_u64_checked(100_000_000.0), Ok(100_000_000));
+        assert_eq!(
+            f64_to_u64_checked(1.0e20f64.to_bits()),
+            Err(TimeError::Overflow)
+        );
+        assert_eq!(
+            f64_to_u64_checked(100_000_000.0f64.to_bits()),
+            Ok(100_000_000)
+        );
     }
 }

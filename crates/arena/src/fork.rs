@@ -35,6 +35,7 @@ use super::{
     ArenaConfig, FighterState, MatchSnapshot, MATCH_WIRE_VERSION_V0, MATCH_WIRE_VERSION_V1,
     MAX_SLOTS, TICK_HZ,
 };
+use engine_combat::depth::DepthSet;
 use engine_combat::exchange::PhasedFighter;
 use engine_combat::fight::MAX_ATTACK_STARTED_PER_TICK;
 use engine_combat::FightEvent;
@@ -460,6 +461,9 @@ impl ForkJob {
             .unwrap_or(tape.0.len());
         #[cfg(feature = "sim")]
         let controllers = self.rebuilt_controllers()?;
+        // Forks come from v1 prefix snapshots only: V1 tables keep poise
+        // damage 0, so the fork depth never staggers and never hashes.
+        let depth = DepthSet::new(engine_combat::TABLES_V1, self.config.fighters);
         Some((
             Sim {
                 config: self.config,
@@ -499,6 +503,7 @@ impl ForkJob {
                 rules: super::ArenaRules::V1,
                 balance: Vec::new(),
                 stagger: Vec::new(),
+                depth,
                 limbs: LimbPool::new(MAX_LIMBS).ok()?,
                 #[cfg(test)]
                 trace: None,

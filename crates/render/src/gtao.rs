@@ -869,6 +869,18 @@ pub fn upsample_bilateral(
             half.height_half
         )));
     }
+    for (i, v) in half.values.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(LookError::Invalid(format!(
+                "gtao half AO[{i}] value {v} is not finite"
+            )));
+        }
+        if !(0.0..=1.0).contains(v) {
+            return Err(LookError::Invalid(format!(
+                "gtao half AO[{i}] value {v} escapes 0..=1"
+            )));
+        }
+    }
     let w = config.width_px as usize;
     let h = config.height_px as usize;
     check_depth_buffer(depth_full, config.full_texels(), "upsample depth")?;
@@ -2249,6 +2261,44 @@ mod tests {
             2,
             "radius 4 over 3 taps steps 2"
         );
+    }
+
+    #[test]
+    fn upsample_rejects_bad_half_texels() {
+        // Caller: `gtao_live_full_for_forward` (same file) plus the live
+        // frame fresh path (`present/gpu_present/live.rs`
+        // `live_ao_upload_for_frame`) through it into the blit `ao_tex`.
+        // Behavior: a half buffer carrying a non-finite or out-of-range
+        // texel refuses loudly so the caller keeps `ao_tex` at 1.0 instead
+        // of uploading NaN; a valid half still upsamples to a finite
+        // 0..=1 field. Same bad half gives the same refusal twice.
+        let (depth, normals) = flat_inputs(8, 8, 5.0);
+        let (good, _) = gtao_half_res(&depth, &normals, &config_8x8()).expect("flat bakes");
+        let full = upsample_bilateral(&good, &depth, &config_8x8()).expect("valid half upsamples");
+        assert_eq!(full.len(), 64, "8x8 upsamples to 64");
+        assert!(
+            full.iter()
+                .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "valid half stays finite 0..=1"
+        );
+        for bad in [f32::NAN, f32::INFINITY, 1.5, -0.5] {
+            let mut half = good.clone();
+            half.values[3] = bad;
+            assert!(
+                matches!(
+                    upsample_bilateral(&half, &depth, &config_8x8()),
+                    Err(LookError::Invalid(_))
+                ),
+                "half texel {bad} refuses loudly so ao_tex keeps 1.0"
+            );
+            assert!(
+                matches!(
+                    upsample_bilateral(&half, &depth, &config_8x8()),
+                    Err(LookError::Invalid(_))
+                ),
+                "same bad half refuses the same twice"
+            );
+        }
     }
 
     #[test]

@@ -100,6 +100,7 @@ use engine_anim::pose::{extract_root, sample_pose};
 use engine_anim::warp_ground::GroundWarp;
 use engine_anim::Clip;
 use engine_combat::arena::MatchState as CombatMatchState;
+use engine_combat::depth::{DepthSet, PoiseMeter};
 use engine_combat::exchange::{ExchangeEvent, ExchangeIntent, PhasedFighter};
 use engine_combat::fight::TABLES_V2;
 use engine_combat::fight::{
@@ -1081,6 +1082,11 @@ pub struct Sim {
     /// Per-slot stagger memory (EG46), stepped only under
     /// [`ArenaRules::balance`]; empty on snapshot and fork sims (v1 only).
     stagger: Vec<StaggerMemory>,
+    /// Combat-depth poise meters stepped beside the fight step: every hit
+    /// moves poise through [`DepthSet::observe`] and trips one stagger
+    /// through [`PoiseMeter::staggered`]. Presentation only, never hashed,
+    /// so V1 bouts replay byte-identical.
+    depth: DepthSet,
     /// Severed-limb pool (EG46b), stepped only under
     /// [`ArenaRules::balance`]; empty on snapshot and fork sims (v1 only).
     /// A cut reaches the authority through [`LimbPool::state_hash`].
@@ -1155,6 +1161,14 @@ impl Sim {
         } else {
             Vec::new()
         };
+        // Depth tables follow the match table version: V1 keeps poise
+        // damage 0 and never staggers, V2 uses the shipped poise rows.
+        let depth_tables = if config.table_version == TABLES_VERSION_V2 {
+            TABLES_V2
+        } else {
+            TABLES_V1
+        };
+        let depth = DepthSet::new(depth_tables, config.fighters);
         let mut sim = Self {
             config: *config,
             fighters,
@@ -1193,6 +1207,7 @@ impl Sim {
                 .map(|_| BalanceState::new(BalanceParams::default()))
                 .collect(),
             stagger: (0..fighters).map(|_| StaggerMemory::new()).collect(),
+            depth,
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
             #[cfg(test)]
             trace: None,
@@ -1384,6 +1399,16 @@ impl Sim {
         if self.rules.balance {
             self.feed_balance(&tick_events)?;
         }
+        // Combat-depth poise beside the fight step: route this tick's fight
+        // events into victim poise via `DepthSet::observe`, then advance the
+        // meters via `DepthSet::tick`. Presentation only, never hashed, so V1
+        // bouts replay byte-identical. V2 rows observe hits and chips; V1
+        // keeps poise damage 0 by skipping observe and never staggers.
+        // Caller: `Sim::step_with` (the fight-tick owner).
+        if self.rules.balance {
+            self.depth.observe(&tick_events);
+        }
+        self.depth.tick();
         // Production call-site over the landed resolvers: the match track
         // resolves beside the fight path only while `match_live` holds.
         // The track honors its version flag (V0 legacy intakes, V1 phased
@@ -1766,6 +1791,34 @@ impl Sim {
         self.balance.get(usize::from(slot))
     }
 
+    /// Read-only poise meter for `slot`: the [`PoiseMeter`] entry or `None`
+    /// for a bad slot. No copy, no lock. Presentation only; the digest path
+    /// never reads this, so the hash cannot move. V1 meters stay full (never
+    /// stagger); V2 meters drain on hits and chips via `DepthSet::observe`.
+    ///
+    /// Consumer: the window presentation reads the victim `staggered` trip
+    /// (see [`Sim::poise_staggered`]). Data owner: this crate owns the
+    /// per-slot [`DepthSet`]. Units: slot index. Determinism scope:
+    /// same-machine read of tick output, never hashed here.
+    #[must_use]
+    pub fn poise(&self, slot: u8) -> Option<&PoiseMeter> {
+        self.depth.poise(slot)
+    }
+
+    /// Victim `staggered` trip for presentation: true exactly while the
+    /// slot's [`PoiseMeter`] holds a stagger trip. Reads the wired
+    /// [`DepthSet`] stepped beside the fight step; never hashed, so V1
+    /// bouts replay byte-identical.
+    ///
+    /// Consumer: the window presentation (victim flash or pose hold).
+    /// Data owner: this crate owns the per-slot [`DepthSet`]. Units: slot
+    /// index. Determinism scope: same-machine read, never hashed here.
+    #[must_use]
+    pub fn poise_staggered(&self, slot: u8) -> bool {
+        self.poise(slot)
+            .is_some_and(|meter: &PoiseMeter| meter.staggered)
+    }
+
     /// Read-only press-tick attack cues from the last stepped tick (EG19b):
     /// one `AttackStarted` per fresh attack start in fighter-ID order under
     /// tables v2; empty under v1 rows, on quiet ticks and past the press
@@ -1918,6 +1971,12 @@ impl Sim {
             .position(|input| input.tick >= snapshot.tick)
             .unwrap_or(tape.0.len());
         let ticks = config.ticks as usize;
+        let depth_tables = if config.table_version == TABLES_VERSION_V2 {
+            TABLES_V2
+        } else {
+            TABLES_V1
+        };
+        let depth = DepthSet::new(depth_tables, config.fighters);
         Some(Sim {
             config: *config,
             fighters,
@@ -1954,6 +2013,7 @@ impl Sim {
             rules: ArenaRules::V1,
             balance: Vec::new(),
             stagger: Vec::new(),
+            depth,
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
             #[cfg(test)]
             trace: None,
