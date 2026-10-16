@@ -16,5 +16,6 @@ Tunable consts with no rows key; bounds stay consts, tables check inside them:
 - `MAX_ATTACK_STARTED_PER_TICK` = SLOT_COUNT (16 cues, hard bound, stays const).
 - `FIGHT_RULES_V1` = 1, `FIGHT_RULES_V2` = 2 (version tags, not tunable).
 
-All 16 `Tables` fields are data (see `content/design/combat.rows` when it lands); v1 stays frozen.
+All 16 `Tables` fields are data (see `content/design/combat.rows`); v1 stays frozen.
+- [des-rows-combat]: `content/design/combat.rows` ships v1 plus v2 copies; `crates/combat/src/tables_text.rs` parses them into `SwapInput` (unknown/missing keys refused, ranges are `validate_tables`).
 - [des-rows-doc]: `FORMAT.md` is the finished rows page (layout, units, legal ranges, worked v2 example); `content/design/` files follow it.
