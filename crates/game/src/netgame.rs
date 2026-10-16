@@ -32,6 +32,7 @@
 //! every datagram carry [`WIRE_VERSION`](engine_net::session::WIRE_VERSION);
 //! anything else is refused before anything is applied.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
@@ -42,9 +43,9 @@ use engine_core::fixed::Fixed;
 use engine_input::{FighterId, FighterInput};
 use engine_net::session::{
     decode_input, decode_snapshot, decode_state, encode_input, encode_state, redundancy_window,
-    Client, FighterSnap, FrameHead, FullSnap, InterpFrame, InterpResult, NetError, RemoteView,
-    Server, SnapshotDelta, StatePacket, KIND_INPUT, KIND_SNAPSHOT, KIND_STATE, MAX_PACKET_BYTES,
-    REDUNDANCY, WIRE_MAGIC, WIRE_VERSION,
+    Client, FullSnap, InterpFrame, InterpResult, NetError, RemoteView, Server, SnapshotDelta,
+    StatePacket, KIND_INPUT, KIND_SNAPSHOT, KIND_STATE, MAX_PACKET_BYTES, REDUNDANCY, WIRE_MAGIC,
+    WIRE_VERSION,
 };
 
 use super::{App, GameConfig, GameError, TickOutcome};
@@ -251,7 +252,7 @@ pub struct NetGame {
     /// Host: authoritative tape (both human slots) backing state windows.
     tape: Vec<FighterInput>,
     /// Guest: server-truth inputs merged from state windows.
-    truth: HashMap<(u32, u8), FighterInput>,
+    truth: BTreeMap<(u32, u8), FighterInput>,
     /// Guest: authoritative checkpoints by tick.
     truth_cps: HashMap<u32, Checkpoint>,
     /// Guest remote-presentation view (net type, reused): the frozen tick-clock
@@ -357,7 +358,7 @@ impl NetGame {
                 outbound: Vec::new(),
                 local_history: Vec::new(),
                 tape: Vec::new(),
-                truth: HashMap::new(),
+                truth: BTreeMap::new(),
                 truth_cps: HashMap::new(),
                 view: RemoteView::new(REMOTE_VIEW_DELAY_TICKS, REMOTE_CURSOR_DELAY_TICKS),
                 last_state_bytes: None,
@@ -389,7 +390,7 @@ impl NetGame {
             outbound: Vec::new(),
             local_history: Vec::new(),
             tape: Vec::new(),
-            truth: HashMap::new(),
+            truth: BTreeMap::new(),
             truth_cps: HashMap::new(),
             view: RemoteView::new(REMOTE_VIEW_DELAY_TICKS, REMOTE_CURSOR_DELAY_TICKS),
             last_state_bytes: None,
@@ -420,6 +421,12 @@ impl NetGame {
     #[must_use]
     pub fn app(&self) -> &App {
         &self.app
+    }
+
+    /// Host tape for tests: authoritative inputs in `(tick, fighter)` order.
+    #[cfg(test)]
+    fn tape_for_test(&self) -> &[FighterInput] {
+        &self.tape
     }
 
     /// Session configuration (bound by the invitation code on guests).
@@ -486,16 +493,6 @@ impl NetGame {
     /// only: never hashed.
     pub fn remote_frame(&mut self, alpha: Fixed) -> Option<InterpFrame> {
         self.view.present(alpha)
-    }
-
-    /// [`NetGame::remote_frame`] into a caller buffer: the per-frame path,
-    /// allocation-free once the buffer holds the slot count.
-    pub fn remote_frame_into(
-        &mut self,
-        alpha: Fixed,
-        out: &mut Vec<FighterSnap>,
-    ) -> Option<FrameHead> {
-        self.view.frame_into(alpha, out)
     }
 
     /// Last state bytes the host emitted (harness final retransmit).
@@ -624,8 +621,17 @@ impl NetGame {
                 return self.app.tick(spoof_invalid(stamped, self.remote_slot));
             }
         }
-        self.tape.extend_from_slice(&inputs);
-        self.tape.sort_by_key(|known| (known.tick, known.fighter.0));
+        // Keep `(tick, fighter)` order without re-sorting the ever-growing
+        // tape: each staged input lands at its `partition_point`, the same
+        // pattern as `App::stage_input` in `lib.rs`. Order holds for the
+        // two-inputs-same-tick LAN case either way inputs arrive.
+        for staged in &inputs {
+            let key = (staged.tick, staged.fighter.0);
+            let index = self
+                .tape
+                .partition_point(|known| (known.tick, known.fighter.0) <= key);
+            self.tape.insert(index, *staged);
+        }
         pending.retain(|(tick, _), _| *tick > cursor);
         let outcome = self.app.tick(stamped);
         debug_assert!(outcome.input_accepted);
@@ -799,14 +805,14 @@ impl NetGame {
             self.truth.insert((input.tick, input.fighter.get()), *input);
         }
         self.truth_cps.insert(checkpoint.tick, checkpoint);
-        let mut tape: Vec<FighterInput> = self
+        // `truth` is a `BTreeMap`, so the range walk is already
+        // `(tick, fighter)`-ordered: no filter-plus-sort plus dead dedup
+        // (keys are unique, the `(tick, fighter)` dedup could never fire).
+        let tape: Vec<FighterInput> = self
             .truth
-            .iter()
-            .filter(|((tick, _), _)| *tick <= checkpoint.tick)
+            .range(..=(checkpoint.tick, u8::MAX))
             .map(|(_, input)| *input)
             .collect();
-        tape.sort_by_key(|input| (input.tick, input.fighter.0));
-        tape.dedup_by_key(|input| (input.tick, input.fighter.0));
         let delta = SnapshotDelta {
             version: WIRE_VERSION,
             tick: checkpoint.tick,
@@ -1107,6 +1113,34 @@ mod tests {
             decode_session_code(&older),
             Err(GameError::Net(NetError::VersionMismatch { got: 0 }))
         );
+    }
+
+    #[test]
+    fn host_tape_keeps_tick_fighter_order_for_same_tick_inputs() {
+        // The LAN tick stages two inputs for the same tick (local slot 0
+        // plus staged remote slot 1): the tape must stay
+        // `(tick, fighter)`-ordered so state windows encode identically.
+        let (_code, mut host) = NetGame::host(small_config()).unwrap();
+        for tick in 0..4 {
+            host.stage_inputs(&[guest_input(tick)]).unwrap();
+            assert!(host.tick_local(host_input(tick)).input_accepted);
+        }
+        let mut last: Option<(u32, u8)> = None;
+        for input in host.tape_for_test().iter() {
+            let key = (input.tick, input.fighter.0);
+            if let Some(prev) = last {
+                assert!(prev <= key, "tape out of order: {prev:?} then {key:?}");
+            }
+            last = Some(key);
+        }
+        // Same-tick pair lands fighter-ordered (slot 0 before slot 1).
+        let tick0: Vec<u8> = host
+            .tape_for_test()
+            .iter()
+            .filter(|input| input.tick == 0)
+            .map(|input| input.fighter.0)
+            .collect();
+        assert_eq!(tick0, vec![0, 1], "same-tick pair must be fighter-ordered");
     }
 
     #[test]

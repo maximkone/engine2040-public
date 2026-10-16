@@ -7,7 +7,10 @@ use engine_audio::CueBank;
 use super::*;
 
 /// Watch content files plus shaders by file; missing roots watch nothing,
-/// notes still stage.
+/// notes still stage. The designer combat rows file rides explicitly via
+/// the practice path const: the `content` scan only sees top-level files
+/// and skips the `design` dir as non-file, so without this a designer
+/// number edit never raises an event and the practice swap never stages.
 pub(super) fn watch_content_roots() -> Watcher {
     let mut watcher = Watcher::new();
     for root in ["content", "crates/render/src/shaders"] {
@@ -25,6 +28,10 @@ pub(super) fn watch_content_roots() -> Watcher {
             watcher.watch(text, WatchSettings::default());
         }
     }
+    watcher.watch(
+        engine_game::practice::DESIGN_COMBAT_ROWS_PATH,
+        WatchSettings::default(),
+    );
     watcher
 }
 

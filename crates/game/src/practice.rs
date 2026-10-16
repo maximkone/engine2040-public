@@ -100,6 +100,21 @@ impl PracticeSwap {
     }
 }
 
+/// Designer combat rows file practice reload watches, from the repo root:
+/// `content/design/combat.rows`. The window watcher stages this path and
+/// the tick boundary cooks its text; designers edit numbers here, no Rust
+/// edit. Caller: `crates/game/src/bin/arena_frame/mod.rs`
+/// (`watch_content_roots` watches it explicitly because the top-level
+/// `content` scan skips the `design` dir as non-file).
+pub const DESIGN_COMBAT_ROWS_PATH: &str = "content/design/combat.rows";
+
+/// True when a watcher event path names the designer combat rows file.
+/// Pure over the path, so temp copies in tests match too.
+#[must_use]
+pub fn is_design_combat_rows(path: &str) -> bool {
+    path.contains("combat.rows")
+}
+
 /// Cook staged combat-rows text: validate via `engine-combat`, refuse bad
 /// rows, else hash validated text. Cold path only, never tick.
 ///
@@ -246,5 +261,19 @@ mod tests {
         assert_eq!(first_hash, second_hash);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&bad_path);
+    }
+
+    #[test]
+    fn design_rows_path_names_the_shipped_file_and_parses() {
+        assert_eq!(DESIGN_COMBAT_ROWS_PATH, "content/design/combat.rows");
+        assert!(is_design_combat_rows(DESIGN_COMBAT_ROWS_PATH));
+        assert!(is_design_combat_rows("content/design/combat.rows"));
+        assert!(!is_design_combat_rows("content/kit.json"));
+        let text = include_str!("../../../content/design/combat.rows");
+        let swap = engine_combat::tables_text::parse_tables(text).expect("shipped rows parse");
+        assert_eq!(swap.version(), 2);
+        assert_eq!(swap.tables(), engine_combat::TABLES_V2);
+        let gen = cook_combat_rows(text).expect("shipped rows cook");
+        assert_eq!(gen, engine_core::hash_bytes(text.as_bytes()));
     }
 }

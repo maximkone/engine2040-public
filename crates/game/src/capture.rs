@@ -94,8 +94,8 @@ impl core::fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
-/// Bound a diagnostic so errors stay small and printable.
-pub(crate) fn cap_message(msg: &str) -> String {
+/// Bound a diagnostic so errors stay small and printable (single owner; `windowed` re-exports it).
+pub fn cap_message(msg: &str) -> String {
     const MAX: usize = 256;
     let out: String = msg.chars().take(MAX).collect();
     if out.len() < msg.len() {

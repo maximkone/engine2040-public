@@ -885,6 +885,43 @@ pub(crate) mod capture {
         }
     }
 
+    /// Cached kit triples for `frame_list`: the kit glTF import parsed once per
+    /// process and reused on every frame. Stores the unfiltered
+    /// `(key, material, texture)` per baked actor; each call filters `texture`
+    /// against the presenter's resident set, so residency still decides the
+    /// `None` lanes per frame. Same triples as a fresh `import_kit` for the
+    /// same content dir (the dir is stable per process, resolved from the exe
+    /// layout). A refused import fails loudly and caches nothing, so the next
+    /// frame retries. No GPU upload here; init already uploaded.
+    ///
+    /// Caller: `frame_list` (same file) keeps the twin kit bind live without
+    /// re-parsing the ~45 MB kit on every frame.
+    fn cached_kit_source(
+    ) -> Result<&'static [(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)], WinError>
+    {
+        static CACHE: std::sync::OnceLock<
+            Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)>,
+        > = std::sync::OnceLock::new();
+        if let Some(cached) = CACHE.get() {
+            return Ok(cached.as_slice());
+        }
+        let imported =
+            engine_game::arena_kit::import_kit(&engine_game::arena_kit::kit_content_dir())
+                .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
+        let triples: Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)> = imported
+            .baked
+            .iter()
+            .map(|baked| (baked.key, baked.material.clone(), baked.texture))
+            .collect();
+        // First-frame race from two threads keeps the winner: both triples
+        // come from the same content dir, so either copy reads identical.
+        let _ = CACHE.set(triples);
+        CACHE
+            .get()
+            .map(Vec::as_slice)
+            .ok_or_else(|| WinError::Render("kit cache missing after init".to_string()))
+    }
+
     /// One-frame draw list for the twin: the HUD clear-only list plus one lit
     /// cube draw when the mesh is resident (proves the forward pass; the HUD
     /// text/quads ride the frame receipt) plus the dressing boxes staged
@@ -922,25 +959,22 @@ pub(crate) mod capture {
         engine_render::twin_fighters::push_twin_fighters(&mut list, &resident)
             .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
         // Arena kit for the window twin (RL21 slice 1): textured cube-swap when
-        // resident, cube stays on miss. Imported once per call (CPU only, no GPU
-        // upload here; the window/headless init already uploaded); a refused
-        // import fails loudly, never a fake frame. `None` lanes draw untextured.
+        // resident, cube stays on miss. Triples come from the once-per-process
+        // cache (CPU only, no GPU upload here; the window/headless init
+        // already uploaded); a refused import fails loudly, never a fake
+        // frame. `None` lanes draw untextured.
         let tex_resident = presenter.texture_keys();
-        let imported =
-            engine_game::arena_kit::import_kit(&engine_game::arena_kit::kit_content_dir())
-                .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
-        let kit_binds: Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)> =
-            imported
-                .baked
-                .iter()
-                .map(|baked| {
-                    (
-                        baked.key,
-                        baked.material.clone(),
-                        baked.texture.filter(|key| tex_resident.contains(key)),
-                    )
-                })
-                .collect();
+        let source = cached_kit_source()?;
+        let kit_binds: Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)> = source
+            .iter()
+            .map(|(key, material, texture)| {
+                (
+                    *key,
+                    material.clone(),
+                    texture.filter(|key| tex_resident.contains(key)),
+                )
+            })
+            .collect();
         engine_render::twin_arena::push_twin_arena_textured(&mut list, &resident, &kit_binds)
             .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
         Ok(list)

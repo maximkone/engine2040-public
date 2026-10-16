@@ -1,6 +1,7 @@
-//! eight_fight: the FC3 8-fighter 30 fps gate shape.
+//! eight_fight: the 8-fighter 30 fps gate shape.
 //!
-//! Consumer: the FC3 quiet perf run (windowed arena, 8 fighters, 1080p).
+//! Status: retired, no production caller (only the `lib.rs` export plus
+//! unit tests); the perf crate mirrors these bars without importing them.
 //! Data owner: this module owns the gate numbers only (fighter count plus
 //! frame ceilings); `engine-render` owns the passes that spend the budget.
 //! Units: whole microseconds (`u64`), integer math only, no wall clock.
@@ -9,7 +10,7 @@
 //!
 //! Std-only. Nothing here enters the sim hash (presentation gate only).
 
-/// Fighters in the FC3 windowed arena run.
+/// Fighters in the retired 8-fighter windowed arena gate run.
 pub const EIGHT_FIGHTERS: u8 = 8;
 
 /// Frame p50 ceiling: 33.3 ms at 30 fps, in microseconds.
@@ -73,7 +74,7 @@ impl core::fmt::Display for EightFightError {
 
 impl std::error::Error for EightFightError {}
 
-/// One FC3 gate session: the windowed arena run with 8 fighters.
+/// One retired gate session: the windowed arena run with 8 fighters.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct EightFightConfig {
     /// Arena seed (same seed twice gives the same run).

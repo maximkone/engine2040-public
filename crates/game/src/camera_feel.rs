@@ -1,13 +1,15 @@
 //! camera_feel: flax-style follow rig plus rate-independent damping.
 //!
-//! Consumer: `camera_feed` feed (next row wires the call).
-//! Caller: `crates/game/src/lib.rs` (declares `pub mod camera_feel`).
+//! Status: retired, no production caller (only the `lib.rs` export plus
+//! unit tests; the presentation feed does not call it).
 //! Owner: this module owns feel tick state, nothing else.
 //! Units: meters, seconds, fixed ticks; trauma `0..=1000`.
 //! Determinism: tick is integer `+ - *` only, replays twice;
 //! present floats never feed sim state, golden unchanged.
 //! Errors: [`CameraError`] at every boundary, never panics.
 //! Budget: zero heap bytes per tick or frame.
+//! Canonical owners elsewhere: follow is `camera::frame_pair`, shake is
+//! `camera::shake_offset`, damping is `camera_rig::damper_blend`.
 //! PORT(maximkone/flax-mcp@a26f960:plugins/gameplay/GameSide/
 //! Game.Shared.Camera/Feel{CameraRig,Damping,Impulse,Transition}*.cs),
 //! MIT; clean-room integer plus presentation rewrite, no vendor bytes.

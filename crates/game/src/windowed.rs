@@ -89,8 +89,6 @@ pub const SMOKE_FRAME_SIZE: (u32, u32) = (128, 96);
 /// a hung smoke fails itself loudly within minutes instead of burning a core
 /// for hours. Overridable per run with `--deadline-ms`.
 pub const SMOKE_WALL_LIMIT_MS: u32 = 300_000;
-/// Cap for display/audio backend messages carried in errors and notices.
-pub const MAX_BACKEND_MSG: usize = 256;
 
 /// Windowed failures: bounded diagnostics, never panics. Audio loss is not an
 /// error: opening the device returns a notice string and the headless mixer
@@ -146,14 +144,10 @@ impl From<PresentError> for WinError {
 }
 
 /// Bound a backend message so errors and notices stay small and printable.
-pub fn cap_message(msg: &str) -> String {
-    let out: String = msg.chars().take(MAX_BACKEND_MSG).collect();
-    if out.len() < msg.len() {
-        format!("{out}...")
-    } else {
-        out
-    }
-}
+///
+/// Re-export of the single owner [`crate::capture::cap_message`] so
+/// `app`-leg callers keep their path with no second body.
+pub use crate::capture::cap_message;
 
 /// Canonical capture scene id the review path can select (the sand arena).
 pub const ARENA_SCENE_ID: &str = "arena";

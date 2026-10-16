@@ -6,8 +6,8 @@
 //! Determinism: table-order loops only, no wall clock, slices in plus copied
 //! frames out, same inputs give same bytes twice. Errors: [`StackError`] on
 //! empty, full or dead tables. Budget: O(shots) time, zero heap bytes per
-//! call. Consumer: the window feed blends [`CameraFrame`] values through it,
-//! presentation only, never simulation state.
+//! call. Status: retired, no production caller (only unit tests plus the
+//! integration test call it); presentation only, never simulation state.
 // PORT(ramokz/phantom-camera@21d3762492e2dc51b448f55438b89b3c19349f96:addons/phantom_camera/scripts/phantom_camera_host/phantom_camera_host.gd — host highest-wins plus tweened handoff, reimplemented integer-tick, zero bytes vendored)
 
 use super::camera::{CameraFrame, Vec3, TRAUMA_SCALE};
