@@ -53,7 +53,7 @@ fn end(b: &[u8], s: usize, d: u32) -> Result<usize, ExtrasError> {
     let mut p = s;
     ws(b, &mut p);
     match b.get(p) {
-        Some(b'{') | Some(b'[') => {
+        Some(b'{' | b'[') => {
             let o = b[p];
             let c = if o == b'{' { b'}' } else { b']' };
             let mut n = 0usize;

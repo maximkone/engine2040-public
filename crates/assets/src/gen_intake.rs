@@ -741,9 +741,17 @@ impl IntakeCache {
             });
         }
         let dir = self.dir.as_ref()?;
-        let meta = std::fs::read_to_string(dir.join(format!("{key}.meta"))).ok()?;
-        let bundle = std::fs::read(dir.join(format!("{key}.bundle"))).ok()?;
-        let row = std::fs::read_to_string(dir.join(format!("{key}.row.json"))).ok()?;
+        // One base join per `get`; the key is hex so `set_extension` appends.
+        let base = dir.join(key);
+        let mut meta_path = base.clone();
+        meta_path.set_extension("meta");
+        let meta = std::fs::read_to_string(&meta_path).ok()?;
+        let mut bundle_path = base.clone();
+        bundle_path.set_extension("bundle");
+        let bundle = std::fs::read(&bundle_path).ok()?;
+        let mut row_path = base;
+        row_path.set_extension("row.json");
+        let row = std::fs::read_to_string(&row_path).ok()?;
         parse_meta(&meta, key, bundle, row)
     }
 
@@ -755,10 +763,19 @@ impl IntakeCache {
 
     fn put(&mut self, out: &IntakeOutput) -> Result<(), IntakeError> {
         if let Some(dir) = &self.dir {
-            let key = &out.cache_key;
-            std::fs::write(dir.join(format!("{key}.bundle")), &out.bundle).map_err(cache_err)?;
-            std::fs::write(dir.join(format!("{key}.row.json")), &out.row).map_err(cache_err)?;
-            std::fs::write(dir.join(format!("{key}.meta")), meta_text(out)).map_err(cache_err)?;
+            // Disk holds the bundle; skip `mem` so `put` copies no bytes.
+            // One base join; the key is hex so `set_extension` appends.
+            let base = dir.join(&out.cache_key);
+            let mut bundle_path = base.clone();
+            bundle_path.set_extension("bundle");
+            std::fs::write(&bundle_path, &out.bundle).map_err(cache_err)?;
+            let mut row_path = base.clone();
+            row_path.set_extension("row.json");
+            std::fs::write(&row_path, &out.row).map_err(cache_err)?;
+            let mut meta_path = base;
+            meta_path.set_extension("meta");
+            std::fs::write(&meta_path, meta_text(out)).map_err(cache_err)?;
+            return Ok(());
         }
         self.mem.insert(out.cache_key.clone(), out.clone());
         Ok(())

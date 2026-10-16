@@ -568,7 +568,6 @@ impl<S: SimTick> P2pSession<S> {
                 return Err(RollbackError::TooFar { frame, oldest });
             }
         }
-        let _ = self.input_at(frame);
         self.confirm_frame(frame, remote)
     }
 

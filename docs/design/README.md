@@ -4,6 +4,17 @@ Notes about what the player sees and feels.
 
 - [PLAYTEST.md](PLAYTEST.md): newcomer sessions, script, survey, funnel, bug grades.
 - [FORMAT.md](FORMAT.md): rows text format designers edit (des-rows-doc).
+- [CONCEPT.md](CONCEPT.md): game concept and pillars.
+- [CORE-LOOP.md](CORE-LOOP.md): core loop and progression.
+- [ENEMIES.md](ENEMIES.md): enemy archetypes and encounters.
+- [HUD.md](HUD.md): HUD layout and overlays.
+- [LEVELS.md](LEVELS.md): level flow and arenas.
+- [SLICE.md](SLICE.md): vertical slice scope.
+- [STAGES.md](STAGES.md): stage gates and delivery stages.
+- [LEDGER.md](LEDGER.md): design decision ledger.
+- [balance-log.md](balance-log.md): balance change log.
+- [burndown.tsv](burndown.tsv): burndown data (planner-producer-r355 owns it).
+- [matchups.csv](matchups.csv): matchup table data.
 
 ## not data yet (crates/combat/src/fight.rs)
 

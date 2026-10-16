@@ -19,7 +19,7 @@
 
 use super::MAX_SLOTS;
 use super::{canon_zero, event_bytes, ArenaConfig, Checkpoint, MatchSnapshot};
-use engine_anim::locomotion::LocoState;
+use engine_anim::motion_net::state_code;
 use engine_core::Fnv64;
 use engine_destruction::bonded::event_bytes as break_bytes;
 use engine_input::{FighterInput, FighterTape};
@@ -395,17 +395,7 @@ fn append_combat(sim: &super::Sim, out: &mut Vec<u8>) {
 /// Brain-driven motion bytes: locomotion state per slot.
 fn append_ai(sim: &super::Sim, out: &mut Vec<u8>) {
     for loco in sim.locos.iter().take(sim.fighters) {
-        let disc: u8 = match loco.state {
-            LocoState::Idle => 0,
-            LocoState::Walk => 1,
-            LocoState::Run => 2,
-            LocoState::Strafe => 3,
-            LocoState::Start => 4,
-            LocoState::Stop => 5,
-            LocoState::Pivot => 6,
-            LocoState::Air => 7,
-            LocoState::Land => 8,
-        };
+        let disc = u8::try_from(state_code(loco.state)).unwrap_or(u8::MAX);
         out.push(disc);
         for axis in [loco.phase(), loco.facing()[0], loco.facing()[1]] {
             out.extend_from_slice(&canon_zero(axis).to_bits().to_le_bytes());

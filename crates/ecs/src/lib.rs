@@ -99,7 +99,7 @@ impl World {
             }
         }
     }
-    /// deterministic state hash (quantized via raw bits)
+    /// deterministic state hash (raw f32 bits, no quantization)
     pub fn state_hash(&self) -> u64 {
         let mut h = Fnv64::new();
         for i in 0..self.alive.len() {

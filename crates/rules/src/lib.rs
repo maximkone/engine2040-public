@@ -148,7 +148,6 @@ mod wiring_tests {
     #[test]
     fn script_hash_and_abi_stable_via_root() {
         let source = "damage(1, 10);\n";
-        assert_eq!(script_hash(source), script_hash(source), "hash repeats");
         assert_eq!(
             script_hash("damage(1, 10);\r\n"),
             script_hash(source),
@@ -160,7 +159,6 @@ mod wiring_tests {
             "edit moves hash via root"
         );
         let limits = Limits::DEFAULT;
-        assert_eq!(rules_abi(&limits), rules_abi(&limits), "ABI repeats");
         let mut wider = limits;
         wider.max_ops += 1;
         assert_ne!(

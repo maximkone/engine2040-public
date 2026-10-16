@@ -1,4 +1,5 @@
 //! scatter: seeded Poisson-disk points for bake-time scatter.
+//! Board: WD15 (open: staged arena-ground bake, base -> wear -> scatter).
 //! Owner: `engine-world`; bake-time only, never the tick or the hash.
 //! Units: meters in (`w`, `h`, `min_dist`), `[x, y]` meters out.
 //! Determinism: same `(seed, recipe, w, h, min_dist)` gives identical bytes.

@@ -92,24 +92,30 @@ pub const POISE_REGEN_DELAY_TICKS_V2: u32 = 30;
 
 /// V2 freeze ticks for one light hit, at 60 Hz.
 ///
-/// Consumer: [`hitstop_for_kind`](crate::fight::hitstop_for_kind) into the
-/// hit branch (light arm wired; heavy needs kind tracking, remainder).
-/// Units: ticks. A light taps (3), so weight reads in the freeze. V1 keeps
-/// its single [`HITSTOP_TICKS`](crate::fight::HITSTOP_TICKS).
+/// Consumer: [`for_kind`](crate::hitstop_kind::for_kind) via
+/// [`for_impact`](crate::hitstop_kind::for_impact) into
+/// [`hitstop_for_impact`](crate::fight::hitstop_for_impact) and the hit
+/// branch of the live step. Units: ticks. A light taps (3), so weight reads
+/// in the freeze. V1 keeps its single
+/// [`HITSTOP_TICKS`](crate::fight::HITSTOP_TICKS).
 pub const LIGHT_HITSTOP_TICKS_V2: u32 = 3;
 
 /// V2 freeze ticks for one heavy hit, at 60 Hz.
 ///
-/// Consumer and units match [`LIGHT_HITSTOP_TICKS_V2`]. Heavy (6) freezes
-/// twice the light, so weight reads. Tested via the helper; the step still
-/// uses the light arm until fighter state carries kind (remainder).
+/// Consumer: [`for_kind`](crate::hitstop_kind::for_kind) via
+/// [`for_impact`](crate::hitstop_kind::for_impact) into
+/// [`hitstop_for_impact`](crate::fight::hitstop_for_impact); the live step
+/// reads the strike kind from `FighterState::attack_kind`. Units: ticks.
+/// Heavy (6) freezes twice the light, so weight reads.
 pub const HEAVY_HITSTOP_TICKS_V2: u32 = 6;
 
 /// V2 freeze ticks for one parry, at 60 Hz.
 ///
-/// Consumer: [`hitstop_for_parry`](crate::fight::hitstop_for_parry) into the
-/// parry branch. Units: ticks. Parry (8) freezes longest, so the answer
-/// reads. V1 keeps its single row.
+/// Consumer: [`for_parry`](crate::hitstop_kind::for_parry) via
+/// [`for_impact`](crate::hitstop_kind::for_impact) into
+/// [`hitstop_for_impact`](crate::fight::hitstop_for_impact) and the parry
+/// branch of the live step. Units: ticks. Parry (8) freezes longest, so the
+/// answer reads. V1 keeps its single row.
 pub const PARRY_HITSTOP_TICKS_V2: u32 = 8;
 
 /// Readable-timing row: [`TABLES_V1`] with a slower light-attack startup
@@ -166,8 +172,9 @@ impl MoveTableSet {
     }
 
     /// The readable-timing rules as version 2: [`v2_rows`] under
-    /// [`TABLES_VERSION_V2`]. Validates under [`validate_tables`]; the live
-    /// step still runs V1, the next slice wires the caller.
+    /// [`TABLES_VERSION_V2`]. Validates under [`validate_tables`]; the arena
+    /// steps this row through [`crate::fight::try_step_v2_into`] and
+    /// [`crate::fight::try_step_v2_with_cues_into`].
     pub const fn v2() -> Self {
         Self {
             version: TABLES_VERSION_V2,

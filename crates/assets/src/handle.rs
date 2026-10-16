@@ -1,8 +1,8 @@
 //! handle: generational asset handles plus load states over the stream queue.
 //!
-//! Owner: `engine-assets`; consumer: the game kit import plus cook pipeline
-//! stages one handle per kit file, then reads ready payloads at init.
-//! Caller: `crates/game/src/arena_kit.rs`.
+//! Owner: `engine-assets`; planned, no caller yet (verified 2026-10-16):
+//! the game kit import plus cook pipeline will stage one handle per kit file,
+//! then read ready payloads at init. Planned caller: `crates/game/src/arena_kit.rs`.
 //! Units: bytes for payload budgets, counts for caps. Determinism: index
 //! order iteration, `BTreeMap` key index, `engine_core::hash_bytes` keys;
 //! no wall clock, no floats. Errors: typed [`HandleError`], never panics.

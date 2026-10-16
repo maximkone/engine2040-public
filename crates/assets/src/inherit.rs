@@ -99,7 +99,11 @@ pub fn resolve(defs: &[Def]) -> Result<Vec<Resolved>, InheritError> {
         order.push(id);
         if let Some(ks) = kids.get(id) {
             for k in ks {
-                let e = indeg.get_mut(k).unwrap();
+                let Some(e) = indeg.get_mut(k) else {
+                    return Err(InheritError::Cycle {
+                        at: (*k).to_string(),
+                    });
+                };
                 *e -= 1;
                 if *e == 0 {
                     ready.insert(k);

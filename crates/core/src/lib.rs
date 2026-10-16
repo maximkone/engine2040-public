@@ -21,8 +21,6 @@ pub mod seal_key;
 pub mod tick;
 pub mod time;
 pub mod vec3;
-/// Off by default; Fixed stays the default sim math.
-pub const DET_MATH_ENABLED: bool = false;
 // One stream type crate-wide; a second same-named type let callers diverge silently.
 pub use counter_rng::{CounterCursor, CounterRng};
 // One hash owner: every crate imports these instead of re-deriving FNV or SplitMix.

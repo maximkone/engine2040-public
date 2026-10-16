@@ -92,12 +92,6 @@ impl Fnv64 {
         self.write_u32(value.to_bits());
     }
 
-    /// Mix an `f64` by its bit pattern.
-    #[inline]
-    pub fn write_f64(&mut self, value: f64) {
-        self.write_u64(value.to_bits());
-    }
-
     /// Mix a `bool` as one byte (0 or 1).
     #[inline]
     pub fn write_bool(&mut self, value: bool) {

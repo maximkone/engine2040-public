@@ -111,11 +111,6 @@ impl Crosshair {
     pub const fn spread_px(self) -> u8 {
         self.spread_px
     }
-
-    /// Replace the spread; over-bound values clamp. Pure.
-    pub fn set_spread(&mut self, spread_px: u8) {
-        self.spread_px = spread_px.min(MAX_SPREAD_PX);
-    }
 }
 
 /// Per-frame play HUD snapshot: the fighter-you arrow, button echo, ammo,

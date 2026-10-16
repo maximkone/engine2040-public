@@ -154,6 +154,8 @@ pub(crate) fn xyz_hit(a: &Box3, b: &Box3) -> bool {
 
 /// Uniform-grid XYZ broadphase: strict volume pairs, sorted + deduped.
 /// Catches stacked volumes the XZ sweep misses; XZ sweep stays the 2D path.
+/// Each axis span clamps to 64 cells past its start, so degenerate giants
+/// cover at most 65 cells per axis instead of blowing the grid.
 pub fn xyz_pairs(actors: &[Actor]) -> Vec<(u32, u32)> {
     let boxes = boxes_of(actors);
     let mut cells: std::collections::BTreeMap<(i32, i32, i32), Vec<usize>> =
@@ -220,43 +222,35 @@ pub fn swept_rect(r: &CmRect, vx_cm: i32, vz_cm: i32) -> CmRect {
 /// Returns (lo_id, hi_id, swept_inter). Sorted, deterministic.
 pub fn sweep_pairs(actors: &[Actor], horizon_ticks: i32) -> Vec<(u32, u32, i64)> {
     let rects = build_rects(actors);
-    let vel_of = |id: u32| -> (i32, i32) {
-        actors
-            .iter()
-            .find(|a| a.id == id)
-            .map(|a| {
-                if a.vx.is_finite() && a.vz.is_finite() {
-                    (
-                        (i64::from(to_cm(a.vx)) * i64::from(horizon_ticks) / 60) as i32,
-                        (i64::from(to_cm(a.vz)) * i64::from(horizon_ticks) / 60) as i32,
-                    )
-                } else {
-                    (0, 0)
-                }
-            })
-            .unwrap_or((0, 0))
-    };
-    let swept: Vec<CmRect> = rects
+    let mut vel: std::collections::BTreeMap<u32, (i32, i32)> = std::collections::BTreeMap::new();
+    for a in actors {
+        let v = if a.vx.is_finite() && a.vz.is_finite() {
+            (
+                clamp_to_i32(i64::from(to_cm(a.vx)) * i64::from(horizon_ticks) / 60),
+                clamp_to_i32(i64::from(to_cm(a.vz)) * i64::from(horizon_ticks) / 60),
+            )
+        } else {
+            (0, 0)
+        };
+        vel.entry(a.id).or_insert(v);
+    }
+    let mut swept: Vec<CmRect> = rects
         .iter()
         .map(|r| {
-            let (vx, vz) = vel_of(r.id);
+            let (vx, vz) = vel.get(&r.id).copied().unwrap_or((0, 0));
             swept_rect(r, vx, vz)
         })
         .collect();
-    let mut swept_sorted = swept.clone();
-    swept_sorted.sort_by_key(|r| (r.min_x, r.min_z, r.id));
+    swept.sort_by_key(|r| (r.min_x, r.min_z, r.id));
     let static_pairs: std::collections::BTreeSet<(u32, u32)> = overlap_pairs(&rects)
         .into_iter()
         .map(|(a, b, _)| (a, b))
         .collect();
-    let area_of: std::collections::BTreeMap<u32, i64> =
-        swept.iter().map(|r| (r.id, r.area)).collect();
     let mut out: Vec<(u32, u32, i64)> = Vec::new();
-    for (lo, hi, inter) in overlap_pairs(&swept_sorted) {
+    for (lo, hi, inter) in overlap_pairs(&swept) {
         if static_pairs.contains(&(lo, hi)) {
             continue;
         }
-        let _ = area_of.get(&lo);
         out.push((lo, hi, inter));
     }
     out.sort_unstable();

@@ -235,17 +235,10 @@ impl ContractCore {
                 Some(self.fail(request, AiError::Timeout, JobState::Done, false))
             }
             MockStep::Malformed => {
-                let bad = Proposal {
-                    request: request.id,
-                    base_revision: request.base_revision,
-                    actions: vec![ProposalAction::Noop; MAX_ACTIONS + 1],
-                    object_versions: Vec::new(),
-                    diagnostics: Vec::new(),
-                };
-                // The scripted bad proposal must actually be invalid, else
-                // the fixture lies about what it covers.
-                debug_assert!(validate_proposal(&bad).is_err());
-                let _ = bad;
+                // No fixture is built here: the invalid shape (`MAX_ACTIONS + 1`
+                // actions) is built and asserted in the mock/suite malformed
+                // tests, so this path only records the failure and allocates
+                // nothing.
                 Some(self.fail(request, AiError::MalformedOutput, JobState::Done, false))
             }
             MockStep::Cancelled => {

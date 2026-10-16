@@ -1,9 +1,11 @@
 //! Packaged smoke: the quick pass-path check for the frame-time gate.
-//! Consumer: CI and the perf report print [`SmokeReport::summary`].
+//! Status: test-only (no production caller reads [`SmokeReport::summary`]
+//! yet; exercised by the unit tests in this file and the wiring vectors).
+//! Tracked by EG41 (packaged smoke/soak/frame-time gate); ranking and the
+//! P2 bar stay in `latency` (`summarize_live`, `check_p2_bar`) — this module
+//! only feeds it packaged samples, never re-ranks or re-bars.
 //! Units: milliseconds. Determinism: seeded samples, so the same seed gives
 //! the same report on every machine (no wall clock, no GPU).
-//! Gate: the one home is `latency::check_p2_bar` (p95 at or under 50 ms);
-//! this module only feeds it packaged samples, never re-ranks or re-bars.
 //! Errors: reuses [`LatencyError`](crate::latency::LatencyError).
 
 use crate::latency::{self, LatencyError, LatencyReport};

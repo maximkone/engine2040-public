@@ -1170,13 +1170,12 @@ fn seg_crosses_box(p1: (i64, i64), p2: (i64, i64), b: &Box3) -> bool {
     false
 }
 
-/// Middle between two endpoints: strictly between along the segment, inside
-/// the corridor, sharing a story with both. Endpoint order never matters.
-pub fn between_holds(actors: &[Actor], m: u32, a: u32, b: u32) -> bool {
+/// Middle-between core over a built view: same comparison as
+/// [`between_holds`], without rebuilding the view per triple.
+fn between_in_view(view: &V2View<'_>, m: u32, a: u32, b: u32) -> bool {
     if m == a || m == b || a == b {
         return false;
     }
-    let view = v2view(actors);
     let (bm, ba, bb) = match (view.boxes.get(&m), view.boxes.get(&a), view.boxes.get(&b)) {
         (Some(x), Some(y), Some(z)) => (x, y, z),
         _ => return false,
@@ -1200,15 +1199,22 @@ pub fn between_holds(actors: &[Actor], m: u32, a: u32, b: u32) -> bool {
     cross * cross <= corr * corr * len2
 }
 
-/// Occluder between two endpoints: strictly between, the straight XZ walk
-/// from one center to the other properly crosses the occluder's box, and
-/// the occluder shares a story with both. A pebble off the path is
-/// between-adjacent but never blocking; a gate across it always is.
-pub fn blocking_holds(actors: &[Actor], o: u32, a: u32, b: u32) -> bool {
-    if o == a || o == b || a == b {
+/// Middle between two endpoints: strictly between along the segment, inside
+/// the corridor, sharing a story with both. Endpoint order never matters.
+pub fn between_holds(actors: &[Actor], m: u32, a: u32, b: u32) -> bool {
+    if m == a || m == b || a == b {
         return false;
     }
     let view = v2view(actors);
+    between_in_view(&view, m, a, b)
+}
+
+/// Occluder core over a built view: same comparison as [`blocking_holds`],
+/// without rebuilding the view per triple.
+fn blocking_in_view(view: &V2View<'_>, o: u32, a: u32, b: u32) -> bool {
+    if o == a || o == b || a == b {
+        return false;
+    }
     let (bo, ba, bb) = match (view.boxes.get(&o), view.boxes.get(&a), view.boxes.get(&b)) {
         (Some(x), Some(y), Some(z)) => (x, y, z),
         _ => return false,
@@ -1230,6 +1236,18 @@ pub fn blocking_holds(actors: &[Actor], o: u32, a: u32, b: u32) -> bool {
     let p1 = (i64::from(ca.0), i64::from(ca.2));
     let p2 = (i64::from(cb.0), i64::from(cb.2));
     seg_crosses_box(p1, p2, bo)
+}
+
+/// Occluder between two endpoints: strictly between, the straight XZ walk
+/// from one center to the other properly crosses the occluder's box, and
+/// the occluder shares a story with both. A pebble off the path is
+/// between-adjacent but never blocking; a gate across it always is.
+pub fn blocking_holds(actors: &[Actor], o: u32, a: u32, b: u32) -> bool {
+    if o == a || o == b || a == b {
+        return false;
+    }
+    let view = v2view(actors);
+    blocking_in_view(&view, o, a, b)
 }
 
 /// Line of sight on the ground plane: same story with no blocking
@@ -1307,6 +1325,38 @@ fn reachable_holds(view: &V2View<'_>, s: u32, o: u32) -> bool {
     true
 }
 
+/// One vocabulary question over a built view: same comparison and order
+/// as [`holds`], without rebuilding the view per pair.
+fn holds_in_view(view: &V2View<'_>, s: u32, rel: Rel, o: u32, frame: Frame) -> bool {
+    if s == o {
+        return false;
+    }
+    match rel {
+        Rel::Above => above_holds(view, s, o),
+        Rel::Below => above_holds(view, o, s),
+        Rel::Front | Rel::Behind | Rel::Left | Rel::Right => match frame {
+            Frame::Viewer(w) => viewer_dir(view, s, o, w, rel),
+            _ => {
+                let f = match frame_fwd(view, frame, s) {
+                    Some(f) => f,
+                    None => return false,
+                };
+                match dir_deltas(view, s, o, f) {
+                    Some((fwd, lat)) => project_dir(rel, fwd, lat),
+                    None => false,
+                }
+            }
+        },
+        Rel::Against => against_holds(view, s, o),
+        Rel::Around => around_holds(view, s, o),
+        Rel::Aligned => aligned_holds(view, s, o),
+        Rel::Near => band_holds(view, s, o, NEAR_CM),
+        Rel::Far => band_holds(view, s, o, FAR_CM),
+        Rel::Visible => visible_holds(view, s, o),
+        Rel::Reachable => reachable_holds(view, s, o),
+    }
+}
+
 /// One vocabulary question: does `rel` hold from `s` to `o` in `frame`?
 /// Frame-free kinds (above/below, against/around/aligned, near/far,
 /// visible/reachable) ignore the frame so callers keep one call shape.
@@ -1318,30 +1368,7 @@ pub fn holds(actors: &[Actor], s: u32, rel: Rel, o: u32, frame: Frame) -> bool {
         return false;
     }
     let view = v2view(actors);
-    match rel {
-        Rel::Above => above_holds(&view, s, o),
-        Rel::Below => above_holds(&view, o, s),
-        Rel::Front | Rel::Behind | Rel::Left | Rel::Right => match frame {
-            Frame::Viewer(w) => viewer_dir(&view, s, o, w, rel),
-            _ => {
-                let f = match frame_fwd(&view, frame, s) {
-                    Some(f) => f,
-                    None => return false,
-                };
-                match dir_deltas(&view, s, o, f) {
-                    Some((fwd, lat)) => project_dir(rel, fwd, lat),
-                    None => false,
-                }
-            }
-        },
-        Rel::Against => against_holds(&view, s, o),
-        Rel::Around => around_holds(&view, s, o),
-        Rel::Aligned => aligned_holds(&view, s, o),
-        Rel::Near => band_holds(&view, s, o, NEAR_CM),
-        Rel::Far => band_holds(&view, s, o, FAR_CM),
-        Rel::Visible => visible_holds(&view, s, o),
-        Rel::Reachable => reachable_holds(&view, s, o),
-    }
+    holds_in_view(&view, s, rel, o, frame)
 }
 
 /// Squared XZ center distance in cm^2, or `None` when either actor's
@@ -1370,7 +1397,8 @@ fn find_pos(actors: &[Actor], id: u32) -> Option<(i32, i32)> {
 /// Full v2 graph over an actor snapshot. Same actor set in any input
 /// order gives the same graph: the working view is id-sorted, edges
 /// freeze in `(subject, relation, object)` order, ternary records in
-/// `(third, lo, hi)` order.
+/// `(third, lo, hi)` order. Builds exactly one view and threads it
+/// through the pair/triple loops, so per-pair views never rebuild.
 pub fn build_rel(actors: &[Actor]) -> RelGraph {
     let view = v2view(actors);
     let ids: Vec<u32> = view.by_id.keys().copied().collect();
@@ -1378,7 +1406,7 @@ pub fn build_rel(actors: &[Actor]) -> RelGraph {
     for (i, &a) in ids.iter().enumerate() {
         for &b in &ids[i + 1..] {
             for rel in [Rel::Against, Rel::Aligned, Rel::Near, Rel::Far] {
-                if holds(actors, a, rel, b, Frame::Subject) {
+                if holds_in_view(&view, a, rel, b, Frame::Subject) {
                     edges.push((a.min(b), rel, a.max(b)));
                 }
             }
@@ -1391,10 +1419,10 @@ pub fn build_rel(actors: &[Actor]) -> RelGraph {
                 Rel::Right,
                 Rel::Around,
             ] {
-                if holds(actors, a, rel, b, Frame::Subject) {
+                if holds_in_view(&view, a, rel, b, Frame::Subject) {
                     edges.push((a, rel, b));
                 }
-                if holds(actors, b, rel, a, Frame::Subject) {
+                if holds_in_view(&view, b, rel, a, Frame::Subject) {
                     edges.push((b, rel, a));
                 }
             }
@@ -1412,10 +1440,10 @@ pub fn build_rel(actors: &[Actor]) -> RelGraph {
                 if b == m {
                     continue;
                 }
-                if between_holds(actors, m, a, b) {
+                if between_in_view(&view, m, a, b) {
                     between.push((m, a.min(b), a.max(b)));
                 }
-                if blocking_holds(actors, m, a, b) {
+                if blocking_in_view(&view, m, a, b) {
                     blocking.push((m, a.min(b), a.max(b)));
                 }
             }

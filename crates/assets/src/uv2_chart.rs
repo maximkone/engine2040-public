@@ -1,5 +1,6 @@
 //! uv2_chart: offline uv2 chart pack for arena static meshes (cook-time only).
-//! Owner: assets lane; consumer `mesh_cook` uv2 channel plus bundle cook.
+//! Owner: assets lane; planned, no caller yet (verified 2026-10-16):
+//! the `mesh_cook` uv2 channel plus bundle cook will consume `pack_uv2`.
 //! Units: meters for positions, texels for atlas, unitless uv `0..1`.
 //! Determinism: sorted indices, fixed shelf pack; same mesh gives same
 //! uv2 plus same digest x2. Cook-time only, never the tick.

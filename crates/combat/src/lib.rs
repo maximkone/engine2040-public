@@ -114,37 +114,6 @@ impl MoveData {
     }
 }
 
-/// Hitstop freeze clock: 60-90ms at 60Hz = 4-6 ticks. Deterministic countdown.
-#[derive(Clone, Debug)]
-pub struct HitstopClock {
-    pub frozen: u32,
-}
-
-impl HitstopClock {
-    pub fn new() -> Self {
-        Self { frozen: 0 }
-    }
-    /// Trigger freeze for ms (clamped 0..=90). 60Hz: ticks = ms*60/1000.
-    pub fn trigger(&mut self, ms: u32) {
-        self.frozen = (ms.min(90) * 60 / 1000).max(1);
-    }
-    /// Returns true while frozen (tick skipped), counts down.
-    pub fn held(&mut self) -> bool {
-        if self.frozen > 0 {
-            self.frozen -= 1;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl Default for HitstopClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Camera trauma in permille, `0..=1000` (0 steady, 1000 full shake).
 /// Presentation-only: shake offsets never enter hashed state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,7 +150,8 @@ pub fn trauma_shake(seed: u64, trauma: Trauma, tick: u64) -> (f32, f32) {
     (a * amp, b * amp)
 }
 
-/// Shipped jab row: the production constructor tick code reads.
+/// Shipped jab row: test-pinned presentation bridge; no production caller
+/// (verified 2026-10-16).
 pub const MOVE_JAB: MoveData = MoveData {
     name: "jab",
     startup: 4,
@@ -190,7 +160,8 @@ pub const MOVE_JAB: MoveData = MoveData {
     cancel: &["cross"],
 };
 
-/// Shipped cross row: cancel target of the jab.
+/// Shipped cross row: cancel target of the jab. Test-pinned presentation
+/// bridge; no production caller (verified 2026-10-16).
 pub const MOVE_CROSS: MoveData = MoveData {
     name: "cross",
     startup: 6,
@@ -200,6 +171,7 @@ pub const MOVE_CROSS: MoveData = MoveData {
 };
 
 /// Shipped uppercut row: terminal move, cancels into nothing.
+/// Test-pinned presentation bridge; no production caller (verified 2026-10-16).
 pub const MOVE_UPPERCUT: MoveData = MoveData {
     name: "uppercut",
     startup: 9,
@@ -208,12 +180,13 @@ pub const MOVE_UPPERCUT: MoveData = MoveData {
     cancel: &[],
 };
 
-/// Shipped timing table every cancel check reads: the in-tree constructors
-/// for [`MoveData`]. Tick code copies rows out, never borrows across ticks.
+/// Shipped timing table for cancel checks in tests: test-pinned presentation
+/// bridge; no production caller (verified 2026-10-16).
 /// Deterministic: plain row order, no heap.
 pub const MOVES_V1: &[MoveData] = &[MOVE_JAB, MOVE_CROSS, MOVE_UPPERCUT];
 
-/// Look up a shipped move row by name. Pure, no heap, `O(rows)`.
+/// Look up a shipped move row by name in tests. Pure, no heap, `O(rows)`.
+/// Test-pinned presentation bridge; no production caller (verified 2026-10-16).
 /// Returns `None` for an unknown name instead of panicking.
 #[must_use]
 pub fn move_row(name: &str) -> Option<MoveData> {
@@ -227,11 +200,10 @@ pub fn move_row(name: &str) -> Option<MoveData> {
     None
 }
 
-/// Shake offsets for a trauma permille at a tick: the named presentation
-/// bridge for callers that hold only a `0..=1000` permille (the camera feed
-/// records permille in-sim and shakes presentation-side). Same seed plus
-/// tick plus permille always gives the same offsets on every PC for one
-/// build; offsets never reach the state hash. No heap.
+/// Shake offsets for a trauma permille at a tick: test-pinned presentation
+/// bridge; no production caller (verified 2026-10-16). Same seed plus tick
+/// plus permille always gives the same offsets on every PC for one build;
+/// offsets never reach the state hash. No heap.
 #[must_use]
 pub fn shake_for_trauma(seed: u64, trauma_permille: u16, tick: u64) -> (f32, f32) {
     trauma_shake(seed, Trauma::from_permille(trauma_permille), tick)
@@ -263,20 +235,6 @@ mod tests {
         assert!(!m.can_cancel("cross", 2)); // startup, too early
         assert!(m.can_cancel("cross", 5));
         assert!(!m.can_cancel("uppercut", 5));
-    }
-
-    #[test]
-    fn hitstop_60_90ms() {
-        let mut c = HitstopClock::new();
-        assert!(!c.held());
-        c.trigger(80); // 80ms -> 4 ticks @60Hz
-        assert_eq!(c.frozen, 4);
-        for _ in 0..4 {
-            assert!(c.held());
-        }
-        assert!(!c.held());
-        c.trigger(999); // clamped 90ms -> 5 ticks
-        assert_eq!(c.frozen, 5);
     }
 
     #[test]

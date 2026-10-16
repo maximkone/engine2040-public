@@ -449,6 +449,41 @@ impl FrameSource for Arc<Mutex<Mixer>> {
     }
 }
 
+/// Smallest `usize` at or above `x`, saturating.
+///
+/// Matches ceiling-then-saturate conversion: non-positive and NaN give `0`,
+/// huge values saturate (the caller caps to its buffer, so taps past the
+/// buffer still land on the cap). Bit math only, so no numeric cast. Never
+/// panics.
+fn ceil_to_usize_saturating(x: f32) -> usize {
+    if !(x > 0.0) {
+        return 0;
+    }
+    if x >= 16_777_216.0 {
+        return usize::MAX;
+    }
+    let bits = x.to_bits();
+    let exp = (bits >> 23) & 0xFF;
+    let mant = bits & 0x7FFFFF;
+    if exp < 127 {
+        return 1;
+    }
+    let shift = 150u32.saturating_sub(exp);
+    let base = 0x800000u32 | mant;
+    let int_part = base >> shift;
+    let frac = if shift == 0 {
+        false
+    } else {
+        base & (1u32 << shift).wrapping_sub(1) != 0
+    };
+    let ceil = if frac {
+        int_part.saturating_add(1)
+    } else {
+        int_part
+    };
+    usize::try_from(ceil).unwrap_or(usize::MAX)
+}
+
 /// Render the current mix offline to 16-bit PCM WAV bytes plus loudness.
 ///
 /// Caller: offline export only (tests plus a future arena capture path);
@@ -481,10 +516,9 @@ pub fn record_audio<S: FrameSource>(
     let rate_f = crate::f32_of(sample_rate.max(1));
     for tap in ac.taps.iter() {
         let want = tap.delay * rate_f;
-        let mut off = 0usize;
-        while crate::f32_of(u32::try_from(off).unwrap_or(u32::MAX)) < want && off < buf.len() {
-            off += 1;
-        }
+        // Smallest frame offset with `off >= want`, capped to the buffer:
+        // the float count-up loop fixed point, via ceiling arithmetic.
+        let off = ceil_to_usize_saturating(want).min(buf.len());
         let g = (tap.gain * wet).clamp(0.0, 1.0);
         let mut k = 0usize;
         while off + k * 2 + 1 < buf.len() {

@@ -65,11 +65,6 @@ impl Rng {
     pub fn fork_named(&self, name: &str) -> Self {
         self.fork(hash_bytes(name.as_bytes()))
     }
-    /// Child stream seeded from the next word; advances the parent once.
-    pub fn fork_next(&mut self) -> Self {
-        let s = self.next_u64();
-        Self(splitmix64(s) | 1)
-    }
     /// FNV-1a 64 over each word's little-endian bytes, in order.
     pub fn digest(vals: &[u64]) -> u64 {
         hash_u64s(vals)

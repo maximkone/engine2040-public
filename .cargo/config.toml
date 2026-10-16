@@ -48,5 +48,5 @@ linker = "rust-lld.exe"
 # plus CARGO_INCREMENTAL=0 for that one command. sccache cannot cache incremental
 # artifacts, so incremental stays on. The old batch wrapper ran through cmd.exe,
 # whose 8191-character limit broke windows-sys (rustc line 9419 chars, 2026-10-13);
-# the old file is kept as .cargo/sccache-pool.cmd.bak-20261013. Do not add a global
+# the old files were removed 2026-10-16. Do not add a global
 # rustc-wrapper here: it would wrap every build (.cargo/config.test.mjs guards it).

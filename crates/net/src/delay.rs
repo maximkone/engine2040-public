@@ -130,11 +130,13 @@ impl Default for FixedDelay {
 }
 
 /// Genre-neutral integer probe for the delay reaction table.
+#[cfg(test)]
 #[derive(Clone, Default)]
 struct DelayProbe {
     acc: u64,
 }
 
+#[cfg(test)]
 impl super::rollback::SimTick for DelayProbe {
     fn advance(&mut self, inputs: [u32; super::rollback::PLAYERS]) {
         let mix = u64::from(inputs[0])
@@ -154,6 +156,7 @@ impl super::rollback::SimTick for DelayProbe {
     }
 }
 
+#[cfg(test)]
 fn probe_pair(n: usize) -> (Vec<u32>, Vec<u32>) {
     let mut local = Vec::with_capacity(n);
     let mut remote = Vec::with_capacity(n);
@@ -165,6 +168,7 @@ fn probe_pair(n: usize) -> (Vec<u32>, Vec<u32>) {
     (local, remote)
 }
 
+#[cfg(test)]
 fn count_rollbacks(delay: u32) -> u64 {
     let (local, remote) = probe_pair(48);
     let mut session = super::rollback::P2pSession::new(DelayProbe::default());
@@ -189,6 +193,7 @@ fn count_rollbacks(delay: u32) -> u64 {
     session.rollback_count()
 }
 
+#[cfg(test)]
 fn reaction_table() -> [(u32, u64); 3] {
     [
         (0, count_rollbacks(0)),

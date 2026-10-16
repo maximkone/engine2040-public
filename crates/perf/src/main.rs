@@ -1,5 +1,7 @@
-//! perf: stress harness -> perf.csv. Zero deps, deterministic.
-//! run: cargo run --release -p engine-perf > perf.csv (gates: sim-1k p99<2ms, 10k p99<=16.6ms, hash x2).
+//! perf: stress harness -> perf.csv. Presentation only, never hashed.
+//! run: cargo run --release -p engine-perf > perf.csv (no gate reads it in
+//!   tree; sample rows are asserted in the endpoint perf-pack tests).
+//! deps: engine-core/ecs/physics/render/arena/ai/destruction/net (+puffin).
 //! profile: cargo run --release -p engine-perf --features profile -- --capture [frames]
 //!   enables the profiler and prints the frame-capture report (perf report input).
 //! vram: cargo run -p engine-perf -- --vram-plan prints the Dawn budget line
@@ -47,6 +49,12 @@ fn csv_row(
     format!("{name},2040,600,{agents},{sprites},{mean:.4},{p50:.4},{p99:.4},{max:.4},{rate:.1},{hash:016x}")
 }
 
+/// perf.csv row stats: p50/p99 rank through the shared nearest-rank owner
+/// (`latency::nearest_rank_sorted`, round rank). Differs deliberately from the
+/// ceil-ranked frame-times JS gate (`tools/proof.mjs` `frameCsvVerdict`,
+/// `ceil(p * n) - 1` over p50/p95): different gate, different percentile, so
+/// the two agree on the canonical 600-tick rows and diverge by at most one
+/// sample elsewhere. No numeric movement on the harness rows from this line.
 fn stats(mut dts: Vec<f64>) -> (f64, f64, f64, f64) {
     dts.sort_by(f64::total_cmp);
     let mean = dts.iter().sum::<f64>() / dts.len().max(1) as f64;

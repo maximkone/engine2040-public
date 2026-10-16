@@ -12,7 +12,7 @@ needs it. Every dependency stays behind a feature, off the headless default.
 | glam 0.33 | MIT/Apache-2.0 | scene `math`, render `v1` | vectors, matrices, quaternions |
 | winit 0.30, wgpu 30 | Apache-2.0; MIT/Apache-2.0 | render `window` | window, event loop, GPU |
 | gltf 1 | MIT/Apache-2.0 | assets `import` | glTF import |
-| bevy =0.20.0-rc.2 (default-features=false: pbr, gltf, animation, winit, png, jpeg; no ktx2, no zstd) | MIT/Apache-2.0 (crates.io API 2026-10-04, bevyengine/bevy) | viewer `window` | HISTORICAL (D1 DEAD 2026-10-06 per docs/FOCUS.md: no Bevy picture, own renderer only; removal from Cargo.toml pending): drew the arena and skinned fighters from one frozen frame per tick; never in `default-members` or the sim graph |
+| bevy =0.20.0-rc.2 | MIT/Apache-2.0 | none (NOT WIRED 2026-10-16: 0 hits in any Cargo.toml/Cargo.lock) | HISTORICAL (D1 DEAD 2026-10-06 per docs/FOCUS.md: no Bevy picture, own renderer only; already removed from Cargo.toml): drew the arena and skinned fighters from one frozen frame per tick; never in `default-members` or the sim graph |
 | rhai =1.26.1 (default-features=false: std, only_i64, no_float, no_time, no_module, no_closure, no_custom_syntax, internals; transitive smartstring 1.0.1 is MPL-2.0+, see `deny.toml` exceptions) | MIT OR Apache-2.0 (crates.io API 2026-10-04, rhaiscript/rhai) | rules (off `default-members`) | the NS32 rules sandbox (owner decision D2): integer-only scripts, op/call/size limits, deny-all registry; never in the sim graph |
 | manifold-rust 0.16.0 | Apache-2.0 (crates.io API 2026-10-04; Manifold port) | geo `boolean` | mesh booleans; its 2D clipper (clipper2-rust, Boost-1.0) has one named exception in `deny.toml` |
 | xatlas (vendored, unmodified, with a C shim of ours) | MIT, plus MIT and BSD-3-Clause notices inside the file (`crates/geo/vendor/README.md`) | geo `uv` | UV unwrap and chart packing; vendored because `xatlas-rs-v2` needs libclang for bindgen; compiled by `build.rs` with `cc`, one thread |
@@ -35,7 +35,7 @@ needs it. Every dependency stays behind a feature, off the headless default.
 | sha2 0.10 | MIT (LICENSE-MIT read live 2026-09-25, RustCrypto/hashes) | game (capture manifests) | per-frame SHA-256 for SHOW1 manifests, cross-checked by tools/showcase.mjs |
 | rustls 0.23 (default-features=false: std, tls12, ring) | Apache-2.0 OR ISC OR MIT (crates.io API, rustls/rustls) | provider `tls` | opt-in HTTPS handshake for cloud LLMs; ring already in the graph via quinn |
 | rustls-native-certs 0.8 | Apache-2.0 OR ISC OR MIT (crates.io API, rustls/rustls-native-certs) | provider `tls` | platform-native roots for the rustls handshake (webpki-roots skipped: CDLA-Permissive-2.0 is outside deny.toml) |
-| ggrs 0.13 | MIT OR Apache-2.0 (crates.io API 2026-10-08, gschup/ggrs) | arena `rollback` | proven rollback save/load/advance for the arena sync (E40c); replaces hand-rolled resim |
+| ggrs 0.13 | MIT OR Apache-2.0 | none (NOT WIRED 2026-10-16: 0 hits in any Cargo.toml/Cargo.lock, candidate only) | rollback candidate for the arena sync (E40c); hand-rolled resim still in use until wired |
 
 ## 2. Banned (`deny.toml` enforces)
 
@@ -44,11 +44,10 @@ needs it. Every dependency stays behind a feature, off the headless default.
 | symphonia | MPL-2.0; banned by decision | lewton, hound (claxon for FLAC if needed) |
 | ktx2 crate | blocked by decision | offline KTX-Software bake if ever needed |
 | zstd, zstd-safe | C bindings with a dual BSD/GPL license | no compression dependency yet |
-- Post-2024 AI-generated code is usable after a license check. Only deny.toml
-  allow-list licenses (plus named exceptions) are usable; GPL/proprietary
-  code is ideas-only, no-license code stays out. Verify before copying.
+- `deny.toml` governs Cargo dependency licenses only. Donor code from any source may be
+  ported or adapted (owner 2026-10-10); no license check or `EVIDENCE.md` row needed. Never hand-roll crypto.
 
-- Source code from any repo (Unreal, Flax, Unity, Blender, or otherwise) may be ported or used as inspiration within the rule above. Ideas and papers only.
+- Source code from any repo (Unreal, Flax, Unity, Blender, or otherwise) may be ported or used as inspiration within the rule above.
 
 ## 3. Candidates the plans name (license to verify before adding)
 

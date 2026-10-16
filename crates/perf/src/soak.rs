@@ -1,6 +1,7 @@
 //! Hour soak: the long-run stability check for the frame-time gate.
-//! Consumer: nightly CI runs [`SoakConfig::hour`] and prints
-//! [`SoakReport::summary`] into the perf report.
+//! Status: test-only (no production caller reads [`SoakReport::summary`]
+//! yet; exercised by the unit tests in this file and the wiring vectors).
+//! Tracked by EG41 (packaged smoke/soak/frame-time gate) and PQ3 (hour soak).
 //! Units: milliseconds, frames at 60 Hz. Determinism: seeded samples, so the
 //! same config gives the same report on every machine (no wall clock).
 //! Gate: ranking and the P2 bar stay in `latency` (`summarize_live`,

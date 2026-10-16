@@ -18,9 +18,6 @@ pub mod crossfade;
 /// Thousand-agent crowd tape over the LOD tiers: seeded build, global
 /// nearest-eight assign, far-ring impostor handoff and per-tier cost post.
 pub mod crowd_scale;
-/// Dual-quaternion skinning option for twist-heavy joints (shoulders,
-/// upper arms): volume-preserving blend beside the default linear path.
-pub mod dq;
 pub mod edit;
 pub mod events;
 /// Exertion/gait layer on locomotion features: warps weights by fatigue,

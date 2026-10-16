@@ -416,7 +416,6 @@ mod tests {
 
     #[test]
     fn error_variants_are_copy_and_comparable() {
-        assert_eq!(CausalError::CorruptTape, CausalError::CorruptTape);
         assert_ne!(CausalError::CorruptTape, CausalError::NoFailureReproduces);
     }
 

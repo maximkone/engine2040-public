@@ -1,11 +1,11 @@
 //! health: asset floors. Bytes>=2048, nonZero>0.90 dense / 0.50 container.
 
 /// Minimum byte size for a real asset (quarantine below).
-pub const BYTE_FLOOR: u64 = 2048;
+pub(crate) const BYTE_FLOOR: u64 = 2048;
 /// Minimum non-zero byte ratio for dense assets (mesh/pcm).
-pub const NONZERO_DENSE: f32 = 0.90;
+pub(crate) const NONZERO_DENSE: f32 = 0.90;
 /// Minimum non-zero byte ratio for containers (glb/ktx).
-pub const NONZERO_CONTAINER: f32 = 0.50;
+pub(crate) const NONZERO_CONTAINER: f32 = 0.50;
 
 /// Non-zero byte ratio in 0..=1 (0 on empty).
 pub fn nonzero_ratio(bytes: &[u8]) -> f32 {

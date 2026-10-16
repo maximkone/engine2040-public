@@ -1,6 +1,6 @@
 //! Two-layer student and its std-only trainer (no burn).
 //!
-//! Consumer: the `distill_fighter` generator fits one [`Mlp`] on teacher rows
+//! Consumer: the `distill_duel` generator fits one [`Mlp`] on teacher rows
 //! and hands it to [`export_mlp`](crate::export_mlp). Owner: this module owns
 //! the two-layer float parameter layout, the softmax cross-entropy loss and
 //! the optimizer. Units: inputs are feature-unit floats
@@ -20,7 +20,7 @@
 //! cross-entropy with Adam.
 
 use crate::data::{check_dataset, check_provenance, DataErrorAt, DatasetManifest, ProvenanceError};
-use crate::data::{Sample, MAX_FEATURE_ABS};
+use crate::data::{Sample, INPUT_QUANT_SCALE, MAX_FEATURE_ABS};
 use crate::spec::{StudentSpec, MAX_EPOCHS};
 use engine_core::Rng;
 
@@ -319,15 +319,18 @@ pub fn fit_mlp(
     let hid = spec.hidden;
     let out = spec.student.dims.output_dim;
     let inv_scale = 1.0 / MAX_FEATURE_ABS;
-    let xs: Vec<Vec<f32>> = dataset
-        .iter()
-        .map(|row| {
-            row.quantized_features()
-                .iter()
-                .map(|v| v * inv_scale)
-                .collect()
-        })
-        .collect();
+    // Flat scaled inputs: one `inp`-wide row per dataset row in order.
+    // Lane `r * inp + i` equals the old `quantized_features()[i] * inv_scale`
+    // bit-for-bit (same `round(v * 16) / 16 * inv_scale` lane math, folded
+    // into one pass with one allocation instead of one `Vec` per row plus the
+    // outer `Vec`). The epoch loop below slices rows out of this buffer, so
+    // training sees contiguous batches with no per-row indirection.
+    let mut xs_flat: Vec<f32> = Vec::with_capacity(dataset.len() * inp);
+    for row in dataset {
+        for v in &row.features {
+            xs_flat.push((v * INPUT_QUANT_SCALE).round() / INPUT_QUANT_SCALE * inv_scale);
+        }
+    }
 
     let mut rng = Rng::new(spec.student.seed);
     let lim1 = (6.0 / count_f32(inp + hid)).sqrt();
@@ -360,8 +363,9 @@ pub fn fit_mlp(
             let scale = 1.0 / count_f32(batch.len());
             for &r in batch {
                 let target = usize::from(dataset[r].target);
+                let x = &xs_flat[r * inp..(r + 1) * inp];
                 grads
-                    .add_row(&mlp, &xs[r], target, scale)
+                    .add_row(&mlp, x, target, scale)
                     .ok_or(FitError::Diverged)?;
             }
             pow1 *= 0.9;
@@ -478,5 +482,43 @@ mod tests {
         assert_eq!(mlp.forward(&[0.0, 0.0], &mut h[..7], &mut l), None);
         assert_eq!(mlp.forward(&[0.0, 0.0], &mut h, &mut l[..1]), None);
         assert_eq!(mlp.forward(&[0.0, 0.0], &mut h, &mut l), Some(()));
+    }
+
+    #[test]
+    fn flat_scaled_inputs_match_rowwise_oracle_bit_exact() {
+        // Oracle: each flat lane equals the old row-wise
+        // `quantized_features()[i] * inv_scale` bit-for-bit. The fold drops
+        // the per-row `Vec`, never the lane math.
+        let s = spec();
+        let rows = xor_rows(&s.student);
+        let inv_scale = 1.0 / MAX_FEATURE_ABS;
+        let inp = s.student.dims.input_dim;
+        let mut flat = Vec::with_capacity(rows.len() * inp);
+        for row in &rows {
+            for v in &row.features {
+                flat.push((v * INPUT_QUANT_SCALE).round() / INPUT_QUANT_SCALE * inv_scale);
+            }
+        }
+        for (r, row) in rows.iter().enumerate() {
+            let oracle: Vec<f32> = row
+                .quantized_features()
+                .iter()
+                .map(|v| v * inv_scale)
+                .collect();
+            let slice = &flat[r * inp..(r + 1) * inp];
+            assert_eq!(slice.len(), oracle.len());
+            for (got, want) in slice.iter().zip(oracle.iter()) {
+                assert_eq!(got.to_bits(), want.to_bits(), "flat lane differs");
+            }
+        }
+        // Single-multiply fold is exact too (both scales are powers of two).
+        let folded_scale = 1.0 / (INPUT_QUANT_SCALE * MAX_FEATURE_ABS);
+        for row in &rows {
+            for v in &row.features {
+                let folded = (v * INPUT_QUANT_SCALE).round() * folded_scale;
+                let direct = (v * INPUT_QUANT_SCALE).round() / INPUT_QUANT_SCALE * inv_scale;
+                assert_eq!(folded.to_bits(), direct.to_bits(), "fold differs");
+            }
+        }
     }
 }

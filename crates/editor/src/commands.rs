@@ -511,8 +511,6 @@ pub struct Journal {
     /// so a reopen starts sealed. A plain apply, a group edit, undo, redo or
     /// an explicit [`seal_coalescing`] closes it.
     coalesce: Option<CoalesceCursor>,
-    /// Pinned merge lanes that never fold (`force_keep_in_merge_ends`).
-    merge_force_keep: Vec<u64>,
 }
 
 /// One open [`begin_group`] frame: the name, flag and key the merged entry
@@ -567,7 +565,6 @@ impl Journal {
         self.groups.clear();
         self.next_group = next;
         self.coalesce = None;
-        self.merge_force_keep.clear();
     }
 }
 
@@ -3285,7 +3282,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_gizmo_drag_merge_ends_annuls_and_keeps_pinned() {
+    fn grouped_gizmo_drag_merge_ends_annuls_and_folds_after_noop() {
         use crate::gizmo::drag_batch;
         let (mut doc, mut journal) = (Document::new(), Journal::new());
         let id = seed_single_node(&mut doc, &mut journal);
@@ -3302,11 +3299,11 @@ mod tests {
         let (rev, base) = (doc.revision, journal.past_len());
         apply_coalesced(&mut doc, &mut journal, &same, &meta, lane).unwrap();
         assert_eq!((journal.past_len(), doc.revision), (base, rev));
-        journal.merge_force_keep.push(lane);
         let third = slider_tick(id, 3.0, doc.revision, 7013);
         apply_coalesced(&mut doc, &mut journal, &third, &meta, lane).unwrap();
         let fourth = slider_tick(id, 4.0, doc.revision, 7014);
         apply_coalesced(&mut doc, &mut journal, &fourth, &meta, lane).unwrap();
-        assert_eq!(journal.past_len(), base + 2);
+        assert_eq!(journal.past_len(), base + 1);
+        assert_eq!(journal.past.last().expect("fold").forward, fourth.ops);
     }
 }

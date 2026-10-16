@@ -95,7 +95,8 @@ use core::f32::consts::PI;
 use engine_ai::{DepthBrain, Intent, Percept, Personality};
 use engine_anim::clip::TICK_DT;
 use engine_anim::contract::{AnimError, LocalPose, RootTable, Skeleton};
-use engine_anim::locomotion::{CombatInterrupt, LocoState, Locomotion, LOCO_LEG_JOINTS};
+use engine_anim::locomotion::{CombatInterrupt, Locomotion, LOCO_LEG_JOINTS};
+use engine_anim::motion_net::state_code;
 use engine_anim::pose::{extract_root, sample_pose};
 use engine_anim::warp_ground::GroundWarp;
 use engine_anim::Clip;
@@ -1048,9 +1049,9 @@ pub struct Sim {
     checkpoints: Vec<Checkpoint>,
     events: Vec<TickEvents>,
     /// Combat event scratch, reserved once to MAX_EVENTS_PER_TICK.
-    /// `try_step_into` reuses its buffer (no growth allocs); the tick log
-    /// below takes an exact-size clone so the scratch keeps its capacity.
-    /// Quiet ticks clone an empty Vec (no heap alloc).
+    /// `try_step_into` clears and reuses its buffer each tick; the tick log
+    /// below takes the buffer by move, so event ticks allocate once for the
+    /// refill. Quiet ticks move an empty Vec (no heap alloc).
     combat_scratch: Vec<FightEvent>,
     /// Press-tick attack cues under readable-timing rows (EG19b): the v2
     /// combat leg clears and fills this each tick, so it always reads the
@@ -1366,9 +1367,10 @@ impl Sim {
         }
         // Strict combat: entry validation makes failure unreachable, but a
         // construction bug rejects the run instead of skipping inputs.
-        // Step into the reserved scratch (no growth allocs), then an
-        // exact-size clone for the owned tick log; the scratch keeps its
-        // buffer for the next event tick. Quiet ticks move nothing.
+        // Step into the reserved scratch (no growth allocs), then move the
+        // tick buffer into the owned tick log; the step clears the scratch
+        // first each tick, so the move keeps every byte. Quiet ticks move
+        // an empty Vec (no heap alloc).
         if self.rules.version == FIGHT_RULES_V2 {
             // Rules v2: pre-move poses in integer mm, fixed-point facing
             // from the absolute IN1 facing, one blade per slot along it.
@@ -1402,7 +1404,7 @@ impl Sim {
         } else {
             try_step_into(inputs, &mut self.fight, &mut self.combat_scratch).ok()?;
         }
-        let tick_events = self.combat_scratch.clone();
+        let tick_events = core::mem::take(&mut self.combat_scratch);
         if self.rules.balance {
             self.feed_balance(&tick_events)?;
         }
@@ -1804,26 +1806,12 @@ impl Sim {
     /// stagger); V2 meters drain on hits and chips via `DepthSet::observe`.
     ///
     /// Consumer: the window presentation reads the victim `staggered` trip
-    /// (see [`Sim::poise_staggered`]). Data owner: this crate owns the
+    /// from the meter. Data owner: this crate owns the
     /// per-slot [`DepthSet`]. Units: slot index. Determinism scope:
     /// same-machine read of tick output, never hashed here.
     #[must_use]
     pub fn poise(&self, slot: u8) -> Option<&PoiseMeter> {
         self.depth.poise(slot)
-    }
-
-    /// Victim `staggered` trip for presentation: true exactly while the
-    /// slot's [`PoiseMeter`] holds a stagger trip. Reads the wired
-    /// [`DepthSet`] stepped beside the fight step; never hashed, so V1
-    /// bouts replay byte-identical.
-    ///
-    /// Consumer: the window presentation (victim flash or pose hold).
-    /// Data owner: this crate owns the per-slot [`DepthSet`]. Units: slot
-    /// index. Determinism scope: same-machine read, never hashed here.
-    #[must_use]
-    pub fn poise_staggered(&self, slot: u8) -> bool {
-        self.poise(slot)
-            .is_some_and(|meter: &PoiseMeter| meter.staggered)
     }
 
     /// Read-only press-tick attack cues from the last stepped tick (EG19b):
@@ -2321,17 +2309,7 @@ fn hash_state_with_sim(
         hash = hash.wrapping_mul(PRIME);
     }
     for loco in locos {
-        let disc: u8 = match loco.state {
-            LocoState::Idle => 0,
-            LocoState::Walk => 1,
-            LocoState::Run => 2,
-            LocoState::Strafe => 3,
-            LocoState::Start => 4,
-            LocoState::Stop => 5,
-            LocoState::Pivot => 6,
-            LocoState::Air => 7,
-            LocoState::Land => 8,
-        };
+        let disc = u8::try_from(state_code(loco.state)).unwrap_or(u8::MAX);
         hash ^= u64::from(disc);
         hash = hash.wrapping_mul(PRIME);
         for axis in [loco.phase(), loco.facing()[0], loco.facing()[1]] {
@@ -2430,7 +2408,7 @@ fn run_trace(config: &ArenaConfig, tape: &FighterTape) -> Option<Vec<Vec<TickMot
 mod tests {
     use super::*;
     use engine_anim::contract::validate_pose;
-    use engine_anim::locomotion::{loco_skeleton, Locomotion};
+    use engine_anim::locomotion::{loco_skeleton, LocoState, Locomotion};
     use engine_combat::fight::ATTACK_DAMAGE;
     use engine_combat::FightEvent;
     use engine_input::fighter::Buttons;

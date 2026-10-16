@@ -4,7 +4,7 @@
 
 ## Start here
 
-- [README](README.md): status and run
+- [README](README.md): engine overview and proof game
 - [AGENTS.md](AGENTS.md): execution policy
 - [docs/INDEX.md](docs/INDEX.md): doc map
 - [docs/VISION.md](docs/VISION.md): where the engine is going

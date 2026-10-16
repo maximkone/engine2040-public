@@ -252,6 +252,26 @@ export function nextestFlakeSummary(output) {
   return `${n} retried`;
 }
 
+// Pure check over a finished `cargo test` leg's combined output (exported
+// for tests): true only when at least one test ran. A zero-match filter
+// prints `test result: ok. 0 passed; ...` and exits 0, so grading on exit
+// code alone passes vacuously; the proof gate fails closed on zero tests-run.
+export function ranAtLeastOneTest(output) {
+  const text = `${output ?? ""}`;
+  const results = [...text.matchAll(/test result:\s*(?:ok|FAILED)\.\s*(\d+)\s+passed;\s*(\d+)\s+failed/gi)];
+  if (results.length > 0) {
+    let ran = 0;
+    for (const [, passed, failed] of results) {
+      ran += Number(passed) + Number(failed);
+    }
+    return ran > 0;
+  }
+  // Nextest summary fallback: an explicit nonzero `N passed` means tests ran.
+  // Absence of any passed count means zero ran.
+  const nextest = [...text.matchAll(/(\d+)\s+passed/gi)];
+  return nextest.some(([, n]) => Number(n) > 0);
+}
+
 // Per-packet fixture-only discipline: the golden receipt verifies once; the
 // seed double-runs below still prove determinism, so a second 600-tick verify
 // is duplicate work. Tool self-tests run in CI nightly only
@@ -491,7 +511,18 @@ if (!args.includes("--skip-build")) {
     ["test", "--locked", "-p", "engine-proof", "--lib", "break_corpus"],
   ]) {
     const result = cargoTest(command);
-    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? `${result.flake} via ${result.via} junit ${result.junit}` : `${result.error || result.out}, ${result.flake} via ${result.via} junit ${result.junit}`);
+    const combined = `${result.out ?? ""}\n${result.error ?? ""}`;
+    const ran = ranAtLeastOneTest(combined);
+    const passed = result.ok && ran;
+    check(
+      `cargo ${command.join(" ")}`,
+      passed,
+      passed
+        ? `${result.flake} via ${result.via} junit ${result.junit}`
+        : !result.ok
+          ? `${result.error || result.out}, ${result.flake} via ${result.via} junit ${result.junit}`
+          : `zero tests ran (filter matched nothing), ${result.flake} via ${result.via} junit ${result.junit}`,
+    );
   }
   const deny = cargo(["deny", "check"]);
   check("cargo deny check", deny.ok, deny.ok ? "" : deny.error || deny.out);
@@ -537,13 +568,13 @@ try {
   const unsupported = cargo(["run", "-p", "engine2040", "--locked", "--release", "--quiet", "--", "--backend", "wgpu"]);
   check("unsupported proof backend cannot fall back silently", !unsupported.ok && unsupported.error.includes("unsupported proof backend"));
 
-  // GX6 truth gate (report-only): the gpu_live registry in engine-proof
-  // names ticked render rows whose GPU submit still refuses on a device.
+  // GX6 truth gate (report-only): only forward is LIVE by on/off pixel proof;
+  // the other eight stay PROBE until device captures prove them.
   // It turns enforcing (failing this gate) only when every registry entry
   // is live; until GX2-GX5 and GX7-GX10 land it reports without failing.
   const gpuLive = cargo(["test", "--locked", "--quiet", "-p", "engine-proof", "--lib", "gpu_live"]);
   const gpuLine = gpuLive.out.split("\n").filter((line) => line.includes("test result")).join("; ");
-  console.log(`[INFO] gpu-live truth gate (report-only): ${gpuLive.ok ? gpuLine : `gate did not execute: ${gpuLive.error}`}`);
+  console.log(`[INFO] gpu-live truth gate (report-only, 1 LIVE/8 PROBE): ${gpuLive.ok ? gpuLine : `gate did not execute: ${gpuLive.error}`}`);
 } catch (error) {
   check("proof execution", false, error.message);
 } finally {

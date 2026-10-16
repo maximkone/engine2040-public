@@ -10,12 +10,15 @@
 //! Budget: each `publish` moves at most `frame_bytes`; memory never tops `bytes`;
 //! per-cell bake cost and peak bytes are posted per cell by the test report.
 //!
-//! Dependency note for the orchestrator: this module needs only std,
-//! `engine-core` and the crate lattice, and mirrors the asset stream
-//! (`StreamBudget`/`StreamQueue`) and nav (`BakeConfig`/bake) contracts
-//! without importing them, so no manifest edit lands here. The real edges to add are
-//! `engine-world -> engine-assets` (stream queue) and `engine-world -> engine-nav`
-//! (per-cell mesh bake); the integration test already drives both real sources.
+//! Dependency note for the orchestrator (true on disk today: unwired):
+//! this module needs only std, `engine-core` and the crate lattice
+//! (`engine-world` has no `engine-assets`/`engine-nav` manifest edge) and
+//! hand-mirrors the asset stream (`StreamBudget`/`StreamQueue`) and nav
+//! (`BakeConfig`/bake) contracts without importing them. The real edges to
+//! add are `engine-world -> engine-assets` (stream queue) and
+//! `engine-world -> engine-nav` (per-cell mesh bake); only the integration
+//! test wires the real sources, via `#[path]` shims to
+//! `crates/assets/src/stream.rs` and `crates/nav/src/mesh.rs`.
 
 use crate::lattice;
 use crate::terrain::{base_height, slope_of};

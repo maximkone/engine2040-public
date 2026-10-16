@@ -1,17 +1,17 @@
 //! geo: cook-time mesh tools an AI can call (decision D4): booleans, UV unwrap and pack,
 //! seam-locked LOD, collision decomposition.
 //!
-//! Callers and edges (from `crates/geo/Cargo.toml:30-35`): above `engine-core` digests, plus
+//! Callers and edges (from `crates/geo/Cargo.toml:29-34`): above `engine-core` digests, plus
 //! `engine-assets` only behind the off-by-default `kit` feature (kit tests read the arena glTF
 //! files); every donor library sits behind its own feature, off by default
-//! (`crates/geo/Cargo.toml:15-28`). The only in-repo consumer is the door `geo` pack
-//! (`crates/endpoint/Cargo.toml:57-58`, feature `geo`, off by default); off `default-members`
-//! (root `Cargo.toml:14-17`). No tick crate depends on it: cook-time only, never in the tick graph.
+//! (`crates/geo/Cargo.toml:15-30`). The only in-repo consumer is the door `geo` pack
+//! (`crates/endpoint/Cargo.toml:18-20`, feature `geo`, off by default, dep at `:63-64`); off `default-members`
+//! (root `Cargo.toml:25`). No tick crate depends on it: cook-time only, never in the tick graph.
 //!
 //! Invariants: results are pure functions of the input mesh and the options (no clock, no thread
 //! count, no random seed the caller did not pass), so a cook run twice gives the same bytes; the
 //! digest of every output is `GeoMesh::digest`. Cook-time `f32` is allowed here (see
-//! `primitives`, and `parry3d` with `f32` in `crates/geo/Cargo.toml:35`); nothing here runs in
+//! `primitives`, and `parry3d` with `f32` in `crates/geo/Cargo.toml:37`); nothing here runs in
 //! the fixed tick. Errors: [`GeoError`] for bad meshes, `recipe::RecipeError` for bad recipes.
 //!
 //! Budgets: 64 recipe ops, 200_000 triangles, 32 name chars

@@ -369,47 +369,6 @@ const SETTINGS_ITEMS: [MenuItem; 1] = [MenuItem {
     enabled: true,
 }];
 
-/// O-023 menu look (`docs/archive/2026-10-08/assets-O-023/layout.json` `menu` list, 640x360
-/// reference; the renderer scales by 2/3/4 and draws 9-slice pieces from
-/// `docs/archive/2026-10-08/assets-O-023/ui-atlas.json` with point sampling). The state machine
-/// above keeps its rows; these numbers only dress them.
-pub mod o023 {
-    /// Reference width the `menu` list is laid out in.
-    pub const REF_W: u32 = 640;
-    /// Reference height the `menu` list is laid out in.
-    pub const REF_H: u32 = 360;
-    /// Center panel (`menu-panel`, `panel` piece) width.
-    pub const PANEL_W: u32 = 210;
-    /// Center panel (`menu-panel`, `panel` piece) height.
-    pub const PANEL_H: u32 = 226;
-    /// Button width (`btn-*`, 160x24 in the `menu` list).
-    pub const BUTTON_W: u32 = 160;
-    /// Button height (`btn-*`, 160x24 in the `menu` list).
-    pub const BUTTON_H: u32 = 24;
-    /// Title (`ARENA`) text scale; subtitle and body rows use scale 1.
-    pub const TITLE_SCALE: u32 = 4;
-    /// Button atlas states in the `menu` list (`button` + `button-primary`
-    /// groups cover all four; `btn-start` shows `hover`).
-    pub const BUTTON_STATES: [&str; 4] = ["normal", "hover", "pressed", "disabled"];
-    /// Body text color (`ink` in `docs/archive/2026-10-08/assets-O-023/tokens.json`).
-    pub const COLOR_INK: &str = "ink";
-    /// Dim text color (`muted` in `docs/archive/2026-10-08/assets-O-023/tokens.json`).
-    pub const COLOR_MUTED: &str = "muted";
-    /// Title text color (`accent` in `docs/archive/2026-10-08/assets-O-023/tokens.json`).
-    pub const COLOR_ACCENT: &str = "accent";
-    /// Text color on the accent button (`onAccent` in tokens).
-    pub const COLOR_ON_ACCENT: &str = "onAccent";
-
-    /// One O-023 menu button row: label, atlas state and text color, in
-    /// `layout.json` order (`btn-continue` is `disabled` until a fight runs).
-    pub const BUTTONS: [(&str, &str, &str); 4] = [
-        ("CONTINUE", "disabled", COLOR_MUTED),
-        ("START", "hover", COLOR_ON_ACCENT),
-        ("OPTIONS", "normal", COLOR_INK),
-        ("QUIT", "normal", COLOR_INK),
-    ];
-}
-
 /// UI-kit-v3 scroll list; same windowing as lobby `visible_slots`. Pure.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct UiScroll;

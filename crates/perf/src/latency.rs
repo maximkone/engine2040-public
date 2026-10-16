@@ -259,9 +259,9 @@ impl LatencyReport {
 }
 
 /// Nearest-rank percentile over a sorted sample slice, owner for the float
-/// reports (`latency`, `core_bench`, `profiler`, `server_budget` and the
-/// `perf` harness stats): rank `round(p / 100 * (n - 1))`, clamped to the
-/// last sample. Empty gives `0.0` so callers without a sample fail soft.
+/// reports (`latency`, `profiler` and the `perf` harness stats): rank
+/// `round(p / 100 * (n - 1))`, clamped to the last sample. Empty gives `0.0`
+/// so callers without a sample fail soft.
 /// Caller: `measure`, `summarize_live` plus the delegated report sites.
 /// Differs deliberately from [`frame_rank`] (ceil rank `ceil(p * n) - 1` so
 /// Rust matches the `tools/proof.mjs` JS gate) and from
@@ -439,8 +439,6 @@ impl HeadlessConditions {
 pub fn headless_report(conditions: &HeadlessConditions) -> Result<String, LatencyError> {
     let (events, effects, presents) = fixture_3f(HEADLESS_SEED, conditions.samples);
     let report = measure(&events, &effects, &presents)?;
-    // Wire the frame-times gate: the same p95 ranks through the CSV round-trip.
-    let _ = frame_csv_verdict(&frame_times_csv(&[report.present_p95_ms]));
     Ok(format!(
         "input_latency_headless seed={HEADLESS_SEED} samples={} warmup={} machine={} profile={}\n\
          {}reference_gpu sim_p50=PENDING sim_p95=PENDING \
@@ -781,7 +779,7 @@ pub struct FrameCsvOutcome {
 
 /// Write per-frame wall times as the proof-gate CSV.
 /// Header `frame,wall_ms`; one row per sample with thousandths.
-/// Caller: window timed-smoke plus [`frame_csv_verdict`] round-trip.
+/// Caller: window timed-smoke; the CSV round-trip is pinned by the tests below.
 #[must_use]
 pub fn frame_times_csv(samples: &[f64]) -> String {
     let mut out = String::from("frame,wall_ms\n");

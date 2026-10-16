@@ -289,6 +289,12 @@ fn is_nan_bits(value: f32) -> bool {
 /// Returns no frames for invalid config or tape (validation owns those
 /// inputs); otherwise one frame per tick in fighter-slot order. Same-machine
 /// oracle for the in-bounds and NaN rules only.
+///
+/// The oracle clamps every step into `[-limit, limit]` and canonicalizes
+/// zeros, mirroring `engine-arena`'s wall clamp, so `InBounds`/`NoNan` cannot
+/// fire on oracle output alone; they are regression guards that fire only if
+/// the clamp/NaN logic below is broken. Synthetic frames in tests prove the
+/// [`check_frame`] predicate itself can fire.
 fn oracle_positions(config: &ArenaConfig, tape: &FighterTape) -> Vec<Vec<[f32; 3]>> {
     if config.validate().is_err() || tape.validate().is_err() {
         return Vec::new();
@@ -335,6 +341,39 @@ fn oracle_positions(config: &ArenaConfig, tape: &FighterTape) -> Vec<Vec<[f32; 3
     frames
 }
 
+/// Check one oracle frame against the wall limit, pushing `NoNan`/`InBounds` fails.
+///
+/// Pure predicate behind [`check_invariants`]; synthetic frames prove it can
+/// fire, while [`oracle_positions`] never emits such frames because it clamps
+/// every step into `[-limit, limit]` and canonicalizes zeros. Caller:
+/// [`check_invariants`] runs this over every oracle frame.
+fn check_frame(limit: f32, frame: &[[f32; 3]], tick: u32, fails: &mut Vec<InvariantFail>) {
+    let mut nan = false;
+    let mut bounds = false;
+    for feet in frame {
+        for axis in [feet[0], feet[2]] {
+            if is_nan_bits(axis) {
+                nan = true;
+            }
+            if !(-limit..=limit).contains(&axis) {
+                bounds = true;
+            }
+        }
+    }
+    if nan {
+        fails.push(InvariantFail {
+            tick,
+            rule: Rule::NoNan,
+        });
+    }
+    if bounds {
+        fails.push(InvariantFail {
+            tick,
+            rule: Rule::InBounds,
+        });
+    }
+}
+
 /// Check every fuzz invariant over one replay.
 ///
 /// Rules: checkpoint ticks never decrease; a tape with effectful inputs never
@@ -342,6 +381,10 @@ fn oracle_positions(config: &ArenaConfig, tape: &FighterTape) -> Vec<Vec<[f32; 3
 /// the wall-clamped arena; no position is NaN by bit pattern. Needs the
 /// config and tape because checkpoints alone carry no positions. Invalid
 /// config or tape yields no findings; validation owns those inputs.
+///
+/// `InBounds`/`NoNan` read [`oracle_positions`] output, which already clamps
+/// into `[-limit, limit]`, so they cannot fire on live corpora; they guard the
+/// clamp/NaN logic itself and are proven firable by synthetic-frame tests.
 pub fn check_invariants(
     config: &ArenaConfig,
     tape: &FighterTape,
@@ -378,30 +421,7 @@ pub fn check_invariants(
     let limit = (config.half_extent_m - FIGHTER_RADIUS_M).max(0.0);
     for (tick, frame) in oracle_positions(config, tape).iter().enumerate() {
         let tick = tick as u32;
-        let mut nan = false;
-        let mut bounds = false;
-        for feet in frame {
-            for axis in [feet[0], feet[2]] {
-                if is_nan_bits(axis) {
-                    nan = true;
-                }
-                if !(-limit..=limit).contains(&axis) {
-                    bounds = true;
-                }
-            }
-        }
-        if nan {
-            fails.push(InvariantFail {
-                tick,
-                rule: Rule::NoNan,
-            });
-        }
-        if bounds {
-            fails.push(InvariantFail {
-                tick,
-                rule: Rule::InBounds,
-            });
-        }
+        check_frame(limit, frame, tick, &mut fails);
     }
     fails
 }
@@ -720,5 +740,59 @@ mod tests {
         }
         assert!(!is_nan_bits(f32::INFINITY));
         assert!(!is_nan_bits(f32::NEG_INFINITY));
+    }
+
+    #[test]
+    fn frame_predicate_fires_on_out_of_bounds_and_nan() {
+        // The predicate behind `InBounds`/`NoNan` can fire on synthetic frames,
+        // proving the rules are not vacuous even though the clamped oracle
+        // never emits such frames on live corpora.
+        let mut fails = Vec::new();
+        check_frame(10.0, &[[11.0, 0.0, 0.0]], 3, &mut fails);
+        assert!(
+            fails
+                .iter()
+                .any(|fail| fail.tick == 3 && fail.rule == Rule::InBounds),
+            "{fails:?}"
+        );
+        let mut fails = Vec::new();
+        check_frame(10.0, &[[f32::NAN, 0.0, 0.0]], 5, &mut fails);
+        assert!(
+            fails
+                .iter()
+                .any(|fail| fail.tick == 5 && fail.rule == Rule::NoNan),
+            "{fails:?}"
+        );
+        let mut clean = Vec::new();
+        check_frame(10.0, &[[0.0, 0.0, 0.0]], 0, &mut clean);
+        assert!(clean.is_empty());
+        let first = {
+            let mut values = Vec::new();
+            check_frame(10.0, &[[11.0, 0.0, 0.0]], 3, &mut values);
+            values
+        };
+        let second = {
+            let mut values = Vec::new();
+            check_frame(10.0, &[[11.0, 0.0, 0.0]], 3, &mut values);
+            values
+        };
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn oracle_output_never_fires_in_bounds_or_no_nan() {
+        // Documents the clamp tautology: the oracle mirrors the wall clamp, so
+        // live corpora never trip these rules; the predicate test above proves
+        // they can fire when fed bad frames.
+        let config = fuzz_config(5);
+        let tape = gen_tape(5, 32, 2);
+        let checkpoints = engine_arena::run(&config, &tape);
+        let fails = check_invariants(&config, &tape, &checkpoints);
+        assert!(
+            !fails
+                .iter()
+                .any(|fail| fail.rule == Rule::InBounds || fail.rule == Rule::NoNan),
+            "{fails:?}"
+        );
     }
 }

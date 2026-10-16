@@ -235,7 +235,6 @@ mod tests {
         let d = fps_snapshot(&world, 10, EYE, YAW, &[], &mut out).expect("empty runs");
         assert!(out.is_empty());
         assert_eq!(d, fps_sight_digest(10, &[]));
-        assert_eq!(d, fps_sight_digest(10, &[]));
     }
 
     #[test]

@@ -12,7 +12,7 @@ Keep scripts small and portable; docs stay in `docs/`.
 
 ## Live tools
 
-94 live scripts. 81 dead tools (39 A-L plus 42 M-Z) were deleted 2026-10-10 and are not listed. Short lines; the script header is the full doc. The list is pinned by `tools/drift-check.test.mjs` (README lists every live `tools/*.mjs`).
+88 live scripts. 81 dead tools (39 A-L plus 42 M-Z) were deleted 2026-10-10 and are not listed. Short lines; the script header is the full doc. The list is pinned by `tools/drift-check.test.mjs` (README lists every live `tools/*.mjs`).
 
 - `tools/affected.mjs` (+ `tools/affected.test.mjs`): node script; see its header.
 - `tools/arch-fitness.mjs` (+ `tools/arch-fitness.test.mjs`): check the crate graph stays acyclic.
@@ -27,7 +27,6 @@ Keep scripts small and portable; docs stay in `docs/`.
 - `tools/cast-safe.mjs` (+ `tools/cast-safe.test.mjs`): node script; see its header.
 - `tools/city-osm.mjs` (+ `tools/city-osm.test.mjs`): convert an offline OSM slice to glTF.
 - `tools/clean.mjs` (+ `tools/clean.test.mjs`): node script; see its header.
-- `tools/clean-run.mjs` (+ `tools/clean-run.test.mjs`): node script; see its header.
 - `tools/compile-cache.mjs` (+ `tools/compile-cache.test.mjs`): node script; see its header.
 - `tools/cook-char.mjs` (+ `tools/cook-char.test.mjs`): check the character intake manifest.
 - `tools/crate-map.mjs` (+ `tools/crate-map.test.mjs`): map each crate to its package, dir and job.
@@ -56,8 +55,6 @@ Keep scripts small and portable; docs stay in `docs/`.
 - `tools/inbox-open.mjs` (+ `tools/inbox-open.test.mjs`): list open inbox rows.
 - `tools/iqa-gate.mjs` (+ `tools/iqa-gate.test.mjs`): gate capture-pair image similarity.
 - `tools/land.mjs` (+ `tools/land.test.mjs`): land a coder packet after PASS review.
-- `tools/lane-board.mjs` (+ `tools/lane-board.test.mjs`): retired lane board read.
-- `tools/lanes.mjs` (+ `tools/lanes.test.mjs`): retired lanes read.
 - `tools/lead-brief.mjs` (+ `tools/lead-brief.test.mjs`): print farm state plus queue rot.
 - `tools/level-check.mjs` (+ `tools/level-check.test.mjs`): gate the hand-placed arena layout.
 - `tools/license-gate.mjs` (+ `tools/license-gate.test.mjs`): gate Cargo licenses.
@@ -67,7 +64,6 @@ Keep scripts small and portable; docs stay in `docs/`.
 - `tools/mp6-check.mjs` (+ `tools/mp6-check.test.mjs`): multiplayer check.
 - `tools/mutants.mjs` (+ `tools/mutants.test.mjs`): node script; see its header.
 - `tools/p4-netsim.mjs` (+ `tools/p4-netsim.test.mjs`): model 64 clients online.
-- `tools/pack-clean.mjs` (+ `tools/pack-clean.test.mjs`): node script; see its header.
 - `tools/packet-gate.mjs` (+ `tools/packet-gate.test.mjs`): gate a packet file.
 - `tools/part-score.mjs` (+ `tools/part-score.test.mjs`): score board parts.
 - `tools/pe-exports.mjs` (+ `tools/pe-exports.test.mjs`): read a Windows PE export table.
@@ -91,11 +87,9 @@ Keep scripts small and portable; docs stay in `docs/`.
 - `tools/research-cap.mjs` (+ `tools/research-cap.test.mjs`): check the research card cap.
 - `tools/rust-quality.mjs` (+ `tools/rust-quality.test.mjs`): score Rust quality.
 - `tools/seal-keys.mjs` (+ `tools/seal-keys.test.mjs`): run cargo legs with seal keys.
-- `tools/seat-ledger.mjs` (+ `tools/seat-ledger.test.mjs`): node script; see its header.
 - `tools/secret-gate.mjs` (+ `tools/secret-gate.test.mjs`): block secret leaks.
 - `tools/ship.mjs` (+ `tools/ship.test.mjs`): node script; see its header.
 - `tools/showcase.mjs` (+ `tools/showcase.test.mjs`): node script; see its header.
-- `tools/showcase-gate.mjs` (+ `tools/showcase-gate.test.mjs`): gate the showcase.
 - `tools/sim-source-scan.mjs` (+ `tools/sim-source-scan.test.mjs`): scan sim sources for banned calls.
 - `tools/sort-once.mjs` (+ `tools/sort-once.test.mjs`): node script; see its header.
 - `tools/sprint-lock.mjs` (+ `tools/sprint-lock.test.mjs`): hold one sprint per tree.
@@ -125,8 +119,6 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/index-check.test.mjs`
 - `tools/knobs-check.test.mjs`
 - `tools/ladder-split.test.mjs`
-- `tools/lanes-cold.test.mjs`
-- `tools/lanes-warm.test.mjs`
 - `tools/plan-index.test.mjs`
 - `tools/pool-queue-batch.test.mjs`
 - `tools/rng-vectors.test.mjs`

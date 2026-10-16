@@ -18,12 +18,12 @@ use super::transport::{self, EndpointError};
 pub enum AdapterTarget {
     /// Local sidecar URL, e.g. `http://127.0.0.1:8080/v1/chat/completions`.
     Local {
-        /// Endpoint URL (loopback only, plain HTTP).
+        /// Endpoint URL (loopback only; `http://` always, `https://` with the provider `tls` feature).
         url: String,
     },
     /// Configured remote host URL plus the secret reference for session auth.
     Remote {
-        /// Endpoint URL (plain HTTP to the configured host).
+        /// Endpoint URL (`http://` always, `https://` with the provider `tls` feature).
         url: String,
         /// Environment variable holding the bearer token at call time.
         auth_env: String,
@@ -64,7 +64,7 @@ impl ProviderAdapter for AdapterHandle {
 /// Why a target was rejected. Carries no secrets by construction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConfigError {
-    /// URL shape or scheme rejected (TLS lives outside this slice).
+    /// URL shape or scheme rejected (`https://` needs the provider `tls` feature).
     BadUrl(EndpointError),
     /// Local targets must name a loopback host.
     NonLoopbackLocal,

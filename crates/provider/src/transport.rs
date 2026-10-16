@@ -62,7 +62,7 @@ impl Endpoint {
 /// Why an endpoint string was rejected. Carries no secrets by construction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EndpointError {
-    /// Only `http://` URLs are accepted; TLS lives outside this slice.
+    /// Accepted schemes: `http://` always, `https://` with the crate `tls` feature.
     Scheme,
     /// Host missing or over 253 bytes.
     Host,
@@ -422,15 +422,11 @@ fn post_json_with(
     };
     stream.write_all(head.as_bytes()).map_err(write_error)?;
     stream.write_all(body.as_bytes()).map_err(write_error)?;
-    let (status, text) = read_response(&mut stream, timeout)?;
+    let (status, text) = read_response(&mut stream)?;
     Ok(TransportResponse { status, body: text })
 }
 
-fn read_response(
-    stream: &mut TransportStream,
-    timeout: Duration,
-) -> Result<(u16, String), TransportError> {
-    let _ = timeout;
+fn read_response(stream: &mut TransportStream) -> Result<(u16, String), TransportError> {
     let mut raw: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {

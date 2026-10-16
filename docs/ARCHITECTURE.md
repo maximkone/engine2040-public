@@ -1,7 +1,7 @@
 # ARCHITECTURE — boundaries before more subsystems
 
 Status: target architecture, with migration work in `ROADMAP.md`. The
-workspace holds 34 crates plus the root package (35 total). A crate name or
+workspace holds 35 crates plus the root package (36 total). A crate name or
 unit test is not evidence that its subsystem is integrated into an application.
 
 ## 1. Dependency direction

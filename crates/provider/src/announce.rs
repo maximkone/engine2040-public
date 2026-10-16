@@ -8,7 +8,8 @@
 //! state, and never imports `arena`. Accepted lines accumulate in a
 //! [`PresentationLog`]; replay reads the log back with the adapter disabled,
 //! so disconnected checkpoints match. Fighter taunts live in [`TauntBook`]
-//! with per-fighter cooldowns. Consumer: game presentation.
+//! with per-fighter cooldowns. In-crate users: `stream`, `openai`,
+//! `anthropic` plus tests; no game-crate consumer yet (verified 2026-10-16).
 
 use std::collections::HashMap;
 

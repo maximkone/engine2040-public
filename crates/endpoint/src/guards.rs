@@ -17,8 +17,8 @@
 //! PORT (ideas reimplemented, zero bytes vendored): flax-mcp
 //! `src/FlaxMcp.Core/Core/Tooling/ToolGuards.cs:40-84` (MIT, Maxim's own
 //! code): `RequireIntent` (every write names its intent) plus
-//! `RequireDryRunId` (the dry-run receipt id rides the `rcpt_` prefix under
-//! a 512 cap) plus the policy gate (mutating writes admit, destructive ones
+//! `RequireDryRunId` (harness-only: the `rcpt_` prefix under a 512 cap;
+//! no live door path mints `rcpt_` ids today) plus the policy gate (mutating writes admit, destructive ones
 //! need an elevated session) plus the args/intent length caps.
 //!
 //! The two verbs behind the gate: `scene.place` ([`VerbClass::Mutating`], it
@@ -222,9 +222,8 @@ pub fn check_intent_len(intent: &str) -> Result<(), GuardError> {
     Ok(())
 }
 
-/// `RequireDryRunId`: every mutating write carries the dry-run receipt id
-/// that its preview minted. The id rides the `rcpt_` prefix under a 512-byte
-/// cap; anything else refuses with a named error plus one recovery. A bad
+/// Harness-only dry-run id shape: the `rcpt_` prefix under a 512-byte
+/// cap. No live door path mints `rcpt_` ids today; anything else refuses with a named error plus one recovery. A bad
 /// prefix is `bad_dry_run_id`, an over-long id is `dry_run_id_too_long`.
 pub fn check_dry_run_id(id: &str) -> Result<(), GuardError> {
     let Some(rest) = id.strip_prefix(DRY_RUN_ID_PREFIX) else {

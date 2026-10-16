@@ -213,10 +213,6 @@ impl Fixed {
     pub fn sin_cos(self) -> (Self, Self) {
         (self.sin(), self.cos())
     }
-    /// Same table lookup as [`Fixed::sin_cos`]; the name predates the table.
-    pub fn cordic_sin_cos(self) -> (Self, Self) {
-        self.sin_cos()
-    }
     /// Tangent; saturates to [`Fixed::MAX`] or [`Fixed::MIN`] where the
     /// cosine is exactly zero.
     pub fn tan(self) -> Self {
@@ -507,8 +503,6 @@ mod tests {
             "cos30={}",
             c.to_bits()
         );
-        let (a, b) = Fixed::from_bits(34315).cordic_sin_cos();
-        assert_eq!((a, b), (s, c));
     }
     #[test]
     fn atan2_quadrants() {

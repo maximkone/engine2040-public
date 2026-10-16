@@ -1,7 +1,7 @@
-//! bc: native BC1/BC3 block codec for in-cook texture compression.
+//! bc: native BC1/BC3/BC4/BC5/BC7 block codec for in-cook texture compression.
 //!
 //! Owner: `engine-assets`; consumer: the texture cooker binds cooked mip
-//! levels through [`encode_image`] (next task wires `CookedTexture`). Units:
+//! levels through [`encode_image`] (`texture_cook::cook_image` calls it). Units:
 //! pixels in, bytes out. Single-threaded row-major encode, so the same
 //! pixels plus format plus slot always emit identical bytes. No third-party
 //! encoder is vendored here; this file is std-only with zero crate imports

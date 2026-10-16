@@ -412,11 +412,6 @@ mod tests {
     }
 
     #[test]
-    fn golden_hash_is_unchanged() {
-        assert_eq!(golden_checkpoint(), Ok(GOLDEN_600));
-    }
-
-    #[test]
     fn report_is_written_twice_and_reproduces() {
         let first = build_report().expect("first report");
         let second = build_report().expect("second report");

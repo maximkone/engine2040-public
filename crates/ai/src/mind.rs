@@ -11,6 +11,12 @@
 //! [`MindError`]; invalid input never panics. Budget: the stream holds at
 //! most [`MAX_EVENTS`] events; recall fills a caller buffer and allocates
 //! nothing; provider work runs off-tick and only recorded actions apply.
+//!
+//! Why a second contract: `engine-provider` owns the serving contract the
+//! adapters enforce, while this module owns the NPC mind shape the game
+//! ticks. The two must agree on budgets and proposal bounds, so any edit
+//! here risks drift against `engine-provider` until a later packet retargets
+//! this mind onto that contract; this change attempts no retarget.
 
 use crate::reaction_delay::{delay_ticks, ready_or_last, ObsRing};
 use engine_core::Fnv64;

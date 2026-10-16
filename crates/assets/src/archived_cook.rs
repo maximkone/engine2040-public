@@ -1,5 +1,6 @@
 //! archived_cook: validated cook envelope borrowed in place, no decode.
-//! Owner `engine-assets`; consumer mmap load path via `wrap_archive_entry`; offline only.
+//! Owner `engine-assets`; planned, no caller yet (verified 2026-10-16):
+//! the mmap load path will consume via `wrap_archive_entry`; offline only.
 //! PORT(rkyv/rkyv@d963abc24301a571605a9bafd963dfed72187fd7:archive validate-once then borrow in place).
 use super::archive::{ArchiveError, ArchiveKind, ArchivedBundle, MAX_ARCHIVE_PAYLOAD_BYTES};
 use super::wire::{push_u32, push_u64, Cursor};

@@ -337,11 +337,11 @@ const REPO_ROOT = dirname(HERE);
 
 function usage() {
   return [
-    "pack-clean.mjs: GM3 release pack plus scripted 5-minute clean-room proof.",
+    "ship.mjs pack: GM3 release pack plus scripted 5-minute clean-room proof.",
     "",
     "Usage:",
-    "  node tools/pack-clean.mjs --help",
-    "  node tools/pack-clean.mjs [--dist <path>] [--target <path>] [--replace]",
+    "  node tools/ship.mjs pack --help",
+    "  node tools/ship.mjs pack [--dist <path>] [--target <path>] [--replace]",
     "                            [--bin <arena-exe>] [--editor-bin <editor-exe>] [--bundle <bundle-bin>]",
     "                            [--frames N | --minutes N] [--log <path>]",
     "                            [--build-log <path>] [--allow-stub] [--skip-build] [--stage-only]",
@@ -1141,12 +1141,12 @@ const REPO_ROOT = dirname(HERE);
 
 function usage() {
   return [
-    "clean-run.mjs: GM3 scripted proof that the packaged Windows build runs clean.",
+    "ship.mjs run: GM3 scripted proof that the packaged Windows build runs clean.",
     "",
     "Usage:",
-    "  node tools/clean-run.mjs --help",
-    "  node tools/clean-run.mjs --dry-run [--fixture <path>] [--work <path>] [--frames N] [--log <path>]",
-    "  node tools/clean-run.mjs [--dist <path>] [--target <path>] [--replace]",
+    "  node tools/ship.mjs run --help",
+    "  node tools/ship.mjs run --dry-run [--fixture <path>] [--work <path>] [--frames N] [--log <path>]",
+    "  node tools/ship.mjs run [--dist <path>] [--target <path>] [--replace]",
     "                            [--frames N | --minutes N] [--log <path>] [--allow-stub]",
     "                            [--bin <arena-exe>] [--bundle <arena-bundle.bin>] [--receipt <path>]",
     "                            [--present-every N] [--present-skip]",

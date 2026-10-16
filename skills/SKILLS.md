@@ -1,4 +1,4 @@
-# Skills - 14 agents, 85 skills in skills/ and 8 in .opencode/skills/
+# Skills - 14 agents, 85 skills in skills/ and 6 in .opencode/skills/
 
 Merge record: center-external `knowledge/TEAMS.md` (not in this repo; 2026-09-27: 25 roles -> 9; each
 merged agent's text kept as a skill). Disk wins.
@@ -69,7 +69,7 @@ agent -> skill -> packet. Packets run foreground (`packet: <name>`).
 | orchestrator (lead) | causal-triage-plan | one wave drops three or more linked errors: causal map plus delegation plan before any fix |
 | orchestrator (lead) | refactor-gates | planning a cross-crate refactor before any edit: blast radius, staged batches, per-batch CI, rollback, HALT until approval |
 | builder / judge | feel-fps-checklist | hit pause, shake, squash, flash or slow motion: prove the hit lands without breaking determinism or budget |
-| pilot / runner | wave8-random | a replay, capture set, or perf run looks wrong: replay/desync vs capture-path vs perf noise before any bug packet |
+| pilot / runner | replay-capture-perf-triage | a replay, capture set, or perf run looks wrong: replay/desync vs capture-path vs perf noise before any bug packet |
 | orchestrator (lead) | land-gate | landing a packet through land.mjs: gate the patch before any commit, refuse on FAIL |
 | builder | asset-budget-checks | potato asset budget in crates/assets: tris, bones, influences, materials, texture pixels inside caps |
 | builder | camera-arm-checks | third-person camera arm in crates/game that shortens at walls and pillars |
@@ -113,7 +113,7 @@ agent/skill edits apply to new sessions. Verify: `opencode debug agent <name> --
 ## In `.opencode/skills/` (OpenCode project folder, not in this table)
 
 - Shelf skills (one master: `C:\empire\center\skills-shared\`, loaded by path; no copies kept here since 2026-10-13): bash-abort-guard, edit-reread, engine-builder, git-one-branch, pwsh-for-bash-writers. `repo-read-first` lives only in the master (no copy here).
-- Engine-only: desync-debug, rust-perf-profiler.
+- Engine-only: desync-debug, grep-overflow-guard, loop-dupfix, rust-perf-profiler, smith-scope-guard.
 - Installed from skillworks 2026-10-10: rust-book, refactoring-to-rust (Rust; both removed 2026-10-12, never loaded); reflection-gate (moved to `docs/archive/2026-10-12/skills/reflection-gate/` on 2026-10-12, never loaded), multi-agent-batch (removed 2026-10-12, never loaded), planning-rows (Dushkin loop skills). rust-borrow-fix was moved to `docs/archive/2026-10-12/skills/rust-borrow-fix/` on 2026-10-12: the bare model passed all 31 rustc repair tasks, so it adds nothing.
 - Verified 2026-10-11 on the live server (`GET /skill`): OpenCode loads `skills/` (through `skills.paths`), `.opencode/skills/` and the global skill folder. A skill whose `description:` holds a colon and a space must be double-quoted, or it is not loaded.
 

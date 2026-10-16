@@ -1,9 +1,10 @@
 //! crack: siege-wall baked fracture plus crack spread on the bonded path.
 //!
-//! Consumer: siege walls in the arena match: one [`CrackWall::bake`]
-//! offline, one [`CrackWall::strike`] per hit. Caller:
+//! Consumer: no arena match caller (verified 2026-10-16); [`CrackWall`] is
+//! exercised by destruction tests and the baked-cache path. Caller:
+//! [`CrackWall::strike`] runs the per-event leg through
 //! [`FractureCache::crack_strike`](crate::fracture::FractureCache::crack_strike)
-//! runs the per-event leg so cache and spread agree in one place. Data
+//! so cache and spread agree in one place. Data
 //! owner: `engine-destruction`. Units: meters, Q16 strain, ticks.
 //! Determinism: table reads plus integer-only spread; the same bake, hits
 //! and seeds give the same bytes and state hash on every PC. Errors:

@@ -1,4 +1,4 @@
-//! net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta. No transport.
+//! net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
 
 pub mod anticheat;
 /// Tick-budgeted pre-cooked map-cell streaming (district/siege cells).

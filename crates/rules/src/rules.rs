@@ -15,7 +15,7 @@ use std::rc::Rc;
 use engine_core::{mix64, Fnv64};
 use rhai::{Engine, Scope};
 
-use crate::error::RulesError;
+use crate::error::{HostFault, LimitKind, RulesError};
 use crate::fixtures::smoke_worlds;
 use crate::host::{self, Action, Emitted, HostCall, HostCtx, World};
 use crate::limits::{Limits, MAX_FIGHTERS, MEM_SLOTS};
@@ -143,9 +143,47 @@ impl TickReport {
         hasher.write_u64(self.faults.len() as u64);
         for fault in &self.faults {
             hasher.write_u8(fault.actor);
-            hasher.write_str(&fault.error.to_string());
+            write_fault_error(&mut hasher, &fault.error);
         }
         hasher.finish()
+    }
+}
+
+/// Fold a fault's kind into a hasher without allocating.
+/// Layout is frozen: one tag byte per `RulesError` variant (plus inner tag for
+/// `Limit`/`Host`).
+fn write_fault_error(hasher: &mut Fnv64, error: &RulesError) {
+    match error {
+        RulesError::TooLarge { .. } => hasher.write_u8(1),
+        RulesError::Float { .. } => hasher.write_u8(2),
+        RulesError::Syntax { .. } => hasher.write_u8(3),
+        RulesError::UnknownVariable { .. } => hasher.write_u8(4),
+        RulesError::UnknownHostCall { .. } => hasher.write_u8(5),
+        RulesError::Forbidden { .. } => hasher.write_u8(6),
+        RulesError::UnboundedLoop { .. } => hasher.write_u8(7),
+        RulesError::Limit { kind } => {
+            hasher.write_u8(8);
+            hasher.write_u8(match kind {
+                LimitKind::Operations => 0,
+                LimitKind::CallDepth => 1,
+                LimitKind::ExprDepth => 2,
+                LimitKind::Data => 3,
+            });
+        }
+        RulesError::Host(fault) => {
+            hasher.write_u8(9);
+            hasher.write_u8(match fault {
+                HostFault::BadTarget(_) => 0,
+                HostFault::BadArg { .. } => 1,
+                HostFault::ActionCap => 2,
+                HostFault::MemSlot(_) => 3,
+            });
+        }
+        RulesError::Arithmetic { .. } => hasher.write_u8(10),
+        RulesError::Thrown { .. } => hasher.write_u8(11),
+        RulesError::Runtime { .. } => hasher.write_u8(12),
+        RulesError::BadWorld { .. } => hasher.write_u8(13),
+        RulesError::NoScript => hasher.write_u8(14),
     }
 }
 

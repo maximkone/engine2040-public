@@ -1,7 +1,8 @@
 //! stream: prioritized asset-streaming queue with memory budgets.
 //!
-//! Owner: `engine-assets`; consumer: the editor asset browser and the game
-//! and editor loaders at frame boundaries. Units: bytes for budgets, reservations
+//! Owner: `engine-assets`; planned, no caller yet (verified 2026-10-16):
+//! the editor asset browser plus game and editor loaders will consume at
+//! frame boundaries. Units: bytes for budgets, reservations
 //! and progress. Higher `priority` completes first, ties break on the blake3
 //! hex id ascending, so the same requests plus the same `publish` calls always
 //! emit the same events. Refusals are typed errors convertible to browser

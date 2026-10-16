@@ -82,9 +82,6 @@ fn foldable(journal: &Journal, doc: &Document, key: u64, batch: &Batch) -> bool 
     if cursor.lane != key {
         return false;
     }
-    if journal.merge_force_keep.contains(&key) {
-        return false;
-    }
     let Some(entry) = journal.past.last() else {
         return false;
     };

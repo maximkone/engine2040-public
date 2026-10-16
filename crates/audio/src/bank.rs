@@ -37,68 +37,6 @@ pub enum BankSound {
     CrowdBed,
 }
 
-// ---------------------------------------------------------------------------
-// O-003 Vol0 content paths (sound-studio adopt by copy, CC0 seed 7).
-// Real clips live under `content/audio/`; they fill the [`Bank`] fields
-// below without changing the [`Bank`] shape or the
-// [`crate::Mixer::play`] + [`Bank::get`] play path. Decoding stays
-// caller-side (see `decode_wav` behind the `device` feature), so this
-// file keeps no file IO and the headless default stays std-only.
-// ---------------------------------------------------------------------------
-
-/// Vol0 pack root in the engine tree.
-pub const VOL0_DIR: &str = "content/audio";
-/// Vol0 manifest copied from sound-studio `sounds/pack/`.
-pub const VOL0_MANIFEST: &str = "content/audio/engine2040-vol0-manifest.json";
-/// Vol0 impact clips (12 files).
-pub const VOL0_IMPACT_DIR: &str = "content/audio/impacts";
-/// Vol0 footstep clips (24 files).
-pub const VOL0_FOOTSTEP_DIR: &str = "content/audio/footsteps";
-
-/// Vol0 impact file names: wood, metal, stone, flesh x small, medium, large.
-pub const VOL0_IMPACTS: [&str; 12] = [
-    "wood-small.wav",
-    "wood-medium.wav",
-    "wood-large.wav",
-    "metal-small.wav",
-    "metal-medium.wav",
-    "metal-large.wav",
-    "stone-small.wav",
-    "stone-medium.wav",
-    "stone-large.wav",
-    "flesh-small.wav",
-    "flesh-medium.wav",
-    "flesh-large.wav",
-];
-
-/// Vol0 footstep file names: grass, gravel, metal, stone, water, wood x 01-04.
-pub const VOL0_FOOTSTEPS: [&str; 24] = [
-    "grass-01.wav",
-    "grass-02.wav",
-    "grass-03.wav",
-    "grass-04.wav",
-    "gravel-01.wav",
-    "gravel-02.wav",
-    "gravel-03.wav",
-    "gravel-04.wav",
-    "metal-01.wav",
-    "metal-02.wav",
-    "metal-03.wav",
-    "metal-04.wav",
-    "stone-01.wav",
-    "stone-02.wav",
-    "stone-03.wav",
-    "stone-04.wav",
-    "water-01.wav",
-    "water-02.wav",
-    "water-03.wav",
-    "water-04.wav",
-    "wood-01.wav",
-    "wood-02.wav",
-    "wood-03.wav",
-    "wood-04.wav",
-];
-
 /// Preloaded playback samples: hit, footstep and crowd-bed voices. The game
 /// plays these through [`crate::Mixer::play`]; the spatial mix spatializes the
 /// same handles.

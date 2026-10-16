@@ -181,8 +181,9 @@ pub const TABLES_V1: Tables = Tables::v1();
 
 /// The readable-timing row (version 2): startup 15 ticks, parry window 7.
 /// The 15/7 literals live once in [`v2_rows`](crate::tables::v2_rows); this
-/// row reuses them so the numbers never duplicate. The live step still runs
-/// [`TABLES_V1`]; the next slice wires the v2 caller.
+/// row reuses them so the numbers never duplicate. The V1 entries step
+/// [`TABLES_V1`]; the arena steps this row through [`try_step_v2_into`]
+/// and [`try_step_v2_with_cues_into`].
 pub const TABLES_V2: Tables = crate::tables::v2_rows();
 
 /// [`Tables`] for one Ludus Magnus class over [`TABLES_V2`].
@@ -250,43 +251,6 @@ pub fn poise_regen_delay_for_tables(tables: &Tables) -> u32 {
     }
 }
 
-/// Freeze ticks for one strike kind under explicit rows, at 60 Hz.
-///
-/// Caller: [`resolve_strike`] hit branch reads the strike kind. Units:
-/// ticks. Determinism: pure match on V2 timing plus kind; same
-/// timing plus same kind give same freeze. Errors: none; non-V2 timing gives
-/// the single [`HITSTOP_TICKS`], unknown kinds give 0 under V2, never panic.
-pub fn hitstop_for_kind(tables: &Tables, kind: u8) -> u32 {
-    use crate::depth::{INPUT_HEAVY, INPUT_LIGHT};
-    if tables.attack_startup_ticks != TABLES_V2.attack_startup_ticks
-        || tables.parry_window_ticks != TABLES_V2.parry_window_ticks
-    {
-        return tables.hitstop_ticks;
-    }
-    if kind == INPUT_LIGHT {
-        crate::tables::LIGHT_HITSTOP_TICKS_V2
-    } else if kind == INPUT_HEAVY {
-        crate::tables::HEAVY_HITSTOP_TICKS_V2
-    } else {
-        0
-    }
-}
-
-/// Freeze ticks for one parry under explicit rows, at 60 Hz.
-///
-/// Caller: [`resolve_strike`] parry branch. Units: ticks. Determinism: pure
-/// compare on V2 timing; V2 timing gives 8, every other timing gives the
-/// single row, so V1 replays stay byte-identical. Errors: none.
-pub fn hitstop_for_parry(tables: &Tables) -> u32 {
-    if tables.attack_startup_ticks == TABLES_V2.attack_startup_ticks
-        && tables.parry_window_ticks == TABLES_V2.parry_window_ticks
-    {
-        crate::tables::PARRY_HITSTOP_TICKS_V2
-    } else {
-        tables.hitstop_ticks
-    }
-}
-
 /// Freeze ticks for one impacting strike under explicit rows, at 60 Hz.
 ///
 /// Caller: [`resolve_strike`] (parry branch plus the clean-hit branch), so the
@@ -295,8 +259,6 @@ pub fn hitstop_for_parry(tables: &Tables) -> u32 {
 /// (parry 8 wins over kind, otherwise light 3, heavy 6, unknown 0); every
 /// other row gives the single row, so V1 replays stay byte-identical.
 /// Errors: none.
-///
-/// Caller: `crates/combat/src/fight.rs` (`resolve_strike`).
 #[must_use]
 pub fn hitstop_for_impact(tables: &Tables, kind: u8, parried: bool) -> u32 {
     if tables.attack_startup_ticks != TABLES_V2.attack_startup_ticks
@@ -2154,15 +2116,29 @@ mod tests {
     #[test]
     fn hitstop_kinds() {
         use crate::depth::{INPUT_HEAVY, INPUT_LIGHT};
-        // Pure helper: V1 keeps the single row, V2 carries per-kind rows.
-        assert_eq!(hitstop_for_kind(&TABLES_V1, INPUT_LIGHT), HITSTOP_TICKS);
-        assert_eq!(hitstop_for_kind(&TABLES_V1, INPUT_HEAVY), HITSTOP_TICKS);
-        assert_eq!(hitstop_for_parry(&TABLES_V1), HITSTOP_TICKS);
-        assert_eq!(hitstop_for_kind(&TABLES_V2, INPUT_LIGHT), 3);
-        assert_eq!(hitstop_for_kind(&TABLES_V2, INPUT_HEAVY), 6);
-        assert_eq!(hitstop_for_parry(&TABLES_V2), 8);
+        // Migrated pins: the V2 kind map lives in `crate::hitstop_kind`;
+        // V1 keeps the single row through the live `hitstop_for_impact`.
+        assert_eq!(
+            hitstop_for_impact(&TABLES_V1, INPUT_LIGHT, false),
+            HITSTOP_TICKS
+        );
+        assert_eq!(
+            hitstop_for_impact(&TABLES_V1, INPUT_HEAVY, false),
+            HITSTOP_TICKS
+        );
+        assert_eq!(
+            hitstop_for_impact(&TABLES_V1, INPUT_LIGHT, true),
+            HITSTOP_TICKS
+        );
+        assert_eq!(crate::hitstop_kind::for_kind(INPUT_LIGHT), 3);
+        assert_eq!(crate::hitstop_kind::for_kind(INPUT_HEAVY), 6);
+        assert_eq!(crate::hitstop_kind::for_parry(), 8);
+        assert_eq!(hitstop_for_impact(&TABLES_V2, INPUT_LIGHT, false), 3);
+        assert_eq!(hitstop_for_impact(&TABLES_V2, INPUT_HEAVY, false), 6);
+        assert_eq!(hitstop_for_impact(&TABLES_V2, INPUT_LIGHT, true), 8);
         // Failure case: unknown kind never freezes under V2.
-        assert_eq!(hitstop_for_kind(&TABLES_V2, 9), 0);
+        assert_eq!(crate::hitstop_kind::for_kind(9), 0);
+        assert_eq!(hitstop_for_impact(&TABLES_V2, 9, false), 0);
         // Wired caller: V1 parry still freezes the single row.
         let mut v1 = FightState::new(2).unwrap();
         v1.fighters[0].is_attacking = true;
@@ -2233,12 +2209,21 @@ mod tests {
         use crate::depth::{INPUT_HEAVY, INPUT_LIGHT};
         // Class rows over V2 keep V2 timing with scaled damage; they freeze
         // per-kind like V2, not the single row, so feel surveys read the same
-        // freeze as the base timing.
+        // freeze as the base timing. Kind rows are pinned in
+        // `crate::hitstop_kind`; class rows prove it through the live impact.
         for class in Class::all() {
             let row = class_tables(class);
-            assert_eq!(hitstop_for_kind(&row, INPUT_LIGHT), 3, "{class:?} light");
-            assert_eq!(hitstop_for_kind(&row, INPUT_HEAVY), 6, "{class:?} heavy");
-            assert_eq!(hitstop_for_parry(&row), 8, "{class:?} parry");
+            assert_eq!(
+                crate::hitstop_kind::for_kind(INPUT_LIGHT),
+                3,
+                "{class:?} light map"
+            );
+            assert_eq!(
+                crate::hitstop_kind::for_kind(INPUT_HEAVY),
+                6,
+                "{class:?} heavy map"
+            );
+            assert_eq!(crate::hitstop_kind::for_parry(), 8, "{class:?} parry map");
             assert_eq!(
                 hitstop_for_impact(&row, INPUT_LIGHT, false),
                 3,
@@ -2259,16 +2244,20 @@ mod tests {
         for class in Class::all() {
             let row = crate::classes::tables(class, TABLES_V1);
             assert_eq!(
-                hitstop_for_kind(&row, INPUT_LIGHT),
+                hitstop_for_impact(&row, INPUT_LIGHT, false),
                 HITSTOP_TICKS,
                 "{class:?} v1 light"
             );
             assert_eq!(
-                hitstop_for_kind(&row, INPUT_HEAVY),
+                hitstop_for_impact(&row, INPUT_HEAVY, false),
                 HITSTOP_TICKS,
                 "{class:?} v1 heavy"
             );
-            assert_eq!(hitstop_for_parry(&row), HITSTOP_TICKS, "{class:?} v1 parry");
+            assert_eq!(
+                hitstop_for_impact(&row, INPUT_LIGHT, true),
+                HITSTOP_TICKS,
+                "{class:?} v1 parry"
+            );
         }
     }
 

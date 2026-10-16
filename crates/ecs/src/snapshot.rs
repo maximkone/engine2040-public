@@ -1,8 +1,7 @@
-//! snapshot: versioned canonical bytes + hash, exact restore. Slot order, FNV-1a64.
+//! snapshot: versioned canonical bytes + hash, restore. Slot order, FNV-1a64. Count is u32 LE.
 
 use std::hash::Hasher;
 
-use engine_core::digest::{TwinFold, RC9_COMBINED_FOLD_ENABLED};
 pub use engine_core::hash_bytes;
 use engine_core::Fnv64;
 
@@ -210,42 +209,11 @@ pub fn snapshot(world: &World) -> Snapshot {
     let mut bytes = Vec::new();
     world.append_canonical(&mut bytes);
     let hash = hash_bytes(&bytes);
-    if RC9_COMBINED_FOLD_ENABLED {
-        let _ = combined_tick_hash(world, &[]);
-        let _ = first_div(world, world, &[], &[]);
-    }
     Snapshot {
         version: SNAPSHOT_VERSION,
         bytes,
         hash,
     }
-}
-
-/// Fused tick hash beside the full rehash.
-///
-/// One index-ordered pass: alive positions feed A, four words per slot feed B, bit-for-bit the two-pass combine. Only [`snapshot`] runs it, behind the flag. Units: hash (u64). Determinism: integer FNV, index order.
-pub(crate) fn combined_tick_hash(world: &World, other_words: &[u32]) -> u64 {
-    let mut fold = TwinFold::new();
-    for (i, alive) in world.alive.iter().enumerate() {
-        if *alive {
-            fold.push_a_u32(world.pos[i].x.to_bits());
-            fold.push_a_u32(world.pos[i].y.to_bits());
-        }
-        let base = i.saturating_mul(4);
-        if base < other_words.len() {
-            let end = base.saturating_add(4).min(other_words.len());
-            for word in &other_words[base..end] {
-                fold.push_b_u32(*word);
-            }
-        }
-    }
-    let covered = world.alive.len().saturating_mul(4);
-    if other_words.len() > covered {
-        for word in &other_words[covered..] {
-            fold.push_b_u32(*word);
-        }
-    }
-    fold.finish()
 }
 
 /// First divergent slot/component (0 pos, 1 other); equal lengths, None iff equal.
@@ -269,7 +237,7 @@ pub(crate) fn first_div(a: &World, b: &World, oa: &[u32], ob: &[u32]) -> Option<
     None
 }
 
-/// Restore the exact world [`snapshot`] captured.
+/// Restore the world [`snapshot`] captured (slot count is u32 LE).
 pub fn restore(bytes: &[u8]) -> Result<World, SnapshotError> {
     let mut pos = 0;
     let version = read_u16(bytes, &mut pos)?;
@@ -499,10 +467,9 @@ mod tests {
     }
 
     #[test]
-    fn fused_tick_hash_equals_two_pass_on_seeded_11k() {
-        use engine_core::hash::FNV64_PRIME;
-        use engine_core::{Fnv64, Rng};
-        let mut world = World::new();
+    fn first_div_names_first_difference_on_seeded_11k() {
+        use engine_core::Rng;
+        let world = World::new();
         let mut rng = Rng::new(2040);
         let mut other = Vec::with_capacity(44_000);
         for _ in 0..11_000 {
@@ -517,35 +484,8 @@ mod tests {
                 other.push(rng.next_u32());
             }
         }
-        let oracle = |world: &World, other: &[u32]| {
-            let mut a = Fnv64::new();
-            for i in 0..world.alive.len() {
-                if world.alive[i] {
-                    a.write_u32(world.pos[i].x.to_bits());
-                    a.write_u32(world.pos[i].y.to_bits());
-                }
-            }
-            let mut b = Fnv64::new();
-            for word in other {
-                b.write_u32(*word);
-            }
-            a.finish() ^ b.finish().wrapping_mul(FNV64_PRIME)
-        };
-        let expected = oracle(&world, &other);
-        assert_eq!(super::combined_tick_hash(&world, &other), expected);
-        assert!(world.kill(7));
-        let killed = oracle(&world, &other);
-        assert_ne!(killed, expected, "a kill must move the hash");
-        assert_eq!(super::combined_tick_hash(&world, &other), killed);
-        world.pos[5_000].x = f32::from_bits(world.pos[5_000].x.to_bits().wrapping_add(1));
-        assert_ne!(super::combined_tick_hash(&world, &other), killed);
         let mut moved_other = other.clone();
         moved_other[9_999] = moved_other[9_999].wrapping_add(1);
-        assert_ne!(super::combined_tick_hash(&world, &moved_other), killed);
-        assert_eq!(
-            super::combined_tick_hash(&world, &other),
-            oracle(&world, &other)
-        );
         assert_eq!(super::first_div(&world, &world, &other, &other), None);
         assert_eq!(
             super::first_div(&world, &world, &other, &moved_other),

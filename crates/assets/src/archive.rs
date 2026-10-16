@@ -1,15 +1,17 @@
 //! archive: zero-copy archived bundles over a shared byte mapping.
 //!
-//! Owner: `engine-assets`; consumer: game and editor startup load the bundle
-//! once through [`map_file`] and serve every entry as a borrowed slice, and
-//! the stream queue binds the same mapping at frame boundaries. Units:
-//! payload bytes in and out, open time in whole milliseconds. Same staged
-//! entries in the same order always finish to the same bytes. Payloads are
-//! opaque: integrity uses FNV-1a64 checks (corruption/truncation detection,
-//! never crypto), while digest authority stays with the bundle's blake3 headers.
-//! Open timing uses the wall clock at the IO boundary; it never feeds the
-//! simulation hash. Opening costs one validation pass with no per-entry
-//! copy; entry access afterwards is O(1) borrowed slices with no allocation.
+//! Owner: `engine-assets`; planned, no caller yet (verified 2026-10-16):
+//! game and editor startup will load the bundle once through [`map_file`]
+//! and serve every entry as a borrowed slice, and the stream queue will bind
+//! the same mapping at frame boundaries. Units: payload bytes in and out,
+//! open time in whole milliseconds. Same staged entries in the same order
+//! always finish to the same bytes. Payloads are opaque: integrity uses
+//! FNV-1a64 checks (corruption/truncation detection, never crypto), while
+//! digest authority stays with the bundle's blake3 headers. Open timing uses
+//! the wall clock at the IO boundary; it never feeds the simulation hash.
+//! Opening costs one validation pass with no per-entry copy plus one
+//! name-index sort; entry lookups are O(log n) over that index and serve
+//! borrowed slices with no allocation.
 
 use super::wire::{bound_chars, push_u16, push_u32, push_u64, Cursor, Short};
 use engine_core::hash_bytes;
@@ -45,7 +47,9 @@ const ARCHIVE_TRAILER_LEN: usize = 8;
 
 /// Payload kind of one archive entry; one byte on the wire, matching the
 /// bundle discriminants so archives wrap bundles without renumbering.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// Declaration order matches the wire discriminants, so the derived order
+/// is the wire order with no numeric cast.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[repr(u8)]
 pub enum ArchiveKind {
     /// Opaque cooked-mesh payload bytes.
@@ -346,12 +350,15 @@ pub struct ArchiveStats {
 }
 
 /// A verified archive over a shared byte mapping: the table is parsed once
-/// on [`ArchivedBundle::open`] (one validation pass, no per-entry copy) and
-/// every entry afterwards borrows from the mapping.
+/// on [`ArchivedBundle::open`] (one validation pass, no per-entry copy, plus
+/// one name-index sort) and every entry afterwards borrows from the mapping.
 #[derive(Clone, Debug)]
 pub struct ArchivedBundle {
     buffer: Arc<[u8]>,
     index: Vec<EntryMeta>,
+    /// Positions into `index` in `(kind, name)` order; `find` binary-searches
+    /// this so lookups are O(log n) with no allocation.
+    lookup: Vec<usize>,
     open_ms: u64,
 }
 
@@ -361,9 +368,11 @@ impl ArchivedBundle {
     pub fn open(buffer: Arc<[u8]>) -> Result<Self, ArchiveError> {
         let started = Instant::now();
         let index = parse(&buffer)?;
+        let lookup = build_lookup(&index);
         Ok(Self {
             buffer,
             index,
+            lookup,
             open_ms: started.elapsed().as_millis() as u64,
         })
     }
@@ -415,16 +424,30 @@ impl ArchivedBundle {
     }
 
     /// Find an entry by kind plus name; names are unique per archive.
+    /// O(log n) over the name index built once in [`ArchivedBundle::open`].
     /// The returned slice borrows from the mapping: no copy, no allocation.
     pub fn find(&self, kind: ArchiveKind, name: &str) -> Option<ArchivedEntry<'_>> {
-        self.index
-            .iter()
-            .find(|meta| meta.kind == kind && meta.name == name)
-            .map(|meta| ArchivedEntry {
-                kind: meta.kind,
-                name: meta.name.as_str(),
-                bytes: &self.buffer[meta.offset..meta.offset + meta.len],
-            })
+        let want = (kind, name);
+        let mut lo = 0usize;
+        let mut hi = self.lookup.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let at = self.lookup[mid];
+            let meta = &self.index[at];
+            let have = (meta.kind, meta.name.as_str());
+            if have < want {
+                lo = mid + 1;
+            } else if have > want {
+                hi = mid;
+            } else {
+                return Some(ArchivedEntry {
+                    kind: meta.kind,
+                    name: meta.name.as_str(),
+                    bytes: &self.buffer[meta.offset..meta.offset + meta.len],
+                });
+            }
+        }
+        None
     }
 
     /// Every entry in writer order, each borrowed from the mapping.
@@ -435,6 +458,15 @@ impl ArchivedBundle {
             bytes: &self.buffer[meta.offset..meta.offset + meta.len],
         })
     }
+}
+
+/// Positions into `metas` in `(kind, name)` order for O(log n) `find`.
+fn build_lookup(metas: &[EntryMeta]) -> Vec<usize> {
+    let mut lookup: Vec<usize> = (0..metas.len()).collect();
+    lookup.sort_unstable_by(|&a, &b| {
+        (metas[a].kind, metas[a].name.as_str()).cmp(&(metas[b].kind, metas[b].name.as_str()))
+    });
+    lookup
 }
 
 /// Parse the frame, verify the archive checksum plus every entry checksum,

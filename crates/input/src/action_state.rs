@@ -91,11 +91,6 @@ impl ActionState {
         self.current
     }
 
-    /// Previous tick digital bits.
-    pub fn prev_bits(self) -> u64 {
-        self.previous
-    }
-
     /// Analog axis `i` in thousandths this tick (`0` out of range).
     pub fn analog(self, axis: u8) -> i32 {
         let i = usize::from(axis);

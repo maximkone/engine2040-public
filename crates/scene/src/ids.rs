@@ -46,11 +46,6 @@ impl ObjectId {
         Self(Uuid::new_v4())
     }
 
-    /// Wrap an existing UUID (import boundaries only).
-    pub fn from_uuid(id: Uuid) -> Self {
-        Self(id)
-    }
-
     /// The wrapped UUID.
     pub fn as_uuid(self) -> Uuid {
         self.0

@@ -641,13 +641,17 @@ impl Default for ReplicationClient {
 /// Mirror one authoritative [`crate::server::Server`] session into the
 /// replication world: every linked player spawns or moves its entity (cm to
 /// mm, saturating), and entities whose player left despawn. Returns the
-/// mirrored entity count. This is the consumer seam: server truth in,
-/// component replication out.
+/// mirrored entity count on success. This is the consumer seam: server truth
+/// in, component replication out. Caller state: tests only (`run_session`,
+/// `session_bridge_tracks_authority`); no production session drives it yet.
+/// Errors: the first [`ReplicateError`] from `spawn`/`set_transform`/`despawn`
+/// (full table or duplicate entity) returns at once; earlier links in this
+/// call may already have applied.
 pub fn publish_server_positions(
     repl: &mut ReplicationServer,
     session: &crate::server::Server,
     links: &[(u32, EntityId)],
-) -> usize {
+) -> Result<usize, ReplicateError> {
     for (player, entity) in links {
         match session.pos(*player) {
             Some((x_cm, y_cm)) => {
@@ -658,22 +662,22 @@ pub fn publish_server_positions(
                 };
                 match repl.entry(*entity) {
                     None => {
-                        let _ = repl.spawn(*entity, transform, Vitals::FULL);
+                        repl.spawn(*entity, transform, Vitals::FULL)?;
                     }
                     Some(current) if current.transform != transform => {
-                        let _ = repl.set_transform(*entity, transform);
+                        repl.set_transform(*entity, transform)?;
                     }
                     _ => {}
                 }
             }
             None => {
                 if repl.entry(*entity).is_some() {
-                    let _ = repl.despawn(*entity);
+                    repl.despawn(*entity)?;
                 }
             }
         }
     }
-    repl.len()
+    Ok(repl.len())
 }
 
 /// Canonical fold over an entity set: count plus sorted LE field bytes,
@@ -972,7 +976,7 @@ mod tests {
                 assert!(session.submit(*player, bits));
             }
             session.tick();
-            publish_server_positions(&mut server, &session, &links);
+            publish_server_positions(&mut server, &session, &links).expect("publish positions");
             server.advance();
             for client_id in [1u32, 2u32] {
                 let message = server.message_for(client_id).expect("message fits");
@@ -1113,7 +1117,7 @@ mod tests {
                 assert!(session.submit(*player, (step + index as u32) & 0xF));
             }
             session.tick();
-            publish_server_positions(&mut server, &session, &links);
+            publish_server_positions(&mut server, &session, &links).expect("publish positions");
             server.advance();
             let message = server.message_for(1).expect("message");
             let decoded =
@@ -1131,13 +1135,32 @@ mod tests {
         // A leaver's entity despawns on the next publish and the tombstone
         // replicates: the mirror drops the entity and still agrees.
         assert!(session.leave(players[1]));
-        publish_server_positions(&mut server, &session, &links);
+        publish_server_positions(&mut server, &session, &links).expect("publish tombstone");
         server.advance();
         let message = server.message_for(1).expect("tombstone");
         assert_eq!(message.despawns, vec![EB]);
         client.apply(&message).expect("despawn applies");
         assert_eq!(client.entry(EB), None);
         assert_eq!(client.world_hash(), server.world_hash());
+    }
+
+    #[test]
+    fn publish_full_table_refuses_loudly() {
+        let mut session = Server::with_seed(11);
+        let player = session.join().expect("join");
+        let mut world = ReplicationServer::new();
+        for id in 0..MAX_ENTITIES as u32 {
+            world
+                .spawn(EntityId(id), transform(id as i32, 0), Vitals::FULL)
+                .expect("fill");
+        }
+        assert_eq!(world.len(), MAX_ENTITIES);
+        let before = world.world_hash();
+        let err = publish_server_positions(&mut world, &session, &[(player, EntityId(9999))])
+            .expect_err("full table must refuse");
+        assert_eq!(err, ReplicateError::TooManyEntities(MAX_ENTITIES + 1));
+        assert_eq!(world.world_hash(), before, "refused spawn changes nothing");
+        assert_eq!(world.entry(EntityId(9999)), None);
     }
 
     #[test]

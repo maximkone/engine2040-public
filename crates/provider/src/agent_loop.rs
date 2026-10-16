@@ -3,6 +3,7 @@
 //! Determinism: same goal plus same planner and door answers always yield
 //! the same transcript and checkpoint; no wall clock, no thread order.
 //! Errors: [`LoopError`] names budget, stuck and tool refusals.
+//! Status: no in-repo consumer yet (verified 2026-10-16).
 //! PORT(0xPlaygrounds/rig agent shape, reimplemented std-only, no dep)
 
 use engine_core::Fnv64;

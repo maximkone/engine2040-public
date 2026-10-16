@@ -23,7 +23,7 @@
 //! Units: digests are FNV-1a 64 (`engine_core`), non-adversarial; files are
 //! pretty-printed JSON, bounded by [`MAX_CASSETTE_BYTES`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -946,7 +946,7 @@ pub struct CassetteAdapter<A> {
     mode: CassetteMode,
     label: String,
     served: BTreeMap<u64, (u64, AdapterOutcome)>,
-    log: Vec<CassetteEvent>,
+    log: VecDeque<CassetteEvent>,
 }
 
 impl<A: ProviderAdapter> CassetteAdapter<A> {
@@ -968,7 +968,7 @@ impl<A: ProviderAdapter> CassetteAdapter<A> {
             mode,
             label: label.to_owned(),
             served: BTreeMap::new(),
-            log: Vec::new(),
+            log: VecDeque::new(),
         })
     }
 
@@ -997,7 +997,7 @@ impl<A: ProviderAdapter> CassetteAdapter<A> {
 
     /// What this adapter did, oldest first, at most [`MAX_LOG_EVENTS`].
     #[must_use]
-    pub fn log(&self) -> &[CassetteEvent] {
+    pub fn log(&self) -> &VecDeque<CassetteEvent> {
         &self.log
     }
 
@@ -1012,9 +1012,9 @@ impl<A: ProviderAdapter> CassetteAdapter<A> {
 
     fn note(&mut self, event: CassetteEvent) {
         if self.log.len() >= MAX_LOG_EVENTS {
-            self.log.remove(0);
+            self.log.pop_front();
         }
-        self.log.push(event);
+        self.log.push_back(event);
     }
 
     fn key_and_image(
@@ -1170,7 +1170,7 @@ pub fn check_double_fidelity(
     expected_miss: Option<MissReason>,
     actual_miss: Option<MissReason>,
     image: &RequestImage,
-    log: &[CassetteEvent],
+    log: &VecDeque<CassetteEvent>,
 ) -> Result<(), CassetteError> {
     let digest = image.digest();
     match (expected_miss, actual_miss) {
@@ -1492,7 +1492,10 @@ mod tests {
         let (live, recorder) = record_live(&dir, &stub, 1);
         assert!(live.result.is_ok(), "live exchange through the stub");
         assert!(live.dispatched_remote);
-        assert!(matches!(recorder.log(), [CassetteEvent::Recorded { .. }]));
+        assert!(matches!(
+            recorder.log().as_slices(),
+            ([CassetteEvent::Recorded { .. }], [])
+        ));
         let files = dir.files();
         assert_eq!(files.len(), 1, "one entry on disk");
         let before = fs::read(&files[0]).expect("entry reads");
@@ -1517,7 +1520,10 @@ mod tests {
         for (w, _) in &replays {
             assert_eq!(w.inner().socket_attempts(), 0, "no socket attempt");
             assert_eq!(w.inner().transport_calls(), 0, "no exchange");
-            assert!(matches!(w.log(), [CassetteEvent::Replayed { .. }]));
+            assert!(matches!(
+                w.log().as_slices(),
+                ([CassetteEvent::Replayed { .. }], [])
+            ));
         }
         assert_eq!(stub.hits(), hits, "the stub saw nothing during replay");
         assert_eq!(fs::read(&files[0]).expect("entry reads"), before);
@@ -1793,13 +1799,19 @@ mod tests {
         let stub = StubServer::spawn_raw(200, String::from("this is not json"));
         let (live, rec) = record_live(&dir, &stub, 1);
         assert_eq!(live.result, Err(AiError::MalformedOutput));
-        assert!(matches!(rec.log(), [CassetteEvent::Recorded { .. }]));
+        assert!(matches!(
+            rec.log().as_slices(),
+            ([CassetteEvent::Recorded { .. }], [])
+        ));
         let dead = dead_url();
         let mut w = replayer(&dir, openai(&dead));
         let out = ask_via(&mut w, &remote_request(1), &dead);
         assert_eq!(out.result, Err(AiError::MalformedOutput));
         assert!(!out.mutated);
-        assert!(matches!(w.log(), [CassetteEvent::Replayed { .. }]));
+        assert!(matches!(
+            w.log().as_slices(),
+            ([CassetteEvent::Replayed { .. }], [])
+        ));
         assert_eq!(w.inner().socket_attempts(), 0);
     }
 
@@ -1809,7 +1821,10 @@ mod tests {
         let quota = StubServer::spawn_raw(429, String::from("{}"));
         let (out, rec) = record_live(&dir, &quota, 1);
         assert_eq!(out.result, Err(AiError::QuotaAuth));
-        assert!(matches!(rec.log(), [CassetteEvent::Skipped { .. }]));
+        assert!(matches!(
+            rec.log().as_slices(),
+            ([CassetteEvent::Skipped { .. }], [])
+        ));
 
         // A request the contract refuses never reached a model: its
         // `MalformedOutput` belongs to the caller and must not be filed.
@@ -1822,7 +1837,10 @@ mod tests {
         bad.schema_version = 2;
         let out = ask_via(&mut rec, &bad, &url);
         assert_eq!(out.result, Err(AiError::MalformedOutput));
-        assert!(matches!(rec.log(), [CassetteEvent::Skipped { .. }]));
+        assert!(matches!(
+            rec.log().as_slices(),
+            ([CassetteEvent::Skipped { .. }], [])
+        ));
         assert!(
             dir.files().is_empty(),
             "nothing the model said, nothing filed"
@@ -1927,10 +1945,11 @@ mod tests {
         let ask = remote_request(1);
         let image = RequestImage::of(&ask, recorder.inner().request_pins());
         let dead = dead_url();
-        let mut log = recorder.log().to_vec();
+        let mut log: std::collections::VecDeque<CassetteEvent> =
+            recorder.log().iter().cloned().collect();
         let mut w = replayer(&dir, openai(&dead));
         let out = ask_via(&mut w, &remote_request(1), &dead);
-        log.extend_from_slice(w.log());
+        log.extend(w.log().iter().cloned());
         assert_eq!(out.result, live.result);
         assert!(!out.dispatched_remote);
         assert_eq!(w.inner().socket_attempts(), 0);
@@ -1959,8 +1978,9 @@ mod tests {
             w.last_miss(),
             Some(CassetteError::Miss(MissReason::Changed(expected)))
         );
-        let mut combined = recorder.log().to_vec();
-        combined.extend_from_slice(w.log());
+        let mut combined: std::collections::VecDeque<CassetteEvent> =
+            recorder.log().iter().cloned().collect();
+        combined.extend(w.log().iter().cloned());
         let actual = match w.last_miss() {
             Some(CassetteError::Miss(reason)) => Some(reason),
             _ => None,

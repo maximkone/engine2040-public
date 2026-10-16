@@ -572,11 +572,9 @@ mod tests {
     #[test]
     fn ping_80ms_maps_inside_the_window() {
         // 80 ms one-way at 60 Hz is 4 ticks: inside the 5-tick window.
-        assert_eq!(4, 4);
         assert!(4 <= u32::from(DEFAULT_WINDOW_TICKS));
         assert_eq!(ticks_to_ms(5), 83);
         // The full window covers the scripted ping with one tick of margin.
-        assert_eq!(4, 4);
     }
 
     #[test]

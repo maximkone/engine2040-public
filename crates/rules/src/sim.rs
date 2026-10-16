@@ -710,7 +710,6 @@ mod fps_tests {
         );
         assert_eq!(played.wins(), (2, 1), "wins split via match");
         assert_eq!(played.rounds_played(), 4, "ties replay via match");
-        assert_eq!(played.digest(), played.digest(), "digest repeats via match");
         assert_ne!(
             FpsMatch::new().digest(),
             played.digest(),

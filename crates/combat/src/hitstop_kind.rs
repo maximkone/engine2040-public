@@ -1,6 +1,9 @@
 //! Per-kind hit-stop freeze rows: light taps, heavy lands, parry answers longest.
 //!
-//! Single home for the V2 kind-to-ticks map. The tick counts stay owned by
+//! Single home for the V2 kind-to-ticks map. Caller: [`for_impact`] reads
+//! [`for_kind`] and [`for_parry`]; [`crate::fight::hitstop_for_impact`]
+//! steps [`for_impact`] into the live freeze (`FightState.hitstop`).
+//! The tick counts stay owned by
 //! `crate::tables` (`LIGHT_HITSTOP_TICKS_V2` and friends); this module only
 //! maps a strike kind to its row. Std-only, no heap, integer ticks only.
 //! V1 rows keep the single `HITSTOP_TICKS` in `crate::fight` and never read
@@ -11,8 +14,10 @@ use crate::tables::{HEAVY_HITSTOP_TICKS_V2, LIGHT_HITSTOP_TICKS_V2, PARRY_HITSTO
 
 /// Freeze ticks for one landed strike kind under V2 rows, at 60 Hz.
 ///
-/// Light taps (3), heavy lands (6); unknown kinds never freeze (0), never
-/// panic. Determinism: pure match on kind; same kind gives same freeze.
+/// Caller: [`for_impact`] (clean-hit leg) plus the `hitstop_kind` tests that
+/// pin the rows. Light taps (3), heavy lands (6); unknown kinds never freeze
+/// (0), never panic. Determinism: pure match on kind; same kind gives same
+/// freeze.
 pub const fn for_kind(kind: u8) -> u32 {
     if kind == INPUT_LIGHT {
         LIGHT_HITSTOP_TICKS_V2
@@ -25,8 +30,9 @@ pub const fn for_kind(kind: u8) -> u32 {
 
 /// Freeze ticks for one parry under V2 rows, at 60 Hz.
 ///
-/// Parry (8) freezes longest, so the answer reads. Determinism: pure const;
-/// every call gives the same freeze.
+/// Caller: [`for_impact`] (parry leg) plus the `hitstop_kind` tests that pin
+/// the row. Parry (8) freezes longest, so the answer reads. Determinism:
+/// pure const; every call gives the same freeze.
 pub const fn for_parry() -> u32 {
     PARRY_HITSTOP_TICKS_V2
 }

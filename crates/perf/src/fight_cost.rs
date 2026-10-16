@@ -1,15 +1,17 @@
 //! fight_cost: frame-cost percentiles behind the FC3 30 fps gate.
 //!
-//! Consumer: the FC3 quiet perf run (windowed arena, 8 fighters) and the
-//! `eight_fight` gate in `engine-game`. Data owner: this module owns the
-//! percentile math plus the gate check; the runner owns the samples.
+//! Status: test-only (no production caller reads `check_gate` yet; exercised
+//! by the unit tests in this file and the wiring vectors). Tracked by FC1
+//! (frame cost table for the windowed arena). Data owner: this module owns
+//! the percentile math plus the gate check; the runner owns the samples.
 //! Units: whole microseconds (`u64`), integer math only, no wall clock.
 //! Determinism: pure functions over caller-sorted samples, same inputs give
 //! same outputs. Errors: [`FightCostError`] at every boundary, never panics.
 //!
-//! The bars mirror `engine-game::eight_fight` (`33_300` / `50_000` us); they
-//! are copied, not imported, because this crate must not depend on the game
-//! crate (acyclic layers). Nothing here enters any sim hash.
+//! The bars mirror the retired `engine-game::eight_fight` ceilings
+//! (`33_300` / `50_000` us); they are copied, not imported, because this
+//! crate must not depend on the game crate (acyclic layers). Nothing here
+//! enters any sim hash.
 
 /// Frame p50 ceiling in microseconds (30 fps). Mirrors the game gate bar.
 pub const FIGHT_P50_BUDGET_US: u64 = 33_300;

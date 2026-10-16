@@ -216,16 +216,22 @@ pub fn heap_peak_csv(workload: &str, peak_bytes: u64) -> String {
 /// Parse the heap-peak baseline file (`crates/perf/baselines/heap_peak.txt`).
 ///
 /// The file holds one base-10 `u64` on its first line (written by the first
-/// quiet run). Leading/trailing ASCII whitespace is ignored; anything else
-/// reads `None` so the gate fails closed instead of passing by default.
+/// quiet run). Leading/trailing ASCII whitespace is ignored, and blank lines
+/// after the first are ignored; a second non-empty row reads `None` so a
+/// corrupt file fails closed instead of passing by default.
 /// Units: text in, bytes out. Determinism: pure parse. Errors: `None` on
-/// empty or non-numeric input, never a panic.
+/// empty, non-numeric, or trailing-row input, never a panic.
 pub fn parse_heap_peak_baseline(text: &str) -> Option<u64> {
-    text.lines()
+    let mut lines = text.lines();
+    let first = lines
         .next()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .and_then(|line| line.parse::<u64>().ok())
+        .and_then(|line| line.parse::<u64>().ok())?;
+    if lines.any(|line| !line.trim().is_empty()) {
+        return None;
+    }
+    Some(first)
 }
 
 #[cfg(test)]
@@ -287,6 +293,39 @@ mod tests {
         assert_eq!(parse_heap_peak_baseline("  57238  \n"), Some(57_238));
         assert_eq!(parse_heap_peak_baseline(""), None);
         assert_eq!(parse_heap_peak_baseline("nope\n"), None);
+    }
+
+    #[test]
+    fn heap_peak_baseline_rejects_trailing_rows() {
+        // Behavior: the baseline file holds one number; a second non-empty
+        // row means corruption, so the gate fails closed. Failure: trailing
+        // bytes are silently ignored and a corrupt file still passes.
+        // Caller: `crates/perf/src/main.rs --heap-peak` plus the `heap_peak`
+        // integration test read this file before the 10 percent gate.
+        assert_eq!(parse_heap_peak_baseline("57238\n"), Some(57_238));
+        assert_eq!(
+            parse_heap_peak_baseline("57238\n"),
+            parse_heap_peak_baseline("57238\n"),
+            "same file parses the same way twice"
+        );
+        assert_eq!(parse_heap_peak_baseline("57238"), Some(57_238));
+        assert_eq!(parse_heap_peak_baseline("57238\n\n"), Some(57_238));
+        assert_eq!(parse_heap_peak_baseline("57238\n   \n"), Some(57_238));
+        assert_eq!(
+            parse_heap_peak_baseline("57238\n999\n"),
+            None,
+            "second number row is corruption"
+        );
+        assert_eq!(
+            parse_heap_peak_baseline("57238\ngarbage\n"),
+            None,
+            "trailing text is corruption"
+        );
+        assert_eq!(
+            parse_heap_peak_baseline("57238\n999\n"),
+            parse_heap_peak_baseline("57238\n999\n"),
+            "corrupt file reads None twice"
+        );
     }
 
     #[test]

@@ -336,7 +336,7 @@ export const FAIL_TAIL_CHARS = 2000;
 export const childFailTail = (out, keep = FAIL_TAIL_LINES, maxChars = FAIL_TAIL_CHARS) => {
   const k = Number.isFinite(keep) && keep > 0 ? Math.trunc(keep) : FAIL_TAIL_LINES;
   const m = Number.isFinite(maxChars) && maxChars > 0 ? Math.trunc(maxChars) : FAIL_TAIL_CHARS;
-  return String(out ?? "").split("\n").filter((l) => l.trim() !== "").slice(-k).join(" | ").slice(0, m);
+  return String(out ?? "").split("\n").filter((l) => l.trim() !== "").slice(-k).join(" | ").slice(-m);
 };
 // 1. The loop command and its required features.
 async function main() {

@@ -309,8 +309,9 @@ pub fn ticked_passes_from_captures(
         epsilon,
         live_floor,
     );
-    // Six device-proven rows stay LIVE; forward, sky and decals resolve
-    // from the masked on/off diff.
+    // Only rows with on/off pixel proof stay LIVE; the six rows without
+    // captures stay PROBE until device evidence lands. Forward, sky and
+    // decals resolve from the masked on/off diff.
     vec![
         PassGate {
             row: "graph",
@@ -320,22 +321,22 @@ pub fn ticked_passes_from_captures(
         PassGate {
             row: "shadow_cluster",
             pass: "submit_gpu",
-            live: true,
+            live: false,
         },
         PassGate {
             row: "ibl",
             pass: "submit_gpu",
-            live: true,
+            live: false,
         },
         PassGate {
             row: "post",
             pass: "submit_gpu",
-            live: true,
+            live: false,
         },
         PassGate {
             row: "gtao",
             pass: "submit_gpu",
-            live: true,
+            live: false,
         },
         PassGate {
             row: "sky",
@@ -345,12 +346,12 @@ pub fn ticked_passes_from_captures(
         PassGate {
             row: "material_layer",
             pass: "submit_gpu",
-            live: true,
+            live: false,
         },
         PassGate {
             row: "particles_gpu",
             pass: "submit_gpu",
-            live: true,
+            live: false,
         },
         PassGate {
             row: "decals",
@@ -362,12 +363,14 @@ pub fn ticked_passes_from_captures(
 
 /// Registry of the ticked render rows' GPU passes as a plain editable list.
 ///
-/// Entries stay live only with on/off pixel proof; sky and decals are PROBE
-/// on the current tree. Caller below wires the pixel verdicts into the flags.
+/// Entries stay live only with on/off pixel proof; only forward is LIVE on
+/// the current tree, the other eight stay PROBE until captures prove them.
+/// Caller below wires the pixel verdicts into the flags.
 pub fn ticked_passes() -> Vec<PassGate> {
     // Forward feeds a 2x1 on/off pair that differs on pixel 0, so it stays
-    // LIVE by pixel diff, never by hardcode. Sky and decals feed identical
-    // quiet 2x1 stubs, so they stay PROBE.
+    // LIVE by pixel diff, never by hardcode. Sky, decals and the six rows
+    // without captures feed identical quiet 2x1 stubs (or no captures), so
+    // they stay PROBE until on/off device captures prove them.
     let forward_on: &[u8] = &[10, 10, 200, 255, 10, 10, 10, 255];
     let forward_off: &[u8] = &[10, 10, 10, 255, 10, 10, 10, 255];
     let stub: &[u8] = &[10, 10, 10, 255, 10, 10, 10, 255];
@@ -434,7 +437,7 @@ pub fn write_pass_truth_report(
     Ok(path)
 }
 
-/// Live gate over the ticked rows; sky and decals stay PROBE until captures move.
+/// Live gate over the ticked rows; only forward is LIVE until captures prove the other eight.
 /// Caller: `crates/proof/src/lib.rs` re-export for the headless proof harness.
 /// Units: none (boolean liveness flags). Determinism: pure, no IO or clock.
 /// Errors: [`GpuLiveRefusal`] naming every PROBE row.
@@ -493,8 +496,20 @@ mod tests {
         let passes = ticked_passes();
         assert_eq!(passes.len(), 9);
         let err = check_passes(&passes)
-            .expect_err("sky and decals stay PROBE until on/off captures prove them");
-        assert_eq!(err.refused, vec!["sky", "decals"]);
+            .expect_err("eight rows stay PROBE until on/off captures prove them");
+        assert_eq!(
+            err.refused,
+            vec![
+                "shadow_cluster",
+                "ibl",
+                "post",
+                "gtao",
+                "sky",
+                "material_layer",
+                "particles_gpu",
+                "decals"
+            ]
+        );
         assert!(err.to_string().contains("sky"));
     }
 
@@ -590,8 +605,20 @@ mod tests {
         assert_eq!(frame_diff_count(&on, &off, 2, 2, None, 200), Ok(0));
         assert!(!resolve_pass_live(&on, &off, 2, 2, None, 200, 0).expect("frames compare"));
         assert!(resolve_pass_live(&on, &off, 2, 2, None, 199, 0).expect("frames compare"));
-        let err = crate::live_gate_report().expect_err("sky and decals stay PROBE");
-        assert_eq!(err.refused, vec!["sky", "decals"]);
+        let err = crate::live_gate_report().expect_err("eight rows stay PROBE");
+        assert_eq!(
+            err.refused,
+            vec![
+                "shadow_cluster",
+                "ibl",
+                "post",
+                "gtao",
+                "sky",
+                "material_layer",
+                "particles_gpu",
+                "decals"
+            ]
+        );
     }
 
     #[test]
@@ -657,6 +684,20 @@ mod tests {
         assert!(first.contains("| graph | LIVE |"));
         assert!(first.contains("| sky | PROBE |"));
         assert!(first.contains("| decals | PROBE |"));
+        // No hardcoded LIVE remains: the six rows without captures stay PROBE.
+        for row in [
+            "shadow_cluster",
+            "ibl",
+            "post",
+            "gtao",
+            "material_layer",
+            "particles_gpu",
+        ] {
+            assert!(
+                first.contains(&format!("| {row} | PROBE |")),
+                "{row} stays PROBE"
+            );
+        }
     }
 
     #[test]
@@ -812,6 +853,20 @@ mod tests {
         assert!(flag(&live, "graph"));
         assert!(flag(&live, "sky"));
         assert!(flag(&live, "decals"));
+        // The six rows without on/off captures never borrow sky/decals proof.
+        for row in [
+            "shadow_cluster",
+            "ibl",
+            "post",
+            "gtao",
+            "material_layer",
+            "particles_gpu",
+        ] {
+            assert!(
+                !flag(&live, row),
+                "{row} stays PROBE without its own captures"
+            );
+        }
         let masked = ticked_passes_from_captures(
             forward_on,
             forward_off,
@@ -869,8 +924,20 @@ mod tests {
         assert!(!flag(&ragged, "graph"));
         assert!(!flag(&ragged, "sky"));
         assert!(!flag(&ragged, "decals"));
-        let err = check_passes(&ticked_passes()).expect_err("sky and decals stay PROBE");
-        assert_eq!(err.refused, vec!["sky", "decals"]);
+        let err = check_passes(&ticked_passes()).expect_err("eight rows stay PROBE");
+        assert_eq!(
+            err.refused,
+            vec![
+                "shadow_cluster",
+                "ibl",
+                "post",
+                "gtao",
+                "sky",
+                "material_layer",
+                "particles_gpu",
+                "decals"
+            ]
+        );
     }
 
     // trimmed live_drifted test: golden backdoor removed.

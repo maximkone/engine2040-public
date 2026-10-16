@@ -842,6 +842,7 @@ impl Mixer {
     /// Move every cursor and fade on one frame, wrap looped voices and drop
     /// the finished ones.
     fn advance(&mut self) {
+        let mut ended = false;
         for v in &mut self.voices {
             v.cursor += 1;
             if v.cursor >= v.frames() && v.route.is_some_and(|route| route.looped) {
@@ -857,8 +858,11 @@ impl Mixer {
                 }
                 Fade::Out(step) => v.level = v.level.saturating_sub(step),
             }
+            ended |= v.finished();
         }
-        self.reap();
+        if ended {
+            self.reap();
+        }
     }
 
     /// Advance one mono frame: deterministic sum over voices in issue order,

@@ -1,9 +1,9 @@
 //! fracture: runtime Voronoi fracture at an impact point, plus the cook
 //! cache that serves the same cut without the cold clip.
 //!
-//! Consumer: siege walls and big props in the arena match (a hit asks for
-//! one [`fracture_at`] or one [`FractureCache::cut`]); the break verbs call
-//! the same functions through the door's break pack. Data owner:
+//! Consumer: the door's `break.fracture` verb via [`fracture_at`] plus
+//! destruction-internal [`FractureCache::bake`] / [`FractureCache::cut`];
+//! no arena match caller (verified 2026-10-16). Data owner:
 //! `engine-destruction`. Units: meters for geometry and sites, cell counts
 //! as `u32`. Determinism: the sites are integer `Rng` draws turned into
 //! floats with `+ - * /` only, each cell is the prop shell clipped by the
@@ -185,7 +185,7 @@ impl Fracture {
 /// `NEAR_EIGHTHS / 8` of the rest within `radius_m` of it (denser near the
 /// hit), the remainder spread over the shell box. Every site stays inside
 /// the box. Clearing and refilling a caller buffer keeps the draws, so the
-/// bytes match [`scatter_sites`].
+/// bytes match a fresh buffer.
 fn scatter_sites_into(
     min: &[f32; 3],
     max: &[f32; 3],
@@ -283,7 +283,7 @@ fn exit_dist2(site: &[f32; 3], cell: &PropMesh, slack: f32) -> f32 {
 
 /// Squared distances between all site pairs written into `out`, row-major
 /// `sites * sites`. Refilling a caller buffer keeps the table, so the bytes
-/// match [`pair_dist2`].
+/// match a fresh table.
 fn pair_dist2_into(sites: &[[f32; 3]], out: &mut Vec<f32>) {
     out.clear();
     out.reserve(sites.len() * sites.len());
@@ -296,7 +296,7 @@ fn pair_dist2_into(sites: &[[f32; 3]], out: &mut Vec<f32>) {
 struct CellLoop<'a> {
     mesh: &'a PropMesh,
     sites: &'a [[f32; 3]],
-    /// Row-major squared site distances (see [`pair_dist2`]).
+    /// Row-major squared site distances (see [`pair_dist2_into`]).
     pair_d2: &'a [f32],
     slack: f32,
 }
@@ -861,15 +861,9 @@ mod tests {
                     pair_dist2_into(&sites, &mut pair);
                     let mut order = Vec::new();
                     let mut scratch = ClipScratch::default();
-                    let (got, _) = clip_cells_with_pair(
-                        &mesh,
-                        &sites,
-                        &hit,
-                        &pair,
-                        &mut order,
-                        &mut scratch,
-                    )
-                    .expect("fractures");
+                    let (got, _) =
+                        clip_cells_with_pair(&mesh, &sites, &hit, &pair, &mut order, &mut scratch)
+                            .expect("fractures");
                     let meshes: Vec<&PropMesh> = got.chunks.iter().map(|c| &c.mesh).collect();
                     assert_eq!(
                         meshes,

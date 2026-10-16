@@ -101,6 +101,40 @@ export function testLayoutViolations(crates, own = OWN_TEST_BINARY) {
   return found;
 }
 
+// Structural map check (2026-10-16): the generated maps must match the tree.
+// Fails when (a) a path listed in `.opencode/modmap.md` is missing on disk
+// under `crates/`, or (b) the crate list in the maps stops matching the
+// Cargo.toml workspace members (`crates/*`). Parses the two maps'
+// headings/paths only; no generator run, no cargo. Pure (exported for tests);
+// main() feeds it disk reads plus one existsSync pass, so it stays fast.
+export function parseModmapHeadings(text) {
+  return [...text.matchAll(/^##\s+(\S+)/gm)].map((m) => m[1]);
+}
+export function parseModmapPaths(text) {
+  return [...text.matchAll(/^-\s+`([^`]+)`/gm)]
+    .map((m) => m[1].split("·")[0].trim())
+    .filter(Boolean);
+}
+export function structuralMapViolations({ headings, paths, workspaceCrates, repomapHasCrates, missing }) {
+  const found = [];
+  for (const p of missing ?? []) {
+    found.push(`structural map check: .opencode/modmap.md lists \`${p}\` but crates/${p} is missing on disk (stale map, regenerate)`);
+  }
+  const headSet = new Set(headings ?? []);
+  const workSet = new Set(workspaceCrates ?? []);
+  const onlyHead = [...headSet].filter((c) => !workSet.has(c)).sort();
+  const onlyWork = [...workSet].filter((c) => !headSet.has(c)).sort();
+  if (onlyHead.length || onlyWork.length) {
+    found.push(`structural map check: crate list mismatch: modmap headings [${[...headSet].sort().join(", ")}] vs workspace crates [${[...workSet].sort().join(", ")}] (only in map: ${onlyHead.join(", ") || "none"}; only on disk: ${onlyWork.join(", ") || "none"})`);
+  }
+  if (!repomapHasCrates) {
+    found.push("structural map check: .opencode/repomap.md tree misses crates/ entry (stale map, regenerate)");
+  }
+  // Unused `paths` documents the parsed path list for callers; missing above carries the failure.
+  void paths;
+  return found;
+}
+
 // Presence summary (no-locks): one non-blocking line naming live sessions.
 // Missing dir or corrupt JSON prints zero, never fails the audit.
 function printPresenceSummary(repoDir) {
@@ -328,7 +362,8 @@ Usage:
   node tools/workspace-check.mjs [--help]
 
 Checks: Cargo metadata, dependency graph, module reachability, sim
-determinism, genre ledger, baseline gate, board needs, new LFS blobs.
+determinism, genre ledger, baseline gate, board needs, new LFS blobs,
+structural maps.
 
 Lane triage: this audits the whole worktree, not your lane. A FAIL on a
 file outside your owned paths / lane diff is pre-existing dirt, not yours:
@@ -698,6 +733,27 @@ try {
     errors.push(`test layout guard could not run: ${error.message}`);
   }
 
+  // Structural map check: generated maps must match the tree (no generator, no cargo).
+  let mapCrates = 0;
+  let mapPaths = 0;
+  try {
+    const modmapText = readFileSync(join(repoDir, ".opencode", "modmap.md"), "utf8");
+    const repomapText = readFileSync(join(repoDir, ".opencode", "repomap.md"), "utf8");
+    const headings = parseModmapHeadings(modmapText);
+    const mapPathsList = parseModmapPaths(modmapText);
+    mapCrates = headings.length;
+    mapPaths = mapPathsList.length;
+    const cratesDir = join(repoDir, "crates");
+    const workspaceCrates = readdirSync(cratesDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(join(cratesDir, e.name, "Cargo.toml")))
+      .map((e) => e.name);
+    const missing = mapPathsList.filter((p) => !existsSync(join(cratesDir, p)));
+    const repomapHasCrates = repomapText.includes("`crates/`");
+    errors.push(...structuralMapViolations({ headings, paths: mapPathsList, workspaceCrates, repomapHasCrates, missing }));
+  } catch (error) {
+    errors.push(`structural map check could not run: ${error.message}`);
+  }
+
   try { const archOut = execFileSync(process.execPath, [join(repoDir, "tools", "arch-fitness.mjs")], { encoding: "utf8" }).trim(); if (archOut === "PASS dependency cycle") console.log(archOut); else errors.push(archOut || "dependency cycle found"); } catch (error) { errors.push(`dependency cycle check failed: ${error.message}`); }
   try {
     const wireFp = wiringFingerprint(repoDir);
@@ -719,6 +775,7 @@ try {
   console.log("PASS lfs guard: no newly tracked non-LFS blob over 5 MB");
   console.log(`PASS research cap: no open row over the card cap (${researchFound.length} breaches)`);
   console.log(`PASS test layout: ${layoutCrates} crates keep one integration-test binary (tests/it)`);
+  console.log(`PASS maps: ${mapCrates} crates, ${mapPaths} paths match the tree`);
   console.log(mathFindings.length
     ? `WARN determinism (report-only until board task D1): platform float math in simulation code: ${mathFindings.join(", ")}`
     : "PASS determinism: no platform float math in simulation code");

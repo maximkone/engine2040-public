@@ -26,8 +26,9 @@
 //! adjudicated hits and frame cost splits for the net, proof and render
 //! adapters.
 
-/// Std-only typed FPS view events: pose, hits and frame splits.
+/// Deterministic diagnostic event queue with phased delivery (test-only, OB4).
 pub mod event_queue;
+/// Std-only typed FPS view events: pose, hits and frame splits.
 pub mod fps;
 pub mod heal;
 /// Bounded 120-frame rerun recording of sim state per tick for desync hunts.

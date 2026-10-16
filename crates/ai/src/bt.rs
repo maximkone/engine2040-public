@@ -1237,6 +1237,11 @@ mod tests {
 
     #[ignore = "timing: measures wall time for the decision budget"]
     #[test]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "ignored wall-clock timing test"
+    )]
     fn decision_stays_inside_budget() {
         let tree = pressure_tree();
         let state = state_at(3, 2_000, true);

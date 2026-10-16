@@ -10,10 +10,12 @@ pub mod validate;
 pub use validate::{Refusal, Schema};
 /// Zero-copy archived bundles over a shared byte mapping: staged
 /// payloads finish to one versioned archive; `open` borrows the mapping with
-/// no per-entry copy. Std-only; game and editor instant loads consume.
+/// no per-entry copy. Std-only; planned, no caller yet (verified 2026-10-16):
+/// game and editor instant loads will consume.
 pub mod archive;
 /// Validated cook envelope borrowed in place: seal offline, wrap once,
-/// then serve roots with no decode. The mmap load path consumes it.
+/// then serve roots with no decode. Planned, no caller yet (verified
+/// 2026-10-16): the mmap load path will consume it.
 pub mod archived_cook;
 pub use archived_cook::{seal, wrap_archive_entry, ArchivedCook, COOK_MAGIC, COOK_VERSION};
 mod wire;
@@ -39,7 +41,7 @@ pub use bundle_cook::{
     load_bundle_file, verify_bundle_bytes, write_bundle_file, BundleCookError, BundleReceipt,
     StagedCooked, STUB_BUNDLE_LEN,
 };
-/// Native BC1/BC3 block codec in-cook: identical bytes x2, encoder
+/// Native BC1/BC3/BC4/BC5/BC7 block codec in-cook: identical bytes x2, encoder
 /// decision UNVERIFIED. Std-only.
 pub mod bc;
 /// Skinned body plus clip-source import for render skinning (fighter look).
@@ -67,7 +69,8 @@ pub mod optimize;
 /// Offline BC cook over `bc` plus KTX2 emit: picked shape, x2 identical.
 pub mod texture_cook;
 /// Offline uv2 chart pack for arena static meshes (cook-time only): chart
-/// plus pack plus hashed provenance row; consumer is the bundle cook.
+/// plus pack plus hashed provenance row; planned, no caller yet (verified
+/// 2026-10-16): the bundle cook will consume `pack_uv2`.
 pub mod uv2_chart;
 pub use uv2_chart::{
     pack_uv2, provenance_for_chart, provenance_row_for_chart, ChartOptions, PackOptions, Uv2Chart,
@@ -82,7 +85,8 @@ pub mod retarget;
 #[cfg(feature = "import")]
 pub mod skin_import;
 /// Asset streaming jobs with priorities and budgets: deterministic
-/// completion order over bundles. Std-only; the asset browser consumes.
+/// completion order over bundles. Std-only; planned, no caller yet (verified
+/// 2026-10-16): the asset browser will consume.
 pub mod stream;
 #[cfg(feature = "import")]
 pub mod texture;
