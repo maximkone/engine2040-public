@@ -156,7 +156,6 @@ pub fn lobe_def(bit: u8) -> Option<&'static LobeDef> {
 /// Errors: none; unknown bits are ignored.
 ///
 /// Consumer: [`Structure::has_lobe`] routes the fragment build through it.
-#[must_use]
 pub fn resolve_lobes(bits: u8) -> impl Iterator<Item = &'static LobeDef> {
     LOBE_REGISTRY.iter().filter(move |d| bits & d.bit != 0)
 }

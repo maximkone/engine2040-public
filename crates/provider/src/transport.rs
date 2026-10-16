@@ -282,9 +282,12 @@ impl Write for TransportStream {
 /// trust — enterprise proxies included — decides what verifies. Built per
 /// request: the native store read is millisecond-scale and never on the sim
 /// tick, so there is no shared cache to poison across `SSL_CERT_FILE`
-/// overrides in tests.
+/// overrides in tests. Caller-supplied DER roots (the offline test CA in the
+/// TLS stub test, none in production) only extend trust for that request.
 #[cfg(feature = "tls")]
-fn tls_config() -> Result<std::sync::Arc<rustls::ClientConfig>, TransportError> {
+fn tls_config(
+    extra_roots: &[&'static [u8]],
+) -> Result<std::sync::Arc<rustls::ClientConfig>, TransportError> {
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let native = rustls_native_certs::load_native_certs();
     if native.certs.is_empty() {
@@ -293,6 +296,11 @@ fn tls_config() -> Result<std::sync::Arc<rustls::ClientConfig>, TransportError> 
     let mut roots = rustls::RootCertStore::empty();
     for cert in native.certs {
         roots.add(cert).map_err(|_| TransportError::Tls)?;
+    }
+    for der in extra_roots {
+        roots
+            .add(rustls::pki_types::CertificateDer::from(*der))
+            .map_err(|_| TransportError::Tls)?;
     }
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(rustls::ALL_VERSIONS)
@@ -321,16 +329,22 @@ fn server_name(host: &str) -> Result<rustls::pki_types::ServerName<'static>, Tra
 
 /// Wrap the connected socket: plain TCP for `http://`, a rustls session for
 /// `https://`. Timeouts are already on the socket, so the lazy handshake
-/// shares the request budget.
-fn wrap_stream(stream: TcpStream, endpoint: &Endpoint) -> Result<TransportStream, TransportError> {
+/// shares the request budget. Caller-supplied DER roots (the offline test CA
+/// in the TLS stub test, none in production) extend the handshake trust
+/// store for that request only.
+fn wrap_stream(
+    stream: TcpStream,
+    endpoint: &Endpoint,
+    extra_roots: &[&'static [u8]],
+) -> Result<TransportStream, TransportError> {
     if !endpoint.tls {
         return Ok(TransportStream::Plain(stream));
     }
     #[cfg(feature = "tls")]
     {
         let name = server_name(&endpoint.host)?;
-        let connection =
-            rustls::ClientConnection::new(tls_config()?, name).map_err(|_| TransportError::Tls)?;
+        let connection = rustls::ClientConnection::new(tls_config(extra_roots)?, name)
+            .map_err(|_| TransportError::Tls)?;
         Ok(TransportStream::Tls(Box::new(rustls::StreamOwned::new(
             connection, stream,
         ))))
@@ -338,6 +352,7 @@ fn wrap_stream(stream: TcpStream, endpoint: &Endpoint) -> Result<TransportStream
     #[cfg(not(feature = "tls"))]
     {
         // Unreachable: `tls` endpoints cannot parse without the feature.
+        let _ = extra_roots;
         Ok(TransportStream::Plain(stream))
     }
 }
@@ -350,6 +365,19 @@ pub fn post_json(
     body: &str,
     bearer: Option<&str>,
     timeout_ms: u64,
+) -> Result<TransportResponse, TransportError> {
+    post_json_with(endpoint, body, bearer, timeout_ms, &[])
+}
+
+/// `post_json` plus caller-supplied DER roots for the TLS trust store.
+/// Private: production passes none, the TLS stub test passes its offline
+/// test CA, and no new public surface needs a door caller.
+fn post_json_with(
+    endpoint: &Endpoint,
+    body: &str,
+    bearer: Option<&str>,
+    timeout_ms: u64,
+    extra_roots: &[&'static [u8]],
 ) -> Result<TransportResponse, TransportError> {
     let timeout = Duration::from_millis(timeout_ms.clamp(1, 30_000));
     let address = format!("{}:{}", endpoint.host, endpoint.port)
@@ -370,7 +398,7 @@ pub fn post_json(
     stream
         .set_write_timeout(Some(timeout))
         .map_err(|_| TransportError::Connect)?;
-    let mut stream = wrap_stream(stream, endpoint)?;
+    let mut stream = wrap_stream(stream, endpoint, extra_roots)?;
     // The header block briefly holds the bearer token in memory; it is
     // written once and never copied into errors, events or diagnostics.
     let mut head = format!(
@@ -676,16 +704,109 @@ mod tests {
         assert!(!text.contains("probe"));
     }
 
-    /// Full loopback TLS roundtrip (an `https://` client against a TLS stub
-    /// with a test CA) needs a cert-minter crate the graph does not carry;
-    /// until then the negative stub test above plus scheme selection prove
-    /// the path. Kept visible so the gap stays explicit.
+    /// Offline TLS fixtures: a self-signed P-256 test CA plus a server cert
+    /// and key for 127.0.0.1/localhost, minted once with openssl. rustls
+    /// speaks both ends, so no cert-minter crate joins the graph and no
+    /// hand-rolled crypto exists anywhere near this test.
+    /// self-signed P-256 test CA (CN=e2040-test-ca, 2026-2036); trusts nothing real. Offline fixture minted once with openssl;
+    /// rustls (not hand-rolled code) speaks both ends in the test.
+    const TEST_CA_DER: &[u8] = b"\x30\x82\x01\x84\x30\x82\x01\x2b\xa0\x03\x02\x01\x02\x02\x14\x12\x90\x42\x05\xb0\x47\xe1\x9e\xfe\x6b\x4e\x90\x86\x2a\x64\x39\x8a\x89\x87\x21\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x02\x30\x18\x31\x16\x30\x14\x06\x03\x55\x04\x03\x0c\x0d\x65\x32\x30\x34\x30\x2d\x74\x65\x73\x74\x2d\x63\x61\x30\x1e\x17\x0d\x32\x36\x31\x30\x31\x36\x30\x39\x34\x34\x34\x38\x5a\x17\x0d\x33\x36\x31\x30\x31\x33\x30\x39\x34\x34\x34\x38\x5a\x30\x18\x31\x16\x30\x14\x06\x03\x55\x04\x03\x0c\x0d\x65\x32\x30\x34\x30\x2d\x74\x65\x73\x74\x2d\x63\x61\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00\x04\xce\x5e\x1b\x33\x1a\xf1\xd9\xb1\xe6\x45\xa7\x8e\x7c\x86\x90\x5e\x82\x94\x35\x17\x86\xd5\xf5\x77\x31\x35\x5c\x61\xe6\xff\x63\xda\xa7\xd2\x42\xac\x77\x21\xd2\x16\x97\x5a\xe9\x5d\x99\x5f\x5c\x3c\xf4\xf0\x1c\xcc\xbf\xd0\x15\x66\xe6\xae\xb6\x5a\x94\x54\xfa\xd9\xa3\x53\x30\x51\x30\x1d\x06\x03\x55\x1d\x0e\x04\x16\x04\x14\x74\x52\x00\x9c\xa0\xf6\xfd\xd7\xe2\xf7\x6a\x33\x51\x71\xc5\xfa\x6e\x32\x09\x36\x30\x1f\x06\x03\x55\x1d\x23\x04\x18\x30\x16\x80\x14\x74\x52\x00\x9c\xa0\xf6\xfd\xd7\xe2\xf7\x6a\x33\x51\x71\xc5\xfa\x6e\x32\x09\x36\x30\x0f\x06\x03\x55\x1d\x13\x01\x01\xff\x04\x05\x30\x03\x01\x01\xff\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x02\x03\x47\x00\x30\x44\x02\x20\x23\x9c\x32\xa0\x1b\xf9\x2e\xf3\x40\x60\x56\xd6\xbc\xbb\x72\x52\x95\xb9\xc5\x8f\x48\x12\x1d\xeb\x96\x03\xfd\x11\x15\xda\x1c\x14\x02\x20\x52\xbe\x65\x89\xca\x4f\xa9\x0c\xb6\xd9\xab\x1b\x05\x81\x61\x03\x0e\x23\x3c\x7b\xf2\x1b\x94\x76\x4f\x27\x70\x48\xdf\x63\x81\xa4";
+    /// server cert for 127.0.0.1/localhost signed by the test CA (2026-2036). Offline fixture minted once with openssl;
+    /// rustls (not hand-rolled code) speaks both ends in the test.
+    const TEST_SRV_DER: &[u8] = b"\x30\x82\x01\x8b\x30\x82\x01\x32\xa0\x03\x02\x01\x02\x02\x14\x12\xa6\x39\x8b\x39\x9a\xbb\x5b\xe3\x20\x26\xc4\xe5\x31\xc5\x0a\x82\xe3\xd9\xc2\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x02\x30\x18\x31\x16\x30\x14\x06\x03\x55\x04\x03\x0c\x0d\x65\x32\x30\x34\x30\x2d\x74\x65\x73\x74\x2d\x63\x61\x30\x1e\x17\x0d\x32\x36\x31\x30\x31\x36\x30\x39\x34\x34\x34\x38\x5a\x17\x0d\x33\x36\x31\x30\x31\x33\x30\x39\x34\x34\x34\x38\x5a\x30\x14\x31\x12\x30\x10\x06\x03\x55\x04\x03\x0c\x09\x31\x32\x37\x2e\x30\x2e\x30\x2e\x31\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00\x04\x3e\x0e\x2e\x7d\x2b\xf7\xa5\xe3\x4b\xd0\xa5\x2a\x90\x6d\x03\xe1\x94\xde\x53\x0e\x19\x62\x04\xd5\x4a\x87\xfb\x57\x05\x60\xce\x5e\xbd\x28\x3d\xb5\x38\x4d\x42\xe0\x21\x2d\x42\xbc\x56\x73\x3d\xfb\xb2\xf3\x14\x4a\x3e\xf4\x38\x9a\xba\x3e\x60\x8a\xe9\x87\x34\x3b\xa3\x5e\x30\x5c\x30\x1a\x06\x03\x55\x1d\x11\x04\x13\x30\x11\x87\x04\x7f\x00\x00\x01\x82\x09\x6c\x6f\x63\x61\x6c\x68\x6f\x73\x74\x30\x1d\x06\x03\x55\x1d\x0e\x04\x16\x04\x14\xed\x0f\xa7\x27\xfb\x57\x3e\x25\x52\x56\xe9\x80\xf0\x60\x44\x20\x30\x09\x08\x08\x30\x1f\x06\x03\x55\x1d\x23\x04\x18\x30\x16\x80\x14\x74\x52\x00\x9c\xa0\xf6\xfd\xd7\xe2\xf7\x6a\x33\x51\x71\xc5\xfa\x6e\x32\x09\x36\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x02\x03\x47\x00\x30\x44\x02\x20\x65\x15\xfe\xcd\x9a\xfe\xc3\x07\xfa\x5d\x0f\x1d\x14\x03\x43\xce\x56\x76\x7a\xdd\xb0\xf5\x83\xca\x6c\xc8\x6c\x01\x6f\x9b\x51\xe7\x02\x20\x69\x00\x17\x10\x85\x71\x37\x75\xb1\x1a\x5d\x74\x5d\x3e\xfa\x97\xf7\x65\x2a\xe7\x9a\xac\x75\x0a\x5c\xa8\xbb\xf2\xdf\x3a\xb5\x4c";
+    /// PKCS8 P-256 server key matching the test server cert. Offline fixture minted once with openssl;
+    /// rustls (not hand-rolled code) speaks both ends in the test.
+    const TEST_SRV_KEY_DER: &[u8] = b"\x30\x81\x87\x02\x01\x00\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x04\x6d\x30\x6b\x02\x01\x01\x04\x20\x0e\x6b\xd2\x62\x36\x79\x5e\x95\x10\xec\xb7\xcc\x87\x0a\xdc\xbb\xff\x2f\x35\x1d\x89\xb8\x70\xb8\x34\x3e\x37\x8b\xd4\x8f\xea\x10\xa1\x44\x03\x42\x00\x04\x3e\x0e\x2e\x7d\x2b\xf7\xa5\xe3\x4b\xd0\xa5\x2a\x90\x6d\x03\xe1\x94\xde\x53\x0e\x19\x62\x04\xd5\x4a\x87\xfb\x57\x05\x60\xce\x5e\xbd\x28\x3d\xb5\x38\x4d\x42\xe0\x21\x2d\x42\xbc\x56\x73\x3d\xfb\xb2\xf3\x14\x4a\x3e\xf4\x38\x9a\xba\x3e\x60\x8a\xe9\x87\x34\x3b";
+
+    /// Loopback TLS stub: serves one `https://` dial from the offline
+    /// fixtures, answers `body` with 200, then the thread exits. Returns the
+    /// port plus the server thread; the caller joins after its assertions.
+    #[cfg(feature = "tls")]
+    fn spawn_tls_stub(body: String) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("tls stub binds loopback");
+        let port = listener.local_addr().expect("tls stub addr").port();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("tls stub accepts one dial");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            let cert = rustls::pki_types::CertificateDer::from(TEST_SRV_DER);
+            let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+                rustls::pki_types::PrivatePkcs8KeyDer::from(TEST_SRV_KEY_DER),
+            );
+            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            let config = rustls::ServerConfig::builder_with_provider(provider)
+                .with_protocol_versions(rustls::ALL_VERSIONS)
+                .expect("tls versions build")
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .expect("offline test cert parses");
+            let connection = rustls::ServerConnection::new(std::sync::Arc::new(config))
+                .expect("server connection builds");
+            let mut tls = rustls::StreamOwned::new(connection, stream);
+            // The client writes head plus body before reading: drain both so
+            // the response is never mistaken for request bytes.
+            let mut raw: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let header_end = loop {
+                match tls.read(&mut chunk) {
+                    Ok(0) => panic!("tls stub: client closed before answering"),
+                    Ok(count) => {
+                        raw.extend_from_slice(&chunk[..count]);
+                        if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break index;
+                        }
+                    }
+                    Err(error) => panic!("tls stub head read failed: {error}"),
+                }
+            };
+            let head = std::str::from_utf8(&raw[..header_end]).expect("tls stub head is ascii");
+            let mut length = 0usize;
+            for line in head.split("\r\n") {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap_or(0);
+                }
+            }
+            let mut pending = raw.split_off(header_end + 4);
+            while pending.len() < length {
+                match tls.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => pending.extend_from_slice(&chunk[..count]),
+                    Err(error) => panic!("tls stub body read failed: {error}"),
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            tls.write_all(response.as_bytes())
+                .expect("tls stub answers");
+        });
+        (port, handle)
+    }
+
+    /// EG17 TLS half: `https://` to a loopback stub carrying a test CA
+    /// completes the handshake and returns the stub body, with no secret in
+    /// any error. The client trusts the offline test CA for this request
+    /// only; production still trusts the native store alone.
     #[cfg(feature = "tls")]
     #[test]
-    #[ignore = "needs a loopback TLS stub with a test CA (no cert-minter in the graph)"]
-    fn https_loopback_roundtrip() {
-        // Would: mint a test CA, serve TLS on 127.0.0.1, post_json over
-        // https, and expect 200 plus the stub body.
+    fn https_stub_roundtrip() {
+        let (port, server) = spawn_tls_stub(String::from("{\"ok\":true}"));
+        let url = format!("https://127.0.0.1:{port}/v1/chat/completions");
+        let endpoint = parse_endpoint(&url).expect("https stub URL parses");
+        assert!(endpoint.tls(), "https scheme selects the handshake");
+        let response = post_json_with(
+            &endpoint,
+            r#"{"model":"probe"}"#,
+            Some("stub-token"),
+            5_000,
+            &[TEST_CA_DER],
+        )
+        .expect("loopback TLS roundtrip completes");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "{\"ok\":true}");
+        server.join().expect("tls stub exits after one dial");
     }
 
     #[test]

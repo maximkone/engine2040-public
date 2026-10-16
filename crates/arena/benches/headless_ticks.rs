@@ -56,6 +56,14 @@ fn run_once(count: usize) -> (Vec<u64>, f64) {
 }
 
 fn main() {
+    // `cargo nextest run --all-targets` probes every bench binary with
+    // `--list --format terse` to build the test list; a `harness = false`
+    // bench must exit 0 without printing throughput lines, or nextest fails
+    // with `line ... did not end with ": test" or ": benchmark"`.
+    // Pattern owned by `crates/perf/benches/instructions.rs`.
+    if std::env::args().any(|arg| arg == "--list") {
+        return;
+    }
     for count in [1usize, 8, 32] {
         let (first, first_s) = run_once(count);
         let (second, second_s) = run_once(count);
