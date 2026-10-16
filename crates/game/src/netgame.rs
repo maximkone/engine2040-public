@@ -140,7 +140,7 @@ pub fn lobby_slot_rows(
 }
 
 /// Windowed loop lobby step: one press plus one command run.
-/// Feeds `input` to `screen`, runs `FillAi`/`SetReady`/`Start` against `lobby`,
+/// Feeds `input` to `screen`, runs `Host`/`FillAi`/`SetReady`/`Start` against `lobby`,
 /// refreshes the screen slots via [`lobby_slot_rows`], and returns the command
 /// the loop saw. Sockets stay in the caller and no address is typed: hosts are
 /// [`engine_ui::lobby_ui::HostId`] positions the caller maps to senders.
@@ -157,6 +157,12 @@ pub fn windowed_lobby_entry(
     use engine_ui::lobby_ui::LobbyCommand;
     let command = screen.input(input)?;
     match command {
+        Some(LobbyCommand::Host) => {
+            if lobby.join(me, lobby.build()).is_ok() {
+                let rows = lobby_slot_rows(lobby, me);
+                screen.joined(&rows, true)?;
+            }
+        }
         Some(LobbyCommand::FillAi) => {
             lobby.ai_fill();
             let rows = lobby_slot_rows(lobby, me);

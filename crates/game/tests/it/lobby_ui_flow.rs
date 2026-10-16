@@ -337,6 +337,16 @@ fn windowed_loop_reaches_lobby_screen_through_its_own_entry() {
     assert!(screen.can_start());
     let mut guest = LobbyScreen::new(limits()).expect("guest screen");
     guest
+        .set_hosts(&[HostRow {
+            id: HostId(0),
+            fighters: FIGHTERS,
+        }])
+        .expect("host list");
+    assert_eq!(
+        guest.input(LobbyInput::Confirm),
+        Ok(Some(LobbyCommand::Join(HostId(0))))
+    );
+    guest
         .joined(&guest_rows(1, FIGHTERS, true), false)
         .expect("guest in lobby");
     assert_eq!(guest.input(LobbyInput::Start), Err(LobbyUiError::NotHost));

@@ -522,7 +522,7 @@ pub mod conditions {
                     }
                     return None;
                 }
-                if held >= TAP_MIN_HELD_TICKS && held <= TAP_MAX_HELD_TICKS {
+                if (TAP_MIN_HELD_TICKS..=TAP_MAX_HELD_TICKS).contains(&held) {
                     return Some(GestureKind::Tap);
                 }
                 return None;
@@ -642,7 +642,7 @@ pub mod conditions {
             assert_eq!(run_hold(30)[1], GestureKind::HoldAndRelease);
             assert_eq!(run_hold(35)[1], GestureKind::HoldAndRelease);
             assert_ne!(
-                run_hold(5).get(0),
+                run_hold(5).first(),
                 Some(&GestureKind::HoldAndRelease),
                 "short tap is never a hold-release"
             );
@@ -701,11 +701,7 @@ pub mod conditions {
             assert_eq!(stack.active(), Some(ActionSet::Menu));
             assert_eq!(stack.pop(), Some(ActionSet::Menu));
             assert!(stack.is_duel_active());
-            let menu_leaks = if menu_bits.0 == 0 && menu_gestures.0 == 0 {
-                0
-            } else {
-                1
-            };
+            let menu_leaks = i32::from(!(menu_bits.0 == 0 && menu_gestures.0 == 0));
             assert_eq!(menu_leaks, 0, "0 menu presses leak into the duel");
         }
 
