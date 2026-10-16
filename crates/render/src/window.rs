@@ -156,6 +156,16 @@ impl WindowShell {
     pub fn look_report_path(&self, date: &str) -> String {
         crate::pass_truth::pass_truth_filename(date)
     }
+
+    /// EG8: write the dated LIVE/PROBE artifact through the gate writer.
+    /// Units: date is a plain tag, never parsed; returns the file path written.
+    /// Determinism: same date gives the same bytes twice; no clock, no float.
+    /// Errors: `std::io::Error` when the report file cannot be written.
+    /// Budget: cold-path report only; heap only the report plus the path.
+    /// Consumer: the EG8 `target/reports/pass-truth-<date>.md` artifact.
+    pub fn write_look_report(&self, date: &str) -> Result<String, std::io::Error> {
+        crate::pass_truth::write_gate_report(date)
+    }
 }
 
 #[cfg(test)]

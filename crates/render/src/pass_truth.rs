@@ -586,6 +586,23 @@ pub fn pass_truth_filename(date: &str) -> String {
     out
 }
 
+/// Dated LIVE/PROBE artifact writer: pairs [`gate_dated_report`] with
+/// [`pass_truth_filename`] and writes `target/reports/pass-truth-<date>.md`.
+/// Units: date is a plain tag, never parsed; returns the file path written.
+/// Determinism: same date gives the same bytes twice; no clock, no float.
+/// Errors: `std::io::Error` when the report file cannot be written.
+/// Budget: cold-path report only; heap only the report plus the path.
+/// Caller: `crate::window::WindowShell::write_look_report` (production wire).
+pub fn write_gate_report(date: &str) -> Result<String, std::io::Error> {
+    let report = gate_dated_report(date);
+    let path = pass_truth_filename(date);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, report.as_bytes())?;
+    Ok(path)
+}
+
 /// Pinned software adapter for the look-gate CI leg.
 /// Units: substring of the adapter name, lower-case compare.
 /// Determinism: pure string match, no IO.
@@ -964,6 +981,24 @@ mod tests {
             report.starts_with("# pass truth 2026-10-16"),
             "report and path share the date tag"
         );
+    }
+
+    #[test]
+    fn dated_report_file_writes_and_repeats() {
+        let date = "tmp-eg8-writer";
+        let path = write_gate_report(date).expect("dated report writes");
+        assert_eq!(path, pass_truth_filename(date));
+        let on_disk = std::fs::read(&path).expect("dated report reads back");
+        let composed = gate_dated_report(date);
+        assert_eq!(on_disk.as_slice(), composed.as_bytes());
+        let again = write_gate_report(date).expect("dated report rewrites");
+        assert_eq!(again, path);
+        let reread = std::fs::read(&path).expect("dated report rereads");
+        assert_eq!(reread.as_slice(), on_disk.as_slice());
+        let text = String::from_utf8(reread).expect("report is utf8");
+        assert!(text.contains("| graph | LIVE |"), "forward is LIVE");
+        assert!(text.contains("| sky | PROBE | 0 |"), "sky stays PROBE");
+        assert!(text.contains("| decals | PROBE | 0 |"), "decals stay PROBE");
     }
 
     #[test]
