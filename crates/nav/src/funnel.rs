@@ -794,6 +794,11 @@ mod tests {
 
     #[test]
     #[ignore = "timing: release perf gate measures the 0.2 ms query budget"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "test-only timing, never the tick"
+    )]
     fn timing_query_p50_under_02ms() {
         use std::time::Instant;
         let nav = open(32, 32, 4);

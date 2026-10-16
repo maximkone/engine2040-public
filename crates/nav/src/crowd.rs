@@ -978,10 +978,7 @@ mod tests {
             far_velocity([0.0, 0.0], [0.05, 0.0], 3.0, [f32::NAN, 0.0], &cfg),
             Err(CrowdError::BadValue("flow"))
         );
-        assert_eq!(
-            far_velocity([0.0, 0.0], [10.0, 0.0], 3.0, [1.0, 0.0], &cfg).is_ok(),
-            true
-        );
+        assert!(far_velocity([0.0, 0.0], [10.0, 0.0], 3.0, [1.0, 0.0], &cfg).is_ok());
     }
 
     #[test]

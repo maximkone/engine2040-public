@@ -203,7 +203,7 @@ fn clamp_box(nav: &TiledNav, b: [usize; 4]) -> Result<[usize; 4], TileError> {
     let x1 = b[2].min(nav.width() - 1);
     let y1 = b[3].min(nav.height() - 1);
     let c = [b[0], b[1], x1, y1];
-    let (cols, _) = nav.tile_dims();
+    let (_cols, _) = nav.tile_dims();
     let edge = nav.edge();
     let n = (c[2] / edge - c[0] / edge + 1) * (c[3] / edge - c[1] / edge + 1);
     if n > MAX_TOUCHED_TILES {

@@ -632,7 +632,14 @@ impl Presenter {
         if sky {
             // The sky entries read only the fog uniform; any forward bind
             // group carries it (the dynamic material offset is unused).
-            rp.set_pipeline(&self.sky_pipeline);
+            // The 4x on path needs the 4x sky pipeline to match the 4x
+            // attachments; the 1x path keeps today's pipeline.
+            let sky_pipeline = if msaa_pair.is_some() {
+                &self.sky_msaa
+            } else {
+                &self.sky_pipeline
+            };
+            rp.set_pipeline(sky_pipeline);
             rp.set_bind_group(0, &self.fallback_bind, &[0]);
             rp.draw(0..3, 0..1);
         }
@@ -1262,6 +1269,7 @@ pub(super) fn forward_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    multisample: wgpu::MultisampleState,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-forward-layout"),
@@ -1322,7 +1330,7 @@ pub(super) fn forward_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample,
         multiview_mask: None,
         cache: None,
     })
@@ -1336,6 +1344,7 @@ pub(super) fn sky_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    multisample: wgpu::MultisampleState,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-sky-layout"),
@@ -1369,7 +1378,7 @@ pub(super) fn sky_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample,
         multiview_mask: None,
         cache: None,
     })

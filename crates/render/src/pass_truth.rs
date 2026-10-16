@@ -125,6 +125,25 @@ impl LookToggles {
     }
 }
 
+/// Disabled submit entries in `LOOK_PASSES` order; enabled slots read `None`.
+/// Units: submit entry names in `LOOK_PASSES` order. Determinism: same toggles
+/// give the same array twice; no clock, no float, no IO. Budget: nine options
+/// on the stack, no heap.
+/// Caller: `crate::present::gpu_present::live::live_sky_should_draw`
+/// in `crates/render/src/present/gpu_present/live.rs`, which skips the sky
+/// bind when the sky row lists its submit entry, plus the coming capture
+/// harness, which skips each listed submit when rendering real on/off frames.
+#[must_use]
+pub fn submit_skips_for(toggles: &LookToggles) -> [Option<&'static str>; 9] {
+    let mut out: [Option<&'static str>; 9] = [None; 9];
+    for (index, spec) in LOOK_PASSES.iter().enumerate() {
+        if !toggles.on[index] {
+            out[index] = Some(spec.pass);
+        }
+    }
+    out
+}
+
 /// One gated pass: its verdict plus the diff behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassVerdict {
@@ -1261,5 +1280,72 @@ mod tests {
             gate_table_masked(None),
             "all-on matches the masked gate"
         );
+    }
+
+    #[test]
+    fn sky_toggle_off_lists_only_sky_skip() {
+        // Caller: `crate::present::gpu_present::live::live_sky_should_draw`
+        // in `crates/render/src/present/gpu_present/live.rs` consumes this
+        // list to skip the sky bind. Behavior: all-on lists no skip, sky
+        // disabled lists only the sky submit entry, unknown rows never list.
+        let all = submit_skips_for(&LookToggles::all_on());
+        assert!(
+            all.iter().all(|slot| slot.is_none()),
+            "all-on lists no skip"
+        );
+        let mut toggles = LookToggles::all_on();
+        toggles.disable("sky");
+        let skips = submit_skips_for(&toggles);
+        let sky_index = LOOK_PASSES
+            .iter()
+            .position(|spec| spec.row == "sky")
+            .expect("sky row present");
+        assert_eq!(
+            skips[sky_index],
+            Some(LOOK_PASSES[sky_index].pass),
+            "sky disabled lists its submit entry"
+        );
+        assert_eq!(
+            skips[sky_index],
+            Some("submit_gpu_sky"),
+            "sky entry is the sky submit"
+        );
+        for (index, slot) in skips.iter().enumerate() {
+            if index != sky_index {
+                assert!(slot.is_none(), "only sky lists a skip");
+            }
+        }
+        let mut ghost = LookToggles::all_on();
+        ghost.disable("no-such-pass");
+        let ghost_skips = submit_skips_for(&ghost);
+        assert!(
+            ghost_skips.iter().all(|slot| slot.is_none()),
+            "unknown disable lists no skip"
+        );
+        assert!(
+            !skips
+                .iter()
+                .flatten()
+                .any(|entry| *entry == "no-such-pass" || *entry == "none"),
+            "unknown rows never appear"
+        );
+        assert_eq!(
+            submit_skips_for(&toggles),
+            skips,
+            "same toggles give same skips twice"
+        );
+        let sky_spec = LOOK_PASSES
+            .iter()
+            .find(|spec| spec.row == "sky")
+            .expect("sky spec present");
+        let off = [10u8, 10, 10, 255, 10, 10, 10, 255];
+        let mut on = off;
+        on[2] = 200;
+        let live = verdict_for_frames(sky_spec, &on, &off, 2, 1, None);
+        assert!(live.live, "sky on/off pair differs in the sky region");
+        assert!(live.diff_pixels > PASS_LIVE_FLOOR);
+        let probe = verdict_for_frames(sky_spec, &off, &off, 2, 1, None);
+        assert!(!probe.live, "identical sky frames stay PROBE");
+        assert_eq!(probe.diff_pixels, 0);
     }
 }

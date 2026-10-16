@@ -6,7 +6,9 @@
 use super::super::fog_fwd::{FogFwd, FOG_FWD_UNIFORM_BYTES};
 use super::super::*;
 use super::frame::{gtao_err, sky_err, GpuMesh, GpuTexture, Targets};
-use super::msaa::{msaa_sample_count, msaa_target_desc, msaa_transient_bytes, MsaaConfig};
+use super::msaa::{
+    msaa_sample_count, msaa_target_desc, msaa_transient_bytes, pipeline_multisample, MsaaConfig,
+};
 use super::submit::{
     blit_pipeline, forward_pipeline, material_entry, padded_depth_row, sky_pipeline,
     uniform_buffer, uniform_entry, MATERIAL_RING_BYTES, MATERIAL_RING_LEN,
@@ -232,6 +234,9 @@ pub struct Presenter {
     /// Fullscreen far-plane sky draw (`vs_sky`/`fs_sky` of the forward
     /// shader over the forward bind layout; it reads only the fog uniform).
     pub(crate) sky_pipeline: wgpu::RenderPipeline,
+    /// 4x MSAA sky pipeline for the on path: same shader plus layout
+    /// as `sky_pipeline` with count 4; bound when `targets.msaa` is `Some`.
+    pub(crate) sky_msaa: wgpu::RenderPipeline,
     /// Blocking-call tally per frame kind (live, probe, capture).
     pub(crate) waits: WaitStats,
     /// Blocking calls recorded so far in the frame being encoded.
@@ -531,11 +536,22 @@ impl Presenter {
             label: Some("ra1-uniforms"),
             entries: &forward_entries,
         });
-        let forward_hdr = forward_pipeline(&device, &forward_shader, &forward_layout, HDR_FORMAT);
-        // EG13 slice 1 keeps the 1x path: the MSAA pipeline reuses the 1x
-        // build until slice 2 wires the 4x targets plus resolve.
-        let forward_hdr_msaa =
-            forward_pipeline(&device, &forward_shader, &forward_layout, HDR_FORMAT);
+        let forward_hdr = forward_pipeline(
+            &device,
+            &forward_shader,
+            &forward_layout,
+            HDR_FORMAT,
+            pipeline_multisample(&MsaaConfig::default()),
+        );
+        // EG13 on path: 4x multisample with one shading run per pixel
+        // (cost is bandwidth, not shading); off stays the 1x path.
+        let forward_hdr_msaa = forward_pipeline(
+            &device,
+            &forward_shader,
+            &forward_layout,
+            HDR_FORMAT,
+            pipeline_multisample(&MsaaConfig { enabled: true }),
+        );
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ra1-blit"),
             source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
@@ -746,7 +762,20 @@ impl Presenter {
             uniform_buffer(&device, "ra1-u-fog-forward", FOG_FWD_UNIFORM_BYTES as u64);
         // EG12 slice 2: staged torch block, 272 bytes, zeroed for clears.
         let torch_buf = uniform_buffer(&device, "eg12-u-torch", 272);
-        let sky_pipeline = sky_pipeline(&device, &forward_shader, &forward_layout, HDR_FORMAT);
+        let sky_1x = sky_pipeline(
+            &device,
+            &forward_shader,
+            &forward_layout,
+            HDR_FORMAT,
+            pipeline_multisample(&MsaaConfig::default()),
+        );
+        let sky_msaa = sky_pipeline(
+            &device,
+            &forward_shader,
+            &forward_layout,
+            HDR_FORMAT,
+            pipeline_multisample(&MsaaConfig { enabled: true }),
+        );
         let material_ring = uniform_buffer(&device, "ra1-u-material-ring", MATERIAL_RING_BYTES);
         let ibl_prefilter_view = ibl_prefilter.create_view(&wgpu::TextureViewDescriptor {
             label: Some("ra1-ibl-prefilter-view"),
@@ -777,12 +806,10 @@ impl Presenter {
             &normal_fallback.view,
         );
         let gpu_timer = GpuTimer::new(&device, &queue);
-        // EG13 slice 1: the MSAA on/off switch. Off (default) keeps
-        // today's 1x HDR plus depth targets and the 1x submit path; on
-        // notes the 4x shape (donor pipeline multisample count 4 with a
-        // view/resolveTarget pair resolved before the blit) while the 1x
-        // path keeps working. Full MSAA textures plus resolve land in
-        // slice 2, so this stays EG2-green. Never waits on the GPU.
+        // EG13: the MSAA on/off switch. Off (default) keeps today's 1x HDR
+        // plus depth targets and the 1x submit path; on renders the 4x HDR
+        // plus depth pair and resolves into 1x HDR before the blit.
+        // Never waits on the GPU.
         let msaa = MsaaConfig::default();
         debug_assert_eq!(
             msaa_sample_count(&msaa),
@@ -790,7 +817,7 @@ impl Presenter {
             "MSAA defaults off: the 1x path"
         );
         // The desc names the HDR plus depth formats with the chosen count;
-        // slice 2 builds the 4x textures from it (resolve before the blit).
+        // `ensure_targets` builds the 4x pair from it (resolve before blit).
         let msaa_desc = msaa_target_desc(&msaa);
         debug_assert_eq!(msaa_desc.sample_count, 1);
         Ok(Self {
@@ -807,7 +834,8 @@ impl Presenter {
             fog_fwd,
             fog_fwd_buf,
             torch_buf,
-            sky_pipeline,
+            sky_pipeline: sky_1x,
+            sky_msaa,
             waits: WaitStats::default(),
             frame_waits: FrameWaits::default(),
             gpu_timer,
@@ -1858,6 +1886,51 @@ impl Presenter {
 
 #[cfg(test)]
 mod presenter_adapter_tests {
+    #[test]
+    fn msaa_edge_live_resolve_splits() {
+        use super::super::msaa::resolve_average;
+        use super::super::msaa::{edge_has_intermediate, msaa_forward_choice, MsaaConfig};
+        let off = MsaaConfig::default();
+        let on = MsaaConfig { enabled: true };
+        // Live branch: on plus built resolves 4x into 1x HDR, else 1x.
+        let (_, on_built_resolves) = msaa_forward_choice(&on, true);
+        let (_, on_unbuilt_resolves) = msaa_forward_choice(&on, false);
+        let (_, off_built_resolves) = msaa_forward_choice(&off, true);
+        let (_, off_unbuilt_resolves) = msaa_forward_choice(&off, false);
+        assert!(on_built_resolves, "on plus built resolves before blit");
+        assert!(!on_unbuilt_resolves, "on plus unbuilt stays 1x");
+        assert!(!off_built_resolves, "off plus built stays 1x");
+        assert!(!off_unbuilt_resolves, "off plus unbuilt stays 1x");
+        // Half-covered edge quad resolves to a half on the on path only.
+        let mixed = [0.0f32, 0.0, 1.0, 1.0];
+        let flat_one = [1.0f32; 4];
+        let on_tex = if on_built_resolves {
+            [resolve_average(mixed)]
+        } else {
+            [resolve_average(flat_one)]
+        };
+        let off_tex = [resolve_average(flat_one)];
+        assert!(
+            edge_has_intermediate(&on_tex, &off_tex),
+            "on set blends, off set stays stepped through live branch"
+        );
+        assert!(
+            !edge_has_intermediate(&off_tex, &off_tex),
+            "flat off-set stays stepped"
+        );
+        // Same split twice: same inputs give same verdict.
+        assert_eq!(
+            edge_has_intermediate(&on_tex, &off_tex),
+            edge_has_intermediate(&on_tex, &off_tex),
+            "same inputs give same split twice"
+        );
+        assert_eq!(
+            msaa_forward_choice(&on, true),
+            msaa_forward_choice(&on, true),
+            "same inputs give same choice twice"
+        );
+    }
+
     #[test]
     fn msaa_toggle_drops_targets() {
         let mut presenter = match crate::present::Presenter::init_offscreen() {

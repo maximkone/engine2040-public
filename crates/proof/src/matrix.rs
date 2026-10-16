@@ -414,6 +414,14 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// Bound HS2 target set: hosts must match exactly, digests match each other, never a pinned constant.
 /// Caller: `compare_matrix_set` (same file) checks this set.
 pub const TARGETS: &[&str] = &["windows-x86_64", "linux-x86_64"];
+/// Optional third HS2 host when an aarch64 runner exists: the two bound
+/// x86-64 rows plus one `*-aarch64` row, digests still equal.
+/// Caller: `compare_matrix_set` (same file) allows this third row.
+/// Units: host labels; determinism: pure string match, no clock or IO.
+#[must_use]
+pub fn is_optional_aarch64_host(host: &str) -> bool {
+    matches!(host, "linux-aarch64" | "windows-aarch64" | "macos-aarch64")
+}
 /// Emit this target's digests beside `collect_local_entry`, with a trace round-trip.
 /// Caller: `collect_local_entry` (same file) proves file-vs-memory equality per row.
 pub fn emit_local_digests(entry: &MatrixEntry) -> (u64, u64, usize) {
@@ -447,11 +455,23 @@ impl fmt::Display for MatrixSetError {
 
 impl std::error::Error for MatrixSetError {}
 
-/// Compare several targets' rows: hosts equal `TARGETS` exactly, digests equal the first row.
+/// Compare several targets' rows: hosts equal `TARGETS` exactly, or the two
+/// bound hosts plus one optional aarch64 host; digests equal the first row.
 /// Caller: `collect_local_entry` (same file) exercises this set check per row.
 pub fn compare_matrix_set(entries: &[MatrixEntry]) -> Result<(), MatrixSetError> {
     let hosts: Vec<&str> = entries.iter().map(|item| item.host.as_str()).collect();
-    if hosts != TARGETS {
+    let hosts_ok = if hosts == TARGETS {
+        true
+    } else if hosts.len() == TARGETS.len() + 1
+        && hosts[0] == TARGETS[0]
+        && hosts[1] == TARGETS[1]
+        && is_optional_aarch64_host(hosts[2])
+    {
+        true
+    } else {
+        false
+    };
+    if !hosts_ok {
         return Err(MatrixSetError::Hosts {
             got: hosts.iter().map(|host| (*host).to_owned()).collect(),
         });
@@ -877,5 +897,42 @@ mod tests {
             .is_none(),
             "bad blocks must fail"
         );
+    }
+
+    #[test]
+    fn matrix_set_accepts_optional_aarch64_third_row() {
+        let first = collect_local_entry().expect("local row collects");
+        let mut second = first.clone();
+        second.host = TARGETS[1].to_owned();
+        let mut third = first.clone();
+        third.host = "linux-aarch64".to_owned();
+        let triple = [first.clone(), second.clone(), third.clone()];
+        assert!(
+            compare_matrix_set(&triple).is_ok(),
+            "optional aarch64 third row passes when digests match"
+        );
+        let mut moved = triple.clone();
+        moved[2].checkpoints[41].legacy ^= 1;
+        let error = compare_matrix_set(&moved).expect_err("moved aarch64 tick must fail");
+        assert!(
+            error.to_string().contains("41"),
+            "diverged aarch64 names the tick: {error}"
+        );
+        assert!(
+            matches!(error, MatrixSetError::Diverged { .. }),
+            "moved tick names divergence, got {error:?}"
+        );
+        let mut bad = triple.clone();
+        bad[2].host = "freebsd-x86_64".to_owned();
+        let error = compare_matrix_set(&bad).expect_err("unknown third host must fail");
+        assert!(
+            matches!(error, MatrixSetError::Hosts { .. }),
+            "unknown host names hosts, got {error:?}"
+        );
+        assert!(is_optional_aarch64_host("linux-aarch64"));
+        assert!(is_optional_aarch64_host("windows-aarch64"));
+        assert!(!is_optional_aarch64_host("linux-x86_64"));
+        assert!(!is_optional_aarch64_host("freebsd-x86_64"));
+        assert!(!is_optional_aarch64_host(""));
     }
 }

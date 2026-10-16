@@ -921,7 +921,7 @@ pub fn depenetrate_point_mm(
 }
 
 fn narrow(v: i64) -> i32 {
-    i32::try_from(v).unwrap_or_else(|_| if v < 0 { i32::MIN } else { i32::MAX })
+    i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX })
 }
 
 /// Grown face holding `entry_mm`: per axis -1 on the low face, 1 on the

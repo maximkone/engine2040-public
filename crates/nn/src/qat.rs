@@ -21,6 +21,13 @@ pub const QAT_LR: f32 = 0.03;
 pub const QAT_MAX_EPOCHS: u32 = 2000;
 /// Largest training row count accepted.
 pub const QAT_MAX_SAMPLES: usize = 4096;
+/// Smallest correct-minus-rival logit gap the QAT path defends while
+/// training, so int8 rounding cannot flip a hairline winner. The tick runtime
+/// requantizes logits to integers (step 1.0) with first-wins ties, so a
+/// sub-LSB gap that looks safe in float still ties 0-0 or -1--1 after export;
+/// defending a few LSBs keeps the winner above both weight noise and output
+/// rounding.
+const QAT_MIN_GAP: f32 = 3.0;
 
 /// Offline training and export failures.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,7 +219,9 @@ fn logits_for_row(
     out
 }
 
-/// Train a bias-free dense student with full-batch SGD on one-hot MSE.
+/// Train a bias-free dense student with full-batch SGD on one-hot MSE, plus a
+/// winning-gap hinge on the QAT path that keeps the correct logit above its
+/// rivals through int8 rounding.
 ///
 /// Units: features in real units within the runtime range, targets are class
 /// ids. Determinism: fixed row order, seeded init, no threads; same inputs
@@ -251,6 +260,30 @@ pub fn train_student(
                 let dlogit = diff * mse_scale;
                 for i in 0..cfg.input_dim {
                     grads[o * cfg.input_dim + i] += dlogit * x[i];
+                }
+            }
+            // The QAT path also defends the winning gap: int8 rounding can
+            // flip a hairline winner that MSE alone leaves standing, so a row
+            // whose correct logit leads by less than the rounding noise pays
+            // a hinge that pushes the gap back above it. The PTQ path never
+            // sees this term, and rows and rivals stay in fixed order.
+            if cfg.qat && cfg.output_dim > 1 {
+                let t = usize::from(*target);
+                let mut rival = 0usize;
+                let mut top = f32::NEG_INFINITY;
+                for o in 0..cfg.output_dim {
+                    if o != t && logits[o] > top {
+                        top = logits[o];
+                        rival = o;
+                    }
+                }
+                let gap = logits[t] - top;
+                if gap < QAT_MIN_GAP {
+                    let dgap = (gap - QAT_MIN_GAP) * mse_scale;
+                    for i in 0..cfg.input_dim {
+                        grads[t * cfg.input_dim + i] += dgap * x[i];
+                        grads[rival * cfg.input_dim + i] -= dgap * x[i];
+                    }
                 }
             }
         }
