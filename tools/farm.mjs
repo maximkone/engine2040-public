@@ -6,7 +6,7 @@
 //   node tools/farm.mjs --max 40        minutes to wait (default 30)
 // Exit 0 = every job green, 1 = a job is red (lines printed and kept in target/farm-last.txt), 2 = no run or timeout.
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -59,13 +59,27 @@ const main = async () => {
   const out = [`farm: ${REPO}@${sha.slice(0, 7)} ${run.url}`];
   for (const j of jobs) out.push(`${j.conclusion === "success" ? "PASS" : String(j.conclusion).toUpperCase()} ${j.name}${j.conclusion === "success" ? "" : ` (step: ${(j.steps ?? []).find((s) => s.conclusion === "failure")?.name ?? "?"})`}`);
   const red = jobs.filter((j) => j.conclusion !== "success" && j.conclusion !== "skipped");
+  let byJob = new Map();
   if (red.length) {
     let log = ""; try { log = gh(["run", "view", String(run.databaseId), "-R", REPO, "--log-failed"]); } catch (e) { log = String(e?.stdout ?? ""); }
-    for (const [job, lines] of errorLines(log)) { out.push(`--- ${job}`); out.push(...lines); }
+    byJob = errorLines(log);
+    for (const [job, lines] of byJob) { out.push(`--- ${job}`); out.push(...lines); }
   }
   out.push(red.length ? `RESULT RED: ${red.length} job(s)` : "RESULT GREEN");
   mkdirSync(join(ROOT, "target"), { recursive: true }); writeFileSync(join(ROOT, "target", "farm-last.txt"), `${out.join("\n")}\n`);
   console.log(out.join("\n"));
+  if (flag("--packets")) for (const j of red) console.log(writePacket(j, run, [...byJob].find(([k]) => k === j.name)?.[1] ?? []));
   process.exit(red.length ? 1 : 0);
+};
+
+// One ready packet per red job (skipped when the queue already holds one for that job from the last 24 h), so a red run needs no human and no message to the lead.
+export const writePacket = (job, run, lines) => {
+  const q = join(ROOT, "target", "queue"); const slug = job.name.toLowerCase().replace(/\(.*$/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
+  const name = `0-farm-${slug}-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.md`;
+  for (const d of ["ready", "running", "held"]) if (existsSync(join(q, d, name))) return `packet exists: ${name}`;
+  if (!existsSync(join(q, "ready"))) return "no queue here";
+  const step = (job.steps ?? []).find((s) => s.conclusion === "failure")?.name ?? "?";
+  const body = `---\nrole: builder\nseat: coder\ntitle: farm red: ${job.name} (step ${step})\nrow: bug:farm-${slug}\npaths: crates\ntest: the narrowest cargo test -p <crate> <test> or cargo clippy -p <crate> that reproduces the lines below\nmax_diff: 60\nsource: node tools/farm.mjs --packets (public mirror ${run.url})\n---\nSeverity: A\nPriority: 1\ntrace: job "${job.name}" failed at step "${step}" in ${run.url}. Error lines:\n${lines.map((l) => `- ${l}`).join("\n") || "- (none captured; read the job log: gh run view " + run.databaseId + " -R " + REPO + " --log-failed)"}\noracle: the job is green on the next farm run.\n## Goal\nReproduce the failure with ONE narrow command on this PC (never workspace-wide), fix the cause in the code. Never raise a budget, baseline or ratchet.\n## Scope\nThe crate the error lines name.\n## Proof\nThe narrow command exits 0; quote the passed count.\n## Stop\n30 minutes. End with RESULT: DONE|PARTIAL|BLOCKED - <what> | proof: <command result>.\n`;
+  writeFileSync(join(q, "ready", name), body); return `packet written: ${name}`;
 };
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main().catch((e) => { console.log("FAILED: " + String(e?.message ?? e).split("\n")[0]); process.exit(2); });

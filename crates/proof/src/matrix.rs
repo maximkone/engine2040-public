@@ -217,7 +217,9 @@ pub struct CorpusCompare {
 }
 
 /// Compare two corpus checkpoint streams. Block `i` covers cases
-/// `i * CHECKPOINT_EVERY .. (i + 1) * CHECKPOINT_EVERY`.
+/// `i * CHECKPOINT_EVERY .. (i + 1) * CHECKPOINT_EVERY`. Names the cause
+/// via [`classify_cause`], mirroring [`compare_checkpoints`], so CI reads
+/// the `[cause=...]` tag beside the block range.
 #[must_use]
 pub fn compare_corpus(base: &[u64], other: &[u64]) -> CorpusCompare {
     if base.len() != other.len() {
@@ -238,12 +240,13 @@ pub fn compare_corpus(base: &[u64], other: &[u64]) -> CorpusCompare {
                 .unwrap_or(u32::MAX)
                 .saturating_mul(CHECKPOINT_EVERY);
             let last = first.saturating_add(CHECKPOINT_EVERY - 1);
+            let cause = classify_cause(*a, *b).unwrap_or("sort-tie");
             return CorpusCompare {
                 equal: false,
                 first_block: Some(block),
                 first_case: Some(first),
                 note: format!(
-                    "first bad corpus block {block} (cases {first}..={last}): \
+                    "first bad corpus block {block} (cases {first}..={last}) [cause={cause}]: \
                      bisect that block for sort ties, libm calls, or fused multiply-add"
                 ),
             };
@@ -584,6 +587,41 @@ mod tests {
         );
         let same = compare_corpus(&report.checkpoints, &report.checkpoints);
         assert!(same.equal);
+    }
+
+    #[test]
+    fn matrix_corpus_block_names_cause_like_tape() {
+        // HS2 slice: the corpus block note names its cause via
+        // `classify_cause`, mirroring `compare_checkpoints`, so CI reads
+        // the `[cause=...]` tag beside the block range.
+        let report = run_cuts(CORPUS_SEED, CHECKPOINT_EVERY * 2).expect("prefix runs");
+        let base = report.checkpoints.clone();
+        let mut fma_moved = base.clone();
+        fma_moved[1] ^= 1;
+        let fma_compared = compare_corpus(&base, &fma_moved);
+        assert!(!fma_compared.equal);
+        assert!(
+            fma_compared.note.contains("[cause=fma]"),
+            "fma block note {}",
+            fma_compared.note
+        );
+        let mut libm_moved = base.clone();
+        libm_moved[1] ^= 0x80;
+        let libm_compared = compare_corpus(&base, &libm_moved);
+        assert!(
+            libm_compared.note.contains("[cause=libm]"),
+            "libm block note {}",
+            libm_compared.note
+        );
+        assert_ne!(
+            fma_compared.note, libm_compared.note,
+            "same block with different magnitudes must name different causes"
+        );
+        assert_eq!(
+            compare_corpus(&base, &fma_moved).note,
+            fma_compared.note,
+            "same inputs give same note twice"
+        );
     }
 
     #[test]

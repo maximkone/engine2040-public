@@ -1202,6 +1202,16 @@ pub(super) fn stage_field_bytes(
     (mean(top, top_n), mean(bottom, bottom_n), min)
 }
 
+/// Forward vertex stride in bytes: pos(12) + normal(12) + uv(8) + tangent(16).
+/// Matches `MeshData::vertex_bytes` and `VIn` in `shaders/forward.wgsl`.
+/// Units bytes per vertex. Determinism: same mesh bytes decode at these offsets.
+/// Caller: `forward_pipeline` below builds `ra1-forward-pipeline` from these.
+pub(super) const FORWARD_VERTEX_STRIDE: u64 = 48;
+/// Byte offset of the tangent (location 3) in the forward vertex.
+/// Units bytes from vertex start. Determinism: fixed layout, never hashed.
+/// Caller: `forward_pipeline` below.
+pub(super) const FORWARD_TANGENT_OFFSET: u64 = 32;
+
 pub(super) fn forward_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -1222,7 +1232,7 @@ pub(super) fn forward_pipeline(
             buffers: &[Some(wgpu::VertexBufferLayout {
                 // Stride matches `MeshData::vertex_bytes`: pos + normal + uv + tangent.
                 // Location 3 carries the tangent with handedness in w.
-                array_stride: 48,
+                array_stride: FORWARD_VERTEX_STRIDE,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
                     wgpu::VertexAttribute {
@@ -1242,7 +1252,7 @@ pub(super) fn forward_pipeline(
                     },
                     wgpu::VertexAttribute {
                         format: wgpu::VertexFormat::Float32x4,
-                        offset: 32,
+                        offset: FORWARD_TANGENT_OFFSET,
                         shader_location: 3,
                     },
                 ],
@@ -1402,4 +1412,47 @@ pub fn create_surface(
     instance
         .create_surface(window)
         .map_err(|e| PresentError::Device(format!("surface: {e}")))
+}
+
+#[cfg(test)]
+mod forward_layout_tests {
+    use super::{FORWARD_TANGENT_OFFSET, FORWARD_VERTEX_STRIDE};
+
+    #[test]
+    fn forward_stride_matches_mesh_bytes() {
+        let mesh = crate::v1::cube();
+        let stride = usize::try_from(FORWARD_VERTEX_STRIDE).expect("stride fits address space");
+        let bytes = mesh.vertex_bytes();
+        assert_eq!(
+            bytes.len(),
+            mesh.positions.len() * stride,
+            "pipeline stride matches interleaved mesh bytes"
+        );
+        let off =
+            usize::try_from(FORWARD_TANGENT_OFFSET).expect("tangent offset fits address space");
+        assert_eq!(off, 32, "tangent starts after pos(12) + normal(12) + uv(8)");
+        for (i, want) in mesh.tangents.iter().enumerate() {
+            let base = i * stride + off;
+            for (k, lane) in want.iter().enumerate() {
+                let got = f32::from_le_bytes(
+                    bytes[base + k * 4..base + (k + 1) * 4]
+                        .try_into()
+                        .expect("tangent bytes in range"),
+                );
+                assert_eq!(got, *lane, "tangent lane {k} round-trips at vertex {i}");
+            }
+        }
+        assert_ne!(
+            stride, 32,
+            "32-byte stride drops location 3 and panics pipeline create"
+        );
+    }
+
+    #[test]
+    fn forward_shader_expects_tangent_at_three() {
+        assert!(
+            crate::v1_gpu::FORWARD_PBR_WGSL.contains("@location(3) tangent: vec4<f32>"),
+            "vertex shader declares tangent at location 3"
+        );
+    }
 }

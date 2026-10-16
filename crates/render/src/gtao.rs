@@ -2909,4 +2909,90 @@ mod tests {
             "live helper routes through the live bind after forward"
         );
     }
+
+    #[test]
+    fn live_fresh_ao_darkens_valley_with_stored_depth() {
+        // Caller: `crates/render/src/present/gpu_present/live.rs`
+        // `present_frame_live` fresh path after `encode_forward`, through
+        // `gtao_live_full_for_forward` (half-res oracle plus bilateral
+        // upsample) into the full-res field the blit samples as `ao_tex`.
+        // Behavior: empty feed refuses loudly so the caller keeps `ao_tex`
+        // at 1.0 (skip, no extra work); the forward-stored step depth (left
+        // near 2 m, right far 6 m) darkens the valley while open sand stays
+        // within 2%; same feed gives the same field twice; ms is evidence
+        // only. Slice 1 keeps the whole-HDR multiply (darkens direct sun
+        // too); ambient-only moves to the slice-2 prepass.
+        let config = config_8x8();
+        let empty_depth: &[f32] = &[];
+        let empty_normals: &[[f32; 3]] = &[];
+        assert!(
+            matches!(
+                gtao_live_full_for_forward(empty_depth, empty_normals, &config),
+                Err(LookError::Invalid(_))
+            ),
+            "empty feed refuses loudly so ao_tex keeps 1.0"
+        );
+        let neutral = vec![GTAO_OPEN; 64];
+        assert!(
+            neutral.iter().all(|v| *v == 1.0),
+            "skipped fresh bind keeps ao_tex at 1.0"
+        );
+        let mut depth = vec![0.0f32; 64];
+        for y in 0..8 {
+            for x in 0..8 {
+                depth[y * 8 + x] = if x < 4 { 2.0 } else { 6.0 };
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; 64];
+        let (first, ms) =
+            gtao_live_full_for_forward(&depth, &normals, &config).expect("stored depth binds");
+        let (second, _) = gtao_live_full_for_forward(&depth, &normals, &config)
+            .expect("stored depth binds again");
+        assert_eq!(first, second, "same stored feed gives same field twice");
+        assert!(ms >= 0.0, "live bind records ms as evidence only");
+        check_ao_full_for_blit(&first, 8, 8).expect("stored bake guards clean for the blit");
+        let (valley, open) = ao_on_off_stats(&first, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        assert!(valley < GTAO_OPEN, "valley must darken, got {valley}");
+        assert!(
+            (open - GTAO_OPEN).abs() < 0.02,
+            "open sand stays within 2%, got {open}"
+        );
+        // Live wiring: the fresh bake runs after forward and before the
+        // blit, with the stale reuse kept as fallback and the empty gate
+        // kept as skip.
+        let src = include_str!("present/gpu_present/live.rs");
+        let live_fn = src
+            .find("fn present_frame_live")
+            .expect("live frame exists");
+        let live_end = src[live_fn..]
+            .find("fn present_frame_probed")
+            .map(|i| live_fn + i)
+            .unwrap_or(src.len());
+        let live_body = &src[live_fn..live_end];
+        for token in [
+            "encode_forward",
+            "live_ao_upload_for_frame",
+            "stale_ao_reuse_upload",
+            "encode_blit",
+            "live_ao_should_bind",
+        ] {
+            assert!(
+                live_body.contains(token),
+                "live frame wires {token} after forward before the blit"
+            );
+        }
+        let fwd_at = live_body
+            .find("encode_forward")
+            .expect("forward sits in live frame");
+        let helper_at = live_body
+            .find("live_ao_upload_for_frame")
+            .expect("fresh helper sits in live frame");
+        let blit_at = live_body
+            .find("encode_blit")
+            .expect("blit sits in live frame");
+        assert!(
+            fwd_at < helper_at && helper_at < blit_at,
+            "fresh bake runs after forward and before the blit"
+        );
+    }
 }

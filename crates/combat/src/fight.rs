@@ -291,18 +291,20 @@ pub fn hitstop_for_parry(tables: &Tables) -> u32 {
 ///
 /// Caller: [`resolve_strike`] (parry branch plus the clean-hit branch), so the
 /// two freeze sites never disagree. Units: ticks. Determinism: pure compare;
-/// parry wins over kind under V2 (8 either way), otherwise the kind row (light
-/// 3, heavy 6, unknown 0); every other row gives the single row, so V1 replays
-/// stay byte-identical. Errors: none.
+/// V2 delegates to the single home [`crate::hitstop_kind::for_impact`]
+/// (parry 8 wins over kind, otherwise light 3, heavy 6, unknown 0); every
+/// other row gives the single row, so V1 replays stay byte-identical.
+/// Errors: none.
 ///
 /// Caller: `crates/combat/src/fight.rs` (`resolve_strike`).
 #[must_use]
 pub fn hitstop_for_impact(tables: &Tables, kind: u8, parried: bool) -> u32 {
-    if parried {
-        hitstop_for_parry(tables)
-    } else {
-        hitstop_for_kind(tables, kind)
+    if tables.attack_startup_ticks != TABLES_V2.attack_startup_ticks
+        || tables.parry_window_ticks != TABLES_V2.parry_window_ticks
+    {
+        return tables.hitstop_ticks;
     }
+    crate::hitstop_kind::for_impact(kind, parried)
 }
 
 // ---- state ----------------------------------------------------------------

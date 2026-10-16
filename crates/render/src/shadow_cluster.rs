@@ -234,6 +234,15 @@ pub fn cascade_splits(near: f32, far: f32) -> Result<[f32; 4], LightError> {
     Ok(splits)
 }
 
+/// Sanitize live sun cost for the per-pass slot: wild reads as zero.
+fn sanitize_shadow_ms(ms: f64) -> f64 {
+    if !ms.is_finite() || ms < 0.0 {
+        0.0
+    } else {
+        ms
+    }
+}
+
 /// Cascaded sun shadow pass: validated config, precomputed splits, texel
 /// budget and (behind `v1`) the baked reference maps.
 #[derive(Clone, PartialEq, Debug)]
@@ -294,7 +303,7 @@ impl SunShadowPass {
             pass: "sun_shadow",
             texels: self.texels(),
             cells: 0,
-            ms,
+            ms: sanitize_shadow_ms(ms),
             degraded: self.degraded.is_some(),
         }
     }
@@ -2429,6 +2438,25 @@ mod tests {
             (0, 0),
             "refused submits size nothing"
         );
+    }
+
+    #[test]
+    fn sun_receipt_sanitizes_shadow_ms_for_per_pass() {
+        let pass = SunShadowPass::build(sun_config()).expect("valid pass builds");
+        let live = pass.receipt(1.25);
+        assert_eq!(live.pass, "sun_shadow");
+        assert!((live.ms - 1.25).abs() < 1e-9);
+        assert_eq!(live.texels, pass.texels());
+        assert!(!live.degraded);
+        for wild in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert_eq!(pass.receipt(wild).ms, 0.0);
+        }
+        assert_eq!(sanitize_shadow_ms(1.25), 1.25);
+        assert_eq!(sanitize_shadow_ms(f64::NAN), 0.0);
+        let line = format!("shadow={:.3}ms", sanitize_shadow_ms(1.25));
+        assert!(line.contains("shadow="));
+        assert_eq!(line, "shadow=1.250ms");
+        assert_eq!(line, format!("shadow={:.3}ms", sanitize_shadow_ms(1.25)));
     }
 }
 

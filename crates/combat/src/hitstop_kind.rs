@@ -31,6 +31,21 @@ pub const fn for_parry() -> u32 {
     PARRY_HITSTOP_TICKS_V2
 }
 
+/// Freeze ticks for one impacting strike under V2 rows, at 60 Hz.
+///
+/// Caller: `crate::fight::hitstop_for_impact` (the V2 path), so the parry
+/// branch and the clean-hit branch never disagree. Units: ticks at 60 Hz.
+/// Determinism: pure match on the parry flag plus the kind; parry wins over
+/// kind (8 either way), otherwise the kind row (light 3, heavy 6, unknown
+/// 0). Errors: none; unknown kinds give 0 unless parried, never panic.
+pub const fn for_impact(kind: u8, parried: bool) -> u32 {
+    if parried {
+        for_parry()
+    } else {
+        for_kind(kind)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +65,24 @@ mod tests {
         // Two builds give equal rows twice: deterministic construction.
         assert_eq!(for_kind(INPUT_HEAVY), for_kind(INPUT_HEAVY));
         assert_eq!(for_parry(), for_parry());
+    }
+
+    #[test]
+    fn hitstop_impact_parry_wins() {
+        // Single home for the V2 impact freeze: parry answers longest,
+        // otherwise the kind row; unknown kinds never freeze unless parried.
+        assert_eq!(for_impact(INPUT_LIGHT, false), 3);
+        assert_eq!(for_impact(INPUT_HEAVY, false), 6);
+        assert_eq!(for_impact(INPUT_LIGHT, true), 8);
+        assert_eq!(for_impact(INPUT_HEAVY, true), 8);
+        assert_eq!(for_impact(9, false), 0);
+        assert_eq!(for_impact(9, true), 8);
+        assert_eq!(for_impact(INPUT_LIGHT, false), for_kind(INPUT_LIGHT));
+        assert_eq!(for_impact(INPUT_HEAVY, false), for_kind(INPUT_HEAVY));
+        assert_eq!(for_impact(INPUT_LIGHT, true), for_parry());
+        assert_eq!(
+            for_impact(INPUT_HEAVY, true),
+            for_impact(INPUT_HEAVY, true)
+        );
     }
 }

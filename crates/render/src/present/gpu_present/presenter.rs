@@ -100,6 +100,11 @@ pub struct Presenter {
     pub(crate) texture_binds: Vec<(TextureKey, wgpu::BindGroup)>,
     /// Forward bind group over the 1x1 white fallback (`None` draws).
     pub(crate) fallback_bind: wgpu::BindGroup,
+    /// Neutral 1x1 normal-map fallback (linear 128,128,255) bound at
+    /// forward 17 for draws with no normal map; the TBN decode keeps
+    /// the geometric normal. Cold init only, never per frame.
+    /// Caller: `Presenter::build` creates it, `forward_bind` samples it.
+    pub(crate) normal_fallback: GpuTexture,
     /// Bind group chosen for each draw of the frame: an index into
     /// `texture_binds`, `None` for the fallback. Reused scratch.
     pub(crate) draw_binds: Vec<Option<usize>>,
@@ -252,6 +257,41 @@ pub struct Presenter {
 /// materials go straight into `Presenter::material_scratch`).
 pub(crate) type StagedUniforms = (Vec<u8>, Vec<u8>);
 
+/// Neutral normal-map texel in 0..=255: 128,128,255 decodes to (0,0,1)
+/// via `eg12_decode_normal`, so the TBN keeps the geometric normal.
+/// Owner presenter, consumer the forward 17 fallback bind.
+/// Caller: `Presenter::build` uploads it once, `forward_bind` samples it.
+fn normal_fallback_rgba() -> [u8; 4] {
+    [128, 128, 255, 255]
+}
+
+/// Layout entries for EG12 slice c normal sampling at group 0 bindings
+/// 17 (filterable 2D texture) plus 18 (filtering sampler). Cold layout
+/// only, never per frame. Mirrors `shaders/forward.wgsl` `normal_map`
+/// plus `normal_smp` sampled by `fs` and `fs_skinned`.
+/// Owner presenter, consumer `Presenter::build` forward layout.
+/// Caller: `Presenter::build` extends the forward entries with these.
+fn forward_normal_layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: 17,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 18,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+    ]
+}
+
 /// LF1 live sky bind: the forward group plus the init-time sky-view
 /// texture at 15. Same buffers the IBL live bind carries, plus the sky
 /// view; cold bind creation only, never per frame. Keeps the binary
@@ -273,6 +313,7 @@ fn forward_bind_with_sky(
     brdf_view: &wgpu::TextureView,
     sh_buf: &wgpu::Buffer,
     sky_view: &wgpu::TextureView,
+    normal_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ra1-forward-bind-sky"),
@@ -334,6 +375,14 @@ fn forward_bind_with_sky(
                 binding: 16,
                 resource: torch.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 17,
+                resource: wgpu::BindingResource::TextureView(normal_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 18,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
         ],
     })
 }
@@ -366,6 +415,51 @@ impl Presenter {
                 aspect: wgpu::TextureAspect::All,
             },
             &[255u8; 4],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        GpuTexture {
+            texture,
+            view,
+            width: 1,
+            height: 1,
+        }
+    }
+
+    /// 1x1 neutral normal texture (linear 128,128,255,255): the identity
+    /// the `None` normal draws bind, so unmapped pixels keep the geometric
+    /// normal via the TBN decode. Cold init path only; fixed bytes, never
+    /// caller input. Data maps stay linear, never sRGB.
+    /// Caller: `Presenter::build` creates it once, `forward_bind` samples it.
+    fn normal_fallback(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTexture {
+        let size = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ra1-normal-fallback"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &normal_fallback_rgba(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4),
@@ -431,6 +525,7 @@ impl Presenter {
             // EG12 slice 2: live torch block, first of 16-19.
             uniform_entry(16, wgpu::ShaderStages::FRAGMENT),
         ];
+        forward_entries.extend_from_slice(&forward_normal_layout_entries());
         forward_entries.extend_from_slice(&ibl::gpu::forward_ibl_layout_entries());
         let forward_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ra1-uniforms"),
@@ -525,6 +620,10 @@ impl Presenter {
         // The 1x1 white texture `None` draws sample (identity multiply): the
         // fallback bind group below keeps it alive for the presenter's life.
         let base_fallback = Self::fallback_white(&device, &queue);
+        // EG12 slice c neutral normal (linear 128,128,255): the identity
+        // `None` normal draws sample, so unmapped pixels keep geometry.
+        // Cold init only; the bind groups below keep it alive.
+        let normal_fallback = Self::normal_fallback(&device, &queue);
         let cam_buf = uniform_buffer(&device, "ra1-u-camera", 80);
         let light_buf = uniform_buffer(&device, "ra1-u-light", 32);
         // The twin sun pass is std-only (no device work); a bad
@@ -675,6 +774,7 @@ impl Presenter {
             &ibl_brdf_view,
             &ibl_sh_buf,
             &sky_view_view,
+            &normal_fallback.view,
         );
         let gpu_timer = GpuTimer::new(&device, &queue);
         // EG13 slice 1: the MSAA on/off switch. Off (default) keeps
@@ -699,6 +799,7 @@ impl Presenter {
             vertex_scratch: Vec::new(),
             texture_binds: Vec::new(),
             fallback_bind,
+            normal_fallback,
             draw_binds: Vec::with_capacity(MAX_DRAWS_PER_FRAME),
             creates: CreateTally::default(),
             look_probes: false,
@@ -1206,7 +1307,8 @@ impl Presenter {
 
     /// Forward bind group over `view` and the shared frame buffers plus
     /// the live baked lighting in the forward group, with the LF1 sky-view
-    /// texture at 15 for the sky pass (opaque `fs` ignores it).
+    /// texture at 15 for the sky pass (opaque `fs` ignores it). The neutral
+    /// normal fallback rides at 17 until per-draw normal maps land.
     pub(crate) fn forward_bind(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
         let pre_view = self
             .ibl_prefilter
@@ -1236,6 +1338,7 @@ impl Presenter {
             &brdf_view,
             &self.ibl_sh_buf,
             &self.sky_view_view,
+            &self.normal_fallback.view,
         )
     }
 
@@ -1796,5 +1899,116 @@ mod presenter_adapter_tests {
         assert_eq!(picked, wgpu::PresentMode::Fifo);
         let picked = crate::present::Presenter::pick_present_mode(&[]);
         assert_eq!(picked, wgpu::PresentMode::Fifo);
+    }
+}
+
+#[cfg(test)]
+mod forward_normal_tests {
+    use super::{forward_normal_layout_entries, normal_fallback_rgba};
+
+    #[test]
+    fn normal_layout_covers_shader_bindings() {
+        assert!(
+            crate::v1_gpu::FORWARD_PBR_WGSL
+                .contains("@group(0) @binding(17) var normal_map"),
+            "forward shader declares normal_map at 17"
+        );
+        assert!(
+            crate::v1_gpu::FORWARD_PBR_WGSL
+                .contains("@group(0) @binding(18) var normal_smp"),
+            "forward shader declares normal_smp at 18"
+        );
+        let entries = forward_normal_layout_entries();
+        assert_eq!(entries[0].binding, 17, "layout carries normal texture at 17");
+        assert_eq!(entries[1].binding, 18, "layout carries normal sampler at 18");
+        for entry in &entries {
+            assert_eq!(
+                entry.visibility,
+                wgpu::ShaderStages::FRAGMENT,
+                "normal entries are fragment-only"
+            );
+            assert!(entry.count.is_none(), "normal entries are not arrays");
+        }
+        match entries[0].ty {
+            wgpu::BindingType::Texture {
+                sample_type,
+                view_dimension,
+                multisampled,
+            } => {
+                assert_eq!(
+                    sample_type,
+                    wgpu::TextureSampleType::Float { filterable: true },
+                    "normal map is filterable float"
+                );
+                assert_eq!(
+                    view_dimension,
+                    wgpu::TextureViewDimension::D2,
+                    "normal map is a 2D view"
+                );
+                assert!(!multisampled, "normal map is not multisampled");
+            }
+            ref other => panic!("binding 17 is a texture, got {other:?}"),
+        }
+        match entries[1].ty {
+            wgpu::BindingType::Sampler(kind) => {
+                assert_eq!(
+                    kind,
+                    wgpu::SamplerBindingType::Filtering,
+                    "normal sampler filters"
+                );
+            }
+            ref other => panic!("binding 18 is a sampler, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn neutral_fallback_keeps_geometric_normal() {
+        assert_eq!(
+            normal_fallback_rgba(),
+            [128, 128, 255, 255],
+            "neutral texel is 128,128,255,255"
+        );
+        let raw = normal_fallback_rgba();
+        let texel = [
+            f32::from(raw[0]) / 255.0,
+            f32::from(raw[1]) / 255.0,
+            f32::from(raw[2]) / 255.0,
+        ];
+        let geom = [0.0, 0.0, 1.0];
+        let decoded =
+            super::super::forward_bind::decode_normal(texel, geom).expect("neutral decodes");
+        let mapped = super::super::forward_bind::world_normal(
+            geom,
+            [1.0, 0.0, 0.0, 1.0],
+            decoded,
+        )
+        .expect("neutral maps");
+        let dot = mapped[0] * geom[0] + mapped[1] * geom[1] + mapped[2] * geom[2];
+        assert!(
+            dot > 0.999,
+            "neutral keeps the geometric normal, dot {dot} is near 1"
+        );
+    }
+
+    #[test]
+    fn white_texel_tilts_and_non_finite_refuses() {
+        let geom = [0.0, 0.0, 1.0];
+        let white = super::super::forward_bind::decode_normal([1.0, 1.0, 1.0], geom)
+            .expect("white decodes");
+        let mapped = super::super::forward_bind::world_normal(
+            geom,
+            [1.0, 0.0, 0.0, 1.0],
+            white,
+        )
+        .expect("white maps");
+        let dot = mapped[0] * geom[0] + mapped[1] * geom[1] + mapped[2] * geom[2];
+        assert!(
+            dot < 0.99,
+            "white tilts the normal, dot {dot} stays below neutral"
+        );
+        assert!(
+            super::super::forward_bind::decode_normal([f32::NAN, 0.5, 0.5], geom).is_err(),
+            "NaN texel refuses"
+        );
     }
 }

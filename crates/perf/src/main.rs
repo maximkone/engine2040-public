@@ -384,8 +384,18 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
 /// prefix predicate (sequential scan
 /// keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache Misses], one
 /// predictable branch [geaen | 3.4.3.2 Branch Prediction]). Same `h`, `gh`,
-/// slot order, float order, no allocation. Caller: `main` mixed row only.
-fn mixed_space_step_split(bodies: &mut [Body], agents: usize, dt: f32) {
+/// slot order, float order, no allocation. When `skip_enabled` is true
+/// (harness `--mixed-skip`) odd `tick`s skip the dynamic-prefix integrate
+/// and reuse the harness ECS tick, halving the physics tail; even `tick`s
+/// run the full prefix bit-identical to the skip-off path. Caller: `main`
+/// mixed row only.
+fn mixed_space_step_split(
+    bodies: &mut [Body],
+    agents: usize,
+    dt: f32,
+    tick: u64,
+    skip_enabled: bool,
+) {
     if dt <= 0.0 || !dt.is_finite() {
         return;
     }
@@ -395,6 +405,9 @@ fn mixed_space_step_split(bodies: &mut [Body], agents: usize, dt: f32) {
         suffix.iter().all(is_settled),
         "sprite suffix must stay settled"
     );
+    if should_skip_mixed_step(tick, skip_enabled) {
+        return;
+    }
     mixed_prefix_step_direct(prefix, dt);
     debug_assert!(
         suffix.iter().all(is_settled),
@@ -633,9 +646,7 @@ fn main() {
                 }
             };
             if is_mixed {
-                if !should_skip_mixed_step(t.0, mixed_skip) {
-                    mixed_space_step_split(&mut space.bodies, agents, DT);
-                }
+                mixed_space_step_split(&mut space.bodies, agents, DT, t.0, mixed_skip);
             } else {
                 space.step(DT);
             }
@@ -756,8 +767,9 @@ mod tests {
     #[test]
     fn mixed_skip_reuses_harness_tick_and_full_runs() {
         // Behavior: with `--mixed-skip`, odd ticks skip `mixed_space_step`
-        // and reuse the harness ECS tick (space digest stable); even ticks
-        // and the default flag run the full step (dynamic prefix moves).
+        // and `mixed_space_step_split` prefix and reuse the harness ECS tick
+        // (space digest stable); even ticks and the default flag run the full
+        // step (dynamic prefix moves), split even stays bit-identical.
         // Failure: a skipped tick moves space, or a full tick leaves it still.
         assert!(!should_skip_mixed_step(0, false));
         assert!(!should_skip_mixed_step(1, false));
@@ -790,6 +802,38 @@ mod tests {
             engine_physics::rigid::state_hash(&plain.bodies),
             plain_before,
             "default must keep current behavior"
+        );
+        let (_, mut split_skip) = seed_mixed_world(16, 32, 2040);
+        let split_before = engine_physics::rigid::state_hash(&split_skip.bodies);
+        mixed_space_step_split(&mut split_skip.bodies, 16, 1.0 / 60.0, 1, true);
+        assert_eq!(
+            engine_physics::rigid::state_hash(&split_skip.bodies),
+            split_before,
+            "split odd-tick skip must reuse the harness tick"
+        );
+        mixed_space_step_split(&mut split_skip.bodies, 16, 1.0 / 60.0, 2, true);
+        assert_ne!(
+            engine_physics::rigid::state_hash(&split_skip.bodies),
+            split_before,
+            "split even tick must run the full prefix"
+        );
+        let (_, mut split_plain) = seed_mixed_world(16, 32, 2040);
+        let split_plain_before = engine_physics::rigid::state_hash(&split_plain.bodies);
+        mixed_space_step_split(&mut split_plain.bodies, 16, 1.0 / 60.0, 1, false);
+        assert_ne!(
+            engine_physics::rigid::state_hash(&split_plain.bodies),
+            split_plain_before,
+            "split default must keep current behavior"
+        );
+        let (_, space_cmp) = seed_mixed_world(16, 32, 2040);
+        let mut via_whole = space_cmp.bodies.clone();
+        let mut via_split = space_cmp.bodies.clone();
+        mixed_space_step(&mut via_whole, 1.0 / 60.0);
+        mixed_space_step_split(&mut via_split, 16, 1.0 / 60.0, 0, true);
+        assert_eq!(
+            engine_physics::rigid::state_hash(&via_whole),
+            engine_physics::rigid::state_hash(&via_split),
+            "split even tick stays bit-identical to the whole step"
         );
     }
 
@@ -860,7 +904,7 @@ mod tests {
             for _ in 0..4 {
                 engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
                 mixed_space_step(&mut whole, 1.0 / 60.0);
-                mixed_space_step_split(&mut split, agents, 1.0 / 60.0);
+                mixed_space_step_split(&mut split, agents, 1.0 / 60.0, 0, false);
                 assert_eq!(split.len(), lib.len());
                 for (i, ((a, b), c)) in split.iter().zip(whole.iter()).zip(lib.iter()).enumerate() {
                     assert_eq!(
@@ -893,7 +937,7 @@ mod tests {
             let mut lib = space.bodies.clone();
             engine_physics::rigid::integrate(&mut lib, bad);
             mixed_space_step(&mut whole, bad);
-            mixed_space_step_split(&mut split, 1000, bad);
+            mixed_space_step_split(&mut split, 1000, bad, 0, false);
             for (i, ((a, b), c)) in split.iter().zip(whole.iter()).zip(lib.iter()).enumerate() {
                 assert_eq!(
                     (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),

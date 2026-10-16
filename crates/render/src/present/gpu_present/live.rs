@@ -1109,13 +1109,14 @@ impl Presenter {
                 timer.map(|(timer, _)| timer.forward_writes()),
             );
             // LF3 first landing: fresh GTAO after forward, before the blit,
-            // wired through the submit helper (`live_ao_upload_for_frame`:
-            // bake via `live_gtao_ao`, guard via `check_ao_full_for_blit`,
-            // upload via `write_ao_full`). The forward-stored depth plus
-            // normals feed is absent until the slice-2 prepass, so the empty
-            // feed stays skip (ao_tex keeps 1.0) with the stale reuse below
-            // as fallback. A guard failure records skip, never fails the
-            // frame; ms is evidence only against `GTAO_BUDGET_MS`.
+            // wired through the live helper (`live_ao_upload_for_frame`:
+            // bake via `gtao_live_full_for_forward`, guard via
+            // `check_ao_full_for_blit`, upload via `write_ao_full`). The
+            // forward-stored depth plus normals feed is absent until the
+            // slice-2 prepass, so the empty feed stays skip (ao_tex keeps
+            // 1.0) with the stale reuse below as fallback. A guard failure
+            // records skip, never fails the frame; ms is evidence only
+            // against `GTAO_BUDGET_MS`.
             let depth: &[f32] = &[];
             let normals: &[[f32; 3]] = &[];
             let fresh_us = if live_ao_should_bind(render_w, render_h, depth.len(), normals.len()) {

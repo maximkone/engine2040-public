@@ -18,7 +18,7 @@ Row verdicts, cut log and landscape dry-run are below. Judge verify for this run
 
 ## Row verdicts (first 20 open FOCUS rows, 2026-10-16, re-verified at 0e393c0)
 
-Every row must answer CONCEPT line 1 (readable decisive arena duel) through one of its eight values. A row serving no value is PARK or CUT. All 20 below serve a value, so all KEEP (same 20 IDs in the same order as the 01:06Z check: FC1 EG8 SP63 LF1 LF2 EG11 EG12 LF3 LF4 EG13 EG14 EG18 RL21 VS1 FC3 EG45 EG19b HS2 SP61 SP64; re-verified `node tools/board-slice.mjs --focus --open` exit 0 at 0e393c0, ran 2026-10-16T01:24Z). Type: creative = player-facing value, process = gate or measurement, business = owner decision (none this run). Scorecard table above left untouched this run (slice claimed 01:06Z, inside 2 h; dry claimed 21:18Z 10-15, outside 2 h but deferred by the one-item rule, so this section refreshed).
+Every row must answer CONCEPT line 1 (readable decisive arena duel) through one of its eight values. A row serving no value is PARK or CUT. All 20 below serve a value, so all KEEP (same 20 IDs in the same order as the 06:44Z check: FC1 EG8 SP63 LF1 LF2 EG11 EG12 LF3 LF4 EG13 EG14 EG18 RL21 VS1 FC3 EG45 EG19b HS2 SP61 SP64; re-verified `node tools/board-slice.mjs --focus --open` exit 0 at 9c37ade7, ran 2026-10-16T07:57Z). Type: creative = player-facing value, process = gate or measurement, business = owner decision (none this run). Scorecard table above left untouched this run (slice claimed 06:44Z, inside 2 h; dry claimed 01:36Z 10-16, outside 2 h but deferred by the one-item rule, so this section refreshed).
 
 | Row | Value served | Verdict | Type |
 |---|---|---|---|
@@ -45,7 +45,7 @@ Every row must answer CONCEPT line 1 (readable decisive arena duel) through one 
 
 ## Cut log
 
-No cuts this run (director, 2026-10-16T01:24Z: all 20 serve a value, so no PARK or CUT; re-confirmed at 0e393c0, first 20 IDs unchanged in the same order). Board untouched by seat rule.
+No cuts this run (director, 2026-10-16T07:57Z: all 20 serve a value, so no PARK or CUT; re-confirmed at 9c37ade7, first 20 IDs unchanged in the same order). Board untouched by seat rule.
 
 ## Landscape dry-run (first 10 LI rows, 2026-10-16)
 

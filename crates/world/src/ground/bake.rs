@@ -106,7 +106,7 @@ fn scatter_props(seed: u64, side: usize, count: usize) -> Result<Vec<GroundProp>
         let kind = u8::try_from(k_word).map_err(|_| BakeErr::TooLarge)?;
         out.push(GroundProp { x, y, kind });
     }
-    out.sort_by(|left, right| (left.y, left.x).cmp(&(right.y, right.x)));
+    out.sort_by_key(|left| (left.y, left.x));
     Ok(out)
 }
 
@@ -155,8 +155,8 @@ pub fn bake_ground(seed: u64, size: u16) -> Result<GroundBake, BakeErr> {
 /// Bake versioned ground bytes for the content hash gate.
 /// Layout: magic(4) + version(1) + seed(8LE) + size(2LE) + tiles
 /// + prop count(2LE) + props(x 2LE + y 2LE + kind 1). Errors:
-/// [`BakeErr::TooLarge`] past [`MAX_BAKE_SIZE`]. Caller:
-/// [`bake_ground`]; the byte form is what reruns compare.
+///   [`BakeErr::TooLarge`] past [`MAX_BAKE_SIZE`]. Caller:
+///   [`bake_ground`]; the byte form is what reruns compare.
 pub fn bake_ground_bytes(seed: u64, size: u16) -> Result<Vec<u8>, BakeErr> {
     let baked = bake_ground(seed, size)?;
     let side = usize::from(baked.size);
@@ -395,7 +395,7 @@ mod tests {
         let side = usize::from(baked.size);
         assert!(baked.props.len() <= MAX_GROUND_PROPS);
         let mut ordered = baked.props.clone();
-        ordered.sort_by(|left, right| (left.y, left.x).cmp(&(right.y, right.x)));
+        ordered.sort_by_key(|left| (left.y, left.x));
         assert_eq!(baked.props, ordered, "props stay in (y, x) order");
         for prop in &baked.props {
             assert!(usize::from(prop.x) < side);

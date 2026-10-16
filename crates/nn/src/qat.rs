@@ -220,6 +220,7 @@ pub fn train_student(
     let rows_u16 = u16::try_from(rows).map_err(|_| QatErr::BadLen)?;
     let out_u16 = u16::try_from(cfg.output_dim).map_err(|_| QatErr::BadDim)?;
     let denom = f32::from(rows_u16) * f32::from(out_u16);
+    let mse_scale = 2.0f32 / denom;
     for _ in 0..cfg.epochs {
         let w_scale = weight_scale(&weights);
         let mut grads = vec![0.0f32; weights.len()];
@@ -231,6 +232,11 @@ pub fn train_student(
                 &all_features[base..base + cfg.input_dim],
                 w_scale,
             );
+            let mut x = Vec::with_capacity(cfg.input_dim);
+            for v in &all_features[base..base + cfg.input_dim] {
+                let q = quantize_lane(*v, QAT_INPUT_STEPS);
+                x.push(f32::from(q) / QAT_INPUT_STEPS);
+            }
             for o in 0..cfg.output_dim {
                 let want = if usize::from(targets[r]) == o {
                     1.0f32
@@ -238,12 +244,7 @@ pub fn train_student(
                     0.0f32
                 };
                 let diff = logits[o] - want;
-                let dlogit = 2.0f32 * diff / denom;
-                let mut x = Vec::with_capacity(cfg.input_dim);
-                for v in &all_features[base..base + cfg.input_dim] {
-                    let q = quantize_lane(*v, QAT_INPUT_STEPS);
-                    x.push(f32::from(q) / QAT_INPUT_STEPS);
-                }
+                let dlogit = diff * mse_scale;
                 for i in 0..cfg.input_dim {
                     grads[o * cfg.input_dim + i] += dlogit * x[i];
                 }

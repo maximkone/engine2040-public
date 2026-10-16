@@ -454,8 +454,9 @@ fn event_count(len: usize) -> Result<u32, LatencyError> {
 /// finite and non-negative, and each present must sit at or after its sim
 /// effect; ranks use the same nearest-rank p50/p95 as [`measure`] so tick
 /// math and live runs read identically. Pure over its inputs: run-to-run
-/// movement lives in the sampling, never in hidden state. Slice in, report
-/// out; run [`check_p2_bar`] on the result for the P2 verdict.
+/// movement lives in the sampling, never in hidden state. Same slices give
+/// the same report twice; the timed-smoke wiring stages wall samples here.
+/// Slice in, report out; run [`check_p2_bar`] on the result for the P2 verdict.
 ///
 /// # Errors
 ///
@@ -727,7 +728,9 @@ impl GpuConditions {
 }
 
 /// Live wall-clock meter for presentation only (on-screen ms, operator
-/// overlays). Never enters `measure` or any report hash.
+/// overlays). Never enters `measure`, `summarize_live` or any report hash;
+/// timed-smoke timestamps stage via `summarize_live`/`WindowLatencyLog`,
+/// never via this meter.
 pub struct WallMeter {
     /// Moment the meter started.
     started: Instant,
@@ -1302,6 +1305,78 @@ mod tests {
         let (events, effects, presents) = fixture_3f(13, 5);
         let report = measure(&events, &effects, &presents).expect("fixture rows join");
         assert_eq!(report.present_p50_ms, 50.0);
+    }
+
+    #[test]
+    fn same_seed_live_report_x2_wall_meter_isolated() {
+        // Behavior: same seed gives the same tick and live reports twice,
+        // and the WallMeter never touches either path; the timed-smoke
+        // wiring stages wall samples via `summarize_live`.
+        // Failure: live ranking diverges per run or wall time leaks into sim.
+        let run_once = || {
+            let (events, effects, presents) = fixture_3f(99, 25);
+            let ticked = measure(&events, &effects, &presents).expect("seeded rows join");
+            let sim_ms: Vec<f64> = events
+                .iter()
+                .zip(effects.iter())
+                .map(|(event, effect)| {
+                    let frames = u32::try_from(effect.tick - event.tick).unwrap_or(u32::MAX);
+                    f64::from(frames) * 1000.0 / TICK_HZ
+                })
+                .collect();
+            let present_ms: Vec<f64> = events
+                .iter()
+                .zip(presents.iter())
+                .map(|(event, present)| {
+                    let frames = u32::try_from(present.frame - event.tick).unwrap_or(u32::MAX);
+                    f64::from(frames) * 1000.0 / TICK_HZ
+                })
+                .collect();
+            let live = summarize_live(&sim_ms, &present_ms).expect("seeded samples summarize");
+            (ticked, live)
+        };
+        let (ticked_first, live_first) = run_once();
+        let (ticked_second, live_second) = run_once();
+        assert_eq!(
+            ticked_first, ticked_second,
+            "same seed repeats the tick report"
+        );
+        assert_eq!(live_first, live_second, "same seed repeats the live report");
+        assert_eq!(
+            live_first, ticked_first,
+            "live ranks like tick math on the same seed"
+        );
+        assert_eq!(
+            ticked_first.summary(),
+            ticked_second.summary(),
+            "tick summaries repeat byte-identically"
+        );
+        assert_eq!(
+            live_first.summary(),
+            live_second.summary(),
+            "live summaries repeat byte-identically"
+        );
+        // WallMeter stays presentation-only: reading it never moves either report.
+        let meter = WallMeter::start();
+        let elapsed = meter.elapsed_ms();
+        assert!(
+            elapsed.is_finite() && elapsed >= 0.0,
+            "wall read stays evidence-only"
+        );
+        let (ticked_after, live_after) = run_once();
+        assert_eq!(
+            ticked_after, ticked_first,
+            "wall reads never touch tick math"
+        );
+        assert_eq!(live_after, live_first, "wall reads never touch live math");
+        assert_eq!(
+            live_after.summary(),
+            live_first.summary(),
+            "summaries ignore wall reads"
+        );
+        // Staged p50/p95 math holds on the seeded 3-frame shape.
+        assert_eq!(live_first.sim_p95_ms, 1.0 * 1000.0 / TICK_HZ);
+        assert_eq!(live_first.present_p95_ms, 50.0);
     }
 
     #[test]
