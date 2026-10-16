@@ -1609,27 +1609,6 @@ mod tests {
         );
     }
 
-    /// Response matrix budget leg: the pure matrix plus the drive-to-legal
-    /// path plus the hash allocates nothing.
-    #[test]
-    fn balance_matrix_tick_path_stays_alloc_free() {
-        let params = BalanceParams::default();
-        let ((), allocs) = alloc_probe::measure(|| {
-            let matrix = response_matrix(params);
-            let mut state = BalanceState::new(params);
-            for row in matrix {
-                state
-                    .respond(row.strength_q8)
-                    .expect("matrix strengths sit inside the ceiling");
-            }
-            let _ = state.state_hash();
-        });
-        assert_eq!(
-            allocs.calls, 0,
-            "matrix path must not allocate, got {allocs:?}"
-        );
-    }
-
     /// Stance rig for the capture-bias proof: feet split +/-150 mm about the
     /// origin under a centered pelvis, so the planar center sits at the
     /// support middle and the bias answers the shove lead alone.

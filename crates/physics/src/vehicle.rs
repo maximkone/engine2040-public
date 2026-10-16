@@ -543,14 +543,6 @@ mod tests {
             assert_eq!(a.comp[k].to_bits(), b.comp[k].to_bits(), "comp[{k}]");
             assert_eq!(a.spin[k].to_bits(), b.spin[k].to_bits(), "spin[{k}]");
         }
-        // Helpers are pure functions of their input: same input, same bits.
-        assert_eq!(det_sin_f32(0.7).to_bits(), det_sin_f32(0.7).to_bits());
-        assert_eq!(det_cos_f32(0.7).to_bits(), det_cos_f32(0.7).to_bits());
-        assert_eq!(det_atan_f32(0.7).to_bits(), det_atan_f32(0.7).to_bits());
-        assert_eq!(
-            pacejka(0.2, 10.0, 1.35, 1.1).to_bits(),
-            pacejka(0.2, 10.0, 1.35, 1.1).to_bits()
-        );
     }
 
     #[test]

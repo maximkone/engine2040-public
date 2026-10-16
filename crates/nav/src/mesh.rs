@@ -625,7 +625,7 @@ impl From<Truncated> for NavError {
 }
 
 /// Stacked floors: each floor bakes alone so shared XZ never merges.
-/// PORT(lunaris@56cc7e30:NAVIGATION bridge multi-level). Caller: rebake.rs `rebake_stacked_level`.
+/// PORT(lunaris@56cc7e30:NAVIGATION bridge multi-level). Caller: rebake.rs `rebake_mesh_tile`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackedNav {
     levels: Vec<NavMesh>,
@@ -1696,8 +1696,11 @@ mod tests {
         let back = StackedNav::from_bytes(&stacked.to_bytes()).expect("round trip");
         assert_eq!(back.digest(), stacked.digest());
         let mut reg = crate::tiles::TileRegistry::new(16).expect("reg builds");
-        let bump =
-            crate::rebake::rebake_stacked_level(&mut reg, &stacked, 0, crate::tiles::TileId(0));
+        let bump = crate::rebake::rebake_mesh_tile(
+            &mut reg,
+            &stacked.levels()[0],
+            crate::tiles::TileId(0),
+        );
         assert_eq!(bump, Ok(1));
     }
 

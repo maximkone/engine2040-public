@@ -127,7 +127,7 @@ impl BreakSet {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObstacleRef(pub u32);
 /// Bounded box-obstacle queue; add/remove enqueue, drain applies touched tiles only.
-/// Caller: `rebake::update`. PORT(recastnavigation/recastnavigation@9f4ce64:DetourTileCache).
+/// Caller: `TiledNav::update_budget`. PORT(recastnavigation/recastnavigation@9f4ce64:DetourTileCache).
 #[derive(Clone, Debug, Default)]
 pub struct ObstacleCache {
     slots: Vec<ObstacleSlot>,
@@ -183,7 +183,7 @@ impl ObstacleCache {
         self.pending.push((false, slot));
         Ok(())
     }
-    /// Applies queued flips in order; rebake happens in `rebake::update`.
+    /// Applies queued flips in order; rebake happens in `TiledNav::update_budget`.
     pub(crate) fn drain(&mut self, nav: &mut TiledNav) {
         for (add, slot) in std::mem::take(&mut self.pending) {
             let [x0, y0, x1, y1] = self.slots[slot].0;
@@ -1042,17 +1042,6 @@ impl TiledNav {
         Ok(affected)
     }
 
-    /// Rebakes exactly one tile and bumps its version.
-    ///
-    /// Explicit recooks of clean tiles stay versioned; only out-of-range
-    /// tiles refuse. Marks cached flows stale.
-    /// Errors: [`TileError::BadTile`], [`TileError::VersionOverflow`].
-    pub fn rebake_tile(&mut self, tile: TileId) -> Result<u32, TileError> {
-        let version = self.registry.rebake(tile)?;
-        self.stale = true;
-        Ok(version)
-    }
-
     /// Rebakes the lowest dirty tile, if any, without allocating.
     ///
     /// Overflowed tiles keep their dirty flag and are skipped, so one
@@ -1083,6 +1072,17 @@ impl TiledNav {
             done += 1;
         }
         done
+    }
+
+    /// Applies queued obstacle flips, then rebakes up to `max_tiles` dirty
+    /// tiles in ascending order without allocating; returns how many
+    /// rebaked. Units: tile counts. Determinism: flips apply in queue
+    /// order, rebakes ascend, so the same queue plus budget gives the same
+    /// versions. The tick calls this with its per-tick tile budget.
+    /// PORT(recastnavigation/recastnavigation@9f4ce64:DetourTileCache `update()`).
+    pub fn update_budget(&mut self, cache: &mut ObstacleCache, max_tiles: usize) -> usize {
+        cache.drain(self);
+        self.rebake_budget(max_tiles)
     }
 
     /// Bakes (or refreshes) the flow field for `goal`.

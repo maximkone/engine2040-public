@@ -1885,6 +1885,149 @@ mod tests {
         }
     }
 
+    fn overlap_row() -> Vec<Body> {
+        // Eight boxes spaced 0.9 apart with half-extent 0.5: neighbours
+        // overlap, so the pair set is non-empty and exercises island grouping.
+        (0..8)
+            .map(|i| Body {
+                x: fixture_index_as_f32(i) * 0.9,
+                y: 0.5,
+                vx: 0.0,
+                vy: 0.0,
+                hx: 0.5,
+                hy: 0.5,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scratch_pairs_into_dirty_buffers_match_fresh() {
+        // Failure: the live tick path reuses `pairs`/`tuples` scratch across
+        // steps, so stale entries from a bigger scene must never leak into a
+        // smaller one; dirty buffers must answer exactly the fresh path.
+        for n in [0, 1, 2, 10, 60] {
+            let b = scatter_bodies(n);
+            let fresh = contact_pairs_inner(&b, false);
+            let mut out = vec![(usize::MAX, usize::MAX); 97];
+            let mut tuples = vec![(1.0f32, 2.0, 3.0, 4.0); 97];
+            let mut mins = vec![-7.5f32; 97];
+            let mut maxs = vec![7.5f32; 97];
+            contact_pairs_into(&b, &mut out, &mut tuples, &mut mins, &mut maxs, false);
+            assert_eq!(out, fresh, "grid scratch must match fresh n={n}");
+        }
+        // Overlapping row plus a NaN body: NaN never overlaps, both agree.
+        let mut b = overlap_row();
+        assert!(!contact_pairs_inner(&b, false).is_empty(), "row must pair");
+        b.push(Body {
+            x: f32::NAN,
+            y: f32::NAN,
+            vx: 0.0,
+            vy: 0.0,
+            hx: 0.5,
+            hy: 0.5,
+        });
+        let fresh = contact_pairs_inner(&b, false);
+        let mut out = vec![(usize::MAX, usize::MAX); 97];
+        let mut tuples = vec![(1.0f32, 2.0, 3.0, 4.0); 97];
+        let mut mins = vec![-7.5f32; 97];
+        let mut maxs = vec![7.5f32; 97];
+        contact_pairs_into(&b, &mut out, &mut tuples, &mut mins, &mut maxs, false);
+        assert_eq!(out, fresh, "grid scratch must match fresh on NaN");
+    }
+
+    #[test]
+    fn scratch_pairs_into_bvh_dirty_buffers_match_fresh() {
+        // Failure: same stale-scratch contract on the BVH candidate path,
+        // which reuses `mins`/`maxs` instead of `tuples`.
+        for n in [0, 1, 2, 10, 60] {
+            let b = scatter_bodies(n);
+            let fresh = contact_pairs_inner(&b, true);
+            let mut out = vec![(usize::MAX, usize::MAX); 97];
+            let mut tuples = vec![(1.0f32, 2.0, 3.0, 4.0); 97];
+            let mut mins = vec![-7.5f32; 97];
+            let mut maxs = vec![7.5f32; 97];
+            contact_pairs_into(&b, &mut out, &mut tuples, &mut mins, &mut maxs, true);
+            assert_eq!(out, fresh, "bvh scratch must match fresh n={n}");
+        }
+        let b = overlap_row();
+        let fresh = contact_pairs_inner(&b, true);
+        assert!(!fresh.is_empty(), "row must pair on bvh");
+        let mut out = vec![(usize::MAX, usize::MAX); 97];
+        let mut tuples = vec![(1.0f32, 2.0, 3.0, 4.0); 97];
+        let mut mins = vec![-7.5f32; 97];
+        let mut maxs = vec![7.5f32; 97];
+        contact_pairs_into(&b, &mut out, &mut tuples, &mut mins, &mut maxs, true);
+        assert_eq!(out, fresh, "bvh scratch must match fresh on row");
+    }
+
+    #[test]
+    fn scratch_pairs_into_early_exit_clears_pairs() {
+        // Failure: scenes with fewer than 2 bodies return early; the pair
+        // list must still come back empty, never the last scene's pairs.
+        let one = vec![Body {
+            x: 0.0,
+            y: 0.5,
+            vx: 0.0,
+            vy: 0.0,
+            hx: 0.5,
+            hy: 0.5,
+        }];
+        for b in [Vec::new(), one] {
+            for use_bvh in [false, true] {
+                let mut out = vec![(0usize, 1usize); 17];
+                let mut tuples = vec![(1.0f32, 2.0, 3.0, 4.0); 17];
+                let mut mins = vec![-7.5f32; 17];
+                let mut maxs = vec![7.5f32; 17];
+                contact_pairs_into(&b, &mut out, &mut tuples, &mut mins, &mut maxs, use_bvh);
+                assert!(
+                    out.is_empty(),
+                    "early exit must clear pairs n={} bvh={use_bvh}",
+                    b.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scratch_island_order_dirty_buffers_match_fresh() {
+        // Failure: reused `order`/`parent`/`roots` must not carry the last
+        // scene's topology; dirty buffers must answer exactly the fresh path.
+        let scenes = [overlap_row(), stack10(), scatter_bodies(60)];
+        for b in &scenes {
+            let pairs = contact_pairs(b);
+            let (mut o1, mut p1, mut r1) = (Vec::new(), Vec::new(), Vec::new());
+            island_order_into(b.len(), &pairs, &mut o1, &mut p1, &mut r1);
+            let (mut o2, mut p2, mut r2) = (
+                vec![usize::MAX; 97],
+                vec![usize::MAX; 97],
+                vec![usize::MAX; 97],
+            );
+            island_order_into(b.len(), &pairs, &mut o2, &mut p2, &mut r2);
+            assert_eq!(
+                (&o2, &p2, &r2),
+                (&o1, &p1, &r1),
+                "island scratch must match fresh"
+            );
+            // Determinism: shuffled pair order gives the same roots, and the
+            // order stays grouped by (root, a, b).
+            let mut shuffled = pairs.clone();
+            shuffled.reverse();
+            let (mut o3, mut p3, mut r3) = (Vec::new(), Vec::new(), Vec::new());
+            island_order_into(b.len(), &shuffled, &mut o3, &mut p3, &mut r3);
+            assert_eq!(r3, r1, "roots must not depend on pair order");
+            assert_eq!(o3.len(), pairs.len(), "order covers every pair");
+            let keys: Vec<(usize, usize, usize)> = o3
+                .iter()
+                .map(|&k| (r3[shuffled[k].0], shuffled[k].0, shuffled[k].1))
+                .collect();
+            assert!(
+                keys.windows(2).all(|w| w[0] <= w[1]),
+                "order grouped by island root"
+            );
+            let _ = (p3, o3);
+        }
+    }
+
     #[test]
     #[ignore = "timing: run under proof --perf"]
     #[expect(

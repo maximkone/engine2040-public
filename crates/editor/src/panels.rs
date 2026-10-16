@@ -120,9 +120,20 @@ pub fn builtin_registry() -> PanelRegistry {
     registry
 }
 
-/// Open every built-in panel; the dock startup calls this once.
+/// Ensure every built-in panel is open; idempotent and allocation-free on
+/// repeat calls, so the per-frame dock pass can call it directly.
 pub fn ensure_builtin_panels(shell: &mut Shell) {
-    builtin_registry().apply_all(shell);
+    for panel in [
+        Panel::Hierarchy,
+        Panel::Inspector,
+        Panel::Viewport,
+        Panel::Findings,
+        Panel::Tuning,
+        Panel::Templates,
+        Panel::Log,
+    ] {
+        shell.open_panel(panel);
+    }
 }
 
 #[cfg(test)]
@@ -150,5 +161,16 @@ mod tests {
         registry.apply_all(&mut shell);
         assert!(shell.is_open(Panel::Log));
         assert_eq!(builtin_registry().len(), 7);
+    }
+
+    #[test]
+    fn ensure_reopens_missing_and_stays_put() {
+        let mut shell = Shell::new();
+        assert!(shell.close_panel(Panel::Log));
+        ensure_builtin_panels(&mut shell);
+        assert!(shell.is_open(Panel::Log));
+        let len = shell.open_panels.len();
+        ensure_builtin_panels(&mut shell);
+        assert_eq!(shell.open_panels.len(), len);
     }
 }

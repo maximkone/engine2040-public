@@ -928,8 +928,9 @@ pub fn redo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
 /// see [`Op`]: insert/remove/move/measurement targets, not linked parents).
 /// Each record's parents name earlier receipts, so the returned chain links
 /// newest back to the object's first record. Undone batches live on the redo
-/// stack and rejoin the chain on redo. Consumers: MCP per-object reads and
-/// approval display.
+/// stack and rejoin the chain on redo. No production reader yet: the endpoint
+/// assistant covers it in tests; a future MCP per-object verb and the
+/// approval display would consume it.
 pub fn chain_for(journal: &Journal, object: ObjectId) -> Vec<Provenance> {
     journal
         .past

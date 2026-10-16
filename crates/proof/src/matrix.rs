@@ -426,7 +426,9 @@ pub fn is_optional_aarch64_host(host: &str) -> bool {
 /// Caller: `collect_local_entry` (same file) proves file-vs-memory equality per row.
 pub fn emit_local_digests(entry: &MatrixEntry) -> (u64, u64, usize) {
     let bytes = crate::encode_trace_inputs(&[]);
-    let back = crate::decode_trace_inputs(Config::default(), &bytes).unwrap_or_default();
+    let decoded = crate::decode_trace_inputs(Config::default(), &bytes);
+    assert!(decoded.is_ok(), "empty trace must decode");
+    let back = decoded.unwrap_or_default();
     assert!(back.is_empty(), "empty trace must round-trip");
     (
         entry.golden_last,

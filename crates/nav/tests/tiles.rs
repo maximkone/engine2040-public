@@ -193,7 +193,6 @@ fn timing_rebake_tile_p95_under_50ms() {
 
 #[test]
 fn obstacle_rebuild_touches_only_its_tiles() {
-    use engine_nav::rebake::update;
     use engine_nav::tiles::{ObstacleCache, TileId};
     let (w, h) = (24usize, 16usize);
     let (start, goal) = ((0usize, 8usize), (23usize, 8usize));
@@ -208,8 +207,8 @@ fn obstacle_rebuild_touches_only_its_tiles() {
     let before: Vec<u32> = (0..nav.tile_count() as u32)
         .map(|t| nav.version(TileId(t)).expect("v"))
         .collect();
-    assert_eq!(update(&mut nav, &mut cache, 1), want.len());
-    assert_eq!(update(&mut nav, &mut cache, 1), 0, "queue drained");
+    assert_eq!(nav.update_budget(&mut cache, 1), want.len());
+    assert_eq!(nav.update_budget(&mut cache, 1), 0, "queue drained");
     nav.bake_goal(goal).expect("field refreshes");
     let sealed = nav.find_path(start, goal).expect("query");
     assert!(sealed.is_none(), "rubble seals");
@@ -221,7 +220,7 @@ fn obstacle_rebuild_touches_only_its_tiles() {
     assert_eq!(cache.remove_obstacle(rubble), Ok(()));
     let mut ticks = 0u32;
     while nav.find_path(start, goal).expect("query").is_none() {
-        update(&mut nav, &mut cache, 1);
+        nav.update_budget(&mut cache, 1);
         nav.bake_goal(goal).expect("refresh");
         ticks += 1;
         assert!(ticks < TICKS_PER_SECOND, "breach opens in one second");

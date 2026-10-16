@@ -412,8 +412,10 @@ fn build_events(
 pub fn collect(tape: &Tape, error: &Error) -> BugBundle {
     let (kind, tick, detail) = describe(error);
     let (events, dropped_events) = build_events(tape, kind, tick, &detail);
+    let encoded = tape.encode();
+    assert!(encoded.is_ok(), "bug bundle tape must encode");
     BugBundle {
-        tape_bytes: tape.encode().unwrap_or_default(),
+        tape_bytes: encoded.unwrap_or_default(),
         build: BuildId::current(),
         rules_version: FIXTURE_VERSION,
         content_digests: Vec::new(),
@@ -432,8 +434,10 @@ pub fn collect(tape: &Tape, error: &Error) -> BugBundle {
 pub fn collect_crash(tape: &Tape, reason: &'static str) -> BugBundle {
     let detail = scrub_detail(&format!("crash: {reason}"));
     let (events, dropped_events) = build_events(tape, FailureKind::Crash, None, &detail);
+    let encoded = tape.encode();
+    assert!(encoded.is_ok(), "bug bundle tape must encode");
     BugBundle {
-        tape_bytes: tape.encode().unwrap_or_default(),
+        tape_bytes: encoded.unwrap_or_default(),
         build: BuildId::current(),
         rules_version: FIXTURE_VERSION,
         content_digests: Vec::new(),
