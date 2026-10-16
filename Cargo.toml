@@ -200,6 +200,10 @@ wgpu = "30.0.1"
 pollster = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 puffin = "0.20"
+# OPT36 feature union (cargo-hakari pattern): one set every -p test builds.
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+engine-workspace-hack = { version = "0.1.0", path = "crates/workspace-hack" }
 
 [dependencies]
 engine-core.workspace = true

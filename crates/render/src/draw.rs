@@ -1776,9 +1776,9 @@ mod tests {
         bad_base[5] = [f32::NAN, 0.0, 0.0];
         let skipped = trail_strip_verts(&bad_base, &tip, &age_ticks);
         assert_eq!(skipped.len(), 22, "one NaN pair drops two verts");
-        assert_eq!(skipped[10].pos_m, base[4], "order holds past the gap");
-        assert_eq!(skipped[11].pos_m, tip[4], "tip order holds past the gap");
-        assert_eq!(skipped[12].pos_m, base[6], "gap skips only the NaN pair");
+        assert_eq!(skipped[8].pos_m, base[4], "order holds past the gap");
+        assert_eq!(skipped[9].pos_m, tip[4], "tip order holds past the gap");
+        assert_eq!(skipped[10].pos_m, base[6], "gap skips only the NaN pair");
         let big_base = [[0.0_f32; 3]; 13];
         let big_tip = [[1.0_f32; 3]; 13];
         let big_age = [0u8; 13];

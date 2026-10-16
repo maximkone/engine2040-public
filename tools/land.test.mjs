@@ -6,7 +6,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acceptCommands, changedPaths, claudeClaimed, failFiles, landedLine, latestReview, planClose, planLanding, ratchetArgs, ratchetVerdict, resultOf, subjectOf, verdictOf, workspaceVerdict } from "./land.mjs";
+import { acceptCommands, changedPaths, claudeClaimed, failFiles, landedLine, latestReview, planClose, planLanding, ratchetArgs, ratchetVerdict, resultOf, reviewBase, subjectOf, verdictOf, workspaceVerdict } from "./land.mjs";
 
 const record = (extra = "", fm = {}) => `---\n${Object.entries({ role: "builder", title: "EG12 torch shadows in the forward shader", row: "EG12", paths: "crates/render/src/shadow.rs, crates/render/src/forward.wgsl", ...fm }).map(([k, v]) => `${k}: ${v}`).join("\n")}\n---\nGoal: g\n\n## Result (completed)\n\nRESULT: DONE - torches cast shadows | proof: cargo test -p engine-render --lib torch 3 passed${extra}\n`;
 const pass = "Checks rerun.\nRUST: 4/5 DEPTH: 3/5\nVERDICT: PASS - torches shadow, tests rerun\n";
@@ -19,6 +19,18 @@ test("a DONE run with a PASS review lands only its own changed paths", () => {
   assert.match(p.message, /^EG12: torch shadows in the forward shader\n/);
   assert.match(p.message, /RESULT: DONE - torches cast shadows/);
   assert.match(p.message, /Review 0-eg12-torch-review: VERDICT: PASS .*\(DEPTH 3\/5, RUST 4\/5\)/);
+});
+
+test("a stale review (master moved after the PASS) requeues instead of landing", () => {
+  assert.equal(reviewBase("RUST: 4/5 DEPTH: 3/5 HEAD abc1234\nVERDICT: PASS\n"), "abc1234");
+  assert.equal(reviewBase("no base here\nVERDICT: PASS\n"), null);
+  const headed = `${pass}HEAD abc1234\n`;
+  assert.equal(planLanding({ ...base, record: record(), review: headed, head: "abc1234567890abcdef" }).ok, true, "same base prefix is fresh");
+  const stale = planLanding({ ...base, record: record(), review: headed, head: "def5678abcdef1234" });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.code, 1);
+  assert.match(stale.why, /review is stale: reviewed at abc1234 but HEAD is def5678abcde/);
+  assert.equal(planLanding({ ...base, record: record(), review: pass, head: "def5678abcdef1234" }).ok, true, "no HEAD in review skips the check");
 });
 
 test("refusals: not DONE, no review, FAIL, low depth, no paths, a claude claim", () => {

@@ -12,6 +12,21 @@ const FLOOR_MS: u32 = 340;
 const BAIT_MS: u32 = 240;
 const END_POSE_MS: u32 = 170;
 
+// Highest readable floor cleared by one signal-plus-attack time in ms:
+// full at 340, bait at 240, end pose at 170, else unreadable. Pure,
+// no allocation, same input gives same verdict on every run.
+fn floor_verdict(ms: u32) -> &'static str {
+    if ms >= FLOOR_MS {
+        "full"
+    } else if ms >= BAIT_MS {
+        "bait"
+    } else if ms >= END_POSE_MS {
+        "end-pose"
+    } else {
+        "unreadable"
+    }
+}
+
 // One printed row per live move: id, startup, active, signal-plus-attack ms.
 // Reads only `moves[0..count]`; spare slots hold placeholders, never steps.
 fn telegraph_table() -> Vec<(u8, u32, u32, u32)> {
@@ -34,7 +49,8 @@ fn print_table(rows: &[(u8, u32, u32, u32)]) {
     for (id, startup, active, ms) in rows {
         println!(
             "move {id}: startup {startup} + active {active} = {ms} ms \
-             vs floors {FLOOR_MS}/{BAIT_MS}/{END_POSE_MS}"
+             vs floors {FLOOR_MS}/{BAIT_MS}/{END_POSE_MS} verdict {}",
+            floor_verdict(*ms)
         );
     }
 }
@@ -116,4 +132,17 @@ fn signal_attack_ms_saturates_without_panic() {
         u32::MAX,
         "single saturated row clamps to u32::MAX"
     );
+}
+
+#[test]
+fn telegraph_floors_classify_jab_cross_bait_full() {
+    // Every floor constant must classify: jab and cross sit unreadable,
+    // bait clears 240, full clears 340, end pose clears 170.
+    let rows = telegraph_table();
+    assert_eq!(floor_verdict(rows[0].3), "unreadable");
+    assert_eq!(floor_verdict(rows[1].3), "unreadable");
+    assert_eq!(floor_verdict(170), "end-pose");
+    assert_eq!(floor_verdict(250), "bait");
+    assert_eq!(floor_verdict(340), "full");
+    assert_eq!(floor_verdict(500), "full");
 }

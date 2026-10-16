@@ -3274,6 +3274,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-workspace-hack"
+version = "0.1.0"
+dependencies = [
+ "engine-anim",
+ "engine-arena",
+ "engine-assets",
+ "engine-render",
+ "engine-scene",
+ "image",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "engine-world"
 version = "0.1.0"
 dependencies = [

@@ -44,6 +44,22 @@ fn sun_last_us_store(us: u64) {
 }
 
 impl Presenter {
+    /// Per-frame torch bytes beside the light bytes, zeroed for clears.
+    /// Stack image, allocates nothing. Reuses the `forward_bind` owner.
+    /// Caller: `stage_frame` below stages the same bytes into `torch_buf`;
+    /// tests in `present/tests_gpu.rs` pin the byte layout.
+    pub(crate) fn torch_bytes(
+        &self,
+        list: &DrawList,
+    ) -> [u8; super::forward_bind::TORCH_BLOCK_BYTES] {
+        let frame = super::forward_bind::TorchFrame::for_draws(!list.items.is_empty());
+        let mut out = [0u8; super::forward_bind::TORCH_BLOCK_BYTES];
+        frame.pack_into(&mut out);
+        out
+    }
+}
+
+impl Presenter {
     /// Record the Tier A look tranche on the device: RL4 sky, RL6 layer
     /// chart, particle pool and decal pool, all under the shared look
     /// bind, before the forward PBR draws. The particle pool steps one
@@ -321,7 +337,9 @@ impl Presenter {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: super::frame::ID_TARGET_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let id_view = id_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -508,6 +526,10 @@ impl Presenter {
             self.material_scratch
                 .resize((index + 1) * MATERIAL_STRIDE, 0);
         }
+        // Torch bytes beside the light bytes; zeroed for clears so clears
+        // stay clean. Staged into `torch_buf` for the forward bind.
+        let torch = self.torch_bytes(list);
+        self.queue.write_buffer(&self.torch_buf, 0, &torch);
         Ok((cam_u.to_bytes(), light_u.to_bytes()))
     }
 
@@ -1011,6 +1033,7 @@ pub(super) struct ForwardParts<'a> {
     pub(super) shadow: &'a wgpu::Buffer,
     pub(super) sampler: &'a wgpu::Sampler,
     pub(super) fog: &'a wgpu::Buffer,
+    pub(super) normal_view: &'a wgpu::TextureView,
 }
 
 /// One forward bind group over `parts` and the base-color `view`. The
@@ -1060,6 +1083,18 @@ pub(super) fn forward_bind_group(
             wgpu::BindGroupEntry {
                 binding: 6,
                 resource: parts.fog.as_entire_binding(),
+            },
+            // Tangent-space normal map plus its sampler (bindings 17-18).
+            // The `fs`/`fs_skinned` entries sample them every fragment, so a
+            // bind group without them leaves binding 17 missing in the
+            // `ra1-forward-pipeline` layout and fails pipeline create.
+            wgpu::BindGroupEntry {
+                binding: FORWARD_NORMAL_BINDING,
+                resource: wgpu::BindingResource::TextureView(parts.normal_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: FORWARD_NORMAL_SAMPLER_BINDING,
+                resource: wgpu::BindingResource::Sampler(parts.sampler),
             },
         ],
     })
@@ -1211,6 +1246,16 @@ pub(super) const FORWARD_VERTEX_STRIDE: u64 = 48;
 /// Units bytes from vertex start. Determinism: fixed layout, never hashed.
 /// Caller: `forward_pipeline` below.
 pub(super) const FORWARD_TANGENT_OFFSET: u64 = 32;
+/// Group 0 binding of the tangent-space normal map sampled by `fs`/`fs_skinned`.
+/// Matches `shaders/forward.wgsl` `normal_map` at 17.
+/// Units binding index. Determinism: fixed layout, never hashed.
+/// Caller: `forward_bind_group` below binds this view for every draw.
+pub(super) const FORWARD_NORMAL_BINDING: u32 = 17;
+/// Group 0 binding of the normal-map sampler at 18.
+/// Matches `shaders/forward.wgsl` `normal_smp`.
+/// Units binding index. Determinism: fixed layout, never hashed.
+/// Caller: `forward_bind_group` below binds the shared sampler here.
+pub(super) const FORWARD_NORMAL_SAMPLER_BINDING: u32 = 18;
 
 pub(super) fn forward_pipeline(
     device: &wgpu::Device,
@@ -1416,7 +1461,10 @@ pub fn create_surface(
 
 #[cfg(test)]
 mod forward_layout_tests {
-    use super::{FORWARD_TANGENT_OFFSET, FORWARD_VERTEX_STRIDE};
+    use super::{
+        FORWARD_NORMAL_BINDING, FORWARD_NORMAL_SAMPLER_BINDING, FORWARD_TANGENT_OFFSET,
+        FORWARD_VERTEX_STRIDE,
+    };
 
     #[test]
     fn forward_stride_matches_mesh_bytes() {
@@ -1453,6 +1501,31 @@ mod forward_layout_tests {
         assert!(
             crate::v1_gpu::FORWARD_PBR_WGSL.contains("@location(3) tangent: vec4<f32>"),
             "vertex shader declares tangent at location 3"
+        );
+    }
+
+    #[test]
+    fn forward_shader_needs_normal_at_seventeen() {
+        assert_eq!(
+            FORWARD_NORMAL_BINDING, 17,
+            "submit normal texture rides at group 0 binding 17"
+        );
+        assert_eq!(
+            FORWARD_NORMAL_SAMPLER_BINDING, 18,
+            "submit normal sampler rides at group 0 binding 18"
+        );
+        let wgsl = crate::v1_gpu::FORWARD_PBR_WGSL;
+        assert!(
+            wgsl.contains("@group(0) @binding(17) var normal_map"),
+            "fragment shader declares normal_map at 17"
+        );
+        assert!(
+            wgsl.contains("@group(0) @binding(18) var normal_smp"),
+            "fragment shader declares normal_smp at 18"
+        );
+        assert!(
+            wgsl.contains("textureSample(normal_map, normal_smp"),
+            "fs samples the bound normal map, so the layout must carry 17"
         );
     }
 }

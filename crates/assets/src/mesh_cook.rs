@@ -26,7 +26,9 @@
 //! triangle budgets are hero `<= 40k`, opponents `<= 25k`, props `<= 5k` at
 //! LOD0 with at most 4 materials per character (materials ride the glTF import).
 
-use super::cooked::{len_word, validate_mesh, CookError, CookedMesh};
+/// Re-exported cooked mesh type the vertex-cache vectors consume.
+pub use super::cooked::CookedMesh;
+use super::cooked::{len_word, validate_mesh, CookError};
 use super::mesh_import::{import_gltf_bytes, MeshImportError, MAX_BYTES};
 use super::wire::bound_chars;
 use engine_core::Fnv64;

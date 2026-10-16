@@ -403,6 +403,17 @@ const STAGED_FOOT_WEST_FAR_FAR: [f32; 2] = [-6.0, 0.0];
 #[cfg(test)]
 const STAGED_FOOT_FAR_FAR_WEST: [f32; 2] = [-8.0, 0.0];
 
+/// Outer-east foot in meters (x, z), mirrors `SUN_STAGED_FIGHTER_X_OUTER_EAST`
+/// plus `SUN_STAGED_FIGHTER_Z_OUTER_EAST` at (10, 0): 3ea49496 frame_000000
+/// plus frame_000002 plus frame_000004 re-checked with Read show no contact
+/// under either fighter near far-east sand, only white specular haze blobs on
+/// sand and walls, though per-pass shadow reads 1.590ms with forward 0.000ms;
+/// the nineteen disks at x -8, -6, -4, -2, 0, 2, 4, 6 and 8 miss outer-east feet
+/// east of x 9, so outer-east sand needs its own disk.
+/// Units: meters. Determinism: fixed constant.
+#[cfg(test)]
+const STAGED_FOOT_OUTER_EAST: [f32; 2] = [10.0, 0.0];
+
 /// Staged contact disk radius in meters, mirrors `SUN_STAGED_RADIUS_M`.
 /// Units: meters. Determinism: fixed constant.
 #[cfg(test)]
@@ -2053,6 +2064,134 @@ mod tests {
         assert_eq!(
             dark, dark_again,
             "same outer-west inputs give same pixels twice"
+        );
+    }
+
+    #[test]
+    fn fighter_grounding_shadow_darkens_near_sand_3ea49496() {
+        // 3ea49496: frame_000000 plus frame_000002 plus frame_000004
+        // re-checked with Read show no contact under either fighter near
+        // far-east sand, only white specular haze blobs on sand and walls,
+        // though per-pass shadow reads 1.590ms with forward 0.000ms. The
+        // nineteen disks at x -8, -6, -4, -2, 0, 2, 4, 6 and 8 miss outer-east
+        // feet east of x 9, so the forward names an outer-east disk at
+        // (10, 0) that darkens outer-east sand. Fails before the outer-east
+        // disk lands, passes after.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        for probe in [
+            "SUN_STAGED_FIGHTER_X_OUTER_EAST",
+            "SUN_STAGED_FIGHTER_Z_OUTER_EAST",
+            "near_outer_east",
+        ] {
+            assert!(
+                wgsl.contains(probe),
+                "forward names outer-east disk: {probe}"
+            );
+        }
+        for probe in [
+            "SUN_STAGED_FIGHTER_X_OUTER_EAST: f32 = 10.0",
+            "SUN_STAGED_FIGHTER_Z_OUTER_EAST: f32 = 0.0",
+            "SUN_STAGED_RADIUS_M: f32 = 1.0",
+            "SUN_STAGED_DARKEN: f32 = 0.5",
+        ] {
+            assert!(
+                wgsl.contains(probe),
+                "forward pins outer-east disk shape: {probe}"
+            );
+        }
+        assert_eq!(
+            STAGED_FOOT_OUTER_EAST,
+            [10.0, 0.0],
+            "CPU outer-east foot mirrors the shader"
+        );
+        let feet = [
+            STAGED_FOOT_A,
+            STAGED_FOOT_B,
+            STAGED_FOOT_MID,
+            STAGED_FOOT_C,
+            STAGED_FOOT_D,
+            STAGED_FOOT_E,
+            STAGED_FOOT_F,
+            STAGED_FOOT_G,
+            STAGED_FOOT_H,
+            STAGED_FOOT_I,
+            STAGED_FOOT_J,
+            STAGED_FOOT_WEST,
+            STAGED_FOOT_EAST,
+            STAGED_FOOT_CENTER,
+            STAGED_FOOT_FAR_EAST,
+            STAGED_FOOT_FAR_FAR_EAST,
+            STAGED_FOOT_WEST_FAR,
+            STAGED_FOOT_WEST_FAR_FAR,
+            STAGED_FOOT_FAR_FAR_WEST,
+            STAGED_FOOT_OUTER_EAST,
+        ];
+        assert_eq!(
+            staged_contact_shadow(10.0, 0.0, 0.0, &feet),
+            STAGED_CONTACT_DARKEN,
+            "outer-east sand (10, 0) darkens to the staged factor"
+        );
+        assert_eq!(
+            staged_contact_shadow(11.0, 0.0, 0.0, &feet),
+            1.0,
+            "exactly one radius out from outer-east stays lit (strict disk)"
+        );
+        assert_eq!(
+            staged_contact_shadow(12.0, 0.0, 0.0, &feet),
+            1.0,
+            "open sand (12, 0) stays lit"
+        );
+        // Offline pixel pair: the same 0.5 darken through the twin face shade
+        // must darken outer-east sand by at least 25 percent (before 1.0 at
+        // open sand (12.0, 0.0, 0.0) vs after 0.5 at outer-east sand
+        // (10.0, 0.0, 0.0)).
+        let pass = twin_sun_pass().expect("twin sun builds");
+        let albedo = [0.42, 0.32, 0.20];
+        let sun_color = [1.0, 0.95, 0.88];
+        let ambient = [0.20, 0.18, 0.16];
+        let lit = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            1.0,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("open sand (12, 0) shades");
+        let dark = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            0.5,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("outer-east sand (10, 0) shades");
+        for i in 0..3 {
+            assert!(
+                dark[i] <= 0.75 * lit[i],
+                "outer-east sand (10, 0) 25 percent darker: {dark:?} vs {lit:?}"
+            );
+            assert!(lit[i].is_finite() && dark[i].is_finite(), "radiance finite");
+        }
+        let dark_again = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            0.5,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("outer-east sand shades twice");
+        assert_eq!(
+            dark, dark_again,
+            "same outer-east inputs give same pixels twice"
         );
     }
 

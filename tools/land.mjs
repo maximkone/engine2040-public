@@ -100,6 +100,9 @@ export const latestReview = (names, packet) => names
   .map((n) => n.match(new RegExp(`^${packet.replace(/[.+]/g, "\\$&")}-review(?:-(\\d+))?\\.md$`)))
   .filter(Boolean).sort((a, b) => Number(a[1] ?? 1) - Number(b[1] ?? 1)).at(-1)?.[0] ?? null;
 
+// The master HEAD the review saw: `HEAD <sha>` in its text (bors try-queue idea: test the merge on fresh master).
+export const reviewBase = (review) => lastOf(String(review ?? ""), /HEAD\s+([0-9a-f]{7,40})\b/gi)?.[1]?.toLowerCase() ?? null;
+
 // Paths a claude-* claim line written in the last 3 h names (Claude coders work beside the loop).
 export const claudeClaimed = (claims, now = Date.now()) => {
   const out = new Set();
@@ -202,7 +205,7 @@ export const recordFacts = (record) => {
 };
 
 // Pure: what to land, or why not. record = the coder's done/ record, review = its latest review record.
-export const planLanding = ({ packet, record, reviewName, review, changed = [], claims = "", now = Date.now() }) => {
+export const planLanding = ({ packet, record, reviewName, review, changed = [], claims = "", now = Date.now(), head = "" }) => {
   const fm = recordFacts(record);
   if (!fm) return { ok: false, code: 1, why: `done/${packet}.md has no front matter and no standing-run heading` };
   const landed = lastOf(record, /^Landed:\s*(\S+)/gm);
@@ -243,6 +246,12 @@ export const planLanding = ({ packet, record, reviewName, review, changed = [], 
   const held = claudeClaimed(claims, now);
   const clash = mine.filter((c) => held.has(c));
   if (clash.length) return { ok: false, code: 1, why: `a claude-* claim holds ${clash.join(", ")}` };
+  const base = reviewBase(review);
+  const cur = String(head ?? "").trim().toLowerCase();
+  if (base && cur) {
+    const same = cur === base || cur.startsWith(base) || base.startsWith(cur);
+    if (!same) return { ok: false, code: 1, why: `review is stale: reviewed at ${base} but HEAD is ${cur.slice(0, 12)}; requeue for a fresh review` };
+  }
   // DONE keeps its own RESULT line; PARTIAL and NOOP name their kind first (the commit says what it is).
   const resultLine = res.status === "DONE" ? res.line : `Result ${res.status}: ${res.what}${res.proof ? ` | proof: ${res.proof}` : ""}`;
   const scores = [Number.isFinite(v.depth) ? `DEPTH ${v.depth}/5` : "", Number.isFinite(v.rust) ? `RUST ${v.rust}/5` : ""].filter(Boolean).join(", ");
@@ -363,10 +372,13 @@ const main = (argv) => {
   const review = reviewName ? readFileSync(join(done, reviewName), "utf8") : null;
   const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
   if (branch !== "master") { console.log(`REFUSED ${packet}: the tree is on ${branch}, not master`); return 1; }
+  const head = git(["rev-parse", "HEAD"]).trim();
   const own = parsePathEntries(recordFacts(record)?.paths).map((e) => e.path).filter(Boolean);
   const changed = own.length ? changedPaths(git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...own])) : [];
   const claimsFile = join(ROOT, "target", "queue", "claims.txt");
-  const plan = planLanding({ packet, record, reviewName, review, changed, claims: existsSync(claimsFile) ? readFileSync(claimsFile, "utf8") : "" });
+  const plan = planLanding({ packet, record, reviewName, review, changed, claims: existsSync(claimsFile) ? readFileSync(claimsFile, "utf8") : "", head });
+  const base = reviewBase(review);
+  if (dry) console.log(`review-base: ${base ?? "unknown"} HEAD: ${head.slice(0, 12)}`);
   if (!plan.ok && plan.closeOnly) {
     if (dry) { console.log(`DRY ${packet}: close-only, would tick ${plan.fm.closes} if the proof holds its Accept command`); return 0; }
     let said = "";

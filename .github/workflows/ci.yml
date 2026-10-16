@@ -79,10 +79,14 @@ jobs:
           - group: rest
             args: "--workspace --exclude engine-render --exclude engine-editor --exclude engine-ui --exclude engine-material --exclude engine-game --exclude engine-playtest --exclude engine-distill --exclude engine-arena --exclude engine-combat --exclude engine-net --exclude engine-endpoint --exclude engine-provider --exclude engine-proof --exclude engine-perf"
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
       - name: free disk
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - name: install mold linker (Linux only)
+        run: sudo apt-get update && sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.9
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
@@ -90,16 +94,24 @@ jobs:
         with:
           shared-key: test-debug
           save-if: ${{ matrix.group == 'rest' }}
+      - name: install cargo-nextest (cached)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: test ${{ matrix.group }}
-        run: cargo test --locked --all-targets ${{ matrix.args }}
+        run: cargo nextest run --locked --all-targets ${{ matrix.args }}
 
   clippy:
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
       - name: free disk
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - name: install mold linker (Linux only)
+        run: sudo apt-get update && sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.9
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
@@ -113,10 +125,14 @@ jobs:
     # Release build, the recorded-input replay proofs and the legacy golden run twice.
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
       - name: free disk
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - name: install mold linker (Linux only)
+        run: sudo apt-get update && sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: actions/setup-node@v4
         with:

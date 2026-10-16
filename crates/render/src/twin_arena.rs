@@ -105,6 +105,32 @@ pub fn twin_arena_kit_present_textured(
     twin_arena_resident_count_textured(resident, draws) > 0
 }
 
+/// Over-budget check: true when resident kit would exceed the frame cap.
+///
+/// Pure, integer only, no allocation. Same inputs give the same bool; empty
+/// and cube pollution stay false because the count is zero or one. Exactly
+/// [`TWIN_ARENA_MAX_DRAWS`] stays false, one more reads true.
+/// Caller: [`push_twin_arena`] budget refusal, so the gate and the push agree.
+#[must_use]
+pub fn twin_arena_over_budget(resident: &[MeshKey], draws: &[(MeshKey, PbrMaterial)]) -> bool {
+    twin_arena_resident_count(resident, draws) > TWIN_ARENA_MAX_DRAWS
+}
+
+/// Over-budget check for textured draws: true when resident textured kit
+/// would exceed the frame cap.
+///
+/// Same budget as [`twin_arena_over_budget`] for triples carrying the
+/// base-color lane. Pure, integer only, no allocation.
+/// Caller: [`push_twin_arena_textured`] budget refusal, so the live
+/// `frame_list` gate and the push agree.
+#[must_use]
+pub fn twin_arena_over_budget_textured(
+    resident: &[MeshKey],
+    draws: &[(MeshKey, PbrMaterial, Option<TextureKey>)],
+) -> bool {
+    twin_arena_resident_count_textured(resident, draws) > TWIN_ARENA_MAX_DRAWS
+}
+
 /// Swap the synthetic cube for resident arena kit draws.
 ///
 /// Takes the per-frame draw list (which holds the cube fallback), the
@@ -139,8 +165,8 @@ pub fn push_twin_arena(
             .validate()
             .map_err(|err| TwinArenaError::Invalid(format!("twin arena material: {err}")))?;
     }
-    let would_push = twin_arena_resident_count(resident, draws);
-    if would_push > TWIN_ARENA_MAX_DRAWS {
+    if twin_arena_over_budget(resident, draws) {
+        let would_push = twin_arena_resident_count(resident, draws);
         return Err(TwinArenaError::Invalid(format!(
             "twin arena over budget: {would_push} draws exceed {TWIN_ARENA_MAX_DRAWS}"
         )));
@@ -207,8 +233,8 @@ pub fn push_twin_arena_textured(
             .validate()
             .map_err(|err| TwinArenaError::Invalid(format!("twin arena material: {err}")))?;
     }
-    let would_push = twin_arena_resident_count_textured(resident, draws);
-    if would_push > TWIN_ARENA_MAX_DRAWS {
+    if twin_arena_over_budget_textured(resident, draws) {
+        let would_push = twin_arena_resident_count_textured(resident, draws);
         return Err(TwinArenaError::Invalid(format!(
             "twin arena over budget: {would_push} draws exceed {TWIN_ARENA_MAX_DRAWS}"
         )));
@@ -812,5 +838,61 @@ mod tests {
             .expect("second textured bind is noop");
         assert_eq!(second, 0, "same textured kit pushed twice draws once");
         assert_eq!(list.items.len(), 2, "textured re-bind pushes nothing");
+    }
+
+    #[test]
+    fn twin_arena_over_budget_tracks_push_refusal() {
+        // Budget predicate the push consults: true only when resident kit
+        // would exceed the frame cap, so the cube stays and nothing pushes.
+        // Fails before the predicate lands (no such fn).
+        let kit = arena_pair(0x4717_0001, 0x11);
+        let draws = [kit.clone()];
+        let resident = [twin_arena_cube_key(), kit.0];
+        assert!(!twin_arena_over_budget(&resident, &draws));
+        let empty: [(MeshKey, PbrMaterial); 0] = [];
+        assert!(!twin_arena_over_budget(&resident, &empty));
+        let pollution = arena_pair(1, 0xA1);
+        assert_eq!(pollution.0, twin_arena_cube_key());
+        let polluted = [pollution, kit.clone()];
+        assert!(!twin_arena_over_budget(&resident, &polluted));
+        let many: Vec<(MeshKey, PbrMaterial)> = (0..257u64)
+            .map(|i| arena_pair(0x4717_0000 + i, (i % 251) as u8))
+            .collect();
+        let mut big_resident = Vec::with_capacity(258);
+        big_resident.push(twin_arena_cube_key());
+        for (key, _) in &many {
+            big_resident.push(*key);
+        }
+        assert!(twin_arena_over_budget(&big_resident, &many));
+        assert_eq!(
+            twin_arena_over_budget(&big_resident, &many),
+            twin_arena_over_budget(&big_resident, &many)
+        );
+    }
+
+    #[test]
+    fn twin_arena_over_budget_textured_tracks_push_refusal() {
+        // Same budget gate for the textured path the live `frame_list`
+        // binds: true only when resident textured kit would exceed the cap.
+        // Fails before the textured predicate lands.
+        let kit = arena_textured_pair(0x4717_0001, 0x11, 0xB001, 0xA1);
+        let draws = [kit.clone()];
+        let resident = [twin_arena_cube_key(), kit.0];
+        assert!(!twin_arena_over_budget_textured(&resident, &draws));
+        let empty: [(MeshKey, PbrMaterial, Option<TextureKey>); 0] = [];
+        assert!(!twin_arena_over_budget_textured(&resident, &empty));
+        let many: Vec<(MeshKey, PbrMaterial, Option<TextureKey>)> = (0..257u64)
+            .map(|i| arena_textured_pair(0x4717_0000 + i, (i % 251) as u8, 0xB001, 0xA1))
+            .collect();
+        let mut big_resident = Vec::with_capacity(258);
+        big_resident.push(twin_arena_cube_key());
+        for (key, _, _) in &many {
+            big_resident.push(*key);
+        }
+        assert!(twin_arena_over_budget_textured(&big_resident, &many));
+        assert_eq!(
+            twin_arena_over_budget_textured(&big_resident, &many),
+            twin_arena_over_budget_textured(&big_resident, &many)
+        );
     }
 }

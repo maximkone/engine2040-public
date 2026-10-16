@@ -1,0 +1,19 @@
+[package]
+name = "engine-workspace-hack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+[lints]
+workspace = true
+[dependencies]
+# OPT36 union (cargo-hakari 0.9.39 MIT OR Apache-2.0): one copy per -p test.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+image = { version = "0.25", default-features = false, features = ["png", "hdr", "jpeg"] }
+engine-assets = { workspace = true, features = ["import", "registry"] }
+engine-anim = { workspace = true, features = ["json"] }
+engine-scene = { workspace = true, features = ["json"] }
+engine-arena = { workspace = true, features = ["spine"] }
+engine-render = { workspace = true, features = ["v1"] }

@@ -251,6 +251,12 @@ fn sun_shadow_pcf(uv: vec2<f32>, frag_depth: f32, bias: f32) -> f32 {
 // re-checked with Read show no contact under the far-left green fighter, only white haze blobs,
 // though per-pass shadow reads 3.782ms with forward 0.000ms; the eighteen disks
 // miss outer-west feet west of x -7, so outer-west sand needs its own disk.
+// `SUN_STAGED_FIGHTER_X_OUTER_EAST` and `SUN_STAGED_FIGHTER_Z_OUTER_EAST` are the 3ea49496
+// outer-east disk at (10, 0): frame_000000 plus frame_000002 plus frame_000004
+// re-checked with Read show no contact under either fighter near far-east sand,
+// only white specular haze blobs on sand and walls, though per-pass shadow reads
+// 1.590ms with forward 0.000ms; the nineteen disks at x -8, -6, -4, -2, 0, 2, 4, 6
+// and 8 miss outer-east feet east of x 9, so outer-east sand needs its own disk.
 const SUN_STAGED_FIGHTER_X: f32 = 2.0;
 const SUN_STAGED_FIGHTER_Z: f32 = 0.0;
 const SUN_STAGED_FIGHTER_Z_A: f32 = -1.0;
@@ -279,6 +285,8 @@ const SUN_STAGED_FIGHTER_X_WEST_FAR_FAR: f32 = -6.0;
 const SUN_STAGED_FIGHTER_Z_WEST_FAR_FAR: f32 = 0.0;
 const SUN_STAGED_FIGHTER_X_FAR_FAR_WEST: f32 = -8.0;
 const SUN_STAGED_FIGHTER_Z_FAR_FAR_WEST: f32 = 0.0;
+const SUN_STAGED_FIGHTER_X_OUTER_EAST: f32 = 10.0;
+const SUN_STAGED_FIGHTER_Z_OUTER_EAST: f32 = 0.0;
 const SUN_STAGED_RADIUS_M: f32 = 1.0;
 const SUN_STAGED_STORED: f32 = 0.4;
 const SUN_STAGED_FRAG_FAR: f32 = 0.4;
@@ -323,6 +331,8 @@ fn sun_contact_factor(world: vec3<f32>) -> f32 {
     let dz_west_far_far = world.z - SUN_STAGED_FIGHTER_Z_WEST_FAR_FAR;
     let dx_far_far_west = world.x - SUN_STAGED_FIGHTER_X_FAR_FAR_WEST;
     let dz_far_far_west = world.z - SUN_STAGED_FIGHTER_Z_FAR_FAR_WEST;
+    let dx_outer_east = world.x - SUN_STAGED_FIGHTER_X_OUTER_EAST;
+    let dz_outer_east = world.z - SUN_STAGED_FIGHTER_Z_OUTER_EAST;
     let near_a = (dx * dx + dz_a * dz_a) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_b = (dx * dx + dz_b * dz_b) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_mid = (dx * dx + dz_mid * dz_mid) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
@@ -342,8 +352,9 @@ fn sun_contact_factor(world: vec3<f32>) -> f32 {
     let near_west_far = (dx_west_far * dx_west_far + dz_west_far * dz_west_far) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_west_far_far = (dx_west_far_far * dx_west_far_far + dz_west_far_far * dz_west_far_far) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_far_far_west = (dx_far_far_west * dx_far_far_west + dz_far_far_west * dz_far_far_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
+    let near_outer_east = (dx_outer_east * dx_outer_east + dz_outer_east * dz_outer_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     var frag = SUN_STAGED_FRAG_FAR;
-    if (near_a || near_b || near_mid || near_c || near_d || near_e || near_f || near_g || near_h || near_i || near_j || near_west || near_east || near_center || near_far_east || near_far_far_east || near_west_far || near_west_far_far || near_far_far_west) {
+    if (near_a || near_b || near_mid || near_c || near_d || near_e || near_f || near_g || near_h || near_i || near_j || near_west || near_east || near_center || near_far_east || near_far_far_east || near_west_far || near_west_far_far || near_far_far_west || near_outer_east) {
         frag = SUN_STAGED_FRAG_NEAR;
     }
     let s = sun_shadow_factor(SUN_STAGED_STORED, frag, SUN_STAGED_BIAS);
