@@ -204,7 +204,7 @@ fn obstacle_rebuild_touches_only_its_tiles() {
     let door = [12, 8, 12, 8];
     let rubble = cache.add_box_obstacle(&nav, door).expect("queues");
     assert_eq!(nav.dirty_count(), 0, "add only queues");
-    let want = vec![nav.tile_of(12, 8).expect("door cell")];
+    let want = [nav.tile_of(12, 8).expect("door cell")];
     let before: Vec<u32> = (0..nav.tile_count() as u32)
         .map(|t| nav.version(TileId(t)).expect("v"))
         .collect();

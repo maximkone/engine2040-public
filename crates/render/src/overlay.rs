@@ -286,15 +286,7 @@ impl OverlayRing {
     /// Caller: `crates/render/src/present/gpu_present/live.rs`.
     #[must_use]
     pub fn hp_bars_plan(&self, aspect: f32) -> Option<OverlayDraw> {
-        let staged = self.quad_count();
-        if staged == 0 {
-            return None;
-        }
-        Some(OverlayDraw {
-            quads: staged,
-            verts: staged * VERTS_PER_QUAD,
-            mvp: overlay_mvp(aspect),
-        })
+        self.draw_plan(aspect)
     }
 }
 
@@ -663,6 +655,47 @@ mod tests {
         assert!(
             OVERLAY_WGSL.contains("overlay_atlas"),
             "atlas texture binding is named overlay_atlas"
+        );
+    }
+
+    #[test]
+    fn overlay_hp_entry_delegates_to_single_draw_plan() {
+        // Caller: `crates/render/src/present/gpu_present/live.rs` keeps its
+        // named `hp_bars_plan` entry point while one owner builds the plan,
+        // so a second construction site cannot drift from `draw_plan`.
+        // Structural: exactly one `Some(OverlayDraw` construction site stays.
+        // (The needle is joined so this test's own source never matches it.)
+        let src = include_str!("overlay.rs");
+        let needle = ["Some(OverlayDraw", " {"].concat();
+        let sites = src.match_indices(needle.as_str()).count();
+        assert_eq!(sites, 1, "one draw-plan owner; hp entry delegates");
+        // Behavioral: the named hp entry still matches the draw plan on the
+        // capped full ring and on the bad-aspect fallback.
+        let mut full = OverlayRing::new();
+        let q = Quad {
+            rect: [0.1, 0.1, 0.2, 0.2],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            col: [255, 255, 255, 255],
+        };
+        for _ in 0..OVERLAY_MAX_QUADS {
+            assert!(full.push_quad(q));
+        }
+        assert_eq!(
+            full.hp_bars_plan(16.0 / 9.0),
+            full.draw_plan(16.0 / 9.0),
+            "full ring stays one plan"
+        );
+        let mut ring = OverlayRing::new();
+        assert!(ring.push_hp_bar(0.04, 0.05, 0.34, 0.09, 1.0));
+        assert_eq!(
+            ring.hp_bars_plan(0.0),
+            ring.draw_plan(0.0),
+            "bad aspect still matches"
+        );
+        assert_eq!(
+            ring.hp_bars_plan(0.0).expect("bad aspect draws").mvp,
+            overlay_mvp(1.0),
+            "bad aspect falls back together"
         );
     }
 }
