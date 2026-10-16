@@ -54,6 +54,9 @@ const allowedEdges = new Map([
   ["engine-core", []],
   ["engine-ecs", []],
   ["engine-nn", []],
+  // OPT36 workspace-hack is scoped out: externals-only union, no path edges.
+  // It must stay out of the headless default graph (see the visit guard below).
+  ["engine-workspace-hack", []],
   // NS32a: the rules adapter implements the arena's controller trait (feature `arena`, off by default).
   ["engine-rules", ["engine-arena"]],
   ["engine-observe", []],
@@ -392,6 +395,11 @@ try {
     }
   }
   visit(root.id);
+  // OPT36 scope: the workspace-hack union stays out of the headless default
+  // graph (externals-only; enabling engine features would pull optional
+  // externals into this resolve, which must stay std-only).
+  const hackPkg = workspacePackages.find((pkg) => pkg.name === "engine-workspace-hack");
+  if (hackPkg && visited.has(hackPkg.id)) errors.push("engine-workspace-hack is scoped out of the headless default graph");
 
   // A file no `mod` declares is never compiled, so its tests never run either.
   // Speed: one walk per crate plus a content cache shared by the module,

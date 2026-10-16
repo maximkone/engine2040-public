@@ -58,14 +58,15 @@ const main = async () => {
   const jobs = JSON.parse(gh(["run", "view", String(run.databaseId), "-R", REPO, "--json", "jobs"])).jobs ?? [];
   const out = [`farm: ${REPO}@${sha.slice(0, 7)} ${run.url}`];
   for (const j of jobs) out.push(`${j.conclusion === "success" ? "PASS" : String(j.conclusion).toUpperCase()} ${j.name}${j.conclusion === "success" ? "" : ` (step: ${(j.steps ?? []).find((s) => s.conclusion === "failure")?.name ?? "?"})`}`);
-  const red = jobs.filter((j) => j.conclusion !== "success" && j.conclusion !== "skipped");
+  const red = jobs.filter((j) => !["success", "skipped", "cancelled"].includes(j.conclusion)); // cancelled = superseded run, never a defect
+  const cancelled = jobs.filter((j) => j.conclusion === "cancelled").length;
   let byJob = new Map();
   if (red.length) {
     let log = ""; try { log = gh(["run", "view", String(run.databaseId), "-R", REPO, "--log-failed"]); } catch (e) { log = String(e?.stdout ?? ""); }
     byJob = errorLines(log);
     for (const [job, lines] of byJob) { out.push(`--- ${job}`); out.push(...lines); }
   }
-  out.push(red.length ? `RESULT RED: ${red.length} job(s)` : "RESULT GREEN");
+  out.push(red.length ? `RESULT RED: ${red.length} job(s)` : `RESULT GREEN${cancelled ? ` (${cancelled} job(s) cancelled = superseded, not counted)` : ""}`);
   mkdirSync(join(ROOT, "target"), { recursive: true }); writeFileSync(join(ROOT, "target", "farm-last.txt"), `${out.join("\n")}\n`);
   console.log(out.join("\n"));
   if (flag("--packets")) for (const j of red) console.log(writePacket(j, run, [...byJob].find(([k]) => k === j.name)?.[1] ?? []));
