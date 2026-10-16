@@ -12,6 +12,7 @@ and proven by `proof/` through the engine's own lanes. Nothing outside
 | `src/*.gltf` (8) | sand_floor, stands, walls, gate_tunnel, torch, banner, crate, debris. glTF 2.0, embedded buffers, meters, +Y up, UVs in 0..1, one mesh per solid part |
 | `textures/*` (22 manifest-tracked) | sand/stone/wood/cloth albedo 1024² sRGB PNG (4) + metal_roughness + flat_normal 256² linear (2) + 12 `*_2k.jpg` + 4 `*_orm.png` (see `manifest.json`). Power-of-two, all ≤ 2k |
 | `hdri/arena_{day,sunset,night}.hdr` | Original CC0 skies, Radiance RGBE 128×64, one per time of day |
+| `hdri/polyhaven-studio-small-09-1k.hdr` | Poly Haven CC0 studio HDRI 1k (probe capture reference; also proof-fixture HDRI) |
 | `placement.json` | 11-actor parade placement (disjoint XZ footprints, all resting, inside ±99 m) |
 | `manifest.json` | sha256 + bytes per generated file (the provenance admits) |
 | `report.json` | Proof output: LOD chains, digests, bundle, spatial verdict |

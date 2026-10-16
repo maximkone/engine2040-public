@@ -12,7 +12,7 @@
 //!
 //! The licensed fixture is one Khronos CC0 glTF scene
 //! (`fixtures/khronos/Triangle.gltf`, byte length pinned to the `EVIDENCE.md`
-//! row) plus one Poly Haven CC0 HDRI (`content/incoming/studio_small_09_1k.hdr`)
+//! row) plus one Poly Haven CC0 HDRI (`content/arena/hdri/polyhaven-studio-small-09-1k.hdr`)
 //! whose digest is recorded as provenance. The HDRI bytes are hashed, not
 //! decoded: texture decode lives in the assets lane and IBL sampling in the
 //! render lane; the proof lane records that the licensed bytes arrived intact.
@@ -34,7 +34,8 @@ use engine_scene::transform::Transform;
 /// Licensed scene fixture: Khronos CC0 glTF (EVIDENCE.md: 1192 B).
 static TRIANGLE: &[u8] = include_bytes!("../../../fixtures/khronos/Triangle.gltf");
 /// Licensed HDRI fixture: Poly Haven CC0 (EVIDENCE.md: 1615248 B).
-static STUDIO_HDRI: &[u8] = include_bytes!("../../../content/incoming/studio_small_09_1k.hdr");
+static STUDIO_HDRI: &[u8] =
+    include_bytes!("../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr");
 
 /// Byte length pinned to the EVIDENCE.md provenance row for Triangle.gltf.
 const TRIANGLE_LEN: usize = 1192;

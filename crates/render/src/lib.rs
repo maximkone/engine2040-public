@@ -106,6 +106,11 @@ pub mod cache;
 /// consumer is the RA2 executor, which feeds back `lod` into `prev_lod`.
 pub mod draw;
 
+/// LOD dither cross-fade, no pop, no alpha sort (GS17): fade share plus
+/// the 4x4 Bayer keep rule with its WGSL mirror. Std-only; consumer is
+/// the `draw` LOD path, which binds `keep` per pixel next slice.
+pub mod lod_fade;
+
 /// CPU-side frame-graph executor (RA2): runs the compiled graph over
 /// recorded pass fns, plans transient aliasing, refuses GPU submit with
 /// a typed error until the bind groups land. Std-only.
