@@ -615,4 +615,89 @@ mod forward_maps_tests {
             );
         }
     }
+
+    #[test]
+    fn torch_block_binds_live_count_and_one_slot() {
+        assert!(
+            FORWARD_MAPS_WGSL.contains("eg12_torches"),
+            "staged chunk binds the torch uniform"
+        );
+        assert!(
+            FORWARD_MAPS_WGSL.contains("@binding(19)"),
+            "torch uniform lives at 19, last of 16-19"
+        );
+        let frame = TorchFrame::for_draws(true);
+        assert_eq!(frame.count(), 2, "two placement torches burn");
+        let mut bytes = [0u8; TORCH_BLOCK_BYTES];
+        frame.pack_into(&mut bytes);
+        let count = u32::from_le_bytes(bytes[256..260].try_into().expect("count"));
+        assert_eq!(count, 2, "bound count follows the live pair");
+        let back = TorchFrame::unpack_slot(&bytes, 1).expect("east slot reads back");
+        assert!((back.pos[0] - 20.0).abs() < 1e-6, "east x reads back");
+        assert!((back.pos[1] - 1.0).abs() < 1e-6, "east y reads back");
+        assert!((back.pos[2] - 3.0).abs() < 1e-6, "east z reads back");
+        assert!((back.color[0] - 1.0).abs() < 1e-6, "east red reads back");
+        assert!((back.color[1] - 0.55).abs() < 1e-6, "east green reads back");
+        assert!((back.range - 12.0).abs() < 1e-6, "east range reads back");
+        let albedo = [0.5, 0.5, 0.5];
+        let geom_n = [0.0, 1.0, 0.0];
+        let falloff = |dist: f32, range: f32| {
+            if range <= 0.0 || dist >= range {
+                return 0.0;
+            }
+            let att = 1.0 / (1.0 + dist * dist);
+            let edge = 1.0 - dist / range;
+            att * edge * edge
+        };
+        let shade = |world: [f32; 3]| {
+            let mut out = [0.0f32; 3];
+            for i in 0..2 {
+                let slot = frame.slot(i).expect("live slot");
+                let dx = slot.pos[0] - world[0];
+                let dy = slot.pos[1] - world[1];
+                let dz = slot.pos[2] - world[2];
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist >= slot.range || slot.range <= 0.0 || dist < 1e-6 {
+                    continue;
+                }
+                let inv = 1.0 / dist.max(0.0001);
+                let l = [dx * inv, dy * inv, dz * inv];
+                let ndotl =
+                    (geom_n[0] * l[0] + geom_n[1] * l[1] + geom_n[2] * l[2]).clamp(0.0, 1.0);
+                if ndotl <= 0.0 {
+                    continue;
+                }
+                let f = falloff(dist, slot.range);
+                for c in 0..3 {
+                    out[c] += albedo[c] * ndotl * slot.color[c] * f;
+                }
+            }
+            out
+        };
+        let mut max_gap = 0.0f32;
+        let mut masked = 0u32;
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                if !((1..3).contains(&x) && (1..3).contains(&y)) {
+                    continue;
+                }
+                masked += 1;
+                let world = [18.0 + x as f32 * 0.5, 0.0, -4.0 + y as f32 * 0.5];
+                let on = shade(world);
+                for c in 0..3 {
+                    max_gap = max_gap.max(on[c].abs());
+                }
+            }
+        }
+        assert_eq!(masked, 4, "mask covers the center 2x2");
+        assert!(
+            max_gap > 0.01,
+            "masked torch on moves above off, got {max_gap}"
+        );
+        let clear = TorchFrame::for_draws(false);
+        assert_eq!(clear.count(), 0, "clears bind zero torches");
+        let mut zero = [0u8; TORCH_BLOCK_BYTES];
+        clear.pack_into(&mut zero);
+        assert_eq!(zero, [0u8; TORCH_BLOCK_BYTES], "clears stay zeroed");
+    }
 }
