@@ -169,6 +169,44 @@ pub const CORE_TOOL_NAMES: [&str; 13] = [
 /// Every reachable tool name: the core in contract order, then every pack
 /// verb pack by pack. Callable by exact name whether or not advertised.
 pub fn tool_names() -> Vec<&'static str> {
+    #[cfg(test)]
+    {
+        use super::build_level::TOOL_BUILD_LEVEL;
+        use super::discover::{TOOL_RPC_DISCOVER, TOOL_SCENE_WATCH};
+        use super::insight::mcp_tools::{TOOL_ASSET_REFS, TOOL_CODE_CALLERS};
+        use super::log_tools::{TOOL_LOG_DIGEST, TOOL_LOG_QUERY};
+        use super::plan_goals::MCP_TOOL_NAME as TOOL_SIM_PLAN_GOALS;
+        use super::play::play_session::TOOL_PLAY_STEP;
+        use super::scene_query::TOOL_SCENE_QUERY;
+        use super::scene_tools::{TOOL_SCENE_BRIEF, TOOL_SCENE_PLACE, TOOL_SCENE_SPATIAL};
+        let _door_pin: [&'static str; 21] = [
+            TOOL_SCENE_READ,
+            TOOL_SCENE_BRIEF,
+            TOOL_SCENE_SPATIAL,
+            TOOL_TX_PREVIEW,
+            TOOL_TX_APPLY,
+            TOOL_TX_UNDO,
+            TOOL_SCENE_PLACE,
+            TOOL_BUILD_LEVEL,
+            TOOL_SCENE_QUERY,
+            TOOL_SIM_PLAN_GOALS,
+            TOOL_PLAY_RUN,
+            TOOL_PLAY_STEP,
+            TOOL_CAPTURE,
+            TOOL_LOG_DIGEST,
+            TOOL_LOG_QUERY,
+            TOOL_API_SEARCH,
+            TOOL_API_DESCRIBE,
+            TOOL_CODE_CALLERS,
+            TOOL_ASSET_REFS,
+            TOOL_RPC_DISCOVER,
+            TOOL_SCENE_WATCH,
+        ];
+        debug_assert!(_door_pin
+            .iter()
+            .all(|pinned| CORE_TOOL_NAMES.contains(pinned)
+                || PackRegistry::shipped().verb_names().contains(pinned)));
+    }
     let mut names: Vec<&'static str> = CORE_TOOL_NAMES.to_vec();
     names.extend(PackRegistry::shipped().verb_names());
     names

@@ -5,6 +5,7 @@ name: ci
 # editing. The private dev repo never runs this (its free minutes are tiny); it is the mirror's job.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

@@ -133,7 +133,7 @@ impl SparseSet {
     /// Dense index for one id, `None` when absent or stale gen.
     fn index_of(&self, e: Entity) -> Option<usize> {
         let slot = usize::try_from(e.id).unwrap_or(usize::MAX);
-        let idx = u32::try_from(*self.sparse.get(slot)?).ok()?;
+        let idx = *self.sparse.get(slot)?;
         if idx == NONE {
             return None;
         }

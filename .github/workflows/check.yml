@@ -1,0 +1,50 @@
+name: check
+
+# GitHub as the workforce (Maxim 2026-10-16): a sprint helper sends one narrow cargo command here with
+# tools/gh-check.mjs; the runner builds the helper's working tree (pushed to a throwaway wip-* branch of
+# the public mirror) and runs it. Up to 20 run at once, so the PC's one build lock no longer queues them.
+on:
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: "one cargo check|test|clippy command"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_CACHE_SIZE: "5G"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  run:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-debug
+          save-if: "false"
+      - name: run the command
+        env:
+          CMD: ${{ inputs.cmd }}
+        shell: bash
+        run: |
+          case "$CMD" in
+            "cargo check "*|"cargo test "*|"cargo clippy "*) ;;
+            *) echo "refused: only cargo check, cargo test or cargo clippy"; exit 2 ;;
+          esac
+          case "$CMD" in *'&'*|*';'*|*'|'*|*'`'*|*'$('*|*'>'*|*'<'*) echo "refused: one plain command only"; exit 2 ;; esac
+          echo "+ $CMD"
+          bash -c "$CMD"

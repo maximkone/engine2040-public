@@ -191,7 +191,7 @@ mod tests {
                     poise: 0,
                     state: 0,
                 }),
-                ai: (i % 2 == 0).then(|| AiState {
+                ai: (i % 2 == 0).then_some(AiState {
                     intent: Intent {
                         mx: 10,
                         mz: -5,
@@ -201,7 +201,7 @@ mod tests {
                     clock: i,
                     source: AiState::FROM_BRAIN,
                 }),
-                anim: (i % 3 == 0).then(|| AnimState {
+                anim: (i % 3 == 0).then_some(AnimState {
                     loco: 1,
                     phase: 0.1,
                     facing: [0.0, 1.0],

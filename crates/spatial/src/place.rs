@@ -987,7 +987,7 @@ pub fn canonical_audit_digest(conflicts: &[ConflictSet]) -> u32 {
                     Wall::North => 0,
                     Wall::South => 1,
                     Wall::East => 2,
-                    _ => 3,
+                    Wall::West => 3,
                 });
             }
             Target::Object(id) => {
