@@ -77,9 +77,10 @@ fn sun_light_basis(sun: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
     (t, u, fwd)
 }
 
-/// Arena sun view-projection for this frame: ortho camera on the pit.
-pub fn arena_sun_view_proj() -> Result<[[f32; 4]; 4], SunShadowError> {
-    let sun_dir = ARENA_DAY_SUN_DIR;
+/// Sun view-projection for one sun direction: ortho camera on the pit.
+/// Owner render lane; Caller `arena_sun_view_proj` plus `submit::encode_forward` live depth keep the snap.
+/// Units meters in, matrix out. Determinism pure, never hashed.
+pub fn sun_view_proj_for_dir(sun_dir: [f32; 3]) -> Result<[[f32; 4]; 4], SunShadowError> {
     if !sun_dir.iter().all(|c| c.is_finite()) {
         return Err(SunShadowError::Invalid("sun dir is not finite".into()));
     }
@@ -113,6 +114,12 @@ pub fn arena_sun_view_proj() -> Result<[[f32; 4]; 4], SunShadowError> {
         return Err(SunShadowError::Invalid("sun view is not finite".into()));
     }
     Ok(m)
+}
+/// Arena sun view-projection for this frame: ortho camera on the pit.
+/// Owner render lane; Caller `arena_sun_view_proj` test plus `submit::encode_forward` live depth.
+/// Units matrix out. Determinism pure delegate, never hashed.
+pub fn arena_sun_view_proj() -> Result<[[f32; 4]; 4], SunShadowError> {
+    sun_view_proj_for_dir(ARENA_DAY_SUN_DIR)
 }
 /// Depth descriptor: square 1024 `Depth32Float`, attachment plus binding.
 pub fn sun_shadow_depth_desc() -> wgpu::TextureDescriptor<'static> {
@@ -156,6 +163,159 @@ pub fn sun_shadow_uniform_bytes(vp: [[f32; 4]; 4], bias: f32, scale: f32) -> [u8
     out[64..68].copy_from_slice(&bias.to_le_bytes());
     out[68..72].copy_from_slice(&scale.to_le_bytes());
     out
+}
+/// Depth-only vertex shader for the live sun map: sun matrix transform.
+/// Owner render lane; Caller `submit::encode_forward` live depth builds its pipeline from it.
+/// Units WGSL text. Determinism fixed bytes.
+pub(crate) const SUN_SHADOW_DEPTH_WGSL: &str = r#"
+struct SunU {
+    view_proj: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> sun: SunU;
+@vertex
+fn vs(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return sun.view_proj * vec4<f32>(pos, 1.0);
+}
+"#;
+/// Live sun uniform for one forward light direction: view-proj plus 80 bytes from the live list.
+/// Owner render lane; Caller `submit::encode_forward` below runs the live edge.
+/// Units meters in, matrix plus bytes out. Determinism pure, never hashed.
+pub(crate) fn live_sun_shadow_for_dir(
+    sun_dir: [f32; 3],
+) -> Result<([[f32; 4]; 4], [u8; 80]), SunShadowError> {
+    let vp = sun_view_proj_for_dir(sun_dir)?;
+    let bytes = sun_shadow_uniform_bytes(vp, SUN_SHADOW_BIAS, 1.0);
+    Ok((vp, bytes))
+}
+/// Build the live sun depth pipeline for one bind layout: depth-only, 48-byte stride.
+/// Owner render lane; Caller `encode_live_sun_shadow` below draws the live list through it.
+/// Units GPU handles. Presentation only, never hashed.
+fn sun_depth_pipeline(
+    device: &wgpu::Device,
+    bind_layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("eg11-sun-pipe-layout"),
+        bind_group_layouts: &[Some(bind_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("eg11-sun-pipeline"),
+        layout: Some(&pipe_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: super::submit::FORWARD_VERTEX_STRIDE,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                }],
+            })],
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+/// Encode one sun depth map from the live draw list: ortho pass over the 30 m pit.
+/// Owner render lane; Caller `submit::encode_forward` before the forward draws; nothing samples it yet.
+/// Units meters for the pit fit, wall us out. Presentation only, never hashed.
+/// Slice 1 creates its texture plus pipeline per frame; slice 2 caches them beside `targets`.
+/// A bad sun direction returns `None` so the forward pass still runs.
+pub(crate) fn encode_live_sun_shadow(
+    presenter: &super::presenter::Presenter,
+    enc: &mut wgpu::CommandEncoder,
+    list: &crate::present::DrawList,
+) -> Option<u64> {
+    let started = std::time::Instant::now();
+    let dir = list.light.direction.to_array();
+    let (view_proj, uniform_bytes) = live_sun_shadow_for_dir(dir).ok()?;
+    let desc = sun_shadow_depth_desc();
+    let texture = presenter.device.create_texture(&desc);
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let uniform_len = u64::try_from(uniform_bytes.len()).unwrap_or(u64::MAX);
+    let uniform = presenter.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("eg11-sun-uniform"),
+        size: uniform_len,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    presenter.queue.write_buffer(&uniform, 0, &uniform_bytes);
+    let bind_layout =
+        presenter
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("eg11-sun-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+    let shader =
+        presenter
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("eg11-sun-depth"),
+                source: wgpu::ShaderSource::Wgsl(SUN_SHADOW_DEPTH_WGSL.into()),
+            });
+    let pipeline = sun_depth_pipeline(&presenter.device, &bind_layout, &shader);
+    let bind = presenter.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("eg11-sun-bind"),
+        layout: &bind_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform.as_entire_binding(),
+        }],
+    });
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("eg11-sun-depth-pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        for item in list.items.iter() {
+            let Some(mesh) = presenter.meshes.get(&item.mesh) else {
+                continue;
+            };
+            pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+            pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.count, 0, 0..1);
+        }
+    }
+    let _ = view_proj;
+    u64::try_from(started.elapsed().as_micros()).ok()
 }
 fn sun_uv_depth(
     view_proj: [[f32; 4]; 4],
@@ -294,6 +454,21 @@ mod tests {
         let m = arena_sun_view_proj().expect("arena sun builds");
         let n = arena_sun_view_proj().expect("builds twice");
         assert_eq!(m, n);
+        // Live helper carries the same ortho fit from the forward sun dir.
+        let live = sun_view_proj_for_dir(ARENA_DAY_SUN_DIR).expect("live dir builds");
+        assert_eq!(m, live, "live dir matches the arena rig");
+        let (live_vp, live_bytes) =
+            live_sun_shadow_for_dir(ARENA_DAY_SUN_DIR).expect("live uniform builds");
+        assert_eq!(live_vp, m, "live view matches the arena view");
+        let want = sun_shadow_uniform_bytes(m, SUN_SHADOW_BIAS, 1.0);
+        assert_eq!(live_bytes, want, "live bytes match the uniform packer");
+        let (_, live_again) =
+            live_sun_shadow_for_dir(ARENA_DAY_SUN_DIR).expect("live builds twice");
+        assert_eq!(live_bytes, live_again, "live bytes x2 equal");
+        assert!(
+            sun_view_proj_for_dir([0.0, 0.0, 0.0]).is_err(),
+            "zero sun refused"
+        );
         let Some([_, _, top]) = sun_uv_depth(m, [2.0, 1.8, 0.0]).expect("box projects") else {
             panic!("box top sits inside the arena map");
         };

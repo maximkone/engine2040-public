@@ -945,7 +945,7 @@ pub struct CassetteAdapter<A> {
     store: CassetteStore,
     mode: CassetteMode,
     label: String,
-    served: BTreeMap<u64, AdapterOutcome>,
+    served: BTreeMap<u64, (u64, AdapterOutcome)>,
     log: Vec<CassetteEvent>,
 }
 
@@ -1063,28 +1063,49 @@ impl<A: ProviderAdapter> CassetteAdapter<A> {
         policy: &AiSessionPolicy,
         capabilities: &ProviderCapabilities,
     ) -> AdapterOutcome {
-        if let Some(first) = self.served.get(&request.id.0) {
+        let current = self
+            .key_and_image(request)
+            .ok()
+            .map(|(_, image)| image.digest());
+        if let Some((stored, first)) = self.served.get(&request.id.0).cloned() {
+            if current.is_some_and(|digest| digest == stored) {
+                let mut again = first.clone();
+                again.duplicate = true;
+                again.mutated = false;
+                again.events = Vec::new();
+                // The double check covers served answers only: a stored refusal
+                // logs `Missed`, never `Replayed`, so it replays as-is.
+                if first.mutated {
+                    if let Ok((_, image)) = self.key_and_image(request) {
+                        debug_assert!(check_double_fidelity(
+                            &first, &again, None, None, &image, &self.log
+                        )
+                        .is_ok());
+                    }
+                }
+                return again;
+            }
+            if current.is_some() {
+                // Same id with other params: never reuse the cached answer.
+                // Serve from the store so the miss names what changed.
+                let outcome = match validate_request(request, capabilities, policy) {
+                    Err(error) => failed_outcome(request, error),
+                    Ok(()) => self.serve(request),
+                };
+                return outcome;
+            }
             let mut again = first.clone();
             again.duplicate = true;
             again.mutated = false;
             again.events = Vec::new();
-            // The double check covers served answers only: a stored refusal
-            // logs `Missed`, never `Replayed`, so it replays as-is.
-            if first.mutated {
-                if let Ok((_, image)) = self.key_and_image(request) {
-                    debug_assert!(check_double_fidelity(
-                        first, &again, None, None, &image, &self.log
-                    )
-                    .is_ok());
-                }
-            }
             return again;
         }
         let outcome = match validate_request(request, capabilities, policy) {
             Err(error) => failed_outcome(request, error),
             Ok(()) => self.serve(request),
         };
-        self.served.insert(request.id.0, outcome.clone());
+        let digest = current.unwrap_or(0);
+        self.served.insert(request.id.0, (digest, outcome.clone()));
         outcome
     }
 
@@ -2006,6 +2027,37 @@ mod tests {
             Some(CassetteError::Miss(MissReason::NotRecorded)),
             "the refusal reason survives the duplicate"
         );
+    }
+
+    #[test]
+    fn same_id_with_changed_prompt_misses_instead_of_reusing() {
+        let dir = TempDir::new("same-id-changed");
+        let stub = StubServer::spawn_completion(chat_ok(NOOP, Some((11, 5))));
+        let (live, _) = record_live(&dir, &stub, 1);
+        assert!(live.result.is_ok(), "live record answers");
+        let dead = dead_url();
+        let mut w = replayer(&dir, openai(&dead));
+        let first = ask_via(&mut w, &remote_request(1), &dead);
+        assert!(first.result.is_ok(), "replay hits the record");
+        assert!(!first.duplicate, "first replay is not a duplicate");
+        let mut changed = remote_request(1);
+        changed.base_revision = 99;
+        let second = ask_via(&mut w, &changed, &dead);
+        assert_eq!(
+            second.result,
+            Err(AiError::UnsupportedCapability),
+            "same id with other params must miss, never reuse"
+        );
+        let want = ChangedParts {
+            user: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            w.last_miss(),
+            Some(CassetteError::Miss(MissReason::Changed(want))),
+            "the miss names the user prompt"
+        );
+        assert_eq!(w.inner().socket_attempts(), 0, "a miss dials nothing");
     }
 
     #[test]
