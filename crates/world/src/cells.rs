@@ -361,11 +361,6 @@ pub fn bake_cell(seed: u64, coord: CellCoord, size: u16) -> Result<Vec<u8>, Cell
     let mut holes = vec![false; n * n];
     for y in 0..n {
         for x in 0..n {
-            // Borders stay free (parity with `terrain::raw_holes`): a seam
-            // never walls an edge, so walkers always find a gap.
-            if x == 0 || y == 0 || x + 1 == n || y + 1 == n {
-                continue;
-            }
             let (gx, gy) = (ox + x as i32, oy + y as i32);
             if !raw_at(gx, gy) {
                 continue;
@@ -421,7 +416,7 @@ pub struct CellData {
     pub size: u16,
     /// Row-major eroded heights, `size * size` entries.
     pub heights: Vec<u8>,
-    /// Isolated holes; borders are always free.
+    /// Isolated holes; window-independent global singles, borders included.
     pub holes: Vec<bool>,
 }
 
@@ -1450,34 +1445,31 @@ mod bound_tests {
     }
 
     #[test]
-    fn cell_borders_stay_free_like_terrain() {
-        // Borders stay free so a seam never walls an edge (parity with
-        // `terrain::raw_holes`, which skips the outer ring).
-        for (seed, size) in [(12345u64, 16u16), (7, 32), (99, 64)] {
-            for (cx, cz) in [(0, 0), (1, 0), (0, 1), (-1, -1)] {
-                let coord = CellCoord::new(cx, cz).expect("fixture coord");
-                let bytes = bake_cell(seed, coord, size).expect("cell bakes");
-                let data = parse_cell(&bytes).expect("parses");
-                let n = usize::from(size);
-                for x in 0..n {
-                    assert!(
-                        !data.holes[x],
-                        "top border free seed {seed} size {size} coord {coord:?} x {x}"
-                    );
-                    assert!(
-                        !data.holes[(n - 1) * n + x],
-                        "bottom border free seed {seed} size {size} coord {coord:?} x {x}"
-                    );
-                }
-                for y in 0..n {
-                    assert!(
-                        !data.holes[y * n],
-                        "left border free seed {seed} size {size} coord {coord:?} y {y}"
-                    );
-                    assert!(
-                        !data.holes[y * n + n - 1],
-                        "right border free seed {seed} size {size} coord {coord:?} y {y}"
-                    );
+    fn cell_holes_nest_across_windows() {
+        // Holes are window-independent global singles: a 32-cell at the hub
+        // must equal its four 16-children texel for texel, borders included.
+        // Per-cell border suppression breaks this (child border free while
+        // parent interior holds a hole, e.g. global (29, 16)), so borders
+        // carry holes like any other texel.
+        for seed in [12345u64, 7, 99] {
+            let parent = parse_cell(
+                &bake_cell(seed, CellCoord::new(0, 0).expect("hub"), 32).expect("parent bakes"),
+            )
+            .expect("parent parses");
+            for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let child_coord = CellCoord::new(dx, dz).expect("child");
+                let child = parse_cell(&bake_cell(seed, child_coord, 16).expect("child bakes"))
+                    .expect("child parses");
+                for y in 0..16 {
+                    for x in 0..16 {
+                        let px = dx as usize * 16 + x;
+                        let py = dz as usize * 16 + y;
+                        assert_eq!(
+                            parent.holes[py * 32 + px],
+                            child.holes[y * 16 + x],
+                            "hole ({px},{py}) nests seed {seed} child {child_coord} ({x},{y})"
+                        );
+                    }
                 }
             }
         }
