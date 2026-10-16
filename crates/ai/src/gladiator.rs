@@ -296,10 +296,6 @@ pub struct Brain {
     last_intent: Intent,
     far_streak: u32,
     config: AiConfig,
-    /// Pursuit memory; empty replays legacy decisions exactly.
-    pub pursuit: crate::goalstack::GoalStack,
-    /// Nerve table; neutral replays legacy decisions exactly.
-    pub nerve: crate::goalstack::WeightTable,
 }
 
 impl Brain {
@@ -346,8 +342,6 @@ impl Brain {
             last_intent: Intent::Advance,
             far_streak: 0,
             config: valid,
-            pursuit: crate::goalstack::GoalStack::new(),
-            nerve: crate::goalstack::WeightTable::neutral(),
         }
     }
 
@@ -464,27 +458,8 @@ impl Brain {
             base[3].saturating_add(bias[3]),
             base[4].saturating_add(bias[4]),
         ];
-        if self.morale == Self::MORALE_NEUTRAL && self.pursuit.is_empty() && self.nerve.is_neutral()
-        {
+        if self.morale == Self::MORALE_NEUTRAL {
             pick_intent(scores)
-        } else if self.morale == Self::MORALE_NEUTRAL {
-            // Stack-top pursuit plus fuzzy nerve blend, integers only: a held
-            // goal pulls the advance lane while the table swaps the nerve.
-            let range_mm = u32::try_from(dist_mm.max(0)).unwrap_or(u32::MAX);
-            let morale_pm =
-                u32::try_from(self.morale.clamp(Self::MORALE_MIN, Self::MORALE_MAX)).unwrap_or(500);
-            let weights = crate::goalstack::weights_for(500, range_mm, morale_pm, &self.nerve);
-            let mut blended = scores;
-            if self.pursuit.top().is_some() {
-                blended[3] = blended[3].saturating_add(100);
-            }
-            match crate::goalstack::blend_lanes(blended, weights) {
-                0 => Intent::Attack,
-                1 => Intent::Block,
-                2 => Intent::Dodge,
-                3 => Intent::Advance,
-                _ => Intent::Retreat,
-            }
         } else {
             let clamped = self.morale.clamp(Self::MORALE_MIN, Self::MORALE_MAX);
             let seen = u16::try_from(clamped).unwrap_or(500);

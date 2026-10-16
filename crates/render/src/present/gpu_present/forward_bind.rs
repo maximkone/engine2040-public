@@ -547,4 +547,72 @@ mod forward_maps_tests {
         let len = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt();
         assert!((len - 1.0).abs() < 1e-6, "output is unit");
     }
+
+    #[test]
+    fn normal_map_on_off_differs_in_masked_region() {
+        // EG12(c) pixel test: 4x4 raster, center 2x2 mask, perturbed
+        // world normal vs the geometric normal under one diagonal light.
+        // Fails when the map is ignored (gap 0), passes with live
+        // `decode_normal` plus `world_normal`.
+        let geom = [0.0, 0.0, 1.0];
+        let tangent = [1.0, 0.0, 0.0, 1.0];
+        // Tilted texel decodes to [~0.447, 0, ~0.894], 26 deg off geom.
+        let texel = [0.75, 0.5, 1.0];
+        let albedo = [0.5, 0.5, 0.5];
+        let inv = core::f32::consts::FRAC_1_SQRT_2;
+        let light = [inv, 0.0, inv];
+        let diffuse = |n: [f32; 3]| {
+            let d = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]).max(0.0);
+            [
+                albedo[0] * d / core::f32::consts::PI,
+                albedo[1] * d / core::f32::consts::PI,
+                albedo[2] * d / core::f32::consts::PI,
+            ]
+        };
+        let off = diffuse(geom);
+        let mut max_gap = 0.0f32;
+        let mut masked = 0u32;
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let in_mask = (1..3).contains(&x) && (1..3).contains(&y);
+                if !in_mask {
+                    continue;
+                }
+                masked += 1;
+                let map_n = super::decode_normal(texel, geom).expect("tilted texel decodes");
+                let world = super::world_normal(geom, tangent, map_n).expect("frame maps");
+                let on = diffuse(world);
+                for c in 0..3 {
+                    max_gap = max_gap.max((on[c] - off[c]).abs());
+                }
+            }
+        }
+        assert_eq!(masked, 4, "mask covers the center 2x2");
+        assert!(
+            max_gap > 0.002,
+            "masked normal map moves above geometric, got {max_gap}"
+        );
+        let mut again = 0.0f32;
+        for y in 1..3u32 {
+            for x in 1..3u32 {
+                let _ = (x, y);
+                let map_n = super::decode_normal(texel, geom).expect("tilted texel decodes");
+                let world = super::world_normal(geom, tangent, map_n).expect("frame maps");
+                let on = diffuse(world);
+                for c in 0..3 {
+                    again = again.max((on[c] - off[c]).abs());
+                }
+            }
+        }
+        assert_eq!(max_gap, again, "masked gap is deterministic");
+        let map_n = super::decode_normal(texel, geom).expect("tilted texel decodes");
+        let deg =
+            super::world_normal(geom, [0.0, 0.0, 1.0, 1.0], map_n).expect("degenerate keeps geom");
+        for c in 0..3 {
+            assert!(
+                (deg[c] - geom[c]).abs() < 1e-6,
+                "degenerate tangent keeps geometric, got {deg:?}"
+            );
+        }
+    }
 }

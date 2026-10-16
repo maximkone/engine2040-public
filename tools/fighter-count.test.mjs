@@ -5,7 +5,7 @@
 // encoder so exact counts are asserted without fixtures.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -188,7 +188,7 @@ test("parseArgs accepts flags and rejects misuse", () => {
   assert.equal(parseArgs(["extra"]).bad, true);
 });
 
-test("golden sample pins frame_000000 box and fighter counts", () => {
+test("golden sample pins frame_000000 box and fighter counts", { skip: !existsSync(GOLDEN) ? `missing ${GOLDEN}; no showcase capture in this checkout` : false }, () => {
   const c = countPngBuffer(readFileSync(GOLDEN), "frame_000000.png");
   assert.equal(c.width, 128);
   assert.equal(c.height, 96);
@@ -196,7 +196,7 @@ test("golden sample pins frame_000000 box and fighter counts", () => {
   assert.equal(c.fighter, 0);
 });
 
-test("newest showcase set pins fighter 0 with nonzero boxes", () => {
+test("newest showcase set pins fighter 0 with nonzero boxes", { skip: (() => { try { findNewestShowcaseDir(); return false; } catch { return "missing target/showcase; no showcase capture in this checkout"; } })() }, () => {
   const dir = findNewestShowcaseDir();
   const r = countDir(dir);
   assert.ok(r.totals.frames >= 4);
@@ -227,6 +227,6 @@ test("CLI prints fighter and box counts for a frame dir", () => {
   assert.equal(gone.status, 1);
 });
 
-test("main returns 0 on the newest showcase set", () => {
+test("main returns 0 on the newest showcase set", { skip: (() => { try { findNewestShowcaseDir(); return false; } catch { return "missing target/showcase; no showcase capture in this checkout"; } })() }, () => {
   assert.equal(main([]), 0);
 });

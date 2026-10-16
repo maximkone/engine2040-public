@@ -1909,18 +1909,22 @@ mod forward_normal_tests {
     #[test]
     fn normal_layout_covers_shader_bindings() {
         assert!(
-            crate::v1_gpu::FORWARD_PBR_WGSL
-                .contains("@group(0) @binding(17) var normal_map"),
+            crate::v1_gpu::FORWARD_PBR_WGSL.contains("@group(0) @binding(17) var normal_map"),
             "forward shader declares normal_map at 17"
         );
         assert!(
-            crate::v1_gpu::FORWARD_PBR_WGSL
-                .contains("@group(0) @binding(18) var normal_smp"),
+            crate::v1_gpu::FORWARD_PBR_WGSL.contains("@group(0) @binding(18) var normal_smp"),
             "forward shader declares normal_smp at 18"
         );
         let entries = forward_normal_layout_entries();
-        assert_eq!(entries[0].binding, 17, "layout carries normal texture at 17");
-        assert_eq!(entries[1].binding, 18, "layout carries normal sampler at 18");
+        assert_eq!(
+            entries[0].binding, 17,
+            "layout carries normal texture at 17"
+        );
+        assert_eq!(
+            entries[1].binding, 18,
+            "layout carries normal sampler at 18"
+        );
         for entry in &entries {
             assert_eq!(
                 entry.visibility,
@@ -1977,12 +1981,8 @@ mod forward_normal_tests {
         let geom = [0.0, 0.0, 1.0];
         let decoded =
             super::super::forward_bind::decode_normal(texel, geom).expect("neutral decodes");
-        let mapped = super::super::forward_bind::world_normal(
-            geom,
-            [1.0, 0.0, 0.0, 1.0],
-            decoded,
-        )
-        .expect("neutral maps");
+        let mapped = super::super::forward_bind::world_normal(geom, [1.0, 0.0, 0.0, 1.0], decoded)
+            .expect("neutral maps");
         let dot = mapped[0] * geom[0] + mapped[1] * geom[1] + mapped[2] * geom[2];
         assert!(
             dot > 0.999,
@@ -1995,12 +1995,8 @@ mod forward_normal_tests {
         let geom = [0.0, 0.0, 1.0];
         let white = super::super::forward_bind::decode_normal([1.0, 1.0, 1.0], geom)
             .expect("white decodes");
-        let mapped = super::super::forward_bind::world_normal(
-            geom,
-            [1.0, 0.0, 0.0, 1.0],
-            white,
-        )
-        .expect("white maps");
+        let mapped = super::super::forward_bind::world_normal(geom, [1.0, 0.0, 0.0, 1.0], white)
+            .expect("white maps");
         let dot = mapped[0] * geom[0] + mapped[1] * geom[1] + mapped[2] * geom[2];
         assert!(
             dot < 0.99,

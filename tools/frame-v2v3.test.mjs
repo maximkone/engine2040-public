@@ -2,6 +2,7 @@
 // V2 arena-day (sky-Ernst) + V3 fight-action (motion-delta) over 2 q1 orbit samples.
 // Quotes the V2/V3 outputs on the samples; dome cubes read not-arena-day + static.
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import test from 'node:test';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +14,8 @@ const NL = String.fromCharCode(10);
 function quote(line) {
   process.stdout.write(line + NL);
 }
-test('decode reads 1280x720 on both orbit samples', function () {
+const MISSING = !existsSync(FA) || !existsSync(FB) ? `missing target/showcase/2026-10-08/orbit; no showcase capture in this checkout` : false;
+test('decode reads 1280x720 on both orbit samples', { skip: MISSING }, function () {
   const a = loadFrame(FA);
   const b = loadFrame(FB);
   assert.equal(a.width, 1280);
@@ -24,7 +26,7 @@ test('decode reads 1280x720 on both orbit samples', function () {
   assert.ok(b.bytes > 1000);
   assert.equal(a.pixels.length, 1280 * 720 * 4);
 });
-test('V2 sky-Ernst says not-arena-day on the dome cubes', function (t) {
+test('V2 sky-Ernst says not-arena-day on the dome cubes', { skip: MISSING }, function (t) {
   const out = classifyPair(FA, FB);
   t.diagnostic('V2 sky-Ernst ' + FA + ' skyFrac=' + out.v2a.skyFrac + ' ernst=' + out.v2a.skyErnst + ' label=' + out.v2a.label);
   t.diagnostic('V2 sky-Ernst ' + FB + ' skyFrac=' + out.v2b.skyFrac + ' ernst=' + out.v2b.skyErnst + ' label=' + out.v2b.label);
@@ -39,7 +41,7 @@ test('V2 sky-Ernst says not-arena-day on the dome cubes', function (t) {
   assert.equal(solo.label, 'not-arena-day');
   assert.equal(solo.width, 1280);
 });
-test('V3 motion-delta says static on the slow orbit pair', function (t) {
+test('V3 motion-delta says static on the slow orbit pair', { skip: MISSING }, function (t) {
   const out = classifyPair(FA, FB);
   t.diagnostic('V3 motion-delta ' + FA + ' -> ' + FB + ' mean=' + out.v3.meanDelta + ' changed=' + out.v3.changedFrac + ' label=' + out.v3.label);
   quote('V3 motion-delta ' + FA + ' -> ' + FB + ' mean=' + out.v3.meanDelta + ' changed=' + out.v3.changedFrac + ' label=' + out.v3.label);
@@ -47,7 +49,7 @@ test('V3 motion-delta says static on the slow orbit pair', function (t) {
   assert.ok(Math.abs(out.v3.meanDelta - 5.12) < 0.6, 'mean near 5.12, got ' + out.v3.meanDelta);
   assert.ok(Math.abs(out.v3.changedFrac - 0.1097) < 0.03, 'changed near 0.1097, got ' + out.v3.changedFrac);
 });
-test('identical frames have zero motion-delta', function () {
+test('identical frames have zero motion-delta', { skip: MISSING }, function () {
   const a = loadFrame(FA);
   const d = v3FightDelta(a, a);
   assert.equal(d.meanDelta, 0);

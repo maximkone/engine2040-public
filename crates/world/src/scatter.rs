@@ -46,8 +46,9 @@ fn point_index(len: usize) -> Result<i32, ScatterErr> {
 /// Bridson Poisson-disk points over `[0, w) x [0, h)` with pairwise distance
 /// at least `min_dist`. Units: meters in and out. Seed: `Rng` at
 /// `blockout::effective_seed(seed, recipe)`, so recipes split like blockout
-/// bakes. Bake-time only: uses `sin`/`cos` for the annulus proposal, never in
-/// the tick. Errors: [`ScatterErr::BadMinDist`] for non-finite or
+/// bakes. Bake-time only: the annulus proposal uses only `+ - * /` and one
+/// `sqrt` for the unit direction, never `sin`/`cos` and never in the tick.
+/// Errors: [`ScatterErr::BadMinDist`] for non-finite or
 /// non-positive `min_dist`, [`ScatterErr::BadExtent`] for non-finite or
 /// non-positive extents, checked before any allocation.
 pub fn poisson_disk(
@@ -102,11 +103,16 @@ pub fn poisson_disk(
         let mut accepted: Option<[f32; 2]> = None;
         for _ in 0..TRIES {
             let radius = min_dist * (1.0 + unit(&mut rng));
-            let angle = core::f32::consts::TAU * unit(&mut rng);
-            let cand = [
-                anchor[0] + radius * angle.cos(),
-                anchor[1] + radius * angle.sin(),
-            ];
+            let ux = unit(&mut rng) * 2.0 - 1.0;
+            let uy = unit(&mut rng) * 2.0 - 1.0;
+            let len2 = ux * ux + uy * uy;
+            if !(1.0e-12..=1.0).contains(&len2) {
+                continue;
+            }
+            // `sqrt` rounds once per IEEE-754 on every platform, while
+            // `sin`/`cos` vary by libm and would move the bake.
+            let inv = 1.0 / len2.sqrt();
+            let cand = [anchor[0] + radius * ux * inv, anchor[1] + radius * uy * inv];
             if cand[0] < 0.0 || cand[0] >= w || cand[1] < 0.0 || cand[1] >= h {
                 continue;
             }
@@ -166,7 +172,7 @@ mod tests {
     fn spike_count_gap_and_reseed() {
         let pts = spike();
         let n = pts.len();
-        assert_eq!(n, 1587, "spike count drifted: count {n}");
+        assert_eq!(n, 1550, "spike count drifted: count {n}");
         assert!(min_gap(&pts) >= 2.0, "pair closer than 2.0 m");
         assert_eq!(pts, spike(), "same seed must rerun byte-identical");
         let other = poisson_disk(7, "scatter-pine", 100.0, 100.0, 2.0).expect("seed 7 bakes");

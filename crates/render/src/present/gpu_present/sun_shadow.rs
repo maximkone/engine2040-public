@@ -31,6 +31,30 @@ pub const SUN_SHADOW_HALF_EXTENT_M: f32 = 15.0;
 pub const SUN_SHADOW_NEAR_M: f32 = 0.5;
 /// Sun camera far in meters from the sun eye.
 pub const SUN_SHADOW_FAR_M: f32 = 60.0;
+/// Half edge in texels when the half switch is on: 1024 over the pit.
+pub const SUN_SHADOW_HALF_SIZE: u32 = 1024;
+/// Half-res switch, staged off: false keeps the 2048 default; the next wiring slice flips it to halve cost.
+/// Owner render lane; Caller `sun_shadow_depth_desc` below keeps the staged default.
+/// Units boolean in. Determinism fixed default, never hashed.
+pub const SUN_SHADOW_HALF_RES: bool = false;
+/// Pure size decision for the half switch: false keeps 2048, true stages 1024.
+/// Owner render lane; Caller `sun_shadow_depth_desc` below plus the half-switch test.
+/// Units texels out. Determinism pure, no allocation, never hashed.
+#[must_use]
+pub fn sun_shadow_size_for_half(half_res: bool) -> u32 {
+    if half_res {
+        SUN_SHADOW_HALF_SIZE
+    } else {
+        SUN_SHADOW_SIZE
+    }
+}
+/// Size-param snap helper the wiring slice calls: snap `origin_m` to the texel grid for `size`.
+/// Owner render lane; Caller `arena_sun_view_proj` below keeps the staged 2048 snap plus the half-switch test.
+/// Units meters in/out. Determinism pure snap via `shadow_cascade::snap_shadow_origin`, never hashed.
+#[must_use]
+pub fn sun_snap_origin_for_size(origin_m: f32, size: u32) -> f32 {
+    crate::shadow_cascade::snap_shadow_origin(origin_m, SUN_SHADOW_HALF_EXTENT_M, size)
+}
 fn sun_light_basis(sun: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let fwd = [-sun[0], -sun[1], -sun[2]];
     let helper: [f32; 3] = if fwd[1].abs() > 0.9 {
@@ -65,7 +89,12 @@ pub fn arena_sun_view_proj() -> Result<[[f32; 4]; 4], SunShadowError> {
     }
     let len = len2.sqrt();
     let sun = [sun_dir[0] / len, sun_dir[1] / len, sun_dir[2] / len];
-    let center = SUN_SHADOW_CENTER_M;
+    // FC3 staging: snap the pit center through the size-param helper; 0 snaps to 0 so the staged 2048 matrix is bit-identical.
+    let center = [
+        sun_snap_origin_for_size(SUN_SHADOW_CENTER_M[0], SUN_SHADOW_SIZE),
+        sun_snap_origin_for_size(SUN_SHADOW_CENTER_M[1], SUN_SHADOW_SIZE),
+        sun_snap_origin_for_size(SUN_SHADOW_CENTER_M[2], SUN_SHADOW_SIZE),
+    ];
     let half = SUN_SHADOW_HALF_EXTENT_M;
     let span = SUN_SHADOW_FAR_M - SUN_SHADOW_NEAR_M;
     let (t, u, _) = sun_light_basis(sun);
@@ -86,11 +115,14 @@ pub fn arena_sun_view_proj() -> Result<[[f32; 4]; 4], SunShadowError> {
 }
 /// Depth descriptor: square 2048 `Depth32Float`, attachment plus binding.
 pub fn sun_shadow_depth_desc() -> wgpu::TextureDescriptor<'static> {
+    // FC3 staging: the half switch stays off so the descriptor keeps the 2048 default; the next slice passes true to halve cost.
+    let edge = sun_shadow_size_for_half(SUN_SHADOW_HALF_RES);
+    debug_assert_eq!(edge, SUN_SHADOW_SIZE);
     wgpu::TextureDescriptor {
         label: Some("sun-shadow-depth"),
         size: wgpu::Extent3d {
-            width: SUN_SHADOW_SIZE,
-            height: SUN_SHADOW_SIZE,
+            width: edge,
+            height: edge,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -174,6 +206,71 @@ mod tests {
         assert_eq!(desc.size.width, 2048, "desc width stays 2048");
         assert_eq!(desc.size.height, 2048, "desc height stays 2048");
         assert_eq!(desc.format, wgpu::TextureFormat::Depth32Float);
+    }
+    #[test]
+    fn sun_half_switch_halves_texel_and_keeps_snap() {
+        // FC3 half-res staging: off keeps the 2048 default, on stages 1024 for the next wiring slice.
+        assert!(!SUN_SHADOW_HALF_RES, "half switch stages off");
+        assert_eq!(SUN_SHADOW_HALF_SIZE, 1024, "half edge is 1024");
+        let full = sun_shadow_size_for_half(false);
+        let half = sun_shadow_size_for_half(true);
+        assert_eq!(full, SUN_SHADOW_SIZE, "off keeps 2048");
+        assert_eq!(full, 2048, "staged default pins 2048");
+        assert_eq!(half, 1024, "half halves the edge");
+        assert_eq!(half, full / 2, "half halves texel count");
+        // Texel widths: 30 m span over the edge, so half doubles the texel.
+        let span = 2.0 * SUN_SHADOW_HALF_EXTENT_M;
+        let full16 = u16::try_from(full).expect("2048 fits in u16");
+        let half16 = u16::try_from(half).expect("1024 fits in u16");
+        let texel_full = span / f32::from(full16);
+        let texel_half = span / f32::from(half16);
+        assert!(
+            (texel_half - texel_full * 2.0).abs() < 1e-6,
+            "half doubles texel: {texel_half} vs {texel_full}"
+        );
+        // Snap keeps the origin on the texel grid for both sizes.
+        let origin = 2.5;
+        let snapped_full = sun_snap_origin_for_size(origin, full);
+        let snapped_half = sun_snap_origin_for_size(origin, half);
+        assert!(
+            (origin - snapped_full).abs() <= texel_full + 1e-6,
+            "full snap within one texel"
+        );
+        assert!(
+            (origin - snapped_half).abs() <= texel_half + 1e-6,
+            "half snap within one texel"
+        );
+        let grid_full = (snapped_full / texel_full).round() * texel_full;
+        let grid_half = (snapped_half / texel_half).round() * texel_half;
+        assert!(
+            (snapped_full - grid_full).abs() < 1e-6,
+            "full stays snapped"
+        );
+        assert!(
+            (snapped_half - grid_half).abs() < 1e-6,
+            "half stays snapped"
+        );
+        // Toggle restores and x2 equal.
+        assert_eq!(
+            sun_shadow_size_for_half(false),
+            full,
+            "toggle restores 2048"
+        );
+        assert_eq!(sun_shadow_size_for_half(true), half, "half repeats");
+        assert_eq!(
+            sun_snap_origin_for_size(origin, full),
+            snapped_full,
+            "full snap x2 equal"
+        );
+        assert_eq!(
+            sun_snap_origin_for_size(origin, half),
+            snapped_half,
+            "half snap x2 equal"
+        );
+        // Descriptor still stages 2048 while the switch is off.
+        let desc = sun_shadow_depth_desc();
+        assert_eq!(desc.size.width, SUN_SHADOW_SIZE, "desc keeps 2048");
+        assert_eq!(desc.size.width, full, "desc matches off decision");
     }
     #[test]
     fn sun_single_box_is_nearer_than_plane() {

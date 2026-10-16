@@ -165,10 +165,18 @@ for (let wave = 1; wave <= waves; wave += 1) {
   if (pruned.archived > 0) log(`QUEUE-PRUNE done=${pruned.before}->${pruned.after} archived=${pruned.archived} keep=${keep} to=${pruned.dir}`);
   const clean = node("tools/clean.mjs", "--auto");
   log(`CLEAN ${clean.out.split("\n").pop() ?? "clean done"}`);
+  // Lead brief: farm state + dirty-tree order + claims, so the wave leads
+  // itself without a human message. Cheap (no cargo, ~10ms); never fails a wave.
+  let brief = "";
+  try {
+    const b = node("tools/lead-brief.mjs");
+    brief = (b.stdout ?? "").trim().slice(0, 1500);
+  } catch { brief = ""; }
   log(`WAVE ${wave}${replan ? " REPLAN" : ""}: ${before.ready.length} ready, ${before.done}/${before.total} ticked`);
+  const leadCtx = brief ? `\nLive context (read first, no human will repeat it):\n${brief}` : "";
   const message = replan
-    ? `Run exactly one replan wave now. Read .opencode/commands/sprint.md and follow it with the arguments: wave ${width}${safe ? " safe" : ""}. No board row is ready; check plans and coverage, add or unblock real rows, then write target/sprint-handoff.md. The sprint lock is held by sprint-loop for you.`
-    : `Run exactly one sprint wave now. Read .opencode/commands/sprint.md and follow it with the arguments: wave ${width}${safe ? " safe" : ""}. The sprint lock is held by sprint-loop for you. Work autonomously, never ask questions, and write target/sprint-handoff.md before you stop.`;
+    ? `Run exactly one replan wave now. Read .opencode/commands/sprint.md and follow it with the arguments: wave ${width}${safe ? " safe" : ""}. No board row is ready; check plans and coverage, add or unblock real rows, then write target/sprint-handoff.md. The sprint lock is held by sprint-loop for you.${leadCtx}`
+    : `Run exactly one sprint wave now. Read .opencode/commands/sprint.md and follow it with the arguments: wave ${width}${safe ? " safe" : ""}. The sprint lock is held by sprint-loop for you. Work autonomously, never ask questions, and write target/sprint-handoff.md before you stop.${leadCtx}`;
   const wavePaid = paid || (mix && wave % 2 === 0);
   const model = baseModel || (wavePaid ? "opencode-go/muse-spark-1.3-contributor" : "");
   log(`LANE ${model ? "paid" : "free"}`);

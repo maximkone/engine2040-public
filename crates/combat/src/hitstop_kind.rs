@@ -80,9 +80,6 @@ mod tests {
         assert_eq!(for_impact(INPUT_LIGHT, false), for_kind(INPUT_LIGHT));
         assert_eq!(for_impact(INPUT_HEAVY, false), for_kind(INPUT_HEAVY));
         assert_eq!(for_impact(INPUT_LIGHT, true), for_parry());
-        assert_eq!(
-            for_impact(INPUT_HEAVY, true),
-            for_impact(INPUT_HEAVY, true)
-        );
+        assert_eq!(for_impact(INPUT_HEAVY, true), for_impact(INPUT_HEAVY, true));
     }
 }
