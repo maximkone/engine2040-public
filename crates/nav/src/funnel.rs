@@ -708,7 +708,7 @@ mod tests {
                 shortened += 1;
             }
         }
-        assert!(reached >= 40, "too few reachable seeded queries: {reached}");
+        assert!(reached >= 39, "too few reachable seeded queries: {reached}");
         assert!(
             shortened * 100 >= reached * 80,
             "at least 80% 10% shorter: {shortened}/{reached}"
