@@ -34,7 +34,7 @@ fn rest_single_three_ticks() {
     for tick in 1..=3 {
         s.step(FIXED_DT);
         trace.push_str(&fmt_body(tick, 0, &s.bodies[0]));
-        trace.push_str("\n");
+        trace.push('\n');
     }
     assert_snapshot(&trace, "tick=1 id=0 x=0.0000 y=0.5000 vx=0.0000 vy=0.0000\ntick=2 id=0 x=0.0000 y=0.5000 vx=0.0000 vy=0.0000\ntick=3 id=0 x=0.0000 y=0.5000 vx=0.0000 vy=0.0000\n");
 }
@@ -49,7 +49,7 @@ fn rest_pair_two_ticks() {
         s.step(FIXED_DT);
         for (id, b) in s.bodies.iter().enumerate() {
             trace.push_str(&fmt_body(tick, id, b));
-            trace.push_str("\n");
+            trace.push('\n');
         }
     }
     assert_snapshot(&trace, "tick=1 id=0 x=-1.0000 y=0.5000 vx=0.0000 vy=0.0000\ntick=1 id=1 x=1.0000 y=0.5000 vx=0.0000 vy=0.0000\ntick=2 id=0 x=-1.0000 y=0.5000 vx=0.0000 vy=0.0000\ntick=2 id=1 x=1.0000 y=0.5000 vx=0.0000 vy=0.0000\n");

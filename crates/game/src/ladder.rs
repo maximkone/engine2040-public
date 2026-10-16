@@ -222,6 +222,28 @@ impl Ladder {
         rank
     }
 
+    /// Fold one outcome using designer rows text at a cold progression
+    /// boundary, never per tick.
+    ///
+    /// Caller: `crates/game/src/modes_world.rs`
+    /// (`ModeSession::settle_with_rows`, progression boundary only).
+    /// Parses `text` via `crate::loop_text::parse_loop` and folds the
+    /// header-version row via `apply_with_tables`, returning the rows rank.
+    /// Units are counts (glory awards, rank floors). A refusal leaves
+    /// `self` unchanged, so last-good stays. Same text plus same outcome
+    /// always folds the same way. Golden unchanged: `Ladder::apply`
+    /// still owns the compiled constants.
+    pub fn apply_rows_text(
+        &mut self,
+        outcome: Outcome,
+        tick: u32,
+        text: &str,
+    ) -> Result<u8, crate::loop_text::LoopRowsError> {
+        let set = crate::loop_text::parse_loop(text)?;
+        self.apply_with_tables(outcome, tick, &set.tables);
+        Ok(self.rank_with_tables(&set.tables))
+    }
+
     /// Replay an outcome script from rung zero with the cursor set to each
     /// outcome's index; equals stepwise [`Ladder::apply`] with
     /// `tick = index`. Pure.
@@ -846,5 +868,39 @@ mod tests {
         landed.apply_with_tables(Outcome::Win, 0, &set.tables);
         assert_eq!(landed.wins, 1);
         assert_eq!(landed.glory, GLORY_PER_WIN);
+    }
+
+    #[test]
+    fn rows_text_entry_folds_like_compiled() {
+        let text = include_str!("../../../content/design/loop.rows");
+        let mut from_text = Ladder::new();
+        let rank = from_text
+            .apply_rows_text(Outcome::Win, 0, text)
+            .expect("shipped rows fold");
+        let mut compiled = Ladder::new();
+        compiled.apply(Outcome::Win, 0);
+        assert_eq!(from_text, compiled);
+        assert_eq!(rank, compiled.rank());
+    }
+
+    #[test]
+    fn rows_text_tuned_moves_glory_and_bad_keeps_last_good() {
+        let text = include_str!("../../../content/design/loop.rows");
+        let tuned = text
+            .replace("table loop version 1", "table loop version 2")
+            .replace("v1 glory_per_win=100", "v2 glory_per_win=150");
+        let mut modded = Ladder::new();
+        let rank = modded
+            .apply_rows_text(Outcome::Win, 0, &tuned)
+            .expect("tuned rows fold");
+        let mut base = Ladder::new();
+        base.apply(Outcome::Win, 0);
+        assert_eq!(modded.glory, base.glory.saturating_add(50));
+        assert_eq!(rank, base.rank());
+        let before = modded;
+        assert!(modded
+            .apply_rows_text(Outcome::Win, 1, "table loop version 0\nv0 glory_per_win=1")
+            .is_err());
+        assert_eq!(modded, before, "refused rows never fold");
     }
 }

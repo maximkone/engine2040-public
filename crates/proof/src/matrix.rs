@@ -527,9 +527,14 @@ mod tests {
             first.cut_digest,
             first.cut_checkpoints.len()
         );
+        // Pin both hosts to TARGETS: the local runner may be either bound
+        // host (windows on dev, linux on the farm), so reusing `first.host`
+        // would duplicate one target on linux and fail the host cover.
+        let mut base = first.clone();
+        base.host = TARGETS[0].to_owned();
         let mut other = first.clone();
         other.host = TARGETS[1].to_owned();
-        let pair = [first.clone(), other];
+        let pair = [base, other];
         assert!(
             compare_matrix_set(&pair).is_ok(),
             "bound hosts plus equal digests pass"
@@ -830,9 +835,12 @@ mod tests {
     #[test]
     fn matrix_set_error_is_typed() {
         let first = collect_local_entry().expect("local row collects");
+        // Same pin as the local-row test: never reuse the runner host.
+        let mut base = first.clone();
+        base.host = TARGETS[0].to_owned();
         let mut other = first.clone();
         other.host = TARGETS[1].to_owned();
-        let pair = [first.clone(), other];
+        let pair = [base, other];
         assert!(
             compare_matrix_set(&pair).is_ok(),
             "bound hosts plus equal digests pass"
@@ -902,11 +910,14 @@ mod tests {
     #[test]
     fn matrix_set_accepts_optional_aarch64_third_row() {
         let first = collect_local_entry().expect("local row collects");
+        // Pin the bound pair to TARGETS for the same runner-host reason.
+        let mut base = first.clone();
+        base.host = TARGETS[0].to_owned();
         let mut second = first.clone();
         second.host = TARGETS[1].to_owned();
         let mut third = first.clone();
         third.host = "linux-aarch64".to_owned();
-        let triple = [first.clone(), second.clone(), third.clone()];
+        let triple = [base, second.clone(), third.clone()];
         assert!(
             compare_matrix_set(&triple).is_ok(),
             "optional aarch64 third row passes when digests match"

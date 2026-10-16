@@ -30,8 +30,11 @@ impl<'a> SensorArrayGenerator<'a> {
     pub const fn is_empty(&self) -> bool {
         self.spots.is_empty()
     }
-    /// Append spots verbatim; cap-checked.
+    /// Append spots verbatim; cap-checked. Empty emits nothing.
     pub fn generate_into(&self, out: &mut Vec<EqPoint>) -> Result<(), EqError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         for p in self.spots {
             if out.len() >= MAX_POINTS {
                 return Err(EqError::TooManyPoints { got: out.len() + 1 });
@@ -50,19 +53,19 @@ pub struct CompositeGenerator<'a> {
 }
 
 impl<'a> Default for CompositeGenerator<'a> {
-    /// Empty chain.
+    /// Empty chain; [`CompositeGenerator::new`] matches it.
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'a> CompositeGenerator<'a> {
-    /// Empty chain.
-    pub const fn new() -> Self {
         Self {
             arms: [None, None, None, None],
             len: 0,
         }
+    }
+}
+
+impl<'a> CompositeGenerator<'a> {
+    /// Empty chain; same as `Default`.
+    pub fn new() -> Self {
+        Self::default()
     }
     /// Arm count.
     pub fn len(&self) -> usize {
@@ -82,7 +85,11 @@ impl<'a> CompositeGenerator<'a> {
         Ok(self)
     }
     /// Append chained candidates in arm order; refused arms skip clean.
+    /// An empty chain emits nothing.
     pub fn generate_into(&self, ctx: &EqContext, out: &mut Vec<EqPoint>) -> Result<(), EqError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         for arm in self.arms.iter().take(usize::from(self.len)).flatten() {
             let base = out.len();
             if arm.generate_crate(ctx, out).is_err() {
@@ -337,6 +344,39 @@ mod tests {
         assert!(
             full.with_arm(Generator::Ring(tiny)).is_err(),
             "fifth arm refuses"
+        );
+    }
+
+    #[test]
+    fn wired_empty_helpers_skip_and_refuse() {
+        // Behaviour: new, default and len agree on empty; guards emit nothing.
+        let fresh = CompositeGenerator::default();
+        assert!(fresh.is_empty());
+        assert_eq!((CompositeGenerator::new().len(), fresh.len()), (0, 0));
+        let mut out = Vec::new();
+        fresh
+            .generate_into(&ctx(), &mut out)
+            .expect("empty chain emits nothing");
+        assert!(out.is_empty());
+        let sensor = SensorArrayGenerator::new(&[]);
+        assert!(sensor.is_empty() && sensor.len() == 0);
+        sensor
+            .generate_into(&mut out)
+            .expect("empty sensor emits nothing");
+        assert!(out.is_empty());
+        // Failure: a live sensor past the point cap refuses typed, while an
+        // empty one still skips the cap check.
+        let spots = [Vec3Mm::new(1_000, 0, 0)];
+        let live = SensorArrayGenerator::new(&spots);
+        assert!(!live.is_empty());
+        let mut packed = vec![EqPoint::new(Vec3Mm::new(0, 0, 0)); MAX_POINTS];
+        assert!(matches!(
+            live.generate_into(&mut packed),
+            Err(EqError::TooManyPoints { .. })
+        ));
+        assert!(
+            sensor.generate_into(&mut packed).is_ok(),
+            "empty skips the cap"
         );
     }
 }

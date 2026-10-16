@@ -122,9 +122,9 @@ impl GoalStack {
         self.len -= 1;
         Some(self.goals[self.len])
     }
-    /// Drop every goal.
+    /// Drop every goal; the stack matches `Default` after.
     pub fn empty(&mut self) {
-        self.len = 0;
+        *self = Self::default();
     }
     /// Newest goal, if any.
     pub fn top(&self) -> Option<&Goal> {
@@ -413,5 +413,22 @@ mod tests {
         let (d2, a2, b2) = scenario_digest(true);
         assert_eq!((d1, a1, b1), (d2, a2, b2));
         assert_eq!(d1, scenario_digest(false).0);
+    }
+
+    #[test]
+    fn wired_default_resets_and_refuses() {
+        // Behaviour: default is the empty stack; empty() resets onto it.
+        assert!(GoalStack::default().is_empty());
+        assert_eq!(GoalStack::default(), GoalStack::new());
+        let mut stack = chase();
+        assert!(!stack.is_empty());
+        stack.empty();
+        assert!(stack.is_empty() && stack.top().is_none());
+        assert_eq!(stack, GoalStack::default(), "empty() resets to default");
+        // Failure: the cap still refuses after a reset cycle.
+        for id in 0..8 {
+            stack.push(goal(id, 100, 1, 0, 0)).expect("first eight fit");
+        }
+        assert_eq!(stack.push(goal(8, 100, 1, 0, 0)), Err(StackError::Full));
     }
 }

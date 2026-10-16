@@ -648,6 +648,28 @@ impl ModeSession {
         ladder.apply(outcome, tick);
     }
 
+    /// Fold one decided match using designer rows text at the progression
+    /// boundary. Reads the header-version row from `text` (shipped as
+    /// `content/design/loop.rows`) and folds via
+    /// `Ladder::apply_rows_text`, returning the rows rank. A refusal keeps
+    /// last-good and reports the 1-based line error. Cold boundary only,
+    /// never per tick. Golden unchanged: the compiled `Ladder::apply`
+    /// path is untouched.
+    pub fn settle_with_rows(
+        &mut self,
+        outcome: Outcome,
+        text: &str,
+    ) -> Result<u8, crate::loop_text::LoopRowsError> {
+        let tick = self.cursor();
+        let ladder = match self {
+            Self::Arena { ladder, .. } => ladder,
+            Self::Siege { ladder, .. } => ladder,
+            Self::District { ladder, .. } => ladder,
+            Self::Ludus { ladder, .. } => ladder,
+        };
+        ladder.apply_rows_text(outcome, tick, text)
+    }
+
     /// Advance one fixed tick on a human input (arena/district/ludus). True when
     /// the input was accepted and recorded for replay. Siege is bot-filled:
     /// ticking it fails loudly; drive it with [`ModeSession::finish_siege`].
@@ -1153,5 +1175,30 @@ mod tests {
         siege.settle(Outcome::Win);
         assert_eq!(siege.ladder().wins, 1);
         assert_eq!(siege.ladder().last_tick, SIEGE_SMOKE_TICKS);
+    }
+
+    #[test]
+    fn settle_with_rows_lands_shipped_and_refuses_bad() {
+        let text = include_str!("../../../content/design/loop.rows");
+        let mut session = ModeSession::boot(arena_boot()).expect("arena boots");
+        drive(&mut session, 8);
+        let rank = session
+            .settle_with_rows(Outcome::Win, text)
+            .expect("shipped rows settle");
+        assert_eq!(session.ladder().wins, 1);
+        assert_eq!(rank, session.ladder().rank());
+        let mut compiled = ModeSession::boot(arena_boot()).expect("arena boots");
+        drive(&mut compiled, 8);
+        compiled.settle(Outcome::Win);
+        assert_eq!(session.ladder(), compiled.ladder());
+        let before = session.ladder_record();
+        assert!(session
+            .settle_with_rows(Outcome::Win, "table loop version 0\nv0 glory_per_win=1")
+            .is_err());
+        assert_eq!(
+            session.ladder_record(),
+            before,
+            "refused rows keep last-good"
+        );
     }
 }

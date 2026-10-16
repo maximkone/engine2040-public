@@ -291,7 +291,7 @@ impl LiveMatch {
                     .iter()
                     .any(|live| live.fighter.0 == staged_input.fighter.0)
             {
-                merge.push(staged_input.clone());
+                merge.push(*staged_input);
             }
         }
         merge.extend_from_slice(inputs);
