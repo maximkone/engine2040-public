@@ -752,7 +752,21 @@ mod append_only_tests {
     }
 
     /// Live canonical report beside its recorded row on this track.
+    /// Warms each workload once outside the counting window so the measured
+    /// run observes steady-state bytes only: the first run in a fresh
+    /// process may initialize lazy state that must not be billed to the
+    /// baseline. The measured runs below must then repeat identically.
     fn live_pairs() -> Vec<(WorkloadReport, Baseline)> {
+        std::hint::black_box(ArenaTick::canonical().run_hash());
+        std::hint::black_box(PhysicsStep::canonical().run_hash());
+        std::hint::black_box(AiDecide::canonical().run_hash());
+        std::hint::black_box(DestructionStep::canonical().run_hash());
+        std::hint::black_box(SpineTransformBody::canonical().run_hash());
+        std::hint::black_box(SpineFullTick::canonical().run_hash());
+        for count in ARENA_MATRIX_COUNTS {
+            let workload = ScaledArenaTick::canonical_for(count).expect("matrix count listed");
+            std::hint::black_box(workload.run_hash());
+        }
         let mut pairs = Vec::with_capacity(4 + ARENA_MATRIX_COUNTS.len());
         pairs.push((ArenaTick::canonical().run_report(), arena_baseline()));
         for (report, name) in [
@@ -793,7 +807,13 @@ mod append_only_tests {
     #[test]
     fn widened_row_hides_from_ceiling_gate_but_trips_exact_gate() {
         let recorded = arena_baseline();
+        std::hint::black_box(ArenaTick::canonical().run_hash());
         let live = ArenaTick::canonical().run_report();
+        let repeat = ArenaTick::canonical().run_report();
+        assert_eq!(
+            live, repeat,
+            "arena live run repeats identically after warm-up"
+        );
         check_exact(&live, &recorded).expect("honest row is exact");
         // A one-byte, one-count regression trips the ceiling gate.
         let regressed = WorkloadReport {

@@ -1050,8 +1050,8 @@ pub struct Sim {
     events: Vec<TickEvents>,
     /// Combat event scratch, reserved once to MAX_EVENTS_PER_TICK.
     /// `try_step_into` clears and reuses its buffer each tick; the tick log
-    /// below takes the buffer by move, so event ticks allocate once for the
-    /// refill. Quiet ticks move an empty Vec (no heap alloc).
+    /// below clones exact-size on event ticks only, so the scratch never
+    /// regrows. Quiet ticks move an empty Vec (no heap alloc).
     combat_scratch: Vec<FightEvent>,
     /// Press-tick attack cues under readable-timing rows (EG19b): the v2
     /// combat leg clears and fills this each tick, so it always reads the
@@ -1367,10 +1367,10 @@ impl Sim {
         }
         // Strict combat: entry validation makes failure unreachable, but a
         // construction bug rejects the run instead of skipping inputs.
-        // Step into the reserved scratch (no growth allocs), then move the
-        // tick buffer into the owned tick log; the step clears the scratch
-        // first each tick, so the move keeps every byte. Quiet ticks move
-        // an empty Vec (no heap alloc).
+        // Step into the reserved scratch (no growth allocs), then clone
+        // exact-size into the owned tick log and clear; the step clears the
+        // scratch first each tick, so the clone keeps every byte and the
+        // scratch keeps its reservation. Quiet ticks move an empty Vec.
         if self.rules.version == FIGHT_RULES_V2 {
             // Rules v2: pre-move poses in integer mm, fixed-point facing
             // from the absolute IN1 facing, one blade per slot along it.
@@ -1404,7 +1404,13 @@ impl Sim {
         } else {
             try_step_into(inputs, &mut self.fight, &mut self.combat_scratch).ok()?;
         }
-        let tick_events = core::mem::take(&mut self.combat_scratch);
+        let tick_events = if self.combat_scratch.is_empty() {
+            Vec::new()
+        } else {
+            let logged = self.combat_scratch.clone();
+            self.combat_scratch.clear();
+            logged
+        };
         if self.rules.balance {
             self.feed_balance(&tick_events)?;
         }

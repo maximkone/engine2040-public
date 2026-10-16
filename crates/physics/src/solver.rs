@@ -421,10 +421,6 @@ impl Solver {
             }
         }
     }
-    /// Binary-search warm entry; `warm` stays sorted by (a, b) via `warm_store_into`.
-    fn warm_lookup(&self, a: usize, b: usize) -> Option<Warm> {
-        warm_lookup_in(&self.warm, a, b)
-    }
     /// FNV-1a over body bits + sleep byte + len. Deterministic across runs.
     pub fn state_hash(&self, bodies: &[Body]) -> u64 {
         hash_bodies(bodies, &self.sleeping)
@@ -887,8 +883,8 @@ fn island_roots_into(
         roots.reserve(n - roots.capacity());
     }
     roots.resize(n, 0);
-    for i in 0..n {
-        roots[i] = find(parent, i);
+    for (i, root) in roots.iter_mut().enumerate() {
+        *root = find(parent, i);
     }
 }
 
@@ -1861,7 +1857,7 @@ mod tests {
         for a in 0..b.len() {
             for c in (a + 1)..b.len() {
                 let linear = s.warm.iter().find(|w| w.a == a && w.b == c);
-                let cached = s.warm_lookup(a, c);
+                let cached = warm_lookup_in(&s.warm, a, c);
                 assert_eq!(
                     linear.map(|w| (w.a, w.b, w.axis, w.jn)),
                     cached.map(|w| (w.a, w.b, w.axis, w.jn)),
@@ -1870,7 +1866,7 @@ mod tests {
             }
         }
         // Missing pair answers None on both paths.
-        assert!(s.warm_lookup(b.len() + 9, b.len() + 10).is_none());
+        assert!(warm_lookup_in(&s.warm, b.len() + 9, b.len() + 10).is_none());
     }
 
     #[test]

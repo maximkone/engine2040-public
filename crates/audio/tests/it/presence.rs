@@ -157,7 +157,7 @@ fn presence_all_modules_load_without_panic() {
         assert!(gate_open(rms(&probe), GATE_THRESHOLD));
         let bus = BusMixer::new(8_000);
         assert!(bus.g_music < bus.g_sfx);
-        assert!((Bus::Sfx.gain_db() - crate::GAIN_SFX_DB).abs() < 1e-6);
+        assert!((Bus::Sfx.gain_db() - engine_audio::GAIN_SFX_DB).abs() < 1e-6);
         assert!(Bus::Music.gain_linear() > 0.0);
         let song = render_song(1, 8_000, 16);
         assert_eq!(song.len(), 16);
@@ -206,8 +206,14 @@ fn presence_all_modules_load_without_panic() {
     // 9: music.
     {
         let song = bake(2040, 2);
-        assert_eq!(engine_audio::music::song_hash(&song), engine_audio::music::song_hash(&song));
-        assert_eq!(engine_audio::music::bake_bytes(&song), engine_audio::music::bake_bytes(&song));
+        assert_eq!(
+            engine_audio::music::song_hash(&song),
+            engine_audio::music::song_hash(&song)
+        );
+        assert_eq!(
+            engine_audio::music::bake_bytes(&song),
+            engine_audio::music::bake_bytes(&song)
+        );
         let beats = beat_list(&song, 8_000);
         assert_eq!(beats.len(), usize::from(song.bars) * 4);
         assert!(!beats.is_empty());

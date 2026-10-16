@@ -54,13 +54,7 @@ mod tests {
             1_000_000,
             1_000_001,
         ] {
-            let clamped = if v < -1_000_000 {
-                -1_000_000
-            } else if v > 1_000_000 {
-                1_000_000
-            } else {
-                v
-            };
+            let clamped = v.clamp(-1_000_000, 1_000_000);
             assert_eq!(
                 clamp_narrow_to_i32(v, -1_000_000, 1_000_000),
                 clamped as i32

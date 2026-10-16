@@ -15,6 +15,10 @@
 //! Reported numbers are per-step ms over `STEPS` timed steps, best of three
 //! fresh runs each way.
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "bench wall-clock report only, never sim state"
+)]
 use std::time::Instant;
 
 /// Fixed-point scale is implicit: positions are mm, velocities are mm/s.
@@ -49,7 +53,7 @@ fn isqrt(n: u64) -> u64 {
         return 0;
     }
     let mut x = n;
-    let mut y = (x + 1) / 2;
+    let mut y = x.div_ceil(2);
     while y < x {
         x = y;
         y = (x + n / x) / 2;
@@ -332,6 +336,11 @@ fn speed_sq_mm_s(vx: i32, vy: i32) -> u64 {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "bench wall-clock report only, never sim state"
+)]
 fn orca_512_step_ms() {
     assert_eq!(build_world().len(), AGENTS, "world must hold 512 agents");
 
@@ -430,4 +439,16 @@ fn orca_separates_overlapping_pair() {
             "clamp failed: {a:?}"
         );
     }
+}
+
+#[test]
+fn isqrt_handles_u64_max_without_overflow() {
+    // Pins the Newton seed against overflow: `(u64::MAX + 1) / 2` wraps,
+    // so the seed must use `div_ceil`. Small values pin the exact root.
+    assert_eq!(isqrt(0), 0);
+    assert_eq!(isqrt(1), 1);
+    assert_eq!(isqrt(4), 2);
+    assert_eq!(isqrt(15), 3);
+    assert_eq!(isqrt(16), 4);
+    assert_eq!(isqrt(u64::MAX), 4_294_967_295);
 }

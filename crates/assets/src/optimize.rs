@@ -378,7 +378,7 @@ fn resize_over_budget(image: &mut DocImage, pixels: usize) -> Result<(), Optimiz
 
 /// Refuse over-budget referenced textures when `import` is off: never guess.
 #[cfg(not(feature = "import"))]
-fn resize_over_budget(image: &DocImage, pixels: usize) -> Result<(), OptimizeError> {
+fn resize_over_budget(_image: &DocImage, pixels: usize) -> Result<(), OptimizeError> {
     if pixels <= MAX_TEXTURE_PX {
         return Ok(());
     }

@@ -359,7 +359,7 @@ mod tests {
             .expect("empty chain emits nothing");
         assert!(out.is_empty());
         let sensor = SensorArrayGenerator::new(&[]);
-        assert!(sensor.is_empty() && sensor.len() == 0);
+        assert!(sensor.is_empty());
         sensor
             .generate_into(&mut out)
             .expect("empty sensor emits nothing");
