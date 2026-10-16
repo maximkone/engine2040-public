@@ -144,26 +144,147 @@ pub fn fight_mesh_key(slot: u8) -> MeshKey {
     MeshKey::new(FIGHT_MESH_ID_BASE + u64::from(slot), [0xF1 ^ slot; 32])
 }
 
-/// Transformed cube mesh for one fighter body: the unit cube scaled by
-/// [`FIGHT_BODY_SIZE_M`] and translated so its feet sit at `feet_m`.
-/// Validation failures are typed, never panics.
+/// Subdivisions per box edge for the staged fighter proxy: 16 gives
+/// 3072 triangles per box, 6144 for the two-part body (over the 5000-tri
+/// CT7 scale the frame gate pins).
+const BODY_SUBDIV: u16 = 16;
+/// Total vertices for the two-part proxy (2 boxes times 6 faces times
+/// `(BODY_SUBDIV + 1)` squared).
+const BODY_VERTS: usize = 3_468;
+/// Total indices for the two-part proxy (2 boxes times 12 times
+/// `BODY_SUBDIV` squared triangles times 3).
+const BODY_INDICES: usize = 18_432;
+
+/// Push one axis-aligned subdivided box with outward face normals and
+/// `0..=1` UVs. Faces are emitted in `+X -X +Y -Y +Z -Z` order with a
+/// `(seg + 1)` squared grid each; winding is informational (both
+/// rasterizers depth-test only, no culling). Pure, headless std-only.
+/// Out-of-range vertex counts are typed, never panics.
+fn push_subdivided_box(
+    min_m: [f32; 3],
+    max_m: [f32; 3],
+    seg: u16,
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+) -> Result<(), WinError> {
+    let seg_f = f32::from(seg);
+    let stride = u32::from(seg) + 1;
+    for face in 0..6 {
+        let normal = match face {
+            0 => [1.0, 0.0, 0.0],
+            1 => [-1.0, 0.0, 0.0],
+            2 => [0.0, 1.0, 0.0],
+            3 => [0.0, -1.0, 0.0],
+            4 => [0.0, 0.0, 1.0],
+            _ => [0.0, 0.0, -1.0],
+        };
+        let base = u32::try_from(positions.len())
+            .map_err(|_| WinError::Render("staged body verts out of range".to_string()))?;
+        for iy in 0..=seg {
+            let v = f32::from(iy) / seg_f;
+            for ix in 0..=seg {
+                let u = f32::from(ix) / seg_f;
+                let pos = match face {
+                    0 => [
+                        max_m[0],
+                        min_m[1] + (max_m[1] - min_m[1]) * v,
+                        min_m[2] + (max_m[2] - min_m[2]) * u,
+                    ],
+                    1 => [
+                        min_m[0],
+                        min_m[1] + (max_m[1] - min_m[1]) * v,
+                        min_m[2] + (max_m[2] - min_m[2]) * u,
+                    ],
+                    2 => [
+                        min_m[0] + (max_m[0] - min_m[0]) * u,
+                        max_m[1],
+                        min_m[2] + (max_m[2] - min_m[2]) * v,
+                    ],
+                    3 => [
+                        min_m[0] + (max_m[0] - min_m[0]) * u,
+                        min_m[1],
+                        min_m[2] + (max_m[2] - min_m[2]) * v,
+                    ],
+                    4 => [
+                        min_m[0] + (max_m[0] - min_m[0]) * u,
+                        min_m[1] + (max_m[1] - min_m[1]) * v,
+                        max_m[2],
+                    ],
+                    _ => [
+                        min_m[0] + (max_m[0] - min_m[0]) * u,
+                        min_m[1] + (max_m[1] - min_m[1]) * v,
+                        min_m[2],
+                    ],
+                };
+                positions.push(pos);
+                normals.push(normal);
+                uvs.push([u, v]);
+            }
+        }
+        for iy in 0..seg {
+            for ix in 0..seg {
+                let a = base + u32::from(iy) * stride + u32::from(ix);
+                let b = a + 1;
+                let c = a + stride;
+                let d = c + 1;
+                indices.extend_from_slice(&[a, b, d, a, d, c]);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Two-part CT7-scale fighter proxy for one body: a torso box plus a head
+/// box inside the [`FIGHT_BODY_SIZE_M`] volume, feet at `feet_m`, 1.8 m
+/// tall, 6144 triangles. Deterministic subdivided grids (no wall clock, no
+/// RNG); headless std-only like the old placeholder. Validation failures
+/// are typed, never panics.
 pub fn fight_body_mesh(feet_m: [f32; 3]) -> Result<MeshData, WinError> {
     if !feet_m.iter().all(|v| v.is_finite()) {
         return Err(WinError::Render(
             "fight body position is not finite".to_string(),
         ));
     }
-    let center_m = [feet_m[0], feet_m[1] + 0.5 * FIGHT_BODY_SIZE_M[1], feet_m[2]];
-    let cube = v1::cube();
-    let mut positions = Vec::with_capacity(cube.positions.len());
-    for p in &cube.positions {
-        positions.push([
-            center_m[0] + p[0] * FIGHT_BODY_SIZE_M[0],
-            center_m[1] + p[1] * FIGHT_BODY_SIZE_M[1],
-            center_m[2] + p[2] * FIGHT_BODY_SIZE_M[2],
-        ]);
-    }
-    v1::upload_mesh(&positions, &cube.normals, &cube.uvs, &cube.indices)
+    let half_x = 0.5 * FIGHT_BODY_SIZE_M[0];
+    let half_z = 0.5 * FIGHT_BODY_SIZE_M[2];
+    let torso_min = [feet_m[0] - half_x, feet_m[1], feet_m[2] - half_z];
+    let torso_max = [feet_m[0] + half_x, feet_m[1] + 1.5, feet_m[2] + half_z];
+    let head_half = 0.15;
+    let head_min = [
+        feet_m[0] - head_half,
+        feet_m[1] + 1.5,
+        feet_m[2] - head_half,
+    ];
+    let head_max = [
+        feet_m[0] + head_half,
+        feet_m[1] + FIGHT_BODY_SIZE_M[1],
+        feet_m[2] + head_half,
+    ];
+    let mut positions = Vec::with_capacity(BODY_VERTS);
+    let mut normals = Vec::with_capacity(BODY_VERTS);
+    let mut uvs = Vec::with_capacity(BODY_VERTS);
+    let mut indices = Vec::with_capacity(BODY_INDICES);
+    push_subdivided_box(
+        torso_min,
+        torso_max,
+        BODY_SUBDIV,
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+    )?;
+    push_subdivided_box(
+        head_min,
+        head_max,
+        BODY_SUBDIV,
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+    )?;
+    v1::upload_mesh(&positions, &normals, &uvs, &indices)
         .map_err(|err| WinError::Render(format!("fight body mesh: {err}")))
 }
 
@@ -992,8 +1113,13 @@ mod tests {
                 assert_ne!(key, super::super::dressing_mesh_key(actor));
             }
             let mesh = fight_body_mesh(dot.pos_m).expect("body mesh builds");
-            assert_eq!(mesh.positions.len(), 24);
-            assert_eq!(mesh.indices.len(), 36);
+            assert_eq!(mesh.positions.len(), BODY_VERTS);
+            assert_eq!(mesh.indices.len(), BODY_INDICES);
+            assert!(
+                mesh.indices.len() / 3 > 5_000,
+                "fighter proxy carries CT7-scale tris, got {}",
+                mesh.indices.len() / 3
+            );
             fight_body_material(dot.slot, dot.hit)
                 .validate()
                 .expect("body material valid");

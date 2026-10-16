@@ -38,6 +38,19 @@ fn timed_loop(mut work: impl FnMut()) -> f64 {
 }
 
 fn main() {
+    // `cargo nextest run --all-targets` probes every bench binary with
+    // `--list --format terse` to build the test list; a `harness = false`
+    // bench must exit 0 without running the timing bench, or nextest fails
+    // with `creating test list failed`. Pattern owned by
+    // `crates/perf/benches/instructions.rs`.
+    // `cargo test --all-targets` launches bench binaries bare: exit 0 without
+    // running, so only `cargo bench` (`--bench`, len > 1) measures.
+    if std::env::args().any(|arg| arg == "--list") {
+        return;
+    }
+    if std::env::args().len() <= 1 {
+        return;
+    }
     profiler::set_enabled(false);
 
     // Golden held: canonical 16-slot 600-tick arena hash repeats x2 with the
