@@ -1375,22 +1375,6 @@ pub fn wal_end_group(
     }
 }
 
-/// Journaled [`cancel_group`]: the marker is logged first so a write failure
-/// leaves both sides untouched.
-pub fn wal_cancel_group(wal: &mut Wal, journal: &mut Journal) -> Result<bool, WalError> {
-    let payload = frame_payload(KIND_CANCEL_GROUP, &[]);
-    wal.append_frame(&payload)?;
-    if cancel_group(journal) {
-        return Ok(true);
-    }
-    wal.forget_last(payload.len())
-        .map_err(|error| match error {
-            WalError::Io(io) => WalError::Truncate(io),
-            other => other,
-        })?;
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

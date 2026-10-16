@@ -92,7 +92,7 @@ Owner lanes: `game` (`crates/game`), with `ui` and `input` only where a row name
 |---|---|---|
 | Windowed loop (WIN1) | done, integrated | `crates/game/src/windowed.rs` + `crates/game/src/bin/arena.rs`; kept because GM3 needs it |
 | Packaged exe + bundle (GM3) | BLOCKED, row open (30-frame REAL/REAL PASS, 5-min still open) | stock 30-frame PASS `C:/e2040-clean/clean-run.log` 2026-10-01 (REAL/REAL, 92 MB 11 entries, RTX 3050, exit 0); the 18000-frame proof needs an exclusive quiet box; needs GM2, WIN1, AS1 |
-| Packaged tree vs clean install | REAL dist exists, 5-min clean install NEVER run | `crates/game/src/package.rs`: `target/as7-dist` REAL/REAL; the 18000-frame run was never attempted (binary 5-min wall bound blocks it, see WIN13) |
+| Packaged tree vs clean install | REAL dist exists, 5-min clean install NEVER run | `crates/game/src/package.rs`: `target/as7-dist` REAL/REAL; the 18000-frame run was never attempted (binary 5-min wall bound blocks it, see WIN13) - code cut 2026-10-16, recover via git log --follow -- crates/game/src/package.rs |
 
 Module note: GM3 stays OPEN and BLOCKED until the 18000-frame clean-machine
 run (A8). Scale cap, read in code: `MAX_PARTICIPANTS: u8 = 16`

@@ -315,7 +315,7 @@ fn tick_frame_small_capture_reads_clean() {
 }
 
 #[test]
-#[ignore = "timing: 600-tick tick-frame capture needs a quiet box; run under --perf"]
+#[ignore = "determinism receipt: 600-tick capture, quantile ordering and off-gate hash equality; run under --perf"]
 fn tick_frame_600_capture_reads_clean() {
     // Full proof at the canonical tick count: 600 tick-vs-frame p50s plus
     // the bucketed plot read clean, with the canonical hash attached.

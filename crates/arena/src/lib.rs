@@ -132,7 +132,8 @@ use recorder::{Dataset, DATASET_VERSION};
 pub const TOP_SPEED_MPS: f32 = 5.0;
 
 /// Fixed steps per second for every headless match.
-pub const TICK_HZ: u32 = 60;
+/// Single owner of the rate is `engine_core::TICK_HZ`.
+pub const TICK_HZ: u32 = engine_core::TICK_HZ as u32;
 /// True when compiled with the `sim` physics track. Checkpoint hashes carry
 /// a track tag byte, so default and `sim` builds of the same match hash
 /// differently by design; budget harnesses (PF1) key their baselines on this.

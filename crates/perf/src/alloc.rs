@@ -48,7 +48,7 @@ pub struct PeakSnapshot {
 }
 
 impl PeakSnapshot {
-    /// Snapshot the largest sample via [`peak_bytes`]; empty reads 0.
+    /// Snapshot the largest sample via [`peak_of`]; empty reads 0.
     ///
     /// Units: bytes in, snapshot out. Determinism: pure `u64` max, same
     /// slice gives the same snapshot twice. Errors: none.
@@ -56,22 +56,9 @@ impl PeakSnapshot {
     #[must_use]
     pub fn of(samples: &[u64]) -> Self {
         Self {
-            peak_bytes: peak_bytes(samples),
+            peak_bytes: peak_of(samples),
         }
     }
-}
-
-/// Return the largest sample as `peak_bytes`, or 0 when empty.
-///
-/// Units: bytes in, bytes out. Determinism: pure `u64` max, same slice
-/// gives the same answer twice. Errors: none.
-/// Caller: [`PeakSnapshot::of`] plus the `--heap-peak` harness via
-/// [`peak_of`]. GS14 free `peak_bytes` beside `peak_of`; the repeat
-/// assert keeps the two maxima tied without duplicating the loop.
-pub fn peak_bytes(samples: &[u64]) -> u64 {
-    let peak = peak_of(samples);
-    debug_assert_eq!(peak, peak_of(samples), "peak repeats deterministically");
-    peak
 }
 
 /// Return the largest sample, or 0 when empty.
@@ -355,27 +342,22 @@ mod tests {
     }
 
     #[test]
-    fn peak_bytes_matches_peak_of_x2() {
-        // GS14 free `peak_bytes` beside `peak_of`; same slice gives the
-        // same bytes twice, and the typed snapshot reads the same number.
-        assert_eq!(peak_bytes(&[]), 0, "empty reads 0");
-        assert_eq!(peak_bytes(&[1, 9, 4]), 9, "max sample wins");
-        assert_eq!(peak_bytes(&[57_238, 57_238]), 57_238);
+    fn peak_of_repeats_deterministically() {
+        // One maximum owner: same slice gives the same peak twice, and the
+        // typed snapshot reads the same number.
+        assert_eq!(peak_of(&[]), 0, "empty reads 0");
+        assert_eq!(peak_of(&[1, 9, 4]), 9, "max sample wins");
+        assert_eq!(peak_of(&[57_238, 57_238]), 57_238);
         let samples = [4_u64, 9, 3, 17, 11];
         assert_eq!(
-            peak_bytes(&samples),
             peak_of(&samples),
-            "free peak_bytes matches peak_of"
-        );
-        assert_eq!(
-            peak_bytes(&samples),
-            peak_bytes(&samples),
-            "same slice gives same peak_bytes twice"
+            peak_of(&samples),
+            "same slice gives same peak twice"
         );
         assert_eq!(
             PeakSnapshot::of(&samples).peak_bytes,
-            peak_bytes(&samples),
-            "typed snapshot matches free peak_bytes"
+            peak_of(&samples),
+            "typed snapshot matches peak_of"
         );
     }
 }

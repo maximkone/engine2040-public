@@ -4,7 +4,7 @@
 //! stream stays dropped unless the RNG proves the bottleneck).
 //!
 //! Determinism: every kernel returns a checksum; the same seed twice gives
-//! the same checksum (asserted by `tests/core_bench.rs`). Timing never
+//! the same checksum (asserted by `tests/it/core_bench_vectors.rs`). Timing never
 //! enters a hash. Units: ns/op, ms/run, bytes. No new dependency (std-only).
 //!
 //! Kernels cover the packet baseline: `run_ticks` + `fold_hash`/`TickState`

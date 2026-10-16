@@ -32,7 +32,6 @@
 //! executed zero checks is never a pass: it adds one `NoChecks` failure.
 
 pub mod agent;
-pub mod agreement;
 pub mod bench_mirror;
 pub mod bot_harness;
 pub mod brief_eval;
@@ -44,13 +43,7 @@ pub mod eval;
 pub mod exploit;
 pub mod frame_check;
 pub mod keypoint;
-pub mod live_probe;
 pub mod living;
-pub mod look;
-/// Pure look judge: L1 fighters-present plus typed JSON, no window.
-pub mod look_judge;
-pub mod look_score;
-pub mod machine_eyes;
 pub mod mirror;
 pub mod mirror_craft;
 pub mod mirror_gdb;

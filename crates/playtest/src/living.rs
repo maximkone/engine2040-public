@@ -833,6 +833,9 @@ fn mem_checkpoint(fixture: &LivingFixture) -> u64 {
 // ---- provider calls (real adapters, fixture scripts) ------------------------
 
 /// Fixture latency for one row in ms: deterministic per backend plus slot.
+/// Living-world pacing policy (1/20/150 ms bases); independent of the
+/// eval-side mock fixture policy, which uses different values. The two are
+/// separate policies by design, not one shared policy.
 pub const fn fixture_latency_ms(backend: Backend, index: u64) -> u64 {
     match backend {
         Backend::Mock => LATENCY_MOCK_MS + index % 2,
@@ -842,6 +845,7 @@ pub const fn fixture_latency_ms(backend: Backend, index: u64) -> u64 {
 }
 
 /// Fixture cost for one row: remote reports units, mock/local stay Unknown.
+/// Living-world policy only; eval-side cost terms differ (see eval.rs).
 pub const fn fixture_cost(backend: Backend) -> Cost {
     match backend {
         Backend::Mock | Backend::Local => Cost::Unknown,

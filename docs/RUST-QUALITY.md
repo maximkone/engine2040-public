@@ -120,7 +120,10 @@ ratcheted with zero weight: every one is visible and budgeted.
 - **Tests.** Each test fails on a plausible defect (M-TAUTOLOGICAL-TESTS);
   oracles over restated constants; `#[ignore = "<why>"]` only.
 - **Performance evidence.** Wall-clock tests are ignored timing tests;
-  instruction-count benches (Gungraun) are the CI-stable perf gate.
+  instruction-count benches (Gungraun) are the CI-stable perf gate, enforced
+  only by the Linux leg of `node tools/proof.mjs --perf`; its receipt line
+  `[PASS] instruction counts inside the 2% Ir budget (...)` is the proof —
+  a Windows run or a bare `cargo bench` proves nothing.
 
 ## 5. Commands
 

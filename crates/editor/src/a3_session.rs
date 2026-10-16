@@ -966,9 +966,12 @@ mod tests {
     #[test]
     fn full_run_survives_a_crash_with_no_lost_edit() {
         let content = lane_content_root();
-        if !content.join(HERO_MESH).exists() {
-            return;
-        }
+        let hero_path = content.join(HERO_MESH);
+        assert!(
+            hero_path.exists(),
+            "missing content fixture {}: a sparse checkout must fail loudly, never green silently",
+            hero_path.display()
+        );
         let scratch = std::env::temp_dir().join("recorded-editor-scratch");
         let _ = std::fs::remove_dir_all(&scratch);
         let report = run_session(&content, &scratch, None).unwrap();
@@ -994,9 +997,12 @@ mod tests {
     #[test]
     fn two_runs_write_identical_scene_bytes() {
         let content = lane_content_root();
-        if !content.join(HERO_MESH).exists() {
-            return;
-        }
+        let hero_path = content.join(HERO_MESH);
+        assert!(
+            hero_path.exists(),
+            "missing content fixture {}: a sparse checkout must fail loudly, never green silently",
+            hero_path.display()
+        );
         let first_dir = std::env::temp_dir().join("recorded-editor-cross-a");
         let second_dir = std::env::temp_dir().join("recorded-editor-cross-b");
         let _ = std::fs::remove_dir_all(&first_dir);

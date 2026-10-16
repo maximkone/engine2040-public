@@ -44,8 +44,9 @@ pub const KILL_SHARE_MAX_PERMILLE: u16 = 350;
 /// P3 bar: no fighter holds below fork stuck speed for 3 s at 60 Hz (the
 /// stuck definition frozen in the game-ai plan). Trips come from a
 /// consecutive-stillness scan over recorded poses (post-kill corpse holds
-/// excluded), never from the cumulative fork counter.
-pub const STUCK_WINDOW_TICKS: u32 = 180;
+/// excluded), never from the cumulative fork counter. Single owner is
+/// `engine_core::STUCK_WINDOW_TICKS`.
+pub const STUCK_WINDOW_TICKS: u32 = engine_core::STUCK_WINDOW_TICKS;
 /// Fixed ticks per exchange-reachability probe match.
 pub const EXCHANGE_TICKS: u32 = 240;
 /// Spotlight matches per discovered move (the overpowered-move detector).

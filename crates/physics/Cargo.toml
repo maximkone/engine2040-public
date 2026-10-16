@@ -17,8 +17,6 @@ rapier = ["dep:rapier3d", "dep:engine-anim"]
 
 [dependencies]
 engine-core = { workspace = true }
-# The persistent job pool `step_islands` runs its lanes on.
-engine-ecs = { workspace = true }
 rapier3d = { workspace = true, optional = true }
 engine-anim = { workspace = true, optional = true }
 

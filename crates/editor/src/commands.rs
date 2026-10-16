@@ -16,7 +16,7 @@
 //! Grouped commands: entries carry a
 //! [`CommandMeta`] name/flag plus a group id; [`begin_group`]/[`end_group`]
 //! fold a gizmo drag into one undo step while insignificant steps skip the
-//! durable journal ([`durable_count`]).
+//! durable journal (significant-only depth via test-only `durable_count`).
 //! PORT(mikwielgus/undoredo@e0659096f26e4b07a68e549835756957b08af0b0:src/delta.rs
 //! Delta commit shape + src/undoredo.rs + examples/cmd_commit.rs): one door
 //! call is one group commit carrying its tool plus args in the entry name.
@@ -479,7 +479,8 @@ pub struct JournalEntry {
     /// [`apply`] stamps `"edit"`. Bounded to [`MAX_COMMAND_NAME_LEN`].
     pub name: String,
     /// False for drag-preview steps: still applied and undoable, but skipped
-    /// by the durable journal (see [`durable_count`]).
+    /// by the durable journal (significant-only depth; see test-only
+    /// `durable_count`).
     pub significant: bool,
     /// Group this entry belongs to ([`NO_GROUP`] when ungrouped);
     /// [`end_group`] merges one group's entries into a single entry.
@@ -771,6 +772,10 @@ pub fn open_group_key(journal: &Journal) -> Option<u64> {
 
 /// True when the durable journal must seal this entry: significant entries
 /// only. Insignificant drag steps skip durability but stay undoable.
+///
+/// Test-only: no prod or endpoint caller seals through this; the four
+/// test suites asserting significant-only semantics call it directly.
+#[cfg(test)]
 pub fn needs_persist(entry: &JournalEntry) -> bool {
     entry.significant
 }
@@ -778,6 +783,10 @@ pub fn needs_persist(entry: &JournalEntry) -> bool {
 /// Durable-journal depth: significant entries on the undo stack. Sealing
 /// one generation per counted entry keeps crash recovery while a 20-step
 /// gizmo drag seals one generation instead of twenty.
+///
+/// Test-only: kept visible (not deleted) so the significant-only
+/// semantics stay asserted by the test suites.
+#[cfg(test)]
 pub fn durable_count(journal: &Journal) -> usize {
     journal
         .past

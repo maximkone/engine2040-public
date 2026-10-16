@@ -43,9 +43,7 @@ use engine_scene::transform::Transform;
 
 use crate::a2_session::encode_png_rgba8;
 use crate::commands::Document;
-use crate::instant::{Restored, RoundInput, RoundSnapshot};
 use crate::play::{ChildPlay, PlayEntrypoint};
-use crate::play_in::{PlayCheckpoint, PlayFrame, PlayInError, PlayInSession};
 use crate::save::{load_from_bytes, save_to_bytes, MAX_SAVE_BYTES};
 use crate::shell::Shell;
 use crate::shell_ui::ShellUi;
@@ -145,13 +143,6 @@ pub enum EditorAppError {
         /// OS report.
         reason: String,
     },
-    /// Play-in-editor refused an action; the round is untouched.
-    PlayInFailed {
-        /// Operation refused (start, frame, step, snapshot, restart, stop).
-        operation: &'static str,
-        /// Why it refused.
-        reason: String,
-    },
 }
 
 impl EditorAppError {
@@ -164,19 +155,9 @@ impl EditorAppError {
             | Self::BadSize { .. }
             | Self::ViewportFailed(_)
             | Self::WindowFailed(_)
-            | Self::PlayInFailed { .. }
             | Self::ChildFailed { .. } => Recovery::FixCallerInput,
             Self::ViewportSuspended | Self::NoAdapter => Recovery::KeepLastGood,
             Self::SnapshotFailed { recovery, .. } => *recovery,
-        }
-    }
-
-    /// Map a play-in-editor refusal onto the app error: a refused action
-    /// moves no round state, so the caller fixes the call and retries.
-    fn play_in(operation: &'static str, error: PlayInError) -> Self {
-        Self::PlayInFailed {
-            operation,
-            reason: error.to_string(),
         }
     }
 
@@ -227,9 +208,6 @@ impl fmt::Display for EditorAppError {
             Self::WindowFailed(reason) => write!(f, "editor window failed: {reason}"),
             Self::ChildFailed { command, reason } => {
                 write!(f, "arena child `{command}` failed: {reason}")
-            }
-            Self::PlayInFailed { operation, reason } => {
-                write!(f, "play-in-editor {operation} refused: {reason}")
             }
         }
     }
@@ -793,9 +771,6 @@ pub struct EditorApp {
     pending: egui::TexturesDelta,
     snapshot: ViewportSnapshot,
     play: Option<ChildPlay>,
-    /// In-viewport play session: the game-window-equivalent loop driven
-    /// in-process; the child above stays the external-play path.
-    play_in: Option<PlayInSession>,
     status: String,
     frames: u64,
 }
@@ -831,7 +806,6 @@ impl EditorApp {
             pending: egui::TexturesDelta::default(),
             snapshot: ViewportSnapshot::new(),
             play: None,
-            play_in: None,
             status,
             frames: 0,
         })
@@ -883,135 +857,6 @@ impl EditorApp {
         }
         self.play = None;
         self.status = "play stopped".to_string();
-    }
-
-    /// True while an in-viewport play session is open.
-    pub fn play_in_alive(&self) -> bool {
-        self.play_in
-            .as_ref()
-            .is_some_and(|session| !session.is_closed())
-    }
-
-    /// Start in-viewport play: the game-window-equivalent fixed-tick loop
-    /// driven in-process over a copy of the open document. The document is
-    /// untouched; stop with [`play_in_stop`](Self::play_in_stop).
-    pub fn play_in_start(&mut self, seed: u64) -> Result<(), EditorAppError> {
-        if self.play_in_alive() {
-            return Ok(());
-        }
-        let entry = self.config.arena.clone();
-        let doc = self.shell.document().clone();
-        match PlayInSession::start(doc, entry, seed) {
-            Ok(session) => {
-                self.status = format!("playing in viewport (tick {})", session.tick());
-                self.play_in = Some(session);
-                Ok(())
-            }
-            Err(error) => Err(EditorAppError::play_in("start", error)),
-        }
-    }
-
-    /// Drive one viewport frame through the session: at most 5 fixed ticks
-    /// (the runtime app's anti-spiral cap, shared with the game window), staged tuning batches land only
-    /// between frames at the tick cursor.
-    pub fn play_in_frame(
-        &mut self,
-        frame_dt: f32,
-        inputs: &[RoundInput],
-    ) -> Result<PlayFrame, EditorAppError> {
-        match self.play_in.as_mut() {
-            Some(session) => session
-                .frame(frame_dt, inputs)
-                .map_err(|e| EditorAppError::play_in("frame", e)),
-            None => Err(EditorAppError::play_in(
-                "frame",
-                PlayInError::Closed { what: "frame" },
-            )),
-        }
-    }
-
-    /// Advance exactly one fixed tick (the Step button's path).
-    pub fn play_in_step(&mut self, input: RoundInput) -> Result<u64, EditorAppError> {
-        match self.play_in.as_mut() {
-            Some(session) => session
-                .step_once(input)
-                .map_err(|e| EditorAppError::play_in("step", e)),
-            None => Err(EditorAppError::play_in(
-                "step",
-                PlayInError::Closed { what: "step" },
-            )),
-        }
-    }
-
-    /// Freeze fixed ticks; frames keep counting.
-    pub fn play_in_pause(&mut self) {
-        if let Some(session) = self.play_in.as_mut() {
-            session.pause();
-        }
-    }
-
-    /// Resume fixed ticks on the next frame.
-    pub fn play_in_resume(&mut self) {
-        if let Some(session) = self.play_in.as_mut() {
-            session.resume();
-        }
-    }
-
-    /// Live round tick (the cursor tuning batches stage against).
-    pub fn play_in_tick(&self) -> u64 {
-        self.play_in.as_ref().map_or(0, |session| session.tick())
-    }
-
-    /// Snapshot the live round over the play snapshot API. Refuses on a closed session.
-    pub fn play_in_snapshot(&self) -> Result<RoundSnapshot, EditorAppError> {
-        match self.play_in.as_ref() {
-            Some(session) => session
-                .snapshot()
-                .map_err(|e| EditorAppError::play_in("snapshot", e)),
-            None => Err(EditorAppError::play_in(
-                "snapshot",
-                PlayInError::Closed { what: "snapshot" },
-            )),
-        }
-    }
-
-    /// The parity checkpoint: tick plus play-snapshot digest of the live round.
-    pub fn play_in_checkpoint(&self) -> Result<PlayCheckpoint, EditorAppError> {
-        match self.play_in.as_ref() {
-            Some(session) => session
-                .checkpoint()
-                .map_err(|e| EditorAppError::play_in("snapshot", e)),
-            None => Err(EditorAppError::play_in(
-                "snapshot",
-                PlayInError::Closed { what: "snapshot" },
-            )),
-        }
-    }
-
-    /// Restart the round from a play snapshot; a refusal leaves it untouched.
-    pub fn play_in_restart(
-        &mut self,
-        snapshot: &RoundSnapshot,
-    ) -> Result<Restored, EditorAppError> {
-        match self.play_in.as_mut() {
-            Some(session) => session
-                .restart(snapshot)
-                .map_err(|e| EditorAppError::play_in("restart", e)),
-            None => Err(EditorAppError::play_in(
-                "restart",
-                PlayInError::Closed { what: "restart" },
-            )),
-        }
-    }
-
-    /// Stop the session: the runtime app shuts down, the document is untouched.
-    /// Idempotent.
-    pub fn play_in_stop(&mut self) {
-        if let Some(session) = self.play_in.as_mut() {
-            let _ = session.stop();
-        }
-        self.play_in = None;
-        self.status = "viewport play stopped".to_string();
     }
 
     /// Save the document to the project path. Returns bytes written.
@@ -1635,13 +1480,6 @@ mod tests {
                 EditorAppError::ChildFailed {
                     command: "game".into(),
                     reason: "missing".into(),
-                },
-                Recovery::FixCallerInput,
-            ),
-            (
-                EditorAppError::PlayInFailed {
-                    operation: "frame",
-                    reason: "stopped".into(),
                 },
                 Recovery::FixCallerInput,
             ),
@@ -2290,48 +2128,6 @@ mod tests {
         // Stop with no child is a no-op Ok.
         app.play_stop();
         assert!(!app.play_alive());
-    }
-
-    /// Play-in-editor parity through the app: the same tape chunked across
-    /// uneven frames, restarted from a snapshot, seals the same checkpoint.
-    #[test]
-    fn play_in_session_through_app_replays_identically() {
-        let mut app = EditorApp::new(EditorConfig::new()).unwrap();
-        assert!(!app.play_in_alive());
-        app.play_in_start(7).unwrap();
-        assert!(app.play_in_alive());
-        // All-neutral tape: padded frame tails equal tape content exactly.
-        // dt 0.09 s steps exactly 5 ticks per frame (5.4 floored, the .4
-        // remainder is constant so no frame ever steps 6).
-        let tape = [RoundInput::neutral(); 50];
-        for chunk in tape.chunks(5) {
-            app.play_in_frame(0.09, chunk).unwrap();
-        }
-        assert_eq!(app.play_in_tick(), 50);
-        let snap = app.play_in_snapshot().unwrap();
-        let extra = [RoundInput::neutral(); 25];
-        for chunk in extra.chunks(5) {
-            app.play_in_frame(0.09, chunk).unwrap();
-        }
-        let point_b = app.play_in_checkpoint().unwrap();
-        app.play_in_restart(&snap).unwrap();
-        assert_eq!(app.play_in_tick(), 50);
-        for chunk in extra.chunks(5) {
-            app.play_in_frame(0.09, chunk).unwrap();
-        }
-        assert_eq!(app.play_in_checkpoint().unwrap(), point_b);
-        // Pause freezes ticks but counts frames; stop closes typed.
-        app.play_in_pause();
-        let before = app.play_in_tick();
-        app.play_in_frame(1.0 / 60.0, &extra[..5]).unwrap();
-        assert_eq!(app.play_in_tick(), before);
-        app.play_in_resume();
-        app.play_in_stop();
-        assert!(!app.play_in_alive());
-        assert!(matches!(
-            app.play_in_frame(1.0 / 60.0, &extra[..5]),
-            Err(EditorAppError::PlayInFailed { .. })
-        ));
     }
 
     #[test]

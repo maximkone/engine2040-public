@@ -315,8 +315,16 @@ pub fn render_report(
         }
         _ => "other".to_owned(),
     };
+    // Replay status is derived from an actual re-run of the filed tape, never
+    // a literal: a broken replay prints MISMATCH and the marker assert in
+    // `seeded_bug_fails_exactly_its_keypoint_and_writes_evidence` can fail.
+    let replay_status = if bug.replay().contains(bug) {
+        "ok"
+    } else {
+        "MISMATCH"
+    };
     out.push_str(&format!(
-        "qa1: seed={BASE_SEED} ticks={MATCH_TICKS} fighters={MATCH_SLOTS} first_bad_tick={} divergent_tick={} {} cause=\"{}\" replay=ok\n",
+        "qa1: seed={BASE_SEED} ticks={MATCH_TICKS} fighters={MATCH_SLOTS} first_bad_tick={} divergent_tick={} {} cause=\"{}\" replay={replay_status}\n",
         bug.first_bad_tick, causal.divergent_tick, metric,
         attribution_line(causal),
     ));
@@ -341,7 +349,8 @@ pub fn render_report(
         ));
     }
     out.push_str("repro: cargo test --manifest-path .lanes/ev4/Cargo.toml --target-dir target/pool-2 -j 4 --locked -p engine-playtest seeded_bug\n");
-    out.push_str("golden: d57b5c8ae3096614 (untouched)\n");
+    // No golden marker here: the canonical 600-tick golden gate lives in
+    // engine-proof; a static copy of its hash would assert nothing.
     out
 }
 
@@ -616,7 +625,6 @@ mod tests {
             SEEDED_KEYPOINT_BUG,
             "siblings_green=true",
             "replay=ok",
-            "d57b5c8ae3096614",
         ] {
             assert!(report.contains(marker), "report names {marker}");
         }

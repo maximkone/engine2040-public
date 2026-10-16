@@ -1,6 +1,6 @@
 //! First-run checklist over templates and play-in-editor (tutorial-1 flow).
 //!
-//! Consumer is the first-run editor session (the Shell/app onboarding panel
+//! Consumer is the headless proof boot flow (`crates/proof/src/fb_ship.rs`
 //! calls [`Checklist::note_template`] on each template apply and
 //! [`Checklist::note_first_fight`] on play-in-editor start). Data owner is
 //! [`Checklist`]: four completion bits plus fixed step ids, hints and

@@ -275,11 +275,11 @@ pub fn build_lod_chain(mesh: &CookedMesh, levels: usize) -> Result<Vec<CookedMes
     lods.push(mesh.clone());
     for level in 1..levels {
         let target = lod_target(base_tris, level);
-        let prev = lods[level - 1].clone();
-        if tri_count(&prev) <= target {
+        if tri_count(&lods[level - 1]) <= target {
+            let prev = lods[level - 1].clone();
             lods.push(prev);
         } else {
-            lods.push(simplify(&prev, target)?);
+            lods.push(simplify(&lods[level - 1], target)?);
         }
     }
     Ok(lods)

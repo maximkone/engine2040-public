@@ -1,4 +1,4 @@
-//! editor: headless-first dock shell stub. Layout is data: serializes, hashes x2, viewport last.
+//! editor: headless-first dock shell. Layout is data: serializes, hashes x2, viewport last.
 
 /// Recorded editable-scene session (gate evidence): headless import, place,
 /// edit, save and reopen through the shell, browser and save codec.
@@ -12,7 +12,8 @@ pub mod app;
 /// Digest-chained audit receipts over the crash-safe journal (rotation-capped).
 pub mod audit;
 /// Asset browser over asset bundles: search, drag-to-place intents,
-/// place-rule refusal. Std-only; wired to app.rs next.
+/// place-rule refusal. Std-only; consumed by the shell and the recorded
+/// sessions (`shell.rs`, `a2_session.rs`, `a3_session.rs`).
 pub mod browser;
 pub mod capability;
 pub mod commands;
@@ -24,7 +25,8 @@ pub mod gizmo;
 /// Data-only node graph for material and VFX graphs; wired to Document.
 pub mod graph;
 /// Schema inspector over registry descriptors: override badging, batched
-/// command edits. Std-only; wired to app.rs next.
+/// command edits. Std-only; consumed by the dock panel (`shell_ui.rs`
+/// renders [`inspector::build_grid`]).
 pub mod inspector;
 /// Automatic inspector rows from registry schemas: min/max/step/dropdown
 /// and read-only hints with undoable command-batch edits. Std-only.
@@ -32,15 +34,19 @@ pub mod inspector_auto;
 pub mod instant;
 /// First-run checklist over templates and play-in-editor: tutorial-1 steps, hints-only
 /// guidance and the 15-minute time-to-first-fight budget. Std-only; the
-/// first-run Shell/app panel consumes it next.
+/// headless proof boot flow drives it (`crates/proof/src/fb_ship.rs`
+/// calls note_template / note_first_fight).
 pub mod onboard;
 /// Outliner: filtered rows plus named selection sets over the shared
-/// inspector selection. Std-only; the editor hierarchy tab consumes it next.
+/// inspector selection. Std-only; consumed by the editor hierarchy tab
+/// (`shell_ui.rs`).
 pub mod outline;
 pub mod play;
 /// Play-in-editor: game-window-equivalent fixed-tick loop in the viewport,
 /// pause/step/restart over play snapshots. Behind `ui` with the engine-app
-/// lifecycle edge so headless stays std-only; wired to app.rs next.
+/// lifecycle edge so headless stays std-only. The user path is `--record-a3`
+/// straight into [`play_in::PlayInSession`]; the `EditorApp` in-viewport
+/// facade was cut 2026-10-16 (recover via `git log --follow -- crates/editor/src/app.rs`).
 #[cfg(feature = "ui")]
 pub mod play_in;
 pub mod save;
@@ -60,27 +66,6 @@ pub mod viewport;
 pub mod viewport_image;
 /// Crash-safe journal: write-ahead log over the command service.
 pub mod wal;
-
-/// Node layout for graph viewer panels (data only, no draw calls).
-#[cfg(feature = "ui")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphLayout {
-    /// Coiled wire layout.
-    Coil,
-    /// Stacked sandwich layout.
-    Sandwich,
-}
-
-/// Viewer hooks for graph nodes (data only, no draw calls).
-#[cfg(feature = "ui")]
-pub trait GraphViewer {
-    /// Title for a node.
-    fn title(&self, node: &graph::GraphNode) -> String;
-    /// Input pin count for a node.
-    fn in_pins(&self, node: &graph::GraphNode) -> u32;
-    /// Output pin count for a node.
-    fn out_pins(&self, node: &graph::GraphNode) -> u32;
-}
 
 /// Why [`Tree::decode`] refused a layout text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

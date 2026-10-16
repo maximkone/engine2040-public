@@ -7,6 +7,7 @@
 //! bytes twice. Errors: typed [`ProvenanceError`] with stable codes.
 //! Offline cook only, never the tick.
 
+#[cfg(test)]
 use engine_core::hash_bytes;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -374,6 +375,8 @@ pub fn provenance_row(record: &ProvenanceRecord) -> String {
 
 /// Digest a whole release in slice order: encode every row, hash the bytes.
 /// Same records give the same digest twice; order changes move it.
+/// Test-only: no production caller digests a release here.
+#[cfg(test)]
 pub fn release_digest(records: &[ProvenanceRecord]) -> u64 {
     let mut bytes = Vec::new();
     for record in records {

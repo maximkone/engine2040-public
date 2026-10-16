@@ -484,13 +484,14 @@ pub struct StagedObj {
 }
 
 /// Snapshot a hierarchy into deterministic plain rows: depth-first from
-/// roots sorted by id text, children sorted, unit 1 m cubes on world
-/// positions. Rows with missing or non-finite world poses are skipped, like
+/// roots sorted by id, children sorted, unit 1 m cubes on world
+/// positions (id byte order equals id text order: hyphenated lowercase hex).
+/// Rows with missing or non-finite world poses are skipped, like
 /// the spatial crate skipping unknown positions (the command service still rejects NaN).
 pub fn snapshot_hierarchy(tree: &Hierarchy) -> Vec<StagedObj> {
     let mut rows = Vec::with_capacity(tree.len());
     let mut roots = tree.roots();
-    roots.sort_by_key(|id| id.to_string());
+    roots.sort();
     let mut stack: Vec<ObjectId> = roots.into_iter().rev().collect();
     while let Some(id) = stack.pop() {
         let Some(world) = tree.world(id) else {
@@ -509,7 +510,7 @@ pub fn snapshot_hierarchy(tree: &Hierarchy) -> Vec<StagedObj> {
             sz: 1.0,
         });
         let mut kids = tree.children(id);
-        kids.sort_by_key(|kid| kid.to_string());
+        kids.sort();
         for kid in kids.into_iter().rev() {
             stack.push(kid);
         }
@@ -525,29 +526,35 @@ fn to_cm(value: f32) -> i32 {
 
 /// XZ footprint pairs with positive-area intersection, as ordered key
 /// pairs. Touching edges are not overlap, mirroring the spatial crate.
+/// Integer footprints precompute once per row; the pair scan compares
+/// ints only instead of re-running float math per pair.
 fn overlap_findings(rows: &[StagedObj]) -> BTreeSet<(String, String)> {
-    let mut pairs = BTreeSet::new();
-    for (i, a) in rows.iter().enumerate() {
-        if ![a.x, a.z, a.sx, a.sz].iter().all(|v| v.is_finite()) {
+    let mut rects: Vec<(usize, i32, i32, i32, i32)> = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        if ![row.x, row.z, row.sx, row.sz]
+            .iter()
+            .all(|v| v.is_finite())
+        {
             continue;
         }
-        let ax0 = to_cm(a.x) - to_cm(a.sx).abs() / 2;
-        let ax1 = to_cm(a.x) + to_cm(a.sx).abs() / 2;
-        let az0 = to_cm(a.z) - to_cm(a.sz).abs() / 2;
-        let az1 = to_cm(a.z) + to_cm(a.sz).abs() / 2;
-        for b in &rows[..i] {
-            if ![b.x, b.z, b.sx, b.sz].iter().all(|v| v.is_finite()) {
-                continue;
-            }
-            let bx0 = to_cm(b.x) - to_cm(b.sx).abs() / 2;
-            let bx1 = to_cm(b.x) + to_cm(b.sx).abs() / 2;
-            let bz0 = to_cm(b.z) - to_cm(b.sz).abs() / 2;
-            let bz1 = to_cm(b.z) + to_cm(b.sz).abs() / 2;
+        let (x0, x1) = (
+            to_cm(row.x) - to_cm(row.sx).abs() / 2,
+            to_cm(row.x) + to_cm(row.sx).abs() / 2,
+        );
+        let (z0, z1) = (
+            to_cm(row.z) - to_cm(row.sz).abs() / 2,
+            to_cm(row.z) + to_cm(row.sz).abs() / 2,
+        );
+        rects.push((i, x0, x1, z0, z1));
+    }
+    let mut pairs = BTreeSet::new();
+    for (a, &(ai, ax0, ax1, az0, az1)) in rects.iter().enumerate() {
+        for &(bi, bx0, bx1, bz0, bz1) in &rects[..a] {
             if ax0 < bx1 && bx0 < ax1 && az0 < bz1 && bz0 < az1 {
-                let (lo, hi) = if a.key < b.key {
-                    (a.key.clone(), b.key.clone())
+                let (lo, hi) = if rows[ai].key < rows[bi].key {
+                    (rows[ai].key.clone(), rows[bi].key.clone())
                 } else {
-                    (b.key.clone(), a.key.clone())
+                    (rows[bi].key.clone(), rows[ai].key.clone())
                 };
                 pairs.insert((lo, hi));
             }

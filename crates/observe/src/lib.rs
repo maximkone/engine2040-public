@@ -23,8 +23,8 @@
 //! simulation state per tick for desync hunts.
 //!
 //! The [`fps`] module adds std-only typed FPS view events: fighter poses,
-//! adjudicated hits and frame cost splits for the net, proof and render
-//! adapters.
+//! adjudicated hits and frame cost splits, read by the endpoint
+//! `check_profile` pack.
 
 /// Deterministic diagnostic event queue with phased delivery (test-only, OB4).
 pub mod event_queue;
@@ -286,70 +286,6 @@ impl RingBuffer {
     }
 }
 
-/// OpenTelemetry GenAI span names used for model and tool spans.
-/// String constants only; there is no OTel SDK dependency. The external
-/// semantic-convention version is pinned by the OTLP exporter adapter,
-/// never here; engine event codes stay stable regardless.
-pub mod gen_ai {
-    /// Model request span.
-    pub const REQUEST: &str = "gen_ai.request";
-    /// Model response span.
-    pub const RESPONSE: &str = "gen_ai.response";
-    /// Tool invocation span.
-    pub const TOOL_CALL: &str = "gen_ai.tool.call";
-    /// Agent invocation operation name.
-    pub const INVOKE_AGENT: &str = "gen_ai.invoke_agent";
-    /// Chat operation name.
-    pub const CHAT: &str = "gen_ai.chat";
-    /// Tool execution operation name.
-    pub const EXECUTE_TOOL: &str = "gen_ai.execute_tool";
-}
-
-/// A bounded diagnostic span over long work (import, cook, provider call,
-/// fork run). Tick-based so tests stay deterministic; wall time may be
-/// attached by service adapters outside this crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Span {
-    /// Span name; use [`gen_ai`] constants for model/tool work.
-    pub name: &'static str,
-    /// Tick when the span opened.
-    pub start_tick: u64,
-    /// Tick when the span closed, if it has.
-    pub end_tick: Option<u64>,
-}
-
-impl Span {
-    /// Open a span at `start_tick`.
-    #[must_use]
-    pub fn begin(name: &'static str, start_tick: u64) -> Self {
-        Self {
-            name,
-            start_tick,
-            end_tick: None,
-        }
-    }
-
-    /// Close the span. A tick before `start_tick` saturates to zero
-    /// duration rather than underflowing.
-    pub fn finish(&mut self, end_tick: u64) {
-        self.end_tick = Some(end_tick);
-    }
-
-    /// True while the span has no end tick.
-    #[must_use]
-    pub fn is_open(&self) -> bool {
-        self.end_tick.is_none()
-    }
-
-    /// Ticks between open and close, or zero while open or inverted.
-    #[must_use]
-    pub fn duration_ticks(&self) -> u64 {
-        self.end_tick
-            .unwrap_or(self.start_tick)
-            .saturating_sub(self.start_tick)
-    }
-}
-
 /// Bounded agent digest: per-code counts with first/last ticks, most
 /// frequent first (ties broken by code, so input order never matters).
 /// The returned string is at most `budget_bytes` bytes long; rows that do
@@ -546,27 +482,5 @@ mod tests {
         let mut shuffled = events.clone();
         shuffled.reverse();
         assert_eq!(digest(&events, 256), digest(&shuffled, 256));
-    }
-
-    #[test]
-    fn span_open_and_finish() {
-        let mut span = Span::begin(gen_ai::TOOL_CALL, 10);
-        assert!(span.is_open());
-        assert_eq!(span.duration_ticks(), 0);
-        span.finish(14);
-        assert!(!span.is_open());
-        assert_eq!(span.duration_ticks(), 4);
-        // Inverted finish saturates instead of underflowing.
-        let mut early = Span::begin(gen_ai::REQUEST, 10);
-        early.finish(4);
-        assert_eq!(early.duration_ticks(), 0);
-    }
-
-    #[test]
-    fn gen_ai_names_use_otel_convention() {
-        assert!(gen_ai::REQUEST.starts_with("gen_ai."));
-        assert!(gen_ai::TOOL_CALL.starts_with("gen_ai."));
-        assert!(!gen_ai::REQUEST.is_empty());
-        assert!(!gen_ai::TOOL_CALL.is_empty());
     }
 }

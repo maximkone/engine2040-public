@@ -33,7 +33,7 @@ the open capability rows of both plans.
 | PID servo (PX11), servo corpus (PX22) | missing (rowed) | no `crates/physics/src/servo.rs`; velocity-set only |
 | Swept shape-cast API (PX20) | missing (rowed) | segment-cast exists (`QueryBvh::cast_into`, BoxMm only); needs PH1, GP2 |
 | Runtime Voronoi fracture (DX5) | shaped-but-unproven | runtime Voronoi in `crates/destruction/src/fracture.rs` + offline `Mode::Voronoi` in `bake.rs`; needs DX4 |
-| Debris LOD (DX6), fracture authoring (DX7), bake rank (DX8), graded bonds (DX9) | missing (rowed) | `low_lod` flag still in tree; every bond still 1.0 (no `bond_grade.rs`) |
+| Debris LOD (DX6), fracture authoring (DX7), bake rank (DX8), graded bonds (DX9) | missing (rowed) | `low_lod` flag still in tree; every bond still 1.0 - code cut 2026-10-16, recover via git log --follow -- crates/destruction/src/bond_grade.rs |
 | Debris snapshot + resim (DX13) | shaped-but-unproven | snapshot bytes, digest and restore in `crates/destruction/src/snapshot.rs`; resim and rollback open; needs DX4, PX17 |
 | Combined 64+500 tick proof (PX19), 1,000-agent LOD (PX16) | missing (rowed) | no perf workload posts the physics slice at 64 fighters + 500 agents |
 
@@ -94,7 +94,7 @@ Best implementation: see the competitor table in §4 and Scorecard rows.
 - Tier A alpha (arena holds together at scale): PX1-PX3 plus DX1-DX4 and DX10 stand; PX9 contacts, PX10 CCD wiring and DX9 grading are required, plus the scale proofs PX16 (1,000-agent LOD, physics slice p99 <= 2 ms), PX17 (64-fighter snapshot in budget), PX18 (8-fighter clinch soak), PX19-PX22 and DX13-DX14. Bar: 8-fighter soak with destruction on hash x2; a 40 m/s blade never passes a 5 cm shield in 1,000 seeded swings; no bone interpenetration over 1 cm in 50 seeded falls; anchors hold until bonds fail; per-event 16/1024 caps hold; 64+500 tick server p99 <= 4 ms (P6); debris restores byte-equal under rollback.
 - Tier B v1: PX4 balance, PX11 PID, PX12 DAT coupling, DX5 runtime fracture, DX6 debris LOD, DX7 authoring. Bar: a 5-strength shove gives stagger, stumble, fall in order and recovers in budget; get-up jitter <= servo at <= 10% overhead; 1,000 debris within the DX4 budget, merges identical x2.
 - Tier C (only on demand): PX5 learned locomotion, DX8 bake-rank taste. Bar: AI walks, turns and recovers from shoves with replay exact x2; a blind A/B against LM1 decides adoption, else killed with numbers; no mocap bytes in git, no non-commercial training data in a shipped student (DT5 manifest gate).
-- CUT (never): a second physics backend, custom XPBD in the tick (presentation-only XPBD allowed), soft-body shields in the tick, naval, online RL in the tick, vendor denoiser in sim. Cores deepened, never forked: the Rapier step contract, `powered.rs` feel, `budget.rs` scale, `nav_dirty.rs` nav contract.
+- CUT (never): a second physics backend, custom XPBD in the tick (presentation-only XPBD allowed), soft-body shields in the tick, naval, online RL in the tick, vendor denoiser in sim. Cores deepened, never forked: the Rapier step contract, `powered.rs` feel, `budget.rs` scale - code cut 2026-10-16, recover via git log --follow -- crates/destruction/src/nav_dirty.rs (`nav_dirty.rs` nav contract had zero non-test callers).
 
 ### cross-architecture matrix (HS2, FOCUS Now)
 
@@ -269,8 +269,7 @@ Donors: `steals.md`; porting policy is AGENTS rule 4. The donor table (repo, SPD
   particle path stays out (look plan owns its singles).
 - Merge: PX9 owns contacts plus joint tables plus motors in
   `ragdoll.rs`/`joint_limits.rs` — never a contacts crate plus a joints
-  crate. DX9 owns grading plus density cuts plus sliver reject in
-  `bond_grade.rs`. PX13/DX10 audits own hunks and tests, never new systems.
+  crate. DX9 grading plus density cuts plus sliver reject - code cut 2026-10-16, recover via git log --follow -- crates/destruction/src/bond_grade.rs. PX13/DX10 audits own hunks and tests, never new systems.
 - Freeze: the DX1 break-event shape, the 60-tick get-up budget, the
   fixed 60 Hz step with fixed iterations, and the `GRID`/solver order
   proofs. Changes arrive as new tables or layers, never as silent edits.

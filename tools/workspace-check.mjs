@@ -579,7 +579,6 @@ try {
     "net/src/quic.rs",
     "observe/src/lib.rs",
     "perf/src/workloads.rs",
-    "physics/src/grapple.rs",
     "playtest/src/agent.rs", "playtest/src/causal.rs", "playtest/src/eval.rs",
     "playtest/src/keypoint.rs", "playtest/src/lib.rs",
     "playtest/src/reachability.rs", "playtest/src/spatial_shapes.rs", "playtest/src/tournament.rs",

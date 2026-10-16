@@ -631,6 +631,10 @@ pub const fn backend_label(backend: Backend) -> &'static str {
 }
 
 /// Fixture latency for one row in ms: deterministic per backend plus slot.
+/// Eval-side fixture policy (mock scripted rows: 0/9/120 ms bases); the
+/// living-world module keeps its own separate live pacing policy with
+/// different values. The two are independent by design, not one shared
+/// policy.
 pub const fn fixture_latency_ms(backend: Backend, index: u64) -> u64 {
     match backend {
         Backend::Mock => LATENCY_MOCK_MS + index % 3,
@@ -640,6 +644,7 @@ pub const fn fixture_latency_ms(backend: Backend, index: u64) -> u64 {
 }
 
 /// Fixture cost for one row: local reports units, mock/remote stay Unknown.
+/// Eval-side policy only; living-world cost terms differ (see living.rs).
 pub const fn fixture_cost(backend: Backend, index: u64) -> Cost {
     match backend {
         Backend::Mock | Backend::Remote => Cost::Unknown,

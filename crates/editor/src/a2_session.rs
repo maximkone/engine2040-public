@@ -1080,9 +1080,12 @@ mod tests {
     #[test]
     fn full_session_roundtrips_on_a_scratch_dir() {
         let content = lane_content_root();
-        if !content.join(HERO_MESH).exists() {
-            return;
-        }
+        let hero_path = content.join(HERO_MESH);
+        assert!(
+            hero_path.exists(),
+            "missing content fixture {}: a sparse checkout must fail loudly, never green silently",
+            hero_path.display()
+        );
         let scratch = std::env::temp_dir().join("ev7-a2-scratch");
         let _ = std::fs::remove_dir_all(&scratch);
         let report = run_session(&content, &scratch, None).unwrap();
@@ -1113,9 +1116,12 @@ mod tests {
     #[test]
     fn two_runs_write_identical_scene_bytes() {
         let content = lane_content_root();
-        if !content.join(HERO_MESH).exists() {
-            return;
-        }
+        let hero_path = content.join(HERO_MESH);
+        assert!(
+            hero_path.exists(),
+            "missing content fixture {}: a sparse checkout must fail loudly, never green silently",
+            hero_path.display()
+        );
         let first_dir = std::env::temp_dir().join("ev7-a2-cross-a");
         let second_dir = std::env::temp_dir().join("ev7-a2-cross-b");
         let _ = std::fs::remove_dir_all(&first_dir);

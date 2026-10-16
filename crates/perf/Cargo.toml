@@ -27,9 +27,6 @@ engine-render.workspace = true
 engine-arena.workspace = true
 engine-ai.workspace = true
 engine-destruction.workspace = true
-# SL17: server_budget reuses the ON3 snapshot/starve cadence owned by
-# engine-net::interest (never mirrors it); game/siege.rs follows the same
-# pattern. Intra-workspace std-only edge, no new external dependency.
 engine-net.workspace = true
 puffin = { workspace = true, optional = true }
 

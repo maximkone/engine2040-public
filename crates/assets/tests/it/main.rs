@@ -4,8 +4,8 @@
 //! executable, not one per file. Add a test file as `tests/it/<name>.rs`
 //! plus one `mod <name>;` line below. Run one file with
 //! `cargo test -p engine-assets --test it <name>::`.
-//! `tests/vfetch_vectors.rs` stays its own binary: its `import` leg does
-//! not build yet.
+//! `tests/vfetch_vectors.rs` stays its own binary: its `import` leg builds
+//! under `--features import` (proven 2026-10-16: 7 passed).
 
 mod blockcomp_cook;
 mod extras_wiring;

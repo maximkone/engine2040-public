@@ -12,11 +12,11 @@
 //! Error type: [`ProfileError`]; the profiler is off by default and every
 //! entry point fails loudly instead of guessing.
 //!
-//! Span keys follow the observe span convention (`perf.*`). The observe crate
-//! stays out of this crate's dependency graph on purpose (the profiler adds
-//! no new dependencies), so interop is by string key: pass one of the
-//! [`SYSTEM_SPANS`] names to `Span::begin` on the observe side and the two
-//! records join on the key.
+//! Span keys are plain `perf.*` strings with no cross-crate join: the perf
+//! crate takes no dependency on `engine-observe` (the profiler adds no new
+//! dependencies), so nothing here reads an observe-side span. A caller that
+//! wants both records correlates them by matching these string keys
+//! operator-side.
 //!
 //! Puffin (`profile` feature) only emits scopes while the profiler is
 //! enabled; serving or saving the puffin stream stays operator-side
@@ -433,39 +433,6 @@ impl GpuPass {
     }
 }
 
-/// One timestamp-query pair: what the driver WOULD capture for a pass.
-/// Real GPU numbers stay operator-side; `resolve` fills the CPU side only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GpuQuery {
-    /// Pass under query.
-    pub pass: GpuPass,
-    /// Begin-timestamp slot.
-    pub begin_slot: u32,
-    /// End-timestamp slot.
-    pub end_slot: u32,
-}
-
-impl GpuQuery {
-    /// Query pair for one pass.
-    #[must_use]
-    pub fn for_pass(pass: GpuPass) -> Self {
-        Self {
-            pass,
-            begin_slot: pass.query_begin(),
-            end_slot: pass.query_end(),
-        }
-    }
-}
-
-/// Query plan for the frame: one pair per pass, in report order.
-#[must_use]
-pub fn query_plan() -> Vec<GpuQuery> {
-    GpuPass::ALL
-        .iter()
-        .map(|pass| GpuQuery::for_pass(*pass))
-        .collect()
-}
-
 /// One resolved pass sample: CPU-side ms measured here, GPU-side ms left
 /// for the operator's reference-GPU run (`None` means not measured here).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -489,18 +456,6 @@ impl GpuSample {
             cpu_ms,
             gpu_ms: None,
         })
-    }
-
-    /// Attach a reference-GPU measurement (operator-side), refusing
-    /// non-finite ms. Fails loudly instead of storing a NaN.
-    pub fn resolve_gpu(&mut self, ms: f64) -> Result<(), ProfileError> {
-        if !ms.is_finite() || ms < 0.0 {
-            return Err(ProfileError::NonFiniteSample {
-                what: self.pass.name(),
-            });
-        }
-        self.gpu_ms = Some(ms);
-        Ok(())
     }
 }
 
@@ -1411,7 +1366,6 @@ mod tests {
         slots.sort_unstable();
         slots.dedup();
         assert_eq!(slots.len(), 2 * GpuPass::ALL.len());
-        assert_eq!(query_plan().len(), GpuPass::ALL.len());
     }
 
     #[test]
@@ -1431,15 +1385,12 @@ mod tests {
                 "ms {bad} is refused"
             );
         }
-        let mut sample = GpuSample::cpu_only(GpuPass::Rl2Ibl, 0.5).expect("valid pass sample");
+        let sample = GpuSample::cpu_only(GpuPass::Rl2Ibl, 0.5).expect("valid pass sample");
         assert_eq!(sample.gpu_ms, None);
-        sample.resolve_gpu(1.75).expect("operator ms attaches");
-        assert_eq!(sample.gpu_ms, Some(1.75));
         assert!(matches!(
             GpuSample::cpu_only(GpuPass::Rl2Ibl, f64::NAN),
             Err(ProfileError::NonFiniteSample { .. })
         ));
-        assert!(sample.resolve_gpu(f64::NAN).is_err());
     }
 
     #[test]

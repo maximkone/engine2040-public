@@ -1,7 +1,8 @@
 //! lod_swap: runtime LOD swap over cooked LOD chains with hysteresis.
 //!
-//! Consumer: game/editor loading picks the resident LOD per fighter each tick
-//! through [`LodSwapper`]. Data owner: `engine-assets`; chain contents stay
+//! Status: no game/editor caller wires [`LodSwapper`] yet;
+//! `game/src/windowed_dressing.rs` uses only `distance_mm_between` plus
+//! `target_lod`. Data owner: `engine-assets`; chain contents stay
 //! owned by `mesh_cook` (this module only reads [`MeshCookOutput`]). Units:
 //! integer millimeters for every distance and band. Determinism scope: the
 //! same actor set plus the same `(tick, distance_mm)` sequence always yields

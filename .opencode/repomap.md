@@ -1,14 +1,14 @@
 # repomap: engine2040
-_generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree counts match the list, not raw disk) | 1240 hot (commits, last 14d) | hot-only: top 41 of 1240 hot files, max 15 symbols each | cap 16KB/500 lines_
+_generated 2026-10-16T21:24:03.250Z | 6168 files mapped (post-exclusion: tree counts match the list, not raw disk) | 1138 hot (commits, last 14d) | hot-only: top 39 of 1138 hot files, max 15 symbols each | cap 16KB/500 lines_
 
 ## tree
 - `.cargo/` - 2 files
 - `.config/` - 2 files
 - `.gitattributes` - 1 file
-- `.github/` - 3 files
+- `.github/` - 2 files
 - `.gitignore` - 1 file
 - `.ignore` - 1 file
-- `.opencode/` - 39 files
+- `.opencode/` - 34 files
 - `AGENTS.md` - 1 file
 - `AGENTS.test.mjs` - 1 file
 - `CLAUDE.md` - 1 file
@@ -21,9 +21,9 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `arsenal.json` - 1 file
 - `clients/` - 11 files
 - `content/` - 822 files
-- `crates/` - 1101 files
+- `crates/` - 1001 files
 - `deny.toml` - 1 file
-- `docs/` - 172 files
+- `docs/` - 167 files
 - `examples/` - 8 files
 - `fixtures/` - 111 files
 - `from-design-studio/` - 31 files
@@ -38,44 +38,61 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `src/` - 2 files
 - `team/` - 8 files
 - `tests/` - 5 files
-- `tools/` - 238 files
-- cold dirs left out (hot-only, no commit in 14d): 6 entries, biggest build/ 3548, .tools/ 2, .editorconfig 1, LICENSE-APACHE 1, SECURITY.md 1, rust-toolchain.toml 1
+- `tools/` - 225 files
+- cold dirs left out (hot-only, no commit in 14d): 6 entries, biggest build/ 3549, .tools/ 2, .editorconfig 1, LICENSE-APACHE 1, SECURITY.md 1, rust-toolchain.toml 1
+## big files (over one 64KB read - Grep, or read with offset+limit; never whole)
+- `docs/design/STAGES.md` - 685KB, ~175367 tok (not symbol-mapped)
+- `build/gm3/release/build/unicode-general-category-faf630b300439277/out/category.rs` - 618KB, ~158285 tok (not symbol-mapped)
+- `.opencode/plugin/loop-keeper.js` - 278KB, ~71210 tok
+- `crates/render/src/post.rs` - 238KB, ~60848 tok
+- `docs/research/LADDER.md` - 199KB, ~50898 tok
+- `crates/arena/src/lib.rs` - 186KB, ~47666 tok
+- `crates/render/src/ibl.rs` - 181KB, ~46362 tok
+- `crates/game/src/camera.rs` - 170KB, ~43443 tok
+- `crates/endpoint/src/assistant.rs` - 168KB, ~42926 tok
+- `docs/research/COMPARE.md` - 158KB, ~40435 tok
+- `crates/game/src/fighter_look.rs` - 142KB, ~36450 tok
+- `crates/endpoint/src/build_level.rs` - 138KB, ~35217 tok
+- ... (+80 more over 64KB)
 
 ## symbols (hot-only, xN = commits last 14d, +refN = inbound import refs, ~N tok = bytes/4 hot only)
-### `docs/SPRINT.md` x140 (6.9KB, ~1778 tok)
+### `docs/SPRINT.md` x136 (7.0KB, ~1789 tok)
 - # SPRINT — board and receipts
 - ## How the board runs
 - ## Areas
 - ## Board
 - ## Parked (not on the board; add a row to revive)
 - ## Receipt log
-### `docs/BLOCKERS.md` x109 (84KB, ~21433 tok)
+### `docs/BLOCKERS.md` x111 (74KB, ~19005 tok)
 - # BLOCKERS - second identical failures, with owner, repro and remedy
 - ## Open
-### `docs/EMPIRE-INBOX.md` x76 (11KB, ~2834 tok)
+### `docs/EMPIRE-INBOX.md` x80 (14KB, ~3456 tok)
 - # Empire inbox — engine2040
 - ## Open
 - ## Done
 - ## Archive 2026-10-02 (diagnose W1-03: 3 stale improver FP diagnostics pruned from Open, texts preserved, nothing lost)
 - ## Archive 2026-10-03 (stale 7+ days; texts kept, reopen by moving a line back under ## Open)
-### `docs/SPRINT-19-receipts.md` x52 (59KB, ~15142 tok)
+### `docs/SPRINT-19-receipts.md` x53 (59KB, ~15186 tok)
 - ## Receipts
-### `tools/workspace-check.mjs` x44 (37KB, ~9532 tok)
+### `tools/workspace-check.mjs` x46 (41KB, ~10542 tok)
 - `const LFS_SIZE_LIMIT`
 - `function largeBlobViolations`
 - `const OWN_TEST_BINARY`
 - `function testLayoutViolations`
+- `function parseModmapHeadings`
+- `function parseModmapPaths`
+- `function structuralMapViolations`
 - `function parseBoardTasks`
 - `const WORKSPACE_CHECK_HELP`
 - `function hasHelpFlag`
-### `.opencode/plugin/loop-keeper.js` x42 (278KB, ~71210 tok) - loop-keeper: continues THIS repo's /sprint when its session goes idle, and
-### `docs/design/SLICE.md` x40 (10KB, ~2572 tok)
+### `docs/design/SLICE.md` x44 (11KB, ~2727 tok)
 - # SLICE — the arena duel scorecard (director seat)
-- ## Row verdicts (first 20 open FOCUS rows, 2026-10-16, re-verified at f18ed81d)
+- ## Row verdicts (first 20 open FOCUS rows, 2026-10-16, re-verified at 93776257)
 - ## Cut log
 - ## Landscape dry-run (first 10 LI rows, 2026-10-16)
-### `docs/SPRINT-18-gaps.md` x38 (118KB, ~30241 tok)
-### `docs/FOCUS.md` x37 (13KB, ~3380 tok)
+### `.opencode/plugin/loop-keeper.js` x41 (278KB, ~71210 tok) - loop-keeper: continues THIS repo's /sprint when its session goes idle, and
+### `docs/SPRINT-18-gaps.md` x40 (118KB, ~30280 tok)
+### `docs/FOCUS.md` x38 (13KB, ~3402 tok)
 - # FOCUS — Rome at war, online, looking like 2040. Arena first, then the city and the siege field, on Windows.
 - ## Now (owner 2026-10-10): four Core proofs, engine depth, multiplayer last
 - ## Core (owner 2026-09-30; wins over everything below where they differ)
@@ -87,20 +104,7 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - ## CUT (never — no files, no deps, no waves)
 - ## OPEN (undecided — not cut, not scheduled, do not build yet)
 - ## Slim rule
-### `docs/VISION.md` x29 (36KB, ~9159 tok)
-- # VISION — Rust engine, AI-native tools, convincing 3D
-- ## Product promises
-- ## Boundaries that make this possible
-- ## Priorities
-- ## Final picture: what the finished engine looks like (owner 2026-09-28)
-- ## Final bars (TARGETS — only `tools/finish.mjs` says what is met)
-- ## What stays undecided (OPEN — do not build yet)
-- ## Anti-vision (CUT — never)
-- ## Full engine depth: the worlds and workflows we intend to support
-- ## Plans: which plan serves which part of the vision
-- ## Steal map (scouts: what we read, oldest first)
-- ## How research aims at this file
-### `crates/arena/src/lib.rs` x27 (186KB, ~47598 tok)
+### `crates/arena/src/lib.rs` x30 (186KB, ~47666 tok)
 - `mod collide`
 - `mod controller`
 - `mod eqs_bind`
@@ -117,7 +121,7 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `mod sync`
 - `mod world`
 - ... (+25 more, see file)
-### `docs/SMOOTH-BUILD.md` x27 (265KB, ~67892 tok)
+### `docs/SMOOTH-BUILD.md` x29 (118KB, ~30222 tok)
 - # SMOOTH-BUILD — build the game without friction; let problems fix themselves
 - ## 1. See every change instantly
 - ## 2. The engine fixes content for you
@@ -130,11 +134,24 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - ## OPT1 build baselines (observed-only, speed102, 2026-09-30)
 - ## OPT4 re-verify (2026-10-12, KEEP rust-lld, no config change)
 - ## OPT8 hakari spike (2026-10-12, builder-build-r3, evidence-only, no config change)
-- ## OPT8 re-measure (2026-10-12, builder-build-r5, evidence-only, no config change)
 - ## OPT4/OPT5/OPT7 landed evidence (2026-10-12, builder-build-r6, docs-only, no re-verify)
 - ## OPT9 sccache landed evidence (2026-10-12, builder-build-r7, docs-only, no config change)
-- ... (+10 more, see file)
-### `docs/plan/BOOK-GAPS-2026-10-12.md` x25 (30KB, ~7633 tok)
+- ## OPT32 proposal: warm sccache + one target-dir per slot (2026-10-13, config-only, no build run)
+- ... (+9 more, see file)
+### `docs/VISION.md` x28 (35KB, ~9007 tok)
+- # VISION — Rust engine, AI-native tools, convincing 3D
+- ## Product promises
+- ## Boundaries that make this possible
+- ## Priorities
+- ## Final picture: what the finished engine looks like (owner 2026-09-28)
+- ## Final bars (TARGETS — only `tools/finish.mjs` says what is met)
+- ## What stays undecided (OPEN — do not build yet)
+- ## Anti-vision (CUT — never)
+- ## Full engine depth: the worlds and workflows we intend to support
+- ## Plans: which plan serves which part of the vision
+- ## Steal map (scouts: what we read, oldest first)
+- ## How research aims at this file
+### `docs/plan/BOOK-GAPS-2026-10-12.md` x26 (30KB, ~7742 tok)
 - # Book gaps vs engine2040 (2026-10-12)
 - ## 1. Verdict
 - ## 2. Wired but unused (code with no live caller)
@@ -143,7 +160,7 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - ## 5. Plan says X, code or book says Y
 - ## 6. Netcode: findings and a decision for the engine2040 lead
 - ## 7. What I re-checked, and what was wrong
-### `crates/endpoint/src/mcp.rs` x24 (113KB, ~28971 tok)
+### `crates/endpoint/src/mcp.rs` x24 (116KB, ~29722 tok)
 - `fn tool_names`
 - `fn default_tool_names`
 - `struct ToolCostRow`
@@ -160,11 +177,7 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `fn batch_error`
 - `fn cap_error`
 - ... (+25 more, see file)
-### `docs/research/LADDER.md` x24 (198KB, ~50792 tok)
-- # Research ladder — every idea, one line, climbing
-- ## Pillar cursor
-- ## Lines
-### `tools/drift-check.mjs` x23 (37KB, ~9587 tok)
+### `tools/drift-check.mjs` x24 (37KB, ~9586 tok)
 - `const focusFamilies`
 - `const isShellJunk`
 - `const shellJunk`
@@ -181,31 +194,34 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `const medianMs`
 - `const tuneStuckTimeout`
 - ... (+4 more, see file)
-### `crates/game/src/lib.rs` x22 (117KB, ~29950 tok)
+### `docs/INDEX.md` x23 (5.4KB, ~1392 tok)
+- # INDEX — active contracts
+- ## Precedence
+- ## Active set
+- ## How-to (docs/book/)
+### `docs/research/LADDER.md` x23 (199KB, ~50898 tok)
+- # Research ladder — every idea, one line, climbing
+- ## Pillar cursor
+- ## Lines
+### `crates/game/src/lib.rs` x22 (123KB, ~31527 tok)
 - `mod anim_bridge`
 - `mod arena_kit`
 - `mod audio_director`
 - `mod audio_mix`
 - `mod balance_verdict`
-- `mod ballistics`
 - `mod bench`
 - `mod camera`
 - `mod camera_arm`
 - `mod camera_feed`
-- `mod camera_feel`
-- `mod camera_stack`
 - `mod capture`
-- `mod cine`
 - `mod crash`
+- `mod crowd_gpu`
+- `mod dev_hotpatch`
+- `mod director`
+- `mod fight_ring`
 - ... (+25 more, see file)
-### `crates/game/src/bin/arena.rs` x21 (114KB, ~29265 tok) - ! arena.exe: window binary (winit loop, fixed-tick accumulator,
-### `docs/INDEX.md` x21 (5.5KB, ~1415 tok)
-- # INDEX — active contracts
-- ## Precedence
-- ## Active set
-- ## How-to (docs/book/)
-### `docs/SPRINT-07-accepted-plan-rows.md` x20 (79KB, ~20304 tok)
-### `crates/anim/src/lib.rs` x19 (7.1KB, ~1830 tok)
+### `crates/game/src/bin/arena.rs` x21 (118KB, ~30090 tok) - ! arena.exe: window binary (winit loop, fixed-tick accumulator,
+### `crates/anim/src/lib.rs` x20 (7.1KB, ~1830 tok)
 - `mod blend`
 - `mod clip`
 - `mod contract`
@@ -222,7 +238,8 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `mod ik`
 - `mod inertialize`
 - ... (+25 more, see file)
-### `crates/assets/src/lib.rs` x18 (9.8KB, ~2511 tok)
+### `docs/SPRINT-07-accepted-plan-rows.md` x20 (79KB, ~20304 tok)
+### `crates/assets/src/lib.rs` x19 (9.7KB, ~2493 tok)
 - `mod budget`
 - `mod datanode`
 - `mod extras`
@@ -239,6 +256,14 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `mod clip_receipt`
 - `mod gen_intake`
 - ... (+25 more, see file)
+### `docs/ARCHITECTURE.md` x19 (17KB, ~4451 tok)
+- # ARCHITECTURE — boundaries before more subsystems
+- ## 1. Dependency direction
+- ## 2. Rust workspace foundation — M0 checklist
+- ## 3. Scene and data contracts — settle before a complex renderer
+- ## 4. Three clocks, separate responsibilities
+- ## 5. Plugins, reload and failures
+- ## 6. Verification is part of the design
 ### `crates/combat/src/fight.rs` x18 (131KB, ~33505 tok)
 - `struct Tables`
 - `fn class_tables`
@@ -256,15 +281,7 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `struct StrikePose`
 - `fn validate_strike_poses`
 - ... (+10 more, see file)
-### `docs/ARCHITECTURE.md` x18 (17KB, ~4451 tok)
-- # ARCHITECTURE — boundaries before more subsystems
-- ## 1. Dependency direction
-- ## 2. Rust workspace foundation — M0 checklist
-- ## 3. Scene and data contracts — settle before a complex renderer
-- ## 4. Three clocks, separate responsibilities
-- ## 5. Plugins, reload and failures
-- ## 6. Verification is part of the design
-### `docs/plan/README.md` x18 (11KB, ~2911 tok)
+### `docs/plan/README.md` x18 (12KB, ~3058 tok)
 - # Plans — the one index, and how a plan is written
 - ## Plan index (owner 2026-10-10: one index for every file in `docs/plan/`)
 - ## How a plan is written
@@ -281,24 +298,7 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - ## 8. Quality gates tests, benchmarks, captures, budgets kept green forever
 - ## 9. Session estimate sessions per tier A/B/C
 - ... (+4 more, see file)
-### `tools/board-slice.mjs` x17 +ref11 (23KB, ~5880 tok)
-- `function boardShardFiles`
-- `function loadBoardText`
-- `function archiveDoneFiles`
-- `function archivedDoneRows`
-- `function focusNowIds`
-- `function parseBoard`
-- `function needsOf`
-- `function ownedOf`
-- `function rowReady`
-- `function focusAncestors`
-- `function blockedBy`
-- `function pickNext`
-- `function ticksOf`
-### `docs/plan/steals.md` x17 (14KB, ~3606 tok)
-- # Steals: open steals that land on a finish bar
-- ## Steals
-### `docs/plan/render-look.md` x16 (39KB, ~9993 tok)
+### `docs/plan/render-look.md` x18 (40KB, ~10145 tok)
 - # Render look (Look)
 - ## 1. Where it stands
 - ## 2. Finish line
@@ -309,7 +309,7 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - ## 7. Board tasks
 - ## 8. Quality gates
 - ## 9. Session estimate
-### `tools/proof.mjs` x16 (37KB, ~9431 tok)
+### `tools/proof.mjs` x18 (37KB, ~9454 tok)
 - `function parseProofArgs`
 - `const PROOF_HELP`
 - `const IR_BENCHES`
@@ -326,29 +326,30 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `const NEXTEST_JUNIT`
 - `function nextestJunitPath`
 - ... (+7 more, see file)
-### `crates/physics/src/cloth.rs` x15 (101KB, ~25815 tok)
-- `enum ClothError`
-- `struct ClothParams`
-- `fn default_cape`
-- `fn validate`
-- `enum ClothCollider`
-- `fn capsule`
-- `fn sphere`
-- `struct ClothWorld`
-- `fn new_grid`
-- `fn particle_count`
-- `fn constraint_count`
-- `fn cols`
-- `fn rows`
-- `fn tick`
-- `fn params`
-- ... (+25 more, see file)
+### `tools/board-slice.mjs` x17 +ref10 (23KB, ~5880 tok)
+- `function boardShardFiles`
+- `function loadBoardText`
+- `function archiveDoneFiles`
+- `function archivedDoneRows`
+- `function focusNowIds`
+- `function parseBoard`
+- `function needsOf`
+- `function ownedOf`
+- `function rowReady`
+- `function focusAncestors`
+- `function blockedBy`
+- `function pickNext`
+- `function ticksOf`
+### `docs/plan/steals.md` x17 (14KB, ~3606 tok)
+- # Steals: open steals that land on a finish bar
+- ## Steals
+### `crates/perf/src/main.rs` x15 (70KB, ~17824 tok) - ! perf: stress harness -> perf.csv. Presentation only, never hashed.
 ### `docs/plan/ATLAS.md` x15 (10.0KB, ~2550 tok)
 - # Plan atlas - where everything is planned, and how true each plan is today
 - ## 1. Every plan: rows, crates and health
 - ## 2. Row prefix -> plan
 - ## 3. Crate -> plans
-### `.opencode/seat-guard.mjs` x14 +ref4 (43KB, ~11126 tok)
+### `.opencode/seat-guard.mjs` x14 +ref3 (43KB, ~11126 tok)
 - `const DEFAULT_CLASSES`
 - `const CLASSES`
 - `const CARGO_SLOT_MAX_MS`
@@ -365,39 +366,40 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `const claimLines`
 - `const allowedPaths`
 - ... (+22 more, see file)
-### `crates/net/src/lib.rs` x14 (11KB, ~2893 tok)
-- `mod anticheat`
+### `crates/net/src/lib.rs` x14 (7.9KB, ~2016 tok)
 - `mod cells`
 - `mod courier`
 - `mod dedicated`
 - `mod delay`
 - `mod delta`
-- `mod guard`
 - `mod heal`
 - `mod interest`
 - `mod interp`
-- `mod lagcomp`
 - `mod link`
 - `mod lobby`
-- `mod nat`
 - `mod netcode`
-- ... (+25 more, see file)
-### `tools/lane-board.mjs` x14 (35KB, ~8939 tok)
-- `function idPrefix`
-- `function laneOf`
-- `function roleOfLane`
-- `function parseTopLine`
-- `function sizeOf`
-- `function shortSection`
-- `function titleOf`
-- `function rowCell`
-- `function waitsOf`
-- `function keeperRows`
-- `function parsePieces`
-- `function buildBoard`
-- `function gather`
-- `function seatSelects`
-- `function check`
+- `mod online`
+- `mod played`
+- `mod quic`
+- `mod receipt`
+- ... (+15 more, see file)
+### `crates/physics/src/lib.rs` x14 (3.2KB, ~813 tok)
+- `mod balance`
+- `mod controller`
+- `mod controller2`
+- `mod kcc`
+- `mod limb`
+- `mod overlap`
+- `mod pd`
+- `mod powered`
+- `mod ragdoll`
+- `mod ragdoll_tape`
+- `mod rapier`
+- `mod rigid`
+- `mod stagger_memory`
+- `struct Space`
+- `fn new`
+- ... (+4 more, see file)
 ### `tools/rust-quality.mjs` x13 +ref2 (39KB, ~10016 tok)
 - `const SIM_CRATES`
 - `const HOT_CRATES`
@@ -432,6 +434,23 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `fn decide_drained_into`
 - `fn decide_drained`
 - ... (+19 more, see file)
+### `crates/audio/src/lib.rs` x13 (60KB, ~15244 tok)
+- `mod bank`
+- `mod coherence`
+- `mod combat_cues`
+- `mod crowd`
+- `mod cue`
+- `mod decode`
+- `mod device`
+- `mod director`
+- `mod dsp`
+- `mod engine`
+- `mod feed`
+- `mod heal`
+- `mod hrtf`
+- `mod mix`
+- `mod music`
+- ... (+25 more, see file)
 ### `crates/combat/src/lib.rs` x13 (12KB, ~2994 tok)
 - `mod anatomy`
 - `mod arena`
@@ -449,40 +468,22 @@ _generated 2026-10-16T14:31:56.485Z | 6291 files mapped (post-exclusion: tree co
 - `mod limbloss`
 - `mod nerve`
 - ... (+15 more, see file)
-### `crates/physics/src/lib.rs` x13 (4.1KB, ~1058 tok)
-- `mod balance`
-- `mod broadphase`
-- `mod cast`
-- `mod checked_fix`
-- `mod cloth`
-- `mod controller`
-- `mod controller2`
-- `mod grapple`
-- `mod islands`
-- `mod islands_build`
-- `mod kcc`
-- `mod limb`
-- `mod lod`
-- `mod overlap`
-- ... (+18 more, see file)
-### `crates/render/src/lib.rs` x13 (19KB, ~4977 tok)
-- `mod window`
-- `mod graph`
-- `mod quality`
-- `mod v1`
-- `mod variants`
-- `mod v1_ibl_shadow`
-- `mod v1_skin`
-- `mod v1_lighting`
-- `mod v1_temporal`
-- `mod v1_gpu`
-- `mod present`
-- `mod overlay`
+### `crates/editor/src/commands.rs` x13 (127KB, ~32510 tok)
+- `struct Document`
+- `mod material`
+- `fn new`
+- `enum Op`
+- `struct Batch`
+- `fn with_stamp`
+- `enum ReceiptSource`
+- `struct ProvenanceStamp`
+- `fn human`
+- `fn script`
+- `fn model`
+- `struct Preview`
+- `struct Applied`
+- `fn batch_id`
+- `enum BatchError`
 - ... (+25 more, see file)
-### `tools/lanes.mjs` x13 (22KB, ~5672 tok)
-- `const flagsFor`
-- `const isWarmLane`
-- `const COLD_HINT`
-### `tools/sprint-loop.mjs` x13 (10KB, ~2595 tok) - Autonomous sprint waves for the OpenCode setup. Each wave is one fresh
 
-_hot-only: 1317 more files are below the cut and not listed_
+_hot-only: 1207 more files are below the cut and not listed_

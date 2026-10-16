@@ -115,13 +115,13 @@ pub struct SceneRow {
 
 /// Snapshot a hierarchy into deterministic panel rows.
 ///
-/// Roots come first sorted by id string, each followed depth-first by its
+/// Roots come first sorted by id, each followed depth-first by its
 /// children (also sorted), so the same hierarchy always yields the same rows.
 /// Takes scene data as an argument and returns owned rows; nothing is stored.
 pub fn snapshot_rows(hierarchy: &Hierarchy) -> Vec<SceneRow> {
     let mut rows = Vec::with_capacity(hierarchy.len());
     let mut roots: Vec<ObjectId> = hierarchy.roots();
-    roots.sort_by_key(|a| a.to_string());
+    roots.sort();
     // Iterative depth-first walk; children pushed reversed so the smallest id
     // pops first. Depth saturates rather than overflowing on long chains.
     let mut stack: Vec<(ObjectId, u32)> = roots.into_iter().rev().map(|id| (id, 0)).collect();
@@ -433,11 +433,6 @@ impl Shell {
     /// The staged preview, if an edit passed validation and waits for apply.
     pub fn staged_preview(&self) -> Option<&Preview> {
         self.staged.as_ref().map(|staged| &staged.preview)
-    }
-
-    /// Discard the staged edit. True when one was waiting.
-    pub fn discard_staged(&mut self) -> bool {
-        self.staged.take().is_some()
     }
 
     /// Automatic inspector grid for the selection (ED9 wave-32 caller).
@@ -1153,11 +1148,6 @@ impl Shell {
     #[cfg(feature = "ui")]
     pub fn tune_replay_exact(&self) -> bool {
         self.tuning.replay_exact()
-    }
-
-    /// Every template kind, in tab order.
-    pub fn template_kinds() -> [TemplateKind; 4] {
-        TemplateKind::all()
     }
 
     /// Reserved template items in name order.

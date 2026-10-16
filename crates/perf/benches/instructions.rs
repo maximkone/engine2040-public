@@ -8,6 +8,13 @@
 //!
 //! Run (Linux with Valgrind and `gungraun-runner` installed):
 //! `cargo bench --locked -p engine-perf --bench instructions`.
+//! Enforcement leg: this budget is enforced ONLY by the Linux leg of
+//! `node tools/proof.mjs --perf` (`irGateVerdict` there), whose receipt line
+//! `[PASS] instruction counts inside the 2% Ir budget (...)` (or `[FAIL] ...`)
+//! is the proof. A bare `cargo bench` run, a Windows run, or a
+//! `cargo test --all-targets` launch (this binary exits 0 without measuring,
+//! see `main` below) proves nothing about the budget: cite the `--perf`
+//! receipt line wherever the 2% is claimed.
 //! Inputs come from `setup`, which Callgrind does not count; the measured
 //! region is the call under test. Wall-clock timing stays in the ignored
 //! timing tests.

@@ -7,26 +7,27 @@
 //! plus same query gives the same hits; same intent over the same
 //! actors in any order gives the same placement or conflict.
 //! Errors: [`BrowserError`]; refusals stage nothing and mutate nothing.
-//! TEMPORARY std-only mirrors (no dependency edge yet; the orchestrator
-//! wires the real edges and deletes these): `AssetKind` mirrors the assets
+//! Local vocabulary copies (headless path): `AssetKind` matches the assets
 //! `bundle::EntryKind` discriminants 1-5, `Relation`/`Wall`/`Target`/
-//! `Want` mirror the spatial `place` vocabulary, `DropPreview` follows the
+//! `Want` match the spatial `place` vocabulary, `DropPreview` follows the
 //! endpoint `PreviewReceipt` discipline (dry-run effects plus resulting
-//! revision, conflicts write nothing).
+//! revision, conflicts write nothing). `engine-spatial` is a `ui`-only
+//! dependency (Cargo.toml), so headless builds solve through these local
+//! defs; keep the values in sync by hand when either side changes.
 
 use std::fmt;
 
 use crate::commands::bound_to;
 
 /// Longest asset name in chars.
-/// TEMPORARY mirror of the assets `bundle::MAX_NAME_CHARS`; same budget, no edge.
+/// Local copy of the assets `bundle::MAX_NAME_CHARS` for headless builds.
 pub const MAX_NAME_CHARS: usize = 128;
 /// Longest tag in chars.
 pub const MAX_TAG_CHARS: usize = 64;
 /// Most tags kept on one entry.
 pub const MAX_TAGS_PER_ENTRY: usize = 8;
 /// Most entries accepted in one bundle view.
-/// TEMPORARY mirror of the assets `bundle::MAX_ENTRIES`; same budget, no edge.
+/// Local copy of the assets `bundle::MAX_ENTRIES` for headless builds.
 pub const MAX_ENTRIES: usize = 4096;
 /// Longest search text or tag filter in chars.
 pub const MAX_QUERY_CHARS: usize = 128;
@@ -37,36 +38,37 @@ pub const MAX_WANTS_PER_DROP: usize = 8;
 /// Most scene actors accepted around one drop.
 pub const MAX_ACTORS_PER_SCENE: usize = 1024;
 /// Bound for echoed text carried in errors.
-/// TEMPORARY mirror of the assets `bundle::MAX_DETAIL_CHARS`; same budget, no edge.
+/// Local copy of the assets `bundle::MAX_DETAIL_CHARS`; editor-owned
+/// bound for headless builds.
 pub const MAX_DETAIL_CHARS: usize = 128;
 /// Solver grid pitch in centimeters.
-/// TEMPORARY mirror of spatial `place::GRID_CM`; same step, no edge.
+/// Local copy of spatial `place::GRID_CM` for headless builds.
 pub const GRID_CM: i32 = 10;
 /// Yaw candidates per position (`k * PI/4`).
-/// TEMPORARY mirror of spatial `place::YAW_STEPS`; same count, no edge.
+/// Local copy of spatial `place::YAW_STEPS` for headless builds.
 pub const YAW_STEPS: i32 = 8;
 /// Side-by-side edge-gap limit in cm.
-/// TEMPORARY mirror of spatial `relation::NEXT_TO_CM`; same limit, no edge.
+/// Local copy of spatial `relation::NEXT_TO_CM` for headless builds.
 pub const NEXT_TO_CM: i32 = 100;
 /// Resting-contact tolerance in cm.
-/// TEMPORARY mirror of spatial `relation::SUPPORT_GAP_CM`; same gap, no edge.
+/// Local copy of spatial `relation::SUPPORT_GAP_CM` for headless builds.
 pub const SUPPORT_GAP_CM: i32 = 5;
 /// Forward half-plane range in cm.
-/// TEMPORARY mirror of spatial `relation::FACING_RANGE_CM`; same range, no edge.
+/// Local copy of spatial `relation::FACING_RANGE_CM` for headless builds.
 pub const FACING_RANGE_CM: i32 = 2000;
 /// Default wall edge-gap range `(min, max)` in cm for `NextTo` + wall.
-/// TEMPORARY mirror of spatial `DEFAULT_WALL_GAP_CM`; same range, no edge.
+/// Local copy of spatial `DEFAULT_WALL_GAP_CM` for headless builds.
 pub const DEFAULT_WALL_GAP_CM: (i32, i32) = (0, 50);
 /// Default point distance range `(min, max)` in cm for `NextTo` + point.
-/// TEMPORARY mirror of spatial `DEFAULT_POINT_DIST_CM`; same range, no edge.
+/// Local copy of spatial `DEFAULT_POINT_DIST_CM` for headless builds.
 pub const DEFAULT_POINT_DIST_CM: (i32, i32) = (0, 50);
 /// Largest point coordinate accepted in cm (+-1 km).
 pub const MAX_POINT_CM: i32 = 100_000;
 
 /// Payload kind of one bundle entry; one byte on the bundle wire.
-/// TEMPORARY mirror of the assets `bundle::EntryKind`: same variants plus
-/// discriminants so the consumer maps 1:1 at the IO boundary. Do not
-/// renumber; replace with the documented `bundle` edge when registered.
+/// Local copy of the assets `bundle::EntryKind` for headless builds: same
+/// variants plus discriminants so the consumer maps 1:1 at the IO boundary.
+/// Do not renumber; keep in sync with the `bundle` edge by hand.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum AssetKind {
@@ -124,8 +126,8 @@ impl fmt::Display for AssetKind {
     }
 }
 
-/// One directed relation. TEMPORARY mirror of the spatial relation vocabulary
-/// the place solver evaluates; same names, same order, no edge yet.
+/// One directed relation. Local copy of the spatial relation vocabulary
+/// for headless builds; same names, same order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Relation {
     Supports,
@@ -165,8 +167,8 @@ impl fmt::Display for Relation {
     }
 }
 
-/// Room wall. TEMPORARY mirror of the spatial wall convention: North is
-/// the min-z bound, South max-z, West min-x, East max-x.
+/// Room wall. Local copy of the spatial wall convention for headless
+/// builds: North is the min-z bound, South max-z, West min-x, East max-x.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Wall {
     North,
@@ -430,9 +432,9 @@ impl SearchHit {
 }
 
 /// Dry-run outcome for a drop: one line per op plus the revision an
-/// apply would publish. TEMPORARY mirror of the endpoint `PreviewReceipt`
+/// apply would publish. Follows the endpoint `PreviewReceipt`
 /// discipline (effects plus resulting revision, conflicts write
-/// nothing); the orchestrator binds the real receipt on wiring.
+/// nothing).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DropPreview {
     /// Asset the drop places.

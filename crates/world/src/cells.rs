@@ -1,8 +1,9 @@
 //! cells: async cell load/unload through stream budgets, per-cell nav+physics, seamless edges.
-//! Owner: `engine-world`; production caller: the map assembler, which drives
-//! `Cells::stream`/`publish` through the `engine-assets` `StreamQueue` adapter
-//! (request/publish/evict parity asserted in-test) and gates publish via the
-//! dual ahead-agent publish gate (seam scan plus walk).
+//! Owner: `engine-world`; status: unwired — no production caller drives
+//! `Cells::stream`/`publish` yet (the map assembler once named here never
+//! landed). Consumers today are the crate's own tests plus the ludus proof
+//! binary (`content/maps/ludus/proof`), which drives `Cells::stream`/`publish`
+//! and gates publish via the dual ahead-agent publish gate (seam scan plus walk).
 //! Units: bytes for budgets/costs, frames for load time, meters for seams.
 //! Determinism: integer math only, `BTreeMap` order, priority-then-coord publish;
 //! the sim hash covers live cell bytes only, so presentation never enters it.
@@ -38,10 +39,11 @@ pub const CELL_MAX_SIZE: u16 = 64;
 /// Halo texels baked around a cell so erosion matches a whole-map bake at the seam.
 pub const CELL_HALO: i32 = 8;
 /// Largest height step allowed across a shared edge, in height units.
-/// Measured 64 over 168 edges (sizes 16/32/64, coords -4..4, seed 12345);
-/// 72 keeps 8 of margin. Steps past this are cliffs or corruption, never
-/// shipped ground: the halo makes cracks impossible by construction, so this
-/// bound documents max grade while the nest test proves exactness.
+/// Regression bound: the 3x3-block seam proof (`cell_streaming.rs:191-216`,
+/// size 16) holds every shared edge within this bound. Steps past this are
+/// cliffs or corruption, never shipped ground: the halo makes cracks
+/// impossible by construction, so this bound documents max grade while the
+/// nest test proves exactness.
 pub const SEAM_TOL: u8 = 72;
 /// Steepest walkable slope in height units per texel (parity with terrain splat).
 pub const SLOPE_LIMIT: u8 = 64;
@@ -49,9 +51,10 @@ pub const SLOPE_LIMIT: u8 = 64;
 pub const MAX_COORD: i32 = 512;
 /// Header bytes: magic(4) + version(1) + seed(8) + cx(4) + cz(4) + size(2).
 pub const CELL_HEADER_LEN: usize = 23;
-/// Largest single-cell byte cost admitted; mirrors the asset stream payload
-/// cap. An honest bake is far below it; it stops a corrupt size from
-/// reserving unbounded memory.
+/// Stream payload mirror: the asset stream refuses payloads past 64 MiB, and
+/// an honest bake is far below it (the largest cell costs 4,631 bytes).
+/// Informational only: admission here is bounded by side validation plus the
+/// byte budget, not by this constant.
 pub const CELL_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Hard ceiling on queued cells, independent of the caller budget.
 pub const CELLS_MAX_PENDING: usize = 1024;
@@ -138,11 +141,6 @@ pub enum CellError {
     BadBudget,
     /// Coord already pending or live; the first slot is untouched.
     Duplicate,
-    /// Single cell bytes outside `1..=64 MiB`.
-    TooLarge {
-        /// Byte count offered.
-        count: usize,
-    },
     /// Admitting the cell would exceed the byte budget.
     OverBudget {
         /// Cell bytes wanted.
@@ -188,7 +186,6 @@ impl fmt::Display for CellError {
             Self::BadCoord => write!(f, "cell bad coord"),
             Self::BadBudget => write!(f, "cell bad budget"),
             Self::Duplicate => write!(f, "cell duplicate"),
-            Self::TooLarge { count } => write!(f, "cell too large: {count}"),
             Self::OverBudget {
                 want_bytes,
                 free_bytes,
@@ -216,8 +213,9 @@ impl std::error::Error for CellError {}
 /// Progress events for the map loader, in emission order. `publish` emits at most
 /// three events per touched cell per call (`Started` once, then `Progress`, then
 /// `Completed`) and at most `PUBLISH_MAX_EVENTS` events per call; untouched cells
-/// emit nothing, so the tick never waits past the frame cap. Mirrors the stream
-/// `StreamEvent` order 1:1 at the IO boundary.
+/// emit nothing, so the tick never waits past the frame cap. Carries the same
+/// seven events as the stream `StreamEvent` at the IO boundary, with `Refused`
+/// last here instead of fifth as in the stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CellEvent {
     /// Cell admitted and queued; its bytes are now reserved.
@@ -447,10 +445,14 @@ impl CellData {
     /// Physics colliders bound for this cell: one box per solid texel.
     /// Deterministic count the map loader registers with the physics stack.
     pub fn collider_count(&self) -> u32 {
-        let n = usize::from(self.size);
-        let walk = self.walkable();
+        Self::solid_count(&self.walkable())
+    }
+
+    /// Solids in an already-computed `walkable` map; the publish path counts
+    /// from the vec it holds instead of re-walking the cell.
+    fn solid_count(walkable: &[bool]) -> u32 {
         let mut count = 0u32;
-        for solid in walk.iter().map(|walkable| !walkable).take(n * n) {
+        for solid in walkable.iter().map(|walkable| !walkable) {
             if solid {
                 count = count.saturating_add(1);
             }
@@ -804,11 +806,6 @@ impl Cells {
             }
         }
         let cost = cell_cost_bytes(size)?;
-        if cost > CELL_MAX_BYTES {
-            return Err(CellError::TooLarge {
-                count: cost as usize,
-            });
-        }
         if self.used_bytes.saturating_add(cost) > self.budget.bytes {
             self.refused_count = self.refused_count.saturating_add(1);
             return Err(CellError::OverBudget {
@@ -836,7 +833,8 @@ impl Cells {
     /// Units: cells in, unit out. Errors: `SeamMismatch` with the failing seam
     /// check named, `Unreachable` when the walkable endpoints disconnect.
     /// Determinism: `BTreeMap` order, integer math only, bounded flood.
-    pub fn gate_for_live(&self, candidate: &CellData) -> Result<(), CellError> {
+    /// Private: only `publish` and the in-module gate tests call it.
+    fn gate_for_live(&self, candidate: &CellData) -> Result<(), CellError> {
         if candidate.seed != self.seed {
             return Err(CellError::SeamMismatch("seed"));
         }
@@ -870,14 +868,7 @@ impl Cells {
         if frame_bytes == 0 || self.pending.is_empty() {
             return events;
         }
-        let mut order = self.pending_order();
-        // Re-sort guard: `pending_order` already sorts, this keeps the loop
-        // total under the borrow checker without re-borrowing the map.
-        order.sort_by(|left, right| {
-            let lp = self.pending.get(left).map_or(0, |slot| slot.priority);
-            let rp = self.pending.get(right).map_or(0, |slot| slot.priority);
-            rp.cmp(&lp).then_with(|| left.cmp(right))
-        });
+        let order = self.pending_order();
         let mut left = frame_bytes;
         for coord in order {
             if left == 0 {
@@ -918,7 +909,7 @@ impl Cells {
                         Ok(parsed) => match self.gate_for_live(&parsed) {
                             Ok(()) => {
                                 let walkable = parsed.walkable();
-                                let colliders = parsed.collider_count();
+                                let colliders = CellData::solid_count(&walkable);
                                 self.live.insert(
                                     coord,
                                     LiveCell {
@@ -990,9 +981,11 @@ impl Cells {
         })
     }
 
-    /// Re-queue one refused coord exactly once (self-repair budget of one).
-    /// A second repair without new information fails `AlreadyRepaired` so a
-    /// poisoned coord cannot spin the queue forever.
+    /// Re-queue one coord through the self-repair budget of one: the first
+    /// repair streams the coord, a second fails `AlreadyRepaired`. `Cells`
+    /// keeps no refused-coord set (only `refused_count`), so the budget
+    /// applies whether or not the coord was ever refused — a poisoned coord
+    /// cannot spin the queue forever.
     pub fn repair(
         &mut self,
         coord: CellCoord,
@@ -1038,13 +1031,14 @@ impl Cells {
         };
         let start = global(from_cell, from.size, from_texel);
         let goal = global(to_cell, to.size, to_texel);
-        if !self.walkable_global(start) || !self.walkable_global(goal) {
+        let index = self.live_index();
+        if !index.walkable(start) || !index.walkable(goal) {
             return Err(CellError::Unreachable);
         }
         if start == goal {
             return Ok(1);
         }
-        // Bound the fill to the live bounding box so far walkers stay bounded.
+        // Bound the fill to `ROUTE_MAX_VISITS` so far walkers stay bounded.
         let mut queue = VecDeque::new();
         let mut seen = BTreeSet::new();
         let mut parent: BTreeMap<(i64, i64), (i64, i64)> = BTreeMap::new();
@@ -1059,7 +1053,7 @@ impl Cells {
             }
             for step in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
                 let next = (at.0 + step.0, at.1 + step.1);
-                if seen.contains(&next) || !self.walkable_global(next) {
+                if seen.contains(&next) || !index.walkable(next) {
                     continue;
                 }
                 if seen.len() >= ROUTE_MAX_VISITS {
@@ -1111,21 +1105,71 @@ impl Cells {
         self.pending.len().saturating_add(self.live.len())
     }
 
-    /// Walkable state of one global texel; unloaded cells read solid (wait,
-    /// never guess), which is what turns late cells into `NotLive`/`Unreachable`.
-    fn walkable_global(&self, pos: (i64, i64)) -> bool {
-        for (coord, cell) in self.live.iter() {
-            let side = i64::from(cell.size);
-            let ox = i64::from(coord.x) * side;
-            let oy = i64::from(coord.z) * side;
-            if pos.0 >= ox && pos.0 < ox + side && pos.1 >= oy && pos.1 < oy + side {
-                let lx = (pos.0 - ox) as usize;
-                let ly = (pos.1 - oy) as usize;
-                let idx = ly * usize::from(cell.size) + lx;
-                return cell.walkable.get(idx).copied().unwrap_or(false);
+    /// Owner index over the live set, built once per [`Cells::route`] call.
+    fn live_index(&self) -> LiveIndex<'_> {
+        LiveIndex::new(&self.live)
+    }
+}
+
+/// Owner index over the live set for one [`Cells::route`] call: per-texel
+/// ownership is one `div_euclid` plus one map lookup per distinct live side
+/// instead of a scan over every live cell.
+struct LiveIndex<'a> {
+    /// Live cells keyed by coord (ascending, the old scan order).
+    map: &'a BTreeMap<CellCoord, LiveCell>,
+    /// Distinct live sides for candidate lookup.
+    sides: Vec<u16>,
+}
+
+impl<'a> LiveIndex<'a> {
+    /// Index the live set; empty when nothing is live.
+    fn new(live: &'a BTreeMap<CellCoord, LiveCell>) -> Self {
+        let mut sides = Vec::new();
+        for cell in live.values() {
+            if !sides.contains(&cell.size) {
+                sides.push(cell.size);
             }
         }
-        false
+        Self { map: live, sides }
+    }
+
+    /// Walkable state of one global texel; unloaded ground reads solid (wait,
+    /// never guess), which is what turns late cells into `NotLive`/`Unreachable`.
+    /// Same answer as the old coord-order scan: every live cell covering the
+    /// texel is a contender (candidate coord = `div_euclid` under one live
+    /// side, then an extent check with that candidate's own size) and the
+    /// smallest coord wins.
+    fn walkable(&self, pos: (i64, i64)) -> bool {
+        let mut best: Option<(CellCoord, &'a LiveCell, usize)> = None;
+        for side in &self.sides {
+            let s = i64::from(*side);
+            let Ok(cx) = i32::try_from(pos.0.div_euclid(s)) else {
+                continue;
+            };
+            let Ok(cz) = i32::try_from(pos.1.div_euclid(s)) else {
+                continue;
+            };
+            let probe = CellCoord { x: cx, z: cz };
+            let Some(cell) = self.map.get(&probe) else {
+                continue;
+            };
+            // The candidate's own extent decides: a different-sized cell at
+            // this coord may not reach the texel.
+            let own = i64::from(cell.size);
+            let (ox, oy) = (i64::from(probe.x) * own, i64::from(probe.z) * own);
+            if pos.0 < ox || pos.0 >= ox + own || pos.1 < oy || pos.1 >= oy + own {
+                continue;
+            }
+            let idx = (pos.1 - oy) as usize * usize::from(cell.size) + (pos.0 - ox) as usize;
+            match best {
+                Some((held, _, _)) if held <= probe => {}
+                _ => best = Some((probe, cell, idx)),
+            }
+        }
+        match best {
+            Some((_, cell, idx)) => cell.walkable.get(idx).copied().unwrap_or(false),
+            None => false,
+        }
     }
 }
 
@@ -1168,9 +1212,10 @@ mod bound_tests {
 
     /// First walkable global texel scanning from `from` along the diagonal.
     fn walkable_near(cells: &Cells, from: (i64, i64), step: i64) -> (i64, i64) {
+        let index = cells.live_index();
         (0..64)
             .map(|k| (from.0 + k * step, from.1 + k * step))
-            .find(|texel| cells.walkable_global(*texel))
+            .find(|texel| index.walkable(*texel))
             .expect("a walkable texel near the corner")
     }
 
@@ -1301,15 +1346,17 @@ mod bound_tests {
     #[test]
     fn route_inside_the_visit_cap_answers_and_past_it_says_budget() {
         // 3 x 3 cells of 64 texels is 36,864 texels: under the cap, so a
-        // corner to corner walk answers with a step count.
+        // corner to corner walk answers with a step count (seed 12345
+        // walks end to end; isolated holes and forced-free endpoints
+        // never wall this block off).
         let small = live_block(3, CELL_MAX_SIZE);
         let from = walkable_near(&small, (0, 0), 1);
         let to = walkable_near(&small, (191, 191), -1);
         let ((fc, ft), (tc, tt)) = (texel_of(from, CELL_MAX_SIZE), texel_of(to, CELL_MAX_SIZE));
         let steps = small.route(fc, ft, tc, tt);
         assert!(
-            matches!(steps, Ok(n) if n > 1) || steps == Err(CellError::Unreachable),
-            "small block answers: {steps:?}"
+            matches!(steps, Ok(n) if n > 1),
+            "small block answers with a step count: {steps:?}"
         );
         // 5 x 5 cells is 102,400 texels: the flood hits the ceiling before
         // it can reach the far corner and says so instead of "no path".

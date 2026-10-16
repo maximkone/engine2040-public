@@ -631,7 +631,7 @@ pub fn lint_names(names: &HashMap<ObjectId, String>) -> Vec<PathLint> {
             text: bound_detail(label),
         })
         .collect();
-    findings.sort_by_key(|finding| finding.source.to_string());
+    findings.sort_by_key(|finding| finding.source);
     findings
 }
 
@@ -959,14 +959,14 @@ mod tests {
             },
         ];
         let grid = inspector::build_grid(&views, &selection, &BTreeMap::new()).unwrap();
-        assert!(!grid.rows_for(stable_id(root)).is_empty());
+        assert!(grid.rows().iter().any(|row| row.node == stable_id(root)));
         // An outliner search hit joins the same object: all three agree.
         let hits = search(&rows, &OutlinerQuery::new("plinth")).unwrap();
         assert_eq!(hits.len(), 1);
         selection = select_toggle(&selection, hits[0].id, &live).unwrap();
         assert_eq!(selection.ids.len(), 2);
         let grid = inspector::build_grid(&views, &selection, &BTreeMap::new()).unwrap();
-        assert!(!grid.rows_for(stable_id(child)).is_empty());
+        assert!(grid.rows().iter().any(|row| row.node == stable_id(child)));
         // The viewport still picks the same root under the shared ids.
         assert_eq!(stable_id(hit.unwrap()), selection.ids[0]);
     }

@@ -21,18 +21,6 @@ pub const MAX_GRAPH_BYTES: usize = 1 << 16;
 /// Graph node id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GraphId(pub u32);
-/// Input pin: node plus index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InPinId {
-    pub node: GraphId,
-    pub pin: u32,
-}
-/// Output pin: node plus index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OutPinId {
-    pub node: GraphId,
-    pub pin: u32,
-}
 /// Node payload.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NodeKind {
@@ -59,7 +47,6 @@ pub struct Wire {
 /// What refused a graph edit or decode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
-    UnknownNode { id: u32 },
     Dangling { node: u32 },
     Cycle { node: u32 },
     NonFinite { node: u32 },
@@ -103,56 +90,6 @@ impl Graph {
     /// Node at an id.
     pub fn get(&self, id: GraphId) -> Option<&GraphNode> {
         self.nodes.get(&id.0)
-    }
-    /// Insert a node and return its fresh id.
-    pub fn insert(&mut self, kind: NodeKind, pos: [f32; 2], open: bool) -> GraphId {
-        let id = self.next;
-        self.next = self.next.wrapping_add(1).max(1);
-        if id == 0 {
-            return self.insert(kind, pos, open);
-        }
-        self.nodes.insert(id, GraphNode { kind, pos, open });
-        GraphId(id)
-    }
-    /// Remove a node plus its wires. False when absent.
-    pub fn remove(&mut self, id: GraphId) -> bool {
-        if self.nodes.remove(&id.0).is_none() {
-            return false;
-        }
-        self.wires.retain(|w| w.out_node != id && w.in_node != id);
-        true
-    }
-    /// Connect output to input. Ok(false) when the wire already exists.
-    pub fn connect(&mut self, out: OutPinId, inp: InPinId) -> Result<bool, GraphError> {
-        if !self.nodes.contains_key(&out.node.0) {
-            return Err(GraphError::UnknownNode { id: out.node.0 });
-        }
-        if !self.nodes.contains_key(&inp.node.0) {
-            return Err(GraphError::UnknownNode { id: inp.node.0 });
-        }
-        let wire = Wire {
-            out_node: out.node,
-            out_pin: out.pin,
-            in_node: inp.node,
-            in_pin: inp.pin,
-        };
-        if self.wires.contains(&wire) {
-            return Ok(false);
-        }
-        if inp.node == out.node || self.reaches(inp.node.0, out.node.0) {
-            return Err(GraphError::Cycle { node: inp.node.0 });
-        }
-        self.wires.insert(wire);
-        Ok(true)
-    }
-    /// Drop one wire. False when absent.
-    pub fn disconnect(&mut self, out: OutPinId, inp: InPinId) -> bool {
-        self.wires.remove(&Wire {
-            out_node: out.node,
-            out_pin: out.pin,
-            in_node: inp.node,
-            in_pin: inp.pin,
-        })
     }
     /// Check dangling wires, finite values, and cycles.
     pub fn validate(&self) -> Result<(), GraphError> {
@@ -354,89 +291,109 @@ fn take1(bytes: &[u8], pos: &mut usize) -> Result<u8, GraphError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn graph_roundtrip_x2_ignores_duplicate_and_refuses_cycle() {
-        let mut graph = Graph::new();
-        let kinds = [
-            NodeKind::Const(1.0),
-            NodeKind::Const(2.0),
-            NodeKind::Op(1),
-            NodeKind::Op(2),
-            NodeKind::Material(3),
-            NodeKind::Material(4),
-            NodeKind::Vfx(5),
-            NodeKind::Vfx(6),
-        ];
-        let mut ids = Vec::new();
-        let xs = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5];
-        for (i, kind) in kinds.into_iter().enumerate() {
-            ids.push(graph.insert(kind, [xs[i], 0.0], true));
-        }
-        assert_eq!(graph.node_count(), 8);
-        let wires = [
-            (0, 0, 2, 0),
-            (1, 0, 2, 1),
-            (2, 0, 3, 0),
-            (3, 0, 4, 0),
-            (4, 0, 5, 0),
-            (5, 0, 6, 0),
-            (6, 0, 7, 0),
-            (0, 0, 3, 1),
-            (1, 0, 4, 1),
-            (2, 0, 5, 1),
-            (3, 0, 6, 1),
-        ];
-        for (a, ap, b, bp) in wires {
-            assert_eq!(
-                graph
-                    .connect(
-                        OutPinId {
-                            node: ids[a],
-                            pin: ap
-                        },
-                        InPinId {
-                            node: ids[b],
-                            pin: bp
-                        }
-                    )
-                    .unwrap(),
-                true
-            );
-        }
-        assert_eq!(
-            graph
-                .connect(
-                    OutPinId {
-                        node: ids[0],
-                        pin: 0
-                    },
-                    InPinId {
-                        node: ids[2],
-                        pin: 0
-                    }
-                )
-                .unwrap(),
-            false
+
+    /// One node row in canonical bytes: id, tag, payload, x, y, open flag.
+    fn push_node(out: &mut Vec<u8>, id: u32, tag: u8, payload: u32, x: f32, y: f32, open: bool) {
+        out.extend_from_slice(&id.to_le_bytes());
+        out.push(tag);
+        out.extend_from_slice(&payload.to_le_bytes());
+        out.extend_from_slice(&x.to_le_bytes());
+        out.extend_from_slice(&y.to_le_bytes());
+        out.push(u8::from(open));
+    }
+
+    /// One wire row in canonical bytes: out node/pin, in node/pin.
+    fn push_wire(out: &mut Vec<u8>, out_node: u32, out_pin: u32, in_node: u32, in_pin: u32) {
+        out.extend_from_slice(&out_node.to_le_bytes());
+        out.extend_from_slice(&out_pin.to_le_bytes());
+        out.extend_from_slice(&in_node.to_le_bytes());
+        out.extend_from_slice(&in_pin.to_le_bytes());
+    }
+
+    /// Seal canonical bytes: header plus node/wire rows plus CRC32.
+    fn seal(nodes: &[(u32, u8, u32, f32, f32, bool)], wires: &[(u32, u32, u32, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&GRAPH_MAGIC);
+        out.extend_from_slice(&GRAPH_VERSION.to_le_bytes());
+        out.extend_from_slice(
+            &u32::try_from(nodes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
         );
-        assert_eq!(graph.wire_count(), 11);
-        let err = graph
-            .connect(
-                OutPinId {
-                    node: ids[7],
-                    pin: 0,
-                },
-                InPinId {
-                    node: ids[2],
-                    pin: 2,
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(err, GraphError::Cycle { .. }));
-        assert!(err.to_string().contains(&ids[2].0.to_string()));
+        for (id, tag, payload, x, y, open) in nodes {
+            push_node(&mut out, *id, *tag, *payload, *x, *y, *open);
+        }
+        out.extend_from_slice(
+            &u32::try_from(wires.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for (a, ap, b, bp) in wires {
+            push_wire(&mut out, *a, *ap, *b, *bp);
+        }
+        let checksum = crate::save::crc32(&out);
+        out.extend_from_slice(&checksum.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn graph_roundtrip_x2_through_decode_only() {
+        let bytes = seal(
+            &[
+                (1, 0, 1.0f32.to_bits(), 0.5, 0.0, true),
+                (2, 0, 2.0f32.to_bits(), 1.5, 0.0, true),
+                (3, 1, 1, 2.5, 0.0, false),
+            ],
+            &[(1, 0, 3, 0), (2, 0, 3, 1)],
+        );
+        let graph = Graph::decode(&bytes).expect("sealed bytes decode");
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.wire_count(), 2);
+        assert_eq!(
+            graph.get(GraphId(1)).map(|node| node.kind),
+            Some(NodeKind::Const(1.0))
+        );
         let first = graph.encode();
-        assert_eq!(first, graph.encode());
-        let back = Graph::decode(&first).unwrap();
+        assert_eq!(first, bytes, "decode then encode is byte-identical");
+        let back = Graph::decode(&first).expect("re-decode works");
         assert_eq!(back, graph);
         assert_eq!(back.encode(), first);
+    }
+
+    #[test]
+    fn decode_refuses_cycle_truncation_and_bad_checksum() {
+        // Wires 1 -> 2 and 2 -> 1 form a cycle over directed wires.
+        let cyclic = seal(
+            &[
+                (1, 0, 1.0f32.to_bits(), 0.0, 0.0, true),
+                (2, 0, 2.0f32.to_bits(), 1.0, 0.0, true),
+            ],
+            &[(1, 0, 2, 0), (2, 0, 1, 0)],
+        );
+        let err = Graph::decode(&cyclic).unwrap_err();
+        assert!(matches!(err, GraphError::Cycle { .. }));
+        assert!(err.to_string().contains("Cycle"));
+
+        let good = seal(
+            &[(1, 0, 1.0f32.to_bits(), 0.0, 0.0, true)],
+            &[],
+        );
+        assert!(matches!(
+            Graph::decode(&good[..good.len() - 5]).unwrap_err(),
+            GraphError::Truncated
+        ));
+        let mut corrupt = good.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xFF;
+        assert!(matches!(
+            Graph::decode(&corrupt).unwrap_err(),
+            GraphError::CrcMismatch
+        ));
+        let mut bad_magic = good;
+        bad_magic[0] = b'X';
+        assert!(matches!(
+            Graph::decode(&bad_magic).unwrap_err(),
+            GraphError::BadMagic | GraphError::CrcMismatch
+        ));
     }
 }

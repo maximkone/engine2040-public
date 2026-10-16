@@ -719,7 +719,6 @@ mod tests {
         assert!(!queue.tape_bytes().is_empty());
     }
 
-    #[ignore = "timing: phase flush of 1k rows stays inside the service budget"]
     #[test]
     fn phase_flush_thousand_rows_within_budget() {
         let mut queue = seed_queue(1000);

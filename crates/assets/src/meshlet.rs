@@ -1,7 +1,8 @@
 //! meshlet: cone-weighted meshlet cook step (64 vertices, 124 triangles).
 //!
-//! Owner: `engine-assets`; consumer: the mesh cook packs one LOD into
-//! these clusters for the render meshlet path. Units: meters in, cluster
+//! Owner: `engine-assets`; status: no mesh-cook caller yet (`mesh_cook.rs`
+//! has no meshlet use); `cook_meshlet_lod` in this module clusters for the
+//! render meshlet path. Units: meters in, cluster
 //! lists out. Determinism: index-order loops, sorted frontier picks and
 //! `total_cmp` float order, so the same positions plus indices always emit
 //! the same meshlets. Errors: typed [`MeshletError`], never a panic.
@@ -831,7 +832,8 @@ fn level_digest(
 /// (errors never compound), clusterize with [`build_meshlets`], digest the
 /// encoded level, then gate every texture through `validate_ktx2` and fold
 /// its bytes into the chained digest. Caller: this module (drives
-/// `build_meshlets` per level); render consumes [`MeshletLodCook`] itself.
+/// `build_meshlets` per level); no render caller yet (`render/src/meshlet.rs`
+/// never imports [`MeshletLodCook`]).
 /// Errors: validation, [`MeshletError::ErrorOverBound`], [`MeshletError::NonKtx2`].
 pub fn cook_meshlet_lod(
     positions: &[[f32; 3]],

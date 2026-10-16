@@ -472,6 +472,28 @@ fn fire_spread_report_numbers() {
         run(SPIKE_SEED, true, WIND_CALM_Q16, COVER_TICKS).expect("calm must run");
     let (contact_only, _) =
         run(SPIKE_SEED, false, WIND_BREEZE_Q16, COVER_TICKS).expect("contact must run");
+    // Pinned report row: this test used to print digests and assert nothing,
+    // so any regression stayed green. Every printed number is now asserted.
+    const BREEZE_DIGEST: u64 = 0xd42636f7cf9b1b9f;
+    const CALM_DIGEST: u64 = 0xac36cab292caff7b;
+    assert_eq!(
+        breeze_sum, BREEZE_DIGEST,
+        "breeze digest drifted: got {breeze_sum:016x}"
+    );
+    assert_eq!(calm_sum, CALM_DIGEST, "calm digest drifted: got {calm_sum:016x}");
+    assert_eq!(breeze.contact_ignitions, 7, "breeze contact count drifted");
+    assert_eq!(breeze.spot_ignitions, 1, "breeze spot count drifted");
+    assert_eq!(
+        count_in(&breeze, ST_BURNT),
+        8,
+        "breeze must still burn the whole wall"
+    );
+    assert_eq!(calm.spot_ignitions, 0, "calm wind must throw zero spots");
+    assert_eq!(
+        count_in(&contact_only, ST_BURNT),
+        8,
+        "contact alone must still burn the whole wall"
+    );
     let mut world = new_world(SPIKE_SEED, true, WIND_BREEZE_Q16).expect("fixture must build");
     let mut worst: u128 = 0;
     for _ in 0..COVER_TICKS {

@@ -46,8 +46,9 @@ use engine_arena::{MAX_PARTICIPANTS, TICK_HZ};
 /// type (mirrors net `session::BodyTape`; this crate has no net dependency).
 pub(crate) use engine_arena::FighterTape as BodyTape;
 
-/// Stuck window: 3 s of sub-threshold speed at [`TICK_HZ`].
-pub const STUCK_WINDOW_TICKS: u32 = 3 * TICK_HZ;
+/// Stuck window: 3 s of sub-threshold speed at [`TICK_HZ`]. Single owner is
+/// `engine_core::STUCK_WINDOW_TICKS`.
+pub const STUCK_WINDOW_TICKS: u32 = engine_core::STUCK_WINDOW_TICKS;
 
 /// Samples per stuck verdict: [`STUCK_WINDOW_TICKS`] consecutive speeds.
 const STUCK_SAMPLES: usize = STUCK_WINDOW_TICKS as usize;

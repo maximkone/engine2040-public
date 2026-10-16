@@ -237,7 +237,7 @@ impl FindingsPanel {
         let staged_tree = stage_tree(&doc.hierarchy, &batch.ops)?;
         let mut order = doc.hierarchy.propagation_order();
         order.extend(staged_tree.propagation_order());
-        order.sort_by_key(|id| id.to_string());
+        order.sort();
         order.dedup();
         let before = snapshot_actors(&doc.hierarchy, &order);
         let staged = snapshot_actors(&staged_tree, &order);

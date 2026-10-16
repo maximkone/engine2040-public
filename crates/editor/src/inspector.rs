@@ -13,18 +13,23 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use engine_scene::ids::ObjectId;
-use engine_scene::schema::{Schema, SchemaRegistry};
 use engine_scene::transform::Transform;
 
 use crate::commands::{Batch, Op};
 
 /// Most fields accepted on one inspected node.
 pub const MAX_FIELDS_PER_NODE: usize = 64;
-/// Longest text value kept in a cell or baseline entry.
+/// Longest text value kept in a cell or baseline entry: the one editor
+/// text bound, re-exported by [`crate::inspector_auto`]. The scene keeps
+/// its own `provenance::MAX_TEXT_LEN`; values never merge.
 pub const MAX_TEXT_LEN: usize = 512;
 /// Most rows kept in one grid.
 pub const MAX_ROWS: usize = 1024;
-/// Most staged edits emitted in one batch.
+/// Most staged edits emitted in one batch: the inspector-grid limit,
+/// distinct from the auto-grid
+/// [`MAX_AUTO_OPS_PER_BATCH`](crate::inspector_auto::MAX_AUTO_OPS_PER_BATCH)
+/// and the journal wire bound. Values never merge: each bound guards its
+/// own service.
 pub const MAX_OPS_PER_BATCH: usize = 256;
 /// Most nodes accepted in one selection.
 pub const MAX_SELECTION: usize = 256;
@@ -49,24 +54,6 @@ impl VersionedComponent {
             payload: payload.to_string(),
         }
     }
-
-    /// Live schema value with the same name, version and payload text.
-    pub fn to_live(&self) -> engine_scene::schema::VersionedComponent {
-        engine_scene::schema::VersionedComponent {
-            component: self.component.clone(),
-            version: self.version,
-            payload: self.payload.clone(),
-        }
-    }
-
-    /// Grid copy of a live schema value; payloads truncate to the cell bound.
-    pub fn from_live(value: &engine_scene::schema::VersionedComponent) -> Self {
-        Self {
-            component: value.component.clone(),
-            version: value.version,
-            payload: text_cell(&value.payload),
-        }
-    }
 }
 
 /// One schema step: a component version plus whether it is the current one.
@@ -78,18 +65,6 @@ pub struct SchemaStep {
     pub version: u32,
     /// True when this is the current version (no further migration).
     pub is_current: bool,
-}
-
-impl SchemaStep {
-    /// Grid view of one live schema descriptor: current exactly when the
-    /// descriptor migrates no further (`migrate` is none).
-    pub fn from_live(schema: &Schema) -> Self {
-        Self {
-            component: schema.component,
-            version: schema.version,
-            is_current: schema.migrate.is_none(),
-        }
-    }
 }
 
 /// Local pose: the live engine-scene transform (meters, parent frame).
@@ -271,21 +246,9 @@ impl InspectorGrid {
         &self.rows
     }
 
-    /// Rows for one node, in display order.
-    pub fn rows_for(&self, node: u64) -> Vec<&FieldRow> {
-        self.rows.iter().filter(|row| row.node == node).collect()
-    }
-
     /// Rows currently badged as prefab overrides.
     pub fn overrides(&self) -> Vec<&FieldRow> {
         self.rows.iter().filter(|row| row.overridden).collect()
-    }
-
-    /// True when every [`DescriptorKind`] renders at least one row.
-    pub fn covers_all_descriptors(&self) -> bool {
-        DescriptorKind::all()
-            .iter()
-            .all(|kind| self.rows.iter().any(|row| row.descriptor == *kind))
     }
 }
 
@@ -621,24 +584,7 @@ pub fn build_grid(
     })
 }
 
-/// Build the property grid with version truth from the live schema registry.
-///
-/// Same rows as [`build_grid`] when the node steps agree with the registry;
-/// unknown components and stale versions badge exactly as the step path.
-/// Callers holding the scene registry prefer this entry point so the grid
-/// renders from live schema descriptors instead of per-node step copies.
-pub fn build_grid_live(
-    nodes: &[NodeView],
-    selection: &Selection,
-    prefab_baseline: &BTreeMap<(u64, String, String), String>,
-    registry: &SchemaRegistry,
-) -> Result<InspectorGrid, InspectorError> {
-    build_grid_with(nodes, selection, prefab_baseline, &|_node, component| {
-        registry.current_version(component)
-    })
-}
-
-/// Shared grid core: the version lookup decides step copies vs live registry.
+/// Shared grid core: the version lookup reads the node step copies.
 fn build_grid_with(
     nodes: &[NodeView],
     selection: &Selection,
@@ -1237,7 +1183,7 @@ pub fn to_command_batch(
     Ok(Batch::new(ops, base_revision, idempotency_key))
 }
 
-/// Inspector panel: prefab baselines plus staged edits over a grid.
+/// Inspector panel: staged edits over a grid.
 ///
 /// The panel owns no scene state: `build_grid` renders rows from caller
 /// snapshots, `stage` validates one cell, `preview` describes the staged
@@ -1245,13 +1191,12 @@ pub fn to_command_batch(
 /// and capability checks stay with the command service that applies it.
 #[derive(Clone, Debug, Default)]
 pub struct InspectorPanel {
-    baseline: BTreeMap<(u64, String, String), String>,
     staged: BTreeMap<(u64, String, String), String>,
     base_revision: u64,
 }
 
 impl InspectorPanel {
-    /// Empty panel: no baseline, no staged edits, revision zero.
+    /// Empty panel: no staged edits, revision zero.
     pub fn new() -> Self {
         Self::default()
     }
@@ -1269,21 +1214,6 @@ impl InspectorPanel {
     /// True when no edit is staged.
     pub fn is_empty(&self) -> bool {
         self.staged.is_empty()
-    }
-
-    /// Record the prefab baseline one field at a time (live-diff source).
-    pub fn set_baseline(&mut self, node: u64, component: &str, field: &str, value: &str) {
-        self.baseline.insert(
-            (node, component.to_string(), field.to_string()),
-            text_cell(value),
-        );
-    }
-
-    /// Baseline entry for one cell, if the node comes from a prefab.
-    pub fn baseline_for(&self, node: u64, component: &str, field: &str) -> Option<&str> {
-        self.baseline
-            .get(&(node, component.to_string(), field.to_string()))
-            .map(String::as_str)
     }
 
     /// Pin the revision staged edits belong to (call when the grid rebuilds).
@@ -1377,7 +1307,7 @@ impl InspectorPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_scene::schema::SchemaError;
+    use engine_scene::schema::{Schema, SchemaError, SchemaRegistry};
 
     const MODES: [&str; 3] = ["ring", "pit", "hall"];
 
@@ -1454,7 +1384,6 @@ mod tests {
                 "descriptor {kind} renders no row"
             );
         }
-        assert!(grid.covers_all_descriptors());
         // No two kinds share a name: the coverage proof names each kind once.
         let mut names: Vec<&str> = DescriptorKind::all()
             .iter()
@@ -1749,13 +1678,10 @@ mod tests {
     }
 
     #[test]
-    fn panel_baseline_rebase_and_refresh() {
+    fn panel_rebase_and_refresh() {
         let (_, grid) = grid_two();
         let mut panel = InspectorPanel::new();
         assert!(panel.is_empty());
-        panel.set_baseline(8, "label", "text", "Plinth");
-        assert_eq!(panel.baseline_for(8, "label", "text"), Some("Plinth"));
-        assert_eq!(panel.baseline_for(8, "label", "missing"), None);
         panel.rebase(3);
         assert_eq!(panel.base_revision(), 3);
         panel.stage(&grid, 8, "label", "text", "Staged").unwrap();
@@ -1823,61 +1749,67 @@ mod tests {
     }
 
     #[test]
-    fn live_registry_agrees_with_step_copies() {
+    fn step_copies_agree_with_registry() {
         let registry = live_registry();
         assert_eq!(registry.current_version("label"), Some(1));
         assert_eq!(registry.current_version("gadget"), Some(3));
+        // Every step copy the fixtures carry agrees with the live registry:
+        // current steps match the registry head, migration steps sit below it.
         let (nodes, stepped) = grid_two();
-        let live =
-            build_grid_live(&nodes, &selection(&[7, 8]), &BTreeMap::new(), &registry).unwrap();
-        assert_eq!(live, stepped);
-        // Unknown components badge the same under both version sources.
+        for node in &nodes {
+            for step in &node.schema {
+                let head = registry.current_version(step.component);
+                assert!(head.is_some(), "registry knows {}", step.component);
+                if step.is_current {
+                    assert_eq!(Some(step.version), head);
+                } else {
+                    assert!(step.version < head.unwrap_or(u32::MAX));
+                }
+            }
+        }
+        // Same rows twice through the prod path: determinism holds.
+        let again = build_grid(&nodes, &selection(&[7, 8]), &BTreeMap::new()).unwrap();
+        assert_eq!(again, stepped);
+        // Unknown components badge through the prod path.
         let mut lonely = prop_node();
         lonely
             .components
             .push(VersionedComponent::new("sigil", 1, "old"));
         let nodes = vec![lonely];
-        let stepped = build_grid(&nodes, &selection(&[8]), &BTreeMap::new()).unwrap();
-        let live = build_grid_live(&nodes, &selection(&[8]), &BTreeMap::new(), &registry).unwrap();
-        assert_eq!(live, stepped);
-        assert!(live
+        let grid = build_grid(&nodes, &selection(&[8]), &BTreeMap::new()).unwrap();
+        assert!(grid
             .rows
             .iter()
             .any(|row| row.component == "sigil" && row.field == "unknown"));
     }
 
     #[test]
-    fn live_conversions_roundtrip() {
-        let value = VersionedComponent::new("label", 1, "Grand Hall");
-        let live = value.to_live();
-        assert_eq!(live.component, "label");
-        assert_eq!(live.version, 1);
-        assert_eq!(VersionedComponent::from_live(&live), value);
-        // Long live payloads truncate to the cell bound instead of refusing.
-        let long = engine_scene::schema::VersionedComponent {
-            component: "label".into(),
-            version: 1,
-            payload: "y".repeat(MAX_TEXT_LEN + 8),
-        };
-        assert_eq!(
-            VersionedComponent::from_live(&long).payload.len(),
-            MAX_TEXT_LEN
-        );
-        // Steps read currency off the live descriptor edge.
-        let current = Schema {
+    fn step_currency_and_text_bound_read_through_build_grid() {
+        // Currency is a step-copy fact: current exactly when no migration follows.
+        let current = SchemaStep {
             component: "label",
             version: 1,
-            migrate: None,
+            is_current: true,
         };
-        assert!(SchemaStep::from_live(&current).is_current);
-        let migration = Schema {
+        assert!(current.is_current);
+        let migration = SchemaStep {
             component: "gadget",
             version: 1,
-            migrate: Some(gadget_bump),
+            is_current: false,
         };
-        let step = SchemaStep::from_live(&migration);
-        assert!(!step.is_current);
-        assert_eq!(step.version, 1);
+        assert!(!migration.is_current);
+        assert_eq!(migration.version, 1);
+        // The prod path enforces the cell bound by refusing, never truncating.
+        let mut heavy = prop_node();
+        heavy.components.push(VersionedComponent::new(
+            "sigil",
+            1,
+            &"y".repeat(MAX_TEXT_LEN + 8),
+        ));
+        assert!(matches!(
+            build_grid(&[heavy], &selection(&[8]), &BTreeMap::new()).unwrap_err(),
+            InspectorError::BadDescriptor { .. }
+        ));
         // Poses are the live transform: identity and finiteness agree.
         assert_eq!(LocalPose::IDENTITY, Transform::IDENTITY);
         assert!(LocalPose::IDENTITY.is_finite());

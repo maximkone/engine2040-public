@@ -529,8 +529,9 @@ pub fn encode_image(
     })
 }
 
-/// Decode an encoded image back to RGBA bytes (row-major); used by
-/// quality gates comparing against the uncompressed source.
+/// Decode an encoded image back to RGBA bytes (row-major).
+/// Test-only quality gate comparing against the uncompressed source.
+#[cfg(test)]
 pub fn decode_image(image: &BcImage) -> Result<Vec<u8>, BcError> {
     validate_dims(image.width, image.height)?;
     if image.bytes.len() != encoded_len(image.width, image.height, image.format) {

@@ -1,7 +1,7 @@
 //! FPS view typed diagnostic events: pose, hits, frame splits.
 //!
-//! Consumer: net (hit verdicts plus pose selection), proof (tick-ordered
-//! trace details plus digests) and render (frame-split costs). Data owner:
+//! Consumer: the endpoint `check_profile` pack reads `FpsFrameSplit`
+//! (`from_stages` plus `sums_within`) for its profile verdict. Data owner:
 //! [`FpsView`] owns three bounded inline rings; the caller owns the shared
 //! [`RingBuffer`](super::RingBuffer) that [`record_view`] drains into.
 //! Units: ticks (`u64`), millimetres (`i32`), yaw deci-degrees (`i16`),
@@ -471,8 +471,8 @@ impl Default for FpsView {
 /// Drain one view into the shared ring oldest-first: poses, hits, splits.
 ///
 /// The caller keeps owning the view; this only exports typed rows as
-/// `fps.pose` / `fps.hit` / `fps.frame.split` events. Used by the net,
-/// proof and render adapters to feed one digest path.
+/// `fps.pose` / `fps.hit` / `fps.frame.split` events. Read by the endpoint
+/// `check_profile` pack through `FpsFrameSplit::from_stages`.
 pub fn record_view(view: &FpsView, ring: &mut RingBuffer) {
     for pose in view.iter_poses() {
         ring.push_pose(*pose);

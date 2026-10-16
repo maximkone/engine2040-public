@@ -49,6 +49,14 @@ use engine_physics::limb::{LimbPool, MAX_LIMBS};
 /// Planar speed below which a fighter counts as stuck, meters per second.
 pub const STUCK_SPEED_MPS: f32 = 0.2;
 
+/// Fighter count as a slot byte for zeroed metrics.
+/// Valid counts are `2..=MAX_PARTICIPANTS` (16), so every live value fits
+/// `u8` exactly; out-of-range counts saturate at `u8::MAX` instead of
+/// truncating low bits, keeping zeroed-metric length bounded.
+fn fighter_slot_count(fighters: usize) -> u8 {
+    u8::try_from(fighters).unwrap_or(u8::MAX)
+}
+
 /// Counterfactual proposal applied to a fork before it runs. Minimal set:
 /// morale intent, script replacement and a freeze. There is deliberately no
 /// `RemoveFighter`: the slot count is fixed by the snapshot config.
@@ -260,11 +268,11 @@ impl Fork {
     /// A crashed worker reads as zeros here; callers that must see the crash
     /// use [`try_run_n`](Fork::try_run_n).
     pub fn run_n(&self, ticks: u32) -> ForkMetrics {
-        let fighters = self.fighters;
+        let fighters = fighter_slot_count(self.fighters);
         self.try_run_n(ticks).unwrap_or_else(|_| ForkMetrics {
-            damage_dealt: (0..fighters as u8).map(|slot| (slot, 0)).collect(),
+            damage_dealt: (0..fighters).map(|slot| (slot, 0)).collect(),
             ticks_to_kill: None,
-            stuck_ticks: (0..fighters as u8).map(|slot| (slot, 0)).collect(),
+            stuck_ticks: (0..fighters).map(|slot| (slot, 0)).collect(),
         })
     }
 
@@ -297,14 +305,14 @@ impl Fork {
     /// [`run_dataset`](super::run_dataset).
     pub fn run_recorded(&self, ticks: u32) -> (ForkMetrics, Dataset) {
         let job = self.job(ticks);
-        let fighters = self.fighters;
+        let fighters = fighter_slot_count(self.fighters);
         match std::thread::spawn(move || job.run_recorded_inner()).join() {
             Ok(pair) => pair,
             Err(_) => (
                 ForkMetrics {
-                    damage_dealt: (0..fighters as u8).map(|slot| (slot, 0)).collect(),
+                    damage_dealt: (0..fighters).map(|slot| (slot, 0)).collect(),
                     ticks_to_kill: None,
-                    stuck_ticks: (0..fighters as u8).map(|slot| (slot, 0)).collect(),
+                    stuck_ticks: (0..fighters).map(|slot| (slot, 0)).collect(),
                 },
                 Dataset::empty(),
             ),
@@ -633,10 +641,11 @@ impl ForkJob {
 
     /// Zeroed metrics with one entry per fighter.
     fn zeros(&self) -> ForkMetrics {
+        let fighters = fighter_slot_count(self.fighters);
         ForkMetrics {
-            damage_dealt: (0..self.fighters as u8).map(|slot| (slot, 0)).collect(),
+            damage_dealt: (0..fighters).map(|slot| (slot, 0)).collect(),
             ticks_to_kill: None,
-            stuck_ticks: (0..self.fighters as u8).map(|slot| (slot, 0)).collect(),
+            stuck_ticks: (0..fighters).map(|slot| (slot, 0)).collect(),
         }
     }
 
@@ -726,6 +735,12 @@ mod tests {
         let (snapshot, _) =
             super::super::run_prefix(&config(), &FighterTape::default(), 60).expect("valid prefix");
         assert!(Fork::from_snapshot(snapshot, 61).is_none());
+    }
+
+    #[test]
+    fn fighter_slot_count_clamps_out_of_range_instead_of_truncating() {
+        assert_eq!(super::fighter_slot_count(300), u8::MAX);
+        assert_eq!(super::fighter_slot_count(2), 2);
     }
 
     #[test]

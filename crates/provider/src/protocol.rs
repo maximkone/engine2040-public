@@ -168,7 +168,8 @@ pub enum ProposalAction {
     Noop,
 }
 
-/// Canonical verb schema the door publishes as `door.grammar_verbs`.
+/// Canonical verb schema for the door grammar gate: served through
+/// `engine-endpoint` `grammar_verbs`, never published as a registry verb.
 /// PORT guidance-ai/llguidance@6cef6ed TopLevelGrammar::from_json_schema pattern.
 pub fn verb_schema_json() -> &'static str {
     r#"{"type":"object","properties":{"actions":{"type":"array","items":{"anyOf":[{"type":"object","properties":{"noop":{"type":"boolean","enum":[true]}},"required":["noop"],"additionalProperties":false},{"type":"object","properties":{"set_position":{"type":"object","properties":{"object":{"type":"integer"},"xyz_cm":{"type":"array","items":{"type":"integer"}}},"required":["object","xyz_cm"],"additionalProperties":false}},"required":["set_position"],"additionalProperties":false},{"type":"object","properties":{"set_label":{"type":"object","properties":{"object":{"type":"integer"},"label":{"type":"string"}}},"required":["object","label"],"additionalProperties":false}},"required":["set_label"],"additionalProperties":false}]}},"diagnostics":{"type":"array","items":{"type":"string"}}},"required":["actions","diagnostics"],"additionalProperties":false}"#

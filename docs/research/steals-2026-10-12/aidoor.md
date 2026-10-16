@@ -17,7 +17,7 @@ LICENSE files read: blender-mcp MIT, wgpu MIT (dual Apache), egui MIT (dual Apac
    (model/mrtr.rs:105-113); our call_tool already returns that enum (mcp.rs:1521). Nothing uses the two new arms. Approval CAP1 is minted by tx.preview and passed back by the same model (mcp.rs:35-53).
 4. Judge: integer metrics only (look/metric.rs:1-22): luma SSIM over non-overlapping 8x8 windows (metric.rs:33,378), CIE76 deltaE (:502-530), 64-bin histogram. L8 = full-frame SSIM vs the Q1 frame (judge.rs:19);
    "motion" = SSIM of consecutive frames (judge.rs:344,1084); frozen window 3 (frame_check.rs:595). FLIP is on the board twice (LF15 SPRINT-18-gaps.md:1544, PQ4 SPRINT-04-finish-quality.md:52), in code zero times.
-   A second, weaker judge look_judge.rs ("first slice", frame_check metrics) mirrors look/judge.rs: slim-law flag.
+   A second, weaker judge look_judge.rs ("first slice", frame_check metrics) mirrors look/judge.rs: slim-law flag. CUT 2026-10-16: both judges plus the look subtree deleted (zero consumers); the LF15 fold is moot.
 5. Temporal: clip_hold.rs scores shimmer on a 64x36 synthetic push-in, last 12 of 120 frames (clip_hold.rs:26-31,53-60); gates GHOST 0.25 and SHIMMER var 0.01 (post.rs:61,63). No fighter in that clip. MotionField exists (post.rs:239).
 6. Goldens: tools/q1-check.mjs:9 pins PNG counts only (4 synth, 30 orbit); no pixel compare, no bless, no .diff output; quality.md:25 says zero reference PNGs sit on disk.
 7. Replay debug: proof/trace.rs:34-35 replay_verbose emits only sim.tick events (locked by covered_scope_is_sim_tick_only); observe/rerun_sink.rs:19 is a 120-row ring of (tick, hash) with first_divergent.
@@ -126,7 +126,7 @@ S4 Visual judging without one eye: tier 1 bit-exact on the pinned software adapt
 S4 Moving-picture stability: judge flicker on consecutive frames after motion compensation with a visibility model plus a sharpness guard, on the 1080p fighter clip, not only the 64x36 oracle.
 S4 Time-travel debugging: the tape is the recording; the viewer is an export. Replay once, write pose, event, hash and DebugDraw channels to MCAP, open in Foxglove or Rerun. One DebugDraw trait, two sinks.
 Amend LF15 (no new row): pooled p95/p99 and explicit ppd. Add to SP62 view.observe: an ascii_map with legend and a `changes` block since the last call (vitric render/describe) so a blind weak model reads the arena in about 600 tokens.
-Fix drift: ai-native.md:61 says budget 38_944 at mcp.rs:126; code says 43_514 at mcp.rs:149. Fold look_judge.rs (first slice) into look/judge.rs when LF15 lands; two judges is a mirror.
+Fix drift: ai-native.md:61 says budget 38_944 at mcp.rs:126; code says 43_514 at mcp.rs:149. Fold look_judge.rs (first slice) into look/judge.rs when LF15 lands; two judges is a mirror. MOOT 2026-10-16: look subtree cut, no fold needed.
 
 == 5. Not worth it ==
 1. VLM-only visual regression gate: VideoGameQA-Bench best is 45.2% on regression, 82.8% on glitch finding with hallucinated clipping; keep the VLM as a second witness after FLIP.

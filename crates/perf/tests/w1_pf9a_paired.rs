@@ -81,7 +81,7 @@ fn tick_frame_paired_receipt_kills_divergence() {
 /// Full proof at the canonical count: paired 600-tick runs share one hash
 /// and print the quantile table with the machine line.
 #[test]
-#[ignore = "timing: 600-tick paired capture needs a quiet box; run under --perf"]
+#[ignore = "determinism receipt: paired 600-tick capture plus quantile table; run under --perf"]
 fn tick_frame_paired_600_runs_share_one_hash() {
     let _guard = lock();
     profiler::set_enabled(true);

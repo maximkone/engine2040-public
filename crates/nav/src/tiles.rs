@@ -1,5 +1,6 @@
 //! tiles: versioned dynamic tiles plus flow fields over the grid.
-//! Owner: nav crate; the arena breaks walls here and steers legions here.
+//! Owner: nav crate; live consumer: the destruction break-set handoff
+//! (dirty tiles in, rebaked tiles plus refreshed goal fields out).
 //! Units: cells in, tile ids and versions out, ticks at 60 Hz.
 //! Determinism: sorted break sets, ascending rebake order, integer BFS
 //! with fixed neighbor order; no hash order, floats, or wall clock.
@@ -25,7 +26,8 @@ pub const MAX_GRID_CELLS: usize = 1_048_576;
 /// Largest cached flow-field count; older goals evict FIFO.
 pub const MAX_FLOW_FIELDS: usize = 8;
 /// Fixed tick rate a breach must open inside of (one second of ticks).
-pub const TICKS_PER_SECOND: u32 = 60;
+/// Single owner of the rate is `engine_core::TICK_HZ`.
+pub const TICKS_PER_SECOND: u32 = engine_core::TICK_HZ as u32;
 /// Largest queued obstacle request count; further requests refuse loudly.
 pub const MAX_OBSTACLE_REQUESTS: usize = 64;
 /// Largest tile set one box obstacle may touch; wider boxes refuse loudly.

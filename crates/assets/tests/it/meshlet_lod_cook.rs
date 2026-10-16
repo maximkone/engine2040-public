@@ -1,8 +1,8 @@
 //! VG2 spike: the LOD DAG halves triangles within error, caps clusters,
 //! repeats x2 and stays KTX2-only.
 //!
-//! Owner: `engine-assets`; consumer: the mesh cook proving arena meshes
-//! land clusters plus a DAG inside the error bound. Units: counts in,
+//! Owner: `engine-assets`; this test proving grid meshes land clusters
+//! plus a DAG inside the error bound. Units: counts in,
 //! cooked levels out. Determinism: fixed grids only, so reruns agree.
 
 use engine_assets::import::{validate_ktx2, KTX2_MAGIC};

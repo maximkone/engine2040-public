@@ -8,32 +8,9 @@
 //! `BTreeMap`/`BTreeSet`, so repeated builds report the same sets.
 
 /// Sever-cook templates (body segments plus stump caps) compiled from
-/// `sever_cook.rs`: the cut presentation reads interior and cap rings from
-/// the canonical payload below, so the templates ship with the cook cache.
+/// `sever_cook.rs`; the templates ship with the cook cache.
 #[path = "sever_cook.rs"]
 pub mod sever_cook;
-
-/// Canonical cache payload for a sever cook: digest plus a per-segment
-/// census (name bytes plus interior/cap face counts). Little-endian
-/// fixed-width integers only, segments already name-sorted by the cook, so
-/// the same rig encodes byte-identical payloads on every PC.
-pub fn sever_cache_payload(output: &sever_cook::SeverCookOutput) -> Vec<u8> {
-    let mut bytes: Vec<u8> = Vec::with_capacity(16 + output.segments.len() * 96);
-    bytes.extend_from_slice(&output.digest.to_le_bytes());
-    let count = u64::try_from(output.segments.len()).unwrap_or(u64::MAX);
-    bytes.extend_from_slice(&count.to_le_bytes());
-    for segment in &output.segments {
-        let name = segment.name.as_bytes();
-        let len = u64::try_from(name.len()).unwrap_or(u64::MAX);
-        bytes.extend_from_slice(&len.to_le_bytes());
-        bytes.extend_from_slice(name);
-        let interior = u64::try_from(segment.interior_tris.len()).unwrap_or(u64::MAX);
-        bytes.extend_from_slice(&interior.to_le_bytes());
-        let cap = u64::try_from(segment.cap_tris.len()).unwrap_or(u64::MAX);
-        bytes.extend_from_slice(&cap.to_le_bytes());
-    }
-    bytes
-}
 
 #[cfg(feature = "registry")]
 use std::collections::{BTreeMap, BTreeSet};

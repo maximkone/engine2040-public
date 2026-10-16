@@ -138,6 +138,8 @@ impl Registry {
         self.ids.get(h.0 as usize).copied()
     }
     /// True when `bytes` still match the stored row; `Err` on bad handle.
+    /// Test-only: no production caller reads freshness here.
+    #[cfg(test)]
     pub fn is_fresh(&self, h: Handle, bytes: &[u8]) -> Result<bool, HandleError> {
         let id = self.ids.get(h.0 as usize).ok_or(HandleError::Bad(h))?;
         Ok(content_hash(bytes) == *id)
@@ -166,11 +168,6 @@ impl AssetId {
 
     /// The nil id. Never minted; useful as an explicit empty slot.
     pub const NIL: Self = Self(ObjectId::NIL);
-
-    /// The wrapped scene id.
-    pub fn as_object_id(self) -> ObjectId {
-        self.0
-    }
 
     /// True for the nil id.
     pub fn is_nil(self) -> bool {

@@ -96,10 +96,10 @@ struct Watch {
 pub struct Watcher {
     next: WatchId,
     watches: BTreeMap<WatchId, Watch>,
-    last_dirty: bool,
 }
 
-/// Hot-reload hook the export path reuses: true when `events` is non-empty. Dev-only.
+/// Test-only hook: true when `events` is non-empty. No export path reads it.
+#[cfg(test)]
 pub fn needs_recook(events: &[FileEvent]) -> bool {
     !events.is_empty()
 }
@@ -138,12 +138,15 @@ impl Watcher {
         id
     }
 
-    /// Stop watching `id`. True when a watch was removed.
+    /// Stop watching `id`. True when a watch was removed. Test-only: the
+    /// landed poll never tears watches down.
+    #[cfg(test)]
     pub fn unwatch(&mut self, id: WatchId) -> bool {
         self.watches.remove(&id).is_some()
     }
 
-    /// True when `id` names an active watch.
+    /// True when `id` names an active watch. Test-only: see `unwatch`.
+    #[cfg(test)]
     pub fn is_watching(&self, id: WatchId) -> bool {
         self.watches.contains_key(&id)
     }
@@ -151,6 +154,9 @@ impl Watcher {
     /// Diff every watch against its last snapshot, oldest watch first.
     /// At most one event per watch per call.
     pub fn poll(&mut self) -> Vec<FileEvent> {
+        if self.watches.is_empty() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for watch in self.watches.values_mut() {
             let current = signature(&watch.path);
@@ -195,7 +201,6 @@ impl Watcher {
                 }
             }
         }
-        self.last_dirty = needs_recook(&out);
         out
     }
 }
@@ -347,12 +352,12 @@ mod tests {
         remove(&path);
         let mut watcher = Watcher::new();
         watcher.watch(&path, WatchSettings::default());
-        assert!(watcher.poll().is_empty());
-        assert!(!watcher.last_dirty);
+        let baseline = watcher.poll();
+        assert!(!needs_recook(&baseline));
         std::fs::write(&path, b"v1").unwrap();
         let events = watcher.poll();
         assert!(needs_recook(&events));
-        assert!(watcher.last_dirty);
+        assert!(watcher.poll().is_empty());
         remove(&path);
     }
 }

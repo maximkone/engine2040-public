@@ -13,7 +13,9 @@ use std::fmt;
 pub const COMBAT_CLIP_COUNT: usize = 48;
 /// Clips per batch slice (three slices make the full set).
 pub const CLIPS_PER_BATCH: usize = 16;
-/// Batch slices in the full combat set.
+/// Batch slices in the full combat set. Test-only: production code walks
+/// `combat_clip_names` directly instead of counting batches.
+#[cfg(test)]
 pub const COMBAT_BATCH_COUNT: usize = 3;
 /// Licence accepted by this intake: combat hand-made chain is CC0-1.0 only,
 /// narrower than the release allow-list (`provenance::ALLOWED_SPDX`).

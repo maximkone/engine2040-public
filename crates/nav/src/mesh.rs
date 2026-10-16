@@ -1,5 +1,6 @@
 //! mesh: navmesh bake plus point/area queries over walkable polygons.
-//! Owner: nav crate, consumers: crowd and links. Units: meters in and out,
+//! Owner: nav crate; live consumers: ludus proof bake plus rebake.rs tile
+//! bumps. Units: meters in and out,
 //! grid cells inside, integer millimeters in bytes. Determinism: quantized
 //! sort plus index-order flood fill, so identical geometry bakes identical
 //! bytes. Errors: typed NavError, unreachable never guesses.
@@ -8,6 +9,8 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::cursor::{Cursor, Truncated};
+/// Largest absolute vertex coordinate in meters; beyond it refuses.
+pub const MAX_COORD_M: f32 = 4096.0;
 
 /// Bake wire magic (`E2NAV1`) at the head of every blob.
 const MESH_MAGIC: [u8; 6] = *b"E2NAV1";
@@ -23,8 +26,6 @@ pub const MAX_SIDE: u32 = 1024;
 pub const MAX_CELLS: usize = 1_048_576;
 /// Largest blob one decode accepts; larger blobs refuse loudly.
 pub const MAX_BYTES: usize = 16 << 20;
-/// Largest absolute vertex coordinate in meters; beyond it refuses.
-pub const MAX_COORD_M: f32 = 4096.0;
 /// Largest area-query radius in meters; beyond it refuses.
 pub const MAX_RADIUS_M: f32 = 1024.0;
 /// Twice the area under which a triangle counts as degenerate, in m^2.
@@ -400,7 +401,11 @@ impl NavMesh {
     }
     /// Canonical versioned bytes; identical geometry bakes identical bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let mut size = 32usize;
+        for poly in &self.polygons {
+            size += 13 + poly.cells.len() * 12 + poly.neighbors.len() * 4;
+        }
+        let mut out = Vec::with_capacity(size);
         out.extend_from_slice(&MESH_MAGIC);
         out.extend_from_slice(&MESH_VERSION.to_le_bytes());
         out.extend_from_slice(&self.cell_mm.to_le_bytes());
@@ -625,7 +630,8 @@ impl From<Truncated> for NavError {
 }
 
 /// Stacked floors: each floor bakes alone so shared XZ never merges.
-/// PORT(lunaris@56cc7e30:NAVIGATION bridge multi-level). Caller: rebake.rs `rebake_mesh_tile`.
+/// PORT(lunaris@56cc7e30:NAVIGATION bridge multi-level). No live caller:
+/// rebake.rs `rebake_mesh_tile` takes a plain `NavMesh`, never this stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackedNav {
     levels: Vec<NavMesh>,
@@ -748,7 +754,8 @@ impl StackedNav {
 }
 
 /// Tile edge in cells for versioned mesh tiles; one NV1 generation per tile.
-/// Caller: `StackedNav::bake_stacked` seeds a table to validate tiling.
+/// Built by `MeshTiles::from_mesh` (whose one call site discards the table);
+/// nothing seeds a live tiling from it today.
 pub const MESH_TILE_EDGE: u32 = 8;
 /// Magic at the head of a tile-version blob; mesh bytes stay `E2NAV1`.
 const TILE_MAGIC: [u8; 6] = *b"E2MTL1";

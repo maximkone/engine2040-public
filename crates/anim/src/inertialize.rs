@@ -202,7 +202,8 @@ const IDENT_Q: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 /// Default angular limit in deg/s: 180 deg in 10 ticks at 60 Hz.
 pub const DEFAULT_ANG_LIMIT_DEG_PER_SEC: f32 = 1080.0;
 /// Fixed anim dt in seconds for the 60 Hz clock.
-const TICK_DT_S: f32 = 1.0 / 60.0;
+/// Single owner is `engine_core::DT` (identical bits to `1.0 / 60.0`).
+const TICK_DT_S: f32 = engine_core::DT;
 
 fn qdot(a: [f32; 4], b: [f32; 4]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]

@@ -1,19 +1,16 @@
-//! GE1 fixture genres (generality proof): three headless games on public APIs.
+//! GE1 fixture genres (generality proof): two headless games on public APIs.
 //!
 //! Purpose: prove any genre could be built with zero engine edits. Owner:
 //! the GE1 fixture (tests + data only). Units: meters, seconds, fixed
 //! 60 Hz ticks; traversal ledge heights in integer millimetres. Determinism:
 //! same rules plus inputs give identical checkpoints twice; sim math is
 //! `+ - * /` and one `sqrt` (aim normalize, enemy drift, camera lead),
-//! index order, fixed dt, SplitMix64 seed expansion, no wall clock. The
-//! vehicle course steps the public D1 vehicle math (integer-table trig
-//! inside `engine-physics`), so its determinism rides the D1 gate. Errors:
+//! index order, fixed dt, SplitMix64 seed expansion, no wall clock. Errors:
 //! typed config/input/replay errors per fixture; bad data fails loudly,
 //! never panics on user bytes.
 
 use engine_core::{hash_bytes, TickState, DT};
 use engine_ecs::{Position, Velocity, World};
-use engine_physics::vehicle as v;
 use engine_physics::{Body, Space};
 use std::sync::OnceLock;
 
@@ -178,17 +175,6 @@ fn cached_twin_rules() -> TwinFileRules {
         .get_or_init(|| {
             let text = load_text("twin-stick").expect("twin rules load");
             parse_twin_rules(&text).expect("twin rules parse")
-        })
-        .clone()
-}
-
-/// Parsed vehicle-course rules, shared across tests in one process.
-fn cached_vehicle_rules() -> VehicleFileRules {
-    static CACHE: OnceLock<VehicleFileRules> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let text = load_text("vehicle-course").expect("vehicle rules load");
-            parse_vehicle_rules(&text).expect("vehicle rules parse")
         })
         .clone()
 }
@@ -904,495 +890,6 @@ fn parse_twin_rules(text: &str) -> Result<TwinFileRules, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Vehicle course: time-trial gates on the public D1 vehicle math.
-// ---------------------------------------------------------------------------
-
-/// Gates per course, `1..=VEHICLE_MAX_GATES`.
-const VEHICLE_MAX_GATES: usize = 16;
-/// Bound recorded drive inputs per course.
-const VEHICLE_MAX_INPUTS: usize = 512;
-/// Gate radius bounds, meters.
-const VEHICLE_GATE_R_MIN_M: f32 = 1.0;
-/// Gate radius bounds, meters.
-const VEHICLE_GATE_R_MAX_M: f32 = 10.0;
-/// Gate coordinate bounds, meters.
-const VEHICLE_COURSE_LIMIT_M: f32 = 100.0;
-
-/// Vehicle tune as data (names the public D1 tune, never engine edits).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum TuneKind {
-    /// Nimble kart tune.
-    Kart,
-    /// Heavy sedan tune.
-    Sedan,
-}
-
-/// Course ground as data (names the public D1 ground, never engine edits).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum GroundKind {
-    /// Flat ground plane.
-    Flat,
-    /// Small-bump heightfield.
-    Bumps,
-}
-
-/// One timed gate: pass within `r` meters in the XZ plane, in order.
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct Gate {
-    /// Gate center x in meters.
-    x: f32,
-    /// Gate center z in meters.
-    z: f32,
-    /// Gate radius in meters.
-    r: f32,
-}
-
-/// One held drive input applied from the named zero-based tick.
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct DriveInput {
-    /// Application tick, strictly below `VehicleConfig::ticks`.
-    tick: u32,
-    /// Throttle `-1..=1`.
-    throttle: f32,
-    /// Brake `0..=1`.
-    brake: f32,
-    /// Steering `-1..=1`.
-    steer: f32,
-}
-
-/// Vehicle course configuration: every field is validated before a run.
-#[derive(Clone, PartialEq, Debug)]
-struct VehicleConfig {
-    /// Initialization seed; expanded with SplitMix64 (seeds never alias).
-    seed: u64,
-    /// Fixed steps, `1..=MAX_TICKS`.
-    ticks: u32,
-    /// Public D1 tune.
-    tune: TuneKind,
-    /// Public D1 ground.
-    ground: GroundKind,
-    /// Ordered gates, `1..=VEHICLE_MAX_GATES`.
-    gates: Vec<Gate>,
-}
-
-/// Recorded run: config, held inputs, one checkpoint per tick, progress.
-#[derive(Clone, PartialEq, Debug)]
-struct VehicleTape {
-    /// Rules the run drove under.
-    config: VehicleConfig,
-    /// Ordered, validated drive inputs.
-    inputs: Vec<DriveInput>,
-    /// One post-step checkpoint per tick.
-    checkpoints: Vec<Checkpoint>,
-    /// Gates cleared in order.
-    cleared: u32,
-    /// First tick every gate cleared, if any.
-    win_tick: Option<u32>,
-    /// Final XZ position in meters.
-    final_xz: [f32; 2],
-}
-
-/// Bad course configuration, culprit carried.
-#[expect(
-    clippy::enum_variant_names,
-    reason = "error variants name the config field they reject"
-)]
-#[derive(Clone, PartialEq, Debug)]
-enum VehicleConfigError {
-    /// Tick count `0` or above `MAX_TICKS`.
-    BadTicks(u32),
-    /// Gate count outside `1..=VEHICLE_MAX_GATES`.
-    BadGates(usize),
-    /// Gate coordinate or radius out of bounds.
-    BadGate(usize),
-    /// Unknown tune name.
-    BadTune(String),
-    /// Unknown ground name.
-    BadGround(String),
-}
-
-/// Bad drive list, reason carried.
-#[expect(
-    clippy::enum_variant_names,
-    reason = "error variants name the config field they reject"
-)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum VehicleInputError {
-    /// No inputs, or more than `VEHICLE_MAX_INPUTS`.
-    BadCount,
-    /// First input past tick 0, a tick past the run end, or unordered ticks.
-    BadTick,
-    /// Non-finite or out-of-range throttle, brake or steer.
-    BadPedal,
-}
-
-/// Run replay failure: invalid data or the first divergent tick.
-#[derive(Clone, PartialEq, Eq, Debug)]
-enum VehicleReplayError {
-    /// Config or drive list rejected.
-    Invalid,
-    /// Checkpoint count does not match the config.
-    Count,
-    /// First mismatching zero-based tick plus both hashes.
-    Divergence {
-        tick: u32,
-        expected: u64,
-        actual: u64,
-    },
-    /// Gate progress differs.
-    Progress(u32),
-}
-
-impl core::fmt::Display for VehicleConfigError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::BadTicks(ticks) => write!(f, "bad ticks ({ticks})"),
-            Self::BadGates(count) => write!(f, "bad gate count ({count})"),
-            Self::BadGate(index) => write!(f, "bad gate ({index})"),
-            Self::BadTune(name) => write!(f, "bad tune ({name})"),
-            Self::BadGround(name) => write!(f, "bad ground ({name})"),
-        }
-    }
-}
-
-impl core::fmt::Display for VehicleInputError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::BadCount => write!(f, "bad input count"),
-            Self::BadTick => write!(f, "input tick out of range or unordered"),
-            Self::BadPedal => write!(f, "pedal not finite or out of range"),
-        }
-    }
-}
-
-impl core::fmt::Display for VehicleReplayError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Invalid => write!(f, "invalid tape"),
-            Self::Count => write!(f, "checkpoint count does not match ticks"),
-            Self::Divergence {
-                tick,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "replay diverged at tick {tick}: expected {expected:016x}, got {actual:016x}"
-            ),
-            Self::Progress(cleared) => write!(f, "gate progress differs at {cleared} cleared"),
-        }
-    }
-}
-
-impl std::error::Error for VehicleConfigError {}
-impl std::error::Error for VehicleInputError {}
-impl std::error::Error for VehicleReplayError {}
-
-impl VehicleConfig {
-    /// Range-check every field; bad data fails with the culprit.
-    fn validate(&self) -> Result<(), VehicleConfigError> {
-        if self.ticks == 0 || self.ticks > MAX_TICKS {
-            return Err(VehicleConfigError::BadTicks(self.ticks));
-        }
-        if self.gates.is_empty() || self.gates.len() > VEHICLE_MAX_GATES {
-            return Err(VehicleConfigError::BadGates(self.gates.len()));
-        }
-        for (index, gate) in self.gates.iter().enumerate() {
-            if !gate.x.is_finite()
-                || !gate.z.is_finite()
-                || !gate.r.is_finite()
-                || gate.x.abs() > VEHICLE_COURSE_LIMIT_M
-                || gate.z.abs() > VEHICLE_COURSE_LIMIT_M
-                || gate.r < VEHICLE_GATE_R_MIN_M
-                || gate.r > VEHICLE_GATE_R_MAX_M
-            {
-                return Err(VehicleConfigError::BadGate(index));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Validate one held drive-input list against its config.
-fn validate_drive_inputs(
-    config: &VehicleConfig,
-    inputs: &[DriveInput],
-) -> Result<(), VehicleInputError> {
-    if inputs.is_empty() || inputs.len() > VEHICLE_MAX_INPUTS {
-        return Err(VehicleInputError::BadCount);
-    }
-    if inputs[0].tick != 0 {
-        return Err(VehicleInputError::BadTick);
-    }
-    for one in inputs {
-        if one.tick >= config.ticks {
-            return Err(VehicleInputError::BadTick);
-        }
-        if !one.throttle.is_finite()
-            || !one.brake.is_finite()
-            || !one.steer.is_finite()
-            || one.throttle < -1.0
-            || one.throttle > 1.0
-            || one.brake < 0.0
-            || one.brake > 1.0
-            || one.steer < -1.0
-            || one.steer > 1.0
-        {
-            return Err(VehicleInputError::BadPedal);
-        }
-    }
-    if inputs.windows(2).any(|pair| pair[0].tick >= pair[1].tick) {
-        return Err(VehicleInputError::BadTick);
-    }
-    Ok(())
-}
-
-/// Seed-expanded start pose: two stream words map into a `[-2, 2]` m box,
-/// one word maps into a `[-pi, pi]` yaw. Every seed starts its own run.
-fn vehicle_start(seed: u64) -> (f32, f32, f32) {
-    let mut state = seed ^ (LANE_MIX >> 1);
-    let x = unit_f32(splitmix64_next(&mut state)) * 4.0 - 2.0;
-    let z = unit_f32(splitmix64_next(&mut state)) * 4.0 - 2.0;
-    let yaw = unit_f32(splitmix64_next(&mut state)) * 2.0 - 1.0;
-    (
-        canon_zero(x),
-        canon_zero(z),
-        canon_zero(yaw * core::f32::consts::PI),
-    )
-}
-
-/// Live run over the public D1 vehicle step: the fixture owns gates and
-/// inputs only; suspension, tires and heading math stay in the engine.
-struct VehicleSim {
-    /// Run rules.
-    config: VehicleConfig,
-    /// Held inputs in tick order.
-    inputs: Vec<DriveInput>,
-    /// Cursor into `inputs`.
-    cursor: usize,
-    /// Currently held input.
-    current: DriveInput,
-    /// Public D1 tune.
-    tune: v::Tune,
-    /// Public D1 ground.
-    ground: fn(f32, f32) -> (f32, v::V3),
-    /// Live vehicle state.
-    state: v::VState,
-    /// Next gate index.
-    next_gate: u32,
-    /// Gates cleared in order.
-    cleared: u32,
-    /// Zero-based fixed tick.
-    tick: u32,
-    /// Running clock over per-tick step hashes.
-    clock: TickState,
-    /// Rules-plus-inputs context folded into every hash.
-    context: u64,
-    /// Checkpoints so far.
-    checkpoints: Vec<Checkpoint>,
-    /// First all-gates tick, once every gate clears.
-    win_tick: Option<u32>,
-}
-
-impl VehicleSim {
-    /// Validated constructor: config, inputs, seed-expanded start, D1 tune.
-    fn build(config: VehicleConfig, inputs: &[DriveInput]) -> Result<Self, VehicleInputError> {
-        config.validate().map_err(|_| VehicleInputError::BadTick)?;
-        validate_drive_inputs(&config, inputs)?;
-        let tune = match config.tune {
-            TuneKind::Kart => v::kart_tune(),
-            TuneKind::Sedan => v::sedan_tune(),
-        };
-        let ground = match config.ground {
-            GroundKind::Flat => v::flat_ground,
-            GroundKind::Bumps => v::bump_ground,
-        };
-        let (sx, sz, yaw) = vehicle_start(config.seed);
-        let mut context_bytes = Vec::new();
-        context_bytes.extend_from_slice(&FIXTURE_VERSION.to_le_bytes());
-        context_bytes.extend_from_slice(&config.seed.to_le_bytes());
-        context_bytes.extend_from_slice(&config.ticks.to_le_bytes());
-        context_bytes.extend_from_slice(&[config.tune as u8, config.ground as u8]);
-        for gate in &config.gates {
-            context_bytes.extend_from_slice(&gate.x.to_bits().to_le_bytes());
-            context_bytes.extend_from_slice(&gate.z.to_bits().to_le_bytes());
-            context_bytes.extend_from_slice(&gate.r.to_bits().to_le_bytes());
-        }
-        for one in inputs {
-            context_bytes.extend_from_slice(&one.tick.to_le_bytes());
-            context_bytes.extend_from_slice(&one.throttle.to_bits().to_le_bytes());
-            context_bytes.extend_from_slice(&one.brake.to_bits().to_le_bytes());
-            context_bytes.extend_from_slice(&one.steer.to_bits().to_le_bytes());
-        }
-        Ok(Self {
-            config,
-            inputs: inputs.to_vec(),
-            cursor: 1,
-            current: inputs[0],
-            tune,
-            ground,
-            state: v::VState::new(v::V3::new(sx, 1.0, sz), yaw),
-            next_gate: 0,
-            cleared: 0,
-            tick: 0,
-            clock: TickState::new(inputs[0].tick as u64 ^ 0x9E37_79B9_7F4A_7C15),
-            context: hash_bytes(&context_bytes),
-            checkpoints: Vec::new(),
-            win_tick: None,
-        })
-    }
-
-    /// One fixed tick: hold inputs, step D1 math, clear gates by squared
-    /// distance (no square root in the course logic), checkpoint.
-    fn step(&mut self) {
-        while self.cursor < self.inputs.len() && self.inputs[self.cursor].tick == self.tick {
-            self.current = self.inputs[self.cursor];
-            self.cursor += 1;
-        }
-        let drive = v::VInput::new(
-            self.current.throttle,
-            self.current.brake,
-            self.current.steer,
-        );
-        v::step(&self.tune, &mut self.state, &drive, DT, self.ground);
-        if usize::try_from(self.next_gate).unwrap_or(usize::MAX) < self.config.gates.len() {
-            let gate = &self.config.gates[self.next_gate as usize];
-            let dx = self.state.pos.x - gate.x;
-            let dz = self.state.pos.z - gate.z;
-            if dx * dx + dz * dz <= gate.r * gate.r {
-                self.next_gate += 1;
-                self.cleared += 1;
-            }
-        }
-        if self.win_tick.is_none() && self.cleared as usize >= self.config.gates.len() {
-            self.win_tick = Some(self.tick);
-        }
-        let step_hash = v::state_hash(&self.state)
-            ^ u64::from(self.cleared).wrapping_mul(PRIME)
-            ^ self.context.wrapping_add(u64::from(self.next_gate));
-        let hash = self.clock.step(step_hash);
-        self.checkpoints.push(Checkpoint {
-            tick: self.tick,
-            hash,
-        });
-        self.tick += 1;
-    }
-
-    /// Drive the course to completion.
-    fn run(mut self) -> VehicleTape {
-        self.checkpoints.reserve(self.config.ticks as usize);
-        while self.tick < self.config.ticks {
-            self.step();
-        }
-        VehicleTape {
-            config: self.config,
-            inputs: self.inputs,
-            checkpoints: self.checkpoints,
-            cleared: self.cleared,
-            win_tick: self.win_tick,
-            final_xz: [self.state.pos.x, self.state.pos.z],
-        }
-    }
-}
-
-/// Boot plus headless play: validate, drive every fixed tick, record.
-fn vehicle_record(
-    config: VehicleConfig,
-    inputs: &[DriveInput],
-) -> Result<VehicleTape, VehicleInputError> {
-    Ok(VehicleSim::build(config, inputs)?.run())
-}
-
-/// Replay a run tape: re-drive and stop at the first divergent tick.
-fn vehicle_replay(tape: &VehicleTape) -> Result<(), VehicleReplayError> {
-    if tape.checkpoints.len() != tape.config.ticks as usize {
-        return Err(VehicleReplayError::Count);
-    }
-    let fresh = vehicle_record(tape.config.clone(), &tape.inputs)
-        .map_err(|_| VehicleReplayError::Invalid)?;
-    for (want, got) in tape.checkpoints.iter().zip(fresh.checkpoints.iter()) {
-        if want != got {
-            return Err(VehicleReplayError::Divergence {
-                tick: want.tick,
-                expected: want.hash,
-                actual: got.hash,
-            });
-        }
-    }
-    if tape.cleared != fresh.cleared || tape.win_tick != fresh.win_tick {
-        return Err(VehicleReplayError::Progress(tape.cleared));
-    }
-    Ok(())
-}
-
-/// Vehicle rules file record: the authority the table test boots from.
-#[derive(Clone, PartialEq, Debug)]
-struct VehicleFileRules {
-    /// Rules version; must equal `FIXTURE_VERSION`.
-    version: u16,
-    /// Course rules.
-    config: VehicleConfig,
-    /// Ordered drive inputs.
-    inputs: Vec<DriveInput>,
-}
-
-/// Parse the vehicle-course rules file into validated tables (std only).
-fn parse_vehicle_rules(text: &str) -> Result<VehicleFileRules, String> {
-    let version = num_after(text, "version")? as u16;
-    if version != FIXTURE_VERSION {
-        return Err(format!("rules version {version} != {FIXTURE_VERSION}"));
-    }
-    if str_after(text, "fixture")? != "vehicle-course" {
-        return Err("rules fixture must be \"vehicle-course\"".to_string());
-    }
-    if str_after(text, "mode")? != "course" {
-        return Err("rules mode must be \"course\"".to_string());
-    }
-    let tune = match str_after(text, "tune")?.as_str() {
-        "kart" => TuneKind::Kart,
-        "sedan" => TuneKind::Sedan,
-        other => return Err(format!("bad tune ({other})")),
-    };
-    let ground = match str_after(text, "ground")?.as_str() {
-        "flat" => GroundKind::Flat,
-        "bumps" => GroundKind::Bumps,
-        other => return Err(format!("bad ground ({other})")),
-    };
-    let mut gates = Vec::new();
-    for obj in objects_in(text, "gates")? {
-        gates.push(Gate {
-            x: num_after(&obj, "x")? as f32,
-            z: num_after(&obj, "z")? as f32,
-            r: num_after(&obj, "r")? as f32,
-        });
-    }
-    let mut inputs = Vec::new();
-    for obj in objects_in(text, "inputs")? {
-        inputs.push(DriveInput {
-            tick: num_after(&obj, "tick")? as u32,
-            throttle: num_after(&obj, "throttle")? as f32,
-            brake: num_after(&obj, "brake")? as f32,
-            steer: num_after(&obj, "steer")? as f32,
-        });
-    }
-    let config = VehicleConfig {
-        seed: num_after(text, "seed")? as u64,
-        ticks: num_after(text, "ticks")? as u32,
-        tune,
-        ground,
-        gates,
-    };
-    config
-        .validate()
-        .map_err(|err| format!("rules config: {err}"))?;
-    validate_drive_inputs(&config, &inputs).map_err(|err| format!("rules inputs: {err}"))?;
-    Ok(VehicleFileRules {
-        version,
-        config,
-        inputs,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Traversal course: third-person ledge course with a probe chooser.
 // ---------------------------------------------------------------------------
 
@@ -2057,65 +1554,6 @@ mod genre_tests {
         assert_ne!(tape.checkpoints, idle.checkpoints);
     }
 
-    /// Vehicle rules-file authority: the shipped tables parse, validate and
-    /// match the documented fixture values.
-    #[test]
-    fn vehicle_rules_file_is_the_authority() {
-        let rules = cached_vehicle_rules();
-        assert_eq!(rules.version, FIXTURE_VERSION);
-        assert_eq!(rules.config.seed, 43);
-        assert_eq!(rules.config.ticks, 600);
-        assert_eq!(rules.config.tune, TuneKind::Kart);
-        assert_eq!(rules.config.ground, GroundKind::Bumps);
-        assert_eq!(rules.config.gates.len(), 3);
-        assert_eq!(rules.inputs.len(), 4);
-        assert_eq!(rules.inputs[0].tick, 0);
-    }
-
-    /// Boot plus headless play: the vehicle tables boot on the D1 step, the
-    /// kart leaves its start box and clears the first gate, identically twice.
-    #[test]
-    fn vehicle_boots_plays_headless_and_records_twice_identical() {
-        let rules = cached_vehicle_rules();
-        let first = vehicle_record(rules.config.clone(), &rules.inputs).expect("vehicle record");
-        let second = vehicle_record(rules.config.clone(), &rules.inputs).expect("vehicle record");
-        assert_eq!(first, second);
-        assert_eq!(first.checkpoints.len(), rules.config.ticks as usize);
-        let (sx, sz, _) = vehicle_start(rules.config.seed);
-        let moved = (first.final_xz[0] - sx).powi(2) + (first.final_xz[1] - sz).powi(2);
-        assert!(moved > 4.0, "kart never left the start box: {moved}");
-        assert!(first.cleared >= 1, "kart cleared no gates");
-        vehicle_replay(&first).expect("vehicle replay");
-        println!(
-            "ge1 vehicle-course final {:016x} ticks {} cleared {}",
-            first.checkpoints.last().expect("last checkpoint").hash,
-            first.checkpoints.len(),
-            first.cleared
-        );
-    }
-
-    /// Replay names the first divergent tick: corrupting one checkpoint hash
-    /// fails at exactly that tick, and a short tape fails the count gate.
-    #[test]
-    fn vehicle_replay_names_first_divergence() {
-        let rules = cached_vehicle_rules();
-        let mut tape = vehicle_record(rules.config.clone(), &rules.inputs).expect("vehicle record");
-        tape.checkpoints[200].hash ^= 1;
-        assert_eq!(
-            vehicle_replay(&tape),
-            Err(VehicleReplayError::Divergence {
-                tick: 200,
-                expected: tape.checkpoints[200].hash,
-                actual: vehicle_record(rules.config.clone(), &rules.inputs)
-                    .expect("vehicle record")
-                    .checkpoints[200]
-                    .hash,
-            })
-        );
-        tape.checkpoints.pop();
-        assert_eq!(vehicle_replay(&tape), Err(VehicleReplayError::Count));
-    }
-
     /// Traversal rules-file authority: the shipped tables parse, validate
     /// and match the documented fixture values.
     #[test]
@@ -2312,84 +1750,7 @@ mod genre_tests {
                 "twin shots accepted"
             );
         }
-        let vehicle = cached_vehicle_rules();
-        for bad_ticks in [0, MAX_TICKS + 1] {
-            let bad = VehicleConfig {
-                ticks: bad_ticks,
-                ..vehicle.config.clone()
-            };
-            assert!(
-                vehicle_record(bad, &vehicle.inputs).is_err(),
-                "vehicle ticks accepted"
-            );
-        }
-        for bad_gates in [
-            vec![],
-            vec![
-                Gate {
-                    x: 0.0,
-                    z: 0.0,
-                    r: 0.5
-                };
-                VEHICLE_MAX_GATES + 1
-            ],
-        ] {
-            let bad = VehicleConfig {
-                gates: bad_gates,
-                ..vehicle.config.clone()
-            };
-            assert!(
-                vehicle_record(bad, &vehicle.inputs).is_err(),
-                "vehicle gates accepted"
-            );
-        }
-        let bad_gate = VehicleConfig {
-            gates: vec![Gate {
-                x: 500.0,
-                z: 0.0,
-                r: 5.0,
-            }],
-            ..vehicle.config.clone()
-        };
-        assert!(
-            vehicle_record(bad_gate, &vehicle.inputs).is_err(),
-            "vehicle gate accepted"
-        );
-        let good_drive = DriveInput {
-            tick: 0,
-            throttle: 0.5,
-            brake: 0.0,
-            steer: 0.0,
-        };
-        for bad_inputs in [
-            vec![],
-            vec![DriveInput {
-                tick: 9,
-                ..good_drive
-            }],
-            vec![DriveInput {
-                throttle: 2.0,
-                ..good_drive
-            }],
-            vec![DriveInput {
-                brake: -1.0,
-                ..good_drive
-            }],
-            vec![DriveInput {
-                steer: f32::INFINITY,
-                ..good_drive
-            }],
-            vec![good_drive, good_drive],
-        ] {
-            assert!(
-                vehicle_record(vehicle.config.clone(), &bad_inputs).is_err(),
-                "vehicle inputs accepted"
-            );
-        }
-        assert!(parse_vehicle_rules("{\"version\": 3}").is_err());
         assert!(parse_twin_rules("{\"version\": 3}").is_err());
-        assert!(format!("{}", VehicleConfigError::BadTune("hover".to_string())).contains("hover"));
-        assert!(format!("{}", VehicleConfigError::BadGround("lava".to_string())).contains("lava"));
         let trav = cached_trav_rules();
         for bad in [
             TravConfig {
@@ -2499,7 +1860,7 @@ mod genre_tests {
         assert_eq!(trav_replay(&short_trav), Err(TravReplayError::Count));
     }
 
-    /// Different rules, different games: moving one goal surface in each
+    /// Different rules, different games: moving one goal surface in either
     /// fixture changes the receipts while the same rules still replay x2.
     #[test]
     fn different_rules_are_different_games() {
@@ -2515,17 +1876,6 @@ mod genre_tests {
             other,
             twin_record(moved_twin, &twin.moves, &twin.shots).expect("moved twin")
         );
-        let vehicle = cached_vehicle_rules();
-        let mut moved_gates = vehicle.config.gates.clone();
-        moved_gates[0].x += 10.0;
-        let moved_vehicle = VehicleConfig {
-            gates: moved_gates,
-            ..vehicle.config.clone()
-        };
-        let base_run =
-            vehicle_record(vehicle.config.clone(), &vehicle.inputs).expect("base vehicle");
-        let other_run = vehicle_record(moved_vehicle, &vehicle.inputs).expect("moved vehicle");
-        assert_ne!(base_run.checkpoints, other_run.checkpoints);
         let trav = cached_trav_rules();
         let mut moved_ledges = trav.config.ledges.clone();
         moved_ledges[0].top_mm = 1900;
@@ -2540,7 +1890,7 @@ mod genre_tests {
     }
 
     /// Neighboring seeds never alias: SplitMix64 gives every seed its own
-    /// spawns and its own receipts in all three fixtures.
+    /// spawns and its own receipts in both fixtures.
     #[test]
     fn neighboring_seeds_never_alias() {
         let twin = cached_twin_rules().config;
@@ -2575,24 +1925,6 @@ mod genre_tests {
             )
             .expect("odd twin")
             .checkpoints
-        );
-        let vehicle = cached_vehicle_rules();
-        assert_ne!(vehicle_start(78), vehicle_start(79));
-        let even_run = VehicleConfig {
-            seed: 78,
-            ..vehicle.config.clone()
-        };
-        let odd_run = VehicleConfig {
-            seed: 79,
-            ..vehicle.config.clone()
-        };
-        assert_ne!(
-            vehicle_record(even_run, &vehicle.inputs)
-                .expect("even vehicle")
-                .checkpoints,
-            vehicle_record(odd_run, &vehicle.inputs)
-                .expect("odd vehicle")
-                .checkpoints
         );
         let trav = cached_trav_rules();
         let even_course = TravConfig {

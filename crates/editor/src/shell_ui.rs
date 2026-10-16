@@ -125,7 +125,9 @@ impl ShellUi {
 
     fn show_inner(&mut self, shell: &mut Shell, ui: &mut egui::Ui) {
         crate::shell::panels::ensure_builtin_panels(shell);
-        for panel in shell.open_panels.clone() {
+        // Borrow the open list: the loop only reads it while the dock takes
+        // the missing tabs, so no per-frame Vec clone.
+        for panel in shell.open_panels.iter().copied() {
             let present = self.dock.iter_all_tabs().any(|(_, tab)| *tab == panel);
             if !present {
                 self.dock.push_to_first_leaf(panel);
@@ -1187,8 +1189,8 @@ mod tests {
         let views = node_views_for_rows(&shell, &rows);
         let baseline: BTreeMap<(u64, String, String), String> = BTreeMap::new();
         let grid = inspector_mod::build_grid(&views, &shared, &baseline).unwrap();
-        assert!(!grid.rows_for(outline_mod::stable_id(root)).is_empty());
-        assert!(!grid.rows_for(outline_mod::stable_id(child)).is_empty());
+        assert!(grid.rows().iter().any(|row| row.node == outline_mod::stable_id(root)));
+        assert!(grid.rows().iter().any(|row| row.node == outline_mod::stable_id(child)));
         let mut ui_state = ShellUi::new(&shell);
         ui_state.shared_selection = shared.clone();
         let ctx = egui::Context::default();

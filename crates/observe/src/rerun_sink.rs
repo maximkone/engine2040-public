@@ -84,7 +84,6 @@ impl RerunSink {
     /// never fails and never allocates. Callers should push ticks in order so
     /// [`RerunSink::first_divergent`] compares matching positions.
     pub fn push(&mut self, tick: u64, state_hash: u64) {
-        debug_assert!(tracy::zone(tracy::RECORD_TICK).is_ok());
         let frame = RerunFrame { tick, state_hash };
         if self.len < MAX_RERUN_FRAMES {
             let pos = (self.start + self.len) % MAX_RERUN_FRAMES;
@@ -112,7 +111,6 @@ impl RerunSink {
     /// same rows. Determinism: pure comparison over stored rows, no clock.
     #[must_use]
     pub fn first_divergent(&self, other: &Self) -> Option<u64> {
-        debug_assert!(tracy::zone(tracy::COMPARE_SCAN).is_ok());
         let mut left = self.iter();
         let mut right = other.iter();
         loop {

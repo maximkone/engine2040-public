@@ -48,7 +48,6 @@ fn root_reaches_every_module_with_headline_numbers() {
     assert_eq!(feel::RUBRIC_PASS_PERMILLE, 900);
     assert_eq!(feel::WIN_LO_PERMILLE, 400);
     assert_eq!(feel::WIN_HI_PERMILLE, 600);
-    assert_eq!(latency::MAX_STAGED_EVENTS, 4_096);
     assert_eq!(vram::GIB, 1_024 * 1_024 * 1_024);
     assert_eq!(alloc::HEAP_PEAK_CSV_HEADER, "workload,peak_bytes");
     assert_eq!(

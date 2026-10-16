@@ -6,7 +6,7 @@ pub mod ground;
 pub mod scatter;
 pub mod terrain;
 
-/// FNV-1a 64 over bytes: the one content hash every bake, blockout and
+/// FNV-1a 64 over bytes: the one content hash every bake and
 /// terrain gate in this crate uses.
 pub use engine_core::hash_bytes as world_hash;
 use engine_core::{hash::GOLDEN_GAMMA, mix64};
