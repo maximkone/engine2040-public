@@ -146,7 +146,7 @@ pub struct PlayRunOutput {
     pub checkpoints: Vec<CheckpointDto>,
     // Play manifest: the exact seed and arena half-extent (meters) the job
     // simulated, echoed on every status. Flat fields, never a nested
-    // object: the twenty-one-tool discovery budget is a gate and every nested
+    // object: the 26-tool discovery budget (`crate::tools::TOOLS`) is a gate and every nested
     // definition spends it. Ticks ride on `tick_count`, so a cross-tool
     // replay refuses seed/extent drift loudly instead of comparing digests
     // across silent defaults.

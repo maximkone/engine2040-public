@@ -141,8 +141,9 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// Then on 2026-10-04 door v2 lands: the advertised list is the thirteen core
 /// tools plus the loaded packs (`scene` by default), measured well under
 /// the budget with every former tool still reachable by name; the budget
-/// stays at 43514 so the number is comparable to the 21-tool door, and the
-/// ledger gate now measures whatever a session advertises.
+/// stays at 43514 so the number is comparable to the old 21-tool door, and the
+/// ledger gate now measures whatever a session advertises. The frozen
+/// [`crate::tools::TOOLS`] registry now holds 26 tools.
 /// Per-tool descriptions stay one line so discovery stays near 6k tokens.
 /// OB3's two log tools, `scene.query` and `sim.plan_goals` keep field docs
 /// off their DTOs to stay inside it.
@@ -212,8 +213,8 @@ pub fn tool_names() -> Vec<&'static str> {
     names
 }
 
-/// Tool names a fresh session advertises: the core plus the default-loaded
-/// packs, in contract order.
+/// Tool names a fresh session advertises: the [`CORE_TOOL_NAMES`] core plus
+/// the default-loaded packs, in contract order (not the `tools::SLIM8` search default).
 pub fn default_tool_names() -> Vec<&'static str> {
     let registry = PackRegistry::shipped();
     let loaded = registry.default_loaded();
@@ -2291,7 +2292,7 @@ mod tests {
         );
     }
 
-    /// The twenty-one tools of the old door, every one still reachable.
+    /// The 21 tools of the old door, every one still reachable.
     const OLD_DOOR: [&str; 21] = [
         "api.describe",
         "api.search",

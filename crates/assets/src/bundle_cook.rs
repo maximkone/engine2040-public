@@ -1,6 +1,6 @@
 //! bundle_cook: bundle cook entry from cooked bytes to E204BNDL.
 //!
-//! Consumer: the packaged game's `pack-clean BUNDLE_RESOLVE` plus the
+//! Consumer: the packaged game's `ship pack BUNDLE_RESOLVE` plus the
 //! `bundle_cook` bin stage one file the game and editor startup loader
 //! accepts. Data owner: `engine-assets`.
 //! Units: payload bytes in, file bytes out, entry counts in receipts. Same
@@ -256,7 +256,7 @@ pub fn cook_bundle_bytes(staged: &StagedCooked) -> Result<Vec<u8>, BundleCookErr
     Ok(writer.finish())
 }
 
-/// Header-only check mirroring `tools/pack-clean.mjs checkBundleHeader`:
+/// Header-only check mirroring `tools/ship.mjs checkBundleHeader`:
 /// magic, version and entry-count bound. Returns the entry count.
 pub fn header_entry_count(bytes: &[u8]) -> Result<usize, BundleCookError> {
     if bytes.len() < STUB_BUNDLE_LEN {
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(receipt.entries, staged.len());
         assert!(receipt.entries >= 6);
         assert!(receipt.bytes > STUB_BUNDLE_LEN);
-        // Header mirrors pack-clean BUNDLE_RESOLVE: magic, version, count.
+        // Header mirrors ship pack BUNDLE_RESOLVE: magic, version, count.
         let bytes = std::fs::read(&path).expect("written file must read");
         assert_eq!(&bytes[0..8], BUNDLE_MAGIC);
         assert_eq!(
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(receipt.bytes, STUB_BUNDLE_LEN);
         let (loaded, _) = load_bundle_file(&path, true).expect("stub loads with flag");
         assert!(loaded.is_empty());
-        // The same file is refused without the flag (pack-clean parity: stub
+        // The same file is refused without the flag (ship pack parity: stub
         // needs --allow-stub, never an A8 proof).
         assert_eq!(
             load_bundle_file(&path, false).unwrap_err(),
@@ -594,7 +594,7 @@ mod tests {
             verify_bundle_bytes(&fresh[..cut], false).unwrap_err(),
             BundleCookError::Bundle(BundleError::Truncated { .. })
         ));
-        // Bad magic is refused as bad magic (pack-clean BUNDLE_RESOLVE parity).
+        // Bad magic is refused as bad magic (ship pack BUNDLE_RESOLVE parity).
         let mut bad = fresh;
         bad[0] ^= 0xFF;
         assert_eq!(

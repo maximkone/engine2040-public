@@ -17,6 +17,7 @@ mod bet_wall_spike;
 mod canonical;
 mod concurrency;
 mod core_bench;
+mod core_bench_vectors;
 mod heap_peak;
 mod lib_wiring_vectors;
 mod perf_proof;

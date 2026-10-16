@@ -13,8 +13,8 @@
 //! gating a module fails here first.
 
 use engine_perf::{
-    alloc, allocator, arena, baselines, budget, core_bench, feel, fight_cost, latency, pgo_harness,
-    profiler, server_budget, smoke, soak, vram, workloads,
+    alloc, allocator, arena, baselines, budget, feel, fight_cost, latency, profiler, smoke, soak,
+    vram, workloads,
 };
 use engine_perf::{baselines::Baseline, workloads::WorkloadReport};
 
@@ -31,23 +31,12 @@ fn root_reaches_every_module_with_headline_numbers() {
     assert_eq!(arena::FrameTransients::NAME, "frame_transients");
     assert_eq!(arena::CULL_KEYS, 1_024);
     assert_eq!(arena::FRAME_BYTES, 7_232);
-    assert_eq!(pgo_harness::PgoConfig::NAME, "frame_slice_pgo");
-    assert_eq!(pgo_harness::PgoConfig::canonical().seed, 7);
-    assert_eq!(pgo_harness::PgoConfig::canonical().frames, 120);
-    assert_eq!(core_bench::SEED_2040, 2_040);
-    assert_eq!(core_bench::TICKS_600, 600);
     assert_eq!(profiler::SYSTEM_SPANS.len(), 4);
     assert_eq!(
         profiler::system_span(profiler::SPAN_ARENA_TICK),
         Ok(profiler::SPAN_ARENA_TICK)
     );
     assert!(profiler::system_span("perf.nope").is_err());
-    assert_eq!(server_budget::PLAYERS, 64);
-    assert_eq!(server_budget::SOLDIERS, 500);
-    assert_eq!(server_budget::ENTITIES, 564);
-    assert_eq!(server_budget::TICK_HZ, 60);
-    assert_eq!(server_budget::SIEGE_TICKS, 600);
-    assert_eq!(server_budget::SYSTEMS.len(), 4);
     assert_eq!(soak::SOAK_SEED, 41);
     assert_eq!(soak::SOAK_HOUR_FRAMES, 216_000);
     assert_eq!(smoke::SMOKE_SEED, 41);
@@ -71,11 +60,6 @@ fn root_reaches_every_module_with_headline_numbers() {
     assert!(tick_hz > 59.9 && tick_hz < 60.1, "tick rate {tick_hz}");
     let p95_bar = std::hint::black_box(latency::PRESENT_P95_BUDGET_MS);
     assert!(p95_bar > 49.9 && p95_bar < 50.1, "P2 bar {p95_bar}");
-    let server_bar = std::hint::black_box(server_budget::BUDGET_P99_MS);
-    assert!(
-        server_bar > 3.9 && server_bar < 4.1,
-        "server bar {server_bar}"
-    );
     let drift_tol = std::hint::black_box(soak::SOAK_DRIFT_TOLERANCE_MS);
     assert!(
         drift_tol > 4.9 && drift_tol < 5.1,
@@ -83,8 +67,6 @@ fn root_reaches_every_module_with_headline_numbers() {
     );
     let swap_bar = std::hint::black_box(allocator::SPEEDUP_PCT);
     assert!(swap_bar > 9.9 && swap_bar < 10.1, "swap bar {swap_bar}");
-    let pgo_bar = std::hint::black_box(pgo_harness::SPEEDUP_PCT);
-    assert!(pgo_bar > 4.9 && pgo_bar < 5.1, "pgo bar {pgo_bar}");
 }
 
 /// The fight-cost gate reads the same through the root: a quiet ladder
@@ -294,8 +276,8 @@ fn latency_ranker_clears_and_trips_via_root() {
 }
 
 /// The remaining roots behave through the crate root: allocation peaks and
-/// CSV rows, the allocator swap bar, the server p99 bar, the recorded
-/// baseline rows, the frame arena and the core-bench kernel.
+/// CSV rows, the allocator swap bar, the recorded baseline rows and the
+/// frame arena.
 #[test]
 fn remaining_roots_behave_via_root() {
     assert_eq!(alloc::peak_of(&[3, 9, 4]), 9);
@@ -313,19 +295,6 @@ fn remaining_roots_behave_via_root() {
     assert!(
         allocator::compare_ms(f64::NAN, 1.0).is_err(),
         "NaN system refuses"
-    );
-    server_budget::check_p99(3.9).expect("headroom passes the server bar");
-    let over = server_budget::check_p99(4.1).expect_err("p99 over 4 ms trips");
-    assert_eq!(
-        over,
-        server_budget::ServerBudgetError::OverBudget {
-            p99_ms: 4.1,
-            budget_ms: server_budget::BUDGET_P99_MS,
-        }
-    );
-    assert!(
-        server_budget::check_p99(f64::NAN).is_err(),
-        "NaN tick refuses"
     );
     let physics = baselines::baseline("physics_step").expect("physics row recorded");
     assert_eq!(physics.ticks, 600);
@@ -346,9 +315,5 @@ fn remaining_roots_behave_via_root() {
             Err(arena::FrameError::Overflow { .. })
         ),
         "empty arena overflows naming the request"
-    );
-    assert_eq!(
-        core_bench::kernel_fold_hash(),
-        core_bench::kernel_fold_hash()
     );
 }

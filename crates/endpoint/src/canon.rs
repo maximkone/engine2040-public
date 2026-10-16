@@ -417,6 +417,35 @@ pub fn dedup(variants: &[String]) -> Result<DedupReport, CanonError> {
     Ok(report_for(raws.len(), keys.len()))
 }
 
+/// Review-pipeline dedup bind: collapse near-duplicate brief variants
+/// through the frozen `dedup` engine before review, so one canonical key
+/// is reviewed once. Single owner for `build_level`, `build_encounter`
+/// and `build_character`; offline authoring only, never in the tick.
+pub fn review_variants(variants: &[String]) -> Result<DedupReport, CanonError> {
+    dedup(variants)
+}
+
+/// Collapse variants for review: keep the first raw text per canonical key
+/// in first-seen order, so reviewers see one representative per key. Single
+/// owner for the three build stages. Errors reuse the frozen [`CanonError`]
+/// codes (`empty_variant`, `variant_too_long`, `too_many_variants`).
+pub fn collapse_for_review(variants: &[String]) -> Result<Vec<String>, CanonError> {
+    if variants.len() > MAX_VARIANTS {
+        return Err(CanonError::TooMany {
+            count: variants.len(),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for raw in variants {
+        let key = canon_key(raw)?;
+        if seen.insert(key) {
+            out.push(raw.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// Ablation entry: same input through sort-only canonicalization.
 pub fn dedup_sort_only(variants: &[String]) -> Result<DedupReport, CanonError> {
     if variants.len() > MAX_VARIANTS {

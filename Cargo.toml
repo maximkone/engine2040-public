@@ -235,7 +235,7 @@ overflow-checks = true
 # Cost: a cold pool build takes about 5 min longer, which auto-clean.ps1 no longer causes by wiping
 # pools. Undo: delete this block.
 # OPT3: workspace dev opt-level 1 keeps iteration fast; dependencies build
-# at opt-level 3 for a playable dev window while the 12 per-crate
+# at opt-level 3 for a playable dev window while the 13 per-crate
 # opt-level 2 lines below stay (explicit lines override "*").
 # Measured 2026-10-03 (touch crates/combat/src/lib.rs, cargo check):
 # before (no "*" line): -p engine-combat 0.94/0.44/0.36 s, touch-to-game
@@ -292,6 +292,7 @@ codegen-units = 16
 # Ship keeps panic=unwind and no PGO until the unwind audit and a
 # recorded-tape PGO A/B per PF3 land (PF3 wave 32: LTO-fat + CGU-1 kept,
 # abort/PGO pending game-exe evidence).
+# Kept as a named alias: identical to release today so `--profile ship` stays defined for that landing.
 [profile.ship]
 inherits = "release"
 lto = "fat"

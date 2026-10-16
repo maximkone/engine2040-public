@@ -299,6 +299,13 @@ fn closed_empty_schema() -> Arc<JsonObject> {
     Arc::new(object)
 }
 
+/// Single owner for typed `bad_args` refusals across verb packs: every
+/// pack maps out-of-range input to this helper so messages stay byte-equal
+/// and `dup_fns` sees one body. Thin callers import it; no new behavior.
+pub(crate) fn bad_args(message: String) -> McpToolError {
+    McpToolError::new("bad_args", message)
+}
+
 /// The advertised model of one tool type, built the way the router builds
 /// its own rows (name, title, description, both schemas, annotations).
 /// Fail-closed: a missing input schema advertises the closed empty-object

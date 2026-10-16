@@ -18,6 +18,7 @@ use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
+use super::bad_args;
 use super::{PackDef, PackError, VerbSpec};
 use crate::mcp::{McpServer, McpToolError};
 use crate::tool_capabilities::CapabilityCard;
@@ -77,10 +78,6 @@ pub struct PerfRow {
 pub struct PerfTableOutput {
     pub source: String,
     pub rows: Vec<PerfRow>,
-}
-
-fn bad_args(message: String) -> McpToolError {
-    McpToolError::new("bad_args", message)
 }
 
 fn bad_csv(message: String) -> McpToolError {

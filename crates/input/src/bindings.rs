@@ -206,9 +206,9 @@ impl ActionSet {
 /// Stack of action sets; the top is active.
 ///
 /// Push Menu over Duel to suspend the fight; pop to resume. Fixed capacity
-/// 3, no heap, no clock. Consumer: the game/app layer pushes Menu/Pause
-/// around UI and calls [`Bindings::button_bits_for_set`] each fixed tick;
-/// v2 only, the v1 [`Bindings::button_bits`] path never reads the stack.
+/// 3, no heap, no clock. No live consumer yet: only in-crate tests drive
+/// [`Bindings::button_bits_for_set`]; v2 only, the v1 [`Bindings::button_bits`]
+/// path never reads the stack.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ActionSetStack {
     slots: [Option<ActionSet>; 3],
@@ -739,8 +739,8 @@ pub mod conditions {
 impl Bindings {
     /// Button bits gated by the active set: Duel flows, Menu/Pause give none.
     ///
-    /// V2 only; the v1 [`Bindings::button_bits`] path is untouched. Caller:
-    /// the game layer each fixed tick with [`ActionSetStack::active`].
+    /// V2 only; the v1 [`Bindings::button_bits`] path is untouched. No live
+    /// consumer yet: only in-crate tests pass [`ActionSetStack::active`].
     /// Determinism: pure over fixed [`BoundAction::ALL`] order. Errors: never fails.
     pub fn button_bits_for_set(self, pressed: &[PhysicalButton], set: ActionSet) -> Buttons {
         if set == ActionSet::Duel {
@@ -755,8 +755,9 @@ impl Bindings {
     /// Feeds `pressed` plus the chord pair into
     /// [`conditions::bits_for_tick`] when Duel is active, else
     /// [`conditions::GestureBits::NONE`]. V2 only, never in tape bytes.
-    /// Caller: the game layer each fixed tick. Determinism: same inputs give
-    /// same bits. Errors: never fails. Budget: O(1), no heap.
+    /// No live consumer yet: only in-crate tests drive this per tick.
+    /// Determinism: same inputs give same bits. Errors: never fails.
+    /// Budget: O(1), no heap.
     pub fn gesture_bits_for_tick(
         tracker: &mut conditions::ConditionTracker,
         pressed: bool,

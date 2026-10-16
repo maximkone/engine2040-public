@@ -5,7 +5,7 @@
 // Errors: missing paths skip (no throw); bad input types throw TypeError, never silent.
 // Warm path (docs/HASH-LAW.md, crates/core/src/lib.rs): the per-tick driver and
 // hash fold stay integer-only so every machine replays bit-exact. Frozen f32
-// receipts (LegacyFixedAcc, DT), canonical bit-writers (write_f32/write_f64),
+// receipts (LegacyFixedAcc, DT), canonical bit-writer (write_f32),
 // the wall poll boundary (push_secs, quantize_wall_secs) and render alpha stay
 // allowlisted by scope: they never enter a simulation hash.
 import assert from "node:assert/strict";
@@ -33,7 +33,7 @@ export const TICK_HASH_FILES = [
   },
   {
     file: "crates/core/src/hash.rs",
-    allowFn: new Set(["Fnv64::write_f32", "Fnv64::write_f64"]),
+    allowFn: new Set(["Fnv64::write_f32"]),
     allowOuter: null,
   },
   {

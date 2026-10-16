@@ -1,7 +1,7 @@
 //! shape_match: shape matching for bonded debris, so a cluster of chunks held
 //! by bonds keeps its form under torque instead of drifting apart.
 //!
-//! Consumer: the arena's bonded-chunk step may call [`ShapeMatcher::step`]
+//! planned - DX15, no caller yet (verified 2026-10-16): the arena's bonded-chunk step will call [`ShapeMatcher::step`]
 //! after it integrates a cluster; it is opt-in and never part of
 //! `BondedCollection::step`, so the tick hash of plain props does not move.
 //! Data owner: `engine-destruction`. Units: meters, seconds, mass in the

@@ -217,36 +217,6 @@ pub fn beat_hash(song: &Song, sample_rate: u32) -> u64 {
     }
     hasher.finish()
 }
-/// Gameplay beat bus: wraps the beat grid, fires each beat exactly once in order.
-#[derive(Clone, Debug)]
-pub struct BeatBus {
-    /// Frozen beat grid (built at `new`, never re-sorted).
-    pub beats: Vec<Beat>,
-    /// Next unfired beat index.
-    pub cursor: usize,
-}
-impl BeatBus {
-    /// Build bus from song at `sample_rate` Hz.
-    pub fn new(song: &Song, sample_rate: u32) -> Self {
-        Self {
-            beats: beat_list(song, sample_rate),
-            cursor: 0,
-        }
-    }
-    /// Rewind to song start (loop / seek-to-zero).
-    pub fn reset(&mut self) {
-        self.cursor = 0;
-    }
-    /// Fire every beat with `sample <= now`, exactly once, in order.
-    pub fn fire_due(&mut self, now: u64) -> &[Beat] {
-        let from = self.cursor;
-        while self.cursor < self.beats.len() && self.beats[self.cursor].sample <= now {
-            self.cursor += 1;
-        }
-        let to = self.cursor;
-        &self.beats[from..to]
-    }
-}
 
 /// Samples per beat on the integer grid: `60 * sample_rate / bpm` (min 1).
 /// Units: samples. Determinism: same inputs give the same count on every
@@ -270,136 +240,6 @@ pub fn bar_samples(sample_rate: u32, bpm: u16) -> u64 {
     u64::from(BEATS_PER_BAR)
         .saturating_mul(samples_per_beat(sample_rate, bpm))
         .max(1)
-}
-
-/// One hit-synced voice: a global beat index plus a track id.
-/// Track selects the sample in `VoiceSchedule::play_due` (`samples[track]`),
-/// so a hit kit and a snare kit ride different tracks on the same clock.
-/// Units: beats and track ids. Determinism: order is `(beat, track)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ScheduledVoice {
-    /// Global beat index from song start.
-    pub beat: u32,
-    /// Track id: index into the caller's sample bank (skipped when out of range).
-    pub track: u8,
-}
-
-impl ScheduledVoice {
-    /// Build one cue. Never panics.
-    pub fn new(beat: u32, track: u8) -> Self {
-        Self { beat, track }
-    }
-    /// Sample offset of this cue at `sample_rate` Hz and `bpm`.
-    /// Units: samples. Determinism: integer grid, same inputs same offset.
-    /// Never panics.
-    pub fn sample_at(&self, sample_rate: u32, bpm: u16) -> u64 {
-        sample_for_beat(self.beat, sample_rate, bpm)
-    }
-}
-
-/// Integer-tick cue clock over [`ScheduledVoice`] (clock plus track routing,
-/// tween progress comes from the same integer sample counts).
-/// Sorted once at build, fires each cue exactly once in order; steady-state
-/// firing borrows only. Consumer: game audio steps the mix sample cursor and
-/// calls `fire_due` or `play_due`; `play_due` issues one
-/// [`SpatialMixer`](crate::spatial::SpatialMixer) `play_at` per due cue and
-/// the mixer's command log is the replay proof. Std-only: the `device`
-/// feature only changes how the bytes leave.
-#[derive(Clone, Debug)]
-pub struct VoiceSchedule {
-    /// Tempo in beats per minute (min 1).
-    pub bpm: u16,
-    /// Mix rate in Hz (min 1).
-    pub sample_rate: u32,
-    /// Cues in fire order `(beat, track)`.
-    pub voices: Vec<ScheduledVoice>,
-    /// Next unfired cue index.
-    pub cursor: usize,
-}
-
-impl VoiceSchedule {
-    /// Build from tempo, rate and cues; sorts cues by `(beat, track)` so the
-    /// same cue set in any input order fires the same way. Never panics.
-    pub fn new(bpm: u16, sample_rate: u32, voices: Vec<ScheduledVoice>) -> Self {
-        let mut voices = voices;
-        voices.sort_by_key(|v| (v.beat, v.track));
-        Self {
-            bpm: bpm.max(1),
-            sample_rate: sample_rate.max(1),
-            voices,
-            cursor: 0,
-        }
-    }
-    /// Cue count.
-    pub fn len(&self) -> usize {
-        self.voices.len()
-    }
-    /// True when no cues were given.
-    pub fn is_empty(&self) -> bool {
-        self.voices.is_empty()
-    }
-    /// Next unfired cue index.
-    pub fn cursor(&self) -> usize {
-        self.cursor
-    }
-    /// Beat length in samples at this clock's rate and tempo.
-    pub fn samples_per_beat(&self) -> u64 {
-        samples_per_beat(self.sample_rate, self.bpm)
-    }
-    /// Sample offset of a global beat on this clock.
-    pub fn sample_for_beat(&self, beat: u32) -> u64 {
-        sample_for_beat(beat, self.sample_rate, self.bpm)
-    }
-    /// Sample offset of one cue on this clock.
-    pub fn sample_for_voice(&self, voice: &ScheduledVoice) -> u64 {
-        voice.sample_at(self.sample_rate, self.bpm)
-    }
-    /// Rewind to song start (loop or seek-to-zero). Never panics.
-    pub fn reset(&mut self) {
-        self.cursor = 0;
-    }
-    /// Fire every cue with `sample <= now_sample`, exactly once, in order.
-    /// Borrows only, so the steady-state tick allocates nothing. Never panics.
-    pub fn fire_due(&mut self, now_sample: u64) -> &[ScheduledVoice] {
-        let from = self.cursor;
-        while self.cursor < self.voices.len() {
-            let at = self.sample_for_voice(&self.voices[self.cursor]);
-            if at > now_sample {
-                break;
-            }
-            self.cursor += 1;
-        }
-        let to = self.cursor;
-        &self.voices[from..to]
-    }
-    /// Fire due cues into `mix`: one `play_at` per due cue using
-    /// `samples[track]` at the center with gain `1.0`. Tracks without a
-    /// sample are skipped. Returns the played count. The mixer's command log
-    /// records every played cue in order, which is the replay proof.
-    /// Never panics.
-    pub fn play_due(
-        &mut self,
-        now_sample: u64,
-        mix: &mut crate::spatial::SpatialMixer,
-        samples: &[crate::Pcm],
-    ) -> usize {
-        let from = self.cursor;
-        while self.cursor < self.voices.len() {
-            let at = self.sample_for_voice(&self.voices[self.cursor]);
-            if at > now_sample {
-                break;
-            }
-            self.cursor += 1;
-        }
-        let mut fired = 0usize;
-        for voice in &self.voices[from..self.cursor] {
-            if let Some(pcm) = samples.get(usize::from(voice.track)) {
-                mix.play_at(pcm, crate::spatial::Pos2::new(0, 0), 1.0);
-                fired += 1;
-            }
-        }
-        fired
-    }
 }
 
 /// Active-layer bitmask for `intensity` 0..1 (bit i = layer i audible).
@@ -738,22 +578,13 @@ mod tests {
         assert_eq!(p.gains(0.37), [1.0, 1.0, 1.0, 1.0]);
     }
     #[test]
-    fn beat_bus_hash_mono() {
+    fn beat_grid_hash_mono() {
         let s = song();
         let (a, b) = (beat_list(&s, 8000), beat_list(&s, 8000));
         assert_eq!(a, b);
         assert_eq!(beat_hash(&s, 8000), beat_hash(&s, 8000));
         assert_eq!(a.len(), s.bars as usize * BEATS_PER_BAR as usize);
         assert!(a.windows(2).all(|w| w[0].sample < w[1].sample));
-        let mut bus = BeatBus::new(&s, 8000);
-        let mut n = 0;
-        for bt in &a {
-            n += bus.fire_due(bt.sample).len();
-        }
-        assert_eq!(n, a.len());
-        assert!(bus.fire_due(u64::MAX).is_empty());
-        bus.reset();
-        assert_eq!(bus.fire_due(0).len(), 1);
     }
     #[test]
     fn render_deterministic_bounded() {
@@ -770,9 +601,7 @@ mod tests {
         assert!(render_pcm(&s, 0.5, 8000, 0).is_empty());
     }
     #[test]
-    fn kira_clock_hit_sync() {
-        use crate::spatial::SpatialMixer;
-        use crate::Pcm;
+    fn integer_beat_grid_hit_sync() {
         // Four bars at 120 BPM: seed 24 pins the bake tempo to 96 + 24.
         let song = bake(24, 4);
         assert_eq!((song.bpm, song.bars), (120, 4));
@@ -781,67 +610,19 @@ mod tests {
         assert_eq!(bar_samples(sr, song.bpm), 96_000);
         let grid = beat_list(&song, sr);
         assert_eq!(grid.len(), 16);
-        // Hit at beat 2 on track 0, snare at beat 4 on track 1.
-        let hit = ScheduledVoice::new(2, 0);
-        let snare = ScheduledVoice::new(4, 1);
-        assert_eq!(hit.sample_at(sr, song.bpm), grid[2].sample);
-        assert_eq!(snare.sample_at(sr, song.bpm), grid[4].sample);
-        for (voice, beat) in [(hit, &grid[2]), (snare, &grid[4])] {
-            let off = voice.sample_at(sr, song.bpm).abs_diff(beat.sample);
+        // Integer grid: beat offsets match the beat list within one sample.
+        for (beat, entry) in [(2u32, &grid[2]), (4u32, &grid[4])] {
+            let off = sample_for_beat(beat, sr, song.bpm).abs_diff(entry.sample);
             assert!(off <= 1, "hit-sync offset {off} samples is over budget");
         }
+        assert_eq!(sample_for_beat(2, sr, song.bpm), grid[2].sample);
         // One-bar crossfade still rides the layer gains end to end.
         let mut player = Player::new(0.0);
         player.request(1.0);
         assert_eq!(player.gains(0.0), [1.0, 0.0, 0.0, 0.0]);
         assert_eq!(player.gains(1.0), [1.0, 1.0, 1.0, 1.0]);
-        // Same cue script twice: same fire order, same mix log, same bytes.
-        let run = || {
-            let mut sched = VoiceSchedule::new(song.bpm, sr, vec![snare, hit]);
-            assert_eq!(
-                sched.voices,
-                vec![hit, snare],
-                "build sorts cues into fire order"
-            );
-            let samples = [
-                Pcm::new(sr, 1, vec![0.5; 128]),
-                Pcm::new(sr, 1, vec![0.25; 128]),
-            ];
-            let mut mix = SpatialMixer::new(sr);
-            assert_eq!(sched.play_due(grid[1].sample, &mut mix, &samples), 0);
-            assert_eq!(sched.play_due(grid[2].sample, &mut mix, &samples), 1);
-            assert_eq!(sched.play_due(grid[3].sample, &mut mix, &samples), 0);
-            assert_eq!(sched.play_due(grid[4].sample, &mut mix, &samples), 1);
-            assert_eq!(sched.cursor(), 2);
-            let cmds = mix.commands().to_vec();
-            let bytes = mix.render_stereo(256);
-            (cmds, bytes)
-        };
-        let (cmds_a, bytes_a) = run();
-        let (cmds_b, bytes_b) = run();
-        assert_eq!(cmds_a, cmds_b, "mix commands must replay");
-        assert_eq!(bytes_a, bytes_b, "rendered bytes must replay");
-        assert_eq!(cmds_a.len(), 2);
-        assert!(bytes_a.iter().any(|&s| s != 0.0), "scheduled hits audible");
+        assert_eq!(sample_for_beat(4, sr, song.bpm), grid[4].sample);
         assert_eq!(beat_hash(&song, sr), beat_hash(&song, sr));
-        // Failure cases: unknown tracks skip without panic, reset refires.
-        let mut sched = VoiceSchedule::new(song.bpm, sr, vec![ScheduledVoice::new(0, 9)]);
-        let samples = [Pcm::new(sr, 1, vec![0.5; 8])];
-        let mut mix = SpatialMixer::new(sr);
-        assert_eq!(sched.play_due(u64::MAX, &mut mix, &samples), 0);
-        assert!(mix.commands().is_empty());
-        assert!(VoiceSchedule::new(song.bpm, sr, Vec::new()).is_empty());
-        let mut sched = VoiceSchedule::new(song.bpm, sr, vec![hit]);
-        let samples = [
-            Pcm::new(sr, 1, vec![0.5; 8]),
-            Pcm::new(sr, 1, vec![0.25; 8]),
-        ];
-        let mut mix = SpatialMixer::new(sr);
-        assert_eq!(sched.play_due(grid[2].sample, &mut mix, &samples), 1);
-        assert!(sched.fire_due(u64::MAX).is_empty());
-        sched.reset();
-        assert_eq!(sched.cursor(), 0);
-        assert_eq!(sched.fire_due(grid[2].sample).len(), 1);
     }
 
     #[test]

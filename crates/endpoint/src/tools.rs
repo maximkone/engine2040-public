@@ -1,5 +1,6 @@
 //! tools: frozen registry mirroring the MCP router, plus the batch cap.
-//! Slim-8 by default, full set via search.
+//! Slim-8 for `search` by default; the door advertises `mcp::default_tool_names`
+//! (core plus default packs), full set via search.
 //!
 //! The registry is version-pinned for replays: tapes pin
 //! [`REGISTRY_VERSION`] beside the tool names, and replay verifies the pin

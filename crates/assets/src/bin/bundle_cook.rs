@@ -48,7 +48,7 @@ fn usage() -> String {
         "",
         "Rules: default cooks the demo staging (non-empty); --empty writes the",
         "16-byte stub, refused without --allow-stub; --check verifies header +",
-        "digests the way pack-clean BUNDLE_RESOLVE accepts them.",
+        "digests the way ship pack BUNDLE_RESOLVE accepts them.",
     ]
     .join("\n")
 }

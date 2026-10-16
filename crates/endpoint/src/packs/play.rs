@@ -4,6 +4,7 @@
 //! Consumer: MCP door after `api.load`. Owner: `engine-arena` sim; DTOs here.
 //! Units: ticks, permille, meters, `u64` digests (decimal strings). Same args
 //! twice seal same bytes; no clock. Errors: typed with recovery. DTO docs off.
+use super::bad_args;
 use super::{PackDef, PackError, VerbSpec};
 use crate::mcp::{McpServer, McpToolError};
 use crate::play::play_session::{dec_u64, BoutSpec, PlaySlot};
@@ -77,9 +78,6 @@ pub struct PlayStepUntilOutput {
     pub digest: u64,
     pub participants: u8,
     pub fighter_hp: u16,
-}
-fn bad_args(message: String) -> McpToolError {
-    McpToolError::new("bad_args", message)
 }
 /// Run until watched hp falls or cap; same slot path as `sim.step`.
 pub fn step_until_report(args: &PlayStepUntilArgs) -> Result<PlayStepUntilOutput, McpToolError> {

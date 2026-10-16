@@ -121,7 +121,29 @@ struct Prepared {
 fn prepare(actors: &[Actor]) -> Prepared {
     let mut ordered: Vec<Actor> = actors.to_vec();
     ordered.sort_by_key(|a| a.id);
-    let good: Vec<Actor> = ordered.iter().filter(|a| valid(a)).cloned().collect();
+    // Derive `good` once from the source slice; names are caller labels and
+    // never reach boxes, layers, edges or digests, so good carries empty
+    // names and skips the second heap `String` clone per valid actor.
+    let mut good: Vec<Actor> = actors
+        .iter()
+        .filter(|a| valid(a))
+        .map(|a| Actor {
+            id: a.id,
+            name: String::new(),
+            x: a.x,
+            y: a.y,
+            z: a.z,
+            sx: a.sx,
+            sy: a.sy,
+            sz: a.sz,
+            parent: a.parent,
+            physical: a.physical,
+            vx: a.vx,
+            vz: a.vz,
+            yaw: a.yaw,
+        })
+        .collect();
+    good.sort_by_key(|a| a.id);
     let boxes: BTreeMap<u32, Box3> = boxes_of(&good).into_iter().map(|b| (b.id, b)).collect();
     let vols: BTreeMap<u32, i64> = boxes.iter().map(|(id, b)| (*id, volume_cm3(b))).collect();
     Prepared {
@@ -1463,28 +1485,47 @@ pub fn build_rel(actors: &[Actor]) -> RelGraph {
 /// ternary records under a format tag distinct from the v1 one, so v2
 /// bytes never alias v1 hashes.
 pub fn digest_rel(graph: &RelGraph) -> u64 {
+    // `build_rel` already emits id-sorted sections, so the hot path hashes
+    // the borrowed slices with no clones or sorts. Hand-shuffled inputs take
+    // the clone+sort path below; both paths hash identical bytes.
+    if graph.edges.windows(2).all(|w| w[0] <= w[1])
+        && graph.between.windows(2).all(|w| w[0] <= w[1])
+        && graph.blocking.windows(2).all(|w| w[0] <= w[1])
+    {
+        return hash_sorted_rel(&graph.edges, &graph.between, &graph.blocking);
+    }
     let mut edges = graph.edges.clone();
     edges.sort_by_key(|(a, r, b)| (*a, *r, *b));
     let mut between = graph.between.clone();
     between.sort_unstable();
     let mut blocking = graph.blocking.clone();
     blocking.sort_unstable();
+    hash_sorted_rel(&edges, &between, &blocking)
+}
+
+/// FNV-1a over already-sorted v2 sections; both `digest_rel` paths call it
+/// so sorted and shuffled inputs hash byte-identical bytes.
+fn hash_sorted_rel(
+    edges: &[(u32, Rel, u32)],
+    between: &[(u32, u32, u32)],
+    blocking: &[(u32, u32, u32)],
+) -> u64 {
     let mut h = Fnv64::new();
     h.write(b"e2relation2");
     h.write_u64(edges.len() as u64);
-    for (a, r, b) in &edges {
+    for (a, r, b) in edges {
         h.write_u32(*a);
         h.write_u8(*r as u8);
         h.write_u32(*b);
     }
     h.write_u64(between.len() as u64);
-    for (m, a, b) in &between {
+    for (m, a, b) in between {
         h.write_u32(*m);
         h.write_u32(*a);
         h.write_u32(*b);
     }
     h.write_u64(blocking.len() as u64);
-    for (o, a, b) in &blocking {
+    for (o, a, b) in blocking {
         h.write_u32(*o);
         h.write_u32(*a);
         h.write_u32(*b);

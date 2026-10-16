@@ -11,7 +11,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::serde::{self, Deserialize, Serialize};
 
 use crate::mcp::{McpServer, McpToolError};
-use crate::packs::{PackDef, PackError, VerbSpec};
+use crate::packs::{bad_args, PackDef, PackError, VerbSpec};
 use crate::play::play_session::{dec_u64, BoutSpec, PlaySlot};
 use crate::play::{build_tape, PlayInputDto, MAX_PLAY_INPUTS, MAX_PLAY_TICKS};
 use crate::tool_capabilities::CapabilityCard;
@@ -109,10 +109,6 @@ pub struct StateDigestOutput {
     #[schemars(with = "String")]
     pub digest: u64,
     pub participants: u8,
-}
-
-fn bad_args(message: String) -> McpToolError {
-    McpToolError::new("bad_args", message)
 }
 
 fn check_bout(

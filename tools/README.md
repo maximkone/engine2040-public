@@ -133,4 +133,5 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/spawn-check.test.mjs`
 - `tools/stale-refs.test.mjs`
 - `tools/stale-targets.test.mjs`
+- `tools/toolchain-pin.test.mjs`
 - `tools/w4-compile-cache-plan.test.mjs`

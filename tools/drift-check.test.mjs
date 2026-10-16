@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { readdirSync, readFileSync } from "node:fs";
 import {
@@ -314,15 +315,26 @@ test("ratchet tail: blanks, null and long output are bounded", () => {
 
 test("tools README lists every live script so the count cannot rot", async () => {
   const dir = fileURLToPath(new URL(".", import.meta.url));
-  const live = readdirSync(dir).filter((n) => n.endsWith(".mjs") && !n.endsWith(".test.mjs")).sort();
+  const allLive = readdirSync(dir).filter((n) => n.endsWith(".mjs") && !n.endsWith(".test.mjs")).sort();
+  const allTests = readdirSync(dir).filter((n) => n.endsWith(".test.mjs")).sort();
+  // Untracked working-tree dirt (a new test its owner has not listed yet) is not the
+  // README's debt: ignore `git ls-files --others` names. Ignored files stay (they are
+  // on disk and listed on purpose). On a clean checkout (CI, public mirror) there are
+  // no others, so the check is unchanged there. No hardcoded count: the live<->README
+  // compare below pins the list on every tree.
+  let others = new Set();
+  try {
+    const out = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z", "--", "tools"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    others = new Set(out.split("\0").filter(Boolean).map((p) => p.split("/").pop()));
+  } catch { others = new Set(); }
+  const live = allLive.filter((n) => !others.has(n));
   const readme = readFileSync(fileURLToPath(new URL("./README.md", import.meta.url)), "utf8");
   const listed = [...readme.matchAll(/^- `tools\/([^\s`]+)`/gm)].map((m) => m[1]);
   const liveListed = listed.filter((n) => n.endsWith(".mjs") && !n.endsWith(".test.mjs"));
-  assert.equal(live.length, 94, "live tools/*.mjs count");
   assert.equal(liveListed.length, live.length, `README lists ${liveListed.length}, tools has ${live.length}`);
   assert.deepEqual([...liveListed].sort(), live, "no unlisted and no missing live script");
   assert.ok(readme.includes(`${live.length} live scripts`), "header count matches the directory");
-  const tests = new Set(readdirSync(dir).filter((n) => n.endsWith(".test.mjs")));
+  const tests = new Set(allTests.filter((n) => !others.has(n)));
   for (const f of live) assert.ok(tests.has(f.replace(/\.mjs$/, ".test.mjs")), `${f} has a *.test.mjs mate`);
   const orphans = [...tests].filter((t) => !live.includes(t.replace(/\.test\.mjs$/, ".mjs"))).sort();
   const orphanListed = listed.filter((n) => n.endsWith(".test.mjs")).sort();

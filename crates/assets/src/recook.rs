@@ -28,11 +28,11 @@
 //!   [`AssetId::NIL`] and version `0`.
 //! - [`ReloadNotice`] is an immutable value (`Copy`, no handles). `Recook`
 //!   never publishes: the caller converts [`RecookDone`] at its own
-//!   boundary (the practice-mode frame) via [`ReloadNotice::for_done`].
+//!   boundary via [`ReloadNotice::for_done`].
 //!
 //! Running-game latency acceptance (small-fixture edit visible within 1 s,
 //! bad reload keeps last-good in play, old tapes replay) belongs to the
-//! hot-reload consumer, not here. Cross-asset dependency edges are out of
+//! caller, not here. Cross-asset dependency edges are out of
 //! scope too: every cook here declares no deps, so invalidation rides the
 //! per-path version; a consumer that needs real dep edges wires them through
 //! the registry.

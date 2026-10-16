@@ -1,6 +1,6 @@
-//! endpoint: agent driving seam. std-only, no network yet.
+//! endpoint: agent driving seam. Core is std-only; the `mcp` feature adds
+//! the rmcp stdio server over the command service (see `bin/e2040-mcp.rs`).
 //! transport -> tools -> sandbox -> receipts.
-//! The `mcp` feature adds the rmcp stdio server over the command service.
 
 /// Sealed assert runs over recorded tapes (harness only, never in tick).
 pub mod assert_run;

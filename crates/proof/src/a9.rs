@@ -18,7 +18,7 @@ use std::sync::{
     OnceLock,
 };
 
-use engine_core::hash_bytes;
+use engine_core::{hash_bytes, hash_hex};
 use engine_observe::EventCode;
 #[cfg(feature = "seal")]
 use hmac::{Hmac, Mac};
@@ -490,7 +490,7 @@ fn seal_manifest(manifest: &[u8], key: &[u8]) -> Result<String, A9Error> {
 /// Tamper-evident, not forgery-proof; sealed builds reject these seals.
 #[cfg(not(feature = "seal"))]
 fn seal_manifest(manifest: &[u8], _key: &[u8]) -> Result<String, A9Error> {
-    Ok(format!("{:016x}\n", hash_bytes(manifest)))
+    Ok(format!("{}\n", hash_hex(manifest)))
 }
 
 /// Check a seal against manifest bytes under the operator key. A seal without
@@ -531,7 +531,7 @@ fn verify_manifest_seal(manifest: &[u8], seal: &str, key: &[u8]) -> Result<(), A
 #[cfg(not(feature = "seal"))]
 fn verify_manifest_seal(manifest: &[u8], seal: &str, _key: &[u8]) -> Result<(), A9Error> {
     let want_seal = seal.trim().to_owned();
-    let got_seal = format!("{:016x}", hash_bytes(manifest));
+    let got_seal = hash_hex(manifest);
     if want_seal != got_seal {
         return Err(A9Error::DigestMismatch {
             file: EVIDENCE_SEAL.to_owned(),

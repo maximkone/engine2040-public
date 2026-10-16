@@ -1,9 +1,8 @@
 //! projectile: fixed-point round flight over caller-owned casts.
 //!
 //! Owner: engine-combat. Consumer: `step_volley` (production volley step)
-//! plus `ObstacleCaster` (multi-wall scene cast over caller walls); the
-//! arena/game row reuses both directly. `NullCaster` stays the vacuum
-//! oracle. Units: metres, metres per
+//! over caller casts; the live game uses `NullCaster` (game/ballistics.rs:643).
+//! `WallCaster` stays the single-wall harness oracle. Units: metres, metres per
 //! second, ticks at 60 Hz; spread is the tangent of the half-angle
 //! (`0..=0.25`). Determinism: `Fixed` Q16 math with `+ - * /` and `sqrt`
 //! only, spread forked from `(tick, shooter, shot)`; the same tables plus
@@ -279,67 +278,6 @@ impl SegmentCast for WallCaster {
             dist_mm,
             material: self.material,
         })
-    }
-}
-
-/// One axis-aligned wall plane datum for [`ObstacleCaster`]: the plane
-/// `x == wall_mm` plus the material id reported on a hit.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct WallPlane {
-    /// Wall plane `x` in mm.
-    pub wall_mm: i32,
-    /// Material id reported on a hit.
-    pub material: u16,
-}
-
-/// Production scene cast over caller-owned wall planes.
-///
-/// Holds a borrowed slice of [`WallPlane`] datums (static geometry or a
-/// fixture lane); the stepper hands integer-millimetre endpoints and the
-/// caster answers the nearest crossed plane, or `None` for a clean miss.
-/// Order-independent: the smallest distance wins, ties break toward the
-/// smallest `wall_mm`, then the smallest `material`, so shuffled wall
-/// slices give the same answer. Deterministic, no heap on the tick path.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ObstacleCaster<'a> {
-    /// Wall planes to test, caller-owned.
-    pub walls: &'a [WallPlane],
-}
-
-impl<'a> SegmentCast for ObstacleCaster<'a> {
-    fn cast(&self, from_mm: [i32; 3], to_mm: [i32; 3]) -> Option<CastHit> {
-        let mut best: Option<CastHit> = None;
-        let mut best_wall_mm: i32 = 0;
-        let mut index = 0;
-        while index < self.walls.len() {
-            let wall = self.walls[index];
-            let crossed = (from_mm[0] < wall.wall_mm) != (to_mm[0] < wall.wall_mm);
-            if crossed {
-                let gap = i64::from(wall.wall_mm) - i64::from(from_mm[0]);
-                if let Some(mag) = gap.checked_abs() {
-                    if let Ok(dist_mm) = u32::try_from(mag) {
-                        let take = match best {
-                            None => true,
-                            Some(found) => {
-                                dist_mm < found.dist_mm
-                                    || (dist_mm == found.dist_mm
-                                        && (wall.wall_mm, wall.material)
-                                            < (best_wall_mm, found.material))
-                            }
-                        };
-                        if take {
-                            best = Some(CastHit {
-                                dist_mm,
-                                material: wall.material,
-                            });
-                            best_wall_mm = wall.wall_mm;
-                        }
-                    }
-                }
-            }
-            index += 1;
-        }
-        best
     }
 }
 
@@ -1145,54 +1083,11 @@ mod tests {
     }
 
     #[test]
-    fn scene_cast_answers_nearest_wall_in_any_order() {
-        let near = WallPlane {
+    fn volley_report_counts_step_and_stop() {
+        let scene = WallCaster {
             wall_mm: 10000,
             material: 7,
         };
-        let far = WallPlane {
-            wall_mm: 20000,
-            material: 3,
-        };
-        let forward = [near, far];
-        let backward = [far, near];
-        let params = flat(0, 0, 0, 100, 600);
-        let run = |walls: &[WallPlane]| {
-            let scene = ObstacleCaster { walls };
-            let mut round = spawn(&params).unwrap();
-            let mut hit: Option<CastHit> = None;
-            for _ in 0..60 {
-                hit = step_round(&mut round, &FLIGHT_V1, &scene).unwrap();
-                if hit.is_some() {
-                    break;
-                }
-            }
-            (hit, round)
-        };
-        let (first, stopped) = run(&forward);
-        let (second, mirrored) = run(&backward);
-        // Shuffled wall slices agree: the nearest plane wins either way.
-        assert_eq!(first, second);
-        let found = first.unwrap();
-        assert_eq!(found.material, 7);
-        assert!(!stopped.alive);
-        assert_eq!(stopped, mirrored);
-        assert!((fixed_to_mm(stopped.pos[0]).unwrap() - 10000).abs() <= 2);
-    }
-
-    #[test]
-    fn volley_report_counts_step_and_stop() {
-        let walls = [
-            WallPlane {
-                wall_mm: 20000,
-                material: 3,
-            },
-            WallPlane {
-                wall_mm: 10000,
-                material: 7,
-            },
-        ];
-        let scene = ObstacleCaster { walls: &walls };
         let tables = FLIGHT_V1;
         let mut rounds: Vec<Round> = Vec::new();
         for shot in 0..3u32 {

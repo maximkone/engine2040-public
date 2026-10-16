@@ -651,10 +651,6 @@ pub const NO_MOVE: u8 = u8::MAX;
 /// telegraph, bait, end pose. Presentation compares against these;
 /// the sim never reads them, so the golden never moves.
 pub const TELEGRAPH_FLOOR_MS: u32 = 340;
-/// Bait floor in milliseconds.
-pub const TELEGRAPH_BAIT_MS: u32 = 240;
-/// End-pose floor in milliseconds.
-pub const TELEGRAPH_END_POSE_MS: u32 = 170;
 /// Fixed clock the signal math rides on.
 pub const TELEGRAPH_TICKS_PER_SEC: u32 = 60;
 /// Milliseconds per second for the signal math.

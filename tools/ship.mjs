@@ -1,7 +1,7 @@
 // GM3 ship proof: one entry point for release pack + clean-room run.
-// Merged from tools/pack-clean.mjs (pack/stage) + tools/clean-run.mjs (run);
+// Pack/stage + run legs merged here;
 // every MANIFESTED/BUNDLE_MAGIC/STUB-refusal line is verbatim from its donor,
-// so package.rs mirrors cannot drift. Old names are one-week shims here.
+// so package.rs mirrors cannot drift.
 //
 //   node tools/ship.mjs --help
 //   node tools/ship.mjs pack [--dist <path>] [--target <path>] [--replace]
@@ -17,8 +17,8 @@
 //   node tools/ship.mjs run --dry-run [--fixture <path>] [--work <path>]
 //                           [--frames N] [--log <path>]
 //
-// pack  = pack-clean full (build + stage + run). stage = pack --stage-only.
-// run   = clean-run full; run --dry-run is the fixtures/clean-run sim and
+// pack  = full (build + stage + run). stage = pack --stage-only.
+// run   = full; run --dry-run is the fixtures/clean-run sim and
 // never touches C:/e2040-clean/.
 
 import {
@@ -322,7 +322,7 @@ const MANIFESTED = [
   "launch.txt",
 ];
 // Editor binary slot: staged alongside the manifest (extra file, digest
-// logged, not a MANIFESTED row so package.rs/clean-run verifiers keep
+// logged, not a MANIFESTED row so package.rs/ship run verifiers keep
 // passing until the orchestrator promotes the layout).
 const EDITOR_REL = "bin/e2040-editor.exe";
 const EDITOR_ENV_VAR = "E2040_PACKAGE_EDITOR";
@@ -419,7 +419,7 @@ function resolveFrames(args) {
   return frames;
 }
 
-// (fnv1a64Hex lives in tools/fnv1a64.mjs, shared with clean-run.mjs.)
+// (fnv1a64Hex lives in tools/fnv1a64.mjs, shared across the ship pack/run legs.)
 
 function joinDist(distDir, rel) {
   return join(distDir, ...rel.split("/"));
@@ -1223,7 +1223,7 @@ function parseArgs(argv) {
   return out;
 }
 
-// (fnv1a64Hex lives in tools/fnv1a64.mjs, shared with pack-clean.mjs.)
+// (fnv1a64Hex lives in tools/fnv1a64.mjs, shared across the ship pack/run legs.)
 
 function joinDist(distDir, rel) {
   return join(distDir, ...rel.split("/"));
@@ -2148,7 +2148,7 @@ main();
 
 function shipUsage() {
   return [
-    "ship.mjs: GM3 release pack plus scripted clean-room proof (pack-clean + clean-run).",
+    "ship.mjs: GM3 release pack plus scripted clean-room proof (ship pack + ship run).",
     "",
     "Usage:",
     "  node tools/ship.mjs --help",

@@ -24,6 +24,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 use rmcp::serde_json::{self, Value};
 
+use super::bad_args;
 use super::{PackDef, PackError, VerbSpec};
 use crate::discover::{DiscoverTool, TOOL_RPC_DISCOVER};
 use crate::log_tools::{LogDigestTool, LogQueryTool, TOOL_LOG_DIGEST, TOOL_LOG_QUERY};
@@ -132,10 +133,6 @@ pub fn register_look_judge(judge: LookJudgeFn) -> Result<(), McpToolError> {
              restart the host to register another",
         )
     })
-}
-
-fn bad_args(message: String) -> McpToolError {
-    McpToolError::new("bad_args", message)
 }
 
 /// A directory argument must be a non-empty relative path of plain names.

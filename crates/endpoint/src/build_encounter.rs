@@ -1003,36 +1003,10 @@ impl RungController {
     }
 }
 
-/// Review-pipeline dedup bind (AB3): collapse near-duplicate brief variants
-/// through the frozen `canon::dedup` engine before review, so one canonical
-/// key is reviewed once. Thin caller: no new canonicalization lives here;
-/// offline authoring only, never in the tick.
-pub fn review_variants(
-    variants: &[String],
-) -> Result<super::canon::DedupReport, super::canon::CanonError> {
-    super::canon::dedup(variants)
-}
-
-/// Collapse variants for review: keep the first raw text per canonical key
-/// in first-seen order, so reviewers see one representative per key. Errors
-/// reuse the frozen [`super::canon::CanonError`] codes (`empty_variant`,
-/// `variant_too_long`, `too_many_variants`).
-pub fn collapse_for_review(variants: &[String]) -> Result<Vec<String>, super::canon::CanonError> {
-    if variants.len() > super::canon::MAX_VARIANTS {
-        return Err(super::canon::CanonError::TooMany {
-            count: variants.len(),
-        });
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for raw in variants {
-        let key = super::canon::canon_key(raw)?;
-        if seen.insert(key) {
-            out.push(raw.clone());
-        }
-    }
-    Ok(out)
-}
+/// Review-pipeline dedup binds (AB3): single owner in [`super::canon`];
+/// re-exported here so `build_encounter::review_variants` keeps its path
+/// with zero behavior change. Offline authoring only, never in the tick.
+pub use super::canon::{collapse_for_review, review_variants};
 
 #[cfg(test)]
 mod tests {

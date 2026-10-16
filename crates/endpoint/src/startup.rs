@@ -73,7 +73,7 @@ impl fmt::Display for StartupError {
 impl std::error::Error for StartupError {}
 
 /// Parsed stdio startup: the project folder to open. The server speaks on
-/// stdin/stdout; there is no port and no extra tool past the twenty-one MCP tools.
+/// stdin/stdout; there is no port and no extra tool past the 26-tool registry (`crate::tools::TOOLS`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupConfig {
     /// Project folder holding the durable `gen-*.edoc` generations.

@@ -24,7 +24,7 @@ pub mod vec3;
 // One stream type crate-wide; a second same-named type let callers diverge silently.
 pub use counter_rng::{CounterCursor, CounterRng};
 // One hash owner: every crate imports these instead of re-deriving FNV or SplitMix.
-pub use hash::{hash_bytes, hash_u64s, mix64, splitmix64, Fnv64};
+pub use hash::{hash_bytes, hash_hex, hash_u64s, hex16, mix64, splitmix64, Fnv64};
 // One quaternion product: every crate composes rotations to the same bits.
 pub use quat::{quat_mul, quat_mul_fixed};
 pub use rng::Rng;

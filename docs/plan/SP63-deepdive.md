@@ -7,14 +7,15 @@ FOCUS Now Look row (`docs/FOCUS.md:7`).
 
 ## Symptom
 
-Three second-identical failures in 48 h, zero rows ticked, work done but
-unlanded. `docs/BLOCKERS.md:35`: SP63-a1 verify BLOCKED x2 on a foreign
+Three second-identical failures in 48 h to 2026-10-14, zero rows ticked, work done but
+unlanded. 2026-10-16 note: the `docs/BLOCKERS.md:35` / `:46` / `:53` cites below are stale — `:35` today is EG11 window build (`v1_skin.rs:769` E0308), `:46` is `provider-json-vs-audit`, `:53` is EG29 slice-1 foreign red (see `docs/BLOCKERS.md:35`, `:46`, `:53`).
+Current SP63 rows are `docs/BLOCKERS.md:28` (`loop-sp63-a2-repair` land REFUSED x10), `:51` (SP63 box-id closeout, `v1.rs:1844` no field tangents), and `:54` (SP63 id-saturates, foreign gate plus link-env). Original 2026-10-14 symptom was: SP63-a1 verify BLOCKED x2 on a foreign
 compile error (`quality.rs:197`, owned by the running GS10 slice; SP63
-code on disk unverified). `docs/BLOCKERS.md:46`: SP63 id slice BLOCKED
+code on disk unverified); SP63 id slice BLOCKED
 x2 on pre-existing `frame.rs:461` targets-none after resize (id_target 4
 passed 1 failed twice; slice hunks in `forward.wgsl`/`submit.rs` green,
-packet-gate FAIL only on pre-existing long fns outside the slice).
-`docs/BLOCKERS.md:53`: `loop-sp63-a2-repair` land REFUSED x10 (ratchet
+packet-gate FAIL only on pre-existing long fns outside the slice);
+`loop-sp63-a2-repair` land REFUSED x10 (ratchet
 regresses staged render files, baseline not staged).
 
 On disk today (2026-10-14 tree, `git status --short` re-read today): `draw_id.rs:1` (slice-1 CPU contract, `CLEAR` at

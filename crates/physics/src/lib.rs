@@ -17,8 +17,6 @@ pub mod controller;
 /// Character controller v2: steps, slopes, platforms, ledge sense, pushes.
 /// Integer-millimeter, std-only; arena locomotion walks these walkers.
 pub mod controller2;
-/// Integer Quake-style FPS walk beside controller2: accel, friction, traction.
-pub mod fps_move;
 /// Grapple servo on opponent ragdoll state: torque caps, breakaway,
 /// ID-sorted solve order. Std-only.
 pub mod grapple;

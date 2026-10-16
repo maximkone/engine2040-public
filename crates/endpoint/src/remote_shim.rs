@@ -1,6 +1,6 @@
 //! BRP-shaped loopback shim over the verb table (in-process, no socket).
 //! PORT(bevy@4e6bd14 crates/bevy_remote/src/http.rs RemoteHttpPlugin + lib.rs BrpRequest/BrpBatch) -> transport-plus-allowlist shape only, idea only. Loopback stdio/in-process so headless stays clean.
-//! Consumer: `McpServer::brp_batch` (one gesture id per batch, seal at end). Owner stays editor commands; this owns only `{method, params}` plus batch shapes. Units meters via `OpDto`. Determinism input-ordered, no clock. Errors one `RpcError` shape via default deny.
+//! Consumer: `McpServer::brp_batch` via `execute_via_shim` (one gesture id per batch, seal at end) plus dry-run readers via `preview_via_shim`. Owner stays editor commands; this owns only `{method, params}` plus batch shapes. Units meters via `OpDto`. Determinism input-ordered, no clock. Errors one `RpcError` shape via default deny.
 use super::discover::{
     batch_execute_grouped, preview_batch, BatchExecuteOutput, PreviewItem, PreviewResult,
 };
@@ -25,7 +25,7 @@ pub struct BrpRequest {
     /// Edits in order.
     pub ops: Vec<OpDto>,
 }
-/// Caller: `McpServer::brp_batch`.
+/// Caller: `preview_via_shim` plus `execute_via_shim` (both map each request through here).
 pub fn to_preview(req: &BrpRequest) -> PreviewItem {
     PreviewItem {
         method: req.method.clone(),
@@ -34,7 +34,7 @@ pub fn to_preview(req: &BrpRequest) -> PreviewItem {
         ops: req.ops.clone(),
     }
 }
-/// Caller: `McpServer::brp_batch`.
+/// Caller: dry-run readers (see `discover` tests); `McpServer::brp_batch` runs the execute lane only.
 pub fn preview_via_shim(server: &McpServer, batch: &[BrpRequest]) -> Vec<PreviewResult> {
     let items: Vec<PreviewItem> = batch.iter().map(to_preview).collect();
     preview_batch(server, &items)

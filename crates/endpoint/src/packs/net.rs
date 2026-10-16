@@ -24,6 +24,7 @@ use engine_core::hash::GOLDEN_GAMMA;
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
+use super::bad_args;
 use super::{PackDef, PackError, VerbSpec};
 use crate::mcp::{McpServer, McpToolError};
 use crate::tool_capabilities::CapabilityCard;
@@ -186,10 +187,6 @@ pub struct LoopbackReport {
     pub converged: bool,
     pub first_divergence: Option<u32>,
     pub digest: u64,
-}
-
-fn bad_args(message: String) -> McpToolError {
-    McpToolError::new("bad_args", message)
 }
 
 /// Run one loopback bout with injected loss, latency and burst drop and report its verdict.

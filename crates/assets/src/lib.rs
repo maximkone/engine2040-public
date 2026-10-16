@@ -155,8 +155,6 @@ pub use import::{
     format_of, gate_results, gates_ok, import, validate_ktx2, Format, ImportError, Imported,
     KtxInfo, Sidecar,
 };
-pub mod inherit;
-pub use inherit::{resolve, Def, InheritError, Resolved};
 /// Format-version registry plus fixture template: a declared version
 /// without its fixture fails the proof gate by construction. Std-only.
 pub mod museum;

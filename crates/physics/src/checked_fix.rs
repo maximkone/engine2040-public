@@ -5,7 +5,7 @@
 //! Errors: none (saturating); absurd inputs clamp instead of wrapping.
 //! Budget: O(1) per call, no allocation.
 //! Consumer: grapple drive and integrate paths (Q16 force downscale and
-//! clamp-then-narrow); this module lands the tested helpers first.
+//! clamp-then-narrow).
 
 use engine_core::checked::saturating_i64_to_i32;
 

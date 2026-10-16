@@ -438,7 +438,10 @@ impl Viewer<'_> {
                     .emit_command(grid, key, self.shell.revision(), &poses)
                 {
                     Ok(batch) => {
-                        let _ = self.shell.apply_ops(batch.ops);
+                        if let Err(error) = self.shell.apply_ops(batch.ops) {
+                            self.shell
+                                .log_message(format!("ERR inspector apply: {error}"));
+                        }
                         let _ = self.inspector_panel.refresh();
                     }
                     Err(error) => {

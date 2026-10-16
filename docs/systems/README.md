@@ -40,22 +40,20 @@ Scale comes from isolation and verification, not headcount. The earlier
 1,024-agent benchmark citation is an unverified research pointer, not evidence
 of engine2040 throughput or a reason to build a larger workforce now. Tiers:
 
-1. **Writers:** up to 12 `rust-coder` workers per working tree, one lane
-   each (`../SPRINT.md`). Past 12, run more orchestrators in separate git
-   worktrees, each with its own target folder and sprint lock, merging through
-   one queue that rebases, runs `node tools/proof.mjs` and fast-forwards
-   master (task SC2). The integrator and the gate set the pace.
+1. **Writers:** up to 12 `rust-coder` workers on the one tree `C:\engine2040` on master, one lane
+   each (`../SPRINT.md`). One worktree only, no lanes, no `git worktree` (see `AGENTS.md:51-52`, `docs/SPRINT.md:21-22`).
+   Past-12 scale-out via a merge queue (task SC2, parked — see `docs/SPRINT.md:100-104`). The integrator and the gate set the pace.
 2. **Specifiers and testers:** bounded parallel read-only reviews first:
    deepen a spec, write property tests, fuzz tapes and invariants (FZ1), add
    chaos cases (HL2). Writing tests/specs requires explicit file ownership too;
    read-mostly is not collision-free if several agents edit the same board.
-3. **Tournaments:** for one hard function with a fixed interface, K agents
-   write competing implementations in throwaway worktrees; the gate plus a
+3. **Tournaments:** parked (task SC3 — see `docs/SPRINT.md:100-104`). If revived, for one hard function with a fixed interface, K agents
+   write competing implementations on the one tree (no throwaway worktrees per `AGENTS.md:51-52`); the gate plus a
    benchmark picks the winner (AlphaEvolve 2506.13131, ShinkaEvolve,
    CodeEvolve 2510.14150; simple baselines stay competitive, 2602.16805, so
-   keep evaluators strong). Only the winner merges (task SC3).
+   keep evaluators strong). Only the winner merges.
 4. **Reviewers and red team:** second-opinion diff review against the spec,
-   and adversarial playtesters hunting exploits (RV1).
+   and adversarial playtesters hunting exploits (RV1, parked — see `docs/SPRINT.md:100-104`).
 
 Rate limits, cost and review capacity cap every tier; measure throughput in
 ticked board tasks, never in agents launched.

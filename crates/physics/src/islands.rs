@@ -1,4 +1,5 @@
-//! islands: deterministic island builder over contact pairs. Same pairs, any order -> same bytes.
+//! islands: deterministic island step over contact-pair topology built in
+//! [`crate::islands_build`]. Same pairs, any order give same bytes.
 //!
 //! Topology plus hashes live in [`crate::islands_build`]; sleep and the
 //! parallel island step stay here. Re-exports keep the single

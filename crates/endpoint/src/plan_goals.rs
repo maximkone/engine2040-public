@@ -769,7 +769,7 @@ mod tests {
 // deterministic oracle is the live path, not a stand-in. It samples the same
 // window the fork asserts judge, and every answer replays byte-identically.
 // DTO structs and fields carry no doc comments on purpose: every doc line
-// inflates the discovery schemas, and the twenty-one-tool list is a gate.
+// inflates the discovery schemas, and the 26-tool list (`crate::tools::TOOLS`) is a gate.
 
 /// Plan request: brief text plus the seed it expands under.
 /// Units are brief chars in, plan ids out. Errors are typed brief refusals

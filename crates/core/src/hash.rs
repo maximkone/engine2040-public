@@ -129,6 +129,18 @@ pub fn hash_u64s(words: &[u64]) -> u64 {
     hasher.finish()
 }
 
+/// Lowercase 16-char hex of a `u64` digest (receipts, manifests, diagnostics).
+#[must_use]
+pub fn hex16(value: u64) -> String {
+    format!("{value:016x}")
+}
+
+/// FNV-1a 64 of `bytes` as 16-char hex (single owner for content tags).
+#[must_use]
+pub fn hash_hex(bytes: &[u8]) -> String {
+    hex16(hash_bytes(bytes))
+}
+
 /// SplitMix64 finalizer: every input bit reaches every output bit, and the
 /// map is a bijection on `u64`.
 #[inline]
@@ -198,5 +210,26 @@ mod tests {
         assert_eq!(next(), 0xe220_a839_7b1d_cdaf);
         assert_eq!(next(), 0x6e78_9e6a_a1b9_65f4);
         assert_eq!(mix64(0), 0, "zero is the finalizer's fixed point");
+    }
+
+    #[test]
+    fn hex_helpers_match_known_vectors() {
+        assert_eq!(hex16(0xd57b5c8ae3096614), "d57b5c8ae3096614");
+        assert_eq!(hex16(0), "0000000000000000");
+        assert_eq!(hash_hex(b""), "cbf29ce484222325");
+        assert_eq!(hash_hex(b"a"), hex16(hash_bytes(b"a")));
+    }
+
+    #[test]
+    fn hex_helpers_are_lowercase_padded() {
+        for v in [0u64, 1, 0xaf63dc4c8601ec8c, u64::MAX] {
+            let s = hex16(v);
+            assert_eq!(s.len(), 16);
+            assert!(s
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        }
+        assert_eq!(hash_hex(b"a").len(), 16);
+        assert_ne!(hash_hex(b"a"), hash_hex(b"b"));
     }
 }

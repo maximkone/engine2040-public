@@ -581,10 +581,6 @@ impl World {
         self.move_to(e, dst, None, None);
         true
     }
-    /// Storage discipline for table kinds (P/V): always [`StorageKind::Table`].
-    pub fn table_kind() -> StorageKind {
-        StorageKind::Table
-    }
     /// Live sparse-marker count.
     pub fn marker_count(&self) -> usize {
         self.markers.len()
@@ -714,16 +710,6 @@ impl World {
             {
                 f(t.entities[i], t.pos[i], t.vel[i]);
             }
-        }
-    }
-    /// Visit every P+V row mutably; stamps both columns with the tick.
-    pub fn for_each_pv_mut(&mut self, mut f: impl FnMut(Entity, &mut Position, &mut Velocity)) {
-        let tick = self.tick;
-        let t = &mut self.tables[3];
-        for i in 0..t.entities.len() {
-            f(t.entities[i], &mut t.pos[i], &mut t.vel[i]);
-            t.pos_changed[i] = tick;
-            t.vel_changed[i] = tick;
         }
     }
     /// Integrate system: `pos += vel * dt` over the P+V table, one 4-wide

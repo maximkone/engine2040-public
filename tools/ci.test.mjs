@@ -1,4 +1,4 @@
-// Run: node --test .github/workflows/ci.test.mjs
+// Run: node --test tools/ci.test.mjs
 // The public mirror is the build farm (Maxim 2026-10-16): heavy checks run in parallel on GitHub's free
 // public runners; the private dev repo never runs this workflow (its free minutes are tiny).
 import assert from "node:assert/strict";
@@ -8,8 +8,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(HERE, "..", "..");
-const text = readFileSync(join(HERE, "ci.yml"), "utf8");
+const ROOT = join(HERE, "..");
+const text = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
 
 function jobNames() {
   const body = text.slice(text.indexOf("\njobs:"));

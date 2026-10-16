@@ -217,6 +217,7 @@ pub fn snapshot(world: &World) -> Snapshot {
 }
 
 /// First divergent slot/component (0 pos, 1 other); equal lengths, None iff equal.
+#[cfg(test)]
 pub(crate) fn first_div(a: &World, b: &World, oa: &[u32], ob: &[u32]) -> Option<(usize, u8)> {
     let pos = a
         .alive
@@ -469,7 +470,7 @@ mod tests {
     #[test]
     fn first_div_names_first_difference_on_seeded_11k() {
         use engine_core::Rng;
-        let world = World::new();
+        let mut world = World::new();
         let mut rng = Rng::new(2040);
         let mut other = Vec::with_capacity(44_000);
         for _ in 0..11_000 {

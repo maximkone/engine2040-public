@@ -1168,7 +1168,8 @@ mod tests {
     fn fracture_event_budget_one_millisecond() {
         let mesh = wall();
         // The arena admits 16 shards per event, so 16 cells is the budgeted
-        // event; larger events are measured and printed, never asserted.
+        // event; BX36 budgets the 32-cell row too. Larger events are
+        // measured and printed, never asserted.
         let mut report = Vec::new();
         for cells in [16u32, 24, 32, 64] {
             let mut samples = Vec::new();
@@ -1188,10 +1189,15 @@ mod tests {
             println!("fracture event cells={cells} p50={p50:?} p99={p99:?}");
             report.push((cells, p99));
         }
-        let (_, p99) = report[0];
+        let (_, p16) = report[0];
         assert!(
-            p99.as_micros() <= 1000,
-            "16-cell fracture p99 {p99:?} over 1 ms"
+            p16.as_micros() <= 1000,
+            "16-cell fracture p99 {p16:?} over 1 ms"
+        );
+        let (_, p32) = report[2];
+        assert!(
+            p32.as_micros() <= 1000,
+            "32-cell fracture p99 {p32:?} over 1 ms"
         );
     }
 }

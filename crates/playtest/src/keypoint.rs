@@ -1631,10 +1631,12 @@ fn run_keypoint(
         .ok_or_else(|| KeypointError::ArenaRefused(spec.id.clone()))?;
     for slot in &spec.freeze {
         fork.apply_proposal(ForkProposal::FreezeFighter { fighter: *slot })
-            .ok();
+            .map_err(|_| KeypointError::ArenaRefused(spec.id.clone()))?;
     }
     for slot in 0..spec.fighters {
-        let slice = window_full.remove(&slot).unwrap_or_default();
+        let slice = window_full
+            .remove(&slot)
+            .ok_or_else(|| KeypointError::ArenaRefused(spec.id.clone()))?;
         if fork
             .apply_proposal(ForkProposal::SwapTape {
                 fighter: slot,

@@ -351,6 +351,37 @@ fn prefix_remainder_all_sliding(remainder: &[Body]) -> bool {
     acc == 0
 }
 
+/// Mixed prefix slide update beside `mixed_step_with_h_fast`.
+///
+/// Bit-identical to the per-body slide (`x += vx * h` plus non-finite
+/// `x = 0, vx = 0` fixup) in slot order with the same float order. The
+/// branch-free update sweep auto-vectorizes to SIMD lanes where the target
+/// allows (scalar fallback covers remainders and non-SIMD targets), and the
+/// single accumulated finite check keeps one predictable branch per call
+/// (sequential scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache
+/// Misses], one predictable branch [geaen | 3.4.3.2 Branch Prediction]).
+/// Same slot order, same float order, no allocation. Caller:
+/// `mixed_prefix_step_direct` slide paths only.
+#[expect(clippy::inline_always, reason = "1k hot slide")]
+#[inline(always)]
+fn slide_slice_x(lanes: &mut [Body], h: f32) {
+    for b in lanes.iter_mut() {
+        b.x += b.vx * h;
+    }
+    let mut bad: u32 = 0;
+    for b in lanes.iter() {
+        bad |= u32::from((b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000);
+    }
+    if bad != 0 {
+        for b in lanes.iter_mut() {
+            if (b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000 {
+                b.x = 0.0;
+                b.vx = 0.0;
+            }
+        }
+    }
+}
+
 /// Mixed dynamic-prefix direct step for the headless harness: 32-wide
 /// sliding groups plus remainder slide, no 32-wide settled predicate.
 ///
@@ -375,13 +406,7 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
         let mut chunks = prefix.chunks_exact_mut(32);
         for chunk in &mut chunks {
             if prefix_chunk_all_sliding(chunk) {
-                for b in chunk.iter_mut() {
-                    b.x += b.vx * h;
-                    if (b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000 {
-                        b.x = 0.0;
-                        b.vx = 0.0;
-                    }
-                }
+                slide_slice_x(chunk, h);
                 continue;
             }
             for b in chunk.iter_mut() {
@@ -390,13 +415,7 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
         }
         let rem = chunks.into_remainder();
         if prefix_remainder_all_sliding(rem) {
-            for b in rem.iter_mut() {
-                b.x += b.vx * h;
-                if (b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000 {
-                    b.x = 0.0;
-                    b.vx = 0.0;
-                }
-            }
+            slide_slice_x(rem, h);
         } else {
             for b in rem.iter_mut() {
                 mixed_step_with_h_fast(b, h, gh);

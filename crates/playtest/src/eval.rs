@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use engine_arena::fork::{Fork, ForkMetrics, ForkProposal};
 use engine_arena::{run_prefix, ArenaConfig, FighterTape};
-use engine_core::{decode_seal_hex, hash_bytes, Fnv64, SealKeyError};
+use engine_core::{decode_seal_hex, hash_hex, Fnv64, SealKeyError};
 use engine_provider::protocol::{AdapterKind, AiError, PrivacyMode, TaskKind};
 use engine_provider::{AiSessionPolicy, Fallback, FallbackCause, MockStep, ProviderCapabilities};
 use hmac::{Hmac, Mac};
@@ -1313,13 +1313,6 @@ pub const OPERATOR_KEY_ENV: &str = "E2040_EVIDENCE_KEY";
 /// Minimum operator key length in bytes; short keys fail loudly at parse.
 pub use engine_core::MIN_SEAL_KEY_BYTES;
 
-/// Lowercase hex digest of file bytes for manifests and sidecars (FNV-1a via
-/// the engine-core owner; the keyed seal over the manifest authenticates all
-/// per-file digests at once, so they stay unkeyed).
-fn fnv_hex(bytes: &[u8]) -> String {
-    format!("{:016x}", hash_bytes(bytes))
-}
-
 /// Fold `text` behind its byte length so adjacent texts cannot collide.
 /// Shared by the living-world and spatial eval digests.
 pub(crate) fn mix_text(hash: &mut Fnv64, text: &str) {
@@ -1442,8 +1435,8 @@ pub fn write_report_files(
     let tape = tape_text(report);
     let manifest = format!(
         "file digest\n{EVIDENCE_REPORT} {}\n{EVIDENCE_TAPE} {}\n",
-        fnv_hex(text.as_bytes()),
-        fnv_hex(tape.as_bytes()),
+        hash_hex(text.as_bytes()),
+        hash_hex(tape.as_bytes()),
     );
     let seal = seal_manifest(manifest.as_bytes(), seal_key)?;
     let report_path = dir.join(EVIDENCE_REPORT);
@@ -1519,7 +1512,7 @@ pub fn verify_evidence(dir: &Path, seal_key: &[u8]) -> Result<(), EvalError> {
             });
         }
         let bytes = read(name)?;
-        let got = fnv_hex(&bytes);
+        let got = hash_hex(&bytes);
         if got != want {
             return Err(EvalError::DigestMismatch {
                 file: name.to_owned(),
@@ -1819,13 +1812,13 @@ mod tests {
         std::fs::write(dir.join(EVIDENCE_REPORT), &bytes).expect("forgery writes");
         let manifest = format!(
             "file digest\n{EVIDENCE_REPORT} {}\n{EVIDENCE_TAPE} {}\n",
-            fnv_hex(&bytes),
-            fnv_hex(tape_text(&report).as_bytes()),
+            hash_hex(&bytes),
+            hash_hex(tape_text(&report).as_bytes()),
         );
         std::fs::write(dir.join(EVIDENCE_MANIFEST), &manifest).expect("manifest reseal");
         std::fs::write(
             dir.join(EVIDENCE_SEAL),
-            format!("{}\n", fnv_hex(manifest.as_bytes())),
+            format!("{}\n", hash_hex(manifest.as_bytes())),
         )
         .expect("seal reseal");
         let error = verify_evidence(&dir, TEST_SEAL_KEY).expect_err("resealed forgery must fail");

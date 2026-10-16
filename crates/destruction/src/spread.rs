@@ -17,8 +17,6 @@ use engine_core::Fnv64;
 
 /// Fixed-point scale for strain: Q16, matches `engine-core` `Fixed::SCALE`.
 pub const STRAIN_SCALE: i64 = 65536;
-/// Fractional bits of the strain fixed-point format.
-pub const STRAIN_FRAC: u32 = 16;
 /// Largest chunk count one spread graph holds; mirrors `bonded` bounds.
 pub const MAX_SPREAD_CHUNKS: usize = 1024;
 /// Largest bond count; mirrors `bonded` bounds.

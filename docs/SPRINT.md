@@ -86,8 +86,7 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-15-platform-live-ai.md`](SPRINT-15-platform-live-ai.md) — Platform and live AI
 - [`SPRINT-16-urban-war.md`](SPRINT-16-urban-war.md) — Urban war
 - [`SPRINT-17-body-and-break.md`](SPRINT-17-body-and-break.md) — Body and break and hard systems
-- [`SPRINT-18-gaps.md`](SPRINT-18-gaps.md) — Look gaps
-- [`SPRINT-18-operator.md`](SPRINT-18-operator.md) — Operator
+- [`SPRINT-18-gaps.md`](SPRINT-18-gaps.md) — Look gaps (shard header `docs/SPRINT-18-gaps.md:1` is canonical per `docs/SPRINT.md:70`; O10 not in title 2026-10-16)
 - [`SPRINT-18-steals.md`](SPRINT-18-steals.md) — Steals and potato tier
 - [`SPRINT-20-game.md`](SPRINT-20-game.md) — Game
 - [`SPRINT-21-look-feel.md`](SPRINT-21-look-feel.md) — Look and feel steals

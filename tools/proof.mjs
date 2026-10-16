@@ -500,6 +500,7 @@ if (!args.includes("--skip-build")) {
   // workspace gates above too; the names here are the acceptance hooks.
   for (const command of [
     ["test", "--locked", "-p", "engine-endpoint", "--test", "it", "redteam::"],
+    ["test", "--locked", "-p", "engine-endpoint", "--features", "mcp", "--lib", "packs::"],
     ["test", "--locked", "-p", "engine-playtest", "tournament::tests::proof_gate_reproduces"],
     ["test", "--locked", "-p", "engine-playtest", "keypoint"],
     ["test", "--locked", "-p", "engine-provider", "--test", "matrix"],

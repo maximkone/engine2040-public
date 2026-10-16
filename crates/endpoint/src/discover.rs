@@ -1577,7 +1577,7 @@ mod tests {
         );
         assert!(
             manifest.tool_count() >= 21,
-            "core plus scene, view and rules reach past the old twenty-one"
+            "core plus scene, view and rules reach past the old 21"
         );
         assert_eq!(manifest.hidden_omitted, 0, "no hidden tools exist yet");
         assert_eq!(manifest.protocol, "2026-07-28");

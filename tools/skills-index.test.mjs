@@ -39,7 +39,16 @@ export function frontmatterErrors(lines, file) {
   return errs;
 }
 test("header parses N skills in skills/", () => {
-  assert.equal(headerCount("# Skills - 14 agents, 85 skills in skills/ and 8 in .opencode/skills/"), 85);
+  const names = listSkills();
+  const opencodeDir = join(ROOT, ".opencode", "skills");
+  let opencodeCount = 0;
+  try {
+    opencodeCount = readdirSync(opencodeDir, { withFileTypes: true }).filter((e) => e.isDirectory() && existsSync(join(opencodeDir, e.name, "SKILL.md"))).length;
+  } catch {
+    opencodeCount = 0;
+  }
+  const header = `# Skills - 14 agents, ${names.length} skills in skills/ and ${opencodeCount} in .opencode/skills/`;
+  assert.equal(headerCount(header), names.length);
 });
 test("missingRows names gaps, frontmatter flags colon-space", () => {
   assert.deepEqual(missingRows("a | ok | b", ["ok", "nope"]), ["nope"]);

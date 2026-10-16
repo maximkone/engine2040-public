@@ -62,8 +62,6 @@ pub fn door_check(intent: &str, payload: &str) -> Vec<CheckIssue> {
     if let Some(r) = crate::sandbox::scan::scan_payload(payload) {
         out.push(CheckIssue::hinted(r.code));
     }
-    #[cfg(feature = "mcp")]
-    let _ = engine_spatial::checks::SPATIAL_CHECKS.len();
     out
 }
 /// Profile stages against the whole frame.

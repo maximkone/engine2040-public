@@ -221,19 +221,6 @@ impl ChangeTicks {
         clamped
     }
 
-    /// Threshold-gated scan: full clamp only when due, else untouched.
-    ///
-    /// Units: ticks. Determinism: same ticks give the same scan choice.
-    /// Budget: constant time when not due, linear with zero allocation
-    /// when due. Call once per tick boundary.
-    pub fn check_if_due(&mut self) -> usize {
-        if self.tick.wrapping_sub(self.last_scan) >= CHECK_TICK_THRESHOLD {
-            self.check()
-        } else {
-            0
-        }
-    }
-
     /// True when the first-column stamp of `row` is newer than `last_run`.
     ///
     /// Units: ticks. Determinism: exact integer math only. Out of

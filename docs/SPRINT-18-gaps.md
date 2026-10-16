@@ -1653,3 +1653,8 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   `tools/product-bar.json` `view_sunk_cm_max` to 3; a fixture down body's
   lowest vertex sits within 1 cm of the sand. F2P: 12-15 cm today. P2P: game
   lib green; golden unchanged. needs: none.
+
+### Operator (folded 2026-10-16 from `SPRINT-18-operator.md`, file removed)
+
+- [ ] O10 Optional: name a second, stronger RT GPU for the Ultra tier;
+  until then Ultra stays unverified.

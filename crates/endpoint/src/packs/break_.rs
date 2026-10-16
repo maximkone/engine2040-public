@@ -14,6 +14,7 @@
 //! DTO structs carry no doc comments on purpose: every doc line inflates the
 //! discovery schemas the door budgets.
 
+use super::bad_args as bad;
 use super::{PackDef, PackError, VerbSpec};
 use crate::mcp::{McpServer, McpToolError};
 use crate::tool_capabilities::CapabilityCard;
@@ -40,10 +41,6 @@ pub const TOOL_HIT_SIMULATE: &str = "hit.simulate";
 pub const MAX_ECHOED_IDS: usize = 64;
 /// Most piece boxes echoed by `break.fracture`.
 pub const MAX_ECHOED_PIECES: usize = 64;
-
-fn bad(message: String) -> McpToolError {
-    McpToolError::new("bad_args", message)
-}
 
 // ---------------------------------------------------------------------------
 // structure.analyze

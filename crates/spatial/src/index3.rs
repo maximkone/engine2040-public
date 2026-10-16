@@ -22,7 +22,7 @@
 //! `apply`, so every query observes the verified revision; `last_dirty`
 //! records the rebuilt ids. Single-edit rebuild p95 < 2 ms at 10k objects.
 
-use super::index::{boxes_of, to_cm, xyz_hit, Box3, XYZ_CELL_CM};
+use super::index::{to_cm, xyz_hit, Box3, XYZ_CELL_CM};
 use super::Actor;
 use engine_core::Fnv64;
 use std::collections::BTreeMap;
@@ -104,8 +104,25 @@ fn live_row(a: &Actor) -> bool {
 /// Boxes for live rows only, id-sorted. Degenerate rows index nothing, and
 /// since a zero-volume box never strictly hits, pair sets are unchanged.
 pub(crate) fn live_boxes(actors: &[Actor]) -> Vec<Box3> {
-    let live: Vec<Actor> = actors.iter().filter(|a| live_row(a)).cloned().collect();
-    let mut rows = boxes_of(&live);
+    let mut rows: Vec<Box3> = actors
+        .iter()
+        .filter(|a| live_row(a))
+        .map(|a| {
+            let hx = to_cm(a.sx).abs() / 2;
+            let hy = to_cm(a.sy).abs() / 2;
+            let hz = to_cm(a.sz).abs() / 2;
+            let (cx, cy, cz) = (to_cm(a.x), to_cm(a.y), to_cm(a.z));
+            Box3 {
+                id: a.id,
+                min_x: cx - hx,
+                max_x: cx + hx,
+                min_y: cy - hy,
+                max_y: cy + hy,
+                min_z: cz - hz,
+                max_z: cz + hz,
+            }
+        })
+        .collect();
     rows.sort_by_key(|b| b.id);
     rows
 }
@@ -369,9 +386,28 @@ fn update_plan(changed: &[Actor], removed: &[u32]) -> (Vec<u32>, BTreeMap<u32, B
     let mut drops: Vec<u32> = removed.to_vec();
     drops.sort_unstable();
     drops.dedup();
-    let live: Vec<Actor> = changed.iter().filter(|a| live_row(a)).cloned().collect();
+    let mut rows: Vec<Box3> = changed
+        .iter()
+        .filter(|a| live_row(a))
+        .map(|a| {
+            let hx = to_cm(a.sx).abs() / 2;
+            let hy = to_cm(a.sy).abs() / 2;
+            let hz = to_cm(a.sz).abs() / 2;
+            let (cx, cy, cz) = (to_cm(a.x), to_cm(a.y), to_cm(a.z));
+            Box3 {
+                id: a.id,
+                min_x: cx - hx,
+                max_x: cx + hx,
+                min_y: cy - hy,
+                max_y: cy + hy,
+                min_z: cz - hz,
+                max_z: cz + hz,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|b| (b.min_x, b.min_y, b.min_z, b.id));
     let mut fresh: BTreeMap<u32, Box3> = BTreeMap::new();
-    for b in boxes_of(&live) {
+    for b in rows {
         fresh.insert(b.id, b);
     }
     (drops, fresh)
@@ -1820,8 +1856,26 @@ pub type Index3 = Rstar;
 /// only the box conversion plus the sweep (`boxes_of` already emits sweep
 /// order, so no second sort).
 pub fn pairs3(actors: &[Actor]) -> Vec<(u32, u32)> {
-    let live: Vec<Actor> = actors.iter().filter(|a| live_row(a)).cloned().collect();
-    let sorted = boxes_of(&live);
+    let mut sorted: Vec<Box3> = actors
+        .iter()
+        .filter(|a| live_row(a))
+        .map(|a| {
+            let hx = to_cm(a.sx).abs() / 2;
+            let hy = to_cm(a.sy).abs() / 2;
+            let hz = to_cm(a.sz).abs() / 2;
+            let (cx, cy, cz) = (to_cm(a.x), to_cm(a.y), to_cm(a.z));
+            Box3 {
+                id: a.id,
+                min_x: cx - hx,
+                max_x: cx + hx,
+                min_y: cy - hy,
+                max_y: cy + hy,
+                min_z: cz - hz,
+                max_z: cz + hz,
+            }
+        })
+        .collect();
+    sorted.sort_by_key(|b| (b.min_x, b.min_y, b.min_z, b.id));
     let order: Vec<usize> = (0..sorted.len()).collect();
     sweep_pairs3_ordered(&sorted, &order)
 }

@@ -170,10 +170,6 @@ impl<W> Schedule<W> {
         self.ambiguity = level;
         self
     }
-    /// Current knob; default is Error.
-    pub fn ambiguity_level(&self) -> AmbiguityLevel {
-        self.ambiguity
-    }
     /// Every unordered conflicting pair in registration order.
     pub fn ambiguities(&self) -> Vec<ScheduleError> {
         let mut out = Vec::new();

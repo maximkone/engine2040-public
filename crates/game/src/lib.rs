@@ -875,15 +875,21 @@ impl App {
     /// right after a Hit or Parried tick, then drops by one per quiet tick.
     /// Read-only visibility for the look (it holds clip clocks while this is
     /// above zero); presentation only, never hashed. Units: fixed ticks.
+    ///
+    /// Caller: `crates/game/src/fighter_look.rs` (`FighterLook::view_run`
+    /// polls the mirrored count each tick; the window twin polls the same).
     #[must_use]
-    fn hitstop_remaining(&self) -> u32 {
+    pub fn hitstop_remaining(&self) -> u32 {
         self.hitstop_remaining
     }
 
     /// True while hitstop holds clip clocks (`remaining > 0`). Pure over the
     /// count; the look calls it with [`App::hitstop_remaining`].
+    ///
+    /// Caller: `crates/game/src/fighter_look.rs` (`FighterLook::view_run`
+    /// polls the hold each tick; the window twin polls the same).
     #[must_use]
-    fn hitstop_holds(remaining: u32) -> bool {
+    pub fn hitstop_holds(remaining: u32) -> bool {
         hitstop::holds(remaining)
     }
 
@@ -976,10 +982,12 @@ impl App {
     /// (the arena rejects unsorted tapes, and a LAN tick stages two inputs).
     /// Callers validate first; this never fails.
     fn stage_input(&mut self, input: FighterInput) {
-        self.tape.0.push(input);
-        self.tape
+        let key = (input.tick, input.fighter.0);
+        let index = self
+            .tape
             .0
-            .sort_by_key(|staged| (staged.tick, staged.fighter.0));
+            .partition_point(|staged| (staged.tick, staged.fighter.0) <= key);
+        self.tape.0.insert(index, input);
     }
 
     /// Remove one staged input again (the unreachable rollback in
@@ -1078,23 +1086,28 @@ impl App {
         if self.live.is_poisoned() || self.live.tick() != tick {
             self.rebuild_live(tick)?;
         }
+        let fighters = self.config.fighters;
+        let current = self.hitstop_remaining;
         let inputs = tick_inputs(&self.tape, tick);
         let stepped = self.live.step(inputs)?;
-        let current = self.hitstop_remaining;
-        self.hitstop_remaining = hitstop::next(current, &stepped.events.events);
-        let cues = stepped.events.events.iter().map(map_cue).collect();
         let checkpoint = stepped.checkpoint;
-        if let Some(rows) = laterals_for_tick(stepped.rows, tick, self.config.fighters) {
-            self.laterals = rows;
-        }
-        if let Some(views) = views_for_tick(stepped.rows, tick, self.config.fighters) {
-            self.views = views;
-        }
+        let cues: Vec<FightCue> = stepped.events.events.iter().map(map_cue).collect();
+        let next_hitstop = hitstop::next(current, &stepped.events.events);
+        let laterals = laterals_for_tick(stepped.rows, tick, fighters);
+        let views = views_for_tick(stepped.rows, tick, fighters);
         // First production read of the press-tick tell (EG19b): one starter
         // slot per fresh v2 attack, in fighter-ID order; empty under v1 rows
-        // and on quiet ticks. `stepped` is dead past this line, so the live
-        // match lends its cue buffer again. Presentation only, never hashed.
-        let started = self.live.cues().iter().map(|cue| cue.attacker).collect();
+        // and on quiet ticks. Both borrows are shared, so the live match
+        // lends its cue buffer beside the stepped tick. Presentation only,
+        // never hashed.
+        let started: Vec<u8> = self.live.cues().iter().map(|cue| cue.attacker).collect();
+        self.hitstop_remaining = next_hitstop;
+        if let Some(rows) = laterals {
+            self.laterals = rows;
+        }
+        if let Some(next_views) = views {
+            self.views = next_views;
+        }
         Some((checkpoint, cues, started))
     }
 

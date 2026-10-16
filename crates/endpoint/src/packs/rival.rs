@@ -24,7 +24,7 @@ fn find_parity<F>(matches: F) -> Option<(&'static str, &'static str)>
 where
     F: FnMut(&(&'static str, &'static str)) -> bool,
 {
-    RIVAL_PARITY.iter().find(matches).copied()
+    RIVAL_PARITY.iter().copied().find(matches)
 }
 
 /// Resolve a rival verb name to our play-pack verb, if it is one of the three.

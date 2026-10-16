@@ -235,7 +235,9 @@ impl ToolBase for ApiSearchTool {
 
 impl SyncTool<McpServer> for ApiSearchTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        let payload = rmcp::serde_json::to_string(&param).unwrap_or_default();
+        let payload = rmcp::serde_json::to_string(&param).map_err(|error| {
+            McpToolError::new("bad_payload", format!("payload encode failed: {error}"))
+        })?;
         service.dispatch_with_payload(TOOL_API_SEARCH, &payload, |state| state.api_search(&param))
     }
 }
@@ -263,7 +265,9 @@ impl ToolBase for ApiDescribeTool {
 
 impl SyncTool<McpServer> for ApiDescribeTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        let payload = rmcp::serde_json::to_string(&param).unwrap_or_default();
+        let payload = rmcp::serde_json::to_string(&param).map_err(|error| {
+            McpToolError::new("bad_payload", format!("payload encode failed: {error}"))
+        })?;
         service.dispatch_with_payload(TOOL_API_DESCRIBE, &payload, |state| {
             state.api_describe(&param)
         })
@@ -293,7 +297,9 @@ impl ToolBase for CodeCallersTool {
 
 impl SyncTool<McpServer> for CodeCallersTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        let payload = rmcp::serde_json::to_string(&param).unwrap_or_default();
+        let payload = rmcp::serde_json::to_string(&param).map_err(|error| {
+            McpToolError::new("bad_payload", format!("payload encode failed: {error}"))
+        })?;
         service.dispatch_with_payload(TOOL_CODE_CALLERS, &payload, |state| {
             state.code_callers(&param)
         })
@@ -323,7 +329,9 @@ impl ToolBase for AssetRefsTool {
 
 impl SyncTool<McpServer> for AssetRefsTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        let payload = rmcp::serde_json::to_string(&param).unwrap_or_default();
+        let payload = rmcp::serde_json::to_string(&param).map_err(|error| {
+            McpToolError::new("bad_payload", format!("payload encode failed: {error}"))
+        })?;
         service.dispatch_with_payload(TOOL_ASSET_REFS, &payload, |state| state.asset_refs(&param))
     }
 }

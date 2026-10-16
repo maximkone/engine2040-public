@@ -78,6 +78,18 @@ pub struct Solver {
     warm: Vec<Warm>,
     // Start-of-step position snapshot, reused across steps (no per-step alloc).
     prev_xy: Vec<(f32, f32)>,
+    // Per-substep scratch, reused across substeps and steps (no per-step alloc).
+    // Capacities grow once, then `clear` keeps them; contents are identical
+    // to the fresh `Vec` path, so the hash never moves.
+    pairs: Vec<(usize, usize)>,
+    order: Vec<usize>,
+    acc: Vec<(f32, f32)>,
+    axes: Vec<u8>,
+    tuples: Vec<(f32, f32, f32, f32)>,
+    mins: Vec<f32>,
+    maxs: Vec<f32>,
+    parent: Vec<usize>,
+    roots: Vec<usize>,
 }
 
 impl Solver {
@@ -148,7 +160,9 @@ impl Solver {
             return;
         }
         // Rest keys on displacement, not speed: settled stacks hold residual velocity but never move.
-        let prev: Vec<(f32, f32)> = bodies.iter().map(|b| (b.x, b.y)).collect();
+        // Reused scratch, no per-step alloc (same rule the XPBD path already used).
+        self.prev_xy.clear();
+        self.prev_xy.extend(bodies.iter().map(|b| (b.x, b.y)));
         let dt = dt.min(0.25);
         let nsub = self.cfg.substeps.max(1);
         let h = dt / substeps_as_f32(nsub);
@@ -157,65 +171,75 @@ impl Solver {
             self.cfg.restitution,
             self.cfg.friction.clamp(0.0, 1.0),
         );
+        let (slop, baumgarte, iterations, sleep_v2, wake_pen, island_split) = (
+            self.cfg.slop,
+            self.cfg.baumgarte,
+            self.cfg.iterations,
+            self.cfg.sleep_v2,
+            self.cfg.wake_pen,
+            self.cfg.island_split,
+        );
         for _ in 0..nsub {
             integrate_bodies(bodies, &self.sleeping, &self.inv_mass, h, g, rest, mu);
-            let pairs = if self.cfg.island_split {
-                contact_pairs_inner(bodies, true)
-            } else {
-                contact_pairs(bodies)
-            };
-            let order = island_order(bodies.len(), &pairs);
-            for &k in &order {
-                let (a, b) = pairs[k];
-                if self.sleeping[a] == self.sleeping[b] {
-                    continue;
-                }
-                let (s, o) = if self.sleeping[a] { (a, b) } else { (b, a) };
-                let v2 = bodies[o].vx * bodies[o].vx + bodies[o].vy * bodies[o].vy;
-                if v2 > self.cfg.sleep_v2 || pen_depth(bodies, a, b) > self.cfg.wake_pen {
-                    self.sleeping[s] = false;
-                    self.timers[s] = 0;
-                }
-            }
-            let (mut acc, axes) = self.warm_start(bodies, &pairs, &order, true, nsub);
-            if self.cfg.island_split {
-                solve_island_split(
-                    bodies,
-                    &self.inv_mass,
-                    &pairs,
-                    &order,
-                    &mut acc,
-                    &self.sleeping,
-                    rest,
-                    mu,
-                    self.cfg.slop,
-                    self.cfg.baumgarte,
-                    self.cfg.iterations,
-                );
-            } else {
-                for _ in 0..self.cfg.iterations {
-                    for (k, &pi) in order.iter().enumerate() {
-                        let (a, b) = pairs[pi];
-                        if self.sleeping[a] && self.sleeping[b] {
-                            continue;
-                        }
-                        resolve(
-                            bodies,
-                            &self.inv_mass,
-                            a,
-                            b,
-                            rest,
-                            mu,
-                            self.cfg.slop,
-                            self.cfg.baumgarte,
-                            &mut acc[k],
-                            self.sleeping[a],
-                            self.sleeping[b],
-                        );
-                    }
-                }
-            }
-            self.warm_store(&pairs, &order, &acc, &axes);
+            contact_pairs_into(
+                bodies,
+                &mut self.pairs,
+                &mut self.tuples,
+                &mut self.mins,
+                &mut self.maxs,
+                island_split,
+            );
+            island_order_into(
+                bodies.len(),
+                &self.pairs,
+                &mut self.order,
+                &mut self.parent,
+                &mut self.roots,
+            );
+            wake_from_contacts(
+                bodies,
+                &self.pairs,
+                &self.order,
+                &mut self.sleeping,
+                &mut self.timers,
+                sleep_v2,
+                wake_pen,
+            );
+            warm_start_into(
+                bodies,
+                &self.sleeping,
+                &self.inv_mass,
+                &self.warm,
+                slop,
+                &self.pairs,
+                &self.order,
+                true,
+                nsub,
+                &mut self.acc,
+                &mut self.axes,
+            );
+            solve_pass(
+                bodies,
+                &self.inv_mass,
+                &self.pairs,
+                &self.order,
+                &mut self.acc,
+                &self.sleeping,
+                rest,
+                mu,
+                slop,
+                baumgarte,
+                iterations,
+                &self.roots,
+                island_split,
+            );
+            warm_store_into(
+                &mut self.warm,
+                &self.pairs,
+                &self.order,
+                &self.acc,
+                &self.axes,
+            );
         }
         sleep_update(
             bodies,
@@ -223,7 +247,7 @@ impl Solver {
             &mut self.timers,
             &self.inv_mass,
             &self.cfg,
-            &prev,
+            &self.prev_xy,
         );
     }
     /// Advance with XPBD distance joints (steals.md A5): the same integrate
@@ -235,10 +259,7 @@ impl Solver {
         if bodies.is_empty() || dt.is_nan() || dt <= 0.0 {
             return;
         }
-        for j in joints.iter_mut() {
-            j.lam_x = 0.0;
-            j.lam_y = 0.0;
-        }
+        reset_lambdas(joints);
         // Rest keys on displacement, not speed: settled hangs hold residual
         // velocity but never move. Reused scratch, no per-step alloc.
         self.prev_xy.clear();
@@ -251,49 +272,74 @@ impl Solver {
             self.cfg.restitution,
             self.cfg.friction.clamp(0.0, 1.0),
         );
+        let (slop, baumgarte, iterations, sleep_v2, wake_pen, island_split) = (
+            self.cfg.slop,
+            self.cfg.baumgarte,
+            self.cfg.iterations,
+            self.cfg.sleep_v2,
+            self.cfg.wake_pen,
+            self.cfg.island_split,
+        );
         for _ in 0..nsub {
             integrate_bodies(bodies, &self.sleeping, &self.inv_mass, h, g, rest, mu);
-            let pairs = if self.cfg.island_split {
-                contact_pairs_inner(bodies, true)
-            } else {
-                contact_pairs(bodies)
-            };
-            let order = island_order(bodies.len(), &pairs);
-            for &k in &order {
-                let (a, b) = pairs[k];
-                if self.sleeping[a] == self.sleeping[b] {
-                    continue;
-                }
-                let (s, o) = if self.sleeping[a] { (a, b) } else { (b, a) };
-                let v2 = bodies[o].vx * bodies[o].vx + bodies[o].vy * bodies[o].vy;
-                if v2 > self.cfg.sleep_v2 || pen_depth(bodies, a, b) > self.cfg.wake_pen {
-                    self.sleeping[s] = false;
-                    self.timers[s] = 0;
-                }
-            }
-            let (mut acc, axes) = self.warm_start(bodies, &pairs, &order, true, nsub);
-            for _ in 0..self.cfg.iterations {
-                for (k, &pi) in order.iter().enumerate() {
-                    let (a, b) = pairs[pi];
-                    if self.sleeping[a] && self.sleeping[b] {
-                        continue;
-                    }
-                    resolve(
-                        bodies,
-                        &self.inv_mass,
-                        a,
-                        b,
-                        rest,
-                        mu,
-                        self.cfg.slop,
-                        self.cfg.baumgarte,
-                        &mut acc[k],
-                        self.sleeping[a],
-                        self.sleeping[b],
-                    );
-                }
-            }
-            self.warm_store(&pairs, &order, &acc, &axes);
+            contact_pairs_into(
+                bodies,
+                &mut self.pairs,
+                &mut self.tuples,
+                &mut self.mins,
+                &mut self.maxs,
+                island_split,
+            );
+            island_order_into(
+                bodies.len(),
+                &self.pairs,
+                &mut self.order,
+                &mut self.parent,
+                &mut self.roots,
+            );
+            wake_from_contacts(
+                bodies,
+                &self.pairs,
+                &self.order,
+                &mut self.sleeping,
+                &mut self.timers,
+                sleep_v2,
+                wake_pen,
+            );
+            warm_start_into(
+                bodies,
+                &self.sleeping,
+                &self.inv_mass,
+                &self.warm,
+                slop,
+                &self.pairs,
+                &self.order,
+                true,
+                nsub,
+                &mut self.acc,
+                &mut self.axes,
+            );
+            // XPBD contacts stay on the legacy loop; joints have the final word.
+            solve_legacy(
+                bodies,
+                &self.inv_mass,
+                &self.pairs,
+                &self.order,
+                &mut self.acc,
+                &self.sleeping,
+                rest,
+                mu,
+                slop,
+                baumgarte,
+                iterations,
+            );
+            warm_store_into(
+                &mut self.warm,
+                &self.pairs,
+                &self.order,
+                &self.acc,
+                &self.axes,
+            );
             // Joints last each substep: their residual is the final word.
             self.solve_xpbd_joints(bodies, joints, h);
         }
@@ -375,72 +421,9 @@ impl Solver {
             }
         }
     }
-    /// Re-apply last step's normal impulse, sliced 1/nsub per substep (full re-inject overshoots and never sleeps).
-    fn warm_start(
-        &self,
-        bodies: &mut [Body],
-        pairs: &[(usize, usize)],
-        order: &[usize],
-        seed: bool,
-        nsub: usize,
-    ) -> (Vec<(f32, f32)>, Vec<u8>) {
-        let mut acc = Vec::with_capacity(order.len());
-        let mut axes = Vec::with_capacity(order.len());
-        for &pi in order {
-            let (a, b) = pairs[pi];
-            let axis = contact_axis(bodies, a, b);
-            axes.push(axis);
-            let mut j = (0.0, 0.0);
-            if seed && !(self.sleeping[a] && self.sleeping[b]) {
-                if let Some(w) = self.warm_lookup(a, b) {
-                    if w.axis == axis {
-                        let share = w.jn / substeps_as_f32(nsub.max(1));
-                        apply_impulse(
-                            bodies,
-                            &self.inv_mass,
-                            a,
-                            b,
-                            axis,
-                            share,
-                            self.cfg.slop,
-                            self.sleeping[a],
-                            self.sleeping[b],
-                        );
-                        j = (w.jn, 0.0);
-                    }
-                }
-            }
-            acc.push(j);
-        }
-        (acc, axes)
-    }
-    /// Binary-search warm entry; `warm` stays sorted by (a, b) via `warm_store`.
+    /// Binary-search warm entry; `warm` stays sorted by (a, b) via `warm_store_into`.
     fn warm_lookup(&self, a: usize, b: usize) -> Option<Warm> {
-        self.warm
-            .binary_search_by_key(&(a, b), |w| (w.a, w.b))
-            .ok()
-            .map(|i| self.warm[i])
-    }
-    /// Cache this substep's accumulated impulses, sorted for determinism.
-    fn warm_store(
-        &mut self,
-        pairs: &[(usize, usize)],
-        order: &[usize],
-        acc: &[(f32, f32)],
-        axes: &[u8],
-    ) {
-        let mut w = Vec::with_capacity(order.len());
-        for (k, &pi) in order.iter().enumerate() {
-            let (a, b) = pairs[pi];
-            w.push(Warm {
-                a,
-                b,
-                axis: axes[k],
-                jn: acc[k].0,
-            });
-        }
-        w.sort_by_key(|e| (e.a, e.b));
-        self.warm = w;
+        warm_lookup_in(&self.warm, a, b)
     }
     /// FNV-1a over body bits + sleep byte + len. Deterministic across runs.
     pub fn state_hash(&self, bodies: &[Body]) -> u64 {
@@ -478,6 +461,88 @@ fn substeps_as_f32(nsub: usize) -> f32 {
 /// instead of wrapping, so a corrupt length can never alias a small stack.
 fn len_as_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// Binary-search warm entry in a sorted slice; the single owner for lookups.
+fn warm_lookup_in(warm: &[Warm], a: usize, b: usize) -> Option<Warm> {
+    warm.binary_search_by_key(&(a, b), |w| (w.a, w.b))
+        .ok()
+        .map(|i| warm[i])
+}
+
+/// Re-apply last step's normal impulse into reused `acc`/`axes`.
+/// Same ops and order as the old per-substep `warm_start`; only the
+/// allocation moves into caller-owned scratch, so the hash never moves.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wide signature kept until its inputs move into a params struct"
+)]
+fn warm_start_into(
+    bodies: &mut [Body],
+    sleeping: &[bool],
+    inv_mass: &[f32],
+    warm: &[Warm],
+    slop: f32,
+    pairs: &[(usize, usize)],
+    order: &[usize],
+    seed: bool,
+    nsub: usize,
+    acc: &mut Vec<(f32, f32)>,
+    axes: &mut Vec<u8>,
+) {
+    acc.clear();
+    axes.clear();
+    acc.reserve(order.len().saturating_sub(acc.capacity().min(order.len())));
+    axes.reserve(order.len().saturating_sub(axes.capacity().min(order.len())));
+    for &pi in order {
+        let (a, b) = pairs[pi];
+        let axis = contact_axis(bodies, a, b);
+        axes.push(axis);
+        let mut j = (0.0, 0.0);
+        if seed && !(sleeping[a] && sleeping[b]) {
+            if let Some(w) = warm_lookup_in(warm, a, b) {
+                if w.axis == axis {
+                    let share = w.jn / substeps_as_f32(nsub.max(1));
+                    apply_impulse(
+                        bodies,
+                        inv_mass,
+                        a,
+                        b,
+                        axis,
+                        share,
+                        slop,
+                        sleeping[a],
+                        sleeping[b],
+                    );
+                    j = (w.jn, 0.0);
+                }
+            }
+        }
+        acc.push(j);
+    }
+}
+
+/// Cache this substep's accumulated impulses into reused `warm`,
+/// sorted for determinism. Same content as the old fresh-`Vec` path.
+fn warm_store_into(
+    warm: &mut Vec<Warm>,
+    pairs: &[(usize, usize)],
+    order: &[usize],
+    acc: &[(f32, f32)],
+    axes: &[u8],
+) {
+    warm.clear();
+    warm.reserve(order.len().saturating_sub(warm.capacity().min(order.len())));
+    for (k, &pi) in order.iter().enumerate() {
+        let (a, b) = pairs[pi];
+        warm.push(Warm {
+            a,
+            b,
+            axis: axes[k],
+            jn: acc[k].0,
+        });
+    }
+    warm.sort_by_key(|e| (e.a, e.b));
 }
 
 // A5 XPBD distance joints (steals.md A5): per-substep h with a compliance
@@ -643,24 +708,55 @@ fn sleep_update(
 }
 
 /// Sorted overlapping AABB pairs (i < j), deterministic.
-/// Grid candidates have the live tick caller; the BVH walk has it on the
-/// split path via [`contact_pairs_inner`] behind `island_split`. Same output.
+/// Live tick path uses [`contact_pairs_into`] for both grid and BVH
+/// candidates; the wrappers below are test-only oracles with the same output.
+#[cfg(test)]
 fn contact_pairs(b: &[Body]) -> Vec<(usize, usize)> {
     contact_pairs_inner(b, false)
 }
+#[cfg(test)]
 fn contact_pairs_inner(b: &[Body], use_bvh: bool) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut tuples = Vec::new();
+    let mut mins = Vec::new();
+    let mut maxs = Vec::new();
+    contact_pairs_into(b, &mut out, &mut tuples, &mut mins, &mut maxs, use_bvh);
+    out
+}
+
+/// Sorted overlapping AABB pairs into reused `out`; exact AABB gate over
+/// grid or BVH candidates, deterministic. Caller-owned `pairs`/`tuples`/
+/// `mins`/`maxs` scratch, so the hash never moves.
+/// Note: `broadphase::candidate_pairs`/`bvh_pairs` still allocate their
+/// internal keys/tree per call (owned by `broadphase.rs`, outside this
+/// packet's scope); this reuses everything `solver.rs` owns.
+fn contact_pairs_into(
+    b: &[Body],
+    out: &mut Vec<(usize, usize)>,
+    tuples: &mut Vec<(f32, f32, f32, f32)>,
+    mins: &mut Vec<f32>,
+    maxs: &mut Vec<f32>,
+    use_bvh: bool,
+) {
+    out.clear();
     if b.len() < 2 {
-        return Vec::new();
+        return;
     }
     // Either candidate set is a superset; the exact gate restores equality.
     let candidates = if use_bvh {
-        let mut mins = Vec::with_capacity(b.len());
-        let mut maxs = Vec::with_capacity(b.len());
+        mins.clear();
+        maxs.clear();
+        if mins.capacity() < b.len() {
+            mins.reserve(b.len() - mins.capacity());
+        }
+        if maxs.capacity() < b.len() {
+            maxs.reserve(b.len() - maxs.capacity());
+        }
         for body in b.iter() {
             mins.push(body.x - body.hx);
             maxs.push(body.x + body.hx);
         }
-        crate::broadphase::bvh_pairs(&mins, &maxs)
+        crate::broadphase::bvh_pairs(mins, maxs)
     } else {
         // Cell covers the largest finite diameter so big bodies span few cells;
         // any positive cell keeps candidates a superset of true overlaps and the
@@ -673,10 +769,18 @@ fn contact_pairs_inner(b: &[Body], use_bvh: bool) -> Vec<(usize, usize)> {
             }
         }
         let cell = (2.0f32 * max_half).max(2.0);
-        let tuples: Vec<(f32, f32, f32, f32)> = b.iter().map(|v| (v.x, v.y, v.hx, v.hy)).collect();
-        crate::broadphase::candidate_pairs(&tuples, cell)
+        tuples.clear();
+        if tuples.capacity() < b.len() {
+            tuples.reserve(b.len() - tuples.capacity());
+        }
+        for v in b.iter() {
+            tuples.push((v.x, v.y, v.hx, v.hy));
+        }
+        crate::broadphase::candidate_pairs(tuples, cell)
     };
-    let mut out = Vec::with_capacity(candidates.len());
+    if out.capacity() < candidates.len() {
+        out.reserve(candidates.len() - out.capacity());
+    }
     for (p, q) in candidates {
         let (a, c) = if p < q { (p, q) } else { (q, p) };
         if a >= b.len() || c >= b.len() {
@@ -692,7 +796,6 @@ fn contact_pairs_inner(b: &[Body], use_bvh: bool) -> Vec<(usize, usize)> {
     }
     out.sort_unstable();
     out.dedup();
-    out
 }
 
 /// Brute-force O(n^2) equality oracle for `contact_pairs`: the old path,
@@ -725,16 +828,34 @@ fn pen_depth(b: &[Body], i: usize, j: usize) -> f32 {
     ox.min(oy)
 }
 
-/// Canonical pair order grouped by union-find island root. Deterministic.
-fn island_order(n: usize, pairs: &[(usize, usize)]) -> Vec<usize> {
-    let root = island_roots(n, pairs);
-    let mut order: Vec<usize> = (0..pairs.len()).collect();
-    order.sort_by_key(|&k| (root[pairs[k].0], pairs[k].0, pairs[k].1));
-    order
+/// Canonical pair order into reused `order`: pairs grouped by union-find
+/// island root, pairs sorted by (root, a, b). Deterministic; caller-owned
+/// `order`/`parent`/`roots` scratch, so the hash never moves.
+fn island_order_into(
+    n: usize,
+    pairs: &[(usize, usize)],
+    order: &mut Vec<usize>,
+    parent: &mut Vec<usize>,
+    roots: &mut Vec<usize>,
+) {
+    island_roots_into(n, pairs, parent, roots);
+    order.clear();
+    if order.capacity() < pairs.len() {
+        order.reserve(pairs.len() - order.capacity());
+    }
+    order.extend(0..pairs.len());
+    order.sort_by_key(|&k| (roots[pairs[k].0], pairs[k].0, pairs[k].1));
 }
 
-/// Union-find island root per body, same rule `island_order` sorts by.
-fn island_roots(n: usize, pairs: &[(usize, usize)]) -> Vec<usize> {
+/// Union-find island roots into reused `parent`/`roots`: union by minimum
+/// with path compression; `roots[i]` is its component minimum. Caller-owned
+/// scratch.
+fn island_roots_into(
+    n: usize,
+    pairs: &[(usize, usize)],
+    parent: &mut Vec<usize>,
+    roots: &mut Vec<usize>,
+) {
     fn find(p: &mut [usize], mut x: usize) -> usize {
         while p[x] != x {
             p[x] = p[p[x]];
@@ -742,12 +863,17 @@ fn island_roots(n: usize, pairs: &[(usize, usize)]) -> Vec<usize> {
         }
         x
     }
-    let mut parent: Vec<usize> = (0..n).collect();
+    parent.clear();
+    if parent.capacity() < n {
+        parent.reserve(n - parent.capacity());
+    }
+    parent.extend(0..n);
     for &(a, b) in pairs {
         if a >= n || b >= n {
             continue;
         }
-        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        let ra = find(parent, a);
+        let rb = find(parent, b);
         if ra != rb {
             if ra < rb {
                 parent[rb] = ra;
@@ -756,22 +882,26 @@ fn island_roots(n: usize, pairs: &[(usize, usize)]) -> Vec<usize> {
             }
         }
     }
-    let mut root = vec![0usize; n];
-    for (i, r) in root.iter_mut().enumerate() {
-        *r = find(&mut parent, i);
+    roots.clear();
+    if roots.capacity() < n {
+        roots.reserve(n - roots.capacity());
     }
-    root
+    roots.resize(n, 0);
+    for i in 0..n {
+        roots[i] = find(parent, i);
+    }
 }
 
-/// Jolt/Rapier-style island split: each island runs all `iterations` before
-/// the next starts. `order` is already grouped by island root, so each run is
-/// contiguous. Islands own disjoint bodies, so this answers the legacy
-/// interleaved loop bit-for-bit on settled stacks; order stays deterministic.
+/// Jolt/Rapier-style island split over precomputed `roots`: each island
+/// runs all `iterations` before the next starts. `order` is already grouped
+/// by island root, so each run is contiguous. Islands own disjoint bodies,
+/// so this answers the legacy interleaved loop bit-for-bit on settled
+/// stacks; caller-owned `roots` scratch, order stays deterministic.
 #[expect(
     clippy::too_many_arguments,
     reason = "one island solve kept flat until contacts grow a params struct"
 )]
-fn solve_island_split(
+fn solve_island_split_on_roots(
     bodies: &mut [Body],
     inv: &[f32],
     pairs: &[(usize, usize)],
@@ -783,11 +913,11 @@ fn solve_island_split(
     slop: f32,
     beta: f32,
     iterations: usize,
+    roots: &[usize],
 ) {
     if order.is_empty() || iterations == 0 {
         return;
     }
-    let roots = island_roots(bodies.len(), pairs);
     let mut start = 0;
     while start < order.len() {
         let root = roots[pairs[order[start]].0];
@@ -817,6 +947,113 @@ fn solve_island_split(
             }
         }
         start = end;
+    }
+}
+
+/// Wake sleepers touched by a fast or deeply-penetrating partner.
+/// Shared by `step` and the XPBD path: same ops and order, same hash.
+fn wake_from_contacts(
+    bodies: &[Body],
+    pairs: &[(usize, usize)],
+    order: &[usize],
+    sleeping: &mut [bool],
+    timers: &mut [u32],
+    sleep_v2: f32,
+    wake_pen: f32,
+) {
+    for &k in order {
+        let (a, b) = pairs[k];
+        if sleeping[a] == sleeping[b] {
+            continue;
+        }
+        let (s, o) = if sleeping[a] { (a, b) } else { (b, a) };
+        let v2 = bodies[o].vx * bodies[o].vx + bodies[o].vy * bodies[o].vy;
+        if v2 > sleep_v2 || pen_depth(bodies, a, b) > wake_pen {
+            sleeping[s] = false;
+            timers[s] = 0;
+        }
+    }
+}
+
+/// One legacy-loop contact pass over `order`: all `iterations` interleaved.
+/// Same branches and order as the inline loop it replaces, same hash.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one solve pass kept flat until contacts grow a params struct"
+)]
+fn solve_legacy(
+    bodies: &mut [Body],
+    inv: &[f32],
+    pairs: &[(usize, usize)],
+    order: &[usize],
+    acc: &mut [(f32, f32)],
+    sleeping: &[bool],
+    rest: f32,
+    mu: f32,
+    slop: f32,
+    baumgarte: f32,
+    iterations: usize,
+) {
+    for _ in 0..iterations {
+        for (k, &pi) in order.iter().enumerate() {
+            let (a, b) = pairs[pi];
+            if sleeping[a] && sleeping[b] {
+                continue;
+            }
+            resolve(
+                bodies,
+                inv,
+                a,
+                b,
+                rest,
+                mu,
+                slop,
+                baumgarte,
+                &mut acc[k],
+                sleeping[a],
+                sleeping[b],
+            );
+        }
+    }
+}
+
+/// One contact-solve pass: island-split runs or the legacy loop.
+/// Shared by `step` so it stays under the fn-length ratchet: same
+/// branches, same order, same hash.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one solve pass kept flat until contacts grow a params struct"
+)]
+fn solve_pass(
+    bodies: &mut [Body],
+    inv: &[f32],
+    pairs: &[(usize, usize)],
+    order: &[usize],
+    acc: &mut [(f32, f32)],
+    sleeping: &[bool],
+    rest: f32,
+    mu: f32,
+    slop: f32,
+    baumgarte: f32,
+    iterations: usize,
+    roots: &[usize],
+    island_split: bool,
+) {
+    if island_split {
+        solve_island_split_on_roots(
+            bodies, inv, pairs, order, acc, sleeping, rest, mu, slop, baumgarte, iterations, roots,
+        );
+    } else {
+        solve_legacy(
+            bodies, inv, pairs, order, acc, sleeping, rest, mu, slop, baumgarte, iterations,
+        );
+    }
+}
+
+/// Clear XPBD lambdas at step start; they rebuild over substeps x iterations.
+fn reset_lambdas(joints: &mut [XpbdJoint]) {
+    for j in joints.iter_mut() {
+        (j.lam_x, j.lam_y) = (0.0, 0.0);
     }
 }
 

@@ -1,6 +1,6 @@
 // Shared FNV-1a 64 hex over bytes; mirrors package.rs digest_hex (integrity
-// only). Single owner: tools/clean-run.mjs and tools/pack-clean.mjs import
-// this instead of carrying their own copy.
+// only). Single owner: tools/ship.mjs imports
+// this instead of carrying its own copy.
 const FNV_OFFSET = 0xcbf29ce484222325n;
 const FNV_PRIME = 0x100000001b3n;
 const FNV_MASK = 0xffffffffffffffffn;

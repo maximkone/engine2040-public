@@ -150,7 +150,7 @@ impl McpServer {
     /// [`Self::dispatch_with_payload`]: lock, run the op, seal one record.
     /// The per-tool remainder stays generic over `R` but holds no audit
     /// words of its own: outcome plus detail are plain `u64`s, the seal
-    /// below is one shared copy for all twenty-one tools.
+    /// below is one shared copy for every dispatched tool.
     fn dispatch_locked<R>(
         &self,
         tool: &str,
@@ -170,7 +170,7 @@ impl McpServer {
 
     /// Seal a capability-gate refusal (cold path): lock, append one
     /// `Refused` record, hand the refusal back. Non-generic, so all
-    /// twenty-one tools share one copy instead of monomorphizing the lock
+    /// dispatched tools share one copy instead of monomorphizing the lock
     /// plus audit words per result type. A poisoned lock still reports
     /// `lock_poisoned` exactly as the inline path did.
     fn seal_refusal(&self, tool: &str, refusal: McpToolError) -> McpToolError {
@@ -204,7 +204,7 @@ impl McpServer {
 
 /// Append one audit record over an already-locked state: the lock words,
 /// the truncation plus hash words and every literal live here once, not
-/// once per dispatched tool result type (bloat audit: twenty-one tools
+/// once per dispatched tool result type (bloat audit: every dispatched tool
 /// share this copy; the generic `dispatch` shell above only maps outcome).
 fn seal_locked(
     state: &mut ServerState,
@@ -237,17 +237,16 @@ impl From<super::witness::WitnessError> for McpToolError {
 /// Cold door path: allocates per node, never on the fixed tick.
 pub(crate) fn witness_digest_for(doc: &Document) -> u64 {
     let mut lane = Fnv64::with_state(WITNESS_DOMAIN ^ doc.revision);
-    let mut ids = Vec::with_capacity(doc.hierarchy.len());
     let mut stack = doc.hierarchy.roots();
+    let mut keyed = Vec::with_capacity(doc.hierarchy.len());
     while let Some(id) = stack.pop() {
-        ids.push(id);
+        keyed.push((id, id.to_string()));
         stack.extend(doc.hierarchy.children(id));
     }
-    ids.sort_by_key(|id| id.to_string());
-    for id in ids {
-        let text = id.to_string();
+    keyed.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+    for (id, text) in &keyed {
         lane.write(text.as_bytes());
-        if let Some(local) = doc.hierarchy.local(id) {
+        if let Some(local) = doc.hierarchy.local(*id) {
             for word in local
                 .position
                 .iter()
@@ -257,10 +256,10 @@ pub(crate) fn witness_digest_for(doc: &Document) -> u64 {
                 lane.write(&word.to_bits().to_le_bytes());
             }
         }
-        if let Some(name) = doc.materials.get(&text) {
+        if let Some(name) = doc.materials.get(text) {
             lane.write(name.as_str().as_bytes());
         }
-        if let Some(kinds) = doc.components.get(&text) {
+        if let Some(kinds) = doc.components.get(text) {
             for (kind, value) in kinds {
                 lane.write(format!("{kind:?}").as_bytes());
                 lane.write(format!("{value:?}").as_bytes());
