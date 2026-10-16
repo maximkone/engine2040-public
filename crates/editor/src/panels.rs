@@ -122,10 +122,6 @@ pub fn builtin_registry() -> PanelRegistry {
 
 /// Open every built-in panel; the dock startup calls this once.
 pub fn ensure_builtin_panels(shell: &mut Shell) {
-    let _ = crate::inspector_auto::registry_panel_grid(
-        &engine_scene::schema::SchemaRegistry::builtin(),
-        &std::collections::BTreeMap::new(),
-    );
     builtin_registry().apply_all(shell);
 }
 

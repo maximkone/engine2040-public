@@ -769,7 +769,9 @@ impl Evaluator {
 use super::clip::clamp01;
 
 /// Shortest-arc normalized lerp between unit quats; NaN-safe identity out.
-/// Owner of the override and graph blends so both agree bit for bit.
+/// Separate from `pose::nlerp` on purpose: the zero-length (antipodal) case
+/// returns identity here while `pose::nlerp` returns `a`, so the two are
+/// close but not bit-for-bit identical.
 pub(crate) fn nlerp(a: [f32; 4], b: [f32; 4], w: f32) -> [f32; 4] {
     const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
     let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];

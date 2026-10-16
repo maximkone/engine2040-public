@@ -85,6 +85,12 @@ impl FightFrame {
 /// Percentile of ascending `sorted` at `pct` (`0..=100`): rank
 /// `len * pct / 100` clamped to the last sample. Empty gives `None`.
 /// Integer math only. `sorted` must be ascending.
+/// Differs deliberately from [`crate::latency::nearest_rank_sorted`] (float
+/// `round(p / 100 * (n - 1))` over ms) and from the ceil-ranked JS gate
+/// (`tools/proof.mjs` `ceil(p * n) - 1`): this gate needs whole microseconds
+/// with no float, plus `None` on empty or `pct > 100` so a bad rank fails
+/// loudly instead of printing zeros. Caller: `p50_sorted`, `p99_sorted` and
+/// `check_gate` only.
 #[must_use]
 pub fn percentile_sorted(sorted: &[u64], pct: u32) -> Option<u64> {
     if sorted.is_empty() || pct > 100 {

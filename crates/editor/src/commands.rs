@@ -515,41 +515,6 @@ pub struct Journal {
     merge_force_keep: Vec<u64>,
 }
 
-/// Group merge discipline (`UndoRedo` `MergeMode`; group-frame merge only).
-/// PORT(godotengine/godot@4d10419cacd6d3009976e8f9fd3abd970fd58018:core/object/undo_redo.h `MergeMode`) -> idea only.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MergeMode {
-    /// Never merge: `end_group` leaves steps individual.
-    Disable,
-    /// Merge consecutive value writes on one node; else leave individual.
-    Ends,
-    /// Merge every member (existing gizmo-drag fold).
-    #[default]
-    All,
-}
-
-/// Explicit do/undo op pair for one tick (`add_do_property` shape).
-/// PORT(godotengine/godot@4d10419cacd6d3009976e8f9fd3abd970fd58018:core/object/undo_redo.h `add_do_property`/`add_undo_property`) -> idea only.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DoUndoPair {
-    /// Forward op staged this tick.
-    pub do_op: Op,
-    /// Inverse restoring the pre-tick value.
-    pub undo_op: Op,
-}
-
-/// Stage one `SetLocal` tick as an explicit do/undo pair without mutating.
-pub fn do_undo_pair(doc: &Document, op: Op) -> Option<DoUndoPair> {
-    if let Op::SetLocal { id, local } = op {
-        let old = doc.hierarchy.local(id)?;
-        return Some(DoUndoPair {
-            do_op: Op::SetLocal { id, local },
-            undo_op: Op::SetLocal { id, local: old },
-        });
-    }
-    None
-}
-
 /// One open [`begin_group`] frame: the name, flag and key the merged entry
 /// takes when [`end_group`] commits.
 #[derive(Clone, Debug, Default)]
@@ -562,8 +527,6 @@ struct GroupFrame {
     significant: bool,
     /// Retry identity the merged entry answers.
     key: u64,
-    /// Merge discipline for this frame (nested groups keep innermost tagging).
-    merge_mode: MergeMode,
 }
 
 impl Journal {
@@ -685,16 +648,6 @@ fn bound_name(name: &str) -> String {
 /// into one undo step or [`cancel_group`] releases them. Returns the group
 /// id (never [`NO_GROUP`]).
 pub fn begin_group(journal: &mut Journal, meta: &CommandMeta, idempotency_key: u64) -> u64 {
-    begin_group_with_mode(journal, meta, idempotency_key, MergeMode::All)
-}
-
-/// Open a group with an explicit merge discipline; nested groups tag innermost.
-pub fn begin_group_with_mode(
-    journal: &mut Journal,
-    meta: &CommandMeta,
-    idempotency_key: u64,
-    mode: MergeMode,
-) -> u64 {
     // A grouped gesture supersedes any open slider: seal it first.
     seal_coalescing(journal);
     let id = journal.next_group.max(1);
@@ -704,29 +657,8 @@ pub fn begin_group_with_mode(
         name: meta.name.clone(),
         significant: meta.significant,
         key: idempotency_key,
-        merge_mode: mode,
     });
     id
-}
-
-/// True when every group member is one value write on one node (Ends fold).
-fn group_members_mergeable(members: &[JournalEntry]) -> bool {
-    if members.is_empty() {
-        return false;
-    }
-    let first = match members[0].forward.first() {
-        Some(op) if members[0].forward.len() == 1 => *op,
-        _ => return false,
-    };
-    members.iter().all(|member| {
-        member.forward.len() == 1
-            && member.forward[0].id() == first.id()
-            && std::mem::discriminant(&member.forward[0]) == std::mem::discriminant(&first)
-            && matches!(
-                member.forward[0],
-                Op::SetLocal { .. } | Op::SetMaterial { .. }
-            )
-    })
 }
 
 /// Commit the innermost open group: its entries merge into one entry named
@@ -752,12 +684,6 @@ pub fn end_group(journal: &mut Journal) -> Option<Applied> {
     }
     let members: Vec<JournalEntry> = journal.past.drain(start..).collect();
     if members.is_empty() {
-        return None;
-    }
-    if frame.merge_mode == MergeMode::Disable
-        || (frame.merge_mode == MergeMode::Ends && !group_members_mergeable(&members))
-    {
-        journal.past.extend(members);
         return None;
     }
     let mut forward = Vec::new();

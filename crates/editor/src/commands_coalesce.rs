@@ -48,7 +48,7 @@ pub fn merge_key(id: ObjectId, lane: &str) -> u64 {
 /// True while a coalescing gesture holds the journal top open: the next
 /// [`apply_coalesced`] tick with the same lane folds instead of pushing. Any
 /// seal ([`seal_coalescing`], a plain apply, a group edit, undo, redo)
-/// closes it. The Shell panel reads this to show the gesture state.
+/// closes it. No production Shell reader yet; tests observe the gesture state.
 pub fn coalescing_open(journal: &Journal) -> bool {
     journal.coalesce.is_some()
 }
@@ -56,9 +56,10 @@ pub fn coalescing_open(journal: &Journal) -> bool {
 /// Seal the open coalescing gesture, if any: the next [`apply_coalesced`]
 /// tick starts a fresh undo entry even on the same lane.
 ///
-/// The Shell calls this on gesture release, on apply of a staged edit and on
-/// focus or selection change, so one slider sweep never swallows a later
-/// one. Sealing an already-sealed journal is a no-op.
+/// A future slider caller would call this on gesture release, on apply of a
+/// staged edit and on focus or selection change, so one slider sweep never
+/// swallows a later one. Currently test-only; the live Shell drag uses
+/// `begin_group`/`end_group`. Sealing an already-sealed journal is a no-op.
 pub fn seal_coalescing(journal: &mut Journal) {
     journal.coalesce = None;
 }
@@ -155,11 +156,6 @@ fn fold_tick(
         Ok(staged) => staged,
         Err(error) => return Some(Err(error)),
     };
-    debug_assert!(
-        batch.ops.len() != 1
-            || do_undo_pair(doc, batch.ops[0]).is_some()
-            || matches!(batch.ops[0], Op::SetMaterial { .. })
-    );
     // Pop the gesture entry while the fresh receipt builds: its previous
     // receipt is superseded by the fold, not a parent of it.
     let top = journal.past.pop()?;
@@ -270,8 +266,10 @@ fn commit_staged(
 /// push and seal. Errors match [`apply_named`]: stale revisions, bad ops,
 /// duplicate keys and undone keys write nothing.
 ///
-/// The Shell drives one lane per slider (or gizmo) gesture: `merge_key` per
-/// tick, [`seal_coalescing`] on release, staged-apply and focus change.
+/// Status: test-only with no production slider caller yet; the live Shell
+/// drag uses `begin_group`/`end_group`. A future caller would drive one lane
+/// per gesture: `merge_key` per tick, [`seal_coalescing`] on release,
+/// staged-apply and focus change.
 pub fn apply_coalesced(
     doc: &mut Document,
     journal: &mut Journal,

@@ -248,15 +248,6 @@ pub struct Timing {
     pub ns_per_op: Option<f64>,
 }
 
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let end = sorted.len() - 1;
-    let index = ((p / 100.0) * end as f64).round() as usize;
-    sorted[index.min(end)]
-}
-
 /// Time `f` with `warmup` discards then `n` samples; `ops_per_sample`
 /// converts the mean into ns/op.
 pub fn time_kernel(
@@ -281,9 +272,9 @@ pub fn time_kernel(
         n,
         warmup,
         mean_ms,
-        p50_ms: percentile(&samples, 50.0),
-        p95_ms: percentile(&samples, 95.0),
-        p99_ms: percentile(&samples, 99.0),
+        p50_ms: crate::latency::nearest_rank_sorted(&samples, 50.0),
+        p95_ms: crate::latency::nearest_rank_sorted(&samples, 95.0),
+        p99_ms: crate::latency::nearest_rank_sorted(&samples, 99.0),
         min_ms: samples.first().copied().unwrap_or(0.0),
         max_ms: samples.last().copied().unwrap_or(0.0),
         ns_per_op,

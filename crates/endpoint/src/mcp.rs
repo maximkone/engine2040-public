@@ -1511,16 +1511,12 @@ impl McpServer {
     }
 
     /// Route one shim batch through the group lane: one gesture id per batch, seal at batch end.
+    /// Runs the execute lane only; previews stay on the dry-run path.
     pub fn brp_batch(
         &self,
         batch: &[crate::remote_shim::BrpRequest],
         gesture_key: u64,
     ) -> crate::discover::BatchExecuteOutput {
-        let _ = (
-            crate::remote_shim::BRP_DEFAULT_ADDR,
-            crate::remote_shim::BRP_DEFAULT_PORT,
-        );
-        let _ = crate::remote_shim::preview_via_shim(self, batch);
         crate::remote_shim::execute_via_shim(self, batch, gesture_key)
     }
 

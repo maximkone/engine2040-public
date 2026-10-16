@@ -1,8 +1,8 @@
 //! Selective undo: revert chosen receipts alone, keep what later work pinned.
 //!
 //! Owner: the command service (`super`, which re-exports every public name
-//! here). Consumers: the undo panel and the door's selective-undo path.
-//! Reads the journal only; the revert itself is one ordinary atomic batch,
+//! here). Status: test-only with no production undo-panel or door caller
+//! yet. Reads the journal only; the revert itself is one ordinary atomic batch,
 //! so units, determinism and error shapes are the command service's own.
 //! Errors: [`UndoError`] (unknown receipt, or the revert batch refused).
 

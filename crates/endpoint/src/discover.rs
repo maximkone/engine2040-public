@@ -12,9 +12,8 @@
 //! Budgets: each watch queue holds at most [`MAX_WATCH_QUEUE`] events,
 //! each delivered log at most [`MAX_WATCH_DELIVERED`], one evidence blob at
 //! most [`MAX_WATCH_EVIDENCE_BYTES`] bytes. `rpc.discover` and `scene.watch`
-//! register on the endpoint router (twenty-one tools: the `scene.query`
-//! tool plus the `sim.plan_goals` tool plus the `level.build` tool); the
-//! [`SyncTool`] shapes here serve through [`McpServer`] either way.
+//! register on the endpoint router (thirteen core tools plus loaded packs);
+//! the [`SyncTool`] shapes here serve through [`McpServer`] either way.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};

@@ -101,7 +101,7 @@ what 64 needs.
 
 ## 2. Finish line
 
-Tier A alpha (arena readable, seams closed): GX3 + GX5 ticked, RL7 feed
+Tier A alpha (arena readable, seams closed): GX3 done-archived, GX5 dropped with no board row (wave-56 verdict, not ticked), RL7 feed
 (RL9) ticked, RL8 one-bake-three-readers ticked, RP5 seam ticked, plus
 new RL11 (look-gate bundle) and RL12 (boosted re-baseline). Bar: every
 Tier A pass submits with 0 validation errors; llvmpipe parity within

@@ -56,7 +56,6 @@ pub mod locomotion;
 pub mod lod;
 #[cfg(test)]
 mod lod_w1_test;
-pub mod match_db;
 pub mod motion_match;
 pub mod motion_net;
 pub mod net_pose;

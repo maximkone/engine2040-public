@@ -258,9 +258,19 @@ impl LatencyReport {
     }
 }
 
-/// Nearest-rank percentile over a sorted sample slice (same convention as the
-/// profiler quantiles, so the two reports rank identically).
-fn percentile(sorted: &[f64], p: f64) -> f64 {
+/// Nearest-rank percentile over a sorted sample slice, owner for the float
+/// reports (`latency`, `core_bench`, `profiler`, `server_budget` and the
+/// `perf` harness stats): rank `round(p / 100 * (n - 1))`, clamped to the
+/// last sample. Empty gives `0.0` so callers without a sample fail soft.
+/// Caller: `measure`, `summarize_live` plus the delegated report sites.
+/// Differs deliberately from [`frame_rank`] (ceil rank `ceil(p * n) - 1` so
+/// Rust matches the `tools/proof.mjs` JS gate) and from
+/// `fight_cost::percentile_sorted` (integer micros, `len * pct / 100`, `None`
+/// on empty or `pct > 100` because that gate needs integer math only).
+pub fn nearest_rank_sorted(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
     let end = sorted.len() - 1;
     let index = ((p / 100.0) * end as f64).round() as usize;
     sorted[index.min(end)]
@@ -344,10 +354,10 @@ pub fn measure(
     present_ms.sort_by(|a, b| a.total_cmp(b));
     Ok(LatencyReport {
         events: events.len() as u32,
-        sim_p50_ms: percentile(&sim_ms, 50.0),
-        sim_p95_ms: percentile(&sim_ms, 95.0),
-        present_p50_ms: percentile(&present_ms, 50.0),
-        present_p95_ms: percentile(&present_ms, 95.0),
+        sim_p50_ms: nearest_rank_sorted(&sim_ms, 50.0),
+        sim_p95_ms: nearest_rank_sorted(&sim_ms, 95.0),
+        present_p50_ms: nearest_rank_sorted(&present_ms, 50.0),
+        present_p95_ms: nearest_rank_sorted(&present_ms, 95.0),
     })
 }
 
@@ -505,10 +515,10 @@ pub fn summarize_live(sim_ms: &[f64], present_ms: &[f64]) -> Result<LatencyRepor
     present.sort_by(|a, b| a.total_cmp(b));
     Ok(LatencyReport {
         events: event_count(sim.len())?,
-        sim_p50_ms: percentile(&sim, 50.0),
-        sim_p95_ms: percentile(&sim, 95.0),
-        present_p50_ms: percentile(&present, 50.0),
-        present_p95_ms: percentile(&present, 95.0),
+        sim_p50_ms: nearest_rank_sorted(&sim, 50.0),
+        sim_p95_ms: nearest_rank_sorted(&sim, 95.0),
+        present_p50_ms: nearest_rank_sorted(&present, 50.0),
+        present_p95_ms: nearest_rank_sorted(&present, 95.0),
     })
 }
 

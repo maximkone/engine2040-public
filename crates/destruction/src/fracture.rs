@@ -181,21 +181,25 @@ impl Fracture {
     }
 }
 
-/// Seeded site list: site 0 is the hit, then `NEAR_EIGHTHS / 8` of the
-/// rest within `radius_m` of it (denser near the hit), the remainder
-/// spread over the shell box. Every site stays inside the box.
-fn scatter_sites(
+/// Seeded site list written into `out`: site 0 is the hit, then
+/// `NEAR_EIGHTHS / 8` of the rest within `radius_m` of it (denser near the
+/// hit), the remainder spread over the shell box. Every site stays inside
+/// the box. Clearing and refilling a caller buffer keeps the draws, so the
+/// bytes match [`scatter_sites`].
+fn scatter_sites_into(
     min: &[f32; 3],
     max: &[f32; 3],
     hit: [f32; 3],
     spec: &FractureSpec,
     stream: u64,
-) -> Vec<[f32; 3]> {
+    out: &mut Vec<[f32; 3]>,
+) {
+    out.clear();
     let mut rng = Rng::new(spec.seed).fork_named("fracture").fork(stream);
     let count = usize::try_from(spec.cells).unwrap_or(usize::MAX);
     let near = (count - 1) * usize::try_from(NEAR_EIGHTHS).unwrap_or(0) / 8;
-    let mut sites = Vec::with_capacity(count);
-    sites.push(hit);
+    out.reserve(count);
+    out.push(hit);
     for k in 1..count {
         let mut p = [0.0f32; 3];
         for axis in 0..3 {
@@ -209,9 +213,8 @@ fn scatter_sites(
                 min[axis] + (unit * 0.5 + 0.5) * (max[axis] - min[axis])
             };
         }
-        sites.push(p);
+        out.push(p);
     }
-    sites
 }
 
 /// Draw value as an exact `f32` (spans are far below `u16::MAX`).
@@ -230,14 +233,30 @@ pub struct ClipCounts {
     pub skipped: usize,
 }
 
-/// Working state of one fracture call, owned by the caller of the cell loop
-/// and reused across its cells: the neighbor order, the clip scratch and the
-/// counts. Every call builds its own, so no fracture reads another's state.
-#[derive(Default)]
-struct CellWork {
+/// Caller-owned scratch for the Voronoi cell loop: the site list, the
+/// row-major site-pair table, the neighbor order and the clip buffers.
+///
+/// A caller that fractures often (see [`FractureCache::bake`]) holds one
+/// across events; the warmed buffers are reused, so only the returned chunks
+/// allocate. A caller that fractures once passes a fresh scratch. Clip counts
+/// stay per call (see [`fracture_counted_with_scratch`]), so a scratch shared
+/// across threads needs one scratch per thread.
+pub struct FractureScratch {
+    sites: Vec<[f32; 3]>,
+    pair_d2: Vec<f32>,
     order: Vec<usize>,
     clip: ClipScratch,
-    counts: ClipCounts,
+}
+
+impl Default for FractureScratch {
+    fn default() -> Self {
+        Self {
+            sites: Vec::new(),
+            pair_d2: Vec::new(),
+            order: Vec::new(),
+            clip: ClipScratch::default(),
+        }
+    }
 }
 
 /// Absolute slack of the Voronoi early exit; meters.
@@ -262,13 +281,15 @@ fn exit_dist2(site: &[f32; 3], cell: &PropMesh, slack: f32) -> f32 {
     reach * reach
 }
 
-/// Squared distances between all site pairs, row-major `sites * sites`.
-fn pair_dist2(sites: &[[f32; 3]]) -> Vec<f32> {
-    let mut table = Vec::with_capacity(sites.len() * sites.len());
+/// Squared distances between all site pairs written into `out`, row-major
+/// `sites * sites`. Refilling a caller buffer keeps the table, so the bytes
+/// match [`pair_dist2`].
+fn pair_dist2_into(sites: &[[f32; 3]], out: &mut Vec<f32>) {
+    out.clear();
+    out.reserve(sites.len() * sites.len());
     for a in sites {
-        table.extend(sites.iter().map(|b| dist2(a, b)));
+        out.extend(sites.iter().map(|b| dist2(a, b)));
     }
-    table
 }
 
 /// Shared inputs of one fracture event's cell loop.
@@ -282,14 +303,20 @@ struct CellLoop<'a> {
 
 impl CellLoop<'_> {
     /// Cell of site `i`: the shell clipped by every other site's bisector,
-    /// nearest site first (ties by index). `work` is reused across cells and
-    /// collects the counts. Neighbors run nearest first and the cell only
-    /// shrinks, so the loop stops at the first neighbor past the cell's
-    /// reach; later clips are misses and the bytes match a full clip.
-    fn clip_cell(&self, i: usize, work: &mut CellWork) -> PropMesh {
+    /// nearest site first (ties by index). `order` and `clip` are caller
+    /// buffers reused across cells and `counts` collects this call's work.
+    /// Neighbors run nearest first and the cell only shrinks, so the loop
+    /// stops at the first neighbor past the cell's reach; later clips are
+    /// misses and the bytes match a full clip.
+    fn clip_cell(
+        &self,
+        i: usize,
+        order: &mut Vec<usize>,
+        clip: &mut ClipScratch,
+        counts: &mut ClipCounts,
+    ) -> PropMesh {
         let (sites, row) = (self.sites, i * self.sites.len());
         let site = &sites[i];
-        let order = &mut work.order;
         order.clear();
         order.extend((0..sites.len()).filter(|j| *j != i));
         order.sort_by(|a, b| {
@@ -301,10 +328,10 @@ impl CellLoop<'_> {
         let mut cutoff2 = exit_dist2(site, &cell, self.slack);
         for (rank, &j) in order.iter().enumerate() {
             if self.pair_d2[row + j] > cutoff2 {
-                work.counts.skipped += order.len() - rank;
+                counts.skipped += order.len() - rank;
                 break;
             }
-            work.counts.clips += 1;
+            counts.clips += 1;
             let Some(plane) = plane_between(site, &sites[j]) else {
                 // Coincident sites share one cell: the lower index keeps it.
                 if j < i {
@@ -313,7 +340,7 @@ impl CellLoop<'_> {
                 }
                 continue;
             };
-            let changed = clip_back_reused(&mut cell, &plane, &mut work.clip);
+            let changed = clip_back_reused(&mut cell, &plane, clip);
             if cell.indices.is_empty() {
                 break;
             }
@@ -325,34 +352,36 @@ impl CellLoop<'_> {
     }
 }
 
-/// Voronoi cells of `sites` over the shell. Cell `i` is the shell clipped
-/// by the half-space of every other site, nearest site first (ties by
-/// index); an empty cell is dropped. Returns kept chunks, their sites and
-/// the kept index of the cell closest to `hit`, plus the counts of this call.
-fn clip_cells(
+/// Voronoi cells of `sites` over the shell with caller buffers: `pair_d2`
+/// is the row-major site table, `order` and `clip` are reused across cells.
+/// Cell `i` is the shell clipped by the half-space of every other site,
+/// nearest site first (ties by index); an empty cell is dropped. Returns kept
+/// chunks, their sites and the kept index of the cell closest to `hit`, plus
+/// the counts of this call.
+fn clip_cells_with_pair(
     mesh: &PropMesh,
     sites: &[[f32; 3]],
     hit: &[f32; 3],
+    pair_d2: &[f32],
+    order: &mut Vec<usize>,
+    clip: &mut ClipScratch,
 ) -> Result<(Fracture, ClipCounts), FractureError> {
     let (min, max) = mesh_aabb(mesh);
     let reach = min.iter().chain(&max).fold(0.0f32, |m, c| m.max(c.abs()));
-    let pair_d2 = pair_dist2(sites);
     let cells = CellLoop {
         mesh,
         sites,
-        pair_d2: &pair_d2,
+        pair_d2,
         slack: EXIT_SLACK_M + reach * EXIT_SLACK_PER_M,
     };
     let mut chunks = Vec::with_capacity(sites.len());
     let mut kept_sites = Vec::with_capacity(sites.len());
     let mut hit_chunk = 0u32;
     let mut best = f32::INFINITY;
-    let mut work = CellWork {
-        order: Vec::with_capacity(sites.len()),
-        ..CellWork::default()
-    };
+    let mut counts = ClipCounts::default();
+    order.reserve(sites.len());
     for (i, site) in sites.iter().enumerate() {
-        let cell = cells.clip_cell(i, &mut work);
+        let cell = cells.clip_cell(i, order, clip, &mut counts);
         if cell.indices.is_empty() {
             continue;
         }
@@ -378,7 +407,7 @@ fn clip_cells(
         sites: kept_sites,
         hit_chunk,
     };
-    Ok((fracture, work.counts))
+    Ok((fracture, counts))
 }
 
 /// Box of the shell, `(min, max)`.
@@ -395,7 +424,20 @@ pub fn fracture_at(
     hit: [f32; 3],
     spec: &FractureSpec,
 ) -> Result<Fracture, FractureError> {
-    fracture_counted(mesh, hit, spec).map(|(fracture, _)| fracture)
+    let mut scratch = FractureScratch::default();
+    fracture_at_with_scratch(mesh, hit, spec, &mut scratch)
+}
+
+/// Cold fracture that reuses the caller's [`FractureScratch`]: the same bytes
+/// as [`fracture_at`], so digests match. Caller: [`FractureCache::bake`] holds
+/// one scratch across its grid entries; [`fracture_at`] covers single cuts.
+pub fn fracture_at_with_scratch(
+    mesh: &PropMesh,
+    hit: [f32; 3],
+    spec: &FractureSpec,
+    scratch: &mut FractureScratch,
+) -> Result<Fracture, FractureError> {
+    fracture_counted_with_scratch(mesh, hit, spec, scratch).map(|(fracture, _)| fracture)
 }
 
 /// [`fracture_at`] plus the [`ClipCounts`] of this call: the same bytes, and
@@ -406,7 +448,22 @@ pub fn fracture_counted(
     hit: [f32; 3],
     spec: &FractureSpec,
 ) -> Result<(Fracture, ClipCounts), FractureError> {
-    fracture_stream(mesh, hit, spec, 0)
+    let mut scratch = FractureScratch::default();
+    fracture_counted_with_scratch(mesh, hit, spec, &mut scratch)
+}
+
+/// [`fracture_counted`] that reuses the caller's [`FractureScratch`]: the same
+/// bytes and counts, so digests match. The scratch keeps no result state, so
+/// a refused call leaves it ready for the next event. Caller: [`fracture_at`]
+/// and [`fracture_counted`] cover single cuts; [`FractureCache::bake`] holds
+/// one scratch across its grid entries.
+pub fn fracture_counted_with_scratch(
+    mesh: &PropMesh,
+    hit: [f32; 3],
+    spec: &FractureSpec,
+    scratch: &mut FractureScratch,
+) -> Result<(Fracture, ClipCounts), FractureError> {
+    fracture_stream_with_scratch(mesh, hit, spec, 0, scratch)
 }
 
 fn fracture_stream(
@@ -415,13 +472,32 @@ fn fracture_stream(
     spec: &FractureSpec,
     stream: u64,
 ) -> Result<(Fracture, ClipCounts), FractureError> {
+    let mut scratch = FractureScratch::default();
+    fracture_stream_with_scratch(mesh, hit, spec, stream, &mut scratch)
+}
+
+fn fracture_stream_with_scratch(
+    mesh: &PropMesh,
+    hit: [f32; 3],
+    spec: &FractureSpec,
+    stream: u64,
+    scratch: &mut FractureScratch,
+) -> Result<(Fracture, ClipCounts), FractureError> {
     spec.validate()?;
     let (min, max) = shell_box(mesh)?;
     if hit.iter().any(|f| !f.is_finite()) || (0..3).any(|a| hit[a] < min[a] || hit[a] > max[a]) {
         return Err(FractureError::BadHit);
     }
-    let sites = scatter_sites(&min, &max, hit, spec, stream);
-    clip_cells(mesh, &sites, &hit)
+    scatter_sites_into(&min, &max, hit, spec, stream, &mut scratch.sites);
+    pair_dist2_into(&scratch.sites, &mut scratch.pair_d2);
+    clip_cells_with_pair(
+        mesh,
+        &scratch.sites,
+        &hit,
+        &scratch.pair_d2,
+        &mut scratch.order,
+        &mut scratch.clip,
+    )
 }
 
 /// Cache key: cell of the quantized hit grid, each axis `0..grid`.
@@ -450,7 +526,9 @@ pub struct FractureCache {
 
 impl FractureCache {
     /// Cooks the cache: `grid^3` cold fractures in z, y, x index order.
-    /// Offline; the cost is `grid^3` cold cuts.
+    /// Offline; the cost is `grid^3` cold cuts. One [`FractureScratch`] is
+    /// held across the entries, so only the stored chunks allocate per entry;
+    /// the bytes match one cold cut per key.
     pub fn bake(mesh: &PropMesh, spec: &FractureSpec, grid: u32) -> Result<Self, FractureError> {
         spec.validate()?;
         if grid == 0 || grid > MAX_CACHE_GRID {
@@ -464,11 +542,20 @@ impl FractureCache {
             max,
             entries: Vec::new(),
         };
+        let baked_spec = cache.spec;
+        let mut scratch = FractureScratch::default();
         for iz in 0..grid {
             for iy in 0..grid {
                 for ix in 0..grid {
                     let key = CacheKey { ix, iy, iz };
-                    let fracture = cache.cold(mesh, key)?;
+                    let stream = u64::try_from(cache.slot(key)).unwrap_or(u64::MAX);
+                    let (fracture, _) = fracture_stream_with_scratch(
+                        mesh,
+                        cache.center_of(key),
+                        &baked_spec,
+                        stream,
+                        &mut scratch,
+                    )?;
                     cache.entries.push(fracture);
                 }
             }
@@ -648,6 +735,7 @@ pub fn chunk_boxes(fracture: &Fracture) -> Vec<Chunk3> {
 mod tests {
     use super::*;
     use crate::bake::BREAKING_THRESHOLD;
+    use engine_core::alloc_probe::measure;
 
     /// Siege wall shell: a closed box `[-2, 2] x [0, 3] x [-0.2, 0.2]`, 12
     /// triangles, meters.
@@ -766,9 +854,22 @@ mod tests {
                         min[2] + (max[2] - min[2]) * frac,
                     ];
                     let spec = spec(cells, seed);
-                    let sites = scatter_sites(&min, &max, hit, &spec, 0);
+                    let mut sites = Vec::new();
+                    scatter_sites_into(&min, &max, hit, &spec, 0, &mut sites);
                     let reference = full_clip_cells(&mesh, &sites);
-                    let (got, _) = clip_cells(&mesh, &sites, &hit).expect("fractures");
+                    let mut pair = Vec::new();
+                    pair_dist2_into(&sites, &mut pair);
+                    let mut order = Vec::new();
+                    let mut scratch = ClipScratch::default();
+                    let (got, _) = clip_cells_with_pair(
+                        &mesh,
+                        &sites,
+                        &hit,
+                        &pair,
+                        &mut order,
+                        &mut scratch,
+                    )
+                    .expect("fractures");
                     let meshes: Vec<&PropMesh> = got.chunks.iter().map(|c| &c.mesh).collect();
                     assert_eq!(
                         meshes,
@@ -1005,6 +1106,56 @@ mod tests {
         }
         assert_eq!(a.cut([9.0, 0.0, 0.0]).unwrap_err(), FractureError::BadHit);
         println!("fracture cache grid=2 digest={:016x}", a.digest());
+    }
+
+    #[test]
+    fn scratch_path_matches_the_cold_bytes_and_refusals() {
+        let mesh = wall();
+        let mut scratch = FractureScratch::default();
+        for job in JOBS {
+            let (fracture, counts) =
+                fracture_counted_with_scratch(&mesh, job.0, &spec(job.1, job.2), &mut scratch)
+                    .expect("fractures");
+            let cold = fracture_counted(&mesh, job.0, &spec(job.1, job.2)).expect("fractures");
+            assert_eq!(fracture.bytes(), cold.0.bytes(), "job {job:?}");
+            assert_eq!(fracture.digest(), cold.0.digest(), "job {job:?}");
+            assert_eq!(counts, cold.1, "job {job:?}");
+        }
+        // A refused call leaves the scratch ready: the next event still cuts.
+        assert_eq!(
+            fracture_counted_with_scratch(&mesh, [0.0, 1.5, 0.2], &spec(1, 1), &mut scratch)
+                .unwrap_err(),
+            FractureError::BadCells
+        );
+        assert_eq!(
+            fracture_counted_with_scratch(&mesh, [9.0, 1.0, 0.0], &spec(8, 1), &mut scratch)
+                .unwrap_err(),
+            FractureError::BadHit
+        );
+        let after = fracture_at_with_scratch(&mesh, [0.3, 1.4, 0.2], &spec(24, 7), &mut scratch)
+            .expect("fractures after refusals");
+        let cold = fracture_at(&mesh, [0.3, 1.4, 0.2], &spec(24, 7)).expect("cold cut");
+        assert_eq!(after.bytes(), cold.bytes());
+        assert_eq!(after.digest(), cold.digest());
+    }
+
+    #[test]
+    fn warmed_scratch_allocates_less_than_a_cold_event() {
+        let mesh = wall();
+        let hit = [0.0, 1.5, 0.0];
+        let s = spec(64, 11);
+        let mut scratch = FractureScratch::default();
+        fracture_counted_with_scratch(&mesh, hit, &s, &mut scratch).expect("warmup");
+        let (_, warmed) = measure(|| {
+            fracture_counted_with_scratch(&mesh, hit, &s, &mut scratch).expect("fractures")
+        });
+        let (_, cold) = measure(|| fracture_counted(&mesh, hit, &s).expect("fractures"));
+        assert!(
+            warmed.calls < cold.calls,
+            "warmed {} vs cold {} alloc calls",
+            warmed.calls,
+            cold.calls
+        );
     }
 
     #[test]

@@ -1582,4 +1582,78 @@ mod tests {
             "gate p95 {p95}ns exceeds {GATE_P95_NANOS}ns; the gate must stay a dozen integer compares"
         );
     }
+
+    #[test]
+    fn unscoped_call_refuses_typed_with_recovery() {
+        // HS21 slice 1 pin: one fixture ties the bare-name gate to the
+        // scope gate. Unknown names plus one out-of-scope batch refuse
+        // typed with recovery; every advertised tool keeps its card with
+        // zero legitimate false refusals. Headless, twice identical.
+        let policy = ScopePolicy::default_file();
+        let mut first: Vec<(&'static str, &'static str, bool)> = Vec::new();
+        for _ in 0..2 {
+            let mut codes: Vec<(&'static str, &'static str, bool)> = Vec::new();
+            for tool in ["shell.exec", "", "exec"] {
+                let verdict = check_tool_call(tool);
+                assert!(!verdict.allowed, "unscoped `{tool}` must refuse");
+                assert!(
+                    verdict.is_capability_refusal(),
+                    "unscoped `{tool}` must map through the capability family"
+                );
+                assert!(
+                    message_carries_recovery(&verdict.message),
+                    "unscoped `{tool}` must carry a recovery: {}",
+                    verdict.message
+                );
+                let error = verdict
+                    .as_tool_error()
+                    .expect("refusal maps to a tool error");
+                assert_eq!(error.code, verdict.code);
+                assert_eq!(error.code, "unknown_tool");
+                let denied = refuse_tool_call_with_policy(tool, &policy)
+                    .expect("unscoped still denies under the shipped policy");
+                assert_eq!(denied.code, "unknown_tool");
+                assert!(message_carries_recovery(&denied.message));
+                codes.push((tool, verdict.code, verdict.allowed));
+            }
+            let doc = Document::new();
+            let caps = ExplainCaps::default_caps();
+            let narrow = Suite::prefixed(7, 8);
+            let far = Suite::batch_with(vec![Suite::insert_op(ObjectId::new())], doc.revision, 61);
+            let scoped_out = check_write(&doc, &far, &narrow, &caps, 1);
+            assert!(!scoped_out.allowed, "out-of-scope batch must refuse");
+            assert_eq!(scoped_out.code, "out_of_scope");
+            assert!(scoped_out.is_capability_refusal());
+            assert!(message_carries_recovery(&scoped_out.message));
+            let scoped_error = scoped_out
+                .as_tool_error()
+                .expect("scope refusal maps to a tool error");
+            assert_eq!(scoped_error.code, "out_of_scope");
+            let admitted = check_write(&doc, &far, &Capability::unrestricted(7), &caps, 1);
+            assert!(admitted.allowed, "full scope admits: {}", admitted.message);
+            assert_eq!(admitted.code, "ok");
+            assert!(refuse_tool_call_with_policy("scene.read", &policy).is_none());
+            assert!(refuse_tool_call_with_policy("tx.preview", &policy).is_none());
+            assert!(refuse_tool_call_with_policy("tx.apply", &policy).is_none());
+            assert!(refuse_tool_call_with_policy("scene.place", &policy).is_none());
+            assert!(refuse_tool_call_with_policy("tx.undo", &policy).is_none());
+            let mut false_refusals = 0_u32;
+            for tool in super::super::mcp::tool_names() {
+                assert_ne!(
+                    card_for_tool(tool),
+                    CapabilityCard::Deny,
+                    "advertised tool `{tool}` must keep its card"
+                );
+                if refuse_tool_call_with_policy(tool, &policy).is_some() {
+                    false_refusals = false_refusals.saturating_add(1);
+                }
+            }
+            assert_eq!(false_refusals, 0, "legit calls must never refuse");
+            if first.is_empty() {
+                first = codes;
+            } else {
+                assert_eq!(first, codes, "replay without a model drifts");
+            }
+        }
+    }
 }

@@ -29,8 +29,9 @@ pub fn fade_weight(fade_left: u32, total: u32) -> f32 {
     1.0 - ticks_f32(fade_left) / ticks_f32(total)
 }
 
-/// Exact `u32` to `f32` for fade counts: every fade here runs hundreds of
-/// ticks at most, far below the exactly representable 2^24 range.
+/// `u32` to `f32` for fade counts via saturating `u16`: values past
+/// `u16::MAX` clamp there. Every `u16` is exactly representable in `f32`
+/// (all below 2^24); fades here run single-digit ticks, far below either cap.
 fn ticks_f32(ticks: u32) -> f32 {
     f32::from(u16::try_from(ticks).unwrap_or(u16::MAX))
 }

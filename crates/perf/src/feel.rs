@@ -1,9 +1,10 @@
 //! Feel quantification: three-domain measurements against the shared
 //! latency bar plus the keypoint rubric.
-//! Owner: engine-perf. Consumer: the perf report binary reads
-//! [`DomainVerdict::summary`]; the keypoint and tournament harnesses feed
-//! the counts this module ranks (pass/total and win permille arrive as
-//! plain numbers, so this crate takes no new dependency edge).
+//! Status: test-only (no production caller reads [`DomainVerdict::summary`]
+//! yet; exercised by the unit tests in this file and the headline check in
+//! `crates/perf/tests/it/lib_wiring_vectors.rs`). The keypoint and
+//! tournament harnesses named here do not exist yet, so counts arrive as
+//! plain numbers in tests and this crate takes no new dependency edge.
 //! Units: milliseconds for the latency legs, permille for shares and rates.
 //! Determinism: pure over inputs; seeded fixtures replay exactly; no wall
 //! clock, no GPU, no network. Errors: typed [`FeelError`].

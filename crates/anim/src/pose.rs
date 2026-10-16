@@ -117,7 +117,9 @@ fn lerp3(a: [f32; 3], b: [f32; 3], w: f32) -> [f32; 3] {
 
 /// Normalized lerp between unit quats (slerp-lite): shortest path, NaN-safe.
 /// Degenerate input (non-finite dot or zero-length lerp) falls back to the
-/// safe bind pose (identity) or `a` for exact antipodes.
+/// safe bind pose (identity) or `a` for exact antipodes. This differs from
+/// the graph eval `nlerp` on that antipodal case (which returns identity),
+/// so the two paths are not bit-for-bit identical.
 fn nlerp(a: [f32; 4], b: [f32; 4], w: f32) -> [f32; 4] {
     const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
     let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];

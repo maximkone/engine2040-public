@@ -236,3 +236,49 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_num, Args};
+
+    #[test]
+    fn defaults_produce_the_committed_fixture() {
+        // The module docs promise defaults regenerate the committed net: a
+        // changed default silently reforges every artifact, so pin them.
+        let args = Args::default();
+        assert_eq!(args.episodes, 50);
+        assert_eq!(args.ticks, 3_600);
+        assert_eq!(args.seed, 0xD15_7111);
+        assert_eq!(args.hidden, 24);
+        assert_eq!(args.epochs, 40);
+        assert_eq!(args.gate_seed, 0x6A7E_0000);
+        assert_eq!(args.out, "fixtures/nets/depth_student.e2nn");
+        assert!(!args.check);
+        assert!(!args.repeat);
+    }
+
+    #[test]
+    fn numbers_parse_decimal_and_hex() {
+        // Callers pass seeds like 0xD157111 on the command line; both
+        // spellings must land on the value a plain decimal names.
+        assert_eq!(parse_num::<u64>("--seed", Some("16".to_string())), Ok(16));
+        assert_eq!(parse_num::<u64>("--seed", Some("0x10".to_string())), Ok(16));
+        assert_eq!(
+            parse_num::<usize>("--episodes", Some("50".to_string())),
+            Ok(50)
+        );
+    }
+
+    #[test]
+    fn bad_numbers_blame_the_flag() {
+        // A typoed value must name the flag so the shell caller knows which
+        // argument to fix; a missing value must say so outright.
+        let err = parse_num::<u64>("--seed", Some("abc".to_string())).unwrap_err();
+        assert!(err.contains("--seed"), "names the flag: {err}");
+        let err = parse_num::<u64>("--seed", None).unwrap_err();
+        assert!(
+            err.contains("--seed") && err.contains("needs a value"),
+            "missing value: {err}"
+        );
+    }
+}

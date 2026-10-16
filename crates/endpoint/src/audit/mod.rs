@@ -26,9 +26,8 @@ pub const MAX_TOOL_NAME_LEN: usize = 64;
 /// Odd 64-bit mixer step constant: 2^64 over phi. An odd multiplier keeps
 /// each mixing step bijective, so distinct prefixes stay distinct.
 ///
-/// The engine's shared hash owner lives in the core crate; this crate cannot
-/// add that dependency edge inside a frozen manifest, so the log mixes
-/// locally with this documented constant until that edge lands. The constant
+/// The crate already depends on the core hash owner; the log still mixes
+/// locally with this documented constant for domain separation. The constant
 /// below is deliberately not one of the core FNV or SplitMix constants.
 const MIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 

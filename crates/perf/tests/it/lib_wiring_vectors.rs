@@ -13,7 +13,7 @@
 //! gating a module fails here first.
 
 use engine_perf::{
-    alloc, allocator, arena, baselines, budget, core_bench, fight_cost, latency, pgo_harness,
+    alloc, allocator, arena, baselines, budget, core_bench, feel, fight_cost, latency, pgo_harness,
     profiler, server_budget, smoke, soak, vram, workloads,
 };
 use engine_perf::{baselines::Baseline, workloads::WorkloadReport};
@@ -55,6 +55,10 @@ fn root_reaches_every_module_with_headline_numbers() {
     assert_eq!(fight_cost::FIGHT_P50_BUDGET_US, 33_300);
     assert_eq!(fight_cost::FIGHT_P99_BUDGET_US, 50_000);
     assert_eq!(fight_cost::FIGHT_FIGHTERS, 8);
+    assert_eq!(feel::KILL_RISE_MS, 10.0);
+    assert_eq!(feel::RUBRIC_PASS_PERMILLE, 900);
+    assert_eq!(feel::WIN_LO_PERMILLE, 400);
+    assert_eq!(feel::WIN_HI_PERMILLE, 600);
     assert_eq!(latency::MAX_STAGED_EVENTS, 4_096);
     assert_eq!(vram::GIB, 1_024 * 1_024 * 1_024);
     assert_eq!(alloc::HEAP_PEAK_CSV_HEADER, "workload,peak_bytes");

@@ -505,6 +505,9 @@ pub struct TickQuantiles {
 impl TickQuantiles {
     /// Summarize per-tick ms: refuses empty input and non-finite samples,
     /// then sorts and reads nearest-rank quantiles (deterministic per input).
+    /// Ranks delegate to [`crate::latency::nearest_rank_sorted`], the single
+    /// float owner (ceil-ranked JS gate and integer fight-cost ranks differ
+    /// deliberately, see there).
     pub fn of(what: &'static str, samples: &[f64]) -> Result<Self, ServerBudgetError> {
         if samples.is_empty() {
             return Err(ServerBudgetError::EmptySamples { what });
@@ -514,11 +517,7 @@ impl TickQuantiles {
         }
         let mut sorted = samples.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).expect("samples are finite"));
-        let at = |p: f64| {
-            let end = sorted.len() - 1;
-            let index = ((p / 100.0) * end as f64).round() as usize;
-            sorted[index.min(end)]
-        };
+        let at = |p: f64| crate::latency::nearest_rank_sorted(&sorted, p);
         Ok(Self {
             ticks: samples.len() as u32,
             p50_ms: at(50.0),

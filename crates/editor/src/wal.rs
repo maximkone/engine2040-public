@@ -1,8 +1,9 @@
 //! Crash-safe journal: a write-ahead log over the command service.
 //!
-//! Consumer: the editor shell save flow calls [`wal_apply`], [`wal_undo`],
-//! [`wal_redo`] and the group wrappers so every acknowledged edit is already
-//! in `journal.wal`; [`Wal::open`] replays to the last good state and
+//! Status: test-only with no production Shell caller yet; the live gizmo
+//! path uses [`begin_group`]/[`end_group`]. [`wal_apply`], [`wal_undo`],
+//! [`wal_redo`] and the group wrappers keep every acknowledged edit in
+//! `journal.wal`; [`Wal::open`] replays to the last good state and
 //! [`Wal::checkpoint`] seals a snapshot plus the full undo/redo stacks.
 //! Data owner: [`Wal`] owns the two files in its directory only.
 //! Units: file offsets and lengths are bytes; stamps are fixed ticks plus

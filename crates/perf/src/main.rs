@@ -47,21 +47,13 @@ fn csv_row(
     format!("{name},2040,600,{agents},{sprites},{mean:.4},{p50:.4},{p99:.4},{max:.4},{rate:.1},{hash:016x}")
 }
 
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let i = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
-    sorted[i.min(sorted.len() - 1)]
-}
-
 fn stats(mut dts: Vec<f64>) -> (f64, f64, f64, f64) {
     dts.sort_by(f64::total_cmp);
     let mean = dts.iter().sum::<f64>() / dts.len().max(1) as f64;
     (
         mean,
-        percentile(&dts, 50.0),
-        percentile(&dts, 99.0),
+        engine_perf::latency::nearest_rank_sorted(&dts, 50.0),
+        engine_perf::latency::nearest_rank_sorted(&dts, 99.0),
         dts.last().copied().unwrap_or(0.0),
     )
 }

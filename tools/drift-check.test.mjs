@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import {
   DRIFT_EXCUSE_SOURCE,
   DRIFT_NEG_RE,
   DRIFT_ROW_RE,
+  FAIL_TAIL_CHARS,
+  FAIL_TAIL_LINES,
+  childFailTail,
   excuseLines,
   focusFamilies,
   isExcuseLine,
@@ -273,4 +276,70 @@ test("drift reads the board with the archive: moved done rows count as ticked", 
   const src = readFileSync(fileURLToPath(new URL("./drift-check.mjs", import.meta.url)), "utf8");
   assert.ok(src.includes("archivedDoneRows"), "drift imports the shared archive reader");
   assert.ok(/parseBoard\(boardText,\s*archivedDoneRows\(ROOT\)\)/.test(src), "the stuck check passes the archive to parseBoard");
+});
+
+test("ratchet tail: a FAIL names the crate and metric (keeps ~20 lines, not 2)", () => {
+  assert.equal(FAIL_TAIL_LINES, 20);
+  assert.equal(FAIL_TAIL_CHARS, 2000);
+  const fake = [
+    "Rust quality scorecard: production code per crate",
+    "[FAIL] ratchet engine_anim: dup_fns 2 -> 5 (dup)",
+    "[FAIL] ratchet engine_core: clones 0 -> 1 (clone)",
+    "[FAIL] ratchet engine_render: alloc 10 -> 12 (alloc)",
+    "RESULT FAIL: 3 ratchet regression(s)",
+  ].join("\n");
+  const tail = childFailTail(fake);
+  assert.ok(tail.includes("engine_anim: dup_fns"), "first FAIL kept: " + tail.slice(0, 120));
+  assert.ok(tail.includes("engine_core: clones"), "second FAIL kept");
+  assert.ok(tail.includes("engine_render: alloc"), "third FAIL kept");
+  assert.ok(tail.includes("3 ratchet regression(s)"), "RESULT kept");
+  // The old 2-line tail dropped the first two FAILs: prove the bug is gone.
+  const oldTail = fake.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 200);
+  assert.ok(!oldTail.includes("engine_anim"), "old 2-line tail lost the crate");
+  assert.ok(tail.includes("engine_anim") && oldTail !== tail, "new tail keeps what the old tail dropped");
+});
+
+test("ratchet tail: blanks, null and long output are bounded", () => {
+  assert.equal(childFailTail(""), "");
+  assert.equal(childFailTail(null), "");
+  assert.equal(childFailTail(undefined), "");
+  const many = Array.from({ length: 40 }, (_, i) => `line ${i} [FAIL] ratchet crate${i}: metric ${i}`).join("\n");
+  const tail = childFailTail(many);
+  assert.equal(tail.split(" | ").length, 20, "keeps the last 20 lines");
+  assert.ok(tail.includes("crate39"), "newest kept");
+  assert.ok(!tail.includes("crate0:"), "oldest dropped");
+  assert.ok(tail.length <= FAIL_TAIL_CHARS, "bounded to 2000 chars");
+  assert.ok(!childFailTail("a\n\nb\n").includes(" |  | "), "blank lines skipped");
+});
+
+test("tools README lists every live script so the count cannot rot", async () => {
+  const dir = fileURLToPath(new URL(".", import.meta.url));
+  const live = readdirSync(dir).filter((n) => n.endsWith(".mjs") && !n.endsWith(".test.mjs")).sort();
+  const readme = readFileSync(fileURLToPath(new URL("./README.md", import.meta.url)), "utf8");
+  const listed = [...readme.matchAll(/^- `tools\/([^\s`]+)`/gm)].map((m) => m[1]);
+  const liveListed = listed.filter((n) => n.endsWith(".mjs") && !n.endsWith(".test.mjs"));
+  assert.equal(live.length, 94, "live tools/*.mjs count");
+  assert.equal(liveListed.length, live.length, `README lists ${liveListed.length}, tools has ${live.length}`);
+  assert.deepEqual([...liveListed].sort(), live, "no unlisted and no missing live script");
+  assert.ok(readme.includes(`${live.length} live scripts`), "header count matches the directory");
+  const tests = new Set(readdirSync(dir).filter((n) => n.endsWith(".test.mjs")));
+  for (const f of live) assert.ok(tests.has(f.replace(/\.mjs$/, ".test.mjs")), `${f} has a *.test.mjs mate`);
+  const orphans = [...tests].filter((t) => !live.includes(t.replace(/\.test\.mjs$/, ".mjs"))).sort();
+  const orphanListed = listed.filter((n) => n.endsWith(".test.mjs")).sort();
+  assert.deepEqual(orphanListed, orphans, "test-only mates listed exactly");
+});
+
+test("p95 has one owner: drr-queue re-exports pool-queue", async () => {
+  const pool = await import("./pool-queue.mjs");
+  const drr = await import("./drr-queue.mjs");
+  assert.equal(typeof pool.p95, "function");
+  assert.equal(typeof drr.p95, "function");
+  assert.equal(drr.p95, pool.p95, "same function, no byte copy");
+  assert.equal(drr.p95([]), 0);
+  const vals = Array.from({ length: 100 }, (_, i) => i + 1);
+  assert.equal(drr.p95(vals), 95);
+  assert.equal(pool.p95(vals), 95);
+  const src = readFileSync(fileURLToPath(new URL("./drr-queue.mjs", import.meta.url)), "utf8");
+  assert.ok(!src.includes("export function p95"), "duplicate body removed");
+  assert.ok(src.includes('from "./pool-queue.mjs"'), "single owner wired");
 });

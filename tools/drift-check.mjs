@@ -150,6 +150,7 @@ const qualityFingerprint = () => {
   statOne(join(ROOT, "tools", "rust-quality.mjs"));
   statOne(join(ROOT, "tools", "rust-quality.baseline.json"));
   statOne(join(ROOT, "tools", "sim-clippy.toml"));
+  statOne(join(ROOT, "tools", "drift-check.mjs"));
   statOne(join(ROOT, "docs", "SPRINT.md"));
   try {
     for (const n of readdirSync(join(ROOT, "docs")).filter((n) => n.startsWith("SPRINT-") && n.endsWith(".md"))) statOne(join(ROOT, "docs", n));
@@ -195,6 +196,7 @@ const workspaceFingerprint = () => {
   s(join(ROOT, "tools", "presence.mjs"));
   s(join(ROOT, "tools", "sim-source-scan.mjs"));
   s(join(ROOT, "tools", "sim-clippy.toml"));
+  s(join(ROOT, "tools", "drift-check.mjs"));
   s(join(ROOT, "Cargo.toml"));
   s(join(ROOT, "Cargo.lock"));
   s(join(ROOT, "rust-toolchain.toml"));
@@ -325,6 +327,17 @@ export const rowTimeoutGuidance = (rowId, durationsMs, baseMs = STUCK_STATIC_WIN
   const tuned = tuneStuckTimeout(vs, base);
   return rowId + ": tune " + Math.round(base / 3_600_000) + "h -> " + Math.round(tuned / 3_600_000) + "h (n=" + vs.length + ", median " + Math.round(medianMs(vs) / 3_600_000) + "h)";
 };
+// Section 7 child-output tail: a ratchet FAIL prints one `[FAIL] ratchet
+// <crate>: <metric> ...` line per regression plus a RESULT line, so keeping
+// only the last 2 lines drops the crate/metric names. Keep ~20 lines so a
+// FAIL names every crate and metric (ratchet regressions stay under 20).
+export const FAIL_TAIL_LINES = 20;
+export const FAIL_TAIL_CHARS = 2000;
+export const childFailTail = (out, keep = FAIL_TAIL_LINES, maxChars = FAIL_TAIL_CHARS) => {
+  const k = Number.isFinite(keep) && keep > 0 ? Math.trunc(keep) : FAIL_TAIL_LINES;
+  const m = Number.isFinite(maxChars) && maxChars > 0 ? Math.trunc(maxChars) : FAIL_TAIL_CHARS;
+  return String(out ?? "").split("\n").filter((l) => l.trim() !== "").slice(-k).join(" | ").slice(0, m);
+};
 // 1. The loop command and its required features.
 async function main() {
 const cmd = read(abs(CFG.command));
@@ -434,7 +447,7 @@ if (__driftArgs.has("--skip-health") || __driftArgs.has("--help") || __driftArgs
       continue;
     }
     const r = run(args[0], args.slice(1));
-    const tail = r.ok ? "" : r.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 200);
+    const tail = r.ok ? "" : childFailTail(r.out);
     writeQualityCache(r.ok, tail);
     if (r.ok) say("PASS", `${name}`);
     else say("FAIL", `${name} failed: ${tail}`);
@@ -448,7 +461,7 @@ if (__driftArgs.has("--skip-health") || __driftArgs.has("--help") || __driftArgs
       continue;
     }
     const r = run(args[0], args.slice(1));
-    const tail = r.ok ? "" : r.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 200);
+    const tail = r.ok ? "" : childFailTail(r.out);
     writeWorkspaceCache(r.ok, tail);
     if (r.ok) say("PASS", `${name}`);
     else say("FAIL", `${name} failed: ${tail}`);
@@ -456,7 +469,7 @@ if (__driftArgs.has("--skip-health") || __driftArgs.has("--help") || __driftArgs
   }
   const r = run(args[0], args.slice(1));
   if (r.ok) say("PASS", `${name}`);
-  else say("FAIL", `${name} failed: ${r.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 200)}`);
+  else say("FAIL", `${name} failed: ${childFailTail(r.out)}`);
 }
 
 // 8. Git: pushed, and nothing meta left uncommitted for a long time.

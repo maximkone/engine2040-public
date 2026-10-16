@@ -1,10 +1,13 @@
 //! PGO harness: before/after wall ms for the frame-slice path.
-//! Consumer: the `perf --pgo` binary flag plus the OPT frame-arenas row.
+//! Status: library-only, test-only in production (no binary flag implements
+//! `--pgo`; `crates/perf/src/main.rs` handles `--alloc-compare`,
+//! `--vram-plan`, `--heap-peak`, `--capture` and `--mixed-skip` only).
 //! Units: frames, words, hash, bytes, count, ms. Determinism: hash and
 //! alloc totals pin; wall ms is presentation-only beside them, never hashed.
 //! Errors: typed [`PgoError`]. Budget: the arena path allocates nothing
 //! steady-state; the heap path allocates per frame (negative control).
-//! Caller: `crates/perf/src/main.rs --pgo` prints the CSV row below.
+//! Caller: tests call `csv_row`/`compare_ms`/`run_report` directly; no
+//! production binary caller prints the CSV row below.
 
 use crate::alloc;
 use engine_core::arena::{ArenaError, SliceArena};

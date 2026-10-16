@@ -133,12 +133,10 @@ function lcg(seed) {
   };
 }
 
-export function p95(values) {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const rank = Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1);
-  return sorted[Math.max(0, rank)];
-}
+// Single owner for the 95th-percentile helper is tools/pool-queue.mjs;
+// drr-queue re-exports it so both lane-gate sims stay like-for-like.
+import { p95 } from "./pool-queue.mjs";
+export { p95 };
 
 // Lane-gate model under DRR: `before` is one serial gate (FIFO backlog, same
 // as pool-queue.mjs); `after` spreads the same arrivals across `workers`

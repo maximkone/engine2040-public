@@ -2,9 +2,9 @@
 //!
 //! The pre-run gate ([`check_before_run`]) fronts every tool call: manifest
 //! cap first, then the static hostile-text scan, so hostile payloads refuse
-//! before the command service stages anything. Next consumer: the dispatch
-//! seam (`door_dispatch`), which will call [`check_before_run`] with the
-//! tool name plus its payload text.
+//! before the command service stages anything. Consumer: the dispatch
+//! seam (`door_dispatch::dispatch_with_payload`), which calls
+//! [`check_before_run`] with the tool name plus its payload text.
 
 use crate::receipts::Effect;
 
