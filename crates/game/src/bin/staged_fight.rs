@@ -28,7 +28,10 @@ use engine_game::capture::fnv_hex;
 use engine_game::fighter_bind::{self, FighterBinding, VARIANTS};
 use engine_game::windowed::{run_staged_fight_frames, StagedFightFrame};
 use engine_game::{App, GameConfig, HUMAN_SLOT, MAX_TICKS};
-use engine_input::{fighter::ATTACK, Buttons, FighterId, FighterInput};
+use engine_input::{
+    fighter::{ATTACK, BLOCK},
+    Buttons, FighterId, FighterInput,
+};
 
 /// Session seed for the staged fight (matches the headless default).
 const SEED: u64 = 2040;
@@ -50,27 +53,35 @@ const RECEIPT_NAME: &str = "receipt.json";
 /// drew these frames, not the twin or GPU (honest evidence, CODELAW 10).
 const STAGED_RENDERER: &str = "staged-cpu";
 
-/// Scripted human input: circle-strafe with an attack every 5 ticks, so the
-/// session lands real cues (hits, blocks, knockdowns) instead of idling.
+/// Scripted human input: circle-strafe base with timed blocks plus a
+/// riposte-window attack, so the bout shows blocks and fires Parried cues
+/// instead of idling. The spawn spread parks the duel out of blade reach
+/// (the human starts by the east wall, the pack brawls mid-arena), so the
+/// script treks west to find the pack and holds fresh blocks 4 of every 5
+/// ticks: each re-press resets the parry age inside the 4-tick parry
+/// window. Cycle 50: regular attack at 0, bait blocks through the middle,
+/// then riposte attack at 35 inside the parry stagger. Pure.
 fn script(tick: u32, human: FighterId) -> FighterInput {
-    let phase = (tick / 15) % 4;
-    let (mx, mz) = match phase {
-        0 => (100, 0),
-        1 => (0, 100),
-        2 => (-100, 0),
-        _ => (0, -100),
+    let weave = match (tick / 10) % 4 {
+        1 => 60,
+        3 => -60,
+        _ => 0,
+    };
+    let cycle = tick % 50;
+    let buttons = if cycle == 0 || cycle == 35 {
+        Buttons(ATTACK)
+    } else if tick % 5 == 4 {
+        Buttons::NONE
+    } else {
+        Buttons(BLOCK)
     };
     FighterInput {
         tick,
         fighter: human,
-        mx,
-        mz,
+        mx: -60,
+        mz: weave,
         facing: 0,
-        buttons: if tick.is_multiple_of(5) {
-            Buttons(ATTACK)
-        } else {
-            Buttons::NONE
-        },
+        buttons,
     }
 }
 
@@ -80,6 +91,8 @@ struct FightStats {
     cues: usize,
     hits: usize,
     knockdowns: usize,
+    blocked: usize,
+    parried: usize,
 }
 
 fn fold_cues(stats: &mut FightStats, cues: &[FightCue]) {
@@ -88,10 +101,9 @@ fn fold_cues(stats: &mut FightStats, cues: &[FightCue]) {
         match cue {
             FightCue::Hit { .. } => stats.hits += 1,
             FightCue::Knockdown { .. } => stats.knockdowns += 1,
-            FightCue::Blocked { .. }
-            | FightCue::Parried { .. }
-            | FightCue::Dodged { .. }
-            | FightCue::StaminaOut { .. } => {}
+            FightCue::Blocked { .. } => stats.blocked += 1,
+            FightCue::Parried { .. } => stats.parried += 1,
+            FightCue::Dodged { .. } | FightCue::StaminaOut { .. } => {}
         }
     }
 }
@@ -204,8 +216,13 @@ fn receipt_json(bindings: &[FighterBinding], config: GameConfig, report: &FightR
         ));
     }
     out.push_str(&format!(
-        "],\"ticks_run\":{},\"cues\":{},\"hits\":{},\"knockdowns\":{}",
-        config.ticks, report.stats.cues, report.stats.hits, report.stats.knockdowns
+        "],\"ticks_run\":{},\"cues\":{},\"hits\":{},\"knockdowns\":{},\"blocked\":{},\"parried\":{}",
+        config.ticks,
+        report.stats.cues,
+        report.stats.hits,
+        report.stats.knockdowns,
+        report.stats.blocked,
+        report.stats.parried
     ));
     out.push_str(",\"final_hp\":[");
     for (index, hp) in report.hp.iter().enumerate() {
@@ -315,11 +332,14 @@ fn run(args: &Args) -> Result<i32, String> {
     std::fs::write(args.out_dir.join(RECEIPT_NAME), receipt.as_bytes())
         .map_err(|err| format!("receipt: {}", err.kind()))?;
     println!(
-        "staged_fight done: ticks={} cues={} hits={} knockdowns={} final_hash={final_hash:016x} captures={} manifest=\"{}\" receipt=\"{}\"",
+        "staged_fight done: ticks={} cues={} hits={} knockdowns={} blocked={} parried={} Parried={} final_hash={final_hash:016x} captures={} manifest=\"{}\" receipt=\"{}\"",
         args.ticks,
         stats.cues,
         stats.hits,
         stats.knockdowns,
+        stats.blocked,
+        stats.parried,
+        stats.parried,
         frames,
         captures.join(FRAMES_MANIFEST_NAME).display(),
         args.out_dir.join(RECEIPT_NAME).display()

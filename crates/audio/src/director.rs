@@ -1037,9 +1037,8 @@ mod tests {
             (tracker.level(), seen)
         };
         let (level, seen) = run();
-        let levels: Vec<Tension> = seen.iter().map(|&(_, l)| l).collect();
         assert!(
-            levels.contains(&Tension::Climax),
+            seen.iter().any(|&(_, level)| level == Tension::Climax),
             "heavy fighting reaches the climax: {seen:?}"
         );
         assert_eq!(
@@ -1049,5 +1048,13 @@ mod tests {
         );
         assert!(seen.len() <= 7, "{} changes: {seen:?}", seen.len() - 1);
         assert_eq!(run(), (level, seen), "replays exactly");
+    }
+
+    #[test]
+    fn director_test_reads_levels_without_collect() {
+        assert!(
+            !include_str!("director.rs").contains(".map(|&(_, l)| l).collect()"),
+            "level probe must use any() so clippy -D warnings stays green"
+        );
     }
 }

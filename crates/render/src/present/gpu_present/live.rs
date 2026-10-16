@@ -249,6 +249,41 @@ pub(crate) fn live_sky_should_count(sky_ms: f64, gap: f32) -> bool {
     true
 }
 
+/// Live sky draw gate for one frame: true while the sky row stays on, false
+/// when the sky row lists its submit entry as skipped.
+///
+/// Owner live, consumer `present_frame_live` below. Units boolean out. Pure
+/// with no IO, clock, allocation or device. Determinism same toggles give the
+/// same bool twice. Fail-open to draw when the registry loses the sky row, so
+/// enabled frames stay bit-identical to today. Presentation only, never hashed.
+/// Caller: `present_frame_live` below (sky bind skip).
+#[must_use]
+pub(crate) fn live_sky_should_draw(toggles: &crate::pass_truth::LookToggles) -> bool {
+    let skips = crate::pass_truth::submit_skips_for(toggles);
+    let Some(index) = crate::pass_truth::LOOK_PASSES
+        .iter()
+        .position(|spec| spec.row == "sky")
+    else {
+        return true;
+    };
+    skips[index].is_none()
+}
+
+/// Live sky feed: horizon plus exposure from the bake, gated by sky switch.
+/// Owner live, consumer `present_frame_live`. Pure, no allocation; off or bad
+/// returns `None` so the frame stays identical.
+#[must_use]
+pub(crate) fn live_sky_feed_for_frame(
+    toggles: &crate::pass_truth::LookToggles,
+    bake: &crate::sky::SkyLookBake,
+    exposure_ev100: f32,
+) -> Option<([f32; 3], f32)> {
+    if !live_sky_should_draw(toggles) {
+        return None;
+    }
+    crate::sky::sky_live_feed(bake, exposure_ev100).ok()
+}
+
 /// FC3 30 fps budget gate: true when p50 sits at or below 33.3 ms and p99 at or below 50.0 ms.
 ///
 /// Owner live, consumer the quiet perf gate (future perf-csv reader). Units ms in, boolean out.
@@ -995,12 +1030,26 @@ impl Presenter {
     /// headless timing runs that need the window frame's cost without a
     /// window. The pixels stay on the device.
     pub fn render_live_offscreen(&mut self, list: &DrawList) -> Result<FrameReceipt, PresentError> {
+        self.render_live_offscreen_with_toggles(list, &crate::pass_truth::LookToggles::all_on())
+    }
+
+    /// Window-path frame with an explicit look-toggle set: sky disabled skips
+    /// the sky bind in `present_frame_live`, all other passes behave as today.
+    /// Owner live, consumer the coming capture harness, which renders each
+    /// arena frame with one pass on and off. Units toggles in, receipt out.
+    /// Presentation only, never hashed.
+    /// Caller: `render_live_offscreen` above (all-on arm) plus the harness.
+    pub fn render_live_offscreen_with_toggles(
+        &mut self,
+        list: &DrawList,
+        toggles: &crate::pass_truth::LookToggles,
+    ) -> Result<FrameReceipt, PresentError> {
         self.check_device()?;
         if self.suspended() {
             return Ok(self.suspended_receipt());
         }
         let (width, height) = self.swap.size();
-        let receipt = self.window_path_frame(LiveSink::Twin, list, width, height)?;
+        let receipt = self.window_path_frame(LiveSink::Twin, list, width, height, toggles)?;
         self.frames_presented += 1;
         Ok(receipt)
     }
@@ -1013,11 +1062,12 @@ impl Presenter {
         list: &DrawList,
         width: u32,
         height: u32,
+        toggles: &crate::pass_truth::LookToggles,
     ) -> Result<FrameReceipt, PresentError> {
         if self.look_probes {
             self.present_frame_probed(sink, list, width, height)
         } else {
-            self.present_frame_live(sink, list, width, height)
+            self.present_frame_live(sink, list, width, height, toggles)
         }
     }
 
@@ -1031,7 +1081,13 @@ impl Presenter {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let receipt = self.window_path_frame(LiveSink::Surface(&view), list, width, height)?;
+        let receipt = self.window_path_frame(
+            LiveSink::Surface(&view),
+            list,
+            width,
+            height,
+            &crate::pass_truth::LookToggles::all_on(),
+        )?;
         self.queue.present(frame);
         self.frames_presented += 1;
         Ok(receipt)
@@ -1049,6 +1105,7 @@ impl Presenter {
         list: &DrawList,
         width: u32,
         height: u32,
+        toggles: &crate::pass_truth::LookToggles,
     ) -> Result<FrameReceipt, PresentError> {
         let (render_w, render_h) = live_present_size(width, height, live_half_res_enabled());
         let camera = effective_camera(list, render_w, render_h)?;
@@ -1101,11 +1158,24 @@ impl Presenter {
                 .ok_or_else(|| PresentError::Validation("live frame has no targets".into()))?;
             let (blit_view, blit_pipeline) = self.sink_target(sink)?;
             let timer = self.gpu_timer.as_ref().zip(timer_slot);
+            // EG8 sky slice: consult the pure gate so the sky row disabled
+            // skips the sky bind; all-on stays true, bit-identical to today.
+            // Caller: `live_sky_should_draw` above over `submit_skips_for`.
+            let sky_draw = live_sky_should_draw(toggles);
+            // LF1: re-read bake pair before forward; `None` keeps off identical.
+            if let Some((sky_horizon, sky_exposure)) = live_sky_feed_for_frame(
+                toggles,
+                &self.sky_look,
+                crate::arena_day::ARENA_DAY_EXPOSURE_EV100,
+            ) {
+                debug_assert_eq!(sky_horizon, self.fog_fwd.color);
+                debug_assert_eq!(sky_exposure, self.sky_exposure);
+            }
             self.encode_forward(
                 &mut enc,
                 targets,
                 list,
-                true,
+                sky_draw,
                 timer.map(|(timer, _)| timer.forward_writes()),
             );
             // LF3 first landing: fresh GTAO after forward, before the blit,
@@ -2057,5 +2127,65 @@ mod live_overlay_tests {
         let blit_at = live_body.find("encode_blit").expect("blit sits");
         let overlay_at = live_body.find("encode_overlay").expect("overlay sits");
         assert!(blit_at < overlay_at, "overlay draws after blit");
+    }
+}
+
+#[cfg(test)]
+mod live_sky_toggle_tests {
+    use super::live_sky_should_draw;
+    #[test]
+    fn sky_off_skips_bind_while_all_on_draws() {
+        let all = crate::pass_truth::LookToggles::all_on();
+        assert!(live_sky_should_draw(&all), "all-on draws bit-identical");
+        let mut off = crate::pass_truth::LookToggles::all_on();
+        off.disable("sky");
+        assert!(!live_sky_should_draw(&off), "sky off skips bind");
+        let mut ghost = crate::pass_truth::LookToggles::all_on();
+        ghost.disable("no-such-pass");
+        assert!(live_sky_should_draw(&ghost), "unknown keeps draw");
+        assert_eq!(live_sky_should_draw(&off), live_sky_should_draw(&off));
+        let src = include_str!("live.rs");
+        let at = src.find("fn present_frame_live").expect("live sits");
+        let end = src[at..]
+            .find("fn present_frame_probed")
+            .map(|i| at + i)
+            .unwrap_or(src.len());
+        let body = &src[at..end];
+        assert!(body.contains("live_sky_should_draw"), "live consults gate");
+        assert!(src.contains("submit_skips_for"), "gate lists skips");
+        assert!(body.contains("sky_draw"), "sky bind is gated");
+        assert!(body.contains("live_sky_feed_for_frame"), "live reads feed");
+    }
+}
+
+#[cfg(test)]
+mod live_sky_feed_tests {
+    use super::live_sky_feed_for_frame;
+    #[test]
+    fn on_reads_bake_off_writes_nothing() {
+        // Caller: `present_frame_live` before `encode_forward`. On reads the
+        // bake pair, off or ragged stays `None` so the frame stays identical.
+        let (capture, _) = crate::sky::bake_sky(
+            &crate::sky::SkyParams::midday(),
+            crate::sky::SKY_CAPTURE_W,
+            crate::sky::SKY_CAPTURE_H,
+        )
+        .expect("day-rig bakes");
+        let (bake, _) = crate::sky::bake_look_from_day(&capture).expect("look bakes");
+        let anchor = crate::arena_day::ARENA_DAY_EXPOSURE_EV100;
+        let all = crate::pass_truth::LookToggles::all_on();
+        let (horizon, exposure) =
+            live_sky_feed_for_frame(&all, &bake, anchor).expect("all-on feeds");
+        assert_eq!(horizon, crate::sky::look_fog_color(&bake));
+        assert_eq!(
+            exposure,
+            crate::sky::ev100_to_exposure(anchor).expect("anchor maps")
+        );
+        let mut off = crate::pass_truth::LookToggles::all_on();
+        off.disable("sky");
+        assert_eq!(live_sky_feed_for_frame(&off, &bake, anchor), None);
+        let mut ragged = bake;
+        ragged.texels.truncate(5);
+        assert_eq!(live_sky_feed_for_frame(&all, &ragged, anchor), None);
     }
 }

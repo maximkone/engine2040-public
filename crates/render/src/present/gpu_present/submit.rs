@@ -175,10 +175,10 @@ impl Presenter {
         Some(ms)
     }
 
-    /// Live sun depth pass is owned by the EG11 lane (`sun_shadow.rs`).
-    /// The forward Location[3] fix must not block capture while that lane
-    /// lands its map type, so this step records zero shadow time and lets
-    /// the forward pass run. Caller: `render_offscreen` below.
+    /// Live sun depth pre-step: kept for the capture order; the live map now
+    /// runs inside `encode_forward` before the forward draws, so this step
+    /// records zero and lets the forward pass post the real shadow time.
+    /// Caller: `render_offscreen` below.
     pub(super) fn encode_sun_depth(
         &self,
         _enc: &mut wgpu::CommandEncoder,
@@ -572,6 +572,9 @@ impl Presenter {
         sky: bool,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
+        // EG11 slice 1: one sun depth map from the live list before forward; nothing samples it yet.
+        let shadow_us = super::sun_shadow::encode_live_sun_shadow(self, enc, list).unwrap_or(0);
+        sun_last_us_store(shadow_us);
         // EG13 on-path choice: on plus built resolves 4x into 1x HDR, else
         // today's 1x path. Names the helper in production (not test-only).
         let (_, should_resolve) =

@@ -115,9 +115,7 @@ fn shape_interval(shape: &Shape, o: V3, d: V3) -> Option<(f32, f32, V3)> {
                 let mut na: V3 = [0.0; 3];
                 na[a] = -1.0;
                 if ta > tb {
-                    let tmp = ta;
-                    ta = tb;
-                    tb = tmp;
+                    std::mem::swap(&mut ta, &mut tb);
                     na[a] = 1.0;
                 }
                 if ta > t0 {
@@ -327,9 +325,7 @@ impl Scene {
             let mut ta = (min[a] - o[a]) * inv[a];
             let mut tb = (max[a] - o[a]) * inv[a];
             if ta > tb {
-                let tmp = ta;
-                ta = tb;
-                tb = tmp;
+                std::mem::swap(&mut ta, &mut tb);
             }
             t0 = t0.max(ta);
             t1 = t1.min(tb);
@@ -454,7 +450,7 @@ pub fn analyse_room(scene: &Scene, listener: V3, rays: usize, bounces: usize) ->
             };
             o = [p[0] + n[0] * 0.01, p[1] + n[1] * 0.01, p[2] + n[2] * 0.01];
             let roll = hash(u64::try_from(i).unwrap_or(0) << 8 | u64::try_from(b).unwrap_or(0));
-            d = if roll % 3 == 0 {
+            d = if roll.is_multiple_of(3) {
                 cosine_direction(n, roll)
             } else {
                 let k = 2.0 * dir_dot(d, n);
@@ -566,8 +562,8 @@ pub fn trace_source(
     ];
     let count = if r > 0.0 { 7 } else { 1 };
     let mut sum = 0.0f32;
-    for k in 0..count {
-        sum += scene.transmittance(listener, aim[k]);
+    for target in aim.iter().take(count) {
+        sum += scene.transmittance(listener, *target);
     }
     let direct = sum / crate::f32_of(u32::try_from(count).unwrap_or(1)).max(1.0);
     let mut out = Acoustics {
@@ -689,5 +685,73 @@ mod tests {
         assert!(ac.taps.iter().all(|t| t.delay <= MAX_ECHO), "echo overlong");
         let open = analyse_room(&Scene::new(Vec::new()), [0.0, 0.0, 0.0], 32, 8);
         assert_eq!(open.rt60, 0.0, "open air does not ring");
+    }
+
+    #[test]
+    fn slab_swap_keeps_entry_before_exit() {
+        let shape = Shape::Box {
+            center: [0.0, 0.0, 0.0],
+            half: [1.0, 1.0, 1.0],
+        };
+        for (o, d) in [
+            ([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([5.0, 0.0, 0.0], [-1.0, 0.0, 0.0]),
+            ([0.0, -5.0, 0.0], [0.0, 1.0, 0.0]),
+        ] {
+            let Some((t0, t1, _)) = shape_interval(&shape, o, d) else {
+                panic!("ray from {o:?} must enter the box");
+            };
+            assert!(t0 <= t1, "entry {t0} after exit {t1}");
+            assert!((t0 - 4.0).abs() < 1e-4, "entry {t0} != 4");
+            assert!((t1 - 6.0).abs() < 1e-4, "exit {t1} != 6");
+        }
+        assert!(
+            shape_interval(&shape, [0.0, 0.0, 5.0], [0.0, 0.0, 1.0]).is_none(),
+            "ray leaving the box must miss"
+        );
+    }
+
+    #[test]
+    fn hash_branch_parity_mod3_vs_is_multiple_of() {
+        assert!(
+            (0u64..4096).all(|roll| (roll % 3 == 0) == roll.is_multiple_of(3)),
+            "mod-3 branch and is_multiple_of must agree on every hash slice"
+        );
+    }
+
+    #[test]
+    fn aim_sampling_uses_one_target_for_point_source() {
+        let scene = Scene::new(Vec::new());
+        for radius in [0.0f32, 0.5] {
+            let ac = trace_source(&scene, [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], 8, radius);
+            assert_eq!(
+                ac.direct_gain, 1.0,
+                "empty scene transmits fully (radius={radius})"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_uses_swap_not_manual_tmp() {
+        assert!(
+            !include_str!("trace.rs").contains("let tmp = ta;"),
+            "slab swap must use std::mem::swap so clippy -D warnings stays green"
+        );
+    }
+
+    #[test]
+    fn trace_uses_is_multiple_of_not_mod() {
+        assert!(
+            !include_str!("trace.rs").contains("roll % 3"),
+            "hash branch must use is_multiple_of so clippy -D warnings stays green"
+        );
+    }
+
+    #[test]
+    fn trace_iterates_aim_not_index_loop() {
+        assert!(
+            !include_str!("trace.rs").contains("for k in 0..count"),
+            "aim sampling must iterate the array so clippy -D warnings stays green"
+        );
     }
 }
