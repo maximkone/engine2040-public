@@ -221,7 +221,7 @@ impl CellQueue {
                     0
                 } else if d2 <= near2 {
                     1
-                } else if d2 <= far2 && tick % FAR_EVERY_TICKS == 0 {
+                } else if d2 <= far2 && tick.is_multiple_of(FAR_EVERY_TICKS) {
                     2
                 } else {
                     continue;
@@ -427,11 +427,7 @@ mod tests {
         // catch-up within 60 ticks, arena checkpoints equal.
         let expected = twin_digest();
         let first = run_once();
-        assert_eq!(
-            first.catchup <= MAX_CATCHUP_TICKS,
-            true,
-            "catch-up over bar"
-        );
+        assert!(first.catchup <= MAX_CATCHUP_TICKS, "catch-up over bar");
         assert_eq!(
             u32::try_from(first.receipts.len()).expect("16 fits"),
             u32::try_from(CELL_COUNT).expect("16 fits"),
