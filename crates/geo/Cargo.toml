@@ -22,10 +22,12 @@ uv = ["dep:cc"]
 lod = ["dep:meshopt"]
 # Convex decomposition for collision (parry3d V-HACD).
 collision = ["dep:parry3d"]
+# Object-space normal baker (parry ray casts + dilate).
+bake = ["collision"]
 # The kit tests read the arena glTF files through the engine importer; a feature (not a
 # dev-dependency) so the workspace graph the headless check walks never sees assets' import feature.
 kit = ["dep:engine-assets", "engine-assets/import"]
-all = ["boolean", "uv", "lod", "collision", "kit"]
+all = ["boolean", "uv", "lod", "collision", "bake", "kit"]
 
 [dependencies]
 engine-core.workspace = true

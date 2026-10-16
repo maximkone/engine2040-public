@@ -16,7 +16,7 @@ workspace = true
 # fails the license gate. serde_json rides `v1`, never dev-deps: the audit
 # traverses dev-deps of reachable crates, so no reachable crate takes an
 # external dev-dep.
-v1 = ["dep:glam", "dep:image", "dep:serde_json"]
+v1 = ["dep:glam", "dep:image", "dep:serde_json", "dep:engine-assets"]
 window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:windows", "v1"]
 
 [dependencies]
@@ -26,6 +26,8 @@ engine-observe.workspace = true
 # Hash constants (FNV offset/prime, golden gamma): engine-core is the one
 # hash owner, the streaming digests name its constants (same values).
 engine-core.workspace = true
+# v1-only tangent owner (ARCHITECTURE C3): v1 calls import_repair::recompute_tangents; default stays std-only.
+engine-assets = { workspace = true, features = ["import"], optional = true }
 glam = { workspace = true, optional = true }
 # Fully specified (not workspace-inherited): cargo ignores default-features
 # = false combined with `workspace = true`, which would re-enable image

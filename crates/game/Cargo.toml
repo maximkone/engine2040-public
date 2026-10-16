@@ -14,7 +14,7 @@ workspace = true
 # `app` intentionally does NOT enable `engine-arena/sim`: both legs run the
 # same kinematic AR2 match (locomotion + combat + brains), so headless
 # checkpoints replay exactly under the window.
-app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets"]
+app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets", "dep:gilrs"]
 
 # WIN1: the `arena` window binary, gated on `app` so the headless default
 # stays std-only. winit is already wired (MIT/Apache, window stack).
@@ -74,6 +74,9 @@ engine-spatial.workspace = true
 # validator cross-checks; no hand-rolled crypto).
 sha2 = { version = "0.10" }
 winit = { workspace = true, optional = true }
+# Pad device poll on the windowed leg only (optional, so the headless default
+# graph stays std-only); Apache-2.0/MIT passes the deny allow-list.
+gilrs = { version = "=0.11.2", optional = true }
 
 [dev-dependencies]
 # Zero-allocation probe owner: the unit tests' counting allocator.

@@ -3117,6 +3117,7 @@ name = "engine-nav"
 version = "0.1.0"
 dependencies = [
  "engine-core",
+ "engine-spatial",
 ]
 
 [[package]]
@@ -3211,6 +3212,7 @@ dependencies = [
  "engine-core",
  "rustls",
  "rustls-native-certs",
+ "serde_json",
 ]
 
 [[package]]
