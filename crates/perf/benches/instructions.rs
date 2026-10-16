@@ -121,8 +121,13 @@ mod harness {
 }
 
 fn main() {
-    // `cargo bench` and the Gungraun runner always pass arguments; a bare
-    // launch is `cargo test --all-targets`.
+    // `cargo test --all-targets` launches bench binaries bare while
+    // `cargo nextest run --all-targets` probes them with `--list --format terse`.
+    // Both probes must exit 0 without touching the Gungraun runner, which may
+    // not be installed; only `cargo bench` and the runner's re-launches measure.
+    if std::env::args().any(|arg| arg == "--list") {
+        return;
+    }
     #[cfg(target_os = "linux")]
     if std::env::args().len() > 1 {
         harness::run();

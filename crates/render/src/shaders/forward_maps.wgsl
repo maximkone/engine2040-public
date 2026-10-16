@@ -37,6 +37,11 @@ struct Eg12Orm {
 @group(0) @binding(17) var eg12_orm_map: texture_2d<f32>;
 @group(0) @binding(18) var eg12_map_sampler: sampler;
 
+// Live torch frame at 19, last of 16-19: 8 warm slots plus count, staged
+// per frame from the placement torch actors (west plus east heads, 12 m
+// range, live count first, rest zeroed). Lambert only, no BRDF copy.
+@group(0) @binding(19) var<uniform> eg12_torches: Eg12TorchBlock;
+
 // Baked ambient scaled by occlusion: AO dims the ambient term only, never
 // the direct sun or the final color (pipeline rule 4). `irradiance` is the
 // SH diffuse term from forward.wgsl (`ibl_irradiance`); occlusion is the

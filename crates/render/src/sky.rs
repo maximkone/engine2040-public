@@ -721,6 +721,31 @@ pub fn look_fog_color(bake: &SkyLookBake) -> [f32; 3] {
     bake.fog
 }
 
+/// Live sky feed (LF1): horizon plus exposure from the same bake, pure.
+/// Caller: `live.rs::present_frame_live` via `live_sky_feed_for_frame`.
+pub fn sky_live_feed(bake: &SkyLookBake, exposure_ev100: f32) -> Result<([f32; 3], f32), SkyError> {
+    if bake.width_px == 0 || bake.height_px == 0 {
+        return Err(SkyError::Invalid("sky live feed bake is empty".into()));
+    }
+    let want = u64::from(bake.width_px) * u64::from(bake.height_px);
+    if u64::try_from(bake.texels.len()).unwrap_or(u64::MAX) != want {
+        return Err(SkyError::Invalid(format!(
+            "sky live feed backing {} mismatches {}x{}",
+            bake.texels.len(),
+            bake.width_px,
+            bake.height_px
+        )));
+    }
+    let horizon = look_fog_color(bake);
+    let exposure = ev100_to_exposure(exposure_ev100)?;
+    if !exposure.is_finite() || exposure <= 0.0 {
+        return Err(SkyError::Invalid(format!(
+            "sky live feed ev100 {exposure_ev100} maps outside positive finite exposure"
+        )));
+    }
+    Ok((horizon, exposure))
+}
+
 /// Live sky-view upload (LF1 slice 1): the row-major sky texels plus the
 /// EV100 anchor for the one init-time texture upload. Clones the bound
 /// bake texels in fixed row order so the same bake gives the same bytes
@@ -2087,6 +2112,36 @@ mod tests {
             ev100_to_exposure(anchor).expect("anchor maps"),
             "exposure equals ev100 mapping"
         );
+    }
+
+    #[test]
+    fn sky_live_feed_matches_bake_horizon_and_exposure() {
+        // Caller: `live.rs::present_frame_live` via `live_sky_feed_for_frame`.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let (horizon, exposure) = sky_live_feed(&bake, anchor).expect("live feed reads");
+        assert_eq!(horizon, look_fog_color(&bake), "horizon equals fog color");
+        assert_eq!(
+            exposure,
+            ev100_to_exposure(anchor).expect("anchor maps"),
+            "exposure equals ev100 mapping"
+        );
+        assert_eq!(
+            sky_live_feed(&bake, anchor).expect("reads again"),
+            (horizon, exposure)
+        );
+        let mut ragged = bake.clone();
+        ragged.texels.truncate(5);
+        assert!(matches!(
+            sky_live_feed(&ragged, anchor),
+            Err(SkyError::Invalid(_))
+        ));
+        for bad in [f32::NAN, f32::INFINITY, 200.0] {
+            assert!(
+                matches!(sky_live_feed(&bake, bad), Err(SkyError::Invalid(_))),
+                "anchor {bad} must fail loudly"
+            );
+        }
     }
 
     #[test]
