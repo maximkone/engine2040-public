@@ -471,12 +471,12 @@ pub const FIRST_CASCADE_FAR_M: f32 = 10.0;
 pub fn split_distances(near_m: f32, far_m: f32) -> [f32; 3] {
     let mut splits = [0.0_f32; 3];
     for (i, split) in splits.iter_mut().enumerate() {
-        *split = practical_split(
-            near_m,
-            far_m,
-            (i + 1) as f32 / CASCADE_DIVISOR,
-            CASCADE_LAMBDA,
-        );
+        let t = match i {
+            0 => 1.0 / CASCADE_DIVISOR,
+            1 => 2.0 / CASCADE_DIVISOR,
+            _ => 1.0,
+        };
+        *split = practical_split(near_m, far_m, t, CASCADE_LAMBDA);
     }
     splits[SUN_CASCADES - 1] = far_m;
     splits
