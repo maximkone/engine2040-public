@@ -173,6 +173,18 @@ fn check_train_inputs(
     Ok(rows)
 }
 
+/// Dequantized runtime inputs for one row: the exact values the tick runtime
+/// multiplies after its one quantization edge. Shared by the forward pass and
+/// the straight-through backward so both see the same grid.
+fn dequantized_inputs(row_features: &[f32]) -> Vec<f32> {
+    let mut x = Vec::with_capacity(row_features.len());
+    for v in row_features {
+        let q = quantize_lane(*v, QAT_INPUT_STEPS);
+        x.push(f32::from(q) / QAT_INPUT_STEPS);
+    }
+    x
+}
+
 /// Logits for one row: runtime-quantized inputs through the (optionally
 /// simulated) dense weights. Caller owns all slices; no heap per call beyond
 /// the returned vector, which the trainer reuses per row.
@@ -182,11 +194,7 @@ fn logits_for_row(
     row_features: &[f32],
     w_scale: f32,
 ) -> Vec<f32> {
-    let mut x = Vec::with_capacity(cfg.input_dim);
-    for v in row_features {
-        let q = quantize_lane(*v, QAT_INPUT_STEPS);
-        x.push(f32::from(q) / QAT_INPUT_STEPS);
-    }
+    let x = dequantized_inputs(row_features);
     let mut out = vec![0.0f32; cfg.output_dim];
     for o in 0..cfg.output_dim {
         let mut acc = 0.0f32;
@@ -224,7 +232,7 @@ pub fn train_student(
     for _ in 0..cfg.epochs {
         let w_scale = weight_scale(&weights);
         let mut grads = vec![0.0f32; weights.len()];
-        for r in 0..rows {
+        for (r, target) in targets.iter().enumerate() {
             let base = r * cfg.input_dim;
             let logits = logits_for_row(
                 &weights,
@@ -232,13 +240,9 @@ pub fn train_student(
                 &all_features[base..base + cfg.input_dim],
                 w_scale,
             );
-            let mut x = Vec::with_capacity(cfg.input_dim);
-            for v in &all_features[base..base + cfg.input_dim] {
-                let q = quantize_lane(*v, QAT_INPUT_STEPS);
-                x.push(f32::from(q) / QAT_INPUT_STEPS);
-            }
+            let x = dequantized_inputs(&all_features[base..base + cfg.input_dim]);
             for o in 0..cfg.output_dim {
-                let want = if usize::from(targets[r]) == o {
+                let want = if usize::from(*target) == o {
                     1.0f32
                 } else {
                     0.0f32
