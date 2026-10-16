@@ -988,12 +988,32 @@ pub fn live_ibl_should_sample(forward_binds_ibl: bool, bake_has_light: bool) -> 
 /// verdict. Threading: pure with no IO, locks, clock, allocation or device;
 /// safe on any thread. Determinism: the same bake gives the same verdict on
 /// every run. Fail-closed: non-finite or non-positive radiance reads as no
-/// light, so the frame keeps the flat floor. Light means any finite
-/// `source_average` channel above 1e-6; zero means the zero fixture.
+/// light, so the frame keeps the flat floor. Light means a finite channel
+/// above 1e-6 in `source_average` and in the SH coefficients and in the
+/// prefilter cube texels; zero means the zero fixture. The analytic BRDF
+/// LUT is excluded: it stays non-zero even for a black HDRI.
 #[cfg(feature = "v1")]
 pub fn bake_has_light(bake: &IblBake) -> bool {
-    bake.source_average
+    let source_lit = bake
+        .source_average
         .iter()
+        .any(|c| c.is_finite() && *c > 1e-6);
+    if !source_lit {
+        return false;
+    }
+    let sh_lit = bake
+        .sh
+        .coeffs
+        .iter()
+        .flat_map(|c| c.iter())
+        .any(|c| c.is_finite() && *c > 1e-6);
+    if !sh_lit {
+        return false;
+    }
+    bake.cube
+        .faces
+        .iter()
+        .flat_map(|t| t.iter())
         .any(|c| c.is_finite() && *c > 1e-6)
 }
 
@@ -3211,6 +3231,26 @@ mod tests {
         // zero bake keeps the flat floor. Fails before the accessor lands.
         assert!(super::bake_has_light(&nonzero_on_off_bake()));
         assert!(!super::bake_has_light(&zero_on_off_bake()));
+    }
+
+    #[cfg(feature = "v1")]
+    #[test]
+    fn bake_has_light_needs_sh_and_cube() {
+        // Fail-closed LF2 slice: a lit `source_average` alone must not sample;
+        // the SH and the prefilter cube must carry light too, or the frame
+        // keeps the flat floor. Fails before the hardening lands.
+        let mut no_sh = nonzero_on_off_bake();
+        no_sh.sh = super::IrradianceSh::zero();
+        assert!(
+            !super::bake_has_light(&no_sh),
+            "lit source with zero SH must keep the floor"
+        );
+        let mut no_cube = nonzero_on_off_bake();
+        no_cube.cube = super::PrefilterCube::new(4, super::IBL_LEVELS);
+        assert!(
+            !super::bake_has_light(&no_cube),
+            "lit source with zero cube must keep the floor"
+        );
     }
 
     #[test]
