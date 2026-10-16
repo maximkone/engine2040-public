@@ -10,7 +10,23 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PUBLIC_REPO, buildTree, denied, scan } from "./public-export.mjs";
+// Public-gate safe (2026-10-16): no static import of ./public-export.mjs here.
+// That file is in its own export DENY list, so the public checkout lacks it and
+// every public gate-tool test fails with ERR_MODULE_NOT_FOUND. The small pure
+// pieces (PUBLIC_REPO + DENY/denied) are mirrored below; the heavy snapshot
+// builders load lazily inside baseTree(). Mirror of tools/public-export.mjs
+// DENY (audit 2026-10-16): if that list changes, copy it here.
+const PUBLIC_REPO = "maximkone/engine2040-public";
+const DENY = [
+  ".opencode/", "opencode.jsonc", "arsenal.json", "orders.csv", "team/", "sprint/", "archive/", "clients/",
+  "docs/archive/", "docs/ROYALTY.md", "docs/EMPIRE-INBOX.md", "AGENTS.md", "AGENTS.test.mjs", "CLAUDE.md",
+  "tools/public-export.mjs", "tools/public-export.test.mjs",
+];
+const denied = (rel) => {
+  if (rel === ".opencode/seat-guard.mjs") return false;
+  if (/^docs\/archive\/SPRINT-done-[^/]*\.md$/.test(rel)) return false;
+  return DENY.some((d) => (d.endsWith("/") ? rel.startsWith(d) : rel === d));
+};
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WORK = join(ROOT, "target", "gh-check");
@@ -39,6 +55,7 @@ const baseTree = async (head) => {
     rmSync(lock, { force: true }); throw new Error("the HEAD snapshot did not appear in 5 minutes");
   }
   try {
+    const { buildTree, scan } = await import("./public-export.mjs");
     const out = join(WORK, `base-${head}`); const b = buildTree({ out });
     const s = scan(b.tree); const secret = s.problems.filter((p) => /secret|token|key/i.test(p));
     if (secret.length) throw new Error(`snapshot refused: ${secret[0]}`);
