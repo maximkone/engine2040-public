@@ -24,7 +24,7 @@ pub mod vec3;
 // One stream type crate-wide; a second same-named type let callers diverge silently.
 pub use counter_rng::{CounterCursor, CounterRng};
 // One hash owner: every crate imports these instead of re-deriving FNV or SplitMix.
-pub use hash::{hash_bytes, hash_hex, hash_u64s, hex16, mix64, splitmix64, Fnv64};
+pub use hash::{hash_bytes, hash_hex, hash_u64s, mix64, splitmix64, Fnv64};
 // One quaternion product: every crate composes rotations to the same bits.
 pub use quat::{quat_mul, quat_mul_fixed};
 pub use rng::Rng;
@@ -38,40 +38,13 @@ pub use seal_key::{
 static TEST_ALLOC: alloc_probe::CountingAlloc = alloc_probe::CountingAlloc;
 #[expect(deprecated, reason = "legacy alias stays exported for frozen receipts")]
 pub use tick::{
-    fold_hash, run_ticks, verify_same_seed, DefaultAcc, FixedAcc, LegacyFixedAcc, Tick, TickState,
-    VerifyError, DT, LEGACY_DT, LEGACY_MAX_FRAME_DT, MAX_FRAME_DT, MAX_STEPS, TICK_HZ,
+    fold_hash, run_ticks, FixedAcc, LegacyFixedAcc, Tick, TickState, DT, LEGACY_DT,
+    LEGACY_MAX_FRAME_DT, MAX_FRAME_DT, MAX_STEPS, TICK_HZ,
 };
 pub use time::{
-    push_and_step, quantize_wall_secs, IntAcc, TimeError, MAX_FRAME_NS, NS_PER_SEC, STEP_NS,
-    STEP_REM_THIRDS, STEP_THIRDS,
+    quantize_wall_secs, IntAcc, TimeError, MAX_FRAME_NS, NS_PER_SEC, STEP_NS, STEP_REM_THIRDS,
+    STEP_THIRDS,
 };
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rng_same_seed_same_stream() {
-        let (mut a, mut b) = (Rng::new(2040), Rng::new(2040));
-        let va: Vec<u64> = (0..8).map(|_| a.next_u64()).collect();
-        let vb: Vec<u64> = (0..8).map(|_| b.next_u64()).collect();
-        assert_eq!(va, vb);
-        assert!(va.iter().any(|&x| x != 0));
-    }
-    #[test]
-    fn rng_zero_seed_live_and_distinct() {
-        let (mut a, mut b) = (Rng::new(0), Rng::new(2));
-        assert_ne!(a.next_u64(), b.next_u64());
-    }
-    #[test]
-    fn fnv_empty_is_offset_basis() {
-        assert_eq!(hash_bytes(&[]), 0xcbf29ce484222325);
-        assert_ne!(hash_bytes(b"a"), hash_bytes(b"b"));
-    }
-    #[test]
-    fn run_ticks_deterministic_and_sized() {
-        let h1 = run_ticks(8, 2040, |t, _| t.0);
-        let h2 = run_ticks(8, 2040, |t, _| t.0);
-        assert_eq!(h1.len(), 8);
-        assert_eq!(h1, h2);
-        assert_ne!(h1.first(), h1.last());
-    }
-}
+/// Fixed simulation step in seconds (60 Hz): the one owner for every crate's
+/// `FIXED_DT` copy. Identical bits to [`tick::DT`]; `tick.rs` stays frozen.
+pub const FIXED_DT: f32 = tick::DT;

@@ -348,7 +348,7 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 
 ### 2026-10-08, RL20 tunnel-mouth bind (RL20)
 
-- RL20 ticked. Landed lane `builder-look-rl20-r3` (tunnel_mouth.rs +154: TunnelMouthBind + bind_window_frame + 2 tests).
+- RL20 ticked. Landed lane `builder-look-rl20-r3` (tunnel_mouth.rs +154: TunnelMouthBind + bind_window_frame + 2 tests). - code cut 2026-10-16, recover via git log --follow -- crates/render/src/tunnel_mouth.rs
 - Tests (judge re-ran): tunnel_mouth 9/9, check clean; packet-gate PASS. Quality cast FAIL is base drift (fix landed in ec12a18 after lane base), zero `as` in owned diff. Missing: RL20 GPU capture pair (pilot row to follow).
 
 ### 2026-10-08, BLOAT2 LFS pass (BLOAT2)
@@ -411,7 +411,7 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 
 ### 2026-10-08, RP9 motion-hold clip (RP9)
 
-- RP9 ticked. Landed lane `builder-look` (clip_hold.rs new 392 lines + lib.rs mod + present/look.rs consumer): 120-frame dolly preset as data, hold_camera/motion/frame through frozen post::taa_resolve, ghost/shimmer oracle + 3 tests.
+- RP9 ticked. Landed lane `builder-look` (clip_hold.rs new 392 lines + lib.rs mod + present/look.rs consumer): 120-frame dolly preset as data, hold_camera/motion/frame through frozen post::taa_resolve, ghost/shimmer oracle + 3 tests. - code cut 2026-10-16, recover via git log --follow -- crates/render/src/clip_hold.rs
 - Tests (judge re-ran): clip_hold 3/3 (ghost 0.0790<0.25, shimmer 0.002427<0.01, bytes x2); post 33/2-ignored; packet-gate PASS 3 paths; quality PASS 0 regressions. Clippy reds pre-exist outside owned. Missing: reference-GPU clip pair (pilot row to follow).
 
 ### 2026-10-08, CT28 provenance gate (CT28)

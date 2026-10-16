@@ -11,7 +11,7 @@ task board on one tree (`C:\engine2040` on master, owner 2026-10-10), run by
 Run `node tools/finish.mjs` for the current baseline; do not copy old crate or
 test counts forward. The 2026-09-28 report records A2/A3 editable-scene and
 editor runs, A6 provider evaluations, and A7/A9/A10 replay, failure and latency
-evidence. A4 is partial (GX3/GX5/Q1); A5 is partial and A8 open on GM3, the
+evidence. A4 is partial (GX3/Q1); A5 is partial and A8 open on GM3, the
 clean packaged run. The window and editor evidence therefore supersede the
 old headless-only baseline. A receipt proves its recorded revision and fixture,
 not every current build. Re-run affected proof after changes.
@@ -19,8 +19,7 @@ not every current build. Re-run affected proof after changes.
 integrated results. A crate, trait or unit test alone never completes a milestone.
 
 M0 status 2026-10-01: met locally, including `cargo deny check`, default and
-all-features tests and lint; no hosted CI by owner decision (local proof is
-the CI, see FINISH-RICH A1); CPU perf-baseline pins landed in
+all-features tests and lint; CI runs on the public mirror engine2040-public per snapshot (free runner minutes; local gates are rust-quality plus workspace-check, see FINISH-RICH A1); CPU perf-baseline pins landed in
 `tools/perf-baseline.json` (PF13 gate), GPU/VRAM rows pending the quiesced
 reference-GPU fill (PF19).
 

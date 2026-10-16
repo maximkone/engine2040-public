@@ -332,12 +332,14 @@ landed evidence sits above (r6). This section records the OPT9 hunks so a
 
 Landed hunks (read-only, same box):
 
-- OPT9 cache: `.cargo/config.toml:54-55` sets `[build]
-  rustc-wrapper = ".cargo/sccache-pool.cmd"` (pool-scoped only; plain
-  `target/debug` runs rustc directly, incremental intact). Wrapper
-  `.cargo/sccache-pool.cmd` exists (pool check, else direct). `sccache
-  --version` prints `0.18.0`. Report `target/evidence/opt9/report.md`
-  absent after the 2026-10-10 `target/` wipe (same as `target/evidence/build/`).
+- OPT9 cache: historical only. The pool wrapper `.cargo/sccache-pool.cmd`
+  and its `[build] rustc-wrapper` hunk were later REMOVED (`.cargo/config.test.mjs`
+  guards against a global wrapper; no wrapper exists in `.cargo/config.toml`
+  today — see its comment block). Current state: `sccache --version` prints
+  `0.18.0` and is opt-in per run only (`node tools/lanes.mjs flags` prints the
+  RUSTC_WRAPPER=sccache + CARGO_INCREMENTAL=0 hint for one command). Report
+  `target/evidence/opt9/report.md` absent after the 2026-10-10 `target/` wipe
+  (same as `target/evidence/build/`).
 
 Evidence (same box, quiet, no code change):
 
@@ -407,8 +409,8 @@ command`, `cargo hakari --version` prints `no such command`, same as the
 row's 2026-10-05 note, re-probed today). OPT8 skipped (claim
 `speed-20261014-0041` at 00:41Z inside the last 2 h). OPT9 skipped (claim
 `speed-20261014-0121` at 01:21Z inside the last 2 h). OPT9 hunks on disk
-(`.cargo/config.toml` linker, `.cargo/sccache-pool.cmd` exists, `sccache
-0.18.0`); the foreign `.cargo/config.toml` fast-test hunk is preserved,
+(`.cargo/config.toml` linker, `sccache 0.18.0` opt-in per run; the pool
+wrapper was later removed); the foreign `.cargo/config.toml` fast-test hunk is preserved,
 not touched here. The full hakari hack stays OPT36 (owns
 `crates/workspace-hack/` plus `tools/feature-unify.mjs` outside this
 packet's paths): not built here.
@@ -1743,9 +1745,9 @@ measured here, no cache change for the reasons below. The foreign
 foreign `tools/bins.mjs` 5th-binary plus MISSING-line hunks are preserved,
 not touched here; the concurrent `janitor-tools-pile-20261014-2136`
 21:36Z pile claim names `tools/bins.mjs`, so this packet touches
-`docs/SMOOTH-BUILD.md` only. `sccache 0.18.0` present,
-`.cargo/sccache-pool.cmd` exists, but `.cargo/config.toml` carries no
-global `rustc-wrapper` (opt-in per run only). The full hakari hack stays
+`docs/SMOOTH-BUILD.md` only. `sccache 0.18.0` present; the
+`.cargo/sccache-pool.cmd` wrapper was later removed; `.cargo/config.toml`
+carries no global `rustc-wrapper` (opt-in per run only). The full hakari hack stays
 OPT36 (owns `crates/workspace-hack/` plus `tools/feature-unify.mjs`
 outside this packet's paths): not built here.
 

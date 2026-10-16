@@ -472,7 +472,7 @@ Same source and routing as the frame section above.
   `ArenaPolicy` option, hash-pinned by net digest in the tape header; (e) gate:
   1000 bouts, sides swapped, binomial test. Diff: hard. (a)-(c) landed
   (4d40e6bf); the arena bind (d) and gate (e) are open. Tier A. Size L. Owns `crates/nn/src/lib.rs`,
-  `crates/nn/src/convert.rs`, `crates/distill/src/student.rs`,
+  `crates/distill/src/student.rs`,
   `crates/distill/src/train.rs`, `crates/distill/src/replay.rs`,
   `crates/ai/src/depth.rs`. Accept: `cargo test -p engine-nn --lib
   infer_into_no_alloc` x2: allocation count 0; `cargo test -p engine-distill

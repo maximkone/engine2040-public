@@ -47,7 +47,7 @@ multi-storey navigation and modern content do not.
 | Slice evidence (UW39) | not started: no `crates/proof/src/uw.rs` (Glob 2026-10-14) | board `docs/SPRINT-16-urban-war.md:225` |
 | Projectile flight (UW2) | partial: Fixed Q16 flight tables landed, no weapon emission or range-hash harness | `crates/combat/src/projectile.rs:15-56`, board `docs/SPRINT-16-urban-war.md:17` |
 | Hearing falloff (UW14 start) | unit-tested integer `heard_by` over cm/tick/0..=1000 strength, no sight or record layer | `crates/ai/src/hearing.rs:64-72` |
-| GP5 second-game fixture | superseded 2026-10-09, record only; not an urban boot | `docs/SECOND-GAME-CHECKLIST.md:1-6`, `fixtures/games/second-game/rules.json` |
+| GP5 second-game fixture | superseded 2026-10-09, record only; not an urban boot | `fixtures/games/second-game/rules.json` (companion checklist doc since deleted) |
 | Projectile flight | integrated for siege engines (WD10) |
 | Ray/segment queries | ticked (UW1); UW2 and UW14 consume it |
 | Guns, less-lethal, devices, doors | missing |

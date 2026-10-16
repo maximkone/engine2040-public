@@ -15,8 +15,8 @@ use crate::session::{SNAPSHOT_HEADER_LEN, SNAPSHOT_SLOT_LEN, STATE_DELTA_HEADER_
 
 /// The canonical slot cap as an array length (the one widening of it).
 const SLOT_CAP: usize = MAX_PARTICIPANTS as usize;
-/// Fixed tick rate in Hz (the arena tick [`engine_arena::TICK_HZ`], widened to u64).
-pub const TICK_HZ: u64 = engine_arena::TICK_HZ as u64;
+/// Fixed tick rate in Hz (the engine-core tick [`engine_core::TICK_HZ`], widened to u64).
+pub const TICK_HZ: u64 = engine_core::TICK_HZ;
 /// Smallest fighter count (matches, like beacons, need at least a pair).
 pub const SCALE_MIN_FIGHTERS: u8 = 2;
 /// Full-snapshot header bytes on the wire (the session codec [`SNAPSHOT_HEADER_LEN`]).

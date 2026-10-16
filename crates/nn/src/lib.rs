@@ -1,6 +1,8 @@
 //! engine-nn: integer-only neural runtime for `.e2nn` files.
 //!
-//! Consumer: gameplay brains (arena policies) running inside the fixed tick.
+//! Status: offline and tooling consumers only (the distill student export,
+//! `ai::NetPolicy`, anim motion nets). No arena or game tick binds a net yet;
+//! the arena bind is open work (EG24(d)).
 //! Owner: this crate owns the `.e2nn` byte layout, the integer math, and the errors.
 //! Units: weights are `i8`; activations are `i8`-range values carried as `i32`;
 //! accumulators are saturating `i32`; requantization is an integer multiplier
@@ -51,22 +53,8 @@ static TEST_ALLOC: engine_core::alloc_probe::CountingAlloc =
 
 /// File magic. Own value, never reused from another crate.
 pub const MAGIC: [u8; 4] = *b"E2NN";
-// Conversion-time only: ONNX int8-QDQ import plus the tract float reference.
-// The integer runtime in this file stays std-only; tract never enters the tick.
-#[cfg(feature = "convert")]
-pub mod convert;
-#[cfg(feature = "convert")]
-pub use convert::{
-    convert, reference_check, ConvertErr, E2nnBytes, ReferenceReport, Whitelist, MAX_GRAPH_INPUTS,
-    MAX_INITIALIZERS, MAX_NODES, MAX_ONNX_BYTES, MAX_RANK, MAX_TENSOR_ELEMENTS,
-    REFERENCE_TOLERANCE,
-};
 mod quant;
 pub use quant::{quantize_lane, quantize_lanes, QUANT_MAX, QUANT_MIN, QUANT_NAN};
-mod spike;
-pub use spike::{
-    spike_infer, spike_tick, SpikeErr, SPIKE_BIAS, SPIKE_INPUT_DIM, SPIKE_OUTPUT_DIM, SPIKE_WEIGHTS,
-};
 mod qat;
 pub use qat::{
     determinism_report, export_qat, simulate_quantize, train_student, QatConfig, QatErr,

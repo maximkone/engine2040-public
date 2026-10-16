@@ -50,21 +50,21 @@ plus seed plus script gives the same PNGs.
   [simulation page](systems-simulation.md)); its dust, debris, and
   blood-decal look submits through the render graph.
 - `engine-world` owns the deterministic bake: seed N plus size M
-  gives versioned bytes (`bake`), recipe-keyed maps (`blockout`:
-  same seed plus recipe plus size gives the same bytes), value-noise
-  heights, cells, terrain, and sky. Pathfinding lives in
-  `engine-nav`; world only emits cells. To ship a new arena from a
-  recipe, see [New map](recipes-new-map.md).
+  gives versioned bytes (`bake`), value-noise heights, cells and
+  terrain. Recipe-keyed blockout maps were retired in 2026-10
+  (`blockout` deleted with no live caller; see [New map](recipes-new-map.md)).
+  Pathfinding lives in `engine-nav`; world streams cells
+  (`Cells::stream`/`publish`) and answers cross-cell step counts
+  (`Cells::route`). To ship a new arena, see [New map](recipes-new-map.md).
 
 Check the world bake headlessly (verified this wave):
 
 ```powershell
-cargo test --locked -p engine-world --lib blockout
+cargo test --locked -p engine-world --lib
 ```
 
-Expected: `4 passed` (`same_inputs_identical`,
-`recipe_and_seed_split`, `effective_seed_deterministic`,
-`oversize_blockout_refuses`).
+Expected: all lib tests pass (cell bounds, terrain layout, ground
+passes, scatter spike).
 
 Windowed play needs a display and a GPU adapter and is outside the
 headless gate: the `arena` window binary takes `--frames N --exit`
@@ -75,5 +75,5 @@ fail loudly on init errors instead of printing a fake frame.
 
 - `crates/render/src/present.rs`, `crates/render/src/executor.rs`, `crates/render/src/graph.rs`
 - `crates/game/src/bin/staged_fight.rs`, `crates/game/src/capture.rs`
-- `crates/audio/`, `crates/ui/`, `crates/input/`, `crates/world/src/blockout.rs`, `crates/world/src/lib.rs`
+- `crates/audio/`, `crates/ui/`, `crates/input/`, `crates/world/src/cells.rs`, `crates/world/src/lib.rs`
 - `docs/SPRINT.md` (truth rule, GX/RL/RP rows), `docs/VISUAL-TARGET.md`

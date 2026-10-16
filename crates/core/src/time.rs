@@ -28,8 +28,6 @@ pub enum TimeError {
     NonFiniteDt,
     /// Tick index or buffered ns would overflow u64.
     Overflow,
-    /// Accumulator and `TickState` tick disagreed at a joint step.
-    Desync { acc: u64, state: u64 },
 }
 
 impl fmt::Display for TimeError {
@@ -38,9 +36,6 @@ impl fmt::Display for TimeError {
             Self::NegativeDt => write!(f, "frame dt must be >= 0"),
             Self::NonFiniteDt => write!(f, "frame dt must be finite"),
             Self::Overflow => write!(f, "tick index or buffer would overflow"),
-            Self::Desync { acc, state } => {
-                write!(f, "tick desync: acc={acc} state={state}")
-            }
         }
     }
 }
@@ -205,36 +200,6 @@ pub fn quantize_wall_secs(dt_secs: f32) -> Result<u64, TimeError> {
     f64_to_u64_checked(clamped.to_bits())
 }
 
-/// Consumer: pace a `TickState` with integer wall time.
-///
-/// Pushes `dt`, then folds one `step(Tick)` hash per due tick into `state`.
-/// The wall `dt` never enters the hash; the tick index plus `step` output do.
-/// Requires `state.tick() == acc.tick()` on entry, else `Desync` and no mutation.
-pub fn push_and_step<F>(
-    acc: &mut IntAcc,
-    state: &mut crate::TickState,
-    dt: Duration,
-    mut step: F,
-) -> Result<u32, TimeError>
-where
-    F: FnMut(crate::Tick) -> u64,
-{
-    if state.tick != acc.tick {
-        return Err(TimeError::Desync {
-            acc: acc.tick,
-            state: state.tick,
-        });
-    }
-    let base = acc.tick;
-    let n = acc.push_duration(dt)?;
-    for i in 0..n {
-        let tick = base.checked_add(u64::from(i)).ok_or(TimeError::Overflow)?;
-        let h = step(crate::Tick(tick));
-        state.step(h);
-    }
-    Ok(n)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,8 +229,8 @@ mod tests {
     }
 
     #[test]
-    fn fixedacc_retired() {
-        // Retirement quarantine: integer ns is the only sim clock.
+    fn int_acc_exact_steps_no_drift() {
+        // Integer ns is the only sim clock.
         // 6000 x 10ms is exactly 60s = 3600 ticks with zero residual.
         let mut acc = IntAcc::new();
         assert_eq!(acc.tick(), 0);
@@ -322,7 +287,13 @@ mod tests {
             let mut acc = IntAcc::new();
             let mut state = crate::TickState::new(7);
             for &dt in dts {
-                push_and_step(&mut acc, &mut state, dt, |t| t.0).expect("bounded");
+                let n = acc
+                    .push_duration(dt)
+                    .expect("bounded tape cannot overflow");
+                let base = acc.tick() - u64::from(n);
+                for i in 0..n {
+                    state.step(base + u64::from(i));
+                }
             }
             (acc.tick(), state.hash())
         };
@@ -336,18 +307,16 @@ mod tests {
     }
 
     #[test]
-    fn golden_d57b5c8ae3096614_unchanged() {
-        // Core inputs the legacy golden depends on stay frozen.
+    fn core_hash_inputs_frozen_and_deterministic() {
+        // Core inputs the app golden depends on stay frozen; same tape
+        // replays x2 identical. The full golden hash is gated by the app
+        // proof (golden x2), never by this unit test.
         assert_eq!(crate::TICK_HZ, 60);
         assert_eq!(crate::DT.to_bits(), (1.0f32 / 60.0f32).to_bits());
         assert_eq!(crate::MAX_STEPS, 5);
         assert_eq!(crate::MAX_FRAME_DT.to_bits(), 0.1f32.to_bits());
         assert_eq!(crate::TickState::new(2040).hash(), 2040);
         assert_eq!(crate::Rng::new(2040).next_u64(), 2189151099318);
-        assert_eq!(
-            format!("{:016x}", 0xd57b5c8ae3096614u64),
-            "d57b5c8ae3096614"
-        );
         let h1 = crate::run_ticks(600, 2040, |t, _| t.0);
         let h2 = crate::run_ticks(600, 2040, |t, _| t.0);
         assert_eq!(h1.len(), 600);
@@ -407,32 +376,6 @@ mod tests {
         assert_eq!(acc.push_ns(MAX_FRAME_NS), Err(TimeError::Overflow));
         assert_eq!(acc.tick, u64::MAX - 1);
         assert_eq!((acc.acc_ns, acc.rem_thirds), (0, 0));
-    }
-
-    #[test]
-    fn desync_refuses() {
-        let mut acc = IntAcc::new();
-        let mut state = crate::TickState::new(1);
-        state.step(9);
-        assert_eq!(
-            push_and_step(&mut acc, &mut state, Duration::from_millis(16), |t| t.0),
-            Err(TimeError::Desync { acc: 0, state: 1 })
-        );
-        assert_eq!(acc.tick(), 0);
-    }
-
-    #[test]
-    fn push_and_step_drives_tickstate() {
-        let mut acc = IntAcc::new();
-        let mut state = crate::TickState::new(2040);
-        let mut total = 0;
-        for _ in 0..1000 {
-            total += push_and_step(&mut acc, &mut state, Duration::from_millis(1), |t| t.0)
-                .expect("bounded");
-        }
-        assert_eq!(total, 60);
-        assert_eq!(acc.tick(), 60);
-        assert_eq!(state.tick, 60);
     }
 
     #[test]

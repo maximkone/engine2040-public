@@ -142,12 +142,12 @@ This is not a prerequisite for a useful assistant or good baseline locomotion.
 - **Runtime:** a std-only Rust interpreter with no floats and no SIMD-dependent
   paths; one forward pass per fighter per decision (for example 10 Hz). A
   32→64→64→8 network is about 6.7k multiply-adds per decision.
-- **Pipeline:** train in any framework, export ONNX with int8 QDQ
-  quantization; the converter checks an operator whitelist, folds scales into
-  integer multipliers and writes `.e2nn`. A float reference run (tract) must
-  agree with the integer run within tolerance before the artifact is
-   accepted. Research on quantization (2607.23227, 2004.09602) does not establish
-   this engine's accuracy or determinism; measure both on its own fixtures.
+- **Pipeline:** train in any framework, then shape the int8 student through
+  the distill export, which folds scales into integer multipliers and writes
+  `.e2nn`. (The old ONNX/tract converter lane was cut 2026-10-16: no target
+  ever enabled it.) Research on quantization (2607.23227, 2004.09602) does
+  not establish this engine's accuracy or determinism; measure both on its
+  own fixtures.
 - **Authority:** the artifact digest joins the rules and asset versions of
   every fixture and replay, so new weights are a versioned rules change. Every
   net has a scripted fallback, and forks compare net against script before a

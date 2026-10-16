@@ -4,7 +4,7 @@
 //! (`crates/assets/src/stream.rs`) and the real nav mesh bake
 //! (`crates/nav/src/mesh.rs`) by source path so this lane edits no manifest;
 //! the orchestrator promotes both to real `engine-world` dependency edges.
-//! Production caller: the map assembler; gate: the publish check.
+//! Status: unwired — no map assembler exists yet; gate: the publish check.
 
 use engine_world::cells;
 
@@ -314,14 +314,19 @@ fn cell_streaming_nine_cell_walk_zero_hitches() {
         )
         .expect("live block routes");
     assert!(steps > 16, "route crosses cells, got {steps} steps");
-    // Presentation never touches the golden hash: two sky states, one hash x2.
+    // The sim hash covers live cell bytes only: idle frames move nothing,
+    // so repeated publishes leave it byte-identical.
     let sim_then = cells.sim_hash();
-    let _sky_noon = ("sky".to_string(), 0.1f32);
-    let hash_noon = cells.sim_hash();
-    let _sky_dusk = ("sky".to_string(), 0.9f32);
-    let hash_dusk = cells.sim_hash();
-    assert_eq!(sim_then, hash_noon);
-    assert_eq!(hash_noon, hash_dusk, "cycle clock leaves sim hash alone");
+    assert!(
+        cells.publish(u64::MAX).is_empty(),
+        "steady state publishes nothing"
+    );
+    assert!(cells.publish(0).is_empty(), "zero cap touches nothing");
+    assert_eq!(
+        cells.sim_hash(),
+        sim_then,
+        "idle frames leave the sim hash alone"
+    );
     // Nav binds per cell: the hub footprint bakes through the real mesh bake,
     // byte-identical twice and under shuffled input, with a walking query.
     let tris = [
@@ -502,7 +507,6 @@ fn cell_streaming_corrupt_cells_refuse_named() {
         CellError::BadCoord,
         CellError::BadBudget,
         CellError::Duplicate,
-        CellError::TooLarge { count: 1 },
         CellError::OverBudget {
             want_bytes: 9,
             free_bytes: 1,

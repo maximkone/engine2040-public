@@ -242,7 +242,10 @@ pub fn parse_ground(bytes: &[u8]) -> Option<GroundBake> {
 }
 
 /// Walk blockers for a ground bake: rubble is decor so nothing blocks.
-/// Units: one flag per texel; all false, so worn paths always connect.
+/// Units: one flag per texel; all false.
+/// Note: this makes the connectivity test below trivial (an all-false grid
+/// always connects). Real blockers belong to a dedicated ground-cut packet;
+/// this packet leaves the function as is.
 pub fn blocked_tiles(baked: &GroundBake) -> Vec<bool> {
     vec![false; usize::from(baked.size).saturating_mul(usize::from(baked.size))]
 }

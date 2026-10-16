@@ -1,6 +1,7 @@
 //! clip: baked quantized clips + SoA sampler, tick-fixed. Clamp + cursor + lerp, FNV traj hash.
 use engine_core::Fnv64;
-pub const TICK_DT: f32 = 1.0 / 60.0;
+/// Fixed tick step in seconds. Single owner of the value is `engine_core::DT`.
+pub const TICK_DT: f32 = engine_core::DT;
 #[derive(Clone, Debug)]
 pub struct QTrack {
     pub times: Vec<f32>,

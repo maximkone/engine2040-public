@@ -451,11 +451,17 @@ impl ConnectionInterest {
     }
 
     /// Scope mask (default all rooms; send-only filter, never sim).
+    /// Test-only scope probe; production keeps the all-rooms default until
+    /// the session packet wires the production setter.
+    #[cfg(test)]
     pub(crate) const fn rooms(&self) -> u64 {
         self.rooms
     }
 
     /// Set scope mask (room membership; send-only).
+    /// Test-only scope probe; production keeps the all-rooms default until
+    /// the session packet wires the production setter.
+    #[cfg(test)]
     pub(crate) fn set_rooms(&mut self, mask: u64) {
         self.rooms = mask;
     }

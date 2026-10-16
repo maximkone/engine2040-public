@@ -27,7 +27,6 @@ needs it. Every dependency stays behind a feature, off the headless default.
 | uuid, blake3 | MIT/Apache-2.0; Apache-2.0 | scene | persistent IDs, content digests |
 | cpal 0.18, lewton 0.10, hound 3.5 | Apache-2.0; MIT/Apache-2.0; Apache-2.0 | audio `device` | device output, Vorbis and WAV decode |
 | rmcp 3.4 | Apache-2.0 | endpoint `mcp` | official Rust MCP SDK |
-| tract-onnx 0.23 | MIT/Apache-2.0 | nn `convert` | float reference for the ONNX converter |
 | burn 0.21 (CPU backends) | MIT/Apache-2.0 | distill `train` | offline student trainer |
 | tokio 1 (rt, macros; 1.53.1 in lock via rmcp) | MIT (crates.io API, tokio-rs/tokio) | endpoint `mcp` | the `e2040-mcp` launcher runtime for MCP5 |
 | quinn 0.11 (default features: runtime-tokio, rustls-ring) | MIT (LICENSE-MIT read live 2026-09-25, quinn-rs/quinn) | net `quic` | QUIC transport + datagrams for ON1 (rustls transitive) |

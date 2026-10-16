@@ -79,6 +79,5 @@ fn nav_connect() {
         let bl = blocked(&t, SLOPE_DEFAULT);
         assert!(!bl[0] && !bl[nn * nn - 1]);
         assert!(connected(&bl, nn), "navConnect {s} {n}");
-        assert_eq!(connected(&bl, nn), connected(&bl, nn));
     }
 }

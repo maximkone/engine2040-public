@@ -338,7 +338,6 @@ pub struct P2pSession<S: SimTick> {
     confirmed: u32,
     anchor_frame: u32,
     anchor: Option<S>,
-    desync_interval: u32,
 }
 
 impl<S: SimTick> P2pSession<S> {
@@ -364,7 +363,6 @@ impl<S: SimTick> P2pSession<S> {
             confirmed: 0,
             anchor_frame: 0,
             anchor: None,
-            desync_interval: 10,
         }
     }
 
@@ -380,26 +378,6 @@ impl<S: SimTick> P2pSession<S> {
                 self.anchor = Some(state);
             }
         }
-    }
-
-    /// True when sparse saving is on.
-    fn is_sparse(&self) -> bool {
-        self.sparse
-    }
-
-    /// Last confirmed frame plus one (sparse anchor frame).
-    fn confirmed_frame(&self) -> u32 {
-        self.confirmed
-    }
-
-    /// Desync scan interval in frames (`0` means every frame).
-    fn desync_interval(&self) -> u32 {
-        self.desync_interval
-    }
-
-    /// Set the desync scan interval in frames.
-    fn set_desync_interval(&mut self, interval: u32) {
-        self.desync_interval = interval;
     }
 
     /// SyncTest-style full-window check: refuses with `TooFar` when sparse

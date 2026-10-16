@@ -27,11 +27,11 @@ and they carry no authority.
 | research/COMPARE.md | Full-layer coverage and power rubrics; fixed denominators, source states and measured performance; look up one id, never read it whole |
 | AI-NATIVE.md | What makes engine2040 a new kind of engine: ten pillars |
 | RESEARCH-VERDICT.md | Which researched ideas are IN, LATER or DROP |
-| ROADMAP.md | Integrated milestones M0–M5 |
+| ROADMAP.md | Integrated milestones M0–M6 |
 | ARCHITECTURE.md | Acyclic layers, crate integration status, schema contracts |
 | CRATE-MAP.md | One row per crate: package, dir, job, engine deps and users (generated: `node tools/crate-map.mjs`) |
 | FINISH-RICH.md | Developer alpha and v1 acceptance with gate status |
-| FOCUS.md | The game: arena keep/cut lists |
+| FOCUS.md | Rome at war: Now order + keep/cut lists |
 | VISUAL-TARGET.md | Reference project and render milestones |
 | EDITOR_AI_CONTROL.md | Provider-neutral services and shared transactions |
 | HASH-LAW.md | Determinism scope and golden hash law |
@@ -50,7 +50,7 @@ and they carry no authority.
 | DECISIONS-M1.md | Technical decisions: layer crates, netcode model, determinism tier, MCP SDK, render references |
 | EVIDENCE.md | Provenance ledger for code ports and content |
 | ROYALTY.md | Draft business terms (not an engine contract) |
-| DEEP-DIVES.md | Research rotation cursor: arXiv/steal dive schedule, at most 3 cards plus one moonshot per dive |
+| Research rotation | Retired 2026-10-16: arXiv/steal dive schedule now rides researcher seats, no cursor file |
 | DIRECTION-LOG.md | Level 3/4 loop-direction changes with revert triggers (rows/retros live in the handoff) |
 | EMPIRE-INBOX.md | Empire Boss inbox, read every wave; tick each item with its board ID or SHA |
 | EMPIRE.md | Owner vision for the empire in 1–2 years; a plan smaller than this is wrong, not the vision |

@@ -1,13 +1,10 @@
 //! world: deterministic bake. Seed N + size M -> versioned bytes, std-only.
 //! Pathfinding lives in engine-nav (single A* owner); world only emits cells.
 
-pub mod blockout;
 pub mod cells;
 pub mod ground;
 pub mod scatter;
 pub mod terrain;
-#[cfg(test)]
-pub mod wetness_spike;
 
 /// FNV-1a 64 over bytes: the one content hash every bake, blockout and
 /// terrain gate in this crate uses.

@@ -100,21 +100,10 @@ AI being core means a first-class engine contract, not model weights in
 
 ## Priorities
 
-The Core in `FOCUS.md` (owner 2026-09-30) sets the order and speed serves it.
-The four proofs come first; a writer row that moves no pixel, hash or
-timing in the arena duel waits behind them:
-
-1. **Look:** moving captures on the RTX 3050 judged by eyes beside the
-   references (Q1, 0 of 10 today).
-2. **Bodies:** animation, ragdoll, cuts, collapse and fire that give the same
-   hash on every PC and in replay (BX28, none today).
-3. **AI door:** the same task gives the same result on any model, a weak one,
-   and none in replay; scores printed beside Unreal, Unity and Godot MCP
-   (HS20, UNKNOWN today).
-4. **Multiplayer (owner 2026-10-03: "engine2040 need multiplayer heavy"):** the
-   arena duel played by 2+ people over LAN and internet, server-authoritative
-   with rollback, AI filling empty slots, the same hash on every PC and in
-   replay (rows MP and ON).
+The Core in `FOCUS.md` `## Core` (owner 2026-09-30) is the single source for
+the order: the four proofs (Look, Bodies, AI door, Multiplayer) come first;
+a writer row that moves no pixel, hash or timing in the arena duel waits
+behind them. Statuses live there, not here.
 
 Speed (OPT, PF) serves them: frame time on the arena scene and edit-to-play
 latency, measured every 5 waves by BENCH; a regression is a red gate.
@@ -205,7 +194,7 @@ print every 5 waves and go down.
 | Online (Finish C) | invite through relay and NAT traversal; 64 clients converging under 150 ms and 2% loss; reconnect under 5 s; 1 h with zero desync | ON4 soak log |
 | Rome beyond arena (Finish C) | ludus, district and siege streaming with zero tick hitches; 10-minute 64-fighter siege replays exactly | replay diff empty |
 | Feel | input to effect p95 50 ms or less; slide under 1 cm; hit-stop, reaction, sound and trauma on the same tick; feel target = Valhall: Harbinger directional combat (owner 2026-10-01): stance-hold clash counts as parry, directional shield block, riposte tempo, rage, flanking AI — deterministic and replay-exact in the arena duel | feel suite plus the arena-duel replay diff |
-| Body and break (Finish A, B) | a gladius sweep severs a bare forearm and cannot pass a manica under one table; the fighter drops, crawls, yields or fights one-handed; a 3-story 400-element building collapses by load path, identical across replay and rollback; ropes cut and drop their load; fire spreads by material and weakens the beam it burns; ground keeps craters and traction; gore Off, Reduced and Full give one golden hash; cut event 16 bytes, 10,000 seeded cuts byte-equal x2 on two PCs, at most 0.15 ms per cut, at most 0.8 ms added to the 64 + 500 server tick, 0.3 ms per cut on screen with 32 stumps live | crates/proof/src/break_corpus.rs (planned, BX28), BX perf workload (BX29), Q1 captures on O5, 64-client soak with 8 cuts per second for 1 h |
+| Body and break (Finish A, B) | a gladius sweep severs a bare forearm and cannot pass a manica under one table; the fighter drops, crawls, yields or fights one-handed; a 3-story 400-element building collapses by load path, identical across replay and rollback; ropes cut and drop their load; fire spreads by material and weakens the beam it burns; ground keeps craters and traction; gore Off, Reduced and Full give one golden hash; cut event 16 bytes, 10,000 seeded cuts byte-equal x2 on two PCs, at most 0.15 ms per cut, at most 0.8 ms added to the 64 + 500 server tick, 0.3 ms per cut on screen with 32 stumps live | crates/proof/src/break_corpus.rs (BX28), BX perf workload (BX29), Q1 captures on O5, 64-client soak with 8 cuts per second for 1 h |
 | AI breaks and balances it (AI in editor) | an agent authors a destructible wall and a severable creature from a brief through typed verbs (`anatomy.set`, `material.set`, `structure.analyze`, `hit.simulate`), every edit undoes, BreakBench 20 pinned tasks (BX25) printed every 5 waves with the same result on mock, local, remote and one external MCP client, printed as parity beside the run rival tool column (G6) — no pass mark claimed until BX25's fixed denominator runs | BreakBench (BX25) printed every 5 waves, tool ledger parity |
 | Speed | CPU p95 8 ms or less Base; GPU p95 14 ms or less; 1000-agent sim p99 2 ms or less; zero steady-state allocations; cold load 5 s or less; server p99 4 ms or less at 64 plus 500 AI | BENCH every 5 waves, regression is a red gate |
 | AI in editor | brief to slice 8/10 or more; every edit undoes; fork rejects the balance-breaker | EV3-style run, 20 tasks across mock, local and remote |

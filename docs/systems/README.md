@@ -40,7 +40,7 @@ Scale comes from isolation and verification, not headcount. The earlier
 1,024-agent benchmark citation is an unverified research pointer, not evidence
 of engine2040 throughput or a reason to build a larger workforce now. Tiers:
 
-1. **Writers:** up to 12 `rust-coder` workers on the one tree `C:\engine2040` on master, one lane
+1. **Writers:** up to the `coders` knob (24) of `builder` workers on the one tree `C:\engine2040` on master, one lane
    each (`../SPRINT.md`). One worktree only, no lanes, no `git worktree` (see `AGENTS.md:51-52`, `docs/SPRINT.md:21-22`).
    Past-12 scale-out via a merge queue (task SC2, parked — see `docs/SPRINT.md:100-104`). The integrator and the gate set the pace.
 2. **Specifiers and testers:** bounded parallel read-only reviews first:

@@ -15,6 +15,7 @@
 use std::net::SocketAddr;
 
 pub use crate::dedicated::Beacon;
+#[cfg(test)]
 use crate::relay::InviteCode;
 use engine_input::MAX_PARTICIPANTS;
 
@@ -41,7 +42,11 @@ pub const LOBBY_VERSION: u8 = 2;
 /// board x -13 z 1.2) in whole millimetres: integer-only so the gate never
 /// takes a float into sim state. Party size is 3 tokens, no allocation.
 const PARTY_SIZE: u8 = 3;
+/// Test-only board probe; production board wiring lands with the party caller.
+#[cfg(test)]
 const PARTY_BOARD_X_MM: i32 = -13_000;
+/// Test-only board probe; production board wiring lands with the party caller.
+#[cfg(test)]
 const PARTY_BOARD_Z_MM: i32 = 1_200;
 
 /// Control-message kinds; typed, never strings.
@@ -566,6 +571,8 @@ impl StartParams {
 /// Reuses [`BuildId`] version-digest checks and [`InviteCode`] minting; never
 /// mirrors either. Determinism: member order is invite order, queue order is
 /// slot order; board check is integer mm, never float. Errors: [`LobbyError`].
+/// Test-only party probe; the ui lobby screen owns the production caller.
+#[cfg(test)]
 struct PartyForm {
     build: BuildId,
     invite: InviteCode,
@@ -573,6 +580,7 @@ struct PartyForm {
     len: u8,
 }
 
+#[cfg(test)]
 impl PartyForm {
     fn new(build: BuildId, invite: InviteCode) -> Result<Self, LobbyError> {
         build.validate()?;
@@ -592,7 +600,7 @@ impl PartyForm {
             .iter()
             .position(|held| *held == token)
         {
-            return Ok(u8::try_from(at).map_err(|_| LobbyError::SlotFull)?);
+            return u8::try_from(at).map_err(|_| LobbyError::SlotFull);
         }
         if self.len >= PARTY_SIZE {
             return Err(LobbyError::SlotFull);

@@ -71,7 +71,7 @@ golden unchanged; kill bars are gates.
   LATER: parked wave67 RT3 verdict — unpark only when RT2 ticked + RT7 fixtures green + ref-GPU ReSTIR re-spike RMSE <=10%; immediate 250-torch work rides RT15.
 - [ ] RT4 render: dynamic GI with no bake — ReSTIR GI plus a world
   radiance cache (Solari and id Tech 8 patterns, from their public talks).
-  Tier C. Size L. Owns `crates/render/src/restir_gi.rs`. Accept: a
+  Tier C. Size L. Owns `crates/render/src/restir_gi.rs`. Accept: a - code cut 2026-10-16, recover via git log --follow -- crates/render/src/restir_gi.rs
   day-to-night sun sweep updates bounce light with no bake step (ReSTIR
   GI + cache 2.5 ms); the gate tunnel leak test passes; Base keeps RL5
   or RT8. Consumer is the WIN1 match. needs: RT1, GX3.
@@ -103,7 +103,7 @@ golden unchanged; kill bars are gates.
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
 - [ ] VG1 render: GPU-driven culling — instance buffers, indirect draws,
   two-pass Hi-Z occlusion. Tier C. Size M. Owns
-  `crates/render/src/gpu_cull.rs`. Accept: an occluded-crowd fixture draws
+  `crates/render/src/gpu_cull.rs`. Accept: an occluded-crowd fixture draws - code cut 2026-10-16, recover via git log --follow -- crates/render/src/gpu_cull.rs
   under 10% of instances; CPU draw cost stays flat as instances grow.
   needs: GX1, RA3.
   LATER: re-aim at renderer 2026-10-06 (owner dropped viewer, D7 Bevy gate dead); CPU oracle seed at target/leftover-2026-10-06/engine-gameplay; planner re-seats into this row's home; unpark by deleting this line.
@@ -133,7 +133,7 @@ golden unchanged; kill bars are gates.
   reference GPU. Consumer is the WIN1 match. needs: GX7, GX2, RL4.
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
 - [ ] VX2 render: volumetric clouds and weather sky — rain wetness drives
-  the RL6 wet layer. Tier C. Size M. Owns `crates/render/src/clouds.rs`.
+  the RL6 wet layer. Tier C. Size M. Owns `crates/render/src/clouds.rs`. - code cut 2026-10-16, recover via git log --follow -- crates/render/src/clouds.rs
   Accept: a day-to-night clip with moving clouds; wet sand darkens and
   reflects. needs: GX7, GX8, RL4, RL6.
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
@@ -252,7 +252,7 @@ golden unchanged; kill bars are gates.
 - [ ] VG11 render: indirect-draw production wiring — the VG8 compute
   cull writes indirect draws the RA1 presenter executes, over the RA2
   aliasing pool with typed no-device refusal. Tier C. Size M. Owns
-  the presenter hunks beside `crates/render/src/gpu_cull.rs` (cull
+  the presenter hunks beside `crates/render/src/gpu_cull.rs` (cull - code cut 2026-10-16, recover via git log --follow -- crates/render/src/gpu_cull.rs
   API frozen). Accept: occluded crowd under 10% drawn; CPU flat to
   20k instances; llvmpipe parity; reference-GPU timing. needs: VG8,
   RA2. (PLN render-2040, reviewed 2026-09-26; waits VG8.)
@@ -267,7 +267,7 @@ golden unchanged; kill bars are gates.
 - [ ] VG8 render: GPU indirect cull + Hi-Z two-pass — compute frustum cull
   to indirect draws (voidin bvh + indirect shape, MIT, reimplemented on
   current wgpu; RA2 aliasing pool; typed no-device refusal). Tier C.
-  Size M. Owns `crates/render/src/gpu_cull.rs`. Accept: occluded crowd
+  Size M. Owns `crates/render/src/gpu_cull.rs`. Accept: occluded crowd - code cut 2026-10-16, recover via git log --follow -- crates/render/src/gpu_cull.rs
   under 10% drawn, CPU flat to 20k, llvmpipe parity + reference-GPU
   timing. needs: GX1, RA3, VG1.
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.

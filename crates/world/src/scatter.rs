@@ -5,8 +5,15 @@
 //! Determinism: same `(seed, recipe, w, h, min_dist)` gives identical bytes.
 //! Errors: [`ScatterErr`] refuses bad inputs before any allocation.
 // PORT(Kromey/fast_poisson@5c8273cb790c600219fc32121f70458220ac9dfe:src/lib.rs Bridson sampler): reimplemented, zero bytes vendored.
-use crate::blockout::effective_seed;
 use engine_core::CounterCursor;
+
+/// Mix a recipe name into a seed: `seed ^ (fnv(recipe) * 0x9E3779B1)`.
+/// Moved here from the retired `blockout` module so scatter recipes keep
+/// splitting exactly as before; same inputs give identical points.
+fn effective_seed(seed: u64, recipe: &str) -> u64 {
+    use engine_core::hash_bytes;
+    seed ^ hash_bytes(recipe.as_bytes()).wrapping_mul(0x9E3779B1)
+}
 
 /// Bridson tries per active point; grid ceiling refuses wild extents pre-alloc.
 const TRIES: u32 = 30;
@@ -46,8 +53,8 @@ fn point_index(len: usize) -> Result<i32, ScatterErr> {
 
 /// Bridson Poisson-disk points over `[0, w) x [0, h)` with pairwise distance
 /// at least `min_dist`. Units: meters in and out. Seed: `CounterCursor` at
-/// `blockout::effective_seed(seed, recipe)`, so recipes split like blockout
-/// bakes and adjacent seeds differ (the legacy `Rng` froze `seed | 1` for
+/// `effective_seed(seed, recipe)` (below), so recipes split and adjacent
+/// seeds differ (the legacy `Rng` froze `seed | 1` for golden replays;
 /// golden replays; new code uses `CounterRng`). Bake-time only: the annulus proposal uses only `+ - * /` and one
 /// `sqrt` for the unit direction, never `sin`/`cos` and never in the tick.
 /// Errors: [`ScatterErr::BadMinDist`] for non-finite or
@@ -157,6 +164,14 @@ mod tests {
 
     fn spike() -> Vec<[f32; 2]> {
         poisson_disk(2040, "scatter-pine", 100.0, 100.0, 2.0).expect("spike fixture bakes")
+    }
+
+    #[test]
+    fn recipe_seed_mix_is_stable() {
+        // Pinned move from the retired blockout module: the mix formula
+        // must not drift, or every scatter recipe rebakes.
+        assert_eq!(effective_seed(7, "a"), effective_seed(7, "a"));
+        assert_ne!(effective_seed(7, "a"), effective_seed(7, "b"));
     }
 
     fn min_gap(pts: &[[f32; 2]]) -> f32 {

@@ -40,7 +40,8 @@ use crate::save::crc32;
 use crate::viewport::Camera;
 
 /// Fixed round rate: inputs are recorded and stepped at 60 Hz.
-pub const TICK_HZ: u64 = 60;
+/// Single owner of the rate is `engine_core::TICK_HZ`.
+pub const TICK_HZ: u64 = engine_core::TICK_HZ;
 /// Replay window: the last 30 s of inputs at [`TICK_HZ`].
 pub const REPLAY_WINDOW_TICKS: usize = 30 * TICK_HZ as usize;
 /// Frame magic for round snapshots. Distinct from the editor save magic

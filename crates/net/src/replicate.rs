@@ -327,6 +327,9 @@ impl ReplicationServer {
     }
 
     /// Set scope mask (room membership; send-only; forces resync next emit).
+    /// Test-only scope probe; production keeps the all-rooms default until
+    /// the server packet wires the production setter.
+    #[cfg(test)]
     pub(crate) fn set_client_rooms(&mut self, client: u32, mask: u64) {
         self.scopes.insert(client, mask);
         self.acked.remove(&client);

@@ -173,7 +173,6 @@ engine-anim = { version = "0.1.0", path = "crates/anim" }
 engine-observe = { version = "0.1.0", path = "crates/observe" }
 engine-nn = { version = "0.1.0", path = "crates/nn" }
 engine-geo = { version = "0.1.0", path = "crates/geo" }
-tract-onnx = "0.23"
 burn = "0.21"
 engine-save = { version = "0.1.0", path = "crates/save" }
 engine-ui = { version = "0.1.0", path = "crates/ui" }

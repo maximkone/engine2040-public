@@ -85,7 +85,7 @@ test("resolved GP18.b stays archived (restore the bullet and this goes red)", ()
   const text = blockers();
   assert.doesNotMatch(text, /gp18b-slot-timeout/, "GP18.b proof-green row is archived");
   assert.doesNotMatch(text, /GP18\.b bench proof starved/, "GP18.b bullet is archived");
-  const archive = readFileSync(join(ROOT, "docs", "BLOCKERS-archive.md"), "utf8").replace(/\r\n/g, "\n");
+  const archive = readFileSync(join(ROOT, "docs", "archive", "BLOCKERS-archive.md"), "utf8").replace(/\r\n/g, "\n");
   assert.match(archive, /gp18b-slot-timeout/, "archive keeps the GP18.b fingerprint");
   assert.match(archive, /landed as 9e7c72fb/, "archive keeps the landing receipt");
 });

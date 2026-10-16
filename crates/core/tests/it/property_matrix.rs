@@ -653,15 +653,39 @@ fn runner_corpus_replays_x2_over_256_cases() {
 
 #[test]
 fn clean_oracles_report_no_failure() {
-    // Correct implementations agree with themselves on every engine input,
-    // so the matrix has no false positives on the shared corpus.
+    // Correct implementations are pure functions of their input: rebuilding
+    // the case from its seed gives the same bytes, the same hash, and the
+    // same decode, so the matrix has no false positives on shared corpus.
     for case in base_corpus() {
-        assert_eq!(hash_bytes(&case.raw), hash_bytes(&case.raw));
-        assert_eq!(decode_seal_hex(&case.hex), decode_seal_hex(&case.hex));
+        let again = case_for_seed(case.seed);
+        assert_eq!(case.raw, again.raw, "seed replays the same bytes");
+        assert_eq!(
+            hash_bytes(&case.raw),
+            hash_bytes(&again.raw),
+            "hash is a pure function of the input"
+        );
+        assert_eq!(
+            decode_seal_hex(&case.hex),
+            decode_seal_hex(&again.hex),
+            "decode is a pure function of the input"
+        );
+        assert_eq!(
+            decode_seal_hex(&case.hex),
+            decode_seal_hex(&hex_of(&case.raw)),
+            "stored hex matches freshly encoded bytes"
+        );
         for mutant in mutants(&case) {
             let hex = hex_of(&mutant);
-            assert_eq!(hash_bytes(&mutant), hash_bytes(&mutant));
-            assert_eq!(decode_seal_hex(&hex), decode_seal_hex(&hex));
+            assert_eq!(
+                decode_seal_hex(&hex),
+                Some(mutant.clone()),
+                "hex round-trips back to the mutant bytes"
+            );
+            assert_eq!(
+                hash_bytes(&mutant),
+                hash_bytes(&decode_seal_hex(&hex).expect("round-trip decodes")),
+                "hash follows the decoded bytes, not the text"
+            );
             assert!(
                 !catches(Bug::TruncHash, case.seed, &[], &hex),
                 "empty input is not a bug"

@@ -1,4 +1,4 @@
-//! det_math: integer-only trig and exp behind an off gate.
+//! det_math: integer-only trig and exp, always compiled in.
 //! Owner: engine-core (std-only; no float, no alloc).
 //! Units: Fixed Q47.16 raw i64; angles radians, exp unitless.
 //! Determinism: wrapping i64 plus i128 widening; identical bits.

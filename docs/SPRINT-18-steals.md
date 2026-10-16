@@ -196,7 +196,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   test); x2 equal. F2P: no dither fade. P2P: `cargo test -p engine-render --lib`
   green.
 - [ ] GS18 render: GPU frustum cull slice 1, the cull shader — `shaders/cull.wgsl`
-  plus `crates/render/src/gpu_cull.rs`: one compute pass tests each static instance's
+  plus `crates/render/src/gpu_cull.rs`: one compute pass tests each static instance's - code cut 2026-10-16, recover via git log --follow -- crates/render/src/gpu_cull.rs
   bounding sphere against the six frustum planes and writes each draw's `instanceCount`
   (vkguide "compute culling": no count buffer, so no `MULTI_DRAW_INDIRECT_COUNT`, which an
   iGPU may lack). Donor: zeux/niagara `drawcull.comp.glsl` (about 140 lines: sphere vs
@@ -217,7 +217,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   paints_per_frame)`, `queue(char_id, uv_rect, kind)`, `drain(frame) -> Vec<Paint>`
   capped per frame, evict the oldest character's map when over the byte cap, a
   `DILATE_PX` const for seam fill. Order by (tick, char_id). Diff: regular. Tier A.
-  Size M. Owns `crates/render/src/wound_map.rs`. Accept: 10 queued paints with a cap
+  Size M. Owns `crates/render/src/wound_map.rs`. Accept: 10 queued paints with a cap - code cut 2026-10-16, recover via git log --follow -- crates/render/src/wound_map.rs
   of 4 per frame drain 4, 4, 2 in order; over the byte cap the oldest map is evicted
   and reported; x2 equal. F2P: no wound map. P2P: `cargo test -p engine-render --lib`
   green.

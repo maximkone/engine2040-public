@@ -28,7 +28,8 @@ use engine_core::Fnv64;
 /// Wire length of one encoded [`NetPose`]: `clip` + `tick` + `phase_q`.
 pub const WIRE_LEN: usize = 6;
 /// Fixed simulation rate the replication stream ticks at.
-pub const TICKS_PER_SEC: u32 = 60;
+/// Single owner of the rate is `engine_core::TICK_HZ`.
+pub const TICKS_PER_SEC: u32 = engine_core::TICK_HZ as u32;
 /// Ticks of 150 ms round-trip at 60 Hz: the resim window the tests prove.
 pub const RTT_TICKS_150MS: u32 = 9;
 /// Phase quantizer: full `[0, 1)` turn maps to `u16` steps.

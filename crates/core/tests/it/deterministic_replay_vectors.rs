@@ -230,72 +230,10 @@ fn run_vector(v: Vector) -> Option<u64> {
     first_divergence(&clean, &faulty)
 }
 
-/// Check one vector: the fault must be caught (journals diverge) exactly at
-/// the injected tick, since every earlier tick draws identically.
-fn check_vector(v: Vector) {
-    let first = run_vector(v);
-    assert_eq!(
-        first,
-        Some(v.at_tick),
-        "seed {} fault {:?} must first diverge at tick {}",
-        v.seed,
-        v.fault,
-        v.at_tick
-    );
-}
-
 #[test]
-fn soak_vector_00_skip_draw_caught() {
-    check_vector(VECTORS[0]);
-}
-
-#[test]
-fn soak_vector_01_double_draw_caught() {
-    check_vector(VECTORS[1]);
-}
-
-#[test]
-fn soak_vector_02_extra_draw_caught() {
-    check_vector(VECTORS[2]);
-}
-
-#[test]
-fn soak_vector_03_swap_lanes_caught() {
-    check_vector(VECTORS[3]);
-}
-
-#[test]
-fn soak_vector_04_bit_flip_caught() {
-    check_vector(VECTORS[4]);
-}
-
-#[test]
-fn soak_vector_05_truncate_draw_caught() {
-    check_vector(VECTORS[5]);
-}
-
-#[test]
-fn soak_vector_06_plus_one_caught() {
-    check_vector(VECTORS[6]);
-}
-
-#[test]
-fn soak_vector_07_cross_stream_caught() {
-    check_vector(VECTORS[7]);
-}
-
-#[test]
-fn soak_vector_08_replay_old_caught() {
-    check_vector(VECTORS[8]);
-}
-
-#[test]
-fn soak_vector_09_zero_draw_caught() {
-    check_vector(VECTORS[9]);
-}
-
-#[test]
-fn all_ten_vectors_catch_desync_with_first_tick() {
+fn every_fault_vector_caught_at_its_tick() {
+    // One real test over all ten seeded schedules: each fault must first
+    // diverge exactly at its injected tick, and each journal replays x2.
     let mut caught = 0u64;
     for v in VECTORS {
         let first = run_vector(v);

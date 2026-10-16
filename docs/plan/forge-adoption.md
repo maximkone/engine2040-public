@@ -707,7 +707,7 @@ Everything not in this table (A-T2-1..A-T2-23, B-Cnn) is plan only; J.3 gives ea
 
 ### Not covered / sampled
 - No audit built or ran anything; test counts are static `#[test]` counts (C1: 6,217). "Compiled" and "passes" were not checked by anyone, including me.
-- C1 plan statuses came from two Explore censuses (not re-checked line by line). C3 read no C# file whole; E04 and E05 sampled old memory notes by grep; E06 did not read FINISH-PROOF tiers or most playtest files; E10 read `feet.rs` in part; E12's loopreview numbers (340 builds / 10 ok, 225 dirty files) are cited from scratch notes and were not re-measured; E13 relied on read-only scouts for most [scout] lines.
+- C1 plan statuses came from two Explore censuses (not re-checked line by line). C3 read no C# file whole; E04 and E05 sampled old memory notes by grep; E06 did not read the FINISH-PROOF tiers (doc since deleted) or most playtest files; E10 read `feet.rs` in part; E12's loopreview numbers (340 builds / 10 ok, 225 dirty files) are cited from scratch notes and were not re-measured; E13 relied on read-only scouts for most [scout] lines.
 - I opened roughly 60 engine, Forge and old-repo files for the checks above. Items in Sections C and D that are not marked [V] are auditor claims.
 
 ### Claims I could not verify

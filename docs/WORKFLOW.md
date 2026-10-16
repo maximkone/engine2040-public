@@ -6,7 +6,7 @@
    be direct; multi-step work gets a short task list. No required wave IDs.
 3. Commit shared contracts (types and signatures) before parallel
    implementation. Every task wires into the consumer the `SPRINT.md` board names.
-4. Code goes to `rust-coder` workers from the `SPRINT.md` board, plans to
+4. Code goes to `builder` workers from the `SPRINT.md` board, plans to
    `planner`: as many code packets per wave as there are free crates (no RAM cap: owner 2026-10-14), one per crate, each
    on its owned paths in the one tree `C:\engine2040` on master (no lanes, no
    worktrees; owner 2026-10-10). One sprint per working tree
@@ -17,7 +17,7 @@
    separately. Keep missing backend coverage visibly unverified.
 6. Review the diff. `/sprint` commits each green task with explicit paths;
    otherwise commit only when asked. `/sprint` pushes each green wave;
-   `/sprint safe` and other work push only when asked. Never force-push.
+   other work pushes only when asked. Never force-push.
    For a commit, inspect status/diff/recent log, run the gate with the hash
    twice, and stage scoped paths only.
 

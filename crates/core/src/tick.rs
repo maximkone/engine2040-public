@@ -15,9 +15,6 @@ pub const MAX_STEPS: u32 = 5;
 pub const LEGACY_MAX_FRAME_DT: f32 = 0.1;
 /// Max accepted frame dt in seconds (legacy alias, identical bits to legacy).
 pub const MAX_FRAME_DT: f32 = LEGACY_MAX_FRAME_DT;
-/// Default tick accumulator: integer ns path, zero drift.
-/// Legacy f32 path stays under `LegacyFixedAcc` for receipts only.
-pub type DefaultAcc = crate::time::IntAcc;
 /// Tick index since sim start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Tick(pub u64);
@@ -115,46 +112,6 @@ where
     }
     hashes
 }
-/// Failure of [`verify_same_seed`]: empty run or two runs that diverged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VerifyError {
-    /// No ticks were requested, so there is no final hash.
-    Empty,
-    /// The two same-seed runs diverged; carries the seed for diagnosis.
-    Desync {
-        /// Seed of the divergent runs.
-        seed: u64,
-    },
-}
-
-impl core::fmt::Display for VerifyError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match *self {
-            Self::Empty => write!(f, "verify: no ticks"),
-            Self::Desync { seed } => write!(f, "desync seed={seed}"),
-        }
-    }
-}
-
-impl std::error::Error for VerifyError {}
-
-/// Verify determinism: run make_hash twice on same seed, compare hashes.
-/// Returns the final hash on match; [`VerifyError::Empty`] when `ticks == 0`,
-/// [`VerifyError::Desync`] (carrying `seed`) when the runs diverge.
-pub fn verify_same_seed<F>(ticks: u64, seed: u64, mut make_hash: F) -> Result<u64, VerifyError>
-where
-    F: FnMut(Tick, &mut Rng) -> u64,
-{
-    if ticks == 0 {
-        return Err(VerifyError::Empty);
-    }
-    let h1 = run_ticks(ticks, seed, &mut make_hash);
-    let h2 = run_ticks(ticks, seed, &mut make_hash);
-    if h1 != h2 {
-        return Err(VerifyError::Desync { seed });
-    }
-    h1.last().copied().ok_or(VerifyError::Empty)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,31 +163,6 @@ mod tests {
         assert_ne!(a, b);
     }
     #[test]
-    fn verify_empty_is_err() {
-        assert_eq!(
-            verify_same_seed(0, 2040, |t, _| t.0),
-            Err(VerifyError::Empty)
-        );
-    }
-    #[test]
-    fn verify_pinned_returns_final_hash() {
-        let expected = *run_ticks(8, 2040, |t, _| t.0).last().unwrap();
-        assert_eq!(verify_same_seed(8, 2040, |t, _| t.0), Ok(expected));
-    }
-    #[test]
-    fn verify_desync_carries_seed() {
-        let mut calls = 0u64;
-        let res = verify_same_seed(4, 2040, |t, _| {
-            calls += 1;
-            if calls > 4 {
-                t.0.wrapping_add(1000)
-            } else {
-                t.0
-            }
-        });
-        assert_eq!(res, Err(VerifyError::Desync { seed: 2040 }));
-    }
-    #[test]
     fn run_ticks_allocates_one_vec() {
         let (hashes, probe) = measure(|| run_ticks(16, 2040, |t, _| t.0));
         assert_eq!(hashes.len(), 16);
@@ -269,15 +201,5 @@ mod tests {
         assert_eq!(legacy.push(DT), alias.push(LEGACY_DT));
         assert_eq!(legacy.push(DT * 2.5), alias.push(LEGACY_DT * 2.5));
         assert_eq!(legacy.alpha().to_bits(), alias.alpha().to_bits());
-    }
-    #[test]
-    fn default_acc_is_integer_path() {
-        let mut acc = DefaultAcc::new();
-        let mut steps: u64 = 0;
-        for _ in 0..1000 {
-            steps += u64::from(acc.push_ns(1_000_000).expect("1ms bounded"));
-        }
-        assert_eq!(steps, 60);
-        assert_eq!(acc.tick(), 60);
     }
 }

@@ -36,8 +36,8 @@ failure cases. `node tools/proof.mjs --perf` runs the timing tests that are
 The board is the `docs/SPRINT-NN-*.md` shards (`docs/SPRINT.md` is their index).
 Slice it with `node tools/board-slice.mjs --focus`, then `--ready`, or `--find <text>`;
 never read it whole. In OpenCode, `/sprint` runs board rows in waves of up to 20
-packets (`builder` for Rust, `planner` for plans), `/next` does one board task,
-and `/gates` runs the gate and reports a receipt.
+packets (`builder` for Rust, `planner` for plans); `/sprint` takes only `wave`
+and `takeover` args.
 `node tools/sprint-loop.mjs` runs waves autonomously. One sprint per working
 tree: `node tools/sprint-lock.mjs status` shows who holds it.
 
@@ -65,11 +65,13 @@ acceptance is specified in `docs/VISUAL-TARGET.md`.
 ## What CI proves
 
 The workflow defines fmt/build/tests/clippy, the workspace audit, real seed and
-recorded-tape proofs and the legacy golden on Windows and Linux, a license gate
-over the window-feature graph, a window-feature compile (not GPU execution) and
-ARM golden runs. GPU simulation parity has no job yet. As of 2026-09-23 GitHub
-refused to start these jobs for billing reasons (`docs/BLOCKERS.md`), so no
-hosted run has verified them; `node tools/proof.mjs` is the current evidence.
+recorded-tape proofs and the legacy golden on Linux and ARM, a license gate
+over the window-feature graph, a window-feature compile on Windows (not GPU execution) and
+ARM golden runs. GPU simulation parity has no job yet. CI runs on the public
+mirror engine2040-public per snapshot (the owner made the repo public to speed
+the build, free runner minutes); local gates are rust-quality plus workspace-check,
+and `node tools/farm.mjs` dispatches narrow remote checks. `node tools/proof.mjs`
+is the local evidence.
 
 ## Design and dependencies
 

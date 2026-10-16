@@ -167,24 +167,35 @@ pub struct NatPlan {
     pub road: Road,
 }
 
+/// Parameters for [`plan_for`]: one struct over eight arguments.
+pub struct NatPlanParams<'a> {
+    /// Invite code identifying the pair.
+    pub code: &'a InviteCode,
+    /// Relay address for the fallback leg.
+    pub relay: SocketAddr,
+    /// Client token.
+    pub token: u64,
+    /// Which side this machine plays.
+    pub role: QuicRole,
+    /// Host candidate address.
+    pub host: SocketAddr,
+    /// Server-reflexive candidate, when STUN learned one.
+    pub srflx: Option<SocketAddr>,
+    /// Local NAT shape.
+    pub local_nat: NatKind,
+    /// Remote NAT shape.
+    pub remote_nat: NatKind,
+}
+
 /// Compose the plan for one side of an invite: leg from the code, ICE-lite
 /// candidates from the addresses, road from the NAT shapes. The only
 /// failure is a bad address (port zero); NAT shapes never fail, they pick
 /// the relay.
-pub fn plan_for(
-    code: &InviteCode,
-    relay: SocketAddr,
-    token: u64,
-    role: QuicRole,
-    host: SocketAddr,
-    srflx: Option<SocketAddr>,
-    local_nat: NatKind,
-    remote_nat: NatKind,
-) -> Result<NatPlan, RelayError> {
+pub fn plan_for(params: NatPlanParams<'_>) -> Result<NatPlan, RelayError> {
     Ok(NatPlan {
-        leg: invite_leg(code, relay, token, role),
-        candidates: gather_quic(host, srflx)?,
-        road: path_for_nats(local_nat, remote_nat),
+        leg: invite_leg(params.code, params.relay, params.token, params.role),
+        candidates: gather_quic(params.host, params.srflx)?,
+        road: path_for_nats(params.local_nat, params.remote_nat),
     })
 }
 
@@ -349,16 +360,16 @@ mod tests {
     #[test]
     fn plan_composes_leg_candidates_and_road() {
         let token = RelayConfig::default().token;
-        let plan = plan_for(
-            &code(),
-            addr(7041),
+        let plan = plan_for(NatPlanParams {
+            code: &code(),
+            relay: addr(7041),
             token,
-            QuicRole::Host,
-            addr(5001),
-            Some(addr(5002)),
-            NatKind::Cone,
-            NatKind::Symmetric,
-        )
+            role: QuicRole::Host,
+            host: addr(5001),
+            srflx: Some(addr(5002)),
+            local_nat: NatKind::Cone,
+            remote_nat: NatKind::Symmetric,
+        })
         .expect("valid addrs plan");
         assert_eq!(
             plan.leg,
@@ -367,30 +378,30 @@ mod tests {
         assert_eq!(plan.candidates.len(), 2, "host plus server-reflexive");
         assert!(plan.candidates[0].priority() > plan.candidates[1].priority());
         assert_eq!(plan.road, Road::Relay, "symmetric remotes predict relay");
-        let direct = plan_for(
-            &code(),
-            addr(7041),
+        let direct = plan_for(NatPlanParams {
+            code: &code(),
+            relay: addr(7041),
             token,
-            QuicRole::Join,
-            addr(5003),
-            None,
-            NatKind::Open,
-            NatKind::Cone,
-        )
+            role: QuicRole::Join,
+            host: addr(5003),
+            srflx: None,
+            local_nat: NatKind::Open,
+            remote_nat: NatKind::Cone,
+        })
         .expect("valid addrs plan");
         assert_eq!(direct.candidates.len(), 1, "host only without STUN");
         assert_eq!(direct.road, Road::Direct);
         assert!(
-            plan_for(
-                &code(),
-                addr(7041),
+            plan_for(NatPlanParams {
+                code: &code(),
+                relay: addr(7041),
                 token,
-                QuicRole::Host,
-                addr(0),
-                None,
-                NatKind::Open,
-                NatKind::Open
-            )
+                role: QuicRole::Host,
+                host: addr(0),
+                srflx: None,
+                local_nat: NatKind::Open,
+                remote_nat: NatKind::Open,
+            })
             .is_err(),
             "port zero never plans"
         );

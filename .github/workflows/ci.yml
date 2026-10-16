@@ -23,9 +23,12 @@ env:
   RUSTC_WRAPPER: "sccache"
   SCCACHE_CACHE_SIZE: "5G"
   # sccache cannot cache incremental artifacts, so CI (cold every run)
-  # disables them for hit rate. Local dev keeps incremental on; lanes pass
-  # CARGO_INCREMENTAL=0 per cold command only (see tools/lanes.mjs COLD_HINT).
+  # disables them for hit rate. Local dev keeps incremental on; cold commands
+  # pass CARGO_INCREMENTAL=0 per command (see docs/SMOOTH-BUILD.md).
   CARGO_INCREMENTAL: "0"
+  # CI never reads the line tables the dev profile emits (Bevy-kept pair; steal 2026-10-16).
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   quick:
@@ -33,13 +36,28 @@ jobs:
     # runs even if an earlier one failed, so one run names all of its reds.
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       RUSTC_WRAPPER: ""
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
+      # No compile here, so no target cache: only what cargo-deny reads,
+      # the registry index, the downloaded crates and the RustSec DB. The
+      # compile jobs cache target + registry through Swatinem/rust-cache.
+      - name: cargo registry and advisory DB cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/advisory-db
+          key: ${{ runner.os }}-quick-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-quick-cargo-
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       - name: fmt
@@ -53,7 +71,14 @@ jobs:
       - name: gate tool tests
         if: ${{ !cancelled() }}
         shell: bash
-        run: node --test tools/*.test.mjs
+        # Quoted glob: node expands it, not the shell. Node's `**` spans every
+        # depth and also no directory at all, so the flat tools/*.test.mjs mates
+        # stay in and the nested tools/dcc/blender/verify_op.test.mjs runs too.
+        # That test spawns `python` (the image ships python-is-python3); the
+        # shim covers a future image that drops the plain name.
+        run: |
+          command -v python >/dev/null || sudo ln -sf "$(command -v python3)" /usr/local/bin/python
+          node --test "tools/**/*.test.mjs"
       - name: install cargo-deny (cached)
         if: ${{ !cancelled() }}
         uses: taiki-e/install-action@v2
@@ -79,15 +104,16 @@ jobs:
           - group: rest
             args: "--workspace --exclude engine-render --exclude engine-editor --exclude engine-ui --exclude engine-material --exclude engine-game --exclude engine-playtest --exclude engine-distill --exclude engine-arena --exclude engine-combat --exclude engine-net --exclude engine-endpoint --exclude engine-provider --exclude engine-proof --exclude engine-perf"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: free disk
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
       - name: install mold linker (Linux only)
         run: sudo apt-get update && sudo apt-get install -y mold
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
@@ -104,15 +130,16 @@ jobs:
   clippy:
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: free disk
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
       - name: install mold linker (Linux only)
         run: sudo apt-get update && sudo apt-get install -y mold
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
@@ -125,16 +152,17 @@ jobs:
     # Release build, the recorded-input replay proofs and the legacy golden run twice.
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: free disk
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
       - name: install mold linker (Linux only)
         run: sudo apt-get update && sudo apt-get install -y mold
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: actions/setup-node@v4
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
       - name: install repository toolchain (rust-toolchain.toml)
@@ -159,7 +187,7 @@ jobs:
           diff "$RUNNER_TEMP/hash-a" "$RUNNER_TEMP/hash-b"
       - name: upload legacy proof logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: legacy-proof-ubuntu-latest
           path: ${{ runner.temp }}/null-*.log
@@ -172,9 +200,10 @@ jobs:
       matrix:
         os: [windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
@@ -188,18 +217,24 @@ jobs:
       matrix:
         os: [ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
+      # ARM runners are the slowest and the only place the golden binary is
+      # rebuilt beside x86: cache target + registry across snapshots.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arm-golden
       - name: legacy golden on ARM
         shell: bash
         run: |
           set -euo pipefail
           cargo run -p engine2040 --locked --release --quiet | tee "$RUNNER_TEMP/arm.log"
           grep -Fx "  ticks=600 final_hash=d57b5c8ae3096614" "$RUNNER_TEMP/arm.log"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: arm-golden-${{ matrix.os }}

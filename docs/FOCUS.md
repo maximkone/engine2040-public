@@ -20,7 +20,7 @@ All ticked: hand off. `--focus` empty: max 2 other ready rows per wave.
 
 ## Core (owner 2026-09-30; wins over everything below where they differ)
 
-Heavy graphics, animation, ragdoll, destruction and the other hard systems, each easy for an AI to drive through the engine's own MCP door. Three proofs a stranger can see:
+Heavy graphics, animation, ragdoll, destruction and the other hard systems, each easy for an AI to drive through the engine's own MCP door. Four proofs a stranger can see:
 
 1. **Look:** moving captures on the RTX 3050 judged by eyes beside the references (Q1, 0 of 10 today).
 2. **Bodies:** animation, ragdoll, cuts, collapse and fire that give the same hash on every PC and in replay (BX28, none today).
@@ -31,7 +31,7 @@ Speed (OPT, PF) serves them. One scene proves all four, the arena duel: a writer
 
 Engine to 10/10 (owner 2026-10-04: "steal, don't reinvent; better than Flax in materials; Blender capabilities needed for game dev"; decisions D1-D7 delegated to the center session, plan `C:\empire\center\sprint\notes\engine-10-plan-2026-10-04.md`).- D1 DEAD 2026-10-06 (D8, D9; text in archive) updated 2026-10-07: own crates/render draws, Bevy is a donor to steal code from.
 - D2 Game rules an AI can write: a Rhai sandbox (integers only, op and size limits, script hash in the tape). This lifts the RC5 "data first, no scripting" deferral.
-- D3 Asset generation lives in the editor as an off-tick job (free, commercial-use models only; cooked, hashed, provenanced files). The shipped game never generates; `frontier.md` pillar 5 now reads "not in the shipped game".
+- D3 Asset generation lives in the editor as an off-tick job (free, commercial-use models only; cooked, hashed, provenanced files). The shipped game never generates (owner D3: RESEARCH-VERDICT.md `ai-makes-assets-inside-shipped-game: DROP`); `frontier.md` pillar 5 covers rough prop-mesh intake only.
 - D4 Modeling, UV, LOD, collision, bake, weights and rig tools are door verbs (native Rust, or headless Blender 5.2 as a cook tool), not editor panels; `content.md` "no UV/retopo/rig tools in the editor" means panels only.
 - D5 (owner 2026-10-10) Any donor code may be ported; `deny.toml` covers Cargo dependencies only; no EVIDENCE rows.
 - D6 The door drops the "exactly 21 tools" cap for core tools plus verb packs (API4 unparked); every verb stays undoable and refuses by default.
@@ -39,7 +39,7 @@ Engine to 10/10 (owner 2026-10-04: "steal, don't reinvent; better than Flax in m
 - D8 Owner 2026-10-06 (viewer dropped in Claude Code, renderer is the move): D1's Bevy picture and D7's Bevy gate are dead. BV rows are BLOCKED on the board. RT, VG, VX, RL rows re-aim at `crates/render`, not the viewer. Planner re-seats homes and lifts the freeze per row.
 - D9 Owner 2026-10-07 (Maxim: "i dont want bevy shit i want my own renderer", then "we steal from bevy just stuff"): no Bevy viewer and no Bevy dependency in the plan. No viewer work, no new BV row, no Bevy spike. The own renderer in `crates/render` is the only picture, and the look seat wakes on every READY row of lane `look` (`ready-match: | look |`). Other engines, Bevy included, stay donors for the method and for licensed WGSL: read live, ported into `crates/render` with a PORT note.
 
-Parked (rows stay and are never unticked; no new rows and no writers unless a bar needs them): audio, UI, modding, platform and shipping, living world. The second game (Urban war) is not parked (owner 2026-09-30) and keeps its board section. The loop enforces the Core in code: `tools/drift-check.mjs` (sections 13 and 14, a focus area with no helper in 6 h is a FAIL) and `tools/steal-next.mjs` (netcode donors allowed again since 2026-10-03). To park or unpark a section, change `PARKED_SECTIONS` there.
+Parked (rows stay and are never unticked; no new rows and no writers unless a bar needs them): audio, UI, modding, platform and shipping, living world. The second game (Urban war) is not parked (owner 2026-09-30) and keeps its board section. The loop enforces the Core in code: `tools/drift-check.mjs` (§13 focus families 6 h, WARN for the owner's last; §14 board sections 12 h) and `tools/steal-next.mjs` (netcode donors allowed again since 2026-10-03). To park or unpark a section, change `PARKED_SECTIONS` there.
 
 Operator 2026-09-24: the arena alone is too small and the look too safe. The
 game grows from one arena into a Roman world of three streamed maps, full
