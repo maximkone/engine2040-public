@@ -325,8 +325,34 @@ fn prefix_chunk_all_sliding(chunk: &[Body]) -> bool {
     acc == 0
 }
 
+/// Mixed prefix remainder sliding predicate beside `prefix_chunk_all_sliding`.
+///
+/// True only when every remainder lane shares the fast slide lane (`vy == +0`,
+/// `y == hy`, small `hy`), so the remainder slide keeps every bit. Empty
+/// remainder holds (no lanes to step). Velocity fast-fail short-circuits in
+/// index order with no per-lane bounds checks (sequential scan keeps cache
+/// misses low [geaen | 3.4.2.7 Avoiding Cache Misses]); settled lanes accumulate
+/// `y`/`hy` bit checks branchlessly into one mask with a single skip branch per
+/// remainder (one predictable branch [geaen | 3.4.3.2 Branch Prediction]).
+/// Exact `+0` bits for `vy` so `-0.0` fails like the scalar path. Same slot
+/// order, same float order, no allocation. Caller: `mixed_prefix_step_direct`
+/// remainder fast path only.
+#[expect(clippy::inline_always, reason = "1k hot prefix tail")]
+#[inline(always)]
+fn prefix_remainder_all_sliding(remainder: &[Body]) -> bool {
+    let mut acc: u32 = 0;
+    for b in remainder.iter() {
+        if b.vy.to_bits() != 0 {
+            return false;
+        }
+        let hy_bits = b.hy.to_bits();
+        acc |= (b.y.to_bits() ^ hy_bits) | u32::from((hy_bits & 0x7FFF_FFFF) >= 0x4700_0000);
+    }
+    acc == 0
+}
+
 /// Mixed dynamic-prefix direct step for the headless harness: 32-wide
-/// sliding groups plus scalar tail, no 32-wide settled predicate.
+/// sliding groups plus remainder slide, no 32-wide settled predicate.
 ///
 /// Bit-identical to `mixed_space_step` over the prefix because stepping a
 /// settled lane via the fast path keeps every bit (pinned by
@@ -362,8 +388,19 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
                 mixed_step_with_h_fast(b, h, gh);
             }
         }
-        for b in chunks.into_remainder().iter_mut() {
-            mixed_step_with_h_fast(b, h, gh);
+        let rem = chunks.into_remainder();
+        if prefix_remainder_all_sliding(rem) {
+            for b in rem.iter_mut() {
+                b.x += b.vx * h;
+                if (b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000 {
+                    b.x = 0.0;
+                    b.vx = 0.0;
+                }
+            }
+        } else {
+            for b in rem.iter_mut() {
+                mixed_step_with_h_fast(b, h, gh);
+            }
         }
         return;
     }

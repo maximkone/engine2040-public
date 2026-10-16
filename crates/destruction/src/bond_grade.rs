@@ -43,7 +43,7 @@ fn f64_round_to_u64_saturating(v: f64) -> u64 {
         return 0;
     }
     let exp_u16 = u16::try_from(exp_raw).unwrap_or(u16::MAX);
-    let exp = i32::from(exp_u16).checked_sub(1023).unwrap_or(i32::MIN);
+    let exp = i32::from(exp_u16).saturating_sub(1023);
     if exp < 0 {
         return 0;
     }
@@ -568,7 +568,7 @@ pub fn apply_sliver_reject(desc: &BondedDesc) -> Result<BondedDesc, GradeError> 
             });
         }
     }
-    bonds.sort_by(|l, r| (l.a, l.b).cmp(&(r.a, r.b)));
+    bonds.sort_by_key(|l| (l.a, l.b));
     bonds.dedup_by(|a, b| a.a == b.a && a.b == b.b);
     let mut anchors = Vec::new();
     for anchor in &desc.anchors {
@@ -856,7 +856,7 @@ mod tests {
         let mut orders: Vec<Vec<usize>> = vec![vec![0, 1], vec![1, 0]];
         for seed in [1u64, 2, 3, 7, 42, 99] {
             let mut v = vec![0usize, 1usize];
-            let mut s = seed
+            let s = seed
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             let j = usize::try_from(s >> 33).unwrap_or(0) % 2;

@@ -2899,3 +2899,140 @@ mod sp28_tests {
         assert!(cycle_residuals_cm(&scene, &build(&scene), &[3]).is_empty());
     }
 }
+
+// ================================================================
+// SP20: fifty seeded questions over a frozen room.
+//
+// What it is: a pure battery over one fixed six-actor arena calling the
+// frozen `holds` query. Five kinds cycle by index (`Left`, `Visible`,
+// `Reachable` plus contrast `Near`, `Behind`); 49 ask in `Frame::World`
+// and index 49 asks in `Frame::Viewer(503)`. Seeded by index only:
+// integer math, no clock, no heap past the fixture setup. Same inputs
+// give the same answers twice; unknown actors answer false.
+#[cfg(test)]
+mod sp20_qa50 {
+    use super::*;
+
+    const QA_IDS: [u32; 6] = [500, 501, 502, 503, 504, 505];
+    const QA_KINDS: [Rel; 5] = [
+        Rel::Left,
+        Rel::Visible,
+        Rel::Reachable,
+        Rel::Near,
+        Rel::Behind,
+    ];
+
+    fn qa_mk(id: u32, name: &str, x: f32, y: f32, z: f32) -> Actor {
+        Actor {
+            id,
+            name: name.into(),
+            x,
+            y,
+            z,
+            sx: 1.0,
+            sy: 1.0,
+            sz: 1.0,
+            parent: None,
+            physical: true,
+            vx: 0.0,
+            vz: 0.0,
+            yaw: 0.0,
+        }
+    }
+
+    /// Frozen arena: row plus viewer, high loft over mid, south post.
+    /// Half-meter grid so `to_cm` stays exact; ids ascending.
+    fn qa_arena() -> Vec<Actor> {
+        vec![
+            qa_mk(500, "hub", -2.0, 0.5, 0.0),
+            qa_mk(501, "mid", 0.0, 0.5, 0.0),
+            qa_mk(502, "east", 2.0, 0.5, 0.0),
+            qa_mk(503, "viewer", -5.0, 0.5, 0.0),
+            qa_mk(504, "high", 0.0, 3.0, 0.0),
+            qa_mk(505, "south", 0.0, 0.5, 3.0),
+        ]
+    }
+
+    /// Pure index seed: subject and object from id order, kind cycles
+    /// through the five covered kinds, world frame except one viewer
+    /// case. No clock, no heap, integer math only.
+    fn qa_question(index: usize) -> (u32, Rel, u32, Frame) {
+        let n = QA_IDS.len();
+        let r = index % n;
+        let q = index / n;
+        let offset = 1 + (q % (n - 1));
+        let s = QA_IDS[r];
+        let o = QA_IDS[(r + offset) % n];
+        let rel = QA_KINDS[index % QA_KINDS.len()];
+        let frame = if index == 49 {
+            Frame::Viewer(503)
+        } else {
+            Frame::World
+        };
+        (s, rel, o, frame)
+    }
+
+    fn qa_answers(actors: &[Actor]) -> [bool; 50] {
+        let mut out = [false; 50];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let (s, rel, o, frame) = qa_question(i);
+            *slot = holds(actors, s, rel, o, frame);
+        }
+        out
+    }
+
+    const QA_EXPECTED: [bool; 50] = [
+        false, true, false, false, false, false, false, false, true, false, false, true, true,
+        true, true, false, false, true, true, true, true, false, false, false, true, true, true,
+        false, false, false, false, true, false, false, false, false, false, false, true, false,
+        false, true, true, true, true, false, false, true, true, false,
+    ];
+
+    #[test]
+    fn qa_fifty_seeded_questions_answer_exactly() {
+        let arena = qa_arena();
+        // Stable id order: fixture ids ascend exactly as the seed table.
+        let ids: Vec<u32> = arena.iter().map(|a| a.id).collect();
+        assert_eq!(ids, QA_IDS.to_vec(), "fixture keeps stable id order");
+        // Coverage: each of the five kinds asks exactly ten times;
+        // exactly one viewer frame, the rest world.
+        let mut per_kind = [0_usize; 5];
+        let mut viewer_count = 0_usize;
+        for i in 0..50 {
+            per_kind[i % QA_KINDS.len()] += 1;
+            if matches!(qa_question(i).3, Frame::Viewer(_)) {
+                viewer_count += 1;
+            }
+        }
+        assert_eq!(per_kind, [10, 10, 10, 10, 10], "five kinds cover fifty");
+        assert_eq!(viewer_count, 1, "one viewer case, rest world");
+        assert!(matches!(qa_question(49).3, Frame::Viewer(503)));
+        // Same inputs give the same answers twice.
+        let first = qa_answers(&arena);
+        let second = qa_answers(&qa_arena());
+        assert_eq!(first, second, "same inputs give same answers twice");
+        // Frozen expectations pin every answer.
+        let mut miss = Vec::new();
+        for (i, slot) in first.iter().enumerate() {
+            if *slot != QA_EXPECTED[i] {
+                let (s, rel, o, frame) = qa_question(i);
+                miss.push(format!(
+                    "{i}: holds({s},{rel:?},{o},{frame:?}) got {slot} want {}",
+                    QA_EXPECTED[i]
+                ));
+            }
+        }
+        assert!(
+            miss.is_empty(),
+            "frozen answers drift:\n{}",
+            miss.join("\n")
+        );
+        // Unknown actors answer false, never panic; same-id never holds.
+        assert!(!holds(&arena, 999, Rel::Left, 500, Frame::World));
+        assert!(!holds(&arena, 500, Rel::Visible, 999, Frame::World));
+        assert!(!holds(&arena, 500, Rel::Reachable, 999, Frame::World));
+        assert!(!holds(&arena, 999, Rel::Near, 500, Frame::World));
+        assert!(!holds(&arena, 500, Rel::Behind, 500, Frame::World));
+        assert!(!holds(&arena, 500, Rel::Left, 501, Frame::Viewer(999)));
+    }
+}
