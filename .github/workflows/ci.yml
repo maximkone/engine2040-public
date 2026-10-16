@@ -32,6 +32,8 @@ jobs:
     # runs even if an earlier one failed, so one run names all of its reds.
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

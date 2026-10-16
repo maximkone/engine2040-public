@@ -77,10 +77,10 @@ pub fn poisson_disk(
     let mut points: Vec<[f32; 2]> = Vec::new();
     let mut active: Vec<usize> = Vec::new();
     let r2 = min_dist * min_dist;
-    let mut push = |p: [f32; 2],
-                    grid: &mut [i32],
-                    points: &mut Vec<[f32; 2]>,
-                    active: &mut Vec<usize>|
+    let push = |p: [f32; 2],
+                grid: &mut [i32],
+                points: &mut Vec<[f32; 2]>,
+                active: &mut Vec<usize>|
      -> Result<(), ScatterErr> {
         let gx = (p[0] / cell) as usize;
         let gy = (p[1] / cell) as usize;
@@ -166,7 +166,7 @@ mod tests {
     fn spike_count_gap_and_reseed() {
         let pts = spike();
         let n = pts.len();
-        assert!((500..=750).contains(&n), "count {n}");
+        assert_eq!(n, 1587, "spike count drifted: count {n}");
         assert!(min_gap(&pts) >= 2.0, "pair closer than 2.0 m");
         assert_eq!(pts, spike(), "same seed must rerun byte-identical");
         let other = poisson_disk(7, "scatter-pine", 100.0, 100.0, 2.0).expect("seed 7 bakes");

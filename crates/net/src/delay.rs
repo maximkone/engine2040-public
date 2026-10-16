@@ -158,8 +158,9 @@ fn probe_pair(n: usize) -> (Vec<u32>, Vec<u32>) {
     let mut local = Vec::with_capacity(n);
     let mut remote = Vec::with_capacity(n);
     for f in 0..n {
-        local.push((f as u32).wrapping_mul(3).wrapping_add(2) % 5);
-        remote.push((f as u32).wrapping_mul(5).wrapping_add(1) % 5);
+        let fi = u32::try_from(f).unwrap_or(u32::MAX);
+        local.push(fi.wrapping_mul(3).wrapping_add(2) % 5);
+        remote.push(fi.wrapping_mul(2).wrapping_add(1) % 5);
     }
     (local, remote)
 }

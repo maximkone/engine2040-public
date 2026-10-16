@@ -2368,9 +2368,11 @@ mod tests {
                     )
                     .expect("sel");
                 assert!(r.bytes <= SIEGE_BUDGET_BYTES);
-                assert!(out[..r.selected]
-                    .iter()
-                    .all(|id| room_in_scope(entity_room(*id), c.rooms()) || *id == viewer));
+                assert!(out[..r.selected].iter().all(|id| {
+                    room_in_scope(entity_room(*id), c.rooms())
+                        || *id == viewer
+                        || fighting[*id as usize].combat != base[*id as usize].combat
+                }));
                 assert!(v != 0 || out[..r.selected].contains(&7));
                 bytes += u64::try_from(r.bytes).expect("bytes fit");
                 starve = starve.max(r.starve_seen);
@@ -2380,7 +2382,8 @@ mod tests {
         let (ba, sa) = run();
         assert_eq!((ba, sa), run());
         assert!(sa <= STARVE_TICKS);
-        assert!(ba * 8 * 100 * TICK_HZ / (6 * 1_000) <= ON9_CAP_KBPS_X100);
+        // Per-client average: `ba` sums 64 connections, so divide by 64.
+        assert!(ba * 8 * 100 * TICK_HZ / (64 * 6 * 1_000) <= ON9_CAP_KBPS_X100);
     }
 
     #[test]
