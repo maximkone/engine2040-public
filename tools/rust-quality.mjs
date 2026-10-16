@@ -372,7 +372,7 @@ export function isPassthrough(fn) {
 }
 
 export const HOT_FN = /(?:^|_)(?:step|tick|update|advance|integrate|simulate|submit|render|draw|mix|solve)(?:_|$)|(?:^|_)frame$/;
-export const ALLOC = /\bVec::new\(\)|\bvec!\s*\[|\bVec::with_capacity\(|\.to_vec\(\)|\.collect(?:::<[^>]*>)?\(\)|\bString::new\(\)|\bString::from\(|\bformat!\s*\(|\.to_string\(\)|\.to_owned\(\)|\bBox::new\(|\b(?:Hash|BTree)(?:Map|Set)::new\(\)|\bVecDeque::new\(\)|\bRc::new\(|\bArc::new\(/;
+export const ALLOC = /\bVec::new\(\)|\bvec!\s*\[|\bVec::with_capacity\(|\.to_vec\(\)|\.collect(?:::<[^>]*>)?\(\)|\bString::new\(\)|\bString::from\(|\bformat!\s*\(|\.to_string\(\)|\.to_owned\(\)|\bBox::new\(|\b(?:Hash|BTree)(?:Map|Set)::new\(\)|\bVecDeque::new\(\)|\bRc::new\(|\bArc::new\(|\.to_bytes\(\)/;
 export const NONDET = /\b(?:HashMap|HashSet|RandomState|DefaultHasher)\b|\bInstant::now\b|\bSystemTime\b|\bthread_rng\b|\brand::random\b/;
 export const HASH_CONST = /0x0*(?:cbf29ce484222325|100000001b3|811c9dc5|1000193|bf58476d1ce4e5b9)(?![0-9a-f])/i;
 export const CAST = /\bas\s+(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64)\b/g;

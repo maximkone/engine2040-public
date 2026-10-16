@@ -731,10 +731,18 @@ mod tests {
         }
     }
 
+    /// Production source without the test module, so style probes ignore their own literals.
+    fn production_source() -> &'static str {
+        include_str!("trace.rs")
+            .split(concat!("#[cfg(", "test)]"))
+            .next()
+            .unwrap_or("")
+    }
+
     #[test]
     fn trace_uses_swap_not_manual_tmp() {
         assert!(
-            !include_str!("trace.rs").contains("let tmp = ta;"),
+            !production_source().contains("let tmp = ta;"),
             "slab swap must use std::mem::swap so clippy -D warnings stays green"
         );
     }
@@ -742,7 +750,7 @@ mod tests {
     #[test]
     fn trace_uses_is_multiple_of_not_mod() {
         assert!(
-            !include_str!("trace.rs").contains("roll % 3"),
+            !production_source().contains("roll % 3"),
             "hash branch must use is_multiple_of so clippy -D warnings stays green"
         );
     }
@@ -750,7 +758,7 @@ mod tests {
     #[test]
     fn trace_iterates_aim_not_index_loop() {
         assert!(
-            !include_str!("trace.rs").contains("for k in 0..count"),
+            !production_source().contains("for k in 0..count"),
             "aim sampling must iterate the array so clippy -D warnings stays green"
         );
     }

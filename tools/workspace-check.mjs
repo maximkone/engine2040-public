@@ -2,6 +2,7 @@
 // graph, module reachability, sim determinism, genre ledger, baseline gate,
 // board needs, and new LFS blobs.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -256,18 +257,25 @@ function saveLfsCache(repoDir, indexFp, headFp, fresh) {
 // E11 cut 3: the report-only wiring scan cost ~55 s per spawn (a full
 // O(defs x files) regex pass over crates/), yet its first line is fixed by
 // the scanned .rs bytes plus the scanner itself. Cache that line in target/
-// (gitignored) keyed by mtime+size of every scanned file; a scanner or file
-// edit misses the cache and re-runs the scan, so the audit never goes stale.
+// (gitignored) keyed by content hash plus mtime+size of every scanned file;
+// a scanner or file edit misses the cache and re-runs the scan, so the audit
+// never goes stale (mtime+size alone collides on same-tick same-size edits).
 // Narrow: the scan itself uses one identifier-token index per file plus one
 // name -> users map (one lookup per def, ~1 s), not one RegExp per def over
 // every other file's full text.
 const WIRING_CACHE = "workspace-check.wiring-cache.json";
+function wiringContentHash(path) {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch { return "unreadable"; }
+}
 function wiringFingerprint(repoDir) {
   const fps = [];
   try {
     try {
-      const st = statSync(join(repoDir, "tools", "wiring-scan.mjs"));
-      fps.push(`tools/wiring-scan.mjs:${st.mtimeMs}:${st.size}`);
+      const scannerPath = join(repoDir, "tools", "wiring-scan.mjs");
+      const st = statSync(scannerPath);
+      fps.push(`tools/wiring-scan.mjs:${st.mtimeMs}:${st.size}:${wiringContentHash(scannerPath)}`);
     } catch { fps.push("tools/wiring-scan.mjs:missing"); }
     const root = join(repoDir, "crates");
     const stack = [root];
@@ -292,7 +300,7 @@ function wiringFingerprint(repoDir) {
     for (const f of files) {
       try {
         const st = statSync(f);
-        fps.push(`${relative(repoDir, f)}:${st.mtimeMs}:${st.size}`);
+        fps.push(`${relative(repoDir, f)}:${st.mtimeMs}:${st.size}:${wiringContentHash(f)}`);
       } catch { fps.push(`${relative(repoDir, f)}:missing`); }
     }
   } catch { /* fingerprint is best-effort: a miss below re-runs the scan */ }
