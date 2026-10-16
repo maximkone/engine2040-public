@@ -756,7 +756,7 @@ impl GpuSkinned {
         // the R3 fighter capture lifts with the live IBL instead of the flat
         // floor. A failed bake fails init loudly, never a silent dark frame.
         let (ibl_bake, _) = crate::ibl::bake(include_bytes!(
-            "../../../content/incoming/studio_small_09_1k.hdr"
+            "../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr"
         ))
         .map_err(|e| GpuSkinError::Device(format!("look ibl bake: {e}")))?;
         let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =

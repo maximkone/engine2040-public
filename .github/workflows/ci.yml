@@ -1,5 +1,8 @@
 name: ci
 
+# The public mirror is the build farm (Maxim 2026-10-16): GitHub's free public runners run every
+# heavy check in parallel (about 10 jobs at once), so the sprint PC compiles only the crate it is
+# editing. The private dev repo never runs this (its free minutes are tiny); it is the mirror's job.
 on:
   push:
   pull_request:
@@ -8,7 +11,7 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same ref supersedes the older run and its billed minutes.
+# A newer push to the same ref supersedes the older run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -24,50 +27,109 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  gates:
-    # Full suite runs once on ubuntu; windows coverage is the smoke job below.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+  quick:
+    # No compile: formatting, boundaries, ratchet, gate-tool tests, dependency policy. Every step
+    # runs even if an earlier one failed, so one run names all of its reds.
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
       - uses: actions/setup-node@v4
         with:
           node-version: 24
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
-      - name: rust-cache
-        uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
       - name: workspace and dependency boundaries
+        if: ${{ !cancelled() }}
         run: node tools/workspace-check.mjs
       - name: rust quality ratchet (docs/RUST-QUALITY.md)
+        if: ${{ !cancelled() }}
         run: node tools/rust-quality.mjs
       - name: gate tool tests
+        if: ${{ !cancelled() }}
         shell: bash
         run: node --test tools/*.test.mjs
-      - name: build
-        run: cargo build --locked --workspace --release
-      - name: test
-        run: cargo test --locked --workspace --all-targets
-      - name: clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: real seed and recorded-input replay proofs
-        run: node tools/proof.mjs --skip-build
       - name: install cargo-deny (cached)
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() }}
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.18.7
       - name: dependency policy
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() }}
         run: cargo deny check
+
+  test:
+    # The workspace test suite in four parallel groups; `rest` is everything the other three do not name.
+    if: github.repository == 'maximkone/engine2040-public'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: render
+            args: "-p engine-render -p engine-editor -p engine-ui -p engine-material"
+          - group: game
+            args: "-p engine-game -p engine-playtest -p engine-distill -p engine-arena -p engine-combat"
+          - group: net
+            args: "-p engine-net -p engine-endpoint -p engine-provider -p engine-proof -p engine-perf"
+          - group: rest
+            args: "--workspace --exclude engine-render --exclude engine-editor --exclude engine-ui --exclude engine-material --exclude engine-game --exclude engine-playtest --exclude engine-distill --exclude engine-arena --exclude engine-combat --exclude engine-net --exclude engine-endpoint --exclude engine-provider --exclude engine-proof --exclude engine-perf"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-debug
+          save-if: ${{ matrix.group == 'rest' }}
+      - name: test ${{ matrix.group }}
+        run: cargo test --locked --all-targets ${{ matrix.args }}
+
+  clippy:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  release-proof:
+    # Release build, the recorded-input replay proofs and the legacy golden run twice.
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - name: build
+        run: cargo build --locked --workspace --release
+      - name: real seed and recorded-input replay proofs
+        if: ${{ !cancelled() }}
+        run: node tools/proof.mjs --skip-build
       - name: legacy null fixture (golden and two-run equality)
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -80,11 +142,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: legacy-proof-${{ matrix.os }}
+          name: legacy-proof-ubuntu-latest
           path: ${{ runner.temp }}/null-*.log
 
   window-compile:
-    # Windows smoke: window-feature check only; the full suite lives in gates.
+    # Windows smoke: window-feature check only; the full suite lives in the test groups.
+    if: github.repository == 'maximkone/engine2040-public'
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +163,7 @@ jobs:
         run: cargo check --locked --workspace --all-targets --features window
 
   arm-golden:
+    if: github.repository == 'maximkone/engine2040-public'
     strategy:
       fail-fast: false
       matrix:

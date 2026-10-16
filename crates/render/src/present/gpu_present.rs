@@ -13,7 +13,7 @@
 /// a fixed bake. Embedded (1.6 MB) to keep the window build
 /// self-contained and deterministic; the steady-state path never cooks.
 const IBL_STUDIO_HDRI_BYTES: &[u8] =
-    include_bytes!("../../../../content/incoming/studio_small_09_1k.hdr");
+    include_bytes!("../../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr");
 
 /// HDR working target: half float, LINEAR radiance. The forward pass writes
 /// exposed scene radiance (values above 1.0 survive); the blit does the

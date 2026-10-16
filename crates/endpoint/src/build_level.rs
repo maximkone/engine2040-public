@@ -36,7 +36,6 @@ mod imp {
         batch_error, cap_error, granted_ops, McpServer, McpToolError, ServerState,
     };
 
-    #[path = "../../build_level_session.rs"]
     mod build_level_session;
     pub use build_level_session::*;
 

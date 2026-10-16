@@ -544,7 +544,8 @@ mod tests {
     use crate::v1::cube;
 
     /// The Poly Haven CC0 studio HDRI, read-only fixture (never written).
-    const HDRI_BYTES: &[u8] = include_bytes!("../../../content/incoming/studio_small_09_1k.hdr");
+    const HDRI_BYTES: &[u8] =
+        include_bytes!("../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr");
 
     fn load_fixture() -> EnvMap {
         load_hdri(HDRI_BYTES).expect("studio HDRI fixture decodes")
