@@ -40,6 +40,7 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `EG18-deepdive.md` — NOW — Look — stuck-gate deep dive for EG18 animation from sim state: bridge caller, compiled machine, graph sample
 - `GS30-deepdive.md` — NOW — Look — stuck-gate deep dive for GS30 spatial isovist: lock the budget (GS38), then tick the row
 - `SP63-deepdive.md` — NOW — Look — stuck-gate deep dive for SP63 draw-id target: land the two foreign fixes first, then slice 1
+- `lf10-pose-hold-rethink.md` — NOW — Bodies — stuck-gate rethink for LF10 pose-hold hitstop: slice A land plus slice B defer
 - `fps-view.md` — NEXT — Look — a first-person eye on a fighter body: eye pose, look channel beside the tape, camera feed, no-clip rule (rows FV1-FV6)
 
 ## How a plan is written
