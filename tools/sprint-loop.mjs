@@ -164,7 +164,7 @@ for (let wave = 1; wave <= waves; wave += 1) {
   const pruned = pruneDoneQueue(keep, false);
   if (pruned.archived > 0) log(`QUEUE-PRUNE done=${pruned.before}->${pruned.after} archived=${pruned.archived} keep=${keep} to=${pruned.dir}`);
   const clean = node("tools/clean.mjs", "--auto");
-  log(`CLEAN ${clean.out.split("\n").pop() ?? "clean done"}`);
+  log(`CLEAN ${((clean.stdout ?? "").trim().split("\n").pop() || "clean done")}`);
   // Lead brief: farm state + dirty-tree order + claims, so the wave leads
   // itself without a human message. Cheap (no cargo, ~10ms); never fails a wave.
   let brief = "";

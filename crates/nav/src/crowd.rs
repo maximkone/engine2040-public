@@ -679,10 +679,27 @@ pub fn steer(
     flow_m_s: [f32; 2],
     config: &CrowdConfig,
 ) -> Result<SteerOutput, CrowdError> {
+    check_unique_ids(neighbors)?;
+    steer_without_id_check(agent, neighbors, goal_m, camera_m, flow_m_s, config)
+}
+
+/// Steer one agent after the caller validated unique ids.
+///
+/// The batch entry ([`steer_all`]) checks ids once per batch, so its
+/// far/impostor tail calls this directly and pays no per-agent pair scan.
+/// Direct callers use [`steer`], which runs the same check first, so refusal
+/// semantics stay identical (a duplicate id still refuses with the same error).
+fn steer_without_id_check(
+    agent: &Agent,
+    neighbors: &[Agent],
+    goal_m: [f32; 2],
+    camera_m: [f32; 2],
+    flow_m_s: [f32; 2],
+    config: &CrowdConfig,
+) -> Result<SteerOutput, CrowdError> {
     check_agent(agent)?;
     check_point(camera_m, "camera")?;
     check_point(flow_m_s, "flow")?;
-    check_unique_ids(neighbors)?;
     let cdx = agent.pos_m[0] - camera_m[0];
     let cdz = agent.pos_m[1] - camera_m[1];
     let lod = lod_for((cdx * cdx + cdz * cdz).sqrt(), config)?;
@@ -766,9 +783,11 @@ pub fn steer_all(
             Lod::Far => stats.far += 1,
             Lod::Impostor => stats.impostor += 1,
         }
-        // Neighbors still pass for signature stability; far/impostor paths
-        // never read them, so their cost stays zero by construction.
-        let cmd = steer(
+        // Ids were validated once per batch above; the helper skips the
+        // O(n^2) rescan so far/impostor lanes add no pair checks. Neighbors
+        // still pass for signature stability; far/impostor paths never read
+        // them, so their cost stays zero by construction.
+        let cmd = steer_without_id_check(
             &agents[i],
             agents,
             goals_m[i],

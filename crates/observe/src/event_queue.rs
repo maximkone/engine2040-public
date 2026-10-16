@@ -1,7 +1,7 @@
 //! Deterministic diagnostic event queue with phased delivery.
 //!
-//! Consumer: replay and chaos harnesses drain flushed rows into the shared
-//! ring and export the tape for byte-identical comparison. Data owner: this
+//! Status: test-only (no production caller drains the queue yet; exercised
+//! by the unit tests in this file). Data owner: this
 //! module owns queue order, the dispatch buffer and the tape; the caller owns
 //! handler membership and the ring. Units: bands (`u8`), sequence numbers and
 //! ticks (`u64`), capacities (`usize`). Determinism: band then insertion order

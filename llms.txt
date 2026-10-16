@@ -32,6 +32,5 @@
 
 ## Optional
 
-- [LICENSE-MIT](LICENSE-MIT): MIT
 - [LICENSE-APACHE](LICENSE-APACHE): Apache 2.0
 - [SECURITY.md](SECURITY.md): supported track and disclosure

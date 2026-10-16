@@ -69,28 +69,28 @@ line under the receipt log.
 
 Rows live in one shard per section (byte-identical; each shard header is the canonical title). The live list is `node tools/board-slice.mjs --ready`.
 
-- [`docs/SPRINT-01-rome-first.md`](docs/SPRINT-01-rome-first.md) — Rome first
-- [`docs/SPRINT-02-done.md`](docs/SPRINT-02-done.md) — Done
-- [`docs/SPRINT-03-finish-line.md`](docs/SPRINT-03-finish-line.md) — Finish line
-- [`docs/SPRINT-04-finish-quality.md`](docs/SPRINT-04-finish-quality.md) — Finish quality
-- [`docs/SPRINT-05-code-quality.md`](docs/SPRINT-05-code-quality.md) — Code quality
-- [`docs/SPRINT-06-plans.md`](docs/SPRINT-06-plans.md) — Plans
-- [`docs/SPRINT-07-accepted-plan-rows.md`](docs/SPRINT-07-accepted-plan-rows.md) — Accepted plan rows
-- [`docs/SPRINT-08-hard-stuff.md`](docs/SPRINT-08-hard-stuff.md) — Hard stuff
-- [`docs/SPRINT-09-empire.md`](docs/SPRINT-09-empire.md) — Empire
-- [`docs/SPRINT-10-empire-inbox-drain.md`](docs/SPRINT-10-empire-inbox-drain.md) — Empire inbox drain
-- [`docs/SPRINT-11-north-star.md`](docs/SPRINT-11-north-star.md) — North star 2026 (S44)
-- [`docs/SPRINT-12-tier-2040.md`](docs/SPRINT-12-tier-2040.md) — 2040 tier
-- [`docs/SPRINT-13-engine-edge.md`](docs/SPRINT-13-engine-edge.md) — Engine edge
-- [`docs/SPRINT-14-agent-workspace.md`](docs/SPRINT-14-agent-workspace.md) — Agent workspace
-- [`docs/SPRINT-15-platform-live-ai.md`](docs/SPRINT-15-platform-live-ai.md) — Platform and live AI
-- [`docs/SPRINT-16-urban-war.md`](docs/SPRINT-16-urban-war.md) — Urban war
-- [`docs/SPRINT-17-body-and-break.md`](docs/SPRINT-17-body-and-break.md) — Body and break and hard systems
-- [`docs/SPRINT-18-gaps.md`](docs/SPRINT-18-gaps.md) — Look gaps
-- [`docs/SPRINT-18-operator.md`](docs/SPRINT-18-operator.md) — Operator
-- [`docs/SPRINT-18-steals.md`](docs/SPRINT-18-steals.md) — Steals and potato tier
-- [`docs/SPRINT-20-game.md`](docs/SPRINT-20-game.md) — Game
-- [`docs/SPRINT-21-look-feel.md`](docs/SPRINT-21-look-feel.md) — Look and feel steals
+- [`SPRINT-01-rome-first.md`](SPRINT-01-rome-first.md) — Rome first
+- [`SPRINT-02-done.md`](SPRINT-02-done.md) — Done
+- [`SPRINT-03-finish-line.md`](SPRINT-03-finish-line.md) — Finish line
+- [`SPRINT-04-finish-quality.md`](SPRINT-04-finish-quality.md) — Finish quality
+- [`SPRINT-05-code-quality.md`](SPRINT-05-code-quality.md) — Code quality
+- [`SPRINT-06-plans.md`](SPRINT-06-plans.md) — Plans
+- [`SPRINT-07-accepted-plan-rows.md`](SPRINT-07-accepted-plan-rows.md) — Accepted plan rows
+- [`SPRINT-08-hard-stuff.md`](SPRINT-08-hard-stuff.md) — Hard stuff
+- [`SPRINT-09-empire.md`](SPRINT-09-empire.md) — Empire
+- [`SPRINT-10-empire-inbox-drain.md`](SPRINT-10-empire-inbox-drain.md) — Empire inbox drain
+- [`SPRINT-11-north-star.md`](SPRINT-11-north-star.md) — North star 2026 (S44)
+- [`SPRINT-12-tier-2040.md`](SPRINT-12-tier-2040.md) — 2040 tier
+- [`SPRINT-13-engine-edge.md`](SPRINT-13-engine-edge.md) — Engine edge
+- [`SPRINT-14-agent-workspace.md`](SPRINT-14-agent-workspace.md) — Agent workspace
+- [`SPRINT-15-platform-live-ai.md`](SPRINT-15-platform-live-ai.md) — Platform and live AI
+- [`SPRINT-16-urban-war.md`](SPRINT-16-urban-war.md) — Urban war
+- [`SPRINT-17-body-and-break.md`](SPRINT-17-body-and-break.md) — Body and break and hard systems
+- [`SPRINT-18-gaps.md`](SPRINT-18-gaps.md) — Look gaps
+- [`SPRINT-18-operator.md`](SPRINT-18-operator.md) — Operator
+- [`SPRINT-18-steals.md`](SPRINT-18-steals.md) — Steals and potato tier
+- [`SPRINT-20-game.md`](SPRINT-20-game.md) — Game
+- [`SPRINT-21-look-feel.md`](SPRINT-21-look-feel.md) — Look and feel steals
 
 ### Ready (live, never a snapshot)
 
@@ -108,4 +108,4 @@ physical sky — see `docs/plan/render-look.md` and `FOCUS.md`.
 
 ## Receipt log
 
-Receipts live in [`docs/SPRINT-19-receipts.md`](docs/SPRINT-19-receipts.md) (newest first). Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`). Tick a task only after its acceptance passed, with a receipt line in that file.
+Receipts live in [`SPRINT-19-receipts.md`](SPRINT-19-receipts.md) (newest first). Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`). Tick a task only after its acceptance passed, with a receipt line in that file.
