@@ -361,6 +361,11 @@ pub fn bake_cell(seed: u64, coord: CellCoord, size: u16) -> Result<Vec<u8>, Cell
     let mut holes = vec![false; n * n];
     for y in 0..n {
         for x in 0..n {
+            // Borders stay free (parity with `terrain::raw_holes`): a seam
+            // never walls an edge, so walkers always find a gap.
+            if x == 0 || y == 0 || x + 1 == n || y + 1 == n {
+                continue;
+            }
             let (gx, gy) = (ox + x as i32, oy + y as i32);
             if !raw_at(gx, gy) {
                 continue;
@@ -1442,5 +1447,39 @@ mod bound_tests {
             .route(from, (0, 0), to, (15, 15))
             .expect("live block routes");
         assert!(steps > 16, "route crosses cells, got {steps} steps");
+    }
+
+    #[test]
+    fn cell_borders_stay_free_like_terrain() {
+        // Borders stay free so a seam never walls an edge (parity with
+        // `terrain::raw_holes`, which skips the outer ring).
+        for (seed, size) in [(12345u64, 16u16), (7, 32), (99, 64)] {
+            for (cx, cz) in [(0, 0), (1, 0), (0, 1), (-1, -1)] {
+                let coord = CellCoord::new(cx, cz).expect("fixture coord");
+                let bytes = bake_cell(seed, coord, size).expect("cell bakes");
+                let data = parse_cell(&bytes).expect("parses");
+                let n = usize::from(size);
+                for x in 0..n {
+                    assert!(
+                        !data.holes[x],
+                        "top border free seed {seed} size {size} coord {coord:?} x {x}"
+                    );
+                    assert!(
+                        !data.holes[(n - 1) * n + x],
+                        "bottom border free seed {seed} size {size} coord {coord:?} x {x}"
+                    );
+                }
+                for y in 0..n {
+                    assert!(
+                        !data.holes[y * n],
+                        "left border free seed {seed} size {size} coord {coord:?} y {y}"
+                    );
+                    assert!(
+                        !data.holes[y * n + n - 1],
+                        "right border free seed {seed} size {size} coord {coord:?} y {y}"
+                    );
+                }
+            }
+        }
     }
 }

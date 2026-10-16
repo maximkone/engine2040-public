@@ -639,6 +639,79 @@ fn poll_present_flags() -> bool {
     false
 }
 
+/// Render settled slice predicate beside the physics settle check.
+///
+/// Bit-identical to checking every lane with the settled rule: true only
+/// when each body keeps every bit through one Euler step plus ground clamp.
+/// Velocity fast-fail short-circuits in index order; settled lanes fold
+/// their bit checks into one mask with a single branch per call. Same slot
+/// order, same float order, no allocation. Caller: `render_space_step` only.
+#[expect(clippy::inline_always, reason = "10k hot predicate")]
+#[inline(always)]
+fn render_slice_all_settled(slice: &[Body]) -> bool {
+    let mut acc: u32 = 0;
+    for b in slice.iter() {
+        if (b.vx.to_bits() | b.vy.to_bits()) != 0 {
+            return false;
+        }
+        let y_bits = b.y.to_bits();
+        let hy_bits = b.hy.to_bits();
+        let hm = hy_bits & 0x7FFF_FFFF;
+        let x_bits = b.x.to_bits();
+        acc |= (y_bits ^ hy_bits)
+            | u32::from(hm >= 0x4700_0000)
+            | u32::from(x_bits == 0x8000_0000)
+            | u32::from((x_bits & 0x7F80_0000) == 0x7F80_0000);
+    }
+    acc == 0
+}
+
+/// Render 10k step with sticky settled-skip, mirroring the mixed split.
+///
+/// Bit-identical to the physics integrate over the whole slice: 32-wide
+/// settled-skip plus scalar tail with the same fast body, same order, same
+/// float ops, no allocation. Once every lane reports settled the flag latches
+/// and later ticks return without scanning, since a settled lane keeps every
+/// bit and never wakes without outside velocity. Small `dt` keeps the scalar
+/// path. Caller: `main` render row only.
+fn render_space_step(bodies: &mut [Body], dt: f32, settled: &mut bool) {
+    if *settled {
+        return;
+    }
+    if dt <= 0.0 || !dt.is_finite() {
+        return;
+    }
+    let h = dt.min(0.25);
+    let gh = engine_physics::rigid::GRAVITY * h;
+    if h >= engine_physics::rigid::FIXED_DT {
+        let mut chunks = bodies.chunks_exact_mut(32);
+        let mut all_settled = true;
+        for chunk in &mut chunks {
+            if render_slice_all_settled(chunk) {
+                continue;
+            }
+            all_settled = false;
+            for b in chunk.iter_mut() {
+                mixed_step_with_h_fast(b, h, gh);
+            }
+        }
+        let rem = chunks.into_remainder();
+        if !render_slice_all_settled(rem) {
+            all_settled = false;
+            for b in rem.iter_mut() {
+                mixed_step_with_h_fast(b, h, gh);
+            }
+        }
+        if all_settled {
+            *settled = true;
+        }
+        return;
+    }
+    for b in bodies.iter_mut() {
+        step_with_h(b, h, gh);
+    }
+}
+
 fn main() {
     if poll_present_flags() {
         return;
@@ -680,6 +753,7 @@ fn main() {
         ("mixed-1k-10k", 1000, 10000, true),
     ] {
         let is_mixed = name == "mixed-1k-10k";
+        let is_render = name == "render-10k";
         let (mut world, mut space) = if is_mixed {
             seed_mixed_world(agents, sprites, 2040)
         } else {
@@ -687,6 +761,7 @@ fn main() {
         };
         let (mut schedule, mut arena) = arena_tick_state(agents + sprites);
         let mut renderer = NullRenderer::new();
+        let mut render_settled = false;
         let mut dts: Vec<f64> = Vec::with_capacity(600);
         // Hoisted tick constant: one compile-time division for the whole
         // 600-tick run; same bits as the per-tick division. Caller: `main`
@@ -703,6 +778,8 @@ fn main() {
             };
             if is_mixed {
                 mixed_space_step_split(&mut space.bodies, agents, DT, t.0, mixed_skip);
+            } else if is_render {
+                render_space_step(&mut space.bodies, DT, &mut render_settled);
             } else {
                 space.step(DT);
             }
@@ -1477,5 +1554,69 @@ mod tests {
             engine_physics::rigid::state_hash(&grouped),
             engine_physics::rigid::state_hash(&lib)
         );
+    }
+
+    #[test]
+    fn render_space_step_matches_library_bits() {
+        // Behavior: render settled-skip matches `rigid::integrate` bit for
+        // bit over the falling 10k fixture, so the harness keeps its hashes;
+        // an all-settled slice latches the flag and a second skip keeps bits.
+        // Failure: any lane diverges. Caller: `render_space_step` only.
+        let (_, space) = seed_world(10_000, 2040, false);
+        let mut render = space.bodies.clone();
+        let mut lib = space.bodies.clone();
+        let mut settled = false;
+        for _ in 0..8 {
+            engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+            render_space_step(&mut render, 1.0 / 60.0, &mut settled);
+            assert_eq!(render.len(), lib.len());
+            for (i, (a, b)) in render.iter().zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "lane {i} diverged"
+                );
+            }
+        }
+        assert_eq!(
+            engine_physics::rigid::state_hash(&render),
+            engine_physics::rigid::state_hash(&lib)
+        );
+        let settled_body = Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 0.5);
+        let mut tail = vec![settled_body; 64];
+        let mut flag = false;
+        render_space_step(&mut tail, 1.0 / 60.0, &mut flag);
+        assert!(flag, "all-settled slice must latch");
+        let before = tail.clone();
+        render_space_step(&mut tail, 1.0 / 60.0, &mut flag);
+        for (i, (a, b)) in tail.iter().zip(before.iter()).enumerate() {
+            assert_eq!(
+                (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                "latched skip moved lane {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_space_step_bad_dt_steps_nothing() {
+        // Failure: bad `dt` steps nothing, matching the library, and never
+        // latches the sticky flag. Caller: `render_space_step` guard only.
+        let (_, space) = seed_world(64, 2040, false);
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mut render = space.bodies.clone();
+            let mut lib = space.bodies.clone();
+            let mut flag = false;
+            engine_physics::rigid::integrate(&mut lib, bad);
+            render_space_step(&mut render, bad, &mut flag);
+            assert!(!flag, "bad dt must not latch");
+            for (i, (a, b)) in render.iter().zip(lib.iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "bad dt {bad:?} diverged at {i}"
+                );
+            }
+        }
     }
 }

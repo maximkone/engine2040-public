@@ -198,8 +198,8 @@ pub fn bake_terrain(seed: u64, size: u16) -> Result<Vec<u8>, BakeErr> {
     Ok(out)
 }
 /// Parses baked terrain bytes. `None` for a wrong header, a side past
-/// `MAX_BAKE_SIZE` or a length that does not match the header, checked
-/// before any allocation.
+/// `MAX_BAKE_SIZE`, a length that does not match the header, or non-zero
+/// hole padding bits, checked before any allocation.
 pub fn parse_terrain(b: &[u8]) -> Option<Terrain> {
     if b.len() < 15 || b[0..4] != MAGIC || b[4] != TVERSION {
         return None;
@@ -215,6 +215,12 @@ pub fn parse_terrain(b: &[u8]) -> Option<Terrain> {
         return None;
     }
     let heights = b[15..15 + n * n].to_vec();
+    let hole_bytes = &b[15 + n * n..15 + n * n + hb];
+    for i in n * n..hb * 8 {
+        if ((hole_bytes[i / 8] >> (i % 8)) & 1) == 1 {
+            return None;
+        }
+    }
     let mut holes = vec![false; n * n];
     for i in 0..n * n {
         holes[i] = ((b[15 + n * n + i / 8] >> (i % 8)) & 1) == 1;
@@ -318,5 +324,59 @@ mod tests {
             parse_terrain(&max).expect("max side parses").size,
             MAX_BAKE_SIZE
         );
+    }
+
+    #[test]
+    fn hole_padding_bits_must_be_zero() {
+        // A 5x5 bake holds 25 hole bits in 4 bytes, so 7 padding bits stay
+        // zero in canonical bytes; a blob with padding set must not parse.
+        let mut bytes = bake_terrain(7, 5).expect("bakes");
+        assert_eq!(bytes.len(), 15 + 25 + 4 + 25 * SPLAT_N);
+        let hole_end = 15 + 25 + 4;
+        let last = hole_end - 1;
+        bytes[last] |= 0b1110_0000;
+        assert!(
+            parse_terrain(&bytes).is_none(),
+            "non-zero hole padding must not parse"
+        );
+    }
+
+    #[test]
+    fn hole_padding_keeps_neighbours_live() {
+        // 5x5 packs 25 live hole bits into 4 bytes: index 24 is the last
+        // live bit and index 25 is the first padding bit. The padding
+        // check must keep the neighbour live while rejecting padding.
+        let bytes = bake_terrain(7, 5).expect("bakes");
+        let hole_at = 15 + 25;
+        let mut live = bytes.clone();
+        live[hole_at + 3] |= 1 << 0;
+        let parsed = parse_terrain(&live).expect("neighbour stays live");
+        assert!(parsed.holes[24]);
+        live[hole_at + 3] |= 1 << 1;
+        assert!(parse_terrain(&live).is_none());
+    }
+
+    #[test]
+    fn padded_hole_bytes_stay_byte_identical() {
+        // Canonical hole bytes carry zero padding; parsing then re-packing
+        // with zero padding must give byte-identical hole bytes.
+        for size in [4u16, 5, 9] {
+            let bytes = bake_terrain(7, size).expect("bakes");
+            let parsed = parse_terrain(&bytes).expect("canonical parses");
+            let n = usize::from(size) * usize::from(size);
+            let hb = n.div_ceil(8);
+            let hole_bytes = &bytes[15 + n..15 + n + hb];
+            let mut repacked = vec![0u8; hb];
+            for (i, live) in parsed.holes.iter().enumerate() {
+                if *live {
+                    repacked[i / 8] |= 1 << (i % 8);
+                }
+            }
+            assert_eq!(
+                &repacked[..],
+                hole_bytes,
+                "hole bytes differ for size {size}"
+            );
+        }
     }
 }

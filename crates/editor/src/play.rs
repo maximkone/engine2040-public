@@ -141,7 +141,7 @@ pub fn export_game(src: &Path, dist: &Path) -> std::io::Result<()> {
         if let Some(parent) = dist.join(rel).parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&from, &dist.join(rel))?;
+        std::fs::copy(&from, dist.join(rel))?;
     }
     Ok(())
 }

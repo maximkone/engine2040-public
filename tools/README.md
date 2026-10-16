@@ -12,7 +12,7 @@ Keep scripts small and portable; docs stay in `docs/`.
 
 ## Live tools
 
-88 live scripts. 81 dead tools (39 A-L plus 42 M-Z) were deleted 2026-10-10 and are not listed. Short lines; the script header is the full doc. The list is pinned by `tools/drift-check.test.mjs` (README lists every live `tools/*.mjs`).
+86 live scripts. 81 dead tools (39 A-L plus 42 M-Z) were deleted 2026-10-10 and are not listed. Short lines; the script header is the full doc. The list is pinned by `tools/drift-check.test.mjs` (README lists every live `tools/*.mjs`).
 
 - `tools/affected.mjs` (+ `tools/affected.test.mjs`): node script; see its header.
 - `tools/arch-fitness.mjs` (+ `tools/arch-fitness.test.mjs`): check the crate graph stays acyclic.
@@ -75,7 +75,6 @@ Keep scripts small and portable; docs stay in `docs/`.
 - `tools/product-check.mjs` (+ `tools/product-check.test.mjs`): check the built game.
 - `tools/proof.mjs` (+ `tools/proof.test.mjs`): golden hash check.
 - `tools/prune-queue.mjs` (+ `tools/prune-queue.test.mjs`): prune done and stale packets.
-- `tools/public-export.mjs` (+ `tools/public-export.test.mjs`): export the public snapshot.
 - `tools/q1-check.mjs` (+ `tools/q1-check.test.mjs`): node script; see its header.
 - `tools/queue-cap.mjs` (+ `tools/queue-cap.test.mjs`): check queue caps and packet roles.
 - `tools/quiet.mjs` (+ `tools/quiet.test.mjs`): run timed work with cargo slots held.
@@ -87,7 +86,6 @@ Keep scripts small and portable; docs stay in `docs/`.
 - `tools/research-cap.mjs` (+ `tools/research-cap.test.mjs`): check the research card cap.
 - `tools/rust-quality.mjs` (+ `tools/rust-quality.test.mjs`): score Rust quality.
 - `tools/seal-keys.mjs` (+ `tools/seal-keys.test.mjs`): run cargo legs with seal keys.
-- `tools/secret-gate.mjs` (+ `tools/secret-gate.test.mjs`): block secret leaks.
 - `tools/ship.mjs` (+ `tools/ship.test.mjs`): node script; see its header.
 - `tools/showcase.mjs` (+ `tools/showcase.test.mjs`): node script; see its header.
 - `tools/sim-source-scan.mjs` (+ `tools/sim-source-scan.test.mjs`): scan sim sources for banned calls.
@@ -108,6 +106,7 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/argv-contract.test.mjs`
 - `tools/bins-quiet.test.mjs`
 - `tools/board-slice-cases.test.mjs`
+- `tools/ci.test.mjs`
 - `tools/compare-split.test.mjs`
 - `tools/cover-gap.test.mjs`
 - `tools/drift-check-catch.test.mjs`
