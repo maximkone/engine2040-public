@@ -37,6 +37,11 @@ codegen-units = 256
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld.exe"
 
+# Linux CI linker (ubuntu-latest only): mold via RUSTFLAGS `-C link-arg=-fuse-ld=mold`
+# in .github/workflows/ci.yml (test, clippy, release-proof). mold is Linux-only,
+# so no Linux linker lives here; Windows keeps rust-lld above. If mold breaks
+# sccache/rust-cache hits, revert the ci.yml RUSTFLAGS hunk first.
+
 # No rustc wrapper. sccache is opt-in per run (OPT9, 2026-10-01: cold
 # `cargo check -p engine-arena` 20.2 s -> 1.1 s at 100% hits). A cold lane gets
 # it from `node tools/lanes.mjs flags`, which prints the hint RUSTC_WRAPPER=sccache
