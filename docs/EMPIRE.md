@@ -27,7 +27,7 @@ Owner history cut to `lab/archive/docs/archive/empire-owner-history.md` — firs
   through the one MCP command service (the same brief→game pipeline forge proves first).
 - Beat Unreal visually on the tier ladder. Reference hardware stays the RTX 3050
   laptop for now: RT tier must look stunning there; Ultra stays designed, unmeasured.
-- License: Apache-2.0 (`LICENSE-APACHE`). Pricing open, not decided
+- License: MIT unchanged (`C:/engine2040/LICENSE-MIT`). Pricing open, not decided
   here. `docs/ROYALTY.md` is a draft, not law; no free-engine
   constraint.
 - Final ground researchers aim at: `C:/engine2040/docs/VISION.md` (Final picture,
