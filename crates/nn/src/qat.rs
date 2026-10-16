@@ -203,18 +203,18 @@ fn logits_for_row(
 ) -> Vec<f32> {
     let x = dequantized_inputs(row_features);
     let mut out = vec![0.0f32; cfg.output_dim];
-    for o in 0..cfg.output_dim {
+    for (o, slot) in out.iter_mut().enumerate() {
         let mut acc = 0.0f32;
-        for i in 0..cfg.input_dim {
+        for (i, &xv) in x.iter().enumerate() {
             let w = weights[o * cfg.input_dim + i];
             let w_use = if cfg.qat {
                 simulate_quantize(w, w_scale)
             } else {
                 w
             };
-            acc += w_use * x[i];
+            acc += w_use * xv;
         }
-        out[o] = acc;
+        *slot = acc;
     }
     out
 }
@@ -250,16 +250,16 @@ pub fn train_student(
                 w_scale,
             );
             let x = dequantized_inputs(&all_features[base..base + cfg.input_dim]);
-            for o in 0..cfg.output_dim {
+            for (o, &logit) in logits.iter().enumerate() {
                 let want = if usize::from(*target) == o {
                     1.0f32
                 } else {
                     0.0f32
                 };
-                let diff = logits[o] - want;
+                let diff = logit - want;
                 let dlogit = diff * mse_scale;
-                for i in 0..cfg.input_dim {
-                    grads[o * cfg.input_dim + i] += dlogit * x[i];
+                for (i, &xv) in x.iter().enumerate() {
+                    grads[o * cfg.input_dim + i] += dlogit * xv;
                 }
             }
             // The QAT path also defends the winning gap: int8 rounding can
@@ -271,18 +271,18 @@ pub fn train_student(
                 let t = usize::from(*target);
                 let mut rival = 0usize;
                 let mut top = f32::NEG_INFINITY;
-                for o in 0..cfg.output_dim {
-                    if o != t && logits[o] > top {
-                        top = logits[o];
+                for (o, &logit) in logits.iter().enumerate() {
+                    if o != t && logit > top {
+                        top = logit;
                         rival = o;
                     }
                 }
                 let gap = logits[t] - top;
                 if gap < QAT_MIN_GAP {
                     let dgap = (gap - QAT_MIN_GAP) * mse_scale;
-                    for i in 0..cfg.input_dim {
-                        grads[t * cfg.input_dim + i] += dgap * x[i];
-                        grads[rival * cfg.input_dim + i] -= dgap * x[i];
+                    for (i, &xv) in x.iter().enumerate() {
+                        grads[t * cfg.input_dim + i] += dgap * xv;
+                        grads[rival * cfg.input_dim + i] -= dgap * xv;
                     }
                 }
             }

@@ -1052,8 +1052,9 @@ mod tests {
 
     #[test]
     fn director_test_reads_levels_without_collect() {
+        let needle = concat!(".map(|&(_, l)| l)", ".collect()");
         assert!(
-            !include_str!("director.rs").contains(".map(|&(_, l)| l).collect()"),
+            !include_str!("director.rs").contains(needle),
             "level probe must use any() so clippy -D warnings stays green"
         );
     }

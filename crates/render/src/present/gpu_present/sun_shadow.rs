@@ -255,38 +255,38 @@ pub(crate) fn encode_live_sun_shadow(
         mapped_at_creation: false,
     });
     presenter.queue.write_buffer(&uniform, 0, &uniform_bytes);
-    let bind_layout =
-        presenter
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("eg11-sun-layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-    let shader =
-        presenter
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("eg11-sun-depth"),
-                source: wgpu::ShaderSource::Wgsl(SUN_SHADOW_DEPTH_WGSL.into()),
-            });
+    let bind_layout = presenter
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("eg11-sun-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+    let shader = presenter
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("eg11-sun-depth"),
+            source: wgpu::ShaderSource::Wgsl(SUN_SHADOW_DEPTH_WGSL.into()),
+        });
     let pipeline = sun_depth_pipeline(&presenter.device, &bind_layout, &shader);
-    let bind = presenter.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("eg11-sun-bind"),
-        layout: &bind_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform.as_entire_binding(),
-        }],
-    });
+    let bind = presenter
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("eg11-sun-bind"),
+            layout: &bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
     {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("eg11-sun-depth-pass"),

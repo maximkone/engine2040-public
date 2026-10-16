@@ -572,6 +572,30 @@ impl PipelineCache {
         self.pending.insert(key.clone())
     }
 
+    /// Queue a compile for this key through `gate`, holding one creation
+    /// slot until the caller resolves. `None` when the key is already in
+    /// flight (no slot consumed) or the gate is full on Dx12, so async
+    /// callers that cannot block skip this frame and retry later. The
+    /// caller holds the guard across the worker compile and drops it
+    /// after [`PipelineCache::resolve_compile`]; the slot frees on drop
+    /// (RAII), on success and on failure.
+    ///
+    /// Caller: [`PipelineCache::warm_keys_gated`] (same file) routes its
+    /// gated warm compiles through here, so the async submit path and the
+    /// load path share one gate.
+    pub fn try_submit<'g>(
+        &mut self,
+        key: &PipelineKey,
+        gate: &'g PipelineGate,
+    ) -> Option<GateGuard<'g>> {
+        if self.pending.contains(key) {
+            return None;
+        }
+        let guard = gate.try_enter()?;
+        self.pending.insert(key.clone());
+        Some(guard)
+    }
+
     /// Non-blocking readiness probe. Never allocates.
     pub fn poll_ready(&self, key: &PipelineKey) -> PollState {
         if self.pending.contains(key) {
@@ -682,6 +706,12 @@ impl PipelineCache {
     /// slot. Caller: [`PipelineCache::warm_keys`] (uncapped Vulkan gate,
     /// behavior unchanged) and the presenter load path next slice (Dx12
     /// gate, one creation at a time). Load-path only.
+    ///
+    /// The warm compiles run the async submit lifecycle
+    /// ([`PipelineCache::try_submit`] then
+    /// [`PipelineCache::resolve_compile`]), so the async path and the
+    /// load path share one gate; ready keys count hits without touching
+    /// it, and a refused submit counts failed.
     pub fn warm_keys_gated(
         &mut self,
         keys: &[PipelineKey],
@@ -690,10 +720,26 @@ impl PipelineCache {
     ) -> WarmSummary {
         let mut summary = WarmSummary::default();
         for key in keys {
-            match self.get_or_compile_gated(key.clone(), gate, || compile(key)) {
-                WarmResult::Hit(_) => summary.hits += 1,
-                WarmResult::Compiled(_) => summary.compiled += 1,
-                WarmResult::Failed => summary.failed += 1,
+            if self.entries.contains_key(key) {
+                summary.hits += 1;
+                continue;
+            }
+            let Some(_slot) = self.try_submit(key, gate) else {
+                self.push_diagnostic(key, "gate full: async submit refused".to_string());
+                summary.failed += 1;
+                continue;
+            };
+            match compile(key) {
+                Ok(blob) => match self.resolve_compile(key, Ok(blob)) {
+                    ResolveOutcome::Compiled { .. } => summary.compiled += 1,
+                    ResolveOutcome::KeptLastGood { .. } | ResolveOutcome::Failed => {
+                        summary.failed += 1;
+                    }
+                },
+                Err(err) => {
+                    self.resolve_compile(key, Err(err.to_string()));
+                    summary.failed += 1;
+                }
             }
         }
         summary
@@ -1105,6 +1151,73 @@ mod tests {
         assert_eq!(cache.poll_ready(&key_a()), PollState::Ready { bytes: 2 });
         assert_eq!(cache.get(&key_a()), Some(&[7, 8][..]));
         assert_eq!(cache.pending_count(), 0);
+    }
+
+    #[test]
+    fn async_submit_dx12_serializes_second_submit_refused_until_resolve() {
+        // GS5: the async compile path goes through the gate: on Dx12 the
+        // second submit while one is in flight is refused; resolving the
+        // first plus dropping its slot frees the gate. Same inputs give the
+        // same verdicts twice.
+        let gate = PipelineGate::new(Backend::Dx12);
+        let mut cache = PipelineCache::new();
+        let _first = cache
+            .try_submit(&key_a(), &gate)
+            .expect("dx12 first submit holds the slot");
+        assert_eq!(gate.live(), 1);
+        assert!(
+            cache.try_submit(&key_b(), &gate).is_none(),
+            "dx12 second submit refused while full"
+        );
+        assert_eq!(cache.poll_ready(&key_b()), PollState::Missing);
+        let outcome = cache.resolve_compile(&key_a(), Ok(vec![7, 8]));
+        assert_eq!(outcome, ResolveOutcome::Compiled { bytes: 2 });
+        drop(_first);
+        assert_eq!(gate.live(), 0, "resolve plus guard drop frees the slot");
+        assert!(
+            cache.try_submit(&key_b(), &gate).is_some(),
+            "freed slot accepts again"
+        );
+    }
+
+    #[test]
+    fn async_submit_duplicate_holds_no_extra_slot() {
+        // A duplicate submit for the key already in flight refuses without
+        // consuming a gate slot, so one key never wedges a Dx12 gate.
+        let gate = PipelineGate::new(Backend::Dx12);
+        let mut cache = PipelineCache::new();
+        let _first = cache
+            .try_submit(&key_a(), &gate)
+            .expect("first submit holds the slot");
+        assert!(
+            cache.try_submit(&key_a(), &gate).is_none(),
+            "duplicate refuses"
+        );
+        assert_eq!(gate.live(), 1, "duplicate holds no extra slot");
+        assert_eq!(gate.peak(), 1);
+    }
+
+    #[test]
+    fn async_submit_vulkan_admits_parallel_submits() {
+        // Uncapped backends admit parallel async submits: both hold, both
+        // resolve to last-good blobs.
+        let gate = PipelineGate::new(Backend::Vulkan);
+        let mut cache = PipelineCache::new();
+        let _a = cache
+            .try_submit(&key_a(), &gate)
+            .expect("vulkan admits first");
+        let _b = cache
+            .try_submit(&key_b(), &gate)
+            .expect("vulkan admits second");
+        assert_eq!(gate.live(), 2);
+        assert_eq!(
+            cache.resolve_compile(&key_a(), Ok(vec![1])),
+            ResolveOutcome::Compiled { bytes: 1 }
+        );
+        assert_eq!(
+            cache.resolve_compile(&key_b(), Ok(vec![2, 3])),
+            ResolveOutcome::Compiled { bytes: 2 }
+        );
     }
 
     #[test]
