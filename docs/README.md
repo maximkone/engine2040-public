@@ -15,7 +15,7 @@ Order of work: `FOCUS.md` "## Now". Rules for AIs: root `../AGENTS.md` (wins) an
 | Game design notes | `design/` (index `design/README.md`) |
 | Specs left from the old systems set | `systems/` (`ai-door.md`, `observability-heal.md`) |
 | Research | `research/COMPARE.md` (rubrics), `research/LADDER.md` (read one rung), `research/steals-*`, `research/web-*` and `research/finish-line-2026-10-17/` (dated dives; the last one feeds the gap list in `plan/finish-line.md`); old catalogs are in git history only (`archive/INDEX.md`) |
-| Skills | `../skills/SKILLS.md` |
+| Skills | `../skills/START-HERE.md` (read first), then `../skills/SKILLS.md` |
 | Archive (no authority) | `archive/INDEX.md`; dated folders `archive/2026-10-NN/` are moved history, kept in git |
 
 ## Rules of thumb

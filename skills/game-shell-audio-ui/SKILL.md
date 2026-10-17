@@ -1,6 +1,6 @@
 ---
 name: game-shell-audio-ui
-description: "Use when you add or change the title, pause, result or rematch shell, a HUD or text overlay, menu layout, or how sound plays (distance gain, cues, voice limits, ducking, music) in crates game, ui or audio: one Flow driver, pause halts the accumulator, 0..1 coords."
+description: "Use when you add or change the title, pause, result or rematch screens, a HUD or text overlay, menu layout, or how sound plays (distance gain, cues, voice limits, ducking, music) in crates game, ui or audio."
 ---
 
 # Game shell, HUD and audio

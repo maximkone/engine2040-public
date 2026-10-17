@@ -1,6 +1,6 @@
 ---
 name: physics-bodies
-description: "Use when you change crates/physics, physfx, destruction, ragdoll, limb cuts, debris, a break, a material, rapier or cloth and soft-body code: hashed authority layer vs float physfx layer, fixed dt, spawn order, enhanced-determinism, rollback rebuild, strain constraints."
+description: "Use when you change physics, physfx, destruction, ragdoll, limb cuts, debris, a break, a material, Rapier or cloth: hashed authority layer versus float physfx layer, fixed dt, spawn order, rollback rebuild."
 ---
 
 # Physics bodies

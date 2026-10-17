@@ -375,3 +375,78 @@ test("writeArena leaves the PNG and the facts side by side, and nothing for a pa
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- the net duel (WEB9, WEB12) ----
+test("parseArgs takes the net duel keys and refuses the half-given ones", () => {
+  const ok = parseArgs(["--chrome", "c", "--server", "ws://127.0.0.1:7050", "--expect-hash", "00ab00ab00ab00ab", "--expect-transport", "websocket", "--net-timeout", "30"]);
+  assert.equal(ok.error, null);
+  assert.deepEqual([ok.server, ok.expectHash, ok.expectTransport, ok.netTimeout], ["ws://127.0.0.1:7050", "00ab00ab00ab00ab", "websocket", 30]);
+  assert.match(parseArgs(["--chrome", "c", "--server", "http://h:1"]).error, /--server/);
+  assert.match(parseArgs(["--chrome", "c", "--server"]).error, /--server/);
+  assert.match(parseArgs(["--chrome", "c", "--wt", "https://h:2/e2040"]).error, /go with --server/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--wt", "ws://h:2"]).error, /--wt/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--cert", "abcd"]).error, /--cert/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-hash", "xyz"]).error, /--expect-hash/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-transport", "quic"]).error, /--expect-transport/);
+  assert.equal(parseArgs(["--chrome", "c"]).server, null, "without --server the full check runs");
+});
+
+test("netUrl puts the keys in the query, encoded", async () => {
+  const { netUrl } = await import("./web-browse.mjs");
+  const cert = "ab".repeat(32);
+  assert.equal(netUrl(8099, { server: "ws://127.0.0.1:7050" }), "http://127.0.0.1:8099/index.html?server=ws%3A%2F%2F127.0.0.1%3A7050");
+  const u = new URL(netUrl(8099, { server: "ws://h:1", wt: "https://h:2/e2040", cert }));
+  assert.deepEqual([u.searchParams.get("server"), u.searchParams.get("wt"), u.searchParams.get("cert")], ["ws://h:1", "https://h:2/e2040", cert]);
+});
+
+test("netVerdict accepts only a finished duel on the expected hash, ticks and leg", async () => {
+  const { netVerdict } = await import("./web-browse.mjs");
+  const line = "net: transport=websocket ticks=600 hash=0123456789abcdef peers=1";
+  const good = netVerdict(line, "ok", { hash: "0123456789ABCDEF", transport: "websocket" });
+  assert.equal(good.ok, true);
+  assert.deepEqual(good.parsed, { transport: "websocket", ticks: 600, hash: "0123456789abcdef", peers: 1 });
+  assert.equal(netVerdict(line, "ok").ok, true, "no expectation, only the shape");
+  const wrongHash = netVerdict(line, "ok", { hash: "fedcba9876543210" });
+  assert.equal(wrongHash.ok, false);
+  assert.match(wrongHash.problems[0], /the server's is fedcba9876543210/);
+  assert.match(netVerdict(line, "ok", { transport: "webtransport" }).problems[0], /expected webtransport/);
+  assert.match(netVerdict(line.replace("ticks=600", "ticks=599"), "ok").problems[0], /ticks 599, expected 600/);
+  assert.match(netVerdict(line.replace("peers=1", "peers=0"), "ok").problems[0], /peers 0/);
+  const failed = netVerdict("net: failed transport=none reason=no leg connected: websocket leg failed: closed", "failed");
+  assert.equal(failed.ok, false);
+  assert.match(failed.problems[0], /ended as failed.*websocket leg failed/);
+  assert.match(netVerdict("", null).problems[0], /never finished/);
+  assert.match(netVerdict("net: idle", "ok").problems[0], /not the net shape/);
+});
+
+test("readNetPage reads the line a mock page prints (real Chrome, WEB_BROWSE_CHROME)", { skip: !process.env.WEB_BROWSE_CHROME }, async () => {
+  const { readNetPage, netVerdict } = await import("./web-browse.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "net-page-"));
+  const html = `<!doctype html><body><pre id="net">net: connecting</pre><script>
+    const q = new URLSearchParams(location.search);
+    setTimeout(() => { document.getElementById('net').textContent = 'net: transport=websocket ticks=600 hash=0123456789abcdef peers=1'; document.body.dataset.net = 'ok'; }, 300);
+    document.title = q.get('server');
+  </script></body>`;
+  writeFileSync(join(dir, "index.html"), html);
+  const server = await serve(dir);
+  try {
+    const url = `http://127.0.0.1:${server.port}/index.html?server=ws%3A%2F%2Fh%3A1`;
+    const r = await readNetPage({ chrome: process.env.WEB_BROWSE_CHROME, url, logFile: join(dir, "chrome.log"), waitMs: 20000 });
+    assert.equal(r.state, "ok");
+    assert.equal(netVerdict(r.text, r.state, { hash: "0123456789abcdef" }).ok, true);
+  } finally {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("netVerdict can demand a loud failure that names the blocked leg", async () => {
+  const { netVerdict } = await import("./web-browse.mjs");
+  const text = "net: failed transport=none reason=no leg connected: webtransport leg failed: no answer within 5 s; websocket leg failed: the socket could not connect";
+  const want = { failure: ["webtransport leg failed", "websocket leg failed"] };
+  assert.equal(netVerdict(text, "failed", want).ok, true);
+  assert.match(netVerdict(text, "failed", { failure: ["quic leg failed"] }).problems[0], /lacks "quic leg failed"/);
+  assert.match(netVerdict("net: transport=websocket ticks=600 hash=0123456789abcdef peers=1", "ok", want).problems[0], /expected the duel to fail/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-failure", "x", "--expect-hash", "00ab00ab00ab00ab"]).error, /does not go with/);
+  assert.deepEqual(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-failure", "a", "--expect-failure", "b"]).expectFailure, ["a", "b"]);
+});

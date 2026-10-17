@@ -15,6 +15,10 @@
   #input, #audio { position: fixed; right: 8px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   #input { top: 8px; }
   #audio { top: 34px; }
+  /* WEB9/WEB12: the net duel line, only when the address has ?server=. */
+  #net { display: none; position: fixed; right: 8px; top: 60px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  body[data-net] #net { display: block; }
+  body[data-net="failed"] #net { background: #b00020; color: #fff; font-weight: 700; }
   #report { position: fixed; left: 8px; right: 8px; bottom: 8px; margin: 0; padding: 6px 8px; max-height: 40vh; overflow: auto; background: rgba(0, 0, 0, 0.7); border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
   /* The arena page keeps the raw adapter line to two rows (it grows on hover) so the picture stays visible. */
   body[data-mode="arena"] #report { right: 50vw; max-height: 3.4em; opacity: 0.85; }
@@ -33,6 +37,7 @@
 <div id="hud">frame 0 | -- ms</div>
 <pre id="input">input: kb=0 mouse=0 pad=0</pre>
 <pre id="audio">audio: state=suspended</pre>
+<pre id="net">net: idle</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>
 <div id="arena-info">
@@ -57,17 +62,25 @@
   <div style="position:fixed;inset:0;z-index:11;padding:5vmin;background:#b00020;color:#fff;font:600 20px system-ui,sans-serif">This page needs JavaScript, WebAssembly and WebGPU (Chrome or Edge 113+, Safari 26+, Firefox 141+ on Windows).</div>
 </noscript>
 <script type="module">
-import init, { run, run_arena, lose_device, request_arena_capture } from "./engine.js";
+import init, { run, run_arena, lose_device, request_arena_capture, run_net } from "./engine.js";
 
 // For the headless check: destroys the device and waits for the shell to come back, and asks for a fresh
 // GPU copy of the canvas.
 window.loseDevice = lose_device;
 window.requestArenaCapture = request_arena_capture;
 // The arena is the page; `?square` opens the plain WebGPU shell (a cleared canvas and one moving square).
-const square = new URLSearchParams(location.search).has("square");
+const query = new URLSearchParams(location.search);
+const square = query.has("square");
 
 try {
   await init();
+  // WEB9/WEB12: `?server=ws://host:port` (optionally `&wt=https://host:port/e2040&cert=<sha256 hex>`) makes the page
+  // join a native dedicated server and play a scripted duel; it prints `net: transport=... ticks=... hash=... peers=...`
+  // to #net and the console and leaves the line in window.netResult. It needs no GPU, so it starts beside the arena.
+  const server = query.get("server");
+  if (server) {
+    window.netResult = run_net(server, query.get("wt"), query.get("cert")).then((line) => (window.netLine = line));
+  }
   await (square ? run("canvas") : run_arena("canvas"));
 } catch (e) {
   // The wasm module did not load or start (no WebAssembly, a missing file, a crash).

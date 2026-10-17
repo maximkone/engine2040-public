@@ -1,6 +1,6 @@
 ---
 name: github-check
-description: "Use when a cargo test, clippy or check proof is needed, a gate or CI check is red, a test binary fails to link, or the local cargo lock blocks: run node tools/gh-check.mjs on a GitHub runner, read the mirror CI with public-export --ci, fix red the smallest way."
+description: "Use when you need a cargo test, clippy or check proof, a gate or CI check is red, a test binary fails to link, or the local cargo lock blocks: run node tools/gh-check.mjs on a GitHub runner, fix red the smallest way. Odd messages: gh-check-playbook."
 ---
 
 # GitHub is the workforce (owner 2026-10-17)
@@ -8,6 +8,8 @@ description: "Use when a cargo test, clippy or check proof is needed, a gate or 
 The PC has one cargo build lock. GitHub runners have none. Heavy proofs go to GitHub; the PC only iterates.
 
 ## One narrow command: `tools/gh-check.mjs`
+
+Which form for which job, and what each odd message means (exit 2 or 3, 0 tests, push or dispatch errors, GPU lines, web-run): skill `gh-check-playbook`.
 
 - `node tools/gh-check.mjs cargo test -p <crate> --lib <filter>`
 - `node tools/gh-check.mjs cargo clippy -p <crate> --all-targets -- -D warnings`

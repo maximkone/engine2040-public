@@ -1,6 +1,6 @@
 ---
 name: perf-bench
-description: "Use when you measure or optimize speed: flamegraph, samply, Gungraun, bench-compare, alloc_probe, paired runs, p50/p95/p99, perf CSV, frame or build time, or any speedup claim: profile first, one variable per change, noise stays open, no golden or threshold changes."
+description: "Use when you measure or speed up code, or claim a speedup: flamegraph, bench-compare, paired runs, p50/p95/p99, perf CSV, frame or build time. Profile first, change one thing, never touch a golden or threshold to pass."
 ---
 
 # Perf and bench

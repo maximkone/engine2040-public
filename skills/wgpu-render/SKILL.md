@@ -1,6 +1,6 @@
 ---
 name: wgpu-render
-description: "Use when writing or fixing wgpu 30.0 code in crates/render: instance, surface, pipelines, buffers, bind groups, uniform alignment, readback, a validation error, a PresentError, resize, minimize or device loss; an older wgpu name from memory will not compile."
+description: "Use when you write or fix wgpu 30.0 code in crates/render: instance, surface, pipelines, buffers, bind groups, uniform alignment, readback, a validation error, resize or device loss. Older wgpu names from memory will not compile."
 ---
 
 # wgpu 30.0 in crates/render
