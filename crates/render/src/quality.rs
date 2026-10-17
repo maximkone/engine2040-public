@@ -198,8 +198,8 @@ mod tests {
         assert_eq!(p.shadow_cascades, 1);
         assert_eq!(p.shadow_map_px, 1024);
         assert_eq!(p.gtao, Gtao::Off);
-        assert_eq!(p.bloom_half_res, false);
-        assert_eq!(p.taa, false);
+        assert!(!p.bloom_half_res);
+        assert!(!p.taa);
         assert_eq!(p.msaa, 0);
         assert_eq!(p.aniso, 0);
         assert_eq!(p.mip_bias_x100, 100);
@@ -211,8 +211,8 @@ mod tests {
         assert_eq!(c.shadow_cascades, 3);
         assert_eq!(c.shadow_map_px, 2048);
         assert_eq!(c.gtao, Gtao::Half);
-        assert_eq!(c.bloom_half_res, true);
-        assert_eq!(c.taa, true);
+        assert!(c.bloom_half_res);
+        assert!(c.taa);
         assert_eq!(c.msaa, 0);
         assert_eq!(c.aniso, 4);
         assert_eq!(c.mip_bias_x100, 100);
@@ -224,8 +224,8 @@ mod tests {
         assert_eq!(h.shadow_cascades, 4);
         assert_eq!(h.shadow_map_px, 4096);
         assert_eq!(h.gtao, Gtao::Full);
-        assert_eq!(h.bloom_half_res, true);
-        assert_eq!(h.taa, true);
+        assert!(h.bloom_half_res);
+        assert!(h.taa);
         assert_eq!(h.msaa, 4);
         assert_eq!(h.aniso, 8);
         assert_eq!(h.mip_bias_x100, 100);

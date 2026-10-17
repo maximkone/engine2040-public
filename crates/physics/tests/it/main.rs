@@ -8,16 +8,7 @@
 //! `#[global_allocator]` to count allocations, and one binary allows one.
 
 mod break_slice_vectors;
-mod contacts;
-mod deterministic_order_vectors;
-mod g21_locked_hash;
 mod idmap_fxbench;
-mod island;
-mod island_sleep_commit;
 mod pd_drive;
-mod physics_broadphase;
-mod physics_solver;
-mod physics_substep;
 mod probe;
-mod seq_impulse_bench;
 mod trace_snapshot;

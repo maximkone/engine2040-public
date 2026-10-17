@@ -28,7 +28,8 @@ use rapier3d::pipeline::PhysicsPipeline;
 use std::fmt::{Display, Formatter};
 
 /// Fixed step, 60 Hz. Callers pass this to [`World::step`].
-pub const FIXED_DT: f32 = 1.0 / 60.0;
+/// Single owner is `engine_core::FIXED_DT`.
+pub use engine_core::FIXED_DT;
 /// Gravity, m/s^2, -Y.
 pub const GRAVITY_Y: f32 = -9.81;
 /// Hash quantization: state floats are scaled by this and rounded to `i64`.

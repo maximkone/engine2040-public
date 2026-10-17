@@ -182,7 +182,7 @@ mod tests {
     fn op_sizer_pins_hand_arithmetic() {
         assert_eq!(mlp_tick_ops(6, 24, 5), 322);
         assert_eq!(mlp_tick_ops(2, 8, 2), 8 * 4 + 2 * 10);
-        assert_eq!(mlp_tick_ops(4, 1, 3), 1 * 6 + 3 * 3);
+        assert_eq!(mlp_tick_ops(4, 1, 3), 6 + 3 * 3);
         // Saturates instead of wrapping on absurd dims.
         assert_eq!(mlp_tick_ops(usize::MAX, usize::MAX, usize::MAX), u64::MAX);
     }
@@ -325,9 +325,7 @@ mod tests {
         bytes.extend_from_slice(&1i32.to_le_bytes());
         bytes.push(0);
         bytes.push(ACT_NONE);
-        for _ in 0..4 * 5 {
-            bytes.push(0);
-        }
+        bytes.resize(bytes.len() + 4 * 5, 0);
         assert_eq!(check_fps(&bytes), Err(FpsError::NonDense));
     }
 }

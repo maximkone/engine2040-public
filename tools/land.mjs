@@ -231,8 +231,17 @@ export const planLanding = ({ packet, record, reviewName, review, changed = [], 
   if (String(fm.closes ?? "").trim() && res.status !== "PARTIAL") {
     const ownC = parsePathEntries(fm.paths).map((e) => e.path).filter((p) => p && !p.startsWith("target/") && !/^[A-Za-z]:|^\/|\.\./.test(p));
     const reviewed = review ? verdictOf(review).verdict : null;
-    if (ownC.length && !changed.some((c) => ownC.some((p) => c === p || c.startsWith(`${p}/`))) && !(reviewed && reviewed !== "PASS")) {
-      return { ok: false, code: 0, closeOnly: true, why: `nothing to land: no changes under ${ownC.join(", ")} (landed or swept already)`, fm, proof: res.proof, status: res.status };
+    const dirty = changed.some((c) => ownC.some((p) => c === p || c.startsWith(`${p}/`)));
+    // A NOOP made no edit at all (resultOf), so a dirty hunk under its paths is another seat's and never its diff: with no PASS review to land
+    // under, the row still closes and closeRow commits only the board file, leaving those hunks alone (2026-10-17: 7 NOOP close records sat
+    // unlandable forever because a foreign hunk defeated this branch and the next check wants a review a NOOP never gets). A DONE keeps the
+    // no-changes condition (its hunks may be its own) and a FAIL/BLOCKED review still stops the tick.
+    const closeOnlyRow = !dirty || (res.status === "NOOP" && !review);
+    if (ownC.length && closeOnlyRow && !(reviewed && reviewed !== "PASS")) {
+      const why = dirty
+        ? `nothing to land: ${ownC.join(", ")} carry other seats' uncommitted edits; the run made none (NOOP), so the tick commits only the board file`
+        : `nothing to land: no changes under ${ownC.join(", ")} (landed or swept already)`;
+      return { ok: false, code: 0, closeOnly: true, why, fm, proof: res.proof, status: res.status };
     }
   }
   if (!reviewName || !review) return { ok: false, code: 1, why: `no review record for ${packet} in done/` };
@@ -273,12 +282,18 @@ export const landedLine = ({ at, row, packet, sha, proof }) => [at, row || "-", 
 // A board row names its acceptance in an `Accept:` clause (it runs to F2P:, P2P:, Diff:, Tier:, Size:, needs:); the
 // commands are its backticked spans that start with a command word. Paths and identifiers in backticks are no command.
 const COMMAND_SPAN = /^[(!\s]*(?:cargo|node|rg|git|pwsh|python3?|npm|Select-String|Test-Path|Get-[A-Z]\w*)\b/i;
+// A bookkeeping span is a command that only looks at the tree (a diff, a status, a log, a search, a Get-*): it belongs to
+// an Accept clause ("`git diff --stat` at most 200 lines") but verifies nothing on its own, so the proof of a close is
+// never asked to hold one. 2026-10-17: EG18's bookkeeping span was read as an Accept command, no honest close proof runs
+// `git diff --stat`, and three close packets ended NOOP with the row open. The row's real command decides; a row whose
+// spans are all bookkeeping is a row with no Accept command and falls back to the packet's `test:` command, as before.
+const BOOKKEEPING_SPAN = /^[(!\s]*(?:git\s+(?:diff|status|log)\b|Select-String\b|Get-[A-Z]\w*)/i;
 export const acceptCommands = (rowText) => {
   const text = String(rowText ?? "").replace(/\s+/g, " ");
   const at = text.search(/\bAccept:/);
   if (at < 0) return [];
   const clause = text.slice(at + "Accept:".length).split(/\b(?:F2P|P2P|Diff|Tier|Size|needs|Needs|BLOCKED|LATER):/)[0];
-  return [...clause.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter((c) => COMMAND_SPAN.test(c));
+  return [...clause.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter((c) => COMMAND_SPAN.test(c) && !BOOKKEEPING_SPAN.test(c));
 };
 
 const squash = (s) => String(s ?? "").replace(/\\/g, "/").replace(/\s+/g, " ").trim().toLowerCase();
@@ -286,7 +301,8 @@ const squash = (s) => String(s ?? "").replace(/\\/g, "/").replace(/\s+/g, " ").t
 // Pure: tick the one row a packet closes. boards = [{ file, text }] in board order (index, then shards). null = the
 // packet closes nothing. { ok: true, file, text } = the board file with `- [ ] ID` ticked and ` Landed <sha7>.` at the end
 // of the row's first line; { ok: false, why } = left alone. A ticked row is never touched; the first file that holds the
-// id decides; every Accept command of the row must stand in the landing proof (equal to it or contained in it).
+// id decides; every Accept command of the row must stand in the landing proof (equal to it or contained in it), and a
+// bookkeeping span (acceptCommands, `git diff --stat`) is no such command.
 // A row with no Accept command in backticks (14 of 25 close-only packets sampled 2026-10-15) could never tick: its close packet ended NOOP and the
 // cutter queued it again. Then the packet's own `test:` command stands in for it: the proof must hold that command.
 export const planClose = ({ closes, proof, sha, boards, test = "" }) => {

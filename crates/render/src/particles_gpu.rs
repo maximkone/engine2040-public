@@ -27,7 +27,8 @@ pub mod vfx_hanabi;
 // ---------------------------------------------------------------------------
 
 /// Fixed simulation step in seconds (60 Hz presentation ticks).
-pub const TICK_DT: f32 = 1.0 / 60.0;
+/// Single owner of the value is `engine_core::DT`.
+pub const TICK_DT: f32 = engine_core::DT;
 /// Largest integrated step in seconds; bigger asks clamp, never explode.
 pub const MAX_DT_CLAMP: f32 = 0.1;
 /// Default pool cap: the worst-case live set stays bounded per frame.
@@ -621,14 +622,6 @@ impl ParticlePool {
         debug_assert!(self.emitters[2].kind == EmitterKind::Sparks);
         batch.dispatch_count()
     }
-    /// Second draw feed over the presentation fluid pool beside the emitters.
-    /// Caller: present bind sizes the fluid billboard draw from this count.
-    pub fn fluid_feed_count(&self, fluid: &fluids_gpu::PresentFluid) -> usize {
-        let _ = self.live.len();
-        let _ = fluids_gpu::FLUID_DRAW_WGSL.len();
-        fluid.alive()
-    }
-
     /// Backing capacity probe for the no-steady-state-allocation test.
     pub fn slot_capacity(&self) -> usize {
         self.live.capacity()
@@ -1022,6 +1015,290 @@ impl ParticlePool {
 pub const PARTICLE_DRAW_WGSL: &str = include_str!("shaders/particle.wgsl");
 
 // ---------------------------------------------------------------------------
+// Staged draw bytes (behind `window`): the CPU image of
+// `shaders/particle.wgsl`, one instance per [`DrawRecord`], plus its
+// per-frame camera uniform. The packing plus the device builders live with
+// the frame pass in `present::gpu_present::submit`; this module owns the
+// layout contract and the draw state itself.
+// ---------------------------------------------------------------------------
+
+/// Draw-uniform byte size for `shaders/particle.wgsl` (`DrawU`): one `mat4`
+/// view-projection, the camera right and up axes, the atlas grid and the
+/// fade plus stretch bars. WGSL puts every `vec3` member on a 16-byte bound,
+/// so the image is 112 bytes where the fields add up to 108.
+#[cfg(feature = "window")]
+pub const PARTICLE_DRAW_UNIFORM_BYTES: usize = 112;
+
+/// One packed draw instance: the `DrawP` image of `shaders/particle.wgsl`
+/// (position, size, velocity, alpha, the two flipbook cells, the blend
+/// weight, then the tint on a 16-byte bound).
+#[cfg(feature = "window")]
+pub const PARTICLE_DRAW_INSTANCE_BYTES: usize = 64;
+
+/// Instances one staged batch carries at most; the pool cap bounds it, so the
+/// instance buffer is sized once and never resizes on a frame.
+#[cfg(feature = "window")]
+const PARTICLE_DRAW_MAX_INSTANCES: usize = POOL_CAP;
+
+/// Scene-depth seam bytes the draw binds at group 0 binding 4: the shader
+/// declares the array but reads a constant zero gap until the closing slice
+/// feeds real depths, so one zeroed 64-byte block serves it.
+#[cfg(feature = "window")]
+const PARTICLE_DRAW_SCENE_DEPTH_BYTES: u64 = 64;
+
+/// Flipbook atlas grid the draw uniform binds. The Kenney sprite set is
+/// descriptors only (`content/vfx`); the shipped stand-in atlas is one white
+/// texel, so every cell samples 1.0 and the per-kind Kenney grids land with
+/// the sprite bytes.
+#[cfg(feature = "window")]
+const PARTICLE_ATLAS_GRID: [u32; 2] = [1, 1];
+
+/// Append one little-endian `f32` at `*at`; stack bytes only.
+#[cfg(feature = "window")]
+fn particle_put_f32(out: &mut [u8], at: &mut usize, v: f32) {
+    out[*at..*at + 4].copy_from_slice(&v.to_le_bytes());
+    *at += 4;
+}
+
+/// Append one little-endian `u32` at `*at`; stack bytes only.
+#[cfg(feature = "window")]
+fn particle_put_u32(out: &mut [u8], at: &mut usize, v: u32) {
+    out[*at..*at + 4].copy_from_slice(&v.to_le_bytes());
+    *at += 4;
+}
+
+/// Pack the `DrawU` image: the frame view-projection in column-major order
+/// (the image the forward camera uniform carries), the billboard axes, the
+/// atlas grid and the fade plus stretch bars from [`SOFT_FADE_RANGE_M`],
+/// [`STRETCH_GAIN`] and [`STRETCH_MAX`]. `soft_on` packs as 0: the staged
+/// [`DrawRecord::fade`] rides the instance alpha, so the shader's own
+/// scene-depth gap stays off until the closing slice feeds `scene_depth`.
+/// Deterministic: fixed field order, no wall clock.
+#[cfg(feature = "window")]
+fn particle_pack_uniform(
+    view_proj: [[f32; 4]; 4],
+    cam_right: [f32; 3],
+    cam_up: [f32; 3],
+) -> [u8; PARTICLE_DRAW_UNIFORM_BYTES] {
+    let mut out = [0u8; PARTICLE_DRAW_UNIFORM_BYTES];
+    let mut at = 0usize;
+    for col in view_proj {
+        for v in col {
+            particle_put_f32(&mut out, &mut at, v);
+        }
+    }
+    for v in cam_right {
+        particle_put_f32(&mut out, &mut at, v);
+    }
+    particle_put_f32(&mut out, &mut at, SOFT_FADE_RANGE_M);
+    for v in cam_up {
+        particle_put_f32(&mut out, &mut at, v);
+    }
+    particle_put_f32(&mut out, &mut at, STRETCH_GAIN);
+    particle_put_u32(&mut out, &mut at, PARTICLE_ATLAS_GRID[0]);
+    particle_put_u32(&mut out, &mut at, PARTICLE_ATLAS_GRID[1]);
+    particle_put_f32(&mut out, &mut at, STRETCH_MAX);
+    particle_put_u32(&mut out, &mut at, 0);
+    debug_assert_eq!(at, PARTICLE_DRAW_UNIFORM_BYTES);
+    out
+}
+
+/// Pack one staged [`DrawRecord`] into the `DrawP` image: `pos`, `size_m`,
+/// both flipbook cells, `tint` and the blend weight cross over; the alpha slot
+/// carries the staged [`DrawRecord::fade`], so the soft fade the CPU staged
+/// reaches the blend, and the blend weight is `blend_b` (`mix(a, b, blend_b)`
+/// equals `a * blend_a + b * blend_b` once the pair sums to one). The velocity
+/// slot packs zero: a record holds no direction, so its quad draws round
+/// (shader stretch 1.0) until the closing slice feeds the velocity beside the
+/// depth gap. Deterministic: fixed order.
+#[cfg(feature = "window")]
+fn particle_pack_instance(record: &DrawRecord, out: &mut [u8]) {
+    debug_assert_eq!(out.len(), PARTICLE_DRAW_INSTANCE_BYTES);
+    let mut at = 0usize;
+    for v in [record.pos[0], record.pos[1], record.pos[2], record.size_m] {
+        particle_put_f32(out, &mut at, v);
+    }
+    for _ in 0..3 {
+        particle_put_f32(out, &mut at, 0.0);
+    }
+    particle_put_f32(out, &mut at, record.fade);
+    particle_put_u32(out, &mut at, record.frame_a);
+    particle_put_u32(out, &mut at, record.frame_b);
+    particle_put_f32(out, &mut at, record.blend_b);
+    particle_put_f32(out, &mut at, 0.0);
+    for v in record.tint {
+        particle_put_f32(out, &mut at, v);
+    }
+    debug_assert_eq!(at, PARTICLE_DRAW_INSTANCE_BYTES);
+}
+
+/// Draw bind-group layout: the view uniform, the instance array, the flipbook
+/// atlas plus its filtering sampler, and the scene-depth seam the shader
+/// declares at binding 4. Fixed shape, never rebuilt.
+#[cfg(feature = "window")]
+fn particle_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let storage = || wgpu::BufferBindingType::Storage { read_only: true };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("rp2-particle-draw-layout"),
+        entries: &[
+            particle_draw_buffer_entry(
+                0,
+                wgpu::ShaderStages::VERTEX,
+                wgpu::BufferBindingType::Uniform,
+            ),
+            particle_draw_buffer_entry(1, wgpu::ShaderStages::VERTEX, storage()),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            particle_draw_buffer_entry(4, wgpu::ShaderStages::VERTEX, storage()),
+        ],
+    })
+}
+
+/// The flipbook pipeline: [`PARTICLE_DRAW_WGSL`] `draw_vs` plus `draw_fs`, no
+/// vertex buffers (the shader reads the instance array), one HDR colour target
+/// alpha blended and no depth attachment, so no pass shape can mismatch. The
+/// shader lays the quad out as corners 0..3, so the strip closes it with two
+/// triangles.
+#[cfg(feature = "window")]
+fn particle_draw_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("rp2-particle-draw"),
+        source: wgpu::ShaderSource::Wgsl(PARTICLE_DRAW_WGSL.into()),
+    });
+    let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("rp2-particle-draw-pipe-layout"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("rp2-particle-draw-pipeline"),
+        layout: Some(&pipe_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("draw_vs"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("draw_fs"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: crate::present::HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..wgpu::PrimitiveState::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// One device buffer with `usage` plus the copy destination the batch uploads
+/// need.
+#[cfg(feature = "window")]
+fn particle_draw_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// Buffer bind-group layout entry at `binding` for `stage`.
+#[cfg(feature = "window")]
+fn particle_draw_buffer_entry(
+    binding: u32,
+    stage: wgpu::ShaderStages,
+    ty: wgpu::BufferBindingType,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: stage,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// The stand-in flipbook atlas: one white texel, so every cell samples 1.0
+/// until the Kenney sprite bytes land (`content/vfx` holds descriptors only),
+/// with the view the bind group samples.
+#[cfg(feature = "window")]
+fn particle_draw_atlas(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let atlas = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("rp2-particle-draw-atlas"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &atlas,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255u8; 4],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+    (atlas, view)
+}
+
+// ---------------------------------------------------------------------------
 // Window device submit (behind `window`): the live pool byte image bound
 // under the shared LookFrame bind shape. Engine-owned WGSL, no donor code.
 // ---------------------------------------------------------------------------
@@ -1089,6 +1366,11 @@ impl ParticleGpuReceipt {
 /// bind group. Built once per frame loop (WIN1 and ED1 each own one);
 /// steady-state submits on a matching shape create no buffers or bind
 /// groups (the reuse test proves the count stays flat).
+///
+/// Beside the probe sits the staged draw side ([`Self::draw_staged`] plus
+/// [`Self::encode_draw`]): the flipbook pipeline over [`PARTICLE_DRAW_WGSL`]
+/// with the view uniform, the max-size instance buffer and one bind group,
+/// built on the first non-empty batch and reused after.
 #[cfg(feature = "window")]
 pub struct ParticleSubmitter {
     pipeline: wgpu::ComputePipeline,
@@ -1100,6 +1382,28 @@ pub struct ParticleSubmitter {
     readback: Option<wgpu::Buffer>,
     bind: Option<wgpu::BindGroup>,
     created_buffers: u64,
+    draw_view: [u8; PARTICLE_DRAW_UNIFORM_BYTES],
+    draw: Option<ParticleDrawState>,
+}
+
+/// Device state for the staged draw: the flipbook pipeline built from
+/// [`PARTICLE_DRAW_WGSL`], the 112-byte view uniform, the max-size instance
+/// buffer, the one-texel atlas stand-in and the bind group that ties them
+/// together under the shader's group 0. Built once, on the first non-empty
+/// batch; every later batch rewrites the same buffers.
+#[cfg(feature = "window")]
+struct ParticleDrawState {
+    pipeline: wgpu::RenderPipeline,
+    bind: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    scene_depth: wgpu::Buffer,
+    /// The one-texel white atlas stand-in the bind group samples.
+    atlas: wgpu::Texture,
+    /// Staged instance bytes, reused across frames (grown once).
+    packed: Vec<u8>,
+    /// Instances in the batch currently on the device; 0 draws nothing.
+    staged: u32,
 }
 
 #[cfg(feature = "window")]
@@ -1149,6 +1453,18 @@ impl ParticleSubmitter {
             readback: None,
             bind: None,
             created_buffers: 0,
+            // Identity draw camera (right +X, up +Y) until a frame binds one.
+            draw_view: particle_pack_uniform(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ),
+            draw: None,
         }
     }
 
@@ -1156,6 +1472,201 @@ impl ParticleSubmitter {
     /// reuse test: flat across matching-shape submits).
     pub fn created_buffers(&self) -> u64 {
         self.created_buffers
+    }
+
+    /// Bind the frame camera the staged draw uses: the view-projection the
+    /// HDR frame is drawn with, in column-major order, plus the camera right
+    /// and up axes the billboard expands along (world space meters, unit
+    /// length). Non-finite input is refused before anything reaches the
+    /// device, so a bad camera never draws a wild quad. Called before the
+    /// first batch it only stages the bytes, which that batch uploads.
+    /// Steady frames rewrite the same 112 bytes: no frame creates anything.
+    pub fn set_draw_view(
+        &mut self,
+        queue: &wgpu::Queue,
+        view_proj: [[f32; 4]; 4],
+        cam_right: [f32; 3],
+        cam_up: [f32; 3],
+    ) -> Result<(), ParticleError> {
+        if !view_proj
+            .iter()
+            .all(|col| col.iter().all(|c| c.is_finite()))
+            || !cam_right.iter().all(|c| c.is_finite())
+            || !cam_up.iter().all(|c| c.is_finite())
+        {
+            return Err(ParticleError::Invalid(
+                "particle draw view is not finite".into(),
+            ));
+        }
+        let packed = particle_pack_uniform(view_proj, cam_right, cam_up);
+        self.draw_view = packed;
+        if let Some(draw) = self.draw.as_ref() {
+            queue.write_buffer(&draw.uniform, 0, &packed);
+        }
+        Ok(())
+    }
+
+    /// Upload one staged batch (one instance per [`DrawRecord`], in the
+    /// feed's fixed emitter order) and report its instance count. An empty
+    /// batch is a calm frame: it reports 0 and sizes nothing. The first
+    /// non-empty batch builds the pipeline, the view uniform, the atlas
+    /// stand-in and the max-size instance buffer; every later batch rewrites
+    /// the same buffers and bind group, so a same-shape batch creates
+    /// nothing. Over-cap batches are refused before any device work. This
+    /// path never maps and never waits on the device.
+    pub fn draw_staged(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        records: &[DrawRecord],
+    ) -> Result<u32, ParticleError> {
+        if records.len() > PARTICLE_DRAW_MAX_INSTANCES {
+            return Err(ParticleError::BudgetExceeded {
+                requested: u32::try_from(records.len()).unwrap_or(u32::MAX),
+                allowed: u32::try_from(PARTICLE_DRAW_MAX_INSTANCES).unwrap_or(u32::MAX),
+            });
+        }
+        if records.is_empty() {
+            if let Some(draw) = self.draw.as_mut() {
+                draw.staged = 0;
+            }
+            return Ok(0);
+        }
+        if self.draw.is_none() {
+            self.draw = Some(ParticleDrawState::build(device, queue, &self.draw_view)?);
+            self.created_buffers = self.created_buffers.saturating_add(3);
+        }
+        let Some(draw) = self.draw.as_mut() else {
+            return Err(ParticleError::Device(
+                "particle draw state lost its built buffers".into(),
+            ));
+        };
+        let bytes = records.len() * PARTICLE_DRAW_INSTANCE_BYTES;
+        draw.packed.clear();
+        draw.packed.resize(bytes, 0);
+        for (slot, record) in records.iter().enumerate() {
+            let at = slot * PARTICLE_DRAW_INSTANCE_BYTES;
+            particle_pack_instance(
+                record,
+                &mut draw.packed[at..at + PARTICLE_DRAW_INSTANCE_BYTES],
+            );
+        }
+        queue.write_buffer(&draw.instances, 0, &draw.packed);
+        draw.staged = u32::try_from(records.len()).map_err(|_| {
+            ParticleError::Device("particle draw batch exceeds the u32 instance count".into())
+        })?;
+        Ok(draw.staged)
+    }
+
+    /// Draw the staged batch into `pass`: one instanced draw over the
+    /// pipeline built from [`PARTICLE_DRAW_WGSL`], or nothing when no batch
+    /// is staged, so a calm frame issues no draw call at all. The pass must
+    /// carry one HDR colour target and no depth attachment, the shape the
+    /// pipeline declares; the caller owns it and its target, so the quads
+    /// land in the frame the blit reads. This reads device state only: no
+    /// map call, no poll wait, no frame stall.
+    pub fn encode_draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(draw) = self.draw.as_ref() else {
+            return;
+        };
+        if draw.staged == 0 {
+            return;
+        }
+        // The two seams the batch binds: the one-texel stand-in atlas and the
+        // zeroed depth block the shader declares until the closing slice.
+        debug_assert_eq!(draw.atlas.size().width, 1);
+        debug_assert_eq!(draw.scene_depth.size(), PARTICLE_DRAW_SCENE_DEPTH_BYTES);
+        pass.set_pipeline(&draw.pipeline);
+        pass.set_bind_group(0, &draw.bind, &[]);
+        pass.draw(0..4, 0..draw.staged);
+    }
+}
+
+#[cfg(feature = "window")]
+impl ParticleDrawState {
+    /// Build the draw state once: the pipeline plus its layout, the view
+    /// uniform, the max-size instance buffer (sized for the pool cap, so no
+    /// frame resizes it), the one-texel white atlas stand-in and the unread
+    /// scene-depth seam at binding 4. Those three buffers are what the create
+    /// counter charges. Runtime sizes that cannot fit a `u64` are refused
+    /// before any device work.
+    fn build(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &[u8; PARTICLE_DRAW_UNIFORM_BYTES],
+    ) -> Result<Self, ParticleError> {
+        let layout = particle_draw_layout(device);
+        let pipeline = particle_draw_pipeline(device, &layout);
+        let uniform_bytes = u64::try_from(view.len())
+            .map_err(|_| ParticleError::Invalid("particle draw uniform exceeds u64".into()))?;
+        let uniform = particle_draw_buffer(
+            device,
+            "rp2-particle-draw-uniform",
+            uniform_bytes,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        queue.write_buffer(&uniform, 0, view);
+        let batch_bytes = PARTICLE_DRAW_MAX_INSTANCES.saturating_mul(PARTICLE_DRAW_INSTANCE_BYTES);
+        let instances = particle_draw_buffer(
+            device,
+            "rp2-particle-draw-instances",
+            u64::try_from(batch_bytes).map_err(|_| {
+                ParticleError::Invalid("particle draw batch exceeds u64 bytes".into())
+            })?,
+            wgpu::BufferUsages::STORAGE,
+        );
+        // The shader declares this seam but reads a constant zero gap until
+        // the closing slice feeds scene depth, so one zeroed block serves it.
+        let scene_depth = particle_draw_buffer(
+            device,
+            "rp2-particle-draw-scene-depth",
+            PARTICLE_DRAW_SCENE_DEPTH_BYTES,
+            wgpu::BufferUsages::STORAGE,
+        );
+        queue.write_buffer(&scene_depth, 0, &[0u8; 64]);
+        let (atlas, atlas_view) = particle_draw_atlas(device, queue);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("rp2-particle-draw-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rp2-particle-draw-bind"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: scene_depth.as_entire_binding(),
+                },
+            ],
+        });
+        Ok(Self {
+            pipeline,
+            bind,
+            uniform,
+            instances,
+            scene_depth,
+            atlas,
+            packed: Vec::with_capacity(PARTICLE_DRAW_MAX_INSTANCES * PARTICLE_DRAW_INSTANCE_BYTES),
+            staged: 0,
+        })
     }
 }
 
@@ -1580,8 +2091,7 @@ mod tests {
         assert!(pool.dropped_total() > 0, "saturation must refuse spawns");
         let live = pool.alive();
         assert!(live >= 4000, "the frame must stage ~4096 live, got {live}");
-        let mut scratch = Vec::new();
-        scratch.reserve(live);
+        let mut scratch = Vec::with_capacity(live);
         // Warmup plus best-of-7: wall clock on the shared box jitters under
         // parallel load, so the budget verdict reads the fastest clean
         // sample, the stage's true cost, never a preempted one.
@@ -2044,5 +2554,239 @@ mod tests {
             Err(ParticleError::Invalid(_))
         ));
         assert_eq!(submitter.created_buffers(), 0, "refusals size no buffers");
+    }
+
+    // ----- RL52 staged draw side (behind `window`) -----
+
+    /// Saturated pool the draw tests share: every emitter at its rate cap, so
+    /// a frame stages the pool cap exactly.
+    #[cfg(feature = "window")]
+    fn saturated_pool() -> ParticlePool {
+        let mut pool = ParticlePool::new(2040);
+        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+            pool.set_rate(kind, MAX_RATE_PER_S)
+                .expect("MAX_RATE_PER_S passes set_rate validation");
+        }
+        for _ in 0..200 {
+            pool.tick();
+        }
+        pool
+    }
+
+    #[test]
+    #[cfg(feature = "window")]
+    fn particles_draw_stages_one_instance_per_live_particle() {
+        // Behavior: the staged feed draws one instance per live particle. A
+        // saturated frame stages alive() records and `draw_staged` reports
+        // that count; an empty batch reports 0, sizes no buffer and is never
+        // an error; a same-shape batch creates nothing.
+        let Some((device, queue, _)) = particle_device() else {
+            eprintln!("SKIPPED particle draw staging: no wgpu adapter on this machine");
+            return;
+        };
+        let pool = saturated_pool();
+        let live = pool.alive();
+        assert!(live >= 4000, "the frame must stage ~4096 live, got {live}");
+        let mut records = Vec::new();
+        let staged = pool.draw_records(false, |_| 0.0, &mut records);
+        assert_eq!(staged, live, "one record per live particle");
+        let mut submitter = ParticleSubmitter::new(device);
+        let before = submitter.created_buffers();
+        let calm = submitter
+            .draw_staged(device, queue, &[])
+            .expect("an empty batch is a calm frame, never an error");
+        assert_eq!(calm, 0, "an empty batch reports no instance");
+        assert_eq!(
+            submitter.created_buffers(),
+            before,
+            "an empty batch sizes no buffer"
+        );
+        let count = submitter
+            .draw_staged(device, queue, &records)
+            .expect("the saturated batch uploads");
+        assert_eq!(
+            count,
+            u32::try_from(live).expect("the pool cap fits u32"),
+            "one instance per live particle"
+        );
+        let built = submitter.created_buffers();
+        assert_eq!(built, before + 3, "the first batch builds the draw buffers");
+        let again = submitter
+            .draw_staged(device, queue, &records)
+            .expect("a same-shape batch reuses");
+        assert_eq!(again, count, "the same batch stages the same count");
+        assert_eq!(
+            submitter.created_buffers(),
+            built,
+            "a same-shape batch creates no buffers or bind groups"
+        );
+        eprintln!(
+            "RL52 particle draw stage: instances={count} records={} alive={live}",
+            records.len()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "window")]
+    fn particles_draw_pipeline_matches_the_staged_record() {
+        // Behavior: the draw pipeline is the staged-record draw. It is built
+        // from PARTICLE_DRAW_WGSL (the same needles the CPU test pins), the
+        // draw side builds one render pipeline and never maps or waits on
+        // the device, and one encoded pass over a staged batch validates
+        // clean against the HDR target it declares.
+        let Some((device, queue, _)) = particle_device() else {
+            eprintln!("SKIPPED particle draw pipeline: no wgpu adapter on this machine");
+            return;
+        };
+        for needle in [
+            "draw_vs",
+            "draw_fs",
+            "draw_flipbook_uv",
+            "stretch",
+            "blend",
+            "fade",
+        ] {
+            assert!(
+                PARTICLE_DRAW_WGSL.contains(needle),
+                "draw WGSL must stage {needle}"
+            );
+        }
+        let src = include_str!("particles_gpu.rs");
+        let start = src
+            .find("fn particle_draw_pipeline")
+            .expect("the draw side exists");
+        let end = src[start..]
+            .find("fn particle_map_and_wait")
+            .map(|at| start + at)
+            .expect("the draw side ends before the bind map helper");
+        let draw_side = &src[start..end];
+        assert!(
+            draw_side.contains("PARTICLE_DRAW_WGSL"),
+            "the pipeline is built from the staged draw shader"
+        );
+        assert!(
+            draw_side.contains("create_render_pipeline"),
+            "the draw side builds one render pipeline"
+        );
+        assert!(
+            !draw_side.contains("map_async"),
+            "the draw path never maps a buffer"
+        );
+        assert!(
+            !draw_side.contains(".poll("),
+            "the draw path never waits on the device"
+        );
+
+        let mut pool = ParticlePool::new(2040);
+        for _ in 0..30 {
+            pool.tick();
+        }
+        let mut records = Vec::new();
+        let staged = pool.draw_records(false, |_| 0.0, &mut records);
+        assert!(staged > 0, "the pool must stage live particles");
+        let mut submitter = ParticleSubmitter::new(device);
+        assert_eq!(
+            submitter
+                .draw_staged(device, queue, &records)
+                .expect("the batch uploads"),
+            u32::try_from(staged).expect("the staged count fits u32")
+        );
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let hdr = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rl52-particle-draw-target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::present::HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rl52-particle-draw-frame"),
+        });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rl52-particle-draw-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            submitter.encode_draw(&mut pass);
+        }
+        queue.submit(Some(enc.finish()));
+        assert!(
+            pollster::block_on(scope.pop()).is_none(),
+            "the staged draw pass must validate clean"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "window")]
+    fn particles_draw_batch_is_deterministic_twice() {
+        // Behavior: the batch is a pure function of the pool. Two pools on
+        // one seed stage identical records, identical packed instance bytes
+        // and identical instance counts, so the draw replays byte for byte.
+        let Some((device, queue, _)) = particle_device() else {
+            eprintln!("SKIPPED particle draw determinism: no wgpu adapter on this machine");
+            return;
+        };
+        let mut a = ParticlePool::new(2040);
+        let mut b = ParticlePool::new(2040);
+        for _ in 0..120 {
+            a.tick();
+            b.tick();
+        }
+        let mut ra = Vec::new();
+        let mut rb = Vec::new();
+        let na = a.draw_records(false, |_| 0.0, &mut ra);
+        let nb = b.draw_records(false, |_| 0.0, &mut rb);
+        assert!(na > 0, "the sim must actually stage");
+        assert_eq!(na, nb, "two pools on one seed stage the same count");
+        assert_eq!(ra, rb, "two pools on one seed stage the same records");
+        let mut pa = vec![0u8; na * PARTICLE_DRAW_INSTANCE_BYTES];
+        let mut pb = vec![0u8; nb * PARTICLE_DRAW_INSTANCE_BYTES];
+        for (slot, record) in ra.iter().enumerate() {
+            let at = slot * PARTICLE_DRAW_INSTANCE_BYTES;
+            let dst = &mut pa[at..at + PARTICLE_DRAW_INSTANCE_BYTES];
+            particle_pack_instance(record, dst);
+        }
+        for (slot, record) in rb.iter().enumerate() {
+            let at = slot * PARTICLE_DRAW_INSTANCE_BYTES;
+            let dst = &mut pb[at..at + PARTICLE_DRAW_INSTANCE_BYTES];
+            particle_pack_instance(record, dst);
+        }
+        assert_eq!(pa, pb, "the packed instance bytes are identical twice");
+        let mut first = ParticleSubmitter::new(device);
+        let mut second = ParticleSubmitter::new(device);
+        let ca = first
+            .draw_staged(device, queue, &ra)
+            .expect("the first batch uploads");
+        let cb = second
+            .draw_staged(device, queue, &rb)
+            .expect("the second batch uploads");
+        assert_eq!(
+            (ca, cb),
+            (
+                u32::try_from(na).expect("the staged count fits u32"),
+                u32::try_from(nb).expect("the staged count fits u32")
+            ),
+            "the same pool twice reports the same instance count"
+        );
     }
 }

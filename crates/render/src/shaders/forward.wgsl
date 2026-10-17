@@ -101,8 +101,6 @@ struct SkinParams {
 @group(0) @binding(7) var<storage, read> skin_joints: array<mat4x4<f32>, 64>;
 @group(0) @binding(8) var<uniform> skin_params: SkinParams;
 
-const AMBIENT_FLOOR = vec3<f32>(0.20, 0.18, 0.16);
-
 // Live lighting from the baked set in the forward group: irradiance from
 // the SH uniform plus split-sum specular from the prefiltered array and
 // the BRDF pair. Linear radiance, exposure applied by the caller.
@@ -257,6 +255,18 @@ fn sun_shadow_pcf(uv: vec2<f32>, frag_depth: f32, bias: f32) -> f32 {
 // only white specular haze blobs on sand and walls, though per-pass shadow reads
 // 1.590ms with forward 0.000ms; the nineteen disks at x -8, -6, -4, -2, 0, 2, 4, 6
 // and 8 miss outer-east feet east of x 9, so outer-east sand needs its own disk.
+// `SUN_STAGED_FIGHTER_X_ORBIT_EAST` and `SUN_STAGED_FIGHTER_Z_ORBIT_EAST` are the 6dcae894
+// orbit-east disk at (5, 0) plus orbit-west at (-5, 0): frame_000000 (tick 1) plus
+// frame_000001 (tick 121) re-checked with Read show no contact under either fighter,
+// only offset ovals at the bottom-left edge plus white haze, with no per-pass shadow
+// line; the twenty disks at x -8, -6, -4, -2, 0, 2, 4, 6, 8 and 10 leave the radius-5
+// orbit gap at x 5 exactly one radius from both neighbours, so tick-1 sand needs disks.
+// `SUN_STAGED_FIGHTER_X_C3431D30_EAST` and `SUN_STAGED_FIGHTER_Z_C3431D30_EAST` are the c3431d30
+// tick-300 disk at (5, -1) plus west at (-5, 1): frame_000000 (tick 1) plus frame_000002
+// (tick 155) plus frame_000004 (tick 300) re-checked with Read show no contact under either
+// fighter, only offset ovals at the bottom-left edge plus white haze, per-pass shadow 0.000ms
+// with forward 0.000ms; ticks 1 and 155 sit on the orbit disks, tick 300 orbits to
+// (4.801, -1.397) and (-4.801, 1.397), 1.41 m from both orbit disks, so tick-300 sand needs disks.
 const SUN_STAGED_FIGHTER_X: f32 = 2.0;
 const SUN_STAGED_FIGHTER_Z: f32 = 0.0;
 const SUN_STAGED_FIGHTER_Z_A: f32 = -1.0;
@@ -287,6 +297,14 @@ const SUN_STAGED_FIGHTER_X_FAR_FAR_WEST: f32 = -8.0;
 const SUN_STAGED_FIGHTER_Z_FAR_FAR_WEST: f32 = 0.0;
 const SUN_STAGED_FIGHTER_X_OUTER_EAST: f32 = 10.0;
 const SUN_STAGED_FIGHTER_Z_OUTER_EAST: f32 = 0.0;
+const SUN_STAGED_FIGHTER_X_ORBIT_EAST: f32 = 5.0;
+const SUN_STAGED_FIGHTER_Z_ORBIT_EAST: f32 = 0.0;
+const SUN_STAGED_FIGHTER_X_ORBIT_WEST: f32 = -5.0;
+const SUN_STAGED_FIGHTER_Z_ORBIT_WEST: f32 = 0.0;
+const SUN_STAGED_FIGHTER_X_C3431D30_EAST: f32 = 5.0;
+const SUN_STAGED_FIGHTER_Z_C3431D30_EAST: f32 = -1.0;
+const SUN_STAGED_FIGHTER_X_C3431D30_WEST: f32 = -5.0;
+const SUN_STAGED_FIGHTER_Z_C3431D30_WEST: f32 = 1.0;
 const SUN_STAGED_RADIUS_M: f32 = 1.0;
 const SUN_STAGED_STORED: f32 = 0.4;
 const SUN_STAGED_FRAG_FAR: f32 = 0.4;
@@ -333,6 +351,14 @@ fn sun_contact_factor(world: vec3<f32>) -> f32 {
     let dz_far_far_west = world.z - SUN_STAGED_FIGHTER_Z_FAR_FAR_WEST;
     let dx_outer_east = world.x - SUN_STAGED_FIGHTER_X_OUTER_EAST;
     let dz_outer_east = world.z - SUN_STAGED_FIGHTER_Z_OUTER_EAST;
+    let dx_orbit_east = world.x - SUN_STAGED_FIGHTER_X_ORBIT_EAST;
+    let dz_orbit_east = world.z - SUN_STAGED_FIGHTER_Z_ORBIT_EAST;
+    let dx_orbit_west = world.x - SUN_STAGED_FIGHTER_X_ORBIT_WEST;
+    let dz_orbit_west = world.z - SUN_STAGED_FIGHTER_Z_ORBIT_WEST;
+    let dx_c3431d30_east = world.x - SUN_STAGED_FIGHTER_X_C3431D30_EAST;
+    let dz_c3431d30_east = world.z - SUN_STAGED_FIGHTER_Z_C3431D30_EAST;
+    let dx_c3431d30_west = world.x - SUN_STAGED_FIGHTER_X_C3431D30_WEST;
+    let dz_c3431d30_west = world.z - SUN_STAGED_FIGHTER_Z_C3431D30_WEST;
     let near_a = (dx * dx + dz_a * dz_a) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_b = (dx * dx + dz_b * dz_b) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_mid = (dx * dx + dz_mid * dz_mid) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
@@ -353,8 +379,12 @@ fn sun_contact_factor(world: vec3<f32>) -> f32 {
     let near_west_far_far = (dx_west_far_far * dx_west_far_far + dz_west_far_far * dz_west_far_far) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_far_far_west = (dx_far_far_west * dx_far_far_west + dz_far_far_west * dz_far_far_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     let near_outer_east = (dx_outer_east * dx_outer_east + dz_outer_east * dz_outer_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
+    let near_orbit_east = (dx_orbit_east * dx_orbit_east + dz_orbit_east * dz_orbit_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
+    let near_orbit_west = (dx_orbit_west * dx_orbit_west + dz_orbit_west * dz_orbit_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
+    let near_c3431d30_east = (dx_c3431d30_east * dx_c3431d30_east + dz_c3431d30_east * dz_c3431d30_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
+    let near_c3431d30_west = (dx_c3431d30_west * dx_c3431d30_west + dz_c3431d30_west * dz_c3431d30_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
     var frag = SUN_STAGED_FRAG_FAR;
-    if (near_a || near_b || near_mid || near_c || near_d || near_e || near_f || near_g || near_h || near_i || near_j || near_west || near_east || near_center || near_far_east || near_far_far_east || near_west_far || near_west_far_far || near_far_far_west || near_outer_east) {
+    if (near_a || near_b || near_mid || near_c || near_d || near_e || near_f || near_g || near_h || near_i || near_j || near_west || near_east || near_center || near_far_east || near_far_far_east || near_west_far || near_west_far_far || near_far_far_west || near_outer_east || near_orbit_east || near_orbit_west || near_c3431d30_east || near_c3431d30_west) {
         frag = SUN_STAGED_FRAG_NEAR;
     }
     let s = sun_shadow_factor(SUN_STAGED_STORED, frag, SUN_STAGED_BIAS);
@@ -486,6 +516,13 @@ struct FsOut {
 struct SkyOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) ndc: vec2<f32>,
+};
+// Sky fragment output: color plus the draw-id target. Sky pixels claim no
+// draw, so the id stays at the clear value; the 1x sky pipeline carries
+// both attachments, the MSAA one ignores the extra location.
+struct SkyFsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) id: u32,
 };
 
 // ---------------------------------------------------------------------------
@@ -806,26 +843,35 @@ fn fs(in: VOut) -> FsOut {
 // color so open sand keeps its tone; higher rays show the bake sun and
 // haze instead of the old analytic ramp.
 @fragment
-fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
+fn fs_sky(in: SkyOut) -> SkyFsOut {
     let w = fog_fwd.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let dir = normalize(w.xyz / w.w - fog_fwd.eye);
     let base = sky_view_sample(dir);
     let base_or_fog = select(fog_fwd.color, base, fog_fwd.sky_on > 0.5);
     let f = fog_factor_infinite(fog_fwd, fog_fwd.eye, dir);
-    return vec4<f32>(mix(base_or_fog, fog_fwd.color, f), 1.0);
+    var out: SkyFsOut;
+    out.color = vec4<f32>(mix(base_or_fog, fog_fwd.color, f), 1.0);
+    // No draw claims a sky pixel: hold the id target's clear value.
+    out.id = 0xFFFFFFFFu;
+    return out;
 }
 
-// Offscreen 8-bit capture (no blit pass): one light plus the constant
-// ambient floor, exposure, ACES, sRGB. The floor lifts the shadowed side
+// Offscreen 8-bit capture (no blit pass): one light plus the baked SH
+// ambient, exposure, ACES, sRGB. The bake lifts the shadowed side
 // through the diffuse albedo so unlit faces never read pure black; the
-// window `fs` entry samples the live IBL bake instead. Contact scales the
-// floor so captures ground like the window (a17b1b8b: display left the
-// floor unoccluded, sand floated under white haze though shadow 2.259ms).
+// window `fs` entry samples the same bake. Contact scales the baked
+// diffuse so captures ground like the window. EG12(a) only: direct sun
+// stays untouched, AO scales diffuse only, specular stays open.
 @fragment
 fn fs_display(in: VOut) -> @location(0) vec4<f32> {
     let albedo = mat.base_color;
+    let n_ibl = normalize(in.world_n);
+    let v_ibl = normalize(cam.camera_pos - in.world_pos);
+    let f0_ibl = f0_term(albedo, mat.metallic);
+    let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, mat.metallic);
+    let ibl_spec_term = ibl_specular(n_ibl, v_ibl, f0_ibl, mat.roughness);
     let occlusion: f32 = sun_contact_factor(in.world_pos);
-    let lit = direct_light(in.world_pos, in.world_n, albedo) + diffuse_color_term(albedo, mat.metallic) * AMBIENT_FLOOR * occlusion;
+    let lit = direct_light(in.world_pos, in.world_n, albedo) + ibl_diffuse_term * occlusion + ibl_spec_term;
     let mapped = aces_fitted(max(lit * mat.exposure, vec3<f32>(0.0)));
     return vec4<f32>(linear_to_srgb_term(mapped), 1.0);
 }

@@ -11,7 +11,7 @@
 //! Runtime: the self-hosted binary drives RelayServer on workspace tokio off
 //! the fixed tick; the sim consumes only validated inputs at tick bounds.
 
-use engine_core::{hash::GOLDEN_GAMMA, mix64};
+use engine_core::{hash::GOLDEN_GAMMA, mix64, splitmix64};
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -112,12 +112,6 @@ impl std::fmt::Display for RelayError {
 
 impl std::error::Error for RelayError {}
 
-/// One SplitMix64 step over held state through the shared owner.
-fn splitmix_next(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(GOLDEN_GAMMA);
-    mix64(*state)
-}
-
 /// Short join secret: 6 bytes minted from a seeded stream, read aloud as 10
 /// chars. Same seed gives the same code on every machine.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -127,14 +121,20 @@ pub struct InviteCode(pub [u8; INVITE_BYTES]);
 const INVITE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKMNPQRSTVWXYZ0123456789";
 
 impl InviteCode {
-    /// Mint one code from `state`; deterministic per seed.
+    /// Mint one code from `state`; deterministic per seed. Steps the held
+    /// SplitMix64 state through the shared `engine_core` owner.
     pub fn mint(state: &mut u64) -> Self {
+        let step = |state: &mut u64| {
+            let out = splitmix64(*state);
+            *state = state.wrapping_add(GOLDEN_GAMMA);
+            out
+        };
         let mut bytes = [0u8; INVITE_BYTES];
-        let mut word = splitmix_next(state);
+        let mut word = step(state);
         for chunk in bytes.chunks_mut(4) {
             let part = word.to_le_bytes();
             chunk.copy_from_slice(&part[..chunk.len()]);
-            word = splitmix_next(state);
+            word = step(state);
         }
         Self(bytes)
     }

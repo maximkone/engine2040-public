@@ -321,31 +321,51 @@ pub fn sphere_depth_bounds(
 /// Units: normalized depth/bias, meters for dist/range, cosines for cone.
 /// Determinism: fixed tap order, same inputs same output.
 /// [found2 | 8.3.1 2D Shadow Maps]
+/// One spot shadow sample: projection plus cone plus range.
+/// Groups the per-fragment scalars so the PCF kernel stays under the
+/// argument cap without changing a bit of math.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SpotShadowSample {
+    /// Normalized projection uv.
+    pub uv: [f32; 2],
+    /// Fragment depth in the same units as the map.
+    pub frag_depth: f32,
+    /// Depth bias in the same units as the map.
+    pub bias: f32,
+    /// Cosine of the fragment angle.
+    pub cos_theta: f32,
+    /// Cosine of the inner cone edge.
+    pub cos_inner: f32,
+    /// Cosine of the outer cone edge.
+    pub cos_outer: f32,
+    /// Fragment distance in meters.
+    pub dist_m: f32,
+    /// Light range in meters.
+    pub range_m: f32,
+}
+
+/// Multi-tap spot compare in `0..=1` over one sample: PCF times cone times falloff, black outside the clamped projection.
 #[must_use]
-pub fn spot_shadow_pcf(
-    depth_map: &[f32],
-    size: u32,
-    uv: [f32; 2],
-    frag_depth: f32,
-    bias: f32,
-    cos_theta: f32,
-    cos_inner: f32,
-    cos_outer: f32,
-    dist_m: f32,
-    range_m: f32,
-) -> f32 {
-    let Some(clamped) = spot_uv_clamped(uv) else {
+pub fn spot_shadow_pcf(depth_map: &[f32], size: u32, sample: SpotShadowSample) -> f32 {
+    let Some(clamped) = spot_uv_clamped(sample.uv) else {
         return 0.0;
     };
-    let cone = spot_cone_factor(cos_theta, cos_inner, cos_outer);
+    let cone = spot_cone_factor(sample.cos_theta, sample.cos_inner, sample.cos_outer);
     if cone <= 0.0 {
         return 0.0;
     }
-    let falloff = torch_falloff(dist_m, range_m);
+    let falloff = torch_falloff(sample.dist_m, sample.range_m);
     if falloff <= 0.0 {
         return 0.0;
     }
-    shadow_pcf(depth_map, size, clamped, frag_depth, bias) * cone * falloff
+    shadow_pcf(
+        depth_map,
+        size,
+        clamped,
+        sample.frag_depth,
+        sample.bias,
+    ) * cone
+        * falloff
 }
 
 /// Face-clamped cube tap in `0..=1`: offset uv clamped inside the face margin
@@ -745,7 +765,7 @@ mod tests {
         for (i, size) in CASCADE_MAP_SIZES.iter().enumerate() {
             let got = cascade_map_size(i).expect("cascade in range");
             assert_eq!(&got, size);
-            assert!(got >= SHADOW_MIN && got <= SHADOW_MAX);
+            assert!((SHADOW_MIN..=SHADOW_MAX).contains(&got));
         }
         let err = cascade_map_size(3).expect_err("cascade 3 out of range");
         assert_eq!(
@@ -906,10 +926,36 @@ mod tests {
     fn spot_and_cube_filter() {
         let map = [0.5f32; 4];
         assert_eq!(
-            spot_shadow_pcf(&map, 2, [1.5, 0.5], 0.5, 0.0, 1.0, 1.0, 0.0, 0.5, 1.0),
+            spot_shadow_pcf(
+                &map,
+                2,
+                SpotShadowSample {
+                    uv: [1.5, 0.5],
+                    frag_depth: 0.5,
+                    bias: 0.0,
+                    cos_theta: 1.0,
+                    cos_inner: 1.0,
+                    cos_outer: 0.0,
+                    dist_m: 0.5,
+                    range_m: 1.0,
+                },
+            ),
             0.0
         );
-        let lit = spot_shadow_pcf(&map, 2, [0.5, 0.5], 0.4, 0.0, 1.0, 1.0, 0.0, 0.5, 4.0);
+        let lit = spot_shadow_pcf(
+            &map,
+            2,
+            SpotShadowSample {
+                uv: [0.5, 0.5],
+                frag_depth: 0.4,
+                bias: 0.0,
+                cos_theta: 1.0,
+                cos_inner: 1.0,
+                cos_outer: 0.0,
+                dist_m: 0.5,
+                range_m: 4.0,
+            },
+        );
         assert!(lit > 0.0 && lit <= 1.0, "lit {lit}");
         let tapped = cube_tap_clamped([0.99, 0.5], [0.1, 0.0], 8);
         assert!(tapped[0] < 1.0, "clamped {tapped:?}");

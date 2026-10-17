@@ -7,10 +7,6 @@ use super::discover::{
 use super::mcp::{McpServer, OpDto};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
-/// Loopback address the shim mirrors (never bound, no listener).
-pub const BRP_DEFAULT_ADDR: &str = "127.0.0.1";
-/// Loopback port the shim mirrors (never bound, no listener).
-pub const BRP_DEFAULT_PORT: u16 = 15702;
 /// One JSON-RPC request driving the same verb table as the local door.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]

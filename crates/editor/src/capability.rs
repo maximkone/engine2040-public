@@ -531,10 +531,7 @@ fn to_cm(value: f32) -> i32 {
 fn overlap_findings(rows: &[StagedObj]) -> BTreeSet<(String, String)> {
     let mut rects: Vec<(usize, i32, i32, i32, i32)> = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {
-        if ![row.x, row.z, row.sx, row.sz]
-            .iter()
-            .all(|v| v.is_finite())
-        {
+        if ![row.x, row.z, row.sx, row.sz].iter().all(|v| v.is_finite()) {
             continue;
         }
         let (x0, x1) = (

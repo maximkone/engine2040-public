@@ -17,9 +17,10 @@ Gate before land. Refuse on FAIL. Pwsh only. One command per call.
 
 - `git diff -- skills/SKILLS.md | node tools/packet-gate.mjs --patch - --owned skills/SKILLS.md` prints `RESULT PASS`.
 - Same diff with `--owned crates/core/src/time.rs` prints `RESULT FAIL` with `outside owned paths`.
-- `node tools/packet-gate.mjs --result target/queue/done/0-cq10-time-checked-20261014.md` prints `RESULT FAIL` with `no RESULT line`.
-- `node tools/land.mjs 0-cq10-time-checked-20261014 --dry` prints `REFUSED` with `no RESULT line`.
-- `node tools/land.mjs 0-arena-shake-watch-20261014 --dry` prints `REFUSED` with `role runner lands nothing`.
+- `node tools/packet-gate.mjs --result target/queue/done/builder-fixer-r161.md` prints `RESULT FAIL` with `no RESULT line`.
+- `node tools/land.mjs builder-fixer-r161 --dry` prints `REFUSED` with `no RESULT line`.
+- `node tools/land.mjs runner-proof-r304 --dry` prints `REFUSED` with `role runner lands nothing`.
+- `node tools/land.mjs builder-integrator-r72 --dry` prints `REFUSED` with `no review record for builder-integrator-r72 in done/`.
 
 ## Hands off
 

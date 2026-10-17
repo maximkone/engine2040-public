@@ -54,6 +54,7 @@ Find any plan, row or crate in `ATLAS.md` (generated: `node tools/plan-atlas.mjs
 --write`; queries `--row ID`, `--crate NAME`, `--priority look|bodies|aidoor|speed|proof|other`,
 `--plan NAME`, `--find TEXT`). Its section 5 lists what is no longer true in each
 plan and section 6 is the refresh queue: the weakest Core plan is the next deep-dive.
+Status 2026-10-16: disk shows `docs/plan/ATLAS.md` (142 lines) has headings only at `:13 ## 1.`, `:52 ## 2.`, `:107 ## 3.` and no section 5 or 6, and `tools/plan-atlas.mjs:227,240,250` writes exactly those three, so the "section 5 lists what is no longer true" and "section 6 is the refresh queue" halves are stale; the old shape lives in git history only (`git log -p -- docs/plan/ATLAS.md` shows `## 5. Rot: what is no longer true` and `## 6. Refresh queue: the weakest Core plans first`), and today the section-1 health column carries that signal (`N section-7 row(s) off the board`).
 
 ## Rules
 

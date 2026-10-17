@@ -4,7 +4,7 @@ Three soft-body review situations. "Off" is habit; "On" names the check, the fai
 
 ## P1: per-edge distances with one stiffness (checks 1, 2)
 
-Input: a diff adds cape cloth to `crates/physics/src/cloth.rs::ClothWorld` as three distance constraints per triangle sharing one `stiffness_q16`, and the cape shears like rubber on diagonal pulls. Test: a straight hang looks right.
+Input: a diff adds cape cloth to `ClothWorld` (the module `crates/physics/src/cloth.rs`, cut 2026-10-16 with the physics dead-module wave - see the SKILL.md cut note) as three distance constraints per triangle sharing one `stiffness_q16`, and the cape shears like rubber on diagonal pulls. Test: a straight hang looks right.
 
 Answer with the skill: Reject. Check 1: carry one element constraint per triangle so shear is visible to the solver, not three edge distances. Check 2: split diagonal stretch from off-diagonal shear with separate stiffness fractions, rest stretch one; prove the diagonal-pull case holds shape with `cargo test -p engine-physics --lib` green and x2-equal bytes.
 

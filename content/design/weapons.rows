@@ -9,12 +9,18 @@
 # stagger_permille (poise hold 0-1000, higher holds longer),
 # stamina_cost (points, heavy above light), counter (1 parry, 2 dodge,
 # 3 block: the answer from the player's own kit that beats this weapon).
+# v2 adds the frame-data fields of docs/design/FORMAT.md: active_ticks (live
+# ticks; steel hits only here), recovery_ticks (committed ticks after active),
+# avoid (parry, dodge, block or range: how the player avoids it) and
+# punish_ticks (the window to hit back; it sits inside recovery). Every v1
+# number is unchanged.
 # House numbers: readable startups sit in 12-24 ticks (dagger 12, gladius 15
 # matches v2 startup, spatha 18, pilum 24 heavy windup); fast weapons hit for
-# less (damage rises with speed_ticks); every weapon has one counter.
+# less (damage rises with speed_ticks); every weapon has one counter, and the
+# steel stays live for 2-3 ticks with 6-14 committed ticks after it.
 # Book notes: weapons as data rows `[handsrust | Damage from Weapons and Claws]`.
-table weapons version 1
-pugio type=1 damage_permille=80 speed_ticks=12 hands=1 stagger_permille=300 stamina_cost=10 counter=2
-gladius type=2 damage_permille=120 speed_ticks=15 hands=1 stagger_permille=400 stamina_cost=15 counter=1
-spatha type=2 damage_permille=150 speed_ticks=18 hands=1 stagger_permille=500 stamina_cost=20 counter=3
-pilum type=3 damage_permille=180 speed_ticks=24 hands=2 stagger_permille=600 stamina_cost=30 counter=2
+table weapons version 2
+pugio type=1 damage_permille=80 speed_ticks=12 hands=1 stagger_permille=300 stamina_cost=10 counter=2 avoid=dodge active_ticks=2 recovery_ticks=6 punish_ticks=4
+gladius type=2 damage_permille=120 speed_ticks=15 hands=1 stagger_permille=400 stamina_cost=15 counter=1 avoid=parry active_ticks=2 recovery_ticks=8 punish_ticks=6
+spatha type=2 damage_permille=150 speed_ticks=18 hands=1 stagger_permille=500 stamina_cost=20 counter=3 avoid=block active_ticks=3 recovery_ticks=10 punish_ticks=8
+pilum type=3 damage_permille=180 speed_ticks=24 hands=2 stagger_permille=600 stamina_cost=30 counter=2 avoid=dodge active_ticks=3 recovery_ticks=14 punish_ticks=10

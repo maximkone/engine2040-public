@@ -12,7 +12,7 @@ On: "Reject. Item 5: `ao_tex` is stuck at 1.0, so the blit multiplies by a const
 
 ## P2: probes-only GTAO (items 6, 7)
 
-Situation: `crates/render/src/gtao.rs::GtaoAo` runs under `--look-probes` in `crates/game/src/bin/arena.rs:86` but live frames never dispatch it. Probe captures look good; the windowed match shows no AO and no live ms.
+Situation: `crates/render/src/gtao.rs::GtaoAo` runs under `--look-probes` in `crates/game/src/bin/arena.rs:98` but live frames never dispatch it. Probe captures look good; the windowed match shows no AO and no live ms.
 
 Off: "Probes prove the math. Ship it; live wiring is a follow-up."
 

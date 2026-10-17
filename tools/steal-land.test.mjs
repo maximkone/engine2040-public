@@ -4,7 +4,7 @@ import { ALLOW, donorInfo, failedByTeam, formatLine, gateLines, nextFor, parseSt
 
 const DAY = 86_400_000;
 const NOW = Date.parse("2026-10-04T00:00:00Z");
-const noGit = { nowMs: NOW, hasCommitSince: () => true, commitTouches: () => true };
+const noGit = { nowMs: NOW, commitTouches: () => true };
 
 const open = (n, extra = {}) => ({
   id: n, date: "2026-10-03", bar: "A8 (GM3)", donor: `o/r@abc123${n} (branch main)`,
@@ -33,15 +33,37 @@ test("a 4th open line per part FAILs; the first three pass", () => {
   assert.match(res[3].reasons.join(";"), /4th open line for part tools/);
 });
 
-test("a 9-day-old open line with no commit since FAILs; a fresh commit saves it", () => {
+// The 2026-10-17 blind spot: four 2026-10-07 lines PASSed here for 10 days
+// because each our/file saw a commit since. Center's size check ages the line
+// itself, so the gate must name them whatever the file's commits.
+test("an open line older than 7 days FAILs by name on a fresh file; inside 7 days passes", () => {
   const old = open(1, { date: "2026-09-25" }); // 9 days before NOW
-  const stale = gateLines([old], { nowMs: NOW, hasCommitSince: () => false, commitTouches: () => true });
+  const stale = gateLines([old], noGit);
   assert.equal(stale[0].ok, false);
-  assert.match(stale[0].reasons.join(";"), /no commit to tools\/ship\.mjs since 2026-09-25/);
-  const fresh = gateLines([old], { nowMs: NOW, hasCommitSince: () => true, commitTouches: () => true });
-  assert.equal(fresh[0].ok, true);
-  const young = gateLines([open(1, { date: "2026-10-03" })], { nowMs: NOW, hasCommitSince: () => false, commitTouches: () => true });
-  assert.equal(young[0].ok, true, "1 day old: youth covers a quiet file");
+  assert.match(stale[0].reasons.join(";"), /open 9d \(since 2026-09-25\) is older than 7 days: mark it landed, expired or rejected/);
+  const freshFile = gateLines([old], { nowMs: NOW, commitTouches: () => true });
+  assert.equal(freshFile[0].ok, false, "a fresh commit to our/file no longer saves an aged line");
+  const same = gateLines([open(1, { date: "2026-10-07" })], { nowMs: Date.parse("2026-10-14T00:00:00Z"), commitTouches: () => true });
+  assert.equal(same[0].ok, true, "exactly 7 days old still passes: center FAILs only older than 7");
+  const young = gateLines([open(1, { date: "2026-10-03" })], noGit);
+  assert.equal(young[0].ok, true, "1 day old: inside the window");
+});
+
+test("expired and rejected lines read as closed and hold no open slot", () => {
+  const md = ["# t", "", "## Steals", "",
+    "2026-10-03 | A4 (Q1) | bevyengine/bevy@844390b2:crates/bevy_anti_alias/src/taa/mod.rs | Apache-2.0 | crates/render/src/v1_temporal.rs | expired 2026-10-11 (still test-only bilinear oracle)",
+    "  what to change, and the number it moves: 0 -> 1.",
+    "2026-10-03 | A4 (Q1) | bevyengine/bevy@844390b2:examples/3d/pcss.rs | Apache-2.0 | crates/render/src/shadow_cluster.rs | rejected 2026-10-17 (0 GPU PCSS paths, no row owns the port)",
+    "  what to change, and the number it moves: 0 -> 1.",
+  ].join("\n");
+  const lines = parseSteals(md);
+  assert.deepEqual(lines.map((l) => l.status), ["expired", "rejected"]);
+  const res = gateLines(lines, noGit);
+  assert.deepEqual(res.map((r) => r.ok), [true, true], "expired and rejected lines PASS");
+  // Two closed lines must not eat the part's 3 open slots.
+  const mixed = [open(1, { date: "2026-10-03" }), open(2, { date: "2026-10-03" }), open(3, { date: "2026-10-03" }), open(4, { date: "2026-10-03" }), lines[0], lines[1]];
+  const mres = gateLines(mixed, noGit);
+  assert.deepEqual(mres.map((r) => r.ok), [true, true, true, false, true, true]);
 });
 
 test("a landed line whose commit touches our/file passes; a miss FAILs", () => {
@@ -136,4 +158,44 @@ test("a landed sha with a trailing provenance comment still lands", () => {
   const bare = parseSteals(md.replace(/ \(owner.*$/, ""));
   assert.equal(bare[0].status, "landed");
   assert.equal(bare[0].sha, "ce21f2a");
+});
+
+test("today's blind spot: an open line older than 7 days on a fresh file must FAIL", () => {
+  // 2026-10-17, the day the four 2026-10-07 steals sat open 10 days while the
+  // loop's gate only saw the 13-day gym.rs line: a commit to our/file excused
+  // every other old open line. Center's size check ages the line, not the file.
+  const today = Date.parse("2026-10-17T09:00:00Z");
+  const blind = open(1, { date: "2026-10-04", our: "crates/endpoint/src/mcp.rs" }); // 13 days
+  const res = gateLines([blind], { nowMs: today, hasCommitSince: () => true, commitTouches: () => true });
+  assert.equal(res[0].ok, false, "a fresh file must not excuse a 13-day open line");
+  assert.match(res[0].reasons.join(";"), /open 1[23]d \(since 2026-10-04\) is older than 7 days/);
+  const young = open(2, { date: "2026-10-11", our: "crates/endpoint/src/mcp.rs" }); // 6 days
+  const inside = gateLines([young], { nowMs: today, hasCommitSince: () => false, commitTouches: () => true });
+  assert.equal(inside[0].ok, true, "inside 7 days: the age rule alone decides, quiet file or not");
+});
+
+test("the 3-open-per-part cap counts open lines only", () => {
+  const lines = [
+    open(1), open(2), open(3),
+    { ...open(4), status: "expired" },
+    { ...open(5), status: "rejected" },
+    open(6),
+  ];
+  const res = gateLines(lines, noGit);
+  assert.deepEqual(res.map((r) => r.ok), [true, true, true, true, true, false]);
+  assert.match(res[5].reasons.join(";"), /4th open line for part tools/);
+});
+
+test("expired and rejected verdicts parse and pass the gate (the words center reads)", () => {
+  const md = ["# t", "", "## Steals", "",
+    "2026-10-03 | A4 (Q1) | bevyengine/bevy@abc1234:x.rs | Apache-2.0 | crates/render/src/x.rs | expired 2026-10-11 (test-only oracle, no board row owns the port)",
+    "  what to change, and the number it moves: 0 -> 1.",
+    "2026-10-03 | A5 | avianphysics/avian@abc1234:y.rs | MIT | crates/physics/src/solver.rs | rejected 2026-10-11 (no number moves)",
+    "  what to change, and the number it moves: 0 -> 1.",
+  ].join("\n");
+  const lines = parseSteals(md);
+  assert.deepEqual(lines.map((l) => l.status), ["expired", "rejected"]);
+  assert.equal(lines[0].bar, "A4 (Q1)", "the bar rule stays visible beside the verdict");
+  const res = gateLines(lines, noGit);
+  assert.deepEqual(res.map((r) => r.ok), [true, true], "a verdict line is closed, not an unknown status");
 });

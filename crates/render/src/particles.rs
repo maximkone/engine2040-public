@@ -1,6 +1,7 @@
 //! particles: seeded CPU mirror of GPU FX at 60Hz. Fixed emitter order, hashed.
 use crate::particles_gpu::throttle_spawn;
-pub const FIXED_DT: f32 = 1.0 / 60.0;
+/// Fixed simulation dt: single owner is `engine_core::FIXED_DT`.
+pub use engine_core::FIXED_DT;
 /// Reference byte image for the fluid pool on the CPU mirror path.
 /// Caller: off-tick check compares this image against the pool bytes.
 pub fn fluid_mirror_bytes(pool: &crate::particles_gpu::fluids_gpu::PresentFluid) -> Vec<u8> {

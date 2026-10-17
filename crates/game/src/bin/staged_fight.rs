@@ -93,6 +93,10 @@ struct FightStats {
     knockdowns: usize,
     blocked: usize,
     parried: usize,
+    /// Refused presses (C5): a drained bar costs no swing and cues no attack.
+    stamina_out: usize,
+    /// Dodges: their own cue kind, so `cues` closes against the printed kinds.
+    dodged: usize,
 }
 
 fn fold_cues(stats: &mut FightStats, cues: &[FightCue]) {
@@ -103,7 +107,8 @@ fn fold_cues(stats: &mut FightStats, cues: &[FightCue]) {
             FightCue::Knockdown { .. } => stats.knockdowns += 1,
             FightCue::Blocked { .. } => stats.blocked += 1,
             FightCue::Parried { .. } => stats.parried += 1,
-            FightCue::Dodged { .. } | FightCue::StaminaOut { .. } => {}
+            FightCue::StaminaOut { .. } => stats.stamina_out += 1,
+            FightCue::Dodged { .. } => stats.dodged += 1,
         }
     }
 }
@@ -216,13 +221,15 @@ fn receipt_json(bindings: &[FighterBinding], config: GameConfig, report: &FightR
         ));
     }
     out.push_str(&format!(
-        "],\"ticks_run\":{},\"cues\":{},\"hits\":{},\"knockdowns\":{},\"blocked\":{},\"parried\":{}",
+        "],\"ticks_run\":{},\"cues\":{},\"hits\":{},\"knockdowns\":{},\"blocked\":{},\"parried\":{},\"stamina_out\":{},\"dodged\":{}",
         config.ticks,
         report.stats.cues,
         report.stats.hits,
         report.stats.knockdowns,
         report.stats.blocked,
-        report.stats.parried
+        report.stats.parried,
+        report.stats.stamina_out,
+        report.stats.dodged
     ));
     out.push_str(",\"final_hp\":[");
     for (index, hp) in report.hp.iter().enumerate() {
@@ -300,6 +307,8 @@ fn run(args: &Args) -> Result<i32, String> {
             engine_game::crowd_gpu::CROWD_BLOCKS
         ));
     }
+    // Director wire: the built `director_layers` getter gets its live caller.
+    director_wire(app.director_layers())?;
 
     // The frames come from the staged fight raster (bodies drawn, hits
     // flashing). It runs the same script through the arena authority, so its
@@ -332,19 +341,66 @@ fn run(args: &Args) -> Result<i32, String> {
     std::fs::write(args.out_dir.join(RECEIPT_NAME), receipt.as_bytes())
         .map_err(|err| format!("receipt: {}", err.kind()))?;
     println!(
-        "staged_fight done: ticks={} cues={} hits={} knockdowns={} blocked={} parried={} Parried={} final_hash={final_hash:016x} captures={} manifest=\"{}\" receipt=\"{}\"",
-        args.ticks,
+        "{}",
+        done_line(
+            args.ticks,
+            &stats,
+            final_hash,
+            frames,
+            &captures.join(FRAMES_MANIFEST_NAME),
+            &args.out_dir.join(RECEIPT_NAME)
+        )
+    );
+    Ok(0)
+}
+
+/// Director wire: read the tail mix answer through the built
+/// `App::director_layers` getter, so the getter has a live caller outside its
+/// own tests, and refuse a nonsense answer loudly. Pure (filing path only,
+/// never the tick); the golden hash stays untouched.
+fn director_wire(layers: engine_game::audio_director::Layers) -> Result<(), String> {
+    let in_range = [
+        layers.intensity,
+        layers.music,
+        layers.cheer,
+        layers.gasp,
+        layers.boo,
+        layers.murmur,
+    ]
+    .into_iter()
+    .all(|gain| gain.is_finite() && (0.0..=1.0).contains(&gain));
+    if in_range {
+        Ok(())
+    } else {
+        Err("director: mix answer out of range".to_string())
+    }
+}
+
+/// The `staged_fight done:` line: every cue kind the fold counts, so a reader
+/// of stdout closes `cues` against the printed kinds the same way the receipt
+/// does. Pure (filing path only, never the tick); the field names and order of
+/// the older surfaces are kept, the new kinds are appended.
+fn done_line(
+    ticks: u32,
+    stats: &FightStats,
+    hash: u64,
+    frames: u32,
+    manifest: &Path,
+    receipt: &Path,
+) -> String {
+    format!(
+        "staged_fight done: ticks={ticks} cues={} hits={} knockdowns={} blocked={} parried={} Parried={} stamina_out={} dodged={} final_hash={hash:016x} captures={frames} manifest=\"{}\" receipt=\"{}\"",
         stats.cues,
         stats.hits,
         stats.knockdowns,
         stats.blocked,
         stats.parried,
         stats.parried,
-        frames,
-        captures.join(FRAMES_MANIFEST_NAME).display(),
-        args.out_dir.join(RECEIPT_NAME).display()
-    );
-    Ok(0)
+        stats.stamina_out,
+        stats.dodged,
+        manifest.display(),
+        receipt.display()
+    )
 }
 
 /// Stamp one staged frame manifest with the renderer key: insert
@@ -500,6 +556,31 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// A mix answer in range: every gain sits in `0..=1`, like a live tick's.
+    fn settled_layers() -> engine_game::audio_director::Layers {
+        engine_game::audio_director::Layers {
+            intensity: 0.4,
+            music: 0.4,
+            murmur: 0.6,
+            cheer: 0.1,
+            gasp: 0.0,
+            boo: 0.0,
+        }
+    }
+
+    /// The director wire the staged run calls after the fight: a live mix
+    /// passes, a gain outside `0..=1` or NaN refuses loudly.
+    #[test]
+    fn director_wire_accepts_the_live_mix_and_refuses_nonsense() {
+        assert!(director_wire(settled_layers()).is_ok());
+        let mut loud = settled_layers();
+        loud.intensity = 1.5;
+        assert!(director_wire(loud).is_err(), "gain above one refuses");
+        let mut nan = settled_layers();
+        nan.cheer = f32::NAN;
+        assert!(director_wire(nan).is_err(), "NaN refuses");
+    }
+
     fn four_fighter_config(ticks: u32) -> GameConfig {
         GameConfig {
             seed: SEED,
@@ -612,11 +693,17 @@ mod tests {
 
     #[test]
     fn staged_600_tick_receipt_replays_byte_identical() {
-        // The staged 600-tick fight pins 27 hits and 3 knockdowns, replayed
-        // twice byte-identical with the pinned bundle SHAs in the receipt.
+        // The staged 600-tick fight pins 27 hits, 3 knockdowns and one refused
+        // press (C5: the spam cadence drains the bar, so one press folds a
+        // StaminaOut cue), replayed twice byte-identical with the pinned
+        // bundle SHAs in the receipt.
         let (first_stats, first_hp, first_hash) = run_full_fight();
         let (second_stats, second_hp, second_hash) = run_full_fight();
-        assert_eq!(first_stats.cues, 30, "script drifted: {first_stats:?}");
+        assert_eq!(first_stats.cues, 31, "script drifted: {first_stats:?}");
+        assert_eq!(
+            first_stats.stamina_out, 1,
+            "the spam cadence must fold one refused press: {first_stats:?}"
+        );
         assert_eq!(first_stats.hits, 27, "script drifted: {first_stats:?}");
         assert_eq!(first_stats.knockdowns, 3, "script drifted: {first_stats:?}");
         assert_eq!(first_stats, second_stats, "fight is not deterministic");
@@ -680,6 +767,136 @@ mod tests {
         assert!(
             first_receipt.contains(&first_sequence),
             "sequence row:\n{first_receipt}"
+        );
+    }
+
+    /// Read one integer field from a receipt JSON string the way an outside
+    /// reader does (the filed `"key":<n>` pair). Panics naming the key when it
+    /// is absent, so a cue kind missing from the receipt fails loudly instead
+    /// of reading as zero and hiding the unaccounted cue.
+    fn receipt_int(receipt: &str, key: &str) -> usize {
+        let marker = format!("\"{key}\":");
+        let at = receipt
+            .find(marker.as_str())
+            .unwrap_or_else(|| panic!("receipt lost the {key} key:\n{receipt}"));
+        let rest = &receipt[at + marker.len()..];
+        let end = rest
+            .find(|ch: char| !ch.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end]
+            .parse()
+            .unwrap_or_else(|_| panic!("{key} is not a number:\n{receipt}"))
+    }
+
+    /// The receipt names every cue kind the fold counts, so `cues` closes
+    /// against the printed kinds. Without the `stamina_out` row the 600-tick
+    /// staged tape leaves one cue unaccounted (31 - 27 - 3 - 0 - 0 = 1) and a
+    /// reader cannot tell a refused press from a dropped iteration (C5/C6).
+    #[test]
+    fn staged_receipt_cue_total_closes() {
+        let (stats, hp, hash) = run_full_fight();
+        let bindings = fighter_bind::bind_all(&fighters_content_dir()).expect("CT7 manifest binds");
+        let receipt = receipt_json(
+            &bindings,
+            four_fighter_config(DEFAULT_TICKS),
+            &FightReport {
+                stats,
+                hp,
+                final_hash: hash,
+                capture_frames: 4,
+                capture_manifest: FRAMES_MANIFEST_NAME.to_string(),
+                sequence_fnv: "0".repeat(16),
+            },
+        );
+        let sum: usize = [
+            "hits",
+            "knockdowns",
+            "blocked",
+            "parried",
+            "stamina_out",
+            "dodged",
+        ]
+        .iter()
+        .map(|key| receipt_int(&receipt, key))
+        .sum();
+        assert_eq!(
+            receipt_int(&receipt, "cues"),
+            sum,
+            "receipt cue total does not close: {receipt}"
+        );
+        // Fold closure: every cue kind is counted, so `cues` cannot carry a
+        // kind the printed rows do not name (Dodged was dropped before).
+        assert_eq!(
+            stats.cues,
+            stats.hits
+                + stats.knockdowns
+                + stats.blocked
+                + stats.parried
+                + stats.stamina_out
+                + stats.dodged,
+            "fold lost a cue kind: {stats:?}"
+        );
+        assert_eq!(
+            receipt_int(&receipt, "stamina_out"),
+            1,
+            "the spam cadence must fold one refused press:\n{receipt}"
+        );
+        assert_eq!(
+            receipt_int(&receipt, "dodged"),
+            0,
+            "the script never presses dodge:\n{receipt}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "receipt lost the dodged key")]
+    fn staged_receipt_reader_fails_loudly_on_a_missing_cue_kind() {
+        // Failure: a receipt that drops a cue kind must fail the reader, not
+        // read as zero and hide the unaccounted cue.
+        let _ = receipt_int("{\"cues\":31,\"hits\":27}", "dodged");
+    }
+
+    /// The stdout line closes the same way the receipt does: `cues` equals the
+    /// printed kinds, so an operator who kept only stdout can still see a
+    /// refused press without parsing the receipt.
+    #[test]
+    fn staged_done_line_names_every_cue_kind() {
+        let (stats, _, _) = run_full_fight();
+        let line = done_line(
+            DEFAULT_TICKS,
+            &stats,
+            0,
+            4,
+            Path::new("captures/manifest.json"),
+            Path::new("receipt.json"),
+        );
+        let field = |key: &str| -> usize {
+            let marker = format!("{key}=");
+            let at = line
+                .find(marker.as_str())
+                .unwrap_or_else(|| panic!("done line lost {key}:\n{line}"));
+            let rest = &line[at + marker.len()..];
+            let end = rest
+                .find(|ch: char| !ch.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest[..end].parse().expect("field is a number")
+        };
+        let sum: usize = [
+            "hits",
+            "knockdowns",
+            "blocked",
+            "parried",
+            "stamina_out",
+            "dodged",
+        ]
+        .iter()
+        .map(|key| field(key))
+        .sum();
+        assert_eq!(field("cues"), sum, "done line does not close:\n{line}");
+        assert_eq!(
+            field("stamina_out"),
+            1,
+            "the spam cadence must fold one refused press:\n{line}"
         );
     }
 

@@ -1,12 +1,12 @@
 // Donor: gschup/ggrs, MIT, https://github.com/gschup/ggrs (src/input_queue.rs).
 // Fresh port in our style against the engine-net rollback API; no vendor bytes.
-// Soak: frame-delay input queue (DelayBuffer) plus P2pSession repeat-last
+// Soak: frame-delay input queue plus P2pSession repeat-last
 // prediction with first-incorrect-frame resim; fixed-seed 2-player run,
 // hash equality across two runs, mispredict count printed.
 
 use engine_core::Fnv64;
 use engine_net::rollback::{P2pSession, SimTick};
-use engine_net::DelayBuffer;
+use std::collections::VecDeque;
 
 /// Fixed soak seed: same script on every run.
 const SEED: u64 = 2040;
@@ -68,14 +68,20 @@ fn fold_stream(stream: &[u64]) -> u64 {
 /// Returns (tape fold, tip hash, rollbacks, mispredicts, first bad frame).
 fn run_soak(seed: u64) -> (u64, u64, u64, u64, Option<u32>) {
     let (local, remote) = script(seed, FRAMES);
-    let mut queue = DelayBuffer::new(DELAY);
+    // Frame-delay input queue (was `engine_net::DelayBuffer`, cut as dead
+    // code): release each local input `DELAY` frames late, neutral 0 warmup.
+    let mut queue: VecDeque<u32> = VecDeque::new();
     let mut session = P2pSession::new(ToyDuel::default());
     let mut delayed = Vec::with_capacity(FRAMES);
     let mut mispredicts = 0u64;
     let mut first_bad = None;
     for f in 0..FRAMES {
-        queue.push_local(local[f]);
-        let l = queue.readable();
+        queue.push_back(local[f]);
+        let l = if queue.len() > DELAY {
+            queue[queue.len() - 1 - DELAY]
+        } else {
+            0
+        };
         delayed.push(l);
         let frame = f as u32;
         let avail = if frame % LOSS_EVERY == LOSS_EVERY - 1 {

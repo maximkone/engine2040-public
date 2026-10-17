@@ -732,6 +732,20 @@ pub fn build_uniforms(
         cam.aspect = aspect;
     }
     let view_proj = cam.view_proj().map_err(UniformError::Camera)?;
+    build_uniforms_with_view_proj(&cam, view_proj, light, material)
+}
+
+/// Pack with the frame's already built `view_proj`: the live and capture
+/// frames build the matrix once in `effective_camera` and hand it here, so
+/// no frame packs a matrix it also built elsewhere. `camera` must be the
+/// camera that matrix was built from (its `eye` fills `camera_pos`); the
+/// bytes are identical to [`build_uniforms`] for the same camera.
+pub fn build_uniforms_with_view_proj(
+    camera: &Camera,
+    view_proj: glam::Mat4,
+    light: &DirectionalLight,
+    material: &PbrMaterial,
+) -> Result<(CameraUniform, LightUniform, MaterialUniform), UniformError> {
     light.validate().map_err(UniformError::Light)?;
     material.validate().map_err(UniformError::Material)?;
     let dir = light.direction.normalize();
@@ -744,7 +758,7 @@ pub fn build_uniforms(
     Ok((
         CameraUniform {
             view_proj_cols,
-            camera_pos: cam.eye.to_array(),
+            camera_pos: camera.eye.to_array(),
         },
         LightUniform {
             dir_to_light: dir.to_array(),

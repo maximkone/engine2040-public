@@ -8,7 +8,7 @@ Situation: A builder adds a fog pass to the live window. The submit returns with
 
 Off: "The fog pass is live. It submitted with 0 validation errors, so it runs on the GPU."
 
-On: "Rule 1: a pass counts only if the picture changes with it on and off. Zero validation errors proves nothing. `crates/render/src/sky.rs:814` is a bind probe that copies a buffer. Capture the frame with the fog pass on and off, and compare the two pixel sets before you call it live."
+On: "Rule 1: a pass counts only if the picture changes with it on and off. Zero validation errors proves nothing. `crates/render/src/sky.rs:989` is a bind probe that copies a buffer. Capture the frame with the fog pass on and off, and compare the two pixel sets before you call it live."
 
 What skill-less misses: it treats validation as proof. It never checks whether the pixels changed, so a copy passes as a pass.
 

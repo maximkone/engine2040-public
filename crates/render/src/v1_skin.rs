@@ -663,7 +663,8 @@ pub fn check_normals(normals: &[[f32; 3]]) -> Vec<NormalDiag> {
 // window frame (`crate::v1_gpu::FORWARD_PBR_WGSL`, entry points
 // `vs_skinned` and `fs_skinned`): joint matrices arrive in AN1 row order
 // uploaded verbatim as WGSL columns (see [`SkinningUniform::to_bytes`]) in a
-// read-only storage buffer at binding 7, the skin parameters at binding 8;
+// read-only storage buffer at binding 7, the skin parameters at binding 8,
+// the neutral normal map at 17/18 like the window `fs` entry;
 // missing skin shades unlit magenta in the fragment entry. The BRDF and the
 // tonemap exist once, in `shaders/forward.wgsl` and `shaders/tonemap.wgsl`.
 
@@ -727,6 +728,8 @@ pub struct GpuSkinned {
     ibl_brdf: wgpu::Texture,
     ibl_sh_buf: wgpu::Buffer,
     ibl_sampler: wgpu::Sampler,
+    /// Neutral 1x1 normal map bound at 17; keeps geometric normals.
+    normal_map: wgpu::Texture,
 }
 
 #[cfg(feature = "window")]
@@ -769,6 +772,39 @@ impl GpuSkinned {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
+        let normal_map = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("r3-normal-fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &normal_map,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[128u8, 128, 255, 255],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("r3-skinned-pbr"),
@@ -823,6 +859,22 @@ impl GpuSkinned {
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 17,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 18,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
         ];
@@ -910,6 +962,7 @@ impl GpuSkinned {
             ibl_brdf,
             ibl_sh_buf,
             ibl_sampler,
+            normal_map,
         })
     }
 
@@ -1093,6 +1146,10 @@ impl GpuSkinned {
             dimension: Some(wgpu::TextureViewDimension::D2),
             ..Default::default()
         });
+        let normal_view = self.normal_map.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("r3-normal-view"),
+            ..Default::default()
+        });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("r3-skin-uniforms"),
             layout: &self.layout,
@@ -1132,6 +1189,14 @@ impl GpuSkinned {
                 wgpu::BindGroupEntry {
                     binding: 12,
                     resource: self.ibl_sh_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(&normal_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::Sampler(&self.ibl_sampler),
                 },
             ],
         });

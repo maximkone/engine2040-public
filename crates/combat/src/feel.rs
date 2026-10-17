@@ -25,8 +25,10 @@ pub const MAX_BUFFER_TICKS: u32 = 12;
 pub const MAX_JUICE_BOOST_TICKS: u32 = 8;
 /// Input-to-effect latency ceiling in milliseconds.
 pub const PQ1_LATENCY_MS: u32 = 50;
-/// Fixed tick rate the latency model assumes.
-pub const TICKS_PER_SEC: u32 = 60;
+/// Fixed tick rate the latency model assumes; the rate's one owner is
+/// `engine_core::TICK_HZ` and its checked narrow form is
+/// `engine_core::TICK_HZ_U32`, which this constant takes.
+pub const TICKS_PER_SEC: u32 = engine_core::TICK_HZ_U32;
 /// Bouts in the balance survey.
 pub const BALANCE_BOUTS: u32 = 200;
 /// Ticks before a survey bout is scored on remaining health.
@@ -1477,6 +1479,60 @@ mod tests {
     use crate::fight::{step_with_tables, step_with_tables_into, TABLES_V1};
     use engine_input::MAX_PARTICIPANTS;
 
+    /// Guard: every ticks-per-second constant in this crate takes the core's
+    /// named checked `u32` owner, never a bare `as` cast on the rate — one
+    /// cast per constant regresses the crate cast ratchet (crates/combat
+    /// casts 65 -> 69). Value first, then each definition read from its own
+    /// source, so the definition cannot drift back to a cast unnoticed.
+    #[test]
+    fn tick_rate_constants_take_the_checked_core_owner() {
+        let rate = engine_core::TICK_HZ_U32;
+        assert_eq!(TICKS_PER_SEC, rate);
+        assert_eq!(crate::exchange::TELEGRAPH_TICKS_PER_SEC, rate);
+        assert_eq!(crate::feel_instrument::TICKS_PER_SEC, rate);
+        assert_eq!(u64::from(rate), engine_core::TICK_HZ);
+        let defs = [
+            (
+                "exchange.rs",
+                "pub const TELEGRAPH_TICKS_PER_SEC:",
+                include_str!("exchange.rs"),
+            ),
+            (
+                "feel.rs",
+                "pub const TICKS_PER_SEC:",
+                include_str!("feel.rs"),
+            ),
+            (
+                "feel_instrument.rs",
+                "pub const TICKS_PER_SEC:",
+                include_str!("feel_instrument.rs"),
+            ),
+            (
+                "projectile.rs",
+                "const TICK_HZ_RAW:",
+                include_str!("projectile.rs"),
+            ),
+        ];
+        for (file, name, src) in defs {
+            let head = src
+                .split("#[cfg(test)]")
+                .next()
+                .expect("every source keeps its cfg(test) marker");
+            let def = head
+                .lines()
+                .find(|line| line.trim_start().starts_with(name))
+                .unwrap_or_else(|| panic!("{file} lost its rate definition"));
+            assert!(
+                def.contains("engine_core::TICK_HZ_U32"),
+                "{file}: rate not taken from the checked core owner: {def}"
+            );
+            assert!(
+                !def.contains(" as "),
+                "{file}: rate defined by a cast: {def}"
+            );
+        }
+    }
+
     fn input(fighter: u8, buttons: u8) -> ParticipantInput {
         ParticipantInput {
             tick: 0,
@@ -2417,13 +2473,18 @@ mod tests {
             report.share_a_permille()
         );
         // Pinned v1 baseline: the exact survey outcome, so any drift fails.
-        // The killer bytes concentrate by construction — the survey policy
-        // draws each tick's button independently (idle 37%, attack 38%), so
-        // the byte at the killing tick lands near the policy mix and the raw
-        // max share (idle, 400) sits above the 350 bar. The bar gates
+        // Re-blessed 2026-10-17 to the C5 stamina-regen gate in
+        // `fight::advance_clocks` (a swing in flight is exertion: no regen
+        // while `is_attacking`, so a mash cadence can empty the bar). The
+        // gate is v1-visible, so the survey posts 102/98 instead of the
+        // pre-gate 118/82; the pin's bars are untouched. The killer bytes
+        // still concentrate by construction — the survey policy draws each
+        // tick's button independently (idle 37%, attack 38%), so the byte at
+        // the killing tick lands near the policy mix and the raw max share
+        // (now the attack byte, 395) sits above the 350 bar. The bar gates
         // multi-move tables tournament-side; here the shares pin for drift.
-        assert_eq!((report.wins_a, report.wins_b, report.draws), (118, 82, 0));
-        assert_eq!(report.share_a_permille(), 590);
+        assert_eq!((report.wins_a, report.wins_b, report.draws), (102, 98, 0));
+        assert_eq!(report.share_a_permille(), 510);
         assert_eq!(report.kills_total, 200);
         assert_eq!(report.share_slots, 4);
         assert_eq!(
@@ -2431,23 +2492,23 @@ mod tests {
             [
                 MoveKillShare {
                     move_byte: 0,
-                    kills: 80
+                    kills: 65
                 },
                 MoveKillShare {
                     move_byte: ATTACK,
-                    kills: 72
+                    kills: 79
                 },
                 MoveKillShare {
                     move_byte: BLOCK,
-                    kills: 33
+                    kills: 37
                 },
                 MoveKillShare {
                     move_byte: DODGE,
-                    kills: 15
+                    kills: 19
                 },
             ]
         );
-        assert_eq!(report.max_kill_share_permille(), 400);
+        assert_eq!(report.max_kill_share_permille(), 395);
         // The cap check itself, on synthetic shares: an even spread passes,
         // the exact 350 boundary passes, a dominant 900-share move fails.
         assert!(shares_report(100, [25, 25, 25, 25]).no_dominant_move());

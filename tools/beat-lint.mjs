@@ -1,10 +1,18 @@
 // beat-lint: ladder beat chart gate (GP40, Rogers ch4).
 //
 // Job: read content/design/ladder.rows and fail a badly paced ladder, so a
-// clumped rung cannot ship. Rules: at most 3 new elements per rung, the
-// enemy tier never falls, the boss flag sits only on the last rung, the
-// first bout starts within 60 s of launch, and rewards plus ranks match
+// clumped rung cannot ship. Rules: each row's minutes and new-element total
+// equal the compiled chart the game reads (`RUNG_MINUTES` and
+// `RUNG_NEW_ELEMENTS` of crates/game/src/ladder.rs, the arrays `Ladder::beat()`
+// returns), at most 3 new elements per rung, the enemy tier never falls, the
+// boss flag sits only on the last rung, and rewards plus ranks match
 // crates/game/src/ladder.rs (a second door to the same numbers, GP27).
+//
+// The first-bout launch cap is NOT a rule here. ladder.rs owns it
+// (`FIRST_BOUT_START_SECS` 45 s, `FIRST_BOUT_START_LIMIT_SECS` 60 s) and its
+// Rust test proves it, so this lint never reads a bout-length column as a
+// launch time. The old rule did, and it forced the rows file to disagree with
+// the compiled table to pass.
 //
 // Ladder numbers (ladder.rs:15-27): rungs 0..=7 (MAX_RUNG 7, 8 rows),
 // glory per win 100 plus 25 per rung held, loop bonus 500 on the top-rung
@@ -17,11 +25,11 @@
 //     new_arena=<int> reward=<int> penalty=<int> minutes=<int>
 //     rank=<0..4> boss=<0|1>`; whole numbers only, `#` comments.
 //
-// Prints one line per rung (tier, new total, reward, rank) plus the first
-// bout bar. Exit 1 when a rule fails: clumped rung (over 3 new), falling
-// tier, boss off the last rung, slow first bout, reward or rank drift from
-// ladder.rs. Exit 2 on bad CLI, missing file or unparsable rows (with line
-// number).
+// Prints one line per rung (id, tier, new total, minutes, reward, rank).
+// Exit 1 when a rule fails: minutes or new total off the compiled chart,
+// clumped rung (over 3 new), falling tier, boss off the last rung, reward or
+// rank drift from ladder.rs. Exit 2 on bad CLI, missing file or unparsable
+// rows (with line number).
 //
 // Usage:
 //   node tools/beat-lint.mjs [--ladder PATH] [--help]
@@ -44,7 +52,12 @@ export const GLORY_RUNG_BONUS = 25;
 export const GLORY_PER_LOOP = 500;
 export const GLORY_RANKS = [0, 300, 900, 1800, 3600];
 export const MAX_NEW_PER_RUNG = 3;
-export const FIRST_BOUT_MINUTES = 1;
+
+// Mirror of crates/game/src/ladder.rs:41,43. The game reads these arrays
+// through `Ladder::beat()` and `rung_beat()`, so a rows file that forks them
+// is a second beat chart, not a second door. Drift fails the lint on purpose.
+export const RUNG_NEW_ELEMENTS = [2, 1, 2, 1, 2, 1, 2, 1];
+export const RUNG_MINUTES = [2, 2, 3, 3, 4, 4, 5, 6];
 
 export const DEFAULT_LADDER = join(ROOT, "content", "design", "ladder.rows");
 
@@ -148,6 +161,9 @@ export function checkAll({ ladderText }) {
     if (added > MAX_NEW_PER_RUNG) {
       failures.push(tag + ": " + added + " new elements, at most " + MAX_NEW_PER_RUNG);
     }
+    if (i < RUNG_NEW_ELEMENTS.length && added !== RUNG_NEW_ELEMENTS[i]) {
+      failures.push(tag + ": " + added + " new elements, ladder.rs teaches " + RUNG_NEW_ELEMENTS[i]);
+    }
 
     if (r.reward !== rewardForRung(i)) {
       failures.push(tag + ": reward " + r.reward + ", ladder.rs pays " + rewardForRung(i));
@@ -164,6 +180,9 @@ export function checkAll({ ladderText }) {
     if (r.minutes < 1 || r.minutes > 10) {
       failures.push(tag + ": minutes " + r.minutes + " outside 1..10");
     }
+    if (i < RUNG_MINUTES.length && r.minutes !== RUNG_MINUTES[i]) {
+      failures.push(tag + ": minutes " + r.minutes + ", ladder.rs expects " + RUNG_MINUTES[i]);
+    }
     if (r.boss !== 0 && r.boss !== 1) failures.push(tag + ": boss must be 0|1");
     if (i === MAX_RUNG && r.boss !== 1) failures.push(tag + ": last rung must carry boss=1");
     if (i !== MAX_RUNG && r.boss === 1) failures.push(tag + ": boss=1 before the last rung");
@@ -171,20 +190,14 @@ export function checkAll({ ladderText }) {
     cumulative += r.reward;
   }
 
-  if (rows.length > 0 && rows[0].minutes > FIRST_BOUT_MINUTES) {
-    failures.push("first bout " + rows[0].minutes + " min, starts within " + FIRST_BOUT_MINUTES + " min of launch");
-  }
-
   return { version: set.version, rows, cumulative, failures };
 }
 
 export function formatLines(r) {
-  const lines = r.rows.map((row) => {
+  return r.rows.map((row) => {
     const added = row.new_moves + row.new_rules + row.new_arena;
-    return row.id + " tier " + row.tier + " new " + added + " reward " + row.reward + " rank " + row.rank;
+    return row.id + " tier " + row.tier + " new " + added + " minutes " + row.minutes + " reward " + row.reward + " rank " + row.rank;
   });
-  lines.push("first_bout_minutes " + (r.rows.length > 0 ? r.rows[0].minutes : "?"));
-  return lines;
 }
 
 export function parseArgs(argv) {
@@ -208,8 +221,8 @@ export function parseArgs(argv) {
 export function helpText() {
   return [
     "Usage: node tools/beat-lint.mjs [--ladder PATH] [--help]",
-    "  Check the ladder beat chart: new elements, tier climb, boss last, first bout.",
-    "  Prints one line per rung plus first_bout_minutes. Exit 1 when a rule fails.",
+    "  Check the ladder beat chart: compiled minutes and new totals, tier climb, boss last.",
+    "  Prints one line per rung. Exit 1 when a rule fails.",
     "Default: content/design/ladder.rows.",
   ].join("\n");
 }

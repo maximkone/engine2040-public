@@ -65,12 +65,6 @@ impl Flow {
     }
 }
 
-/// Handback glide the shell grants a take before the live camera resumes.
-/// Units: fixed ticks at 60 Hz; equals the cinematic handback window, so the
-/// shell and the sequence player agree on the glide length.
-/// Caller: `crate::cine::HANDBACK_TICKS` (intro/outro takes).
-pub const CINE_HANDBACK_TICKS: u32 = crate::cine::HANDBACK_TICKS;
-
 #[cfg(test)]
 mod tests {
     use super::*;

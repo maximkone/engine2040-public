@@ -37,12 +37,7 @@ pub struct RestirDi {
 impl RestirDi {
     /// Allocate for one sweep.
     pub fn new() -> Self {
-        Self {
-            hist: vec![0u8; 800 * 600],
-            cnt: vec![0u32; 800 * 600],
-            draws: CounterRng::new(3050),
-            step: 0,
-        }
+        Self::default()
     }
     /// Render through reservoirs plus denoise.
     pub fn render(
@@ -108,6 +103,17 @@ impl RestirDi {
         let denoise_ms = t1.elapsed().as_secs_f64() * 1000.0;
         self.step = self.step.wrapping_add(1);
         Ok(DiReceipt { di_ms, denoise_ms })
+    }
+}
+
+impl Default for RestirDi {
+    fn default() -> Self {
+        Self {
+            hist: vec![0u8; 800 * 600],
+            cnt: vec![0u32; 800 * 600],
+            draws: CounterRng::new(3050),
+            step: 0,
+        }
     }
 }
 #[cfg(test)]

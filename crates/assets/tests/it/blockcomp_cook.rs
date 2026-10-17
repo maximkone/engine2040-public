@@ -50,7 +50,7 @@ fn bc7_plus_ktx2_x2_under_budget() {
     assert_eq!(cooked.ktx2, again.ktx2);
     validate_ktx2("tex/normal.ktx2", &cooked.ktx2).expect("normal gate passes");
     assert!(cooked.ktx2.len() < 262_144);
-    assert!((256 * 256) <= POTATO.max_tex_px);
+    const { assert!((256 * 256) <= POTATO.max_tex_px) };
 }
 
 #[test]

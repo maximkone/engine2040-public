@@ -56,6 +56,7 @@ and content gate, GP19 staged rig, GP20 damping split, GP23 phased tables.
 | Duel HUD | built, never drawn | `ui/src/lib.rs:781 DuelOverlay` built only in ui tests; UI parked (`FOCUS.md:41`) (N5, GP38) |
 | Ladder pacing | PARTIAL | `game/src/ladder.rs` ranks and `apply`; no beat chart, no per-rung new element, enemy or minutes (N28, GP40) |
 | Playtest that asks a question | PARTIAL (GP41, board open) | charter runner `crates/playtest/src/charter.rs:94-127`, C1 ships `crates/playtest/charters/c1.toml:1-6`; C2 (camera separation) missing |
+Status 2026-10-16: disk shows `:58` is stale on both halves: `node tools/board-slice.mjs --find GP41` prints one row, `GP41 done Game ... GP21 accepts on Landed 06134105` (so GP41 is not board open), and C2 is on disk: `crates/playtest/charters/c2.toml:1-6` ships id c2 with question `a light hit shakes the camera at most a quarter of a heavy`, `crates/playtest/src/charter.rs:158` `C2_SRC` `include_str!`s that file, `:161 load_c2`, `:166 run_c2`, `:174 light_within_quarter` and test `:316 charter_c2_parses_and_prints_pass` cover it, so C2 is not missing and the shipped C2 question is camera shake, not camera separation; the C1 half still holds (`crates/playtest/charters/c1.toml:1-6` ships, `charter.rs:94-127` is `parse_charter` plus `evaluate`).
 | Debug camera, pause and step in the game binary | MISSING | only `--camera-path` in `bin/arena.rs:250`; pause/step live in the editor only (`editor/src/play_in.rs:131-164`) (N31, GP42) |
 | Camera feel cores (GP8) | open, board | flax-mcp camera rig and damping cores, MIT; needs GP3 |
 | Combat depth cores (GP9) | partly on disk | `combat/src/depth.rs:202-275` PoiseMeter exists: GP30 wires it instead of a port |
@@ -282,6 +283,8 @@ lines the run prints, and a log of what, where, why and conclusion. Bugs carry
 severity A (blocks a gate), B (hurts a pillar) or C (cosmetic) and a repro. Bot
 charters run in the loop; human sessions (5-7 newcomers) are Maxim's hands, asked
 once through the inbox with the charter attached.
+Status 2026-10-16: the "asked once" half is not on disk: `node C:/empire/center/empire.mjs inbox engine2040` lists 10 open items (cap 10) and none names the newcomer session, and the add is refused at that cap (`inbox engine2040 add ... --ref PLAYTEST-KIT-HANDS` prints `not added, 10 open items (cap 10): tick or merge one first`), so the ask waits on one ticked or merged item; the kit half is done (`docs/design/PLAYTEST.md` ships the script, survey, funnel and A/B/C grades, `node tools/playtest-log.mjs --check <csv>` grades a log row by row, and `node --test tools/playtest-log.test.mjs` is 1 pass).
+Status 2026-10-17: that count is stale on disk: `node --test tools/playtest-log.test.mjs` is 2 pass (tests 2, pass 2, fail 0) because the missing-log case landed after that line (commit 4fd1d1e0, `tools/playtest-log.test.mjs` +12 lines), and `docs/design/PLAYTEST.md:7` already reads the same 2 pass. The "asked once" half is unchanged: a re-send at 2026-10-17T01:44Z (`node C:/empire/center/empire.mjs inbox engine2040 add "PLAYTEST kit is ready for a human round" --by "tech writer seat"`) was refused again with `engine2040: not added, 10 open items (cap 10): tick or merge one first`, so the ask still waits on one ticked or merged item.
 
 ### brains and navigation
 
@@ -304,6 +307,7 @@ brains; nav steering is the unwired part (BOOK-GAPS W12). Traversal links are
 authored in content (sidecar markers) and baked by the cooker; TV1 consumes them
 at runtime. DX1 break sets invalidate tiles through the `rebake.rs` registry;
 WD8 stitches per-cell NV1 bakes on shared edges once tiles land.
+Status 2026-10-17: disk shows the S11 left line is gone, so the gap no longer holds: `rg -n "AI[-]to[-]arena" docs/plan/gameplay.md` exits 1 with zero hits, and the row's cite `docs/plan/gameplay.md:150` now reads "counters, repair-craft hooks, LIGHT slice only); the second-game proof", while the corrected text sits at `docs/plan/gameplay.md:305-306` ("`arena/src/engage.rs:20` and `fork.rs:148` already use `engine_ai` brains; nav steering is the unwired part (BOOK-GAPS W12)"); the disk half holds with one drifted cite: `crates/arena/src/engage.rs:20` is `use engine_ai::{FoeView, MeleeView, Percept, Squad, StrikePhase};` and the brains field is at `crates/arena/src/fork.rs:174` `brains: Vec<engine_ai::DepthBrain>`, so the row's `fork.rs:148` cite now points at `pub damage_dealt: Vec<(u8, u16)>` and only the nav-steering half (W12) stays open, with `docs/plan/gameplay.md:436` keeping GA8 "needs: -".
 
 Determinism: same seed plus same tape gives same intents, paths and
 steering. Bakes sort everything and emit versioned bytes (`E2NAV1` v1;

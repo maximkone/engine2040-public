@@ -170,9 +170,13 @@ impl ArenaApp {
 
     /// Mean ms of one per-pass column: the probe columns (sky, layers,
     /// particles, decals, ibl) average over frames that probed, fog, gtao
-    /// and shadow over every folded frame.
+    /// and shadow over every folded frame. A run that probes nothing at all
+    /// (`pass_probes == 0`: live without `--look-probes` or capture) folds no
+    /// probe sample, so those columns carry the live-path value of every
+    /// folded frame and divide by `pass_frames` like the rest; asking for a
+    /// divisor of 0 clamps to 1 and prints the run's sum under an `ms` label.
     pub(super) fn pass_mean(&self, index: usize) -> String {
-        let over = if index < 5 {
+        let over = if index < 5 && self.pass_probes > 0 {
             self.pass_probes
         } else {
             self.pass_frames
@@ -280,10 +284,13 @@ impl ArenaApp {
     }
 
     /// The frame-split receipt: mean sim, present and fighter ms, then the
-    /// per-frame work and interval percentiles on the CPU, the GPU pass
+    /// fighter skin wall split into its CPU pose and GPU upload halves, then
+    /// the per-frame work and interval percentiles on the CPU, the GPU pass
     /// percentiles from the device clock (`gpu_ms=unsupported` when the
     /// adapter has no timestamp queries), the mean swapchain acquire wait
     /// and the present mode (a vsync-bound mode parks the CPU in acquire).
+    /// `fighters_pose`/`fighters_upload` are `0.000` until a skinned tick
+    /// lands, so they never read as a measurement of a frame that did work.
     pub(super) fn frame_split_line(&self) -> String {
         let frames = u64::from(self.frames_presented.max(1));
         let mut work = self.work_us.clone();
@@ -322,10 +329,12 @@ impl ArenaApp {
             )
         });
         format!(
-            "arena frame-split: sim={}ms present={}ms fighters={}ms per frame (mean over {} frames) cpu_ms p50={} p99={} interval_ms p50={} p99={} {} acquire={}ms present_mode={}",
+            "arena frame-split: sim={}ms present={}ms fighters={}ms fighters_pose={}ms fighters_upload={}ms per frame (mean over {} frames) cpu_ms p50={} p99={} interval_ms p50={} p99={} {} acquire={}ms present_mode={}",
             Self::mean_ms(self.sim_us, frames),
             Self::mean_ms(self.present_us, frames),
             Self::mean_ms(self.fighters_us, frames),
+            Self::mean_ms(self.fighters_pose_us, frames),
+            Self::mean_ms(self.fighters_upload_us, frames),
             self.frames_presented,
             fmt_us_as_ms(percentile_us(&work, 50)),
             fmt_us_as_ms(percentile_us(&work, 99)),
@@ -347,5 +356,59 @@ impl ArenaApp {
         let message = live_wait_failure(&stats)?;
         tell!("arena: {message}");
         Some(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_game::GameConfig;
+
+    #[test]
+    fn live_per_pass_means_divide_by_folded_frames_not_one() {
+        // Failing-before: a live run folds frames and probes none, so
+        // `pass_probes` stays 0 and the probe columns asked `mean_ms` for a
+        // divisor of 0, which clamps to 1: `ibl=` printed the 300-frame sum
+        // (32.185 ms) where the encode wall costs 0.107 ms per frame, so FC1's
+        // frame cost table had to discount its own biggest column.
+        let raw: Vec<String> = ["arena", "--frames", "2", "--exit"]
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect();
+        let args = WinArgs::parse(&raw).expect("valid smoke fixture parses");
+        let config = GameConfig {
+            seed: 2040,
+            ticks: 24,
+            fighters: 2,
+            half_extent_m: 20.0,
+        };
+        let mut app = ArenaApp::new(config, args, None).expect("test session builds");
+        app.pass_adapter = "RTX".to_string();
+        app.pass_frames = 300;
+        app.pass_probes = 0;
+        app.pass_us = [0; 8];
+        app.pass_us[4] = 32_185;
+        assert_eq!(
+            app.pass_mean(4),
+            "0.107",
+            "live ibl averages the folded frames"
+        );
+        assert_eq!(app.pass_mean(7), "0.000", "a zero column stays 0.000");
+        let line = app
+            .per_pass_line()
+            .expect("pinned adapter plus folded frames build the line");
+        assert!(
+            line.contains("frames=300") && line.contains("ibl=0.107ms"),
+            "the printed column carries the per-frame mean, not the sum: {line}"
+        );
+        // The clamp that printed the sum: `mean_ms` with a zero divisor
+        // divides by `frames.max(1)`, so `pass_mean` must never ask for 0.
+        assert_eq!(ArenaApp::mean_ms(32_185, 0), "32.185", "zero divisor sums");
+        assert_eq!(ArenaApp::mean_ms(32_185, 300), "0.107", "300 frames mean");
+        // A run that does probe keeps the probe divisor, so the capture
+        // sidecar still files sky_ms over the frames that probed.
+        app.pass_probes = 2;
+        app.pass_us[4] = 2_000;
+        assert_eq!(app.pass_mean(4), "1.000", "probed ibl keeps its divisor");
     }
 }

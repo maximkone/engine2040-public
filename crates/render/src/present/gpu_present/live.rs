@@ -9,7 +9,8 @@ use super::super::*;
 use super::frame::{FrameReceipt, LookPassReceipt};
 use super::presenter::Presenter;
 use super::submit::{
-    effective_camera, inverse_view_proj_cols, map_readback_f32, padded_depth_row, MATERIAL_STRIDE,
+    effective_camera, inverse_view_proj_cols, map_readback_f32, padded_depth_row, FrameCamera,
+    MATERIAL_STRIDE,
 };
 
 /// Fog tranche rows in receipt order: fog passes, fog validation errors,
@@ -62,13 +63,21 @@ pub(super) fn live_bloom_should_run(max_luma: f32, threshold: f32, knee: f32) ->
     crate::post::bloom_should_run(max_luma, threshold, knee)
 }
 
-/// Live bloom on/off switch: off keeps today's frame bit-identical
-/// (default), on lets the gate below decide per frame. Owner live,
-/// consumer the future live bloom pass. Units boolean out. Determinism
-/// one relaxed atomic load, no wall clock, no allocation. Presentation
-/// only, never hashed.
+/// Shipped live bloom default, mirroring the presenter's `BloomState::on()`
+/// default: the window frame runs the halo without any caller raising the
+/// switch, so `LF4`'s bloom is live in the picture the window ships.
+/// Owner live, consumer `LIVE_BLOOM_ENABLED` below and the shipped-default
+/// test. Units boolean. Presentation only, never hashed.
+pub(super) const LIVE_BLOOM_DEFAULT_ON: bool = true;
+
+/// Live bloom on/off switch: ships at [`LIVE_BLOOM_DEFAULT_ON`], so the
+/// window frame consults the gate below and runs the halo; off keeps the
+/// frame bit-identical and is reached through
+/// `Presenter::set_bloom_enabled(false)`. Owner live, consumer
+/// `present_frame_live`. Units boolean out. Determinism one relaxed atomic
+/// load, no wall clock, no allocation. Presentation only, never hashed.
 static LIVE_BLOOM_ENABLED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+    core::sync::atomic::AtomicBool::new(LIVE_BLOOM_DEFAULT_ON);
 
 /// Read the live bloom switch. Units boolean out.
 #[must_use]
@@ -406,16 +415,20 @@ impl Presenter {
         &buf[..n]
     }
 
-    /// Stage one frame from the shared camera plus order: same validation
-    /// and uniform packing as `stage_frame` but reuses the caller-built
-    /// camera instead of rebuilding it. Units bytes out. Presentation only.
+    /// Stage one frame from the shared camera plus the frame's built
+    /// view-projection: same validation and uniform packing as `stage_frame`
+    /// but reuses the caller-built camera and matrix instead of rebuilding
+    /// either. Returns stack camera (80 B) plus light (32 B) images; every
+    /// draw's material lands in `material_scratch`, so a staged frame
+    /// allocates nothing. Units bytes out. Presentation only.
     /// Caller live paths below after `effective_camera`.
     fn stage_frame_with_camera(
         &mut self,
         list: &DrawList,
         camera: &crate::v1::Camera,
+        view_proj: glam::Mat4,
         order: &[usize],
-    ) -> Result<(Vec<u8>, Vec<u8>), PresentError> {
+    ) -> Result<([u8; 80], [u8; 32]), PresentError> {
         list.validate()?;
         if order.len() != list.items.len() {
             return Err(PresentError::InvalidDraw {
@@ -423,16 +436,15 @@ impl Presenter {
                 reason: "draw order length mismatches list".into(),
             });
         }
-        let aspect = camera.aspect;
         list.light
             .validate()
             .map_err(|e| PresentError::InvalidDraw {
                 index: 0,
                 reason: format!("light: {e}"),
             })?;
-        let (cam_u, light_u, _) = crate::v1::build_uniforms(
+        let (cam_u, light_u, _) = crate::v1::build_uniforms_with_view_proj(
             camera,
-            aspect,
+            view_proj,
             &list.light,
             &crate::v1::PbrMaterial {
                 base_color: [0.5, 0.5, 0.5],
@@ -454,13 +466,14 @@ impl Presenter {
                     index: slot,
                     reason: "draw order escapes list".into(),
                 })?;
-            let (_, _, mat_u) =
-                crate::v1::build_uniforms(camera, aspect, &list.light, &item.material).map_err(
-                    |e| PresentError::InvalidDraw {
-                        index: slot,
-                        reason: format!("material: {e}"),
-                    },
-                )?;
+            // Material-only pack: the camera plus light uniforms above already
+            // carry this frame's matrix, so no per-draw view math runs here.
+            let mat_u = crate::v1::build_material(&item.material).map_err(|e| {
+                PresentError::InvalidDraw {
+                    index: slot,
+                    reason: format!("material: {e}"),
+                }
+            })?;
             if self.meshes.get(&item.mesh).is_none() {
                 return Err(PresentError::InvalidDraw {
                     index: slot,
@@ -475,18 +488,21 @@ impl Presenter {
                     });
                 }
             }
-            self.material_scratch.extend_from_slice(&mat_u.to_bytes());
+            // Stack image, not `to_bytes()`: the per-draw byte image would
+            // build one `Vec` per draw, which the ALLOC ratchet cannot see.
+            self.material_scratch.extend_from_slice(&mat_u.to_array());
             self.material_scratch
                 .resize((slot + 1) * MATERIAL_STRIDE, 0);
         }
-        Ok((cam_u.to_bytes(), light_u.to_bytes()))
+        Ok((cam_u.to_array(), light_u.to_array()))
     }
 
     /// After-blit overlay draw for staged HP bars: one textured-quad draw
     /// over the blit view with no depth. Skips empty plans or verts so the
     /// live frame stays bit-identical when no HUD is staged. Units quads.
-    /// Presentation only, never hashed. Caller `present_frame_live`.
-    fn encode_overlay(
+    /// Presentation only, never hashed. Callers `present_frame_live` and
+    /// `submit::render_offscreen` (the capture twin).
+    pub(super) fn encode_overlay(
         &self,
         enc: &mut wgpu::CommandEncoder,
         plan: Option<crate::overlay::OverlayDraw>,
@@ -763,8 +779,9 @@ pub(crate) fn live_present_should_reuse(
 
 /// After-blit overlay pipeline for one output format: textured quads,
 /// alpha blend, no depth; layout follows the shared overlay helpers.
-/// Owner live, consumer `present_frame_live` below.
-fn live_overlay_pipeline(
+/// Owner live, consumer `present_frame_live` plus the capture path in
+/// `submit::render_offscreen`.
+pub(super) fn live_overlay_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
@@ -892,32 +909,18 @@ impl Presenter {
 
     /// Refresh the fog uniform the forward fragment and the sky draw read:
     /// inverse view-projection and eye for the sky rays, the height-fog
-    /// slope for both. `shader_fog` false (the capture twin and the probe
-    /// composite, which fog through the blit pair) writes a zero slope, so
-    /// the forward mix is exactly 0.0 and nothing fogs twice. The kill
-    /// switch (`set_fog_enabled`) zeroes the slope on the live frame too.
+    /// slope for both. Reads the frame camera plus its built matrix, so the
+    /// frame never builds the matrix a second time. `shader_fog` false (the
+    /// capture twin and the probe composite, which fog through the blit pair)
+    /// writes a zero slope, so the forward mix is exactly 0.0 and nothing fogs
+    /// twice. The kill switch (`set_fog_enabled`) zeroes the slope on the live
+    /// frame too.
     pub(super) fn write_fog_forward(
         &self,
-        list: &DrawList,
-        width: u32,
-        height: u32,
+        frame: &FrameCamera,
         shader_fog: bool,
     ) -> Result<(), PresentError> {
-        let mut camera = list.camera.clone();
-        if height == 0 {
-            return Err(PresentError::InvalidDraw {
-                index: 0,
-                reason: "fog frame height is zero".into(),
-            });
-        }
-        let w16 = u16::try_from(width).unwrap_or(u16::MAX);
-        let h16 = u16::try_from(height).unwrap_or(1);
-        camera.aspect = f32::from(w16) / f32::from(h16);
-        camera.view_proj().map_err(|e| PresentError::InvalidDraw {
-            index: 0,
-            reason: format!("camera: {e}"),
-        })?;
-        let inv = inverse_view_proj_cols(&camera)?;
+        let inv = inverse_view_proj_cols(frame)?;
         let mut flat = [0.0f32; 16];
         for (dst, src) in flat.chunks_exact_mut(4).zip(inv.iter()) {
             dst.copy_from_slice(src);
@@ -930,7 +933,7 @@ impl Presenter {
         self.queue.write_buffer(
             &self.fog_fwd_buf,
             0,
-            &fog.to_bytes(&flat, camera.eye.to_array()),
+            &fog.to_bytes(&flat, frame.eye.to_array()),
         );
         Ok(())
     }
@@ -1108,15 +1111,16 @@ impl Presenter {
         toggles: &crate::pass_truth::LookToggles,
     ) -> Result<FrameReceipt, PresentError> {
         let (render_w, render_h) = live_present_size(width, height, live_half_res_enabled());
-        let camera = effective_camera(list, render_w, render_h)?;
+        let frame = effective_camera(list, render_w, render_h)?;
         let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
         let order = Self::frame_draw_order(list, &mut order_buf);
-        let (cam_bytes, light_bytes) = self.stage_frame_with_camera(list, &camera, order)?;
+        let (cam_bytes, light_bytes) =
+            self.stage_frame_with_camera(list, &frame, frame.built_view_proj, order)?;
         self.frame_waits = FrameWaits::default();
         self.ensure_targets(render_w, render_h);
         self.write_frame_uniforms(&cam_bytes, &light_bytes);
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;
-        self.write_fog_forward(list, render_w, render_h, true)?;
+        self.write_fog_forward(&frame, true)?;
         if self.neutral_fog_pending {
             // Leaving the probe composite: the pair still holds its last
             // fog and occlusion, reset it once.
@@ -1144,13 +1148,17 @@ impl Presenter {
             .as_mut()
             .and_then(|timer| timer.begin_frame(&self.device));
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let forward_ibl_started = std::time::Instant::now();
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ra1-live-frame"),
             });
         let stale_us: u64;
+        // The `ibl` cell is the forward IBL-bound encode and nothing else, as
+        // `ibl::live_ibl_receipt` documents it: the clock below opens on that
+        // one pass and closes on it, so the AO upload, blit and overlay never
+        // bill to the `ibl` column.
+        let forward_ibl_ms: f64;
         {
             let targets = self
                 .targets
@@ -1171,6 +1179,7 @@ impl Presenter {
                 debug_assert_eq!(sky_horizon, self.fog_fwd.color);
                 debug_assert_eq!(sky_exposure, self.sky_exposure);
             }
+            let forward_ibl_started = std::time::Instant::now();
             self.encode_forward(
                 &mut enc,
                 targets,
@@ -1178,6 +1187,7 @@ impl Presenter {
                 sky_draw,
                 timer.map(|(timer, _)| timer.forward_writes()),
             );
+            forward_ibl_ms = forward_ibl_started.elapsed().as_secs_f64() * 1000.0;
             // LF3 first landing: fresh GTAO after forward, before the blit,
             // wired through the live helper (`live_ao_upload_for_frame`:
             // bake via `gtao_live_full_for_forward`, guard via
@@ -1235,7 +1245,7 @@ impl Presenter {
                     .map(|c| c.format)
                     .unwrap_or(super::OUTPUT_FORMAT),
             };
-            if let Some(plan) = self.overlay.hp_bars_plan(camera.aspect) {
+            if let Some(plan) = self.overlay.hp_bars_plan(frame.aspect) {
                 let mut verts = [crate::overlay::QuadVertex::default();
                     crate::overlay::OVERLAY_MAX_QUADS * crate::overlay::VERTS_PER_QUAD];
                 let written = self.overlay.write_vertices(&mut verts);
@@ -1265,7 +1275,6 @@ impl Presenter {
                 timer.encode_resolve(&mut enc, slot);
             }
         }
-        let forward_ibl_ms = forward_ibl_started.elapsed().as_secs_f64() * 1000.0;
         // The shipped forward layout carries the bake binds and `fs` samples,
         // so the live frame is bound; the bake verdict comes from the live bake.
         let bake_lit = crate::ibl::bake_has_light(&self.ibl_bake);
@@ -1303,8 +1312,9 @@ impl Presenter {
     ) -> Result<FrameReceipt, PresentError> {
         let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
         let order = Self::frame_draw_order(list, &mut order_buf);
-        let camera = effective_camera(list, width, height)?;
-        let (cam_bytes, light_bytes) = self.stage_frame_with_camera(list, &camera, order)?;
+        let frame = effective_camera(list, width, height)?;
+        let (cam_bytes, light_bytes) =
+            self.stage_frame_with_camera(list, &frame, frame.built_view_proj, order)?;
         self.frame_waits = FrameWaits::default();
         let probe = self
             .frames_presented
@@ -1324,7 +1334,7 @@ impl Presenter {
         // The surface twin samples the same cascaded sun as the
         // offscreen twin; the frame focus depth selects the band.
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;
-        self.write_fog_forward(list, width, height, false)?;
+        self.write_fog_forward(&frame, false)?;
         let fog_wired = self.fog_enabled && super::super::fog_fits_frame(width, height);
         // The fog tranche (depth readback, CPU decode, fog plus contact
         // compute, readback, upload) is the blocking part of a frame; the
@@ -1376,24 +1386,39 @@ impl Presenter {
             }
         }
         self.queue.submit(Some(enc.finish()));
+        let mut raw_depth = std::mem::take(&mut self.depth_decode);
+        // The depth copy above was recorded only when the fog tranche is due,
+        // so map only then: a held frame runs no copy and must not map, or a
+        // frame tallied live pays one map plus one poll wait, the stall the
+        // arena smoke fails on (`WaitStats::live_blocking`).
+        if fog_now {
+            let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
+            map_readback_f32(
+                &self.device,
+                &mut self.frame_waits,
+                depth_rb,
+                width,
+                padded_depth_row(width),
+                height,
+                &mut raw_depth,
+            )?;
+        }
         let fog_rows: FogRows = if fog_now {
-            let raw_depth = {
-                let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
-                map_readback_f32(
-                    &self.device,
-                    &mut self.frame_waits,
-                    depth_rb,
-                    width,
-                    padded_depth_row(width),
-                    height,
-                )?
-            };
-            self.run_fog_tranche(&raw_depth, &camera, width, height)?
+            let rows = self.run_fog_tranche(&raw_depth, &frame, width, height);
+            self.depth_decode = raw_depth;
+            rows?
         } else if fog_wired {
+            self.depth_decode = raw_depth;
             // Between refreshes the blit keeps the last fog pair.
             (0, 0, 0, 0, 0, 0)
-        } else {
+        } else if self.fog_pair_dirty {
+            self.depth_decode = raw_depth;
             self.clear_fog_targets(width, height)
+        } else {
+            // Pair already neutral: skip the two full-res re-uploads
+            // plus the uniform write this frame.
+            self.depth_decode = raw_depth;
+            (0, 0, 0, 0, 0, 0)
         };
         // Post-forward chart: same bake, same submitter, own receipt
         // rows, so the look tranche counts exactly the four forward
@@ -1521,7 +1546,7 @@ mod live_bloom_gate_tests {
         // Caller: future live bloom pass (switch plus gate).
         // Behavior: off never runs, on follows the post oracle.
         set_live_bloom_enabled(false);
-        assert!(!live_bloom_enabled(), "switch defaults off");
+        assert!(!live_bloom_enabled(), "switch reads back off");
         assert!(
             !live_bloom_for_frame(false, 4.0, 1.0, 0.5),
             "off plus torch stays off"
@@ -1556,7 +1581,7 @@ mod live_bloom_gate_tests {
         // Behavior: off never runs, on follows the oracle; dark stays off,
         // torch runs; the live frame consults the gate before the blit.
         set_live_bloom_enabled(false);
-        assert!(!live_bloom_enabled(), "switch defaults off");
+        assert!(!live_bloom_enabled(), "switch reads back off");
         assert!(
             !live_bloom_for_frame(false, 0.05, 1.0, 0.5),
             "off plus dark stays off"
@@ -1600,6 +1625,46 @@ mod live_bloom_gate_tests {
         set_live_bloom_enabled(false);
         assert!(!live_bloom_enabled(), "switch restores off");
     }
+
+    #[test]
+    fn live_bloom_switch_ships_on_in_the_window_frame() {
+        // Caller: `present_frame_live` (the shipped window frame; no game
+        // caller raises the switch today).
+        // Behavior: the live switch ships at `LIVE_BLOOM_DEFAULT_ON`, which
+        // mirrors the presenter's `BloomState::on()` default, so a bright
+        // arena frame runs the halo in the window; a dark frame and the off
+        // leg stay unchanged.
+        assert!(
+            super::LIVE_BLOOM_DEFAULT_ON,
+            "the window frame ships blooming"
+        );
+        assert!(
+            include_str!("presenter.rs").contains("bloom: BloomState::on()"),
+            "the presenter default is the window frame's bloom state"
+        );
+        assert!(
+            live_bloom_for_frame(
+                super::LIVE_BLOOM_DEFAULT_ON,
+                2.4,
+                super::LIVE_BLOOM_THRESHOLD,
+                super::LIVE_BLOOM_KNEE
+            ),
+            "a bright frame runs the halo with the shipped thresholds"
+        );
+        assert!(
+            !live_bloom_for_frame(
+                super::LIVE_BLOOM_DEFAULT_ON,
+                0.05,
+                super::LIVE_BLOOM_THRESHOLD,
+                super::LIVE_BLOOM_KNEE
+            ),
+            "a dark frame stays off even with the switch shipped on"
+        );
+        assert!(
+            !live_bloom_for_frame(false, 2.4, 1.0, 0.5),
+            "the off leg stays off"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1626,6 +1691,35 @@ mod live_ibl_receipt_tests {
             (0, 0, 0),
             "zero size stays skipped"
         );
+    }
+
+    #[test]
+    fn live_ibl_span_covers_the_forward_encode_only() {
+        // Caller: `present_frame_live` receipt path.
+        // Behavior: the clock that becomes `ibl.2` opens at the forward
+        // IBL-bound encode and closes on it, so the AO upload, the blit and
+        // the overlay below never bill to the `ibl` column.
+        let src = include_str!("live.rs");
+        let open = "let forward_ibl_started = std::time::Instant::now();";
+        let close = "forward_ibl_started.elapsed()";
+        let start = src.find(open).expect("live path opens the ibl clock");
+        let end = src.find(close).expect("live path closes the ibl clock");
+        assert!(start < end, "the ibl clock closes after it opens");
+        let span = &src[start..end];
+        assert!(
+            span.contains("self.encode_forward("),
+            "the span holds the forward IBL-bound encode"
+        );
+        for leak in [
+            "create_command_encoder",
+            "live_ao_upload_for_frame(",
+            "stale_ao_reuse_upload(",
+            "encode_blit(",
+            "encode_overlay(",
+            "encode_resolve(",
+        ] {
+            assert!(!span.contains(leak), "the ibl span leaks {leak}");
+        }
     }
 
     #[test]
@@ -1778,6 +1872,85 @@ mod frame_camera_once_tests {
             cam_once.to_array(),
             cam_rebuilt.to_array(),
             "shared staged bytes match rebuilt"
+        );
+    }
+}
+
+#[cfg(test)]
+mod one_view_proj_frame_build_tests {
+    /// Production head of a file: everything before its first test module.
+    fn head(src: &str) -> &str {
+        &src[..src.find("#[cfg(test)]").unwrap_or(src.len())]
+    }
+
+    #[test]
+    fn one_camera_view_proj_build_per_frame() {
+        // Caller: `present_frame_live` / `present_frame_probed` here plus
+        // `render_offscreen` in `submit`.
+        // Behavior: the frame path builds the camera view-projection once per
+        // frame and every later reader takes the built matrix instead of
+        // building the matrix again.
+        let build = concat!("camera.view_proj", "()");
+        let access = concat!(".view_proj", "()");
+        let live = head(include_str!("live.rs"));
+        assert_eq!(
+            live.matches(access).count(),
+            0,
+            "live frame path builds no view-proj"
+        );
+        assert!(
+            live.contains("built_view_proj"),
+            "live staging reads the built matrix"
+        );
+        assert!(
+            live.contains("build_uniforms_with_view_proj"),
+            "live staging packs the built matrix"
+        );
+        let fog = head(include_str!("fog_tranche.rs"));
+        assert_eq!(
+            fog.matches(access).count(),
+            0,
+            "fog path builds no view-proj"
+        );
+        let submit = include_str!("submit.rs");
+        let eff = submit.find("fn effective_camera").expect("build owner");
+        let inv = submit
+            .find("fn inverse_view_proj_cols")
+            .expect("inverse owner");
+        assert_eq!(
+            submit[eff..inv].matches(build).count(),
+            1,
+            "the frame camera builds view_proj once"
+        );
+        assert_eq!(
+            submit.matches(build).count(),
+            1,
+            "no other build sits on the frame path"
+        );
+        assert_eq!(
+            submit[inv..].matches(build).count(),
+            0,
+            "the fog inverse builds no matrix"
+        );
+        assert!(
+            submit[inv..].contains("built_view_proj"),
+            "the fog inverse inverts the built matrix"
+        );
+        assert!(
+            submit.contains("build_uniforms_with_view_proj"),
+            "capture staging packs the built matrix"
+        );
+        let v1 = include_str!("../../v1.rs");
+        let pack = v1
+            .find("pub fn build_uniforms_with_view_proj(")
+            .expect("the packer takes the built matrix");
+        let mat = v1
+            .find("pub(crate) fn build_material(")
+            .expect("the material packer follows it");
+        assert_eq!(
+            v1[pack..mat].matches(access).count(),
+            0,
+            "the built-matrix packer never rebuilds view_proj"
         );
     }
 }
@@ -2187,5 +2360,225 @@ mod live_sky_feed_tests {
         let mut ragged = bake;
         ragged.texels.truncate(5);
         assert_eq!(live_sky_feed_for_frame(&all, &ragged, anchor), None);
+    }
+}
+
+#[cfg(test)]
+mod live_overlay_capture_tests {
+    use crate::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter};
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(presenter) => Ok(presenter),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        require_or_skip(test, probe)
+    }
+
+    fn cube_list(key: MeshKey, width: u32, height: u32) -> DrawList {
+        let scene = crate::v1::default_scene(width, height).expect("default scene is valid");
+        DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+                normal_map: None,
+            }],
+        }
+    }
+
+    fn rgba(png: &[u8]) -> Vec<u8> {
+        image::load_from_memory(png)
+            .expect("capture is a valid PNG")
+            .to_rgba8()
+            .into_raw()
+    }
+
+    /// Pixel box of a 0..1 hud rect through the shared overlay matrix.
+    /// Pixel `i` covers centre `i + 0.5`, so the box keeps exactly the pixels
+    /// whose centre falls inside the projected rect. Truncating both corners
+    /// (`as u32` on each) dropped the far row and column whenever the edge had
+    /// a fractional part: the bar's right edge lands at 40.8 px, so the last
+    /// covered column (centre 40.5) fell outside a box that ended at 40 and
+    /// read as a leak.
+    fn rect_px(rect: [f32; 4], aspect: f32, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let m = crate::overlay::overlay_mvp(aspect);
+        let to_px = |x: f32, y: f32| {
+            let nx = m[0][0] * x + m[3][0];
+            let ny = m[1][1] * y + m[3][1];
+            (
+                (nx + 1.0) * 0.5 * width as f32,
+                (-ny + 1.0) * 0.5 * height as f32,
+            )
+        };
+        let (ax, ay) = to_px(rect[0], rect[1]);
+        let (bx, by) = to_px(rect[2], rect[3]);
+        let (minx, maxx) = (ax.min(bx), ax.max(bx));
+        let (miny, maxy) = (ay.min(by), ay.max(by));
+        let x0 = (minx - 0.5).ceil().clamp(0.0, width as f32) as u32;
+        let y0 = (miny - 0.5).ceil().clamp(0.0, height as f32) as u32;
+        let x1 = ((maxx - 0.5).floor() + 1.0).clamp(0.0, width as f32) as u32;
+        let y1 = ((maxy - 0.5).floor() + 1.0).clamp(0.0, height as f32) as u32;
+        (x0, y0, x1.max(x0), y1.max(y0))
+    }
+
+    #[test]
+    fn hp_rect_holds_bars_not_scene() {
+        // Caller: `render_offscreen` capture path (the arena capture and the
+        // headless smoke twin read their PNG from it).
+        // Behavior: a staged hp bar changes the pixels inside its screen
+        // rect; the frame outside that rect stays byte-identical.
+        let Some(mut presenter) = init_or_skip("hp_rect_holds_bars_not_scene") else {
+            return;
+        };
+        let key = MeshKey::new(1, [0xA1; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(160, 120).expect("valid size applies");
+        let list = cube_list(key, 160, 120);
+        let bare = presenter
+            .render_offscreen(&list)
+            .expect("bare frame renders");
+        let bare_png = bare.png.expect("bare frame has pixels");
+        let bare_px = rgba(&bare_png);
+        presenter.clear_overlay();
+        let [x0, y0, x1, y1] = crate::overlay::hp_bar_rect(0);
+        assert!(
+            presenter.push_hp_bar(x0, y0, x1, y1, 1.0),
+            "stage one full hp bar"
+        );
+        let with = presenter
+            .render_offscreen(&list)
+            .expect("hud frame renders");
+        assert!(
+            with.manifest.is_clean(),
+            "hud frame stays validation-clean, got {:?}",
+            with.manifest
+        );
+        let with_png = with.png.expect("hud frame has pixels");
+        let with_px = rgba(&with_png);
+        assert_eq!(bare_px.len(), with_px.len(), "same frame size");
+        let (rx0, ry0, rx1, ry1) = rect_px([x0, y0, x1, y1], 160.0 / 120.0, 160, 120);
+        let (mut inside, mut outside) = (0usize, 0usize);
+        for y in 0..120u32 {
+            for x in 0..160u32 {
+                let i = ((y * 160 + x) * 4) as usize;
+                let moved = (0..3)
+                    .any(|c| (i32::from(bare_px[i + c]) - i32::from(with_px[i + c])).abs() > 16);
+                if !moved {
+                    continue;
+                }
+                if (rx0..rx1).contains(&x) && (ry0..ry1).contains(&y) {
+                    inside += 1;
+                } else {
+                    outside += 1;
+                }
+            }
+        }
+        assert!(
+            inside >= 16,
+            "the hp rect must hold bar pixels, moved inside={inside}"
+        );
+        assert_eq!(outside, 0, "the bar draw stays inside its rect");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live staging allocation gate: staging one live frame must read the same
+// byte images while adding no heap allocation per draw. A `to_bytes()` call
+// site in the stager built one `Vec` per draw; the ALLOC regex of
+// rust-quality never sees it because it greps call sites for `to_vec`, not
+// for the helper that wraps it. Skips (passes) with no adapter.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod live_stage_alloc_tests {
+    use super::super::submit::{effective_camera, MATERIAL_STRIDE};
+    use crate::present::{
+        DrawItem, DrawList, MeshKey, PresentError, Presenter, MAX_DRAWS_PER_FRAME,
+    };
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+    use engine_core::alloc_probe::measure;
+
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(presenter) => Ok(presenter),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        require_or_skip(test, probe)
+    }
+
+    /// One live stage, exactly as `present_frame_live` runs it: the frame
+    /// camera once, then the shared stager over the frame's draw order.
+    /// Returns the staged byte-image lengths (camera, light), so the image
+    /// sizes are proven beside the allocation count.
+    fn stage(presenter: &mut Presenter, list: &DrawList) -> (usize, usize) {
+        let frame = effective_camera(list, 96, 96).expect("frame camera builds");
+        let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
+        let draws = list.items.len().min(MAX_DRAWS_PER_FRAME);
+        for (slot, at) in order_buf[..draws].iter_mut().enumerate() {
+            *at = slot;
+        }
+        let (cam, light) = presenter
+            .stage_frame_with_camera(list, &frame, frame.built_view_proj, &order_buf[..draws])
+            .expect("live stage");
+        (cam.len(), light.len())
+    }
+
+    #[test]
+    fn live_stage_allocs_do_not_grow_with_the_draw_count() {
+        // Caller: `stage_frame_with_camera` (the live and probe frames).
+        // Behavior: the per-draw material pack adds no heap as draws grow.
+        let Some(mut presenter) = init_or_skip("live_stage_allocs_do_not_grow_with_the_draw_count")
+        else {
+            return;
+        };
+        let key = MeshKey::new(0x5A11, [0x21; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        let scene = crate::v1::default_scene(96, 96).expect("default scene is valid");
+        let item = DrawItem {
+            mesh: key,
+            material: scene.material.clone(),
+            base_color: None,
+            normal_map: None,
+        };
+        let list_with = |draws: usize| DrawList {
+            camera: scene.camera.clone(),
+            light: scene.light.clone(),
+            items: vec![item.clone(); draws],
+        };
+        let (one, many) = (list_with(1), list_with(48));
+        // Warmup outside the counting: the steady-state contract.
+        let warm = stage(&mut presenter, &many);
+        assert_eq!(warm, (80, 32), "camera 80 B plus light 32 B");
+        let (one_dims, single) = measure(|| stage(&mut presenter, &one));
+        let (many_dims, wide) = measure(|| stage(&mut presenter, &many));
+        assert_eq!(one_dims, (80, 32), "one draw stages the same bytes");
+        assert_eq!(many_dims, (80, 32), "48 draws stage the same bytes");
+        assert_eq!(single.calls, 0, "one live stage allocates nothing");
+        assert_eq!(
+            wide.calls, single.calls,
+            "the live stage allocates nothing more as the draw count grows"
+        );
+        eprintln!(
+            "live stage allocs: 1 draw {} / 48 draws {}",
+            single.calls, wide.calls
+        );
+        assert_eq!(
+            presenter.material_scratch.len(),
+            48 * MATERIAL_STRIDE,
+            "one 256-byte stride per draw lands in the reused scratch"
+        );
     }
 }

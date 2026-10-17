@@ -258,16 +258,14 @@ fn cas_parity_matches_chain_on_flat_and_clamps_lobe_on_edge() {
     notch[idx(W, 4, 3)] = [0.9, 0.9, 0.9];
     let bit = fsr_rcas_sharpen(&notch, W, H, 1.0).expect("notch sharpen runs");
     let center = at(&bit, 3, 3);
-    for c in 0..3 {
+    for (c, ch) in center.iter().enumerate() {
         assert!(
-            (center[c] - 0.6).abs() > 1e-6,
-            "full sharpness moves the notch ch {c}: {}",
-            center[c],
+            (*ch - 0.6).abs() > 1e-6,
+            "full sharpness moves the notch ch {c}: {ch}",
         );
         assert!(
-            center[c] >= 0.1 - EPS && center[c] <= 0.9 + EPS,
-            "notch stays in lobe ch {c}: {}",
-            center[c],
+            *ch >= 0.1 - EPS && *ch <= 0.9 + EPS,
+            "notch stays in lobe ch {c}: {ch}",
         );
     }
 

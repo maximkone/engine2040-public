@@ -13,6 +13,11 @@
 // Assertion lines are `assert*!(...)` (Rust), `assert(...)/assert.xxx(...)`
 // (JS/TS), or an `expected` literal line under `tests/` or `#[cfg(test)]`.
 // Pure additions (a new test) never count: only removed lines do.
+// Unwired guard (AD5): a new `pub` fn/struct/enum in a non-test Rust file needs a
+// reference from another non-test file, else `UNWIRED-RISK: <item> has no non-test
+// caller outside <file>`. A consumer row waives it (`--unlocks <row-id|packet.md>`
+// reads that packet's `UNLOCKS: <row>` line; `unlocks: [id]` in auditPatch).
+// `--orphans` lists the old ones under <root>/crates, exits 0, deletes nothing.
 // This checks the patch, not a helper's claims. Acceptance still needs a fresh
 // independent rerun; a clean patch is not evidence that its tests passed.
 // New Rust lines meet the top-tier bar in docs/RUST-QUALITY.md (layer 2):
@@ -26,8 +31,8 @@
 // New (untracked) files under --owned are read whole and scanned as added. An
 // owned path with no change in the patch and no file on disk is a FAIL.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainModule } from './steal-next.mjs';
 import { proofProblem } from "./argv.mjs";
@@ -245,7 +250,81 @@ export function untrackedPaths(owned, cwd = ".") {
   }
 }
 
-export function auditPatch(patch, { owned, role = "writer", root = ".", ids = null, untracked = [], testsMark = false }) {
+// A new `pub` item (fn, struct, enum) needs a caller outside its own file.
+const PUB_ITEM = /^\s*pub\s+(?:async\s+|unsafe\s+|const\s+|extern\s+"[^"]*"\s+)*(fn|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/;
+
+// A binary's or an example's `pub` item has no outside API: exempt like tests.
+const binPath = (name) => /^(?:crates\/[^/]+\/)?(?:src\/(?:main\.rs|bin\/)|examples\/)/.test(name);
+
+// `UNLOCKS:` row ids in packet text (a consumer row: AD5, FIX3, E42b).
+export function unlockRows(text) {
+  return [...String(text ?? "").matchAll(/\bUNLOCKS:\s*([A-Z][A-Z0-9]*\d[a-z]?)\b/g)].map((m) => m[1]);
+}
+
+// Added Rust lines of the patch with test scope flagged (on-disk file, else hunk).
+function patchRows(sections, root) {
+  const out = [];
+  for (const section of sections.filter((s) => s.startsWith("diff --git "))) {
+    const path = pathInPatch(/^\+\+\+ (.+)$/m.exec(section)?.[1]);
+    if (!path?.endsWith(".rs")) continue;
+    const added = addedLines(section);
+    if (!added.length) continue;
+    const full = existsSync(join(root, path)) ? readFileSync(join(root, path), "utf8").replace(/\r\n/g, "\n") : null;
+    const mask = full === null ? null : testLines(lex(full).code);
+    let heuristic = false;
+    for (const a of added) {
+      const { code } = lex(a.text);
+      if (mask === null && /#\[cfg\(test\)\]|^\s*mod tests\b/.test(a.text)) heuristic = true;
+      out.push({ path, line: a.line, code, test: testPath(path) || binPath(path) || (mask ? mask[a.line - 1] === 1 : heuristic) });
+    }
+  }
+  return out;
+}
+
+// Unwired guard (AD5), patch-only: the default path never reads the repo.
+function unwiredFindings(sections, { root = ".", unlocks = [] } = {}) {
+  if (unlocks.length) return [];
+  const rows = patchRows(sections, root);
+  const errors = [];
+  for (const r of rows) {
+    const m = r.test ? null : PUB_ITEM.exec(r.code);
+    if (!m) continue;
+    const word = new RegExp(`\\b${m[2]}\\b`);
+    if (rows.some((o) => o.path !== r.path && !o.test && word.test(o.code))) continue;
+    errors.push(`UNWIRED-RISK: ${m[2]} has no non-test caller outside ${r.path} (new pub ${m[1]} at line ${r.line}): add a caller in another file, or name the consumer row with an UNLOCKS: line`);
+  }
+  return errors;
+}
+
+// Report-only (AD5 `--orphans`): the pub items under <root>/crates no other file
+// mentions. Grep-level; it deletes and rewrites nothing.
+export function orphans(root = ".") {
+  const files = [];
+  const walk = (dir) => { for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === "target" || e.name.startsWith(".")) continue;
+    const p = join(dir, e.name);
+    if (e.isDirectory()) walk(p); else if (e.name.endsWith(".rs")) files.push(p);
+  } };
+  const rel = (file) => relative(root, file).replace(/\\/g, "/");
+  try { walk(join(root, "crates")); } catch { return []; }
+  const code = new Map(files.filter((f) => !testPath(rel(f)) && !binPath(rel(f))).map((file) => {
+    const bytes = readFileSync(file);
+    const text = bytes.includes(0) ? "" : lex(bytes.toString("utf8").replace(/\r\n/g, "\n")).code;
+    const mask = testLines(text);
+    return [rel(file), text.split("\n").map((line, i) => (mask[i] === 1 ? "" : line)).join("\n")];
+  }));
+  const found = [];
+  for (const [file, text] of code) text.split("\n").forEach((line, i) => {
+    const m = PUB_ITEM.exec(line);
+    if (m) found.push({ file, line: i + 1, kind: m[1], name: m[2] });
+  });
+  const name = new RegExp(`\\b(?:${[...new Set(found.map((o) => o.name))].join("|")})\\b`, "g");
+  const elsewhere = new Map();
+  for (const [file, text] of code) for (const m of text.matchAll(name)) elsewhere.set(m[0], (elsewhere.get(m[0]) ?? new Set()).add(file));
+  return found.filter((o) => [...(elsewhere.get(o.name) ?? [])].every((p) => p === o.file));
+}
+
+export function auditPatch(patch, { owned, role = "writer", root = ".", ids = null, untracked = [], testsMark = false, unlocks = [] }) {
   if (!roles.has(role)) throw new Error(`invalid role: ${role}`);
   if (!Array.isArray(owned) || owned.length === 0) throw new Error("at least one --owned path is required");
   const paths = owned.map(scope);
@@ -304,6 +383,8 @@ export function auditPatch(patch, { owned, role = "writer", root = ".", ids = nu
   if (!testsMark && fake.edited > 0 && fake.implChanged) {
     errors.push(`FAKE-PASS-RISK: ${fake.edited} assertion lines edited while production code also changed (row needs a TESTS: mark to waive)`);
   }
+  // Unwired guard (AD5): a new pub item needs a caller in another file, or a consumer row.
+  errors.push(...unwiredFindings(sections, { root, unlocks }));
   // Ratchet debt rides a baseline landing openly, never silently: findings
   // that raise a rust-quality count fail unless this patch also moves
   // tools/rust-quality.baseline.json (--accept/--tighten). The pre-commit
@@ -366,7 +447,7 @@ function cli(argv) {
     if (!audit.ok) process.exitCode = 1;
     return;
   }
-  const opts = { owned: [], role: "writer", patch: "", root: "", testsMark: false };
+  const opts = { owned: [], role: "writer", patch: "", root: "", testsMark: false, unlocks: [], orphans: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--owned") opts.owned.push(argv[++i] ?? "");
@@ -374,8 +455,21 @@ function cli(argv) {
     else if (arg === "--patch") opts.patch = argv[++i] ?? "";
     else if (arg === "--root") opts.root = argv[++i] ?? "";
     else if (arg === "--tests") opts.testsMark = true;
-    else if (arg === "--help" || arg === "-h") { console.log("Usage: node tools/packet-gate.mjs --patch <file|-> --owned <path> [--role writer] [--root <dir>] [--tests]"); return; }
+    else if (arg === "--orphans") opts.orphans = true;
+    else if (arg === "--unlocks") {
+      const value = argv[++i] ?? ""; // a row id (PX36) or a packet file with an UNLOCKS: line
+      const ids = unlockRows(existsSync(value) ? readFileSync(value, "utf8") : `UNLOCKS: ${value}`);
+      if (!ids.length) throw new Error(`--unlocks needs a row id or a packet file with an UNLOCKS: line: ${value}`);
+      opts.unlocks.push(...ids);
+    }
+    else if (arg === "--help" || arg === "-h") { console.log("Usage: node tools/packet-gate.mjs --patch <file|-> --owned <path> [--role writer] [--root <dir>] [--tests] [--unlocks <row-id|packet.md>]\n       node tools/packet-gate.mjs --orphans [--root <dir>] (report only, exits 0)"); return; }
     else throw new Error(`unknown argument: ${arg}`);
+  }
+  if (opts.orphans) {
+    const found = orphans(opts.root || ".");
+    for (const o of found) console.log(`ORPHAN ${o.file}:${o.line} pub ${o.kind} ${o.name}`);
+    console.log(`RESULT PASS: ${found.length} orphan(s): report only, nothing deleted or rewritten`);
+    return;
   }
   if (!opts.patch) throw new Error("--patch is required");
   // A collected lane patch target/lanes/<id>.patch reads its files from .lanes/<id>.

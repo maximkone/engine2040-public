@@ -25,8 +25,10 @@ pub const CONTRACT_SOLDIERS: usize = 500;
 pub const SQUAD_SIZE: usize = 8;
 /// Largest squad roster for a full legion.
 pub const MAX_SQUADS: usize = MAX_SOLDIERS / SQUAD_SIZE;
-/// Fixed tick rate the LOD clock counts in.
-pub const TICK_HZ: u32 = 60;
+/// Fixed tick rate the LOD clock counts in. Single owner of the rate is
+/// `engine_core::TICK_HZ`; its checked u32 form is
+/// `engine_core::TICK_HZ_U32`, which this constant takes.
+pub const TICK_HZ: u32 = engine_core::TICK_HZ_U32;
 /// Enemy range in cells that braces a holding shield wall.
 pub const BRACE_RANGE_CELLS: u32 = 16;
 /// Lateral gap in cells a flanking squad keeps off the enemy anchor.
@@ -942,6 +944,32 @@ mod tests {
 
     fn small_grid() -> (usize, usize) {
         (40, 20)
+    }
+
+    #[test]
+    fn tick_rate_comes_from_the_checked_core_owner() {
+        // Owner: `engine_core::TICK_HZ_U32`, the named checked conversion of
+        // `engine_core::TICK_HZ`. The rate constant must take that owner and
+        // never a numeric `as` cast, or the crate cast ratchet regresses
+        // (crates/ai casts 105 -> 106). Value first, then the definition.
+        let expected = engine_core::TICK_HZ_U32;
+        assert_eq!(TICK_HZ, expected);
+        assert_eq!(u64::from(TICK_HZ), engine_core::TICK_HZ);
+        // The definition above cfg(test) takes the checked core owner.
+        const SRC: &str = include_str!("legion.rs");
+        let head = SRC
+            .split("#[cfg(test)]")
+            .next()
+            .expect("legion.rs keeps its cfg(test) marker");
+        let def = head
+            .lines()
+            .find(|line| line.trim_start().starts_with("pub const TICK_HZ:"))
+            .expect("the rate constant keeps its definition");
+        assert!(
+            def.contains("engine_core::TICK_HZ_U32"),
+            "rate not taken from the checked core owner: {def}"
+        );
+        assert!(!def.contains(" as "), "rate defined by a cast: {def}");
     }
 
     #[test]

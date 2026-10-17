@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkRise, baselineCounts, baselineOf, baselineTotal, countByCrate, formatReport, helpText, scanIslands } from './wiring-scan.mjs';
+import { checkRise, baselineCounts, baselineOf, baselineTotal, countByCrate, formatReport, helpText, scanIslands, acquireRunLock, loadVerdict, saveVerdict, treeKey } from './wiring-scan.mjs';
 
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), 'wiring-'));
@@ -159,4 +160,56 @@ test('wiring_baseline_file_committed', async () => {
   assert.equal(typeof baseline.by_crate, 'object');
   assert.ok(Object.keys(baseline.by_crate).length > 0);
   assert.equal(baselineTotal(baseline), baseline.total);
+});
+
+// ---- HEAD + dirty-file verdict cache and the one-run-per-tool lock ----
+
+function gitRepo() {
+  const repo = mkdtempSync(join(tmpdir(), 'verdict-repo-'));
+  const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: ['ignore', 'ignore', 'ignore'] });
+  writeFileSync(join(repo, 'a.rs'), 'pub fn a() {}\n');
+  git('init', '-q');
+  git('add', 'a.rs');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'one');
+  return repo;
+}
+
+test('verdict key and cache: HEAD plus the dirty-file hash, a dirty edit moves it', () => {
+  const repo = gitRepo();
+  try {
+    const clean = treeKey(repo);
+    assert.equal(clean.split('|').length, 3, `HEAD, dirty hash, caller key from ${clean}`);
+    assert.equal(treeKey(repo), clean, 'an unchanged tree keeps its key');
+    saveVerdict(repo, 'demo', clean, { out: 'PASS demo\n', err: '', code: 0 });
+    assert.equal(loadVerdict(repo, 'demo', clean).out, 'PASS demo\n', 'a keyed entry replays');
+    writeFileSync(join(repo, 'a.rs'), 'pub fn a() {}\npub fn b() {}\n');
+    const dirty = treeKey(repo);
+    assert.notEqual(dirty, clean, 'a dirty edit moves the key');
+    assert.equal(loadVerdict(repo, 'demo', dirty), null, 'a moved key never replays a stale verdict');
+    assert.notEqual(treeKey(repo, 'check'), treeKey(repo, 'report'), 'the caller mode is in the key');
+  } finally { cleanup(repo); }
+});
+
+test('run lock: a dead holder is taken over now, a live holder is waited on', async () => {
+  const repo = gitRepo();
+  try {
+    const lines = [];
+    mkdirSync(join(repo, 'target', 'locks'), { recursive: true });
+    writeFileSync(join(repo, 'target', 'locks', 'dead.lock'), '{"pid":999999}');
+    acquireRunLock(repo, 'dead', (m) => lines.push(m)).release();
+    assert.deepEqual(lines, [], 'a dead holder is taken over, never waited on');
+    const url = new URL('./wiring-scan.mjs', import.meta.url).href;
+    const child = `import { writeFileSync } from 'node:fs'; import { join } from 'node:path';
+import { acquireRunLock } from ${JSON.stringify(url)};
+const repo = process.argv[1]; acquireRunLock(repo, 'demo');
+writeFileSync(join(repo, 'held'), '1'); setTimeout(() => process.exit(0), 900);`;
+    const holder = spawn(process.execPath, ['--input-type=module', '-e', child, repo], { stdio: 'ignore' });
+    for (let i = 0; i < 200 && !existsSync(join(repo, 'held')); i += 1) await new Promise((r) => setTimeout(r, 25));
+    const start = Date.now();
+    acquireRunLock(repo, 'demo', (m) => lines.push(m)).release();
+    const waited = Date.now() - start;
+    await new Promise((r) => holder.on('exit', r));
+    assert.ok(lines.some((l) => l.startsWith('waiting for lock: demo (held by pid ')), `a wait line, got ${JSON.stringify(lines)}`);
+    assert.ok(waited >= 200, `the second run waited for the live holder, waited ${waited}ms`);
+  } finally { cleanup(repo); }
 });

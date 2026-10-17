@@ -13,7 +13,8 @@
 //! Book notes: tiers as data rows climbing in skill `[handsrust | Damage from
 //! Weapons and Claws]`; difficulty judged from the player's seat
 //! `[testing | Level progression]`. The 60% tier bar is a house number until
-//! the tournament proves another number; the boss stays PROPOSED with no row.
+//! the tournament proves another number; the `tier_4` boss row lands here and
+//! the T3-vs-T4 pair proves the bar against the elite.
 
 use engine_combat::fight::TABLES_V2;
 
@@ -88,8 +89,8 @@ fn parse_line(line_text: &str, line: usize) -> EnemyRow {
     assert!(parts.len() >= 2, "line {line}: need `<id> <key>=<int> ...`");
     let id_box: &'static str = Box::leak(parts[0].to_string().into_boxed_str());
     assert!(
-        id_box == "tier_1" || id_box == "tier_2" || id_box == "tier_3",
-        "line {line}: unknown tier `{id_box}`, want tier_1..tier_3 (boss stays PROPOSED)"
+        id_box == "tier_1" || id_box == "tier_2" || id_box == "tier_3" || id_box == "tier_4",
+        "line {line}: unknown tier `{id_box}`, want tier_1..tier_4"
     );
     let mut hp: Option<u32> = None;
     let mut tell: Option<u32> = None;
@@ -121,7 +122,7 @@ fn parse_line(line_text: &str, line: usize) -> EnemyRow {
     }
 }
 
-/// Parse the whole table: version plus three tier rows. Pure.
+/// Parse the whole table: version plus four tier rows. Pure.
 fn parse_table(src: &str) -> (u64, Vec<EnemyRow>) {
     let mut logical: Vec<(usize, String)> = Vec::new();
     for (index, raw) in src.lines().enumerate() {
@@ -182,13 +183,14 @@ fn higher_wins(high: &EnemyRow, low: &EnemyRow, base: u64, matches: u32) -> u32 
 }
 
 #[test]
-fn header_holds_three_tiers() {
+fn header_holds_four_tiers() {
     let (version, rows) = parse_table(ENEMIES_SRC);
     assert!(version != 0, "version never 0");
-    assert_eq!(rows.len(), 3, "want tier_1..tier_3, got {}", rows.len());
+    assert_eq!(rows.len(), 4, "want tier_1..tier_4, got {}", rows.len());
     assert_eq!(rows[0].id, "tier_1");
     assert_eq!(rows[1].id, "tier_2");
     assert_eq!(rows[2].id, "tier_3");
+    assert_eq!(rows[3].id, "tier_4");
 }
 
 #[test]
@@ -222,6 +224,7 @@ fn every_row_has_readable_tell_and_allowed_counter() {
     }
     assert_eq!(row_for(&rows, "tier_1").counter, 1, "grunt teaches parry");
     assert_eq!(row_for(&rows, "tier_2").counter, 2, "veteran teaches dodge");
+    assert_eq!(row_for(&rows, "tier_4").counter, 1, "boss opens with parry");
 }
 
 #[test]
@@ -246,7 +249,11 @@ fn tell_tracks_v2_startup() {
 #[test]
 fn tier_beats_below_in_60_percent_of_seeded_duels() {
     let (_, rows) = parse_table(ENEMIES_SRC);
-    let pairs = [("tier_1", "tier_2"), ("tier_2", "tier_3")];
+    let pairs = [
+        ("tier_1", "tier_2"),
+        ("tier_2", "tier_3"),
+        ("tier_3", "tier_4"),
+    ];
     for (pair_index, (low_id, high_id)) in pairs.iter().enumerate() {
         let low = row_for(&rows, low_id);
         let high = row_for(&rows, high_id);
@@ -255,6 +262,7 @@ fn tier_beats_below_in_60_percent_of_seeded_duels() {
         let second = higher_wins(high, low, base, DUELS_PER_PAIR);
         assert_eq!(first, second, "{high_id} over {low_id} must replay");
         let rate = first * 1000 / DUELS_PER_PAIR;
+        println!("{high_id} over {low_id}: {first}/{DUELS_PER_PAIR} wins, {rate} permille");
         assert!(
             rate >= TIER_BAR_PERMILLE,
             "{high_id} beats {low_id} in {rate} permille, want 600 or more (wins {first}/{})",

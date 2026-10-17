@@ -25,6 +25,7 @@ fn test_table() -> LodTable {
         id: 7,
         bands_m: vec![10.0, 20.0, 40.0],
         hysteresis_m: 0.5,
+        pixel_thresholds_px: None,
     }
 }
 fn node_at(id: u64, dist_m: f32, prev_lod: u8) -> SceneNode {

@@ -287,9 +287,7 @@ mod tests {
             let mut acc = IntAcc::new();
             let mut state = crate::TickState::new(7);
             for &dt in dts {
-                let n = acc
-                    .push_duration(dt)
-                    .expect("bounded tape cannot overflow");
+                let n = acc.push_duration(dt).expect("bounded tape cannot overflow");
                 let base = acc.tick() - u64::from(n);
                 for i in 0..n {
                     state.step(base + u64::from(i));

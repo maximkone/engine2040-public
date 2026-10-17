@@ -11,7 +11,8 @@
 //                                         done-when check (report <path> exists, rg, node <script>).
 //                                         No placeholder <...> in a test line. One packet per row: FAIL when an
 //                                         older ready/ packet already names a row of this one, or done/ holds
-//                                         a packet or run for it written in the last 2 h (the message names it).
+//                                         a packet or run for it written in the last 2 h (the message names it;
+//                                         a record that closed nothing - RESULT NOOP - holds nothing).
 // Cap = knob queue_per_writer x (coders + smiths) in .opencode/knobs.json. Exit 0 ADD/PASS, 1 VERIFY/FAIL, 2 usage.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, posix, resolve } from "node:path";
@@ -206,6 +207,18 @@ export const testProblems = (test, { root = ROOT, entries = [], cls = "code" } =
 // The board row ids a `row:` value names (EG12, MP6, MP17). Category tags (rot:unwired-testonly, bug:x, new) name none.
 export const rowKeys = (value) => String(value ?? "").match(/\b[A-Z][A-Z0-9]*\d[a-z]?\b/g) ?? [];
 const recordRow = (text) => frontMatter(text)?.fm?.row ?? [...String(text ?? "").matchAll(/\bROW:\s*([^|\n`]+)/g)].at(-1)?.[1] ?? "";
+// A record whose own RESULT is NOOP closed nothing: it made no edits (land.mjs reads NOOP as "the work was already in the
+// tree"), so no review or landing is in flight for its row and a 2 h hold would be a lockout. 2026-10-17: a NOOP FOCUS
+// scan that only *named* EG18 refused the close packet for that row. land.mjs owns the full result read (its resultOf);
+// this is the coarse "did it close anything" question, so the last RESULT line after `## Result` decides, and the reply
+// template's own `RESULT: DONE|PARTIAL|...` line (`(?!\|)`) is no result.
+const CLOSED_RESULT = /^.*\bRESULT:\s*(DONE|PARTIAL|BLOCKED|NOOP)\b(?!\|)(?!\s*-?\s*<(?:what|one line|summary|text)\b)/gim;
+const closedNothing = (text) => {
+  const s = String(text ?? "");
+  const at = s.lastIndexOf("\n## Result");
+  const status = [...(at < 0 ? s : s.slice(at)).matchAll(CLOSED_RESULT)].at(-1)?.[1] ?? "";
+  return /^NOOP$/i.test(status);
+};
 export const DONE_WAIT_MS = 2 * 3_600_000;
 
 // The ids of every row on the board (index, shards, archived done rows); null when the tree has no board to read.
@@ -215,9 +228,10 @@ export const boardRowIds = (root = ROOT) => {
 
 // One packet per row (2026-10-12 flow audit: 5 rows had 2 ready packets at once, EG8 was planned twice). Another packet in
 // ready/ that names a row id of this one stands if it is older (ties: the smaller name); done/ holding a packet or a standing
-// run for the row, written in the last 2 h, means its review and landing are still in flight. `self` = this packet's own
-// file name, which is never its own twin. A packet that is not in ready/ yet meets every queued one. Only ids that are
-// rows on the board count: `row: LEAD2` or `row: J5` tag a whole class of packets, not one row.
+// run for the row, written in the last 2 h, means its review and landing are still in flight - unless it closed nothing
+// (closedNothing: a NOOP record edits nothing, so its row waits for no review and no landing, 2026-10-17). `self` = this
+// packet's own file name, which is never its own twin. A packet that is not in ready/ yet meets every queued one. Only ids
+// that are rows on the board count: `row: LEAD2` or `row: J5` tag a whole class of packets, not one row.
 export const rowProblems = (fm, { root = ROOT, self = "", now = Date.now() } = {}) => {
   const keys = rowKeys(fm?.row);
   if (!keys.length) return [];
@@ -239,7 +253,9 @@ export const rowProblems = (fm, { root = ROOT, self = "", now = Date.now() } = {
     const file = join(queue, "done", n);
     const age = now - statSync(file).mtimeMs;
     if (age >= DONE_WAIT_MS) continue;
-    const theirs = rowKeys(recordRow(readFileSync(file, "utf8")));
+    const text = readFileSync(file, "utf8");
+    if (closedNothing(text)) continue; // it holds no row: nothing it did is waiting on a review or a landing
+    const theirs = rowKeys(recordRow(text));
     const hit = keys.find((k) => theirs.includes(k) && isRow(k));
     if (hit) out.push(`row ${hit} has done/${n}, written ${Math.max(0, Math.round(age / 60_000))} min ago (under 2 h): let its review and landing finish before planning the row again`);
   }

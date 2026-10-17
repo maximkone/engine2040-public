@@ -31,8 +31,10 @@ use std::time::Instant;
 use engine_assets::watcher::{WatchSettings, Watcher};
 use engine_audio::{AudioEngine, Bank, FeedTx, FightCue, FrameSource, Mixer};
 use engine_game::arena_kit::{
-    kit_prop_rows, live_kit_notice, push_kit_draws, stage_kit_or_default, KitReport,
+    kit_match_world_or_empty, kit_prop_rows, live_kit_notice, push_kit_draws, stage_kit_or_default,
+    KitReport,
 };
+use engine_game::camera::{free_cam_step, CameraMode, DirectorParams};
 use engine_game::capture;
 use engine_game::crash;
 use engine_game::fight_ring::{ring_prop_row, ring_wall_row};
@@ -43,12 +45,13 @@ use engine_game::practice::PracticeSwap;
 use engine_game::reload::{HotReload, ReloadReason};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
 use engine_game::windowed::{
-    cap_message as capped, check_exit_deadline_with_limit, feed_tick_audio,
-    fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row, hud_cells_quads,
-    open_audio, push_fight_draws, smoke_muted, split_staged_flag, stage_arena_bank, stage_dressing,
-    stage_fight_bodies, staged_fight_input, staged_session_config, surface_frame_action,
-    StagedFighterDot, StagedTally, SurfaceFrameAction, TickAccumulator, WinArgs, WinError,
-    FRAME_TIMES_CSV_HEADER, WINDOWED_SAMPLE_RATE, WINDOW_SIZE,
+    apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
+    feed_tick_audio, fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row,
+    hud_cells_quads, hud_draw_list, msaa_setting, open_audio, push_fight_draws, smoke_muted,
+    split_staged_flag, stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
+    staged_session_config, surface_frame_action, StagedFighterDot, StagedTally, SurfaceFrameAction,
+    TickAccumulator, WinArgs, WinError, FRAME_TIMES_CSV_HEADER, MSAA_ENV, WINDOWED_SAMPLE_RATE,
+    WINDOW_SIZE,
 };
 use engine_game::{App, GameConfig, TickOutcome, HUMAN_SLOT};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
@@ -97,6 +100,9 @@ const LOOK_PROBES_FLAG: &str = "--look-probes";
 const LOOK_PROBE_EVERY: u32 = 120;
 /// Surface frames between fog plus contact refreshes under `--look-probes`.
 const LIVE_FOG_EVERY: u32 = 4;
+/// Presented frames between hot-reload watcher polls: one poll stats every
+/// watched file, so every frame would cost up to ~257 `fs::metadata` calls.
+const HOT_RELOAD_POLL_EVERY_FRAMES: u16 = 30;
 
 /// Flag that fails the run when any presented frame shows no fighter (the
 /// camera once looked at bare sand for half a perf run, 2026-10-11).
@@ -106,6 +112,17 @@ const REQUIRE_FRAMING_FLAG: &str = "--require-framing";
 /// one JSON line (camera, then each drawn body's act, clip, tint, bounds and
 /// screen rect), so a script or a model reads the scene with no screenshot.
 const VIEW_BRIEF_FLAG: &str = "--view-brief";
+
+/// `--pause-at-tick <N>`: hold the fixed-tick accumulator once the accumulated
+/// tick count reaches `N` (`0` holds before the first tick). Presentation only:
+/// the sim's integer cursor stops, the frozen hash stands.
+const PAUSE_AT_TICK_FLAG: &str = "--pause-at-tick";
+/// `--step`: a bare flag that lets one Space press advance exactly one held
+/// tick while `--pause-at-tick` holds. One press is one tick, never one per
+/// presented frame. Presentation only.
+const STEP_FLAG: &str = "--step";
+/// The exact stop line a smoke greps: `paused tick=<N>`, no other tokens.
+const PAUSE_LINE_PREFIX: &str = "paused tick=";
 
 /// Pull `--view-brief <path>` out of the argument list; a flag with no
 /// path is an error.
@@ -133,6 +150,41 @@ fn split_flag(raw: &[String], flag: &str) -> (bool, Vec<String>) {
         .cloned()
         .collect();
     (on, rest)
+}
+
+/// Split the value flag `--pause-at-tick <N>` plus the bare `--step` flag off
+/// the argument list before the strict `WinArgs` parser (it would refuse either
+/// as unknown), same shape as [`split_flag`]. Returns the pause tick (if any),
+/// whether stepping is armed, and the remainder in order. A `--pause-at-tick`
+/// with a missing or unparsable tick fails loudly, never silently defaulted.
+/// Pure over the argument slice.
+fn split_pause_flags(raw: &[String]) -> Result<(Option<u64>, bool, Vec<String>), String> {
+    let step_on = raw.iter().any(|arg| arg == STEP_FLAG);
+    let mut pause_at = None;
+    let mut rest = Vec::with_capacity(raw.len());
+    let mut index = 0usize;
+    while index < raw.len() {
+        let arg = &raw[index];
+        if arg == PAUSE_AT_TICK_FLAG {
+            let value = raw
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| format!("{PAUSE_AT_TICK_FLAG} needs a tick"))?;
+            let tick: u64 = value
+                .parse()
+                .map_err(|_| format!("{PAUSE_AT_TICK_FLAG} {value}"))?;
+            pause_at = Some(tick);
+            index += 2;
+            continue;
+        }
+        if arg == STEP_FLAG {
+            index += 1;
+            continue;
+        }
+        rest.push(arg.clone());
+        index += 1;
+    }
+    Ok((pause_at, step_on, rest))
 }
 
 /// What the fight camera showed over a run: frames tallied, frames with no
@@ -225,6 +277,66 @@ fn framing_should_tally(ticks_done: u32) -> bool {
     ticks_done > 0
 }
 
+/// What the shell does with the fixed-tick accumulator on one frame under
+/// `--pause-at-tick`: run it, hold it, or run exactly one requested step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PauseDecision {
+    /// Run the ordinary accumulator steps.
+    Run,
+    /// Hold the accumulator; add zero ticks this frame.
+    Hold,
+    /// Run exactly one tick for one requested Space press.
+    Step,
+}
+
+/// The stop-or-step decision for the `--pause-at-tick` hold. Below the pause
+/// tick (or with no pause tick) the sim runs; at or past it the sim holds, and
+/// a `stepped` Space request runs exactly one tick. Without `--pause-at-tick`
+/// the sim always runs, so a stray step is a no-op. Pure, no window and no
+/// event loop: the test drives it directly.
+fn pause_decision(tick: u64, pause_at: Option<u64>, stepped: bool) -> PauseDecision {
+    match pause_at {
+        Some(at) if tick >= at => {
+            if stepped {
+                PauseDecision::Step
+            } else {
+                PauseDecision::Hold
+            }
+        }
+        _ => PauseDecision::Run,
+    }
+}
+
+/// Props and light for one `--view-brief` row: every kit row plus the ring and
+/// its wall as one row each, under the law-holding noon light the brief is
+/// measured with until the sun bind lands. Pure; built only when the flag is
+/// on, so a plain run pays nothing per frame.
+fn frame_brief_props() -> (Vec<PropTruth>, FrameLight) {
+    let mut props: Vec<PropTruth> = kit_prop_rows()
+        .iter()
+        .map(|(kind, bounds)| PropTruth {
+            kind,
+            min: bounds[0],
+            max: bounds[1],
+        })
+        .collect();
+    for row in [ring_prop_row(), ring_wall_row()] {
+        props.push(PropTruth {
+            kind: row.0,
+            min: row.1[0],
+            max: row.1[1],
+        });
+    }
+    let light = FrameLight {
+        sun_dir: [0.0, 1.0, 0.0],
+        sun_elev: 0.5,
+        exposure: 1.0,
+        fog: 0.0,
+        passes: 1,
+    };
+    (props, light)
+}
+
 /// Whether the surface list needs fresh kit draws: the skinned look clears
 /// the list (`list.items.clear` in `push_fighters`), so a bound look drops
 /// kit draws before submit. Skipping that re-staging saves one `mesh_keys`
@@ -232,6 +344,39 @@ fn framing_should_tally(ticks_done: u32) -> bool {
 /// cleared draws never reached the submit. Pure.
 fn should_push_kit(look_bound: bool) -> bool {
     !look_bound
+}
+
+/// Whether the frame list can skip the twin import: a bound skinned look
+/// clears `list.items` before its ring draws (`push_fighters` calls
+/// `list.items.clear` on both the cached and the fresh-skin arms), so the
+/// cube, dressing, twin fighters and kit draws that `frame_list` stages
+/// every frame never reach the submit. The twin kit import re-reads plus
+/// re-parses the 8 glTF kit files (~45 MB of JSON) on every frame, about
+/// a second per present, so 300 presents cannot fit the 180 s look gate
+/// while the bound look discards all of it. Pure over the bound flag.
+fn should_build_cheap_list(look_bound: bool) -> bool {
+    look_bound
+}
+
+/// Camera-only frame list for a bound look: the HUD clear list plus the
+/// establishing dressing eye with the capture orbit applied, no twin items.
+/// `push_fighters` clears then draws the ring plus skinned bodies over this
+/// base and re-aims the camera, so the surface and its capture PNGs show
+/// the same fight as the full twin list. A bad size refuses loudly instead
+/// of filing an empty frame. Presentation only, never hashed.
+///
+/// Caller: `present_frame` below takes this path while the look is bound;
+/// the refused-look path keeps the full twin `frame_list`.
+fn cheap_frame_list(
+    width: u32,
+    height: u32,
+    camera_path: Option<engine_game::windowed::CameraPath>,
+    frame: u32,
+) -> Result<DrawList, WinError> {
+    let mut list = hud_draw_list(width.max(1), height.max(1))?;
+    list.camera = dressing_camera(width.max(1), height.max(1))?;
+    apply_camera_orbit(&mut list, frame, camera_path);
+    Ok(list)
 }
 
 /// Presentation threading for the EG45 balance look: folds one tick's cues
@@ -397,6 +542,13 @@ fn run(raw: &[String]) -> i32 {
             return 2;
         }
     };
+    let (pause_at_tick, step_mode, raw) = match split_pause_flags(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
     let (chart_args, rest) = match split_chart_args(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -462,6 +614,11 @@ fn run(raw: &[String]) -> i32 {
         }
     };
     app.staged = staged.then(StagedTally::default);
+    app.pause_at_tick = pause_at_tick;
+    app.step_mode = step_mode;
+    if let Some(code) = app.stage_receipt_session() {
+        return code;
+    }
     app.look_probes = Presenter::look_probes_for_capture(look_probes, app.capture.is_some());
     app.require_framing = require_framing;
     if let Some(path) = view_brief {
@@ -621,6 +778,18 @@ struct ArenaApp {
     /// Window shell state; Title, Paused and Result hold the accumulator
     /// at zero steps while Match runs the bout.
     flow: Flow,
+    /// `--pause-at-tick N`: hold the accumulator once the tick reaches `N`.
+    pause_at_tick: Option<u64>,
+    /// `--step`: a Space press advances exactly one held tick.
+    step_mode: bool,
+    /// A Space press awaiting exactly one held tick (cleared when served).
+    step_requested: bool,
+    /// The `paused tick=N` line already printed for this hold.
+    pause_announced: bool,
+    /// Presentation camera mode; free-fly inspects a held tick.
+    cam_mode: CameraMode,
+    /// Free-fly view pose (view code only: never hashed, never sim input).
+    free_cam: DirectorParams,
     /// Whether the Result line already printed for this bout; cleared on
     /// rematch so the next finished bout announces once.
     result_announced: bool,
@@ -661,6 +830,13 @@ struct ArenaApp {
     present_us: u64,
     /// Wall us of `present_us` spent posing and uploading fighters.
     fighters_us: u64,
+    /// Wall us of `fighters_us` spent on the CPU pose half (clip sample,
+    /// skin, pose fold, down lift), folded from the skinned frame's split.
+    /// Zero until a skinned tick lands.
+    fighters_pose_us: u64,
+    /// Wall us of `fighters_us` spent on the GPU upload half (`v1::upload_mesh`
+    /// plus `Presenter::upload_mesh` per part). Zero until a skinned tick lands.
+    fighters_upload_us: u64,
     /// `--look-probes`: run the blocking look probes in the window.
     look_probes: bool,
     /// `--require-framing`: a frame with no fighter in the picture fails.
@@ -690,6 +866,13 @@ struct ArenaApp {
     bout_tape: Vec<String>,
 }
 
+/// Build the live session's match over the arena kit's physical placement:
+/// the kit walls collide instead of being pictures. A bad placement falls
+/// back to the empty world (open sand) instead of failing the window.
+fn live_session(config: GameConfig) -> Result<App, WinError> {
+    Ok(App::with_world(config, kit_match_world_or_empty())?.into_duel()?)
+}
+
 impl ArenaApp {
     fn new(
         config: GameConfig,
@@ -697,14 +880,12 @@ impl ArenaApp {
         capture: Option<CaptureSlot>,
     ) -> Result<Self, WinError> {
         let test_panic_at = arena_frame::test_panic_tick()?;
-        let app = App::new(config)?.into_duel()?;
+        let app = live_session(config)?;
         let mixer = Arc::new(Mutex::new(Mixer::new(WINDOWED_SAMPLE_RATE)));
-        // Automated smoke never opens a device: `--mute` mutes explicitly,
-        // `--exit`/`--timed-smoke` runs mute by construction.
-        let muted = smoke_muted(&args);
-        // `--mute` plus automated `--exit` runs open no audio device at all;
-        // the mixer keeps rendering voices offline either way.
-        let muted = args.mute || muted;
+        // Automated smoke never opens a device: `--mute` mutes explicitly and
+        // `--exit`/`--timed-smoke` runs mute by construction; either way the
+        // mixer keeps rendering voices offline.
+        let muted = args.mute || smoke_muted(&args);
         let (_device, audio_notice) = open_audio(Arc::clone(&mixer), muted);
         if _device.is_some() {
             tell!("arena: {audio_notice}");
@@ -753,6 +934,12 @@ impl ArenaApp {
             pressed: Vec::new(),
             acc: TickAccumulator::new(),
             flow: boot,
+            pause_at_tick: None,
+            step_mode: false,
+            step_requested: false,
+            pause_announced: false,
+            cam_mode: CameraMode::Director,
+            free_cam: DirectorParams::arena(),
             result_announced: false,
             last: Instant::now(),
             started: Instant::now(),
@@ -772,6 +959,8 @@ impl ArenaApp {
             sim_us: 0,
             present_us: 0,
             fighters_us: 0,
+            fighters_pose_us: 0,
+            fighters_upload_us: 0,
             look_probes: Presenter::look_probes_for_capture(false, capture_armed),
             require_framing: false,
             framing: Framing::default(),
@@ -797,12 +986,31 @@ impl ArenaApp {
         FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))
     }
 
+    /// Swap the staged leg onto its receipt session (empty world under rules
+    /// v1, what `staged_fight.exe` builds) so the window replays its pinned
+    /// fight. Reports a rebuild failure; `None` when not staged or it landed.
+    fn stage_receipt_session(&mut self) -> Option<i32> {
+        if self.staged.is_none() {
+            return None;
+        }
+        match App::new(self.config) {
+            Ok(session) => {
+                self.app = session;
+                None
+            }
+            Err(err) => {
+                tell!("arena: {err}");
+                Some(2)
+            }
+        }
+    }
+
     /// Clear the finished bout so rematch starts clean: a fresh match, a
     /// zeroed tick cursor, a drained accumulator and a fresh scratch
     /// outcome. The staged tally restarts too; the look keeps painting
     /// (presentation only, never hashed). Loud on a refused rebuild.
     fn reset_bout(&mut self) -> Result<(), WinError> {
-        self.app = App::new(self.config)?.into_duel()?;
+        self.app = live_session(self.config)?;
         self.ticks_done = 0;
         self.acc = TickAccumulator::new();
         self.tick_scratch = TickOutcome::default();
@@ -843,6 +1051,45 @@ impl ArenaApp {
         warmup_steps(steps, self.ticks_done, self.config.ticks, true)
     }
 
+    /// Fixed steps owed this frame under the `--pause-at-tick` hold. `Run`
+    /// advances one frame-driven step per presented frame, clamped so the tick
+    /// lands exactly on the pause tick and never past it; `Hold` prints the
+    /// one `paused tick=N` stop line and adds zero ticks; a `Step` runs exactly
+    /// one requested tick. Without `--pause-at-tick` this is
+    /// [`ArenaApp::ticks_owed`] unchanged, so the default run is byte-identical.
+    /// Presentation only: the sim's integer cursor stops, the frozen hash
+    /// stands.
+    fn pause_steps(&mut self, elapsed_ms: f64) -> u32 {
+        let stepped = std::mem::take(&mut self.step_requested);
+        let decision = pause_decision(u64::from(self.ticks_done), self.pause_at_tick, stepped);
+        match decision {
+            PauseDecision::Hold => {
+                if !self.pause_announced {
+                    self.pause_announced = true;
+                    say!("{PAUSE_LINE_PREFIX}{}", self.ticks_done);
+                }
+                0
+            }
+            PauseDecision::Step => 1,
+            PauseDecision::Run => match self.pause_at_tick {
+                // Frame-driven pacing under `--pause-at-tick`: one step per
+                // presented frame, so the hold lands on the exact tick whatever
+                // the box's present mode (an Immediate swapchain runs only a
+                // handful of ticks in 200 frames). Debug pacing only: the
+                // integer tick, the sim and the hash are unchanged, and a run
+                // without the flag keeps the wall-clock accumulator untouched.
+                Some(at) => {
+                    let shown = self.flow.ticks_run()
+                        && self.presenter.as_ref().is_some_and(|p| !p.suspended());
+                    let owed = u32::from(shown);
+                    let room = at.saturating_sub(u64::from(self.ticks_done));
+                    owed.min(u32::try_from(room).unwrap_or(u32::MAX))
+                }
+                None => self.ticks_owed(elapsed_ms),
+            },
+        }
+    }
+
     /// Step fixed ticks for the elapsed wall time, then present one HUD frame.
     fn tick_and_present(&mut self, event_loop: &ActiveEventLoop) {
         // The automated `--exit` run owns its wall-clock bound (`--deadline-ms`
@@ -857,7 +1104,7 @@ impl ArenaApp {
         let interval = self.last.elapsed();
         let elapsed_ms = interval.as_secs_f64() * 1000.0;
         self.last = Instant::now();
-        let steps = self.ticks_owed(elapsed_ms);
+        let steps = self.pause_steps(elapsed_ms);
         let sim_started = Instant::now();
         let human = match self.human() {
             Ok(human) => human,
@@ -925,6 +1172,16 @@ impl ArenaApp {
             self.audio_notice,
             self.presenter_notice,
         );
+        // Frozen sim hash for the run: the same tick count gives the same hash
+        // paused or not, so a `--pause-at-tick` run and an unpaused run at the
+        // same tick paste equal lines. Evidence only; never a hash input.
+        if let Some(point) = self.app.checkpoints().last() {
+            say!(
+                "arena sim: ticks={} hash={:016x}",
+                self.ticks_done,
+                point.hash
+            );
+        }
         if let Some(tx) = self.feed_tx.as_ref() {
             let stats = tx.stats();
             say!(
@@ -1017,10 +1274,17 @@ impl ArenaApp {
     /// bytes ride a separate explicit offscreen render (see
     /// `capture_offscreen`), never the surface receipt, so an offscreen PNG
     /// can never stand in for the OS window.
-    /// Hot reload (EG29 slice 1): poll the watcher once per presented frame
-    /// and settle staged generations at this boundary with the tick stamped.
-    /// A failed cook keeps last-good and logs its reason; the tick never waits.
+    /// Hot reload (EG29 slice 1): poll the watcher every
+    /// [`HOT_RELOAD_POLL_EVERY_FRAMES`] presented frames and settle staged
+    /// generations at this boundary with the tick stamped.
+    /// Throttled because one poll stats every watched file (up to ~257
+    /// `fs::metadata` calls); at 30 frames the edit still shows within 1 s
+    /// at 60 fps. A failed cook keeps last-good and logs its reason; the
+    /// tick never waits.
     fn poll_hot_reload(&mut self) {
+        if self.frames_presented % u32::from(HOT_RELOAD_POLL_EVERY_FRAMES) != 0 {
+            return;
+        }
         let events = self.watcher.poll();
         let frame = self.frames_presented;
         for event in &events {
@@ -1078,15 +1342,27 @@ impl ArenaApp {
                 return;
             }
             let (width, height) = presenter.size();
-            match frame_list(
-                presenter,
-                width,
-                height,
-                self.args.camera_path,
-                self.frames_presented,
-            ) {
-                Ok(list) => list,
-                Err(err) => return self.fail(event_loop, err, 2),
+            // A bound look clears the twin items before its ring draws, so
+            // build the camera-only list and skip the per-frame twin kit
+            // import (re-parsed glTFs every present); the refused look keeps
+            // the full twin list below, whose items reach the submit.
+            if should_build_cheap_list(self.look.is_some()) {
+                match cheap_frame_list(width, height, self.args.camera_path, self.frames_presented)
+                {
+                    Ok(list) => list,
+                    Err(err) => return self.fail(event_loop, err, 2),
+                }
+            } else {
+                match frame_list(
+                    presenter,
+                    width,
+                    height,
+                    self.args.camera_path,
+                    self.frames_presented,
+                ) {
+                    Ok(list) => list,
+                    Err(err) => return self.fail(event_loop, err, 2),
+                }
             }
         };
         // Kit draws ride the same list as the surface and the offscreen
@@ -1107,6 +1383,12 @@ impl ArenaApp {
         self.fighters_us = self
             .fighters_us
             .saturating_add(duration_us(fighters_started.elapsed()));
+        // Free-fly overrides the fight camera while the mode is on: the look
+        // clears and re-aims `list.camera`, so this must run after it. View
+        // only; the default director run leaves the camera untouched.
+        if self.cam_mode == CameraMode::Free {
+            self.aim_free_cam(&mut list);
+        }
         let receipt = {
             let Some(presenter) = self.presenter.as_mut() else {
                 self.fail(
@@ -1199,9 +1481,17 @@ impl ArenaApp {
                 // dressing boxes and the parade kit (laid across the fight
                 // area) leave the frame; the look draws the ring instead.
                 list.items.clear();
-                self.fight_draws = look
+                let report = look
                     .present_into(presenter, list, &frame)
                     .map_err(|err| WinError::Render(err.to_string()))?;
+                self.fight_draws = report.draws;
+                // The skin wall split rides beside the untouched `fighters_us`
+                // lump (FC3 and the row accept read that one): no second timing
+                // source, just the fold of the halves the look already measured.
+                self.fighters_pose_us = self.fighters_pose_us.saturating_add(report.skin.pose_us);
+                self.fighters_upload_us = self
+                    .fighters_upload_us
+                    .saturating_add(report.skin.upload_us);
                 // Cached order: the same tick sorts to the same submit order x2,
                 // in place with no per-frame allocation.
                 sort_draw_list(list);
@@ -1223,28 +1513,7 @@ impl ArenaApp {
                 // Props and light ride the brief only: kit plus ring draws as
                 // one row each, with a law-holding noon light until the sun
                 // bind lands. Built only when the flag is on; zero per tick.
-                let mut props: Vec<PropTruth> = kit_prop_rows()
-                    .iter()
-                    .map(|(kind, bounds)| PropTruth {
-                        kind,
-                        min: bounds[0],
-                        max: bounds[1],
-                    })
-                    .collect();
-                for row in [ring_prop_row(), ring_wall_row()] {
-                    props.push(PropTruth {
-                        kind: row.0,
-                        min: row.1[0],
-                        max: row.1[1],
-                    });
-                }
-                let light = FrameLight {
-                    sun_dir: [0.0, 1.0, 0.0],
-                    sun_elev: 0.5,
-                    exposure: 1.0,
-                    fog: 0.0,
-                    passes: 1,
-                };
+                let (props, light) = frame_brief_props();
                 let line = brief_line_with_props(
                     frame.frame,
                     t,
@@ -1382,6 +1651,61 @@ impl ArenaApp {
         }
     }
 
+    /// Toggle the presentation camera between the director and free-fly. View
+    /// only: the sim, the tape and every hash are untouched.
+    fn toggle_free_cam(&mut self) {
+        self.cam_mode = match self.cam_mode {
+            CameraMode::Director => CameraMode::Free,
+            CameraMode::Free => CameraMode::Director,
+        };
+    }
+
+    /// One free-fly key step: arrows look (yaw/pitch), WASD move world meters
+    /// on the floor plane and Q/E move down/up. The caller keeps the look
+    /// inside [`free_cam_step`]'s bounds, so the function itself never clamps;
+    /// a key with no mapping steps nothing. Presentation only.
+    fn step_free_cam(&mut self, code: winit::keyboard::KeyCode) {
+        use winit::keyboard::KeyCode;
+        const LOOK_RAD: f32 = 0.1;
+        const MOVE_M: f32 = 0.5;
+        let (mut yaw, mut pitch) = (self.free_cam.free_yaw_rad, self.free_cam.free_pitch_rad);
+        let mut move_m = [0.0f32; 3];
+        match code {
+            KeyCode::ArrowLeft => yaw -= LOOK_RAD,
+            KeyCode::ArrowRight => yaw += LOOK_RAD,
+            KeyCode::ArrowUp => pitch += LOOK_RAD,
+            KeyCode::ArrowDown => pitch -= LOOK_RAD,
+            KeyCode::KeyW => move_m[2] -= MOVE_M,
+            KeyCode::KeyS => move_m[2] += MOVE_M,
+            KeyCode::KeyA => move_m[0] -= MOVE_M,
+            KeyCode::KeyD => move_m[0] += MOVE_M,
+            KeyCode::KeyQ => move_m[1] -= MOVE_M,
+            KeyCode::KeyE => move_m[1] += MOVE_M,
+            _ => return,
+        }
+        yaw = yaw.clamp(-core::f32::consts::PI, core::f32::consts::PI);
+        pitch = pitch.clamp(-core::f32::consts::FRAC_PI_2, core::f32::consts::FRAC_PI_2);
+        // A refused step (should never happen after the clamp) is ignored, so
+        // the window keeps presenting; the function itself never clamps.
+        let _ = free_cam_step(&mut self.free_cam, (yaw, pitch), move_m);
+    }
+
+    /// Aim the frame camera at the free-fly pose while free mode is on: the eye
+    /// is the flown position, the target one meter along the flown yaw/pitch.
+    /// Presentation only; the default director run never calls this.
+    fn aim_free_cam(&self, list: &mut DrawList) {
+        let eye = self.free_cam.free_eye_m;
+        let (sin_yaw, cos_yaw) = self.free_cam.free_yaw_rad.sin_cos();
+        let (sin_pitch, cos_pitch) = self.free_cam.free_pitch_rad.sin_cos();
+        list.camera.eye = [eye.x, eye.y, eye.z].into();
+        list.camera.target = [
+            eye.x + cos_pitch * sin_yaw,
+            eye.y + sin_pitch,
+            eye.z - cos_pitch * cos_yaw,
+        ]
+        .into();
+    }
+
     /// Bring up the visible presenter on the winit window:
     /// backend-picked instance plus surface plus swapchain at the window
     /// size, cube plus dressing staged. Never falls back to offscreen here:
@@ -1413,6 +1737,10 @@ impl ArenaApp {
                 ));
                 presenter.set_probe_every(LOOK_PROBE_EVERY);
                 presenter.set_fog_every(LIVE_FOG_EVERY);
+                // EG13: 4x MSAA stays off unless this run asks for it
+                // (`E2040_MSAA=1`), so the default window frame keeps the
+                // 1x path the look captures were taken with.
+                presenter.set_msaa_enabled(msaa_setting(std::env::var(MSAA_ENV).ok().as_deref()));
                 let key = MeshKey::new(1, [0xA1; 32]);
                 // A refused cube falls back to clear-only frames, never a panic.
                 let _ = presenter.upload_mesh(key, &engine_render::v1::cube());
@@ -1510,6 +1838,25 @@ impl ApplicationHandler for ArenaApp {
                     // T, both clearing the finished bout first. Escape keeps
                     // its pause toggle above.
                     let struck = event.state == ElementState::Pressed && !event.repeat;
+                    // `--step`: one Space press advances exactly one held tick.
+                    // A no-op outside the running bout, so Title/Space still
+                    // only starts the bout (see `pause_decision`).
+                    if struck
+                        && self.step_mode
+                        && self.flow == Flow::Match
+                        && code == winit::keyboard::KeyCode::Space
+                    {
+                        self.step_requested = true;
+                    }
+                    // Free-fly: one key toggles the presentation camera; while
+                    // it is on, WASD/arrows fly the eye one step per press.
+                    // Never touches the sim (presentation only).
+                    if struck && code == winit::keyboard::KeyCode::KeyF {
+                        self.toggle_free_cam();
+                    }
+                    if struck && self.cam_mode == CameraMode::Free {
+                        self.step_free_cam(code);
+                    }
                     if struck
                         && self.flow == Flow::Title
                         && (code == winit::keyboard::KeyCode::Enter
@@ -1595,6 +1942,50 @@ mod tests {
             should_push_kit(false),
             "refused look keeps the cube frame, so kit draws still push"
         );
+    }
+
+    #[test]
+    fn bound_look_builds_the_cheap_frame_list() {
+        // The skinned look clears the frame list before its ring draws, so
+        // the twin kit import that `frame_list` runs every frame is discarded
+        // work (~1 s of glTF parses per frame). A bound look must take the
+        // cheap camera-only list; a refused look keeps the full twin list.
+        assert!(
+            should_build_cheap_list(true),
+            "bound look discards twin items, so skip the twin import"
+        );
+        assert!(
+            !should_build_cheap_list(false),
+            "refused look draws the twin items, so keep the full list"
+        );
+    }
+
+    #[test]
+    fn cheap_frame_list_carries_the_orbit_camera_with_no_twin_items() {
+        // Camera parity: the cheap list aims the same dressing-plus-orbit eye
+        // as the full twin list and carries the same light, with no items
+        // for the look to clear. Failure case: an absurd size refuses loudly
+        // instead of filing an empty frame; a zero size masks to 1 exactly
+        // like the full twin list (`width.max(1)`), so it still builds.
+        let cheap = cheap_frame_list(1280, 720, None, 7).expect("cheap list builds");
+        let orbit = engine_game::windowed::dressing_camera(1280, 720).expect("orbit base builds");
+        assert_eq!(
+            cheap.camera.eye.to_array(),
+            orbit.eye.to_array(),
+            "cheap list keeps the establishing eye"
+        );
+        assert_eq!(
+            cheap.camera.target.to_array(),
+            orbit.target.to_array(),
+            "cheap list keeps the establishing target"
+        );
+        assert!(
+            cheap.items.is_empty(),
+            "no twin items for the look to clear, got {}",
+            cheap.items.len()
+        );
+        assert!(cheap_frame_list(0, 720, None, 0).is_ok());
+        assert!(cheap_frame_list(9999, 64, None, 0).is_err());
     }
 
     #[test]
@@ -1822,6 +2213,23 @@ mod tests {
             fighters: 2,
             half_extent_m: 20.0,
         }
+    }
+
+    #[test]
+    fn staged_window_leg_replays_the_receipt_fight() {
+        // Failing-before: the window built the staged leg over the kit world
+        // under rules v2 (12 hits, 1 knockdown) and failed its own pinned
+        // receipt; the receipt's session is the empty world under rules v1.
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "600", "--exit"]))
+            .expect("smoke args parse");
+        use engine_game::windowed::{STAGED_FIGHT_HITS, STAGED_FIGHT_KNOCKDOWNS};
+        let mut app = ArenaApp::new(staged_session_config(), args, None).expect("session builds");
+        app.staged = Some(StagedTally::default());
+        assert!(app.stage_receipt_session().is_none(), "the swap lands");
+        app.run_sim_ticks(app.config.ticks, app.human().expect("human slot"));
+        let tally = app.staged.expect("staged tally");
+        assert_eq!(tally.hits, STAGED_FIGHT_HITS);
+        assert_eq!(tally.knockdowns, STAGED_FIGHT_KNOCKDOWNS);
     }
 
     #[test]
@@ -2098,6 +2506,57 @@ mod tests {
         assert!(line.contains("fps=60.0"), "{line}");
         assert!(format_timed_smoke(60, 60, 0.0).is_err());
         assert!(format_timed_smoke(60, 60, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn camera_pause_decision_holds_at_the_tick_and_steps_once() {
+        // `--pause-at-tick 120`: hold at exactly tick 120; one Space press
+        // advances exactly one tick; without a pause tick a stray step is a
+        // no-op and the sim runs.
+        assert_eq!(pause_decision(119, Some(120), false), PauseDecision::Run);
+        assert_eq!(pause_decision(120, Some(120), false), PauseDecision::Hold);
+        assert_eq!(pause_decision(120, Some(120), true), PauseDecision::Step);
+        // After one step the tick is 121 and holds again: exactly one tick.
+        assert_eq!(pause_decision(121, Some(120), false), PauseDecision::Hold);
+        assert_eq!(pause_decision(120, None, false), PauseDecision::Run);
+        assert_eq!(pause_decision(120, None, true), PauseDecision::Run);
+        // A tick below the pause tick still runs even with a step armed.
+        assert_eq!(pause_decision(119, Some(120), true), PauseDecision::Run);
+        // Pause at 0 holds before the first tick.
+        assert_eq!(pause_decision(0, Some(0), false), PauseDecision::Hold);
+        assert_eq!(pause_decision(0, Some(0), true), PauseDecision::Step);
+        // The stop line a smoke greps is a stable single line, tick only.
+        assert_eq!(format!("{PAUSE_LINE_PREFIX}{}", 120u32), "paused tick=120");
+    }
+
+    #[test]
+    fn camera_pause_flags_split_off_before_winargs() {
+        // `--pause-at-tick N` and `--step` are split off before the strict
+        // WinArgs parser, which refuses them as unknown flags today.
+        let raw = strings(&[
+            "arena",
+            "--frames",
+            "200",
+            "--pause-at-tick",
+            "120",
+            "--step",
+            "--exit",
+        ]);
+        let (pause_at, step, rest) = split_pause_flags(&raw).expect("flags split");
+        assert_eq!(pause_at, Some(120));
+        assert!(step, "--step is armed");
+        assert_eq!(rest, strings(&["arena", "--frames", "200", "--exit"]));
+        // The remainder parses; the raw flags stay unknown to the strict parser.
+        assert!(WinArgs::parse(&rest).is_ok());
+        assert!(WinArgs::parse(&raw).is_err());
+        // A missing or unparsable tick fails loudly, never silently defaulted.
+        assert!(split_pause_flags(&strings(&["arena", "--pause-at-tick"])).is_err());
+        assert!(split_pause_flags(&strings(&["arena", "--pause-at-tick", "x"])).is_err());
+        assert!(split_pause_flags(&strings(&["arena", "--pause-at-tick", "--step"])).is_err());
+        let (none, no_step, same) =
+            split_pause_flags(&strings(&["arena", "--exit"])).expect("no pause flags still splits");
+        assert!(none.is_none() && !no_step);
+        assert_eq!(same, strings(&["arena", "--exit"]));
     }
 
     #[test]
@@ -2681,5 +3140,13 @@ mod tests {
             SurfaceFrameAction::Failed,
             "shared policy still fails hard validation"
         );
+    }
+
+    #[test]
+    fn brief_props_carry_kit_rows_plus_ring_and_wall() {
+        let (props, light) = frame_brief_props();
+        let kit_rows = kit_prop_rows().len();
+        assert_eq!(props.len(), kit_rows + 2, "kit plus ring and wall");
+        assert_eq!(light.sun_dir, [0.0, 1.0, 0.0], "noon until the bind");
     }
 }

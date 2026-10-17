@@ -550,8 +550,8 @@ fn check_repeat(
         }
         Ok(next)
     } else {
-        *last_tool = tool.to_owned();
-        *last_input = input.to_owned();
+        tool.clone_into(last_tool);
+        input.clone_into(last_input);
         Ok(0)
     }
 }

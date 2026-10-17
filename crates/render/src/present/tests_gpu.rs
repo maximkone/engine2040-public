@@ -848,6 +848,31 @@ mod rl9_gpu_tests {
         );
     }
 
+    #[test]
+    fn gtao_background_gate_matches_the_half_shader_and_the_ra1_far_clip() {
+        // One figure, two implementations: the CPU oracle's constant in
+        // `gtao.rs` and the device half kernel's `GATE_M` must agree, and it
+        // must sit at or under the RA1 far clip so cleared (sky) texels land
+        // on the background side of it.
+        let src = include_str!("../gtao.rs");
+        let want = format!("const GATE_M: f32 = {:.1};", crate::gtao::GTAO_BACKGROUND_M);
+        assert!(
+            src.contains(&want),
+            "the half kernel carries its own gate: {want} missing"
+        );
+        let far = crate::v1::Camera::new(
+            [0.0, 2.0, 5.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 1.0, 0.0],
+            40.0f32.to_radians(),
+        )
+        .far;
+        assert!(
+            crate::gtao::GTAO_BACKGROUND_M <= far,
+            "the gate must sit under the RA1 far clip {far}"
+        );
+    }
+
     /// Copy one R32 float AO texture to the CPU. Test only: this waits
     /// on the GPU, same shape as the id-target readback helper.
     fn read_ao_back(presenter: &Presenter, texture: &wgpu::Texture) -> Vec<f32> {
@@ -1327,6 +1352,11 @@ mod live_frame_tests {
         assert!(stats.probe_waits >= 7, "probe frame waits: {stats:?}");
         assert_eq!(stats.live_frames, 3, "held frames count as live");
         assert_eq!(stats.live_blocking(), 0, "held frames still never wait");
+        assert_eq!(
+            (stats.live_maps, stats.live_waits),
+            (0, 0),
+            "a held frame records no depth copy, so it maps nothing: {stats:?}"
+        );
         // Back to the default: the next live frame resets the stale pair.
         presenter.set_look_probes(false);
         let live = presenter.render_live_offscreen(&list).expect("live frame");
@@ -1612,5 +1642,139 @@ mod live_frame_tests {
                 "draw {index} shows its own material, got {px:?}"
             );
         }
+    }
+
+    /// LF4 accept legs on the live GPU path: a torch-glint halo differs
+    /// with bloom on versus off, a frame with no pixel above the knee is
+    /// unchanged, read-back x2 is byte-identical, validation errors 0.
+    /// Caller: `Presenter::set_bloom_enabled` through `present_frame_live`
+    /// into the blit halo. Skip without an adapter, never fake-pass.
+    #[test]
+    fn bloom_on_off_halo_differs_dark_unchanged_live() {
+        let Some(mut presenter) = init_or_skip("bloom_on_off_halo_differs_dark_unchanged_live")
+        else {
+            return;
+        };
+        presenter
+            .upload_mesh(cube_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(128, 128).expect("valid size applies");
+        let scene = crate::v1::default_scene(128, 128).expect("default scene is valid");
+        let torch = DrawList {
+            camera: camera_at(6.0),
+            light: scene.light.clone(),
+            items: vec![DrawItem {
+                mesh: cube_key(),
+                material: crate::v1::PbrMaterial {
+                    base_color: [1.0, 1.0, 1.0],
+                    metallic: 0.0,
+                    roughness: 0.8,
+                    exposure: 4.0,
+                },
+                base_color: None,
+                normal_map: None,
+            }],
+        };
+        let mut dim_light = scene.light.clone();
+        dim_light.intensity = 0.2;
+        let dark = DrawList {
+            camera: camera_at(6.0),
+            light: dim_light,
+            items: vec![DrawItem {
+                mesh: cube_key(),
+                material: crate::v1::PbrMaterial {
+                    base_color: [0.1, 0.1, 0.1],
+                    metallic: 0.0,
+                    roughness: 0.8,
+                    exposure: 1.0,
+                },
+                base_color: None,
+                normal_map: None,
+            }],
+        };
+        presenter.set_bloom_enabled(false);
+        assert!(!presenter.bloom_enabled(), "switch reads back off");
+        let off_receipt = presenter
+            .render_live_offscreen(&torch)
+            .expect("torch off renders");
+        assert!(off_receipt.presented && off_receipt.is_clean());
+        assert_eq!(
+            off_receipt.validation_errors, 0,
+            "torch off stays validation-clean"
+        );
+        let (off_rgba, off_w, off_h) = read_twin(&presenter);
+        presenter.set_bloom_enabled(true);
+        assert!(presenter.bloom_enabled(), "switch reads back on");
+        let on_receipt = presenter
+            .render_live_offscreen(&torch)
+            .expect("torch on renders");
+        assert!(on_receipt.presented && on_receipt.is_clean());
+        assert_eq!(
+            on_receipt.validation_errors, 0,
+            "torch on stays validation-clean"
+        );
+        let (on_rgba, on_w, on_h) = read_twin(&presenter);
+        assert_eq!((off_w, off_h), (128, 128), "twin covers the frame");
+        assert_eq!((on_w, on_h), (128, 128), "twin covers the frame");
+        assert_eq!(off_rgba.len(), on_rgba.len(), "same frame size");
+        let on_again = presenter
+            .render_live_offscreen(&torch)
+            .expect("torch on replays");
+        assert!(on_again.presented && on_again.is_clean());
+        assert_eq!(on_again.validation_errors, 0, "replay stays clean");
+        let (on2_rgba, _, _) = read_twin(&presenter);
+        assert_eq!(on_rgba, on2_rgba, "same halo replays byte-identical");
+        let mut halo_count = 0usize;
+        let mut max_diff = 0u8;
+        for chunk in off_rgba.chunks_exact(4).zip(on_rgba.chunks_exact(4)) {
+            let (a, b) = chunk;
+            for c in 0..3 {
+                let diff = a[c].abs_diff(b[c]);
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+                if diff >= 5 {
+                    halo_count += 1;
+                    break;
+                }
+            }
+        }
+        assert!(
+            halo_count > 50,
+            "torch halo differs on vs off: {halo_count} pixels, max {max_diff}"
+        );
+        assert!(
+            max_diff >= 8,
+            "halo lift is visible on vs off, max {max_diff}"
+        );
+        let width = usize::try_from(off_w).expect("twin width fits in memory");
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let idx = (y * width + x) * 4;
+                assert_eq!(
+                    off_rgba[idx..idx + 4],
+                    on_rgba[idx..idx + 4],
+                    "sub-knee corner stays identical at ({x}, {y})"
+                );
+            }
+        }
+        let dark_off = presenter
+            .render_live_offscreen(&dark)
+            .expect("dark off renders");
+        assert!(dark_off.presented && dark_off.is_clean());
+        let (dark_off_rgba, _, _) = read_twin(&presenter);
+        presenter.set_bloom_enabled(true);
+        let dark_on = presenter
+            .render_live_offscreen(&dark)
+            .expect("dark on renders");
+        assert!(dark_on.presented && dark_on.is_clean());
+        assert_eq!(dark_on.validation_errors, 0, "dark on stays clean");
+        let (dark_on_rgba, _, _) = read_twin(&presenter);
+        assert_eq!(
+            dark_off_rgba, dark_on_rgba,
+            "sub-knee frame is unchanged on vs off"
+        );
+        presenter.set_bloom_enabled(false);
+        assert!(!presenter.bloom_enabled(), "switch restores off");
     }
 }

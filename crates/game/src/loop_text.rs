@@ -3,8 +3,8 @@
 //! Consumer: the mode framework reads a [`LoopSet`] at a progression
 //! boundary; this module only parses and validates, it never folds a
 //! ladder. Data owner: [`ladder`](crate::ladder) owns rung, glory and
-//! repair counters. Units: glory awards and rank floors are counts (no
-//! suffix). Determinism scope: same text gives the same set or the same
+//! repair counters. Units: glory awards, the loss drain and rank floors
+//! are counts (no suffix). Determinism scope: same text gives the same set or the same
 //! refusal; integer math only, rows keep file order. Errors:
 //! [`LoopRowsError`] carries the 1-based line number. Budget: cold path
 //! only, `O(rows)` time over one small row `Vec`; never called per tick.
@@ -12,13 +12,16 @@
 //! `rank_with_tables`, `apply_rows_text` at a progression boundary).
 
 #[cfg(test)]
-use crate::ladder::{GLORY_PER_LOOP, GLORY_PER_WIN, GLORY_RANKS, GLORY_RUNG_BONUS};
+use crate::ladder::{
+    GLORY_LOSS_PENALTY, GLORY_PER_LOOP, GLORY_PER_WIN, GLORY_RANKS, GLORY_RUNG_BONUS,
+};
 
 /// Field names in row order; the only accepted keys.
-const KNOWN: [&str; 8] = [
+const KNOWN: [&str; 9] = [
     "glory_per_win",
     "glory_rung_bonus",
     "glory_per_loop",
+    "glory_loss_penalty",
     "glory_rank0",
     "glory_rank1",
     "glory_rank2",
@@ -30,6 +33,7 @@ const KNOWN: [&str; 8] = [
 const MAX_GLORY_WIN: u32 = 10_000;
 const MAX_RUNG_BONUS: u32 = 1_000;
 const MAX_GLORY_LOOP: u32 = 10_000;
+const MAX_GLORY_LOSS: u32 = 10_000;
 const MAX_RANK_FLOOR: u32 = 100_000;
 
 /// Tunable loop row: the glory numbers designers edit, in one place.
@@ -45,6 +49,8 @@ pub struct LoopTables {
     pub glory_rung_bonus: u32,
     /// Glory granted on completing a top-rung loop, counts.
     pub glory_per_loop: u32,
+    /// Glory drained by a loss, counts; the named drain of the pool.
+    pub glory_loss_penalty: u32,
     /// Glory floors per rank index, counts; first is zero, strictly rising.
     pub glory_ranks: [u32; 5],
 }
@@ -185,7 +191,7 @@ fn parse_row(line: &str, lineno: u32) -> Result<(u32, LoopTables), LoopRowsError
         Some(0) | None => return Err(LoopRowsError::RowId(lineno)),
         Some(version) => version,
     };
-    let mut values: [Option<u32>; 8] = [None; 8];
+    let mut values: [Option<u32>; 9] = [None; 9];
     for pair in words {
         let (key, val) = pair
             .split_once('=')
@@ -223,7 +229,8 @@ fn parse_row(line: &str, lineno: u32) -> Result<(u32, LoopTables), LoopRowsError
         glory_per_win: get(0),
         glory_rung_bonus: get(1),
         glory_per_loop: get(2),
-        glory_ranks: [get(3), get(4), get(5), get(6), get(7)],
+        glory_loss_penalty: get(3),
+        glory_ranks: [get(4), get(5), get(6), get(7), get(8)],
     };
     validate_loop(&tables, lineno)?;
     Ok((row_version, tables))
@@ -245,9 +252,9 @@ fn range(
 
 /// Range-check loop rows. First failure wins, deterministically.
 ///
-/// Rules: awards sit inside their caps; rank floors sit inside theirs
-/// with the first at zero and each later floor strictly above the one
-/// before, so ranks step up exactly once per floor.
+/// Rules: awards and the loss drain sit inside their caps; rank floors
+/// sit inside theirs with the first at zero and each later floor strictly
+/// above the one before, so ranks step up exactly once per floor.
 fn validate_loop(tables: &LoopTables, line: u32) -> Result<(), LoopRowsError> {
     range(
         "glory_per_win",
@@ -270,8 +277,15 @@ fn validate_loop(tables: &LoopTables, line: u32) -> Result<(), LoopRowsError> {
         MAX_GLORY_LOOP,
         line,
     )?;
+    range(
+        "glory_loss_penalty",
+        tables.glory_loss_penalty,
+        0,
+        MAX_GLORY_LOSS,
+        line,
+    )?;
     for (index, floor) in tables.glory_ranks.iter().enumerate() {
-        range(KNOWN[3 + index], *floor, 0, MAX_RANK_FLOOR, line)?;
+        range(KNOWN[4 + index], *floor, 0, MAX_RANK_FLOOR, line)?;
     }
     if tables.glory_ranks[0] != 0 {
         return Err(LoopRowsError::Invalid {
@@ -282,7 +296,7 @@ fn validate_loop(tables: &LoopTables, line: u32) -> Result<(), LoopRowsError> {
     for index in 1..tables.glory_ranks.len() {
         if tables.glory_ranks[index - 1] >= tables.glory_ranks[index] {
             return Err(LoopRowsError::Invalid {
-                field: KNOWN[3 + index],
+                field: KNOWN[4 + index],
                 line,
             });
         }
@@ -338,7 +352,7 @@ pub fn parse_loop(text: &str) -> Result<LoopSet, LoopRowsError> {
 mod tests {
     use super::*;
 
-    const V1_LINE: &str = "v1 glory_per_win=100 glory_rung_bonus=25 glory_per_loop=500 glory_rank0=0 glory_rank1=300 glory_rank2=900 glory_rank3=1800 glory_rank4=3600";
+    const V1_LINE: &str = "v1 glory_per_win=100 glory_rung_bonus=25 glory_per_loop=500 glory_loss_penalty=50 glory_rank0=0 glory_rank1=300 glory_rank2=900 glory_rank3=1800 glory_rank4=3600";
 
     fn v1_file() -> String {
         ["table loop version 1", V1_LINE].join("\n")
@@ -351,6 +365,7 @@ mod tests {
         assert_eq!(tables.glory_per_win, GLORY_PER_WIN);
         assert_eq!(tables.glory_rung_bonus, GLORY_RUNG_BONUS);
         assert_eq!(tables.glory_per_loop, GLORY_PER_LOOP);
+        assert_eq!(tables.glory_loss_penalty, GLORY_LOSS_PENALTY);
         assert_eq!(tables.glory_ranks, GLORY_RANKS);
     }
 
@@ -360,6 +375,7 @@ mod tests {
         let set = parse_loop(text).expect("shipped file parses to v1");
         assert_eq!(set.version, 1);
         assert_eq!(set.tables.glory_per_win, GLORY_PER_WIN);
+        assert_eq!(set.tables.glory_loss_penalty, GLORY_LOSS_PENALTY);
         assert_eq!(set.tables.glory_ranks, GLORY_RANKS);
     }
 
@@ -392,6 +408,14 @@ mod tests {
             parse_loop(&flat),
             Err(LoopRowsError::Invalid {
                 field: "glory_rank2",
+                line: 2
+            })
+        );
+        let drain = v1_file().replace("glory_loss_penalty=50", "glory_loss_penalty=20000");
+        assert_eq!(
+            parse_loop(&drain),
+            Err(LoopRowsError::Invalid {
+                field: "glory_loss_penalty",
                 line: 2
             })
         );

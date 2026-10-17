@@ -25,11 +25,11 @@ Nine checks for Rust test shape. Name the crate in each finding (core, ecs, phys
    Flag: two tests writing the same test-output file; env mutated mid-suite (crates: perf, physics).
 8. **Run control.** Ask: can the run filter by name, run one file, show captured output only on demand, and park slow tests as ignored?
    Flag: full suite always run; println relied on without show-output; slow test blocking the gate (crates: perf, arena).
-9. **Integration layout.** Ask: do integration tests live in tests as separate crates on the public API, with shared setup in tests/common/mod and thin binaries over a lib?
-   Flag: integration test calling private items; tests/common file run as an empty test crate; binary logic untestable from tests (crates: combat, game).
+9. **Integration layout.** Ask: do integration tests live under `crates/<crate>/tests/` on the public API, and in a crate that has `crates/<crate>/tests/it/main.rs` as modules of that one binary (each `tests/it/<name>.rs` plus one `mod <name>;` line in `main.rs`, shared setup a module too), with a thin binary over a lib (`cargo test -p <crate> --test it <name>::`)?
+   Flag: a new top-level test file in a crate merged to tests/it (workspace-check test-layout guard); integration test calling private items; a helper file that runs as its own empty test crate; binary logic untestable from tests (crates: combat, game).
 
 ## Do / Don't
-- Do: keep unit tests beside the code under cfg(test) and integration tests in tests on the public API. Don't: compile test helpers into the build or test private detail from tests.
+- Do: keep unit tests beside the code under cfg(test) and integration tests under crates/<crate>/tests (as tests/it modules in a crate that merged to one binary) on the public API. Don't: compile test helpers into the build, add a second test executable beside tests/it, or test private detail from tests.
 - Do: pin panic tests with an expected substring and print actual values in messages. Don't: accept bare should_panic or value-free asserts.
 
 source: Klabnik et al., The Rust Programming Language (3rd ed.), ch. 11

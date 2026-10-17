@@ -32,9 +32,10 @@ use engine_arena::world::MatchWorld;
 use engine_arena::{run, ArenaConfig, Checkpoint, FighterId, FighterInput, FighterTape};
 use engine_core::{hash::GOLDEN_GAMMA, splitmix64};
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
-use rmcp::model::ToolAnnotations;
+use rmcp::model::{CallToolResult, ContentBlock, ToolAnnotations};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
+use rmcp::serde_json::Value;
 
 use super::mcp::{McpServer, McpToolError};
 
@@ -66,9 +67,17 @@ pub const CAPTURE_DEFAULT_HEIGHT: u32 = 64;
 pub const CAPTURE_MAX_DIM: u32 = 2048;
 /// MCP bound on PNG bytes accepted from a wired capture callback.
 pub const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
+/// Default longest-side cap applied before encode (`max_size`).
+pub const CAPTURE_DEFAULT_MAX_SIZE: u32 = 768;
+/// Floor on `max_size`: a frame narrower than this is not usable evidence.
+pub const CAPTURE_MIN_MAX_SIZE: u32 = 200;
+/// Cap on the caption text block beside the image block.
+pub const FRAME_CAPTION_MAX_CHARS: usize = 2048;
 
-/// PNG file magic: a wired receipt must start with these bytes.
-const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+/// PNG file magic: a wired receipt must start with these bytes. One home
+/// for the play module plus the receipt tests (`play_session`,
+/// `requery`, `tests/it/step20x2`).
+pub const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 // Fighter-contract ranges, mirrored from engine-input (which owns them).
 // Arena re-exports everything play.run needs except `Buttons`, so these
 // mirrors keep endpoint to its single permitted engine-arena edge; every
@@ -155,15 +164,17 @@ pub struct PlayRunOutput {
     pub scene_rev: Option<u64>,
 }
 
-/// Capture request: optional receipt width and height in pixels.
-/// Units are pixels in, PNG bytes out. Errors are typed `bad_size` outside
-/// `1..=2048`. Budget is 4 MB of PNG bytes.
+/// Capture request: optional receipt width and height in pixels, plus the
+/// longest-side cap `max_size` (default 768, clamped to 200..=2048 and applied
+/// before encode). Units are pixels in, PNG bytes out. Errors are typed
+/// `bad_size` outside `1..=2048`. Budget is 4 MB of PNG bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct CaptureArgs {
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub max_size: Option<u32>,
 }
 
 /// Receipt manifest: adapter, driver, dimensions and validation errors.
@@ -862,7 +873,9 @@ pub fn check_run_against_step(
 // Capture: render-free receipt, unsupported unless a callback is wired.
 // ---------------------------------------------------------------------------
 
-/// Validate receipt dimensions against the R1 bound.
+/// Validate receipt dimensions against the R1 bound, then cap the longest side
+/// at `max_size` (default 768, clamped 200..=2048) before encode. Returns the
+/// effective size the renderer must cover.
 fn capture_size(args: &CaptureArgs) -> Result<(u32, u32), McpToolError> {
     let width = args.width.unwrap_or(CAPTURE_DEFAULT_WIDTH);
     let height = args.height.unwrap_or(CAPTURE_DEFAULT_HEIGHT);
@@ -878,7 +891,11 @@ fn capture_size(args: &CaptureArgs) -> Result<(u32, u32), McpToolError> {
             format!("capture size {width}x{height} exceeds {CAPTURE_MAX_DIM}"),
         ));
     }
-    Ok((width, height))
+    let max_size = args
+        .max_size
+        .unwrap_or(CAPTURE_DEFAULT_MAX_SIZE)
+        .clamp(CAPTURE_MIN_MAX_SIZE, CAPTURE_MAX_DIM);
+    Ok((width.min(max_size), height.min(max_size)))
 }
 
 /// Unwired capture: structured unsupported, never a success shape. The
@@ -909,7 +926,14 @@ pub fn capture_with_look_hook(
     hook: Option<&mut dyn FnMut(&[u8])>,
 ) -> Result<CaptureOutput, McpToolError> {
     let (width, height) = capture_size(args)?;
-    let mut out = render(args)?;
+    // The renderer is asked for the effective size, so the `max_size` cap is
+    // honoured by the callback too (not only by the manifest check below).
+    let asked = CaptureArgs {
+        width: Some(width),
+        height: Some(height),
+        max_size: args.max_size,
+    };
+    let mut out = render(&asked)?;
     if out.manifest.width != width || out.manifest.height != height {
         let dots = abstract_dot_positions(width, height);
         return Err(McpToolError::new(
@@ -976,6 +1000,74 @@ pub fn capture_with(
     render: CaptureRenderer<'_>,
 ) -> Result<CaptureOutput, McpToolError> {
     capture_with_look_hook(args, render, None)
+}
+
+// ---------------------------------------------------------------------------
+// AX27: the MCP frame carrier (one image block plus a caption).
+// ---------------------------------------------------------------------------
+
+/// Standard base64 with padding (RFC 4648): the image block carries text, never
+/// the raw byte array.
+fn b64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len() / 3 * 4 + 4);
+    for chunk in bytes.chunks(3) {
+        let packed = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        let digit =
+            |shift: u32| char::from(ALPHABET[usize::try_from((packed >> shift) & 63).unwrap_or(0)]);
+        out.push(digit(18));
+        out.push(digit(12));
+        out.push(if chunk.len() > 1 { digit(6) } else { '=' });
+        out.push(if chunk.len() > 2 { digit(0) } else { '=' });
+    }
+    out
+}
+
+/// Lowercase hex of a byte digest (64 chars for a SHA-256).
+fn hex_bytes(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0F)]));
+    }
+    out
+}
+
+/// The MCP answer for one frame receipt JSON (`manifest` plus a `png_bytes`
+/// array): one `image/png` block, one caption of at most
+/// [`FRAME_CAPTION_MAX_CHARS`], and `structuredContent` = the receipt without
+/// `png_bytes`, its `manifest.sha256` set to the SHA-256 of the exact PNG bytes
+/// (`engine-game` owns the `sha2` digest). A value with no readable `png_bytes`
+/// passes through as plain structured content, so non-frame verbs are untouched.
+///
+/// Caller: the `capture` and `play.step` arms of `mcp.rs`.
+pub fn frame_call_result(mut value: Value) -> CallToolResult {
+    let Some(object) = value.as_object_mut() else {
+        return CallToolResult::structured(value);
+    };
+    let Some(png) = object
+        .remove("png_bytes")
+        .and_then(|raw| rmcp::serde_json::from_value::<Vec<u8>>(raw).ok())
+    else {
+        return CallToolResult::structured(value);
+    };
+    let sha256 = hex_bytes(&engine_game::camera_feed::showcase_sha256(&png));
+    if let Some(Value::Object(manifest)) = object.get_mut("manifest") {
+        manifest.insert("sha256".to_owned(), Value::String(sha256.clone()));
+    }
+    let caption: String = format!("frame: image/png, {} bytes, sha256 {sha256}", png.len())
+        .chars()
+        .take(FRAME_CAPTION_MAX_CHARS)
+        .collect();
+    let mut result = CallToolResult::success(vec![
+        ContentBlock::image(b64_encode(&png), "image/png"),
+        ContentBlock::text(caption),
+    ]);
+    result.structured_content = Some(value);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,6 +1533,7 @@ mod tests {
             CaptureArgs {
                 width: Some(96),
                 height: Some(64),
+                max_size: None,
             },
         )
         .expect_err("unwired capture must fail");
@@ -1453,6 +1546,7 @@ mod tests {
             CaptureArgs {
                 width: Some(0),
                 height: Some(64),
+                max_size: None,
             },
         )
         .expect_err("zero width must fail");
@@ -1462,6 +1556,7 @@ mod tests {
             CaptureArgs {
                 width: Some(CAPTURE_MAX_DIM + 1),
                 height: Some(64),
+                max_size: None,
             },
         )
         .expect_err("oversize receipt must fail");
@@ -1474,6 +1569,7 @@ mod tests {
         let args = CaptureArgs {
             width: Some(96),
             height: Some(64),
+            max_size: None,
         };
         // Caller-supplied one-shot renderer: the endpoint never imports
         // render, it only validates this render-free receipt.
@@ -1538,11 +1634,84 @@ mod tests {
         assert_eq!(skewed.code, "bad_receipt");
     }
 
+    /// Test-only base64 decoder (RFC 4648, padded): the image block is checked
+    /// by decoding, never by trusting the encoder.
+    fn b64_decode(text: &str) -> Vec<u8> {
+        let digit = |c: u8| -> u32 {
+            match c {
+                b'A'..=b'Z' => u32::from(c - b'A'),
+                b'a'..=b'z' => u32::from(c - b'a') + 26,
+                b'0'..=b'9' => u32::from(c - b'0') + 52,
+                b'+' => 62,
+                _ => 63,
+            }
+        };
+        let symbols: Vec<u32> = text.bytes().filter(|b| *b != b'=').map(digit).collect();
+        let mut out = Vec::with_capacity(symbols.len() / 4 * 3);
+        for chunk in symbols.chunks(4) {
+            let mut packed = 0u32;
+            for (index, symbol) in chunk.iter().enumerate() {
+                packed |= symbol << (18 - 6 * index);
+            }
+            for shift in (0..chunk.len().saturating_sub(1)).map(|i| 16 - 8 * i) {
+                out.push((packed >> shift) as u8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn capture_image_block() {
+        let mut png = PNG_MAGIC.to_vec();
+        png.extend(std::iter::repeat(0x5A_u8).take(300));
+        let raw = rmcp::serde_json::to_value(&CaptureOutput {
+            manifest: CaptureManifestDto {
+                adapter: "test-adapter".to_owned(),
+                driver: "test-driver".to_owned(),
+                width: 96,
+                height: 64,
+                validation_errors: 0,
+            },
+            png_bytes: png.clone(),
+        })
+        .expect("receipt serializes");
+        // The in-process receipt still owns the bytes; only the MCP carrier moves.
+        assert!(
+            raw.get("png_bytes").is_some(),
+            "in-process path keeps png_bytes"
+        );
+
+        let result = frame_call_result(raw);
+        let (image, text) = match &result.content[..] {
+            [ContentBlock::Image(image), ContentBlock::Text(text)] => (image, text),
+            other => panic!("expected one image plus one caption, got {other:?}"),
+        };
+        assert_eq!(image.mime_type, "image/png");
+        assert!(text.text.chars().count() <= FRAME_CAPTION_MAX_CHARS);
+        let decoded = b64_decode(&image.data);
+        assert_eq!(
+            &decoded[..PNG_MAGIC.len()],
+            &PNG_MAGIC,
+            "PNG magic survives"
+        );
+        let structured = result.structured_content.expect("structured content kept");
+        assert!(structured.get("png_bytes").is_none(), "no png_bytes key");
+        assert_eq!(
+            structured
+                .get("manifest")
+                .and_then(|m| m.get("sha256"))
+                .and_then(Value::as_str),
+            Some(hex_bytes(&engine_game::camera_feed::showcase_sha256(&decoded)).as_str()),
+            "the image bytes hash to the manifest sha256"
+        );
+    }
+
     #[test]
     fn look_hook_runs_once_per_validated_capture() {
         let args = CaptureArgs {
             width: Some(96),
             height: Some(64),
+            max_size: None,
         };
         let receipt = |asked: &CaptureArgs| {
             let mut png = PNG_MAGIC.to_vec();
@@ -1743,6 +1912,7 @@ mod tests {
             &CaptureArgs {
                 width: Some(96),
                 height: Some(64),
+                max_size: None,
             },
             Box::new(|_| {
                 Ok(CaptureOutput {

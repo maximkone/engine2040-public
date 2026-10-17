@@ -1,4 +1,4 @@
-//! Duel enemy tiers T1-T3: the skill-first ladder for the arena duel.
+//! Duel enemy tiers T1-T4: the skill-first ladder for the arena duel.
 //!
 //! Consumer: the balance tournament hook (reads [`SHIPPED_TIERS`],
 //! [`WIN_BAR_PERMILLE`], [`TIER_DUELS`] and [`skill_score`]) and the arena
@@ -45,13 +45,15 @@ pub fn bar_wins() -> u32 {
 mod tests {
     use super::*;
 
-    /// The shipped designer file parses to the shipped rows, twice alike.
+    /// The shipped designer file parses to the shipped rows plus the primus,
+    /// twice alike.
     #[test]
     fn shipped_file_matches_shipped_rows_twice() {
         let text = include_str!("../../../content/design/enemies.rows");
         let first = parse_tiers(text).expect("shipped tiers parse");
         let second = parse_tiers(text).expect("shipped tiers replay");
-        assert_eq!(first, SHIPPED_TIERS);
+        assert_eq!(first[..3], SHIPPED_TIERS);
+        assert_eq!(first[3], crate::depth::PRIMUS_TIER);
         assert_eq!(second, first);
     }
 

@@ -213,11 +213,15 @@ const ROW = [
 const BOARD = (rows = ROW) => ["# SPRINT", "### Finish line", "- [x] A1 core: done.", ...rows, "- [ ] EG13 render: next row, needs: EG12.", ""].join("\n");
 const PROOF = "cargo test -p engine-render --lib torch 3 passed";
 
-test("acceptCommands reads the backticked commands of the Accept clause only", () => {
+test("acceptCommands reads the backticked commands of the Accept clause only, and drops bookkeeping spans", () => {
   assert.deepEqual(acceptCommands(ROW.join(" ")), ["cargo test -p engine-render --lib torch"], "the P2P command is not the Accept command");
   assert.deepEqual(acceptCommands("- [ ] X1 a: Accept: `! rg -n gone crates/a.rs` and `crates/a/src/b.rs` exist, `node tools/c.mjs --x`. F2P: `cargo test -p a`."), ["! rg -n gone crates/a.rs", "node tools/c.mjs --x"], "paths are no commands");
   assert.deepEqual(acceptCommands("- [ ] X1 a: Accept: the table matches. F2P: `cargo test -p a`."), []);
   assert.deepEqual(acceptCommands("- [ ] X1 a: no accept clause `cargo test -p a`"), []);
+  // A bookkeeping span only looks at the tree (a diff, a status, a log, a search, a Get-*): it is no verifying command
+  // (2026-10-17: EG18's `git diff --stat` at most 200 lines was read as an Accept command and no close proof holds it).
+  assert.deepEqual(acceptCommands("- [ ] EG18 game: no caller. Accept: `cargo test -p engine-game --lib fighter_anim` green x2; `git diff --stat` at most 200 lines. Diff: good."), ["cargo test -p engine-game --lib fighter_anim"], "`git diff --stat` is bookkeeping, not an Accept command");
+  assert.deepEqual(acceptCommands("- [ ] X1 a: Accept: `git status --porcelain` is clean, `git log -1` is short, `Select-String -Path a.rs -Pattern z` is empty, `Get-Content a.log` exists. F2P: `cargo test -p a`."), [], "bookkeeping only: nothing to verify");
 });
 
 test("planClose: no closes: is nothing to do; a bad id, an unknown, a ticked or a command-less row is told why", () => {
@@ -257,6 +261,18 @@ test("planClose ticks the row on its Accept command: first line gets Landed <sha
   assert.equal(/[^\r]\n/.test(crlf.text), false, "no bare LF appeared");
   const twice = planClose({ closes: "EG12", proof: PROOF, sha: "abc1234", boards: [{ file: "a", text: ok.text }, { file: "b", text: board }] });
   assert.match(twice.why, /already ticked/, "never untick, never tick a later duplicate");
+  // EG18 shape (2026-10-17): the Accept clause carries the verifying command beside a bookkeeping span. The proof that
+  // holds the command which decides the row ticks it; the bookkeeping span is not asked for, and three close packets no
+  // longer end NOOP (2026-10-15: 36 of 36 sampled close packets ended NOOP with the row open).
+  const eg18 = BOARD(["- [ ] EG18 game: animation from sim state, slice 1. Accept: `cargo test -p engine-game --lib fighter_anim` green x2; `git diff --stat` at most 200 lines. Diff: good. Tier A. Size M.", "  needs: none."]);
+  const tick = planClose({ closes: "EG18", proof: "cargo test -p engine-game --lib fighter_anim -> 15 passed; 0 failed", sha: "deadbee", boards: [{ file: "f", text: eg18 }] });
+  assert.equal(tick.ok, true, tick.why);
+  assert.deepEqual(tick.accept, ["cargo test -p engine-game --lib fighter_anim"], "only the verifying command is required");
+  assert.equal(tick.text.split("\n")[3], "- [x] EG18 game: animation from sim state, slice 1. Accept: `cargo test -p engine-game --lib fighter_anim` green x2; `git diff --stat` at most 200 lines. Diff: good. Tier A. Size M. Landed deadbee.");
+  // a row whose spans are all bookkeeping has no Accept command left: it ticks on the packet's own test:, as before
+  const book = BOARD(["- [ ] EG12 render: x. Accept: `git diff --stat`, `Select-String -Path a.rs -Pattern z`. Diff: good.", "  needs: none."]);
+  assert.match(planClose({ closes: "EG12", proof: PROOF, sha: "abc1234", boards: [{ file: "f", text: book }] }).why, /no Accept command/);
+  assert.equal(planClose({ closes: "EG12", proof: PROOF, sha: "abc1234", test: "cargo test -p engine-render --lib torch", boards: [{ file: "f", text: book }] }).ok, true);
 });
 
 test("planClose: a row with no Accept command ticks on the packet's own test: command, and only when the proof holds it (14 of 25 close packets, 2026-10-15)", () => {
@@ -400,6 +416,26 @@ test("land: a close-only packet (NOOP or DONE, code already in the tree, no revi
     assert.match(land(root).stdout, /^NOOP .*\| board: not ticked: EG12 is already ticked/, "a second run ticks nothing more");
     assert.equal(subjects(root).length, 2);
     assert.equal(existsSync(join(root, "target", "queue", "landed.tsv")), false, "a tick is no landing: no ledger line");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("land: a close-only NOOP ticks its row even when another seat's hunks sit under its paths; the hunks are left uncommitted (7 NOOP close records refused on a foreign hunk, 2026-10-17)", () => {
+  // The record's own run made zero edits, so a hunk under its paths is another seat's: planLanding must plan the close, not demand a review.
+  const noop = record("", { closes: "EG12" }).replace("RESULT: DONE - torches cast shadows", "RESULT: NOOP - already in the tree");
+  const plan = planLanding({ ...base, record: noop, reviewName: null, review: null });
+  assert.equal(plan.ok, false);
+  assert.equal(plan.closeOnly, true, "today this is the `no review record` refusal");
+  assert.equal(plan.code, 0);
+  assert.match(plan.why, /^nothing to land: /, "the tick message still says nothing to land");
+  const root = landRepo({ result: `RESULT: NOOP - already in the tree | proof: ${PROOF}`, change: true, review: "" });
+  try {
+    const r = land(root);
+    assert.match(r.stdout, /^NOOP 0-eg12-torch: nothing to land: .*\| board: ticked EG12 in docs\/SPRINT-18-gaps\.md/, r.stdout + r.stderr);
+    assert.equal(r.status, 0);
+    assert.equal(subjects(root).length, 2, "init and the board tick only: the dirty hunk is never committed");
+    assert.deepEqual(sh(root, "show", "--name-only", "--format=", "HEAD").trim().split(/\r?\n/), ["docs/SPRINT-18-gaps.md"]);
+    assert.match(sh(root, "status", "--porcelain", "--", "crates/render/src/shadow.rs"), /^ M crates\/render\/src\/shadow\.rs$/m, "the foreign hunk stays in the tree");
+    assert.match(readFileSync(join(root, "docs", "SPRINT-18-gaps.md"), "utf8"), /^- \[x\] EG12 .* Landed \w{7}\.$/m);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

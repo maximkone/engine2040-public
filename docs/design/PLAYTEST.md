@@ -4,6 +4,11 @@ Only people run this. Agents never run it.
 Kind: 5 to 7 first-time players per round, in Maxim's hands.
 One driving question per session. One session per player.
 
+Status 2026-10-17: the kit is complete and parses (`node --test tools/playtest-log.test.mjs`, 2 pass).
+No session has run yet, so `docs/design/playtests/` holds no log. Agents cannot fill it: only people play.
+The inbox ask saying so was sent once, 2026-10-17, and refused: 10 open items (cap 10). Re-send after a tick.
+Re-send 2026-10-17T01:44Z: refused again, `not added, 10 open items (cap 10): tick or merge one first`, so the ask still waits on one ticked or merged item. The same refusal and the live 2 pass count are recorded in `docs/plan/gameplay.md` (Status 2026-10-17).
+
 ## Session goals (3)
 
 1. Find where a new player gets lost in the first fight.
@@ -61,6 +66,8 @@ Three positive, three negative. Flip the negative items before you average.
 
 Percent is players reaching it divided by players who started.
 
+Status 2026-10-17: the three numbers above are the blank template's example round, not a run. No session has run, so `docs/design/playtests/` holds no log; a real round replaces them and keeps this line under the table.
+
 ## Bug severity
 
 - A: blocks play. No workaround. Fix first.
@@ -81,11 +88,20 @@ Columns:
 - `yes_no`: yes, no, or empty. `bug_id`: empty or an id. `severity`: empty, A, B, or C.
 - A row with empty `where` or empty `conclusion` fails.
 
+Example rows, one that passes and one that fails (row 3 has no `where` and no `conclusion`):
+
+```
+tester,in_audience,build_sha,minute,confusion_point,question,yes_no,what,where,why,conclusion,bug_id,severity
+P1,yes,b46768e0,4,blocked once,What stops you when you block?,yes,tried to block,arena centre,no prompt shown,add a block prompt,,B
+P2,yes,b46768e0,6,lost,What stops you when you block?,no,walked in circles,,,,,
+```
+
 Check a log (use the file you wrote above):
 
 `node tools/playtest-log.mjs --check docs/design/playtests/<date>.csv`
 
 It prints `PASS <row> ok` or `FAIL <row> <reason>` per row, then a count line.
+A missing log prints `FAIL 0 missing log <path>` and the count line, so a date with no file reads plainly instead of a stack trace.
 Its test:
 
 `node --test tools/playtest-log.test.mjs`

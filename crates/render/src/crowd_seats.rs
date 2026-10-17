@@ -231,6 +231,6 @@ mod tests {
         assert_ne!(slots[1], slots[2], "neighbours differ");
         assert_ne!(slots[2], slots[3], "neighbours differ");
         assert_eq!(crowd_palette_rgba(4), slots[0], "index wraps");
-        assert!(CROWD_HEAD_M > 0.0, "heads have size");
+        const { assert!(CROWD_HEAD_M > 0.0, "heads have size") }
     }
 }

@@ -5,18 +5,15 @@
 use super::super::mcp::McpToolError;
 use engine_provider::protocol as proto;
 use rmcp::serde_json::Value;
-/// Door verb publishing the typed-verb JSON schema.
-pub const GRAMMAR_TOOL: &str = "door.grammar_verbs";
-/// Publish the canonical verb schema over `ProposalAction`.
+/// Read the canonical verb schema over `ProposalAction`.
 pub fn grammar_verbs() -> &'static str {
-    let _ = GRAMMAR_TOOL;
     proto::verb_schema_json()
 }
 fn malformed() -> McpToolError {
     proto::note_malformed();
     McpToolError::new(
         "malformed_output",
-        "outside grammar; re-run with door.grammar_verbs",
+        "outside grammar; re-submit typed actions plus diagnostics, then re-run",
     )
 }
 /// Accept only outputs parsing to the verb schema (reject-then-mask).

@@ -474,10 +474,7 @@ mod tests {
 
     /// Saturating slot byte without panics: values past 255 read as 255.
     fn slot_byte(slot: usize) -> u8 {
-        match u8::try_from(slot) {
-            Ok(value) => value,
-            Err(_) => u8::MAX,
-        }
+        u8::try_from(slot).unwrap_or(u8::MAX)
     }
 
     fn fixture_doc(name: &str, slot: usize, travel_base: f32, lift_base: f32) -> ClipDoc {
@@ -711,13 +708,16 @@ mod tests {
             .collect()
     }
 
-    fn full_set() -> (
+    /// The five vectors one full receipt fixture hands back.
+    type FullSet = (
         Vec<ReceiptRow>,
         Vec<ReceiptRow>,
         Vec<ReceiptRow>,
         Vec<u64>,
         Vec<ProvenanceRecord>,
-    ) {
+    );
+
+    fn full_set() -> FullSet {
         let canonical = canonical_rows();
         let mut seen: Vec<u64> = canonical.iter().map(|row| row.digest).collect();
         let combat = cook_combat_rows(&mut seen);

@@ -3,8 +3,10 @@
 // One open line per steal under ## Steals; the builder that lands it marks
 // it `landed <sha>`. This tool picks the next line, fetches its pinned donor
 // file, and gates the file: at most 3 open lines per part, no open line older
-// than 7 days whose our/file saw no commit since, no landed mark whose commit
-// misses our/file. Old lines without a size parse as M.
+// than 7 days (center size-check.mjs ages the line by name, with no
+// file-freshness excuse), no landed mark whose commit misses our/file. An
+// `expired <date> (<reason>)` or `rejected <date> (<reason>)` line is closed.
+// Old lines without a size parse as M.
 //
 // Usage from the repo/lane root:
 //   node tools/steal-land.mjs --next <part>   oldest open line of a part
@@ -47,8 +49,10 @@ Usage:
       target/steals/<id>/donor.<ext> plus a LICENSE copy. Off-allowlist
       licenses are saved with the verdict PORT (porting allowed).
   node tools/steal-land.mjs --gate          FAIL a 4th open line per part,
-      an open line older than 7 days whose our/file has no commit since
-      the line's date, and a landed <sha> whose commit misses our/file.
+      an open line older than 7 days by name (center size-check.mjs's rule:
+      age alone, so a fresh commit to our/file never saves the line), and a
+      landed <sha> whose commit misses our/file. expired <date> (<reason>)
+      and rejected <date> (<reason>) read as closed, as center reads them.
   -h, --help     print this help and exit 0
 
 Exit codes: 0 ok - 1 gate FAIL or fetch failure - 2 usage.
@@ -74,7 +78,11 @@ export function parseSteals(md) {
     const size = sized ? cells[4].toUpperCase() : "M";
     const statusRaw = cells[sized ? 5 : 4];
     const landed = statusRaw.match(/^landed\s+([0-9a-fA-F]{7,40})(?:\s+\(.*\))?$/i);
-    const status = /^open$/i.test(statusRaw) ? "open" : landed ? "landed" : statusRaw;
+    // Center's size check closes a line with `expired <date> (<reason>)` or
+    // `rejected <date> (<reason>)`; read both the same way so one ledger
+    // serves both gates (2026-10-17).
+    const closed = statusRaw.match(/^(expired|rejected)\b/i);
+    const status = /^open$/i.test(statusRaw) ? "open" : landed ? "landed" : closed ? closed[1].toLowerCase() : statusRaw;
     let promise = "";
     if (i + 1 < lines.length && /^[ \t]+\S/.test(lines[i + 1])) {
       promise = lines[i + 1].trim();
@@ -174,7 +182,7 @@ export function formatLine(l) {
 }
 
 // Pure gate over parsed lines; git access is injected so tests stay offline.
-export function gateLines(lines, { nowMs = Date.now(), hasCommitSince = null, commitTouches = null } = {}) {
+export function gateLines(lines, { nowMs = Date.now(), commitTouches = null } = {}) {
   const openByPart = new Map();
   for (const l of lines) {
     if (l.status !== "open") continue;
@@ -194,17 +202,21 @@ export function gateLines(lines, { nowMs = Date.now(), hasCommitSince = null, co
       reasons.push(`4th open line for part ${over.get(l.id)} (${openByPart.get(over.get(l.id)).length} open; max ${MAX_OPEN_PER_PART})`);
     }
     if (l.status === "open") {
-      const age = Math.floor((nowMs - dateMs(l.date)) / DAY);
-      if (age > STALE_DAYS) {
-        const fresh = hasCommitSince ? hasCommitSince(l.our, l.date) : true;
-        if (!fresh) reasons.push(`open ${age}d with no commit to ${l.our} since ${l.date}`);
-      }
+      // Center's rule is age alone. The old file-freshness excuse let the four
+      // 2026-10-07 lines sit open for 10 days and PASS here while center's
+      // size check named them (2026-10-17); with it gone both gates name the
+      // same line.
+      const ageMs = nowMs - dateMs(l.date);
+      const age = Math.floor(ageMs / DAY);
+      // Center's comparison exactly (`now - dated > 7 * DAY`), so a line is
+      // named in the round it turns stale, not up to 24 h later.
+      if (ageMs > STALE_DAYS * DAY) reasons.push(`open ${age}d (since ${l.date}) is older than ${STALE_DAYS} days: mark it landed, expired or rejected`);
     }
     if (l.status === "landed") {
       const touches = commitTouches ? commitTouches(l.sha, l.our) : true;
       if (!touches) reasons.push(`landed ${l.sha} touches no ${l.our}`);
     }
-    if (l.status !== "open" && l.status !== "landed") reasons.push(`unknown status '${l.status}' (want open or landed <sha>)`);
+    if (!["open", "landed", "expired", "rejected"].includes(l.status)) reasons.push(`unknown status '${l.status}' (want open, landed <sha>, expired <date> (<reason>) or rejected <date> (<reason>))`);
     return { id: l.id, ok: reasons.length === 0, reasons };
   });
 }
@@ -227,10 +239,6 @@ function runBin(bin, args, { cwd = ROOT } = {}) {
   return { ok: r.status === 0, out: `${r.stdout ?? ""}`.trim(), err: `${r.stderr ?? ""}`.trim() };
 }
 
-const gitHasCommitSince = (file, since) => {
-  const r = runBin("git", ["log", `--since=${since}T00:00:00Z`, "--format=%H", "-1", "--", file]);
-  return r.ok && r.out.length > 0;
-};
 const gitCommitTouches = (sha, file) => {
   const r = runBin("git", ["show", "--pretty=", "--name-only", sha, "--"]);
   if (!r.ok) return false;
@@ -301,7 +309,7 @@ function cmdFetch(idRaw) {
 
 function cmdGate() {
   const lines = loadSteals();
-  const results = gateLines(lines, { hasCommitSince: gitHasCommitSince, commitTouches: gitCommitTouches });
+  const results = gateLines(lines, { commitTouches: gitCommitTouches });
   const byId = new Map(results.map((r) => [r.id, r]));
   let bad = 0;
   for (const l of lines) {

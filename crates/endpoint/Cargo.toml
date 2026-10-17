@@ -13,7 +13,7 @@ workspace = true
 # `e2040-mcp` stdio binary (MIT, 1.53.1 in lock via rmcp; workspace tokio).
 # EA1e drives the local/remote provider adapters on recorded fixtures.
 [features]
-mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json", "dep:engine-arena", "dep:engine-spatial", "dep:tokio", "dep:engine-provider", "dep:engine-observe", "dep:engine-game", "dep:engine-destruction", "dep:engine-combat", "dep:engine-anim", "dep:engine-material", "dep:engine-ai", "dep:engine-net"]
+mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json", "dep:engine-arena", "dep:engine-spatial", "dep:tokio", "dep:engine-provider", "dep:engine-observe", "dep:engine-game", "dep:engine-destruction", "dep:engine-combat", "dep:engine-anim", "dep:engine-material", "dep:engine-ai", "dep:engine-net", "dep:engine-physics"]
 
 # The geo pack's modeling ops (boolean, unwrap, lod, collision) run on the cook-time engine-geo crate:
 # off by default so the default build has neither the donor libraries nor the xatlas C++ step.
@@ -60,6 +60,8 @@ engine-anim = { workspace = true, optional = true, features = ["json"] }
 engine-material = { workspace = true, optional = true }
 engine-ai = { workspace = true, optional = true }
 engine-net = { workspace = true, optional = true }
+# The physics pack (door verb) reads the std-only balance core: no rapier feature.
+engine-physics = { workspace = true, optional = true }
 # Cook-time geometry (feature `geo`); never in the tick graph.
 engine-geo = { workspace = true, optional = true }
 # The intake verb cooks generated meshes (cook-time only).

@@ -1,27 +1,25 @@
 //! `play.step` 20x2-tick PNG receipt proof: twenty live steps of two ticks.
 //!
 //! Consumer: the vision playtester over `e2040-mcp`. Data owner for
-//! simulation is `engine-arena`; this test owns only the decode and the
-//! variance gate over the receipts. Units are ticks, meters, pixels.
+//! simulation is `engine-arena`; the receipt decoder for the variance gate
+//! is a test-side copy carried in this file, so production keeps one home for
+//! the codec. Units are ticks, meters, pixels.
 //! Determinism: same seed plus same tape twice gives the same digests and
 //! the same PNG bytes. Errors are typed tool codes, asserted by name.
 
 #![cfg(feature = "mcp")]
 
 use engine_endpoint::play::play_session::PlaySession;
-use engine_endpoint::play::PlayInputDto;
+use engine_endpoint::play::{PlayInputDto, PNG_MAGIC};
 
-/// PNG file magic: every receipt starts with these bytes.
-const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 /// Receipt size used by this proof.
 const W: u32 = 96;
 /// Receipt size used by this proof.
 const H: u32 = 64;
 /// Test seed: fixed so the duel replays.
 const SEED: u64 = 2040;
-/// Software rasterizer pixel bound, mirrored from the endpoint.
-const MAX_SOFTWARE_PIXELS: u64 = 512 * 512;
 
+/// CRC-32 (IEEE) over a PNG chunk tag plus body.
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for byte in data {
@@ -37,6 +35,7 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// Adler-32 over the inflated scanlines, as the zlib trailer carries it.
 fn adler32(data: &[u8]) -> u32 {
     let mut a = 1u32;
     let mut b = 0u32;
@@ -47,14 +46,11 @@ fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-/// Decode the endpoint's own receipts (RGB8, filter 0, stored deflate).
-/// Anything else fails as a receipt error, never success.
-fn decode_png_rgb(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    let bad = |detail: &str| detail.to_owned();
+/// Walk a receipt PNG's chunks: IHDR dimensions (RGB8 only) plus the
+/// concatenated IDAT. Anything else fails, never passes.
+fn receipt_chunks(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     if png.len() < PNG_MAGIC.len() || png[..PNG_MAGIC.len()] != PNG_MAGIC {
-        return Err(bad(
-            "receipt bytes are not a PNG (missing the 8-byte magic)",
-        ));
+        return Err("receipt bytes are not a PNG (missing the 8-byte magic)".to_owned());
     }
     let mut pos = PNG_MAGIC.len();
     let mut width: Option<u32> = None;
@@ -66,7 +62,7 @@ fn decode_png_rgb(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         let tag = [png[pos + 4], png[pos + 5], png[pos + 6], png[pos + 7]];
         pos += 8;
         if pos + len + 4 > png.len() {
-            return Err(bad("receipt PNG chunk runs past the buffer end"));
+            return Err("receipt PNG chunk runs past the buffer end".to_owned());
         }
         let body = &png[pos..pos + len];
         let want = crc32(&png[pos - 4..pos + len]);
@@ -77,17 +73,17 @@ fn decode_png_rgb(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             png[pos + len + 3],
         ]);
         if want != got {
-            return Err(bad("receipt PNG chunk fails its CRC"));
+            return Err("receipt PNG chunk fails its CRC".to_owned());
         }
         match &tag {
             b"IHDR" => {
                 if len != 13 {
-                    return Err(bad("receipt IHDR has the wrong length"));
+                    return Err("receipt IHDR has the wrong length".to_owned());
                 }
                 width = Some(u32::from_be_bytes([body[0], body[1], body[2], body[3]]));
                 height = Some(u32::from_be_bytes([body[4], body[5], body[6], body[7]]));
                 if body[8] != 8 || body[9] != 2 {
-                    return Err(bad("receipt PNG is not RGB8"));
+                    return Err("receipt PNG is not RGB8".to_owned());
                 }
             }
             b"IDAT" => idat.extend_from_slice(body),
@@ -100,45 +96,43 @@ fn decode_png_rgb(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         pos += len + 4;
     }
     if !ended {
-        return Err(bad("receipt PNG never ends (missing IEND)"));
+        return Err("receipt PNG never ends (missing IEND)".to_owned());
     }
-    let (width, height) = (
-        width.ok_or_else(|| bad("receipt PNG has no IHDR"))?,
-        height.ok_or_else(|| bad("receipt PNG has no IHDR"))?,
-    );
-    if width == 0 || height == 0 || width > 2048 || height > 2048 {
-        return Err(bad("receipt PNG dimensions are outside 1..=2048"));
-    }
-    if u64::from(width) * u64::from(height) > MAX_SOFTWARE_PIXELS * 16 {
-        return Err(bad("receipt PNG dimensions overflow the decode bound"));
-    }
+    let width = width.ok_or_else(|| "receipt PNG has no IHDR".to_owned())?;
+    let height = height.ok_or_else(|| "receipt PNG has no IHDR".to_owned())?;
+    Ok((width, height, idat))
+}
+
+/// Inflate a zlib stream whose deflate blocks are all stored, as our own
+/// encoder writes them.
+fn inflate_stored(idat: &[u8]) -> Result<Vec<u8>, String> {
     if idat.len() < 6 {
-        return Err(bad("receipt PNG IDAT is too short for zlib"));
+        return Err("receipt PNG IDAT is too short for zlib".to_owned());
     }
     if idat[0] != 0x78 || (u16::from(idat[0]) * 256 + u16::from(idat[1])) % 31 != 0 {
-        return Err(bad("receipt PNG IDAT is not a zlib stream"));
+        return Err("receipt PNG IDAT is not a zlib stream".to_owned());
     }
     let mut raw = Vec::new();
     let mut cursor = 2;
     loop {
         if cursor + 5 > idat.len() {
-            return Err(bad("receipt PNG deflate block is truncated"));
+            return Err("receipt PNG deflate block is truncated".to_owned());
         }
         let header = idat[cursor];
         let last = header & 1 == 1;
         if header & 0x06 != 0 {
-            return Err(bad("receipt PNG uses a compressed deflate block"));
+            return Err("receipt PNG uses a compressed deflate block".to_owned());
         }
         cursor += 1;
         let len = u16::from_le_bytes([idat[cursor], idat[cursor + 1]]);
         let nlen = u16::from_le_bytes([idat[cursor + 2], idat[cursor + 3]]);
         if nlen != !len {
-            return Err(bad("receipt PNG stored block fails its length check"));
+            return Err("receipt PNG stored block fails its length check".to_owned());
         }
         cursor += 4;
         let len = len as usize;
         if cursor + len + 4 > idat.len() {
-            return Err(bad("receipt PNG stored block runs past the stream"));
+            return Err("receipt PNG stored block runs past the stream".to_owned());
         }
         raw.extend_from_slice(&idat[cursor..cursor + len]);
         cursor += len;
@@ -151,21 +145,34 @@ fn decode_png_rgb(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
                 idat[cursor + 3],
             ]);
             if want != got {
-                return Err(bad("receipt PNG fails its Adler check"));
+                return Err("receipt PNG fails its Adler check".to_owned());
             }
             break;
         }
     }
+    Ok(raw)
+}
+
+/// Decode our own `play.step` receipts (RGB8, filter 0, stored deflate) for
+/// the variance gate. Anything else fails, never passes. Test-side copy of
+/// the session codec: `tests/` may carry its own helper, production keeps one
+/// home for it.
+fn decode_receipt_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let (width, height, idat) = receipt_chunks(png)?;
+    if width == 0 || height == 0 || width > 2048 || height > 2048 {
+        return Err("receipt PNG dimensions are outside 1..=2048".to_owned());
+    }
+    let raw = inflate_stored(&idat)?;
     let w = width as usize;
     let h = height as usize;
     if raw.len() != h * (1 + w * 3) {
-        return Err(bad("receipt PNG scanlines do not match IHDR"));
+        return Err("receipt PNG scanlines do not match IHDR".to_owned());
     }
     let mut rgb = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         let row = &raw[y * (1 + w * 3)..(y + 1) * (1 + w * 3)];
         if row[0] != 0 {
-            return Err(bad("receipt PNG uses a non-zero filter"));
+            return Err("receipt PNG uses a non-zero filter".to_owned());
         }
         rgb.extend_from_slice(&row[1..]);
     }
@@ -246,7 +253,7 @@ fn play_step_twenty_by_two_pngs_decode_with_variance() {
             out.png_bytes.len() >= PNG_MAGIC.len() && out.png_bytes[..PNG_MAGIC.len()] == PNG_MAGIC,
             "step {step}: receipt starts with PNG magic"
         );
-        let (w, h, rgb) = decode_png_rgb(&out.png_bytes).expect("every step PNG decodes");
+        let (w, h, rgb) = decode_receipt_png(&out.png_bytes).expect("every step PNG decodes");
         assert_eq!((w, h), (W, H), "step {step}: decoded size matches ask");
         let (mean, variance) =
             variance_gate(&rgb).expect("every step PNG passes the variance gate");

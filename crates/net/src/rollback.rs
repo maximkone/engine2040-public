@@ -55,7 +55,7 @@ pub struct Frame {
 
 /// Bounded frame log: push newest, evict oldest past cap.
 pub struct FrameLog {
-    frames: Vec<Frame>,
+    frames: std::collections::VecDeque<Frame>,
     cap: usize,
 }
 
@@ -63,15 +63,15 @@ impl FrameLog {
     /// Construct with capacity (clamped to `MAX_P2P_ROLLBACK`).
     pub fn new(cap: usize) -> Self {
         Self {
-            frames: vec![],
+            frames: std::collections::VecDeque::new(),
             cap: cap.clamp(1, MAX_P2P_ROLLBACK),
         }
     }
     /// Save one frame (advance).
     pub fn save(&mut self, hash: u64, input: u32) {
-        self.frames.push(Frame { hash, input });
+        self.frames.push_back(Frame { hash, input });
         if self.frames.len() > self.cap {
-            self.frames.remove(0);
+            self.frames.pop_front();
         }
     }
     /// Load a saved frame for resimulation.

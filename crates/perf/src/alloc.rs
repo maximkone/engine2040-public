@@ -6,6 +6,7 @@
 
 use engine_core::alloc_probe::{self, CountingAlloc};
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 
 #[global_allocator]
 static GLOBAL_ALLOC: CountingAlloc = CountingAlloc;
@@ -219,6 +220,102 @@ pub fn parse_heap_peak_baseline(text: &str) -> Option<u64> {
         return None;
     }
     Some(first)
+}
+
+/// What one run did with the heap-peak baseline file, so the caller can say
+/// whether it recorded the pin or read it back.
+///
+/// Owner: this module owns the rule; `crates/perf/src/main.rs --heap-peak` is
+/// the caller. Units: bytes in, action out. Determinism: the same file state
+/// and peak give the same action and the same bytes on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeapPeakBaseline {
+    /// No baseline existed, so this peak became the pin.
+    Recorded(u64),
+    /// A recorded baseline was already on disk and stays in force.
+    Kept(u64),
+}
+
+impl HeapPeakBaseline {
+    /// The baseline in force after the call, in bytes.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        match self {
+            Self::Recorded(bytes) | Self::Kept(bytes) => bytes,
+        }
+    }
+}
+
+/// Why the baseline file was left untouched.
+///
+/// Owner: this module owns the refusal; the binary prints it.
+/// Units: bytes in, typed error out. Determinism: pure reads plus an integer
+/// compare, so the same file state gives the same refusal twice.
+#[derive(Debug)]
+pub enum HeapPeakError {
+    /// A zero peak is not a measurement, so nothing is recorded and no file
+    /// is created (a recorded zero would fail every later run).
+    ZeroPeak,
+    /// The file holds something other than one baseline number. A corrupt pin
+    /// is refused, never silently replaced, so a red gate cannot be turned
+    /// green by a rewrite.
+    CorruptBaseline,
+    /// The file could not be read or written; the cause is carried.
+    Io(std::io::Error),
+}
+
+impl Display for HeapPeakError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroPeak => write!(
+                f,
+                "heap-peak baseline: refused a zero peak (not a measurement)"
+            ),
+            Self::CorruptBaseline => write!(
+                f,
+                "heap-peak baseline: held text is not one baseline number; refusing to replace it"
+            ),
+            Self::Io(err) => write!(f, "heap-peak baseline: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for HeapPeakError {}
+
+/// Record `peak_bytes` as the heap-peak baseline when no pin exists yet.
+///
+/// The row's first clause: the first quiet run writes
+/// `crates/perf/baselines/heap_peak.txt` (one decimal `u64` and a newline, the
+/// text [`parse_heap_peak_baseline`] reads back), and every later run keeps the
+/// recorded pin instead of moving the bar it is measured against. Missing
+/// parent folders are created, so a fresh tree records on its first run.
+/// Units: bytes in, the in-force baseline out. Determinism: same file state and
+/// peak give the same action and the same file bytes twice. Errors:
+/// [`HeapPeakError`] naming the refusal, never a panic.
+/// Caller: `crates/perf/src/main.rs` `--heap-peak`.
+pub fn ensure_heap_peak_baseline(
+    path: &Path,
+    peak_bytes: u64,
+) -> Result<HeapPeakBaseline, HeapPeakError> {
+    if peak_bytes == 0 {
+        return Err(HeapPeakError::ZeroPeak);
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => match parse_heap_peak_baseline(&text) {
+            Some(recorded) => Ok(HeapPeakBaseline::Kept(recorded)),
+            None => Err(HeapPeakError::CorruptBaseline),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(HeapPeakError::Io)?;
+                }
+            }
+            std::fs::write(path, format!("{peak_bytes}\n")).map_err(HeapPeakError::Io)?;
+            Ok(HeapPeakBaseline::Recorded(peak_bytes))
+        }
+        Err(err) => Err(HeapPeakError::Io(err)),
+    }
 }
 
 #[cfg(test)]

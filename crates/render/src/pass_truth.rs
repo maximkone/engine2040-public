@@ -19,6 +19,11 @@
 
 use std::fmt;
 
+/// Window-read arm of the gate: gate caller-owned on/off captures into one row
+/// per look pass, mark the passes with no pair, and publish the dated artifact
+/// from those rows. Consumer: `crate::window::WindowShell`.
+pub mod reads;
+
 /// Diff epsilon in 0..=255 levels: a pixel counts only above it.
 pub const PASS_EPSILON: u8 = 5;
 /// Live floor in pixels: a pass is live only strictly above it.
@@ -121,7 +126,7 @@ impl LookToggles {
         LOOK_PASSES
             .iter()
             .position(|spec| spec.row == row)
-            .map_or(false, |index| self.on[index])
+            .is_some_and(|index| self.on[index])
     }
 }
 
@@ -999,6 +1004,70 @@ mod tests {
         assert!(text.contains("| graph | LIVE |"), "forward is LIVE");
         assert!(text.contains("| sky | PROBE | 0 |"), "sky stays PROBE");
         assert!(text.contains("| decals | PROBE | 0 |"), "decals stay PROBE");
+    }
+
+    #[test]
+    fn dated_artifact_lists_every_look_pass_twice() {
+        let date = "2026-10-17";
+        let path = write_gate_report(date).expect("dated artifact writes");
+        assert_eq!(path, "target/reports/pass-truth-2026-10-17.md");
+        assert_eq!(path, pass_truth_filename(date), "writer uses the gate path");
+        let first = std::fs::read(&path).expect("dated artifact reads back");
+        let composed = gate_dated_report(date);
+        assert_eq!(
+            first.as_slice(),
+            composed.as_bytes(),
+            "artifact bytes are the composed gate run"
+        );
+        let text = String::from_utf8(first.clone()).expect("artifact is utf8");
+        assert!(text.starts_with("# pass truth 2026-10-17\n\n"));
+        for spec in LOOK_PASSES.iter() {
+            let needle = format!("| {} |", spec.row);
+            assert_eq!(
+                text.matches(&needle).count(),
+                1,
+                "row {} listed once",
+                spec.row
+            );
+        }
+        assert!(text.contains("| graph | LIVE |"), "forward is LIVE");
+        assert!(text.contains("| sky | PROBE | 0 |"), "sky stays PROBE");
+        assert!(text.contains("| decals | PROBE | 0 |"), "decals stay PROBE");
+        assert!(text.contains("7 LIVE, 2 PROBE"), "counts ride the artifact");
+        // The gate path is cwd-relative and cargo runs this test from the
+        // package root, while the row reads its artifact at the repo root
+        // beside the other `pass-truth-<date>.md` files: publish the same
+        // composed bytes there under the gate's own file name.
+        let gate_name = std::path::Path::new(&path)
+            .file_name()
+            .expect("gate path names a file");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("reports");
+        std::fs::create_dir_all(&root).expect("repo report dir exists");
+        let row_file = root.join(gate_name);
+        std::fs::write(&row_file, composed.as_bytes()).expect("row artifact writes");
+        let row_bytes = std::fs::read(&row_file).expect("row artifact reads back");
+        assert_eq!(
+            row_bytes.as_slice(),
+            composed.as_bytes(),
+            "row artifact carries the gate bytes"
+        );
+        assert_eq!(
+            row_bytes.as_slice(),
+            first.as_slice(),
+            "row artifact equals the gate file"
+        );
+        let again = write_gate_report(date).expect("dated artifact rewrites");
+        assert_eq!(again, path);
+        let second = std::fs::read(&path).expect("dated artifact rereads");
+        assert_eq!(
+            second.as_slice(),
+            first.as_slice(),
+            "second write is byte-identical"
+        );
     }
 
     #[test]

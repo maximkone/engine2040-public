@@ -1,7 +1,8 @@
 //! sever_cook: watertight sever templates plus stump caps per body segment.
 //!
-//! Consumer: the GPU cut presentation reads the cooked interior and cap rings
-//! through the cook-cache payload (`super::sever_cache_payload`), and the
+//! Planned consumer (BX7 cut presentation, not wired yet): the GPU cut
+//! presentation will read the cooked interior and cap rings
+//! from `SeverCookOutput` directly, and the
 //! anatomy joints name the segments. Units: millimetres for positions, counts
 //! for verts/tris. Determinism: segments sort by name, edges sort by key, the
 //! digest is the crate-canonical content hash over a little-endian encoding,

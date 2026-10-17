@@ -86,10 +86,10 @@ are still missing.
 | Siege tick budget (ON10) | unit-tested, integrated |
 | Hour-long online soak (ON11) | unit-tested, integrated |
 | Quantized interest grid | implemented in `interest.rs`, no standalone `aoi.rs` |
-| Local cheat guards (sanitize + speed/teleport) | unit-tested, integrated as authority (ON5 ticked) |
+| Local cheat guards (sanitize + speed/teleport) | modules cut 2026-10-16, never wired; the feature is not on any live path; MP13 needs a re-scope decision |
 | Channel hints (reliable/unreliable/sequenced) | implemented as hint only |
-| Server-authority cheat checks + tapes (ON5) | unit-tested, integrated, ticked |
-| Steam overlay relay fabric | unit-tested, integrated |
+| Server-authority cheat checks + tapes (ON5) | modules cut 2026-10-16, never wired; the feature is not on any live path; MP13 needs a re-scope decision |
+| Steam overlay relay fabric | modules cut 2026-10-16, never wired; the feature is not on any live path |
 | Netcode P2P history | implemented, unbounded history |
 | Party + server list + matchmaking-lite (ON6) | missing (board owns `session.rs` text) |
 | Networked physics, debris/ragdoll/projectiles (ON7) | missing |
@@ -110,12 +110,10 @@ Module notes that constrain the rows below:
   consumer is real encode/decode, but `session.rs`/`scale.rs` do not call
   `ConnectionInterest::select` yet (grep 2026-10-01: zero hits in either
   file); ON29 closes exactly that seam.
-- `guard.rs` landed (ON5 ticked) but refusals do not feed `heal.rs:164`
-  `NetHeal` quarantine yet; ON38 bridges exactly that seam with tape
-  positions, never a second authority.
-- `steam_relay.rs` landed beside QUIC and the invite-code relay (per-session
-  `TransportKind`, no socket in the fabric); ON39 hardens exactly that seam
-  (overlay invites + version-digest refuse + queue bounds).
+- `guard.rs` and `anticheat.rs` cut 2026-10-16, never wired; the feature is
+  not on any live path; MP13 needs a re-scope decision.
+- `steam_relay.rs` cut 2026-10-16, never wired; the feature is not on any
+  live path.
 
 ## 2. Finish line
 
@@ -202,6 +200,13 @@ off the tick with validated inputs consumed only at tick boundaries,
 and the determinism rule (same seed plus same tape gives same bytes,
 same selection and same soak hash; ties break by stable slot order,
 never by thread or hash order).
+
+- Status 2026-10-17: the disk shows the resim cap is 9, not 8, so every line in this file that
+  quotes an 8-tick resim cap is stale (the lines above, the table row above, and the item below):
+  `crates/net/src/netcode.rs:22 pub const MAX_ROLLBACK: usize = 9;` (its own test at `:550` asserts 9,
+  "150 ms at 60 Hz is 9 ticks"), `crates/net/src/rollback.rs:39 WAN_ROLLBACK_CAP: usize =
+  crate::netcode::MAX_ROLLBACK` with `:1171` asserting 9, and `crates/anim/src/net_pose.rs:34
+  pub const RTT_TICKS_150MS: u32 = 9;`. Row S18 in `docs/plan/BOOK-GAPS-2026-10-12.md`.
 
 Data flow per tick: clients send inputs with 3x redundancy
 (`INPUT_BYTES=10` each) on unreliable datagrams; the server echoes
@@ -356,6 +361,9 @@ pub fn guard_report(tick: Tick, why: GuardHit) -> Tape; // ON5, replay-backed
    per snapshot, input redundancy + XOR/RLE compression; why: WAN loss bursts
    exceed LAN windows; reference: GGPO rollback concepts + backroll-rs XOR+RLE
    shape (reimplement integer-only); donor: backroll-rs (pattern only).
+   Status 2026-10-17: the "≤8-tick resim" here is stale: the disk holds `crates/net/src/netcode.rs:22
+   MAX_ROLLBACK = 9` and `crates/anim/src/net_pose.rs:34 RTT_TICKS_150MS = 9;`, so 150 ms RTT is 9
+   ticks. Row S18 in `docs/plan/BOOK-GAPS-2026-10-12.md`.
 5. Cheating without spyware → server-authority rate/range/movement/lag-window
    checks, hits only through MP5 lag compensation, refusals logged with replay
    tapes; why: kernel drivers are out, authority plus evidence is the product;

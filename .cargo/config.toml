@@ -29,6 +29,18 @@ opt-level = 0
 opt-level = 2
 codegen-units = 256
 
+# Every coder's plain `cargo test` runs the built-in `test` profile, which
+# inherits dev and its debug = "line-tables-only": the debug = 0 codegen win
+# above only reached the nextest proof path, and that path is parked until the
+# owner installs cargo-nextest (OPT6). Overriding `test` here gives the same win
+# to every `cargo test` (lane gates, proof legs, one-crate iterations) with no
+# flag change and no new tool, while `cargo build` / `cargo run` keep dev's
+# line-tables-only for backtraces. Panic messages still show file:line; only the
+# test profile loses line numbers inside backtraces. opt-level is untouched, so
+# test bodies run at the same speed as before.
+[profile.test]
+debug = 0
+
 # Windows link speedup: rust-lld.exe ships inside the toolchain sysroot and rustc finds it there,
 # no PATH entry or VS component needed (measured 2026-09-29 on this PC, cold `cargo test -p
 # engine-game --all-features --no-run`: 121 s with link.exe, 79 s with rust-lld; unit tests, bins,

@@ -36,7 +36,8 @@ pub const BALANCED_MIN_PERMILLE: u16 = 400;
 /// Balanced band ceiling, see [`BALANCED_MIN_PERMILLE`].
 pub const BALANCED_MAX_PERMILLE: u16 = 600;
 /// Stillness trip length (the tournament 3 s stuck window at 60 Hz, restated here).
-pub const STUCK_WINDOW_TICKS: u32 = 180;
+/// Single owner is `engine_core::STUCK_WINDOW_TICKS`.
+pub const STUCK_WINDOW_TICKS: u32 = engine_core::STUCK_WINDOW_TICKS;
 /// Seed fan-out per match: `base_seed + i * SEED_GAP`, ranges never overlap.
 pub const SEED_GAP: u64 = 65_537;
 /// Ticks per strike-discovery probe (the frozen-foe spam window).
@@ -59,8 +60,8 @@ pub const PQ1_FIXTURE_TICKS: u32 = 64;
 /// Seeded fixture base seed for the latency pin.
 pub const PQ1_FIXTURE_SEED: u64 = 9001;
 /// Kill-share ceiling for the lever screen: one move's share stays under this.
-/// Mirrors the live `pq2-balance-tournament` bar
-/// (`crates/playtest/src/tournament.rs:40`): one gate stays, no second number.
+/// Mirrors the live `pq2-balance-tournament` bar (`KILL_SHARE_MAX_PERMILLE`
+/// in `crates/playtest/src/tournament.rs`): one gate stays, no second number.
 /// Units: permille, integer math only.
 pub const PQ2_KILL_SHARE_MAX_PERMILLE: u16 = 350;
 
@@ -916,6 +917,22 @@ mod tests {
         println!(
             "PQ2 lopsided move_byte={} share={} bar={} kills_a={}/{}",
             strike, share, PQ2_KILL_SHARE_MAX_PERMILLE, lever.kills_a, lever.matches,
+        );
+    }
+
+    #[test]
+    fn kill_share_bar_is_one_number_across_crates() {
+        // One bar, no second number: the combat depth set carries its own copy
+        // of the kill-share ceiling for the feel survey, and this harness
+        // mirrors it for the lever screen. A copy that moves alone would put
+        // two bars in the tree, so that drift is refused here by name.
+        // (`engine-playtest` is not a dependency of this crate; its copy and
+        // the endpoint copy are named in
+        // `target/queue/ready/des-ledger-source-drift-20261017.md`.)
+        assert_eq!(
+            engine_combat::feel::KILL_SHARE_MAX_PERMILLE,
+            PQ2_KILL_SHARE_MAX_PERMILLE,
+            "combat's kill-share bar drifted from the bench bar"
         );
     }
 

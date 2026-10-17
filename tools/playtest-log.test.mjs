@@ -2,7 +2,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { checkCsvText } from "./playtest-log.mjs";
+import { checkCsvText, checkFile } from "./playtest-log.mjs";
 
 const SAMPLE =
   "tester,in_audience,build_sha,minute,confusion_point,question,yes_no,what,where,why,conclusion,bug_id,severity\r\n" +
@@ -20,5 +20,15 @@ describe("playtest-log", () => {
     assert.equal(res.lines[0].row, 2);
     assert.equal(res.lines[1].ok, false);
     assert.equal(res.lines[1].row, 3);
+  });
+
+  it("reports a missing log as one FAIL line, not a crash", () => {
+    const res = checkFile("docs/design/playtests/2099-01-01.csv");
+    assert.equal(res.pass, 0);
+    assert.equal(res.fail, 1);
+    assert.equal(res.lines.length, 1);
+    assert.equal(res.lines[0].ok, false);
+    assert.equal(res.lines[0].row, 0);
+    assert.match(res.lines[0].reason, /^missing log /);
   });
 });

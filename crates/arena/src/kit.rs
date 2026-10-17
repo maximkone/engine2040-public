@@ -6,7 +6,8 @@
 //! [`MatchWorld`] owns collision. Units: meters, radians (yaw about +Y).
 //! Determinism: same bytes give the same sorted world and spawns; nothing
 //! here feeds the sim hash. Errors: typed [`KitError`], never panics.
-//! Budget: 11 boxes parsed once at init; zero per-tick work.
+//! Budget: one box per physical actor (6 on the shipped placement) parsed
+//! once at init; zero per-tick work.
 
 use core::fmt;
 
@@ -256,10 +257,12 @@ mod tests {
         text
     }
 
+    /// The embedded placement stages 11 actors and parses 6 physical boxes
+    /// (the name counts the staged actors, the world holds the physical set).
     #[test]
     fn kit_parses_11_physical_obstacles() {
         let world = kit_match_world().expect("embedded placement collides");
-        assert_eq!(world.obstacles().len(), KIT_ACTOR_COUNT);
+        assert_eq!(world.obstacles().len(), 6, "6 physical boxes collide");
         assert!(!world.is_empty());
         assert!(
             world
@@ -279,10 +282,12 @@ mod tests {
         assert_ne!(first.digest(), MatchWorld::empty().digest());
     }
 
+    /// The FPS spawns settle free over the 6 physical boxes of the shipped
+    /// placement (the dressing no longer pads the world).
     #[test]
     fn kit_fps_spawns_settle_free_and_face() {
         let map = fps_test_map().expect("fps template settles");
-        assert_eq!(map.world.obstacles().len(), KIT_ACTOR_COUNT);
+        assert_eq!(map.world.obstacles().len(), 6, "6 physical boxes collide");
         assert_eq!(map.spawns, fps_spawns());
         assert_eq!(map.yaws, fps_spawn_yaws());
         for spawn in map.spawns {
@@ -317,9 +322,16 @@ mod tests {
 
     #[test]
     fn kit_rejects_bad_yaw_size_or_flag() {
-        let yawed = KIT_JSON.replacen("\"yaw\": 0", "\"yaw\": 1", 1);
+        // Bad shapes ride the `eleven` fixture (all boxes physical), so a
+        // dressing flag flip in the shipped data can never disarm them: a
+        // non-physical actor never reaches the box checks at all.
+        let yawed = eleven(
+            "{\"x\": 0.0, \"z\": 0.0, \"sx\": 1.0, \"sz\": 1.0, \"yaw\": 1.0, \"physical\": true}",
+        );
         assert!(kit_match_world_from_json(&yawed).is_err());
-        let flat = KIT_JSON.replacen("\"sx\": 30", "\"sx\": 0", 1);
+        let flat = eleven(
+            "{\"x\": 0.0, \"z\": 0.0, \"sx\": 0.0, \"sz\": 1.0, \"yaw\": 0.0, \"physical\": true}",
+        );
         assert!(kit_match_world_from_json(&flat).is_err());
         let missing = eleven("{\"x\": 0.0, \"z\": 0.0, \"sx\": 1.0, \"sz\": 1.0, \"yaw\": 0.0}");
         assert!(kit_match_world_from_json(&missing).is_err());

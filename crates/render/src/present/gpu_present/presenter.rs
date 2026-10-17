@@ -7,17 +7,19 @@ use super::super::fog_fwd::{FogFwd, FOG_FWD_UNIFORM_BYTES};
 use super::super::*;
 use super::frame::{gtao_err, sky_err, GpuMesh, GpuTexture, Targets};
 use super::msaa::{
-    msaa_sample_count, msaa_target_desc, msaa_transient_bytes, pipeline_multisample, MsaaConfig,
+    msaa_effective_sample_count, msaa_sample_count, msaa_target_desc, msaa_transient_bytes,
+    pipeline_multisample, MsaaConfig, MsaaSupport, MSAA_SAMPLE_COUNT,
 };
 use super::submit::{
     blit_pipeline, forward_pipeline, material_entry, padded_depth_row, sky_pipeline,
     uniform_buffer, uniform_entry, MATERIAL_RING_BYTES, MATERIAL_RING_LEN,
 };
 use super::timing::GpuTimer;
-use super::{BLIT_WGSL, HDR_FORMAT, IBL_STUDIO_HDRI_BYTES, OUTPUT_FORMAT};
+use super::{BLIT_WGSL, DEPTH_FORMAT, HDR_FORMAT, IBL_STUDIO_HDRI_BYTES, OUTPUT_FORMAT};
 use crate::v1::{self};
 use crate::v1_gpu::FORWARD_PBR_WGSL;
 use crate::{decals, fog, gtao, ibl, material_layer, overlay, particles_gpu, sky};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// LF4 slice 1 bloom state: enable flag plus CPU-mirrored thresholds.
@@ -113,6 +115,9 @@ pub struct Presenter {
     /// Buffers and bind groups created, per frame and in total.
     pub(crate) creates: CreateTally,
     pub(crate) meshes: CpuCache<MeshKey, GpuMesh>,
+    /// Index fingerprint per resident mesh: same-shape re-uploads with the
+    /// same topology rewrite vertices in place with no new buffers.
+    pub(crate) mesh_index_hash: BTreeMap<MeshKey, u64>,
     pub(crate) textures: CpuCache<TextureKey, GpuTexture>,
     /// Arena crowd mesh and palette, packed by `ensure_crowd`. They sit
     /// beside the caches, not in them, so the receipt's cache rows count
@@ -182,11 +187,21 @@ pub struct Presenter {
     pub(crate) fog_plan: Option<(u32, u32, crate::graph::CompiledGraph)>,
     /// RL9 depth readback staging, shape-keyed like the fog buffers.
     pub(crate) depth_rb: Option<(u32, u32, wgpu::Buffer)>,
+    /// RL9 CPU decode scratch for the depth readback (resized on shape
+    /// change only, reused every fog frame so steady-state fog frames
+    /// allocate nothing for the decode).
+    pub(crate) depth_decode: Vec<f32>,
     /// RL9 scratch for fog/ao byte staging (resized on shape change
     /// only, reused across both uploads and the neutral clears).
     pub(crate) fog_scratch: Vec<u8>,
     /// RL9 kill switch (A/B evidence and operator fallback); default on.
     pub(crate) fog_enabled: bool,
+    /// The blit fog pair holds non-neutral data (a tranche upload or a
+    /// live-path AO upload) and must be reset once before it can be
+    /// trusted as neutral. Fresh targets start neutral, `run_fog_tranche`
+    /// sets this, `clear_fog_targets` clears it; the fog-off branches
+    /// skip their re-upload while it stays false.
+    pub(crate) fog_pair_dirty: bool,
     /// RL9 evidence: mean fog factor over the top frame half.
     pub(crate) fog_top_mean: f32,
     /// RL9 evidence: mean fog factor over the bottom frame half.
@@ -208,6 +223,11 @@ pub struct Presenter {
     /// Twin shadow uniform (32 bytes under `twin_forward_wgsl`):
     /// the per-frame bind refreshes the active cascade here.
     pub(crate) twin_shadow_buf: wgpu::Buffer,
+    /// EG11 live sun depth map: one cached texture plus pipeline pair the
+    /// live forward submit records before the forward draws, so a live frame
+    /// pays the depth pass, never a texture plus pipeline build.
+    /// Presentation only, never hashed.
+    pub(crate) sun_sub: super::sun_shadow::SunShadowSubmitter,
     /// Warmed pipeline variants for the scene key set (pipeline-cache
     /// residency; load allocates, per-frame borrows).
     pub(crate) pipelines: crate::cache::PipelineCache,
@@ -223,6 +243,11 @@ pub struct Presenter {
     /// path. The window leg flips it; slice 2 builds the 4x targets plus
     /// resolve. Copyable state, no per-frame allocation.
     pub(crate) msaa: MsaaConfig,
+    /// What the adapter can build for EG13's 4x pair (colour, depth,
+    /// resolve), read once at build from its per-format multisample flags.
+    /// The switch reads it, so a pair the adapter cannot build stays on the
+    /// 1x path instead of failing texture creation. Presentation only.
+    pub(crate) msaa_support: MsaaSupport,
     /// Height fog and sky colors the forward shader evaluates per fragment.
     pub(crate) fog_fwd: FogFwd,
     /// Per-frame fog uniform (group 0 binding 6, read by the forward
@@ -481,10 +506,26 @@ impl Presenter {
         }
     }
 
+    /// What the adapter can build for EG13's 4x pair: `MULTISAMPLE_X4` on the
+    /// HDR colour format, `MULTISAMPLE_X4` on the depth format and
+    /// `MULTISAMPLE_RESOLVE` on the colour format (the 1x resolve target).
+    /// Owner: render lane; Caller: `Presenter::init_offscreen` plus
+    /// `Presenter::init_windowed`, which hand it to `Presenter::build`.
+    fn msaa_support_for(adapter: &wgpu::Adapter) -> MsaaSupport {
+        let color = adapter.get_texture_format_features(HDR_FORMAT).flags;
+        let depth = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+        MsaaSupport::from_flags(
+            color.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4),
+            depth.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4),
+            color.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE),
+        )
+    }
+
     fn build(
         device: wgpu::Device,
         queue: wgpu::Queue,
         info: wgpu::AdapterInfo,
+        support: MsaaSupport,
     ) -> Result<Self, PresentError> {
         // The one forward shader file: static and sky vertex entries, the
         // linear HDR fragment entry, the sky fragment entry. No patching.
@@ -540,16 +581,18 @@ impl Presenter {
             &device,
             &forward_shader,
             &forward_layout,
-            HDR_FORMAT,
+            &super::submit::forward_color_target_formats(),
             pipeline_multisample(&MsaaConfig::default()),
         );
         // EG13 on path: 4x multisample with one shading run per pixel
         // (cost is bandwidth, not shading); off stays the 1x path.
+        // SP63: the MSAA pass keeps a single HDR attachment, so its
+        // pipeline carries one target.
         let forward_hdr_msaa = forward_pipeline(
             &device,
             &forward_shader,
             &forward_layout,
-            HDR_FORMAT,
+            &[HDR_FORMAT],
             pipeline_multisample(&MsaaConfig { enabled: true }),
         );
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -762,18 +805,20 @@ impl Presenter {
             uniform_buffer(&device, "ra1-u-fog-forward", FOG_FWD_UNIFORM_BYTES as u64);
         // EG12 slice 2: staged torch block, 272 bytes, zeroed for clears.
         let torch_buf = uniform_buffer(&device, "eg12-u-torch", 272);
+        // SP63: the 1x pass carries HDR plus the id target; the MSAA pass
+        // keeps its single HDR attachment.
         let sky_1x = sky_pipeline(
             &device,
             &forward_shader,
             &forward_layout,
-            HDR_FORMAT,
+            &super::submit::forward_color_target_formats(),
             pipeline_multisample(&MsaaConfig::default()),
         );
         let sky_msaa = sky_pipeline(
             &device,
             &forward_shader,
             &forward_layout,
-            HDR_FORMAT,
+            &[HDR_FORMAT],
             pipeline_multisample(&MsaaConfig { enabled: true }),
         );
         let material_ring = uniform_buffer(&device, "ra1-u-material-ring", MATERIAL_RING_BYTES);
@@ -831,6 +876,7 @@ impl Presenter {
             creates: CreateTally::default(),
             look_probes: false,
             msaa,
+            msaa_support: support,
             fog_fwd,
             fog_fwd_buf,
             torch_buf,
@@ -859,8 +905,10 @@ impl Presenter {
             ibl_sh_buf,
             fog_plan: None,
             depth_rb: None,
+            depth_decode: Vec::new(),
             fog_scratch: Vec::new(),
             fog_enabled: true,
+            fog_pair_dirty: false,
             fog_top_mean: 0.0,
             fog_bottom_mean: 0.0,
             fog_contact_min: 1.0,
@@ -870,6 +918,7 @@ impl Presenter {
             gtao_submit_us: 0,
             twin_sun,
             twin_shadow_buf,
+            sun_sub: super::sun_shadow::SunShadowSubmitter::build(&device),
             pipelines,
             pipeline_keys,
             device,
@@ -893,6 +942,7 @@ impl Presenter {
             cam_buf,
             light_buf,
             meshes: CpuCache::new(MAX_CACHED_MESHES),
+            mesh_index_hash: BTreeMap::new(),
             textures: CpuCache::new(MAX_CACHED_TEXTURES),
             crowd_mesh: None,
             crowd_palette: None,
@@ -933,7 +983,9 @@ impl Presenter {
         .map_err(|_| PresentError::NoAdapter)?;
         let info = adapter.get_info();
         let (device, queue) = Self::request_device(&adapter)?;
-        Self::build(device, queue, info)
+        // EG13: the adapter owns the MSAA count; read its 4x support once.
+        let support = Self::msaa_support_for(&adapter);
+        Self::build(device, queue, info, support)
     }
 
     /// Open the device and queue on `adapter`, asking for pass timestamps
@@ -976,7 +1028,9 @@ impl Presenter {
         )?;
         let info = adapter.get_info();
         let (device, queue) = Self::request_device(&adapter)?;
-        let mut presenter = Self::build(device, queue, info)?;
+        // EG13: the adapter owns the MSAA count; read its 4x support once.
+        let support = Self::msaa_support_for(&adapter);
+        let mut presenter = Self::build(device, queue, info, support)?;
         presenter.attach_surface(instance, surface, width, height)?;
         Ok(presenter)
     }
@@ -1008,14 +1062,15 @@ impl Presenter {
     }
 
     /// Pick the swapchain present mode: the shortest acquire wait the
-    /// driver offers, else the first listed mode. Units: none.
+    /// driver offers (Immediate tears but never waits for vsync), then
+    /// Mailbox, else the first listed mode. Units: none.
     /// Caller: `Presenter::attach_surface`.
     pub fn pick_present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
-        if modes.contains(&wgpu::PresentMode::Mailbox) {
-            return wgpu::PresentMode::Mailbox;
-        }
         if modes.contains(&wgpu::PresentMode::Immediate) {
             return wgpu::PresentMode::Immediate;
+        }
+        if modes.contains(&wgpu::PresentMode::Mailbox) {
+            return wgpu::PresentMode::Mailbox;
         }
         modes.first().copied().unwrap_or(wgpu::PresentMode::Fifo)
     }
@@ -1155,15 +1210,80 @@ impl Presenter {
         self.device_lost = Some(reason);
     }
 
+    /// Fingerprint of an index list for the upload skip: FNV-1a over LE bytes.
+    /// Pure, no allocation. Presentation only, never hashed.
+    fn mesh_index_hash(indices: &[u32]) -> u64 {
+        let mut h = engine_core::Fnv64::new();
+        for &i in indices {
+            h.write_u32(i);
+        }
+        h.finish()
+    }
+
+    /// Reuse verdict for a resident mesh: true only when a fingerprint is
+    /// stored and the incoming one matches. Pure, no allocation.
+    fn mesh_upload_should_reuse(stored: Option<u64>, incoming: u64) -> bool {
+        matches!(stored, Some(known) if known == incoming)
+    }
+
     /// Upload a mesh under `key`. The mesh is revalidated on upload (its
     /// fields are public, so hand-built data cannot sneak past), then
     /// packed into GPU buffers. A changed digest replaces the resident
     /// buffers; eviction drops the oldest entry first.
     pub fn upload_mesh(&mut self, key: MeshKey, mesh: &v1::MeshData) -> Result<(), PresentError> {
+        // Skip switch: same shape plus same topology rewrites vertices in
+        // place (one write, no new buffers); bytes pack into `vertex_scratch`
+        // with the hash first, so a moved topology skips validation.
+        let reuse_hit = match self.meshes.get(&key) {
+            Some(resident) => {
+                let want_vertices = u32::try_from(mesh.positions.len()).unwrap_or(u32::MAX);
+                let want_count = u32::try_from(mesh.indices.len()).unwrap_or(u32::MAX);
+                resident.vertices == want_vertices
+                    && resident.count == want_count
+                    && Self::mesh_upload_should_reuse(
+                        self.mesh_index_hash.get(&key).copied(),
+                        Self::mesh_index_hash(&mesh.indices),
+                    )
+            }
+            None => false,
+        };
+        if reuse_hit {
+            let validated =
+                v1::upload_mesh(&mesh.positions, &mesh.normals, &mesh.uvs, &mesh.indices)
+                    .map_err(|e| PresentError::InvalidMesh(format!("{e}")))?;
+            self.vertex_scratch.clear();
+            self.vertex_scratch.reserve(validated.positions.len() * 48);
+            for index in 0..validated.positions.len() {
+                for component in validated.positions[index] {
+                    self.vertex_scratch
+                        .extend_from_slice(&component.to_le_bytes());
+                }
+                for component in validated.normals[index] {
+                    self.vertex_scratch
+                        .extend_from_slice(&component.to_le_bytes());
+                }
+                for component in validated.uvs[index] {
+                    self.vertex_scratch
+                        .extend_from_slice(&component.to_le_bytes());
+                }
+                for component in validated.tangents[index] {
+                    self.vertex_scratch
+                        .extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            if let Some(resident) = self.meshes.get(&key) {
+                self.queue
+                    .write_buffer(&resident.vertex, 0, &self.vertex_scratch);
+                return Ok(());
+            }
+        }
         let gpu = self.pack_mesh(mesh)?;
+        let incoming = Self::mesh_index_hash(&mesh.indices);
         if let Some(evicted) = self.meshes.insert(key, gpu) {
             debug_assert_ne!(evicted, key, "reinsert never evicts itself");
+            self.mesh_index_hash.remove(&evicted);
         }
+        self.mesh_index_hash.insert(key, incoming);
         Ok(())
     }
 
@@ -1530,6 +1650,11 @@ impl Presenter {
         if self.look_probes && !on {
             self.neutral_fog_pending = true;
         }
+        if !self.look_probes && on {
+            // Entering the probe composite: the pair may hold live-path
+            // uploads, so the fog-off branch resets it once below.
+            self.fog_pair_dirty = true;
+        }
         self.look_probes = on;
     }
 
@@ -1548,10 +1673,16 @@ impl Presenter {
     }
 
     /// Turn 4x MSAA on or off on the window leg (default off). Off keeps
-    /// today's 1x path; on notes the 4x shape until slice 2 builds the
-    /// MSAA targets plus resolve. Copyable state, no per-frame allocation,
-    /// never waits on the GPU.
+    /// today's 1x path; on builds the 4x targets plus resolve only while the
+    /// adapter can build the whole pair, so a weak adapter reads back off
+    /// instead of failing texture creation. Copyable state, no per-frame
+    /// allocation, never waits on the GPU.
     pub fn set_msaa_enabled(&mut self, on: bool) {
+        // The adapter owns the count: `msaa_effective_sample_count` reads the
+        // requested switch plus the support read at build, so an unbuildable
+        // pair never reaches `ensure_targets`.
+        let want = MsaaConfig { enabled: on };
+        let on = msaa_effective_sample_count(&want, self.msaa_support) == MSAA_SAMPLE_COUNT;
         if self.msaa.enabled != on {
             self.msaa.enabled = on;
             self.targets = None;
@@ -1759,6 +1890,7 @@ impl Presenter {
     /// Caller: `crates/render/src/present/gpu_present/submit.rs` live encode.
     pub fn set_bloom_enabled(&mut self, on: bool) {
         self.bloom.enabled = on;
+        super::live::set_live_bloom_enabled(on);
     }
 
     /// LF4 bloom switch state.
@@ -1967,6 +2099,20 @@ mod presenter_adapter_tests {
     }
 
     #[test]
+    fn present_mode_prefers_immediate_over_mailbox() {
+        // Caller: `Presenter::attach_surface` window present path.
+        // Behavior: Immediate (tearing, no vsync wait) is the shortest
+        // acquire wait, so it wins when the driver offers it; pixels and
+        // draws are unchanged, only the wait is skipped.
+        let picked = crate::present::Presenter::pick_present_mode(&[
+            wgpu::PresentMode::Fifo,
+            wgpu::PresentMode::Mailbox,
+            wgpu::PresentMode::Immediate,
+        ]);
+        assert_eq!(picked, wgpu::PresentMode::Immediate);
+    }
+
+    #[test]
     fn present_mode_keeps_old_path_when_not_ready() {
         let picked = crate::present::Presenter::pick_present_mode(&[wgpu::PresentMode::Fifo]);
         assert_eq!(picked, wgpu::PresentMode::Fifo);
@@ -2078,6 +2224,62 @@ mod forward_normal_tests {
         assert!(
             super::super::forward_bind::decode_normal([f32::NAN, 0.5, 0.5], geom).is_err(),
             "NaN texel refuses"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mesh_upload_reuse_tests {
+    #[test]
+    fn same_topology_reuses_different_rebuilds() {
+        let a = super::Presenter::mesh_index_hash(&[0, 1, 2, 2, 1, 3]);
+        let b = super::Presenter::mesh_index_hash(&[0, 1, 2, 2, 1, 3]);
+        let c = super::Presenter::mesh_index_hash(&[0, 1, 2, 2, 1, 4]);
+        assert_eq!(a, b, "same indices give same fingerprint twice");
+        assert_ne!(a, c, "changed index moves the fingerprint");
+        assert!(
+            super::Presenter::mesh_upload_should_reuse(Some(a), b),
+            "same topology reuses"
+        );
+        assert!(
+            !super::Presenter::mesh_upload_should_reuse(Some(a), c),
+            "changed topology rebuilds"
+        );
+        assert!(
+            !super::Presenter::mesh_upload_should_reuse(None, b),
+            "first upload rebuilds"
+        );
+    }
+
+    #[test]
+    fn second_identical_upload_sizes_no_new_buffers() {
+        let mut presenter = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => p,
+            Err(crate::present::PresentError::NoAdapter) => {
+                eprintln!("SKIPPED mesh reuse: no adapter");
+                return;
+            }
+            Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let key = crate::present::MeshKey::new(0x5EED_0001, [0x5E; 32]);
+        let mesh = crate::v1::cube();
+        presenter
+            .upload_mesh(key, &mesh)
+            .expect("first upload builds");
+        let (buffers, _) = presenter.gpu_create_totals();
+        presenter
+            .upload_mesh(key, &mesh)
+            .expect("second identical reuses");
+        let (buffers_after, _) = presenter.gpu_create_totals();
+        assert_eq!(
+            buffers_after, buffers,
+            "identical re-upload sizes no new buffers"
+        );
+        let mut bad = mesh.clone();
+        bad.positions[0] = [f32::NAN, 0.0, 0.0];
+        assert!(
+            presenter.upload_mesh(key, &bad).is_err(),
+            "non-finite refuses"
         );
     }
 }

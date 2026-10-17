@@ -169,7 +169,7 @@ fn view_z_roundtrip_rel_err_within_1e_minus_4() {
     for i in 1..SLICES {
         let b = boundary_m(i).expect("boundary in range");
         for d in [b * (1.0 - 1e-9), b, b * (1.0 + 1e-9)] {
-            if d < NEAR_M || d > FAR_M {
+            if !(NEAR_M..=FAR_M).contains(&d) {
                 continue;
             }
             let back = coord_to_depth(depth_to_coord(d));

@@ -3,9 +3,9 @@
 // Boxes-only means staged_fight_frames.rs builds each body as one scaled cube
 // (fight_body_mesh scales v1::cube() by FIGHT_BODY_SIZE_M, 24 verts / 36 indices).
 // Real fighters mean CT7 bodies (2+ meshes over 5,000 tris per VS4 accept) drawn
-// at fighter_views positions. Today the file still pins the cube, so the two
-// refusal tests below FAIL. They turn green when VS4 lands and the cube pin is
-// gone. Build-only: reads sources, never cargo, never GPU. Missing paths skip.
+// at fighter_views positions. VS4 has landed: the cube pin is gone, so the two
+// refusal tests below PASS, and they fail again if the cube pin returns.
+// Build-only: reads sources, never cargo, never GPU. Missing paths skip.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

@@ -5,18 +5,22 @@
 //! resimulate when the server corrects them. Transport is [`std::net`] UDP
 //! only; this crate stays dependency-light (arena plus input path deps).
 //!
-//! Authority per tick: [`Server`] owns the match. It ticks the arena prefix
-//! with the human inputs it has received; every slot without a human input
-//! is filled by the arena's own brain fill, so AI fills empty slots
-//! server-side with no extra code here. The server never rolls back: an
-//! input that arrives after its tick was authored loses and the client
-//! resimulates to the server truth.
+//! Authority per tick: [`Server`] owns the match. It holds one cold
+//! [`LiveMatch`](engine_arena::LiveMatch) and steps it exactly once per
+//! authored tick with the human inputs it has received (one sim step per
+//! tick, byte-identical to the arena prefix runners); every slot without a
+//! human input is filled by the arena's own brain fill, so AI fills empty
+//! slots server-side with no extra code here. The server never rolls back:
+//! an input that arrives after its tick was authored loses and the client
+//! resimulates to the server truth. [`Server::steps`] is the cost proof.
 //!
 //! Prediction per tick: [`Client`] predicts its local input immediately for
-//! responsiveness and assumes the server shares every prediction so far.
-//! [`Client::on_server_state`] names the ticks where that assumption was
-//! wrong (mispredict ticks); [`Client::resimulate`] then replays the
-//! server-true prefix plus the still-unacked local predictions.
+//! responsiveness through its own held live match (one sim step per
+//! predicted tick; [`Client::steps`] is the cost proof) and assumes the
+//! server shares every prediction so far. [`Client::on_server_state`] names
+//! the ticks where that assumption was wrong (mispredict ticks);
+//! [`Client::resimulate`] then replays the server-true prefix plus the
+//! still-unacked local predictions.
 //!
 //! [`SnapshotDelta`] is a full snapshot for now: version tag, tick, hash and
 //! the complete authoritative input prefix. Quantized fighter-state deltas
@@ -60,8 +64,8 @@
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
-use engine_arena::{run, ArenaConfig, Checkpoint};
-use engine_input::{FighterId, FighterInput, FighterTape};
+use engine_arena::{ArenaConfig, Checkpoint, LiveMatch};
+use engine_input::{FighterId, FighterInput};
 /// Neutral names for the input contract types: engine code outside the GE2
 /// genre ledger imports them from here instead of naming the genre types.
 pub use engine_input::{FighterId as BodyId, FighterInput as BodyInput, FighterTape as BodyTape};
@@ -317,12 +321,17 @@ pub struct SnapshotDelta {
 }
 
 /// Server-authoritative arena match: owns the config, the authoritative input
-/// tape and the checkpoint history. Data owner for authoritative inputs.
+/// tape, the checkpoint history and one incremental live stepper. Data owner
+/// for authoritative inputs.
 pub struct Server {
     config: ArenaConfig,
     next_tick: u32,
     tape: Vec<FighterInput>,
     checkpoints: Vec<Checkpoint>,
+    /// One cold authority sim stepped exactly once per authored tick, the
+    /// same shape as the arena's EG1 live match. The tape stays the data
+    /// owner above; the stepper owns the running sim state.
+    stepper: LiveMatch,
 }
 
 impl Server {
@@ -331,17 +340,26 @@ impl Server {
         if config.validate().is_err() {
             return Err(NetError::BadConfig);
         }
+        let stepper = LiveMatch::new(&config).ok_or(NetError::BadConfig)?;
         Ok(Self {
             config,
             next_tick: 0,
             tape: Vec::new(),
             checkpoints: Vec::new(),
+            stepper,
         })
     }
 
     /// Next tick to author.
     pub fn tick_now(&self) -> u32 {
         self.next_tick
+    }
+
+    /// Incremental sim steps performed since construction: exactly one per
+    /// authored tick. A from-zero replay per tick would blow this up; the
+    /// finding-4 test pins 600 ticks to 600 steps.
+    pub fn steps(&self) -> u64 {
+        self.stepper.steps()
     }
 
     /// Authoritative checkpoints so far, one per authored tick.
@@ -361,6 +379,8 @@ impl Server {
     /// slot below the config count, and pass [`FighterInput::validate`];
     /// duplicates within the call fail. Slots without an input are AI-filled
     /// by the arena. Any failure rejects the whole tick and changes nothing.
+    /// The held live match steps exactly once per call: the checkpoint equals
+    /// the last row of the arena prefix run over the whole tape (EG1 parity).
     pub fn tick(
         &mut self,
         inputs: &[FighterInput],
@@ -382,18 +402,12 @@ impl Server {
             }
             prev = Some(key);
         }
-        let mut tape = self.tape.clone();
-        tape.extend_from_slice(&sorted);
-        let sub = ArenaConfig {
-            ticks: self.next_tick + 1,
-            ..self.config
-        };
-        let checkpoints = run(&sub, &FighterTape(tape.clone()));
-        let Some(checkpoint) = checkpoints.last().copied() else {
-            return Err(NetError::SimRejected);
+        let checkpoint = match self.stepper.step(&sorted) {
+            Some(stepped) => stepped.checkpoint,
+            None => return Err(NetError::SimRejected),
         };
         debug_assert_eq!(checkpoint.tick, self.next_tick);
-        self.tape.clone_from(&tape);
+        self.tape.extend_from_slice(&sorted);
         self.checkpoints.push(checkpoint);
         self.next_tick += 1;
         Ok((
@@ -402,7 +416,7 @@ impl Server {
                 version: WIRE_VERSION,
                 tick: checkpoint.tick,
                 hash: checkpoint.hash,
-                tape,
+                tape: self.tape.clone(),
             },
         ))
     }
@@ -421,6 +435,21 @@ pub struct Client {
     total_mispredicts: u64,
     last_mispredicts: Vec<u32>,
     cells: crate::cells::CellMirror,
+    /// Prediction sim: the predicted tape, one step per predicted tick (the
+    /// same tape the old prefix run rebuilt per call, now held and stepped).
+    stepper: LiveMatch,
+    /// Authority sim: the merged server tape, one step per received tick.
+    /// Never rewinds and never replays: the merged tape only grows.
+    truth: LiveMatch,
+    /// Authoritative checkpoints, one per truth step (index == tick): the
+    /// prefix the old per-state `run_prefix` rebuilt, held instead.
+    truth_cps: Vec<Checkpoint>,
+    /// Leading `checkpoints` entries known equal to `truth_cps`: the
+    /// mispredict compare walks only the ticks truth newly covered, so a
+    /// state costs O(1) amortized instead of a from-zero replay.
+    agreed: usize,
+    /// Sim steps the held steppers performed (the finding-4 cost proof).
+    steps: u64,
 }
 
 impl Client {
@@ -429,6 +458,8 @@ impl Client {
         if config.validate().is_err() || local.0 >= config.fighters {
             return Err(NetError::BadConfig);
         }
+        let stepper = LiveMatch::new(&config).ok_or(NetError::BadConfig)?;
+        let truth = LiveMatch::new(&config).ok_or(NetError::BadConfig)?;
         Ok(Self {
             config,
             local,
@@ -440,6 +471,11 @@ impl Client {
             total_mispredicts: 0,
             last_mispredicts: Vec::new(),
             cells: crate::cells::CellMirror::new(),
+            stepper,
+            truth,
+            truth_cps: Vec::new(),
+            agreed: 0,
+            steps: 0,
         })
     }
 
@@ -500,6 +536,9 @@ impl Client {
     /// checkpoint. The input must be stamped for [`Self::tick_now`], name
     /// the local slot and validate; remote slots stay empty so the arena
     /// AI-fills them exactly like the server does when it lacks their input.
+    /// The held live match steps once per covered tick (a server-ahead
+    /// catch-up leaves unpredicted ticks, which step AI-filled, exactly like
+    /// the prefix run over the predicted tape filled them).
     pub fn predict(&mut self, input: FighterInput) -> Result<Checkpoint, NetError> {
         if input.validate().is_err() || input.fighter != self.local {
             return Err(NetError::BadInput);
@@ -507,11 +546,34 @@ impl Client {
         if input.tick != self.tick_now() {
             return Err(NetError::BadInput);
         }
+        let mut checkpoint = None;
+        while self.stepper.tick() <= input.tick {
+            let slice: &[FighterInput] = if self.stepper.tick() == input.tick {
+                std::slice::from_ref(&input)
+            } else {
+                &[]
+            };
+            let Some(stepped) = self.stepper.step(slice) else {
+                return Err(NetError::SimRejected);
+            };
+            checkpoint = Some(stepped.checkpoint);
+            self.steps += 1;
+        }
+        let Some(checkpoint) = checkpoint else {
+            return Err(NetError::SimRejected);
+        };
         self.predicted.push(input);
-        let checkpoints = self.run_prefix(self.predicted.clone(), self.tick_now() + 1)?;
-        let checkpoint = checkpoints.last().copied().ok_or(NetError::SimRejected)?;
         self.checkpoints.push(checkpoint);
         Ok(checkpoint)
+    }
+
+    /// Sim steps the held steppers performed since construction: one per
+    /// predicted tick (plus AI-filled catch-up ticks), one per authoritative
+    /// tick a state newly covers, and one per re-based suffix tick. A
+    /// from-zero replay anywhere would blow this up; the finding-4 test pins
+    /// 600 predicted ticks to 600 steps and the lockstep state pass to 2x.
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 
     /// Apply one authoritative server state, naming the ticks where the
@@ -521,8 +583,12 @@ impl Client {
     /// any failure changes nothing. A duplicate or out-of-order state
     /// (tick at or below the last applied server tick) answers `Ok(vec![])`
     /// and changes nothing. Otherwise the delta tape merges into the server
-    /// truth, the overlapping prefix is compared, and the differing ticks
-    /// are returned. Call [`Self::resimulate`] afterwards to converge.
+    /// truth and the authority sim steps forward one tick per newly received
+    /// tick — never a from-zero replay. The mispredict list stays byte-equal
+    /// to the old full-prefix compare: every overlapping tick is compared,
+    /// but entries already known equal are skipped, so a state costs O(1)
+    /// amortized and a later mismatch still names every divergent tick.
+    /// Call [`Self::resimulate`] afterwards to converge.
     pub fn on_server_state(
         &mut self,
         checkpoint: Checkpoint,
@@ -539,20 +605,42 @@ impl Client {
             return Ok(Vec::new());
         }
         let merged = merge_tapes(&self.server_tape, &delta.tape);
-        let authoritative = self.run_prefix(merged.clone(), checkpoint.tick + 1)?;
+        // The merged tape only grows and a known tick never changes (merge
+        // keeps the first entry per key), so the authority sim can step
+        // forward one tick per newly received tick. A delta that adds entries
+        // for already-applied ticks rewrites the authority prefix (a heal
+        // snapshot can legitimately add one the windows missed); the held sim
+        // cannot un-step, so rebuild it from zero over the merged tape and
+        // compare the whole overlap again, exactly like the old prefix run.
+        let old_known = self
+            .server_tape
+            .partition_point(|input| Some(input.tick) <= self.server_tick);
+        let new_known = merged.partition_point(|input| Some(input.tick) <= self.server_tick);
+        if new_known > old_known {
+            self.truth = LiveMatch::new(&self.config).ok_or(NetError::SimRejected)?;
+            self.truth_cps.clear();
+            self.agreed = 0;
+        }
+        while self.truth.tick() <= checkpoint.tick {
+            let tick = self.truth.tick();
+            let slice = tick_slice(&merged, tick);
+            let Some(stepped) = self.truth.step(slice) else {
+                return Err(NetError::SimRejected);
+            };
+            self.truth_cps.push(stepped.checkpoint);
+            self.steps += 1;
+        }
+        let compare_to = self.checkpoints.len().min((checkpoint.tick + 1) as usize);
         let mut mispredicts = Vec::new();
-        for (index, predicted) in self
-            .checkpoints
-            .iter()
-            .enumerate()
-            .take((checkpoint.tick + 1) as usize)
-        {
-            if let Some(truth) = authoritative.get(index) {
-                if predicted != truth {
-                    mispredicts.push(index as u32);
-                }
+        for index in self.agreed.min(compare_to)..compare_to {
+            if self.checkpoints[index] != self.truth_cps[index] {
+                mispredicts.push(index as u32);
             }
         }
+        self.agreed = match mispredicts.first() {
+            Some(&first) => first as usize,
+            None => compare_to,
+        };
         self.server_tape = merged;
         self.server_tick = Some(checkpoint.tick);
         self.server_hash = Some(checkpoint.hash);
@@ -562,10 +650,24 @@ impl Client {
     }
 
     /// Resimulate from the server truth: ticks at or below the last server
-    /// tick replay the authoritative inputs, later ticks replay the still
-    /// unacked local predictions. Returns the converged checkpoint history.
+    /// tick are the authoritative checkpoints the held truth sim already
+    /// produced, later ticks re-step the still-unacked local predictions
+    /// from a snapshot at the truth tip (one step per unacked tick, never a
+    /// from-zero replay). Returns the converged checkpoint history.
     pub fn resimulate(&mut self) -> Vec<Checkpoint> {
-        let done = self.server_tick.map_or(0, |tick| tick + 1);
+        let Some(done) = self.server_tick.map(|tick| tick + 1) else {
+            // No authority learned: the prediction history already is the
+            // canonical run over the predicted tape.
+            return self.checkpoints.clone();
+        };
+        let prefix_len = done as usize;
+        if self.truth_cps.len() < prefix_len {
+            return self.checkpoints.clone();
+        }
+        let end = self.checkpoints.len().max(prefix_len);
+        // Canonical tape: authority `0..=server_tick`, then the still-unacked
+        // predictions; the prefix checkpoints come from the held truth
+        // history, only the unacked suffix steps again.
         let mut tape = self.server_tape.clone();
         tape.extend(
             self.predicted
@@ -575,14 +677,26 @@ impl Client {
         );
         tape.sort_by_key(|input| (input.tick, input.fighter.0));
         tape.dedup_by_key(|input| (input.tick, input.fighter.0));
-        let end = self
-            .checkpoints
-            .len()
-            .max(self.server_tick.map_or(0, |tick| (tick + 1) as usize));
-        let Ok(checkpoints) = self.run_prefix_vec(tape, end as u32) else {
-            return self.checkpoints.clone();
-        };
+        let mut checkpoints = self.truth_cps[..prefix_len].to_vec();
+        if checkpoints.len() < end {
+            let Some(snapshot) = self.truth.snapshot() else {
+                return self.checkpoints.clone();
+            };
+            let Some(mut suffix) = LiveMatch::from_snapshot(snapshot) else {
+                return self.checkpoints.clone();
+            };
+            while suffix.tick() < end as u32 {
+                let tick = suffix.tick();
+                let slice = tick_slice(&tape, tick);
+                let Some(stepped) = suffix.step(slice) else {
+                    return self.checkpoints.clone();
+                };
+                checkpoints.push(stepped.checkpoint);
+                self.steps += 1;
+            }
+        }
         self.checkpoints.clone_from(&checkpoints);
+        self.agreed = checkpoints.len().min(prefix_len);
         checkpoints
     }
 
@@ -610,31 +724,14 @@ impl Client {
         self.resimulate();
         Ok(mispredicts)
     }
+}
 
-    /// Run the arena prefix `0..ticks` over `tape`; `None` when empty.
-    fn run_prefix(&self, tape: Vec<FighterInput>, ticks: u32) -> Result<Vec<Checkpoint>, NetError> {
-        if ticks == 0 {
-            return Ok(Vec::new());
-        }
-        let sub = ArenaConfig {
-            ticks,
-            ..self.config
-        };
-        let checkpoints = run(&sub, &FighterTape(tape));
-        if checkpoints.len() != ticks as usize {
-            return Err(NetError::SimRejected);
-        }
-        Ok(checkpoints)
-    }
-
-    /// Prefix run that tolerates the empty range for [`Self::resimulate`].
-    fn run_prefix_vec(
-        &self,
-        tape: Vec<FighterInput>,
-        ticks: u32,
-    ) -> Result<Vec<Checkpoint>, NetError> {
-        self.run_prefix(tape, ticks)
-    }
+/// Inputs running at `tick`, in fighter order: the slice a prefix run would
+/// read from the tape cursor at that tick. `tape` is `(tick, fighter)`-sorted.
+fn tick_slice(tape: &[FighterInput], tick: u32) -> &[FighterInput] {
+    let start = tape.partition_point(|input| input.tick < tick);
+    let end = tape.partition_point(|input| input.tick <= tick);
+    &tape[start..end]
 }
 
 /// Validate a tape slice: every input ranges plus slot below `fighters`,
@@ -1373,7 +1470,9 @@ pub fn send_packet(sock: &UdpSocket, peer: SocketAddr, bytes: &[u8]) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_arena::run;
     use engine_input::fighter::Buttons;
+    use engine_input::FighterTape;
     use std::collections::{BTreeMap, VecDeque};
 
     /// Deterministic xorshift64 for seeded loss injection (no new deps).

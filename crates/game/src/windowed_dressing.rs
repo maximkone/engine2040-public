@@ -7,9 +7,12 @@
 //! Errors: typed `super::WinError`, never panics.
 
 use super::WinError;
-use engine_assets::lod_swap::{distance_mm_between, target_lod};
+use engine_assets::lod_swap::{
+    distance_mm_between, target_lod, LodSwapper, SwapEvent, MAX_SWAPS_PER_TICK,
+};
 use engine_assets::mesh_cook::MAX_LOD_LEVELS;
 use engine_render::present::{DrawList, MeshKey, Presenter, SizeClass};
+use std::cell::RefCell;
 
 /// Dressing staging: `content/arena/dressing.json` torch/banner actors
 /// bound into the window twin forward path (0 new tris: transformed cubes).
@@ -304,20 +307,115 @@ pub fn dressing_lod(actor: &DressingActor, eye_m: [f32; 3]) -> usize {
     dressing_lod_and_mm(actor, eye_m).0
 }
 
+/// Live LOD state of the dressing stage: one asset [`LodSwapper`] over the six
+/// dressing actors, the pushed-frame counter its swaps are stamped with, and
+/// the reused swap scratch. A fresh picker per frame would read what the
+/// stateless band pick reads, so hysteresis needs the state: render-thread
+/// only, hence a thread-local instead of a lock.
+struct DressingLods {
+    swapper: LodSwapper,
+    frames: u64,
+    swaps: Vec<SwapEvent>,
+}
+
+impl DressingLods {
+    /// Register the six known actors at [`MAX_LOD_LEVELS`]. A refused
+    /// registration (duplicate id, bad level count) is a data bug and fails
+    /// loudly instead of staging a silently untracked actor.
+    fn new() -> Result<Self, WinError> {
+        let mut swapper = LodSwapper::new();
+        for actor in dressing_actors()? {
+            swapper
+                .register(actor.id, MAX_LOD_LEVELS)
+                .map_err(|err| WinError::Render(format!("dressing lod register: {err}")))?;
+        }
+        Ok(Self {
+            swapper,
+            frames: 0,
+            swaps: Vec::new(),
+        })
+    }
+}
+
+thread_local! {
+    /// Per-thread dressing LOD state; `None` until the first pushed frame
+    /// registered the actors. See [`DressingLods`].
+    static DRESSING_LODS: RefCell<Option<DressingLods>> = RefCell::new(None);
+}
+
+/// Resident LOD of every dressing actor for one frame at `eye_m`: poll the
+/// thread's swapper over the whole roster (registering on first use, at most
+/// [`MAX_SWAPS_PER_TICK`] swaps in actor order) and return each resident LOD in
+/// table order. `usize::MAX` marks an actor this poll could not decide (refused
+/// eye or swap), so the caller falls back to the stateless band pick instead of
+/// blanking the frame. One poll per pushed frame; no per-frame heap.
+fn resident_dressing_lods(eye_m: [f32; 3]) -> [usize; DRESSING_ACTOR_COUNT] {
+    let mut out = [usize::MAX; DRESSING_ACTOR_COUNT];
+    let Ok(actors) = dressing_actors() else {
+        return out;
+    };
+    let mut distances = [(0u32, 0u32); DRESSING_ACTOR_COUNT];
+    for (slot, actor) in actors.iter().enumerate() {
+        match distance_mm_between(eye_m, actor.pos_m) {
+            Ok(distance_mm) => distances[slot] = (actor.id, distance_mm),
+            Err(_) => return out,
+        }
+    }
+    DRESSING_LODS.with(|cell| {
+        let mut held = cell.borrow_mut();
+        if held.is_none() {
+            if let Ok(state) = DressingLods::new() {
+                *held = Some(state);
+            }
+        }
+        let Some(DressingLods {
+            swapper,
+            frames,
+            swaps,
+        }) = held.as_mut()
+        else {
+            return;
+        };
+        swaps.clear();
+        let tick = *frames;
+        *frames = frames.saturating_add(1);
+        if swapper
+            .poll_into(tick, &distances, MAX_SWAPS_PER_TICK, swaps)
+            .is_err()
+        {
+            return;
+        }
+        for (slot, actor) in actors.iter().enumerate() {
+            if let Some(lod) = swapper.lod(actor.id) {
+                out[slot] = lod;
+            }
+        }
+    });
+    out
+}
+
 /// Push one draw per resident dressing mesh, nearest band first: the asset
 /// LOD bands order submission front-to-back, so tiled GPUs shade less
-/// twice. Same set as before (missing keys still draw nothing); order is
-/// the only change, and opaque depth-tested boxes paint identical pixels
-/// in any order. Cold per-frame tail (stack parse, no mesh rebuild).
-/// Returns draws pushed.
+/// twice. Same set as before (missing keys still draw nothing); order is the
+/// only change, and opaque depth-tested boxes paint identical pixels in any
+/// order. Each actor's resident LOD comes from the live [`LodSwapper`] poll
+/// below, so hysteresis holds across frames; rank only, pixels order-free.
+/// Cold per-frame tail (stack parse, no mesh rebuild). Returns draws pushed.
 pub fn push_dressing_draws(list: &mut DrawList, resident: &[MeshKey]) -> Result<usize, WinError> {
     let actors = dressing_actors()?;
     let eye = list.camera.eye.to_array();
+    // Live LOD swap: the thread's swapper owns the residents, so a coarse pick
+    // holds across frames; an undecided actor keeps the stateless band pick.
+    let live = resident_dressing_lods(eye);
     // Bounded stack rank, nearest band first; ties keep file order (the
     // slot breaks them), so the same frame always submits the same order.
     let mut rank: [(usize, u32, usize); DRESSING_ACTOR_COUNT] = [(0, 0, 0); DRESSING_ACTOR_COUNT];
     for (slot, actor) in actors.iter().enumerate() {
-        let (lod, distance_mm) = dressing_lod_and_mm(actor, eye);
+        let (stateless, distance_mm) = dressing_lod_and_mm(actor, eye);
+        let lod = match live[slot] {
+            usize::MAX => stateless,
+            decided => decided,
+        };
         rank[slot] = (lod, distance_mm, slot);
     }
     for i in 1..DRESSING_ACTOR_COUNT {
@@ -348,4 +446,103 @@ pub fn push_dressing_draws(list: &mut DrawList, resident: &[MeshKey]) -> Result<
         }
     }
     Ok(pushed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_assets::lod_swap::{HYSTERESIS_MM, LOD_BAND_MM};
+
+    /// Frame-size-valid draw list with the camera eye moved to `eye_m`.
+    fn frame_at(eye_m: [f32; 3]) -> DrawList {
+        let scene = engine_render::v1::default_scene(128, 96).expect("default scene builds");
+        let mut camera =
+            engine_render::v1::Camera::new(eye_m, DRESSING_TARGET_M, [0.0, 1.0, 0.0], 0.9);
+        camera.aspect = 128.0 / 96.0;
+        camera.far = 120.0;
+        DrawList {
+            camera,
+            light: scene.light,
+            items: Vec::new(),
+        }
+    }
+
+    /// Swaps the last pushed frame logged plus the resident LOD of `actor`.
+    fn live_state(actor: u32) -> (usize, Option<usize>) {
+        DRESSING_LODS.with(|cell| {
+            let held = cell.borrow();
+            match held.as_ref() {
+                Some(state) => (state.swaps.len(), state.swapper.lod(actor)),
+                None => (0, None),
+            }
+        })
+    }
+
+    #[test]
+    fn dressing_lod_swap_holds_hysteresis_across_frames() {
+        let actors = dressing_actors().expect("dressing parses");
+        let resident: Vec<MeshKey> = actors.iter().map(dressing_mesh_key).collect();
+        let first = actors[0];
+        let far_m = [first.pos_m[0] + 200.0, first.pos_m[1], first.pos_m[2]];
+        // Far frame: every actor coarsens to the last band, one swap each.
+        let mut far = frame_at(far_m);
+        assert_eq!(
+            push_dressing_draws(&mut far, &resident).expect("far frame"),
+            DRESSING_ACTOR_COUNT
+        );
+        assert_eq!(
+            live_state(first.id),
+            (DRESSING_ACTOR_COUNT, Some(MAX_LOD_LEVELS - 1))
+        );
+        // Same eye again: the held state swaps nothing (no churn).
+        let mut held = frame_at(far_m);
+        assert_eq!(
+            push_dressing_draws(&mut held, &resident).expect("held frame"),
+            DRESSING_ACTOR_COUNT
+        );
+        assert_eq!(live_state(first.id).0, 0, "held LOD logs no swap");
+        // 59 m sits inside the last band's hysteresis depth, so the coarse pick
+        // holds; 57 m is past it, so the refine lands and is logged.
+        assert_eq!((LOD_BAND_MM[2], HYSTERESIS_MM), (60_000, 2_000));
+        let inside_m = [first.pos_m[0] + 59.0, first.pos_m[1], first.pos_m[2]];
+        let mut inside = frame_at(inside_m);
+        push_dressing_draws(&mut inside, &resident).expect("hysteresis frame");
+        assert_eq!(live_state(first.id).1, Some(MAX_LOD_LEVELS - 1));
+        let refine_m = [first.pos_m[0] + 57.0, first.pos_m[1], first.pos_m[2]];
+        let mut refine = frame_at(refine_m);
+        push_dressing_draws(&mut refine, &resident).expect("refine frame");
+        assert_eq!(live_state(first.id).1, Some(MAX_LOD_LEVELS - 2));
+        assert!(live_state(first.id).0 >= 1, "the refine is logged");
+    }
+
+    #[test]
+    fn dressing_frame_one_keeps_the_order_and_refuses_no_frame() {
+        // A fresh swapper starts at LOD0, so frame one equals the stateless
+        // band pick; a refused poll changes nothing and still draws all six.
+        let actors = dressing_actors().expect("dressing parses");
+        let resident: Vec<MeshKey> = actors.iter().map(dressing_mesh_key).collect();
+        let mut list = frame_at(DRESSING_EYE_M);
+        assert_eq!(
+            push_dressing_draws(&mut list, &resident).expect("frame pushes"),
+            DRESSING_ACTOR_COUNT
+        );
+        let order: Vec<MeshKey> = list
+            .items
+            .iter()
+            .map(|item| item.mesh)
+            .filter(|key| resident.contains(key))
+            .collect();
+        assert_eq!(order, resident, "nearer band first, file order within");
+        let before = live_state(actors[0].id);
+        let mut nan = frame_at([f32::NAN, 5.0, 0.0]);
+        assert_eq!(
+            push_dressing_draws(&mut nan, &resident).expect("nan eye still draws"),
+            DRESSING_ACTOR_COUNT
+        );
+        assert_eq!(
+            live_state(actors[0].id),
+            before,
+            "a refused poll changes nothing"
+        );
+    }
 }

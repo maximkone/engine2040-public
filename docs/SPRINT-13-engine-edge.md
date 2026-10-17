@@ -5,13 +5,13 @@ before and after and keeps its change only if the numbers move; misses
 revert the same wave. OPT1–OPT13 serve the FOCUS "Now" speed pillar.
 Rows marked (orchestrator) land root config or `tools/` edits.
 
-- [ ] OPT4 ops: linker A/B and PF6 re-verify — `rust-lld.exe` for
+- [x] OPT4 ops: linker A/B and PF6 re-verify — `rust-lld.exe` for Landed 631e7192.
   `x86_64-pc-windows-msvc`; record link time for `arena.exe` and test
   binaries; restate what PF6 actually delivered. (orchestrator) Tier A.
   Size S. Owns `.cargo/config.toml` hunks and a PF6 note. Accept: keep
   only if link ≥ 20% faster with every test green; the PF6 receipt names
   what exists. needs: OPT1.
-- [ ] OPT5 ops: profiles with one job each — `profiling` (release, line
+- [x] OPT5 ops: profiles with one job each — `profiling` (release, line Landed 15ffd5d2.
   tables, thin LTO), `perf-test` (release, thin LTO, 16 codegen units)
   for proof `--release` legs if PF1 budgets hold, `ship` (fat LTO, one
   unit, `panic = "abort"` after an unwind audit, PGO from a recorded
@@ -25,7 +25,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   Accept: wall time and flake counts before/after; kept only if faster
    with the same failures visible. needs: OPT1.
    (DO NOT DISPATCH 2026-10-05: PARKED, cargo-nextest absent exit 101. Retry only after owner installs and posts version. Never re-probe whole, per 510 deep-dive.)
-- [ ] OPT7 ops: affected-package gate — `tools/affected.mjs` maps a diff
+- [x] OPT7 ops: affected-package gate — `tools/affected.mjs` maps a diff Landed cd37e7c4.
   to changed packages plus reverse dependencies via `cargo metadata`;
   lane acceptance runs that closure; the full proof stays once per wave.
   (orchestrator) Tier A. Size M. Owns `tools/affected.mjs`. Accept: a

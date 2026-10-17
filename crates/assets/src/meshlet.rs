@@ -711,6 +711,10 @@ fn border_locked(indices: &[u32], vert_count: usize) -> Vec<bool> {
     locked
 }
 
+/// Return of a level collapse: compacted positions, indices and the largest
+/// collapse cost relative to mesh extent.
+type CollapseOut = (Vec<[f32; 3]>, Vec<u32>, f32);
+
 /// Greedy midpoint edge collapse down to `target` triangles: cheapest open
 /// edge first (index-order scan, first cheapest wins), locked vertices never
 /// move, survivors keep input order, degenerate triangles drop. Returns the
@@ -720,7 +724,7 @@ fn simplify_level(
     positions: &[[f32; 3]],
     indices: &[u32],
     target: usize,
-) -> Result<(Vec<[f32; 3]>, Vec<u32>, f32), MeshletError> {
+) -> Result<CollapseOut, MeshletError> {
     let mut lo = [f32::INFINITY; 3];
     let mut hi = [f32::NEG_INFINITY; 3];
     for p in positions {

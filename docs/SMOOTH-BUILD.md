@@ -336,8 +336,9 @@ Landed hunks (read-only, same box):
   and its `[build] rustc-wrapper` hunk were later REMOVED (`.cargo/config.test.mjs`
   guards against a global wrapper; no wrapper exists in `.cargo/config.toml`
   today — see its comment block). Current state: `sccache --version` prints
-  `0.18.0` and is opt-in per run only (`node tools/lanes.mjs flags` prints the
-  RUSTC_WRAPPER=sccache + CARGO_INCREMENTAL=0 hint for one command). Report
+  `0.18.0` and is opt-in per run only (set `RUSTC_WRAPPER=sccache` and
+  `CARGO_INCREMENTAL=0` by hand on the one command; the old per-command hint
+  printer was retired 2026-10-10, see `.cargo/config.toml`). Report
   `target/evidence/opt9/report.md` absent after the 2026-10-10 `target/` wipe
   (same as `target/evidence/build/`).
 

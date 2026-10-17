@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn upscale_720p_rejects_bad_inputs() {
-        assert!(upscale_720p_to_1080p(&vec![[0.4, 0.4, 0.4]; 10]).is_err());
+        assert!(upscale_720p_to_1080p(&[[0.4, 0.4, 0.4]; 10]).is_err());
         let mut bad = vec![[0.4, 0.4, 0.4]; 1280 * 720];
         bad[7] = [f32::NAN, 0.0, 0.0];
         assert!(upscale_720p_to_1080p(&bad).is_err());

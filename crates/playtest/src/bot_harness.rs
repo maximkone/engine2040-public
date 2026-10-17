@@ -41,7 +41,7 @@ pub struct HarnessAggregate {
 /// Move table: hold, retreat, advance, strike, guarded retreat/advance.
 pub fn move_input(t: &BodyInput, slot: u8, tick: u32, i: u8) -> Option<BodyInput> {
     let row = [(0, 0), (-100, 0), (100, 0), (0, 1), (-100, 3), (100, 3)];
-    let (mx, byte) = *row.get(usize::try_from(i).unwrap_or(99))?;
+    let (mx, byte) = *row.get(usize::from(i))?;
     let mut out = *t;
     out.tick = tick;
     out.fighter = engine_arena::BodyId::new(slot)?;
@@ -71,7 +71,7 @@ impl BotHarness {
         if self.ticks_per_bout == 0 || self.ticks_per_bout > engine_arena::MAX_TICKS {
             return Err(HarnessError::BadField(self.ticks_per_bout));
         }
-        if self.delay_frames % self.hold_ticks != 0 {
+        if !self.delay_frames.is_multiple_of(self.hold_ticks) {
             return Err(HarnessError::NotDivisible {
                 delay: self.delay_frames,
                 hold: self.hold_ticks,
@@ -90,8 +90,7 @@ impl BotHarness {
                     .wrapping_add(u64::from(bout).wrapping_mul(7919))
                     .wrapping_add(u64::from(slot).wrapping_mul(104_729))
                     .wrapping_add(u64::from(k).wrapping_mul(1_299_709));
-                selected[usize::try_from(slot).unwrap_or(0)]
-                    .push(u8::try_from(splitmix64(mixed) % 6).unwrap_or(0));
+                selected[usize::from(slot)].push(u8::try_from(splitmix64(mixed) % 6).unwrap_or(0));
             }
         }
         let executed: Vec<Vec<u8>> = selected.iter().map(|s| delay_selected(s, lag)).collect();
@@ -99,7 +98,7 @@ impl BotHarness {
         for tick in 0..self.ticks_per_bout {
             let k = usize::try_from(tick.checked_div(self.hold_ticks).unwrap_or(0)).unwrap_or(0);
             for slot in 0..2u8 {
-                let s = usize::try_from(slot).unwrap_or(0);
+                let s = usize::from(slot);
                 let input = move_input(t, slot, tick, *executed[s].get(k).unwrap_or(&0))?;
                 strikes[s] += u32::from(input.buttons.0 & 1 != 0);
                 inputs.push(input);

@@ -162,6 +162,7 @@ fn join_config() -> ArenaConfig {
         ticks: JOIN_TICKS,
         fighters: 2,
         half_extent_m: 20.0,
+        table_version: 1,
     }
 }
 

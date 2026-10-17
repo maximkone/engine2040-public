@@ -37,6 +37,7 @@ pub mod pins;
 pub mod policy;
 pub mod protocol;
 pub mod remote;
+mod serving;
 pub mod stream;
 pub mod transport;
 pub mod vendor;

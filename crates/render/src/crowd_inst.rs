@@ -14,8 +14,9 @@
 use engine_core::Fnv64;
 use std::fmt;
 
+/// Far-row impostor select over the staged crowd (octahedral atlas cell).
 #[path = "crowd_impostor.rs"]
-pub(crate) mod crowd_impostor;
+pub mod crowd_impostor;
 
 const CROWD_VAT_WGSL: &str = include_str!("shaders/crowd_vat.wgsl");
 
@@ -44,8 +45,11 @@ pub const CROWD_INST_BUDGET_MS: f64 = 0.5;
 pub const CROWD_PACKED_WORDS: usize = 5;
 /// Millimeters per meter for the integer depth digest.
 const MM_PER_M: f32 = 1000.0;
-/// Largest float below `u32::MAX`, the saturating cast ceiling.
-const U32_MAX_F: f32 = 4_294_967_295.0;
+/// Ceiling at 2^32 for the saturating millimeter cast: values at or past
+/// this pin at `u32::MAX` instead of wrapping. Written as an exact
+/// product of exact literals so the value stays exact without tripping
+/// the lossy-float literal lint (a single 2^32 literal is not exact).
+const U32_MAX_F: f32 = 8_388_608.0 * 512.0;
 
 // Stand shape continues the present 96-seat ring (`draw::crowd_*`, same
 // wall, rise and run), extended upward and outward for 20k-50k seats.
@@ -167,7 +171,7 @@ impl SeatLayout {
     /// Smallest 50-row layout covering `total` seats (`1..=MAX`).
     /// Production 20k seats give 50 rows by 100 cols; tests use small
     /// literals instead. Refuses 0 and anything past the cap.
-    pub(crate) fn for_seats(total: u32) -> Result<Self, CrowdInstError> {
+    pub fn for_seats(total: u32) -> Result<Self, CrowdInstError> {
         let max = u32::try_from(MAX_CROWD_SEATS).unwrap_or(u32::MAX);
         if total == 0 {
             return Err(CrowdInstError::BadLayout("for_seats needs at least 1"));
@@ -179,7 +183,7 @@ impl SeatLayout {
             });
         }
         let per_sector = total.div_ceil(4);
-        let cols = per_sector.div_ceil(50).max(1).min(320);
+        let cols = per_sector.div_ceil(50).clamp(1, 320);
         Ok(Self {
             rows_per_sector: 50,
             cols_per_row: u16::try_from(cols).unwrap_or(320),
@@ -426,7 +430,7 @@ impl CrowdFrameStats {
     }
 }
 
-/// Caller-owned frame builder: layout plus planes plus two reused buffers.
+/// Caller-owned frame builder: layout plus precomputed sector flags plus two reused buffers.
 /// Construct once per window, rebuild every frame with no allocation.
 pub struct CrowdBuilder<'a> {
     layout: &'a SeatLayout,
@@ -434,7 +438,6 @@ pub struct CrowdBuilder<'a> {
     block_levels: &'a [u16; CROWD_BLOCKS],
     tick: u64,
     camera_m: [f32; 3],
-    planes: &'a [[f32; 4]; 6],
     flags: [bool; CROWD_SECTORS],
     prev_lod: &'a mut [u8],
     out: &'a mut [CrowdInstance],
@@ -484,7 +487,6 @@ impl<'a> CrowdBuilder<'a> {
             block_levels,
             tick,
             camera_m,
-            planes,
             flags,
             prev_lod,
             out,
@@ -611,7 +613,7 @@ fn dist_mm(v: f32) -> u32 {
         return 0;
     }
     let mm = v * MM_PER_M;
-    if !(mm < U32_MAX_F) {
+    if mm >= U32_MAX_F {
         return u32::MAX;
     }
     // The range check above holds `mm` inside `u32`, so truncation is exact.
@@ -626,7 +628,7 @@ fn dist_mm(v: f32) -> u32 {
 /// phase (exact, no trig) scaled by excitement. Phase and excitement
 /// clamp at 1000 permille; phase 0 reads exactly 0. Presentation only.
 #[must_use]
-pub(crate) fn bob_offset_m(phase_permille: u16, excitement_permille: u16) -> f32 {
+pub fn bob_offset_m(phase_permille: u16, excitement_permille: u16) -> f32 {
     let phase = phase_permille.min(1000);
     let tri = if phase <= 500 { phase } else { 1000 - phase };
     let excite = excitement_permille.min(1000);
@@ -642,7 +644,7 @@ pub(crate) fn bob_offset_m(phase_permille: u16, excitement_permille: u16) -> f32
 /// next slice writes with `queue.write_buffer` (allocate once at max
 /// size, never map inside the frame).
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct GpuBindRequest {
+pub struct GpuBindRequest {
     /// Visible seats bound.
     pub instances: u32,
     /// Upload words (`instances * 5`), exact.
@@ -661,7 +663,7 @@ impl GpuBindRequest {
 
 /// Describe the upload for `instances` visible seats: words and bytes
 /// are checked products, never wrapping. Refuses 0 and past-cap counts.
-pub(crate) fn describe_bind(instances: usize) -> Result<GpuBindRequest, CrowdInstError> {
+pub fn describe_bind(instances: usize) -> Result<GpuBindRequest, CrowdInstError> {
     let count = u32::try_from(instances).map_err(|_| CrowdInstError::OverBudget {
         requested: u32::MAX,
         allowed: u32::try_from(MAX_CROWD_SEATS).unwrap_or(u32::MAX),
@@ -696,7 +698,7 @@ pub(crate) fn describe_bind(instances: usize) -> Result<GpuBindRequest, CrowdIns
 /// Pack one seat into five words: xyz bits plus `lod | palette | phase`
 /// plus excitement. Inputs clamp at their permille ceilings; the reader
 /// below inverts this exactly.
-pub(crate) fn pack_instance(
+pub fn pack_instance(
     pos_m: [f32; 3],
     lod: u8,
     palette: u8,
@@ -705,12 +707,14 @@ pub(crate) fn pack_instance(
     out: &mut [u32; CROWD_PACKED_WORDS],
 ) {
     pack_instance_full(
-        pos_m,
-        lod,
-        palette,
-        0,
-        0,
-        phase_permille,
+        &CrowdInstance {
+            pos_m,
+            palette,
+            lod,
+            phase_permille,
+            tint: 0,
+            variant: 0,
+        },
         excitement_permille,
         out,
     );
@@ -718,30 +722,25 @@ pub(crate) fn pack_instance(
 
 /// Full pack with the 6-bit tint (`18..23`) and 3-bit variant folded
 /// into phase high bits (`13..15`); phase stays 10 bits below.
-pub(crate) fn pack_instance_full(
-    pos_m: [f32; 3],
-    lod: u8,
-    palette: u8,
-    tint: u8,
-    variant: u8,
-    phase_permille: u16,
+pub fn pack_instance_full(
+    seat: &CrowdInstance,
     excitement_permille: u16,
     out: &mut [u32; CROWD_PACKED_WORDS],
 ) {
-    out[0] = pos_m[0].to_bits();
-    out[1] = pos_m[1].to_bits();
-    out[2] = pos_m[2].to_bits();
-    out[3] = (u32::from(lod) << 24)
-        | (u32::from(tint.min(63)) << 18)
-        | (u32::from(palette & 3) << 16)
-        | (u32::from(variant.min(7)) << 13)
-        | u32::from(phase_permille.min(1000));
+    out[0] = seat.pos_m[0].to_bits();
+    out[1] = seat.pos_m[1].to_bits();
+    out[2] = seat.pos_m[2].to_bits();
+    out[3] = (u32::from(seat.lod) << 24)
+        | (u32::from(seat.tint.min(63)) << 18)
+        | (u32::from(seat.palette & 3) << 16)
+        | (u32::from(seat.variant.min(7)) << 13)
+        | u32::from(seat.phase_permille.min(1000));
     out[4] = u32::from(excitement_permille.min(1000));
 }
 
 /// One unpacked bind cell: the exact inverse of [`pack_instance`].
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct UnpackedCell {
+pub struct UnpackedCell {
     /// Feet position in meters.
     pub pos_m: [f32; 3],
     /// Visual level.
@@ -760,7 +759,7 @@ pub(crate) struct UnpackedCell {
 
 /// Invert [`pack_instance`]; `None` on a short slice, never a panic.
 #[must_use]
-pub(crate) fn unpack_instance(words: &[u32]) -> Option<UnpackedCell> {
+pub fn unpack_instance(words: &[u32]) -> Option<UnpackedCell> {
     if words.len() < CROWD_PACKED_WORDS {
         return None;
     }
@@ -790,7 +789,7 @@ pub(crate) fn unpack_instance(words: &[u32]) -> Option<UnpackedCell> {
 /// CPU staging above is the authority here; the window build records the
 /// live pass instead.
 #[cfg(not(feature = "window"))]
-pub(crate) fn submit_gpu(
+pub fn submit_gpu(
     instances: &[CrowdInstance],
     viewport_px: [u32; 2],
 ) -> Result<GpuBindRequest, CrowdInstError> {
@@ -1244,11 +1243,11 @@ mod tests {
         for tick in [0u64, 12, 41] {
             let dec = u16::try_from(tick.saturating_mul(2)).unwrap_or(u16::MAX);
             let mut levels = [300u16; CROWD_BLOCKS];
-            for b in 0..16usize {
-                levels[b] = 700u16.saturating_sub(dec).max(300);
+            for slot in levels.iter_mut().take(16) {
+                *slot = 700u16.saturating_sub(dec).max(300);
             }
-            for b in 16..64usize {
-                levels[b] = 500u16.saturating_sub(dec).max(300);
+            for slot in levels.iter_mut().skip(16) {
+                *slot = 500u16.saturating_sub(dec).max(300);
             }
             let run = || {
                 let planes = open_planes();

@@ -28,6 +28,6 @@ Situation: A builder feeds new sound commands to the audio callback through a sh
 
 Off: "Use a mutex. It is fine if the lock is short. The stutter is the device."
 
-On: "Rule 5: feed the audio callback through a single-writer queue. Search `node tools/books.mjs search "audio callback lock free"` and cite [gems2 29.2; bos ch.5]. The window's mixer `try_lock` at `crates/game/src/bin/arena.rs:518` is the case to fix, and the commands it drops when busy must be counted."
+On: "Rule 5: feed the audio callback through a single-writer queue. Search `node tools/books.mjs search "audio callback lock free"` and cite [gems2 29.2; bos ch.5]. The window's mixer `try_lock` at `crates/game/src/bin/arena_frame/mod.rs:114` is the case to fix, and the commands it drops when busy must be counted."
 
 What skill-less misses: the lock on the real-time path, and the silent drop when the lock is busy. The stutter has a cause in the code, not the device.

@@ -34,9 +34,10 @@ use engine_anim::pose::extract_root;
 use engine_input::{FighterInput, FighterTape};
 
 use crate::recorder::{on_fork_step, DamageLedger, Row, StepRecord};
+use crate::world::MatchWorld;
 use crate::{
-    ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, Sim, TickBreaks, TickEvents,
-    MAX_SLOTS,
+    ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, MatchSnapshot, Sim,
+    TickBreaks, TickEvents, MAX_SLOTS,
 };
 
 /// Dataset recorder leg: pre-step poses, fight state and damage counters
@@ -165,7 +166,24 @@ impl LiveMatch {
     /// Fresh match at tick 0 under explicit fight rules (EG3); `None` when
     /// the config is invalid or the rules version is unknown.
     pub fn with_rules(config: &ArenaConfig, rules: ArenaRules) -> Option<Self> {
-        let mut sim = Sim::build(config, &FighterTape::default(), false, false)?;
+        Self::with_rules_world(config, rules, MatchWorld::empty())
+    }
+
+    /// [`LiveMatch::with_rules`] over a static obstacle world: the kit walls
+    /// the fight collides with. [`MatchWorld::empty`] is the legacy open
+    /// sand byte for byte, so existing callers and fixtures stay frozen.
+    ///
+    /// Consumer: the game's live window session (`engine-game`), which loads
+    /// the arena kit's physical placement into this world. Units: meters.
+    /// Determinism: the same world gives the same checkpoints; the world
+    /// digest rides every checkpoint. Errors: `None` on an invalid config,
+    /// an unknown rules version or a world that blocks a spawn.
+    pub fn with_rules_world(
+        config: &ArenaConfig,
+        rules: ArenaRules,
+        world: MatchWorld,
+    ) -> Option<Self> {
+        let mut sim = Sim::build_world(config, &FighterTape::default(), false, false, world)?;
         if !sim.set_rules(rules) {
             return None;
         }
@@ -367,6 +385,83 @@ impl LiveMatch {
         FighterTape(self.recorded.clone())
     }
 
+    /// Non-consuming snapshot of the running match at its current tick: the
+    /// same bytes [`run_prefix`](crate::run_prefix) would capture there,
+    /// taken from the held sim without disturbing it. `None` when the match
+    /// runs a non-empty obstacle world: [`MatchSnapshot`] carries no world,
+    /// so a resume would silently drop it (the world digest rides every
+    /// checkpoint).
+    ///
+    /// Pair with [`LiveMatch::from_snapshot`] to continue a second leg from
+    /// the same tick while the original keeps stepping. Consumer: the net
+    /// session's re-based prediction suffix. Units: fixed ticks.
+    #[cfg(not(feature = "sim"))]
+    #[must_use]
+    pub fn snapshot(&self) -> Option<MatchSnapshot> {
+        if !self.sim.world.is_empty() {
+            return None;
+        }
+        Some(MatchSnapshot {
+            config: self.sim.config,
+            tick: self.sim.tick,
+            states: self.sim.states.clone(),
+            wishes: self.sim.wishes,
+            buttons: self.sim.buttons,
+            fight: self.sim.fight,
+            match_state: *self.sim.match_track.state(),
+            match_version: self.sim.match_track.version(),
+            phased: *self.sim.match_track.phased(),
+            brains: self.sim.brains.clone(),
+            locos: self.sim.locos.clone(),
+            destruction: self.sim.destruction.clone(),
+        })
+    }
+
+    /// Fresh stepper resuming `snapshot` at its tick under the frozen v1
+    /// rules, the same leg [`resume`](crate::resume) takes wrapped in the
+    /// one-step-at-a-time stepper: `None` when the snapshot is misfiled or
+    /// its config is invalid. The snapshot is consumed (single-use, like
+    /// [`resume`](crate::resume)); the source match stays untouched and keeps
+    /// stepping.
+    ///
+    /// Std-only track: the `sim` leg cannot copy its live controllers out of
+    /// a running match (they are not `Clone`), so it keeps the single-use
+    /// [`run_prefix`]/[`resume`] path. Snapshots carry no obstacle world, so
+    /// the resume runs the legacy open arena, exactly like
+    /// [`resume`](crate::resume).
+    #[cfg(not(feature = "sim"))]
+    #[must_use]
+    pub fn from_snapshot(snapshot: MatchSnapshot) -> Option<Self> {
+        let config = snapshot.config();
+        let mut sim = Sim::from_snapshot_parts(snapshot, &config, &FighterTape::default())?;
+        // The live log keeps one row: drop the whole-match reservations.
+        sim.checkpoints = Vec::with_capacity(1);
+        sim.events = Vec::with_capacity(1);
+        sim.breaks = Vec::with_capacity(1);
+        let fighters = sim.fighters;
+        Some(Self {
+            sim,
+            leg: DatasetLeg::new(fighters),
+            tape: FighterTape(Vec::with_capacity(MAX_SLOTS)),
+            staged: Vec::new(),
+            recorded: Vec::new(),
+            merge: Vec::new(),
+            rows: Vec::with_capacity(fighters),
+            checkpoint: Checkpoint { tick: 0, hash: 0 },
+            events: TickEvents {
+                tick: 0,
+                events: Vec::new(),
+            },
+            breaks: TickBreaks {
+                tick: 0,
+                events: Vec::new(),
+            },
+            steps: 0,
+            poisoned: false,
+            fallbacks: Vec::new(),
+        })
+    }
+
     /// One shared-leg step plus the one-row log rotation.
     fn advance(&mut self) -> Option<()> {
         self.leg.step(&mut self.sim, &self.tape, &mut self.rows)?;
@@ -450,7 +545,20 @@ impl LivePresentation {
     /// must run the authority's rules, since hits move fighters. `None` when
     /// the config is invalid or the rules version is unknown.
     pub fn with_rules(config: &ArenaConfig, rules: ArenaRules) -> Option<Self> {
-        let mut sim = Sim::build(config, &FighterTape::default(), true, false)?;
+        Self::with_rules_world(config, rules, MatchWorld::empty())
+    }
+
+    /// [`LivePresentation::with_rules`] over a static obstacle world: the
+    /// pose cursor must resolve the same kit walls the authority does, or the
+    /// drawn fighter walks through the wall the sim just blocked.
+    ///
+    /// Consumer: the game's live window session (`engine-game`).
+    pub fn with_rules_world(
+        config: &ArenaConfig,
+        rules: ArenaRules,
+        world: MatchWorld,
+    ) -> Option<Self> {
+        let mut sim = Sim::build_world(config, &FighterTape::default(), true, false, world)?;
         if !sim.set_rules(rules) {
             return None;
         }
@@ -587,6 +695,7 @@ fn window_delta(a: RootSample, b: RootSample, tick: u32, single: bool) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::Obstacle;
     use crate::{run_breaks, run_dataset, run_events, run_prefix};
     use engine_input::{fighter::ATTACK, Buttons, FighterId};
 
@@ -670,6 +779,52 @@ mod tests {
             assert!(live.step(&[]).is_none(), "finished match steps nothing");
             assert_eq!(live.steps(), u64::from(config.ticks));
         }
+    }
+
+    #[cfg(not(feature = "sim"))]
+    #[test]
+    fn live_snapshot_resumes_bit_identical_without_consuming_the_match() {
+        // The non-consuming snapshot continues a second leg from the same
+        // tick byte-identically while the source match keeps stepping.
+        let config = ArenaConfig::try_new(2040, 600, 2, 20.0).expect("valid config");
+        let tape = script(&config);
+        let (_, checkpoints) = run_prefix(&config, &tape, config.ticks).expect("prefix");
+        let mut live = LiveMatch::new(&config).expect("live match");
+        for tick in 0..300 {
+            live.step(tick_inputs(&tape, tick)).expect("live step");
+        }
+        let mut first = LiveMatch::from_snapshot(live.snapshot().expect("open arena snapshots"))
+            .expect("resume at 300");
+        let mut second =
+            LiveMatch::from_snapshot(live.snapshot().expect("snapshot twice")).expect("resume 2");
+        assert_eq!((first.tick(), second.tick()), (300, 300));
+        // The resumed leg replays the suffix byte-identically to the oracle.
+        for tick in 300..config.ticks {
+            let stepped = first.step(tick_inputs(&tape, tick)).expect("suffix step");
+            assert_eq!(
+                stepped.checkpoint, checkpoints[tick as usize],
+                "suffix {tick}"
+            );
+        }
+        // The second resume and the untouched original hold the same bytes:
+        // taking the snapshot consumed nothing.
+        let mut again = Vec::new();
+        for tick in 300..320 {
+            let stepped = second.step(tick_inputs(&tape, tick)).expect("second suffix");
+            again.push(stepped.checkpoint);
+        }
+        assert_eq!(again, checkpoints[300..320], "second resume agrees");
+        for tick in 300..config.ticks {
+            let stepped = live.step(tick_inputs(&tape, tick)).expect("live continues");
+            assert_eq!(stepped.checkpoint, checkpoints[tick as usize], "live {tick}");
+        }
+        assert_eq!(live.steps(), u64::from(config.ticks), "one step per tick");
+        // A world-armed match refuses to snapshot: MatchSnapshot has no world.
+        let world =
+            MatchWorld::try_new(vec![Obstacle::aligned([19.0, 19.0], [0.5, 0.5])]).expect("world");
+        let armed =
+            LiveMatch::with_rules_world(&config, ArenaRules::V1, world).expect("world match");
+        assert!(armed.snapshot().is_none(), "the world would be dropped");
     }
 
     #[test]

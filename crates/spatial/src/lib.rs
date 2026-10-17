@@ -23,11 +23,15 @@ pub mod relation;
 pub mod repair;
 /// Free-space sampler: Poisson-disc placements, largest open spot.
 pub mod sample;
+/// Whole-scene unit-mismatch detector: median object size vs layout extent.
+pub mod scale;
 /// Sight and reach: line of sight, visibility, cover, reachability.
 pub mod sight;
 /// Repair-loop eval: ten seeded scenes through the repair loop.
 pub mod spatial_eval;
 pub mod staged;
+/// Offline open-vocabulary label lift into node tag proposals (SP46).
+pub mod tag_lift;
 
 pub use brief::{brief, brief_stats, brief_text, estimate_tokens, Brief, BriefStats, Group};
 pub use checks::{run_checks, run_spatial, OPT_IN_CHECKS, SPATIAL_CHECKS};
@@ -50,6 +54,7 @@ pub use sample::{
 #[cfg(test)]
 pub use staged::full_check_timed;
 pub use staged::{actors_from_snapshot, check_staged, staged_to_actors, SnapshotRow, StagedActor};
+pub use tag_lift::{lift_captures, lift_label};
 
 /// One scene actor snapshot. Units: meters, f32 in, integer-cm inside.
 #[derive(Debug, Clone, PartialEq)]

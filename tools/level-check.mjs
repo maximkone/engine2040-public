@@ -20,6 +20,9 @@
 //     radius_cm=<int> height_cm=<int> advantage=<0|1> dominance=<0|1>
 //     risk=<0|1>`; whole numbers only (optional leading -), `#` comments.
 //   class: 0 none, 1 magnet, 2 curtain, 3 generator, 4 bumper.
+//   A row named after an actor must carry that actor's placement centre
+//   (within 50 cm) and that actor's placement box height (`sy` metres, within
+//   5 cm), so a moved or reshaped actor cannot keep a stale row.
 //
 // Prints one line each (first five are the proof):
 //   walk_s <spawn to spawn, 1 decimal>
@@ -30,8 +33,21 @@
 // plus (tournament tapes exist only later):
 //   deaths_per_zone <per-zone kills or none (no tapes)>
 //   possible_death <floor cells within 2000mm of a zone centre>
-// Exit 1 when a rule fails: no holdable dominance point, open floor with no
-// cover, an actor with no use, scale missing, walk out of band, bad rows.
+// Exit 1 when a rule fails: no holdable dominance point, a dominance flag that
+// no single fighter can hold (radius above the hold cap or centre off the
+// floor), open floor with no cover, a bumper standing off the duel floor (the
+// fight never reaches it, so it is dressing, not cover), an advantage point
+// standing off the duel floor (the fight never reaches it, so it is dead
+// space) or no advantage point on the floor at all, a risk point standing off
+// the duel floor (the fight never reaches it, so the flag is a note, not data;
+// no minimum risk-point count is required, see the rule comment), an actor with
+// no use, a zone row whose centre drifted off its actor's placement pose or
+// whose `height_cm` disagrees with the actor's placement box height (a moved or
+// reshaped actor with a stale row else passes silent), scale missing, walk out
+// of band, bad rows.
+// A spawn with no floor bumper inside `COVER_REACH_CM` starts the bout uncovered.
+// Two spawns whose nearest cover differs in `height_cm` by more than
+// `HEIGHT_TOLERANCE_CM` fail too: one side starts the bout with better cover.
 // Exit 2 on bad CLI, missing file or unparsable rows (with line number).
 //
 // Usage:
@@ -54,13 +70,37 @@ export const SPAWN_B_CM = [400, 0];
 export const SPEED_CM_S = 170;
 export const FLOOR_HALF_CM = 1000;
 export const ENTRANCE_RADIUS_CM = 300;
+/**
+ * Cover reach: each spawn needs a floor bumper within this many cm, so one side
+ * never starts the bout in the open (600 cm is 3.5 s at the 170 cm/s march,
+ * inside the walk band this tool owns; the live mirrored pair reads 510 cm).
+ */
+export const COVER_REACH_CM = 600;
 export const REACH_MM = 2000;
 export const FIGHTER_HEIGHT_MM = 1800;
 export const DODGE_CM = 200;
 export const DEATH_RADIUS_CM = 200;
+/** A zone row's centre must sit this close to its actor's placement pose. */
+export const ZONE_POS_TOLERANCE_CM = 50;
+/**
+ * A zone row named after a placement actor must carry that actor's box height
+ * (`sy` in cm) within this many cm: `height_cm` is the design claim (the
+ * silhouette the fight reads) and the placement box is what the kit builds.
+ * Units cm; the tool owns the tolerance the same way it owns the walk band.
+ */
+export const HEIGHT_TOLERANCE_CM = 5;
 export const WALK_MIN_S = 3.0;
 export const WALK_MAX_S = 6.0;
 export const GRID_STEP_CM = 50;
+/**
+ * One fighter holds a dominance point alone while its radius stays inside the
+ * hold circle: sword reach 200 cm (2000mm) plus one 100 cm body step. Above it
+ * a second fighter stands outside reach on the far side of the circle. The
+ * director names no hold cap yet (SLICE.md holds none), so this tool owns the
+ * constant the same way it owns the walk band; the 3 m centre circle (r 250 cm)
+ * fits, a 15 m sand_floor row does not. Change only with a measured layout.
+ */
+export const DOMINANCE_HOLD_RADIUS_CM = 300;
 
 export const DEFAULT_PLACEMENT = join(ROOT, "content", "arena", "placement.json");
 export const DEFAULT_ZONES = join(ROOT, "content", "design", "arena-zones.rows");
@@ -85,7 +125,7 @@ export function formatWalkS(v) {
   return (Math.round(v * 10) / 10).toFixed(1);
 }
 
-/** Parse placement JSON text. Returns [{ id, name, xCm, zCm, physical }]. */
+/** Parse placement JSON text. Returns [{ id, name, xCm, zCm, sizeYCm, physical }]. */
 export function parsePlacement(text, label = "placement") {
   let data;
   try {
@@ -103,12 +143,17 @@ export function parsePlacement(text, label = "placement") {
     const x = Number(a.x);
     const z = Number(a.z);
     if (!Number.isFinite(x) || !Number.isFinite(z)) fail(label + ": actor " + a.name + " has non-finite pose");
+    // The box height is a placement fact; a row's height_cm is the design
+    // claim, so the claim needs this number to be checked against.
+    const sy = Number(a.sy);
+    if (!Number.isFinite(sy)) fail(label + ": placement actor " + a.name + " misses sy");
     // Placement units are meters (content/arena/README.md); zones use cm.
     out.push({
       id: a.id,
       name: a.name,
       xCm: Math.round(x * 100),
       zCm: Math.round(z * 100),
+      sizeYCm: Math.round(sy * 100),
       physical: a.physical === true,
       physicalPresent: typeof a.physical === "boolean",
     });
@@ -209,6 +254,98 @@ export function computeCover(zoneRows) {
   return zoneRows.filter((r) => r.class === 4).length;
 }
 
+/**
+ * True when a zone centre stands on the duel floor, the 10 m half-extent fight
+ * ring (rome-spec `halfExtentCm 1000`). Off it, the fight never reaches the
+ * zone, so its flags mean nothing. Pure.
+ */
+export function onDuelFloor(row) {
+  return Math.abs(row.cx_cm) <= FLOOR_HALF_CM && Math.abs(row.cz_cm) <= FLOOR_HALF_CM;
+}
+
+/** Bumper rows standing off the duel floor: dressing, not cover. Pure. */
+export function coverOffFloor(zoneRows) {
+  return zoneRows.filter((r) => r.class === 4 && !onDuelFloor(r));
+}
+
+/**
+ * The nearest floor bumper (class 4 and `onDuelFloor`) as a row plus its
+ * distance in cm, or null when none exists: an off-floor bumper is not cover,
+ * the fight never reaches it. Ties take the first row in file order, so a
+ * verdict never depends on how a caller ordered equal rows. Pure.
+ */
+export function nearestCoverRow(zoneRows, spawnCm = SPAWN_A_CM) {
+  let best = null;
+  for (const r of zoneRows) {
+    if (r.class !== 4 || !onDuelFloor(r)) continue;
+    const distCm = Math.round(Math.hypot(r.cx_cm - spawnCm[0], r.cz_cm - spawnCm[1]));
+    if (best === null || distCm < best.distCm) best = { ...r, distCm };
+  }
+  return best;
+}
+
+/**
+ * Distance in cm from a spawn to the nearest floor bumper, or null when none
+ * exists. Pure: the `nearestCoverRow` distance, so both readers agree.
+ */
+export function nearestCoverCm(zoneRows, spawnCm = SPAWN_A_CM) {
+  const best = nearestCoverRow(zoneRows, spawnCm);
+  return best === null ? null : best.distCm;
+}
+
+function formatNearestCover(distCm) {
+  return distCm === null ? "no floor bumper" : distCm + " cm";
+}
+
+/** Spawns with no floor bumper inside COVER_REACH_CM: one side starts uncovered. */
+export function coverReachFailures(zoneRows) {
+  const out = [];
+  for (const [label, cm] of [["A", SPAWN_A_CM], ["B", SPAWN_B_CM]]) {
+    const d = nearestCoverCm(zoneRows, cm);
+    if (d === null || d > COVER_REACH_CM) {
+      out.push(
+        "cover spawn " + label + " at (" + cm[0] + "," + cm[1] + ") has no bumper within " +
+          COVER_REACH_CM + " cm (nearest " + formatNearestCover(d) + "): one side starts the bout uncovered",
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Both spawns' nearest floor bumper standing at a different height: the taller
+ * one hides its fighter behind more silhouette, so that side wins the first
+ * exchange (Worlds II.6 advantage points). A spawn with no floor bumper adds no
+ * line here - the reach rule already fails that spawn. Pure.
+ */
+export function coverFormFailures(zoneRows) {
+  const a = nearestCoverRow(zoneRows, SPAWN_A_CM);
+  const b = nearestCoverRow(zoneRows, SPAWN_B_CM);
+  if (a === null || b === null) return [];
+  if (Math.abs(a.height_cm - b.height_cm) <= HEIGHT_TOLERANCE_CM) return [];
+  return [
+    "cover spawn A starts beside " + a.id + " (" + a.height_cm + " cm) while spawn B starts beside " +
+      b.id + " (" + b.height_cm + " cm): one side starts the bout with better cover",
+  ];
+}
+
+/** Advantage rows standing off the duel floor: dead space, not an advantage. Pure. */
+export function advantageOffFloor(zoneRows) {
+  return zoneRows.filter((r) => r.advantage === 1 && !onDuelFloor(r));
+}
+
+/** Risk rows standing off the duel floor: dead space, not a risk. Pure. */
+export function riskOffFloor(zoneRows) {
+  return zoneRows.filter((r) => r.risk === 1 && !onDuelFloor(r));
+}
+
+/** Dominance rows no single fighter can hold alone. Pure. */
+export function dominanceUnheld(zoneRows) {
+  return zoneRows.filter(
+    (r) => r.dominance === 1 && (r.radius_cm > DOMINANCE_HOLD_RADIUS_CM || !onDuelFloor(r)),
+  );
+}
+
 /** Floor grid: centres at -975..975 step 50 (40x40 = 1600 cells). */
 export function floorCells() {
   const cells = [];
@@ -268,10 +405,28 @@ export function checkAll({ placementText, zonesText, levelsText, arenaKitText })
   const zones = parseZones(zonesText);
   const rows = zones.rows;
 
-  // Every placement actor needs one zone row (centre extra allowed).
+  // Every placement actor needs one zone row (centre extra allowed), and the
+  // row must agree with the placement: its centre with the actor's pose and
+  // its height_cm with the actor's box height. A moved or reshaped actor with
+  // a stale row passes every other rule, so these rules are what make a layout
+  // change fail.
   const zoneIds = new Set(rows.map((r) => r.id));
   const missingZones = actors.filter((a) => !zoneIds.has(a.name)).map((a) => a.name);
   if (missingZones.length > 0) failures.push("zones miss actors: " + missingZones.join(", "));
+  for (const a of actors) {
+    const row = rows.find((r) => r.id === a.name);
+    if (!row) continue;
+    if (Math.abs(row.cx_cm - a.xCm) > ZONE_POS_TOLERANCE_CM || Math.abs(row.cz_cm - a.zCm) > ZONE_POS_TOLERANCE_CM) {
+      failures.push(
+        "zone row " + a.name + " centre (" + row.cx_cm + "," + row.cz_cm + ") disagrees with placement (" + a.xCm + "," + a.zCm + ")",
+      );
+    }
+    if (Math.abs(row.height_cm - a.sizeYCm) > HEIGHT_TOLERANCE_CM) {
+      failures.push(
+        "zone row " + a.name + " height_cm " + row.height_cm + " disagrees with placement box height " + a.sizeYCm,
+      );
+    }
+  }
 
   const walkS = computeWalkS();
   const walkOne = formatWalkS(walkS);
@@ -291,6 +446,43 @@ export function checkAll({ placementText, zonesText, levelsText, arenaKitText })
   const dominance = rows.filter((r) => r.dominance === 1).length;
   if (dominance === 0) failures.push("no dominance point one fighter can hold alone");
   if (cover === 0) failures.push("open floor with no cover");
+  // A flag is a claim; these rules are what make the claim hold. The seed
+  // cases came from the real history: debris_field sat at 34 m (off the floor)
+  // for three days as `cover 2 bumpers`, a dominance flag on the 30 m
+  // sand_floor row passed while no fighter can hold it, and the stands carried
+  // advantage=1 from 20 m out, where the fight never reaches it.
+  for (const r of coverOffFloor(rows)) {
+    failures.push(
+      "cover " + r.id + " stands outside the duel floor at (" + r.cx_cm + "," + r.cz_cm + "): the fight never reaches it",
+    );
+  }
+  for (const f of coverReachFailures(rows)) failures.push(f);
+  // The two spawns' cover must be the same form too: a taller crate on one side
+  // is a first-exchange advantage the reach rule cannot see.
+  for (const f of coverFormFailures(rows)) failures.push(f);
+  for (const r of advantageOffFloor(rows)) {
+    failures.push(
+      "advantage " + r.id + " stands outside the duel floor at (" + r.cx_cm + "," + r.cz_cm + "): the fight never reaches it",
+    );
+  }
+  if (!rows.some((r) => r.advantage === 1 && onDuelFloor(r))) {
+    failures.push("no advantage point inside the duel floor");
+  }
+  // A risk point off the floor is dead space (Worlds II.6): the fight never
+  // reaches it, so the flag is a note, not data. No "at least one risk point"
+  // rule: the director's bar list names no risk-point count and the entrance
+  // risk point is already named in LEVELS.md (Zone circle), so a minimum would
+  // fail a legal flat layout.
+  for (const r of riskOffFloor(rows)) {
+    failures.push(
+      "risk " + r.id + " stands outside the duel floor at (" + r.cx_cm + "," + r.cz_cm + "): the fight never reaches it",
+    );
+  }
+  for (const r of dominanceUnheld(rows)) {
+    failures.push(
+      "dominance " + r.id + " is not holdable alone (radius_cm " + r.radius_cm + " above cap " + DOMINANCE_HOLD_RADIUS_CM + " or centre off the duel floor)",
+    );
+  }
   if (noUse.count > 0) failures.push("actor with no use: " + noUse.missing.join(", "));
   if (entrance.permille < 0 || entrance.permille > 1000) failures.push("entrance_share out of range");
   if (possibleDeath === 0) failures.push("dead space: no floor cell within 2000mm of a zone centre");

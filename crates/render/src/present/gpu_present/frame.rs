@@ -571,6 +571,10 @@ mod id_tests {
         let box_key = crate::present::MeshKey::new(0xB0E1, [0xB0; 32]);
         let plane_key = crate::present::MeshKey::new(0x51A0, [0x51; 32]);
         let plane = crate::v1::MeshData {
+            // Ground quad at y=-0.5, +Y normal. The winding is CCW seen
+            // from above (same convention as `v1::cube`), so the top face
+            // is front-facing for the down-looking default camera and the
+            // back-face cull keeps it.
             positions: vec![
                 [-16.0, -0.5, -16.0],
                 [16.0, -0.5, -16.0],
@@ -579,7 +583,7 @@ mod id_tests {
             ],
             normals: vec![[0.0, 1.0, 0.0]; 4],
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            indices: vec![0, 1, 2, 0, 2, 3],
+            indices: vec![0, 2, 1, 0, 3, 2],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 4],
         };
         presenter
@@ -653,6 +657,118 @@ mod id_tests {
         assert!(
             first.iter().all(|v| *v == 0 || *v == 1 || *v == ID_CLEAR),
             "only box, plane or clear appear"
+        );
+    }
+}
+
+#[cfg(test)]
+mod msaa_targets_tests {
+    use super::super::msaa::{
+        attachment_plan, edge_has_intermediate, msaa_forward_choice, msaa_target_desc,
+        needs_resolve, resolve_average, resolved_is_intermediate, MsaaConfig, MSAA_SAMPLE_COUNT,
+    };
+
+    #[test]
+    fn msaa_targets_resolve_only_when_on() {
+        let off = MsaaConfig::default();
+        let on = MsaaConfig { enabled: true };
+        assert_eq!(
+            msaa_target_desc(&off).sample_count,
+            1,
+            "off stays the 1x path"
+        );
+        assert_eq!(
+            msaa_target_desc(&on).sample_count,
+            MSAA_SAMPLE_COUNT,
+            "on picks the 4x pair"
+        );
+        assert!(!needs_resolve(&off), "off resolves nothing");
+        assert!(needs_resolve(&on), "on resolves before the blit");
+        assert_eq!(
+            attachment_plan(&on).depth_samples,
+            MSAA_SAMPLE_COUNT,
+            "depth grows with color"
+        );
+        assert_eq!(
+            msaa_forward_choice(&on, true),
+            (MSAA_SAMPLE_COUNT, true),
+            "on plus built resolves 4x into 1x HDR"
+        );
+        assert_eq!(
+            msaa_forward_choice(&on, false),
+            (1, false),
+            "on plus unbuilt stays 1x"
+        );
+        assert_eq!(
+            msaa_forward_choice(&off, true),
+            (1, false),
+            "off plus built stays 1x"
+        );
+        assert_eq!(
+            resolve_average([0.0, 0.0, 1.0, 1.0]),
+            0.5,
+            "half-covered edge resolves to a half"
+        );
+        assert!(
+            resolved_is_intermediate([0.0, 0.0, 1.0, 1.0]),
+            "edge quad blends"
+        );
+        assert!(!resolved_is_intermediate([1.0; 4]), "flat 1 holds");
+        let on_tex = [resolve_average([0.0, 0.0, 1.0, 1.0])];
+        let off_tex = [resolve_average([1.0; 4])];
+        assert!(
+            edge_has_intermediate(&on_tex, &off_tex),
+            "resolved edge shows an intermediate on value only"
+        );
+        assert!(
+            !edge_has_intermediate(&off_tex, &off_tex),
+            "flat off-set stays stepped"
+        );
+        let mut presenter = match crate::present::Presenter::init_offscreen() {
+            Ok(presenter) => presenter,
+            Err(crate::present::PresentError::NoAdapter) => {
+                eprintln!("SKIPPED msaa targets resolve: no adapter");
+                return;
+            }
+            Err(error) => panic!("presenter init failed: {error}"),
+        };
+        presenter.resize(64, 64).expect("size applies");
+        presenter.ensure_targets(64, 64);
+        assert!(
+            presenter
+                .targets
+                .as_ref()
+                .expect("targets exist")
+                .msaa
+                .is_none(),
+            "off keeps the 1x path"
+        );
+        presenter.set_msaa_enabled(true);
+        assert!(presenter.targets.is_none(), "flip drops targets");
+        presenter.ensure_targets(64, 64);
+        let pair = presenter
+            .targets
+            .as_ref()
+            .expect("targets exist")
+            .msaa
+            .as_ref()
+            .expect("on builds the 4x pair");
+        assert_eq!(pair.samples, MSAA_SAMPLE_COUNT, "pair names 4 samples");
+        assert!(
+            msaa_forward_choice(&on, true).1,
+            "built on path resolves before the blit"
+        );
+        presenter.set_msaa_enabled(false);
+        assert!(presenter.targets.is_none(), "flip back drops targets");
+        presenter.ensure_targets(64, 64);
+        assert!(
+            presenter
+                .targets
+                .as_ref()
+                .expect("targets exist")
+                .msaa
+                .is_none(),
+            "off back stays the 1x path bit-identical"
         );
     }
 }

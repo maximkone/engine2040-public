@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn naive_vec_per_frame_allocates_every_frame() {
-        let (_, count) = measure(|| {
+        let ((), count) = measure(|| {
             for frame in 0..120u32 {
                 let mut scratch = vec![0u8; 1024];
                 scratch[0] = (frame & 0xFF) as u8;
@@ -224,7 +224,7 @@ mod tests {
         }
         let warmed_used = arena.used();
         let warmed_cap = arena.capacity();
-        let (_, count) = measure(|| {
+        let ((), count) = measure(|| {
             for _ in 0..120u32 {
                 arena.begin_frame();
                 for v in 0..64u64 {

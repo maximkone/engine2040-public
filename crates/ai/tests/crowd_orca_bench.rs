@@ -4,9 +4,11 @@
 // every line below is a fresh integer fixed-point implementation written for
 // engine2040.
 //!
-//! Crowd avoidance bench: 512-agent ORCA step, naive O(n^2) neighbour scan
-//! (before) versus kd-tree neighbour query (after) with an identical
-//! half-plane solve, so both paths land bit-identical velocities.
+//! Crowd avoidance bench: 512-agent ORCA step with three interchangeable
+//! neighbour feeds — the naive O(n^2) scan (before), the kd-tree query and
+//! the uniform grid query — over one identical half-plane solve, so every
+//! path lands bit-identical velocities and the ms numbers compare the feed
+//! alone.
 //!
 //! Units: millimetres for length, millimetres per second for velocity,
 //! milliseconds for time. All state is `i32`/`i64` integers: the step is
@@ -23,6 +25,14 @@ use std::time::Instant;
 
 /// Fixed-point scale is implicit: positions are mm, velocities are mm/s.
 const AGENTS: usize = 512;
+/// Agent counts of the NV4 bar ("0.1 ms per agent flat from 50 to 500"):
+/// the sizes the crowd neighbour feed is compared and timed at.
+const NV4_SIZES: [usize; 3] = [50, 200, 256];
+/// Seeded layouts per size: the brute-force list and the kd-tree list must
+/// agree on every one of them.
+const NV4_LAYOUTS: u64 = 200;
+/// Seeded arena half-width in mm; seed coordinates land in `-HALF..=HALF`.
+const ARENA_HALF_MM: i64 = 20_000;
 /// Timed steps per run; amortises scheduling noise over the query gap.
 const STEPS: usize = 20;
 /// Neighbour radius in mm. Kept tight so the kd-tree prune beats the scan.
@@ -107,6 +117,40 @@ fn build_world() -> Vec<Agent> {
             vy_mm_s: 0,
             pref_vx_mm_s: pref_vx,
             pref_vy_mm_s: pref_vy,
+        });
+    }
+    agents
+}
+
+/// Signed millimetre lane in `-span..=span` from one 64-bit hash. Integer
+/// only, so the same hash always lands on the same coordinate; a span that
+/// cannot be represented refuses to 0 instead of wrapping.
+fn lane_mm(hash: u64, span: i64) -> i32 {
+    let modulus = u64::try_from(2 * span + 1).unwrap_or(1);
+    let rotated = i64::try_from(hash % modulus).unwrap_or(0) - span;
+    i32::try_from(rotated).unwrap_or(0)
+}
+
+/// Deterministic seeded layout of `n` agents: positions in the seeded arena
+/// and a preferred velocity at the mirror point, both from
+/// [`engine_core::splitmix64`]. The same `(n, seed)` rebuilds the same world
+/// twice, and the `NV4_LAYOUTS` seeds give different geometry each time.
+fn build_world_seeded(n: usize, seed: u64) -> Vec<Agent> {
+    let mut agents = Vec::with_capacity(n);
+    for i in 0..n {
+        let lane = u64::try_from(i).unwrap_or(u64::MAX);
+        let h = engine_core::splitmix64(seed ^ lane.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let px_mm = lane_mm(h, ARENA_HALF_MM);
+        let py_mm = lane_mm(h.rotate_left(17), ARENA_HALF_MM);
+        // Preferred velocity points at the mirrored point: agents must cross.
+        let (pref_vx_mm_s, pref_vy_mm_s) = clamp_speed(-i64::from(px_mm), -i64::from(py_mm));
+        agents.push(Agent {
+            px_mm,
+            py_mm,
+            vx_mm_s: 0,
+            vy_mm_s: 0,
+            pref_vx_mm_s,
+            pref_vy_mm_s,
         });
     }
     agents
@@ -204,24 +248,33 @@ fn solve_agent(agent: &Agent, neighbours: &[usize], agents: &[Agent]) -> (i32, i
     clamp_speed(nvx, nvy)
 }
 
+/// Brute-force neighbour list for one agent: every other agent inside
+/// `NEIGHBOUR_DIST_MM`, ascending index order. Written into `out` (cleared
+/// first) so the scan, the kd-tree query and a comparison run share one
+/// buffer.
+fn neighbours_naive_into(agents: &[Agent], i: usize, out: &mut Vec<usize>) {
+    let r_sq = (NEIGHBOUR_DIST_MM * NEIGHBOUR_DIST_MM) as u64;
+    out.clear();
+    for j in 0..agents.len() {
+        if i == j {
+            continue;
+        }
+        let dx = i64::from(agents[j].px_mm - agents[i].px_mm);
+        let dy = i64::from(agents[j].py_mm - agents[i].py_mm);
+        let d_sq = (dx * dx + dy * dy) as u64;
+        if d_sq <= r_sq {
+            out.push(j);
+        }
+    }
+}
+
 /// Naive O(n^2) neighbour scan. Returns the integrated world.
 fn step_naive(agents: &mut [Agent]) {
-    let r_sq = (NEIGHBOUR_DIST_MM * NEIGHBOUR_DIST_MM) as u64;
     let mut new_v = vec![(0i32, 0i32); agents.len()];
+    let mut neighbours = Vec::new();
     for i in 0..agents.len() {
-        let mut neighbours = Vec::new();
-        for j in 0..agents.len() {
-            if i == j {
-                continue;
-            }
-            let dx = i64::from(agents[j].px_mm - agents[i].px_mm);
-            let dy = i64::from(agents[j].py_mm - agents[i].py_mm);
-            let d_sq = (dx * dx + dy * dy) as u64;
-            if d_sq <= r_sq {
-                neighbours.push(j);
-            }
-        }
-        // Index order is already ascending: deterministic constraint order.
+        // Ascending index order: deterministic constraint order.
+        neighbours_naive_into(agents, i, &mut neighbours);
         new_v[i] = solve_agent(&agents[i], &neighbours, agents);
     }
     for (a, v) in agents.iter_mut().zip(new_v) {
@@ -301,26 +354,144 @@ fn kd_query(
     }
 }
 
+/// kd-tree neighbour list for one agent into `out` (cleared first):
+/// ascending index order, so it matches [`neighbours_naive_into`] exactly.
+fn neighbours_kdtree_into(
+    tree: &Option<Box<KdNode>>,
+    agents: &[Agent],
+    i: usize,
+    out: &mut Vec<usize>,
+) {
+    let r_sq = (NEIGHBOUR_DIST_MM * NEIGHBOUR_DIST_MM) as u64;
+    out.clear();
+    kd_query(tree, agents[i].px_mm, agents[i].py_mm, r_sq, agents, out);
+    out.retain(|&j| j != i);
+    out.sort_unstable();
+}
+
 /// kd-tree neighbour query path. Returns the integrated world.
 fn step_kdtree(agents: &mut [Agent]) {
-    let r_sq = (NEIGHBOUR_DIST_MM * NEIGHBOUR_DIST_MM) as u64;
     let mut order: Vec<usize> = (0..agents.len()).collect();
     let tree = kd_build(&mut order, 0, agents);
     let mut new_v = vec![(0i32, 0i32); agents.len()];
     let mut scratch = Vec::new();
     for i in 0..agents.len() {
-        scratch.clear();
-        kd_query(
-            &tree,
-            agents[i].px_mm,
-            agents[i].py_mm,
-            r_sq,
-            agents,
-            &mut scratch,
-        );
-        scratch.retain(|&j| j != i);
-        // Sort so constraint order matches the naive path exactly.
-        scratch.sort_unstable();
+        // Sorted so constraint order matches the naive path exactly.
+        neighbours_kdtree_into(&tree, agents, i, &mut scratch);
+        new_v[i] = solve_agent(&agents[i], &scratch, agents);
+    }
+    for (a, v) in agents.iter_mut().zip(new_v) {
+        a.vx_mm_s = v.0;
+        a.vy_mm_s = v.1;
+        a.px_mm += (i64::from(v.0) * DT_MS / 1_000) as i32;
+        a.py_mm += (i64::from(v.1) * DT_MS / 1_000) as i32;
+    }
+}
+
+/// Half-width of the grid world in millimetres: every bench world starts
+/// inside [`ARENA_HALF_MM`], so this covers the 20-step runs with margin.
+const WORLD_HALF_MM: i64 = 32_000;
+/// Uniform-grid neighbour index over the XZ plane.
+///
+/// Cell edge equals [`NEIGHBOUR_DIST_MM`], so every agent inside the query
+/// radius sits in the 3x3 block of cells around the query cell (`span = 1`);
+/// a centre-cell-only scan (`span = 0`) is the wrong-grid failure case
+/// `grid_query_span_is_required` pins. One counting-sort build per step costs
+/// O(n + cells) and a query visits at most nine cells. Positions outside
+/// `WORLD_HALF_MM` clamp into the edge cells (the bench worlds stay inside).
+struct Grid {
+    cells_axis: i64,
+    cell_mm: i64,
+    starts: Vec<u32>,
+    items: Vec<u32>,
+}
+
+impl Grid {
+    /// Cell index on one axis for `coord_mm`, clamped into the grid.
+    fn axis_cell(cell_mm: i64, cells_axis: i64, coord_mm: i32) -> i64 {
+        ((i64::from(coord_mm) + WORLD_HALF_MM) / cell_mm).clamp(0, cells_axis - 1)
+    }
+
+    /// Bucket every agent once (counting sort, no per-cell vector) for this
+    /// step's positions.
+    fn build(agents: &[Agent]) -> Self {
+        let cell_mm = i64::from(NEIGHBOUR_DIST_MM);
+        let cells_axis = (2 * WORLD_HALF_MM) / cell_mm + 1;
+        let cells = usize::try_from(cells_axis * cells_axis).unwrap_or(0);
+        let mut starts = vec![0u32; cells + 1];
+        for a in agents {
+            let c = Self::cell_slot(cell_mm, cells_axis, a.px_mm, a.py_mm);
+            starts[c + 1] += 1;
+        }
+        // In place prefix sums: `starts[c]` becomes the first slot of cell `c`
+        // because the counts already live at `c + 1`.
+        let mut acc = 0u32;
+        for slot in starts.iter_mut() {
+            acc += *slot;
+            *slot = acc;
+        }
+        let mut cursor = starts.clone();
+        let mut items = vec![0u32; agents.len()];
+        for (i, a) in agents.iter().enumerate() {
+            let c = Self::cell_slot(cell_mm, cells_axis, a.px_mm, a.py_mm);
+            let slot = cursor[c] as usize;
+            items[slot] = u32::try_from(i).unwrap_or(0);
+            cursor[c] += 1;
+        }
+        Self {
+            cells_axis,
+            cell_mm,
+            starts,
+            items,
+        }
+    }
+
+    /// Flat cell slot of one position (row-major over Y then X).
+    fn cell_slot(cell_mm: i64, cells_axis: i64, x_mm: i32, y_mm: i32) -> usize {
+        let cx = Self::axis_cell(cell_mm, cells_axis, x_mm);
+        let cy = Self::axis_cell(cell_mm, cells_axis, y_mm);
+        usize::try_from(cy * cells_axis + cx).unwrap_or(0)
+    }
+
+    /// Neighbour list for `agents[i]` into `out` (cleared first), ascending
+    /// index order so it matches [`neighbours_naive_into`]. `span` is how
+    /// many cells each side of the query cell are scanned: `1` is the correct
+    /// 3x3 block, `0` the wrong centre-only scan.
+    fn neighbours_into(&self, agents: &[Agent], i: usize, span: i64, out: &mut Vec<usize>) {
+        let r_sq = (NEIGHBOUR_DIST_MM * NEIGHBOUR_DIST_MM) as u64;
+        out.clear();
+        let a = &agents[i];
+        let cx = Self::axis_cell(self.cell_mm, self.cells_axis, a.px_mm);
+        let cy = Self::axis_cell(self.cell_mm, self.cells_axis, a.py_mm);
+        for yy in (cy - span).max(0)..=(cy + span).min(self.cells_axis - 1) {
+            for xx in (cx - span).max(0)..=(cx + span).min(self.cells_axis - 1) {
+                let c = usize::try_from(yy * self.cells_axis + xx).unwrap_or(0);
+                let (s, e) = (self.starts[c] as usize, self.starts[c + 1] as usize);
+                for &j in &self.items[s..e] {
+                    let j = j as usize;
+                    if j == i {
+                        continue;
+                    }
+                    let dx = i64::from(agents[j].px_mm - a.px_mm);
+                    let dy = i64::from(agents[j].py_mm - a.py_mm);
+                    if (dx * dx + dy * dy) as u64 <= r_sq {
+                        out.push(j);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+    }
+}
+
+/// Grid neighbour query path: one build per step, because positions move.
+/// Returns the integrated world.
+fn step_grid(agents: &mut [Agent]) {
+    let grid = Grid::build(agents);
+    let mut new_v = vec![(0i32, 0i32); agents.len()];
+    let mut scratch = Vec::new();
+    for i in 0..agents.len() {
+        grid.neighbours_into(agents, i, 1, &mut scratch);
         new_v[i] = solve_agent(&agents[i], &scratch, agents);
     }
     for (a, v) in agents.iter_mut().zip(new_v) {
@@ -451,4 +622,156 @@ fn isqrt_handles_u64_max_without_overflow() {
     assert_eq!(isqrt(15), 3);
     assert_eq!(isqrt(16), 4);
     assert_eq!(isqrt(u64::MAX), 4_294_967_295);
+}
+
+/// The NV4 acceptance leg: the grid feed, the kd-tree feed and the
+/// brute-force list hand the solver the same neighbours on every seeded
+/// layout, at every NV4 size. A failing leg names the size, the seed and the
+/// agent, so a drift is reproducible from the message alone.
+#[test]
+fn orca_neighbour_paths_agree_on_200_seeded_layouts() {
+    let mut naive = Vec::new();
+    let mut kd = Vec::new();
+    let mut grid_list = Vec::new();
+    let mut layouts = 0u64;
+    let mut neighbours_checked = 0u64;
+    for n in NV4_SIZES {
+        for seed in 0..NV4_LAYOUTS {
+            let agents = build_world_seeded(n, seed);
+            assert_eq!(agents.len(), n, "seeded layout holds n agents");
+            let mut order: Vec<usize> = (0..agents.len()).collect();
+            let tree = kd_build(&mut order, 0, &agents);
+            let grid = Grid::build(&agents);
+            for i in 0..agents.len() {
+                neighbours_naive_into(&agents, i, &mut naive);
+                neighbours_kdtree_into(&tree, &agents, i, &mut kd);
+                assert_eq!(
+                    naive, kd,
+                    "n={n} seed={seed} agent={i}: kd-tree neighbours differ from the brute-force list"
+                );
+                grid.neighbours_into(&agents, i, 1, &mut grid_list);
+                assert_eq!(
+                    naive, grid_list,
+                    "n={n} seed={seed} agent={i}: grid neighbours differ from the brute-force list"
+                );
+                neighbours_checked += 1;
+            }
+            layouts += 1;
+        }
+    }
+    let expected_layouts = NV4_LAYOUTS * u64::try_from(NV4_SIZES.len()).unwrap_or(1);
+    assert_eq!(layouts, expected_layouts, "every seeded layout compared");
+    assert!(
+        neighbours_checked > expected_layouts,
+        "every agent of every layout compared: {neighbours_checked}"
+    );
+}
+
+/// Timing leg for the NV4 bar: before (brute-force scan), kd-tree query and
+/// grid query per-step ms at 50, 200 and 256 agents, with the per-agent ms
+/// the "0.1 ms per agent" bar is read from. Only the bit-identical world
+/// comparison is asserted; the ms numbers are a report and never gate.
+#[test]
+#[expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "bench wall-clock report only, never sim state"
+)]
+fn orca_step_ms_at_nv4_sizes() {
+    for n in NV4_SIZES {
+        let mut before_ms = f64::INFINITY;
+        let mut before_world = build_world_seeded(n, 2040);
+        for _ in 0..3 {
+            let mut world = build_world_seeded(n, 2040);
+            let t0 = Instant::now();
+            for _ in 0..STEPS {
+                step_naive(&mut world);
+            }
+            before_ms = before_ms.min(t0.elapsed().as_secs_f64() * 1_000.0 / STEPS as f64);
+            before_world = world;
+        }
+        let mut after_ms = f64::INFINITY;
+        let mut after_world = build_world_seeded(n, 2040);
+        for _ in 0..3 {
+            let mut world = build_world_seeded(n, 2040);
+            let t1 = Instant::now();
+            for _ in 0..STEPS {
+                step_kdtree(&mut world);
+            }
+            after_ms = after_ms.min(t1.elapsed().as_secs_f64() * 1_000.0 / STEPS as f64);
+            after_world = world;
+        }
+        let mut grid_ms = f64::INFINITY;
+        let mut grid_world = build_world_seeded(n, 2040);
+        for _ in 0..3 {
+            let mut world = build_world_seeded(n, 2040);
+            let t2 = Instant::now();
+            for _ in 0..STEPS {
+                step_grid(&mut world);
+            }
+            grid_ms = grid_ms.min(t2.elapsed().as_secs_f64() * 1_000.0 / STEPS as f64);
+            grid_world = world;
+        }
+        // Wall-clock report only; state below is integer-deterministic.
+        println!(
+            "crowd_orca_nv4 n={n} before_ms={before_ms:.4} after_ms={after_ms:.4} \
+             grid_ms={grid_ms:.4} before_ms_per_agent={:.6} grid_ms_per_agent={:.6}",
+            before_ms / n as f64,
+            grid_ms / n as f64
+        );
+        assert_eq!(
+            before_world, after_world,
+            "n={n}: kd-tree path must match the naive path exactly"
+        );
+        assert_eq!(
+            before_world, grid_world,
+            "n={n}: grid path must match the naive path exactly"
+        );
+        let mut rerun = build_world_seeded(n, 2040);
+        for _ in 0..STEPS {
+            step_kdtree(&mut rerun);
+        }
+        assert_eq!(after_world, rerun, "n={n}: steps must be deterministic");
+        let mut grid_rerun = build_world_seeded(n, 2040);
+        for _ in 0..STEPS {
+            step_grid(&mut grid_rerun);
+        }
+        assert_eq!(
+            grid_world, grid_rerun,
+            "n={n}: grid steps must be deterministic"
+        );
+    }
+}
+
+/// The wrong-grid failure case the agreement leg could catch: a
+/// centre-cell-only scan (`span = 0`) misses a neighbour sitting just across
+/// a cell edge, while the 3x3 block (`span = 1`) finds it. Without this leg a
+/// grid that never scanned its neighbour cells would still look green.
+#[test]
+fn grid_query_span_is_required() {
+    let still = |px_mm: i32| Agent {
+        px_mm,
+        py_mm: 0,
+        vx_mm_s: 0,
+        vy_mm_s: 0,
+        pref_vx_mm_s: 0,
+        pref_vy_mm_s: 0,
+    };
+    // Cell edges sit on multiples of `NEIGHBOUR_DIST_MM` (2_000 mm) because
+    // the grid world starts a whole number of cells below zero: 1_999 mm and
+    // 3_499 mm are 1_500 mm apart yet in adjacent cells.
+    let agents = vec![still(1_999), still(3_499)];
+    let grid = Grid::build(&agents);
+    let mut out = Vec::new();
+    grid.neighbours_into(&agents, 0, 1, &mut out);
+    assert_eq!(
+        out,
+        vec![1],
+        "the 3x3 block must find the across-edge neighbour"
+    );
+    grid.neighbours_into(&agents, 0, 0, &mut out);
+    assert!(
+        out.is_empty(),
+        "centre-only scan must miss it (that is the failure case): {out:?}"
+    );
 }

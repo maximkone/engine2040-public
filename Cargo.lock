@@ -2996,6 +2996,7 @@ dependencies = [
  "engine-material",
  "engine-net",
  "engine-observe",
+ "engine-physics",
  "engine-provider",
  "engine-rules",
  "engine-scene",

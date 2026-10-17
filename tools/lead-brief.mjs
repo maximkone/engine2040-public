@@ -32,11 +32,12 @@ try {
   const result = [...all].reverse().find((l) => l.startsWith("RESULT"));
   if (result && !farmJobs.includes(result)) farmJobs.push(result);
   let cur = null;
+  const cause = new Map(); // one line per distinct cause text; the count says how many red jobs hit it
   for (const l of all.slice(1)) {
-    if (l.startsWith("--- ")) { cur = l.slice(4).trim(); continue; }
-    if (cur) { farmCauses.push(`  ${cur}: ${l.slice(0, 140)}`); cur = null; }
+    if (l.startsWith("--- ")) { cur = true; continue; }
+    if (cur) { const text = l.slice(0, 140); cause.set(text, (cause.get(text) ?? 0) + 1); cur = null; }
   }
-  farmCauses = farmCauses.slice(0, 6);
+  farmCauses = [...cause].slice(0, 6).map(([text, n]) => `  ${n} job(s): ${text}`);
 } catch { /* no farm yet */ }
 
 // 2. Dirty tree: count + ordered paths (landing order = what to land/clean first).

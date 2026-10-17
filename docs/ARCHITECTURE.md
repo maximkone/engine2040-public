@@ -60,6 +60,7 @@ behind the off-by-default `spine` feature (the spine step and parity harness);
 runs the state machine door state (`anim.graph.set`, `anim.graph.undo`, `anim.preview`); anim never imports endpoint.
 `engine-endpoint` depends on `engine-assets` (features `import`, `registry`) behind its off-by-default `intake` feature: the
 `asset.intake` verb cooks a generated GLB through `engine_assets::gen_intake` (cook-time only; no tick crate depends on it); assets never imports endpoint.
+`engine-endpoint` depends on `engine-physics` behind its `mcp` feature: the `physics` verb pack reads the std-only balance core (`engine_physics::balance::response_matrix`, `recovery_ticks`), so one tuning has one answer; physics never imports endpoint.
 `engine-proof` depends on `engine-combat` (default features): `break_corpus.rs` feeds 10,000 seeded swings to the cut resolver and pins one digest; combat never imports proof.
 
 ### Crate integration status (2026-10-01)

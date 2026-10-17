@@ -257,7 +257,12 @@ mod tests {
         let first = &actors[0];
         assert_eq!(first.id, 1);
         assert_eq!(first.asset, KitAsset::SandFloor);
-        assert!(first.physical);
+        // The sand slab is the ground the duel is fought on, never a wall:
+        // the shipped flag is false and the collision world skips it.
+        assert!(
+            !first.physical,
+            "the sand floor is dressing, not a collider"
+        );
         assert_eq!(first.asset.file_name(), "sand_floor.gltf");
     }
 

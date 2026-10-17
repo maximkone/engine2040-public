@@ -1189,8 +1189,14 @@ mod tests {
         let views = node_views_for_rows(&shell, &rows);
         let baseline: BTreeMap<(u64, String, String), String> = BTreeMap::new();
         let grid = inspector_mod::build_grid(&views, &shared, &baseline).unwrap();
-        assert!(grid.rows().iter().any(|row| row.node == outline_mod::stable_id(root)));
-        assert!(grid.rows().iter().any(|row| row.node == outline_mod::stable_id(child)));
+        assert!(grid
+            .rows()
+            .iter()
+            .any(|row| row.node == outline_mod::stable_id(root)));
+        assert!(grid
+            .rows()
+            .iter()
+            .any(|row| row.node == outline_mod::stable_id(child)));
         let mut ui_state = ShellUi::new(&shell);
         ui_state.shared_selection = shared.clone();
         let ctx = egui::Context::default();

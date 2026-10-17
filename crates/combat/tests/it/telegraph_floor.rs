@@ -6,6 +6,7 @@
 //! into a failure. Report only: no sim state changes, no hash input.
 
 use engine_combat::exchange::{signal_attack_ms, PHASED_V1};
+use engine_combat::{Tables, TABLES_V1, TABLES_V2};
 
 // Readable-attack floors in milliseconds: full telegraph, bait, end pose.
 const FLOOR_MS: u32 = 340;
@@ -55,6 +56,46 @@ fn print_table(rows: &[(u8, u32, u32, u32)]) {
     }
 }
 
+// Signal-plus-attack ms for every shipped move under one rules version:
+// the version's whiff (`Tables::attack_startup_ticks`, 4 for v1 and 15 for
+// v2) plus the move's own live ticks, which `PHASED_V1` owns. One integer
+// path for both versions, so a retune moves the report without touching it.
+fn rules_signal_table(tables: &Tables) -> Vec<(u8, u32, u32, u32)> {
+    let mut rows = Vec::new();
+    let mut i: usize = 0;
+    while i < usize::from(PHASED_V1.count) {
+        let row = PHASED_V1.moves[i];
+        let startup = tables.attack_startup_ticks;
+        rows.push((
+            row.move_id,
+            startup,
+            row.active_ticks,
+            signal_attack_ms(startup, row.active_ticks),
+        ));
+        i += 1;
+    }
+    rows
+}
+
+// The two shipped rules versions with their label, in report order: the
+// proof scene's v1 first, then the v2 rows the window and the Rome duel play.
+fn shipped_rules_tables() -> [(&'static str, Vec<(u8, u32, u32, u32)>); 2] {
+    [
+        ("v1", rules_signal_table(&TABLES_V1)),
+        ("v2", rules_signal_table(&TABLES_V2)),
+    ]
+}
+
+fn print_version_table(label: &str, rows: &[(u8, u32, u32, u32)]) {
+    for (id, startup, active, ms) in rows {
+        println!(
+            "rules {label} move {id}: startup {startup} + active {active} = {ms} ms \
+             vs floors {FLOOR_MS}/{BAIT_MS}/{END_POSE_MS} verdict {}",
+            floor_verdict(*ms)
+        );
+    }
+}
+
 #[test]
 fn telegraph_table_is_identical_x2() {
     let first = telegraph_table();
@@ -74,14 +115,56 @@ fn telegraph_table_is_identical_x2() {
 fn telegraph_strict_fails_below_floor() {
     let rows = telegraph_table();
     print_table(&rows);
+    let shipped = shipped_rules_tables();
+    for (label, version_rows) in &shipped {
+        print_version_table(label, version_rows);
+    }
     let strict = std::env::var("TELEGRAPH_STRICT").unwrap_or_default() == "1";
     if strict {
-        for (id, _, _, ms) in &rows {
-            assert!(
-                *ms >= FLOOR_MS,
-                "strict: move {id} at {ms} ms sits below the {FLOOR_MS} ms floor"
-            );
+        for (label, version_rows) in &shipped {
+            for (id, _, _, ms) in version_rows {
+                assert!(
+                    *ms >= FLOOR_MS,
+                    "strict: rules {label} move {id} at {ms} ms sits below the {FLOOR_MS} ms floor"
+                );
+            }
         }
+    }
+}
+
+#[test]
+fn telegraph_report_covers_both_shipped_rules_versions() {
+    // The window plays the v2 rows (`TABLES_V2`, startup 15) while the proof
+    // scene keeps v1 (startup 4), so a floor verdict read off v1 alone says
+    // nothing about the rules a player meets. Report both, pinned.
+    let v1 = rules_signal_table(&TABLES_V1);
+    let v2 = rules_signal_table(&TABLES_V2);
+    print_version_table("v1", &v1);
+    print_version_table("v2", &v2);
+    // One pure integer path: the same rules read identically twice.
+    assert_eq!(v1, rules_signal_table(&TABLES_V1));
+    assert_eq!(v2, rules_signal_table(&TABLES_V2));
+    assert_eq!(v1, vec![(0, 4, 2, 100), (1, 4, 3, 116)]);
+    assert_eq!(v2, vec![(0, 15, 2, 283), (1, 15, 3, 300)]);
+    // v2 widens the tell for every move and still clears no floor: this is
+    // why `TELEGRAPH_STRICT=1` is red on the shipped rows today.
+    assert_eq!(TABLES_V2.attack_startup_ticks, 15);
+    assert_eq!(TABLES_V1.attack_startup_ticks, 4);
+    for (moved, baseline) in v2.iter().zip(v1.iter()) {
+        assert_eq!(moved.0, baseline.0, "same move id in both versions");
+        assert!(
+            moved.3 > baseline.3,
+            "move {} must widen its tell under v2: {} ms vs {} ms",
+            moved.0,
+            moved.3,
+            baseline.3
+        );
+        assert!(
+            moved.3 < FLOOR_MS,
+            "move {} at {} ms must sit below the {FLOOR_MS} ms floor while the tell stays short",
+            moved.0,
+            moved.3
+        );
     }
 }
 

@@ -11,7 +11,9 @@
 use std::fmt;
 use std::time::Instant;
 
-use crate::gi::{BakeScene, Lightmap, ProbeGrid, SurfaceSample};
+use crate::gi::{
+    decode_rgb9e5, encode_rgb9e5, hdr_texel_levels, BakeScene, Lightmap, ProbeGrid, SurfaceSample,
+};
 
 // ---------------------------------------------------------------------------
 // Bounds: every external size is validated before allocation.
@@ -179,6 +181,14 @@ pub struct ArenaBake {
     /// Per-texel validity mask, row-major like the map: 1 means the bake
     /// input was sound, 0 means a degenerate sample the consumer must skip.
     pub valid: Vec<u8>,
+    /// Linear HDR lane beside the byte texels: one RGB9E5 code per texel,
+    /// row-major, encoded by [`crate::gi::encode_rgb9e5`] from the same cooked
+    /// texels the palette index quantises, so both lanes read one bake.
+    pub hdr: Vec<u32>,
+    /// Distinct decoded HDR levels the lane carries at cook time, where the
+    /// byte lane shows at most [`crate::gi::PALETTE_LEN`]; a cook statistic
+    /// the frame receipt and captures report.
+    pub hdr_levels: u64,
     /// Actor probe grid over the arena volume.
     pub probes: ProbeGrid,
     /// Per-probe tunnel seal in grid order: 1 means the probe sits inside a
@@ -192,6 +202,17 @@ impl ArenaBake {
     /// Texel count of the lightmap.
     pub fn texels(&self) -> usize {
         self.map.tex.len()
+    }
+
+    /// Linear HDR texel `(u, v)` decoded from the RGB9E5 lane, `None` outside
+    /// the map (bounds-checked, O(1), allocates nothing); the byte lane keeps
+    /// working beside it.
+    pub fn texel_hdr(&self, u: u32, v: u32) -> Option<[f32; 3]> {
+        if u >= self.map.w || v >= self.map.h {
+            return None;
+        }
+        let i = usize::try_from(u64::from(v) * u64::from(self.map.w) + u64::from(u)).ok()?;
+        self.hdr.get(i).copied().map(decode_rgb9e5)
     }
 
     /// Valid texel count (mask entries equal to 1).
@@ -218,8 +239,9 @@ impl ArenaBake {
         self.valid.get(i).copied().unwrap_or(0) == 1
     }
 
-    /// Exact resident bytes: HDR texels plus indices plus mask plus probe
-    /// SH plus seals plus boxes. The frame receipt must agree with this.
+    /// Exact cook-payload bytes: HDR texels plus indices plus mask plus probe
+    /// SH plus seals plus boxes; the runtime RGB9E5 lane ([`Self::hdr`]) rides
+    /// beside that payload, so its layout and digest stay put.
     pub fn resident_bytes(&self) -> u64 {
         self.map.tex.len() as u64 * 12
             + self.map.idx.len() as u64
@@ -232,12 +254,16 @@ impl ArenaBake {
     /// Backing check: dims match every buffer before a bind trusts the bake.
     pub fn check_backing(&self, what: &'static str) -> Result<(), BakedGiError> {
         let n = self.map.w as usize * self.map.h as usize;
-        if self.map.tex.len() != n || self.map.idx.len() != n || self.valid.len() != n {
+        let lane = [
+            self.map.tex.len(),
+            self.map.idx.len(),
+            self.valid.len(),
+            self.hdr.len(),
+        ];
+        if lane.iter().any(|&len| len != n) {
             return Err(BakedGiError::Invalid(format!(
-                "baked-gi {what} lightmap backing {} mismatches {}x{}",
-                self.map.tex.len(),
-                self.map.w,
-                self.map.h
+                "baked-gi {what} lightmap backing {lane:?} mismatches {}x{}",
+                self.map.w, self.map.h
             )));
         }
         if self.valid.iter().any(|&v| v != 0 && v != 1) {
@@ -425,6 +451,11 @@ pub fn bake_arena(
         }
     }
     let map = Lightmap::bake(w, h, &cleaned, scene);
+    // RL43 second lane: the same cooked texels as RGB9E5, one code per texel,
+    // so the stored linear level and the byte lane read the one bake.
+    let hdr: Vec<u32> = map.tex.iter().map(|t| encode_rgb9e5(*t)).collect();
+    let hdr_levels = u64::try_from(hdr_texel_levels(&map.tex))
+        .map_err(|_| BakedGiError::Invalid("baked-gi HDR levels exceed u64".into()))?;
     let grid = ProbeGrid::bake(probe.nx, probe.ny, probe.nz, probe.min, probe.step, scene);
     let mut sealed = Vec::with_capacity(grid.sh.len());
     for iz in 0..probe.nz {
@@ -441,6 +472,8 @@ pub fn bake_arena(
         ArenaBake {
             map,
             valid,
+            hdr,
+            hdr_levels,
             probes: grid,
             sealed,
             boxes: boxes.to_vec(),

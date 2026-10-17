@@ -48,3 +48,9 @@ pub use time::{
 /// Fixed simulation step in seconds (60 Hz): the one owner for every crate's
 /// `FIXED_DT` copy. Identical bits to [`tick::DT`]; `tick.rs` stays frozen.
 pub const FIXED_DT: f32 = tick::DT;
+/// Tick rate as `u32` (60 Hz): the narrow form every crate's ticks-per-second
+/// constant derives from, so no call site repeats `as u32` on the rate.
+pub const TICK_HZ_U32: u32 = checked::u32_from_u64(TICK_HZ);
+/// Stillness window in ticks (3 s at 60 Hz): the one owner for every crate's
+/// `STUCK_WINDOW_TICKS` copy. Value never changes.
+pub const STUCK_WINDOW_TICKS: u32 = 3 * TICK_HZ_U32;

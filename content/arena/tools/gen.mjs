@@ -298,19 +298,24 @@ function paintHdri() {
 // ---------------------------------------------------------------------------
 // Parade placement: every footprint disjoint in XZ, all resting (min_y = 0),
 // inside +-99 m, grammar-clean unique names. The engine spatial run is judge.
+// `physical` is the collision flag the match reads (the one data owner is
+// placement.json); walls, the stands, the gate and the two cover boxes bump,
+// the sand floor and the torches/banners are dressing the view still draws.
+// Wall z tracks rome-spec half_extent_m (10 m) and the zone rows, so a regen
+// never moves a wall inside the duel floor.
 // ---------------------------------------------------------------------------
 const PLACEMENT = [
-  { id: 1, name: 'sand_floor', asset: 'sand_floor', x: -60, y: 0.1, z: 0, sx: 30, sy: 0.2, sz: 30 },
-  { id: 2, name: 'stands', asset: 'stands', x: -20, y: 1.5, z: 0, sx: 12, sy: 3, sz: 6 },
-  { id: 3, name: 'wall_north', asset: 'walls', x: -2, y: 1.5, z: -8, sx: 8, sy: 3, sz: 1 },
-  { id: 4, name: 'wall_south', asset: 'walls', x: -2, y: 1.5, z: 8, sx: 8, sy: 3, sz: 1 },
-  { id: 5, name: 'gate_tunnel', asset: 'gate_tunnel', x: 12, y: 2.5, z: 0, sx: 6, sy: 5, sz: 3 },
-  { id: 6, name: 'torch_west', asset: 'torch', x: 20, y: 1.0, z: -3, sx: 0.5, sy: 2, sz: 0.5 },
-  { id: 7, name: 'torch_east', asset: 'torch', x: 20, y: 1.0, z: 3, sx: 0.5, sy: 2, sz: 0.5 },
-  { id: 8, name: 'banner_west', asset: 'banner', x: 24, y: 1.5, z: -3, sx: 1.6, sy: 3, sz: 0.6 },
-  { id: 9, name: 'banner_east', asset: 'banner', x: 24, y: 1.5, z: 3, sx: 1.6, sy: 3, sz: 0.6 },
-  { id: 10, name: 'crate_a', asset: 'crate', x: 29, y: 0.5, z: 0, sx: 1, sy: 1, sz: 1 },
-  { id: 11, name: 'debris_field', asset: 'debris', x: 34, y: 0.25, z: 0, sx: 2.5, sy: 0.5, sz: 2.5 },
+  { id: 1, name: 'sand_floor', asset: 'sand_floor', x: -60, y: 0.1, z: 0, sx: 30, sy: 0.2, sz: 30, physical: false },
+  { id: 2, name: 'stands', asset: 'stands', x: -20, y: 1.5, z: 0, sx: 12, sy: 3, sz: 6, physical: true },
+  { id: 3, name: 'wall_north', asset: 'walls', x: -2, y: 1.5, z: -10, sx: 8, sy: 3, sz: 1, physical: true },
+  { id: 4, name: 'wall_south', asset: 'walls', x: -2, y: 1.5, z: 10, sx: 8, sy: 3, sz: 1, physical: true },
+  { id: 5, name: 'gate_tunnel', asset: 'gate_tunnel', x: 10, y: 2.5, z: 0, sx: 6, sy: 5, sz: 3, physical: true },
+  { id: 6, name: 'torch_west', asset: 'torch', x: 20, y: 1.0, z: -3, sx: 0.5, sy: 2, sz: 0.5, physical: false },
+  { id: 7, name: 'torch_east', asset: 'torch', x: 20, y: 1.0, z: 3, sx: 0.5, sy: 2, sz: 0.5, physical: false },
+  { id: 8, name: 'banner_west', asset: 'banner', x: 24, y: 1.5, z: -3, sx: 1.6, sy: 3, sz: 0.6, physical: false },
+  { id: 9, name: 'banner_east', asset: 'banner', x: 24, y: 1.5, z: 3, sx: 1.6, sy: 3, sz: 0.6, physical: false },
+  { id: 10, name: 'crate_a', asset: 'crate', x: -5, y: 0.5, z: -5, sx: 1, sy: 1, sz: 1, physical: true },
+  { id: 11, name: 'debris_field', asset: 'debris', x: 5, y: 0.5, z: 5, sx: 2.5, sy: 1, sz: 2.5, physical: true },
 ];
 
 // ---------------------------------------------------------------------------
@@ -347,7 +352,24 @@ paintHdri();
 import { readFileSync } from 'node:fs';
 for (const n of ['arena_day', 'arena_sunset', 'arena_night'])
   track(`hdri/${n}.hdr`, readFileSync(join(HDRI, n + '.hdr')));
-const placementJson = Buffer.from(JSON.stringify({ actors: PLACEMENT.map((a) => ({ ...a, parent: null, physical: true, vx: 0, vz: 0, yaw: 0 })) }, null, 2));
+// Field order matches the shipped placement.json (the parse reads by key, but
+// a byte-stable regen keeps `git diff` honest): `physical` rides each row.
+const placementJson = Buffer.from(
+  JSON.stringify(
+    {
+      actors: PLACEMENT.map(({ physical, ...row }) => ({
+        ...row,
+        parent: null,
+        physical,
+        vx: 0,
+        vz: 0,
+        yaw: 0,
+      })),
+    },
+    null,
+    2,
+  ),
+);
 writeFileSync(join(ROOT, 'placement.json'), placementJson);
 track('placement.json', placementJson);
 // CT53: the one real loader rides the regen. dressing.json is staged, never

@@ -1,10 +1,117 @@
 // wiring-scan.mjs - list pub items with no production user across crates.
 // Regex first slice: pub fn|struct|enum|trait|const lines, test code skipped.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PUB_RE = /^\s*pub\s+(fn|struct|enum|trait|const)\s+([A-Za-z_][A-Za-z0-9_]*)/;
+
+// Shared run lock and HEAD+dirty verdict cache (also used by workspace-check.mjs).
+// One run per name holds the lock, so a concurrent caller waits instead of scanning.
+const LOCK_TTL_MS = 10 * 60 * 1000; // a holder file older than this is stale
+const LOCK_MAX_WAIT_MS = 15 * 60 * 1000; // never wait on a lock forever
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// { release }. A held lock is waited on (one wait line) until the holder releases.
+export function acquireRunLock(repoDir, name, log = function () {}) {
+  const path = join(repoDir, 'target', 'locks', name + '.lock');
+  mkdirSync(dirname(path), { recursive: true });
+  const started = Date.now();
+  let told = false;
+  for (;;) {
+    try {
+      writeFileSync(path, JSON.stringify({ pid: process.pid }), { flag: 'wx' });
+      return { release: function () { try { unlinkSync(path); } catch { /* already released */ } } };
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+    }
+    let owner = NaN;
+    try { owner = JSON.parse(readFileSync(path, 'utf8')).pid; } catch { owner = NaN; }
+    if (owner === process.pid) return { release: function () {} };
+    let stale = false;
+    try { stale = Date.now() - statSync(path).mtimeMs > LOCK_TTL_MS; } catch { continue; }
+    if (!stale && Number.isInteger(owner)) { try { process.kill(owner, 0); } catch (err) { stale = err?.code !== 'EPERM'; } }
+    if (stale) { try { unlinkSync(path); } catch { /* raced with the holder */ } continue; }
+    if (!told) {
+      log('waiting for lock: ' + name + ' (held by pid ' + (Number.isInteger(owner) ? owner : '?') + ')');
+      told = true;
+    }
+    if (Date.now() - started > LOCK_MAX_WAIT_MS) { log('lock wait timed out: ' + name); return { release: function () {} }; }
+    sleepSync(100);
+  }
+}
+
+// HEAD commit plus a sha256 over every dirty and untracked file's content plus the
+// caller's own key (mode, root). null when git fails: run uncached, never stale.
+export function treeKey(repoDir, extra = '') {
+  try {
+    const head = readFileSync(join(repoDir, '.git', 'HEAD'), 'utf8').trim();
+    const ref = /^ref:\s*(.+)$/.exec(head)?.[1];
+    const sha = ref ? readFileSync(join(repoDir, '.git', ...ref.split('/')), 'utf8').trim() : head;
+    const git = (args) => execFileSync('git', ['-C', repoDir, '--no-optional-locks', ...args], { encoding: 'utf8' });
+    const dirty = [...git(['diff-index', '--name-only', '-z', 'HEAD']).split('\0'),
+      ...git(['ls-files', '--others', '--exclude-standard', '-z']).split('\0')].filter(Boolean);
+    const sum = createHash('sha256');
+    for (const rel of [...new Set(dirty)].sort()) {
+      sum.update(rel).update('\0');
+      try { sum.update(readFileSync(join(repoDir, rel))); } catch { sum.update('<gone>'); }
+      sum.update('\0');
+    }
+    return sha + '|' + sum.digest('hex') + '|' + extra;
+  } catch { return null; }
+}
+
+export function loadVerdict(repoDir, name, key) {
+  try {
+    const cached = JSON.parse(readFileSync(join(repoDir, 'target', name + '.verdict-cache.json'), 'utf8'));
+    if (cached?.key === key && typeof cached.out === 'string') return cached;
+  } catch { /* missing or corrupt: a full run below */ }
+  return null;
+}
+
+export function saveVerdict(repoDir, name, key, entry) {
+  try {
+    mkdirSync(join(repoDir, 'target'), { recursive: true });
+    writeFileSync(join(repoDir, 'target', name + '.verdict-cache.json'), JSON.stringify({ key, out: entry.out, err: entry.err, code: entry.code }));
+  } catch { /* best-effort: the run already has its bytes */ }
+}
+
+function captureOutput(run) {
+  const out = [];
+  const err = [];
+  const stdout = process.stdout.write;
+  const stderr = process.stderr.write;
+  process.stdout.write = (chunk) => { out.push(String(chunk)); return true; };
+  process.stderr.write = (chunk) => { err.push(String(chunk)); return true; };
+  try { run(); } finally { process.stdout.write = stdout; process.stderr.write = stderr; }
+  return { out: out.join(''), err: err.join(''), code: process.exitCode ?? 0 };
+}
+
+// One run at a time: hold the lock, replay a keyed verdict, or run and save it.
+export function runWithVerdictCache({ repoDir, name, extra = '', enabled = true, run }) {
+  if (!enabled) { run(); return; }
+  const lock = acquireRunLock(repoDir, name, (line) => process.stderr.write(line + '\n'));
+  const emit = (entry) => {
+    if (entry.out) process.stdout.write(entry.out);
+    if (entry.err) process.stderr.write(entry.err);
+    process.exitCode = entry.code ?? 0;
+  };
+  try {
+    const key = treeKey(repoDir, extra);
+    const hit = key ? loadVerdict(repoDir, name, key) : null;
+    if (hit) { emit(hit); return; }
+    const entry = captureOutput(run);
+    if (key) saveVerdict(repoDir, name, key, entry);
+    emit(entry);
+  } finally {
+    lock.release();
+  }
+}
 
 // Committed baseline pin: total + per-crate island counts. --check fails on rise.
 const BASELINE_FILE = 'wiring-scan.baseline.json';
@@ -268,8 +375,12 @@ if (isMain) {
     process.exitCode = 0;
   } else {
   const root = resolve(arg);
-  const islands = scanIslands(root);
   const toolDir = dirname(fileURLToPath(import.meta.url));
+  const mode = wantCheck ? 'check' : wantBaseline ? 'baseline' : wantJson ? 'json' : 'report';
+  runWithVerdictCache({ repoDir: dirname(toolDir), name: 'wiring-scan', extra: mode + '|' + root,
+    enabled: mode !== 'baseline', // --baseline writes files: never replay it
+    run: function () {
+  const islands = scanIslands(root);
   if (wantCheck) {
     const found = readBaselineFile(toolDir);
     if (!found.baseline) {
@@ -340,5 +451,7 @@ if (isMain) {
     }
     process.stdout.write(formatReport(islands));
   }
+    },
+  });
   }
 }

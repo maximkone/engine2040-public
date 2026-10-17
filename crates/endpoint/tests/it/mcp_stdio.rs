@@ -18,8 +18,8 @@ use rmcp::serde_json::{self, Value};
 
 /// Bounded wait per server reply: a silent server fails the test, never hangs it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-/// What a fresh door lists: the ten core tools plus the default `scene`
-/// pack, in contract order. Every other verb is callable by name and listed
+/// What a fresh door lists: the thirteen core tools plus the six default
+/// `scene`-pack verbs (19 names), in contract order. Every other verb is callable by name and listed
 /// once its pack loads (`api.load`). The last three are the defined TOOL_
 /// consts that inbox row EB-2026-10-08-S178 (E37) registered: `game.build`,
 /// `sim.build_encounter`, `test.run`.
@@ -187,6 +187,25 @@ fn structured(result: &Value) -> Value {
     serde_json::from_str(text).expect("tool text parses as JSON")
 }
 
+/// Tool names the door currently lists, sorted (the wire sorts; the contract
+/// set is what matters).
+fn listed_tools(client: &mut StdioClient) -> Vec<String> {
+    let list = client.send("tools/list", &format!("{{{META}}}"));
+    let mut names: Vec<String> = list["tools"]
+        .as_array()
+        .expect("tool list carries tools")
+        .iter()
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .expect("tool carries a name")
+                .to_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// The scripted edit: one insert op under the nil root.
 fn insert_op(id: &str) -> String {
     format!(
@@ -233,23 +252,7 @@ fn scripted_client_lists_previews_applies_and_undoes_over_stdio() {
     // Discovery: exactly the core plus the scene pack, so no
     // execute/shell/file-write door. (The wire sorts names; the contract set
     // is what matters.)
-    let list_names = |client: &mut StdioClient| -> Vec<String> {
-        let list = client.send("tools/list", &format!("{{{META}}}"));
-        let mut names: Vec<String> = list["tools"]
-            .as_array()
-            .expect("tool list carries tools")
-            .iter()
-            .map(|tool| {
-                tool["name"]
-                    .as_str()
-                    .expect("tool carries a name")
-                    .to_owned()
-            })
-            .collect();
-        names.sort();
-        names
-    };
-    let names = list_names(&mut client);
+    let names = listed_tools(&mut client);
     let mut expected: Vec<String> = EXPECTED_TOOLS.iter().map(ToString::to_string).collect();
     expected.sort();
     assert_eq!(names, expected);
@@ -266,7 +269,7 @@ fn scripted_client_lists_previews_applies_and_undoes_over_stdio() {
     assert_eq!(called["result"]["events"], digest["events"]);
     let loaded = structured(&client.call("api.load", r#"{"pack":"view"}"#));
     assert_eq!(loaded["loaded"].as_bool(), Some(true));
-    let with_view = list_names(&mut client);
+    let with_view = listed_tools(&mut client);
     for verb in VIEW_PACK {
         assert!(
             with_view.contains(&verb.to_owned()),
@@ -374,6 +377,57 @@ fn scripted_client_lists_previews_applies_and_undoes_over_stdio() {
     let back = structured(&client.call("scene.read", "{}"));
     assert_eq!(back["revision"].as_u64(), Some(2));
     assert_eq!(back["total"].as_u64(), Some(0));
+
+    assert!(client.close_and_wait(), "server exits cleanly on stdin EOF");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn physics_read_answers_equal_bytes_twice_over_stdio() {
+    let dir = scratch("physics-read");
+    let mut client = StdioClient::spawn(&dir);
+
+    // The physics pack loads on demand: a fresh door lists no `physics.read`,
+    // the verb answers by exact name anyway, and `api.load` lists it.
+    let fresh = listed_tools(&mut client);
+    assert!(
+        !fresh.contains(&"physics.read".to_owned()),
+        "the physics pack waits for api.load: {fresh:?}"
+    );
+    let loaded = structured(&client.call("api.load", r#"{"pack":"physics"}"#));
+    assert_eq!(loaded["loaded"].as_bool(), Some(true));
+    assert_eq!(loaded["verbs"][0].as_str(), Some("physics.read"));
+    assert!(
+        listed_tools(&mut client).contains(&"physics.read".to_owned()),
+        "api.load lists the physics verb"
+    );
+
+    // One request, twice: the outside client reads the same bytes both times.
+    let args = r#"{"stagger_line_q8":512,"blow_strength_q8":512}"#;
+    let first = structured(&client.call("physics.read", args));
+    let second = structured(&client.call("physics.read", args));
+    assert_eq!(first, second, "the same call answers the same bytes twice");
+    assert_eq!(first["verdict"].as_str(), Some("Staggered"));
+    assert_eq!(first["recovery_ticks"].as_u64(), Some(30));
+    assert_eq!(first["stumble_q8"].as_u64(), Some(640));
+    assert_eq!(first["fall_q8"].as_u64(), Some(896));
+    let matrix = first["matrix"].as_array().expect("five rows");
+    assert_eq!(matrix.len(), 5, "one row per standard strength");
+    assert_eq!(matrix[3]["verdict"].as_str(), Some("Staggered"));
+    assert_eq!(matrix[4]["verdict"].as_str(), Some("Stumbling"));
+    // The live facts the door cannot answer stay unwired, never zero.
+    for fact in [
+        "per_slot_balance",
+        "bone_velocities",
+        "bone_contacts",
+        "joint_drift",
+    ] {
+        assert_eq!(
+            first["live_bout"][fact].as_str(),
+            Some("not_wired"),
+            "`{fact}` answers not_wired"
+        );
+    }
 
     assert!(client.close_and_wait(), "server exits cleanly on stdin EOF");
     let _ = std::fs::remove_dir_all(&dir);

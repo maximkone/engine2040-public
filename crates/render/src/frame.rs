@@ -130,12 +130,6 @@ impl Frame {
         self.draws.capacity()
     }
 
-    /// Arena bytes used this frame.
-    #[must_use]
-    pub fn arena_used(&self) -> usize {
-        self.arena.used()
-    }
-
     /// Arena backing bytes behind this frame.
     #[must_use]
     pub fn arena_capacity(&self) -> usize {
@@ -160,12 +154,6 @@ impl Frame {
             hash.write_u8(draw.lod);
         }
         hash.finish()
-    }
-
-    /// Digest over this frame's scratch bytes.
-    #[must_use]
-    pub fn arena_digest(&self) -> u64 {
-        self.arena.digest()
     }
 
     /// Push one draw; refuses past the shared cap without truncating.
@@ -264,7 +252,7 @@ mod tests {
         let warmed_draw_cap = frame.draw_capacity();
         let warmed_arena_cap = frame.arena_capacity();
         let warmed_digest = frame.order_digest();
-        let (_, count) = measure(|| {
+        let ((), count) = measure(|| {
             for index in 0..120u64 {
                 frame.begin_frame();
                 for id in 0..48u64 {

@@ -27,6 +27,7 @@ use engine_ui::{
     DuelOverlay, Hud,
 };
 
+use self::windowed_captions::{caption_strip, push_caption_tick};
 use super::audio_mix::{Material, MixBridge, MixVoice, VoiceSeed, Wall, MAX_MIX_VOICES};
 use super::camera::DirectorParams;
 use super::camera_feed::PresentationFeed;
@@ -35,6 +36,8 @@ use super::pad::{fps_bindings, tick_input_with_pad, RecordedPadEvent};
 use super::pad::{poll_gilrs_once, snapshot_from_recorded};
 use super::{App, Checkpoint, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
 
+#[path = "windowed_captions.rs"]
+mod windowed_captions;
 #[path = "windowed_smoke.rs"]
 mod windowed_smoke;
 pub use windowed_smoke::{
@@ -73,9 +76,10 @@ pub const SMOKE_TICKS: u32 = 120;
 /// Window size opened for the smoke.
 pub const WINDOW_SIZE: (u32, u32) = (1280, 720);
 /// Fixed step in seconds (60 Hz); mirrors the shell accumulator.
-pub const WIN_FIXED_DT_S: f64 = 1.0 / 60.0;
+/// Single owner of the rate is `engine_core::TICK_HZ`.
+pub const WIN_FIXED_DT_S: f64 = 1.0 / engine_core::TICK_HZ as f64;
 /// Fixed step in milliseconds (the accumulator input unit).
-pub const WIN_FIXED_DT_MS: f64 = 1000.0 / 60.0;
+pub const WIN_FIXED_DT_MS: f64 = 1000.0 / engine_core::TICK_HZ as f64;
 /// Most fixed steps per presented frame (spiral-of-death clamp, p99 cap):
 /// one 60 Hz frame owes one step, so 2 absorbs a single missed vsync
 /// (~33 ms) while a hitch's excess wall time is dropped instead of repaid
@@ -89,6 +93,20 @@ pub const SMOKE_FRAME_SIZE: (u32, u32) = (128, 96);
 /// a hung smoke fails itself loudly within minutes instead of burning a core
 /// for hours. Overridable per run with `--deadline-ms`.
 pub const SMOKE_WALL_LIMIT_MS: u32 = 300_000;
+
+/// Window-leg 4x MSAA setting (EG13): `1` turns the 4x HDR/depth pair plus
+/// its resolve on; unset, `0` or any other word keeps the default 1x path
+/// the look captures were taken with. Same shape as `E2040_STEAM_RUNNING`.
+pub const MSAA_ENV: &str = "E2040_MSAA";
+
+/// Whether this run builds the 4x MSAA targets: true only for `1`, so a
+/// typo never silently antialiases or silently drops it. Owner: this
+/// module. Caller: the `arena` window leg and the offscreen smoke twin at
+/// presenter init, both through `Presenter::set_msaa_enabled`. Pure string
+/// compare, no clock; the returned boolean is the setting's only effect.
+pub fn msaa_setting(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value == "1")
+}
 
 /// Windowed failures: bounded diagnostics, never panics. Audio loss is not an
 /// error: opening the device returns a notice string and the headless mixer
@@ -130,6 +148,21 @@ impl core::fmt::Display for WinError {
 }
 
 impl std::error::Error for WinError {}
+
+impl WinError {
+    /// Refiles a wall-limit stall as the typed exit receipt: the shared pure
+    /// limit check reports a stall as `Render` with elapsed plus limit already
+    /// in the message, so the `--exit` exit path hands back [`Self::Timeout`],
+    /// the shape the row's drill reads (the `arena` window loop refiles the
+    /// same way). A refused limit or a bad reading (`BadArgs`) passes through
+    /// untouched. Pure: same input, same variant.
+    fn exit_receipt(self) -> Self {
+        match self {
+            Self::Render(msg) => Self::Timeout(msg),
+            other => other,
+        }
+    }
+}
 
 impl From<GameError> for WinError {
     fn from(err: GameError) -> Self {
@@ -1148,6 +1181,37 @@ pub fn practice_frame_index(frames_pumped: u64) -> u32 {
     u32::try_from(frames_pumped).unwrap_or(u32::MAX)
 }
 
+/// Poll the pad once and map one idle human input through the FPS bindings,
+/// reusing the caller's `cache`/`scratch` buffers and carrying `stick` so a
+/// held deflection survives quiet frames. Caller: `run_windowed`, per tick.
+fn windowed_tick_input(
+    tick: u32,
+    human: FighterId,
+    bindings: &Bindings,
+    backend: Option<&mut gilrs::Gilrs>,
+    stick: &mut (f32, f32),
+    cache: &mut Vec<RecordedPadEvent>,
+    scratch: &mut Vec<PhysicalButton>,
+) -> Result<FighterInput, GameError> {
+    // Human wish through the FPS input map, fed by one device drain per
+    // tick; the debug check keeps the poll seam equal to the fold.
+    cache.clear();
+    drain_gilrs_once(backend, stick, cache);
+    #[cfg(debug_assertions)]
+    {
+        // No-clone seam check: the fold reads the drained slice twice
+        // and must agree (guards against folds with hidden state).
+        // The old check cloned the cache through `poll_gilrs_once`
+        // every tick in debug builds; comparing by slice keeps the
+        // check with zero heap. `poll_gilrs_once` keeps its owned
+        // API for the by-value drain callers (see pad.rs).
+        let folded = snapshot_from_recorded(cache.as_slice());
+        debug_assert_eq!(folded, snapshot_from_recorded(cache.as_slice()));
+    }
+    tick_input_with_pad(tick, human, &[], cache.as_slice(), bindings, scratch)
+        .map_err(|_| GameError::BadConfig("fps-map idle input"))
+}
+
 /// Run windowed play headless-safe: open the render window shell, feed one
 /// idle human input per fixed tick through the FPS input map (AI
 /// brains fill every other slot, same as the headless leg), play each tick's
@@ -1156,7 +1220,11 @@ pub fn practice_frame_index(frames_pumped: u64) -> u32 {
 /// skipped with a reason. Never panics on missing display/audio hardware:
 /// there is none to miss yet (see the module docs).
 pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, GameError> {
-    let mut app = App::new(config)?.into_duel()?;
+    // The live session plays the arena kit's physical placement, so the kit
+    // walls stop being pictures; a bad placement falls back to the empty
+    // world (open sand) instead of failing the session.
+    let world = super::arena_kit::kit_match_world_or_empty();
+    let mut app = App::with_world(config, world)?.into_duel()?;
     let mut shell = WindowShell::new();
     shell.open(WINDOW_SIZE.0, WINDOW_SIZE.1);
     let bindings = fps_bindings();
@@ -1183,6 +1251,10 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
         .expect("arena camera table is valid");
     // Live balance verdicts (EG45): folded from each tick's cues, counted below.
     let mut verdict_gaits = vec![GaitPhase::Steady; usize::from(app.config().fighters)];
+    // Accessibility captions (engine_ui::access): the built `SubtitleFeed`'s
+    // live caller; per-tick cues push captions into the HUD receipt.
+    let mut captions = caption_strip();
+    let mut caption_counts = (0usize, 0usize);
     // Reused pressed buffer (sized once here, zero per tick): the per-tick
     // pad poll merges into it instead of handing out a fresh list.
     let mut pad_scratch = Vec::with_capacity(16);
@@ -1192,24 +1264,15 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
     let mut pad_events_cache: Vec<RecordedPadEvent> = Vec::with_capacity(8);
     let mut pad_stick = (0.0f32, 0.0f32);
     for tick in 0..ticks_run {
-        // Human wish through the FPS input map, fed by one device drain
-        // per tick; the debug check keeps the poll seam equal to the fold.
-        pad_events_cache.clear();
-        drain_gilrs_once(pad_backend.as_mut(), &mut pad_stick, &mut pad_events_cache);
-        #[cfg(debug_assertions)]
-        debug_assert_eq!(
-            poll_gilrs_once(|| pad_events_cache.clone()),
-            snapshot_from_recorded(&pad_events_cache)
-        );
-        let input = tick_input_with_pad(
+        let input = windowed_tick_input(
             tick,
             human,
-            &[],
-            &pad_events_cache,
             &bindings,
+            pad_backend.as_mut(),
+            &mut pad_stick,
+            &mut pad_events_cache,
             &mut pad_scratch,
-        )
-        .map_err(|_| GameError::BadConfig("fps-map idle input"))?;
+        )?;
         let outcome = app.tick(input);
         debug_assert!(outcome.input_accepted);
         // Frame stamped beside the tick for the practice swap, read-only:
@@ -1217,6 +1280,7 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
         let frame = practice_frame_index(shell.draw_count());
         let _ = (frame, tick);
         super::balance_verdict::fold_verdict_gaits(&mut verdict_gaits, &outcome.cues);
+        caption_counts = push_caption_tick(captions.as_mut(), u64::from(tick), &outcome.cues);
         let _ = feed.win_frame(&outcome);
         let stats = mix_tick_audio(&mut mixer, &bank, &mut bridge, &walls, &outcome);
         send_sum += stats.send_sum;
@@ -1230,7 +1294,8 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
     // path (layout cells, then one quad per cell for the renderer).
     let (base_cells, base_quads) = hud_cells_quads(app.hud());
     let (vcells, vquads) = verdict_cells_quads(&verdict_gaits);
-    let (hud_cells, hud_quads) = (base_cells + vcells, base_quads + vquads);
+    let (scells, squads) = caption_counts;
+    let (hud_cells, hud_quads) = (base_cells + vcells + scells, base_quads + vquads + squads);
 
     // Lobby wiring (UIX3b): the live loop owns the screen; presentation only.
     drive_lobby_once(config.seed);
@@ -1263,6 +1328,9 @@ fn smoke_presenter() -> Result<Option<(Presenter, MeshKey, super::arena_kit::Kit
     match Presenter::init_offscreen() {
         Ok(mut presenter) => {
             presenter.resize(SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)?;
+            // EG13: the offscreen twin honors the same setting as the
+            // window, so one capture pair can show 4x MSAA on and off.
+            presenter.set_msaa_enabled(msaa_setting(std::env::var(MSAA_ENV).ok().as_deref()));
             // One lit cube proves the forward pass; a failed upload falls
             // back to clear-only frames rather than failing the smoke.
             let key = MeshKey::new(1, [0xA1; 32]);
@@ -1313,10 +1381,10 @@ fn smoke_twin_list(
     // Kit draws in place of dressing (VS1): the cube stays lit beside them
     // (the visible error mesh), so a refused stage still paints a valid frame.
     let kit_pushed = super::arena_kit::push_kit_draws(&mut list, &resident, kit);
-    // Kit prop rows ride the twin frame: physical placement boxes for the
+    // Kit prop rows ride the twin frame: one box per staged actor for the
     // brief (presentation only, hash untouched).
     let _ = super::arena_kit::kit_prop_rows().len();
-    // Collision lockstep: the 11 physical placement boxes must collide as a
+    // Collision lockstep: the placement's physical boxes must collide as a
     // `MatchWorld`; when they cannot, drop the kit draws just pushed so a
     // picture never hides a missing wall. Presentation only, hash untouched.
     let world_ok = super::arena_kit::kit_match_world().is_ok();
@@ -1448,8 +1516,11 @@ pub fn run_headless_smoke_with_options(
     let mut verdict_gaits = vec![GaitPhase::Steady; usize::from(app.config().fighters)];
     for tick in 0..ticks_run {
         // Own wall-clock bound: a wedged device fails the smoke loudly
-        // instead of hanging the run past its limit.
-        check_exit_deadline_with_limit(started.elapsed().as_secs_f64() * 1000.0, wall_limit_ms)?;
+        // instead of hanging the run past its limit, and the stall leaves the
+        // exit path as the typed `Timeout` receipt (elapsed plus limit stay
+        // in the message).
+        check_exit_deadline_with_limit(started.elapsed().as_secs_f64() * 1000.0, wall_limit_ms)
+            .map_err(WinError::exit_receipt)?;
         let input = fighter_input_from_pressed(tick, human, &[], &bindings);
         let outcome = app.tick(input);
         debug_assert!(outcome.input_accepted);
@@ -1599,6 +1670,17 @@ mod tests {
         }
     }
 
+    /// EG13: the window leg turns 4x MSAA on only for `E2040_MSAA=1`; an
+    /// unset value, `0` or any other word keeps the default 1x path.
+    #[test]
+    fn msaa_setting_is_on_only_for_one() {
+        assert!(msaa_setting(Some("1")), "1 turns the 4x pair on");
+        assert!(!msaa_setting(None), "unset keeps the 1x path");
+        assert!(!msaa_setting(Some("0")), "0 keeps the 1x path");
+        assert!(!msaa_setting(Some("true")), "a word is not the setting");
+        assert_eq!(MSAA_ENV, "E2040_MSAA", "the setting name is pinned");
+    }
+
     #[test]
     fn windowed_smoke_runs_the_full_data_path() {
         let report = run_windowed(config(), SMOKE_TICKS).unwrap();
@@ -1616,8 +1698,12 @@ mod tests {
         assert_eq!(report.camera_frames, SMOKE_TICKS);
 
         // Replay equivalence across legs: the windowed idle run matches a
-        // headless run fed the same idle inputs tick for tick.
-        let mut headless = App::new(config()).unwrap().into_duel().unwrap();
+        // headless run fed the same idle inputs AND the same kit world tick
+        // for tick.
+        let mut headless = App::with_world(config(), crate::arena_kit::kit_match_world_or_empty())
+            .unwrap()
+            .into_duel()
+            .unwrap();
         let mut last = None;
         for tick in 0..SMOKE_TICKS {
             let outcome = headless.tick(FighterInput {
@@ -1840,6 +1926,52 @@ mod tests {
         assert!(check_exit_deadline_with_limit(f64::INFINITY, 1000).is_err());
         assert!(check_exit_deadline_with_limit(-1.0, 1000).is_err());
         assert!(check_exit_deadline_with_limit(0.0, 0).is_err());
+    }
+
+    /// WIN9 drill: `--deadline-ms 60_000` bounds the `--exit` run at 60 s, so a
+    /// frame stalled past it must leave the exit path as the typed
+    /// `WinError::Timeout` receipt naming elapsed plus limit, while the
+    /// untouched 300 s default keeps the normal 30-frame run green.
+    #[test]
+    fn exit_deadline_drill_stall_is_the_typed_timeout_receipt() {
+        let drill = WinArgs::parse(
+            &["arena", "--frames", "30", "--exit", "--deadline-ms", "60000"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(drill.wall_limit_ms(), 60_000, "--deadline-ms is the bound");
+        let plain = WinArgs::parse(
+            &["arena", "--frames", "30", "--exit"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(plain.wall_limit_ms(), SMOKE_WALL_LIMIT_MS);
+        assert_eq!(SMOKE_WALL_LIMIT_MS, 300_000, "the default bound is 300 s");
+        // The exit path's own check, refile included: in bound stays green.
+        let receipt = |elapsed_ms: f64, limit_ms: u32| {
+            check_exit_deadline_with_limit(elapsed_ms, limit_ms).map_err(WinError::exit_receipt)
+        };
+        receipt(59_999.0, drill.wall_limit_ms()).expect("inside the drill bound is green");
+        // Forced stall: past 60 s the exit receipt is `Timeout` naming both.
+        let err = receipt(60_001.0, drill.wall_limit_ms()).unwrap_err();
+        assert!(
+            matches!(&err, WinError::Timeout(msg) if msg.contains("60001") && msg.contains("60000")),
+            "drill stall must be Timeout naming elapsed+limit, got: {err}"
+        );
+        assert!(
+            format!("{err}").starts_with("exit timeout ("),
+            "the receipt prints as the exit timeout line: {err}"
+        );
+        // The default bound still spans 300 s: the normal run is unaffected.
+        receipt(299_999.0, plain.wall_limit_ms()).expect("default bound keeps the run green");
+        assert!(
+            receipt(300_001.0, plain.wall_limit_ms()).is_err(),
+            "default bound still fires past 300 s"
+        );
     }
 
     #[test]
@@ -2588,10 +2720,11 @@ mod tests {
 
     #[test]
     fn kit_collision_lockstep_keeps_draws_when_world_collides() {
-        // Behavior: the embedded 11 physical actors collide as one
-        // `MatchWorld`, so the twin frame keeps every kit draw it pushed.
+        // Behavior: the embedded placement's 6 physical actors collide as one
+        // `MatchWorld` (11 staged actors, dressing skipped), so the twin frame
+        // keeps every kit draw it pushed.
         let world = crate::arena_kit::kit_match_world().expect("embedded placement collides");
-        assert_eq!(world.obstacles().len(), crate::arena_kit::KIT_ACTOR_COUNT);
+        assert_eq!(world.obstacles().len(), 6);
         let rows = crate::arena_kit::kit_prop_rows();
         assert_eq!(rows.len(), crate::arena_kit::KIT_ACTOR_COUNT);
         assert_eq!(kit_kept_after_collision(10, 4, true), 10);

@@ -2,41 +2,22 @@
 
 /// Center-of-mass balance core plus stagger response.
 pub mod balance;
-pub mod broadphase;
-/// Named float-to-int conversions for tick paths: checked `TryFrom`
-/// entries plus saturating wrappers, shared by broadphase cell math.
-pub mod cast;
-/// Tick-path integer narrowing on the core checked owner: clamp-then-narrow
-/// and Q16 downscale helpers the servo paths adopt next.
-pub mod checked_fix;
-/// CPU verlet cloth on fixed-point math: bone-anchored, presentation
-/// only, never checkpoints. Std-only.
-pub mod cloth;
 #[cfg(feature = "rapier")]
 pub mod controller;
 /// Character controller v2: steps, slopes, platforms, ledge sense, pushes.
 /// Integer-millimeter, std-only; arena locomotion walks these walkers.
 pub mod controller2;
-/// Grapple servo on opponent ragdoll state: torque caps, breakaway,
-/// ID-sorted solve order. Std-only.
-pub mod grapple;
-pub mod islands;
-pub mod islands_build;
 pub mod kcc;
 /// Severed limbs as bodies: mass from volume and density, inherited velocity
 /// plus blade impulse, stump recoil, canonical order, capped, snapshotted.
 /// Integer, std-only.
 pub mod limb;
-/// Physics LOD for armies: far soldiers as capsules, near ones full detail,
-/// CCD only for fast weapons and projectiles, island sleep for rest.
-pub mod lod;
 pub mod overlap;
 /// PD velocity-servo drive law for the powered ragdoll: D-damped servo
 /// axes, magnitude clamp, dt fallback to P-only. Std-only.
 pub mod pd;
 #[cfg(feature = "rapier")]
 pub mod powered;
-pub mod query;
 #[cfg(feature = "rapier")]
 pub mod ragdoll;
 /// Frozen-baseline fall/clinch measurement tape: seeded scripts beside
@@ -46,14 +27,10 @@ pub mod ragdoll_tape;
 #[cfg(feature = "rapier")]
 pub mod rapier;
 pub mod rigid;
-pub mod solver;
 /// Cumulative pain, servo fatigue and per-bone injury beside the balance
 /// core: the arena hit pipeline feeds each blow here plus `balance`.
 /// Integer, std-only.
 pub mod stagger_memory;
-pub mod substep;
-pub mod vehicle;
-pub mod verify;
 
 pub use rigid::Body;
 

@@ -5,8 +5,8 @@ use engine_core::hash::{FNV64_OFFSET, FNV64_PRIME};
 
 /// Gravity acceleration (+down as `-y`), m/s^2.
 pub const GRAVITY: f32 = 9.8;
-/// Fixed step, 60 Hz.
-pub const FIXED_DT: f32 = 1.0 / 60.0;
+/// Fixed step, 60 Hz. Single owner is `engine_core::FIXED_DT`.
+pub use engine_core::FIXED_DT;
 
 /// Rigid body: position + velocity + half-extents. Ground at `y == hy`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -241,38 +241,22 @@ fn chunk_all_settled8(chunk: &[Body]) -> bool {
     chunk.iter().all(is_settled)
 }
 
-/// Slice-settled predicate beside [`is_settled`], owner for the narrow family.
+/// Slice-settled predicate beside [`is_settled`], thin caller over the single owner.
 ///
 /// Bit-identical to `slice.iter().all(is_settled)`: true only when every lane
-/// keeps every bit through one Euler step plus ground clamp. Velocity
-/// fast-fail short-circuits in index order with no per-lane bounds checks
+/// keeps every bit through one Euler step plus ground clamp. Delegates to the
+/// per-body owner [`is_settled`] in index order with no per-lane bounds checks
 /// (sequential scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache
-/// Misses]); settled lanes accumulate bit checks branchlessly into one mask
-/// with a single skip branch per call (one predictable branch
-/// [geaen | 3.4.3.2 Branch Prediction]). `y == hy` folds via
-/// `(y_bits ^ hy_bits)` ORed into the mask (zero iff equal), same truth table
-/// as `u32::from(y_bits != hy_bits)` with one fewer compare per settled body.
-/// Same slot order, same float order, no allocation. Caller: [`integrate`]
+/// Misses]); the mask-free delegation is the single owner of the family, so the
+/// render harness in `crates/perf/src/main.rs` (another crate, out of scope
+/// here) is the only place left with a copy of the old mask. Same slot order,
+/// same float order, no allocation. Caller: [`integrate`]
 /// remainder fast path plus [`chunk_all_settled32`] only.
 /// Units: metres, m/s. Determinism: bit compares, no allocation.
 #[expect(clippy::inline_always, reason = "11k hot predicate")]
 #[inline(always)]
 fn slice_all_settled(slice: &[Body]) -> bool {
-    let mut acc: u32 = 0;
-    for b in slice.iter() {
-        if (b.vx.to_bits() | b.vy.to_bits()) != 0 {
-            return false;
-        }
-        let y_bits = b.y.to_bits();
-        let hy_bits = b.hy.to_bits();
-        let hm = hy_bits & 0x7FFF_FFFF;
-        let x_bits = b.x.to_bits();
-        acc |= (y_bits ^ hy_bits)
-            | u32::from(hm >= 0x4700_0000)
-            | u32::from(x_bits == 0x8000_0000)
-            | u32::from((x_bits & 0x7F80_0000) == 0x7F80_0000);
-    }
-    acc == 0
+    slice.iter().all(is_settled)
 }
 
 /// Thirty-two-wide settled predicate beside [`is_settled`].
@@ -280,7 +264,7 @@ fn slice_all_settled(slice: &[Body]) -> bool {
 /// Bit-identical to `chunk.iter().all(is_settled)`: true only when all
 /// thirty-two keep every bit, so `integrate` pays one skip branch per
 /// 32-wide group while the 10k settled slice keeps its skip. Delegates to
-/// [`slice_all_settled`] (same mask, same order) so the 1k dynamic prefix
+/// [`slice_all_settled`] (same order via [`is_settled`]) so the 1k dynamic prefix
 /// still fails after one `vx|vy` check with no `y`/`hy`/`x` loads and settled
 /// lanes keep one predictable branch per group
 /// ([geaen | 3.4.3.2 Branch Prediction]). Same slot order, same float order,

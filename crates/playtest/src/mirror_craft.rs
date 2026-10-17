@@ -564,6 +564,31 @@ mod tests {
         );
     }
 
+    /// The row's own bar: ten ids, unique, in report order.
+    #[test]
+    fn the_slice_holds_ten_tasks_in_report_order() {
+        let report = run();
+        assert_eq!(report.tasks(), 10, "the report holds ten tasks");
+        assert_eq!(report.rows.len(), 30, "ten tasks x three backends");
+        let ids: Vec<&str> = report
+            .rows
+            .iter()
+            .filter(|row| row.backend == "mock")
+            .map(|row| row.task)
+            .collect();
+        assert_eq!(
+            ids,
+            ["cr01", "cr02", "cr03", "cr04", "cr05", "cr06", "cr07", "cr08", "cr09", "cr10"],
+            "report order carries the ten task ids"
+        );
+        let consts: Vec<&str> = TASKS.iter().map(|task| task.id).collect();
+        assert_eq!(consts, ids, "TASKS pins the report order");
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 10, "ids stay unique for the aggregate");
+    }
+
     #[test]
     fn the_slice_reproduces_and_matches_across_backends() {
         let first = run();

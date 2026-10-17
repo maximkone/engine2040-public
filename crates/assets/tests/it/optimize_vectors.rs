@@ -154,10 +154,12 @@ fn unused_uvs_zero_out_and_control_round_trips() {
         normalize_digest(&control),
         "control digest stable"
     );
-    assert!(
-        MAX_TEXTURE_PX >= 1_048_576,
-        "pixel cap holds the potato tier"
-    );
+    const {
+        assert!(
+            MAX_TEXTURE_PX >= 1_048_576,
+            "pixel cap holds the potato tier"
+        );
+    };
 }
 
 #[test]

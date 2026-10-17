@@ -1105,6 +1105,14 @@ fn fork_id(
                 hasher.write(&[0, *fighter]);
                 hasher.write(&permille.to_le_bytes());
             }
+            ForkProposal::SetTier { fighter, tier } => {
+                hasher.write(&[3, *fighter]);
+                hasher.write(&[tier.tier]);
+                hasher.write(&tier.hp_permille.to_le_bytes());
+                hasher.write(&tier.tell_ticks.to_le_bytes());
+                hasher.write(&tier.stagger_permille.to_le_bytes());
+                hasher.write(&[tier.counter]);
+            }
             ForkProposal::SwapTape { fighter, inputs } => {
                 hasher.write(&[1, *fighter]);
                 hasher.write(&(inputs.len() as u64).to_le_bytes());

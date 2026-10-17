@@ -36,6 +36,11 @@ pub const GTAO_TAPS: usize = 3;
 pub const GTAO_RADIUS_MAX_PX: f32 = 64.0;
 /// Largest accepted GTAO depth falloff in meters.
 pub const GTAO_FALLOFF_MAX_M: f32 = 32.0;
+/// Tap depth (m) at or beyond which a GTAO tap is background, never an
+/// occluder: both cameras clip past it, so a cleared (far-plane) texel
+/// decodes at or past it. Never hashed. Caller: `gtao_half_res` (same
+/// file) and `GTAO_HALF_WGSL` gate their tap term with the same figure.
+pub const GTAO_BACKGROUND_M: f32 = 100.0;
 /// Posted GPU budget at 1080p on the reference GPU (PF2 enforces).
 pub const GTAO_BUDGET_MS: f64 = 0.8;
 /// Bytes per AO texel on the device (R32 float, half and full alike).
@@ -820,6 +825,9 @@ pub fn gtao_half_res(
                         let ny = (cy as i32 + dy * off * side).clamp(0, h as i32 - 1) as usize;
                         let ni = ny * w + nx;
                         let nd = depth_full[ni] as f64;
+                        if nd >= f64::from(GTAO_BACKGROUND_M) {
+                            continue;
+                        }
                         let nn = normals[ni];
                         let diff = ((cd - nd) / falloff).clamp(0.0, 1.0);
                         let dot = (nc[0] * nn[0] + nc[1] * nn[1] + nc[2] * nn[2]).max(0.0) as f64;
@@ -999,6 +1007,8 @@ struct LookU {
 @group(0) @binding(2) var<storage, read> depth: array<f32>;
 @group(0) @binding(3) var<storage, read> normals: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> ao_half: array<f32>;
+// Cleared far-plane texels are background and never occlude (GTAO_BACKGROUND_M).
+const GATE_M: f32 = 100.0;
 @compute @workgroup_size(8, 8)
 fn half_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let hx = gid.x;
@@ -1028,6 +1038,7 @@ fn half_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ny = clamp(i32(cy) + dy * off * sgn, 0, i32(fh) - 1);
                 let ni = u32(ny) * fw + u32(nx);
                 let nd = depth[ni];
+                if (nd >= GATE_M) { continue; }
                 let nn = normals[ni].xyz;
                 let diff = clamp((cd - nd) / cfg.falloff, 0.0, 1.0);
                 let align = max(dot(nc, nn), 0.0);
@@ -2750,6 +2761,30 @@ mod tests {
     }
 
     #[test]
+    fn far_plane_background_never_occludes_itself() {
+        // Cleared texels decode to the far plane: never an occluder.
+        let normals = vec![[0.0, 0.0, 1.0]; 64];
+        let config = config_8x8();
+        let mut far = vec![GTAO_BACKGROUND_M; 64];
+        for (i, d) in far.iter_mut().enumerate() {
+            if i % 8 < 4 {
+                *d += 6.0;
+            }
+        }
+        let (half, _) = gtao_half_res(&far, &normals, &config).expect("background bakes");
+        assert!(
+            half.values.iter().all(|v| (v - GTAO_OPEN).abs() < 0.02),
+            "background stays open"
+        );
+        let step: Vec<f32> = (0..64).map(|i| if i % 8 < 4 { 2.0 } else { 6.0 }).collect();
+        let (hs, _) = gtao_half_res(&step, &normals, &config).expect("step bakes");
+        let full = upsample_bilateral(&hs, &step, &config).expect("step upsamples");
+        let (v, o) = ao_on_off_stats(&full, 8, 8, (4, 1), (0, 1)).expect("probes read");
+        assert!(v < GTAO_OPEN - 1e-6, "step darkens: {v}");
+        assert!((o - GTAO_OPEN).abs() < 0.02, "sand open: {o}");
+    }
+
+    #[test]
     fn ao_on_off_is_deterministic_x2() {
         let mut depth = vec![0.0f32; 64];
         for y in 0..8 {
@@ -2945,9 +2980,11 @@ mod tests {
     fn live_helper_routes_through_live_bind() {
         // Caller: `crates/render/src/present/gpu_present/submit.rs` `live_gtao_ao`
         // after `encode_forward` before `encode_blit`.
-        // Behavior: routes through `gtao_live_full_for_forward` (half plus
-        // bilateral upsample) so valley darkens via the live bind, open sand
-        // stays within 2%, `ao_tex` leaves 1.0. Failure keeps the bypass.
+        // Behavior: the helper routes through `gtao_live_full_for_forward`
+        // (half plus bilateral upsample), BUT the only production caller
+        // (`submit_ibl_chart`) passes empty `&[]`/`&[]`, so the gate always
+        // skips and the receipt stays `None`. This pins both halves: the
+        // routing inside the helper and the empty-feed skip at the call site.
         let src = include_str!("present/gpu_present/submit.rs");
         let ao_fn = src.find("fn live_gtao_ao").expect("live helper exists");
         let ao_end = src[ao_fn..]
@@ -2957,6 +2994,10 @@ mod tests {
         assert!(
             src[ao_fn..ao_end].contains("gtao_live_full_for_forward"),
             "live helper routes through the live bind after forward"
+        );
+        assert!(
+            src.contains("let depth: &[f32] = &[];"),
+            "production caller passes an empty feed, so the live bind skips"
         );
     }
 

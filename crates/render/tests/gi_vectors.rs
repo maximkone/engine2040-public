@@ -85,7 +85,9 @@ fn nine_coeffs_match_on_three_axes() {
 fn lookup_budget_is_sixty_four_ops() {
     assert_eq!(SH_COEFFS, 9);
     assert_eq!(RUNTIME_OPS_PER_SAMPLE, 64);
-    assert!(
+    // Compile-time law: the lookup may never outgrow its op budget. A const
+    // assertion fails the build, so it cannot pass vacuously at run time.
+    const _: () = assert!(
         RUNTIME_OPS_PER_SAMPLE <= LOOKUP_OP_BUDGET,
         "lookup must stay within 64 ops"
     );

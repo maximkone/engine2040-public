@@ -1,5 +1,5 @@
-//! Integer-cm 3D k-d tree, median-split build plus k-nearest queries.
-//! Caller: `crates/nav/src/crowd.rs` neighbour feed (`build` + `knn`).
+//! Integer-cm 3D k-d tree: median-split build plus k-nearest and radius queries.
+//! No non-test caller yet; every query is exercised by this module's tests.
 /// One point in integer centimeters: `[x_cm, y_cm, z_cm]`.
 pub type CmPoint = [i64; 3];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,45 @@ impl KdTree {
         }
         best.into_iter().map(|(_, i)| i).collect()
     }
+    /// Every input index within `radius_cm` of `q`, ordered by `(distance, index)`.
+    /// A non-positive radius or an empty tree gives an empty vector.
+    pub fn radius(&self, q: CmPoint, radius_cm: i64) -> Vec<usize> {
+        let mut found: Vec<(u128, usize)> = Vec::new();
+        if radius_cm > 0 {
+            if let Some(root) = self.root {
+                let r = u128::from(radius_cm.unsigned_abs());
+                self.collect(root, q, r * r, &mut found);
+            }
+        }
+        found.sort_unstable();
+        found.into_iter().map(|(_, i)| i).collect()
+    }
+    /// Collect in-radius points; a far child is skipped when the splitting-plane
+    /// gap already exceeds the radius, and the near child is always visited
+    /// because its points may sit on the query's side of that plane.
+    fn collect(&self, slot: usize, q: CmPoint, radius_sq: u128, found: &mut Vec<(u128, usize)>) {
+        let node = self.nodes[slot];
+        let point = self.points[node.point];
+        let here = Self::dist_sq(point, q);
+        if here <= radius_sq {
+            found.push((here, node.point));
+        }
+        let axis = usize::from(node.axis);
+        let diff = i128::from(q[axis]) - i128::from(point[axis]);
+        let (near, far) = if diff <= 0 {
+            (node.left, node.right)
+        } else {
+            (node.right, node.left)
+        };
+        if let Some(next) = near {
+            self.collect(next, q, radius_sq, found);
+        }
+        if diff.unsigned_abs() * diff.unsigned_abs() <= radius_sq {
+            if let Some(next) = far {
+                self.collect(next, q, radius_sq, found);
+            }
+        }
+    }
     fn search(&self, slot: usize, q: CmPoint, k: usize, best: &mut Vec<(u128, usize)>) {
         let node = self.nodes[slot];
         let here = Self::dist_sq(self.points[node.point], q);
@@ -128,6 +167,47 @@ mod tests {
             }
         }
         assert_eq!(n, 200);
+    }
+    #[test]
+    fn kdtree_radius_matches_brute_force_on_seeded_corpus() {
+        let mut r = Rng::new(0x5EED_2040);
+        let pts: Vec<CmPoint> = (0..500).map(|_| pt(&mut r, 4_000)).collect();
+        let t = KdTree::build(&pts);
+        let empty = KdTree::build(&[]);
+        let mut q = Rng::new(0xFEED_2040);
+        let mut n = 0;
+        for radius_cm in [0_i64, 400, 8_000] {
+            let cap = u128::from(radius_cm.unsigned_abs());
+            let cap = cap * cap;
+            for _ in 0..40 {
+                let query = pt(&mut q, 4_000);
+                let mut all: Vec<(u128, usize)> = pts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &p)| KdTree::dist_sq(p, query) <= cap)
+                    .map(|(i, &p)| (KdTree::dist_sq(p, query), i))
+                    .collect();
+                all.sort_unstable();
+                let want: Vec<usize> = all.iter().map(|&(_, i)| i).collect();
+                let got = t.radius(query, radius_cm);
+                assert_eq!(got, want, "radius={radius_cm} q={query:?}");
+                // The result is ordered by (distance, index), never by input index.
+                let pairs: Vec<(u128, usize)> = got
+                    .iter()
+                    .map(|&i| (KdTree::dist_sq(pts[i], query), i))
+                    .collect();
+                assert!(
+                    pairs.windows(2).all(|w| w[0] <= w[1]),
+                    "order for radius={radius_cm}"
+                );
+                assert_eq!(t.radius(query, radius_cm), got, "repeat run drifted");
+                assert!(empty.radius(query, radius_cm).is_empty(), "empty tree");
+                assert!(t.radius(query, 0).is_empty(), "radius 0 gives no points");
+                assert!(t.radius(query, -7).is_empty(), "negative radius is empty");
+                n += 1;
+            }
+        }
+        assert_eq!(n, 120);
     }
     #[test]
     fn kdtree_10k_build_plus_1k_queries_replays_within_budget() {

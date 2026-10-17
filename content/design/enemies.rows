@@ -1,4 +1,4 @@
-# enemies design rows: three duel tiers as designer data (Bycer ch8).
+# enemies design rows: the duel tiers as designer data (Bycer ch8).
 # Designers change numbers here without a Rust edit; the AI seat loads
 # these rows into tier skill (GA13) and the game test below checks them.
 # Whole numbers only, `#` comments, no floats. Units live in the key:
@@ -9,14 +9,18 @@
 # from the player's own kit that beats this tier).
 # Cards live in docs/design/ENEMIES.md: tier_1 is the Holder grunt
 # (teaches parry), tier_2 is the Flanker veteran (teaches dodge),
-# tier_3 is the Holder elite (stamina pressure, riposte). One melee
+# tier_3 is the Holder elite (stamina pressure, riposte), tier_4 is the
+# primus boss (parry, then dodge in phase 2 at or below 500 hp). One melee
 # enemy at a time per encounter; StrikePhase is the shared 15/1/8 clock.
 # House numbers: the 60% tier bar (a tier beats the one below in 60% or
 # more of seeded duels) and the 2-4 tick human noise stay until the
 # tournament and human tapes prove another number.
-# T4 boss stays PROPOSED (needs owner EB-2026-10-12-S32); no tier_4 row
-# lands before that answer.
+# tier_4 is the primus boss row: the design card (docs/design/ENEMIES.md)
+# answers the owner ask (EB-2026-10-13-S2) and crates/ai/src/depth.rs ships
+# the same numbers as `PRIMUS_TIER`; the GA13 tournament hook reads the
+# ladder later. The row stays inside the narrow hp band and the 15-tick tell.
 table enemies version 1
 tier_1 hp_permille=950 tell_ticks=15 stagger_permille=400 counter=1
 tier_2 hp_permille=1000 tell_ticks=15 stagger_permille=500 counter=2
 tier_3 hp_permille=1050 tell_ticks=15 stagger_permille=600 counter=1
+tier_4 hp_permille=1100 tell_ticks=15 stagger_permille=700 counter=1

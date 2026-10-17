@@ -11,4 +11,5 @@ mod deterministic_replay_vectors;
 mod fixed_property;
 mod fppe_vec3_vectors;
 mod property_matrix;
+mod root_reexport_contract;
 mod turn_hash_journal;

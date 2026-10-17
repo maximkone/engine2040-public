@@ -180,7 +180,7 @@ fn build_table(state: &mut u64) -> [f32; 8] {
 }
 // Cubic-spline stays the fallback if poly6 tables miss budget; same trait covers it.
 fn falloff(r: f32) -> f32 {
-    if !r.is_finite() || r < 0.0 || r > SMOOTH_H {
+    if !r.is_finite() || !(0.0..=SMOOTH_H).contains(&r) {
         return 0.0;
     }
     1.0 - r / SMOOTH_H
@@ -314,8 +314,7 @@ impl PresentFluid {
     }
     /// Byte image in fixed order.
     pub fn sim_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.reserve(16 + self.alive() * 40);
+        let mut out = Vec::with_capacity(16 + self.alive() * 40);
         out.extend_from_slice(&self.ticks.to_le_bytes());
         out.extend_from_slice(&u32::try_from(self.blood.len()).unwrap_or(0).to_le_bytes());
         out.extend_from_slice(&u32::try_from(self.water.len()).unwrap_or(0).to_le_bytes());

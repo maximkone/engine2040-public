@@ -185,6 +185,216 @@ fn dodged_tape_gives_dodged() {
     assert!(seen, "dodge i-frames negate the hit");
 }
 
+/// Does a defender who answers with `hold` at `press` take `kind` from an
+/// attacker who presses `ATTACK` at tick 0? One pure scripted tape; the
+/// press tick is always computed from the tables by the caller.
+fn answer_tape(tables: &engine_combat::fight::Tables, press: u32, hold: u8, kind: &str) -> bool {
+    let mut state = FightState::new(2).expect("two fighters fit");
+    let horizon = tables.attack_startup_ticks + tables.attack_recovery_ticks + 8;
+    for step in 0..horizon {
+        let attacker = if step == 0 { ATTACK } else { 0 };
+        // Block is held from its press on; a dodge is a one-tick press.
+        let victim = if hold == DODGE {
+            if step == press {
+                DODGE
+            } else {
+                0
+            }
+        } else if step >= press {
+            hold
+        } else {
+            0
+        };
+        if has(&step_pair(&mut state, tables, attacker, victim), kind) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The parry span one row buys, measured on scripted tapes instead of
+/// computed: `(first_parry_press, parry_presses)`, where a press is the tick
+/// the victim presses and holds block while the attacker presses `ATTACK` at
+/// tick 0, and a press counts when the impact comes out `Parried`. Pure; one
+/// scanned tape per tick of the attacker's tell.
+fn parry_span(tables: &engine_combat::Tables) -> (u32, u32) {
+    let startup = tables.attack_startup_ticks;
+    let presses: Vec<u32> = (0..=startup)
+        .filter(|press| answer_tape(tables, *press, BLOCK, "parried"))
+        .collect();
+    let first = *presses
+        .first()
+        .expect("a block held into the impact parries");
+    let count = u32::try_from(presses.len()).expect("a tell of at most 60 ticks fits u32");
+    (first, count)
+}
+
+/// The answer a row names must be an outcome the engine can produce, not a
+/// word: for every `counter` code in `weapons.rows` (1 parry, 2 dodge,
+/// 3 block) a scripted tape under `TABLES_V2` where the defender answers
+/// with that input yields the matching [`FightEvent`]. The press ticks are
+/// measured off the tables one tick at a time, never typed in, so a change
+/// to the startup or to either window moves this test with the row it
+/// checks.
+#[test]
+fn every_counter_code_names_a_live_outcome() {
+    let tables = &TABLES_V2;
+    let (_, rows) = weapons_parse_table(WEAPONS_SRC);
+    // Parry: the far edge of the window, measured. The earliest press that
+    // still parries; one tick before it only blocks, and the answer named by
+    // a row is taken from that measured edge.
+    let (earliest_parry, parry_presses) = parry_span(tables);
+    assert!(
+        earliest_parry > 0,
+        "a row with a parry window of {} must still leave tell ticks where a parry is late",
+        tables.parry_window_ticks
+    );
+    let past_parry = earliest_parry - 1;
+    assert!(
+        !answer_tape(tables, past_parry, BLOCK, "parried"),
+        "a press {past_parry} ticks early must be past the parry window {}",
+        tables.parry_window_ticks
+    );
+    assert!(
+        answer_tape(tables, past_parry, BLOCK, "blocked"),
+        "one tick past the window still blocks, not parries"
+    );
+    // The window is a span of press ticks, not a single late press: every
+    // press from the measured edge to the impact tick parries.
+    assert_eq!(
+        parry_presses,
+        tables.parry_window_ticks + 1,
+        "the window {} must buy {} parrying press ticks, measured {parry_presses}",
+        tables.parry_window_ticks,
+        tables.parry_window_ticks + 1
+    );
+    // Dodge: the i-frames must still be live at impact.
+    let dodge_press = tables
+        .attack_startup_ticks
+        .saturating_sub(tables.dodge_iframes_ticks.saturating_sub(1));
+    let mut kinds = 0u8;
+    for row in &rows {
+        // 1 parry, 2 dodge, 3 block: the code form of the `avoid` word.
+        let answered = match row.counter {
+            1 => answer_tape(tables, earliest_parry, BLOCK, "parried"),
+            2 => answer_tape(tables, dodge_press, DODGE, "dodged"),
+            _ => answer_tape(tables, 0, BLOCK, "blocked"),
+        };
+        assert!(
+            answered,
+            "line {}: weapon `{}` names counter {} ({}), so that answer must land",
+            row.line, row.id, row.counter, row.avoid
+        );
+        kinds |= match row.counter {
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        };
+    }
+    assert_eq!(
+        kinds, 7,
+        "the rows must answer with all three counters, got mask {kinds}"
+    );
+}
+
+/// ADR 0010, the parry 8 to 13 sweep: a parry must never cover a whole
+/// move's tell, so the window stays below the fastest weapon's startup in
+/// `weapons.rows` (`docs/design/FORMAT.md`: startup counts up to and
+/// including the first active tick). Candidates 12 and 13 cover the
+/// pugio's whole 12-tick tell; the shipped v2 window sits below it. The
+/// 8-tick house cap is held by `v2_parry_window_shorter_than_startup`.
+#[test]
+fn parry_window_stays_below_the_fastest_tell() {
+    let (_, rows) = weapons_parse_table(WEAPONS_SRC);
+    let fastest = rows.first().expect("rows sort fastest first").speed_ticks;
+    assert!(
+        TABLES_V2.parry_window_ticks < fastest,
+        "v2 parry {} must sit below the fastest tell {} ({} ticks): a wider window can be held before the swing starts",
+        TABLES_V2.parry_window_ticks,
+        rows.first().expect("rows sort fastest first").id,
+        fastest
+    );
+}
+
+/// ADR 0010, the parry sweep 8 to 13, measured instead of argued. Startup is
+/// held at the v2 row and each candidate is a copy of `TABLES_V2` with only
+/// `parry_window_ticks` moved, so one number moves at a time (Adams ch8).
+/// Two gates decide a candidate, and both are read off tapes:
+///
+/// - Tell gate: the parry may not answer the whole tell of the fastest weapon
+///   in `weapons.rows`, or the attacker's feint has no meaning (Bycer ch8:
+///   a tell and a commit).
+/// - Half gate: the row may answer at most half of its own tell
+///   (`parry_window_ticks * 2 <= attack_startup_ticks`), or pressing late in
+///   a swing is a promise the defender can always keep (Sellers ch9-10: a
+///   gate needs a cost).
+///
+/// The sweep's numbers are pasted in `docs/adr/0010-parry-window.md`: with
+/// startup 15 and the pugio's 12-tick tell, candidates 12 and 13 fall to the
+/// tell gate, 8 to 11 pass it at 600-800 permille of the tell covered and all
+/// fail the half gate, and the shipped 7 covers 533 permille (8 of 15 ticks)
+/// and sits on it. This test holds that verdict.
+#[test]
+fn parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on() {
+    let (_, rows) = weapons_parse_table(WEAPONS_SRC);
+    let fastest_row = rows.first().expect("rows sort fastest first");
+    let fastest = fastest_row.speed_ticks;
+    let startup = TABLES_V2.attack_startup_ticks;
+    assert_eq!(
+        startup, 15,
+        "the ADR 0010 sweep holds startup at the v2 row (15 ticks)"
+    );
+    let mut fell_to_tell = 0u32;
+    let mut fell_to_half = 0u32;
+    for candidate in 8..=13u32 {
+        let mut tables = TABLES_V2;
+        tables.parry_window_ticks = candidate;
+        let (earliest, presses) = parry_span(&tables);
+        assert_eq!(
+            presses,
+            candidate + 1,
+            "window {candidate} must buy {} parrying press ticks, measured {presses}",
+            candidate + 1
+        );
+        assert!(
+            earliest < startup,
+            "window {candidate} must leave {} tell ticks where a parry is late",
+            startup.saturating_sub(candidate)
+        );
+        if presses > fastest {
+            fell_to_tell += 1;
+        }
+        if candidate * 2 > startup {
+            fell_to_half += 1;
+        }
+    }
+    assert_eq!(
+        (fell_to_tell, fell_to_half),
+        (2, 6),
+        "candidates 12 and 13 swallow the {}'s {fastest}-tick tell and every candidate 8 to 13 answers more than half the {startup}-tick tell",
+        fastest_row.id
+    );
+    // The widest window both gates allow, and the row that ships.
+    let widest = (1..=60u32)
+        .filter(|window| window * 2 <= startup && *window < fastest)
+        .max()
+        .expect("some window fits both gates");
+    assert_eq!(
+        widest, TABLES_V2.parry_window_ticks,
+        "the shipped parry {} must be the widest window both gates allow",
+        TABLES_V2.parry_window_ticks
+    );
+    // The number the sweep decided on: covered press ticks of the tell, in
+    // permille, for the shipped row as measured by its own tapes.
+    let (earliest, covered) = parry_span(&TABLES_V2);
+    assert_eq!(
+        (earliest, covered, covered * 1000 / startup),
+        (8, 8, 533),
+        "the shipped parry {} covers {covered} of {startup} tell ticks",
+        TABLES_V2.parry_window_ticks
+    );
+}
+
 #[test]
 fn stamina_out_tape_gives_stamina_out() {
     let tables = &TABLES_V1;
@@ -222,6 +432,25 @@ struct WeaponRow {
     stamina_cost: u32,
     /// Answer from the player's kit: 1 parry, 2 dodge, 3 block.
     counter: u32,
+    /// Avoid word from the frame-data fields (`docs/design/FORMAT.md`):
+    /// `parry`, `dodge`, `block` or `range`.
+    avoid: &'static str,
+    /// Live ticks: steel can hit only here, at least one.
+    active_ticks: u32,
+    /// Committed ticks after active, `0..=60`.
+    recovery_ticks: u32,
+    /// Punish window in ticks; sits inside recovery, at least one.
+    punish_ticks: u32,
+}
+
+/// The avoid word for a counter code: 1 parry, 2 dodge, 3 block
+/// (`docs/design/FORMAT.md`: `counter` is the code form of `avoid`). Pure.
+fn avoid_word_for_counter(counter: u32) -> &'static str {
+    match counter {
+        1 => "parry",
+        2 => "dodge",
+        _ => "block",
+    }
 }
 
 /// True when the text is all ASCII digits with at least one digit. Pure.
@@ -271,10 +500,23 @@ fn weapons_parse_line(line_text: &str, line: usize) -> WeaponRow {
     let mut stagger: Option<u32> = None;
     let mut stamina: Option<u32> = None;
     let mut counter: Option<u32> = None;
+    let mut avoid: Option<&'static str> = None;
+    let mut active: Option<u32> = None;
+    let mut recovery: Option<u32> = None;
+    let mut punish: Option<u32> = None;
     for field in &parts[1..] {
         let (k, v) = field
             .split_once('=')
             .unwrap_or_else(|| panic!("line {line}: field `{field}` needs `<key>=<int>`"));
+        if k == "avoid" {
+            // The avoid answer is a word, not a number (FORMAT.md frame data).
+            assert!(
+                matches!(v, "parry" | "dodge" | "block" | "range"),
+                "line {line}: avoid `{v}` must be parry, dodge, block or range"
+            );
+            avoid = Some(Box::leak(v.to_string().into_boxed_str()));
+            continue;
+        }
         let parsed = weapons_parse_u32(v, line, k);
         match k {
             "type" => weapon_type = Some(parsed),
@@ -284,6 +526,9 @@ fn weapons_parse_line(line_text: &str, line: usize) -> WeaponRow {
             "stagger_permille" => stagger = Some(parsed),
             "stamina_cost" => stamina = Some(parsed),
             "counter" => counter = Some(parsed),
+            "active_ticks" => active = Some(parsed),
+            "recovery_ticks" => recovery = Some(parsed),
+            "punish_ticks" => punish = Some(parsed),
             _ => panic!("line {line}: unknown key `{k}`"),
         }
     }
@@ -300,6 +545,10 @@ fn weapons_parse_line(line_text: &str, line: usize) -> WeaponRow {
         stagger_permille: need("stagger_permille", stagger),
         stamina_cost: need("stamina_cost", stamina),
         counter: need("counter", counter),
+        avoid: avoid.unwrap_or_else(|| panic!("line {line}: weapon `{id_box}` misses `avoid`")),
+        active_ticks: need("active_ticks", active),
+        recovery_ticks: need("recovery_ticks", recovery),
+        punish_ticks: need("punish_ticks", punish),
     }
 }
 
@@ -419,6 +668,86 @@ fn every_weapon_has_a_counter() {
             (1..=3).contains(&row.counter),
             "line {}: counter {} must be 1 parry, 2 dodge or 3 block",
             row.line,
+            row.counter
+        );
+    }
+}
+
+/// The counting rule of `docs/design/FORMAT.md`: `startup` counts up to and
+/// including the first active tick. On a press-at-zero tape under V2 rows the
+/// first `Hit` lands on step `attack_startup_ticks`, so the tell the player
+/// read lasted exactly `startup` ticks.
+#[test]
+fn first_active_tick_is_startup() {
+    let tables = &TABLES_V2;
+    let mut state = FightState::new(2).expect("two fighters fit");
+    let horizon = tables.attack_startup_ticks + tables.attack_recovery_ticks + 6;
+    let mut landed_on = None;
+    for step in 0..horizon {
+        let attacker = if step == 0 { ATTACK } else { 0 };
+        let events = step_pair(&mut state, tables, attacker, 0);
+        if has(&events, "hit") {
+            landed_on = Some(step);
+            break;
+        }
+    }
+    assert_eq!(
+        landed_on,
+        Some(tables.attack_startup_ticks),
+        "under v2 the first hit must land on the startup tick (FORMAT.md counting rule)"
+    );
+}
+
+/// Frame data per move (`docs/design/FORMAT.md`): every row carries
+/// `startup active recovery` in ticks plus the two player questions, and the
+/// punish window sits inside recovery.
+#[test]
+fn every_move_carries_frame_data() {
+    let (_, rows) = weapons_parse_table(WEAPONS_SRC);
+    for row in &rows {
+        assert!(
+            row.active_ticks >= 1,
+            "line {}: weapon `{}` needs at least one active tick",
+            row.line,
+            row.id
+        );
+        assert!(
+            row.punish_ticks >= 1,
+            "line {}: weapon `{}` needs a punish window of at least one tick",
+            row.line,
+            row.id
+        );
+        assert!(
+            row.punish_ticks <= row.recovery_ticks,
+            "line {}: weapon `{}` punish {} must sit inside recovery {}",
+            row.line,
+            row.id,
+            row.punish_ticks,
+            row.recovery_ticks
+        );
+        assert!(
+            row.speed_ticks + row.active_ticks + row.recovery_ticks <= 60,
+            "line {}: weapon `{}` startup+active+recovery {} must fit 60 ticks",
+            row.line,
+            row.id,
+            row.speed_ticks + row.active_ticks + row.recovery_ticks
+        );
+    }
+}
+
+/// The avoid answer and the counter code never disagree: `avoid` is the
+/// word form of `counter` (`docs/design/FORMAT.md`).
+#[test]
+fn avoid_matches_counter() {
+    let (_, rows) = weapons_parse_table(WEAPONS_SRC);
+    for row in &rows {
+        assert_eq!(
+            row.avoid,
+            avoid_word_for_counter(row.counter),
+            "line {}: weapon `{}` avoid `{}` must be the word for counter {}",
+            row.line,
+            row.id,
+            row.avoid,
             row.counter
         );
     }

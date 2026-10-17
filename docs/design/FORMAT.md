@@ -56,7 +56,14 @@ Legal ranges for the `combat` table:
 - The shipped v1 row (`parry == startup == 4`) predates the strict
   rule and stays valid for replays only; a new file must keep the
   parry window below startup, so a file that copies v1 exactly is
-  refused. Start from v2.
+  refused. Start from v2's numbers.
+
+A shipped row is frozen. `v1` and `v2` in `content/design/combat.rows`
+mirror `TABLES_V1` and `TABLES_V2`; change one of their numbers and the
+loader refuses the whole file with that row's line number, because an
+old tape must keep reading the numbers it was recorded under. A change
+is a new version: bump the header, then ship the changed numbers under
+a new row id (`v3`, `v4`, ...). The old rows may stay as reference.
 
 ## Frame data per move
 
@@ -81,6 +88,23 @@ is avoid, recovery is `attack_recovery_ticks` or `endlag_ticks`.
 A future per-move table uses `startup`, `active`, `recovery`,
 `avoid` and `punish` directly.
 
+`content/design/weapons.rows` version 2 carries these fields directly:
+`speed_ticks` stays the startup key, and `active_ticks`, `recovery_ticks`,
+`avoid` and `punish_ticks` are the frame-data fields. Its `counter` code
+must read as the same answer as `avoid`, and `punish_ticks` must sit inside
+`recovery_ticks`; the game test
+`crates/game/tests/it/design_combat.rs::every_move_carries_frame_data`
+holds both.
+
+The row's `avoid` answer has to be a window, not a wish: the parry may not
+answer the whole tell of the fastest weapon in `weapons.rows`, and may answer
+at most half of its own tell. Both gates are measured off tapes for the
+shipped row and for the swept candidates 8 to 13 by
+`crates/game/tests/it/design_combat.rs::parry_sweep_8_to_13_leaves_a_verdict_the_shipped_row_sits_on`,
+with the numbers and the reason in `docs/adr/0010-parry-window.md`. A faster
+weapon in this file or a shorter startup moves that verdict, so the sweep is
+rerun before the number changes.
+
 ## Worked example
 
 Readable-timing combat row (version 2). Every value passes
@@ -93,5 +117,24 @@ table combat version 2
 v2 attack_damage=120 attack_startup_ticks=15 attack_recovery_ticks=8 attack_stamina_cost=25 dodge_stamina_cost=20 block_hold_cost_per_tick=1 stamina_regen_per_tick=2 dodge_duration_ticks=10 dodge_iframes_ticks=6 block_chip_num=1 block_chip_den=5 parry_window_ticks=7 parry_stagger_ticks=12 hit_react_ticks=6 hitstop_ticks=4 knockdown_ticks=30
 ```
 
-Change one number (e.g. `attack_startup_ticks=16`), keep the file,
-and practice mode swaps it in at the next tick boundary.
+The v2 row above is reference: an edit inside it is refused.
+
+## Change one number
+
+Copy the row you start from, give the copy the next version id, and set
+the header to that same number. Here v3 is v2 with a slower light
+startup (16 instead of 15); v1 and v2 stay as reference rows:
+
+```text
+# Slower light startup: v3 of the readable-timing row.
+table combat version 3
+v1 attack_damage=120 attack_startup_ticks=4 attack_recovery_ticks=8 attack_stamina_cost=25 dodge_stamina_cost=20 block_hold_cost_per_tick=1 stamina_regen_per_tick=2 dodge_duration_ticks=10 dodge_iframes_ticks=6 block_chip_num=1 block_chip_den=5 parry_window_ticks=4 parry_stagger_ticks=12 hit_react_ticks=6 hitstop_ticks=4 knockdown_ticks=30
+v2 attack_damage=120 attack_startup_ticks=15 attack_recovery_ticks=8 attack_stamina_cost=25 dodge_stamina_cost=20 block_hold_cost_per_tick=1 stamina_regen_per_tick=2 dodge_duration_ticks=10 dodge_iframes_ticks=6 block_chip_num=1 block_chip_den=5 parry_window_ticks=7 parry_stagger_ticks=12 hit_react_ticks=6 hitstop_ticks=4 knockdown_ticks=30
+v3 attack_damage=120 attack_startup_ticks=16 attack_recovery_ticks=8 attack_stamina_cost=25 dodge_stamina_cost=20 block_hold_cost_per_tick=1 stamina_regen_per_tick=2 dodge_duration_ticks=10 dodge_iframes_ticks=6 block_chip_num=1 block_chip_den=5 parry_window_ticks=7 parry_stagger_ticks=12 hit_react_ticks=6 hitstop_ticks=4 knockdown_ticks=30
+```
+
+`v3` passes `validate_tables` (startup 16 is inside `1..=60`, parry 7
+stays below 16), and the header picks it. Practice mode reads the file
+at the next tick boundary and swaps that row in; the swap is written to
+the tape. A refused file changes nothing and the last good rows stay
+live, so a typo costs a log line, not a broken bout.

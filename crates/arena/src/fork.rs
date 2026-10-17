@@ -46,6 +46,11 @@ use engine_input::{FighterError, FighterId, FighterInput, FighterTape};
 use engine_physics::controller::ControllerSnapshot;
 use engine_physics::limb::{LimbPool, MAX_LIMBS};
 
+/// The shipped duel tiers, re-exported from `engine_ai::tier` (single owner
+/// of the numbers) so a balance consumer outside the AI crate installs the
+/// one shipped table instead of copying its rows.
+pub use engine_ai::tier::{TierRow, SHIPPED_TIERS, TIER_DUELS, WIN_BAR_PERMILLE};
+
 /// Planar speed below which a fighter counts as stuck, meters per second.
 pub const STUCK_SPEED_MPS: f32 = 0.2;
 
@@ -58,8 +63,9 @@ fn fighter_slot_count(fighters: usize) -> u8 {
 }
 
 /// Counterfactual proposal applied to a fork before it runs. Minimal set:
-/// morale intent, script replacement and a freeze. There is deliberately no
-/// `RemoveFighter`: the slot count is fixed by the snapshot config.
+/// morale intent, a duel tier, script replacement and a freeze. There is
+/// deliberately no `RemoveFighter`: the slot count is fixed by the snapshot
+/// config.
 #[derive(Clone, PartialEq, Debug)]
 pub enum ForkProposal {
     /// Set one brain's morale (`0..=1000`, 500 neutral): high morale attacks
@@ -70,6 +76,15 @@ pub enum ForkProposal {
         fighter: u8,
         /// Morale in permille, `0..=1000`.
         permille: u16,
+    },
+    /// Install one shipped duel tier on a brain: its role pins the policy and
+    /// its reaction plus aggression shape the temperament, so a balance
+    /// difficulty becomes a skill rung, never a stat wall or hidden info.
+    SetTier {
+        /// Fighter slot, `0..config.fighters`.
+        fighter: u8,
+        /// The tier row to install; single owner is `engine_ai::tier`.
+        tier: TierRow,
     },
     /// Replace the fork tape slice for one fighter. Entries run on absolute
     /// match ticks; gaps are AI-filled like the real tick.
@@ -228,9 +243,10 @@ impl Fork {
     }
 
     /// Queue a proposal on the fork. `SetAggression` applies to the stored
-    /// brain immediately; `SwapTape` merges into the fork tape (replacing
-    /// that fighter's earlier slice); `FreezeFighter` latches the slot and
-    /// wins over tape at run time. Invalid proposals change nothing.
+    /// brain immediately; `SetTier` installs the tier on the stored brain;
+    /// `SwapTape` merges into the fork tape (replacing that fighter's earlier
+    /// slice); `FreezeFighter` latches the slot and wins over tape at run
+    /// time. Invalid proposals change nothing.
     pub fn apply_proposal(&mut self, proposal: ForkProposal) -> Result<(), ForkError> {
         match proposal {
             ForkProposal::SetAggression { fighter, permille } => {
@@ -239,6 +255,11 @@ impl Fork {
                     return Err(ForkError::BadPermille(permille));
                 }
                 self.brains[slot].set_morale(i32::from(permille));
+                Ok(())
+            }
+            ForkProposal::SetTier { fighter, tier } => {
+                let slot = self.slot(fighter)?;
+                self.brains[slot].set_tier(tier);
                 Ok(())
             }
             ForkProposal::SwapTape { fighter, inputs } => {
@@ -490,6 +511,9 @@ impl ForkJob {
                 locos: self.locos,
                 warps: Vec::new(),
                 destruction: self.destruction,
+                // Forks come from v1 prefix snapshots, which carry no
+                // obstacle world: the empty world is the legacy match.
+                world: super::world::MatchWorld::empty(),
                 #[cfg(feature = "sim")]
                 controllers,
                 cursor,
@@ -877,6 +901,15 @@ mod tests {
                 permille: 1001,
             }),
             Err(ForkError::BadPermille(1001))
+        );
+        // `SetTier` mirrors the morale row: a slot outside the fighter count
+        // refuses with the culprit carried, never a panic.
+        assert_eq!(
+            fork.apply_proposal(ForkProposal::SetTier {
+                fighter: 2,
+                tier: SHIPPED_TIERS[0],
+            }),
+            Err(ForkError::UnknownFighter(2))
         );
         assert_eq!(
             fork.apply_proposal(ForkProposal::FreezeFighter { fighter: 7 }),

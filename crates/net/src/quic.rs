@@ -1921,21 +1921,31 @@ mod channel_route_tests {
 #[cfg(test)]
 mod relay_transport_tests {
     use super::*;
-    use crate::nat::{invite_leg, mint_ticket, QuicRole};
-    use crate::relay::{RelayConfig, RelayHub};
+    use crate::relay::{InviteCode, RelayConfig, RelayHub};
+    use crate::split::invite_ids;
 
     fn relay() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 7041))
     }
 
-    fn legs() -> (RelayLeg, RelayLeg) {
+    /// Test-only leg pair: the same invite code maps the same host/join id
+    /// pair on both sides via `split::invite_ids` (mirrored roles).
+    fn legs_at(relay_addr: SocketAddr) -> (RelayLeg, RelayLeg) {
         let mut rng = 0x0A11_CE00_1234_5678u64;
-        let (code, _) = mint_ticket(&mut rng, 3, 0x1234_5678, 0).expect("ticket mints");
+        let code = InviteCode::mint(&mut rng);
         let token = RelayConfig::default().token;
-        (
-            invite_leg(&code, relay(), token, QuicRole::Host),
-            invite_leg(&code, relay(), token, QuicRole::Join),
-        )
+        let (host_id, join_id) = invite_ids(&code);
+        let mk = |me: u64, peer: u64| RelayLeg {
+            addr: relay_addr,
+            token,
+            me,
+            peer,
+        };
+        (mk(host_id, join_id), mk(join_id, host_id))
+    }
+
+    fn legs() -> (RelayLeg, RelayLeg) {
+        legs_at(relay())
     }
 
     #[test]
@@ -2049,11 +2059,7 @@ mod relay_transport_tests {
             .set_nonblocking(true)
             .expect("fake relay nonblocking");
         let relay_addr = relay_sock.local_addr().expect("relay addr");
-        let mut rng = 0x0A11_CE00_1234_5678u64;
-        let (code, _) = mint_ticket(&mut rng, 3, 0x1234_5678, 0).expect("ticket mints");
-        let token = RelayConfig::default().token;
-        let host_leg = invite_leg(&code, relay_addr, token, QuicRole::Host);
-        let join_leg = invite_leg(&code, relay_addr, token, QuicRole::Join);
+        let (host_leg, join_leg) = legs_at(relay_addr);
         let mut transport = RelayTransport::bind_loopback(join_leg).expect("loopback bind");
         let target = transport.local_addr().expect("transport addr");
         let payload = vec![7u8; 16];

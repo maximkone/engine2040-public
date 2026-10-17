@@ -54,8 +54,14 @@ fn record_commit(target: DomTarget, ime: &Ime) -> Vec<DomEvent> {
     if text.is_empty() {
         return Vec::new();
     }
-    let _ = target;
-    vec![DomEvent::BeforeInput, DomEvent::TextInput, DomEvent::Input]
+    // Each editable target commits through the same beforeinput ->
+    // textInput -> input order; the match keeps the recorder honest per
+    // target instead of ignoring it.
+    match target {
+        DomTarget::Input | DomTarget::Textarea | DomTarget::ContentEditable => {
+            vec![DomEvent::BeforeInput, DomEvent::TextInput, DomEvent::Input]
+        }
+    }
 }
 
 /// Assert one vector emits `beforeinput` -> `textInput` -> `input`.

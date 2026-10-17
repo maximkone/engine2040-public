@@ -316,14 +316,13 @@ pub fn normalize_document(doc: &Document) -> Result<Document, OptimizeError> {
     for image in &mut out_images {
         let pixels = usize::try_from(image.width)
             .unwrap_or(usize::MAX)
-            .checked_mul(usize::try_from(image.height).unwrap_or(usize::MAX))
-            .unwrap_or(usize::MAX);
+            .saturating_mul(usize::try_from(image.height).unwrap_or(usize::MAX));
         if pixels <= MAX_TEXTURE_PX {
             continue;
         }
         resize_over_budget(image, pixels)?;
     }
-    out_images.sort_by(|a, b| a.id.cmp(&b.id));
+    out_images.sort_by_key(|a| a.id);
     Ok(Document {
         meshes: pruned_meshes,
         materials: unique_materials,
@@ -350,8 +349,7 @@ fn resize_over_budget(image: &mut DocImage, pixels: usize) -> Result<(), Optimiz
     }
     while usize::try_from(width)
         .unwrap_or(usize::MAX)
-        .checked_mul(usize::try_from(height).unwrap_or(usize::MAX))
-        .unwrap_or(usize::MAX)
+        .saturating_mul(usize::try_from(height).unwrap_or(usize::MAX))
         > MAX_TEXTURE_PX
     {
         width = width.div_ceil(2).max(1);

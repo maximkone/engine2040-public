@@ -7,7 +7,10 @@
 //! chip counts. Determinism: same text gives same swap or same refusal.
 //! Errors: [`CombatError`] only; parse failures carry the line in `value`,
 //! range failures carry the culprit value. Cold path only, never tick.
+//! Digits owner: [`engine_core::checked::decimal_u32`] (no local copy).
 //! Caller: `crates/combat/src/lib.rs` (module wiring; game wiring in EG29).
+
+use engine_core::checked::decimal_u32;
 
 use crate::fight::{CombatError, Tables, TABLES_V1, TABLES_V2};
 use crate::tables::MoveTableSet;
@@ -32,15 +35,6 @@ const KNOWN: [&str; 16] = [
     "hitstop_ticks",
     "knockdown_ticks",
 ];
-
-/// ASCII digits only, no sign, no dot, checked overflow; `None` refuses.
-fn decimal(text: &str) -> Option<u32> {
-    if !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    // Empty text and overflow both fail `parse`, which refuses them.
-    text.parse::<u32>().ok()
-}
 
 /// Parse `table combat version <n>`; `n` nonzero, refused with its line.
 fn parse_header(line: &str, lineno: u32) -> Result<u32, CombatError> {
@@ -69,7 +63,7 @@ fn parse_header(line: &str, lineno: u32) -> Result<u32, CombatError> {
     let _ = again.next();
     let _ = again.next();
     let token = again.next().unwrap_or("");
-    match decimal(token) {
+    match decimal_u32(token) {
         Some(0) => Err(CombatError::BadTableVersion(0)),
         None => Err(CombatError::BadTableValue {
             field: "table",
@@ -97,7 +91,7 @@ fn parse_row(line: &str, lineno: u32) -> Result<(u32, Tables), CombatError> {
             value: lineno,
         });
     }
-    let row_version = match decimal(digits) {
+    let row_version = match decimal_u32(digits) {
         Some(0) | None => {
             return Err(CombatError::BadTableValue {
                 field: "id",
@@ -129,7 +123,7 @@ fn parse_row(line: &str, lineno: u32) -> Result<(u32, Tables), CombatError> {
                 value: lineno,
             });
         }
-        let number = decimal(val).ok_or(CombatError::BadTableValue {
+        let number = decimal_u32(val).ok_or(CombatError::BadTableValue {
             field: KNOWN[index],
             value: lineno,
         })?;
@@ -353,5 +347,22 @@ mod tests {
         let v3_file = ["table combat version 3", V1_LINE, &v3_line].join("\n");
         let swap = parse_tables(&v3_file).expect("new version swaps");
         assert_eq!(swap.version(), 3);
+    }
+
+    #[test]
+    fn row_digits_use_the_shared_checked_owner() {
+        // Digits only in, whole number out, overflow refused: the one owner
+        // the arena zones rows reader also calls, so the two rows readers
+        // cannot drift into two copies of the same body.
+        assert_eq!(engine_core::checked::decimal_u32("120"), Some(120));
+        assert_eq!(engine_core::checked::decimal_u32("4294967296"), None);
+        let over = v2_file().replace("attack_damage=120", "attack_damage=4294967296");
+        assert_eq!(
+            parse_tables(&over),
+            Err(CombatError::BadTableValue {
+                field: "attack_damage",
+                value: 2
+            })
+        );
     }
 }

@@ -623,6 +623,12 @@ impl FramePlan {
         }
     }
 }
+impl Default for FramePlan {
+    /// Same empty accumulator as [`FramePlan::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
 /// Trace input file bytes: 16 LE bytes per input in tape order.
 /// Caller: `crate::matrix::emit_local_digests` proves file-vs-memory equality.
 #[must_use]
@@ -637,7 +643,7 @@ pub fn encode_trace_inputs(inputs: &[Input]) -> Vec<u8> {
 /// Caller: `crate::matrix::emit_local_digests` replays the file bytes.
 /// Errors: [`Error::Invalid`] on bad length or failed [`validate`].
 pub fn decode_trace_inputs(config: Config, bytes: &[u8]) -> Result<Vec<Input>, Error> {
-    if bytes.len() % 16 != 0 || bytes.len() / 16 > MAX_INPUTS {
+    if !bytes.len().is_multiple_of(16) || bytes.len() / 16 > MAX_INPUTS {
         return Err(Error::Invalid("bad trace length"));
     }
     let mut inputs = Vec::with_capacity(bytes.len() / 16);

@@ -183,18 +183,32 @@ pub fn persist_sealed(
     frame.extend_from_slice(&payload_len.to_le_bytes());
     frame.extend_from_slice(&payload);
     frame.extend_from_slice(&crc32(&payload).to_le_bytes());
-    let name = generation_file_name(generation);
-    let tmp = dir.join(format!("{name}{TMP_SUFFIX}"));
+    write_atomic(&dir.join(generation_file_name(generation)), &frame)
+}
+
+/// Atomic write to any file path: tmp file synced to disk, then rename, then
+/// the directory synced (a crash never leaves half a file; the prior valid
+/// file survives a failed write). Mirrors `engine-save`'s `write_atomic`
+/// (see the module note) for paths outside the generation naming scheme.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("path has no file name"))?;
+    let mut tmp_name = name.to_os_string();
+    tmp_name.push(TMP_SUFFIX);
+    let tmp = path.with_file_name(tmp_name);
     {
         use std::io::Write as _;
         let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&frame)?;
-        // Flush before the rename publishes the generation. The handle closes
-        // at the end of this block, which Windows needs before the rename.
+        file.write_all(bytes)?;
+        // Flush before the rename publishes the bytes. The handle closes at
+        // the end of this block, which Windows needs before the rename.
         file.sync_all()?;
     }
-    std::fs::rename(&tmp, dir.join(name))?;
-    sync_dir(dir);
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        sync_dir(dir);
+    }
     Ok(())
 }
 

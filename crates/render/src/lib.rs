@@ -25,15 +25,9 @@ pub mod quality;
 #[cfg(feature = "v1")]
 pub mod v1;
 
-/// Live shader, material and texture reload (HR2): versioned swap over HR1
-/// notices with last-good kept on failure. Behind `v1`; consumer is HR5
-/// practice-mode wiring.
-#[cfg(feature = "v1")]
-pub mod live;
-
 /// Shader variant manifest with count gate + frame-exact staged reload
 /// (RA7): enumerates static defines, refuses over-cap variants loudly.
-/// Std-only; feeds `cache::PipelineKey` defines and `live` swaps.
+/// Std-only; feeds `cache::PipelineKey` defines.
 pub mod variants;
 
 /// V1 IBL + shadow map (R2): HDRI environment sampling with a roughness
@@ -62,11 +56,6 @@ pub mod v1_lighting;
 #[cfg(all(test, feature = "v1"))]
 pub mod v1_temporal;
 
-/// VFX (R5): dust and torch particles plus blood decals, with instanced-quad
-/// upload reusing the v1 mesh path. Behind `v1`; consumers are GM1/CB2.
-#[cfg(feature = "v1")]
-pub mod v1_vfx;
-
 /// V1 forward-PBR on wgpu (R1): offscreen capture with zero validation errors.
 #[cfg(feature = "window")]
 pub mod v1_gpu;
@@ -83,7 +72,6 @@ pub mod present;
 /// quads drained to one triangle list. Std-only; consumer is the slice-2
 /// present-path feed.
 pub mod overlay;
-pub mod sprite_pack;
 
 /// EG8 pass-truth gate (GX6 successor): a look pass counts live only when
 /// its on/off frames differ above epsilon. Std-only; consumer is the EG8
@@ -96,23 +84,15 @@ pub mod pass_truth;
 /// `SimulatedSurface` forced-loss tests are the first consumer.
 pub mod heal;
 
-/// Generational staging-belt uploads (RA6): ring of in-flight frame
-/// generations, retire-after-submit discipline, `invalidate_all` for the
-/// AH2 resize/loss hook. Std-only; consumers are the RA2 executor and the
-/// WIN1/ED1 frame loops.
-pub mod uploads;
-
-/// Demand-paged tile residency on the streaming path:
-/// tile-LRU cap-192 plus pinned L0 beside the frozen `CpuCache` in
-/// `stream`, carrying the LADDER:528 ACCEPTED spike. Std-only; consumer is
-/// the RA6 staging-belt upload path, which pages tiles instead of whole
-/// textures. The `present.rs:300-356` FIFO is untouched.
-pub mod stream;
-
 /// Persisted pipeline cache with async compile and last-good fallback
 /// (RA5): versioned on-disk blobs keyed by shader hash + define set +
 /// layout id. Std-only; consumer is the RA2 executor's pipeline path.
 pub mod cache;
+
+/// Debug line sink (RL58 slice 1): named line groups with a per-group depth
+/// bias, a per-frame recorder and the pure line-vertex build. Std-only; the
+/// consumer is the RL58 live line pass plus the Rapier backend (later slices).
+pub mod debug_draw;
 
 /// Scene draw list with culling and hysteresis LOD (RA3): pure function
 /// of (snapshot, camera, lod table), integer-stable order. Std-only;
@@ -122,9 +102,14 @@ pub mod draw;
 /// Draw-id target CPU contract: index to texel id plus readback tally.
 pub mod draw_id;
 
-/// Draw-id readback reduce to per-body pixel counts (SP63 slice b).
-/// Std-only; consumer is the slice-c visibility score.
-pub mod draw_id_reduce;
+/// GPU frustum cull slice 1 (GS18) device runner: one compute pass writes a
+/// 0/1 flag per static instance plus the 5-u32 indirect args over the shared
+/// `shaders/cull.wgsl`, then refuses when the device set misses the `draw`
+/// CPU oracle. Needs the `window` feature; the GS18b
+/// `draw_indexed_indirect` hook is the caller (the row states no draw path
+/// uses the cull yet).
+#[cfg(feature = "window")]
+pub mod gpu_cull;
 
 /// Reused per-frame draw list plus uniform and draw encode over one
 /// bump arena. Std-only; the submit path reads the encoded bytes.
@@ -133,9 +118,6 @@ pub mod frame;
 /// One reusable byte buffer as a per-frame bump arena. Std-only;
 /// consumer is the sibling `frame` module, which encodes into it.
 pub mod frame_alloc;
-
-/// GPU frustum cull plus its CPU oracle.
-pub mod gpu_cull;
 
 /// Instanced reacting crowd staging: seat layout, hysteresis LOD, sector
 /// cull hook and caller-owned instance builds over the present seat math.
@@ -146,6 +128,11 @@ pub mod crowd_inst;
 /// the 4x4 Bayer keep rule with its WGSL mirror. Std-only; consumer is
 /// the `draw` LOD path, which binds `keep` per pixel next slice.
 pub mod lod_fade;
+
+/// Wound paint budget queue: one paint list per character with a capped
+/// per-frame drain and oldest-map eviction. Std-only; the decal atlas bind
+/// drains it next slice.
+pub mod wound_map;
 
 /// CPU-side frame-graph executor (RA2): runs the compiled graph over
 /// recorded pass fns, plans transient aliasing, refuses GPU submit with
@@ -175,18 +162,6 @@ pub mod baked_bake;
 /// Baked lightmaps with validity mask + SH probes reusing the ibl SH path
 /// (RL5): bake identical bytes x2; consumer is the WIN1/ED1 arena + Q1.
 pub mod baked_gi;
-/// Halton-sampled arena lightmap bake (RL5 bake-once path): Halton
-/// hemisphere plus adaptive refine into the `baked_bake` owners; consumer
-/// is `baked_gi::sample_arena_frame` via `halton_bake`.
-pub mod baked_halton;
-pub use baked_halton::{
-    halton, halton23_scrambled, halton_bake, hemisphere_dir, num_samples, BOUNCE_1, BOUNCE_2,
-    ERROR_TOL, INITIAL_SAMPLES, MAX_SAMPLES,
-};
-/// Hero motion-hold clip: fixed 120-frame slow push-in over the twin
-/// establishing view through the frozen temporal resolve. Std-only;
-/// consumer is the twin establishing view through `present::look`.
-pub mod clip_hold;
 /// Deferred blood decals with depth reject (RP3): sand-not-air fixtures,
 /// roughness drying curve. Std-only; consumer is WIN1 CB2 gore mapping.
 pub mod decals;
@@ -196,29 +171,11 @@ pub mod decals;
 #[cfg(feature = "window")]
 pub mod presenter_pick;
 
-/// Wound paint budget queue (GS19 slice 1): one paint list per character,
-/// capped drain per frame in stable order. Std-only; the next slice binds
-/// the drain to the decal atlas.
-pub mod wound_map;
-
-/// Sword ribbon ring (RL53 slice 1): pure CPU trail staging in mm.
-/// Std-only; consumer is the slice-2 GPU draw, which reads the ring.
-pub mod trail;
-
 /// Height fog + contact shadows live on the GPU (RL7): fog ramps from the
 /// bound RL4 day capture, contact pass for small details. Std-only;
 /// consumer is the WIN1 forward graph via `compile_fog_for_forward`.
 pub mod fog;
 
-/// Volumetric cloud layer over the RL4 sky bake: slab raymarch with
-/// hashed offsets, deterministic reruns. Std-only; consumer is the
-/// sky capture via `composite_clouds_over_capture`.
-pub mod clouds;
-/// Analytic volumetric fog plus one cloud slice over the height lane:
-/// stepped extinction march with a quality-table step hook, CPU reference
-/// plus the embedded device shader. Std-only; the root helper below reads
-/// the march budget, the forward graph binds the pass next.
-pub mod fog_vol;
 /// GTAO ambient occlusion at half resolution + the shared LookFrame
 /// bind shape (RL3): bilateral upsample, CPU golden bytes, GPU submit
 /// refused until the RA1 bind groups land. Std-only.
@@ -241,34 +198,19 @@ pub mod particles_gpu;
 /// sun (RL27): pinned splits over the camera range, std-only; consumer
 /// is the day-sweep fixture, then RL30.
 pub mod shadow_cascade;
-/// Skin, eye and hair shade slice: wrapped-diffuse subsurface approx plus
-/// wet-eye and strand glint, gated by the quality table. Std-only CPU
-/// reference plus the slice WGSL; consumer is the forward-pass bind next.
-pub mod skin;
 /// Physical sky + EV100 exposure (RL4): Hillaire-school radiance, day
 /// param identical bytes x2. Std-only; feeds RL2 IBL and RL7 fog.
 pub mod sky;
-/// Static Gaussian backdrop, presentation only (splat): PLY cook plus tile
-/// composite with depth test on and depth write off. Std-only; consumer is
-/// the tile first-pass presenter plus tests/it/splat_backdrop.rs.
-pub mod splat;
-/// Test GPU gate: a GPU test skips with a `SKIPPED` line, or fails under
-/// `E2040_REQUIRE_GPU=1`. Consumers are the GPU-backed tests.
+/// Test GPU gate: `require_or_skip` skips with a `SKIPPED` line (counted),
+/// or fails under `E2040_REQUIRE_GPU=1`. Ad-hoc `SKIPPED` sites bypass it.
 pub mod test_gpu;
 /// Startup lighting-tier probe Base/Rt/Ultra (RT0): adapter ray-query plus
 /// accel read, forced tiers refused loudly, tier stamped into RA8 manifests.
 /// Std-only; consumer is RT9 tier-aware graph wiring (WIN1 match).
 pub mod tier;
-/// Display-transform CPU mirror plus the one-source hue gate (test-only).
-#[cfg(test)]
-mod tonemap;
 
 /// Pure integer dynres governor (GS12): GPU microseconds to scale percent.
 pub mod dynres_gov;
-/// Tunnel-mouth exposure split: one baked frame holding sunlit sand
-/// plus the dim gate-tunnel mouth off the frozen day rig. Std-only;
-/// consumer is the window forward bind plus the capture bundle.
-pub mod tunnel_mouth;
 
 #[cfg(feature = "window")]
 pub mod gpu;
@@ -311,8 +253,6 @@ impl LightGrid {
 
 pub mod core;
 pub mod gi;
-/// SDFGI-cascade CPU reference tables (E38b spike, flag-gated, never default-on).
-pub mod gi_dyn;
 /// Dynamic GI probe stub over the arena slice (RL-RT slice 1): a 32-probe
 /// RGB grid refreshed per frame from the live rig, no bake. Std-only;
 /// consumer is `GiRuntime::irradiance_mixed` in `gi`.
@@ -322,8 +262,6 @@ pub mod gi_probe;
 /// Std-only; consumer is the later submit pass, deferred here.
 pub mod meshlet;
 pub mod particles;
-/// Half-res ReSTIR-GI reservoir oracle (CPU reference, flag-gated, never default-on).
-pub mod restir_gi;
 /// Ray-traced sun shadows over the arena sand (RL-RT slice 1): pinned
 /// occluders, slab-tested shadow factors and the EG8 on/off pixel gate.
 /// Std-only; consumer is `gi_probe` plus its frame shade.
@@ -335,6 +273,11 @@ pub mod shadow_post;
 /// temporal upsampling, then bloom/exposure/ACES/grading reading the
 /// RL1/RL2 passes. Consumers: WIN1/ED1 final frame, Q1 clips.
 pub mod post;
+
+/// Post jitter and motion leaf (CQ24): Halton-2/3 per-frame projection
+/// jitter plus current-minus-history motion vectors, re-exported through
+/// the `post` facade so `post::` callers keep their path.
+pub mod post_jitter_motion;
 
 /// SMAA fallback plus dynamic resolution around RP1 (RP4): edge-detect
 /// area blend for the TAA-off path plus a hysteresis scale controller on
@@ -376,13 +319,9 @@ pub mod twin_arena;
 /// Consumers: WIN1/ED1 material frame, Q1 chart.
 pub mod ibl;
 
-/// Volumetric step hint for the window forward pass: march steps (count)
-/// plus the cloud-slice toggle read from the quality table. Thin glue over
-/// [`fog_vol`]; the march math and the table hook live there.
-pub fn volumetric_hint(quality: quality::Quality) -> (u8, bool) {
-    let config = fog_vol::config_for_quality(quality);
-    (config.steps, config.cloud_on)
-}
+/// Sword ribbon ring (RL53 slice 1): the sim's integer sweep segments ringed
+/// and staged as a vert strip; consumer is the `crates/game` trail feed.
+pub mod trail;
 
 /// Headless frame counter: `begin_frame` counts one frame per call and
 /// `draw_count` reports the total. Deterministic; no IO, no allocation.
@@ -458,23 +397,37 @@ mod tests {
     }
 
     #[test]
-    fn draw_id_reduce_is_wired() {
-        // Workspace-audit pin (SP63 slice b): the reduce module must stay
-        // declared, or its unit tests silently stop compiling.
-        assert_eq!(crate::draw_id_reduce::CLEAR_MIRROR, u32::MAX);
+    fn aces_one_source_gate() {
+        // Moved from the deleted test-only `tonemap` mirror (wave-4 mining):
+        // the CPU mirror never compared against the WGSL it mirrored, so only
+        // this cross-file count stays. One ACES source in the owned WGSL copy.
+        let wgsl = include_str!("shaders/tonemap.wgsl");
+        let aces_defs = wgsl.matches("fn aces").count();
+        assert_eq!(aces_defs, 1, "one `fn aces` definition, got {aces_defs}");
+        let post = include_str!("post.rs");
+        assert!(!post.contains("fn aces"), "post still carries its copy");
+        let total = post.matches("fn aces").count()
+            + include_str!("v1.rs").matches("fn aces").count()
+            + include_str!("shadow_post.rs").matches("fn aces").count()
+            + include_str!("shaders/post/post_chain.wgsl")
+                .matches("fn aces")
+                .count()
+            + include_str!("shaders/post/composite_compute.wgsl")
+                .matches("fn aces")
+                .count()
+            + aces_defs;
+        assert_eq!(
+            total, 4,
+            "one source: total {total}, want 4 with post clean"
+        );
+        assert!(
+            wgsl.contains("fn rrt_odt_fit") && wgsl.contains("fn aces_fitted"),
+            "keeps the single fitted source"
+        );
+        assert!(
+            wgsl.contains("fn dither4"),
+            "keeps the fixed-pattern helper"
+        );
     }
 
-    #[test]
-    fn splat_is_wired() {
-        // Workspace-audit pin (splat): src/splat.rs must stay declared in
-        // lib.rs, or the backdrop silently stops compiling into the library
-        // (the `#[path]` shim in tests/it/splat_backdrop.rs masked this).
-        let row = crate::splat::LicenseRow {
-            source: "fixture-local",
-            terms: "test-only",
-            capture: "wiring-pin",
-        };
-        assert_eq!(row.capture, "wiring-pin");
-        assert!(crate::splat::SplatBackdrop::try_new(None, &[]).is_err());
-    }
 }

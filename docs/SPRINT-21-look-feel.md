@@ -663,7 +663,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   pipeline_counter` x2: the material-walk fixture prints late=0 and 4 counters,
   sites that bypass cache.rs listed. F2P: no counter. P2P: golden unchanged.
   needs: none.
-- [ ] OPT36 build: one dependency feature set for every `-p` test. Overnight
+- [x] OPT36 build: one dependency feature set for every `-p` test. Overnight Landed 398ac7bb.
   2026-10-12, 52 of 184 heavy runs hit the 300 s kill and the ok runs had a p90
   of 288 s. `target/debug/deps` holds 16 builds of `syn`, 7 of `serde_json` and
   7 of `num_traits`: each `cargo test -p <crate>` unifies features for its own
@@ -708,7 +708,7 @@ eye pose from the body, a presentation-only look channel beside the tape, the ca
 no-clip rule at eye level, eye-space shake, one scripted proof tape. Every row is PRESENTATION; the golden
 `d57b5c8ae3096614` is P2P on every row. FV4 waits on the boarded UW11 body.
 
-- [ ] FV1 fps-view: eye pose from the fighter body. Tier A. Size S.
+- [x] FV1 fps-view: eye pose from the fighter body. Tier A. Size S. Landed e6a49874.
   Owns `crates/game/src/fps_view.rs` (new file beside `camera.rs`).
   Accept: `eye_for_fighter` puts the eye at table head height over
   `pos_m` with yaw from `facing`; bad height, facing or table refuses

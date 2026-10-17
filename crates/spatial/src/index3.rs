@@ -25,7 +25,7 @@
 use super::index::{to_cm, xyz_hit, Box3, XYZ_CELL_CM};
 use super::Actor;
 use engine_core::Fnv64;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Wire magic at the head of every index blob (`E2IX30`).
@@ -436,10 +436,10 @@ fn note_edit(
     *last_dirty = dirty;
 }
 
-/// XZ tiles covered by one box at nav pitch, row-major `(z, x)` order.
-/// Integer math only; live boxes cover at least one tile. The world cap
-/// bounds giants: 200 m at 1 m pitch is 40k tiles, never a wrap.
-fn free_tiles_of(b: &Box3) -> Vec<(i32, i32)> {
+/// XZ tiles covered by one box at nav pitch, row-major `(z, x)` order, plus
+/// whether the world cap clipped the footprint. Integer math only; the world
+/// cap bounds giants: 200 m at 1 m pitch is 40k tiles, never a wrap.
+fn free_tiles_of(b: &Box3) -> (Vec<(i32, i32)>, bool) {
     let pitch = super::navcheck::TILE_CM.max(1);
     let x0 = b.min_x.div_euclid(pitch);
     let x1 = (b.max_x - 1).div_euclid(pitch);
@@ -461,9 +461,11 @@ fn free_tiles_of(b: &Box3) -> Vec<(i32, i32)> {
         }
         z = z.saturating_add(1);
     }
+    // The cap only bites when the walk stopped short of the footprint's last tile.
+    let clipped = out.len() >= 40_000 && out.last().copied() != Some((x1, z1));
     out.sort_unstable_by_key(|&(x, z)| (z, x));
     out.dedup();
-    out
+    (out, clipped)
 }
 
 /// Full free-space oracle over an entry set: tile to covering-box count.
@@ -478,7 +480,7 @@ fn free_tiles_of(b: &Box3) -> Vec<(i32, i32)> {
 fn rebuild_free(boxes: &BTreeMap<u32, Box3>) -> BTreeMap<(i32, i32), u32> {
     let mut map: BTreeMap<(i32, i32), u32> = BTreeMap::new();
     for b in boxes.values() {
-        for t in free_tiles_of(b) {
+        for t in free_tiles_of(b).0 {
             let count = map.get(&t).copied().unwrap_or(0);
             map.insert(t, count.saturating_add(1));
         }
@@ -1104,6 +1106,10 @@ pub struct Rstar {
     /// nav pitch. Placement broadphase and reachability read it; the
     /// full rebuild is the oracle.
     free: BTreeMap<(i32, i32), u32>,
+    /// Ids whose footprint the 40k-tile cap truncated: non-empty means the
+    /// field is incomplete, so a field miss stops proving clear space and
+    /// `overlaps_any` walks the exact tree instead.
+    clipped: BTreeSet<u32>,
 }
 
 impl Rstar {
@@ -1139,6 +1145,7 @@ impl Rstar {
             rebuilds: 0,
             last_dirty: Vec::new(),
             free: BTreeMap::new(),
+            clipped: BTreeSet::new(),
         };
         for b in live_boxes(actors) {
             tree.insert_entry(b);
@@ -1340,7 +1347,11 @@ impl Rstar {
             self.remove_entry(bx.id);
         }
         self.boxes.insert(bx.id, bx);
-        free_add(&mut self.free, &free_tiles_of(&bx));
+        let (tiles, clipped) = free_tiles_of(&bx);
+        free_add(&mut self.free, &tiles);
+        if clipped {
+            self.clipped.insert(bx.id);
+        }
         let mut reinserted = vec![false; 32];
         self.insert_level(
             Rentry {
@@ -1566,7 +1577,9 @@ impl Rstar {
             return false;
         }
         self.boxes.remove(&id);
-        free_remove(&mut self.free, &free_tiles_of(&bx));
+        let (tiles, _) = free_tiles_of(&bx);
+        free_remove(&mut self.free, &tiles);
+        self.clipped.remove(&id);
         // Collapse a single-child root to keep the height minimal.
         if !self.nodes[self.root].leaf && self.nodes[self.root].entries.len() == 1 {
             self.root = self.nodes[self.root].entries[0].child as usize;
@@ -1694,7 +1707,8 @@ impl Rstar {
     /// `ignore_id`. The solver clearance hook: a solved placement must read
     /// `false` here against the scene-minus-object index. The free-space
     /// field is the broadphase: all-free XZ tiles mean clear without the
-    /// tree walk; occupied tiles fall through to the exact test.
+    /// tree walk; occupied tiles fall through to the exact test. A field
+    /// miss proves clear space only when no box was clipped.
     pub fn overlaps_any(&self, probe: &Box3, ignore_id: u32) -> bool {
         if probe.min_x < probe.max_x && probe.min_y < probe.max_y && probe.min_z < probe.max_z {
             let pitch = super::navcheck::TILE_CM.max(1);
@@ -1724,7 +1738,7 @@ impl Rstar {
                     }
                     z = z.saturating_add(1);
                 }
-                if !any_hit {
+                if !any_hit && self.clipped.is_empty() {
                     return false;
                 }
             }
@@ -1797,6 +1811,7 @@ impl Rstar {
             rebuilds: 0,
             last_dirty: Vec::new(),
             free: BTreeMap::new(),
+            clipped: BTreeSet::new(),
         };
         let mut rows: Vec<Box3> = boxes.values().copied().collect();
         rows.sort_by_key(|b| b.id);
@@ -3317,5 +3332,17 @@ mod tests {
         tree.apply(std::slice::from_ref(&gone), &[]);
         assert_eq!(tree.free, rebuild_free(&tree.boxes));
         assert!(!tree.boxes.contains_key(&5));
+    }
+
+    #[test]
+    fn index3_free_field_giant_wall_reads_occupied() {
+        // A 600 m box clips the 40k-tile free field, so the center and far
+        // corner never enter it; a covered probe must still read occupied.
+        let wall = mk(0, "giant_wall", 0.0, 1.0, 0.0, 600.0, 2.0, 600.0);
+        let index = Rstar::build(&[wall]);
+        let far = probe_actor(&mk(1, "probe", 290.0, 1.0, 290.0, 0.6, 1.0, 0.6)).unwrap();
+        let mid = probe_actor(&mk(2, "probe", 0.0, 1.0, 0.0, 0.6, 1.0, 0.6)).unwrap();
+        assert!(index.overlaps_any(&far, 1));
+        assert!(index.overlaps_any(&mid, 2));
     }
 }

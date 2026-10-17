@@ -84,8 +84,8 @@ Competitors already expose undo and approval flows. Claim a gap only after check
 - rollback-netcode-lan-server-auth: IN — M3 multiplayer core; M4 hardens (more fighters, hostile faults)
 - multiplayer-transport-rollback: IN — M3 LAN core (2+ fighters, AI-filled slots); M4 dedicated server under faults
 - relay-wan: IN — ON1–ON4: QUIC, self-hosted relay, NAT traversal, WAN soak (operator 2026-09-24)
-- full-anticheat: DROP — kernel and client anticheat; server-authority checks are ON5
-- server-authority-checks: IN — ON5
+- full-anticheat: DROP — kernel and client anticheat; server-authority checks were cut 2026-10-16 (MP13 re-scope pending)
+- server-authority-checks: CUT — modules cut 2026-10-16, never wired; the feature is not on any live path; MP13 needs a re-scope decision
 - server-browser: IN — LIGHT as ON6 (operator 2026-09-24)
 - arena-slice (now docs/plan/render-look.md, arena wiring): IN — M3 (sword and shield, 2+ fighters over LAN, hit-react, crowd); see ROADMAP.md
 - chariot-vehicle-path: IN — M3 LIGHT; proves input tape and replay are vehicle-agnostic

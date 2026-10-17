@@ -116,6 +116,17 @@ fn look_err(e: crate::gtao::LookError) -> FogError {
     FogError::Invalid(format!("fog look frame: {e}"))
 }
 
+/// Cold builders: keep `format!` out of hot submit bodies (same messages).
+fn sz(prefix: &str, have: [u32; 2], want: [u32; 2]) -> FogError {
+    FogError::Invalid(format!(
+        "{prefix} {}x{} mismatches frame {}x{}",
+        have[0], have[1], want[0], want[1]
+    ))
+}
+fn range_bad(kind: &str, i: usize, v: f32) -> FogError {
+    FogError::Invalid(format!("{kind}[{i}] value {v} outside 0..=1"))
+}
+
 // ---------------------------------------------------------------------------
 // Fog params: height extinction plus the bound day color.
 // ---------------------------------------------------------------------------
@@ -706,10 +717,8 @@ impl ContactAo {
     pub fn submit_gpu(&self, frame: &crate::gtao::LookFrame) -> Result<FogReceipt, FogError> {
         frame.validate().map_err(look_err)?;
         if frame.viewport_px != [self.width_px, self.height_px] {
-            return Err(FogError::Invalid(format!(
-                "contact {}x{} mismatches frame {}x{}",
-                self.width_px, self.height_px, frame.viewport_px[0], frame.viewport_px[1]
-            )));
+            let have = [self.width_px, self.height_px];
+            return Err(sz("contact", have, frame.viewport_px));
         }
         Err(FogError::NoDevice(
             "contact GPU bind needs the window build with a live device plus the RA1 forward pass bind group; the CPU bake is the reference"
@@ -730,10 +739,8 @@ impl ContactAo {
     ) -> Result<FogReceipt, FogError> {
         frame.validate().map_err(look_err)?;
         if frame.viewport_px != [self.width_px, self.height_px] {
-            return Err(FogError::Invalid(format!(
-                "contact {}x{} mismatches frame {}x{}",
-                self.width_px, self.height_px, frame.viewport_px[0], frame.viewport_px[1]
-            )));
+            let have = [self.width_px, self.height_px];
+            return Err(sz("contact", have, frame.viewport_px));
         }
         submit_bind_probe(
             device,
@@ -975,29 +982,21 @@ pub fn submit_gpu_fog(
 ) -> Result<FogReceipt, FogError> {
     frame.validate().map_err(look_err)?;
     if frame.viewport_px != [field.width_px, field.height_px] {
-        return Err(FogError::Invalid(format!(
-            "fog field {}x{} mismatches frame {}x{}",
-            field.width_px, field.height_px, frame.viewport_px[0], frame.viewport_px[1]
-        )));
+        let have = [field.width_px, field.height_px];
+        return Err(sz("fog field", have, frame.viewport_px));
     }
     if frame.viewport_px != [ao.width_px, ao.height_px] {
-        return Err(FogError::Invalid(format!(
-            "contact {}x{} mismatches frame {}x{}",
-            ao.width_px, ao.height_px, frame.viewport_px[0], frame.viewport_px[1]
-        )));
+        let have = [ao.width_px, ao.height_px];
+        return Err(sz("contact", have, frame.viewport_px));
     }
     for (i, v) in field.factor.iter().enumerate() {
         if !v.is_finite() || *v < 0.0 || *v > 1.0 {
-            return Err(FogError::Invalid(format!(
-                "fog factor[{i}] value {v} outside 0..=1"
-            )));
+            return Err(range_bad("fog factor", i, *v));
         }
     }
     for (i, v) in ao.values.iter().enumerate() {
         if !v.is_finite() || *v < 0.0 || *v > 1.0 {
-            return Err(FogError::Invalid(format!(
-                "contact value[{i}] value {v} outside 0..=1"
-            )));
+            return Err(range_bad("contact value", i, *v));
         }
     }
     let _ = frame.frame_index;
@@ -1784,29 +1783,21 @@ pub fn submit_gpu_fog(
 ) -> Result<FogReceipt, FogError> {
     frame.validate().map_err(look_err)?;
     if frame.viewport_px != [field.width_px, field.height_px] {
-        return Err(FogError::Invalid(format!(
-            "fog field {}x{} mismatches frame {}x{}",
-            field.width_px, field.height_px, frame.viewport_px[0], frame.viewport_px[1]
-        )));
+        let have = [field.width_px, field.height_px];
+        return Err(sz("fog field", have, frame.viewport_px));
     }
     if frame.viewport_px != [ao.width_px, ao.height_px] {
-        return Err(FogError::Invalid(format!(
-            "contact {}x{} mismatches frame {}x{}",
-            ao.width_px, ao.height_px, frame.viewport_px[0], frame.viewport_px[1]
-        )));
+        let have = [ao.width_px, ao.height_px];
+        return Err(sz("contact", have, frame.viewport_px));
     }
     for (i, v) in field.factor.iter().enumerate() {
         if !v.is_finite() || *v < 0.0 || *v > 1.0 {
-            return Err(FogError::Invalid(format!(
-                "fog factor[{i}] value {v} outside 0..=1"
-            )));
+            return Err(range_bad("fog factor", i, *v));
         }
     }
     for (i, v) in ao.values.iter().enumerate() {
         if !v.is_finite() || *v < 0.0 || *v > 1.0 {
-            return Err(FogError::Invalid(format!(
-                "contact value[{i}] value {v} outside 0..=1"
-            )));
+            return Err(range_bad("contact value", i, *v));
         }
     }
     let started = Instant::now();

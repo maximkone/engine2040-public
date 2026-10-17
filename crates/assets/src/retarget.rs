@@ -1441,7 +1441,7 @@ pub fn bake_traversal_batch(
     let mut plans = Vec::with_capacity(clips.len());
     for clip in clips {
         plans.push(RetargetPlan {
-            source_clip: *clip,
+            source_clip: clip,
             ..*rig
         });
     }

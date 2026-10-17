@@ -829,8 +829,17 @@ impl NetGame {
             Role::Guest { client } => client.resimulate(),
             Role::Host { .. } => return Err(GameError::Net(NetError::BadKind(KIND_STATE))),
         };
-        self.rebuild_view()?;
-        let desync = first_divergence(self.app.checkpoints(), &converged);
+        // Rebuild the view only when it fell behind the converged history:
+        // the lockstep path leaves it already equal, so no fresh `App` and no
+        // from-zero view replay runs per state. Byte-true: the old rebuild
+        // produced exactly this history, so the desync answer is the same
+        // either way, and the tripwire still runs whenever a rebuild is owed.
+        let desync = if self.app.checkpoints() == converged.as_slice() {
+            None
+        } else {
+            self.rebuild_view()?;
+            first_divergence(self.app.checkpoints(), &converged)
+        };
         self.last_mispredicts.clone_from(&mispredicts);
         self.last_report = desync;
         Ok(NetApplied::StateApplied {

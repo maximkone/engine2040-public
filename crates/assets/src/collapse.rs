@@ -253,11 +253,11 @@ fn pick_collapses(
 
 /// Collapse `b` into `a` at the midpoint; attributes average, `w` is kept.
 fn apply_collapses(
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    uv0: &mut Vec<[f32; 2]>,
-    tangents: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
+    positions: &mut [[f32; 3]],
+    normals: &mut [[f32; 3]],
+    uv0: &mut [[f32; 2]],
+    tangents: &mut [[f32; 4]],
+    indices: &mut [u32],
     collapses: &[(usize, usize)],
 ) {
     for (a, b) in collapses {

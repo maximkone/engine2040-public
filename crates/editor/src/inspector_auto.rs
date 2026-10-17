@@ -19,10 +19,14 @@ use crate::inspector::parse_bool;
 
 /// Most rows kept in one auto grid.
 pub const MAX_ROWS: usize = 128;
-/// Most ops staged in one auto batch.
-pub const MAX_OPS: usize = 64;
-/// Longest text value kept in a cell.
-pub const MAX_TEXT_LEN: usize = 512;
+/// Most ops staged in one auto batch: the auto-grid limit, distinct from
+/// the inspector [`MAX_OPS_PER_BATCH`](crate::inspector::MAX_OPS_PER_BATCH)
+/// and the journal wire bound (`wal::MAX_OPS`, private). Values never merge: each
+/// bound guards its own service.
+pub const MAX_AUTO_OPS_PER_BATCH: usize = 64;
+/// Longest text value kept in a cell: the one editor text bound, owned by
+/// [`crate::inspector`] (the scene keeps its own `provenance::MAX_TEXT_LEN`).
+pub use crate::inspector::MAX_TEXT_LEN;
 
 /// Every schema type the auto grid renders (20, in grid order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -700,18 +704,6 @@ pub fn build_grid(
     grid
 }
 
-/// Declared fields for the registry panel: the first twelve schemas in order.
-///
-/// Reuses [`field_schemas`] with no new schema kind; rows render through
-/// [`build_declared_grid`] with [`validate_edit`] refusals.
-pub fn registry_panel_grid(
-    registry: &SchemaRegistry,
-    values: &BTreeMap<(String, String), String>,
-) -> AutoGrid {
-    let schemas = field_schemas();
-    build_declared_grid(&schemas[..12], registry, values)
-}
-
 /// Find one grid row by component and field.
 fn find_row<'a>(
     grid: &'a AutoGrid,
@@ -988,10 +980,10 @@ pub fn preview_edits(
     edits: &BTreeMap<(String, String), String>,
     base_revision: u64,
 ) -> Result<BatchPreview, AutoError> {
-    if edits.len() > MAX_OPS {
+    if edits.len() > MAX_AUTO_OPS_PER_BATCH {
         return Err(AutoError::TooManyOps {
             count: edits.len(),
-            max: MAX_OPS,
+            max: MAX_AUTO_OPS_PER_BATCH,
         });
     }
     let mut effects = Vec::with_capacity(edits.len());
@@ -1079,10 +1071,10 @@ pub fn apply_batch(
             got: batch.base_revision,
         });
     }
-    if batch.ops.len() > MAX_OPS {
+    if batch.ops.len() > MAX_AUTO_OPS_PER_BATCH {
         return Err(AutoError::TooManyOps {
             count: batch.ops.len(),
-            max: MAX_OPS,
+            max: MAX_AUTO_OPS_PER_BATCH,
         });
     }
     for op in &batch.ops {

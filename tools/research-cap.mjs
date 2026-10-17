@@ -120,7 +120,7 @@ if (isMain) {
   if (process.argv.includes("--next")) {
     const i = process.argv.indexOf("--n");
     const found = nextRows({ cardNames, board, claims: existsSync(CLAIMS) ? readFileSync(CLAIMS, "utf8") : "", n: i > 0 ? Number(process.argv[i + 1]) || 3 : 3, cardTexts });
-    if (!found.length) console.log(`research: every open row has ${CAP} cards or a fresh claim (RESULT: NOOP, or take the research topic in docs/RESEARCH.md read longest ago)`);
+    if (!found.length) console.log(`research: every open row has ${CAP} cards or a fresh claim (RESULT: NOOP)`);
     for (const r of found) console.log(`${r.row}  ${r.cards} card(s)  [${r.status.slice(0, 40)}]\n    home: ${r.home}\n    done-when: ${String(r.doneWhen).slice(0, 140)}`);
   } else {
     const rows = boardRows(board);

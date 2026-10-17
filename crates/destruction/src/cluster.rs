@@ -21,10 +21,23 @@
 use crate::bonded::{flagged_indices, slot, wire, BondedDesc, BreakError};
 use engine_core::Fnv64;
 
+/// Damage share lost per hop along a bond, in permille: an impact halves on
+/// every bond it crosses, so a cascade dies out on its own. Integer only.
+pub const CASCADE_FALLOFF_PERMILLE: u32 = 500;
+
+/// One damage cascade's outcome, every list in ascending index order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cascade {
+    /// Chunks that took enough damage and swapped to their shattered prefab.
+    pub broken_chunks: Vec<u32>,
+    /// Bonds those swaps snapped, ascending; bonds already snapped stay out.
+    pub snapped_bonds: Vec<u32>,
+}
+
 /// Sparse bond topology of one bonded descriptor: sorted adjacency over the
 /// descriptor bonds in index order, the anchor set, and the intact/broken
-/// bond flags. Fresh graphs start fully intact; later pieces snap bonds
-/// through this same graph, never a copy.
+/// bond flags. Fresh graphs start fully intact; later pieces snap bonds and
+/// run the damage cascade through this same graph, never a copy.
 #[derive(Clone, Debug)]
 pub struct ClusterBondGraph {
     chunk_count: usize,
@@ -159,6 +172,110 @@ impl ClusterBondGraph {
         hash.finish()
     }
 
+    /// Snaps one bond, so the topology carries nothing across it any more.
+    /// Out-of-range ids are refused with [`BreakError::BadBond`].
+    pub fn snap_bond(&mut self, bond: u32) -> Result<(), BreakError> {
+        let index = slot(bond);
+        if index >= self.bond_count {
+            return Err(BreakError::BadBond(index));
+        }
+        self.broken[index] = true;
+        Ok(())
+    }
+
+    /// One damage cascade: `impact` enters at `origin`, crosses intact bonds
+    /// losing [`CASCADE_FALLOFF_PERMILLE`] per hop and never crossing a
+    /// snapped one. A chunk whose share reaches `toughness` swaps to its
+    /// shattered prefab and snaps every incident bond, so whatever hung below
+    /// it leaves the intact set; anchored chunks pass their share on but never
+    /// swap. Layers visit in ascending index order, once per chunk, so the same
+    /// input gives the same lists on every PC. Units: integer impact points
+    /// against an integer `toughness`. Errors: [`BreakError`] on a bad origin,
+    /// zero impact or zero toughness.
+    pub fn cascade(
+        &mut self,
+        origin: u32,
+        impact: u32,
+        toughness: u32,
+    ) -> Result<Cascade, BreakError> {
+        let start = slot(origin);
+        if start >= self.chunk_count {
+            return Err(BreakError::BadChunk(start));
+        }
+        if impact == 0 {
+            return Err(BreakError::BadImpulse);
+        }
+        if toughness == 0 {
+            return Err(BreakError::BadThreshold);
+        }
+        let mut share = vec![0u32; self.chunk_count];
+        let mut seen = vec![false; self.chunk_count];
+        let mut work: Vec<usize> = Vec::new();
+        share[start] = impact;
+        seen[start] = true;
+        work.push(start);
+        let mut outcome = Cascade {
+            broken_chunks: Vec::new(),
+            snapped_bonds: Vec::new(),
+        };
+        let mut layer_start = 0;
+        while layer_start < work.len() {
+            let layer_end = work.len();
+            work[layer_start..layer_end].sort_unstable();
+            for cursor in layer_start..layer_end {
+                let current = work[cursor];
+                let swaps = share[current] >= toughness && !self.anchored[current];
+                if swaps {
+                    outcome.broken_chunks.push(wire(current));
+                }
+                // The shock runs one hop ahead of the shatter: neighbours on
+                // intact bonds take their share before this chunk's own bonds
+                // snap, which is what carries a wave down a chain.
+                let span = slot(self.adj_start[current])..slot(self.adj_start[current + 1]);
+                for (neighbor, bond) in &self.adj[span] {
+                    if self.broken[slot(*bond)] {
+                        continue;
+                    }
+                    let reached = u32::try_from(
+                        u64::from(share[current]) * u64::from(CASCADE_FALLOFF_PERMILLE) / 1000,
+                    )
+                    .unwrap_or(u32::MAX);
+                    if reached == 0 {
+                        continue;
+                    }
+                    let next = slot(*neighbor);
+                    if seen[next] {
+                        share[next] = share[next].max(reached);
+                    } else {
+                        seen[next] = true;
+                        share[next] = reached;
+                        work.push(next);
+                    }
+                }
+                if swaps {
+                    self.snap_incident(current, &mut outcome.snapped_bonds);
+                }
+            }
+            layer_start = layer_end;
+        }
+        outcome.snapped_bonds.sort_unstable();
+        outcome.snapped_bonds.dedup();
+        Ok(outcome)
+    }
+
+    /// Snaps every intact bond incident to `chunk`, appending the ids; the
+    /// caller sorts. A chunk keeps only the snapped skeleton it leaves behind.
+    fn snap_incident(&mut self, chunk: usize, out: &mut Vec<u32>) {
+        let span = slot(self.adj_start[chunk])..slot(self.adj_start[chunk + 1]);
+        for (_, bond) in &self.adj[span] {
+            let index = slot(*bond);
+            if !self.broken[index] {
+                self.broken[index] = true;
+                out.push(*bond);
+            }
+        }
+    }
+
     /// Anchor connectivity over intact bonds: breadth-first layers out of the
     /// anchors, neighbors visited in ascending span order so parent choice
     /// is canonical. Allocates: analysis and tests only, never the tick.
@@ -283,6 +400,35 @@ mod tests {
         let again = ClusterBondGraph::new(&desc).expect("rebuilds");
         assert_eq!(again.intact_set(), graph.intact_set());
         assert_eq!(again.digest(), graph.digest());
+    }
+
+    /// DX16: the cascade down the 12-shard chain, its edges and the repeat.
+    #[test]
+    fn cluster_graph_cascade_propagates_along_bonds_only() {
+        let desc = chain_twelve();
+        let mut graph = ClusterBondGraph::new(&desc).expect("valid chain builds");
+        // Impact 4 on shard 1, toughness 2, half per hop: shards 1 and 2 swap,
+        // the anchored shard 0 passes its share on and the tail falls.
+        let cascade = graph.cascade(wire(1), 4, 2).expect("cascade runs");
+        assert_eq!(cascade.broken_chunks, vec![1, 2]);
+        assert_eq!(cascade.snapped_bonds, vec![0, 1, 2]);
+        assert!(!graph.is_bond_broken(3), "shard 3 holds its bond");
+        assert!(!graph.is_supported(3), "the tail hangs off a snapped bond");
+        assert_eq!(graph.intact_set(), vec![0]);
+        let mut again = ClusterBondGraph::new(&desc).expect("rebuilds");
+        let repeat = again.cascade(wire(1), 4, 2).expect("cascade reruns");
+        assert_eq!(repeat, cascade);
+        assert_eq!(again.digest(), graph.digest());
+        // A snapped bond carries nothing: a huge impact still stops at the gap.
+        let mut gapped = ClusterBondGraph::new(&desc).expect("rebuilds");
+        gapped.snap_bond(wire(3)).expect("bond 3 snaps");
+        let wave = gapped.cascade(wire(1), 1000, 2).expect("cascade reruns");
+        assert_eq!(wave.broken_chunks, vec![1, 2, 3]);
+        assert_eq!(gapped.broken_bonds(), vec![0, 1, 2, 3]);
+        assert_eq!(graph.cascade(wire(40), 4, 2), Err(BreakError::BadChunk(40)));
+        assert_eq!(graph.cascade(wire(1), 0, 2), Err(BreakError::BadImpulse));
+        assert_eq!(graph.cascade(wire(1), 4, 0), Err(BreakError::BadThreshold));
+        assert_eq!(graph.snap_bond(wire(99)), Err(BreakError::BadBond(99)));
     }
 
     #[test]

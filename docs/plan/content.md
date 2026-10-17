@@ -209,6 +209,7 @@ cooker (CT67 is a bounded spike with a cap), no second map pipeline
 - Freeze: `bc.rs` codec, `LOD_BAND_MM`/`HYSTERESIS_MM`, and the museum `prove` shape; tuning rides staged tables, never new knobs.
 - We will not build: handles and residency (AS4/AS5), USD (AS6), conformance (CT10), compression (CT11), manifests (CT12), proxies (CT13), motion source (CT14), sandbox (CT16). Those are open rows that keep their files and owners. OpenUSD after Finish A; no runtime recook (hot reload stays HR1 background recook with swap boundaries).
 - Status 2026-10-12: AS4/AS5 are open B rows at docs/plan/content.md:220-221, bundle streams with placeholders at docs/plan/content.md:89-90 and queue to LodSwapper at docs/plan/content.md:144-146, so "will not build handles and residency" is false.
+- Status 2026-10-17: disk shows the false line still at docs/plan/content.md:210, with AS4 "handles and load states | B" at docs/plan/content.md:222 and AS5 "one residency manager | B | AS4" at docs/plan/content.md:223 (each row one line lower than the 2026-10-12 cite of :220-221), bundle streams with placeholders at docs/plan/content.md:89-90 and the LodSwapper queue at docs/plan/content.md:144-146, so "will not build handles and residency" stays false.
 
 ## 7. Board tasks
 

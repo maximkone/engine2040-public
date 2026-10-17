@@ -161,3 +161,102 @@ fn check_link(link: &TraversalLink) -> Result<(), LinkError> {
     fix_edge(link.edge_m)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tiles::BreakSet;
+
+    /// One authored edge with a plain in-range anchor.
+    fn edge(id: u32, tile: u32, kind: LinkKind) -> TraversalLink {
+        TraversalLink {
+            id: LinkId(id),
+            kind,
+            edge_m: [1.0, 2.0],
+            tile: TileId(tile),
+        }
+    }
+
+    /// A break batch as the destruction cooker builds it.
+    fn break_set(tiles: &[TileId]) -> BreakSet {
+        BreakSet::new(7, tiles, 64).expect("break set builds")
+    }
+
+    #[test]
+    fn a_break_batch_names_only_the_links_on_its_tiles_ascending() {
+        let links = [
+            edge(9, 1, LinkKind::Drop),
+            edge(3, 5, LinkKind::Mantle),
+            edge(6, 1, LinkKind::Hurdle),
+            edge(4, 9, LinkKind::Climb),
+        ];
+        let rebaked = rebake_for_set(&links, &break_set(&[TileId(5), TileId(1)]))
+            .expect("links on dirty tiles rebake");
+        assert_eq!(
+            rebaked,
+            vec![LinkId(3), LinkId(6), LinkId(9)],
+            "dirty tiles only, ascending by id, never the tile-9 link"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_id_on_two_dirty_tiles_names_one_rebake() {
+        let links = [edge(8, 2, LinkKind::Vault), edge(8, 3, LinkKind::Drop)];
+        assert_eq!(
+            rebake_for_set(&links, &break_set(&[TileId(2), TileId(3)])),
+            Ok(vec![LinkId(8)]),
+            "the cooker recooks one link once"
+        );
+    }
+
+    #[test]
+    fn no_dirty_tiles_names_no_rebake() {
+        let links = [edge(1, 0, LinkKind::Hurdle)];
+        assert_eq!(rebake_links(&links, &[]), Ok(vec![]));
+        assert_eq!(rebake_links(&[], &[TileId(0)]), Ok(vec![]));
+    }
+
+    #[test]
+    fn the_same_registry_and_batch_rebake_the_same_ids_twice() {
+        let links = [
+            edge(5, 4, LinkKind::Climb),
+            edge(1, 4, LinkKind::Drop),
+            edge(2, 7, LinkKind::Mantle),
+        ];
+        let batch = break_set(&[TileId(4), TileId(7)]);
+        let first = rebake_for_set(&links, &batch).expect("first pass");
+        let second = rebake_for_set(&links, &batch).expect("second pass");
+        assert_eq!(first, vec![LinkId(1), LinkId(2), LinkId(5)]);
+        assert_eq!(first, second, "same input, same ids in the same order");
+    }
+
+    #[test]
+    fn an_edge_anchor_off_the_lane_refuses_the_batch_and_names_the_lane() {
+        let mut nan = edge(1, 2, LinkKind::Vault);
+        nan.edge_m = [f32::NAN, 0.0];
+        assert_eq!(
+            rebake_links(&[nan], &[TileId(2)]),
+            Err(LinkError::BadProbe("edge"))
+        );
+        let mut far = edge(2, 2, LinkKind::Vault);
+        far.edge_m = [EDGE_RANGE_M + 1.0, 0.0];
+        assert_eq!(
+            rebake_links(&[far], &[TileId(2)]),
+            Err(LinkError::BadProbe("edge"))
+        );
+    }
+
+    #[test]
+    fn a_registry_past_the_link_bound_refuses_with_both_numbers() {
+        let links: Vec<TraversalLink> = (0..=MAX_LINKS as u32)
+            .map(|id| edge(id, 1, LinkKind::Hurdle))
+            .collect();
+        assert_eq!(
+            rebake_links(&links, &[TileId(1)]),
+            Err(LinkError::TooManyLinks {
+                got: MAX_LINKS + 1,
+                max: MAX_LINKS,
+            })
+        );
+    }
+}

@@ -72,6 +72,61 @@ pub fn msaa_sample_count(config: &MsaaConfig) -> u32 {
     }
 }
 
+/// What the adapter can build for the 4x pair, one bool per target format:
+/// `HDR_FORMAT` colour at 4 samples, `DEPTH_FORMAT` depth at 4 samples, plus
+/// the 1x HDR target accepting a resolve. Read once at presenter build from
+/// the adapter's `TextureFormatFeatureFlags`. Pure data, no device handle, so
+/// headless tests run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct MsaaSupport {
+    /// `MULTISAMPLE_X4` on the HDR colour format.
+    pub color_4x: bool,
+    /// `MULTISAMPLE_X4` on the depth format.
+    pub depth_4x: bool,
+    /// `MULTISAMPLE_RESOLVE` on the HDR colour format.
+    pub resolve_ok: bool,
+}
+
+impl MsaaSupport {
+    /// Support from three adapter flags in pair order (colour 4x, depth 4x,
+    /// colour resolve), so a caller cannot transpose the two formats.
+    /// Owner: render lane; Caller: `Presenter::msaa_support_for`.
+    #[must_use]
+    pub fn from_flags(color_4x: bool, depth_4x: bool, resolve_ok: bool) -> Self {
+        Self {
+            color_4x,
+            depth_4x,
+            resolve_ok,
+        }
+    }
+
+    /// True only while the whole 4x path can be built. One render pass
+    /// carries one sample count on every attachment and the resolve needs a
+    /// 1x target, so a half-supported pair is not a pair.
+    /// Owner: render lane; Caller: `msaa_effective_sample_count` (same file).
+    #[must_use]
+    pub fn pair_ok(&self) -> bool {
+        self.color_4x && self.depth_4x && self.resolve_ok
+    }
+}
+
+/// Sample count a config must use for the given adapter support: the 4x count
+/// only while the switch is on AND the adapter can build the whole pair, else
+/// the 1x count. Pure: same inputs give the same count twice.
+/// Owner: render lane; Caller: `Presenter::set_msaa_enabled` (the switch
+/// reads back off instead of failing texture creation on a weak adapter).
+/// Units: samples out. Determinism: integer/bool logic only; no allocation,
+/// no clock, no device, so headless tests run. Errors: none. Budget: no
+/// allocation on any path.
+#[must_use]
+pub fn msaa_effective_sample_count(config: &MsaaConfig, support: MsaaSupport) -> u32 {
+    if msaa_enabled(config) && support.pair_ok() {
+        MSAA_SAMPLE_COUNT
+    } else {
+        RESOLVE_SAMPLE_COUNT
+    }
+}
+
 /// Forward attachment decision for a config plus the built flag: on plus
 /// built gives `(4, true)` (4x views, resolve into 1x HDR), anything else
 /// gives `(1, false)` (today's 1x path).
@@ -385,6 +440,43 @@ mod tests {
             msaa_forward_choice(&off, false),
             msaa_forward_choice(&off, false),
             "same inputs give same choice twice"
+        );
+    }
+
+    #[test]
+    fn msaa_effective_count_follows_the_adapter_pair() {
+        let on = MsaaConfig { enabled: true };
+        let off = MsaaConfig::default();
+        let full = MsaaSupport::from_flags(true, true, true);
+        assert!(full.pair_ok(), "colour plus depth plus resolve is a pair");
+        assert_eq!(
+            msaa_effective_sample_count(&on, full),
+            MSAA_SAMPLE_COUNT,
+            "a full pair keeps the 4x count on"
+        );
+        // A half-supported pair is not a pair: one pass carries one count,
+        // so a single missing format drops the whole on path to 1x.
+        for support in [
+            MsaaSupport::from_flags(false, true, true),
+            MsaaSupport::from_flags(true, false, true),
+            MsaaSupport::from_flags(true, true, false),
+        ] {
+            assert!(!support.pair_ok(), "a half pair is not a pair");
+            assert_eq!(
+                msaa_effective_sample_count(&on, support),
+                RESOLVE_SAMPLE_COUNT,
+                "unsupported on stays the 1x path"
+            );
+        }
+        assert_eq!(
+            msaa_effective_sample_count(&off, full),
+            RESOLVE_SAMPLE_COUNT,
+            "off never asks for 4x"
+        );
+        assert_eq!(
+            msaa_effective_sample_count(&on, full),
+            msaa_effective_sample_count(&on, full),
+            "same inputs give same count twice"
         );
     }
 }

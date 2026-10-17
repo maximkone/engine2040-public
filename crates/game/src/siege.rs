@@ -24,8 +24,8 @@
 //! eight integer-hp sections bombarded by four deterministic engines on
 //! a fixed schedule with sorted `(tick, engine)` impacts; the arena's
 //! own bonded prop already folds sword-hit breaks into every
-//! shard checkpoint, and the engine ledger here is the schedule the
-//! ballistics sim sources its projectile impacts from. Replication samples the
+//! shard checkpoint, and the engine ledger here is the schedule of
+//! record for shard bombardment impacts. Replication samples the
 //! interest API at the 10 Hz snapshot cadence over the 64 fighter
 //! entities (the full 64-viewer + 500-soldier soak stays owned by
 //! `engine-net`). Cells stream in `engine-world`: shards bind to
@@ -60,8 +60,9 @@ pub const SIEGE_SHARDS: usize = 4;
 pub const SHARD_FIGHTERS: u8 = 16;
 /// Global slots in one siege.
 pub const SIEGE_SLOTS: usize = 64;
-/// Ten minutes at the arena tick rate.
-pub const SIEGE_TICKS_10MIN: u32 = 36_000;
+/// Ten minutes at the arena tick rate. Single owner is
+/// `engine_net::tick_budget::SIEGE_TICKS_10MIN`. Value never changes.
+pub const SIEGE_TICKS_10MIN: u32 = engine_net::tick_budget::SIEGE_TICKS_10MIN;
 /// Largest siege accepted (mirrors the arena replay bound).
 pub const SIEGE_MAX_TICKS: u32 = 100_000;
 /// Wall sections in the bombardment ledger.

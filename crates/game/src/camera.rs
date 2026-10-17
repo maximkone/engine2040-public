@@ -133,6 +133,18 @@ pub struct FighterView {
     pub alive: bool,
 }
 
+/// Presentation camera mode for the arena window: the director frames the
+/// bout; free-fly flies the eye by hand so a held tick can be inspected. View
+/// code only: the mode never enters the simulation, the tape or any hash.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CameraMode {
+    /// Director framing (the arena default).
+    #[default]
+    Director,
+    /// Hand-flown free eye, moved by [`free_cam_step`].
+    Free,
+}
+
 /// Director tuning: field of view, framing fit, boom shape, shake cap and
 /// the integer trauma decay applied per tick.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -160,6 +172,14 @@ pub struct DirectorParams {
     pub max_shake_m: f32,
     /// Trauma permille decayed per tick; `0` never decays.
     pub decay_permille_per_tick: u32,
+    /// Free-fly eye in meters (view only: neither [`DirectorParams::encode`]
+    /// nor [`CameraFrame::to_bytes`] reads it, so the director record stays
+    /// byte-identical). Defaults to the arena's establishing eye.
+    pub free_eye_m: Vec3,
+    /// Free-fly yaw in radians, `-PI..=PI` (view only, never hashed).
+    pub free_yaw_rad: f32,
+    /// Free-fly pitch in radians, `-PI/2..=PI/2` (view only, never hashed).
+    pub free_pitch_rad: f32,
 }
 
 impl DirectorParams {
@@ -307,6 +327,9 @@ impl DirectorParams {
             boom_radius_m: get_table_f32(bytes, 33),
             boom_margin_m: get_table_f32(bytes, 37),
             decay_permille_per_tick: u32::from_le_bytes(decay),
+            // View-only free-fly pose is not part of the 45-byte table; a
+            // decoded table starts from the default pose like a fresh table.
+            ..Self::default()
         };
         params.validate()?;
         Ok(params)
@@ -315,7 +338,7 @@ impl DirectorParams {
 
 impl Default for DirectorParams {
     /// Arena defaults: 60-degree fov, 1 m margin, 4 m base in `[2, 30] m`,
-    /// a low behind-and-above boom, 0.35 m shake cap, 60 permille decay.
+    /// a low behind-and-above boom, 0.12 m shake cap, 60 permille decay.
     fn default() -> Self {
         Self {
             fov_y_rad: core::f32::consts::FRAC_PI_3,
@@ -327,10 +350,48 @@ impl Default for DirectorParams {
             boom_back: 1.0,
             boom_radius_m: BOOM_RADIUS_M,
             boom_margin_m: BOOM_MARGIN_M,
-            max_shake_m: 0.35,
+            max_shake_m: 0.12,
             decay_permille_per_tick: 60,
+            free_eye_m: Vec3::new(0.0, 2.0, 6.0),
+            free_yaw_rad: 0.0,
+            free_pitch_rad: 0.0,
         }
     }
+}
+
+/// Free-fly step from the current eye: store the new absolute `look` (yaw,
+/// pitch in radians) and translate the eye by `move_m` world meters. The
+/// pose is view code only: it never enters the director record
+/// ([`DirectorParams::encode`], [`CameraFrame::to_bytes`]) and the simulation
+/// never reads it, so a step cannot move the hash. Uses the same
+/// [`DirectorParams::validate`] gates as the framing math. Errors: bad tuning
+/// names its row, a `look` that is not finite or outside `yaw -PI..=PI` /
+/// `pitch -PI/2..=PI/2` fails with the culprit row name, a non-finite
+/// `move_m` or a non-finite stored eye fails loudly, never a silent clamp.
+/// Budget: O(1) time, no heap; same inputs give the same pose twice.
+pub fn free_cam_step(
+    params: &mut DirectorParams,
+    look: (f32, f32),
+    move_m: [f32; 3],
+) -> Result<(), CameraError> {
+    params.validate()?;
+    let (yaw_rad, pitch_rad) = look;
+    if !yaw_rad.is_finite() || yaw_rad < -core::f32::consts::PI || yaw_rad > core::f32::consts::PI {
+        return Err(CameraError::BadParam("free_yaw_rad"));
+    }
+    if !pitch_rad.is_finite() || pitch_rad.abs() > core::f32::consts::FRAC_PI_2 {
+        return Err(CameraError::BadParam("free_pitch_rad"));
+    }
+    if !move_m.iter().all(|axis| axis.is_finite()) {
+        return Err(CameraError::BadParam("free_move_m"));
+    }
+    if !params.free_eye_m.is_finite() {
+        return Err(CameraError::BadEye);
+    }
+    params.free_yaw_rad = yaw_rad;
+    params.free_pitch_rad = pitch_rad;
+    params.free_eye_m = params.free_eye_m + Vec3::new(move_m[0], move_m[1], move_m[2]);
+    Ok(())
 }
 
 /// Camera failures: bounded diagnostics, never panics.
@@ -2565,6 +2626,35 @@ mod tests {
     }
 
     #[test]
+    fn fight_shake_cap_matches_lf11_row() {
+        // LF11 row: fight-camera shake at most 0.12 m; one hit is nonzero
+        // and settles within 60 ticks (1.0 s); same ticks repeat.
+        let params = DirectorParams::default();
+        assert!(
+            (params.max_shake_m - 0.12).abs() <= 1.0e-6,
+            "fight cap is 0.12 m, got {}",
+            params.max_shake_m
+        );
+        let cap = params.max_shake_m;
+        for tick in [0u32, 7, 11, 23, 31] {
+            let full = shake_offset(1000, tick, cap);
+            for component in [full.x, full.y, full.z] {
+                assert!(
+                    component >= -0.12 - 1.0e-5 && component <= 0.12 + 1.0e-5,
+                    "full trauma stays inside 0.12 m at tick {tick}: {full:?}"
+                );
+            }
+            let again = shake_offset(1000, tick, cap);
+            assert_eq!(full, again, "same tick repeats at tick {tick}");
+        }
+        let hit = shake_offset(400, 11, cap);
+        assert!(
+            hit.len() > 1.0e-6,
+            "one 400-permille hit is nonzero: {hit:?}"
+        );
+    }
+
+    #[test]
     fn framing_centers_pair_and_clamps() {
         let params = DirectorParams::default();
         let focus = Vec3::new(0.0, 1.0, 0.0);
@@ -2822,6 +2912,71 @@ mod tests {
             DirectorParams::traversal(),
             "failed retune keeps the old table"
         );
+    }
+
+    #[test]
+    fn camera_free_cam_validates_and_takes_no_hash_bytes() {
+        // A free-fly step lands a finite eye; the free pose is view code only,
+        // so the director record (46 bytes) is unchanged for identical inputs
+        // x2 and never depends on the free eye.
+        let mut params = DirectorParams::arena();
+        free_cam_step(&mut params, (0.5, -0.25), [1.0, 0.5, -2.0]).expect("free step lands");
+        assert!(params.free_eye_m.is_finite(), "free eye stays finite");
+        assert!(
+            params.free_yaw_rad.is_finite() && params.free_pitch_rad.is_finite(),
+            "free look stays finite"
+        );
+        let fighters = scripted_pair(3);
+        let mut first = Director::new(0, DirectorParams::arena()).expect("director builds");
+        let first_bytes = first.update(&fighters, 3).expect("frame").to_bytes();
+        // Same director inputs x2 over the free-flown table: identical bytes.
+        let mut second = Director::new(0, params).expect("director builds");
+        let second_bytes = second.update(&fighters, 3).expect("frame").to_bytes();
+        assert_eq!(
+            first_bytes, second_bytes,
+            "same inputs give the same {FRAME_BYTES} bytes twice"
+        );
+        assert_eq!(first_bytes.len(), FRAME_BYTES);
+        // A further free move still cannot enter the record.
+        free_cam_step(&mut params, (1.0, 0.0), [5.0, 0.0, 0.0]).expect("move lands");
+        assert!(params.free_eye_m.is_finite());
+        let mut third = Director::new(0, params).expect("director builds");
+        let third_bytes = third.update(&fighters, 3).expect("frame").to_bytes();
+        assert_eq!(
+            first_bytes, third_bytes,
+            "the free-fly pose never enters the camera frame bytes"
+        );
+    }
+
+    #[test]
+    fn camera_free_cam_refuses_a_bad_look() {
+        // A non-finite or out-of-range look refuses with a typed error and
+        // moves nothing; a legal edge is accepted, never clamped.
+        let mut params = DirectorParams::arena();
+        let eye0 = params.free_eye_m;
+        let half_pi = core::f32::consts::FRAC_PI_2;
+        for bad in [
+            (f32::NAN, 0.0),
+            (0.0, f32::NAN),
+            (PI + 0.01, 0.0),
+            (-PI - 0.01, 0.0),
+            (0.0, half_pi + 0.01),
+            (0.0, -half_pi - 0.01),
+            (f32::INFINITY, 0.0),
+        ] {
+            assert!(
+                free_cam_step(&mut params, bad, [0.0, 0.0, 0.0]).is_err(),
+                "look accepted: {bad:?}"
+            );
+        }
+        assert_eq!(params.free_eye_m, eye0, "a refused look moves nothing");
+        assert!(
+            free_cam_step(&mut params, (0.0, 0.0), [f32::NAN, 0.0, 0.0]).is_err(),
+            "a non-finite move refuses"
+        );
+        // The legal bounds are inclusive: no silent clamp.
+        assert!(free_cam_step(&mut params, (PI, half_pi), [0.0, 0.0, 0.0]).is_ok());
+        assert!(free_cam_step(&mut params, (-PI, -half_pi), [0.0, 0.0, 0.0]).is_ok());
     }
 
     /// Solo traversal agent: a 6 m circle at 1 m height, one tick per step.

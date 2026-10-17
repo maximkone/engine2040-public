@@ -18,7 +18,7 @@ Situation: A builder adds `static mut` for the match event log, so tests can rea
 
 Off: "A static mut is the simplest way. Tests can read it from anywhere."
 
-On: "Rule 3: pass per-match state through the match object. Add no process-wide mutable state for it. Counter-example to avoid: `crates/endpoint/src/play/play_session.rs:113`, the `STEP_HOOK` static. Search `node tools/books.mjs search "mutable static variable"` and cite [trpl ch.20]. Give each test its own match object."
+On: "Rule 3: pass per-match state through the match object. Add no process-wide mutable state for it. Counter-example to avoid: a process-wide static holding the hook (the old `STEP_HOOK` static is gone); the hook is now an `Option<StepCaptureHook>` on the play slot, wired by `with_step_capture_hook` at `crates/endpoint/src/play/play_session.rs:804`. Search `node tools/books.mjs search "mutable static variable"` and cite [trpl ch.20]. Give each test its own match object."
 
 What skill-less misses: the shared state. Two matches or two parallel tests share the log, so the results depend on the order the tests run in.
 
@@ -28,6 +28,6 @@ Situation: A builder feeds the audio mixer from the tick with `if let Ok(mut m) 
 
 Off: "try_lock keeps the tick from blocking. The lock is only busy now and then, so the drops are rare."
 
-On: "Rule 5: a try_lock that fails must queue or count the work, never drop it silently. Search `node tools/books.mjs search "rust atomics locks real time"` and cite [bos ch.5]. The window mixer at `crates/game/src/bin/arena.rs:518` has this bug; add a queue or a dropped-command counter there."
+On: "Rule 5: a try_lock that fails must queue or count the work, never drop it silently. Search `node tools/books.mjs search "rust atomics locks real time"` and cite [bos ch.5]. The window mixer at `crates/game/src/bin/arena_frame/mod.rs:114` drops audible voices on a refused lock and counts nothing; add the counter there (the feed above it already queues and counts `FeedStats::dropped_full`)."
 
 What skill-less misses: that the commands vanish under load, with no count. Nobody sees the loss, so the audio looks wrong with no visible error.

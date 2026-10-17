@@ -1,5 +1,5 @@
-//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, thirteen packs load on
-//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay` in [`PACK_NAMES`]), and every verb registers through one typed API.
+//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, fourteen packs load on
+//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics` in [`PACK_NAMES`]), and every verb registers through one typed API.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists its core tools plus
 //! the packs a session loaded (`api.load`), dispatches any verb by exact
@@ -53,6 +53,8 @@ pub mod gym;
 pub mod material;
 pub mod net;
 pub mod perf;
+/// Balance answers for one blow: the read-only `physics.read` verb.
+pub mod physics;
 pub mod play;
 pub mod replay;
 pub mod rules;
@@ -60,7 +62,7 @@ pub mod scene;
 pub mod view;
 
 /// Every pack name, in contract order. Each name has one module below.
-pub const PACK_NAMES: [&str; 13] = [
+pub const PACK_NAMES: [&str; 14] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -74,6 +76,7 @@ pub const PACK_NAMES: [&str; 13] = [
     perf::PACK,
     play::PACK,
     replay::PACK,
+    physics::PACK,
 ];
 
 /// Core tool: call one verb from any pack by exact name.
@@ -440,7 +443,7 @@ impl PackRegistry {
         self.packs.push(pack);
     }
 
-    /// The shipped registry: the thirteen packs of [`PACK_NAMES`], built once.
+    /// The shipped registry: the fourteen packs of [`PACK_NAMES`], built once.
     /// Registration errors never panic here; the guard test asserts the
     /// shipped list is clean.
     pub fn shipped() -> &'static Self {
@@ -460,6 +463,7 @@ impl PackRegistry {
                 perf::pack(),
                 play::pack(),
                 replay::pack(),
+                physics::pack(),
             ])
         })
     }

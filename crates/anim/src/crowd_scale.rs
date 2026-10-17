@@ -14,8 +14,6 @@ use engine_core::{Fnv64, Rng};
 pub const MAX_CROWD: usize = 1000;
 /// Canonical crowd seed; reseed paths derive from it by xor folds.
 pub const CROWD_SEED: u64 = 2040;
-/// Perf workload name posted for this tape.
-pub const WORKLOAD_NAME: &str = "anim_crowd_1000";
 /// Modeled full-rate eval cost per agent per tick, in nanoseconds.
 pub const COST_FULL_NS: u64 = 1500;
 /// Amortized half-rate cost: one full eval every 2 ticks.

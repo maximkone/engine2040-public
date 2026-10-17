@@ -65,7 +65,7 @@ use super::requery::{requery_key, RequeryCache, RequeryParams};
 use super::{
     build_tape, capture_with, CaptureArgs, CaptureManifestDto, CaptureOutput, PlayInputDto,
     CAPTURE_DEFAULT_HEIGHT, CAPTURE_DEFAULT_WIDTH, CAPTURE_MAX_DIM, MAX_CAPTURE_BYTES,
-    MAX_PLAY_INPUTS, MAX_PLAY_TICKS,
+    MAX_PLAY_INPUTS, MAX_PLAY_TICKS, PNG_MAGIC,
 };
 use crate::mcp::{McpServer, McpToolError};
 
@@ -74,9 +74,6 @@ pub const TOOL_PLAY_STEP: &str = "play.step";
 /// Software rasterizer pixel bound (512x512): stored-deflate receipts stay
 /// under [`MAX_CAPTURE_BYTES`]; a wired GPU callback covers the full 2048.
 const MAX_SOFTWARE_PIXELS: u64 = 512 * 512;
-
-/// PNG file magic: every receipt starts with these bytes.
-const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
 /// `#[serde(with = "dec_u64")]` for a `u64` hash, digest or seed: the wire
 /// carries the exact decimal text (JS and LLM clients parse JSON numbers as
@@ -636,10 +633,11 @@ fn step_compute(
     let asked = CaptureArgs {
         width: request.width,
         height: request.height,
+        max_size: None,
     };
     let capture = match hook {
         Some(render) => capture_with(&asked, Box::new(|asked| render(asked, digest, upto)))?,
-        None => software_capture(&asked, digest, upto, seed, request.half, &view)?,
+        None => software_capture(&asked, digest, upto, seed, &view)?,
     };
     Ok(PlayStepOutput {
         tick: upto,
@@ -861,7 +859,6 @@ fn software_capture(
     digest: u64,
     tick: u32,
     seed: u64,
-    half: f32,
     view: &BoutView,
 ) -> Result<CaptureOutput, McpToolError> {
     let width = args.width.unwrap_or(CAPTURE_DEFAULT_WIDTH);
@@ -893,7 +890,6 @@ fn software_capture(
         tick,
         digest,
         seed,
-        half,
         &view.fighters,
         &view.events,
     );
@@ -929,11 +925,9 @@ fn render_step_pixels(
     tick: u32,
     digest: u64,
     seed: u64,
-    half: f32,
     fighters: &[ActorNumbers],
     events: &[BoutEvent],
 ) -> Vec<u8> {
-    let _ = half;
     let w = width as usize;
     let h = height as usize;
     let mut rgb = vec![0u8; w * h * 3];
@@ -1298,8 +1292,10 @@ fn require_non_black(rgb: &[u8]) -> Result<(), McpToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::play::frame_call_result;
     use engine_editor::capability::Capability;
     use rmcp::handler::server::router::tool::SyncTool;
+    use rmcp::model::ContentBlock;
 
     const SEED: u64 = 2040;
     const W: u32 = 96;
@@ -1677,7 +1673,7 @@ mod tests {
                 velocity: [0.0, 0.0, 0.0],
             },
         ];
-        let rgb = render_step_pixels(width, height, tick, digest, 99, 20.0, &fighters, &[]);
+        let rgb = render_step_pixels(width, height, tick, digest, 99, &fighters, &[]);
         Ok(CaptureOutput {
             manifest: CaptureManifestDto {
                 adapter: adapter.to_owned(),
@@ -1712,6 +1708,24 @@ mod tests {
         tick: u32,
     ) -> Result<CaptureOutput, McpToolError> {
         tagged_receipt("hook-beta", asked, digest, tick)
+    }
+
+    #[test]
+    fn play_step_receipt_carries_image_block() {
+        let out = play_step_with(&tool_args(2), None).expect("software step answers");
+        let result =
+            frame_call_result(rmcp::serde_json::to_value(&out).expect("step receipt serializes"));
+        assert!(
+            result.content.iter().any(
+                |item| matches!(item, ContentBlock::Image(image) if image.mime_type == "image/png")
+            ),
+            "the step answers with one image/png block"
+        );
+        let structured = result.structured_content.expect("structured content kept");
+        assert!(
+            structured.get("png_bytes").is_none() && structured.get("manifest").is_some(),
+            "the step keeps its manifest and drops the raw array"
+        );
     }
 
     #[test]
@@ -2085,8 +2099,8 @@ mod tests {
             death_cause_fighter(0, 200, "idle", -5.0),
             death_cause_fighter(1, 1000, "idle", 5.0),
         ];
-        let whole = render_step_pixels(W, H, 600, 7, SEED, 20.0, &full, &[]);
-        let damaged = render_step_pixels(W, H, 600, 7, SEED, 20.0, &hurt, &[]);
+        let whole = render_step_pixels(W, H, 600, 7, SEED, &full, &[]);
+        let damaged = render_step_pixels(W, H, 600, 7, SEED, &hurt, &[]);
         assert_ne!(
             whole, damaged,
             "hp 1000 vs 200 must change the receipt (hp bar)"
@@ -2099,7 +2113,7 @@ mod tests {
             death_cause_fighter(0, 800, "idle", -5.0),
             death_cause_fighter(1, 1000, "idle", 5.0),
         ];
-        let quiet = render_step_pixels(W, H, 600, 7, SEED, 20.0, &fighters, &[]);
+        let quiet = render_step_pixels(W, H, 600, 7, SEED, &fighters, &[]);
         let hit = BoutEvent {
             tick: 595,
             kind: "hit".to_owned(),
@@ -2107,7 +2121,7 @@ mod tests {
             victim: 0,
             amount: 200,
         };
-        let flashed = render_step_pixels(W, H, 600, 7, SEED, 20.0, &fighters, &[hit]);
+        let flashed = render_step_pixels(W, H, 600, 7, SEED, &fighters, &[hit]);
         assert_ne!(quiet, flashed, "a recent hit must flash the victim");
     }
 
@@ -2128,8 +2142,8 @@ mod tests {
             victim: 0,
             amount: 0,
         };
-        let living = render_step_pixels(W, H, 600, 7, SEED, 20.0, &alive, &[]);
-        let fallen = render_step_pixels(W, H, 600, 7, SEED, 20.0, &dead, &[kill]);
+        let living = render_step_pixels(W, H, 600, 7, SEED, &alive, &[]);
+        let fallen = render_step_pixels(W, H, 600, 7, SEED, &dead, &[kill]);
         assert_ne!(living, fallen, "out phase plus kill must mark death");
     }
 }

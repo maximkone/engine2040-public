@@ -94,8 +94,8 @@ fn check_tri(name: &str, v: [f32; 3]) -> Result<(), RtShadowError> {
 /// Grid index to `f32` scalar (exact for frame sizes; saturates, never
 /// wraps). Render owner: `gi_probe` and `gi_dyn` reuse this instead of a
 /// second copy; the saturating step reuses
-/// `engine_core::checked::saturating_usize_to_u32` so the `assets`
-/// `count_f32` twin shares one workspace owner for the clamp.
+/// `engine_core::checked::saturating_usize_to_u32`. Note: the `assets`
+/// `count_f32` twin keeps its own `u16::try_from` copy, not this helper.
 pub(crate) fn idx_f32(i: usize) -> f32 {
     let wide = engine_core::checked::saturating_usize_to_u32(i);
     let narrow = u16::try_from(wide.min(u32::from(u16::MAX))).unwrap_or(u16::MAX);
@@ -199,7 +199,7 @@ pub fn sand_radiance(
     ambient: [f32; 3],
 ) -> Result<[f32; 3], RtShadowError> {
     let sun = unit_sun(sun_dir)?;
-    if !shadow.is_finite() || shadow < 0.0 || shadow > 1.0 {
+    if !shadow.is_finite() || !(0.0..=1.0).contains(&shadow) {
         return Err(invalid("rt shadow factor is outside 0..=1"));
     }
     check_tri("ambient", ambient)?;
@@ -331,13 +331,6 @@ pub fn torch_visibility(
     let h0 = ray_hits_box(origin, dir, &RT_BOXES[0], 0.0, RT_T_MAX_M).unwrap_or(false);
     let h1 = ray_hits_box(origin, dir, &RT_BOXES[1], 0.0, RT_T_MAX_M).unwrap_or(false);
     Ok(!(h0 || h1))
-}
-
-/// Rt many-light gate: production read of the DI torch count.
-///
-/// Caller wiring for `restir_di`: Base keeps clusters, Rt takes reservoirs.
-pub fn restir_torch_count() -> usize {
-    restir_di::DI_TORCHES
 }
 
 #[cfg(test)]

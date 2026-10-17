@@ -23,6 +23,8 @@
 //! `manifold-rust` (Apache-2.0, port of Manifold), `xatlas` (MIT, vendored source behind the
 //! `uv` feature), `meshopt` (MIT OR Apache-2.0, meshoptimizer), `parry3d` (Apache-2.0, V-HACD).
 
+/// Humanoid bone auto-map: the 22 humanoid bones named from a rig's joint names, std only.
+pub mod bonemap;
 pub mod mesh;
 /// Native mesh ops (weld, mirror, array, flip, normals): std only, no feature.
 pub mod ops;
@@ -87,6 +89,8 @@ mod wiring_tests {
         // The validate signature callers program against stays put.
         let _: fn(&crate::mesh::GeoMesh) -> Result<(), crate::GeoError> =
             crate::mesh::GeoMesh::validate;
+        // The bone auto-map resolves at the root too: `auto_map` never moves silently.
+        let _: fn(&[&str]) -> Vec<(crate::bonemap::HumanoidBone, usize)> = crate::bonemap::auto_map;
         let _ = mesh::GeoError::NonFinite;
         let _ = primitives::cuboid_faces([1.0, 1.0, 1.0]);
         let _ = recipe::RecipeError::TooManyOps;

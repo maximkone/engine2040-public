@@ -18,7 +18,9 @@ bars (pixel test on their screen rect). F2P — that rect holds scene
 pixels today. P2P — `cargo test -p engine-render --lib` green.
 
 Reads beside this page: `content/design/controls.rows` (verbs and
-feedback flags; gamepad and rumble read it), `content/design/cues.rows`
+feedback flags, plus the pad codes the window backend emits: 0..=3 face,
+then 4..=7 pad directions; gamepad and rumble read it),
+`content/design/cues.rows`
 (sound cues, 40 ms budget; the visual answer rides the next frame, 25 ms),
 `docs/VISUAL-TARGET.md` (1920x1080 presentation; sizes below are px at
 720p and scale linearly), `crates/game/src/camera.rs` (director),
@@ -37,7 +39,9 @@ ratio against what sits behind it (4.5:1 text, 3:1 large graphics).
 `second`: the non-colour channel — no information by colour alone
 (Basic tier; `DuelOverlay` already carries `palette_id` 0-3 for
 deuteranopia, protanopia, tritanopia). `feel`: the engageability line —
-what the player should feel when it changes.
+what the player should feel when it changes. Gated: a row whose `second`
+cell names no shape, icon or sound fails
+`design_controls::hud_elements_never_colour_alone`.
 
 | element | show | event | text | contrast | second | feel |
 |---|---|---|---|---|---|---|

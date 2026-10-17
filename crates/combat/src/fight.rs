@@ -1378,7 +1378,9 @@ fn resolve_strike(
 
 /// Step 4: advance attack, dodge, react and knockdown clocks and regen
 /// stamina; the queued input buffer expires lazily when popped, so no clock
-/// ages it here. Clamps health to its ceiling.
+/// ages it here. A swing in flight is exertion, so an attacking fighter does
+/// not regen (the mash drain); idle, blocking and post-swing ticks do.
+/// Clamps health to its ceiling.
 fn advance_clocks(state: &mut FightState, tables: &Tables, count: usize) {
     for id in 0..count {
         let f = &mut state.fighters[id];
@@ -1407,7 +1409,14 @@ fn advance_clocks(state: &mut FightState, tables: &Tables, count: usize) {
         if f.is_blocking {
             f.stamina = f.stamina.saturating_sub(tables.block_hold_cost_per_tick);
         }
-        f.stamina = (f.stamina.saturating_add(tables.stamina_regen_per_tick)).min(MAX_STAMINA);
+        // A swing in flight is exertion: no stamina comes back while the
+        // attack clock runs, so a mash cadence drains the bar and the press
+        // the empty bar refuses reports `StaminaOut`. Before this gate the
+        // 25-point cost met 26 points of regen across the 13-tick swing, so
+        // the bar never emptied and no refusal could ever fire.
+        if !f.is_attacking {
+            f.stamina = (f.stamina.saturating_add(tables.stamina_regen_per_tick)).min(MAX_STAMINA);
+        }
         if f.hp_permille > MAX_HP_PERMILLE {
             f.hp_permille = MAX_HP_PERMILLE;
         }
@@ -2486,6 +2495,52 @@ mod tests {
             }
         }
         assert!(started, "attack never restarted after regen");
+    }
+
+    /// The C5 spam drain: a fighter that presses ATTACK at a mash cadence
+    /// drains its own bar to empty inside one 600-tick bout, and the presses
+    /// the empty bar refuses report `StaminaOut`. Red before the regen gate:
+    /// the 25-point cost landed every 13th tick while 2 regen per tick
+    /// refilled 26, so the bar never left full and no cue ever fired.
+    #[test]
+    fn spam_cadence_drains_the_bar_and_reports_refusals() {
+        // Three real cadences: a mash every tick, the staged frames tape
+        // (attack every 5 ticks), and the staged binary tape (attack on
+        // cycle 0 and 35, block otherwise with a dropped bit every fifth
+        // tick). Each is pure over the tick.
+        let cadences: [fn(u32) -> u8; 3] = [
+            |_| ATTACK,
+            |tick| {
+                if tick % 5 == 0 {
+                    ATTACK
+                } else {
+                    Buttons::NONE.0
+                }
+            },
+            |tick| match tick % 50 {
+                0 | 35 => ATTACK,
+                _ if tick % 5 == 4 => Buttons::NONE.0,
+                _ => BLOCK,
+            },
+        ];
+        for (index, cadence) in cadences.iter().enumerate() {
+            let mut state = FightState::new(2).unwrap();
+            let mut outs = 0usize;
+            let mut lowest = MAX_STAMINA;
+            for at in 0..600u32 {
+                let events = tick(&mut state, &[input(0, cadence(at)), none(1)]);
+                outs += events
+                    .iter()
+                    .filter(|e| matches!(e, FightEvent::StaminaOut { fighter: 0 }))
+                    .count();
+                lowest = lowest.min(state.fighters[0].stamina);
+            }
+            assert!(
+                outs > 0,
+                "cadence {index} never refused a press (lowest stamina {lowest})"
+            );
+            assert_eq!(lowest, 0, "cadence {index} never emptied the bar");
+        }
     }
 
     #[test]

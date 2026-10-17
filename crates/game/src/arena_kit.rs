@@ -17,7 +17,6 @@ use engine_render::present::MeshKey;
 use engine_render::present::{TextureKey, TextureUpload};
 #[cfg(feature = "app")]
 use sha2::{Digest, Sha256};
-#[cfg(feature = "app")]
 use std::path::{Path, PathBuf};
 
 /// Placement table loading (parse `placement.json` into actors): the
@@ -95,11 +94,16 @@ fn parse_err(text: &str) -> KitError {
     KitError::Parse(bound_diag(text))
 }
 
+/// Import failure with bounded detail; keeps headless parsing lines short.
+fn import_err(text: &str) -> KitError {
+    KitError::Import(bound_diag(text))
+}
+
 /// Buffer length as `u64` without truncation; a merged kit mesh that would
 /// not fit in `u32` indices fails loudly instead of wrapping.
 #[cfg(feature = "app")]
 fn len_u64(len: usize, file: &'static str) -> Result<u64, KitError> {
-    let words = u32::try_from(len).map_err(|_| KitError::Import(bound_diag(file)))?;
+    let words = u32::try_from(len).map_err(|_| import_err(file))?;
     Ok(u64::from(words))
 }
 
@@ -162,15 +166,17 @@ fn kit_match_world_for_actors(actors: &[KitActor]) -> Result<MatchWorld, KitErro
     MatchWorld::try_new(obstacles).map_err(|error| KitError::Parse(bound_diag(&error.to_string())))
 }
 
-/// Match collision world for the embedded placement: the 11 physical actors
-/// as floor boxes so walls stop being pictures.
+/// Match collision world for the embedded placement: every actor whose
+/// `physical` flag is set, as floor boxes so walls stop being pictures (the
+/// shipped placement collides six: stands, both walls, the gate, crate_a,
+/// debris_field; the sand floor and the torches/banners are dressing).
 ///
 /// Consumer: the arena session that plays the staged kit (a later caller
 /// reads this world into the spine step); data owner stays this module
 /// (placement parse). Units: meters. Determinism: same bytes give the same
 /// sorted world; insertion order never moves the hash. Errors:
-/// [`KitError::Parse`] when the placement or any box is bad. Budget: 11
-/// boxes built on demand at init; zero per tick.
+/// [`KitError::Parse`] when the placement or any box is bad. Budget: one box
+/// per physical actor, built on demand at init; zero per tick.
 ///
 /// Caller: [`kit_prop_rows`] (same file) keeps the brief in lockstep with
 /// collision (see its body).
@@ -179,17 +185,33 @@ pub fn kit_match_world() -> Result<MatchWorld, KitError> {
     kit_match_world_for_actors(&actors)
 }
 
-/// One view row per physical staged kit draw: kind plus bounds in
-/// `kit_actors` order, skipping non-physical dressing.
+/// [`kit_match_world`] with the live session's refusal path: an unbuildable
+/// placement maps to [`MatchWorld::empty()`] (the legacy open arena) instead
+/// of failing the session, and [`kit_prop_rows`] already reports zero rows
+/// for the same placement, so view and sim stay in lockstep.
+///
+/// Caller: `crates/game/src/windowed.rs` (`run_windowed`) and
+/// `crates/game/src/bin/arena.rs` build the live match over this.
+/// Units: meters. Determinism: same bytes give the same world; the empty
+/// world keeps the legacy checkpoints. Budget: parsed once per call at
+/// session load; zero per tick.
+#[must_use]
+pub fn kit_match_world_or_empty() -> MatchWorld {
+    kit_match_world().unwrap_or_else(|_| MatchWorld::empty())
+}
+
+/// One view row per staged kit draw: kind plus bounds in `kit_actors` order.
 ///
 /// Kind is the actor asset file name; bounds are the placement box
 /// (`pos_m +/- size_m / 2`) passed through [`aabb_of`] so the pair keeps
 /// `[min, max]` order. Pure reader: embedded placement only, no presenter,
-/// no file IO. View only; feeds the brief text, never the sim hash.
+/// no file IO. View only; feeds the brief text, never the sim hash. The view
+/// draws every staged actor, `physical` or not: the flag is the collision
+/// gate ([`kit_obstacles`]), never the draw gate.
 ///
 /// Consumer: the `--view-brief` prop list. Units: meters. Errors: none; an
 /// unparsable placement or a bad box reads as zero rows, never a panic.
-/// Budget: one entry per physical actor, built on demand for the brief;
+/// Budget: one entry per staged actor, built on demand for the brief;
 /// heap on the presentation path only, zero per tick.
 #[must_use]
 pub fn kit_prop_rows() -> Vec<(&'static str, [[f32; 3]; 2])> {
@@ -205,9 +227,6 @@ pub fn kit_prop_rows() -> Vec<(&'static str, [[f32; 3]; 2])> {
     }
     let mut rows = Vec::with_capacity(actors.len());
     for actor in &actors {
-        if !actor.physical {
-            continue;
-        }
         let min = [
             actor.pos_m[0] - actor.size_m[0] / 2.0,
             actor.pos_m[1] - actor.size_m[1] / 2.0,
@@ -413,7 +432,6 @@ pub fn apply_fit(
 /// Walks up from the exe (deployed `bin/arena.exe` or dev `target/...`)
 /// to the tree holding `content/arena/placement.json`; falls back to the
 /// launch directory. Same layout dev and clean room.
-#[cfg(feature = "app")]
 #[must_use]
 pub fn kit_content_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
@@ -555,16 +573,247 @@ fn merge_import(
         uvs.extend_from_slice(&mesh.uv0);
         for index in &mesh.indices {
             let rebased = base + u64::from(*index);
-            let rebased32 =
-                u32::try_from(rebased).map_err(|_| KitError::Import(bound_diag(file)))?;
+            let rebased32 = u32::try_from(rebased).map_err(|_| import_err(file))?;
             indices.push(rebased32);
         }
         triangles += len_u64(mesh.indices.len(), file)? / 3;
     }
     if positions.is_empty() {
-        return Err(KitError::Import(bound_diag(file)));
+        return Err(import_err(file));
     }
     Ok((positions, normals, uvs, indices, triangles))
+}
+
+/// Procedural crowd rows and columns on the west stands: 3 tiers by 8 seats.
+#[cfg(feature = "app")]
+const CROWD_ROWS: usize = 3;
+/// Seats per stands tier, spaced along the stands length.
+#[cfg(feature = "app")]
+const CROWD_COLS: usize = 8;
+/// Stone top sits near 3.0 m; heads must clear this bound.
+#[cfg(feature = "app")]
+const CROWD_MIN_TOP_M: f32 = 3.2;
+/// Lift target when the fitted stone runs low, so heads always clear stone.
+#[cfg(feature = "app")]
+const CROWD_LIFT_TOP_M: f32 = 3.35;
+
+/// True for the west stands actor that carries the procedural crowd.
+///
+/// Pure over the placement row; the same actor gives the same bool.
+/// Caller: `import_kit` in this file merges crowd only for this actor.
+#[cfg(feature = "app")]
+fn crowd_is_stands(actor: &KitActor) -> bool {
+    actor.id == 2 && actor.asset == KitAsset::Stands
+}
+
+/// Append one axis-aligned box (24 verts, 36 indices) with outward normals.
+///
+/// Cold init only; the staging buffers grow here, zero per tick.
+/// Caller: `append_stands_crowd` builds bodies plus heads from this box.
+#[cfg(feature = "app")]
+fn push_crowd_box(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    center: [f32; 3],
+    size: [f32; 3],
+) {
+    let hx = size[0] * 0.5;
+    let hy = size[1] * 0.5;
+    let hz = size[2] * 0.5;
+    let cx = center[0];
+    let cy = center[1];
+    let cz = center[2];
+    // Six faces with outward normals plus four corners each, matching the
+    // procedural cube winding (culling stays off, so order is informational).
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [cx + hx, cy - hy, cz - hz],
+                [cx + hx, cy - hy, cz + hz],
+                [cx + hx, cy + hy, cz + hz],
+                [cx + hx, cy + hy, cz - hz],
+            ],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [
+                [cx - hx, cy - hy, cz + hz],
+                [cx - hx, cy - hy, cz - hz],
+                [cx - hx, cy + hy, cz - hz],
+                [cx - hx, cy + hy, cz + hz],
+            ],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [
+                [cx - hx, cy + hy, cz - hz],
+                [cx - hx, cy + hy, cz + hz],
+                [cx + hx, cy + hy, cz + hz],
+                [cx + hx, cy + hy, cz - hz],
+            ],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [cx - hx, cy - hy, cz + hz],
+                [cx - hx, cy - hy, cz - hz],
+                [cx + hx, cy - hy, cz - hz],
+                [cx + hx, cy - hy, cz + hz],
+            ],
+        ),
+        (
+            [0.0, 0.0, 1.0],
+            [
+                [cx - hx, cy - hy, cz + hz],
+                [cx + hx, cy - hy, cz + hz],
+                [cx + hx, cy + hy, cz + hz],
+                [cx - hx, cy + hy, cz + hz],
+            ],
+        ),
+        (
+            [0.0, 0.0, -1.0],
+            [
+                [cx + hx, cy - hy, cz - hz],
+                [cx - hx, cy - hy, cz - hz],
+                [cx - hx, cy + hy, cz - hz],
+                [cx + hx, cy + hy, cz - hz],
+            ],
+        ),
+    ];
+    let base = u32::try_from(positions.len()).unwrap_or(u32::MAX);
+    let mut face_base = base;
+    for (normal, corners) in &faces {
+        for (corner_index, corner) in corners.iter().enumerate() {
+            positions.push(*corner);
+            normals.push(*normal);
+            let uv = match corner_index {
+                0 => [0.0, 0.0],
+                1 => [1.0, 0.0],
+                2 => [1.0, 1.0],
+                _ => [0.0, 1.0],
+            };
+            uvs.push(uv);
+        }
+        indices.extend_from_slice(&[
+            face_base,
+            face_base + 1,
+            face_base + 2,
+            face_base,
+            face_base + 2,
+            face_base + 3,
+        ]);
+        face_base += 4;
+    }
+}
+
+/// Merge 24 spectators (body plus head boxes) into fitted stands buffers.
+///
+/// Feet rest on tier fractions of the fitted height, rising from the arena
+/// side east to the back west; heads clear [`CROWD_MIN_TOP_M`]. Returns
+/// false when the fitted mesh has no bounds, staging stone without crowd
+/// instead of skipping the actor. Same fitted mesh gives the same crowd;
+/// cold init only, zero per tick.
+/// Caller: `import_kit` in this file calls this for the stands actor only.
+#[cfg(feature = "app")]
+fn append_stands_crowd(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+) -> bool {
+    let [min, max] = match aabb_of(positions) {
+        Ok(bounds) => bounds,
+        Err(_) => return false,
+    };
+    let dx = max[0] - min[0];
+    let dy = max[1] - min[1];
+    let dz = max[2] - min[2];
+    if !(dx > 1e-6 && dy > 1e-6 && dz > 1e-6) {
+        return false;
+    }
+    let x0 = min[0] + dx * 0.08;
+    let x1 = max[0] - dx * 0.08;
+    let z0 = min[2] + dz * 0.08;
+    let z1 = max[2] - dz * 0.08;
+    let span_x = x1 - x0;
+    let span_z = z1 - z0;
+    if !(span_x > 1e-6 && span_z > 1e-6) {
+        return false;
+    }
+    let stone_len = positions.len();
+    let rows_f = f32::from(u8::try_from(CROWD_ROWS).unwrap_or(3));
+    let cols_f = f32::from(u8::try_from(CROWD_COLS).unwrap_or(8));
+    for row in 0..CROWD_ROWS {
+        let row_f = f32::from(u8::try_from(row).unwrap_or(0));
+        // East near the arena sits low, west back sits high like the tiers.
+        let frac_x = (row_f + 0.5) / rows_f;
+        let x = x1 - frac_x * span_x;
+        let tread = min[1] + ((row_f + 0.75) / rows_f) * dy;
+        for col in 0..CROWD_COLS {
+            let col_f = f32::from(u8::try_from(col).unwrap_or(0));
+            let frac_z = (col_f + 0.5) / cols_f;
+            let z = z0 + frac_z * span_z;
+            let variant = u8::try_from((row * CROWD_COLS + col) % 3).unwrap_or(0);
+            let body_h = 0.50 + 0.05 * f32::from(variant);
+            let body_center = [x, tread + body_h * 0.5, z];
+            push_crowd_box(
+                positions,
+                normals,
+                uvs,
+                indices,
+                body_center,
+                [0.34, body_h, 0.24],
+            );
+            let head_side = 0.20;
+            let head_center = [x, tread + body_h + 0.04 + head_side * 0.5, z];
+            push_crowd_box(
+                positions,
+                normals,
+                uvs,
+                indices,
+                head_center,
+                [head_side, head_side, head_side],
+            );
+        }
+    }
+    // The fitted stone may run low; lift only the crowd so heads clear it.
+    // Stone stays where the fit put it, so tiers never move.
+    let top = positions
+        .iter()
+        .skip(stone_len)
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    if top <= CROWD_MIN_TOP_M {
+        let lift = CROWD_LIFT_TOP_M - top;
+        for point in positions.iter_mut().skip(stone_len) {
+            point[1] += lift;
+        }
+    }
+    true
+}
+
+/// Fitted buffers for one actor, with crowd merged on the stands.
+///
+/// Pure over the source plus fit; the same inputs give the same buffers.
+/// Cold init only, zero per tick.
+/// Caller: `import_kit` in this file bakes one actor through this helper.
+#[cfg(feature = "app")]
+fn fitted_buffers(
+    source: &KitSource,
+    actor: &KitActor,
+    params: &FitParams,
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+    let (mut pos, mut nor) = apply_fit(&source.1, &source.2, params);
+    let mut uv = source.3.clone();
+    let mut idx = source.4.clone();
+    if crowd_is_stands(actor) {
+        // A refused crowd keeps stone without crowd, never skips the actor.
+        let _ = append_stands_crowd(&mut pos, &mut nor, &mut uv, &mut idx);
+    }
+    (pos, nor, uv, idx)
 }
 
 /// Import plus fit every kit actor mesh from `root/src/<asset>.gltf` (CPU
@@ -615,8 +864,9 @@ pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
                 continue;
             }
         };
-        let (fit_pos, fit_nor) = apply_fit(&source.1, &source.2, &params);
-        let mesh = match engine_render::v1::upload_mesh(&fit_pos, &fit_nor, &source.3, &source.4) {
+        // Crowd rides the stands draw, so draws stay at 11 and files at 8.
+        let (fit_pos, fit_nor, fit_uv, fit_idx) = fitted_buffers(source, actor, &params);
+        let mesh = match engine_render::v1::upload_mesh(&fit_pos, &fit_nor, &fit_uv, &fit_idx) {
             Ok(mesh) => mesh,
             Err(_) => {
                 skipped.push((actor.id, "mesh"));
@@ -755,10 +1005,14 @@ pub fn stage_kit(
 }
 
 /// Stage the content-dir kit, drawing the cube only when staging is refused
-/// (twin fallback path); never fails, never panics.
+/// (twin fallback path); never fails, never panics. A refusal surfaces as
+/// one skipped draw in the receipt (use [`stage_kit`] for the typed reason).
 #[cfg(feature = "app")]
 pub fn stage_kit_or_default(presenter: &mut engine_render::present::Presenter) -> KitReport {
-    stage_kit(presenter, &kit_content_dir()).unwrap_or_default()
+    stage_kit(presenter, &kit_content_dir()).unwrap_or_else(|_| KitReport {
+        skipped: 1,
+        ..Default::default()
+    })
 }
 
 /// One-line window log notice for a staged kit (`"arena: staged N kit
@@ -803,10 +1057,162 @@ pub fn push_kit_draws(
     pushed
 }
 
+// ---------------------------------------------------------------------------
+// Headless leg: CPU-only kit gate without `app`. Default tests prove 8 files
+// and 5,000+ tris with no `gltf` in the default graph. Same order and counts
+// as the `app` import; GPU upload stays on the `app` leg.
+// ---------------------------------------------------------------------------
+
+/// One baked actor on the headless leg: placement plus stable key.
+///
+/// Consumer: default gate tests keep order and counts identical to `app`.
+/// Units: meters for the actor box. Determinism: same files, same keys in
+/// placement order. Errors: none; bad files fail the import. Budget: 11
+/// entries at init; zero per tick.
+///
+/// Caller: crates/game/src/arena_kit.rs `import_kit` builds one per actor.
+#[cfg(not(feature = "app"))]
+pub struct BakedKitMesh {
+    /// Placement actor this entry was fitted to.
+    pub actor: KitActor,
+    /// Stable presenter key for this actor.
+    pub key: MeshKey,
+}
+
+/// CPU-side kit import on the headless leg: fit plus triangles, no GPU.
+///
+/// Consumer: default gate tests. Units: triangles from glTF accessors.
+/// Determinism: same bytes, same counts and keys. Errors: [`KitError`]
+/// when a file cannot be read or parsed or the floor fails. Budget: files
+/// read once at init; zero per tick.
+///
+/// Caller: crates/game/src/arena_kit.rs `import_kit` is called by tests.
+#[cfg(not(feature = "app"))]
+pub struct ImportedKit {
+    /// One entry per placed actor (11 on the shipping placement).
+    pub baked: Vec<BakedKitMesh>,
+    /// Source triangles over distinct files, not per-actor copies.
+    pub triangles: u64,
+    /// Distinct kit files imported.
+    pub files: usize,
+    /// Actors skipped with reason (`"import"` or `"fit"`).
+    pub skipped: Vec<(u32, &'static str)>,
+    /// Actors on fallback materials.
+    pub material_fallbacks: usize,
+}
+
+// Every `u64` after `"needle":` in order (counts, indices).
+#[cfg(not(feature = "app"))]
+fn all_u64_after(text: &str, quoted: &str, file: &'static str) -> Result<Vec<u64>, KitError> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(quoted) {
+        let with_needle = rest.get(at..).ok_or_else(|| import_err(file))?;
+        let after_needle = with_needle
+            .strip_prefix(quoted)
+            .ok_or_else(|| import_err(file))?;
+        let colon_at = after_needle.find(':').ok_or_else(|| import_err(file))?;
+        let with_colon = after_needle
+            .get(colon_at..)
+            .ok_or_else(|| import_err(file))?;
+        let after_colon = with_colon
+            .strip_prefix(':')
+            .ok_or_else(|| import_err(file))?;
+        let trimmed = after_colon.trim_start();
+        let mut end = 0usize;
+        for c in trimmed.chars() {
+            if c.is_ascii_digit() {
+                end = end
+                    .checked_add(c.len_utf8())
+                    .ok_or_else(|| import_err(file))?;
+            } else {
+                break;
+            }
+        }
+        if end == 0 {
+            return Err(import_err(file));
+        }
+        let digits = trimmed.get(..end).ok_or_else(|| import_err(file))?;
+        let value = digits.parse::<u64>().map_err(|_| import_err(file))?;
+        out.push(value);
+        rest = trimmed.get(end..).ok_or_else(|| import_err(file))?;
+    }
+    Ok(out)
+}
+
+// Triangles for one file: index counts over primitives, no `gltf`.
+#[cfg(not(feature = "app"))]
+fn file_triangles(text: &str, file: &'static str) -> Result<u64, KitError> {
+    let counts = all_u64_after(text, "\"count\"", file)?;
+    let indices = all_u64_after(text, "\"indices\"", file)?;
+    let mut triangles = 0u64;
+    for idx in indices {
+        let ai = usize::try_from(idx).map_err(|_| import_err(file))?;
+        let count = counts.get(ai).copied().ok_or_else(|| import_err(file))?;
+        triangles = triangles
+            .checked_add(count / 3)
+            .ok_or_else(|| import_err(file))?;
+    }
+    if triangles == 0 {
+        return Err(import_err(file));
+    }
+    Ok(triangles)
+}
+
+/// Import every kit actor from `root/src/<asset>.gltf` without `gltf`
+/// (headless leg): std-only JSON counts over the same files the `app` leg
+/// parses, same order and keys. A missing file or floor miss fails loudly.
+///
+/// Caller: default gate tests call `import_kit` with [`kit_content_dir`].
+#[cfg(not(feature = "app"))]
+pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
+    let actors = kit_actors()?;
+    let files = kit_asset_files(&actors);
+    let mut triangles = 0u64;
+    for file in &files {
+        let path = root.join("src").join(file);
+        let bytes = std::fs::read(&path)
+            .map_err(|err| KitError::Io(bound_diag(&format!("{file}: {err}"))))?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| import_err(file))?;
+        if !text.contains("\"baseColorFactor\"") || !text.contains("\"metallicFactor\"") {
+            return Err(import_err(file));
+        }
+        let tris = file_triangles(text, file)?;
+        triangles = triangles
+            .checked_add(tris)
+            .ok_or_else(|| import_err(file))?;
+    }
+    let mut baked = Vec::with_capacity(actors.len());
+    for actor in &actors {
+        if !files.contains(&actor.asset.file_name()) {
+            return Err(import_err(actor.asset.file_name()));
+        }
+        baked.push(BakedKitMesh {
+            actor: *actor,
+            key: kit_mesh_key(actor),
+        });
+    }
+    if !kit_meets_tris_floor(triangles) {
+        return Err(KitError::Import(bound_diag("kit triangles below floor")));
+    }
+    if baked.is_empty() {
+        return Err(KitError::Import("no kit actor baked".to_string()));
+    }
+    Ok(ImportedKit {
+        baked,
+        triangles,
+        files: files.len(),
+        skipped: Vec::new(),
+        material_fallbacks: 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::kit_load::kit_actor_from_block;
     use super::*;
+    use engine_arena::{ArenaConfig, ArenaRules, LiveMatch, FIGHTER_RADIUS_M};
+    use engine_input::{Buttons, FighterId, FighterInput, FighterTape};
 
     #[test]
     fn placement_parses_11_actors_over_8_files() {
@@ -831,22 +1237,60 @@ mod tests {
         );
     }
 
+    /// The `physical` flag is real data, not a constant: the six walls collide
+    /// and the five dressing actors do not. Ids follow the placement file
+    /// order (1 `sand_floor`, 2 `stands`, 3 `wall_north`, 4 `wall_south`,
+    /// 5 `gate_tunnel`, 6/7 `torch_*`, 8/9 `banner_*`, 10 `crate_a`,
+    /// 11 `debris_field`), so a flip on either side fails by name.
     #[test]
-    fn physical_flag_reads_true_for_embedded_placement() {
+    fn physical_pins_the_six_walls_and_drops_the_dressing() {
         let actors = kit_actors().expect("embedded placement parses");
-        assert!(
-            actors.iter().all(|actor| actor.physical),
-            "all {} placed actors collide",
-            actors.len()
+        let collides: Vec<(u32, KitAsset)> = actors
+            .iter()
+            .filter(|actor| actor.physical)
+            .map(|actor| (actor.id, actor.asset))
+            .collect();
+        assert_eq!(
+            collides,
+            vec![
+                (2, KitAsset::Stands),
+                (3, KitAsset::Walls),
+                (4, KitAsset::Walls),
+                (5, KitAsset::GateTunnel),
+                (10, KitAsset::Crate),
+                (11, KitAsset::Debris),
+            ],
+            "the stands, both walls, the gate and the two cover boxes collide"
         );
-        let rows = kit_prop_rows();
-        assert_eq!(rows.len(), KIT_ACTOR_COUNT);
+        let dressing: Vec<u32> = actors
+            .iter()
+            .filter(|actor| !actor.physical)
+            .map(|actor| actor.id)
+            .collect();
+        assert_eq!(
+            dressing,
+            vec![1, 6, 7, 8, 9],
+            "the sand floor, both torches and both banners are dressing"
+        );
+        // The data drives the sim: the collision world is exactly those six
+        // boxes, while the view keeps drawing every staged actor.
+        let world = kit_match_world().expect("embedded placement collides");
+        assert_eq!(world.obstacles().len(), 6);
+        assert_eq!(kit_prop_rows().len(), KIT_ACTOR_COUNT);
     }
 
+    /// The embedded placement stages 11 actors and collides 6 of them: the
+    /// stands, both walls, the gate and the two cover boxes (the name counts
+    /// the staged actors, the world holds the physical set).
     #[test]
     fn kit_world_holds_11_colliders() {
+        assert_eq!(
+            kit_actors().expect("embedded placement parses").len(),
+            KIT_ACTOR_COUNT,
+            "11 staged actors"
+        );
         let world = kit_match_world().expect("embedded placement collides");
-        assert_eq!(world.obstacles().len(), KIT_ACTOR_COUNT);
+        assert_eq!(world.obstacles().len(), 6, "6 physical boxes collide");
         assert!(!world.is_empty());
         assert!(
             world
@@ -862,16 +1306,20 @@ mod tests {
 
     #[test]
     fn kit_world_refuses_bad_box_or_yaw() {
+        // Index 1 is `stands`, a physical actor, so its box reaches the world
+        // and a zero size must refuse (the sand floor is dressing and builds
+        // no box at all).
         let mut actors = kit_actors().expect("embedded placement parses");
-        actors[0].size_m = [0.0, 1.0, 1.0];
+        actors[1].size_m = [0.0, 1.0, 1.0];
         assert!(kit_match_world_for_actors(&actors).is_err());
         let mut actors = kit_actors().expect("embedded placement parses");
         actors[2].yaw = core::f32::consts::FRAC_PI_2;
         assert!(kit_match_world_for_actors(&actors).is_err());
+        // Dropping one `physical` flag drops exactly one box from the six.
         let mut actors = kit_actors().expect("embedded placement parses");
         actors[10].physical = false;
-        let world = kit_match_world_for_actors(&actors).expect("10 walls still collide");
-        assert_eq!(world.obstacles().len(), KIT_ACTOR_COUNT - 1);
+        let world = kit_match_world_for_actors(&actors).expect("five walls still collide");
+        assert_eq!(world.obstacles().len(), 5);
     }
 
     #[test]
@@ -992,7 +1440,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "app")]
     #[test]
     fn kit_imports_8_files_over_5000_tris() {
         let kit = import_kit(&kit_content_dir()).expect("kit imports from content");
@@ -1012,7 +1459,6 @@ mod tests {
     }
 
     // Same bytes give the same meshes: one import per run, keys stable x2.
-    #[cfg(feature = "app")]
     #[test]
     fn kit_imports_8_files_over_5000_tris_x2() {
         let root = kit_content_dir();
@@ -1188,5 +1634,230 @@ mod tests {
                 "textured sand {var_tex:.1} is 4x flat {var_flat:.1}"
             );
         }
+    }
+
+    // Crowd on the stands: the west stands draw carries procedural
+    // spectators (body plus head boxes) above its treads, so tiers read as
+    // spectators instead of bare stone. Fails before the crowd merge lands.
+    #[cfg(feature = "app")]
+    #[test]
+    fn stands_mesh_carries_procedural_crowd() {
+        let kit = import_kit(&kit_content_dir()).expect("kit imports from content");
+        let stands = kit
+            .baked
+            .iter()
+            .find(|baked| baked.actor.id == 2)
+            .expect("stands actor staged");
+        // 24 spectators (3 rows x 8 cols) add body plus head boxes.
+        assert!(
+            stands.mesh.positions.len() >= 2_000,
+            "stands mesh holds crowd, got {} verts",
+            stands.mesh.positions.len()
+        );
+        let top = stands
+            .mesh
+            .positions
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(top > 3.2, "crowd heads rise above the stone top, got {top}");
+    }
+
+    #[cfg(feature = "app")]
+    #[test]
+    fn crowd_helpers_name_stands_only() {
+        let actors = kit_actors().expect("embedded placement parses");
+        let sand = actors
+            .iter()
+            .find(|actor| actor.id == 1)
+            .expect("sand floor placed");
+        let stands = actors
+            .iter()
+            .find(|actor| actor.id == 2)
+            .expect("stands placed");
+        assert!(!crowd_is_stands(sand), "sand never carries crowd");
+        assert!(crowd_is_stands(stands), "west stands carries crowd");
+        for actor in &actors {
+            if actor.id != 2 {
+                assert!(
+                    !crowd_is_stands(actor),
+                    "actor {} is stone, not crowd",
+                    actor.id
+                );
+            }
+        }
+        // One box is 24 verts plus 36 indices with unit normals in UV range.
+        let mut pos = Vec::new();
+        let mut nor = Vec::new();
+        let mut uv = Vec::new();
+        let mut idx = Vec::new();
+        push_crowd_box(
+            &mut pos,
+            &mut nor,
+            &mut uv,
+            &mut idx,
+            [0.0, 1.0, 0.0],
+            [0.34, 0.55, 0.24],
+        );
+        assert_eq!(pos.len(), 24, "one box holds 24 verts");
+        assert_eq!(nor.len(), 24);
+        assert_eq!(uv.len(), 24);
+        assert_eq!(idx.len(), 36);
+        for normal in &nor {
+            let len2 = normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2];
+            assert!((len2 - 1.0).abs() < 1e-6, "crowd normals stay unit");
+        }
+        for coord in &uv {
+            assert!(
+                (0.0..=1.0).contains(&coord[0]) && (0.0..=1.0).contains(&coord[1]),
+                "crowd uvs sample the texture"
+            );
+        }
+        // Empty mesh refuses crowd instead of dividing by zero.
+        let mut empty_pos = Vec::new();
+        let mut empty_nor = Vec::new();
+        let mut empty_uv = Vec::new();
+        let mut empty_idx = Vec::new();
+        assert!(
+            !append_stands_crowd(
+                &mut empty_pos,
+                &mut empty_nor,
+                &mut empty_uv,
+                &mut empty_idx
+            ),
+            "empty mesh takes no crowd"
+        );
+    }
+
+    /// Observed pose series for slot 0 over `config`, played by an
+    /// `LiveMatch` over `world` with a taped walk: slot 0 wishes `mz` every
+    /// tick and slot 1 idles, so both slots are taped and no brain decides.
+    /// The sample pushed for each tick is that tick's dataset row, which
+    /// holds the pre-step pose (tick 0 is the settled spawn), so the series
+    /// covers every pose the match reached at a tick boundary.
+    fn kit_wall_walk(config: &ArenaConfig, world: &MatchWorld, mz: i8) -> Vec<[f32; 3]> {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            inputs.push(FighterInput {
+                tick,
+                fighter: FighterId(0),
+                mx: 0,
+                mz,
+                facing: 0,
+                buttons: Buttons::NONE,
+            });
+            inputs.push(FighterInput {
+                tick,
+                fighter: FighterId(1),
+                mx: 0,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons::NONE,
+            });
+        }
+        let tape = FighterTape(inputs);
+        let mut live = LiveMatch::with_rules_world(config, ArenaRules::V1, world.clone())
+            .expect("match builds");
+        let mut out = Vec::new();
+        while live.tick() < config.ticks {
+            let tick = live.tick();
+            let stepped = live.step(kit_tick_inputs(&tape, tick)).expect("tick steps");
+            out.push(stepped.rows[0].observation.fighters[0].pos);
+        }
+        out
+    }
+
+    /// The input slice staged for one tick of a `(tick, fighter)`-sorted tape.
+    fn kit_tick_inputs(tape: &FighterTape, tick: u32) -> &[FighterInput] {
+        let start = tape.0.partition_point(|input| input.tick < tick);
+        let end = tape.0.partition_point(|input| input.tick <= tick);
+        &tape.0[start..end]
+    }
+
+    /// F2P: a fighter driven straight at `wall_north` (centre `[-2, -10]`,
+    /// half `[4, 0.5]`) for 600 ticks never reaches its near face `z = -9.5`,
+    /// while the same drive over the empty world walks through it. Mirrors
+    /// `arena::spine_step::walled_fights_never_put_a_fighter_inside_the_wall`.
+    #[test]
+    fn kit_walls_stop_a_fighter() {
+        let world = kit_match_world().expect("embedded placement collides");
+        let face_z = -10.0 + 0.5;
+        // A seed whose settled slot-0 spawn stands south of the wall and well
+        // inside its 8 m x band, so a straight -z walk meets the flat face
+        // (no corner slide): the walk is then deterministic.
+        let mut chosen = None;
+        for seed in 0..64u64 {
+            let config = ArenaConfig::try_new(seed, 600, 2, 12.0).expect("valid config");
+            let mut probe =
+                LiveMatch::with_rules_world(&config, ArenaRules::V1, world.clone()).expect("probe");
+            let stepped = probe.step(&[]).expect("probe tick steps");
+            let spawn = stepped.rows[0].observation.fighters[0].pos;
+            if (-5.0..=1.0).contains(&spawn[0]) && spawn[2] > -8.0 {
+                chosen = Some((config, spawn));
+                break;
+            }
+        }
+        let (config, spawn) = chosen.expect("a seed spawns in front of the wall");
+        assert!(spawn[2] > face_z, "the walk starts clear of the wall");
+
+        let walled = kit_wall_walk(&config, &world, -100);
+        assert_eq!(walled.len(), 600, "one pose per tick");
+        for pose in &walled {
+            assert!(
+                !world.overlaps([pose[0], pose[2]], FIGHTER_RADIUS_M),
+                "fighter inside a kit box at {pose:?}"
+            );
+            assert!(
+                pose[2] > face_z,
+                "the drive reached the wall's near face at {pose:?}"
+            );
+        }
+        let reached = walled.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+        assert!(
+            reached < -8.5,
+            "the drive must reach the wall, got {reached}"
+        );
+
+        // F2P oracle: the same drive over the open arena walks through the
+        // wall, so the world is what stops the fighter.
+        let open = kit_wall_walk(&config, &MatchWorld::empty(), -100);
+        let through = open.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+        assert!(
+            through < -10.5,
+            "the empty world must let the fighter through the wall, got {through}"
+        );
+    }
+
+    /// Accept, second half: 1,000 seeded ticks of two bots (20 seeds x 50
+    /// ticks) see 0 fighters inside a kit box.
+    #[test]
+    fn kit_walls_never_crossed_by_two_bots_x1000() {
+        let world = kit_match_world().expect("embedded placement collides");
+        let mut ticks = 0u32;
+        let mut moved = false;
+        for seed in 0..20u64 {
+            let config = ArenaConfig::try_new(seed, 50, 2, 12.0).expect("valid config");
+            let mut live = LiveMatch::with_rules_world(&config, ArenaRules::V1, world.clone())
+                .expect("bot match builds");
+            let mut first = None;
+            while live.tick() < config.ticks {
+                let stepped = live.step(&[]).expect("bot tick steps");
+                for pose in stepped.rows[0].observation.fighters.iter() {
+                    if let Some(start) = first {
+                        moved |= pose.pos != start;
+                    } else {
+                        first = Some(pose.pos);
+                    }
+                    assert!(
+                        !world.overlaps([pose.pos[0], pose.pos[2]], FIGHTER_RADIUS_M),
+                        "seed {seed}: fighter inside a kit box at {:?}",
+                        pose.pos
+                    );
+                }
+                ticks += 1;
+            }
+        }
+        assert_eq!(ticks, 1000, "20 seeds x 50 ticks of two bots");
+        assert!(moved, "the bots must walk, or the crossing test is vacuous");
     }
 }

@@ -20,7 +20,7 @@ pub use crate::baked_bake::{
 };
 use std::time::Instant;
 
-use crate::gi::palette_entry;
+use crate::gi::{f32_from_u32, palette_entry, u32_from_f32};
 use crate::ibl::{eval_sh, IrradianceSh};
 
 // ---------------------------------------------------------------------------
@@ -73,6 +73,28 @@ pub fn sample_lightmap(bake: &ArenaBake, u: f32, v: f32) -> Option<[u8; 3]> {
         return None;
     }
     bake.map.idx.get(i).copied().map(palette_entry)
+}
+
+/// Linear HDR companion of [`sample_lightmap`]: the RGB9E5 lane at the same
+/// texel, decoded to linear irradiance (sky plus bounce), with the identical
+/// finite/range/floor rule, mask gate and `None` signals as the byte path.
+pub fn sample_lightmap_hdr(bake: &ArenaBake, u: f32, v: f32) -> Option<[f32; 3]> {
+    if bake.map.w == 0 || bake.map.h == 0 {
+        return None;
+    }
+    if !(u.is_finite() && v.is_finite() && (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)) {
+        return None;
+    }
+    // The byte path's floor rule through the shared named conversions, so both
+    // lanes land on the same texel without a second index rule.
+    let (w, h) = (bake.map.w, bake.map.h);
+    let x = u32_from_f32((u * f32_from_u32(w)).floor()).min(w - 1);
+    let y = u32_from_f32((v * f32_from_u32(h)).floor()).min(h - 1);
+    let i = usize::try_from(u64::from(y) * u64::from(w) + u64::from(x)).ok()?;
+    if bake.valid.get(i).copied().unwrap_or(0) != 1 {
+        return None;
+    }
+    bake.texel_hdr(x, y)
 }
 
 /// Nearest probe coefficients in grid order (clamped indices, never panics).
@@ -136,6 +158,10 @@ pub fn fighter_irradiance(
 pub struct GiFrameSample {
     /// Byte-exact palette row, or `None` on an invalid texel.
     pub light: Option<[u8; 3]>,
+    /// Linear HDR companion of `light` at the same texel: the RGB9E5 lane
+    /// decoded (sky plus bounce), `None` where `light` is `None`. The lane the
+    /// forward swap reads; the byte lane above keeps today's look.
+    pub light_hdr: Option<[f32; 3]>,
     /// Fighter diffuse irradiance in linear space, always finite.
     pub irradiance: [f32; 3],
     /// True while the position sat inside a sealed box (nearest probe).
@@ -153,9 +179,11 @@ pub fn sample_arena_frame(
     normal: [f32; 3],
 ) -> Result<GiFrameSample, BakedGiError> {
     let light = sample_lightmap(bake, u, v);
+    let light_hdr = sample_lightmap_hdr(bake, u, v);
     let irradiance = fighter_irradiance(bake, pos, normal)?;
     Ok(GiFrameSample {
         light,
+        light_hdr,
         irradiance,
         sealed: bake.boxes.iter().any(|b| b.contains(pos)),
     })
@@ -231,6 +259,9 @@ pub struct GiReceipt {
     pub lightmap_texels: u64,
     /// Valid lightmap texels (mask reads 1).
     pub valid_texels: u64,
+    /// Distinct decoded HDR levels the RGB9E5 lane carries (the byte lane
+    /// shows at most [`crate::gi::PALETTE_LEN`] of them).
+    pub lightmap_hdr_levels: u64,
     /// Fighter probes bound.
     pub probe_count: u64,
     /// Sealed probes bound.
@@ -293,6 +324,7 @@ pub fn bind_gi(
         viewport_px,
         lightmap_texels: bake.texels() as u64,
         valid_texels: bake.valid_count() as u64,
+        lightmap_hdr_levels: bake.hdr_levels,
         probe_count: bake.probe_count() as u64,
         sealed_probes: bake.sealed_count() as u64,
         resident_bytes: bake.resident_bytes(),
@@ -677,34 +709,6 @@ pub mod gpu {
         Ok(texture)
     }
 
-    /// One-shot probe uniform cook bytes in upload order: 9 vec4f32 per
-    /// probe in grid order, the same order as
-    /// [`super::probe_uniform_bytes_into`]. Shared by the one-shot upload
-    /// below and the submitter repack, so both paths push verbatim cook bytes.
-    pub fn probe_upload_bytes(bake: &ArenaBake) -> Result<Vec<u8>, BakedGiError> {
-        let mut bytes = vec![0u8; super::probe_uniform_len(bake)?];
-        if bytes.is_empty() {
-            return Err(BakedGiError::Invalid(
-                "baked-gi probe upload is empty".into(),
-            ));
-        }
-        super::probe_uniform_bytes_into(bake, &mut bytes)?;
-        Ok(bytes)
-    }
-
-    /// One-shot seal cook bytes in upload order: one flag per probe in grid
-    /// order, the same order as [`super::probe_seal_bytes_into`].
-    pub fn seal_upload_bytes(bake: &ArenaBake) -> Result<Vec<u8>, BakedGiError> {
-        let mut bytes = vec![0u8; super::probe_seal_len(bake)?];
-        if bytes.is_empty() {
-            return Err(BakedGiError::Invalid(
-                "baked-gi seal upload is empty".into(),
-            ));
-        }
-        super::probe_seal_bytes_into(bake, &mut bytes)?;
-        Ok(bytes)
-    }
-
     /// Bind-probe compute shader over the probe uniform: copies the bound
     /// words back out, proving the GI bind-group path validates with 0
     /// errors and the device image matches the cook bit-for-bit.
@@ -1063,7 +1067,8 @@ mod tests {
     use super::*;
     use crate::baked_bake::sample_sound;
     use crate::gi::{
-        BakeScene, DirLight, Lightmap, PointLight, ProbeGrid, SkyAmbient, SurfaceSample,
+        decode_rgb9e5, encode_rgb9e5, hdr_texel_levels, BakeScene, DirLight, Lightmap, PointLight,
+        ProbeGrid, SkyAmbient, SurfaceSample, PALETTE_LEN,
     };
 
     fn small_samples(w: u32, h: u32) -> Vec<SurfaceSample> {
@@ -1209,6 +1214,9 @@ mod tests {
         assert_eq!(bad, None, "masked texel falls back to probes");
         let good = sample_lightmap(&bake, 0.1, 0.1).expect("valid texel reads");
         assert_eq!(good, palette_entry(bake.map.idx[0]));
+        // The linear lane takes the same mask gate and the same floor rule.
+        assert_eq!(sample_lightmap_hdr(&bake, 0.3, 0.3), None, "masked lane");
+        assert_eq!(sample_lightmap_hdr(&bake, 0.1, 0.1), bake.texel_hdr(0, 0));
         // Fallback irradiance still works over masked texels.
         let fb =
             fighter_irradiance(&bake, [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]).expect("fallback shades");
@@ -1243,6 +1251,8 @@ mod tests {
                 idx: vec![],
             },
             valid: vec![],
+            hdr: vec![],
+            hdr_levels: 0,
             probes: ProbeGrid {
                 nx: 0,
                 ny: 0,
@@ -2181,5 +2191,115 @@ mod tests {
             "steady-state binds create nothing"
         );
         assert_eq!(submitter.sized_words(), sized);
+    }
+
+    // --- RL43: the linear HDR lane beside the byte lane ---------------------
+
+    /// One bake whose `w * h` texels ramp over as many distinct grey albedos
+    /// under a flat `sky` (sky == ground, no dir/point light), so texel `i`
+    /// reads `sky * alp_i`. The `f32::from_bits` ramp walks 256 steps per
+    /// octave over 16 octaves, one RGB9E5 code step per sample.
+    fn hdr_bake(sky: f32, w: u32, h: u32) -> ArenaBake {
+        let n = (w * h) as usize;
+        let samples: Vec<SurfaceSample> = (0..n)
+            .map(|i| {
+                let bits = (((i / 256) + 114) << 23) | ((i % 256) << 15);
+                let t = if n > 1 {
+                    f32::from_bits(bits as u32)
+                } else {
+                    1.0
+                };
+                SurfaceSample {
+                    pos: [0.0, 0.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    albedo: [t; 3],
+                    occlusion: 1.0,
+                }
+            })
+            .collect();
+        let sky = SkyAmbient {
+            sky: [sky; 3],
+            ground: [sky; 3],
+        };
+        bake_arena(
+            w,
+            h,
+            &samples,
+            &BakeScene {
+                dirs: &[],
+                points: &[],
+                sky,
+            },
+            &ProbeSpec {
+                nx: 1,
+                ny: 1,
+                nz: 1,
+                min: [0.0; 3],
+                step: [1.0; 3],
+            },
+            &[],
+        )
+        .expect("hdr ramp bakes")
+        .0
+    }
+
+    #[test]
+    fn baked_gi_gradient_holds_more_than_1024_levels() {
+        // RL43: 4096 distinct input irradiance values read back over 1024
+        // distinct linear levels; the byte lane can only ever show one row per
+        // PALETTE entry, so it cannot carry the ramp.
+        let bake = hdr_bake(4.0, 64, 64);
+        let mut rows = bake.map.idx.clone();
+        rows.sort_unstable();
+        rows.dedup();
+        assert!(rows.len() <= PALETTE_LEN, "byte lane stays on the palette");
+        let uv = |k: u32| (k as f32 + 0.5) / 64.0;
+        let mut levels: Vec<[u32; 3]> = (0..4096u32)
+            .map(|i| {
+                sample_lightmap_hdr(&bake, uv(i % 64), uv(i / 64))
+                    .expect("ramp texel reads")
+                    .map(f32::to_bits)
+            })
+            .collect();
+        levels.sort_unstable();
+        levels.dedup();
+        assert!(levels.len() > 1024, "{} levels", levels.len());
+        // The shared gate measurable agrees with what the sampler reads back.
+        assert_eq!(levels.len(), hdr_texel_levels(&bake.map.tex));
+    }
+
+    #[test]
+    fn baked_gi_hdr_lane_round_trips_x2() {
+        let (a, _) = bake_arena_fixture().expect("first bakes");
+        let (b, _) = bake_arena_fixture().expect("second bakes");
+        assert_eq!(a.hdr, b.hdr, "RGB9E5 lane stable x2");
+        assert_eq!(a.hdr_levels, hdr_texel_levels(&a.map.tex) as u64);
+        let encoder: Vec<u32> = a.map.tex.iter().map(|t| encode_rgb9e5(*t)).collect();
+        assert_eq!(a.hdr, encoder, "lane is the shared encoder");
+        assert_eq!(a.texel_hdr(3, 4), b.texel_hdr(3, 4), "texel_hdr x2");
+        assert_eq!(a.texel_hdr(ARENA_LIGHTMAP_W, 0), None, "off map refuses");
+        assert_eq!(a.texel_hdr(0, ARENA_LIGHTMAP_H), None, "off map refuses");
+        // A NaN input never stores a NaN level.
+        let nan = encode_rgb9e5([f32::NAN, f32::INFINITY, -1.0]);
+        assert_eq!((nan, decode_rgb9e5(nan)), (0, [0.0; 3]), "no NaN level");
+        assert_eq!(hdr_texel_levels(&[[f32::NAN; 3]]), 1, "NaN is zero");
+    }
+
+    #[test]
+    fn baked_gi_hdr_stays_linear_at_the_top_end() {
+        // RL43: a 10000-nit texel keeps its ordering over a 1-nit texel in the
+        // linear lane, while the byte lane keeps reading the palette row it
+        // read before: Reinhard clamps at 4.0, so it cannot tell them apart.
+        let bright = hdr_bake(10000.0, 1, 1);
+        let mid = hdr_bake(100.0, 1, 1);
+        let dim = hdr_bake(1.0, 1, 1);
+        let hdr = |b: &ArenaBake| sample_lightmap_hdr(b, 0.5, 0.5).expect("reads");
+        let (hi, me) = (hdr(&bright)[0], hdr(&mid)[0]);
+        assert!(hi > 1000.0 && me > 99.0 && me < 101.0, "linear at top end");
+        assert!(hi > me && me > hdr(&dim)[0] && hi / hdr(&dim)[0] > 1000.0);
+        let row = sample_lightmap(&bright, 0.5, 0.5).expect("byte lane reads");
+        assert_eq!(row, palette_entry(bright.map.idx[0]));
+        assert_eq!(sample_lightmap(&mid, 0.5, 0.5), Some(row), "one row");
+        assert!(bright.map.idx[0] > dim.map.idx[0], "byte lane orders them");
     }
 }

@@ -14,7 +14,10 @@ use engine_core::{run_ticks, Rng, Tick};
 use engine_ecs::archetype::{Position, Velocity, World};
 use engine_ecs::schedule::{Phase, Schedule};
 use engine_ecs::PhaseArena;
-use engine_perf::alloc::{allows, heap_peak_csv, parse_heap_peak_baseline, peak_of, PeakSnapshot};
+use engine_perf::alloc::{
+    allows, ensure_heap_peak_baseline, heap_peak_csv, parse_heap_peak_baseline, peak_of,
+    HeapPeakBaseline, PeakSnapshot,
+};
 use engine_perf::profiler::{self, CAPTURE_FRAMES_DEFAULT, CAPTURE_FRAMES_MAX};
 use engine_perf::vram::{self, VramInfo};
 use engine_perf::workloads::ScaledArenaTick;
@@ -361,7 +364,7 @@ fn prefix_remainder_all_sliding(remainder: &[Body]) -> bool {
 /// (sequential scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache
 /// Misses], one predictable branch [geaen | 3.4.3.2 Branch Prediction]).
 /// Same slot order, same float order, no allocation. Caller:
-/// `mixed_prefix_step_direct` slide paths only.
+/// `mixed_prefix_step_direct` group and latched whole-prefix slide paths.
 #[expect(clippy::inline_always, reason = "1k hot slide")]
 #[inline(always)]
 fn slide_slice_x(lanes: &mut [Body], h: f32) {
@@ -393,22 +396,36 @@ fn slide_slice_x(lanes: &mut [Body], h: f32) {
 /// grouping only saves branches, never changes bits. Saves one per-body
 /// `vy`/`y` branch per sliding lane in the steady-state 1k slide (sequential
 /// scan keeps cache misses low [geaen | 3.4.2.7 Avoiding Cache Misses], one
-/// predictable branch [geaen | 3.4.3.2 Branch Prediction]). Same `h`, `gh`,
-/// slot order, float order, no allocation. Caller: `mixed_space_step_split`
-/// prefix only.
-fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
+/// predictable branch [geaen | 3.4.3.2 Branch Prediction]).
+///
+/// `sliding` is the whole-prefix slide latch: a tick whose every lane sits in
+/// the slide lane (`vy == +0`, `y == hy`, `|hy|` below 32768) sets it. The
+/// slide lane only moves `x` plus the non-finite `x`/`vx` fixup, so a lane
+/// enters it and never leaves it; the latch still holds on every later tick
+/// (pinned lane for lane by `mixed_prefix_slide_latch_matches_library_over_run`),
+/// and a latched tick slides the whole prefix in one sweep instead of
+/// re-reading every 32-lane group for its predicate. Bad `dt` and the tiny-`h`
+/// scalar path leave the latch untouched. Same `h`, `gh`, slot order, float
+/// order, no allocation. Caller: `mixed_space_step_split` prefix only.
+fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32, sliding: &mut bool) {
     if dt <= 0.0 || !dt.is_finite() {
         return;
     }
     let h = dt.min(0.25);
     let gh = engine_physics::rigid::GRAVITY * h;
     if h >= engine_physics::rigid::FIXED_DT {
+        if *sliding {
+            slide_slice_x(prefix, h);
+            return;
+        }
+        let mut all_sliding = true;
         let mut chunks = prefix.chunks_exact_mut(32);
         for chunk in &mut chunks {
             if prefix_chunk_all_sliding(chunk) {
                 slide_slice_x(chunk, h);
                 continue;
             }
+            all_sliding = false;
             for b in chunk.iter_mut() {
                 mixed_step_with_h_fast(b, h, gh);
             }
@@ -417,10 +434,12 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
         if prefix_remainder_all_sliding(rem) {
             slide_slice_x(rem, h);
         } else {
+            all_sliding = false;
             for b in rem.iter_mut() {
                 mixed_step_with_h_fast(b, h, gh);
             }
         }
+        *sliding = all_sliding;
         return;
     }
     for b in prefix.iter_mut() {
@@ -443,14 +462,17 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32) {
 /// slot order, float order, no allocation. When `skip_enabled` is true
 /// (harness `--mixed-skip`) odd `tick`s skip the dynamic-prefix integrate
 /// and reuse the harness ECS tick, halving the physics tail; even `tick`s
-/// run the full prefix bit-identical to the skip-off path. Caller: `main`
-/// mixed row only.
+/// run the full prefix bit-identical to the skip-off path. `sliding` carries
+/// the whole-prefix slide latch into `mixed_prefix_step_direct`, so later
+/// ticks skip the per-group predicate; a skipped `tick` never touches it.
+/// Caller: `main` mixed row only.
 fn mixed_space_step_split(
     bodies: &mut [Body],
     agents: usize,
     dt: f32,
     tick: u64,
     skip_enabled: bool,
+    sliding: &mut bool,
 ) {
     if dt <= 0.0 || !dt.is_finite() {
         return;
@@ -464,7 +486,7 @@ fn mixed_space_step_split(
     if should_skip_mixed_step(tick, skip_enabled) {
         return;
     }
-    mixed_prefix_step_direct(prefix, dt);
+    mixed_prefix_step_direct(prefix, dt, sliding);
     debug_assert!(
         suffix.iter().all(is_settled),
         "skipped suffix keeps every bit"
@@ -496,7 +518,7 @@ fn should_skip_mixed_step(tick: u64, skip_enabled: bool) -> bool {
 /// [geaen | 3.4.3.2 Branch Prediction]). Pure integer mod, no allocation, no
 /// wall clock, deterministic across runs. Caller: `main` mixed row only.
 fn should_run_mixed_full(tick: u64, skip_enabled: bool) -> bool {
-    !skip_enabled || tick % 4 == 0
+    !skip_enabled || tick.is_multiple_of(4)
 }
 
 /// Reads the harness `--mixed-skip` flag. False by default, so the triple
@@ -746,6 +768,10 @@ fn run_scenario_row(name: &str, agents: usize, sprites: usize, dynamic: bool, mi
     let (mut schedule, mut arena) = arena_tick_state(agents + sprites);
     let mut renderer = NullRenderer::new();
     let mut render_settled = false;
+    // Whole-prefix slide latch for the mixed row (pinned by
+    // `mixed_prefix_slide_latch_matches_library_over_run`). Caller: `main`
+    // mixed row only.
+    let mut mixed_sliding = false;
     let mut dts: Vec<f64> = Vec::with_capacity(600);
     // Hoisted tick constant: one compile-time division for the whole
     // 600-tick run; same bits as the per-tick division. Caller: `main`
@@ -771,7 +797,14 @@ fn run_scenario_row(name: &str, agents: usize, sprites: usize, dynamic: bool, mi
             }
         };
         if is_mixed {
-            mixed_space_step_split(&mut space.bodies, agents, DT, t.0, mixed_skip);
+            mixed_space_step_split(
+                &mut space.bodies,
+                agents,
+                DT,
+                t.0,
+                mixed_skip,
+                &mut mixed_sliding,
+            );
         } else if is_render {
             render_space_step(&mut space.bodies, DT, &mut render_settled);
         } else {
@@ -815,6 +848,22 @@ fn main() {
         let (first, second, peak) = heap_peak_peak_bytes();
         debug_assert_eq!(first, second, "peak inputs repeat");
         let baseline_path = format!("{}/baselines/heap_peak.txt", env!("CARGO_MANIFEST_DIR"));
+        // GS14 first clause: the first quiet run writes the pin, later runs
+        // keep it. A refusal (no peak to record, or a file that is not a
+        // baseline) ends the run at once instead of printing a gate verdict
+        // from a pin nobody recorded.
+        match ensure_heap_peak_baseline(std::path::Path::new(&baseline_path), peak) {
+            Ok(HeapPeakBaseline::Recorded(recorded)) => {
+                println!("heap peak: baseline recorded {recorded} bytes");
+            }
+            Ok(HeapPeakBaseline::Kept(recorded)) => {
+                println!("heap peak: baseline kept {recorded} bytes");
+            }
+            Err(err) => {
+                eprintln!("heap peak baseline: {err}");
+                std::process::exit(2);
+            }
+        }
         let baseline_text = std::fs::read_to_string(&baseline_path).unwrap_or_default();
         let text = heap_peak_gate_text(peak, &baseline_text);
         print!("{text}");
@@ -976,23 +1025,53 @@ mod tests {
             plain_before,
             "default must keep current behavior"
         );
+        let mut sliding = false;
         let (_, mut split_skip) = seed_mixed_world(16, 32, 2040);
         let split_before = engine_physics::rigid::state_hash(&split_skip.bodies);
-        mixed_space_step_split(&mut split_skip.bodies, 16, 1.0 / 60.0, 1, true);
+        mixed_space_step_split(
+            &mut split_skip.bodies,
+            16,
+            1.0 / 60.0,
+            1,
+            true,
+            &mut sliding,
+        );
         assert_eq!(
             engine_physics::rigid::state_hash(&split_skip.bodies),
             split_before,
             "split odd-tick skip must reuse the harness tick"
         );
-        mixed_space_step_split(&mut split_skip.bodies, 16, 1.0 / 60.0, 2, true);
+        assert!(
+            !sliding,
+            "a skipped tick must not claim the prefix is all sliding"
+        );
+        mixed_space_step_split(
+            &mut split_skip.bodies,
+            16,
+            1.0 / 60.0,
+            2,
+            true,
+            &mut sliding,
+        );
         assert_ne!(
             engine_physics::rigid::state_hash(&split_skip.bodies),
             split_before,
             "split even tick must run the full prefix"
         );
+        assert!(
+            !sliding,
+            "a falling prefix must not take the all-sliding latch"
+        );
         let (_, mut split_plain) = seed_mixed_world(16, 32, 2040);
         let split_plain_before = engine_physics::rigid::state_hash(&split_plain.bodies);
-        mixed_space_step_split(&mut split_plain.bodies, 16, 1.0 / 60.0, 1, false);
+        mixed_space_step_split(
+            &mut split_plain.bodies,
+            16,
+            1.0 / 60.0,
+            1,
+            false,
+            &mut sliding,
+        );
         assert_ne!(
             engine_physics::rigid::state_hash(&split_plain.bodies),
             split_plain_before,
@@ -1002,7 +1081,7 @@ mod tests {
         let mut via_whole = space_cmp.bodies.clone();
         let mut via_split = space_cmp.bodies.clone();
         mixed_space_step(&mut via_whole, 1.0 / 60.0);
-        mixed_space_step_split(&mut via_split, 16, 1.0 / 60.0, 0, true);
+        mixed_space_step_split(&mut via_split, 16, 1.0 / 60.0, 0, true, &mut sliding);
         assert_eq!(
             engine_physics::rigid::state_hash(&via_whole),
             engine_physics::rigid::state_hash(&via_split),
@@ -1046,9 +1125,10 @@ mod tests {
         let (_, space) = seed_mixed_world(1000, 10_000, 2040);
         let mut direct = space.bodies.clone();
         let mut lib = space.bodies.clone();
+        let mut sliding = false;
         for _ in 0..4 {
             engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
-            mixed_prefix_step_direct(&mut direct[..1000], 1.0 / 60.0);
+            mixed_prefix_step_direct(&mut direct[..1000], 1.0 / 60.0, &mut sliding);
             assert_eq!(direct.len(), lib.len());
             for (i, (a, b)) in direct.iter().zip(lib.iter()).enumerate() {
                 assert_eq!(
@@ -1060,6 +1140,46 @@ mod tests {
         }
         assert_eq!(
             engine_physics::rigid::state_hash(&direct),
+            engine_physics::rigid::state_hash(&lib)
+        );
+    }
+
+    #[test]
+    fn mixed_prefix_slide_latch_matches_library_over_run() {
+        // Behavior: the narrowed prefix path (whole-prefix slide latch) keeps
+        // every bit of `rigid::integrate` over the falling 1k harness prefix
+        // for a full 600-tick run, before the latch flips and for every tick
+        // after it (which slides the whole prefix in one sweep, no per-group
+        // predicate); the latch holds only once every lane sits in the slide
+        // lane. Failure: any lane diverges or the latch flips early.
+        // Caller: `mixed_prefix_step_direct` latched path only.
+        let (_, space) = seed_mixed_world(1000, 10_000, 2040);
+        let mut narrowed = space.bodies.clone();
+        let mut lib = space.bodies.clone();
+        let mut sliding = false;
+        let mut latched_ticks = 0u32;
+        for tick in 0..600u64 {
+            engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
+            mixed_prefix_step_direct(&mut narrowed[..1000], 1.0 / 60.0, &mut sliding);
+            latched_ticks += u32::from(sliding);
+            for (i, (a, b)) in narrowed[..1000].iter().zip(lib[..1000].iter()).enumerate() {
+                assert_eq!(
+                    (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
+                    (b.x.to_bits(), b.y.to_bits(), b.vx.to_bits(), b.vy.to_bits()),
+                    "tick {tick} lane {i} diverged"
+                );
+            }
+        }
+        assert!(
+            latched_ticks > 100,
+            "the latched sweep must carry the run tail, saw {latched_ticks}"
+        );
+        assert!(
+            prefix_remainder_all_sliding(&narrowed[..1000]),
+            "a latched prefix must be all sliding"
+        );
+        assert_eq!(
+            engine_physics::rigid::state_hash(&narrowed),
             engine_physics::rigid::state_hash(&lib)
         );
     }
@@ -1100,10 +1220,11 @@ mod tests {
             let mut split = space.bodies.clone();
             let mut whole = space.bodies.clone();
             let mut lib = space.bodies.clone();
+            let mut sliding = false;
             for _ in 0..4 {
                 engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
                 mixed_space_step(&mut whole, 1.0 / 60.0);
-                mixed_space_step_split(&mut split, agents, 1.0 / 60.0, 0, false);
+                mixed_space_step_split(&mut split, agents, 1.0 / 60.0, 0, false, &mut sliding);
                 assert_eq!(split.len(), lib.len());
                 for (i, ((a, b), c)) in split.iter().zip(whole.iter()).zip(lib.iter()).enumerate() {
                     assert_eq!(
@@ -1134,9 +1255,11 @@ mod tests {
             let mut split = space.bodies.clone();
             let mut whole = space.bodies.clone();
             let mut lib = space.bodies.clone();
+            let mut sliding = false;
             engine_physics::rigid::integrate(&mut lib, bad);
             mixed_space_step(&mut whole, bad);
-            mixed_space_step_split(&mut split, 1000, bad, 0, false);
+            mixed_space_step_split(&mut split, 1000, bad, 0, false, &mut sliding);
+            assert!(!sliding, "bad dt must not latch the prefix");
             for (i, ((a, b), c)) in split.iter().zip(whole.iter()).zip(lib.iter()).enumerate() {
                 assert_eq!(
                     (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
@@ -1599,15 +1722,17 @@ mod tests {
     #[test]
     fn mixed_prefix_grouped_slide_matches_library_bits() {
         // Behavior: grouped slide (all-sliding 64-lane prefix) matches
-        // `rigid::integrate` bit for bit, so steady-state narrowing never
-        // moves the mixed hash. Failure: any lane diverges.
-        // Caller: `mixed_prefix_step_direct` grouped fast path only.
+        // `rigid::integrate` bit for bit and latches the whole-prefix slide
+        // flag, so steady-state narrowing never moves the mixed hash.
+        // Failure: any lane diverges or the latch stays clear.
+        // Caller: `mixed_prefix_step_direct` grouped and latched paths.
         let sliding = Body::new(1.25, 0.5, 1.0, 0.0, 0.5, 0.5);
         let mut grouped = vec![sliding; 64];
         let mut lib = grouped.clone();
+        let mut latch = false;
         for _ in 0..8 {
             engine_physics::rigid::integrate(&mut lib, 1.0 / 60.0);
-            mixed_prefix_step_direct(&mut grouped, 1.0 / 60.0);
+            mixed_prefix_step_direct(&mut grouped, 1.0 / 60.0, &mut latch);
             for (i, (a, b)) in grouped.iter().zip(lib.iter()).enumerate() {
                 assert_eq!(
                     (a.x.to_bits(), a.y.to_bits(), a.vx.to_bits(), a.vy.to_bits()),
@@ -1615,6 +1740,7 @@ mod tests {
                     "sliding lane {i} diverged"
                 );
             }
+            assert!(latch, "an all-sliding prefix must latch");
         }
         assert_eq!(
             engine_physics::rigid::state_hash(&grouped),

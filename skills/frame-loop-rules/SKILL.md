@@ -22,6 +22,6 @@ Use when you change the live loop, a per-frame or per-tick path, a worker thread
 
 - `crates/core/src/time.rs`: the integer clock and accumulator the loop uses.
 - `crates/game/src/bin/arena.rs` installs the crash hook in `main` (`crash::install_run_hook` in `crates/game/src/crash.rs`), and `crates/game/tests/crash_hook.rs` proves it with a forced panic. Rule 7 is met for the window binary; a new binary must do the same.
-- `crates/game/src/bin/arena_frame/mod.rs:107`: the window's mixer is fed inside `self.mixer.try_lock()` in the tick path, not through a single-writer queue (rule 5).
+- `crates/game/src/bin/arena_frame/mod.rs:114`: the window's mixer is fed inside `self.mixer.try_lock()` in the tick path, not through a single-writer queue (rule 5).
 
 Search more: `node tools/books.mjs search "game loop logging crash"`

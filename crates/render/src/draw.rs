@@ -96,6 +96,10 @@ pub struct LodTable {
     pub bands_m: Vec<f32>,
     /// Half-width of the hysteresis band around each boundary in meters.
     pub hysteresis_m: f32,
+    /// Ascending projected-size boundaries in pixels, or `None` for the
+    /// distance bands; the last entry separates level 0 from level 1 and the
+    /// first separates the two coarsest. Read by [`lod_by_pixel_error`].
+    pub pixel_thresholds_px: Option<Vec<f32>>,
 }
 
 /// One culled, LOD-picked draw in integer-stable order.
@@ -128,6 +132,8 @@ pub enum DrawError {
     BadNode { id: u64, reason: String },
     /// The LOD table itself is degenerate (NaN, unordered, over-wide).
     BadLodTable(String),
+    /// Pixel-error LOD inputs are degenerate; the message names the field.
+    BadPixelLod(String),
     /// A node names a table that was not supplied; nothing is guessed.
     UnknownLodTable {
         node: u64,
@@ -155,6 +161,7 @@ impl fmt::Display for DrawError {
             DrawError::BadCamera(why) => write!(f, "bad camera: {why}"),
             DrawError::BadNode { id, reason } => write!(f, "bad node {id}: {reason}"),
             DrawError::BadLodTable(why) => write!(f, "bad lod table: {why}"),
+            DrawError::BadPixelLod(why) => write!(f, "bad pixel lod: {why}"),
             DrawError::UnknownLodTable {
                 node,
                 expected,
@@ -246,7 +253,7 @@ pub fn cull_cpu_flags_into(
     while i < n {
         let s = spheres[i];
         let visible = sphere_visible_cpu([s[0], s[1], s[2]], s[3], planes);
-        flags[i] = if visible { 1 } else { 0 };
+        flags[i] = u8::from(visible);
         i += 1;
     }
     n
@@ -375,7 +382,7 @@ fn validate_lod_table(table: &LodTable) -> Result<(), DrawError> {
             "hysteresis_m must be finite and non-negative".to_string(),
         ));
     }
-    if table.bands_m.len() > u8::MAX as usize {
+    if table.bands_m.len() > usize::from(u8::MAX) {
         return Err(DrawError::BadLodTable(
             "more bands than LOD levels fit in u8".to_string(),
         ));
@@ -393,6 +400,22 @@ fn validate_lod_table(table: &LodTable) -> Result<(), DrawError> {
             )));
         }
         prev = *band;
+    }
+    if let Some(thresholds) = &table.pixel_thresholds_px {
+        let mut prev = 0.0f32;
+        for (i, threshold) in thresholds.iter().enumerate() {
+            if !threshold.is_finite() || *threshold <= 0.0 {
+                return Err(DrawError::BadLodTable(format!(
+                    "pixel threshold {i} must be finite and positive"
+                )));
+            }
+            if i > 0 && *threshold <= prev {
+                return Err(DrawError::BadLodTable(format!(
+                    "pixel threshold {i} must ascend above {prev}"
+                )));
+            }
+            prev = *threshold;
+        }
     }
     Ok(())
 }
@@ -442,6 +465,73 @@ fn pick_lod(dist: f32, prev: u8, levels: u8, bands: &[f32], hyst: f32) -> u8 {
         lod -= 1;
     }
     lod
+}
+
+/// LOD level from a node's projected size on screen: meters in (`radius_m`,
+/// `distance_m`), pixels out. `screen_h` is the frame height in pixels and
+/// `tan_half_fov_y` is `tan(fov_y_rad / 2)` for that vertical field of view;
+/// the projected diameter is
+/// `2 * radius_m / (2 * distance_m * tan_half_fov_y) * screen_h`, then the
+/// ascending `thresholds_px` are walked from the finest boundary down, the
+/// mirrored form of [`pick_lod`]'s hysteresis: level `i` holds while the
+/// size stays at or above `thresholds_px[len - 1 - i]`, so a node that
+/// shrinks on screen lands on a coarser level. `prev` is honoured and the
+/// pick caps at `levels`.
+///
+/// Errors: [`DrawError::BadPixelLod`] on a non-finite or negative
+/// `radius_m`, a `distance_m` that is not above zero, a `screen_h` outside
+/// 1..=65535 pixels, a non-finite `tan_half_fov_y <= 0`, `levels` of zero, a
+/// negative or non-finite `hyst_px`, or an empty `thresholds_px`. No caller
+/// yet: the pick in [`cull_lod`] carries no frame height in its call chain.
+#[expect(clippy::too_many_arguments, reason = "8 inputs mirror the pick")]
+pub fn lod_by_pixel_error(
+    radius_m: f32,
+    distance_m: f32,
+    screen_h: u32,
+    tan_half_fov_y: f32,
+    levels: u8,
+    prev: u8,
+    thresholds_px: &[f32],
+    hyst_px: f32,
+) -> Result<u8, DrawError> {
+    let bad = |why: &str| DrawError::BadPixelLod(why.to_string());
+    if !radius_m.is_finite() || radius_m < 0.0 {
+        return Err(bad("radius_m must be finite and non-negative"));
+    }
+    if !distance_m.is_finite() || distance_m <= 0.0 {
+        return Err(bad("distance_m must be finite and positive"));
+    }
+    if screen_h == 0 || screen_h > u32::from(u16::MAX) {
+        return Err(bad("screen_h must be 1..=65535 pixels"));
+    }
+    if !tan_half_fov_y.is_finite() || tan_half_fov_y <= 0.0 {
+        return Err(bad("tan_half_fov_y must be finite and positive"));
+    }
+    if levels == 0 {
+        return Err(bad("levels must be at least 1"));
+    }
+    if !hyst_px.is_finite() || hyst_px < 0.0 {
+        return Err(bad("hyst_px must be finite and non-negative"));
+    }
+    if thresholds_px.is_empty() {
+        return Err(bad("thresholds_px must not be empty"));
+    }
+    let screen_h_px = f32::from(u16::try_from(screen_h).unwrap_or(u16::MAX));
+    let size_px = 2.0 * radius_m / (2.0 * distance_m * tan_half_fov_y) * screen_h_px;
+    // `pick_lod`'s rule mirrored: the level index walks down the ascending
+    // boundaries as the size shrinks.
+    let len = thresholds_px.len();
+    let max_lod = levels - 1;
+    let usable = len.min(usize::from(max_lod));
+    let mut lod = prev.min(max_lod);
+    let edge = |step: usize| thresholds_px[len - 1 - step];
+    while usize::from(lod) < usable && size_px < edge(usize::from(lod)) - hyst_px {
+        lod += 1;
+    }
+    while lod > 0 && usize::from(lod) <= len && size_px > edge(usize::from(lod) - 1) + hyst_px {
+        lod -= 1;
+    }
+    Ok(lod)
 }
 
 /// Dither keep share for one draw's outgoing LOD edge: 255 fully kept.
@@ -652,10 +742,7 @@ impl DrawList {
         // Live GPU wiring: the executor builds its compute pipeline from
         // `CULL_WGSL` and its 5-u32 args from this list's visible count.
         // `len` fits `u32`: the over-cap return above holds 256 max.
-        let visible = match u32::try_from(self.draws.len()) {
-            Ok(v) => v,
-            Err(_) => u32::MAX,
-        };
+        let visible = u32::try_from(self.draws.len()).unwrap_or(u32::MAX);
         let indirect = indirect_args_5(visible);
         assert!(
             CULL_WGSL.contains("atomicAdd")
@@ -900,6 +987,7 @@ pub fn storm_fixture(seed: u64) -> StormFixture {
             id: 7,
             bands_m: vec![10.0, 20.0, 40.0],
             hysteresis_m: 0.5,
+            pixel_thresholds_px: None,
         },
     }
 }
@@ -934,6 +1022,7 @@ mod tests {
             id: 7,
             bands_m: vec![10.0, 20.0, 40.0],
             hysteresis_m: 0.5,
+            pixel_thresholds_px: None,
         }
     }
 
@@ -1002,6 +1091,7 @@ mod tests {
             id: 7,
             bands_m: vec![10.0, 20.0, 40.0],
             hysteresis_m: 0.0,
+            pixel_thresholds_px: None,
         };
         for (dist, raw) in [(5.0, 0), (10.01, 1), (19.99, 1), (20.01, 2), (50.0, 3)] {
             for prev in 0..4u8 {
@@ -1124,6 +1214,7 @@ mod tests {
             id: 7,
             bands_m: vec![10.0, 20.0, 40.0],
             hysteresis_m: 0.0,
+            pixel_thresholds_px: None,
         };
         let below = SceneSnapshot {
             nodes: vec![node(2, [0.0, 0.0, -9.9], 0.5)],
@@ -1140,6 +1231,7 @@ mod tests {
             id: 9,
             bands_m: vec![],
             hysteresis_m: 0.0,
+            pixel_thresholds_px: None,
         };
         let mut only = node(4, [0.0, 0.0, -5.0], 0.5);
         only.lod_levels = 1;
@@ -1331,6 +1423,7 @@ mod tests {
             id: 7,
             bands_m: vec![20.0, 10.0],
             hysteresis_m: 0.5,
+            pixel_thresholds_px: None,
         };
         let snapshot = SceneSnapshot {
             nodes: vec![node(1, [0.0, 0.0, -5.0], 0.5)],
@@ -1789,5 +1882,105 @@ mod tests {
         );
         let second = trail_strip_verts(&base, &tip, &age_ticks);
         assert_eq!(first, second, "same bytes give same verts x2");
+    }
+
+    /// `tan(fov_y_rad / 2)`: the optics the pixel pick divides by.
+    fn tan_half_of(fov_y_rad: f32) -> f32 {
+        (fov_y_rad * 0.5).tan()
+    }
+
+    const FOV_60: f32 = std::f32::consts::FRAC_PI_3;
+
+    /// One-meter ball, 1080p, four levels, `prev` honoured.
+    fn pick_px(dist: f32, fov: f32, prev: u8, t: &[f32], hyst: f32) -> u8 {
+        lod_by_pixel_error(1.0, dist, 1080, tan_half_of(fov), 4, prev, t, hyst).expect("picks")
+    }
+
+    #[test]
+    fn lod_pixel_error_picks_the_smaller_level_for_a_far_node() {
+        // 40 and 120 px boundaries: 467 px at 4 m, 31 px at 60 m, 102 px at FOV 20.
+        let t = [40.0, 120.0];
+        let near = pick_px(4.0, FOV_60, 0, &t, 0.0);
+        let far = pick_px(60.0, FOV_60, 0, &t, 0.0);
+        let tele = pick_px(60.0, std::f32::consts::PI / 9.0, 0, &t, 0.0);
+        assert_eq!((near, far, tele), (0, 2, 1), "467, 31 and 102 px");
+        assert!(tele < far, "the narrower FOV picks the finer level");
+    }
+
+    #[test]
+    fn lod_pixel_error_never_switches_inside_the_hysteresis_band() {
+        // 120 px boundary, 10 px band: 110..130 px holds; 15.5 m is 120.7 px.
+        let t = [120.0];
+        assert_eq!(pick_px(15.5, FOV_60, 0, &t, 10.0), 0, "held");
+        assert_eq!(pick_px(15.5, FOV_60, 1, &t, 10.0), 1, "held");
+        assert_eq!(pick_px(18.0, FOV_60, 0, &t, 10.0), 1, "103.9 px leaves");
+        assert_eq!(pick_px(13.0, FOV_60, 1, &t, 10.0), 0, "143.9 px leaves");
+    }
+
+    #[test]
+    fn lod_pixel_error_refuses_bad_inputs() {
+        let op = tan_half_of(FOV_60);
+        let good = [60.0];
+        let call = |r: f32, d: f32, h: u32, fov: f32, lv: u8, hyst: f32, t: &[f32]| {
+            lod_by_pixel_error(r, d, h, fov, lv, 0, t, hyst)
+        };
+        let no = |why: &str, r: Result<u8, DrawError>| {
+            assert!(matches!(r, Err(DrawError::BadPixelLod(_))), "{why}: {r:?}");
+        };
+        no("NaN radius", call(f32::NAN, 4.0, 1080, op, 4, 0.0, &good));
+        no("negative r", call(-1.0, 4.0, 1080, op, 4, 0.0, &good));
+        no("zero dist", call(1.0, 0.0, 1080, op, 4, 0.0, &good));
+        no("NaN dist", call(1.0, f32::NAN, 1080, op, 4, 0.0, &good));
+        no("zero h", call(1.0, 4.0, 0, op, 4, 0.0, &good));
+        no("zero optics", call(1.0, 4.0, 1080, 0.0, 4, 0.0, &good));
+        no("zero levels", call(1.0, 4.0, 1080, op, 0, 0.0, &good));
+        no("negative hyst", call(1.0, 4.0, 1080, op, 4, -1.0, &good));
+        no("no thresholds", call(1.0, 4.0, 1080, op, 4, 0.0, &[]));
+        let err = call(f32::NAN, 4.0, 1080, op, 4, 0.0, &good).expect_err("refused");
+        assert!(format!("{err}").contains("radius_m"), "got {err}");
+    }
+
+    #[test]
+    fn lod_pixel_error_caps_at_levels() {
+        // Four boundaries, a sub-pixel ball: the pick stops at the coarsest.
+        let t = [1.0, 2.0, 3.0, 4.0];
+        let op = tan_half_of(FOV_60);
+        let two = lod_by_pixel_error(0.01, 200.0, 540, op, 2, 0, &t, 0.0).expect("two");
+        let four = lod_by_pixel_error(0.01, 200.0, 540, op, 4, 0, &t, 0.0).expect("four");
+        assert_eq!(two, 1, "two levels cap the pick");
+        assert_eq!(four, 3, "four levels reach the last boundary");
+    }
+
+    #[test]
+    fn lod_pixel_none_keeps_the_band_path_bytes_identical() {
+        let camera = test_camera();
+        let table = test_table();
+        assert!(table.pixel_thresholds_px.is_none(), "no pixel path armed");
+        let mut list = DrawList::new();
+        for (dist, prev) in [(5.0f32, 0u8), (12.0, 1), (25.0, 1), (60.0, 2)] {
+            let mut n = node(1, [0.0, 0.0, -dist], 0.5);
+            n.prev_lod = prev;
+            let snapshot = SceneSnapshot { nodes: vec![n] };
+            let draws = list.build(&snapshot, &camera, &table).expect("builds");
+            let band = pick_lod(dist, prev, 4, &table.bands_m, table.hysteresis_m);
+            assert_eq!(draws[0].lod, band, "band level moved at {dist} m");
+        }
+    }
+
+    #[test]
+    fn lod_pixel_table_refuses_bad_thresholds() {
+        let camera = test_camera();
+        let snapshot = SceneSnapshot {
+            nodes: vec![node(1, [0.0, 0.0, -5.0], 0.5)],
+        };
+        let build = |t: Vec<f32>| {
+            let mut table = test_table();
+            table.pixel_thresholds_px = Some(t);
+            DrawList::new().build(&snapshot, &camera, &table).is_ok()
+        };
+        assert!(!build(vec![60.0, 0.0]), "zero boundary");
+        assert!(!build(vec![60.0, 60.0]), "unordered boundary");
+        assert!(!build(vec![f32::NAN]), "NaN boundary");
+        assert!(build(vec![40.0, 120.0]), "an ascending pair builds");
     }
 }

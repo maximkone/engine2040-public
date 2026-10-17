@@ -2,10 +2,6 @@
 
 pub mod bake;
 pub mod bake3d;
-/// Graded per-bond breaking strain from contact area, mass, anchor
-/// distance and seeded jitter, plus density cuts and sliver reject.
-/// Bake only; the arena tick stays frozen. Std-only.
-pub mod bond_grade;
 pub mod bonded;
 /// Debris budgets at 8-fighter scale: per-event caps, sleep islands,
 /// distance LOD. Std-only.
@@ -19,7 +15,6 @@ pub mod crack;
 pub mod csg;
 /// Bounds-checked byte reads shared by the snapshot decoders.
 mod cursor;
-pub mod debris;
 /// Runtime Voronoi fracture at an impact point with a capped cell count, break
 /// events on the bonded shape, and the cook cache that serves the same
 /// cut without the cold clip. Std-only.
@@ -28,9 +23,6 @@ pub mod fracture;
 /// toughness, brittleness, shard rule, sound, dust, spark, decal and burn
 /// rate, plus bond and chunk material-id validators. Std-only.
 pub mod material;
-/// Per-event dirty-set records for the nav tile handoff: the freed
-/// chunks one break batch freed, sorted and deduped. Std-only.
-pub mod nav_dirty;
 /// Shape matching for bonded debris: best-fit rotation per cluster, goal
 /// positions with a dt-independent spring and a volume proxy, so chunks
 /// hold their form under torque. Opt-in, never in the bonded tick. Std-only.
@@ -47,9 +39,6 @@ pub mod spread;
 /// collapse, report digest) plus the seeded oracle wall and frame
 /// building fixtures. Std-only.
 pub mod structure;
-/// Offline siege-wall slice bake for FPS/crowd maps: one bake ships chunk
-/// bytes, the runtime only decodes and serves table reads. Std-only.
-pub mod wall_slice;
 
 pub use bake::{bake_bytes, bake_hash, fracture, Chunk};
 pub use bonded::{
@@ -62,7 +51,6 @@ pub use csg::{
     frac_name_into, knife, shell_union, to_bonded_desc, CsgError, CutPlane, FractureChunk,
     PropMesh,
 };
-pub use debris::{BakedDebris, DebrisError, DebrisField, HitWake, Prebroken, WokeShard};
 pub use fracture::{
     fracture_at, CacheKey, Fracture, FractureCache, FractureError, FractureSpec, MAX_CACHE_GRID,
     MAX_FRACTURE_CELLS,
@@ -77,10 +65,6 @@ pub use shape_match::{ShapeError, ShapeMatcher, SpringCoefficients};
 pub use structure::{
     analyze, building, collapse_digest, oracle_wall, report_digest, seeded_wall_cut_digest,
     Building, BuildingSpec, ElementKind, StructureError, StructureReport,
-};
-pub use wall_slice::{
-    bake_slice, decode_slice, slice_bytes, slice_digest, SiegeSliceSpec, WallSliceError,
-    MAX_SLICE_PIECES, WALL_SLICE_V1,
 };
 
 // The one counting allocator of this test binary: zero-allocation tests read

@@ -1,7 +1,8 @@
 //! Diagnostic render vectors: graphical refusal shape, std-only.
 //!
-//! Consumer: the MCP door reviewer and any weak model that must pick the
-//! refusal cause in one round trip. Each vector starts from one real
+//! Consumer: this file's own vectors (plus any future graphical handler):
+//! `label_of`/`render_graphical` below exist only here, and the test asserts
+//! the local renderer, never a door surface. Each vector starts from one real
 //! [`engine_endpoint::guards::GuardError`], renders a small graphical block
 //! (header plus labelled snippet plus help), and asserts the block names the
 //! machine `code`, shows a human `label`, quotes the request `snippet`, and

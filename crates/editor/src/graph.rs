@@ -315,19 +315,11 @@ mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(&GRAPH_MAGIC);
         out.extend_from_slice(&GRAPH_VERSION.to_le_bytes());
-        out.extend_from_slice(
-            &u32::try_from(nodes.len())
-                .unwrap_or(u32::MAX)
-                .to_le_bytes(),
-        );
+        out.extend_from_slice(&u32::try_from(nodes.len()).unwrap_or(u32::MAX).to_le_bytes());
         for (id, tag, payload, x, y, open) in nodes {
             push_node(&mut out, *id, *tag, *payload, *x, *y, *open);
         }
-        out.extend_from_slice(
-            &u32::try_from(wires.len())
-                .unwrap_or(u32::MAX)
-                .to_le_bytes(),
-        );
+        out.extend_from_slice(&u32::try_from(wires.len()).unwrap_or(u32::MAX).to_le_bytes());
         for (a, ap, b, bp) in wires {
             push_wire(&mut out, *a, *ap, *b, *bp);
         }
@@ -374,10 +366,7 @@ mod tests {
         assert!(matches!(err, GraphError::Cycle { .. }));
         assert!(err.to_string().contains("Cycle"));
 
-        let good = seal(
-            &[(1, 0, 1.0f32.to_bits(), 0.0, 0.0, true)],
-            &[],
-        );
+        let good = seal(&[(1, 0, 1.0f32.to_bits(), 0.0, 0.0, true)], &[]);
         assert!(matches!(
             Graph::decode(&good[..good.len() - 5]).unwrap_err(),
             GraphError::Truncated

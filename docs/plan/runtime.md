@@ -182,6 +182,8 @@ sequence inside one test process (no threads, no nondeterminism); FK1
 forks keep their existing worker-thread shape and fork spine state the
 same way they fork arena state today.
 
+Status 2026-10-17: disk shows the S17 row's `:138-139` cite is off by 42 lines: `docs/plan/runtime.md:138` still carries the D6 fork-join sentence ("the sim may run an index-ordered fork-join on the one `JobPool` when the hash is equal at 1, 2, 4 and 8 threads (RC36), otherwise it stays single-threaded and deterministic"), while the standalone false line is `docs/plan/runtime.md:180` "Threads: the sim stays single-threaded."; `docs/adr/0006-single-threaded-sim.md:3` now records that answer as `Status: Proposed` (Test-Path True), so the `:138` "record `docs/adr/` via CQ22" half is no longer future work, and the door is still shut: RC36 is an open, ready board row at `docs/SPRINT-20-game.md:221`, so the S17 gap holds at `:180` and only the `:138-139` cite is stale.
+
 Determinism: spine math is `Fixed` and integer only, stable orders only
 (index order, never hash order), no wall clock, no float
 transcendentals — the HASH-LAW tier-3 rule verbatim. Component hamt/sets

@@ -72,6 +72,7 @@ pub mod seed;
 pub mod spine_step;
 pub mod sync;
 pub mod world;
+pub mod zones;
 
 #[cfg(test)]
 #[global_allocator]
@@ -127,6 +128,7 @@ use engine_physics::rapier::FIXED_DT;
 use engine_physics::stagger_memory::StaggerMemory;
 pub use match_wire::{MATCH_WIRE_VERSION_V0, MATCH_WIRE_VERSION_V1};
 use recorder::{Dataset, DATASET_VERSION};
+use world::MatchWorld;
 
 /// Top speed at full wish (`100`) in meters per second.
 pub const TOP_SPEED_MPS: f32 = 5.0;
@@ -1044,6 +1046,12 @@ pub struct Sim {
     /// the warp.
     warps: Vec<GroundWarp>,
     destruction: BondedCollection,
+    /// Static obstacle world this sim resolves every tick (default
+    /// [`MatchWorld::empty`], the legacy open arena). A non-empty world
+    /// settles the spawns, resolves each slot's root delta after the clamp
+    /// and folds its digest into every checkpoint, so two scene revisions
+    /// never share a hash. Consumer: the game's live window session.
+    world: MatchWorld,
     #[cfg(feature = "sim")]
     controllers: Vec<Controller>,
     cursor: usize,
@@ -1110,6 +1118,22 @@ impl Sim {
         record: bool,
         match_live: bool,
     ) -> Option<Self> {
+        Self::build_world(config, tape, record, match_live, MatchWorld::empty())
+    }
+
+    /// [`Sim::build`] over a static obstacle world: the kit walls a match
+    /// collides with. An empty world is the legacy open arena, byte for byte
+    /// (no settle, no resolve, no digest fold), so every existing caller
+    /// stays frozen; a non-empty world settles each spawn out of the boxes
+    /// and folds its digest into every checkpoint, exactly as the spine step
+    /// does. Consumer: the game's live window session (`engine-game`).
+    fn build_world(
+        config: &ArenaConfig,
+        tape: &FighterTape,
+        record: bool,
+        match_live: bool,
+        world: MatchWorld,
+    ) -> Option<Self> {
         if config.validate().is_err() {
             return None;
         }
@@ -1122,7 +1146,17 @@ impl Sim {
                 return None;
             }
         }
-        let states = spawn_states(config.seed, config.fighters, config.half_extent_m);
+        let mut states = spawn_states(config.seed, config.fighters, config.half_extent_m);
+        // A supplied world places every spawn out of its boxes first, so a
+        // seed that lands on a kit wall starts free (mirrors `SpineMatch`).
+        if !world.is_empty() {
+            let limit = wall_limit(config.half_extent_m);
+            for state in states.iter_mut() {
+                let placed = world.settle([state.pos[0], state.pos[2]], FIGHTER_RADIUS_M, limit)?;
+                state.pos[0] = placed[0];
+                state.pos[2] = placed[1];
+            }
+        }
         let fight = FightState::new(config.fighters).ok()?;
         let match_track = match_wire::MatchTrack::new(config.fighters)?;
         let brains = (0..fighters)
@@ -1191,6 +1225,7 @@ impl Sim {
             locos,
             warps,
             destruction,
+            world,
             #[cfg(feature = "sim")]
             controllers,
             cursor: 0,
@@ -1528,19 +1563,25 @@ impl Sim {
             }
             #[cfg(not(feature = "sim"))]
             {
-                // Single resolution without physics: one clamp, applied once.
+                // Single resolution without physics: one clamp, then the
+                // static world push-out when a kit world is supplied (the
+                // spine step's rule). The blocked remainder is never
+                // reapplied on a later tick.
                 let state = &mut self.states[slot];
-                let (nx, nz) = (
-                    (state.pos[0] + requested[0]).clamp(-limit, limit),
-                    (state.pos[2] + requested[1]).clamp(-limit, limit),
-                );
+                let from = [state.pos[0], state.pos[2]];
+                let raw = [state.pos[0] + requested[0], state.pos[2] + requested[1]];
+                let to = [raw[0].clamp(-limit, limit), raw[1].clamp(-limit, limit)];
+                let placed = if self.world.is_empty() {
+                    to
+                } else {
+                    self.world.resolve(from, to, FIGHTER_RADIUS_M, limit)
+                };
                 #[cfg(test)]
-                let clamped =
-                    nx != state.pos[0] + requested[0] || nz != state.pos[2] + requested[1];
+                let clamped = placed != to || to != raw;
                 #[cfg(test)]
                 let (before_x, before_z) = (state.pos[0], state.pos[2]);
-                state.pos[0] = canon_zero(nx);
-                state.pos[2] = canon_zero(nz);
+                state.pos[0] = canon_zero(placed[0]);
+                state.pos[2] = canon_zero(placed[1]);
                 #[cfg(test)]
                 tick_trace.push(TickMotion {
                     requested,
@@ -1625,6 +1666,9 @@ impl Sim {
             &self.stagger,
             &self.limbs,
         );
+        // A supplied world folds after the rules: the empty world digests to
+        // zero and leaves the golden bytes untouched.
+        let hash = fold_world(self.world.digest(), hash);
         self.checkpoints.push(Checkpoint {
             tick: self.tick,
             hash,
@@ -1996,6 +2040,9 @@ impl Sim {
             locos: snapshot.locos,
             warps: Vec::new(),
             destruction: snapshot.destruction,
+            // Snapshots/resumes come from the v1 prefix runners, which carry
+            // no obstacle world: the empty world is the legacy match.
+            world: MatchWorld::empty(),
             #[cfg(feature = "sim")]
             controllers,
             cursor,
@@ -2229,6 +2276,23 @@ pub(crate) fn event_bytes(event: &FightEvent) -> [u8; 5] {
         FightEvent::StaminaOut { fighter } => [4, fighter, 0, 0, 0],
         FightEvent::Knockdown { attacker, victim } => [5, attacker, victim, 0, 0],
     }
+}
+
+/// Fold a [`MatchWorld::digest`] into a checkpoint hash. A zero digest (the
+/// empty world) returns `hash` untouched, so the legacy golden stays
+/// byte-frozen; a non-empty world mixes its bytes with the same prime the
+/// rest of the hash uses (mirrors the spine step, so both steps agree).
+fn fold_world(digest: u64, hash: u64) -> u64 {
+    if digest == 0 {
+        return hash;
+    }
+    const PRIME: u64 = 0x1000_0000_01b3;
+    let mut hash = hash;
+    for byte in digest.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 /// FNV-1a over canonical bytes: the AR1 set (tick plus per-fighter id,

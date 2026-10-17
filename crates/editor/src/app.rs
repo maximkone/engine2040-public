@@ -43,6 +43,7 @@ use engine_scene::transform::Transform;
 
 use crate::a2_session::encode_png_rgba8;
 use crate::commands::Document;
+use crate::durable::write_atomic;
 use crate::play::{ChildPlay, PlayEntrypoint};
 use crate::save::{load_from_bytes, save_to_bytes, MAX_SAVE_BYTES};
 use crate::shell::Shell;
@@ -373,10 +374,12 @@ where
 // Project files: `.edoc` save bytes plus fs. The codec stays pure in `save`.
 // ---------------------------------------------------------------------------
 
-/// Save the document to `path` (`.edoc` bytes). Returns bytes written.
+/// Save the document to `path` (`.edoc` bytes), atomically: tmp plus rename,
+/// so a crash mid-save leaves the prior file, never a truncated one. Returns
+/// bytes written.
 pub fn save_project(doc: &Document, path: &Path) -> Result<u64, EditorAppError> {
     let bytes = save_to_bytes(doc);
-    std::fs::write(path, &bytes).map_err(|error| EditorAppError::SaveFailed {
+    write_atomic(path, &bytes).map_err(|error| EditorAppError::SaveFailed {
         path: path.to_path_buf(),
         reason: error.to_string(),
     })?;
@@ -892,7 +895,7 @@ impl EditorApp {
         match self.snapshot.capture(&self.shell, width, height) {
             Ok(out) => {
                 let path = self.config.snapshot_path();
-                std::fs::write(&path, &out.png).map_err(|error| EditorAppError::SaveFailed {
+                write_atomic(&path, &out.png).map_err(|error| EditorAppError::SaveFailed {
                     path: path.clone(),
                     reason: error.to_string(),
                 })?;
@@ -928,7 +931,7 @@ impl EditorApp {
             }
         })?;
         let path = self.config.snapshot_path();
-        std::fs::write(&path, &png).map_err(|error| EditorAppError::SaveFailed {
+        write_atomic(&path, &png).map_err(|error| EditorAppError::SaveFailed {
             path: path.clone(),
             reason: error.to_string(),
         })?;

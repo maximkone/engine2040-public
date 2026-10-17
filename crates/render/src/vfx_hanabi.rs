@@ -133,10 +133,6 @@ impl HanabiEffectDesc {
     pub fn sample_gradient(&self, age01: f32) -> [f32; 4] {
         crate::particles::hanabi_gradient(self.grad_a, self.grad_b, age01)
     }
-    /// Layout key: one billboard layout, so every effect shares one dispatch.
-    pub fn layout_key(&self) -> u32 {
-        0
-    }
 }
 
 /// Fixed-order batch: N effects staged into exactly one indirect dispatch.
@@ -175,6 +171,11 @@ impl HanabiBatch {
     /// Effect count in fixed order.
     pub fn len(&self) -> usize {
         self.descs.len()
+    }
+    /// True while no effects are staged.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.descs.is_empty()
     }
     /// Live count after the last tick.
     pub fn alive(&self) -> usize {

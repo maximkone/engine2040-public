@@ -142,6 +142,11 @@ pub fn assert_forward_wgsl_binds_ibl(forward_wgsl: &str) -> Result<(), IblError>
     Ok(())
 }
 
+// Accept CRLF checkouts as well as LF (`core.autocrlf` on Windows).
+fn fs_close(rest: &str) -> Option<usize> {
+    rest.find("\n}\n").or_else(|| rest.find("\r\n}\r\n"))
+}
+
 /// Assert the live window forward scales baked diffuse by occlusion only.
 ///
 /// Owner: render lane; consumer: the EG12 wiring gate plus the live forward
@@ -157,7 +162,7 @@ pub fn assert_forward_ibl_scales_diffuse_only(forward_wgsl: &str) -> Result<(), 
         IblError::Invalid("forward pass misses window fs: inline FORWARD_IBL_WGSL".into())
     })?;
     let rest = &forward_wgsl[start..];
-    let end = rest.find("\n}\n").ok_or_else(|| {
+    let end = fs_close(rest).ok_or_else(|| {
         IblError::Invalid("forward fs misses closing brace: inline FORWARD_IBL_WGSL".into())
     })?;
     let body = &rest[..end];
@@ -930,8 +935,9 @@ pub fn shade_ibl(
     shade_ibl_occluded(bake, normal, view_dir, base_color, metallic, roughness, 1.0)
 }
 
-/// Flat ambient floor the off path adds when the bake is off: CPU mirror
-/// of the `AMBIENT_FLOOR` constant in `forward.wgsl` (linear RGB).
+/// Flat ambient floor the off path adds when the bake is off: the retired
+/// `AMBIENT_FLOOR` triple from `forward.wgsl` (linear RGB), kept here as
+/// the single owner now that the shader shades ambient from the bake.
 /// Units: linear radiance factor. Determinism: same triple on every run.
 /// This item sizes nothing and allocates nothing.
 #[cfg(feature = "v1")]
@@ -1585,68 +1591,6 @@ pub mod gpu {
         pub brdf_view: &'a wgpu::TextureView,
         /// SH uniform buffer (144 bytes).
         pub sh_buf: &'a wgpu::Buffer,
-    }
-
-    /// One live forward bind group over `parts`: group 0 uniforms plus
-    /// lighting entries bound every frame. Cold bind creation only.
-    pub fn forward_live_bind(
-        device: &wgpu::Device,
-        parts: &ForwardLiveParts<'_>,
-    ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ra1-forward-bind"),
-            layout: parts.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: parts.cam.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: parts.light.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: parts.material,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(parts.material_bytes),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: parts.shadow.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(parts.base_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(parts.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: parts.fog.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(parts.pre_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: wgpu::BindingResource::TextureView(parts.brdf_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: wgpu::BindingResource::Sampler(parts.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: parts.sh_buf.as_entire_binding(),
-                },
-            ],
-        })
     }
 
     /// Posted encode + submit + readback budget for the chart pass in ms
@@ -3163,7 +3107,7 @@ mod tests {
         }
         let start = wgsl.find("fn fs(in: VOut)").expect("live forward has fs");
         let rest = &wgsl[start..];
-        let end = rest.find("\n}\n").expect("fs closes");
+        let end = super::fs_close(rest).expect("fs closes");
         let body = &rest[..end];
         assert!(
             body.contains("ibl_sample")
@@ -3263,7 +3207,7 @@ mod tests {
             .find("fn fs_skinned(in: VOut)")
             .expect("skinned capture has fs_skinned");
         let rest = &wgsl[start..];
-        let end = rest.find("\n}\n").expect("fs_skinned closes");
+        let end = super::fs_close(rest).expect("fs_skinned closes");
         let body = &rest[..end];
         assert!(body.contains("ibl_sample"), "fs_skinned samples the bake");
         assert!(
@@ -3294,7 +3238,7 @@ mod tests {
             .find("fn fs_skinned(in: VOut)")
             .expect("skinned capture has fs_skinned");
         let rest = &wgsl[start..];
-        let end = rest.find("\n}\n").expect("fs_skinned closes");
+        let end = super::fs_close(rest).expect("fs_skinned closes");
         let body = &rest[..end];
         assert!(
             !body.contains("ibl * occlusion")
@@ -3837,7 +3781,8 @@ mod tests {
         coeffs[0] = [3.544_908, 3.544_908, 3.544_908];
         let sh = IrradianceSh { coeffs };
         let zero = IrradianceSh::zero();
-        // CPU mirror of `AMBIENT_FLOOR` in `shaders/forward.wgsl` (linear).
+        // The retired forward.wgsl floor triple (linear); the shader no
+        // longer carries an AMBIENT_FLOOR const.
         let floor = [0.20f32, 0.18, 0.16];
         let albedo = [0.5, 0.5, 0.5];
         let normal = [0.0, 1.0, 0.0];
@@ -3916,6 +3861,37 @@ mod tests {
             FORWARD_IBL_CHUNK_HASH.to_le_bytes(),
             "bind head stays the pinned chunk hash"
         );
+    }
+
+    #[test]
+    fn ambient_sh9_replaces_floor_on_masked_region() {
+        // EG12(a): display ambient comes from the SH bake with AO on diffuse only.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        let body = wgsl
+            .split("fn fs_display")
+            .nth(1)
+            .expect("display entry")
+            .split("fn fs_skinned")
+            .next()
+            .expect("display close");
+        assert!(body.contains("direct_light(in.world_pos, in.world_n, albedo)"));
+        assert!(!body.contains("AMBIENT_FLOOR"));
+        assert!(body.contains("ibl_diffuse") || body.contains("ibl_irradiance"));
+        assert!(body.contains("* occlusion") || body.contains("*occlusion"));
+        assert!(body.contains("ibl_spec"));
+        assert!(
+            !body.contains("ibl * occlusion")
+                && !body.contains("ibl*occlusion")
+                && !body.contains("ibl *occlusion")
+                && !body.contains("ibl* occlusion"),
+            "display never scales combined ibl"
+        );
+        let mut coeffs = [[0.0f32; 3]; IBL_SH_COEFFS];
+        coeffs[0] = [3.544_908, 3.544_908, 3.544_908];
+        let sh = IrradianceSh { coeffs };
+        let e = ambient_occluded(&sh, [0.0, 1.0, 0.0], 0.5).expect("masked evals");
+        let gap = (0.5 * e[0] / PI - 0.5 * 0.20 * 0.5).abs();
+        assert!(gap > 0.002, "masked gap {gap}");
     }
 
     #[cfg(feature = "v1")]

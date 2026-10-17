@@ -94,7 +94,7 @@ fn slice_one(mesh: &Mesh, normal: [f32; 3], offset: f32, eps: f32) -> (Mesh, Mes
                     .into_iter()
                     .filter(|(_, _, d)| *d < -eps)
                     .collect();
-                (s.0, s.1, s.2, others[0].clone(), others[1].clone())
+                (s.0, s.1, s.2, others[0], others[1])
             } else {
                 let s = if da < -eps {
                     (ia, pa, da)
@@ -107,7 +107,7 @@ fn slice_one(mesh: &Mesh, normal: [f32; 3], offset: f32, eps: f32) -> (Mesh, Mes
                     .into_iter()
                     .filter(|(_, _, d)| *d > eps)
                     .collect();
-                (s.0, s.1, s.2, others[0].clone(), others[1].clone())
+                (s.0, s.1, s.2, others[0], others[1])
             };
             let t0 = single_d / (single_d - double_a.2);
             let t1 = single_d / (single_d - double_b.2);

@@ -361,10 +361,62 @@ mod tests {
         );
     }
 
+    /// A decoded clip is only honest when its shape holds: mono/stereo,
+    /// nonzero rate, bounded frames, whole interleaved frames, finite audio.
+    fn check_pcm_shape(pcm: &Pcm, what: &str) {
+        assert!(
+            (1..=MAX_CHANNELS).contains(&pcm.channels),
+            "{what} decoded {pcm:?}: channels outside 1..={MAX_CHANNELS}"
+        );
+        assert_ne!(pcm.sample_rate, 0, "{what} decoded {pcm:?}: zero rate");
+        assert!(
+            pcm.frames() <= MAX_PCM_FRAMES,
+            "{what} decoded {} frames past the {MAX_PCM_FRAMES} cap",
+            pcm.frames()
+        );
+        assert!(
+            !pcm.is_empty(),
+            "{what} decoded an empty clip (decoders reject empties)"
+        );
+        assert_eq!(
+            pcm.samples.len() % usize::from(pcm.channels),
+            0,
+            "{what} decoded a partial trailing frame"
+        );
+        assert!(
+            pcm.samples.iter().all(|s| s.is_finite()),
+            "{what} decoded non-finite audio"
+        );
+    }
+
+    /// A rejection is only honest when it names a typed [`DecodeError`].
+    fn check_typed_rejection(error: &DecodeError, what: &str) {
+        assert!(
+            matches!(
+                error,
+                DecodeError::Empty
+                    | DecodeError::TooLarge { .. }
+                    | DecodeError::UnsupportedChannels { .. }
+                    | DecodeError::UnsupportedRate
+                    | DecodeError::TooManyFrames { .. }
+                    | DecodeError::InvalidWav
+                    | DecodeError::Truncated
+                    | DecodeError::InvalidVorbis
+            ),
+            "{what} rejected with an untyped error: {error:?}"
+        );
+        assert!(
+            error.to_string().starts_with("decode: "),
+            "{what} rejection carries no decode context: {error}"
+        );
+    }
+
     #[test]
     fn adversarial_bytes_never_panic() {
         // Byte-level mutations over a tiny wav plus pure noise: every input
-        // must return Ok or Err, never panic.
+        // must decode to a well-shaped clip or return a typed rejection,
+        // never panic. Ok and Err alike are checked, so a wrong-accept (a
+        // corrupt header decoding to garbage) or a wrong-error fails here.
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: 8_000,
@@ -372,16 +424,46 @@ mod tests {
             sample_format: hound::SampleFormat::Int,
         };
         let base = encode_wav(spec, &[1, -2, 3, -4], &[]);
+        // Pinned corpus: the untouched base is four mono frames at 8 kHz.
+        let clean = decode_wav(&base).expect("pinned base wav decodes");
+        assert_eq!(clean.sample_rate, 8_000, "pinned base rate");
+        assert_eq!(clean.channels, 1, "pinned base channels");
+        assert_eq!(clean.frames(), 4, "pinned base frames");
+        assert_eq!(
+            decode_wav(&[]),
+            Err(DecodeError::Empty),
+            "empty wav pins the Empty rejection"
+        );
+        assert_eq!(
+            decode_vorbis(&[]),
+            Err(DecodeError::Empty),
+            "empty vorbis pins the Empty rejection"
+        );
         for i in 0..base.len() {
             let mut mutated = base.clone();
             mutated[i] ^= 0xFF;
-            let _ = decode_wav(&mutated);
-            let _ = decode_vorbis(&mutated);
+            let what = format!("wav mutation byte {i}");
+            match decode_wav(&mutated) {
+                Ok(pcm) => check_pcm_shape(&pcm, &what),
+                Err(error) => check_typed_rejection(&error, &what),
+            }
+            let what = format!("vorbis mutation byte {i}");
+            match decode_vorbis(&mutated) {
+                Ok(pcm) => check_pcm_shape(&pcm, &what),
+                Err(error) => check_typed_rejection(&error, &what),
+            }
         }
         for len in [1usize, 2, 3, 4, 7, 12, 44, 45, 100] {
             let noise: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(251) >> 1) as u8).collect();
-            let _ = decode_wav(&noise);
-            let _ = decode_vorbis(&noise);
+            let what = format!("{len}-byte noise");
+            match decode_wav(&noise) {
+                Ok(pcm) => check_pcm_shape(&pcm, &what),
+                Err(error) => check_typed_rejection(&error, &what),
+            }
+            match decode_vorbis(&noise) {
+                Ok(pcm) => check_pcm_shape(&pcm, &what),
+                Err(error) => check_typed_rejection(&error, &what),
+            }
         }
     }
 

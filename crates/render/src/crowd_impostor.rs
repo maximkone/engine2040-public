@@ -15,7 +15,7 @@ use std::fmt;
 
 /// Far-row failures; shape mirrors [`super::CrowdInstError`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum CrowdImpostorError {
+pub enum CrowdImpostorError {
     /// One view direction is not finite; seat index carried.
     BadDirection(usize),
     /// Caller buffer too short; sizes carried.
@@ -38,7 +38,7 @@ impl std::error::Error for CrowdImpostorError {}
 /// Far-row band in meters: past L1 the body freezes, the quad takes over.
 pub(crate) const IMPOSTOR_DIST_M: f32 = 45.0;
 /// Atlas edge in cells: 4 by 4 octahedral cells.
-pub(crate) const ATLAS_EDGE: u8 = 4;
+pub const ATLAS_EDGE: u8 = 4;
 
 /// True while one seat takes the quad path: past the L1 band or NaN.
 /// Discrete LOD chains switch outward with distance [gearus | 11.1.1].
@@ -53,7 +53,7 @@ pub(crate) fn select_impostor(dist_m: f32) -> bool {
 /// Octahedral cell for one view direction: fold to the octahedron,
 /// quantize to 4 by 4, pack row-major. O(1), no allocation.
 #[must_use]
-pub(crate) fn octa_cell_for(dir: [f32; 3]) -> u8 {
+pub fn octa_cell_for(dir: [f32; 3]) -> u8 {
     let ax = dir[0].abs();
     let ay = dir[1].abs();
     let az = dir[2].abs();

@@ -5,9 +5,8 @@
 //! the live frame calls once per presented frame.
 use super::super::*;
 use super::frame::gtao_err;
-use super::submit::{inverse_view_proj_cols, stage_field_bytes};
+use super::submit::{inverse_view_proj_cols, stage_field_bytes, FrameCamera};
 use super::Presenter;
-use crate::v1;
 
 impl Presenter {
     /// Fog tranche plus GTAO: decode this frame's depth readback
@@ -18,10 +17,10 @@ impl Presenter {
     /// submit us, gtao passes, gtao validation errors, gtao submit us)
     /// for the receipt and records the halve-means plus contact minimum
     /// as evidence.
-    pub(crate) fn run_fog_tranche(
+    pub(super) fn run_fog_tranche(
         &mut self,
         raw_depth: &[f32],
-        camera: &v1::Camera,
+        camera: &FrameCamera,
         width: u32,
         height: u32,
     ) -> Result<(u32, u32, u64, u32, u32, u64), PresentError> {
@@ -143,6 +142,9 @@ impl Presenter {
         self.frame_waits.map_and_wait();
         let gus = Self::ms_to_us(gtao.submit_ms);
         self.gtao_submit_us = gus;
+        // The pair now holds this frame's fog plus AO: the fog-off
+        // branches below must reset it once before trusting neutral.
+        self.fog_pair_dirty = true;
         // Live GTAO drives the blit AO: overwrite the contact pair above
         // with the full-res bilateral upsample over this frame's feed.
         // Same row-major layout as the contact upload; fog factor stays.
@@ -194,7 +196,9 @@ impl Presenter {
 
     /// RL9 neutral path: factor 0 (no tint), AO open, evidence reset.
     /// Held, fog-off and over-budget frames show the clear forward frame;
-    /// GTAO rides the same gate (no feed, no occlusion pass).
+    /// GTAO rides the same gate (no feed, no occlusion pass). Leaves the
+    /// pair neutral and clears `fog_pair_dirty`; callers skip this whole
+    /// upload while the flag stays false.
     pub(crate) fn clear_fog_targets(
         &mut self,
         width: u32,
@@ -254,6 +258,7 @@ impl Presenter {
         self.fog_ao_bottom_mean = 1.0;
         self.fog_submit_us = 0;
         self.gtao_submit_us = 0;
+        self.fog_pair_dirty = false;
         (0, 0, 0, 0, 0, 0)
     }
 }

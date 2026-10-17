@@ -15,8 +15,11 @@ use super::{
     winrates::{self, apply_morale, human_tape_for, HumanError},
     BalanceConfig, Failure,
 };
-use engine_arena::fork::{Fork, ForkMetrics, ForkProposal, STUCK_SPEED_MPS};
+use engine_arena::fork::{
+    Fork, ForkMetrics, ForkProposal, TierRow, SHIPPED_TIERS, STUCK_SPEED_MPS,
+};
 use engine_arena::recorder::Dataset;
+use engine_arena::zones::{shipped_gate_anchor, zone_at, ZoneTally};
 use engine_arena::{ArenaConfig, FighterId, FighterInput, FighterTape, TICK_HZ};
 
 /// This harness's name in [`Failure::verifier`].
@@ -229,6 +232,16 @@ pub struct DifficultyReport {
     pub stuck_seeds: Vec<(u8, Vec<u64>)>,
     /// Total slow ticks across every fighter and match.
     pub stuck_ticks_total: u64,
+    /// GP36 zone *time* shares in permille `[centre, ring, wall, gate]` over
+    /// every recorded fighter tick, summing to exactly 1000.
+    pub zone_permille: [u32; 4],
+    /// Gate-mouth *time* share in permille (the GP36 bar keeps it under 250):
+    /// a share of fighter ticks, never the level-check floor *area* share.
+    /// Equals `zone_permille[3]`.
+    pub entrance_share: u32,
+    /// Kills whose killing-tick killer pose sat in each zone, in
+    /// `[centre, ring, wall, gate]` order.
+    pub kills_per_zone: [u32; 4],
 }
 
 /// Full balance-tournament report: one row per difficulty plus the move
@@ -272,6 +285,24 @@ impl TournamentReport {
                     .collect::<Vec<_>>()
                     .join(","),
                 row.stuck_ticks_total,
+            ));
+            out.push_str(&format!(
+                "  zone share centre={} ring={} wall={} gate={} (fighter-tick time permille, sum 1000)\n",
+                row.zone_permille[0],
+                row.zone_permille[1],
+                row.zone_permille[2],
+                row.zone_permille[3],
+            ));
+            out.push_str(&format!(
+                "  entrance_share={} (gate time share permille: a fighter-tick share, not the level-check floor-area share)\n",
+                row.entrance_share,
+            ));
+            out.push_str(&format!(
+                "  kills_per_zone=[{},{},{},{}] (centre,ring,wall,gate)\n",
+                row.kills_per_zone[0],
+                row.kills_per_zone[1],
+                row.kills_per_zone[2],
+                row.kills_per_zone[3],
             ));
             for share in &row.kill_shares {
                 out.push_str(&format!(
@@ -408,6 +439,20 @@ fn merge_tapes(tapes: &[FighterTape]) -> FighterTape {
     FighterTape(inputs)
 }
 
+/// Install an optional shipped tier row on every brain of a duel fork: a
+/// difficulty is one skill rung over the whole field, never a per-slot stat
+/// wall. `None` on an internal contract break (configs validate first).
+fn apply_tier(fork: &mut Fork, fighters: u8, tier: Option<TierRow>) -> Option<()> {
+    let Some(row) = tier else {
+        return Some(());
+    };
+    for fighter in 0..fighters {
+        fork.apply_proposal(ForkProposal::SetTier { fighter, tier: row })
+            .ok()?;
+    }
+    Some(())
+}
+
 /// Run one full-match fork: prefix at tick 0, `SetAggression` morale per
 /// slot (the game-ai pacing input), then each tape slice rides as a `SwapTape`
 /// proposal so brain slots stay live exactly like the real tick.
@@ -442,10 +487,12 @@ fn fork_metrics(config: &ArenaConfig, morale: &[u16], tape: &FighterTape) -> Opt
 }
 
 /// Recorded fork run: metrics plus per-fighter rows for kill attribution.
-/// Metrics equal [`fork_metrics`] over the same fork by construction.
+/// Metrics equal [`fork_metrics`] over the same fork by construction, plus
+/// the optional difficulty tier rung installed on every brain.
 fn fork_recorded(
     config: &ArenaConfig,
     morale: &[u16],
+    tier: Option<TierRow>,
     tape: &FighterTape,
 ) -> Option<(ForkMetrics, Dataset)> {
     let (snapshot, _) = engine_arena::run_prefix(config, tape, 0)?;
@@ -457,6 +504,7 @@ fn fork_recorded(
         })
         .ok()?;
     }
+    apply_tier(&mut fork, config.fighters, tier)?;
     for slot in 0..config.fighters {
         let slice: Vec<FighterInput> = tape
             .0
@@ -484,12 +532,13 @@ fn fork_recorded(
 fn fork_recorded_with_error(
     config: &ArenaConfig,
     morale: &[u16],
+    tier: Option<TierRow>,
     error: HumanError,
 ) -> Option<(ForkMetrics, Dataset)> {
     if !error.enabled {
-        return fork_recorded(config, morale, &FighterTape::default());
+        return fork_recorded(config, morale, tier, &FighterTape::default());
     }
-    let (_, dataset) = fork_recorded(config, morale, &FighterTape::default())?;
+    let (_, dataset) = fork_recorded(config, morale, tier, &FighterTape::default())?;
     let mut perfect_zero: Vec<FighterInput> = dataset
         .rows
         .iter()
@@ -504,6 +553,7 @@ fn fork_recorded_with_error(
     let (snapshot, _) = engine_arena::run_prefix(config, &FighterTape::default(), 0)?;
     let mut fork = Fork::from_snapshot(snapshot, 0)?;
     apply_morale(&mut fork, morale)?;
+    apply_tier(&mut fork, config.fighters, tier)?;
     fork.apply_proposal(ForkProposal::SwapTape {
         fighter: 0,
         inputs: noisy.0.clone(),
@@ -819,6 +869,17 @@ fn validate(config: &TournamentConfig) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Recorded pose of `slot` at `tick` in a dataset row-major by tick then
+/// slot, `None` when the shape is short. Pure: never panics.
+fn pose_at(dataset: &Dataset, fighters: usize, tick: u32, slot: usize) -> Option<[f32; 3]> {
+    let base = usize::try_from(tick).ok()?.checked_mul(fighters)?;
+    let row = dataset.rows.get(base.checked_add(slot)?)?;
+    row.observation
+        .fighters
+        .get(slot)
+        .map(|fighter| fighter.pos)
+}
+
 /// Consecutive-stillness scan over recorded poses (the game-ai stuck
 /// definition): speed sample `t` spans poses `t` and `t+1`, and a fighter
 /// trips on [`STUCK_WINDOW_TICKS`] consecutive sub-threshold samples.
@@ -891,8 +952,113 @@ fn kill_shares_of(mut kill_counts: Vec<(u8, u32)>, kills_total: u32) -> Vec<Kill
         .collect()
 }
 
+/// Running per-difficulty tallies across one tournament's matches: wins,
+/// kill attribution, stuck trips and the GP36 zone metric, folded one
+/// recorded match at a time so [`run_difficulty`] stays a short driver.
+struct DifficultyTotals {
+    /// Matches fighter 0 won outright (top damage).
+    wins: u32,
+    /// Matches tied for top damage.
+    draws: u32,
+    /// Matches another fighter won outright.
+    losses: u32,
+    /// Matches with any kill.
+    kills_total: u32,
+    /// Kill counts per observed killing byte.
+    kill_counts: Vec<(u8, u32)>,
+    /// Per-slot stuck match counts.
+    stuck: Vec<(u8, u32)>,
+    /// Tripped match seeds per slot.
+    stuck_seeds: Vec<(u8, Vec<u64>)>,
+    /// Total slow ticks across every fighter and match.
+    stuck_ticks_total: u64,
+    /// GP36 zone time tally over every recorded fighter tick.
+    zones: ZoneTally,
+    /// GP36 kills whose killing-tick killer pose sat in each zone.
+    kills_per_zone: [u32; 4],
+}
+
+impl DifficultyTotals {
+    /// Empty tallies for a two-slot duel field.
+    fn new() -> Self {
+        Self {
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            kills_total: 0,
+            kill_counts: Vec::new(),
+            stuck: vec![(0, 0), (1, 0)],
+            stuck_seeds: vec![(0, Vec::new()), (1, Vec::new())],
+            stuck_ticks_total: 0,
+            zones: ZoneTally::default(),
+            kills_per_zone: [0; 4],
+        }
+    }
+
+    /// Fold one recorded match into every tally: the result, kill
+    /// attribution, stuck trips, and the GP36 zone metric (every pose plus
+    /// the kill's zone at the killing tick). The gate anchor is data from
+    /// the shipped rows, never a constant.
+    fn observe(
+        &mut self,
+        seed: u64,
+        dataset: &Dataset,
+        metrics: &ForkMetrics,
+        fighters: usize,
+        ticks: u32,
+    ) {
+        match winrates::slot_zero_result(&metrics.damage_dealt) {
+            winrates::SlotZero::Win => self.wins += 1,
+            winrates::SlotZero::Draw => self.draws += 1,
+            winrates::SlotZero::Loss => self.losses += 1,
+        }
+        let gate = shipped_gate_anchor();
+        let gate_mouth = [gate[0], gate[1]];
+        let gate_half_m = gate[2];
+        for tick in 0..ticks {
+            for slot in 0..fighters {
+                if let Some(pos) = pose_at(dataset, fighters, tick, slot) {
+                    self.zones
+                        .add(zone_at(pos[0], pos[2], gate_mouth, gate_half_m));
+                }
+            }
+        }
+        if let Some(kill_in) = metrics.ticks_to_kill {
+            self.kills_total += 1;
+            let killer = killer_of(metrics);
+            let byte = killing_byte(dataset, killer, kill_in.saturating_sub(1));
+            match self.kill_counts.iter_mut().find(|(b, _)| *b == byte) {
+                Some(entry) => entry.1 += 1,
+                None => self.kill_counts.push((byte, 1)),
+            }
+            if let Some(pos) = pose_at(
+                dataset,
+                fighters,
+                kill_in.saturating_sub(1),
+                usize::from(killer),
+            ) {
+                let zone = zone_at(pos[0], pos[2], gate_mouth, gate_half_m);
+                self.kills_per_zone[zone.index()] += 1;
+            }
+        }
+        for (_, slow) in &metrics.stuck_ticks {
+            self.stuck_ticks_total += u64::from(*slow);
+        }
+        let kill_tick = metrics.ticks_to_kill.map(|kill| kill.saturating_sub(1));
+        for slot in scan_stuck_consecutive(dataset, fighters, ticks, kill_tick) {
+            if let Some(entry) = self.stuck.iter_mut().find(|(s, _)| *s == slot) {
+                entry.1 += 1;
+            }
+            if let Some(entry) = self.stuck_seeds.iter_mut().find(|(s, _)| *s == slot) {
+                entry.1.push(seed);
+            }
+        }
+    }
+}
+
 /// Run one difficulty's AI-vs-AI tournament: `matches` recorded forks with
-/// per-slot morale, tallying wins plus kill attribution and stuck trips.
+/// per-slot morale and the difficulty's shipped tier rung, tallying wins
+/// plus kill attribution and stuck trips.
 fn run_difficulty(
     config: &TournamentConfig,
     index: usize,
@@ -900,15 +1066,13 @@ fn run_difficulty(
     error: HumanError,
 ) -> Result<DifficultyReport, Failure> {
     let base = config.difficulty_seed(index);
+    let fighters = difficulty.morale.len();
+    // The shipped ladder's production install: rung `index` reads its row
+    // straight from `engine_ai::tier` (no copy of the numbers here). Rungs
+    // past the shipped table stay untiered, matching a custom ladder.
+    let tier = SHIPPED_TIERS.get(index).copied();
     let mut seeds = Vec::with_capacity(config.matches as usize);
-    let mut wins = 0u32;
-    let mut draws = 0u32;
-    let mut losses = 0u32;
-    let mut kills_total = 0u32;
-    let mut kill_counts: Vec<(u8, u32)> = Vec::new();
-    let mut stuck: Vec<(u8, u32)> = vec![(0, 0), (1, 0)];
-    let mut stuck_seeds: Vec<(u8, Vec<u64>)> = vec![(0, Vec::new()), (1, Vec::new())];
-    let mut stuck_ticks_total = 0u64;
+    let mut totals = DifficultyTotals::new();
     for i in 0..config.matches {
         let seed = base.wrapping_add(u64::from(i));
         seeds.push(seed);
@@ -920,58 +1084,30 @@ fn run_difficulty(
             table_version: 1,
         };
         let Some((metrics, dataset)) =
-            fork_recorded_with_error(&match_config, &difficulty.morale, error)
+            fork_recorded_with_error(&match_config, &difficulty.morale, tier, error)
         else {
             return Err(fail(format!(
                 "difficulty {} fork rejected match {i} (seed {seed}): internal contract break",
                 difficulty.name
             )));
         };
-        match winrates::slot_zero_result(&metrics.damage_dealt) {
-            winrates::SlotZero::Win => wins += 1,
-            winrates::SlotZero::Draw => draws += 1,
-            winrates::SlotZero::Loss => losses += 1,
-        }
-        if let Some(kill_in) = metrics.ticks_to_kill {
-            kills_total += 1;
-            let killer = killer_of(&metrics);
-            let byte = killing_byte(&dataset, killer, kill_in.saturating_sub(1));
-            match kill_counts.iter_mut().find(|(b, _)| *b == byte) {
-                Some(entry) => entry.1 += 1,
-                None => kill_counts.push((byte, 1)),
-            }
-        }
-        for (_, slow) in &metrics.stuck_ticks {
-            stuck_ticks_total += u64::from(*slow);
-        }
-        let kill_tick = metrics.ticks_to_kill.map(|kill| kill.saturating_sub(1));
-        for slot in scan_stuck_consecutive(
-            &dataset,
-            difficulty.morale.len(),
-            config.match_ticks,
-            kill_tick,
-        ) {
-            if let Some(entry) = stuck.iter_mut().find(|(s, _)| *s == slot) {
-                entry.1 += 1;
-            }
-            if let Some(entry) = stuck_seeds.iter_mut().find(|(s, _)| *s == slot) {
-                entry.1.push(seed);
-            }
-        }
+        totals.observe(seed, &dataset, &metrics, fighters, config.match_ticks);
     }
-    let kill_shares = kill_shares_of(kill_counts, kills_total);
-    let rate = ((2 * wins + draws) * 1000 / (2 * config.matches)) as u16;
+    let kill_shares = kill_shares_of(totals.kill_counts, totals.kills_total);
+    let win_permille = (2 * totals.wins + totals.draws) * 1000 / (2 * config.matches);
+    let rate = u16::try_from(win_permille).unwrap_or(u16::MAX);
     let win_report = winrates::Report {
         matches: config.matches,
         match_ticks: config.match_ticks,
         seeds: seeds.clone(),
-        wins,
-        draws,
-        losses,
+        wins: totals.wins,
+        draws: totals.draws,
+        losses: totals.losses,
         rate_permille: rate,
     };
-    let stuck_trips: Vec<(u8, u32)> = stuck.into_iter().filter(|(_, n)| *n > 0).collect();
-    let stuck_seeds: Vec<(u8, Vec<u64>)> = stuck_seeds
+    let stuck_trips: Vec<(u8, u32)> = totals.stuck.into_iter().filter(|(_, n)| *n > 0).collect();
+    let stuck_seeds: Vec<(u8, Vec<u64>)> = totals
+        .stuck_seeds
         .into_iter()
         .filter(|(_, seeds)| !seeds.is_empty())
         .collect();
@@ -980,16 +1116,19 @@ fn run_difficulty(
         matches: config.matches,
         match_ticks: config.match_ticks,
         seeds,
-        wins,
-        draws,
-        losses,
+        wins: totals.wins,
+        draws: totals.draws,
+        losses: totals.losses,
         rate_permille: rate,
         uncertainty_permille: win_report.uncertainty_permille(),
-        kills_total,
+        kills_total: totals.kills_total,
         kill_shares,
         stuck_trips,
         stuck_seeds,
-        stuck_ticks_total,
+        stuck_ticks_total: totals.stuck_ticks_total,
+        zone_permille: totals.zones.shares(),
+        entrance_share: totals.zones.entrance_share(),
+        kills_per_zone: totals.kills_per_zone,
     })
 }
 
@@ -1478,6 +1617,7 @@ fn sweep_csv_name(stamp: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_arena::fork::{TIER_DUELS, WIN_BAR_PERMILLE};
 
     fn tiny_config() -> TournamentConfig {
         TournamentConfig {
@@ -1673,6 +1813,38 @@ mod tests {
     }
 
     #[test]
+    fn zones_shares_sum_to_1000_and_entrance_stays_under_250() {
+        // GP36: one metric over every recorded fighter tick. The gate anchor
+        // is data (content/design/arena-zones.rows, gate_tunnel at 12 m on
+        // the centre lane). The four shares always sum to 1000 permille and
+        // the gate *time* share stays under the 250 bar; the record itself
+        // does not move.
+        let config = tiny_config();
+        let first = run(&config).expect("tiny config runs");
+        let second = run(&config).expect("tiny config replays");
+        assert_eq!(first, second, "the zone tally must not disturb the record");
+        assert_eq!(first.to_text(), second.to_text());
+        assert!(!first.per_difficulty.is_empty());
+        for row in &first.per_difficulty {
+            let sum: u32 = row.zone_permille.iter().sum();
+            assert_eq!(sum, 1000, "zone shares must sum to 1000: {row:?}");
+            assert_eq!(row.entrance_share, row.zone_permille[3]);
+            assert!(
+                row.entrance_share < 250,
+                "GP36 bar: entrance under 250 permille, got {}",
+                row.entrance_share
+            );
+            let zone_kills: u32 = row.kills_per_zone.iter().sum();
+            assert_eq!(zone_kills, row.kills_total, "every kill lands in one zone");
+        }
+        let text = first.to_text();
+        assert!(text.contains("zone share centre="), "{text}");
+        assert!(text.contains("entrance_share="), "{text}");
+        assert!(text.contains("kills_per_zone=["), "{text}");
+        println!("{text}");
+    }
+
+    #[test]
     fn seeded_overpowered_move_is_flagged() {
         // The discovered strike lever spammed into brains must trip the
         // spotlight cap: this is the seeded-overpowered proof.
@@ -1713,7 +1885,8 @@ mod tests {
             half_extent_m: 20.0,
             table_version: 1,
         };
-        let Some((metrics, dataset)) = fork_recorded(&cfg, &[500, 500], &FighterTape::default())
+        let Some((metrics, dataset)) =
+            fork_recorded(&cfg, &[500, 500], None, &FighterTape::default())
         else {
             panic!("seed 2043 must fork");
         };
@@ -1750,7 +1923,8 @@ mod tests {
             half_extent_m: 20.0,
             table_version: 1,
         };
-        fork_recorded(&cfg, morale, &FighterTape::default()).expect("stuck-leg seed must fork")
+        fork_recorded(&cfg, morale, None, &FighterTape::default())
+            .expect("stuck-leg seed must fork")
     }
 
     /// Ticks where `slot` issues a nonzero move wish (a live brain).
@@ -1965,6 +2139,9 @@ mod tests {
             stuck_trips: Vec::new(),
             stuck_seeds: Vec::new(),
             stuck_ticks_total: 0,
+            zone_permille: [0; 4],
+            entrance_share: 0,
+            kills_per_zone: [0; 4],
         };
         let config = tiny_config();
         let single = TournamentReport {
@@ -2243,5 +2420,81 @@ mod tests {
             .count();
         assert_eq!(data_rows, first.rows.len());
         println!("wrote {} with {data_rows} data rows", path.display());
+    }
+
+    /// One adjacent tier pair over [`TIER_DUELS`] seeded duels at the
+    /// standard match length: slot 0 holds `higher`, slot 1 `lower`, morale
+    /// even. `Ok(permille)` when the higher rung clears
+    /// [`WIN_BAR_PERMILLE`]; `Err` naming the pair when it does not (the
+    /// inverted-install failure case).
+    fn tier_pair_verdict(higher: TierRow, lower: TierRow) -> Result<u16, String> {
+        let base = TournamentConfig::standard().base_seed;
+        let mut wins = 0u32;
+        for i in 0..TIER_DUELS {
+            let cfg = ArenaConfig {
+                seed: base.wrapping_add(u64::from(i)),
+                ticks: STANDARD_TICKS,
+                fighters: 2,
+                half_extent_m: 20.0,
+                table_version: 1,
+            };
+            let (snapshot, _) = engine_arena::run_prefix(&cfg, &FighterTape::default(), 0)
+                .ok_or("tier pair prefix refused")?;
+            let mut fork = Fork::from_snapshot(snapshot, 0).ok_or("tier pair fork refused")?;
+            for (slot, tier) in [higher, lower].iter().enumerate() {
+                let fighter = u8::try_from(slot).map_err(|_| "tier pair slot overflow")?;
+                fork.apply_proposal(ForkProposal::SetTier {
+                    fighter,
+                    tier: *tier,
+                })
+                .map_err(|error| format!("tier pair slot {slot} refused: {error:?}"))?;
+            }
+            if matches!(
+                winrates::slot_zero_result(&fork.run_n(cfg.ticks).damage_dealt),
+                winrates::SlotZero::Win
+            ) {
+                wins += 1;
+            }
+        }
+        let permille = u16::try_from(wins * 1000 / TIER_DUELS).unwrap_or(u16::MAX);
+        if permille < WIN_BAR_PERMILLE {
+            return Err(format!(
+                "tier pair tier_{} (higher) vs tier_{} (lower): {permille} permille of {TIER_DUELS} duels, below the {WIN_BAR_PERMILLE} bar",
+                higher.tier, lower.tier
+            ));
+        }
+        Ok(permille)
+    }
+
+    #[test]
+    fn tier_bar_posts_600_plus_per_pair() {
+        // GA13: the shipped tier table's production reader is the tournament
+        // ladder (`run_difficulty` installs SHIPPED_TIERS[index]). Each
+        // adjacent pair posts the higher rung clearing the bar over
+        // TIER_DUELS seeded duels, and the pair replays exactly.
+        for low in 0..SHIPPED_TIERS.len() - 1 {
+            let (lower, higher) = (SHIPPED_TIERS[low], SHIPPED_TIERS[low + 1]);
+            let first = tier_pair_verdict(higher, lower).expect("higher rung must clear the bar");
+            let again = tier_pair_verdict(higher, lower).expect("pair replays");
+            assert_eq!(
+                first, again,
+                "pair tier_{}/tier_{} must replay",
+                higher.tier, lower.tier
+            );
+            println!(
+                "tier pair tier_{} vs tier_{}: {first} permille of {TIER_DUELS} duels",
+                higher.tier, lower.tier
+            );
+        }
+        // Failure case: an inverted install puts tier_3 on the lowest rung,
+        // so the nominally-higher rung holds tier_1 and posts below the bar;
+        // the refusal names the pair.
+        let inverted = tier_pair_verdict(SHIPPED_TIERS[0], SHIPPED_TIERS[2])
+            .expect_err("inverted install must post below the bar");
+        assert!(
+            inverted.contains("tier_1") && inverted.contains("tier_3"),
+            "refusal names the pair: {inverted}"
+        );
+        println!("inverted install refused: {inverted}");
     }
 }

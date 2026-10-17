@@ -39,6 +39,8 @@ Code as-is 2026-10-15: CQ9 open — 12 files over the 1500 bar (`tools/rust-qual
 10. **Loop landing gate.** sprint-loop refuses to commit when workspace-check exits non-zero; test in sprint-loop.test.mjs. Board commit f336c06b claimed PASS after a FAIL.
 11. **Doc truth.** FOCUS Now drops ticked BX28 BX37 BX38 PX6 (owner edit); plan rows are regenerated from the board, not hand-copied.
 
+- Status 2026-10-17: disk shows the "sprint-loop refuses to commit when workspace-check exits non-zero; test in sprint-loop.test.mjs" half of item 10 above is false. `tools/sprint-loop.mjs` (Length 10378) has 0 `workspace-check` hits (`rg -c "workspace-check" tools/sprint-loop.mjs` exits 1) and calls no git commit at all — each wave only spawns `opencode run --agent orchestrator` (`:183-187`) — and `tools/sprint-loop.test.mjs` (Length 6264) has 0 `workspace` hits over its 8 tests (dry-run oracle, ready-id list, the two usage errors, three prune-queue cases, the QUEUE-PRUNE rename counter). The audit gate that does refuse now lives in `tools/land.mjs`: the audit comment at `:128-133`, `workspaceVerdict` at `:156-171`, and it is the tool that commits (`git add -- <paths>` `:444`, `git commit -F <msg> -- <paths>` `:448`, the close-row pair `:373-374`, push `:458`). The other half of item 10 still holds: board commit `f336c06b` exists ("Board: UI3/UI4 replan plus MP10 lightyear reword plus LADDER P3 lines (workspace-check PASS)"). So the `:38` cite in `docs/plan/BOOK-GAPS-2026-10-12.md` row S14 has drifted to `:39` and the loop/test half of that row needs a fix.
+
 ### build and runtime speed (OPT)
 
 - Release profile: fat LTO, one codegen unit; no `panic = "abort"`, no PGO (PF3 note: "pending game-exe evidence").
@@ -53,6 +55,7 @@ Code as-is 2026-10-15: CQ9 open — 12 files over the 1500 bar (`tools/rust-qual
 - GPU-driven culling and meshlets: open (VG1, VG2, VG3, VG8). Release frame time on the reference GPU: never measured (Q1 open).
 - Provider: capability negotiation, sessions, jobs, scripted fallback, streaming, 4 vendor adapters. Record and replay only inside the brief chain; no general cassette (OPT24). Model routing, VRAM arbitration and prompt versioning are missing (OPT25-OPT28).
 - Test strength: fuzz, chaos, museum; no mutation or property tests yet (OPT21, OPT22).
+- Status 2026-10-17: the mutation half of the line above is stale: `tools/mutants.mjs:1` is on disk (Test-Path True, Length 16562) with `tools/mutants.test.mjs` (Length 16655) beside it, so a mutation tool ships; the property half holds (`Select-String -Path Cargo.toml,crates/*/Cargo.toml -Pattern proptest` = 0 hits). Tracked as row S13 in `docs/plan/BOOK-GAPS-2026-10-12.md` (its plan cite `:53` has drifted to this line `:55`).
 - MCP door: self-describing, declarative tools, EXPLAIN, audit receipts (MCP7, MCP9, MCP10, EA3).
 
 ## 2. Finish line

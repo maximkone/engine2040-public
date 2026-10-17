@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY } from "./workspace-check.mjs";
+import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges } from "./workspace-check.mjs";
 import { parseBoard, needsOf } from "./board-slice.mjs";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { deriveFixedApi, genreHits, maskRust, platformMathHits, productionCode } from "./sim-source-scan.mjs";
@@ -281,6 +281,19 @@ test("workspace-check runs both gates through the shared scanner", () => {
   assert.match(gate, /platformMathHits\(/);
   assert.match(gate, /genreHits\(/);
   assert.doesNotMatch(gate, /split\("#\[cfg\(test\)\]"\)\[0\]/, "raw cfg(test) split would bypass comment masking");
+});
+
+test("documented edges: every optional engine-endpoint manifest edge has one allow entry", () => {
+  const EDGE = /^(engine-[a-z-]+)\s*=\s*\{\s*workspace\s*=\s*true,\s*optional\s*=\s*true/gm;
+  const names = (toml) => [...toml.matchAll(EDGE)].map((m) => m[1]);
+  assert.deepEqual(names("engine-physics = { workspace = true, optional = true }\n"), ["engine-physics"]);
+  assert.deepEqual(names("engine-core = { workspace = true }\n"), [], "a required edge is not optional");
+  // The audit reads the real manifest: the doc row must grow with it (PX40 physics pack).
+  const toml = readFileSync(new URL("../crates/endpoint/Cargo.toml", import.meta.url), "utf8");
+  const allowed = new Set(allowedEdges.get("engine-endpoint"));
+  for (const dep of names(toml)) {
+    assert.equal(allowed.has(dep), true, `${dep} is an engine-endpoint manifest edge, so it needs one allow entry`);
+  }
 });
 
 test("test layout guard: a new top-level test file in a merged crate fails with the fix", () => {

@@ -1,6 +1,7 @@
 //! core: headless Forward+ (tile assign, light cull, draw build, visible hash). Borrows sim, never owns.
 use crate::{LightGrid, TILE};
 
+/// Sprite for the CPU oracle: screen rect plus depth.
 #[derive(Clone, Copy, Debug)]
 pub struct Sprite {
     pub id: u32,
@@ -10,12 +11,14 @@ pub struct Sprite {
     pub hh: f32,
     pub depth: f32,
 }
+/// Point light for the CPU oracle: screen center plus radius.
 #[derive(Clone, Copy, Debug)]
 pub struct Light {
     pub x: f32,
     pub y: f32,
     pub r: f32,
 }
+/// Viewport: pixel size plus camera origin (top-left, screen space).
 #[derive(Clone, Copy, Debug)]
 pub struct View {
     pub w: u32,
@@ -23,6 +26,7 @@ pub struct View {
     pub cam_x: f32,
     pub cam_y: f32,
 }
+/// Headless Forward+ oracle over one viewport (borrows sim, never owns).
 pub struct ForwardPlus {
     pub view: View,
     pub gw: usize,
@@ -41,6 +45,7 @@ fn mix(mut h: u64, b: &[u8]) -> u64 {
 }
 
 impl ForwardPlus {
+    /// Oracle for a `w` by `h` viewport with camera origin (`cam_x`, `cam_y`).
     pub fn new(w: u32, h: u32, cam_x: f32, cam_y: f32) -> Self {
         let gw = if w == 0 { 0 } else { w.div_ceil(TILE) as usize };
         let gh = if h == 0 { 0 } else { h.div_ceil(TILE) as usize };
@@ -53,21 +58,26 @@ impl ForwardPlus {
             sort_scratch: Vec::new(),
         }
     }
+    /// Tile count (`gw` by `gh`).
     pub fn tile_count(&self) -> usize {
         self.gw * self.gh
     }
+    /// Draw count kept by the last build.
     pub fn visible(&self) -> usize {
         self.draw.len()
     }
+    /// Tiles that overflowed the light grid.
     pub fn overflow(&self) -> u32 {
         self.grid.overflow_tiles
     }
+    /// Tile `t` bounds in screen space (`x0`, `y0`, `x1`, `y1`).
     pub fn tile_rect(&self, t: usize) -> (f32, f32, f32, f32) {
         let s = TILE as f32;
         let tx = (t % self.gw) as f32 * s;
         let ty = (t / self.gw) as f32 * s;
         (tx, ty, tx + s, ty + s)
     }
+    /// Assign lights to tiles; an empty view keeps an empty grid.
     pub fn cull_lights(&mut self, lights: &[Light]) {
         self.grid = LightGrid::new(self.gw * self.gh);
         if self.gw == 0 || self.gh == 0 {
@@ -96,6 +106,7 @@ impl ForwardPlus {
             o += self.grid.counts[t] as u32;
         }
     }
+    /// Keep on-screen sprites, sorted front-to-back, with no per-frame allocation.
     pub fn build_draw(&mut self, sprites: &[Sprite]) {
         self.draw.clear();
         let (vx0, vy0) = (self.view.cam_x, self.view.cam_y);
@@ -127,10 +138,12 @@ impl ForwardPlus {
         });
         self.draw.extend(b.iter().map(|x| x.0));
     }
+    /// Cull lights then build draws for one frame.
     pub fn render(&mut self, sprites: &[Sprite], lights: &[Light]) {
         self.cull_lights(lights);
         self.build_draw(sprites);
     }
+    /// Visible-state hash (view, draw order, light grid).
     pub fn hash(&self) -> u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         h = mix(h, &self.view.w.to_le_bytes());

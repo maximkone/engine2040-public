@@ -31,6 +31,7 @@ skinning, AM11 springs. Their evidence paths are in git (`pack.rs`, `dq.rs`, `sp
 | Thousand-agent crowd pose budget (AM18) | missing (rowed) | needs AM13 |
 
 - Status 2026-10-12: LM2 row above says `crates/anim/src/warp_ground.rs` does not exist yet, but `crates/anim/src/warp_ground.rs` exists on disk, so that cell is false.
+- Status 2026-10-17: disk shows the false LM2 cell still at `docs/plan/animation.md:26` ("`crates/anim/src/warp_ground.rs` does not exist yet; needs LM1, AM6 (ticked)") with the 2026-10-12 Status at `:33` already marking it false, and the same "does not exist" claim a second time in this file's LM2 note (`:220` before this line was added, now `:221`), while the code side holds: `crates/anim/src/warp_ground.rs` on disk (Test-Path True, Length 27849) plus `crates/anim/src/warp_ground_feel_test.rs` (Test-Path True), the live consumer `use engine_anim::warp_ground::GroundWarp;` at `crates/arena/src/lib.rs:102` with the warp vector at `:1047` and `:1196`, and this file's `:145` recording it "landed with no window caller", so the S7 gap still holds and only the two "does not exist" lines stay false.
 
 Open tail, in one line: starts, stops and pivots must match distance; remote
 fighters must pose the same after rollback; crowds cheapen with distance; eval

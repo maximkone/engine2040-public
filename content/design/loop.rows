@@ -1,8 +1,9 @@
 # loop design rows: copy of compiled ladder constants (v1).
 # Designers change numbers here without a Rust edit; the game reads
 # the header version row at a progression boundary. Whole numbers only,
-# `#` comments, no floats. Glory is counts (no suffix). Range checks
-# are validate_loop in crates/game/src/loop_text.rs; the compiled
-# constants stay the truth for replays. Rank names stay in code.
+# `#` comments, no floats. Glory is counts (no suffix); the loss drain is
+# the named drain of the pool. Range checks are validate_loop in
+# crates/game/src/loop_text.rs; the compiled constants stay the truth for
+# replays. Rank names stay in code.
 table loop version 1
-v1 glory_per_win=100 glory_rung_bonus=25 glory_per_loop=500 glory_rank0=0 glory_rank1=300 glory_rank2=900 glory_rank3=1800 glory_rank4=3600
+v1 glory_per_win=100 glory_rung_bonus=25 glory_per_loop=500 glory_loss_penalty=50 glory_rank0=0 glory_rank1=300 glory_rank2=900 glory_rank3=1800 glory_rank4=3600

@@ -25,6 +25,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
+use super::config::{AdapterHandle, AdapterTarget, ConfigError};
+use super::mock::MockStep;
 use super::protocol::AiRequest;
 use super::transport::{self, Endpoint};
 
@@ -292,6 +294,22 @@ impl Arbiter {
         PlacementReader {
             shared: Arc::clone(&self.shared),
         }
+    }
+
+    /// Build the serving adapter for `target` under this arbiter's placement:
+    /// the local arm applies the route on its request path, so a request under
+    /// frame pressure parks or dials the CPU sidecar instead of always dialing
+    /// the GPU sidecar. The route reads this arbiter's published placement
+    /// (one atomic load per request, never a wait on the tick); `cpu` is the
+    /// loopback CPU sidecar endpoint, or `None` to park every CPU and deferred
+    /// placement.
+    pub fn serving_adapter(
+        &self,
+        target: &AdapterTarget,
+        script: Vec<MockStep>,
+        cpu: Option<Endpoint>,
+    ) -> Result<AdapterHandle, ConfigError> {
+        super::serving::serving_adapter(target, script, self, cpu)
     }
 
     /// Feed one sample; returns the notice when the placement moved. Integer

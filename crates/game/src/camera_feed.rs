@@ -106,7 +106,9 @@ pub fn trauma_for_cues(cues: &[FightCue]) -> u32 {
 /// presentation-side (the rig's pure shake stage moves the presented eye,
 /// never sim state). With no stage bypassed the rig serves byte-identical
 /// frames to the raw director. Frame and trauma receipts are pre-sized at
-/// construction, so steady-state updates allocate nothing.
+/// construction, then trimmed to the rolling [`FEED_TICKS`] window, so
+/// steady-state updates allocate nothing and long sessions retain the
+/// latest window instead of the whole run.
 pub struct PresentationFeed {
     rig: StagedRig,
     frames: Vec<CameraFrame>,
@@ -136,6 +138,16 @@ impl PresentationFeed {
     #[must_use]
     pub fn frames(&self) -> &[CameraFrame] {
         &self.frames
+    }
+
+    /// Drop receipts past the rolling [`FEED_TICKS`] window. At most one
+    /// entry overflows per tick, so one head-drop keeps the latest window
+    /// with no allocation.
+    fn trim_receipts(&mut self) {
+        if self.frames.len() > FEED_TICKS as usize {
+            self.frames.remove(0);
+            self.trauma.remove(0);
+        }
     }
 
     /// Recorded in-sim trauma per presented tick, in tick order.
@@ -193,6 +205,7 @@ impl PresentationFeed {
         );
         self.frames.push(frame);
         self.trauma.push(frame.trauma_permille);
+        self.trim_receipts();
         Ok(frame)
     }
 
@@ -244,6 +257,7 @@ impl PresentationFeed {
         );
         self.frames.push(frame);
         self.trauma.push(frame.trauma_permille);
+        self.trim_receipts();
         Ok(frame)
     }
 

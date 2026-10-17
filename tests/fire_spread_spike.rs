@@ -480,7 +480,10 @@ fn fire_spread_report_numbers() {
         breeze_sum, BREEZE_DIGEST,
         "breeze digest drifted: got {breeze_sum:016x}"
     );
-    assert_eq!(calm_sum, CALM_DIGEST, "calm digest drifted: got {calm_sum:016x}");
+    assert_eq!(
+        calm_sum, CALM_DIGEST,
+        "calm digest drifted: got {calm_sum:016x}"
+    );
     assert_eq!(breeze.contact_ignitions, 7, "breeze contact count drifted");
     assert_eq!(breeze.spot_ignitions, 1, "breeze spot count drifted");
     assert_eq!(

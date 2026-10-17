@@ -19,6 +19,8 @@ holds the floors (a broken one files a `bug:` packet by itself) and the targets 
 | G8 Multiplayer | the duel on LAN and internet, one hash | Core proof 4 (last) | open |
 | G9 Potato (owner 2026-10-11) | the same arena runs on this PC's Intel UHD with downlevel limits: proposal p50 50 ms, p99 80 ms, working set 3 GB; heap peak does not grow; assets stay inside the potato caps | `node tools/potato-check.mjs` (GS16), `crates/perf` heap peak (GS14), assets budget (GS15) | not measured on the Intel UHD yet (2026-10-13 run: adapter UNKNOWN, NO_IGPU, exit 2) |
 
+Status 2026-10-17: disk shows the G9 gate file the row cites is present: `tools/potato-check.mjs` (Test-Path True, 18346 bytes, rg hit at `docs/plan/finish-line.md:20`) with `tools/potato-check.test.mjs` and `tools/potato-bar.json` beside it, so the BOOK-GAPS row S15 "no such file" half is stale (`Get-ChildItem tools -Filter *potato*` lists 3 files) and "green on paper only" no longer holds; the row's own 2026-10-13 cell still reads "not measured on the Intel UHD yet", so the gate is runnable but unrun.
+
 ## The order (docs/FOCUS.md Now holds the rows; this is why)
 
 1. Light the frame (weeks 1-2): wire what exists. LF1 sky, LF2 IBL, EG11 sun shadow,

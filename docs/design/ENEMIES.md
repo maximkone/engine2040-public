@@ -14,8 +14,9 @@ Read 2026-10-12, byte-exact:
 - `crates/ai/src/personality.rs`: `Personality` (reaction 0-5 ticks, range 1000-1500 mm, aggression 250-750). Not a kind. A temperament.
 - `crates/ai/src/legion.rs`: `Formation` (Line, Column, Wedge, ShieldWall) and `Order` (Hold, Advance, Charge, Retreat, FlankLeft, FlankRight). Squad shapes for hundreds of soldiers. Not single-duel kinds.
 
-Tier check (re-checked 2026-10-14): `rg -n "grunt|veteran|elite|boss" crates/ai/src` hits `crates/ai/src/depth.rs` (`SHIPPED_TIERS` tiers 1-3 matching `content/design/enemies.rows`, `PRIMUS_TIER` tier 4 code side, one `elite` doc comment).
-Tiers 1-3 below are shipped in code; the tier_4 file row lands with GA13.
+Tier check (re-checked 2026-10-17): `rg -n "grunt|veteran|elite|boss" crates/ai/src` hits `crates/ai/src/depth.rs:460` only — one `elite` doc comment. The ladder is the tier *number*: `SHIPPED_TIERS` seats tiers 1-3 (`depth.rs:433`) and `PRIMUS_TIER` seats tier 4 (`depth.rs:463`), `parse_tiers` returns `[TierRow; 4]` (`depth.rs:585`), and `crates/ai/src/tier.rs:14` re-exports the ladder for the non-AI crates.
+Tiers 1-4 are shipped in code and the tier_4 file row landed: `content/design/enemies.rows` carries tier_1..tier_4 and `crates/game/tests/it/design_enemy.rs::header_holds_four_tiers` seats four rows.
+Wiring check (re-checked 2026-10-17): the rows live in `depth.rs` and `DepthBrain` reads them; the install path out of the crate is `ForkProposal::SetTier` in `crates/arena/src/fork.rs:83`, applied through `DepthBrain::set_tier` at `fork.rs:262`, and the caller is the tournament ladder (`crates/playtest/src/tournament.rs:1073` puts `SHIPPED_TIERS[index]` on every brain of the duel). That caller is uncommitted work in flight (row GA13) and it currently posts the tier bar far below the design bar — see "Curve and bar numbers" below. `crates/endpoint/src/assistant.rs:1108` only narrates `SetTier`. The rung that clears the bar is a packet for the AI builder (`target/queue/ready/des-enemy-tier-skill-rung-20261017.md`), never an edit here.
 
 ## Global numbers both cards use
 
@@ -39,7 +40,7 @@ Bodies and space:
 Two numbers below are house numbers, not measured facts:
 
 - The 60% tier bar (a tier beats the tier below in 60% or more of seeded duels). Stated on each tier row. Keep until the tournament proves another number.
-- The 2-4 tick human noise (33-66 ms) plus one action per 8 ticks in `crates/playtest/src/winrates.rs`. The code marks it as a house number itself. Calibrate it on recorded human tapes when any exist. Today no tapes exist, so the number stays.
+- The 2-4 tick human noise (33-66 ms) plus one action per 8 ticks in `crates/playtest/src/winrates.rs`. The code marks it as a house number itself. Calibrate it on recorded human tapes when any exist. No *recorded* human tape exists today (`content/` carries none; `winrates::human_tape_for` builds a seeded noise tape out of the perfect brain, so it can never calibrate its own number), so the house number stays.
 
 ## Card 1 — Holder duelist (`Role::Holder`)
 
@@ -77,18 +78,51 @@ Two numbers below are house numbers, not measured facts:
 - `Personality` (reaction, range, nerve) tunes both cards. Bold (750) presses, shy (250) guards. Both stay inside the same two cards.
 - `Formation` and `Order` (Line, Wedge, ShieldWall, Charge, Flank) are squad shapes for the siege field, not single duelists. One melee enemy at a time per encounter. Squads wait for the legion seat.
 
-## Tier plan (T1-T3 shipped in `depth.rs`, T4 code side landed, file row with GA13)
+## Tier plan (names PROPOSED; T1-T4 rows shipped in `depth.rs` and in the designer file)
+
+The four names — grunt, veteran, elite, boss — are PROPOSED designer labels for
+the code's `tier_1..tier_4` rows: `rg -n "grunt|veteran|elite|boss" crates/ai/src`
+hits one doc comment only (`depth.rs:460`), so the ladder is the tier *number*
+and the name is this card's word for it. The `tier_4` file row landed:
+`parse_tiers` seats four rows (`crates/ai/src/depth.rs:585`),
+`content/design/enemies.rows` carries tier_1..tier_4, and
+`crates/game/tests/it/design_enemy.rs` seats four rows, checks the 15-tick tell
+against the v2 table and runs the 60% bar over its stat model. What is still
+PROPOSED is the rung that *holds*: the row file carries HP, poise, tell and
+counter only, while `TierRow::role()`, `reaction_ticks()` and
+`aggression_permille()` derive one role and one temperament per tier number, and
+that derived rung posts 20 permille on the real duel ("Curve and bar numbers"
+below). So the bar needs a rung that wins, which is the packet
+`target/queue/ready/des-enemy-tier-skill-rung-20261017.md` for the AI builder.
+The boss itself needs no new ask: the owner answered with `EB-2026-10-13-S2` and
+both asks closed.
 
 | tier | name | card | change from below | bar |
 |---|---|---|---|---|
-| T1 | grunt | Holder, calm (aggression 400, reaction 3-5) | first foe, slow to notice | beats nothing yet, teaches parry |
-| T2 | veteran | Flanker, even (aggression 500, reaction 1-3) | adds the arc, must dodge | beats T1 in 60%+ of seeded duels (house number) |
-| T3 | elite | Holder, bold (aggression 700) plus Flanker mix | stamina pressure, riposte | beats T2 in 60%+ of seeded duels (house number) |
-| T4 | boss (code side landed, file row with GA13) | Holder body, Flanker feet, phase 2 | phase answer, see below | beats T3 in 60%+ of seeded duels (house number) |
+| T1 | grunt | Holder, calm (nerve 400, reaction 4) | first foe, slow to notice | beats nothing yet, teaches parry |
+| T2 | veteran | Flanker, even (nerve 500, reaction 2) | adds the arc, must dodge | beats T1 in 60%+ of seeded duels (house number) |
+| T3 | elite | Holder, bold (nerve 700, reaction 1); a Flanker-kit mix stays a card proposal | stamina pressure, riposte | beats T2 in 60%+ of seeded duels (house number) |
+| T4 | boss (row landed) | Holder body, Flanker feet, phase 2 | phase answer, see below | beats T3 in 60%+ of seeded duels (house number) |
 
 Noise for all tiers: perfect player first (a variant nobody can finish is skipped), then the seeded 2-4 tick human error, default off. House number until human tapes calibrate it.
 
-Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 2026-10-12/13): build the T4 primus boss as these cards propose it. Code side landed (`PRIMUS_TIER` in `crates/ai/src/depth.rs`: 1100 HP inside the narrow band, 15-tick tell, parry answer, phase 2 at or below 500 HP). The `tier_4` file row still lands with GA13, so `design_enemy.rs` still seats three tiers. No new boss stats beyond that answer.
+Tier rows scale HP inside the narrow band only: `hp_permille` 950/1000/1050/1100 with `stagger_permille` 400/500/600/700 (`content/design/enemies.rows`), so HP stays a test of answers, never a wall. The tier rows name the counter which the tables allow (`counter` 1 parry, 2 dodge, 3 block); the first two tiers teach parry then dodge.
+
+Tier composition (PROPOSED, and it adds no kind): T1 and T3 hold the Holder card, T2 the Flanker card, T4 a Holder body with Flanker feet. `Role` still has its two kinds, so no card below was invented. The rung is derived, not authored: `TierRow::role()` maps tier 2 to `Role::Flanker` and every other tier to `Role::Holder`, and `reaction_ticks()`/`aggression_permille()` climb 4/2/1/1 and 400/500/700/700 (`crates/ai/src/depth.rs:281,289,298`). The row file still carries no role column, so a designer cannot retune a rung without a Rust edit — which is what the packet changes.
+
+Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 2026-10-12/13): build the T4 primus boss as these cards propose it. The answer is recorded by the earlier runs of this seat (`target/queue/archive/builder-design-enemy-r10.md`, `r13.md`); today's `node C:/empire/center/empire.mjs inbox engine2040 list` does not list it, so no second ask was filed. Code and file landed: `PRIMUS_TIER` in `crates/ai/src/depth.rs:463` (1100 HP inside the narrow band, 15-tick tell, parry answer, phase 2 at or below 500 HP) and the tier_4 row in `content/design/enemies.rows`. No new boss stats beyond that answer; what the boss still needs is the skill rung and a sweep that counts its phase-2 answer, not the stat model alone.
+
+## Curve and bar numbers (measured, not proposed)
+
+The sweep (E07-12, `crates/playtest/src/tournament.rs`): one knob — `match_ticks`, the ONE `BalanceConfig` field the sweep varies — at 300/600/1200 ticks, 200 matches per difficulty per value (1800 duels), the perfect player first, then the seeded 2-4 tick human error when enabled (default off). It writes `target/reports/difficulty-<UTC>.csv` with `knob,value,difficulty,player,win_rate_permille,kill_shares,stuck_count,trials` plus `# skipped ...` lines for a variant nobody finishes. A number per difficulty tier is the win rate in permille on that tier's row.
+
+- Newest curve: `target/reports/difficulty-20261017T0233Z.csv` (sha256 `2D1EDAA349CCDF1E997AA94D8088DCDE8F2E63A61B488C763C1EDBE2F992541A`), 3 data rows, 6 skips. Pressure finishes at 482/472/420 permille at 300/600/1200 ticks; even and cauldron are no-finisher at all three values.
+- The curve before it (`difficulty-20261016T2354Z.csv`, sha256 `687803EEB19466E69CE1037F8AB18494387ED70DABFF077F0510E832EAFC68AB`) had 7 data rows: 517 at 300 even, 542/487/532 at 600, 590/435/590 at 1200. The collapse tracks the uncommitted GA13 tier install, and the install's own bar check posts **20 permille** for tier_2 over tier_1 (`cargo test -p engine-playtest --lib tournament::tests::tier_bar_posts`), far under the 600 bar: HP inside a narrow band plus the derived role and temperament is not enough, so the rung — not the HP — has to win the duel. A design number did not move.
+- Bands (house numbers): win rate 400-600 permille, kill-share cap 350. The newest curve stays inside 400-600 on the rows it finishes, and violates the kill-share cap (`2:1000`), as the previous one did.
+- `cargo test -p engine-game --test it design_enemy::` 4 passed: the 60% bar holds in the rows' own stat model (HP plus poise plus seeded jitter). The real ladder contradicts it, so that model is a floor, never the proof.
+- `cargo test -p engine-playtest --lib tournament` is RED today (22 passed, 3 failed): the two GA3 stuck pins and the GA13 tier bar, all three inside the uncommitted install. Named in `docs/design/balance-log.md`.
+
+The 60% tier bar and the 2-4 tick noise are house numbers (stated at the top). The noise cannot be calibrated yet: no recorded human tape exists, and `winrates::human_tape_for` builds a noise tape out of the perfect brain, so it cannot calibrate its own number.
 
 ## What the pilot checks
 
@@ -96,4 +130,4 @@ Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 
 - Holder parry works in the 7-tick window and staggers 12.
 - Flanker arc is dodged with the 6 i-frame ticks.
 - Both cards at 1000 HP feel fair. Wins come from answers, not from HP.
-- Open: boss kit, phase 2, and the calibrated noise number.
+- Open: boss kit, phase 2, the calibrated noise number, and the skill rung that makes the 60% bar true on the real ladder (packet `des-enemy-tier-skill-rung-20261017`).

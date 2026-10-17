@@ -215,7 +215,7 @@ test("single-file tree: loadBoardText is byte-identical to the index file", () =
   assert.equal(tasks.size, 7);
 });
 
-// Adopted from tools/board-parser-parity.test.mjs (W2-01 parity, orphan adopted 2026-10-08):
+// W2-01 parity cases adopted 2026-10-08 from the removed board-parser-parity test, kept here:
 // finish.mjs, sprint-loop.mjs and drift-check.mjs share the one SPRINT parser in board-slice.mjs.
 const HERE = dirname(fileURLToPath(import.meta.url));
 

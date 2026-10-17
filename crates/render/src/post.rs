@@ -170,177 +170,9 @@ fn receipt(pass: &'static str, pixels: u64, ms: f64) -> PassReceipt {
     PassReceipt { pass, pixels, ms }
 }
 
-// ---------------------------------------------------------------------------
-// Jittered projection: Halton-2/3 per-frame offsets (engine-owned).
-// ---------------------------------------------------------------------------
-
-/// Radical inverse of `index` in `base`. Pure textbook math; frame callers
-/// pass `frame + 1` so frame 0 still jitters off the origin.
-pub fn halton(mut index: u32, base: u32) -> f32 {
-    debug_assert!(base >= 2, "halton base must be >= 2");
-    let (b, mut denom) = (f64::from(base), 1.0f64);
-    let mut out = 0.0f64;
-    while index > 0 {
-        denom *= b;
-        out += f64::from(index % base) / denom;
-        index /= base;
-    }
-    out as f32
-}
-
-/// Jitter offset for `frame` in pixels, centered on `[-0.5, 0.5)`: x from
-/// Halton base 2, y from Halton base 3. Depends only on the frame number,
-/// never on wall time. The single owner of the R4 Halton-2/3 sequence
-/// (the `v1` parity test pins the composition).
-pub fn jitter_offset(frame: u64) -> [f32; 2] {
-    let i = frame.wrapping_add(1) as u32;
-    [halton(i, 2) - 0.5, halton(i, 3) - 0.5]
-}
-
-/// Jitter for `frame` in NDC units (`offset * 2 / res`), the value
-/// [`jitter_projection`] adds to the projection matrix. Zero resolution
-/// (suspended swap path) yields zero jitter.
-pub fn jitter_ndc(frame: u64, width: u32, height: u32) -> [f32; 2] {
-    if width == 0 || height == 0 {
-        return [0.0, 0.0];
-    }
-    let [jx, jy] = jitter_offset(frame);
-    [jx * 2.0 / width as f32, jy * 2.0 / height as f32]
-}
-
-/// GPU uniform `[jx_px, jy_px, jx_ndc, jy_ndc]` for the resolve pass.
-pub fn jitter_uniform(frame: u64, width: u32, height: u32) -> [f32; 4] {
-    let [px, py] = jitter_offset(frame);
-    let [nx, ny] = jitter_ndc(frame, width, height);
-    [px, py, nx, ny]
-}
-
-/// Jitter a row-major projection matrix for this frame: offsets the
-/// perspective terms (`m[2][0]`, `m[2][1]`), leaving everything else
-/// bit-identical. The `v1` wrapper pins the same terms on `glam::Mat4`.
-pub fn jitter_projection(proj: [[f32; 4]; 4], ndc: [f32; 2]) -> [[f32; 4]; 4] {
-    let mut out = proj;
-    out[2][0] += ndc[0];
-    out[2][1] += ndc[1];
-    out
-}
-
-/// Jitter a `glam` projection matrix (same terms as [`jitter_projection`])
-/// for the `v1_gpu` TAA pass. Behind `v1` with the camera math.
-#[cfg(feature = "v1")]
-pub fn jitter_projection_glam(proj: glam::Mat4, ndc: [f32; 2]) -> glam::Mat4 {
-    let mut out = proj;
-    out.z_axis.x += ndc[0];
-    out.z_axis.y += ndc[1];
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Motion vectors: current-minus-history flow in pixels.
-// ---------------------------------------------------------------------------
-
-/// Per-pixel motion in pixels: `motion[x, y] = current_pos - history_pos`,
-/// so the history sample for `(x, y)` sits at `(x - mx, y - my)`.
-/// Row-major, `width * height` entries.
-#[derive(Clone, PartialEq, Debug)]
-pub struct MotionField {
-    /// Frame width in pixels.
-    pub width: u32,
-    /// Frame height in pixels.
-    pub height: u32,
-    /// Motion vectors in pixels, row-major.
-    pub flow: Vec<[f32; 2]>,
-}
-
-impl MotionField {
-    /// Build from an explicit flow field: validates dims, length and
-    /// finiteness before the resolve can read it.
-    pub fn build(width: u32, height: u32, flow: Vec<[f32; 2]>) -> Result<Self, PostError> {
-        check_dims(width, height)?;
-        let want = width as usize * height as usize;
-        if flow.len() != want {
-            return Err(PostError::Invalid(format!(
-                "motion flow {} differs from {width}x{height} ({want})",
-                flow.len()
-            )));
-        }
-        for (i, v) in flow.iter().enumerate() {
-            if !v.iter().all(|c| c.is_finite()) {
-                return Err(PostError::Invalid(format!(
-                    "motion vector {i} is not finite"
-                )));
-            }
-        }
-        Ok(Self {
-            width,
-            height,
-            flow,
-        })
-    }
-
-    /// Zero motion everywhere (static camera): history reprojects 1:1.
-    pub fn zero(width: u32, height: u32) -> Result<Self, PostError> {
-        check_dims(width, height)?;
-        Ok(Self {
-            width,
-            height,
-            flow: vec![[0.0, 0.0]; width as usize * height as usize],
-        })
-    }
-
-    /// Motion at texel `(x, y)` in pixels.
-    pub fn at(&self, x: u32, y: u32) -> [f32; 2] {
-        self.flow[y as usize * self.width as usize + x as usize]
-    }
-
-    /// Pixel count (`width * height`).
-    pub fn len(&self) -> usize {
-        self.width as usize * self.height as usize
-    }
-
-    /// Whether the field holds no texels (only when a dimension is 0,
-    /// which [`Self::build`] never produces).
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-fn check_dims(width: u32, height: u32) -> Result<(), PostError> {
-    if width == 0 || height == 0 {
-        return Err(PostError::Invalid("post frame size is zero".into()));
-    }
-    if width > MAX_POST_DIM || height > MAX_POST_DIM {
-        return Err(PostError::BudgetExceeded {
-            requested: width.max(height),
-            allowed: MAX_POST_DIM,
-        });
-    }
-    Ok(())
-}
-
-fn check_image(
-    pixels: &[[f32; 3]],
-    width: u32,
-    height: u32,
-    what: &'static str,
-) -> Result<(), PostError> {
-    check_dims(width, height)?;
-    let want = width as usize * height as usize;
-    if pixels.len() != want {
-        return Err(PostError::Invalid(format!(
-            "{what} pixels {} differ from {width}x{height} ({want})",
-            pixels.len()
-        )));
-    }
-    for (i, p) in pixels.iter().enumerate() {
-        if !p.iter().all(|c| c.is_finite()) {
-            return Err(PostError::Invalid(format!(
-                "{what} texel {i} is not finite"
-            )));
-        }
-    }
-    Ok(())
-}
+// The post jitter and motion leaf lives in `post_jitter_motion`; re-exported
+// here so every `post::` caller keeps its path.
+pub use crate::post_jitter_motion::*;
 
 // ---------------------------------------------------------------------------
 // TAA resolve: bilinear reproject plus Karis-style neighborhood clamp.
@@ -822,7 +654,7 @@ pub fn fsr_rcas_sharpen(
     h: u32,
     sharpness: f32,
 ) -> Result<Vec<[f32; 3]>, PostError> {
-    if !sharpness.is_finite() || sharpness < FSR_SHARPEN_MIN || sharpness > FSR_SHARPEN_MAX {
+    if !sharpness.is_finite() || !(FSR_SHARPEN_MIN..=FSR_SHARPEN_MAX).contains(&sharpness) {
         return Err(PostError::Invalid("fsr sharpness outside 0..=1".into()));
     }
     check_image(img, w, h, "fsr rcas src")?;
@@ -1054,7 +886,8 @@ pub const BLOOM_OFF_INTENSITY: f32 = 0.0;
 /// `on minus off` at the texel. Validates the frame plus the config plus
 /// both coords; out-of-range coords fail loudly. Pure, std-only,
 /// caller-owned buffers, sizes nothing.
-/// Caller: `run_chain_core` in this file (presenter frame oracle health).
+/// Caller: bloom health tests in this file (the per-frame chain no longer
+/// runs the 8x8 oracle; see `run_chain_core`).
 pub fn bloom_on_off_lift(
     hdr: &[[f32; 3]],
     width: u32,
@@ -1354,15 +1187,13 @@ fn kino_iterations(height: u32, radius: f32, max_levels: u32) -> u32 {
         3
     } else if rf >= 2.0 {
         2
-    } else if rf >= 1.0 {
-        1
     } else {
-        0
+        i32::from(rf >= 1.0)
     };
-    let cap: i32 = i32::try_from(max_levels).map_or(6, |v| v);
+    let cap: i32 = i32::try_from(max_levels).unwrap_or(6);
     let want = logh.saturating_add(r_int).saturating_sub(8);
     let clamped = want.clamp(1, cap.max(1));
-    u32::try_from(clamped).map_or(1, |v| v)
+    u32::try_from(clamped).unwrap_or(1)
 }
 
 /// Karis first-mip blend weight for one tap (anti-flicker option).
@@ -1641,19 +1472,30 @@ pub fn apply_bloom(
     let depth = kino_depth.min(cfg.levels).max(1);
     // Blur chain: the first downsample is Karis-weighted (one hot texel
     // cannot own the mip), later levels are plain box averages. Each level
-    // halves the previous bright mip.
+    // halves the previous bright mip. No per-level clone: each mip moves
+    // into the chain and the next level reads it from there, so the chain
+    // holds one copy only.
     let mut chain: Vec<(Vec<[f32; 3]>, u32, u32)> = Vec::new();
-    let (mut level, mut lw, mut lh) = (bright, width, height);
+    let mut bright_opt: Option<Vec<[f32; 3]>> = Some(bright);
+    let (mut lw, mut lh) = (width, height);
     for i in 0..depth {
         let (next, nw, nh) = if i == 0 {
-            downsample_karis(&level, lw, lh)
+            let src = bright_opt
+                .as_ref()
+                .ok_or_else(|| PostError::Invalid("bloom bright held for first mip".into()))?;
+            downsample_karis(src, lw, lh)
         } else {
-            downsample_box(&level, lw, lh)
+            let (prev, _, _) = chain
+                .last()
+                .ok_or_else(|| PostError::Invalid("bloom chain holds prior mip".into()))?;
+            downsample_box(prev, lw, lh)
         };
-        level = next;
+        if i == 0 {
+            bright_opt.take();
+        }
         lw = nw;
         lh = nh;
-        chain.push((level.clone(), lw, lh));
+        chain.push((next, lw, lh));
         if lw == 1 && lh == 1 {
             break;
         }
@@ -2117,9 +1959,9 @@ pub fn tonemap_aces(c: [f32; 3], exposure: f32, white: f32) -> Result<[f32; 3], 
     }
     let exposed = [c[0] * exposure, c[1] * exposure, c[2] * exposure];
     let capped = [
-        exposed[0].max(0.0).min(1e6),
-        exposed[1].max(0.0).min(1e6),
-        exposed[2].max(0.0).min(1e6),
+        exposed[0].clamp(0.0, 1e6),
+        exposed[1].clamp(0.0, 1e6),
+        exposed[2].clamp(0.0, 1e6),
     ];
     let peak = capped[0].max(capped[1].max(capped[2]));
     let w = neutral_fit_one(white).max(1e-4);
@@ -2180,38 +2022,21 @@ fn run_chain_core(
     let flared = apply_bloom(hdr, width, height, &chain.bloom)?;
     let bloom_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-    // Wired oracle health: `bloom_on_off_lift` must see a halo lift on a
-    // synthetic torch while the far corner stays put; fail-closed
-    // monitoring, never changes pixels.
-    let mut probe = [[0.05, 0.05, 0.06]; 8 * 8];
-    probe[3 * 8 + 3] = [4.0, 2.2, 1.1];
-    let (halo_lift, dark_lift) =
-        bloom_on_off_lift(&probe, 8, 8, &BloomConfig::default(), (4, 3), (0, 0))?;
-    if !(halo_lift > 0.0 && dark_lift == 0.0) {
-        return Err(PostError::Invalid("bloom oracle halo failed".into()));
-    }
-
+    // Fused exposure plus ACES plus grade in one pass over the flared
+    // frame: `tonemap_aces(p, mult, white)` repeats the old `p * mult`
+    // then `tonemap_aces(exposed, 1.0)` bit-identically (times 1.0 is
+    // exact), then grades. One full-frame buffer instead of three; the
+    // fused ms rides the exposure slot while aces/grade quote 0 so the
+    // total stays honest.
     let started = Instant::now();
     let mult = chain.exposure.mult()?;
-    let exposed: Vec<[f32; 3]> = flared
-        .iter()
-        .map(|p| [p[0] * mult, p[1] * mult, p[2] * mult])
-        .collect();
+    let mut ldr = Vec::with_capacity(flared.len());
+    for p in &flared {
+        let toned = tonemap_aces(*p, mult, chain.aces_white)?;
+        ldr.push(apply_grade(toned, &chain.grade)?);
+    }
     let exposure_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-    let started = Instant::now();
-    let mut toned = Vec::with_capacity(exposed.len());
-    for p in &exposed {
-        toned.push(tonemap_aces(*p, 1.0, chain.aces_white)?);
-    }
-    let aces_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-    let started = Instant::now();
-    let mut ldr = Vec::with_capacity(toned.len());
-    for p in &toned {
-        ldr.push(apply_grade(*p, &chain.grade)?);
-    }
-    let grade_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let (aces_ms, grade_ms) = (0.0, 0.0);
 
     Ok(PostOutput {
         ldr,
@@ -3853,77 +3678,6 @@ mod tests {
     }
 
     #[test]
-    fn jitter_matches_halton_values() {
-        // Textbook anchors: halton(1,2)=1/2, halton(2,2)=1/4, halton(1,3)=1/3.
-        assert!(approx(halton(1, 2), 0.5, 1e-7));
-        assert!(approx(halton(2, 2), 0.25, 1e-7));
-        assert!(approx(halton(1, 3), 1.0 / 3.0, 1e-7));
-        // Frame 0 leaves half-pixel x (0.5-0.5) and -1/6 y (1/3-1/2).
-        let j0 = jitter_offset(0);
-        assert!(approx(j0[0], 0.0, 1e-7));
-        assert!(approx(j0[1], -1.0 / 6.0, 1e-6));
-        for frame in [0u64, 1, 2, 7, 15] {
-            let j = jitter_offset(frame);
-            assert!(
-                (-0.5..0.5).contains(&j[0]) && (-0.5..0.5).contains(&j[1]),
-                "frame {frame} jitter {j:?} stays in the pixel"
-            );
-        }
-        // NDC scales pixels by 2/res; zero res suspends to zero.
-        let ndc = jitter_ndc(1, 1920, 1080);
-        let [px, py] = jitter_offset(1);
-        assert!(approx(ndc[0], px * 2.0 / 1920.0, 1e-7));
-        assert!(approx(ndc[1], py * 2.0 / 1080.0, 1e-7));
-        assert_eq!(jitter_ndc(3, 0, 720), [0.0, 0.0]);
-        let u = jitter_uniform(1, 1280, 720);
-        let [ex, ey] = jitter_ndc(1, 1280, 720);
-        assert_eq!(u, [px, py, ex, ey]);
-    }
-
-    #[test]
-    fn jittered_projection_touches_only_perspective_terms() {
-        let proj = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 2.0, 0.0, 0.0],
-            [0.3, -0.4, 1.0, 1.0],
-            [0.0, 0.0, -0.5, 0.0],
-        ];
-        let out = jitter_projection(proj, [0.01, -0.02]);
-        assert!(approx(out[2][0], 0.31, 1e-7));
-        assert!(approx(out[2][1], -0.42, 1e-7));
-        for r in [0, 1, 3] {
-            assert_eq!(out[r], proj[r]);
-        }
-        assert_eq!(out[2][2], proj[2][2]);
-        assert_eq!(out[2][3], proj[2][3]);
-        assert_eq!(jitter_projection(proj, [0.0, 0.0]), proj);
-    }
-
-    #[test]
-    fn motion_field_validates_inputs() {
-        let m = MotionField::zero(4, 4).expect("zero builds");
-        assert_eq!((m.width, m.height, m.len()), (4, 4, 16));
-        assert!(!m.is_empty());
-        assert_eq!(m.at(2, 1), [0.0, 0.0]);
-        assert!(matches!(
-            MotionField::zero(0, 4),
-            Err(PostError::Invalid(_))
-        ));
-        assert!(matches!(
-            MotionField::zero(4096, 4),
-            Err(PostError::BudgetExceeded { .. })
-        ));
-        assert!(matches!(
-            MotionField::build(2, 2, vec![[0.0, 0.0]; 3]),
-            Err(PostError::Invalid(_))
-        ));
-        assert!(matches!(
-            MotionField::build(2, 2, vec![[f32::NAN, 0.0]; 4]),
-            Err(PostError::Invalid(_))
-        ));
-    }
-
-    #[test]
     fn taa_static_scene_resolves_exactly() {
         // History equals current: every sample reprojects 1:1 and the box
         // clamp is a no-op, so the resolve reproduces the frame exactly.
@@ -4086,7 +3840,7 @@ mod tests {
         assert!(fsr_easu_upsample(&ok[..15], 4, 4, 8, 8).is_err());
         assert!(fsr_rcas_sharpen(&ok, 4, 4, 2.0).is_err());
         assert!(fsr_upscale(&ok, 4, 4, 4096, 4, FSR_DEFAULT_SHARPNESS).is_err());
-        assert!(fsr_edge_width_10_90(&vec![[0.5, 0.5, 0.5]; 16], 4, 4).is_err());
+        assert!(fsr_edge_width_10_90(&[[0.5, 0.5, 0.5]; 16], 4, 4).is_err());
         assert!(fsr_mtf50(0.0 - 1.0).is_err());
         assert!(fsr_mtf50_lift(-1.0, 1.0).is_err());
     }

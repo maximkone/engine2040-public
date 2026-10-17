@@ -12,7 +12,7 @@ Live GTAO darkens creases from depth, not a constant. Eight checks. Each names t
 3. **Tap pattern.** Ask: do `GTAO_SLICES` and `GTAO_TAPS` set the slice dirs and steps in `crates/render/src/gtao.rs`? Flag: one slice or one tap with no on-vs-off gain; step ignores `GtaoConfig`. (render)
 4. **Range.** Ask: are `radius_px` and `falloff_m` inside `(0, GTAO_RADIUS_MAX_PX]` and `(0, GTAO_FALLOFF_MAX_M]`? Flag: huge radius that flattens the frame; falloff that never reaches the wall base. (render)
 5. **Blit multiply.** Ask: does `crates/render/src/shaders/blit.wgsl:49` clamp `ao_tex` to 0..1 and darken ambient only? Flag: `ao_tex` stuck at 1.0; AO darkening direct sun too. (render)
-6. **Live, not probes.** Ask: does AO run on live frames, not only under `--look-probes` in `crates/game/src/bin/arena.rs:92`? Flag: live `ao_tex` stays constant while probes look fine. (game)
+6. **Live, not probes.** Ask: does AO run on live frames, not only under `--look-probes` in `crates/game/src/bin/arena.rs:98` (`LOOK_PROBES_FLAG`)? Flag: live `ao_tex` stays constant while probes look fine. (game)
 7. **Budget.** Ask: is live cost at or under `GTAO_BUDGET_MS` 0.8 ms by `ms <= GTAO_BUDGET_MS`? Flag: no live ms number; cost above budget with no cut. (render)
 8. **Stable output.** Ask: does the same depth give the same AO twice within `GTAO_GPU_PARITY_TOL`? Flag: golden hash moves with AO on; open sand shifts over 2% on vs off. (render)
 

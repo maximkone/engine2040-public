@@ -15,7 +15,9 @@ use crate::crowd::FightCue;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Ticks per second the game thread runs [`Director::update`].
-pub const TICK_HZ: u32 = 60;
+/// Reads the single owner's checked narrow form (`engine_core::TICK_HZ_U32`):
+/// a bare `as u32` on the `u64` rate would truncate silently.
+pub const TICK_HZ: u32 = engine_core::TICK_HZ_U32;
 /// Distance in cm at or inside which an event lands at full weight.
 pub const CLOSE_CM_DEFAULT: u32 = 400;
 /// Distance in cm at or beyond which an event is unheard.
@@ -414,6 +416,14 @@ mod tests {
     use super::*;
     use crate::music::{active_mask, Player};
     use engine_core::alloc_probe::measure;
+
+    /// The const reads the checked narrow owner and widens back to the one
+    /// `u64` rate: 60 Hz both ways, with no `as u32` at this call site.
+    #[test]
+    fn tick_hz_keeps_the_core_owner_u64() {
+        let rate: u64 = u64::from(TICK_HZ);
+        assert_eq!(rate, engine_core::TICK_HZ);
+    }
 
     fn hit_at(distance_cm: u32) -> PlacedCue {
         PlacedCue::new(

@@ -120,10 +120,7 @@ fn short_text(text: &str) -> String {
 
 /// Saturating slot byte without panics: values past 255 read as 255.
 fn slot_byte(slot: usize) -> u8 {
-    match u8::try_from(slot) {
-        Ok(value) => value,
-        Err(_) => u8::MAX,
-    }
+    u8::try_from(slot).unwrap_or(u8::MAX)
 }
 
 /// True when the digest matches a pinned canonical digest.
@@ -593,7 +590,7 @@ mod tests {
                 map: &map,
                 config: &config,
             };
-            let (_, digest) = intake_cook(&plan, &borrowed[slot], EXPECTED_SPDX, &mut again)
+            let (_, digest) = intake_cook(&plan, borrowed[slot], EXPECTED_SPDX, &mut again)
                 .expect("recook must pass");
             assert_eq!(digest, first[slot]);
         }
@@ -713,7 +710,7 @@ mod tests {
             cook_traversal_batch(&plans, &borrowed, &spdx, &mut seen).expect("batch cooks");
         assert_eq!(digests.len(), 4);
         assert_eq!(seen, digests);
-        let too_many = vec![plans[0].clone(); MAX_BATCH_CLIPS + 1];
+        let too_many = vec![plans[0]; MAX_BATCH_CLIPS + 1];
         let many_sides = vec!["{}"; MAX_BATCH_CLIPS + 1];
         let many_spdx = vec![EXPECTED_SPDX; MAX_BATCH_CLIPS + 1];
         assert!(matches!(

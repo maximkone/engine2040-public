@@ -38,6 +38,8 @@ the open capability rows of both plans.
 | Combined 64+500 tick proof (PX19), 1,000-agent LOD (PX16) | missing (rowed) | no perf workload posts the physics slice at 64 fighters + 500 agents |
 
 - Status 2026-10-12: BX4 row above says no `limb.rs`, but `crates/physics/src/limb.rs:1` and `crates/arena/src/limbs.rs:1` exist on disk, so that cell is false.
+- Status 2026-10-17: disk shows `crates/physics/src/ragdoll.rs:378` and `crates/physics/src/powered.rs:317` call `.ccd_enabled(true)` (rg hits), so the `:32` "`ccd_enabled` 0 hits" cell and the `:45` "CCD is off by grep" line are false at those two sites.
+- Status 2026-10-17: disk shows the false BX4 cell still at `:25` ("no `limb.rs`, `limbloss.rs`, `injured.rs`; glob 2026-09-30") with `:40` already marking it false, while the code names now exist: `crates/physics/src/limb.rs:1`, `crates/arena/src/limbs.rs:1` and `crates/combat/src/limbloss.rs:1` (Test-Path True, `limb`/`limbs`/`limbloss` under `crates/`), and only `crates/physics/src/injured.rs` is still absent (Test-Path False), so the "no `limb.rs`" half stays stale and the `:25` cell stays false.
 
 Step contract (kept green forever): fixed 60 Hz, fixed iterations, sorted
 insertion, hash x2 plus snapshot/restore equality; cloth stays
@@ -58,6 +60,8 @@ hash and snapshot, PH2 controller, D1 vehicles, PH3 ragdoll blend, PX1 per-bone
 servo with the 60-tick get-up, PX2 cloth (CPU verlet, presentation-only), PX3
 grapple, PX7 army LOD, PX8 controller v2, DX1 bonded, DX2 CSG, DX3 spread, DX4
 budgets, DX10 nav dirty. Carried over: DX1 break-event shape; cloth never hashed.
+
+Status 2026-10-17: disk shows this PH3/PX1 landed list at `docs/plan/body-and-break.md:59` ("PH2 controller, D1 vehicles, PH3 ragdoll blend, PX1 per-bone"), so the `BOOK-GAPS-2026-10-12.md:188` S10 cite `body-and-break.md:9,54-55` is stale; the disk half still holds: `crates/game/Cargo.toml:14` reads "`app` intentionally does NOT enable `engine-arena/sim`" with `:15-16` the same comment and `:17` `app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets", "dep:gilrs"]` naming no `sim`, while the sim feature that would pull Rapier bodies in sits at `crates/arena/Cargo.toml:26` `sim = ["engine-physics/rapier"]`, so S10 still holds with a drifted left cite only.
 
 ## 2. Finish line
 

@@ -4,7 +4,8 @@
 //! Errors: test asserts only, no production path.
 
 use engine_perf::alloc::{
-    allows, heap_peak_csv, parse_heap_peak_baseline, peak_of, PeakSnapshot, HEAP_PEAK_CSV_HEADER,
+    allows, ensure_heap_peak_baseline, heap_peak_csv, parse_heap_peak_baseline, peak_of,
+    HeapPeakBaseline, PeakSnapshot, HEAP_PEAK_CSV_HEADER,
 };
 
 #[test]
@@ -153,4 +154,68 @@ fn alloc_steady_window_reads_zero_and_cooks_x2() {
         let csv = heap_peak_csv("arena_tick_8", peak);
         assert!(csv.contains("arena_tick_8,58198"), "{csv}");
     }
+}
+
+#[test]
+fn heap_peak_first_run_records_baseline_and_later_runs_keep_it() {
+    // GS14 clause "The first run writes crates/perf/baselines/heap_peak.txt"
+    // had no writer: `--heap-peak` only read the file and failed closed, so a
+    // fresh tree could never record the pin its later runs gate on. F2P: no
+    // `ensure_heap_peak_baseline` existed before this test, so this file did
+    // not compile.
+    let dir = format!(
+        "{}/../../target/tmp-heap-peak-baseline",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp folder under target");
+    let path = std::path::Path::new(&dir).join("heap_peak.txt");
+    let first = ensure_heap_peak_baseline(&path, 58198).expect("first quiet run records");
+    assert_eq!(first, HeapPeakBaseline::Recorded(58198));
+    assert_eq!(
+        first.bytes(),
+        58198,
+        "the recorded pin is the baseline in force"
+    );
+    let written = std::fs::read_to_string(&path).expect("baseline reads back");
+    assert_eq!(written, "58198\n", "one decimal line, newline ended");
+    assert_eq!(
+        parse_heap_peak_baseline(&written).expect("the recorded file parses"),
+        58198,
+        "the file the gate reads back holds the recorded peak"
+    );
+    let second = ensure_heap_peak_baseline(&path, 999_999).expect("a later run keeps the pin");
+    assert_eq!(second, HeapPeakBaseline::Kept(58198));
+    assert_eq!(second.bytes(), 58198);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("baseline still reads"),
+        "58198\n",
+        "a later run never overwrites a recorded baseline"
+    );
+    // A zero peak is not a measurement: refuse it and leave no file behind.
+    let zero_path = std::path::Path::new(&dir).join("zero.txt");
+    assert!(
+        ensure_heap_peak_baseline(&zero_path, 0).is_err(),
+        "a zero peak is refused"
+    );
+    assert!(!zero_path.exists(), "a refused recording writes nothing");
+    // A corrupt file is not a baseline: refuse it loudly, never replace it, so
+    // a red gate is never silently turned green by a rewrite.
+    let corrupt_path = std::path::Path::new(&dir).join("corrupt.txt");
+    std::fs::write(&corrupt_path, "nope\n").expect("corrupt fixture writes");
+    let refused = ensure_heap_peak_baseline(&corrupt_path, 58198);
+    assert!(refused.is_err(), "a corrupt baseline is refused");
+    assert_eq!(
+        refused.expect_err("refused").to_string(),
+        ensure_heap_peak_baseline(&corrupt_path, 58198)
+            .expect_err("refused twice")
+            .to_string(),
+        "the same refusal reads the same twice"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&corrupt_path).expect("corrupt file still reads"),
+        "nope\n",
+        "the refused file is left byte-exact"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

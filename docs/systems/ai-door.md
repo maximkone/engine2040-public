@@ -1,7 +1,7 @@
 # SYS ai-door — providers, MCP, eval, playtest agents, skill packs
 
 Lanes: provider (`crates/provider`, new), mcp (`crates/endpoint`), playtest
-(`crates/playtest`, new), skills (`crates/skills`, new). Contracts:
+(`crates/playtest`, new), skills (`skills/`, new). Contracts:
 `../EDITOR_AI_CONTROL.md`, `../AI-NATIVE.md`. Board: C2, PV1–PV3, MCP1–MCP4,
 QA1, QA2, CR1, VF1, LG1, EV1, RV1, WS1, OB3, CAP1.
 

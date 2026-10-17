@@ -194,7 +194,7 @@ pub fn assess_domain(
     let latency_pass = varied_p95_ms <= PRESENT_P95_BUDGET_MS;
     let rise_ms = varied_p95_ms - baseline_p95_ms;
     let kill_pass = rise_ms <= KILL_RISE_MS;
-    let win_pass = WIN_LO_PERMILLE <= win_permille && win_permille <= WIN_HI_PERMILLE;
+    let win_pass = (WIN_LO_PERMILLE..=WIN_HI_PERMILLE).contains(&win_permille);
     let rate = u64::from(rubric_passed) * 1000 / u64::from(rubric_total);
     let rubric_pass = rate >= u64::from(RUBRIC_PASS_PERMILLE);
     let overall_pass = latency_pass && kill_pass && win_pass && rubric_pass;

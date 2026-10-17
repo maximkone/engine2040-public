@@ -1,14 +1,19 @@
 //! Design controls: one key, one pad button and feedback per verb.
 //!
 //! Consumer: the gamepad seat (EG27/UIX14) and the gesture seat (GP46) read
-//! `content/design/controls.rows`; the HUD seat reads the feedback flags.
-//! Data owner: this test owns the parse; `engine-input` owns [`Bindings`].
+//! `content/design/controls.rows`; the HUD seat reads the feedback flags and
+//! `docs/design/HUD.md` (the second-channel rule this file also gates).
+//! Data owner: this test owns the parse; `engine-input` owns [`Bindings`],
+//! `crates/game/src/windowed.rs` owns the live pad codes.
 //! Units: key codes address [`Key`](engine_input::map::Key) storage,
-//! pad codes are gamepad button indices, hand is 1 left or 2 right,
+//! pad codes are the codes the window backend emits (`gilrs_button_code`:
+//! 0..=3 face, 4..=7 pad directions), hand is 1 left or 2 right,
 //! flags are 0/1. Determinism: parse is pure over the included text.
 //! Errors: a bad header, key, or missing row fails with the line number.
 
+use engine_game::pad::{tick_input_with_pad, RecordedPadEvent};
 use engine_input::bindings::{Bindings, BoundAction, InputConfig, PhysicalButton};
+use engine_input::fighter::{Buttons, FighterId, ATTACK, BLOCK, DODGE};
 
 /// Included controls table text (compile-time, no IO at test time).
 const CONTROLS_SRC: &str = include_str!("../../../../content/design/controls.rows");
@@ -332,4 +337,178 @@ fn pad_buttons_distinct() {
         );
         pads.push(row.pad);
     }
+}
+
+/// Pad codes the live window backend emits, by role: face buttons first,
+/// then the four pad directions.
+///
+/// Owner: `gilrs_button_code` in `crates/game/src/windowed.rs` (private, so
+/// this test mirrors it). `drain_gilrs_once` drops every other button, so a
+/// code outside these eight reaches no binding and the row would be a dead
+/// button. A new backend button must widen both lists in the same change.
+const PAD_FACE: [u8; 4] = [0, 1, 2, 3];
+/// The four direction codes in backend order: up, down, left, right.
+const PAD_DIRECTIONS: [u8; 4] = [4, 5, 6, 7];
+
+/// Role name for one backend pad code; `None` when the backend never emits
+/// it. Pure.
+fn pad_role(code: u8) -> Option<&'static str> {
+    match code {
+        0 => Some("south"),
+        1 => Some("east"),
+        2 => Some("north"),
+        3 => Some("west"),
+        4 => Some("pad up"),
+        5 => Some("pad down"),
+        6 => Some("pad left"),
+        7 => Some("pad right"),
+        _ => None,
+    }
+}
+
+#[test]
+fn pad_codes_are_live_backend_codes() {
+    let (_, rows) = parse_table(CONTROLS_SRC);
+    for row in &rows {
+        let role = pad_role(row.pad).unwrap_or_else(|| {
+            panic!(
+                "line {}: verb `{}` pad code {} is no code the window backend emits",
+                row.line, row.id, row.pad
+            )
+        });
+        // The left thumb holds the directions, so every move verb takes one
+        // of the four direction codes and every fight verb a face code.
+        if row.id.starts_with("move_") {
+            assert!(
+                PAD_DIRECTIONS.contains(&row.pad),
+                "line {}: move verb `{}` must take a pad direction (4..=7), got {} ({role})",
+                row.line,
+                row.id,
+                row.pad
+            );
+        } else {
+            assert!(
+                PAD_FACE.contains(&row.pad),
+                "line {}: fight verb `{}` must take a face code (0..=3), got {} ({role})",
+                row.line,
+                row.id,
+                row.pad
+            );
+        }
+    }
+}
+
+#[test]
+fn pad_codes_drive_their_verb() {
+    let (_, rows) = parse_table(CONTROLS_SRC);
+    let slot = FighterId::new(0).expect("slot zero is always valid");
+    for row in &rows {
+        let action =
+            verb_action(row.id).unwrap_or_else(|| panic!("line {}: unknown verb", row.line));
+        // Bind only the pad row, then feed the one button the row names:
+        // the verb must fire through the shared pad path (pad.rs), which is
+        // the path the window frame loop calls once per fixed tick.
+        let mut table = Bindings::new();
+        table.rebind(action, PhysicalButton::Pad(row.pad));
+        let events = [RecordedPadEvent::ButtonDown(row.pad)];
+        let mut scratch: Vec<PhysicalButton> = Vec::new();
+        let input = tick_input_with_pad(0, slot, &[], &events, &table, &mut scratch)
+            .expect("pad input validates");
+        let seen = (input.mx, input.mz, input.buttons);
+        let want = match row.id {
+            "attack" => (0, 0, Buttons(ATTACK)),
+            "block" => (0, 0, Buttons(BLOCK)),
+            "dodge" => (0, 0, Buttons(DODGE)),
+            "move_forward" => (100, 0, Buttons::NONE),
+            "move_back" => (-100, 0, Buttons::NONE),
+            "move_left" => (0, -100, Buttons::NONE),
+            "move_right" => (0, 100, Buttons::NONE),
+            other => panic!("line {}: verb `{other}` has no pad expectation", row.line),
+        };
+        assert_eq!(
+            seen, want,
+            "line {}: verb `{}` on pad {} gave {seen:?}, want {want:?}",
+            row.line, row.id, row.pad
+        );
+    }
+}
+
+/// Included HUD rule page (compile-time, no IO at test time).
+const HUD_SRC: &str = include_str!("../../../../docs/design/HUD.md");
+
+/// Split one markdown table row into trimmed cells. Pure.
+fn md_cells(line: &str) -> Vec<&str> {
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect()
+}
+
+/// True when every cell is a markdown separator (`---` / `:---:`). Pure.
+fn is_separator(cells: &[&str]) -> bool {
+    !cells.is_empty()
+        && cells
+            .iter()
+            .all(|cell| !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':'))
+}
+
+#[test]
+fn hud_elements_never_colour_alone() {
+    // Basic accessibility tier: no information by colour alone. Every
+    // element row in docs/design/HUD.md carries the second channel (`second`
+    // cell: shape, icon or sound) beside its text height at 720p, its
+    // contrast ratio, and the engageability line (`feel` cell).
+    let mut rows = 0usize;
+    let mut in_table = false;
+    for (index, raw) in HUD_SRC.lines().enumerate() {
+        let line = index + 1;
+        if raw.starts_with("| element") {
+            in_table = true;
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        if !raw.trim_start().starts_with('|') {
+            break;
+        }
+        let cells = md_cells(raw);
+        if is_separator(&cells) {
+            continue;
+        }
+        assert_eq!(
+            cells.len(),
+            7,
+            "HUD.md line {line}: element row needs 7 columns, got {}",
+            cells.len()
+        );
+        let (element, text, contrast, second, feel) =
+            (cells[0], cells[3], cells[4], cells[5], cells[6]);
+        assert!(
+            ["shape", "icon", "sound"]
+                .iter()
+                .any(|kind| second.contains(kind)),
+            "HUD.md line {line}: element `{element}` is colour alone, its second \
+             channel `{second}` names no shape, icon or sound"
+        );
+        assert!(
+            text.contains("px"),
+            "HUD.md line {line}: element `{element}` misses its 720p text height, got `{text}`"
+        );
+        assert!(
+            contrast.contains(":1"),
+            "HUD.md line {line}: element `{element}` misses its contrast ratio, got `{contrast}`"
+        );
+        assert!(
+            !feel.is_empty(),
+            "HUD.md line {line}: element `{element}` misses its engageability line"
+        );
+        rows += 1;
+    }
+    assert!(
+        rows >= 5,
+        "HUD.md elements table holds {rows} rows, want at least 5"
+    );
 }

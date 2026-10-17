@@ -26,7 +26,8 @@ pub const TOOL_BUILD_GAME: &str = "game.build";
 pub const TOOL_SUMMARY: &str =
     "brief text to packaged playable slice: level, character, encounter, five-minute play proof";
 /// Ticks per second of the slice session; five minutes is `PLAY_TICKS`.
-pub const TICKS_PER_SECOND: u32 = 60;
+/// Single owner of the rate is `engine_core::TICK_HZ`.
+pub const TICKS_PER_SECOND: u32 = engine_core::TICK_HZ as u32;
 /// Fixed play length: five minutes at 60 Hz. Fits the WD6 lobby tick bound
 /// the AB8 door bind passes verbatim to `LobbyBoot`.
 pub const PLAY_TICKS: u32 = 300 * TICKS_PER_SECOND;

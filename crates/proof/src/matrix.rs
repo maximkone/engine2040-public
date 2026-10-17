@@ -65,7 +65,7 @@ pub fn host_label() -> String {
 pub fn collect_local_entry() -> Result<MatrixEntry, MatrixError> {
     let tape = record(Config::default(), &[]).map_err(MatrixError::Proof)?;
     replay(&tape).map_err(MatrixError::Proof)?;
-    let decision = crate::FramePlan::new().begin_frame(16, 16, 5);
+    let decision = crate::FramePlan::default().begin_frame(16, 16, 5);
     assert!(
         decision.steps == 1 && decision.dropped == 0,
         "passive plan beside the row"
@@ -462,17 +462,11 @@ impl std::error::Error for MatrixSetError {}
 /// Caller: `collect_local_entry` (same file) exercises this set check per row.
 pub fn compare_matrix_set(entries: &[MatrixEntry]) -> Result<(), MatrixSetError> {
     let hosts: Vec<&str> = entries.iter().map(|item| item.host.as_str()).collect();
-    let hosts_ok = if hosts == TARGETS {
-        true
-    } else if hosts.len() == TARGETS.len() + 1
-        && hosts[0] == TARGETS[0]
-        && hosts[1] == TARGETS[1]
-        && is_optional_aarch64_host(hosts[2])
-    {
-        true
-    } else {
-        false
-    };
+    let hosts_ok = hosts == TARGETS
+        || (hosts.len() == TARGETS.len() + 1
+            && hosts[0] == TARGETS[0]
+            && hosts[1] == TARGETS[1]
+            && is_optional_aarch64_host(hosts[2]));
     if !hosts_ok {
         return Err(MatrixSetError::Hosts {
             got: hosts.iter().map(|host| (*host).to_owned()).collect(),

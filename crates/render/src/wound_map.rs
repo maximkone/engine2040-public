@@ -8,9 +8,126 @@
 //! through [`WoundMaps::last_evict`]. Std-only: no GPU, no wall clock, and
 //! wound bytes never enter the simulation hash.
 
-/// Intake companion (rect validation, facing gate, order key, seam dilate).
-#[path = "wound_queue.rs"]
-mod wound_queue;
+mod wound_queue {
+    //! Wound paint intake and ordering for the per-character budget store.
+    //!
+    //! Validates normalized-UV rects, gates backface paints, and orders paints
+    //! by `(tick, char_id)`. Owner: `wound_map`, the only consumer. Units: UV
+    //! 0..1 floats, texels for [`DILATE_PX`]. Determinism: pure functions of
+    //! the arguments; the order key is integers only. Invalid rects are
+    //! dropped (`None`/`false`), never a panic.
+    // PORT(naelstrof/SkinnedMeshDecals): per-fighter decal maps with a capped
+    // per-frame drain, adapted from the donor's skinned-mesh decal projection
+    // into a CPU budget queue; GPU projection lands with the atlas bind.
+
+    use std::cmp::Ordering;
+
+    /// Seam fill ring width in texels around each drained rect, applied at bind.
+    ///
+    /// Recorded here so the bind step dilates the same rects it drains; this
+    /// module only queues and orders rects.
+    pub const DILATE_PX: u32 = 1;
+
+    /// Wound rect in normalized atlas UV: `[u0, u1] x [v0, v1]`, each 0..1.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub struct UvRect {
+        /// Left edge in UV.
+        pub u0: f32,
+        /// Top edge in UV.
+        pub v0: f32,
+        /// Right edge in UV.
+        pub u1: f32,
+        /// Bottom edge in UV.
+        pub v1: f32,
+    }
+
+    /// Wound paint kind: cut, bruise, or burn.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum WoundKind {
+        /// Open cut.
+        Cut,
+        /// Closed bruise.
+        Bruise,
+        /// Burn mark.
+        Burn,
+    }
+
+    /// One bounding paint for one hit on one body.
+    ///
+    /// `char_id` is the owning body: a paint never leaks onto another body
+    /// because eviction and drain both keep this tag.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub struct Paint {
+        /// Tick of the hit at 60 Hz; drain orders by this first.
+        pub tick: u32,
+        /// Owning character id; drain orders by this second.
+        pub char_id: u32,
+        /// Clamped wound rect in atlas UV.
+        pub rect: UvRect,
+        /// Wound paint kind.
+        pub kind: WoundKind,
+    }
+
+    /// Clamp a rect into 0..1 UV, ordering corners; `None` when nothing remains.
+    ///
+    /// Non-finite inputs and empty results are dropped, mirroring the atlas
+    /// reject for air or buried prints: a paint outside the map paints nothing.
+    pub fn clamp_rect(rect: UvRect) -> Option<UvRect> {
+        if !(rect.u0.is_finite()
+            && rect.v0.is_finite()
+            && rect.u1.is_finite()
+            && rect.v1.is_finite())
+        {
+            return None;
+        }
+        let clamped = UvRect {
+            u0: rect.u0.min(rect.u1).clamp(0.0, 1.0),
+            v0: rect.v0.min(rect.v1).clamp(0.0, 1.0),
+            u1: rect.u0.max(rect.u1).clamp(0.0, 1.0),
+            v1: rect.v0.max(rect.v1).clamp(0.0, 1.0),
+        };
+        if clamped.u0 >= clamped.u1 || clamped.v0 >= clamped.v1 {
+            return None;
+        }
+        Some(clamped)
+    }
+
+    /// True when a paint faces the camera: cosine of surface normal and view
+    /// direction above zero. Non-finite input never faces.
+    pub fn is_front_facing(facing: f32) -> bool {
+        facing.is_finite() && facing > 0.0
+    }
+
+    /// Drain order for two paints: `tick` first, then `char_id`.
+    pub fn paint_order(a: &Paint, b: &Paint) -> Ordering {
+        (a.tick, a.char_id).cmp(&(b.tick, b.char_id))
+    }
+
+    /// Integer texture size as float, saturating above `u16::MAX`.
+    ///
+    /// Map sizes are texture dims, far below the bound; saturation only
+    /// guards absurd inputs without a panic.
+    fn u32_to_f32_sat(v: u32) -> f32 {
+        u16::try_from(v).map_or_else(|_| f32::from(u16::MAX), f32::from)
+    }
+
+    /// Expand a rect by [`DILATE_PX`] texels on a square `map_px` map, clamped.
+    ///
+    /// Gives the seam-fill ring so neighboring UV islands share texels. A zero
+    /// map size returns the rect unchanged (no bind target yet).
+    pub fn dilate_uv(rect: UvRect, map_px: u32) -> UvRect {
+        if map_px == 0 {
+            return rect;
+        }
+        let step = u32_to_f32_sat(DILATE_PX) / u32_to_f32_sat(map_px);
+        UvRect {
+            u0: (rect.u0 - step).clamp(0.0, 1.0),
+            v0: (rect.v0 - step).clamp(0.0, 1.0),
+            u1: (rect.u1 + step).clamp(0.0, 1.0),
+            v1: (rect.v1 + step).clamp(0.0, 1.0),
+        }
+    }
+}
 
 pub use wound_queue::DILATE_PX;
 use wound_queue::{clamp_rect, is_front_facing, paint_order};

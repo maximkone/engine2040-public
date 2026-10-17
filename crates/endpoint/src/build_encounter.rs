@@ -36,8 +36,9 @@ pub const WIN_MAX_PERMILLE: u16 = 600;
 /// P3 bar (PQ2 oracle): no single move takes more than this kill share.
 pub const KILL_SHARE_MAX_PERMILLE: u16 = 350;
 /// P3 bar: a stuck fighter holds below fork stuck speed this many window
-/// ticks before the window counts as degenerate.
-pub const STUCK_WINDOW_TICKS: u32 = 180;
+/// ticks before the window counts as degenerate. Single owner is
+/// `engine_core::STUCK_WINDOW_TICKS`.
+pub const STUCK_WINDOW_TICKS: u32 = engine_core::STUCK_WINDOW_TICKS;
 /// Floor (FK1/EA1c shape): a kill faster than this many fork ticks breaches.
 pub const MIN_TICKS_TO_KILL: u32 = 450;
 /// GA1 ladder size: rungs `0..=MAX_RUNG`.

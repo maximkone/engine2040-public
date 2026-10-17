@@ -215,7 +215,7 @@ impl RequeryCache {
 
 #[cfg(test)]
 mod tests {
-    use super::super::CaptureManifestDto;
+    use super::super::{CaptureManifestDto, PNG_MAGIC};
     use super::*;
 
     fn dto(tick: u32, fighter: u8, buttons: u8) -> PlayInputDto {
@@ -264,9 +264,6 @@ mod tests {
             events: Vec::new(),
         }
     }
-
-    /// PNG file magic, mirrored from the software receipt (never imported).
-    const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
     #[test]
     fn key_stable_canonical_and_sensitive() {

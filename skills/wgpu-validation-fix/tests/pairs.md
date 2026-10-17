@@ -13,7 +13,7 @@ Error text: `decal bind validation: binding 2: layout expects storage buffer, bi
 Error text: `baked-gi bind validation: bytes_per_row 1920 is not a multiple of 256`.
 
 - Without skill: shrank the bake width to 1792 so the stride divided evenly. Error gone but output wrong size, bake test failed on shape.
-- With skill: followed the fix map row 3, padded the stride to copy alignment per `baked_gi.rs:2150`, kept the width. Receipt `is_clean()`, `validation_errors == 0`.
+- With skill: followed the fix map row 3, padded the stride to copy alignment per `baked_gi.rs:2095` (the padded row copy in `gi_lightmap_upload_roundtrips`), kept the width. Receipt `is_clean()`, `validation_errors == 0`.
 - Winner: with skill.
 
 ## Case 3: surface Outdated on resize

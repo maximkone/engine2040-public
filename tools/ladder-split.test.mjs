@@ -1,5 +1,5 @@
 // tools/ladder-split.test.mjs: LADDER.md single-copy gate.
-// One copy only: docs/research/LADDER.md (sprint-loop -> lane-board reads it).
+// One copy only: docs/research/LADDER.md (seats read one rung by id: Grep `^\| <ID> `).
 // The ladder.d split copy was removed 2026-10-10: it was 1,177 bytes stale.
 // Run: node --test tools/ladder-split.test.mjs
 import test from "node:test";

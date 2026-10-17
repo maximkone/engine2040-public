@@ -23,27 +23,44 @@ What the player learns first, in order. Times at 60 Hz.
 4. By tick 240: first exchange. Light attack meets block. The player learns one attack and its one answer.
 5. Ticks 240-600: dodge and parry appear. A dodge avoids; a fresh block press parries. Spam tires through stamina.
 6. Round end: higher hp wins on timeout; all foes at 0 hp wins early; a tie replays. Best of 5, first to 3.
-7. Bout end: rung climbs on a win and retreats on a loss. Glory pays on wins only. The next tier waits.
+7. Bout end: rung climbs on a win and retreats on a loss. Glory pays on a win and drains 50 on a loss. The next tier waits.
 
 ## Beat chart per ladder rung
 
 Rungs run `0..=7` (`MAX_RUNG` 7 in `crates/game/src/ladder.rs`).
-Tier never falls. The boss is last. At most 3 new things per rung (Rogers L4).
+Tier never falls (`RUNG_ENEMY_TIER`); the boss is last (`BOSS_TIER` 4).
+New things per rung are `RUNG_NEW_ELEMENTS`, each rung at most 3
+(`MAX_NEW_ELEMENTS_PER_RUNG`, Rogers L4). Minutes are `RUNG_MINUTES`.
+Both columns below are the ladder's own numbers, never a second copy.
 
-| rung | tier | new, at most 3 | reward, glory counts |
-|---|---|---|---|
-| 0 | T1 recruit | move, light attack | 100, rank Tiro |
-| 1 | T1 recruit | block answer | 125, rank Tiro |
-| 2 | T2 veteran | dodge, heavy tell | 150, rank Tiro |
-| 3 | T2 veteran | parry window | 175, rank Gladiator |
-| 4 | T2 veteran | riposte, stamina pressure | 200, rank Gladiator |
-| 5 | T3 champion | clash, poise stagger | 225, rank Gladiator |
-| 6 | T3 champion | ring control | 250, rank Primus |
-| 7 | T4 primus, boss last | phase 2 answer | 275 plus 500 per loop, rank Champion to Legend |
+| rung | tier | new, at most 3 | new count | minutes | reward, glory counts |
+|---|---|---|---|---|---|
+| 0 | T1 recruit | move, light attack | 2 | 2 | 100, rank Tiro |
+| 1 | T1 recruit | block answer | 1 | 2 | 125, rank Tiro |
+| 2 | T2 veteran | dodge, heavy tell | 2 | 3 | 150, rank Tiro |
+| 3 | T2 veteran | parry window | 1 | 3 | 175, rank Gladiator |
+| 4 | T2 veteran | riposte, stamina pressure | 2 | 4 | 200, rank Gladiator |
+| 5 | T3 champion | clash | 1 | 4 | 225, rank Gladiator |
+| 6 | T3 champion | poise stagger, ring control | 2 | 5 | 250, rank Primus |
+| 7 | T4 primus, boss last | phase 2 answer | 1 | 6 | 275 plus 500 per loop, rank Champion to Legend |
 
 Glory math (`crates/game/src/ladder.rs`): win pays 100 plus 25 per rung held; a top-rung win loops to rung 0 and adds 500.
 Rank floors: 0, 300, 900, 1800, 3600 to Tiro, Gladiator, Primus, Champion, Legend.
-Minutes: rung 0 starts within 60 s of launch; each rung is about 1-2 min (one bout is at most five 10 s rounds plus resets).
+Minutes: `RUNG_MINUTES` is the per-rung bout budget, the `minutes` cell above,
+2, 2, 3, 3, 4, 4, 5, 6 and rising with the rung. One bout is at most five 10 s
+rounds plus resets, so a rung budget can never be read as one round. Rung 0
+starts within 60 s of launch (`FIRST_BOUT_START_LIMIT_SECS`), and
+`FIRST_BOUT_START_SECS` 45 is the target inside that cap.
+Second door: `content/design/ladder.rows` is the designer beat chart and
+`tools/beat-lint.mjs` gates it (at most 3 new per rung, tier never falls, boss
+last, reward and rank equal to `crates/game/src/ladder.rs`). The lint mirrors
+reward, rank, the 3-new cap and the first-bout cap, but not the per-rung minute
+and new-count arrays, so the `new count` and `minutes` cells above are the
+compiled `RUNG_NEW_ELEMENTS` and `RUNG_MINUTES` that `Ladder::beat()` returns,
+while the rows file stated its own (minutes 1, 1, 2, 2, 2, 3, 3, 4; new totals
+2, 2, 2, 3, 2, 2, 2, 3) and no gate could trip on that. Packet
+`des-ladder-chart-drift-20261017` brings the rows file and the lint onto these
+same arrays, so neither ever carries a third copy.
 
 ## Reward table
 
@@ -52,5 +69,5 @@ A skipped fight pays nothing. No show, no glory, no rung move.
 | outcome | glory | rung | note |
 |---|---|---|---|
 | win | 100 plus 25 per rung, plus 500 on a top-rung loop | climbs 1, loops to 0 at the top | the only source of glory |
-| lose | 0 | retreats 1, floor pins at 0 | no penalty column in code today; loss moves the rung, never the glory |
+| lose | -50 (`GLORY_LOSS_PENALTY`), floored at 0 | retreats 1, floor pins at 0 | the glory drain: a loss pays no reward and takes 50 back |
 | skip | 0 | stays | a skipped fight pays nothing |

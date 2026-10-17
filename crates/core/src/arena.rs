@@ -6,7 +6,7 @@
 //! allocates once; steady-state frames allocate nothing, proven by
 //! `alloc_probe` tests. Threading: `&mut` scoped to one frame on one
 //! thread; slices never outlive the frame's `reset`.
-//! Caller: `crates/perf/src/pgo_harness.rs` stages frame words here.
+//! Caller: per-frame owners stage their words here through `SliceArena`.
 
 use std::fmt::{self, Display, Formatter};
 
@@ -155,7 +155,9 @@ impl SliceArena {
     }
 
     /// Stage `values` into scratch and hand back the arena copy. An empty
-    /// input returns an empty slice without moving the cursor.
+    /// input returns an empty slice without moving the cursor. Writes the
+    /// caller words once then commits the cursor (no zero-fill pass: the
+    /// copy covers every word it claims, so the bytes are identical).
     ///
     /// # Errors
     ///
@@ -164,7 +166,16 @@ impl SliceArena {
         if values.is_empty() {
             return Ok(&mut []);
         }
-        let dest = self.alloc(values.len())?;
+        let end = self.cursor.saturating_add(values.len());
+        if end > self.buf.len() {
+            return Err(ArenaError::Overflow {
+                needed_words: end,
+                capacity_words: self.buf.len(),
+            });
+        }
+        let start = self.cursor;
+        self.cursor = end;
+        let dest = &mut self.buf[start..end];
         dest.copy_from_slice(values);
         Ok(dest)
     }

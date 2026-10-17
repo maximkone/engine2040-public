@@ -4,10 +4,14 @@
 //! Determinism: same corpus gives the same report; ordering is path-stable.
 //! Errors: [`InsightError`] for malformed gold rows (missing fields).
 
+#[cfg(test)]
 use super::index::{Index, InsightError};
+#[cfg(test)]
 use super::search::{self};
 
 /// One gold row: an agent-style query plus the path that must rank top-3.
+/// Test-only: the gold fixture never ships in lib artifacts.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoldQuery {
     /// Agent-style question, written from board rows.
@@ -17,6 +21,8 @@ pub struct GoldQuery {
 }
 
 /// Gold report: hits, total, per-mille rate and the misses.
+/// Test-only: scored by the gold tests below.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoldReport {
     /// Queries with `expect` inside the top 3.
@@ -30,11 +36,15 @@ pub struct GoldReport {
 }
 
 /// The 50-query gold set. Lives at `fixtures/insight-gold.json` so agents
-/// and harnesses read the same rows the tests score.
+/// and harnesses read the same rows the tests score. Test-only: the fixture
+/// text never embeds in lib artifacts.
+#[cfg(test)]
 pub const GOLD_JSON: &str = include_str!("../../../../fixtures/insight-gold.json");
 
 /// Parse the gold JSON with a small std-only scanner (the endpoint
 /// headless graph carries no serde): reads `"q"`/`"expect"` pairs.
+/// Test-only.
+#[cfg(test)]
 pub fn parse_gold(json: &str) -> Result<Vec<GoldQuery>, InsightError> {
     let mut out = Vec::new();
     let mut rest = json;
@@ -67,7 +77,8 @@ pub fn parse_gold(json: &str) -> Result<Vec<GoldQuery>, InsightError> {
 }
 
 /// Read one JSON string literal after a key: returns the value plus the
-/// bytes consumed (handles `\"` and `\\` escapes).
+/// bytes consumed (handles `\"` and `\\` escapes). Test-only.
+#[cfg(test)]
 fn take_string(text: &str) -> Option<(String, usize)> {
     let open = text.find('"')? + 1;
     let mut value = String::new();
@@ -88,6 +99,8 @@ fn take_string(text: &str) -> Option<(String, usize)> {
 }
 
 /// Score gold queries against the index: `expect` must land in the top 3.
+/// Test-only.
+#[cfg(test)]
 pub fn run_gold(index: &Index, queries: &[GoldQuery]) -> GoldReport {
     let mut hits = 0;
     let mut misses = Vec::new();
@@ -111,7 +124,8 @@ pub fn run_gold(index: &Index, queries: &[GoldQuery]) -> GoldReport {
     }
 }
 
-/// One A/B packet: a board-row task with a known target item.
+/// One A/B packet: a board-row task with a known target item. Test-only.
+#[cfg(test)]
 pub struct PacketTask {
     /// Board row, e.g. `MCP7`.
     pub id: &'static str,
@@ -122,7 +136,8 @@ pub struct PacketTask {
 }
 
 /// A/B outcome: baseline (paged dump under a token budget) versus tools
-/// (`api.search` then `api.describe`). Tokens are chars/4.
+/// (`api.search` then `api.describe`). Tokens are chars/4. Test-only.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbReport {
     /// Baseline tokens across all tasks.
@@ -145,6 +160,8 @@ pub struct AbReport {
 /// The baseline reads path-sorted 8-item pages until it solves the task or
 /// `budget_tokens` runs out; solved tasks charge only the tokens read, not
 /// the full budget. The tool path spends one search plus one describe task.
+/// Test-only.
+#[cfg(test)]
 pub fn ab_compare(index: &Index, tasks: &[PacketTask], budget_tokens: usize) -> AbReport {
     let mut report = AbReport {
         base_tokens: 0,
@@ -283,6 +300,10 @@ pub const TOOL_SCENE_READ: &str = \"scene.read\";
 /// Machine code plus legal values. Towncrier never sends an empty pass.
 pub struct McpToolError { pub code: u32 }
 ";
+    // NOTE (test-honesty): the `golden_brief_text_arena_fixture() -> bool`
+    // line inside BRIEF is synthetic retrieval-fixture text for the
+    // `#[cfg(test)]` seed corpus only — sample data, never a proof source
+    // (nothing asserts its return value; the real brief gate is elsewhere).
     const BRIEF: &str = "\
 /// Bounded brief text plus digest. Cartographer sketches groups and relations.
 pub fn scene_brief() -> u64 { 0 }

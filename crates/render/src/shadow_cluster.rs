@@ -2497,10 +2497,10 @@ mod sun_shadow_regression {
         let splits = cascade_splits(near, far).expect("valid range splits");
         assert_eq!(SUN_CASCADES, 3, "three cascades pin two interiors");
         assert_eq!(CASCADE_LAMBDA, 0.5, "reference half-log half-uniform blend");
-        for i in 1..SUN_CASCADES {
+        for (i, split) in splits.iter().enumerate().skip(1) {
             let t = i as f32 / SUN_CASCADES as f32;
             let expected = practical_split(near, far, t, CASCADE_LAMBDA);
-            assert_eq!(splits[i], expected, "interior {i} calls practical_split");
+            assert_eq!(*split, expected, "interior {i} calls practical_split");
         }
     }
 

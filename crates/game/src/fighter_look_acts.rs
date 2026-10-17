@@ -472,6 +472,7 @@ mod tests {
             bundle_shas: Vec::new(),
             truth: Vec::new(),
             shake_trauma_permille: 0,
+            uploaded_digest: crate::fighter_look::empty_upload_digest(),
         }
     }
 

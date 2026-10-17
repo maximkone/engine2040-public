@@ -30,7 +30,7 @@ pub const UV_STEP_V: f32 = 1.0 / 16.0;
 /// Pure; same inputs give the same box twice.
 #[must_use]
 pub fn glyph_uv(code: u8) -> Option<[f32; 4]> {
-    if code < GLYPH_FIRST || code > GLYPH_LAST {
+    if !(GLYPH_FIRST..=GLYPH_LAST).contains(&code) {
         return None;
     }
     let idx = code - GLYPH_FIRST;

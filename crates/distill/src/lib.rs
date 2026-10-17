@@ -138,8 +138,8 @@ mod root_wiring_tests {
         assert_eq!(DEFAULT_BOUTS, 1_000);
         assert_eq!(MAX_BOUTS, 20_000);
         assert_eq!(DEFAULT_BOUT_TICKS, 3_600);
-        assert!(DUEL_LANES > 0, "duel reads lanes via root");
-        assert!(DUEL_CLASSES > 0, "duel reads classes via root");
+        const _: () = assert!(DUEL_LANES > 0, "duel reads lanes via root");
+        const _: () = assert!(DUEL_CLASSES > 0, "duel reads classes via root");
         assert_eq!(DUEL_LANE_STEPS.len(), DUEL_LANES);
     }
 
@@ -259,7 +259,7 @@ mod root_wiring_tests {
         assert_eq!(wilson95(0, 0), (0.0, 1.0), "empty sample spans all");
         let (lo, hi) = wilson95(5, 10);
         assert!(
-            lo >= 0.0 && lo < 0.5 && 0.5 < hi && hi <= 1.0,
+            (0.0..0.5).contains(&lo) && hi > 0.5 && hi <= 1.0,
             "interval holds p"
         );
         assert_eq!(wilson95(12, 10), wilson95(10, 10), "overshoot clamps");

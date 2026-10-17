@@ -33,7 +33,6 @@ pub mod audio_director;
 /// the frozen audio brains, tunnel preset on, voice floor at -12 dB.
 pub mod audio_mix;
 pub mod balance_verdict;
-pub mod ballistics;
 /// Balance harness: falsifiable spacing experiments over
 /// the arena fork path for balance tuning. Std-only.
 pub mod bench;
@@ -46,18 +45,9 @@ pub mod camera_arm;
 /// Presentation feed: drives the camera director from the frame
 /// loop with in-sim trauma and presentation-side shake. Std-only.
 pub mod camera_feed;
-/// Flax-style follow rig plus rate-independent damping, impulse dispatch
-/// and transition cores. Tick is integer-only; floats are presentation only.
-pub mod camera_feel;
-/// Priority shot table plus eased handoff over the frozen director frames.
-/// Std-only, presentation only.
-pub mod camera_stack;
 /// Showcase clip capture: tape-bound PNG sequence plus manifest.
 /// Headless-safe: flags, tape codec, std-only PNG writer and frame sink.
 pub mod capture;
-/// Cinematic sequence player: intro/outro takes beside the auto-cut
-/// director. Presentation only; the flow shell aliases its handback.
-pub mod cine;
 /// Crash reports to a local file: version, adapter, tape tail,
 /// checkpoint, loud exit. Std-only.
 pub mod crash;
@@ -70,9 +60,6 @@ pub mod dev_hotpatch;
 /// Auto spectator camera (trailer cuts from fight beats): shot choice over
 /// fixed-tick cues with continuity rules, presentation only. Std-only.
 pub mod director;
-/// Eight-fighter gate shape: FC3 30 fps ceilings plus the quiet-run config.
-/// Std-only, presentation gate only, never hashed.
-pub mod eight_fight;
 /// Fight ring: sand pit plus stone tiers under the fighter look. App leg.
 #[cfg(feature = "app")]
 pub mod fight_ring;
@@ -102,14 +89,10 @@ pub mod loop_text;
 /// Living ludus voices — trainer, blacksmith and crowd: fight memories
 /// with goals over the district yard, scripted fallback offline. Std-only.
 pub mod ludus_npcs;
-/// Display modes with last-good swap: enumerate, stage at frame
-/// boundary, honest refusal. Std-only.
-pub mod modes;
 /// Mode framework: arena, siege and district free-roam over the
 /// ladder. Std-only.
 pub mod modes_world;
 pub mod netgame;
-pub mod package;
 /// Gamepad sticks plus buttons through the shared bindings table. Std-only.
 pub mod pad;
 /// Clip-clock hold: which fighter slots freeze while sim hitstop is above
@@ -118,8 +101,6 @@ pub mod pose_hold;
 /// Practice swap: staged combat tuning applied at a tick boundary. Std-only.
 pub mod practice;
 pub mod progress;
-/// Quest chain: ordered objectives with ordered tasks over the ladder.
-pub mod quest;
 /// Hot-reload gate: staged generations applied at frame boundaries. Std-only.
 pub mod reload;
 /// Best-of-5 duel rounds over one-round arena sessions. Pure folds,
@@ -140,9 +121,6 @@ pub mod view_truth;
 /// Holds the last 12 pairs per slot; idle slots stay empty.
 /// Age ticks fade alpha from 1 at age 0 to 0 at age 11.
 pub mod weapon_trail;
-/// Window bind: hero + 2 staged fighters for the window twin.
-/// Std-only.
-pub mod window_bind;
 #[cfg(feature = "app")]
 pub mod windowed;
 
@@ -151,6 +129,7 @@ use crate::crowd_gpu::CrowdGpuSim;
 use crate::director::{Director as CutDirector, DirectorConfig, FighterLateral, MIN_SHOT_TICKS};
 use engine_anim::contract::{LocalPose, RootTable};
 use engine_arena::recorder::Row;
+use engine_arena::world::MatchWorld;
 use engine_arena::{
     run_loco_poses, ArenaConfig, ArenaRules, Checkpoint, LiveMatch, LivePresentation,
 };
@@ -630,6 +609,13 @@ pub struct App {
     /// the fighter-draw leg through [`App::fighter_views`]. Presentation
     /// only, never hashed.
     views: Vec<FighterView>,
+    /// Scratch cue buffer reused by [`App::simulate_tick`]: cleared and
+    /// extended every accepted tick, so the tick path allocates nothing at
+    /// steady state. Never read across ticks.
+    tick_cues: Vec<FightCue>,
+    /// Scratch starter-slot buffer, same reuse discipline as
+    /// [`App::tick_cues`].
+    tick_started: Vec<u8>,
     /// Last mix answer, served on every outcome (rejected ticks repeat it).
     director_layers: Layers,
     kills: Vec<KillEntry>,
@@ -659,6 +645,13 @@ pub struct App {
     present_sim: Option<LivePresentation>,
     /// Presentation sim steps spent by retired presentation sims.
     present_retired_steps: u64,
+    /// Static obstacle world this session's match and pose cursor run over
+    /// (default [`MatchWorld::empty`], the legacy open arena). The live
+    /// window loads the arena kit's physical placement here, so kit walls
+    /// stop being pictures; every other caller keeps the empty default and
+    /// its byte-frozen checkpoints. Units: meters. Determinism: the same
+    /// world gives the same checkpoints (the digest rides every one).
+    world: MatchWorld,
 }
 
 impl App {
@@ -667,6 +660,17 @@ impl App {
     /// tick without a tape input for it.
     pub fn new(config: GameConfig) -> Result<Self, GameError> {
         Self::new_for_slot(config, HUMAN_SLOT)
+    }
+
+    /// [`App::new`] over a static obstacle world: the arena kit's physical
+    /// placement ([`crate::arena_kit::kit_match_world`]) so kit walls stop
+    /// being pictures. [`MatchWorld::empty`] is the legacy open arena, so
+    /// every other caller stays byte-frozen.
+    ///
+    /// Caller: `crates/game/src/windowed.rs` (`run_windowed`) and
+    /// `crates/game/src/bin/arena.rs` build the live window here.
+    pub fn with_world(config: GameConfig, world: MatchWorld) -> Result<Self, GameError> {
+        Self::new_for_slot_world(config, HUMAN_SLOT, world)
     }
 
     /// Move a fresh session to the live duel's combat: tables v2 under rules
@@ -679,8 +683,8 @@ impl App {
         }
         self.arena.table_version = engine_combat::tables::TABLES_VERSION_V2;
         self.rules = self.arena.rules();
-        self.live =
-            LiveMatch::with_rules(&self.arena, self.rules).ok_or(GameError::BadConfig("arena"))?;
+        self.live = LiveMatch::with_rules_world(&self.arena, self.rules, self.world.clone())
+            .ok_or(GameError::BadConfig("arena"))?;
         Ok(self)
     }
 
@@ -689,6 +693,16 @@ impl App {
     /// anything else fails. Single-player callers use [`App::new`], which
     /// pins slot 0 and is behavior-identical to the single-player session.
     pub fn new_for_slot(config: GameConfig, human_slot: u8) -> Result<Self, GameError> {
+        Self::new_for_slot_world(config, human_slot, MatchWorld::empty())
+    }
+
+    /// [`App::new_for_slot`] over an explicit obstacle world (see
+    /// [`App::with_world`]).
+    fn new_for_slot_world(
+        config: GameConfig,
+        human_slot: u8,
+        world: MatchWorld,
+    ) -> Result<Self, GameError> {
         config.validate()?;
         if human_slot >= config.fighters {
             return Err(GameError::BadConfig("human_slot"));
@@ -709,7 +723,8 @@ impl App {
         .map_err(|_| GameError::BadConfig("director"))?;
         let arena = config.arena_config();
         let rules = arena.rules();
-        let live = LiveMatch::with_rules(&arena, rules).ok_or(GameError::BadConfig("arena"))?;
+        let live = LiveMatch::with_rules_world(&arena, rules, world.clone())
+            .ok_or(GameError::BadConfig("arena"))?;
         Ok(Self {
             config,
             arena,
@@ -736,6 +751,8 @@ impl App {
             cut_director,
             laterals: Vec::with_capacity(usize::from(config.fighters)),
             views: Vec::with_capacity(usize::from(config.fighters)),
+            tick_cues: Vec::new(),
+            tick_started: Vec::new(),
             director_layers: Layers {
                 intensity: 0.0,
                 music: 0.0,
@@ -755,6 +772,7 @@ impl App {
             present_live: true,
             present_sim: None,
             present_retired_steps: 0,
+            world,
         })
     }
 
@@ -976,6 +994,7 @@ impl App {
         self.cursor += 1;
         self.observe_into(tick, &cues, &started, checkpoint, out);
         self.extend_presentation();
+        self.restore_tick_scratch(cues, started);
     }
 
     /// Stage one validated input on the tape, keeping `(tick, fighter)` order
@@ -983,6 +1002,12 @@ impl App {
     /// Callers validate first; this never fails.
     fn stage_input(&mut self, input: FighterInput) {
         let key = (input.tick, input.fighter.0);
+        // Monotonic ticks append in O(1); only out-of-order LAN arrivals pay
+        // the `partition_point` plus memmove.
+        if tape_should_append(&self.tape, key) {
+            self.tape.0.push(input);
+            return;
+        }
         let index = self
             .tape
             .0
@@ -1048,6 +1073,7 @@ impl App {
         self.cursor += 1;
         let out = self.observe(tick, &cues, &started, checkpoint);
         self.extend_presentation();
+        self.restore_tick_scratch(cues, started);
         out
     }
 
@@ -1091,31 +1117,44 @@ impl App {
         let inputs = tick_inputs(&self.tape, tick);
         let stepped = self.live.step(inputs)?;
         let checkpoint = stepped.checkpoint;
-        let cues: Vec<FightCue> = stepped.events.events.iter().map(map_cue).collect();
+        // Steady-state zero alloc: refill the scratch buffers in place
+        // instead of collecting fresh vecs every tick.
+        self.tick_cues.clear();
+        self.tick_cues.extend(stepped.events.events.iter().map(map_cue));
         let next_hitstop = hitstop::next(current, &stepped.events.events);
-        let laterals = laterals_for_tick(stepped.rows, tick, fighters);
-        let views = views_for_tick(stepped.rows, tick, fighters);
+        fill_laterals_for_tick(stepped.rows, tick, fighters, &mut self.laterals);
+        fill_views_for_tick(stepped.rows, tick, fighters, &mut self.views);
         // First production read of the press-tick tell (EG19b): one starter
         // slot per fresh v2 attack, in fighter-ID order; empty under v1 rows
         // and on quiet ticks. Both borrows are shared, so the live match
         // lends its cue buffer beside the stepped tick. Presentation only,
         // never hashed.
-        let started: Vec<u8> = self.live.cues().iter().map(|cue| cue.attacker).collect();
+        self.tick_started.clear();
+        self.tick_started
+            .extend(self.live.cues().iter().map(|cue| cue.attacker));
         self.hitstop_remaining = next_hitstop;
-        if let Some(rows) = laterals {
-            self.laterals = rows;
-        }
-        if let Some(next_views) = views {
-            self.views = next_views;
-        }
+        // Move the refilled scratch out for this tick only; both callers
+        // restore the buffers below, so the next tick reuses the capacity.
+        let cues = std::mem::take(&mut self.tick_cues);
+        let started = std::mem::take(&mut self.tick_started);
         Some((checkpoint, cues, started))
+    }
+
+    /// Restore the [`App::simulate_tick`] scratch buffers after one accepted
+    /// tick, keeping their capacity for the next tick. Callers run this on
+    /// every path that consumed the tick's owned cue buffers.
+    fn restore_tick_scratch(&mut self, mut cues: Vec<FightCue>, mut started: Vec<u8>) {
+        cues.clear();
+        started.clear();
+        self.tick_cues = cues;
+        self.tick_started = started;
     }
 
     /// Rare path: replace the live match with a fresh one stepped through
     /// the tape's first `ticks` ticks. `None` (live match untouched) when
     /// the tape no longer replays.
     fn rebuild_live(&mut self, ticks: u32) -> Option<()> {
-        let mut live = LiveMatch::with_rules(&self.arena, self.rules)?;
+        let mut live = LiveMatch::with_rules_world(&self.arena, self.rules, self.world.clone())?;
         let mut hitstop = 0u32;
         for tick in 0..ticks {
             let stepped = live.step(tick_inputs(&self.tape, tick))?;
@@ -1432,7 +1471,8 @@ impl App {
     fn rebuild_presentation(&mut self, ticks: u32) -> Option<()> {
         let fighters = usize::from(self.config.fighters);
         let session = usize::try_from(self.config.ticks).ok()?;
-        let mut sim = LivePresentation::with_rules(&self.arena, self.live.rules())?;
+        let mut sim =
+            LivePresentation::with_rules_world(&self.arena, self.live.rules(), self.world.clone())?;
         let mut fresh = PresentationData {
             pose_tracks: (0..fighters).map(|_| Vec::with_capacity(session)).collect(),
             root_tables: (0..fighters)
@@ -1597,6 +1637,15 @@ pub struct FighterView {
     pub yaw: f32,
 }
 
+/// True when `key` sorts at or after the tape tail, so the input appends in
+/// O(1). Pure over the tail and the key; out-of-order LAN arrivals return
+/// false and pay the sorted insert. Caller: [`App::stage_input`].
+fn tape_should_append(tape: &FighterTape, key: (u32, u8)) -> bool {
+    tape.0
+        .last()
+        .map_or(true, |last| (last.tick, last.fighter.0) <= key)
+}
+
 /// The tape's inputs for one tick: the tape is `(tick, fighter)`-sorted, so
 /// the tick's slice is found by two binary searches (no scan, no alloc).
 fn tick_inputs(tape: &FighterTape, tick: u32) -> &[FighterInput] {
@@ -1611,20 +1660,29 @@ fn tick_inputs(tape: &FighterTape, tick: u32) -> &[FighterInput] {
 /// (wrong tick, wrong count); the caller keeps the previous views then.
 /// Pure over the rows.
 fn views_for_tick(rows: &[Row], tick: u32, fighters: u8) -> Option<Vec<FighterView>> {
+    let mut out = Vec::with_capacity(usize::from(fighters));
+    fill_views_for_tick(rows, tick, fighters, &mut out).then_some(out)
+}
+
+/// Refill `out` with the tick's views in place (clear plus extend, no
+/// allocation once sized). True on a shape match; false (buffer untouched)
+/// on any mismatch, so the caller keeps the previous views then.
+fn fill_views_for_tick(rows: &[Row], tick: u32, fighters: u8, out: &mut Vec<FighterView>) -> bool {
     let stride = usize::from(fighters);
-    let row = rows.first()?;
+    let row = match rows.first() {
+        Some(row) => row,
+        None => return false,
+    };
     if row.observation.tick != tick || row.observation.fighters.len() != stride {
-        return None;
+        return false;
     }
-    let mut out = Vec::with_capacity(stride);
-    for entry in &row.observation.fighters {
-        out.push(FighterView {
-            slot: entry.id,
-            pos_m: entry.pos,
-            yaw: entry.yaw,
-        });
-    }
-    Some(out)
+    out.clear();
+    out.extend(row.observation.fighters.iter().map(|entry| FighterView {
+        slot: entry.id,
+        pos_m: entry.pos,
+        yaw: entry.yaw,
+    }));
+    true
 }
 
 /// Laterals for one dataset tick: the tick's first row carries the shared
@@ -1633,19 +1691,33 @@ fn views_for_tick(rows: &[Row], tick: u32, fighters: u8) -> Option<Vec<FighterVi
 /// at the tick's first row. `None` on any shape mismatch (wrong tick, wrong
 /// count); the caller keeps the previous laterals then. Pure over the rows.
 fn laterals_for_tick(rows: &[Row], tick: u32, fighters: u8) -> Option<Vec<FighterLateral>> {
+    let mut out = Vec::with_capacity(usize::from(fighters));
+    fill_laterals_for_tick(rows, tick, fighters, &mut out).then_some(out)
+}
+
+/// Refill `out` with the tick's laterals in place (clear plus extend, no
+/// allocation once sized). True on a shape match; false (buffer untouched)
+/// on any mismatch, so the caller keeps the previous laterals then.
+fn fill_laterals_for_tick(
+    rows: &[Row],
+    tick: u32,
+    fighters: u8,
+    out: &mut Vec<FighterLateral>,
+) -> bool {
     let stride = usize::from(fighters);
-    let row = rows.first()?;
+    let row = match rows.first() {
+        Some(row) => row,
+        None => return false,
+    };
     if row.observation.tick != tick || row.observation.fighters.len() != stride {
-        return None;
+        return false;
     }
-    let mut out = Vec::with_capacity(stride);
-    for entry in &row.observation.fighters {
-        out.push(FighterLateral {
-            id: entry.id,
-            x_m: entry.pos[0],
-        });
-    }
-    Some(out)
+    out.clear();
+    out.extend(row.observation.fighters.iter().map(|entry| FighterLateral {
+        id: entry.id,
+        x_m: entry.pos[0],
+    }));
+    true
 }
 
 // The unit-test binary's one counting allocator; the zero-allocation gates
@@ -2971,5 +3043,40 @@ mod tests {
             }
             other => panic!("short crowd buffer must refuse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn out_of_order_stage_keeps_tape_sorted() {
+        // Tape-sort repair: out-of-order LAN arrivals insert sorted, so the
+        // tape stays `(tick, fighter)`-sorted and validates.
+        let mut app = App::new(small_config()).unwrap();
+        let at = |tick: u32, fighter: u8| FighterInput {
+            tick,
+            fighter: FighterId::new(fighter).unwrap(),
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        };
+        app.stage_input(at(2, 1));
+        app.stage_input(at(0, 0));
+        app.stage_input(at(0, 1));
+        app.stage_input(at(2, 0));
+        app.stage_input(at(1, 0));
+        let keys: Vec<(u32, u8)> = app
+            .tape
+            .0
+            .iter()
+            .map(|input| (input.tick, input.fighter.0))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![(0, 0), (0, 1), (1, 0), (2, 0), (2, 1)],
+            "tape must stay sorted"
+        );
+        assert!(app.tape.validate().is_ok());
+        assert!(tape_should_append(&app.tape, (2, 1)));
+        assert!(tape_should_append(&app.tape, (3, 0)));
+        assert!(!tape_should_append(&app.tape, (1, 0)));
     }
 }

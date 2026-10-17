@@ -373,7 +373,7 @@ mod tests {
                 }
             }
             assert_eq!(
-                &repacked[..],
+                repacked.as_slice(),
                 hole_bytes,
                 "hole bytes differ for size {size}"
             );

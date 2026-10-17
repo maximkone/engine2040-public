@@ -21,6 +21,7 @@ use engine_scene::transform::Transform;
 
 use crate::a2_session::{capture_viewport_png, fnv_hex, ExeCapture};
 use crate::browser::{search, AssetKind, BundleEntry, BundleView, SearchQuery};
+use crate::durable::write_atomic;
 use crate::gizmo::GizmoDrag;
 use crate::play::{ChildPlay, PlayEntrypoint};
 use crate::save::{load_from_bytes, save_to_bytes};
@@ -215,7 +216,7 @@ fn read_content(root: &Path, rel: &str) -> Result<Vec<u8>, A3Error> {
 /// Write one evidence file or stop with its path.
 fn write_out(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), A3Error> {
     let path = dir.join(name);
-    std::fs::write(&path, bytes).map_err(|error| A3Error::Io {
+    write_atomic(&path, bytes).map_err(|error| A3Error::Io {
         path: path.to_string_lossy().into_owned(),
         reason: error.to_string(),
     })

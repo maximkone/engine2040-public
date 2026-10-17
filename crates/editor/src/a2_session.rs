@@ -21,6 +21,7 @@ use crate::browser::{
     preview_drop, search, AssetKind, BrowserActor, BundleEntry, BundleView, Intent, ObjectRef,
     Relation, SearchQuery, Target, Want,
 };
+use crate::durable::write_atomic;
 use crate::save::{load_from_bytes, save_to_bytes};
 use crate::shell::Shell;
 
@@ -767,7 +768,7 @@ struct LiveSave {
 /// Write one evidence file or stop with its path.
 fn write_out(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), A2Error> {
     let path = dir.join(name);
-    std::fs::write(&path, bytes).map_err(|error| A2Error::Io {
+    write_atomic(&path, bytes).map_err(|error| A2Error::Io {
         path: path.to_string_lossy().into_owned(),
         reason: error.to_string(),
     })

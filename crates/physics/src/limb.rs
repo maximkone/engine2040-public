@@ -23,8 +23,8 @@ use engine_core::{Fnv64, Rng};
 pub const MAX_LIMBS: usize = 256;
 /// Wire version of the snapshot bytes.
 pub const LIMB_SNAPSHOT_V1: u32 = 1;
-/// Fixed step, 60 Hz.
-pub const TICKS_PER_SECOND: i64 = 60;
+/// Fixed step, 60 Hz. Single owner of the rate is `engine_core::TICK_HZ`.
+pub const TICKS_PER_SECOND: i64 = engine_core::TICK_HZ as i64;
 /// Gravity per tick in mm/s (about 9.8 m/s^2 at 60 Hz).
 pub const GRAVITY_MMPS_PER_TICK: i32 = 163;
 /// Fastest a limb may fly, mm/s (40 m/s).

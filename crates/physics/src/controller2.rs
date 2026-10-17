@@ -1,9 +1,9 @@
 //! controller2: character controller v2 — steps, slopes, moving platforms,
 //! ledge sense feeding traversal, fighter push and crowd shove.
 //!
-//! Consumer: arena locomotion walks these walkers; the traversal chooser in
-//! `engine-anim` (`traversal.rs`) consumes the ledge probes this module
-//! emits. Data owner: `engine-physics`; this module never imports assets,
+//! Consumer: arena locomotion walks these walkers; the ledge probes mirror
+//! the traversal thresholds by value (verified 2026-10-16: no `engine-anim`
+//! consumer, `crates/anim` holds zero `engine-physics` refs). Data owner: `engine-physics`; this module never imports assets,
 //! arena or the render path. Units: integer millimeters, ticks at 60 Hz.
 //!
 //! Determinism scope: the authority path uses only `+ - * /` on `i32`/`i64`

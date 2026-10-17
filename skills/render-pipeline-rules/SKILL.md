@@ -24,7 +24,7 @@ Use when you change the frame pipeline in `crates/render`: a pass, a readback, f
 
 - `crates/render/src/present/gpu_present/submit.rs::map_readback_f32`: the function blocks on `poll(wait_indefinitely)`. Rule 2 forbids a wait like this in a frame.
 - `crates/render/src/sky.rs::bind_main`: the bind probe `dst[i] = src[i] + look.exposure * 0.0` only copies a buffer. It is not a live pass (rule 1). The same shape is in `crates/render/src/fog.rs::bind_main`.
-- `crates/render/src/v1.rs::MeshData`: it holds positions, normals, uvs, indices plus tangents (`tangents`, built by `compute_tangents` from positions plus UVs). Rule 8 needs the tangent on the GPU path; check the carry before adding normal maps.
+- `crates/render/src/v1.rs::MeshData`: it holds positions, normals, uvs, indices plus tangents (`tangents`, built by `recompute_tangents` in `crates/assets/src/import_repair.rs`; engine-assets owns them, no local mirror). Rule 8 needs the tangent on the GPU path; check the carry before adding normal maps.
 - `crates/game/src/bin/arena.rs::LOOK_PROBE_EVERY` = 120 and `crates/game/src/bin/arena.rs::LIVE_FOG_EVERY` = 4 set how often the live window runs probes and fog.
 
 Search more: `node tools/books.mjs search "render pass pipeline"`

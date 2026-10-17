@@ -13,7 +13,9 @@
 //! with gizmo drags grouped by [`commands::begin_group`]/[`end_group`].
 //! A staged inspector edit is validated with [`commands::validate`] before
 //! it can apply, so an invalid draft (NaN, unknown node, stale revision)
-//! reports an error and changes nothing.
+//! reports an error and changes nothing. Every acknowledged apply also
+//! chains one audit receipt ([`AuditChain`](crate::audit::AuditChain)), so
+//! the dock is the production owner of [`crate::audit`].
 //!
 //! The hierarchy panel never stores scene handles: [`snapshot_rows`] takes a
 //! [`Hierarchy`] as a function argument and returns plain [`SceneRow`] data
@@ -30,6 +32,7 @@ use engine_scene::ids::ObjectId;
 use engine_scene::schema::SchemaRegistry;
 use engine_scene::transform::{Hierarchy, Transform};
 
+use crate::audit::AuditChain;
 use crate::inspector_auto::{build_grid, AutoError, AutoGrid};
 
 use crate::browser::{AssetKind, BundleView};
@@ -289,6 +292,13 @@ pub struct Shell {
     log: LogRing,
     staged: Option<StagedEdit>,
     next_key: u64,
+    /// Digest-chained audit receipts over acknowledged applies: one receipt
+    /// per committed [`Shell::apply_staged`] batch, so the `audit` module's
+    /// chain has a production owner instead of only tests.
+    audit: AuditChain,
+    /// Monotonic acknowledge counter. The dock has no fixed tick, so each
+    /// receipt stamps the next value into its `tick` field.
+    apply_tick: u64,
     /// Open gizmo-drag group, if a drag session is live.
     gizmo_group: Option<u64>,
     /// Template reservations: item names, node ids and cost totals.
@@ -316,6 +326,8 @@ impl Shell {
             log: LogRing::new(LOG_CAP),
             staged: None,
             next_key: 1,
+            audit: AuditChain::new(),
+            apply_tick: 0,
             gizmo_group: None,
             templates: TemplateService::new(),
             #[cfg(feature = "ui")]
@@ -648,6 +660,7 @@ impl Shell {
         let meta = CommandMeta::significant(staged.name);
         match commands::apply_named(&mut self.doc, &mut self.journal, &batch, &meta) {
             Ok(applied) => {
+                self.record_audit(&batch, &meta, &applied);
                 self.log_applied(&applied);
                 self.staged = None;
                 Ok(applied)
@@ -656,6 +669,21 @@ impl Shell {
                 self.log.push(format!("ERR apply staged: {error}"));
                 Err(ShellError::Command(error))
             }
+        }
+    }
+
+    /// Chain one acknowledged apply in the audit receipts: the entry covers
+    /// the stamped acknowledge counter, the published revision, the batch key,
+    /// the command name and the batch ops (see
+    /// [`AuditChain::record_applied`]). Call only after the command service
+    /// acknowledged the batch. A receipt that cannot fit the module's size
+    /// bounds logs its refusal instead of panicking: the document and the
+    /// journal are committed either way.
+    fn record_audit(&mut self, batch: &Batch, meta: &CommandMeta, applied: &Applied) {
+        let tick = self.apply_tick;
+        self.apply_tick = self.apply_tick.saturating_add(1);
+        if let Err(error) = self.audit.record_applied(tick, batch, meta, applied) {
+            self.log.push(format!("ERR audit receipt: {error}"));
         }
     }
 
@@ -1311,6 +1339,41 @@ mod tests {
         assert_eq!(shell.document().hierarchy.local(child), Some(pose_at(1.0)));
         shell.redo().expect("redo holds the inspector batch");
         assert_eq!(shell.document().hierarchy.local(child), Some(pose_at(4.0)));
+    }
+
+    #[test]
+    fn apply_staged_records_one_audit_receipt_per_acknowledged_apply() {
+        let (mut shell, _root, child) = seeded_shell();
+        assert!(shell.select(child));
+        shell.stage_transform(pose_at(4.0)).unwrap();
+        assert!(shell.audit.is_empty());
+
+        // One acknowledged apply chains exactly one receipt.
+        let applied = shell.apply_staged().unwrap();
+        assert_eq!(applied.revision, shell.revision());
+        assert_eq!(shell.audit.len(), 1);
+        assert_eq!(shell.audit.total_appended(), 1);
+        shell.audit.verify().expect("chain verifies");
+        let head = shell.audit.head().expect("receipt retained");
+        shell
+            .audit
+            .verify_pinned(head, 1)
+            .expect("pinned head verifies");
+
+        // Undo/redo are journal authority, not acknowledged applies.
+        shell.undo().expect("undo holds the inspector batch");
+        assert_eq!(shell.audit.total_appended(), 1);
+
+        // A refused apply (nothing staged) appends nothing.
+        assert!(shell.apply_staged().is_err());
+        assert_eq!(shell.audit.total_appended(), 1);
+        // A second acknowledged apply extends the chain, head moves.
+        assert!(shell.select(child));
+        shell.stage_transform(pose_at(6.0)).unwrap();
+        shell.apply_staged().unwrap();
+        assert_eq!(shell.audit.total_appended(), 2);
+        assert_ne!(shell.audit.head().expect("receipt retained"), head);
+        shell.audit.verify().expect("chain still verifies");
     }
 
     #[test]

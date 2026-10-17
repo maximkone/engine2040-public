@@ -12,12 +12,13 @@ import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
 import { breaches as researchBreaches, failLine as researchFailLine } from "./research-cap.mjs";
 import { list as presenceList } from "./presence.mjs";
 import { deriveFixedApi, genreHits, platformMathHits } from "./sim-source-scan.mjs";
+import { runWithVerdictCache } from "./wiring-scan.mjs";
 
 // engine-core is the bottom layer (ARCHITECTURE.md): any crate may use it.
 // Without this, packets re-derived its hash, rng and alloc probe instead.
 const UNIVERSAL_EDGES = new Set(["engine-core"]);
 
-const allowedEdges = new Map([
+export const allowedEdges = new Map([
   ["engine2040", ["engine-core", "engine-ecs", "engine-render", "engine-physics", "engine-nav", "engine-audio", "engine-script", "engine-net", "engine-assets", "engine-destruction", "engine-ai", "engine-ponytail", "engine-proof"]],
   ["engine-ai", ["engine-ecs", "engine-physics", "engine-input", "engine-nn"]],
   ["engine-app", ["engine-core", "engine-ecs", "engine-scene", "engine-arena"]],
@@ -40,7 +41,8 @@ const allowedEdges = new Map([
   ["engine-distill", ["engine-nn", "engine-ai", "engine-arena", "engine-input"]],
   // The squad pack reads legion formations from engine-ai (feature `mcp` only).
   // The net verb pack runs loopback bouts through engine-net (feature `mcp` only).
-  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net"]],
+  // The physics pack (door verb) reads the std-only balance core: no rapier feature (PX40).
+  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics"]],
   ["engine-input", ["engine-core"]],
   ["engine-net", ["engine-arena", "engine-input", "engine-observe"]],
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
@@ -380,12 +382,26 @@ export function hasHelpFlag(argv = process.argv.slice(2)) {
 }
 
 function main() {
-try {
   if (hasHelpFlag(process.argv.slice(2))) {
     process.stdout.write(WORKSPACE_CHECK_HELP);
     return;
   }
   const repoDir = join(dirname(fileURLToPath(import.meta.url)), "..");
+  runWithVerdictCache({
+    repoDir,
+    name: "workspace-check",
+    run: () => {
+      try {
+        audit(repoDir);
+      } catch (error) {
+        console.error(`FAIL workspace audit: ${error.message}`);
+        process.exitCode = 1;
+      }
+    },
+  });
+}
+
+function audit(repoDir) {
   const cached = loadCargoMetadata(repoDir);
   const metadata = cached.metadata
     ?? JSON.parse(execFileSync("cargo", ["metadata", "--locked", "--format-version", "1"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));
@@ -754,6 +770,17 @@ try {
   }
 
   try { const archOut = execFileSync(process.execPath, [join(repoDir, "tools", "arch-fitness.mjs")], { encoding: "utf8" }).trim(); if (archOut === "PASS dependency cycle") console.log(archOut); else errors.push(archOut || "dependency cycle found"); } catch (error) { errors.push(`dependency cycle check failed: ${error.message}`); }
+  // Steal ledger age (2026-10-17): the loop runs its own gate in the round that
+  // already reads docs/plan/steals.md, so an open line older than 7 days (center
+  // size-check's rule: age alone) is named here in the round it turns stale, not
+  // 10 days later by a reds packet. tools/steal-land.mjs is the one source.
+  try {
+    const stealOut = execFileSync(process.execPath, [join(repoDir, "tools", "steal-land.mjs"), "--gate"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+    console.log(`PASS steal ledger: ${stealOut[stealOut.length - 2] ?? stealOut[stealOut.length - 1] ?? ""}`);
+  } catch (error) {
+    const fails = `${error.stdout ?? ""}`.split("\n").filter((l) => l.startsWith("[FAIL]")).join("; ");
+    errors.push(`steal ledger (tools/steal-land.mjs --gate): ${fails || String(error.message).split("\n")[0]}`);
+  }
   try {
     const wireFp = wiringFingerprint(repoDir);
     let wireOut = loadWiringCache(repoDir, wireFp);
@@ -778,11 +805,7 @@ try {
   console.log(mathFindings.length
     ? `WARN determinism (report-only until board task D1): platform float math in simulation code: ${mathFindings.join(", ")}`
     : "PASS determinism: no platform float math in simulation code");
-} catch (error) {
-  console.error(`FAIL workspace audit: ${error.message}`);
-  process.exitCode = 1;
-}
-} // main
+} // audit
 
 if (import.meta.main) {
   main();

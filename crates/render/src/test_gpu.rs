@@ -1,20 +1,37 @@
 //! Test GPU gate: a GPU test that finds no adapter says so, and
-//! `E2040_REQUIRE_GPU=1` turns that skip into a failure.
+//! `E2040_REQUIRE_GPU=1` turns that skip into a failure — but only for tests
+//! that call `require_or_skip`. Most GPU tests in this crate still skip
+//! ad-hoc (`eprintln!("SKIPPED ...")` plus return, ~59 sites), which bypasses
+//! the gate; converting them is a separate packet coordinated with
+//! `tools/proof.mjs`, which counts the `SKIPPED` lines.
 //!
-//! Owner: render crate. Consumers: GPU-backed tests (`present/tests_gpu.rs`
-//! first) and `tools/proof.mjs`, which counts the `SKIPPED` lines of the
-//! render leg into its RESULT line. Units: none. Determinism: none; a skip
-//! writes one line to stderr, which libtest output capture never swallows.
+//! Owner: render crate. Consumers: GPU-backed tests that call
+//! `require_or_skip` (`present/tests_gpu.rs` first) and `tools/proof.mjs`,
+//! which counts the `SKIPPED` lines of the render leg into its RESULT line.
+//! Units: none. Determinism: none; a skip writes one line to stderr, which
+//! libtest output capture never swallows, and bumps the skip counter below.
 //! Errors: only a missing adapter is a skip; any other probe failure stays
 //! the caller's panic.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Environment switch: `1` makes a missing adapter a failure.
+/// Environment switch: `1` makes a missing adapter a failure, but only
+/// where the test routes through `require_or_skip`.
 pub const REQUIRE_GPU_ENV: &str = "E2040_REQUIRE_GPU";
 
 /// Line prefix for a skipped GPU test; `tools/proof.mjs` counts these lines.
 pub const SKIP_PREFIX: &str = "SKIPPED";
+
+/// How many skips went through `require_or_skip`/`note_skip` this process.
+/// Ad-hoc `eprintln!("SKIPPED ...")` sites bypass both the gate and this
+/// counter; the counter makes the routed skips visible, not the total.
+static SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Routed skips so far in this process (see [`SKIP_COUNT`]).
+pub fn skip_count() -> u64 {
+    SKIP_COUNT.load(Ordering::Relaxed)
+}
 
 /// A GPU probe that found no adapter, with the reason it gave.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +73,7 @@ pub fn require_or_skip_with<T>(
 /// A direct stderr write: libtest captures the print macros for passing
 /// tests, and the proof gate must still see the skip.
 pub fn note_skip(test: &str, why: &str) {
+    SKIP_COUNT.fetch_add(1, Ordering::Relaxed);
     let _ = writeln!(std::io::stderr(), "{SKIP_PREFIX} {test}: {why}");
 }
 

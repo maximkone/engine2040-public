@@ -6,6 +6,14 @@
 // no new dependency.
 // Bench/offline id maps only: never use this Fx hasher on the tick path.
 // The simulation hash stays on its existing stable path.
+// clippy.toml names this file's exception: an offline id-map bench compares
+// the std HashMap (SipHash) with the fixed-seed Fx map and times both with
+// `Instant`, so it needs the two std items the tick path may never use.
+#![expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "offline id-map bench: std HashMap and Instant timing stay out of the tick path"
+)]
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};

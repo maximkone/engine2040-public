@@ -19,6 +19,4 @@ mod particles_seed;
 mod post_aa_parity;
 mod shadow_aces;
 mod shadow_post;
-mod splat_backdrop;
 mod torch_cluster_vectors;
-mod vfx_r5;

@@ -1,7 +1,7 @@
 //! projectile: fixed-point round flight over caller-owned casts.
 //!
 //! Owner: engine-combat. Consumer: `step_volley` (production volley step)
-//! over caller casts; the live game uses `NullCaster` (game/ballistics.rs:643).
+//! over caller casts; the live game uses the local `NullCaster` (no scene cast).
 //! `WallCaster` stays the single-wall harness oracle. Units: metres, metres per
 //! second, ticks at 60 Hz; spread is the tangent of the half-angle
 //! (`0..=0.25`). Determinism: `Fixed` Q16 math with `+ - * /` and `sqrt`
@@ -33,8 +33,16 @@ pub const GRAVITY_V1: Fixed = Fixed::from_bits(642908);
 pub const FLIGHT_V1: FlightTables = FlightTables::v1();
 /// Fixed-point tick step: 1/60 s truncated deterministically (65536/60).
 const DT: Fixed = Fixed::from_bits(Fixed::ONE.to_bits() / TICK_HZ_RAW);
-/// Tick rate as a raw Q16 divisor; mirrors `engine_core::tick::TICK_HZ`.
-const TICK_HZ_RAW: i64 = 60;
+/// Widening `u32` to `i64` inside a const initializer, where `i64::from` is
+/// not callable; the bytes are read out loud, so the width stays visible.
+const fn widen_u32(v: u32) -> i64 {
+    let b = v.to_be_bytes();
+    i64::from_be_bytes([0, 0, 0, 0, b[0], b[1], b[2], b[3]])
+}
+/// Tick rate as a raw Q16 divisor; the rate's one owner is
+/// `engine_core::TICK_HZ` and its checked narrow form is
+/// `engine_core::TICK_HZ_U32`, widened here in const context.
+const TICK_HZ_RAW: i64 = widen_u32(engine_core::TICK_HZ_U32);
 /// Spread-stream domain tag: arbitrary, separates spread draws from any
 /// other forked stream.
 const SPREAD_DOMAIN: u64 = 0x5350_5245_4107_0001;

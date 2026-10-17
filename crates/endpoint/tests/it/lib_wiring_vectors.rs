@@ -7,11 +7,12 @@
 //! registry entries, frames, guard verdicts. Determinism: integer compares
 //! only, no clock, no IO, no network. Errors are panics via asserts.
 //!
-//! Why this file exists: `crates/endpoint/src/lib.rs` changed 30+ times in
-//! 30 days yet held zero `#[test]` and no `tests/it` module named it, so a
-//! dropped `pub mod` would compile the crate but break every caller at
-//! their `use` line. Each vector below names the root path, so removing or
-//! gating a module fails here first.
+//! Why this file exists: `crates/endpoint/src/lib.rs` long held zero
+//! `#[test]`, so a dropped `pub mod` compiled the crate but broke every
+//! caller at their `use` line. This file pins the `tools`, `transport` and
+//! `guards` roots; `tests/it/lib_std_wiring.rs` pins the remaining std-only
+//! modules. Each vector below names its root path, so removing or gating a
+//! module fails here first.
 
 use engine_endpoint::{
     guards::{self, VerbClass},

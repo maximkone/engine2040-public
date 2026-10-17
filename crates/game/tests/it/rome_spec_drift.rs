@@ -5,11 +5,14 @@
 //! owns the numbers; `engine-core` owns tick/seed budgets, `engine-combat`
 //! owns damage/range bounds, `engine-game` owns the session defaults.
 //! Units: meters, Hz, ticks, HP, mm, seeds. Determinism: pure string scan
-//! over included text, no IO at test time. Errors: panics name the culprit
-//! key; a moved wall fails the wall test by name.
+//! over included text plus the collision world embedded from the same rows,
+//! no IO at test time. Errors: panics name the culprit key; a moved wall
+//! fails the wall test by name and a wall that stops colliding fails the
+//! collision-world test.
 
 use engine_combat::fight::TABLES_V1;
 use engine_core::config::{Budgets, Config};
+use engine_game::arena_kit::kit_match_world;
 
 /// Included Rome spec (compile-time, so a missing file fails the build).
 const SPEC_SRC: &str = include_str!("../../../../content/arena/rome-spec.json");
@@ -142,4 +145,19 @@ fn walls_match_spec_half_extent() {
     let half = spec_f32("half_extent_m");
     assert_eq!(wall_z("wall_north"), -half, "north wall sits at -half");
     assert_eq!(wall_z("wall_south"), half, "south wall sits at +half");
+}
+
+#[test]
+fn wall_collision_world_matches_spec_half_extent() {
+    let half = spec_f32("half_extent_m");
+    let world = kit_match_world().expect("embedded placement builds a collision world");
+    let planes_at = |z: f32| {
+        world
+            .obstacles()
+            .iter()
+            .filter(|obstacle| obstacle.center[1] == z)
+            .count()
+    };
+    assert_eq!(planes_at(-half), 1, "one wall plane collides at -half");
+    assert_eq!(planes_at(half), 1, "one wall plane collides at +half");
 }

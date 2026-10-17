@@ -29,8 +29,6 @@ pub const PROBE_NZ: usize = 4;
 pub const PROBE_COUNT: usize = PROBE_NX * PROBE_NY * PROBE_NZ;
 /// Grid minimum corner in meters.
 pub const PROBE_MIN: [f32; 3] = [-8.0, 0.0, -8.0];
-/// Grid maximum corner in meters.
-pub const PROBE_MAX: [f32; 3] = [8.0, 2.0, 8.0];
 /// Probe spacing in meters, matching `(MAX - MIN) / (N - 1)` per axis.
 pub const PROBE_STEP: [f32; 3] = [16.0 / 3.0, 2.0, 16.0 / 3.0];
 /// Sky share at ankle height: low probes still see sky past the fighters.
@@ -100,10 +98,7 @@ impl ProbeGrid {
     /// Allocate the one grid, seeded with the flat ambient floor so the
     /// first frame is valid before any [`update`](ProbeGrid::update).
     pub fn new() -> Self {
-        let mut probes = Vec::with_capacity(PROBE_COUNT);
-        for _ in 0..PROBE_COUNT {
-            probes.push(RT_AMBIENT_FLAT);
-        }
+        let probes = vec![RT_AMBIENT_FLAT; PROBE_COUNT];
         Self {
             nx: PROBE_NX,
             ny: PROBE_NY,
@@ -180,7 +175,7 @@ impl ProbeGrid {
         }
         let at = |x: usize, y: usize, z: usize| self.probes[(z * self.ny + y) * self.nx + x];
         let mut o = [0.0f32; 3];
-        for c in 0..3 {
+        for (c, slot) in o.iter_mut().enumerate() {
             let x00 = at(ks[0], ks[1], ks[2])[c]
                 + (at(k1s[0], ks[1], ks[2])[c] - at(ks[0], ks[1], ks[2])[c]) * ts[0];
             let x10 = at(ks[0], k1s[1], ks[2])[c]
@@ -191,7 +186,7 @@ impl ProbeGrid {
                 + (at(k1s[0], k1s[1], k1s[2])[c] - at(ks[0], k1s[1], k1s[2])[c]) * ts[0];
             let z0v = x00 + (x10 - x00) * ts[1];
             let z1v = x01 + (x11 - x01) * ts[1];
-            o[c] = z0v + (z1v - z0v) * ts[2];
+            *slot = z0v + (z1v - z0v) * ts[2];
         }
         Ok(o)
     }

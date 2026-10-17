@@ -14,9 +14,11 @@
 //! a refused upload fails the frame.
 //! Budget: cold load about 1 s (4 bodies, 6 clips, 16 PNG decodes); per
 //! frame CPU skinning of about 3.9k vertices per fighter plus one mesh
-//! upload per body part (4 per fighter).
+//! upload per body part (4 per fighter) whose 48 B vertices changed since
+//! its last upload ([`upload_slot_parts`]).
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use engine_anim::contract::{skinning_matrices, LocalPose, Skeleton};
 use engine_anim::hit_react::{envelope, DIP_M, PEAK_M};
@@ -28,6 +30,7 @@ use engine_assets::body_import::{
 };
 use engine_assets::retarget::{retarget_clip, BoneMap};
 use engine_assets::skin_import::ImportedClip;
+use engine_core::Fnv64;
 use engine_render::present::{DrawItem, DrawList, MeshKey, Presenter, TextureKey, TextureUpload};
 use engine_render::v1::{self, Camera, MeshData, PbrMaterial};
 use engine_render::v1_skin::{SkinPipeline, SkinWeights};
@@ -58,7 +61,8 @@ pub const MAX_LOOK_FIGHTERS: usize = 8;
 /// Steepest fight-camera look down: rise per metre of eye-to-focus reach.
 const MAX_PITCH_SLOPE: f32 = 0.75;
 /// Fixed ticks per second (clip clocks advance with match ticks).
-const TICK_HZ: f32 = 60.0;
+/// Single owner of the rate is `engine_core::TICK_HZ`.
+const TICK_HZ: f32 = engine_core::TICK_HZ as f32;
 /// Ticks between swing start and the impact cue (about mid-swing).
 const IMPACT_TICKS: u32 = 12;
 /// Ticks a hit victim stays tinted (about 100 ms: a flash, not a strobe).
@@ -87,6 +91,8 @@ const BALANCE_STUMBLE_LEAN_M: f32 = 0.18;
 /// puts the upright start of the death clip about 56 cm under the sand, so
 /// the cap sits above any body height and never clips a real sink.
 const SAND_LIFT_MAX_M: f32 = 1.0;
+/// Fall ticks to reach the sand (LF17, view only): 30 at 60 Hz.
+const SAND_FALL_TICKS: u32 = 30;
 /// View-only shake added per in-reach Hit, in permille (LF11, view only).
 /// Presentation only; the sim hash never reads it.
 const SHAKE_HIT_PERMILLE: u32 = 400;
@@ -99,9 +105,9 @@ const SHAKE_MAX_PERMILLE: u32 = 1000;
 /// so 17 (the ceiling) clears full trauma in 59 ticks, inside 1.0 s.
 /// Integer-only, so the same ticks give the same trauma twice.
 const SHAKE_DECAY_PERMILLE_PER_TICK: u32 = 17;
-/// Shake cap in meters at full trauma (LF11): the arena director default,
-/// so the fight camera matches the staged rig at full trauma.
-const SHAKE_MAX_M: f32 = 0.35;
+/// Shake cap in meters at full trauma (LF11): 0.12 m, the arena director
+/// default, so the fight camera matches the staged rig at full trauma.
+const SHAKE_MAX_M: f32 = 0.12;
 
 /// Clip files under `glb/clips/`, in [`ClipRole`] order.
 const CLIP_FILES: [&str; 6] = [
@@ -287,24 +293,96 @@ fn balance_lean_m(gait: GaitPhase) -> f32 {
     }
 }
 
-/// Lift to rest a body on the sand (LF17, view only): the below-sand depth
-/// of the posed bounds, clamped to `0.0..=SAND_LIFT_MAX_M`. The full depth
-/// applies from the first tick: the fallen pelvis moves the whole upright
-/// start pose down at once, so any ease would show a body sunk into the sand.
-///
-/// Consumer: [`FighterLook::stage_bodies`] (the frame's CPU skin folds every
-/// posed vertex into `BodyTruth::min`, so the fix reads the pose-skinned
-/// bounds, never the clip file: the skeleton pose owns the vertices).
-/// Data owner: this module owns the present lift; the sim hash never reads
-/// it. Units: meters in, meters out. Determinism: pure `f32` in, `f32` out,
-/// no clock, no allocation. Errors: none; non-finite or above-sand bounds
-/// read as 0, and the helper only adds lift, never lowers.
+/// Full below-sand depth, clamped `0.0..=SAND_LIFT_MAX_M` (LF17, view only).
+/// Pure `f32` in/out; non-finite or above sand reads as 0, never lowers.
 #[must_use]
 fn sand_lift_m(lowest_y: f32) -> f32 {
     if !lowest_y.is_finite() {
         return 0.0;
     }
     (crate::view_truth::GROUND_Y - lowest_y).clamp(0.0, SAND_LIFT_MAX_M)
+}
+
+/// Eased down lift (LF17, view only): full depth times smoothstep age over
+/// `SAND_FALL_TICKS`. Age 0 gives 0, rest gives full depth within 1 cm.
+#[must_use]
+fn sand_lift_eased(lowest_y: f32, down_age_ticks: u32) -> f32 {
+    let full = sand_lift_m(lowest_y);
+    if full <= 0.0 {
+        return 0.0;
+    }
+    if down_age_ticks >= SAND_FALL_TICKS {
+        return full;
+    }
+    let denom = f32::from(u16::try_from(SAND_FALL_TICKS).unwrap_or(u16::MAX));
+    let age = f32::from(u16::try_from(down_age_ticks).unwrap_or(u16::MAX));
+    let t = (age / denom).clamp(0.0, 1.0);
+    full * t * t * (3.0 - 2.0 * t)
+}
+
+/// Down-only rest lift for one slot (LF17, view only): eased depth for `Down`
+/// or `Fallen`, else 0, so idle hover stays on its own law. View only.
+#[must_use]
+fn down_rest_lift(slot: &SlotAnim, tick: u32, lowest_y: f32, has_bounds: bool) -> f32 {
+    if !has_bounds {
+        return 0.0;
+    }
+    if slot.act == Act::Down {
+        sand_lift_eased(lowest_y, tick.saturating_sub(slot.act_start))
+    } else if slot.balance == GaitPhase::Fallen {
+        sand_lift_m(lowest_y)
+    } else {
+        0.0
+    }
+}
+
+/// Whole microseconds of wall clock, saturating. Evidence only: the fighter
+/// skin split ([`SkinSplit`]) reports through it and nothing hashed reads it.
+fn micros(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Body parts left resident for the frame's draws, split into the CPU pose
+/// half and the GPU upload half of the fighter skin wall.
+///
+/// Consumer: [`FighterLook::present_into`] returns it inside
+/// [`PresentReport`] and `crates/game/src/bin/arena.rs` folds both halves
+/// into the `arena frame-split` line beside the untouched `fighters` lump.
+/// Data owner: this module, read-only for its consumers. Units: parts,
+/// microseconds of wall clock sampled with [`Instant`] only (no map, poll or
+/// wait). Determinism: evidence only; the counters never enter a draw, the
+/// view truth or hashed state. A zero means no `SkinnedFrame`s reached the
+/// upload path this call, never a second timing law.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SkinSplit {
+    /// Parts the frame's draws read this call: one per part with finite
+    /// posed vertices, whether it was written or already resident.
+    pub uploaded: usize,
+    /// `uploaded`'s CPU half: clip sample, skin, pose fold, the down lift and
+    /// the upload digest ([`FighterLook::pose_frame`] plus the per-part fold).
+    pub pose_us: u64,
+    /// `uploaded`'s GPU half: the `v1::upload_mesh` plus
+    /// `Presenter::upload_mesh` pair per part (validation, tangent rebuild,
+    /// byte pack, buffer write). A part whose digest is unchanged runs no
+    /// pair and adds nothing.
+    pub upload_us: u64,
+}
+
+/// One presented frame's cost report: the draws pushed for the frame and the
+/// split of the fighter skin wall behind them.
+///
+/// Consumer: `crates/game/src/bin/arena.rs` (`ArenaApp::push_fighters`) adds
+/// `skin.pose_us`/`skin.upload_us` to its `fighters_pose_us`/
+/// `fighters_upload_us` counters, printed as `fighters_pose=`/
+/// `fighters_upload=` on the `arena frame-split` line. Units: draws, parts,
+/// microseconds of wall clock. Determinism: evidence only; the draws stay the
+/// frame's draw list and the counters never enter hashed state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PresentReport {
+    /// Draws pushed this frame: the staged ring plus the skinned body parts.
+    pub draws: usize,
+    /// Parts left resident for those draws and the two wall halves.
+    pub skin: SkinSplit,
 }
 
 /// Upload one slot's skinned parts with the down lift applied (LF17, view
@@ -314,8 +392,17 @@ fn sand_lift_m(lowest_y: f32) -> f32 {
 /// `refresh_mesh_vertices` path writes 32 B (pos + normal + uv) and leaves
 /// the 48 B stride misaligned past the first vertex, stretching every other
 /// fighter triangle across the screen (1209Z streaks). Until that path carries
-/// tangents, every skinned frame re-uploads the full mesh (correct stride)
-/// so fighters render with limbs and armor. Returns parts written.
+/// tangents, every *changed* skinned frame re-uploads the full mesh (correct
+/// stride) so fighters render with limbs and armor.
+///
+/// The pair is skipped when the frame's lifted positions plus skinned normals
+/// hash to the part's resident digest (`digests`, keyed by
+/// `slot * MAX_PARTS + part`): the resident bytes already are the frame's
+/// bytes, so a frozen body re-uploads nothing and a moved one re-uploads
+/// whole. `uploaded` counts the parts left resident for the frame either way.
+/// Returns that count beside the two halves they cost: the lift plus digest
+/// fold into `pose_us`, the `v1::upload_mesh`/`Presenter::upload_mesh` pair
+/// into `upload_us` ([`SkinSplit`]).
 /// [found2 | 7.6.2 Rendering with Normal Maps]
 fn upload_slot_parts(
     presenter: &mut Presenter,
@@ -323,30 +410,68 @@ fn upload_slot_parts(
     rig: &Rig,
     frames: Vec<engine_render::v1_skin::SkinnedFrame>,
     lift: f32,
-) -> Result<usize, LookError> {
-    let mut uploaded = 0usize;
+    digests: &mut [Option<u64>],
+) -> Result<SkinSplit, LookError> {
+    let mut split = SkinSplit::default();
     for (part_index, posed) in frames.into_iter().enumerate() {
         let part = &rig.parts[part_index];
+        let lifted_started = Instant::now();
+        // Digest the exact bytes the pair would upload: the lifted positions
+        // and the skinned normals (uvs and indices belong to the rig and
+        // never change). Hashing rides the lift pass, so a changed frame pays
+        // one pass over the vertices it already touches.
+        let mut hasher = Fnv64::new();
         let lifted: Vec<[f32; 3]> = if lift > 0.0 {
-            posed
-                .positions
-                .iter()
-                .map(|p| [p[0], p[1] + lift, p[2]])
-                .collect()
+            let mut out = Vec::with_capacity(posed.positions.len());
+            for position in &posed.positions {
+                let moved = [position[0], position[1] + lift, position[2]];
+                for component in moved {
+                    hasher.write_f32(component);
+                }
+                out.push(moved);
+            }
+            out
         } else {
+            for position in &posed.positions {
+                for component in position {
+                    hasher.write_f32(*component);
+                }
+            }
             posed.positions
         };
+        for normal in &posed.normals {
+            for component in normal {
+                hasher.write_f32(*component);
+            }
+        }
+        let digest = hasher.finish();
+        split.pose_us = split
+            .pose_us
+            .saturating_add(micros(lifted_started.elapsed()));
+        let slot_part = slot_index * MAX_PARTS + part_index;
+        if digests.get(slot_part) == Some(&Some(digest)) {
+            // Resident bytes already are this frame's bytes: no upload.
+            split.uploaded += 1;
+            continue;
+        }
         let key = look_mesh_key(slot_index, part_index);
         // 48 B stride fix: always re-upload with recomputed tangents; never
         // refresh 32 B in place (misaligned past vertex 0, streaks).
+        let upload_started = Instant::now();
         let mesh = v1::upload_mesh(&lifted, &posed.normals, &part.mesh.uvs, &part.mesh.indices)
             .map_err(|err| LookError::Skin(format!("{err}")))?;
         presenter
             .upload_mesh(key, &mesh)
             .map_err(|err| LookError::Upload(err.to_string()))?;
-        uploaded += 1;
+        split.upload_us = split
+            .upload_us
+            .saturating_add(micros(upload_started.elapsed()));
+        if let Some(resident) = digests.get_mut(slot_part) {
+            *resident = Some(digest);
+        }
+        split.uploaded += 1;
     }
-    Ok(uploaded)
+    Ok(split)
 }
 
 /// Note: the authoritative read is `engine-arena` `Sim::balance` (already
@@ -491,6 +616,20 @@ pub struct FighterLook {
     /// add 400, in-reach Knockdowns add 700, clamped at 1000, decayed 1000
     /// per second. Presentation only; the sim hash never reads it.
     shake_trauma_permille: u32,
+    /// Last uploaded vertex digest per `slot * MAX_PARTS + part`, `None`
+    /// before that part's first upload. The upload pair is skipped when a
+    /// frame's lifted positions plus skinned normals hash to the resident
+    /// entry, so a frozen body re-uploads nothing while a moved one
+    /// re-uploads whole (48 B stride, never a 32 B refresh). Presentation
+    /// only; never hashed and never drawn.
+    uploaded_digest: Vec<Option<u64>>,
+}
+
+/// One upload-digest slot per `slot * MAX_PARTS + part`, all empty: the
+/// [`FighterLook::uploaded_digest`] shape, one owner for the constructor and
+/// the test literals that spell the struct out.
+fn empty_upload_digest() -> Vec<Option<u64>> {
+    vec![None; MAX_LOOK_FIGHTERS * MAX_PARTS]
 }
 
 /// Fighters content dir (`content/fighters`), resolved like the kit dir:
@@ -565,6 +704,55 @@ fn skin_radius_m(body: &SkinnedBody) -> f32 {
         }
     }
     radius
+}
+
+/// Posed bound of one skinned body in world meters: the axis-box centre over
+/// every posed vertex plus the farthest vertex gap from it, or `None` when no
+/// finite vertex folds in. This is the bound a draw carries, so culling
+/// follows the pose and a limb the bind pose never had stays inside it
+/// (Eberly 3.2); the vertices ride the body's down-rest lift like the drawn
+/// mesh does. Meters in, meters out, no heap, and the same frames give the
+/// same bound bytes twice.
+fn posed_bound_m(body: &PosedBody) -> Option<([f32; 3], f32)> {
+    let lift = if body.lift.is_finite() {
+        body.lift
+    } else {
+        0.0
+    };
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    let mut folded = false;
+    for frame in body.frames.iter() {
+        for vertex in frame.positions.iter() {
+            if !vertex.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            folded = true;
+            let at = [vertex[0], vertex[1] + lift, vertex[2]];
+            for (axis, value) in at.iter().enumerate() {
+                lo[axis] = lo[axis].min(*value);
+                hi[axis] = hi[axis].max(*value);
+            }
+        }
+    }
+    if !folded {
+        return None;
+    }
+    let centre: [f32; 3] = std::array::from_fn(|axis| (lo[axis] + hi[axis]) * 0.5);
+    let mut radius2 = 0.0f32;
+    for frame in body.frames.iter() {
+        for vertex in frame.positions.iter() {
+            if !vertex.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            let (dx, dy, dz) = (
+                vertex[0] - centre[0],
+                vertex[1] + lift - centre[1],
+                vertex[2] - centre[2],
+            );
+            radius2 = radius2.max(dx * dx + dy * dy + dz * dz);
+        }
+    }
+    Some((centre, radius2.sqrt()))
 }
 
 /// Retarget every clip source onto the body skeleton, in file order.
@@ -750,6 +938,12 @@ struct PosedBody {
     truth: BodyTruth,
     frames: Vec<engine_render::v1_skin::SkinnedFrame>,
     lift: f32,
+    /// Bound this draw carries in world meters: the posed-vertex bound
+    /// ([`posed_bound_m`]) floored at the rig's bind radius, so a cull reads
+    /// the pose and never the bind-pose sphere. `None` when no posed vertex
+    /// is finite. Consumer: [`FighterLook::stage_bodies`], the frame's draw
+    /// path, replacing the bind sphere a render draw cull would read.
+    bound: Option<([f32; 3], f32)>,
 }
 
 impl PosedBody {
@@ -813,6 +1007,7 @@ impl FighterLook {
             bundle_shas: bindings.into_iter().map(|b| b.bundle_sha256).collect(),
             truth: Vec::new(),
             shake_trauma_permille: 0,
+            uploaded_digest: empty_upload_digest(),
         })
     }
 
@@ -1122,16 +1317,18 @@ impl FighterLook {
     }
 
     /// Skin every seen fighter at sub-tick `alpha` and write its parts into
-    /// their resident vertex buffers. Returns parts written. A skinning or
-    /// upload refusal is loud.
+    /// their resident vertex buffers, skipping a part whose bytes are already
+    /// resident. Returns parts left resident; the wall halves behind them are
+    /// [`Self::present_into`]'s report ([`SkinSplit`]). A skinning or upload
+    /// refusal is loud.
     pub fn stage_frame(
-        &self,
+        &mut self,
         presenter: &mut Presenter,
         fighters: usize,
         alpha: f32,
     ) -> Result<usize, LookError> {
         self.stage_bodies(presenter, fighters, alpha)
-            .map(|(uploaded, _)| uploaded)
+            .map(|(split, _)| split.uploaded)
     }
 
     /// Sample one seen slot at sub-tick `alpha`: clip pick, world joint
@@ -1177,7 +1374,8 @@ impl FighterLook {
     /// per seen fighter, with no `Presenter`, so `load`, `observe_tick` and
     /// this run headless. A seen slot with no rig fails loud; unseen slots
     /// pose nothing. The same inputs pose the same bodies twice; the sim
-    /// hash never reads them.
+    /// hash never reads them. Each posed body carries its bound from the
+    /// posed vertices, floored at the rig's bind radius.
     fn pose_frame(&self, fighters: usize, alpha: f32) -> Result<Vec<PosedBody>, LookError> {
         let alpha = crate::stage_bodies::clamp_alpha(alpha);
         let mut posed = Vec::with_capacity(fighters.min(MAX_LOOK_FIGHTERS));
@@ -1231,31 +1429,25 @@ impl FighterLook {
                 }
                 frames.push(posed);
             }
-            // LF17 sand rest, view only: lift a body by its below-sand depth
-            // so the lowest vertex rests on GROUND_Y. The bounds come
-            // from the CPU skin of the pose `slot_pose` returned (after the
-            // `FALLEN_PELVIS_M` clamp), the same vertices the frame draws, so
-            // the fix reads the pose, never the clip file. The lift is a +y
-            // translation of the root and every posed vertex, at full depth
-            // from the first tick. Every act rests on the sand (the fallen
-            // pelvis sinks a start pose 56 cm, a fast run dips the feet a few
-            // cm); above sand never pushes down; the sim hash never reads
-            // this.
-            let lift = if body.has_bounds() {
-                sand_lift_m(body.min[1])
-            } else {
-                0.0
-            };
+            // LF17 down rest, view only: eased lift, idle never lifts.
+            let lift = down_rest_lift(&slot, self.tick, body.min[1], body.has_bounds());
             if lift > 0.0 {
                 body.root[1] += lift;
                 body.min[1] += lift;
                 body.max[1] += lift;
             }
-            posed.push(PosedBody {
+            let mut drawn = PosedBody {
                 truth: body,
                 frames,
                 lift,
-            });
+                bound: None,
+            };
+            // One owner of the bound mint: the posed vertices, floored at
+            // the rig's own bind radius so a bound never shrinks under the
+            // sphere it replaces.
+            drawn.bound =
+                posed_bound_m(&drawn).map(|(centre, radius)| (centre, radius.max(rig.radius_m)));
+            posed.push(drawn);
         }
         Ok(posed)
     }
@@ -1311,14 +1503,13 @@ impl FighterLook {
                 body.min = lo;
                 body.max = hi;
             }
-            // LF17 sand rest, view only: the joints path lifts by its own
-            // bounds, the same rule as the full pose, so down bodies rest on
-            // the sand in both modes; the sim hash never reads this.
-            let lift = if body.has_bounds() {
-                sand_lift_m(body.min[1])
-            } else {
-                0.0
-            };
+            // LF17 down rest, view only: same eased rule as the full pose.
+            let lift = down_rest_lift(
+                &self.slots[slot_index],
+                self.tick,
+                body.min[1],
+                body.has_bounds(),
+            );
             if lift > 0.0 {
                 body.root[1] += lift;
                 body.min[1] += lift;
@@ -1357,7 +1548,21 @@ impl FighterLook {
         let mut laws = crate::view_truth::ViewLaws::default();
         for tick in 0..ticks {
             let outcome = app.tick_empty();
+            // LF10: poll the app's mirrored hitstop the same way the window
+            // twin does; the look's cue-derived freeze follows the same
+            // 4-tick law, so the hold agrees. Presentation only, never hashed.
+            let remaining = app.hitstop_remaining();
+            let holding = crate::App::hitstop_holds(remaining);
+            debug_assert!(
+                remaining <= engine_combat::fight::HITSTOP_TICKS,
+                "hitstop mirror stays within the sim freeze"
+            );
             look.observe_tick(tick, app.fighter_views(), app.hp(), &outcome.cues);
+            debug_assert_eq!(
+                holding,
+                look.bridge.iter().any(|slot| tick < slot.hold_until()),
+                "app mirror and look freeze agree at tick {tick}"
+            );
             look.observe_live_balances(app.live_match(), usize::from(fighters));
             let joints = look.pose_frame_joints(usize::from(fighters), 0.5)?;
             laws.note(&camera, f64::from(tick) + 0.5, &joints);
@@ -1369,26 +1574,55 @@ impl FighterLook {
     /// the exact posed vertices, model-space joints, clip, tint): the view
     /// truth costs one pass over vertices the CPU skin already produced.
     fn stage_bodies(
-        &self,
+        &mut self,
         presenter: &mut Presenter,
         fighters: usize,
         alpha: f32,
-    ) -> Result<(usize, Vec<BodyTruth>), LookError> {
+    ) -> Result<(SkinSplit, Vec<BodyTruth>), LookError> {
         // Split: the CPU pose step lives in `pose_frame`; this keeps the
         // upload, so every existing caller poses and draws exactly as before.
+        let pose_started = Instant::now();
         let posed = self.pose_frame(fighters, alpha)?;
-        let mut uploaded = 0usize;
+        let mut split = SkinSplit {
+            uploaded: 0,
+            pose_us: micros(pose_started.elapsed()),
+            upload_us: 0,
+        };
         let mut truth = Vec::with_capacity(posed.len());
         for body in posed {
             let slot_index = usize::from(body.truth.slot);
+            let rig_index = self.rig_for_slot(slot_index);
             let rig = self
                 .rigs
-                .get(self.rig_for_slot(slot_index))
+                .get(rig_index)
                 .ok_or_else(|| LookError::Skin("rig missing".to_string()))?;
-            uploaded += upload_slot_parts(presenter, slot_index, rig, body.frames, body.lift)?;
+            // The carried bound is what a cull reads, so it must agree with
+            // the folded vertex box: one emptiness story for both owners.
+            debug_assert_eq!(
+                body.bound.is_some(),
+                body.truth.has_bounds(),
+                "posed bound and folded AABB agree on a finite body"
+            );
+            // No finite posed vertex means nothing to draw: the slot keeps
+            // its resident mesh instead of writing NaN vertices over it.
+            if body.bound.is_none() {
+                truth.push(body.truth);
+                continue;
+            }
+            let parts = upload_slot_parts(
+                presenter,
+                slot_index,
+                rig,
+                body.frames,
+                body.lift,
+                &mut self.uploaded_digest,
+            )?;
+            split.uploaded += parts.uploaded;
+            split.pose_us = split.pose_us.saturating_add(parts.pose_us);
+            split.upload_us = split.upload_us.saturating_add(parts.upload_us);
             truth.push(body.truth);
         }
-        Ok((uploaded, truth))
+        Ok((split, truth))
     }
 
     /// Every body the last [`Self::present_into`] drew, as numbers.
@@ -1463,15 +1697,16 @@ impl FighterLook {
     }
 
     /// One frame for the presenter: skin and upload every fighter, push the
-    /// textured draws and aim the list camera for the frame's shot.
-    /// Returns draws pushed; refusals are loud.
+    /// textured draws and aim the list camera for the frame's shot. Returns
+    /// the frame's draws beside the fighter skin wall split ([`PresentReport`]);
+    /// refusals are loud.
     pub fn present_into(
         &mut self,
         presenter: &mut Presenter,
         list: &mut DrawList,
         frame: &LookFrame,
-    ) -> Result<usize, LookError> {
-        let (_, truth) = self.stage_bodies(presenter, frame.fighters, frame.alpha)?;
+    ) -> Result<PresentReport, LookError> {
+        let (skin, truth) = self.stage_bodies(presenter, frame.fighters, frame.alpha)?;
         self.truth = truth;
         let resident = presenter.mesh_keys();
         if let Some(ring) = &self.ring {
@@ -1481,7 +1716,7 @@ impl FighterLook {
         if draws > 0 {
             list.camera = self.fight_camera(&list.camera, frame.shot, frame.fighters, frame.frame);
         }
-        Ok(draws)
+        Ok(PresentReport { draws, skin })
     }
 
     /// Seen fighters whose chest (1 m up) is in `camera`'s picture: the
@@ -1749,6 +1984,7 @@ mod tests {
             bundle_shas: Vec::new(),
             truth: Vec::new(),
             shake_trauma_permille: 0,
+            uploaded_digest: empty_upload_digest(),
         }
     }
 
@@ -1812,6 +2048,7 @@ mod tests {
             bundle_shas: Vec::new(),
             truth: Vec::new(),
             shake_trauma_permille: 0,
+            uploaded_digest: empty_upload_digest(),
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -1842,6 +2079,7 @@ mod tests {
             bundle_shas: Vec::new(),
             truth: Vec::new(),
             shake_trauma_permille: 0,
+            uploaded_digest: empty_upload_digest(),
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -2086,6 +2324,7 @@ mod tests {
             bundle_shas: Vec::new(),
             truth: Vec::new(),
             shake_trauma_permille: 0,
+            uploaded_digest: empty_upload_digest(),
         }
     }
 
@@ -2369,9 +2608,10 @@ mod tests {
     #[test]
     fn product_sunk_56cm_down_rest_reports_green() {
         // Product 05142ee3 frame 169 slot 0 down min -0.561, sunk 56.1 floor 3.
-        // Old down lift capped 0.20 eased (0 at tick 0) left 56.1/36.1 sunk.
-        // Fix lifts full depth at once, cap 1.0, view only. Pure positions
-        // plus view laws, no window.
+        // Down lift eased over the fall (LF17, view only): 0 at the fall start,
+        // full depth at rest, cap 1.0. Pure positions plus view laws, no window.
+        // Caller: `FighterLook::pose_frame` plus `pose_frame_joints` (the live
+        // down-only rest lift reads this eased depth).
         use crate::view_truth::{BodyTruth, ViewLaws};
         let cam = Camera::new([0.0, 1.5, 6.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], 1.0);
         let mut raw = BodyTruth::new(
@@ -2393,10 +2633,24 @@ mod tests {
             "unlifted sunk 56.1, got {}",
             before.line().unwrap()
         );
-        let lift = sand_lift_m(raw.min[1]);
+        let start_lift = sand_lift_eased(raw.min[1], 0);
+        assert!(
+            start_lift.abs() < 1e-6,
+            "fall start lifts nothing, got {start_lift}"
+        );
+        let mid_lift = sand_lift_eased(raw.min[1], SAND_FALL_TICKS / 2);
+        assert!(
+            mid_lift > 0.0 && mid_lift < 0.561,
+            "fall middle lifts partway, got {mid_lift}"
+        );
+        let lift = sand_lift_eased(raw.min[1], SAND_FALL_TICKS);
         assert!(
             (lift - 0.561).abs() < 1e-6,
-            "full depth at once, got {lift}"
+            "rest lifts full depth, got {lift}"
+        );
+        assert!(
+            (raw.min[1] + lift).abs() * 100.0 < 1.0,
+            "the rested body sits within 1 cm of the sand"
         );
         let mut fixed = raw;
         fixed.root[1] += lift;
@@ -2869,16 +3123,24 @@ mod tests {
         let views = [view(0, -1.0, 0.0), view(1, 1.0, 0.0)];
         look.observe_tick(0, &views, &[1000, 1000], &[]);
         let created = presenter.gpu_create_totals();
-        for step in 0..5u8 {
+        // A moved pose is what re-sends a part (an upload digest skips only
+        // the parts whose bytes are already resident), so every step here
+        // steps the tick and both roots: each staged frame is a changed one.
+        for step in 1..=5u8 {
+            let moved = [
+                view(0, -1.0 + f32::from(step) * 0.1, 0.0),
+                view(1, 1.0 - f32::from(step) * 0.1, 0.0),
+            ];
+            look.observe_tick(u32::from(step), &moved, &[1000, 1000], &[]);
             let written = look
-                .stage_frame(&mut presenter, 2, f32::from(step) * 0.2)
+                .stage_frame(&mut presenter, 2, 0.5)
                 .expect("frame stages");
             assert!(written >= 2, "both fighters write their parts");
         }
         // 48 B stride (pos + normal + uv + tangent) needs a full re-upload
-        // with recomputed tangents every skinned frame; the 32 B in-place
-        // refresh misaligns past vertex 0 into streaks (1209Z). Creates must
-        // grow while every part still writes.
+        // with recomputed tangents on every changed skinned frame; the 32 B
+        // in-place refresh misaligns past vertex 0 into streaks (1209Z).
+        // Creates must grow while every part still writes.
         assert!(
             presenter.gpu_create_totals() > created,
             "tangent re-upload creates buffers: {:?} vs {created:?}",
@@ -2897,12 +3159,105 @@ mod tests {
         }
         // A fighter that shows up later already owns its buffers.
         let three = [view(0, -1.0, 0.0), view(1, 1.0, 0.0), view(2, 0.0, 3.0)];
-        look.observe_tick(1, &three, &[1000, 1000, 1000], &[]);
+        look.observe_tick(6, &three, &[1000, 1000, 1000], &[]);
         look.stage_frame(&mut presenter, 3, 0.5)
             .expect("late fighter stages");
         assert!(
             presenter.gpu_create_totals() > created,
             "late slots re-upload too"
+        );
+    }
+
+    #[test]
+    fn skinned_upload_skips_resident_parts_and_counts_both_halves() {
+        // F2P: without the upload digest every part re-runs the
+        // `v1::upload_mesh`/`Presenter::upload_mesh` pair on every present, so
+        // `second.skin.upload_us` is non-zero and the assertion below fails.
+        // The two halves must both count on a staged rig, must sit inside the
+        // wall they are cut from, and the half the cut owns must drop on an
+        // identical second call while `uploaded` still reports the parts the
+        // frame needs - and a moved pose must re-upload whole, never leaving
+        // the resident bytes of a previous tick on screen.
+        let mut presenter = match Presenter::init_offscreen() {
+            Ok(presenter) => presenter,
+            Err(engine_render::present::PresentError::NoAdapter) => {
+                eprintln!("SKIPPED fighter skin split: no wgpu adapter on this machine");
+                return;
+            }
+            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        };
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        look.stage_meshes(&mut presenter).expect("bodies stage");
+        let views = [view(0, -1.0, 0.0)];
+        look.observe_tick(0, &views, &[1000], &[]);
+        let scene = engine_render::v1::default_scene(64, 64).expect("default scene is valid");
+        let list = || DrawList {
+            camera: scene.camera.clone(),
+            light: scene.light.clone(),
+            items: Vec::new(),
+        };
+        let frame = LookFrame {
+            fighters: 1,
+            alpha: 0.5,
+            shot: Shot::Action,
+            frame: 0,
+        };
+        let parts = look.rigs[look.rig_for_slot(0)].parts.len();
+        // Warm the skin, the tangent rebuild and the allocator off the clock.
+        let warm = LookFrame {
+            alpha: 0.25,
+            ..frame
+        };
+        look.present_into(&mut presenter, &mut list(), &warm)
+            .expect("warm present");
+        // One tick later the fighter stands a step on: the changed placed
+        // vertices must re-upload whole, and the identical repeat must not.
+        look.observe_tick(1, &[view(0, -0.8, 0.0)], &[1000], &[]);
+        let wall = Instant::now();
+        let first = look
+            .present_into(&mut presenter, &mut list(), &frame)
+            .expect("first present");
+        let wall_ns = wall.elapsed().as_nanos();
+        let second = look
+            .present_into(&mut presenter, &mut list(), &frame)
+            .expect("repeat present");
+        assert!(
+            first.skin.pose_us > 0 && first.skin.upload_us > 0,
+            "both halves count on a staged rig, got {:?}",
+            first.skin
+        );
+        let split_ns =
+            u128::from(first.skin.pose_us) * 1_000 + u128::from(first.skin.upload_us) * 1_000;
+        assert!(
+            split_ns <= wall_ns,
+            "the split never exceeds the wall it was cut from: {split_ns} ns vs {wall_ns} ns"
+        );
+        assert_eq!(
+            first.skin.uploaded, parts,
+            "one staged fighter writes its parts"
+        );
+        assert_eq!(
+            second.skin.uploaded, parts,
+            "the repeated frame still reports the parts it needs"
+        );
+        // The cut: an unchanged digest runs no `upload_mesh` pair, so the
+        // second identical call adds zero upload time while the first frame
+        // of a moved pose still uploads whole.
+        assert_eq!(
+            second.skin.upload_us, 0,
+            "an unchanged digest uploads nothing, got {:?}",
+            second.skin
+        );
+        // A skipped part is never a stale one: the next tick moves the body,
+        // so its parts leave the resident digest and the pair runs again.
+        look.observe_tick(2, &[view(0, -0.6, 0.0)], &[1000], &[]);
+        let moved = look
+            .present_into(&mut presenter, &mut list(), &frame)
+            .expect("moved present");
+        assert!(
+            moved.skin.upload_us > 0 && moved.skin.uploaded == parts,
+            "a moved pose re-uploads its parts, got {:?}",
+            moved.skin
         );
     }
 
@@ -3132,6 +3487,122 @@ mod tests {
                 .iter()
                 .zip(outer_max.iter())
                 .all(|(inner, outer)| *inner <= *outer + pad)
+    }
+
+    /// One synthetic skinned frame over `positions`: the fold input of
+    /// [`posed_bound_m`].
+    fn bound_frame(positions: &[[f32; 3]]) -> engine_render::v1_skin::SkinnedFrame {
+        engine_render::v1_skin::SkinnedFrame {
+            positions: positions.to_vec(),
+            normals: vec![[0.0, 1.0, 0.0]; positions.len()],
+            used_error_material: false,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// One synthetic posed body over `positions`, with no bound computed yet.
+    fn bound_body(positions: &[[f32; 3]]) -> PosedBody {
+        PosedBody {
+            truth: BodyTruth::new(0, "idle", [0.0; 3], 0.0, Vec::new()),
+            frames: vec![bound_frame(positions)],
+            lift: 0.0,
+            bound: None,
+        }
+    }
+
+    /// Gap between two world points in meters.
+    fn gap_m(a: [f32; 3], b: [f32; 3]) -> f32 {
+        let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    #[test]
+    fn posed_bound_follows_a_posed_arm_outside_the_bind_sphere() {
+        // Accept case: the bind sphere is 0.5 m around the trunk and the
+        // swing holds the arm 1.5 m out past it. A bind-pose sphere culls
+        // that arm; the posed bound holds it.
+        let bind_radius_m = 0.5f32;
+        let (trunk, arm) = ([0.0, 0.9, 0.0], [1.5, 1.2, 0.0]);
+        let body = bound_body(&[[-0.3, 0.0, -0.3], [0.3, 1.8, 0.3], arm]);
+        let (centre, radius) = posed_bound_m(&body).expect("finite vertices bind");
+        assert!(
+            gap_m(centre, arm) <= radius + 1e-6,
+            "the posed arm stays inside the bound, got {} over {radius}",
+            gap_m(centre, arm)
+        );
+        assert!(
+            gap_m(trunk, arm) > bind_radius_m,
+            "the arm leaves the sphere"
+        );
+        assert!(radius >= bind_radius_m, "the bound clears the sphere");
+    }
+
+    #[test]
+    fn posed_bound_replays_same_bytes_twice() {
+        let body = bound_body(&[[-0.3, 0.0, -0.3], [1.5, 1.2, 0.0], [0.3, 1.8, 0.3]]);
+        let first = posed_bound_m(&body).expect("finite vertices bind");
+        let second = posed_bound_m(&body).expect("finite vertices bind again");
+        assert_eq!(
+            (first.0.map(f32::to_bits), first.1.to_bits()),
+            (second.0.map(f32::to_bits), second.1.to_bits()),
+            "the same posed vertices give the same bound bytes twice"
+        );
+    }
+
+    #[test]
+    fn posed_bound_refuses_a_nan_vertex() {
+        // A NaN vertex never widens the bound and never panics; a body whose
+        // every vertex is non-finite has no bound at all.
+        assert_eq!(
+            posed_bound_m(&bound_body(&[[f32::NAN, 0.0, 0.0]])),
+            None,
+            "no finite vertex, no bound"
+        );
+        let mixed = bound_body(&[[0.0, 0.0, 0.0], [f32::NAN, 90.0, 0.0], [1.0, 2.0, 0.0]]);
+        let (centre, radius) = posed_bound_m(&mixed).expect("finite vertices bind");
+        assert_eq!(
+            centre,
+            [0.5, 1.0, 0.0],
+            "the NaN vertex never moves the centre"
+        );
+        assert!(
+            centre.iter().all(|v| v.is_finite()) && radius.is_finite(),
+            "the bound stays finite"
+        );
+        assert!(
+            radius <= gap_m(centre, [1.0, 2.0, 0.0]) + 1e-6,
+            "the NaN vertex never widens the bound, got {radius}"
+        );
+    }
+
+    #[test]
+    fn posed_bound_never_shrinks_below_the_bind_radius() {
+        // The caller floors the posed radius at the rig's bind radius
+        // (`Rig::radius_m` = `skin_radius_m` of the bind body, floor 0.5 m),
+        // so a bound never shrinks under today's value.
+        let bind_radius_m = 0.5f32;
+        let tiny = bound_body(&[[-0.01, 0.0, -0.01], [0.01, 0.04, 0.01]]);
+        let (_, radius) = posed_bound_m(&tiny).expect("finite vertices bind");
+        assert!(radius < bind_radius_m, "a tiny pose sits inside the sphere");
+        assert_eq!(radius.max(bind_radius_m), bind_radius_m, "the floor holds");
+        // End to end: every slot a real posed frame carries sits at or above
+        // its rig's bind radius, never under it.
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let views = [view(0, -1.0, 0.0), view(1, 1.0, 0.0)];
+        look.observe_tick(0, &views, &[1000, 1000], &[]);
+        let posed = look.pose_frame(2, 0.5).expect("CPU pose");
+        assert_eq!(posed.len(), 2, "both seen slots pose");
+        for body in &posed {
+            let rig = &look.rigs[look.rig_for_slot(usize::from(body.truth.slot))];
+            let (centre, radius) = body.bound.expect("a posed body carries a bound");
+            assert!(centre.iter().all(|v| v.is_finite()), "centre stays finite");
+            assert!(
+                radius >= rig.radius_m,
+                "slot {} bound {radius} under the bind radius {}",
+                body.truth.slot,
+                rig.radius_m
+            );
+        }
     }
 
     #[test]
@@ -3373,6 +3844,7 @@ mod tests {
             bundle_shas: Vec::new(),
             truth: Vec::new(),
             shake_trauma_permille: 0,
+            uploaded_digest: empty_upload_digest(),
         };
         assert_eq!(
             empty

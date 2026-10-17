@@ -193,6 +193,98 @@ pub fn palette_entry(i: u8) -> [u8; 3] {
     PALETTE[(i as usize) % PALETTE_LEN]
 }
 
+// ---------------------------------------------------------------------------
+// RL43 linear HDR texel lane: RGB9E5 shared-exponent codec.
+// ---------------------------------------------------------------------------
+
+/// Largest value an RGB9E5 mantissa/exponent pair holds (`511/512 * 2^16`).
+const RGB9E5_MAX: f32 = 65408.0;
+
+/// Named conversion, no `as`: exact `u32` -> `f32` while `v < 2^23` (the value
+/// rides the mantissa of `2^23 + v`, the low bits of `0x4b00_0000`).
+pub(crate) fn f32_from_u32(v: u32) -> f32 {
+    f32::from_bits(0x4b00_0000 + v) - 8_388_608.0
+}
+
+/// Named conversion, no `as`: nearest `u32` for `x` in `0.0 ..= 2^23` (half
+/// away from zero), the integer riding the mantissa of `2^23 + x`. Every
+/// caller clamps into that range first; outside it the bits mean nothing.
+pub(crate) fn u32_from_f32(x: f32) -> u32 {
+    (x.round() + 8_388_608.0).to_bits() & 0x7f_ffff
+}
+
+/// `round(c * 512 / 2^s)` per channel for a shared exponent field `e_field`
+/// (`s = e_field - 15`): the one shared-exponent rounding.
+fn scaled_mantissas(c: [f32; 3], e_field: u32) -> [u32; 3] {
+    let scale = f32::from_bits((e_field + 112) << 23);
+    [
+        u32_from_f32(c[0] * 512.0 / scale),
+        u32_from_f32(c[1] * 512.0 / scale),
+        u32_from_f32(c[2] * 512.0 / scale),
+    ]
+}
+
+/// Encode one linear HDR texel as RGB9E5: 9-bit mantissas under one 5-bit
+/// shared exponent (R in 0..9, G in 9..18, B in 18..27, biased exponent in
+/// 27..32), values `2^-24 ..= 65408`. The single codec the bake lane and the
+/// gate both call, so the stored level and the measured level cannot drift;
+/// negative and non-finite inputs store zero, so a NaN is never a level.
+pub fn encode_rgb9e5(rgb: [f32; 3]) -> u32 {
+    let mut c = [0.0f32; 3];
+    for k in 0..3 {
+        c[k] = if rgb[k].is_finite() && rgb[k] > 0.0 {
+            rgb[k].min(RGB9E5_MAX)
+        } else {
+            0.0
+        };
+    }
+    let mx = c[0].max(c[1]).max(c[2]);
+    if mx <= 0.0 {
+        return 0;
+    }
+    // Shared exponent straight off mx's biased exponent: one step up from
+    // floor(log2 mx), so the brightest mantissa rounds into 256..=511.
+    let mut e_field = ((mx.to_bits() >> 23) & 0xff).saturating_sub(111).min(31);
+    let mut m = scaled_mantissas(c, e_field);
+    if m[0].max(m[1]).max(m[2]) > 511 {
+        // Rounding carried into bit 10: one exponent up, never past 31.
+        e_field = (e_field + 1).min(31);
+        m = scaled_mantissas(c, e_field);
+    }
+    (e_field << 27) | (m[2] << 18) | (m[1] << 9) | m[0]
+}
+
+/// Decode RGB9E5 bits back to a linear HDR texel: `m / 512 * 2^(E - 15)` per
+/// channel, always finite and nonnegative (zero bits give `[0.0; 3]`), so a
+/// stored level is never a NaN.
+pub fn decode_rgb9e5(bits: u32) -> [f32; 3] {
+    let e_field = (bits >> 27) & 0x1f;
+    let scale = f32::from_bits((e_field + 112) << 23) / 512.0;
+    [
+        f32_from_u32(bits & 0x1ff) * scale,
+        f32_from_u32((bits >> 9) & 0x1ff) * scale,
+        f32_from_u32((bits >> 18) & 0x1ff) * scale,
+    ]
+}
+
+/// Distinct decoded levels over an input ramp: every entry rides the shared
+/// codec once and the distinct decoded triples are counted. The measurable the
+/// RL43 gradient gate asserts, where the byte lane can only ever show
+/// [`PALETTE_LEN`] of them; cold path (one sort), never per frame. NaN entries
+/// collapse to the one zero level.
+pub fn hdr_texel_levels(ramp: &[[f32; 3]]) -> usize {
+    let mut keys: Vec<[u32; 3]> = ramp
+        .iter()
+        .map(|c| {
+            let d = decode_rgb9e5(encode_rgb9e5(*c));
+            [d[0].to_bits(), d[1].to_bits(), d[2].to_bits()]
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys.len()
+}
+
 /// baked hemisphere lightmap: HDR `tex` + runtime palette `idx`.
 pub struct Lightmap {
     /// width in texels.
@@ -525,7 +617,7 @@ impl<'a> GiRuntime<'a> {
         d: [f32; 3],
         dyn_weight: f32,
     ) -> Result<[f32; 3], crate::gi_probe::GiProbeError> {
-        if !dyn_weight.is_finite() || dyn_weight < 0.0 || dyn_weight > 1.0 {
+        if !dyn_weight.is_finite() || !(0.0..=1.0).contains(&dyn_weight) {
             return Err(crate::gi_probe::GiProbeError::Invalid(format!(
                 "gi mixed weight {dyn_weight} leaves 0..=1"
             )));

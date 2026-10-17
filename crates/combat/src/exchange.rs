@@ -651,8 +651,10 @@ pub const NO_MOVE: u8 = u8::MAX;
 /// telegraph, bait, end pose. Presentation compares against these;
 /// the sim never reads them, so the golden never moves.
 pub const TELEGRAPH_FLOOR_MS: u32 = 340;
-/// Fixed clock the signal math rides on.
-pub const TELEGRAPH_TICKS_PER_SEC: u32 = 60;
+/// Fixed clock the signal math rides on. The rate's one owner is
+/// `engine_core::TICK_HZ` and its checked narrow form is
+/// `engine_core::TICK_HZ_U32`, which this constant takes. Value never changes.
+pub const TELEGRAPH_TICKS_PER_SEC: u32 = engine_core::TICK_HZ_U32;
 /// Milliseconds per second for the signal math.
 pub const TELEGRAPH_MS_PER_SEC: u32 = 1_000;
 

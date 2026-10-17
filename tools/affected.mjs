@@ -7,6 +7,10 @@
 // (MIT, https://github.com/lightsofapollo/cargo-affect) -- reverse-dep closure
 // idea only, reimplemented here, zero donor bytes.
 // PORT(lightsofapollo/cargo-affect@3136b757: reverse-dep closure over the resolve graph).
+// Measured 2026-10-17: crates/combat/src/fight.rs -> closure 20 of 36 (55.6%),
+// dependents only; crates/core/src/lib.rs -> whole workspace, closure 36 of 36
+// (100.0%). Recorder only: no behavior change, no gate flag change.
+// `node --test tools/affected.test.mjs` -> 24 pass / 0 fail.
 //
 //   node tools/affected.mjs [--base <ref>] [--files <paths...>] [--json] [--mark-green]
 //

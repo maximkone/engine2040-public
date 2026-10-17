@@ -3,7 +3,17 @@
 // E2040_ADAPTER=integrated E2040_LIMITS=downlevel, samples working set with
 // tasklist every 250 ms, prints the potato line plus one line per bar, and
 // writes target/reports/potato-<date>.md. Bars in tools/potato-bar.json.
+// The same samples stamp the run's load (`potato load: QUIET` or `LOADED n
+// cargo + m rustc running`), because a number read while a build runs is a
+// filed number, never a claim of speed (quiet.mjs rule). The bar lines and
+// their PASS/FAIL do not change with the load; the `--floor` verdict does:
+// on a LOADED box it is withheld (exit 3) instead of printing a red the owner
+// would read as a product verdict (26 builds made one run read p99 557 ms
+// against a 14 ms steady state, 2026-10-17).
 // Owner 2026-10-11. Units: ms, MB. Pure parsers give the same line x2.
+// Adapter evidence, in order: the GS6 `adapter: <name> <backend> <kind>
+// vendor=0x<id>` line, else arena's live `arena per-pass: adapter="<name>"`
+// cell (kind then comes from the name). No evidence reads NO_IGPU, exit 2.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -23,13 +33,61 @@ export function parseAdapterName(output) {
   return noVendor.replace(/\s+/g, "_");
 }
 
-// Integrated adapter name, or null when the output names no integrated
-// adapter. Fails closed: no adapter line means no proof of integrated.
+// Adapter name quoted on arena's `arena per-pass:` line, e.g.
+// `adapter="Intel(R) UHD Graphics"`. Null when that line or cell is absent.
+// This is the line the live arena actually prints at --exit.
+export function parsePerPassAdapter(output) {
+  const line = String(output ?? "").split(/\r?\n/).find((l) => l.startsWith("arena per-pass:"));
+  if (!line) return null;
+  const name = /adapter="([^"]*)"/.exec(line)?.[1]?.trim();
+  return name ? name : null;
+}
+
+// Adapter kind word in a GS6 `describe()` line: the token before `vendor=`
+// (`adapter: RTX-3050 dx12 discrete vendor=0x10de`). Null when that shape is
+// absent, so a plain name line never guesses a kind from this path.
+export function parseAdapterTypeWord(output) {
+  const line = String(output ?? "").split(/\r?\n/).find((l) => /^adapter:\s*\S/i.test(l));
+  if (!line) return null;
+  const before = line.replace(/\s+vendor=.*$/i, "").trim();
+  const word = before.split(/\s+/).pop()?.toLowerCase() ?? "";
+  return ["discrete", "integrated", "cpu", "other"].includes(word) ? word : null;
+}
+
+// Adapter kind from its name alone, for the live `per-pass` line that carries
+// no kind word. Software first, then discrete, then integrated: the gate may
+// only read integrated when the name really says so.
+export function classifyAdapterKind(name) {
+  const key = String(name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!key) return "unknown";
+  if (/basic render driver|llvmpipe|\bwarp\b|software/.test(key)) return "cpu";
+  if (/geforce|\brtx\b|\bgtx\b|quadro|tesla|\brx \d|\barc\b|radeon pro/.test(key)) return "discrete";
+  if (/\buhd\b|\biris\b|hd graphics|vega|radeon tm graphics|radeon graphics/.test(key)) return "integrated";
+  return "other";
+}
+
+// The one adapter name the potato line reports: the GS6 `describe()` line
+// first (it carries the kind), else arena's live `per-pass` name. Spaces to
+// underscores so the potato line stays space-separated. Null when neither
+// line exists.
+export function arenaAdapterName(output) {
+  const text = String(output ?? "");
+  const described = parseAdapterName(text);
+  if (described !== null) return described;
+  const live = parsePerPassAdapter(text);
+  return live === null ? null : live.replace(/\s+/g, "_");
+}
+
+// Integrated adapter name, or null when the run shows no integrated adapter.
+// Fails closed: no adapter evidence at all reads null, and a discrete or
+// software adapter never reads integrated. An explicit kind word wins; with
+// only a live name the name is classified.
 export function findIntegratedAdapter(output) {
   const text = String(output ?? "");
-  const hasIntegrated = /integrated/i.test(text);
-  if (!hasIntegrated) return null;
-  return parseAdapterName(text);
+  const name = arenaAdapterName(text);
+  if (name === null) return null;
+  const kind = parseAdapterTypeWord(text) ?? classifyAdapterKind(name);
+  return kind === "integrated" ? name : null;
 }
 
 // Frame p50/p99 from the last `arena frame-split:` line. Prefers
@@ -75,6 +133,34 @@ export function parseTasklistPeakMb(csvText, procName = "arena.exe") {
   return Math.round(maxKb / 1024);
 }
 
+// Cargo and rustc processes in one `tasklist` sample. A gate number read
+// while a build runs is a filed number, never a claim of speed (the
+// quiet.mjs rule), so the run stamps its own load. Pure over the text;
+// an empty or missing sample reads QUIET because nothing is running.
+export function parseBuildLoad(csvText) {
+  let cargo = 0;
+  let rustc = 0;
+  for (const line of String(csvText ?? "").split(/\r?\n/)) {
+    if (/^"cargo\.exe"/i.test(line)) cargo += 1;
+    else if (/^"rustc\.exe"/i.test(line)) rustc += 1;
+  }
+  return { cargo, rustc, loaded: cargo + rustc > 0 };
+}
+
+// Load stamp text: QUIET when no build runs, else LOADED with the counts
+// and the wording that says the numbers are filed. Pure.
+export function formatLoadText(load) {
+  const cargo = Number(load?.cargo ?? 0);
+  const rustc = Number(load?.rustc ?? 0);
+  if (!(cargo + rustc > 0)) return "QUIET";
+  return `LOADED ${cargo} cargo + ${rustc} rustc running (filed numbers, not a speed claim)`;
+}
+
+// One line for the run's load stamp, beside the potato line. Pure.
+export function formatLoadLine(load) {
+  return `potato load: ${formatLoadText(load)}`;
+}
+
 // One potato line. Numbers print with 3 decimals (ms) and whole MB;
 // null prints UNKNOWN so an unmeasured number never reads as zero.
 export function formatPotatoLine({ adapter, p50_ms, p99_ms, peak_ws_mb }) {
@@ -102,10 +188,16 @@ export function checkBars(measured, bar) {
   ];
 }
 
-// Exit for the gate: 2 when no integrated adapter, 1 when --floor runs
-// and any bar is not PASS, else 0. Without --floor a FAIL still exits 0.
-export function decideExit({ hasIntegrated, verdicts, floor }) {
+// Exit for the gate: 2 when no integrated adapter, 3 when `--floor` runs on a
+// box a build stamped LOADED (the numbers are filed, so the gate withholds the
+// verdict instead of printing a false FAIL - a run at 26 cargo/rustc read p99
+// 557 ms against the 14 ms steady state on 2026-10-17), 1 when `--floor` runs
+// and any bar is not PASS, else 0. Without `--floor` a FAIL still exits 0, and
+// every bar line still prints its PASS/FAIL whatever the load: nothing is
+// hidden, only the verdict is withheld.
+export function decideExit({ hasIntegrated, verdicts, floor, loaded }) {
   if (!hasIntegrated) return 2;
+  if (floor && loaded) return 3;
   if (floor && verdicts.some((v) => v.status !== "PASS")) return 1;
   return 0;
 }
@@ -142,13 +234,18 @@ export function formatBarLine(v) {
 }
 
 // Markdown report for `target/reports/potato-<date>.md`. Pure over inputs.
-export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegrated, missing, timedOut }) {
+// The load line says whether the numbers came from a quiet box or a loaded
+// one, so a filed number never reads as a quiet one; `withheld` records that
+// `--floor` refused a verdict on that loaded run (exit 3).
+export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegrated, missing, timedOut, load, withheld }) {
   const bars = (verdicts ?? []).map(formatBarLine).join("\n");
   return [
     `# Potato check ${at ?? "UNKNOWN"}`,
     "",
     `cmd: ${cmd ?? "UNKNOWN"}`,
     `env: ${env ?? "UNKNOWN"}`,
+    `load: ${load ? formatLoadText(load) : "UNKNOWN"}`,
+    `floor: ${withheld ? "WITHHELD (box was loaded; numbers are filed, no verdict)" : "judged"}`,
     `adapter: ${adapter ?? "UNKNOWN"}${hasIntegrated ? "" : " (NO_IGPU)"}`,
     missing ? "arena: MISSING (no run; numbers are UNKNOWN)" : "arena: ran",
     timedOut ? "arena: TIMED OUT (numbers may be partial)" : "arena: exited",
@@ -160,16 +257,27 @@ export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegra
 }
 
 // Pure summary over canned or live inputs; same inputs give same summary.
-export function summarize({ output, tasklistText, bar, floor }) {
+// `loaded` is the run's own load stamp (see `parseBuildLoad`): a verdict on a
+// box that was building is withheld by `decideExit`.
+export function summarize({ output, tasklistText, bar, floor, loaded }) {
   const text = String(output ?? "");
-  const adapter = parseAdapterName(text) ?? "UNKNOWN";
+  const adapter = arenaAdapterName(text) ?? "UNKNOWN";
   const hasIntegrated = findIntegratedAdapter(text) !== null;
   const { p50_ms, p99_ms } = parseFrameTimes(text);
   const peak_ws_mb = parseTasklistPeakMb(String(tasklistText ?? ""));
   const measured = { p50_ms, p99_ms, peak_ws_mb };
   const line = formatPotatoLine({ adapter, p50_ms, p99_ms, peak_ws_mb });
   const verdicts = checkBars(measured, bar);
-  return { adapter, hasIntegrated, measured, line, verdicts, exit: decideExit({ hasIntegrated, verdicts, floor: !!floor }) };
+  const wasLoaded = loaded === true;
+  return {
+    adapter,
+    hasIntegrated,
+    measured,
+    line,
+    verdicts,
+    loaded: wasLoaded,
+    exit: decideExit({ hasIntegrated, verdicts, floor: !!floor, loaded: wasLoaded }),
+  };
 }
 
 // One tasklist sample. A failed sample is loud (error names the cause) so
@@ -184,7 +292,7 @@ export function sampleTasklist(execFn = execFileSync) {
 
 // Live run with working-set sampling every 250 ms; missing reads UNKNOWN.
 async function runLive() {
-  if (!existsSync(ARENA_EXE)) return { output: "", tasklistText: "", missing: true, timedOut: false };
+  if (!existsSync(ARENA_EXE)) return { output: "", tasklistText: "", missing: true, timedOut: false, load: { cargo: 0, rustc: 0, loaded: false } };
   const child = spawn(ARENA_EXE, [...RUN_ARGS], {
     cwd: ROOT,
     env: { ...process.env, ...RUN_ENV },
@@ -234,35 +342,63 @@ async function runLive() {
   if (tasklistFailures > 0) {
     console.error(`potato-check: tasklist failed ${tasklistFailures}x, peak may read UNKNOWN (last: ${tasklistError})`);
   }
-  return { output, tasklistText: snapshots.join("\n"), missing: false, timedOut, tasklistFailures };
+  // Worst load seen over the run: one build during the sample makes the
+  // frame numbers filed, not quiet.
+  let load = { cargo: 0, rustc: 0, loaded: false };
+  for (const text of snapshots) {
+    const sample = parseBuildLoad(text);
+    if (sample.cargo + sample.rustc > load.cargo + load.rustc) load = sample;
+  }
+  return { output, tasklistText: snapshots.join("\n"), missing: false, timedOut, tasklistFailures, load };
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
+// Tool entry point with injectable seams: a test drives the real print,
+// exit and report path with canned arena text, a fake tasklist and a temp
+// report dir, so the Accept's "prints NO_IGPU and exits 2" / "--floor exits
+// 1" are proven on the tool, not only on the pure helpers. Returns the exit
+// code: 2 when no integrated adapter shows or the bar file is unreadable,
+// 3 when `--floor` runs on a box a build stamped LOADED (no verdict on filed
+// numbers), 1 when `--floor` runs and a bar is not PASS, else 0. Defaults are
+// the live implementations, so production behaviour is unchanged.
+// Caller: `main` (same file) passes `process.argv` and the live defaults.
+export async function run(argv = [], deps = {}) {
+  const log = deps.log ?? ((line) => console.log(line));
+  const logError = deps.errorLog ?? ((line) => console.error(line));
+  const runLiveFn = deps.runLive ?? runLive;
+  const loadBarFn = deps.loadBar ?? (() => loadBar());
+  const reportDir = deps.reportDir ?? REPORT_DIR;
+  const now = deps.now ?? (() => new Date());
   if (argv.includes("--help") || argv.includes("-h")) {
-    console.log("usage: node tools/potato-check.mjs [--floor]");
-    return;
+    log("usage: node tools/potato-check.mjs [--floor]");
+    return 0;
   }
   const floor = argv.includes("--floor");
   let bar;
   try {
-    bar = loadBar();
+    bar = loadBarFn();
   } catch (err) {
-    console.error(`potato-check: ${err?.message ?? err}`);
-    process.exitCode = 2;
-    return;
+    logError(`potato-check: ${err?.message ?? err}`);
+    return 2;
   }
-  const live = await runLive();
-  const s = summarize({ output: live.output, tasklistText: live.tasklistText, bar, floor });
-  console.log(s.line);
-  for (const v of s.verdicts) console.log(formatBarLine(v));
-  if (!s.hasIntegrated) console.log("NO_IGPU");
-  if (live.missing) console.error(`potato-check: missing ${ARENA_EXE}`);
-  if (live.timedOut) console.error("potato-check: arena run timed out");
+  const live = await runLiveFn();
+  const s = summarize({
+    output: live.output,
+    tasklistText: live.tasklistText,
+    bar,
+    floor,
+    loaded: live.load?.loaded === true,
+  });
+  log(s.line);
+  for (const v of s.verdicts) log(formatBarLine(v));
+  log(formatLoadLine(live.load));
+  if (s.exit === 3) log("potato floor: WITHHELD - a build ran during this run, so the bars are filed numbers, not a verdict (rerun on a quiet box)");
+  if (!s.hasIntegrated) log("NO_IGPU");
+  if (live.missing) logError(`potato-check: missing ${ARENA_EXE}`);
+  if (live.timedOut) logError("potato-check: arena run timed out");
   try {
-    mkdirSync(REPORT_DIR, { recursive: true });
-    const at = new Date().toISOString();
-    const file = join(REPORT_DIR, `potato-${at.slice(0, 10)}.md`);
+    mkdirSync(reportDir, { recursive: true });
+    const at = now().toISOString();
+    const file = join(reportDir, `potato-${at.slice(0, 10)}.md`);
     writeFileSync(
       file,
       formatReport({
@@ -275,13 +411,19 @@ async function main() {
         hasIntegrated: s.hasIntegrated,
         missing: live.missing,
         timedOut: live.timedOut,
+        load: live.load,
+        withheld: s.exit === 3,
       }),
     );
-    console.log(`report: ${file}`);
+    log(`report: ${file}`);
   } catch (err) {
-    console.error(`potato-check: report failed: ${err?.message ?? err}`);
+    logError(`potato-check: report failed: ${err?.message ?? err}`);
   }
-  process.exitCode = s.exit;
+  return s.exit;
+}
+
+async function main() {
+  process.exitCode = await run(process.argv.slice(2));
 }
 
 if (import.meta.main) await main();

@@ -98,6 +98,23 @@ export function checkCsvText(text) {
   return { lines, pass, fail, total: pass + fail };
 }
 
+// Read one log file and check it. A missing file is one FAIL line, not a crash.
+export function checkFile(path) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+    return {
+      lines: [{ row: 0, ok: false, reason: `missing log ${path}` }],
+      pass: 0,
+      fail: 1,
+      total: 1,
+    };
+  }
+  return checkCsvText(text);
+}
+
 function printResult(res) {
   for (const l of res.lines) {
     console.log(`${l.ok ? "PASS" : "FAIL"} ${l.row} ${l.reason}`);
@@ -108,8 +125,7 @@ function printResult(res) {
 // CLI: node tools/playtest-log.mjs --check <csv>
 const args = process.argv.slice(2);
 if (args[0] === "--check" && args[1]) {
-  const text = readFileSync(args[1], "utf8");
-  const res = checkCsvText(text);
+  const res = checkFile(args[1]);
   printResult(res);
   process.exit(res.fail === 0 ? 0 : 1);
 } else if (import.meta.url === `file://${process.argv[1]}`.replaceAll("\\", "/") || process.argv[1]?.endsWith("playtest-log.mjs")) {

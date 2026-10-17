@@ -4,7 +4,8 @@ use super::NullRenderer;
 use crate::pass_truth::{PassVerdict, SuppliedPair};
 
 /// Fixed simulation dt: 60Hz. Accumulator clamps spiral-of-death at 5 steps.
-pub const FIXED_DT: f32 = 1.0 / 60.0;
+/// Single owner is `engine_core::FIXED_DT`; this re-export keeps the render path.
+pub use engine_core::FIXED_DT;
 pub const MAX_STEPS_PER_PUMP: u32 = 5;
 
 /// Window surface state. Informational only — never hashed.
@@ -165,6 +166,27 @@ impl WindowShell {
     /// Consumer: the EG8 `target/reports/pass-truth-<date>.md` artifact.
     pub fn write_look_report(&self, date: &str) -> Result<String, std::io::Error> {
         crate::pass_truth::write_gate_report(date)
+    }
+
+    /// EG8: dated LIVE/PROBE artifact over the caller's real window reads,
+    /// each row naming where its frames came from. Units: date is a plain tag,
+    /// never parsed. Determinism: same date plus pairs give the same bytes
+    /// twice; no clock, no float, no IO. Consumer: the EG8
+    /// `target/reports/pass-truth-<date>.md` artifact. Caller wire for
+    /// `crate::pass_truth::reads::window_read_report`.
+    pub fn look_read_report(&self, date: &str, pairs: &[SuppliedPair<'_>]) -> String {
+        crate::pass_truth::reads::window_read_report(date, pairs)
+    }
+
+    /// EG8: write that artifact to its dated path, returning the path written.
+    /// Errors: `std::io::Error` when the report file cannot be written. Caller
+    /// wire for `crate::pass_truth::reads::write_window_read_report`.
+    pub fn write_look_read_report(
+        &self,
+        date: &str,
+        pairs: &[SuppliedPair<'_>],
+    ) -> Result<String, std::io::Error> {
+        crate::pass_truth::reads::write_window_read_report(date, pairs)
     }
 }
 
@@ -349,5 +371,38 @@ mod tests {
         assert_eq!(table.len(), 2);
         assert!(!table[0].live, "unknown batch row stays PROBE");
         assert!(!table[1].live, "ragged batch pair stays PROBE");
+    }
+
+    #[test]
+    fn look_read_report_arm_writes_dated_file() {
+        let shell = WindowShell::new();
+        let off = [10u8, 10, 10, 255, 10, 10, 10, 255];
+        let mut moved = off;
+        moved[2] = 200;
+        let pairs = [SuppliedPair {
+            row: "graph",
+            on: &moved,
+            off: &off,
+            width: 2,
+            height: 1,
+            mask: None,
+        }];
+        let wrote = shell
+            .write_look_read_report("eg8-window-read-arm", &pairs)
+            .expect("window read report writes");
+        assert_eq!(wrote, shell.look_report_path("eg8-window-read-arm"));
+        assert_eq!(
+            std::fs::read(wrote).expect("written report readable"),
+            shell
+                .look_read_report("eg8-window-read-arm", &pairs)
+                .as_bytes(),
+            "the window wire writes the window-read report"
+        );
+        assert!(
+            shell
+                .look_read_report("eg8-window-read-arm", &pairs)
+                .contains("| graph | LIVE | 1 | window |"),
+            "the wired report keeps the window-read row"
+        );
     }
 }

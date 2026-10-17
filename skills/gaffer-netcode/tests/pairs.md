@@ -13,7 +13,7 @@ Off: "Trust the client position. It saves server work and feels fast."
 
 On: "Rule 1: the server owns the world (§Client/Server). Clients send
 inputs via `InputPacket`, never positions. Keep authority in `Server` at
-`crates/net/src/session.rs:201`."
+`crates/net/src/session.rs:326`."
 
 Winner: On. Off blesses the cheat; On names the rule and the file.
 

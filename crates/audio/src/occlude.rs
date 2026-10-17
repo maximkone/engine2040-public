@@ -11,7 +11,9 @@
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Ticks per second the game thread runs the query (matches the fixed tick).
-pub const TICK_HZ: u32 = 60;
+/// Reads the single owner's checked narrow form (`engine_core::TICK_HZ_U32`):
+/// a bare `as u32` on the `u64` rate would truncate silently.
+pub const TICK_HZ: u32 = engine_core::TICK_HZ_U32;
 /// One tick in microseconds, rounded (1_000_000 / 60).
 pub const TICK_US: u32 = 16_667;
 /// Slew down (ducking behind a wall) time in ms: muffles without pumping.
@@ -315,6 +317,14 @@ impl VoiceOcclusion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The const reads the checked narrow owner and widens back to the one
+    /// `u64` rate: 60 Hz both ways, with no `as u32` at this call site.
+    #[test]
+    fn tick_hz_keeps_the_core_owner_u64() {
+        let rate: u64 = u64::from(TICK_HZ);
+        assert_eq!(rate, engine_core::TICK_HZ);
+    }
 
     fn stone_cross_wall() -> Wall {
         // Voice at (500, 0), listener at origin: this stone wall at x = 250

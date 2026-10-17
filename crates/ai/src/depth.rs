@@ -337,8 +337,8 @@ impl TierRow {
     /// Parse one `tier_<n> hp_permille=<int> tell_ticks=<int>
     /// stagger_permille=<int> counter=<int>` row with its 1-based line.
     /// Whole numbers only; fences refuse as [`TierError::OutOfFence`].
-    /// Accepts `tier_1` to `tier_4`; [`parse_tiers`] still seats only the
-    /// three shipped rows, so a `tier_4` file row lands with GA13.
+    /// Accepts `tier_1` to `tier_4`; [`parse_tiers`] seats all four and
+    /// defaults a missing `tier_4` to [`PRIMUS_TIER`].
     pub fn from_row(line: &str, line_no: usize) -> Result<Self, TierError> {
         let mut words = line.split_whitespace();
         let id = words.next().ok_or(TierError::RowId { line: line_no })?;
@@ -458,8 +458,8 @@ pub const SHIPPED_TIERS: [TierRow; 3] = [
 /// `900..=1200` band, the tell matches the ladder's readable 15 ticks,
 /// and the phase-1 answer is parry (`1`), the same school as the T3
 /// elite. Notice is faster (reaction 1) and nerve is bolder (700, 750 in
-/// phase 2). The `tier_4` file row lands with GA13; this const pins the
-/// code side first.
+/// phase 2). The designer file carries this row as `tier_4`; a file
+/// without one still parses, defaulting the fourth slot to this const.
 pub const PRIMUS_TIER: TierRow = TierRow {
     tier: 4,
     hp_permille: 1100,
@@ -575,15 +575,17 @@ fn tier_header(line: &str, line_no: usize) -> Result<u32, TierError> {
     }
 }
 
-/// Parse the designer rows file into the three duel tiers in tier order.
+/// Parse the designer rows file into the four duel tiers in tier order.
 ///
 /// Layout mirrors the combat rows: line 1 `table enemies version <n>`,
 /// then one `tier_<n>` row per tier; `#` comments and blank lines ignored.
-/// Whole numbers only; a bad row refuses with its line number.
-pub fn parse_tiers(text: &str) -> Result<[TierRow; 3], TierError> {
+/// Whole numbers only; a bad row refuses with its line number. Rows
+/// `tier_1` to `tier_3` are required; a missing `tier_4` falls back to
+/// [`PRIMUS_TIER`], so the ladder always seats four rows.
+pub fn parse_tiers(text: &str) -> Result<[TierRow; 4], TierError> {
     let mut header: Option<u32> = None;
     let mut header_no: usize = 0;
-    let mut slots: [Option<TierRow>; 3] = [None, None, None];
+    let mut slots: [Option<TierRow>; 4] = [None, None, None, None];
     for (idx, raw) in text.lines().enumerate() {
         let line_no = idx.saturating_add(1);
         let cut = raw.find('#').map_or(raw, |i| raw.split_at(i).0);
@@ -610,7 +612,8 @@ pub fn parse_tiers(text: &str) -> Result<[TierRow; 3], TierError> {
     let a = slots[0].ok_or(TierError::MissingKey { line: header_no })?;
     let b = slots[1].ok_or(TierError::MissingKey { line: header_no })?;
     let c = slots[2].ok_or(TierError::MissingKey { line: header_no })?;
-    Ok([a, b, c])
+    let d = slots[3].unwrap_or(PRIMUS_TIER);
+    Ok([a, b, c, d])
 }
 
 /// Feint state: a brief attack bonus after the foe releases an attack in
@@ -1007,10 +1010,11 @@ impl DepthBrain {
 
     /// Decide one [`FighterInput`] for `percept`: track the feint release,
     /// score through the scripted core with the depth bias, steer the emitted
-    /// wish off blocked axes and toward a far foe, then charge stamina for
-    /// the emitted intent. Always deterministic and always passes
-    /// [`FighterInput::validate`]. Budget: the steering post-pass is a dozen
-    /// integer ops with zero allocation.
+    /// wish off blocked axes and toward a far foe, then map a tier brain's
+    /// facing-relative wish into the world axes a legacy arena reads, and
+    /// charge stamina for the emitted intent. Always deterministic and always
+    /// passes [`FighterInput::validate`]. Budget: the steering post-pass plus
+    /// the tier wish map are a few dozen integer ops with zero allocation.
     ///
     /// [`FighterInput::validate`]: engine_input::FighterInput::validate
     pub fn decide(&mut self, percept: &Percept) -> FighterInput {
@@ -1041,6 +1045,16 @@ impl DepthBrain {
             self.half_extent_mm,
         );
         let input = FighterInput { mx, mz, ..scored };
+        // A tier brain is the shipped duel enemy: when its arena hands it no
+        // melee view (the legacy rules that read the wish pair as world axes,
+        // not the facing-relative scored wish), it maps its own wish into the
+        // foe frame so the rung can close and fence. A rules-v2 arena maps
+        // the same wish itself and attaches a live view, so this never doubles.
+        let input = if self.tier.is_some() && !percept.melee.is_live() {
+            tier_wish_to_world(input, self.inner.intent(), percept, dist_mm)
+        } else {
+            input
+        };
         let drained = self
             .policy
             .stamina()
@@ -1107,6 +1121,50 @@ fn pos_mm(coord_m: f32) -> i32 {
         return 0;
     }
     (coord_m.clamp(-1_000.0, 1_000.0) * 1000.0) as i32
+}
+
+/// Map one decided [`FighterInput`]'s facing-relative wish into world axes.
+///
+/// The scored wish is facing-relative (`mx` forward at the foe, `mz` to the
+/// side) while the arena's locomotion reads `FighterInput::mx`/`mz` as world
+/// axes. Rules v2 rebuilds the wish from the intent in the foe frame, so the
+/// brain must not; the legacy v1 arena reads the pair as world motion, so a
+/// tier brain maps its own wish or `Intent::Advance` walks along world +X
+/// instead of at the foe and the pair never closes. Magnitudes match the
+/// scripted emit table; an attack beyond the tier's own swing spacing closes
+/// in at full wish instead of holding (the strike band was tuned for the v1
+/// rangeless hit). Facing, buttons and the tick pass through. Integer-only
+/// (`isqrt`), no allocation, coincident fighters stand still.
+fn tier_wish_to_world(
+    mut decided: FighterInput,
+    intent: Intent,
+    percept: &Percept,
+    dist_mm: i32,
+) -> FighterInput {
+    let me = [pos_mm(percept.self_pos[0]), pos_mm(percept.self_pos[2])];
+    let foe = [pos_mm(percept.foe_pos[0]), pos_mm(percept.foe_pos[2])];
+    let dx = i64::from(foe[0]) - i64::from(me[0]);
+    let dz = i64::from(foe[1]) - i64::from(me[1]);
+    let len = i64::try_from(u64::try_from(dx * dx + dz * dz).unwrap_or(0).isqrt()).unwrap_or(0);
+    if len == 0 {
+        decided.mx = 0;
+        decided.mz = 0;
+        return decided;
+    }
+    let side = if decided.mz < 0 { -1 } else { 1 };
+    let (forward, aside): (i64, i64) = match intent {
+        Intent::Attack if dist_mm > i32::from(TIER_RANGE_MM) => (100, 0),
+        Intent::Attack => (30, 0),
+        Intent::Block => (0, 0),
+        Intent::Dodge => (0, 100 * side),
+        Intent::Advance => (100, 0),
+        Intent::Retreat => (-80, 0),
+        Intent::Reposition => (60, 80 * side),
+    };
+    let axis = |v: i64| i8::try_from((v / len).clamp(-100, 100)).unwrap_or(0);
+    decided.mx = axis(forward * dx + aside * dz);
+    decided.mz = axis(forward * dz - aside * dx);
+    decided
 }
 
 /// Squad: one holder pins the center, the rest circle as flankers. This is
@@ -1505,7 +1563,10 @@ pub fn spawn_due(rung: u8, tick: u32, last_spawn_tick: u32) -> Result<bool, Dept
 }
 
 /// Morale step for `rung` at `tick`: the rung drift once per 60 ticks,
-/// `0` otherwise. The arena adds it through [`DepthBrain::apply_morale_drift`].
+/// `0` otherwise. No live bout calls this: morale moves only offline, through
+/// the fork proposal (`SetAggression` in `engine-arena`) and the editor tuning
+/// panel. The arena would add it through [`DepthBrain::apply_morale_drift`]
+/// once the rung arrives with the match config.
 pub fn morale_step(rung: u8, tick: u32) -> Result<i32, DepthError> {
     tension_row(rung).map(|row| {
         if tick.is_multiple_of(60) {
@@ -2408,8 +2469,12 @@ mod tests {
     fn tier_rows_match_the_designer_file_and_climb_in_skill() {
         let text = include_str!("../../../content/design/enemies.rows");
         let rows = parse_tiers(text).expect("designer tiers parse");
-        assert_eq!(rows, SHIPPED_TIERS);
-        assert_eq!((rows[0].tier, rows[1].tier, rows[2].tier), (1, 2, 3));
+        assert_eq!(rows[..3], SHIPPED_TIERS);
+        assert_eq!(rows[3], PRIMUS_TIER);
+        assert_eq!(
+            (rows[0].tier, rows[1].tier, rows[2].tier, rows[3].tier),
+            (1, 2, 3, 4)
+        );
         assert_eq!(
             (
                 rows[0].hp_permille,
@@ -2493,13 +2558,128 @@ mod tests {
         assert_eq!(mid.role(), Role::Flanker);
     }
 
+    /// A north foe at `z` metres with the brain itself at the origin.
+    fn north_percept(z: f32) -> Percept {
+        Percept::new([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, z], false, z, 0)
+    }
+
+    #[test]
+    fn tier_brain_maps_its_wish_into_the_foe_frame() {
+        // Legacy arena (no melee view): the foe stands 20 m north, so the
+        // mapped advance must point north. Without the map the brain emits
+        // the facing-relative (100, 0) and walks world +X instead, which is
+        // why the pair never closed and every duel ended 0-0.
+        let north = north_percept(20.0);
+        let mut tiered = DepthBrain::new(fighter(0), 6);
+        tiered.set_tier(SHIPPED_TIERS[0]);
+        let closing = tiered.decide(&north);
+        closing.validate().expect("mapped tier output validates");
+        assert_eq!(
+            (closing.mx, closing.mz),
+            (0, 100),
+            "tier advance must close on the foe: {closing:?}"
+        );
+        // A brain with no tier keeps the legacy world reading byte-identical:
+        // the map belongs to the shipped duel rung only.
+        let mut plain = DepthBrain::new(fighter(0), 6);
+        let legacy = plain.decide(&north);
+        assert_eq!((legacy.mx, legacy.mz), (100, 0));
+        // Rules v2 attaches a live view and maps the same wish itself, so a
+        // tier brain must leave the facing-relative pair alone (no double map).
+        let mut v2 = DepthBrain::new(fighter(0), 6);
+        v2.set_tier(SHIPPED_TIERS[0]);
+        let live = north.with_melee(MeleeView::nearest(
+            1_000,
+            1_000,
+            &[FoeView::quantize(1, 20_000, 1_000, StrikePhase::Idle, 0)],
+        ));
+        let held = v2.decide(&live);
+        assert_eq!(
+            (held.mx, held.mz),
+            (100, 0),
+            "a v2 arena maps the wish; the brain must not map it twice"
+        );
+    }
+
+    #[test]
+    fn tier_wish_map_follows_the_foe_frame_and_its_fences() {
+        let wish = FighterInput {
+            tick: 0,
+            fighter: fighter(0),
+            mx: 100,
+            mz: 0,
+            facing: 0,
+            buttons: engine_input::Buttons::NONE,
+        };
+        let at = |x: f32, z: f32| Percept::new([0.0, 0.0, 0.0], 0.0, [x, 0.0, z], false, 10.0, 0);
+        let out = |intent: Intent, percept: &Percept, dist_mm: i32| {
+            let mapped = tier_wish_to_world(wish, intent, percept, dist_mm);
+            mapped.validate().expect("mapped wish validates");
+            (mapped.mx, mapped.mz)
+        };
+        let north = at(0.0, 10.0);
+        assert_eq!(out(Intent::Advance, &north, 10_000), (0, 100));
+        assert_eq!(out(Intent::Retreat, &north, 10_000), (0, -80));
+        assert_eq!(out(Intent::Reposition, &north, 10_000), (80, 60));
+        assert_eq!(out(Intent::Block, &north, 10_000), (0, 0));
+        // The four faces: the wish follows the foe, never a fixed world axis.
+        assert_eq!(out(Intent::Advance, &at(10.0, 0.0), 10_000), (100, 0));
+        assert_eq!(out(Intent::Advance, &at(-10.0, 0.0), 10_000), (-100, 0));
+        assert_eq!(out(Intent::Advance, &at(0.0, -10.0), 10_000), (0, -100));
+        // Dodge steps onto the right-hand perpendicular of the foe bearing:
+        // due east means the dodge goes south, due north due east.
+        assert_eq!(out(Intent::Dodge, &at(10.0, 0.0), 10_000), (0, -100));
+        assert_eq!(out(Intent::Dodge, &north, 10_000), (100, 0));
+        // Attack inside the tier's own swing spacing steps in at (30, 0);
+        // beyond it the swing closes at full wish instead of holding.
+        assert_eq!(
+            out(Intent::Attack, &north, i32::from(TIER_RANGE_MM)),
+            (0, 30)
+        );
+        assert_eq!(
+            out(Intent::Attack, &north, i32::from(TIER_RANGE_MM) + 1),
+            (0, 100)
+        );
+        // Coincident fighters stand still rather than dividing by zero.
+        assert_eq!(out(Intent::Advance, &at(0.0, 0.0), 0), (0, 0));
+        // Every intent over every bearing stays inside the wish fence.
+        for intent in [
+            Intent::Attack,
+            Intent::Block,
+            Intent::Dodge,
+            Intent::Advance,
+            Intent::Retreat,
+            Intent::Reposition,
+        ] {
+            for (x, z) in [
+                (0.0f32, 9.0f32),
+                (9.0, 0.0),
+                (-9.0, 0.0),
+                (0.0, -9.0),
+                (7.0, -7.0),
+                (-5.0, 5.0),
+            ] {
+                let (mx, mz) = out(intent, &at(x, z), 9_000);
+                assert!(
+                    (-100..=100).contains(&mx) && (-100..=100).contains(&mz),
+                    "{intent:?} at ({x},{z}) left the fence: ({mx},{mz})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn tier_rows_refuse_bad_lines_with_the_line() {
         let good_1 = "tier_1 hp_permille=950 tell_ticks=15 stagger_permille=400 counter=1";
         let good_2 = "tier_2 hp_permille=1000 tell_ticks=15 stagger_permille=500 counter=2";
         let good_3 = "tier_3 hp_permille=1050 tell_ticks=15 stagger_permille=600 counter=1";
         let file = ["table enemies version 1", good_1, good_2, good_3].join("\n");
-        assert_eq!(parse_tiers(&file).expect("good file"), SHIPPED_TIERS);
+        let good = parse_tiers(&file).expect("good file");
+        assert_eq!(good[..3], SHIPPED_TIERS);
+        assert_eq!(
+            good[3], PRIMUS_TIER,
+            "a file without tier_4 falls back to the primus row"
+        );
         let bad_header = ["table combat version 1", good_1, good_2, good_3].join("\n");
         assert_eq!(parse_tiers(&bad_header), Err(TierError::Header { line: 1 }));
         let unknown = file.replace("hp_permille=950", "health=950");
@@ -2526,6 +2706,12 @@ mod tests {
         );
         let dup = [file.as_str(), good_1].join("\n");
         assert_eq!(parse_tiers(&dup), Err(TierError::Duplicate { line: 5 }));
+        let tier_5 = [
+            file.as_str(),
+            "tier_5 hp_permille=1100 tell_ticks=15 stagger_permille=700 counter=1",
+        ]
+        .join("\n");
+        assert_eq!(parse_tiers(&tier_5), Err(TierError::RowId { line: 5 }));
         assert_eq!(
             TierRow::from_row(
                 "tier_9 hp_permille=950 tell_ticks=15 stagger_permille=400 counter=1",
@@ -2570,7 +2756,7 @@ mod tests {
     }
 
     #[test]
-    fn tier_primus_skill_climbs_past_t3_without_moving_the_file() {
+    fn tier_primus_skill_climbs_past_t3_and_the_file_carries_it() {
         let t3 = SHIPPED_TIERS[2];
         assert!(PRIMUS_TIER.reaction_ticks() <= t3.reaction_ticks());
         assert!(PRIMUS_TIER.aggression_for_phase(2) >= t3.aggression_permille());
@@ -2597,11 +2783,12 @@ mod tests {
             "tier_4 hp_permille=1100 tell_ticks=15 stagger_permille=700 counter=1",
         ]
         .join("\n");
-        assert_eq!(parse_tiers(&file), Err(TierError::RowId { line: 5 }));
+        let four = parse_tiers(&file).expect("four-row file parses");
+        assert_eq!(four[..3], SHIPPED_TIERS);
+        assert_eq!(four[3], PRIMUS_TIER);
         let text = include_str!("../../../content/design/enemies.rows");
-        assert_eq!(
-            parse_tiers(text).expect("shipped file still parses to 3 rows"),
-            SHIPPED_TIERS
-        );
+        let shipped = parse_tiers(text).expect("shipped file parses to four rows");
+        assert_eq!(shipped[..3], SHIPPED_TIERS);
+        assert_eq!(shipped[3], PRIMUS_TIER);
     }
 }

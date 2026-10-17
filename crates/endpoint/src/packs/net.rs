@@ -20,7 +20,6 @@
 //! DTO structs carry no field docs on purpose: every doc line inflates the
 //! advertised schemas, and the discovery budget is a gate.
 
-use engine_core::hash::GOLDEN_GAMMA;
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
@@ -33,9 +32,6 @@ use crate::tool_capabilities::CapabilityCard;
 pub const PACK: &str = "net";
 /// Verb: loopback bout with injected loss, convergence and first tick.
 pub const TOOL_NET_LOOPBACK: &str = "net.loopback";
-
-/// Largest loss in permille (conditioner wiring seam).
-const MAX_PERMILLE: u32 = 1000;
 
 /// The net pack: loopback bout with injected loss, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
@@ -50,123 +46,6 @@ pub fn pack() -> Result<PackDef, PackError> {
         CapabilityCard::Observe,
     )?);
     Ok(pack)
-}
-
-/// Link conditioner settings, integers only (ticks, permille, deterministic).
-/// Builder returns `None` when a permille is above 1000.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConditionerConfig {
-    pub latency_ticks: u32,
-    pub jitter_ticks: u32,
-    pub good_loss_permille: u32,
-    pub bad_loss_permille: u32,
-    pub good_to_bad_permille: u32,
-    pub bad_to_good_permille: u32,
-}
-
-impl ConditionerConfig {
-    /// Fixed loss in both states; `None` when `permille` is above 1000.
-    pub fn with_fixed_loss(permille: u32) -> Option<Self> {
-        if permille > MAX_PERMILLE {
-            return None;
-        }
-        Some(Self {
-            latency_ticks: 0,
-            jitter_ticks: 0,
-            good_loss_permille: permille,
-            bad_loss_permille: permille,
-            good_to_bad_permille: 0,
-            bad_to_good_permille: 0,
-        })
-    }
-}
-
-/// Link state: good drops at the good rate, bad at the bad rate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkState {
-    Good,
-    Bad,
-}
-
-/// Deterministic link conditioner: drops or delays by seeded draws.
-/// No float, no wall clock.
-#[derive(Debug)]
-pub struct Conditioner {
-    pub state: LinkState,
-    pub queue: Vec<(u64, Vec<u8>)>,
-    cfg: ConditionerConfig,
-    rng: u64,
-}
-
-impl Conditioner {
-    /// Open a conditioner under `cfg` with its own draw stream from `seed`.
-    pub fn new(cfg: ConditionerConfig, seed: u64) -> Self {
-        let rng = if seed == 0 { GOLDEN_GAMMA } else { seed };
-        Self {
-            state: LinkState::Good,
-            queue: Vec::new(),
-            cfg,
-            rng,
-        }
-    }
-
-    fn next_rand(&mut self) -> u64 {
-        let mut x = self.rng;
-        x ^= x.wrapping_shl(13);
-        x ^= x.wrapping_shr(7);
-        x ^= x.wrapping_shl(17);
-        self.rng = x;
-        x
-    }
-
-    /// Offer one packet at `now`: flip the Gilbert-Elliott state on its
-    /// permille draw, drop by the loss draw in the state this packet travels
-    /// in, or stamp `now + latency + jitter` (`0..=jitter_ticks` by one more
-    /// draw, `0` when `jitter_ticks` is `0`). One xorshift step per draw, so
-    /// the same seed plus the same config seals the same queue twice.
-    pub fn condition(&mut self, packet: Vec<u8>, now: u64) {
-        let flip = self.next_rand() % u64::from(MAX_PERMILLE);
-        match self.state {
-            LinkState::Good if flip < u64::from(self.cfg.good_to_bad_permille) => {
-                self.state = LinkState::Bad;
-            }
-            LinkState::Bad if flip < u64::from(self.cfg.bad_to_good_permille) => {
-                self.state = LinkState::Good;
-            }
-            _ => {}
-        }
-        let loss = match self.state {
-            LinkState::Good => self.cfg.good_loss_permille,
-            LinkState::Bad => self.cfg.bad_loss_permille,
-        };
-        let draw = self.next_rand() % u64::from(MAX_PERMILLE);
-        if draw < u64::from(loss) {
-            return;
-        }
-        let extra = if self.cfg.jitter_ticks == 0 {
-            0
-        } else {
-            self.next_rand() % (u64::from(self.cfg.jitter_ticks) + 1)
-        };
-        let deliver = now
-            .saturating_add(u64::from(self.cfg.latency_ticks))
-            .saturating_add(extra);
-        self.queue.push((deliver, packet));
-        self.queue.sort_by_key(|(at, _)| *at);
-    }
-
-    /// Every packet due at `now`, oldest deliver first.
-    pub fn pop_due(&mut self, now: u64) -> Vec<Vec<u8>> {
-        let mut count = 0;
-        for (at, _) in &self.queue {
-            if *at <= now {
-                count += 1;
-            } else {
-                break;
-            }
-        }
-        self.queue.drain(..count).map(|(_, bytes)| bytes).collect()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,28 +137,15 @@ pub fn loopback_report(
         .iter()
         .filter_map(|seat| seat.first_divergence)
         .min();
-    let digest = report.digest().wrapping_add(conditioner_probe(seed));
+    // Fold the loopback probe constant: the retired local conditioner ran
+    // one zero-loss packet through `pop_due(0)`, which always delivered
+    // exactly one packet, so the digest carries `+ 1` and no sim work.
+    let digest = report.digest().wrapping_add(1);
     Ok(LoopbackReport {
         converged,
         first_divergence,
         digest,
     })
-}
-
-/// Probe the conditioner: one packet through fixed loss, due count.
-/// Caller is [`loopback_report`].
-pub fn conditioner_probe(seed: u64) -> u64 {
-    let cfg = ConditionerConfig {
-        latency_ticks: 0,
-        jitter_ticks: 0,
-        good_loss_permille: 0,
-        bad_loss_permille: 0,
-        good_to_bad_permille: 0,
-        bad_to_good_permille: 0,
-    };
-    let mut cond = Conditioner::new(cfg, seed);
-    cond.condition(vec![seed.to_le_bytes()[0]], 0);
-    u64::try_from(cond.pop_due(0).len()).unwrap_or(0)
 }
 
 /// `net.loopback` request: loss percent plus seed plus latency and burst ticks, integers only.
@@ -468,63 +334,24 @@ mod tests {
     }
 
     #[test]
-    fn net_conditioner_deterministic_x2() {
-        assert_eq!(ConditionerConfig::with_fixed_loss(1001), None);
-        let cfg = ConditionerConfig::with_fixed_loss(100).expect("100 builds");
-        let mut first = Conditioner::new(cfg, 2040);
-        let mut second = Conditioner::new(cfg, 2040);
-        for tick in 0..120u64 {
-            let bytes = tick.to_le_bytes().to_vec();
-            first.condition(bytes.clone(), tick);
-            second.condition(bytes, tick);
-            assert_eq!(first.pop_due(tick), second.pop_due(tick));
+    fn net_loopback_partial_loss_desync_pins_the_exact_tick() {
+        // DP1 remainder: a partial loss desync names an exact, non-zero tick
+        // per seed (full loss `Some(0)` stays the boundary case above). At 90
+        // percent loss the seeded wire starves a seat a few ticks in, so the
+        // tick is non-trivial and reproduces on the same seed twice.
+        for (seed, tick) in [(11_u64, 94_u32), (12, 17)] {
+            let first = loopback_report(90, seed, 0, None, None).expect("90pct loss runs");
+            assert_eq!(
+                first.first_divergence,
+                Some(tick),
+                "seed {seed} names its exact tick: {first:?}"
+            );
+            assert!(
+                !first.converged,
+                "a desync never reads converged: {first:?}"
+            );
+            let again = loopback_report(90, seed, 0, None, None).expect("repeats");
+            assert_eq!(first, again, "seed {seed} reproduces its tick twice");
         }
-        assert_eq!(conditioner_probe(2040), conditioner_probe(2040));
-    }
-
-    #[test]
-    fn net_conditioner_bursty_transitions_flip_state() {
-        // Gilbert-Elliott seam: Good flips to Bad on its permille draw, Bad
-        // holds when its return draw never hits, and Bad drops everything.
-        let cfg = ConditionerConfig {
-            latency_ticks: 2,
-            jitter_ticks: 0,
-            good_loss_permille: 0,
-            bad_loss_permille: 1000,
-            good_to_bad_permille: 1000,
-            bad_to_good_permille: 0,
-        };
-        let mut cond = Conditioner::new(cfg, 7);
-        assert_eq!(cond.state, LinkState::Good);
-        cond.condition(vec![1], 0);
-        assert_eq!(
-            cond.state,
-            LinkState::Bad,
-            "Good always flips when good_to_bad is 1000"
-        );
-        assert!(
-            cond.pop_due(10).is_empty(),
-            "Bad with full loss drops the flipped packet"
-        );
-        cond.condition(vec![2], 1);
-        assert_eq!(cond.state, LinkState::Bad, "Bad holds when return is 0");
-        assert!(cond.pop_due(11).is_empty());
-        // Jitter window: zero loss delivers inside now + latency ..= + jitter.
-        let calm = ConditionerConfig {
-            latency_ticks: 2,
-            jitter_ticks: 3,
-            good_loss_permille: 0,
-            bad_loss_permille: 0,
-            good_to_bad_permille: 0,
-            bad_to_good_permille: 0,
-        };
-        let mut first = Conditioner::new(calm, 99);
-        first.condition(vec![9], 0);
-        assert!(first.pop_due(1).is_empty(), "latency holds the packet");
-        let due = first.pop_due(5);
-        assert_eq!(due.len(), 1, "jitter delivers inside the window");
-        let mut second = Conditioner::new(calm, 99);
-        second.condition(vec![9], 0);
-        assert_eq!(due, second.pop_due(5), "same seed seals the same queue");
     }
 }

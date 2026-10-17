@@ -1,7 +1,9 @@
 //! Digest-chained audit receipts over the crash-safe journal.
 //!
-//! Status: test-only with no production Shell caller yet; [`audit_apply`]
-//! would record each acknowledged WAL apply. The data owner is [`AuditChain`]. Units: seq/revision
+//! Consumer: the editor dock [`Shell`](crate::shell::Shell) owns one chain and
+//! chains a receipt per acknowledged apply through [`AuditChain::record_applied`];
+//! [`audit_apply`] stays the WAL-first entry for callers that drive a [`Wal`].
+//! The data owner is [`AuditChain`]. Units: seq/revision
 //! counters, bytes for entry encodings. Determinism: little-endian canonical
 //! bytes, FNV-based `digest_parts` (also used by instant snapshots — no new
 //! crypto). Errors:
@@ -254,9 +256,10 @@ fn link(prev: &[u8; 32], entry_digest: &[u8; 32], seq: u64) -> [u8; 32] {
 
 /// Append-only digest chain with a bounded rotation cap.
 ///
-/// Units: seq/revision counters, bytes for entry encodings. Ownership: no
-/// production owner yet; tests own the chain and call [`audit_apply`] after
-/// each acknowledged WAL apply. Threading: single-threaded, no locks; send the receipts, not the
+/// Units: seq/revision counters, bytes for entry encodings. Ownership: the
+/// editor [`Shell`](crate::shell::Shell) owns one chain and calls
+/// [`Self::record_applied`] after each acknowledged apply; tests call
+/// [`audit_apply`] after each acknowledged WAL apply. Threading: single-threaded, no locks; send the receipts, not the
 /// chain, across threads. Determinism: little-endian canonical bytes with the
 /// FNV-based `digest_parts`, so the same edits always chain the same
 /// digests. Errors: [`AuditError`]; oversize refuses before appending.

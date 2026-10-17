@@ -17,8 +17,9 @@ pub const MAX_BOUTS: usize = 256;
 /// Longest bout in fixed ticks. Bounds harness time.
 pub const MAX_TICKS: u32 = 3_600;
 /// Stillness window in ticks (3 s at 60 Hz). A stream of identical
-/// decisions this long counts as stuck.
-pub const STUCK_WINDOW_TICKS: u32 = 180;
+/// decisions this long counts as stuck. Single owner is
+/// `engine_core::STUCK_WINDOW_TICKS`.
+pub const STUCK_WINDOW_TICKS: u32 = engine_core::STUCK_WINDOW_TICKS;
 /// Standard batch width matching the playtest proof size.
 pub const STANDARD_BOUTS: usize = 200;
 /// Standard bout length in fixed ticks.

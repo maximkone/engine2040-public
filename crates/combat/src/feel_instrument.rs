@@ -21,8 +21,10 @@ pub const SCENARIO_COUNT_U8: u8 = 20;
 /// engine inventory inspired by Lin et al. 2208.06155v3 section 4, not a
 /// copy of the paper's list).
 pub const FEATURE_COUNT: usize = 19;
-/// Fixed tick rate the latency model assumes.
-pub const TICKS_PER_SEC: u32 = 60;
+/// Fixed tick rate the latency model assumes; the rate's one owner is
+/// `engine_core::TICK_HZ` and its checked narrow form is
+/// `engine_core::TICK_HZ_U32`, which this constant takes.
+pub const TICKS_PER_SEC: u32 = engine_core::TICK_HZ_U32;
 /// p95 input-to-effect ceiling in milliseconds (packet contract).
 pub const P95_LATENCY_MS: u32 = 50;
 /// Minimum coordinated-vs-baseline impact gain in permille (+10%).

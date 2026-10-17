@@ -54,6 +54,11 @@ const SUN_DISK_FULL: f64 = 0.999_97;
 const SUN_DISK_INTENSITY: f64 = 40.0;
 const SUNSET_RGB: [f64; 3] = [0.9, 0.45, 0.2];
 const HAZE_RGB: [f64; 3] = [0.55, 0.6, 0.65];
+// Daylight zenith pedestal in linear HDR per channel: multiple-scatter
+// approx (own words, no donor bytes) so the overhead day sky reads blue at
+// the live exposure. Elev-squared weight keeps the horizon ring (fog/IBL)
+// intact: fog samples the equator where this term is ~zero.
+const DAY_ZENITH_RGB: [f64; 3] = [0.20, 0.34, 0.62];
 const AIR_MASS_MIN_ELEV: f64 = 0.04;
 const AIR_MASS_MAX: f64 = 24.0;
 
@@ -239,6 +244,12 @@ fn scatter_above(v: [f64; 3], s: [f64; 3], turbidity: f64) -> [f64; 3] {
         out[c] += SUN_INTENSITY * 0.06 * SUNSET_RGB[c] * horizon * (0.5 + 0.15 * turbidity);
         out[c] += (turbidity - SKY_TURBIDITY_MIN as f64) * 0.35 * HAZE_RGB[c] * horizon;
     }
+    // Daylight zenith pedestal: elev-squared weight peaks overhead and
+    // vanishes at the horizon, so fog color and IBL horizon stay put.
+    let zenith_w = elev * elev;
+    out[0] += DAY_ZENITH_RGB[0] * zenith_w;
+    out[1] += DAY_ZENITH_RGB[1] * zenith_w;
+    out[2] += DAY_ZENITH_RGB[2] * zenith_w;
     // Solar disk: smooth ~degree-wide boost, dimmed by mean transmittance.
     let disk = smoothstep(SUN_DISK_COS, SUN_DISK_FULL, cos_t);
     for v in &mut out {
@@ -2230,7 +2241,10 @@ mod tests {
         // F2P live-sky text gate: `fs_sky` must fetch the uploaded bake by
         // ray direction (not the old analytic ramp) while keeping the
         // infinite fog mix in linear HDR for the blit.
-        let wgsl = include_str!("shaders/forward.wgsl");
+        // Windows checkouts carry CRLF (HEAD blobs stay LF): normalize once
+        // so the brace scan below finds the same `\n}\n` close on both.
+        let normalized = include_str!("shaders/forward.wgsl").replace("\r\n", "\n");
+        let wgsl = normalized.as_str();
         let head = "fn fs_sky(";
         let start = wgsl.find(head).expect("fs_sky exists");
         let rest = &wgsl[start..];
@@ -2279,5 +2293,64 @@ mod tests {
             sky_live_on_off_gap(&ragged),
             Err(SkyError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn day_zenith_reads_daylight_blue() {
+        // Bug-art-sky-void: the arena day rig zenith must read daylight blue
+        // (bright, B>G>R) so the outdoor ceiling never renders as a dark void.
+        // Fails on the dark single-scatter zenith (~0.07 B); passes with the
+        // multiple-scatter daylight pedestal.
+        let params = sky_live_params();
+        let zenith = sky_radiance([0.0, 1.0, 0.0], &params).expect("day zenith radiates");
+        assert!(
+            zenith.iter().all(|c| c.is_finite() && *c >= 0.0),
+            "zenith finite, got {zenith:?}"
+        );
+        assert!(
+            zenith[2] > zenith[1] && zenith[1] > zenith[0],
+            "zenith B>G>R, got {zenith:?}"
+        );
+        assert!(zenith[2] > 0.4, "daylight zenith B bright, got {zenith:?}");
+        let bake = sky_live_bake();
+        let sampled = sample_look_skybox(&bake, [0.0, 1.0, 0.0]).expect("bake zenith samples");
+        assert!(
+            sampled[2] > 0.4 && sampled[2] > sampled[0],
+            "baked zenith stays blue, got {sampled:?}"
+        );
+    }
+
+    #[test]
+    fn sky_live_binds_bake_bytes_x2() {
+        // One live bind: same bake twice gives equal upload bytes, the sky
+        // region differs above the epsilon, and the live receipt keeps the
+        // sky slot above zero when bound and moved.
+        let bake = sky_live_bake();
+        let anchor = sky_live_params().exposure_ev100;
+        let (a_tex, a_ev) = sky_view_upload(&bake, anchor).expect("first uploads");
+        let again = sky_live_bake();
+        let (b_tex, b_ev) = sky_view_upload(&again, anchor).expect("second uploads");
+        assert_eq!(
+            sky_upload_bytes(&a_tex, a_ev),
+            sky_upload_bytes(&b_tex, b_ev),
+            "upload bytes stable twice"
+        );
+        let gap = sky_live_on_off_gap(&bake).expect("day-rig gaps");
+        assert!(gap > 0.01, "sky region differs, got {gap}");
+        let live = include_str!("present/gpu_present/live.rs");
+        assert!(
+            live.contains("live_sky_should_count"),
+            "live receipt gates sky time"
+        );
+        assert!(
+            live.contains("sky_live_on_off_gap"),
+            "live receipt reads the gap oracle"
+        );
+        assert!(
+            live.contains("sky_submit_us"),
+            "arena per-pass sky stays above zero on live frames"
+        );
+        let wgsl = include_str!("shaders/forward.wgsl");
+        assert!(wgsl.contains("sky_view"), "forward binds the sky view");
     }
 }

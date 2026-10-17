@@ -87,11 +87,17 @@ fn deterministic_hash_equal_pins_flag() {
             s.step(FIXED_DT);
         }
     }
-    let raw = format!(
-        "ticks=60 equal={} hash={}\n",
-        a.state_hash() == b.state_hash(),
-        a.state_hash()
+    let digest = a.state_hash();
+    // Both spaces must agree AND the digest itself is pinned: the redacted
+    // trace below erases the hash, so a uniform drift would otherwise stay
+    // green.
+    const PINNED_HASH: u64 = 0xe4e51f3dabeaf948;
+    assert_eq!(a.state_hash(), b.state_hash(), "twin spaces diverge");
+    assert_eq!(
+        digest, PINNED_HASH,
+        "trace digest drifted: got {digest:016x}"
     );
+    let raw = format!("ticks=60 equal={} hash={digest}\n", digest == b.state_hash());
     let trace = redact_hash(&raw);
     assert_snapshot(&trace, "ticks=60 equal=true hash=[HASH]\n");
 }

@@ -5,15 +5,17 @@
 //! Units: strain Q16 fixed-point, ticks on events. Determinism: canonical
 //! bond order, sorted worklist, integer-only math; reruns are bit-identical.
 //! Errors: [`SpreadError`]. Budget: 0.5 ms per spread event (bounded scans
-//! over at most 4096 bonds; only the per-event output vec allocates).
+//! over at most 4096 bonds; one neighbor scratch plus the per-event output
+//! vec allocate per call, nothing per break or per pop).
 //!
 //! Mirror: bond/event/error shapes repeat `bonded.rs` so this file stays
 //! std-only and `rustc --test` clean; they can be swapped for `super::bonded`
 //! imports plus `From` impls once a caller needs the bonded types here.
 
-use crate::bonded::{flagged_indices, BondedDesc, BreakError};
-use crate::cluster::ClusterBondGraph;
+use crate::bonded::{flagged_indices, slot, wire, BondedDesc, BreakError};
+use crate::cluster::{Cascade, ClusterBondGraph};
 use engine_core::Fnv64;
+use std::collections::VecDeque;
 
 /// Fixed-point scale for strain: Q16, matches `engine-core` `Fixed::SCALE`.
 pub const STRAIN_SCALE: i64 = 65536;
@@ -120,6 +122,33 @@ pub fn spread_digest(events: &[SpreadEvent]) -> u64 {
 pub fn cluster_support_and_digest(desc: &BondedDesc) -> Result<(Vec<u32>, u64), BreakError> {
     let graph = ClusterBondGraph::new(desc)?;
     Ok((graph.intact_set(), graph.digest()))
+}
+
+/// Anchor-connected chunks and the swing of one damage cascade through the
+/// sparse topology.
+///
+/// Propagation-leg query: builds the single [`ClusterBondGraph`] for `desc`,
+/// replays the bonds that already snapped, spreads `impact` from `origin`
+/// along intact bonds ([`crate::cluster::CASCADE_FALLOFF_PERMILLE`] per hop,
+/// never crossing a snapped one) and returns the cascade, the anchor-connected
+/// set still standing and the bit-exact digest. Units: chunk indices, integer
+/// impact points against an integer `toughness`. Errors: [`BreakError`] for a
+/// bad descriptor, bond or impact, never a panic. Off-tick query only: the
+/// walk allocates (analysis, never the tick). Consumer: the door's break
+/// verbs, DX11.
+pub fn cluster_cascade_and_digest(
+    desc: &BondedDesc,
+    snapped: &[u32],
+    origin: u32,
+    impact: u32,
+    toughness: u32,
+) -> Result<(Cascade, Vec<u32>, u64), BreakError> {
+    let mut graph = ClusterBondGraph::new(desc)?;
+    for bond in snapped {
+        graph.snap_bond(*bond)?;
+    }
+    let cascade = graph.cascade(origin, impact, toughness)?;
+    Ok((cascade, graph.intact_set(), graph.digest()))
 }
 
 /// Typed validation failures; external input maps here, never to a panic.
@@ -298,12 +327,18 @@ pub fn spread_cracks(
     let mut acc = vec![0i64; n];
     let mut broken = vec![false; n];
     let mut queued = vec![false; n];
+    // One neighbor scratch reused for every broken bond, so the flood
+    // allocates once per call (plus the output vec), never once per break.
+    let mut neighbors: Vec<usize> = Vec::new();
     acc[hit_bond] = seed_strain_q16;
     // Sorted worklist of bond ids; ascending pop order is the flood order.
-    let mut pending: Vec<u32> = vec![hit_bond as u32];
+    // A deque pops the head in O(1) without shifting the whole worklist per
+    // pop; inserts stay sorted by binary search, so the pop order (and every
+    // carry, break and event) matches the old shifting Vec exactly.
+    let mut pending: VecDeque<u32> = VecDeque::from([wire(hit_bond)]);
     queued[hit_bond] = true;
-    while !pending.is_empty() {
-        let current = pending.remove(0) as usize;
+    while let Some(current) = pending.pop_front() {
+        let current = slot(current);
         queued[current] = false;
         if broken[current] {
             continue;
@@ -318,7 +353,13 @@ pub fn spread_cracks(
                     graph.bonds[current].a as usize,
                     graph.bonds[current].b as usize,
                 );
-                for next in merge_neighbors(&graph.adjacency[a], &graph.adjacency[c], current) {
+                merge_neighbors_into(
+                    &graph.adjacency[a],
+                    &graph.adjacency[c],
+                    current,
+                    &mut neighbors,
+                );
+                for &next in &neighbors {
                     if broken[next] {
                         continue;
                     }
@@ -329,6 +370,7 @@ pub fn spread_cracks(
                         queued[next] = true;
                     }
                 }
+                neighbors.clear();
             }
         }
     }
@@ -342,8 +384,14 @@ pub fn spread_cracks(
             });
         }
     }
-    // Support search from anchors over unbroken bonds; anchored chunks seed
-    // it, so they stay until their own bonds fail.
+    events.extend(frees_after(graph, &broken, tick));
+    Ok(events)
+}
+
+/// Frees after the flood: a support search from the anchors over the intact
+/// bonds. Anchored chunks seed it, so they stay until their own bonds fail.
+/// Frees come out in chunk order, after every bond event.
+fn frees_after(graph: &SpreadGraph, broken: &[bool], tick: u32) -> Vec<SpreadEvent> {
     let mut supported = vec![false; graph.chunk_count];
     let mut stack = Vec::new();
     for (i, anchored) in graph.anchored.iter().enumerate() {
@@ -354,11 +402,12 @@ pub fn spread_cracks(
     }
     while let Some(current) = stack.pop() {
         for bond in &graph.adjacency[current] {
-            if broken[*bond as usize] {
+            let id = slot(*bond);
+            if broken[id] {
                 continue;
             }
-            let ends = graph.bonds[*bond as usize];
-            let (x, y) = (ends.a as usize, ends.b as usize);
+            let ends = graph.bonds[id];
+            let (x, y) = (slot(ends.a), slot(ends.b));
             let next = if x == current {
                 y
             } else if y == current {
@@ -372,21 +421,25 @@ pub fn spread_cracks(
             }
         }
     }
-    for (i, is_supported) in supported.iter().enumerate() {
+    let mut frees = Vec::new();
+    for (chunk, is_supported) in supported.iter().enumerate() {
         if !is_supported {
-            events.push(SpreadEvent::ChunkFreed {
+            frees.push(SpreadEvent::ChunkFreed {
                 tick,
-                chunk: i as u32,
+                chunk: wire(chunk),
             });
         }
     }
-    Ok(events)
+    frees
 }
 
 /// Merges two ascending bond-id lists into one ascending neighbor list,
 /// skipping the bond being broken. Index order keeps the flood sorted.
-fn merge_neighbors(left: &[u32], right: &[u32], skip: usize) -> Vec<usize> {
-    let mut out = Vec::with_capacity(left.len() + right.len());
+/// Writes into caller-owned `out` (cleared first) so the flood reuses one
+/// scratch instead of allocating per broken bond.
+fn merge_neighbors_into(left: &[u32], right: &[u32], skip: usize, out: &mut Vec<usize>) {
+    out.clear();
+    out.reserve(left.len() + right.len());
     let (mut l, mut r) = (0usize, 0usize);
     while l < left.len() && r < right.len() {
         let (x, y) = (left[l], right[r]);
@@ -414,7 +467,6 @@ fn merge_neighbors(left: &[u32], right: &[u32], skip: usize) -> Vec<usize> {
         }
         r += 1;
     }
-    out
 }
 
 #[cfg(test)]
@@ -480,6 +532,41 @@ mod tests {
                 .skip(5)
                 .all(|e| matches!(e, SpreadEvent::ChunkFreed { .. })),
             "free events trail in chunk order: {first:?}"
+        );
+    }
+
+    /// Guard: the flood stays inside the repo's long-function limit
+    /// (`tools/rust-quality.mjs` counts `fn` spans over 100 lines), so a
+    /// later refactor cannot re-grow `spread_cracks` past the `long_fns`
+    /// ratchet row the same way one already did.
+    #[test]
+    fn spread_cracks_stays_within_long_fn_limit() {
+        const LIMIT: usize = 100;
+        let src: &str = include_str!("spread.rs");
+        let start = src
+            .find("pub fn spread_cracks(")
+            .expect("spread.rs keeps its flood entry point");
+        let open = start + src[start..].find('{').expect("fn has a body");
+        let mut depth = 0usize;
+        let mut end = open;
+        for (k, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + k;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let lines = src[start..=end].lines().count();
+        assert_eq!(depth, 0, "spread_cracks body must close");
+        assert!(
+            lines <= LIMIT,
+            "spread_cracks is {lines} lines (limit {LIMIT}): split it into named steps"
         );
     }
 
@@ -788,6 +875,25 @@ mod tests {
             ..desc.clone()
         };
         assert!(cluster_support_and_digest(&dangling).is_err());
+        // DX16: the cascade bridge is the same graph's propagation query: an
+        // impact 4 on the middle shard with toughness 2 swaps shards 1 and 2
+        // and leaves only the anchored shard standing.
+        let (cascade, standing, digest) =
+            cluster_cascade_and_digest(&desc, &[], 1, 4, 2).expect("cascade bridges");
+        assert_eq!(cascade.broken_chunks, vec![1, 2]);
+        assert_eq!(cascade.snapped_bonds, vec![0, 1]);
+        assert_eq!(standing, vec![0]);
+        let (_, again, repeat) = cluster_cascade_and_digest(&desc, &[], 1, 4, 2).expect("twice");
+        assert_eq!(again, standing);
+        assert_eq!(digest, repeat);
+        // A bond that snapped before the hit stops the wave: shard 1 swaps
+        // alone and shard 2 keeps both its own bonds intact.
+        let (gapped, _, _) =
+            cluster_cascade_and_digest(&desc, &[1], 1, 4, 2).expect("replays the gap");
+        assert_eq!(gapped.broken_chunks, vec![1]);
+        assert_eq!(gapped.snapped_bonds, vec![0], "only the new snap reports");
+        assert!(cluster_cascade_and_digest(&desc, &[], 40, 4, 2).is_err());
+        assert!(cluster_cascade_and_digest(&desc, &[9], 1, 4, 2).is_err());
     }
 
     /// Deterministic Fisher-Yates with an LCG; std-only, no RNG crate.

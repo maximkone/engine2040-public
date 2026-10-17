@@ -211,6 +211,22 @@ test("a row with a done/ packet written in the last 2 h waits; an older one, a r
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a done/ record that closed nothing (its own RESULT is NOOP) holds no row for 2 h (2026-10-17: a NOOP scan locked EG18 out)", () => {
+  const now = Date.now();
+  const root = fixture({
+    // a standing run that only *verified* a landed-open row: RESULT NOOP, no edits, so nothing of EG18 is in flight
+    "target/queue/done/builder-focus-r226.md": "# FOCUS Now coder #226 (@builder, standing)\n\n## Result (completed)\n\nROW: EG18 scan | OWNED: target/queue/ready/x.md\nRESULT: NOOP - no FOCUS row was free; the first landed-but-open row (EG18) was verified, not closed | proof: rg -n caller crates/combat/src/feel.rs\n",
+    // the same shape worked for real: DONE holds the row, and the reply template's `RESULT: DONE|PARTIAL|...` line is no result
+    "target/queue/done/0-eg19-gate.md": "Reply as `RESULT: DONE|PARTIAL|BLOCKED|NOOP - <what> | proof: <where>`.\n\nROW: EG19\nRESULT: DONE - wired | proof: rg -n caller crates/combat/src/feel.rs\n",
+  });
+  try {
+    aged(root, "target/queue/done/builder-focus-r226.md", 29, now);
+    aged(root, "target/queue/done/0-eg19-gate.md", 29, now);
+    assert.deepEqual(checkPacket(packet({ row: "EG18" }), { root, self: "n.md", now }), [], "a NOOP record closed nothing: the row is free");
+    assert.match(checkPacket(packet({ row: "EG19" }), { root, self: "n.md", now }).join(" "), /row EG19 has done\/0-eg19-gate\.md, written 29 min ago \(under 2 h\): let its review and landing finish/, "a DONE record still waits, and the message names it");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("--check on a file in ready/ prints the row clash and exits 1; the older twin still passes", () => {
   const root = fixture({ "target/queue/ready/old.md": packet(), "target/queue/ready/new.md": packet() });
   try {

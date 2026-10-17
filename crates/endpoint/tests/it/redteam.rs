@@ -15,7 +15,8 @@
 //! `crates/save/src/fallback.rs`: timeout or refusal falls back to the
 //! scripted path with a notice, cancelled or stale propagates, local-only
 //! failure never escalates to remote), the MCP5 door
-//! (`crates/endpoint/src/mcp.rs`: exactly 20 tools, no shell, code execution
+//! (`crates/endpoint/src/mcp.rs`: thirteen core tools plus pack verbs — the
+//! exact count pin lives in `tests/it/tool_count_pin.rs` — no shell, code execution
 //! or file writes, CAP1-bound approvals), and the endpoint tool guards
 //! (`tools`, `sandbox`, `receipts`, `transport`, exercised directly below).
 //!
@@ -235,26 +236,65 @@ fn evaluate(case: &Case, secrets: &[String]) -> Verdict {
     let frame = transport::Frame::new("tools.call", &case.tool, 1);
     let frame_ok = transport::validate(&frame);
     // Real guard 3: preview-vs-live plus tier gate shapes (deny wins).
-    let _admit = sandbox::admit(true, true);
-    let _tier = sandbox::tier_allows(0, false, false);
+    // Pinned: readonly admits even in preview; tier 0 mutates nothing.
+    assert_eq!(
+        sandbox::admit(true, true),
+        receipts::Effect::Landed,
+        "readonly admits in preview"
+    );
+    assert!(
+        !sandbox::tier_allows(0, false, false),
+        "tier 0 must not allow a mutating call"
+    );
     // Real guard 4: receipt envelope always carries two recovery verbs.
-    let _receipt = receipts::Receipt::refused_bind();
+    let receipt = receipts::Receipt::refused_bind();
+    assert!(!receipt.ok, "a refused bind is not ok");
+    assert_eq!(receipt.code, "arg_bind_failed", "refusal names the bind");
+    assert_eq!(
+        receipt.recovery.len(),
+        2,
+        "refusal carries two recovery verbs"
+    );
 
     let redacted_payload = redact(&case.payload, secrets);
     let mut log = format!(
         "case={} vector={} tool={} verdict={} invariant={} recovery={} payload={}",
         case.id, case.vector, case.tool, "pending", case.invariant, case.recovery, redacted_payload
     );
-    // Touch the remaining real guards so the harness cannot drift from them:
-    // batch cap, byte plus char caps, loopback, token, timeout tiers.
-    let _ = tools::check_batch(parse_calls(&case.payload).unwrap_or(1));
-    let _ = transport::check_caps(
-        parse_sized(&case.payload, "bytes").unwrap_or(0),
-        parse_sized(&case.payload, "chars").unwrap_or(0),
+    // Every remaining guard is asserted per case, so a guard that stops
+    // refusing fails this harness instead of drifting green: batch cap,
+    // byte plus char caps, loopback, token, timeout tiers.
+    let calls = parse_calls(&case.payload).unwrap_or(1);
+    assert_eq!(
+        tools::check_batch(calls).is_ok(),
+        calls <= tools::BATCH_MAX,
+        "case {}: batch guard must fire past BATCH_MAX ({calls})",
+        case.id
     );
-    let _ = transport::is_loopback(&parse_host(&case.payload).unwrap_or_default());
-    let _ = transport::token_ok("presented", "expected");
-    let _ = transport::timeout_for("patch");
+    let bytes = parse_sized(&case.payload, "bytes").unwrap_or(0);
+    let chars = parse_sized(&case.payload, "chars").unwrap_or(0);
+    assert_eq!(
+        transport::check_caps(bytes, chars),
+        bytes <= transport::MAX_BYTES && chars <= transport::MAX_CHARS,
+        "case {}: cap guard must fire past the caps ({bytes} bytes, {chars} chars)",
+        case.id
+    );
+    let host = parse_host(&case.payload).unwrap_or_default();
+    assert_eq!(
+        transport::is_loopback(&host),
+        matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost"),
+        "case {}: only loopback hosts pass ({host:?})",
+        case.id
+    );
+    assert!(
+        !transport::token_ok("presented", "expected"),
+        "mismatched tokens must never intersect"
+    );
+    assert_eq!(
+        transport::timeout_for("patch"),
+        10,
+        "patch tier pins its 10 s timeout"
+    );
 
     let verdict_kind: &'static str = if !known || !frame_ok {
         "refused"

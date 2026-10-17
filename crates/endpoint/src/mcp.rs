@@ -70,9 +70,9 @@ use engine_scene::transform::Transform;
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase, ToolRouter};
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, InitializeResult,
-    JsonObject, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType,
-    ServerCapabilities, ServerConfig, ToolAnnotations, ToolsCapability,
+    CacheScope, CallToolRequestParams, CallToolResponse, InitializeResult, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities,
+    ServerConfig, ToolAnnotations, ToolsCapability,
 };
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
@@ -89,8 +89,8 @@ use super::packs::{
     ApiCallTool, ApiLoadTool, PackRegistry, PACK_NAMES, TOOL_API_CALL, TOOL_API_LOAD,
 };
 use super::play::{
-    CaptureArgs, CaptureOutput, CaptureTool, PlayJobs, PlayRunArgs, PlayRunOutput, PlayRunTool,
-    TOOL_CAPTURE, TOOL_PLAY_RUN,
+    frame_call_result, CaptureArgs, CaptureOutput, CaptureTool, PlayJobs, PlayRunArgs,
+    PlayRunOutput, PlayRunTool, TOOL_CAPTURE, TOOL_PLAY_RUN,
 };
 use super::tool_macro::{TestRunTool, TOOL_TEST_RUN};
 use super::witness::EvidenceReceipt;
@@ -1311,6 +1311,13 @@ crate::e2_tool!(
 fn sanitize_schema_value(value: &mut Value) {
     match value {
         Value::Object(map) => {
+            // AX15 surface trim (2026-10-17): every advertised schema repeated
+            // the same 57-char `$schema` dialect key, 2622 chars on the loaded
+            // list. MCP clients read tool schemas in the protocol's own
+            // dialect, so the key carried no information a caller needs; the
+            // door drops it and spends the room on verbs instead of
+            // boilerplate. No field, verb or budget changes.
+            map.remove("$schema");
             for (key, entry) in map.iter_mut() {
                 if (key == "format" || key == "type")
                     && entry.as_str().is_some_and(|format| format == "uint64")
@@ -1330,8 +1337,10 @@ fn sanitize_schema_value(value: &mut Value) {
     }
 }
 
-/// Strip the `uint64` schema emit from one advertised tool, leaving plain
-/// `integer` in both its input and output schemas.
+/// Trim one advertised tool's schemas to what a caller needs: the `uint64`
+/// emit becomes plain `integer`, and the repeated `$schema` dialect key is
+/// dropped (see [`sanitize_schema_value`]). Both shrink the ledger the
+/// discovery budget counts, without changing one field.
 fn sanitize_tool_schema(tool: &mut rmcp::model::Tool) {
     let mut input = Value::Object((*tool.input_schema).clone());
     sanitize_schema_value(&mut input);
@@ -1439,7 +1448,19 @@ impl McpServer {
     ) -> Result<CallToolResponse, ErrorData> {
         if self.tool_router.has_route(&request.name) {
             let tcc = ToolCallContext::new(self, request, context);
-            return self.tool_router.call(tcc).await;
+            let response = self.tool_router.call(tcc).await?;
+            // AX27: a frame receipt answers with an image block plus a caption
+            // instead of a raw `png_bytes` number array. Every other value and
+            // every error result passes through untouched.
+            return match response {
+                CallToolResponse::Complete(result) if result.is_error != Some(true) => {
+                    match result.structured_content {
+                        Some(value) => Ok(frame_call_result(value).into()),
+                        None => Ok(result.into()),
+                    }
+                }
+                other => Ok(other),
+            };
         }
         let name = request.name.to_string();
         let Some(verb) = PackRegistry::shipped().verb(&name) else {
@@ -1452,7 +1473,8 @@ impl McpServer {
             .arguments
             .map_or_else(|| Value::Object(JsonObject::new()), Value::Object);
         match verb.invoke(self, args) {
-            Ok(value) => Ok(CallToolResult::structured(value).into()),
+            // AX27: `play.step` returns its frame the same way `capture` does.
+            Ok(value) => Ok(frame_call_result(value).into()),
             Err(error) => Err(ErrorData::from(error)),
         }
     }
@@ -2044,7 +2066,7 @@ mod tests {
 
     #[test]
     fn tool_schema_drift_matches_command_shapes() {
-        // Every tx input schema advertises exactly the five command ops.
+        // Every tx input schema advertises the seven command ops.
         for tool in [TxPreviewTool::input_schema(), TxApplyTool::input_schema()] {
             let schema = tool.expect("tx tools carry input schemas");
             let text = rmcp::serde_json::to_string(&*schema).expect("schema serializes");
@@ -2475,6 +2497,18 @@ mod tests {
             "loading view grows the list: {grown} vs {budget}"
         );
         assert_eq!(server.tool_budget_ledger().total_chars, grown);
+        // The loaded list is a real advertised list too: the same ledger gate
+        // must pass it, floor included, or `api.load` has no room to hand a
+        // pack to a client (bug:endpoint-api-load-budget).
+        let loaded_gate = server
+            .tool_budget_gate_with_bloat(0)
+            .expect("the loaded list passes the ledger gate with the floor intact");
+        assert_eq!(loaded_gate.total_chars, grown);
+        assert!(
+            loaded_gate.headroom_chars >= TOOL_LIST_MIN_HEADROOM_CHARS,
+            "loaded list leaves {} chars, floor is {TOOL_LIST_MIN_HEADROOM_CHARS}",
+            loaded_gate.headroom_chars
+        );
     }
 
     #[test]

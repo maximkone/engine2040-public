@@ -1221,7 +1221,7 @@ pub const BUG_SEEDS: [BugSeed; BUG_COUNT] = [
         target: "kp15-kill-confirm",
         op: FaultOp::DropInput {
             fighter: 0,
-            tick: 140,
+            tick: 192,
         },
     },
 ];
@@ -2117,7 +2117,7 @@ mod tests {
         let drops = [
             ("bug-window-parry-late", "tick 8 fighter 1"),
             ("bug-stamina-regen-dead", "tick 54 fighter 0"),
-            ("bug-kill-confirm-dropped", "tick 140 fighter 0"),
+            ("bug-kill-confirm-dropped", "tick 192 fighter 0"),
         ];
         for (bug, cause) in drops {
             let fault = BUG_SEEDS

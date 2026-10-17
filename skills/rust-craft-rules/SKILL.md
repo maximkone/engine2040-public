@@ -22,7 +22,7 @@ Use when you add unsafe code, a static, a lock or guard, a real-time callback, o
 - `crates/geo/src/uv.rs` `check_inputs`: model. The safe wrapper around the xatlas C call checks every precondition the C side relies on before it enters `unsafe` (rule 2).
 - `crates/endpoint/src/play/play_session.rs`: model. The capture hook and the re-query cache belong to the session object, not to a static (rule 3). Two process-wide statics that exist on purpose: `crates/endpoint/src/discover.rs` `WATCH_HUB` and `crates/endpoint/src/packs/anim.rs` `DOORS`; do not copy them for per-match state.
 - `crates/endpoint/src/play/requery.rs`: model. A poisoned lock becomes the typed error `lock_poisoned` (rule 4).
-- `crates/game/src/bin/arena.rs`: counter-example. The mixer `try_lock` in the tick path has no fallback, so audio commands drop silently when it is busy (rule 5).
+- `crates/game/src/bin/arena_frame/mod.rs:114`: counter-example. The tick's audible mirror takes the mixer with `try_lock` and has no else branch, so those voices drop silently when it is busy; the lock-free feed above it (`feed_tick_audio`) queues and counts `FeedStats::dropped_full` (rule 5).
 - `crates/ecs/src/pool.rs` `JobPool::scope`: model. It waits for every job, then re-raises the lowest-numbered job panic with `resume_unwind` (rule 6).
 
 Search more: `node tools/books.mjs search "unsafe safe abstraction preconditions"`

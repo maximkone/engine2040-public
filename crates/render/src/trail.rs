@@ -1,214 +1,237 @@
-//! Sword ribbon ring (RL53 slice 1): pure CPU trail staging.
+//! Sword ribbon ring (RL53 slice 1): the CPU ring the sim's integer weapon
+//! sweeps feed, plus the vert strip the staged ribbon draw reads.
 //!
-//! Owner: render lane. Units: mm for positions, mm for widths, 0..255 alpha.
-//! Determinism: same pushes give same bytes twice; fixed order, no clock.
-//! Errors: out-of-range index gives None, empty ring gives 0 segment.
-//! Budget: fixed 16 samples, no heap per push; GPU draw lands next slice.
+//! Owner: render lane. Units: mm in every stored sample and width, m in vert
+//! positions, alpha share 0..=1. Determinism: the samples are exact integer
+//! copies, so the same pushes give the same ring bytes and the same verts twice;
+//! no clock, no float in a stored sample. Errors: an index past `len` is `None`,
+//! an empty ring is 0 verts. Budget: 16 samples, one bounded vert `Vec` per
+//! build. Consumer: the `crates/game` trail feed pushes the swing's sweep
+//! segments; the staged `shaders/trail.wgsl` expands the strip next slice.
 
-/// Fixed sample count for the ribbon ring.
+use crate::draw::TrailStripVert;
+
+/// Ring capacity: the last 16 tick segments of one swing.
 pub const TRAIL_SAMPLES: usize = 16;
+/// Longest kept smoothed sub-segment in cm: the row's smoothing cap.
+pub const TRAIL_BLADE_MAX_CM: u32 = 8;
+/// [`TRAIL_BLADE_MAX_CM`] in mm, the drop line the smoothing check reads.
+const TRAIL_MAX_MM: u32 = TRAIL_BLADE_MAX_CM * 10;
+/// Thin width in mm when the width curve has no entry for a sample.
+const TRAIL_THIN_MM: u32 = 2;
+/// Modeled nanoseconds charged per ribbon vert by [`TrailRing::trail_ms`].
+const TRAIL_NS_PER_VERT: f64 = 4.0;
 
-/// Q16 one (1.0) for [`catmull_q16`].
-const Q16_ONE: i32 = 65_536;
-
-/// Q16 half (0.5) for the one subdivision in [`max_seg_mm`].
-const Q16_HALF: i32 = 32_768;
-
-/// Thin end width in mm for [`width_mm`].
-const WIDTH_THIN_MM: u32 = 2;
-
-/// Extra width at the middle in mm for [`width_mm`].
-const WIDTH_PEAK_EXTRA_MM: u32 = 22;
-
-/// Squared half-range for the parabolic width falloff.
-const WIDTH_RANGE_SQ: i32 = 225;
-
-/// Divisor matching [`WIDTH_RANGE_SQ`] minus the centre square.
-const WIDTH_DIVISOR: u32 = 224;
-
-/// Fixed ring of sword ribbon samples in mm.
-///
-/// Holds the last [`TRAIL_SAMPLES`] base/tip pairs in push order. Push
-/// overwrites the oldest sample once full, so `len` caps at 16 and
-/// `get(0)` is always the oldest resident sample.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrailRing {
-    base: [[i32; 3]; TRAIL_SAMPLES],
-    tip: [[i32; 3]; TRAIL_SAMPLES],
-    len: usize,
-    head: usize,
+/// One sweep segment kept by the ring: exact integer millimeters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrailSample {
+    /// Blade start of the tick in mm (`p0_mm`).
+    pub p0_mm: [i32; 3],
+    /// Blade end of the tick in mm (`p1_mm`).
+    pub p1_mm: [i32; 3],
 }
 
-impl Default for TrailRing {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Fixed oldest-first ring of the last [`TRAIL_SAMPLES`] segments: `newest` is
+/// the newest slot, `len` the resident count, and a push past full overwrites
+/// the oldest resident sample.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrailRing {
+    samples: [TrailSample; TRAIL_SAMPLES],
+    newest: usize,
+    len: usize,
 }
 
 impl TrailRing {
-    /// Empty ring holding no samples.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            base: [[0; 3]; TRAIL_SAMPLES],
-            tip: [[0; 3]; TRAIL_SAMPLES],
-            len: 0,
-            head: 0,
-        }
-    }
-
-    /// Drop all samples; backing stays zeroed for the next slash.
-    pub fn clear(&mut self) {
-        self.len = 0;
-        self.head = 0;
-    }
-
-    /// Push one base/tip pair in mm; overwrites oldest once full.
-    ///
-    /// Steady path: two array stores plus counter updates, no heap.
-    pub fn push(&mut self, base_mm: [i32; 3], tip_mm: [i32; 3]) {
-        self.base[self.head] = base_mm;
-        self.tip[self.head] = tip_mm;
-        self.head = (self.head + 1) % TRAIL_SAMPLES;
-        if self.len < TRAIL_SAMPLES {
-            self.len += 1;
-        }
-    }
-
     /// Resident sample count, capped at [`TRAIL_SAMPLES`].
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    /// True when no samples are resident.
+    /// True when no sample is resident.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Oldest-first sample; index 0 is the tail, `len - 1` is the head.
-    ///
-    /// Returns `None` past `len` so a stale index never panics.
+    /// Push one tick's sweep segment in mm; both endpoints are copied as
+    /// integers, never converted to float.
+    pub fn push_segment(&mut self, sweep_p0_mm: [i32; 3], sweep_p1_mm: [i32; 3]) {
+        self.newest = (self.newest + 1) % TRAIL_SAMPLES;
+        self.samples[self.newest] = TrailSample {
+            p0_mm: sweep_p0_mm,
+            p1_mm: sweep_p1_mm,
+        };
+        if self.len < TRAIL_SAMPLES {
+            self.len += 1;
+        }
+    }
+
+    /// Oldest-first sample; `None` past `len`, so a stale index never panics.
     #[must_use]
-    pub fn get(&self, index: usize) -> Option<([i32; 3], [i32; 3])> {
+    pub(crate) fn sample(&self, index: usize) -> Option<TrailSample> {
         if index >= self.len {
             return None;
         }
-        let slot = (self.head + TRAIL_SAMPLES - self.len + index) % TRAIL_SAMPLES;
-        Some((self.base[slot], self.tip[slot]))
+        let slot = (self.newest + TRAIL_SAMPLES + 1 - self.len + index) % TRAIL_SAMPLES;
+        Some(self.samples[slot])
+    }
+
+    /// Newest pushed `p1_mm`: the sweep's own blade end, so the ribbon tip
+    /// stays inside the sim's centimeter.
+    #[must_use]
+    pub fn tip_mm(&self) -> Option<[i32; 3]> {
+        let newest = self.len().checked_sub(1)?;
+        self.sample(newest).map(|s| s.p1_mm)
+    }
+
+    /// Build the ribbon vert strip from the resident samples.
+    ///
+    /// One base vert and one tip vert per output point, oldest first, in the
+    /// `draw::trail_strip_verts` strip shape. Each span is split at its integer
+    /// Catmull-Rom midpoint, so the ribbon bends between ticks; the width curve
+    /// lays the strip across the posed segment (`width_mm` holds one width per
+    /// oldest-first sample, a missing entry reuses the last one); alpha ramps 0
+    /// at the oldest sample to 1 at the newest. A span whose smoothed halves run
+    /// past [`TRAIL_BLADE_MAX_CM`] on either lane drops that sample; one bounded
+    /// `Vec` (at most 64 verts), and the same ring gives the same verts twice.
+    #[must_use]
+    pub fn ribbon_verts(&self, width_mm: &[u32]) -> Vec<TrailStripVert> {
+        let len = self.len();
+        let mut out = Vec::with_capacity(4 * TRAIL_SAMPLES);
+        // Lane pair of the last kept sample, of the one before it, plus the
+        // index of the last kept sample; empty until the first accept.
+        let mut prev = [[0i32; 3]; 2];
+        let mut prev2 = [[0i32; 3]; 2];
+        let mut kept = 0usize;
+        let mut last = 0usize;
+        for i in 0..len {
+            let Some(s) = self.sample(i) else { continue };
+            let here = [s.p0_mm, laid_tip(s.p0_mm, s.p1_mm, width_at(width_mm, i))];
+            if kept == 0 {
+                out.push(vert(here[0], age_alpha(i, len)));
+                out.push(vert(here[1], age_alpha(i, len)));
+                prev = here;
+                prev2 = here;
+                last = i;
+                kept = 1;
+                continue;
+            }
+            let next = self.sample(i + 1).unwrap_or(s);
+            let after = [
+                next.p0_mm,
+                laid_tip(next.p0_mm, next.p1_mm, width_at(width_mm, i + 1)),
+            ];
+            let mut mid = [[0i32; 3]; 2];
+            let mut wild = false;
+            for l in 0..2 {
+                mid[l] = cr3(prev2[l], prev[l], here[l], after[l]);
+                wild |=
+                    dist(prev[l], mid[l]) > TRAIL_MAX_MM || dist(mid[l], here[l]) > TRAIL_MAX_MM;
+            }
+            if wild {
+                continue;
+            }
+            let alpha = age_alpha(last, len);
+            out.push(vert(mid[0], alpha));
+            out.push(vert(mid[1], alpha));
+            let here_alpha = age_alpha(i, len);
+            out.push(vert(here[0], here_alpha));
+            out.push(vert(here[1], here_alpha));
+            prev2 = prev;
+            prev = here;
+            last = i;
+            kept += 1;
+        }
+        out
+    }
+
+    /// Modeled build cost in ms for `frames` ribbon builds, one per frame.
+    ///
+    /// Pure model, no wall clock: a build is charged four verts per resident
+    /// sample at [`TRAIL_NS_PER_VERT`], so every host reads the same number.
+    #[must_use]
+    pub fn trail_ms(&self, frames: u32) -> f64 {
+        let verts = u32::try_from(4 * self.len).unwrap_or(u32::MAX);
+        f64::from(verts) * f64::from(frames) * TRAIL_NS_PER_VERT / 1_000_000.0
     }
 }
 
-/// Ribbon width in mm at oldest-first index `i`.
-///
-/// Parabolic falloff: thin at both ends, wide at the middle. Index past
-/// 15 clamps to the head end so a stale index still draws thin.
-#[must_use]
-pub fn width_mm(i: usize) -> u32 {
-    let clamped = i.min(TRAIL_SAMPLES - 1);
-    let as_i32 = i32::try_from(clamped).unwrap_or(0);
-    let dist = (2 * as_i32 - 15).abs();
-    let numer = WIDTH_RANGE_SQ - dist * dist;
-    let numer_u32 = u32::try_from(numer.max(0)).unwrap_or(0);
-    WIDTH_THIN_MM + (WIDTH_PEAK_EXTRA_MM * numer_u32) / WIDTH_DIVISOR
+/// Width in mm at oldest-first sample `i`; a missing entry reuses the last one.
+fn width_at(width_mm: &[u32], i: usize) -> u32 {
+    width_mm
+        .get(i)
+        .or(width_mm.last())
+        .copied()
+        .unwrap_or(TRAIL_THIN_MM)
 }
 
-/// Ribbon alpha at oldest-first index `i`.
-///
-/// Linear ramp: 0 at the tail, 255 at the head. Index past 15 clamps
-/// to opaque so a stale index never turns transparent.
-#[must_use]
-pub fn alpha_u8(i: usize) -> u8 {
-    let clamped = i.min(TRAIL_SAMPLES - 1);
-    let num = u32::try_from(clamped).unwrap_or(u32::MAX);
-    let den = u32::try_from(TRAIL_SAMPLES - 1).unwrap_or(1);
-    u8::try_from((255 * num) / den).unwrap_or(u8::MAX)
+/// Alpha share for the sample pushed `i` ticks ago: 0 at the oldest, 1 newest.
+fn age_alpha(i: usize, len: usize) -> f32 {
+    let den = len.saturating_sub(1);
+    if den == 0 {
+        return 1.0;
+    }
+    let num = u16::try_from(i.min(den)).unwrap_or(u16::MAX);
+    f32::from(num) / f32::from(u16::try_from(den).unwrap_or(u16::MAX))
 }
 
-/// One-dimension Catmull-Rom in Q16, integer only.
-///
-/// `t_q16` is Q16 in 0..=65536 (0.0..=1.0); out-of-range clamps to the
-/// endpoints. Endpoints are exact: `t = 0` gives `p1`, `t = 65536`
-/// gives `p2`. Intermediate math runs in `i64` so mm inputs never
-/// overflow; the halved sum clamps to `i32` range.
-#[must_use]
-pub fn catmull_q16(p0: i32, p1: i32, p2: i32, p3: i32, t_q16: i32) -> i32 {
-    let t = i64::from(t_q16.clamp(0, Q16_ONE));
-    let t2 = (t * t) >> 16;
-    let t3 = (t2 * t) >> 16;
-    let q0 = i64::from(p0);
-    let q1 = i64::from(p1);
-    let q2 = i64::from(p2);
-    let q3 = i64::from(p3);
-    let term1 = 2 * q1;
-    let term2 = ((-q0 + q2) * t) >> 16;
-    let c2 = 2 * q0 - 5 * q1 + 4 * q2 - q3;
-    let term3 = (c2 * t2) >> 16;
-    let c3 = -q0 + 3 * q1 - 3 * q2 + q3;
-    let term4 = (c3 * t3) >> 16;
-    let half = (term1 + term2 + term3 + term4) >> 1;
-    let clamped = half.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
-    i32::try_from(clamped).unwrap_or(0)
+/// Lay the width curve across the posed segment: the tip point sits `width_mm`
+/// from the base along `p1 - p0`, in integers; a zero-length segment keeps the
+/// posed tip, so there is no divide by zero.
+fn laid_tip(p0_mm: [i32; 3], p1_mm: [i32; 3], width_mm: u32) -> [i32; 3] {
+    let len = dist(p0_mm, p1_mm);
+    if len == 0 {
+        return p1_mm;
+    }
+    let w = i64::from(width_mm);
+    let mut out = p0_mm;
+    for k in 0..3 {
+        let step = i64::from(p1_mm[k]) - i64::from(p0_mm[k]);
+        out[k] = p0_mm[k].saturating_add(i32::try_from(step * w / i64::from(len)).unwrap_or(0));
+    }
+    out
 }
 
-/// Integer distance in mm between two mm points.
-fn dist_mm(a: [i32; 3], b: [i32; 3]) -> u32 {
-    let dx = i64::from(a[0]) - i64::from(b[0]);
-    let dy = i64::from(a[1]) - i64::from(b[1]);
-    let dz = i64::from(a[2]) - i64::from(b[2]);
-    let sum = dx * dx + dy * dy + dz * dz;
-    let mag = u64::try_from(sum.max(0)).unwrap_or(0).isqrt();
-    u32::try_from(mag).unwrap_or(u32::MAX)
+/// Catmull-Rom midpoint (t = 1/2) of the span `a -> b` in integers,
+/// `(-p0 + 9a + 9b - p3) / 16`, so every host reads the same midpoint.
+fn cr(p0: i32, p1: i32, p2: i32, p3: i32) -> i32 {
+    let sum = 9 * (i64::from(p1) + i64::from(p2)) - i64::from(p0) - i64::from(p3);
+    i32::try_from(sum / 16).unwrap_or(if sum < 0 { i32::MIN } else { i32::MAX })
 }
 
-/// Smoothed midpoint of one span per axis at `t = 0.5`.
-fn span_mid(prev: [i32; 3], a: [i32; 3], b: [i32; 3], next: [i32; 3]) -> [i32; 3] {
+/// Per-axis [`cr`] over one span.
+fn cr3(p0: [i32; 3], a: [i32; 3], b: [i32; 3], p3: [i32; 3]) -> [i32; 3] {
     [
-        catmull_q16(prev[0], a[0], b[0], next[0], Q16_HALF),
-        catmull_q16(prev[1], a[1], b[1], next[1], Q16_HALF),
-        catmull_q16(prev[2], a[2], b[2], next[2], Q16_HALF),
+        cr(p0[0], a[0], b[0], p3[0]),
+        cr(p0[1], a[1], b[1], p3[1]),
+        cr(p0[2], a[2], b[2], p3[2]),
     ]
 }
 
-/// Longest smoothed sub-segment in mm over one midpoint per span.
-///
-/// Each span `i -> i + 1` is split at its Catmull-Rom midpoint (ends
-/// clamp by duplicating the endpoint), for both the base and the tip
-/// lanes; the longest half-segment wins. Empty and single-sample rings
-/// give 0. Integer only; same ring gives the same length twice.
-#[must_use]
-pub fn max_seg_mm(ring: &TrailRing) -> u32 {
-    if ring.len() < 2 {
-        return 0;
+/// Integer distance in mm between two mm points: i64 inside, `isqrt` out.
+fn dist(a: [i32; 3], b: [i32; 3]) -> u32 {
+    let mut sum = 0u64;
+    for k in 0..3 {
+        let d = i64::from(a[k]) - i64::from(b[k]);
+        sum += u64::try_from(d * d).unwrap_or(0);
     }
-    let mut worst: u32 = 0;
-    for s in 0..ring.len() - 1 {
-        let (prev_base, prev_tip) = ring.get(s.saturating_sub(1)).unwrap_or(([0; 3], [0; 3]));
-        let (a_base, a_tip) = ring.get(s).unwrap_or(([0; 3], [0; 3]));
-        let (b_base, b_tip) = ring.get(s + 1).unwrap_or(([0; 3], [0; 3]));
-        let next_slot = if s + 2 < ring.len() { s + 2 } else { s + 1 };
-        let (next_base, next_tip) = ring.get(next_slot).unwrap_or(([0; 3], [0; 3]));
-        // Clamp the Catmull ends: duplicate the span end when past the ring.
-        let (p0_base, p0_tip) = if s == 0 {
-            (a_base, a_tip)
-        } else {
-            (prev_base, prev_tip)
-        };
-        let mid_base = span_mid(p0_base, a_base, b_base, next_base);
-        let mid_tip = span_mid(p0_tip, a_tip, b_tip, next_tip);
-        for d in [
-            dist_mm(a_base, mid_base),
-            dist_mm(mid_base, b_base),
-            dist_mm(a_tip, mid_tip),
-            dist_mm(mid_tip, b_tip),
-        ] {
-            if d > worst {
-                worst = d;
-            }
-        }
+    u32::try_from(sum.isqrt()).unwrap_or(u32::MAX)
+}
+
+/// One vert from an mm point and a 0..=1 age alpha.
+fn vert(p_mm: [i32; 3], alpha: f32) -> TrailStripVert {
+    TrailStripVert {
+        pos_m: [m_mm(p_mm[0]), m_mm(p_mm[1]), m_mm(p_mm[2])],
+        alpha,
     }
-    worst
+}
+
+/// Integer mm to meters without an `as` cast: whole meters plus the remainder.
+fn m_mm(mm: i32) -> f32 {
+    let (whole, rem) = (mm / 1000, mm % 1000);
+    let whole16 = i16::try_from(whole).unwrap_or(if whole < 0 { i16::MIN } else { i16::MAX });
+    f32::from(whole16) + f32::from(i16::try_from(rem).unwrap_or(0)) / 1000.0
 }
 
 #[cfg(test)]
@@ -216,119 +239,104 @@ mod tests {
     use super::*;
     use engine_core::alloc_probe::measure;
 
-    /// Staged slash tip at sample `i`: -500..500 mm along x.
-    fn slash_tip(i: usize) -> [i32; 3] {
-        let step = i32::try_from(i).unwrap_or(0);
-        [-500 + (1_000 * step) / 15, 0, 0]
+    /// Staged slash: the blade start walks -500..=500 mm in x, tip 80 mm above.
+    fn sweep(i: usize) -> ([i32; 3], [i32; 3]) {
+        let p1 = [-500 + (1_000 * i32::try_from(i).unwrap_or(0)) / 15, 0, 0];
+        ([p1[0], -80, 0], p1)
     }
 
-    /// Staged slash base: same x, 80 mm below the tip on y.
-    fn slash_base(i: usize) -> [i32; 3] {
-        let tip = slash_tip(i);
-        [tip[0], -80, 0]
+    /// The row's width curve: 2 mm at the thin end, 24 mm at the middle.
+    fn curve() -> [u32; TRAIL_SAMPLES] {
+        core::array::from_fn(|i| TRAIL_THIN_MM + 22 * u32::try_from(i).unwrap_or(0) / 15)
     }
 
-    /// Fill a ring with the 16 staged slash samples.
-    fn staged_ring() -> TrailRing {
-        let mut ring = TrailRing::new();
+    /// Ring filled with the 16 staged slash segments.
+    fn staged() -> TrailRing {
+        let mut ring = TrailRing::default();
         for i in 0..TRAIL_SAMPLES {
-            ring.push(slash_base(i), slash_tip(i));
+            let (p0, p1) = sweep(i);
+            ring.push_segment(p0, p1);
         }
         ring
     }
 
+    /// Span of one lane segment in meters, for the 8 cm check.
+    fn span_m(a: &TrailStripVert, b: &TrailStripVert) -> f32 {
+        let d = [
+            b.pos_m[0] - a.pos_m[0],
+            b.pos_m[1] - a.pos_m[1],
+            b.pos_m[2] - a.pos_m[2],
+        ];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
     #[test]
-    fn trail_ring_holds_16_and_replays_bytes_x2() {
-        let first = staged_ring();
-        let mut second = TrailRing::new();
-        for i in 0..TRAIL_SAMPLES {
-            second.push(slash_base(i), slash_tip(i));
+    fn trail_ring_bytes_x2_and_tip_matches_sweep_p1() {
+        let a = staged();
+        let b = staged();
+        let (va, vb) = (a.ribbon_verts(&curve()), b.ribbon_verts(&curve()));
+        assert_eq!(a, b, "the same pushes write the same ring bytes");
+        assert_eq!(va, vb, "the same ring gives the same verts twice");
+        assert!(va.len() > 2 * TRAIL_SAMPLES, "the spans subdivide");
+        let tip = a.tip_mm().expect("the ring holds the staged slash");
+        let (_, want) = sweep(TRAIL_SAMPLES - 1);
+        let drift = dist(tip, want);
+        assert!(drift <= 10, "tip {tip:?} drifts {drift} mm from sweep p1");
+    }
+
+    #[test]
+    fn trail_ring_caps_at_sixteen_and_keeps_order() {
+        let mut ring = TrailRing::default();
+        for i in 0..20 {
+            let (p0, p1) = sweep(i);
+            ring.push_segment(p0, p1);
         }
-        assert_eq!(first.len(), TRAIL_SAMPLES);
-        assert_eq!(second.len(), TRAIL_SAMPLES);
-        for i in 0..TRAIL_SAMPLES {
-            assert_eq!(first.get(i), second.get(i));
-        }
-        assert_eq!(first, second);
-        // Ring overwrites oldest once full: four more pushes drop 0..4.
-        let mut grown = first.clone();
-        for k in 0..4 {
-            grown.push([2_000 + k32(k), 0, 0], [2_000 + k32(k), 60, 0]);
-        }
-        assert_eq!(grown.len(), TRAIL_SAMPLES);
-        let (old_base, _) = grown.get(0).expect("ring keeps 16");
-        assert_eq!(old_base[0], slash_base(4)[0]);
-    }
-
-    /// Small helper keeps the overwrite probe in `i32` without a cast.
-    fn k32(k: usize) -> i32 {
-        i32::try_from(k).unwrap_or(0)
-    }
-
-    #[test]
-    fn trail_tip_matches_sweep_p1_within_10mm() {
-        let ring = staged_ring();
-        let (_, tip) = ring.get(TRAIL_SAMPLES - 1).expect("head resident");
-        let want: [i32; 3] = [500, 0, 0];
-        assert_eq!(dist_mm(tip, want), 0);
-        assert!(
-            dist_mm(tip, want) <= 10,
-            "tip {tip:?} drifts past 10 mm from {want:?}"
-        );
-    }
-
-    #[test]
-    fn trail_smoothed_max_segment_within_80mm() {
-        let ring = staged_ring();
-        let worst = max_seg_mm(&ring);
-        assert!(
-            worst <= 80,
-            "smoothed max segment {worst} mm runs past the 80 mm kill line"
-        );
-        assert!(worst > 0, "staged slash must span nonzero segments");
-    }
-
-    #[test]
-    fn trail_width_is_thin_at_ends_and_wide_in_middle() {
-        assert_eq!(width_mm(0), WIDTH_THIN_MM);
-        assert_eq!(width_mm(TRAIL_SAMPLES - 1), WIDTH_THIN_MM);
-        let mid = width_mm(7);
-        assert_eq!(mid, width_mm(8));
-        assert!(mid > width_mm(0));
-        assert_eq!(mid, WIDTH_THIN_MM + WIDTH_PEAK_EXTRA_MM);
-        assert_eq!(width_mm(99), width_mm(TRAIL_SAMPLES - 1));
-    }
-
-    #[test]
-    fn trail_alpha_ramps_from_tail_to_head() {
-        assert_eq!(alpha_u8(0), 0);
-        assert_eq!(alpha_u8(TRAIL_SAMPLES - 1), 255);
-        assert!(alpha_u8(7) < alpha_u8(8));
-        assert_eq!(alpha_u8(99), 255);
-    }
-
-    #[test]
-    fn trail_catmull_hits_endpoints_and_midpoint() {
-        assert_eq!(catmull_q16(0, 10, 20, 30, 0), 10);
-        assert_eq!(catmull_q16(0, 10, 20, 30, Q16_ONE), 20);
-        assert_eq!(catmull_q16(-500, -500, 500, 500, Q16_HALF), 0);
-        assert_eq!(catmull_q16(5, 5, 5, 5, Q16_HALF), 5);
-    }
-
-    #[test]
-    fn trail_push_is_zero_alloc_and_clears() {
-        let mut ring = TrailRing::new();
-        let ((), count) = measure(|| {
-            for i in 0..TRAIL_SAMPLES {
-                ring.push(slash_base(i), slash_tip(i));
-            }
+        assert_eq!(ring.len(), TRAIL_SAMPLES, "20 pushes keep 16 samples");
+        let kept: Vec<i32> = (0..ring.len())
+            .map(|i| ring.sample(i).expect("resident").p0_mm[0])
+            .collect();
+        let want: Vec<i32> = (4..20).map(|i| sweep(i).0[0]).collect();
+        assert_eq!(kept, want, "the newest 16 survive, oldest first");
+        let ordered = kept.windows(2).all(|w| w[0] < w[1]);
+        assert!(ordered, "order is oldest-first");
+        let ((), probe) = measure(|| {
+            let (p0, p1) = sweep(0);
+            ring.push_segment(p0, p1);
         });
-        assert_eq!(count.calls, 0, "push must not touch the heap");
-        assert_eq!(ring.len(), TRAIL_SAMPLES);
-        ring.clear();
-        assert_eq!(ring.len(), 0);
-        assert!(ring.is_empty());
-        assert_eq!(ring.get(0), None);
-        assert_eq!(max_seg_mm(&ring), 0);
+        assert_eq!(probe.calls, 0, "a push never touches the heap");
+    }
+
+    #[test]
+    fn trail_smoothing_never_leaves_a_segment_over_eight_cm() {
+        let mut ring = TrailRing::default();
+        for i in 0..TRAIL_SAMPLES {
+            let (p0, p1) = sweep(i);
+            if i == 8 {
+                // One wild tick: the ring must drop it, not stretch the ribbon.
+                ring.push_segment([8_000, 0, 0], [8_000, 500, 0]);
+            } else {
+                ring.push_segment(p0, p1);
+            }
+        }
+        let verts = ring.ribbon_verts(&curve());
+        let mut longest = 0.0f32;
+        for lane in 0..2 {
+            for step in 0..verts.len() / 2 - 1 {
+                let (a, b) = (2 * step + lane, 2 * step + 2 + lane);
+                longest = longest.max(span_m(&verts[a], &verts[b]));
+            }
+        }
+        assert!(longest > 0.0, "the staged slash still spans samples");
+        assert!(longest <= 0.080, "kept segment {longest} m is past 8 cm");
+        let wild = verts.iter().any(|v| (v.pos_m[0] - 8.0).abs() < 0.05);
+        assert!(!wild, "the wild sample is dropped, not kept");
+    }
+
+    #[test]
+    fn trail_ms_budget() {
+        let ms = staged().trail_ms(300);
+        assert!(ms <= 0.15, "300 frames of a 16-sample ring cost {ms} ms");
+        assert!(ms > 0.0, "a full ring costs something");
+        assert_eq!(TrailRing::default().trail_ms(300), 0.0, "empty builds 0");
     }
 }

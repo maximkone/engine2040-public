@@ -1,8 +1,7 @@
 //! ladder: arena ladder table, glory ranks, per-rung beats, repair hook (LIGHT slice).
 //!
-//! Consumer: display modes (`modes.rs`) reads [`LadderRecord`]; the
-//! session loop folds match outcomes into [`Ladder`] and stores the record
-//! beside the versioned progression payload. Data owner: this module owns
+//! Consumer: the session loop folds match outcomes into [`Ladder`] and
+//! stores the record beside the versioned progression payload. Data owner: this module owns
 //! rung, glory and repair counters. Units: wins, losses and glory are
 //! counts; `last_tick` is a fixed-tick cursor. Determinism: integer-only
 //! fold over the outcome script in order; same script gives the same state,
@@ -20,6 +19,11 @@ pub const GLORY_PER_WIN: u32 = 100;
 pub const GLORY_RUNG_BONUS: u32 = 25;
 /// Glory granted on completing a loop at the top rung.
 pub const GLORY_PER_LOOP: u32 = 500;
+/// Named glory drain: glory paid on a loss, half the base win. A loss
+/// subtracts it with a saturating floor at zero, so the counter never
+/// falls below zero. Mirrored in `content/design/loop.rows` as
+/// `glory_loss_penalty`, so a designer tunes the drain without a Rust edit.
+pub const GLORY_LOSS_PENALTY: u32 = 50;
 /// Glory floors for ranks `0..GLORY_RANKS.len()`; the rank is the highest
 /// index whose floor the glory counter reaches.
 pub const GLORY_RANKS: [u32; 5] = [0, 300, 900, 1800, 3600];
@@ -135,8 +139,9 @@ impl Ladder {
 
     /// Fold one decided match at fixed tick `tick`: wins climb (a win on the
     /// top rung completes a loop, resets to rung zero and arms one repair),
-    /// losses retreat with the floor pinned at zero. Counters and glory
-    /// saturate; the cursor always advances to `tick`.
+    /// losses retreat with the floor pinned at zero and drain
+    /// [`GLORY_LOSS_PENALTY`] glory. Counters and glory saturate; the cursor
+    /// always advances to `tick`.
     pub fn apply(&mut self, outcome: Outcome, tick: u32) {
         self.last_tick = tick;
         match outcome {
@@ -157,6 +162,7 @@ impl Ladder {
             }
             Outcome::Loss => {
                 self.losses = self.losses.saturating_add(1);
+                self.glory = self.glory.saturating_sub(GLORY_LOSS_PENALTY);
                 if self.rung > 0 {
                     self.rung -= 1;
                 }
@@ -200,6 +206,7 @@ impl Ladder {
             }
             Outcome::Loss => {
                 self.losses = self.losses.saturating_add(1);
+                self.glory = self.glory.saturating_sub(tables.glory_loss_penalty);
                 if self.rung > 0 {
                     self.rung -= 1;
                 }
@@ -540,6 +547,19 @@ mod tests {
     }
 
     #[test]
+    fn loss_drains_glory_and_floors_at_zero() {
+        let mut ladder = Ladder::new();
+        ladder.apply(Outcome::Win, 0);
+        assert_eq!(ladder.glory, GLORY_PER_WIN);
+        ladder.apply(Outcome::Loss, 1);
+        assert_eq!(ladder.glory, GLORY_PER_WIN - GLORY_LOSS_PENALTY);
+        // The drain saturates: a loss at zero glory never goes negative.
+        let mut broke = Ladder::new();
+        broke.apply(Outcome::Loss, 0);
+        assert_eq!(broke.glory, 0);
+    }
+
+    #[test]
     fn top_rung_win_loops_and_arms_one_repair() {
         let mut ladder = Ladder::run_script(&wins(usize::from(MAX_RUNG)));
         assert_eq!(ladder.rung, MAX_RUNG);
@@ -717,6 +737,7 @@ mod tests {
         assert_eq!(GLORY_PER_WIN, 100);
         assert_eq!(GLORY_RUNG_BONUS, 25);
         assert_eq!(GLORY_PER_LOOP, 500);
+        assert_eq!(GLORY_LOSS_PENALTY, 50);
         assert_eq!(GLORY_RANKS, [0, 300, 900, 1800, 3600]);
         assert_eq!(
             RANK_NAMES,
@@ -729,19 +750,16 @@ mod tests {
     #[test]
     fn light_gate_holds_over_owned_sources() {
         const LADDER_SRC: &str = include_str!("ladder.rs");
-        const MODES_SRC: &str = include_str!("modes.rs");
-        for src in [LADDER_SRC, MODES_SRC] {
-            let head = src
-                .split("#[cfg(test)]")
-                .next()
-                .expect("owned file keeps its cfg(test) marker");
-            assert!(
-                is_light_clean(head),
-                "LIGHT slice must name no CUT scope: {:?}",
-                first_cut_token(head)
-            );
-            assert_eq!(first_cut_token(head), None);
-        }
+        let head = LADDER_SRC
+            .split("#[cfg(test)]")
+            .next()
+            .expect("owned file keeps its cfg(test) marker");
+        assert!(
+            is_light_clean(head),
+            "LIGHT slice must name no CUT scope: {:?}",
+            first_cut_token(head)
+        );
+        assert_eq!(first_cut_token(head), None);
     }
 
     #[test]
@@ -833,6 +851,7 @@ mod tests {
         assert_eq!(set.tables.glory_per_win, GLORY_PER_WIN);
         assert_eq!(set.tables.glory_rung_bonus, GLORY_RUNG_BONUS);
         assert_eq!(set.tables.glory_per_loop, GLORY_PER_LOOP);
+        assert_eq!(set.tables.glory_loss_penalty, GLORY_LOSS_PENALTY);
         assert_eq!(set.tables.glory_ranks, GLORY_RANKS);
         let script = [Outcome::Win, Outcome::Win, Outcome::Loss, Outcome::Win];
         let mut compiled = Ladder::new();
@@ -902,5 +921,60 @@ mod tests {
             .apply_rows_text(Outcome::Win, 1, "table loop version 0\nv0 glory_per_win=1")
             .is_err());
         assert_eq!(modded, before, "refused rows never fold");
+    }
+
+    #[test]
+    fn shipped_rows_carry_the_loss_drain() {
+        // F2P: the rows file must carry the glory drain key, so a designer
+        // tunes a lost bout without a Rust edit.
+        let text = include_str!("../../../content/design/loop.rows");
+        assert!(
+            text.contains("glory_loss_penalty="),
+            "loop.rows must carry the glory loss drain key"
+        );
+        let set = crate::loop_text::parse_loop(text).expect("shipped loop.rows parses");
+        assert_eq!(set.tables.glory_loss_penalty, GLORY_LOSS_PENALTY);
+        let mut from_rows = Ladder::new();
+        from_rows
+            .apply_rows_text(Outcome::Win, 0, text)
+            .expect("shipped win folds");
+        from_rows
+            .apply_rows_text(Outcome::Loss, 1, text)
+            .expect("shipped loss folds");
+        let mut compiled = Ladder::new();
+        compiled.apply(Outcome::Win, 0);
+        compiled.apply(Outcome::Loss, 1);
+        assert_eq!(from_rows, compiled, "shipped rows drain like compiled");
+    }
+
+    #[test]
+    fn rows_loss_penalty_tunes_the_drain() {
+        // One number in the rows text, no Rust edit: the drain follows the row.
+        let text = include_str!("../../../content/design/loop.rows");
+        let tuned = text
+            .replace("table loop version 1", "table loop version 2")
+            .replace("v1 glory_per_win", "v2 glory_per_win")
+            .replace("glory_loss_penalty=50", "glory_loss_penalty=80");
+        let mut base = Ladder::new();
+        base.apply_rows_text(Outcome::Win, 0, text)
+            .expect("shipped win folds");
+        base.apply_rows_text(Outcome::Loss, 1, text)
+            .expect("shipped loss folds");
+        let mut modded = Ladder::new();
+        modded
+            .apply_rows_text(Outcome::Win, 0, &tuned)
+            .expect("tuned win folds");
+        modded
+            .apply_rows_text(Outcome::Loss, 1, &tuned)
+            .expect("tuned loss folds");
+        assert_eq!(base.glory, GLORY_PER_WIN.saturating_sub(GLORY_LOSS_PENALTY));
+        assert_eq!(modded.glory, GLORY_PER_WIN.saturating_sub(80));
+        assert_eq!(modded.wins, base.wins);
+        assert_eq!(modded.rung, base.rung);
+        // A drain the ranges refuse folds nothing: last-good stays.
+        let bad = text.replace("glory_loss_penalty=50", "glory_loss_penalty=20000");
+        let before = modded;
+        assert!(modded.apply_rows_text(Outcome::Loss, 2, &bad).is_err());
+        assert_eq!(modded, before);
     }
 }

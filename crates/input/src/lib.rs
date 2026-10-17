@@ -6,6 +6,7 @@ pub mod action_state;
 pub mod bindings;
 pub mod fighter;
 pub mod gestures;
+pub mod look;
 pub mod map;
 
 pub use bindings::{

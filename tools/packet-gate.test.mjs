@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { auditLand, auditPatch, auditResult, untrackedPaths } from "./packet-gate.mjs";
+import { auditLand, auditPatch, auditResult, unlockRows, untrackedPaths } from "./packet-gate.mjs";
 import { ALLOC, CAST, HASH_CONST, NONDET } from "./rust-quality.mjs";
 
 const patch = (oldPath, newPath, line = "+fn run() { true }") => [
@@ -16,6 +16,9 @@ const patch = (oldPath, newPath, line = "+fn run() { true }") => [
   line,
   "",
 ].join("\n");
+
+// A private caller in another file: the AD5 guard needs one, and `fn g` is no pub item.
+const caller = (path, target) => patch(null, path, `+fn g() {\n+    let _ = ${target};\n+}\n`);
 
 test("owned code and tests pass only their declared packet role", () => {
   const src = patch(null, "crates/combat/src/action.rs");
@@ -66,7 +69,7 @@ test("new production Rust meets the bar; the same code in tests or bins may not 
   const bad = rust({ "crates/render/src/a.rs": "pub fn f(v: Option<u8>) -> u8 {\n    println!(\"x\");\n    v.unwrap()\n}\n" }, ["crates/render/"]);
   assert.match(bad.errors.join("\n"), /rust-unwrap/);
   assert.match(bad.errors.join("\n"), /rust-print/);
-  const inTests = rust({ "crates/render/src/a.rs": "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { Some(1).unwrap(); println!(\"ok\"); }\n}\n" }, ["crates/render/"]);
+  const inTests = rust({ "crates/render/src/a.rs": "fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { Some(1).unwrap(); println!(\"ok\"); }\n}\n" }, ["crates/render/"]);
   assert.equal(inTests.ok, true, inTests.errors.join("\n"));
   const bin = rust({ "crates/game/src/bin/tool.rs": "fn main() { println!(\"usage\"); }\n" }, ["crates/game/"]);
   assert.equal(bin.ok, true, bin.errors.join("\n"));
@@ -85,15 +88,15 @@ test("lint escapes need expect with a reason; dbg never lands", () => {
 });
 
 test("simulation crates refuse nondeterminism unless waived; presentation crates may hash", () => {
-  const src = "use std::collections::HashMap;\npub fn f() {}\n";
+  const src = "use std::collections::HashMap;\nfn f() {}\n";
   assert.match(rust({ "crates/physics/src/a.rs": src }, ["crates/physics/"]).errors.join("\n"), /rust-nondet/);
-  const waived = rust({ "crates/physics/src/a.rs": "use std::collections::HashMap; // det-ok: debug names, never hashed\npub fn f() {}\n" }, ["crates/physics/"]);
+  const waived = rust({ "crates/physics/src/a.rs": "use std::collections::HashMap; // det-ok: debug names, never hashed\nfn f() {}\n" }, ["crates/physics/"]);
   assert.equal(waived.ok, true, waived.errors.join("\n"));
   assert.equal(rust({ "crates/render/src/a.rs": src }, ["crates/render/"]).ok, true);
 });
 
 test("core owns hashing and the alloc probe; copies elsewhere fail", () => {
-  const fnv = "pub fn h(b: &[u8]) -> u64 {\n    let mut h = 0xcbf2_9ce4_8422_2325u64;\n    for x in b { h = (h ^ u64::from(*x)).wrapping_mul(0x100000001b3); }\n    h\n}\n";
+  const fnv = "fn h(b: &[u8]) -> u64 {\n    let mut h = 0xcbf2_9ce4_8422_2325u64;\n    for x in b { h = (h ^ u64::from(*x)).wrapping_mul(0x100000001b3); }\n    h\n}\n";
   assert.match(rust({ "crates/anim/src/a.rs": fnv }, ["crates/anim/"]).errors.join("\n"), /rust-hash-copy/);
   assert.equal(rust({ "crates/core/src/a.rs": fnv }, ["crates/core/"]).ok, true);
   const probe = "struct P;\nunsafe impl GlobalAlloc for P {}\n";
@@ -103,10 +106,10 @@ test("core owns hashing and the alloc probe; copies elsewhere fail", () => {
 test("comments carry no board IDs, typed errors only, and hot fns do not allocate", () => {
   assert.match(rust({ "crates/render/src/a.rs": "// GP19 staged rig\npub fn f() {}\n" }, ["crates/render/"]).errors.join("\n"), /rust-board-id/);
   assert.match(rust({ "crates/render/src/a.rs": "/// Parse.\npub fn f() -> Result<u8, String> { Ok(1) }\n" }, ["crates/render/"]).errors.join("\n"), /rust-string-error/);
-  const hot = "pub fn step(out: &mut Vec<u32>) {\n    let scratch: Vec<u32> = Vec::new();\n    out.extend(scratch);\n}\npub fn build() -> Vec<u32> { Vec::new() }\n";
+  const hot = "fn step(out: &mut Vec<u32>) {\n    let scratch: Vec<u32> = Vec::new();\n    out.extend(scratch);\n}\nfn build() -> Vec<u32> { Vec::new() }\n";
   const r = rust({ "crates/arena/src/a.rs": hot }, ["crates/arena/"]);
   assert.equal(r.errors.filter((e) => /rust-hot-alloc/.test(e)).length, 1, r.errors.join("\n"));
-  const cold = "pub fn step(out: &mut Vec<u32>) {\n    let scratch: Vec<u32> = Vec::new(); // alloc-ok: empty Vec never allocates\n    out.extend(scratch);\n}\n";
+  const cold = "fn step(out: &mut Vec<u32>) {\n    let scratch: Vec<u32> = Vec::new(); // alloc-ok: empty Vec never allocates\n    out.extend(scratch);\n}\n";
   assert.equal(rust({ "crates/arena/src/a.rs": cold }, ["crates/arena/"]).ok, true);
 });
 
@@ -145,7 +148,7 @@ const baselineSection = [
 ].join("\n");
 
 test("a commit adding ratchet debt is refused unless its landing moves the baseline", () => {
-  const cast = patch(null, "crates/render/src/a.rs", "+/// Scale a count.\n+pub fn f(x: u64) -> u32 {\n+    x as u32\n+}\n");
+  const cast = patch(null, "crates/render/src/a.rs", "+/// Scale a count.\n+fn f(x: u64) -> u32 {\n+    x as u32\n+}\n");
   const silent = auditPatch(cast, { owned: ["crates/render/"], role: "writer" });
   assert.equal(silent.ok, false);
   assert.match(silent.errors.join("\n"), /ratchet-baseline/);
@@ -157,7 +160,7 @@ test("a commit adding ratchet debt is refused unless its landing moves the basel
 });
 
 test("new expect and panic sites need the same baseline landing", () => {
-  const ex = patch(null, "crates/core/src/a.rs", "+/// Get the slot.\n+pub fn f(v: Option<u8>) -> u8 {\n+    v.expect(\"slot checked above\")\n+}\n");
+  const ex = patch(null, "crates/core/src/a.rs", "+/// Get the slot.\n+fn f(v: Option<u8>) -> u8 {\n+    v.expect(\"slot checked above\")\n+}\n");
   const silent = auditPatch(ex, { owned: ["crates/core/"], role: "writer" });
   assert.equal(silent.ok, false);
   assert.match(silent.errors.join("\n"), /rust-expect-site/);
@@ -184,7 +187,7 @@ test("an untracked new file is scanned like a hunk, and a clean one passes with 
     assert.equal(r.ok, false);
     assert.match(r.errors.join("\n"), /rust-allow/);
   } finally { bad.done(); }
-  const good = lane({ "crates/render/src/b.rs": "/// One.\npub fn f() -> u8 {\n    1\n}\n" });
+  const good = lane({ "crates/render/src/b.rs": "/// One.\nfn f() -> u8 {\n    1\n}\n" });
   try {
     const r = auditPatch("", { owned: ["crates/render/"], role: "writer", root: good.root, ids, untracked: ["crates/render/src/b.rs"] });
     assert.equal(r.ok, true, r.errors.join("\n"));
@@ -209,7 +212,7 @@ test("a binary untracked file is refused, not read as text", () => {
 });
 
 test("an owned path with no change and no file on disk fails; an existing one with no change does not", () => {
-  const l = lane({ "crates/render/src/a.rs": "/// One.\npub fn f() {}\n" });
+  const l = lane({ "crates/render/src/a.rs": "/// One.\nfn f() {}\n" });
   try {
     const gone = auditPatch(l.text, { owned: ["crates/render/", "crates/render/src/gone.rs"], role: "writer", root: l.root, ids });
     assert.equal(gone.ok, false);
@@ -268,9 +271,9 @@ test("GS4 fake-pass guard: a new test passes, an edited assertion plus code fail
     "+++ b/crates/combat/src/f.rs",
     "@@ -1,2 +1,2 @@",
     "-/// Get f.",
-    "-pub fn f() -> u8 { 5 }",
+    "-fn f() -> u8 { 5 }",
     "+/// Get f.",
-    "+pub fn f() -> u8 { 6 }",
+    "+fn f() -> u8 { 6 }",
     "",
   ].join("\n");
   const fail = auditPatch(editBoth, { owned: ["crates/combat/"], role: "writer" });
@@ -327,9 +330,9 @@ test("GS4 fake-pass guard: --tests waives the canned diff on the CLI", () => {
       "+++ b/crates/combat/src/f.rs",
       "@@ -1,2 +1,2 @@",
       "-/// Get f.",
-      "-pub fn f() -> u8 { 5 }",
+      "-fn f() -> u8 { 5 }",
       "+/// Get f.",
-      "+pub fn f() -> u8 { 6 }",
+      "+fn f() -> u8 { 6 }",
       "",
     ].join("\n"));
     const gate = join(dirname(fileURLToPath(import.meta.url)), "packet-gate.mjs");
@@ -359,4 +362,65 @@ test("packet-gate --result audits a reply file and exits 1 on a book cite", () =
     assert.match(bad.out, /FAIL .*proof names no command or file result/);
     assert.match(bad.out, /RESULT FAIL/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("AD5 unwired guard: an uncalled new pub item fails; a caller, an UNLOCKS row, --unlocks pass", () => {
+  const def = patch(null, "crates/render/src/a.rs", "+/// Solo.\n+pub fn solo() -> u8 {\n+    1\n+}\n");
+  const alone = auditPatch(def, { owned: ["crates/render/"], role: "writer" });
+  assert.equal(alone.ok, false);
+  assert.match(alone.errors.join("\n"), /UNWIRED-RISK: solo has no non-test caller outside crates\/render\/src\/a\.rs/);
+  const opts = { owned: ["crates/render/"], role: "writer" };
+  assert.equal(auditPatch(def + caller("crates/render/src/b.rs", "crate::a::solo"), opts).ok, true);
+  assert.equal(auditPatch(def, { ...opts, unlocks: ["PX36"] }).ok, true);
+  assert.deepEqual(unlockRows("## Proof\nUNLOCKS: FIX3\nUNLOCKS: E42b\n"), ["FIX3", "E42b"]);
+  const dir = mkdtempSync(join(tmpdir(), "packet-gate-unlocks-"));
+  try {
+    writeFileSync(join(dir, "p.patch"), def);
+    writeFileSync(join(dir, "row.md"), "## Proof\nUNLOCKS: AD5\n");
+    const gate = join(dirname(fileURLToPath(import.meta.url)), "packet-gate.mjs");
+    const run = (...extra) => spawnSync(process.execPath, [gate, "--patch", join(dir, "p.patch"), "--owned", "crates/render/", "--root", dir, ...extra], { encoding: "utf8" });
+    assert.equal(run().status, 1, "an uncalled pub item is refused");
+    assert.equal(run("--unlocks", join(dir, "row.md")).status, 0, "the packet's UNLOCKS: row waives it");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("AD5 unwired guard: px36 shape (two new fns calling only each other) fails", () => {
+  const r = rust({ "crates/combat/src/bias.rs": "/// Capture bias.\npub fn capture_bias(x: u8) -> u8 {\n    strike_gait_biased(x)\n}\n/// Biased gait.\npub fn strike_gait_biased(x: u8) -> u8 {\n    capture_bias(x)\n}\n", "crates/combat/tests/bias.rs": "fn t() { crate::bias::capture_bias(1); crate::bias::strike_gait_biased(1); }\n" }, ["crates/combat/"]);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join("\n"), /UNWIRED-RISK: capture_bias has no non-test caller/);
+  assert.match(r.errors.join("\n"), /UNWIRED-RISK: strike_gait_biased has no non-test caller/);
+});
+
+test("AD5 unwired guard: rt19 shape (helper referenced only from tests/) fails", () => {
+  const r = rust({ "crates/render/src/reflect.rs": "/// Screen ray.\npub fn reflect_screen_for_forward() -> u8 {\n    1\n}\n", "crates/render/tests/reflect.rs": "fn t() { assert_eq!(reflect_screen_for_forward(), 1); }\n" }, ["crates/render/"]);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join("\n"), /UNWIRED-RISK: reflect_screen_for_forward has no non-test caller/);
+});
+
+test("AD5 unwired guard: fix5 shape (struct and fn used only inside #[cfg(test)]) fails", () => {
+  const r = rust({ "crates/anim/src/blend.rs": "/// Blend runner.\npub struct Runner {\n    pub n: u8,\n}\n/// Eval one.\npub fn eval(r: &Runner) -> u8 {\n    r.n\n}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { let r = super::Runner { n: 1 }; assert_eq!(super::eval(&r), 1); }\n}\n" }, ["crates/anim/"]);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join("\n"), /UNWIRED-RISK: Runner has no non-test caller/);
+  assert.match(r.errors.join("\n"), /UNWIRED-RISK: eval has no non-test caller/);
+});
+
+test("AD5 unwired guard: fix3c shape (test-only island of new pub items) fails", () => {
+  const r = rust({ "crates/combat/src/trauma.rs": "/// Trauma kind.\npub enum Trauma {\n    Cut,\n}\n/// Landed-blow shake.\npub fn impact_shake(t: Trauma) -> u8 {\n    match t {\n        Trauma::Cut => 1,\n    }\n}\n", "crates/combat/tests/trauma.rs": "#[test]\nfn t() { assert_eq!(impact_shake(Trauma::Cut), 1); }\n" }, ["crates/combat/"]);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join("\n"), /UNWIRED-RISK: Trauma has no non-test caller/);
+  assert.match(r.errors.join("\n"), /UNWIRED-RISK: impact_shake has no non-test caller/);
+});
+
+test("AD5 --orphans reports an existing orphan and exits 0 without touching it", () => {
+  const body = "/// Used.\npub fn used() -> u8 {\n    1\n}\npub fn orphan() -> u8 {\n    2\n}\n";
+  const l = lane({ "crates/demo/src/a.rs": body, "crates/demo/src/lib.rs": "fn run() -> u8 {\n    crate::a::used()\n}\n" });
+  try {
+    const gate = join(dirname(fileURLToPath(import.meta.url)), "packet-gate.mjs");
+    const r = spawnSync(process.execPath, [gate, "--orphans", "--root", l.root], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ORPHAN crates\/demo\/src\/a\.rs:5 pub fn orphan/);
+    assert.doesNotMatch(r.stdout, /pub fn used/);
+    assert.match(r.stdout, /RESULT PASS: 1 orphan/);
+    assert.equal(readFileSync(join(l.root, "crates/demo/src/a.rs"), "utf8"), body);
+  } finally { l.done(); }
 });

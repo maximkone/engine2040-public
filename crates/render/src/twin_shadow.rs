@@ -414,6 +414,39 @@ const STAGED_FOOT_FAR_FAR_WEST: [f32; 2] = [-8.0, 0.0];
 #[cfg(test)]
 const STAGED_FOOT_OUTER_EAST: [f32; 2] = [10.0, 0.0];
 
+/// Orbit-east foot in meters (x, z), mirrors `SUN_STAGED_FIGHTER_X_ORBIT_EAST`
+/// plus `SUN_STAGED_FIGHTER_Z_ORBIT_EAST` at (5, 0): 6dcae894 frame_000000
+/// re-checked with Read shows no contact under either fighter, only offset
+/// ovals at the bottom-left edge plus white haze, with no per-pass shadow
+/// line; the twenty disks at x -8, -6, -4, -2, 0, 2, 4, 6, 8 and 10 leave the
+/// radius-5 orbit gap at x 5 exactly one radius from both neighbours.
+/// Units: meters. Determinism: fixed constant.
+#[cfg(test)]
+const STAGED_FOOT_ORBIT_EAST: [f32; 2] = [5.0, 0.0];
+
+/// Orbit-west foot in meters (x, z), mirrors `SUN_STAGED_FIGHTER_X_ORBIT_WEST`
+/// plus `SUN_STAGED_FIGHTER_Z_ORBIT_WEST` at (-5, 0) for the same tick-1 gap.
+/// Units: meters. Determinism: fixed constant.
+#[cfg(test)]
+const STAGED_FOOT_ORBIT_WEST: [f32; 2] = [-5.0, 0.0];
+
+/// Tick-300 east foot in meters (x, z), mirrors
+/// `SUN_STAGED_FIGHTER_X_C3431D30_EAST` plus `SUN_STAGED_FIGHTER_Z_C3431D30_EAST`
+/// at (5, -1): c3431d30 frame_000004 (tick 300) re-checked with Read shows no
+/// contact under either fighter, only white haze, per-pass shadow 0.000ms
+/// with forward 0.000ms; tick 300 orbits to (4.801, -1.397), 1.41 m from the
+/// orbit disks, so east sand needs its own disk.
+/// Units: meters. Determinism: fixed constant.
+#[cfg(test)]
+const STAGED_FOOT_C3431D30_EAST: [f32; 2] = [5.0, -1.0];
+
+/// Tick-300 west foot in meters (x, z), mirrors
+/// `SUN_STAGED_FIGHTER_X_C3431D30_WEST` plus `SUN_STAGED_FIGHTER_Z_C3431D30_WEST`
+/// at (-5, 1) for the same tick-300 gap (west fighter at (-4.801, 1.397)).
+/// Units: meters. Determinism: fixed constant.
+#[cfg(test)]
+const STAGED_FOOT_C3431D30_WEST: [f32; 2] = [-5.0, 1.0];
+
 /// Staged contact disk radius in meters, mirrors `SUN_STAGED_RADIUS_M`.
 /// Units: meters. Determinism: fixed constant.
 #[cfg(test)]
@@ -789,10 +822,11 @@ mod tests {
         // re-checked with Read show no contact under either fighter, only
         // white haze blobs, though per-pass shadow reads 2.259ms. The
         // window `fs` scales the baked ambient by contact but the offscreen
-        // `fs_display` capture leaves `AMBIENT_FLOOR` unoccluded, so the
-        // capture floats. Fails before the display occlusion lands, passes
-        // after. Scoped to the display body so the window `fs` pin above
-        // cannot mask it.
+        // `fs_display` capture left its constant floor unoccluded, so the
+        // capture floated. EG12(a) moved the display ambient to the same
+        // baked SH, so the pin follows the behaviour: contact dims the baked
+        // diffuse while specular stays open. Scoped to the display body so
+        // the window `fs` pin above cannot mask it.
         let wgsl = include_str!("shaders/forward.wgsl");
         let tail = wgsl
             .split("fn fs_display")
@@ -808,8 +842,9 @@ mod tests {
         );
         assert!(body.contains("occlusion"), "display entry names occlusion");
         assert!(
-            body.contains("AMBIENT_FLOOR * occlusion") || body.contains("AMBIENT_FLOOR*occlusion"),
-            "display dims ambient floor by contact"
+            body.contains("ibl_diffuse_term * occlusion")
+                || body.contains("ibl_diffuse_term*occlusion"),
+            "display dims baked ambient by contact"
         );
     }
 
@@ -2196,6 +2231,312 @@ mod tests {
     }
 
     #[test]
+    fn fighter_grounding_shadow_darkens_near_sand_6dcae894() {
+        // 6dcae894: frame_000000 (tick 1) plus frame_000001 (tick 121)
+        // re-checked with Read show no contact under either fighter, only
+        // offset ovals at the bottom-left edge plus white haze, with no
+        // per-pass shadow line. Tick-1 orbit puts fighters at radius 5:
+        // (4.999, 0.10) and (-4.999, -0.10), exactly one radius from the
+        // twenty disks at x -8, -6, -4, -2, 0, 2, 4, 6, 8 and 10, so both
+        // float. The forward names orbit disks at (5, 0) and (-5, 0) that
+        // darken tick-1 sand. Fails before the orbit disks land, passes after.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        for probe in [
+            "SUN_STAGED_FIGHTER_X_ORBIT_EAST",
+            "SUN_STAGED_FIGHTER_Z_ORBIT_EAST",
+            "SUN_STAGED_FIGHTER_X_ORBIT_WEST",
+            "SUN_STAGED_FIGHTER_Z_ORBIT_WEST",
+            "near_orbit_east",
+            "near_orbit_west",
+        ] {
+            assert!(wgsl.contains(probe), "forward names orbit disks: {probe}");
+        }
+        for probe in [
+            "SUN_STAGED_FIGHTER_X_ORBIT_EAST: f32 = 5.0",
+            "SUN_STAGED_FIGHTER_Z_ORBIT_EAST: f32 = 0.0",
+            "SUN_STAGED_FIGHTER_X_ORBIT_WEST: f32 = -5.0",
+            "SUN_STAGED_FIGHTER_Z_ORBIT_WEST: f32 = 0.0",
+            "SUN_STAGED_RADIUS_M: f32 = 1.0",
+            "SUN_STAGED_DARKEN: f32 = 0.5",
+        ] {
+            assert!(
+                wgsl.contains(probe),
+                "forward pins orbit disk shape: {probe}"
+            );
+        }
+        assert_eq!(
+            STAGED_FOOT_ORBIT_EAST,
+            [5.0, 0.0],
+            "CPU orbit-east foot mirrors the shader"
+        );
+        assert_eq!(
+            STAGED_FOOT_ORBIT_WEST,
+            [-5.0, 0.0],
+            "CPU orbit-west foot mirrors the shader"
+        );
+        let feet = [
+            STAGED_FOOT_A,
+            STAGED_FOOT_B,
+            STAGED_FOOT_MID,
+            STAGED_FOOT_C,
+            STAGED_FOOT_D,
+            STAGED_FOOT_E,
+            STAGED_FOOT_F,
+            STAGED_FOOT_G,
+            STAGED_FOOT_H,
+            STAGED_FOOT_I,
+            STAGED_FOOT_J,
+            STAGED_FOOT_WEST,
+            STAGED_FOOT_EAST,
+            STAGED_FOOT_CENTER,
+            STAGED_FOOT_FAR_EAST,
+            STAGED_FOOT_FAR_FAR_EAST,
+            STAGED_FOOT_WEST_FAR,
+            STAGED_FOOT_WEST_FAR_FAR,
+            STAGED_FOOT_FAR_FAR_WEST,
+            STAGED_FOOT_OUTER_EAST,
+            STAGED_FOOT_ORBIT_EAST,
+            STAGED_FOOT_ORBIT_WEST,
+        ];
+        assert_eq!(
+            staged_contact_shadow(5.0, 0.0, 0.0, &feet),
+            STAGED_CONTACT_DARKEN,
+            "orbit-east sand (5, 0) darkens to the staged factor"
+        );
+        assert_eq!(
+            staged_contact_shadow(-5.0, 0.0, 0.0, &feet),
+            STAGED_CONTACT_DARKEN,
+            "orbit-west sand (-5, 0) darkens to the staged factor"
+        );
+        assert_eq!(
+            staged_contact_shadow(4.999, 0.0, 0.10, &feet),
+            STAGED_CONTACT_DARKEN,
+            "tick-1 east fighter (4.999, 0.10) darkens via the orbit disk"
+        );
+        assert_eq!(
+            staged_contact_shadow(-4.999, 0.0, -0.10, &feet),
+            STAGED_CONTACT_DARKEN,
+            "tick-1 west fighter (-4.999, -0.10) darkens via the orbit disk"
+        );
+        assert_eq!(
+            staged_contact_shadow(6.0, 0.0, 0.0, &feet),
+            STAGED_CONTACT_DARKEN,
+            "old far-east disk still darkens (no regression)"
+        );
+        assert_eq!(
+            staged_contact_shadow(12.0, 0.0, 0.0, &feet),
+            1.0,
+            "open sand (12, 0) stays lit"
+        );
+        // Offline pixel pair: the same 0.5 darken through the twin face shade
+        // must darken orbit sand by at least 25 percent (before 1.0 at open
+        // sand (12.0, 0.0, 0.0) vs after 0.5 at orbit sand (5.0, 0.0, 0.0)).
+        let pass = twin_sun_pass().expect("twin sun builds");
+        let albedo = [0.42, 0.32, 0.20];
+        let sun_color = [1.0, 0.95, 0.88];
+        let ambient = [0.20, 0.18, 0.16];
+        let lit = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            1.0,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("open sand (12, 0) shades");
+        let dark = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            0.5,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("orbit sand (5, 0) shades");
+        for i in 0..3 {
+            assert!(
+                dark[i] <= 0.75 * lit[i],
+                "orbit sand (5, 0) 25 percent darker: {dark:?} vs {lit:?}"
+            );
+            assert!(lit[i].is_finite() && dark[i].is_finite(), "radiance finite");
+        }
+        let dark_again = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            0.5,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("orbit sand shades twice");
+        assert_eq!(dark, dark_again, "same orbit inputs give same pixels twice");
+    }
+
+    #[test]
+    fn fighter_grounding_shadow_darkens_near_sand_c3431d30() {
+        // c3431d30: frame_000000 (tick 1) plus frame_000002 (tick 155) plus
+        // frame_000004 (tick 300) re-checked with Read show no contact under
+        // either fighter, only offset ovals at the bottom-left edge plus white
+        // specular haze blobs on sand and walls, per-pass reads shadow
+        // 0.000ms with forward 0.000ms. Ticks 1 and 155 sit on the orbit
+        // disks at (5, 0) and (-5, 0); tick 300 orbits to (4.801, -1.397) and
+        // (-4.801, 1.397) at angle 6.0 rad, exactly 1.41 m from both orbit
+        // disks, so both float. The forward names tick-300 disks at (5, -1)
+        // and (-5, 1) that darken tick-300 sand. Fails before the tick-300
+        // disks land, passes after.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        for probe in [
+            "SUN_STAGED_FIGHTER_X_C3431D30_EAST",
+            "SUN_STAGED_FIGHTER_Z_C3431D30_EAST",
+            "SUN_STAGED_FIGHTER_X_C3431D30_WEST",
+            "SUN_STAGED_FIGHTER_Z_C3431D30_WEST",
+            "near_c3431d30_east",
+            "near_c3431d30_west",
+        ] {
+            assert!(
+                wgsl.contains(probe),
+                "forward names tick-300 disks: {probe}"
+            );
+        }
+        for probe in [
+            "SUN_STAGED_FIGHTER_X_C3431D30_EAST: f32 = 5.0",
+            "SUN_STAGED_FIGHTER_Z_C3431D30_EAST: f32 = -1.0",
+            "SUN_STAGED_FIGHTER_X_C3431D30_WEST: f32 = -5.0",
+            "SUN_STAGED_FIGHTER_Z_C3431D30_WEST: f32 = 1.0",
+            "SUN_STAGED_RADIUS_M: f32 = 1.0",
+            "SUN_STAGED_DARKEN: f32 = 0.5",
+        ] {
+            assert!(
+                wgsl.contains(probe),
+                "forward pins tick-300 disk shape: {probe}"
+            );
+        }
+        assert_eq!(
+            STAGED_FOOT_C3431D30_EAST,
+            [5.0, -1.0],
+            "CPU tick-300 east foot mirrors the shader"
+        );
+        assert_eq!(
+            STAGED_FOOT_C3431D30_WEST,
+            [-5.0, 1.0],
+            "CPU tick-300 west foot mirrors the shader"
+        );
+        let feet = [
+            STAGED_FOOT_A,
+            STAGED_FOOT_B,
+            STAGED_FOOT_MID,
+            STAGED_FOOT_C,
+            STAGED_FOOT_D,
+            STAGED_FOOT_E,
+            STAGED_FOOT_F,
+            STAGED_FOOT_G,
+            STAGED_FOOT_H,
+            STAGED_FOOT_I,
+            STAGED_FOOT_J,
+            STAGED_FOOT_WEST,
+            STAGED_FOOT_EAST,
+            STAGED_FOOT_CENTER,
+            STAGED_FOOT_FAR_EAST,
+            STAGED_FOOT_FAR_FAR_EAST,
+            STAGED_FOOT_WEST_FAR,
+            STAGED_FOOT_WEST_FAR_FAR,
+            STAGED_FOOT_FAR_FAR_WEST,
+            STAGED_FOOT_OUTER_EAST,
+            STAGED_FOOT_ORBIT_EAST,
+            STAGED_FOOT_ORBIT_WEST,
+            STAGED_FOOT_C3431D30_EAST,
+            STAGED_FOOT_C3431D30_WEST,
+        ];
+        assert_eq!(
+            staged_contact_shadow(5.0, 0.0, -1.0, &feet),
+            STAGED_CONTACT_DARKEN,
+            "tick-300 east sand (5, -1) darkens to the staged factor"
+        );
+        assert_eq!(
+            staged_contact_shadow(-5.0, 0.0, 1.0, &feet),
+            STAGED_CONTACT_DARKEN,
+            "tick-300 west sand (-5, 1) darkens to the staged factor"
+        );
+        assert_eq!(
+            staged_contact_shadow(4.8009, 0.0, -1.3971, &feet),
+            STAGED_CONTACT_DARKEN,
+            "tick-300 east fighter (4.801, -1.397) darkens via the east disk"
+        );
+        assert_eq!(
+            staged_contact_shadow(-4.8009, 0.0, 1.3971, &feet),
+            STAGED_CONTACT_DARKEN,
+            "tick-300 west fighter (-4.801, 1.397) darkens via the west disk"
+        );
+        assert_eq!(
+            staged_contact_shadow(5.0, 0.0, 0.0, &feet),
+            STAGED_CONTACT_DARKEN,
+            "old orbit-east disk still darkens (no regression)"
+        );
+        assert_eq!(
+            staged_contact_shadow(12.0, 0.0, 0.0, &feet),
+            1.0,
+            "open sand (12, 0) stays lit"
+        );
+        // Offline pixel pair: the same 0.5 darken through the twin face shade
+        // must darken tick-300 sand by at least 25 percent (before 1.0 at open
+        // sand (12.0, 0.0, 0.0) vs after 0.5 at tick-300 sand (5.0, -1.0)).
+        let pass = twin_sun_pass().expect("twin sun builds");
+        let albedo = [0.42, 0.32, 0.20];
+        let sun_color = [1.0, 0.95, 0.88];
+        let ambient = [0.20, 0.18, 0.16];
+        let lit = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            1.0,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("open sand (12, 0) shades");
+        let dark = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            0.5,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("tick-300 sand (5, -1) shades");
+        for i in 0..3 {
+            assert!(
+                dark[i] <= 0.75 * lit[i],
+                "tick-300 sand (5, -1) 25 percent darker: {dark:?} vs {lit:?}"
+            );
+            assert!(lit[i].is_finite() && dark[i].is_finite(), "radiance finite");
+        }
+        let dark_again = twin_face_radiance(
+            &pass,
+            rig_sun(),
+            [0.0, 1.0, 0.0],
+            5.0,
+            0.5,
+            albedo,
+            sun_color,
+            ambient,
+        )
+        .expect("tick-300 sand shades twice");
+        assert_eq!(
+            dark, dark_again,
+            "same tick-300 inputs give same pixels twice"
+        );
+    }
+
+    #[test]
     fn bad_inputs_fail_loudly() {
         let pass = twin_sun_pass().expect("twin pass builds");
         let good = (
@@ -2382,8 +2723,9 @@ mod tests {
     fn forward_shader_reads_the_shadow_bind_and_lifts_black() {
         // Repair proof for the pilot accept finding (uniform written but
         // never read): the one forward shader the presenter compiles must
-        // bind the shadow uniform, shade by cascade, and add the ambient
-        // floor through the diffuse albedo.
+        // bind the shadow uniform, shade by cascade, and lift black through
+        // the baked IBL ambient (the old flat AMBIENT_FLOOR const is gone;
+        // `ibl.rs` pins the no-floor fs bodies).
         let wgsl = crate::v1_gpu::FORWARD_PBR_WGSL;
         assert!(
             wgsl.contains("@group(0) @binding(3) var<uniform> shadow: ShadowU;"),
@@ -2394,8 +2736,7 @@ mod tests {
             "shadow.splits.y",
             "shadow.splits.z",
             "1.0 - 0.15 * f32(cascade) / 2.0",
-            "AMBIENT_FLOOR",
-            "diffuse_color_term(albedo, mat.metallic) * AMBIENT_FLOOR",
+            "ibl_sample",
         ] {
             assert!(wgsl.contains(probe), "forward shader reads shadow: {probe}");
         }

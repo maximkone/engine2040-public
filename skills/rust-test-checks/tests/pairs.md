@@ -12,11 +12,11 @@ What a skill-less answer misses: that green does not mean the right guard fired.
 
 ## P2: integration test reaches into private code
 
-Input: Review crates/arena where tests/integration_test.rs calls a private helper directly, and tests/common.rs shows up as its own run with zero tests.
+Input: Review crates/combat where a tests/it module calls a private helper directly, and someone adds crates/combat/tests/extra.rs as a second test executable that runs with zero tests.
 
-Answer with the skill: Rule 9 fails (crates: arena, combat). Keep integration tests in tests as separate crates on the public API only, move shared setup to tests/common/mod so it is not built as a crate, and keep a thin binary over a lib so tests can use it. Run cargo test -p engine-arena --test integration_test.
+Answer with the skill: Rule 9 fails (crates: combat, game). Keep integration tests on the public API as modules of crates/combat/tests/it/ (one `mod extra;` line in main.rs), so the crate links one test binary, and keep a thin binary over a lib so tests can use it. Run cargo test -p engine-combat --test it extra::.
 
-What a skill-less answer misses: that tests dir files are separate crates. A direct private call will not match how users call the lib, and a common.rs file adds an empty test section that hides real coverage.
+What a skill-less answer misses: that a stray file under tests/ is its own crate. A direct private call will not match how users call the lib, a top-level file fails the workspace-check test-layout guard once the crate merged to tests/it, and a helper file adds an empty test section that hides real coverage.
 
 ## P3: parallel tests share one output file
 

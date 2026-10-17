@@ -52,6 +52,10 @@ use super::injection::score::import_screen;
 use super::injection::Category;
 use super::mcp::{batch_error, cap_error, granted_ops, McpServer, McpToolError, ServerState};
 
+mod spatial_checks;
+use spatial_checks::{finding_line, id_table, label_table, partition, staged_sizes};
+pub use spatial_checks::{SizeSource, SkippedCheck};
+
 /// MCP tool name for the bounded scene brief (read-only).
 pub const TOOL_SCENE_BRIEF: &str = "scene.brief";
 /// MCP tool name for the spatial findings page (read-only).
@@ -301,36 +305,43 @@ pub struct SceneBriefOutput {
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneSpatialArgs {
-    /// Check names to run (at most [`SCENE_SPATIAL_MAX_CHECKS`]); `None` runs all offline checks.
-    /// Opt-in names (`relationCycle`) run only when listed here.
+    /// Checks to run, at most [`SCENE_SPATIAL_MAX_CHECKS`] (`None` = every
+    /// offline check); opt-in names run only when listed here.
     pub checks: Option<Vec<String>>,
-    /// Findings rows per page (1..=[`SCENE_SPATIAL_MAX_FINDINGS`]).
+    /// Findings rows per page, 1..=[`SCENE_SPATIAL_MAX_FINDINGS`].
     pub limit: Option<u32>,
 }
 
 /// Output of `scene.spatial`: verdict, spatial hash, paged brief-style finding
-/// lines, and the index-to-UUID table plus index-aligned `name [id]` labels.
-/// Read-only: findings never stage or apply anything.
+/// lines, the id table plus `name [id]` labels, the checks that ran and the
+/// catalog checks the door could not drive, and each node's size source
+/// ([`Self::checks_run`], [`Self::skipped`], [`Self::size_source`]). Read-only.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneSpatialOutput {
-    /// Document revision the findings were read at.
+    /// Document revision read.
     pub revision: u64,
-    /// Overall verdict: `clean`, `warn` or `red`.
+    /// `clean`, `warn` or `red`.
     pub verdict: String,
-    /// Hash of the full finding set (page-independent).
+    /// Hash of the full finding set, page-independent.
     pub hash: u64,
-    /// Total finding count across all pages.
+    /// Finding count across all pages.
     pub total: u64,
-    /// True when findings were cut to the page limit.
+    /// Findings were cut to the page limit.
     pub truncated: bool,
-    /// Brief-style finding lines, `finding <check> <a> <b|-> <severity> <pct>`.
+    /// Finding lines, `finding <check> <a> <b|-> <severity> <pct>`.
     pub findings: Vec<String>,
-    /// Index-to-UUID table: bare UUID text per staged object, id-text sorted.
+    /// Bare UUID text per staged object, id-text sorted.
     pub ids: Vec<String>,
-    /// MCP8 `name [id]` labels, index-aligned with `ids` (see [`SceneBriefOutput`]).
+    /// `name [id]` labels, index-aligned with `ids`.
     pub objects: Vec<String>,
+    /// Checks that ran, catalog order.
+    pub checks_run: Vec<String>,
+    /// Catalog checks that did not run, each with one reason.
+    pub skipped: Vec<SkippedCheck>,
+    /// Where each staged node's size came from.
+    pub size_source: SizeSource,
 }
 
 /// Arguments for `scene.place`: the revision the intent was built against, an
@@ -431,11 +442,11 @@ pub struct ScenePlaceOutput {
     pub dry_run: Vec<String>,
 }
 
-// Document snapshot: actors plus the index-to-UUID table. Actors carry
-// consecutive ids matching their table position.
+// Document snapshot: actors, the id table and the count of unresolved poses.
 struct Snapshot {
     actors: Vec<engine_spatial::Actor>,
     ids: Vec<ObjectId>,
+    missing_pose: u64,
 }
 
 // Y yaw extracted from a world quaternion ([x, y, z, w] like Transform).
@@ -452,9 +463,9 @@ fn quat_of_yaw(yaw: f32) -> [f32; 4] {
     [0.0, half.sin(), 0.0, half.cos()]
 }
 
-// Sorted-id snapshot of every node with a finite world position. Nodes with
-// missing or non-finite world poses are skipped, like the CAP1 gate skips
-// them; sizes are unit cubes, like the CAP1 gate assumes.
+// Sorted-id snapshot of every reachable node plus the count of nodes whose
+// world pose was missing or non-finite: those post a NaN actor, never a drop,
+// so `unknown-position` fires with the id still in the table.
 fn snapshot(doc: &Document) -> Snapshot {
     let mut order: Vec<ObjectId> = Vec::new();
     let mut stack = doc.hierarchy.roots();
@@ -465,22 +476,28 @@ fn snapshot(doc: &Document) -> Snapshot {
     order.sort_by_key(|id| id.to_string());
     let mut actors = Vec::new();
     let mut ids = Vec::new();
+    let mut missing_pose = 0u64;
     for id in order {
-        let Some(world) = doc.hierarchy.world(id) else {
-            continue;
-        };
-        if !world.position.iter().all(|lane| lane.is_finite()) {
-            continue;
+        let world = doc
+            .hierarchy
+            .world(id)
+            .filter(|w| w.position.iter().all(|lane| lane.is_finite()));
+        // A missing or non-finite pose posts a NaN actor, never a drop.
+        missing_pose += u64::from(world.is_none());
+        let world = world.unwrap_or(Transform::new(
+            [f32::NAN; 3],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0; 3],
+        ));
+        let index = u32::try_from(actors.len()).unwrap_or(u32::MAX);
+        if index == u32::MAX {
+            break;
         }
         let yaw = if world.rotation.iter().all(|lane| lane.is_finite()) {
             yaw_of_quat(world.rotation)
         } else {
             0.0
         };
-        let index = u32::try_from(actors.len()).unwrap_or(u32::MAX);
-        if index == u32::MAX {
-            break;
-        }
         ids.push(id);
         actors.push(engine_spatial::Actor {
             id: index,
@@ -498,24 +515,11 @@ fn snapshot(doc: &Document) -> Snapshot {
             yaw,
         });
     }
-    Snapshot { actors, ids }
-}
-
-fn id_table(ids: &[ObjectId]) -> Vec<String> {
-    ids.iter().map(ObjectId::to_string).collect()
-}
-
-// MCP8 labels for the wire: one `name [id]` entry per staged object,
-// index-aligned with [`id_table`], so numeric findings map to labels by the
-// same position.
-fn label_table(ids: &[ObjectId]) -> Vec<String> {
-    ids.iter()
-        .enumerate()
-        .map(|(index, id)| {
-            let index = u32::try_from(index).unwrap_or(u32::MAX);
-            object_label(index, id)
-        })
-        .collect()
+    Snapshot {
+        actors,
+        ids,
+        missing_pose,
+    }
 }
 
 fn parse_relation(text: &str) -> Result<Relation, McpToolError> {
@@ -555,21 +559,6 @@ fn parse_object_id(field: &str, text: &str) -> Result<ObjectId, McpToolError> {
             format!("{field} `{text}` is not an object id (expected UUID text)"),
         )
     })
-}
-
-// One finding rendered exactly like the SP4 brief lines (`finding <check>
-// <a> <b|-> <severity> <pct>`), so spatial rows compare directly against
-// brief text. Single-actor findings render `b` as `-`.
-fn finding_line(finding: &engine_spatial::Finding) -> String {
-    let b = if finding.b == u32::MAX {
-        "-".to_string()
-    } else {
-        finding.b.to_string()
-    };
-    format!(
-        "finding {} {} {} {} {}\n",
-        finding.check, finding.a, b, finding.severity, finding.pct
-    )
 }
 
 // A parsed place want plus its source text (conflicts echo source texts).
@@ -1001,10 +990,11 @@ impl ServerState {
     /// Units: `limit` counts finding rows per page. Ownership: reads the live
     /// document, writes nothing, takes no locks. Determinism: same scene,
     /// checks and limit always page the same rows with the same hash.
+    /// Honesty: `checks_run` names what ran, `skipped` what could not, with a reason.
     /// Errors: `bad_limit` for `0` or limits past
     /// [`SCENE_SPATIAL_MAX_FINDINGS`], `too_many_checks` past
     /// [`SCENE_SPATIAL_MAX_CHECKS`], `bad_check` for unknown names,
-    /// `needs_nav_view` for nav checks with no baked view.
+    /// `needs_nav_view` for an explicit nav check with no baked view.
     pub fn scene_spatial(
         &self,
         args: &SceneSpatialArgs,
@@ -1051,23 +1041,22 @@ impl ServerState {
         // tx.preview's job, and the CAP1 gate replays the spatial delta on
         // every apply, so findings here can never drift from the gate.
         let snap = snapshot(&self.doc);
-        let report = match &selected {
-            None => engine_spatial::run(&snap.actors),
-            Some(names) => engine_spatial::run_checks(&snap.actors, names).map_err(|legal| {
-                if legal == ["needs-nav-view"] {
-                    McpToolError::new(
-                        "needs_nav_view",
-                        "nav checks need a baked nav view which this tool has no access to; \
-                         submit offline checks only",
-                    )
-                } else {
-                    McpToolError::new(
-                        "bad_check",
-                        format!("check refused; submit any of {}", legal.join(", ")),
-                    )
-                }
-            })?,
-        };
+        let (run, skipped) = partition(selected.as_deref(), snap.missing_pose > 0);
+        let checks_run: Vec<String> = run.iter().map(|name| (*name).to_string()).collect();
+        let report = engine_spatial::run_checks(&snap.actors, &run).map_err(|legal| {
+            if legal == ["needs-nav-view"] {
+                McpToolError::new(
+                    "needs_nav_view",
+                    "nav checks need a baked nav view which this tool has no access to; \
+                     submit offline checks only",
+                )
+            } else {
+                McpToolError::new(
+                    "bad_check",
+                    format!("check refused; submit any of {}", legal.join(", ")),
+                )
+            }
+        })?;
         let total = report.findings.len() as u64;
         let end = (limit as usize).min(report.findings.len());
         let findings: Vec<String> = report.findings[..end].iter().map(finding_line).collect();
@@ -1080,6 +1069,9 @@ impl ServerState {
             findings,
             ids: id_table(&snap.ids),
             objects: label_table(&snap.ids),
+            checks_run,
+            skipped,
+            size_source: staged_sizes(snap.actors.len()),
         })
     }
 
@@ -1992,6 +1984,135 @@ mod tests {
             "the frozen catalog list stays unchanged: {}",
             refused.message
         );
+    }
+
+    // AD3 fixture: one stage fires every check the door can drive — an
+    // overlapping crowd over the density cap, a floater (support too), a sunk
+    // node, a far node, and a finite 1e30-scaled chain whose last `0 * inf`
+    // world pose is NaN (staged as a finding, never a silent drop).
+    fn ad3_server() -> McpServer {
+        fn add(ops: &mut Vec<Op>, parent: ObjectId, pos: [f32; 3], scale: [f32; 3]) -> ObjectId {
+            let id = ObjectId::new();
+            ops.push(Op::Insert {
+                id,
+                parent,
+                local: Transform::new(pos, [0.0, 0.0, 0.0, 1.0], scale),
+            });
+            id
+        }
+        let nil = ObjectId::NIL;
+        let mut ops = Vec::new();
+        for i in 0..9u8 {
+            add(&mut ops, nil, [0.05 * f32::from(i), 0.0, 0.0], [1.0; 3]);
+        }
+        for pos in [[0.0, 5.0, 0.0], [0.0, -5.0, 0.0], [150.0, 0.0, 0.0]] {
+            add(&mut ops, nil, pos, [1.0; 3]);
+        }
+        let root = add(&mut ops, nil, [0.0; 3], [1.0e30; 3]);
+        let mid = add(&mut ops, root, [0.0; 3], [1.0e30; 3]);
+        add(&mut ops, mid, [0.0; 3], [1.0; 3]);
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let batch = Batch {
+            ops,
+            base_revision: 0,
+            idempotency_key: 901,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &batch).expect("fixture applies");
+        McpServer::with_document(doc, journal, 7, Capability::unrestricted(7))
+    }
+
+    fn door_read(server: &McpServer) -> SceneSpatialOutput {
+        SceneSpatialTool::invoke(
+            server,
+            SceneSpatialArgs {
+                checks: None,
+                limit: Some(SCENE_SPATIAL_MAX_FINDINGS),
+            },
+        )
+        .expect("read")
+    }
+
+    // AD3 door fire test + output golden (receipt 2026-10-17): the output
+    // gained `checks_run`, `skipped` and `size_source`. Every `SPATIAL_CHECKS`
+    // entry either fires on this fixture or is named in `skipped` with a
+    // non-empty reason, ran plus skipped covers the catalog exactly once, a
+    // filtered call reports the same honesty, a bare scene counts its default
+    // boxes, and the JSON golden carries all three keys and round-trips.
+    #[test]
+    fn spatial_door_fire() {
+        let server = ad3_server();
+        let page = door_read(&server);
+        for check in engine_spatial::SPATIAL_CHECKS {
+            let fired = page
+                .findings
+                .iter()
+                .any(|line| line.starts_with(&format!("finding {check} ")));
+            let named = page.skipped.iter().find(|row| row.check == check);
+            assert!(
+                fired || named.is_some(),
+                "{check}: neither fired nor skipped"
+            );
+            assert!(
+                !(fired && named.is_some()),
+                "{check}: fired checks are not also reported skipped"
+            );
+            if let Some(row) = named {
+                assert!(!row.reason.is_empty(), "{check}: skip carries a reason");
+                assert!(
+                    engine_spatial::SPATIAL_CHECKS.contains(&row.check.as_str()),
+                    "{}: skipped name is off the frozen catalog",
+                    row.check
+                );
+            }
+        }
+        assert_eq!(
+            page.checks_run.len() + page.skipped.len(),
+            engine_spatial::SPATIAL_CHECKS.len(),
+            "ran + skipped must cover the catalog"
+        );
+        // The fixture's non-finite world pose is a finding, not a dropped node.
+        assert!(
+            page.checks_run
+                .iter()
+                .any(|name| name.as_str() == "unknown-position"),
+            "a non-finite pose must run unknown-position: {:?}",
+            page.checks_run
+        );
+        assert!(page
+            .findings
+            .iter()
+            .any(|line| line.starts_with("finding unknown-position ")));
+        assert_eq!(page.size_source.collider, 0, "no colliders yet");
+        assert!(page.size_source.default > 0, "nodes are default-sized");
+        let filtered = SceneSpatialTool::invoke(
+            &server,
+            SceneSpatialArgs {
+                checks: Some(vec!["overlap".to_string()]),
+                limit: None,
+            },
+        )
+        .expect("filtered read");
+        assert_eq!(filtered.checks_run, vec!["overlap".to_string()]);
+        assert_eq!(
+            filtered.skipped.len(),
+            engine_spatial::SPATIAL_CHECKS.len() - 1,
+            "every unrequested catalog name is named"
+        );
+        assert!(filtered
+            .skipped
+            .iter()
+            .all(|row| row.reason == "not_requested"));
+        let (bare, _, _) = overlap_scene();
+        assert_eq!(door_read(&bare).size_source.default, 4, "four bare nodes");
+        let json = rmcp::serde_json::to_value(&page).expect("output serializes");
+        for key in ["checks_run", "skipped", "size_source"] {
+            assert!(json.get(key).is_some(), "golden key {key} missing");
+        }
+        let back: SceneSpatialOutput =
+            rmcp::serde_json::from_value(json).expect("golden round-trips");
+        assert_eq!(back, page, "output golden is stable");
     }
 
     #[test]
