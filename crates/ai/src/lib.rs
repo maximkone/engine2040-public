@@ -61,7 +61,7 @@ pub use memory::{
 };
 pub mod mind;
 pub use mind::{
-    backend_rows, conformance_suite, validate_proposal as validate_mind_proposal, ActionDraft,
+    backend_rows, validate_proposal as validate_mind_proposal, ActionDraft,
     ActionKind, ActionLog, ActionSource, AdapterOutcome, AskOutcome, AskStatus, BackendRow, Goal,
     GoalState, LateOutcome, LocalAdapter, MemoryEvent, MemoryKind, Mind, MindAction, MindAdapter,
     MindContext, MindError, MindRequest, MindRuntime, MockAdapter, NpcId, Privacy,

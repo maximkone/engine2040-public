@@ -521,6 +521,40 @@ impl LaunchSpec {
         })
     }
 
+    /// By-value [`Self::arg`]: chains straight off a temporary, so a whole
+    /// launch reads as one expression.
+    ///
+    /// ```rust
+    /// use engine_endpoint::secret_launch::LaunchSpec;
+    ///
+    /// # fn main() -> Result<(), engine_endpoint::secret_launch::LaunchError> {
+    /// let spec = LaunchSpec::new("e2040-mcp")?
+    ///     .with_arg("--project-dir")?
+    ///     .with_arg("/work")?
+    ///     .with_secret("API_TOKEN", "token-abc-123")?
+    ///     .with_inherit("PATH")?;
+    /// assert_eq!(spec.secret_keys(), ["API_TOKEN"]);
+    /// assert!(!format!("{spec:?}").contains("token-abc-123"));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_arg(mut self, arg: &str) -> Result<Self, LaunchError> {
+        self.arg(arg)?;
+        Ok(self)
+    }
+
+    /// By-value [`Self::secret`].
+    pub fn with_secret(mut self, key: &str, value: &str) -> Result<Self, LaunchError> {
+        self.secret(key, value)?;
+        Ok(self)
+    }
+
+    /// By-value [`Self::inherit`].
+    pub fn with_inherit(mut self, name: &str) -> Result<Self, LaunchError> {
+        self.inherit(name)?;
+        Ok(self)
+    }
+
     /// Push one child arg; NUL and oversized args refuse.
     pub fn arg(&mut self, arg: &str) -> Result<&mut Self, LaunchError> {
         if self.args.len() >= MAX_ARGS {
@@ -662,22 +696,6 @@ pub fn audit_for(spec: &LaunchSpec, launch: u64) -> AuditRecord {
     }
 }
 
-fn escape_json_into(out: &mut String, text: &str) {
-    for next in text.chars() {
-        match next {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            next if (next as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", next as u32));
-            }
-            next => out.push(next),
-        }
-    }
-}
-
 /// Render one audit record as a single JSON line with key names only.
 ///
 /// Units: one JSON line per call; key names only, never secret values or the
@@ -702,14 +720,14 @@ pub fn audit_json(record: &AuditRecord) -> String {
     let mut out = String::from("{\"launch\":");
     out.push_str(&record.launch.to_string());
     out.push_str(",\"program\":\"");
-    escape_json_into(&mut out, &record.program);
+    engine_core::json::escape_into(&mut out, &record.program);
     out.push_str("\",\"keys\":[");
     for (index, key) in record.keys.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
         out.push('"');
-        escape_json_into(&mut out, key);
+        engine_core::json::escape_into(&mut out, key);
         out.push('"');
     }
     out.push_str("]}");

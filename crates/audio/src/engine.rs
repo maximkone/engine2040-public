@@ -103,6 +103,9 @@ impl AudioEngine {
             Command::Stop { cue, .. } => {
                 self.mixer.stop_cue(cue);
             }
+            Command::Trim { cue, gain, .. } => {
+                self.mixer.set_cue_trim(cue, gain);
+            }
             Command::Tension { level, .. } => {
                 if let Some(bed) = self.music.as_mut() {
                     bed.request(level, self.mixer.mixer_mut());

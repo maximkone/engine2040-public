@@ -242,6 +242,8 @@ test("the page contract: canvas, hud, report, fatal message with the browser ver
   assert.match(html, /<pre id="report"/);
   assert.match(html, /id="fatal"[^>]*role="alert"/);
   assert.match(html, /id="fatal-reason"/);
+  assert.ok(html.includes('<pre id="input">input: kb=0 mouse=0 pad=0</pre>'));
+  assert.ok(html.includes('<pre id="audio">audio: state=suspended</pre>'));
   assert.match(html, /<script type="module">/);
   assert.match(html, /from "\.\/engine\.js"/);
   assert.match(html, /run\("canvas"\)/);

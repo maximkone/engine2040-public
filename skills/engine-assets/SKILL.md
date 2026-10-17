@@ -1,17 +1,17 @@
 ---
 name: engine-assets
-description: Use when an ASSETS packet asks you to find, record the source and terms of, download and cook CC0/CC-BY characters, animations, kits, textures and HDRIs into content/ with a proven import.
+description: Use when a content row (ASSETS) asks you to find, record the source and terms of, download and cook CC0/CC-BY characters, animations, kits, textures and HDRIs into content/ with a proven import.
 ---
 # engine-assets
 
-Merged on 2026-09-27 (owner GO: fewer, stronger roles). The builder loads it for ASSETS packets.
+Merged on 2026-09-27 (owner GO: fewer, stronger roles). Load it for content rows.
 
 ## From the asset-specialist agent
 
 _Content specialist. Finds, records the source and terms of, downloads and cooks CC0/CC-BY characters, animations, kits, textures and HDRIs into content/ with a provenance row per asset (rows CT7-CT9 and map content)._
 
-Follow AGENTS.md and `docs/plan/content.md`. Accept one CONTENT packet with
-its board row, owned `content/` paths (one tree, master), budgets and the
+Follow AGENTS.md and `docs/plan/content.md`. Take one CONTENT board row with
+its row text, owned `content/` paths (one tree, master), budgets and the
 consumer that must load the result.
 
 1. Find sources with websearch (Quaternius, Poly Haven, ambientCG, Kenney,
@@ -27,9 +27,9 @@ consumer that must load the result.
    cook is identical twice, budgets hold. If no caller loads it yet, report
    OPEN with a named follow-up row (CT15-style) instead of claiming done.
 
-No commits, no dispatch. Return files, provenance rows, budgets and the proof.
+Commit by path (skill `commit-by-path`). Report files, provenance rows, budgets and the proof.
 
-Eyes (Muse sees images): render a preview of every cooked asset (Blender 5.2
+Eyes: render a preview of every cooked asset (Blender 5.2
 headless or the engine capture) and open it with the Read tool: silhouette,
 scale next to a 1.8 m reference, UV stretch, seams, rig breakage. Refuse what
 looks broken even if the import test passes.

@@ -420,7 +420,7 @@ pub fn validate_swing(swing: &BladeSwing, tables: &CutTables) -> Result<(), CutE
         let squared = dx * dx + dy * dy + dz * dz;
         // Sum of squares is non-negative so the conversion fits; saturate
         // rather than panic to keep validation total.
-        let dist = isqrt_u64(u64::try_from(squared).unwrap_or(u64::MAX));
+        let dist = u64::try_from(squared).unwrap_or(u64::MAX).isqrt();
         return Err(CutError::BadValue {
             field: "swing_len_mm",
             value: saturate_q16(dist),
@@ -686,24 +686,6 @@ fn in_envelope(swing: &BladeSwing, target: &JointTarget) -> bool {
         return false;
     }
     true
-}
-
-/// Integer square root: the greatest `root` with `root * root <= value`.
-fn isqrt_u64(value: u64) -> u64 {
-    if value < 2 {
-        return value;
-    }
-    let mut guess = 1u64 << (64 - value.leading_zeros()).div_ceil(2);
-    loop {
-        let next128 = (u128::from(guess) + u128::from(value) / u128::from(guess)) / 2;
-        // Newton step from a u64 guess stays in u64; saturate so the root
-        // stays total even if the bound argument changes.
-        let next = u64::try_from(next128).unwrap_or(u64::MAX);
-        if next >= guess {
-            return guess;
-        }
-        guess = next;
-    }
 }
 
 /// Clamp `num / den` to `[0, CUT_Q]` with round-to-nearest; `den <= 0`

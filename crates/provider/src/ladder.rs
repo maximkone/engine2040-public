@@ -255,6 +255,9 @@ pub struct LadderReport {
     /// The scripted service standing in when `used` is scripted and the
     /// session policy allows one. Nothing from the model is in it.
     pub scripted: Option<ScriptedFallback>,
+    /// Digest of the system prompt the exchange carried (see
+    /// [`crate::prompt`]); `None` until the adapter that sent it stamps it.
+    pub prompt: Option<u64>,
 }
 
 /// The ladder's verdict: the value or the last failure, plus the report.
@@ -312,6 +315,7 @@ pub fn descend<T>(
                     used: Rung::Scripted,
                     drops,
                     scripted: None,
+                    prompt: None,
                 },
             };
         }
@@ -328,6 +332,7 @@ impl<T> Descent<T> {
                 used,
                 drops,
                 scripted: None,
+                prompt: None,
             },
         }
     }
@@ -838,8 +843,9 @@ mod wire_tests {
     use super::*;
     use crate::fallback::FallbackCause;
     use crate::mock::fixtures;
-    use crate::pins::RequestPins;
+    use crate::pins::{default_system_prompt, RequestPins};
     use crate::policy::{AiSessionPolicy, Fallback, ProviderCapabilities};
+    use crate::prompt::text_digest;
     use crate::protocol::{AdapterKind, PrivacyMode, ProposalAction};
     use crate::stub::{chat_ok, settle, StubServer};
     use crate::transport::parse_endpoint;
@@ -1146,6 +1152,13 @@ mod wire_tests {
                 let report = got.report.as_ref().expect("report");
                 assert_eq!(report.used, want, "{label}");
                 assert_eq!(report.scripted, None, "{label}");
+                assert_eq!(
+                    report.prompt,
+                    Some(text_digest(default_system_prompt(
+                        fixtures::request(7, 3).kind
+                    ))),
+                    "{label}: the record names the prompt it asked with"
+                );
                 let skipped = got
                     .events
                     .iter()
@@ -1259,8 +1272,6 @@ mod wire_tests {
             (401u16, AiError::QuotaAuth),
             (403, AiError::QuotaAuth),
             (429, AiError::QuotaAuth),
-            (408, AiError::Timeout),
-            (503, AiError::Unavailable),
         ] {
             let (got, stub) = run_with(
                 Vendor::OpenAi,
@@ -1272,6 +1283,43 @@ mod wire_tests {
             assert_eq!(stub.hits(), 1, "{status}: no second ask");
             let report = got.report.as_ref().expect("report");
             assert_eq!(report.used, Rung::Scripted, "{status}");
+            assert_eq!(
+                got.events,
+                vec![RungDrop {
+                    request: RequestId(7),
+                    from: Rung::Native,
+                    to: Rung::Scripted,
+                    cause: DropCause::Error(error)
+                }],
+                "{status}"
+            );
+        }
+        // A server fault is retried below the ladder, on the same rung: the
+        // second ask serves, so no rung drops.
+        for status in [408u16, 503] {
+            let (got, stub) = run(
+                Vendor::OpenAi,
+                LadderPlan::native(),
+                &[(status, String::from("{}")), ok(valid.clone())],
+            );
+            assert!(got.outcome.result.is_ok(), "{status}: the retry serves");
+            assert_eq!(stub.hits(), 2, "{status}: one retry");
+            assert!(got.events.is_empty(), "{status}: no rung dropped");
+        }
+        // A fault that never clears is asked 1 + MAX_RETRIES times, then ends
+        // on the scripted floor with the mapped error.
+        for (status, error) in [(408u16, AiError::Timeout), (503, AiError::Unavailable)] {
+            let (got, stub) = run(
+                Vendor::OpenAi,
+                LadderPlan::native(),
+                &[(status, String::from("{}"))],
+            );
+            assert_eq!(got.outcome.result, Err(error), "{status}");
+            assert_eq!(
+                stub.hits(),
+                1 + u64::from(crate::retry::MAX_RETRIES),
+                "{status}"
+            );
             assert_eq!(
                 got.events,
                 vec![RungDrop {
@@ -1395,6 +1443,7 @@ mod wire_tests {
                     ..template
                 }],
                 scripted: None,
+                prompt: None,
             });
         }
         assert_eq!(http.ladder_log.len(), MAX_LADDER_LOG);

@@ -30,6 +30,9 @@ needs it. Every dependency stays behind a feature, off the headless default.
 | burn 0.21 (CPU backends) | MIT/Apache-2.0 | distill `train` | offline student trainer |
 | tokio 1 (rt, macros; 1.53.1 in lock via rmcp) | MIT (crates.io API, tokio-rs/tokio) | endpoint `mcp` | the `e2040-mcp` launcher runtime for MCP5 |
 | quinn 0.11 (default features: runtime-tokio, rustls-ring) | MIT (LICENSE-MIT read live 2026-09-25, quinn-rs/quinn) | net `quic` | QUIC transport + datagrams for ON1 (rustls transitive) |
+| wtransport 0.7 | MIT OR Apache-2.0 | net `webtransport` | WebTransport server for browser clients beside quinn (WEB9) |
+| tokio-tungstenite 0.29 + futures-util 0.3 (default-features=false: handshake; std, sink) | MIT (tokio-tungstenite), MIT OR Apache-2.0 (futures-util); both already in Cargo.lock via the endpoint MCP stack | net `websocket` | WebSocket server, the fallback leg when a network drops UDP (WEB12); plain ws, wss is terminated in front |
+| wasm-bindgen 0.2, wasm-bindgen-futures 0.4, js-sys 0.3, web-sys 0.3 (WebSocket, MessageEvent, CloseEvent) | MIT OR Apache-2.0 | net (wasm32 only) | browser WebSocket and WebTransport clients behind the Transport trait; the versions engine-web already links |
 | puffin 0.20 | MIT/Apache-2.0 (crates.io API 2026-09-24) | perf `profile` | profiler on observe spans for PF2 |
 | sha2 0.10 | MIT (LICENSE-MIT read live 2026-09-25, RustCrypto/hashes) | game (capture manifests) | per-frame SHA-256 for SHOW1 manifests, cross-checked by tools/showcase.mjs |
 | rustls 0.23 (default-features=false: std, tls12, ring) | Apache-2.0 OR ISC OR MIT (crates.io API, rustls/rustls) | provider `tls` | opt-in HTTPS handshake for cloud LLMs; ring already in the graph via quinn |

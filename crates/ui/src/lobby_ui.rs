@@ -16,6 +16,13 @@
 //!
 //! Pacing and caps come in through [`LobbyLimits`] from the net lobby's own
 //! constants, so this screen holds no mirror of them.
+//!
+//! Staleness: the caller's clock reaches the screen through [`LobbyScreen::poll`].
+//! A host row not seen for more than [`STALE_PERIODS`] refresh periods is
+//! evicted by that poll with a typed [`LobbyNotice`], one pass over the host
+//! list. Once the caller reports the lobby is being heard
+//! ([`LobbyScreen::lobby_heard`]), ready-up and start refuse slot rows that
+//! went quiet for as long.
 
 use super::menus::{FightRequest, MenuError};
 use engine_input::MAX_PARTICIPANTS;
@@ -60,6 +67,9 @@ pub enum SlotRow {
         ready: bool,
     },
 }
+
+/// K: refresh periods without news before a host row or a heard lobby is stale.
+pub const STALE_PERIODS: u64 = 4;
 
 /// Rows drawn per frame; the screen virtualizes the slot list through this window.
 pub const LOBBY_VIEW_ROWS: usize = 8;
@@ -165,6 +175,16 @@ pub enum LobbyCommand {
     Exit,
 }
 
+/// A fact the screen shows the player once. Typed, never a string.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LobbyNotice {
+    /// Host rows went stale and were dropped from the list.
+    HostsGone {
+        /// Rows evicted since the notice was last taken.
+        count: usize,
+    },
+}
+
 /// What refused a lobby screen call. Refusals change nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LobbyUiError {
@@ -182,6 +202,9 @@ pub enum LobbyUiError {
     NotReady,
     /// The slot list has no row for this player.
     NoSlotForYou,
+    /// Ready-up or start on slot rows the lobby has not refreshed for
+    /// [`STALE_PERIODS`] refresh periods.
+    StaleSlots,
     /// The press or event does not fit the phase; phase carried.
     WrongPhase(LobbyPhase),
     /// The fight request failed the menu's own check.
@@ -198,6 +221,7 @@ impl core::fmt::Display for LobbyUiError {
             Self::NotHost => write!(f, "only the host can do that"),
             Self::NotReady => write!(f, "not every slot is filled and ready"),
             Self::NoSlotForYou => write!(f, "no slot for this player"),
+            Self::StaleSlots => write!(f, "the lobby went quiet; wait for fresh slots"),
             Self::WrongPhase(phase) => write!(f, "not allowed while {phase:?}"),
             Self::BadFight(err) => write!(f, "bad fight request: {err}"),
         }
@@ -212,10 +236,17 @@ pub struct LobbyScreen {
     limits: LobbyLimits,
     phase: LobbyPhase,
     hosts: Vec<HostRow>,
+    /// Clock reading each host row was last seen at; parallel to `hosts`.
+    hosts_seen_ms: Vec<u64>,
     selected: usize,
     slots: Vec<SlotRow>,
     host: bool,
     last_refresh_ms: Option<u64>,
+    /// Newest clock reading handed to [`LobbyScreen::poll`].
+    clock_ms: u64,
+    /// Clock reading the lobby was last heard at; `None` until watched.
+    lobby_heard_ms: Option<u64>,
+    notice: Option<LobbyNotice>,
     fight: Option<FightRequest>,
 }
 
@@ -233,10 +264,14 @@ impl LobbyScreen {
             limits,
             phase: LobbyPhase::Browsing,
             hosts: Vec::new(),
+            hosts_seen_ms: Vec::new(),
             selected: 0,
             slots: Vec::new(),
             host: false,
             last_refresh_ms: None,
+            clock_ms: 0,
+            lobby_heard_ms: None,
+            notice: None,
             fight: None,
         })
     }
@@ -337,9 +372,110 @@ impl LobbyScreen {
         humans == PARTY_SIZE
     }
 
+    /// Take the pending notice, once.
+    pub fn take_notice(&mut self) -> Option<LobbyNotice> {
+        self.notice.take()
+    }
+
+    /// Milliseconds after which a host row or a heard lobby is stale.
+    fn stale_ms(&self) -> u64 {
+        self.limits.refresh_period_ms.saturating_mul(STALE_PERIODS)
+    }
+
+    /// Ms since `seen_ms` on the caller's clock (wrap-safe).
+    fn age(&self, seen_ms: u64) -> u64 {
+        self.clock_ms.wrapping_sub(seen_ms)
+    }
+
+    /// Put the highlight back on host `id` if it is still listed, else clamp
+    /// it into the list.
+    fn reselect(&mut self, id: Option<HostId>) {
+        let kept = id.and_then(|id| self.hosts.iter().position(|row| row.id == id));
+        self.selected =
+            kept.unwrap_or_else(|| self.selected.min(self.hosts.len().saturating_sub(1)));
+    }
+
+    /// Drop host rows older than [`STALE_PERIODS`] refresh periods: one pass
+    /// over at most `max_hosts` rows, then a notice for the count.
+    fn evict_stale_hosts(&mut self) {
+        let (clock, limit) = (self.clock_ms, self.stale_ms());
+        let highlighted = self.selected().map(|row| row.id);
+        let before = self.hosts.len();
+        let mut seen = self.hosts_seen_ms.iter();
+        self.hosts.retain(|_| {
+            seen.next()
+                .is_some_and(|&at| clock.wrapping_sub(at) <= limit)
+        });
+        self.hosts_seen_ms
+            .retain(|&at| clock.wrapping_sub(at) <= limit);
+        let gone = before - self.hosts.len();
+        if gone > 0 {
+            self.reselect(highlighted);
+            self.note_hosts_gone(gone);
+        }
+    }
+
+    fn note_hosts_gone(&mut self, count: usize) {
+        let prior = match self.notice {
+            Some(LobbyNotice::HostsGone { count }) => count,
+            None => 0,
+        };
+        self.notice = Some(LobbyNotice::HostsGone {
+            count: prior.saturating_add(count),
+        });
+    }
+
+    /// Note one beacon sighting of `row` on the caller's clock: a listed host
+    /// is refreshed, a new one joins the list. A full list makes room by
+    /// evicting its stalest row, so a ghost storm of fresh ids cannot lock a
+    /// real host out. One pass over at most `max_hosts` rows.
+    ///
+    /// # Errors
+    /// [`LobbyUiError::WrongPhase`] outside the host list phase.
+    pub fn see_host(&mut self, row: HostRow) -> Result<(), LobbyUiError> {
+        if self.phase != LobbyPhase::Browsing {
+            return Err(LobbyUiError::WrongPhase(self.phase));
+        }
+        let highlighted = self.selected().map(|row| row.id);
+        if let Some(index) = self.hosts.iter().position(|other| other.id == row.id) {
+            self.hosts[index] = row;
+            self.hosts_seen_ms[index] = self.clock_ms;
+            return Ok(());
+        }
+        if self.hosts.len() >= self.limits.max_hosts {
+            let stalest = (0..self.hosts_seen_ms.len())
+                .max_by_key(|&index| self.age(self.hosts_seen_ms[index]))
+                .unwrap_or(0);
+            self.hosts.remove(stalest);
+            self.hosts_seen_ms.remove(stalest);
+            self.note_hosts_gone(1);
+        }
+        self.hosts.push(row);
+        self.hosts_seen_ms.push(self.clock_ms);
+        self.reselect(highlighted);
+        Ok(())
+    }
+
+    /// Report that the lobby just spoke (a slot update, the host's beacon).
+    /// From now on ready-up and start refuse slot rows that stay quiet for
+    /// [`STALE_PERIODS`] refresh periods; before the first call nothing is
+    /// ever stale, so a caller that never reports keeps the old behavior.
+    pub fn lobby_heard(&mut self) {
+        self.lobby_heard_ms = Some(self.clock_ms);
+    }
+
+    /// True when the lobby is watched and has been quiet too long.
+    fn slots_stale(&self) -> bool {
+        self.lobby_heard_ms
+            .is_some_and(|at| self.age(at) > self.stale_ms())
+    }
+
     /// Ask for a host-list refresh at most once per period while browsing.
-    /// The first call answers at once; the clock is the caller's.
+    /// The first call answers at once; the clock is the caller's. Every call
+    /// moves the screen's clock and evicts stale host rows.
     pub fn poll(&mut self, now_ms: u64) -> Option<LobbyCommand> {
+        self.clock_ms = now_ms;
+        self.evict_stale_hosts();
         if self.phase != LobbyPhase::Browsing {
             return None;
         }
@@ -365,11 +501,10 @@ impl LobbyScreen {
         if hosts.len() > self.limits.max_hosts {
             return Err(LobbyUiError::TooManyHosts(hosts.len()));
         }
-        let kept = self
-            .selected()
-            .and_then(|row| hosts.iter().position(|other| other.id == row.id));
-        self.selected = kept.unwrap_or_else(|| self.selected.min(hosts.len().saturating_sub(1)));
+        let highlighted = self.selected().map(|row| row.id);
         self.hosts = hosts.to_vec();
+        self.hosts_seen_ms = vec![self.clock_ms; hosts.len()];
+        self.reselect(highlighted);
         Ok(())
     }
 
@@ -421,6 +556,13 @@ impl LobbyScreen {
     }
 
     fn input_in_lobby(&mut self, input: LobbyInput) -> Result<Option<LobbyCommand>, LobbyUiError> {
+        let needs_fresh_slots = matches!(
+            input,
+            LobbyInput::ToggleReady | LobbyInput::Start | LobbyInput::QueueParty
+        );
+        if needs_fresh_slots && self.slots_stale() {
+            return Err(LobbyUiError::StaleSlots);
+        }
         match input {
             LobbyInput::Up | LobbyInput::Down | LobbyInput::Confirm | LobbyInput::Host => Ok(None),
             LobbyInput::Back => {
@@ -455,6 +597,7 @@ impl LobbyScreen {
         self.phase = LobbyPhase::Browsing;
         self.slots.clear();
         self.host = false;
+        self.lobby_heard_ms = None;
     }
 
     /// The join was granted: show the lobby. `host` is true when this player
@@ -470,6 +613,7 @@ impl LobbyScreen {
         self.slots = slots.to_vec();
         self.host = host;
         self.phase = LobbyPhase::InLobby;
+        self.refresh_heard();
         Ok(())
     }
 
@@ -495,7 +639,15 @@ impl LobbyScreen {
         }
         Self::check_slots(slots)?;
         self.slots = slots.to_vec();
+        self.refresh_heard();
         Ok(())
+    }
+
+    /// New slot rows count as news once the lobby is watched.
+    fn refresh_heard(&mut self) {
+        if self.lobby_heard_ms.is_some() {
+            self.lobby_heard_ms = Some(self.clock_ms);
+        }
     }
 
     fn check_slots(slots: &[SlotRow]) -> Result<(), LobbyUiError> {
@@ -930,6 +1082,164 @@ mod tests {
         assert_eq!(projected.units, 192);
         assert_eq!(projected.bytes, one.bytes.saturating_mul(64));
         assert_eq!(projected.units, sixteen.units.saturating_mul(4));
+    }
+
+    /// Screen with room for a full beacon list (the net cap is 16).
+    fn wide_screen() -> LobbyScreen {
+        LobbyScreen::new(LobbyLimits {
+            refresh_period_ms: 250,
+            max_hosts: usize::from(MAX_PARTICIPANTS),
+        })
+        .expect("limits are valid")
+    }
+
+    const STALE_MS: u64 = 250 * STALE_PERIODS;
+
+    #[test]
+    fn a_ghost_storm_is_evicted_in_one_poll_and_no_ghost_stays_listed() {
+        let mut screen = wide_screen();
+        screen.poll(0);
+        for id in 0..16 {
+            screen.see_host(host(id, 2)).unwrap();
+        }
+        assert_eq!(screen.hosts().len(), 16);
+        // Right at K periods a row is still fresh; one ms later it is a ghost.
+        screen.poll(STALE_MS);
+        assert_eq!(screen.hosts().len(), 16);
+        assert_eq!(screen.take_notice(), None);
+        screen.poll(STALE_MS + 1);
+        assert!(screen.hosts().is_empty());
+        assert_eq!(screen.selected(), None);
+        assert_eq!(screen.status(), "Looking for games on this network");
+        assert_eq!(
+            screen.take_notice(),
+            Some(LobbyNotice::HostsGone { count: 16 })
+        );
+        assert_eq!(screen.take_notice(), None, "a notice shows once");
+    }
+
+    #[test]
+    fn a_live_host_survives_the_ghosts_around_it() {
+        let mut screen = wide_screen();
+        screen.poll(0);
+        for id in 0..8 {
+            screen.see_host(host(id, 2)).unwrap();
+        }
+        screen
+            .set_hosts(&[host(0, 2), host(1, 2), host(7, 2)])
+            .unwrap();
+        screen.input(LobbyInput::Down).unwrap();
+        screen.input(LobbyInput::Down).unwrap();
+        assert_eq!(screen.selected(), Some(host(7, 2)));
+        // Host 7 beacons again at 900 ms; the rest stay quiet.
+        screen.poll(900);
+        screen.see_host(host(7, 4)).unwrap();
+        screen.poll(STALE_MS + 1);
+        assert_eq!(screen.hosts(), &[host(7, 4)]);
+        assert_eq!(screen.selected(), Some(host(7, 4)), "the highlight follows");
+        assert_eq!(
+            screen.take_notice(),
+            Some(LobbyNotice::HostsGone { count: 2 })
+        );
+    }
+
+    #[test]
+    fn a_thousand_ghosts_never_outgrow_the_list_or_lock_a_real_host_out() {
+        let mut screen = wide_screen();
+        for step in 0..1000u64 {
+            screen.poll(step);
+            screen
+                .see_host(host(100 + u16::try_from(step).unwrap(), 2))
+                .unwrap();
+            assert!(screen.hosts().len() <= 16);
+        }
+        screen.see_host(host(1, 2)).unwrap();
+        assert!(screen.hosts().contains(&host(1, 2)));
+        assert_eq!(screen.hosts().len(), 16);
+        // The evictions were counted, not lost.
+        assert_eq!(
+            screen.take_notice(),
+            Some(LobbyNotice::HostsGone { count: 985 })
+        );
+    }
+
+    #[test]
+    fn eviction_survives_a_clock_wrap() {
+        let mut screen = wide_screen();
+        screen.poll(u64::MAX - 100);
+        screen.see_host(host(1, 2)).unwrap();
+        screen.poll(u64::MAX - 50);
+        assert_eq!(screen.hosts().len(), 1);
+        screen.poll(STALE_MS);
+        assert!(screen.hosts().is_empty());
+    }
+
+    #[test]
+    fn ready_up_refuses_slots_the_lobby_stopped_refreshing() {
+        let mut screen = wide_screen();
+        screen.set_hosts(&[host(1, 2)]).unwrap();
+        screen.input(LobbyInput::Confirm).unwrap();
+        screen.poll(0);
+        screen.joined(&[you(false), SlotRow::Ai], true).unwrap();
+        screen.lobby_heard();
+        // Quiet for exactly K periods is still fine.
+        screen.poll(STALE_MS);
+        assert_eq!(
+            screen.input(LobbyInput::ToggleReady),
+            Ok(Some(LobbyCommand::SetReady(true)))
+        );
+        screen.poll(STALE_MS + 1);
+        for press in [
+            LobbyInput::ToggleReady,
+            LobbyInput::Start,
+            LobbyInput::QueueParty,
+        ] {
+            assert_eq!(
+                screen.input(press),
+                Err(LobbyUiError::StaleSlots),
+                "{press:?}"
+            );
+        }
+        // Leaving and fresh news both stay possible; fresh slots unlock ready-up.
+        screen.set_slots(&[you(false), SlotRow::Ai]).unwrap();
+        assert_eq!(
+            screen.input(LobbyInput::ToggleReady),
+            Ok(Some(LobbyCommand::SetReady(true)))
+        );
+    }
+
+    #[test]
+    fn an_unwatched_lobby_is_never_stale() {
+        let mut screen = in_lobby(true, &[you(false), SlotRow::Ai]);
+        screen.poll(10_000_000);
+        assert_eq!(
+            screen.input(LobbyInput::ToggleReady),
+            Ok(Some(LobbyCommand::SetReady(true)))
+        );
+    }
+
+    #[test]
+    fn eviction_cost_is_one_pass_and_grows_with_the_list_only() {
+        // One scan per poll: 16 rows cost 16 steps, a 64-slot list 64.
+        let sixteen = LobbyScale::for_slots(16);
+        let projected = LobbyScale::for_slots(64);
+        assert_eq!((sixteen.slots, projected.slots), (16, 64));
+        assert_eq!(projected.units, sixteen.units * 4);
+        let mut wide = LobbyScreen::new(LobbyLimits {
+            refresh_period_ms: 250,
+            max_hosts: 64,
+        })
+        .unwrap();
+        wide.poll(0);
+        for id in 0..64 {
+            wide.see_host(host(id, 2)).unwrap();
+        }
+        wide.poll(STALE_MS + 1);
+        assert!(wide.hosts().is_empty());
+        assert_eq!(
+            wide.take_notice(),
+            Some(LobbyNotice::HostsGone { count: 64 })
+        );
     }
 
     #[test]

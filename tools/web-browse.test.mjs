@@ -232,3 +232,146 @@ test("a real Chrome reads the mock page back, with and without navigator.gpu", {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- scripted input (AIS2) ----
+test("inputCommands maps events to CDP calls and waits, in order", async () => {
+  const { inputCommands } = await import("./web-browse.mjs");
+  const cmds = inputCommands([{ kind: "key", key: "a" }, { kind: "click", x: 10, y: 20 }, { kind: "wait", ms: 50 }, { kind: "key_down", key: "ArrowLeft" }, { kind: "key_up", key: "ArrowLeft" }]);
+  assert.deepEqual(cmds.map((c) => c.wait ?? `${c.method}:${c.params.type}`), [
+    "Input.dispatchKeyEvent:keyDown", "Input.dispatchKeyEvent:keyUp",
+    "Input.dispatchMouseEvent:mouseMoved", "Input.dispatchMouseEvent:mousePressed", "Input.dispatchMouseEvent:mouseReleased",
+    50, "Input.dispatchKeyEvent:rawKeyDown", "Input.dispatchKeyEvent:keyUp",
+  ]);
+  assert.equal(cmds[0].params.code, "KeyA");
+  assert.equal(cmds[0].params.text, "a");
+  assert.equal(cmds[1].params.text, undefined);
+  assert.deepEqual([cmds[3].params.x, cmds[3].params.y, cmds[3].params.button], [10, 20, "left"]);
+});
+
+test("inputCommands refuses what it cannot map", async () => {
+  const { inputCommands } = await import("./web-browse.mjs");
+  assert.throws(() => inputCommands([{ kind: "tap" }]), /unknown input kind/);
+  assert.throws(() => inputCommands([{ kind: "key", key: "NoSuchKey" }]), /unknown key/);
+  assert.throws(() => inputCommands([{ kind: "click", x: 1 }]), /integer x and y/);
+  assert.throws(() => inputCommands([{ kind: "wait", ms: 99999 }]), /0\.\.=2000/);
+});
+
+test("parseArgs takes --input and refuses it without a file", () => {
+  assert.equal(parseArgs(["--chrome", "c", "--input", "e.json"]).input, "e.json");
+  assert.match(parseArgs(["--chrome", "c", "--input"]).error, /--input needs/);
+});
+
+// ---- the arena frame (WEB5): the GPU copy of the canvas, its hash, its PNG and the receipt ----
+test("fnv1a64 is FNV-1a 64: the published vectors and the same digest the render crate prints", async () => {
+  const { fnv1a64 } = await import("./web-browse.mjs");
+  assert.equal(fnv1a64(Buffer.from("a")), "af63dc4c8601ec8c");
+  assert.equal(fnv1a64(Buffer.alloc(0)), "cbf29ce484222325");
+  // The same four bytes are a unit test in crates/render/src/present/gpu_present/capture.rs.
+  assert.equal(fnv1a64(Buffer.from([9, 8, 7, 255])), "f247a9ba2081b132");
+  assert.notEqual(fnv1a64(Buffer.from([9, 8, 7, 254])), fnv1a64(Buffer.from([9, 8, 7, 255])));
+});
+
+test("encodePng writes a PNG the decoder reads back byte for byte, with real CRCs", async () => {
+  const { encodePng: write } = await import("./web-browse.mjs");
+  const w = 7, h = 5, rgba = Buffer.alloc(w * h * 4);
+  for (let i = 0; i < rgba.length; i++) rgba[i] = (i * 37 + (i >> 3)) & 255;
+  const png = write(w, h, rgba);
+  const back = decodePng(png);
+  assert.deepEqual([back.width, back.height, back.channels], [w, h, 4]);
+  assert.ok(Buffer.from(back.data).equals(rgba));
+  // Every chunk's CRC is the CRC-32 of its type and data.
+  const { crc32 } = await import("node:zlib");
+  let off = 8, chunks = 0;
+  while (off < png.length) {
+    const len = png.readUInt32BE(off);
+    assert.equal(png.readUInt32BE(off + 8 + len), crc32(png.subarray(off + 4, off + 8 + len)) >>> 0, `chunk at ${off}`);
+    off += 12 + len; chunks++;
+  }
+  assert.equal(chunks, 3, "IHDR, IDAT, IEND");
+});
+
+test("encodePng refuses bytes that are not the shape it was told", async () => {
+  const { encodePng: write } = await import("./web-browse.mjs");
+  assert.throws(() => write(4, 4, Buffer.alloc(10)), /not a 4x4 RGBA image/);
+  assert.throws(() => write(0, 4, Buffer.alloc(0)), /not a 0x4 RGBA image/);
+});
+
+test("arenaVerdict: a drawn, intact capture with a clean receipt passes, and each fault is named", async () => {
+  const { arenaVerdict } = await import("./web-browse.mjs");
+  const good = {
+    capture: "ready", captureLine: { hash: "00ff00ff00ff00ff", blank: false }, hashOk: true, nodeHash: "00ff00ff00ff00ff",
+    stats: { width: 8, height: 8, distinct: 900, dominantShare: 0.05, meanLuma: 150 },
+    receipt: { ok: true, frames: 120, frameErrors: 0, validationErrors: 0 }, receiptText: "{}",
+  };
+  assert.deepEqual(arenaVerdict(good), { ok: true, problems: [] });
+  assert.deepEqual(arenaVerdict(null), { ok: true, problems: [] }, "a page without the arena is not judged here");
+  const bad = (patch) => arenaVerdict({ ...good, ...patch }).problems.join(" | ");
+  assert.match(bad({ capture: null }), /never finished/);
+  assert.match(bad({ capture: "error" }), /ended as error/);
+  assert.match(bad({ capture: "blank", captureLine: { hash: "x", blank: true } }), /ended as blank.*\(blank\)/);
+  assert.match(bad({ hashOk: false, nodeHash: "1111111111111111" }), /hash to 1111111111111111, the page said 00ff00ff00ff00ff/);
+  assert.match(bad({ stats: { width: 8, height: 8, distinct: 1, dominantShare: 1, meanLuma: 0 } }), /copied canvas is blank/);
+  assert.match(bad({ receipt: { ...good.receipt, validationErrors: 2, firstError: "bind group" } }), /validation errors 2: bind group/);
+  assert.match(bad({ receipt: { ...good.receipt, frameErrors: 1 } }), /frame errors 1/);
+  assert.match(bad({ receipt: { ...good.receipt, frames: 0 } }), /counts no frame/);
+  assert.match(bad({ receipt: null, receiptText: "garbage" }), /receipt is not JSON: garbage/);
+});
+
+test("verdict: for the arena page the GPU copy decides, a black screenshot does not fail it", async () => {
+  const arena = { capture: "ready", captureLine: { hash: "aa", blank: false }, hashOk: true, nodeHash: "aa", stats: { width: 8, height: 8, distinct: 500, dominantShare: 0.1, meanLuma: 120 }, receipt: { ok: true, frames: 40, frameErrors: 0, validationErrors: 0 }, receiptText: "{}" };
+  const run = { timedOut: false, report: { ok: true, adapter: {} }, stats: { width: 8, height: 8, distinct: 1, dominantShare: 1, meanLuma: 0 }, framesAdvanced: true, recovered: true };
+  assert.equal(verdict({ ...run, arena }).ok, true, "black screenshot, drawn GPU copy");
+  assert.equal(verdict(run).code, "blank-canvas", "without the arena the screenshot decides");
+  const failed = verdict({ ...run, arena: { ...arena, receipt: { ...arena.receipt, validationErrors: 3 } } });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.code, "arena");
+  assert.match(failed.why, /validation errors 3/);
+});
+
+test("readArena brings the pixels over the wire intact and makes the PNG (mock page, no browser)", async () => {
+  const { readArena, fnv1a64, encodePng: write } = await import("./web-browse.mjs");
+  const w = 6, h = 4, rgba = Buffer.alloc(w * h * 4);
+  for (let i = 0; i < rgba.length; i++) rgba[i] = (i * 53 + 11) & 255;
+  const line = JSON.stringify({ ok: true, frame: 31, width: w, height: h, hash: fnv1a64(rgba), blank: false });
+  const receipt = JSON.stringify({ ok: true, frames: 31, frameErrors: 0, validationErrors: 0 });
+  const nodes = { receipt, passes: "sky=0.1ms", init: "arena ready in 800 ms", capture: line };
+  const evalJs = async (expr) => {
+    if (expr.includes("dataset.mode")) return true;
+    if (expr.includes("dataset.capture")) return "ready";
+    if (expr.includes("FileReader")) return rgba.toString("base64");
+    const id = /getElementById\('(\w+)'\)/.exec(expr)?.[1];
+    return nodes[id] ?? "";
+  };
+  const a = await readArena({ evalJs, sleep: async () => {} }, 1000);
+  assert.equal(a.capture, "ready");
+  assert.equal(a.hashOk, true);
+  assert.equal(a.nodeHash, fnv1a64(rgba));
+  assert.deepEqual([a.width, a.height, a.bytes], [w, h, rgba.length]);
+  assert.ok(Buffer.from(decodePng(a.png).data).equals(rgba), "the PNG holds the very bytes");
+  assert.equal(a.receipt.frames, 31);
+  // Bytes of the wrong count are refused rather than hashed.
+  const short = await readArena({ evalJs: async (e) => (e.includes("FileReader") ? rgba.subarray(0, 12).toString("base64") : evalJs(e)), sleep: async () => {} }, 1000);
+  assert.equal(short.hashOk, false);
+  assert.equal(short.png, undefined);
+  // A page that is not the arena is skipped.
+  assert.equal(await readArena({ evalJs: async () => false, sleep: async () => {} }), null);
+  void write;
+});
+
+test("writeArena leaves the PNG and the facts side by side, and nothing for a page without the arena", async () => {
+  const { writeArena, encodePng: write } = await import("./web-browse.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "arena-out-"));
+  try {
+    writeArena(dir, "none", null);
+    const png = write(2, 2, Buffer.alloc(16, 200));
+    writeArena(dir, "arena-capture", { capture: "ready", png, receipt: { frames: 3 } });
+    const { readFileSync, readdirSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(dir).sort(), ["arena-capture.json", "arena-capture.png"]);
+    assert.ok(readFileSync(join(dir, "arena-capture.png")).equals(png));
+    const facts = JSON.parse(readFileSync(join(dir, "arena-capture.json"), "utf8"));
+    assert.equal(facts.capture, "ready");
+    assert.equal(facts.png, undefined, "the bytes are in the PNG, not repeated in the JSON");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

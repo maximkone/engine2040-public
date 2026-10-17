@@ -23,7 +23,7 @@ export const allowedEdges = new Map([
   ["engine-audio", ["engine-observe"]],
   ["engine-save", ["engine-observe"]],
   ["engine-anim", ["engine-nn", "engine-combat"]],
-  ["engine-playtest", ["engine-arena", "engine-render", "engine-provider", "engine-spatial"]],
+  ["engine-playtest", ["engine-ai", "engine-arena", "engine-render", "engine-provider", "engine-spatial"]],
   ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle
   ["engine-assets", ["engine-scene", "engine-anim", "engine-clock"]],
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
@@ -50,11 +50,13 @@ export const allowedEdges = new Map([
   // physics and the skeleton/pose types from anim. No sim crate (arena, combat, proof) may list it;
   // engine-game lists it as an optional dependency of its `app` leg (RZ4 break look).
   ["engine-physfx", ["engine-physics", "engine-anim"]],
-  ["engine-render", ["engine-observe", "engine-assets"]], // v1-only tangents (ARCHITECTURE C3); default stays std-only
+  ["engine-render", ["engine-observe", "engine-assets", "engine-clock"]], // v1-only tangents (ARCHITECTURE C3); default stays std-only; the clock seam for frame timers (a browser has no std clock)
   ["engine-ui", ["engine-input"]],
   // WEB4 browser shell: the golden tape and corpus run in the page through engine-proof; the shell hands the
-  // page's clock to engine-clock. No render code yet; nothing depends on this crate.
-  ["engine-web", ["engine-proof", "engine-clock"]],
+  // page's clock to engine-clock. WEB5: on wasm32 it also drives the render crate's presenter for the arena frame
+  // (a target-gated dependency, so the native build of this crate stays a library of pure modules). WEB7 maps browser input
+  // and a WebAudio gate onto engine-input and the std-only engine-audio. Nothing depends on it.
+  ["engine-web", ["engine-proof", "engine-clock", "engine-render", "engine-input", "engine-audio"]],
   ["engine-viewer", ["engine-game", "engine-arena", "engine-app", "engine-material"]],
   ["engine-geo", ["engine-assets"]],
   ["engine-perf", ["engine-core", "engine-ecs", "engine-physics", "engine-render", "engine-arena", "engine-ai", "engine-destruction", "engine-net"]],

@@ -5,7 +5,7 @@ use super::*;
 
 /// Every knob of a cap table by name. The struct is taken apart with no `..`: a new knob does
 /// not compile until it is listed here, so it cannot escape the ordering test.
-fn knobs(caps: Caps) -> [(&'static str, usize); 6] {
+fn knobs(caps: Caps) -> [(&'static str, usize); 8] {
     let Caps {
         bodies,
         ragdolls,
@@ -13,6 +13,8 @@ fn knobs(caps: Caps) -> [(&'static str, usize); 6] {
         statics,
         solver_iterations,
         ccd_substeps,
+        blast_bodies,
+        impact_bodies,
     } = caps;
     [
         ("bodies", bodies),
@@ -21,6 +23,8 @@ fn knobs(caps: Caps) -> [(&'static str, usize); 6] {
         ("statics", statics),
         ("solver_iterations", solver_iterations),
         ("ccd_substeps", ccd_substeps),
+        ("blast_bodies", blast_bodies),
+        ("impact_bodies", impact_bodies),
     ]
 }
 

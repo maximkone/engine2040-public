@@ -40,6 +40,10 @@ pub mod bench;
 /// the intact piece hidden on the break tick. Presentation only, never hashed. App leg only.
 #[cfg(feature = "app")]
 pub mod break_look;
+/// Break window: the center crate in the playable window, whole until a sword hit breaks it, then
+/// debris that falls and settles (RZ4w). Presentation only, never hashed. App leg only.
+#[cfg(feature = "app")]
+pub mod break_window;
 /// Arena camera director: lock-on, tick-decay trauma shake,
 /// pure framing fn, presentation only. Std-only.
 pub mod camera;
@@ -125,6 +129,10 @@ pub mod view_truth;
 /// Holds the last 12 pairs per slot; idle slots stay empty.
 /// Age ticks fade alpha from 1 at age 0 to 0 at age 11.
 pub mod weapon_trail;
+/// What the `arena` window tells the audio feed each tick: the listener at
+/// the camera, placed fight and footstep plays, tension, the crowd bed.
+/// Presentation only.
+pub mod window_audio_space;
 #[cfg(feature = "app")]
 pub mod windowed;
 
@@ -135,10 +143,11 @@ use engine_anim::contract::{LocalPose, RootTable};
 use engine_arena::recorder::Row;
 use engine_arena::world::MatchWorld;
 use engine_arena::{
-    run_loco_poses, ArenaConfig, ArenaRules, Checkpoint, LiveMatch, LivePresentation,
+    run_loco_poses, ArenaConfig, ArenaRules, Checkpoint, LiveMatch, LivePresentation, MatchSpec,
 };
 use engine_audio::{BankSound, Crowd, FightCue, Reaction};
 use engine_combat::{fight::MAX_HP_PERMILLE, FightEvent};
+use engine_destruction::bonded::BreakEvent;
 use engine_input::{FighterId, FighterInput, FighterTape, MAX_PARTICIPANTS};
 use engine_save::{migrate, open, save_generation, slot_name, SaveErr};
 use engine_ui::{Hud, KillCause, KillEntry, CELLS_PER_METER};
@@ -479,6 +488,11 @@ pub struct TickOutcome {
     /// Presentation only: the swing clip starts from these (EG19c), so no
     /// hp, audio, crowd or hash contact. Fighter slots in press order.
     pub started: Vec<u8>,
+    /// Destruction break events of the tick as the authority emitted them (bond snaps, then
+    /// freed chunks); empty on quiet ticks and on a rejected tick. The window's break picture
+    /// (`break_window`) reads them after the tick ran. Presentation only: the events are
+    /// already hashed by the arena, nothing here is read back.
+    pub breaks: Vec<BreakEvent>,
     /// Crowd reaction per cue, in the same order as [`TickOutcome::cues`].
     pub reactions: Vec<Reaction>,
     /// Crowd-bed gain multiplier `0.0..=1.0` after the tick.
@@ -509,6 +523,7 @@ impl Default for TickOutcome {
             audio: Vec::new(),
             cues: Vec::new(),
             started: Vec::new(),
+            breaks: Vec::new(),
             reactions: Vec::new(),
             bed_gain: 1.0,
             layers: Layers {
@@ -577,9 +592,8 @@ pub struct App {
     live: LiveMatch,
     /// Fight rules every live sim of this session runs (EG3): the ones the
     /// arena config selects ([`ArenaConfig::rules`]). v1 until
-    /// [`App::into_duel`]; the LAN host's authority (`engine-net` server)
-    /// builds from `GameConfig::arena_config`, which stays v1, so LAN play
-    /// keeps replaying v1 on both sides.
+    /// [`App::into_duel`]. [`App::spec`] names this match for the net server
+    /// and client, so LAN play can build the same one.
     rules: ArenaRules,
     /// Sim steps spent by retired live matches (rebuilds), so
     /// [`App::sim_steps`] counts every step the session ever paid.
@@ -620,6 +634,9 @@ pub struct App {
     /// Scratch starter-slot buffer, same reuse discipline as
     /// [`App::tick_cues`].
     tick_started: Vec<u8>,
+    /// The tick's authority break events, filled by [`App::simulate_tick`] and moved into
+    /// [`TickOutcome::breaks`] by [`App::observe_into`]; empty between ticks.
+    tick_breaks: Vec<BreakEvent>,
     /// Last mix answer, served on every outcome (rejected ticks repeat it).
     director_layers: Layers,
     kills: Vec<KillEntry>,
@@ -685,11 +702,20 @@ impl App {
         if self.cursor != 0 || self.retired_steps != 0 || self.live.steps() != 0 {
             return Err(GameError::BadConfig("duel_tables"));
         }
-        self.arena.table_version = engine_combat::tables::TABLES_VERSION_V2;
-        self.rules = self.arena.rules();
-        self.live = LiveMatch::with_rules_world(&self.arena, self.rules, self.world.clone())
-            .ok_or(GameError::BadConfig("arena"))?;
+        let spec = MatchSpec::duel(self.arena, self.world.clone());
+        self.live = spec.live().ok_or(GameError::BadConfig("arena"))?;
+        self.arena = spec.config;
+        self.rules = spec.rules;
         Ok(self)
+    }
+
+    /// The match this session plays: config, rules and world as one value.
+    /// The net server and client build from the same spec
+    /// (`Server::from_spec`, `Client::from_spec`), so a peer given this
+    /// value plays the match the window shows.
+    #[must_use]
+    pub fn spec(&self) -> MatchSpec {
+        MatchSpec::new(self.arena, self.rules, self.world.clone())
     }
 
     /// Start a session with an explicit local human slot (LAN guests play
@@ -757,6 +783,7 @@ impl App {
             views: Vec::with_capacity(usize::from(config.fighters)),
             tick_cues: Vec::new(),
             tick_started: Vec::new(),
+            tick_breaks: Vec::new(),
             director_layers: Layers {
                 intensity: 0.0,
                 music: 0.0,
@@ -1112,6 +1139,7 @@ impl App {
         out.cues.clear();
         out.reactions.clear();
         out.started.clear();
+        out.breaks.clear();
         out.bed_gain = self.crowd.bed_gain();
         out.layers = self.director_layers;
     }
@@ -1141,6 +1169,9 @@ impl App {
         let next_hitstop = hitstop::next(current, &stepped.events.events);
         fill_laterals_for_tick(stepped.rows, tick, fighters, &mut self.laterals);
         fill_views_for_tick(stepped.rows, tick, fighters, &mut self.views);
+        // The authority's break events for this tick, kept for `observe_into` to hand out.
+        self.tick_breaks.clear();
+        self.tick_breaks.extend_from_slice(&stepped.breaks.events);
         // First production read of the press-tick tell (EG19b): one starter
         // slot per fresh v2 attack, in fighter-ID order; empty under v1 rows
         // and on quiet ticks. Both borrows are shared, so the live match
@@ -1295,6 +1326,10 @@ impl App {
         out.reactions.clear();
         out.cues.clear();
         out.started.clear();
+        // The tick's break events move from the scratch `simulate_tick` filled; a direct
+        // call that never simulated finds it empty, so nothing stale is ever replayed.
+        out.breaks.clear();
+        out.breaks.extend(self.tick_breaks.drain(..));
         out.audio.reserve(cues.len());
         out.reactions.reserve(cues.len());
         out.cues.reserve(cues.len());
@@ -1949,6 +1984,52 @@ mod tests {
             ticked.into_duel(),
             Err(GameError::BadConfig("duel_tables"))
         ));
+    }
+
+    /// DSN1: the window session and the net server and client, all built from
+    /// one spec, play the same match: equal state hash on every tick of a
+    /// scripted 300-tick duel on the kit walls.
+    #[test]
+    fn spec_window_server_and_client_play_one_match_for_300_ticks() {
+        use engine_net::session::{Client, Server};
+        let config = GameConfig {
+            seed: 0x5EED,
+            ticks: 300,
+            fighters: 4,
+            half_extent_m: 18.0,
+        };
+        let mut window = App::with_world(config, crate::arena_kit::kit_match_world_or_empty())
+            .unwrap()
+            .into_duel()
+            .unwrap();
+        let spec = MatchSpec::kit_duel(config.arena_config()).expect("kit duel");
+        assert_eq!(
+            window.spec().world_digest(),
+            spec.world_digest(),
+            "the game and the arena load one kit world"
+        );
+        assert_eq!(window.spec().identity(), spec.identity());
+        let mut server = Server::from_spec(window.spec()).expect("server");
+        let mut client =
+            Client::from_spec(window.spec(), FighterId::new(HUMAN_SLOT).unwrap()).expect("client");
+        let mut checkpoints = Vec::new();
+        for tick in 0..config.ticks {
+            let input = script(tick);
+            let seen = window.tick(input).checkpoint.expect("window tick");
+            let (authored, _) = server.tick(&[input]).expect("server tick");
+            let predicted = client.predict(input).expect("client predict");
+            assert_eq!(seen, authored, "window vs server at tick {tick}");
+            assert_eq!(seen, predicted, "window vs client at tick {tick}");
+            checkpoints.push(seen.hash);
+        }
+        let default = App::new(config).unwrap().spec();
+        assert_eq!(default.rules, ArenaRules::V1, "the default stays v1");
+        assert_eq!(default.world_digest(), 0, "the default stays open sand");
+        let mut v1 = LiveMatch::new(&config.arena_config()).unwrap();
+        let v1_hashes: Vec<u64> = (0..config.ticks)
+            .map(|tick| v1.step(&[script(tick)]).unwrap().checkpoint.hash)
+            .collect();
+        assert_ne!(checkpoints, v1_hashes, "the spec is not the old default");
     }
 
     #[test]

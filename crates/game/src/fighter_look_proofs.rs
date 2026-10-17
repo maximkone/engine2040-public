@@ -164,6 +164,9 @@ fn sand_rest_real_fight_dead_lie_on_the_sand_and_the_living_are_not_lifted() {
         .and_then(crate::App::into_duel)
         .expect("duel builds");
     let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+    // This proof is the flat-pose rest: a ragdoll rests by its physics instead (RZ2w, proved in
+    // `ragdoll_look`), so the layer is off here.
+    look.set_ragdoll(false);
     let (mut dead_frames, mut worst_cm) = (0u32, 0.0f32);
     for tick in 0..900u32 {
         let out = app.tick_empty();

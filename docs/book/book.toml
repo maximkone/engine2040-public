@@ -1,8 +1,18 @@
 [book]
-title = "engine2040 Manual (API2)"
+title = "engine2040 handbook"
 authors = ["engine2040"]
 language = "en"
 src = "."
 
 [build]
 create-missing = false
+# Outside the book folder: src is ".", so an output folder inside it would be copied into the next build.
+build-dir = "../../target/book"
+
+[output.html]
+git-repository-url = "https://github.com/maximkone/engine2040-public"
+# The handbook is served at /docs/ under the game page (GitHub Pages project site).
+site-url = "/engine2040-public/docs/"
+
+[output.html.search]
+enable = true

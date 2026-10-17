@@ -154,7 +154,7 @@
   },
   "crates/render/src/ibl.rs": {
    "block": 2,
-   "clock": 2
+   "clock": 1
   },
   "crates/render/src/material_layer.rs": {
    "block": 1,
@@ -177,18 +177,11 @@
    "block": 6,
    "clock": 13
   },
-  "crates/render/src/present/gpu_present/live.rs": {
-   "clock": 5
-  },
   "crates/render/src/present/gpu_present/presenter.rs": {
    "block": 4
   },
   "crates/render/src/present/gpu_present/submit.rs": {
-   "block": 3,
-   "clock": 1
-  },
-  "crates/render/src/present/gpu_present/sun_shadow.rs": {
-   "clock": 1
+   "block": 2
   },
   "crates/render/src/restir_di.rs": {
    "clock": 2
@@ -201,9 +194,7 @@
    "clock": 2
   },
   "crates/render/src/sky.rs": {
-   "block": 1,
-   "clock": 3,
-   "thread": 1
+   "block": 1
   },
   "crates/render/src/upscale_easu.rs": {
    "clock": 1

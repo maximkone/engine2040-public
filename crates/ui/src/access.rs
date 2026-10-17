@@ -156,11 +156,13 @@ pub const MAX_SUBTITLE_LINES: usize = 4;
 pub const DEFAULT_SUBTITLE_LINES: usize = 3;
 
 /// Bounded caption strip, oldest-first. A full strip drops its oldest line,
-/// the same rule as the kill feed.
+/// the same rule as the kill feed, and counts every line it drops so a hit
+/// storm shows as a number, never as unbounded work or a growing queue.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubtitleFeed {
     lines: Vec<Subtitle>,
     cap: usize,
+    dropped: u64,
 }
 
 impl SubtitleFeed {
@@ -175,7 +177,15 @@ impl SubtitleFeed {
         Ok(Self {
             lines: Vec::new(),
             cap,
+            dropped: 0,
         })
+    }
+
+    /// Cues that never reached the screen or were pushed off it, since the
+    /// strip was made. Shown as a "+N" count by the renderer. Pure.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// Capacity in lines.
@@ -190,12 +200,20 @@ impl SubtitleFeed {
         &self.lines
     }
 
-    /// Add the captions for one tick's cues, in cue order. Pure.
+    /// Add the captions for one tick's cues, in cue order. Only the last
+    /// `cap` cues of a tick can survive the strip, so the rest are counted
+    /// without building a line: the cost is `O(cap)` however big the storm.
+    /// Pure.
     pub fn push_cues(&mut self, tick: u64, notes: &[FightNote]) {
-        for &note in notes {
+        let skipped = notes.len().saturating_sub(self.cap);
+        self.dropped = self
+            .dropped
+            .saturating_add(u64::try_from(skipped).unwrap_or(u64::MAX));
+        for &note in &notes[skipped..] {
             if self.lines.len() >= self.cap {
                 // `cap >= 1` and `len >= cap`, so the vec is non-empty.
                 self.lines.remove(0);
+                self.dropped = self.dropped.saturating_add(1);
             }
             self.lines.push(Subtitle::from_note(tick, note));
         }
@@ -360,6 +378,61 @@ mod tests {
         assert_eq!(texts, vec!["Dodged", "Knockdown"]);
         assert_eq!(strip.lines()[0].tick, 5);
         assert_eq!(strip.cap(), 2);
+    }
+
+    /// Every ordered pair of 16 fighters lands a hit in one tick: 240 cues.
+    fn sixteen_fighter_storm() -> Vec<FightNote> {
+        let mut storm = Vec::new();
+        for attacker in 0..16 {
+            for victim in (0..16).filter(|&victim| victim != attacker) {
+                storm.push(FightNote::Hit {
+                    attacker: fighter(attacker),
+                    victim: fighter(victim),
+                });
+            }
+        }
+        storm
+    }
+
+    #[test]
+    fn a_sixteen_fighter_hit_storm_stays_bounded_and_counts_every_drop() {
+        let storm = sixteen_fighter_storm();
+        assert_eq!(storm.len(), 240);
+        let mut strip = SubtitleFeed::new(DEFAULT_SUBTITLE_LINES).expect("default cap is valid");
+        let mut pushed = 0u64;
+        for tick in 0..50u64 {
+            strip.push_cues(tick, &storm);
+            pushed += storm.len() as u64;
+            assert_eq!(strip.lines().len(), DEFAULT_SUBTITLE_LINES);
+            // Nothing is lost silently: shown plus dropped is everything pushed.
+            assert_eq!(strip.lines().len() as u64 + strip.dropped(), pushed);
+        }
+        // The survivors are the storm's last cues, stamped with the last tick.
+        let tail = &storm[storm.len() - DEFAULT_SUBTITLE_LINES..];
+        for (line, note) in strip.lines().iter().zip(tail) {
+            assert_eq!(*line, Subtitle::from_note(49, *note));
+        }
+    }
+
+    #[test]
+    fn the_storm_shortcut_matches_pushing_one_cue_at_a_time() {
+        let storm = sixteen_fighter_storm();
+        let mut batched = SubtitleFeed::new(2).expect("cap 2 is valid");
+        let mut single = batched.clone();
+        batched.push_cues(7, &storm[..40]);
+        for note in &storm[..40] {
+            single.push_cues(7, std::slice::from_ref(note));
+        }
+        assert_eq!(batched, single);
+        assert_eq!(batched.dropped(), 38);
+    }
+
+    #[test]
+    fn a_quiet_strip_drops_nothing() {
+        let mut strip = SubtitleFeed::new(MAX_SUBTITLE_LINES).expect("max cap is valid");
+        strip.push_cues(1, &sixteen_fighter_storm()[..MAX_SUBTITLE_LINES]);
+        assert_eq!(strip.dropped(), 0);
+        assert_eq!(strip.lines().len(), MAX_SUBTITLE_LINES);
     }
 
     #[test]

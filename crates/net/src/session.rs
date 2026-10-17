@@ -64,7 +64,7 @@
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
-use engine_arena::{ArenaConfig, Checkpoint, LiveMatch};
+use engine_arena::{ArenaConfig, Checkpoint, LiveMatch, MatchSpec};
 use engine_input::{FighterId, FighterInput};
 /// Neutral names for the input contract types: engine code outside the GE2
 /// genre ledger imports them from here instead of naming the genre types.
@@ -324,7 +324,7 @@ pub struct SnapshotDelta {
 /// tape, the checkpoint history and one incremental live stepper. Data owner
 /// for authoritative inputs.
 pub struct Server {
-    config: ArenaConfig,
+    spec: MatchSpec,
     next_tick: u32,
     tape: Vec<FighterInput>,
     checkpoints: Vec<Checkpoint>,
@@ -335,14 +335,21 @@ pub struct Server {
 }
 
 impl Server {
-    /// Validate `config` and open a match at tick zero.
+    /// Validate `config` and open the default match at tick zero: rules v1
+    /// on open sand, [`MatchSpec::v1`].
     pub fn new(config: ArenaConfig) -> Result<Self, NetError> {
-        if config.validate().is_err() {
+        Self::from_spec(MatchSpec::v1(config))
+    }
+
+    /// Validate `spec` and open its match at tick zero: the same match the
+    /// window plays when it builds from the same spec.
+    pub fn from_spec(spec: MatchSpec) -> Result<Self, NetError> {
+        if spec.config.validate().is_err() {
             return Err(NetError::BadConfig);
         }
-        let stepper = LiveMatch::new(&config).ok_or(NetError::BadConfig)?;
+        let stepper = spec.live().ok_or(NetError::BadConfig)?;
         Ok(Self {
-            config,
+            spec,
             next_tick: 0,
             tape: Vec::new(),
             checkpoints: Vec::new(),
@@ -369,7 +376,12 @@ impl Server {
 
     /// Match config.
     pub fn config(&self) -> ArenaConfig {
-        self.config
+        self.spec.config
+    }
+
+    /// The match this server runs: config, rules and world.
+    pub fn spec(&self) -> &MatchSpec {
+        &self.spec
     }
 
     /// Author one fixed tick with this tick's human inputs, returning the
@@ -385,7 +397,7 @@ impl Server {
         &mut self,
         inputs: &[FighterInput],
     ) -> Result<(Checkpoint, SnapshotDelta), NetError> {
-        let fighters = self.config.fighters;
+        let fighters = self.spec.config.fighters;
         let mut sorted: Vec<FighterInput> = inputs.to_vec();
         sorted.sort_by_key(|input| (input.tick, input.fighter.0));
         let mut prev: Option<(u32, u8)> = None;
@@ -425,7 +437,7 @@ impl Server {
 /// Predicting arena client: owns local predictions plus the server truth
 /// learned so far. Never imports game or editor types.
 pub struct Client {
-    config: ArenaConfig,
+    spec: MatchSpec,
     local: FighterId,
     predicted: Vec<FighterInput>,
     server_tape: Vec<FighterInput>,
@@ -453,15 +465,23 @@ pub struct Client {
 }
 
 impl Client {
-    /// Validate `config` and bind the local fighter slot.
+    /// Validate `config` and bind the local fighter slot, on the default
+    /// match: rules v1 on open sand, [`MatchSpec::v1`].
     pub fn new(config: ArenaConfig, local: FighterId) -> Result<Self, NetError> {
-        if config.validate().is_err() || local.0 >= config.fighters {
+        Self::from_spec(MatchSpec::v1(config), local)
+    }
+
+    /// Validate `spec` and bind the local fighter slot. Prediction and
+    /// authority sims both build from `spec`, so a client on the server's
+    /// spec predicts the match the server authors.
+    pub fn from_spec(spec: MatchSpec, local: FighterId) -> Result<Self, NetError> {
+        if spec.config.validate().is_err() || local.0 >= spec.config.fighters {
             return Err(NetError::BadConfig);
         }
-        let stepper = LiveMatch::new(&config).ok_or(NetError::BadConfig)?;
-        let truth = LiveMatch::new(&config).ok_or(NetError::BadConfig)?;
+        let stepper = spec.live().ok_or(NetError::BadConfig)?;
+        let truth = spec.live().ok_or(NetError::BadConfig)?;
         Ok(Self {
-            config,
+            spec,
             local,
             predicted: Vec::new(),
             server_tape: Vec::new(),
@@ -477,6 +497,11 @@ impl Client {
             agreed: 0,
             steps: 0,
         })
+    }
+
+    /// The match this client predicts: config, rules and world.
+    pub fn spec(&self) -> &MatchSpec {
+        &self.spec
     }
 
     /// Local fighter slot.
@@ -515,11 +540,6 @@ impl Client {
         let p = crate::cells::decode_packet(bytes).map_err(|_| NetError::BadInput)?;
         let receipt = self.cells.apply(&p).map_err(|_| NetError::BadInput)?;
         Ok(receipt.hash)
-    }
-
-    /// Bitmask of held cells (16 bits for the 4x4 fixture).
-    pub fn cell_have(&self) -> u32 {
-        self.cells.have
     }
 
     /// Held cell count for the streamed fixture.
@@ -600,7 +620,7 @@ impl Client {
         if delta.tick != checkpoint.tick || delta.hash != checkpoint.hash {
             return Err(NetError::BadState);
         }
-        validate_tape(&delta.tape, self.config.fighters, Some(delta.tick))?;
+        validate_tape(&delta.tape, self.spec.config.fighters, Some(delta.tick))?;
         if self.server_tick.is_some_and(|done| checkpoint.tick <= done) {
             return Ok(Vec::new());
         }
@@ -617,7 +637,7 @@ impl Client {
             .partition_point(|input| Some(input.tick) <= self.server_tick);
         let new_known = merged.partition_point(|input| Some(input.tick) <= self.server_tick);
         if new_known > old_known {
-            self.truth = LiveMatch::new(&self.config).ok_or(NetError::SimRejected)?;
+            self.truth = self.spec.live().ok_or(NetError::SimRejected)?;
             self.truth_cps.clear();
             self.agreed = 0;
         }
@@ -679,10 +699,7 @@ impl Client {
         tape.dedup_by_key(|input| (input.tick, input.fighter.0));
         let mut checkpoints = self.truth_cps[..prefix_len].to_vec();
         if checkpoints.len() < end {
-            let Some(snapshot) = self.truth.snapshot() else {
-                return self.checkpoints.clone();
-            };
-            let Some(mut suffix) = LiveMatch::from_snapshot(snapshot) else {
+            let Some(mut suffix) = self.match_at(&tape, done) else {
                 return self.checkpoints.clone();
             };
             while suffix.tick() < end as u32 {
@@ -698,6 +715,23 @@ impl Client {
         self.checkpoints.clone_from(&checkpoints);
         self.agreed = checkpoints.len().min(prefix_len);
         checkpoints
+    }
+
+    /// A match positioned at `tip` on the canonical `tape`. A snapshot of the
+    /// held truth sim when it can give one (rules v1 on open sand); else the
+    /// spec rebuilt and replayed to `tip`, because a rules v2 or walled match
+    /// has no snapshot yet (the replayed steps count in [`Client::steps`]).
+    fn match_at(&mut self, tape: &[FighterInput], tip: u32) -> Option<LiveMatch> {
+        if let Some(snapshot) = self.truth.snapshot() {
+            return LiveMatch::from_snapshot(snapshot);
+        }
+        let mut replay = self.spec.live()?;
+        while replay.tick() < tip {
+            let tick = replay.tick();
+            replay.step(tick_slice(tape, tick))?;
+            self.steps += 1;
+        }
+        Some(replay)
     }
 
     /// Authoritative resync: apply one supervisor-blessed snapshot and
@@ -1466,6 +1500,9 @@ pub fn bind_loopback() -> io::Result<UdpSocket> {
 pub fn send_packet(sock: &UdpSocket, peer: SocketAddr, bytes: &[u8]) -> io::Result<usize> {
     sock.send_to(bytes, peer)
 }
+
+#[cfg(test)]
+mod spec_tests;
 
 #[cfg(test)]
 mod tests {

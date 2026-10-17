@@ -1,0 +1,4 @@
+# The seed of the headless run: one unsigned whole number (0 to 18446744073709551615).
+# Change it and `engine2040 run --headless` plays a different, still repeatable, run.
+# 2040 with 600 ticks is the engine's golden run.
+2040

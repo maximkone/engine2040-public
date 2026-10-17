@@ -21,5 +21,6 @@ mod quant_vectors;
 mod quantize_grid_vectors;
 mod quantize_parity;
 mod registry_singleton_vectors;
+mod sidecar_conformance;
 mod sparse_order_vectors;
 mod spatial_sort_vectors;

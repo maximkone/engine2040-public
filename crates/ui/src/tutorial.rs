@@ -8,6 +8,10 @@
 //! integer state only, same inputs give the same [`Tutorial::state_digest`]
 //! on every machine. Errors: [`TutorialError`]; refusals change nothing.
 //! Budget: constant time per input, no heap use on the step path.
+//!
+//! Two lessons share one guide: the first fight ([`SCRIPT`]) and the defense
+//! lesson ([`DEFENSE_SCRIPT`]: block, parry, riposte). Both run the same
+//! action stream, so a lesson replays from its recorded inputs like a fight.
 
 use super::menus::{FightRequest, Menu, MenuCommand, Screen};
 
@@ -24,6 +28,10 @@ pub enum TutorialAction {
     Block,
     /// Pause beat: open the pause menu, then resume.
     Pause,
+    /// Parry beat: answer the incoming hit inside the parry window.
+    Parry,
+    /// Riposte beat: strike back inside the window the parry opened.
+    Riposte,
 }
 
 impl core::fmt::Display for TutorialAction {
@@ -33,6 +41,8 @@ impl core::fmt::Display for TutorialAction {
             Self::Attack => "attack",
             Self::Block => "block",
             Self::Pause => "pause",
+            Self::Parry => "parry",
+            Self::Riposte => "riposte",
         };
         f.write_str(label)
     }
@@ -74,6 +84,44 @@ pub static SCRIPT: [TutorialStep; 4] = [
         want: TutorialAction::Pause,
     },
 ];
+
+/// Defense lesson rows in fixed order: guard, parry, riposte. Block alone
+/// soaks a hit; the parry answers it on time; the riposte spends the window
+/// the parry opened, so the rows teach the beats in the order a fight uses them.
+pub static DEFENSE_SCRIPT: [TutorialStep; 3] = [
+    TutorialStep {
+        id: "guard",
+        prompt: "Block: hold guard through the incoming hit",
+        want: TutorialAction::Block,
+    },
+    TutorialStep {
+        id: "parry",
+        prompt: "Parry: tap guard just before the hit lands",
+        want: TutorialAction::Parry,
+    },
+    TutorialStep {
+        id: "riposte",
+        prompt: "Riposte: strike back while the foe is open",
+        want: TutorialAction::Riposte,
+    },
+];
+
+/// Which lesson a guide teaches.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Lesson {
+    FirstFight,
+    Defense,
+}
+
+impl Lesson {
+    /// The rows of this lesson.
+    const fn script(self) -> &'static [TutorialStep] {
+        match self {
+            Self::FirstFight => &SCRIPT,
+            Self::Defense => &DEFENSE_SCRIPT,
+        }
+    }
+}
 
 /// Effect of one guide input. Pure output, no side effects.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -136,6 +184,7 @@ enum Phase {
 /// starts with no console on the path. Pure transitions, constant time.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Tutorial {
+    lesson: Lesson,
     done: u8,
     phase: Phase,
     menu: Menu,
@@ -145,11 +194,28 @@ impl Tutorial {
     /// Fresh profile: first row armed, clean main menu, nothing done. Pure.
     #[must_use]
     pub const fn fresh() -> Self {
+        Self::start(Lesson::FirstFight)
+    }
+
+    /// Fresh profile on the defense lesson: block, parry, riposte. Pure.
+    #[must_use]
+    pub const fn defense() -> Self {
+        Self::start(Lesson::Defense)
+    }
+
+    const fn start(lesson: Lesson) -> Self {
         Self {
+            lesson,
             done: 0,
             phase: Phase::Guiding,
             menu: Menu::main(),
         }
+    }
+
+    /// Rows of the lesson this guide runs. Pure.
+    #[must_use]
+    pub const fn script(&self) -> &'static [TutorialStep] {
+        self.lesson.script()
     }
 
     /// Current effect without feeding input: progress while guiding, the
@@ -157,7 +223,7 @@ impl Tutorial {
     fn status(&self) -> Result<TutorialEffect, TutorialError> {
         match self.phase {
             Phase::Guiding => Ok(TutorialEffect::Advanced {
-                remaining: SCRIPT.len().saturating_sub(usize::from(self.done)),
+                remaining: self.script().len().saturating_sub(usize::from(self.done)),
             }),
             Phase::Finished => Ok(TutorialEffect::Completed(FightRequest::default_fight())),
             Phase::Skipped => Err(TutorialError::AlreadySkipped),
@@ -179,7 +245,7 @@ impl Tutorial {
             Phase::Skipped => return Err(TutorialError::AlreadySkipped),
             Phase::Guiding => {}
         }
-        let want = match SCRIPT.get(usize::from(self.done)) {
+        let want = match self.script().get(usize::from(self.done)) {
             Some(row) => row.want,
             None => return Err(TutorialError::AlreadyFinished),
         };
@@ -190,7 +256,7 @@ impl Tutorial {
             });
         }
         self.done = self.done.saturating_add(1);
-        if usize::from(self.done) >= SCRIPT.len() {
+        if usize::from(self.done) >= self.script().len() {
             self.phase = Phase::Finished;
             self.menu = Menu::main();
         }
@@ -254,7 +320,7 @@ impl Tutorial {
     #[must_use]
     pub fn next(&self) -> Option<&'static TutorialStep> {
         match self.phase {
-            Phase::Guiding => SCRIPT.get(usize::from(self.done)),
+            Phase::Guiding => self.script().get(usize::from(self.done)),
             Phase::Finished | Phase::Skipped => None,
         }
     }
@@ -288,7 +354,7 @@ impl Tutorial {
     #[must_use]
     pub fn remaining(&self) -> usize {
         match self.phase {
-            Phase::Guiding => SCRIPT.len().saturating_sub(usize::from(self.done)),
+            Phase::Guiding => self.script().len().saturating_sub(usize::from(self.done)),
             Phase::Finished | Phase::Skipped => 0,
         }
     }
@@ -310,7 +376,12 @@ impl Tutorial {
             Screen::Settings { .. } => 2,
         };
         let highlight_byte: u8 = u8::from(self.menu.selected() != 0);
-        let mut digest: u64 = u64::from(self.done);
+        let lesson_byte: u8 = match self.lesson {
+            Lesson::FirstFight => 0,
+            Lesson::Defense => 1,
+        };
+        let mut digest: u64 = u64::from(lesson_byte);
+        digest = digest.wrapping_mul(131).wrapping_add(u64::from(self.done));
         digest = digest.wrapping_mul(131).wrapping_add(u64::from(phase_byte));
         digest = digest
             .wrapping_mul(131)
@@ -552,6 +623,97 @@ mod tests {
                 TutorialAction::Pause,
             ]
         );
+    }
+
+    fn defense_inputs() -> Vec<TutorialAction> {
+        DEFENSE_SCRIPT.iter().map(|row| row.want).collect()
+    }
+
+    #[test]
+    fn fresh_profile_finishes_block_parry_riposte_with_no_console() {
+        let mut guide = Tutorial::defense();
+        assert_eq!(guide.script().len(), 3);
+        assert_eq!(guide.remaining(), 3);
+        assert_eq!(
+            guide.next().map(|row| row.want),
+            Some(TutorialAction::Block)
+        );
+        let effect = guide
+            .apply_all(&defense_inputs())
+            .expect("the defense rows drive the lesson home");
+        assert_eq!(
+            effect,
+            TutorialEffect::Completed(FightRequest::default_fight())
+        );
+        assert!(guide.is_finished());
+        let cmd = guide.launch_command().expect("finished lesson launches");
+        assert!(matches!(
+            dispatch(cmd, &hooks()),
+            Ok(MenuEffect::FightStarted(_))
+        ));
+    }
+
+    #[test]
+    fn defense_lesson_replays_exactly_twice_and_differs_from_lesson_one() {
+        let inputs = defense_inputs();
+        let mut first = Tutorial::defense();
+        let mut second = Tutorial::defense();
+        first.apply_all(&inputs).expect("first replay");
+        second.apply_all(&inputs).expect("second replay");
+        assert_eq!(first, second);
+        assert_eq!(first.state_digest(), second.state_digest());
+        // Same cleared count, different lesson: the digest tells them apart.
+        let mut lesson_one = Tutorial::fresh();
+        lesson_one
+            .apply_all(&script_inputs()[..3])
+            .expect("three rows of lesson one");
+        assert_eq!(lesson_one.done_count(), first.done_count());
+        assert_ne!(lesson_one.state_digest(), first.state_digest());
+    }
+
+    #[test]
+    fn riposte_before_parry_is_refused_naming_both() {
+        let mut guide = Tutorial::defense();
+        guide.step(TutorialAction::Block).expect("guard clears");
+        let before = guide.state_digest();
+        assert_eq!(
+            guide.step(TutorialAction::Riposte),
+            Err(TutorialError::UnexpectedInput {
+                expected: TutorialAction::Parry,
+                got: TutorialAction::Riposte,
+            })
+        );
+        assert_eq!(guide.state_digest(), before);
+        // Lesson one does not know the defense beats either.
+        let mut lesson_one = Tutorial::fresh();
+        assert_eq!(
+            lesson_one.step(TutorialAction::Parry),
+            Err(TutorialError::UnexpectedInput {
+                expected: TutorialAction::Move,
+                got: TutorialAction::Parry,
+            })
+        );
+    }
+
+    #[test]
+    fn skipping_the_defense_lesson_leaves_a_clean_menu() {
+        let mut guide = Tutorial::defense();
+        guide.step(TutorialAction::Block).expect("guard clears");
+        assert_eq!(guide.skip(), Ok(Menu::main()));
+        assert_eq!(guide.menu(), Menu::main());
+        assert_eq!(guide.remaining(), 0);
+        assert_eq!(guide.launch_command(), Err(TutorialError::AlreadySkipped));
+    }
+
+    #[test]
+    fn defense_rows_are_short_unique_ascii() {
+        for row in DEFENSE_SCRIPT.iter() {
+            assert!(row.id.is_ascii() && row.prompt.is_ascii());
+            assert!(!row.prompt.is_empty() && row.prompt.chars().count() <= 80);
+            assert!(SCRIPT.iter().all(|other| other.id != row.id), "{}", row.id);
+        }
+        assert_eq!(TutorialAction::Parry.to_string(), "parry");
+        assert_eq!(TutorialAction::Riposte.to_string(), "riposte");
     }
 
     #[test]

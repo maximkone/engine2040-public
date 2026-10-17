@@ -3171,8 +3171,14 @@ dependencies = [
  "engine-core",
  "engine-input",
  "engine-observe",
+ "futures-util",
+ "js-sys",
  "quinn",
  "tokio",
+ "tokio-tungstenite",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wtransport",
 ]
 
@@ -3228,6 +3234,7 @@ dependencies = [
 name = "engine-playtest"
 version = "0.1.0"
 dependencies = [
+ "engine-ai",
  "engine-arena",
  "engine-core",
  "engine-provider",
@@ -3273,6 +3280,7 @@ name = "engine-render"
 version = "0.1.0"
 dependencies = [
  "engine-assets",
+ "engine-clock",
  "engine-core",
  "engine-observe",
  "glam 0.33.9",
@@ -3330,8 +3338,11 @@ dependencies = [
 name = "engine-web"
 version = "0.1.0"
 dependencies = [
+ "engine-audio",
  "engine-clock",
+ "engine-input",
  "engine-proof",
+ "engine-render",
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",

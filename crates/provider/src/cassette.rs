@@ -329,7 +329,7 @@ impl RequestImage {
     }
 }
 
-fn kind_name(kind: TaskKind) -> &'static str {
+pub(crate) fn kind_name(kind: TaskKind) -> &'static str {
     match kind {
         TaskKind::Inspect => "inspect",
         TaskKind::Propose => "propose",

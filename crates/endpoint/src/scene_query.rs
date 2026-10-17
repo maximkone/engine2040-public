@@ -15,13 +15,16 @@ use engine_editor::commands::Document;
 use engine_scene::ids::ObjectId;
 use engine_spatial::diff::{diff_graph, SemanticDiff};
 use engine_spatial::navcheck::octant;
+use engine_spatial::relation::{
+    frame_name, parse_rel, rel_name, rel_words, subjects_of, Frame, Rel,
+};
 use engine_spatial::sample::{
     largest_open_spot, sample_free_space, SamplerConfig, SAMPLE_ACTOR_BASE,
 };
 use engine_spatial::sight::{
     cover, reachable, visible, Cover, Reach, ReachView, SightWorld, Stance,
 };
-use engine_spatial::Actor;
+use engine_spatial::{pos_known, size_known, to_cm, Actor};
 
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::model::ToolAnnotations;
@@ -29,29 +32,16 @@ use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
 use super::mcp::{McpServer, McpToolError};
-use super::scene_tools::{object_label, parse_object_ref};
-
-/// Meters to integer cm, mirroring the spatial index convention.
-fn to_cm(v: f32) -> i32 {
-    (v * 100.0).round() as i32
-}
-
-/// Finite position, mirroring the spatial validity rule.
-fn pos_known(a: &Actor) -> bool {
-    a.x.is_finite() && a.y.is_finite() && a.z.is_finite()
-}
-
-/// Finite size, mirroring the spatial validity rule.
-fn size_known(a: &Actor) -> bool {
-    a.sx.is_finite() && a.sy.is_finite() && a.sz.is_finite()
-}
+use super::scene_tools::{
+    object_label, parse_object_ref, SCENE_BRIEF_DEFAULT_BUDGET, SCENE_BRIEF_MAX_BUDGET,
+};
 
 /// Door tool name for spatial questions.
 pub const TOOL_SCENE_QUERY: &str = "scene.query";
-/// Default answer budget in bytes, mirroring `scene.brief`.
-pub const QUERY_DEFAULT_BUDGET: u32 = 4096;
-/// Hard answer budget in bytes, mirroring `scene.brief`.
-pub const QUERY_MAX_BUDGET: u32 = 16384;
+/// Default answer budget in bytes: the `scene.brief` default.
+pub const QUERY_DEFAULT_BUDGET: u32 = SCENE_BRIEF_DEFAULT_BUDGET;
+/// Hard answer budget in bytes: the `scene.brief` cap.
+pub const QUERY_MAX_BUDGET: u32 = SCENE_BRIEF_MAX_BUDGET;
 /// Hard hit cap per answer.
 pub const QUERY_MAX_RESULTS: usize = 64;
 /// Hard radius cap in cm, mirroring the SP1 world bound.
@@ -94,6 +84,9 @@ pub enum QueryKind {
     FreeSpace = 6,
     /// Actors inside a horizontal cone around the observer, within a plan-view range.
     Cone = 7,
+    /// Actors for which a relation word (`left_of`, `visible_from`, ...)
+    /// holds toward the anchor, optionally seen from a viewer actor.
+    Relation = 8,
 }
 
 impl QueryKind {
@@ -108,6 +101,7 @@ impl QueryKind {
             Self::LargestOpen => "largest_open",
             Self::FreeSpace => "free_space",
             Self::Cone => "cone",
+            Self::Relation => "relation",
         }
     }
 
@@ -122,11 +116,12 @@ impl QueryKind {
             "largest_open" => Ok(Self::LargestOpen),
             "free_space" => Ok(Self::FreeSpace),
             "cone" => Ok(Self::Cone),
+            "relation" => Ok(Self::Relation),
             _ => Err(QueryError::new(
                 "bad_kind",
                 format!("query kind `{text}` is unknown"),
                 "legal kinds: near, between, visible, reachable, cover_near, \
-                 largest_open, free_space, cone (re-read scene.brief for ids first)",
+                 largest_open, free_space, cone, relation (re-read scene.brief for ids first)",
             )),
         }
     }
@@ -198,6 +193,8 @@ pub struct QueryArgs {
     pub budget_bytes: u32,
     pub half_angle_deg: Option<i32>,
     pub filter: Option<String>,
+    /// Relation word for `relation` queries.
+    pub rel: Option<Rel>,
 }
 
 impl QueryArgs {
@@ -218,6 +215,7 @@ impl QueryArgs {
             budget_bytes: QUERY_DEFAULT_BUDGET,
             half_angle_deg: None,
             filter: None,
+            rel: None,
         }
     }
 
@@ -281,6 +279,16 @@ impl QueryArgs {
         a.min_gap_cm = min_gap_cm;
         a.max_samples = max_samples;
         a.seed = seed;
+        a
+    }
+
+    /// Actors for which `rel` holds toward `anchor`, in the world frame or
+    /// (with `viewer`) as that actor sees the scene.
+    pub fn relation(anchor: u32, rel: Rel, viewer: Option<u32>) -> Self {
+        let mut a = Self::base(QueryKind::Relation);
+        a.anchor = Some(anchor);
+        a.rel = Some(rel);
+        a.other = viewer;
         a
     }
 
@@ -1078,6 +1086,45 @@ pub fn run_query(
                 .collect();
             Ok(render(args.kind, &anchors, hits, vec![], budget))
         }
+        QueryKind::Relation => {
+            let anchor = check_anchor(actors, args.anchor)?;
+            let rel = args.rel.ok_or_else(|| {
+                QueryError::new(
+                    "bad_relation",
+                    "relation needs a `relation` word".to_string(),
+                    format!("legal relations: {}", rel_words()),
+                )
+            })?;
+            let frame = match args.other {
+                Some(viewer) => {
+                    actor_by_id(actors, viewer).ok_or_else(|| {
+                        QueryError::new(
+                            "unknown_actor",
+                            format!("viewer {viewer} names no scene actor"),
+                            valid_ids_hint(actors),
+                        )
+                    })?;
+                    Frame::Viewer(viewer)
+                }
+                None => Frame::World,
+            };
+            let hits: Vec<Hit> = subjects_of(actors, rel, anchor.id, frame)
+                .into_iter()
+                .take(limit)
+                .filter_map(|id| {
+                    let a = actor_by_id(actors, id)?;
+                    Some(Hit {
+                        id,
+                        x: a.x,
+                        y: a.y,
+                        z: a.z,
+                        matched: true,
+                        reason: format!("{}: {} frame", rel_name(rel), frame_name(frame)),
+                    })
+                })
+                .collect();
+            Ok(render(args.kind, &[anchor.id], hits, vec![], budget))
+        }
         QueryKind::FreeSpace => {
             let capsule = check_capsule(args.capsule_radius_cm)?;
             if !(1..=QUERY_MAX_RADIUS_CM).contains(&args.min_gap_cm) {
@@ -1256,6 +1303,7 @@ pub struct SceneQueryArgs {
     pub budget_bytes: Option<u32>,
     pub half_angle_deg: Option<i32>,
     pub filter: Option<String>,
+    pub relation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1404,6 +1452,19 @@ impl super::mcp::ServerState {
             .as_deref()
             .map(|text| resolve_actor("other", text, &uuids))
             .transpose()?;
+        let rel = args
+            .relation
+            .as_deref()
+            .map(|word| {
+                parse_rel(word).ok_or_else(|| {
+                    query_error(QueryError::new(
+                        "bad_relation",
+                        format!("relation `{word}` is unknown"),
+                        format!("legal relations: {}", rel_words()),
+                    ))
+                })
+            })
+            .transpose()?;
         let reach = open_floor(&actors);
         let query = QueryArgs {
             kind,
@@ -1421,6 +1482,7 @@ impl super::mcp::ServerState {
             budget_bytes: args.budget_bytes.unwrap_or(QUERY_DEFAULT_BUDGET),
             half_angle_deg: args.half_angle_deg,
             filter: args.filter.clone(),
+            rel,
         };
         let answer = run_query(&actors, &reach, &query).map_err(query_error)?;
         super::watch_ledger::note_door_answer(kind, request_chars(args), &answer);
@@ -1468,7 +1530,7 @@ impl ToolBase for SceneQueryTool {
     fn description() -> Option<Cow<'static, str>> {
         Some(
             "Spatial questions over the staged scene with reasons: near, between, \
-             visible, reachable, cover, open space, cone. Read-only."
+             visible, reachable, cover, open space, cone, relation (left_of,              visible_from, ...; `other` names the viewer). Read-only."
                 .into(),
         )
     }
@@ -2231,6 +2293,80 @@ mod tests {
     }
 
     #[test]
+    fn query_tool_answers_relation_words_like_the_spatial_oracle() {
+        let server = door_server();
+        let labels = staged_labels(&server);
+        let relation = |anchor: &str, word: &str, viewer: Option<&str>| SceneQueryArgs {
+            kind: "relation".to_owned(),
+            anchor: Some(anchor.to_owned()),
+            other: viewer.map(str::to_owned),
+            relation: Some(word.to_owned()),
+            ..Default::default()
+        };
+        // Oracle: the same four crates as plain actors, ids by label order.
+        let spots = [(-2.0f32, 0.0f32), (0.0, 0.0), (2.0, 0.0), (0.0, 2.0)];
+        let actors: Vec<Actor> = spots
+            .iter()
+            .enumerate()
+            .map(|(id, (x, z))| Actor {
+                id: id as u32,
+                name: format!("crate_{id}"),
+                x: *x,
+                y: 0.5,
+                z: *z,
+                sx: 1.0,
+                sy: 1.0,
+                sz: 1.0,
+                parent: None,
+                physical: true,
+                vx: 0.0,
+                vz: 0.0,
+                yaw: 0.0,
+            })
+            .collect();
+        let mut sided = 0;
+        for word in ["left_of", "right_of", "near", "in_front_of", "behind"] {
+            let rel = parse_rel(word).expect("word parses");
+            let out = query(&server, relation(&labels[1], word, None));
+            let want: Vec<String> = subjects_of(&actors, rel, 1, Frame::World)
+                .into_iter()
+                .map(|id| labels[id as usize].clone())
+                .collect();
+            let got: Vec<String> = out.hits.iter().map(|hit| hit.object.clone()).collect();
+            assert_eq!(got, want, "{word} from the door matches the oracle");
+            assert!(out
+                .hits
+                .iter()
+                .all(|hit| hit.matched && hit.reason == format!("{word}: world frame")));
+            if word == "left_of" || word == "right_of" {
+                sided += got.len();
+            }
+        }
+        assert_eq!(sided, 2, "west and east sit left and right of the middle");
+        // A viewer actor changes the frame, like the oracle's Viewer frame.
+        let seen = query(&server, relation(&labels[1], "left_of", Some(&labels[3])));
+        let want: Vec<String> = subjects_of(&actors, Rel::Left, 1, Frame::Viewer(3))
+            .into_iter()
+            .map(|id| labels[id as usize].clone())
+            .collect();
+        let got: Vec<String> = seen.hits.iter().map(|hit| hit.object.clone()).collect();
+        assert_eq!(got, want);
+        // Typed refusals name the legal words.
+        for bad in [
+            SceneQueryArgs {
+                kind: "relation".to_owned(),
+                anchor: Some(labels[1].clone()),
+                ..Default::default()
+            },
+            relation(&labels[1], "leftish", None),
+        ] {
+            let error = SceneQueryTool::invoke(&server, bad).expect_err("bad relation refuses");
+            assert_eq!(error.code, "bad_relation");
+            assert!(error.message.contains("left_of"), "{}", error.message);
+        }
+    }
+
+    #[test]
     fn query_tool_identity_is_readonly_with_schemas() {
         use rmcp::handler::server::router::tool::ToolBase;
 
@@ -2280,6 +2416,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert_eq!(near.kind, "near");
@@ -2313,6 +2450,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert_eq!(near.digest, again.digest);
@@ -2336,6 +2474,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert!(between
@@ -2362,6 +2501,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert_eq!(seen.hits.len(), 4);
@@ -2386,6 +2526,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert_eq!(reach.hits.len(), 3);
@@ -2412,6 +2553,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert!(cover
@@ -2438,6 +2580,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert_eq!(open.hits.len(), 1);
@@ -2460,6 +2603,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         );
         assert!(!free.hits.is_empty());
@@ -2488,6 +2632,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         )
         .expect_err("unknown anchor refuses");
@@ -2511,6 +2656,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         )
         .expect_err("unknown kind refuses");
@@ -2534,6 +2680,7 @@ mod tests {
                 budget_bytes: None,
                 half_angle_deg: None,
                 filter: None,
+                relation: None,
             },
         )
         .expect_err("bad radius refuses");

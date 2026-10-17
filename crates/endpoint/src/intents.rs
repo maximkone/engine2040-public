@@ -10,6 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::canon::valid_name;
+use crate::spatial_glue::{quat_of_yaw, yaw_of_quat};
 use engine_editor::commands::{self, Batch, CommandMeta, Document, Journal, Op, ProvenanceStamp};
 use engine_scene::ids::ObjectId;
 use engine_scene::transform::Transform;
@@ -20,7 +22,7 @@ pub const MAX_INTENT_OPS: usize = 32;
 /// Most new solved objects one brief may place (bootstrap walls excluded).
 pub const MAX_NEW_OBJECTS: usize = 24;
 /// Actor-name bound, mirroring the spatial grammar check.
-pub const NAME_MAX: usize = 64;
+pub const NAME_MAX: usize = crate::canon::NAME_MAX;
 /// First wall actor id; wall ids never collide with prop ids.
 pub const WALL_BASE: u32 = 900_000;
 /// Default room half-extent in meters when no bootstrap sets one.
@@ -353,20 +355,6 @@ impl std::fmt::Display for IntentError {
 
 impl std::error::Error for IntentError {}
 
-/// Spatial-grammar names: `[a-z0-9_]`, no leading digit, bounded length.
-fn valid_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > NAME_MAX {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap_or('0');
-    if !first.is_ascii_lowercase() && first != '_' {
-        return false;
-    }
-    name.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
 fn relation_word(relation: Relation) -> &'static str {
     match relation {
         Relation::Supports => "supports",
@@ -397,31 +385,6 @@ fn want_text(want: &Want) -> String {
         None => format!("{} {target}", relation_word(want.relation)),
         Some((lo, hi)) => format!("{} {target} [{lo},{hi}]", relation_word(want.relation)),
     }
-}
-
-/// One finding rendered like the SP4 brief lines.
-fn finding_line(finding: &engine_spatial::Finding) -> String {
-    let peer = if finding.b == u32::MAX {
-        "-".to_owned()
-    } else {
-        finding.b.to_string()
-    };
-    format!(
-        "finding {} {} {} {} {}",
-        finding.check, finding.a, peer, finding.severity, finding.pct
-    )
-}
-
-/// Y yaw extracted from a world quaternion. Identity reads zero.
-fn yaw_of_quat(q: [f32; 4]) -> f32 {
-    let [x, y, z, w] = q;
-    (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z))
-}
-
-/// Pure-Y rotation quaternion for a solved yaw.
-fn quat_of_yaw(yaw: f32) -> [f32; 4] {
-    let half = 0.5 * yaw;
-    [0.0, half.sin(), 0.0, half.cos()]
 }
 
 /// Sorted-id snapshot of every node with a finite world position. Sizes ride
@@ -943,7 +906,7 @@ pub fn compile(ops: &[IntentOp], existing: &[Actor], seed: u64) -> Result<Compil
         .filter(|finding| {
             touched.contains(&finding.a) || (finding.b != u32::MAX && touched.contains(&finding.b))
         })
-        .map(finding_line)
+        .map(engine_spatial::Finding::row)
         .collect();
     if !failed.is_empty() {
         return Err(IntentError::CheckFailed { findings: failed });
@@ -1540,7 +1503,7 @@ mod tests {
                 "clean",
                 "brief {}: {:?}",
                 case.name,
-                report.findings.iter().map(finding_line).collect::<Vec<_>>()
+                report.findings.iter().map(engine_spatial::Finding::row).collect::<Vec<_>>()
             );
             // Exactly one journal entry: one undo reverts the brief.
             assert_eq!(journal.past_len(), pre_past + 1, "brief {}", case.name);

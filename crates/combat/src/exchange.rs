@@ -234,11 +234,6 @@ pub const fn parry_open_with(block_age: u32, tables: &ExchangeTables) -> bool {
     block_age >= tables.parry_start_tick && block_age <= tables.parry_end_tick()
 }
 
-/// True while a riposte stays open: elapsed in [0, window] after the parry.
-pub const fn riposte_open(ticks_since_parry: u32, tables: &ExchangeTables) -> bool {
-    ticks_since_parry <= tables.riposte_window_ticks
-}
-
 /// Timed answer of one attack against one defender press.
 ///
 /// Pure scheduling proof: `impact_tick` is the attack's impact tick,

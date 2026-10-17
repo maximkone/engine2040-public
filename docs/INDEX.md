@@ -1,6 +1,6 @@
 # INDEX — active contracts
 
-Quick start: `ROADMAP.md` → `ARCHITECTURE.md` (17.4KB); the work list is the board in `SPRINT.md` (slice it, never read whole).
+Map first: `README.md` (one screen). Quick start: `ROADMAP.md` → `ARCHITECTURE.md` (17.4KB); the work list is the board in `SPRINT.md` (slice it, never read whole).
 Then read `PLAN-REVIEW.md` → `VISION.md` → `AI-NATIVE.md`, plus
 `VISUAL-TARGET.md`, `EDITOR_AI_CONTROL.md`, `HASH-LAW.md` or the
 subsystem plan in `plan/` for the task.
@@ -50,16 +50,12 @@ and they carry no authority.
 | DECISIONS-M1.md | Technical decisions: layer crates, netcode model, determinism tier, MCP SDK, render references |
 | EVIDENCE.md | Provenance ledger for code ports and content |
 | ROYALTY.md | Draft business terms (not an engine contract) |
-| Research rotation | Retired 2026-10-16: arXiv/steal dive schedule now rides researcher seats, no cursor file |
-| DIRECTION-LOG.md | Level 3/4 loop-direction changes with revert triggers (rows/retros live in the handoff) |
 | plan/frontier.md | Research topics for the focus areas (render, animation, physics, hard systems, AI door) |
 | research/LADDER.md | Cards, spikes and verdicts, one ladder rung each; read the rung, not the file (199 KB) |
-| archive/ (2026-10-10 only) | No authority: license sweeps 2026-09-24 (superseded by DEPENDENCIES.md + EVIDENCE.md), `docs/archive/2026-10-03/GE1-FIXTURES.md` (fixture-genre proof receipts), done board rows in `docs/archive/SPRINT-done-2026-10-03.md`. Moved 2026-10-12: `archive/2026-10-08` to `docs/archive/2026-10-08/archive-root`, `archive/2026-10-09` to `docs/archive/2026-10-09/archive-root` |
-| REPO-SWEEP.md | GitHub corner-map cursor for the RES-REPO reader (36 KB, read the corner not the file) |
+| archive/ | No authority, git history made browsable: `archive/INDEX.md` lists what moved on 2026-10-17, older dated folders are listed by their date |
 | CAPTURE.md | Capture output: built-in dump first, OBS only for live play |
 | fixtures/ | Fixture dir: pinned test data, start at `../fixtures/README.md` |
-| one tree | One tree `C:\engine2040` on master; pull first, commit by path, push (`AGENTS.md` "Work from plans") |
-| target/sprint-handoff.md | Sprint handoff: last wave lands, ticks and blockers |
+| README.md | The one-screen map of docs/: plans, rows, book, research, archive |
 | INDEX.md | This list |
 
 ## How-to (docs/book/)

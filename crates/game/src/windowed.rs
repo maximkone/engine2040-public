@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex};
 
 use engine_arena::GaitPhase;
-use engine_audio::{device::DeviceOutput, Bank, BankSound, CueBank, FeedTx, Mixer};
+use engine_audio::{device::DeviceOutput, Bank, CueBank, FeedTx, Mixer};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
 use engine_render::{
     backend::{BackendChoice, BackendError},
@@ -32,9 +32,10 @@ use super::audio_mix::{Material, MixBridge, MixVoice, VoiceSeed, Wall, MAX_MIX_V
 use super::camera::DirectorParams;
 use super::camera_feed::PresentationFeed;
 use super::pad::{fps_bindings, tick_input_with_pad, RecordedPadEvent};
+use super::window_audio_space::AudioSpace;
 #[cfg(any(debug_assertions, test))]
 use super::pad::{poll_gilrs_once, snapshot_from_recorded};
-use super::{App, Checkpoint, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
+use super::{App, Checkpoint, FighterView, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
 
 #[path = "windowed_captions.rs"]
 mod windowed_captions;
@@ -439,6 +440,42 @@ pub fn check_exit_deadline(elapsed_ms: f64) -> Result<(), WinError> {
     Ok(())
 }
 
+/// Grace after the in-loop `--exit` bound before the watchdog thread fires:
+/// the loop check wins whenever the loop is alive, the thread only catches a
+/// loop wedged inside one blocking call.
+pub const EXIT_WATCHDOG_GRACE_MS: u64 = 5_000;
+
+/// Arm the `--exit` watchdog: a detached thread that runs `on_stall` once
+/// `limit_ms` plus [`EXIT_WATCHDOG_GRACE_MS`] have passed, so a process stuck
+/// inside a driver call still leaves within its bound. `on_stall` receives the
+/// typed `Timeout` receipt naming elapsed plus limit; the binary prints it and
+/// exits. Presentation shell only: no simulation state is read or written.
+pub fn arm_exit_watchdog(
+    limit_ms: u32,
+    on_stall: impl FnOnce(WinError) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    spawn_watchdog(
+        u64::from(limit_ms) + EXIT_WATCHDOG_GRACE_MS,
+        limit_ms,
+        on_stall,
+    )
+}
+
+/// Sleep `wait_ms`, then hand the `Timeout` receipt to `on_stall`. Split out
+/// so the test fires it in milliseconds instead of waiting out the bound.
+fn spawn_watchdog(
+    wait_ms: u64,
+    limit_ms: u32,
+    on_stall: impl FnOnce(WinError) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        on_stall(WinError::Timeout(format!(
+            "exit watchdog fired: elapsed_ms={wait_ms} limit_ms={limit_ms}"
+        )));
+    })
+}
+
 /// What the window loop does with one `render_surface` outcome. Transient
 /// acquire states skip the frame (Lost/Outdated already reconfigured inside
 /// the call); everything else hard fails loudly so an unpainted window can
@@ -800,30 +837,29 @@ pub fn stage_arena_bank(sample_rate: u32) -> Result<(Arc<CueBank>, bool), WinErr
     Err(WinError::Render(cap_message("arena bank missing clips")))
 }
 
-/// Cue name for one windowed voice (flat play, gain from the tick).
-fn bank_sound_cue(sound: BankSound) -> &'static str {
-    match sound {
-        BankSound::Hit => engine_audio::cue_names::HIT,
-        BankSound::Footstep => engine_audio::cue_names::FOOTSTEP,
-        BankSound::CrowdBed => engine_audio::cue_names::CROWD,
-    }
-}
-
-/// Queue one tick's voices plus the camera listener through the feed.
+/// Queue one tick through the feed with the room's shape (EG21w): the
+/// listener at the camera, each fight event as its named cue placed at the
+/// fighter it happened to, footsteps on the floor's surface cue, the tension
+/// level and the crowd bed gain from the outcome.
 ///
-/// Consumer: the `arena` window stages each tick's `TickOutcome::audio` here
-/// instead of the lossy `try_lock` hand-off. Data owner: the feed owns the
-/// queue; this helper only maps voices to cue names. Units: `tick` is the
-/// fixed tick the outcome ran on. Determinism: same outcomes queue the same
-/// commands (presentation only, never hashed). Errors: never fails: a full
-/// ring or an unknown cue is counted in `FeedStats` (`dropped_full`,
-/// `unknown_cue`), never dropped silently.
-/// Caller: `crates/game/src/bin/arena.rs::ArenaApp::tick_and_present`.
-pub fn feed_tick_audio(tx: &mut FeedTx, tick: u32, outcome: &TickOutcome) {
-    let _ = tx.listener(tick, WIN_LISTENER_3CM, 0);
-    for command in &outcome.audio {
-        let _ = tx.play(tick, bank_sound_cue(command.sound), command.gain, None);
-    }
+/// Consumer: the `arena` window, once per fixed tick, instead of the lossy
+/// `try_lock` hand-off. Data owner: the feed owns the queue, `space` owns the
+/// camera seat and the stride/tension/bed state, the game owns `views`
+/// (`App::fighter_views`, meters) and the outcome. Units: `tick` is the fixed
+/// tick the outcome ran on; positions leave as centimeters. Determinism: same
+/// outcomes, views and camera queue the same commands (presentation only,
+/// never hashed). Errors: never fails: a full ring or a cue the bank lacks is
+/// counted in `FeedStats` (`dropped_full`, `unknown_cue`), never dropped
+/// silently.
+/// Caller: `crates/game/src/bin/arena_frame/mod.rs::ArenaApp::run_sim_ticks`.
+pub fn feed_tick_audio(
+    tx: &mut FeedTx,
+    space: &mut AudioSpace,
+    tick: u32,
+    outcome: &TickOutcome,
+    views: &[FighterView],
+) {
+    space.feed(tx, tick, outcome, views);
 }
 
 /// HUD text cells plus quads for one snapshot (hp line plus kill-feed lines
@@ -1979,6 +2015,22 @@ mod tests {
         );
     }
 
+    /// WIN9 watchdog: a loop wedged inside one blocking call never reaches
+    /// the in-loop check, so the thread hands the typed `Timeout` receipt
+    /// (elapsed plus limit named) to its exit hook on its own.
+    #[test]
+    fn exit_watchdog_fires_the_timeout_receipt_without_the_loop() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_watchdog(10, 60_000, move |err| tx.send(err).expect("receiver alive"))
+            .join()
+            .expect("watchdog thread ends");
+        let err = rx.recv().expect("watchdog fired");
+        assert!(
+            matches!(&err, WinError::Timeout(msg) if msg.contains("elapsed_ms=10") && msg.contains("limit_ms=60000")),
+            "watchdog must be Timeout naming elapsed+limit, got: {err}"
+        );
+    }
+
     #[test]
     fn surface_errors_split_transient_skips_from_loud_failures() {
         // Transient acquire states skip the frame and retry next frame;
@@ -2337,10 +2389,11 @@ mod tests {
         let mut app = App::new(config()).expect("app").into_duel().expect("duel");
         let bindings = Bindings::new();
         let human = FighterId::new(HUMAN_SLOT).expect("human");
+        let mut space = AudioSpace::new();
         for tick in 0..10 {
             let input = fighter_input_from_pressed(tick, human, &[], &bindings);
             let outcome = app.tick(input);
-            feed_tick_audio(&mut tx, tick, &outcome);
+            feed_tick_audio(&mut tx, &mut space, tick, &outcome, app.fighter_views());
             let mut stereo = [0.0f32; 2];
             engine.render_stereo_into(&mut stereo);
         }

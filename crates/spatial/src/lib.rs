@@ -36,7 +36,10 @@ pub mod tag_lift;
 pub use brief::{brief, brief_stats, brief_text, estimate_tokens, Brief, BriefStats, Group};
 pub use checks::{run_checks, run_spatial, OPT_IN_CHECKS, SPATIAL_CHECKS};
 pub use diff::{describe, diff_graph, dry_run_diff, summarize, Edge, SemanticDiff};
-pub use index::{density_grid, nearest, overlap_pairs, sweep_pairs, xyz_pairs, CmRect};
+pub use index::{
+    density_grid, nearest, overlap_pairs, pos_known, size_known, sweep_pairs, to_cm, xyz_pairs,
+    CmRect,
+};
 pub use navcheck::{Door, NavView, Tile};
 pub use place::{
     enumerate_support_surfaces, solve, ConflictSet, Intent, ObjectRef, PlaceError, RepairHint,
@@ -84,6 +87,22 @@ pub struct Finding {
     pub b: u32,
     pub pct: f32,
     pub severity: &'static str,
+}
+
+impl Finding {
+    /// Brief row `finding <check> <a> <b|-> <severity> <pct>`, no newline;
+    /// single-actor findings render `b` as `-`.
+    pub fn row(&self) -> String {
+        let b = if self.b == u32::MAX {
+            "-".to_owned()
+        } else {
+            self.b.to_string()
+        };
+        format!(
+            "finding {} {} {} {} {}",
+            self.check, self.a, b, self.severity, self.pct
+        )
+    }
 }
 
 /// Full report: frozen-order findings + FNV-1a hash over canonical bytes.

@@ -341,7 +341,7 @@ pub fn validate_sweep(s: &WeaponSweep, count: u8, tables: &SweepTables) -> Resul
     if dx * dx + dy * dy + dz * dz > max * max {
         return Err(SweepError::BadValue {
             field: "sweep_len_mm",
-            value: isqrt_u64((dx * dx + dy * dy + dz * dz) as u64) as u32,
+            value: ((dx * dx + dy * dy + dz * dz) as u64).isqrt() as u32,
         });
     }
     Ok(())
@@ -802,7 +802,7 @@ fn in_envelope(a: &SweepParticipant, d: &SweepParticipant, s: &WeaponSweep) -> b
 /// True when the raised shield cone covers the direction to the attacker.
 ///
 /// Integer only: the facing/dot comparison is exact, the cosine comes from
-/// a fixed-point polynomial (no trig calls), and lengths use [`isqrt_u64`].
+/// a fixed-point polynomial (no trig calls), and lengths use `u64::isqrt`.
 /// Division truncation shrinks the cone by under one cosine count, which
 /// favors the attacker; fixtures keep a wide margin from the cone edge.
 fn shield_blocks(def: &SweepParticipant, atk_pos: [i32; 3]) -> bool {
@@ -817,11 +817,11 @@ fn shield_blocks(def: &SweepParticipant, atk_pos: [i32; 3]) -> bool {
     }
     let fx2 = i64::from(def.facing_x) * i64::from(def.facing_x);
     let fz2 = i64::from(def.facing_z) * i64::from(def.facing_z);
-    let len_f = isqrt_u64((fx2 + fz2) as u64);
+    let len_f = ((fx2 + fz2) as u64).isqrt();
     if len_f == 0 {
         return false;
     }
-    let len_d = isqrt_u64((dx * dx + dz * dz) as u64);
+    let len_d = ((dx * dx + dz * dz) as u64).isqrt();
     let cos = u64::from(cos_half_q16(def.shield_half_deg));
     (dot as u64) * COS_Q16 >= cos * len_f * len_d
 }
@@ -843,21 +843,6 @@ fn cos_half_q16(half_deg: u8) -> u32 {
         0
     } else {
         cos as u32
-    }
-}
-
-/// Integer square root: the greatest `r` with `r * r <= n`. Newton iteration.
-fn isqrt_u64(n: u64) -> u64 {
-    if n < 2 {
-        return n;
-    }
-    let mut x = 1u64 << (64 - n.leading_zeros()).div_ceil(2);
-    loop {
-        let y = ((u128::from(x) + u128::from(n) / u128::from(x)) / 2) as u64;
-        if y >= x {
-            return x;
-        }
-        x = y;
     }
 }
 
@@ -1683,13 +1668,13 @@ mod tests {
 
     #[test]
     fn integer_sqrt_and_cosine_helpers_hold() {
-        assert_eq!(isqrt_u64(0), 0);
-        assert_eq!(isqrt_u64(1), 1);
-        assert_eq!(isqrt_u64(2), 1);
-        assert_eq!(isqrt_u64(15), 3);
-        assert_eq!(isqrt_u64(16), 4);
-        assert_eq!(isqrt_u64(3_200_000_000_000), 1_788_854);
-        assert_eq!(isqrt_u64(u64::MAX), 4_294_967_295);
+        assert_eq!(0u64.isqrt(), 0);
+        assert_eq!(1u64.isqrt(), 1);
+        assert_eq!(2u64.isqrt(), 1);
+        assert_eq!(15u64.isqrt(), 3);
+        assert_eq!(16u64.isqrt(), 4);
+        assert_eq!(3_200_000_000_000u64.isqrt(), 1_788_854);
+        assert_eq!(u64::MAX.isqrt(), 4_294_967_295);
         // Cosine rows: exact at 0 degrees, near-exact at 60, near zero at
         // 90, monotone between (fixed-point rounding needs a few counts).
         assert_eq!(cos_half_q16(0), 65536);

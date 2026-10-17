@@ -123,11 +123,18 @@ pub struct SceneRow {
 /// Takes scene data as an argument and returns owned rows; nothing is stored.
 pub fn snapshot_rows(hierarchy: &Hierarchy) -> Vec<SceneRow> {
     let mut rows = Vec::with_capacity(hierarchy.len());
-    let mut roots: Vec<ObjectId> = hierarchy.roots();
-    roots.sort();
+    // One pass builds every child list (sorted by id); asking the hierarchy
+    // per node would scan all nodes each time, quadratic at siege scale.
+    let kids_of = hierarchy.child_map();
+    let mut stack: Vec<(ObjectId, u32)> = kids_of
+        .get(&ObjectId::NIL)
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|id| (*id, 0))
+        .collect();
     // Iterative depth-first walk; children pushed reversed so the smallest id
     // pops first. Depth saturates rather than overflowing on long chains.
-    let mut stack: Vec<(ObjectId, u32)> = roots.into_iter().rev().map(|id| (id, 0)).collect();
     while let Some((id, depth)) = stack.pop() {
         let (parent, local) = match (hierarchy.parent(id), hierarchy.local(id)) {
             (Some(parent), Some(local)) => (parent, local),
@@ -139,10 +146,8 @@ pub fn snapshot_rows(hierarchy: &Hierarchy) -> Vec<SceneRow> {
             depth,
             local,
         });
-        let mut kids = hierarchy.children(id);
-        kids.sort_by_key(|a| a.to_string());
-        for kid in kids.into_iter().rev() {
-            stack.push((kid, depth.saturating_add(1)));
+        for kid in kids_of.get(&id).into_iter().flatten().rev() {
+            stack.push((*kid, depth.saturating_add(1)));
         }
     }
     rows

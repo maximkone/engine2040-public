@@ -2024,6 +2024,84 @@ mod tests {
         check_supported(&siege, 11, 17, 6.2);
     }
 
+    /// The two-floor ludus fixture of the SP16 gate: ground slab, treads and
+    /// a first-floor slab, plus the prop to place.
+    fn two_floor_ludus() -> Vec<Actor> {
+        vec![
+            mk(0, "slab_ground", 0.0, 0.1, 0.0, 10.0, 0.2, 10.0),
+            mk(1, "slab_first", 0.0, 3.1, -2.0, 6.0, 0.2, 6.0),
+            mk(2, "step_0", 0.0, 0.5, 3.5, 1.0, 1.0, 1.0),
+            mk(3, "step_1", 0.0, 1.5, 2.5, 1.0, 1.0, 1.0),
+            mk(4, "step_2", 0.0, 2.5, 1.5, 1.0, 1.0, 1.0),
+            mk(9, "prop", -2.0, 0.2, 2.0, 0.4, 0.4, 0.4),
+        ]
+    }
+
+    #[test]
+    fn enumeration_separates_floors_from_treads_on_two_floors() {
+        // SP37: floor, ground shelf, three treads and the first floor come
+        // back sorted by top, each with its kind; the solver picks the same
+        // rest heights the enumeration reports.
+        let ludus = two_floor_ludus();
+        let rest: Vec<Actor> = ludus.iter().filter(|a| a.id != 9).cloned().collect();
+        let index = super::super::index3::Index3::build(&rest);
+        let surfaces = super::enumerate_support_surfaces(&ludus, 9, &index);
+        let tops: Vec<(i32, super::SupportKind)> =
+            surfaces.iter().map(|s| (s.top_cm, s.kind)).collect();
+        use super::SupportKind::{Floor, ShelfTop, Tread};
+        assert_eq!(
+            tops,
+            [
+                (0, Floor),
+                (20, ShelfTop),
+                (100, Tread),
+                (200, Tread),
+                (300, Tread),
+                (320, ShelfTop)
+            ]
+        );
+        assert!(surfaces.windows(2).all(|w| w[0].top_cm <= w[1].top_cm));
+        // The prop starts at floor level: only the floor plane rests, no
+        // raised top does.
+        let resting: Vec<Option<u32>> = surfaces
+            .iter()
+            .filter(|s| s.rests)
+            .map(|s| s.supporter)
+            .collect();
+        assert_eq!(resting, [None]);
+        check_supported(&ludus, 1, 9, 3.4);
+        check_supported(&ludus, 3, 9, 2.2);
+    }
+
+    #[test]
+    #[ignore = "timing: SP37 solve p95, release --perf only"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "test-only timing, never the tick"
+    )]
+    fn sp37_two_floor_solve_p95_under_50ms() {
+        let ludus = two_floor_ludus();
+        let intent = Intent {
+            object: ObjectRef::Id(9),
+            wants: vec![Want {
+                relation: Relation::OnTopOf,
+                target: Target::Object(1),
+                distance_cm: None,
+            }],
+        };
+        let mut micros = Vec::new();
+        for _ in 0..100 {
+            let start = std::time::Instant::now();
+            solve(&intent, &ludus).expect("two-floor support solves");
+            micros.push(start.elapsed().as_micros());
+        }
+        micros.sort_unstable();
+        let p95 = micros[94];
+        eprintln!("SP37 two-floor solve p95={p95}us over 100 solves");
+        assert!(p95 <= 50_000, "solve p95 {p95}us over 50 ms");
+    }
+
     #[test]
     fn conflict_set_keeps_eq() {
         // Compile-time proof for the frozen shape: hints ride along but

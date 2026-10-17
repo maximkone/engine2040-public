@@ -265,7 +265,7 @@ fn newest_csv(root: &Path) -> Result<String, McpToolError> {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("perf-")
             && name.ends_with(".csv")
-            && best.as_ref().map_or(true, |seen| name > *seen)
+            && best.as_ref().is_none_or(|seen| name > *seen)
         {
             best = Some(name);
         }

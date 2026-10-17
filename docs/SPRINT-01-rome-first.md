@@ -365,7 +365,7 @@
   for the reference GPU; proof: `cargo test --locked -p engine-game
   --lib window_bind` 4/4 green plus `fighter_bind` green, golden
   unchanged.)
-- [ ] UI3 ui: HUD overlay model — names, HP pips, tick and hit flash as
+- [x] UI3 ui: HUD overlay model — names, HP pips, tick and hit flash as Landed 780ad679. DuelOverlay called from windowed.rs; engine-ui 155 passed, run 39052304852.
   data with x2-identical bytes (landed `e76c0f2`, never boarded). Tier A.
   Size XS. Owns `crates/ui/src/lib.rs` overlay hunks (encode/decode/tests
   only, no endpoint; UI2 frozen). Accept: bytes round-trip; seeded bytes
@@ -380,7 +380,7 @@
   painted counts on twin + play-step PNGs; HP/facing/bounds readable;
   bytes round-trip x2. needs: UI2, UI3, WIN1. (PLN49 R5; checker wave-48:
   tick only with WIN1 consumer wired and stub removed.)
-- [ ] UI5 ui: play HUD — `play.step` PNGs show HP bars + names + button
+- [ ] UI5 ui: play HUD — `play.step` PNGs show HP bars + names + button Progress 2026-10-17: ui side landed (play_hud.rs, raster test); left: draw it into play.step PNGs (endpoint paint_hud, new endpoint-to-ui edge).
   echo + tick + fighter-you arrow; 4F palette passes a colorblind check.
   Tier A. Size S. Owns HUD hunks beside `crates/ui/` (UI4 wiring
   frozen). Accept: seed95 PNGs carry bars/names/echo/tick/arrow;
@@ -447,7 +447,7 @@
   engine-game --lib cli` green. needs: WIN1, WIN2.
   (PLN render-look.md EXTEND, proposed 2026-09-29.)
   LATER: parked 2026-10-03 (circus verdict 2: docs/plan/render-look.md parks shipping (rows stay, no writers unless a bar needs them) and only WIN9 is the bar's exception; this window polish changes no pixel, hash or timing); unpark by deleting this line.
-- [ ] WIN9 game: arena --exit watchdog — the exe self-exits within 60 s
+- [x] WIN9 game: arena --exit watchdog — the exe self-exits within 60 s Landed 09ea66c3. arm_exit_watchdog; windowed tests 57 passed.
   of the last frame; no process outlives its shell timeout + grace.
   Tier A. Size S. Owns watchdog hunks beside `crates/game/src/bin/arena.rs`
   (exit path only). Accept: forced-stall drill with `--deadline-ms 60_000`

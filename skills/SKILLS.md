@@ -1,8 +1,9 @@
-# Skills - 75 skills in skills/ and 5 in .opencode/skills/
+# Skills - 82 skills in skills/ and 5 in .opencode/skills/
 
-Standalone repo (owner 2026-10-17): any AI loads a skill by its trigger. The first column below is a hint of who
-uses it (builder writes code, judge/review reads a diff); there is one OpenCode agent, `builder`. Skills in `skills/`,
-one line each: who -> skill -> trigger.
+Standalone repo (owner 2026-10-17): any AI (Claude Code, OpenCode, anything) loads a skill by its trigger and works
+from plans and board rows (`AGENTS.md` "Work from plans"). The first column below is only a hint of the kind of job
+(builder writes code, judge/review reads a diff); there are no seats, packets or queues. Skills in `skills/`,
+one line each: who -> skill -> trigger. Work-flow skills: `commit-by-path`, `board-row-writing`, `github-check`.
 
 | builder | engine-code | CODE: crates, tests, determinism, render, scene/editor, gameplay AI, deps |
 | builder | engine-experiment | EXPERIMENT spikes: smallest repro + one ablation, adopt/reject |
@@ -28,11 +29,11 @@ one line each: who -> skill -> trigger.
 | builder / judge | rust-craft-rules | Rust unsafe proofs, process-wide state, lock guards, real-time try_lock, scoped threads: 6 rules; the rest sit in engine-code (`cache-and-ordering-checks` removed 2026-10-12, never loaded) (engine review 2026-10-10, rust-craft.md) |
 | pilot / planner | door-and-headless-runbook | headless staged fight, golden proof, arena capture, perf CSV, the e2040-mcp door, the playtest crate |
 | miner | engine-subsystem-review | SKILL: turn one book chapter into a tested checklist skill shaped like engine-subsystem-review |
-| perf | engine-bench | PERF: measure frame and tick time on the built binaries, file one cut packet |
-| porter | engine-code | PORT: turn one donor file into a Rust port packet with its test |
-| rot-hunter | engine-proof | CUT: find dead code, stubs and stale docs, file one cut packet per finding |
-| runner | door-and-headless-runbook | RUN: run the built binaries and the AI door, report numbers, file a bug packet on a break |
-| walker | engine-playtest | WALK: walk one journey as a user on the built game, score it, file at most 2 asks |
+| perf | engine-bench | PERF: measure frame and tick time on the built binaries, report the bottleneck and one cut row |
+| porter | engine-code | PORT: turn one donor file into a Rust port with its test |
+| rot-hunter | engine-proof | CUT: find dead code, stubs and stale docs, one board row per finding |
+| runner | door-and-headless-runbook | RUN: run the built binaries and the AI door, report numbers, file a bug report on a break |
+| walker | engine-playtest | WALK: walk one journey as a user on the built game, score it, file at most 2 rows |
 
 ## More skills in skills/ (no agent names them: they load by their trigger, so read the trigger first)
 
@@ -44,7 +45,7 @@ one line each: who -> skill -> trigger.
 | builder / judge | wgpu-validation-fix | a wgpu validation error or a PresentError in a crates/render submit |
 | builder / judge | mcp-verb-authoring | add or change an MCP verb in crates/endpoint: name, card, refusals, dry run, audit, budget |
 | builder / judge | checked-numerics | a numeric `as` cast or integer and float math in sim code |
-| pilot / planner | bug-report-writing | gates for a bug queue packet: steps, expected, actual, build, proof |
+| pilot / planner | bug-report-writing | gates for a bug report (BLOCKERS row or bug row): steps, expected, actual, build, proof |
 | researcher / builder | book-search | search the game-engine and Rust books with `node tools/books.mjs search "<words>"`, cite book id and heading |
 | builder | bevy-rust-ecs | port Bevy 0.19 names into the own renderer or sim; a Bevy viewer may not be built |
 | builder / judge | wired-caller-checks | a new pub fn, helper, or module in crates: 7 checks, FAIL without a production caller |
@@ -90,7 +91,13 @@ one line each: who -> skill -> trigger.
 | builder | vram-budget-checks | VRAM math, staging belt, streaming pool, eviction rule before budget live |
 | builder / judge | wgpu-render-rules | wgpu 30.0 code: instance, surface, pipelines, buffers, bind groups, alignment |
 | builder / judge | wound-map-checks | wound paint maps for fighter cuts: check the queue |
-
+| builder / judge | web-build-and-test | build, run and prove the browser (wasm) target: tools/web-build.mjs, web-browse.mjs, headless Chrome flags, the page's golden line, web-build.yml, pages.yml, public mirror export |
+| builder / judge | two-physics-layers | add a break, limb, ragdoll or material: hashed authority layer vs float physfx layer, HASH-LAW, the one dependency line |
+| any | commit-by-path | commit on the shared master tree: own paths only, temp GIT_INDEX_FILE for shared files, tick the board row, workspace-check, pull, push |
+| planner / builder | board-row-writing | write or edit a board row: Diff, Tier, Size, Owns, Accept, F2P, P2P, needs, Landed tick |
+| builder / judge | wasm-compat | a crate on the browser path must also build for wasm32: cfg patterns, engine_clock::install, FsSource stub, tools/wasm-gate.mjs baseline, wasm-check.yml legs |
+| builder | pbr-texture-sources | add or change CC0 PBR texture sets in content/arena/sources: PROVENANCE row, ambientCG rules, LFS pointer pitfall, tools/arena-sources.mjs |
+| pilot / judge | golden-matrix | same hash on five targets (linux, windows, aarch64, wasm, wasm simd128): tape, corpus and ragdoll rows, reading MATCH / DIVERGE / SKIP |
 
 ## In `.opencode/skills/` (OpenCode project folder, not in this table)
 

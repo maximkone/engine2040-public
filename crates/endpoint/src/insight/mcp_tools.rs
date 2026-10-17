@@ -204,14 +204,6 @@ impl ServerState {
     }
 }
 
-/// Read-only annotations shared by all four Insight tools.
-fn readonly_annotations() -> Option<ToolAnnotations> {
-    let mut annotations = ToolAnnotations::default();
-    annotations.read_only_hint = Some(true);
-    annotations.open_world_hint = Some(false);
-    Some(annotations)
-}
-
 /// `api.search` tool: ranked index search, read-only.
 pub struct ApiSearchTool;
 
@@ -229,7 +221,7 @@ impl ToolBase for ApiSearchTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        readonly_annotations()
+        crate::mcp::read_only_annotations()
     }
 }
 
@@ -259,7 +251,7 @@ impl ToolBase for ApiDescribeTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        readonly_annotations()
+        crate::mcp::read_only_annotations()
     }
 }
 
@@ -291,7 +283,7 @@ impl ToolBase for CodeCallersTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        readonly_annotations()
+        crate::mcp::read_only_annotations()
     }
 }
 
@@ -323,7 +315,7 @@ impl ToolBase for AssetRefsTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        readonly_annotations()
+        crate::mcp::read_only_annotations()
     }
 }
 

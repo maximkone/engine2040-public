@@ -20,6 +20,8 @@ pub enum Field {
     Alpha,
     /// A flight time in ticks.
     Ticks,
+    /// A heading with no direction in it (all zeros).
+    Direction,
 }
 
 impl Field {
@@ -32,6 +34,7 @@ impl Field {
             Field::Extent => "extent",
             Field::Alpha => "alpha",
             Field::Ticks => "ticks",
+            Field::Direction => "direction",
         }
     }
 }

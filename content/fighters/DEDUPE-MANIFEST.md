@@ -13,22 +13,31 @@ AS1 entry blake3, identical in all 4 variant bundles (see §2). Sidecar SHA =
 `content/fighters/sidecars/<short>.json` (14 files, schema owned by CT33,
 values read-only here). GLB SHA = `content/fighters/glb/clips/<action>.glb`.
 
-| # | short | source action | glb bytes | glb sha16 | cook digest | dur s | keys | loop | root | sidecar bytes | sidecar sha16 | bundle clip bytes | bundle digest16 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | idle | human_male_idle | 69532 | a2b0cfa670722e2e | 185e70c7034759e2 | 0.792 | 819 | true | false | 183 | aed842d70bf25f08 | 29873 | 018cd00438046630 |
-| 2 | run | human_male_run | 69532 | d70d936ef077de8d | 3ea8557d0d3aec49 | 0.792 | 819 | true | true | 180 | 10ce219f7ba03170 | 29872 | cb83b749dcd6297d |
-| 3 | jump | human_male_jump | 69532 | 616bae7ea3976f22 | a2e04e8655f597bb | 0.792 | 819 | false | true | 183 | a0ef99d906c40aeb | 29873 | 4ee373312fc13ccb |
-| 4 | death | human_male_death | 71260 | 1893e5cb2e2494901 | 9d1cea58b0889137 | 0.833 | 862 | false | false | 186 | d57189ff7312bc6e | 31422 | a57df8d2db86505b |
-| 5 | idle_combat_1h | human_male_idle_combat_main_hand_melee | 69556 | a936e4a6d12961ea | 143b54df62b7441a | 0.792 | 819 | true | false | 208 | 41e10f30e0705d07 | 29896 | d88b6a7b06434c46 |
-| 6 | idle_combat_unarmed | human_male_idle_combat_unarmed | 69548 | 36f6c97144f8a47e3 | f76a98cfcf0a9866 | 0.792 | 819 | true | false | 213 | 22e7a01c8cc8ec4b | 29888 | a8be09781273d3f2 |
-| 7 | attack_1h_1 | human_male_cast_main_hand_melee | 53996 | 29afa8abbb1a8f13e | 1696e44a049e5f7f | 0.417 | 432 | false | false | 324 | 9867452fcbfdc5c3 | 15957 | 34cfea0f6a6830ef |
-| 8 | attack_1h_2 | human_male_cast_main_hand_melee_2 | 53996 | 54283fa8fd025e2b | 8f8ffa50539f3657 | 0.417 | 432 | false | false | 324 | 597c3f4598186a7b | 15959 | 18c82aa9262ab1fb |
-| 9 | attack_1h_3 | human_male_cast_main_hand_melee_3 | 53996 | ccc80face7b028b29 | 4274703f355d99c3 | 0.417 | 432 | false | false | 324 | bfcf126173c42cfa | 15959 | 9089f7d3181a9cf4 |
-| 10 | attack_2h_1 | human_male_cast_two_handed_melee | 53996 | e157db55608e07974 | e4497f7576e75611 | 0.417 | 432 | false | false | 325 | f689700e5f358867 | 15958 | b54759dde9a19a26 |
-| 11 | attack_2h_2 | human_male_cast_two_handed_melee_2 | 53996 | d3a5d5c287b4ce6ec | 0e6beb775c1f2e22 | 0.417 | 432 | false | false | 325 | 51a4b8edd1b5b86ae | 15960 | 914770241d19c731 |
-| 12 | block_shield | human_male_cast_off_hand_shield | 53996 | 9c356f894fc8047a | a52bcd35da54bd52 | 0.417 | 432 | false | false | 208 | cb2bc392359d286b7 | 15957 | bfab0abb4a594a3b |
-| 13 | attack_dual_1 | human_male_cast_dual_wield_melee | 53996 | 0f5eea98b4ea71ca | f24f6072ccb699d2 | 0.417 | 432 | false | false | 420 | a557ac629848d952 | 15958 | 2e199256a857da80 |
-| 14 | taunt | human_male_power_up | 53984 | e58392df62208740 | 4f322525c7970901 | 0.417 | 432 | false | false | 186 | 9d6b6121dc9e8bc01 | 15945 | d0c5539c6b54c142 |
+<!-- gen:dedupe-clips -->
+| # | short | source action | glb bytes | glb sha16 | cook digest | dur s | keys | loop | root | sidecar bytes | sidecar sha16 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | idle | human_male_idle | 69532 | a2b0cfa670722e2e | 185e70c7034759e2 | 0.792 | 819 | true | false | 170 | 98e5654e531ae24d |
+| 2 | run | human_male_run | 69532 | d70d936ef077de8d | 3ea8557d0d3aec49 | 0.792 | 819 | true | true | 167 | 06648d1e61183ca8 |
+| 3 | jump | human_male_jump | 69532 | 616bae7ea3976f22 | a2e04e8655f597bb | 0.792 | 819 | false | true | 170 | d1f227db9eaab197 |
+| 4 | death | human_male_death | 71260 | 1893e5cb2e249490 | 9d1cea58b0889137 | 0.833 | 862 | false | false | 173 | 2d0301a8ea08f764 |
+| 5 | idle_combat_1h | human_male_idle_combat_main_hand_melee | 69556 | a936e4a6d12961ea | 143b54df62b7441a | 0.792 | 819 | true | false | 194 | 23b3b7858b802cf8 |
+| 6 | idle_combat_unarmed | human_male_idle_combat_unarmed | 69548 | 36f6c97144f8a47e | f76a98cfcf0a9866 | 0.792 | 819 | true | false | 199 | 38c7af90c3eedaf0 |
+| 7 | attack_1h_1 | human_male_cast_main_hand_melee | 53996 | 29afa8abbb1a8f13 | 1696e44a049e5f7f | 0.417 | 432 | false | false | 303 | 86c13001df45cc44 |
+| 8 | attack_1h_2 | human_male_cast_main_hand_melee_2 | 53996 | 54283fa8fd025e2b | 8f8ffa50539f3657 | 0.417 | 432 | false | false | 303 | a613dd6e05e81ece |
+| 9 | attack_1h_3 | human_male_cast_main_hand_melee_3 | 53996 | ccc80face7b028b2 | 4274703f355d99c3 | 0.417 | 432 | false | false | 303 | f847f42d4da7f650 |
+| 10 | attack_2h_1 | human_male_cast_two_handed_melee | 53996 | e157db55608e0797 | e4497f7576e75611 | 0.417 | 432 | false | false | 304 | afadfadf27913e46 |
+| 11 | attack_2h_2 | human_male_cast_two_handed_melee_2 | 53996 | d3a5d5c287b4ce6e | 0e6beb775c1f2e22 | 0.417 | 432 | false | false | 304 | f6e39bdc33258c9a |
+| 12 | block_shield | human_male_cast_off_hand_shield | 53996 | 9c356f894fc8047a | a52bcd35da54bd52 | 0.417 | 432 | false | false | 194 | e0ee550beb8fde50 |
+| 13 | attack_dual_1 | human_male_cast_dual_wield_melee | 53996 | 0f5eea98b4ea71ca | f24f6072ccb699d2 | 0.417 | 432 | false | false | 394 | 5b540ccc21ca0c74 |
+| 14 | taunt | human_male_power_up | 53984 | e58392df62208740 | 4f322525c7970901 | 0.417 | 432 | false | false | 173 | 44f24176a85158f7 |
+
+- 56 clip slots (4 variants x 14 clips) hold 14 unique cook digests; one GLB per clip is 850916 bytes in total, so 42 slots are duplicates of a pinned digest.
+<!-- /gen:dedupe-clips -->
+
+The table is generated by `node tools/fighter-report.mjs --write` from the
+GLBs, the sidecars (hashed LF-normalised so a CRLF checkout agrees) and the
+`manifest.json` cook pins; the tool fails when the 14 clips do not share one
+digest across all variant slots. Bundle-side clip bytes and digests are in §2.
 
 Full SHA-256 for every GLB, sidecar and bundle file was hashed 2026-10-08
 (`ct32-hash` run); sha16 above is the first 16 hex chars of each full hash.

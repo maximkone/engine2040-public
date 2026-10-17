@@ -27,20 +27,20 @@ pub fn check_verbs(text: &str) -> Result<(), McpToolError> {
         return Err(malformed());
     }
     let value: Value = rmcp::serde_json::from_str(trimmed).map_err(|_| malformed())?;
-    let top = value.as_object().ok_or_else(|| malformed())?;
+    let top = value.as_object().ok_or_else(malformed)?;
     if top.len() != 2 || !top.contains_key("actions") || !top.contains_key("diagnostics") {
         return Err(malformed());
     }
-    let actions = top["actions"].as_array().ok_or_else(|| malformed())?;
+    let actions = top["actions"].as_array().ok_or_else(malformed)?;
     if actions.len() > 64 || !actions.iter().all(is_typed_verb) {
         return Err(malformed());
     }
-    let diags = top["diagnostics"].as_array().ok_or_else(|| malformed())?;
+    let diags = top["diagnostics"].as_array().ok_or_else(malformed)?;
     if diags.len() > 64 {
         return Err(malformed());
     }
     for line in diags {
-        let text = line.as_str().ok_or_else(|| malformed())?;
+        let text = line.as_str().ok_or_else(malformed)?;
         if text.len() > 4096 || text.chars().any(|c| c.is_control()) {
             return Err(malformed());
         }

@@ -159,6 +159,20 @@ pub fn fog_params_for_look_bake(
 pub fn bake_look_on_worker(
     capture: crate::sky::SkyCapture,
 ) -> Result<(crate::sky::SkyLookBake, f64), PresentError> {
+    // A browser tab has no second thread: the same bake runs on the calling thread, same bytes.
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::sky::bake_look_from_day(&capture).map_err(|e| rl8_err("bake", e))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    bake_look_on_thread(capture)
+}
+
+/// The worker-thread bake behind [`bake_look_on_worker`] on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+fn bake_look_on_thread(
+    capture: crate::sky::SkyCapture,
+) -> Result<(crate::sky::SkyLookBake, f64), PresentError> {
     let handle = crate::sky::spawn_look_bake(capture).map_err(|e| rl8_err("bake", e))?;
     handle
         .join()

@@ -265,7 +265,7 @@ pub fn time_kernel(
         black_box(f());
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
     }
-    samples.sort_by(|a, b| a.partial_cmp(b).expect("timings are finite"));
+    samples.sort_by(f64::total_cmp);
     let mean_ms = samples.iter().sum::<f64>() / samples.len().max(1) as f64;
     let ns_per_op = ops_per_sample.map(|ops| mean_ms * 1_000_000.0 / ops as f64);
     Timing {

@@ -1006,13 +1006,14 @@ _35 crates, 933 Rust files. One line per file: `crate/path` · lines · the file
 - `ui/src/tutorial.rs` · 584 · tutorial: guided first fight for a fresh profile.
 - `ui/tests/ime_commit.rs` · 25 · IME gate: commits insert at the cursor only when allowed, controls dropped.
 
-## web (engine-web, 6 files, 1494 lines)
-- `web/src/lib.rs` · 55 · web: the browser shell, a WebGPU device, a cleared canvas and one JSON line of facts (WEB4).
-- `web/src/anim.rs` · 301 · The visible parts of a frame, as pure functions of time so they run and test without a GPU:
+## web (engine-web, 7 files, 1820 lines)
+- `web/src/lib.rs` · 59 · web: the browser shell, a WebGPU device, a cleared canvas and one JSON line of facts (WEB4).
+- `web/src/anim.rs` · 322 · The visible parts of a frame, as pure functions of time so they run and test without a GPU:
+- `web/src/golden.rs` · 268 · The engine, not only the GPU: the golden tape and the break corpus, run inside the page.
 - `web/src/limits.rs` · 217 · What the shell asks the browser's GPU for, and how a device's answer is printed.
 - `web/src/recovery.rs` · 82 · How often the shell starts over after a lost device before it gives up.
 - `web/src/report.rs` · 354 · The one JSON line the page prints to itself and to the console.
-- `web/src/shell.rs` · 485 · Browser glue: the page's DOM, the WebGPU device through wgpu, and the animation loop.
+- `web/src/shell.rs` · 518 · Browser glue: the page's DOM, the WebGPU device through wgpu, and the animation loop.
 
 ## workspace-hack (engine-workspace-hack, 1 files, 2 lines)
 - `workspace-hack/src/lib.rs` · 2 · Workspace hack: union of dependency features (cargo-hakari pattern).

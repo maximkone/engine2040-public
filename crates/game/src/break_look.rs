@@ -23,9 +23,15 @@ use engine_physfx::{Error as FxError, Key, Material, PhysFx, Shard, Stats, Tier,
 use engine_render::present::MeshKey;
 use std::collections::BTreeMap;
 
-/// Mesh id block of break pieces. Each prop owns [`MAX_BONDED_CHUNKS`] ids of it, so two props
-/// never share a key.
+/// Mesh id block of break pieces. Each prop owns [`IDS_PER_PROP`] ids of it (two per chunk), so
+/// two props never share a key.
 pub const BREAK_MESH_ID_BASE: u64 = 0xB4EA_0000;
+/// Ids one prop owns in that block.
+const IDS_PER_PROP: u64 = 2048;
+const _: () = assert!(
+    MAX_BONDED_CHUNKS * 2 <= 2048,
+    "a prop's chunks must fit its id block"
+);
 /// Half-width of the floor the debris lands on, meters.
 const FLOOR_HALF_M: f32 = 50.0;
 /// Half-thickness of that floor slab, meters.
@@ -36,6 +42,18 @@ const PUSH_LIFT: f32 = 0.5;
 const MAX_KICK_MS: f32 = 12.0;
 /// Largest push handed to the physical layer, newton-seconds. It accepts 1e5 per axis.
 const MAX_PUSH_NS: f32 = 90_000.0;
+/// No side of a flying piece is thinner than this share of its longest side: rubble is chunky,
+/// and a fracture patch cut from a flat face has no thickness at all.
+const MIN_SIDE_SHARE: f32 = 0.25;
+/// A flying piece's body is this share of its chunk box. The boxes of neighbouring chunks overlap
+/// (they are boxes around cut cells), and bodies that start inside each other keep shoving; the
+/// margin lets them start apart and sleep sooner.
+const BODY_FIT: f32 = 0.8;
+/// Thinnest a piece is made, half-extent in meters: the physical layer refuses bodies under 1 cm.
+const MIN_BODY_HALF_M: f32 = 0.02;
+/// Largest piece the physical layer takes, half-extent in meters. A bigger chunk is a prop to
+/// split first.
+const MAX_BODY_HALF_M: f32 = 5.0;
 
 /// Why a prop or a call was refused.
 #[derive(Clone, Debug, PartialEq)]
@@ -89,10 +107,20 @@ impl std::error::Error for LookError {}
 /// its own origin, so a [`PieceDraw`] transform places it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PieceMesh {
-    /// Key of the piece, stable for the prop and the chunk size.
+    /// Key of the piece, stable for the prop, the chunk and the size.
     pub key: MeshKey,
-    /// Half-extents of the chunk box, meters.
+    /// Half-extents of the box, meters.
     pub half: [f32; 3],
+}
+
+/// The two boxes a chunk is drawn as.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChunkMeshes {
+    /// The chunk's own box, drawn while it stands in the wall.
+    pub standing: PieceMesh,
+    /// The box of the body the physical layer simulates, drawn while the chunk flies, so the
+    /// picture rests where the physics rests.
+    pub flying: PieceMesh,
 }
 
 /// One breakable prop as the picture knows it: the rest boxes of its chunks and how they hang
@@ -106,7 +134,7 @@ pub struct BreakProp {
     bonds: Vec<[usize; 2]>,
     /// Chunks that never fall, ascending and unique.
     anchors: Vec<usize>,
-    pieces: Vec<PieceMesh>,
+    pieces: Vec<ChunkMeshes>,
     /// Bottom of the lowest chunk: the ground the debris lands on.
     floor_y: f32,
 }
@@ -134,7 +162,10 @@ impl BreakProp {
             let finite = [c.x, c.y, c.z, c.hx, c.hy, c.hz, c.mass]
                 .iter()
                 .all(|v| v.is_finite());
-            if !finite || [c.hx, c.hy, c.hz, c.mass].iter().any(|v| *v <= 0.0) {
+            let sized = [c.hx, c.hy, c.hz]
+                .iter()
+                .all(|h| *h > 0.0 && *h <= MAX_BODY_HALF_M);
+            if !finite || !sized || c.mass <= 0.0 {
                 return Err(LookError::BadChunk(i));
             }
         }
@@ -156,14 +187,27 @@ impl BreakProp {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let half = [c.hx, c.hy, c.hz];
-                PieceMesh {
-                    key: piece_key(prop, i, half),
-                    half,
+                let chunk = [c.hx, c.hy, c.hz];
+                let longest = c.hx.max(c.hy).max(c.hz);
+                let standing = chunk.map(|h| h.max(MIN_BODY_HALF_M));
+                let flying = chunk
+                    .map(|h| (h.max(longest * MIN_SIDE_SHARE) * BODY_FIT).max(MIN_BODY_HALF_M));
+                ChunkMeshes {
+                    standing: PieceMesh {
+                        key: piece_key(prop, i, false, standing),
+                        half: standing,
+                    },
+                    flying: PieceMesh {
+                        key: piece_key(prop, i, true, flying),
+                        half: flying,
+                    },
                 }
             })
             .collect();
-        let floor_y = chunks.iter().map(|c| c.y - c.hy).fold(f32::INFINITY, f32::min);
+        let floor_y = chunks
+            .iter()
+            .map(|c| c.y - c.hy)
+            .fold(f32::INFINITY, f32::min);
         Ok(Self {
             intact,
             material,
@@ -262,12 +306,16 @@ impl BreakLook {
         };
         fx.add_static_box(
             [FLOOR_HALF_M, FLOOR_THICK_M, FLOOR_HALF_M],
-            [centre(|c| c.x), prop.floor_y - FLOOR_THICK_M, centre(|c| c.z)],
+            [
+                centre(|c| c.x),
+                prop.floor_y - FLOOR_THICK_M,
+                centre(|c| c.z),
+            ],
         )
         .map_err(LookError::Fx)?;
         for anchor in &prop.anchors {
             let c = prop.chunks[*anchor];
-            fx.add_static_box([c.hx, c.hy, c.hz], [c.x, c.y, c.z])
+            fx.add_static_box(prop.pieces[*anchor].standing.half, [c.x, c.y, c.z])
                 .map_err(LookError::Fx)?;
         }
         Ok(Self {
@@ -339,7 +387,7 @@ impl BreakLook {
             if *piece == Piece::Standing {
                 let c = self.prop.chunks[chunk];
                 draws.push(PieceDraw {
-                    mesh: self.prop.pieces[chunk].key,
+                    mesh: self.prop.pieces[chunk].standing.key,
                     at: Transform {
                         pos: [c.x, c.y, c.z],
                         ..Transform::IDENTITY
@@ -351,7 +399,7 @@ impl BreakLook {
             if let Key::Shard { batch, index } = body.key {
                 if let Some(chunk) = self.flying.get(&(batch, index)) {
                     draws.push(PieceDraw {
-                        mesh: self.prop.pieces[*chunk].key,
+                        mesh: self.prop.pieces[*chunk].flying.key,
                         at: body.at,
                     });
                 }
@@ -363,9 +411,9 @@ impl BreakLook {
         })
     }
 
-    /// The piece meshes to upload once, one per chunk in chunk order.
+    /// The piece meshes to upload once: two boxes per chunk, in chunk order.
     #[must_use]
-    pub fn meshes(&self) -> &[PieceMesh] {
+    pub fn meshes(&self) -> &[ChunkMeshes] {
         &self.prop.pieces
     }
 
@@ -437,7 +485,7 @@ impl BreakLook {
                         pos: [c.x, c.y, c.z],
                         ..Transform::IDENTITY
                     },
-                    half: [c.hx, c.hy, c.hz],
+                    half: self.prop.pieces[*i].flying.half,
                     velocity: [0.0; 3],
                 }
             })
@@ -478,12 +526,11 @@ fn unit(v: [f32; 3]) -> Option<[f32; 3]> {
     (len > 1e-6).then(|| v.map(|c| c / len))
 }
 
-/// Key of one chunk's mesh: the prop's id block plus the chunk index; the digest follows the
-/// chunk size, so a recooked prop uploads again.
-fn piece_key(prop: u16, chunk: usize, half: [f32; 3]) -> MeshKey {
-    let id = BREAK_MESH_ID_BASE
-        + u64::from(prop) * MAX_BONDED_CHUNKS as u64
-        + u64::try_from(chunk).unwrap_or(0);
+/// Key of one chunk's standing or flying box: the prop's id block, then two ids per chunk; the
+/// digest follows the box size, so a recooked prop uploads again.
+fn piece_key(prop: u16, chunk: usize, flying: bool, half: [f32; 3]) -> MeshKey {
+    let slot = u64::try_from(chunk).unwrap_or(0) * 2 + u64::from(flying);
+    let id = BREAK_MESH_ID_BASE + u64::from(prop) * IDS_PER_PROP + slot;
     let mut raw = [0u8; 12];
     for (slot, h) in raw.chunks_exact_mut(4).zip(half) {
         slot.copy_from_slice(&h.to_bits().to_le_bytes());
@@ -534,6 +581,9 @@ mod tests {
         }
     }
 
+    /// Chunks this near the hit take the blow too, as under a thrown boulder, meters.
+    const STRIKE_REACH_M: f32 = 1.6;
+
     /// The kit's north wall (actor 3), fractured around its middle and struck there on
     /// `BREAK_TICK`.
     struct WallBreak {
@@ -542,8 +592,13 @@ mod tests {
         events: Vec<BreakEvent>,
     }
 
-    /// `blow` is added to the impulse that just clears the authority's fracture gate.
+    /// `blow` is added to the impulse that just clears the authority's fracture gate, per chunk.
     fn wall_break(blow: f32) -> WallBreak {
+        wall_break_seeded(blow, 7)
+    }
+
+    /// [`wall_break`] with the fracture pattern of `seed`.
+    fn wall_break_seeded(blow: f32, seed: u64) -> WallBreak {
         let actor = kit_actors()
             .expect("placement parses")
             .into_iter()
@@ -555,23 +610,29 @@ mod tests {
         let spec = FractureSpec {
             cells: 24,
             radius_m: 1.2,
-            seed: 7,
+            seed,
         };
         let fracture = fracture_at(&box_shell(min, max), actor.pos_m, &spec).expect("fractures");
         let desc = fracture
             .to_desc(DEFAULT_BOND_STRAIN, BREAKING_THRESHOLD)
             .expect("descriptor");
         let mut field = BondedCollection::new(&desc).expect("collection");
-        let struck = usize::try_from(fracture.hit_chunk).expect("index");
-        let gate = field.chunk_mass(struck).expect("mass") * field.break_threshold();
-        field
-            .apply_impact(struck, gate + blow, BREAK_TICK)
-            .expect("impact");
+        for (chunk, c) in desc.chunks.iter().enumerate() {
+            let d = [0, 1, 2].map(|a| [c.x, c.y, c.z][a] - actor.pos_m[a]);
+            if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= STRIKE_REACH_M * STRIKE_REACH_M {
+                let gate = c.mass * field.break_threshold();
+                field
+                    .apply_impact(chunk, gate + blow, BREAK_TICK)
+                    .expect("impact");
+            }
+        }
         field.step(1.0 / 60.0);
+        let events = field.drain_events();
+        assert!(freed_count(&events) > 0, "a blow of {blow} frees nothing");
         WallBreak {
             actor,
             desc,
-            events: field.drain_events(),
+            events,
         }
     }
 
@@ -591,7 +652,11 @@ mod tests {
     /// Observes ticks `0..=until`, the wall's events on `BREAK_TICK` and nothing else.
     fn play(look: &mut BreakLook, wall: &WallBreak, until: u32) {
         for tick in 0..=until {
-            let events: &[BreakEvent] = if tick == BREAK_TICK { &wall.events } else { &[] };
+            let events: &[BreakEvent] = if tick == BREAK_TICK {
+                &wall.events
+            } else {
+                &[]
+            };
             look.observe(tick, events).expect("tick observed");
         }
     }
@@ -607,8 +672,7 @@ mod tests {
     /// drawn in its place.
     #[test]
     fn the_intact_mesh_is_hidden_on_the_break_tick() {
-        let wall = wall_break(1.0);
-        assert!(freed_count(&wall.events) > 0, "the impact frees chunks");
+        let wall = wall_break(6.0);
         let intact = kit_mesh_key(&wall.actor);
         let mut look = wall_look(Tier::Comfort, &wall);
         for tick in 0..BREAK_TICK {
@@ -623,7 +687,11 @@ mod tests {
         let frame = look.frame(0.0).expect("frame");
         assert_eq!(frame.hidden, vec![intact], "gone on the break tick itself");
         assert_eq!(frame.draws.len(), wall.desc.chunks.len());
-        let keys: Vec<MeshKey> = look.meshes().iter().map(|m| m.key).collect();
+        let keys: Vec<MeshKey> = look
+            .meshes()
+            .iter()
+            .flat_map(|m| [m.standing.key, m.flying.key])
+            .collect();
         assert!(frame.draws.iter().all(|d| keys.contains(&d.mesh)));
         assert!(frame.draws.iter().all(|d| d.mesh != intact));
         look.observe(BREAK_TICK + 1, &[]).expect("next tick");
@@ -634,11 +702,13 @@ mod tests {
     /// bodies, the first ones in the caller's order, and the picture draws exactly those.
     #[test]
     fn debris_count_stays_under_the_tier_cap() {
+        // A 20 x 10 field of cubes with room around each; every row hangs 0.3 m higher than the
+        // one before, so all but the first row fall.
         let chunks: Vec<Chunk3> = (0..200)
             .map(|k| Chunk3 {
-                x: f32::from(u8::try_from(k % 20).expect("small")) * 0.25,
-                y: 0.1 + f32::from(u8::try_from(k / 20).expect("small")) * 0.25,
-                z: 0.0,
+                x: f32::from(u8::try_from(k % 20).expect("small")) * 0.4,
+                y: 0.1 + f32::from(u8::try_from(k / 20).expect("small")) * 0.3,
+                z: f32::from(u8::try_from(k / 20).expect("small")) * 0.4,
                 hx: 0.1,
                 hy: 0.1,
                 hz: 0.1,
@@ -658,9 +728,12 @@ mod tests {
         look.observe(BREAK_TICK, &all).expect("break tick");
         assert_eq!(look.stats().bodies, cap, "the table is full, not over");
         let frame = look.frame(1.0).expect("frame");
-        let kept: Vec<MeshKey> = look.meshes()[..cap].iter().map(|m| m.key).collect();
+        let kept: Vec<MeshKey> = look.meshes()[..cap].iter().map(|m| m.flying.key).collect();
         let drawn: Vec<MeshKey> = frame.draws.iter().map(|d| d.mesh).collect();
-        assert_eq!(drawn, kept, "the first {cap} in the caller's order, no more");
+        assert_eq!(
+            drawn, kept,
+            "the first {cap} in the caller's order, no more"
+        );
         for tick in BREAK_TICK + 1..BREAK_TICK + SIX_SECONDS {
             look.observe(tick, &[]).expect("tick");
             assert!(look.stats().bodies <= cap);
@@ -670,15 +743,26 @@ mod tests {
         assert_eq!(look.stats().awake, 0, "the pile sleeps");
     }
 
-    /// Every debris body sleeps within six seconds of sim time, lands above the ground and the
-    /// blow really moved the pieces.
+    /// Every debris body sleeps within six seconds of sim time, whatever the fracture pattern,
+    /// and the pieces land above the ground, moved by the blow.
     #[test]
     fn debris_sleeps_within_six_seconds() {
-        let wall = wall_break(6.0);
-        let mut look = wall_look(Tier::Comfort, &wall);
-        play(&mut look, &wall, BREAK_TICK);
+        for seed in [7, 8, 11, 13] {
+            let ticks = settle(&wall_break_seeded(6.0, seed));
+            println!("break_look wall seed {seed}: asleep after {ticks} ticks");
+        }
+    }
+
+    /// Plays the wall's break and returns the ticks after the break tick until nothing is awake.
+    fn settle(wall: &WallBreak) -> u32 {
+        let mut look = wall_look(Tier::Comfort, wall);
+        play(&mut look, wall, BREAK_TICK);
         let bodies = look.stats().bodies;
-        assert_eq!(bodies, freed_count(&wall.events), "one body per freed chunk");
+        assert_eq!(
+            bodies,
+            freed_count(&wall.events),
+            "one body per freed chunk"
+        );
         assert!(bodies <= Tier::Comfort.caps().bodies);
         assert!(look.stats().awake > 0, "fresh debris is awake");
         let rest = look.frame(1.0).expect("frame");
@@ -691,11 +775,18 @@ mod tests {
             }
         }
         let ticks = asleep_at.expect("every body sleeps within 6 s");
-        println!("break_look wall: {bodies} bodies asleep after {ticks} ticks");
         let end = look.frame(1.0).expect("frame");
         assert_eq!(end.draws.len(), rest.draws.len(), "nothing was lost");
-        let floor = wall.desc.chunks.iter().map(|c| c.y - c.hy).fold(f32::MAX, f32::min);
-        assert!(end.draws.iter().all(|d| d.at.pos[1] > floor), "above the ground");
+        let floor = wall
+            .desc
+            .chunks
+            .iter()
+            .map(|c| c.y - c.hy)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            end.draws.iter().all(|d| d.at.pos[1] > floor),
+            "above the ground"
+        );
         let moved = end
             .draws
             .iter()
@@ -708,6 +799,7 @@ mod tests {
         assert!(moved > 0, "the pieces fell or flew from where they stood");
         let slept = look.frame(0.3).expect("frame");
         assert_eq!(slept, end, "asleep means the same at every alpha");
+        ticks
     }
 
     /// The same events on the same ticks give the same transforms; another blow does not.
@@ -718,7 +810,11 @@ mod tests {
             let mut look = wall_look(Tier::Comfort, &wall);
             let mut seen = Vec::new();
             for tick in 0..=BREAK_TICK + 40 {
-                let events: &[BreakEvent] = if tick == BREAK_TICK { &wall.events } else { &[] };
+                let events: &[BreakEvent] = if tick == BREAK_TICK {
+                    &wall.events
+                } else {
+                    &[]
+                };
                 look.observe(tick, events).expect("tick");
                 for alpha in [0.0, 0.5, 1.0] {
                     seen.push(look.frame(alpha).expect("frame"));
@@ -727,8 +823,12 @@ mod tests {
             seen
         };
         let first = run(6.0);
-        assert_eq!(first, run(6.0), "x2");
-        assert_ne!(first, run(1.0), "a harder blow throws the pieces differently");
+        assert!(first == run(6.0), "the same events replay x2");
+        let harder = run(12.0);
+        assert!(
+            first != harder,
+            "a harder blow throws the pieces differently"
+        );
     }
 
     fn input(tick: u32, fighter: u8, buttons: Buttons) -> FighterInput {
@@ -803,12 +903,25 @@ mod tests {
     /// A refused call changes nothing, and the same tick can be tried again.
     #[test]
     fn refused_events_and_ticks_leave_the_look_as_it_was() {
-        let wall = wall_break(1.0);
+        let wall = wall_break(6.0);
         let mut look = wall_look(Tier::Comfort, &wall);
-        let ghost_chunk = [BreakEvent::ChunkFreed { tick: 1, chunk: 9_999 }];
-        assert_eq!(look.observe(1, &ghost_chunk), Err(LookError::UnknownChunk(9_999)));
-        let ghost_bond = [BreakEvent::BondBroken { tick: 1, bond: 9_999, strain: 4.0 }];
-        assert_eq!(look.observe(1, &ghost_bond), Err(LookError::UnknownBond(9_999)));
+        let ghost_chunk = [BreakEvent::ChunkFreed {
+            tick: 1,
+            chunk: 9_999,
+        }];
+        assert_eq!(
+            look.observe(1, &ghost_chunk),
+            Err(LookError::UnknownChunk(9_999))
+        );
+        let ghost_bond = [BreakEvent::BondBroken {
+            tick: 1,
+            bond: 9_999,
+            strain: 4.0,
+        }];
+        assert_eq!(
+            look.observe(1, &ghost_bond),
+            Err(LookError::UnknownBond(9_999))
+        );
         assert_eq!(look.frame(1.0).expect("frame"), Frame::default());
         assert_eq!(look.stats().bodies, 0);
         // The refusals did not use up tick 1.
@@ -817,8 +930,15 @@ mod tests {
         assert!(!broken.hidden.is_empty());
         let stale = look.observe(1, &wall.events);
         assert_eq!(stale, Err(LookError::StaleTick { last: 1, got: 1 }));
-        assert_eq!(look.observe(0, &[]), Err(LookError::StaleTick { last: 1, got: 0 }));
-        assert_eq!(look.stats().bodies, freed_count(&wall.events), "no debris twice");
+        assert_eq!(
+            look.observe(0, &[]),
+            Err(LookError::StaleTick { last: 1, got: 0 })
+        );
+        assert_eq!(
+            look.stats().bodies,
+            freed_count(&wall.events),
+            "no debris twice"
+        );
         assert!(stale.expect_err("stale").to_string().contains("tick 1"));
         assert_eq!(
             look.frame(f32::NAN).unwrap_err(),
@@ -829,7 +949,7 @@ mod tests {
     /// A chunk freed twice (a replayed event on a later tick) is one body.
     #[test]
     fn a_chunk_freed_again_stays_one_body() {
-        let wall = wall_break(1.0);
+        let wall = wall_break(6.0);
         let mut look = wall_look(Tier::Comfort, &wall);
         play(&mut look, &wall, BREAK_TICK);
         let bodies = look.stats().bodies;
@@ -839,7 +959,8 @@ mod tests {
             .filter(|e| matches!(e, BreakEvent::ChunkFreed { .. }))
             .copied()
             .collect();
-        look.observe(BREAK_TICK + 1, &again).expect("replayed events");
+        look.observe(BREAK_TICK + 1, &again)
+            .expect("replayed events");
         assert_eq!(look.stats().bodies, bodies);
     }
 
@@ -861,28 +982,49 @@ mod tests {
         assert_eq!(build(&[], &[], &[]), Err(LookError::EmptyProp));
         let many = vec![chunk; MAX_BONDED_CHUNKS + 1];
         assert_eq!(build(&many, &[], &[]), Err(LookError::TooManyChunks));
-        let nan = Chunk3 { x: f32::NAN, ..chunk };
+        let nan = Chunk3 {
+            x: f32::NAN,
+            ..chunk
+        };
         assert_eq!(build(&[chunk, nan], &[], &[]), Err(LookError::BadChunk(1)));
         let flat = Chunk3 { hy: 0.0, ..chunk };
         assert_eq!(build(&[flat], &[], &[]), Err(LookError::BadChunk(0)));
-        let bond = Bond { a: 0, b: 7, breaking_strain: 1.0 };
+        let huge = Chunk3 { hx: 6.0, ..chunk };
+        assert_eq!(build(&[huge], &[], &[]), Err(LookError::BadChunk(0)));
+        let bond = Bond {
+            a: 0,
+            b: 7,
+            breaking_strain: 1.0,
+        };
         assert_eq!(build(&[chunk], &[bond], &[]), Err(LookError::BadBond(0)));
         assert_eq!(build(&[chunk], &[], &[0, 1]), Err(LookError::BadAnchor(1)));
-        assert_eq!(build(&[chunk], &[], &[0, 0]), Ok(()), "a repeated anchor is one anchor");
+        assert_eq!(
+            build(&[chunk], &[], &[0, 0]),
+            Ok(()),
+            "a repeated anchor is one anchor"
+        );
     }
 
     /// Two props never share a piece key, and a chunk's key follows its size.
     #[test]
     fn piece_keys_are_unique_per_prop_and_chunk() {
-        let wall = wall_break(1.0);
+        let wall = wall_break(6.0);
         let key = |prop: u16, chunks: &[Chunk3]| {
-            BreakProp::new(prop, MeshKey::new(1, [1; 32]), Material::Stone, chunks, &[], &[])
-                .expect("prop")
-                .pieces
-                .iter()
-                .map(|p| p.key)
-                .collect::<Vec<_>>()
+            BreakProp::new(
+                prop,
+                MeshKey::new(1, [1; 32]),
+                Material::Stone,
+                chunks,
+                &[],
+                &[],
+            )
+            .expect("prop")
+            .pieces
+            .iter()
+            .flat_map(|p| [p.standing.key, p.flying.key])
+            .collect::<Vec<_>>()
         };
+        // Standing and flying box of every chunk, in chunk order.
         let a = key(0, &wall.desc.chunks);
         let b = key(1, &wall.desc.chunks);
         let mut all: Vec<MeshKey> = a.iter().chain(&b).copied().collect();
@@ -890,11 +1032,13 @@ mod tests {
         all.dedup();
         assert_eq!(all.len(), a.len() + b.len());
         let mut wider = wall.desc.chunks.clone();
-        wider[0].hx *= 2.0;
+        wider[0].hy = 2.0;
         let c = key(0, &wider);
-        assert_eq!(c[0].id, a[0].id);
-        assert_ne!(c[0].digest, a[0].digest, "a recooked chunk uploads again");
-        assert_eq!(c[1], a[1]);
+        for k in 0..2 {
+            assert_eq!(c[k].id, a[k].id);
+            assert_ne!(c[k].digest, a[k].digest, "a recooked chunk uploads again");
+        }
+        assert_eq!(c[2..], a[2..], "the other chunks keep their keys");
     }
 
     #[test]

@@ -248,8 +248,9 @@ impl Hierarchy {
             None => return Err(HierarchyError::UnknownParent),
         };
         let local = relative(parent_world, world).ok_or(HierarchyError::DegenerateScale)?;
-        self.nodes.get_mut(&id).expect("node checked above").parent = new_parent;
-        self.nodes.get_mut(&id).expect("node checked above").local = local;
+        let slot = self.nodes.get_mut(&id).ok_or(HierarchyError::UnknownNode)?;
+        slot.parent = new_parent;
+        slot.local = local;
         Ok(())
     }
 
@@ -259,19 +260,28 @@ impl Hierarchy {
         let node = *self.nodes.get(&id).ok_or(HierarchyError::UnknownNode)?;
         // Precompute before mutating so a degenerate scale fails atomically.
         let mut relinked = Vec::new();
+        // Every child shares one grandparent: walk its chain once, on the first child.
+        let mut grandparent_world = None;
         for child in self.children(id) {
             let child_world = self.world(child).ok_or(HierarchyError::UnknownNode)?;
-            let grandparent_world = match self.world(node.parent) {
+            let parent_pose = match grandparent_world {
                 Some(pose) => pose,
-                None if node.parent.is_nil() => Transform::identity(),
-                None => return Err(HierarchyError::UnknownParent),
+                None => {
+                    let pose = match self.world(node.parent) {
+                        Some(pose) => pose,
+                        None if node.parent.is_nil() => Transform::identity(),
+                        None => return Err(HierarchyError::UnknownParent),
+                    };
+                    grandparent_world = Some(pose);
+                    pose
+                }
             };
             let local =
-                relative(grandparent_world, child_world).ok_or(HierarchyError::DegenerateScale)?;
+                relative(parent_pose, child_world).ok_or(HierarchyError::DegenerateScale)?;
             relinked.push((child, local));
         }
         for (child, local) in relinked {
-            let slot = self.nodes.get_mut(&child).expect("child listed above");
+            let slot = self.nodes.get_mut(&child).ok_or(HierarchyError::UnknownNode)?;
             slot.parent = node.parent;
             slot.local = local;
         }
@@ -315,6 +325,19 @@ impl Hierarchy {
             .collect();
         out.sort_by_key(|id: &ObjectId| id.as_uuid());
         out
+    }
+
+    /// Every node's direct children in one pass: parent id to child ids,
+    /// each list sorted like [`Hierarchy::children`]. Roots sit under the nil
+    /// key. Walking a whole tree through this map costs `O(n log n)`, where
+    /// calling [`Hierarchy::children`] per node costs `O(n^2)`.
+    pub fn child_map(&self) -> BTreeMap<ObjectId, Vec<ObjectId>> {
+        let mut map: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
+        // The node map iterates in id order, so each list lands sorted.
+        for (id, node) in &self.nodes {
+            map.entry(node.parent).or_default().push(*id);
+        }
+        map
     }
 
     /// Nodes without a parent, sorted by id.
@@ -701,6 +724,32 @@ mod tests {
             Err(HierarchyError::DegenerateScale)
         );
         assert_eq!(tree.parent(child), Some(ObjectId::NIL));
+    }
+
+    #[test]
+    fn child_map_matches_children_for_every_node() {
+        let mut tree = Hierarchy::new();
+        let mut ids = Vec::new();
+        for index in 0..40 {
+            let id = ObjectId::new();
+            let parent = if index < 4 {
+                ObjectId::NIL
+            } else {
+                ids[index % 4]
+            };
+            tree.insert(id, parent, pose([index as f32, 0.0, 0.0]))
+                .unwrap();
+            ids.push(id);
+        }
+        let map = tree.child_map();
+        assert_eq!(map.get(&ObjectId::NIL), Some(&tree.roots()));
+        for id in &ids {
+            let listed = map.get(id).cloned().unwrap_or_default();
+            assert_eq!(listed, tree.children(*id));
+        }
+        let listed: usize = map.values().map(Vec::len).sum();
+        assert_eq!(listed, tree.len(), "every node sits under one parent");
+        assert!(Hierarchy::new().child_map().is_empty());
     }
 
     #[test]

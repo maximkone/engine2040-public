@@ -4,7 +4,7 @@ Each row lowers a scorecard metric; `node tools/rust-quality.mjs --list
 <metric> --crate <crate>` is its work list. When a metric reaches zero in
 every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
 
-- [ ] CQ5 spatial: tick time — `staged.rs` reads `Instant::now` in
+- [x] CQ5 spatial: tick time — `staged.rs` reads `Instant::now` in Landed fb7466b1. staged.rs has no Instant; spatial 301 tests, clippy -D warnings, run 39052576461.
   production: elapsed time comes from the caller or `engine_core::Tick`;
   spatial adopts `tools/sim-clippy.toml`. Tier A. Size S. Owns
   `crates/spatial/src/staged.rs`. Accept: spatial nondet 0; config adopted;

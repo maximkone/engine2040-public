@@ -34,6 +34,7 @@ use engine_game::arena_kit::{
     kit_match_world_or_empty, kit_prop_rows, live_kit_notice, push_kit_draws, stage_kit_or_default,
     KitReport,
 };
+use engine_game::break_window::BreakScene;
 use engine_game::camera::{free_cam_step, CameraMode, DirectorParams};
 use engine_game::capture;
 use engine_game::crash;
@@ -44,10 +45,11 @@ use engine_game::input::{map_key, map_mouse};
 use engine_game::practice::PracticeSwap;
 use engine_game::reload::{settle_paths, HotReload};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
+use engine_game::window_audio_space::AudioSpace;
 use engine_game::windowed::{
     apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
     feed_tick_audio, fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row,
-    hud_cells_quads, hud_draw_list, msaa_setting, open_audio, push_fight_draws, smoke_muted,
+    hud_cells_quads, hud_draw_list, msaa_setting, push_fight_draws, smoke_muted,
     split_staged_flag, stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
     staged_session_config, surface_frame_action, StagedFighterDot, StagedTally, SurfaceFrameAction,
     TickAccumulator, WinArgs, WinError, FRAME_TIMES_CSV_HEADER, MSAA_ENV, WINDOWED_SAMPLE_RATE,
@@ -623,6 +625,14 @@ fn run(raw: &[String]) -> i32 {
             return 2;
         }
     };
+    // An automated `--exit` run must leave within its bound even when the
+    // loop wedges inside a driver call: the thread prints the receipt and exits.
+    if args.exit {
+        engine_game::windowed::arm_exit_watchdog(args.wall_limit_ms(), |err| {
+            tell!("arena: {err}");
+            std::process::exit(1);
+        });
+    }
     let config = match session_config(&args) {
         Ok(_) if staged => staged_session_config(),
         Ok(config) => config,
@@ -807,6 +817,9 @@ struct ArenaApp {
     feed_engine: Option<AudioEngine>,
     /// Reused stereo scratch for the offline feed pump (zero per tick).
     feed_scratch: Vec<f32>,
+    /// Where the room's ears are (the camera), the footstep strides, the
+    /// music level and the crowd bed: what `feed_tick_audio` keeps between ticks.
+    audio_space: AudioSpace,
     /// Live device stream when one opened; `None` degrades with a notice.
     _device: Option<engine_audio::device::DeviceOutput>,
     audio_notice: String,
@@ -819,6 +832,9 @@ struct ArenaApp {
     fight_draws: usize,
     /// Skinned CT7 fighters; `None` (refused load) draws the staged boxes.
     look: Option<FighterLook>,
+    /// The center crate: whole until a sword hit breaks it, then debris (RZ4w).
+    /// Presentation only, never hashed; `None` after a refused build or upload.
+    break_scene: Option<BreakScene>,
     /// Cached fighter draws for the last skinned tick: items plus draws,
     /// reused when the pose tick is unchanged so the 8-fighter skin runs
     /// once per tick instead of once per present. Presentation only.
@@ -945,12 +961,23 @@ impl ArenaApp {
     ) -> Result<Self, WinError> {
         let test_panic_at = arena_frame::test_panic_tick()?;
         let app = live_session(config)?;
+        let break_scene = BreakScene::new(&app.live_match().config());
         let mixer = Arc::new(Mutex::new(Mixer::new(WINDOWED_SAMPLE_RATE)));
         // Automated smoke never opens a device: `--mute` mutes explicitly and
         // `--exit`/`--timed-smoke` runs mute by construction; either way the
-        // mixer keeps rendering voices offline.
+        // cue engine keeps rendering offline.
         let muted = args.mute || smoke_muted(&args);
-        let (_device, audio_notice) = open_audio(Arc::clone(&mixer), muted);
+        // Arena cue bank once at startup: real `content/audio` takes only;
+        // missing clips fail loudly instead of falling back to silent synth.
+        // The device (when one opens) plays the cue engine the feed drives,
+        // so what the window hears is placed by the camera (EG21w).
+        let (cue_bank, _) = stage_arena_bank(WINDOWED_SAMPLE_RATE)?;
+        let arena_frame::CueFeedOpen {
+            tx: feed_tx,
+            engine: feed_engine,
+            device: _device,
+            notice: audio_notice,
+        } = arena_frame::open_cue_feed(Some(cue_bank), muted);
         if _device.is_some() {
             tell!("arena: {audio_notice}");
         } else {
@@ -964,12 +991,8 @@ impl ArenaApp {
         let boot = initial_flow(&args);
         // Hot reload (EG29 slice 1): content files plus shaders, see arena_frame.
         let watcher = arena_frame::watch_content_roots();
-        // Arena cue bank once at startup: real `content/audio` takes only;
-        // missing clips fail loudly instead of falling back to silent synth.
-        // The feed below plays the real takes; the mixer keeps rendering offline.
+        // Voices of the shared offline mixer (the mirror of the feed's plays).
         let bank = Bank::placeholder(WINDOWED_SAMPLE_RATE);
-        let (cue_bank, _) = stage_arena_bank(WINDOWED_SAMPLE_RATE)?;
-        let (feed_tx, feed_engine) = arena_frame::open_cue_feed(Some(cue_bank));
         let feed_scratch = vec![0.0f32; engine_game::windowed::FRAMES_PER_TICK * 2];
         let shell = Self {
             config,
@@ -980,6 +1003,7 @@ impl ArenaApp {
             feed_tx,
             feed_engine,
             feed_scratch,
+            audio_space: AudioSpace::new(),
             mixer,
             _device,
             audio_notice,
@@ -988,6 +1012,7 @@ impl ArenaApp {
             kit: KitReport::default(),
             fight_draws: 0,
             look: None,
+            break_scene,
             fighter_cache_tick: None,
             fighter_cache_fighters: 0,
             fighter_cache_draws: 0,
@@ -1075,6 +1100,7 @@ impl ArenaApp {
     /// (presentation only, never hashed). Loud on a refused rebuild.
     fn reset_bout(&mut self) -> Result<(), WinError> {
         self.app = live_session(self.config)?;
+        self.break_scene = BreakScene::new(&self.app.live_match().config());
         self.ticks_done = 0;
         self.acc = TickAccumulator::new();
         self.tick_scratch = TickOutcome::default();
@@ -1261,11 +1287,23 @@ impl ArenaApp {
         self.report_tape();
         if let Some(tx) = self.feed_tx.as_ref() {
             let stats = tx.stats();
+            let space = self.audio_space.stats();
             say!(
-                "arena audio feed: sent={} applied={} dropped_full={}",
+                "arena audio feed: sent={} applied={} dropped_full={} unknown_cue={}",
                 stats.sent,
                 stats.applied,
                 stats.dropped_full,
+                stats.unknown_cue,
+            );
+            say!(
+                "arena audio space: placed={} flat={} footsteps={} tension_sends={} tension_unheard={} bed_writes={} refused={}",
+                space.positioned,
+                space.flat,
+                space.footsteps,
+                space.tension_sends,
+                space.tension_unheard,
+                space.bed_writes,
+                space.refused,
             );
         }
         if self.args.timed_smoke {
@@ -1291,6 +1329,9 @@ impl ArenaApp {
         }
         if let Some(line) = self.view.line() {
             say!("{line}");
+        }
+        if let Some(scene) = self.break_scene.as_ref() {
+            say!("{}", scene.receipt_line());
         }
         if let Some(mut out) = self.view_brief.take() {
             if let Err(err) = out.flush() {
@@ -1458,6 +1499,7 @@ impl ArenaApp {
         if let Err(err) = self.push_fighters(&mut list) {
             return self.fail(event_loop, err, 1);
         }
+        self.push_break(&mut list);
         self.fighters_us = self
             .fighters_us
             .saturating_add(duration_us(fighters_started.elapsed()));
@@ -1467,6 +1509,10 @@ impl ArenaApp {
         if self.cam_mode == CameraMode::Free {
             self.aim_free_cam(&mut list);
         }
+        // The ears sit where the camera does (EG21w): the next tick's
+        // listener, so a blow on the left of the picture sounds on the left.
+        self.audio_space
+            .follow_camera(list.camera.eye.to_array(), list.camera.target.to_array());
         let receipt = {
             let Some(presenter) = self.presenter.as_mut() else {
                 self.fail(
@@ -1612,6 +1658,20 @@ impl ArenaApp {
             self.fight_draws = push_fight_draws(list, &resident, &dots)?;
         }
         Ok(())
+    }
+
+    /// The center crate over the frame list: whole, then its chunks and the debris they became
+    /// (RZ4w). Presentation only. A refused upload drops the picture loudly and the window
+    /// keeps running without the crate.
+    fn push_break(&mut self, list: &mut DrawList) {
+        let (Some(scene), Some(presenter)) = (self.break_scene.as_mut(), self.presenter.as_mut())
+        else {
+            return;
+        };
+        if let Err(why) = scene.push(presenter, list, self.last_alpha) {
+            tell!("arena notice: break picture dropped: {why}");
+            self.break_scene = None;
+        }
     }
 
     /// Explicit offscreen capture path: when an armed sink is due, render

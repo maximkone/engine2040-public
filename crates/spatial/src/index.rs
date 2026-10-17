@@ -3,6 +3,7 @@
 
 use super::Actor;
 
+/// Centimeters per meter, the scale of every integer index.
 pub const CM_PER_M: f32 = 100.0;
 
 /// XZ footprint in integer centimeters.
@@ -16,14 +17,17 @@ pub struct CmRect {
     pub area: i64,
 }
 
+/// Meters to integer centimeters, rounded to nearest.
 pub fn to_cm(v: f32) -> i32 {
     (v * CM_PER_M).round() as i32
 }
 
+/// True when the actor's position is finite on all three axes.
 pub fn pos_known(a: &Actor) -> bool {
     a.x.is_finite() && a.y.is_finite() && a.z.is_finite()
 }
 
+/// True when the actor's size is finite on all three axes.
 pub fn size_known(a: &Actor) -> bool {
     a.sx.is_finite() && a.sy.is_finite() && a.sz.is_finite()
 }
@@ -114,6 +118,7 @@ pub struct Box3 {
     pub max_z: i32,
 }
 
+/// Edge of one cell of the 3D grid, in centimeters.
 pub const XYZ_CELL_CM: i32 = 100;
 
 /// Volumes for actors with known position and size. Sorted for determinism.

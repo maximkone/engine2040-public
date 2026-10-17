@@ -190,6 +190,37 @@ fn blast_the_same_blast_twice_gives_the_same_velocities() {
 }
 
 #[test]
+fn blast_shoves_only_the_nearest_bodies_of_the_tier() {
+    let cap = Tier::Potato.caps().blast_bodies;
+    let mut fx = PhysFx::new(Tier::Potato);
+    // Farthest spawned first, so the nearest ones are the youngest: the cap picks by distance.
+    let total = cap + 10;
+    for k in (0..total).rev() {
+        fx.spawn_debris_of(
+            Material::Stone,
+            &[shard_at(0.5 + 0.25 * k as f32)],
+            [0.0; 3],
+        )
+        .expect("stone");
+    }
+    let blast = Blast {
+        radius_mm: 20_000,
+        ..BLAST
+    };
+    assert_eq!(fx.apply_blast(blast), Ok(cap), "the tier shoves {cap}");
+    let speeds = x_speeds(&mut fx);
+    let (far, near) = speeds.split_at(total - cap);
+    assert!(
+        far.iter().all(|v| *v == 0.0),
+        "the far ten stay put: {far:?}"
+    );
+    assert!(
+        near.iter().all(|v| *v > 1.0),
+        "the nearest are thrown: {near:?}"
+    );
+}
+
+#[test]
 fn blast_refusals_name_the_input_and_leave_the_world_unchanged() {
     let mut touched = scene();
     let mut control = scene();

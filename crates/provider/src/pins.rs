@@ -286,6 +286,13 @@ impl RequestPins {
         }
     }
 
+    /// Address of the system prompt a request of `kind` carries (see
+    /// [`crate::prompt`]); it lands in the exchange record.
+    #[must_use]
+    pub fn prompt_digest(&self, kind: TaskKind) -> u64 {
+        super::prompt::text_digest(self.system_for(kind))
+    }
+
     /// Pinned temperature, in thousandths.
     #[must_use]
     pub fn temperature_milli(&self) -> u16 {

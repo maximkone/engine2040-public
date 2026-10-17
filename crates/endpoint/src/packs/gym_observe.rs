@@ -372,14 +372,14 @@ mod tests {
         step(&server, hit.tick);
         let before = observe(&server);
         assert!(
-            !before.events.iter().any(|event| *event == hit),
+            !before.events.contains(&hit),
             "the hit has not happened yet at tick {}",
             hit.tick
         );
         step(&server, hit.tick + 1);
         let after = observe(&server);
         assert!(
-            after.events.iter().any(|event| *event == hit),
+            after.events.contains(&hit),
             "the hit shows in the very next observation"
         );
         assert_eq!(

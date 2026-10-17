@@ -186,16 +186,6 @@ pub struct FighterView {
 }
 
 impl FighterView {
-    /// True when every field matches (an idle slot the delta would omit).
-    #[must_use]
-    pub const fn same_as(self, other: Self) -> bool {
-        self.x_mm == other.x_mm
-            && self.y_mm == other.y_mm
-            && self.z_mm == other.z_mm
-            && self.yaw_ddeg == other.yaw_ddeg
-            && self.hp == other.hp
-            && self.stamina == other.stamina
-    }
 
     /// True when combat state (hp or stamina) changed since the baseline.
     #[must_use]

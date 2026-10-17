@@ -125,6 +125,8 @@ pub fn sample_track(tr: &QTrack, t: f32, hint: &mut usize) -> [f32; 3] {
     if tr.times.len() != tr.keys.len() || tr.times.is_empty() {
         return [0.0; 3];
     }
+    // NaN time maps to the first key, so a one-key track never reaches `interval`.
+    let t = if t.is_nan() { tr.times[0] } else { t };
     let last = tr.times.len() - 1;
     if t <= tr.times[0] {
         *hint = 0;
@@ -258,6 +260,20 @@ mod tests {
             max: [0.0; 3],
         };
         assert_eq!(sample_track(&empty, 0.5, &mut h3), [0.0; 3]);
+    }
+    #[test]
+    fn nan_time_on_a_one_key_track_returns_key_zero() {
+        let one = bake_track(vec![0.5], vec![[1.0, 2.0, 3.0]]);
+        let mut hint = 0;
+        let got = sample_track(&one, f32::NAN, &mut hint);
+        assert_eq!(got, sample_track(&one, 0.0, &mut 0));
+        assert_eq!(hint, 0);
+        for i in 0..3 {
+            assert!((got[i] - [1.0, 2.0, 3.0][i]).abs() < 2e-3, "{got:?}");
+        }
+        let c = lin();
+        let mut h = 0;
+        assert_eq!(sample_track(&c.tracks[0], f32::NAN, &mut h), sample_track(&c.tracks[0], 0.0, &mut 0));
     }
     #[test]
     fn quant_err_mid() {

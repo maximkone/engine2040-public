@@ -230,6 +230,9 @@ impl std::fmt::Display for TransportError {
 pub struct TransportResponse {
     /// HTTP status code.
     pub status: u16,
+    /// `Retry-After` in milliseconds when the server sent delta-seconds
+    /// (an HTTP-date is not read).
+    pub retry_after_ms: Option<u64>,
     /// Response body text.
     pub body: String,
 }
@@ -422,11 +425,17 @@ fn post_json_with(
     };
     stream.write_all(head.as_bytes()).map_err(write_error)?;
     stream.write_all(body.as_bytes()).map_err(write_error)?;
-    let (status, text) = read_response(&mut stream)?;
-    Ok(TransportResponse { status, body: text })
+    let (status, retry_after_ms, text) = read_response(&mut stream)?;
+    Ok(TransportResponse {
+        status,
+        retry_after_ms,
+        body: text,
+    })
 }
 
-fn read_response(stream: &mut TransportStream) -> Result<(u16, String), TransportError> {
+fn read_response(
+    stream: &mut TransportStream,
+) -> Result<(u16, Option<u64>, String), TransportError> {
     let mut raw: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {
@@ -451,10 +460,18 @@ fn read_response(stream: &mut TransportStream) -> Result<(u16, String), Transpor
     let mut lines = head.split("\r\n");
     let status = parse_status(lines.next().ok_or(TransportError::Protocol)?)?;
     let mut content_length: Option<usize> = None;
+    let mut retry_after_ms: Option<u64> = None;
     for line in lines {
         let lower = line.to_ascii_lowercase();
         if let Some(value) = lower.strip_prefix("content-length:") {
             content_length = value.trim().parse::<usize>().ok();
+        }
+        if let Some(value) = lower.strip_prefix("retry-after:") {
+            retry_after_ms = value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .map(|seconds| seconds.saturating_mul(1000));
         }
     }
     let mut body = raw.split_off(header_end + 4);
@@ -501,7 +518,7 @@ fn read_response(stream: &mut TransportStream) -> Result<(u16, String), Transpor
         return Err(TransportError::Redirect);
     }
     let text = String::from_utf8(body).map_err(|_| TransportError::BadEncoding)?;
-    Ok((status, text))
+    Ok((status, retry_after_ms, text))
 }
 
 fn find_header_end(raw: &[u8]) -> Option<usize> {
@@ -523,12 +540,13 @@ fn parse_status(line: &str) -> Result<u16, TransportError> {
 }
 
 /// Map a completed non-200 status to its contract error. Auth and quota
-/// refusals are [`AiError::QuotaAuth`]; redirects are refused per policy as
+/// refusals are [`AiError::QuotaAuth`]; redirects and refused request shapes
+/// (400, 404, 422: the same request would be refused again) are
 /// [`AiError::UnsupportedCapability`]; anything else is a retryable
 /// [`AiError::Unavailable`], never a guess.
 pub fn map_status(status: u16) -> AiError {
     match status {
-        300..=399 => AiError::UnsupportedCapability,
+        300..=399 | 400 | 404 | 422 => AiError::UnsupportedCapability,
         401 | 403 | 429 => AiError::QuotaAuth,
         408 => AiError::Timeout,
         _ => AiError::Unavailable,
@@ -823,6 +841,7 @@ mod tests {
     #[test]
     fn status_mapping_names_policy_refusals() {
         assert_eq!(map_status(301), AiError::UnsupportedCapability);
+        assert_eq!(map_status(400), AiError::UnsupportedCapability);
         assert_eq!(map_status(401), AiError::QuotaAuth);
         assert_eq!(map_status(403), AiError::QuotaAuth);
         assert_eq!(map_status(429), AiError::QuotaAuth);

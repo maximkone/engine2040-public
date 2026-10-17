@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HELP, analyzeFile, cloneKey, compare, functions, hitIsOwned, isPassthrough, lex, scopeRatchetToOwned, score, testLines, testOnlyFile } from "./rust-quality.mjs";
+import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, functions, hitIsOwned, isPassthrough, lex, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
 
 const lib = { crate: "engine-x", lib: true, bin: false, sim: false, hot: false, core: false, testFile: false };
 const sim = { ...lib, crate: "engine-physics", sim: true, hot: true };
@@ -40,6 +40,20 @@ test("a file opening with #![cfg(test)] after its docs is test code; a later one
   assert.equal(testOnlyFile("// note\n\n#![cfg(test)]\n"), true);
   assert.equal(testOnlyFile("fn f() {}\n#![cfg(test)]\n"), false);
   assert.equal(testOnlyFile("#[cfg(test)]\nmod tests {}\n"), false);
+});
+
+test("test paths and #[cfg(test)] file modules are test code", () => {
+  for (const p of ["src/tests/blast.rs", "src/a/tests/x.rs", "src/lod_test.rs", "src/wiring_tests.rs", "src/tests.rs"]) {
+    assert.equal(testPath(p), true, p);
+  }
+  for (const p of ["src/latest.rs", "src/contests/x.rs", "src/attest.rs", "src/lib.rs"]) {
+    assert.equal(testPath(p), false, p);
+  }
+  const lib_rs = "pub mod a;\n#[cfg(test)]\nmod stub;\n#[cfg(test)]\npub(crate) mod suite;\n#[cfg(test)]\nmod inline { }\nmod live;\n";
+  assert.deepEqual(cfgTestMods(lib_rs), ["stub", "suite"]);
+  assert.deepEqual(cfgTestModPaths("src/lib.rs", lib_rs), ["src/stub", "src/suite"]);
+  assert.deepEqual(cfgTestModPaths("src/mind.rs", "#[cfg(test)]\nmod conformance;\n"), ["src/mind/conformance"]);
+  assert.deepEqual(cfgTestModPaths("src/a/mod.rs", "#[cfg(test)]\nmod t;\n"), ["src/a/t"]);
 });
 
 test("test modules, #[test] fns and tests.rs files are not production code", () => {

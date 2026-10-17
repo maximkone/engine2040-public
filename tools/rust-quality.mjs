@@ -483,6 +483,30 @@ export function testOnlyFile(text) {
   return /^(?:\s*\/\/[^\n]*\n)*\s*#!\[cfg\(test\)\]/.test(text);
 }
 
+// Test code by path: tests/benches/examples roots, any `tests/` folder, `tests.rs`,
+// and `*_test.rs` / `*_tests.rs` files.
+export function testPath(inPkg) {
+  return /^(?:tests|benches|examples)\//.test(inPkg) || /(?:^|\/)tests\//.test(inPkg) || /(?:^|\/)(?:tests|[^/]+_tests?)\.rs$/.test(inPkg);
+}
+
+// Module names a file declares as `#[cfg(test)] mod x;` (file modules, not inline bodies).
+export function cfgTestMods(text) {
+  const names = [];
+  const re = /#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/g;
+  for (let m = re.exec(text); m; m = re.exec(text)) names.push(m[1]);
+  return names;
+}
+
+// Package-relative paths (`dir/x.rs`, `dir/x/mod.rs` and the `dir/x/` folder prefix)
+// of the modules `rel`'s text declares under `#[cfg(test)]`.
+export function cfgTestModPaths(rel, text) {
+  const slash = rel.lastIndexOf("/");
+  const dir = slash < 0 ? "" : rel.slice(0, slash);
+  const base = rel.slice(slash + 1);
+  const own = /^(?:lib|main|mod)\.rs$/.test(base) ? dir : `${dir ? `${dir}/` : ""}${base.replace(/\.rs$/, "")}`;
+  return cfgTestMods(text).map((n) => `${own ? `${own}/` : ""}${n}`);
+}
+
 // Measure the workspace. Returns per-crate metrics, hits and clone groups.
 // `filter`, when given, skips packages it rejects before any walk/read.
 // `useCache` reuses per-file metrics/hits/clones from CACHE_DIR; --no-cache passes false.
@@ -500,10 +524,17 @@ export function measure(root = ".", filter = null, useCache = true) {
     const files = pkg.roots.flatMap((r) => walk(join(pkg.dir, r)));
     const lib = existsSync(join(pkg.dir, "src", "lib.rs"));
     const total = { name: pkg.name, metrics: null, hits: {}, files: files.length };
+    const texts = new Map(files.map((f) => [f, readFileSync(f, "utf8")]));
+    const testMods = new Set();
+    for (const [f, t] of texts) {
+      if (!t.includes("#[cfg(test)]")) continue;
+      for (const p of cfgTestModPaths(relative(pkg.dir, f).split("\\").join("/"), t)) testMods.add(p);
+    }
     for (const file of files) {
       const rel = relative(root, file).split("\\").join("/");
       const inPkg = relative(pkg.dir, file).split("\\").join("/");
-      const text = readFileSync(file, "utf8");
+      const text = texts.get(file);
+      const declaredTest = [...testMods].some((p) => inPkg === `${p}.rs` || inPkg.startsWith(`${p}/`));
       const kind = {
         crate: pkg.name,
         lib,
@@ -511,7 +542,7 @@ export function measure(root = ".", filter = null, useCache = true) {
         sim: SIM_CRATES.includes(pkg.name),
         hot: HOT_CRATES.includes(pkg.name),
         core: pkg.name === "engine-core",
-        testFile: /^(?:tests|benches|examples)\//.test(inPkg) || /(?:^|\/)(?:tests|[^/]+_tests)\.rs$/.test(inPkg) || testOnlyFile(text),
+        testFile: testPath(inPkg) || declaredTest || testOnlyFile(text),
       };
       let cacheFile = null;
       let key = null;

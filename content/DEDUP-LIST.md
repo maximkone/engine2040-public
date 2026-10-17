@@ -17,4 +17,4 @@ Same-size groups (check before use):
 - 912 bytes x3: materials/reference/marble.json = materials/siege/marble.json, near materials/siege/stone.json.
 - 3,879 bytes x2: maps/manifest.json = maps/manifest_run1.json. Same for ludus report/manifest pairs.
 
-Unused (read-never, eyes or record only): previews, ref-sheets, report_run1, manifest_before, ct21-recook exports.
+Unused (read-never, eyes or record only): previews, ref-sheets, report_run1, ct21-recook exports.

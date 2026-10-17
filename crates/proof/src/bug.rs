@@ -263,14 +263,7 @@ const SECRET_MARKERS: &[&str] = &[
 
 /// Truncate `text` to `max_bytes` bytes on a `char` boundary.
 fn bound_str(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_owned();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
+    text[..text.floor_char_boundary(max_bytes)].to_owned()
 }
 
 /// Scrub secret-shaped text: truncate to [`MAX_MESSAGE_LEN`], then replace

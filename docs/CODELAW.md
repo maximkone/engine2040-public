@@ -46,7 +46,7 @@ Every packet and review checks these. A packet that breaks one is rejected.
 16. **Measured, not claimed.** `node tools/rust-quality.mjs` scores every
     crate (`docs/RUST-QUALITY.md`); no packet raises a crate's debt count,
     new crates enter at grade A, and new lines pass the `rust-*` rules of
-    `tools/packet-gate.mjs`. The baseline only goes down.
+    `docs/RUST-QUALITY.md` layer 2. The baseline only goes down.
 17. **Exceptions carry a reason.** `#[expect(lint, reason = "...")]`, never
     `#[allow]`; `#[ignore = "<why>"]`; waivers `// det-ok: <why>` and
     `// alloc-ok: <why>` are counted and reviewed like code.

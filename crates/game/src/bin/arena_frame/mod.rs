@@ -2,6 +2,7 @@
 //! helpers `ArenaApp::new` calls, the fixed-tick loop `tick_and_present`
 //! runs, and the per-pass timing report written at exit. The methods stay on
 //! `ArenaApp` (defined in the crate root); this module only moves them out.
+use engine_audio::device::{AudioSink, DeviceOutput};
 use engine_audio::CueBank;
 
 use super::*;
@@ -47,22 +48,64 @@ pub(super) fn test_panic_tick() -> Result<Option<u32>, WinError> {
     }
 }
 
-/// Feed sender plus offline engine for the arena cue bank: the real takes
-/// when the bank decoded, nothing when it did not.
-pub(super) fn open_cue_feed(
-    cue_opt: Option<Arc<CueBank>>,
-) -> (Option<FeedTx>, Option<AudioEngine>) {
-    match cue_opt {
-        Some(cue_bank) => {
-            let (tx, engine) = AudioEngine::with_feed(
-                cue_bank,
-                engine_audio::FEED_CAPACITY,
-                WINDOWED_SAMPLE_RATE,
-                2040,
+/// What opening the cue feed produced: the sender, then either the live
+/// device that owns the engine or the offline engine the game thread pumps,
+/// plus the one-line state of the audio for the log.
+pub(super) struct CueFeedOpen {
+    pub(super) tx: Option<FeedTx>,
+    /// Offline engine, pumped by `run_sim_ticks`; `None` while a device plays.
+    pub(super) engine: Option<AudioEngine>,
+    /// Live stream that owns the engine; `None` when muted or refused.
+    pub(super) device: Option<DeviceOutput>,
+    pub(super) notice: String,
+}
+
+/// Feed sender plus the engine behind it for the arena cue bank: the real
+/// takes when the bank decoded, nothing when it did not. Unless `muted`, the
+/// default device plays the engine itself, so the feed's placed voices are
+/// the ones heard; a refused open (or `muted`) keeps an offline engine over
+/// the same bank and says why in `notice` (never silent about it).
+pub(super) fn open_cue_feed(cue_opt: Option<Arc<CueBank>>, muted: bool) -> CueFeedOpen {
+    let Some(cue_bank) = cue_opt else {
+        return CueFeedOpen {
+            tx: None,
+            engine: None,
+            device: None,
+            notice: "audio degraded: no cue bank".to_string(),
+        };
+    };
+    let (tx, sink, refusal) = AudioSink::open(
+        &cue_bank,
+        engine_audio::FEED_CAPACITY,
+        WINDOWED_SAMPLE_RATE,
+        2040,
+        muted,
+    );
+    let (engine, device, notice) = match (sink, refusal) {
+        (AudioSink::Device(output), _) => {
+            let notice = format!(
+                "audio live: {}ch {}Hz",
+                output.channels(),
+                output.sample_rate()
             );
-            (Some(tx), Some(engine))
+            (None, Some(output), notice)
         }
-        None => (None, None),
+        (AudioSink::Offline(engine), Some(err)) => (
+            Some(engine),
+            None,
+            format!("audio degraded: {err}; cue engine renders offline"),
+        ),
+        (AudioSink::Offline(engine), None) => (
+            Some(engine),
+            None,
+            engine_game::windowed::MUTED_AUDIO_NOTICE.to_string(),
+        ),
+    };
+    CueFeedOpen {
+        tx: Some(tx),
+        engine,
+        device,
+        notice,
     }
 }
 
@@ -244,19 +287,25 @@ impl ArenaApp {
             // counted): a busy mixer never loses commands because the feed
             // already queued them with the camera listener.
             if let Some(tx) = self.feed_tx.as_mut() {
-                feed_tick_audio(tx, tick, &self.tick_scratch);
+                feed_tick_audio(
+                    tx,
+                    &mut self.audio_space,
+                    tick,
+                    &self.tick_scratch,
+                    self.app.fighter_views(),
+                );
             }
-            // Audible mirror into the shared mixer (best effort): a refused
-            // lock loses audible voices only, never feed commands which are
-            // already queued and counted above.
-            if let Ok(mut mixer) = self.mixer.try_lock() {
-                for command in &self.tick_scratch.audio {
-                    mixer.play(self.bank.get(command.sound), command.gain);
-                }
-                // Offline render only while no device stream is live: the
-                // device callback pulls voices itself when connected.
-                // Reused buffer keeps the per-tick path heap-free.
-                if self._device.is_none() {
+            // Offline mirror into the shared mixer (best effort), only while
+            // no device stream is live: with a device the feed's engine is
+            // what plays, and a mixer nobody renders would just grow voices.
+            // A refused lock loses mirror voices only, never feed commands
+            // which are already queued and counted above. Reused buffer keeps
+            // the per-tick path heap-free.
+            if self._device.is_none() {
+                if let Ok(mut mixer) = self.mixer.try_lock() {
+                    for command in &self.tick_scratch.audio {
+                        mixer.play(self.bank.get(command.sound), command.gain);
+                    }
                     mixer.render_into(&mut self.audio_scratch);
                 }
             }

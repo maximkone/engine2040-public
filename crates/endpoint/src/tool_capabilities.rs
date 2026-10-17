@@ -186,6 +186,48 @@ pub fn card_for_tool(tool: &str) -> CapabilityCard {
     }
 }
 
+/// Which axis a refusal sits on: the tool and its grant, or this one turn.
+///
+/// A weak model reads the tag to pick the right retry: a `Tool` refusal
+/// never passes by resending the same call (reach for another tool or a
+/// wider grant), a `Turn` refusal passes by reshaping this one call.
+///
+/// ```
+/// use engine_endpoint::tool_capabilities::{check_tool_call, RefusalAxis};
+///
+/// assert_eq!(check_tool_call("shell.exec").axis(), Some(RefusalAxis::Tool));
+/// assert_eq!(check_tool_call("scene.read").axis(), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalAxis {
+    /// The tool, the op class, the object scope, the edit budget or the
+    /// session tier is the limit: the same call cannot pass this session.
+    Tool,
+    /// This call's own shape or cost is the limit: a smaller or valid batch
+    /// passes now.
+    Turn,
+}
+
+impl RefusalAxis {
+    /// Short axis name for the wire tag and logs.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::Turn => "turn",
+        }
+    }
+
+    /// One-line recovery hint for this axis.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Tool => {
+                "do not resend this call; use a granted tool or op class, or ask for a wider grant"
+            }
+            Self::Turn => "resend now with a smaller or valid batch; the grant is not the limit",
+        }
+    }
+}
+
 /// The machine check that ran for one verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckKind {
@@ -225,6 +267,23 @@ impl CheckKind {
             Self::JournalUndo => "journal_undo",
             Self::UnknownTool => "unknown_tool",
             Self::WriteGate => "write_gate",
+        }
+    }
+
+    /// Axis a refusal by this check sits on; `None` for the read-only
+    /// admission, which never refuses. Shape and cost checks are `Turn`;
+    /// every grant, tier, name and route check is `Tool`.
+    pub fn axis(self) -> Option<RefusalAxis> {
+        match self {
+            Self::ReadOnly => None,
+            Self::PreviewShape | Self::CostCaps => Some(RefusalAxis::Turn),
+            Self::OpMask
+            | Self::ObjectScope
+            | Self::EditBudget
+            | Self::DestructiveTier
+            | Self::JournalUndo
+            | Self::UnknownTool
+            | Self::WriteGate => Some(RefusalAxis::Tool),
         }
     }
 }
@@ -292,15 +351,34 @@ impl Verdict {
             )
     }
 
-    /// Verdict as a tool error: `None` when admitted, so callers keep the
-    /// check that ran beside the value read back without a second call.
-    pub fn as_tool_error(&self) -> Option<McpToolError> {
+    /// Axis tag of a refusal: `None` when the call is admitted, so a legit
+    /// call never carries a refusal tag.
+    pub fn axis(&self) -> Option<RefusalAxis> {
         if self.allowed {
             None
         } else {
-            Some(McpToolError::new(self.code, self.message.clone()))
+            self.check.axis()
         }
     }
+
+    /// Verdict as a tool error: `None` when admitted, so callers keep the
+    /// check that ran beside the value read back without a second call. A
+    /// refusal carries its axis tag and hint in `data`.
+    pub fn as_tool_error(&self) -> Option<McpToolError> {
+        let axis = self.axis()?;
+        Some(tagged(
+            McpToolError::new(self.code, self.message.clone()),
+            axis,
+        ))
+    }
+}
+
+/// Attach the axis tag and its recovery hint to a refusal as `data`.
+fn tagged(error: McpToolError, axis: RefusalAxis) -> McpToolError {
+    error.with_data(rmcp::serde_json::json!({
+        "axis": axis.name(),
+        "hint": axis.hint(),
+    }))
 }
 
 /// True when a refusal message carries at least one recovery cue, so a weak
@@ -559,6 +637,20 @@ pub fn load_scope_policy(path: &str) -> Result<ScopePolicy, ScopePolicyError> {
     parse_scope_policy(&text)
 }
 
+/// The stale-policy refusal: the grant file, not the call, is the limit.
+fn stale_policy(policy: &ScopePolicy) -> McpToolError {
+    tagged(
+        McpToolError::new(
+            "stale_policy",
+            format!(
+                "scope policy version {} is stale; re-run with scope-policy-version: {SCOPE_POLICY_VERSION}",
+                policy.version()
+            ),
+        ),
+        RefusalAxis::Tool,
+    )
+}
+
 /// Refuse one bare tool name under a versioned policy.
 ///
 /// A stale version refuses with `stale_policy` naming the shipped version;
@@ -566,13 +658,7 @@ pub fn load_scope_policy(path: &str) -> Result<ScopePolicy, ScopePolicyError> {
 /// exactly as before. Pure: reads the table only.
 pub fn refuse_tool_call_with_policy(tool: &str, policy: &ScopePolicy) -> Option<McpToolError> {
     if policy.version() != SCOPE_POLICY_VERSION {
-        return Some(McpToolError::new(
-            "stale_policy",
-            format!(
-                "scope policy version {} is stale; re-run with scope-policy-version: {SCOPE_POLICY_VERSION}",
-                policy.version()
-            ),
-        ));
+        return Some(stale_policy(policy));
     }
     let verdict = check_tool_call(tool);
     if verdict.card == CapabilityCard::Deny {
@@ -595,13 +681,7 @@ pub fn refuse_write_with_policy(
     policy: &ScopePolicy,
 ) -> Option<McpToolError> {
     if policy.version() != SCOPE_POLICY_VERSION {
-        return Some(McpToolError::new(
-            "stale_policy",
-            format!(
-                "scope policy version {} is stale; re-run with scope-policy-version: {SCOPE_POLICY_VERSION}",
-                policy.version()
-            ),
-        ));
+        return Some(stale_policy(policy));
     }
     check_write(doc, batch, cap, caps, DOOR_TIER).as_tool_error()
 }
@@ -649,7 +729,7 @@ pub fn refuse_preview(doc: &Document, batch: &Batch, caps: &ExplainCaps) -> Opti
     }
     check_batch(doc, batch, caps)
         .err()
-        .map(|refusal| refusal.to_tool_error(caps))
+        .map(|refusal| tagged(refusal.to_tool_error(caps), RefusalAxis::Turn))
 }
 
 /// Refuse one mutating batch under the Commit card at [`DOOR_TIER`]: shape,
@@ -803,6 +883,8 @@ pub struct CaseOutcome {
     pub check: CheckKind,
     /// True when the call was admitted.
     pub allowed: bool,
+    /// Axis tag of a refusal; `None` for an admitted call.
+    pub axis: Option<RefusalAxis>,
     /// Machine code of the verdict.
     pub code: &'static str,
     /// Detail with the legal values plus one recovery.
@@ -895,6 +977,7 @@ impl Suite {
             card: verdict.card,
             check: verdict.check,
             allowed: verdict.allowed,
+            axis: verdict.axis(),
             code: verdict.code,
             message: verdict.message.clone(),
             doc_unchanged: doc.revision == before,
@@ -917,6 +1000,7 @@ impl Suite {
             card: verdict.card,
             check: verdict.check,
             allowed: verdict.allowed,
+            axis: verdict.axis(),
             code: verdict.code,
             message: verdict.message.clone(),
             doc_unchanged: doc.revision == before,
@@ -1396,6 +1480,75 @@ mod tests {
                 assert_eq!(error.code, outcome.code);
             }
         }
+    }
+
+    /// Hand-labeled axis per adversarial brief, independent of the check
+    /// table: `Some(true)` tool axis, `Some(false)` turn axis, `None` legit.
+    const BRIEF_AXES: [(&str, Option<bool>); 20] = [
+        ("read_ready", None),
+        ("preview_valid_insert", None),
+        ("apply_valid_move", None),
+        ("preview_empty", Some(false)),
+        ("preview_too_many", Some(false)),
+        ("commit_insert_mask_none", Some(true)),
+        ("commit_delete_mask_insert_only", Some(true)),
+        ("commit_move_mask_edit_only", Some(true)),
+        ("commit_insert_out_of_scope", Some(true)),
+        ("commit_reparent_out_of_scope", Some(true)),
+        ("commit_over_budget", Some(true)),
+        ("commit_zero_budget", Some(true)),
+        ("commit_explain_objects", Some(false)),
+        ("commit_explain_bytes", Some(false)),
+        ("commit_explain_nav", Some(false)),
+        ("commit_explain_dirty", Some(false)),
+        ("commit_remove_tier_zero", Some(true)),
+        ("commit_remove_mask_without_delete", Some(true)),
+        ("door_unknown_shell", Some(true)),
+        ("door_unknown_empty", Some(true)),
+    ];
+
+    #[test]
+    fn refusals_carry_the_right_axis_tag_and_hint() {
+        let report = run_adversarial_suite();
+        assert_eq!(report.outcomes.len(), BRIEF_AXES.len());
+        let mut correct = 0_u32;
+        for (outcome, (name, want)) in report.outcomes.iter().zip(BRIEF_AXES) {
+            assert_eq!(outcome.name, name, "brief order drifted");
+            let got = outcome.axis.map(|axis| axis == RefusalAxis::Tool);
+            if got == want {
+                correct += 1;
+            }
+            // Zero legit false positives: an admitted call is never tagged.
+            if outcome.allowed {
+                assert_eq!(outcome.axis, None, "legit brief `{name}` got a tag");
+            }
+        }
+        assert!(
+            correct * 100 >= 80 * 20,
+            "axis tags correct on {correct}/20 briefs, need >= 80%"
+        );
+        assert_eq!(
+            correct, 20,
+            "every adversarial brief tags on the right axis"
+        );
+        // The tag rides the wire error beside the code, with the hint.
+        let doc = Document::new();
+        let empty = Suite::batch_with(Vec::new(), doc.revision, 70);
+        let turn = refuse_preview(&doc, &empty, &ExplainCaps::default_caps()).expect("refuses");
+        let data = turn.data().expect("turn refusal carries data");
+        assert_eq!(data["axis"], "turn");
+        assert_eq!(data["hint"], RefusalAxis::Turn.hint());
+        let tool = refuse_tool_call("shell.exec").expect("unknown denies");
+        assert_eq!(
+            tool.data().expect("tool refusal carries data")["axis"],
+            "tool"
+        );
+        let stale = parse_scope_policy("scope-policy-version: 999\n").expect("stale parses");
+        let stale = refuse_tool_call_with_policy("scene.read", &stale).expect("stale refuses");
+        assert_eq!(
+            stale.data().expect("stale policy is tagged")["axis"],
+            "tool"
+        );
     }
 
     #[test]

@@ -14,11 +14,10 @@ and proven by `proof/` through the engine's own lanes. Nothing outside
 | `hdri/arena_{day,sunset,night}.hdr` | Original CC0 skies, Radiance RGBE 128×64, one per time of day |
 | `hdri/polyhaven-studio-small-09-1k.hdr` | Poly Haven CC0 studio HDRI 1k (probe capture reference; also proof-fixture HDRI) |
 | `placement.json` | 11-actor parade placement (disjoint XZ footprints, all resting, inside ±99 m) |
-| `manifest.json` | sha256 + bytes per generated file (the provenance admits) |
+| `manifest.json` | sole truth for the kit bytes: sha256 + bytes per generated file (src, 2k maps, ORMs, HDRIs). `node tools/arena-report.mjs` checks it against disk; the stale pre-kit manifest is deleted (CT82) |
 | `report.json` | Proof output: LOD chains, digests, bundle, spatial verdict |
 | `report_run1.json` | SUPERSEDED iteration (merged boxes, empty LODs — the refused run, kept as the repair record) |
 | `report_run2.json` | Previous run of the current kit, byte-identical to `report.json` |
-| `manifest_before.json` | HISTORICAL pre-regen snapshot, NOT byte-identical to `manifest.json` (e.g. `src/sand_floor.gltf` 28231 bytes here vs 1791278 bytes now; hashes differ) |
 | `previews/preview_*.png` (8) | Front/side/top renders of the COOKED LOD0 meshes + 1.8 m reference figure |
 | `content/arena/tools/gen.mjs` | Deterministic generator (geometry, PNG, RGBE, placement, manifest, proof bindings) |
 | `content/arena/tools/placement_data.rs` | Generated Rust bindings (placement table, PBR factors, COL mesh indices) |

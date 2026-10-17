@@ -140,11 +140,6 @@ pub fn quantize_yaw_rad(yaw: f32) -> i16 {
     wrap_decideg(decideg)
 }
 
-/// Dequantize decidegrees back to radians.
-pub fn dequantize_yaw_ddeg(q: i16) -> f32 {
-    f32::from(q) / 10.0 * core::f32::consts::PI / 180.0
-}
-
 /// Wrap integer decidegrees to `[-1800, 1800)`.
 pub(crate) fn wrap_decideg(d: i32) -> i16 {
     let mut w = d % 3600;

@@ -25,6 +25,7 @@ use super::mock::ProviderAdapter;
 use super::pins::RequestPins;
 use super::policy::{AiSessionPolicy, JobState, ProviderCapabilities};
 use super::protocol::{AiError, AiRequest, PrivacyMode, Proposal, ProposalAction, Usage};
+use super::retry;
 use super::stream::{
     parse_sse_stream, SourceLabel, SseFrame, StreamConfig, StreamError, StreamJob,
 };
@@ -896,7 +897,11 @@ impl HttpAdapter {
             }
             _ => None,
         };
-        self.note_ladder(LadderReport { scripted, ..report });
+        self.note_ladder(LadderReport {
+            scripted,
+            prompt: Some(self.pins.prompt_digest(request.kind)),
+            ..report
+        });
         outcome
     }
 
@@ -916,7 +921,10 @@ impl HttpAdapter {
         }
         let body = (wire.body)(request, &self.pins.at(rung));
         self.socket_attempts += 1;
-        match transport::post_json(&self.endpoint, &body, token, left_ms) {
+        let gate = retry::gate_for(&self.endpoint);
+        let sent =
+            retry::post_json_retrying(&self.endpoint, &body, token, left_ms, request.id.0, &gate);
+        match sent {
             Ok(response) => {
                 self.transport_calls += 1;
                 if response.status != 200 {
@@ -972,6 +980,7 @@ impl HttpAdapter {
         let auth = auth.clone();
         let body = (wire.body)(request, &self.pins);
         let transport_timeout = request.budget.max_ms.clamp(1, 30_000);
+        let seed = request.id.0;
         let source = if transport::is_loopback(endpoint.host()) {
             SourceLabel::Recorded
         } else {
@@ -989,7 +998,16 @@ impl HttpAdapter {
                 feed.fail(StreamError::Unavailable);
                 return;
             };
-            match transport::post_json(&endpoint, &body, Some(&token), transport_timeout) {
+            let gate = retry::gate_for(&endpoint);
+            let sent = retry::post_json_retrying(
+                &endpoint,
+                &body,
+                Some(&token),
+                transport_timeout,
+                seed,
+                &gate,
+            );
+            match sent {
                 Ok(response) => {
                     if response.status != 200 {
                         feed.fail(status_failure(response.status));
@@ -1286,7 +1304,7 @@ fn rung_status_failure(status: u16) -> RungFailure {
 fn status_failure(status: u16) -> StreamError {
     match transport::map_status(status) {
         AiError::Timeout => StreamError::Timeout,
-        AiError::UnsupportedCapability => StreamError::Offline,
+        AiError::UnsupportedCapability if (300..400).contains(&status) => StreamError::Offline,
         _ => StreamError::Unavailable,
     }
 }

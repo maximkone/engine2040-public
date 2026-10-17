@@ -31,6 +31,7 @@ const TAG_PLAY_AT: u32 = 2;
 const TAG_LISTENER: u32 = 3;
 const TAG_STOP: u32 = 4;
 const TAG_TENSION: u32 = 5;
+const TAG_TRIM: u32 = 6;
 
 /// One cue play request, tick-stamped.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +75,16 @@ pub enum Command {
         /// Level to move to.
         level: Tension,
     },
+    /// Ride every live voice of a looped cue (the crowd bed) at `gain`
+    /// without restarting it; absolute, `1.0` is the play level.
+    Trim {
+        /// Fixed tick the command was emitted on.
+        tick: u32,
+        /// Cue whose voices to ride.
+        cue: CueId,
+        /// Multiplier, sanitized by the mixer.
+        gain: f32,
+    },
 }
 
 impl Command {
@@ -81,9 +92,10 @@ impl Command {
     pub fn tick(&self) -> u32 {
         match *self {
             Self::Play(play) => play.tick,
-            Self::Listener { tick, .. } | Self::Stop { tick, .. } | Self::Tension { tick, .. } => {
-                tick
-            }
+            Self::Listener { tick, .. }
+            | Self::Stop { tick, .. }
+            | Self::Tension { tick, .. }
+            | Self::Trim { tick, .. } => tick,
         }
     }
 }
@@ -203,6 +215,9 @@ impl Slot {
             Command::Tension { tick, level } => {
                 [TAG_TENSION, u32::from(level.level()), tick, 0, 0, 0, 0, 0]
             }
+            Command::Trim { tick, cue, gain } => {
+                [TAG_TRIM, u32::from(cue.0), tick, gain.to_bits(), 0, 0, 0, 0]
+            }
         };
         for (cell, word) in self.0.iter().zip(words) {
             cell.store(word, Ordering::Relaxed);
@@ -233,6 +248,11 @@ impl Slot {
             TAG_TENSION => Some(Command::Tension {
                 tick: w(2),
                 level: Tension::from_level(u8::try_from(w(1)).ok()?)?,
+            }),
+            TAG_TRIM => Some(Command::Trim {
+                tick: w(2),
+                cue: cue()?,
+                gain: f32::from_bits(w(3)),
             }),
             _ => None,
         }
@@ -378,6 +398,24 @@ impl FeedTx {
     /// As [`Self::send`].
     pub fn tension(&mut self, tick: u32, level: Tension) -> Result<(), FeedError> {
         self.send(Command::Tension { tick, level })
+    }
+
+    /// Queue a live level for every voice of the looped cue called `cue`
+    /// (the crowd bed): call each tick the level moves. Absolute, so `1.0`
+    /// puts the bed back at its play level; a cue with no live voice ignores
+    /// it on the audio side.
+    ///
+    /// # Errors
+    ///
+    /// [`FeedError::UnknownCue`] (counted) for a name the bank lacks, else
+    /// as [`Self::send`].
+    pub fn trim(&mut self, tick: u32, cue: &str, gain: f32) -> Result<(), FeedError> {
+        let id = self.resolve(cue)?;
+        self.send(Command::Trim {
+            tick,
+            cue: id,
+            gain,
+        })
     }
 
     /// Queue a one-shot stinger (a cue in [`Group::Stinger`]) that ducks the

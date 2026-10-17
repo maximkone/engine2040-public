@@ -89,60 +89,44 @@ Detail per drop lives in `textures/SAND-PROVENANCE.md`,
 shipped nothing (linen albedo rejected on eyes-check, see
 `CLOTH-PROVENANCE.md:33-43`).
 
-## Per-map bytes + VRAM estimate (re-measured 2026-10-09)
+## Per-map bytes + VRAM estimate (generated)
 
-Bytes and dims below were re-read from disk in this lane (node
-stdlib: `stat` + SHA-256 twice + JPEG SOF / PNG IHDR / HDR header
-parse). All 19 files report `BYTES-MATCH` and `SHA-MATCH-X2` against
-`content/arena/manifest.json`. VRAM is an estimate only, formula:
-`w*h*4 bytes RGBA8 x 4/3` for the full mip chain. It is an upper
-bound (the engine may use compressed uploads); measured VRAM on the
-reference GPU is OPEN (see Caps).
+Everything in the block below is written by `node tools/arena-report.mjs --write`
+from the files on disk (stat, SHA-256, JPEG SOF / PNG IHDR / HDR header) and
+`manifest.json`; `node tools/arena-report.mjs` fails when it goes stale. Roughness
+JPEGs are staged and provenanced but NOT bound: a grayscale rough map would read
+metalness ~0.9 from the B channel, and the authored ORM carries rough in G with B=0.
+The two night/sunset HDRIs sit in `content/local/hdri` (SIZE-BUDGET.md) and are read from there.
 
-| File | Disk bytes | Dims (parsed) | VRAM est. RGBA8+mips |
-|---|---|---|---|
-| `hdri/arena_day.hdr` | 22384990 | 4096x2048 | 44739243 |
-| `hdri/arena_sunset.hdr` | 22841596 | 4096x2048 | 44739243 |
-| `hdri/arena_night.hdr` | 27968841 | 4096x2048 | 44739243 |
-| `textures/sand_albedo_2k.jpg` | 457152 | 2048x2048 | 22369621 |
-| `textures/sand_normal_2k.jpg` | 863847 | 2048x2048 | 22369621 |
-| `textures/sand_roughness_2k.jpg` | 505596 | 2048x2048 | 22369621 |
-| `textures/stone_albedo_2k.jpg` | 2066659 | 2048x2048 | 22369621 |
-| `textures/stone_normal_2k.jpg` | 2182355 | 2048x2048 | 22369621 |
-| `textures/stone_roughness_2k.jpg` | 1607004 | 2048x2048 | 22369621 |
-| `textures/wood_albedo_2k.jpg` | 1940468 | 2048x2048 | 22369621 |
-| `textures/wood_normal_2k.jpg` | 3135183 | 2048x2048 | 22369621 |
-| `textures/wood_roughness_2k.jpg` | 1010429 | 2048x2048 | 22369621 |
-| `textures/cloth_albedo_2k.jpg` | 3195339 | 2048x1971 | 21528576 |
-| `textures/cloth_normal_2k.jpg` | 2656496 | 2048x1971 | 21528576 |
-| `textures/cloth_roughness_2k.jpg` | 3891940 | 2048x1972 | 21539499 |
-| `textures/sand_orm.png` | 664 | 256x256 | 349525 |
-| `textures/stone_orm.png` | 664 | 256x256 | 349525 |
-| `textures/wood_orm.png` | 664 | 256x256 | 349525 |
-| `textures/cloth_orm.png` | 664 | 256x256 | 349525 |
+<!-- gen:pbr-vram -->
+| File | Disk bytes | SHA-256 | Dims | VRAM est. RGBA8+mips | Bound |
+| --- | --- | --- | --- | --- | --- |
+| `hdri/arena_day.hdr` | 22384990 | `c3ddb9860a308449718f1187bf988638f09eb155ad1eed45ac7ab6607eda47c0` | 4096x2048 | 44739242 | one active HDRI |
+| `hdri/arena_sunset.hdr` (content/local/hdri) | 22841596 | `f243a060f84df1437705d2e50bbdbcce66aa55ddb2d913c18eb3f87873213b10` | 4096x2048 | 44739242 | no |
+| `hdri/arena_night.hdr` (content/local/hdri) | 27968841 | `66452c13b77cd8dbdd44b8ff9837d304c64d5d095ef3c93b31465024a2fb0d07` | 4096x2048 | 44739242 | no |
+| `textures/sand_albedo_2k.jpg` | 457152 | `1803d7e2861b304bea6d2e124dcd4c657fcb93843b84c17bb2db98ce48a87e4e` | 2048x2048 | 22369621 | yes |
+| `textures/sand_normal_2k.jpg` | 863847 | `0f35185b7225fe2027897bb7e4586c7deb048817524f1ed104fdae7ce80bdc06` | 2048x2048 | 22369621 | yes |
+| `textures/sand_roughness_2k.jpg` | 505596 | `318b440c109de7411f9e7443f38ae3cf873f34e90afd762c931bae3b23426da2` | 2048x2048 | 22369621 | no |
+| `textures/stone_albedo_2k.jpg` | 2066659 | `4571ff357e041bacb75ab06ad1958e74a0b396e0f3d8b9dc9d4717f704996304` | 2048x2048 | 22369621 | yes |
+| `textures/stone_normal_2k.jpg` | 2182355 | `b367bdae7a75df039f3425a6eb9d395cd390a7a67b581bec89a44d2a31a8dbdc` | 2048x2048 | 22369621 | yes |
+| `textures/stone_roughness_2k.jpg` | 1607004 | `98495e70e919ea892f2119100e64d8d5a5accb9982703fdd923477e7f2a346fb` | 2048x2048 | 22369621 | no |
+| `textures/wood_albedo_2k.jpg` | 1940468 | `02a124390e368fe7ae4bb98235fd02113cd4159fd5a7ea580ccba3e319b3577b` | 2048x2048 | 22369621 | yes |
+| `textures/wood_normal_2k.jpg` | 3135183 | `a7ff9954729e7d4dd678b1e35a2edacef9246e45d25a714c000ce95e3cc4e436` | 2048x2048 | 22369621 | yes |
+| `textures/wood_roughness_2k.jpg` | 1010429 | `6b9761d9955a6405e73d0040348cf856bfa3d94127baab3b177cdd8d27390f95` | 2048x2048 | 22369621 | no |
+| `textures/cloth_albedo_2k.jpg` | 3195339 | `7c81a1577f50a023825d8d5e26ec7f8596e47534d8ff601aa0b074980833e875` | 2048x1971 | 21528576 | yes |
+| `textures/cloth_normal_2k.jpg` | 2656496 | `20207c7b1e4328f8b8b635435d33d5adf23c44f045d1f711b4105999d1883745` | 2048x1971 | 21528576 | yes |
+| `textures/cloth_roughness_2k.jpg` | 3891940 | `23f0b2bfdf7f88bff072878bb763c6e825ab154da50b51040b607911b74154c3` | 2048x1972 | 21539498 | no |
+| `textures/sand_orm.png` | 664 | `dab40fa6e1cf645b0418f6fe3dbaf95bc6c6839677eea15026a2cfb2ab57baaa` | 256x256 | 349525 | yes |
+| `textures/stone_orm.png` | 664 | `55c28331a119efccdd555460024a179d7427894f11c7d06d4a9c9cc1a56fb39f` | 256x256 | 349525 | yes |
+| `textures/wood_orm.png` | 664 | `3ff77c78f00914c17c68484d728acc6e4c0b6d0a269f0606fac74126173a34c0` | 256x256 | 349525 | yes |
+| `textures/cloth_orm.png` | 664 | `ee00980f79c991be07c3015869efd6478388e3fa3e08240b7625f59986b246f1` | 256x256 | 349525 | yes |
 
-Totals for the 19 staged files: disk 96710551 bytes (~92.2 MiB);
-estimate sum if everything were bound at once 401539069 bytes
-(~383.0 MiB). Only one HDRI is active per time of day and the four
-`*_roughness_2k.jpg` files are staged but NOT GPU-bound (see Caps),
-so the active bound set is far smaller.
-
-## VRAM caps (estimate + OPEN measured)
-
-Bound set (what the glTF embeds actually bind; roughness JPEGs are
-staged + provenanced but NOT bound because a grayscale rough map
-would read metalness ~0.9 from the B channel; the authored ORM
-carries rough in G with B=0):
-
-- Sand bound: albedo 22369621 + normal 22369621 + ORM 349525 = 45088767
-- Stone bound: albedo 22369621 + normal 22369621 + ORM 349525 = 45088767
-- Wood bound: albedo 22369621 + normal 22369621 + ORM 349525 = 45088767
-- Cloth bound: albedo 21528576 + normal 21528576 + ORM 349525 = 43406677
-- Bound PBR total: 178672978 bytes (~170.4 MiB)
-- Plus one active 4k HDRI: 44739243 bytes (~42.7 MiB)
-- Active bound estimate: 223412221 bytes (~213.1 MiB)
-- Staged-but-unbound roughness estimate (0 GPU cost): 88648362 bytes
-  (~84.5 MiB) that is NOT uploaded.
+- Bound PBR set (albedo + normal + ORM per material): 178672978 bytes (170.4 MiB).
+- Plus one active 4k HDRI: 44739242 bytes. Active bound estimate: 223412220 bytes (213.1 MiB).
+- Cap, potato tier (2 GB VRAM floor): 268435456 bytes (256.0 MiB): PASS.
+- Cap, comfortable tier (3050 class): 1073741824 bytes (1024.0 MiB): PASS.
+- Estimate is an upper bound (RGBA8 plus full mips, no compressed upload). Measured VRAM with the adapter and driver line needs the reference GPU and is not claimed here.
+<!-- /gen:pbr-vram -->
 
 Caps: every bound map is <= 2048 per edge (POT except velvet
 2048x1971/1972, cook-legal per `CLOTH-PROVENANCE.md:77-82`), every
@@ -160,7 +144,7 @@ rides the Q1/RA14 pilot. No measured VRAM is claimed here.
   2 ignored (2026-10-09, this lane). Covers `cook_texture` first-cook
   == second-cook (`crates/assets/src/texture.rs:291-292,318-319`).
 - File identity: all 19 files above `BYTES-MATCH` + `SHA-MATCH-X2`
-  against `manifest.json` (re-hash script `$env:TEMP\opencode\ct45-measure.mjs`).
+  against `manifest.json` (re-hash with `node tools/arena-report.mjs`).
 - Bundle: bytes 93026981, entries 172, `identical_twice: true`,
   `corrupt_refused: true` (`report.json:4`, `report_run2.json:4`).
 - Spatial: actors 11, findings 0, verdict clean, hash
@@ -212,5 +196,5 @@ of CT45.
 
 Commands run (this lane): `cargo test --locked -p engine-assets
 --lib` (128 passed, 0 failed, 2 ignored);
-`node "$env:TEMP\opencode\ct45-measure.mjs"` (19/19 BYTES-MATCH +
+`node tools/arena-report.mjs` (19/19 BYTES-MATCH +
 SHA-MATCH-X2, totals disk 96710551 / est 401539069).

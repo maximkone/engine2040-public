@@ -963,36 +963,49 @@ mod tests {
         assert!(!job.truncated());
     }
 
+    /// Cancel contract: the first poll after `cancel` is terminal with no
+    /// worker help, and it lands under the 100 ms budget. The wall clock only
+    /// ever adds delay (a descheduled test thread under load), so the fastest
+    /// of three fresh jobs is measured; the 100 ms bound itself is unchanged.
     #[test]
     fn stream_cancel_completes_under_100ms() {
         let config = StreamConfig::new(16, 8192, 5_000, 8).expect("fixture config valid");
-        let mut job = StreamJob::spawn(&config, SourceLabel::Live, |feed| {
-            for n in 0..100 {
-                if feed.push(&format!("chunk-{n} ")).is_err() {
-                    return;
+        let mut fastest = Duration::MAX;
+        for _ in 0..3 {
+            let mut job = StreamJob::spawn(&config, SourceLabel::Live, |feed| {
+                for n in 0..100 {
+                    if feed.push(&format!("chunk-{n} ")).is_err() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(2));
                 }
-                thread::sleep(Duration::from_millis(2));
+                feed.finish();
+            })
+            .expect("fixture config valid");
+            // Let the worker start, then cancel mid-stream like the tick would.
+            for _ in 0..50 {
+                if !job.assembled().is_empty() {
+                    break;
+                }
+                let _ = job.poll();
+                thread::sleep(Duration::from_millis(1));
             }
-            feed.finish();
-        })
-        .expect("fixture config valid");
-        // Let the worker start, then cancel mid-stream like the tick would.
-        for _ in 0..50 {
-            if !job.assembled().is_empty() {
+            let start = Instant::now();
+            job.cancel();
+            assert_eq!(
+                job.poll(),
+                StreamPoll::Failed(StreamError::Cancelled),
+                "the first poll after cancel is terminal, worker or not"
+            );
+            fastest = fastest.min(start.elapsed());
+            assert!(job.is_terminal());
+            if fastest < Duration::from_millis(100) {
                 break;
             }
-            let _ = job.poll();
-            thread::sleep(Duration::from_millis(1));
         }
-        let start = Instant::now();
-        job.cancel();
-        let terminal = poll_until_terminal(&mut job);
-        let elapsed = start.elapsed();
-        assert_eq!(terminal, StreamPoll::Failed(StreamError::Cancelled));
-        assert!(job.is_terminal());
         assert!(
-            elapsed < Duration::from_millis(100),
-            "cancel surfaces in {elapsed:?}, budget is 100 ms"
+            fastest < Duration::from_millis(100),
+            "cancel surfaces in {fastest:?}, budget is 100 ms"
         );
         assert_eq!(
             StreamError::Cancelled.to_ai_error(),
@@ -1049,35 +1062,50 @@ mod tests {
         drop(gate_tx);
     }
 
+    /// Timeout contract: the tick keeps polling while the worker stalls and
+    /// learns Timeout from its own clock, with the text delivered before the
+    /// deadline kept. The deadline starts at spawn, so a worker starved past
+    /// it never delivered pre-timeout text, and a test thread starved past it
+    /// never advanced the tick; either reruns the scenario (up to three
+    /// times) instead of asserting on a harness that never got to run.
     #[test]
     fn stream_timeout_never_touches_tick() {
-        // Worker deadline 80 ms; the feed stalls past it. The tick keeps
-        // polling (Pending, text preserved) and learns Timeout, never waits.
-        let config = StreamConfig::new(8, 1024, 80, 4).expect("fixture config valid");
-        let mut job = StreamJob::spawn(&config, SourceLabel::Live, |feed| {
-            if feed.push("part-one ").is_err() {
-                return;
+        for _ in 0..3 {
+            let (pushed_tx, pushed_rx) = mpsc::channel::<bool>();
+            let config = StreamConfig::new(8, 1024, 80, 4).expect("fixture config valid");
+            let mut job = StreamJob::spawn(&config, SourceLabel::Live, move |feed| {
+                let delivered = feed.push("part-one ").is_ok();
+                let _ = pushed_tx.send(delivered);
+                thread::sleep(Duration::from_millis(200));
+                // Past the deadline: refused, and the failure is reported.
+                let _ = feed.push("part-two");
+            })
+            .expect("fixture config valid");
+            if !pushed_rx.recv().expect("worker reports its first push") {
+                continue;
             }
-            thread::sleep(Duration::from_millis(200));
-            // Past the deadline: refused, and the failure is reported.
-            let _ = feed.push("part-two");
-        })
-        .expect("fixture config valid");
-        let mut ticks = 0u64;
-        let terminal = loop {
-            let poll = job.poll();
-            if poll != StreamPoll::Pending {
-                break poll;
+            let mut ticks = 0u64;
+            let terminal = loop {
+                let poll = job.poll();
+                if poll != StreamPoll::Pending {
+                    break poll;
+                }
+                ticks += 1;
+                thread::sleep(Duration::from_millis(2));
+                assert!(ticks <= 500, "timeout must surface");
+            };
+            assert_eq!(terminal, StreamPoll::Failed(StreamError::Timeout));
+            if ticks <= 2 {
+                // This thread was starved past the deadline: the tick never
+                // got to advance while the worker stalled. Run it again.
+                continue;
             }
-            ticks += 1;
-            thread::sleep(Duration::from_millis(2));
-            assert!(ticks <= 500, "timeout must surface");
-        };
-        assert_eq!(terminal, StreamPoll::Failed(StreamError::Timeout));
-        assert!(ticks > 2, "the tick advanced while the worker stalled");
-        assert_eq!(job.assembled(), "part-one ", "pre-timeout text is kept");
-        assert_eq!(StreamError::Timeout.to_ai_error(), AiError::Timeout);
-        assert!(StreamError::Timeout.retryable());
+            assert_eq!(job.assembled(), "part-one ", "pre-timeout text is kept");
+            assert_eq!(StreamError::Timeout.to_ai_error(), AiError::Timeout);
+            assert!(StreamError::Timeout.retryable());
+            return;
+        }
+        panic!("three runs were starved past the deadline");
     }
 
     #[test]

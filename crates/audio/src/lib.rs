@@ -266,6 +266,9 @@ struct Voice {
     /// Q24 level applied on top of the gains: [`LEVEL_ONE`] unless fading.
     level: u32,
     fade: Fade,
+    /// Live multiplier set by [`Mixer::set_cue_trim`] (`1.0` untouched): how
+    /// the game rides a looped bed up and down without restarting it.
+    trim: f32,
 }
 
 /// A voice's level ramp, in Q24 steps per frame.
@@ -677,6 +680,7 @@ impl Mixer {
             route,
             level,
             fade,
+            trim: 1.0,
         });
         id
     }
@@ -774,6 +778,22 @@ impl Mixer {
         before - self.voices.len()
     }
 
+    /// Set the live multiplier of every voice of `cue` to `trim`
+    /// (sanitized into `0.0..=MAX_GAIN`); returns how many voices took it.
+    /// Absolute, not cumulative: `1.0` puts the voices back at their play
+    /// level. A cue with no live voice is a no-op (`0`).
+    pub fn set_cue_trim(&mut self, cue: CueId, trim: f32) -> usize {
+        let trim = sanitize_gain(trim);
+        let mut touched = 0;
+        for voice in &mut self.voices {
+            if voice.route.map(|route| route.cue) == Some(cue) {
+                voice.trim = trim;
+                touched += 1;
+            }
+        }
+        touched
+    }
+
     /// Music duck gain right now (`1.0` untouched, falling toward
     /// [`DUCK_FLOOR_PERCENT`] percent while dialogue plays).
     pub fn duck_gain(&self) -> f32 {
@@ -805,7 +825,7 @@ impl Mixer {
             duck: false,
         };
         for v in &self.voices {
-            let ramp = v.fade_gain();
+            let ramp = v.fade_gain() * v.trim;
             let (l, r) = if mono {
                 let gain = 0.5 * (v.gain_l + v.gain_r) * ramp;
                 (mono_in(&v.data, v.channels, v.cursor) * gain, 0.0)

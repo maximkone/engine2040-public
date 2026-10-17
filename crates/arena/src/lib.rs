@@ -68,6 +68,7 @@ pub mod parity;
 pub mod probe;
 pub mod recorder;
 pub mod seed;
+pub mod spec;
 #[cfg(feature = "spine")]
 pub mod spine_step;
 pub mod sync;
@@ -90,6 +91,7 @@ pub use gym::{
     GymSnapshot, GYM_ACTION_ATTACK, GYM_ACTION_BLOCK, GYM_ACTION_DODGE, GYM_NUM_ACTIONS,
 };
 pub use live::{LiveMatch, LivePresentation, LiveTick};
+pub use spec::MatchSpec;
 
 use core::f32::consts::PI;
 
@@ -2186,6 +2188,49 @@ const CRATE_HALF_M: f32 = 0.5;
 /// Crate chunk count.
 const CRATE_PIECES: usize = 8;
 
+/// The bonded crate prop as it stands before its first step: what a picture of the break
+/// needs to draw the crate whole and then as chunks. Read-only; the sim never reads it back.
+///
+/// Caller: `crates/game/src/break_window.rs` builds the window's break picture from it.
+/// Units: meters, Y up. Determinism: the same config gives the same chunks, bonds and anchors
+/// as the crate every live match of that config wires (same bake, same seed). Budget: one
+/// bake at window start, never per tick.
+#[derive(Clone, Debug)]
+pub struct CrateRest {
+    /// Center of the whole crate, meters.
+    pub center_m: [f32; 3],
+    /// Half-extent of the whole crate, meters.
+    pub half_m: f32,
+    /// Chunk boxes in the collection's index order (the `chunk` of a break event indexes it).
+    pub chunks: Vec<engine_destruction::bonded::Chunk3>,
+    /// Bonds in the collection's order (the `bond` of a break event indexes it).
+    pub bonds: Vec<engine_destruction::bonded::Bond>,
+    /// Chunks that never fall.
+    pub anchors: Vec<u32>,
+}
+
+/// The crate prop a match of `config` wires, at rest; `None` when the bake is refused (the
+/// same case that rejects the match). Additive and read-only: no sim state changes.
+#[must_use]
+pub fn crate_rest(config: &ArenaConfig) -> Option<CrateRest> {
+    let collection = BondedCollection::crate_prop(
+        CRATE_CENTER_M[0],
+        CRATE_CENTER_M[1],
+        CRATE_CENTER_M[2],
+        CRATE_HALF_M,
+        CRATE_PIECES,
+        crate_seed(config),
+    )
+    .ok()?;
+    Some(CrateRest {
+        center_m: CRATE_CENTER_M,
+        half_m: CRATE_HALF_M,
+        chunks: collection.chunks().to_vec(),
+        bonds: collection.bonds().to_vec(),
+        anchors: collection.anchors(),
+    })
+}
+
 /// Crate bake seed: the stream word right after the fighter spawn words, so
 /// the same config wires the same crate and neighbouring seeds differ.
 fn crate_seed(config: &ArenaConfig) -> u64 {
@@ -3498,6 +3543,37 @@ mod tests {
         assert!(idle.iter().all(|row| row.events.is_empty()));
         // Breaks ride the checkpoints: the attack run diverges from idle.
         assert_ne!(run(&config, &tape), run(&config, &idle_tape(&config)));
+    }
+
+    #[test]
+    fn crate_rest_names_the_crate_the_match_breaks() {
+        let config = short_config();
+        let rest = crate_rest(&config).expect("the crate bakes");
+        assert_eq!(rest.center_m, CRATE_CENTER_M);
+        assert!(!rest.chunks.is_empty() && !rest.anchors.is_empty());
+        let again = crate_rest(&config).expect("the crate bakes twice");
+        assert_eq!(rest.chunks.len(), again.chunks.len());
+        assert_eq!(rest.bonds.len(), again.bonds.len());
+        assert_eq!(rest.anchors, again.anchors);
+        // Every index a live break names is a chunk or a bond of this rest crate.
+        let breaks = run_breaks(&config, &attack_tape(&config));
+        let mut named = 0usize;
+        for event in breaks.iter().flat_map(|row| row.events.iter()) {
+            match *event {
+                BreakEvent::BondBroken { bond, .. } => {
+                    assert!((bond as usize) < rest.bonds.len(), "bond {bond}");
+                }
+                BreakEvent::ChunkFreed { chunk, .. } => {
+                    assert!((chunk as usize) < rest.chunks.len(), "chunk {chunk}");
+                }
+            }
+            named += 1;
+        }
+        assert!(named > 0, "the attack tape breaks the crate");
+        // A bad config bakes nothing it should not: the seed alone moves the pattern.
+        let other = ArenaConfig { seed: 7, ..config };
+        let moved = crate_rest(&other).expect("another seed bakes");
+        assert_eq!(moved.chunks.len(), rest.chunks.len());
     }
 
     #[test]

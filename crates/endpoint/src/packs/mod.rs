@@ -1,5 +1,5 @@
-//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, fourteen packs load on
-//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics` in [`PACK_NAMES`]), and every verb registers through one typed API.
+//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, fifteen packs load on
+//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `web` in [`PACK_NAMES`]), and every verb registers through one typed API.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists its core tools plus
 //! the packs a session loaded (`api.load`), dispatches any verb by exact
@@ -60,9 +60,11 @@ pub mod replay;
 pub mod rules;
 pub mod scene;
 pub mod view;
+/// Browser loop: `build.web`, `serve.web`, `browser.capture`, `browser.input`, refused until the project allows web.
+pub mod web;
 
 /// Every pack name, in contract order. Each name has one module below.
-pub const PACK_NAMES: [&str; 14] = [
+pub const PACK_NAMES: [&str; 15] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -77,6 +79,7 @@ pub const PACK_NAMES: [&str; 14] = [
     play::PACK,
     replay::PACK,
     physics::PACK,
+    web::PACK,
 ];
 
 /// Core tool: call one verb from any pack by exact name.
@@ -443,7 +446,7 @@ impl PackRegistry {
         self.packs.push(pack);
     }
 
-    /// The shipped registry: the fourteen packs of [`PACK_NAMES`], built once.
+    /// The shipped registry: the fifteen packs of [`PACK_NAMES`], built once.
     /// Registration errors never panic here; the guard test asserts the
     /// shipped list is clean.
     pub fn shipped() -> &'static Self {
@@ -464,6 +467,7 @@ impl PackRegistry {
                 play::pack(),
                 replay::pack(),
                 physics::pack(),
+                web::pack(),
             ])
         })
     }
@@ -963,7 +967,7 @@ mod tests {
         );
         assert_eq!(registry.verb_names(), vec![TOOL_SCENE_BRIEF]);
         assert_eq!(
-            registry.models_for(&["view"].into_iter().collect()).len(),
+            registry.models_for(&std::iter::once("view").collect()).len(),
             0,
             "the losing duplicate advertises nothing"
         );
@@ -993,7 +997,7 @@ mod tests {
         // Shipped verbs all carry schemas, so none hit the fallback.
         for verb in PackRegistry::shipped().verb_names() {
             let model = PackRegistry::shipped()
-                .verb(&verb)
+                .verb(verb)
                 .expect("verb lists")
                 .model();
             let schema = &model.input_schema;
