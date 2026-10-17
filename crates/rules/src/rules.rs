@@ -135,12 +135,12 @@ impl TickReport {
     /// FNV-1a 64 of every action and fault (fault detail by kind only).
     pub fn digest(&self) -> u64 {
         let mut hasher = Fnv64::new();
-        hasher.write_u64(self.actions.len() as u64);
+        hasher.write_len(self.actions.len());
         for emitted in &self.actions {
             hasher.write_u8(emitted.actor);
             emitted.action.write_into(&mut hasher);
         }
-        hasher.write_u64(self.faults.len() as u64);
+        hasher.write_len(self.faults.len());
         for fault in &self.faults {
             hasher.write_u8(fault.actor);
             write_fault_error(&mut hasher, &fault.error);

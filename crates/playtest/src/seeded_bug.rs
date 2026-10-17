@@ -347,6 +347,11 @@ pub fn render_report(
             "{}\n",
             crate::causal::verify_line(&config, &control, &probe)
         ));
+        out.push_str(&format!(
+            "{}
+",
+            crate::divergence::capture_line(&config, &control, &probe)
+        ));
     }
     out.push_str("repro: cargo test --manifest-path .lanes/ev4/Cargo.toml --target-dir target/pool-2 -j 4 --locked -p engine-playtest seeded_bug\n");
     // No golden marker here: the canonical 600-tick golden gate lives in

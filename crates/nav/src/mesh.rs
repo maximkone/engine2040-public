@@ -800,27 +800,6 @@ impl MeshTiles {
             .copied()
             .ok_or(NavError::NotCanonical("tile id"))
     }
-    /// Bump exactly `dirty` tiles ascending; untouched keep versions.
-    /// Validates first, so a bad set changes nothing. Errors: bad tile.
-    pub fn bump_exactly(&mut self, dirty: &[u32]) -> Result<Vec<u32>, NavError> {
-        for t in dirty {
-            let index = usize::try_from(*t).map_err(|_| NavError::NotCanonical("tile id"))?;
-            if index >= self.versions.len() {
-                return Err(NavError::NotCanonical("tile id"));
-            }
-        }
-        let mut sorted = dirty.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        for t in &sorted {
-            let index = usize::try_from(*t).map_err(|_| NavError::NotCanonical("tile id"))?;
-            let v = &mut self.versions[index];
-            *v = v
-                .checked_add(1)
-                .ok_or(NavError::NotCanonical("tile version"))?;
-        }
-        Ok(sorted)
-    }
     /// Canonical bytes; identical tables bake identical bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -878,11 +857,6 @@ impl MeshTiles {
             versions,
         })
     }
-}
-
-/// True when two tile tables share edge and grid, so per-cell NV1 bakes stitch.
-pub fn stitch_shared_edge(a: &MeshTiles, b: &MeshTiles) -> bool {
-    a.edge == b.edge && a.cols == b.cols && a.rows == b.rows
 }
 
 /// Neighbor ids of polygon `id` out of `count`: strictly ascending, in

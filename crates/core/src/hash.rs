@@ -13,6 +13,8 @@ pub const FNV64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 pub const FNV64_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// SplitMix64 increment (2^64 / golden ratio, odd).
 pub const GOLDEN_GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
+/// First SplitMix64 finalizer multiplier (the lane multiplier some mixers reuse).
+pub const MIX64_MUL_A: u64 = 0xbf58_476d_1ce4_e5b9;
 
 /// Streaming FNV-1a 64. Integers are written little-endian and floats as
 /// their IEEE-754 bits, so a digest never depends on the host.
@@ -72,6 +74,19 @@ impl Fnv64 {
     #[inline]
     pub fn write_u64(&mut self, value: u64) {
         self.write(&value.to_le_bytes());
+    }
+
+    /// Mix a collection length as a `u64` (the bytes `write_u64(n as u64)` wrote).
+    #[inline]
+    pub fn write_len(&mut self, len: usize) {
+        self.write_u64(u64::try_from(len).unwrap_or(u64::MAX));
+    }
+
+    /// Mix a collection length as a `u32`, saturating at `u32::MAX` (the bytes
+    /// `write_u32(n as u32)` wrote for every length below 2^32).
+    #[inline]
+    pub fn write_len32(&mut self, len: usize) {
+        self.write_u32(u32::try_from(len).unwrap_or(u32::MAX));
     }
 
     /// Mix an `i32` as four little-endian bytes.
@@ -146,7 +161,7 @@ pub fn hash_hex(bytes: &[u8]) -> String {
 #[inline]
 #[must_use]
 pub const fn mix64(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 30)).wrapping_mul(MIX64_MUL_A);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
 }
@@ -185,6 +200,21 @@ mod tests {
         positive.write_f32(0.0);
         assert_ne!(positive.finish(), Fnv64::new().finish());
         assert_ne!(hash_u64s(&[1, 2]), hash_u64s(&[2, 1]), "order matters");
+    }
+
+    #[test]
+    fn length_writes_match_the_plain_integer_writes() {
+        let mut wide = Fnv64::new();
+        wide.write_len(5);
+        let mut plain = Fnv64::new();
+        plain.write_u64(5);
+        assert_eq!(wide.finish(), plain.finish());
+        let mut narrow = Fnv64::new();
+        narrow.write_len32(5);
+        let mut plain32 = Fnv64::new();
+        plain32.write_u32(5);
+        assert_eq!(narrow.finish(), plain32.finish());
+        assert_ne!(wide.finish(), narrow.finish(), "the two widths differ");
     }
 
     #[test]

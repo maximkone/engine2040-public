@@ -745,6 +745,8 @@ pub(crate) mod capture {
         let kit_report = engine_game::arena_kit::stage_kit_or_default(&mut presenter);
         let kit_draws = kit_triples(&kit_report);
         let mut app = App::new(config)?;
+        // The center crate's break picture rides the twin frames like the window's (RZ4w).
+        let mut crate_scene = engine_game::break_window::BreakScene::new(&app.live_match().config());
         let human = FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))?;
         let mut cursor = TapeInputs::new(tape.map(|loaded| loaded.inputs).unwrap_or_default());
         let mut presented = 0u32;
@@ -761,6 +763,12 @@ pub(crate) mod capture {
             let outcome = app.tick(input);
             if !outcome.input_accepted {
                 return Err(WinError::Render(format!("tick {tick} rejected")));
+            }
+            if let Some(scene) = crate_scene.as_mut() {
+                if let Err(err) = scene.observe_outcome(&outcome) {
+                    tell!("arena notice: break picture dropped: {err}");
+                    crate_scene = None;
+                }
             }
             if sink.should_capture(tick + 1) {
                 let hash = outcome.checkpoint.map(|point| point.hash).unwrap_or(0);
@@ -781,6 +789,12 @@ pub(crate) mod capture {
                 .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
                 let overlay = engine_game::windowed::duel_overlay_for_app(&app);
                 engine_game::windowed::stage_hp_bars(&mut presenter, &overlay);
+                if let Some(scene) = crate_scene.as_mut() {
+                    if let Err(why) = scene.push(&mut presenter, &mut list, 1.0) {
+                        tell!("arena notice: break picture dropped: {why}");
+                        crate_scene = None;
+                    }
+                }
                 let out = presenter.render_offscreen(&list)?;
                 if !out.manifest.is_clean() {
                     return Err(WinError::Render("twin frame failed validation".to_string()));
@@ -796,6 +810,10 @@ pub(crate) mod capture {
                     }
                 }
             }
+        }
+        if let Some(scene) = crate_scene.as_ref() {
+            say!("{}", scene.receipt_line());
+            say!("{}", scene.stats().receipt_line());
         }
         seal_capture_cut_log(&mut sink, &app);
         sink.finish()

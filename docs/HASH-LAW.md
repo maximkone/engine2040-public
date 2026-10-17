@@ -110,6 +110,17 @@ root motion, `net` state):
   match seed, so v2 digests now include the per-slot temperaments and moved
   with that commit; v1 checkpoints and `GOLDEN_600=d57b5c8ae3096614` are
   unchanged.
+- DSN1/DSN2 (2026-10-17): a match is one `MatchSpec` (config, rules, world;
+  `crates/arena/src/spec.rs`) that the window (`App::spec`), `Server::from_spec`
+  and `Client::from_spec` all build from; `MatchSpec::v1` is `LiveMatch::new`
+  byte for byte. The arena match is pinned across machines: `arena_line`
+  (`cargo run -p engine-proof --features arena --bin arena_line`) plays 1200
+  ticks of 8 fighters under rules v2 on the kit walls and prints a digest and
+  every tick hash. Golden-matrix run 39054403838: `arena=d29b3b17bbd3b244` on
+  linux-x86_64, windows-x86_64, linux-aarch64, wasm32-wasip1 and
+  wasm32-wasip1-simd128, all MATCH. It is a new fixture (own digest); the
+  legacy golden is unchanged. A limb cut is not in the tape yet: the sim step
+  has no caller of `spawn_limbs`.
 
 ## AI and asynchronous services
 

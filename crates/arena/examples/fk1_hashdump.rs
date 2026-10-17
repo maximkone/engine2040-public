@@ -1,6 +1,6 @@
 //! fk1_hashdump: dump one scripted headless arena hash chain to stdout.
 //!
-//! Helper behind `scripts/fk1_determinism.mjs` (FK1 determinism gate). Runs a
+//! Helper behind `tools/fk1_determinism.mjs` (FK1 determinism gate). Runs a
 //! scripted match through the gym headless path (`GymLive`, one step per tick)
 //! and prints one `tick hash` hex row per tick, so two independent processes
 //! give byte-comparable chains. Reads no files, writes no files; IO is stdout

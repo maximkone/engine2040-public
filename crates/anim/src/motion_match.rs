@@ -431,7 +431,7 @@ pub fn search(db: &MotionDb, query: &Query) -> Result<(MatchResult, SearchReceip
 /// FNV-1a64 over entries (clip, tick, contact, fixed lanes).
 pub fn db_hash(db: &MotionDb) -> u64 {
     let mut h = Fnv64::new();
-    h.write_u64(db.entries.len() as u64);
+    h.write_len(db.entries.len());
     for e in &db.entries {
         h.write_u16(e.clip);
         h.write_u16(e.tick);

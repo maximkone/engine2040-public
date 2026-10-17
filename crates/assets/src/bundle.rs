@@ -182,7 +182,7 @@ impl BundleWriter {
     /// Pack a cooked mesh under `name`.
     pub fn add_mesh(&mut self, name: &str, mesh: &CookedMesh) -> Result<(), BundleError> {
         validate_mesh(mesh).map_err(|e| invalid(name, &format!("{e:?}")))?;
-        self.stage(EntryKind::Mesh, name, encode_mesh(mesh, name)?)
+        self.stage(EntryKind::Mesh, name, encode_mesh(mesh)?)
     }
 
     /// Pack a cooked material under `name`.
@@ -507,6 +507,14 @@ impl<'a> Payload<'a> {
         self.cursor.take(len).map_err(|_| self.short())
     }
 
+    /// Refuse before allocating for `bytes` more bytes the payload cannot hold.
+    fn need(&self, bytes: usize) -> Result<(), BundleError> {
+        if self.len.saturating_sub(self.cursor.pos()) < bytes {
+            return Err(self.short());
+        }
+        Ok(())
+    }
+
     fn u8(&mut self) -> Result<u8, BundleError> {
         self.cursor.u8().map_err(|_| self.short())
     }
@@ -575,7 +583,7 @@ fn encoding_of(byte: u8) -> Option<TextureEncoding> {
     }
 }
 
-fn encode_mesh(mesh: &CookedMesh, name: &str) -> Result<Vec<u8>, BundleError> {
+fn encode_mesh(mesh: &CookedMesh) -> Result<Vec<u8>, BundleError> {
     if mesh.positions.len() > MAX_VERTICES {
         return Err(BundleError::TooLarge {
             count: mesh.positions.len(),
@@ -615,7 +623,6 @@ fn encode_mesh(mesh: &CookedMesh, name: &str) -> Result<Vec<u8>, BundleError> {
     if out.len() > MAX_PAYLOAD_BYTES {
         return Err(BundleError::TooLarge { count: out.len() });
     }
-    let _ = name;
     Ok(out)
 }
 
@@ -625,6 +632,8 @@ fn decode_mesh(bytes: &[u8], entry: &str) -> Result<CookedMesh, BundleError> {
     if verts == 0 || verts > MAX_VERTICES {
         return Err(invalid(entry, "mesh vertex count out of range"));
     }
+    // Positions, normals, uv0 and tangents: (3 + 3 + 2 + 4) f32 per vertex.
+    payload.need(verts.saturating_mul(48))?;
     let mut positions = Vec::with_capacity(verts);
     for _ in 0..verts {
         positions.push([payload.f32()?, payload.f32()?, payload.f32()?]);
@@ -650,6 +659,7 @@ fn decode_mesh(bytes: &[u8], entry: &str) -> Result<CookedMesh, BundleError> {
     if indices_len > MAX_BUNDLE_INDICES {
         return Err(invalid(entry, "mesh index count out of range"));
     }
+    payload.need(indices_len.saturating_mul(4))?;
     let mut indices = Vec::with_capacity(indices_len);
     for _ in 0..indices_len {
         indices.push(payload.u32()?);
@@ -782,6 +792,7 @@ fn decode_texture(bytes: &[u8], entry: &str) -> Result<CookedTexture, BundleErro
         if total > MAX_TEXTURE_PIXELS {
             return Err(invalid(entry, "texture pixel budget exceeded"));
         }
+        payload.need(want.saturating_mul(16))?;
         let mut texels = Vec::with_capacity(want);
         for _ in 0..want {
             let texel = [
@@ -844,6 +855,8 @@ fn decode_skin(bytes: &[u8], entry: &str) -> Result<Skin, BundleError> {
     if rows > MAX_VERTICES {
         return Err(invalid(entry, "skin row count out of range"));
     }
+    // Four u16 joints plus four f32 weights per row.
+    payload.need(rows.saturating_mul(24))?;
     let mut joints = Vec::with_capacity(rows);
     for _ in 0..rows {
         joints.push([
@@ -969,11 +982,12 @@ fn decode_clip(bytes: &[u8], entry: &str) -> Result<ImportedClip, BundleError> {
 }
 
 fn decode_vec3_track(payload: &mut Payload<'_>) -> Result<engine_anim::Track, BundleError> {
-    let entry = payload.entry.to_string();
+    let entry = payload.entry;
     let keys = payload.u32()? as usize;
     if keys > MAX_TRACK_KEYS {
-        return Err(invalid(&entry, "clip position track out of range"));
+        return Err(invalid(entry, "clip position track out of range"));
     }
+    payload.need(keys.saturating_mul(16))?;
     let mut times = Vec::with_capacity(keys);
     let mut values = Vec::with_capacity(keys);
     for _ in 0..keys {
@@ -991,11 +1005,12 @@ fn decode_vec3_track(payload: &mut Payload<'_>) -> Result<engine_anim::Track, Bu
 fn decode_quat_track(
     payload: &mut Payload<'_>,
 ) -> Result<engine_anim::pose::QuatTrack, BundleError> {
-    let entry = payload.entry.to_string();
+    let entry = payload.entry;
     let keys = payload.u32()? as usize;
     if keys > MAX_TRACK_KEYS {
-        return Err(invalid(&entry, "clip rotation track out of range"));
+        return Err(invalid(entry, "clip rotation track out of range"));
     }
+    payload.need(keys.saturating_mul(20))?;
     let mut times = Vec::with_capacity(keys);
     let mut values = Vec::with_capacity(keys);
     for _ in 0..keys {
@@ -1023,6 +1038,21 @@ mod tests {
     use super::*;
     use engine_anim::pose::QuatTrack;
     use engine_anim::{Clip, Track};
+
+    #[test]
+    fn decode_texture_refuses_a_header_the_bytes_cannot_back() {
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, 256);
+        push_u32(&mut bytes, 256);
+        bytes.push(slot_byte(TextureSlot::BaseColor));
+        bytes.push(encoding_byte(TextureEncoding::Srgb));
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 256);
+        push_u32(&mut bytes, 256);
+        // 65,536 texels claimed, none present: refused before any allocation.
+        let refused = decode_texture(&bytes, "big").err();
+        assert_eq!(refused, Some(invalid("big", "payload ends mid-field")));
+    }
 
     fn triangle() -> CookedMesh {
         CookedMesh {

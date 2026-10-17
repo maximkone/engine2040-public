@@ -1,6 +1,7 @@
 //! tests: caps, recycling, determinism, refusals, sleeping, interpolation and the budget.
 
 mod blast;
+mod impact;
 mod ladder;
 mod materials;
 
@@ -89,6 +90,8 @@ fn generous() -> Caps {
         statics: 16,
         solver_iterations: 4,
         ccd_substeps: 1,
+        blast_bodies: 4096,
+        impact_bodies: 4096,
     }
 }
 

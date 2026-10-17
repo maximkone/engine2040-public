@@ -148,3 +148,41 @@ fn material_a_bad_shard_is_refused_for_every_material() {
         assert_eq!(fx.stats().bodies, 0);
     }
 }
+
+#[test]
+fn material_physfx_colliders_and_the_walker_read_the_same_numbers() {
+    use engine_physics::controller2::Config;
+    for material in Material::ALL {
+        let row = material.props();
+        let mut fx = PhysFx::new(Tier::Web);
+        fx.spawn_debris_of(material, &[cube(1.0)], [0.0; 3])
+            .expect("debris");
+        let [(friction, restitution, density)] = fx.collider_numbers()[..] else {
+            panic!("one collider expected");
+        };
+        // What the Rapier collider holds, what the table says and what the walker's config
+        // carries are one number each.
+        let walker = Config::on(material);
+        assert_eq!(
+            walker.friction_pm,
+            i32::from(row.friction_pm),
+            "{material:?}"
+        );
+        assert_eq!(friction, row.friction(), "{material:?}");
+        assert_eq!(friction, walker.friction_pm as f32 / 1000.0, "{material:?}");
+        assert_eq!(restitution, row.restitution(), "{material:?}");
+        assert_eq!(density, row.density(), "{material:?}");
+        assert_eq!(
+            walker.step_height_mm,
+            i32::from(row.step_mm),
+            "{material:?}"
+        );
+        // The grip the walker accelerates with scales the same row against the ground row.
+        let ground = engine_physics::material::GROUND.props().friction_pm;
+        assert_eq!(
+            i64::from(walker.grip_accel_mm_s2()),
+            60_000 * i64::from(row.friction_pm) / i64::from(ground),
+            "{material:?}"
+        );
+    }
+}

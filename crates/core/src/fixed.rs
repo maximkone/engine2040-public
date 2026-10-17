@@ -265,10 +265,6 @@ impl Fixed {
         }
         hasher.finish()
     }
-    /// Alias of [`Fixed::digest`] for state-hash call sites.
-    pub fn hash_state(vals: &[Self]) -> u64 {
-        Self::digest(vals)
-    }
     /// Reference ordering oracle for `Fixed` vs `Fixed`, independent of the derived `Ord`.
     ///
     /// Compares raw Q47.16 bits with explicit branches so oracle vectors and
@@ -527,7 +523,6 @@ mod tests {
     fn digest_golden() {
         let v = [Fixed::from_int(1), Fixed::from_int(2)];
         assert_eq!(Fixed::digest(&v), 4601385034970360190);
-        assert_eq!(Fixed::hash_state(&v), Fixed::digest(&v));
         assert_eq!(Fixed::digest(&v), Fixed::digest(&v));
         assert_ne!(Fixed::digest(&v), Fixed::digest(&[Fixed::from_int(1)]));
     }

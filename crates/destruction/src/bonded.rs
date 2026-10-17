@@ -12,7 +12,10 @@ use crate::shards3d::in_contact;
 use engine_core::Fnv64;
 
 pub use crate::bake3d::Chunk3;
+pub use blast::MAX_BLAST_RADIUS_MM;
 
+/// An authority explosion applied as impacts through the same bond rule.
+mod blast;
 /// Canonical snapshot bytes and restore of the moving state (rollback resim).
 mod snapshot;
 
@@ -184,6 +187,8 @@ pub enum BreakError {
     BadStrain,
     /// Impact impulse non-finite or negative.
     BadImpulse,
+    /// Blast radius zero or past `MAX_BLAST_RADIUS_MM`, or a center outside the world.
+    BadBlast,
     /// Snapshot bytes are truncated, versioned wrong, of another shape,
     /// non-finite or trailing.
     BadSnapshot,
@@ -200,6 +205,7 @@ impl core::fmt::Display for BreakError {
             BreakError::BadThreshold => write!(f, "fracture threshold is out of bounds"),
             BreakError::BadStrain => write!(f, "strain amount is out of bounds"),
             BreakError::BadImpulse => write!(f, "impact impulse is out of bounds"),
+            BreakError::BadBlast => write!(f, "blast radius or center is out of bounds"),
             BreakError::BadSnapshot => write!(f, "bonded snapshot bytes are not valid"),
         }
     }
@@ -473,7 +479,7 @@ impl BondedCollection {
     /// bit-exact floats keep reruns identical.
     pub fn state_hash(&self) -> u64 {
         let mut h = Fnv64::new();
-        h.write_u32(self.chunks.len() as u32);
+        h.write_len32(self.chunks.len());
         h.write_u32(self.tick);
         h.write_u32(self.threshold.to_bits());
         for (c, v) in self.chunks.iter().zip(self.vel.iter()) {
@@ -492,7 +498,7 @@ impl BondedCollection {
                 h.write_u32(w);
             }
         }
-        h.write_u32(self.bonds.len() as u32);
+        h.write_len32(self.bonds.len());
         for ((bond, strain), broken) in self
             .bonds
             .iter()

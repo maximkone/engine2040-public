@@ -259,6 +259,20 @@ pub struct TournamentReport {
     pub exchange: ExchangeReach,
 }
 
+/// PQ9 line: the difficulty tally scored as fighter 0 vs fighter 1 Elo,
+/// naming the entrants that sit `OP_GAP` or more above the start rating.
+fn elo_line(row: &DifficultyReport) -> String {
+    match crate::rating::table_from_tally(0, 1, row.wins, row.draws, row.losses) {
+        Ok(table) => format!(
+            "  elo fighter0={:.0} fighter1={:.0} op_flagged={:?}\n",
+            table.rating(0).unwrap_or(crate::rating::START_RATING),
+            table.rating(1).unwrap_or(crate::rating::START_RATING),
+            crate::rating::flagged(&table),
+        ),
+        Err(error) => format!("  elo refused: {error}\n"),
+    }
+}
+
 impl TournamentReport {
     /// Reproducible text report: one line per difficulty plus spotlight and
     /// exchange rows, so reviewers quote numbers without re-running.
@@ -293,6 +307,7 @@ impl TournamentReport {
                 row.zone_permille[2],
                 row.zone_permille[3],
             ));
+            out.push_str(&elo_line(row));
             out.push_str(&format!(
                 "  entrance_share={} (gate time share permille: a fighter-tick share, not the level-check floor-area share)\n",
                 row.entrance_share,
@@ -1841,6 +1856,12 @@ mod tests {
         assert!(text.contains("zone share centre="), "{text}");
         assert!(text.contains("entrance_share="), "{text}");
         assert!(text.contains("kills_per_zone=["), "{text}");
+        let elo_rows = text.matches("  elo fighter0=").count();
+        assert_eq!(
+            elo_rows,
+            first.per_difficulty.len(),
+            "one PQ9 row per difficulty: {text}"
+        );
         println!("{text}");
     }
 

@@ -9,7 +9,10 @@ pub mod terrain;
 /// FNV-1a 64 over bytes: the one content hash every bake and
 /// terrain gate in this crate uses.
 pub use engine_core::hash_bytes as world_hash;
-use engine_core::{hash::GOLDEN_GAMMA, mix64};
+use engine_core::{
+    hash::{GOLDEN_GAMMA, MIX64_MUL_A},
+    mix64,
+};
 
 pub const MAGIC: [u8; 4] = *b"W204";
 pub const VERSION: u8 = 1;
@@ -39,7 +42,7 @@ impl std::error::Error for BakeErr {}
 fn lattice(seed: u64, x: i32, y: i32) -> u64 {
     let z = seed
         .wrapping_add((x as u64).wrapping_mul(GOLDEN_GAMMA))
-        .wrapping_add((y as u64).wrapping_mul(0xbf58476d1ce4e5b9));
+        .wrapping_add((y as u64).wrapping_mul(MIX64_MUL_A));
     mix64(z)
 }
 

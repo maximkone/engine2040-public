@@ -44,7 +44,7 @@ duplication.
 | Layer | Mechanism | Runs | Refuses |
 |---|---|---|---|
 | 1 Compiler | `[workspace.lints]` (84 lints, each at zero when enabled); `#[expect(lint, reason)]` only; `tools/sim-clippy.toml` copied into every simulation crate | every clippy run: packet, proof, CI | any new hit; HashMap/HashSet/Instant/SystemTime, libm trig/exp/powf and `mul_add` in simulation crates (type-aware, tests included) |
-| 2 Packet gate | `tools/packet-gate.mjs` `rust-*` rules on added lines, reading the lane's post-patch files | every collected lane, before checker and judge | `unwrap`, print in libraries, `allow`, `expect` without reason, `dbg!`, nondeterminism in sim, FNV/probe copies, board IDs in comments, string errors, allocation in hot fns, new fn over 100 lines, new file over 1,500 lines. Warns on new casts and growth |
+| 2 Packet gate (script retired 2026-10-17 with the packet loop; the rules still hold, check them by hand on your diff) | the `rust-*` rules on added lines | every change you make | `unwrap`, print in libraries, `allow`, `expect` without reason, `dbg!`, nondeterminism in sim, FNV/probe copies, board IDs in comments, string errors, allocation in hot fns, new fn over 100 lines, new file over 1,500 lines. Warns on new casts and growth |
 | 3 Ratchet | `tools/rust-quality.mjs` per-crate counts vs baseline; sim-config drift | `proof.mjs`, CI, every wave | any count rise; a new crate below grade A; a simulation crate missing the sim config |
 | 4 Review | checker (mechanical), judge Rust score 0-5 (under 3 fails), api-reviewer (Rust API + Pragmatic Rust Guidelines) | every packet | taste and design the tools cannot see |
 | 5 Loop | `/sprint` quality duty: one `CQ` writer every wave; lint ladder; score line in every handoff | every wave | a wave that ends with the score down |
@@ -131,7 +131,6 @@ ratcheted with zero weight: every one is visible and budgeted.
 node tools/rust-quality.mjs                    # scorecard + ratchet (proof, CI)
 node tools/rust-quality.mjs --crate physics    # one crate before reporting
 node tools/rust-quality.mjs --list hot_alloc --crate render   # burn-down list
-git diff -- <owned path> | node tools/packet-gate.mjs --patch - --owned <path>
 node tools/rust-quality.mjs --tighten          # orchestrator, after a green wave
 ```
 

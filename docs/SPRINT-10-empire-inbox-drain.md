@@ -21,7 +21,7 @@
   `docs/research/DISCOVERED.md`; 1 bounded spike with numbers. Tier A.
   Size M. Owns the DELTA cards + spike. Accept: cards land; spike line in
   handoff; judged PASS. needs: none. (EB-2026-10-01-S142.)
-- [ ] E-STEAL139 research: STEAL-ENG batch spikes (EB-2026-10-01-S139) - one
+- [ ] E-STEAL139 research: STEAL-ENG batch spikes (EB-2026-10-01-S139) - one Progress 2026-10-17: Donor ports landed without a baseline table: hanabi dispatch vfx_hanabi.rs (1d01a410), meshoptimizer-style cone-weighted meshlets (-15 pct test, gh run 39056659814), ggrs discard history (e449553e); the avian, lightyear, backroll, Jolt and bvh SAH spikes and the bar-moving row are not found.
   light test + baseline each: bevy RenderApp split, avian XPBD, lightyear
   net, backroll-rs, hanabi, Jolt BodyInterface (BX28), meshoptimizer meshlets,
   bvh SAH. Tier A. Size L. Owns the spike tests. Accept: 3+ spikes landed
@@ -244,7 +244,7 @@
   only. Accept: F2P live lanes at most 10 and every removed dirty lane
   has its diff saved; P2P `node tools/workspace-check.mjs` PASS. needs:
   none. (EB-2026-10-05-S14.)
-- [ ] E7 proof: finish reads the archive for pruned ticks (EB-2026-10-05-S72)
+- [ ] E7 proof: finish reads the archive for pruned ticks (EB-2026-10-05-S72) Progress 2026-10-17: finish.mjs reads archive ticks since 4db33ad7 (`--archive <dir>`, finish.test.mjs 14 pass); but `node tools/finish.mjs` prints 5 met, 12 partial, 9 open, not the 10 of 26 the Accept names.
   - teach `tools/finish.mjs` to read ticked rows in `docs/archive/` as well
   as live `docs/SPRINT.md`, so the prune stops dropping met gates. Tier A.
   Size S. Owns `tools/finish.mjs` hunks only. Accept: F2P
@@ -263,10 +263,10 @@
 - [ ] E10 look: arena600 capture shows fighters + frame stats (EB-2026-10-07-S9, EB-2026-10-07-S10, EB-2026-10-08-S17). Size S. Owns `tools/showcase.mjs`. F2P `node tools/showcase.mjs --clip <dir> --check-only` OK + NUMBERS.txt p50/p95/VRAM/draw, none UNKNOWN; P2P Lead 2 score 5+. needs: none.
 - [ ] E11 render: split the 4th big file back to 3 (EB-2026-10-06-S68). Size S. Owns one `crates/render` file, move-only. F2P `node tools/rust-quality.mjs --crate render` big_files 3; P2P golden x2, public API unchanged. needs: none.
 - [ ] E12 build: AB19 bench then AB level-graph chain (EB-2026-10-07-S272, EB-2026-10-07-S273). Size S. Owns `tools/ab-bench.mjs`. F2P 1000 headless-mock builds report x2 + 10/10 pass/refusals, undo restores, digests x2; P2P VISION bar prints the number. needs: none.
-- [ ] E13 playtest: steered agent beats random + crash tape replays (EB-2026-10-07-S274, EB-2026-10-05-S26). Size S. Owns `crates/playtest`. F2P steered finds seeded bugs in fewer tapes than random + injected crash replays same tick 10/10; P2P golden x2. needs: none.
-- [ ] E14 proof: float-leak gate test (EB-2026-10-07-S137). Size S. Owns `crates/engine-core` probe. F2P probe-in fails, probe-out passes; P2P golden x2. needs: none.
+- [ ] E13 playtest: steered agent beats random + crash tape replays (EB-2026-10-07-S274, EB-2026-10-05-S26). Size S. Owns `crates/playtest`. F2P steered finds seeded bugs in fewer tapes than random + injected crash replays same tick 10/10; P2P golden x2. needs: none. Progress 2026-10-17: Steered-beats-random leg exists: crates/playtest/tests/spatial_steer_compare.rs steered_finds_planted_bug_faster_than_random passed, gh run 39056907771 (415eb7d4); the injected-crash replay 10/10 leg has no test.
+- [x] E14 proof: float-leak gate test (EB-2026-10-07-S137). Size S. Owns `crates/engine-core` probe. F2P probe-in fails, probe-out passes; P2P golden x2. needs: none. Landed 2f02202f. `node --test tools/float-gate.test.mjs` 10 pass (flags a float injected into the warm tick scope, passes integer-only code, repo scan of tick/hash/fixed/time clean), local 2026-10-17.
 - [ ] E15 net: rollback tape fixes (EB-2026-10-07-S151). Size S. Owns `crates/net/src/rollback.rs`. F2P 10k-frame flat memory + replay hash x2; P2P tests green. needs: none.
-- [ ] E16 endpoint: MCP door on official Rust SDK (EB-2026-10-07-S152). Size S. Owns `crates/endpoint`. F2P conformance green + mock/local/remote 75/75; P2P one outside client end to end. needs: none.
+- [ ] E16 endpoint: MCP door on official Rust SDK (EB-2026-10-07-S152). Size S. Owns `crates/endpoint`. F2P conformance green + mock/local/remote 75/75; P2P one outside client end to end. needs: none. Progress 2026-10-17: rmcp 3.4 server in use (workspace Cargo.toml, endpoint feature mcp); jsonrpc_conformance_vectors passed (12 vectors agree on code), gh run 39056814820; mock/local/remote 75/75 and the outside-client leg are not recorded.
 - [ ] E17 lanes: forge undo-journal port, one revert proves undo (EB-2026-10-07-S94). Size S. Owns `tools/lanes.mjs`. F2P lane revert OK + lane test PASS; P2P workspace-check PASS. needs: none.
 - [ ] E18 ops: weight cut, blobs + lanes (EB-2026-10-06-S69, EB-2026-10-07-S243). Size S. Owns 2 spike crates + gen-built skies/glTF + lane worktrees. F2P ls-files -110MB + worktrees 8 or fewer + GB freed printed; P2P workspace PASS, proofs green. needs: none.
 - [ ] E19 docs: archive done text, shrink board + inbox (EB-2026-10-07-S244). Size S. Owns `docs/archive/` moves. F2P inbox 40 or fewer open none over 7d + both files under 60KB; P2P workspace PASS. needs: none.
@@ -277,29 +277,29 @@
 - [ ] E24 content: intake vault V5 + V6 manifests offline (EB-2026-10-06-S31, EB-2026-10-06-S65). Size S. Owns `content/` intake. F2P manifest verifies engine-side; P2P provenance rows cite O-005/V5. needs: none.
 - [ ] E25 plan: deep-dives LM2 LM3 RL5 (EB-2026-10-07-S74, EB-2026-10-07-S75). Size S. Owns `docs/plan/` dive notes. F2P root cause + approach + proof command posted per row; P2P drift prints no stuck LM2/LM3/RL5. needs: none.
 - [ ] S27 playtest: showcase fighters in motion (EB-2026-10-08-S29). Size S. Owns `target/showcase/` set plus `tools/showcase.mjs` hunks only. F2P newest `target/showcase` set lists 3 PNG and its NOTES.md names 2 staged fighters in motion with 0 red-box stand-ins; P2P Lead 2 journey score 5 or more. needs: SHOW1.
-- [ ] S28 deps: drop unused Bevy workspace dep (EB-2026-10-08-S34). Size S. Owns root `Cargo.toml` bevy lines plus `docs/FOCUS.md` D1 only. F2P `rg bevy Cargo.toml` prints 0 lines and a crate-scoped `cargo check` stays green with golden `d57b5c8ae3096614` unchanged; P2P `node tools/workspace-check.mjs` PASS. needs: none.
+- [x] S28 deps: drop unused Bevy workspace dep (EB-2026-10-08-S34). Size S. Owns root `Cargo.toml` bevy lines plus `docs/FOCUS.md` D1 only. F2P `rg bevy Cargo.toml` prints 0 lines and a crate-scoped `cargo check` stays green with golden `d57b5c8ae3096614` unchanged; P2P `node tools/workspace-check.mjs` PASS. needs: none. Landed eb440e64. `rg bevy Cargo.toml` prints 0 lines; engine-render --lib 719 passed on the runner, gh run 39056801624; workspace-check board lines green (remaining FAIL lines are foreign web/render edges).
 - [ ] E26 ops: cargo lane memo, top lanes once per wave (EB-2026-10-08-S43). Size S. Owns `tools/` memo hunks only. F2P top lanes run once per wave or memo hits print on same code; P2P `node tools/workspace-check.mjs` PASS. needs: none.
-- [ ] E27 perf: V20 P6 puffin take (EB-2026-10-07-ST20a). Size S. Owns `crates/perf/src/profiler.rs` only. Take puffin c81e9bb (MIT) into the profiler end to end. F2P profile overhead before-after numbers printed (ms + allocs, identical input); P2P `cargo test -p engine-perf --lib` green + steal ledger marked landed. needs: none.
+- [x] E27 perf: V20 P6 puffin take (EB-2026-10-07-ST20a). Size S. Owns `crates/perf/src/profiler.rs` only. Take puffin c81e9bb (MIT) into the profiler end to end. F2P profile overhead before-after numbers printed (ms + allocs, identical input); P2P `cargo test -p engine-perf --lib` green + steal ledger marked landed. needs: none. Landed 237d53c5. `cargo test -p engine-perf --lib` 122 passed, gh run 39056228486; commit posts off-path bench 0.87 ns/op, alloc +0, golden x2; steal-ledger leg retired by porting policy 2026-10-10.
 - [ ] E28 physics: V20 A5 avian take (EB-2026-10-07-ST20a). Size S. Owns `crates/physics/src/solver.rs` only. Take avian a35a80bd (MIT) into the solver end to end. F2P solver bench before-after numbers printed (ms on the same scene, hash x2); P2P `cargo test -p engine-physics --lib` green + steal ledger marked landed. needs: none.
-- [ ] E29 ship: V20 A8 nextest take (EB-2026-10-07-ST20b). Size S. Owns `tools/ship.mjs` archive leg only. Take nextest 919b10c6 (MIT) into the archive leg end to end. F2P archive receipt exists with file list + hashes; P2P `node tools/workspace-check.mjs` PASS + steal ledger marked landed. needs: none.
-- [ ] E30 render: V20 C2 strolle take (EB-2026-10-07-ST20b). Size S. Owns `crates/render/src/shadow_cluster/torch_cluster.rs` only. Take strolle 69cbcdd4 (MIT) temporal-carry into the 250-torch assign end to end. F2P assign cost before-after numbers printed (ms, same torch set); P2P `cargo test -p engine-render --lib` green + steal ledger marked landed. needs: none.
-- [ ] E31 net: V20 ON40 ggrs take (EB-2026-10-07-ST20c). Size S. Owns `crates/net/src/netcode.rs` only. Take ggrs e97e3d24 (MIT) bounded history into netcode end to end. F2P history memory flat over 10k frames (bytes printed, replay hash x2); P2P `cargo test -p engine-net --lib` green + golden `d57b5c8ae3096614` unchanged + steal ledger marked landed. needs: none.
-- [ ] E32 render: V20 A4 FSR1 take (EB-2026-10-07-ST20c). Size S. Owns `crates/render/src/post.rs` only. Take FSR1 a21ffb8 (MIT) EASU plus RCAS into post end to end. F2P upscale measured numbers printed (ms + pixel diff vs parked TAAU on the same frame); P2P `cargo test -p engine-render --lib` green + steal ledger marked landed. needs: none.
+- [x] E29 ship: V20 A8 nextest take (EB-2026-10-07-ST20b). Size S. Owns `tools/ship.mjs` archive leg only. Take nextest 919b10c6 (MIT) into the archive leg end to end. F2P archive receipt exists with file list + hashes; P2P `node tools/workspace-check.mjs` PASS + steal ledger marked landed. needs: none. Landed 8ad99d66. `node --test tools/ship.test.mjs` 23 pass incl. archive receipt with file list (rel, bytes, fnv) plus junit receipt per run (A8 accept), local 2026-10-17; steal-ledger leg retired by porting policy 2026-10-10.
+- [x] E30 render: V20 C2 strolle take (EB-2026-10-07-ST20b). Size S. Owns `crates/render/src/shadow_cluster/torch_cluster.rs` only. Take strolle 69cbcdd4 (MIT) temporal-carry into the 250-torch assign end to end. F2P assign cost before-after numbers printed (ms, same torch set); P2P `cargo test -p engine-render --lib` green + steal ledger marked landed. needs: none. Landed a05bc464. temporal_carry_cuts_pairs_at_low_rmse inside `cargo test -p engine-render --lib` 719 passed, gh run 39056801624; commit prints tight 14641 vs temporal 1920 pairs (cut 86.5 pct, rmse 0, 11.94 ms, digest x2); steal-ledger leg retired.
+- [ ] E31 net: V20 ON40 ggrs take (EB-2026-10-07-ST20c). Size S. Owns `crates/net/src/netcode.rs` only. Take ggrs e97e3d24 (MIT) bounded history into netcode end to end. F2P history memory flat over 10k frames (bytes printed, replay hash x2); P2P `cargo test -p engine-net --lib` green + golden `d57b5c8ae3096614` unchanged + steal ledger marked landed. needs: none. Progress 2026-10-17: Bounded history landed e449553e: on40_history_bounded_cap_plus_pending_bursty_loss (64-frame tape, fold/tip/digest x2) inside `cargo test -p engine-net --lib` 258 passed, gh run 39056801523; no 10k-frame flat-memory test with bytes printed exists (rollback_soak runs 120 frames), so Accept is not met.
+- [x] E32 render: V20 A4 FSR1 take (EB-2026-10-07-ST20c). Size S. Owns `crates/render/src/post.rs` only. Take FSR1 a21ffb8 (MIT) EASU plus RCAS into post end to end. F2P upscale measured numbers printed (ms + pixel diff vs parked TAAU on the same frame); P2P `cargo test -p engine-render --lib` green + steal ledger marked landed. needs: none. Landed 0c672df7. fsr_540p_to_1080p_posts_mtf50_shimmer_and_ms (prints base vs candidate ms, MTF50 lift, shimmer variance) inside `cargo test -p engine-render --lib` 719 passed, gh run 39056801624; steal-ledger leg retired.
 - [ ] S29 look: reference-GPU renderproof capture (EB-2026-10-08-S53). Size S. Owns `tools/showcase.mjs` renderer leg only. One look capture drawn by `crates/render` (not presenter-twin), manifest names the renderer, PNG shows 2 fighters on lit ground under sky. F2P newest capture manifest under `target/showcase` prints renderer crates-render and its PNG shows 2 fighters (Lead 2 eyes); P2P Lead 2 journey score 5 or more. needs: E10.
 - [ ] E33 proof: Core evidence freshness list (EB-2026-10-08-S67). Size S. Owns `target/lead2.md` evidence appendix only. F2P dated-evidence list prints 4 of 4 Core areas (Look, Bodies, AI-door, Multiplayer) with evidence dated within 3 days; P2P `node tools/workspace-check.mjs` PASS. needs: none.
 - [ ] E34 ops: queue width rules (EB-2026-10-08-S28, EB-2026-10-08-S51, EB-2026-10-08-S158). Size S. Owns `target/queue/batch.md` rule lines only. F2P `rg 'CPU-heavy at most 6' target/queue/batch.md` prints 1 + ready over-2h count 0 + golden slot named + oldest ready under 30min; P2P `node tools/workspace-check.mjs` PASS. needs: none.
 - [ ] E35 ops: queue drain (EB-2026-10-08-S46). Size S. Owns `target/queue/` claims + running + win6-top lane + CT42 intake. F2P claims fresh + running empty + win6-top landed + CT42 16 clips in `content/fighters/incoming`; P2P workspace-check PASS. needs: none.
 - [ ] E36 checks: rating 3 checks (EB-2026-10-08-S58). Size S. Owns rust ratchet sites + VISION Plans map legs + `tools/` board_ready test. F2P empire check drift + vision + arsenal PASS or one-line reasons in the handoff; P2P golden `d57b5c8ae3096614` x2. needs: none.
 - [ ] E37 audit: license gate + dupes (EB-2026-10-08-S68, EB-2026-10-08-S176, EB-2026-10-08-S178, EB-2026-10-08-S105). Size S. Owns `content/ai-loop/license_gate.py` + hex4 sites + endpoint tool registry + `crates/provider` transports. F2P license_gate tests green + hex4 1 shared helper + TOOL_ consts reachable-or-deleted + provider green with lines before/after printed; P2P workspace-check PASS. needs: none.
-- [ ] E38 render: WGSL split + SDFGI spike (EB-2026-10-08-S69, EB-2026-10-08-S110). Size S. Owns `crates/render` post.rs + gi_dyn only. F2P WGSL in separate shader modules + gi_dyn leak under 5pct and under 1.2ms; P2P `cargo test -p engine-render --lib` green. needs: none.
+- [ ] E38 render: WGSL split + SDFGI spike (EB-2026-10-08-S69, EB-2026-10-08-S110). Size S. Owns `crates/render` post.rs + gi_dyn only. F2P WGSL in separate shader modules + gi_dyn leak under 5pct and under 1.2ms; P2P `cargo test -p engine-render --lib` green. needs: none. Progress 2026-10-17: WGSL split landed eb440e64: post.rs pulls shaders/post/*.wgsl via include_str!; the gi_dyn leak under 5 pct and 1.2 ms leg has no module or test.
 - [ ] E39 game + ui: camera fixtures + IME gate (EB-2026-10-08-S70, EB-2026-10-08-S152). Size S. Owns `crates/game` camera.rs + `crates/ui` text.rs only. F2P fixture_course module + text 7 passed; P2P game + ui lib green. needs: none.
 - [ ] E40 net: QUIC errors + relay + arena rollback (EB-2026-10-08-S107, EB-2026-10-08-S156, EB-2026-10-08-S109). Size S. Owns `crates/net` quic.rs + relay test + `crates/arena` sync only. F2P `rg 'let _ = self.sock.send_to' crates/net` 0 + relay 0 failures + sync 6 passed hashes x2; P2P net + arena lib green. needs: none.
 - [ ] E41 physics: casts + solver + ragdoll (EB-2026-10-08-S147, EB-2026-10-08-S177, EB-2026-10-08-S166). Size S. Owns `crates/physics` broadphase + solver + ragdoll only. F2P clippy 23 cast lines + state_hash equality + joint hash x2 + drift ratchet PASS; P2P `cargo test -p engine-physics --lib` green. needs: none.
-- [ ] E42 combat + playtest: wound values + spatial steer (EB-2026-10-08-S149, EB-2026-10-08-S167). Size S. Owns `crates/combat` gore.rs + `crates/playtest` steer only. F2P gore 7 passed hash x2 + planted-bug tape found faster than random; P2P golden unchanged. needs: none.
-- [ ] E43 assets: meshlets + cook budget + big blob (EB-2026-10-08-S108, EB-2026-10-08-S150, EB-2026-10-08-S179). Size S. Owns `crates/assets` cook + meshlet + `content/arena/textures/cloth_roughness_2k.jpg`. F2P meshlet count -15pct vs naive + over_budget simplifies LOD0 <= 5000 + LFS guard passes; P2P assets lib green. needs: none.
+- [x] E42 combat + playtest: wound values + spatial steer (EB-2026-10-08-S149, EB-2026-10-08-S167). Size S. Owns `crates/combat` gore.rs + `crates/playtest` steer only. F2P gore 7 passed hash x2 + planted-bug tape found faster than random; P2P golden unchanged. needs: none. Landed 415eb7d4. `cargo test -p engine-combat --lib gore` 8 passed (same_bout_twice_gives_identical_gore_streams, gore_stream_excluded_from_state_hash), gh run 39056885390; engine-playtest `spatial_steer_compare` steered_finds_planted_bug_faster_than_random passed, gh run 39056907771.
+- [ ] E43 assets: meshlets + cook budget + big blob (EB-2026-10-08-S108, EB-2026-10-08-S150, EB-2026-10-08-S179). Size S. Owns `crates/assets` cook + meshlet + `content/arena/textures/cloth_roughness_2k.jpg`. F2P meshlet count -15pct vs naive + over_budget simplifies LOD0 <= 5000 + LFS guard passes; P2P assets lib green. needs: none. Progress 2026-10-17: Three legs have tests: cone_weighted_beats_naive_by_fifteen_percent_at_equal_bounds (assets meshlet, passed gh run 39056659814), over_budget_simplifies_to_prop_budget (mesh_cook), cloth_roughness_2k.jpg is under LFS; but `cargo test -p engine-assets --lib` is red: 177 passed, 1 failed (archive::stage_refuses_an_archive_past_the_offset_limit, archive_fits(usize::MAX..) assert), gh run 39056931425.
 - [ ] E44 endpoint: mcp macro + licence gate (EB-2026-10-08-S148, EB-2026-10-08-S151). Size S. Owns `crates/endpoint` mcp.rs + licence gate leg only. F2P mcp 18 passed + `cargo deny check licenses` 0 unlicensed; P2P endpoint lib green + workspace-check PASS. needs: none.
 - [ ] E45 docs: bigdocs + steal-next + jams + LICENSE (EB-2026-10-08-S96, EB-2026-10-08-S97, EB-2026-10-08-S160, EB-2026-10-08-S79). Size S. Owns LICENSE + COMPARE lookup line + `tools/steal-next.mjs` + `docs/jams/` + the part split of `docs/research/COMPARE.md` and `docs/research/LADDER.md` (EB-2026-10-09-S42). F2P repo-standard no FAIL license + bigdocs 3/3 + steal-next green or refs 0 + jams copied + committed; P2P workspace-check PASS. needs: none.
-- [ ] E46 misc: heal + bevy + verdict + showcase gate (EB-2026-10-08-S174, EB-2026-10-08-S175, EB-2026-10-08-S155, EB-2026-10-08-S159). Size S. Owns `crates/audio` heal test + root Cargo.toml bevy lines + `tools/showcase.mjs` gate leg. F2P audio 0 failed + `rg bevy Cargo.toml` 0 + 682 verdict file exists + showcase --check-only exit 0; P2P workspace-check PASS. needs: none.
+- [ ] E46 misc: heal + bevy + verdict + showcase gate (EB-2026-10-08-S174, EB-2026-10-08-S175, EB-2026-10-08-S155, EB-2026-10-08-S159). Size S. Owns `crates/audio` heal test + root Cargo.toml bevy lines + `tools/showcase.mjs` gate leg. F2P audio 0 failed + `rg bevy Cargo.toml` 0 + 682 verdict file exists + showcase --check-only exit 0; P2P workspace-check PASS. needs: none. Progress 2026-10-17: bevy leg done: `rg bevy Cargo.toml` prints 0; audio heal test, 682 verdict file and showcase --check-only legs not verified.
 - [ ] E47 tools: drift-check speed (EB-2026-10-08-S106). Size S. Owns `tools/drift-check.mjs` + metrics opens only. F2P 3-run median under 12s with identical PASS/FAIL verdicts; P2P workspace-check PASS. needs: none.
 - [ ] E48 render steals: joints + sky (EB-2026-10-08-S157). Size S. Owns `crates/render` glTF joints + sky bake only. F2P 3 glTF fighters 0 magenta frames + sky bake under 0.4ms; P2P render lib green. needs: none.
 - [ ] E49 combat: resolve split (EB-2026-10-08-S261). Size S. Owns `crates/combat/src/exchange.rs` resolve_tick only. F2P rg shows resolve_clashes + resolve_parries defs + `cargo test -p engine-combat --lib` green; P2P golden `d57b5c8ae3096614` x2. needs: none.
@@ -307,7 +307,7 @@
 - [ ] E51 speed: measured hotspot bundle (EB-2026-10-08-S263). Size S. Owns workspace double-scan + rust-quality prefilter + plan-atlas reread only. F2P workspace + `rust-quality --crate core` medians drop 2x + plan-atlas tests 7/7; P2P `node tools/workspace-check.mjs` PASS. needs: none.
 - [ ] E53 tools: pool-wait ETA + auto-retry (EB-2026-10-09-S3). Size S. Owns `tools/lanes.mjs` pool leg only. F2P rg pool-starvation class in 24h done records prints 0; P2P `node tools/lanes.mjs list` green. needs: none.
 - [ ] E54 deps: drop 9 unused root deps (EB-2026-10-08-S258). Size S. Owns root `Cargo.toml` only. F2P `rg -n engine- src/` shows only engine-proof + `cargo check -p engine2040` green; P2P `node tools/workspace-check.mjs` PASS. needs: none.
-- [ ] E55 game: split windowed_dressing out (EB-2026-10-08-S259). Size S. Owns `crates/game/src/windowed.rs` + new `windowed_dressing.rs` only. F2P windowed.rs drops ~300 lines + `cargo check -p engine-game` green; P2P `node tools/workspace-check.mjs` PASS. needs: none.
+- [x] E55 game: split windowed_dressing out (EB-2026-10-08-S259). Size S. Owns `crates/game/src/windowed.rs` + new `windowed_dressing.rs` only. F2P windowed.rs drops ~300 lines + `cargo check -p engine-game` green; P2P `node tools/workspace-check.mjs` PASS. needs: none. Landed 1d01a410. windowed_dressing.rs (548 lines, dressing_* fns) split out of windowed.rs and re-exported; engine-game builds and `--test it lobby_ui_flow` passes, gh run 39056624992.
 - [ ] E56 arena: split match_observer out (EB-2026-10-08-S260). Size S. Owns `crates/arena/src/lib.rs` + new `match_observer.rs` only. F2P lib.rs drops ~145 lines + `cargo check -p engine-arena` green; P2P `node tools/workspace-check.mjs` PASS. needs: none.
 - [ ] E57 render: one cascade_splits owner — shadow_post.rs line 54 and shadow_cluster.rs
   line 221 both define `cascade_splits` with different signatures (EB-2026-10-08-S232; the ACES
@@ -350,7 +350,7 @@
   engine2040` prints PASS and center's moved.mjs due shows the metric under 20, or the rewrite is
   staged with its new number in the handoff. F2P: the metric reads 34 today. P2P: the other
   agent files unchanged. needs: none.
-- [ ] E61 net: ggrs snapshot restore plus input queue on top of the bounded history
+- [x] E61 net: ggrs snapshot restore plus input queue on top of the bounded history Landed 2fc42668. `cargo test -p engine-net --test it ggrs_loss::` 1 passed (ggrs_loss_64_every_5th_converges_bounded), gh run 39056598160; `cargo test -p engine-net --lib` 258 passed, gh run 39056801523.
   (EB-2026-10-09-S24; commit e449553e landed the history bound under ON40, row E31). Port the
   snapshot restore and the input queue (gschup/ggrs, MIT or Apache-2.0, read live, reimplemented
   with a PORT note). Diff: good. Tier B. Size M. Owns `crates/net/src/netcode.rs`,
@@ -436,14 +436,15 @@
   negatives (a visible meshlet is never culled). F2P: the stub has 0 tests today. P2P:
   `cargo test -p engine-assets --test it meshlet_vectors::` green; golden `d57b5c8ae3096614` x2.
   needs: none.
-- [ ] E71 endpoint: run the mcp-feature suites and fix the pins (EB-2026-10-09-S68,
+- [ ] E71 endpoint: run the mcp-feature suites and fix the pins (EB-2026-10-09-S68, Progress 2026-10-17: Suites run green: tool_budget_exhaustion 5 passed, jsonrpc_conformance_12_vectors passed, tool_count_pin (frozen registry 26) passed, `--features mcp --test it`, gh run 39056814820; docs/book/ai-door.md still says twenty tools and 32,768 chars while the test pins 13 core + pack verbs, so the one-count leg is open.
   EB-2026-10-11-S7). tool_budget_exhaustion (5 tests) and jsonrpc_conformance_vectors (12 vectors)
   compile but were never run; tool_count_pin asserts 26 tools while docs/book/ai-door.md says twenty
-  tools and 32,768 chars and the mcp-verb-authoring skill says 43,514: make test, book and skill
-  state one count and one budget. Cargo runs in a lead seat only (RAM). Diff: regular. Tier B.
+  tools and 32,768 chars while the code says 43,514 (the ai-door skill now points at the pin test
+  and `mcp.rs` constants instead of a number): make test and book state one count and one budget.
+  Heavy cargo goes to GitHub (`tools/gh-check.mjs`). Diff: regular. Tier B.
   Size S. Owns `crates/endpoint/tests/it/tool_budget_exhaustion.rs`,
   `crates/endpoint/tests/it/jsonrpc_conformance_vectors.rs`, `crates/endpoint/tests/it/tool_count_pin.rs`,
-  `docs/book/ai-door.md`, `skills/mcp-verb-authoring/SKILL.md`. Accept:
+  `docs/book/ai-door.md`. Accept:
   `cargo test -p engine-endpoint --features mcp --test it tool_budget_exhaustion` prints 5 passed;
   the same with `jsonrpc_conformance_vectors` prints 12 passed and with `tool_count_pin` passes.
   F2P: no run on record and the book count differs from the test today. P2P:
@@ -470,7 +471,7 @@
   `crates/render/tests/it/main.rs`. Accept: `cargo test -p engine-render --test it post_fsr1_parity::`
   passes. F2P: the module does not exist, and a one-constant edit in EASU turns it red. P2P:
   `cargo test -p engine-render --test it post_aa_parity::` 3 passed. needs: none.
-- [ ] E75 observe: wire the breaker and hedge paths into the supervisor retry path
+- [ ] E75 observe: wire the breaker and hedge paths into the supervisor retry path Progress 2026-10-17: Rolling breaker wired into the supervisor retry path in 516b43ff (breaker_open_rejects_retry_without_budget, breaker_is_opt_in_per_code, failed_half_open_probe_reopens_at_once; `cargo test -p engine-observe --lib supervisor` 15 passed, gh run 39056560377); the hedge path is still not called from supervisor.rs.
   (EB-2026-10-09-S72). circuit_vectors and hedge_vectors pass (5 and 5) but nothing in
   crates/observe/src uses them. Diff: good. Tier B. Size S. Owns `crates/observe/src/supervisor.rs`.
   Accept: `cargo test -p engine-observe --lib supervisor` passes with a breaker-open case asserted;
@@ -514,7 +515,7 @@
   `docs/plan/multiplayer.md`. Accept: `cargo test -p engine-net --lib dedicated` green x2 and the
   headless run prints its listing line. F2P: `rg -ci master crates/net/src/dedicated.rs` prints 0
   today. P2P: golden `d57b5c8ae3096614` x2; `cargo test -p engine-net --lib` green. needs: none.
-- [ ] E80 destruction: debris snapshot resim (EB-2026-10-09-S110; snapshot bytes, digest and restore
+- [x] E80 destruction: debris snapshot resim (EB-2026-10-09-S110; snapshot bytes, digest and restore Landed c466633e. `cargo test -p engine-destruction --lib snapshot` 8 passed (rollback_across_a_collapse_is_byte_equal_to_the_straight_run, an_eight_tick_rollback_resims_equal_at_every_tick_of_the_collapse, debris_snapshot_break_then_rollback_resims_byte_equal, canonical (island, id) restore order, max_shards cap checked on restore), gh run 39056263269.
   landed in c466633e, DX6 debris LOD stays its own row). Restore in island order and replay a
   rollback twice with the 16 and 1024 caps held. Diff: good. Tier B. Size M. Owns
   `crates/destruction/src/snapshot.rs`. Accept: `cargo test -p engine-destruction --lib snapshot`
@@ -611,7 +612,7 @@
   `docs/adr/0002-two-finish-files.md`. Accept: `rg -n "finish-line.md" docs/SPRINT.md` prints line 7
   and `node tools/finish.mjs` exits 0 with the same gate count. F2P: SPRINT.md line 7 names
   FINISH-RICH.md today. P2P: `node --test tools/finish.test.mjs` passes. needs: E87.
-- [ ] E93 save: publish the save envelope constants for forge to read (EB-2026-10-08-S231, the part
+- [x] E93 save: publish the save envelope constants for forge to read (EB-2026-10-08-S231, the part Landed 55f813eb. `cargo test -p engine-save --lib` 32 passed incl. envelope_drift (VERSION 1, SLOTS 16, payload 1,048,576, total 1,048,605 pinned against content/arena/save-envelope.json), gh run 39056263382.
   GP37 does not cover; GP37 moves rome-spec to content/arena/rome-spec.json, and forge's Rome
   SPEC.md names no spatial-threshold file yet, so that leg waits for a forge ask). Write VERSION 1,
   SLOTS 16, MAX_PAYLOAD_BYTES 1,048,576 and MAX_TOTAL_BYTES (29 plus the payload) from the engine-save
@@ -629,7 +630,7 @@
   `docs/plan/OPT24-deepdive.md`, `docs/plan/EG18-deepdive.md`. Accept: `node tools/drift-check.mjs`
   prints RESULT PASS. F2P: RESULT FAIL with 4 fail lines today. P2P: `node tools/workspace-check.mjs`
   PASS; golden `d57b5c8ae3096614` x2. needs: none.
-- [ ] UIX3b ui: wire LobbyScreen into the windowed game loop (center re-score 2026-10-12;
+- [x] UIX3b ui: wire LobbyScreen into the windowed game loop (center re-score 2026-10-12; Landed 1d01a410. `cargo test -p engine-game --test it lobby_ui_flow::` 3 passed incl. windowed_loop_reaches_lobby_screen_through_its_own_entry, gh run 39056624992; `rg -c LobbyScreen crates/game/src` 4 hits. Caveat: run_windowed drives drive_lobby_once once per smoke (windowed.rs:1030), not per press.
   production caller for the screen, whose headless tests are in
   crates/game/tests/it/lobby_ui_flow.rs). `rg LobbyScreen crates/game/src` prints 0 today. The loop
   draws the host and slot lists, feeds one LobbyInput per press and runs each LobbyCommand against

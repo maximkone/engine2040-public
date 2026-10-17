@@ -1,7 +1,7 @@
 //! check: every input is validated here, before a spawn touches the world.
 
 use crate::error::{Error, Field};
-use crate::types::{Blast, Transform};
+use crate::types::{Blast, Impact, Transform};
 use engine_physics::ragdoll::BoneShape;
 
 /// Largest position component accepted, meters.
@@ -10,6 +10,10 @@ pub(crate) const MAX_COORD: f32 = 1_000.0;
 const MAX_COORD_MM: u32 = 1_000_000;
 /// Largest blast radius accepted, millimeters (100 m).
 const MAX_BLAST_RADIUS_MM: u32 = 100_000;
+/// Largest impact reach accepted, millimeters (5 m): a projectile hit is local.
+const MAX_IMPACT_RADIUS_MM: u32 = 5_000;
+/// Largest impact momentum accepted, newton-seconds: a catapult stone (10 kg at 100 m/s).
+const MAX_IMPACT_NS: u32 = 1_000;
 /// The body a blast impulse is quoted for, kilograms.
 pub(crate) const BLAST_REFERENCE_KG: f32 = 70.0;
 /// Longest flight accepted, ticks (20 s at 60 Hz): staying up longer needs a launch speed past
@@ -103,6 +107,24 @@ pub(crate) fn blast(blast: Blast) -> Result<(), Error> {
         return Err(Error::OutOfRange(Field::Extent));
     }
     velocity_gain([blast.impulse_ns as f32, 0.0, 0.0], BLAST_REFERENCE_KG)?;
+    Ok(())
+}
+
+/// An impact with its point inside the world, a reach above zero and within
+/// [`MAX_IMPACT_RADIUS_MM`], a heading and a momentum within [`MAX_IMPACT_NS`].
+pub(crate) fn impact(hit: Impact) -> Result<(), Error> {
+    if hit.at_mm.iter().any(|c| c.unsigned_abs() > MAX_COORD_MM) {
+        return Err(Error::OutOfRange(Field::Position));
+    }
+    if hit.radius_mm == 0 || hit.radius_mm > MAX_IMPACT_RADIUS_MM {
+        return Err(Error::OutOfRange(Field::Extent));
+    }
+    if hit.direction == [0; 3] {
+        return Err(Error::OutOfRange(Field::Direction));
+    }
+    if hit.impulse_ns > MAX_IMPACT_NS {
+        return Err(Error::OutOfRange(Field::Impulse));
+    }
     Ok(())
 }
 

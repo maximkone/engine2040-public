@@ -169,11 +169,7 @@ fn bound_note(note: &str) -> String {
     if note.len() <= SCORE_NOTE_MAX {
         return note.to_owned();
     }
-    let mut end = SCORE_NOTE_MAX;
-    while end > 0 && !note.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut out = note[..end].to_owned();
+    let mut out = note[..note.floor_char_boundary(SCORE_NOTE_MAX)].to_owned();
     out.push_str("...");
     out
 }

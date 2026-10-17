@@ -11,10 +11,14 @@ pub mod arena;
 pub mod checked;
 pub mod config;
 pub mod counter_rng;
+/// Bitwise IEEE CRC-32 shared by the PNG writers.
+pub mod crc32;
 pub mod det_math;
 pub mod digest;
 pub mod fixed;
 pub mod hash;
+/// JSON string escaping for the hand-rolled writers.
+pub mod json;
 pub mod quat;
 pub mod rng;
 pub mod seal_key;

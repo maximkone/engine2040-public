@@ -115,7 +115,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   luminance within 2 m of a torch >= 2x far sand; 8 lights <= 0.8 ms, 32 <= 1.5
   ms in `arena per-pass`; capture x2 equal. F2P: 0 point lights in the frame.
   P2P: golden unchanged. needs: EG12, VS7.
-- [ ] RL43 render: the lightmap texel is linear HDR irradiance — `gi.rs:10-29`
+- [ ] RL43 render: the lightmap texel is linear HDR irradiance — `gi.rs:10-29` Progress 2026-10-17: gi.rs RGB9E5 linear HDR lane landed (baked_gi_gradient_holds_more_than_1024_levels, baked_gi_hdr_lane_round_trips_x2, baked_gi_hdr_stays_linear_at_the_top_end); left: no BC6H keyframe and no 1 MB bound for a 1024^2 map, sky-plus-bounce-only storage and second UV set unproven. Not run in this audit.
   quantises to 16 grays after Reinhard and bakes albedo in (`gi.rs:176-197`);
   store sky plus bounce only (live sun and torches never baked), RGB9E5 or BC6H,
   second UV set. The RL5 freeze lifts for this storage fix (lead 2026-10-12).
@@ -143,7 +143,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
 
 **Materials and characters (render-look.md)**
 
-- [ ] RL46a render: material interface first — `present.rs` DrawItem carries a
+- [x] RL46a render: material interface first — `present.rs` DrawItem carries a Landed 1d01a41. Tick audit 2026-10-17: present.rs material_interface_carries_id_and_four_slots, material_interface_forward_keeps_one_lit_entry, material_interface_list_validates_clean green with --features window in gh-check run 39057362669. Note: slots 1 and 3 are reserved accessors, only base color and normal have fields (see NS31b2).
   material id plus four texture slots, `shaders/forward.wgsl` exposes one lit
   entry point, `crates/material/src/compile.rs` owns the six-lobe registry;
   RL46 implements the build while RL48-51 code to this shape. Diff: regular.
@@ -214,7 +214,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
 
 **Particles, trails, crowd and fog (render-look.md; crowd with content.md)**
 
-- [ ] RL52 render: particles drawn, soft, lit, flipbook-blended — the GPU path is
+- [ ] RL52 render: particles drawn, soft, lit, flipbook-blended — the GPU path is Progress 2026-10-17: flipbook draw state landed (particles_gpu.rs DrawRecord with soft fade and velocity stretch, particle_draw_gpu.rs staged bytes, shaders/particle.wgsl) with gpu_draw_changes_pixels checking the on/off feeds at 4096 live (hash x2); left: that test reads draw records, not a rendered torch-region mask, and particle_ms <= 1.0 plus the ghost metric need the reference GPU capture. Not run in this audit.
   a bind probe that copies words and draws nothing (`particles_gpu.rs:751-772`,
   `present/gpu_present/submit.rs:71-90`). Instanced quads from the seeded CPU
   pool, soft depth fade (Wicked), two-frame flipbook blend and velocity stretch
@@ -224,7 +224,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   gpu_draw_changes_pixels: torch-region mask differs on vs off with 4096 live,
   particle_ms <= 1.0, ghost metric (`post.rs:60`) not worse. F2P: on and off frames
   are byte-equal. P2P: golden unchanged. needs: none.
-- [ ] RL53 render: sword ribbon trail from the integer sweep — no trail code; the
+- [ ] RL53 render: sword ribbon trail from the integer sweep — no trail code; the Progress 2026-10-17: crates/render/src/trail.rs slice 1 (16-sample TrailRing, trail_ring_bytes_x2_and_tip_matches_sweep_p1, smoothing under 8 cm, modeled trail_ms_budget); left: no draw pass or windup-to-impact window wiring, trail_ms is modeled not measured.
   sim yields blade segments (`crates/combat/src/sweep.rs:197-206`). A 16-sample
   ring, Catmull-Rom between ticks, width curve and alpha ramp (Hanabi ribbon,
   GPUTrail), drawn only from windup peak to impact plus 4 ticks; one draw. Diff:
@@ -288,7 +288,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   hit_react_rot` x2 (weight 0 equals base bytes, two strikes sum within 1e-5),
   and `node tools/product-check.mjs` prints react_head_cm_max >= 8 with pops not
   above before. F2P: react_head_cm_max is 0. P2P: golden unchanged. needs: EG18.
-- [ ] AM24 anim: last-stage joint angular-speed limiter — 35-55 pops per 300
+- [ ] AM24 anim: last-stage joint angular-speed limiter — 35-55 pops per 300 Progress 2026-10-17: AngularLimiter landed in anim inertialize.rs and SpacePlayer (ang_limit_takes_ten_ticks_for_180_deg_at_1080_degs, ang_limit_space_player_caps_180_deg_step, run 39056591616); left: not wired into fighter_look observe_tick and slot_pose, and product-check pops=0 is not shown.
   frames up to 1 m (`tools/product-bar.json:24`); no stage guards the final pose
   (`fighter_look.rs:838-885`). Keep the last output rotation per bone, slerp
   toward the wanted one by min(1, limit*dt/angle) (Godot
@@ -306,7 +306,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   head yaw <= 0.5 deg/tick^2 over a 0..180 deg sweep, a target swap eases in 12
   ticks, the head never leaves 70 deg. F2P: the clamp steps velocity. P2P:
   golden unchanged. needs: LF12.
-- [ ] GP43 game: one stateful fight camera — `present_into` overwrites the director
+- [ ] GP43 game: one stateful fight camera — `present_into` overwrites the director Progress 2026-10-17: FightCamSpring landed in camera_rig.rs with fight_cam_spring_smooths_duel_at_both_rates (yaw p99 <= 60 deg/s, eye step <= 25 cm, 30 vs 144 fps within 1 cm) and trauma tests; left: nothing outside tests calls it, fighter_look present_into still uses the stateless fight_camera.
   camera with a stateless fight_camera (`fighter_look.rs:1089,1133-1218`), trauma
   never shows, DampedSync is frame-rate dependent (`camera.rs:2487-2552`). Exact
   halflife springs on yaw, distance and look point, a timed FOV punch on Hit,
@@ -347,7 +347,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   cut_cap`: 0 added draw calls, cap coverage >= 98 percent of the stump
   silhouette, validation errors 0, <= 0.15 ms for 8 stumps. F2P: the stump
   capture shows 0 cap pixels. P2P: golden unchanged. needs: BX8.
-- [ ] PX42 bodies: a human ragdoll joint table — every joint is spherical with one
+- [ ] PX42 bodies: a human ragdoll joint table — every joint is spherical with one Progress 2026-10-17: ragdoll.rs humanoid joint table landed with joint_table_humanoid_defaults and fifty_seeded_human_falls_measured (0 backward-hinge frames after clamp, physics green run 39057362796); left: the human_fall report in ragdoll_tape.rs and the peak-speed baseline under --test ragdoll_tape do not exist.
   limit per depth (`crates/physics/src/ragdoll.rs:1116-1145,1167`), so knees and
   elbows fold backward. Hinges for knee and elbow, cone plus twist elsewhere, a
   zero-speed friction motor (5-10 N.m), a soft spring (Box3D `shared/human.c`).
@@ -357,7 +357,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   human falls, peak bone speed after rest <= the posted baseline, `balance_hash`
   green. F2P: the new report shows backward knees. P2P: golden unchanged. needs:
   PX9.
-- [ ] PX43 bodies: ragdoll Stabilize — density 1.0 on every capsule
+- [ ] PX43 bodies: ragdoll Stabilize — density 1.0 on every capsule Progress 2026-10-17: ragdoll.rs stabilize_clamps_ratio_preserving_total (links inside the ratio band) green in physics run 39057362796; left: no interpenetration_max_m baseline and nothing under --test ragdoll_tape.
   (`ragdoll.rs:388-392`). Child:parent mass ratio clamped to [0.8, 1.2], an
   inertia floor, root joints solved last (Jolt `Ragdoll.cpp` Stabilize). Diff:
   regular. Tier B. Size S. Owns the mass hunk of `ragdoll.rs`. Accept: `cargo
@@ -381,7 +381,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `node tools/mp6-check.mjs`: over_cap 0 on every WAN profile, < 3 rollbacks per
   1000 ticks at 2-frame delay, max slew <= 5 percent, 0 skipped frames. F2P: no
   slew data posted. P2P: golden unchanged, tape bytes equal. needs: MP24.
-- [ ] MP27 proof: sync test at every tick and confirmed-only peer compare —
+- [ ] MP27 proof: sync test at every tick and confirmed-only peer compare — Progress 2026-10-17: arena sync.rs sync_heavy_mode_clean_reports_zero_false_positives verifies rollback at every tick of the test config; left: no 600 split points at depth 8, no deliberately unsnapshotted LimbPool counter caught test, check_remote confirmed-only compare unchanged.
   `verify_rollback` tests one split point (`crates/arena/src/sync.rs:141-179`);
   `check_remote` (`crates/net/src/netcode.rs:211`) compares predicted frames and
   would report a false desync. ggrs sync-test shape. SIM test only. Diff:
@@ -392,7 +392,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
 
 **GPU speed and the live frame (render-look.md, potato.md, quality.md)**
 
-- [ ] RL60 render: DrawItem carries a transform and the live loop draws per bin
+- [ ] RL60 render: DrawItem carries a transform and the live loop draws per bin Progress 2026-10-17: present.rs BinKey and group_into_bins landed (bins_single_key_256_copies_give_one_bin_with_256_indices, shuffled input stable); left: DrawItem has no transform, the submit loop still draws per item, no ARENA draws=/bins= line.
   (the base RL32 needs) — `present.rs:375-387` has no model matrix and
   `forward.wgsl:205-214` takes world-space vertices, so two kit copies cannot
   share a mesh key; 7 wgpu calls per item, cap 256 (`submit.rs:504-516`). Opaque
@@ -447,7 +447,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   two pipelines from one module differ only by constants, variants per tier <= 4,
   fragment texture fetches 13 -> 1 with IBL specular off. F2P: no override in any
   shader. P2P: golden unchanged. needs: none.
-- [ ] RL61 render: LOD by projected pixel error — `draw.rs:354-365` picks LOD by
+- [ ] RL61 render: LOD by projected pixel error — `draw.rs:354-365` picks LOD by Progress 2026-10-17: draw.rs lod_by_pixel_error plus DrawTable pixel_thresholds_px landed (lod_pixel_error_* tests: FOV 20 picks finer than FOV 60, hysteresis, band path unchanged when unarmed); left: no 1080p to 540p one-LOD-sooner test, no orbit pop capture, cook stores no per-LOD error, not armed in the live loop.
   distance bands that ignore FOV and render scale. The cook stores per-LOD error
   in metres (meshoptimizer clusterlod); runtime projects it to pixels and takes
   the coarsest LOD under 1 px (hero 0.5) with hysteresis. Diff: regular. Tier B.
@@ -468,7 +468,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
 
 **AI door, machine eyes and replay (ai-native.md, quality.md)**
 
-- [ ] AX27 endpoint: capture and play.step return the frame as an MCP image block
+- [x] AX27 endpoint: capture and play.step return the frame as an MCP image block Landed 0b8cb60. Tick audit 2026-10-17: play.rs capture_image_block (one image block with PNG magic, hashes to manifest sha256, no png_bytes key, caption under the cap) green in gh-check run 39057874705 (endpoint --features mcp --lib). Note: the play.step receipt carrier was not checked.
   — `capture` returns `png_bytes: Vec<u8>` (`crates/endpoint/src/play.rs:188-191`)
   through `CallToolResult::structured` (`mcp.rs:1416`), so a 300 KB PNG becomes a
   number array of about 2.1M characters, written twice, that no model can see.
@@ -573,7 +573,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   7 cues mapped, motors off <= 10 ms after focus loss; a pad disconnect pauses a
   local duel within 1 tick (Steam Deck rule); a `--features pad` test lists >= 1
   fake pad. F2P: no rumble code. P2P: golden unchanged. needs: EG27.
-- [ ] GP46 input: tick-counted gestures and action sets — 7 actions and 3 button
+- [x] GP46 input: tick-counted gestures and action sets — 7 actions and 3 button Landed 7d13d5f. Tick audit 2026-10-17: bindings.rs conditions_tap/hold/hold_and_release/chord, conditions_menu_presses_never_reach_duel, conditions_same_script_gives_same_tape_bytes_x2 (v1 keeps 3 bits) green in gh-check run 39057174696 (engine-input, 51 passed).
   bits (`crates/input/src/bindings.rs:21`, `fighter.rs:24-30`), only press exists.
   Tap, hold, hold-and-release and chord conditions counted in integer ticks before
   the tape (bevy_enhanced_input shape), action sets stack (Duel, Menu, Pause); the
@@ -634,7 +634,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   and every inline source pass; a seeded type error in forward.wgsl fails with
   line:col and the live swap keeps last-good. F2P: the brace check accepts that
   edit. P2P: golden unchanged. needs: none.
-- [ ] RL58 render: debug-draw lines with a Rapier backend (deepens EG26) — no
+- [ ] RL58 render: debug-draw lines with a Rapier backend (deepens EG26) — no Progress 2026-10-17: crates/render/src/debug_draw.rs slice 1 (DebugDraw trait, line groups with depth bias, recorder, line_verts, debug_draw_* tests); left: no line pass, no Rapier backend, no capture or golden on/off check.
   debug draw in `crates/render/src`; rapier `debug-render` is off
   (`Cargo.toml:192`). Line groups with depth bias (Bevy gizmos), the Rapier
   backend trait draws colliders and joints; combat sweeps, hurt capsules and nav
@@ -655,7 +655,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   shadow atlas, cascades, AO, motion, luminance) give 8 non-black PNGs with 8
   different SHA-256; < 0.1 ms with no view selected. F2P: an unknown view name is
   accepted and no view PNG exists. P2P: golden unchanged. needs: PF25.
-- [ ] OPT34 render: pipeline-creation counter by cause — OPT19 tests a frame-time
+- [x] OPT34 render: pipeline-creation counter by cause — OPT19 tests a frame-time Landed 1d01a41. Tick audit 2026-10-17: cache.rs pipeline_counter_material_walk_counts_four_causes_with_late_zero (prints late=0 and 4 counters) and pipeline_counter_failed_insert_counts_no_build green in gh-check run 39057362669 (render --features window) and render lib run 39057649152; the cache.rs doc lists the 19 sites that bypass the counters.
   spike, which needs a quiet box; Godot counts builds by cause. Count every
   pipeline built in `crates/render/src/cache.rs` by cause (mesh, surface, draw,
   specialization); after load the late count is 0. Diff: regular. Tier A. Size
@@ -690,7 +690,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   makes the dependent fresh, a cook-version bump recooks 100 percent, a kill
   between file 1 and 2 leaves exactly 1 entry to redo, bundle bytes x2. F2P: the
   dependent is served stale. P2P: golden unchanged. needs: none.
-- [ ] RC38 ecs: declared access, a conflict check and a seeded order shuffle —
+- [ ] RC38 ecs: declared access, a conflict check and a seeded order shuffle — Progress 2026-10-17: schedule.rs access sets, conflict refusal naming both systems and set_shuffle_seed landed (sched_shuffle_keeps_hash_across_50_seeds, ecs green run 39057318550); left: the 50 shuffles run a toy ArchetypeWorld, not the match that yields d57b5c8ae3096614.
   systems run in registration order with no read or write sets
   (`crates/ecs/src/schedule.rs:36-47,97`). Each system declares its columns; the
   build refuses an unordered conflicting pair; the golden runs under 50 seeded
@@ -742,7 +742,7 @@ no-clip rule at eye level, eye-space shake, one scripted proof tape. Every row i
   table); UW11 accept line ("never clips the body") holds on the
   infantry body; replays twice. F2P: the orbit fixture shows head
   pixels without the rule. P2P: golden unchanged. needs: FV1, UW11.
-- [ ] FV5 feel: eye-space trauma kick plus FOV punch. Tier B. Size S.
+- [x] FV5 feel: eye-space trauma kick plus FOV punch. Tier B. Size S. Landed 1d01a41. Tick audit 2026-10-17: fps_view.rs shake_eye_kick_and_fov_punch_hold_gp21_bar (jab x4 <= super kick, roll <= 0.10 rad x gain, FOV punch under cap, calm is zero) and shake_eye_replays_exactly_twice pass in gh-check run 39057596405 (engine-game --lib, the only red test there is refilled_outcome_matches_fresh_tick_for_tick). Note: the module header says retired, no production caller.
   Owns `crates/game/src/fps_view.rs` shake hunk (calls
   `smooth_trauma_offset`, no new curve).
   Accept: jab kick at or under 1/4 super kick about the eye (GP21

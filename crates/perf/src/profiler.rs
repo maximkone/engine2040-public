@@ -495,7 +495,7 @@ impl Quantiles {
             return Err(ProfileError::NonFiniteSample { what });
         }
         let mut sorted = samples.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("samples are finite"));
+        sorted.sort_by(f64::total_cmp);
         let at = |p: f64| crate::latency::nearest_rank_sorted(&sorted, p);
         Ok(Self {
             frames: samples.len() as u32,
@@ -1267,24 +1267,14 @@ pub fn capture(frames: u32) -> Result<FrameReport, ProfileError> {
     // Names and p50s copy out first so the rows below can move into the report.
     let top_system = systems
         .iter()
-        .max_by(|a, b| {
-            a.quantiles
-                .p50_ms
-                .partial_cmp(&b.quantiles.p50_ms)
-                .expect("quantiles are finite")
-        })
-        .expect("four system rows always exist");
+        .max_by(|a, b| a.quantiles.p50_ms.total_cmp(&b.quantiles.p50_ms))
+        .ok_or(ProfileError::EmptySamples { what: "systems" })?;
     let (costliest_system, costliest_system_p50_ms) =
         (top_system.span, top_system.quantiles.p50_ms);
     let top_pass = passes
         .iter()
-        .max_by(|a, b| {
-            a.quantiles
-                .p50_ms
-                .partial_cmp(&b.quantiles.p50_ms)
-                .expect("quantiles are finite")
-        })
-        .expect("six pass rows always exist");
+        .max_by(|a, b| a.quantiles.p50_ms.total_cmp(&b.quantiles.p50_ms))
+        .ok_or(ProfileError::EmptySamples { what: "passes" })?;
     let (costliest_pass, costliest_pass_p50_ms) = (top_pass.pass.name(), top_pass.quantiles.p50_ms);
     Ok(FrameReport {
         frames,

@@ -137,16 +137,6 @@ pub fn sample(clip: &Clip, joint: usize, t: f32) -> [f32; 3] {
     ]
 }
 
-/// Blend two poses: a + (b - a) * clamp01(t).
-pub fn blend(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    let f = clamp01(t);
-    [
-        a[0] + (b[0] - a[0]) * f,
-        a[1] + (b[1] - a[1]) * f,
-        a[2] + (b[2] - a[2]) * f,
-    ]
-}
-
 /// Scalar quant: per-channel uniform to u16. max==min guards div-zero.
 pub fn quantize(v: [f32; 3], min: [f32; 3], max: [f32; 3]) -> [u16; 3] {
     let mut q = [0u16; 3];
@@ -175,9 +165,9 @@ pub fn dequantize(q: [u16; 3], min: [f32; 3], max: [f32; 3]) -> [f32; 3] {
 /// FNV-1a64 over track count, lens, and f32 bits (same constants as ecs).
 pub fn clip_hash(clip: &Clip) -> u64 {
     let mut h = Fnv64::new();
-    h.write_u64(clip.tracks.len() as u64);
+    h.write_len(clip.tracks.len());
     for tr in &clip.tracks {
-        h.write_u64(tr.times.len() as u64);
+        h.write_len(tr.times.len());
         for w in tr
             .times
             .iter()
@@ -215,7 +205,7 @@ mod tests {
     #[test]
     fn blend_midpoint() {
         assert_eq!(
-            blend([0.0, 0.0, 0.0], [2.0, 4.0, 6.0], 0.5),
+            blend::lerp3([0.0, 0.0, 0.0], [2.0, 4.0, 6.0], 0.5),
             [1.0, 2.0, 3.0]
         );
     }

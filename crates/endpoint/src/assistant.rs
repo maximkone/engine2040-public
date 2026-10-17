@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::spatial_glue::{conflict_texts, finding_line, quat_of_yaw, yaw_of_quat, ParsedWant};
 use engine_arena::fork::{Fork, ForkMetrics, ForkProposal};
 use engine_arena::{ArenaConfig, FighterTape};
 use engine_core::{
@@ -329,18 +330,6 @@ struct ActorSnapshot {
     ids: Vec<ObjectId>,
 }
 
-/// Y yaw extracted from a world quaternion (`[x, y, z, w]` like Transform).
-fn yaw_of_quat(q: [f32; 4]) -> f32 {
-    let [x, y, z, w] = q;
-    (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z))
-}
-
-/// Pure-Y rotation quaternion for a solved yaw.
-fn quat_of_yaw(yaw: f32) -> [f32; 4] {
-    let half = 0.5 * yaw;
-    [0.0, half.sin(), 0.0, half.cos()]
-}
-
 fn snapshot_actors(doc: &Document) -> ActorSnapshot {
     let mut order: Vec<ObjectId> = Vec::new();
     let mut stack = doc.hierarchy.roots();
@@ -384,42 +373,6 @@ fn snapshot_actors(doc: &Document) -> ActorSnapshot {
         });
     }
     ActorSnapshot { actors, ids }
-}
-
-/// One staged-delta finding rendered exactly like the SP4 brief lines
-/// (`finding <check> <a> <b|-> <severity> <pct>`). Single-actor findings
-/// render `b` as `-`.
-fn finding_line(finding: &engine_spatial::Finding) -> String {
-    let b = if finding.b == u32::MAX {
-        "-".to_owned()
-    } else {
-        finding.b.to_string()
-    };
-    format!(
-        "finding {} {} {} {} {}\n",
-        finding.check, finding.a, b, finding.severity, finding.pct
-    )
-}
-
-/// A parsed place want plus its source text (conflicts echo source texts).
-struct ParsedWant {
-    want: engine_spatial::Want,
-    source: String,
-}
-
-/// Unmet solver wants back to source texts. The conflict set is a
-/// subsequence of the intent in intent order, so an ordered multiset
-/// subtraction finds each entry exactly once.
-fn conflict_texts(parsed: &[ParsedWant], unmet: &[engine_spatial::Want]) -> Vec<String> {
-    let mut rest: Vec<engine_spatial::Want> = unmet.to_vec();
-    let mut out = Vec::new();
-    for entry in parsed {
-        if let Some(position) = rest.iter().position(|other| *other == entry.want) {
-            rest.remove(position);
-            out.push(entry.source.clone());
-        }
-    }
-    out
 }
 
 fn bad_want(source: &str, detail: &str) -> ProposeError {

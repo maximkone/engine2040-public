@@ -17,6 +17,10 @@
 //! valid position if a corner pinch cannot be solved, so a fighter is never
 //! inside an obstacle at any tick.
 //!
+//! A world may also carry a kit zone of cooked static colliders
+//! ([`kit_zone::KitZone`], added by [`MatchWorld::with_kit_zone`]): hulls and meshes
+//! from the art, resolved by the same push-out. A world built without one is unchanged.
+//!
 //! Units: meters. Determinism: `+ - * /`, `sqrt` and comparisons only,
 //! obstacles in canonical (sorted bytes) order, no hash maps.
 
@@ -30,6 +34,11 @@ use crate::canon_zero;
 /// spawns); start at [`kit::fps_test_map`].
 #[path = "kit.rs"]
 pub mod kit;
+
+/// Cooked static colliders (hulls and meshes from the art) as extra walls for the
+/// capsule controller; opt in through [`MatchWorld::with_kit_zone`].
+#[path = "kit_zone.rs"]
+pub mod kit_zone;
 
 /// Most obstacles one match carries (a scene far above this is a level, not
 /// an arena).
@@ -161,6 +170,9 @@ impl std::error::Error for WorldError {}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MatchWorld {
     obstacles: Vec<Obstacle>,
+    /// Cooked kit-zone colliders; `None` for every world built without
+    /// [`MatchWorld::with_kit_zone`], which then plays and hashes as before.
+    zone: Option<kit_zone::KitZone>,
 }
 
 impl MatchWorld {
@@ -217,7 +229,28 @@ impl MatchWorld {
             o.center = [canon_zero(o.center[0]), canon_zero(o.center[1])];
         }
         obstacles.sort_by_key(bits);
-        Ok(Self { obstacles })
+        Ok(Self {
+            obstacles,
+            zone: None,
+        })
+    }
+
+    /// This world plus a kit zone of cooked static colliders: the explicit opt-in
+    /// constructor for collision that comes from the art. The boxes keep their order
+    /// and their digest words; the zone adds its own digest after them, so a world
+    /// built without a zone is untouched. An empty zone changes nothing.
+    ///
+    /// Consumer: the game's window session opts in here; the door's cast verbs read
+    /// the zone back through [`MatchWorld::kit_zone`].
+    #[must_use]
+    pub fn with_kit_zone(mut self, zone: kit_zone::KitZone) -> Self {
+        self.zone = (!zone.is_empty()).then_some(zone);
+        self
+    }
+
+    /// The kit zone, when this world was built with one.
+    pub fn kit_zone(&self) -> Option<&kit_zone::KitZone> {
+        self.zone.as_ref()
     }
 
     /// Obstacles in canonical order.
@@ -227,12 +260,13 @@ impl MatchWorld {
 
     /// True when the world is the legacy empty arena.
     pub fn is_empty(&self) -> bool {
-        self.obstacles.is_empty()
+        self.obstacles.is_empty() && self.zone.is_none()
     }
 
-    /// FNV-1a over the canonical obstacle bytes; `0` for the empty world.
+    /// FNV-1a over the canonical obstacle bytes, then the kit zone digest when there is
+    /// one; `0` for the empty world.
     pub fn digest(&self) -> u64 {
-        if self.obstacles.is_empty() {
+        if self.is_empty() {
             return 0;
         }
         let mut hash = Fnv64::new();
@@ -242,12 +276,16 @@ impl MatchWorld {
                 hash.write_u32(word);
             }
         }
+        if let Some(zone) = &self.zone {
+            hash.write_u64(zone.digest());
+        }
         hash.finish()
     }
 
-    /// True when a circle at `p` overlaps any obstacle.
+    /// True when a circle at `p` overlaps any obstacle or kit-zone footprint.
     pub fn overlaps(&self, p: [f32; 2], radius: f32) -> bool {
         self.obstacles.iter().any(|o| o.overlaps(p, radius))
+            || self.zone.as_ref().is_some_and(|z| z.overlaps(p, radius))
     }
 
     /// Move a circle from `from` (a valid, non-overlapping position) to `to`
@@ -263,6 +301,10 @@ impl MatchWorld {
                     p = q;
                     moved = true;
                 }
+            }
+            if let Some(q) = self.zone.as_ref().and_then(|z| z.push_out(p, radius)) {
+                p = q;
+                moved = true;
             }
             p = [
                 canon_zero(p[0].clamp(-limit, limit)),
@@ -292,6 +334,9 @@ impl MatchWorld {
                 if let Some(q) = o.push_out(p, radius) {
                     p = q;
                 }
+            }
+            if let Some(q) = self.zone.as_ref().and_then(|z| z.push_out(p, radius)) {
+                p = q;
             }
             p = [
                 canon_zero(p[0].clamp(-limit, limit)),

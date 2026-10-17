@@ -816,14 +816,14 @@ fn mem_checkpoint(fixture: &LivingFixture) -> u64 {
     let mut hash = Fnv64::new();
     mix_text(&mut hash, &fixture.id);
     hash.write_u64(fixture.seed);
-    hash.write_u64(fixture.memories.len() as u64);
+    hash.write_len(fixture.memories.len());
     for line in &fixture.memories {
         hash.write_u64(line.tick);
         hash.write_u8(line.kind.as_byte());
         hash.write_u64(u64::from(line.salience));
         mix_text(&mut hash, &line.text);
     }
-    hash.write_u64(fixture.goals.len() as u64);
+    hash.write_len(fixture.goals.len());
     for goal in &fixture.goals {
         mix_text(&mut hash, goal);
     }

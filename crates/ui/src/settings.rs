@@ -171,7 +171,10 @@ impl Settings {
     ) -> Result<(), SettingsError> {
         for other in BoundAction::ALL {
             if other != action && self.bindings.button(other) == button {
-                return Err(SettingsError::ButtonTaken { action: other });
+                return Err(SettingsError::ButtonTaken {
+                    action: other,
+                    wanted: action,
+                });
             }
         }
         Ok(())
@@ -277,11 +280,15 @@ pub enum SettingsError {
         /// Wish units asked for.
         deadzone: u8,
     },
-    /// The button already drives another action; that action is carried.
+    /// The button already drives another action; both actions are carried.
     ButtonTaken {
         /// Action holding the button.
         action: BoundAction,
+        /// Action that asked for it.
+        wanted: BoundAction,
     },
+    /// Every action already took its button in this drill.
+    DrillDone,
     /// The staged batch already holds [`MAX_STAGED`] edits.
     StagedFull,
     /// Nothing staged to apply or pop.
@@ -321,9 +328,11 @@ impl core::fmt::Display for SettingsError {
             Self::DeadzoneOutOfRange { deadzone } => {
                 write!(f, "deadzone {deadzone} is above {DEADZONE_MAX}")
             }
-            Self::ButtonTaken { action } => {
-                write!(f, "button already drives {action:?}; rebind that first")
-            }
+            Self::ButtonTaken { action, wanted } => write!(
+                f,
+                "{wanted:?} cannot take a button that drives {action:?}; rebind {action:?} first"
+            ),
+            Self::DrillDone => write!(f, "every action already has its button"),
             Self::StagedFull => write!(f, "staged batch is full ({MAX_STAGED} edits)"),
             Self::NothingStaged => write!(f, "nothing staged"),
             Self::NothingToUndo => write!(f, "nothing applied to undo"),
@@ -648,6 +657,47 @@ impl SettingsPanel {
             changes,
             tape_digest: self.tape.digest(),
         }
+    }
+}
+
+/// Pad-only rebind drill: the screen asks for one action at a time in
+/// [`BoundAction::ALL`] order and each press binds it, so a full rebind needs
+/// no keyboard. Every press is an ordinary staged edit on the panel, so the
+/// whole drill lands at one boundary tick and replays from the tape. A press
+/// onto a button another action holds is refused naming both actions and the
+/// drill keeps asking for the same action.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct RebindDrill {
+    next: usize,
+}
+
+impl RebindDrill {
+    /// Drill at the first action.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { next: 0 }
+    }
+
+    /// Action the next press binds; `None` once every action has its button.
+    #[must_use]
+    pub const fn awaiting(&self) -> Option<BoundAction> {
+        BoundAction::from_index(self.next)
+    }
+
+    /// Stage the awaited action onto `button` and move to the next action.
+    ///
+    /// # Errors
+    /// [`SettingsError::ButtonTaken`] naming both actions, a full staged
+    /// batch or [`SettingsError::DrillDone`]; the drill does not advance.
+    pub fn press(
+        &mut self,
+        panel: &mut SettingsPanel,
+        button: PhysicalButton,
+    ) -> Result<BoundAction, SettingsError> {
+        let action = self.awaiting().ok_or(SettingsError::DrillDone)?;
+        panel.stage(SettingChange::Rebind { action, button })?;
+        self.next += 1;
+        Ok(action)
     }
 }
 
@@ -1044,7 +1094,7 @@ fn snapshot(settings: &Settings) -> Vec<SettingChange> {
 mod tests {
     use super::*;
     use engine_input::fighter::ATTACK;
-    use engine_input::Key;
+    use engine_input::{Key, ACTION_COUNT};
 
     const FREE_KEY: PhysicalButton = PhysicalButton::Key(200);
 
@@ -1269,6 +1319,107 @@ mod tests {
         assert_eq!(panel.tape().len(), 4);
     }
 
+    /// Seven distinct pad buttons, one per action in table order.
+    fn pad_presses() -> [PhysicalButton; ACTION_COUNT] {
+        core::array::from_fn(|index| PhysicalButton::Pad(u8::try_from(index).unwrap()))
+    }
+
+    /// Run the whole drill from a fresh panel and apply it on tick `at`.
+    fn pad_drill_panel(at: u32) -> SettingsPanel {
+        let mut panel = SettingsPanel::new();
+        let mut drill = RebindDrill::new();
+        for (index, button) in pad_presses().into_iter().enumerate() {
+            assert_eq!(drill.awaiting(), BoundAction::from_index(index));
+            let bound = drill.press(&mut panel, button).unwrap();
+            assert_eq!(Some(bound), BoundAction::from_index(index));
+        }
+        assert_eq!(drill.awaiting(), None);
+        panel.apply(at).unwrap();
+        panel
+    }
+
+    #[test]
+    fn a_full_rebind_needs_only_the_pad_and_goes_live_on_its_boundary() {
+        let mut panel = pad_drill_panel(20);
+        panel.advance(19).unwrap();
+        assert_eq!(
+            panel.live().bindings.button(BoundAction::Attack),
+            PhysicalButton::Key(Key::F.0),
+            "staged and stamped is not live before the boundary"
+        );
+        panel.advance(20).unwrap();
+        for (action, button) in BoundAction::ALL.into_iter().zip(pad_presses()) {
+            assert_eq!(panel.live().bindings.button(action), button);
+        }
+        // The input layer reads the pad press as the action; the old key is dead.
+        let pad = panel.live().bindings.button_bits(&[PhysicalButton::Pad(0)]);
+        assert_ne!(pad.0 & ATTACK, 0);
+        let key = panel
+            .live()
+            .bindings
+            .button_bits(&[PhysicalButton::Key(Key::F.0)]);
+        assert_eq!(key.0 & ATTACK, 0);
+    }
+
+    #[test]
+    fn the_pad_drill_replays_exactly_twice() {
+        let first = pad_drill_panel(20);
+        let second = pad_drill_panel(20);
+        assert_eq!(first.tape().digest(), second.tape().digest());
+        assert_eq!(first.tape(), second.tape());
+        assert_eq!(
+            first.tape().settings_at(20),
+            second.tape().settings_at(20),
+            "the tape folds to the same bindings on the same tick"
+        );
+        assert_eq!(first.tape().settings_at(19), Settings::default());
+        // An undo stamps the inverse on the tape; earlier ticks still replay.
+        let mut undone = first.clone();
+        undone.undo_applied(30).unwrap();
+        assert_eq!(undone.tape().settings_at(25), first.tape().settings_at(20));
+        assert_eq!(undone.tape().settings_at(30), Settings::default());
+    }
+
+    #[test]
+    fn a_pad_button_another_action_holds_is_refused_naming_both() {
+        let mut panel = pad_drill_panel(5);
+        panel.advance(5).unwrap();
+        let mut drill = RebindDrill::new();
+        // Attack asks for Block's pad button.
+        let err = drill.press(&mut panel, PhysicalButton::Pad(1)).unwrap_err();
+        assert_eq!(
+            err,
+            SettingsError::ButtonTaken {
+                action: BoundAction::Block,
+                wanted: BoundAction::Attack,
+            }
+        );
+        let text = err.to_string();
+        assert!(text.contains("Block") && text.contains("Attack"), "{text}");
+        // Refused: nothing staged, the drill still asks for Attack.
+        assert_eq!(panel.staged_len(), 0);
+        assert_eq!(drill.awaiting(), Some(BoundAction::Attack));
+        assert_eq!(
+            drill.press(&mut panel, PhysicalButton::Pad(9)),
+            Ok(BoundAction::Attack)
+        );
+        assert_eq!(drill.awaiting(), Some(BoundAction::Block));
+    }
+
+    #[test]
+    fn a_finished_drill_refuses_more_presses() {
+        let mut panel = SettingsPanel::new();
+        let mut drill = RebindDrill::new();
+        for button in pad_presses() {
+            drill.press(&mut panel, button).unwrap();
+        }
+        assert_eq!(
+            drill.press(&mut panel, PhysicalButton::Pad(40)),
+            Err(SettingsError::DrillDone)
+        );
+        assert_eq!(panel.staged_len(), ACTION_COUNT);
+    }
+
     #[test]
     fn undo_waits_for_staged_edits() {
         let mut panel = SettingsPanel::new();
@@ -1289,7 +1440,8 @@ mod tests {
                 button: PhysicalButton::Key(Key::W.0),
             }),
             Err(SettingsError::ButtonTaken {
-                action: BoundAction::MoveForward
+                action: BoundAction::MoveForward,
+                wanted: BoundAction::MoveBack,
             })
         );
         // Rebinding an action onto its own button is a no-op, not a clash.

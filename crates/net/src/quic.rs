@@ -7,7 +7,9 @@
 //! std QUIC runtime never enter sim hashes. Errors: session NetError for
 //! wire faults, std io for socket setup, rustls for crypto setup.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+#[cfg(feature = "quic")]
+use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
@@ -1733,7 +1735,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "quic"))]
 mod channel_route_tests {
     use super::*;
     use crate::netcode::Channel;
@@ -1918,7 +1920,7 @@ mod channel_route_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "quic"))]
 mod relay_transport_tests {
     use super::*;
     use crate::relay::{InviteCode, RelayConfig, RelayHub};
@@ -2096,7 +2098,9 @@ mod relay_transport_tests {
         assert_eq!(got[0].from, PeerId(relay_addr), "sender names the relay");
         match &got[0].frame {
             InboundFrame::Datagram(bytes) => assert_eq!(*bytes, payload),
-            other => panic!("forward rides datagrams, got {other:?}"),
+            other @ InboundFrame::Stream { .. } => {
+                panic!("forward rides datagrams, got {other:?}")
+            }
         }
         // Forged control leaves state unchanged.
         let forged_reg = RelayMsg::Registered {
@@ -2118,7 +2122,7 @@ mod relay_transport_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "quic"))]
 mod on30_spike_tests {
     /// ON30 spike: the relay leg through the invite/punch path converges with
     /// full checkpoint equality under the WAN soak 150 ms / 2 pct loss profile.

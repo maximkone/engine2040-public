@@ -1,9 +1,16 @@
 //! material: one table of what things are made of: weight, grip, bounce and drag.
 //!
-//! Data owner: `engine-physics`. Readers: the float physical layer (`engine-physfx`) for the
-//! colliders of ragdoll bones, limbs and debris; integer authority code may read the same rows,
-//! which is why every number is an integer (thousandths for the coefficients) and the `f32`
-//! accessors only divide. Std-only, no state, nothing to step.
+//! Data owner: `engine-physics`. Three readers, one table:
+//! - the float physical layer (`engine-physfx`): density, bounce and damping for the colliders of
+//!   ragdoll bones, limbs and debris, and grip for their contacts;
+//! - the authority walker (`controller2::Config::on`): grip (ground acceleration) and the step
+//!   height of the ground it stands on, all integers;
+//! - the audio cue picker ([`Material::cue`]): which [`SoundClass`] an impact makes and how
+//!   [`Loudness`] it is. It names a cue; it plays nothing.
+//!
+//! Every number is an integer (thousandths for the coefficients) and the `f32` accessors only
+//! divide, so integer authority code and float presentation read the very same values.
+//! Std-only, no state, nothing to step.
 //!
 //! The rows `Flesh` and `Stone` are the constants the Rapier code already used: bones and limbs
 //! are `Flesh`, ground and thrown rubble are `Stone`. A test reads those source files and fails
@@ -26,6 +33,53 @@ pub enum Material {
     Cloth,
 }
 
+/// The family of sound an impact on a material makes. A cue picker maps each class to its sample
+/// bank; this crate only names the class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundClass {
+    /// A hollow knock.
+    Knock,
+    /// A hard clack.
+    Clack,
+    /// A dull thud.
+    Thud,
+    /// A ringing clang.
+    Ring,
+    /// A hiss of grains.
+    Hiss,
+    /// A soft rustle.
+    Rustle,
+}
+
+/// How hard an impact sounds, from the speed it lands at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Loudness {
+    /// Too gentle to make a sound.
+    Silent,
+    /// A tap.
+    Soft,
+    /// A knock.
+    Medium,
+    /// A crash.
+    Hard,
+}
+
+/// What the cue picker is told about one impact: which class to play and how loud.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cue {
+    /// The sound family of the material that was hit.
+    pub class: SoundClass,
+    /// How hard it was hit.
+    pub loudness: Loudness,
+}
+
+/// Impact speeds, millimeters per second, where [`Loudness`] steps up: below the first nothing is
+/// heard, then soft, medium and hard.
+pub const LOUDNESS_STEPS_MM_S: [u32; 3] = [400, 1_500, 4_000];
+
+/// The ground the authority walker is tuned for: today's constants are this row's numbers.
+pub const GROUND: Material = Material::Stone;
+
 /// The numbers of one material. Coefficients are thousandths (`900` is `0.9`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Props {
@@ -39,6 +93,11 @@ pub struct Props {
     pub linear_damping_pm: u16,
     /// Angular damping per second, thousandths.
     pub angular_damping_pm: u16,
+    /// Tallest rise a walker steps onto from ground of this material, millimeters: soft ground
+    /// gives way under the foot.
+    pub step_mm: u16,
+    /// The sound family an impact on this material makes.
+    pub sound: SoundClass,
 }
 
 impl Material {
@@ -62,6 +121,8 @@ impl Material {
                 restitution_pm: 450,
                 linear_damping_pm: 30,
                 angular_damping_pm: 50,
+                step_mm: 500,
+                sound: SoundClass::Knock,
             },
             Material::Stone => Props {
                 density_kg_m3: 2_000,
@@ -69,6 +130,8 @@ impl Material {
                 restitution_pm: 200,
                 linear_damping_pm: 20,
                 angular_damping_pm: 50,
+                step_mm: 500,
+                sound: SoundClass::Clack,
             },
             Material::Flesh => Props {
                 density_kg_m3: 1_000,
@@ -76,6 +139,8 @@ impl Material {
                 restitution_pm: 0,
                 linear_damping_pm: 50,
                 angular_damping_pm: 50,
+                step_mm: 500,
+                sound: SoundClass::Thud,
             },
             Material::Metal => Props {
                 density_kg_m3: 7_800,
@@ -83,6 +148,8 @@ impl Material {
                 restitution_pm: 300,
                 linear_damping_pm: 10,
                 angular_damping_pm: 20,
+                step_mm: 500,
+                sound: SoundClass::Ring,
             },
             Material::Sand => Props {
                 density_kg_m3: 1_600,
@@ -90,6 +157,8 @@ impl Material {
                 restitution_pm: 0,
                 linear_damping_pm: 200,
                 angular_damping_pm: 300,
+                step_mm: 400,
+                sound: SoundClass::Hiss,
             },
             Material::Cloth => Props {
                 density_kg_m3: 250,
@@ -97,8 +166,39 @@ impl Material {
                 restitution_pm: 0,
                 linear_damping_pm: 400,
                 angular_damping_pm: 500,
+                step_mm: 450,
+                sound: SoundClass::Rustle,
             },
         }
+    }
+}
+
+impl Material {
+    /// The sound family an impact on this material makes.
+    pub const fn sound(self) -> SoundClass {
+        self.props().sound
+    }
+
+    /// The cue for an impact on this material at `impact_speed_mm_s` (the closing speed along
+    /// the contact normal): the material's [`SoundClass`] at the [`Loudness`] the speed earns.
+    pub const fn cue(self, impact_speed_mm_s: u32) -> Cue {
+        Cue {
+            class: self.sound(),
+            loudness: loudness(impact_speed_mm_s),
+        }
+    }
+}
+
+/// The [`Loudness`] of an impact at `speed_mm_s`.
+pub const fn loudness(speed_mm_s: u32) -> Loudness {
+    if speed_mm_s < LOUDNESS_STEPS_MM_S[0] {
+        Loudness::Silent
+    } else if speed_mm_s < LOUDNESS_STEPS_MM_S[1] {
+        Loudness::Soft
+    } else if speed_mm_s < LOUDNESS_STEPS_MM_S[2] {
+        Loudness::Medium
+    } else {
+        Loudness::Hard
     }
 }
 
@@ -249,6 +349,49 @@ mod tests {
                 .iter()
                 .all(|f| *f == Material::Stone.props().friction()),
             "{grips:?}"
+        );
+    }
+
+    #[test]
+    fn material_table_every_material_has_its_own_sound_class() {
+        for (i, a) in Material::ALL.iter().enumerate() {
+            for b in &Material::ALL[i + 1..] {
+                assert_ne!(a.sound(), b.sound(), "{a:?} and {b:?} sound alike");
+            }
+        }
+        assert_eq!(Material::Metal.sound(), SoundClass::Ring);
+        assert_eq!(Material::Wood.sound(), SoundClass::Knock);
+    }
+
+    #[test]
+    fn material_table_cue_picker_steps_loudness_with_impact_speed() {
+        let [soft, medium, hard] = LOUDNESS_STEPS_MM_S;
+        assert!(soft < medium && medium < hard);
+        let at = |speed| Material::Stone.cue(speed);
+        assert_eq!(at(0).loudness, Loudness::Silent);
+        assert_eq!(at(soft - 1).loudness, Loudness::Silent);
+        assert_eq!(at(soft).loudness, Loudness::Soft);
+        assert_eq!(at(medium - 1).loudness, Loudness::Soft);
+        assert_eq!(at(medium).loudness, Loudness::Medium);
+        assert_eq!(at(hard - 1).loudness, Loudness::Medium);
+        assert_eq!(at(hard).loudness, Loudness::Hard);
+        assert_eq!(at(u32::MAX).loudness, Loudness::Hard);
+        assert!(at(hard).loudness > at(soft).loudness);
+        for material in Material::ALL {
+            assert_eq!(material.cue(5_000).class, material.sound());
+        }
+    }
+
+    #[test]
+    fn material_table_step_heights_are_walkable_and_the_ground_row_is_the_legacy_step() {
+        for material in Material::ALL {
+            let step = material.props().step_mm;
+            assert!((200..=500).contains(&step), "{material:?} step {step}");
+        }
+        assert!(Material::Sand.props().step_mm < GROUND.props().step_mm);
+        assert_eq!(
+            i32::from(GROUND.props().step_mm),
+            crate::controller2::STEP_HEIGHT_MM
         );
     }
 

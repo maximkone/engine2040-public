@@ -428,7 +428,7 @@ pub fn bake_digest(b: &Bake) -> u64 {
     let mut h = Fnv64::new();
     h.write_u64(b.seed);
     h.write_u32(b.mode as u32);
-    h.write_u32(b.shards.len() as u32);
+    h.write_len32(b.shards.len());
     for s in &b.shards {
         for w in [
             s.x.to_bits(),
@@ -444,7 +444,7 @@ pub fn bake_digest(b: &Bake) -> u64 {
         h.write_u32(s[0].to_bits());
         h.write_u32(s[1].to_bits());
     }
-    h.write_u32(b.edges.len() as u32);
+    h.write_len32(b.edges.len());
     for (a, c) in &b.edges {
         h.write_u32(u32::from(*a));
         h.write_u32(u32::from(*c));

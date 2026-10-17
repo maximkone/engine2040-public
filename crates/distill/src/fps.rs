@@ -11,7 +11,7 @@
 //! no threads, no IO. Errors: malformed or over-budget students map to [`FpsError`];
 //! [`check_fps`] never panics.
 //!
-//! Why static instead of timed (ai-door-rules 6, test-truth-rules 3): training and
+//! Why static instead of timed: training and
 //! search stay offline while the tick runs only the small int8 net, and the default
 //! suite never asserts wall-clock time. The gate counts integer ops instead: the
 //! shipped 6-24-5 student costs a few hundred ops per perception tick, negligible

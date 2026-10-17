@@ -9,6 +9,7 @@ Notes about what the player sees and feels.
 - [ENEMIES.md](ENEMIES.md): enemy archetypes and encounters.
 - [HUD.md](HUD.md): HUD layout and overlays.
 - [LEVELS.md](LEVELS.md): level flow and arenas.
+- [KAM-RTS-IDEAS.md](KAM-RTS-IDEAS.md): ideas from the kam-web RTS port (command layer, lockstep, logistics, AI knobs, fighter plus commander).
 - [SLICE.md](SLICE.md): vertical slice scope.
 - [STAGES.md](STAGES.md): stage gates and delivery stages.
 - [LEDGER.md](LEDGER.md): design decision ledger.

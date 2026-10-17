@@ -34,6 +34,10 @@ pub struct Caps {
     pub solver_iterations: usize,
     /// Continuous-collision substeps per step; `0` turns CCD off.
     pub ccd_substeps: usize,
+    /// Bodies one blast may shove: the nearest to its center, the rest stay put.
+    pub blast_bodies: usize,
+    /// Bodies one projectile impact may shove: the nearest to the hit point.
+    pub impact_bodies: usize,
 }
 
 impl Tier {
@@ -51,6 +55,8 @@ impl Tier {
                 statics: 64,
                 solver_iterations: 2,
                 ccd_substeps: 0,
+                blast_bodies: 24,
+                impact_bodies: 3,
             },
             Tier::Web => Caps {
                 bodies: 192,
@@ -59,6 +65,8 @@ impl Tier {
                 statics: 128,
                 solver_iterations: 3,
                 ccd_substeps: 1,
+                blast_bodies: 48,
+                impact_bodies: 4,
             },
             Tier::Comfort => Caps {
                 bodies: 384,
@@ -67,6 +75,8 @@ impl Tier {
                 statics: 256,
                 solver_iterations: 4,
                 ccd_substeps: 1,
+                blast_bodies: 96,
+                impact_bodies: 6,
             },
             Tier::High => Caps {
                 bodies: 768,
@@ -75,6 +85,8 @@ impl Tier {
                 statics: 512,
                 solver_iterations: 6,
                 ccd_substeps: 2,
+                blast_bodies: 192,
+                impact_bodies: 8,
             },
         }
     }
@@ -105,6 +117,8 @@ impl Caps {
             self.contacts,
             self.statics,
             self.solver_iterations,
+            self.blast_bodies,
+            self.impact_bodies,
         ];
         if positive.contains(&0) {
             return Err(Error::BadCaps);

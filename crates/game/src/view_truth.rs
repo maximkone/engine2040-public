@@ -9,7 +9,8 @@
 //! or a model reads with no image: bodies off screen, sunk into the sand or
 //! floating, joints that pop between frames (clip snaps), planted feet that
 //! slide off their spot on the sand (`foot_slide_cm`, the p95 over
-//! `planted_feet` foot-frames), non-finite vertices, the skin error material,
+//! `planted_feet` foot-frames), floored fighters drawn from their ragdoll
+//! (`ragdolls`, the most in one frame), non-finite vertices, the skin error material,
 //! the camera inside a body or under the ground.
 //!
 //! Consumer: the arena's `arena view:` receipt line and its `--view-brief`
@@ -67,6 +68,9 @@ pub struct BodyTruth {
     /// is planted on, in meters, while the foot is at full plant; `None` while
     /// the foot is free. The slide the `foot_slide_cm` receipt meters.
     pub foot_slide_m: [Option<f32>; 2],
+    /// Drawn from its ragdoll bones this frame (RZ2w), not from a clip. A ragdoll falls and
+    /// tumbles under physics, so the clip-snap law does not judge its joints.
+    pub ragdolled: bool,
 }
 
 impl BodyTruth {
@@ -98,6 +102,7 @@ impl BodyTruth {
             nonfinite: u32::try_from(nonfinite).unwrap_or(u32::MAX),
             error_parts: 0,
             foot_slide_m: [None; 2],
+            ragdolled: false,
         }
     }
 
@@ -265,6 +270,8 @@ pub struct ViewLaws {
     /// Foot-frames at full plant by how far the drawn ankle sat from the spot
     /// it is planted on, one bin per millimeter; empty until the first one.
     slide_bins: Vec<u32>,
+    /// Most bodies drawn from a ragdoll in one folded frame.
+    ragdolls_max: u32,
     tracks: Vec<Option<Track>>,
 }
 
@@ -285,6 +292,10 @@ impl ViewLaws {
         {
             self.eye_in_body = self.eye_in_body.saturating_add(1);
         }
+        let ragdolls = bodies.iter().filter(|body| body.ragdolled).count();
+        self.ragdolls_max = self
+            .ragdolls_max
+            .max(u32::try_from(ragdolls).unwrap_or(u32::MAX));
         let mut drawn = vec![false; self.tracks.len()];
         for body in bodies {
             self.bodies = self.bodies.saturating_add(1);
@@ -387,6 +398,15 @@ impl ViewLaws {
             self.tracks[index] = Some(prev);
             return;
         }
+        if body.ragdolled {
+            // Physics moves these joints, not a clip: nothing to predict, nothing to snap.
+            self.tracks[index] = Some(Track {
+                t,
+                joints: body.joints.clone(),
+                vel: None,
+            });
+            return;
+        }
         let mut popped = false;
         if let Some(vel) = &prev.vel {
             let mut worst = 0.0f64;
@@ -420,6 +440,12 @@ impl ViewLaws {
         });
     }
 
+    /// Most bodies drawn from a ragdoll in one folded frame (RZ2w).
+    #[must_use]
+    pub fn ragdolls(&self) -> u32 {
+        self.ragdolls_max
+    }
+
     /// Bodies drawn with no on-screen rect, over bodies drawn.
     #[must_use]
     pub fn offscreen_share(&self) -> f64 {
@@ -446,7 +472,7 @@ impl ViewLaws {
             parts.join("/")
         };
         Some(format!(
-            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2} foot_slide_cm={:.1} planted_feet={}",
+            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2} foot_slide_cm={:.1} planted_feet={} ragdolls={}",
             self.frames,
             self.first_t.unwrap_or(0.0),
             self.last_t,
@@ -463,6 +489,7 @@ impl ViewLaws {
             self.cover_max,
             self.foot_slide_p95_m() * 100.0,
             self.planted_feet(),
+            self.ragdolls(),
         ))
     }
 }
@@ -788,7 +815,7 @@ mod tests {
         assert_eq!(
             laws.line().as_deref(),
             Some(
-                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0"
+                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0 ragdolls=0"
             )
         );
     }
@@ -814,7 +841,7 @@ mod tests {
         );
         let line = laws.line().expect("frames folded");
         assert!(
-            line.ends_with(" foot_slide_cm=9.5 planted_feet=100"),
+            line.ends_with(" foot_slide_cm=9.5 planted_feet=100 ragdolls=0"),
             "{line}"
         );
         // One slide of five meters lands in the last bin and moves p95 by one
@@ -830,7 +857,7 @@ mod tests {
         );
         let line = laws.line().expect("frames folded");
         assert!(line.contains(" nonfinite=1 "), "{line}");
-        assert!(line.ends_with(" planted_feet=101"), "{line}");
+        assert!(line.ends_with(" planted_feet=101 ragdolls=0"), "{line}");
     }
 
     #[test]

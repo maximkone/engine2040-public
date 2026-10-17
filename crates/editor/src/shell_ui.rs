@@ -24,7 +24,9 @@ use crate::gizmo::{ui::GizmoSession, GizmoTool};
 use crate::inspector::{
     self, InspectorGrid, InspectorPanel, NodeView, SchemaStep, VersionedComponent,
 };
-use crate::outline::{self, OutlinerRow, Selection as SharedSelection, SelectionBank};
+use crate::outline::{
+    self, OutlinerHandles, OutlinerRow, OutlinerView, Selection as SharedSelection, SelectionBank,
+};
 use crate::shell::{Panel, Shell, ShellError};
 use crate::templates::TemplateKind;
 use crate::tuning::CombatField;
@@ -53,6 +55,9 @@ pub struct ShellUi {
     template_status: Option<String>,
     /// Outliner search text for the hierarchy tab (substring over row names).
     outliner_query: String,
+    /// Outliner rows and hits cached per document revision: a quiet frame
+    /// rebuilds nothing, whatever the scene size.
+    outline: OutlinerView,
     /// Shared live selection over stable row ids; viewport, outliner and
     /// inspector agree on this one object.
     shared_selection: SharedSelection,
@@ -84,6 +89,7 @@ impl ShellUi {
             template_preview: None,
             template_status: None,
             outliner_query: String::new(),
+            outline: OutlinerView::new(),
             shared_selection,
             selection_sets: SelectionBank::new(),
             set_name: String::new(),
@@ -133,7 +139,12 @@ impl ShellUi {
                 self.dock.push_to_first_leaf(panel);
             }
         }
-        reconcile_shared_selection(shell, &mut self.shared_selection);
+        if let Ok((rows, live)) = self
+            .outline
+            .sync(shell.revision(), || live_outliner_rows(shell))
+        {
+            reconcile_shared_selection(shell, &mut self.shared_selection, &rows, &live);
+        }
         let (gizmo, dock, viewport_tex, fix_preview, tune_replay) = (
             &mut self.gizmo,
             &mut self.dock,
@@ -147,8 +158,9 @@ impl ShellUi {
             &mut self.template_preview,
             &mut self.template_status,
         );
-        let (outliner_query, shared_selection, selection_sets, set_name) = (
+        let (outliner_query, outline, shared_selection, selection_sets, set_name) = (
             &mut self.outliner_query,
+            &mut self.outline,
             &mut self.shared_selection,
             &mut self.selection_sets,
             &mut self.set_name,
@@ -165,6 +177,7 @@ impl ShellUi {
             template_preview,
             template_status,
             outliner_query,
+            outline,
             shared_selection,
             selection_sets,
             set_name,
@@ -187,6 +200,7 @@ struct Viewer<'a> {
     template_preview: &'a mut Option<crate::commands::Preview>,
     template_status: &'a mut Option<String>,
     outliner_query: &'a mut String,
+    outline: &'a mut OutlinerView,
     shared_selection: &'a mut SharedSelection,
     selection_sets: &'a mut SelectionBank,
     set_name: &'a mut String,
@@ -224,27 +238,33 @@ impl TabViewer for Viewer<'_> {
 }
 
 impl Viewer<'_> {
+    /// Cached outliner rows and live ids for the shell's current revision.
+    fn outline_handles(&mut self) -> Result<OutlinerHandles, outline::OutlineError> {
+        self.outline
+            .sync(self.shell.revision(), || live_outliner_rows(self.shell))
+    }
+
     /// Hierarchy tab over [`outline`]: search plus named sets over one selection.
     ///
-    /// Rows come from [`live_outliner_rows`], hits from [`outline::search`],
-    /// clicks join [`SharedSelection`]; sets persist in [`SelectionBank`].
-    /// Add and remove go through shell batches, never direct writes.
+    /// Rows and hits come from the revision-cached [`OutlinerView`]; clicks
+    /// join [`SharedSelection`]; sets persist in [`SelectionBank`]. The hit
+    /// list draws last and only the rows in view, so the frame costs the same
+    /// at 20 rows and at 2,000. Add and remove go through shell batches,
+    /// never direct writes.
     fn hierarchy(&mut self, ui: &mut egui::Ui) {
-        let rows = match live_outliner_rows(self.shell) {
-            Ok(rows) => rows,
+        let (rows, live) = match self.outline_handles() {
+            Ok(handles) => handles,
             Err(error) => {
                 ui.label(format!("outliner refused: {error}"));
                 return;
             }
         };
-        let live = outline::live_set(&rows);
         outline::prune(self.shared_selection, &live);
         ui.horizontal(|ui| {
             ui.label("search");
             ui.text_edit_singleline(self.outliner_query);
         });
-        let query = outline::OutlinerQuery::new(self.outliner_query);
-        let hits = match outline::search(&rows, &query) {
+        let hits = match self.outline.search(self.outliner_query) {
             Ok(hits) => hits,
             Err(error) => {
                 ui.label(format!("search refused: {error}"));
@@ -254,25 +274,33 @@ impl Viewer<'_> {
         if rows.is_empty() {
             ui.label("Empty scene: Add root to begin.");
         }
-        for hit in &hits {
-            let selected = self.shared_selection.ids.contains(&hit.id);
-            let indent = f32::from(u16::try_from(hit.depth.min(16)).unwrap_or(16)) * 16.0;
-            ui.horizontal(|ui| {
-                ui.add_space(indent);
-                if ui.selectable_label(selected, hit.name.clone()).clicked() {
-                    *self.shared_selection = outline::select_one(hit.id);
-                    sync_shell_to_shared(self.shell, self.shared_selection, &rows);
-                }
-                if ui.button("toggle").clicked() {
-                    if let Ok(next) = outline::select_toggle(self.shared_selection, hit.id, &live) {
-                        *self.shared_selection = next;
-                        sync_shell_to_shared(self.shell, self.shared_selection, &rows);
-                    }
-                }
-            });
-        }
         self.hierarchy_sets(ui, &rows, &live);
         self.hierarchy_add_remove(ui);
+        ui.separator();
+        let row_height = ui.spacing().interact_size.y;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, row_height, hits.len(), |ui, range| {
+                for hit in &hits[range] {
+                    let selected = self.shared_selection.ids.contains(&hit.id);
+                    let indent = f32::from(u16::try_from(hit.depth.min(16)).unwrap_or(16)) * 16.0;
+                    ui.horizontal(|ui| {
+                        ui.add_space(indent);
+                        if ui.selectable_label(selected, hit.name.clone()).clicked() {
+                            *self.shared_selection = outline::select_one(hit.id);
+                            sync_shell_to_shared(self.shell, self.shared_selection, &rows);
+                        }
+                        if ui.button("toggle").clicked() {
+                            if let Ok(next) =
+                                outline::select_toggle(self.shared_selection, hit.id, &live)
+                            {
+                                *self.shared_selection = next;
+                                sync_shell_to_shared(self.shell, self.shared_selection, &rows);
+                            }
+                        }
+                    });
+                }
+            });
     }
 
     /// Named selection sets over the shared selection; refusals land in the log.
@@ -344,14 +372,13 @@ impl Viewer<'_> {
     /// fold into the command batch, so viewport, outliner and inspector
     /// agree on the identical live selection object.
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        let rows = match live_outliner_rows(self.shell) {
-            Ok(rows) => rows,
+        let (rows, live) = match self.outline_handles() {
+            Ok(handles) => handles,
             Err(error) => {
                 ui.label(format!("outliner refused: {error}"));
                 return;
             }
         };
-        let live = outline::live_set(&rows);
         outline::prune(self.shared_selection, &live);
         if self.shared_selection.ids.is_empty() {
             ui.label("Select a row in Hierarchy.");
@@ -394,7 +421,10 @@ impl Viewer<'_> {
                     ui.label(row.value.clone());
                     return;
                 }
-                let current = staged_map.get(&key).cloned().unwrap_or(row.value.clone());
+                let current = staged_map
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| row.value.clone());
                 let mut draft = current.clone();
                 ui.text_edit_singleline(&mut draft);
                 if draft != current {
@@ -964,13 +994,13 @@ pub(crate) fn poses_for_rows(
 /// and pushes the shared primary otherwise, so viewport, outliner and
 /// inspector agree on the identical live object. Never stages batches beyond
 /// closing a live gizmo drag through the sync below.
-pub(crate) fn reconcile_shared_selection(shell: &mut Shell, shared: &mut SharedSelection) {
-    let rows = match live_outliner_rows(shell) {
-        Ok(rows) => rows,
-        Err(_) => return,
-    };
-    let live = outline::live_set(&rows);
-    outline::prune(shared, &live);
+pub(crate) fn reconcile_shared_selection(
+    shell: &mut Shell,
+    shared: &mut SharedSelection,
+    rows: &[OutlinerRow],
+    live: &BTreeSet<u64>,
+) {
+    outline::prune(shared, live);
     if shared.primary.is_none() {
         if let Some(id) = shell.selection.map(outline::stable_id) {
             if live.contains(&id) {
@@ -981,7 +1011,7 @@ pub(crate) fn reconcile_shared_selection(shell: &mut Shell, shared: &mut SharedS
         }
         return;
     }
-    sync_shell_to_shared(shell, shared, &rows);
+    sync_shell_to_shared(shell, shared, rows);
 }
 
 /// Mirror the shared primary into the shell for gizmo compatibility.
@@ -1206,6 +1236,44 @@ mod tests {
         output.textures_delta.clear();
         assert_eq!(shell.selection, Some(root));
         assert_eq!(ui_state.shared_selection, shared);
+    }
+
+    /// The 2,000-row siege scene draws only the rows in view, and a quiet
+    /// frame reuses the cached outliner rows instead of rebuilding them.
+    #[test]
+    fn siege_hierarchy_frame_draws_only_the_visible_rows() {
+        let (mut shell, _) = outline::siege_scene();
+        let mut ui_state = ShellUi::new(&shell);
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let mut frame = |shell: &mut Shell| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| ui_state.show(shell, ui));
+            output.textures_delta.clear();
+            output.shapes.len()
+        };
+        // The first frame loads fonts and builds the 2,000 rows once.
+        frame(&mut shell);
+        let mut shapes = 0;
+        let mut times: Vec<std::time::Duration> = (0..31)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                shapes = frame(&mut shell);
+                start.elapsed()
+            })
+            .collect();
+        times.sort();
+        let median = times[times.len() / 2];
+        eprintln!("ED19 siege dock frame: median {median:?}, {shapes} shapes");
+        assert!(
+            shapes < 600,
+            "{shapes} shapes: the list must virtualize, not draw 2,000 rows"
+        );
+        assert!(median < std::time::Duration::from_millis(5), "{median:?}");
+        assert_eq!(shell.document().hierarchy.len(), outline::SIEGE_ROWS);
     }
 
     /// The Findings tab draws staged rows without panicking and without

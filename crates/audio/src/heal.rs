@@ -335,14 +335,7 @@ impl Default for DeviceHeal {
 
 /// Truncate a notice to [`MAX_NOTICE_LEN`] bytes on a `char` boundary.
 fn bound_notice(text: &str) -> String {
-    if text.len() <= MAX_NOTICE_LEN {
-        return text.to_owned();
-    }
-    let mut end = MAX_NOTICE_LEN;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
+    text[..text.floor_char_boundary(MAX_NOTICE_LEN)].to_owned()
 }
 
 #[cfg(test)]

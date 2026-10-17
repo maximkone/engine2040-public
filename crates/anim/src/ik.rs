@@ -10,6 +10,7 @@
 
 use super::contract::{rotate, LocalPose, Skeleton};
 use engine_core::quat_mul;
+use engine_core::vec3::cross3;
 
 /// Shortest bone the solvers accept, in meters; a shorter one has no length
 /// to reach with and is refused.
@@ -80,13 +81,6 @@ fn norm(v: [f32; 3]) -> [f32; 3] {
 }
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 /// `base + dir * k`.
 fn madd(base: [f32; 3], dir: [f32; 3], k: f32) -> [f32; 3] {
@@ -218,7 +212,7 @@ pub fn turn_between(from: [f32; 3], to: [f32; 3]) -> [f32; 4] {
         let axis = bend_axis(a, [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
         return [axis[0], axis[1], axis[2], 0.0];
     }
-    let c = cross(a, b);
+    let c = cross3(a, b);
     unit([c[0], c[1], c[2], 1.0 + d])
 }
 
@@ -672,11 +666,6 @@ mod tests {
                 })
                 .collect(),
         };
-        let about = |axis: [f32; 3], angle: f32| {
-            let (s, c) = (angle * 0.5).sin_cos();
-            let n = norm(axis);
-            [n[0] * s, n[1] * s, n[2] * s, c]
-        };
         let pose = LocalPose {
             positions: vec![
                 [0.1, 0.95, -0.05],
@@ -685,11 +674,13 @@ mod tests {
                 [0.0, -0.38, -0.2],
                 [0.0, -0.05, 0.12],
             ],
+            // Unit quaternions turning 0.25 rad about x, 0.3 about y, -0.2 about x
+            // and 0.15 about (0.2, 0, 1): no joint frame is the identity.
             rotations: vec![
-                about([1.0, 0.0, 0.0], 0.25),
-                about([0.0, 1.0, 0.0], 0.3),
-                about([1.0, 0.0, 0.0], -0.2),
-                about([0.2, 0.0, 1.0], 0.15),
+                [0.124_674_73, 0.0, 0.0, 0.992_197_7],
+                [0.0, 0.149_438_13, 0.0, 0.988_771_1],
+                [-0.099_833_42, 0.0, 0.0, 0.995_004_2],
+                [0.014_694_92, 0.0, 0.073_474_62, 0.997_188_8],
                 [0.0, 0.0, 0.0, 1.0],
             ],
         };

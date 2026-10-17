@@ -38,6 +38,7 @@ pub mod brief_eval;
 pub mod budgets;
 pub mod causal;
 pub mod charter;
+pub mod divergence;
 mod door;
 pub mod eval;
 pub mod exploit;
@@ -85,6 +86,7 @@ pub use tournament::{proof_gate, GateOutcome, GATE_NAME};
 /// Fixture aggregate for mirror rows: 2 bouts, hold 2, delay 4.
 pub fn bot_harness_fixture() -> bot_harness::HarnessAggregate {
     let harness = bot_harness::BotHarness {
+        brain: bot_harness::Brain::Seeded,
         hold_ticks: 2,
         delay_frames: 4,
         bouts: 2,

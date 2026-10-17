@@ -287,13 +287,7 @@ fn check_value(value: &VersionedComponent) -> Result<(), SchemaError> {
 
 /// Bound a migration-failure cause, keeping a UTF-8 boundary.
 fn truncate_cause(mut cause: String) -> String {
-    if cause.len() > MAX_CAUSE_LEN {
-        let mut end = MAX_CAUSE_LEN;
-        while !cause.is_char_boundary(end) {
-            end -= 1;
-        }
-        cause.truncate(end);
-    }
+    cause.truncate(cause.floor_char_boundary(MAX_CAUSE_LEN));
     cause
 }
 

@@ -347,6 +347,12 @@ impl SpatialMixer {
         self.mixer.stop_cue(cue)
     }
 
+    /// Ride every voice of `cue` at `trim` (see [`Mixer::set_cue_trim`]);
+    /// returns how many voices took it.
+    pub fn set_cue_trim(&mut self, cue: CueId, trim: f32) -> usize {
+        self.mixer.set_cue_trim(cue, trim)
+    }
+
     /// Cue plays skipped for being beyond their falloff max.
     pub fn culled(&self) -> u64 {
         self.culled

@@ -283,6 +283,9 @@ impl FighterLook {
                         }
                         self.add_shake_trauma(SHAKE_KNOCKDOWN_PERMILLE);
                     }
+                    // RZ2w: the dead victim falls as a ragdoll, pushed along the blow. Noted
+                    // before the floor verdict so it keeps the standing pose.
+                    self.ragdoll_note_knockdown(attacker, victim, cues);
                     self.floor_slot(victim);
                 }
                 FightCue::Blocked { attacker, .. }
@@ -534,6 +537,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: crate::fighter_look::empty_upload_digest(),
             inertia: Vec::new(),
+            ragdoll: crate::fighter_look::ragdoll_look::RagdollLook::empty(),
         }
     }
 

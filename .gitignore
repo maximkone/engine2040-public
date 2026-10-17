@@ -13,6 +13,7 @@ content/arena/bundle/
 *.blend1
 # History-slim 2026-10-02: external dropboxes purged from history, never track again.
 content/incoming/
+content/_incoming/
 content/fighters/incoming/
 *.7z
 # tools/pack-clean.mjs writes its logs at the repo root: never track them.

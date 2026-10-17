@@ -14,8 +14,7 @@ percent of other engines' power and coverage, MCP and AI-agnostic stuff, MCP Ble
 Kept true by the compare seat (`target/queue/standing/researcher-compare.md`). Never invent a number: a cell is
 `UNKNOWN` until it holds a source (URL, revision or version, date read) and a rule for the percent.
 
-Archived 2026-10-04: the four oldest AI-door surveys (e-blendermcp 2026-09-30, e-3dsearch, e-openprompts, e-blendermcp follow-up) moved verbatim to `archive/COMPARE-2026-10-04.md` (nothing deleted; frozen denominators and the main table stay here).
-Archived 2026-10-16: the seven first-round (b-series) follow-up surveys (D-RAGDOLL-1b, D-DESTRUCT-1b, D-CLOTH-1b, D-FLUIDS-1b, D-FLUIDS-1c, D-VEHICLES-1b, D-CROWDS-1b, 2026-10-01/02) moved verbatim to `archive/COMPARE-2026-10-16.md` (nothing deleted; frozen denominators, rubric, lookup index, c-series follow-ups and AI-door surveys stay here).
+Archived: the four oldest AI-door surveys (e-blendermcp, e-3dsearch, e-openprompts, e-blendermcp follow-up) and the seven b-series follow-ups (D-RAGDOLL-1b, D-DESTRUCT-1b, D-CLOTH-1b, D-FLUIDS-1b, D-FLUIDS-1c, D-VEHICLES-1b, D-CROWDS-1b) were in `docs/research/archive/COMPARE-*.md`, which left the tree on 2026-10-17 (`git log --all -- docs/research/archive`). Frozen denominators, rubric, lookup index, c-series follow-ups and AI-door surveys stay here.
 
 
 ## Comparison rubric R-CMP-2

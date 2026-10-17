@@ -123,7 +123,7 @@ pub fn slide_mm(a: [f32; 3], b: [f32; 3]) -> u32 {
 /// equally, which is the replay receipt for locked sequences.
 pub fn feet_hash(positions: &[[f32; 3]]) -> u64 {
     let mut h = Fnv64::new();
-    h.write_u64(positions.len() as u64);
+    h.write_len(positions.len());
     for p in positions.iter() {
         for lane in p.iter() {
             h.write_f32(*lane);

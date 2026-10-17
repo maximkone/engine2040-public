@@ -1145,8 +1145,8 @@ impl SelfPlayReport {
 /// identically. `foe_a`/`foe_b` carry the rival last attack flag.
 fn neutral_pair(bout: u64, tick: u32, foe_a: bool, foe_b: bool, seed: u64) -> (Percept, Percept) {
     let mixed = engine_core::splitmix64(
-        seed.wrapping_add(bout.wrapping_mul(0x9E37_79B9_7F4A_7C15))
-            .wrapping_add(u64::from(tick).wrapping_mul(0xBF58_476D_1CE4_E5B9)),
+        seed.wrapping_add(bout.wrapping_mul(engine_core::hash::GOLDEN_GAMMA))
+            .wrapping_add(u64::from(tick).wrapping_mul(engine_core::hash::MIX64_MUL_A)),
     );
     // `mixed % 120` is 0..120, so separation stays in 1.0..13.0 m.
     let lane = (mixed % 120) as f32;

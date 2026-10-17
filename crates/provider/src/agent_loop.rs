@@ -470,7 +470,8 @@ impl AgentLoop {
                             reason: String::from("observation too long"),
                         });
                     }
-                    tokens_used = charge_step(tokens_used, &tool, &input, &observation);
+                    let cost = step_cost(&tool, &input, &observation);
+                    tokens_used = tokens_used.saturating_add(cost);
                     if tokens_used > self.budget.max_tokens {
                         return Err(LoopError::BudgetOverrun {
                             kind: BudgetKind::Tokens,
@@ -484,7 +485,7 @@ impl AgentLoop {
                         tool,
                         input,
                         observation,
-                        tokens: step_tokens(&steps),
+                        tokens: cost,
                         idempotency_key,
                     });
                 }
@@ -556,21 +557,11 @@ fn check_repeat(
     }
 }
 
-/// Add one tool step to the running token total with saturating math.
-fn charge_step(spent: u32, tool: &str, input: &str, observation: &str) -> u32 {
-    spent
-        .saturating_add(estimate_tokens(tool))
+/// Estimated tokens one tool step costs: its verb, input and observation.
+fn step_cost(tool: &str, input: &str, observation: &str) -> u32 {
+    estimate_tokens(tool)
         .saturating_add(estimate_tokens(input))
         .saturating_add(estimate_tokens(observation))
-}
-
-/// Token field for the step just pushed: re-estimated from its texts.
-fn step_tokens(steps: &[StepRecord]) -> u32 {
-    match steps.last() {
-        Some(prior) => prior.tokens,
-        None => 1,
-    }
-    .saturating_add(0)
 }
 
 /// Offline three-step demo wiring the loop, planner and door together.
@@ -626,7 +617,21 @@ mod tests {
         assert_eq!(outcome.steps[2].tool, "verify");
         assert_eq!(outcome.steps[0].step, 0);
         assert_eq!(outcome.steps[2].step, 2);
-        assert!(outcome.tokens_used > 0);
+        let step_sum: u32 = outcome.steps.iter().map(|record| record.tokens).sum();
+        assert!(step_sum > 0, "every step records its own cost");
+        assert_eq!(
+            outcome.tokens_used,
+            estimate_tokens("offline three-step")
+                + step_sum
+                + estimate_tokens("brazier placed north"),
+            "total is goal plus steps plus answer"
+        );
+        assert_eq!(
+            outcome.steps[0].tokens,
+            estimate_tokens("inspect")
+                + estimate_tokens("room")
+                + estimate_tokens("room: bare sand")
+        );
         assert_eq!(outcome.checkpoint(), transcript_checkpoint(&outcome.steps));
     }
 

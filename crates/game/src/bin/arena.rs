@@ -34,6 +34,7 @@ use engine_game::arena_kit::{
     kit_match_world_or_empty, kit_prop_rows, live_kit_notice, push_kit_draws, stage_kit_or_default,
     KitReport,
 };
+use engine_game::break_window::BreakScene;
 use engine_game::camera::{free_cam_step, CameraMode, DirectorParams};
 use engine_game::capture;
 use engine_game::crash;
@@ -44,14 +45,15 @@ use engine_game::input::{map_key, map_mouse};
 use engine_game::practice::PracticeSwap;
 use engine_game::reload::{settle_paths, HotReload};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
+use engine_game::window_audio_space::AudioSpace;
 use engine_game::windowed::{
     apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
     feed_tick_audio, fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row,
-    hud_cells_quads, hud_draw_list, msaa_setting, open_audio, push_fight_draws, smoke_muted,
+    hud_cells_quads, hud_draw_list, msaa_setting, push_fight_draws, smoke_muted,
     split_staged_flag, stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
     staged_session_config, surface_frame_action, StagedFighterDot, StagedTally, SurfaceFrameAction,
-    TickAccumulator, WinArgs, WinError, FRAME_TIMES_CSV_HEADER, MSAA_ENV, WINDOWED_SAMPLE_RATE,
-    WINDOW_SIZE,
+    TickAccumulator, WinArgs, WinError, WindowPad, FRAME_TIMES_CSV_HEADER, MSAA_ENV,
+    WINDOWED_SAMPLE_RATE, WINDOW_SIZE,
 };
 use engine_game::{App, GameConfig, TickOutcome, HUMAN_SLOT};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
@@ -107,6 +109,10 @@ const HOT_RELOAD_POLL_EVERY_FRAMES: u16 = 30;
 /// Flag that fails the run when any presented frame shows no fighter (the
 /// camera once looked at bare sand for half a perf run, 2026-10-11).
 const REQUIRE_FRAMING_FLAG: &str = "--require-framing";
+
+/// `--no-break-look`: the center crate stays out of the picture (no whole crate, no debris).
+/// The sim breaks it either way; presentation only (RZ4w).
+const NO_BREAK_LOOK_FLAG: &str = "--no-break-look";
 
 /// `--view-brief <path>`: write the view truth of every presented frame as
 /// one JSON line (camera, then each drawn body's act, clip, tint, bounds and
@@ -588,6 +594,7 @@ fn run(raw: &[String]) -> i32 {
     let (staged, raw) = split_staged_flag(raw);
     let (look_probes, raw) = split_flag(&raw, LOOK_PROBES_FLAG);
     let (require_framing, raw) = split_flag(&raw, REQUIRE_FRAMING_FLAG);
+    let (no_break_look, raw) = split_flag(&raw, NO_BREAK_LOOK_FLAG);
     let (view_brief, raw) = match split_view_brief(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -623,6 +630,14 @@ fn run(raw: &[String]) -> i32 {
             return 2;
         }
     };
+    // An automated `--exit` run must leave within its bound even when the
+    // loop wedges inside a driver call: the thread prints the receipt and exits.
+    if args.exit {
+        engine_game::windowed::arm_exit_watchdog(args.wall_limit_ms(), |err| {
+            tell!("arena: {err}");
+            std::process::exit(1);
+        });
+    }
     let config = match session_config(&args) {
         Ok(_) if staged => staged_session_config(),
         Ok(config) => config,
@@ -679,6 +694,9 @@ fn run(raw: &[String]) -> i32 {
     }
     app.look_probes = Presenter::look_probes_for_capture(look_probes, app.capture.is_some());
     app.require_framing = require_framing;
+    if no_break_look {
+        app.break_scene = None;
+    }
     if let Some(path) = view_brief {
         match File::create(&path) {
             Ok(file) => app.view_brief = Some(BufWriter::new(file)),
@@ -807,6 +825,9 @@ struct ArenaApp {
     feed_engine: Option<AudioEngine>,
     /// Reused stereo scratch for the offline feed pump (zero per tick).
     feed_scratch: Vec<f32>,
+    /// Where the room's ears are (the camera), the footstep strides, the
+    /// music level and the crowd bed: what `feed_tick_audio` keeps between ticks.
+    audio_space: AudioSpace,
     /// Live device stream when one opened; `None` degrades with a notice.
     _device: Option<engine_audio::device::DeviceOutput>,
     audio_notice: String,
@@ -819,6 +840,9 @@ struct ArenaApp {
     fight_draws: usize,
     /// Skinned CT7 fighters; `None` (refused load) draws the staged boxes.
     look: Option<FighterLook>,
+    /// The center crate: whole until a sword hit breaks it, then debris (RZ4w).
+    /// Presentation only, never hashed; `None` after a refused build or upload.
+    break_scene: Option<BreakScene>,
     /// Cached fighter draws for the last skinned tick: items plus draws,
     /// reused when the pose tick is unchanged so the 8-fighter skin runs
     /// once per tick instead of once per present. Presentation only.
@@ -832,6 +856,9 @@ struct ArenaApp {
     capture: Option<CaptureSlot>,
     window: Option<Arc<Window>>,
     pressed: Vec<PhysicalButton>,
+    /// Gamepad (EG27w): polled once per wall step, merged with `pressed` for
+    /// the human slot's input; idle (no device, nothing held) changes nothing.
+    pad: WindowPad,
     acc: TickAccumulator,
     /// Window shell state; Title, Paused and Result hold the accumulator
     /// at zero steps while Match runs the bout.
@@ -945,17 +972,18 @@ impl ArenaApp {
     ) -> Result<Self, WinError> {
         let test_panic_at = arena_frame::test_panic_tick()?;
         let app = live_session(config)?;
+        let break_scene = BreakScene::new(&app.live_match().config());
         let mixer = Arc::new(Mutex::new(Mixer::new(WINDOWED_SAMPLE_RATE)));
         // Automated smoke never opens a device: `--mute` mutes explicitly and
         // `--exit`/`--timed-smoke` runs mute by construction; either way the
-        // mixer keeps rendering voices offline.
+        // cue engine keeps rendering offline.
         let muted = args.mute || smoke_muted(&args);
-        let (_device, audio_notice) = open_audio(Arc::clone(&mixer), muted);
-        if _device.is_some() {
-            tell!("arena: {audio_notice}");
-        } else {
-            tell!("arena notice: {audio_notice}");
-        }
+        let arena_frame::CueFeedOpen {
+            tx: feed_tx,
+            engine: feed_engine,
+            device: _device,
+            notice: audio_notice,
+        } = arena_frame::open_window_audio(muted)?;
         // An armed capture needs measured sky_ms for the per-pass sidecar,
         // so it arms the blocking look probes even without `--look-probes`;
         // live without capture stays non-blocking (Game Engine Gems 1 ch 9.6).
@@ -964,12 +992,8 @@ impl ArenaApp {
         let boot = initial_flow(&args);
         // Hot reload (EG29 slice 1): content files plus shaders, see arena_frame.
         let watcher = arena_frame::watch_content_roots();
-        // Arena cue bank once at startup: real `content/audio` takes only;
-        // missing clips fail loudly instead of falling back to silent synth.
-        // The feed below plays the real takes; the mixer keeps rendering offline.
+        // Voices of the shared offline mixer (the mirror of the feed's plays).
         let bank = Bank::placeholder(WINDOWED_SAMPLE_RATE);
-        let (cue_bank, _) = stage_arena_bank(WINDOWED_SAMPLE_RATE)?;
-        let (feed_tx, feed_engine) = arena_frame::open_cue_feed(Some(cue_bank));
         let feed_scratch = vec![0.0f32; engine_game::windowed::FRAMES_PER_TICK * 2];
         let shell = Self {
             config,
@@ -980,6 +1004,7 @@ impl ArenaApp {
             feed_tx,
             feed_engine,
             feed_scratch,
+            audio_space: AudioSpace::new(),
             mixer,
             _device,
             audio_notice,
@@ -988,6 +1013,7 @@ impl ArenaApp {
             kit: KitReport::default(),
             fight_draws: 0,
             look: None,
+            break_scene,
             fighter_cache_tick: None,
             fighter_cache_fighters: 0,
             fighter_cache_draws: 0,
@@ -996,6 +1022,7 @@ impl ArenaApp {
             capture,
             window: None,
             pressed: Vec::new(),
+            pad: WindowPad::open(),
             acc: TickAccumulator::new(),
             flow: boot,
             pause_at_tick: None,
@@ -1060,6 +1087,7 @@ impl ArenaApp {
         match App::new(self.config) {
             Ok(session) => {
                 self.app = session;
+                self.break_scene = BreakScene::new(&self.app.live_match().config());
                 None
             }
             Err(err) => {
@@ -1075,6 +1103,7 @@ impl ArenaApp {
     /// (presentation only, never hashed). Loud on a refused rebuild.
     fn reset_bout(&mut self) -> Result<(), WinError> {
         self.app = live_session(self.config)?;
+        self.break_scene = BreakScene::new(&self.app.live_match().config());
         self.ticks_done = 0;
         self.acc = TickAccumulator::new();
         self.tick_scratch = TickOutcome::default();
@@ -1174,6 +1203,7 @@ impl ArenaApp {
             Ok(human) => human,
             Err(err) => return self.fail(event_loop, err, 2),
         };
+        self.pad.poll();
         self.run_sim_ticks(steps, human);
         if self.ticks_done >= self.config.ticks {
             self.flow = self.flow.on(FlowEvent::MatchOver);
@@ -1259,15 +1289,7 @@ impl ArenaApp {
             );
         }
         self.report_tape();
-        if let Some(tx) = self.feed_tx.as_ref() {
-            let stats = tx.stats();
-            say!(
-                "arena audio feed: sent={} applied={} dropped_full={}",
-                stats.sent,
-                stats.applied,
-                stats.dropped_full,
-            );
-        }
+        self.report_audio_feed();
         if self.args.timed_smoke {
             let elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0;
             match format_timed_smoke(self.frames_presented, self.ticks_done, elapsed_ms) {
@@ -1291,6 +1313,10 @@ impl ArenaApp {
         }
         if let Some(line) = self.view.line() {
             say!("{line}");
+        }
+        if let Some(scene) = self.break_scene.as_ref() {
+            say!("{}", scene.receipt_line());
+            say!("{}", scene.stats().receipt_line());
         }
         if let Some(mut out) = self.view_brief.take() {
             if let Err(err) = out.flush() {
@@ -1458,6 +1484,7 @@ impl ArenaApp {
         if let Err(err) = self.push_fighters(&mut list) {
             return self.fail(event_loop, err, 1);
         }
+        self.push_break(&mut list);
         self.fighters_us = self
             .fighters_us
             .saturating_add(duration_us(fighters_started.elapsed()));
@@ -1467,6 +1494,10 @@ impl ArenaApp {
         if self.cam_mode == CameraMode::Free {
             self.aim_free_cam(&mut list);
         }
+        // The ears sit where the camera does (EG21w): the next tick's
+        // listener, so a blow on the left of the picture sounds on the left.
+        self.audio_space
+            .follow_camera(list.camera.eye.to_array(), list.camera.target.to_array());
         let receipt = {
             let Some(presenter) = self.presenter.as_mut() else {
                 self.fail(
@@ -1612,6 +1643,20 @@ impl ArenaApp {
             self.fight_draws = push_fight_draws(list, &resident, &dots)?;
         }
         Ok(())
+    }
+
+    /// The center crate over the frame list: whole, then its chunks and the debris they became
+    /// (RZ4w). Presentation only. A refused upload drops the picture loudly and the window
+    /// keeps running without the crate.
+    fn push_break(&mut self, list: &mut DrawList) {
+        let (Some(scene), Some(presenter)) = (self.break_scene.as_mut(), self.presenter.as_mut())
+        else {
+            return;
+        };
+        if let Err(why) = scene.push(presenter, list, self.last_alpha) {
+            tell!("arena notice: break picture dropped: {why}");
+            self.break_scene = None;
+        }
     }
 
     /// Explicit offscreen capture path: when an armed sink is due, render
@@ -2727,6 +2772,54 @@ mod tests {
         let app = ArenaApp::new(bin_config(), args, None).expect("muted session builds");
         assert!(app._device.is_none(), "muted smoke opens no audio device");
         assert!(app.audio_notice.contains("muted"), "{}", app.audio_notice);
+    }
+
+    #[test]
+    fn pad_moves_the_human_slot() {
+        // EG27w: recorded stick events move slot 0 on the tape exactly as the
+        // keyboard wish does; with no device (or an idle one) nothing changes.
+        use engine_game::pad::RecordedPadEvent;
+        use engine_input::BoundAction;
+        let session = || {
+            let args = WinArgs::parse(&strings(&["arena", "--frames", "20", "--exit"]))
+                .expect("smoke args parse");
+            let mut app = ArenaApp::new(bin_config(), args, None).expect("session builds");
+            // Tests never read the host's real pad.
+            app.pad = WindowPad::absent();
+            app
+        };
+        let ticks = 20;
+        let sim_hash = |app: &ArenaApp| app.app.checkpoints().last().expect("ticks ran").hash;
+
+        let mut keys = session();
+        let right = keys.bindings.button(BoundAction::MoveRight);
+        keys.set_pressed(right, true);
+        keys.run_sim_ticks(ticks, keys.human().expect("human slot"));
+
+        let mut pad = session();
+        pad.pad.apply(&[RecordedPadEvent::Axis { lx: 1.0, ly: 0.0 }]);
+        assert!(!pad.pad.is_idle(), "a deflected stick is not idle");
+        pad.run_sim_ticks(ticks, pad.human().expect("human slot"));
+
+        let mut idle = session();
+        idle.pad.poll();
+        assert!(idle.pad.is_idle(), "no device reports nothing");
+        idle.run_sim_ticks(ticks, idle.human().expect("human slot"));
+
+        assert_eq!(sim_hash(&pad), sim_hash(&keys), "stick equals the key");
+        assert_ne!(sim_hash(&pad), sim_hash(&idle), "the stick moved the slot");
+        let at = |app: &ArenaApp| app.app.fighter_views()[usize::from(HUMAN_SLOT)].pos_m;
+        let walked = (at(&pad)[0] - at(&idle)[0]).hypot(at(&pad)[2] - at(&idle)[2]);
+        assert!(walked > 0.1, "slot 0 walked {walked} m from where idle stands");
+        assert_eq!(at(&pad), at(&keys));
+
+        // A held pad button stays held between polls until it is released.
+        let mut held = WindowPad::absent();
+        held.apply(&[RecordedPadEvent::ButtonDown(2)]);
+        held.apply(&[RecordedPadEvent::Axis { lx: 0.0, ly: 0.0 }]);
+        assert!(!held.is_idle(), "the button is still down");
+        held.apply(&[RecordedPadEvent::ButtonUp(2)]);
+        assert!(held.is_idle(), "released");
     }
 
     #[test]

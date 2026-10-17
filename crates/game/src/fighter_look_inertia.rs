@@ -228,6 +228,10 @@ impl FighterLook {
         slot: &SlotAnim,
         alpha: f32,
     ) -> Result<LocalPose, LookError> {
+        // RZ2w: a floored slot is drawn from its ragdoll bones, not from a clip.
+        if let Some(pose) = self.ragdoll_pose(index, rig, slot, alpha) {
+            return Ok(pose);
+        }
         let mut pose = self.slot_pose(rig, slot, alpha)?;
         if slot.iz_age < SETTLE_TICKS {
             if let Some(set) = self.inertia.get(index) {
@@ -235,6 +239,8 @@ impl FighterLook {
                     .map_err(|err| LookError::Skin(err.to_string()))?;
             }
         }
+        // RZ2w: a slot rising out of a ragdoll carries the get-up offsets on top.
+        self.ragdoll_getup_offsets(index, &mut pose, alpha)?;
         Ok(pose)
     }
 

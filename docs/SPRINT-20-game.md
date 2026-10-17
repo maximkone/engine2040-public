@@ -83,7 +83,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
 
 **The arena as a level, the round, the HUD (Tier A)**
 
-- [ ] GP37 content: one Rome numbers file plus a drift test — the shared numbers
+- [x] GP37 content: one Rome numbers file plus a drift test — the shared numbers Landed d0a4f6b4. rome_spec_drift 3 tests, run 39048280955.
   live in `docs/plan/rome-spec.json` and forge `SPEC.md:69-73` names a missing
   `content/arena/rome-spec.json`; engine walls sit at z -8 and +8 m
   (`content/arena/placement.json` ids 3-4) while the spec's half extent is

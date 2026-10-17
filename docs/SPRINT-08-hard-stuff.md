@@ -6,7 +6,7 @@ fixed-point, sorted order, x2 hashes); presentation-only rows say so. Donors
 come from the Rust sweep in `RESEARCH-VERDICT.md` (licenses re-read at port
 time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
 
-- [ ] PX35 physics: long-range attachments for cloth and soft sheets — the
+- [ ] PX35 physics: long-range attachments for cloth and soft sheets — the Progress 2026-10-17: per-node tethers landed (6f871bb5: cloth.rs rebuild_tethers and solve_tethers, test the_tether_pulls_an_overstretched_particle_back_to_its_reach); left: cloth is f32 Verlet not integer math, and the 32x32 fu30_soft_settle_offline_baseline spike test no longer exists, so the 25% + 64 raw link bar is not measured.
   32x32 soft-settle spike (`cloth.rs` `fu30_soft_settle_offline_baseline`,
   ignored) stretches its top links about 2x under the cape tune because
   position-based constraints cannot carry a long hanging chain in a few
@@ -16,18 +16,18 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Accept: the spike test runs un-ignored with every link within 25% + 64 raw
   of rest; cape tests and the zero-allocation step test stay green; replay
   bit-exact x2. needs: none.
-- [ ] LM2 anim: GASP-class ground feel — distance matching for starts,
+- [x] LM2 anim: GASP-class ground feel — distance matching for starts, Landed 379b13c. Tick audit 2026-10-17: warp_ground_feel_test stride_sweep_slide_under_1cm, strafe_135_skateless_and_capped, replay_exact_x2 and warp_ground_test starts/stops_slide_under_1cm_05_to_7 green, gh-check runs 39056062979 (warp_ground, 24 tests) and 39056591616 (engine-anim, 390 passed).
   stops and pivots, orientation warping for strafes, stride warping so feet
   match capsule speed (Paragon GDC 2016 shapes, reimplemented). Tier A.
   Size M. Owns `crates/anim/src/warp_ground.rs`. Accept: foot slide under
   1 cm from 0.5 to 7 m/s; strafes to 135 degrees without skating; replay
   exact x2. needs: LM1, AM6.
-- [ ] LM3 anim: networked motion — replicate pick index and phase so remote
+- [x] LM3 anim: networked motion — replicate pick index and phase so remote Landed 9bb8b28. Tick audit 2026-10-17: net_pose_w1_test two_clients_match_after_resim_at_150ms_rtt (both clients land on the authority checkpoints after resim, kbps_per_fighter 2.88 asserted) green in gh-check run 39056591616 (engine-anim, 390 passed).
   fighters pose the same after rollback and resim. Tier A. Size M. Owns
   `crates/anim/src/net_pose.rs`. Accept: two clients at 150 ms RTT show the
   same pose checkpoints after resim; kbps per fighter charted. needs: LM1,
   NET2.
-- [ ] AM13 anim: animation LOD — update-rate tiers by distance and screen
+- [ ] AM13 anim: animation LOD — update-rate tiers by distance and screen Progress 2026-10-17: lod.rs tier table plus assign_tiers keeps the 8 nearest at full rate (lod_w1_test.rs, anim_lod_pin.rs, gh-check run 39056591616 engine-anim 390 passed); left: the 64-fighter under 2 ms timing on the reference CPU is not measured.
   size, IK and springs off far away, crowd handed to VG4. Tier A. Size M.
   Owns `crates/anim/src/lod.rs`. Accept: 64 fighters under 2 ms total on
   the reference CPU; the 8 nearest match full-rate poses. needs: AM1, LM1.
@@ -42,7 +42,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Size M. Owns `crates/anim/src/additive.rs`. Accept: no pops on any
   interruption; foot slide at most 20 mm straight and 40 mm on pivots;
   replay x2; at most 0.05 ms per tick. needs: AM1, AM2, AM3, AM6.
-- [ ] AM18 anim: thousand-agent crowd pose budget — extend the AM13 tiers
+- [ ] AM18 anim: thousand-agent crowd pose budget — extend the AM13 tiers Progress 2026-10-17: crates/anim/src/crowd_scale.rs landed (assign_crowd_tiers, eight_nearest_match_full_rate_poses, far ring FarImpostorSink handoff, run 39056591616); left: the 1,000-agent p99 is a modeled cost (modeled_tick_cost_posts_per_tier_within_budget), the timing gate thousand_agent_tick_p99_within_budget is #[ignore] and only re-checks the model, and no PF workload entry exists.
   to a seeded 1,000-agent crowd tape on the reference CPU with per-tier
   costs posted and the far ring handed to VG4 impostors by contract.
   Tier A. Size M. Owns the scale-proof hunks plus PF workload
@@ -107,7 +107,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   fails on seeded regression; 8-fighter tick in budget; schema change
   refuses with diff; golden unchanged. needs: LM1, AM8, PF1.
   (PLN28 animation.md, reviewed 2026-09-25.)
-- [ ] TV2 anim: traversal-to-nav link contract proof — every TV1 edge
+- [ ] TV2 anim: traversal-to-nav link contract proof — every TV1 edge Progress 2026-10-17: crates/nav/src/links.rs has the traversal link registry with rebake_links and rebake_for_set tests (nav suite green, run 39057395844); left: no contract test ties each anim TV1 edge to its NV2 link entry on the five fixtures.
   names exactly its NV2 link-registry entry and rebakes exactly those
   links, proven x2 on vault/hurdle/mantle/climb/drop fixtures. Tier A.
   Size S. Owns contract test + per-edge link records (no new system).
@@ -120,7 +120,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   `crates/physics/src/learned_ctrl.rs`. Accept: an AI fighter walks, turns
   and recovers from shoves; replay exact x2; A/B against LM1 on blind
   review decides adoption. Hunt 2026-09-25: the student passes tract agreement (max abs diff at most 2.0) and the 100-match tournament [350, 650]; a student trained on a shuffled teacher must collapse, else the pipeline is rejected. Motion 2026-09-25: CT14 clips may seed teachers, under DT5 manifests; clips from non-commercial training data never train a shipped student. needs: PX4, DT2, NN1.
-- [ ] NN3 nn: quantization-aware training — `simulate_quantize()` during
+- [ ] NN3 nn: quantization-aware training — `simulate_quantize()` during Progress 2026-10-17: crates/nn/src/qat.rs landed (simulate_quantize, train_student, export_qat, determinism_report; qat_beats_post_training_on_fixture and int8_student_is_bit_identical_with_report green, run 39057462635); left: the win is shown on a 64-row fixture not the DT3 tournament, and no digest compare across two toolchains is posted.
   training plus a determinism report across toolchains; only the int8
   student ships. Tier B. Size S. Owns `crates/nn/src/qat.rs`. Accept: QAT
   beats post-training quantization on the DT3 tournament; the int8 student
@@ -210,7 +210,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   test -p engine-physics --lib clinch` green on the 8-fighter soak; 50
   seeded clinch-falls separate; hash x2; golden unchanged. needs: PX9,
   DX4. (EXTEND physics 2026-09-27.)
-- [ ] DX11 destruction: siege-wall fracture at 64-player scale — capped
+- [ ] DX11 destruction: siege-wall fracture at 64-player scale — capped Progress 2026-10-17: fracture.rs has the chunk cap, break_events_follow_the_dx1_shape_and_replay and fracture_event_budget_one_millisecond (the 1 ms test is #[ignore], run alone; destruction suite run 39057037628); left: no wall-break at 64-player scale, no break-event bandwidth-in-net-budget or rollback-exact test.
   seeded runtime cuts with break events on the DX1 shape and break-event
   bandwidth inside the net budget, rollback-exact. Tier B. Size M. Owns
   scale-proof hunks beside `crates/destruction/src/fracture.rs` (DX5 cuts
@@ -233,7 +233,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   -p engine-physics --lib combined_tick` green on the 64+500 fixture;
   physics slice p99 within 4 ms on the reference CPU; hash x2; golden
   unchanged. needs: PX7, PX16, PF1. (EXTEND physics 2026-09-29.)
-- [ ] PX20 physics: deterministic swept shape-cast API — segment-cast
+- [ ] PX20 physics: deterministic swept shape-cast API — segment-cast Progress 2026-10-17: crates/physics/src/query.rs has sphere_cast and ray_cast with rb_query_kinds tests (6b671986, f32 nearest hit); left: no Fixed/Q16 segment cast with sorted time-of-impact and no swept_cast test.
   with sorted time-of-impact in `crates/physics/src/query.rs`,
   Fixed/Q16 only, consumed by GP2 sweep and PX10 CCD wiring. Tier A.
   Size S. Owns the cast hunks in `query.rs` (no new file, no step
@@ -241,7 +241,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   green incl. 1,000 seeded casts; TOI order stable under permutation;
   hash x2; golden unchanged. needs: PH1, GP2. (EXTEND physics
   2026-09-29.)
-- [ ] PX21 physics: moving-platform ride — deterministic platform-delta
+- [ ] PX21 physics: moving-platform ride — deterministic platform-delta Progress 2026-10-17: kcc.rs platform_ride_matrix (station within 1 cm over 600 ticks, platform stop, step-off inherits velocity, hash x2) green in physics run 39057362796; left: the step-off landing is only asserted grounded, not within 1 cm of a target.
   inheritance for carried fighters (ride, step-off, platform stop),
   integer deltas only. Tier B. Size S. Owns ride hunks beside
   `crates/physics/src/kcc.rs` (PH2 frozen). Accept: `cargo test
@@ -263,7 +263,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   (bake only, never the tick). Accept: graded bonds hold anchors until
   their strain fails on wall fixtures; bake x2; golden unchanged.
     needs: DX2, DX3. (EXTEND physics 2026-09-29.)
-- [ ] DX16 destruction: bond-graph damage propagation — bond topology +
+- [x] DX16 destruction: bond-graph damage propagation — bond topology + Landed d328c26. Tick audit 2026-10-17: cluster_graph_cascade_propagates_along_bonds_only (12-shard chain, swap at break, digest equal x2) plus debris_snapshot green in gh-check run 39057037628 (engine-destruction, 152 passed).
   per-piece health/propagation/cascade/shattered-prefab swap director ported
   as Rust from flax-mcp
   `plugins/world/src/Physics/Core/Packs/Destruction/Destruction.ClusterGraph.cs`
@@ -328,7 +328,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Accept: malicious asset names refused; out-of-scope tool calls
   blocked. Kill: float math in tick. needs: CT4, MCP8. (RES-STEAL
   wave 36 Dive 12, reviewed 2026-09-26.)
-- [ ] NV4 nav: near-field avoidance — ORCA half-planes on the XZ plane in
+- [ ] NV4 nav: near-field avoidance — ORCA half-planes on the XZ plane in Progress 2026-10-17: crates/ai/tests/crowd_orca_bench.rs holds an integer ORCA half-plane step with naive, kd-tree and grid neighbour feeds benched at 50, 200 and 256 agents; left: no crates/nav/src/orca.rs, no 500-agent flat-cost proof, no 1,000-seed corridor stuck drill.
   Fixed math for fighters within 15 m (RVO2-3D, Apache-2.0, math ported with
   a PORT row); far agents stay on flow fields and impostors. Tier B. Size M.
   Owns `crates/nav/src/orca.rs`. Accept: steering ≤ 0.1 ms per agent, flat
@@ -383,7 +383,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
    test -p engine-ai legion` green, battle fixture run twice.
    needs: GA2, NV5.
    (PLN EXTEND gameplay.md, proposed 2026-09-29.)
-- [ ] GA10 brain: threshold-gated utility pick + otherwise fallback —
+- [x] GA10 brain: threshold-gated utility pick + otherwise fallback — Landed f3cbc4f. Tick audit 2026-10-17: utility_threshold_gates_first_and_highest, utility_threshold_otherwise_and_jitter, gladiator tests green in gh-check run 39056802035 (engine-ai, 264 passed).
   FirstToScore/HighestToScore threshold pickers plus an otherwise fallback
   over the same Brief slice, ported as std-only Rust from `zkat/big-brain`
   `src/pickers.rs` (license Apache-2.0, reimplement only, never the crate
@@ -396,7 +396,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   `cargo test -p engine-ai --lib gladiator` stays green. needs: BR1.
    (STEAL 2026-10-03 big-brain, https://github.com/zkat/big-brain;
    re-opens the LADDER big-brain picker CARD with the spike numbers.)
-- [ ] GA11 brain: deterministic behavior-tree executor — Sequence /
+- [x] GA11 brain: deterministic behavior-tree executor — Sequence / Landed 453811f. Tick audit 2026-10-17: behavior_tree_check_and_parallel_status, behavior_tree_trace_is_byte_identical_x2 (Sequence, Select, Invert, Check, Parallel) and gladiator tests green in gh-check run 39056802035 (engine-ai, 264 passed).
    Selector / Parallel + blackboard over integer tick state, ported as
    std-only Rust from `Sollimann/bonsai` BT executor shape (license
    MIT, reimplement only, never the crate dep). Tier B. Size S. Owns
@@ -418,7 +418,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
    planner). P2P:
    `cargo test -p engine-ai --lib gladiator` stays green. needs: GA11.
    (STEAL 2026-10-03 dogoap, https://github.com/victorb/dogoap.)
-- [ ] NV10 nav: broadphase plus 1,000-agent P6 bar — integer
+- [ ] NV10 nav: broadphase plus 1,000-agent P6 bar — integer Progress 2026-10-17: the grid and kd-tree neighbour feeds exist in crates/ai/tests/crowd_orca_bench.rs against the scan referee; left: no crates/nav/src/crowd.rs, no byte-equal check on the NV8 corpus, no p50/p95/p99 at 1,000 agents.
   uniform-grid (or R* split shape, georust/rstar pattern only)
   contender against the id-sorted scan referee; byte-equal neighbor
   sets on every seed, then p50/p95/p99 at 50/500/1000 agents. Tier A.
@@ -443,7 +443,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   byte-equal again after a 4-tile breach plus rebake; bytes x2.
   Proof: `cargo test -p engine-nav tiles` green, stitch diff run
   twice. needs: NV3. (PLN EXTEND gameplay.md, proposed 2026-09-29.)
-- [ ] NV13 nav: temp-obstacle request queue — touched/pending sets
+- [ ] NV13 nav: temp-obstacle request queue — touched/pending sets Progress 2026-10-17: ObstacleCache plus TiledNav::update_budget landed in tiles.rs with tests/tiles.rs obstacle_rebuild_touches_only_its_tiles and obstacle_requests_refuse_loudly (nav green, run 39057395844); left: the 4-tile breach numbers (touched 4/4/4 cap 8, up_to_date, digest afb7c5d2) are not asserted anywhere.
   plus budgeted rebuild plus `up_to_date` convergence (LADDER L517
   ADOPT-scoped spike). Tier A. Size S.
   Owns `crates/nav/src/tiles.rs` queue plus `update_budget` hunks
@@ -488,11 +488,11 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   simulation code keeps its integer math. Tier A. Size M. Owns the named
   hot files per PF2 capture. Accept: each change A/B-measured; identical
   outputs. needs: PF2.
-- [ ] PF9 perf: replay visual debugger — tracy spans plus a rerun recording
+- [ ] PF9 perf: replay visual debugger — tracy spans plus a rerun recording Progress 2026-10-17: crates/observe/src/rerun_sink.rs landed (names_first_mismatched_hash, tracy zone names; observe green run 39057303818) and PF9a paired reruns name the first divergent hash; left: the GPU timestamp, 2,000-frame and RA8 manifest legs of the hunt are not done.
   of simulation state per tick for desync hunts (licenses read first).
   Tier B. Size M. Owns `crates/observe/src/rerun_sink.rs`. Accept: a seeded
   desync shows its first divergent tick in the recording. GitHub hunt 2026-09-25: GPU timestamp queries (two per pass) resolved behind the GX truth gate give `gpu_ms` next to CPU spans; a free-list buffer arena keeps allocations flat over 120 frames (wgpu, rend3 patterns). Deep 3D pass: raise capture to 2,000 frames (120 today), cover every GPU pass (6 today), and write tier, VRAM and draw counts into the RA8 manifest; this harness comes before any GPU budget    claim. needs: PF2.
-- [ ] PF9a perf: headless paired-rerun harness (Tracy offline-capture shape,
+- [x] PF9a perf: headless paired-rerun harness (Tracy offline-capture shape, Landed 90eb08c. Tick audit 2026-10-17: crates/perf/tests/w1_pf9a_paired.rs (tick_frame_paired_small_runs_share_one_hash, _receipt_kills_divergence, _600_runs_share_one_hash) and profiler.rs paired receipt tests green in gh-check run 39057250493 (engine-perf).
   zero Tracy bytes; method reference `wolfpld/tracy@afb16f68` BSD-3-Clause,
   `capture/`+`csvexport/` pattern only). Tier B. Size S. Owns
   `crates/perf/src/profiler.rs` paired-capture hunks only (no new file, no

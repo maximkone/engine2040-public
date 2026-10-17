@@ -7,270 +7,85 @@
 //! plus same query gives the same hits; same intent over the same
 //! actors in any order gives the same placement or conflict.
 //! Errors: [`BrowserError`]; refusals stage nothing and mutate nothing.
-//! Local vocabulary copies (headless path): `AssetKind` matches the assets
-//! `bundle::EntryKind` discriminants 1-5, `Relation`/`Wall`/`Target`/
-//! `Want` match the spatial `place` vocabulary, `DropPreview` follows the
-//! endpoint `PreviewReceipt` discipline (dry-run effects plus resulting
-//! revision, conflicts write nothing). `engine-spatial` is a `ui`-only
-//! dependency (Cargo.toml), so headless builds solve through these local
-//! defs; keep the values in sync by hand when either side changes.
+//! Vocabulary is the real thing, not a copy: `AssetKind` is the assets
+//! archive/bundle entry kind (`engine_assets::ArchiveKind`, which AS1
+//! `bundle::EntryKind` re-exports), and `Relation`/`Wall`/`Target`/`Want`/
+//! `Intent`/`ObjectRef` are the `engine-spatial` placement vocabulary. The
+//! drop solver is `engine_spatial::place::solve`; a refused drop carries its
+//! `ConflictSet` as typed text. `DropPreview` follows the endpoint
+//! `PreviewReceipt` discipline (dry-run effects plus resulting revision,
+//! conflicts write nothing).
 
 use std::fmt;
 
+use engine_assets::archive::{
+    ArchivedBundle, MAX_ARCHIVE_DETAIL_CHARS, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CHARS,
+};
+use engine_spatial::place::{solve, ConflictSet, TransformOut};
+use engine_spatial::Actor;
+
 use crate::commands::bound_to;
 
-/// Longest asset name in chars.
-/// Local copy of the assets `bundle::MAX_NAME_CHARS` for headless builds.
-pub const MAX_NAME_CHARS: usize = 128;
+pub use engine_assets::ArchiveKind as AssetKind;
+pub use engine_spatial::{Intent, ObjectRef, Relation, Target, Wall, Want};
+
+/// Longest asset name in chars: the archive's own bound.
+pub const MAX_NAME_CHARS: usize = MAX_ARCHIVE_NAME_CHARS;
 /// Longest tag in chars.
 pub const MAX_TAG_CHARS: usize = 64;
 /// Most tags kept on one entry.
 pub const MAX_TAGS_PER_ENTRY: usize = 8;
-/// Most entries accepted in one bundle view.
-/// Local copy of the assets `bundle::MAX_ENTRIES` for headless builds.
-pub const MAX_ENTRIES: usize = 4096;
+/// Most entries accepted in one bundle view: the archive's own bound.
+pub const MAX_ENTRIES: usize = MAX_ARCHIVE_ENTRIES;
 /// Longest search text or tag filter in chars.
 pub const MAX_QUERY_CHARS: usize = 128;
 /// Most hits returned by one search; the full bundle fits exactly.
-pub const MAX_RESULTS: usize = 4096;
+pub const MAX_RESULTS: usize = MAX_ENTRIES;
 /// Most relation wants accepted on one drop.
 pub const MAX_WANTS_PER_DROP: usize = 8;
 /// Most scene actors accepted around one drop.
 pub const MAX_ACTORS_PER_SCENE: usize = 1024;
-/// Bound for echoed text carried in errors.
-/// Local copy of the assets `bundle::MAX_DETAIL_CHARS`; editor-owned
-/// bound for headless builds.
-pub const MAX_DETAIL_CHARS: usize = 128;
-/// Solver grid pitch in centimeters.
-/// Local copy of spatial `place::GRID_CM` for headless builds.
-pub const GRID_CM: i32 = 10;
-/// Yaw candidates per position (`k * PI/4`).
-/// Local copy of spatial `place::YAW_STEPS` for headless builds.
-pub const YAW_STEPS: i32 = 8;
-/// Side-by-side edge-gap limit in cm.
-/// Local copy of spatial `relation::NEXT_TO_CM` for headless builds.
-pub const NEXT_TO_CM: i32 = 100;
-/// Resting-contact tolerance in cm.
-/// Local copy of spatial `relation::SUPPORT_GAP_CM` for headless builds.
-pub const SUPPORT_GAP_CM: i32 = 5;
-/// Forward half-plane range in cm.
-/// Local copy of spatial `relation::FACING_RANGE_CM` for headless builds.
-pub const FACING_RANGE_CM: i32 = 2000;
-/// Default wall edge-gap range `(min, max)` in cm for `NextTo` + wall.
-/// Local copy of spatial `DEFAULT_WALL_GAP_CM` for headless builds.
-pub const DEFAULT_WALL_GAP_CM: (i32, i32) = (0, 50);
-/// Default point distance range `(min, max)` in cm for `NextTo` + point.
-/// Local copy of spatial `DEFAULT_POINT_DIST_CM` for headless builds.
-pub const DEFAULT_POINT_DIST_CM: (i32, i32) = (0, 50);
+/// Bound for echoed text carried in errors: the archive's own bound.
+pub const MAX_DETAIL_CHARS: usize = MAX_ARCHIVE_DETAIL_CHARS;
 /// Largest point coordinate accepted in cm (+-1 km).
 pub const MAX_POINT_CM: i32 = 100_000;
 
-/// Payload kind of one bundle entry; one byte on the bundle wire.
-/// Local copy of the assets `bundle::EntryKind` for headless builds: same
-/// variants plus discriminants so the consumer maps 1:1 at the IO boundary.
-/// Do not renumber; keep in sync with the `bundle` edge by hand.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum AssetKind {
-    /// Cooked mesh bytes.
-    Mesh = 1,
-    /// Cooked material bytes.
-    Material = 2,
-    /// Cooked texture bytes with mips.
-    Texture = 3,
-    /// Skin bytes.
-    Skin = 4,
-    /// Imported clip bytes.
-    Clip = 5,
+/// Every asset kind in wire order (the archive discriminants 1 to 5).
+pub const ASSET_KINDS: [AssetKind; 5] = [
+    AssetKind::Mesh,
+    AssetKind::Material,
+    AssetKind::Texture,
+    AssetKind::Skin,
+    AssetKind::Clip,
+];
+
+/// One-line source text for a want, in intent order (conflict sets, logs).
+fn want_text(want: &Want) -> String {
+    let target = match want.target {
+        Target::Wall(wall) => format!("wall:{}", wall_name(wall)),
+        Target::Object(id) => format!("object:{id}"),
+        Target::Point { x_cm, z_cm } => format!("point:{x_cm},{z_cm}"),
+    };
+    let range = match want.distance_cm {
+        Some((lo, hi)) => format!("{lo}..={hi}"),
+        None => "default".to_string(),
+    };
+    format!("{} {target} dist {range}", want.relation.name())
 }
 
-impl AssetKind {
-    /// Every kind, in wire order.
-    pub const fn all() -> [Self; 5] {
-        [
-            Self::Mesh,
-            Self::Material,
-            Self::Texture,
-            Self::Skin,
-            Self::Clip,
-        ]
-    }
-
-    /// Decode a wire byte; `None` means the bundle row is corrupt.
-    pub const fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            1 => Some(Self::Mesh),
-            2 => Some(Self::Material),
-            3 => Some(Self::Texture),
-            4 => Some(Self::Skin),
-            5 => Some(Self::Clip),
-            _ => None,
-        }
-    }
-
-    /// Lowercase kind name for rows and diagnostics.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Mesh => "mesh",
-            Self::Material => "material",
-            Self::Texture => "texture",
-            Self::Skin => "skin",
-            Self::Clip => "clip",
-        }
+/// Short wall name quoted in conflicts.
+const fn wall_name(wall: Wall) -> &'static str {
+    match wall {
+        Wall::North => "north",
+        Wall::South => "south",
+        Wall::East => "east",
+        Wall::West => "west",
     }
 }
 
-impl fmt::Display for AssetKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// One directed relation. Local copy of the spatial relation vocabulary
-/// for headless builds; same names, same order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Relation {
-    Supports,
-    OnTopOf,
-    Inside,
-    NextTo,
-    Facing,
-}
-
-impl Relation {
-    /// Every relation, in solver order.
-    pub const fn all() -> [Self; 5] {
-        [
-            Self::Supports,
-            Self::OnTopOf,
-            Self::Inside,
-            Self::NextTo,
-            Self::Facing,
-        ]
-    }
-
-    /// Short relation name quoted in refusals.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Supports => "supports",
-            Self::OnTopOf => "on_top_of",
-            Self::Inside => "inside",
-            Self::NextTo => "next_to",
-            Self::Facing => "facing",
-        }
-    }
-}
-
-impl fmt::Display for Relation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// Room wall. Local copy of the spatial wall convention for headless
-/// builds: North is the min-z bound, South max-z, West min-x, East max-x.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Wall {
-    North,
-    South,
-    East,
-    West,
-}
-
-impl Wall {
-    /// Every wall, in solver order.
-    pub const fn all() -> [Self; 4] {
-        [Self::North, Self::South, Self::East, Self::West]
-    }
-
-    /// Short wall name quoted in refusals.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::North => "north",
-            Self::South => "south",
-            Self::East => "east",
-            Self::West => "west",
-        }
-    }
-}
-
-impl fmt::Display for Wall {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// What a want is measured against: a room wall, an actor id, or an
-/// explicit XZ point in integer centimeters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Target {
-    Wall(Wall),
-    Object(u32),
-    Point { x_cm: i32, z_cm: i32 },
-}
-
-impl Target {
-    /// One-line source text for conflict sets, in intent order.
-    pub fn describe(self) -> String {
-        match self {
-            Self::Wall(w) => format!("wall:{}", w.name()),
-            Self::Object(id) => format!("object:{id}"),
-            Self::Point { x_cm, z_cm } => format!("point:{x_cm},{z_cm}"),
-        }
-    }
-}
-
-/// One relation constraint. `distance_cm` is an inclusive `(min, max)`
-/// in cm for `NextTo` and `Facing`; `None` selects the per-target
-/// default. Distance is ignored for `Inside`, `OnTopOf`, `Supports`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Want {
-    pub relation: Relation,
-    pub target: Target,
-    pub distance_cm: Option<(i32, i32)>,
-}
-
-impl Want {
-    /// One-line source text for conflict sets, in intent order.
-    pub fn describe(self) -> String {
-        let range = match self.distance_cm {
-            Some((lo, hi)) => format!("{lo}..={hi}"),
-            None => "default".to_string(),
-        };
-        format!(
-            "{} {} dist {range}",
-            self.relation.name(),
-            self.target.describe()
-        )
-    }
-}
-
-/// Which actor a drop moves: an id, or a name matching exactly one actor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ObjectRef {
-    Id(u32),
-    Name(String),
-}
-
-impl ObjectRef {
-    /// Label quoted in refusals (bounded, never raw unbounded input).
-    pub fn label(&self) -> String {
-        match self {
-            Self::Id(id) => format!("id {id}"),
-            Self::Name(name) => format!("name '{}'", bound_detail(name)),
-        }
-    }
-}
-
-/// One placement intent: move `object` so every want holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Intent {
-    pub object: ObjectRef,
-    pub wants: Vec<Want>,
-}
-
-/// One scene actor snapshot. Plain data subset of the spatial actor:
-/// id, grammar-clean name, meters, extents, yaw radians.
+/// One scene actor snapshot the caller hands the drop: id, grammar-clean
+/// name, meters, extents, yaw radians. The solver reads it as a spatial
+/// actor ([`BrowserActor::to_actor`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrowserActor {
     pub id: u32,
@@ -314,9 +129,23 @@ impl BrowserActor {
         }
     }
 
-    /// Grounded rest height for these extents in meters.
-    pub fn rest_y(self) -> f32 {
-        self.sy * 0.5
+    /// The solver's view of this actor: physical, still, no parent.
+    fn to_actor(&self) -> Actor {
+        Actor {
+            id: self.id,
+            name: self.name.clone(),
+            x: self.x,
+            y: self.y,
+            z: self.z,
+            sx: self.sx,
+            sy: self.sy,
+            sz: self.sz,
+            parent: None,
+            physical: true,
+            vx: 0.0,
+            vz: 0.0,
+            yaw: self.yaw,
+        }
     }
 }
 
@@ -382,6 +211,19 @@ impl BundleView {
         }
         self.entries.push(entry);
         Ok(())
+    }
+
+    /// List every entry of a real archive (the AS1 bundle wrapped 1:1). The
+    /// archive format already keeps names unique and bounded, so rows go in
+    /// without the duplicate scan; it carries no tags, so rows list untagged.
+    pub fn from_archive(archive: &ArchivedBundle) -> Result<Self, BrowserError> {
+        let mut entries = Vec::with_capacity(archive.len());
+        for item in archive.iter() {
+            let entry = BundleEntry::new(item.kind, item.name, &[]);
+            validate_entry(&entry)?;
+            entries.push(entry);
+        }
+        Ok(Self { entries })
     }
 
     /// True when an asset name is listed.
@@ -747,7 +589,7 @@ fn validate_actor(actor: &BrowserActor) -> Result<(), BrowserError> {
 /// section per group; [`search`] scans the groups so hits already come
 /// out in kind-then-name order. Pure: same bundle, same groups.
 pub fn hierarchy(bundle: &BundleView) -> Vec<(AssetKind, Vec<&BundleEntry>)> {
-    let mut groups: Vec<(AssetKind, Vec<&BundleEntry>)> = AssetKind::all()
+    let mut groups: Vec<(AssetKind, Vec<&BundleEntry>)> = ASSET_KINDS
         .into_iter()
         .map(|kind| (kind, Vec::new()))
         .collect();
@@ -858,422 +700,10 @@ fn validate_intent(intent: &Intent) -> Result<(), BrowserError> {
     Ok(())
 }
 
-/// Meters to integer centimeters (banker-free round, matches the spatial solver).
-fn to_cm(meters: f32) -> i32 {
-    (f64::from(meters) * 100.0).round() as i32
-}
-
-/// Octant of a yaw step: `0` faces +X like the spatial relations; `k * PI/4` after.
-fn octant_of(yaw_idx: i32) -> (i32, i32) {
-    match yaw_idx.rem_euclid(YAW_STEPS) {
-        0 => (1, 0),
-        1 => (1, 1),
-        2 => (0, 1),
-        3 => (-1, 1),
-        4 => (-1, 0),
-        5 => (-1, -1),
-        6 => (0, -1),
-        _ => (1, -1),
-    }
-}
-
-/// Yaw radians of one yaw step.
-fn yaw_of(yaw_idx: i32) -> f32 {
-    yaw_idx as f32 * core::f32::consts::FRAC_PI_4
-}
-
-/// Union XZ bounds over valid actors, in integer centimeters.
-#[derive(Clone, Copy, Debug)]
-struct Bounds {
-    min_x: i32,
-    max_x: i32,
-    min_z: i32,
-    max_z: i32,
-}
-
-fn room_bounds(actors: &[BrowserActor]) -> Option<Bounds> {
-    let mut bounds = Bounds {
-        min_x: i32::MAX,
-        max_x: i32::MIN,
-        min_z: i32::MAX,
-        max_z: i32::MIN,
-    };
-    let mut any = false;
-    for actor in actors {
-        if actor.validate_silent().is_err() {
-            continue;
-        }
-        let hx = to_cm(actor.sx).abs() / 2;
-        let hz = to_cm(actor.sz).abs() / 2;
-        let (cx, cz) = (to_cm(actor.x), to_cm(actor.z));
-        bounds.min_x = bounds.min_x.min(cx - hx);
-        bounds.max_x = bounds.max_x.max(cx + hx);
-        bounds.min_z = bounds.min_z.min(cz - hz);
-        bounds.max_z = bounds.max_z.max(cz + hz);
-        any = true;
-    }
-    if any {
-        Some(bounds)
-    } else {
-        None
-    }
-}
-
-impl BrowserActor {
-    /// Silent validity for bound scans (solver reports loudly elsewhere).
-    fn validate_silent(&self) -> Result<(), ()> {
-        if ![self.x, self.y, self.z, self.sx, self.sy, self.sz, self.yaw]
-            .iter()
-            .all(|lane| lane.is_finite())
-        {
-            return Err(());
-        }
-        if self.sx <= 0.0 || self.sy <= 0.0 || self.sz <= 0.0 {
-            return Err(());
-        }
-        Ok(())
-    }
-}
-
-/// Resolved drop geometry plus its grounded rest height in meters.
-struct Placed {
-    id: u32,
-    sx: f32,
-    sz: f32,
-    y_m: f32,
-}
-
-fn resolve_object(intent: &Intent, actors: &[BrowserActor]) -> Result<Placed, BrowserError> {
-    let matches: Vec<&BrowserActor> = match &intent.object {
-        ObjectRef::Id(id) => actors.iter().filter(|actor| actor.id == *id).collect(),
-        ObjectRef::Name(name) => actors.iter().filter(|actor| &actor.name == name).collect(),
-    };
-    if matches.is_empty() {
-        return Err(BrowserError::UnknownObject {
-            label: intent.object.label(),
-        });
-    }
-    if matches.len() > 1 {
-        let label = match &intent.object {
-            ObjectRef::Id(id) => format!("id {id}"),
-            ObjectRef::Name(name) => format!("name '{}'", bound_detail(name)),
-        };
-        return Err(BrowserError::AmbiguousObject {
-            label,
-            count: matches.len(),
-        });
-    }
-    let actor = matches[0];
-    validate_actor(actor)?;
-    Ok(Placed {
-        id: actor.id,
-        sx: actor.sx,
-        sz: actor.sz,
-        y_m: actor.sy * 0.5,
-    })
-}
-
-/// Solver working set: frozen maps plus bounds, all order-invariant.
-struct Ctx<'a> {
-    bounds: Bounds,
-    boxes: std::collections::BTreeMap<u32, (i32, i32, i32, i32)>,
-    by_id: std::collections::BTreeMap<u32, &'a BrowserActor>,
-}
-
-/// XZ box `(min_x, max_x, min_z, max_z)` in centimeters.
-fn box_of(actor: &BrowserActor) -> (i32, i32, i32, i32) {
-    let hx = to_cm(actor.sx).abs() / 2;
-    let hz = to_cm(actor.sz).abs() / 2;
-    let (cx, cz) = (to_cm(actor.x), to_cm(actor.z));
-    (cx - hx, cx + hx, cz - hz, cz + hz)
-}
-
-fn context<'a>(actors: &'a [BrowserActor], bounds: Bounds) -> Ctx<'a> {
-    let mut boxes = std::collections::BTreeMap::new();
-    for actor in actors {
-        if actor.validate_silent().is_ok() {
-            boxes.insert(actor.id, box_of(actor));
-        }
-    }
-    let by_id: std::collections::BTreeMap<u32, &'a BrowserActor> =
-        actors.iter().map(|actor| (actor.id, actor)).collect();
-    Ctx {
-        bounds,
-        boxes,
-        by_id,
-    }
-}
-
-fn valid_range(range: Option<(i32, i32)>) -> Option<(i64, i64)> {
-    range
-        .map(|(lo, hi)| (i64::from(lo), i64::from(hi)))
-        .filter(|(lo, hi)| *lo >= 0 && *hi >= *lo)
-}
-
-fn valid_range_or(want: Option<(i32, i32)>, fallback: (i32, i32)) -> Option<(i64, i64)> {
-    match want {
-        Some(_) => valid_range(want),
-        None => Some((i64::from(fallback.0), i64::from(fallback.1))),
-    }
-}
-
-/// Inclusive range check over a squared center distance.
-fn dist_in(center2: i64, range: (i64, i64)) -> bool {
-    range.0 * range.0 <= center2 && center2 <= range.1 * range.1
-}
-
-fn center2(cx: i32, cz: i32, tx: i32, tz: i32) -> i64 {
-    let dx = i64::from(cx) - i64::from(tx);
-    let dz = i64::from(cz) - i64::from(tz);
-    dx * dx + dz * dz
-}
-
-fn edge_gap2(min_x: i32, max_x: i32, min_z: i32, max_z: i32, other: &(i32, i32, i32, i32)) -> i64 {
-    let gx = (i64::from(min_x.max(other.0)) - i64::from(max_x.min(other.1))).max(0);
-    let gz = (i64::from(min_z.max(other.2)) - i64::from(max_z.min(other.3))).max(0);
-    gx * gx + gz * gz
-}
-
-/// Spatial facing: strictly ahead in the yaw-snapped half-plane and in range.
-fn face_holds(cx: i32, cz: i32, yaw_idx: i32, tx: i32, tz: i32) -> bool {
-    if cx == tx && cz == tz {
-        return false;
-    }
-    let (fx, fz) = octant_of(yaw_idx);
-    let dx = i64::from(tx) - i64::from(cx);
-    let dz = i64::from(tz) - i64::from(cz);
-    if i64::from(fx) * dx + i64::from(fz) * dz <= 0 {
-        return false;
-    }
-    let range = i64::from(FACING_RANGE_CM);
-    dx * dx + dz * dz <= range * range
-}
-
-/// Optional center-distance refinement; `None` always holds.
-fn dist_holds(cx: i32, cz: i32, tx: i32, tz: i32, distance_cm: Option<(i32, i32)>) -> bool {
-    match distance_cm {
-        None => true,
-        Some(_) => match valid_range(distance_cm) {
-            Some(range) => dist_in(center2(cx, cz, tx, tz), range),
-            None => false,
-        },
-    }
-}
-
-/// Gap in cm between the probe footprint edge and the named room wall.
-fn wall_gap(wall: Wall, bounds: &Bounds, min_x: i32, max_x: i32, min_z: i32, max_z: i32) -> i64 {
-    match wall {
-        Wall::North => i64::from(min_z) - i64::from(bounds.min_z),
-        Wall::South => i64::from(bounds.max_z) - i64::from(max_z),
-        Wall::West => i64::from(min_x) - i64::from(bounds.min_x),
-        Wall::East => i64::from(bounds.max_x) - i64::from(max_x),
-    }
-}
-
-/// True when the probe at `(cx, cz)` with `yaw_idx` satisfies `want`.
-/// All geometry runs on integer centimeters.
-fn satisfies(want: &Want, cx: i32, cz: i32, yaw_idx: i32, obj: &Placed, ctx: &Ctx<'_>) -> bool {
-    let hx = to_cm(obj.sx).abs() / 2;
-    let hz = to_cm(obj.sz).abs() / 2;
-    let (min_x, max_x) = (cx - hx, cx + hx);
-    let (min_z, max_z) = (cz - hz, cz + hz);
-    let bounds = &ctx.bounds;
-    match (want.relation, want.target) {
-        (Relation::NextTo, Target::Wall(wall)) => {
-            let Some(range) = valid_range_or(want.distance_cm, DEFAULT_WALL_GAP_CM) else {
-                return false;
-            };
-            let gap = wall_gap(wall, bounds, min_x, max_x, min_z, max_z);
-            range.0 <= gap && gap <= range.1
-        }
-        (Relation::NextTo, Target::Object(id)) => {
-            let Some(range) = valid_range_or(want.distance_cm, (0, NEXT_TO_CM)) else {
-                return false;
-            };
-            let Some(other) = ctx.boxes.get(&id) else {
-                return false;
-            };
-            if id == obj.id {
-                return false;
-            }
-            dist_in(edge_gap2(min_x, max_x, min_z, max_z, other), range)
-        }
-        (Relation::NextTo, Target::Point { x_cm, z_cm }) => {
-            let Some(range) = valid_range_or(want.distance_cm, DEFAULT_POINT_DIST_CM) else {
-                return false;
-            };
-            dist_in(center2(cx, cz, x_cm, z_cm), range)
-        }
-        (Relation::Facing, Target::Wall(wall)) => {
-            let (fx, fz) = octant_of(yaw_idx);
-            let toward = match wall {
-                Wall::North => fz < 0,
-                Wall::South => fz > 0,
-                Wall::West => fx < 0,
-                Wall::East => fx > 0,
-            };
-            if !toward {
-                return false;
-            }
-            match want.distance_cm {
-                None => true,
-                Some(_) => {
-                    let Some(range) = valid_range(want.distance_cm) else {
-                        return false;
-                    };
-                    let gap = wall_gap(wall, bounds, min_x, max_x, min_z, max_z);
-                    range.0 <= gap && gap <= range.1
-                }
-            }
-        }
-        (Relation::Facing, Target::Object(id)) => {
-            let Some(target) = ctx.by_id.get(&id) else {
-                return false;
-            };
-            if target.id == obj.id || target.validate_silent().is_err() {
-                return false;
-            }
-            face_holds(cx, cz, yaw_idx, to_cm(target.x), to_cm(target.z))
-                && dist_holds(cx, cz, to_cm(target.x), to_cm(target.z), want.distance_cm)
-        }
-        (Relation::Facing, Target::Point { x_cm, z_cm }) => {
-            face_holds(cx, cz, yaw_idx, x_cm, z_cm)
-                && dist_holds(cx, cz, x_cm, z_cm, want.distance_cm)
-        }
-        (Relation::Inside, Target::Object(id)) => {
-            let Some(other) = ctx.boxes.get(&id) else {
-                return false;
-            };
-            if id == obj.id {
-                return false;
-            }
-            other.0 <= min_x && max_x <= other.1 && other.2 <= min_z && max_z <= other.3
-        }
-        (Relation::Inside, _) => false,
-        (Relation::OnTopOf | Relation::Supports, Target::Object(id)) => {
-            let Some(other) = ctx.boxes.get(&id) else {
-                return false;
-            };
-            if id == obj.id {
-                return false;
-            }
-            // XZ overlap with the support footprint; height is grounded
-            // by construction, so the check is the footprint hit.
-            min_x < other.1 && other.0 < max_x && min_z < other.3 && other.2 < max_z
-        }
-        (Relation::OnTopOf | Relation::Supports, _) => false,
-    }
-}
-
-struct Candidate {
-    cx: i32,
-    cz: i32,
-    yaw_idx: i32,
-}
-
-/// Frozen candidate order: z ascending, x ascending, yaw ascending.
-fn candidates(obj: &Placed, bounds: &Bounds) -> Vec<Candidate> {
-    let hx = to_cm(obj.sx).abs() / 2;
-    let hz = to_cm(obj.sz).abs() / 2;
-    let (x_lo, x_hi) = (bounds.min_x + hx, bounds.max_x - hx);
-    let (z_lo, z_hi) = (bounds.min_z + hz, bounds.max_z - hz);
-    if x_lo > x_hi || z_lo > z_hi {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut cz = z_lo;
-    while cz <= z_hi {
-        let mut cx = x_lo;
-        while cx <= x_hi {
-            for yaw_idx in 0..YAW_STEPS {
-                out.push(Candidate { cx, cz, yaw_idx });
-            }
-            cx += GRID_CM;
-        }
-        cz += GRID_CM;
-    }
-    out
-}
-
-fn wants_hold(wants: &[Want], cx: i32, cz: i32, yaw_idx: i32, obj: &Placed, ctx: &Ctx<'_>) -> bool {
-    wants
-        .iter()
-        .all(|want| satisfies(want, cx, cz, yaw_idx, obj, ctx))
-}
-
-/// Spatial-style self-verify: no new XZ `overlap` with another valid actor.
-/// Placements rest grounded by construction, so `floating` never fires.
-fn verifies(actors: &[BrowserActor], obj: &Placed, cx: i32, cz: i32) -> bool {
-    let hx = to_cm(obj.sx).abs() / 2;
-    let hz = to_cm(obj.sz).abs() / 2;
-    let (min_x, max_x) = (cx - hx, cx + hx);
-    let (min_z, max_z) = (cz - hz, cz + hz);
-    for actor in actors {
-        if actor.id == obj.id || actor.validate_silent().is_err() {
-            continue;
-        }
-        let (ox0, ox1, oz0, oz1) = box_of(actor);
-        if min_x < ox1 && ox0 < max_x && min_z < oz1 && oz0 < max_z {
-            return false;
-        }
-    }
-    true
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Solved {
-    cx: i32,
-    cz: i32,
-    yaw_idx: i32,
-}
-
-fn search_wants(
-    wants: &[Want],
-    obj: &Placed,
-    ctx: &Ctx<'_>,
-    actors: &[BrowserActor],
-    grid: &[Candidate],
-) -> Option<Solved> {
-    for candidate in grid {
-        if !wants_hold(
-            wants,
-            candidate.cx,
-            candidate.cz,
-            candidate.yaw_idx,
-            obj,
-            ctx,
-        ) {
-            continue;
-        }
-        if verifies(actors, obj, candidate.cx, candidate.cz) {
-            return Some(Solved {
-                cx: candidate.cx,
-                cz: candidate.cz,
-                yaw_idx: candidate.yaw_idx,
-            });
-        }
-    }
-    None
-}
-
-/// Blocking relation name for a conflict: the first unmet want's
-/// relation, or `overlap` when every want holds but no cell verifies.
-fn blocking_relation(unmet: &[Want]) -> &'static str {
-    unmet
-        .first()
-        .map(|want| want.relation.name())
-        .unwrap_or("overlap")
-}
-
-/// Solve one placement intent over an actor snapshot.
-///
-/// Returns the first quantized placement (10 cm grid, 8 yaws, z/x/yaw
-/// order) satisfying every want and passing the overlap self-check,
-/// or the minimal conflicting subset on failure. Pure: reads only.
-fn solve_drop(
-    intent: &Intent,
-    actors: &[BrowserActor],
-) -> Result<(Placed, Solved, Bounds), BrowserError> {
+/// Solve one drop with the real spatial solver. Shapes and scene are checked
+/// first (loud, typed); an impossible drop returns the solver's minimal
+/// conflict set as [`BrowserError::Conflict`]. Pure: reads only.
+fn solve_drop(intent: &Intent, actors: &[BrowserActor]) -> Result<TransformOut, BrowserError> {
     validate_intent(intent)?;
     if actors.len() > MAX_ACTORS_PER_SCENE {
         return Err(BrowserError::BadActor {
@@ -1282,7 +712,7 @@ fn solve_drop(
         });
     }
     // An empty scene has no walls to measure against; refuse before
-    // resolving so the panel names the missing room, not the object.
+    // solving so the panel names the missing room, not the object.
     if actors.is_empty() {
         return Err(BrowserError::NoBounds);
     }
@@ -1292,61 +722,36 @@ fn solve_drop(
             reason: "actor lane must be finite with positive extents",
         })?;
     }
-    let obj = resolve_object(intent, actors).map_err(|error| match error {
-        BrowserError::UnknownObject { label } => BrowserError::Conflict {
-            relation: "unknown-object",
-            reason: format!("unknown-object {label}"),
-            conflicts: intent.wants.iter().map(|want| want.describe()).collect(),
-        },
-        BrowserError::AmbiguousObject { label, .. } => BrowserError::Conflict {
-            relation: "ambiguous-object",
-            reason: format!("ambiguous-object {label}"),
-            conflicts: intent.wants.iter().map(|want| want.describe()).collect(),
-        },
-        BrowserError::BadActor { id, .. } => BrowserError::Conflict {
-            relation: "unknown-size",
-            reason: format!("unknown-size id {id}"),
-            conflicts: intent.wants.iter().map(|want| want.describe()).collect(),
-        },
-        other => other,
-    })?;
-    let Some(bounds) = room_bounds(actors) else {
-        return Err(BrowserError::NoBounds);
+    let scene: Vec<Actor> = actors.iter().map(BrowserActor::to_actor).collect();
+    match solve(intent, &scene) {
+        Ok(mut placed) if !placed.is_empty() => Ok(placed.swap_remove(0)),
+        Ok(_) => Err(BrowserError::NoBounds),
+        Err(conflict) => Err(conflict_error(&conflict)),
+    }
+}
+
+/// Map the solver's conflict set onto the panel's typed refusal. Lookup
+/// failures keep their own name as the blocking relation; a search failure
+/// names the first unmet want's relation.
+fn conflict_error(conflict: &ConflictSet) -> BrowserError {
+    if conflict.reason.starts_with("no-bounds") {
+        return BrowserError::NoBounds;
+    }
+    let lookup = ["unknown-object", "ambiguous-object", "unknown-size"]
+        .into_iter()
+        .find(|name| conflict.reason.starts_with(name));
+    let relation = match (lookup, conflict.unmet.first()) {
+        (Some(name), _) => name,
+        (None, Some(want)) => want.relation.name(),
+        (None, None) => "overlap",
     };
-    let ctx = context(actors, bounds);
-    let grid = candidates(&obj, &bounds);
-    if let Some(solved) = search_wants(&intent.wants, &obj, &ctx, actors, &grid) {
-        return Ok((obj, solved, bounds));
-    }
-    // Minimal conflict: shrink by removal in intent order. Removing
-    // want `i` sticks only while the remainder stays unsatisfiable.
-    let mut conflict: Vec<usize> = (0..intent.wants.len()).collect();
-    for i in 0..intent.wants.len() {
-        if !conflict.contains(&i) {
-            continue;
-        }
-        let trial: Vec<Want> = conflict
-            .iter()
-            .filter(|&&j| j != i)
-            .map(|&j| intent.wants[j])
-            .collect();
-        if search_wants(&trial, &obj, &ctx, actors, &grid).is_none() {
-            conflict.retain(|&j| j != i);
-        }
-    }
-    let unmet: Vec<Want> = conflict.iter().map(|&j| intent.wants[j]).collect();
-    let relation = blocking_relation(&unmet);
-    let conflicts: Vec<String> = unmet.iter().map(|want| want.describe()).collect();
-    Err(BrowserError::Conflict {
+    BrowserError::Conflict {
         relation,
-        reason: format!(
-            "no placement on {GRID_CM} cm grid x {YAW_STEPS} yaws satisfies {} want(s); \
-             minimal conflict covers {} want(s)",
-            intent.wants.len(),
-            unmet.len(),
-        ),
-        conflicts,
-    })
+        // The solver echoes object names verbatim; bound them like every
+        // other echoed text.
+        reason: bound_detail(&conflict.reason),
+        conflicts: conflict.unmet.iter().map(want_text).collect(),
+    }
 }
 
 /// Effect line for one solved drop, in batch order.
@@ -1369,17 +774,16 @@ pub fn preview_drop(
         .ok_or_else(|| BrowserError::UnknownAsset {
             name: bound_detail(asset),
         })?;
-    let (obj, solved, _) = solve_drop(intent, actors)?;
-    let (x, z) = (solved.cx as f32 / 100.0, solved.cz as f32 / 100.0);
-    let (y, yaw) = (obj.y_m, yaw_of(solved.yaw_idx));
+    let placed = solve_drop(intent, actors)?;
+    let (id, x, y, z, yaw) = (placed.id, placed.x, placed.y, placed.z, placed.yaw);
     Ok(DropPreview {
         asset: entry.name.clone(),
-        id: obj.id,
+        id,
         x,
         y,
         z,
         yaw,
-        effects: vec![effect_line(&entry.name, obj.id, x, y, z, yaw)],
+        effects: vec![effect_line(&entry.name, id, x, y, z, yaw)],
         resulting_revision: base_revision + 1,
     })
 }
@@ -1544,6 +948,7 @@ impl BrowserPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_assets::archive::ArchiveWriter;
     use std::time::Instant;
 
     fn entry(kind: AssetKind, name: &str, tags: &[&str]) -> BundleEntry {
@@ -1620,24 +1025,54 @@ mod tests {
     }
 
     #[test]
-    fn kind_wire_bytes_match_as1_entrykind() {
-        assert_eq!(AssetKind::Mesh as u8, 1);
-        assert_eq!(AssetKind::Material as u8, 2);
-        assert_eq!(AssetKind::Texture as u8, 3);
-        assert_eq!(AssetKind::Skin as u8, 4);
-        assert_eq!(AssetKind::Clip as u8, 5);
-        for (byte, kind) in [
-            (1, AssetKind::Mesh),
-            (2, AssetKind::Material),
-            (3, AssetKind::Texture),
-            (4, AssetKind::Skin),
-            (5, AssetKind::Clip),
-        ] {
-            assert_eq!(AssetKind::from_byte(byte), Some(kind));
+    fn kind_wire_bytes_match_the_real_archive() {
+        // One entry per kind through the real writer and opener: the kind
+        // byte survives the wire in order, and `ASSET_KINDS` is that order.
+        let mut writer = ArchiveWriter::new();
+        for (index, kind) in ASSET_KINDS.into_iter().enumerate() {
+            assert_eq!(kind as usize, index + 1, "discriminants run 1 to 5");
+            writer.stage(kind, kind.label(), &[index as u8]).unwrap();
         }
-        assert_eq!(AssetKind::from_byte(0), None);
-        assert_eq!(AssetKind::from_byte(6), None);
-        assert_eq!(AssetKind::all().len(), 5);
+        let bytes = writer.finish();
+        let archive = ArchivedBundle::open_slice(&bytes).unwrap();
+        let wire: Vec<AssetKind> = archive.iter().map(|item| item.kind).collect();
+        assert_eq!(wire, ASSET_KINDS);
+        let view = BundleView::from_archive(&archive).unwrap();
+        for kind in ASSET_KINDS {
+            assert_eq!(view.find(kind.label()).map(|row| row.kind), Some(kind));
+        }
+    }
+
+    #[test]
+    fn real_archive_search_over_a_full_bundle_stays_under_50ms() {
+        let mut writer = ArchiveWriter::new();
+        for index in 0..MAX_ENTRIES {
+            let kind = ASSET_KINDS[index % ASSET_KINDS.len()];
+            writer
+                .stage(kind, &format!("asset_{index:04}"), &[index as u8])
+                .unwrap();
+        }
+        let bytes = writer.finish();
+        let archive = ArchivedBundle::open_slice(&bytes).unwrap();
+        let view = BundleView::from_archive(&archive).unwrap();
+        assert_eq!(view.len(), MAX_ENTRIES);
+        let mut worst = std::time::Duration::ZERO;
+        for text in ["", "asset_3", "ASSET_40", "no such asset"] {
+            let start = Instant::now();
+            let hits = search(&view, &SearchQuery::new(text, None, None)).unwrap();
+            worst = worst.max(start.elapsed());
+            match text {
+                "" => assert_eq!(hits.len(), MAX_ENTRIES),
+                "asset_3" => assert_eq!(hits.len(), 1000),
+                "ASSET_40" => assert_eq!(hits.len(), 96),
+                _ => assert!(hits.is_empty()),
+            }
+        }
+        eprintln!("ED14 real archive: {MAX_ENTRIES} entries, worst search {worst:?}");
+        assert!(worst < std::time::Duration::from_millis(50), "{worst:?}");
+        // Every kind lists under its own filter, in wire order.
+        let meshes = search(&view, &SearchQuery::new("", Some(AssetKind::Mesh), None)).unwrap();
+        assert_eq!(meshes.len(), MAX_ENTRIES.div_ceil(ASSET_KINDS.len()));
     }
 
     #[test]
@@ -1692,9 +1127,9 @@ mod tests {
     fn hierarchy_groups_bundle_in_wire_order() {
         let bundle = small_bundle();
         let groups = hierarchy(&bundle);
-        assert_eq!(groups.len(), AssetKind::all().len());
+        assert_eq!(groups.len(), ASSET_KINDS.len());
         let kinds: Vec<AssetKind> = groups.iter().map(|(kind, _)| *kind).collect();
-        assert_eq!(kinds, AssetKind::all());
+        assert_eq!(kinds, ASSET_KINDS);
         // Every listed entry appears exactly once, under its own kind,
         // with names sorted inside each kind group.
         let mut total = 0;
@@ -1729,7 +1164,7 @@ mod tests {
     fn full_bundle_search_stays_under_50ms() {
         let mut bundle = BundleView::new();
         for index in 0..MAX_ENTRIES {
-            let kind = AssetKind::all()[index % AssetKind::all().len()];
+            let kind = ASSET_KINDS[index % ASSET_KINDS.len()];
             let name = format!("asset_{index:04}");
             let tag: &str = if index % 2 == 0 { "even" } else { "odd" };
             bundle.push(BundleEntry::new(kind, &name, &[tag])).unwrap();

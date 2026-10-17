@@ -1321,7 +1321,7 @@ pub use engine_core::MIN_SEAL_KEY_BYTES;
 /// Fold `text` behind its byte length so adjacent texts cannot collide.
 /// Shared by the living-world and spatial eval digests.
 pub(crate) fn mix_text(hash: &mut Fnv64, text: &str) {
-    hash.write_u64(text.len() as u64);
+    hash.write_len(text.len());
     hash.write_str(text);
 }
 

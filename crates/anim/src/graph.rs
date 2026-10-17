@@ -1922,7 +1922,7 @@ mod tests {
         {
             hash.write_f32(*lane);
         }
-        hash.write_u64(world.log.len() as u64);
+        hash.write_len(world.log.len());
         for call in world.log.calls() {
             hash.write(&call.tick.to_le_bytes());
             hash.write(&call.code.to_le_bytes());

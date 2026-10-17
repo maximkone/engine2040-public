@@ -16,7 +16,7 @@ use engine_core::Fnv64;
 
 /// Length-prefixed text, so adjacent texts cannot collide.
 fn mix_text(hash: &mut Fnv64, text: &str) {
-    hash.write_u64(text.len() as u64);
+    hash.write_len(text.len());
     hash.write_str(text);
 }
 

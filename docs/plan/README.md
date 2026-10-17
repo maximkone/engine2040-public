@@ -11,6 +11,8 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `finish-line.md` — NOW — all four — the finish line as numbers the loop prints itself (gates G1-G8, product check), the order of the LF steal rows, research in `docs/research/steals-2026-10-11/`
 - `status-2026-10-17.md` — NOW — all four — one-screen truth check: what is verified green this week, what code was cut, which rows are unbuilt, and the owner's open decisions; read it before trusting a status cell in any plan
 - `web-and-realism.md` — NOW — Look, Bodies, Multiplayer — heavy realistic games on Windows and in the browser: the wasm build, the physical layer (ragdoll, severed limbs, debris), the lit and textured arena, browser multiplayer, and an AI-driven project setup (rows WEB, RZ, VR, AIS)
+- `wiring-triage-2026-10-17.md` — NEXT — all four — what exists but nothing calls: the cut verdicts, 29 unwired features with their missing call sites, ten wirings with paste-ready rows
+- `design-review-2026-10-17.md` — NEXT — all four — 13 ranked design findings (DSN1-DSN13) with a board row each
 - `render-look.md` — NOW — Look — moving fighter captures on the RTX 3050 stand beside the references: arena kit, window build, Q1 reference captures
 - `body-and-break.md` — NOW — Bodies — cuts, limbs, ragdoll, collapse and fire give one hash on every PC and in replay (physics base inside)
 - `hard-systems.md` — NOW — AI door — published, reproducible AI-door scores beside rivals, and the proofs behind them

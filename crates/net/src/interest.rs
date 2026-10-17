@@ -501,17 +501,6 @@ impl ConnectionInterest {
         self.starve_max
     }
 
-    /// Carried kilobits/s x100 over `ticks` ticks at 60 Hz (integer math:
-    /// bytes*8*100*60/(ticks*1000); gates compare this, never float).
-    #[must_use]
-    pub const fn kbps_x100(&self, ticks: u32) -> u64 {
-        if ticks == 0 {
-            return 0;
-        }
-        // u128 headroom: u64 bytes * 48_000 never overflows the ledger scale.
-        ((self.bytes_sent as u128 * 8 * 100 * TICK_HZ as u128) / (ticks as u128 * 1_000)) as u64
-    }
-
     /// Carried bytes/s over `ticks` ticks at 60 Hz (integer math).
     #[must_use]
     pub const fn bytes_per_sec(&self, ticks: u32) -> u64 {

@@ -108,6 +108,50 @@ pub struct PlayInputDto {
     pub buttons: u8,
 }
 
+/// The three verbs of the multiplexed `play.run` tool. The wire keeps the
+/// plain `action` text; the dispatch matches this enum, so an unknown verb
+/// is refused once, at [`PlayAction::parse`], and never reaches a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayAction {
+    /// Run a bounded match and file its job.
+    Start,
+    /// Read the next progress or the final result of a job.
+    Poll,
+    /// Stop a running job.
+    Cancel,
+}
+
+impl PlayAction {
+    /// Parse the wire text; anything else is `bad_action` naming the legal
+    /// verbs.
+    pub fn parse(text: &str) -> Result<Self, McpToolError> {
+        match text {
+            "start" => Ok(Self::Start),
+            "poll" => Ok(Self::Poll),
+            "cancel" => Ok(Self::Cancel),
+            other => Err(McpToolError::new(
+                "bad_action",
+                format!("action `{other}` is unknown; submit start, poll or cancel"),
+            )),
+        }
+    }
+
+    /// Job id a `poll` or `cancel` names; `bad_job_id` when the call omits it.
+    fn job_id(self, args: &PlayRunArgs) -> Result<u64, McpToolError> {
+        args.job_id.ok_or_else(|| {
+            let verb = match self {
+                Self::Start => "start",
+                Self::Poll => "poll",
+                Self::Cancel => "cancel",
+            };
+            McpToolError::new(
+                "bad_job_id",
+                format!("action `{verb}` needs job_id; `start` returns one"),
+            )
+        })
+    }
+}
+
 /// Match job request: start, poll or cancel plus the start composition.
 /// Units are ticks, meters of half-extent and poll counts. Errors are typed
 /// `bad_ticks`, `bad_extent` and job errors. Budget is 3600 ticks a match.
@@ -310,30 +354,11 @@ impl PlayJobs {
         world: Option<MatchWorld>,
         runner: Option<&MatchRunner<'_>>,
     ) -> Result<PlayRunOutput, McpToolError> {
-        match args.action.as_str() {
-            "start" => self.start(args, world, runner),
-            "poll" => {
-                let id = args.job_id.ok_or_else(|| {
-                    McpToolError::new(
-                        "bad_job_id",
-                        "action `poll` needs job_id; `start` returns one",
-                    )
-                })?;
-                self.poll(id)
-            }
-            "cancel" => {
-                let id = args.job_id.ok_or_else(|| {
-                    McpToolError::new(
-                        "bad_job_id",
-                        "action `cancel` needs job_id; `start` returns one",
-                    )
-                })?;
-                self.cancel(id)
-            }
-            other => Err(McpToolError::new(
-                "bad_action",
-                format!("action `{other}` is unknown; submit start, poll or cancel"),
-            )),
+        let action = PlayAction::parse(&args.action)?;
+        match action {
+            PlayAction::Start => self.start(args, world, runner),
+            PlayAction::Poll => self.poll(action.job_id(args)?),
+            PlayAction::Cancel => self.cancel(action.job_id(args)?),
         }
     }
 
@@ -914,6 +939,9 @@ pub fn capture_unsupported(args: &CaptureArgs) -> Result<CaptureOutput, McpToolE
 pub type CaptureRenderer<'a> =
     Box<dyn FnOnce(&CaptureArgs) -> Result<CaptureOutput, McpToolError> + 'a>;
 
+/// Optional per-receipt PNG notifier handed to [`capture_with_look_hook`].
+pub type LookHook<'a> = Option<&'a mut dyn FnMut(&[u8])>;
+
 /// Per-frame look hook: hands each validated capture PNG to the hook once.
 ///
 /// `None` keeps the receipt path byte-identical; a refused receipt never
@@ -923,7 +951,7 @@ pub type CaptureRenderer<'a> =
 pub fn capture_with_look_hook(
     args: &CaptureArgs,
     render: CaptureRenderer<'_>,
-    hook: Option<&mut dyn FnMut(&[u8])>,
+    hook: LookHook<'_>,
 ) -> Result<CaptureOutput, McpToolError> {
     let (width, height) = capture_size(args)?;
     // The renderer is asked for the effective size, so the `max_size` cap is
@@ -1146,10 +1174,7 @@ impl ToolBase for PlayRunTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        let mut annotations = ToolAnnotations::default();
-        annotations.read_only_hint = Some(false);
-        annotations.open_world_hint = Some(false);
-        Some(annotations)
+        crate::mcp::write_annotations(false)
     }
 }
 
@@ -1347,6 +1372,23 @@ mod tests {
         assert_eq!(done.status, "completed");
         assert!(done.truncated_logs);
         assert!(done.logs.len() <= MAX_JOB_LOGS);
+    }
+
+    #[test]
+    fn play_action_parses_the_three_verbs_and_refuses_the_rest() {
+        assert_eq!(PlayAction::parse("start"), Ok(PlayAction::Start));
+        assert_eq!(PlayAction::parse("poll"), Ok(PlayAction::Poll));
+        assert_eq!(PlayAction::parse("cancel"), Ok(PlayAction::Cancel));
+        for bad in ["", "Start", "launch", "poll "] {
+            let error = PlayAction::parse(bad).expect_err("unknown verb refuses");
+            assert_eq!(error.code, "bad_action", "verb `{bad}`");
+            assert!(error.message.contains("start, poll or cancel"));
+        }
+        let error = PlayAction::Cancel
+            .job_id(&PlayRunArgs::default())
+            .expect_err("cancel needs an id");
+        assert_eq!(error.code, "bad_job_id");
+        assert!(error.message.contains("`cancel`"));
     }
 
     #[test]
@@ -1663,7 +1705,7 @@ mod tests {
     #[test]
     fn capture_image_block() {
         let mut png = PNG_MAGIC.to_vec();
-        png.extend(std::iter::repeat(0x5A_u8).take(300));
+        png.extend(std::iter::repeat_n(0x5A_u8, 300));
         let raw = rmcp::serde_json::to_value(&CaptureOutput {
             manifest: CaptureManifestDto {
                 adapter: "test-adapter".to_owned(),
@@ -1682,7 +1724,7 @@ mod tests {
         );
 
         let result = frame_call_result(raw);
-        let (image, text) = match &result.content[..] {
+        let (image, text) = match &*result.content {
             [ContentBlock::Image(image), ContentBlock::Text(text)] => (image, text),
             other => panic!("expected one image plus one caption, got {other:?}"),
         };

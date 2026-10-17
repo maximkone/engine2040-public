@@ -305,6 +305,11 @@ pub mod twin_shadow;
 #[cfg(feature = "v1")]
 pub mod twin_fighters;
 
+/// A lit arena ring with eight GPU-skinned fighters built from code alone (WEB5): the browser's
+/// first arena frame, and the native twin of it. Consumer is `crates/web`.
+#[cfg(feature = "v1")]
+pub mod procedural_arena;
+
 /// Twin arena kit bind: the recooked arena kit (CT8) replaces the synthetic
 /// central cube when resident, else the cube stays as fallback. Bind glue
 /// over the v1 draw types; consumer is the twin `frame_list` in

@@ -4,7 +4,7 @@ import test from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { causeNote, compareRagdoll, compareRows, compareTapes, formatMatrix, formatRagdoll, formatRows, parseArgs, parseRagdoll, parseRows, parseTape, run } from './golden-matrix.mjs';
+import { causeNote, compareArena, compareRagdoll, compareRows, compareTapes, formatArena, formatMatrix, formatRagdoll, formatRows, parseArena, parseArgs, parseRagdoll, parseRows, parseTape, run } from './golden-matrix.mjs';
 function makeTape(opts) {
   const o = opts || {};
   const seed = o.seed !== undefined ? BigInt(o.seed) : 19n;
@@ -262,9 +262,9 @@ test('rows with another block count or width are SKIP, not a block', function ()
   assert.ok(out.endsWith('CORPUS RESULT FAIL'));
 });
 test('parseArgs splits tapes from rows and refuses one-file groups', function () {
-  assert.deepEqual(parseArgs(['a', 'b']), { tapes: ['a', 'b'], rows: [], ragdoll: [], error: null });
-  assert.deepEqual(parseArgs(['a', 'b', '--rows', 'x', 'y', 'z']), { tapes: ['a', 'b'], rows: ['x', 'y', 'z'], ragdoll: [], error: null });
-  assert.deepEqual(parseArgs(['--rows', 'x', 'y']), { tapes: [], rows: ['x', 'y'], ragdoll: [], error: null });
+  assert.deepEqual(parseArgs(['a', 'b']), { tapes: ['a', 'b'], rows: [], ragdoll: [], arena: [], error: null });
+  assert.deepEqual(parseArgs(['a', 'b', '--rows', 'x', 'y', 'z']), { tapes: ['a', 'b'], rows: ['x', 'y', 'z'], ragdoll: [], arena: [], error: null });
+  assert.deepEqual(parseArgs(['--rows', 'x', 'y']), { tapes: [], rows: ['x', 'y'], ragdoll: [], arena: [], error: null });
   assert.match(parseArgs([]).error, /^usage:/);
   assert.match(parseArgs(['a']).error, /^usage:/);
   assert.match(parseArgs(['a', 'b', '--rows', 'x']).error, /^usage:/);
@@ -432,9 +432,9 @@ test('ragdoll rows with another tick or body count are SKIP, not a tick', functi
   assert.ok(out.endsWith('RAGDOLL RESULT FAIL'));
 });
 test('parseArgs reads the ragdoll group beside tapes and rows in any order', function () {
-  assert.deepEqual(parseArgs(['--ragdoll', 'x', 'y']), { tapes: [], rows: [], ragdoll: ['x', 'y'], error: null });
-  assert.deepEqual(parseArgs(['a', 'b', '--rows', 'r', 's', '--ragdoll', 'x', 'y', 'z']), { tapes: ['a', 'b'], rows: ['r', 's'], ragdoll: ['x', 'y', 'z'], error: null });
-  assert.deepEqual(parseArgs(['a', 'b', '--ragdoll', 'x', 'y', '--rows', 'r', 's']), { tapes: ['a', 'b'], rows: ['r', 's'], ragdoll: ['x', 'y'], error: null });
+  assert.deepEqual(parseArgs(['--ragdoll', 'x', 'y']), { tapes: [], rows: [], ragdoll: ['x', 'y'], arena: [], error: null });
+  assert.deepEqual(parseArgs(['a', 'b', '--rows', 'r', 's', '--ragdoll', 'x', 'y', 'z']), { tapes: ['a', 'b'], rows: ['r', 's'], ragdoll: ['x', 'y', 'z'], arena: [], error: null });
+  assert.deepEqual(parseArgs(['a', 'b', '--ragdoll', 'x', 'y', '--rows', 'r', 's']), { tapes: ['a', 'b'], rows: ['r', 's'], ragdoll: ['x', 'y'], arena: [], error: null });
   assert.match(parseArgs(['--ragdoll', 'x']).error, /^usage:/);
   assert.match(parseArgs(['a', 'b', '--ragdoll', 'x', 'y', '--ragdoll', 'z', 'w']).error, /only one --ragdoll group/);
   assert.match(parseArgs(['a', 'b', '--rows', 'x', 'y', '--ragdoll', 'p', 'q', '--rows', 'z', 'w']).error, /only one --rows group/);
@@ -468,6 +468,132 @@ test('run compares ragdoll rows over files and sets the exit code', function () 
     const missing = run(['--ragdoll', ragA, join(dir, 'gone.txt')]);
     assert.equal(missing.code, 2);
     assert.match(missing.err, /not a ragdoll row: cannot read .*gone\.txt/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// The text `arena_line` prints: a summary line, then one line per tick with the checkpoint hash.
+function makeArena(opts) {
+  const o = opts || {};
+  const host = o.host !== undefined ? o.host : 'linux-x86_64';
+  const ticks = o.ticks !== undefined ? o.ticks : 6;
+  const hash = o.hash !== undefined ? o.hash : function (t) { return BigInt(5000 + t * 17); };
+  const spec = o.spec !== undefined ? o.spec : 0x00aa11bb22cc33ddn;
+  const world = o.world !== undefined ? o.world : 0x0123456789abcdefn;
+  const overall = o.overall !== undefined ? o.overall : 0xfeedfacecafebeefn;
+  const lines = [host + ' arena=' + hex(overall) + ' ticks=' + ticks + ' fighters=8 spec=' + hex(spec) + ' world=' + hex(world) + ' hits=9 blocks=4 parries=2 dodges=1 knockdowns=1 breaks=3'];
+  for (let t = 0; t < ticks; t += 1) {
+    lines.push(host + ' tick=' + t + ' hash=' + hex(hash(t)));
+  }
+  return lines.join('\n') + '\n';
+}
+function arenaEntries(texts, names) {
+  const entries = texts.map(function (t, i) { return { name: names[i], row: parseArena(t) }; });
+  const results = entries.slice(1).map(function (e) { return compareArena(entries[0].row, e.row); });
+  return { entries: entries, results: results };
+}
+test('parseArena reads the summary, every tick line, a BOM and CRLF', function () {
+  const row = parseArena(makeArena({ host: 'wasi-wasm32', ticks: 3 }));
+  assert.equal(row.host, 'wasi-wasm32');
+  assert.equal(row.digest, 0xfeedfacecafebeefn);
+  assert.equal(row.ticks, 3);
+  assert.equal(row.fighters, 8);
+  assert.equal(row.spec, 0x00aa11bb22cc33ddn);
+  assert.deepEqual(row.events, { hits: 9, blocks: 4, parries: 2, dodges: 1, knockdowns: 1, breaks: 3 });
+  assert.deepEqual(row.hashes, [5000n, 5017n, 5034n]);
+  const crlf = '﻿' + makeArena({ ticks: 2 }).replace(/\n/g, '\r\n');
+  assert.deepEqual(parseArena(crlf).hashes, [5000n, 5017n]);
+});
+test('parseArena refuses a row that is not what arena_line prints', function () {
+  const good = makeArena();
+  const bad = function (text) {
+    assert.throws(function () { parseArena(text); }, function (err) { return err instanceof Error && err.message.indexOf('not an arena row') === 0; });
+  };
+  bad('');
+  bad(good.split('\n')[0] + '\n');
+  bad(good.replace('feedfacecafebeef', 'feedface'));
+  bad(good.replace('ticks=6', 'ticks=7'));
+  bad(good.replace('linux-x86_64 tick=2', 'linux-x86_64 tick=3'));
+  bad(good.replace('linux-x86_64 tick=2', 'wasi-wasm32 tick=2'));
+  bad(good.replace('hash=', 'hash=0x'));
+});
+test('equal arena rows match and the arena verdict is PASS', function () {
+  const g = arenaEntries([makeArena(), makeArena(), makeArena({ host: 'wasi-wasm32' })], ['a.txt', 'b.txt', 'c.txt']);
+  assert.deepEqual(g.results.map(function (r) { return r.equal; }), [true, true]);
+  const out = formatArena(g.entries, g.results);
+  assert.match(out, /golden-matrix: 3 arena rows/);
+  assert.match(out, /c\.txt host=wasi-wasm32 arena=feedfacecafebeef ticks=6 fighters=8 spec=00aa11bb22cc33dd world=0123456789abcdef hits=9/);
+  assert.match(out, /MATCH b\.txt vs a\.txt/);
+  assert.match(out, /MATCH c\.txt vs a\.txt/);
+  assert.ok(out.endsWith('ARENA RESULT PASS'));
+});
+test('a moved tick hash names the first bad tick and a cause', function () {
+  const moved = makeArena({ host: 'linux-aarch64', hash: function (t) { return t >= 4 ? BigInt(5000 + t * 17) + 1n : BigInt(5000 + t * 17); } });
+  const r = compareArena(parseArena(makeArena()), parseArena(moved));
+  assert.equal(r.equal, false);
+  assert.equal(r.comparable, true);
+  assert.equal(r.firstTick, 4);
+  assert.equal(r.cause, 'fma');
+  assert.match(r.note, /first bad tick 4 \(4 ticks matched\) \[cause=fma\]/);
+  const start = compareArena(parseArena(makeArena()), parseArena(makeArena({ hash: function (t) { return BigInt(9000 + t); } })));
+  assert.equal(start.firstTick, 0);
+  assert.match(start.note, /the start state differs/);
+  const g = arenaEntries([makeArena(), moved], ['linux.txt', 'arm.txt']);
+  const out = formatArena(g.entries, g.results);
+  assert.match(out, /DIVERGE arm\.txt vs linux\.txt \(linux-aarch64 vs linux-x86_64\): first bad tick 4/);
+  assert.ok(out.endsWith('ARENA RESULT FAIL'));
+});
+test('matching tick hashes with a moved digest fail by digest name', function () {
+  const r = compareArena(parseArena(makeArena()), parseArena(makeArena({ overall: 1n })));
+  assert.equal(r.equal, false);
+  assert.equal(r.comparable, true);
+  assert.equal(r.firstTick, null);
+  assert.match(r.note, /arena digest differs: feedfacecafebeef vs 0000000000000001/);
+});
+test('arena rows of another match or shape are SKIP, not a tick', function () {
+  const base = parseArena(makeArena());
+  const shorter = compareArena(base, parseArena(makeArena({ ticks: 5 })));
+  assert.equal(shorter.comparable, false);
+  assert.match(shorter.note, /arena shape differs/);
+  const otherWorld = compareArena(base, parseArena(makeArena({ world: 1n })));
+  assert.equal(otherWorld.comparable, false);
+  assert.match(otherWorld.note, /arena match differs/);
+  const otherSpec = compareArena(base, parseArena(makeArena({ spec: 1n })));
+  assert.equal(otherSpec.comparable, false);
+  const g = arenaEntries([makeArena(), makeArena({ spec: 1n })], ['a.txt', 'b.txt']);
+  const out = formatArena(g.entries, g.results);
+  assert.match(out, /SKIP b\.txt: arena match differs/);
+  assert.ok(out.endsWith('ARENA RESULT FAIL'));
+});
+test('parseArgs reads the arena group beside tapes, rows and ragdoll in any order', function () {
+  assert.deepEqual(parseArgs(['--arena', 'x', 'y']), { tapes: [], rows: [], ragdoll: [], arena: ['x', 'y'], error: null });
+  assert.deepEqual(parseArgs(['a', 'b', '--ragdoll', 'r', 's', '--arena', 'x', 'y', 'z']), { tapes: ['a', 'b'], rows: [], ragdoll: ['r', 's'], arena: ['x', 'y', 'z'], error: null });
+  assert.deepEqual(parseArgs(['--arena', 'x', 'y', 'a', 'b']).error, null);
+  assert.match(parseArgs(['--arena', 'x']).error, /^usage:/);
+  assert.match(parseArgs(['a', 'b', '--arena', 'x', 'y', '--arena', 'z', 'w']).error, /only one --arena group/);
+});
+test('run compares arena rows over files and sets the exit code', function () {
+  const dir = mkdtempSync(join(tmpdir(), 'golden-matrix-arena-'));
+  try {
+    const put = function (name, data) {
+      const p = join(dir, name);
+      writeFileSync(p, data);
+      return p;
+    };
+    const arenaA = put('aa.txt', makeArena());
+    const arenaB = put('ab.txt', makeArena({ host: 'wasi-wasm32' }));
+    const arenaC = put('ac.txt', makeArena({ host: 'linux-aarch64', hash: function (t) { return t >= 3 ? 7n : BigInt(5000 + t * 17); } }));
+    const same = run(['--arena', arenaA, arenaB]);
+    assert.equal(same.code, 0, same.err + same.out);
+    assert.match(same.out, /ARENA RESULT PASS/);
+    assert.doesNotMatch(same.out, /RAGDOLL|CORPUS/);
+    const bad = run(['--arena', arenaA, arenaB, arenaC]);
+    assert.equal(bad.code, 1);
+    assert.match(bad.out, /first bad tick 3/);
+    assert.match(bad.out, /ARENA RESULT FAIL/);
+    const notRow = run(['--arena', arenaA, arenaA.replace('aa.txt', 'gone.txt')]);
+    assert.equal(notRow.code, 2);
+    assert.match(notRow.err, /not an arena row: cannot read .*gone\.txt/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

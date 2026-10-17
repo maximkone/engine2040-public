@@ -19,7 +19,7 @@ holds the floors (a broken one files a `bug:` packet by itself) and the targets 
 | G8 Multiplayer | the duel on LAN and internet, one hash | Core proof 4 (last) | open |
 | G9 Potato (owner 2026-10-11) | the same arena runs on this PC's Intel UHD with downlevel limits: proposal p50 50 ms, p99 80 ms, working set 3 GB; heap peak does not grow; assets stay inside the potato caps | `node tools/potato-check.mjs` (GS16), `crates/perf` heap peak (GS14), assets budget (GS15) | 2026-10-17 run on the Intel UHD (`target/reports/potato-2026-10-17.md`, adapter Intel UHD Graphics, downlevel limits): p50 7.969 ms, p99 13.163 ms, peak working set 1508 MB, all under the bars; floor verdict WITHHELD because the box was loaded (14 cargo + 2 rustc), so no verdict yet; that report does not show heap growth or asset caps |
 | G10 Web (owner 2026-10-17) | the same arena runs in a browser tab on WebGPU: the golden tape equal on wasm, the browser frame beside the native frame (SSIM), a headless Chrome client and a native client end a duel on one digest, the build on a Pages URL the work PC opens | WEB1 WEB3 (wasm digests), WEB5 (frame), WEB9 (net), WEB10 (URL), `docs/plan/web-and-realism.md` | 2026-10-17 first proofs: the golden tape (`last_state=2aca9338670aa0cb`) and the Rapier ragdoll tape (`ragdoll=8097ccafb6740acb`) are equal on wasm32-wasip1 under wasmtime and on the three native targets, and the physics tests pass 156 of 156 under wasmtime (WEB1, WEB3; mirror runs 39035336085, 39036088168); the compiler side is shown by the probe (34 of 37 crate legs type-check for wasm32, the arena game links to 2.55 MB / 434 KB brotli, a headless Chrome gets a software WebGPU adapter; `docs/research/web-2026-10-17/07-wasm-probe.md`); not started: a browser tab running our code, a WebGPU frame, browser net; the wasm probe report `target/reports/wasm-probe-2026-10-17.md` has the per-crate answer |
-| G11 Physical (owner 2026-10-17) | knocked fighters fall as ragdolls, limbs come off, walls break into debris, all painted from authority events; 8 ragdolls + 200 debris bodies + 6 limbs inside the frame budget; the sim hash equal with the physical layer on and off | RZ1 (caps and budget), RZ2 RZ3 RZ4 (the pictures), RZ9 (ladder), the `physfx:` receipt line | not started: the playable arena has no rigid-body physics (`crates/game/Cargo.toml:12-17`) |
+| G11 Physical (owner 2026-10-17) | knocked fighters fall as ragdolls, limbs come off, walls break into debris, all painted from authority events; 8 ragdolls + 200 debris bodies + 6 limbs inside the frame budget; the sim hash equal with the physical layer on and off | RZ1 (caps and budget), RZ2 RZ3 RZ4 (the pictures), RZ9 (ladder), the `physfx:` receipt line | 2026-10-17 partial: `crates/physfx` (float Rapier world: ragdoll, limb, debris, blast, caps, sleep) and `crates/game/src/ragdoll_look.rs` / `break_look.rs` exist and `app` turns physfx on; the window draw hooks (RZ2-RZ4) are open, so no ragdoll or debris is seen yet |
 
 Status 2026-10-17: disk shows the G9 gate file the row cites is present: `tools/potato-check.mjs` (Test-Path True, 18346 bytes, rg hit at `docs/plan/finish-line.md:20`) with `tools/potato-check.test.mjs` and `tools/potato-bar.json` beside it, so the BOOK-GAPS row S15 "no such file" half is stale (`Get-ChildItem tools -Filter *potato*` lists 3 files) and "green on paper only" no longer holds; the row's cell now carries the 2026-10-17 Intel UHD run (numbers under the bars, verdict WITHHELD on a loaded box), so the gate is measured but has no verdict.
 
@@ -32,6 +32,50 @@ Status 2026-10-17 (`finish.mjs`, G3 and the Look proof): `node tools/finish.mjs`
 Status 2026-10-17 (G6 to G8): G6: `crates/proof/src/break_corpus.rs` exists and HS2 is open; the break corpus test was not run for this status. G7: the door verbs `play.step_until`, `input.inject` and `state.digest` pass again (`cargo test -p engine-endpoint --features mcp --lib packs::play`, 7 passed on the GitHub runner today); the 75/75 run is older and was not repeated. G8: MP6 is ticked on the board with a loopback Accept (the real two-machine run has not happened), ON30 (internet) is open, and the code for lag compensation (MP5) and server cheat checks (ON5) was removed on 2026-10-16 (see `multiplayer.md`).
 
 Open owner decisions that touch the gates (2026-10-17): (1) `tinted_share` in `tools/product-bar.json`: the red floor `tinted_share_max` is 0.25 and the target says "tinted_share under 0.10 in an 8-fighter brawl". Today's hit-tint change (`FLASH_TICKS` 6 to 15 in `fighter_look.rs`) prints 0.10 and 0.11 for 8 fighters and 0.02 for 4. Hits now read on screen but sit on the target line. Choose: keep "under 0.10" and shorten the flash, or change the target to "at least 0.10 and under 0.25". (2) Restore or re-open each swept row (list in `status-2026-10-17.md`); the gates above count those ticks. (3) Who runs `tools/product-check.mjs` now that the keeper is gone.
+
+## What we still lack (2026-10-17 gap list)
+
+The finish line for a game engine that runs the same game on Windows and in a browser, is AI-native in its core, and makes the hard systems one call. Sources, with evidence per line: `docs/research/finish-line-2026-10-17/` (`01-books.md`: Gregory, Lengyel, Game Engine Gems, Rust and WebAssembly, Modern Game Testing and the agent-patterns book, checked against today's code, with the earlier BOOK-GAPS rows marked closed or open; `02-github.md`: 25 ranked repo steals; `03-arxiv.md`: 20 ranked papers). Today in one line: deep libraries and one played arena duel; the browser tab draws the arena but does not play it.
+
+### A. One game, two targets
+
+1. **Play the real match in the browser.** Move the app loop out of `crates/game/src/bin/arena.rs` into a lib both entry points share; on wasm, drive `engine-arena` with a fixed-step accumulator from `engine-clock` and feed web input into the tape. Proof: the page prints tick, hash and tier, and the hash equals native. Size L.
+2. **Content by fetch with one load queue.** A `LoadQueue` (priority, byte budget, cancel): a thread natively, `fetch` on the web. The generational `AssetHandle` (`crates/assets/src/handle.rs`, no caller today) becomes the only way the game holds an asset, with unload. Size M.
+3. **Browser multiplayer client.** Steal `moq-dev/web-transport` (one trait: Quinn server, wasm client, WebSocket fallback through `qmux`) so native and browser send the same codec bytes. Proof: native server, native client and headless Chrome end a duel on one digest. Size L.
+4. **Native renders only what the web can do.** A CI leg that creates the wgpu instance with `InstanceFlags::STRICT_WEBGPU_COMPLIANCE`. Size S.
+5. **Web audio on an AudioWorklet**, fed by the existing mixer (the page uses the deprecated ScriptProcessorNode today). Size S.
+6. **Web quality tier and pipeline warm-up:** compile every pipeline before the first frame; one degrade ladder in a fixed order. Size M.
+
+### B. Looks good, and the engine proves it with numbers
+
+7. **Finish the lit frame:** a depth and normal prepass, GTAO on ambient only, the post chain (bloom, grade, TAA) as a real pass, particles and decals drawn in the scene, and cull, sort and instancing in the live draw loop. Size L, in slices.
+8. **Machine eyes again:** about 10 reference captures per tier in `content/reference/`, a `view.compare` door verb that returns SSIMULACRA2 (pure Rust, `rust-av/ssimulacra2`) and a diff image. Calibrate the VLM look judge on VideoGameQA-Bench and RefGlitch (pass it the last clean frame) and keep it advisory: geometry and keypoint checks stay the gate, because VLMs miss pose and clipping bugs. Size M.
+9. **Temporal artifacts:** a TAA registration test (Frozen History) and the CGVQM+D video metric as an offline gate for TAA, upscaling and dynres. Size S-M.
+
+### C. Hard systems are one call, for a person and for an AI
+
+10. **One-call physical effects:** finish the ragdoll, limb and break draw hooks; a `body.toml` (bone shapes, muscle strength, gore level, cut table); door verbs `fx.ragdoll`, `fx.limb`, `fx.break`, `fx.blast` that print the `physfx:` receipt and a capture. Rapier 0.36 soft bodies for capes and banners, in physfx only (float, never hashed). Size M.
+11. **A data-driven game layer:** one `game.rules` file per mode with regions, triggers (enter, leave, timer, hp), objectives and Rhai hooks, run inside the tick through `Rules::tick` actions so the hash stays honest. A new mode becomes one file. Size L.
+12. **`engine2040 new / build / run` runs the real game,** plus door verbs `project.new`, `project.build`, `project.run`. Size M.
+13. **Debug kit in the game and on the door:** cvars, a console, pause, step and time scale, debug draw (`crates/render/src/debug_draw.rs` has no caller), tick-phase profiler scopes, and one Perfetto trace file for CPU spans and GPU passes. Size M.
+14. **Animation data:** quaternion lanes in packed clips, sockets so a weapon follows a hand, rotation additive. Size M.
+15. **Physics oracle spike:** run box3d-rust's falling-ragdoll determinism scene twice on Windows and once on wasm. If the three digests match, it is the candidate hashed-ragdoll backend; fixed3d sets the cost of a fully integer solver (about 2.2x float). Size M.
+
+### D. The AI builds, tests and fixes with little help
+
+16. **MCP resources, prompts and progress:** serve the crate map, door reference, error catalog and `game.toml` schema as resources; five prompts (new duel, add a break, tune a hit, fix a red capture, make the web build); progress notifications on long calls. Size S.
+17. **`scene.diff`** (snapshot id, then deltas only) and an editor activity feed tagged human or agent. Size S.
+18. **Agent memory and a task suite:** a project memory the door serves (decisions, failed fixes, tuned values, each with its tape hash); 10 build tasks scored by programmatic referees (no LLM judge) with Play@k; pass rate per model. Size M.
+19. **Verifier output in every build verb,** so each edit returns its own check. Size S.
+20. **`tune.sweep`:** one knob, a range, 5 seeds, a CSV and the win-rate curve; the result lands only as an undoable change. Size S-M.
+
+### E. Engine core
+
+21. **Job pool in the sim:** fighter step and islands through `fork_join_on` with the golden equal at 1 and 8 workers; forks on the shared pool (`crates/arena/src/fork.rs` spawns one thread per branch today); a `loom` model of `JobPool::scope`. Size M.
+22. **Windows ship check from CI:** clean folder, `--profile ship`, run N seconds, read the receipt, compare to the reference captures. Without it, G1 "never broken" is unmeasured. Size M.
+23. **Netcode model:** an owner decision first (server-authoritative or P2P rollback), then a real two-machine run.
+
+Order: A1, B7 and B8 first (the browser plays, the arena is lit, and a number says so). The small AI items (D16, D17, D19) and C10 run beside them. Then the rest.
 
 ## The order (docs/FOCUS.md Now holds the rows; this is why)
 
@@ -48,19 +92,9 @@ Open owner decisions that touch the gates (2026-10-17): (1) `tinted_share` in `t
    bar's targets as they are met, LF16 door verbs, editor asset jobs (TripoSR or Stable
    Fast 3D, MoMask clips) once the frame is lit. Multiplayer stays last.
 
-## Who does what
-
-- Owner 2026-10-11: "add all to plans so sprints will do it". Seats skip `Diff: hard`, so
-  every hard row is split into loop-sized slices that keep the parent ID as slice 1 (EG11
-  b-c, LF5 b-d, SP63 b-c, EG19 b-c, EG46 b, AL1 b): one crate, at most 200 changed lines, a
-  named file or donor, one test that fails before. A slice that fails review twice is split
-  smaller with the review's reason in the new slice; no row waits for a paid session.
-- The keeper's product check is the loop's eyes: it runs the built game after every code
-  change and files `bug:product-<metric>` packets, which run right after `loop:` fixes.
-- Walkers judge the product check's fresh captures (`target/reports/product/runs/`).
-
 ## Sources
 
+`docs/research/finish-line-2026-10-17/` (books, GitHub, arXiv: the gap list above).
 `docs/research/steals-2026-10-11/`: `render-steals.md` (shader files to port, build order),
 `anim-feel-steals.md` (springs, inertialization, IK, shake, spring bones),
 `arxiv-neural.md` (FLIP for the judge; offline motion models; what to skip),

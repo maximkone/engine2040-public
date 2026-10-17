@@ -69,7 +69,7 @@ mod dec_u64_vec {
     use rmcp::serde_json::Value;
 
     /// Write hashes as decimal strings, one entry per tick in tick order.
-    pub fn serialize<S: Serializer>(values: &Vec<u64>, out: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(values: &[u64], out: S) -> Result<S::Ok, S::Error> {
         let texts: Vec<String> = values.iter().map(|value| value.to_string()).collect();
         texts.serialize(out)
     }
@@ -358,11 +358,6 @@ pub fn bisect_report(args: &ReplayArgs) -> Result<ReplayReport, McpToolError> {
 /// `replay.verify` handler: the pure report under the audited dispatch seam.
 fn replay_verify(service: &McpServer, args: &ReplayArgs) -> Result<ReplayReport, McpToolError> {
     service.dispatch(TOOL_REPLAY_VERIFY, |_| verify_report(args))
-}
-
-/// `replay.bisect` handler: the pure report under the audited dispatch seam.
-fn replay_bisect(service: &McpServer, args: &ReplayArgs) -> Result<ReplayReport, McpToolError> {
-    service.dispatch(TOOL_REPLAY_BISECT, |_| bisect_report(args))
 }
 
 crate::e2_tool!(

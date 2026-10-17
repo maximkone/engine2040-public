@@ -555,10 +555,10 @@ fn vram_plan_text() -> String {
     format!("{}", vram::plan(info))
 }
 
-/// Peak requested bytes (an upper bound on live heap) over two 600-tick 8-fighter headless runs.
+/// Peak live heap bytes of two 600-tick 8-fighter headless runs.
 ///
-/// Runs the 8-fighter canonical match twice and takes the max `alloc_bytes`
-/// via [`peak_of`]. The struct literal equals
+/// Runs the 8-fighter canonical match twice, each in its own counted window,
+/// and takes the max via [`peak_of`]. The struct literal equals
 /// [`ScaledArenaTick::canonical_for`] for 8 (seed 1, 600 ticks, 20 m);
 /// the match is deterministic, so the same build gives the same peak twice.
 /// Presentation gate only, never enters the simulation hash.
@@ -570,21 +570,11 @@ fn heap_peak_peak_bytes() -> (u64, u64, u64) {
         half_extent_m: 20.0,
         fighters: 8,
     };
-    let first = workload.run_report();
-    let second = workload.run_report();
-    debug_assert_eq!(first.ticks, 600, "headless match runs 600 ticks");
-    debug_assert_eq!(first.hash, second.hash, "8-fighter hash repeats");
-    debug_assert_eq!(
-        first.alloc_bytes, second.alloc_bytes,
-        "8-fighter alloc repeats"
-    );
-    let peak = PeakSnapshot::of(&[first.alloc_bytes, second.alloc_bytes]).peak_bytes;
-    debug_assert_eq!(
-        peak,
-        peak_of(&[first.alloc_bytes, second.alloc_bytes]),
-        "typed snapshot matches the pure max"
-    );
-    (first.alloc_bytes, second.alloc_bytes, peak)
+    let first = workload.run_peak_live_bytes();
+    let second = workload.run_peak_live_bytes();
+    let peak = PeakSnapshot::of(&[first, second]).peak_bytes;
+    debug_assert_eq!(peak, peak_of(&[first, second]), "typed snapshot matches the pure max");
+    (first, second, peak)
 }
 
 /// Gate verdict text for `peak` against `baseline_text`.

@@ -30,12 +30,6 @@ pub fn clamp_delay(delay: u32) -> u32 {
     delay.clamp(MIN_DELAY, MAX_DELAY)
 }
 
-/// Clamp an advantage target into `-MAX_TARGET_ABS..=MAX_TARGET_ABS`.
-#[must_use]
-pub fn clamp_target(target: i32) -> i32 {
-    target.clamp(-MAX_TARGET_ABS, MAX_TARGET_ABS)
-}
-
 /// Signed frame advantage: `local_frame - remote_frame` in ticks.
 ///
 /// Positive means local is ahead (add delay); negative means behind (drop

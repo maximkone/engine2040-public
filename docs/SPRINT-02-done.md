@@ -7,7 +7,7 @@
   within tolerance; input latency ≤ 50ms. Kill: float math in the tick;
   divergence. needs: CB1, PQ2. (RES-STEAL wave 35 Dive 11, reviewed
   2026-09-26; remapped from colliding CB1.)
-- [ ] PT2 playtest: readable fight captures — duel `play.step` captures
+- [x] PT2 playtest: readable fight captures — duel `play.step` captures Landed 1d01a410. pt2_* tests, run 39053276085.
   draw CT7 fighter silhouettes (or stamp ABSTRACT-DOTS + legend), kp01
   jab flash visible; same inputs twice give same digests. Tier A.
   Size S. Owns capture-draw hunks beside `crates/endpoint/src/play.rs`.

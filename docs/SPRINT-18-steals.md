@@ -25,7 +25,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   and `--baseline` exits 1 when any crate's island count rises. F2P: no
   wiring-scan tool. P2P: `node --test tools/wiring-scan.test.mjs`;
   `node tools/workspace-check.mjs` PASS. Landed so far (2026-10-12 check): ec5d0f45 (scanner and fixtures). Remaining: `--json` byte-equal x2, the ten crates with most islands, `target/reports/wiring-scan.json`, a baseline file and `--baseline` exit 1 when a crate's island count rises.
-- [ ] GS2 tools: wiring coverage, nightly and report only — which functions does the
+- [ ] GS2 tools: wiring coverage, nightly and report only — which functions does the Progress 2026-10-17: tool and 15 tests green (node --test tools/wiring-cov.test.mjs, NOOP exit 2 without llvm-cov, canned fixture grouped list x2, fake-cargo plan); f1456ff. Left: the real run, `cargo llvm-cov` is not installed on this PC so target/reports/wiring-cov.json is still the canned fixture.
   real arena never run? `cargo llvm-cov run` on the arena binary for a short
   scripted run (same flags as FC1: `--scene arena --fighters 8 --frames 300 --exit`),
   then list zero-hit functions per crate for render, game, anim, audio, ai (donor:
@@ -58,7 +58,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   `assert_eq!(f(), 5)` to `6` and edits `f`: fail; the same with `TESTS:`: pass.
   F2P: the edited-assertion diff passes today. P2P: `node --test
   tools/packet-gate.test.mjs` green.
-- [ ] GS5 render: one pipeline at a time on DX12 — wgpu #10547 (open, no PR): the FXC
+- [x] GS5 render: one pipeline at a time on DX12 — wgpu #10547 (open, no PR): the FXC Landed 1d01a41. cache_gate_dx12_serializes_eight_threads (peak 1), cache_gate_vulkan_allows_parallel_eight_threads, cache_gate_gl_allows_parallel_eight_threads, warm_keys_gated_routes_compiles_through_gate, async_submit_dx12_serializes_second_submit_refused_until_resolve green in engine-render lib 719 passed, run 39056588691.
   shader cache shares `ID3DBlob` copies across threads with a non-atomic refcount;
   3 of 221 runs hit use-after-free. Add `PipelineGate::enter(backend)` in
   `cache.rs`: on `Dx12` it serializes `create_*_pipeline` (max 1 in flight), on other
@@ -70,7 +70,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
 
 **Potato tier (new gate G9: the same game on a weak PC)**
 
-- [ ] GS6 render: choose the adapter on purpose — `presenter.rs` takes
+- [x] GS6 render: choose the adapter on purpose — `presenter.rs` takes Landed 1d01a41. adapter.rs tests (auto_picks_the_discrete_gpu, integrated_picks_the_uhd, name_fragment_picks_the_uhd, cpu_only_list_is_only_software_naming_it, backend_order_is_dx12_then_vulkan_then_gl, describe_prints_the_startup_line) green in engine-render lib 719 passed, run 39056588691; presenter.rs reads choice_from_env at 3 sites and holds no PowerPreference::HighPerformance.
   `PowerPreference::HighPerformance` at three call sites, and on an Optimus laptop
   wgpu #257 returned the Intel adapter with the NVIDIA card missing; Bevy #13113
   silently got the CPU "Basic Render Driver". New `crates/render/src/adapter.rs`:
@@ -86,7 +86,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   adapter is `Err(OnlySoftware)` naming it; `presenter.rs` has no
   `PowerPreference::HighPerformance` left. F2P: presenter hardcodes it. P2P: `cargo
   test -p engine-render --lib` green; golden unchanged.
-- [ ] GS7 game: pick the dGPU on hybrid laptops — export `NvOptimusEnablement = 1` and
+- [ ] GS7 game: pick the dGPU on hybrid laptops — export `NvOptimusEnablement = 1` and Progress 2026-10-17: the two statics exist (`NvOptimusEnablement`, `AmdPowerXpressRequestHighPerformance` in crates/game/src/crash.rs, 1d01a41) but there is no crates/game/build.rs /EXPORT link arg and `node tools/pe-exports.mjs target/release/arena.exe` prints nothing (exit 0), so neither name is exported yet. needs GS8 is landed.
   `AmdPowerXpressRequestHighPerformance = 1` from `arena.exe` (donor: GLFW
   `src/win32_init.c`; the exe, not a DLL, must export them). A `static` marked
   `#[no_mangle]` plus `crates/game/build.rs` printing
@@ -113,7 +113,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   an adapter via `test_gpu.rs`) renders one frame with zero validation errors or
   lists the failing passes. F2P: `request_device` always asks for the adapter's full
   limits. P2P: `cargo test -p engine-render --lib` green. needs: GS6.
-- [ ] GS10 render: one quality table — new `crates/render/src/quality.rs`:
+- [x] GS10 render: one quality table — new `crates/render/src/quality.rs`: Landed 1d01a41. quality_monotone_tiers, quality_units_nonempty, quality_cut_order_fixed, quality_hash_stable_x2 green in engine-render lib 719 passed, run 39056588691.
   `Quality {Potato, Comfort, High}` and `Knobs {render_scale_pct, shadow_cascades,
   shadow_map_px, gtao, bloom_half_res, taa, msaa, aniso, mip_bias_x100,
   stream_pool_mb, particle_cap, decal_cap, crowd_cap}` as consts, plus `CUT_ORDER`
@@ -147,7 +147,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   3x spike drops to the floor within K frames; after the spike it returns to 100 in
   at most 40 cooldown periods; x2 equal. F2P: no governor fn. P2P: `cargo test -p
   engine-render --lib` green.
-- [ ] GS13 perf: VRAM budget math — `crates/perf/src/vram.rs`, pure, from Dawn
+- [x] GS13 perf: VRAM budget math — `crates/perf/src/vram.rs`, pure, from Dawn Landed 3513a7e7. Proof: cargo test -p engine-perf, run 39051586513.
   `UpdateVideoMemoryInfo`: `reservation = min(budget / 2, requested)`,
   `budget = (budget - reservation) * 95 / 100`, `usage = current - reservation`
   (saturating), plus `pressure_pct()`. The Windows `QueryVideoMemoryInfo` call that
@@ -156,7 +156,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   usage 2 GiB, requested 1 GiB gives reservation 1 GiB, budget 4.75 GiB, usage 1 GiB;
   usage above budget gives pressure over 100; x2 equal. F2P: no vram module. P2P:
   `cargo test -p engine-perf --lib` green.
-- [ ] GS14 perf: peak heap gate — extend `crates/perf/src/alloc.rs` with `peak_bytes`
+- [x] GS14 perf: peak heap gate — extend `crates/perf/src/alloc.rs` with `peak_bytes` Landed 334b5700. peak_live_bytes in alloc_probe; runs 39051586513, 39051586814.
   if absent, and add `crates/perf/tests/heap_peak.rs`: run the 600-tick 8-fighter
   headless match and record peak live heap to `target/reports/heap-peak.csv`. The
   first run writes `crates/perf/baselines/heap_peak.txt`; later runs fail when peak
@@ -175,7 +175,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   passes and a 4,100-tri one reports `tris` with both numbers; a section with 76 bones
   reports `bones`; x2 equal. F2P: no budget module. P2P: `cargo test -p engine-assets
   --lib` green.
-- [ ] GS16 tools: the potato run — `node tools/potato-check.mjs` runs `arena.exe --scene
+- [x] GS16 tools: the potato run — `node tools/potato-check.mjs` runs `arena.exe --scene Landed 178a0f5. node --test tools/potato-check.test.mjs 27 pass (canned arena plus fake tasklist exact potato line x2, NO_IGPU exit 2, --floor exit 1 on p50 over); real report target/reports/potato-2026-10-17.md (p50 7.969 ms, p99 13.163 ms, peak ws 1508 MB on the UHD). needs GS6 landed above.
   arena --fighters 8 --frames 600 --exit` with `E2040_ADAPTER=integrated` and
   `E2040_LIMITS=downlevel` on this PC's Intel UHD, samples the process working set
   every 250 ms with `tasklist`, reads the `arena frame-split` lines, and prints
@@ -212,7 +212,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   Accept: the arena scene's frame draw count drops with GPU cull on; the same frame
   with `E2040_CPU_CULL=1` matches the CPU path; validation errors 0. F2P: draws are
   CPU-culled only. P2P: render lib green; golden unchanged. needs: GS18.
-- [ ] GS19 render: wound maps with a budget — donor naelstrof/SkinnedMeshDecals. New
+- [x] GS19 render: wound maps with a budget — donor naelstrof/SkinnedMeshDecals. New Landed 1d01a41. wound_drain_caps_per_frame_in_order (4,4,2), wound_evicts_oldest_map_over_cap, wound_stable_x2 green in engine-render lib 719 passed, run 39056588691; no draw caller yet (pure budget core).
   `crates/render/src/wound_map.rs`, pure: `WoundMaps::new(cap_bytes,
   paints_per_frame)`, `queue(char_id, uv_rect, kind)`, `drain(frame) -> Vec<Paint>`
   capped per frame, evict the oldest character's map when over the byte cap, a

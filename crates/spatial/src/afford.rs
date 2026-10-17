@@ -962,6 +962,7 @@ pub fn count_by_afford(tags: &[ActorTags]) -> [usize; 8] {
 // The rule table lives in [`rules`]; this module re-exports its public
 // surface so `afford::ASSERT_RULES` paths keep working. Behavior is
 // unchanged: rule tags equal [`derive_for_agent`] tags on the gold room.
+/// Rule table behind the affordance derivation (re-exported by this module).
 #[path = "rules.rs"]
 pub mod rules;
 #[cfg(test)]
