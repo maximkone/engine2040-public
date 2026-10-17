@@ -1,11 +1,16 @@
 name: pages
 
 # WEB10: the browser build on a URL the work PC opens (owner 2026-10-17: public is fine). Builds crates/web for
-# wasm32-unknown-unknown exactly like web-build.yml, then deploys dist/web to GitHub Pages from the Actions flow.
+# wasm32-unknown-unknown exactly like web-build.yml, then deploys the site to GitHub Pages from the Actions flow.
 # Runs on every push of the public mirror's main (each snapshot export) and on demand; the private dev repo never
 # runs it. GitHub Pages cannot set COOP/COEP headers, so the page is single-threaded (WEB14 adds a service worker
 # when threads are wanted). The page prints the commit and the golden hash; a wrong MIME for the module is checked
 # here before anything is published.
+# DOC1: the site is three parts under one URL. The game (dist/web) is the root; the handbook (docs/book, built by
+# mdBook) is /docs/; rustdoc for the crates a game author touches is /docs/api/. A broken internal link in the book
+# (tools/book-links.mjs, run on the sources and on the assembled site) fails the build, and the job summary prints
+# the handbook page count, the rustdoc crate list and the rustdoc warning count. The deploy job runs on the default
+# branch only, so a throwaway branch can run the whole build to prove a step without publishing.
 on:
   workflow_dispatch:
   push:
@@ -93,14 +98,68 @@ jobs:
           kill "$server"
           echo "engine_bg.wasm is served as: $type"
           test "$type" = "application/wasm"
+      # DOC1: mdBook, pinned to one release and checked against the digest GitHub lists for the asset.
+      - name: mdBook (pinned release binary)
+        shell: bash
+        env:
+          MDBOOK_TAG: v0.5.4
+          MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          archive="$RUNNER_TEMP/mdbook.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" "https://github.com/rust-lang/mdBook/releases/download/$MDBOOK_TAG/mdbook-$MDBOOK_TAG-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$MDBOOK_SHA256  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/mdbook" --version
+      - name: handbook sources - links, generated door reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/book-links.mjs
+          node tools/door-reference.mjs --check
+      - name: site - game at the root, handbook under docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          cp -r dist/web/. site/
+          mdbook build docs/book --dest-dir "$GITHUB_WORKSPACE/site/docs"
+          node tools/book-links.mjs --landing site/index.html
+      # The crates a game author touches (tools/book-links.mjs DOC_CRATES, listed on docs/book/api.md). The features
+      # are the ones that show the public API: Rapier in physics and physfx, the MCP door in endpoint.
+      - name: rustdoc for the crates a game author touches
+        shell: bash
+        env:
+          RUSTDOCFLAGS: ""
+        run: |
+          set -euo pipefail
+          cargo doc --no-deps --locked -p engine-core -p engine-arena -p engine-combat -p engine-physics -p engine-physfx -p engine-anim -p engine-render -p engine-game -p engine-net -p engine-assets -p engine-input -p engine-endpoint --features engine-physics/rapier,engine-physfx/rapier,engine-endpoint/mcp 2>&1 | tee "$RUNNER_TEMP/rustdoc.log"
+          mkdir -p site/docs/api
+          cp -r target/doc/. site/docs/api/
+          rm -f site/docs/api/.lock
+          warnings="$(grep -Eo 'generated [0-9]+ warnings?' "$RUNNER_TEMP/rustdoc.log" | awk '{ n += $2 } END { print n + 0 }')"
+          echo "rustdoc warnings: $warnings"
+          echo "RUSTDOC_WARNINGS=$warnings" >> "$GITHUB_ENV"
+      - name: site - links, page and crate counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/book-links.mjs --site site
+          {
+            node tools/book-links.mjs --site site --markdown
+            echo
+            echo "Rustdoc warnings: $RUSTDOC_WARNINGS"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: dist/web
+          path: site
 
   deploy:
     needs: build
-    if: github.repository == 'maximkone/engine2040-public'
+    if: github.repository == 'maximkone/engine2040-public' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -121,3 +180,18 @@ jobs:
             sleep 10
           done
           exit 1
+      - name: the published handbook and rustdoc answer 200
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ steps.deployment.outputs.page_url }}"
+          for path in docs/ docs/for-ai.html docs/door-reference.html docs/api/engine_game/index.html; do
+            code=000
+            for i in 1 2 3 4 5 6; do
+              code="$(curl -s -o /dev/null -w '%{http_code}' "$base$path")"
+              if [ "$code" = 200 ]; then break; fi
+              sleep 10
+            done
+            echo "$base$path -> $code"
+            test "$code" = 200
+          done

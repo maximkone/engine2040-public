@@ -1,4 +1,7 @@
+mod build;
 mod cli;
+mod manifest;
+mod project;
 
 fn main() -> std::process::ExitCode {
     match cli::run(std::env::args_os().skip(1)) {

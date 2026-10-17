@@ -48,6 +48,7 @@ pub(super) const BLIT_WGSL: &str = concat!(
 );
 
 mod bind_memo;
+mod capture;
 mod fog_tranche;
 mod forward_bind;
 mod frame;
@@ -56,10 +57,13 @@ mod gtao_live;
 mod live;
 mod msaa;
 mod presenter;
+#[cfg(any(target_arch = "wasm32", test))]
+mod scope_ledger;
 mod submit;
 mod sun_shadow;
 mod timing;
 
+pub use capture::{CaptureStats, FrameCapture, DISTINCT_CAP};
 pub use frame::{
     last_live_wall_split, FrameOutput, FrameReceipt, LivePixels, LiveWallSplit, LookPassReceipt,
 };

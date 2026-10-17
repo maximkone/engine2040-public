@@ -10,6 +10,7 @@
 
 use super::contract::{rotate, LocalPose, Skeleton};
 use engine_core::quat_mul;
+use engine_core::vec3::cross3;
 
 /// Shortest bone the solvers accept, in meters; a shorter one has no length
 /// to reach with and is refused.
@@ -80,13 +81,6 @@ fn norm(v: [f32; 3]) -> [f32; 3] {
 }
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 /// `base + dir * k`.
 fn madd(base: [f32; 3], dir: [f32; 3], k: f32) -> [f32; 3] {
@@ -218,7 +212,7 @@ pub fn turn_between(from: [f32; 3], to: [f32; 3]) -> [f32; 4] {
         let axis = bend_axis(a, [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
         return [axis[0], axis[1], axis[2], 0.0];
     }
-    let c = cross(a, b);
+    let c = cross3(a, b);
     unit([c[0], c[1], c[2], 1.0 + d])
 }
 

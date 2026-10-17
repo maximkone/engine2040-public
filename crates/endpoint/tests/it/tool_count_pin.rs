@@ -13,23 +13,24 @@ use engine_endpoint::{
     tools::TOOLS,
 };
 
-/// Reachable tools under `--features mcp`: 13 core + 42 pack verbs (the physics
-/// pack adds `physics.read`; the play
+/// Reachable tools under `--features mcp`: 13 core + 44 pack verbs (the physics
+/// pack adds `physics.read`, `physics.raycast` and `physics.shapecast`; the play
 /// pack adds `play.step_until`, `input.inject` and `state.digest`). The `rules` feature adds 3 (`rules.set`,
 /// `rules.test`, `rules.explain`), the `intake` feature adds 1 (`asset.intake`);
 /// one arm per combination keeps the pin exact under every feature set.
 /// Measured 2026-10-17 with the door probe (`api.load` per pack): 42 pack
 /// verbs. The `b2f8a5cf` replay/play-ext landing added four verbs and bumped
 /// the pin by two, so this corrects the inherited two-verb drift; the physics
-/// pack's own +1 was already counted.
+/// pack's own +1 was already counted. The two cast verbs
+/// (`physics.raycast`, `physics.shapecast`) then moved every arm up by two.
 #[cfg(not(any(feature = "rules", feature = "intake")))]
-const EXPECTED_ROUTER: usize = 55;
+const EXPECTED_ROUTER: usize = 57;
 #[cfg(all(feature = "rules", not(feature = "intake")))]
-const EXPECTED_ROUTER: usize = 58;
+const EXPECTED_ROUTER: usize = 60;
 #[cfg(all(feature = "intake", not(feature = "rules")))]
-const EXPECTED_ROUTER: usize = 56;
+const EXPECTED_ROUTER: usize = 58;
 #[cfg(all(feature = "rules", feature = "intake"))]
-const EXPECTED_ROUTER: usize = 59;
+const EXPECTED_ROUTER: usize = 61;
 
 #[test]
 fn frozen_registry_pins_26_and_router_is_pinned() {

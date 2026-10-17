@@ -311,7 +311,7 @@ impl SunShadowSubmitter {
         enc: &mut wgpu::CommandEncoder,
         list: &crate::present::DrawList,
     ) -> Option<u64> {
-        let started = std::time::Instant::now();
+        let started = engine_clock::now();
         let dir = list.light.direction.to_array();
         let (_, uniform_bytes) = live_sun_shadow_for_dir(dir).ok()?;
         presenter
@@ -344,7 +344,7 @@ impl SunShadowSubmitter {
                 pass.draw_indexed(0..mesh.count, 0, 0..1);
             }
         }
-        u64::try_from(started.elapsed().as_micros()).ok()
+        u64::try_from(engine_clock::since(started).as_micros()).ok()
     }
 }
 /// CPU oracle: sun-map UV and depth of a world point; test-only until the
