@@ -555,7 +555,7 @@
    "allow_no_reason": 0,
    "dead_code_allows": 0,
    "print_in_lib": 0,
-   "string_errors": 1,
+   "string_errors": 0,
    "board_ids": 0,
    "hash_reimpl": 0,
    "dup_fns": 0,

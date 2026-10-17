@@ -1,6 +1,6 @@
 ---
 name: door-and-headless-runbook
-description: "Use when running engine2040 without a window or a person: the headless staged fight, the golden proof, arena capture, perf CSV, the e2040 MCP door (e2040-mcp) and the playtest crate. Gives the exact pwsh run lines and where each writes its output."
+description: "Use when you must run engine2040 without a person or window: staged fight, golden proof, perf CSV, the e2040 MCP door, the playtest crate. Gives exact run lines and output paths. Arena window runs: arena-capture-and-view-line."
 ---
 
 # Door and headless runbook
@@ -16,6 +16,7 @@ Every line below names a binary or test that exists in this repo. Run from the r
 - `cargo run -p engine-game --features app --bin staged_fight`. The bin has `required-features = ["app"]`, so the flag is needed. It writes frame PNGs, a frame manifest (a JSON array, one row per frame) and a receipt under `target/ct15-staged-fight` (crates/game/src/bin/staged_fight.rs::DEFAULT_OUT_DIR). Same manifest, seed and script give the same PNGs and receipt twice.
 
 ## Arena capture (window build)
+- Receipt lines (`arena view:`, `arena break:`, `physfx:`), `--exit` runs and flags: skill `arena-capture-and-view-line`.
 - `cargo run -p engine-game --features app --bin arena -- --capture-dir target/clips/<name> --capture-every 2 --tape <tape> --rows <ROW1> --sha <build-sha> --fps 30` (docs/CAPTURE.md::Built-in dump). The `arena` bin also has `required-features = ["app"]`.
 - Output: `frame_000001.png` files, `manifest.json` and `cutlog.json`. For smooth clips add `--camera-path arena600`.
 

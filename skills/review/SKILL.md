@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Use when reviewing a diff or auditing an area: depth 0-5 score, rust-quality gate, new pub item with no caller, GPU Unsupported refusal, Eyes on captures, API review of a crate or MCP family, dead-code audit with ranked findings."
+description: "Use when you review a diff or audit an area: depth 0-5 score, rust-quality bar, a pub item with no caller, a GPU test that skipped, captures you must open, API review, dead-code audit with ranked findings."
 ---
 
 # Review
@@ -48,7 +48,7 @@ Return: `VERDICT: ...`, findings ordered by severity with path, line and repro, 
 
 ## 3. Rust quality bar
 
-- `node tools/rust-quality.mjs --crate <crate>` must print `RESULT PASS` with 0 ratchet regressions. Run it targeted, never as a whole-workspace suite. A `rust-*` FAIL or a ratchet regression is FAIL before you read further. Use `--no-cache` when you need a fresh answer (skill `github-check`).
+- `node tools/rust-quality.mjs --crate <crate>` must print `RESULT PASS` with 0 ratchet regressions. Run it targeted, never as a whole-workspace suite. A `rust-*` FAIL or a ratchet regression is FAIL before you read further. Use `--no-cache` when you need a fresh answer (skill `github-check`). A FAIL to fix or accept: skill `rust-quality-ratchet`. A new pub item with no caller: skill `wiring-a-feature`.
 - The old per-change gate script is retired. Check these rules by hand on the added lines: `unwrap`, print in libraries, `allow`, `expect` without a reason, `dbg!`, nondeterminism in sim, copies of Fnv or probe helpers, board ids in comments, string errors, allocation in hot fns, a new fn over 100 lines, a new file over 1,500 lines. New casts and growth are warnings (skill `rust-safety`). Rules live in `docs/RUST-QUALITY.md`.
 - Never a new `#[allow(`. The exception is `#[expect(lint, reason = "...")]` you would defend.
 - Read the diff for what tools cannot see, then score 0 to 5. 0 would not compile in review. 3 is idiomatic and owned. 5 is what a top engine team would copy.
