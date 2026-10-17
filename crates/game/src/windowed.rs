@@ -1935,10 +1935,17 @@ mod tests {
     #[test]
     fn exit_deadline_drill_stall_is_the_typed_timeout_receipt() {
         let drill = WinArgs::parse(
-            &["arena", "--frames", "30", "--exit", "--deadline-ms", "60000"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
+            &[
+                "arena",
+                "--frames",
+                "30",
+                "--exit",
+                "--deadline-ms",
+                "60000",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
         )
         .unwrap();
         assert_eq!(drill.wall_limit_ms(), 60_000, "--deadline-ms is the bound");

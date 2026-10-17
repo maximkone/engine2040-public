@@ -3,6 +3,10 @@
 // the tangent-builder cite must name the live owner. engine-assets owns tangents
 // (ARCHITECTURE C3): v1.rs builds them with import_repair::recompute_tangents,
 // so a cite of a local `compute_tangents` sends a reader to a symbol that is gone.
+// Two drifted: the LF1 forward feed added a doc block above the WGSL, so the bind
+// probe's copy slid from sky.rs:814 down to the copy line; and the P2 stall span
+// `submit.rs:1089-1103` went dead when the lane rewrites moved the readback, so
+// that cite names its owner by symbol. Move a drifted cite and this pin together.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -38,6 +42,15 @@ const TANGENT_FN = "recompute_tangents";
 const LINE_CITES = [
   { cite: "crates/render/src/sky.rs:989", need: /dst\[i\] = src\[i\]/ },
 ];
+
+// The P2 stall cite names its owner by symbol, never by line: submit.rs is
+// rewritten lane by lane (EG11 sun depth, RL52 staged draw), so a number drifts.
+// The old span `submit.rs:1089-1103` held a bind-group list at HEAD, not the
+// wait, so it stays out of both files.
+const STALL_FILE = "crates/render/src/present/gpu_present/submit.rs";
+const STALL_FN = "map_readback_f32";
+const STALL_CITE = `${STALL_FILE}::${STALL_FN}`;
+const DEAD_SPANS = ["submit.rs:1089-1103"];
 
 const CITE = /(?:crates|tools|docs|content|fixtures|tests)\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
 const LINE_CITE = /(?:crates|tools|docs|content|fixtures|tests)\/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:\d+/g;
@@ -104,8 +117,6 @@ test("every line cite lands on the live line, in both files", () => {
   for (const rel of FILES) {
     const body = text(rel);
     for (const m of body.matchAll(LINE_CITE)) {
-      // `submit.rs:1089-1103` is a probe span, not a single pinned line.
-      if (body[m.index + m[0].length] === "-") continue;
       const file = fileOf(m[0]);
       cited.add(file);
       if (!pinned.has(file)) {
@@ -118,4 +129,18 @@ test("every line cite lands on the live line, in both files", () => {
   }
   assert.deepEqual(stray, [], `line cite the pin does not know, pin it or drop it: ${stray.join(" | ")}`);
   for (const file of pinned.keys()) assert.ok(cited.has(file), `${file} is no longer cited in this skill`);
+});
+
+test("the P2 stall cite names the live wait by symbol, not the dead span", () => {
+  const body = readFileSync(join(ROOT, STALL_FILE), "utf8");
+  assert.match(
+    body,
+    new RegExp(`pub\\(super\\) fn ${STALL_FN}\\b`),
+    `${STALL_FILE} no longer defines ${STALL_FN}: the P2 cite is dead`,
+  );
+  assert.match(body, /wait_indefinitely/, `${STALL_FILE} no longer blocks on wait_indefinitely`);
+  for (const rel of FILES) {
+    assert.ok(text(rel).includes(STALL_CITE), `${rel} no longer cites ${STALL_CITE}`);
+    for (const dead of DEAD_SPANS) assert.ok(!text(rel).includes(dead), `${rel} cites the dead span ${dead}`);
+  }
 });

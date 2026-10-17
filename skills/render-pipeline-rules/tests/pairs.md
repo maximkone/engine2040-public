@@ -18,7 +18,7 @@ Situation: A builder needs the depth buffer on the CPU for fog. They call `map_r
 
 Off: "Map the buffer and poll with wait_indefinitely. It is the simplest way and the data is correct."
 
-On: "Rule 2: never map, poll or wait on a GPU result inside a frame. Read it two frames later with a non-blocking map. Search `node tools/books.mjs search "gpu readback frame"` and cite [gems1 9.6, 11.3-11.4]. The current wait is `crates/render/src/present/gpu_present/submit.rs:1089-1103`, the stall to remove."
+On: "Rule 2: never map, poll or wait on a GPU result inside a frame. Read it two frames later with a non-blocking map. Search `node tools/books.mjs search "gpu readback frame"` and cite [gems1 9.6, 11.3-11.4]. The current wait is the in-frame `crates/render/src/present/gpu_present/submit.rs::map_readback_f32` call (its `poll(wait_indefinitely)`), the stall to remove."
 
 What skill-less misses: the frame stall. The fps drop comes from this wait, and the simplest fix is the one that hurts most.
 
