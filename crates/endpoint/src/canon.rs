@@ -95,8 +95,12 @@ fn is_kind(word: &str) -> bool {
     KINDS.contains(&word)
 }
 
-fn valid_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 64 {
+/// Actor-name bound in chars (mirrors the spatial grammar check).
+pub(crate) const NAME_MAX: usize = 64;
+
+/// Spatial-grammar names: `[a-z0-9_]`, 1..=`NAME_MAX` chars, no leading digit.
+pub(crate) fn valid_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > NAME_MAX {
         return false;
     }
     let mut chars = name.chars();

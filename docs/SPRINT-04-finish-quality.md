@@ -56,7 +56,7 @@ finish scoreboard runs every wave.
   fails the gate. Tier C. Size M. Owns `crates/playtest/src/lookcheck.rs`.
   Accept: a seeded exposure regression is caught; scores repeat within noise.
   needs: Q1, RT7.
-- [ ] API2 tools: docs site and coverage ratchet — `cargo doc --workspace
+- [ ] API2 tools: docs site and coverage ratchet — `cargo doc --workspace Progress 2026-10-17: `tools/docs-coverage.mjs` (5 tests pass) is wired into `tools/proof.mjs` (line 623) and `docs/book/` holds quick-start, recipes and per-system refs. Left: `#![warn(missing_docs)]` is in 1 crate, zero-warning `cargo doc --workspace --no-deps`, the mdBook build check, the fresh-agent quick-start drill; the ratchet itself FAILs on 4 crates today (proof +1, provider +1 undocumented; ai and anim lost one public item each).
   --no-deps` with zero warnings; `#![warn(missing_docs)]` in every crate with
   per-crate coverage in `tools/docs-coverage.mjs` that never drops; doctests
   run in `tools/proof.mjs`; an mdBook manual in `docs/book/` (quick start,
@@ -107,7 +107,7 @@ finish scoreboard runs every wave.
   p95 200 ms or less at 10x or better median speedup, RSS 2x or less the
   BM25 baseline, else killed with numbers. needs: API1.
   LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] PV6 provider: cancel/timeout timing-flake hardening — cancel <100ms
+- [ ] PV6 provider: cancel/timeout timing-flake hardening — cancel <100ms Progress 2026-10-17: 6c672ba4 cancel and timeout flake hardened (runs 39051091100, 39052718180); left: three consecutive green runs on a loaded box.
   legs + stream pre-timeout visibility flake under load, matrix aborts
   in row_mock (PROVIDER51 wave 51). Tier B. Size S. Owns
   `crates/provider/src/stream.rs` cancel/timeout path + 3 timing
@@ -118,7 +118,7 @@ finish scoreboard runs every wave.
    tests/matrix.rs:824 row_mock cancel_leg, observed 111ms vs 100ms
    budget under package-cache lock contention; lib 133/0 green. NOT
    fixed — same fingerprint (timing under load).
-- [ ] PV7 provider: tool-loop agent harness with budget + transcript — a
+- [x] PV7 provider: tool-loop agent harness with budget + transcript — a Landed 6c672ba4. Run 39051091100.
    bounded perceive-plan-act loop over the door (max steps, max tokens,
    stop on done/stuck), ported as std-only Rust from `0xPlaygrounds/rig`
    agent/adapter shape (license MIT, reimplement only, never the crate

@@ -244,6 +244,9 @@ enum Role {
 pub struct NetGame {
     app: App,
     config: GameConfig,
+    /// True when the session plays the window's match (rules v2 on the kit
+    /// walls, `App::into_duel`); false keeps the frozen v1 open-sand match.
+    duel: bool,
     local_slot: u8,
     remote_slot: u8,
     role: Role,
@@ -283,11 +286,33 @@ pub fn encode_session_code(config: &GameConfig) -> String {
     )
 }
 
+/// Suffix of an invitation code that names the duel match (rules v2 on the
+/// kit walls, the match the window plays): `<v1 code>-duel`.
+pub const SESSION_CODE_DUEL: &str = "duel";
+
+/// [`encode_session_code`] for the duel match: the same fields plus the
+/// [`SESSION_CODE_DUEL`] suffix, so the guest builds the host's spec. Pure.
+#[must_use]
+pub fn encode_duel_session_code(config: &GameConfig) -> String {
+    format!("{}-{SESSION_CODE_DUEL}", encode_session_code(config))
+}
+
 /// Decode an invitation code back into the match config. A version field other
 /// than [`WIRE_VERSION`] fails as [`NetError::VersionMismatch`]; anything
-/// unparseable or out of range fails as [`GameError::BadConfig`]. Pure.
+/// unparseable or out of range fails as [`GameError::BadConfig`]. Pure. A duel
+/// code decodes to its config too; [`decode_session_mode`] also names the mode.
 pub fn decode_session_code(code: &str) -> Result<GameConfig, GameError> {
-    let parts: Vec<&str> = code.split('-').collect();
+    decode_session_mode(code).map(|(config, _duel)| config)
+}
+
+/// [`decode_session_code`] plus the match mode: `true` for a code that ends in
+/// [`SESSION_CODE_DUEL`], `false` for the plain v1 code. Pure.
+pub fn decode_session_mode(code: &str) -> Result<(GameConfig, bool), GameError> {
+    let mut parts: Vec<&str> = code.split('-').collect();
+    let duel = parts.last() == Some(&SESSION_CODE_DUEL);
+    if duel {
+        parts.pop();
+    }
     if parts.len() != 6 || parts[0] != SESSION_CODE_PREFIX {
         return Err(GameError::BadConfig("session_code"));
     }
@@ -315,7 +340,7 @@ pub fn decode_session_code(code: &str) -> Result<GameConfig, GameError> {
         half_extent_m: f32::from_bits(extent_bits),
     };
     config.validate()?;
-    Ok(config)
+    Ok((config, duel))
 }
 
 /// Peek the packet kind after checking magic plus version, so role dispatch
@@ -340,17 +365,35 @@ impl NetGame {
     /// learned from its first input packet (or pinned with
     /// [`NetGame::set_peer`]).
     pub fn host(config: GameConfig) -> Result<(String, Self), GameError> {
-        let app = App::new_for_slot(config, 0)?;
-        let server = Server::new(config.arena_config()).map_err(GameError::Net)?;
+        Self::host_mode(config, false)
+    }
+
+    /// [`NetGame::host`] for the match the window plays: rules v2 on the kit
+    /// walls. The authority server builds from the host view's own spec
+    /// ([`App::spec`]) and the invitation code carries the mode, so the guest
+    /// predicts the same match.
+    pub fn host_duel(config: GameConfig) -> Result<(String, Self), GameError> {
+        Self::host_mode(config, true)
+    }
+
+    /// One host path for both modes.
+    fn host_mode(config: GameConfig, duel: bool) -> Result<(String, Self), GameError> {
+        let app = Self::session_app(config, 0, duel)?;
+        let server = Server::from_spec(app.spec()).map_err(GameError::Net)?;
         let sock = UdpSocket::bind("127.0.0.1:0").map_err(|err| GameError::Io(err.kind()))?;
         sock.set_nonblocking(true)
             .map_err(|err| GameError::Io(err.kind()))?;
-        let code = encode_session_code(&config);
+        let code = if duel {
+            encode_duel_session_code(&config)
+        } else {
+            encode_session_code(&config)
+        };
         Ok((
             code,
             Self {
                 app,
                 config,
+                duel,
                 local_slot: 0,
                 remote_slot: 1,
                 role: Role::Host {
@@ -376,16 +419,17 @@ impl NetGame {
     /// config bound by construction), opens the predictor at slot 1 and dials
     /// `host_addr`.
     pub fn join(host_addr: SocketAddr, code: &str) -> Result<Self, GameError> {
-        let config = decode_session_code(code)?;
-        let app = App::new_for_slot(config, 1)?;
+        let (config, duel) = decode_session_mode(code)?;
+        let app = Self::session_app(config, 1, duel)?;
         let local = FighterId::new(1).ok_or(GameError::BadConfig("fighters"))?;
-        let client = Client::new(config.arena_config(), local).map_err(GameError::Net)?;
+        let client = Client::from_spec(app.spec(), local).map_err(GameError::Net)?;
         let sock = UdpSocket::bind("127.0.0.1:0").map_err(|err| GameError::Io(err.kind()))?;
         sock.set_nonblocking(true)
             .map_err(|err| GameError::Io(err.kind()))?;
         Ok(Self {
             app,
             config,
+            duel,
             local_slot: 1,
             remote_slot: 0,
             role: Role::Guest { client },
@@ -401,6 +445,23 @@ impl NetGame {
             last_mispredicts: Vec::new(),
             last_report: None,
         })
+    }
+
+    /// A fresh view for `slot`: the window's duel (rules v2, kit walls) or the
+    /// frozen v1 session.
+    fn session_app(config: GameConfig, slot: u8, duel: bool) -> Result<App, GameError> {
+        if duel {
+            App::new_for_slot_world(config, slot, crate::arena_kit::kit_match_world_or_empty())?
+                .into_duel()
+        } else {
+            App::new_for_slot(config, slot)
+        }
+    }
+
+    /// True when the session plays the window's duel match.
+    #[must_use]
+    pub fn is_duel(&self) -> bool {
+        self.duel
     }
 
     /// True on the authoring peer.
@@ -860,7 +921,7 @@ impl NetGame {
     fn rebuild_view(&mut self) -> Result<(), GameError> {
         let done = self.server_tick().map_or(0, |tick| tick + 1);
         let predicted = self.local_history.len() as u32;
-        let mut fresh = App::new_for_slot(self.config, self.local_slot)?;
+        let mut fresh = Self::session_app(self.config, self.local_slot, self.duel)?;
         for tick in 0..predicted {
             if let Some(known) = self.truth.get(&(tick, self.remote_slot)).copied() {
                 fresh
@@ -1129,6 +1190,19 @@ mod tests {
     }
 
     #[test]
+    fn spec_duel_code_carries_the_mode_and_plain_codes_stay_v1() {
+        let plain = encode_session_code(&config());
+        let duel = encode_duel_session_code(&config());
+        assert_eq!(duel, format!("{plain}-duel"));
+        assert_eq!(decode_session_mode(&plain), Ok((config(), false)));
+        assert_eq!(decode_session_mode(&duel), Ok((config(), true)));
+        assert_eq!(decode_session_code(&duel), Ok(config()));
+        for bad in [format!("{duel}-duel"), format!("{plain}-solo")] {
+            assert!(decode_session_mode(&bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
     fn host_tape_keeps_tick_fighter_order_for_same_tick_inputs() {
         // The LAN tick stages two inputs for the same tick (local slot 0
         // plus staged remote slot 1): the tape must stay
@@ -1158,9 +1232,24 @@ mod tests {
 
     #[test]
     fn two_peer_loopback_converges_under_latency_and_loss() {
-        let (code, mut host) = NetGame::host(config()).unwrap();
+        let hosted = NetGame::host(config()).unwrap();
+        loopback_converges(hosted, false);
+    }
+
+    /// DSN1: the same loopback over the window's match. The host's server and
+    /// the guest's client build from the host view's spec, so the converged
+    /// history is rules v2 on the kit walls, not the old v1 open sand.
+    #[test]
+    fn spec_two_peer_loopback_converges_on_the_duel_match() {
+        let hosted = NetGame::host_duel(config()).unwrap();
+        loopback_converges(hosted, true);
+    }
+
+    fn loopback_converges((code, mut host): (String, NetGame), duel: bool) {
+        assert_eq!(host.is_duel(), duel);
         let host_addr = host.local_addr().unwrap();
         let mut guest = NetGame::join(host_addr, &code).unwrap();
+        assert_eq!(guest.is_duel(), duel, "the code carries the mode");
         assert!(host.is_host() && !guest.is_host());
         assert_eq!((host.local_slot(), host.remote_slot()), (0, 1));
         assert_eq!((guest.local_slot(), guest.remote_slot()), (1, 0));
@@ -1251,6 +1340,12 @@ mod tests {
         );
         assert_eq!(guest.app().hp(), host.app().hp());
         assert_eq!(guest.last_report(), None);
+        let v1 = App::new(config()).unwrap().spec();
+        assert_eq!(
+            host.app().spec() == v1,
+            !duel,
+            "the session plays the mode its code names"
+        );
     }
 
     #[test]

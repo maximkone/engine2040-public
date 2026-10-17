@@ -864,8 +864,12 @@ pub fn simulate_bout_outcome(seed: u64, tables: &Tables) -> BoutOutcome {
         Ok(state) => state,
         Err(_) => return outcome,
     };
-    let mut stream_a = seed.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(0x01);
-    let mut stream_b = seed.wrapping_mul(0xbf58476d1ce4e5b9).wrapping_add(0x02);
+    let mut stream_a = seed
+        .wrapping_mul(engine_core::hash::GOLDEN_GAMMA)
+        .wrapping_add(0x01);
+    let mut stream_b = seed
+        .wrapping_mul(engine_core::hash::MIX64_MUL_A)
+        .wrapping_add(0x02);
     // One buffer cleared per tick: the survey holds no per-tick heap while
     // recording exactly the tick's own events for kill attribution.
     // Harness-only scratch: one empty vector per surveyed bout, reused via

@@ -121,15 +121,7 @@ fn relation_line(edge: &(u32, Relation, u32)) -> String {
 }
 
 fn finding_line(finding: &super::Finding) -> String {
-    let b = if finding.b == u32::MAX {
-        "-".to_string()
-    } else {
-        finding.b.to_string()
-    };
-    format!(
-        "finding {} {} {} {} {}\n",
-        finding.check, finding.a, b, finding.severity, finding.pct
-    )
+    format!("{}\n", finding.row())
 }
 
 fn object_line(entry: &ObjectEntry) -> String {

@@ -200,6 +200,25 @@ pub fn map_file(path: &std::path::Path) -> std::io::Result<Arc<[u8]>> {
     Ok(Arc::from(bytes.into_boxed_slice()))
 }
 
+/// Largest finished archive the writer accepts: every wire offset and length
+/// is a `u32`, so the whole file must stay inside that range.
+const ARCHIVE_OFFSET_LIMIT: usize = u32::MAX as usize;
+
+/// Table-of-contents bytes for one entry: kind, name length, name, offset,
+/// length, checksum.
+fn table_row_len(name: &str) -> usize {
+    (1 + 2 + 4 + 4 + 8usize).saturating_add(name.len())
+}
+
+/// True when header, table, payloads and trailer fit within `limit` bytes.
+fn archive_fits(table_len: usize, payload_len: usize, limit: usize) -> bool {
+    ARCHIVE_HEADER_LEN
+        .saturating_add(table_len)
+        .saturating_add(payload_len)
+        .saturating_add(ARCHIVE_TRAILER_LEN)
+        <= limit
+}
+
 /// One staged entry: kind plus name plus opaque payload bytes.
 #[derive(Clone, Debug)]
 struct Staged {
@@ -241,6 +260,18 @@ impl ArchiveWriter {
         name: &str,
         payload: &[u8],
     ) -> Result<(), ArchiveError> {
+        self.stage_within(ARCHIVE_OFFSET_LIMIT, kind, name, payload)
+    }
+
+    /// `stage` with an explicit cap on the finished archive size, so the
+    /// wire offsets (`u32`) can never wrap.
+    fn stage_within(
+        &mut self,
+        limit: usize,
+        kind: ArchiveKind,
+        name: &str,
+        payload: &[u8],
+    ) -> Result<(), ArchiveError> {
         if name.is_empty() || name.chars().count() > MAX_ARCHIVE_NAME_CHARS {
             return Err(ArchiveError::BadName(bound_detail(name)));
         }
@@ -255,6 +286,20 @@ impl ArchiveWriter {
         if payload.len() > MAX_ARCHIVE_PAYLOAD_BYTES {
             return Err(ArchiveError::TooLarge {
                 count: payload.len(),
+            });
+        }
+        let table_len = self.entries.iter().fold(table_row_len(name), |sum, entry| {
+            sum.saturating_add(table_row_len(&entry.name))
+        });
+        let payload_len = self.entries.iter().fold(payload.len(), |sum, entry| {
+            sum.saturating_add(entry.payload.len())
+        });
+        if !archive_fits(table_len, payload_len, limit) {
+            return Err(ArchiveError::TooLarge {
+                count: ARCHIVE_HEADER_LEN
+                    .saturating_add(table_len)
+                    .saturating_add(payload_len)
+                    .saturating_add(ARCHIVE_TRAILER_LEN),
             });
         }
         self.entries.push(Staged {
@@ -295,15 +340,17 @@ impl ArchiveWriter {
         for entry in &self.entries {
             table_len = table_len.saturating_add(1 + 2 + entry.name.len() + 4 + 4 + 8);
         }
-        let mut offset = ARCHIVE_HEADER_LEN.saturating_add(table_len) as u32;
+        // `stage` keeps header + table + payloads inside `u32`, so no clamp fires.
+        let wire32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let mut offset = ARCHIVE_HEADER_LEN.saturating_add(table_len);
         for entry in &self.entries {
             out.push(entry.kind as u8);
             push_u16(&mut out, entry.name.len() as u16);
             out.extend_from_slice(entry.name.as_bytes());
-            push_u32(&mut out, offset);
-            push_u32(&mut out, entry.payload.len() as u32);
+            push_u32(&mut out, wire32(offset));
+            push_u32(&mut out, wire32(entry.payload.len()));
             push_u64(&mut out, hash_bytes(&entry.payload));
-            offset = offset.saturating_add(entry.payload.len() as u32);
+            offset = offset.saturating_add(entry.payload.len());
         }
         for entry in &self.entries {
             out.extend_from_slice(&entry.payload);
@@ -654,6 +701,34 @@ mod tests {
             .stage(ArchiveKind::Clip, "hero-step", &payload(0x55, 2048))
             .unwrap();
         writer
+    }
+
+    #[test]
+    fn stage_refuses_an_archive_past_the_offset_limit() {
+        // One entry "a" with 10 payload bytes: 16 header + 20 row + 10 + 8 trailer.
+        assert_eq!(table_row_len("a"), 20);
+        assert!(archive_fits(20, 10, 54));
+        assert!(!archive_fits(20, 10, 53));
+        assert!(!archive_fits(usize::MAX, usize::MAX, ARCHIVE_OFFSET_LIMIT));
+        assert_eq!(ARCHIVE_OFFSET_LIMIT, u32::MAX as usize);
+
+        let mut writer = ArchiveWriter::new();
+        let refused = writer.stage_within(53, ArchiveKind::Mesh, "a", &[7; 10]);
+        assert_eq!(refused, Err(ArchiveError::TooLarge { count: 54 }));
+        assert!(writer.is_empty(), "a refused stage keeps nothing");
+        writer
+            .stage_within(54, ArchiveKind::Mesh, "a", &[7; 10])
+            .unwrap();
+        // A second entry adds a row and payload: 16 + 40 + 11 + 8 = 75.
+        let refused = writer.stage_within(74, ArchiveKind::Mesh, "b", &[8; 1]);
+        assert_eq!(refused, Err(ArchiveError::TooLarge { count: 75 }));
+        assert_eq!(writer.len(), 1);
+        writer
+            .stage_within(75, ArchiveKind::Mesh, "b", &[8; 1])
+            .unwrap();
+        let bytes = writer.finish();
+        assert_eq!(bytes.len(), 75);
+        assert!(ArchivedBundle::open_slice(&bytes).is_ok());
     }
 
     #[test]

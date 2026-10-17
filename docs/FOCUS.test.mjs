@@ -1,7 +1,7 @@
 // Run: node --test docs/FOCUS.test.mjs
-// Speed fix: Now holds only ready rows in focus order (width-30 waves).
-// Fails on revert: restoring the 128-id Now (done LJ1/EG19 plus 43 waiting
-// rows) fails the count and the all-ready assertions below.
+// FOCUS "## Now" is the work order: `board-slice --focus` reads only that
+// section, so every numbered focus item must sit inside it, and every id it
+// names must exist on the board.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -12,7 +12,6 @@ import {
   focusNowIds,
   loadBoardText,
   parseBoard,
-  rowReady,
 } from "../tools/board-slice.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -22,41 +21,42 @@ function focusText() {
   return readFileSync(FOCUS_PATH, "utf8").replace(/\r\n/g, "\n");
 }
 
-function nowIds() {
-  return focusNowIds(focusText());
-}
-
-function board() {
-  return parseBoard(loadBoardText(), archivedDoneRows());
-}
-
-test("Now holds the ready-only count, not the 128-id overload", () => {
-  const ids = nowIds();
-  assert.equal(ids.length, 83, `Now holds ${ids.length} ids, want 83 ready-only (was 128)`);
-  assert.match(focusText(), /Now holds 83 ids/, "count line names 83 (revert to 128 and this goes red)");
-  assert.doesNotMatch(focusText(), /Now holds 128 ids/, "stale 128-id count is gone");
-});
-
-test("every Now id is open and ready (no done, no waiting)", () => {
-  const { tasks } = board();
-  const ids = nowIds();
-  for (const id of ids) {
-    const t = tasks.get(id);
-    assert.ok(t, `${id} is on the board`);
-    assert.ok(!t.done, `${id} is ticked/done and must leave Now (revert LJ1/EG19 and this goes red)`);
-    assert.ok(rowReady(tasks, t), `${id} waits and must leave Now (revert waiting rows and this goes red)`);
+// Ids on every numbered "N. **Title** ... Rows: ..." line, wherever it sits.
+function numberedItemIds(text) {
+  const ids = [];
+  for (const line of text.split("\n")) {
+    if (!/^\d+\. \*\*/.test(line)) continue;
+    const m = /\bRows:\s*(.+)$/.exec(line);
+    if (!m) continue;
+    for (const tok of m[1].split(/[\s,;]+/)) {
+      const id = tok.replace(/[.)]+$/, "");
+      if (/^[A-Z][A-Z0-9]*\d[a-z]?$/.test(id)) ids.push(id);
+    }
   }
+  return ids;
+}
+
+test("Now names at least one row", () => {
+  assert.ok(focusNowIds(focusText()).length > 0, "FOCUS.md ## Now has no Rows: ids");
 });
 
-test("ticked rows stay out of Now", () => {
-  const ids = nowIds();
-  assert.ok(!ids.includes("LJ1"), "LJ1 is done and stays out (restore it and this goes red)");
-  assert.ok(!ids.includes("EG19"), "EG19 is done and stays out (restore it and this goes red)");
+test("every numbered focus item sits inside ## Now, so --focus sees its rows", () => {
+  const text = focusText();
+  const now = new Set(focusNowIds(text));
+  const outside = numberedItemIds(text).filter((id) => !now.has(id));
+  assert.deepEqual(outside, [], `ids on numbered items outside ## Now: ${outside.join(" ")}`);
 });
 
-test("waiting chains stay out of Now (ready focus order)", () => {
-  const ids = nowIds();
-  for (const id of ["SP63b", "SP63c", "EG11b", "EG11c", "Q1", "GP38", "HS32", "EG46b"]) {
-    assert.ok(!ids.includes(id), `${id} waits and stays out (restore it and this goes red)`);
+// Ticked ids are harmless (--focus prints ready rows only); unknown ids are typos.
+test("every Now id is a board row", () => {
+  const { tasks } = parseBoard(loadBoardText(), archivedDoneRows());
+  const unknown = focusNowIds(focusText()).filter((id) => !tasks.get(id));
+  assert.deepEqual(unknown, [], `ids not on the board: ${unknown.join(" ")}`);
+});
+
+test("no stale pointers to removed loop tools", () => {
+  const text = focusText();
+  for (const gone of ["drift-check.mjs", "steal-next.mjs", "PARKED_SECTIONS", "C:\\empire"]) {
+    assert.ok(!text.includes(gone), `FOCUS.md still names ${gone}`);
   }
 });

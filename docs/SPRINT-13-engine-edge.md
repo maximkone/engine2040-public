@@ -31,11 +31,11 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   (orchestrator) Tier A. Size M. Owns `tools/affected.mjs`. Accept: a
   seeded `combat` edit runs combat and dependents only; a `core` edit
   runs all; lane gate median wall time halved. needs: OPT1.
-- [ ] OPT8 ops: feature unification spike — a cargo-hakari workspace-hack
+- [ ] OPT8 ops: feature unification spike — a cargo-hakari workspace-hack Progress 2026-10-17: `crates/workspace-hack` (OPT36) and `tools/feature-unify.mjs` are on disk and `engine-workspace-hack` is a workspace dependency; spike evidence is in docs/SMOOTH-BUILD.md (16 syn, 12 serde_json, 14 num_traits copies in target/debug/deps before the hack). Left: the before/after dependency rebuild count across five lane builds (bar: drops by a third).
   crate (license read first). (orchestrator) Tier B. Size S. Owns the
   spike report. Accept: dependency rebuild count across five lane builds
   before/after; kept only if it drops by a third. needs: OPT1.
-- [ ] OPT9 ops: compile cache spike — sccache across lane pools.
+- [ ] OPT9 ops: compile cache spike — sccache across lane pools. Progress 2026-10-17: docs/SMOOTH-BUILD.md holds the OPT9 evidence: sccache 0.18.0 is opt-in per run (the pool wrapper was removed on purpose, .cargo/config.test.mjs guards it) and the GitHub check workflow runs with sccache. Left: a cold lane build before/after number (bar: at least 30% faster).
   (orchestrator) Tier B. Size S. Owns the spike report. Accept: cold lane
   build time before/after; kept only if ≥ 30% faster. needs: OPT1.
 - [ ] OPT11 ops: crate fan-out cut — reverse-dependency closure times
@@ -49,7 +49,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   window build. Tier C. Size M. Owns the spike report. Accept: an edit
   reaches the running game in ≤ 2 s with state kept, or the row closes
   with the failure. needs: OPT3.
-- [ ] OPT14 ecs: spine performance bars — PF1 workloads on the ARC spine:
+- [ ] OPT14 ecs: spine performance bars — PF1 workloads on the ARC spine: Progress 2026-10-17: `SpineTransformBody` (10k entity-steps) and `SpineFullTick` (1,024 agent-ticks) exist in crates/perf/src/workloads.rs with recorded hash baselines, kill-bar rows 0.5 ms and 2.0 ms in `TIME_BUDGETS_MS` (baselines.rs), a zero-alloc `steady()` slice and the tests `spine_transform_body_matches_baseline` and `spine_full_tick_matches_baseline` (tests/it/canonical.rs). Left: measured ms x2 posted in the PF1 table.
   10k entities transform and body step ≤ 0.5 ms, 1k agents full tick
   ≤ 2 ms, 0 allocations; the ARC3 parity harness prints them. Tier B.
   Size S. Owns `crates/perf` spine workloads. Accept: numbers x2 in the
@@ -81,13 +81,13 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   material shows no frame above 1.5× the median from pipeline creation.
   Tier A. Size S. Owns warm-up hunks in `crates/render/src/cache.rs`.
   Accept: the walk fixture passes x2. needs: RA5, RA7.
-- [ ] OPT20 render: dynamic resolution — measured GPU time drives the
+- [ ] OPT20 render: dynamic resolution — measured GPU time drives the Progress 2026-10-17: The control law landed as `crates/render/src/dynres_gov.rs` (DynRes, GS12) wired into `aa_scale::ScaleController`; tests scale_dynres_* and scale_controller_spike_floors_through_the_governor (a 3x spike floors the scale at 50%). Left: a seeded GPU-load fixture proving frame time p95 at most 16.7 ms, the resolution-change log, and the file name (the row says dynres.rs).
   internal resolution between 50% and 100% through the TAAU upscaler to
   hold the frame budget. Tier B. Size M. Owns
   `crates/render/src/dynres.rs`. Accept: under a seeded GPU load spike
   frame time p95 ≤ 16.7 ms; resolution changes logged; golden unchanged.
   needs: GX4, RA8.
-- [ ] OPT21 ops: mutation testing ratchet — cargo-mutants on `core`,
+- [ ] OPT21 ops: mutation testing ratchet — cargo-mutants on `core`, Progress 2026-10-17: `tools/mutants.mjs` (+ mutants.test.mjs) runs cargo-mutants on a patch and fails closed on surviving mutants in the changed lines. Left: the per-crate survival ratchet over core, combat, nav, spatial and net, and the deleted-assertion drill.
   `combat`, `nav`, `spatial` and `net`; surviving mutants listed with
   rows for the worst gaps; the survival rate per crate may never rise.
   Tier A. Size M. Owns the report and the ratchet leg. Accept: seeding a
@@ -122,20 +122,20 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   `crates/provider/src/ladder.rs`. Accept: every backend reports its rung;
   malformed output never applies; rung drops are logged events. needs:
   PV5, AX1.
-- [ ] OPT26 provider: scorecard router — per task class (bark, dialogue,
+- [x] OPT26 provider: scorecard router — per task class (bark, dialogue, Landed aa644693. Run 39052718180; router has no caller beyond Ask::for_request yet.
   level brief, encounter, review) pick a model from the eval scorecard
   (quality, p95 latency, cost) under budget caps, falling back local →
   remote → scripted; every decision recorded. Tier B. Size M. Owns
   `crates/provider/src/router.rs`. Accept: a seeded outage of the top
   model reroutes within the deadline; decisions replay from the record;
   a cost cap refuses loudly. needs: OPT24, EV1.
-- [ ] OPT27 provider: inference arbiter — local models and the game
+- [ ] OPT27 provider: inference arbiter — local models and the game Progress 2026-10-17: provider side done (arbiter, serving adapter); left: feed live frame p95 and read_vram, window-build budget check on a GPU.
   share one 6 GB GPU: under frame pressure local inference moves to CPU,
   defers or routes remote; VRAM use reported; the tick never waits.
   Tier B. Size M. Owns `crates/provider/src/arbiter.rs`. Accept: with a
   local model loaded the window build holds the P6 frame budget; requests
   degrade with typed notices. needs: PV2, RA4.
-- [ ] OPT28 provider: prompts as versioned assets — every prompt and
+- [x] OPT28 provider: prompts as versioned assets — every prompt and Landed aa644693. Run 39052718180.
   brief template is a content-addressed asset with version, provenance
   and an eval set; an edit re-runs its evals and may not lower the score.
   Tier B. Size S. Owns `crates/provider/src/prompt.rs`. Accept: a seeded

@@ -872,14 +872,6 @@ impl TiledNav {
         Ok(TileId(tile))
     }
 
-    /// True when a cell is blocked. Errors: [`TileError::OutOfBounds`].
-    pub fn is_blocked(&self, x: usize, y: usize) -> Result<bool, TileError> {
-        if x >= self.w || y >= self.h {
-            return Err(TileError::OutOfBounds);
-        }
-        Ok(self.blocked[y * self.w + x])
-    }
-
     /// Version of one tile. Errors: [`TileError::BadTile`].
     pub fn version(&self, tile: TileId) -> Result<u32, TileError> {
         self.registry.version(tile)

@@ -330,11 +330,6 @@ impl FighterState {
         self.hp_permille > 0 && self.react == 0 && self.knockdown == 0
     }
 
-    /// True during dodge invulnerability frames under the shipped V1 row.
-    pub const fn invulnerable(self) -> bool {
-        self.invulnerable_with(&TABLES_V1)
-    }
-
     /// True during dodge invulnerability frames under explicit table rows.
     pub const fn invulnerable_with(self, tables: &Tables) -> bool {
         self.is_dodging && self.dodge_age < tables.dodge_iframes_ticks

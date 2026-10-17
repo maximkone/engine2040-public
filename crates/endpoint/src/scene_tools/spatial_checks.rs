@@ -103,7 +103,7 @@ pub(crate) fn partition<'a>(
     // Opt-in names (`relationCycle`) ride outside the frozen catalog; the door
     // can always drive them over the staged graph.
     for name in selected.into_iter().flatten() {
-        if !engine_spatial::SPATIAL_CHECKS.contains(&name) {
+        if !engine_spatial::SPATIAL_CHECKS.contains(name) {
             run.push(name);
         }
     }
@@ -127,19 +127,4 @@ pub(crate) fn label_table(ids: &[ObjectId]) -> Vec<String> {
             object_label(index, id)
         })
         .collect()
-}
-
-/// One finding rendered exactly like the SP4 brief lines (`finding <check>
-/// <a> <b|-> <severity> <pct>`), so spatial rows compare directly against
-/// brief text. Single-actor findings render `b` as `-`.
-pub(crate) fn finding_line(finding: &engine_spatial::Finding) -> String {
-    let b = if finding.b == u32::MAX {
-        "-".to_string()
-    } else {
-        finding.b.to_string()
-    };
-    format!(
-        "finding {} {} {} {} {}\n",
-        finding.check, finding.a, b, finding.severity, finding.pct
-    )
 }

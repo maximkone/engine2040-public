@@ -120,6 +120,22 @@ pub struct Blast {
     pub impulse_ns: u32,
 }
 
+/// An authority projectile hit, with the integers the sim holds it in: an arrow, a bolt or a
+/// thrown stone landing on the world. Unlike a [`Blast`] it pushes along the projectile's heading
+/// and the push is a real impulse, so a heavy body moves less than a light one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Impact {
+    /// Where it landed, millimeters.
+    pub at_mm: [i32; 3],
+    /// The projectile's heading. Only the direction counts, not the length; not all zero.
+    pub direction: [i16; 3],
+    /// The projectile's momentum in newton-seconds at the hit (mass times speed), what a body
+    /// at the hit point receives. It falls off linearly to nothing at `radius_mm`.
+    pub impulse_ns: u32,
+    /// How far around the hit point it shoves, millimeters.
+    pub radius_mm: u32,
+}
+
 /// The authority's account of an arrow or a thrown object: where it left, where it hit and how
 /// many ticks later. The hit stays authority; the picture only draws the arc between the two.
 #[derive(Clone, Copy, Debug, PartialEq)]

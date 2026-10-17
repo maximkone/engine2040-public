@@ -1,36 +1,57 @@
 # engine2040
 
-> Rust engine, AI-native, deterministic. Game: Rome at war. Golden `d57b5c8ae3096614`.
+> Rust game engine, deterministic and AI-native. One door (an MCP server) lets an AI set up, run and check a whole game. Proof game: a multiplayer Roman arena. Golden hash `d57b5c8ae3096614` (seed 2040, 600 ticks).
+
+Read `docs/book/for-ai.md` first. It is short, and a test checks that every path and command in it exists.
 
 ## Start here
 
-- [README](README.md): engine overview and proof game
-- [AGENTS.md](AGENTS.md): execution policy
-- [docs/INDEX.md](docs/INDEX.md): doc map
-- [docs/VISION.md](docs/VISION.md): where the engine is going
-- [docs/ROADMAP.md](docs/ROADMAP.md): the boss file for what gets built
-- [CONTRIBUTING.md](CONTRIBUTING.md): setup, gates, delivery
+- [For AIs: read this first](docs/book/for-ai.md): what the engine is, the proofs to run, the rules that win, where plans live, the door verbs to start with
+- [README](README.md): overview and the two proof commands
+- [CONTRIBUTING](CONTRIBUTING.md): setup and gates
+- [docs/INDEX.md](docs/INDEX.md): the doc map
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crate layers and who may depend on whom
+- [docs/CRATE-MAP.md](docs/CRATE-MAP.md): every crate with its job
 
-## Work
+## Prove it works
 
-- [docs/SPRINT.md](docs/SPRINT.md): the work board
-- [docs/EMPIRE-INBOX.md](docs/EMPIRE-INBOX.md): work asked from center
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crate layers
+- `cargo run --locked -- --verify` prints `final_hash=d57b5c8ae3096614` and `verified=true`
+- `node tools/proof.mjs --skip-build` runs the seed and tape proofs
+- `node tools/web-build.mjs` builds the browser shell into `dist/web` (`node tools/web-doctor.mjs` lists what is missing)
+- `node tools/workspace-check.mjs` audits the workspace after board or doc edits
 
-## Folders
+## Rules that win
 
-- [crates](crates): rust crates by job
-- [docs](docs): canonical docs and plans
-- [tools](tools): node gates and lane scripts
-- [content](content): game data and arena source
+- [docs/HASH-LAW.md](docs/HASH-LAW.md): what determinism proves; integers in simulation, no platform trig, the golden moves only with a receipt
+- [docs/plan/web-and-realism.md](docs/plan/web-and-realism.md): the authority layer and the physical layer; one render writer at a time
+- Commit by path: pull first, commit only your own paths, never `git add -A`, never rebase, amend or force-push
+- [docs/RUST-QUALITY.md](docs/RUST-QUALITY.md): no stubs, `#[expect(reason)]` not `#[allow]`, `node tools/rust-quality.mjs` stays green
 
-## Entry points
+## Plans and rows
 
-- [Cargo.toml](Cargo.toml): workspace root and crate list
-- [docs/CODELAW.md](docs/CODELAW.md): engineering rules
-- [docs/HASH-LAW.md](docs/HASH-LAW.md): golden hash scope
+- [docs/FOCUS.md](docs/FOCUS.md): the order of work, section "Now"
+- [docs/SPRINT.md](docs/SPRINT.md): the board. Slice it with `node tools/board-slice.mjs --focus`, `--ready` or a row id
+- [docs/plan/README.md](docs/plan/README.md): one plan per subsystem; `node tools/plan-atlas.mjs --row <ID>` finds a row's plan
+- [docs/SPRINT-22-web-realism.md](docs/SPRINT-22-web-realism.md): the browser, realism, AI setup and docs rows
+- [tools/README.md](tools/README.md): the node tools
+
+## The door
+
+- [Door reference](docs/book/door-reference.md): every core tool and verb pack with arguments, ranges, typed refusals, undo and scope, printed from the Rust source
+- [The AI door](docs/book/ai-door.md): how a session works (read, preview, apply, undo)
+- [crates/endpoint/src/packs](crates/endpoint/src/packs): the verb packs
+- Start with `rpc.discover`, `api.search`, `api.describe`, `scene.read`, `tx.preview`, `tx.apply`, `tx.undo`
+
+## The handbook
+
+- [Quick start](docs/book/quick-start.md): a fresh checkout to a running headless arena
+- [Build, run and publish the web target](docs/book/web-build.md)
+- [Physics layers](docs/book/physics-layers.md): what the sim decides and what only looks heavy
+- [Quality tiers](docs/book/quality-tiers.md): what each tier cuts
+- [Troubleshooting](docs/book/troubleshooting.md): no WebGPU, black canvas, blocked UDP, wrong MIME, stale certificate
 
 ## Optional
 
+- [docs/research/web-2026-10-17/07-wasm-probe.md](docs/research/web-2026-10-17/07-wasm-probe.md): what compiles and runs on WebAssembly, measured
 - [LICENSE-APACHE](LICENSE-APACHE): Apache 2.0
 - [SECURITY.md](SECURITY.md): supported track and disclosure

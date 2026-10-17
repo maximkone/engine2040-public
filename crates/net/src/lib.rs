@@ -1,7 +1,14 @@
 //! net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
 
+/// Browser clients: the WebSocket and WebTransport legs of a page joining the
+/// dedicated server, behind the same `Transport` trait (wasm32 glue plus the
+/// natively tested inbox and stream framing).
+pub mod browser;
 /// Tick-budgeted pre-cooked map-cell streaming (district/siege cells).
 pub mod cells;
+/// Connect race: WebTransport against WebSocket, first success wins, a failure
+/// names the blocked leg. Pure logic over futures.
+pub mod connect_race;
 /// Real-UDP link between the two machines of a split bout: lockstep slot
 /// exchange with resends, relay registration, STUN echo, hole punch, probes.
 pub mod courier;
@@ -28,9 +35,10 @@ pub mod online;
 /// The played bout: lobby-formed fight, dedicated server, predicting clients,
 /// scripted mid-fight drop and rejoin over a [`link::Wire`].
 pub mod played;
-/// QUIC transport: quinn datagrams + streams behind Transport.
-/// Feature-gated (`quic`); the headless default stays std-only UDP.
-#[cfg(feature = "quic")]
+/// The `Transport` trait, the frame types and the std-only transports (UDP,
+/// relay, simulated QUIC). The quinn backend inside is feature-gated (`quic`);
+/// the headless default stays std-only UDP. The module compiles for the
+/// browser, so the browser clients can implement the same trait.
 pub mod quic;
 /// Posted evidence of the played proofs as JSON receipts. Std-only.
 pub mod receipt;
@@ -51,6 +59,9 @@ pub mod snapshot;
 pub mod split;
 pub mod tick_budget;
 pub mod wan_soak;
+/// WebSocket transport, the fallback for browsers on networks that drop UDP:
+/// the wire layout (always) and the native server (feature `websocket`).
+pub mod websocket;
 /// WebTransport server transport for browser clients: datagrams carry the
 /// snapshots, one bidirectional stream carries reliable events, and the
 /// pinned self-signed certificate helper feeds `serverCertificateHashes`.

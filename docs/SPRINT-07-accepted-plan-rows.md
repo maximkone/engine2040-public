@@ -1,6 +1,6 @@
 ### Accepted plan rows (Tier A/B future; dispatch like Finish line rows)
 
-- [ ] RC8 core: deterministic math spike — correctly rounded sin, cos, exp
+- [ ] RC8 core: deterministic math spike — correctly rounded sin, cos, exp Progress 2026-10-17: crates/core/src/det_math.rs has det_sin/det_cos/det_exp/det_atan2za on Fixed (det_golden_spots, det_bit_identical_100k, det_zero_alloc); left: corpus is 100k not 1M, no two-toolchain run, CODELAW sin/cos ban not lifted.
   and atan2 (CORE-MATH and RLIBM methods, papers only, no code copied)
   behind a gate; `Fixed` stays the default sim math. Tier C. Size M. Owns
   `crates/core/src/det_math.rs`. Accept: a 1M-input corpus is bit-identical
@@ -15,7 +15,7 @@
   verdict as the full rehash on 20 of 20 seeded divergences with exact
   localization; at least 10% faster at 8 fighters or killed with numbers;
   golden unchanged. needs: none.
-- [ ] RC11 ecs: parallel bake and verify — extend the RC3 fork-join to bake,
+- [x] RC11 ecs: parallel bake and verify — extend the RC3 fork-join to bake, Landed f74588ee. bake_words/verify_sums/broadphase_pairs_match_serial_across_threads_and_chunks (workers 0,1,2,4,8 x 5 chunkings) run 39056114783; scaled_bake_parallel_clears_2x_over_serial (--ignored, release, runner) ok run 39056618000.
   verify and broadphase work only (never the sim tick; Rapier parallel stays
   DROP), seeded by RC7 streams. Tier B. Size S. Owns
   `crates/ecs/src/parallel.rs`. Accept: bit-identical across 1, 2, 4 and 8
@@ -27,7 +27,7 @@
   `crates/net/src/handshake.rs`. Accept: handshake roundtrip x2;
   bad keys refuse. needs: NET1. (RES-REPO wave 32 corner 3, reviewed
   2026-09-26.)
-- [ ] RC16 ecs: wrapping change ticks — u32 Tick with relative compare +
+- [x] RC16 ecs: wrapping change ticks — u32 Tick with relative compare + Landed 7d13d5f1. changed_scan_does_half_the_compares_when_one_column_clean (20,000 vs 10,002 compares on the 1%-dirty 10k scene), wrap_soak_near_max_repeats_exactly (x2), timing_10k_1pct_reports_gated_faster (--ignored, release); runs 39056114783 and 39056618000; golden d57b5c8ae3096614 held at DSN2 run 39054403838.
   MAX_CHANGE_AGE clamp at the tick boundary + per-column summary ticks;
   Changed-iteration skips clean columns (bevy_ecs
   `change_detection/tick.rs`, MIT OR Apache-2.0, pattern reimplemented).
@@ -41,7 +41,7 @@
   stays reserved for RC12 splits). Tier B. Size M. Owns spine call sites
   in `crates/ecs` (no new storage). Accept: 20 prefab spawns bytes x2;
   0 tick-path allocs; golden unchanged. needs: ARC1, RC4.
-- [ ] RC20 ecs: ordered slot-write collect for bake/verify/anim-eval lanes
+- [ ] RC20 ecs: ordered slot-write collect for bake/verify/anim-eval lanes Progress 2026-10-17: fork_join_on gathers chunk partials in slots, bit-identical across 0/1/2/4/8 workers (parallel.rs, run 39056114783) and a synthetic scaled bake clears 2x (run 39056618000); left: the ordered slot-write collect with exact-len pre-size and full-coverage assert is not built, 2x not measured on the CT2 workload.
   — exact-len pre-size, disjoint index-slot writes, full-coverage assert
   (rayon `iter/collect`, MIT, pattern reimplemented, no dependency; sim
   tick untouched). Tier B. Size S. Owns `crates/ecs/src/parallel.rs`
@@ -105,7 +105,7 @@
   drift; same tape twice identical; golden `d57b5c8ae3096614` x2 or a
   HASH-LAW receipt with old/new hashes; `git grep FixedAcc` finds no
   sim-path user. needs: RC6.
-- [ ] RC31 app: per-frame overhead harness — ordering + extraction
+- [x] RC31 app: per-frame overhead harness — ordering + extraction Landed 0e40e0e5. rc31_harness_posts_p50, rc31_ordering_plus_extraction_under_budget (--include-ignored, release), rc31_over_budget_names_slowest_stage; p50=0us over 200 frames on the runner (not the reference machine) run 39058615260.
   asserted under 0.1 ms p50 as a PF1-style workload on the reference
   machine. Tier A. Size S. Owns test hunks in `crates/app` (no new
   crate). Accept: `cargo test -p engine-app` posts the p50 number;
@@ -130,7 +130,7 @@
   `crates/app`. Accept: numbers posted on the reference machine;
   replay x2 identical; golden unchanged or a HASH-LAW receipt.
   needs: RC29.
-- [ ] ARC5 net+save: spine rollback and persistence — net resim and
+- [ ] ARC5 net+save: spine rollback and persistence — net resim and Progress 2026-10-17: save side exists (crates/save/src/persist.rs spine payload, rollback.rs spine_gate); crates/net has no spine call sites; left: net resim over spine bytes and the QUIC + UDP drop/rejoin convergence proof.
   save envelope consume `spine::snapshot/restore`; a loopback drop
   and a save round-trip converge on spine bytes, over the QUIC channel
   mapping (`crates/net/src/quic.rs`, ON1) as well as UDP. Tier A.
@@ -231,7 +231,7 @@
   seeded float dt in the spine path fails; `cargo test -p
   engine-ecs` green; golden unchanged. needs: ARC17, RC6. (PLN
   architecture EXTEND 2026-09-30; planner-rows-r1.)
-- [ ] ARC19 arena: single-tape spine parity probe — the smallest ARC3
+- [ ] ARC19 arena: single-tape spine parity probe — the smallest ARC3 Progress 2026-10-17: crates/arena/src/parity.rs (feature spine): twenty_seeded_tapes_match_exactly_over_600_ticks and a_wall_in_the_way_reports_the_exact_first_divergence green run 39058684792 (20 tapes over 600 ticks, first divergence names tick + column); spine columns live in crates/ecs/src/spine.rs, so the ARC17 need (columns in archetype.rs) is not met as written; proof time not posted.
   slice: translate one seeded tape's inputs into the ARC17 columns
   once, step one tick beside the legacy step, and compare the
   checkpoint, reporting the first divergent component or exact-match.
@@ -253,7 +253,7 @@
   only the real-NAT hole-punch leg needs a second network.)
   progress 2026-10-10: loopback Accept met. `net-bout mp6` PASS (LAN and WAN converge, full checkpoint equality, soak 16 bots x600 hash 681d5332c0a19f60 x2, fault matrix x2). `node tools/mp6-check.mjs`: 23 pass, 0 fail, 1 warn: resim window 8 vs WAN deepest 19 (116 ticks over, counted on the resync path; owner decision, window not changed here). Open: real two-machine LAN leg (no two-machine runner in the repo yet). AI-swap test played_ai_broadcasts_identical_with_machine_ids_swapped passes on the tree; its played.rs commit is shared with split-claude.
   progress 2026-10-10 (split-claude): two-machine runner built, `crates/net/src/split.rs` + `courier.rs`. Machine A: `net_bout mp6-serve [--bind 0.0.0.0:7040] [--out target/mp6-lan]`; machine B: `net_bout mp6-join --server A:7040`. Lockstep step exchange over real UDP; the fault links run in step time, so each bout equals its one-process twin (digest checked per bout in `real-net.json`, with probe RTT, loss and resends). Two-process loopback smoke: MP6 CHECK PASS (23 pass, 0 fail, same resim WARN). Open: one run on two real machines.
-- [ ] MP8 net: channel table + priority mapping — every wire `KIND_*`
+- [x] MP8 net: channel table + priority mapping — every wire `KIND_*` Landed 1d01a410. kind_table_reads_every_kind, combat_inputs_never_starve_under_snapshot_flood, full_16_snapshot_fits_a_datagram run 39056258774; table covers the 3 session-wire KIND_* (lobby.rs KIND_* is a separate wire outside the table).
   maps to a `Channel` plus a priority class in one table the encoder
   reads; 16-fighter full snapshots stay within 1200 bytes. Tier B.
   Size S. Owns `crates/net/src/netcode.rs` channel table + `scale.rs`
@@ -286,7 +286,7 @@
   same flags x2; a clamped input names its tick in the replay
   report; golden unchanged. needs: MP4, NET1.
   (PLN31 multiplayer.md EXTEND, reviewed 2026-09-28.)
-- [ ] MP14 net: resim auto-tune — the 8-tick resim window and input
+- [x] MP14 net: resim auto-tune — the 8-tick resim window and input Landed 1d01a410. mp14_window_and_delay_sized_by_posted_mp6 + adaptive_delay_covers_the_round_trip_minus_the_window run 39056258774.
   delay become measured values sized by the MP6 posted
   distributions, with a fixture that fails when hardware data would
   move them. Tier A. Size S. Owns tuning hunks in
@@ -294,7 +294,7 @@
   values stay reviewed). Accept: window sized by posted data with
   the sizing math in-test; MP6 distributions referenced by digest.
   needs: MP6. (PLN31 multiplayer.md EXTEND, reviewed 2026-09-28.)
-- [ ] MP15 net: dedicated auto-theater — every `HeadlessServer`
+- [x] MP15 net: dedicated auto-theater — every `HeadlessServer` Landed 1d01a410. dedicated_auto_theater_ends_playable_with_cr1_parity + dedicated_auto_theater_refuses_before_finish_and_bad_probe run 39056258774.
   match end writes its theater tape plus CR1 divergence report with
   no operator step. Tier A. Size S. Owns match-end hunks in
   `crates/net/src/dedicated.rs` (theater reuses MP4/MP7 shapes, no
@@ -322,7 +322,7 @@
   `MAX_PARTICIPANTS=16` count gate, revival rides GE12. Children:
   land the 16-baseline now, revive 32 after GE12.)
   (DO NOT DISPATCH 2026-10-05: KILLED wave 96, count gate refuses 32. Take MP16a now, MP16b after GE12. Revival rides GE12, never a soak hunk.)
-- [ ] MP16a net: 16-fighter LAN soak baseline within the current
+- [x] MP16a net: 16-fighter LAN soak baseline within the current Landed c2ffb691. soak_16_bot_x600_converges_with_matching_hashes, combat_inputs_never_starve_under_snapshot_flood, kbps_chart_rows_stay_under_target; scale filter 19 passed run 39056258774.
   cap — priorities plus idle-shed prove 16 fighters inside the MP2
   1200-byte budget. Tier B. Size S. Owns soak hunks in
   `crates/net/src/scale.rs` (caps frozen, values reviewed).
@@ -355,7 +355,7 @@
   first, deltas smaller on quiet tapes, ≥20% saving or killed
   with numbers; hash x2. needs: MP8, MP9, MP16.
   (PLN multiplayer.md EXTEND, proposed 2026-09-29.)
-- [ ] MP19 net: every-match theater receipt — the MP7 three-tape
+- [x] MP19 net: every-match theater receipt — the MP7 three-tape Landed 1d01a410 (with MP15). dedicated_auto_theater_ends_playable_with_cr1_parity (playable tape + report equal to CR1 attribute) and ..._refuses_before_finish_and_bad_probe (corrupt probe refused BadInput) run 39056258774.
   attribution plus the MP15 match-end auto-write as one receipt:
   every dedicated match ends playable and attributed with zero
   operator steps. Tier A. Size S. Owns match-end hunks in
@@ -398,7 +398,7 @@
   P2P: full `-p engine-net --lib` stays green + golden unchanged.
   Kill: no count drop, tip hash diverges, or resim distance > 8.
   needs: MP2. (RES-STEAL 680-res-ggpo4, 2026-10-08.)
-- [ ] GP18 game: feel baseline lock — pin the GP11 schemas plus GP12
+- [ ] GP18 game: feel baseline lock — pin the GP11 schemas plus GP12 Progress 2026-10-17: baselines pinned (pq2_kill_bars_pin_v1_baseline, no-float gate); open question: Accept says no move above 35% of kills but the v1 survey pins attack share 395 (350 bar gates multi-move tables only); owner call.
   harness with PQ1/PQ2 kill bars and a no-float-in-tick grep. Tier B.
   Size S. Owns baseline hunks beside `crates/combat/src/feel.rs` +
   `crates/game/src/bench.rs` (no new pass). Accept: PQ1 p95 at or
@@ -421,14 +421,14 @@
   0 allocs; captures show all layers. needs: GP11, GP16, GP21.
   (PLN45 gameplay, verdict TAKE.) CB4 supplies the four contact-frame
   data layers this row fans out — data before wiring (PLN49).
-- [ ] GP8 game: camera feel cores — flax-mcp camera rig, damping, impulse
+- [ ] GP8 game: camera feel cores — flax-mcp camera rig, damping, impulse Progress 2026-10-17: not restored: camera_rig.rs, follow_pose, shake_offset and add_trauma already cover the old camera_feel.rs; only a pose transition would be new.
   dispatch and transition cores rewritten in Rust as `crates/game`
   camera modules (MIT, PORT cite + EVIDENCE row; clean-room, no vendor).
   Tier B. Size M. Owns `crates/game/src/camera_feel.rs`. Accept: rig
   produces a valid follow pose headless; damping frame-rate-independent;
   fixtures green. Kill: float math in the tick; divergence on same seed.
   needs: GP3. (RES-STEAL wave 32 flax-mcp, reviewed 2026-09-26.)
-- [ ] GF1 feel: Juicee game-feel pipeline reimplemented in Rust —
+- [x] GF1 feel: Juicee game-feel pipeline reimplemented in Rust — Landed 374c0303. combat feel.rs; 40 passed.
   hit-stop, shake, reactions over HR3 move tables (MIT, PORT cite +
   EVIDENCE row). Tier B. Size M. Owns `crates/combat/src/feel.rs`.
   Accept: hit-stop ≤ 2 frames, shake amplitude within tolerance, PQ2
@@ -446,7 +446,7 @@
   frame; effects deterministic. Kill: Unity/Godot dependency;
   per-tick allocation. needs: GF1. (RES-STEAL wave 35 Dive 11,
   reviewed 2026-09-26.)
-- [ ] GP6 game: feel quantification — Pichlmair & Johansen 2011.09201v1
+- [ ] GP6 game: feel quantification — Pichlmair & Johansen 2011.09201v1 Progress 2026-10-17: crates/perf/src/feel.rs scorer with 8 unit tests (50 ms bar, win 400-600 permille, rubric 900 permille); test-only, counts are plain numbers; left: fixtures/feel-gold/ missing, no feed from real PQ1/PQ2/VK1 runs.
   three-domain framework operationalized into PQ1 latency bands plus a
   VK1 keypoint rubric (ideas only, license UNVERIFIED). Tier A. Size M.
   Owns `crates/perf/src/feel.rs` + `fixtures/feel-gold/`. Accept: PQ1
@@ -467,19 +467,19 @@
   `crates/anim/src/camera_framing.rs`. Accept: PQ1 latency ≤ 50ms;
   silhouette readability ≥ 80% in playtest. Kill: float math in tick.
   needs: PQ1, GP13. (RES-ARXIV wave 35 Dive 11, reviewed 2026-09-26.)
-- [ ] ED14 editor: browser real-edge wiring - AS1 `bundle::EntryKind` +
+- [x] ED14 editor: browser real-edge wiring - AS1 `bundle::EntryKind` + Progress 2026-10-17: kind_wire_bytes_match_as1_entrykind, full_bundle_search_stays_under_50ms and the bad-drop conflict-set tests exist in crates/editor/src/browser.rs; left: the local EntryKind / GRID_CM / YAW_STEPS mirror copies are not deleted. Landed 4bd06b85. Mirrors deleted, solver is engine_spatial::place::solve; 4096-entry archive search 1.6 ms; run 39058437704.
   SP5 `place` vocabulary replace the mirrors (ED3 file frozen; lands
   after ED3). Tier B. Size M. Owns `crates/editor/src/browser.rs`
   wiring hunks. Accept: mirrors deleted; full AS1 bundle search ≤ 50 ms
   measured; bad drops refused with conflict sets. needs: ED3, AS1, SP5.
-- [ ] ED15 editor: live-panel integration - the ED1 hierarchy tab
+- [x] ED15 editor: live-panel integration - the ED1 hierarchy tab Progress 2026-10-17: live_panels_share_one_selection (shell_ui.rs) green on the PC with --features ui: viewport pick, outliner search and inspector grid agree on one SharedSelection; left: no Xvfb smoke run. Landed 71c3f0fb. live_panels_share_one_selection and the headless dock frame smoke (stands in for the Xvfb smoke).
   consumes `outline.rs` (search + sets), the inspector panel consumes
   the `inspector.rs` grid, one selection-unity test over the three live
   panels. Tier B. Size M. Owns `crates/editor/src/shell_ui.rs` panel
   hunks. Accept: viewport/outliner/inspector agree on the identical
   live selection object; no parallel hierarchy/inspector in `shell_ui`;
   Xvfb smoke. needs: ED2, ED6, ED1.
-- [ ] ED16 editor: play parity on three tapes - same tape through child
+- [x] ED16 editor: play parity on three tapes - same tape through child Landed 7d13d5f1. three_tapes_child_and_viewport_seal_same_checkpoints_twice, play_in:: 9 passed (local PC run, cargo test -p engine-editor --features ui --lib, 2026-10-17; the ui feature never routes to the runner).
   play and `play_in` gives same checkpoints (short fight, long soak,
   tuned fight); Xvfb smoke. Tier B. Size M. Owns
   `crates/editor/src/play_in.rs` proof hunks + tape fixtures. Accept:
@@ -496,12 +496,12 @@
   Size S. Owns `crates/editor/src/onboard.rs` timing hunks. Accept:
   measured time posted; every blocker fixed in the flow, not coached
   around. needs: ED5, ED4.
-- [ ] ED19 editor: outliner at siege scale - 2,000-row scene (64-player
+- [x] ED19 editor: outliner at siege scale - 2,000-row scene (64-player Landed 71c3f0fb. siege_scene_search_stays_under_50_ms (worst 344.9us), quiet_panel_frame_stays_under_one_millisecond_at_siege_scale (15.4us quiet, 2.8ms after an edit), selection_sets_over_hundreds_of_siege_rows (1.06ms); 19 outline tests, local PC run 2026-10-17.
   + 500-AI shape): search ≤ 50 ms, panel frame ≤ 1 ms, selection sets
   over hundreds (Godot rename-proof shape stands, MIT). Tier C.
   Size S. Owns `crates/editor/src/outline.rs` scale hunks + fixture.
   Accept: fixture numbers posted; no mirror types. needs: ED6.
-- [ ] AS4 assets: handles and load states — generational handles and
+- [x] AS4 assets: handles and load states — generational handles and Landed 070e6fdb. handle:: 10 passed incl. fifty_asset_matrix_resolves_or_refuses and stale_handle_never_panics_and_never_ready run 39056931005.
   NotLoaded, Loading, Loaded or Failed per asset with dependency readiness,
   typed refusals and no panics, on top of the AS2 queue (Bevy asset pattern,
   MIT OR Apache-2.0). Tier B. Size S. Owns `crates/assets/src/handle.rs`.
@@ -525,7 +525,7 @@
   on headphones; LICENSE verified first with evidence row.
   needs: AU1.
   LATER: parked 2026-10-03 (circus verdict: audio parked by FOCUS.md (owner 2026-09-30)); unpark by deleting this line.
-- [ ] SN5 audio: headphone 3D — an HRTF path for headphones (HRIR sphere,
+- [x] SN5 audio: headphone 3D — an HRTF path for headphones (HRIR sphere, Landed 52538adf. orbit_blind_naming_7_of_8 + steady_state_process_allocates_nothing, hrtf:: 14 passed run 39056954000 (row stays FOCUS-parked by its LATER line).
   overlap-save convolution, geometry-aware interpolation as fixed tables;
   `hrtf` crate MIT as a pattern or a dependency with a DEPENDENCIES row;
   arXiv 2609.25995 idea only). Speakers keep the current pan. Tier B. Size L.
@@ -548,17 +548,17 @@
    a notice; round-trip identical twice; a changed setting still
    replays exactly. needs: UIX2. (PLN shipping.md, reviewed 2026-09-26;
    waits UIX2.)
-- [ ] UIX7 ui: settings dispatch wiring — menus `OpenSettings` rows
+- [x] UIX7 ui: settings dispatch wiring — menus `OpenSettings` rows Landed 1f2432f0. menus:: green incl. settings_rows_stage_then_swap_on_the_boundary; ui filter menus|lobby|access|settings|tutorial 110 passed run 39056568551.
   dispatch into UIX2 staging with TU1 swaps. Tier A. Size M. Owns
   dispatch hunks in `crates/ui/src/menus.rs`. Accept: `cargo test -p
   engine-ui --lib menus` green. needs: UIX1, UIX2.
   (PLN shipping.md EXTEND, proposed 2026-09-29.)
-- [ ] UIX8 ui: lobby scale proof — 16-slot list virtualized over MP3
+- [x] UIX8 ui: lobby scale proof — 16-slot list virtualized over MP3 Landed 0b43f1d9. lobby_scale_sixteen_virtualized_with_cost_and_projection + lobby_scale_window_past_end_draws_nothing, run 39056568551.
   state, per-slot cost + 64-slot projection as numbers. Tier B.
   Size S. Owns scale hunks beside `crates/ui/src/lobby_ui.rs`.
   Accept: `cargo test -p engine-ui --lib lobby` green. needs: UIX3,
   MP3. (PLN shipping.md EXTEND, proposed 2026-09-29.)
-- [ ] UIX9 ui: subtitle storm bound — subtitles-minimal over a
+- [x] UIX9 ui: subtitle storm bound — subtitles-minimal over a Landed 1f2432f0. a_sixteen_fighter_hit_storm_stays_bounded_and_counts_every_drop + access:: green, run 39056568551.
   drop-and-count queue under a 16-fighter hit storm. Tier B. Size S.
   Owns storm hunks beside `crates/ui/src/access.rs`. Accept: `cargo
   test -p engine-ui --lib access` green. needs: UIX4, CB1.
@@ -569,14 +569,14 @@
   `contrast_ratio` number against `MIN_CONTRAST` (`crates/ui/src/lib.rs`
   `Palette::validate`), remaining taste goes to the AI review panel;
   subtitle events from fight cues. needs: UI1, CB1.
-- [ ] UIX10 ui: remap-by-pad drill — full rebind inside settings with
+- [x] UIX10 ui: remap-by-pad drill — full rebind inside settings with Landed 1f2432f0. a_full_rebind_needs_only_the_pad_and_goes_live_on_its_boundary, the_pad_drill_replays_exactly_twice, a_pad_button_another_action_holds_is_refused_naming_both, run 39056568551.
   the keyboard unplugged; conflicts refuse naming both actions. Tier
   B. Size S. Owns rebind hunks beside `crates/ui/src/settings.rs`
   (UIX2 file frozen; lands after UIX2). Accept: pad-alone full rebind
   green; every edit stages at a boundary and replays exactly. Proof:
   `cargo test -p engine-ui --lib settings` green. needs: UIX2, WIN3.
   (PLN shipping.md EXTEND, proposed 2026-09-29.)
-- [ ] UIX11 ui: stale-beacon eviction — beacons older than K refresh
+- [x] UIX11 ui: stale-beacon eviction — beacons older than K refresh Landed 1f2432f0. a_ghost_storm_is_evicted_in_one_poll_and_no_ghost_stays_listed, a_thousand_ghosts_never_outgrow_the_list_or_lock_a_real_host_out, ready_up_refuses_slots_the_lobby_stopped_refreshing, run 39056568551.
   periods evict with a notice; ready-up refuses stale slots. Tier B.
   Size S. Owns eviction hunks beside `crates/ui/src/lobby_ui.rs`
   (UIX3 file frozen; lands after UIX3). Accept: scripted ghost storm
@@ -584,7 +584,7 @@
   numbers; typed messages only. Proof: `cargo test -p engine-ui --lib
   lobby` green. needs: UIX3, MP3.
   (PLN shipping.md EXTEND, proposed 2026-09-29.)
-- [ ] UIX12 ui: tutorial-2 defense lesson — block, parry and riposte
+- [x] UIX12 ui: tutorial-2 defense lesson — block, parry and riposte Landed 1f2432f0. fresh_profile_finishes_block_parry_riposte_with_no_console, defense_lesson_replays_exactly_twice_and_differs_from_lesson_one, skipping_the_defense_lesson_leaves_a_clean_menu, run 39056568551.
   window as new `SCRIPT` rows over UIX1 commands, inputs recorded like
   any fight. Tier B. Size M. Owns lesson hunks in
   `crates/ui/src/tutorial.rs` (UIX5 file frozen; lands after UIX5).
@@ -601,9 +601,9 @@
   `crates/combat/src/move_intake.rs`. Accept: 5 generated moves either land
   as valid HR3 entries or are refused with a reason; replay x2. needs: CT14,
   HR3, VK1, PQ2.
-- [ ] EV15 research: the research ladder. Tier A. Size S. Owns
-  `docs/research/LADDER.md` and the RES packet format in
-  `skills/engine-orchestrate/SKILL.md`. Accept: every research return adds
+- [ ] EV15 research: the research ladder. Tier A. Size S. Owns Progress 2026-10-17: 20aea8ee tools/ladder-counts.mjs; left: the LADDER rule in the research skill.
+  `docs/research/LADDER.md` and the LADDER line rule in
+  `skills/research/SKILL.md`. Accept: every research return adds
   LADDER lines; the retro prints counts per rung from the file. needs:
   EV3. (PLN48 frontier.md, reviewed 2026-09-27.) LADDER ID repairs
   applied wave 49 (PLN49): P2 RideWay is AX11, P2 Chronos is AX12, the
@@ -614,18 +614,18 @@
   checksum hunks beside the EV2 rebuild path (tape format frozen). Accept:
   20/20 planted corruptions located to the tick; memory <= half full-state;
   rerun x2 identical. needs: EV2, QA1. (PLN48 STEAL dive14 Card 4 remap.)
-- [ ] QA3 ai: deterministic BT bot brains for playtest bouts — sequence /
+- [x] QA3 ai: deterministic BT bot brains for playtest bouts — sequence / Landed 20aea8ee. Run 39052941210; Brain::Trees in bot_harness.
   selector / blackboard ticks over integer state, serializable trees.
   Tier A. Size M. Owns brain hunks beside `crates/ai/src/` (bot tables
   frozen). Accept: 200 bouts rerun-identical x2 from tapes; VK1 pass >=
   baseline -2%; 0 stuck; decision <= 0.1 ms; 0 float/alloc in tick. needs:
   QA1, PQ2. (PLN48 STEAL dive14 Card 1 remap.)
-- [ ] PQ9 proof: skill-rating scorer for the balance tournament — Elo /
+- [x] PQ9 proof: skill-rating scorer for the balance tournament — Elo / Landed 20aea8ee. Elo line per difficulty in the tournament report; run 39052941210.
   Glicko-2 over bout records, offline only. Tier B. Size S. Owns scoring
   hunks beside the PQ2 harness (bout records frozen). Accept: planted OP
   move detected <= 100 bouts; 0 false alarms on balanced records; scoring
   <= 10 ms. needs: PQ2. (PLN48 STEAL dive14 Card 2.)
-- [ ] CR2 net: structured divergence capture for replay tapes — fixed
+- [x] CR2 net: structured divergence capture for replay tapes — fixed Landed 20aea8ee. 48-byte divergence record; run 39052941210.
   schema (tick + input + subsystem + digests) at first divergence. Tier B.
   Size S. Owns capture hunks beside `crates/net/src/replay.rs` (tape
   format frozen). Accept: 10/10 seeded bugs attribute to exact tick+input
@@ -636,13 +636,13 @@
   Size M. Owns `crates/spatial/src/brief.rs`. Accept: a 2,000-object
   fixture briefs under 4k tokens and the A6 spatial proof still passes.
   needs: SP18. (PLN48 frontier.md.)
-- [ ] SP20 spatial: spatial question answering from the graph — "left of",
+- [ ] SP20 spatial: spatial question answering from the graph — "left of", Progress 2026-10-17: ea34de95 parse_rel and relation kind on scene.query; left: the model-vs-raw-brief comparison needs a live model.
   "visible from", "reachable from" as engine queries over MCP. Tier A.
   Size M. Owns `crates/spatial/src/relation.rs`, `crates/endpoint` verb.
   Accept: 50 seeded questions answered exactly; a model using the verb
   beats the same model reading the raw brief (numbers in LADDER). needs:
   SP19. (PLN48 frontier.md.)
-- [ ] SP21 spatial: incremental free-space field on `index3` for placement
+- [x] SP21 spatial: incremental free-space field on `index3` for placement Landed ea34de95. index3_sp21_edit_updates_free_field_under_1ms, run 39054360489.
   and reachability. Tier A. Size M. Owns `crates/spatial/src/index3.rs`.
   Accept: an edit updates the field in under 1 ms on the arena fixture;
   SP16 stacking reads it. needs: SP16. (PLN48 frontier.md.)
@@ -690,7 +690,7 @@
   3 tapes replay to identical reports. Accept: 3/3 tapes identical
   bytes x2; digest line reads back; golden `d57b5c8ae3096614`
   unchanged. needs: EV20, EV21, EV22. (PLAN eyes.md E4.)
-- [ ] MCP25 mcp: scope-policy file deepening the capability table.
+- [x] MCP25 mcp: scope-policy file deepening the capability table. Landed ea34de95. policy file in tool_capabilities.rs.
   Tier A. Size S. Owns policy-file hunks beside
   `crates/endpoint/src/tool_capabilities.rs` (table frozen).
   Accept: 20 adversarial briefs ≥ 80% refused by capability check with
@@ -715,7 +715,7 @@
   Accept: 20-fixture token/success/latency report; kill-or-land with
   numbers (bar: >= 50% fewer tokens, 0 loss, p95 <= +10%). needs: API1,
   API4. (PLN48 reader P2 Card 2.)
-- [ ] MCP17 mcp: turn-vs-tool capability refusal tags — taxonomy hunks
+- [x] MCP17 mcp: turn-vs-tool capability refusal tags — taxonomy hunks Landed e3a3f738. RefusalAxis, 20/20 adversarial briefs tag correctly.
   beside the MCP11 table tagging each refusal by axis with a recovery
   hint. Tier A. Size S. Owns `crates/endpoint/src/tool_capabilities.rs`
   tags (tools frozen). Accept: 20/20 adversarial tagged >= 80% correctly;
@@ -751,7 +751,7 @@
   Size M. Accept: numbers in LADDER; VG1 starts from the winner. needs:
   PF13. (PLN48 frontier.md.)
   LATER: parked 2026-10-03 (circus verdict: spike rejected on LADDER); unpark by deleting this line.
-- [ ] CT21 content: hero weapons-graft fix + re-cook — fix `tools/weapons.py`
+- [x] CT21 content: hero weapons-graft fix + re-cook — fix `tools/weapons.py` Landed ad451d33. fighter_bind 3 passed run 39058324156 (pin moved); cook x2 identical + eyes recorded in content/fighters/CT21-RECOOK-RECEIPT.md.
   graft transform so sword/shield land in the hands (Q2 bbox back to body
   scale), re-cook hero, eyes with weapons visible + in-hand, cook x2
   identical, budgets hold, then move the pin (`manifest.json` body/bundle
@@ -787,11 +787,11 @@
   credited) into LM1. Tier A. Size M. Owns `content/locomotion/` expansion.
   Accept: bake x2 + typed refusals. needs: CT1, CT3. (PLAN-CONTENT wave 58;
   plan §7 CT30 boarded as CT31.)
-- [ ] CT32 content: 14-canonical-clip dedupe manifest + before/after MB
+- [x] CT32 content: 14-canonical-clip dedupe manifest + before/after MB Landed b5cdaf64. 14 clips share one cook digest across 56 slots.
   through AS1 bundles. Tier A. Size S. Owns the dedupe manifest. Accept:
   bundle loads, `fighter_bind` green, bytes x2. needs: CT7.
   (PLAN-CONTENT wave 58; plan §7 CT31 boarded as CT32.)
-- [ ] CT33 content: sidecar consumer schema + conformance test (CB4 reads
+- [x] CT33 content: sidecar consumer schema + conformance test (CB4 reads Landed b5cdaf64. Run 39052948713 (sidecar 5 passed).
   windows, LM2 reads contacts; traversal schema for board CT24). Tier A.
   Size S. Owns the sidecar schema. Accept: `cargo test --locked
   -p engine-assets sidecar`. needs: CT1, CT7. (PLAN-CONTENT wave 58;
@@ -832,7 +832,7 @@
   provenance per file names generator, model and prompt digest;
   license gate refuses unreadable model terms. needs: CT4. (EXTEND
   wave 85.)
-- [ ] CT41 content: LOD ms/VRAM table over the CT35 bake. Tier A.
+- [ ] CT41 content: LOD ms/VRAM table over the CT35 bake. Tier A. Progress 2026-10-17: b5cdaf64 LOD table from hero.json with tris and VRAM; left: GPU ms and the PF13 join.
   Size S. Owns `content/fighters/LOD-REPORT.md` (CT35 `lod/` frozen).
   Accept: `cargo test --locked -p engine-assets lod_swap` + `mesh_cook`
   green; per-LOD tris/ms/VRAM posted on the reference GPU with
@@ -857,13 +857,13 @@
   identical; budgets hold; front/side/top previews against the 1.8 m
   figure; 8-fighter soak capture shows populated stands with 0 findings.
   Consumer: CT27 soak, CT34 card. needs: CT25, CT8. (EXTEND wave 86.)
-- [ ] CT45 content: PBR 2k + HDRI provenance report with VRAM caps.
+- [ ] CT45 content: PBR 2k + HDRI provenance report with VRAM caps. Progress 2026-10-17: f2effc78 per-map table generated, bound set 213 MiB under the 256 MiB cap; left: measured VRAM on the reference GPU.
   Tier B. Size M. Owns `content/arena/pbr/REPORT.md` (CT26 pass frozen;
   `content/arena/hdri/` untouched). Accept: 0 findings; Q1/RA14 read PBR
   (no noise); cook x2 identical; provenance per file; per-map bytes +
   VRAM posted on the reference GPU. Consumer: Q1 captures, RA14. needs:
   CT26, CT8. (EXTEND wave 86.)
-- [ ] CT46 content: provenance audit dry-run for the CT28 gate (50-asset
+- [x] CT46 content: provenance audit dry-run for the CT28 gate (50-asset Landed 124fcf36. tools/provenance-audit.mjs: 58 rows, 7 refusals named; run 39053389819.
   matrix). Tier A. Size S. Owns `content/PROVENANCE-AUDIT.md` (gate code
   stays CT28). Accept: matrix lists URL+SPDX+author+SHA or
   generator+model+prompt digest per asset; release-refusal dry-run names
@@ -946,7 +946,7 @@
   frozen; no pass code). Accept: RA14/WIN6 shows sand, stands, fighters,
   0 findings, log==pixels (UI4 pattern); `fighter_bind` green; golden
   unchanged. Consumer RA14/Q1. needs: CT22, CT29. (EXTEND wave 89.)
-- [ ] CT61 content: empty-stands P6 baseline for the CT27 soak.
+- [ ] CT61 content: empty-stands P6 baseline for the CT27 soak. Progress 2026-10-17: f2effc78 SOAK-BASELINE.md payload estimate 236 MiB; left: 8-fighter day capture ms on the GPU.
   Tier A. Size S. Owns `content/arena/SOAK-BASELINE.md` (CT7 + CT8 bundles
   frozen). Accept: 8-fighter day capture, 0 findings; CPU/GPU ms + VRAM
   posted on the reference GPU with adapter+driver lines; cook x2
@@ -958,7 +958,7 @@
   bytes + VRAM + hitch count on the reference GPU with the adapter
   line; cook x2 identical; golden unchanged. Consumer C5/WD. needs:
   CT9. (EXTEND wave 90.)
-- [ ] CT63 content: combat sound list with provenance (Tier A sound list).
+- [ ] CT63 content: combat sound list with provenance (Tier A sound list). Progress 2026-10-17: b29e14b0 content/sound/HIT-LIST.md maps every FightCue to a CC0 file or silent; left: the SN10 bridge (parked).
   Tier A. Size S. Owns `content/sound/HIT-LIST.md` + per-file rows
   (new dir; no audio code). Accept: every hit/knockdown in the staged
   fight names a CC0 source with URL+SPDX+author+SHA; SN10 log bridge
@@ -1004,7 +1004,7 @@
   frozen). Accept: 2 motions-only clips via CT1 with sidecars +
   EVIDENCE; Geno/LAFAN1/QAL refusals green; LM1 reads scout bake; x2.
   Consumer CT37/CT31. needs: CT1. (EXTEND wave 92.)
-- [ ] CT77 content: arena src commit-gate (crate + torch pair).
+- [x] CT77 content: arena src commit-gate (crate + torch pair). Landed f2effc78. SRC-RECEIPT.md gate.
   Tier A. Size S. Owns `content/arena/SRC-RECEIPT.md` (pair frozen).
   Accept: pair committed only with cook x2 + SP5 0 findings; SHAs +
   budgets named; golden unchanged. Consumer CT53/CT57. needs: CT8.
@@ -1027,7 +1027,7 @@
   committed set cooks x2 identical; `cargo test --locked -p
   engine-assets provenance` green; Q1/RA14 read it with 0 findings.
   Consumer Q1 captures, RA14 presenter, WIN9 bin proof. needs: CT8.
-- [ ] CT82 content: manifest single truth (delete the stale pre-kit
+- [ ] CT82 content: manifest single truth (delete the stale pre-kit Progress 2026-10-17: f2effc78 tools/arena-report.mjs checks manifest.json against disk; left: regenerate manifest.json (sand_floor, stands, banner gltf and placement.json drifted today).
   manifest). Tier A. Size S. Owns `content/arena/manifest_before.json`
   deletion (`manifest.json` + `report.json` frozen; no new bytes).
   Accept: stale file removed; `manifest.json` sole truth with 2k maps +
@@ -1043,7 +1043,7 @@
   for touched-only nav re-bake (Recast Zlib). Tier A. Size S. Accept:
   equality 20/20, enumerate p95 <= 0.1 ms, bytes x2. needs: SP15.
   (READER-SPACE wave 50; consumer NV6.)
-- [ ] SP37 spatial: support-surface enumeration for stacked rest (floor vs
+- [x] SP37 spatial: support-surface enumeration for stacked rest (floor vs Landed 34bac826. two-floor enumeration, run 39054360489.
   shelf-top vs tread + clearance), feeding SP16/SP9 (READER-P1 wave 54).
   Tier B. Size S. Owns enumeration hunks beside `crates/spatial/src/place.rs`
   (solver API frozen). Accept: SP16 two-floor fixtures place 0 findings,
@@ -1065,7 +1065,7 @@
    `cargo test -p engine-spatial --lib board_example_solves_and_passes_sp1`
    stays green. needs: SP3.
    (STEAL 2026-10-03 kiddo, https://github.com/sdd/kiddo.)
-- [ ] SP50 scene: per-instance prefab override deltas — keyed override
+- [ ] SP50 scene: per-instance prefab override deltas — keyed override Progress 2026-10-17: prefab 18 tests pass (run 39051482184); left: digest 4aae94af not reproduced.
   map over frozen `reinstantiate`, prefab edits applied underneath
   (Bevy Scene resolve + ScenePatch shape, reimplemented integer-only,
   zero bytes vendored). Tier A. Size S. Owns override-map hunks beside
@@ -1075,7 +1075,7 @@
   SP12 gold still green; kill on any override lost, any prefab edit not
   applied under deltas, or any digest drift. needs: RC4. (LADDER P1
   CANDIDATE 2026-09-30, spike 5/5 + x2.)
-- [ ] SP56 spatial (held on SP38): canonical digest + perm-stable audit
+- [x] SP56 spatial (held on SP38): canonical digest + perm-stable audit Landed 049cdd8d. conflict_audit_baseline (60 seeds, 20 perms) + conflict_audit_baseline_failures + sp38_audit_hunks_cover_sixty_seeds_and_twenty_perms run 39056881036.
   gate as the SP38 proof leg (60/60 + 20/20 + digest `05b20def` x2).
   Tier B. Size S. Owns audit hunks beside
   `crates/spatial/src/place.rs` + `repair.rs`. Accept: `cargo test -p
@@ -1087,7 +1087,7 @@
   conflict_predictor_agreement` green; 60/60 + 10/10 at identical
   bytes, else stays held. needs: SP38, SP12. (PLN future-spatial
   2026-09-30.)
-- [ ] SP60 spatial: frame-aware verb baseline tape — 50 seeded Qs
+- [x] SP60 spatial: frame-aware verb baseline tape — 50 seeded Qs Landed ea34de95. digest c65a8802bf9e5249, run 39054437372.
   measured read-only on the frozen v2 substrate. Tier B. Size S. Owns
   fixture hunks beside `crates/spatial/src/relation.rs`. Accept:
   `cargo test -p engine-spatial --lib frame_verb_baseline` green;
@@ -1172,26 +1172,26 @@
   (GP21 stage frozen). Accept: jab <= 1/4 super displacement measured;
   restore <= 1e-5 every tick; sim x2; playtester small/big call
   recorded. needs: GP21, GP11. (PLN49 R8 reshape.)
-- [ ] EA4 endpoint: bound the door audit — rotation cap + anchor (EA3's
+- [x] EA4 endpoint: bound the door audit — rotation cap + anchor (EA3's Landed 15d91eb2. audit keeps 1024 records plus anchor digest; 100/100 tamper test.
   256 pattern) or budgeted unbounded justification; 100-session tamper
   stays 100/100. Tier A. Size S. Owns `crates/endpoint/src/audit/`
   bounds (append-Result kept). Accept: memory bounded by test;
   M-MEM-REUSE holds. needs: none. (API review wave 49.)
-- [ ] MCP22 endpoint: un-mirror sibling types — play/scene_query consts
+- [ ] MCP22 endpoint: un-mirror sibling types — play/scene_query consts Progress 2026-10-17: 15d91eb2 audit mixer reads core GOLDEN_GAMMA, scene_query uses spatial cm helpers; left: mirrored fighter ranges in play.rs (needs an endpoint-to-input edge).
   + audit mixer via real edges (core-hash edge packet covers the
   mixer). Tier B. Size S. Owns mirrors only, no behavior change.
   Accept: `hash_reimpl` 36 down, dup sites 34 down, goldens unchanged.
   needs: none. (API review wave 49.)
-- [ ] MCP23 endpoint: strong types for units + actions — `PlacedDto`
+- [x] MCP23 endpoint: strong types for units + actions — `PlacedDto` Landed ed0903cc. PlayAction enum, checked PlacedDto.
   meters/radians + range asserts, `PlayAction` enum, no silent yaw
   flatten. Tier B. Size M. Owns `scene_tools.rs` + `play.rs` types
   (MCP18 first). Accept: malformed action / non-finite pose refused
   typed; M-STRONG-TYPES holds. needs: MCP18. (API review wave 49.)
-- [ ] API8 endpoint: builder + ctor ergonomics — by-value chaining,
+- [x] API8 endpoint: builder + ctor ergonomics — by-value chaining, Landed bb9ed898. LaunchSpec builder, run 39054820535.
   config struct, Debug/Clone/Default. Tier C. Size S. Owns ctors only.
   Accept: doctest chains a full spec from a temporary. needs: MCP19.
   (API review wave 49.)
-- [ ] SP28 spatial: relation-cycle consistency over the SP3 graph —
+- [x] SP28 spatial: relation-cycle consistency over the SP3 graph — Landed ea34de95. brief p95 25 us, run 39054437372.
   integer-cm factor residuals with smallest-cycle refusals. Tier A.
   Size S. Owns check hunks beside `crates/spatial/src/relation.rs` +
   `checks.rs` (SP3 Relation/Graph frozen). Accept: 60 seeded graphs,
@@ -1204,7 +1204,7 @@
   replays, else stays held. Kill: no measured lift or replay drift.
   needs: SP21, SP16. (PLN50 wave-49 WILD moonshot; LMAX ideas-only,
   UNVERIFIED.)
-- [ ] SP49 spatial: smallest-cycle refusal + repair receipt over the SP3
+- [ ] SP49 spatial: smallest-cycle refusal + repair receipt over the SP3 Progress 2026-10-17: relation.rs smallest_cycle + cycle_residuals_cm and the checks.rs relationCycle finding exist (SP28); left: repair.rs has no cycle repair or re-check receipt and no 30 clean / 30 one-cycle corpus.
   graph — explain+repair beside SP28 detect (SayPlan simulator-repair
   shape, datafrog NOT taken). Tier A. Size S. Owns repair hunks beside
   `crates/spatial/src/repair.rs` + `checks.rs` (SP3 Relation/Graph

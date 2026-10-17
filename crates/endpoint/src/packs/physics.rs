@@ -1,6 +1,15 @@
-//! `physics` pack: what one blow does to a fighter's balance.
+//! `physics` pack: what one blow does to a fighter's balance, and what a ray or a
+//! swept sphere meets in cooked collision.
 //!
-//! One read-only verb, `physics.read`: for a stagger line and a blow strength
+//! Three read-only verbs. `physics.raycast` and `physics.shapecast` cast a ray or a
+//! swept sphere against cooked collider bytes (hex of the `E2CC` blob the asset cook
+//! writes) and answer the nearest hit: collider id, distance, point and normal. A cast
+//! must name its layer scope (`fighter`, `prop`, `debris`, `sensor`, `world`); a call
+//! that names none is refused with the typed code `unscoped`, never answered against
+//! everything. The geometry and the casts live in `engine-physics`
+//! (`collider`, `layers`, `query`); this pack only parses, scopes and reports.
+//!
+//! `physics.read`: for a stagger line and a blow strength
 //! (both Q8 impulse units, 256 reads unity) it answers the verdict the blow
 //! warrants (`Steady`, `Staggered`, `Stumbling` or `Fallen`), the ticks the
 //! stance then needs to go legal again, and the five standard rows of the
@@ -33,6 +42,9 @@ use engine_physics::balance::{
     recovery_ticks, response_matrix, BalanceParams, BalanceState, GaitVerdict, DEFAULT_STAGGER_Q8,
     MAX_IMPULSE_Q8,
 };
+use engine_physics::collider::{self, Collider};
+use engine_physics::layers::{self, LayerError};
+use engine_physics::query::{self, CastError, Hit};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
@@ -40,6 +52,14 @@ use rmcp::serde::{Deserialize, Serialize};
 pub const PACK: &str = "physics";
 /// Verb: what one blow does to a fighter's balance.
 pub const TOOL_PHYSICS_READ: &str = "physics.read";
+/// Verb: the nearest thing a ray meets in cooked collision.
+pub const TOOL_PHYSICS_RAYCAST: &str = "physics.raycast";
+/// Verb: the nearest thing a swept sphere meets in cooked collision.
+pub const TOOL_PHYSICS_SHAPECAST: &str = "physics.shapecast";
+/// Typed refusal code of a cast that names no layer scope.
+pub const UNSCOPED: &str = "unscoped";
+/// Longest accepted collider blob in hex chars (64 KiB of cooked bytes).
+pub const MAX_COLLIDER_HEX_CHARS: usize = 131_072;
 
 /// Word every fact answers that only the live bout could know. The door's
 /// bout carries no balance rules (`balance` is off in the arena rules), so a
@@ -192,17 +212,209 @@ crate::e2_tool!(
     invoke = physics_read
 );
 
-/// The physics pack: one read-only verb, loaded on demand.
+/// Request shared by both casts: the cooked world, the cast line and the layer scope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde", default)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PhysicsRaycastArgs {
+    pub colliders_hex: String,
+    pub origin: [f32; 3],
+    pub direction: [f32; 3],
+    pub max_distance_m: f32,
+    pub layers: Vec<String>,
+}
+
+/// A raycast plus the sphere radius.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde", default)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PhysicsShapecastArgs {
+    pub colliders_hex: String,
+    pub origin: [f32; 3],
+    pub direction: [f32; 3],
+    pub radius_m: f32,
+    pub max_distance_m: f32,
+    pub layers: Vec<String>,
+}
+
+/// What a cast met first.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PhysicsHitOut {
+    pub collider: String,
+    pub distance_m: f32,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+/// The nearest hit (absent on a clean miss) plus how many colliders the blob held.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PhysicsCastOutput {
+    pub hit: Option<PhysicsHitOut>,
+    pub colliders: u32,
+    pub scope: Vec<String>,
+}
+
+/// Lowercase or uppercase hex into bytes; `None` for odd length or a non-hex char.
+fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
+        .collect()
+}
+
+/// Decode the request's collider blob into shapes, or the typed refusal.
+fn world_of(colliders_hex: &str) -> Result<Vec<Collider>, McpToolError> {
+    if colliders_hex.len() > MAX_COLLIDER_HEX_CHARS {
+        return Err(bad(format!(
+            "colliders_hex holds {} chars; at most {MAX_COLLIDER_HEX_CHARS} (64 KiB of cooked \
+             bytes); cast against fewer colliders",
+            colliders_hex.len()
+        )));
+    }
+    let bytes = bytes_of_hex(colliders_hex).ok_or_else(|| {
+        McpToolError::new(
+            "bad_colliders",
+            "colliders_hex is not hex; pass the cooked E2CC collider bytes as an even-length \
+             hex string",
+        )
+    })?;
+    collider::decode(&bytes).map_err(|error| {
+        McpToolError::new(
+            "bad_colliders",
+            format!("{error}; pass the bytes the asset collider cook wrote, unchanged"),
+        )
+    })
+}
+
+/// The layer mask a request's words name. Naming none is `unscoped`: a cast never
+/// falls back to "every layer".
+fn scope_of(words: &[String]) -> Result<u32, McpToolError> {
+    layers::scope(words).map_err(|error| match error {
+        LayerError::Empty => McpToolError::new(
+            UNSCOPED,
+            format!(
+                "layers is empty; a cast must name the layers it may hit ({}); re-run with at \
+                 least one",
+                layers::names().collect::<Vec<_>>().join(", ")
+            ),
+        ),
+        unknown @ LayerError::Unknown(_) => bad(format!("{unknown}; re-run with known layers")),
+    })
+}
+
+fn cast_error(error: CastError) -> McpToolError {
+    match error {
+        CastError::Unscoped => McpToolError::new(UNSCOPED, "the layer scope names no layer"),
+        other => bad(format!(
+            "{other}; re-run with a finite origin, a non-zero direction, and distances above zero"
+        )),
+    }
+}
+
+fn report(world: &[Collider], scope: &[String], hit: Option<Hit>) -> PhysicsCastOutput {
+    PhysicsCastOutput {
+        hit: hit.and_then(|hit| {
+            Some(PhysicsHitOut {
+                collider: world.get(hit.collider)?.id.clone(),
+                distance_m: hit.distance,
+                point: hit.point,
+                normal: hit.normal,
+            })
+        }),
+        colliders: u32::try_from(world.len()).unwrap_or(u32::MAX),
+        scope: scope.to_vec(),
+    }
+}
+
+/// `physics.raycast` handler: decode the blob, resolve the scope, cast once.
+/// Pure: reads only its arguments and writes nothing.
+fn physics_raycast(
+    _server: &McpServer,
+    args: &PhysicsRaycastArgs,
+) -> Result<PhysicsCastOutput, McpToolError> {
+    let scope = scope_of(&args.layers)?;
+    let world = world_of(&args.colliders_hex)?;
+    let hit = query::ray_cast(
+        &world,
+        args.origin,
+        args.direction,
+        args.max_distance_m,
+        scope,
+    )
+    .map_err(cast_error)?;
+    Ok(report(&world, &args.layers, hit))
+}
+
+/// `physics.shapecast` handler: as the raycast, with a sphere of `radius_m`.
+fn physics_shapecast(
+    _server: &McpServer,
+    args: &PhysicsShapecastArgs,
+) -> Result<PhysicsCastOutput, McpToolError> {
+    let scope = scope_of(&args.layers)?;
+    let world = world_of(&args.colliders_hex)?;
+    let hit = query::sphere_cast(
+        &world,
+        args.origin,
+        args.direction,
+        args.radius_m,
+        args.max_distance_m,
+        scope,
+    )
+    .map_err(cast_error)?;
+    Ok(report(&world, &args.layers, hit))
+}
+
+crate::e2_tool!(
+    /// `physics.raycast`: the nearest hit of a ray in cooked collision.
+    PhysicsRaycastTool,
+    name = TOOL_PHYSICS_RAYCAST,
+    description = "Cast a ray (origin, direction, max_distance_m) against cooked collider bytes (colliders_hex, the E2CC blob as hex) and answer the nearest hit: collider id, distance_m, point, normal. layers is required (fighter, prop, debris, sensor, world); naming none is refused as unscoped. Read-only.",
+    readonly = true,
+    args = PhysicsRaycastArgs,
+    output = PhysicsCastOutput,
+    invoke = physics_raycast
+);
+
+crate::e2_tool!(
+    /// `physics.shapecast`: the nearest hit of a swept sphere in cooked collision.
+    PhysicsShapecastTool,
+    name = TOOL_PHYSICS_SHAPECAST,
+    description = "Sweep a sphere (radius_m) from origin along direction for max_distance_m against cooked collider bytes (colliders_hex) and answer the nearest hit: collider id, distance_m the centre travels, contact point, normal. layers is required; naming none is refused as unscoped. Read-only.",
+    readonly = true,
+    args = PhysicsShapecastArgs,
+    output = PhysicsCastOutput,
+    invoke = physics_shapecast
+);
+
+/// The physics pack: three read-only verbs, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "balance: what one blow does to a fighter's stance (verdict word, recovery ticks, \
          the five-strength shove-response matrix), pure and integer over the physics balance \
-         core, with live-bout facts unwired",
+         core, with live-bout facts unwired; casts: nearest hit of a ray or a swept sphere \
+         in cooked collider bytes, scoped by layer",
         false,
     );
     pack.add(VerbSpec::of::<PhysicsReadTool>(
         TOOL_PHYSICS_READ,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<PhysicsRaycastTool>(
+        TOOL_PHYSICS_RAYCAST,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<PhysicsShapecastTool>(
+        TOOL_PHYSICS_SHAPECAST,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -352,11 +564,194 @@ mod tests {
         assert_ne!(NOT_WIRED, "0");
     }
 
+    /// The cook's pinned bytes for one unit-cube hull `COL_box` on the `prop` layer, a
+    /// checked-in fixture (`engine-assets` `collider_cook` asserts its writer makes exactly these).
+    const CUBE_BYTES: &[u8] = include_bytes!("../../../../content/physics/unit_cube_hull.e2cc");
+
+    fn cube_hex() -> String {
+        CUBE_BYTES.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn ray_args(layers: &[&str]) -> PhysicsRaycastArgs {
+        PhysicsRaycastArgs {
+            colliders_hex: cube_hex(),
+            origin: [-3.0, 0.5, 0.5],
+            direction: [1.0, 0.0, 0.0],
+            max_distance_m: 10.0,
+            layers: layers.iter().map(|word| (*word).to_owned()).collect(),
+        }
+    }
+
+    fn near(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1.0e-4)
+    }
+
     #[test]
-    fn physics_read_pack_registers_one_observe_verb() {
+    fn physics_raycast_returns_the_hit_point_and_normal_for_a_scripted_ray() {
+        let server = server();
+        let out = PhysicsRaycastTool::invoke(&server, ray_args(&["prop", "world"])).expect("casts");
+        let hit = out.hit.clone().expect("the ray meets the cube");
+        assert_eq!(hit.collider, "COL_box");
+        assert!((hit.distance_m - 3.0).abs() < 1.0e-5, "{}", hit.distance_m);
+        assert!(near(hit.point, [0.0, 0.5, 0.5]), "{:?}", hit.point);
+        assert!(near(hit.normal, [-1.0, 0.0, 0.0]), "{:?}", hit.normal);
+        assert_eq!(
+            (out.colliders, out.scope.as_slice()),
+            (1, &["prop".to_owned(), "world".to_owned()][..])
+        );
+        // The same request twice gives the same bytes.
+        let again =
+            PhysicsRaycastTool::invoke(&server, ray_args(&["prop", "world"])).expect("casts");
+        assert_eq!(
+            rmcp::serde_json::to_string(&again).expect("serializes"),
+            rmcp::serde_json::to_string(&out).expect("serializes")
+        );
+        // A ray that points away, or stops short, is a clean miss (no hit, not an error).
+        let mut away = ray_args(&["prop"]);
+        away.direction = [-1.0, 0.0, 0.0];
+        assert_eq!(
+            PhysicsRaycastTool::invoke(&server, away)
+                .expect("casts")
+                .hit,
+            None
+        );
+        let mut short = ray_args(&["prop"]);
+        short.max_distance_m = 2.0;
+        assert_eq!(
+            PhysicsRaycastTool::invoke(&server, short)
+                .expect("casts")
+                .hit,
+            None
+        );
+    }
+
+    #[test]
+    fn physics_raycast_an_unscoped_call_is_refused_with_a_typed_reason() {
+        let server = server();
+        let unscoped =
+            PhysicsRaycastTool::invoke(&server, ray_args(&[])).expect_err("no scope refuses");
+        assert_eq!(unscoped.code, UNSCOPED);
+        assert!(
+            unscoped
+                .message
+                .contains("fighter, prop, debris, sensor, world"),
+            "the refusal names the legal layers: {}",
+            unscoped.message
+        );
+        // A request that omits `layers` entirely parses to the same refusal.
+        let json = format!(
+            "{{\"colliders_hex\":\"{}\",\"direction\":[1,0,0],\"max_distance_m\":5}}",
+            cube_hex()
+        );
+        let omitted: PhysicsRaycastArgs =
+            rmcp::serde_json::from_str(&json).expect("defaults fill the rest");
+        assert_eq!(
+            PhysicsRaycastTool::invoke(&server, omitted)
+                .expect_err("refuses")
+                .code,
+            UNSCOPED
+        );
+        let shape = PhysicsShapecastTool::invoke(&server, PhysicsShapecastArgs::default())
+            .expect_err("refuses");
+        assert_eq!(
+            shape.code, UNSCOPED,
+            "the sphere cast is scoped the same way"
+        );
+        // A scope that excludes the cube's layer sees nothing there.
+        let blind =
+            PhysicsRaycastTool::invoke(&server, ray_args(&["world", "fighter"])).expect("casts");
+        assert_eq!(blind.hit, None, "the cube is on the prop layer");
+        // An unknown layer word is bad_args, naming the legal words.
+        let ghost =
+            PhysicsRaycastTool::invoke(&server, ray_args(&["ghost"])).expect_err("unknown layer");
+        assert_eq!(ghost.code, "bad_args");
+        assert!(ghost.message.contains("ghost") && ghost.message.contains("fighter"));
+    }
+
+    #[test]
+    fn physics_raycast_refuses_bad_blobs_and_bad_lines() {
+        let server = server();
+        let with = |edit: fn(&mut PhysicsRaycastArgs)| {
+            let mut args = ray_args(&["prop"]);
+            edit(&mut args);
+            PhysicsRaycastTool::invoke(&server, args).expect_err("refuses")
+        };
+        assert_eq!(
+            with(|a| a.colliders_hex = "zz".to_owned()).code,
+            "bad_colliders"
+        );
+        assert_eq!(
+            with(|a| a.colliders_hex = "abc".to_owned()).code,
+            "bad_colliders"
+        );
+        assert_eq!(
+            with(|a| a.colliders_hex = "+f".to_owned()).code,
+            "bad_colliders",
+            "a sign is not hex"
+        );
+        let bad_magic = with(|a| a.colliders_hex = cube_hex().replacen("45", "46", 1));
+        assert_eq!(bad_magic.code, "bad_colliders");
+        assert!(bad_magic.message.contains("E2CC"), "{}", bad_magic.message);
+        assert_eq!(
+            with(|a| a.colliders_hex = cube_hex()[..40].to_owned()).code,
+            "bad_colliders"
+        );
+        assert_eq!(
+            with(|a| a.colliders_hex = "00".repeat(MAX_COLLIDER_HEX_CHARS)).code,
+            "bad_args"
+        );
+        assert_eq!(with(|a| a.direction = [0.0; 3]).code, "bad_args");
+        assert_eq!(with(|a| a.max_distance_m = 0.0).code, "bad_args");
+        assert_eq!(with(|a| a.origin[0] = f32::NAN).code, "bad_args");
+    }
+
+    #[test]
+    fn physics_shapecast_stops_a_radius_short_with_the_contact_point_and_normal() {
+        let server = server();
+        let args = PhysicsShapecastArgs {
+            colliders_hex: cube_hex(),
+            origin: [-3.0, 0.5, 0.5],
+            direction: [1.0, 0.0, 0.0],
+            radius_m: 0.5,
+            max_distance_m: 10.0,
+            layers: vec!["prop".to_owned()],
+        };
+        let out = PhysicsShapecastTool::invoke(&server, args.clone()).expect("casts");
+        let hit = out.hit.expect("the sphere meets the cube");
+        assert_eq!(hit.collider, "COL_box");
+        assert!((hit.distance_m - 2.5).abs() < 1.0e-5, "{}", hit.distance_m);
+        assert!(near(hit.point, [0.0, 0.5, 0.5]) && near(hit.normal, [-1.0, 0.0, 0.0]));
+        // Clearing the cube by more than the radius is a miss; a negative radius refuses.
+        let mut high = args.clone();
+        high.origin[1] = 1.6;
+        assert_eq!(
+            PhysicsShapecastTool::invoke(&server, high)
+                .expect("casts")
+                .hit,
+            None
+        );
+        let mut negative = args;
+        negative.radius_m = -1.0;
+        assert_eq!(
+            PhysicsShapecastTool::invoke(&server, negative)
+                .expect_err("refuses")
+                .code,
+            "bad_args"
+        );
+    }
+
+    #[test]
+    fn physics_pack_registers_three_observe_verbs() {
         let pack = pack().expect("pack builds");
         assert_eq!(pack.name(), PACK);
-        assert_eq!(pack.verb_names(), vec![TOOL_PHYSICS_READ]);
+        assert_eq!(
+            pack.verb_names(),
+            vec![
+                TOOL_PHYSICS_READ,
+                TOOL_PHYSICS_RAYCAST,
+                TOOL_PHYSICS_SHAPECAST
+            ]
+        );
         assert!(!pack.default_loaded(), "the pack loads on demand");
         assert!(
             !pack.summary().is_empty(),

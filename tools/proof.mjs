@@ -619,6 +619,15 @@ try {
   const fails = lines.filter((l) => l.startsWith("[FAIL]") || l.startsWith("RESULT FAIL"));
   check("rust quality ratchet (tools/rust-quality.mjs)", !quality.error && quality.status === 0, quality.status === 0 ? score.replace(/\s+/g, " ") : fails.slice(0, 4).join(" | "));
 }
+// Docs coverage ratchet (API2): static, about 1 s. A crate's undocumented
+// public items may not rise over tools/docs-coverage.baseline.json, so a new
+// public item without a doc comment fails the proof.
+{
+  const docs = spawnSync(process.execPath, ["tools/docs-coverage.mjs"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const lines = `${docs.stdout ?? ""}${docs.stderr ?? ""}`.split("\n");
+  const fails = lines.filter((l) => l.startsWith("[FAIL]") || l.startsWith("RESULT FAIL"));
+  check("docs coverage ratchet (tools/docs-coverage.mjs)", !docs.error && docs.status === 0, docs.status === 0 ? (lines.find((l) => l.startsWith("RESULT")) ?? "") : fails.slice(0, 4).join(" | "));
+}
 // The gate tools gate themselves in CI nightly only (`node --test
 // tools/*.test.mjs` in .github/workflows/ci.yml, E2040_NIGHTLY=1); the proof
 // gate never reruns them, so per-packet proof stays fixtures only.

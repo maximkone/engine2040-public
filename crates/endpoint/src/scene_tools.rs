@@ -38,7 +38,6 @@ use std::sync::{Mutex, MutexGuard};
 
 use engine_editor::capability::{apply_gated, approve};
 use engine_editor::commands::{self, Batch, Document, Op, ProvenanceStamp};
-use engine_scene::codec::{Scene, CURRENT_VERSION};
 use engine_scene::ids::ObjectId;
 use engine_scene::transform::Transform;
 use engine_spatial::{Intent, ObjectRef, Relation, Target, Wall};
@@ -53,7 +52,8 @@ use super::injection::Category;
 use super::mcp::{batch_error, cap_error, granted_ops, McpServer, McpToolError, ServerState};
 
 mod spatial_checks;
-use spatial_checks::{finding_line, id_table, label_table, partition, staged_sizes};
+use crate::spatial_glue::{conflict_texts, finding_line, quat_of_yaw, yaw_of_quat, ParsedWant};
+use spatial_checks::{id_table, label_table, partition, staged_sizes};
 pub use spatial_checks::{SizeSource, SkippedCheck};
 
 /// MCP tool name for the bounded scene brief (read-only).
@@ -384,6 +384,39 @@ pub struct PlacedDto {
     pub yaw: f32,
 }
 
+/// Largest coordinate magnitude a placement may carry, in meters: the SP1
+/// world bound (+-100 m).
+pub const PLACED_LIMIT_M: f32 = 100.0;
+
+impl PlacedDto {
+    /// Build a placement from meters and a Y yaw in radians, refusing typed
+    /// instead of passing a bad pose on: every lane must be finite, each
+    /// coordinate within +-[`PLACED_LIMIT_M`], and the yaw within one full
+    /// turn (the solver's 8 steps and `atan2` both stay inside it, so a yaw
+    /// outside it is a degrees-for-radians unit mix-up).
+    pub fn checked(id: String, x: f32, y: f32, z: f32, yaw: f32) -> Result<Self, McpToolError> {
+        for (lane, value) in [("x", x), ("y", y), ("z", z)] {
+            if !value.is_finite() || value.abs() > PLACED_LIMIT_M {
+                return Err(McpToolError::new(
+                    "bad_pose",
+                    format!(
+                        "placement {lane} {value} m is not a finite value within                          +-{PLACED_LIMIT_M} m; re-run with a pose inside the world bound"
+                    ),
+                ));
+            }
+        }
+        if !yaw.is_finite() || yaw.abs() > std::f32::consts::TAU + 1e-3 {
+            return Err(McpToolError::new(
+                "bad_pose",
+                format!(
+                    "placement yaw {yaw} rad is not a finite angle within +-2*pi;                      re-run with a yaw in radians"
+                ),
+            ));
+        }
+        Ok(Self { id, x, y, z, yaw })
+    }
+}
+
 /// One solver-computed repair for a `scene.place` conflict: relax the
 /// dropped want and take this placement instead. Meters in `placement`,
 /// integer cm in `move_cm`; mapped from `ConflictSet.hints`, so the same
@@ -449,23 +482,10 @@ struct Snapshot {
     missing_pose: u64,
 }
 
-// Y yaw extracted from a world quaternion ([x, y, z, w] like Transform).
-// Identity reads zero; pure-Y rotations read their angle exactly. The caller
-// guarantees finite lanes.
-fn yaw_of_quat(q: [f32; 4]) -> f32 {
-    let [x, y, z, w] = q;
-    (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z))
-}
-
-// Pure-Y rotation quaternion for a solved yaw.
-fn quat_of_yaw(yaw: f32) -> [f32; 4] {
-    let half = 0.5 * yaw;
-    [0.0, half.sin(), 0.0, half.cos()]
-}
-
 // Sorted-id snapshot of every reachable node plus the count of nodes whose
-// world pose was missing or non-finite: those post a NaN actor, never a drop,
-// so `unknown-position` fires with the id still in the table.
+// world pose (position or rotation) was missing or non-finite: those post a
+// NaN actor, never a drop and never a flattened yaw, so `unknown-position`
+// fires with the id still in the table.
 fn snapshot(doc: &Document) -> Snapshot {
     let mut order: Vec<ObjectId> = Vec::new();
     let mut stack = doc.hierarchy.roots();
@@ -478,26 +498,21 @@ fn snapshot(doc: &Document) -> Snapshot {
     let mut ids = Vec::new();
     let mut missing_pose = 0u64;
     for id in order {
-        let world = doc
-            .hierarchy
-            .world(id)
-            .filter(|w| w.position.iter().all(|lane| lane.is_finite()));
+        let world = doc.hierarchy.world(id).filter(|w| {
+            w.position
+                .iter()
+                .chain(w.rotation.iter())
+                .all(|lane| lane.is_finite())
+        });
         // A missing or non-finite pose posts a NaN actor, never a drop.
         missing_pose += u64::from(world.is_none());
-        let world = world.unwrap_or(Transform::new(
-            [f32::NAN; 3],
-            [0.0, 0.0, 0.0, 1.0],
-            [1.0; 3],
-        ));
+        let world =
+            world.unwrap_or_else(|| Transform::new([f32::NAN; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]));
         let index = u32::try_from(actors.len()).unwrap_or(u32::MAX);
         if index == u32::MAX {
             break;
         }
-        let yaw = if world.rotation.iter().all(|lane| lane.is_finite()) {
-            yaw_of_quat(world.rotation)
-        } else {
-            0.0
-        };
+        let yaw = yaw_of_quat(world.rotation);
         ids.push(id);
         actors.push(engine_spatial::Actor {
             id: index,
@@ -559,12 +574,6 @@ fn parse_object_id(field: &str, text: &str) -> Result<ObjectId, McpToolError> {
             format!("{field} `{text}` is not an object id (expected UUID text)"),
         )
     })
-}
-
-// A parsed place want plus its source text (conflicts echo source texts).
-struct ParsedWant {
-    want: engine_spatial::Want,
-    source: String,
 }
 
 // Want grammar, one line per want: `<relation> <target> [<lo>,<hi>]?` where
@@ -685,21 +694,6 @@ fn parse_want(source: &str, index_of: &BTreeMap<String, u32>) -> Result<WantOutc
     }))
 }
 
-// Unmet solver wants back to source texts. The conflict set is a subsequence
-// of the intent in intent order, so an ordered multiset subtraction finds
-// each entry exactly once.
-fn conflict_texts(parsed: &[ParsedWant], unmet: &[engine_spatial::Want]) -> Vec<String> {
-    let mut rest: Vec<engine_spatial::Want> = unmet.to_vec();
-    let mut out = Vec::new();
-    for entry in parsed {
-        if let Some(position) = rest.iter().position(|other| *other == entry.want) {
-            rest.remove(position);
-            out.push(entry.source.clone());
-        }
-    }
-    out
-}
-
 // Solver repair hints plus their dry-run diffs, mapped to the door shape.
 // Graph building and the in-memory hint application are pure
 // `engine-spatial` calls over the same snapshot the solve ran on, so the
@@ -715,7 +709,7 @@ fn hint_output(
     spatial_id: u32,
     parsed: &[ParsedWant],
     conflict: &engine_spatial::ConflictSet,
-) -> (Vec<RepairHintDto>, Vec<String>) {
+) -> Result<(Vec<RepairHintDto>, Vec<String>), McpToolError> {
     let before = engine_spatial::build(&snap.actors);
     let mut hints = Vec::with_capacity(conflict.hints.len());
     let mut dry_run = Vec::new();
@@ -755,18 +749,18 @@ fn hint_output(
         hints.push(RepairHintDto {
             dropped: hint.dropped,
             dropped_want: dropped_text,
-            placement: PlacedDto {
-                id: placement_id,
-                x: hint.placement.x,
-                y: hint.placement.y,
-                z: hint.placement.z,
-                yaw: hint.placement.yaw,
-            },
+            placement: PlacedDto::checked(
+                placement_id,
+                hint.placement.x,
+                hint.placement.y,
+                hint.placement.z,
+                hint.placement.yaw,
+            )?,
             move_cm: hint.move_cm,
             note: hint.note.clone(),
         });
     }
-    (hints, dry_run)
+    Ok((hints, dry_run))
 }
 
 fn conflict_output(
@@ -857,6 +851,8 @@ fn apply_placement(
     placed: &engine_spatial::TransformOut,
     idempotency_key: u64,
 ) -> Result<ScenePlaceOutput, McpToolError> {
+    // Refuse a non-finite or out-of-range pose before anything is staged.
+    let placement = PlacedDto::checked(node.to_string(), placed.x, placed.y, placed.z, placed.yaw)?;
     // Roots carry world poses as their local pose; keep the node's scale.
     let scale = state
         .doc
@@ -917,13 +913,7 @@ fn apply_placement(
     Ok(ScenePlaceOutput {
         revision: applied.revision,
         solved: true,
-        placement: Some(PlacedDto {
-            id: node.to_string(),
-            x: placed.x,
-            y: placed.y,
-            z: placed.z,
-            yaw: placed.yaw,
-        }),
+        placement: Some(placement),
         effects: preview.effects,
         key: applied.key,
         conflicts: Vec::new(),
@@ -1183,7 +1173,7 @@ impl ServerState {
         let solved = match engine_spatial::solve(&intent, &snap.actors) {
             Ok(out) => out,
             Err(conflict) => {
-                let (hints, dry_run) = hint_output(&snap, node, spatial_id, &parsed, &conflict);
+                let (hints, dry_run) = hint_output(&snap, node, spatial_id, &parsed, &conflict)?;
                 return Ok(conflict_output(
                     self.doc.revision,
                     conflict_texts(&parsed, &conflict.unmet),
@@ -1285,11 +1275,7 @@ impl ToolBase for ScenePlaceTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        let mut annotations = ToolAnnotations::default();
-        annotations.read_only_hint = Some(false);
-        annotations.idempotent_hint = Some(true);
-        annotations.open_world_hint = Some(false);
-        Some(annotations)
+        crate::mcp::write_annotations(true)
     }
 }
 
@@ -1319,246 +1305,6 @@ impl SyncTool<McpServer> for ScenePlaceTool {
         service.dispatch_with_payload(TOOL_SCENE_PLACE, &payload, |state| {
             state.scene_place(&param)
         })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Run pin gate: a headed match pins its build, scene and adapter before the
-// first tick, or refuses with a named error. The empty arena never plays
-// silently: revision zero refuses. The manifest carries the same values the
-// gate checked, so a replay across builds or scenes refuses loudly.
-// ---------------------------------------------------------------------------
-
-/// Build identity stamped on every run pin: the crate version serving the
-/// door, so a replay across builds refuses instead of comparing digests
-/// across silent upgrades. Units: dotted version text. Determinism: fixed
-/// at compile time for the whole process.
-pub(crate) const RUN_BUILD_PIN: &str = env!("CARGO_PKG_VERSION");
-
-/// Adapter name for the software rasterizer path: the receipt adapter when
-/// no device hook is wired. Units: device label text. Determinism: fixed
-/// string compare only.
-pub(crate) const RUN_ADAPTER_SOFTWARE: &str = "endpoint-software";
-
-/// Longest adapter or driver string kept in a run pin. Units: chars.
-/// Mirrors the receipt bound, so over-long device names refuse.
-pub(crate) const MAX_RUN_ADAPTER_CHARS: usize = 256;
-
-/// Longest scene digest kept in a run pin. Units: chars of lowercase hex.
-pub(crate) const MAX_RUN_DIGEST_CHARS: usize = 64;
-
-/// One headed run pin: the exact build, scene revision plus content digest
-/// and schema, and the adapter plus driver the match will play. Flat fields
-/// so the manifest carries the same values the gate checked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
-#[schemars(crate = "rmcp::schemars")]
-pub(crate) struct RunPin {
-    /// Build version that minted the pin, always [`RUN_BUILD_PIN`].
-    pub build: String,
-    /// Adapter the match will render on, non-empty, at most 256 chars.
-    pub adapter: String,
-    /// Driver the match will render on, non-empty, at most 256 chars.
-    pub driver: String,
-    /// Scene revision pinned; zero never pins.
-    pub scene_revision: u64,
-    /// Content digest of the canonical save bytes at the revision.
-    pub scene_digest: String,
-    /// Scene schema version of the pinned bytes.
-    pub scene_schema: u32,
-}
-
-/// Check one adapter or driver label: non-empty and within the receipt bound.
-/// Errors: `bad_adapter` naming the bound plus one recovery.
-fn check_adapter_value(field: &str, value: &str) -> Result<(), McpToolError> {
-    if value.is_empty() {
-        return Err(McpToolError::new(
-            "bad_adapter",
-            format!(
-                "{field} is empty; submit the adapter and driver names the receipt will carry \
-                 (software path uses `{RUN_ADAPTER_SOFTWARE}`)"
-            ),
-        ));
-    }
-    if value.chars().count() > MAX_RUN_ADAPTER_CHARS {
-        return Err(McpToolError::new(
-            "bad_adapter",
-            format!(
-                "{field} holds more than {MAX_RUN_ADAPTER_CHARS} chars; \
-                 submit at most {MAX_RUN_ADAPTER_CHARS} chars"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// Check one scene digest: 64 chars of lowercase hex. Errors: `bad_digest`
-/// naming the shape plus one recovery.
-fn check_digest_value(digest: &str) -> Result<(), McpToolError> {
-    if digest.len() != MAX_RUN_DIGEST_CHARS {
-        return Err(McpToolError::new(
-            "bad_digest",
-            format!(
-                "scene digest holds {} chars; submit {MAX_RUN_DIGEST_CHARS} lowercase hex chars \
-                 from the scene save digest",
-                digest.len()
-            ),
-        ));
-    }
-    let clean = digest
-        .chars()
-        .all(|lane| lane.is_ascii_hexdigit() && !lane.is_ascii_uppercase());
-    if !clean {
-        return Err(McpToolError::new(
-            "bad_digest",
-            "scene digest is not lowercase hex; re-read the scene digest and pin again",
-        ));
-    }
-    Ok(())
-}
-
-/// Mint a run pin for one headed match. Stamps the current build, checks the
-/// adapter plus driver labels, the scene revision plus digest plus schema.
-/// Revision zero refuses with `empty_arena`, so the empty arena never plays
-/// silently. Errors: `empty_arena`, `bad_adapter`, `bad_digest`, `bad_schema`.
-pub(crate) fn mint_run_pin(
-    adapter: &str,
-    driver: &str,
-    revision: u64,
-    digest: &str,
-    schema: u32,
-) -> Result<RunPin, McpToolError> {
-    if revision == 0 {
-        return Err(McpToolError::new(
-            "empty_arena",
-            "scene pin at revision 0 names the empty arena; apply one edit, then pin again",
-        ));
-    }
-    check_adapter_value("adapter", adapter)?;
-    check_adapter_value("driver", driver)?;
-    check_digest_value(digest)?;
-    if schema != CURRENT_VERSION {
-        return Err(McpToolError::new(
-            "bad_schema",
-            format!(
-                "scene schema {schema} is not the reader schema {CURRENT_VERSION}; \
-                 re-read the scene, then pin again"
-            ),
-        ));
-    }
-    Ok(RunPin {
-        build: RUN_BUILD_PIN.to_owned(),
-        adapter: adapter.to_owned(),
-        driver: driver.to_owned(),
-        scene_revision: revision,
-        scene_digest: digest.to_owned(),
-        scene_schema: schema,
-    })
-}
-
-/// Demand a run pin before the first tick: `None` refuses with `missing_pin`.
-/// Checks the build stamp, the adapter plus driver labels, then the live
-/// revision plus schema plus digest. A moved revision fails with `stale_pin`
-/// naming both sides; drifted bytes fail with `digest_mismatch`. Errors:
-/// `missing_pin`, `empty_arena`, `bad_build`, `bad_adapter`, `bad_digest`,
-/// `bad_schema`, `stale_pin`, `digest_mismatch`.
-pub(crate) fn require_run_pin(
-    pin: Option<&RunPin>,
-    live_revision: u64,
-    live_digest: &str,
-    live_schema: u32,
-) -> Result<RunPin, McpToolError> {
-    let pin = pin.ok_or_else(|| {
-        McpToolError::new(
-            "missing_pin",
-            "run needs a scene pin; read the scene, pin its revision, then start",
-        )
-    })?;
-    if pin.scene_revision == 0 {
-        return Err(McpToolError::new(
-            "empty_arena",
-            "scene pin at revision 0 names the empty arena; apply one edit, then pin again",
-        ));
-    }
-    if pin.build != RUN_BUILD_PIN {
-        return Err(McpToolError::new(
-            "bad_build",
-            format!(
-                "run pin holds build `{}`, this door serves `{RUN_BUILD_PIN}`; \
-                 re-pin on this build, then start",
-                pin.build
-            ),
-        ));
-    }
-    check_adapter_value("adapter", &pin.adapter)?;
-    check_adapter_value("driver", &pin.driver)?;
-    check_digest_value(&pin.scene_digest)?;
-    if pin.scene_schema != live_schema {
-        return Err(McpToolError::new(
-            "bad_schema",
-            format!(
-                "run pin holds schema {}, live schema is {live_schema}; \
-                 re-read the scene, then pin again",
-                pin.scene_schema
-            ),
-        ));
-    }
-    if pin.scene_revision != live_revision {
-        return Err(McpToolError::new(
-            "stale_pin",
-            format!(
-                "run pin holds revision {}, live revision is {live_revision}; \
-                 re-read the scene, then pin again",
-                pin.scene_revision
-            ),
-        ));
-    }
-    if pin.scene_digest != live_digest {
-        return Err(McpToolError::new(
-            "digest_mismatch",
-            "scene bytes drifted from the pinned digest; re-read the scene, then pin again",
-        ));
-    }
-    Ok(pin.clone())
-}
-
-/// Mint the pin for the live document: the canonical save digest at the live
-/// revision plus schema, under the given adapter plus driver. Revision zero
-/// refuses with `empty_arena`. Owner: the editor document; this helper only
-/// reads it. Determinism: same document plus labels always mint the same pin.
-pub(crate) fn live_run_pin(
-    doc: &Document,
-    adapter: &str,
-    driver: &str,
-) -> Result<RunPin, McpToolError> {
-    let scene = Scene::encode(&doc.hierarchy);
-    mint_run_pin(
-        adapter,
-        driver,
-        doc.revision,
-        &scene.digest(),
-        scene.version,
-    )
-}
-
-/// Session pin gate for headed play (Caller: `crates/endpoint/src/mcp.rs`
-/// `ServerState::play_run` + `crates/endpoint/src/play/play_session.rs`
-/// `ServerState::play_step`, remainder): mint/demand the pin pre-start;
-/// revision zero refuses `empty_arena`.
-impl ServerState {
-    /// Mint the pin for the live document. Errors: `empty_arena`, `bad_adapter`, `bad_schema`.
-    pub(crate) fn live_play_pin(
-        &self,
-        adapter: &str,
-        driver: &str,
-    ) -> Result<RunPin, McpToolError> {
-        live_run_pin(&self.doc, adapter, driver)
-    }
-
-    /// Demand the pin pre-start; `None` is `missing_pin`. Errors: the pin-gate codes.
-    pub(crate) fn require_play_pin(&self, pin: Option<&RunPin>) -> Result<RunPin, McpToolError> {
-        let scene = Scene::encode(&self.doc.hierarchy);
-        require_run_pin(pin, self.doc.revision, &scene.digest(), scene.version)
     }
 }
 
@@ -2850,6 +2596,25 @@ mod tests {
         );
     }
 
+    // Strong units: a placement is meters and radians or it refuses typed.
+    #[test]
+    fn placed_dto_refuses_bad_poses_typed() {
+        let ok = PlacedDto::checked("n".to_owned(), 1.0, 0.5, -99.0, 5.5).expect("sane pose");
+        assert_eq!((ok.x, ok.y, ok.z, ok.yaw), (1.0, 0.5, -99.0, 5.5));
+        for (x, y, z, yaw) in [
+            (f32::NAN, 0.0, 0.0, 0.0),
+            (0.0, f32::INFINITY, 0.0, 0.0),
+            (0.0, 0.0, 100.5, 0.0),
+            (0.0, 0.0, 0.0, f32::NAN),
+            (0.0, 0.0, 0.0, 90.0),
+        ] {
+            let error = PlacedDto::checked("n".to_owned(), x, y, z, yaw)
+                .expect_err("bad pose refuses typed");
+            assert_eq!(error.code, "bad_pose", "pose ({x}, {y}, {z}) yaw {yaw}");
+            assert!(error.message.contains("re-run"), "recovery cue");
+        }
+    }
+
     // Roots-only plus yaw round-trip: parented nodes fail loudly with the
     // violated invariant and one recovery, never a silent flatten; yaw
     // extracted from a world quaternion writes back a pure-Y rotation.
@@ -2971,192 +2736,5 @@ mod tests {
             "pure-Y write keeps z at zero"
         );
         assert!((yaw_of_quat(local.rotation) - placed.yaw).abs() <= 1e-5);
-    }
-
-    // Run pin gate: an unpinned run refuses before the first tick with a
-    // named error, so nothing simulates silently without build, scene and
-    // adapter pinned.
-    #[test]
-    fn run_pin_unpinned_refuses_with_named_error() {
-        let refused = require_run_pin(None, 7, &"0".repeat(64), CURRENT_VERSION)
-            .expect_err("no pin must refuse");
-        assert_eq!(refused.code, "missing_pin");
-        assert!(
-            refused.message.contains("scene pin"),
-            "got: {}",
-            refused.message
-        );
-    }
-
-    // Run pin gate: revision zero names the empty arena and never plays
-    // silently, through mint, require and the live document helper.
-    #[test]
-    fn run_pin_empty_arena_never_plays_silently() {
-        let digest = "0".repeat(64);
-        let refused = mint_run_pin(
-            RUN_ADAPTER_SOFTWARE,
-            "software driver",
-            0,
-            &digest,
-            CURRENT_VERSION,
-        )
-        .expect_err("revision 0 must refuse");
-        assert_eq!(refused.code, "empty_arena");
-        assert!(
-            refused.message.contains("revision 0"),
-            "got: {}",
-            refused.message
-        );
-        let pin = RunPin {
-            build: RUN_BUILD_PIN.to_owned(),
-            adapter: RUN_ADAPTER_SOFTWARE.to_owned(),
-            driver: "software driver".to_owned(),
-            scene_revision: 0,
-            scene_digest: digest.clone(),
-            scene_schema: CURRENT_VERSION,
-        };
-        let refused = require_run_pin(Some(&pin), 0, &digest, CURRENT_VERSION)
-            .expect_err("revision 0 must refuse");
-        assert_eq!(refused.code, "empty_arena");
-        let fresh = Document::new();
-        let refused = live_run_pin(&fresh, RUN_ADAPTER_SOFTWARE, "software driver")
-            .expect_err("fresh document must refuse");
-        assert_eq!(refused.code, "empty_arena");
-    }
-
-    // Run pin gate: a pinned run carries the same build, scene and adapter
-    // in its manifest, round-tripping through the wire shape.
-    #[test]
-    fn run_pin_pinned_carries_pin_in_manifest() {
-        let room = room_scene();
-        let state = room.server.lock().expect("test lock holds");
-        let live_revision = state.doc.revision;
-        assert!(live_revision > 0, "seeded room is not empty");
-        let live = live_run_pin(&state.doc, RUN_ADAPTER_SOFTWARE, "software driver")
-            .expect("seeded room pins");
-        drop(state);
-        assert_eq!(live.build, RUN_BUILD_PIN);
-        assert_eq!(live.adapter, RUN_ADAPTER_SOFTWARE);
-        assert_eq!(live.scene_revision, live_revision);
-        assert_eq!(live.scene_digest.len(), MAX_RUN_DIGEST_CHARS);
-        assert_eq!(live.scene_schema, CURRENT_VERSION);
-        let text = rmcp::serde_json::to_string(&live).expect("pin rides the manifest");
-        assert!(text.contains(RUN_BUILD_PIN), "got: {text}");
-        assert!(text.contains(RUN_ADAPTER_SOFTWARE), "got: {text}");
-        assert!(text.contains(&live.scene_digest), "got: {text}");
-        let back: RunPin = rmcp::serde_json::from_str(&text).expect("manifest reads back");
-        assert_eq!(back, live);
-        let held = require_run_pin(
-            Some(&live),
-            live.scene_revision,
-            &live.scene_digest,
-            live.scene_schema,
-        )
-        .expect("held pin passes");
-        assert_eq!(held, live);
-    }
-
-    // Run pin gate: build, adapter, digest and revision drift all refuse with
-    // named errors that quote both sides, so a replay across builds or scenes
-    // fails loudly.
-    #[test]
-    fn run_pin_drift_refuses_with_named_errors() {
-        let room = room_scene();
-        let state = room.server.lock().expect("test lock holds");
-        let live_revision = state.doc.revision;
-        let live = live_run_pin(&state.doc, RUN_ADAPTER_SOFTWARE, "software driver")
-            .expect("seeded room pins");
-        drop(state);
-        let live_digest = live.scene_digest.clone();
-        let mut moved = live.clone();
-        moved.scene_revision = live_revision + 1;
-        let refused = require_run_pin(Some(&moved), live_revision, &live_digest, CURRENT_VERSION)
-            .expect_err("moved revision must refuse");
-        assert_eq!(refused.code, "stale_pin");
-        assert!(
-            refused.message.contains(&moved.scene_revision.to_string()),
-            "got: {}",
-            refused.message
-        );
-        assert!(
-            refused.message.contains(&live_revision.to_string()),
-            "got: {}",
-            refused.message
-        );
-        let mut drifted = live.clone();
-        let last = drifted.scene_digest.pop().expect("digest has a tail");
-        let flip = if last == '0' { '1' } else { '0' };
-        drifted.scene_digest.push(flip);
-        let refused = require_run_pin(Some(&drifted), live_revision, &live_digest, CURRENT_VERSION)
-            .expect_err("drifted bytes must refuse");
-        assert_eq!(refused.code, "digest_mismatch");
-        let mut rebuilt = live.clone();
-        rebuilt.build = "0.0.0".to_owned();
-        let refused = require_run_pin(Some(&rebuilt), live_revision, &live_digest, CURRENT_VERSION)
-            .expect_err("rebuilt door must refuse");
-        assert_eq!(refused.code, "bad_build");
-        assert!(
-            refused.message.contains(RUN_BUILD_PIN),
-            "got: {}",
-            refused.message
-        );
-        let refused = mint_run_pin("", "software driver", 7, &live_digest, CURRENT_VERSION)
-            .expect_err("empty adapter must refuse");
-        assert_eq!(refused.code, "bad_adapter");
-        let long = "x".repeat(MAX_RUN_ADAPTER_CHARS + 1);
-        let refused = mint_run_pin(&long, "software driver", 7, &live_digest, CURRENT_VERSION)
-            .expect_err("over-long adapter must refuse");
-        assert_eq!(refused.code, "bad_adapter");
-        let refused = mint_run_pin(
-            RUN_ADAPTER_SOFTWARE,
-            "software driver",
-            7,
-            "short",
-            CURRENT_VERSION,
-        )
-        .expect_err("short digest must refuse");
-        assert_eq!(refused.code, "bad_digest");
-        let refused = mint_run_pin(
-            RUN_ADAPTER_SOFTWARE,
-            "software driver",
-            7,
-            &live_digest,
-            CURRENT_VERSION + 1,
-        )
-        .expect_err("foreign schema must refuse");
-        assert_eq!(refused.code, "bad_schema");
-    }
-
-    // Run pin gate through the session entry points: the empty session
-    // refuses `empty_arena`, an unpinned start refuses `missing_pin`, and
-    // a minted pin passes the same session while riding the manifest.
-    #[test]
-    fn run_pin_session_gate_pins_or_refuses_pre_start() {
-        let empty = McpServer::new(7, Capability::unrestricted(7));
-        let state = empty.lock().expect("test lock holds");
-        let refused = state
-            .live_play_pin(RUN_ADAPTER_SOFTWARE, "software driver")
-            .expect_err("empty session must refuse");
-        drop(state);
-        assert_eq!(refused.code, "empty_arena");
-        let room = room_scene();
-        let state = room.server.lock().expect("test lock holds");
-        let refused = state
-            .require_play_pin(None)
-            .expect_err("unpinned start must refuse");
-        assert_eq!(refused.code, "missing_pin");
-        let live = state
-            .live_play_pin(RUN_ADAPTER_SOFTWARE, "software driver")
-            .expect("seeded room pins");
-        let held = state
-            .require_play_pin(Some(&live))
-            .expect("held pin passes pre-start");
-        assert_eq!(held, live);
-        assert_eq!(held.build, RUN_BUILD_PIN);
-        assert_eq!(held.adapter, RUN_ADAPTER_SOFTWARE);
-        let text = rmcp::serde_json::to_string(&held).expect("pin rides the manifest");
-        assert!(text.contains(RUN_BUILD_PIN), "got: {text}");
-        assert!(text.contains(RUN_ADAPTER_SOFTWARE), "got: {text}");
-        assert!(text.contains(&held.scene_digest), "got: {text}");
     }
 }

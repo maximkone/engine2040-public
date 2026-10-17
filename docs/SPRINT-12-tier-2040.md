@@ -49,7 +49,7 @@ golden unchanged; kill bars are gates.
   `node C:/empire/center/vision-check.mjs engine2040` PASS for
   this file's map row; golden unchanged. needs: EV3.
   LATER: parked 2026-10-03 (circus verdict 2: FOCUS.md parks audio, UI, modding, platform and shipping, living world, and no open finish bar lists this row); unpark by deleting this line.
-- [ ] FU8 futures: facial lip-sync map spike (phoneme to viseme bake).
+- [ ] FU8 futures: facial lip-sync map spike (phoneme to viseme bake). Progress 2026-10-17: `cargo test -p engine-anim --lib lipsync` 5 passed (bake_sha_x2_avalanche, runtime_refused_loud), gh run 39056263783 (6c08415c); the bake test uses 3 cues and posts no key count or ms for a 10-cue bake.
   Tier B spike. Size S. Owns spike hunks beside `crates/anim/src/lipsync.rs`
   (bake refusal frozen). Accept: `cargo test --locked -p engine-anim lipsync`
   green; 10-cue bake posts key count + ms; runtime inference still refused;
@@ -107,7 +107,7 @@ golden unchanged; kill bars are gates.
   under 10% of instances; CPU draw cost stays flat as instances grow.
   needs: GX1, RA3.
   LATER: re-aim at renderer 2026-10-06 (owner dropped viewer, D7 Bevy gate dead); CPU oracle seed at target/leftover-2026-10-06/engine-gameplay; planner re-seats into this row's home; unpark by deleting this line.
-- [ ] VG2 assets: meshlet cook — clusters plus a simplification DAG
+- [ ] VG2 assets: meshlet cook — clusters plus a simplification DAG Progress 2026-10-17: cook_meshlet_lod (meshlet.rs LOD DAG, error bound LOD_MAX_ERROR, KTX2-only) with meshlet_lod_cook::lod_dag_halves_triangles_caps_clusters_and_repeats_x2 passed, gh run 39057257306; only grid meshes are cooked, arena architecture has no caller yet.
   (meshoptimizer patterns, license read first), bytes identical x2.
   Tier C. Size M. Owns `crates/assets/src/meshlet.rs`. Accept: arena
   architecture cooks to clusters within the error bound; cook x2
@@ -257,7 +257,7 @@ golden unchanged; kill bars are gates.
   20k instances; llvmpipe parity; reference-GPU timing. needs: VG8,
   RA2. (PLN render-2040, reviewed 2026-09-26; waits VG8.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
-- [ ] VG7 assets: meshlet clusterize + simplify cook — bounded clusters +
+- [ ] VG7 assets: meshlet clusterize + simplify cook — bounded clusters + Progress 2026-10-17: cluster build plus error DAG cook exist (meshlet.rs cook_meshlet_lod, cook x2 identical on grid fixtures, gh run 39057257306); 100M-triangle arena stone and llvmpipe byte parity are not shown.
   error DAG for 100M-tri arena stone, bytes x2 (meshoptimizer clusterize /
   simplify / overdraw ideas, MIT, reimplemented std-only, no vendoring).
   Tier C. Size M. Owns `crates/assets/src/meshlet.rs`. Accept: arena
@@ -427,7 +427,7 @@ golden unchanged; kill bars are gates.
   `crates/net/src/wan_discipline.rs`. Accept: 64 bots plus AI at 150 ms,
   30 ms jitter, 2% loss and reorder converge; no combat entity starved over
   500 ms; at most 128 kbps per client; hash x2. needs: ON1, ON3, ON4, ON5.
-- [ ] ON15 net: per-connection scope gate — room membership + per-user scope
+- [ ] ON15 net: per-connection scope gate — room membership + per-user scope Progress 2026-10-17: room membership scope (entity_room, room_in_scope, set_rooms) and interest_64_room_converges (64 viewers, kbps under 12,800 x100 cap, starve under 30 ticks, x2 deterministic) passed in `cargo test -p engine-net --lib` 258 passed, gh run 39056801523 (40def1e2); no assertion of the 3x saving versus broadcast, and no production caller (ON29).
   predicate over `aoi.rs` feeding the ON3 priority queue (naia rooms/scopes,
   MIT OR Apache-2.0, patterns only; naia has no rate-LOD of its own).
   Tier C. Size M. Owns `crates/net/src/interest.rs`. Accept: 64-bot soak
@@ -533,7 +533,7 @@ golden unchanged; kill bars are gates.
   progress 2026-10-10: loopback only, Accept not met, row stays open. `net-bout on30` (--features quic) PASS: relay and direct bouts converge with full checkpoint equality. Open: real-NAT hole punch across two networks (no relay bin on HEAD yet); the hash x2 with the MP1 tape leg was not run. cargo test -p engine-net --features quic --lib: 261 pass, 1 red: lobby::tests::loopback_two_peers_form_fight_without_typed_addresses (beacon timeout under load; lobby.rs untouched by this work, not chased).
   progress 2026-10-10 (split-claude): real-NAT runner built. `net_relay [--bind 0.0.0.0:7041]` on a host both networks reach (RelayHub: STUN echo, token register, forward from the registered address only). Machine A: `net_bout on30-serve --relay R:7041` prints an invite code; machine B: `net_bout on30-join --relay R:7041 --code CODE`. Both register, learn the public address, trade candidates, punch (bound 300 ticks), then play WAN bouts x2 over the relay and x2 direct when the punch won; each equals its one-process twin. Receipts in `target/on30-nat` (online-bout, checkpoints, drop-rejoin, distributions, punch, real-net). The real leg rides UDP, not QUIC. Three-process loopback smoke: ON30 NAT PASS. Open: one run across two real networks.
   decision 2026-10-10 (owner delegated to Claude): the real-NAT leg counts over the UDP courier; QUIC through the relay is QR1 (LATER, `docs/SPRINT-18-gaps.md`). ON30 ticks on one run across two real networks with the `target/on30-nat` receipts and the hash x2 with the MP1 tape (operator run: `net_relay` on a reachable host, `on30-serve` and `on30-join` on two networks).
-- [ ] ON31 net: voice-boundary proof with SN9 — typed tests proving
+- [ ] ON31 net: voice-boundary proof with SN9 — typed tests proving Progress 2026-10-17: audio voice.rs live_synth_refused (synthesize_live returns VoiceError::LiveSynthRefused) passed in `cargo test -p engine-audio --lib voice`, gh run 39057032190; no net voice path and no voice on/off golden test yet (needs ON8).
   `voice.rs` bake-only refusal holds while ON8/ON12 net voice never
   touches the tick, checkpoints or golden. Tier B. Size S. Owns
   boundary test hunks in `crates/audio` + `crates/net` (no new
@@ -541,7 +541,7 @@ golden unchanged; kill bars are gates.
   voice on/off golden identical x2; transport stays ON-owned, bake
   stays audio-owned. needs: ON1, ON8, AU1. (PLN online, reviewed
   2026-09-26; waits ON8.)
-- [ ] ON36 net: confirmed-frame discard in P2P rollback — discard
+- [ ] ON36 net: confirmed-frame discard in P2P rollback — discard Progress 2026-10-17: rollback.rs discard tests queues_hold_128_and_discard_advances_tail, discard_stops_at_predicted_and_clamps_to_frame, loopback_seeded_loss_converges_replay_empty pass in `cargo test -p engine-net --lib` 258 passed, gh run 39056801523; the 64-frame bursty tape with history <= CAP+pending lives in netcode.rs (on40_history_bounded..., e449553e), not in rollback.rs.
   confirmed frames from the P2P session `history` behind a
   requested-frame guard, bounding memory (spike: 64→11 entries,
   512B→88B on the 64-frame bursty-loss tape, fold/tip/digest
@@ -562,14 +562,14 @@ golden unchanged; kill bars are gates.
   twice with the cycle on); the cycle publishes one `SkyState` per frame
   for render only; sun position feeds the RL4 sky path, never sim.
   needs: VX2.
-- [ ] WD7 world: cell publish gate — dual ahead-agent check
+- [x] WD7 world: cell publish gate — dual ahead-agent check Landed 1d01a410. `cargo test -p engine-world --lib` filter dual_gate: dual_gate_refuses_broken_seam_with_named_check, dual_gate_refuses_unreachable_island_with_named_check, dual_gate_nine_cell_walk_holds_budgets passed, gh run 39056058112.
   (geometric seam scan + navigational walk) before any cell goes
   live; bad cells refused with the failing check named. Tier C.
   Size S. Owns the gate in `crates/world/src/cells.rs` + fixtures.
   Accept: a cell with a broken seam and a cell with an unreachable
   nav island both refuse before publish; a 9-cell walk holds the
   AS2 budgets. needs: WD1.
-- [ ] WD8 world: versioned mesh tiles — per-cell NV1 bakes stitched
+- [x] WD8 world: versioned mesh tiles — per-cell NV1 bakes stitched Landed e7e12827 (rebake_mesh_tile live; tiles in a9766af6). `cargo test -p engine-nav --lib` 67 passed incl. apply_breaks_names_exact_dirty_tiles, rebake_bumps_only_its_tile_and_clears, walkers_repath_only_when_their_tile_advances, mesh_tile_rebake_bumps_through_the_registry, wiring_tests::root_mesh_tiles_and_rebake_bump_one_tile, gh run 39056263891. Versions live in TileRegistry, not in the mesh bytes.
   on shared edges with per-tile versions in the mesh bytes, so
   `rebake_mesh_tile` stops returning `Unsupported` and DX1 break
   sets rebake exactly their tiles. Tier C. Size M. Owns tile
@@ -613,7 +613,7 @@ golden unchanged; kill bars are gates.
   p50 <= 100 ms; SP-clean rate at/above builder+repair baseline;
   rerun byte-identical x2; 0 tick code. needs: WD1.
   (PLN47 verdict TAKE; EMPIRE outcome 4.)
-- [ ] WD15 world: staged arena-ground bake — ordered seeded passes
+- [ ] WD15 world: staged arena-ground bake — ordered seeded passes Progress 2026-10-17: crates/world/src/ground/bake.rs (1d01a410): ten_bakes_rerun_identical_x2, no_blocked_paths_and_connected, staged_has_wear_and_rubble_over_uniform_dirt passed, gh run 39056058112; the 100 ms bake test is #[ignore] (wall clock, not run) and the blind A/B leg has no record.
   (base → wear → scatter) baking courtyard dirt, rubble scatter and
   worn paths to deterministic tile/prop tables with a preview capture
   (bones-ai/rust-procedural-world discipline, MIT; Bevy/f32 never

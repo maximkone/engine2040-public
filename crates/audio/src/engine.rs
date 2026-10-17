@@ -103,6 +103,9 @@ impl AudioEngine {
             Command::Stop { cue, .. } => {
                 self.mixer.stop_cue(cue);
             }
+            Command::Trim { cue, gain, .. } => {
+                self.mixer.set_cue_trim(cue, gain);
+            }
             Command::Tension { level, .. } => {
                 if let Some(bed) = self.music.as_mut() {
                     bed.request(level, self.mixer.mixer_mut());
@@ -287,6 +290,33 @@ mod tests {
         engine.render_stereo_into(&mut out);
         assert!(engine.mixer().is_idle());
         assert!(out.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn trim_command_rides_a_looped_bed_without_restarting_it() {
+        let (mut tx, mut engine) = AudioEngine::with_feed(test_bank(), 16, RATE, 3);
+        tx.play(0, "bed", 1.0, None).expect("room");
+        let level = |engine: &mut AudioEngine| {
+            let mut out = [0.0f32; 8];
+            engine.render_stereo_into(&mut out);
+            out[0]
+        };
+        let full = level(&mut engine);
+        assert!(full > 0.0, "the bed sounds");
+        tx.trim(1, "bed", 0.5).expect("room");
+        let half = level(&mut engine);
+        assert!((half - full * 0.5).abs() < 1e-6, "{half} vs {full}");
+        tx.trim(2, "bed", 0.0).expect("room");
+        assert_eq!(level(&mut engine), 0.0, "muted, not stopped");
+        assert_eq!(engine.mixer().voice_count(), 1, "same voice, still looping");
+        tx.trim(3, "bed", 1.0).expect("room");
+        assert_eq!(level(&mut engine), full, "back to the play level");
+        // A cue the bank lacks is counted, a cue with no live voice is a no-op.
+        assert_eq!(tx.trim(4, "nope", 1.0), Err(FeedError::UnknownCue));
+        tx.trim(4, "clack", 0.3).expect("room");
+        level(&mut engine);
+        let stats = tx.stats();
+        assert_eq!((stats.unknown_cue, stats.sent), (1, stats.applied));
     }
 
     #[test]

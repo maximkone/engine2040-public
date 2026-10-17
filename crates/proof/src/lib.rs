@@ -15,6 +15,8 @@ use std::fmt;
 use std::path::{Component, Path};
 
 pub mod a9;
+#[cfg(feature = "arena")]
+pub mod arena_matrix;
 pub mod break_corpus;
 pub mod bug;
 pub mod chaos;

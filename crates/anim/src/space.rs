@@ -211,7 +211,7 @@ pub fn bake(mut samples: Vec<SpaceSample>) -> Result<BlendSpace, SpaceError> {
 /// FNV-1a64 over the canonical samples (speed, angle, clip).
 pub fn space_hash(space: &BlendSpace) -> u64 {
     let mut hash = Fnv64::new();
-    hash.write_u64(space.len() as u64);
+    hash.write_len(space.len());
     for sample in &space.samples {
         hash.write(&sample.speed_q.to_le_bytes());
         hash.write(&sample.angle_q.to_le_bytes());

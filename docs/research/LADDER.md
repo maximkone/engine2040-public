@@ -25,9 +25,7 @@ Merge history before 2026-10-03T21:15Z: 34 merges collapsed (full log in `git lo
 
 ## Lines
 
-Archived 2026-10-04: oldest 220 REJECTED/DUPE rulings moved verbatim to `archive/LADDER-2026-10-04.md` (nothing deleted; OPEN CARD/SPIKE/LANDED rows stay here). Older kills (168 REJECTED + 13 DUPE, 2026-09-30) live in `LADDER-ARCHIVE.md`; both archives are history, never re-add without their re-open signal.
-Archived 2026-10-08: 120 done rows (LANDED 15 + REJECTED 104 + DUPE 1) moved verbatim to `archive/LADDER-2026-10-08.md` (nothing deleted; OPEN CARD/SPIKE/CANDIDATE rows stay here).
-Archived 2026-10-16: 169 done rows (LANDED 2 + REJECTED 167 + DUPE 0) moved verbatim to `archive/LADDER-2026-10-16.md` (nothing deleted; OPEN CARD/SPIKE/CANDIDATE rows stay here).
+Archived: 677 done rulings (REJECTED, DUPE, LANDED; cuts of 2026-09-30, 10-04, 10-08 and 10-16) left this file. They were in `docs/research/archive/LADDER-*.md`, which left the tree on 2026-10-17; read them with `git log --all -- docs/research/archive`. OPEN CARD/SPIKE/CANDIDATE rows stay here. Never re-add a killed idea without its re-open signal.
 
 - CARD ACCEPTED | P5 | phased-fighter benchmark as the GP23 validation harness | arXiv 2607.06514 (wave 46 card 1) | not run: GP23 fixture, current resolver tests -> phased fixture, window-named failures | spike first (GP23)
 - CARD ACCEPTED | P2 | sealed run capsule for the OB1 digest and AX6 evidence line | wave 46 card 2 | not run: OB1 digest vs sealed bundle, tamper detection rate | spike first (OB1, AX6)

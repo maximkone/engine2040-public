@@ -69,7 +69,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   engine-combat --lib hitstop_kinds` x2: a v2 heavy hit freezes 6 ticks, a
   light 3, a parry 8; v1 unchanged. F2P: one value today. P2P: golden
   unchanged. needs: none.
-- [ ] GP32 arena: the live duel runs tables v2, the proof scene keeps v1 — the
+- [x] GP32 arena: the live duel runs tables v2, the proof scene keeps v1 — the Landed e93f9b27. `cargo test -p engine-arena --lib -- table_version` 3 passed on this PC (table_version_v1_steps_startup_4, table_version_v2_steps_startup_15, table_version_config_selects_the_rules_it_builds); the window build and capture build go through `App::into_duel` (windowed.rs, capture.rs, netgame.rs); golden d57b5c8ae3096614 unchanged on all five machines in golden-matrix run 39054403838.
   arena hardcodes `TABLES_V1` (`crates/arena/src/lib.rs:105,1302`), so the
   readable startups, buffer and commit lock never reach a player. Add a table
   version to the match config: default v1 (the proof scene and the golden),
@@ -83,7 +83,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
 
 **The arena as a level, the round, the HUD (Tier A)**
 
-- [ ] GP37 content: one Rome numbers file plus a drift test — the shared numbers
+- [x] GP37 content: one Rome numbers file plus a drift test — the shared numbers Landed d0a4f6b4. rome_spec_drift 3 tests, run 39048280955.
   live in `docs/plan/rome-spec.json` and forge `SPEC.md:69-73` names a missing
   `content/arena/rome-spec.json`; engine walls sit at z -8 and +8 m
   (`content/arena/placement.json` ids 3-4) while the spec's half extent is
@@ -199,7 +199,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   Accept: `cargo test -p engine-playtest --lib charter` x2: C1 and C2 print
   their lines; a broken expectation prints FAIL with the line. F2P: no charter
   runner. P2P: P3 green. needs: none.
-- [ ] GP34 game: one balance bar — `crates/game/src/bench.rs:61-63` keeps a kill
+- [ ] GP34 game: one balance bar — `crates/game/src/bench.rs:61-63` keeps a kill Progress 2026-10-17: `PQ2_KILL_SHARE_MAX_PERMILLE = 350` in crates/game/src/bench.rs now mirrors the tournament bar (one gate; caller bin/staged_fight.rs, test design_loop.rs) and the dead 1000 ceiling is gone, but `rg -n 1000 crates/game/src/bench.rs` still hits the `PERMILLE` scale const, so the literal Accept is unmet.
   ceiling of 1000 permille per side that cannot trip and has no caller; the live
   bar is `playtest/src/tournament.rs:40` (350). Delete `bench.rs` (git rm, its
   test with it) or route it through the tournament bar with a per-move count;
@@ -243,7 +243,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   it with `deny.toml`). Accept: `RUSTFLAGS="--cfg loom" cargo test -p engine-ecs
   --lib loom_pool` green; a planted missing-wait fails it. F2P: no model. P2P:
   ecs lib green. needs: none.
-- [ ] SL46 quality: the fight tick joins the float gate — `tools/rust-quality.mjs:21`
+- [ ] SL46 quality: the fight tick joins the float gate — `tools/rust-quality.mjs:21` Progress 2026-10-17: `engine-arena` is in SIM_CRATES (tools/rust-quality.mjs:22) and `crates/arena/clippy.toml` is byte-identical to tools/sim-clippy.toml (checked by simClippyFindings); `node tools/rust-quality.mjs --crate arena` scores 98 A. Left: the scorecard has no float column and the planted f32 `sin()` drill was not run.
   SIM_CRATES lists 12 crates without `engine-arena`, whose `FighterState`
   (`arena/src/lib.rs:469-476`) keeps f32. Add it; copy `tools/sim-clippy.toml`
   to `crates/arena/clippy.toml`. Diff: regular. Tier A. Size S. Owns the list in
@@ -251,7 +251,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   tools/rust-quality.mjs --crate arena` reports its float count; a planted f32
   `sin()` in the arena step fails it. F2P: arena not scanned. P2P: the
   rust-quality baseline holds. needs: none.
-- [ ] CQ18 quality: release keeps overflow checks — `[profile.release]`
+- [ ] CQ18 quality: release keeps overflow checks — `[profile.release]` Progress 2026-10-17: `overflow-checks = true` is set in `[profile.release]` (root Cargo.toml); golden d57b5c8ae3096614 unchanged on all five machines in golden-matrix run 39054403838. Left: ARENA frame-split p50 before/after (under 3% slower) and the `node tools/proof.mjs` double print.
   (`Cargo.toml:218-221`) sets none while comments at `:227,238` say checks stay
   on, and proof runs use `--release` (`tools/proof.mjs:401`). Set
   `overflow-checks = true`, measure the cost. Diff: regular. Tier A. Size S.
@@ -277,7 +277,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   Size M. Owns those two types and their call sites, the presenter hunk.
   Accept: `rg -n "struct Handle\(pub|struct Fixed\(pub" crates` empty;
   workspace tests green. F2P: public fields. P2P: golden unchanged. needs: none.
-- [ ] CQ21 quality: the crate graph is tested acyclic and coupling has an alarm —
+- [x] CQ21 quality: the crate graph is tested acyclic and coupling has an alarm — Landed 5791e829. The DFS cycle check lives in `tools/arch-fitness.mjs` (wired into workspace-check at `tools/workspace-check.mjs:754`): `node --test tools/arch-fitness.test.mjs` 4 pass (seeded cycle a->b->a fails, self loop fails, real graph passes); `node --test tools/crate-map.test.mjs` 3 pass incl. instability Ce/(Ca+Ce); `node tools/crate-map.mjs` prints instability per crate. Tests sit in those two files, not workspace-check.test.mjs.
   `docs/ARCHITECTURE.md:9` promises an acyclic graph; `tools/workspace-check.mjs:308-318`
   only walks reachability; `tools/crate-map.mjs:4-5` prints fan-in and fan-out
   with no bar. Add a DFS cycle check with a seeded-cycle test and instability
@@ -286,7 +286,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `node --test tools/workspace-check.test.mjs`: a seeded cycle fails, the real
   graph passes; `node tools/crate-map.mjs` prints instability per crate. F2P:
   no cycle test. P2P: workspace-check result unchanged. needs: none.
-- [ ] CQ22 docs: decision records — D1-D9 sit in `docs/FOCUS.md` prose and the
+- [ ] CQ22 docs: decision records — D1-D9 sit in `docs/FOCUS.md` prose and the Progress 2026-10-17: `docs/adr/` holds a README plus 11 records (0001-0011, each with a Status line); only 0001, 0006 and 0010 name a Compliance check path, 8 say `none yet`. Left: a check path on every record.
   book decisions D1-D6 (`BOOK-GAPS-2026-10-12.md:199-201`) as open lines; no
   record has a status or a check. `docs/adr/README.md` plus one record per
   decision (status, context, options, decision, consequences, the check that

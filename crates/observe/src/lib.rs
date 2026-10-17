@@ -330,14 +330,7 @@ pub fn digest(events: &[Event], budget_bytes: usize) -> String {
 
 /// Truncate `text` to `max_bytes` bytes on a `char` boundary.
 fn bound_len(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_owned();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
+    text[..text.floor_char_boundary(max_bytes)].to_owned()
 }
 
 #[cfg(test)]

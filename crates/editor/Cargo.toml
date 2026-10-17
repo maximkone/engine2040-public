@@ -16,7 +16,7 @@ workspace = true
 # and serde_json are already in the workspace lock via RA1. `egui-wgpu/winit`
 # stays off: it would pull a new package into the lock.
 [features]
-ui = ["dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:egui_dock", "dep:transform-gizmo", "dep:transform-gizmo-egui", "dep:winit", "engine-render/window", "dep:engine-spatial", "dep:engine-combat", "dep:engine-ai", "dep:engine-app"]
+ui = ["dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:egui_dock", "dep:transform-gizmo", "dep:transform-gizmo-egui", "dep:winit", "engine-render/window", "dep:engine-combat", "dep:engine-ai", "dep:engine-app"]
 
 # ED1: the editor executable, gated on `ui` so headless stays std-only.
 [[bin]]
@@ -28,8 +28,12 @@ required-features = ["ui"]
 # Pose stamps hash through the engine-core FNV owner (one hash owner).
 engine-core.workspace = true
 engine-scene.workspace = true
-# SP2 findings panel consumes spatial's public API (one direction only).
-engine-spatial = { workspace = true, optional = true }
+# SP2 findings panel and the asset browser's drop solver consume spatial's
+# public API (one direction only); spatial depends on core alone.
+engine-spatial.workspace = true
+# The asset browser reads archive/bundle entry kinds and bounds from the real
+# owner (std-only default features: core and clock).
+engine-assets.workspace = true
 # TU1 live tuning reads combat/brain validated-swap schemas (data only).
 engine-combat = { workspace = true, optional = true }
 engine-ai = { workspace = true, optional = true }

@@ -416,11 +416,6 @@ impl HeadlessServer {
         Ok((checkpoint, delta))
     }
 
-    /// Borrow the tick-driven cell send queue. Caller: `cells.rs` priority drain.
-    pub fn cell_queue(&self) -> &crate::cells::CellQueue {
-        &self.cells
-    }
-
     /// Mutably borrow the cell send queue (subscribe plus combat marks).
     pub fn cell_queue_mut(&mut self) -> &mut crate::cells::CellQueue {
         &mut self.cells

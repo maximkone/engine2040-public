@@ -18,6 +18,10 @@ pub struct AllocSnapshot {
     pub bytes: u64,
     /// Number of successful allocations.
     pub count: u64,
+    /// Highest live heap reached in the window, in bytes above the level at
+    /// its start (requests minus frees, so buffers made and dropped in a loop
+    /// read once). This is the number the heap-peak gate reads.
+    pub peak_live_bytes: u64,
 }
 
 /// Run `f` with counting enabled on the calling thread and return its value
@@ -31,18 +35,17 @@ pub fn measure<T>(f: impl FnOnce() -> T) -> (T, AllocSnapshot) {
     let observed = AllocSnapshot {
         bytes: seen.bytes,
         count: seen.calls,
+        peak_live_bytes: seen.peak_live_bytes,
     };
     (value, observed)
 }
 
 /// Peak heap observed over one run, in bytes.
 ///
-/// Each sample is the bytes requested inside one counted window ([`measure`]).
-/// The counting allocator records requests and not frees, so a sample is an
-/// upper bound on how far the live heap grew in that window: it never reads
-/// low, and a leak or an extra buffer moves it by exactly the bytes added.
-/// A true live-heap high-water mark needs free accounting in the shared
-/// `engine_core::alloc_probe`, which this crate does not own.
+/// Each sample is the live-heap high-water mark of one counted window
+/// ([`AllocSnapshot::peak_live_bytes`]): requests minus frees, so scratch that
+/// is made and dropped each tick reads once, and a leak or an extra buffer
+/// moves it by exactly the bytes held.
 /// Owner: this module owns only the pure math over recorded samples; it
 /// never reads a clock or the OS. Determinism: same inputs give the same
 /// peak twice. Errors: none, construction cannot fail.
@@ -103,7 +106,7 @@ pub fn allows(peak_bytes: u64, baseline_bytes: u64) -> bool {
 pub enum PeakGateError {
     /// Peak exceeded the 10 percent headroom above the baseline.
     OverBudget {
-        /// Largest requested-bytes sample in bytes (an upper bound on live heap).
+        /// Largest live-heap sample in bytes.
         peak_bytes: u64,
         /// Recorded baseline in bytes.
         baseline_bytes: u64,
@@ -331,7 +334,7 @@ mod tests {
     #[test]
     fn counts_only_inside_the_window() {
         let ((), before) = measure(|| {});
-        assert_eq!(before, AllocSnapshot { bytes: 0, count: 0 });
+        assert_eq!(before, AllocSnapshot::default());
         let ((), one) = measure(|| {
             std::hint::black_box(vec![0u8; 64]);
         });
@@ -340,7 +343,7 @@ mod tests {
         // Allocating after the window closed is not charged to the next one.
         std::hint::black_box(vec![0u8; 256]);
         let ((), after) = measure(|| {});
-        assert_eq!(after, AllocSnapshot { bytes: 0, count: 0 });
+        assert_eq!(after, AllocSnapshot::default());
     }
 
     #[test]

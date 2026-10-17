@@ -7,6 +7,8 @@ game is a multiplayer Roman arena on Windows (`docs/FOCUS.md`).
 
 Run: `cargo run -p engine2040 --release` prints the final hash.
 Proof: `node tools/proof.mjs --skip-build` (hash x2) and `node tools/workspace-check.mjs`.
+AI or new here: read [`docs/book/for-ai.md`](docs/book/for-ai.md) first (the same page as a link list is `llms.txt`).
+Handbook: the pages in `docs/book/`, built with mdBook and published under `/docs/` beside the browser build.
 
 Crates follow explicit acyclic dependencies. Provider SDKs, GPU resources and
 blocking IO stay outside `engine-core` and the authoritative tick. Live AI

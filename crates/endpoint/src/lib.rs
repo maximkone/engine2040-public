@@ -51,6 +51,8 @@ pub mod scene_query;
 pub mod scene_tools;
 pub mod secret_launch;
 #[cfg(feature = "mcp")]
+mod spatial_glue;
+#[cfg(feature = "mcp")]
 pub mod startup;
 #[cfg(feature = "mcp")]
 pub mod tool_capabilities;

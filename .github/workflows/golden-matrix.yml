@@ -11,6 +11,10 @@ name: golden-matrix
 # transform per tick) is recorded on the same five machines and compared with `--ragdoll`, which
 # names the first tick and body that differ; and the lib tests of engine-physics (feature rapier)
 # run natively and as wasm32-wasip1 under wasmtime, where the same tests must pass.
+# DSN2 adds the arena claim: the rules-v2 kit match the window and the net server play (8 fighters,
+# 1200 ticks, `arena_line`, the checkpoint hash of every tick) is recorded on the same five machines
+# and compared with `--arena`, which names the first tick that differs. The legacy tape above never
+# runs arena code; this row does.
 # Start it from the Actions tab (workflow_dispatch) or by pushing a throwaway branch named
 # golden-matrix-* of the public mirror. The private dev repo never runs it.
 on:
@@ -84,6 +88,15 @@ jobs:
           cargo run -p engine-proof --features ragdoll --bin ragdoll_line --locked --release --quiet > out/ragdoll-row.txt
           head -n 1 out/ragdoll-row.txt
           got="$(head -n 1 out/ragdoll-row.txt | cut -d' ' -f1)"
+          test "$got" = "${{ matrix.host }}" || { echo "this runner is $got, the matrix slot says ${{ matrix.host }}"; exit 1; }
+      # DSN2: the arena match (rules v2, kit walls, 8 fighters, 1200 ticks), the checkpoint hash of every tick.
+      - name: record the arena rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p engine-proof --features arena --bin arena_line --locked --release --quiet > out/arena-row.txt
+          head -n 1 out/arena-row.txt
+          got="$(head -n 1 out/arena-row.txt | cut -d' ' -f1)"
           test "$got" = "${{ matrix.host }}" || { echo "this runner is $got, the matrix slot says ${{ matrix.host }}"; exit 1; }
       - uses: actions/upload-artifact@v5
         if: always()
@@ -172,6 +185,16 @@ jobs:
           head -n 1 out/ragdoll-row.txt
           got="$(head -n 1 out/ragdoll-row.txt | cut -d' ' -f1)"
           test "$got" = "wasi-wasm32" || { echo "this runner is $got, the matrix slot says wasi-wasm32"; exit 1; }
+      # DSN2: the arena match, built apart like the ragdoll so each build keeps only its own features.
+      - name: record the arena rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target wasm32-wasip1 -p engine-proof --features arena --bin arena_line
+          wasmtime run --dir . target/wasm32-wasip1/release/arena_line.wasm > out/arena-row.txt
+          head -n 1 out/arena-row.txt
+          got="$(head -n 1 out/arena-row.txt | cut -d' ' -f1)"
+          test "$got" = "wasi-wasm32" || { echo "this runner is $got, the matrix slot says wasi-wasm32"; exit 1; }
       # Size of each wasm file, and how many SIMD instructions the build really holds (wabt's
       # wasm-objdump): a SIMD leg that holds none proves nothing about SIMD. The count is a note, not a gate.
       - name: wasm sizes and SIMD instruction counts
@@ -183,7 +206,7 @@ jobs:
           sudo apt-get update -qq > /dev/null 2>&1
           sudo apt-get install -y -qq wabt > /dev/null 2>&1
           : > out/wasm-sizes.txt
-          for f in engine2040 matrix_line ragdoll_line; do
+          for f in engine2040 matrix_line ragdoll_line arena_line; do
             p="target/wasm32-wasip1/release/$f.wasm"
             if [ ! -f "$p" ]; then echo "${{ matrix.label }} $f.wasm missing" >> out/wasm-sizes.txt; continue; fi
             n=na
@@ -288,7 +311,7 @@ jobs:
           set -euo pipefail
           missing=0
           for host in linux-x86_64 windows-x86_64 linux-aarch64 wasm32-wasip1 wasm32-wasip1-simd128; do
-            for file in golden.e2040 matrix-row.txt ragdoll-row.txt; do
+            for file in golden.e2040 matrix-row.txt ragdoll-row.txt arena-row.txt; do
               if [ ! -f "matrix/golden-$host/$file" ]; then
                 echo "MISSING matrix/golden-$host/$file: that runner recorded nothing, so the matrix is incomplete"
                 missing=1
@@ -305,6 +328,7 @@ jobs:
             $m/golden-linux-x86_64/golden.e2040 $m/golden-windows-x86_64/golden.e2040 $m/golden-linux-aarch64/golden.e2040 $m/golden-wasm32-wasip1/golden.e2040 $m/golden-wasm32-wasip1-simd128/golden.e2040 \
             --rows $m/golden-linux-x86_64/matrix-row.txt $m/golden-windows-x86_64/matrix-row.txt $m/golden-linux-aarch64/matrix-row.txt $m/golden-wasm32-wasip1/matrix-row.txt $m/golden-wasm32-wasip1-simd128/matrix-row.txt \
             --ragdoll $m/golden-linux-x86_64/ragdoll-row.txt $m/golden-windows-x86_64/ragdoll-row.txt $m/golden-linux-aarch64/ragdoll-row.txt $m/golden-wasm32-wasip1/ragdoll-row.txt $m/golden-wasm32-wasip1-simd128/ragdoll-row.txt \
+            --arena $m/golden-linux-x86_64/arena-row.txt $m/golden-windows-x86_64/arena-row.txt $m/golden-linux-aarch64/arena-row.txt $m/golden-wasm32-wasip1/arena-row.txt $m/golden-wasm32-wasip1-simd128/arena-row.txt \
             > verdict.txt || status=$?
           # The physics lib tests, native against wasm32-wasip1: the same tests must pass, by name.
           p=physics/physics-tests

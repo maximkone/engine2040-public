@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 pub use crate::dedicated::Beacon;
 #[cfg(test)]
 use crate::relay::InviteCode;
+use engine_arena::MatchSpec;
 use engine_input::MAX_PARTICIPANTS;
 
 /// Fewest fighters a lobby can form with.
@@ -153,6 +154,17 @@ pub struct BuildId {
 }
 
 impl BuildId {
+    /// Build identity of `version` playing `spec`: `rules` is the spec's
+    /// [`MatchSpec::identity`], which folds the config, the rules version and
+    /// the world digest. A peer on other rules or another world holds another
+    /// identity and is refused at [`Lobby::join`] with both digests named.
+    pub fn of_spec(version: u16, spec: &MatchSpec) -> Self {
+        Self {
+            version,
+            rules: spec.identity(),
+        }
+    }
+
     /// Range-check: version zero is reserved and fails.
     pub fn validate(self) -> Result<(), LobbyError> {
         if self.version == 0 {

@@ -7,6 +7,7 @@ use super::{navcheck, Actor, Finding, Report};
 use engine_core::Fnv64;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Every check name this crate can run.
 pub const SPATIAL_CHECKS: [&str; 18] = [
     "overlap",
     "unknown-position",
@@ -49,6 +50,7 @@ const DENSITY_CELL_CM: i32 = 100; // 1 m crowd cells
 const DENSITY_MAX: usize = 8; // headcount per cell
 const NAME_MAX_LEN: usize = 64; // grammar: [a-z0-9_], no leading digit
 
+/// Severity word for a check name (`red`, `yellow` or the fallback).
 pub fn severity_of(check: &str) -> &'static str {
     match check {
         "overlap" | "bounds" | "scale" | "dupeSpam" => "red",
@@ -76,6 +78,7 @@ pub(crate) fn hash_findings(findings: &[Finding]) -> u64 {
     h.finish()
 }
 
+/// Run the named checks over `actors`; unknown names come back as the error.
 pub fn run_checks(actors: &[Actor], checks: &[&str]) -> Result<Report, Vec<&'static str>> {
     run_spatial(actors, checks, None)
 }

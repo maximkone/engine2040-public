@@ -19,13 +19,13 @@ platform outputs enter only as recorded actions.
   Tier B. Size S. Owns `tools/ship.mjs` (orchestrator). Accept: two runs
   give identical manifests for identical inputs; a failing clean check
   stops the script. needs: GM3, OPT5.
-- [ ] PLF6 game: minidumps and a symbol store — minidump-writer beside
+- [ ] PLF6 game: minidumps and a symbol store — minidump-writer beside Progress 2026-10-17: `crates/game/src/crash.rs` writes a minidump stub beside the crash report (`write_minidump_stub`, tests near crash.rs:882-895). Left: a real minidump-writer dump, symbols archived per build id, the local symbolize command.
   the WIN4 report; symbols archived per build id; a local symbolize
   command; nothing uploads. Tier B. Size S. Owns
   `crates/game/src/crash.rs` hunks plus the tool. Accept: a forced crash
   yields a dump that symbolizes to the faulting function. needs: WIN4.
   LATER: parked 2026-10-03 (circus verdict 2: FOCUS.md parks audio, UI, modding, platform and shipping, living world, and no open finish bar lists this row); unpark by deleting this line.
-- [ ] PLF7 ui: localization — Fluent string tables, a pseudo-locale that
+- [ ] PLF7 ui: localization — Fluent string tables, a pseudo-locale that Progress 2026-10-17: `crates/ui/src/locale.rs` has static en/de tables, integer plurals and `pseudo_into` (test locale_two_languages_plurals_pseudo). Left: Fluent string files, right-to-left shaping and bidi, font fallback, the hardcoded-string gate.
   lengthens and marks every string, right-to-left shaping and bidi for
   Arabic and Hebrew, font fallback, and a gate that fails on hardcoded
   UI strings. Tier B. Size L. Owns `crates/ui/src/locale.rs`. Accept:

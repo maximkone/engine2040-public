@@ -41,6 +41,7 @@ pub(crate) mod capture {
 
     use std::time::Instant;
 
+    use engine_game::break_window::BreakScene;
     use engine_game::capture::{self, CaptureSink, LookTap, TapeInputs};
     use engine_game::director::AuditReport;
     use engine_game::windowed::{
@@ -715,20 +716,7 @@ pub(crate) mod capture {
             .unwrap_or(&[]);
         capture::validate_tape_for_run(inputs, HUMAN_SLOT, config.ticks)
             .map_err(|err| WinError::Render(capped(&err.to_string())))?;
-        let meta = capture::ManifestMeta {
-            rows: flags.rows.clone(),
-            sha: flags.sha.clone(),
-            fps: flags.fps,
-        };
-        let mut sink = capture::CaptureSink::create(
-            &flags.dir,
-            flags.every,
-            config.seed,
-            tape.as_ref(),
-            capture::TWIN_RENDERER,
-            &meta,
-        )
-        .map_err(|err| WinError::Render(capped(&err.to_string())))?;
+        let mut sink = open_twin_sink(config, tape.as_ref(), flags)?;
         presenter.resize(SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)?;
         // One lit cube proves the forward pass; a refused upload falls back to
         // clear-only frames rather than failing the capture.
@@ -745,6 +733,8 @@ pub(crate) mod capture {
         let kit_report = engine_game::arena_kit::stage_kit_or_default(&mut presenter);
         let kit_draws = kit_triples(&kit_report);
         let mut app = App::new(config)?;
+        // The center crate's break picture rides the twin frames like the window's (RZ4w).
+        let mut crate_scene = BreakScene::new(&app.live_match().config());
         let human = FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))?;
         let mut cursor = TapeInputs::new(tape.map(|loaded| loaded.inputs).unwrap_or_default());
         let mut presented = 0u32;
@@ -762,6 +752,7 @@ pub(crate) mod capture {
             if !outcome.input_accepted {
                 return Err(WinError::Render(format!("tick {tick} rejected")));
             }
+            observe_crate(&mut crate_scene, &outcome);
             if sink.should_capture(tick + 1) {
                 let hash = outcome.checkpoint.map(|point| point.hash).unwrap_or(0);
                 let mut list = frame_list(
@@ -781,6 +772,7 @@ pub(crate) mod capture {
                 .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
                 let overlay = engine_game::windowed::duel_overlay_for_app(&app);
                 engine_game::windowed::stage_hp_bars(&mut presenter, &overlay);
+                push_crate(&mut crate_scene, &mut presenter, &mut list);
                 let out = presenter.render_offscreen(&list)?;
                 if !out.manifest.is_clean() {
                     return Err(WinError::Render("twin frame failed validation".to_string()));
@@ -797,9 +789,52 @@ pub(crate) mod capture {
                 }
             }
         }
+        if let Some(scene) = crate_scene.as_ref() {
+            say!("{}", scene.receipt_line());
+            say!("{}", scene.stats().receipt_line());
+        }
         seal_capture_cut_log(&mut sink, &app);
         sink.finish()
             .map_err(|err| WinError::Render(capped(&err.to_string())))
+    }
+
+    /// The twin capture's PNG sink: manifest rows from the flags, bound to the tape.
+    fn open_twin_sink(
+        config: GameConfig,
+        tape: Option<&capture::LoadedTape>,
+        flags: &capture::CaptureFlags,
+    ) -> Result<CaptureSink, WinError> {
+        let meta = capture::ManifestMeta {
+            rows: flags.rows.clone(),
+            sha: flags.sha.clone(),
+            fps: flags.fps,
+        };
+        capture::CaptureSink::create(
+            &flags.dir,
+            flags.every,
+            config.seed,
+            tape,
+            capture::TWIN_RENDERER,
+            &meta,
+        )
+        .map_err(|err| WinError::Render(capped(&err.to_string())))
+    }
+
+    /// Twin capture, break picture: one accepted tick for the crate (RZ4w). A refusal drops
+    /// the picture loudly; the capture goes on without the crate.
+    fn observe_crate(scene: &mut Option<BreakScene>, outcome: &engine_game::TickOutcome) {
+        if let Some(Err(err)) = scene.as_mut().map(|s| s.observe_outcome(outcome)) {
+            tell!("arena notice: break picture dropped: {err}");
+            *scene = None;
+        }
+    }
+
+    /// Twin capture, break picture: the crate's boxes onto the frame list (RZ4w).
+    fn push_crate(scene: &mut Option<BreakScene>, presenter: &mut Presenter, list: &mut DrawList) {
+        if let Some(Err(why)) = scene.as_mut().map(|s| s.push(presenter, list, 1.0)) {
+            tell!("arena notice: break picture dropped: {why}");
+            *scene = None;
+        }
     }
 
     /// Capture slot for the window session: tape cursor plus the PNG sink.

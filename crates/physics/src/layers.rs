@@ -154,7 +154,10 @@ mod tests {
         for (_, bit, _) in TABLE {
             assert!(!blocks(SENSOR, bit));
         }
-        assert!(!blocks(WORLD, WORLD), "static pieces never collide with each other");
+        assert!(
+            !blocks(WORLD, WORLD),
+            "static pieces never collide with each other"
+        );
         assert!(blocks(DEBRIS, WORLD) && blocks(DEBRIS, PROP));
     }
 

@@ -237,14 +237,6 @@ impl WeightTable {
             lanes: [200, 1_000, 900, 200, 1_000],
         }
     }
-    /// True for the all-1000 table.
-    pub const fn is_neutral(&self) -> bool {
-        self.lanes[0] == 1_000
-            && self.lanes[1] == 1_000
-            && self.lanes[2] == 1_000
-            && self.lanes[3] == 1_000
-            && self.lanes[4] == 1_000
-    }
 }
 
 /// Separator-shaped weights over stamina, range and morale: table lanes

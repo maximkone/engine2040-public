@@ -12,6 +12,7 @@ const STEALS = join(dirname(fileURLToPath(import.meta.url)), "steals.md");
 const text = readFileSync(STEALS, "utf8").replace(/\r\n/g, "\n");
 const lines = text.split("\n");
 const open = lines.filter((l) => /^\d{4}-\d\d-\d\d \| .* \| open\s*$/.test(l));
+const dated = lines.filter((l) => /^\d{4}-\d\d-\d\d \| /.test(l));
 
 test("no UNVERIFIED open steal line remains", () => {
   const bad = open.filter((l) => /\| UNVERIFIED \|/.test(l));
@@ -23,7 +24,8 @@ test("at most one open ON40 ggrs input_queue line", () => {
   assert.ok(dupes.length <= 1, `duplicate ON40 input_queue open lines: ${dupes.length}`);
 });
 
+// Open or landed: both lines landed on 2026-10-17 and keep their record.
 test("the superseding ON40 MIT line and the P6 puffin line are intact", () => {
-  assert.ok(open.some((l) => /e97e3d2416/.test(l)), "superseding ON40 MIT line (e97e3d2416) missing");
-  assert.ok(open.some((l) => /P6 \(PF2\)/.test(l) && /puffin/.test(l)), "P6 puffin line missing");
+  assert.ok(dated.some((l) => /e97e3d2416/.test(l)), "superseding ON40 MIT line (e97e3d2416) missing");
+  assert.ok(dated.some((l) => /P6 \(PF2\)/.test(l) && /puffin/.test(l)), "P6 puffin line missing");
 });

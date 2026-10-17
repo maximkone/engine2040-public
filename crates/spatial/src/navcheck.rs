@@ -4,11 +4,17 @@ use super::index::{build_rects, pos_known, to_cm};
 use super::{Actor, Finding};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// Edge of one nav tile, in centimeters.
 pub const TILE_CM: i32 = 100;
+/// Frame eaten on both sides of a door together, in centimeters.
 pub const DOOR_FRAME_CM: i32 = 20; // frame eaten on both sides together
+/// Actors slower than this hold no heading (centimeters).
 pub const FLOW_MIN_SPEED_CM: i32 = 20; // actors slower than this hold no heading
+/// Half-extent of the access-front probe, in centimeters.
 pub const PROBE_CM: i32 = 45; // accessFront probe half-extent
+/// Single-file clear minimum of a door, in centimeters (red below).
 pub const DOOR_SINGLE_CM: i32 = 90; // single-file clear minimum (red below)
+/// Two-way clear minimum of a door, in centimeters (yellow below).
 pub const DOOR_DOUBLE_CM: i32 = 150; // two-way clear minimum (yellow below)
 
 /// One walkable nav tile.

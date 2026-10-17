@@ -74,6 +74,7 @@ pub struct GraphSetOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
+#[expect(clippy::empty_structs_with_brackets, reason = "serde reads the wire shape `{}`; a unit struct reads null")]
 pub struct NoArgs {}
 
 /// Result of `anim.graph.undo`.

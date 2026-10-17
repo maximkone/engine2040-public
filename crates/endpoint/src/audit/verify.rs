@@ -34,6 +34,16 @@ impl AuditVerifier {
         }
     }
 
+    /// Checker for a rotated window: the next record must carry `next_seq`
+    /// and link from `anchor`, the chain digest of the record before it.
+    pub fn from_anchor(next_seq: u64, anchor: [u8; 32]) -> Self {
+        Self {
+            next_seq,
+            prev: anchor,
+            seen: 0,
+        }
+    }
+
     /// Records checked so far.
     pub fn verified(&self) -> u64 {
         self.seen
@@ -108,9 +118,11 @@ impl Default for AuditVerifier {
 
 /// Verify borrowed records in order with constant memory.
 ///
-/// Same verdict as [`super::DoorAudit::verify`]: dense sequence from 1, linked
-/// `prev` digests and recomputed seals. A truncated tail still verifies as a
-/// prefix, so holders pin with [`verify_pinned_records`].
+/// Same verdict as [`super::DoorAudit::verify`] for a log that never rotated:
+/// dense sequence from 1, linked `prev` digests and recomputed seals. A
+/// rotated log streams through [`super::DoorAudit::window_verifier`] instead.
+/// A truncated tail still verifies as a prefix, so holders pin with
+/// [`verify_pinned_records`].
 ///
 /// Errors: [`AuditError::OrderBroken`] or [`AuditError::ChainBroken`] at the
 /// first failing sequence number.
@@ -318,12 +330,13 @@ mod tests {
             log.append(7, "scene.read", i, AuditOutcome::Ok, i)
                 .expect("bounded append chains");
         }
-        verify_records(log.iter()).expect("long log verifies in a stream");
-        let mut checker = AuditVerifier::new();
+        // 2,000 appends rotate past the cap: the retained window streams from
+        // the anchor with the same constant-size checker.
+        let mut checker = log.window_verifier();
         for record in log.iter() {
             checker.feed(record).expect("ordered feed advances");
         }
-        assert_eq!(checker.verified(), 2_000);
+        assert_eq!(checker.verified(), super::super::DOOR_AUDIT_CAP as u64);
         assert_eq!(checker.head_digest(), log.head());
         assert!(
             std::mem::size_of_val(&checker) <= 64,
@@ -340,9 +353,12 @@ mod tests {
                 .expect("budget append chains");
         }
         let start = std::time::Instant::now();
-        verify_records(log.iter()).expect("measured log verifies");
+        let mut checker = log.window_verifier();
+        for record in log.iter() {
+            checker.feed(record).expect("measured log verifies");
+        }
         // Integer mean only: floating point never enters this module.
-        let mean = start.elapsed().as_nanos() / u128::from(N);
+        let mean = start.elapsed().as_nanos() / u128::from(checker.verified());
         let budget = u128::from(VERIFY_BUDGET_NS);
         eprintln!("door-audit-verify mean={mean}ns over {N} records (budget {budget}ns)");
         assert!(mean < budget, "verify mean {mean}ns exceeds {budget}ns");

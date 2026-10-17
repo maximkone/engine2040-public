@@ -888,6 +888,12 @@ impl ScaledArenaTick {
     pub fn run_report(&self) -> WorkloadReport {
         measured_report(self.tracked_name(), self.ticks, || self.run_hash())
     }
+
+    /// Peak live heap of one canonical run in bytes: the number the heap-peak
+    /// gate pins. Caller: `perf --heap-peak` and the `heap_peak` test.
+    pub fn run_peak_live_bytes(&self) -> u64 {
+        alloc::measure(|| self.run_hash()).1.peak_live_bytes
+    }
 }
 
 /// Seeded XZ radius query over structure-of-arrays points: the measured

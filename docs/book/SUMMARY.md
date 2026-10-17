@@ -1,7 +1,14 @@
 # Summary
 
+[For AIs: read this first](for-ai.md)
+
 - [Quick start: from zero to a running arena](quick-start.md)
+- [Build, run and publish the web target](web-build.md)
+- [Physics layers: authority and physical](physics-layers.md)
+- [Quality tiers: what each one cuts](quality-tiers.md)
+- [Troubleshooting](troubleshooting.md)
 - [The AI door: twenty MCP tools](ai-door.md)
+- [Door reference: every tool and verb](door-reference.md)
 - [Verifiers: keypoints, balance gate, red-team](verifiers.md)
 - [Simulation systems: tick, fight, move, think](systems-simulation.md)
 - [Presentation systems: render, audio, HUD, world look](systems-presentation.md)
@@ -10,3 +17,19 @@
 - [Recipe: add a weapon](recipes-add-weapon.md)
 - [Recipe: new map](recipes-new-map.md)
 - [Recipe: drive it from MCP](recipes-drive-from-mcp.md)
+- [API reference (rustdoc)](api.md)
+
+# Reference
+
+- [Physics](ref-physics.md)
+- [Destruction](ref-destruction.md)
+- [Physical effects layer (physfx)](ref-physfx.md)
+- [Render](ref-render.md)
+- [Web build and runtime](ref-web.md)
+- [Arena, combat, rules, input](ref-arena-combat.md)
+- [Animation, AI, nav](ref-anim-ai.md)
+- [Net](ref-net.md)
+- [Core, ECS, data crates](ref-core-data.md)
+- [Tools](ref-tools.md)
+- [Process](ref-process.md)
+- [Content and skills](ref-content.md)

@@ -6,6 +6,7 @@
 //! lod and rebuild errors, bad input refuses. Budget: small fixed tapes,
 //! no steady per tick work here.
 
+use engine_anim::blend::lerp3;
 use engine_anim::hit_react::hit_mask;
 use engine_anim::injured::{
     digest as single_digest, rebuild_single, stance_contains, Loss, STANCE_MIN,
@@ -14,7 +15,7 @@ use engine_anim::injured_double::{
     digest as double_digest, rebuild_double, rebuild_double_from_joints, rebuild_many,
 };
 use engine_anim::lod::{assign_tiers, tier_for, LodError, Tier};
-use engine_anim::{blend, clip_hash, dequantize, quantize, sample, Clip, Track};
+use engine_anim::{clip_hash, dequantize, quantize, sample, Clip, Track};
 
 fn two_key() -> Clip {
     Clip {
@@ -222,7 +223,7 @@ fn lib_sample_blend_quant_pin() {
     assert_eq!(sample(&clip, 0, 1.0), [2.0, 4.0, 6.0]);
     assert_eq!(sample(&clip, 7, 0.5), [0.0, 0.0, 0.0]);
     assert_eq!(
-        blend([0.0, 0.0, 0.0], [2.0, 4.0, 6.0], 0.5),
+        lerp3([0.0, 0.0, 0.0], [2.0, 4.0, 6.0], 0.5),
         [1.0, 2.0, 3.0]
     );
     assert_eq!(

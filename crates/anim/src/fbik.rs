@@ -670,7 +670,7 @@ pub struct CombatOutcome {
 /// equal poses hash equally, which is the replay receipt for IK sequences.
 pub fn fbik_hash(pose: &Pose) -> u64 {
     let mut h = Fnv64::new();
-    h.write_u64(pose.positions.len() as u64);
+    h.write_len(pose.positions.len());
     for p in pose.positions.iter() {
         for lane in p.iter() {
             h.write_f32(*lane);

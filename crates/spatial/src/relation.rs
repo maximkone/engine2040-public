@@ -1393,6 +1393,47 @@ pub fn holds(actors: &[Actor], s: u32, rel: Rel, o: u32, frame: Frame) -> bool {
     holds_in_view(&view, s, rel, o, frame)
 }
 
+/// Every relation word [`rel_name`] prints, in frozen discriminant order.
+const ALL_RELS: [Rel; 13] = [
+    Rel::Above,
+    Rel::Below,
+    Rel::Front,
+    Rel::Behind,
+    Rel::Left,
+    Rel::Right,
+    Rel::Against,
+    Rel::Around,
+    Rel::Aligned,
+    Rel::Near,
+    Rel::Far,
+    Rel::Visible,
+    Rel::Reachable,
+];
+
+/// Parse a relation word exactly as [`rel_name`] prints it (`left_of`,
+/// `visible_from`, ...); `None` for anything else.
+pub fn parse_rel(word: &str) -> Option<Rel> {
+    ALL_RELS.into_iter().find(|rel| rel_name(*rel) == word)
+}
+
+/// Legal relation words, comma separated, for refusals that name them.
+pub fn rel_words() -> String {
+    ALL_RELS.map(rel_name).join(", ")
+}
+
+/// Every subject `s` with `holds(actors, s, rel, o, frame)`, ids ascending.
+/// One valid-only view serves all subjects, so a "what is left of `o`"
+/// question costs one pass instead of one view per candidate. Empty for an
+/// unknown or degenerate `o`.
+pub fn subjects_of(actors: &[Actor], rel: Rel, o: u32, frame: Frame) -> Vec<u32> {
+    let view = v2view(actors);
+    view.by_id
+        .keys()
+        .copied()
+        .filter(|s| *s != o && holds_in_view(&view, *s, rel, o, frame))
+        .collect()
+}
+
 /// Squared XZ center distance in cm^2, or `None` when either actor's
 /// position is unknown. The numeric measure behind the near/far bands:
 /// measures stay numeric, thresholds stay in the caller.
@@ -2296,10 +2337,6 @@ mod vocab_tests {
             first.digest,
             first.step_us
         );
-        assert_eq!(
-            format!("{:016x}", 0xd57b5c8ae3096614u64),
-            "d57b5c8ae3096614"
-        );
     }
 
     #[test]
@@ -3103,5 +3140,25 @@ mod sp20_qa50 {
         assert!(!holds(&arena, 999, Rel::Near, 500, Frame::World));
         assert!(!holds(&arena, 500, Rel::Behind, 500, Frame::World));
         assert!(!holds(&arena, 500, Rel::Left, 501, Frame::Viewer(999)));
+    }
+
+    #[test]
+    fn qa_subjects_of_agrees_with_holds_and_words_roundtrip() {
+        let arena = qa_arena();
+        for rel in ALL_RELS {
+            assert_eq!(parse_rel(rel_name(rel)), Some(rel), "word roundtrips");
+            for o in QA_IDS {
+                for frame in [Frame::World, Frame::Subject, Frame::Viewer(503)] {
+                    let want: Vec<u32> = QA_IDS
+                        .into_iter()
+                        .filter(|s| holds(&arena, *s, rel, o, frame))
+                        .collect();
+                    assert_eq!(subjects_of(&arena, rel, o, frame), want, "{rel:?} {o}");
+                }
+            }
+        }
+        assert_eq!(parse_rel("left"), None);
+        assert!(rel_words().starts_with("above, below, in_front_of"));
+        assert!(subjects_of(&arena, Rel::Left, 999, Frame::World).is_empty());
     }
 }

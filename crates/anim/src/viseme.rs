@@ -214,7 +214,7 @@ pub fn sample(c: &VisemeClip, t: f32) -> [f32; N] {
 /// FNV-1a64 over len + time/weight bits.
 pub fn clip_hash(c: &VisemeClip) -> u64 {
     let mut h = Fnv64::new();
-    h.write_u64(c.times.len() as u64);
+    h.write_len(c.times.len());
     for t in &c.times {
         h.write_f32(*t);
     }

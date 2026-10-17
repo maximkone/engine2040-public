@@ -206,7 +206,7 @@ make those live, and every row built on them waits.
   ghost/shimmer inside the RP6 bars and 0 validation errors; golden
     unchanged. needs: GX1, GX4, RP5. (ART wave 86.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
-- [ ] RL27 render: cascaded shadow maps for the arena-day sun — cascade-split
+- [x] RL27 render: cascaded shadow maps for the arena-day sun — cascade-split Landed 8d5f2ea2. `cargo test -p engine-render --lib -- shadow_cascade post ibl` 91 passed, 2 ignored (13 shadow_cascade tests incl. splits_pinned_as_data and day_sweep_byte_identical_x2, ibl green); render tests run on this PC by design (GPU code).
   selection + per-cascade shadow-map sizing ported from `FyroxEngine/Fyrox`
   `fyrox-impl/src/renderer/shadow/csm.rs` (license MIT, adapt with
   attribution). Tier B. Size M. Owns `crates/render/src/shadow_cascade.rs`.

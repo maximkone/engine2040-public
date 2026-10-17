@@ -13,7 +13,7 @@ Physics (extends PX1, BX4, BX12, DX5, BX13):
   `crates/physics/src/powered.rs`. Accept: F2P `cargo test -p
   engine-physics --lib articulated` green (3-chain lift, same ticks x2
   shuffled); P2P golden `d57b5c8ae3096614` unchanged. needs: PX1.
-- [ ] NS3 physics: ragdoll-vs-ragdoll clinch contacts — two clinching
+- [ ] NS3 physics: ragdoll-vs-ragdoll clinch contacts — two clinching Progress 2026-10-17: `resolve_spacing` in crates/physics/src/ragdoll.rs parts clinched bone pairs and the 660-tick clinch tape runs in ragdoll_tape.rs (it reports floor penetration only). Left: a fighter-vs-fighter max-penetration under 1 cm test x2 shuffled.
   fighters separate without interpenetration under canonical (fighter, joint)
   order. Size M. Owns hunks beside `crates/physics/src/ragdoll.rs`. Accept:
   F2P clinch tape max penetration under 1 cm x2 shuffled; P2P golden
@@ -26,7 +26,7 @@ Physics (extends PX1, BX4, BX12, DX5, BX13):
 
 Animation (extends AN1, AM2, TV1, PX4, LOC2, LMM1, PX1):
 
-- [ ] NS6 anim: full-body IK solve for carry and climb — spine plus limbs over
+- [ ] NS6 anim: full-body IK solve for carry and climb — spine plus limbs over Progress 2026-10-17: crates/anim/src/fbik.rs holds the reach, aim and grip full-body solve (reach_lands_inside_1cm_analytic_first, two_hand_grip_meets_at_the_weapon, steady_state_reuses_caller_buffers). Left: carry and climb fixtures over TV1 edges.
   TV1 edges with balance (PX4) as the veto. Size M. Owns hunks beside
   `crates/anim/src/fbik.rs`. Accept: F2P carry fixture: hands on load, no
   joint over its limit, x2; P2P golden unchanged. needs: TV1, PX4.
@@ -140,7 +140,7 @@ Crowds (extends CT64, AU2, NV2, CT25, GA2, AM18, PX16):
 
 Rules (extends RC5, decision D2 in `FOCUS.md`):
 
-- [ ] NS32c rules: quiet-box p99 for the arena adapter — new ignored test `arena_drive_p99` in
+- [x] NS32c rules: quiet-box p99 for the arena adapter — new ignored test `arena_drive_p99` in Landed 47146997. `cargo test --release -p engine-rules --features arena --test arena_budget -- --ignored --nocapture`: arena drive p99 0.0411 ms per tick (16 scripted fighters, 600 ticks, 0 faults, bar 0.2 ms), fresh GitHub runner, gh run 39058176282.
   `crates/rules/tests/arena_budget.rs` (feature `arena`): 16 fighters, all scripted with
   `shield_bash_arena.rhai`, 600 ticks, time `RulesController::control` per tick. Size S.
   Accept: F2P `cargo test --release -p engine-rules --features arena --test arena_budget --

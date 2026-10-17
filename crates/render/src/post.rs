@@ -3685,7 +3685,7 @@ mod tests {
     fn single_uniform_owner() {
         // Caller: Rp1Submitter uniform uploads (window path) via the single owner.
         // Behavior: post.rs must reuse the shared uniform helper in v1_gpu
-        // and never carry its own copy (render-pipeline-rules 5).
+        // and never carry its own copy.
         let src = include_str!("post.rs");
         let needle = ["fn", "uniform_buf("].join(" ");
         assert!(

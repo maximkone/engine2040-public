@@ -193,12 +193,6 @@ impl OnlineWire {
         self.relay.as_ref().map_or(0, RelayServer::peer_count)
     }
 
-    /// Fabric datagrams lost so far, relay hops included.
-    #[must_use]
-    pub fn fabric_dropped(&self) -> u64 {
-        self.fabric.dropped()
-    }
-
     fn register_with_relay(&mut self, hop_latency: u32) -> Result<(), BoutError> {
         let config = RelayConfig::default();
         let mut relay = RelayServer::new(config);

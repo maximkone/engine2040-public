@@ -178,7 +178,7 @@ impl Runtime {
     }
     pub fn state_hash(&self) -> u64 {
         let mut h = Fnv64::new();
-        h.write_u32(self.len() as u32);
+        h.write_len32(self.len());
         for w in self.mask.words() {
             h.write_u64(*w);
         }

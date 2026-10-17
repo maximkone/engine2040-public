@@ -1,9 +1,24 @@
 //! Bot harness: hold F, delay D, six moves, batch receipts over fixed ticks.
+use engine_ai::bout::run_bout;
+use engine_ai::bt::{
+    guard_tree, pressure_tree, ACTION_ADVANCE, ACTION_ATTACK, ACTION_BLOCK, ACTION_DODGE,
+    ACTION_RETREAT,
+};
 use engine_arena::{ArenaConfig, BodyInput, BodyTape};
 use engine_core::{splitmix64, Fnv64};
+/// Who picks the six-move indexes: seeded mixes, or the QA3 trees.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Brain {
+    /// One seeded mix per decision (the original open-loop bot).
+    Seeded,
+    /// Slot 0 runs the pressure tree, slot 1 the guard tree (`engine_ai::bt`).
+    Trees,
+}
 /// Config: hold F, delay D, bouts N, ticks per bout, first seed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BotHarness {
+    /// Move source for both slots.
+    pub brain: Brain,
     pub hold_ticks: u32,
     pub delay_frames: u32,
     pub bouts: u32,
@@ -51,6 +66,16 @@ pub fn move_input(t: &BodyInput, slot: u8, tick: u32, i: u8) -> Option<BodyInput
     out.buttons.0 = byte;
     Some(out)
 }
+/// Map one BT action id onto the move table index of [`move_input`].
+pub fn bt_move(action: u8) -> u8 {
+    match action {
+        ACTION_ATTACK => 3,
+        ACTION_BLOCK => 4,
+        ACTION_DODGE | ACTION_RETREAT => 1,
+        ACTION_ADVANCE => 2,
+        _ => 5,
+    }
+}
 /// Delay selected decisions by lag; early outputs hold idle.
 pub fn delay_selected(selected: &[u8], lag: usize) -> Vec<u8> {
     selected
@@ -84,8 +109,29 @@ impl BotHarness {
         let lag = usize::try_from(lag_ticks).unwrap_or(0);
         let count = self.ticks_per_bout / self.hold_ticks.max(1) + 1;
         let mut selected = [Vec::new(), Vec::new()];
+        let tape = (self.brain == Brain::Trees).then(|| {
+            run_bout(
+                &pressure_tree(),
+                &guard_tree(),
+                u64::from(bout),
+                self.ticks_per_bout,
+                seed,
+            )
+        });
         for k in 0..count {
             for slot in 0..2u8 {
+                if let Some(tape) = &tape {
+                    let actions = if slot == 0 {
+                        &tape.actions_a
+                    } else {
+                        &tape.actions_b
+                    };
+                    let tick = usize::try_from(k * self.hold_ticks).unwrap_or(0);
+                    let at = tick.min(actions.len().saturating_sub(1));
+                    selected[usize::from(slot)]
+                        .push(bt_move(actions.get(at).copied().unwrap_or(0)));
+                    continue;
+                }
                 let mixed = seed
                     .wrapping_add(u64::from(bout).wrapping_mul(7919))
                     .wrapping_add(u64::from(slot).wrapping_mul(104_729))
@@ -175,6 +221,7 @@ impl BotHarness {
 mod tests {
     use super::*;
     const TINY: BotHarness = BotHarness {
+        brain: Brain::Seeded,
         hold_ticks: 2,
         delay_frames: 4,
         bouts: 2,
@@ -210,5 +257,60 @@ mod tests {
         assert_eq!(first.mean_lag_ticks, 4);
         assert_eq!(first.mean_lag_decisions, 2);
         assert_eq!(crate::bot_harness_fixture().bouts, 2);
+    }
+    #[test]
+    fn tree_brains_replay_x2_never_stick_and_differ_from_seeded() {
+        let trees = BotHarness {
+            brain: Brain::Trees,
+            bouts: 20,
+            ticks_per_bout: 120,
+            base_seed: 2040,
+            ..TINY
+        };
+        let first = trees.run().expect("tree batch runs");
+        assert_eq!(first, trees.run().expect("tree batch replays"));
+        assert_eq!(first.stuck_bouts, 0);
+        let seeded = BotHarness {
+            brain: Brain::Seeded,
+            ..trees
+        };
+        assert_ne!(
+            first.digest,
+            seeded.run().expect("seeded batch runs").digest
+        );
+    }
+    #[test]
+    fn tree_strikes_equal_attack_decisions_on_the_bout_tape() {
+        let harness = BotHarness {
+            brain: Brain::Trees,
+            bouts: 1,
+            ticks_per_bout: 120,
+            base_seed: 7,
+            ..TINY
+        };
+        let hold = harness.hold_ticks;
+        let template = crate::agent::template_input(&ArenaConfig {
+            seed: 7,
+            ticks: 120,
+            fighters: 2,
+            half_extent_m: 20.0,
+            table_version: 1,
+        })
+        .expect("template");
+        let (_, strikes) = harness.bout_tape(7, 0, &template).expect("tape");
+        let tape = run_bout(&pressure_tree(), &guard_tree(), 0, 120, 7);
+        let lag = usize::try_from(harness.delay_frames / hold).unwrap_or(0);
+        // A tick strikes when the move executing then (lagged decision window) has the attack bit.
+        let want = |actions: &[u8]| {
+            (lag * hold as usize..120)
+                .filter(|t| {
+                    let decided = actions[(t / hold as usize - lag) * hold as usize];
+                    let input = move_input(&template, 0, 0, bt_move(decided)).expect("move");
+                    input.buttons.0 & 1 != 0
+                })
+                .count() as u32
+        };
+        assert_eq!(strikes, [want(&tape.actions_a), want(&tape.actions_b)]);
+        assert!(strikes[0] > 0);
     }
 }

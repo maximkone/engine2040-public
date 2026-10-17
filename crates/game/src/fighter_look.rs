@@ -63,7 +63,8 @@ mod fighter_look_feet;
 
 use self::fighter_look_feet::{foot_slides, Feet, Legs};
 
-/// Real-body proofs for the sand rest and the hitstop hold (a test-only file).
+/// Real-body proofs for the sand rest, the hitstop hold, clip switches and
+/// planted feet (a test-only file).
 #[path = "fighter_look_proofs.rs"]
 mod fighter_look_proofs;
 

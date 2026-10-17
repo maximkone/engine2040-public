@@ -3,42 +3,74 @@
 use super::{GroupId, PhysFx};
 use crate::check::{self, BLAST_REFERENCE_KG, MAX_COORD, MAX_SPEED};
 use crate::error::{Error, Field};
-use crate::types::{Blast, Flight, Key, Transform};
+use crate::types::{Blast, Flight, Impact, Key, Transform};
 use engine_physics::material::Material;
 use engine_physics::ragdoll::BoneShape;
 use engine_physics::rapier::{FIXED_DT, GRAVITY_Y};
+use rapier3d::dynamics::RigidBodyHandle;
 use rapier3d::math::Vector;
 
 /// Closer to the center than this (meters) a body has no outward direction and goes straight up.
 const AT_CENTER: f32 = 1.0e-4;
 
+/// A body inside the reach of a blast or an impact.
+struct Near {
+    handle: RigidBodyHandle,
+    /// From the center to the body, meters.
+    offset: [f32; 3],
+    distance: f32,
+}
+
 impl PhysFx {
-    /// Shoves every body inside the blast's radius straight away from its center and wakes it.
+    /// The bodies closer to `center` than `reach` (meters), nearest first and at most `limit` of
+    /// them; ties go to the older body, so the pick is the same every run.
+    fn nearest(&self, center: [f32; 3], reach: f32, limit: usize) -> Vec<Near> {
+        let mut near: Vec<(u32, Near)> = Vec::new();
+        for (index, rec) in self.records.iter().enumerate() {
+            let Some(rec) = rec else { continue };
+            let Some(body) = self.world.bodies.get(rec.handle) else {
+                continue;
+            };
+            let at = body.translation();
+            let offset = [at.x - center[0], at.y - center[1], at.z - center[2]];
+            let distance = offset.iter().map(|c| c * c).sum::<f32>().sqrt();
+            if distance < reach {
+                near.push((
+                    index as u32,
+                    Near {
+                        handle: rec.handle,
+                        offset,
+                        distance,
+                    },
+                ));
+            }
+        }
+        near.sort_by(|a, b| a.1.distance.total_cmp(&b.1.distance).then(a.0.cmp(&b.0)));
+        near.truncate(limit);
+        near.into_iter().map(|(_, n)| n).collect()
+    }
+
+    /// Shoves the bodies inside the blast's radius straight away from its center and wakes them.
     /// The gain is `impulse / 70 kg` at the center and falls off linearly to nothing at the
-    /// radius, whatever the body weighs; a body at the radius or beyond is not touched. Returns
-    /// how many bodies were pushed. A bad blast is refused and changes nothing.
+    /// radius, whatever the body weighs; a body at the radius or beyond is not touched, and only
+    /// the nearest `Caps::blast_bodies` are. Returns how many bodies were pushed. A bad blast is
+    /// refused and changes nothing.
     pub fn apply_blast(&mut self, blast: Blast) -> Result<usize, Error> {
         check::blast(blast)?;
         let center = blast.center_mm.map(|c| c as f32 / 1000.0);
         let reach = blast.radius_mm as f32 / 1000.0;
         let peak = blast.impulse_ns as f32 / BLAST_REFERENCE_KG;
         let mut pushed = 0;
-        for rec in self.records.iter().flatten() {
-            let Some(body) = self.world.bodies.get_mut(rec.handle) else {
+        for near in self.nearest(center, reach, self.caps.blast_bodies) {
+            let Some(body) = self.world.bodies.get_mut(near.handle) else {
                 continue;
             };
-            let at = body.translation();
-            let offset = [at.x - center[0], at.y - center[1], at.z - center[2]];
-            let distance = offset.iter().map(|c| c * c).sum::<f32>().sqrt();
-            if distance >= reach {
-                continue;
-            }
-            let away = if distance > AT_CENTER {
-                offset.map(|c| c / distance)
+            let away = if near.distance > AT_CENTER {
+                near.offset.map(|c| c / near.distance)
             } else {
                 [0.0, 1.0, 0.0]
             };
-            let gain = peak * (1.0 - distance / reach);
+            let gain = peak * (1.0 - near.distance / reach);
             let v = body.linvel();
             body.set_linvel(
                 Vector::new(
@@ -51,6 +83,39 @@ impl PhysFx {
             pushed += 1;
         }
         Ok(pushed)
+    }
+
+    /// Shoves the bodies around a projectile's hit point along its heading with a real impulse:
+    /// `impulse_ns` at the hit point, falling off linearly to nothing at the radius. A heavy body
+    /// gains less speed than a light one, and a hit off its center spins it. No body gains more
+    /// than the speed cap, only the nearest `Caps::impact_bodies` are touched, and they wake.
+    /// Returns how many were hit. A bad impact is refused and changes nothing.
+    pub fn apply_impact(&mut self, hit: Impact) -> Result<usize, Error> {
+        check::impact(hit)?;
+        let point = hit.at_mm.map(|c| c as f32 / 1000.0);
+        let reach = hit.radius_mm as f32 / 1000.0;
+        let heading = hit.direction.map(f32::from);
+        let length = heading.iter().map(|c| c * c).sum::<f32>().sqrt();
+        let heading = heading.map(|c| c / length);
+        let mut struck = 0;
+        for near in self.nearest(point, reach, self.caps.impact_bodies) {
+            let Some(body) = self.world.bodies.get_mut(near.handle) else {
+                continue;
+            };
+            let share = hit.impulse_ns as f32 * (1.0 - near.distance / reach);
+            let impulse = share.min(MAX_SPEED * body.mass());
+            body.apply_impulse_at_point(
+                Vector::new(
+                    heading[0] * impulse,
+                    heading[1] * impulse,
+                    heading[2] * impulse,
+                ),
+                Vector::new(point[0], point[1], point[2]),
+                true,
+            );
+            struck += 1;
+        }
+        Ok(struck)
     }
 
     /// Launches an arrow or a thrown object (named `id`, replaced by a respawn of the id) that

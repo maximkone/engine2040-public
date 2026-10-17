@@ -10,26 +10,33 @@
 //! no floating point; the same call sequence always seals the same head.
 //! Errors: [`AuditError`]: one named variant per tamper class, plus
 //! exhaustion for the append counter. Budget: at
-//! most [`DOOR_AUDIT_BUDGET_NS`] nanoseconds per appended record.
+//! most [`DOOR_AUDIT_BUDGET_NS`] nanoseconds per appended record. Memory:
+//! at most [`DOOR_AUDIT_CAP`] records are retained; the oldest rotates out
+//! and the anchor digest advances, so the retained window stays verifiable.
 
+use std::collections::VecDeque;
 use std::fmt;
+
+use engine_core::hash::GOLDEN_GAMMA;
 
 mod verify;
 pub use verify::{verify_pinned_records, verify_records, AuditVerifier, VERIFY_BUDGET_NS};
 
 /// Nanoseconds per appended record: half a millisecond, measured in tests.
 pub const DOOR_AUDIT_BUDGET_NS: u64 = 500_000;
+/// Retention cap: at most this many records stay in memory. Past it the
+/// oldest record rotates out and [`DoorAudit::anchor`] advances to its chain
+/// digest (the pattern of the editor audit chain, with a larger window
+/// because every door call appends one record).
+pub const DOOR_AUDIT_CAP: usize = 1024;
 /// Longest tool name retained verbatim; longer names truncate on a character
 /// boundary (every gateway name is far shorter, so this never fires live).
 pub const MAX_TOOL_NAME_LEN: usize = 64;
 
-/// Odd 64-bit mixer step constant: 2^64 over phi. An odd multiplier keeps
-/// each mixing step bijective, so distinct prefixes stay distinct.
-///
-/// The crate already depends on the core hash owner; the log still mixes
-/// locally with this documented constant for domain separation. The constant
-/// below is deliberately not one of the core FNV or SplitMix constants.
-const MIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+/// Mixer step constant: the core SplitMix64 increment (2^64 over phi, odd).
+/// An odd multiplier keeps each mixing step bijective, so distinct prefixes
+/// stay distinct. The value is the core hash owner's, not a local copy.
+const MIX_GAMMA: u64 = GOLDEN_GAMMA;
 
 /// Domain-separated seeds for the four digest passes.
 const MIX_SEEDS: [u64; 4] = [mix_seed(1), mix_seed(2), mix_seed(3), mix_seed(4)];
@@ -186,12 +193,20 @@ fn link(prev: &[u8; 32], entry: &[u8; 32], seq: u64) -> [u8; 32] {
     digest32(&[prev, entry, &seq.to_le_bytes()])
 }
 
-/// Append-only digest chain over gateway calls. Retention is the session
-/// lifetime: every call appends exactly one record and records are never
-/// evicted, so verification always covers the full session.
+/// Append-only digest chain over gateway calls. Every call appends exactly
+/// one record; at most [`DOOR_AUDIT_CAP`] stay retained. Past the cap the
+/// oldest record rotates out and the anchor advances to its chain digest, so
+/// memory is bounded while the retained window still verifies from the
+/// anchor and holders pin the head plus [`Self::total_appended`].
 #[derive(Clone, Debug)]
 pub struct DoorAudit {
-    records: Vec<CallRecord>,
+    records: VecDeque<CallRecord>,
+    /// Chain digest of the newest rotated-out record (zeros while nothing
+    /// rotated out): verification of the retained window starts here.
+    anchor: [u8; 32],
+    /// Records rotated out so far; the first retained record carries
+    /// sequence `dropped + 1`.
+    dropped: u64,
     /// Total records ever appended (also the next sequence number).
     appended: u64,
 }
@@ -200,7 +215,9 @@ impl DoorAudit {
     /// Empty log at the zero anchor.
     pub fn new() -> Self {
         Self {
-            records: Vec::new(),
+            records: VecDeque::new(),
+            anchor: [0u8; 32],
+            dropped: 0,
             appended: 0,
         }
     }
@@ -215,6 +232,17 @@ impl DoorAudit {
         self.records.is_empty()
     }
 
+    /// Records rotated out past [`DOOR_AUDIT_CAP`] so far.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Anchor digest the retained window chains from (zeros until the first
+    /// rotation).
+    pub fn anchor(&self) -> [u8; 32] {
+        self.anchor
+    }
+
     /// Total records ever appended.
     pub fn total_appended(&self) -> u64 {
         self.appended
@@ -222,7 +250,7 @@ impl DoorAudit {
 
     /// Head chain digest, if any record is retained.
     pub fn head(&self) -> Option<[u8; 32]> {
-        self.records.last().map(|record| record.chain)
+        self.records.back().map(|record| record.chain)
     }
 
     /// Retained records, oldest first.
@@ -246,15 +274,18 @@ impl DoorAudit {
             .appended
             .checked_add(1)
             .ok_or(AuditError::SequenceExhausted)?;
-        let mut end = MAX_TOOL_NAME_LEN.min(tool.len());
-        while !tool.is_char_boundary(end) {
-            end -= 1;
-        }
-        let prev = self.records.last().map_or([0u8; 32], |record| record.chain);
+        let end = tool.floor_char_boundary(MAX_TOOL_NAME_LEN);
+        let prev = self.head().unwrap_or(self.anchor);
         let bytes = entry_bytes(session, &tool[..end], revision, outcome, detail, seq);
         let entry = digest32(&[&bytes]);
         let chain = link(&prev, &entry, seq);
-        self.records.push(CallRecord {
+        if self.records.len() >= DOOR_AUDIT_CAP {
+            if let Some(rotated) = self.records.pop_front() {
+                self.anchor = rotated.chain;
+                self.dropped = rotated.seq;
+            }
+        }
+        self.records.push_back(CallRecord {
             seq,
             session,
             tool: tool[..end].to_owned(),
@@ -265,36 +296,26 @@ impl DoorAudit {
             chain,
         });
         self.appended = seq;
-        self.records.last().ok_or(AuditError::SequenceExhausted)
+        self.records.back().ok_or(AuditError::SequenceExhausted)
     }
 
-    /// Verify the full session: dense sequence from 1, linked `prev`
-    /// digests, recomputed entry digests from the stored fields, and
-    /// recomputed chain links. Any naive delete, modify, reorder or splice
-    /// fails. A truncated tail still verifies as a prefix, so holders pin
-    /// with [`Self::verify_pinned`].
+    /// Streaming checker positioned at the start of the retained window: feed
+    /// it [`Self::iter`] (or a cloned export of it) record by record. A log
+    /// that never rotated starts at the zero anchor, like [`AuditVerifier::new`].
+    pub fn window_verifier(&self) -> AuditVerifier {
+        AuditVerifier::from_anchor(self.dropped.saturating_add(1), self.anchor)
+    }
+
+    /// Verify the retained window: dense sequence from the first retained
+    /// record, linked `prev` digests starting at the anchor, recomputed entry
+    /// digests from the stored fields, and recomputed chain links. Any naive
+    /// delete, modify, reorder or splice fails. A truncated tail still
+    /// verifies as a prefix, so holders pin with [`Self::verify_pinned`].
     pub fn verify(&self) -> Result<(), AuditError> {
-        let mut prev = [0u8; 32];
-        for (index, record) in self.records.iter().enumerate() {
-            let want = u64::try_from(index).unwrap_or(u64::MAX).wrapping_add(1);
-            if record.seq != want || record.prev != prev {
-                return Err(AuditError::OrderBroken { seq: record.seq });
-            }
-            let bytes = entry_bytes(
-                record.session,
-                &record.tool,
-                record.revision,
-                record.outcome,
-                record.detail,
-                record.seq,
-            );
-            let entry = digest32(&[&bytes]);
-            if link(&record.prev, &entry, record.seq) != record.chain {
-                return Err(AuditError::ChainBroken { seq: record.seq });
-            }
-            prev = record.chain;
-        }
-        Ok(())
+        let mut checker = self.window_verifier();
+        self.records
+            .iter()
+            .try_for_each(|record| checker.feed(record))
     }
 
     /// Verify plus pin: the head digest and the total appended length must
@@ -471,7 +492,7 @@ mod tests {
                 }
                 _ => {
                     // Cut the tail: still link-valid, so pin the live head.
-                    tampered.records.pop();
+                    tampered.records.pop_back();
                     if tampered.verify_pinned(head, total).is_err() {
                         detected += 1;
                         per_class[4] += 1;
@@ -565,7 +586,7 @@ mod tests {
         // A cut tail verifies as a prefix but moves the head, so it fails
         // the pin; a forged extension instead moves the total.
         let mut cut = log.clone();
-        cut.records.pop();
+        cut.records.pop_back();
         cut.verify().expect("cut tail is a valid prefix");
         assert!(
             matches!(
@@ -602,6 +623,44 @@ mod tests {
             .append(7, &long, 3, AuditOutcome::Ok, 11)
             .expect("truncated append chains");
         assert_eq!(first.head(), second.head());
+    }
+
+    /// Memory is bounded: ten caps of appends retain one cap of records, the
+    /// anchor advances, the window verifies from it, and tamper inside the
+    /// window or against the pin still fails.
+    #[test]
+    fn rotation_cap_bounds_memory_and_keeps_the_window_verifiable() {
+        let total = DOOR_AUDIT_CAP as u64 * 10 + 3;
+        let mut log = DoorAudit::new();
+        for i in 0..total {
+            log.append(7, "scene.read", i, AuditOutcome::Ok, i)
+                .expect("rotating append chains");
+            assert!(
+                log.len() <= DOOR_AUDIT_CAP,
+                "retention never passes the cap"
+            );
+        }
+        assert_eq!(log.len(), DOOR_AUDIT_CAP);
+        assert_eq!(log.total_appended(), total);
+        assert_eq!(log.dropped(), total - DOOR_AUDIT_CAP as u64);
+        assert_ne!(log.anchor(), [0u8; 32], "anchor advanced past genesis");
+        assert_eq!(log.iter().next().expect("window").seq, log.dropped() + 1);
+        log.verify()
+            .expect("retained window verifies from the anchor");
+        let head = log.head().expect("head");
+        log.verify_pinned(head, total).expect("pinned rotated log");
+        let mut edited = log.clone();
+        edited.records[5].detail ^= 1;
+        assert!(edited.verify().is_err(), "edit inside the window fails");
+        let mut dropped = log.clone();
+        dropped.records.pop_front();
+        assert!(dropped.verify().is_err(), "dropping the oldest fails");
+        let mut cut = log.clone();
+        cut.records.pop_back();
+        assert!(
+            cut.verify_pinned(head, total).is_err(),
+            "cut tail fails the pin"
+        );
     }
 
     #[test]

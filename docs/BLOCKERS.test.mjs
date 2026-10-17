@@ -3,7 +3,7 @@
 // Docs-side zero-caller grep gate: a stale "unwired, zero callers" row must not
 // linger once its production caller lands (TV2/rebake_for_set proved the skew).
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -40,6 +40,9 @@ test("TV2 stays pruned while its production cooker caller exists", () => {
   const text = blockers();
   assert.doesNotMatch(text, /TV2 cooker entry unwired/, "TV2 row is gone once wired");
   assert.doesNotMatch(text, /tv2-cooker-unwired/, "TV2 fingerprint is gone once wired");
+  // nav_dirty.rs was removed on purpose in 3387a96e (DX10 dead-code cut); while it
+  // exists, its production half must keep the WD9 cooker caller.
+  if (!existsSync(NAV_DIRTY_PATH)) return;
   const dirty = readFileSync(NAV_DIRTY_PATH, "utf8").replace(/\r\n/g, "\n");
   const production = dirty.split("#[cfg(test)]")[0];
   assert.ok(

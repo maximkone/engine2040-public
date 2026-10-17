@@ -523,7 +523,7 @@ mod tests {
     /// code and node lane. Pure integer work; allocates nothing.
     fn am16_digest(log: &CallbackLog) -> u64 {
         let mut hash = Fnv64::new();
-        hash.write_u64(log.len() as u64);
+        hash.write_len(log.len());
         for call in log.calls() {
             hash.write(&call.tick.to_le_bytes());
             hash.write(&call.code.to_le_bytes());

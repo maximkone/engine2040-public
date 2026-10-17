@@ -22,6 +22,10 @@ quinn = { version = "0.11", optional = true }
 # it. It runs on its own tokio I/O thread; the tick loop never awaits.
 wtransport = { version = "0.7", optional = true }
 tokio = { workspace = true, optional = true, features = ["net", "sync", "time"] }
+# WebSocket server (optional): the fallback leg for browsers whose network blocks UDP.
+# Handshake only (no TLS, no connect helpers): wss is terminated in front of it.
+tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "sink"] }
 
 [features]
 # `--features quic` builds the quinn transport behind Transport.
@@ -29,6 +33,18 @@ quic = ["dep:quinn"]
 # `--features webtransport` adds the WebTransport server beside QUIC: the
 # same Transport trait and wire codec, plus the pinned-certificate helper.
 webtransport = ["quic", "dep:wtransport", "dep:tokio"]
+# `--features websocket` adds the WebSocket server beside QUIC: the same Transport
+# trait and the same payload bytes, one binary message per frame.
+websocket = ["quic", "dep:tokio-tungstenite", "dep:futures-util", "dep:tokio"]
+
+# Browser clients (WebSocket and WebTransport through the page's own APIs).
+# Target-gated, so the native build never sees them; the wasm-bindgen glue is
+# the one `engine-web` already links (Cargo.lock).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "Event", "MessageEvent", "WebSocket"] }
 
 [dev-dependencies]
 engine-core = { workspace = true, features = ["test-util"] }

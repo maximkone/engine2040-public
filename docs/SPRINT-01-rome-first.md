@@ -160,7 +160,7 @@
   `SetMaterialParam body.toughness 9` moves `sim_digest` only; a bad value is refused with the record path and the
   document revision does not change); P2P `cargo test -p engine-editor --lib` green, golden `d57b5c8ae3096614`
   unchanged. needs: NS31a.
-- [ ] NS31b1 assets: cook the two missing texture slots — in `crates/assets/src/cooked.rs` add `TextureSlot::Occlusion`
+- [ ] NS31b1 assets: cook the two missing texture slots — in `crates/assets/src/cooked.rs` add `TextureSlot::Occlusion` Progress 2026-10-17: TextureSlot::Occlusion and Emissive cook (cooked.rs, texture.rs, five_slots_round_trip passes in gh-check run 39057512389 engine-assets --lib); left: the same run has 1 red test, archive::tests::stage_refuses_an_archive_past_the_offset_limit (archive_fits(usize::MAX, usize::MAX, usize::MAX)), so the P2P engine-assets green bar fails; the bundle digest check was not seen.
   (linear, red channel) and `TextureSlot::Emissive` (sRGB, linearized on cook like `BaseColor`; see
   `TextureEncoding`), handle both in `cook_texture` (`crates/assets/src/texture.rs`, line 96) and in every
   `match` on `TextureSlot` the compiler flags. Tier A. Size S. Owns `crates/assets/src/cooked.rs` and
@@ -169,7 +169,7 @@
   linearized and Occlusion texels are not; a duplicate slot in one material is still refused); P2P `cargo test
   -p engine-assets` green and the cooked bundle digest of the existing assets is unchanged (the existing digest
   tests stay green), golden unchanged. needs: none.
-- [ ] NS31b2 render: a draw can carry the four texture slots — in `crates/render/src/present.rs` extend `DrawItem`
+- [ ] NS31b2 render: a draw can carry the four texture slots — in `crates/render/src/present.rs` extend `DrawItem` Progress 2026-10-17: DrawItem carries normal_map and texture_slots() reserves 4 slots (RL46a material_interface tests); left: no orm or emissive field, no unknown_orm/normal/emissive_key_is_invalid_draw tests.
   (line 360) with `orm: Option<TextureKey>`, `normal: Option<TextureKey>`, `emissive: Option<TextureKey>` next
   to `base_color`; an unknown key fails the frame with `InvalidDraw` exactly like `base_color` does; every
   struct literal of `DrawItem` in the workspace gets `None` (use Grep `DrawItem {`). No shader change here.
@@ -179,7 +179,7 @@
   `  unknown_emissive_key_is_invalid_draw`); P2P the existing `present` tests green and the frame bytes of an
   untextured draw are identical to before (the existing capture-hash tests stay green), golden unchanged.
   needs: NS31b1.
-- [ ] NS31c1 material: compile records to WGSL — new file `crates/material/src/compile.rs` with `pub struct Compiled`
+- [ ] NS31c1 material: compile records to WGSL — new file `crates/material/src/compile.rs` with `pub struct Compiled` Progress 2026-10-17: crates/material/src/compile.rs landed (Compiled, compile, CHANNEL_FLOATS, texture_bindings, key; same_record_gives_the_same_bytes_twice, a_structure_edit_changes_the_text_and_the_key, siege_kit plus reference records share at most 12 structures; material suite green run 39057556202); left: no test that a coated record has strictly more bindings than the same record uncoated, and texture_bindings returns (slot, binding) pairs not Vec<TextureSlot>.
   (`wgsl: String`, `key: u64`, structure accessors `uniform_bytes() -> usize` and `texture_bindings() -> Vec<TextureSlot>`)
   and `pub fn compile(record: &MaterialRecord) -> Compiled` that generates the WGSL for the record's channels
   (base color, metallic-roughness, occlusion, normal, emissive, coat, sheen) plus `pub const CHANNEL_FLOATS: usize`
@@ -188,7 +188,7 @@
   compile` (all 21 records of `MaterialSet::shipped()` compile to non-empty WGSL, keys equal x2, a coated record
   has a different key and strictly more bindings than the same record uncoated); P2P `cargo test -p engine-material`
   green, golden unchanged. needs: NS31b1.
-- [ ] NS31c2 render: a pipeline from the generated WGSL — new file `crates/render/src/material_pipeline.rs` (window
+- [ ] NS31c2 render: a pipeline from the generated WGSL — new file `crates/render/src/material_pipeline.rs` (window Progress 2026-10-17: crates/render/src/material_pipeline.rs landed as a std-only pipeline binning module (lobe plus slot key, MAX_MATERIAL_PIPELINES 12, bins_come_back_in_stable_order); left: no pipeline_for, no wgpu pipeline from generated WGSL, no 21-record GPU build test.
   feature) with `pub fn pipeline_for(device, compiled: &engine_material::compile::Compiled) ->
   Result<wgpu::RenderPipeline, MaterialPipelineError>` that creates the shader module from `compiled.wgsl`,
   binds group 0 (camera, light, `MaterialU` of `compiled.structure.uniform_bytes()` bytes, channel block of
@@ -249,14 +249,14 @@
   `cargo test -p engine-material mtlx_import` (6 hand-written constant or image `.mtlx` strings in the module
   tests import, the records round-trip through `to_text`/`parse`; 2 procedural nodegraph strings refused with
   `UnsupportedNode` naming the node); golden unchanged. needs: NS31f.
-- [ ] NS31g1 assets: BC5 for normal maps — in `crates/assets/src/bc.rs` add `BcFormat::Bc5`, `encode_bc5_block` and
+- [ ] NS31g1 assets: BC5 for normal maps — in `crates/assets/src/bc.rs` add `BcFormat::Bc5`, `encode_bc5_block` and Progress 2026-10-17: bc.rs has BcFormat::Bc5, encode_bc5_block and decode_bc5_block and the cook routes Normal to BC5 (blockcomp_cook.rs); left: no 1024x1024 mean angular error <= 1.5 degrees test.
   `decode_bc5_block` (two BC4 channels, red and green, 16 bytes per 4x4 block; the normal's blue is rebuilt in
   the shader), `block_bytes` returns 16 for it, and route `TextureSlot::Normal` to BC5 in `encode_image`. Tier A.
   Size S. Owns `crates/assets/src/bc.rs`. Accept: F2P `cargo test -p engine-assets --lib bc` (a 1024x1024
   seeded normal map cooks to 1 MiB plus mips, mean angular error at most 1.5 degrees against the source, cook
   bytes equal x2); P2P the BC1 and BC3 tests and the cooked bundle digest of existing assets unchanged, golden
   unchanged. needs: NS31b1.
-- [ ] NS31g2 assets: BC7 for base color and ORM — in `crates/assets/src/bc.rs` add `BcFormat::Bc7` with an encoder
+- [ ] NS31g2 assets: BC7 for base color and ORM — in `crates/assets/src/bc.rs` add `BcFormat::Bc7` with an encoder Progress 2026-10-17: BcFormat::Bc7 exists but encode_bc7_block is the BC3 halves swapped, not a real mode 6 encoder; left: real BC7 mode 6 encode and decode, the 38 dB PSNR test on 1024x1024 base color.
   that writes mode 6 only (one subset, 7-bit endpoints plus p-bit, 4-bit indices; PORT note: the format is the
   Khronos data format spec, write it yourself, no `ctt`, no C code) and `decode_bc7_block` for mode 6; route
   `BaseColor` and `MetallicRoughness` to BC7. Tier A. Size M. Owns `crates/assets/src/bc.rs`. Accept: F2P `cargo test -p
@@ -288,7 +288,7 @@
   half of `crates/game/src/arena_kit.rs`. Accept: F2P the sand region of the
   frame-60 capture has a luminance variance at least 4 times the untextured
   run; P2P golden unchanged. needs: VS1, VS2.
-- [ ] VS4 game: fighters at their simulated positions — `App::fighter_views()`
+- [ ] VS4 game: fighters at their simulated positions — `App::fighter_views()` Progress 2026-10-17: App::fighter_views landed (dd7b4743) with lib.rs fighter_views_match_sim_positions_every_tick (2 fighters, 120 ticks, byte-equal to the dataset); left: no test that at least 2 fighter meshes over 5,000 triangles are drawn.
   returns slot, position and yaw from the authoritative dataset each tick; the
   4 CT7 bodies import (after `fighter_bind::bind_all`) and draw in bind pose at
   those positions in the window and capture legs. Tier A. Size M. Owns
@@ -365,7 +365,7 @@
   for the reference GPU; proof: `cargo test --locked -p engine-game
   --lib window_bind` 4/4 green plus `fighter_bind` green, golden
   unchanged.)
-- [ ] UI3 ui: HUD overlay model — names, HP pips, tick and hit flash as
+- [x] UI3 ui: HUD overlay model — names, HP pips, tick and hit flash as Landed 780ad679. DuelOverlay called from windowed.rs; engine-ui 155 passed, run 39052304852.
   data with x2-identical bytes (landed `e76c0f2`, never boarded). Tier A.
   Size XS. Owns `crates/ui/src/lib.rs` overlay hunks (encode/decode/tests
   only, no endpoint; UI2 frozen). Accept: bytes round-trip; seeded bytes
@@ -380,7 +380,7 @@
   painted counts on twin + play-step PNGs; HP/facing/bounds readable;
   bytes round-trip x2. needs: UI2, UI3, WIN1. (PLN49 R5; checker wave-48:
   tick only with WIN1 consumer wired and stub removed.)
-- [ ] UI5 ui: play HUD — `play.step` PNGs show HP bars + names + button
+- [ ] UI5 ui: play HUD — `play.step` PNGs show HP bars + names + button Progress 2026-10-17: ui side landed (play_hud.rs, raster test); left: draw it into play.step PNGs (endpoint paint_hud, new endpoint-to-ui edge).
   echo + tick + fighter-you arrow; 4F palette passes a colorblind check.
   Tier A. Size S. Owns HUD hunks beside `crates/ui/` (UI4 wiring
   frozen). Accept: seed95 PNGs carry bars/names/echo/tick/arrow;
@@ -447,7 +447,7 @@
   engine-game --lib cli` green. needs: WIN1, WIN2.
   (PLN render-look.md EXTEND, proposed 2026-09-29.)
   LATER: parked 2026-10-03 (circus verdict 2: docs/plan/render-look.md parks shipping (rows stay, no writers unless a bar needs them) and only WIN9 is the bar's exception; this window polish changes no pixel, hash or timing); unpark by deleting this line.
-- [ ] WIN9 game: arena --exit watchdog — the exe self-exits within 60 s
+- [x] WIN9 game: arena --exit watchdog — the exe self-exits within 60 s Landed 09ea66c3. arm_exit_watchdog; windowed tests 57 passed.
   of the last frame; no process outlives its shell timeout + grace.
   Tier A. Size S. Owns watchdog hunks beside `crates/game/src/bin/arena.rs`
   (exit path only). Accept: forced-stall drill with `--deadline-ms 60_000`

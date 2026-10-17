@@ -28,10 +28,11 @@ pub(super) enum LiveSink<'a> {
     Twin,
 }
 
-/// Whole microseconds since `started`, saturating. Wall clock, evidence
-/// only, never hashed.
-fn micros_since(started: std::time::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+/// Whole microseconds since `started` (a reading of `engine_clock::now`),
+/// saturating. Wall clock, evidence only, never hashed. The engine clock
+/// rather than `std::time::Instant`: a browser tab has no std clock.
+fn micros_since(started: std::time::Duration) -> u64 {
+    u64::try_from(engine_clock::since(started).as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Live half-res present switch: off keeps full-res pixels (default),
@@ -350,7 +351,7 @@ impl Presenter {
         if !cached_ok {
             return 0;
         }
-        let started = std::time::Instant::now();
+        let started = engine_clock::now();
         let wrote = {
             let cached = self.gtao_sub.full_ao();
             self.write_ao_full(width, height, cached)
@@ -358,7 +359,7 @@ impl Presenter {
         if wrote.is_err() {
             return 0;
         }
-        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
         Self::ms_to_us(ms)
     }
 
@@ -1130,7 +1131,10 @@ impl Presenter {
             height,
             &crate::pass_truth::LookToggles::all_on(),
         )?;
-        let present_started = std::time::Instant::now();
+        if let Some(format) = self.surface_config.as_ref().map(|config| config.format) {
+            self.capture_after_frame(&frame.texture, format, width, height);
+        }
+        let present_started = engine_clock::now();
         self.queue.present(frame);
         super::frame::record_present_call_us(micros_since(present_started));
         self.frames_presented += 1;
@@ -1151,7 +1155,9 @@ impl Presenter {
         height: u32,
         toggles: &crate::pass_truth::LookToggles,
     ) -> Result<FrameReceipt, PresentError> {
-        let stage_started = std::time::Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        self.scopes.settle();
+        let stage_started = engine_clock::now();
         let (render_w, render_h) = live_present_size(width, height, live_half_res_enabled());
         let frame = effective_camera(list, render_w, render_h)?;
         let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
@@ -1188,7 +1194,7 @@ impl Presenter {
             live_bind_last_store(live_current);
         }
         let stage_us = micros_since(stage_started);
-        let submit_started = std::time::Instant::now();
+        let submit_started = engine_clock::now();
         let timer_slot = self
             .gpu_timer
             .as_mut()
@@ -1226,14 +1232,14 @@ impl Presenter {
                 debug_assert_eq!(sky_horizon, self.fog_fwd.color);
                 debug_assert_eq!(sky_exposure, self.sky_exposure);
             }
-            let forward_ibl_started = std::time::Instant::now();
+            let forward_ibl_started = engine_clock::now();
             let sky_timed = self.encode_forward(
                 &mut enc,
                 targets,
                 list,
                 ForwardLook::live(&look, sky_draw, gtao_run, timer.map(|(timer, _)| timer)),
             );
-            forward_ibl_ms = forward_ibl_started.elapsed().as_secs_f64() * 1000.0;
+            forward_ibl_ms = engine_clock::since(forward_ibl_started).as_secs_f64() * 1000.0;
             // LF3: GTAO on the stored forward depth, on the device, writing
             // `ao_tex` for the blit below (no readback, no wait).
             gtao_timed = gtao_run
@@ -2063,7 +2069,7 @@ mod live_wall_split_tests {
             }],
         };
         for frame in 0..3 {
-            let started = std::time::Instant::now();
+            let started = engine_clock::now();
             let receipt = presenter
                 .render_live_offscreen(&list)
                 .expect("live frame renders");
@@ -2119,8 +2125,8 @@ mod live_ibl_receipt_tests {
         // IBL-bound encode and closes on it, so the AO upload, the blit and
         // the overlay below never bill to the `ibl` column.
         let src = include_str!("live.rs");
-        let open = "let forward_ibl_started = std::time::Instant::now();";
-        let close = "forward_ibl_started.elapsed()";
+        let open = "let forward_ibl_started = engine_clock::now();";
+        let close = "engine_clock::since(forward_ibl_started)";
         let start = src.find(open).expect("live path opens the ibl clock");
         let end = src.find(close).expect("live path closes the ibl clock");
         assert!(start < end, "the ibl clock closes after it opens");

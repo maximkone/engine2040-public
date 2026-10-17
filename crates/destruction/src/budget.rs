@@ -484,7 +484,7 @@ impl DebrisLedger {
         h.write_u32(self.cfg.sleep_ticks);
         h.write_i32(self.cfg.lod_distance_mm);
         h.write_i32(self.cfg.sleep_speed_mm_per_tick);
-        h.write_u32(self.shards.len() as u32);
+        h.write_len32(self.shards.len());
         for s in &self.shards {
             h.write_u32(s.id);
             h.write_u32(s.island);

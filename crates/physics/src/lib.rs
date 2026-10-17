@@ -5,6 +5,9 @@ pub mod balance;
 /// Presentation cloth for fighter capes and arena banners: CPU Verlet in floats at the fixed
 /// 60 Hz step, per-tier cost table, sleeping when still. Never hashed, never read by the sim.
 pub mod cloth;
+/// Static collision shapes (convex hulls, triangle meshes) and the reader for the cooked
+/// collider bytes the asset cook writes. Std-only.
+pub mod collider;
 #[cfg(feature = "rapier")]
 pub mod controller;
 /// Character controller v2: steps, slopes, platforms, ledge sense, pushes.
@@ -14,6 +17,8 @@ pub mod controller2;
 /// through. Std-only; no sim step.
 pub mod islands;
 pub mod kcc;
+/// The collision layer table (fighter, prop, debris, sensor, world) as plain integers.
+pub mod layers;
 /// Severed limbs as bodies: mass from volume and density, inherited velocity
 /// plus blade impulse, stump recoil, canonical order, capped, snapshotted.
 /// Integer, std-only.
@@ -25,6 +30,9 @@ pub mod overlap;
 /// PD velocity-servo drive law for the powered ragdoll: D-damped servo
 /// axes, magnitude clamp, dt fallback to P-only. Std-only.
 pub mod pd;
+/// Ray casts and swept-sphere casts against cooked static colliders (the door's
+/// `physics.raycast` and `physics.shapecast`). Std-only.
+pub mod query;
 #[cfg(feature = "rapier")]
 pub mod powered;
 #[cfg(feature = "rapier")]

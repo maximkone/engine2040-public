@@ -20,10 +20,10 @@ use engine_core::Fnv64;
 
 use super::scene_query::{QueryAnswer, QueryKind};
 
-/// Query verbs on the hardened surface: the eight [`QueryKind`] words.
+/// Query verbs on the hardened surface: the nine [`QueryKind`] words.
 /// Rows are indexed by the frozen discriminant through [`verb_index`], so an
 /// appended kind fails to compile here instead of aliasing a row.
-pub const QUERY_VERB_COUNT: usize = 8;
+pub const QUERY_VERB_COUNT: usize = 9;
 /// Estimated chars per model token on the door (Blender/Unity/Godot MCP
 /// comparison point: our ledger posts chars plus this estimate, never a
 /// vendor tokenizer).
@@ -45,6 +45,7 @@ fn verb_index(kind: QueryKind) -> usize {
         QueryKind::LargestOpen => 5,
         QueryKind::FreeSpace => 6,
         QueryKind::Cone => 7,
+        QueryKind::Relation => 8,
     }
 }
 
@@ -188,6 +189,7 @@ impl WatchLedger {
                 VerbRow::new(QueryKind::LargestOpen),
                 VerbRow::new(QueryKind::FreeSpace),
                 VerbRow::new(QueryKind::Cone),
+                VerbRow::new(QueryKind::Relation),
             ],
             latest_revision: 0,
             latest_digest: 0,
@@ -408,6 +410,7 @@ mod tests {
     use super::super::discover::{WatchConfig, WatchHub, WatchKind};
     use super::super::scene_query::{run_query, QueryArgs};
     use super::*;
+    use engine_spatial::relation::Rel;
     use engine_spatial::sight::ReachView;
     use engine_spatial::Actor;
     use std::collections::BTreeMap;
@@ -461,7 +464,8 @@ mod tests {
             4 => QueryArgs::cover_near(0, [5.0, 1.6, 5.0], false, 500),
             5 => QueryArgs::largest_open(30),
             6 => QueryArgs::free_space(30, 100, 8, 7),
-            _ => QueryArgs::cone_from(0, 90, 500),
+            7 => QueryArgs::cone_from(0, 90, 500),
+            _ => QueryArgs::relation(0, Rel::Left, None),
         }
     }
 
@@ -589,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn token_table_posts_all_eight_verbs() {
+    fn token_table_posts_all_nine_verbs() {
         let (actors, reach) = fixture();
         let mut ledger = WatchLedger::new();
         for i in 0..QUERY_VERB_COUNT {
@@ -616,6 +620,7 @@ mod tests {
             "largest_open",
             "free_space",
             "cone",
+            "relation",
         ] {
             assert!(text.contains(name), "table posts {name}");
         }
@@ -625,7 +630,7 @@ mod tests {
         );
         // Same calls give byte-identical text.
         assert_eq!(text, ledger.token_table_text(), "table text is stable");
-        // Empty ledger still posts all eight rows at zero.
+        // Empty ledger still posts all nine rows at zero.
         let blank = WatchLedger::new().token_table_text();
         assert!(blank.contains("near 0 0 0"), "blank rows read zero");
     }

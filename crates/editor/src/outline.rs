@@ -2,30 +2,35 @@
 //!
 //! Owner: the editor session; reads row snapshots, never owns the scene.
 //! Units: stable row ids (`u64`), depths, query text. Budget: UI thread
-//! only, search linear in rows, panel frame over <= 1024 rows. Determinism:
+//! only, search linear in rows (<= 50 ms at [`MAX_ROWS`]), a quiet panel frame
+//! is O(1) through [`OutlinerView`]. Determinism:
 //! same rows plus same query give the same hits in row order. Errors:
 //! [`OutlineError`]; refusals stage nothing and mutate nothing. Consumer:
 //! the editor outliner panel (hierarchy tab) via pure helpers here.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
 use engine_scene::ids::ObjectId;
 
 use crate::commands::bound_to;
 use crate::shell::SceneRow;
+#[cfg(test)]
+use crate::shell::Shell;
 
 // The shared selection lives in the inspector module; the outliner reuses
 // it instead of minting a parallel type (one owner per type).
 pub use crate::inspector::Selection;
 pub use crate::inspector::MAX_SELECTION;
 
-/// Most rows listed in one outliner snapshot.
-pub const MAX_ROWS: usize = 1024;
+/// Most rows listed in one outliner snapshot: a 64-player plus 500-AI siege
+/// scene fits with room to spare.
+pub const MAX_ROWS: usize = 2048;
 /// Longest search text in chars.
 pub const MAX_QUERY_CHARS: usize = 128;
 /// Most hits returned by one search; the full outliner fits exactly.
-pub const MAX_RESULTS: usize = 1024;
+pub const MAX_RESULTS: usize = MAX_ROWS;
 /// Most named selection sets kept in one bank.
 pub const MAX_SETS: usize = 32;
 /// Longest selection-set name in chars.
@@ -180,13 +185,15 @@ pub fn build_rows(
                 max: MAX_ROWS,
             });
         }
-        let raw: String = names.get(&row.id).cloned().unwrap_or_default();
-        let fallback = short_name(row.id);
-        let picked = if raw.is_empty() { fallback } else { raw };
+        // The fallback id text is built only for rows without a label.
+        let name = match names.get(&row.id) {
+            Some(label) if !label.is_empty() => bound_detail(label),
+            _ => bound_detail(&short_name(row.id)),
+        };
         out.push(OutlinerRow {
             id,
             source: row.id,
-            name: bound_detail(&picked),
+            name,
             depth: row.depth,
             parent: if row.parent.is_nil() {
                 None
@@ -201,6 +208,73 @@ pub fn build_rows(
 /// Live stable ids of the current snapshot, for membership checks.
 pub fn live_set(rows: &[OutlinerRow]) -> BTreeSet<u64> {
     rows.iter().map(|row| row.id).collect()
+}
+
+/// Shared handles to one revision's outliner rows and their live id set.
+pub type OutlinerHandles = (Arc<[OutlinerRow]>, Arc<BTreeSet<u64>>);
+
+/// Outliner rows, live ids and the last search, cached per document revision.
+///
+/// The document revision grows by one per apply, undo and redo, so it names
+/// the row set exactly. A quiet frame (same revision, same query) rebuilds
+/// nothing and clones two `Arc` handles; only an edit rebuilds the rows, and
+/// only a new query or new rows re-run the search. Handles are `Arc` so a
+/// panel keeps drawing from one while it stages edits on the shell.
+#[derive(Clone, Debug)]
+pub struct OutlinerView {
+    revision: Option<u64>,
+    rows: Arc<[OutlinerRow]>,
+    live: Arc<BTreeSet<u64>>,
+    hits: Option<(String, Arc<[OutlinerHit]>)>,
+}
+
+impl Default for OutlinerView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OutlinerView {
+    /// Empty view: the first [`sync`](Self::sync) builds the rows.
+    pub fn new() -> Self {
+        Self {
+            revision: None,
+            rows: Arc::from(Vec::new()),
+            live: Arc::new(BTreeSet::new()),
+            hits: None,
+        }
+    }
+
+    /// Rows and live ids for document `revision`. `build` runs only when the
+    /// revision moved since the last call; a failed build leaves the view
+    /// empty so no stale rows hide behind a new revision.
+    pub fn sync(
+        &mut self,
+        revision: u64,
+        build: impl FnOnce() -> Result<Vec<OutlinerRow>, OutlineError>,
+    ) -> Result<OutlinerHandles, OutlineError> {
+        if self.revision != Some(revision) {
+            *self = Self::new();
+            let rows = build()?;
+            self.live = Arc::new(live_set(&rows));
+            self.rows = Arc::from(rows);
+            self.revision = Some(revision);
+        }
+        Ok((Arc::clone(&self.rows), Arc::clone(&self.live)))
+    }
+
+    /// Hits of `query` over the synced rows, searched again only when the
+    /// text or the rows changed.
+    pub fn search(&mut self, query: &str) -> Result<Arc<[OutlinerHit]>, OutlineError> {
+        if let Some((text, hits)) = &self.hits {
+            if text == query {
+                return Ok(Arc::clone(hits));
+            }
+        }
+        let hits: Arc<[OutlinerHit]> = Arc::from(search(&self.rows, &OutlinerQuery::new(query))?);
+        self.hits = Some((query.to_string(), Arc::clone(&hits)));
+        Ok(hits)
+    }
 }
 
 /// One search query: substring over row names; empty matches every row.
@@ -673,10 +747,59 @@ pub fn remap_selection(selection: &Selection, map: &BTreeMap<u64, u64>) -> (Sele
     (Selection { ids, primary }, dropped)
 }
 
+/// Rows in the siege scale fixture.
+#[cfg(test)]
+pub(crate) const SIEGE_ROWS: usize = 2000;
+
+/// Siege-shaped scene for the scale proofs: an arena root, a players group
+/// of 64, an AI group of 500 in five squads of 100, and props filling the
+/// scene up to [`SIEGE_ROWS`]. Returns the shell plus a name for every node.
+#[cfg(test)]
+pub(crate) fn siege_scene() -> (Shell, HashMap<ObjectId, String>) {
+    use crate::commands::Op;
+    use engine_scene::transform::Transform;
+
+    let mut ops = Vec::with_capacity(SIEGE_ROWS);
+    let mut names = HashMap::new();
+    let mut add = |name: String, parent: ObjectId| {
+        let id = ObjectId::new();
+        ops.push(Op::Insert {
+            id,
+            parent,
+            local: Transform::identity(),
+        });
+        names.insert(id, name);
+        id
+    };
+    let arena = add("arena".to_string(), ObjectId::NIL);
+    let players = add("players".to_string(), arena);
+    for index in 0..64 {
+        add(format!("player {index:02}"), players);
+    }
+    let ai = add("ai".to_string(), arena);
+    for squad in 0..5 {
+        let group = add(format!("squad {squad}"), ai);
+        for member in 0..100 {
+            add(format!("ai {:03}", squad * 100 + member), group);
+        }
+    }
+    let props = add("props".to_string(), arena);
+    // Arena, players group, 64 players, ai group, 5 squads, 500 AI, props group.
+    let placed = 1 + 1 + 64 + 1 + 5 + 500 + 1;
+    for prop in 0..SIEGE_ROWS - placed {
+        add(format!("prop {prop:04}"), props);
+    }
+    let mut shell = Shell::new();
+    shell.apply_ops(ops).expect("siege scene applies");
+    (shell, names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::any::TypeId;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
 
     use engine_scene::transform::Transform;
 
@@ -1170,5 +1293,157 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(live.contains(&hits[0].id));
         assert!(selection.ids.iter().all(|id| live.contains(id)));
+    }
+
+    /// Median of `runs` timings of `work`.
+    fn median_of(runs: usize, mut work: impl FnMut()) -> Duration {
+        let mut times: Vec<Duration> = (0..runs)
+            .map(|_| {
+                let start = Instant::now();
+                work();
+                start.elapsed()
+            })
+            .collect();
+        times.sort();
+        times[runs / 2]
+    }
+
+    #[test]
+    fn siege_scene_search_stays_under_50_ms() {
+        let (shell, names) = siege_scene();
+        let rows = build_rows(&shell.rows(), &names).unwrap();
+        assert_eq!(rows.len(), SIEGE_ROWS);
+        let count = |text: &str| search(&rows, &OutlinerQuery::new(text)).unwrap().len();
+        assert_eq!(count("ai 4"), 100);
+        assert_eq!(count("PLAYER"), 65, "64 players plus their group");
+        assert_eq!(count(""), SIEGE_ROWS);
+        assert_eq!(count("no such row"), 0);
+        let mut worst = Duration::ZERO;
+        for text in ["", "ai 4", "PROP 1", "squad"] {
+            let start = Instant::now();
+            search(&rows, &OutlinerQuery::new(text)).unwrap();
+            worst = worst.max(start.elapsed());
+        }
+        eprintln!("ED19 siege: {SIEGE_ROWS} rows, worst search {worst:?}");
+        assert!(worst < Duration::from_millis(50), "search took {worst:?}");
+    }
+
+    #[test]
+    fn view_rebuilds_rows_only_when_the_revision_moves() {
+        let (mut shell, names) = siege_scene();
+        let builds = Cell::new(0u32);
+        let build = |shell: &Shell| {
+            builds.set(builds.get() + 1);
+            build_rows(&shell.rows(), &names)
+        };
+        let mut view = OutlinerView::new();
+        let (rows, live) = view.sync(shell.revision(), || build(&shell)).unwrap();
+        assert_eq!(
+            (builds.get(), rows.len(), live.len()),
+            (1, SIEGE_ROWS, SIEGE_ROWS)
+        );
+        // A quiet frame shares the same handles and never calls the builder.
+        let (again, _) = view.sync(shell.revision(), || build(&shell)).unwrap();
+        assert!(Arc::ptr_eq(&rows, &again));
+        assert_eq!(builds.get(), 1);
+        let hits = view.search("ai 4").unwrap();
+        assert_eq!(hits.len(), 100);
+        assert!(Arc::ptr_eq(&hits, &view.search("ai 4").unwrap()));
+        assert_eq!(view.search("squad").unwrap().len(), 5);
+        // An edit moves the revision: rows rebuild and the search runs again.
+        shell
+            .insert_node(
+                ObjectId::new(),
+                ObjectId::NIL,
+                engine_scene::transform::Transform::identity(),
+            )
+            .unwrap();
+        let (grown, grown_live) = view.sync(shell.revision(), || build(&shell)).unwrap();
+        assert_eq!((builds.get(), grown.len()), (2, SIEGE_ROWS + 1));
+        assert!(grown_live.len() > live.len());
+        assert_eq!(view.search("squad").unwrap().len(), 5);
+        // A refused build leaves nothing stale behind the new revision.
+        let refused = view.sync(shell.revision() + 1, || {
+            Err(OutlineError::TooManyRows {
+                count: MAX_ROWS + 1,
+                max: MAX_ROWS,
+            })
+        });
+        assert!(refused.is_err());
+        assert!(view.search("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn selection_sets_over_hundreds_of_siege_rows() {
+        let (shell, names) = siege_scene();
+        let rows = build_rows(&shell.rows(), &names).unwrap();
+        let live = live_set(&rows);
+        let order = order_of(&rows);
+        let ai: Vec<u64> = search(&rows, &OutlinerQuery::new("ai "))
+            .unwrap()
+            .iter()
+            .map(|hit| hit.id)
+            .collect();
+        assert_eq!(ai.len(), 500);
+        let start = Instant::now();
+        // Two overlapping sets of 200 AI rows: rows 0..200 and 100..300.
+        let pick = |ids: &[u64]| {
+            ids.iter().fold(Selection::new(), |sel, id| {
+                select_add(&sel, *id, &live).expect("under the selection bound")
+            })
+        };
+        let (a, b) = (pick(&ai[..200]), pick(&ai[100..300]));
+        let mut bank = SelectionBank::new();
+        bank.save("squad-a", a.clone(), &live).unwrap();
+        bank.save("squad-b", b.clone(), &live).unwrap();
+        assert_eq!(intersect(&a, &b).ids.len(), 100);
+        assert_eq!(difference(&a, &b).ids.len(), 100);
+        let wide = bank.recall_mode("squad-b", &a, RecallMode::Union);
+        assert!(wide.is_err(), "300 rows pass the {MAX_SELECTION} bound");
+        // A shift-click span over 250 rows fits; one more row does not.
+        let span = select_range(&Selection::new(), order[10], order[259], &order, &live).unwrap();
+        assert_eq!(span.ids.len(), 250);
+        assert!(select_range(&Selection::new(), order[10], order[266], &order, &live).is_err());
+        // Fifty AI rows despawn: the bank's sets prune to the survivors.
+        let gone: BTreeSet<u64> = ai[..50].iter().copied().collect();
+        let alive: BTreeSet<u64> = live.difference(&gone).copied().collect();
+        assert_eq!(dangling_count(&a, &alive), 50);
+        let mut pruned = bank.recall("squad-a", &Selection::new()).unwrap();
+        assert!(prune(&mut pruned, &alive));
+        assert_eq!(pruned.ids.len(), 150);
+        let took = start.elapsed();
+        eprintln!("ED19 siege: two 200-row sets, algebra and prune took {took:?}");
+        assert!(took < Duration::from_millis(50), "sets took {took:?}");
+    }
+
+    #[test]
+    fn quiet_panel_frame_stays_under_one_millisecond_at_siege_scale() {
+        let (shell, names) = siege_scene();
+        let revision = shell.revision();
+        let mut view = OutlinerView::new();
+        let rebuild = median_of(9, || {
+            view = OutlinerView::new();
+            view.sync(revision, || build_rows(&shell.rows(), &names))
+                .unwrap();
+        });
+        // A quiet frame: synced rows, memoized hits, labels for the window
+        // the scroll area shows (40 rows).
+        let mut labelled = 0usize;
+        let quiet = median_of(101, || {
+            view.sync(revision, || unreachable!("revision did not move"))
+                .unwrap();
+            let hits = view.search("").unwrap();
+            labelled = hits.iter().take(40).map(|hit| hit.label().len()).sum();
+        });
+        assert!(labelled > 0);
+        eprintln!("ED19 siege: panel frame quiet {quiet:?}, after an edit {rebuild:?}");
+        assert!(
+            quiet < Duration::from_millis(1),
+            "quiet frame took {quiet:?}"
+        );
+        assert!(
+            rebuild < Duration::from_millis(10),
+            "rebuild took {rebuild:?}"
+        );
     }
 }

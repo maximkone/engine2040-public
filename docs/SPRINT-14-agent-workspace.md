@@ -5,7 +5,7 @@ cross-family review, halt lifecycle, destructive-command and secret
 guards, tests for every loop tool. Rows are orchestrator-landed unless
 they name another lane; none touches `crates/`.
 
-- [ ] AW1 tools: board slices — `tools/board-slice.mjs <ID>` prints the
+- [ ] AW1 tools: board slices — `tools/board-slice.mjs <ID>` prints the Progress 2026-10-17: `node --test tools/board-slice.test.mjs tools/board-slice-cases.test.mjs` 40 pass; `node tools/board-slice.mjs --self-check` is 9/10 today (VS1 slice 11,558 bytes over the 8,192 budget). The context meter does not exist (the loop is retired).
   row verbatim, the first lines of its prerequisite rows, its plan §3/§7
   excerpt and owned paths; packet cards carry the slice. Tier A. Size S.
   Owns `tools/board-slice.mjs` plus a test. Accept: slices for 10 ready
@@ -60,7 +60,7 @@ they name another lane; none touches `crates/`.
   permission block. Accept: a drill agent's attempts are refused; one
   normal wave runs unaffected. needs: none.
   LATER: parked 2026-10-03 (circus verdict: loop-about-the-loop work, not a graphics/animation/ragdoll/AI-door bar (center runs the loop)); unpark by deleting this line.
-- [ ] AW9 tools: secret guard — `packet-gate` and the commit path scan
+- [ ] AW9 tools: secret guard — `packet-gate` and the commit path scan Progress 2026-10-17: `tools/secret-gate.mjs` scans the staged diff (12 tests in secret-gate.test.mjs pass; `--self-test` detects a seeded key). No hook calls it (docs/book/ref-process.md:230); packet-gate and the plaintext-key-file handoff flag are gone. Left: wire it into the commit path and run the 50-commit false-positive check.
   staged diffs for key and token patterns and refuse; the handoff flags
   plaintext key files in the OpenCode config folder for the owner. Tier
   A. Size S. Owns the scanner and its test. Accept: a seeded key in a

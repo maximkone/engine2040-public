@@ -362,6 +362,18 @@ impl PhysFx {
         Ok(out)
     }
 
+    /// The (friction, restitution, density) the collider of every body was built with, spawn
+    /// order not guaranteed: lets a test check what the world really holds against the table.
+    #[cfg(test)]
+    pub(crate) fn collider_numbers(&self) -> Vec<(f32, f32, f32)> {
+        self.records
+            .iter()
+            .flatten()
+            .filter_map(|rec| self.world.colliders.get(rec.collider))
+            .map(|c| (c.friction(), c.restitution(), c.density()))
+            .collect()
+    }
+
     /// Counters as of the last step.
     pub fn stats(&self) -> Stats {
         Stats {

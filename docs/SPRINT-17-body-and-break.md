@@ -3,7 +3,7 @@
 Tier A rows only. The later rows (BX13-BX27, BX29-BX32, HS1, HS3-HS14, HS16-HS19,
 HS22, HS24-HS28) stay in their plan files and are boarded when these land.
 
-- [ ] BX5 anim: injured locomotion — hop, crawl, fall, one-arm guard, rebuilt
+- [ ] BX5 anim: injured locomotion — hop, crawl, fall, one-arm guard, rebuilt Progress 2026-10-17: `crates/anim/src/injured.rs` and `injured_double.rs` rebuild the single and double loss joint masks (tests single_loss_masks_rebuild_x1000, double_loss_masks_rebuild_x1000, override wiring into layers). Left: hop, crawl, fall and one-arm-guard locomotion, the support polygon, and a legal state within 20 ticks.
   joint mask and support polygon after each loss. Tier A. Size L. Owns
   `crates/anim/src/injured.rs`. Accept: 15 single-loss and 6 double-loss
   fixtures x 1,000 seeds, no NaN, no T-pose, no joint over its limit; a fighter
@@ -19,7 +19,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   A. Size L. Owns `crates/render/src/slice.rs`. Accept: 0.3 ms per cut, 32
   stumps live at 1080p Base (reference GPU); watertight validator green; capture
   pair beside a reference. needs: BX2, BX8.
-- [ ] BX8 assets: sever cook — each character cook emits segment interior
+- [x] BX8 assets: sever cook — each character cook emits segment interior Landed 0fbf0431. `cargo test -p engine-assets --lib -- sever_cook` 7 passed (both_rigs_cook_with_sorted_segments, digest_identical_twice, interior_and_cap_templates_are_watertight, open_segment_fails_loud, flipped_sign_fails_loud, flipped_winding_fails_loud, canonical_encoding_repeats_bit_identical), gh run 39058461060. No render caller yet (BX7).
   templates and stump caps and proves them watertight. Tier A. Size M. Owns
   `crates/assets/src/sever_cook.rs`. Accept: cook fails loudly on a non-watertight
   or flipped-normal segment; digest x2; Rome gladiator and urban officer rigs
@@ -32,7 +32,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   stone and armor; stump, limb landing, structure groan before collapse. Tier
   A. Size S. Owns hunks beside `crates/audio`. Accept: event-to-sound table
   covers every material pair; no sound without an event. needs: BX2, BX12, SN1.
-- [ ] BX36 destruction: fracture event at 32 cells under 1 ms — `crates/destruction/src/fracture.rs` (fn `clip_cells`) and
+- [x] BX36 destruction: fracture event at 32 cells under 1 ms — `crates/destruction/src/fracture.rs` (fn `clip_cells`) and Landed 79913e64. `cargo test --release -p engine-destruction --lib fracture_event_budget_one_millisecond -- --ignored --nocapture` prints cells=32 p50 239 us p99 288 us (cells=16 p99 111 us, 24 p99 202 us, 64 p99 763 us) and the test asserts the 32-cell row, gh run 39058844125; `--lib fracture` 15 passed, gh run 39058643179. The two digests quoted in the row are not pinned by any test; golden d57b5c8ae3096614 unchanged per golden-matrix run 39054403838.
   `crates/destruction/src/csg.rs` (fns `clip_back`, `split_back`). Tier B. Size S. Owns those two files only. Today (release, loaded box)
   16 cells p99 727 us, 24 cells 995 us, 32 cells 1.4 ms, 64 cells 2.7 ms. Idea: while clipping one cell, stop at the first neighbor whose
   bisector is farther than the cell's farthest vertex from its site (neighbors are already sorted nearest first), and reuse the plane list
@@ -182,7 +182,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   before (no bake beside V-HACD). P2P: visacd green x2 plus golden held.
   needs: GEO5, GEO5b. (RES-STEAL 2026-10-05 VisACD r2-r18 deduped;
   GEO14 variant folded.)
-- [ ] GEO6a geo: humanoid bone auto-map (center note GEO6, Godot `SkeletonProfileHumanoid` name patterns as the shape, own
+- [x] GEO6a geo: humanoid bone auto-map (center note GEO6, Godot `SkeletonProfileHumanoid` name patterns as the shape, own Landed c9eed786. `cargo test -p engine-geo --lib -- bonemap ops` 10 passed (bonemap: twenty_fixtures_map_all_22_bones, legless_rig_gets_only_the_bones_it_has, first_joint_keeps_a_bone_and_no_index_repeats, names_sides_and_table_order_line_up), gh run 39056587122; `cargo clippy -p engine-geo --all-targets -- -D warnings` clean, gh run 39059227974; rust-quality geo 100 A.
   code, MIT idea) — new `crates/geo/src/bonemap.rs` (std only, no feature) with `pub enum HumanoidBone` of the 22 bones
   Hips, Spine, Chest, UpperChest, Neck, Head, LeftShoulder, RightShoulder, LeftUpperArm, RightUpperArm, LeftLowerArm,
   RightLowerArm, LeftHand, RightHand, LeftUpperLeg, RightUpperLeg, LeftLowerLeg, RightLowerLeg, LeftFoot, RightFoot, LeftToes,
@@ -207,7 +207,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   of 1, at most 4 non-zero influences, 0 unweighted vertices; the vertex nearest bone 1's middle has bone 1 weight at least
   0.9; a vertex at the joint of bone 1 and 2 has both weights between 0.4 and 0.6; result digest equal x2; empty `bones`
   returns `GeoError::Malformed`; clippy clean; golden unchanged. needs: none.
-- [ ] GEO7a geo: object-space normal baker (center note GEO7, first leg) — new `crates/geo/src/bake.rs` behind feature `bake =
+- [ ] GEO7a geo: object-space normal baker (center note GEO7, first leg) — new `crates/geo/src/bake.rs` behind feature `bake = Progress 2026-10-17: `crates/geo/src/bake.rs` (`bake_normals`, feature `bake`) exists with 4 unit tests (bad inputs, texel uv, texel dir, dilate). Left: the 256 px sphere accept test (90% coverage, mean angle at most 3 degrees, digest x2) and clippy with `--features bake`.
   ["collision"]` in `crates/geo/Cargo.toml` (add it to `all`): `pub fn bake_normals(low: &GeoMesh, high: &GeoMesh, size: u32,
   cage: f32) -> Result<NormalMap, GeoError>` with `pub struct NormalMap { pub size: u32, pub rgb: Vec<[u8; 3]>, pub covered:
   Vec<bool> }`: for every texel centre inside a UV triangle of `low` (barycentric from `low.uvs`), take the interpolated
@@ -220,7 +220,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   texel's decoded normal and the analytic sphere normal (normalized position) at most 3 degrees; digest of `rgb` equal x2;
   at most 5 s in the test profile; if the 3 degrees fail after one cage change (0.1 or 0.3), write the measured angle into
   this row and stop; clippy clean with `--features bake`; golden unchanged. needs: GEO3.
-- [ ] GEO8a anim: clip edit verbs trim, retime, cleanup (center note GEO8, first leg; strips and mirror stay open) — new
+- [x] GEO8a anim: clip edit verbs trim, retime, cleanup (center note GEO8, first leg; strips and mirror stay open) — new Landed 818b576e. `cargo test -p engine-anim --lib -- edit` 8 passed (trim_keeps_boundary_values, retime_half_gives_exact_ticks, cleanup_drops_collinear_keys, edits_repeat), gh run 39056803048; full `cargo test -p engine-anim` green (390 lib, 1 ignored, doctests 8), gh run 39059034454.
   `crates/anim/src/edit.rs` plus one `pub mod edit;` line in `crates/anim/src/lib.rs` (Motion owns `graph.rs` and
   `state_machine.rs`, do not touch them): over `QClip`/`QTrack` of `clip.rs`, `pub fn trim(clip: &QClip, start_tick: u32,
   end_tick: u32) -> Option<QClip>` (keys with times in the window, times shifted so the window starts at 0, boundary keys
@@ -259,7 +259,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   as a base64 data URI built by a 20-line helper in the test) and checks both targets, names, exact deltas and default
   weights; sparse accessor, delta count mismatch and NaN each give their own typed error; `skin_import` tests still green;
   golden unchanged. needs: none.
-- [ ] GEO12 geo: native mesh ops weld, mirror, array, flip, normals (center note GEO2 second half) — new
+- [x] GEO12 geo: native mesh ops weld, mirror, array, flip, normals (center note GEO2 second half) — new Landed 0b43f1d9. `cargo test -p engine-geo --lib -- bonemap ops` 10 passed, the 6 ops tests weld_merges_split_cube, mirror_doubles_volume, array_three_cubes, flip_twice_is_identity, normals_unit_and_outward, ops_repeat, gh run 39056587122; default-feature clippy -D warnings clean, gh run 39059227974; rust-quality geo 100 A.
   `crates/geo/src/ops.rs` (std only, no feature) with `pub fn weld_by_distance(m: &GeoMesh, epsilon: f32) -> GeoMesh` (vertices
   closer than `epsilon` on a quantized grid merge to the lowest index, degenerate triangles dropped, normals and UVs of the
   kept vertex), `pub enum Axis { X, Y, Z }`, `pub fn mirror(m: &GeoMesh, axis: Axis) -> GeoMesh` (the mesh plus its reflection

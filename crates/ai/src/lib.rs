@@ -61,13 +61,13 @@ pub use memory::{
 };
 pub mod mind;
 pub use mind::{
-    backend_rows, conformance_suite, validate_proposal as validate_mind_proposal, ActionDraft,
-    ActionKind, ActionLog, ActionSource, AdapterOutcome, AskOutcome, AskStatus, BackendRow, Goal,
-    GoalState, LateOutcome, LocalAdapter, MemoryEvent, MemoryKind, Mind, MindAction, MindAdapter,
-    MindContext, MindError, MindRequest, MindRuntime, MockAdapter, NpcId, Privacy,
-    Proposal as MindProposal, Relation, RemoteAdapter, ScriptStep, CTX_GOALS, CTX_MEMORIES,
-    LOCAL_LATENCY_MS, MAX_ACTIONS_PER_ASK, MAX_EVENTS, MAX_GOALS, MAX_RELATIONS, MAX_TEXT,
-    MOCK_LATENCY_MS, REMOTE_COST, REMOTE_LATENCY_MS,
+    backend_rows, validate_proposal as validate_mind_proposal, ActionDraft, ActionKind, ActionLog,
+    ActionSource, AdapterOutcome, AskOutcome, AskStatus, BackendRow, Goal, GoalState, LateOutcome,
+    LocalAdapter, MemoryEvent, MemoryKind, Mind, MindAction, MindAdapter, MindContext, MindError,
+    MindRequest, MindRuntime, MockAdapter, NpcId, Privacy, Proposal as MindProposal, Relation,
+    RemoteAdapter, ScriptStep, CTX_GOALS, CTX_MEMORIES, LOCAL_LATENCY_MS, MAX_ACTIONS_PER_ASK,
+    MAX_EVENTS, MAX_GOALS, MAX_RELATIONS, MAX_TEXT, MOCK_LATENCY_MS, REMOTE_COST,
+    REMOTE_LATENCY_MS,
 };
 pub mod depth;
 pub use depth::{
