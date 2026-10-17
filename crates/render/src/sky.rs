@@ -16,7 +16,6 @@
 //! split the RL3/RL2 passes landed.
 
 use std::fmt;
-use std::time::Instant;
 
 #[cfg(feature = "window")]
 use crate::decals::{compute_storage_entry, compute_uniform_entry};
@@ -413,7 +412,7 @@ pub fn bake_sky(
             "sky capture {width_px}x{height_px} exceeds {SKY_CAPTURE_MAX_DIM}"
         )));
     }
-    let started = Instant::now();
+    let started = engine_clock::now();
     // Trig table: the azimuth depends on the column only, so one cos/sin
     // pair per column serves every row (was: one pair per texel).
     // Width is validated above (1..=SKY_CAPTURE_MAX_DIM), so the u32->usize
@@ -442,7 +441,7 @@ pub fn bake_sky(
             texels.push(sky_radiance(view, params)?);
         }
     }
-    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
     Ok((
         SkyCapture {
             width_px,
@@ -637,10 +636,10 @@ pub fn bake_look_from_day(capture: &SkyCapture) -> Result<(SkyLookBake, f64), Sk
             ));
         }
     }
-    let started = Instant::now();
+    let started = engine_clock::now();
     let ambient = capture.mean_radiance()?;
     let fog = fog_color(capture)?;
-    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
     let thread = std::thread::current()
         .name()
         .unwrap_or(RL8_LOOK_BAKE_THREAD)
@@ -1135,7 +1134,7 @@ pub fn submit_gpu_sky(
     let count = u32::try_from(words)
         .map_err(|_| SkyError::Invalid(format!("sky texel words {words} exceed u32")))?;
     let byte_len = words * 4;
-    let started = Instant::now();
+    let started = engine_clock::now();
 
     if submitter.cached_words != Some(words) {
         let src_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1245,7 +1244,7 @@ pub fn submit_gpu_sky(
         frame_index: frame.frame_index,
         capture_texels: capture.texels.len() as u64,
         validation_errors: 0,
-        submit_ms: started.elapsed().as_secs_f64() * 1000.0,
+        submit_ms: engine_clock::since(started).as_secs_f64() * 1000.0,
     })
 }
 

@@ -20,8 +20,6 @@
 
 use std::f32::consts::PI;
 use std::fmt;
-#[cfg(feature = "v1")]
-use std::time::Instant;
 
 // ---------------------------------------------------------------------------
 // Bake shape: fixed sizes bound every allocation up front.
@@ -760,13 +758,13 @@ pub fn bake(hdri_bytes: &[u8]) -> Result<(IblBake, f64), IblError> {
     if hdri_bytes.is_empty() {
         return Err(IblError::MissingHdri);
     }
-    let started = Instant::now();
+    let started = engine_clock::now();
     let env = crate::v1_ibl_shadow::load_hdri(hdri_bytes).map_err(IblError::from)?;
     let cube = bake_cube(&env)?;
     let sh = project_sh(&env);
     let brdf = brdf_lut_build(BRDF_LUT_SIZE)?;
     let source_average = crate::v1_ibl_shadow::env_average(&env);
-    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
     Ok((
         IblBake {
             cube,

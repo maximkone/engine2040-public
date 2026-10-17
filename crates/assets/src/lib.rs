@@ -48,6 +48,10 @@ pub use bundle_cook::{
 /// Native BC1/BC3/BC4/BC5/BC7 block codec in-cook: identical bytes x2, encoder
 /// decision UNVERIFIED. Std-only.
 pub mod bc;
+/// Colliders cooked from the art: convex hulls for props and triangle meshes for static
+/// kit pieces, written as deterministic bytes the physics lane reads. Hull and bytes are
+/// std-only; the glTF `COL_` node reader rides the `import` feature.
+pub mod collider_cook;
 /// Skinned body plus clip-source import for render skinning (fighter look).
 #[cfg(feature = "import")]
 pub mod body_import;

@@ -20,7 +20,7 @@ by design, so unattended repair stays report-only. FX3's standalone `/fix`
 command was retired the same day it hardened (commit `c71841f`, one-command
 loop); no workspace-wide fix sequence exists to run. Its scoping rules
 (report first, failing package only, dirty-set check, one retry) live on in
-`.opencode/commands/sprint.md` sections 2 and 4.
+`AGENTS.md` "Proof" and "Evidence and blockers".
 
 ## 1. See every change instantly
 
@@ -79,8 +79,8 @@ loop); no workspace-wide fix sequence exists to run. Its scoping rules
    Review suggestions and re-run the same failing command plus the full gate.
    One diagnosed retry; the same failure twice gets a blocker with exact output.
    Unsupported compiler errors remain red, not "fixed" by disabling checks.
-   The standalone command file is gone (retired in `c71841f`); the loop
-   applies these rules through `.opencode/commands/sprint.md`.
+   The standalone command file is gone (retired in `c71841f`); these rules
+   now live in `AGENTS.md`.
 - Sprint startup checks the environment read-only. Installing tools, deleting
    caches or repairing locks are separate explicit operations. A green gate
    never authorizes committing somebody else's dirty files.

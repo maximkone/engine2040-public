@@ -136,7 +136,7 @@ The harness wires the three verifier gates by name
 `engine-playtest tournament::tests::proof_gate_reproduces`,
 `engine-playtest keypoint`), so a removed or renamed gate fails the build on
 the proof side instead of silently unwiring. See the library entry
-[Cross-crate harness wiring](../library/cross-crate-harness-wiring.md)
+[Cross-crate harness wiring](https://github.com/maximkone/engine2040-public/blob/main/docs/library/cross-crate-harness-wiring.md)
 for the pattern and reuse counter.
 
 ## Reference

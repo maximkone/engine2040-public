@@ -1,0 +1,640 @@
+//! query: ray casts and swept-sphere casts against cooked static colliders.
+//!
+//! Consumer: the door verbs `physics.raycast` and `physics.shapecast`. Data owner:
+//! [`crate::collider`] (the shapes) and [`crate::layers`] (the scope). Units: meters,
+//! Y up; directions are normalized here, distances are along the unit direction.
+//! Determinism: `+ - * /`, `sqrt` and comparisons in `f32`, colliders and triangles in
+//! stored order, ties go to the earlier one; the same world and the same cast always
+//! give the same hit on every machine. Errors: [`CastError`] names the bad argument;
+//! a clean miss is `Ok(None)`. Budget: one pass over the in-scope triangles per cast,
+//! with a bounding-box skip per collider; no allocation.
+//!
+//! Every shape is a triangle soup and every triangle is two-sided, so a cast that
+//! starts inside a closed collider reports the wall it meets going out. A sphere that
+//! already touches a triangle at the start reports distance zero and the push-out
+//! direction. A swept sphere is tested against each triangle as a plane, three edge
+//! cylinders and three corner spheres, which is exact for the whole triangle soup.
+
+use core::fmt;
+
+use engine_core::vec3::cross3;
+
+use crate::collider::Collider;
+
+type V3 = [f32; 3];
+
+/// Why a cast was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CastError {
+    /// An origin, direction, radius or distance is NaN or infinite.
+    NonFinite,
+    /// The direction has no length.
+    ZeroDirection,
+    /// The distance is not above zero.
+    BadDistance,
+    /// The radius is negative.
+    BadRadius,
+    /// The scope names no layer bit.
+    Unscoped,
+}
+
+impl fmt::Display for CastError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let words = match self {
+            Self::NonFinite => "a cast argument is not finite",
+            Self::ZeroDirection => "the cast direction has no length",
+            Self::BadDistance => "the cast distance must be above zero",
+            Self::BadRadius => "the cast radius must not be negative",
+            Self::Unscoped => "the cast scope names no layer",
+        };
+        f.write_str(words)
+    }
+}
+
+impl std::error::Error for CastError {}
+
+/// The nearest thing a cast met.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    /// Index of the collider in the slice cast against.
+    pub collider: usize,
+    /// Distance travelled along the unit direction (the sphere centre for a sphere).
+    pub distance: f32,
+    /// Contact point on the surface.
+    pub point: [f32; 3],
+    /// Unit surface normal facing the cast.
+    pub normal: [f32; 3],
+}
+
+fn add(a: V3, b: V3) -> V3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn sub(a: V3, b: V3) -> V3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn scale(a: V3, s: f32) -> V3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn dot(a: V3, b: V3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn unit(a: V3) -> Option<V3> {
+    let len = dot(a, a).sqrt();
+    (len > 1.0e-9).then(|| scale(a, 1.0 / len))
+}
+
+/// A candidate contact: distance, point, unit normal.
+type Contact = (f32, V3, V3);
+
+/// Keep the earlier of two candidates unless the new one is strictly nearer.
+fn nearer(best: &mut Option<Contact>, found: Option<Contact>) {
+    if let Some(c) = found {
+        if best.is_none_or(|b| c.0 < b.0) {
+            *best = Some(c);
+        }
+    }
+}
+
+/// Ray `origin + t * dir` against one triangle (Moller-Trumbore, two-sided).
+fn ray_triangle(o: V3, d: V3, tri: &[V3; 3], max_t: f32) -> Option<Contact> {
+    let e1 = sub(tri[1], tri[0]);
+    let e2 = sub(tri[2], tri[0]);
+    let p = cross3(d, e2);
+    let det = dot(e1, p);
+    if det.abs() < 1.0e-9 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = sub(o, tri[0]);
+    let u = dot(s, p) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = cross3(s, e1);
+    let v = dot(d, q) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = dot(e2, q) * inv;
+    if !(0.0..=max_t).contains(&t) {
+        return None;
+    }
+    let n = unit(cross3(e1, e2))?;
+    let facing = if dot(n, d) < 0.0 { n } else { scale(n, -1.0) };
+    Some((t, add(o, scale(d, t)), facing))
+}
+
+/// Closest point on a triangle to `p` (Ericson, real-time collision detection 5.1.5).
+fn closest_on_triangle(p: V3, tri: &[V3; 3]) -> V3 {
+    let [a, b, c] = *tri;
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot(ab, ap), dot(ac, ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = sub(p, b);
+    let (d3, d4) = (dot(ab, bp), dot(ac, bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return add(a, scale(ab, d1 / (d1 - d3)));
+    }
+    let cp = sub(p, c);
+    let (d5, d6) = (dot(ab, cp), dot(ac, cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return add(a, scale(ac, d2 / (d2 - d6)));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return add(b, scale(sub(c, b), w));
+    }
+    let denom = 1.0 / (va + vb + vc);
+    add(a, add(scale(ab, vb * denom), scale(ac, vc * denom)))
+}
+
+/// True when `p` (on the triangle's plane) lies inside the triangle.
+fn inside_triangle(p: V3, tri: &[V3; 3], n: V3) -> bool {
+    (0..3).all(|i| {
+        let (a, b) = (tri[i], tri[(i + 1) % 3]);
+        dot(cross3(sub(b, a), sub(p, a)), n) >= 0.0
+    })
+}
+
+/// First time the sphere centre path `o + t d` is `r` from the segment `p..q`, if the
+/// contact lies within the segment.
+fn sweep_edge(o: V3, d: V3, r: f32, p: V3, q: V3, max_t: f32) -> Option<Contact> {
+    let e = sub(q, p);
+    let ee = dot(e, e);
+    if ee <= 0.0 {
+        return None;
+    }
+    let m = sub(o, p);
+    let d_perp = sub(d, scale(e, dot(d, e) / ee));
+    let m_perp = sub(m, scale(e, dot(m, e) / ee));
+    let a = dot(d_perp, d_perp);
+    if a < 1.0e-9 {
+        return None;
+    }
+    let b = dot(m_perp, d_perp);
+    let c = dot(m_perp, m_perp) - r * r;
+    if c < 0.0 {
+        return None;
+    }
+    let disc = b * b - a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = (-b - disc.sqrt()) / a;
+    if !(0.0..=max_t).contains(&t) {
+        return None;
+    }
+    let centre = add(o, scale(d, t));
+    let u = dot(sub(centre, p), e) / ee;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let on_edge = add(p, scale(e, u));
+    let n = unit(sub(centre, on_edge))?;
+    Some((t, on_edge, n))
+}
+
+/// First time the sphere centre path `o + t d` is `r` from the point `v`.
+fn sweep_vertex(o: V3, d: V3, r: f32, v: V3, max_t: f32) -> Option<Contact> {
+    let m = sub(o, v);
+    let b = dot(m, d);
+    let c = dot(m, m) - r * r;
+    if c < 0.0 {
+        return None;
+    }
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = -b - disc.sqrt();
+    if !(0.0..=max_t).contains(&t) {
+        return None;
+    }
+    let n = unit(sub(add(o, scale(d, t)), v))?;
+    Some((t, v, n))
+}
+
+/// Sphere of radius `r` swept along `o + t d` against one two-sided triangle.
+fn sphere_triangle(o: V3, d: V3, r: f32, tri: &[V3; 3], max_t: f32) -> Option<Contact> {
+    let n = unit(cross3(sub(tri[1], tri[0]), sub(tri[2], tri[0])))?;
+    let closest = closest_on_triangle(o, tri);
+    let gap = sub(o, closest);
+    if dot(gap, gap) < r * r {
+        // Already touching: no travel, pushed out along the gap (or against the cast).
+        let normal = unit(gap).unwrap_or_else(|| scale(d, -1.0));
+        return Some((0.0, closest, normal));
+    }
+    let mut best = None;
+    let side = dot(n, sub(o, tri[0]));
+    let facing = if side >= 0.0 { n } else { scale(n, -1.0) };
+    let approach = dot(facing, d);
+    if approach < -1.0e-7 {
+        let t = (side.abs() - r) / -approach;
+        if (0.0..=max_t).contains(&t) {
+            let touch = sub(add(o, scale(d, t)), scale(facing, r));
+            if inside_triangle(touch, tri, n) {
+                nearer(&mut best, Some((t, touch, facing)));
+            }
+        }
+    }
+    for i in 0..3 {
+        nearer(
+            &mut best,
+            sweep_edge(o, d, r, tri[i], tri[(i + 1) % 3], max_t),
+        );
+    }
+    for v in tri {
+        nearer(&mut best, sweep_vertex(o, d, r, *v, max_t));
+    }
+    best
+}
+
+/// True when the ray `o + t d`, `t <= max_t`, can touch the box grown by `grow`.
+fn ray_near_box(o: V3, d: V3, lo: V3, hi: V3, grow: f32, max_t: f32) -> bool {
+    let (mut t0, mut t1) = (0.0f32, max_t);
+    for axis in 0..3 {
+        let (min, max) = (lo[axis] - grow, hi[axis] + grow);
+        if d[axis].abs() < 1.0e-9 {
+            if o[axis] < min || o[axis] > max {
+                return false;
+            }
+        } else {
+            let (a, b) = ((min - o[axis]) / d[axis], (max - o[axis]) / d[axis]);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+            if t0 > t1 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Validate the cast arguments; returns the unit direction.
+fn check(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    radius: f32,
+    max_distance: f32,
+    scope: u32,
+) -> Result<V3, CastError> {
+    if origin.iter().chain(&dir).any(|v| !v.is_finite())
+        || !radius.is_finite()
+        || !max_distance.is_finite()
+    {
+        return Err(CastError::NonFinite);
+    }
+    if radius < 0.0 {
+        return Err(CastError::BadRadius);
+    }
+    if max_distance <= 0.0 {
+        return Err(CastError::BadDistance);
+    }
+    if scope & crate::layers::ALL == 0 {
+        return Err(CastError::Unscoped);
+    }
+    unit(dir).ok_or(CastError::ZeroDirection)
+}
+
+/// Sweep a sphere of `radius` from `origin` along `dir` (any length) for at most
+/// `max_distance` meters against the colliders whose layer is in `scope`; the nearest
+/// hit, if any. `distance` is how far the sphere centre travels before contact. A zero
+/// radius is a ray.
+pub fn sphere_cast(
+    colliders: &[Collider],
+    origin: [f32; 3],
+    dir: [f32; 3],
+    radius: f32,
+    max_distance: f32,
+    scope: u32,
+) -> Result<Option<Hit>, CastError> {
+    let d = check(origin, dir, radius, max_distance, scope)?;
+    let mut best: Option<(usize, Contact)> = None;
+    for (index, collider) in colliders.iter().enumerate() {
+        if collider.layer & scope == 0 {
+            continue;
+        }
+        if let Some((lo, hi)) = collider.shape.bounds() {
+            if !ray_near_box(origin, d, lo, hi, radius, max_distance) {
+                continue;
+            }
+        }
+        let limit = best.map_or(max_distance, |(_, c)| c.0);
+        let mut found: Option<Contact> = None;
+        for tri in collider.shape.triangles() {
+            let hit = if radius > 0.0 {
+                sphere_triangle(origin, d, radius, &tri, limit)
+            } else {
+                ray_triangle(origin, d, &tri, limit)
+            };
+            nearer(&mut found, hit);
+        }
+        if let Some(c) = found {
+            if best.is_none_or(|(_, b)| c.0 < b.0) {
+                best = Some((index, c));
+            }
+        }
+    }
+    Ok(best.map(|(collider, (distance, point, normal))| Hit {
+        collider,
+        distance,
+        point,
+        normal,
+    }))
+}
+
+/// Cast a ray from `origin` along `dir` (any length) for at most `max_distance`
+/// meters against the colliders whose layer is in `scope`; the nearest hit, if any.
+pub fn ray_cast(
+    colliders: &[Collider],
+    origin: [f32; 3],
+    dir: [f32; 3],
+    max_distance: f32,
+    scope: u32,
+) -> Result<Option<Hit>, CastError> {
+    sphere_cast(colliders, origin, dir, 0.0, max_distance, scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collider::tests::cube_hull;
+    use crate::collider::Shape;
+    use crate::layers;
+
+    fn cube(id: &str, layer: u32) -> Collider {
+        Collider {
+            id: id.to_owned(),
+            layer,
+            shape: cube_hull(),
+        }
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1.0e-4)
+    }
+
+    #[test]
+    fn a_ray_hits_the_near_face_with_its_point_and_normal() {
+        let world = [cube("COL_cube", layers::WORLD)];
+        let hit = ray_cast(
+            &world,
+            [-3.0, 0.5, 0.5],
+            [2.0, 0.0, 0.0],
+            10.0,
+            layers::WORLD,
+        )
+        .expect("valid cast")
+        .expect("a hit");
+        assert_eq!(hit.collider, 0);
+        assert!(
+            (hit.distance - 3.0).abs() < 1.0e-5,
+            "length of dir does not matter"
+        );
+        assert!(close(hit.point, [0.0, 0.5, 0.5]), "{:?}", hit.point);
+        assert!(close(hit.normal, [-1.0, 0.0, 0.0]), "{:?}", hit.normal);
+    }
+
+    #[test]
+    fn a_ray_respects_range_aim_nearest_and_scope() {
+        let world = [
+            cube("COL_far", layers::WORLD),
+            Collider {
+                id: "COL_near".to_owned(),
+                layer: layers::PROP,
+                shape: match cube_hull() {
+                    Shape::Hull { points, faces } => Shape::Hull {
+                        points: points.iter().map(|p| [p[0] - 4.0, p[1], p[2]]).collect(),
+                        faces,
+                    },
+                    Shape::Mesh { .. } => unreachable!("cube_hull is a hull"),
+                },
+            },
+        ];
+        let from = [-8.0, 0.5, 0.5];
+        let both = layers::WORLD | layers::PROP;
+        // The prop at x -4..-3 is nearer than the cube at x 0..1.
+        let hit = ray_cast(&world, from, [1.0, 0.0, 0.0], 20.0, both)
+            .expect("valid cast")
+            .expect("hit");
+        assert_eq!(hit.collider, 1);
+        assert!((hit.distance - 4.0).abs() < 1.0e-5);
+        // Scope filters by layer: only the world cube answers.
+        let hit = ray_cast(&world, from, [1.0, 0.0, 0.0], 20.0, layers::WORLD)
+            .expect("valid cast")
+            .expect("hit");
+        assert_eq!(hit.collider, 0);
+        assert!((hit.distance - 8.0).abs() < 1.0e-5);
+        // Too short, off to the side, and pointing away all miss.
+        assert_eq!(ray_cast(&world, from, [1.0, 0.0, 0.0], 3.0, both), Ok(None));
+        assert_eq!(
+            ray_cast(&world, [-8.0, 2.0, 0.5], [1.0, 0.0, 0.0], 20.0, both),
+            Ok(None)
+        );
+        assert_eq!(
+            ray_cast(&world, from, [-1.0, 0.0, 0.0], 20.0, both),
+            Ok(None)
+        );
+        // Same cast twice, same answer.
+        assert_eq!(
+            ray_cast(&world, from, [1.0, 0.0, 0.0], 20.0, both),
+            ray_cast(&world, from, [1.0, 0.0, 0.0], 20.0, both)
+        );
+    }
+
+    #[test]
+    fn a_ray_hits_a_mesh_and_a_ray_from_inside_reports_the_wall_it_leaves_by() {
+        let Shape::Hull { points, faces } = cube_hull() else {
+            unreachable!("cube is a hull");
+        };
+        let mesh = Collider {
+            id: "COL_mesh".to_owned(),
+            layer: layers::WORLD,
+            shape: Shape::Mesh {
+                vertices: points,
+                indices: faces.iter().flatten().map(|&i| u32::from(i)).collect(),
+            },
+        };
+        let hit = ray_cast(
+            core::slice::from_ref(&mesh),
+            [0.5, 5.0, 0.5],
+            [0.0, -1.0, 0.0],
+            10.0,
+            layers::WORLD,
+        )
+        .expect("valid cast")
+        .expect("hit");
+        assert!(close(hit.point, [0.5, 1.0, 0.5]) && close(hit.normal, [0.0, 1.0, 0.0]));
+        let out = ray_cast(
+            core::slice::from_ref(&mesh),
+            [0.5, 0.5, 0.5],
+            [1.0, 0.0, 0.0],
+            10.0,
+            layers::WORLD,
+        )
+        .expect("valid cast")
+        .expect("hit");
+        assert!((out.distance - 0.5).abs() < 1.0e-5);
+        assert!(
+            close(out.normal, [-1.0, 0.0, 0.0]),
+            "the wall faces the ray's origin side"
+        );
+    }
+
+    #[test]
+    fn bad_cast_arguments_are_refused_by_name() {
+        let world = [cube("COL_cube", layers::WORLD)];
+        let ok = [0.0, 1.0, 0.0];
+        let scope = layers::WORLD;
+        assert_eq!(
+            ray_cast(&world, [f32::NAN, 0.0, 0.0], ok, 5.0, scope),
+            Err(CastError::NonFinite)
+        );
+        assert_eq!(
+            ray_cast(&world, [0.0; 3], [0.0; 3], 5.0, scope),
+            Err(CastError::ZeroDirection)
+        );
+        assert_eq!(
+            ray_cast(&world, [0.0; 3], ok, 0.0, scope),
+            Err(CastError::BadDistance)
+        );
+        assert_eq!(
+            ray_cast(&world, [0.0; 3], ok, f32::INFINITY, scope),
+            Err(CastError::NonFinite)
+        );
+        assert_eq!(
+            ray_cast(&world, [0.0; 3], ok, 5.0, 0),
+            Err(CastError::Unscoped)
+        );
+        assert_eq!(
+            ray_cast(&world, [0.0; 3], ok, 5.0, 1 << 9),
+            Err(CastError::Unscoped)
+        );
+        assert_eq!(
+            sphere_cast(&world, [0.0; 3], ok, -1.0, 5.0, scope),
+            Err(CastError::BadRadius)
+        );
+    }
+
+    #[test]
+    fn a_swept_sphere_stops_one_radius_short_of_a_face() {
+        let world = [cube("COL_cube", layers::WORLD)];
+        let hit = sphere_cast(
+            &world,
+            [-3.0, 0.5, 0.5],
+            [1.0, 0.0, 0.0],
+            0.5,
+            10.0,
+            layers::WORLD,
+        )
+        .expect("valid cast")
+        .expect("a hit");
+        assert!(
+            (hit.distance - 2.5).abs() < 1.0e-5,
+            "centre travels to x = -0.5"
+        );
+        assert!(close(hit.point, [0.0, 0.5, 0.5]), "{:?}", hit.point);
+        assert!(close(hit.normal, [-1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_swept_sphere_rolls_over_an_edge_and_catches_a_corner() {
+        let world = [cube("COL_cube", layers::WORLD)];
+        // Centre 0.3 above the top edge: the rounded edge is met at x = -0.4.
+        let edge = sphere_cast(
+            &world,
+            [-3.0, 1.3, 0.5],
+            [1.0, 0.0, 0.0],
+            0.5,
+            10.0,
+            layers::WORLD,
+        )
+        .expect("valid cast")
+        .expect("edge hit");
+        assert!((edge.distance - 2.6).abs() < 1.0e-4, "{}", edge.distance);
+        assert!(close(edge.point, [0.0, 1.0, 0.5]), "{:?}", edge.point);
+        assert!(close(edge.normal, [-0.8, 0.6, 0.0]), "{:?}", edge.normal);
+        // Aimed past the corner (0, 1, 1): only the corner sphere is met.
+        let corner = sphere_cast(
+            &world,
+            [-3.0, 1.3, 1.3],
+            [1.0, 0.0, 0.0],
+            0.5,
+            10.0,
+            layers::WORLD,
+        )
+        .expect("valid cast")
+        .expect("corner hit");
+        assert!(
+            (corner.distance - (3.0 - 0.07f32.sqrt())).abs() < 1.0e-4,
+            "{}",
+            corner.distance
+        );
+        assert!(close(corner.point, [0.0, 1.0, 1.0]));
+        assert!(
+            close(corner.normal, [-0.07f32.sqrt() / 0.5, 0.6, 0.6]),
+            "{:?}",
+            corner.normal
+        );
+        // A path that clears the cube by more than the radius misses.
+        let miss = sphere_cast(
+            &world,
+            [-3.0, 1.6, 0.5],
+            [1.0, 0.0, 0.0],
+            0.5,
+            10.0,
+            layers::WORLD,
+        );
+        assert_eq!(miss, Ok(None));
+    }
+
+    #[test]
+    fn a_sphere_that_starts_touching_reports_zero_and_the_way_out() {
+        let world = [cube("COL_cube", layers::WORLD)];
+        let hit = sphere_cast(
+            &world,
+            [-0.3, 0.5, 0.5],
+            [0.0, 0.0, 1.0],
+            0.5,
+            10.0,
+            layers::WORLD,
+        )
+        .expect("valid cast")
+        .expect("a hit");
+        assert_eq!(hit.distance, 0.0);
+        assert!(close(hit.normal, [-1.0, 0.0, 0.0]), "{:?}", hit.normal);
+        // A zero radius is the ray cast.
+        assert_eq!(
+            sphere_cast(
+                &world,
+                [-3.0, 0.5, 0.5],
+                [1.0, 0.0, 0.0],
+                0.0,
+                10.0,
+                layers::WORLD
+            ),
+            ray_cast(
+                &world,
+                [-3.0, 0.5, 0.5],
+                [1.0, 0.0, 0.0],
+                10.0,
+                layers::WORLD
+            )
+        );
+    }
+}

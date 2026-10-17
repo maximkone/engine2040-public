@@ -1,0 +1,24 @@
+{
+  "note": "Every fenced shell command in docs/book/web-build.md, physics-layers.md, quality-tiers.md and troubleshooting.md. dry = safe to run on any machine: it writes nothing, needs no network, GPU or browser, and exits 0. tools/book-commands.test.mjs runs the dry ones, so a renamed tool breaks the build; the others are checked for their node tool file and cargo package names. A command that is not dry says why.",
+  "commands": [
+    { "cmd": "node tools/web-doctor.mjs", "pages": ["web-build.md", "troubleshooting.md"], "dry": false, "why": "probes this machine and exits 1 when a piece is missing" },
+    { "cmd": "node tools/wasm-gate.mjs --help", "pages": ["web-build.md"], "dry": true },
+    { "cmd": "node tools/web-build.mjs", "pages": ["web-build.md"], "dry": false, "why": "builds the wasm module (minutes, needs the wasm32 target and wasm-bindgen)" },
+    { "cmd": "node tools/web-build.mjs --no-opt", "pages": ["web-build.md"], "dry": false, "why": "builds the wasm module" },
+    { "cmd": "python -m http.server 8080 --bind 127.0.0.1 -d dist/web", "pages": ["web-build.md"], "dry": false, "why": "starts a server that does not exit" },
+    { "cmd": "curl -sI http://localhost:8080/engine_bg.wasm", "pages": ["web-build.md", "troubleshooting.md"], "dry": false, "why": "needs the local server running" },
+    { "cmd": "node tools/web-browse.mjs --dir dist/web --chrome google-chrome --out out/web", "pages": ["web-build.md"], "dry": false, "why": "launches headless Chrome" },
+    { "cmd": "node tools/web-browse.mjs --dir dist/web --chrome google-chrome --out out/web --require-adapter", "pages": ["troubleshooting.md"], "dry": false, "why": "launches headless Chrome" },
+    { "cmd": "node --test tools/web-doctor.test.mjs", "pages": ["web-build.md", "troubleshooting.md"], "dry": true },
+    { "cmd": "curl -sI https://maximkone.github.io/engine2040-public/engine_bg.wasm", "pages": ["web-build.md", "troubleshooting.md"], "dry": false, "why": "needs the network and a deployed site" },
+    { "cmd": "node tools/gh-check.mjs cargo test -p engine-physfx --features rapier --lib the_same_inputs_give_identical_transforms_twice", "pages": ["physics-layers.md"], "dry": false, "why": "runs a cargo test on a GitHub runner" },
+    { "cmd": "node tools/gh-check.mjs cargo test -p engine-proof break_corpus", "pages": ["physics-layers.md"], "dry": false, "why": "runs a cargo test on a GitHub runner" },
+    { "cmd": "node tools/gh-check.mjs cargo test -p engine-physfx --features rapier --lib budget_eight_ragdolls_two_hundred_debris_six_limbs", "pages": ["physics-layers.md"], "dry": false, "why": "runs a cargo test on a GitHub runner" },
+    { "cmd": "node tools/gh-check.mjs cargo test -p engine-render --lib quality_monotone_tiers", "pages": ["quality-tiers.md"], "dry": false, "why": "runs a cargo test on a GitHub runner" },
+    { "cmd": "node tools/gh-check.mjs cargo test -p engine-physfx --features rapier --lib every_tier_table_is_valid_and_climbs", "pages": ["quality-tiers.md"], "dry": false, "why": "runs a cargo test on a GitHub runner" },
+    { "cmd": "node tools/potato-check.mjs --help", "pages": ["quality-tiers.md"], "dry": true },
+    { "cmd": "sudo apt-get install -y libvulkan1 mesa-vulkan-drivers", "pages": ["troubleshooting.md"], "dry": false, "why": "installs system packages" },
+    { "cmd": "node tools/gh-check.mjs cargo test -p engine-net --lib webtransport_refuses_a_client_pinned_to_the_wrong_hash", "pages": ["troubleshooting.md"], "dry": false, "why": "runs a cargo test on a GitHub runner" },
+    { "cmd": "node tools/gh-check.mjs cargo test -p engine-net --lib webtransport_cert_refuses_validity_over_14_days_and_accepts_exactly_14", "pages": ["troubleshooting.md"], "dry": false, "why": "runs a cargo test on a GitHub runner" }
+  ]
+}
