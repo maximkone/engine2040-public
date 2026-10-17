@@ -115,10 +115,45 @@ pub struct Ready {
     pub user_agent: String,
 }
 
+/// What the arena page adds to its ready line: the quality tier it chose (WEB8), the pipeline
+/// warm-up (WEB13) and the validation errors counted up to the line. `tools/web-browse.mjs`
+/// and the door's receipt line read `tier`, `validation` and `pipelines` from it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArenaFacts {
+    pub tier: String,
+    /// `query`, `limits` or `default`.
+    pub tier_why: String,
+    /// Pipelines built before the first frame.
+    pub pipelines: u64,
+    /// Milliseconds the warm-up took.
+    pub pipelines_ms: u64,
+    /// Pipelines built after the warm-up (0 on a healthy page).
+    pub late_pipelines: u64,
+    /// Validation errors of every kind counted when the line is printed.
+    pub validation: u64,
+}
+
 impl Ready {
     /// The ready line: `"ok":true` and every fact above.
     #[must_use]
     pub fn line(&self) -> String {
+        self.object().finish()
+    }
+
+    /// The ready line with the arena facts (tier, pipelines, validation) appended.
+    #[must_use]
+    pub fn line_with(&self, facts: &ArenaFacts) -> String {
+        let mut line = self.object();
+        line.str("tier", &facts.tier)
+            .str("tierWhy", &facts.tier_why)
+            .uint("pipelines", facts.pipelines)
+            .uint("pipelinesMs", facts.pipelines_ms)
+            .uint("latePipelines", facts.late_pipelines)
+            .uint("validation", facts.validation);
+        line.finish()
+    }
+
+    fn object(&self) -> Object {
         let a = &self.adapter;
         let mut adapter = Object::new();
         adapter
@@ -149,7 +184,7 @@ impl Ready {
             .raw("canvas", &canvas.finish())
             .str("surfaceFormat", &self.surface_format)
             .str("userAgent", &self.user_agent);
-        line.finish()
+        line
     }
 }
 
@@ -284,6 +319,36 @@ mod tests {
         // A quote or a newline inside a value must not end the line early.
         assert!(line.contains(r#"NVIDIA \"RTX\" 3050\\x"#), "{line}");
         assert!(line.contains(r#"line one\nline two"#), "{line}");
+    }
+
+    #[test]
+    fn the_arena_ready_line_adds_tier_pipelines_and_validation() {
+        let facts = ArenaFacts {
+            tier: "web".into(),
+            tier_why: "default".into(),
+            pipelines: 24,
+            pipelines_ms: 412,
+            late_pipelines: 0,
+            validation: 0,
+        };
+        let line = sample().line_with(&facts);
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.starts_with("{\"ok\":true"), "{line}");
+        for needle in [
+            r#""tier":"web""#,
+            r#""tierWhy":"default""#,
+            r#""pipelines":24"#,
+            r#""pipelinesMs":412"#,
+            r#""latePipelines":0"#,
+            r#""validation":0"#,
+            // The plain facts are still there, in front.
+            r#""commit":"abc1234""#,
+            r#""userAgent":"Mozilla/5.0 HeadlessChrome""#,
+        ] {
+            assert!(line.contains(needle), "{needle} missing from {line}");
+        }
+        // The plain line (the square shell) does not carry them.
+        assert!(!sample().line().contains("\"tier\""));
     }
 
     #[test]

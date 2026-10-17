@@ -49,8 +49,9 @@ pub const MAX_KEYPOINTS: usize = 8;
 /// Longest memory, goal, line or vision text, in chars (follows the
 /// `engine-ai` mind contract).
 pub const MAX_TEXT: usize = 280;
-/// Contradictory pairs one self-repair attempt may quarantine per row.
-pub const REPAIR_BUDGET_PAIRS: usize = 1;
+/// Lines one self-repair attempt may quarantine per row. The seeded set
+/// carries at most two contradictory pairs, so two heals them all.
+pub const REPAIR_BUDGET_PAIRS: usize = 2;
 /// Fixture format version this runner accepts.
 pub const SPEC_VERSION: u16 = 1;
 /// Largest accepted fixture file in bytes.
@@ -188,7 +189,7 @@ pub enum FixtureScript {
     /// Clean ask that should complete through the provider.
     Clean,
     /// Seeded bad memory: contradiction pairs the keypoint gate must drop
-    /// unless the single repair quarantine heals them.
+    /// unless the bounded repair quarantine heals them.
     BadMemory,
     /// Provider times out; the scripted fallback path is the pass.
     Timeout,
@@ -765,48 +766,40 @@ fn count_pairs(lines: &[MemLine]) -> usize {
     pairs
 }
 
-/// One bounded self-repair attempt: quarantine the later-ingested line of the
-/// first contradictory pair in `(tick, kind, index)` scan order. At most
-/// [`REPAIR_BUDGET_PAIRS`] pairs leave per row; the rest still drop.
-fn repair_once(lines: &[MemLine]) -> (Vec<MemLine>, bool) {
-    let mut indexed: Vec<usize> = (0..lines.len()).collect();
-    indexed.sort_by_key(|&index| (lines[index].tick, lines[index].kind, index));
-    let mut drop: Option<usize> = None;
-    let mut repaired = 0usize;
-    let mut seen: Vec<usize> = Vec::new();
-    for &index in &indexed {
-        if repaired >= REPAIR_BUDGET_PAIRS {
-            break;
-        }
-        let mut clash: Option<usize> = None;
-        for &prior in &seen {
-            if lines[prior].tick == lines[index].tick
+/// One bounded self-repair attempt: scan in `(tick, kind, index)` order and
+/// quarantine each line that contradicts an earlier-kept line, the later-
+/// ingested one going. At most [`REPAIR_BUDGET_PAIRS`] lines leave per row;
+/// contradictions past that stay and still drop the row.
+fn repair_once(lines: &[MemLine]) -> (Vec<MemLine>, usize) {
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    order.sort_by_key(|&index| (lines[index].tick, lines[index].kind, index));
+    let mut kept: Vec<usize> = Vec::new();
+    let mut gone: Vec<usize> = Vec::new();
+    for &index in &order {
+        let clash = kept.iter().any(|&prior| {
+            lines[prior].tick == lines[index].tick
                 && lines[prior].kind == lines[index].kind
                 && lines[prior].text != lines[index].text
-            {
-                clash = Some(prior);
-                break;
-            }
-        }
-        if clash.is_some() {
-            drop = Some(index);
-            repaired += 1;
+        });
+        if clash && gone.len() < REPAIR_BUDGET_PAIRS {
+            gone.push(index);
         } else {
-            seen.push(index);
+            kept.push(index);
         }
     }
-    match drop {
-        Some(gone) => {
-            let kept = lines
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != gone)
-                .map(|(_, line)| line.clone())
-                .collect();
-            (kept, true)
-        }
-        None => (lines.to_vec(), false),
-    }
+    let healed = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !gone.contains(index))
+        .map(|(_, line)| line.clone())
+        .collect();
+    (healed, gone.len())
+}
+
+/// Grounded-line check: a provider line must cite the top recall verbatim; a
+/// scripted fallback line is pre-approved and recorded as scripted.
+fn grounded_line(fell_back: bool, said: &str, top_text: &str) -> bool {
+    fell_back || said.contains(top_text)
 }
 
 /// Deterministic memory checkpoint: fixture identity plus record bytes in
@@ -1021,11 +1014,12 @@ pub struct LivingRow {
 /// rule-based keypoints as the only gate.
 fn run_row(fixture: &LivingFixture, index: u64, backend: Backend) -> LivingRow {
     let pairs_pre = count_pairs(&fixture.memories);
-    let (healed, repair_used) = if pairs_pre > 0 {
+    let (healed, quarantined) = if pairs_pre > 0 {
         repair_once(&fixture.memories)
     } else {
-        (fixture.memories.clone(), false)
+        (fixture.memories.clone(), 0)
     };
+    let repair_used = quarantined > 0;
     let pairs_post = count_pairs(&healed);
     let order = recall_order(&healed, ASK_TICK);
     let top_text = order
@@ -1045,9 +1039,7 @@ fn run_row(fixture: &LivingFixture, index: u64, backend: Backend) -> LivingRow {
     } else {
         provider_line(backend, fixture.npc, &top_text, &goal)
     };
-    // Grounded-line check: provider lines must cite the top recall verbatim;
-    // scripted fallback lines are pre-approved and recorded as scripted.
-    let grounded = fell_back || said.contains(&top_text);
+    let grounded = grounded_line(fell_back, &said, &top_text);
 
     let mut misses = keypoint_misses(
         fixture,
@@ -1086,7 +1078,7 @@ fn run_row(fixture: &LivingFixture, index: u64, backend: Backend) -> LivingRow {
         format!("drop: {}", misses.join("; "))
     };
     if repair_used {
-        detail.push_str(" repair:quarantined-1");
+        detail.push_str(&format!(" repair:quarantined-{quarantined}"));
     }
     if fell_back {
         if let Some(cause) = fallback_cause.and_then(FallbackCause::from_error) {
@@ -1354,7 +1346,7 @@ impl LivingReport {
     /// numbers. Deterministic from the report, never a model call.
     pub fn next_step(&self) -> String {
         format!(
-            "LW3 input: quarantine-then-say with repair budget {} heals single-pair faults ({} row(s) repaired) while {} row(s) still drop on multi-pair faults; carry the same rule-based keypoints plus providers-off replay into ludus_npcs before any new line ships.",
+            "LW3 input: quarantine-then-say with repair budget {} heals the seeded faults ({} row(s) repaired) while {} row(s) still drop past the budget; carry the same rule-based keypoints plus providers-off replay into ludus_npcs before any new line ships.",
             REPAIR_BUDGET_PAIRS,
             self.repairs_used(),
             self.dropped(),
@@ -1572,32 +1564,24 @@ mod tests {
     }
 
     #[test]
-    fn seeded_bad_memory_drops_exactly_its_cases() {
+    fn seeded_bad_memory_heals_within_the_repair_budget() {
         let report = suite();
-        // Multi-pair faults exhaust the repair budget and drop on every
-        // backend; the single-pair fault heals and passes with repair noted.
-        let mut dropped = report.dropped_rows();
-        dropped.sort();
-        let mut expected = Vec::new();
-        for id in ["lw12", "lw20"] {
-            for backend in ["mock", "local", "remote"] {
-                expected.push(format!("{id}:{backend}"));
-            }
-        }
-        expected.sort();
-        assert_eq!(
-            dropped, expected,
-            "exactly the seeded multi-pair cases drop"
+        // Every seeded fault (one or two pairs) fits the budget: nothing
+        // drops, nothing contradicts after repair, every said line is grounded.
+        assert!(
+            report.dropped_rows().is_empty(),
+            "{:?}",
+            report.dropped_rows()
         );
-        for backend in BACKENDS {
-            let row = run_row_by_id("lw19", backend).expect("lw19 exists");
-            assert!(row.completed, "single-pair fault heals on {}", row.backend);
-            assert!(
-                row.repair_used,
-                "healed row notes repair on {}",
-                row.backend
-            );
-            assert_eq!(row.contradictions, 0);
+        assert_eq!(report.contradiction_pairs(), 0);
+        assert_eq!(report.grounded_count(), report.rows.len());
+        for id in ["lw12", "lw19", "lw20"] {
+            for backend in BACKENDS {
+                let row = run_row_by_id(id, backend).expect("seeded fixture exists");
+                assert!(row.completed, "{id} heals on {}", row.backend);
+                assert!(row.repair_used, "{id} notes repair on {}", row.backend);
+                assert_eq!(row.contradictions, 0);
+            }
         }
         for id in ["lw01", "lw11", "lw13", "lw17"] {
             for backend in BACKENDS {
@@ -1605,6 +1589,30 @@ mod tests {
                 assert!(row.completed, "{id} must pass on {}", row.backend);
             }
         }
+    }
+
+    #[test]
+    fn repair_budget_leaves_contradictions_past_it() {
+        let line = |tick, text: &str| MemLine {
+            tick,
+            kind: MemKind::Seen,
+            text: text.to_owned(),
+            salience: 500,
+        };
+        let three = [
+            line(1, "a up"),
+            line(1, "a down"),
+            line(2, "b up"),
+            line(2, "b down"),
+            line(3, "c up"),
+            line(3, "c down"),
+        ];
+        assert_eq!(count_pairs(&three), 3);
+        let (healed, gone) = repair_once(&three);
+        assert_eq!(gone, REPAIR_BUDGET_PAIRS);
+        assert_eq!(count_pairs(&healed), 3 - REPAIR_BUDGET_PAIRS);
+        assert!(healed.iter().any(|l| l.text == "a up"), "earlier line kept");
+        assert!(!healed.iter().any(|l| l.text == "a down"));
     }
 
     #[test]
@@ -1653,8 +1661,8 @@ mod tests {
             assert_eq!(pairs(id), 0, "{id} must ship contradiction-free");
         }
         let report = suite();
-        // Post-repair: healed singles read 0, exhausted multis read 1 each.
-        assert_eq!(report.contradiction_pairs(), 2 * BACKENDS.len());
+        // Post-repair every seeded pair is quarantined.
+        assert_eq!(report.contradiction_pairs(), 0);
         assert_eq!(
             report.contradiction_rate_permille(),
             report.contradiction_pairs() as u64 * 1000 / report.rows.len() as u64
@@ -1662,31 +1670,18 @@ mod tests {
     }
 
     #[test]
-    fn repair_budget_holds_at_one_pair() {
+    fn repair_quarantines_the_later_line_of_each_seeded_pair() {
         let report = suite();
-        // Every seeded bad-memory row attempts the quarantine (3 fixtures x
-        // 3 backends); only the single-pair fault heals into a pass.
+        // Every seeded bad-memory row (3 fixtures x 3 backends) repairs and
+        // passes; clean rows never repair.
         assert_eq!(report.repairs_used(), 3 * BACKENDS.len());
-        let healed = report
-            .rows
-            .iter()
-            .filter(|row| row.repair_used && row.completed)
-            .count();
-        assert_eq!(healed, BACKENDS.len(), "only lw19 heals");
         for row in &report.rows {
-            if row.repair_used {
-                assert!(
-                    row.fixture == "lw12" || row.fixture == "lw19" || row.fixture == "lw20",
-                    "repair only touches seeded faults"
-                );
-            }
-        }
-        for row in &report.rows {
-            if row.fixture == "lw12" || row.fixture == "lw20" {
-                assert!(row.repair_used, "{} must attempt repair", row.fixture);
-                assert_eq!(row.contradictions, 1, "{} keeps one pair", row.fixture);
-                assert!(!row.completed, "{} still drops", row.fixture);
-            }
+            assert_eq!(
+                row.repair_used,
+                ["lw12", "lw19", "lw20"].contains(&row.fixture.as_str()),
+                "repair only touches seeded faults ({})",
+                row.fixture
+            );
         }
         // Repair keeps the earlier-ingested line: the survivor outranks.
         let fixtures = load_fixtures().expect("fixtures must load");
@@ -1694,12 +1689,29 @@ mod tests {
             .iter()
             .find(|fixture| fixture.id == "lw19")
             .expect("lw19");
-        let (healed, used) = repair_once(&lw19.memories);
-        assert!(used);
+        let (healed, gone) = repair_once(&lw19.memories);
+        assert_eq!(gone, 1);
         assert_eq!(healed.len(), lw19.memories.len() - 1);
         assert!(healed.iter().any(|line| line.text == "the gate holds"));
         assert!(!healed.iter().any(|line| line.text == "the gate falls"));
         assert_eq!(count_pairs(&healed), 0);
+        let lw12 = fixtures.iter().find(|f| f.id == "lw12").expect("lw12");
+        let (healed, gone) = repair_once(&lw12.memories);
+        assert_eq!((gone, count_pairs(&healed)), (2, 0), "two pairs, two lines");
+    }
+
+    #[test]
+    fn grounded_line_rejects_a_line_that_cites_no_recall() {
+        assert!(grounded_line(
+            false,
+            "I recall the gate holds.",
+            "the gate holds"
+        ));
+        assert!(!grounded_line(false, "The sky is green.", "the gate holds"));
+        assert!(grounded_line(true, "The sky is green.", "the gate holds"));
+        for row in &suite().rows {
+            assert!(row.grounded, "{} {}", row.fixture, row.backend);
+        }
     }
 
     #[test]
@@ -1799,14 +1811,14 @@ mod tests {
     #[test]
     fn consistency_numbers_follow_the_gate() {
         let report = suite();
-        assert_eq!(report.consistency_permille(), 900, "54 of 60 rows pass");
-        assert_eq!(report.completed(), 54);
-        assert_eq!(report.dropped(), 6);
+        assert_eq!(report.consistency_permille(), 1000, "all 60 rows pass");
+        assert_eq!(report.completed(), 60);
+        assert_eq!(report.dropped(), 0);
         assert_eq!(report.grounded_count(), report.rows.len());
         let verdict = report.verdict();
         assert!(
             verdict.pass,
-            "seeded drops plus exact replay pass: {}",
+            "healed suite plus exact replay pass: {}",
             verdict.reason
         );
         assert!(report.next_step().contains("LW3 input"));
@@ -1866,14 +1878,22 @@ mod tests {
     fn report_text_carries_files_numbers_repair_verdict_next_step_cost() {
         let text = suite().to_text();
         assert!(text.contains("files lw01.json"), "files listed");
-        assert!(text.contains("consistency_permille=900"), "numbers present");
+        assert!(
+            text.contains("consistency_permille=1000"),
+            "numbers present"
+        );
         assert!(text.contains("repairs_used=9"), "repair use present");
         assert!(text.contains("verdict pass=true"), "verdict present");
         assert!(text.contains("next_step LW3 input"), "next step present");
         assert!(text.contains("remote_units=140"), "cost present");
-        assert!(text.contains(
-            "dropped_rows lw12:local,lw12:mock,lw12:remote,lw20:local,lw20:mock,lw20:remote"
-        ));
+        assert!(text.contains("contradiction_pairs=0"), "ratchet at zero");
+        assert!(
+            text.contains(
+                "dropped_rows 
+"
+            ),
+            "no dropped rows"
+        );
         for label in ["mock", "local", "remote"] {
             assert!(text.contains(label), "report must name {label}");
         }

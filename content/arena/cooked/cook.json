@@ -1,0 +1,21 @@
+{
+  "max_dim": 1024,
+  "maps": [
+    {"file": "stone_base.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 349968, "source_jpg_bytes": 831880, "rgba8_bytes": 2097152, "psnr_db": 34.8},
+    {"file": "stone_normal.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 699504, "source_jpg_bytes": 907097, "rgba8_bytes": 2097152, "psnr_db": 43.3},
+    {"file": "stone_orm.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 349968, "source_jpg_bytes": 741884, "rgba8_bytes": 2097152, "psnr_db": 33.5},
+    {"file": "sand_base.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 699488, "source_jpg_bytes": 563256, "rgba8_bytes": 4194304, "psnr_db": 45.0},
+    {"file": "sand_normal.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398544, "source_jpg_bytes": 1058031, "rgba8_bytes": 4194304, "psnr_db": 55.9},
+    {"file": "sand_orm.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 699488, "source_jpg_bytes": 772049, "rgba8_bytes": 4194304, "psnr_db": 42.0},
+    {"file": "wood_base.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 349968, "source_jpg_bytes": 716040, "rgba8_bytes": 2097152, "psnr_db": 37.2},
+    {"file": "wood_normal.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 699504, "source_jpg_bytes": 575442, "rgba8_bytes": 2097152, "psnr_db": 48.6},
+    {"file": "wood_orm.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 349968, "source_jpg_bytes": 625087, "rgba8_bytes": 2097152, "psnr_db": 37.7},
+    {"file": "iron_base.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 699488, "source_jpg_bytes": 706330, "rgba8_bytes": 4194304, "psnr_db": 41.7},
+    {"file": "iron_normal.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 1398544, "source_jpg_bytes": 1272514, "rgba8_bytes": 4194304, "psnr_db": 52.6},
+    {"file": "iron_orm.ktx2", "width": 1024, "height": 1024, "levels": 11, "ktx2_bytes": 699488, "source_jpg_bytes": 1471493, "rgba8_bytes": 4194304, "psnr_db": 33.2},
+    {"file": "floor_base.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 349968, "source_jpg_bytes": 737414, "rgba8_bytes": 2097152, "psnr_db": 36.6},
+    {"file": "floor_normal.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 699504, "source_jpg_bytes": 995888, "rgba8_bytes": 2097152, "psnr_db": 41.5},
+    {"file": "floor_orm.ktx2", "width": 1024, "height": 512, "levels": 11, "ktx2_bytes": 349968, "source_jpg_bytes": 743302, "rgba8_bytes": 2097152, "psnr_db": 36.0}
+  ],
+  "total": {"ktx2_bytes": 9793360, "source_jpg_bytes": 12717707, "rgba8_bytes": 44040192}
+}

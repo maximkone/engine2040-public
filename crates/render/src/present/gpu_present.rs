@@ -63,6 +63,7 @@ mod scope_ledger;
 mod submit;
 mod sun_shadow;
 mod timing;
+mod warmup;
 
 pub use capture::{CaptureStats, FrameCapture, DISTINCT_CAP};
 pub use frame::{

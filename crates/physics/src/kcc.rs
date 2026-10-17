@@ -839,6 +839,25 @@ mod tests {
             a.pos.x,
         );
     }
+    /// Independent f64 prediction of an airborne walker: the tick count and x at which
+    /// the feet come within ground-snap reach of a floor at y = -0.5.
+    fn ballistic_landing(cfg: &KccConfig, launch: &KccState, wish_x: f32) -> (f64, u32) {
+        let dt = f64::from(DT);
+        let (mut x, mut y) = (f64::from(launch.pos.x), f64::from(launch.pos.y));
+        let (mut vx, mut vy) = (f64::from(launch.vel.x), f64::from(launch.vel.y));
+        let reach = -0.5 + f64::from(cfg.step_down + cfg.skin);
+        for tick in 1..=600u32 {
+            let mx = f64::from(cfg.accel_air) * dt;
+            vx += (f64::from(wish_x) - vx).clamp(-mx, mx);
+            vy -= f64::from(cfg.gravity) * dt;
+            x += vx * dt;
+            y += vy * dt;
+            if y <= reach {
+                return (x, tick);
+            }
+        }
+        (x, 0)
+    }
     #[test]
     fn platform_ride_matrix() {
         let cfg = KccConfig::default();
@@ -872,15 +891,26 @@ mod tests {
             s.grounded = true;
             let mut inherited = false;
             let wish = KccInput::new(V3::new(4.0, 0.0, 0.0), false);
+            let mut flight = None;
             for _ in 0..180 {
                 let on_deck = s.grounded && s.pos.y > 0.0;
                 s.deck_delta_mm = if on_deck { dm } else { [0, 0, 0] };
                 step(&cfg, &w, &mut s, &wish, DT);
                 w.boxes[0].min.x += dx;
                 w.boxes[0].max.x += dx;
-                if !s.grounded && s.last_ride_mm == [0, 0, 0] && !inherited {
+                if let Some((launch, ticks)) = flight.as_mut() {
+                    *ticks += 1;
+                    if s.grounded {
+                        let (want_x, want_ticks) = ballistic_landing(&cfg, launch, wish.wish.x);
+                        assert_eq!(*ticks, want_ticks, "landing tick rep {rep}");
+                        let off = (f64::from(s.pos.x) - want_x).abs();
+                        assert!(off <= 0.01, "lands {off} m from the ballistic target");
+                        flight = None;
+                    }
+                } else if !s.grounded && s.last_ride_mm == [0, 0, 0] && !inherited {
                     inherited = true;
                     assert!(s.vel.x > 4.5, "step-off inherits {:?}", s.vel);
+                    flight = Some((s, 0u32));
                 }
             }
             assert!(s.grounded && inherited, "step-off lands rep {rep}");

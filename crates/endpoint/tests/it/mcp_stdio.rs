@@ -350,7 +350,7 @@ fn scripted_client_lists_previews_applies_and_undoes_over_stdio() {
     );
     let started = structured(&client.call(
         "play.run",
-        r#"{"action":"start","seed":2040,"ticks":4,"fighters":2,"half_extent_m":20.0}"#,
+        r#"{"action":"start","seed":2040,"ticks":4,"fighters":2,"half_extent_m":20.0,"scene_rev":1}"#,
     ));
     assert_eq!(started["status"].as_str(), Some("running"));
     let job = started["job_id"].as_u64().expect("start returns a job id");

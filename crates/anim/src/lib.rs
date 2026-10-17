@@ -9,6 +9,9 @@ static TEST_ALLOC: engine_core::alloc_probe::CountingAlloc =
 use clip::clamp01;
 use engine_core::Fnv64;
 
+/// Additive spine: locomotion base, masked upper-body override and flinch
+/// additive through one inertializer, planted feet pinned by two-bone IK.
+pub mod additive;
 pub mod blend;
 pub mod clip;
 pub mod contract;
@@ -58,9 +61,17 @@ pub mod lod;
 #[cfg(test)]
 mod lod_w1_test;
 pub mod motion_match;
+#[cfg(test)]
+mod motion_schema_test;
 pub mod motion_net;
+/// Per-fighter pose-hash rings naming the first divergent tick and fighter
+/// between two clients. Diagnostics only, never authoritative.
+pub mod net_diverge;
 pub mod net_pose;
 pub mod pack;
+/// Per-character eval on the RC3 job pool: index-ordered chunks, one owner per
+/// character, poses identical under every chunking. Presentation and bake only.
+pub mod par;
 pub mod pose;
 pub mod readable;
 pub mod space;
@@ -74,6 +85,8 @@ pub mod state_machine;
 /// as a view-only strip, the render forward pass reads the strip vertices.
 pub mod trails;
 pub mod traversal;
+#[cfg(test)]
+mod traversal_link_test;
 pub mod viseme;
 /// GASP-class ground feel: distance matching, orientation warping and
 /// stride warping over locomotion output. Std-only; arena presentation

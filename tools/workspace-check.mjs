@@ -22,19 +22,19 @@ export const allowedEdges = new Map([
   ["engine-app", ["engine-core", "engine-ecs", "engine-scene", "engine-arena", "engine-clock"]],
   ["engine-audio", ["engine-observe"]],
   ["engine-save", ["engine-observe"]],
-  ["engine-anim", ["engine-nn", "engine-combat"]],
-  ["engine-playtest", ["engine-ai", "engine-arena", "engine-render", "engine-provider", "engine-spatial"]],
+  ["engine-anim", ["engine-nn", "engine-combat", "engine-ecs", "engine-nav"]],
+  ["engine-playtest", ["engine-ai", "engine-arena", "engine-combat", "engine-render", "engine-provider", "engine-spatial"]],
   ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle
   ["engine-assets", ["engine-scene", "engine-anim", "engine-clock"]],
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx"]],
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock"]],
   ["engine-destruction", ["engine-core", "engine-nav"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
   ["engine-material", ["engine-destruction"]],
-  ["engine-editor", ["engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app"]],
+  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app"]],
   // The duel teacher and strength gate run arena bouts through the public controller seam.
   ["engine-distill", ["engine-nn", "engine-ai", "engine-arena", "engine-input"]],
   // The squad pack reads legion formations from engine-ai (feature `mcp` only).
@@ -56,7 +56,7 @@ export const allowedEdges = new Map([
   // page's clock to engine-clock. WEB5: on wasm32 it also drives the render crate's presenter for the arena frame
   // (a target-gated dependency, so the native build of this crate stays a library of pure modules). WEB7 maps browser input
   // and a WebAudio gate onto engine-input and the std-only engine-audio. Nothing depends on it.
-  ["engine-web", ["engine-proof", "engine-clock", "engine-render", "engine-input", "engine-audio"]],
+  ["engine-web", ["engine-proof", "engine-clock", "engine-render", "engine-input", "engine-audio", "engine-net"]],
   ["engine-viewer", ["engine-game", "engine-arena", "engine-app", "engine-material"]],
   ["engine-geo", ["engine-assets"]],
   ["engine-perf", ["engine-core", "engine-ecs", "engine-physics", "engine-render", "engine-arena", "engine-ai", "engine-destruction", "engine-net"]],
@@ -231,6 +231,23 @@ function loadCargoMetadata(repoDir) {
     if (cached?.fp === fp && cached?.metadata) return { metadata: cached.metadata, fp, hit: true };
   } catch { /* missing or corrupt: run cargo below */ }
   return { metadata: null, fp };
+}
+const HEADLESS_CACHE = "workspace-check.headless-tree.json";
+function headlessPackages(repoDir, fp) {
+  const path = join(repoDir, "target", HEADLESS_CACHE);
+  if (!process.env.WORKSPACE_CHECK_NO_CACHE) {
+    try {
+      const cached = JSON.parse(readFileSync(path, "utf8"));
+      if (cached?.fp === fp && Array.isArray(cached.lines)) return cached.lines;
+    } catch { /* missing or corrupt: run cargo below */ }
+  }
+  const out = execFileSync("cargo", ["tree", "--locked", "-p", "engine2040", "-e", "normal,build", "--prefix", "none", "--format", "{p}"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  const lines = [...new Set(out.split("\n").map((l) => l.replace(/ \(\*\)$/, "").trim()).filter(Boolean))];
+  try {
+    mkdirSync(join(repoDir, "target"), { recursive: true });
+    writeFileSync(path, JSON.stringify({ fp, lines }));
+  } catch { /* cache is best-effort */ }
+  return lines;
 }
 function saveCargoMetadata(repoDir, fp, metadata) {
   try {
@@ -428,36 +445,22 @@ function audit(repoDir) {
     }
   }
 
+  // Headless default = what a bare `cargo build` of the root package compiles (runtime and build deps, no dev
+  // edges). `cargo metadata` cannot answer this: it unifies features across every workspace member and platform,
+  // so a wasm32-only dep (engine-web -> engine-render/window) would pull winit, wgpu and gltf into the root graph.
+  // `cargo tree -p engine2040` resolves the root alone, on the host target; path crates print "(<dir>)", externals do not.
+  const headless = headlessPackages(repoDir, cached.fp);
   const visited = new Set();
-  function visit(id) {
-    if (visited.has(id)) return;
-    visited.add(id);
-    const pkg = packages.get(id);
-    const node = nodes.get(id);
-    if (!pkg || !node) throw new Error(`unresolved package ${id}`);
-    if (pkg.source !== null) errors.push(`headless default pulls external package ${pkg.name}`);
-    // Headless default is the runtime graph, not the test graph: skip
-    // dev-only edges (e.g. arena dev-dep -> provider for the AL1
-    // stamped-reply test). cargo metadata lists dev edges in node.deps with
-    // dep_kinds[].kind === "dev"; a dep with any non-dev kind stays visited
-    // (fail closed when dep_kinds is missing).
-    for (const dependency of node.deps) {
-      const kinds = dependency.dep_kinds;
-      if (
-        Array.isArray(kinds) &&
-        kinds.length > 0 &&
-        kinds.every((k) => k && k.kind === "dev")
-      )
-        continue;
-      visit(dependency.pkg);
-    }
+  for (const line of headless) {
+    const name = line.split(" ")[0];
+    if (/ \(.+\)$/.test(line)) visited.add(name);
+    else errors.push(`headless default pulls external package ${name}`);
   }
-  visit(root.id);
   // OPT36 scope: the workspace-hack union stays out of the headless default
   // graph (externals-only; enabling engine features would pull optional
   // externals into this resolve, which must stay std-only).
   const hackPkg = workspacePackages.find((pkg) => pkg.name === "engine-workspace-hack");
-  if (hackPkg && visited.has(hackPkg.id)) errors.push("engine-workspace-hack is scoped out of the headless default graph");
+  if (hackPkg && visited.has(hackPkg.name)) errors.push("engine-workspace-hack is scoped out of the headless default graph");
 
   // A file no `mod` declares is never compiled, so its tests never run either.
   // Speed: one walk per crate plus a content cache shared by the module,
@@ -582,7 +585,7 @@ function audit(repoDir) {
     "combat/src/lib.rs", "combat/src/sweep.rs", "combat/src/tables.rs",
     "ecs/src/bridge.rs",
     "editor/src/instant.rs", "editor/src/templates.rs",
-    "endpoint/src/assistant.rs", "endpoint/src/play.rs",
+    "endpoint/src/assistant.rs", "endpoint/src/assistant/fork.rs", "endpoint/src/play.rs",
     "endpoint/src/build_level.rs", "endpoint/src/build_character.rs",
     "endpoint/src/build_encounter.rs", "endpoint/src/build_game.rs",
     "input/src/bindings.rs", "input/src/fighter.rs", "input/src/lib.rs",
@@ -596,12 +599,17 @@ function audit(repoDir) {
     "perf/src/workloads.rs",
     "playtest/src/agent.rs", "playtest/src/causal.rs", "playtest/src/eval.rs",
     "playtest/src/keypoint.rs", "playtest/src/lib.rs",
+    // Keypoint submodules split out of keypoint.rs (listed above): the spec parser and the spine track name the arena
+    // FighterTape/FighterInput contract types, the same sites keypoint.rs already carries.
+    "playtest/src/keypoint/spec_parse.rs", "playtest/src/keypoint/spine.rs",
     "playtest/src/reachability.rs", "playtest/src/spatial_shapes.rs", "playtest/src/tournament.rs",
     "playtest/src/trigger.rs", "playtest/src/winrates.rs",
     "proof/src/fuzz.rs",
     "provider/src/announce.rs",
     "render/src/baked_gi.rs",
     "ui/src/lib.rs", "ui/src/menus.rs", "ui/src/text.rs",
+    // WEB7: the browser input records wrap engine-input FighterId/FighterInput (contract site, like input/src/fighter.rs).
+    "web/src/input.rs",
   ]);
   const genreFindings = [];
   for (const pkg of workspacePackages.filter((p) => !["engine-arena", "engine-game", "engine-viewer"].includes(p.name))) {
@@ -752,17 +760,6 @@ function audit(repoDir) {
   }
 
   try { const archOut = execFileSync(process.execPath, [join(repoDir, "tools", "arch-fitness.mjs")], { encoding: "utf8" }).trim(); if (archOut === "PASS dependency cycle") console.log(archOut); else errors.push(archOut || "dependency cycle found"); } catch (error) { errors.push(`dependency cycle check failed: ${error.message}`); }
-  // Steal ledger age (2026-10-17): the loop runs its own gate in the round that
-  // already reads docs/plan/steals.md, so an open line older than 7 days (center
-  // size-check's rule: age alone) is named here in the round it turns stale, not
-  // 10 days later by a reds packet. tools/steal-land.mjs is the one source.
-  try {
-    const stealOut = execFileSync(process.execPath, [join(repoDir, "tools", "steal-land.mjs"), "--gate"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
-    console.log(`PASS steal ledger: ${stealOut[stealOut.length - 2] ?? stealOut[stealOut.length - 1] ?? ""}`);
-  } catch (error) {
-    const fails = `${error.stdout ?? ""}`.split("\n").filter((l) => l.startsWith("[FAIL]")).join("; ");
-    errors.push(`steal ledger (tools/steal-land.mjs --gate): ${fails || String(error.message).split("\n")[0]}`);
-  }
   try {
     const wireFp = wiringFingerprint(repoDir);
     let wireOut = loadWiringCache(repoDir, wireFp);

@@ -57,77 +57,24 @@ pub fn delay_for_advantage(current: u32, advantage: i32, target: i32) -> u32 {
     }
 }
 
-/// Genre-neutral integer probe for the delay reaction table.
+/// Fault profile of the input-delay sweep: the WAN base latency (4 ticks,
+/// 67 ms) with 30 ms jitter (2 ticks), no reordering, at `loss_pct` loss.
 #[cfg(test)]
-#[derive(Clone, Default)]
-struct DelayProbe {
-    acc: u64,
-}
-
-#[cfg(test)]
-impl super::rollback::SimTick for DelayProbe {
-    fn advance(&mut self, inputs: [u32; super::rollback::PLAYERS]) {
-        let mix = u64::from(inputs[0])
-            .wrapping_mul(31)
-            .wrapping_add(u64::from(inputs[1]).wrapping_mul(131))
-            .wrapping_add(7);
-        self.acc = self
-            .acc
-            .wrapping_add(mix)
-            .wrapping_add(0x9E37_79B9_7F4A_7C15 & 0x00FF_FFFF_FFFF_FFFF);
-    }
-
-    fn state_hash(&self) -> u64 {
-        let mut fold = engine_core::Fnv64::new();
-        fold.write_u64(self.acc);
-        fold.finish()
+fn sweep_profile(loss_pct: u32) -> super::link::LinkProfile {
+    super::link::LinkProfile {
+        latency: 4,
+        jitter: 2,
+        loss_pct,
+        reorder_pct: 0,
     }
 }
 
+/// One seeded loopback bout per delay in `MIN_DELAY..=MAX_DELAY`.
 #[cfg(test)]
-fn probe_pair(n: usize) -> (Vec<u32>, Vec<u32>) {
-    let mut local = Vec::with_capacity(n);
-    let mut remote = Vec::with_capacity(n);
-    for f in 0..n {
-        let fi = u32::try_from(f).unwrap_or(u32::MAX);
-        local.push(fi.wrapping_mul(3).wrapping_add(2) % 5);
-        remote.push(fi.wrapping_mul(2).wrapping_add(1) % 5);
-    }
-    (local, remote)
-}
-
-#[cfg(test)]
-fn count_rollbacks(delay: u32) -> u64 {
-    let (local, remote) = probe_pair(48);
-    let mut session = super::rollback::P2pSession::new(DelayProbe::default());
-    session.enable_sparse_saving(false);
-    assert!(session.verify_full_window(0).is_ok());
-    for (f, (&l, &r)) in local.iter().zip(remote.iter()).enumerate() {
-        let lost = f as u32 % 5 == 4 && delay < 2;
-        let avail = if lost { None } else { Some(r) };
-        session.advance_frame(l, avail);
-        if f >= 2 {
-            let late = (f - 2) as u32;
-            if late % 5 == 4 && delay < 2 {
-                let _ = session.confirm_frame(late, remote[f - 2]);
-            }
-        }
-    }
-    for (f, &r) in remote.iter().enumerate() {
-        if f as u32 % 5 == 4 && delay < 2 {
-            let _ = session.confirm_frame(f as u32, r);
-        }
-    }
-    session.rollback_count()
-}
-
-#[cfg(test)]
-fn reaction_table() -> [(u32, u64); 3] {
-    [
-        (0, count_rollbacks(0)),
-        (2, count_rollbacks(2)),
-        (4, count_rollbacks(4)),
-    ]
+fn sweep(loss_pct: u32) -> Vec<super::rollback::loopback::Receipt> {
+    (MIN_DELAY..=MAX_DELAY)
+        .map(|delay| super::rollback::loopback::run(delay, sweep_profile(loss_pct), 0x5EE9, 600))
+        .collect()
 }
 
 #[cfg(test)]
@@ -160,22 +107,36 @@ mod tests {
     }
 
     #[test]
-    fn delay_reaction_table_posts_counts() {
-        let table = reaction_table();
-        assert_eq!([table[0].0, table[1].0, table[2].0], [0, 2, 4]);
-        assert!(table[0].1 > 0, "delay 0 must resim on seeded loss");
-        assert!(
-            table[1].1 < table[0].1,
-            "delay 2 hides the 2-tick lateness: {:?}",
-            table
-        );
-        assert_eq!(table[1].1, 0, "delay 2 covers seeded lateness: {:?}", table);
-        assert_eq!(table[2].1, 0, "delay 4 stays covered: {:?}", table);
-        let per_1000 = table[1].1 * 1000 / 48;
-        assert!(per_1000 < 3, "delay 2 under 3 per 1000: {per_1000}");
-        println!(
-            "delay-reaction: d0={} d2={} d4={} per48",
-            table[0].1, table[1].1, table[2].1
-        );
+    fn input_delay_sweep_posts_misprediction_and_resim_per_setting() {
+        // QN2 receipt: delay 0..=8 over the WAN base latency with 30 ms
+        // jitter at 0, 2 and 5 percent loss. Every cell converges to the
+        // truth hash and more delay never predicts more frames. The data
+        // does not pick the default: resim depth falls one tick per delay
+        // tick and already sits under the 9-tick window at delay 0, so the
+        // default is held as safe (inside the window), not as the minimum.
+        for loss in [0, 2, 5] {
+            let rows = sweep(loss);
+            for (delay, r) in (MIN_DELAY..).zip(&rows) {
+                let per_1000 = r.mispredicted * 1000 / u64::from(r.frames);
+                println!(
+                    "sweep loss={loss}% d={delay} pred={} mispred={} per1000={per_1000} resims={} max={}",
+                    r.predicted, r.mispredicted, r.rollbacks, r.max_rollback,
+                );
+                assert!(r.tip_matches_truth, "loss {loss} delay {delay}: {r:?}");
+            }
+            for pair in rows.windows(2) {
+                assert!(pair[1].predicted <= pair[0].predicted, "{pair:?}");
+            }
+            let at_default = &rows[DEFAULT_DELAY as usize];
+            assert!(
+                at_default.max_rollback <= crate::netcode::MAX_ROLLBACK,
+                "loss {loss}: the default resims past the window: {at_default:?}"
+            );
+            assert!(
+                at_default.rollbacks <= rows[0].rollbacks
+                    && at_default.max_rollback < rows[0].max_rollback,
+                "loss {loss}: the default must resim less deep than delay 0"
+            );
+        }
     }
 }

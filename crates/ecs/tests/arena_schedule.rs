@@ -109,3 +109,72 @@ fn short_presize_refuses_without_applying_kills() {
     assert_eq!(hash, world.state_hash());
     assert_eq!(world.pending(), 0);
 }
+
+/// RC35 (P6): agents in the 1,000-agent soak world.
+const SOAK_AGENTS: usize = 1_000;
+/// Ticks sampled per soak run (10 seconds at 60 Hz) and warmup before them.
+const SOAK_TICKS: usize = 600;
+const SOAK_WARMUP: usize = 60;
+/// P6 budget: p99 of one full arena tick over 1,000 agents.
+const P6_P99_BUDGET_NS: u128 = 2_000_000;
+
+/// One 1,000-agent soak run: the arena tick digests and the p99 tick time.
+#[expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "timing test reads the wall clock; it never enters the tick"
+)]
+fn soak_run() -> (Vec<u64>, u128) {
+    let mut world = World::new();
+    world.reserve(SOAK_AGENTS + 8);
+    for i in 0..SOAK_AGENTS {
+        let f = i as f32;
+        world.spawn(
+            Some(Position { x: f * 0.25, y: -f }),
+            Some(Velocity { x: 0.5, y: -0.25 }),
+        );
+    }
+    // Checkpoint bytes per live P+V entity are 21; headroom for the census.
+    let slots = SOAK_AGENTS + 8;
+    let bytes = SOAK_AGENTS * 21 + 64;
+    let mut arena = PhaseArena::with_capacity(slots, bytes);
+    arena.reserve(slots, bytes);
+    let mut schedule = integrate_schedule();
+    let mut digests = Vec::with_capacity(SOAK_WARMUP + SOAK_TICKS);
+    let mut times = Vec::with_capacity(SOAK_TICKS);
+    for tick in 0..SOAK_WARMUP + SOAK_TICKS {
+        let start = std::time::Instant::now();
+        let digest = schedule
+            .run_arena_tick(&mut world, &mut arena, 0.016)
+            .expect("soak tick fits the pre-size");
+        let spent = start.elapsed().as_nanos();
+        digests.push(digest);
+        if tick >= SOAK_WARMUP {
+            times.push(spent);
+        }
+    }
+    times.sort_unstable();
+    // Nearest rank: the smallest sample with at least 99% of samples at or below it.
+    let rank = (times.len() * 99).div_ceil(100);
+    (digests, times[rank - 1])
+}
+
+#[test]
+fn thousand_agent_tick_p99_under_2ms_and_replays() {
+    let (first, first_p99) = soak_run();
+    let (second, second_p99) = soak_run();
+    eprintln!(
+        "RC35 1000 agents: p99 {}us then {}us per arena tick (budget {}us), {} ticks each",
+        first_p99 / 1_000,
+        second_p99 / 1_000,
+        P6_P99_BUDGET_NS / 1_000,
+        first.len(),
+    );
+    assert_eq!(first, second, "1,000-agent replay drifted between runs");
+    assert!(
+        first.windows(2).any(|w| w[0] != w[1]),
+        "soak never moved the checkpoint"
+    );
+    assert!(first_p99 <= P6_P99_BUDGET_NS, "run 1 p99 {first_p99}ns");
+    assert!(second_p99 <= P6_P99_BUDGET_NS, "run 2 p99 {second_p99}ns");
+}

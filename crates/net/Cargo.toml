@@ -37,6 +37,13 @@ webtransport = ["quic", "dep:wtransport", "dep:tokio"]
 # trait and the same payload bytes, one binary message per frame.
 websocket = ["quic", "dep:tokio-tungstenite", "dep:futures-util", "dep:tokio"]
 
+# The dedicated server a page plays a scripted duel against (WEB9/WEB12). It needs the
+# WebSocket server, so a default build (std-only) never sees it.
+[[bin]]
+name = "net_serve"
+path = "src/bin/net_serve.rs"
+required-features = ["websocket"]
+
 # Browser clients (WebSocket and WebTransport through the page's own APIs).
 # Target-gated, so the native build never sees them; the wasm-bindgen glue is
 # the one `engine-web` already links (Cargo.lock).

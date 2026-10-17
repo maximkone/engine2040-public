@@ -35,7 +35,7 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   over 100 lines (largest `editor/src/a2_session.rs` `run_session`, 375)
   split by concern into modules and named steps, behavior unchanged. Tier B.
   Size M per file. Owns one file per packet. Accept: big_files and long_fns
-  fall by the split count; public API unchanged; tests green. needs: none.
+  fall by the split count; public API unchanged; tests green. needs: none. Progress 2026-10-17: 9 files split (post, aa_scale, assistant, build_game, build_level, camera, keypoint, spatial_eval, index3), big_files 19 -> 10, golden unchanged (run 39063249080); commits 781ecd67 6f0229da 67a1c31f 40578154; left: render fog/gtao/ibl/presenter/live/submit and game fighter_look/lib/windowed/arena (held by other agents).
 - [x] CQ24 quality: split post jitter plus motion leaf out — `halton`, `jitter_*`, Landed f737386e. The leaf is `crates/render/src/post_jitter_motion.rs` (flat file, not post/jitter_motion.rs): `pub fn halton` is there, `post.rs` re-exports it; render lib post tests green (`cargo test -p engine-render --lib -- shadow_cascade post ibl` 91 passed, PC run); golden unchanged.
   `MotionField`, `check_dims`/`check_image` move verbatim to new
   `crates/render/src/post/jitter_motion.rs`; facade re-exports. Accept: grep for
@@ -77,11 +77,11 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   (playtest 50, render 18, assets 17) become typed enums with `Display` and
   a source. Tier B. Size S per crate. Owns one crate's error module.
   Accept: the crate's string_errors 0; tests green. needs: none.
-- [ ] CQ15 ops: Miri UB gate on non-forbid unsafe sites (sim crates
+- [x] CQ15 ops: Miri UB gate on non-forbid unsafe sites (sim crates
   already forbid; live sites editor/app.rs:244 + endpoint/
   secret_launch.rs:164) (READER-WILD wave 51, Miri MIT). Tier B.
   Size S. Accept: Miri green scoped (core alloc_probe + site audit),
-  forbid-rollout list, 0 suppressions. needs: none. (WILD.)
+  forbid-rollout list, 0 suppressions. needs: none. (WILD.) Landed 3c5d3641. tools/miri-gate.mjs (12 node tests), tools/miri-sites.json, .github/workflows/miri.yml; mirror run 39066930973 all four jobs green; Miri covers alloc_probe, ecs Scope::spawn (2 tests) and provider test_env; the xatlas C++ and DXGI sites are mapped as skipped.
 - [ ] CQ16 ops: std-only file-snapshot + redaction helper for goldens
   with a pending-gate (insta snapshot/redaction discipline
   reimplemented, Apache-2.0; no insta dependency, no vendored bytes).
@@ -94,14 +94,14 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   impossible, or proof suite slows >5%, or >0 pending snapshots
   committable. needs: none. (WILD corner-23 Card 1.)
   LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] CQ-NET-API3 net: single tick-rate and codec-length owner —
+- [x] CQ-NET-API3 net: single tick-rate and codec-length owner — Landed 61dc1642. scale.rs takes `TICK_HZ` from `engine_core` and the codec lengths (`SNAPSHOT_HEADER_LEN`, `SNAPSHOT_SLOT_LEN`, `STATE_DELTA_HEADER_LEN`) from `session`; no `owned copy, no import` text left in crates/net/src; `server::TICK_HZ` went with server.rs in the net slim 3151bd46. `cargo test -p engine-net --lib` 258 passed, 2 ignored, gh run 39061111700 (scale and session filter: 39 passed, gh run 39057623054).
   `scale.rs` imports the arena tick rate and the session codec lengths
   instead of parity copies; `server::TICK_HZ` re-exports the same owner.
   Tier A. Size S. Owns `crates/net/src/scale.rs`,
   `crates/net/src/server.rs`. Accept: no "owned copy, no import" in
   `crates/net/src`; scale + server tests green; golden x2. needs: none.
   (API-REVIEW wave 54.)
-- [ ] CQ-NET-API4 net: name the three servers — rename `server::Server`
+- [x] CQ-NET-API4 net: name the three servers — rename `server::Server` Landed 3151bd46. Moot after the net slim: `server::Server` no longer exists; the one public `Server` is `session::Server`, the rest have their own names (`dedicated::HeadlessServer`, `websocket::WsServer`, `webtransport::WtServer`, `relay::RelayServer`, `relay::StunServer`). `cargo test -p engine-net --lib` 258 passed, gh run 39061111700.
   to the AOI/presence harness name with a deprecated alias for one wave;
   root docs name `session::Server` vs `dedicated::HeadlessServer` vs the
   harness. Tier B. Size S. Owns `crates/net/src/server.rs`,
@@ -116,7 +116,7 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   one documented session choice per use-case in `lib.rs`; zero "stub"
   comments in public API; tests green; golden x2. needs: CQ-NET-API2.
   (API-REVIEW wave 54.)
-- [ ] CQ-NET-API6 net: units in names — `SnapEnt::{x,y}` gain cm units,
+- [x] CQ-NET-API6 net: units in names — `SnapEnt::{x,y}` gain cm units, Landed 3151bd46. Moot after the net slim: `SnapEnt`, `Config{budget,cell,view,world}`, `DelayBuffer` and anticheat.rs no longer exist in crates/net/src. `cargo test -p engine-net --lib` 258 passed, gh run 39061111700.
   `Config::{budget,cell,view,world}` gain byte/cm units,
   `DelayBuffer.delay` gains ticks, anticheat limits gain unit suffixes.
   Tier A. Size S. Owns `crates/net/src/server.rs`,

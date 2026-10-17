@@ -393,12 +393,33 @@ impl Mind {
     /// skill, 10 back; not ready repeats top; same observes give same `Felt`).
     /// Needs no provider; empty streams report [`MindError::NothingToReflect`].
     pub fn reflect(&mut self, tick: u64) -> Result<(), MindError> {
-        if self.events.is_empty() {
-            return Err(MindError::NothingToReflect);
+        self.reflect_scored(tick, false)
+    }
+
+    /// Fixed-cadence reflection: on a [`crate::reflect::due`] tick that has no
+    /// `Felt` yet, reflect with capped surprise (the top memory rising over
+    /// the last `Felt`'s importance adds at most
+    /// [`crate::reflect::SURPRISE_CAP`]). Returns whether it reflected; an
+    /// empty stream reflects nothing. Stateless: the cadence reads the stream.
+    pub fn reflect_due(&mut self, tick: u64) -> Result<bool, MindError> {
+        let reflected_now = self
+            .events
+            .iter()
+            .any(|e| e.kind == MemoryKind::Felt && e.tick >= tick);
+        if !crate::reflect::due(tick) || reflected_now {
+            return Ok(false);
         }
+        match self.reflect_scored(tick, true) {
+            Ok(()) => Ok(true),
+            Err(MindError::NothingToReflect) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Shared reflection body; `cadence` adds the capped surprise.
+    fn reflect_scored(&mut self, tick: u64, cadence: bool) -> Result<(), MindError> {
         let mut slot = [0usize; 1];
-        let found = self.recall_into(tick, &mut slot);
-        if found == 0 {
+        if self.recall_into(tick, &mut slot) == 0 {
             return Err(MindError::NothingToReflect);
         }
         let top_text = self.events[slot[0]].text.clone();
@@ -416,7 +437,15 @@ impl Mind {
         // Reflection text embeds a bounded memory line, so it always fits:
         // both halves are bounded and the template is short. Truncate defensively.
         let bounded: String = text.chars().take(MAX_TEXT).collect();
-        self.observe(tick, MemoryKind::Felt, &bounded, delayed.min(1000))
+        let base = delayed.min(1000);
+        let last_felt = self
+            .events
+            .iter()
+            .rev()
+            .find(|e| cadence && e.kind == MemoryKind::Felt)
+            .map(|e| e.salience);
+        let importance = crate::reflect::importance(base, top_salience, last_felt);
+        self.observe(tick, MemoryKind::Felt, &bounded, importance)
     }
 
     /// Add a goal; returns its mind-local id. History (done/dropped) counts

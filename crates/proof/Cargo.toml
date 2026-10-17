@@ -34,6 +34,9 @@ fuzz = ["dep:engine-arena"]
 # DSN2 arena tape (src/arena_matrix.rs, bin arena_line): plays the rules-v2 kit
 # match the window and the net server play, through engine-arena's MatchSpec.
 arena = ["dep:engine-arena"]
+# ARC10 spine parity column (src/spine_parity.rs, bin spine_parity_line): the
+# legacy step against the spine step; needs engine-arena's `spine` flag.
+spine = ["dep:engine-arena", "engine-arena/spine"]
 scene-museum = ["dep:engine-scene"]
 # MV1 harness (tests/m1_workflow.rs) runs the real workflow through the
 # assets/editor/scene/render APIs. These stay OPTIONAL normal deps (the
@@ -61,6 +64,9 @@ required-features = ["ragdoll"]
 [[bin]]
 name = "arena_line"
 required-features = ["arena"]
+[[bin]]
+name = "spine_parity_line"
+required-features = ["spine"]
 
 [[test]]
 name = "m1_workflow"

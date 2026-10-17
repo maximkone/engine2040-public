@@ -59,6 +59,10 @@ pub mod snapshot;
 pub mod split;
 pub mod tick_budget;
 pub mod wan_soak;
+/// The scripted duel a page plays against the native dedicated server: the
+/// host and client state machines over the `Transport` trait, the spec and the
+/// script both ends share.
+pub mod webduel;
 /// WebSocket transport, the fallback for browsers on networks that drop UDP:
 /// the wire layout (always) and the native server (feature `websocket`).
 pub mod websocket;

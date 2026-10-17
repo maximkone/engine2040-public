@@ -230,6 +230,65 @@ pub fn parse_island_snapshot(
     Ok(states)
 }
 
+/// Whole-island sleep hysteresis.
+/// An island sleeps only when EVERY member rests (`v2 <= sleep_v2` for
+/// `sleep_steps` ticks); one fast member (`v2 >= wake_v2`) wakes all.
+/// Mid-band resets timers but keeps state, so nothing flaps.
+#[derive(Clone, Copy, Debug)]
+pub struct SleepConfig {
+    /// Squared speed (m^2/s^2) at or below which a member counts as resting.
+    pub sleep_v2: f32,
+    /// Squared speed at or above which a member wakes its whole island.
+    pub wake_v2: f32,
+    /// Resting ticks in a row before an island falls asleep.
+    pub sleep_steps: u32,
+}
+
+impl Default for SleepConfig {
+    fn default() -> Self {
+        Self {
+            sleep_v2: 0.0025,
+            wake_v2: 0.01,
+            sleep_steps: 60,
+        }
+    }
+}
+
+/// Fold per-body motion (`v2`: squared speed, len `n`) into per-body sleep
+/// state through canonical `islands`. `timers`/`asleep` must have len `n`.
+pub fn update_sleep(
+    n: usize,
+    islands: &[Vec<usize>],
+    v2: &[f32],
+    timers: &mut [u32],
+    asleep: &mut [bool],
+    cfg: SleepConfig,
+) {
+    if timers.len() < n || asleep.len() < n || v2.len() < n {
+        return;
+    }
+    for members in islands {
+        // Peak includes sleepers: a kick on zeroed velocity is the wake signal.
+        let peak = members
+            .iter()
+            .filter(|&&i| i < n)
+            .fold(0.0f32, |p, &i| p.max(v2[i]));
+        for &i in members.iter().filter(|&&i| i < n) {
+            if peak >= cfg.wake_v2 {
+                asleep[i] = false;
+                timers[i] = 0;
+            } else if peak <= cfg.sleep_v2 {
+                if !asleep[i] {
+                    timers[i] = timers[i].saturating_add(1);
+                    asleep[i] = timers[i] >= cfg.sleep_steps;
+                }
+            } else {
+                timers[i] = 0;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

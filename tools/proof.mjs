@@ -95,6 +95,27 @@ export function irGateVerdict(run) {
   return { ok, rows, line: ok ? `[PASS] instruction counts inside the 2% Ir budget (${rows.map((r) => r.now).join(", ")})` : `[FAIL] instruction counts: ${why}` };
 }
 
+// Pure verdicts over the `spine_parity_line` bin (ARC10, exported for tests).
+// The scorecard column is one line: `spine parity: seeds=20 ticks=600 match=20
+// mismatch=0 first=none`. The real run is green only on exit 0 with every seed
+// matched; the canary run (`--seeded-wall`, a wall only the spine side knows)
+// is green only when the gate FAILS and names the first divergence, so a gate
+// that cannot fail is red too.
+export function parseParityLine(text) {
+  const m = /^spine parity: seeds=(\d+) ticks=(\d+) match=(\d+) mismatch=(\d+) first=(.+)$/m.exec(`${text ?? ""}`);
+  return m ? { seeds: Number(m[1]), ticks: Number(m[2]), matched: Number(m[3]), mismatch: Number(m[4]), first: m[5], line: m[0] } : null;
+}
+
+export function parityVerdict(run, { canary = false } = {}) {
+  const col = parseParityLine(run.stdout);
+  const lastStderr = `${run.stderr ?? ""}`.trim().split("\n").pop();
+  if (run.error || !col) return { ok: false, line: `no parity line: ${run.error?.message ?? (lastStderr || "empty output")}` };
+  const clean = run.status === 0 && col.matched === col.seeds && col.mismatch === 0 && col.first === "none";
+  if (!canary) return { ok: clean, line: col.line };
+  const caught = run.status !== 0 && col.mismatch >= 1 && col.first !== "none";
+  return { ok: caught, line: caught ? `canary caught: ${col.line}` : `canary NOT caught: ${col.line}` };
+}
+
 // Pure verdict over the frame-time CSV text (exported for tests). Only the
 // wall_ms column is required, looked up by header name so order and extra
 // columns do not matter. Blank lines are skipped, CRLF is handled.
@@ -576,6 +597,14 @@ try {
   const gpuLive = cargo(["test", "--locked", "--quiet", "-p", "engine-proof", "--lib", "gpu_live"]);
   const gpuLine = gpuLive.out.split("\n").filter((line) => line.includes("test result")).join("; ");
   console.log(`[INFO] gpu-live truth gate (report-only, 1 LIVE/8 PROBE): ${gpuLive.ok ? gpuLine : `gate did not execute: ${gpuLive.error}`}`);
+  // ARC10 spine scorecard: the parity column per build (legacy step against
+  // spine step, 20 seeded 600-tick tapes). A mismatch fails the gate; the
+  // canary run must fail too, or the column proves nothing.
+  const parityRun = (extra) => spawnSync("cargo", ["run", "-p", "engine-proof", "--locked", "--release", "--quiet", "--features", "spine", "--bin", "spine_parity_line", "--", ...extra], { encoding: "utf8", timeout: 1_800_000, maxBuffer: 16 * 1024 * 1024 });
+  const parity = parityVerdict(parityRun([]));
+  check("spine parity column", parity.ok, parity.line);
+  const canary = parityVerdict(parityRun(["--seeded-wall"]), { canary: true });
+  check("spine parity canary (seeded divergence fails the gate)", canary.ok, canary.line);
 } catch (error) {
   check("proof execution", false, error.message);
 } finally {

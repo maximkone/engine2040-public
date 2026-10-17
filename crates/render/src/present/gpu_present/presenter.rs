@@ -89,9 +89,14 @@ pub struct Presenter {
     /// Filtering sampler for per-draw base-color textures (shared by
     /// every draw bind; created once, never per frame).
     pub(crate) base_sampler: wgpu::Sampler,
+    /// Repeat-addressed twin of `base_sampler` for material sets, whose UVs
+    /// tile (VR2). Plain draws keep the clamped one.
+    pub(crate) repeat_sampler: wgpu::Sampler,
     /// Blit into the LDR twin; built once (no per-frame pipeline alloc).
     pub(crate) twin_pipeline: wgpu::RenderPipeline,
     pub(crate) surface_pipeline: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
+    /// HP-bar overlay pipelines by target format, built in the warm-up and not per frame (WEB13).
+    pub(crate) overlay_pipes: std::sync::Mutex<Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>>,
     pub(crate) surface: Option<wgpu::Surface<'static>>,
     pub(crate) surface_config: Option<wgpu::SurfaceConfiguration>,
     pub(crate) swap: v1::SwapState,
@@ -115,6 +120,15 @@ pub struct Presenter {
     /// the geometric normal. Cold init only, never per frame.
     /// Caller: `Presenter::build` creates it, `forward_bind` samples it.
     pub(crate) normal_fallback: GpuTexture,
+    /// Neutral 1x1 ORM fallback (linear 255,255,255): occlusion open, the
+    /// roughness and metallic factors pass through unscaled (VR2).
+    pub(crate) orm_fallback: GpuTexture,
+    /// Resident material sets (normal map + ORM + their forward bind group),
+    /// keyed by the normal-map key a draw names. VR2.
+    pub(crate) map_sets: Vec<MapSet>,
+    /// Material set chosen for each draw of the frame: an index into
+    /// `map_sets`, `None` for a draw that names no normal map. Reused scratch.
+    pub(crate) draw_sets: Vec<Option<usize>>,
     /// Bind group chosen for each draw of the frame: an index into
     /// `texture_binds`, `None` for the fallback. Reused scratch.
     pub(crate) draw_binds: Vec<Option<usize>>,
@@ -294,6 +308,40 @@ pub struct Presenter {
     pub(crate) scopes: super::scope_ledger::ScopeLedger,
 }
 
+/// One resident material set (VR2): a linear tangent-space normal map and an
+/// ORM map (R occlusion, G roughness, B metallic) over one base-color view,
+/// with the forward bind group built once at upload. A draw names it by
+/// `DrawItem::normal_map`.
+pub(crate) struct MapSet {
+    /// The normal-map key a draw names to select this set.
+    pub(crate) key: TextureKey,
+    /// Keeps the allocations alive behind the bind group's views.
+    pub(crate) _textures: [GpuTexture; 2],
+    /// Forward group: base view, normal view, ORM view and the shared frame buffers.
+    pub(crate) bind: wgpu::BindGroup,
+}
+
+/// Neutral ORM texel in 0..=255: 255,255,255 is open occlusion with the
+/// roughness and metallic factors passing through unscaled.
+fn orm_fallback_rgba() -> [u8; 4] {
+    [255, 255, 255, 255]
+}
+
+/// Layout entry for the VR2 ORM map at group 0 binding 19 (filterable 2D
+/// texture; the sampler is the normal map's at 18). Cold layout only.
+fn forward_orm_layout_entry() -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding: 19,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 /// Neutral normal-map texel in 0..=255: 128,128,255 decodes to (0,0,1)
 /// via `eg12_decode_normal`, so the TBN keeps the geometric normal.
 /// Owner presenter, consumer the forward 17 fallback bind.
@@ -341,6 +389,9 @@ struct ForwardBindSources<'a> {
     material_bytes: u64,
     shadow: &'a wgpu::Buffer,
     sampler: &'a wgpu::Sampler,
+    /// Sampler for the base map (5) and the normal and ORM maps (18): the
+    /// clamped `sampler` for plain draws, the Repeat one for material sets.
+    map_sampler: &'a wgpu::Sampler,
     fog: &'a wgpu::Buffer,
     torch: &'a wgpu::Buffer,
     pre_view: &'a wgpu::TextureView,
@@ -348,6 +399,8 @@ struct ForwardBindSources<'a> {
     sh_buf: &'a wgpu::Buffer,
     sky_view: &'a wgpu::TextureView,
     normal_view: &'a wgpu::TextureView,
+    /// ORM map view (binding 19).
+    orm_view: &'a wgpu::TextureView,
     /// Joint palette storage buffer (binding 7, one block per draw offset).
     skin_joints: &'a wgpu::Buffer,
     /// `SkinParams` uniform (binding 8).
@@ -372,6 +425,7 @@ fn forward_bind_with_sky(
         material_bytes,
         shadow,
         sampler,
+        map_sampler,
         fog,
         torch,
         pre_view,
@@ -379,6 +433,7 @@ fn forward_bind_with_sky(
         sh_buf,
         sky_view,
         normal_view,
+        orm_view,
         skin_joints,
         skin_params,
     } = *sources;
@@ -419,7 +474,7 @@ fn forward_bind_with_sky(
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::Sampler(map_sampler),
             },
             whole(6, fog),
             wgpu::BindGroupEntry {
@@ -446,7 +501,11 @@ fn forward_bind_with_sky(
             },
             wgpu::BindGroupEntry {
                 binding: 18,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::Sampler(map_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 19,
+                resource: wgpu::BindingResource::TextureView(orm_view),
             },
         ],
     })
@@ -480,6 +539,53 @@ impl Presenter {
                 aspect: wgpu::TextureAspect::All,
             },
             &[255u8; 4],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        GpuTexture {
+            texture,
+            view,
+            width: 1,
+            height: 1,
+        }
+    }
+
+    /// One-texel linear RGBA8 texture: the identity a map slot binds when a
+    /// draw names no map (VR2 ORM). Cold init path only; fixed bytes.
+    fn linear_texel(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &'static str,
+        rgba: [u8; 4],
+    ) -> GpuTexture {
+        let size = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4),
@@ -611,6 +717,7 @@ impl Presenter {
             uniform_entry(16, wgpu::ShaderStages::FRAGMENT),
         ];
         forward_entries.extend_from_slice(&forward_normal_layout_entries());
+        forward_entries.push(forward_orm_layout_entry());
         forward_entries.extend_from_slice(&ibl::gpu::forward_ibl_layout_entries());
         let forward_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ra1-uniforms"),
@@ -745,6 +852,19 @@ impl Presenter {
             anisotropy_clamp: 8,
             ..Default::default()
         });
+        // VR2: the same filtering, Repeat addressing, for material sets whose
+        // box-projected UVs tile across a surface.
+        let repeat_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vr2-repeat-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
         // The 1x1 white texture `None` draws sample (identity multiply): the
         // fallback bind group below keeps it alive for the presenter's life.
         let base_fallback = Self::fallback_white(&device, &queue);
@@ -752,6 +872,8 @@ impl Presenter {
         // `None` normal draws sample, so unmapped pixels keep geometry.
         // Cold init only; the bind groups below keep it alive.
         let normal_fallback = Self::normal_fallback(&device, &queue);
+        let orm_fallback =
+            Self::linear_texel(&device, &queue, "ra1-orm-fallback", orm_fallback_rgba());
         let cam_buf = uniform_buffer(&device, "ra1-u-camera", 80);
         let light_buf = uniform_buffer(&device, "ra1-u-light", 32);
         // The twin sun pass is std-only (no device work); a bad
@@ -911,6 +1033,7 @@ impl Presenter {
                 material_bytes: super::submit::MATERIAL_BYTES,
                 shadow: &twin_shadow_buf,
                 sampler: &base_sampler,
+                map_sampler: &base_sampler,
                 fog: &fog_fwd_buf,
                 torch: &torch_buf,
                 pre_view: &ibl_prefilter_view,
@@ -918,6 +1041,7 @@ impl Presenter {
                 sh_buf: &ibl_sh_buf,
                 sky_view: &sky_view_view,
                 normal_view: &normal_fallback.view,
+                orm_view: &orm_fallback.view,
                 skin_joints: &skin_joint_buf,
                 skin_params: &skin_params_buf,
             },
@@ -945,6 +1069,9 @@ impl Presenter {
             texture_binds: Vec::new(),
             fallback_bind,
             normal_fallback,
+            orm_fallback,
+            map_sets: Vec::new(),
+            draw_sets: Vec::with_capacity(MAX_DRAWS_PER_FRAME),
             draw_binds: Vec::with_capacity(MAX_DRAWS_PER_FRAME),
             creates: CreateTally::default(),
             look_probes: false,
@@ -1015,8 +1142,10 @@ impl Presenter {
             blit_shader,
             blit_sampler,
             base_sampler,
+            repeat_sampler,
             twin_pipeline,
             surface_pipeline: None,
+            overlay_pipes: std::sync::Mutex::new(Vec::new()),
             surface: None,
             surface_config: None,
             swap: v1::SwapState::new(0, 0),
@@ -1343,7 +1472,7 @@ impl Presenter {
         };
         if reuse_hit {
             let validated =
-                v1::upload_mesh(&mesh.positions, &mesh.normals, &mesh.uvs, &mesh.indices)
+                v1::upload_mesh_tiled(&mesh.positions, &mesh.normals, &mesh.uvs, &mesh.indices)
                     .map_err(|e| PresentError::InvalidMesh(format!("{e}")))?;
             self.vertex_scratch.clear();
             self.vertex_scratch.reserve(validated.positions.len() * 48);
@@ -1541,7 +1670,7 @@ impl Presenter {
         // Revalidate: `MeshData` fields are public, so only the validator
         // decides what reaches the GPU. Uploads are rare (cached), so the
         // re-pack cost is off the frame path.
-        let mesh = v1::upload_mesh(&mesh.positions, &mesh.normals, &mesh.uvs, &mesh.indices)
+        let mesh = v1::upload_mesh_tiled(&mesh.positions, &mesh.normals, &mesh.uvs, &mesh.indices)
             .map_err(|e| PresentError::InvalidMesh(format!("{e}")))?;
         let vb = self
             .device
@@ -1708,11 +1837,141 @@ impl Presenter {
         evicted
     }
 
+    /// Upload a linear (non-sRGB) data map with its box-filter mip chain.
+    /// Cold path only; the normal and ORM maps of a material set use it.
+    fn pack_linear_texture(
+        &self,
+        upload: &TextureUpload,
+        label: &'static str,
+    ) -> Result<GpuTexture, PresentError> {
+        upload.validate()?;
+        let size = wgpu::Extent3d {
+            width: upload.width,
+            height: upload.height,
+            depth_or_array_layers: 1,
+        };
+        let mips = upload.mip_chain();
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: u32::try_from(mips.len() + 1).unwrap_or(1),
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let base = (upload.width, upload.height, upload.rgba.as_slice());
+        let levels = std::iter::once(base).chain(mips.iter().map(|(w, h, d)| (*w, *h, d.as_slice())));
+        for (level, (width, height, rgba)) in (0u32..).zip(levels) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok(GpuTexture {
+            texture,
+            view,
+            width: upload.width,
+            height: upload.height,
+        })
+    }
+
+    /// Register a material set (VR2): `normal` (linear tangent-space, GL
+    /// convention) and an optional `orm` map (R occlusion, G roughness, B
+    /// metallic, linear), bound over the already-resident base-color texture
+    /// `base` (`None` binds the white fallback). A draw selects the set by
+    /// naming `key` as its `normal_map`; the set's bind group carries its own
+    /// base, so a re-upload of `base` needs the set registered again. The
+    /// ORM factors multiply the draw's material factors; no ORM keeps them as
+    /// they are. Cold path only: one bind group, never created inside a frame.
+    /// A `base` that is not resident fails with `MissingTexture`.
+    pub fn upload_material_set(
+        &mut self,
+        key: TextureKey,
+        base: Option<TextureKey>,
+        normal: &TextureUpload,
+        orm: Option<&TextureUpload>,
+    ) -> Result<(), PresentError> {
+        let normal_gpu = self.pack_linear_texture(normal, "ra1-set-normal")?;
+        let orm_gpu = match orm {
+            Some(upload) => self.pack_linear_texture(upload, "ra1-set-orm")?,
+            None => Self::linear_texel(&self.device, &self.queue, "ra1-set-orm", orm_fallback_rgba()),
+        };
+        let white;
+        let base_view = match &base {
+            Some(base_key) => self.require_texture_view(base_key)?.0,
+            None => {
+                white = Self::fallback_white(&self.device, &self.queue);
+                &white.view
+            }
+        };
+        let bind = self.forward_bind_maps(
+            base_view,
+            &normal_gpu.view,
+            &orm_gpu.view,
+            &self.repeat_sampler,
+        );
+        self.creates.bind_group();
+        self.map_sets.retain(|set| set.key != key);
+        self.map_sets.push(MapSet {
+            key,
+            _textures: [normal_gpu, orm_gpu],
+            bind,
+        });
+        Ok(())
+    }
+
+    /// Drop one material set; true when it was registered.
+    pub fn evict_material_set(&mut self, key: &TextureKey) -> bool {
+        let before = self.map_sets.len();
+        self.map_sets.retain(|set| set.key != *key);
+        self.map_sets.len() != before
+    }
+
+    /// Keys of the registered material sets, in registration order.
+    pub fn material_set_keys(&self) -> Vec<TextureKey> {
+        self.map_sets.iter().map(|set| set.key).collect()
+    }
+
     /// Forward bind group over `view` and the shared frame buffers plus
     /// the live baked lighting in the forward group, with the LF1 sky-view
     /// texture at 15 for the sky pass (opaque `fs` ignores it). The neutral
     /// normal fallback rides at 17 until per-draw normal maps land.
     pub(crate) fn forward_bind(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.forward_bind_maps(
+            view,
+            &self.normal_fallback.view,
+            &self.orm_fallback.view,
+            &self.base_sampler,
+        )
+    }
+
+    /// [`Self::forward_bind`] with an explicit normal map and ORM map (VR2
+    /// material sets): the same group, only the two map views differ.
+    pub(crate) fn forward_bind_maps(
+        &self,
+        view: &wgpu::TextureView,
+        normal_view: &wgpu::TextureView,
+        orm_view: &wgpu::TextureView,
+        map_sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
         let pre_view = self
             .ibl_prefilter
             .create_view(&wgpu::TextureViewDescriptor {
@@ -1735,13 +1994,15 @@ impl Presenter {
                 material_bytes: super::submit::MATERIAL_BYTES,
                 shadow: &self.twin_shadow_buf,
                 sampler: &self.base_sampler,
+                map_sampler,
                 fog: &self.fog_fwd_buf,
                 torch: &self.torch_buf,
                 pre_view: &pre_view,
                 brdf_view: &brdf_view,
                 sh_buf: &self.ibl_sh_buf,
                 sky_view: &self.sky_view_view,
-                normal_view: &self.normal_fallback.view,
+                normal_view,
+                orm_view,
                 skin_joints: &self.skin_joint_buf,
                 skin_params: &self.skin_params_buf,
             },

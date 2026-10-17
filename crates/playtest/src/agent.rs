@@ -40,6 +40,7 @@ use engine_arena::fork::{Fork, ForkProposal};
 use engine_arena::recorder::DATASET_VERSION;
 use engine_arena::{ArenaConfig, Checkpoint, FighterId, FighterInput, FighterTape};
 use engine_arena::{MAX_PARTICIPANTS, TICK_HZ};
+use engine_core::diverge::first_divergence;
 
 /// Neutral alias for the input tape contract type: engine code outside the
 /// GE2 genre ledger imports the tape from here instead of naming the genre
@@ -734,20 +735,6 @@ fn record_trajectory(config: &ArenaConfig, probe: &FighterTape) -> Trajectory {
     }
 }
 
-/// First tick where `control` and `probe` checkpoints differ. Length
-/// mismatch counts as divergence at the shared prefix end.
-pub fn scan_desync(control: &[Checkpoint], probe: &[Checkpoint]) -> Option<u32> {
-    for (index, (left, right)) in control.iter().zip(probe.iter()).enumerate() {
-        if left != right {
-            return Some(index as u32);
-        }
-    }
-    if control.len() != probe.len() {
-        return Some(control.len().min(probe.len()) as u32);
-    }
-    None
-}
-
 /// Stuck fighters: planar speed below
 /// [`STUCK_SPEED_MPS`](engine_arena::fork::STUCK_SPEED_MPS) for
 /// [`STUCK_WINDOW_TICKS`] consecutive ticks. Speed sample `t` spans poses
@@ -824,7 +811,7 @@ fn watch_match(
 ) -> Vec<BugFile> {
     let tape_bytes = encode_tape(config, control_tape, probe_tape);
     let mut bugs = Vec::new();
-    if let Some(tick) = scan_desync(&done.control, &done.probe) {
+    if let Some(tick) = first_divergence(&done.control, &done.probe) {
         if let (Some(expected), Some(observed)) = (
             done.control.get(tick as usize).map(|point| point.hash),
             done.probe.get(tick as usize).map(|point| point.hash),
@@ -1103,12 +1090,12 @@ mod tests {
         let tape = FighterTape::default();
         let control = engine_arena::run(&config, &tape);
         assert!(!control.is_empty());
-        assert_eq!(scan_desync(&control, &control), None);
+        assert_eq!(first_divergence(&control, &control), None);
         let mut probe = control.clone();
         probe[3].hash ^= 1;
-        assert_eq!(scan_desync(&control, &probe), Some(3));
+        assert_eq!(first_divergence(&control, &probe), Some(3));
         let short = &control[..control.len() - 1];
-        assert_eq!(scan_desync(&control, short), Some(short.len() as u32));
+        assert_eq!(first_divergence(&control, short), Some(short.len() as u32));
     }
 
     #[test]

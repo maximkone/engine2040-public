@@ -1,0 +1,1 @@
+id=fk3-jab-shake-small;claim=a jab shakes the camera at most a quarter of a big hit;kind=shake_separation;small=180;big=700;max_permille=250

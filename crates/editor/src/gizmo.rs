@@ -30,7 +30,7 @@
 
 use engine_core::quat_mul;
 use engine_scene::ids::ObjectId;
-use engine_scene::transform::{Transform, MIN_INVERTIBLE_SCALE};
+use engine_scene::transform::{quat_normalized, Transform, MIN_INVERTIBLE_SCALE};
 
 use crate::commands::Batch;
 
@@ -381,16 +381,6 @@ fn quat_from_columns(cols: [[f64; 3]; 3]) -> Option<[f64; 4]> {
         ]
     };
     quat_normalized_f64(q)
-}
-
-/// Unit quaternion, or identity for degenerate input, f32.
-fn quat_normalized(q: [f32; 4]) -> [f32; 4] {
-    let len_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
-    if !len_sq.is_finite() || len_sq < 1e-12 {
-        return [0.0, 0.0, 0.0, 1.0];
-    }
-    let len = len_sq.sqrt();
-    [q[0] / len, q[1] / len, q[2] / len, q[3] / len]
 }
 
 /// Unit quaternion, or None for degenerate input, f64.

@@ -1,6 +1,6 @@
 ---
 name: research
-description: "Use when doing research, a steal or an experiment: research card, donor repo or arXiv paper, LADDER line, spike with one ablation, searching the game-engine and Rust books (tools/books.mjs), or porting Bevy 0.19 code and names into crates/render."
+description: "Use when you do research, a steal or an experiment: a research card, donor repo or arXiv paper, a spike with one ablation, the books (tools/books.mjs), or porting Bevy 0.19 code into crates/render."
 ---
 
 # Research

@@ -15,6 +15,7 @@ pub mod counter_rng;
 pub mod crc32;
 pub mod det_math;
 pub mod digest;
+pub mod diverge;
 pub mod fixed;
 pub mod hash;
 /// JSON string escaping for the hand-rolled writers.
@@ -40,10 +41,9 @@ pub use seal_key::{
 #[cfg(test)]
 #[global_allocator]
 static TEST_ALLOC: alloc_probe::CountingAlloc = alloc_probe::CountingAlloc;
-#[expect(deprecated, reason = "legacy alias stays exported for frozen receipts")]
 pub use tick::{
-    fold_hash, run_ticks, FixedAcc, LegacyFixedAcc, Tick, TickState, DT, LEGACY_DT,
-    LEGACY_MAX_FRAME_DT, MAX_FRAME_DT, MAX_STEPS, TICK_HZ,
+    fold_hash, run_ticks, Tick, TickState, DT, LEGACY_DT, LEGACY_MAX_FRAME_DT, MAX_FRAME_DT,
+    MAX_STEPS, TICK_HZ,
 };
 pub use time::{
     quantize_wall_secs, IntAcc, TimeError, MAX_FRAME_NS, NS_PER_SEC, STEP_NS, STEP_REM_THIRDS,
