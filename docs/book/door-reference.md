@@ -437,7 +437,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | [`scene.spatial`](#scenespatial) | `observe` · read-only | Spatial findings for the staged scene as brief-style lines. |
 | [`scene.place`](#sceneplace) | `commit` | Solve relation wants like `next_to wall:north [0,60]` and apply through the command gate; conflicts carry solver repair hints plus dry-run diffs. |
 | [`level.build`](#levelbuild) | `commit` | Build a level from a text brief: relation plan, SP5 placement and cell layout with nav checks, applied through the command gate; conflicts and findings on refusal. |
-| [`scene.query`](#scenequery) | `observe` · read-only | Spatial questions over the staged scene with reasons: near, between, visible, reachable, cover, open space, cone, relation (left_of, visible_from, ...; `other` names... |
+| [`scene.query`](#scenequery) | `observe` · read-only | Spatial questions with reasons: near, between, visible, reachable, cover, open space, cone, relation. |
 | [`scene.watch`](#scenewatch) | `observe` · read-only | Read-only scene digest subscription: bursts coalesce to the latest digest. |
 
 ### `scene.brief`
@@ -564,7 +564,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 
 ### `scene.query`
 
-> Spatial questions over the staged scene with reasons: near, between, visible, reachable, cover, open space, cone, relation (left_of,              visible_from, ...; `other` names the viewer). Read-only.
+> Spatial questions with reasons: near, between, visible, reachable, cover, open space, cone, relation. Read-only.
 
 - **Scope:** `observe` · read-only
 - **Undo:** none: read-only
