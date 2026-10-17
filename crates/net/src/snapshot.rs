@@ -24,9 +24,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
-use super::session::{
-    decode_snapshot, encode_snapshot, encode_state_delta, NetError, MAX_PACKET_BYTES,
-};
+use super::session::{decode_snapshot, encode_snapshot, encode_state_delta, NetError};
 use crate::delay::{clamp_delay, DEFAULT_DELAY};
 use crate::delta::{encode_delta, FighterSnap, FullSnap};
 use engine_arena::Checkpoint;
@@ -797,7 +795,7 @@ impl SnapshotSender {
     /// # Errors
     ///
     /// [`NetError`] when `full` does not validate or a packet exceeds
-    /// [`MAX_PACKET_BYTES`].
+    /// [`MAX_PACKET_BYTES`](crate::session::MAX_PACKET_BYTES).
     pub fn encode(&mut self, full: &FullSnap, hash: u64) -> Result<SnapshotPacket, NetError> {
         let delta = self.acked.as_ref().and_then(|base| {
             let stale = self.sent.iter().filter(|s| s.tick > base.tick).count();
@@ -908,7 +906,7 @@ mod tests {
                 .base_tick,
             160
         );
-        assert!(bytes.len() <= MAX_PACKET_BYTES);
+        assert!(bytes.len() <= crate::session::MAX_PACKET_BYTES);
     }
 
     #[test]

@@ -165,7 +165,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   CT2 quadric chain, impostors past the LOD distance; replaces the `low_lod`
   flag. Tier B. Size M. Owns `crates/destruction/src/debris_lod.rs`. Accept:
   1,000 debris pieces cost within the DX4 budget; merges are identical x2;
-  no pop visible in a PQ4 lookcheck. needs: DX4, CT2.
+  no pop visible in a PQ4 lookcheck. needs: DX4, CT2. Progress 2026-10-17: 4cf108a8 debris_lod.rs tiers Full/Simplified/Merged/Impostor over the DX4 ledger; 1 ms budget test is ignored and unrun, PQ4 lookcheck needs a human; left: a caller in the window and the CT2 chain.
 - [ ] DX7 editor: fracture authoring — bond paint, strength preview and a
   break-replay preview in the editor, through the command service with undo,
   so AI and humans author destructibles. Tier B. Size M. Owns
@@ -178,7 +178,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Bake only, runtime untouched. Tier C. Size S. Owns
   `crates/destruction/src/bake_rank.rs`. Accept: same bond count as uniform,
   better break look in a blind review, DX3 8-way equality holds; else killed.
-  needs: DX2.
+  needs: DX2. Progress 2026-10-17: 3f671e24 bake_rank.rs spaces lattice cuts by impact likelihood with the same bond count and anchors, 8-way spread equality; the keep-or-kill blind review needs a human; left: a caller.
 - [ ] DX9 destruction: graded bonds — per-bond breaking strain from contact
   area, mass and anchor distance with seeded jitter (today every bond is
   1.0), Voronoi-density cut sites clipped by the existing split code, sliver
@@ -186,7 +186,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   NV3. Bake only. Tier B. Size M. Owns `crates/destruction/src/bond_grade.rs`.
   Accept: bake x2; DX3 8-way equality; anchors hold; a blind review prefers
   graded breaks, else density is killed but grading stays; 16/1024 caps hold
-  in the 8-fighter soak. needs: DX2, DX3, DX4.
+  in the 8-fighter soak. needs: DX2, DX3, DX4. Progress 2026-10-17: 40da318b bond_grade.rs strain from contact area, pair mass, anchor distance, seeded jitter, sliver refusal, per-event break records with dirty nav tiles; 8-way insertion-order equality and 16-per-event / 1024-total caps in an 80-cut soak (run 39069886844); left: Voronoi-density cut sites, blind review, a caller.
 - [x] PX16 physics: 1,000-agent LOD + sleep scale proof — far soldiers as
   capsules, near ones full ragdoll, whole-island sleep hysteresis, plus
   a seeded shove-through-the-crowd tape proving no missed wake. Tier A.
@@ -210,14 +210,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   test -p engine-physics --lib clinch` green on the 8-fighter soak; 50
   seeded clinch-falls separate; hash x2; golden unchanged. needs: PX9,
   DX4. (EXTEND physics 2026-09-27.)
-- [ ] DX11 destruction: siege-wall fracture at 64-player scale — capped Progress 2026-10-17: fracture.rs has the chunk cap, break_events_follow_the_dx1_shape_and_replay and fracture_event_budget_one_millisecond (the 1 ms test is #[ignore], run alone; destruction suite run 39057037628); left: no wall-break at 64-player scale, no break-event bandwidth-in-net-budget or rollback-exact test.
+- [x] DX11 destruction: siege-wall fracture at 64-player scale — capped Progress 2026-10-17: fracture.rs has the chunk cap, break_events_follow_the_dx1_shape_and_replay and fracture_event_budget_one_millisecond (the 1 ms test is #[ignore], run alone; destruction suite run 39057037628); left: no wall-break at 64-player scale, no break-event bandwidth-in-net-budget or rollback-exact test.
   seeded runtime cuts with break events on the DX1 shape and break-event
   bandwidth inside the net budget, rollback-exact. Tier B. Size M. Owns
   scale-proof hunks beside `crates/destruction/src/fracture.rs` (DX5 cuts
   frozen). Accept: `cargo test -p engine-destruction --lib fracture`
   green incl. wall-break at scale; chunk cap held; at most 1 ms per
   fracture event; bytes x2; golden unchanged. needs: DX5, DX4. (EXTEND
-  physics 2026-09-27.)
+  physics 2026-09-27.) Landed 05564684 (3c161bdd). 64 strikes in one window hold the chunk cap, fit the 1024-shard ledger and one 1200-byte datagram, match a replica on every strike and resim to the same hash from a mid-window clone; found and fixed a real bug (thin patch under MIN_MASS refused with BadChunk) in FractureChunk::to_chunk3 (run 39069886844).
 - [ ] DX12 destruction: debris-to-GPU handoff proof — 1,000 debris poses
   into the RP2 seeded pool within tolerance, merges identical x2, no
   visible pop. Tier B. Size S. Owns handoff test beside
@@ -256,12 +256,12 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   never the tick). Accept: tables cut hit/partial/get-up jitter vs the
   untuned servo with at most 10% overhead; corpus replays x2; golden
   unchanged. needs: PX1, PX9. (EXTEND physics 2026-09-29.)
-- [ ] DX14 destruction: bond-grade calibration corpus — offline seeded
+- [x] DX14 destruction: bond-grade calibration corpus — offline seeded
   impacts measuring break thresholds by contact area, mass and anchor
   distance, emitting the grading tables DX9 consumes. Tier B. Size S.
   Owns `crates/destruction/tests/grade_calib.rs` + table fixtures
   (bake only, never the tick). Accept: graded bonds hold anchors until
-  their strain fails on wall fixtures; bake x2; golden unchanged.
+  their strain fails on wall fixtures; bake x2; golden unchanged. Landed 0363fee8 (3c161bdd). tests/grade_calib.rs bisects the real snap strain of 552 bonds over 3 wall seeds: no bond snaps below its graded strain, anchors survive huge hits, per-hop table pinned in tests/fixtures/grade_calib.txt (engine-destruction run 39069886844, clippy run 39069703051).
     needs: DX2, DX3. (EXTEND physics 2026-09-29.)
 - [x] DX16 destruction: bond-graph damage propagation — bond topology + Landed d328c26. Tick audit 2026-10-17: cluster_graph_cascade_propagates_along_bonds_only (12-shard chain, swap at break, digest equal x2) plus debris_snapshot green in gh-check run 39057037628 (engine-destruction, 152 passed).
   per-piece health/propagation/cascade/shattered-prefab swap director ported
@@ -287,7 +287,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   blind pick of learned set on at least 12 of 20 vs seeded Voronoi.
   F2P: the impact_table test fails before (no module on master). P2P:
   impact_table green x2 plus golden held. needs: DX5. (RES-STEAL
-  2026-10-05 DeepFracture r5-r17 deduped; HS33/BX42 variants folded.)
+  2026-10-05 DeepFracture r5-r17 deduped; HS33/BX42 variants folded.) Progress 2026-10-17: 3c161bdd impact_table.rs 486 entries x 3 shapes, integer lookup, replay x2, 1000 random impacts no NaN; the learned-vs-seeded win is a score proxy, the blind pick is open; left: a caller at spawn.
 - [ ] CT10 assets: glTF conformance — the cook passes the Khronos glTF sample
   models (license per model read first) and Blender glTF exporter variants
   (animation sampling, per-action vs broadcast, PBR mapping from

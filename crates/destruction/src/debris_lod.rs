@@ -160,15 +160,30 @@ impl LodPlan {
             h.write_u32(g.lead);
             h.write_u32(g.island);
             h.write_u32(g.count);
-            g.centroid_mm.iter().for_each(|v| h.write(&v.to_le_bytes()));
+            for v in g.centroid_mm {
+                h.write(&v.to_le_bytes());
+            }
         }
         for g in &self.impostors {
             h.write_u32(g.island);
             h.write_u32(g.count);
-            g.centroid_mm.iter().for_each(|v| h.write(&v.to_le_bytes()));
+            for v in g.centroid_mm {
+                h.write(&v.to_le_bytes());
+            }
         }
         h.finish()
     }
+}
+
+/// One merge-band shard; the derived order is the sort order of the groups.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct BandShard {
+    island: u32,
+    cell: [i32; 3],
+    id: u32,
+    pos: [i32; 3],
+    /// Index of the shard's entry in the tier list.
+    slot: usize,
 }
 
 /// Squared distance of a shard to the camera; mm^2.
@@ -196,8 +211,7 @@ pub fn plan_lod(
     let sq = |mm: i32| i64::from(mm) * i64::from(mm);
     let camera = camera_mm.map(|v| v.clamp(-MAX_POS_MM, MAX_POS_MM));
     let mut tiers = Vec::with_capacity(ledger.len());
-    // (island, cell, id, pos, tier slot) of every merge-band shard, sorted below.
-    let mut near_band: Vec<(u32, [i32; 3], u32, [i32; 3], usize)> = Vec::new();
+    let mut near_band: Vec<BandShard> = Vec::new();
     let mut far: Vec<(u32, u32, [i32; 3])> = Vec::new();
     for i in 0..ledger.len() {
         let Some(shard) = ledger.shard_at(i) else {
@@ -209,7 +223,13 @@ pub fn plan_lod(
             Tier::Impostor(shard.island)
         } else if d > sq(cfg.merge_mm) {
             let cell = shard.pos_mm.map(|p| p.div_euclid(cfg.cell_mm));
-            near_band.push((shard.island, cell, shard.id, shard.pos_mm, tiers.len()));
+            near_band.push(BandShard {
+                island: shard.island,
+                cell,
+                id: shard.id,
+                pos: shard.pos_mm,
+                slot: tiers.len(),
+            });
             Tier::Merged(shard.id)
         } else if d >= sq(cfg.level2_mm) {
             Tier::Simplified(2)
@@ -224,19 +244,21 @@ pub fn plan_lod(
     let mut merged = Vec::new();
     let mut at = 0;
     while at < near_band.len() {
-        let key = (near_band[at].0, near_band[at].1);
+        let key = (near_band[at].island, near_band[at].cell);
         let end = near_band[at..]
             .iter()
-            .position(|m| (m.0, m.1) != key)
+            .position(|m| (m.island, m.cell) != key)
             .map_or(near_band.len(), |n| at + n);
-        let lead = near_band[at..end].iter().map(|m| m.2).min().unwrap_or(0);
+        let lead = near_band[at..end].iter().map(|m| m.id).min().unwrap_or(0);
         let mut sum = [0i64; 3];
         for m in &near_band[at..end] {
-            (0..3).for_each(|a| sum[a] += i64::from(m.3[a]));
+            for (s, p) in sum.iter_mut().zip(m.pos) {
+                *s += i64::from(p);
+            }
         }
         let count = u32::try_from(end - at).unwrap_or(u32::MAX);
         for m in &near_band[at..end] {
-            tiers[m.4].1 = Tier::Merged(lead);
+            tiers[m.slot].1 = Tier::Merged(lead);
         }
         merged.push(MergeGroup {
             lead,
@@ -257,7 +279,9 @@ pub fn plan_lod(
             .map_or(far.len(), |n| at + n);
         let mut sum = [0i64; 3];
         for f in &far[at..end] {
-            (0..3).for_each(|a| sum[a] += i64::from(f.2[a]));
+            for (s, p) in sum.iter_mut().zip(f.2) {
+                *s += i64::from(p);
+            }
         }
         let count = u32::try_from(end - at).unwrap_or(u32::MAX);
         impostors.push(Impostor {

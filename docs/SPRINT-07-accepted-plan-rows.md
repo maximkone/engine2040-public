@@ -5,7 +5,7 @@
   behind a gate; `Fixed` stays the default sim math. Tier C. Size M. Owns
   `crates/core/src/det_math.rs`. Accept: a 1M-input corpus is bit-identical
   on two toolchains and twice per build; zero allocations; the sin/cos ban
-  in CODELAW lifts only on green. needs: none.
+  in CODELAW lifts only on green. needs: none. Progress 2026-10-17: 4f556c75 correctly rounded sin/cos/exp, 0 wrong over every raw input of two sin/cos periods and the unsaturated exp range vs a test-only f64 oracle; 1M corpus digest 967702734373494140 identical on rustc 1.97.1 and 1.88.0 (Windows) and 1.97.1 (Linux), run 39066980501; left: atan2 stays CORDIC, and the HASH-LAW sin/cos ban stays until a cross-machine matrix row.
 - [ ] RC9 core: incremental digest experiment — per-component hashes folded
   into archetype roots and a tick root (Merkle style), O(changed) per tick,
   reporting the first divergent archetype and component; runs beside the
@@ -14,7 +14,7 @@
   `crates/core/src/digest.rs`, `crates/ecs/src/snapshot.rs`. Accept: same
   verdict as the full rehash on 20 of 20 seeded divergences with exact
   localization; at least 10% faster at 8 fighters or killed with numbers;
-  golden unchanged. needs: none.
+  golden unchanged. needs: none. Progress 2026-10-17: 80f99810 MerkleDigest/WorldDigest beside the real hash: equal to the full rehash on 20/20 seeded divergences; 0.32x at 8 fighters all changing (890 vs 287 ns), 1.7x with 1 of 8 changed, 16x at 1024 slots, 17.5x at 11,000; killed for the arena tick, code kept unwired (runs 39068711062, 39069090846, 39068837684).
 - [x] RC11 ecs: parallel bake and verify — extend the RC3 fork-join to bake, Landed f74588ee. bake_words/verify_sums/broadphase_pairs_match_serial_across_threads_and_chunks (workers 0,1,2,4,8 x 5 chunkings) run 39056114783; scaled_bake_parallel_clears_2x_over_serial (--ignored, release, runner) ok run 39056618000.
   verify and broadphase work only (never the sim tick; Rapier parallel stays
   DROP), seeded by RC7 streams. Tier B. Size S. Owns
@@ -98,13 +98,13 @@
   callers) + custom schedule (not wyrand vectors) + missing PORT cite +
   ISLAND/CHUNK tags dup counters. R2 must wire one real caller with
   chunk-equivalence, pin upstream vectors, add PORT + EVIDENCE row.
-- [ ] RC30 core: retire the f32 `FixedAcc` legacy path — `time.rs`
+- [x] RC30 core: retire the f32 `FixedAcc` legacy path — `time.rs`
   integer-ns accumulator becomes the only sim clock. Tier B. Size S.
   Owns hunks in `crates/core/src/tick.rs`, `crates/core/src/time.rs`.
   Accept: f32 residual measured on the 10M-push soak first, then zero
   drift; same tape twice identical; golden `d57b5c8ae3096614` x2 or a
   HASH-LAW receipt with old/new hashes; `git grep FixedAcc` finds no
-  sim-path user. needs: RC6.
+  sim-path user. needs: RC6. Landed 7fed0107. LegacyFixedAcc/FixedAcc removed; the f32 residual on a 16/17 ms jitter tape ended 0.745 ms off true, IntAcc 0 ns; tools/float-gate.test.mjs now fails any f32 clock in tick.rs (engine-core run 39065712849, golden run 39064559231, engine-proof --lib 142 passed run 39065716995).
 - [x] RC31 app: per-frame overhead harness — ordering + extraction Landed 0e40e0e5. rc31_harness_posts_p50, rc31_ordering_plus_extraction_under_budget (--include-ignored, release), rc31_over_budget_names_slowest_stage; p50=0us over 200 frames on the runner (not the reference machine) run 39058615260.
   asserted under 0.1 ms p50 as a PF1-style workload on the reference
   machine. Tier A. Size S. Owns test hunks in `crates/app` (no new

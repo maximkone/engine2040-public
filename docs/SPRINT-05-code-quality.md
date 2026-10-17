@@ -72,7 +72,7 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   `clippy::cast_possible_truncation`, `cast_sign_loss` and
   `cast_possible_wrap` join the crate at zero. Tier A. Size M per crate.
   Owns one crate per packet. Accept: crate casts at most 5 per 1,000 lines;
-  golden x2 unchanged. needs: none.
+  golden x2 unchanged. needs: none. Progress 2026-10-17: f6c055fb numeric casts engine-core 19 -> 1 and engine-geo 2 -> 0 (the one left is the audited f64->f32 narrowing in checked.rs); arena lib run 39065884031, geo run 39065811433.
 - [ ] CQ14 ops: typed errors — 93 `Result<_, String>` in library code Progress 2026-10-17: string_errors 93 -> 19 (render 13, endpoint 3, game 2, scene 1; playtest and assets at 0). Left: those 19.
   (playtest 50, render 18, assets 17) become typed enums with `Display` and
   a source. Tier B. Size S per crate. Owns one crate's error module.

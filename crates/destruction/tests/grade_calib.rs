@@ -30,7 +30,9 @@ fn wall(seed: u64) -> BondedDesc {
 fn hops(desc: &BondedDesc) -> Vec<u32> {
     let mut hops = vec![u32::MAX; desc.chunks.len()];
     let mut frontier: Vec<usize> = desc.anchors.iter().map(|&a| a as usize).collect();
-    frontier.iter().for_each(|&a| hops[a] = 0);
+    for &a in &frontier {
+        hops[a] = 0;
+    }
     let mut depth = 0;
     while !frontier.is_empty() {
         depth += 1;

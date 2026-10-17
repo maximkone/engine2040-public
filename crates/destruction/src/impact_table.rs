@@ -286,7 +286,7 @@ fn best_cut(
     candidates: u32,
 ) -> Result<Fracture, ImpactError> {
     let axis = usize::try_from(dir / 2).unwrap_or(0);
-    let sign = if dir % 2 == 0 { 1.0 } else { -1.0 };
+    let sign = if dir.is_multiple_of(2) { 1.0 } else { -1.0 };
     let mut hit = center;
     hit[axis] = (hit[axis] + sign * spec.radius_m * PUSH_EIGHTHS / 8.0)
         .clamp(bounds.0[axis], bounds.1[axis]);

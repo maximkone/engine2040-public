@@ -544,7 +544,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 
 - **Scope:** `commit`
 - **Undo:** journaled: the handler calls `apply_gated`, so core `tx.undo` reverts the newest batch
-- **Source:** `crates/endpoint/src/build_level.rs`
+- **Source:** `crates/endpoint/src/build_level/imp/door.rs`
 - **Returns:** `BuildLevelOutput` with `revision`, `solved`, `placements`, `findings`, `conflicts`, `reason`, `repairs_used`, `verdict`, `next_ab4`, `cost_units`, `key`, `undo_token`, `record_line`
 
 **Arguments** (`BuildLevelArgs`):

@@ -1200,9 +1200,9 @@ mod tests {
 
     fn strike_row(tick: u32, hit_mm: [i16; 3], strain_q16: u32) -> Vec<u8> {
         let mut row = tick.to_le_bytes().to_vec();
-        hit_mm
-            .iter()
-            .for_each(|v| row.extend_from_slice(&v.to_le_bytes()));
+        for v in hit_mm {
+            row.extend_from_slice(&v.to_le_bytes());
+        }
         row.extend_from_slice(&strain_q16.to_le_bytes());
         row
     }
