@@ -926,9 +926,12 @@ mod tests {
         // of the kill-share ceiling for the feel survey, and this harness
         // mirrors it for the lever screen. A copy that moves alone would put
         // two bars in the tree, so that drift is refused here by name.
-        // (`engine-playtest` is not a dependency of this crate; its copy and
-        // the endpoint copy are named in
-        // `target/queue/ready/des-ledger-source-drift-20261017.md`.)
+        // (`engine-playtest` is not a dependency of this crate, so the playtest
+        // and endpoint copies are pinned by source text in
+        // `crates/game/tests/it/design_loop.rs`
+        // (`kill_share_bar_is_one_number_across_crates`); the packet that filed
+        // that gap, `target/queue/done/des-ledger-source-drift-20261017.md`, is
+        // closed.)
         assert_eq!(
             engine_combat::feel::KILL_SHARE_MAX_PERMILLE,
             PQ2_KILL_SHARE_MAX_PERMILLE,

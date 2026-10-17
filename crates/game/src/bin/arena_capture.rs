@@ -662,6 +662,15 @@ pub(crate) mod capture {
             .collect()
     }
 
+    /// File one twin capture's cut log through the editorial gate and print
+    /// the receipt: a flagged log refuses the seal loudly.
+    fn seal_capture_cut_log(sink: &mut CaptureSink, app: &App) -> Result<(), WinError> {
+        let line = cut_log_audit_line(app.director_audit())?;
+        sink.note_director_cuts(app.director_cuts(), app.director_shot());
+        say!("{line}");
+        Ok(())
+    }
+
     /// Headless twin capture: the same session over the tape with every due tick
     /// rendered through the offscreen twin under `camera_path` (the orbit eye is
     /// the captured-frame count, so the flags run moves while the baseline stays
@@ -1117,6 +1126,97 @@ pub(crate) mod capture {
             assert_eq!(triples[1].2, None, "untextured lane stays None");
             assert_eq!(triples[2].2, Some(tex_b), "textured lane kept");
             assert_eq!(triples[0].1, material, "factors ride with the key");
+        }
+    }
+
+    #[cfg(test)]
+    mod cut_audit_tests {
+        use super::*;
+        use engine_game::director::{
+            audit_cuts, Cut, CutReason, ShotKind, ShotSide, MIN_SHOT_TICKS,
+        };
+
+        /// Behaviour: a running session's own cut log, read through the
+        /// accessor the capture seal uses, audits clean and receipts its cut
+        /// count; the gate would let this clip be filed.
+        #[test]
+        fn live_session_cut_log_audits_clean_and_receipts() {
+            let mut app = App::new(GameConfig {
+                seed: 2040,
+                ticks: 600,
+                fighters: 2,
+                half_extent_m: 20.0,
+            })
+            .expect("charted config");
+            let human = FighterId::new(HUMAN_SLOT).expect("human slot");
+            for tick in 0..600u32 {
+                // Scripted brawl tape: strafe plus an attack every 12 ticks, so
+                // the session actually lands beats and its director cuts.
+                let outcome = app.tick(engine_input::FighterInput {
+                    tick,
+                    fighter: human,
+                    mx: if tick % 24 < 12 { 60 } else { -60 },
+                    mz: 0,
+                    facing: 0,
+                    buttons: if tick.is_multiple_of(12) {
+                        engine_input::Buttons(engine_input::fighter::ATTACK)
+                    } else {
+                        engine_input::Buttons::NONE
+                    },
+                });
+                assert!(outcome.input_accepted, "tick {tick} accepted");
+            }
+            let cuts = app.director_cuts().len();
+            assert!(
+                cuts >= 2,
+                "a 600-tick brawl cuts more than once, got {cuts}"
+            );
+            let line = cut_log_audit_line(app.director_audit())
+                .expect("a running session files a clean cut log");
+            assert_eq!(
+                line,
+                format!("arena capture: cut log clean cuts={cuts} flags=0")
+            );
+        }
+
+        /// Failure: a cut log whose continuity flags fire (a jump cut plus the
+        /// short hold under it) refuses the seal loudly and names the counts,
+        /// so an editorially broken clip is never filed.
+        #[test]
+        fn flagged_cut_log_refuses_the_seal() {
+            let open = Cut {
+                tick: 0,
+                from_kind: ShotKind::Wide,
+                to_kind: ShotKind::Wide,
+                from_focus: 0,
+                to_focus: 0,
+                side: ShotSide::Left,
+                crossed_line: false,
+                reason: CutReason::Hit,
+                beat_tick: 0,
+            };
+            let jump = Cut {
+                tick: 30,
+                from_kind: ShotKind::Close,
+                to_kind: ShotKind::Close,
+                from_focus: 1,
+                to_focus: 1,
+                side: ShotSide::Left,
+                crossed_line: false,
+                reason: CutReason::Hit,
+                beat_tick: 30,
+            };
+            let audit = audit_cuts(&[open, jump], MIN_SHOT_TICKS);
+            assert!(!audit.is_clean(), "a jump under the hold floor flags");
+            assert_eq!(audit.jump_cuts, 1, "same framing and focus is a jump");
+            assert_eq!(audit.short_holds, 1, "30 ticks is under the 60 hold");
+            let err = cut_log_audit_line(audit).expect_err("a flagged log refuses");
+            let text = format!("{err:?}");
+            assert!(text.contains("cut log audit: 2 flags"), "loud: {text}");
+            assert!(
+                text.contains("jump 1 line 0 hold 1 slew 0 stale 0"),
+                "names each flag: {text}"
+            );
         }
     }
 }

@@ -1051,7 +1051,17 @@ impl DepthBrain {
         // foe frame so the rung can close and fence. A rules-v2 arena maps
         // the same wish itself and attaches a live view, so this never doubles.
         let input = if self.tier.is_some() && !percept.melee.is_live() {
-            tier_wish_to_world(input, self.inner.intent(), percept, dist_mm)
+            let mapped = tier_wish_to_world(input, self.inner.intent(), percept, dist_mm);
+            let (mx, mz) = steer::steer_wish(
+                pos_mm(percept.self_pos[0]),
+                pos_mm(percept.self_pos[2]),
+                pos_mm(percept.foe_pos[0]),
+                pos_mm(percept.foe_pos[2]),
+                mapped.mx,
+                mapped.mz,
+                self.half_extent_mm,
+            );
+            FighterInput { mx, mz, ..mapped }
         } else {
             input
         };

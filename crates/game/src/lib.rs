@@ -876,6 +876,18 @@ impl App {
         self.cut_director.shot()
     }
 
+    /// Continuity audit over the spectator-camera cut log so far (jump cuts,
+    /// line crosses, short holds, slew overs, stale beats), judged against the
+    /// director's own hold floor.
+    ///
+    /// Caller: `crates/game/src/bin/arena_capture.rs` (`cut_log_audit_line`
+    /// gates the capture seal on this report). Presentation only, never
+    /// hashed. Budget: one pass over the cut log, on the seal path.
+    #[must_use]
+    pub fn director_audit(&self) -> crate::director::AuditReport {
+        self.cut_director.audit()
+    }
+
     /// Live HUD snapshot (kill feed, human hp, ladder score).
     #[must_use]
     pub fn hud(&self) -> &Hud {
@@ -1120,7 +1132,8 @@ impl App {
         // Steady-state zero alloc: refill the scratch buffers in place
         // instead of collecting fresh vecs every tick.
         self.tick_cues.clear();
-        self.tick_cues.extend(stepped.events.events.iter().map(map_cue));
+        self.tick_cues
+            .extend(stepped.events.events.iter().map(map_cue));
         let next_hitstop = hitstop::next(current, &stepped.events.events);
         fill_laterals_for_tick(stepped.rows, tick, fighters, &mut self.laterals);
         fill_views_for_tick(stepped.rows, tick, fighters, &mut self.views);
@@ -2121,6 +2134,10 @@ mod tests {
 
     #[test]
     fn save_load_roundtrip_preserves_progression_and_seed() {
+        // `save_progress` mirrors through `steam::probe`, which reads the
+        // process-global Steam switches: share the Steam tests' env lock so a
+        // mirror here can never land inside their cloud dir mid-window.
+        let _env = crate::steam::ENV_LOCK.lock().expect("steam env lock");
         let dir = progress_dir("roundtrip");
         let (app, _) = run_session(small_config());
         app.save_progress(&dir, 3).unwrap();
@@ -2133,6 +2150,9 @@ mod tests {
 
     #[test]
     fn failed_save_write_preserves_prior_valid_generation() {
+        // Same env-lock owner as the Steam tests: this save may mirror, and
+        // the Steam switches are process-global.
+        let _env = crate::steam::ENV_LOCK.lock().expect("steam env lock");
         let dir = progress_dir("recover");
         let (app, _) = run_session(small_config());
         app.save_progress(&dir, 1).unwrap();

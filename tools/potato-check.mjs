@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // potato-check: the potato gate G9 run (row GS16). Runs arena 8x600 with
-// E2040_ADAPTER=integrated E2040_LIMITS=downlevel, samples working set with
-// tasklist every 250 ms, prints the potato line plus one line per bar, and
-// writes target/reports/potato-<date>.md. Bars in tools/potato-bar.json.
+// E2040_ADAPTER=integrated E2040_LIMITS=downlevel, samples the arena's working
+// set every 250 ms from ONE long-lived sampler child (a `tasklist` process per
+// sample stalled the very frames it measured: interval_ms p99 93.297 ms against
+// 14.715 ms without one, 2026-10-17), prints the potato line plus one line per
+// bar, and writes target/reports/potato-<date>.md. Bars in tools/potato-bar.json.
 // The same samples stamp the run's load (`potato load: QUIET` or `LOADED n
 // cargo + m rustc running`), because a number read while a build runs is a
 // filed number, never a claim of speed (quiet.mjs rule). The bar lines and
@@ -282,6 +284,8 @@ export function summarize({ output, tasklistText, bar, floor, loaded }) {
 
 // One tasklist sample. A failed sample is loud (error names the cause) so
 // a dead sampler reads as a warning downstream, never as a silent zero.
+// Kept as the gate's fallback seam: the live path samples from one long-lived
+// child (see `startSampler`), and only a child that died comes back here.
 export function sampleTasklist(execFn = execFileSync) {
   try {
     return { text: execFn("tasklist", ["/FO", "CSV", "/NH"], { encoding: "utf8" }), error: null };
@@ -290,10 +294,101 @@ export function sampleTasklist(execFn = execFileSync) {
   }
 }
 
-// Live run with working-set sampling every 250 ms; missing reads UNKNOWN.
-async function runLive() {
+// Sampler cadence (the row's 250 ms), the processes the gate reads (arena for
+// the peak working set, cargo and rustc for the run's load stamp), and the
+// Windows PowerShell the sampler child runs under.
+export const SAMPLE_MS = 250;
+export const SAMPLED_PROCESSES = Object.freeze(["arena", "cargo", "rustc"]);
+export const POWERSHELL_EXE = process.env.E2040_POWERSHELL ?? "powershell.exe";
+
+// The sampler child's script: one `tasklist`-shaped CSV row per sampled process
+// per tick (`"arena.exe","1234","Console","1","1,310,720 K"`, working set in
+// KB), so `parseTasklistPeakMb` and `parseBuildLoad` stay the only parsers and
+// their bytes do not move. `Get-Process` runs inside the child, so no process is
+// created between samples; an empty line keeps the cadence observable while no
+// sampled process runs (the gate warms the sampler before the first frame).
+// The `-f` operands need their own parentheses: inside a method call the commas
+// would otherwise read as extra arguments.
+function samplerScript(procs, intervalMs) {
+  const ms = Number.isFinite(Number(intervalMs)) && Number(intervalMs) > 0 ? Math.round(Number(intervalMs)) : SAMPLE_MS;
+  return [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$names=@(${procs.map((p) => `'${p}'`).join(",")})`,
+    "$fmt=[cultureinfo]::InvariantCulture",
+    "while($true){",
+    "  $rows=0",
+    "  foreach($p in @(Get-Process -Name $names)){",
+    "    $rows=$rows+1",
+    `    [Console]::Out.WriteLine(('"{0}.exe","{1}","Console","1","{2} K"' -f $p.ProcessName,$p.Id,($p.WorkingSet64/1KB).ToString('N0',$fmt))) }`,
+    "  if($rows -eq 0){ [Console]::Out.WriteLine('') }",
+    `  Start-Sleep -Milliseconds ${ms} }`,
+  ].join("\n");
+}
+
+// ONE long-lived sampler child for a whole gate run. The reason is measured: a
+// `tasklist` process spawned per sample from this tool's event loop stalled the
+// arena frames it measured (interval_ms p99 93.297 ms against 14.715 ms without
+// one, 2026-10-17). `ready` resolves on the child's first line, `read()` drains
+// the lines since the last read and reports a dead child as `error` (never a
+// silent zero), `stop()` ends the child and never throws.
+export function startSampler({ spawnFn = spawn, procs = SAMPLED_PROCESSES, intervalMs = SAMPLE_MS } = {}) {
+  const script = samplerScript(procs, intervalMs);
+  const pending = { text: "", error: null };
+  let stopped = false;
+  let wake = () => {};
+  const ready = new Promise((resolve) => {
+    wake = resolve;
+  });
+  let child = null;
+  try {
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    child = spawnFn(POWERSHELL_EXE, ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { windowsHide: true });
+  } catch (err) {
+    pending.error = err?.message ?? String(err);
+    wake(false);
+  }
+  child?.stdout?.on("data", (d) => {
+    pending.text += String(d);
+    wake(true);
+  });
+  child?.on("error", (err) => {
+    if (!stopped) pending.error = err?.message ?? String(err);
+    wake(false);
+  });
+  child?.on("exit", (code) => {
+    if (!stopped && code !== 0) pending.error = `sampler exited ${code}`;
+    wake(false);
+  });
+  return {
+    ready,
+    read() {
+      const out = { text: pending.text, error: pending.error };
+      pending.text = "";
+      pending.error = null;
+      return out;
+    },
+    stop() {
+      stopped = true;
+      try {
+        child?.kill();
+      } catch (err) {
+        console.error(`potato-check: sampler kill failed: ${err?.message ?? err}`);
+      }
+    },
+  };
+}
+
+// Live run with ONE working-set sampler for the whole run, warmed before the
+// arena's first measured frame so its one-time startup cost lands outside the
+// window the bars judge. A sampler that dies comes back as a failure count
+// (`run` warns about it) and falls back to the per-sample `tasklist` seam,
+// slower but with the numbers intact. `sampler`, `spawnArena` and `sampleFn`
+// are the test seams; production passes nothing and gets the live ones.
+async function runLive({ sampler: makeSampler = startSampler, spawnArena = spawn, sampleFn = sampleTasklist } = {}) {
   if (!existsSync(ARENA_EXE)) return { output: "", tasklistText: "", missing: true, timedOut: false, load: { cargo: 0, rustc: 0, loaded: false } };
-  const child = spawn(ARENA_EXE, [...RUN_ARGS], {
+  const sampler = makeSampler();
+  await Promise.race([Promise.resolve(sampler.ready), new Promise((r) => setTimeout(r, 5_000))]);
+  const child = spawnArena(ARENA_EXE, [...RUN_ARGS], {
     cwd: ROOT,
     env: { ...process.env, ...RUN_ENV },
     windowsHide: false,
@@ -308,17 +403,28 @@ async function runLive() {
   const snapshots = [];
   let tasklistFailures = 0;
   let tasklistError = "";
+  let samplerDead = false;
   const poll = () => {
-    const s = sampleTasklist();
+    const s = sampler.read();
     if (s.error) {
+      samplerDead = true;
       tasklistFailures += 1;
       tasklistError = s.error;
-    } else {
-      snapshots.push(s.text);
+    }
+    if (s.text) snapshots.push(s.text);
+    if (samplerDead) {
+      // A dead sampler must not blind the gate: keep sampling the slow way and
+      // let the warning below say the numbers came from the fallback.
+      const f = sampleFn();
+      if (f.error) {
+        tasklistFailures += 1;
+        tasklistError = f.error;
+      } else {
+        snapshots.push(f.text);
+      }
     }
   };
-  poll();
-  const timer = setInterval(poll, 250);
+  const timer = setInterval(poll, SAMPLE_MS);
   const timedOut = await new Promise((resolve) => {
     const killer = setTimeout(() => {
       try {
@@ -339,9 +445,7 @@ async function runLive() {
   });
   clearInterval(timer);
   poll();
-  if (tasklistFailures > 0) {
-    console.error(`potato-check: tasklist failed ${tasklistFailures}x, peak may read UNKNOWN (last: ${tasklistError})`);
-  }
+  sampler.stop();
   // Worst load seen over the run: one build during the sample makes the
   // frame numbers filed, not quiet.
   let load = { cargo: 0, rustc: 0, loaded: false };
@@ -349,14 +453,16 @@ async function runLive() {
     const sample = parseBuildLoad(text);
     if (sample.cargo + sample.rustc > load.cargo + load.rustc) load = sample;
   }
+  // The failure count travels back with the run: `run` warns through its own
+  // log seam, because a run that sampled nothing must never read as a clean one.
   return { output, tasklistText: snapshots.join("\n"), missing: false, timedOut, tasklistFailures, load };
 }
 
 // Tool entry point with injectable seams: a test drives the real print,
-// exit and report path with canned arena text, a fake tasklist and a temp
-// report dir, so the Accept's "prints NO_IGPU and exits 2" / "--floor exits
-// 1" are proven on the tool, not only on the pure helpers. Returns the exit
-// code: 2 when no integrated adapter shows or the bar file is unreadable,
+// exit and report path with canned arena text, a fake sampler child and a
+// temp report dir, so the Accept's "prints NO_IGPU and exits 2" / "--floor
+// exits 1" are proven on the tool, not only on the pure helpers. Returns the
+// exit code: 2 when no integrated adapter shows or the bar file is unreadable,
 // 3 when `--floor` runs on a box a build stamped LOADED (no verdict on filed
 // numbers), 1 when `--floor` runs and a bar is not PASS, else 0. Defaults are
 // the live implementations, so production behaviour is unchanged.
@@ -380,7 +486,7 @@ export async function run(argv = [], deps = {}) {
     logError(`potato-check: ${err?.message ?? err}`);
     return 2;
   }
-  const live = await runLiveFn();
+  const live = await runLiveFn({ sampler: deps.sampler, spawnArena: deps.spawnArena, sampleFn: deps.sampleFn });
   const s = summarize({
     output: live.output,
     tasklistText: live.tasklistText,
@@ -391,6 +497,9 @@ export async function run(argv = [], deps = {}) {
   log(s.line);
   for (const v of s.verdicts) log(formatBarLine(v));
   log(formatLoadLine(live.load));
+  if (live.tasklistFailures > 0) {
+    logError(`potato-check: working-set sampler failed ${live.tasklistFailures}x, peak may read UNKNOWN (last: ${live.tasklistError})`);
+  }
   if (s.exit === 3) log("potato floor: WITHHELD - a build ran during this run, so the bars are filed numbers, not a verdict (rerun on a quiet box)");
   if (!s.hasIntegrated) log("NO_IGPU");
   if (live.missing) logError(`potato-check: missing ${ARENA_EXE}`);

@@ -358,14 +358,7 @@ pub fn spot_shadow_pcf(depth_map: &[f32], size: u32, sample: SpotShadowSample) -
     if falloff <= 0.0 {
         return 0.0;
     }
-    shadow_pcf(
-        depth_map,
-        size,
-        clamped,
-        sample.frag_depth,
-        sample.bias,
-    ) * cone
-        * falloff
+    shadow_pcf(depth_map, size, clamped, sample.frag_depth, sample.bias) * cone * falloff
 }
 
 /// Face-clamped cube tap in `0..=1`: offset uv clamped inside the face margin

@@ -236,13 +236,17 @@ pub fn mirror_generation(slot: u8, payload: &[u8]) -> MirrorOutcome {
     }
 }
 
+/// Env vars are process-global: [`SteamBackend::probe`] reads them for every
+/// caller, so this lock is owned at module scope and taken by the Steam tests
+/// *and* by any test whose `App::save_progress` may mirror while the switches
+/// could be set. Without it an unlocked save lands inside a Steam test's own
+/// cloud dir and the missing-slot assert sees bytes it never wrote.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Env vars are process-global; serialize every test that touches them.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn cloud_dir(name: &str) -> std::path::PathBuf {
         let dir =

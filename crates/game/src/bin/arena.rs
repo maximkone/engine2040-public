@@ -307,6 +307,39 @@ fn pause_decision(tick: u64, pause_at: Option<u64>, stepped: bool) -> PauseDecis
     }
 }
 
+/// One zone line per actor in the shipped hand-placed rows, beside the prop
+/// rows the `--view-brief` lists ([`frame_brief_props`] reads the same kit
+/// data): `arena zone <id> class=<0..4> advantage=<0|1> dominance=<0|1>
+/// risk=<0|1> zone=<Gate|Centre|Ring|Wall>`.
+///
+/// The flags are the layout `tools/level-check.mjs` gates; the trailing
+/// `zone` is the ring classifier's reading of that row's own centre under the
+/// same gate row, so a layout edit shows up in the twin output too. A refused
+/// table prints one loud line instead of failing the run. Pure: embedded rows
+/// plus the classifier, no file IO, no window.
+fn zone_report_lines() -> Vec<String> {
+    let rows = match engine_game::arena_kit::kit_zone_rows() {
+        Ok(rows) => rows,
+        Err(err) => return vec![format!("arena zones: {err}")],
+    };
+    rows.iter()
+        .map(|row| {
+            let zone = engine_game::fight_ring::ring_zone_at(
+                f32::from(row.cx_cm) / 100.0,
+                f32::from(row.cz_cm) / 100.0,
+            );
+            format!(
+                "arena zone {} class={} advantage={} dominance={} risk={} zone={zone:?}",
+                row.id,
+                row.class,
+                u8::from(row.advantage),
+                u8::from(row.dominance),
+                u8::from(row.risk),
+            )
+        })
+        .collect()
+}
+
 /// Props and light for one `--view-brief` row: every kit row plus the ring and
 /// its wall as one row each, under the law-holding noon light the brief is
 /// measured with until the sun bind lands. Pure; built only when the flag is
@@ -584,6 +617,11 @@ fn run(raw: &[String]) -> i32 {
     say!("arena {}", pick.startup_line());
     // OS VRAM budget before the device takes its share (cold, startup only).
     println!("arena {}", engine_render::backend::read_vram().log_line());
+    // The hand-placed zone layout beside the twin's prop rows: a layout edit
+    // shows the same flags the design gate reads.
+    for line in zone_report_lines() {
+        say!("{line}");
+    }
     if chart_args.enabled {
         return run_chart_mode(&config, &args, &chart_args);
     }
@@ -3148,5 +3186,35 @@ mod tests {
         let kit_rows = kit_prop_rows().len();
         assert_eq!(props.len(), kit_rows + 2, "kit plus ring and wall");
         assert_eq!(light.sun_dir, [0.0, 1.0, 0.0], "noon until the bind");
+    }
+
+    /// The twin's zone report lists one line per hand-placed row with the
+    /// flags, so a layout edit shows up in the twin output beside the props.
+    #[test]
+    fn zone_report_lists_every_hand_placed_row() {
+        let lines = zone_report_lines();
+        let rows = engine_game::arena_kit::kit_zone_rows().expect("zone rows parse");
+        assert_eq!(lines.len(), rows.len(), "one zone line per row: {lines:?}");
+        assert!(
+            lines[0].starts_with("arena zone sand_floor class=0 advantage=0 dominance=0 risk=0"),
+            "{:?}",
+            lines[0]
+        );
+        let gate = lines
+            .iter()
+            .find(|line| line.starts_with("arena zone gate_tunnel "))
+            .expect("gate line");
+        assert!(
+            gate.contains("class=2") && gate.contains("risk=1") && gate.contains("zone=Gate"),
+            "{gate}"
+        );
+        let centre = lines
+            .iter()
+            .find(|line| line.starts_with("arena zone centre "))
+            .expect("centre line");
+        assert!(
+            centre.contains("advantage=1") && centre.contains("dominance=1"),
+            "{centre}"
+        );
     }
 }

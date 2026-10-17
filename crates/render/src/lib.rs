@@ -429,5 +429,4 @@ mod tests {
             "keeps the fixed-pattern helper"
         );
     }
-
 }

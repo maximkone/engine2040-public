@@ -186,6 +186,26 @@ test("the 3-open-per-part cap counts open lines only", () => {
   assert.match(res[5].reasons.join(";"), /4th open line for part tools/);
 });
 
+// 2026-10-17: the build farm checks out the public mirror, whose shallow
+// snapshot history holds none of the private shas in docs/plan/steals.md.
+// `git show <sha>` then fails on the farm and the gate read that as "landed
+// but touches no our/file": a lie about the row. An absent sha is not a
+// verdict here and must be a named note on a passing line; only a sha this
+// clone holds, whose commit really misses the file, stays the FAIL.
+test("a landed sha this clone cannot resolve passes with a named note; a resolvable miss still FAILs", () => {
+  const done = { ...open(1), status: "landed", sha: "c466633e" };
+  const absent = gateLines([done], { nowMs: NOW, commitTouches: () => null });
+  assert.equal(absent[0].ok, true, "an absent sha must not FAIL the row it cannot judge");
+  assert.equal(absent[0].reasons.length, 0, "the note is never a FAIL reason");
+  assert.match(absent[0].notes.join(";"), /landed c466633e not in this clone: cannot verify tools\/ship\.mjs/);
+  const miss = gateLines([done], { nowMs: NOW, commitTouches: () => false });
+  assert.equal(miss[0].ok, false, "a sha this repo holds that misses our/file stays a FAIL");
+  assert.match(miss[0].reasons.join(";"), /landed c466633e touches no tools\/ship\.mjs/);
+  const hit = gateLines([done], { nowMs: NOW, commitTouches: () => true });
+  assert.equal(hit[0].ok, true);
+  assert.deepEqual(hit[0].notes, [], "a verified touch carries no note");
+});
+
 test("expired and rejected verdicts parse and pass the gate (the words center reads)", () => {
   const md = ["# t", "", "## Steals", "",
     "2026-10-03 | A4 (Q1) | bevyengine/bevy@abc1234:x.rs | Apache-2.0 | crates/render/src/x.rs | expired 2026-10-11 (test-only oracle, no board row owns the port)",

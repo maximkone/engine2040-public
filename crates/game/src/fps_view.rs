@@ -60,25 +60,39 @@ pub struct LogicalFrame {
     pub look: LookState,
 }
 /// Render eye: interpolated feet plus height, with look attached and the
-/// trauma roll (`0` when calm).
+/// trauma roll (`0` when calm). Millimetre lanes are `f32`, the feed's own
+/// unit: whole millimetres land exact (`i16` covers every arena span) and a
+/// sub-millimetre shake kick keeps seven digits, so the camera feed narrows
+/// nothing and no lane needs a numeric `as` cast.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct RenderEye {
-    pub eye_mm: [f64; 3],
+    pub eye_mm: [f32; 3],
     pub yaw_rad: f32,
     pub pitch_rad: f32,
     /// Roll about the view axis from the shake, always `0` in [`render_eye`].
     pub roll_rad: f32,
 }
-fn lerp_lane(a: i32, b: i32, alpha_q: u32) -> f64 {
-    let t = f64::from(alpha_q.min(INTERP_SCALE)) / f64::from(INTERP_SCALE);
-    f64::from(a) + (f64::from(b) - f64::from(a)) * t
+/// Whole millimetres as the lane's own type: `i16` holds 32.7 m, wider than any
+/// arena span, and the `f32` step is `From`, so a lane narrows without a
+/// numeric `as` cast.
+fn mm_lane(mm: i32) -> f32 {
+    f32::from(i16::try_from(mm).unwrap_or(i16::MAX))
+}
+/// [`INTERP_SCALE`] as the lane's own type; the test below keeps the one number
+/// in step with the public `u32`.
+const INTERP_SCALE_Q: u16 = 1000;
+fn lerp_lane(a: i32, b: i32, alpha_q: u32) -> f32 {
+    let t = f32::from(u16::try_from(alpha_q.min(INTERP_SCALE)).unwrap_or(INTERP_SCALE_Q))
+        / f32::from(INTERP_SCALE_Q);
+    let (a_f, b_f) = (mm_lane(a), mm_lane(b));
+    a_f + (b_f - a_f) * t
 }
 /// Build the render eye at overstep alpha permille; adds height over interpolated feet.
 pub fn render_eye(frame: &LogicalFrame, alpha_q: u32, height_mm: i32) -> RenderEye {
     RenderEye {
         eye_mm: [
             lerp_lane(frame.prev_mm[0], frame.pos_mm[0], alpha_q),
-            lerp_lane(frame.prev_mm[1], frame.pos_mm[1], alpha_q) + f64::from(height_mm),
+            lerp_lane(frame.prev_mm[1], frame.pos_mm[1], alpha_q) + mm_lane(height_mm),
             lerp_lane(frame.prev_mm[2], frame.pos_mm[2], alpha_q),
         ],
         yaw_rad: frame.look.yaw_rad,
@@ -90,7 +104,7 @@ pub fn render_eye(frame: &LogicalFrame, alpha_q: u32, height_mm: i32) -> RenderE
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct EyeShake {
     /// Kick in mm about the eye, eye-space axes: `x` right, `y` up, `z` forward.
-    pub kick_mm: [f64; 3],
+    pub kick_mm: [f32; 3],
     /// Roll about the view axis, at or under [`EYE_ROLL_MAX_RAD`].
     pub roll_rad: f32,
     /// FOV punch, at or under [`FOV_PUNCH_MAX_RAD`].
@@ -129,12 +143,12 @@ pub fn eye_shake_for_trauma(trauma_permille: u32, tick: u32, gain_q: u32) -> Eye
     // The curve carries the trauma gain; the dial scales kick, roll and punch.
     let dial = eye_shake_dial(gain_q);
     let gain = trauma_gain(trauma_permille) * dial;
-    let mm = f64::from(dial) * 1000.0;
+    let mm = dial * 1000.0;
     EyeShake {
         kick_mm: [
-            f64::from(shake.offset_m.x) * mm,
-            f64::from(shake.offset_m.y) * mm,
-            f64::from(shake.offset_m.z) * mm,
+            shake.offset_m.x * mm,
+            shake.offset_m.y * mm,
+            shake.offset_m.z * mm,
         ],
         roll_rad: (gain * EYE_ROLL_MAX_RAD).min(EYE_ROLL_MAX_RAD),
         fov_punch_rad: (gain * FOV_PUNCH_MAX_RAD).min(FOV_PUNCH_MAX_RAD),
@@ -143,15 +157,15 @@ pub fn eye_shake_for_trauma(trauma_permille: u32, tick: u32, gain_q: u32) -> Eye
 /// Rotate an eye-space kick (mm: `x` right, `y` up, `z` forward) into world
 /// axes for a view yawed and pitched by the frame; right-handed, `+y` up, yaw
 /// `0` facing `+z` (the rig's boom axis, `camera_rig.rs:716`).
-fn eye_space_kick_mm(kick: [f64; 3], yaw_rad: f32, pitch_rad: f32) -> [f64; 3] {
+fn eye_space_kick_mm(kick: [f32; 3], yaw_rad: f32, pitch_rad: f32) -> [f32; 3] {
     let (sy, cy) = yaw_rad.sin_cos();
     let (sp, cp) = pitch_rad.sin_cos();
     let (kx, ky, kz) = (kick[0], kick[1], kick[2]);
     // right = (cy, 0, -sy), up = (-sy sp, cp, -cy sp), forward = (sy cp, sp, cy cp)
     [
-        f64::from(cy) * kx - f64::from(sy * sp) * ky + f64::from(sy * cp) * kz,
-        f64::from(cp) * ky + f64::from(sp) * kz,
-        -f64::from(sy) * kx - f64::from(cy * sp) * ky + f64::from(cy * cp) * kz,
+        cy * kx - (sy * sp) * ky + (sy * cp) * kz,
+        cp * ky + sp * kz,
+        -sy * kx - (cy * sp) * ky + (cy * cp) * kz,
     ]
 }
 /// Render eye with the eye-space trauma kick folded in: the pose from
@@ -178,8 +192,9 @@ pub fn render_eye_shaken(
     eye.roll_rad = shake.roll_rad;
     eye
 }
-/// Eye triple in meters for the render camera feed.
-pub fn eye_m(eye: &RenderEye) -> [f64; 3] {
+/// Eye triple in meters for the render camera feed: the lanes are already the
+/// feed's `f32` millimetres, so the divide is one step and needs no narrowing.
+pub fn eye_m(eye: &RenderEye) -> [f32; 3] {
     [
         eye.eye_mm[0] / 1000.0,
         eye.eye_mm[1] / 1000.0,
@@ -206,9 +221,9 @@ pub fn eye_for_fighter(
     }
     Ok(RenderEye {
         eye_mm: [
-            f64::from(pos_m[0]) * 1000.0,
-            f64::from(pos_m[1]) * 1000.0 + f64::from(height_mm),
-            f64::from(pos_m[2]) * 1000.0,
+            pos_m[0] * 1000.0,
+            pos_m[1] * 1000.0 + mm_lane(height_mm),
+            pos_m[2] * 1000.0,
         ],
         yaw_rad: facing_yaw_rad,
         pitch_rad: 0.0,
@@ -268,11 +283,10 @@ pub fn camera_for_eye(
     if !aspect.is_finite() || !(1e-3..=1e4).contains(&aspect) {
         return Err(CameraError::BadParam("FV3 aspect"));
     }
-    let meters = eye_m(eye);
-    // `core` has no `f32: TryFrom<f64>`, so the millimetre lanes narrow here:
-    // the eye is already validated finite, and a lane past `f32` range reaches
-    // the render camera's own finite check, which refuses it by name.
-    let position = [meters[0] as f32, meters[1] as f32, meters[2] as f32];
+    // The lanes are already the feed's millimetres (`RenderEye::eye_mm`), so the
+    // metres are one divide, no narrowing cast; a lane past `f32` range still
+    // reaches the render camera's own finite check, which refuses it by name.
+    let position = eye_m(eye);
     let (sy, cy) = eye.yaw_rad.sin_cos();
     let (sp, cp) = eye.pitch_rad.sin_cos();
     // Forward from yaw and pitch: yaw 0 level faces +z, and the triple is unit
@@ -304,6 +318,16 @@ mod tests {
     use crate::camera::TRAUMA_SCALE;
     use crate::camera_feed::{trauma_for_cue, trauma_for_cues};
     use engine_audio::FightCue;
+    #[test]
+    fn interp_scale_lane_type_holds_the_public_number() {
+        // The lane type carries its own permille scale (`INTERP_SCALE_Q`): a
+        // retune of the public `u32` must move both, never one.
+        assert_eq!(
+            INTERP_SCALE,
+            u32::from(INTERP_SCALE_Q),
+            "lane scale drifted"
+        );
+    }
     #[test]
     fn fps_look_clamps_and_wraps() {
         let mut look = LookState::neutral();
@@ -347,7 +371,7 @@ mod tests {
         assert_eq!(eye.eye_mm[0], 1000.0, "x missed pos");
         assert_eq!(
             eye.eye_mm[1],
-            2000.0 + f64::from(EYE_HEIGHT_MM),
+            2000.0 + mm_lane(EYE_HEIGHT_MM),
             "y missed height"
         );
         assert_eq!(eye.eye_mm[2], 3000.0, "z missed pos");
@@ -385,7 +409,7 @@ mod tests {
         assert_eq!(eye.eye_mm[0], 1000.0, "sanity: eye moved");
     }
     /// Kick length in mm: the L2 norm of the eye-space kick triple.
-    fn kick_len_mm(kick: &[f64; 3]) -> f64 {
+    fn kick_len_mm(kick: &[f32; 3]) -> f32 {
         (kick[0] * kick[0] + kick[1] * kick[1] + kick[2] * kick[2]).sqrt()
     }
     #[test]
@@ -451,7 +475,7 @@ mod tests {
             let mut out = Vec::new();
             for (tick, trauma) in track {
                 let eye = render_eye_shaken(&frame, 500, EYE_HEIGHT_MM, *trauma, *tick, gain_q);
-                out.extend(eye.eye_mm.iter().map(|lane| lane.to_bits()));
+                out.extend(eye.eye_mm.iter().map(|lane| u64::from(lane.to_bits())));
                 let shake = eye_shake_for_trauma(*trauma, *tick, gain_q);
                 out.push(u64::from(eye.roll_rad.to_bits()));
                 out.push(u64::from(shake.fov_punch_rad.to_bits()));
@@ -529,7 +553,7 @@ mod tests {
         fn camera_for_eye_refuses_bad_fov_aspect_and_eye() {
             let good = eye_for_fighter([0.0, 0.0, 0.0], 0.0, EYE_HEIGHT_MM).expect("valid eye");
             let nan_eye = RenderEye {
-                eye_mm: [f64::NAN, 0.0, 0.0],
+                eye_mm: [f32::NAN, 0.0, 0.0],
                 ..good
             };
             let nan_yaw = RenderEye {

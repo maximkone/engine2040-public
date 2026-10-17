@@ -46,6 +46,8 @@ insertion, hash x2 plus snapshot/restore equality; cloth stays
 presentation-only and never enters the hash. Scale rows PX15-PX18 and
 DX11-DX12 are boarded open; CCD is off by grep.
 
+Status 2026-10-17: disk shows that "CCD is off by grep" text two lines lower than the `:45` cite in the bullet above, at `docs/plan/body-and-break.md:47` (`rg -n "CCD is off by grep" docs/plan/body-and-break.md` returns only `47:`), and the code side still holds, so that line and the `:32` "`ccd_enabled` 0 hits" cell stay false: `crates/physics/src/ragdoll.rs:378` and `crates/physics/src/powered.rs:317` call `.ccd_enabled(true)` (rg hits), `crates/physics/src/lod.rs` is gone (Test-Path False) and `rg -n ccd_for crates` exits 1 with 0 hits, while bomb CCD still runs inside the solver as `CCDSolver` at `crates/physics/src/ragdoll.rs:299`, `crates/physics/src/powered.rs:248` and `crates/physics/src/rapier.rs:144`.
+
 ### physics and destruction base
 
 The arena already falls, grapples, wears capes and breaks crates the same way

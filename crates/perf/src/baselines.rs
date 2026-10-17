@@ -37,9 +37,9 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         workload: "arena_tick",
         ticks: 600,
-        hash: 15533397989756457830,
-        alloc_bytes: 62441,
-        alloc_count: 64,
+        hash: 12857399269765116608,
+        alloc_bytes: 62963,
+        alloc_count: 151,
     },
     Baseline {
         workload: "arena_tick_sim",
@@ -86,23 +86,23 @@ pub const BASELINES: &[Baseline] = &[
     Baseline {
         workload: ScaledArenaTick::NAME_4,
         ticks: 600,
-        hash: 8562710637924615174,
+        hash: 8938032063638970347,
         alloc_bytes: 56958,
         alloc_count: 60,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_8,
         ticks: 600,
-        hash: 7212065434303264423,
-        alloc_bytes: 58750,
-        alloc_count: 64,
+        hash: 6433453695639145363,
+        alloc_bytes: 58756,
+        alloc_count: 65,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_16,
         ticks: 600,
-        hash: 15533397989756457830,
-        alloc_bytes: 62441,
-        alloc_count: 64,
+        hash: 12857399269765116608,
+        alloc_bytes: 62963,
+        alloc_count: 151,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_4_SIM,

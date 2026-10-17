@@ -4,8 +4,11 @@
 // it `landed <sha>`. This tool picks the next line, fetches its pinned donor
 // file, and gates the file: at most 3 open lines per part, no open line older
 // than 7 days (center size-check.mjs ages the line by name, with no
-// file-freshness excuse), no landed mark whose commit misses our/file. An
-// `expired <date> (<reason>)` or `rejected <date> (<reason>)` line is closed.
+// file-freshness excuse), no landed mark whose commit misses our/file. A
+// landed sha this clone cannot resolve (the public mirror holds none of the
+// private shas) is not a verdict: it passes with a named note, never as
+// `touches no`. An `expired <date> (<reason>)` or `rejected <date> (<reason>)`
+// line is closed.
 // Old lines without a size parse as M.
 //
 // Usage from the repo/lane root:
@@ -51,8 +54,11 @@ Usage:
   node tools/steal-land.mjs --gate          FAIL a 4th open line per part,
       an open line older than 7 days by name (center size-check.mjs's rule:
       age alone, so a fresh commit to our/file never saves the line), and a
-      landed <sha> whose commit misses our/file. expired <date> (<reason>)
-      and rejected <date> (<reason>) read as closed, as center reads them.
+      landed <sha> whose commit misses our/file. A landed sha this clone
+      cannot resolve (the public mirror has no private shas) passes with a
+      named note: it is unverifiable here, never a touches-no FAIL.
+      expired <date> (<reason>) and rejected <date> (<reason>) read as
+      closed, as center reads them.
   -h, --help     print this help and exit 0
 
 Exit codes: 0 ok - 1 gate FAIL or fetch failure - 2 usage.
@@ -182,6 +188,10 @@ export function formatLine(l) {
 }
 
 // Pure gate over parsed lines; git access is injected so tests stay offline.
+// commitTouches returns true (the commit touches our/file), false (the commit
+// is in this clone and misses the file: a FAIL) or null (this clone cannot
+// resolve the sha: a note, the only honest reading on the mirror's snapshot
+// clone, which holds none of the private shas).
 export function gateLines(lines, { nowMs = Date.now(), commitTouches = null } = {}) {
   const openByPart = new Map();
   for (const l of lines) {
@@ -197,6 +207,7 @@ export function gateLines(lines, { nowMs = Date.now(), commitTouches = null } = 
   }
   return lines.map((l) => {
     const reasons = [];
+    const notes = [];
     if (!SIZES.has(String(l.size).toUpperCase())) reasons.push(`unknown size '${l.size}' (want XS|S|M|L|XL, or no size for M)`);
     if (over.has(l.id)) {
       reasons.push(`4th open line for part ${over.get(l.id)} (${openByPart.get(over.get(l.id)).length} open; max ${MAX_OPEN_PER_PART})`);
@@ -214,10 +225,15 @@ export function gateLines(lines, { nowMs = Date.now(), commitTouches = null } = 
     }
     if (l.status === "landed") {
       const touches = commitTouches ? commitTouches(l.sha, l.our) : true;
-      if (!touches) reasons.push(`landed ${l.sha} touches no ${l.our}`);
+      // A sha this clone cannot resolve says nothing about our/file: the
+      // public mirror's export snapshots hold no private sha (2026-10-17).
+      // Reading that as `touches no` was the lie the farm saw. Name it
+      // instead, and keep the bite for a sha that is here and misses.
+      if (touches === null) notes.push(`landed ${l.sha} not in this clone: cannot verify ${l.our} here (private sha)`);
+      else if (!touches) reasons.push(`landed ${l.sha} touches no ${l.our}`);
     }
     if (!["open", "landed", "expired", "rejected"].includes(l.status)) reasons.push(`unknown status '${l.status}' (want open, landed <sha>, expired <date> (<reason>) or rejected <date> (<reason>))`);
-    return { id: l.id, ok: reasons.length === 0, reasons };
+    return { id: l.id, ok: reasons.length === 0, reasons, notes };
   });
 }
 
@@ -239,7 +255,13 @@ function runBin(bin, args, { cwd = ROOT } = {}) {
   return { ok: r.status === 0, out: `${r.stdout ?? ""}`.trim(), err: `${r.stderr ?? ""}`.trim() };
 }
 
+// The sha is resolved first and git is asked about it only then: a sha this
+// clone does not hold (the public mirror's shallow export snapshots) is
+// "cannot verify here" (null), never "touches no" (false). `^{commit}` also
+// takes the 7-40 char prefixes the ledger writes.
 const gitCommitTouches = (sha, file) => {
+  const have = runBin("git", ["cat-file", "-e", `${sha}^{commit}`]);
+  if (!have.ok) return null;
   const r = runBin("git", ["show", "--pretty=", "--name-only", sha, "--"]);
   if (!r.ok) return false;
   return r.out.split("\n").map((s) => s.trim()).includes(file);
@@ -314,10 +336,14 @@ function cmdGate() {
   let bad = 0;
   for (const l of lines) {
     const r = byId.get(l.id);
-    if (r.ok) console.log(`[PASS] #${l.id} ${l.date} ${l.bar} ${l.our} ${l.status}`);
+    // A note (a landed sha this clone cannot resolve) rides on the line it
+    // explains and never changes the PASS/FAIL words.
+    const note = r.notes.length ? ` (${r.notes.join("; ")})` : "";
+    if (r.ok) console.log(`[PASS] #${l.id} ${l.date} ${l.bar} ${l.our} ${l.status}${note}`);
     else {
       bad += 1;
       for (const reason of r.reasons) console.log(`[FAIL] #${l.id} ${l.date} ${l.bar} ${l.our} ${l.status}: ${reason}`);
+      if (note) console.log(`  #${l.id}${note}`);
     }
   }
   const open = lines.filter((l) => l.status === "open").length;

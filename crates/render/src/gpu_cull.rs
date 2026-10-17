@@ -30,9 +30,12 @@ const CULL_WGSL: &str = include_str!("shaders/cull.wgsl");
 /// Threads per cull workgroup: matches `@workgroup_size(64)` in the shader.
 pub const CULL_WORKGROUP: u32 = 64;
 
-/// Indirect args words: index count, instance count, first index, base
-/// vertex, first instance (an indexed draw, the 5-word form).
+/// Words in the indirect args block: index count, instance count, first
+/// index, base vertex, first instance (the indexed 5-word form).
 pub const INDIRECT_WORDS: usize = 5;
+
+/// Bytes of one `u32` word.
+const WORD_BYTES: u64 = 4;
 
 /// Slice-1 cull failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,13 +91,33 @@ impl CullProof {
     #[must_use]
     pub fn visible_ids(&self) -> Vec<u32> {
         let mut ids: Vec<u32> = Vec::new();
-        for (index, flag) in self.flags.iter().enumerate() {
+        let mut id: u32 = 0;
+        for flag in &self.flags {
             if *flag == 1 {
-                ids.push(index as u32);
+                ids.push(id);
             }
+            id = id.saturating_add(1);
         }
         ids
     }
+}
+
+/// `words` `u32` words as bytes, or a refusal.
+fn word_bytes(words: usize) -> Result<u64, CullError> {
+    u64::try_from(words)
+        .ok()
+        .and_then(|count| count.checked_mul(WORD_BYTES))
+        .ok_or_else(|| CullError::BadInput(String::from("a cull word block would overflow")))
+}
+
+/// A byte offset as a slice index, or a refusal. Named conversion, so no
+/// `as` cast indexes the readback.
+fn word_index(bytes: u64) -> Result<usize, CullError> {
+    usize::try_from(bytes).map_err(|_| {
+        CullError::BadInput(String::from(
+            "the cull readback offset does not fit the address space",
+        ))
+    })
 }
 
 /// Refuse input the pass cannot answer for, before any device work: an empty
@@ -102,9 +125,9 @@ impl CullProof {
 /// non-finite component.
 pub fn check_inputs(spheres: &[[f32; 4]], planes: &[[f32; 4]; 6]) -> Result<(), CullError> {
     if spheres.is_empty() {
-        return Err(CullError::BadInput(
-            "no spheres: an empty cull has nothing to count".to_string(),
-        ));
+        return Err(CullError::BadInput(String::from(
+            "no spheres: an empty cull has nothing to count",
+        )));
     }
     for (index, sphere) in spheres.iter().enumerate() {
         if !sphere.iter().all(|word| word.is_finite()) {
@@ -137,6 +160,17 @@ fn pack_vec4(words: &[[f32; 4]]) -> Vec<u8> {
         }
     }
     bytes
+}
+
+/// One pass's buffers plus their bind group. Every buffer is zero-filled by
+/// the device at creation, which is exactly the start state the pass wants:
+/// `main` writes every flag `0..count`, the atomic starts at 0 and
+/// `write_args` overwrites all five words.
+struct CullBuffers {
+    flags: wgpu::Buffer,
+    count: wgpu::Buffer,
+    args: wgpu::Buffer,
+    bind: wgpu::BindGroup,
 }
 
 /// Reusable slice-1 device state: the cull pipeline plus its `write_args`
@@ -208,11 +242,26 @@ impl GpuCuller {
         planes: &[[f32; 4]; 6],
     ) -> Result<CullProof, CullError> {
         check_inputs(spheres, planes)?;
-        let count = spheres.len() as u32;
-        let flags_bytes = u64::from(count) * 4;
-        let args_bytes = INDIRECT_WORDS as u64 * 4;
+        let count = u32::try_from(spheres.len()).map_err(|_| {
+            CullError::BadInput(String::from("more spheres than one cull can count"))
+        })?;
+        let buffers = self.upload(device, spheres, planes)?;
+        self.dispatch(device, queue, &buffers, count)?;
+        let (device_count, device_flags, device_args) =
+            read_back(device, queue, &buffers, spheres.len())?;
+        self.verify(device_count, device_flags, device_args, spheres, planes)
+    }
+
+    /// Upload the spheres and planes, size the three answer buffers and wire
+    /// the bind group. No writes: the device zero-fills them.
+    fn upload(
+        &self,
+        device: &wgpu::Device,
+        spheres: &[[f32; 4]],
+        planes: &[[f32; 4]; 6],
+    ) -> Result<CullBuffers, CullError> {
         use wgpu::util::DeviceExt;
-        let storage = wgpu::BufferUsages::STORAGE
+        let answer = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC;
         let spheres_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -225,27 +274,24 @@ impl GpuCuller {
             contents: &pack_vec4(planes),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        let flags_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let flags = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gs18-cull-flags"),
-            size: flags_bytes,
-            usage: storage,
+            size: word_bytes(spheres.len())?,
+            usage: answer,
             mapped_at_creation: false,
         });
-        let count_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let count = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gs18-cull-count"),
-            size: 4,
-            usage: storage,
+            size: word_bytes(1)?,
+            usage: answer,
             mapped_at_creation: false,
         });
-        let args_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let args = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gs18-cull-args"),
-            size: args_bytes,
-            usage: storage,
+            size: word_bytes(INDIRECT_WORDS)?,
+            usage: answer,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&flags_buf, 0, &vec![0u8; flags_bytes as usize]);
-        queue.write_buffer(&count_buf, 0, &0u32.to_le_bytes());
-        queue.write_buffer(&args_buf, 0, &vec![0u8; args_bytes as usize]);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gs18-cull-bind"),
             layout: &self.layout,
@@ -260,18 +306,35 @@ impl GpuCuller {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: flags_buf.as_entire_binding(),
+                    resource: flags.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: count_buf.as_entire_binding(),
+                    resource: count.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: args_buf.as_entire_binding(),
+                    resource: args.as_entire_binding(),
                 },
             ],
         });
+        Ok(CullBuffers {
+            flags,
+            count,
+            args,
+            bind,
+        })
+    }
+
+    /// One compute pass under a validation scope: `main` over every sphere,
+    /// then `write_args`. Any validation error is a refusal, never a warning.
+    fn dispatch(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffers: &CullBuffers,
+        count: u32,
+    ) -> Result<(), CullError> {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("gs18-cull"),
@@ -282,7 +345,7 @@ impl GpuCuller {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.cull);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, &buffers.bind, &[]);
             pass.dispatch_workgroups(count.div_ceil(CULL_WORKGROUP), 1, 1);
             // One thread turns the counted survivors into the draw args.
             pass.set_pipeline(&self.write_args);
@@ -295,95 +358,111 @@ impl GpuCuller {
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(CullError::Validation(format!("{error:?}")));
         }
-        // Past the scope every validation error is a refusal above, so a
-        // proof only ever carries a clean 0 here.
-        let validation_errors = 0u32;
-        // One mapped read: count, then the flags, then the args.
-        let back_size = 4 + flags_bytes + args_bytes;
-        let back = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gs18-cull-readback"),
-            size: back_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("gs18-cull-copy"),
-        });
-        encoder.copy_buffer_to_buffer(&count_buf, 0, &back, 0, 4);
-        encoder.copy_buffer_to_buffer(&flags_buf, 0, &back, 4, flags_bytes);
-        encoder.copy_buffer_to_buffer(&args_buf, 0, &back, 4 + flags_bytes, args_bytes);
-        queue.submit(Some(encoder.finish()));
-        let slice = back.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| CullError::Device(format!("poll: {error}")))?;
-        receiver
-            .recv()
-            .map_err(|error| CullError::Device(format!("map channel: {error}")))?
-            .map_err(|error| CullError::Device(format!("map: {error}")))?;
-        let device_count;
-        let device_flags;
-        let device_args;
-        {
-            let mapped = slice
-                .get_mapped_range()
-                .map_err(|error| CullError::Device(format!("mapped range: {error}")))?;
-            let word = |at: usize| {
-                let mut four = [0u8; 4];
-                four.copy_from_slice(&mapped[at..at + 4]);
-                u32::from_le_bytes(four)
-            };
-            device_count = word(0);
-            device_flags = (0..count as usize)
-                .map(|index| word(4 + index * 4))
-                .collect::<Vec<u32>>();
-            let mut args = [0u32; INDIRECT_WORDS];
-            for (index, slot) in args.iter_mut().enumerate() {
-                *slot = word(4 + flags_bytes as usize + index * 4);
-            }
-            device_args = args;
-        }
-        // The range guard is gone with the block above: the map may go.
-        back.unmap();
-        // The oracle is the check, not a second opinion.
+        Ok(())
+    }
+
+    /// The oracle is the check, not a second opinion: a count, flag or args
+    /// disagreement is a refusal with both counts.
+    fn verify(
+        &self,
+        device_count: u32,
+        device_flags: Vec<u32>,
+        device_args: [u32; INDIRECT_WORDS],
+        spheres: &[[f32; 4]],
+        planes: &[[f32; 4]; 6],
+    ) -> Result<CullProof, CullError> {
         let mut cpu_flags = vec![0u8; spheres.len()];
         let written = cull_cpu_flags_into(spheres, planes, &mut cpu_flags);
         let cpu_count = visible_count(&cpu_flags[..written]);
+        let mismatch = || CullError::Mismatch {
+            device: device_count,
+            cpu: cpu_count,
+        };
         if device_count != cpu_count {
-            return Err(CullError::Mismatch {
-                device: device_count,
-                cpu: cpu_count,
-            });
+            return Err(mismatch());
         }
         if device_flags
             .iter()
             .zip(cpu_flags.iter())
             .any(|(device, cpu)| *device != u32::from(*cpu))
         {
-            return Err(CullError::Mismatch {
-                device: device_count,
-                cpu: cpu_count,
-            });
+            return Err(mismatch());
         }
-        let want_args = indirect_args_5(cpu_count);
-        if device_args != want_args {
-            return Err(CullError::Mismatch {
-                device: device_count,
-                cpu: cpu_count,
-            });
+        if device_args != indirect_args_5(cpu_count) {
+            return Err(mismatch());
         }
         Ok(CullProof {
             count: device_count,
             cpu_count,
             args: device_args,
             flags: device_flags,
-            validation_errors,
+            // Every validation error is a refusal inside `dispatch`, so a
+            // proof only ever carries a clean 0 here.
+            validation_errors: 0,
         })
     }
+}
+
+/// Read the count, the flags and the args back in one map: the count at 0,
+/// the flags next, the args last.
+fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffers: &CullBuffers,
+    spheres: usize,
+) -> Result<(u32, Vec<u32>, [u32; INDIRECT_WORDS]), CullError> {
+    let flags_bytes = word_bytes(spheres)?;
+    let args_bytes = word_bytes(INDIRECT_WORDS)?;
+    let args_at = 4 + flags_bytes;
+    let parse_args_at = word_index(args_at)?;
+    let back = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gs18-cull-readback"),
+        size: args_at + args_bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gs18-cull-copy"),
+    });
+    encoder.copy_buffer_to_buffer(&buffers.count, 0, &back, 0, 4);
+    encoder.copy_buffer_to_buffer(&buffers.flags, 0, &back, 4, flags_bytes);
+    encoder.copy_buffer_to_buffer(&buffers.args, 0, &back, args_at, args_bytes);
+    queue.submit(Some(encoder.finish()));
+    let slice = back.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| CullError::Device(format!("poll: {error}")))?;
+    receiver
+        .recv()
+        .map_err(|error| CullError::Device(format!("map channel: {error}")))?
+        .map_err(|error| CullError::Device(format!("map: {error}")))?;
+    let count;
+    let flags;
+    let args;
+    {
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|error| CullError::Device(format!("mapped range: {error}")))?;
+        let word = |at: usize| {
+            let mut four = [0u8; 4];
+            four.copy_from_slice(&mapped[at..at + 4]);
+            u32::from_le_bytes(four)
+        };
+        count = word(0);
+        flags = (0..spheres).map(|index| word(4 + index * 4)).collect();
+        let mut words = [0u32; INDIRECT_WORDS];
+        for (index, slot) in words.iter_mut().enumerate() {
+            *slot = word(parse_args_at + index * 4);
+        }
+        args = words;
+    }
+    // The range guard is gone with the block above: the map may go.
+    back.unmap();
+    Ok((count, flags, args))
 }
 
 #[cfg(test)]

@@ -30,6 +30,33 @@ use engine_render::v1::{self, MeshData, PbrMaterial};
 /// ring's own tests stay valid.
 pub use engine_arena::zones::{zone_at, ArenaZone, ZoneTally, CENTRE_R_M, RING_R_M};
 
+/// Classify one floor point into its zone under the shipped gate mouth: the
+/// `gate_tunnel` row of `content/design/arena-zones.rows` read through
+/// [`crate::arena_kit::kit_zone_rows`], so the ring's zone reading and the
+/// design gate share one anchor; falls back to
+/// [`engine_arena::zones::shipped_gate_anchor`] when that row is absent.
+/// Units: meters. Determinism: same rows give the same zone.
+///
+/// Caller: `crates/game/src/bin/arena.rs` `zone_report_lines` names each
+/// row's zone through this.
+pub fn ring_zone_at(x_m: f32, z_m: f32) -> ArenaZone {
+    let gate = crate::arena_kit::kit_zone_rows().ok().and_then(|rows| {
+        rows.into_iter()
+            .find(|row| row.id == crate::arena_kit::KIT_ZONE_GATE_ID)
+    });
+    let (mouth, half) = match gate {
+        Some(row) => (
+            [f32::from(row.cx_cm) / 100.0, f32::from(row.cz_cm) / 100.0],
+            f32::from(row.radius_cm) / 100.0,
+        ),
+        None => {
+            let [x, z, half] = engine_arena::zones::shipped_gate_anchor();
+            ([x, z], half)
+        }
+    };
+    zone_at(x_m, z_m, mouth, half)
+}
+
 /// Floor mesh key (clear of every other staged key).
 pub const RING_FLOOR_KEY_ID: u64 = 0xF16D_0001;
 /// Wall plus tiers mesh key.
@@ -716,6 +743,17 @@ mod tests {
         // Just past the mouth edge: radial band decides again.
         assert_eq!(zone_at(5.0, 1.6, gate, 1.5), ArenaZone::Ring);
         assert_eq!(zone_at(3.4, 0.0, gate, 1.5), ArenaZone::Ring);
+    }
+
+    /// The ring reads its gate mouth from the hand-placed row (10 m out, 2 m
+    /// half-edge), not a caller constant: the same file the design gate gates.
+    #[test]
+    fn ring_zone_at_reads_the_shipped_gate_row() {
+        assert_eq!(ring_zone_at(10.0, 0.0), ArenaZone::Gate);
+        assert_eq!(ring_zone_at(11.9, 1.9), ArenaZone::Gate);
+        assert_eq!(ring_zone_at(12.1, 0.0), ArenaZone::Wall);
+        assert_eq!(ring_zone_at(5.0, 0.0), ArenaZone::Ring);
+        assert_eq!(ring_zone_at(0.0, 0.0), ArenaZone::Centre);
     }
 
     #[test]

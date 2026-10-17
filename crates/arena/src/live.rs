@@ -810,13 +810,18 @@ mod tests {
         // taking the snapshot consumed nothing.
         let mut again = Vec::new();
         for tick in 300..320 {
-            let stepped = second.step(tick_inputs(&tape, tick)).expect("second suffix");
+            let stepped = second
+                .step(tick_inputs(&tape, tick))
+                .expect("second suffix");
             again.push(stepped.checkpoint);
         }
         assert_eq!(again, checkpoints[300..320], "second resume agrees");
         for tick in 300..config.ticks {
             let stepped = live.step(tick_inputs(&tape, tick)).expect("live continues");
-            assert_eq!(stepped.checkpoint, checkpoints[tick as usize], "live {tick}");
+            assert_eq!(
+                stepped.checkpoint, checkpoints[tick as usize],
+                "live {tick}"
+            );
         }
         assert_eq!(live.steps(), u64::from(config.ticks), "one step per tick");
         // A world-armed match refuses to snapshot: MatchSnapshot has no world.

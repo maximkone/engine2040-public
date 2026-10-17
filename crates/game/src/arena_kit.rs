@@ -27,6 +27,141 @@ mod kit_load;
 pub use kit_load::{
     kit_actors, kit_actors_from_json, KitActor, KitAsset, KIT_ACTOR_COUNT, KIT_JSON,
 };
+
+/// Hand-placed zone table (`content/design/arena-zones.rows`): the one file
+/// the design gate (`tools/level-check.mjs`) and this reader both read.
+pub const KIT_ZONE_ROWS: &str = include_str!("../../../content/design/arena-zones.rows");
+/// Row id of the entrance tunnel: the gate anchor owner.
+pub const KIT_ZONE_GATE_ID: &str = "gate_tunnel";
+/// Rows the shipped table holds: one per placement actor plus `centre`.
+const KIT_ZONE_COUNT: usize = KIT_ACTOR_COUNT + 1;
+
+/// One row of the hand-placed zone table.
+///
+/// Units: whole centimeters; `class` is 0 none, 1 magnet, 2 curtain, 3
+/// generator, 4 bumper, and `advantage`/`dominance`/`risk` are the row's
+/// `0|1` flags. Fields: `id` actor or zone name, `cx_cm`/`cz_cm` the centre,
+/// `radius_cm` the mouth or hold radius (above zero), `height_cm` the height.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct KitZoneRow {
+    pub id: &'static str,
+    pub class: u8,
+    pub cx_cm: i16,
+    pub cz_cm: i16,
+    pub radius_cm: i16,
+    pub height_cm: i16,
+    pub advantage: bool,
+    pub dominance: bool,
+    pub risk: bool,
+}
+
+/// Row error carrying the 1-based line, like `tools/level-check.mjs`.
+fn zone_err(line: usize, detail: &str) -> KitError {
+    parse_err(&format!("zones line {line}: {detail}"))
+}
+
+/// Parse the zone table text (`table arena-zones version 1`, then one
+/// `<id> class=<0..4> cx_cm=<int> cz_cm=<int> radius_cm=<int> height_cm=<int>
+/// advantage=<0|1> dominance=<0|1> risk=<0|1>` row; `#` comments and blank
+/// lines skipped). Every rule mirrors `tools/level-check.mjs` `parseZones`.
+fn kit_zone_rows_from_text(text: &'static str) -> Result<Vec<KitZoneRow>, KitError> {
+    const KEYS: [&str; 8] = [
+        "class",
+        "cx_cm",
+        "cz_cm",
+        "radius_cm",
+        "height_cm",
+        "advantage",
+        "dominance",
+        "risk",
+    ];
+    let mut header = false;
+    let mut rows: Vec<KitZoneRow> = Vec::with_capacity(KIT_ZONE_COUNT);
+    for (index, raw) in text.lines().enumerate() {
+        let line = index + 1;
+        let body = raw.split('#').next().unwrap_or("").trim();
+        if body.is_empty() {
+            continue;
+        }
+        if !header {
+            if body != "table arena-zones version 1" {
+                return Err(zone_err(line, "first row must be the header"));
+            }
+            header = true;
+            continue;
+        }
+        let mut cells = body.split_whitespace();
+        let Some(id) = cells.next().filter(|id| !id.contains('=')) else {
+            return Err(zone_err(line, "misses actor id"));
+        };
+        let mut values = [0i16; KEYS.len()];
+        let mut mask = 0u8;
+        for cell in cells {
+            let Some((key, value)) = cell.split_once('=') else {
+                return Err(zone_err(line, "bad cell"));
+            };
+            let Some(slot) = KEYS.iter().position(|known| *known == key) else {
+                return Err(zone_err(line, "unknown key"));
+            };
+            let digits = value.strip_prefix('-').unwrap_or(value);
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(zone_err(line, "whole number only"));
+            }
+            mask |= 1 << slot;
+            values[slot] = value
+                .parse::<i16>()
+                .map_err(|_| zone_err(line, "out of range"))?;
+        }
+        if mask != u8::MAX {
+            return Err(zone_err(line, "missing or duplicate key"));
+        }
+        if !(0..=4).contains(&values[0]) {
+            return Err(zone_err(line, "class must be 0..4"));
+        }
+        if values[3] <= 0 {
+            return Err(zone_err(line, "radius_cm must be above 0"));
+        }
+        for (slot, key) in [(5usize, "advantage"), (6, "dominance"), (7, "risk")] {
+            if values[slot] != 0 && values[slot] != 1 {
+                return Err(zone_err(line, &format!("{key} must be 0|1")));
+            }
+        }
+        rows.push(KitZoneRow {
+            id,
+            class: u8::try_from(values[0]).unwrap_or(0),
+            cx_cm: values[1],
+            cz_cm: values[2],
+            radius_cm: values[3],
+            height_cm: values[4],
+            advantage: values[5] == 1,
+            dominance: values[6] == 1,
+            risk: values[7] == 1,
+        });
+    }
+    if !header {
+        return Err(parse_err("zones: misses the table header"));
+    }
+    if rows.len() != KIT_ZONE_COUNT {
+        return Err(parse_err(&format!(
+            "zones: {KIT_ZONE_COUNT} rows, saw {}",
+            rows.len()
+        )));
+    }
+    Ok(rows)
+}
+
+/// The hand-placed zone rows, in file order.
+///
+/// Consumer: the twin's zone report (`crates/game/src/bin/arena.rs`) and the
+/// ring's gate anchor (`crates/game/src/fight_ring.rs`), both reading the file
+/// `tools/level-check.mjs` gates. Units: whole centimeters, flags `0|1`.
+/// Determinism: same bytes give the same rows in file order (no map). Errors:
+/// [`KitError::Parse`] with the 1-based line of a bad row, or the row count
+/// from a missing actor row. Budget: 12 rows once at init, zero per tick.
+pub fn kit_zone_rows() -> Result<Vec<KitZoneRow>, KitError> {
+    kit_zone_rows_from_text(KIT_ZONE_ROWS)
+}
+
 /// Distinct kit files staged (one import per file).
 pub const KIT_ASSET_COUNT: usize = 8;
 /// Minimum source triangles over the staged kit files (the shipping kit
@@ -1859,5 +1994,44 @@ mod tests {
         }
         assert_eq!(ticks, 1000, "20 seeds x 50 ticks of two bots");
         assert!(moved, "the bots must walk, or the crossing test is vacuous");
+    }
+
+    /// F2P: the kit reads the hand-placed zone table (`content/design/
+    /// arena-zones.rows`), so the game's zone reading and `tools/level-check.mjs`
+    /// come from one file. The flag columns had no Rust reader (only test
+    /// fixtures and win-rate prose named them).
+    #[test]
+    fn kit_zone_rows_reads_the_hand_placed_layout() {
+        let rows = kit_zone_rows().expect("embedded zone rows parse");
+        assert_eq!(rows.len(), KIT_ZONE_COUNT, "11 actor rows plus centre");
+        let gate = rows
+            .iter()
+            .find(|row| row.id == KIT_ZONE_GATE_ID)
+            .expect("gate row present");
+        // 10 m on the centre lane, 2 m half-edge: the shipped gate anchor.
+        assert_eq!((gate.class, gate.cx_cm, gate.cz_cm), (2, 1000, 0));
+        assert_eq!(gate.radius_cm, 200);
+        // The flags are shipped data: two advantage bumper rows and exactly
+        // one holdable dominance point (the duel centre).
+        assert_eq!(rows.iter().filter(|r| r.class == 4).count(), 2);
+        assert_eq!(rows.iter().filter(|r| r.dominance).count(), 1);
+        assert!(rows.iter().any(|r| r.advantage && r.class == 4));
+        assert!(rows.iter().any(|r| r.risk));
+    }
+
+    /// The reader refuses what `tools/level-check.mjs` refuses, with the line
+    /// number or the row count: a float, an out-of-band class, and a table
+    /// missing an actor row (1 row of the shipped 12).
+    #[test]
+    fn kit_zone_rows_refuse_bad_rows_by_line_and_count() {
+        let float = "table arena-zones version 1\nsand_floor class=0 cx_cm=1.5 cz_cm=0 radius_cm=100 height_cm=20 advantage=0 dominance=0 risk=0\n";
+        let err = kit_zone_rows_from_text(float).expect_err("a float cx_cm refuses");
+        assert!(err.to_string().contains("line 2"), "{err}");
+        let class = "table arena-zones version 1\nsand_floor class=9 cx_cm=0 cz_cm=0 radius_cm=100 height_cm=20 advantage=0 dominance=0 risk=0\n";
+        let err = kit_zone_rows_from_text(class).expect_err("class 9 refuses");
+        assert!(err.to_string().contains("line 2"), "{err}");
+        let short = "table arena-zones version 1\nsand_floor class=0 cx_cm=-6000 cz_cm=0 radius_cm=1500 height_cm=20 advantage=0 dominance=0 risk=0\n";
+        let err = kit_zone_rows_from_text(short).expect_err("a missing actor row refuses");
+        assert!(err.to_string().contains("1 of 12"), "{err}");
     }
 }

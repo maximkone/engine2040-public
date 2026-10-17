@@ -246,7 +246,6 @@ pub fn resolve_pass_live(
 
 /// Pixel truth is strict on/off diff only; no golden backdoor remains.
 /// Pixel truth compares on/off pairs only.
-
 /// Maps one on/off pair to LIVE, or PROBE on ragged input.
 /// Caller: `ticked_passes_from_captures` keeps ragged passes at PROBE.
 /// Units: RGBA bytes row-major. Determinism: same bytes give same bool twice.
@@ -259,16 +258,14 @@ fn resolve_or_probe(
     epsilon: u8,
     live_floor: usize,
 ) -> bool {
-    match resolve_pass_live(on, off, width, height, ignore_mask, epsilon, live_floor) {
-        Ok(live) => live,
-        Err(_) => false,
-    }
+    resolve_pass_live(on, off, width, height, ignore_mask, epsilon, live_floor).unwrap_or_default()
 }
 
 /// Builds the ticked pass list from on/off capture pairs, diff-gated.
 /// Caller: `ticked_passes` feeds inline 2x1 pairs plus quiet stubs.
 /// Units: RGBA bytes row-major. Determinism: same bytes give the same flags twice.
 /// Errors: ragged pairs resolve to PROBE, never panics.
+#[expect(clippy::too_many_arguments, reason = "three pairs + shared params")]
 pub fn ticked_passes_from_captures(
     forward_on: &[u8],
     forward_off: &[u8],

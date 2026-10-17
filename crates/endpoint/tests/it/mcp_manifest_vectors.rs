@@ -34,8 +34,7 @@ fn manifest_list_shape_covers_registry() {
     // Slim-8 stays read-only inside the manifest, so a weak model discovers
     // the door without ever touching a writer.
     for name in tools::SLIM8 {
-        let def = tools::lookup(name)
-            .unwrap_or_else(|| panic!("slim-8 tool {name} is listed"));
+        let def = tools::lookup(name).unwrap_or_else(|| panic!("slim-8 tool {name} is listed"));
         assert!(def.readonly, "slim-8 tool {name} stays read-only");
     }
     // Unknown tools fail closed even under a good path.

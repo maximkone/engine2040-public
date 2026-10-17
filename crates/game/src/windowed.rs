@@ -1515,10 +1515,8 @@ pub fn run_headless_smoke_with_options(
     // Live balance verdicts (EG45): folded from each tick's cues, counted below.
     let mut verdict_gaits = vec![GaitPhase::Steady; usize::from(app.config().fighters)];
     for tick in 0..ticks_run {
-        // Own wall-clock bound: a wedged device fails the smoke loudly
-        // instead of hanging the run past its limit, and the stall leaves the
-        // exit path as the typed `Timeout` receipt (elapsed plus limit stay
-        // in the message).
+        // Own wall-clock bound: a wedged device self-exits with the typed
+        // `Timeout` receipt.
         check_exit_deadline_with_limit(started.elapsed().as_secs_f64() * 1000.0, wall_limit_ms)
             .map_err(WinError::exit_receipt)?;
         let input = fighter_input_from_pressed(tick, human, &[], &bindings);

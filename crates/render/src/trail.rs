@@ -161,7 +161,7 @@ impl TrailRing {
 fn width_at(width_mm: &[u32], i: usize) -> u32 {
     width_mm
         .get(i)
-        .or(width_mm.last())
+        .or_else(|| width_mm.last())
         .copied()
         .unwrap_or(TRAIL_THIN_MM)
 }

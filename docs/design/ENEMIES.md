@@ -16,7 +16,7 @@ Read 2026-10-12, byte-exact:
 
 Tier check (re-checked 2026-10-17): `rg -n "grunt|veteran|elite|boss" crates/ai/src` hits `crates/ai/src/depth.rs:460` only — one `elite` doc comment. The ladder is the tier *number*: `SHIPPED_TIERS` seats tiers 1-3 (`depth.rs:433`) and `PRIMUS_TIER` seats tier 4 (`depth.rs:463`), `parse_tiers` returns `[TierRow; 4]` (`depth.rs:585`), and `crates/ai/src/tier.rs:14` re-exports the ladder for the non-AI crates.
 Tiers 1-4 are shipped in code and the tier_4 file row landed: `content/design/enemies.rows` carries tier_1..tier_4 and `crates/game/tests/it/design_enemy.rs::header_holds_four_tiers` seats four rows.
-Wiring check (re-checked 2026-10-17): the rows live in `depth.rs` and `DepthBrain` reads them; the install path out of the crate is `ForkProposal::SetTier` in `crates/arena/src/fork.rs:83`, applied through `DepthBrain::set_tier` at `fork.rs:262`, and the caller is the tournament ladder (`crates/playtest/src/tournament.rs:1073` puts `SHIPPED_TIERS[index]` on every brain of the duel). That caller is uncommitted work in flight (row GA13) and it currently posts the tier bar far below the design bar — see "Curve and bar numbers" below. `crates/endpoint/src/assistant.rs:1108` only narrates `SetTier`. The rung that clears the bar is a packet for the AI builder (`target/queue/ready/des-enemy-tier-skill-rung-20261017.md`), never an edit here.
+Wiring check (re-checked 2026-10-17): the rows live in `depth.rs` and `DepthBrain` reads them; the install path out of the crate is `ForkProposal::SetTier` in `crates/arena/src/fork.rs:83`, applied through `DepthBrain::set_tier` at `fork.rs:262`, and the caller is the tournament ladder (`crates/playtest/src/tournament.rs:1073` puts `SHIPPED_TIERS[index]` on every brain of the duel). That caller is landed at HEAD (row GA13) and it posts 995 permille per adjacent pair on the real duel — see "Curve and bar numbers" below. `crates/endpoint/src/assistant.rs:1108` only narrates `SetTier`. The rung that clears the bar without freezing the ladder is a packet for the AI builder (`target/queue/ready/0-des-enemy-tier-ladder-20261017.md`), never an edit here.
 
 ## Global numbers both cards use
 
@@ -92,8 +92,9 @@ PROPOSED is the rung that *holds*: the row file carries HP, poise, tell and
 counter only, while `TierRow::role()`, `reaction_ticks()` and
 `aggression_permille()` derive one role and one temperament per tier number, and
 that derived rung posts 20 permille on the real duel ("Curve and bar numbers"
-below). So the bar needs a rung that wins, which is the packet
-`target/queue/ready/des-enemy-tier-skill-rung-20261017.md` for the AI builder.
+below, now 995 with the rung landed and the ladder frozen). So the bar needs a
+rung that wins inside the P3 bands, which is the packet
+`target/queue/ready/0-des-enemy-tier-ladder-20261017.md` for the AI builder.
 The boss itself needs no new ask: the owner answered with `EB-2026-10-13-S2` and
 both asks closed.
 
@@ -116,11 +117,12 @@ Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 
 
 The sweep (E07-12, `crates/playtest/src/tournament.rs`): one knob — `match_ticks`, the ONE `BalanceConfig` field the sweep varies — at 300/600/1200 ticks, 200 matches per difficulty per value (1800 duels), the perfect player first, then the seeded 2-4 tick human error when enabled (default off). It writes `target/reports/difficulty-<UTC>.csv` with `knob,value,difficulty,player,win_rate_permille,kill_shares,stuck_count,trials` plus `# skipped ...` lines for a variant nobody finishes. A number per difficulty tier is the win rate in permille on that tier's row.
 
-- Newest curve: `target/reports/difficulty-20261017T0233Z.csv` (sha256 `2D1EDAA349CCDF1E997AA94D8088DCDE8F2E63A61B488C763C1EDBE2F992541A`), 3 data rows, 6 skips. Pressure finishes at 482/472/420 permille at 300/600/1200 ticks; even and cauldron are no-finisher at all three values.
-- The curve before it (`difficulty-20261016T2354Z.csv`, sha256 `687803EEB19466E69CE1037F8AB18494387ED70DABFF077F0510E832EAFC68AB`) had 7 data rows: 517 at 300 even, 542/487/532 at 600, 590/435/590 at 1200. The collapse tracks the uncommitted GA13 tier install, and the install's own bar check posts **20 permille** for tier_2 over tier_1 (`cargo test -p engine-playtest --lib tournament::tests::tier_bar_posts`), far under the 600 bar: HP inside a narrow band plus the derived role and temperament is not enough, so the rung — not the HP — has to win the duel. A design number did not move.
-- Bands (house numbers): win rate 400-600 permille, kill-share cap 350. The newest curve stays inside 400-600 on the rows it finishes, and violates the kill-share cap (`2:1000`), as the previous one did.
-- `cargo test -p engine-game --test it design_enemy::` 4 passed: the 60% bar holds in the rows' own stat model (HP plus poise plus seeded jitter). The real ladder contradicts it, so that model is a floor, never the proof.
-- `cargo test -p engine-playtest --lib tournament` is RED today (22 passed, 3 failed): the two GA3 stuck pins and the GA13 tier bar, all three inside the uncommitted install. Named in `docs/design/balance-log.md`.
+- Newest curve (2026-10-17T0511Z, the dry-fallback re-run): `target/reports/difficulty-20261017T0511Z.csv` (sha256 `7997DE3027D7D5D3A86607C1B13F502E2A1BA7851F1D50B64D3A18FF41B1CF40`), 3 data rows, 6 skips. Pressure finishes at 57/2/0 permille at 300/600/1200 ticks with `2:1000` kill share and stuck 146/382/396 of 200; even and cauldron are no-finisher at all three values. A second full sweep (`difficulty-20261017T0512Z.csv`) wrote a byte-identical body, so the curve replays exactly.
+- The curve before it (`difficulty-20261017T0233Z.csv`, sha256 `2D1EDAA349CCDF1E997AA94D8088DCDE8F2E63A61B488C763C1EDBE2F992541A`) had the same 3 rows and 6 skips with pressure at 482/472/420 and stuck 4/12/56; the one before that (`difficulty-20261016T2354Z.csv`, sha256 `687803EEB19466E69CE1037F8AB18494387ED70DABFF077F0510E832EAFC68AB`) finished 7 rows inside the 400-600 band. Two collapses in one day, both measured.
+- The tier bar on the real duel is green today: `cargo test -p engine-playtest --lib tournament::tests::tier_bar_posts -- --nocapture` prints `tier pair tier_2 vs tier_1: 995 permille of 200 duels` and `tier pair tier_3 vs tier_2: 995 permille` (was 20 permille at 01:55Z), and the inverted install still refuses at 0 permille. 995 permille is a blowout, not a rung: the same install freezes the ladder (57/2/0, stuck 396).
+- Bands (house numbers): win rate 400-600 permille, kill-share cap 350. The newest curve violates both (57/2/0; `2:1000`), the same failure the P3 sim pins report.
+- `cargo test -p engine-game --test it design_enemy::` 4 passed: the 60% bar holds in the rows' own stat model (HP plus poise plus seeded jitter). The real ladder contradicts its side effects, so that model is a floor, never the proof.
+- `cargo test -p engine-playtest --lib tournament` is RED today (23 passed, 2 failed): `p3_standard_posts_numbers_with_known_stuck_edge` (left `[(0,191),(1,191)]`, right `[(0,3),(1,3)]`) and `proof_gate_reproduces_byte_identical_with_five_named_stuck_legs` (left 6, right 2). Both pins are stale receipts of the pre-install ladder and are deliberately NOT re-blessed, because the reached numbers breach the bands. Cause is outside this seat: `crates/ai` landed `tier_wish_to_world` at 04:22Z (commit `20d57419`). Named in `docs/design/balance-log.md`.
 
 The 60% tier bar and the 2-4 tick noise are house numbers (stated at the top). The noise cannot be calibrated yet: no recorded human tape exists, and `winrates::human_tape_for` builds a noise tape out of the perfect brain, so it cannot calibrate its own number.
 

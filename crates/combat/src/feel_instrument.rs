@@ -378,7 +378,10 @@ pub struct ScenarioReport {
     pub sound_delay_ticks: u32,
     /// Impact score in permille-scale points (integer proxy, ideas only).
     pub impact: u32,
-    /// Input-to-effect latency in ms (buffer ticks at 60 Hz).
+    /// Added input-to-effect latency in ms for a fresh press: the ticks the
+    /// fight tick adds before the swing starts (0 under the shipped tick).
+    /// The intake window is a forgiveness budget for a locked-swing press,
+    /// never a delay, so this reading is not the buffer row in ms.
     pub latency_ms: u32,
 }
 
@@ -462,7 +465,10 @@ pub const fn camera_kick_for(damage: u16, parries: u32, trauma_peak: u16, camera
     0
 }
 
-/// Input-to-effect latency in ms under a preset (buffer ticks at 60 Hz).
+/// Input-to-effect latency in ms added to a fresh press under a preset: the
+/// tick's own number ([`FeelPreset::pq1_latency_ms`]), never the preset's
+/// buffer row in ms. Consumer: the per-scenario report (`measure_one`) and,
+/// through it, the p95 gate.
 pub const fn input_latency_ms(preset: FeelPreset) -> u32 {
     preset.pq1_latency_ms()
 }
@@ -915,22 +921,38 @@ mod tests {
         assert_eq!(check_gates(&summary), Ok(()));
     }
 
+    /// The p95 pin in the same unit as the PQ1 pin: the latency the tick adds
+    /// to a fresh press, which is 0 ms for every preset. A wider buffer row
+    /// buys forgiveness, never delay (it used to read 33 ms off a 2-tick row
+    /// the tick never read). The 50 ms ceiling still refuses a reading over it.
     #[test]
     fn p95_latency_within_50ms() {
         let reports = v1_reports();
-        assert_eq!(p95_latency_ms(&reports), 33, "2-tick buffer at 60 Hz");
-        // Failure case: a 4-tick buffer costs 66 ms and fails the gate.
+        assert_eq!(
+            p95_latency_ms(&reports),
+            0,
+            "a fresh press swings on its press tick"
+        );
+        assert_eq!(check_gates(&summarize(&reports)), Ok(()));
+        // The old failure leg, inverted: four buffer ticks on the row no
+        // longer cost 66 ms, because the row is not a delay.
         let mut streamlining = StreamliningParams::v1();
         streamlining.input_buffer_ticks = 4;
-        let slow = FeelPreset::new(2, TuningParams::v1(), JuicingParams::v1(), streamlining);
-        assert_eq!(input_latency_ms(slow), 66);
-        let slow_reports = run_suite(&slow, &TABLES_V1).unwrap();
-        assert_eq!(p95_latency_ms(&slow_reports), 66);
+        let wide = FeelPreset::new(2, TuningParams::v1(), JuicingParams::v1(), streamlining);
+        assert_eq!(input_latency_ms(wide), 0);
+        let wide_reports = run_suite(&wide, &TABLES_V1).unwrap();
+        assert_eq!(p95_latency_ms(&wide_reports), 0);
+        assert_eq!(check_gates(&summarize(&wide_reports)), Ok(()));
+        // The ceiling keeps its teeth: a reading over 50 ms is refused.
+        let over = SuiteSummary {
+            p95_latency_ms: P95_LATENCY_MS + 1,
+            ..summarize(&reports)
+        };
         assert_eq!(
-            check_gates(&summarize(&slow_reports)),
+            check_gates(&over),
             Err(InstrumentError::BadValue {
                 field: "p95_latency_ms",
-                value: 66
+                value: P95_LATENCY_MS + 1
             })
         );
     }

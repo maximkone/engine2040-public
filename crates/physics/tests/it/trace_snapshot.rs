@@ -97,7 +97,10 @@ fn deterministic_hash_equal_pins_flag() {
         digest, PINNED_HASH,
         "trace digest drifted: got {digest:016x}"
     );
-    let raw = format!("ticks=60 equal={} hash={digest}\n", digest == b.state_hash());
+    let raw = format!(
+        "ticks=60 equal={} hash={digest}\n",
+        digest == b.state_hash()
+    );
     let trace = redact_hash(&raw);
     assert_snapshot(&trace, "ticks=60 equal=true hash=[HASH]\n");
 }

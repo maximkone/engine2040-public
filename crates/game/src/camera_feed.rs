@@ -26,6 +26,14 @@ use super::camera::{
 };
 use super::TickOutcome;
 
+/// Rolling window length in receipts, in the unit the receipt buffers are
+/// sized and compared in (`usize`). The window is owned once per unit: this
+/// one for the buffers and the trim, [`FEED_TICKS`] as the public `u32` tick
+/// count, with `feed_window_owner_agrees_with_the_public_tick_count` pinning
+/// the pair. `From` has no `u32` → `usize` lane (`try_from` is not `const`
+/// either), and a bare `as` at each site would hide the bound this pair
+/// already states.
+const FEED_WINDOW: usize = 600;
 /// Ticks the acceptance orbit covers (matches the director's 600-tick gate).
 pub const FEED_TICKS: u32 = 600;
 /// Per-frame budget in milliseconds (the director's 0.05 ms rail).
@@ -120,7 +128,7 @@ impl PresentationFeed {
     /// pre-sized for [`FEED_TICKS`] ticks at the construction boundary
     /// (never per tick).
     pub fn new(focus: u8, params: DirectorParams) -> Result<Self, CameraError> {
-        let capacity = FEED_TICKS as usize;
+        let capacity = FEED_WINDOW;
         Ok(Self {
             rig: StagedRig::new(focus, params)?,
             frames: Vec::with_capacity(capacity),
@@ -144,7 +152,7 @@ impl PresentationFeed {
     /// entry overflows per tick, so one head-drop keeps the latest window
     /// with no allocation.
     fn trim_receipts(&mut self) {
-        if self.frames.len() > FEED_TICKS as usize {
+        if self.frames.len() > FEED_WINDOW {
             self.frames.remove(0);
             self.trauma.remove(0);
         }
@@ -333,7 +341,7 @@ impl SmoothedFeed {
         Ok(Self {
             inner: PresentationFeed::new(focus, params)?,
             sync: DampedSync::new(gain_permille)?,
-            smoothed: Vec::with_capacity(FEED_TICKS as usize),
+            smoothed: Vec::with_capacity(FEED_WINDOW),
         })
     }
 
@@ -355,7 +363,8 @@ impl SmoothedFeed {
         self.inner.trauma_log()
     }
 
-    /// Smoothed scene transforms in tick order (one per observed tick).
+    /// Smoothed scene transforms in tick order, one per windowed tick and
+    /// aligned with `frames`.
     #[must_use]
     pub fn smoothed(&self) -> &[LookIntent] {
         &self.smoothed
@@ -386,6 +395,13 @@ impl SmoothedFeed {
         let intent = LookIntent::from_frame(&frame);
         let smoothed = self.sync.sync(&intent);
         self.smoothed.push(smoothed);
+        // The frames this log parallels are a rolling `FEED_WINDOW` window:
+        // keep the smoothed log the same length with the frame trim owner,
+        // so the report's frame/smoothed zip stays aligned and the pre-sized
+        // capacity never regrows.
+        while self.smoothed.len() > self.inner.len() {
+            self.smoothed.remove(0);
+        }
         Ok((frame, smoothed))
     }
 
@@ -446,7 +462,7 @@ pub fn shake_report(frames: &[CameraFrame]) -> ShakeReport {
     }
     let count = frames.len() as f64;
     ShakeReport {
-        ticks: frames.len() as u32,
+        ticks: engine_core::checked::saturating_usize_to_u32(frames.len()),
         max_displacement_m: peak,
         mean_displacement_m: if count > 0.0 {
             (sum / count) as f32
@@ -1048,6 +1064,19 @@ mod tests {
     }
 
     #[test]
+    fn feed_window_owner_agrees_with_the_public_tick_count() {
+        // One owner for the window length: the `usize` receipt capacity and
+        // the public `u32` tick count must never drift, or the trim keeps a
+        // different number of receipts than the buffers were pre-sized for.
+        assert_eq!(FEED_TICKS, 600, "public window ticks");
+        assert_eq!(
+            FEED_WINDOW,
+            usize::from(u16::try_from(FEED_TICKS).expect("window fits u16")),
+            "one owner for the window"
+        );
+    }
+
+    #[test]
     fn win1_trauma_replays_exactly_twice() {
         let (first, first_points) = run_win_loop();
         let (second, second_points) = run_win_loop();
@@ -1443,6 +1472,37 @@ mod tests {
             "steady-state smoothed update must not allocate"
         );
         assert!(folded != 0, "sanity: frames advanced during the window");
+    }
+
+    #[test]
+    fn gp20_smoothed_log_stays_in_the_feed_window() {
+        let mut feed = SmoothedFeed::new(0, DirectorParams::default(), 250).unwrap();
+        for tick in 0..FEED_TICKS + 5 {
+            feed.orbit_tick(tick, &[]).expect("frame");
+        }
+        assert_eq!(feed.len(), FEED_TICKS as usize, "frames window");
+        assert_eq!(
+            feed.smoothed().len(),
+            feed.frames().len(),
+            "smoothed parallels the frames window (one intent per windowed tick)"
+        );
+    }
+
+    #[test]
+    fn gp20_smoothed_log_keeps_no_alloc_past_the_window() {
+        let mut feed = SmoothedFeed::new(0, DirectorParams::default(), 250).unwrap();
+        for tick in 0..FEED_TICKS {
+            feed.orbit_tick(tick, &[]).expect("warm-up");
+        }
+        let (_, steady) = alloc_probe::measure(|| {
+            for tick in FEED_TICKS..2 * FEED_TICKS {
+                feed.orbit_tick(tick, &[]).expect("frame");
+            }
+        });
+        assert_eq!(
+            steady.calls, 0,
+            "a windowed smoothed log must not allocate past FEED_TICKS"
+        );
     }
 
     // Trauma curve at the feed boundary: numbers, restore, sim bytes.

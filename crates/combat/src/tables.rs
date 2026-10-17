@@ -48,7 +48,13 @@ pub const INPUT_BUFFER_TICKS_V1: u32 = 0;
 /// Ticks a press survives in the input buffer under V2 rows: 8 ticks
 /// (133 ms at 60 Hz), so a tap in recovery is kept for the first ready tick.
 /// Single owner of the 8-tick value; the fight intake reads it through
-/// [`buffer_window`](crate::feel::buffer_window).
+/// [`buffer_window`](crate::feel::buffer_window), and
+/// [`StreamliningParams::input_buffer_ticks`](crate::feel::StreamliningParams::input_buffer_ticks)
+/// mirrors it rather than holding a second window. Units: ticks at 60 Hz.
+/// This row is a forgiveness budget, never a latency: the PQ1 pin reads the
+/// ticks the tick adds to a fresh press
+/// ([`FRESH_PRESS_ADDED_TICKS`](crate::feel::FRESH_PRESS_ADDED_TICKS)) and
+/// never this value.
 pub const INPUT_BUFFER_TICKS_V2: u32 = 8;
 
 /// V2 poise damage of one light strike, in points.

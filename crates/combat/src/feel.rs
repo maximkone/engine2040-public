@@ -25,6 +25,15 @@ pub const MAX_BUFFER_TICKS: u32 = 12;
 pub const MAX_JUICE_BOOST_TICKS: u32 = 8;
 /// Input-to-effect latency ceiling in milliseconds.
 pub const PQ1_LATENCY_MS: u32 = 50;
+/// Ticks the fight tick adds before a fresh attack press starts its swing:
+/// none. One owner: the fight intake in `crate::fight`, which starts a fresh
+/// press's swing on the press tick itself, so a press the player makes ready
+/// meets no added latency. A press made while a swing is locked is the only
+/// press the intake buffer holds, and that one is a promise kept (it fires on
+/// the first ready tick), never a delay. Caller:
+/// [`FeelPreset::pq1_latency_ms`]. Units: ticks at 60 Hz. Determinism: a const
+/// read by no tick and no replay.
+pub const FRESH_PRESS_ADDED_TICKS: u32 = 0;
 /// Fixed tick rate the latency model assumes; the rate's one owner is
 /// `engine_core::TICK_HZ` and its checked narrow form is
 /// `engine_core::TICK_HZ_U32`, which this constant takes.
@@ -195,8 +204,14 @@ impl JuicingParams {
 /// sim off its fixed tick (buffering, cancel grace, block forgiveness).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StreamliningParams {
-    /// Ticks a press survives in the buffer, `0..=12`; the latency ceiling
-    /// allows at most 3 (3 ticks = 50 ms at 60 Hz).
+    /// Ticks a press survives in the intake buffer while a swing is locked,
+    /// `0..=12`. This row mirrors the published window the tick reads,
+    /// [`INPUT_BUFFER_TICKS_V2`](crate::tables::INPUT_BUFFER_TICKS_V2),
+    /// through [`buffer_window`]; the intake reads the table row, never this
+    /// field, so the two can no longer disagree. It is a forgiveness budget,
+    /// not a latency: a fresh press swings on its press tick and a held press
+    /// fires on the first ready tick, so no latency ceiling is measured
+    /// against it (8 ticks = 133 ms, over the 50 ms pin, and rightly so).
     pub input_buffer_ticks: u32,
     /// Extra ticks a cancel stays legal past the window, `0..=12`.
     pub cancel_grace_ticks: u32,
@@ -205,10 +220,11 @@ pub struct StreamliningParams {
 }
 
 impl StreamliningParams {
-    /// The shipped feel support: a 2-tick buffer (33 ms, inside the ceiling).
+    /// The shipped feel support: the published 8-tick intake window (133 ms of
+    /// forgiveness at 60 Hz) with the shipped cancel and block grace.
     pub const fn v1() -> Self {
         Self {
-            input_buffer_ticks: 2,
+            input_buffer_ticks: crate::tables::INPUT_BUFFER_TICKS_V2,
             cancel_grace_ticks: 2,
             block_forgive_ticks: 2,
         }
@@ -271,15 +287,20 @@ impl StreamliningParams {
     }
 }
 
-/// Window the fight intake reads for one tick: V2 rows give 8 ticks
-/// (133 ms at 60 Hz), every other row gives 0, so only V2 buffers and V1
-/// bouts replay byte-identical.
+/// Window the fight intake reads for one tick: V2 rows give the published
+/// 8-tick window (133 ms at 60 Hz), every other row gives 0, so only V2
+/// buffers and V1 bouts replay byte-identical.
 ///
-/// Owner: engine-combat. Caller: the fight step (`crate::fight`) at intake;
-/// the 2-tick [`StreamliningParams::v1`] row stays survey-only and never
-/// reaches the tick. Units: ticks at 60 Hz. Determinism: pure integer
-/// compare, same tables give same window. Errors: none. Budget: O(1) time,
-/// no heap.
+/// Owner: engine-combat. The window's single owner is the table row
+/// [`INPUT_BUFFER_TICKS_V2`](crate::tables::INPUT_BUFFER_TICKS_V2); this
+/// helper reads that row and never a preset, and
+/// [`StreamliningParams::v1`] mirrors it instead of owning a second number.
+/// Caller: the fight step (`crate::fight`) at intake. This window is the
+/// forgiveness budget a locked-swing press survives, not a latency: the PQ1
+/// pin reads the tick's added latency for a fresh press
+/// ([`FRESH_PRESS_ADDED_TICKS`], 0 ticks) and never this value. Units: ticks
+/// at 60 Hz. Determinism: pure integer compare, same tables give same window.
+/// Errors: none. Budget: O(1) time, no heap.
 pub fn buffer_window(tables: &Tables) -> u32 {
     if *tables == crate::fight::TABLES_V2 {
         crate::tables::INPUT_BUFFER_TICKS_V2
@@ -359,22 +380,44 @@ impl FeelPreset {
         self.tuning.apply(base)
     }
 
-    /// Input-to-effect latency in milliseconds: the buffer is the only
-    /// feel stage before impact, so `buffer * 1000 / 60` (integer, truncates).
+    /// Input-to-effect latency in milliseconds added to a *fresh* press: the
+    /// ticks the tick itself adds before the swing starts
+    /// ([`FRESH_PRESS_ADDED_TICKS`], so 0 ms), never the intake window in ms.
+    ///
+    /// The window is a forgiveness budget for a press made while a swing is
+    /// locked: it delays no press the player makes ready, so billing it as
+    /// latency mispriced the intake (8 ticks = 133 ms, 2.7x over the 50 ms
+    /// pin). One owner: the fight intake; the window the intake reads is the
+    /// table row behind [`buffer_window`], and every valid preset reports the
+    /// same latency because no row can buy delay. Units: milliseconds at
+    /// 60 Hz, integer and truncating. Caller: [`FeelPreset::check_pq1`] and
+    /// `crate::feel_instrument::input_latency_ms`.
     pub const fn pq1_latency_ms(self) -> u32 {
-        self.streamlining.input_buffer_ticks * 1000 / TICKS_PER_SEC
+        FRESH_PRESS_ADDED_TICKS * 1000 / TICKS_PER_SEC
     }
 
-    /// Latency gate: the preset passes while its latency fits in 50 ms.
+    /// Latency gate: a preset passes while the latency a fresh press meets
+    /// fits in 50 ms. The reading is the tick's own added latency over
+    /// [`PQ1_LATENCY_MS`]; the error names that reading, never the window.
     pub fn check_pq1(&self) -> Result<(), FeelError> {
-        if self.pq1_latency_ms() > PQ1_LATENCY_MS {
-            return Err(FeelError::BadValue {
-                field: "input_buffer_ticks",
-                value: self.streamlining.input_buffer_ticks,
-            });
-        }
-        Ok(())
+        check_latency_ms(self.pq1_latency_ms())
     }
+}
+
+/// The 50 ms ceiling on one latency reading, in milliseconds: refuse a
+/// reading over [`PQ1_LATENCY_MS`] and name it. One owner: the shipped tick,
+/// which reports 0 added ticks for a fresh press, so the gate stays green and
+/// trips the day the tick starts adding ticks. Caller:
+/// [`FeelPreset::check_pq1`]. Units: milliseconds; deterministic integer
+/// compare, no heap.
+fn check_latency_ms(latency_ms: u32) -> Result<(), FeelError> {
+    if latency_ms > PQ1_LATENCY_MS {
+        return Err(FeelError::BadValue {
+            field: "pq1_latency_ms",
+            value: latency_ms,
+        });
+    }
+    Ok(())
 }
 
 /// The shipped feel rows as one versioned row.
@@ -1552,7 +1595,7 @@ mod tests {
     fn v1_preset_validates_and_holds_pq1() {
         assert_eq!(FEEL_V1.validate(), Ok(()));
         assert_eq!(FEEL_V1.version, FEEL_VERSION_V1);
-        assert_eq!(FEEL_V1.pq1_latency_ms(), 33);
+        assert_eq!(FEEL_V1.pq1_latency_ms(), 0);
         assert_eq!(FEEL_V1.check_pq1(), Ok(()));
         // Tuning overlays only its six knobs; the rest passes through.
         let tuned = FEEL_V1.tables(TABLES_V1);
@@ -1760,9 +1803,13 @@ mod tests {
         );
     }
 
+    /// The PQ1 pin in its one true unit: the latency the tick adds to a fresh
+    /// press. A wider buffer row buys forgiveness, never delay, so the number
+    /// stays 0 ms for every row and the 50 ms ceiling keeps its teeth on the
+    /// reading it names. The old unit (`row ticks * 1000 / 60`, so 2 ticks =
+    /// 33 ms, 4 ticks = 66 ms) measured a knob the tick never reads.
     #[test]
     fn pq1_latency_bands_hold() {
-        // Integer model: ticks * 1000 / 60, truncating.
         let preset = |buffer| {
             let mut streamlining = StreamliningParams::v1();
             streamlining.input_buffer_ticks = buffer;
@@ -1773,18 +1820,81 @@ mod tests {
                 streamlining,
             )
         };
-        assert_eq!(preset(0).pq1_latency_ms(), 0);
-        assert_eq!(preset(2).pq1_latency_ms(), 33);
-        assert_eq!(preset(3).pq1_latency_ms(), 50);
-        assert_eq!(preset(3).check_pq1(), Ok(()));
-        // Four buffered ticks cost 66 ms: over the latency ceiling.
-        assert_eq!(preset(4).pq1_latency_ms(), 66);
+        // Every legal row reports the tick's own added latency: 0 ms.
+        for buffer in 0..=MAX_BUFFER_TICKS {
+            assert_eq!(
+                preset(buffer).pq1_latency_ms(),
+                0,
+                "row {buffer} buys no delay: the swing starts on the press tick"
+            );
+            assert_eq!(preset(buffer).check_pq1(), Ok(()));
+        }
+        // The ceiling is still a ceiling, in whole ticks at 60 Hz: 3 ticks is
+        // 50 ms, so a tick that ever added 4 would fail.
+        assert_eq!(PQ1_LATENCY_MS, 50);
+        assert_eq!(3 * 1000 / TICKS_PER_SEC, PQ1_LATENCY_MS);
+        assert_eq!(check_latency_ms(PQ1_LATENCY_MS), Ok(()));
         assert_eq!(
-            preset(4).check_pq1(),
+            check_latency_ms(4 * 1000 / TICKS_PER_SEC),
             Err(FeelError::BadValue {
-                field: "input_buffer_ticks",
-                value: 4
+                field: "pq1_latency_ms",
+                value: 66
             })
+        );
+    }
+
+    /// One owner for the intake number. The preset row mirrors the table row
+    /// the tick reads ([`buffer_window`] under V2), and the PQ1 pin reports the
+    /// latency the tick adds to a fresh press - never the buffer row in ms.
+    /// F2P: before this row moved, the preset said 2 while the tick read 8, so
+    /// the printed pair was `2` vs `8` ticks and the PQ1 receipt read 33 ms off
+    /// a knob no tick reads.
+    #[test]
+    fn one_owner_input_buffer_ticks_is_the_window_the_tick_reads() {
+        let row = FEEL_V1.streamlining.input_buffer_ticks;
+        let tick_window = crate::feel::buffer_window(&crate::fight::TABLES_V2);
+        let table_row = crate::tables::INPUT_BUFFER_TICKS_V2;
+        println!(
+            "input buffer one owner: preset row {row} ticks vs tick window {tick_window} ticks, \
+             table row {table_row} ticks; PQ1 added latency {} ms for a fresh press \
+             (stale pair before this row moved: 2 vs 8 ticks, 33 ms)",
+            FEEL_V1.pq1_latency_ms()
+        );
+        // One value, three readers agree, and it is the published 8 ticks.
+        assert_eq!(tick_window, table_row, "the tick window is the table row");
+        assert_eq!(row, table_row, "the preset row mirrors the table row");
+        assert_eq!(table_row, 8, "the published window is 8 ticks");
+        assert!(
+            table_row * 1000 / TICKS_PER_SEC > PQ1_LATENCY_MS,
+            "the window (133 ms) is bigger than the pin (50 ms) and that is the point: \
+             it is a forgiveness budget, not the latency"
+        );
+        // V1 rows keep a zero window: no replay moves.
+        assert_eq!(crate::feel::buffer_window(&TABLES_V1), 0);
+        // The PQ1 number is the latency the tick adds to a fresh press, so it
+        // is 0 ms: the window is a forgiveness budget, not a delay.
+        assert_eq!(FEEL_V1.pq1_latency_ms(), 0);
+        assert_eq!(FEEL_V1.check_pq1(), Ok(()));
+        // The fact that number must report, read from the tick itself: a fresh
+        // press under the V2 rows starts its swing on the press tick.
+        let mut state = FightState::new(1).unwrap();
+        step_with_tables_into(
+            &[input(0, ATTACK)],
+            &mut state,
+            &crate::fight::TABLES_V2,
+            &mut Vec::new(),
+        );
+        assert!(
+            state.fighters[0].is_attacking,
+            "a fresh press swings on its press tick"
+        );
+        assert_eq!(
+            state.fighters[0].attack_age, 1,
+            "the swing clock starts on the press tick (0 added, 1 after the tick's step)"
+        );
+        assert!(
+            state.fighters[0].attack_buffer.is_empty(),
+            "nothing buffered"
         );
     }
 
