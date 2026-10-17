@@ -20,7 +20,7 @@ and terms, so no row is UNKNOWN. The 9 operator-generated sprites (`ds-o*`,
 `kaggle-*`) are MIT (operator-generated asset, full rights) per the vendored
 vault subset `content/engine2040-v7.json:93-101` (record hashes match the
 on-disk bytes); per-file author plus delivery/capture source comes from the
-full vault manifest `C:/empire/studio/asset-vault/manifests/engine2040-v7.json`
+full vault manifest `C:/empire/asset-vault/manifests/engine2040-v7.json`
 (508 records, generated 2026-10-08). The 24 `kenney-*` stubs and the
 `kenney-platformer-tile.bin` fixture point at their Kenney donor packs
 (https://kenney.nl/assets/<kit>, CC0-1.0, author Kenney) via the same vault
@@ -77,7 +77,7 @@ Flags (do not ship):
 `kenney-platformer-tile.bin`): the 34 rows above plus 24 V7 `kenney-*`
 placeholders and `procgen-sprite-pack-01.png`, landed as deterministic 8x8
 stubs following the V4 pattern. Donor and terms per slug come from the full
-vault manifest `C:/empire/studio/asset-vault/manifests/engine2040-v7.json`
+vault manifest `C:/empire/asset-vault/manifests/engine2040-v7.json`
 (SHA of each on-disk stub was recomputed 2026-10-15 and differs from the
 vault record hash, so every file below is PLACEHOLDER-NOT-SHIP). No file
 below needed a move to `target/abandoned/`: every source is determined.

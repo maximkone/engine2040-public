@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "note": "WEB11 budgets for dist/web. Set 2026-10-17 from web-build run 39042934511 (wasm 215789, gzip 95654, brotli 79566, first_bundle 91478, mem 1179648 = 18 pages) plus about 25% headroom; ttff_ms is the board bar (8000) because no run recorded it yet. Raise a number only with a reason in the commit; lower it when the build shrinks.",
+  "budgets": {
+    "wasm": 269800,
+    "gzip": 119600,
+    "brotli": 99500,
+    "first_bundle": 114400,
+    "mem": 1474560,
+    "ttff_ms": 8000
+  }
+}

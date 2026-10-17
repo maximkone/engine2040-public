@@ -224,9 +224,6 @@ impl FighterLook {
         self.fold_cues(tick, cues);
         self.fold_acts(tick, views, hp, cues, elapsed);
         self.fold_switches(&before, elapsed);
-        // LF12: step each slot's planted feet from the clip's end-of-tick
-        // ankles, after the switch offsets so a plant reads the shown pose.
-        self.fold_feet(elapsed);
         // View-only trail feed (LF14): age once, push attacking slots and
         // clear the rest. Presentation only, never the sim hash.
         self.feed_trails();

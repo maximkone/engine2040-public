@@ -165,7 +165,7 @@ seat guard refuses their edits, so take the next row. Search the books first:
   tools/proof.mjs` RESULT names the skipped count. F2P: the require_or_skip test
   fails before (no helper module). P2P: `cargo test -p engine-render --lib`
   green; golden `d57b5c8ae3096614` unchanged. Review: testing.md G4. needs: EG2.
-- [x] EG8 render: a pass is live only if pixels change — the GX6 truth gate Landed 1bb6097.
+- [ ] EG8 render: a pass is live only if pixels change — the GX6 truth gate
   counts a pass live when it does not return Unsupported, so bind probes pass
   (`sky.rs` copies a buffer, the cascade "shadow" is a distance dim). New
   gate: render the arena frame with the pass on and off; live only if a
@@ -1385,7 +1385,7 @@ the EG8 on vs off test shows the island is wrong. Every look row ends with
 passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0.24 of a
 60 ms frame), so wiring spends headroom FC3 has; FC1 measures each landing.
 
-- [x] LF1 render: the window draws the `sky.rs` Hillaire bake — `forward.wgsl` Landed 1bb6097.
+- [ ] LF1 render: the window draws the `sky.rs` Hillaire bake — `forward.wgsl`
   `fs_sky` draws an analytic fog-form sky; `sky.rs` (physical sky bake plus
   EV100 exposure) is already baked on the CPU at presenter start
   (`presenter.rs:365-373`) but the live frame only reads two colours from it
@@ -1398,7 +1398,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   x2 equal; `arena per-pass` sky above 0 ms on live frames. F2P: a live-sky
   test fails before (`fs_sky` reads no texture). P2P: `cargo test -p
   engine-render --lib` green; golden unchanged. needs: EG9.
-- [ ] LF2 render: the window lights with `ibl.rs` — `fs` adds a constant Landed so far (2026-10-17): 1bb6097 (ibl LIVE: armor 1074/1074 and sand 36511/36511 pixels change, capture equal twice). Remaining: a separate ibl ms in arena per-pass (it runs inside forward).
+- [ ] LF2 render: the window lights with `ibl.rs` — `fs` adds a constant
   `AMBIENT_FLOOR`; `ibl.rs` bakes a prefiltered cubemap and BRDF LUT on the
   CPU at presenter start from the embedded
   `content/incoming/studio_small_09_1k.hdr` (`gpu_present.rs:15`,
@@ -1412,7 +1412,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   regions differ on vs off; capture x2 equal; ibl above 0 ms live. F2P: on vs
   off frames are identical today. P2P: render lib green; golden unchanged.
   needs: EG9.
-- [ ] LF3 render: GTAO in the live frame — the blit multiplies `ao_tex` Landed so far (2026-10-17): 1bb6097 (landing 1: GTAO on the device writes ao_tex, 0.165 ms at 720p, feet 0.9907 and wall base 0.9877 vs open sand 1.0000). Remaining: landing 2, the depth-only prepass so AO scales ambient only; GTAO under MSAA.
+- [ ] LF3 render: GTAO in the live frame — the blit multiplies `ao_tex`
   (`shaders/blit.wgsl:49`), which stays 1.0; `gtao.rs` computes half-res GTAO
   on the GPU only under `--look-probes`. There is no depth prepass: the
   forward pass clears and stores depth once (`submit.rs:410-419`). First

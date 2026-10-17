@@ -3,7 +3,9 @@
 /// Content by logical path through a source: files natively, a packed
 /// `.e2bundle` in the browser. Std-only.
 pub mod asset_source;
-pub use asset_source::{AssetSource, BundleSource, FsSource, SourceError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use asset_source::FsSource;
+pub use asset_source::{AssetSource, BundleSource, SourceError};
 pub mod budget;
 pub mod datanode;
 pub use datanode::{parse, DataNodeError, Node};
