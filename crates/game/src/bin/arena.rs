@@ -42,7 +42,7 @@ use engine_game::fighter_look::{look_down_deg, shot_for_frame, FighterLook, Look
 use engine_game::flow::{Flow, FlowEvent};
 use engine_game::input::{map_key, map_mouse};
 use engine_game::practice::PracticeSwap;
-use engine_game::reload::{HotReload, ReloadReason};
+use engine_game::reload::{settle_paths, HotReload};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
 use engine_game::windowed::{
     apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
@@ -201,6 +201,10 @@ struct Framing {
     steepest_deg: f32,
     bodies: u32,
     tinted: u32,
+    /// Fighters in the match the tally was taken over (`0` until counted).
+    fighters: usize,
+    /// Fewest fighters the look had folded at any tallied frame.
+    fewest_seen: usize,
 }
 
 impl Default for Framing {
@@ -213,6 +217,8 @@ impl Default for Framing {
             steepest_deg: f32::MIN,
             bodies: 0,
             tinted: 0,
+            fighters: 0,
+            fewest_seen: usize::MAX,
         }
     }
 }
@@ -235,13 +241,27 @@ impl Framing {
         self.bodies = self.bodies.saturating_add(count(drawn));
     }
 
+    /// One frame's denominator: the fighters in the match and how many of
+    /// them the look had folded, so `fewest_in_view` reads against a count.
+    fn note_count(&mut self, fighters: usize, seen: usize) {
+        self.fighters = self.fighters.max(fighters);
+        self.fewest_seen = self.fewest_seen.min(seen);
+    }
+
     /// The `arena framing:` receipt line; `None` when nothing was tallied.
+    /// `fighters=` and `seen=` ride only once counted: `fewest_in_view` of 2
+    /// is fine out of 2 and a fault out of 8.
     fn line(&self) -> Option<String> {
         (self.frames > 0).then(|| {
             let first = self.first_empty.map_or_else(|| "-".to_string(), |f| f.to_string());
             let share = f64::from(self.tinted) / f64::from(self.bodies.max(1));
+            let counted = if self.fighters > 0 {
+                format!(" fighters={} seen={}", self.fighters, self.fewest_seen)
+            } else {
+                String::new()
+            };
             format!(
-                "arena framing: frames={} empty={} first_empty={first} fewest_in_view={} steepest_down_deg={:.1} tinted_share={share:.2}",
+                "arena framing: frames={}{counted} empty={} first_empty={first} fewest_in_view={} steepest_down_deg={:.1} tinted_share={share:.2}",
                 self.frames, self.empty, self.fewest, self.steepest_deg
             )
         })
@@ -836,6 +856,9 @@ struct ArenaApp {
     started: Instant,
     ticks_done: u32,
     frames_presented: u32,
+    /// Wall steps whose present the `--present-every`/`--present-skip`
+    /// throttle skipped on purpose; they never count as presented frames.
+    frames_skipped: u32,
     /// Reused offline mix buffer (`FRAMES_PER_TICK` frames; one heap alloc
     /// at construction, zero per tick via `render_into`).
     audio_scratch: Vec<f32>,
@@ -890,6 +913,9 @@ struct ArenaApp {
     work_us: Vec<u64>,
     /// Wall us between consecutive frames (the rate the player sees).
     interval_us: Vec<u64>,
+    /// Per-frame wall split behind `work_us`, so the receipt names the slow
+    /// frames (`--exit` runs only, like `work_us`).
+    frame_rows: Vec<arena_frame::FrameRow>,
     /// Tick index that panics on purpose (`TEST_PANIC_ENV`); `None` otherwise.
     test_panic_at: Option<u32>,
     /// Reused scratch for one tick's canonical input bytes (crash tape).
@@ -983,6 +1009,7 @@ impl ArenaApp {
             started: Instant::now(),
             ticks_done: 0,
             frames_presented: 0,
+            frames_skipped: 0,
             audio_scratch: vec![0.0f32; engine_game::windowed::FRAMES_PER_TICK],
             tick_scratch: TickOutcome::default(),
             last_alpha: 0.0,
@@ -1006,6 +1033,7 @@ impl ArenaApp {
             view_brief: None,
             work_us: Vec::new(),
             interval_us: Vec::new(),
+            frame_rows: Vec::new(),
             test_panic_at,
             crash_bytes: Vec::with_capacity(16),
             watcher,
@@ -1165,13 +1193,24 @@ impl ArenaApp {
         self.sim_us = self
             .sim_us
             .saturating_add(duration_us(present_started - sim_started));
-        self.present_frame(event_loop);
-        self.present_us = self
-            .present_us
-            .saturating_add(duration_us(present_started.elapsed()));
-        if self.args.exit && self.frames_presented > 0 {
-            self.work_us.push(duration_us(sim_started.elapsed()));
-            self.interval_us.push(duration_us(interval));
+        // A throttled step ran its ticks above and draws nothing: no present
+        // wall, no frame sample, no presented-frame count.
+        if !self.take_present_skip() {
+            let fighters_before = self.fighters_us;
+            self.present_frame(event_loop);
+            let present_wall_us = duration_us(present_started.elapsed());
+            self.present_us = self.present_us.saturating_add(present_wall_us);
+            if self.args.exit && self.frames_presented > 0 {
+                let work_wall_us = duration_us(sim_started.elapsed());
+                self.work_us.push(work_wall_us);
+                self.interval_us.push(duration_us(interval));
+                self.frame_rows.push(arena_frame::FrameRow {
+                    index: self.frames_presented.saturating_sub(1),
+                    work_us: work_wall_us,
+                    present_us: present_wall_us,
+                    fighters_us: self.fighters_us.saturating_sub(fighters_before),
+                });
+            }
         }
         // Every `--exit` run carries its own wall-clock bound: a hung window
         // loop fails itself loudly instead of burning a core for hours.
@@ -1183,13 +1222,14 @@ impl ArenaApp {
         }
         // `--frames N --exit` smoke leaves after N presented frames; a staged
         // fight leaves once the whole staged session ran.
-        let finished = match self.staged {
-            Some(_) => self.ticks_done >= self.config.ticks && self.frames_presented > 0,
-            None => self
-                .args
-                .frames
-                .is_some_and(|frames| self.frames_presented >= frames),
-        };
+        let finished = arena_frame::exit_reached(
+            self.staged.is_some(),
+            self.ticks_done,
+            self.config.ticks,
+            self.frames_presented,
+            self.args.frames,
+            self.args.present_skip,
+        );
         if self.args.exit && finished {
             self.finish_exit(event_loop);
         }
@@ -1220,6 +1260,7 @@ impl ArenaApp {
                 point.hash
             );
         }
+        self.report_tape();
         if let Some(tx) = self.feed_tx.as_ref() {
             let stats = tx.stats();
             say!(
@@ -1305,34 +1346,26 @@ impl ArenaApp {
         matches!(err, PresentError::Validation(msg) if msg == "surface acquire failed")
     }
 
-    /// Present one frame to the visible OS window through the swapchain.
-    /// The surface path is the only green path: transient acquire states
-    /// and minimization skip the redraw, every hard failure ends loudly,
-    /// and a frame that reports validation errors never counts. Capture
-    /// bytes ride a separate explicit offscreen render (see
-    /// `capture_offscreen`), never the surface receipt, so an offscreen PNG
-    /// can never stand in for the OS window.
     /// Hot reload (EG29 slice 1): poll the watcher every
     /// [`HOT_RELOAD_POLL_EVERY_FRAMES`] presented frames and settle staged
     /// generations at this boundary with the tick stamped.
     /// Throttled because one poll stats every watched file (up to ~257
     /// `fs::metadata` calls); at 30 frames the edit still shows within 1 s
-    /// at 60 fps. A failed cook keeps last-good and logs its reason; the
-    /// tick never waits.
+    /// at 60 fps. A file the cook refuses (empty, malformed JSON or WGSL,
+    /// bad combat rows, unreadable) keeps its last-good generation and logs
+    /// its reason; the tick never waits.
     fn poll_hot_reload(&mut self) {
         if self.frames_presented % u32::from(HOT_RELOAD_POLL_EVERY_FRAMES) != 0 {
             return;
         }
         let events = self.watcher.poll();
         let frame = self.frames_presented;
-        for event in &events {
-            self.reload.note_changed(&event.path);
-        }
-        let report = self.reload.settle(frame, self.ticks_done, |path| {
-            std::fs::read(path)
-                .map(|bytes| engine_core::hash_bytes(&bytes))
-                .map_err(|err| ReloadReason::Cook(err.to_string()))
-        });
+        let report = settle_paths(
+            &mut self.reload,
+            events.iter().map(|event| event.path.as_str()),
+            frame,
+            self.ticks_done,
+        );
         for applied in &report.applied {
             say!(
                 "arena reload applied {} gen={} frame={} tick={}",
@@ -1345,10 +1378,9 @@ impl ArenaApp {
         for (path, reason) in &report.failed {
             say!("arena reload kept last-good {path} reason={reason:?}");
         }
-        for event in &events {
-            if event.path.contains("combat.rows") {
-                self.practice.note_tuning(&event.path);
-            }
+        // Only rows the cook accepted reach the practice swap.
+        for path in report.tuning_paths() {
+            self.practice.note_tuning(path);
         }
         let tick = self.ticks_done;
         if let Some(applied) =
@@ -1366,6 +1398,13 @@ impl ArenaApp {
         }
     }
 
+    /// Present one frame to the visible OS window through the swapchain.
+    /// The surface path is the only green path: transient acquire states
+    /// and minimization skip the redraw, every hard failure ends loudly,
+    /// and a frame that reports validation errors never counts. Capture
+    /// bytes ride a separate explicit offscreen render (see
+    /// `capture_offscreen`), never the surface receipt, so an offscreen PNG
+    /// can never stand in for the OS window.
     fn present_frame(&mut self, event_loop: &ActiveEventLoop) {
         let mut list = {
             let Some(presenter) = self.presenter.as_ref() else {
@@ -1543,6 +1582,8 @@ impl ArenaApp {
             if framing_should_tally(self.ticks_done) {
                 self.framing
                     .note(self.frames_presented, in_view, look_down_deg(&list.camera));
+                self.framing
+                    .note_count(frame.fighters, look.fighters_seen(frame.fighters));
                 self.framing.note_tint(look.tinted(frame.fighters));
             }
             let t = look.sim_time(frame.alpha);
@@ -2162,6 +2203,23 @@ mod tests {
     }
 
     #[test]
+    fn framing_line_names_its_denominator() {
+        // `fewest_in_view=2` alone cannot be read: 2 of 2 is a clean frame,
+        // 2 of 8 is a fault. Once counted, the line says out of how many.
+        let mut framing = Framing::default();
+        framing.note(0, 2, 17.0);
+        framing.note_count(8, 8);
+        let line = framing.line().expect("a tallied frame prints");
+        assert!(line.contains(" fighters=8 seen=8 "), "{line}");
+        assert!(line.contains("fewest_in_view=2"), "{line}");
+        // The seen count is the worst frame's; the fighter count the match's.
+        framing.note(1, 5, 17.0);
+        framing.note_count(8, 6);
+        let line = framing.line().expect("a tallied frame prints");
+        assert!(line.contains(" fighters=8 seen=6 "), "{line}");
+    }
+
+    #[test]
     fn zero_tick_frame_is_excluded_from_framing_tally() {
         // The first redraw buffers about 12 ms for 0 steps, so no
         // `observe_tick` runs before the first tally and every slot is
@@ -2746,6 +2804,68 @@ mod tests {
             "an armed capture must arm look probes so sky_ms measures above zero"
         );
         assert!(app.capture.is_some(), "capture stays armed for the sidecar");
+        std::fs::remove_dir_all(&root).expect("test temp dir cleans");
+    }
+
+    #[test]
+    fn window_ticks_obey_the_bound_tape_on_the_arena_scene_session() {
+        // The window's own session (kit world, duel rules, eight bodies) takes
+        // the bound tape on slot 0: an attack tape moves the sim hash off the
+        // idle run, and the tape's receipt counts every input as applied.
+        let config = GameConfig {
+            seed: 2040,
+            ticks: 60,
+            fighters: 8,
+            half_extent_m: 20.0,
+        };
+        let args = || {
+            WinArgs::parse(&strings(&["arena", "--frames", "60", "--exit"]))
+                .expect("smoke args parse")
+        };
+        let mut idle = ArenaApp::new(config, args(), None).expect("idle session builds");
+        idle.run_sim_ticks(60, idle.human().expect("human slot"));
+        let root = bin_temp_dir("window-tape");
+        let inputs: Vec<FighterInput> = (0..60u32)
+            .map(|tick| FighterInput {
+                tick,
+                fighter: FighterId::new(HUMAN_SLOT).expect("slot 0 is a fighter"),
+                mx: 0,
+                mz: 0,
+                facing: 0,
+                buttons: engine_input::Buttons(engine_input::fighter::ATTACK),
+            })
+            .collect();
+        let tape_path = root.join("atk.tape");
+        std::fs::write(&tape_path, cap::encode_tape_bytes(&inputs)).expect("test tape writes");
+        let flags = cap::CaptureFlags {
+            dir: root.join("clip"),
+            every: 1000,
+            tape: Some(tape_path),
+            rows: vec!["SHOW1".to_string()],
+            sha: "deadbeef1234".to_string(),
+            fps: 30,
+        };
+        let slot = setup_capture(&Some(flags), &config)
+            .expect("capture arms")
+            .expect("slot armed");
+        let mut taped = ArenaApp::new(config, args(), Some(slot)).expect("taped session builds");
+        taped.run_sim_ticks(60, taped.human().expect("human slot"));
+        let last_hash = |app: &ArenaApp| app.app.checkpoints().last().expect("ticks ran").hash;
+        assert_ne!(
+            last_hash(&taped),
+            last_hash(&idle),
+            "the attack tape reached the sim"
+        );
+        let receipt = taped
+            .capture
+            .as_ref()
+            .and_then(|slot| slot.tape.receipt())
+            .expect("tape bound");
+        assert_eq!(
+            (receipt.inputs, receipt.applied, receipt.missed),
+            (60, 60, 0)
+        );
+        assert_eq!(receipt.failure(), None);
         std::fs::remove_dir_all(&root).expect("test temp dir cleans");
     }
 

@@ -52,33 +52,64 @@ fn composite(in: BOut) -> vec4<f32> {
     // moves this to forward ambient-only.
     return vec4<f32>(mix(hdr.rgb, fog.color, f) * ao, hdr.a);
 }
-// Display grade after the one tone map, before the sRGB encode (LF4 slice
-// 1): contrast and saturation around mid-grey, then gain plus lift.
-// Single-pass bloom before the one tone map (LF4 slice 2): 4-tap halo on
-// linear HDR, soft-knee gated so dark stays identical. Constants mirror
-// `post.rs` `BloomConfig::default` (threshold 1.0, knee 0.5, intensity
-// 0.6); the Kino pyramid in `post.rs` `apply_bloom` stays the CPU oracle.
-// Live flag rides `FogU::_pad0` (0.0 off returns `c` unchanged, 1.0 on
-// runs the halo); the live frame writes it per frame after forward.
+// Single-pass bloom before the one tone map (LF4 slice 2). Every tap is
+// soft-knee extracted first, then the extracts are blurred: a glint a pixel
+// or two wide still haloes though its neighbours are dark, and a frame with
+// no texel above the knee adds exactly zero. The knee curve is
+// `post.rs` `kino_prefilter_weight`; threshold 1.0, knee 0.5, intensity 0.6
+// mirror `BloomConfig::default`. The mip pyramid in `post.rs`
+// `apply_bloom` stays the CPU oracle. Live flag rides `FogU::_pad0` (0.0
+// off returns `c` unchanged, 1.0 on runs the halo); the live frame writes it
+// per frame after forward.
 const BLIT_BLOOM_THRESHOLD: f32 = 1.0;
+const BLIT_BLOOM_KNEE: f32 = 0.5;
 const BLIT_BLOOM_INTENSITY: f32 = 0.6;
+// Per-channel cap on one tap before the knee, so a single hot texel cannot
+// own the halo (the oracle weights its first mip for the same reason).
+const BLIT_BLOOM_TAP_MAX: f32 = 16.0;
+// Kernel weights, summing to 1: the centre texel, four axis taps (two texels
+// each through the bilinear fetch) and four diagonal taps (four texels each).
+// Together they cover every texel of the 5x5 block around the pixel.
+const BLIT_BLOOM_W_CENTER: f32 = 0.28;
+const BLIT_BLOOM_W_AXIS: f32 = 0.12;
+const BLIT_BLOOM_W_DIAG: f32 = 0.06;
+fn blit_bloom_extract(s: vec3<f32>) -> vec3<f32> {
+    let rgb = clamp(s, vec3<f32>(0.0), vec3<f32>(BLIT_BLOOM_TAP_MAX));
+    let br = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let knee = BLIT_BLOOM_THRESHOLD * BLIT_BLOOM_KNEE + 0.00001;
+    let foot = BLIT_BLOOM_THRESHOLD - knee;
+    if (br <= foot) {
+        return vec3<f32>(0.0);
+    }
+    if (br >= foot + 2.0 * knee) {
+        return rgb;
+    }
+    let rq = clamp(br - foot, 0.0, 2.0 * knee);
+    let soft = max(0.25 / knee * rq * rq, br - BLIT_BLOOM_THRESHOLD);
+    return rgb * (soft / max(br, 0.00001));
+}
+fn blit_bloom_tap(uv: vec2<f32>, texel: vec2<f32>, off: vec2<f32>) -> vec3<f32> {
+    return blit_bloom_extract(textureSampleLevel(hdr_tex, hdr_smp, uv + off * texel, 0.0).rgb);
+}
 fn blit_bloom(c: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if (fog._pad0 < 0.5) {
         return c;
     }
-    let tw = max(fog.width_f, 1.0);
-    let th = max(fog.height_f, 1.0);
-    let texel = vec2<f32>(1.0 / tw, 1.0 / th);
-    var acc = vec3<f32>(0.0);
-    acc += textureSample(hdr_tex, hdr_smp, uv + vec2<f32>(texel.x, 0.0)).rgb;
-    acc += textureSample(hdr_tex, hdr_smp, uv - vec2<f32>(texel.x, 0.0)).rgb;
-    acc += textureSample(hdr_tex, hdr_smp, uv + vec2<f32>(0.0, texel.y)).rgb;
-    acc += textureSample(hdr_tex, hdr_smp, uv - vec2<f32>(0.0, texel.y)).rgb;
-    acc *= 0.25;
-    let luma = dot(acc, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let w = clamp((luma - BLIT_BLOOM_THRESHOLD) / max(BLIT_BLOOM_THRESHOLD * 0.5, 0.00001), 0.0, 1.0);
-    return c + acc * (w * BLIT_BLOOM_INTENSITY);
+    let texel = vec2<f32>(1.0 / max(fog.width_f, 1.0), 1.0 / max(fog.height_f, 1.0));
+    var halo = blit_bloom_extract(c) * BLIT_BLOOM_W_CENTER;
+    var axis = blit_bloom_tap(uv, texel, vec2<f32>(1.5, 0.0));
+    axis += blit_bloom_tap(uv, texel, vec2<f32>(-1.5, 0.0));
+    axis += blit_bloom_tap(uv, texel, vec2<f32>(0.0, 1.5));
+    axis += blit_bloom_tap(uv, texel, vec2<f32>(0.0, -1.5));
+    var diag = blit_bloom_tap(uv, texel, vec2<f32>(1.5, 1.5));
+    diag += blit_bloom_tap(uv, texel, vec2<f32>(-1.5, 1.5));
+    diag += blit_bloom_tap(uv, texel, vec2<f32>(1.5, -1.5));
+    diag += blit_bloom_tap(uv, texel, vec2<f32>(-1.5, -1.5));
+    halo += axis * BLIT_BLOOM_W_AXIS + diag * BLIT_BLOOM_W_DIAG;
+    return c + halo * BLIT_BLOOM_INTENSITY;
 }
+// Display grade after the one tone map, before the sRGB encode (LF4 slice
+// 1): contrast and saturation around mid-grey, then gain plus lift.
 const BLIT_GRADE_MID: f32 = 0.18;
 const BLIT_GRADE_CONTRAST: f32 = 1.08;
 const BLIT_GRADE_SATURATION: f32 = 1.12;

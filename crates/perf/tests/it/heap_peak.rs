@@ -116,7 +116,11 @@ fn heap_peak_real_64mib_buffer_in_the_match_window_trips_the_gate() {
     // while the match itself drifts.
     const EXTRA: u64 = 64 << 20;
     let workload = engine_perf::workloads::ScaledArenaTick::canonical_for(8).expect("8 listed");
+    // Warm-up outside any window, so a lazily built table is not charged to
+    // whichever measured run happens to touch it first.
+    let warm = workload.run_hash();
     let (hash, plain) = measure(|| workload.run_hash());
+    assert_eq!(hash, warm, "the warm-up hashes like the measured run");
     let (again_hash, again) = measure(|| workload.run_hash());
     assert_eq!(hash, again_hash, "the match hashes the same twice");
     assert_eq!(plain, again, "the match allocates the same twice");

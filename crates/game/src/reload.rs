@@ -240,7 +240,8 @@ fn check_wgsl(text: &str) -> Result<(), ShapeError> {
                 (b'(', _) => open.push(b')'),
                 (b'[', _) => open.push(b']'),
                 (b'}' | b')' | b']', _) => {
-                    if open.pop() != Some(byte) {
+                    let want = open.pop();
+                    if want != Some(byte) {
                         return Err(ShapeError {
                             what: "unbalanced closer",
                             at,
@@ -292,10 +293,18 @@ impl JsonScan<'_> {
         self.bytes.get(self.at).copied()
     }
 
+    /// Advance past the run of bytes `keep` accepts; returns the run length.
+    fn skip_while(&mut self, keep: fn(u8) -> bool) -> usize {
+        let run = self
+            .bytes
+            .get(self.at..)
+            .map_or(0, |rest| rest.iter().take_while(|&&b| keep(b)).count());
+        self.at += run;
+        run
+    }
+
     fn space(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-            self.at += 1;
-        }
+        self.skip_while(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'));
     }
 
     fn eat(&mut self, want: u8) -> bool {
@@ -307,11 +316,7 @@ impl JsonScan<'_> {
     }
 
     fn digits(&mut self) -> usize {
-        let start = self.at;
-        while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.at += 1;
-        }
-        self.at - start
+        self.skip_while(|b| b.is_ascii_digit())
     }
 
     fn word(&mut self, word: &[u8]) -> Result<(), ShapeError> {

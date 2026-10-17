@@ -103,7 +103,7 @@ pub fn allows(peak_bytes: u64, baseline_bytes: u64) -> bool {
 pub enum PeakGateError {
     /// Peak exceeded the 10 percent headroom above the baseline.
     OverBudget {
-        /// Largest live-heap sample in bytes.
+        /// Largest requested-bytes sample in bytes (an upper bound on live heap).
         peak_bytes: u64,
         /// Recorded baseline in bytes.
         baseline_bytes: u64,

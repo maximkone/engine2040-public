@@ -475,25 +475,103 @@ pub fn validate_tape_for_run(
 pub struct TapeInputs {
     inputs: Vec<FighterInput>,
     cursor: usize,
+    applied: usize,
+    missed: usize,
 }
 
 impl TapeInputs {
     /// Wrap sorted tape inputs (empty idles every tick).
     #[must_use]
     pub fn new(inputs: Vec<FighterInput>) -> Self {
-        Self { inputs, cursor: 0 }
+        Self {
+            inputs,
+            cursor: 0,
+            applied: 0,
+            missed: 0,
+        }
     }
 
-    /// The staged input for `tick`, if the tape names it (exact match; ticks
-    /// are queried in order, so a stale entry is unreachable).
+    /// The staged input for `tick`, if the tape names it (exact match). An
+    /// entry behind `tick` names a tick the caller never asked for: it is
+    /// counted as missed and skipped, so one skipped tick cannot silence every
+    /// later input of the tape.
     pub fn input_for_tick(&mut self, tick: u32) -> Option<FighterInput> {
+        while self.cursor < self.inputs.len() && self.inputs[self.cursor].tick < tick {
+            self.cursor += 1;
+            self.missed += 1;
+        }
         if self.cursor < self.inputs.len() && self.inputs[self.cursor].tick == tick {
             let input = self.inputs[self.cursor];
             self.cursor += 1;
+            self.applied += 1;
             Some(input)
         } else {
             None
         }
+    }
+
+    /// What the cursor did so far; `None` for a tape with no inputs (nothing
+    /// was bound, so there is nothing to report).
+    #[must_use]
+    pub fn receipt(&self) -> Option<TapeReceipt> {
+        (!self.inputs.is_empty()).then_some(TapeReceipt {
+            inputs: self.inputs.len(),
+            applied: self.applied,
+            missed: self.missed,
+        })
+    }
+}
+
+/// Run-end account of one bound tape: how many inputs it holds, how many the
+/// sim consumed and how many were skipped. The rest are unreached (the run
+/// ended first). Evidence only; never hashed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TapeReceipt {
+    /// Inputs the tape holds.
+    pub inputs: usize,
+    /// Inputs handed to the sim on their own tick.
+    pub applied: usize,
+    /// Inputs whose tick passed without being asked for.
+    pub missed: usize,
+}
+
+impl TapeReceipt {
+    /// Inputs the run ended before reaching.
+    #[must_use]
+    pub fn unreached(self) -> usize {
+        self.inputs
+            .saturating_sub(self.applied)
+            .saturating_sub(self.missed)
+    }
+
+    /// The one-line receipt a run prints beside its manifest.
+    #[must_use]
+    pub fn line(self) -> String {
+        format!(
+            "arena tape: inputs={} applied={} unreached={} missed={}",
+            self.inputs,
+            self.applied,
+            self.unreached(),
+            self.missed
+        )
+    }
+
+    /// Why this run cannot claim the tape drove it: a skipped input, or a
+    /// tape none of whose inputs reached the sim. `None` when the tape played.
+    #[must_use]
+    pub fn failure(self) -> Option<String> {
+        if self.missed > 0 {
+            return Some(format!(
+                "bound tape skipped {} of {} inputs (their ticks never ran through the tape)",
+                self.missed, self.inputs
+            ));
+        }
+        (self.applied == 0).then(|| {
+            format!(
+                "bound tape never reached the sim: 0 of {} inputs applied",
+                self.inputs
+            )
+        })
     }
 }
 
@@ -1357,6 +1435,145 @@ mod tests {
             sha: "deadbeef1234".to_string(),
             fps: 30,
         }
+    }
+
+    /// The window's arena-scene session: kit world, duel rules, eight bodies.
+    fn arena_scene_session(ticks: u32) -> App {
+        let config = GameConfig {
+            seed: 2040,
+            ticks,
+            fighters: 8,
+            half_extent_m: 20.0,
+        };
+        App::with_world(config, crate::arena_kit::kit_match_world_or_empty())
+            .and_then(App::into_duel)
+            .expect("arena scene session builds")
+    }
+
+    /// One tape of `ticks` identical human inputs on every tick.
+    fn held_tape(ticks: u32, (mx, mz): (i8, i8), buttons: Buttons) -> TapeInputs {
+        TapeInputs::new(
+            (0..ticks)
+                .map(|tick| FighterInput {
+                    tick,
+                    fighter: FighterId::new(HUMAN_SLOT).unwrap(),
+                    mx,
+                    mz,
+                    facing: 0,
+                    buttons,
+                })
+                .collect(),
+        )
+    }
+
+    /// Run `app` the way the window loop does (the tape owns the human slot
+    /// on the ticks it names, idle otherwise). Returns the slot-0 press tells
+    /// (ticks the hero began an attack) and the final checkpoint hash.
+    fn run_like_window(app: &mut App, tape: &mut TapeInputs, ticks: u32) -> (u32, u64) {
+        let mut presses = 0;
+        for _ in 0..ticks {
+            let tick = app.cursor();
+            let input = tape
+                .input_for_tick(tick)
+                .unwrap_or_else(|| idle_input(tick));
+            let out = app.tick(input);
+            assert!(out.input_accepted, "tick {tick} accepted");
+            presses += u32::from(out.started.contains(&HUMAN_SLOT));
+        }
+        (presses, app.checkpoints().last().expect("ran").hash)
+    }
+
+    #[test]
+    fn arena_scene_session_obeys_the_tape_on_slot_zero() {
+        let ticks = 120;
+        let attack = Buttons(engine_input::fighter::ATTACK);
+        let (idle_presses, idle_hash) = run_like_window(
+            &mut arena_scene_session(ticks),
+            &mut held_tape(ticks, (0, 0), Buttons::NONE),
+            ticks,
+        );
+        let (presses, hash) = run_like_window(
+            &mut arena_scene_session(ticks),
+            &mut held_tape(ticks, (0, 0), attack),
+            ticks,
+        );
+        let (_, again) = run_like_window(
+            &mut arena_scene_session(ticks),
+            &mut held_tape(ticks, (0, 0), attack),
+            ticks,
+        );
+        assert_eq!(idle_presses, 0, "an idle tape never presses");
+        assert!(
+            presses > 0,
+            "an attack tape makes slot 0 swing, got {presses}"
+        );
+        assert_ne!(hash, idle_hash, "the attack tape moved the sim hash");
+        assert_eq!(hash, again, "the same tape replays to the same hash");
+    }
+
+    #[test]
+    fn arena_scene_wish_moves_the_hero_metres() {
+        let ticks = 180;
+        let mut rested = arena_scene_session(ticks);
+        run_like_window(
+            &mut rested,
+            &mut held_tape(ticks, (0, 0), Buttons::NONE),
+            ticks,
+        );
+        // Full wish along +z: at this seed the hero spawns against the +x
+        // wall, so a wish along x is clamped by design and proves nothing.
+        let mut walker = arena_scene_session(ticks);
+        run_like_window(
+            &mut walker,
+            &mut held_tape(ticks, (0, 100), Buttons::NONE),
+            ticks,
+        );
+        let (rest, end) = (
+            rested.fighter_views()[0].pos_m,
+            walker.fighter_views()[0].pos_m,
+        );
+        let moved = (end[0] - rest[0]).hypot(end[2] - rest[2]);
+        assert!(
+            moved > 5.0,
+            "a full wish moves the hero metres, got {moved}"
+        );
+    }
+
+    #[test]
+    fn tape_cursor_keeps_later_inputs_after_a_skipped_tick() {
+        let ticks = [0u32, 1, 2, 4, 5];
+        let mut tape = TapeInputs::new(ticks.iter().map(|&tick| idle_input(tick)).collect());
+        for tick in 0..3 {
+            assert!(tape.input_for_tick(tick).is_some(), "tick {tick} named");
+        }
+        assert!(tape.input_for_tick(3).is_none(), "tick 3 is not named");
+        // The caller never asks for tick 4; tick 5 must still land.
+        let late = tape.input_for_tick(5).expect("tick 5 lands after the skip");
+        assert_eq!(late.tick, 5);
+        let receipt = tape.receipt().expect("a tape with inputs reports");
+        assert_eq!((receipt.inputs, receipt.applied, receipt.missed), (5, 4, 1));
+        assert_eq!(receipt.unreached(), 0);
+        let why = receipt.failure().expect("a skipped input is a failure");
+        assert!(why.contains("skipped 1 of 5"), "{why}");
+    }
+
+    #[test]
+    fn tape_receipt_names_unreached_inputs_and_refuses_an_inert_tape() {
+        let mut tape = held_tape(10, (0, 0), Buttons::NONE);
+        assert_eq!(TapeInputs::default().receipt(), None, "no tape, no receipt");
+        let idle = tape.receipt().expect("bound tape reports");
+        assert_eq!(idle.applied, 0, "nothing ran yet");
+        let why = idle.failure().expect("zero applied inputs is a failure");
+        assert!(why.contains("0 of 10"), "{why}");
+        for tick in 0..6 {
+            tape.input_for_tick(tick);
+        }
+        let played = tape.receipt().expect("bound tape reports");
+        assert_eq!(played.failure(), None, "a tape that played is fine");
+        assert_eq!(
+            played.line(),
+            "arena tape: inputs=10 applied=6 unreached=4 missed=0"
+        );
     }
 
     #[test]

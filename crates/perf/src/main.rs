@@ -555,7 +555,7 @@ fn vram_plan_text() -> String {
     format!("{}", vram::plan(info))
 }
 
-/// Peak live-heap bytes over two 600-tick 8-fighter headless runs.
+/// Peak requested bytes (an upper bound on live heap) over two 600-tick 8-fighter headless runs.
 ///
 /// Runs the 8-fighter canonical match twice and takes the max `alloc_bytes`
 /// via [`peak_of`]. The struct literal equals

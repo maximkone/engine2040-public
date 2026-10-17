@@ -321,7 +321,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   Suspicious; sound only gives Investigate; confirmed gives Combat; confirmed then lost
   gives Track and then Unaware after 300 ticks; a closed door blocks sight; x2 equal.
   F2P: no ladder. P2P: `cargo test -p engine-ai --lib` green.
-- [ ] GS30 spatial: isovist — new `crates/spatial/src/isovist.rs`: the visibility polygon
+- [x] GS30 spatial: isovist — new `crates/spatial/src/isovist.rs`: the visibility polygon Landed d10f8c58.
   from an integer-cm origin over wall segments by a rotational sweep with an active-edge
   heap (donor: kratocz/godot-visibility-polygon, CC0, itself from byronknoll
   visibility-polygon-js; split crossing segments first, since `break_intersections` is
@@ -349,7 +349,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   each; the 200-bout survey (`feel.rs` `BALANCE_BOUTS`) gives fighter-0 share between
   350 and 650 permille for every ordered pair; hash x2. F2P: no class rows. P2P:
   `cargo test -p engine-combat --lib` green; golden unchanged.
-- [ ] GS32 combat: telegraph floors report — `crates/combat/tests/telegraph_floor.rs`
+- [x] GS32 combat: telegraph floors report — `crates/combat/tests/telegraph_floor.rs` Landed 62dd9539.
   prints, for every move in `TABLES_V1`, signal + attack ms (`(startup + active) * 1000
   / 60`) against the Dark Souls 3 floors (340 ms, bait 240 ms, end pose 170 ms; Jerry
   Zhang, Anatomy of an Enemy Attack). Report only; `TELEGRAPH_STRICT=1` fails below

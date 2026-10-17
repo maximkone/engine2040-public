@@ -3,9 +3,11 @@
 //! Units: integer centimetres in, square centimetres out.
 //! Determinism: integer math only (`i64`/`i128`), sorted walls/endpoints and
 //! angles; same inputs give the same order twice. No float, no clock.
-//! Errors: none; empty walls give empty polygon, short rings return 0.
+//! Errors: none; empty walls or a coordinate past `MAX_COORD_CM` give an
+//! empty polygon, short rings return 0.
 //! Crossings split at integer-cm points before the sweep; collinear
 //! overlaps stay as-is. Fixtures beyond the X crossing are non-crossing.
+//! Proof: `parity_*` tests compare the ring with a brute-force segment test.
 //! Book: [found2 | 9.1 Polygon Clipping] (clip keeps the positive side).
 
 use std::cmp::Ordering;
@@ -23,22 +25,42 @@ pub struct WallSeg {
     pub bz_cm: i32,
 }
 
+/// Largest coordinate magnitude, in centimetres, the sweep accepts (2^24 cm,
+/// 167 km). Inside it every cross product and every hit-point numerator fits
+/// the integer width used for it, so the sweep cannot overflow. Outside it
+/// [`isovist`] reports an empty ring and [`split_crossings`] returns its
+/// input unchanged.
+pub const MAX_COORD_CM: i32 = 1 << 24;
+
+fn in_domain(p: [i32; 2]) -> bool {
+    p[0].unsigned_abs() <= MAX_COORD_CM.unsigned_abs()
+        && p[1].unsigned_abs() <= MAX_COORD_CM.unsigned_abs()
+}
+
+fn walls_in_domain(walls: &[WallSeg]) -> bool {
+    walls
+        .iter()
+        .all(|w| in_domain([w.ax_cm, w.az_cm]) && in_domain([w.bx_cm, w.bz_cm]))
+}
+
 /// Closed-ring area of a polygon in square centimetres.
 ///
-/// Shoelace over `i64`; returns 0 for fewer than 3 points. A 10 m square
+/// Shoelace over `i128`; returns 0 for fewer than 3 points. A 10 m square
 /// (1_000 cm side) reports 1_000_000 cm2; a 10_000 cm side reports
 /// 100_000_000 cm2. Sign-independent: clockwise and counter-clockwise
-/// rings report the same area, twice identically.
+/// rings report the same area, twice identically. An area past `i64::MAX`
+/// (only possible for rings wider than [`MAX_COORD_CM`]) saturates.
 pub fn area_cm2(poly: &[[i32; 2]]) -> i64 {
     if poly.len() < 3 {
         return 0;
     }
-    let mut acc: i64 = 0;
+    let mut acc: i128 = 0;
     for (i, point) in poly.iter().enumerate() {
         let next = poly[(i + 1) % poly.len()];
-        acc += i64::from(point[0]) * i64::from(next[1]) - i64::from(next[0]) * i64::from(point[1]);
+        acc +=
+            i128::from(point[0]) * i128::from(next[1]) - i128::from(next[0]) * i128::from(point[1]);
     }
-    acc.abs() / 2
+    i64::try_from(acc.abs() / 2).unwrap_or(i64::MAX)
 }
 
 fn cross(ax: i64, az: i64, bx: i64, bz: i64) -> i64 {
@@ -64,8 +86,10 @@ fn ray_hit(origin: [i32; 2], dir: [i64; 2], w: WallSeg) -> Option<(i64, i64, [i3
         return None;
     }
     let (tn, dn) = (t_num.abs(), det.abs());
-    let px = (i64::from(origin[0]) * dn + dir[0] * tn) / dn;
-    let pz = (i64::from(origin[1]) * dn + dir[1] * tn) / dn;
+    // Numerators reach 2^87 inside the domain: widen before the divide.
+    let (tn128, dn128) = (i128::from(tn), i128::from(dn));
+    let px = (i128::from(origin[0]) * dn128 + i128::from(dir[0]) * tn128) / dn128;
+    let pz = (i128::from(origin[1]) * dn128 + i128::from(dir[1]) * tn128) / dn128;
     let (px32, pz32) = (i32::try_from(px).ok()?, i32::try_from(pz).ok()?);
     Some((tn, dn, [px32, pz32]))
 }
@@ -86,27 +110,17 @@ fn closest_hit(origin: [i32; 2], dir: [i64; 2], walls: &[WallSeg]) -> Option<[i3
     }
     best.map(|(_, _, pt)| pt)
 }
-fn angle_cmp(origin: [i32; 2], a: [i32; 2], b: [i32; 2]) -> Ordering {
-    let ax = i64::from(a[0]) - i64::from(origin[0]);
-    let az = i64::from(a[1]) - i64::from(origin[1]);
-    let bx = i64::from(b[0]) - i64::from(origin[0]);
-    let bz = i64::from(b[1]) - i64::from(origin[1]);
-    let ha = i32::from(!(az > 0 || (az == 0 && ax > 0)));
-    let hb = i32::from(!(bz > 0 || (bz == 0 && bx > 0)));
+/// Counter-clockwise order of two ray directions from +X, exact in integers.
+/// Equal directions compare equal whatever their length.
+fn dir_cmp(a: [i64; 2], b: [i64; 2]) -> Ordering {
+    let ha = i32::from(!(a[1] > 0 || (a[1] == 0 && a[0] > 0)));
+    let hb = i32::from(!(b[1] > 0 || (b[1] == 0 && b[0] > 0)));
     if ha != hb {
         return ha.cmp(&hb);
     }
-    let cr = cross(ax, az, bx, bz);
-    if cr != 0 {
-        return if cr > 0 {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        };
-    }
-    let da = ax * ax + az * az;
-    let db = bx * bx + bz * bz;
-    da.cmp(&db).then_with(|| a.cmp(&b))
+    // Offset rays reach 2^36 per axis, so the cross product needs 128 bits.
+    let turn = i128::from(a[0]) * i128::from(b[1]) - i128::from(a[1]) * i128::from(b[0]);
+    0.cmp(&turn)
 }
 fn simplify_collinear(poly: Vec<[i32; 2]>) -> Vec<[i32; 2]> {
     let n = poly.len();
@@ -138,7 +152,7 @@ fn simplify_collinear(poly: Vec<[i32; 2]>) -> Vec<[i32; 2]> {
 /// output twice. No float, no clock.
 pub fn split_crossings(walls: &[WallSeg]) -> Vec<WallSeg> {
     let n = walls.len();
-    if n < 2 {
+    if n < 2 || !walls_in_domain(walls) {
         return walls.to_vec();
     }
     let mut pts: Vec<Vec<[i32; 2]>> = Vec::with_capacity(n);
@@ -256,10 +270,16 @@ pub fn isovist_ray_budget(wall_count: usize) -> usize {
 /// Splits crossings, then canonicalizes and sorts walls, casts three
 /// integer rays per endpoint
 /// (exact plus two `K = 1024` offsets for shadow edges), keeps the closest
-/// hit per ray, sorts by angle, dedups, and drops straight-edge dust.
-/// Same inputs give the same order twice.
+/// hit per ray, sorts the hits by their ray's direction, dedups, and drops
+/// straight-edge dust.
+/// Same inputs give the same order twice, whatever order or direction the
+/// walls come in. Every vertex sits on a wall to the centimetre, and a
+/// shadow step lies within 1/1024 rad of the true shadow edge.
+///
+/// Rooms must be closed: a ray that escapes through a gap adds no vertex.
+/// Empty walls, or any coordinate beyond [`MAX_COORD_CM`], give an empty ring.
 pub fn isovist(origin: [i32; 2], walls: &[WallSeg]) -> Vec<[i32; 2]> {
-    if walls.is_empty() {
+    if walls.is_empty() || !in_domain(origin) || !walls_in_domain(walls) {
         return Vec::new();
     }
     let mut sorted: Vec<WallSeg> = split_crossings(walls);
@@ -279,7 +299,11 @@ pub fn isovist(origin: [i32; 2], walls: &[WallSeg]) -> Vec<[i32; 2]> {
     ends.sort_unstable();
     ends.dedup();
     const K: i64 = 1024;
-    let mut hits: Vec<[i32; 2]> = Vec::with_capacity(isovist_ray_budget(sorted.len()));
+    // Each hit keeps the direction of the ray that found it. The ring is
+    // ordered by those exact directions, never by the rounded hit points: a
+    // far hit rounded onto an end's own bearing would otherwise swap places
+    // with the near end it was cast beside.
+    let mut rays: Vec<([i64; 2], [i32; 2])> = Vec::with_capacity(isovist_ray_budget(sorted.len()));
     for e in &ends {
         let dx = i64::from(e[0]) - i64::from(origin[0]);
         let dz = i64::from(e[1]) - i64::from(origin[1]);
@@ -294,15 +318,16 @@ pub fn isovist(origin: [i32; 2], walls: &[WallSeg]) -> Vec<[i32; 2]> {
         for d in dirs {
             if let Some(pt) = closest_hit(origin, d, &sorted) {
                 if pt != origin {
-                    hits.push(pt);
+                    rays.push((d, pt));
                 }
             }
         }
     }
-    if hits.is_empty() {
+    if rays.is_empty() {
         return Vec::new();
     }
-    hits.sort_by(|a, b| angle_cmp(origin, *a, *b));
+    rays.sort_by(|a, b| dir_cmp(a.0, b.0).then_with(|| a.1.cmp(&b.1)));
+    let mut hits: Vec<[i32; 2]> = rays.into_iter().map(|(_, pt)| pt).collect();
     hits.dedup();
     simplify_collinear(hits)
 }
@@ -492,6 +517,386 @@ mod tests {
             }
         }
         walls
+    }
+
+    // Brute-force parity. The oracle never touches the sweep: a point is
+    // seen when the straight line from the eye to it touches no wall, and
+    // the ring must contain exactly those points. Two thin bands are
+    // skipped because the fan is only exact there by design: within 4 cm of
+    // a wall (centimetre rounding) and within 0.002 rad of a wall end
+    // (the near-radial shadow step).
+
+    /// Fixed-seed generator so the random rooms replay exactly.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+        fn range(&mut self, lo: i32, hi: i32) -> i32 {
+            let span = u64::try_from(hi - lo + 1).expect("hi >= lo");
+            lo + i32::try_from(self.next() % span).expect("span fits i32")
+        }
+    }
+
+    fn v128(p: [i32; 2]) -> [i128; 2] {
+        [i128::from(p[0]), i128::from(p[1])]
+    }
+    fn sub(a: [i128; 2], b: [i128; 2]) -> [i128; 2] {
+        [a[0] - b[0], a[1] - b[1]]
+    }
+    fn cross128(a: [i128; 2], b: [i128; 2]) -> i128 {
+        a[0] * b[1] - a[1] * b[0]
+    }
+    fn orient(a: [i128; 2], b: [i128; 2], c: [i128; 2]) -> i128 {
+        cross128(sub(b, a), sub(c, a))
+    }
+    fn in_box(a: [i128; 2], b: [i128; 2], c: [i128; 2]) -> bool {
+        c[0] >= a[0].min(b[0])
+            && c[0] <= a[0].max(b[0])
+            && c[1] >= a[1].min(b[1])
+            && c[1] <= a[1].max(b[1])
+    }
+    /// Segments `p1p2` and `p3p4` share at least one point.
+    fn segments_touch(p1: [i128; 2], p2: [i128; 2], p3: [i128; 2], p4: [i128; 2]) -> bool {
+        let d1 = orient(p3, p4, p1);
+        let d2 = orient(p3, p4, p2);
+        let d3 = orient(p1, p2, p3);
+        let d4 = orient(p1, p2, p4);
+        if ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+        {
+            return true;
+        }
+        (d1 == 0 && in_box(p3, p4, p1))
+            || (d2 == 0 && in_box(p3, p4, p2))
+            || (d3 == 0 && in_box(p1, p2, p3))
+            || (d4 == 0 && in_box(p1, p2, p4))
+    }
+    fn sight_blocked(eye: [i32; 2], p: [i32; 2], walls: &[WallSeg]) -> bool {
+        walls.iter().any(|w| {
+            segments_touch(
+                v128(eye),
+                v128(p),
+                v128([w.ax_cm, w.az_cm]),
+                v128([w.bx_cm, w.bz_cm]),
+            )
+        })
+    }
+    /// Even-odd test: casts a ray toward +X and counts edge crossings.
+    fn ring_contains(ring: &[[i32; 2]], p: [i32; 2]) -> bool {
+        let (px, pz) = (i128::from(p[0]), i128::from(p[1]));
+        let mut inside = false;
+        for (i, corner) in ring.iter().enumerate() {
+            let a = v128(*corner);
+            let b = v128(ring[(i + 1) % ring.len()]);
+            if (a[1] > pz) != (b[1] > pz) {
+                let lhs = (px - a[0]) * (b[1] - a[1]);
+                let rhs = (b[0] - a[0]) * (pz - a[1]);
+                let crossing_is_right = if b[1] > a[1] { lhs < rhs } else { lhs > rhs };
+                if crossing_is_right {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
+    /// True when `p` sits within `band` cm of wall `w`.
+    fn near_wall(p: [i32; 2], w: &WallSeg, band: i128) -> bool {
+        let a = v128([w.ax_cm, w.az_cm]);
+        let b = v128([w.bx_cm, w.bz_cm]);
+        let e = sub(b, a);
+        let q = sub(v128(p), a);
+        let len2 = e[0] * e[0] + e[1] * e[1];
+        let along = q[0] * e[0] + q[1] * e[1];
+        if len2 == 0 || along <= 0 {
+            return q[0] * q[0] + q[1] * q[1] <= band * band;
+        }
+        if along >= len2 {
+            let r = sub(v128(p), b);
+            return r[0] * r[0] + r[1] * r[1] <= band * band;
+        }
+        let side = cross128(e, q);
+        side * side <= band * band * len2
+    }
+    /// True when the eye-to-`p` direction is within 0.002 rad of the
+    /// direction to any wall end.
+    fn in_end_sliver(eye: [i32; 2], p: [i32; 2], walls: &[WallSeg]) -> bool {
+        let d = sub(v128(p), v128(eye));
+        let dd = d[0] * d[0] + d[1] * d[1];
+        walls.iter().any(|w| {
+            [[w.ax_cm, w.az_cm], [w.bx_cm, w.bz_cm]].iter().any(|end| {
+                let v = sub(v128(*end), v128(eye));
+                let vv = v[0] * v[0] + v[1] * v[1];
+                let side = cross128(d, v);
+                vv != 0 && d[0] * v[0] + d[1] * v[1] > 0 && side * side * 250_000 <= dd * vv
+            })
+        })
+    }
+
+    struct Parity {
+        checked: usize,
+        sampled: usize,
+        mismatches: Vec<[i32; 2]>,
+    }
+
+    /// Compare the ring with the brute-force oracle on a grid over
+    /// `lo..=hi`. Also locks replay x2 and that every vertex sits on a wall.
+    fn parity(eye: [i32; 2], walls: &[WallSeg], lo: [i32; 2], hi: [i32; 2]) -> Parity {
+        let ring = isovist(eye, walls);
+        assert_eq!(ring, isovist(eye, walls), "ring replays x2");
+        assert!(ring.len() >= 3, "a closed room gives a ring: {ring:?}");
+        let pieces = split_crossings(walls);
+        for v in &ring {
+            assert!(
+                pieces.iter().any(|w| near_wall(*v, w, 2)),
+                "vertex {v:?} floats off every wall"
+            );
+        }
+        let mut out = Parity {
+            checked: 0,
+            sampled: 0,
+            mismatches: Vec::new(),
+        };
+        let step = 37_usize;
+        for z in (lo[1] + 13..=hi[1]).step_by(step) {
+            for x in (lo[0] + 13..=hi[0]).step_by(step) {
+                let p = [x, z];
+                out.sampled += 1;
+                if p == eye
+                    || pieces.iter().any(|w| near_wall(p, w, 4))
+                    || in_end_sliver(eye, p, &pieces)
+                {
+                    continue;
+                }
+                out.checked += 1;
+                if !sight_blocked(eye, p, walls) != ring_contains(&ring, p) {
+                    out.mismatches.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    fn assert_parity(label: &str, eye: [i32; 2], walls: &[WallSeg], lo: [i32; 2], hi: [i32; 2]) {
+        let got = parity(eye, walls, lo, hi);
+        assert!(
+            got.mismatches.is_empty(),
+            "{label} eye {eye:?}: ring and brute force disagree at {:?} ({} of {} checked)",
+            &got.mismatches[..got.mismatches.len().min(6)],
+            got.mismatches.len(),
+            got.checked
+        );
+        assert!(
+            got.checked * 10 >= got.sampled * 8,
+            "{label} eye {eye:?}: only {} of {} samples were checked",
+            got.checked,
+            got.sampled
+        );
+    }
+
+    fn ring_walls(points: &[[i32; 2]]) -> Vec<WallSeg> {
+        let mut walls = Vec::with_capacity(points.len());
+        for (i, a) in points.iter().enumerate() {
+            let b = points[(i + 1) % points.len()];
+            walls.push(seg(a[0], a[1], b[0], b[1]));
+        }
+        walls
+    }
+
+    fn pillar(x0: i32, z0: i32, x1: i32, z1: i32) -> Vec<WallSeg> {
+        ring_walls(&[[x0, z0], [x1, z0], [x1, z1], [x0, z1]])
+    }
+
+    #[test]
+    fn parity_hand_built_rooms_match_brute_force() {
+        let mut pillar_room = room_walls();
+        pillar_room.extend(pillar(600, 450, 700, 550));
+        let l_room = ring_walls(&[
+            [0, 0],
+            [1200, 0],
+            [1200, 500],
+            [500, 500],
+            [500, 1200],
+            [0, 1200],
+        ]);
+        let mut busy_room = ring_walls(&[[0, 0], [1400, 0], [1400, 900], [0, 900]]);
+        busy_room.extend(pillar(300, 300, 380, 380));
+        busy_room.extend(pillar(900, 500, 1000, 560));
+        busy_room.push(seg(600, 100, 600, 600));
+        let mut x_room = room_walls();
+        x_room.push(seg(100, 100, 701, 503));
+        x_room.push(seg(100, 600, 700, 150));
+        // Each room is probed from several eyes over its box plus a margin.
+        let probe = |label: &str, walls: &[WallSeg], eyes: &[[i32; 2]], size: [i32; 2]| {
+            for eye in eyes {
+                assert_parity(label, *eye, walls, [-60, -60], [size[0] + 60, size[1] + 60]);
+            }
+        };
+        let eyes = [[500, 500], [150, 150], [850, 850], [650, 300]];
+        probe("pillar", &pillar_room, &eyes, [1000, 1000]);
+        let eyes = [[250, 250], [1000, 250], [250, 1000], [100, 1100]];
+        probe("ell", &l_room, &eyes, [1200, 1200]);
+        let eyes = [[150, 150], [700, 700], [1250, 800], [700, 650]];
+        probe("busy", &busy_room, &eyes, [1400, 900]);
+        let eyes = [[50, 50], [500, 900], [900, 300], [400, 330]];
+        probe("cross", &x_room, &eyes, [1000, 1000]);
+    }
+
+    /// A closed 1000 x 1000 room with a few random walls, and an eye that
+    /// is not within 8 cm of any of them.
+    fn random_room(seed: u64) -> (Vec<WallSeg>, [i32; 2]) {
+        let mut rng = Lcg(seed);
+        let mut walls = room_walls();
+        let extra = 2 + usize::try_from(rng.next() % 7).expect("small");
+        for _ in 0..extra {
+            let a = [rng.range(60, 940), rng.range(60, 940)];
+            let mut b = [
+                (a[0] + rng.range(-300, 300)).clamp(20, 980),
+                (a[1] + rng.range(-300, 300)).clamp(20, 980),
+            ];
+            if rng.next().is_multiple_of(3) {
+                b[1] = a[1];
+            }
+            let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+            if dx * dx + dz * dz >= 400 {
+                walls.push(seg(a[0], a[1], b[0], b[1]));
+            }
+        }
+        let pieces = split_crossings(&walls);
+        loop {
+            let eye = [rng.range(40, 960), rng.range(40, 960)];
+            if !pieces.iter().any(|w| near_wall(eye, w, 8)) {
+                return (walls, eye);
+            }
+        }
+    }
+
+    #[test]
+    fn isovist_far_hit_rounded_onto_an_end_bearing_stays_before_that_end() {
+        // The ray just above the free wall's top end meets the left wall at
+        // z 300.7, which rounds onto the end's own bearing (the end is at
+        // (600, 600), the eye at (700, 650)). Ordering the rounded hits by
+        // bearing then put the near end first and folded the ring over
+        // itself; ordering by the casting ray keeps the far hit first.
+        let mut walls = ring_walls(&[[0, 0], [1400, 0], [1400, 900], [0, 900]]);
+        walls.push(seg(600, 100, 600, 600));
+        let eye = [700, 650];
+        let ring = isovist(eye, &walls);
+        assert_eq!(ring, isovist(eye, &walls));
+        let far = ring.iter().position(|p| *p == [0, 300]).expect("far hit");
+        let near = ring
+            .iter()
+            .position(|p| *p == [600, 600])
+            .expect("near end");
+        assert_eq!(near, far + 1, "far hit comes first: {ring:?}");
+        assert_eq!(
+            ring,
+            vec![
+                [1400, 900],
+                [0, 900],
+                [0, 300],
+                [600, 600],
+                [600, 100],
+                [582, 0],
+                [1400, 0]
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_random_rooms_match_brute_force() {
+        for seed in 1..=24_u64 {
+            let (walls, eye) = random_room(seed);
+            assert_parity(
+                &format!("seed {seed}"),
+                eye,
+                &walls,
+                [-40, -40],
+                [1040, 1040],
+            );
+        }
+    }
+
+    #[test]
+    fn isovist_ignores_wall_order_direction_and_junk() {
+        for seed in [3_u64, 9, 17] {
+            let (walls, eye) = random_room(seed);
+            let want = isovist(eye, &walls);
+            assert!(want.len() >= 4);
+            let mut turned: Vec<WallSeg> = walls
+                .iter()
+                .rev()
+                .map(|w| seg(w.bx_cm, w.bz_cm, w.ax_cm, w.az_cm))
+                .collect();
+            assert_eq!(isovist(eye, &turned), want, "seed {seed}: reversed walls");
+            turned.rotate_left(3);
+            assert_eq!(isovist(eye, &turned), want, "seed {seed}: rotated walls");
+            // A repeated wall and a zero-length wall add no sight line.
+            turned.push(turned[2]);
+            turned.push(seg(333, 777, 333, 777));
+            assert_eq!(
+                isovist(eye, &turned),
+                want,
+                "seed {seed}: duplicate and dot"
+            );
+        }
+    }
+
+    #[test]
+    fn isovist_far_coordinates_stay_exact() {
+        // The widest legal room: every product here overflowed `i64` before
+        // the hit point was widened.
+        let m = MAX_COORD_CM;
+        let room = ring_walls(&[[-m, -m], [m, -m], [m, m], [-m, m]]);
+        let ring = isovist([0, 0], &room);
+        assert_eq!(ring, isovist([0, 0], &room));
+        assert_eq!(ring, vec![[m, m], [-m, m], [-m, -m], [m, -m]]);
+        assert_eq!(area_cm2(&ring), 1_i64 << 50);
+        let mut with_pillar = room.clone();
+        with_pillar.extend(pillar(m / 2, -100, m / 2 + 100, 100));
+        let shaded = isovist([0, 0], &with_pillar);
+        assert_eq!(shaded, isovist([0, 0], &with_pillar));
+        assert!(shaded.len() > 4, "the pillar casts a shadow: {shaded:?}");
+        assert!(shaded.contains(&[m / 2, -100]) && shaded.contains(&[m / 2, 100]));
+        assert!(area_cm2(&shaded) < 1_i64 << 50);
+        // A cross at the far corner splits on an integer point inside the box.
+        let split = split_crossings(&[seg(-m, -m, m, m), seg(-m, m, m, -m)]);
+        assert_eq!(split.len(), 4);
+        assert!(split
+            .iter()
+            .all(|w| w.ax_cm.abs() <= m && w.bz_cm.abs() <= m));
+    }
+
+    #[test]
+    fn isovist_outside_the_domain_is_empty_not_a_panic() {
+        let m = MAX_COORD_CM;
+        let room = ring_walls(&[[-m, -m], [m, -m], [m, m], [-m, m]]);
+        assert!(!isovist([0, 0], &room).is_empty());
+        // One cm past the bound, an extreme eye and an extreme wall.
+        assert!(isovist([m + 1, 0], &room).is_empty());
+        assert!(isovist([0, i32::MIN], &room).is_empty());
+        let wide = ring_walls(&[[i32::MIN, i32::MIN], [i32::MAX, i32::MIN], [0, i32::MAX]]);
+        assert!(isovist([0, 0], &wide).is_empty());
+        assert_eq!(isovist([0, 0], &wide), isovist([0, 0], &wide));
+        // `split_crossings` hands out-of-domain walls back untouched.
+        let cross = [
+            seg(i32::MIN, i32::MIN, i32::MAX, i32::MAX),
+            seg(i32::MIN, i32::MAX, i32::MAX, i32::MIN),
+        ];
+        assert_eq!(split_crossings(&cross), cross.to_vec());
+        // The widest ring a caller can build saturates instead of wrapping.
+        let huge = [
+            [i32::MIN, i32::MIN],
+            [i32::MAX, i32::MIN],
+            [i32::MAX, i32::MAX],
+            [i32::MIN, i32::MAX],
+        ];
+        assert_eq!(area_cm2(&huge), i64::MAX);
+        assert_eq!(area_cm2(&huge), area_cm2(&huge));
     }
 
     /// Acceptance probe: the 3-rays-per-endpoint integer fan holds arena

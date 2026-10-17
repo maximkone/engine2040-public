@@ -205,6 +205,79 @@ impl FrameReceipt {
     }
 }
 
+/// Wall-clock split of one live window frame in microseconds. It names where
+/// the CPU time of a present goes: the staging before any command exists, the
+/// encode through `queue.submit`, and the `queue.present` call. Reported
+/// beside [`FrameReceipt`], never inside it. Evidence only, never hashed.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct LiveWallSplit {
+    /// Camera and draw pack, targets, uniforms, shadow bind, fog uniform and
+    /// draw binds: everything before the encoder opens.
+    pub stage_us: u64,
+    /// Encoder create through `queue.submit` (forward, blit and overlay).
+    pub submit_us: u64,
+    /// The `queue.present` call; 0 on the offscreen twin, which has no
+    /// swapchain image to present.
+    pub present_call_us: u64,
+}
+
+impl LiveWallSplit {
+    /// Sum of the three spans; never above the wall of the whole call.
+    #[must_use]
+    pub fn total_us(&self) -> u64 {
+        self.stage_us
+            .saturating_add(self.submit_us)
+            .saturating_add(self.present_call_us)
+    }
+
+    /// `stage=..ms submit=..ms present=..ms`, the millisecond format of the
+    /// per-pass line. Cold receipt path only.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "stage={}ms submit={}ms present={}ms",
+            FrameReceipt::format_ms_us(self.stage_us),
+            FrameReceipt::format_ms_us(self.submit_us),
+            FrameReceipt::format_ms_us(self.present_call_us),
+        )
+    }
+}
+
+thread_local! {
+    /// The last live window frame's split on the presenting thread. A frame
+    /// is written and read on the thread that presents it, so two presenters
+    /// on two threads never see each other's numbers.
+    static LAST_LIVE_WALL: core::cell::Cell<LiveWallSplit> = const {
+        core::cell::Cell::new(LiveWallSplit {
+            stage_us: 0,
+            submit_us: 0,
+            present_call_us: 0,
+        })
+    };
+}
+
+/// Store the split of the live frame that just submitted (present call 0
+/// until the surface path patches it).
+pub(super) fn record_live_wall_split(split: LiveWallSplit) {
+    LAST_LIVE_WALL.with(|cell| cell.set(split));
+}
+
+/// Patch the `queue.present` span into the split the same frame recorded.
+pub(super) fn record_present_call_us(us: u64) {
+    LAST_LIVE_WALL.with(|cell| {
+        let mut split = cell.get();
+        split.present_call_us = us;
+        cell.set(split);
+    });
+}
+
+/// The last live window frame's wall split on this thread; all zero before
+/// the first live frame. Evidence only, never hashed.
+#[must_use]
+pub fn last_live_wall_split() -> LiveWallSplit {
+    LAST_LIVE_WALL.with(core::cell::Cell::get)
+}
+
 /// Offscreen frame output: PNG bytes (absent while suspended) plus the
 /// adapter/driver manifest and the frame receipt.
 #[derive(Debug)]

@@ -65,8 +65,15 @@ const MAX_PITCH_SLOPE: f32 = 0.75;
 const TICK_HZ: f32 = engine_core::TICK_HZ as f32;
 /// Ticks between swing start and the impact cue (about mid-swing).
 const IMPACT_TICKS: u32 = 12;
-/// Ticks a hit victim stays tinted (about 100 ms: a flash, not a strobe).
-const FLASH_TICKS: u32 = 6;
+/// Ticks a hit victim stays tinted: 0.25 s, as long as the light-attack
+/// tell that caused the hit, so one hit reads on screen and in the tally.
+const FLASH_TICKS: u32 = 15;
+/// Share of the green channel a flashing body keeps.
+const FLASH_GREEN_KEEP: f32 = 0.35;
+/// Share of the blue channel a flashing body keeps.
+const FLASH_BLUE_KEEP: f32 = 0.3;
+/// Exposure a flashing body draws at.
+const FLASH_EXPOSURE: f32 = 1.6;
 /// Farthest drawn attacker-to-victim gap that still tints the victim.
 /// Rules v1 lands every swing on every living foe at any range, so without
 /// this gate all eight bodies strobe red from the first exchange on.
@@ -361,10 +368,9 @@ pub struct SkinSplit {
     /// `uploaded`'s CPU half: clip sample, skin, pose fold, the down lift and
     /// the upload digest ([`FighterLook::pose_frame`] plus the per-part fold).
     pub pose_us: u64,
-    /// `uploaded`'s GPU half: the `v1::upload_mesh` plus
-    /// `Presenter::upload_mesh` pair per part (validation, tangent rebuild,
-    /// byte pack, buffer write). A part whose digest is unchanged runs no
-    /// pair and adds nothing.
+    /// `uploaded`'s GPU half: the staged value plus `Presenter::upload_mesh`
+    /// per part (validation, tangent rebuild, byte pack, buffer write). A
+    /// part whose digest is unchanged runs neither and adds nothing.
     pub upload_us: u64,
 }
 
@@ -385,6 +391,60 @@ pub struct PresentReport {
     pub skin: SkinSplit,
 }
 
+/// The value [`upload_slot_parts`] hands to `Presenter::upload_mesh`: posed
+/// positions and normals over the rig part's own uvs and indices.
+///
+/// `Presenter::upload_mesh` revalidates its input and rebuilds the tangents
+/// from those four arrays on every call, and never reads the value's
+/// `tangents`; running `v1::upload_mesh` here as well repeated the whole
+/// validate plus tangent pass on every changed part. `tangents` stays empty on
+/// purpose: nothing but the presenter reads this value, and a bad vertex
+/// still refuses there, before any buffer is written.
+fn staged_part_mesh(
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    rig_mesh: &MeshData,
+) -> MeshData {
+    MeshData {
+        positions,
+        normals,
+        uvs: rig_mesh.uvs.clone(),
+        indices: rig_mesh.indices.clone(),
+        tangents: Vec::new(),
+    }
+}
+
+/// True when every part of `slot_index` is resident as a skinned mesh on the
+/// slot's own joint block (staged by [`FighterLook::stage_skinned_meshes`]),
+/// so a frame only has to write that block. Pure reads of the presenter.
+fn slot_is_gpu_skinned(presenter: &Presenter, slot_index: usize, rig: &Rig) -> bool {
+    !rig.parts.is_empty()
+        && (0..rig.parts.len()).all(|part_index| {
+            presenter.skin_block_of(&look_mesh_key(slot_index, part_index)) == Some(slot_index)
+        })
+}
+
+/// The GPU-skin frame write for one slot: its joint matrices (down lift
+/// folded in) into the slot's block, nothing else. The `parts` count reads
+/// as uploaded (they are resident and drawn); the single block write is the
+/// frame's whole upload half. A refusal (a non-finite matrix) is loud.
+fn write_slot_skin(
+    presenter: &mut Presenter,
+    slot_index: usize,
+    parts: usize,
+    matrices: &[[[f32; 4]; 4]],
+) -> Result<SkinSplit, LookError> {
+    let started = Instant::now();
+    presenter
+        .write_skin_block(slot_index, matrices)
+        .map_err(|err| LookError::Upload(err.to_string()))?;
+    Ok(SkinSplit {
+        uploaded: parts,
+        pose_us: 0,
+        upload_us: micros(started.elapsed()),
+    })
+}
+
 /// Upload one slot's skinned parts with the down lift applied (LF17, view
 /// only): lifted positions for the draw, normals ride unchanged, tangents
 /// recomputed from the lifted positions plus UVs. The GPU vertex is 48 B
@@ -395,14 +455,14 @@ pub struct PresentReport {
 /// tangents, every *changed* skinned frame re-uploads the full mesh (correct
 /// stride) so fighters render with limbs and armor.
 ///
-/// The pair is skipped when the frame's lifted positions plus skinned normals
-/// hash to the part's resident digest (`digests`, keyed by
+/// The upload is skipped when the frame's lifted positions plus skinned
+/// normals hash to the part's resident digest (`digests`, keyed by
 /// `slot * MAX_PARTS + part`): the resident bytes already are the frame's
 /// bytes, so a frozen body re-uploads nothing and a moved one re-uploads
 /// whole. `uploaded` counts the parts left resident for the frame either way.
 /// Returns that count beside the two halves they cost: the lift plus digest
-/// fold into `pose_us`, the `v1::upload_mesh`/`Presenter::upload_mesh` pair
-/// into `upload_us` ([`SkinSplit`]).
+/// fold into `pose_us`, the [`staged_part_mesh`] plus `Presenter::upload_mesh`
+/// step into `upload_us` ([`SkinSplit`]).
 /// [found2 | 7.6.2 Rendering with Normal Maps]
 fn upload_slot_parts(
     presenter: &mut Presenter,
@@ -458,8 +518,7 @@ fn upload_slot_parts(
         // 48 B stride fix: always re-upload with recomputed tangents; never
         // refresh 32 B in place (misaligned past vertex 0, streaks).
         let upload_started = Instant::now();
-        let mesh = v1::upload_mesh(&lifted, &posed.normals, &part.mesh.uvs, &part.mesh.indices)
-            .map_err(|err| LookError::Skin(format!("{err}")))?;
+        let mesh = staged_part_mesh(lifted, posed.normals, &part.mesh);
         presenter
             .upload_mesh(key, &mesh)
             .map_err(|err| LookError::Upload(err.to_string()))?;
@@ -528,17 +587,27 @@ pub fn shot_for_frame(frame: u32, frames: Option<u32>, directed: bool) -> Shot {
 /// plane and inside the field of view. False for a camera that cannot build
 /// a view.
 fn in_picture(camera: &Camera, at: [f32; 3]) -> bool {
+    count_in_picture(camera, std::iter::once(at)) == 1
+}
+
+/// How many of `points` land in `camera`'s picture (see [`in_picture`]): the
+/// one owner of the picture test, with a single view build for the batch.
+fn count_in_picture(camera: &Camera, points: impl Iterator<Item = [f32; 3]>) -> usize {
     let Ok(view) = camera.view_matrix() else {
-        return false;
+        return 0;
     };
-    let mut point = camera.eye;
-    (point.x, point.y, point.z) = (at[0], at[1], at[2]);
-    let local = view.transform_point3(point);
-    let depth = -local.z;
     let half = (camera.fov_y * 0.5).tan();
-    depth > camera.near
-        && local.y.abs() <= depth * half
-        && local.x.abs() <= depth * half * camera.aspect
+    points
+        .filter(|at| {
+            let mut point = camera.eye;
+            (point.x, point.y, point.z) = (at[0], at[1], at[2]);
+            let local = view.transform_point3(point);
+            let depth = -local.z;
+            depth > camera.near
+                && local.y.abs() <= depth * half
+                && local.x.abs() <= depth * half * camera.aspect
+        })
+        .count()
 }
 
 /// Degrees `camera` looks down below the horizon (negative looks up).
@@ -591,6 +660,155 @@ fn pit_orbit(focus: [f32; 3], azimuth: f32, distance: f32, limit: f32) -> (f32, 
         }
     }
     best
+}
+
+/// One fight framing: what the eye looks at and where it orbits.
+#[derive(Clone, Copy)]
+struct ShotSpec {
+    /// Floor point the eye aims at, meters.
+    focus: [f32; 3],
+    /// Wanted eye distance from `focus` along the floor, meters.
+    distance: f32,
+    /// Eye height; `0.0` derives it from `distance`.
+    height: f32,
+    /// Height of the aim point, meters.
+    look_y: f32,
+    /// Wanted orbit azimuth, radians.
+    azimuth: f32,
+}
+
+/// The fight lens for `spec`: eye kept inside the pit (`limit`) and under the
+/// pitch cap, both ends moved by `shake`. `base` comes back when the pose
+/// cannot validate. Pure presentation.
+fn shot_camera(base: &Camera, spec: ShotSpec, limit: f32, shake: [f32; 3]) -> Camera {
+    let height = if spec.height > 0.0 {
+        spec.height
+    } else {
+        1.6 + spec.distance * 0.22
+    };
+    let (azimuth, reach) = pit_orbit(spec.focus, spec.azimuth, spec.distance, limit);
+    let eye = [
+        spec.focus[0] + azimuth.sin() * reach + shake[0],
+        height.min(spec.look_y + reach * MAX_PITCH_SLOPE) + shake[1],
+        spec.focus[2] + azimuth.cos() * reach + shake[2],
+    ];
+    let target = [
+        spec.focus[0] + shake[0],
+        spec.look_y + shake[1],
+        spec.focus[2] + shake[2],
+    ];
+    let mut camera = base.clone();
+    camera.eye = eye.into();
+    camera.target = target.into();
+    camera.up = [0.0, 1.0, 0.0].into();
+    camera.fov_y = 60.0f32.to_radians();
+    camera.near = 0.1;
+    camera.far = camera.far.max(120.0);
+    if camera.validate().is_ok() {
+        camera
+    } else {
+        base.clone()
+    }
+}
+
+/// Nearest group-shot eye distance tried, meters.
+const WIDE_START_M: f32 = 8.0;
+/// Step between tried group-shot eye distances, meters.
+const WIDE_STEP_M: f32 = 1.0;
+/// Farthest group-shot eye distance, meters (inside the 120 m far plane).
+const WIDE_MAX_M: f32 = 48.0;
+/// Orbit azimuths tried per group shot: the wanted one and its mirrors.
+const WIDE_ORBITS: u8 = 16;
+/// Spare pit room (meters) that makes an orbit comfortable: the wanted orbit
+/// keeps the shot while it holds this much, so a body drifting at the edge of
+/// the pit does not flip the eye across the arena.
+const WIDE_SLACK_M: f32 = 3.0;
+/// Halvings that tighten a found eye distance below [`WIDE_STEP_M`].
+const WIDE_REFINE: u8 = 4;
+
+/// A wider eye for the seen bodies (`seen`, floor positions) when `current`
+/// drops one. Orbits nearest the `wanted` azimuth go first, each walked out
+/// from [`WIDE_START_M`] while the pit has room for the eye; the first orbit
+/// that holds every body with [`WIDE_SLACK_M`] to spare wins, else the one
+/// with the most spare room. When no orbit holds them all, the eye that holds
+/// the most, if more than `current` does. `None` keeps `current`. Pure
+/// presentation.
+fn wide_group_camera(
+    base: &Camera,
+    seen: &[[f32; 3]],
+    current: &Camera,
+    limit: f32,
+    wanted: f32,
+    shake: [f32; 3],
+) -> Option<Camera> {
+    let chests = || seen.iter().map(|at| [at[0], 1.0, at[2]]);
+    let kept = count_in_picture(current, chests());
+    if kept >= seen.len() {
+        return None;
+    }
+    let (mut low, mut high) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for at in seen {
+        low = [low[0].min(at[0]), low[1].min(at[2])];
+        high = [high[0].max(at[0]), high[1].max(at[2])];
+    }
+    let focus = [0.5 * (low[0] + high[0]), 0.0, 0.5 * (low[1] + high[1])];
+    let eye_at = |azimuth: f32, distance: f32| {
+        let spec = ShotSpec {
+            focus,
+            distance,
+            height: 0.0,
+            look_y: 1.0,
+            azimuth,
+        };
+        shot_camera(base, spec, limit, shake)
+    };
+    let mut whole: Option<(f32, Camera)> = None;
+    let mut part: Option<(usize, Camera)> = None;
+    for orbit in 0..WIDE_ORBITS {
+        let steps = f32::from((orbit + 1) / 2);
+        let side = if orbit % 2 == 1 { steps } else { -steps };
+        let azimuth = wanted + side * std::f32::consts::FRAC_PI_8;
+        let room = pit_room(focus, azimuth, limit).min(WIDE_MAX_M);
+        let mut distance = WIDE_START_M;
+        while distance <= room {
+            let camera = eye_at(azimuth, distance);
+            let held = count_in_picture(&camera, chests());
+            if held >= seen.len() {
+                // Tighten between the last miss and this hit, so the eye
+                // glides with the bodies instead of stepping a whole meter.
+                let (mut near, mut hit) = (distance - WIDE_STEP_M, (distance, camera));
+                let halvings = if distance > WIDE_START_M {
+                    WIDE_REFINE
+                } else {
+                    0
+                };
+                for _ in 0..halvings {
+                    let mid = 0.5 * (near + hit.0);
+                    let tried = eye_at(azimuth, mid);
+                    if count_in_picture(&tried, chests()) >= seen.len() {
+                        hit = (mid, tried);
+                    } else {
+                        near = mid;
+                    }
+                }
+                let slack = room - hit.0;
+                if slack >= WIDE_SLACK_M {
+                    return Some(hit.1);
+                }
+                if whole.as_ref().is_none_or(|(most, _)| slack > *most) {
+                    whole = Some((slack, hit.1));
+                }
+                break;
+            }
+            if held > kept && part.as_ref().is_none_or(|(most, _)| held > *most) {
+                part = Some((held, camera));
+            }
+            distance += WIDE_STEP_M;
+        }
+    }
+    whole
+        .map(|(_, camera)| camera)
+        .or_else(|| part.map(|(_, camera)| camera))
 }
 
 /// The fighter look: rigs, per-slot anim state and the last tick seen.
@@ -910,6 +1128,21 @@ pub fn look_mesh_key(slot: usize, part: usize) -> MeshKey {
     MeshKey::new(id, digest)
 }
 
+/// The hit-flash material for a body part: red-shifted albedo (the shader
+/// multiplies it into the base-color map) and a brighter exposure. Pure; a
+/// finite valid input stays finite and valid.
+#[must_use]
+fn flash_material(base: &PbrMaterial) -> PbrMaterial {
+    let mut flash = base.clone();
+    flash.base_color = [
+        base.base_color[0],
+        base.base_color[1] * FLASH_GREEN_KEEP,
+        base.base_color[2] * FLASH_BLUE_KEEP,
+    ];
+    flash.exposure = FLASH_EXPOSURE;
+    flash
+}
+
 /// GPU skin availability probe behind the window path.
 ///
 /// Consumer: [`FighterLook::load_and_stage`] (cold window entry) calls this
@@ -937,6 +1170,10 @@ fn gpu_skin_adapter() -> Option<String> {
 struct PosedBody {
     truth: BodyTruth,
     frames: Vec<engine_render::v1_skin::SkinnedFrame>,
+    /// Joint matrices (`inverse bind * joint * root`, AN1 rows) with the down
+    /// lift already in their translation row: the GPU skin path writes them
+    /// as the body's one joint block, the frames above only feed the bounds.
+    matrices: Vec<[[f32; 4]; 4]>,
     lift: f32,
     /// Bound this draw carries in world meters: the posed-vertex bound
     /// ([`posed_bound_m`]) floored at the rig's bind radius, so a cull reads
@@ -946,6 +1183,7 @@ struct PosedBody {
     bound: Option<([f32; 3], f32)>,
 }
 
+#[cfg(test)]
 impl PosedBody {
     fn truth(&self) -> &BodyTruth {
         &self.truth
@@ -1316,6 +1554,33 @@ impl FighterLook {
         Ok(staged)
     }
 
+    /// The GPU-skin twin of [`Self::stage_meshes`]: create every slot's
+    /// part buffers once as bind-pose skinned vertices (pos, normal, uv,
+    /// joints, weights), each slot on its own joint block. A staged frame
+    /// then writes one joint block per body and uploads no vertices, and the
+    /// window forward pass blends the skin in the vertex stage. Returns
+    /// parts staged. Cold path; loud on refusal.
+    pub fn stage_skinned_meshes(&mut self, presenter: &mut Presenter) -> Result<usize, LookError> {
+        let mut staged = 0usize;
+        for slot_index in 0..MAX_LOOK_FIGHTERS {
+            let rig = &self.rigs[self.rig_for_slot(slot_index)];
+            for (part_index, part) in rig.parts.iter().enumerate() {
+                presenter
+                    .upload_skinned_mesh(
+                        look_mesh_key(slot_index, part_index),
+                        &part.mesh,
+                        &part.skin,
+                        slot_index,
+                    )
+                    .map_err(|err| LookError::Upload(err.to_string()))?;
+                staged += 1;
+            }
+        }
+        // The resident bytes are the bind pose again: no CPU digest holds.
+        self.uploaded_digest.fill(None);
+        Ok(staged)
+    }
+
     /// Skin every seen fighter at sub-tick `alpha` and write its parts into
     /// their resident vertex buffers, skipping a part whose bytes are already
     /// resident. Returns parts left resident; the wall halves behind them are
@@ -1392,7 +1657,7 @@ impl FighterLook {
             let pos = sample.pos;
             let yaw = sample.yaw;
             let root = sample.root;
-            let matrices: Vec<[[f32; 4]; 4]> = sample
+            let mut matrices: Vec<[[f32; 4]; 4]> = sample
                 .world
                 .iter()
                 .zip(rig.inverse_binds.iter())
@@ -1435,10 +1700,17 @@ impl FighterLook {
                 body.root[1] += lift;
                 body.min[1] += lift;
                 body.max[1] += lift;
+                // The blend weights sum to one, so lifting every joint's
+                // translation row lifts each skinned vertex by `lift`, the
+                // same shift `upload_slot_parts` adds to the CPU positions.
+                for matrix in &mut matrices {
+                    matrix[3][1] += lift;
+                }
             }
             let mut drawn = PosedBody {
                 truth: body,
                 frames,
+                matrices,
                 lift,
                 bound: None,
             };
@@ -1526,8 +1798,8 @@ impl FighterLook {
     /// view laws line. The same seed gives the same line twice; the sim hash
     /// never reads it.
     /// Caller: `crates/endpoint/src/packs/view.rs` (SP62 `view.laws` pops this
-    /// line, needs SP61); crate-internal until that door wires it.
-    pub(crate) fn view_run(seed: u64, ticks: u32, fighters: u8) -> Result<String, LookError> {
+    /// line); public so that door can reach it without a `Presenter`.
+    pub fn view_run(seed: u64, ticks: u32, fighters: u8) -> Result<String, LookError> {
         if ticks == 0 {
             return Ok(String::new());
         }
@@ -1609,14 +1881,22 @@ impl FighterLook {
                 truth.push(body.truth);
                 continue;
             }
-            let parts = upload_slot_parts(
-                presenter,
-                slot_index,
-                rig,
-                body.frames,
-                body.lift,
-                &mut self.uploaded_digest,
-            )?;
+            // A body whose parts were staged as skinned meshes draws from
+            // bind-pose vertices plus one joint block; the CPU-skinned frames
+            // above then only fed its bounds. Any other body re-uploads its
+            // posed vertices.
+            let parts = if slot_is_gpu_skinned(presenter, slot_index, rig) {
+                write_slot_skin(presenter, slot_index, rig.parts.len(), &body.matrices)?
+            } else {
+                upload_slot_parts(
+                    presenter,
+                    slot_index,
+                    rig,
+                    body.frames,
+                    body.lift,
+                    &mut self.uploaded_digest,
+                )?
+            };
             split.uploaded += parts.uploaded;
             split.pose_us = split.pose_us.saturating_add(parts.pose_us);
             split.upload_us = split.upload_us.saturating_add(parts.upload_us);
@@ -1654,15 +1934,11 @@ impl FighterLook {
                 if !resident.contains(&key) {
                     continue;
                 }
-                let mut material = part.material.clone();
-                if flash {
-                    material.base_color = [
-                        material.base_color[0],
-                        material.base_color[1] * 0.35,
-                        material.base_color[2] * 0.3,
-                    ];
-                    material.exposure = 1.6;
-                }
+                let material = if flash {
+                    flash_material(&part.material)
+                } else {
+                    part.material.clone()
+                };
                 list.items.push(DrawItem {
                     mesh: key,
                     material,
@@ -1682,12 +1958,19 @@ impl FighterLook {
         presenter: &mut Presenter,
         half_extent_m: f32,
     ) -> Result<Self, LookError> {
-        // Keep the built GPU skin path constructed in the live window frame;
-        // the CPU skin below stays the single render path.
+        // Keep the built GPU skin path constructed in the live window frame.
         let _ = gpu_skin_adapter();
         let mut look = Self::load(&fighters_content_dir())?;
         look.stage_textures(presenter)?;
-        look.stage_meshes(presenter)?;
+        // The window draws the skin on the GPU: bind-pose vertices plus one
+        // joint block per body. `E2040_CPU_SKIN` keeps the CPU-skinned
+        // upload for A/B captures and as the fallback (the pose, bounds and
+        // draw order are the same either way).
+        if std::env::var_os("E2040_CPU_SKIN").is_some() {
+            look.stage_meshes(presenter)?;
+        } else {
+            look.stage_skinned_meshes(presenter)?;
+        }
         let ring = FightRing::load(&crate::arena_kit::kit_content_dir(), half_extent_m)
             .map_err(|err| LookError::Ring(err.to_string()))?;
         ring.stage(presenter)
@@ -1723,10 +2006,23 @@ impl FighterLook {
     /// window's framing check, 0 when the shot shows nobody.
     #[must_use]
     pub fn fighters_in_view(&self, camera: &Camera, fighters: usize) -> usize {
+        let chests = self
+            .slots
+            .iter()
+            .take(fighters.min(MAX_LOOK_FIGHTERS))
+            .filter(|slot| slot.seen)
+            .map(|slot| [slot.pos[0], 1.0, slot.pos[2]]);
+        count_in_picture(camera, chests)
+    }
+
+    /// Fighters under `fighters` the look has folded at least one tick for:
+    /// the denominator the framing receipt reads `fighters_in_view` against.
+    #[must_use]
+    pub fn fighters_seen(&self, fighters: usize) -> usize {
         self.slots
             .iter()
             .take(fighters.min(MAX_LOOK_FIGHTERS))
-            .filter(|slot| slot.seen && in_picture(camera, [slot.pos[0], 1.0, slot.pos[2]]))
+            .filter(|slot| slot.seen)
             .count()
     }
 
@@ -1849,38 +2145,31 @@ impl FighterLook {
                 return self.wide_camera(base, center);
             }
         };
-        let height = if height > 0.0 {
-            height
-        } else {
-            1.6 + distance * 0.22
-        };
         // Keep the eye inside the pit so the wall never blocks the shot.
         let limit = self
             .ring
             .as_ref()
             .map_or(f32::MAX, |ring| ring.wall_m - 0.6);
-        let (azimuth, reach) = pit_orbit(focus, azimuth, distance, limit);
         // View-only shake (LF11): one sample moves both eye and target
         // before validate, so the same ticks give the same offsets.
         let shake = self.fight_shake_vec();
-        let eye = [
-            focus[0] + azimuth.sin() * reach + shake[0],
-            height.min(look_y + reach * MAX_PITCH_SLOPE) + shake[1],
-            focus[2] + azimuth.cos() * reach + shake[2],
-        ];
-        let target = [focus[0] + shake[0], look_y + shake[1], focus[2] + shake[2]];
-        let mut camera = base.clone();
-        camera.eye = eye.into();
-        camera.target = target.into();
-        camera.up = [0.0, 1.0, 0.0].into();
-        camera.fov_y = 60.0f32.to_radians();
-        camera.near = 0.1;
-        camera.far = camera.far.max(120.0);
-        if camera.validate().is_ok() {
-            camera
-        } else {
-            base.clone()
+        let spec = ShotSpec {
+            focus,
+            distance,
+            height,
+            look_y,
+            azimuth,
+        };
+        let camera = shot_camera(base, spec, limit, shake);
+        // The fight shot shows the fight: when the close framing drops a
+        // live body, a wider eye that holds more of them takes over.
+        if shot == Shot::Action {
+            let wanted = 0.9 + turn;
+            if let Some(wider) = wide_group_camera(base, &seen, &camera, limit, wanted, shake) {
+                return wider;
+            }
         }
+        camera
     }
 }
 
@@ -2062,6 +2351,152 @@ mod tests {
             4,
             "both pairs stay in the 60 deg picture"
         );
+    }
+
+    /// `spread_look` re-seated on `bodies` (floor x/z, slot order, all seen).
+    fn look_at(bodies: &[[f32; 2]]) -> FighterLook {
+        let mut look = spread_look();
+        for slot in &mut look.slots {
+            slot.seen = false;
+        }
+        for (slot, at) in look.slots.iter_mut().zip(bodies) {
+            slot.seen = true;
+            slot.pos = [at[0], 0.0, at[1]];
+        }
+        look
+    }
+
+    /// Where the eight bodies of the standing 8-fighter run (seed 2040) stood
+    /// at ticks 0 and 250: the hero pinned at the +x wall, the rest across a
+    /// 36 by 30 m field.
+    const ARENA_SPREADS: [[[f32; 2]; 8]; 2] = [
+        [
+            [19.2, 3.4],
+            [-16.6, -11.2],
+            [9.7, -2.2],
+            [8.9, 11.5],
+            [-1.3, 16.2],
+            [-2.9, 17.9],
+            [18.1, 15.0],
+            [16.9, 15.0],
+        ],
+        [
+            [19.2, 3.4],
+            [-9.6, -8.6],
+            [16.5, 1.0],
+            [13.3, 13.1],
+            [-2.1, 17.8],
+            [-3.2, 18.3],
+            [14.9, 12.6],
+            [14.2, 13.5],
+        ],
+    ];
+
+    fn arena_base() -> Camera {
+        Camera::new(
+            [0.0, 5.0, 12.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            50.0f32.to_radians(),
+        )
+    }
+
+    #[test]
+    fn fight_camera_frames_every_live_body_at_the_arena_spread() {
+        // The hero's duel shot held 2 of 8 here; the fight shot holds all.
+        for spread in &ARENA_SPREADS {
+            let look = look_at(spread);
+            let cam = look.fight_camera(&arena_base(), Shot::Action, 8, 0);
+            assert_eq!(look.fighters_seen(8), 8);
+            assert_eq!(look.fighters_in_view(&cam, 8), 8, "every body in picture");
+        }
+    }
+
+    #[test]
+    fn wide_group_camera_holds_the_arena_spread_from_inside_the_pit() {
+        // The pit wall sits 21 m out, the eye 0.6 m inside it.
+        let limit = 20.4;
+        for spread in &ARENA_SPREADS {
+            let look = look_at(spread);
+            let seen: Vec<[f32; 3]> = look.slots.iter().take(8).map(|s| s.pos).collect();
+            let close = look.fight_camera(&arena_base(), Shot::Action, 2, 0);
+            let cam = wide_group_camera(&arena_base(), &seen, &close, limit, 0.9, [0.0; 3])
+                .expect("a wider eye holds the spread");
+            assert_eq!(look.fighters_in_view(&cam, 8), 8);
+            let eye = cam.eye.to_array();
+            assert!(
+                eye[0].abs() <= limit + 1e-3 && eye[2].abs() <= limit + 1e-3,
+                "eye {eye:?} left the pit"
+            );
+        }
+    }
+
+    #[test]
+    fn arena_run_keeps_all_eight_bodies_in_the_fight_shot_inside_the_pit() {
+        // The window's own session, idle hero: at every tick of 300 the
+        // fight shot (pit wall 21 m, eye 0.6 m inside it) holds all eight.
+        let config = crate::GameConfig {
+            seed: 2040,
+            ticks: 300,
+            fighters: 8,
+            half_extent_m: 20.0,
+        };
+        let mut app = crate::App::with_world(config, crate::arena_kit::kit_match_world_or_empty())
+            .and_then(crate::App::into_duel)
+            .expect("arena session builds");
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let human = engine_input::FighterId::new(crate::HUMAN_SLOT).expect("human slot");
+        let (mut last_eye, mut max_step): (Option<[f32; 3]>, f32) = (None, 0.0);
+        for tick in 0..300 {
+            let idle = engine_input::FighterInput {
+                tick,
+                fighter: human,
+                mx: 0,
+                mz: 0,
+                facing: 0,
+                buttons: engine_input::Buttons::NONE,
+            };
+            let out = app.tick(idle);
+            look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
+            let seen: Vec<[f32; 3]> = look.slots.iter().take(8).map(|s| s.pos).collect();
+            assert_eq!(look.fighters_seen(8), 8, "tick {tick}: every body folded");
+            let close = look.fight_camera(&arena_base(), Shot::Action, 2, tick);
+            let cam = wide_group_camera(&arena_base(), &seen, &close, 20.4, 0.9, [0.0; 3])
+                .expect("a wider eye holds the field");
+            assert_eq!(look.fighters_in_view(&cam, 8), 8, "tick {tick}");
+            let eye = cam.eye.to_array();
+            if let Some(prev) = last_eye {
+                let step = ((eye[0] - prev[0]).powi(2) + (eye[2] - prev[2]).powi(2)).sqrt();
+                max_step = max_step.max(step);
+            }
+            last_eye = Some(eye);
+            assert!(
+                eye[0].abs() <= 20.4 + 1e-3 && eye[2].abs() <= 20.4 + 1e-3,
+                "tick {tick}: eye {eye:?} left the pit"
+            );
+        }
+        // The eye glides with the bodies; a flip to another orbit would jump
+        // tens of meters in one tick.
+        assert!(max_step < 1.0, "eye jumped {max_step} m in one tick");
+    }
+
+    #[test]
+    fn wide_group_camera_keeps_a_shot_that_already_holds_everyone() {
+        let look = look_at(&[[0.0, 0.0], [2.0, 0.0]]);
+        let seen: Vec<[f32; 3]> = look.slots.iter().take(2).map(|s| s.pos).collect();
+        let cam = look.fight_camera(&arena_base(), Shot::Action, 2, 0);
+        assert_eq!(look.fighters_in_view(&cam, 2), 2);
+        assert!(wide_group_camera(&arena_base(), &seen, &cam, 20.4, 0.9, [0.0; 3]).is_none());
+    }
+
+    #[test]
+    fn wide_group_camera_needs_room_for_the_eye() {
+        // A pit smaller than the nearest wide eye cannot widen the shot: the
+        // close framing stays, whatever it drops.
+        let look = look_at(&ARENA_SPREADS[0]);
+        let seen: Vec<[f32; 3]> = look.slots.iter().take(8).map(|s| s.pos).collect();
+        let close = look.fight_camera(&arena_base(), Shot::Action, 2, 0);
+        assert!(wide_group_camera(&arena_base(), &seen, &close, 2.0, 0.9, [0.0; 3]).is_none());
     }
 
     #[test]
@@ -2726,6 +3161,385 @@ mod tests {
         assert_eq!(look.tinted(2), (1, 2));
     }
 
+    /// `(slot, part, plain material, drawn material)` for every part of the
+    /// first `fighters` slots, in the order `push_draws` emits them, with
+    /// all parts resident.
+    fn drawn_parts(
+        look: &FighterLook,
+        fighters: usize,
+    ) -> Vec<(usize, usize, PbrMaterial, PbrMaterial)> {
+        let mut order = Vec::new();
+        for slot in 0..fighters {
+            for part in 0..look.rigs[look.rig_for_slot(slot)].parts.len() {
+                order.push((slot, part));
+            }
+        }
+        let resident: Vec<MeshKey> = order.iter().map(|&(s, p)| look_mesh_key(s, p)).collect();
+        let scene = engine_render::v1::default_scene(64, 64).expect("default scene is valid");
+        let mut list = DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: Vec::new(),
+        };
+        let pushed = look.push_draws(&mut list, &resident, fighters);
+        assert_eq!(pushed, order.len(), "one draw per resident part");
+        order
+            .into_iter()
+            .zip(list.items)
+            .map(|((slot, part), item)| {
+                let plain = look.rigs[look.rig_for_slot(slot)].parts[part]
+                    .material
+                    .clone();
+                (slot, part, plain, item.material)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tint_reaches_the_drawn_parts() {
+        // The flag is not a receipt: the draw the frame pushes for a flashing
+        // victim carries the red-shifted material, and only that victim's.
+        assert_eq!(FLASH_TICKS, 15, "a hit reads as long as its tell");
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let near = [view(0, -1.0, 0.0), view(1, 1.0, 0.0)];
+        look.observe_tick(0, &near, &[1000, 1000], &[]);
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 100,
+        };
+        look.observe_tick(40, &near, &[1000, 900], &[hit]);
+        let parts = drawn_parts(&look, 2);
+        assert!(parts.iter().any(|p| p.0 == 1), "the victim is drawn");
+        for (slot, part, plain, drawn) in &parts {
+            if *slot == 1 {
+                assert_eq!(drawn, &flash_material(plain), "victim part {part}");
+                assert!(drawn.exposure > plain.exposure, "brighter");
+                assert!(
+                    drawn.base_color[1] < plain.base_color[1],
+                    "green drops, so the body reads red"
+                );
+                assert!(drawn.validate().is_ok(), "the presenter accepts it");
+            } else {
+                assert_eq!(drawn, plain, "the attacker is never tinted");
+            }
+        }
+        // The window is exactly FLASH_TICKS wide: the last flashing tick
+        // still draws tinted, the next one draws the plain material.
+        look.observe_tick(40 + FLASH_TICKS - 1, &near, &[1000, 900], &[]);
+        assert_eq!(look.tinted(2), (1, 2));
+        assert!(drawn_parts(&look, 2).iter().any(|p| p.2 != p.3));
+        look.observe_tick(40 + FLASH_TICKS, &near, &[1000, 900], &[]);
+        assert_eq!(look.tinted(2), (0, 2), "the flash is spent");
+        for (slot, part, plain, drawn) in drawn_parts(&look, 2) {
+            assert_eq!(plain, drawn, "slot {slot} part {part} plain again");
+        }
+    }
+
+    #[test]
+    fn flash_material_shifts_red_and_stays_valid() {
+        for base in [[1.0, 1.0, 1.0], [0.2, 0.5, 0.9], [0.0, 0.0, 0.0]] {
+            let plain = PbrMaterial {
+                base_color: base,
+                metallic: 0.1,
+                roughness: 0.6,
+                exposure: 1.0,
+            };
+            let flash = flash_material(&plain);
+            assert_eq!(flash.base_color[0], base[0], "red is kept");
+            assert!(flash.base_color[1] <= base[1] && flash.base_color[2] <= base[2]);
+            assert_eq!(flash.exposure, FLASH_EXPOSURE);
+            assert_eq!((flash.metallic, flash.roughness), (0.1, 0.6));
+            assert!(flash.validate().is_ok(), "{base:?} stays a valid material");
+        }
+    }
+
+    /// Tinted body-frames over drawn body-frames for a bout of `fighters`
+    /// at `window` ticks per hit, one frame per tick (the arena's tally).
+    /// Reads the last in-reach hit tick off `flash_until`, so any window up
+    /// to [`FLASH_TICKS`] comes from one run.
+    fn bout_tint_share(seed: u64, ticks: u32, fighters: u8, windows: &[u32]) -> Vec<(f64, u32)> {
+        let config = crate::GameConfig {
+            seed,
+            ticks,
+            fighters,
+            half_extent_m: 20.0,
+        };
+        let mut app = crate::App::new(config).expect("app builds");
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let mut drawn = 0u32;
+        let mut tinted = vec![0u32; windows.len()];
+        let mut hits = 0u32;
+        let mut last_hit = [None::<u32>; MAX_LOOK_FIGHTERS];
+        for tick in 0..ticks {
+            let outcome = app.tick_empty();
+            look.observe_tick(tick, app.fighter_views(), app.hp(), &outcome.cues);
+            look.observe_live_balances(app.live_match(), usize::from(fighters));
+            for slot in 0..usize::from(fighters).min(MAX_LOOK_FIGHTERS) {
+                let state = look.slots[slot];
+                if !state.seen {
+                    continue;
+                }
+                drawn += 1;
+                if state.flash_until > 0 {
+                    let at = state.flash_until - FLASH_TICKS;
+                    if last_hit[slot] != Some(at) {
+                        last_hit[slot] = Some(at);
+                        hits += 1;
+                    }
+                }
+                for (count, window) in tinted.iter_mut().zip(windows) {
+                    *count += u32::from(last_hit[slot].is_some_and(|at| tick < at + window));
+                }
+            }
+        }
+        assert!(drawn > 0, "the bout draws bodies");
+        tinted
+            .into_iter()
+            .map(|count| (f64::from(count) / f64::from(drawn), hits))
+            .collect()
+    }
+
+    #[test]
+    fn tint_share_of_a_brawl_stays_under_the_strobe_floor() {
+        // The strobe floor (`tools/product-bar.json` `tinted_share_max`,
+        // 0.25 of drawn bodies): a readable 15-tick flash must not turn a
+        // brawl into a strobe. Same bout, windows of 6 and 15 ticks.
+        for fighters in [4u8, 8] {
+            for seed in [2040u64, 7] {
+                let share = bout_tint_share(seed, 300, fighters, &[6, FLASH_TICKS]);
+                let (short, long) = (share[0].0, share[1].0);
+                eprintln!(
+                    "tint share fighters={fighters} seed={seed} hits={}: 6 ticks {short:.3}, {FLASH_TICKS} ticks {long:.3}",
+                    share[0].1
+                );
+                assert!(long >= short, "a longer flash never tints less");
+                assert!(
+                    long < 0.25,
+                    "{fighters} fighters seed {seed}: share {long:.3} is a strobe"
+                );
+            }
+        }
+    }
+
+    /// A staged look on its own offscreen presenter: textures plus either
+    /// the CPU-skinned or the GPU-skinned part buffers. `None` without an
+    /// adapter (the test reports the skip).
+    fn staged_look(test: &str, gpu_skin: bool) -> Option<(FighterLook, Presenter)> {
+        let mut presenter = match Presenter::init_offscreen() {
+            Ok(presenter) => presenter,
+            Err(engine_render::present::PresentError::NoAdapter) => {
+                eprintln!("SKIPPED {test}: no wgpu adapter on this machine");
+                return None;
+            }
+            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        };
+        presenter.resize(192, 108).expect("valid size applies");
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        look.stage_textures(&mut presenter).expect("textures stage");
+        if gpu_skin {
+            look.stage_skinned_meshes(&mut presenter)
+                .expect("skinned bodies stage");
+        } else {
+            look.stage_meshes(&mut presenter).expect("bodies stage");
+        }
+        Some((look, presenter))
+    }
+
+    /// One scripted tick of a four-fighter ring: a hit on slot 1 at tick 20
+    /// (flash), slot 2 knocked down at tick 21 and held down after. Call it
+    /// for every tick from 0, in order.
+    fn brawl_step(look: &mut FighterLook, tick: u32) {
+        let ring = [
+            view(0, -1.0, 0.0),
+            view(1, 1.0, 0.0),
+            view(2, 0.0, 1.8),
+            view(3, 0.0, -1.8),
+        ];
+        match tick {
+            20 => look.observe_tick(
+                tick,
+                &ring,
+                &[1000, 900, 1000, 1000],
+                &[FightCue::Hit {
+                    attacker: 0,
+                    victim: 1,
+                    damage: 100,
+                }],
+            ),
+            21 => {
+                look.observe_tick(
+                    tick,
+                    &ring,
+                    &[1000, 900, 0, 1000],
+                    &[FightCue::Knockdown {
+                        attacker: 3,
+                        victim: 2,
+                    }],
+                );
+                // The sim's balance verdict: the victim lies on the sand,
+                // the pose whose first frames sink under it.
+                look.observe_balance(2, GaitPhase::Fallen);
+            }
+            t if t > 21 => look.observe_tick(t, &ring, &[1000, 900, 0, 1000], &[]),
+            t => look.observe_tick(t, &ring, &[1000; 4], &[]),
+        }
+    }
+
+    #[test]
+    fn skin_window_frame_matches_the_cpu_skinned_frame() {
+        let Some((mut cpu_look, mut cpu)) = staged_look("skin window frame (cpu)", false) else {
+            return;
+        };
+        let Some((mut gpu_look, mut gpu)) = staged_look("skin window frame (gpu)", true) else {
+            return;
+        };
+        let frame = LookFrame {
+            fighters: 4,
+            alpha: 0.5,
+            shot: Shot::Action,
+            frame: 0,
+        };
+        let scene = engine_render::v1::default_scene(192, 108).expect("default scene is valid");
+        let list = || DrawList {
+            camera: scene.camera.clone(),
+            light: scene.light.clone(),
+            items: Vec::new(),
+        };
+        let parts: usize = (0..4)
+            .map(|slot| gpu_look.rigs[gpu_look.rig_for_slot(slot)].parts.len())
+            .sum();
+        // Ticks that show a flash (24), the deepest sand lift (26) and a body
+        // at rest on the sand (75), each compared frame for frame.
+        for until in 0..=75u32 {
+            brawl_step(&mut cpu_look, until);
+            brawl_step(&mut gpu_look, until);
+            if ![24, 26, 75].contains(&until) {
+                continue;
+            }
+            let (mut cpu_list, mut gpu_list) = (list(), list());
+            let cpu_report = cpu_look
+                .present_into(&mut cpu, &mut cpu_list, &frame)
+                .expect("cpu frame stages");
+            let created = gpu.gpu_create_totals();
+            let gpu_report = gpu_look
+                .present_into(&mut gpu, &mut gpu_list, &frame)
+                .expect("gpu frame stages");
+            assert_eq!(
+                gpu.gpu_create_totals(),
+                created,
+                "a GPU-skinned frame creates no buffer or bind group (tick {until})"
+            );
+            assert_eq!(cpu_report.draws, gpu_report.draws, "same draws");
+            assert_eq!(gpu_report.skin.uploaded, parts, "every part is resident");
+            assert!(gpu_report.skin.pose_us > 0, "the bounds still pose on CPU");
+            // The truth the camera, the view laws and the lift read is the
+            // same vertex box either way.
+            assert_eq!(cpu_look.view_truth().len(), gpu_look.view_truth().len());
+            for (a, b) in cpu_look.view_truth().iter().zip(gpu_look.view_truth()) {
+                assert_eq!((a.min, a.max, a.root), (b.min, b.max, b.root));
+            }
+            if until == 26 {
+                assert!(
+                    gpu_look.view_truth().iter().any(|body| body.root[1] > 0.02),
+                    "the downed body rides a sand lift at tick {until}"
+                );
+            }
+            let cpu_out = cpu.render_offscreen(&cpu_list).expect("cpu renders");
+            let gpu_out = gpu.render_offscreen(&gpu_list).expect("gpu renders");
+            assert!(cpu_out.receipt.is_clean() && gpu_out.receipt.is_clean());
+            let decode = |png: Option<Vec<u8>>| {
+                TextureUpload::from_encoded(&png.expect("capture has pixels"))
+                    .expect("capture is a PNG")
+                    .rgba
+            };
+            let (a, b) = (decode(cpu_out.png), decode(gpu_out.png));
+            assert_eq!(a.len(), b.len());
+            let mut worst = 0u8;
+            let mut over = 0usize;
+            for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+                let d = pa
+                    .iter()
+                    .zip(pb)
+                    .map(|(x, y)| x.abs_diff(*y))
+                    .max()
+                    .unwrap_or(0);
+                worst = worst.max(d);
+                over += usize::from(d > 8);
+            }
+            eprintln!(
+                "skin window frame tick {until}: worst channel diff {worst}, pixels over 8: {over} of {}",
+                a.len() / 4
+            );
+            assert!(
+                over * 100 <= a.len() / 4,
+                "tick {until}: under 1% of pixels differ by more than 8 levels, got {over} (worst {worst})"
+            );
+        }
+    }
+
+    #[test]
+    fn skin_window_joint_blocks_follow_the_pose_and_the_lift() {
+        let Some((mut look, presenter)) = staged_look("skin window blocks", true) else {
+            return;
+        };
+        for slot in 0..MAX_LOOK_FIGHTERS {
+            let rig = &look.rigs[look.rig_for_slot(slot)];
+            for part in 0..rig.parts.len() {
+                assert_eq!(
+                    presenter.skin_block_of(&look_mesh_key(slot, part)),
+                    Some(slot),
+                    "slot {slot} part {part} draws through its own block"
+                );
+            }
+            assert!(slot_is_gpu_skinned(&presenter, slot, rig));
+        }
+        // The matrices the frame writes carry the lift in their last row.
+        // Tick 26 is where the fallen start pose sinks deepest under the
+        // sand, so the eased lift is at its largest there (about 2.7 cm).
+        for tick in 0..=26u32 {
+            brawl_step(&mut look, tick);
+        }
+        let posed = look.pose_frame(4, 0.5).expect("CPU pose");
+        let downed = posed
+            .iter()
+            .find(|body| body.truth.slot == 2)
+            .expect("slot 2 is posed");
+        assert!(
+            downed.lift > 0.02,
+            "the downed body is lifted, got {} m",
+            downed.lift
+        );
+        let upright = posed
+            .iter()
+            .find(|body| body.truth.slot == 0)
+            .expect("slot 0 is posed");
+        assert_eq!(upright.lift, 0.0, "an upright body is not lifted");
+        let rig = &look.rigs[look.rig_for_slot(2)];
+        let slot = look.slots[2];
+        let sample = look.slot_sample(rig, &slot, 0.5).expect("sample");
+        for (matrix, (joint, inverse)) in downed
+            .matrices
+            .iter()
+            .zip(sample.world.iter().zip(rig.inverse_binds.iter()))
+        {
+            let base = mul(&mul(inverse, joint), &sample.root);
+            assert_eq!(matrix[3][1], base[3][1] + downed.lift);
+            assert_eq!(matrix[3][0], base[3][0]);
+            assert_eq!(matrix[0], base[0]);
+        }
+        // A CPU-staged presenter is never taken for a GPU-skinned one.
+        let Some((cpu_look, cpu)) = staged_look("skin window blocks (cpu)", false) else {
+            return;
+        };
+        let rig = &cpu_look.rigs[cpu_look.rig_for_slot(0)];
+        assert!(!slot_is_gpu_skinned(&cpu, 0, rig));
+        assert!(
+            presenter.mesh_count() >= MAX_LOOK_FIGHTERS,
+            "every slot owns its parts"
+        );
+    }
+
     #[test]
     fn fighter_anim_same_tick_gives_same_clip_and_phase() {
         let views = [view(0, -1.0, 0.0), view(1, 1.0, 0.0)];
@@ -3126,29 +3940,34 @@ mod tests {
         // A moved pose is what re-sends a part (an upload digest skips only
         // the parts whose bytes are already resident), so every step here
         // steps the tick and both roots: each staged frame is a changed one.
+        let mut truth = Vec::new();
         for step in 1..=5u8 {
             let moved = [
                 view(0, -1.0 + f32::from(step) * 0.1, 0.0),
                 view(1, 1.0 - f32::from(step) * 0.1, 0.0),
             ];
             look.observe_tick(u32::from(step), &moved, &[1000, 1000], &[]);
-            let written = look
-                .stage_frame(&mut presenter, 2, 0.5)
+            let (split, bodies) = look
+                .stage_bodies(&mut presenter, 2, 0.5)
                 .expect("frame stages");
-            assert!(written >= 2, "both fighters write their parts");
+            assert!(split.uploaded >= 2, "both fighters write their parts");
+            assert!(split.upload_us > 0, "a moved pose runs the upload");
+            truth = bodies;
         }
-        // 48 B stride (pos + normal + uv + tangent) needs a full re-upload
-        // with recomputed tangents on every changed skinned frame; the 32 B
-        // in-place refresh misaligns past vertex 0 into streaks (1209Z).
-        // Creates must grow while every part still writes.
-        assert!(
-            presenter.gpu_create_totals() > created,
-            "tangent re-upload creates buffers: {:?} vs {created:?}",
-            presenter.gpu_create_totals()
+        // The full 48 B image (pos + normal + uv + tangent, tangents rebuilt
+        // from the posed vertices) rewrites each resident buffer in place: a
+        // changed frame writes every part and creates no GPU buffer, and the
+        // 32 B refresh that misaligned past vertex 0 (1209Z streaks) is not
+        // what runs.
+        assert_eq!(
+            presenter.gpu_create_totals(),
+            created,
+            "steady frames rewrite the staged buffers, never create new ones"
         );
         // No streak: every posed vertex stays within 5 m of its slot root
         // (a stretched triangle would read as tens of meters).
-        for body in look.view_truth() {
+        assert_eq!(truth.len(), 2, "both seen fighters report a body");
+        for body in &truth {
             let dx = body.max[0] - body.min[0];
             let dy = body.max[1] - body.min[1];
             let dz = body.max[2] - body.min[2];
@@ -3160,11 +3979,192 @@ mod tests {
         // A fighter that shows up later already owns its buffers.
         let three = [view(0, -1.0, 0.0), view(1, 1.0, 0.0), view(2, 0.0, 3.0)];
         look.observe_tick(6, &three, &[1000, 1000, 1000], &[]);
-        look.stage_frame(&mut presenter, 3, 0.5)
+        let (split, _) = look
+            .stage_bodies(&mut presenter, 3, 0.5)
             .expect("late fighter stages");
+        assert!(split.upload_us > 0, "the late fighter writes its parts");
+        assert_eq!(
+            presenter.gpu_create_totals(),
+            created,
+            "late slots rewrite their staged buffers too"
+        );
+    }
+
+    /// What the presenter was handed before [`staged_part_mesh`]: the caller
+    /// validated and rebuilt the tangents too, then the presenter did the same
+    /// again. Reference arm only; returns the microseconds the pair took.
+    fn upload_parts_validated_first(
+        presenter: &mut Presenter,
+        slot_index: usize,
+        rig: &Rig,
+        frames: Vec<engine_render::v1_skin::SkinnedFrame>,
+        lift: f32,
+    ) -> u64 {
+        let mut spent = 0u64;
+        for (part_index, posed) in frames.into_iter().enumerate() {
+            let part = &rig.parts[part_index];
+            let started = Instant::now();
+            let lifted: Vec<[f32; 3]> = if lift > 0.0 {
+                posed
+                    .positions
+                    .iter()
+                    .map(|p| [p[0], p[1] + lift, p[2]])
+                    .collect()
+            } else {
+                posed.positions
+            };
+            let mesh = v1::upload_mesh(&lifted, &posed.normals, &part.mesh.uvs, &part.mesh.indices)
+                .expect("posed part validates");
+            presenter
+                .upload_mesh(look_mesh_key(slot_index, part_index), &mesh)
+                .expect("posed part uploads");
+            spent = spent.saturating_add(micros(started.elapsed()));
+        }
+        spent
+    }
+
+    #[test]
+    fn skinned_upload_draws_the_same_pixels_without_the_caller_side_pass() {
+        // The staged value carries no tangents: the presenter must rebuild
+        // them itself, so the picture must equal the one the validated pair
+        // drew, and both must differ from the bind pose they replaced.
+        let mut presenter = match Presenter::init_offscreen() {
+            Ok(presenter) => presenter,
+            Err(engine_render::present::PresentError::NoAdapter) => {
+                eprintln!("SKIPPED fighter staged mesh pixels: no wgpu adapter on this machine");
+                return;
+            }
+            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        };
+        presenter.resize(160, 120).expect("valid size applies");
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        look.stage_textures(&mut presenter).expect("textures stage");
+        look.stage_meshes(&mut presenter).expect("bodies stage");
+        look.observe_tick(0, &[view(0, -1.0, 0.0), view(1, 1.0, 0.0)], &[1000; 2], &[]);
+        look.observe_tick(1, &[view(0, -0.8, 0.0), view(1, 0.8, 0.0)], &[1000; 2], &[]);
+        let posed = look.pose_frame(2, 0.5).expect("CPU pose");
+        assert_eq!(posed.len(), 2, "both seen slots pose");
+        let scene = engine_render::v1::default_scene(160, 120).expect("default scene is valid");
+        let draw = |look: &FighterLook, presenter: &mut Presenter| -> Vec<u8> {
+            let mut list = DrawList {
+                camera: scene.camera.clone(),
+                light: scene.light.clone(),
+                items: Vec::new(),
+            };
+            let resident = presenter.mesh_keys();
+            assert!(look.push_draws(&mut list, &resident, 2) > 0, "bodies draw");
+            list.camera = look.fight_camera(&list.camera, Shot::Action, 2, 0);
+            presenter
+                .render_offscreen(&list)
+                .expect("offscreen renders")
+                .png
+                .expect("a live frame has pixels")
+        };
+        let bind = draw(&look, &mut presenter);
+        let mut digests = empty_upload_digest();
+        for body in &posed {
+            let slot = usize::from(body.truth.slot);
+            let rig = &look.rigs[look.rig_for_slot(slot)];
+            upload_slot_parts(
+                &mut presenter,
+                slot,
+                rig,
+                body.frames.clone(),
+                body.lift,
+                &mut digests,
+            )
+            .expect("staged parts upload");
+        }
+        let staged = draw(&look, &mut presenter);
+        look.stage_meshes(&mut presenter)
+            .expect("bind pose returns");
+        assert_eq!(draw(&look, &mut presenter), bind, "the bind pose is back");
+        for body in &posed {
+            let slot = usize::from(body.truth.slot);
+            let rig = &look.rigs[look.rig_for_slot(slot)];
+            upload_parts_validated_first(&mut presenter, slot, rig, body.frames.clone(), body.lift);
+        }
+        let validated = draw(&look, &mut presenter);
+        assert_ne!(staged, bind, "the posed upload changes the picture");
+        assert!(staged == validated, "same posed bytes reach the submit");
+    }
+
+    #[test]
+    fn skinned_upload_spends_less_than_the_validated_first_pair() {
+        // F2P: with `v1::upload_mesh` run in the caller as well, the staged
+        // arm repeats the validate plus tangent pass the presenter already
+        // owns, so its best round costs the same as the reference arm (7589
+        // us vs 7482 us measured) and the 92% bound below fails. With the cut
+        // the best round costs 55-80% of the reference on a busy machine.
+        let mut presenter = match Presenter::init_offscreen() {
+            Ok(presenter) => presenter,
+            Err(engine_render::present::PresentError::NoAdapter) => {
+                eprintln!("SKIPPED fighter staged mesh cost: no wgpu adapter on this machine");
+                return;
+            }
+            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        };
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        look.stage_meshes(&mut presenter).expect("bodies stage");
+        let views: Vec<FighterView> = (0..8u8)
+            .map(|slot| view(slot, -3.5 + f32::from(slot), 0.0))
+            .collect();
+        look.observe_tick(0, &views, &[1000; 8], &[]);
+        let posed = look.pose_frame(8, 0.5).expect("CPU pose");
+        assert_eq!(posed.len(), 8, "eight seen slots pose");
+        let (mut reference_best, mut staged_best) = (u64::MAX, u64::MAX);
+        for round in 0..30u32 {
+            let reference_arm = |presenter: &mut Presenter| -> u64 {
+                let mut spent = 0u64;
+                for body in &posed {
+                    let slot = usize::from(body.truth.slot);
+                    let rig = &look.rigs[look.rig_for_slot(slot)];
+                    spent = spent.saturating_add(upload_parts_validated_first(
+                        presenter,
+                        slot,
+                        rig,
+                        body.frames.clone(),
+                        body.lift,
+                    ));
+                }
+                spent
+            };
+            let staged_arm = |presenter: &mut Presenter| -> u64 {
+                let mut spent = 0u64;
+                for body in &posed {
+                    let slot = usize::from(body.truth.slot);
+                    let rig = &look.rigs[look.rig_for_slot(slot)];
+                    let mut digests = empty_upload_digest();
+                    let split = upload_slot_parts(
+                        presenter,
+                        slot,
+                        rig,
+                        body.frames.clone(),
+                        body.lift,
+                        &mut digests,
+                    )
+                    .expect("staged parts upload");
+                    spent = spent.saturating_add(split.upload_us);
+                }
+                spent
+            };
+            // Alternate who goes first so neither arm owns the warm cache.
+            let (reference, staged) = if round % 2 == 0 {
+                let reference = reference_arm(&mut presenter);
+                (reference, staged_arm(&mut presenter))
+            } else {
+                let staged = staged_arm(&mut presenter);
+                (reference_arm(&mut presenter), staged)
+            };
+            if round > 0 {
+                reference_best = reference_best.min(reference);
+                staged_best = staged_best.min(staged);
+            }
+        }
+        eprintln!("staged upload best {staged_best} us vs validated pair best {reference_best} us");
         assert!(
-            presenter.gpu_create_totals() > created,
-            "late slots re-upload too"
+            staged_best * 25 <= reference_best * 23,
+            "the staged value skips the caller-side pass: {staged_best} us vs {reference_best} us"
         );
     }
 
@@ -3505,6 +4505,7 @@ mod tests {
         PosedBody {
             truth: BodyTruth::new(0, "idle", [0.0; 3], 0.0, Vec::new()),
             frames: vec![bound_frame(positions)],
+            matrices: Vec::new(),
             lift: 0.0,
             bound: None,
         }
