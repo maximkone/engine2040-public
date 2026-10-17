@@ -1190,4 +1190,104 @@ mod tests {
             "32-cell fracture p99 {p32:?} over 1 ms"
         );
     }
+
+    /// One strike on the wire: tick, hit in whole millimeters, Q16 seed
+    /// strain. The effect (break events) is re-derived from the baked cache,
+    /// so the cause is what ships.
+    const STRIKE_ROW_BYTES: usize = 4 + 3 * 2 + 4;
+    /// The siege datagram budget of the net crate (`MAX_DATAGRAM_BYTES`).
+    const SIEGE_DATAGRAM_BYTES: usize = 1200;
+
+    fn strike_row(tick: u32, hit_mm: [i16; 3], strain_q16: u32) -> Vec<u8> {
+        let mut row = tick.to_le_bytes().to_vec();
+        hit_mm
+            .iter()
+            .for_each(|v| row.extend_from_slice(&v.to_le_bytes()));
+        row.extend_from_slice(&strain_q16.to_le_bytes());
+        row
+    }
+
+    fn read_row(row: &[u8]) -> (u32, [f32; 3], i64) {
+        let i16_at = |at: usize| i16::from_le_bytes([row[at], row[at + 1]]);
+        let mm = |at: usize| f32::from(i16_at(at)) / 1000.0;
+        let tick = u32::from_le_bytes([row[0], row[1], row[2], row[3]]);
+        let strain = u32::from_le_bytes([row[10], row[11], row[12], row[13]]);
+        (tick, [mm(4), mm(6), mm(8)], i64::from(strain))
+    }
+
+    /// DX11 at 64-player scale: 64 players strike the siege wall inside one
+    /// snapshot window. Every strike stays under the chunk cap, the pieces
+    /// of all 64 fit the 1024-shard ledger, the strike rows fit one siege
+    /// datagram where the break events they cause do not, a second wall
+    /// that only reads the rows lands on the same hash for every strike, and
+    /// a wall restored from a mid-window clone resims to the same end state.
+    #[test]
+    fn sixty_four_players_break_the_siege_wall_rollback_exact() {
+        use crate::bonded::event_bytes;
+        use crate::crack::CrackWall;
+        const PLAYERS: u32 = 64;
+        let wall_spec = spec(16, 3);
+        let bake = || {
+            CrackWall::bake(&wall(), &wall_spec, 4, 1.0, BREAKING_THRESHOLD).expect("wall bakes")
+        };
+        let mut rng = Rng::new(64).fork_named("siege-64");
+        let mut rows = Vec::new();
+        for k in 0..PLAYERS {
+            let mut mm = [0i16; 3];
+            for (axis, (lo, span)) in [(-2000i64, 4001u64), (0, 3001), (-200, 401)]
+                .into_iter()
+                .enumerate()
+            {
+                mm[axis] =
+                    i16::try_from(lo + i64::try_from(rng.next_range(0, span)).expect("fits"))
+                        .expect("fits");
+            }
+            let strain = u32::try_from(rng.next_range(4, 12)).expect("fits") << 16;
+            rows.push(strike_row(k + 1, mm, strain));
+        }
+        let play = |wall: &mut CrackWall, rows: &[Vec<u8>]| {
+            let mut receipts = Vec::new();
+            for row in rows {
+                let (tick, hit, strain) = read_row(row);
+                let out = wall.strike(hit, strain).expect("strike");
+                assert_eq!(wall.tick(), tick, "row ticks follow the served strikes");
+                receipts.push(out);
+            }
+            receipts
+        };
+        let mut authority = bake();
+        let mid_rows = usize::try_from(PLAYERS / 2).expect("small");
+        let first_half = play(&mut authority, &rows[..mid_rows]);
+        let checkpoint = authority.clone();
+        let second_half = play(&mut authority, &rows[mid_rows..]);
+        let receipts: Vec<_> = first_half.into_iter().chain(second_half).collect();
+        let (mut events, mut pieces) = (0usize, 0usize);
+        for out in &receipts {
+            assert!(
+                out.chunks <= wall_spec.cells && out.chunks <= MAX_FRACTURE_CELLS,
+                "chunk cap"
+            );
+            events += out.events.len();
+            pieces += usize::try_from(out.chunks).expect("small");
+        }
+        assert!(pieces <= 1024, "{pieces} pieces fit the 1024-shard ledger");
+        let event_bytes_total = events * event_bytes(&receipts[0].events[0]).len();
+        let rows_total = rows.len() * STRIKE_ROW_BYTES;
+        assert!(rows.iter().all(|r| r.len() == STRIKE_ROW_BYTES));
+        assert!(rows_total <= SIEGE_DATAGRAM_BYTES, "{rows_total} B of rows");
+        assert!(
+            event_bytes_total > SIEGE_DATAGRAM_BYTES,
+            "{event_bytes_total} B of events would not fit"
+        );
+        // A replica that only reads the rows lands on the same receipts.
+        let mut replica = bake();
+        assert_eq!(play(&mut replica, &rows), receipts);
+        assert_eq!(replica.state_hash(), authority.state_hash());
+        // Rollback: restore the mid-window clone and resim the rest.
+        let mut resim = checkpoint;
+        let again = play(&mut resim, &rows[mid_rows..]);
+        assert_eq!(again, receipts[mid_rows..]);
+        assert_eq!(resim.state_hash(), authority.state_hash());
+        assert_eq!(resim.tick(), PLAYERS);
+    }
 }

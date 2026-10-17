@@ -72,21 +72,7 @@ fn root_tick_constants_keep_the_fixed_step() {
 }
 
 #[test]
-#[expect(
-    deprecated,
-    reason = "the frozen legacy accumulator alias stays importable for old receipts"
-)]
-fn root_legacy_accumulator_alias_stays_importable() {
-    let legacy = engine_core::FixedAcc::fixed();
-    // Same type, not a copy: a caller may pass either name to the same code.
-    let mut typed: engine_core::LegacyFixedAcc = legacy;
-    assert_eq!(
-        typed.push(tick::DT),
-        1,
-        "one fixed step in gives one step out"
-    );
-    let alpha = typed.alpha();
-    assert!((0.0..=1.0).contains(&alpha), "render alpha stays in range");
+fn root_legacy_step_bits_stay_importable() {
     assert_eq!(engine_core::LEGACY_DT.to_bits(), tick::LEGACY_DT.to_bits());
     assert_eq!(engine_core::LEGACY_MAX_FRAME_DT, tick::LEGACY_MAX_FRAME_DT);
 }

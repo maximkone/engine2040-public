@@ -1,9 +1,12 @@
 //! archetype store: SoA columns per table, swap-remove, generational entities. Same spawns = same hash.
 
 use std::any::TypeId;
+use std::hash::Hasher;
 
 use crate::arena::{ArenaError, PhaseArena};
-use crate::snapshot::hash_bytes;
+use crate::snapshot::{hash_bytes, CanonicalBytes};
+use crate::spine::{AiState, Body, Intent, Vitals};
+use engine_core::fixed::Fixed;
 use engine_core::Fnv64;
 
 /// Sparse marker storage plus `StorageKind`/`Added`/`Changed` (see `sparse.rs`).
@@ -27,6 +30,188 @@ pub struct Velocity {
     pub x: f32,
     pub y: f32,
 }
+
+// spine columns: begin
+// ARC17 float quarantine: everything between this marker and the end marker
+// is integer or `Fixed` only; a test scans the text and fails on any float.
+
+/// Pose column of the archetype store: feet position `[x, y, z]` in meters
+/// and facing yaw in radians, all [`Fixed`]. The fixed-point twin of
+/// `spine::Transform` (which keeps `f32` for golden parity).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FixedTransform {
+    /// Feet position in meters.
+    pub pos: [Fixed; 3],
+    /// Facing yaw in radians.
+    pub yaw: Fixed,
+}
+
+/// Anim column of the archetype store: locomotion discriminant, gait phase
+/// and facing, flags and pose reference, with [`Fixed`] phase and facing.
+/// The fixed-point twin of `spine::AnimState`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FixedAnim {
+    /// Locomotion state discriminant.
+    pub loco: u8,
+    /// Gait phase.
+    pub phase: Fixed,
+    /// Gait facing unit vector `[x, z]`.
+    pub facing: [Fixed; 2],
+    /// True while airborne.
+    pub airborne: bool,
+    /// True while a combat interrupt freezes the gait.
+    pub interrupt: bool,
+    /// Presentation pose reference; 0 = none.
+    pub pose_ref: u32,
+}
+
+impl CanonicalBytes for FixedTransform {
+    fn append_canonical(&self, out: &mut Vec<u8>) {
+        for axis in self.pos {
+            out.extend_from_slice(&axis.to_le_bytes());
+        }
+        out.extend_from_slice(&self.yaw.to_le_bytes());
+    }
+    fn append_hash<H: Hasher>(&self, state: &mut H) {
+        for axis in self.pos {
+            state.write(&axis.to_le_bytes());
+        }
+        state.write(&self.yaw.to_le_bytes());
+    }
+}
+
+impl CanonicalBytes for FixedAnim {
+    fn append_canonical(&self, out: &mut Vec<u8>) {
+        out.push(self.loco);
+        out.extend_from_slice(&self.phase.to_le_bytes());
+        for axis in self.facing {
+            out.extend_from_slice(&axis.to_le_bytes());
+        }
+        out.push(u8::from(self.airborne));
+        out.push(u8::from(self.interrupt));
+        out.extend_from_slice(&self.pose_ref.to_le_bytes());
+    }
+    fn append_hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&[self.loco]);
+        state.write(&self.phase.to_le_bytes());
+        for axis in self.facing {
+            state.write(&axis.to_le_bytes());
+        }
+        state.write(&[u8::from(self.airborne), u8::from(self.interrupt)]);
+        state.write(&self.pose_ref.to_le_bytes());
+    }
+}
+
+/// Archetype bit of [`FixedTransform`].
+const TRANSFORM_BIT: u8 = 4;
+/// Archetype bit of [`Body`].
+const BODY_BIT: u8 = 8;
+/// Archetype bit of [`Vitals`] (ARC1's fighter column).
+const VITALS_BIT: u8 = 16;
+/// Archetype bit of [`AiState`].
+const AI_BIT: u8 = 32;
+/// Archetype bit of [`FixedAnim`].
+const ANIM_BIT: u8 = 64;
+/// Every spine bit, in canonical column order.
+const SPINE_BITS: [u8; 5] = [TRANSFORM_BIT, BODY_BIT, VITALS_BIT, AI_BIT, ANIM_BIT];
+/// Union of [`SPINE_BITS`].
+const SPINE_MASK: u8 = TRANSFORM_BIT | BODY_BIT | VITALS_BIT | AI_BIT | ANIM_BIT;
+
+/// Canonical byte length of the spine column with archetype bit `bit`.
+const fn spine_len(bit: u8) -> usize {
+    match bit {
+        TRANSFORM_BIT | BODY_BIT => 32,
+        VITALS_BIT => 7,
+        AI_BIT => 10,
+        _ => 31,
+    }
+}
+
+/// The five spine columns one entity may carry; `None` is an absent column.
+/// Canonical order is bit order: transform, body, vitals, ai, anim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpineRow {
+    /// Pose column.
+    pub transform: Option<FixedTransform>,
+    /// Body column.
+    pub body: Option<Body>,
+    /// Vitals column.
+    pub vitals: Option<Vitals>,
+    /// AI column.
+    pub ai: Option<AiState>,
+    /// Anim column.
+    pub anim: Option<FixedAnim>,
+}
+
+impl SpineRow {
+    /// Archetype bits of the columns present.
+    pub fn mask(&self) -> u8 {
+        let bit = |present: bool, bit: u8| if present { bit } else { 0 };
+        bit(self.transform.is_some(), TRANSFORM_BIT)
+            | bit(self.body.is_some(), BODY_BIT)
+            | bit(self.vitals.is_some(), VITALS_BIT)
+            | bit(self.ai.is_some(), AI_BIT)
+            | bit(self.anim.is_some(), ANIM_BIT)
+    }
+
+    /// Columns of `self`, with absent ones taken from `other`.
+    fn or(self, other: Self) -> Self {
+        Self {
+            transform: self.transform.or(other.transform),
+            body: self.body.or(other.body),
+            vitals: self.vitals.or(other.vitals),
+            ai: self.ai.or(other.ai),
+            anim: self.anim.or(other.anim),
+        }
+    }
+
+    /// Canonical byte length of the spine columns in `mask`.
+    fn canonical_len(mask: u8) -> usize {
+        SPINE_BITS
+            .into_iter()
+            .filter(|bit| has_bit(mask, *bit))
+            .map(spine_len)
+            .sum()
+    }
+}
+
+impl CanonicalBytes for SpineRow {
+    fn append_canonical(&self, out: &mut Vec<u8>) {
+        if let Some(c) = &self.transform {
+            c.append_canonical(out);
+        }
+        if let Some(c) = &self.body {
+            c.append_canonical(out);
+        }
+        if let Some(c) = &self.vitals {
+            c.append_canonical(out);
+        }
+        if let Some(c) = &self.ai {
+            c.append_canonical(out);
+        }
+        if let Some(c) = &self.anim {
+            c.append_canonical(out);
+        }
+    }
+    fn append_hash<H: Hasher>(&self, state: &mut H) {
+        if let Some(c) = &self.transform {
+            c.append_hash(state);
+        }
+        if let Some(c) = &self.body {
+            c.append_hash(state);
+        }
+        if let Some(c) = &self.vitals {
+            c.append_hash(state);
+        }
+        if let Some(c) = &self.ai {
+            c.append_hash(state);
+        }
+        if let Some(c) = &self.anim {
+            c.append_hash(state);
+        }
+    }
+}
+// spine columns: end
 
 /// Change-tick stamp.
 pub type Tick = u32;
@@ -67,6 +252,16 @@ impl ComponentId {
     pub const POS: Self = Self(P);
     /// Bit for [`Velocity`].
     pub const VEL: Self = Self(V);
+    /// Bit for [`FixedTransform`].
+    pub const TRANSFORM: Self = Self(TRANSFORM_BIT);
+    /// Bit for [`Body`].
+    pub const BODY: Self = Self(BODY_BIT);
+    /// Bit for [`Vitals`].
+    pub const VITALS: Self = Self(VITALS_BIT);
+    /// Bit for [`AiState`].
+    pub const AI: Self = Self(AI_BIT);
+    /// Bit for [`FixedAnim`].
+    pub const ANIM: Self = Self(ANIM_BIT);
     /// Raw archetype bit.
     pub fn bit(self) -> u8 {
         self.0
@@ -74,36 +269,53 @@ impl ComponentId {
 }
 
 /// Typed component registry.
-/// `Position` maps to bit 1, `Velocity` to bit 2; unknown types report `None`
-/// instead of minting silent bits.
+/// `Position` maps to bit 1, `Velocity` to bit 2 and the five spine columns
+/// to bits 4 to 64; unknown types report `None` instead of minting silent
+/// bits. `Position` and `Velocity` start registered, the spine columns
+/// register on demand.
 #[derive(Debug)]
 pub struct Registry {
-    count: u8,
+    registered: u8,
 }
 
 impl Registry {
     /// Registry with `Position` + `Velocity` registered.
     pub fn new() -> Self {
-        Self { count: 2 }
+        Self { registered: P | V }
     }
     /// Number of registered components.
     pub fn len(&self) -> usize {
-        usize::from(self.count)
+        (0..u8::BITS)
+            .filter(|bit| (self.registered >> bit) & 1 == 1)
+            .count()
     }
     /// True when nothing is registered.
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.registered == 0
     }
     /// Register a component type; known types return their fixed bit.
     pub fn register<T: 'static>(&mut self, _name: &'static str) -> Option<ComponentId> {
-        self.bit::<T>()
+        let id = self.bit::<T>()?;
+        self.registered |= id.bit();
+        Some(id)
     }
     /// Bit for a known component type, `None` for unknown types.
     pub fn bit<T: 'static>(&self) -> Option<ComponentId> {
-        if TypeId::of::<T>() == TypeId::of::<Position>() {
+        let t = TypeId::of::<T>();
+        if t == TypeId::of::<Position>() {
             Some(ComponentId::POS)
-        } else if TypeId::of::<T>() == TypeId::of::<Velocity>() {
+        } else if t == TypeId::of::<Velocity>() {
             Some(ComponentId::VEL)
+        } else if t == TypeId::of::<FixedTransform>() {
+            Some(ComponentId::TRANSFORM)
+        } else if t == TypeId::of::<Body>() {
+            Some(ComponentId::BODY)
+        } else if t == TypeId::of::<Vitals>() {
+            Some(ComponentId::VITALS)
+        } else if t == TypeId::of::<AiState>() {
+            Some(ComponentId::AI)
+        } else if t == TypeId::of::<FixedAnim>() {
+            Some(ComponentId::ANIM)
         } else {
             None
         }
@@ -172,6 +384,93 @@ struct Table {
     pos_changed: Vec<Tick>,
     vel: Vec<Velocity>,
     vel_changed: Vec<Tick>,
+    transform: Vec<FixedTransform>,
+    body: Vec<Body>,
+    vitals: Vec<Vitals>,
+    ai: Vec<AiState>,
+    anim: Vec<FixedAnim>,
+}
+
+impl Table {
+    /// Push the spine columns of `mask` from `s`; absent ones take defaults.
+    fn push_spine(&mut self, mask: u8, s: &SpineRow) {
+        if has_bit(mask, TRANSFORM_BIT) {
+            self.transform.push(s.transform.unwrap_or_default());
+        }
+        if has_bit(mask, BODY_BIT) {
+            self.body.push(s.body.unwrap_or_default());
+        }
+        if has_bit(mask, VITALS_BIT) {
+            self.vitals.push(s.vitals.unwrap_or_default());
+        }
+        if has_bit(mask, AI_BIT) {
+            self.ai.push(s.ai.unwrap_or_default());
+        }
+        if has_bit(mask, ANIM_BIT) {
+            self.anim.push(s.anim.unwrap_or_default());
+        }
+    }
+
+    /// Remove the spine columns of `mask` at `row`, swapping the last in.
+    fn swap_remove_spine(&mut self, mask: u8, row: usize) {
+        if has_bit(mask, TRANSFORM_BIT) {
+            self.transform.swap_remove(row);
+        }
+        if has_bit(mask, BODY_BIT) {
+            self.body.swap_remove(row);
+        }
+        if has_bit(mask, VITALS_BIT) {
+            self.vitals.swap_remove(row);
+        }
+        if has_bit(mask, AI_BIT) {
+            self.ai.swap_remove(row);
+        }
+        if has_bit(mask, ANIM_BIT) {
+            self.anim.swap_remove(row);
+        }
+    }
+
+    /// Copy of the spine columns the table's `mask` carries at `row`.
+    fn spine_row(&self, mask: u8, row: usize) -> SpineRow {
+        SpineRow {
+            transform: has_bit(mask, TRANSFORM_BIT).then(|| self.transform[row]),
+            body: has_bit(mask, BODY_BIT).then(|| self.body[row]),
+            vitals: has_bit(mask, VITALS_BIT).then(|| self.vitals[row]),
+            ai: has_bit(mask, AI_BIT).then(|| self.ai[row]),
+            anim: has_bit(mask, ANIM_BIT).then(|| self.anim[row]),
+        }
+    }
+}
+
+/// `Hasher` that feeds an [`Fnv64`]: lets spine columns stream into the
+/// state hash through their `append_hash` with no allocation.
+struct FnvSink<'a>(&'a mut Fnv64);
+
+impl Hasher for FnvSink<'_> {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+    fn finish(&self) -> u64 {
+        0
+    }
+}
+
+/// `Hasher` that stages bytes into a [`PhaseArena`]; the first overflow is
+/// kept and later writes are dropped, so the caller reads one `Result`.
+struct ArenaSink<'a> {
+    arena: &'a mut PhaseArena,
+    result: Result<(), ArenaError>,
+}
+
+impl Hasher for ArenaSink<'_> {
+    fn write(&mut self, bytes: &[u8]) {
+        if self.result.is_ok() {
+            self.result = self.arena.try_extend_bytes(bytes);
+        }
+    }
+    fn finish(&self) -> u64 {
+        0
+    }
 }
 
 /// DOTS-layout contract (buyer-expectation pin, ideas only): one dense SoA
@@ -192,6 +491,16 @@ fn assert_table_for_mask(mask: u8, table: &Table) {
         debug_assert_eq!(table.vel_changed.len(), n);
     } else {
         debug_assert!(table.vel.is_empty() && table.vel_changed.is_empty());
+    }
+    let spine_lens = [
+        table.transform.len(),
+        table.body.len(),
+        table.vitals.len(),
+        table.ai.len(),
+        table.anim.len(),
+    ];
+    for (bit, len) in SPINE_BITS.into_iter().zip(spine_lens) {
+        debug_assert_eq!(len, if has_bit(mask, bit) { n } else { 0 });
     }
 }
 
@@ -224,6 +533,7 @@ fn swap_remove_row(tables: &mut [Table], locs: &mut [Loc], mask: u8, row: usize)
         t.vel.swap_remove(row);
         t.vel_changed.swap_remove(row);
     }
+    t.swap_remove_spine(mask, row);
     if row != last {
         locs[t.entities[row].slot()].row = row as u32;
     }
@@ -342,15 +652,38 @@ impl World {
             table.pos_changed.reserve(entities);
             table.vel.reserve(entities);
             table.vel_changed.reserve(entities);
+            table.transform.reserve(entities);
+            table.body.reserve(entities);
+            table.vitals.reserve(entities);
+            table.ai.reserve(entities);
+            table.anim.reserve(entities);
         }
     }
-    /// Archetype mask for a spawn pair.
-    fn mask_of(p: &Option<Position>, v: &Option<Velocity>) -> u8 {
-        (if p.is_some() { P } else { 0 }) | (if v.is_some() { V } else { 0 })
+    /// Archetype mask for a spawn triple.
+    fn mask_of(p: &Option<Position>, v: &Option<Velocity>, s: &SpineRow) -> u8 {
+        (if p.is_some() { P } else { 0 }) | (if v.is_some() { V } else { 0 }) | s.mask()
+    }
+    /// Grow the table list so `mask` indexes a table. Tables are created on
+    /// first use, so a world that never carries spine bits keeps four.
+    fn ensure_table(&mut self, mask: u8) {
+        while self.tables.len() <= usize::from(mask) {
+            self.tables.push(Table::default());
+        }
     }
     /// Spawn into the matching table; recycles ids with their live `gen`.
     pub fn spawn(&mut self, p: Option<Position>, v: Option<Velocity>) -> Entity {
-        let mask = Self::mask_of(&p, &v);
+        self.spawn_with(p, v, SpineRow::default())
+    }
+    /// Spawn with spine columns: the archetype carries every component
+    /// given. Spine columns carry no change stamp. Setup path (a new table
+    /// may allocate); the tick path spawns nothing.
+    pub fn spawn_with(
+        &mut self,
+        p: Option<Position>,
+        v: Option<Velocity>,
+        spine: SpineRow,
+    ) -> Entity {
+        let mask = Self::mask_of(&p, &v, &spine);
         let (id, gen) = match self.free.pop() {
             Some(id) => (id, self.locs[id as usize].gen),
             None => {
@@ -364,7 +697,13 @@ impl World {
                 (id, 0)
             }
         };
-        let row = self.push_row(mask, Entity { id, gen }, p, v, self.tick, self.tick);
+        let row = self.push_row(
+            mask,
+            Entity { id, gen },
+            (p, self.tick),
+            (v, self.tick),
+            &spine,
+        );
         self.locs[id as usize] = Loc {
             mask,
             row,
@@ -378,11 +717,11 @@ impl World {
         &mut self,
         mask: u8,
         e: Entity,
-        p: Option<Position>,
-        v: Option<Velocity>,
-        pc: Tick,
-        vc: Tick,
+        (p, pc): (Option<Position>, Tick),
+        (v, vc): (Option<Velocity>, Tick),
+        spine: &SpineRow,
     ) -> u32 {
+        self.ensure_table(mask);
         let t = &mut self.tables[usize::from(mask)];
         let row = t.entities.len() as u32;
         t.entities.push(e);
@@ -394,10 +733,15 @@ impl World {
             t.vel.push(v.unwrap_or(Velocity { x: 0.0, y: 0.0 }));
             t.vel_changed.push(vc);
         }
+        t.push_spine(mask, spine);
         row
     }
     /// Read back the stored components of one row.
-    fn read_row(&self, mask: u8, row: usize) -> (Option<Position>, Tick, Option<Velocity>, Tick) {
+    fn read_row(
+        &self,
+        mask: u8,
+        row: usize,
+    ) -> (Option<Position>, Tick, Option<Velocity>, Tick, SpineRow) {
         let t = &self.tables[usize::from(mask)];
         let cp = if has_bit(mask, P) {
             Some(t.pos[row])
@@ -419,7 +763,7 @@ impl World {
         } else {
             self.tick
         };
-        (cp, cpc, cv, cvc)
+        (cp, cpc, cv, cvc, t.spine_row(mask, row))
     }
     /// Immediate despawn; stale generations fail closed.
     pub fn despawn(&mut self, e: Entity) -> bool {
@@ -490,14 +834,20 @@ impl World {
         Ok(())
     }
     /// Move one entity to table `dst`, carrying stored components.
-    fn move_to(&mut self, e: Entity, dst: u8, p: Option<Position>, v: Option<Velocity>) {
+    fn move_to(
+        &mut self,
+        e: Entity,
+        dst: u8,
+        (p, v): (Option<Position>, Option<Velocity>),
+        spine: SpineRow,
+    ) {
         let id = e.slot();
         let (src, row) = (self.locs[id].mask, self.locs[id].row_index());
-        let (kept_p, cpc, kept_v, cvc) = self.read_row(src, row);
+        let (kept_p, cpc, kept_v, cvc, kept_s) = self.read_row(src, row);
         let cp = if has_bit(src, P) { kept_p } else { p };
         let cv = if has_bit(src, V) { kept_v } else { v };
         swap_remove_row(&mut self.tables, &mut self.locs, src, row);
-        let nr = self.push_row(dst, e, cp, cv, cpc, cvc);
+        let nr = self.push_row(dst, e, (cp, cpc), (cv, cvc), &kept_s.or(spine));
         self.locs[id].mask = dst;
         self.locs[id].row = nr;
     }
@@ -560,7 +910,7 @@ impl World {
             return self.set_vel(e, v);
         }
         let dst = self.locs[e.slot()].mask | V;
-        self.move_to(e, dst, None, Some(v));
+        self.move_to(e, dst, (None, Some(v)), SpineRow::default());
         true
     }
     /// Remove [`Position`], moving the entity across tables.
@@ -569,7 +919,7 @@ impl World {
             return false;
         }
         let dst = self.locs[e.slot()].mask & !P;
-        self.move_to(e, dst, None, None);
+        self.move_to(e, dst, (None, None), SpineRow::default());
         true
     }
     /// Remove [`Velocity`], moving the entity across tables.
@@ -578,7 +928,65 @@ impl World {
             return false;
         }
         let dst = self.locs[e.slot()].mask & !V;
-        self.move_to(e, dst, None, None);
+        self.move_to(e, dst, (None, None), SpineRow::default());
+        true
+    }
+    /// Copy of the spine columns the entity carries, `None` for a stale
+    /// handle. An entity with no spine bit yields an all-`None` row.
+    pub fn get_spine(&self, e: Entity) -> Option<SpineRow> {
+        if !self.ok(e) {
+            return None;
+        }
+        let l = self.locs[e.slot()];
+        Some(self.tables[usize::from(l.mask)].spine_row(l.mask, l.row_index()))
+    }
+    /// Overwrite the spine columns `s` names. Refuses (false, nothing
+    /// written) for a stale handle or when `s` names a column the entity
+    /// does not carry; use [`World::add_spine`] to attach columns.
+    pub fn set_spine(&mut self, e: Entity, s: &SpineRow) -> bool {
+        if !self.ok(e) || s.mask() & !self.locs[e.slot()].mask != 0 {
+            return false;
+        }
+        let l = self.locs[e.slot()];
+        let (t, r) = (&mut self.tables[usize::from(l.mask)], l.row_index());
+        if let Some(c) = s.transform {
+            t.transform[r] = c;
+        }
+        if let Some(c) = s.body {
+            t.body[r] = c;
+        }
+        if let Some(c) = s.vitals {
+            t.vitals[r] = c;
+        }
+        if let Some(c) = s.ai {
+            t.ai[r] = c;
+        }
+        if let Some(c) = s.anim {
+            t.anim[r] = c;
+        }
+        true
+    }
+    /// Attach the spine columns `s` names, moving the entity across tables
+    /// when it lacks any; columns it already carries are overwritten.
+    pub fn add_spine(&mut self, e: Entity, s: SpineRow) -> bool {
+        if !self.ok(e) {
+            return false;
+        }
+        let have = self.locs[e.slot()].mask;
+        let dst = have | s.mask();
+        if dst != have {
+            self.move_to(e, dst, (None, None), s);
+        }
+        self.set_spine(e, &s)
+    }
+    /// Remove one spine column (`id` must be a spine bit the entity
+    /// carries), moving the entity across tables.
+    pub fn remove_spine(&mut self, e: Entity, id: ComponentId) -> bool {
+        if !self.ok(e) || id.bit() & SPINE_MASK == 0 || self.locs[e.slot()].mask & id.bit() == 0 {
+            return false;
+        }
+        let dst = self.locs[e.slot()].mask & !id.bit();
+        self.move_to(e, dst, (None, None), SpineRow::default());
         true
     }
     /// Live sparse-marker count.
@@ -665,31 +1073,39 @@ impl World {
     }
     /// Visit every entity carrying [`Position`].
     pub fn for_each_p(&self, mut f: impl FnMut(Entity, Position)) {
-        debug_assert_eq!(self.tables.len(), 4);
-        assert_table_for_mask(1, &self.tables[1]);
-        assert_table_for_mask(3, &self.tables[3]);
-        for m in [1u8, 3] {
-            let t = &self.tables[usize::from(m)];
+        for t in self.tables_with(P) {
             for i in 0..t.entities.len() {
                 f(t.entities[i], t.pos[i]);
             }
         }
     }
+    /// Tables whose mask carries every bit of `bits`, in mask order. Spine
+    /// bits only add tables, so P-only and P+V queries still visit the pure
+    /// P and P+V tables first, in the same order as before.
+    fn tables_with(&self, bits: u8) -> impl Iterator<Item = &Table> {
+        (0u8..)
+            .zip(&self.tables)
+            .filter(move |(mask, _)| mask & bits == bits)
+            .map(|(mask, table)| {
+                assert_table_for_mask(mask, table);
+                table
+            })
+    }
     /// Visit every entity carrying [`Position`] plus [`Velocity`].
     pub fn for_each_pv(&self, mut f: impl FnMut(Entity, Position, Velocity)) {
-        debug_assert_eq!(self.tables.len(), 4);
-        assert_table_for_mask(3, &self.tables[3]);
-        let t = &self.tables[3];
-        for i in 0..t.entities.len() {
-            f(t.entities[i], t.pos[i], t.vel[i]);
+        for t in self.tables_with(P | V) {
+            for i in 0..t.entities.len() {
+                f(t.entities[i], t.pos[i], t.vel[i]);
+            }
         }
     }
     /// Visit P+V rows changed after `since`.
     pub fn for_each_pv_changed(&self, since: Tick, mut f: impl FnMut(Entity, Position, Velocity)) {
-        let t = &self.tables[3];
-        for i in 0..t.entities.len() {
-            if newer(t.pos_changed[i], since) || newer(t.vel_changed[i], since) {
-                f(t.entities[i], t.pos[i], t.vel[i]);
+        for t in self.tables_with(P | V) {
+            for i in 0..t.entities.len() {
+                if newer(t.pos_changed[i], since) || newer(t.vel_changed[i], since) {
+                    f(t.entities[i], t.pos[i], t.vel[i]);
+                }
             }
         }
     }
@@ -703,16 +1119,18 @@ impl World {
         this_run: Tick,
         mut f: impl FnMut(Entity, Position, Velocity),
     ) {
-        let t = &self.tables[3];
-        for i in 0..t.entities.len() {
-            if is_newer_than(t.pos_changed[i], last_run, this_run)
-                || is_newer_than(t.vel_changed[i], last_run, this_run)
-            {
-                f(t.entities[i], t.pos[i], t.vel[i]);
+        for t in self.tables_with(P | V) {
+            for i in 0..t.entities.len() {
+                if is_newer_than(t.pos_changed[i], last_run, this_run)
+                    || is_newer_than(t.vel_changed[i], last_run, this_run)
+                {
+                    f(t.entities[i], t.pos[i], t.vel[i]);
+                }
             }
         }
     }
-    /// Integrate system: `pos += vel * dt` over the P+V table, one 4-wide
+    /// Integrate system: `pos += vel * dt` over every P+V table (the pure
+    /// P+V table first, then P+V tables that also carry spine columns), one 4-wide
     /// head plus a scalar tail in index order. Finite `dt` takes the fast
     /// path: static 4-blocks and static tail rows skip the float mul, and
     /// every stamp lands in one bulk fill so the hot loop carries no stamp
@@ -721,7 +1139,14 @@ impl World {
     /// state hash. Budget: O(rows) time, zero allocation.
     pub fn integrate(&mut self, dt: f32) {
         let tick = self.tick;
-        let t = &mut self.tables[3];
+        for (mask, t) in (0u8..).zip(self.tables.iter_mut()) {
+            if mask & (P | V) == P | V {
+                Self::integrate_table(t, tick, dt);
+            }
+        }
+    }
+    /// [`World::integrate`] over one P+V table.
+    fn integrate_table(t: &mut Table, tick: Tick, dt: f32) {
         let n = t.entities.len();
         if n == 0 {
             return;
@@ -826,6 +1251,7 @@ impl World {
             if has_bit(loc.mask, V) {
                 len += 8;
             }
+            len += SpineRow::canonical_len(loc.mask);
         }
         len
     }
@@ -865,12 +1291,21 @@ impl World {
                     arena.try_extend_bytes(&table.vel[row].x.to_bits().to_le_bytes())?;
                     arena.try_extend_bytes(&table.vel[row].y.to_bits().to_le_bytes())?;
                 }
+                if loc.mask & SPINE_MASK != 0 {
+                    let mut sink = ArenaSink {
+                        arena: &mut *arena,
+                        result: Ok(()),
+                    };
+                    table.spine_row(loc.mask, row).append_hash(&mut sink);
+                    sink.result?;
+                }
             }
             id = id.wrapping_add(1);
         }
         Ok(hash_bytes(arena.bytes()))
     }
-    /// Deterministic state hash (quantized via raw bits, id order).
+    /// Deterministic state hash (quantized via raw bits, id order). Spine
+    /// columns follow the P and V words of their entity in bit order.
     pub fn state_hash(&self) -> u64 {
         let mut h = Fnv64::new();
         for (id, l) in self.locs.iter().enumerate() {
@@ -889,10 +1324,17 @@ impl World {
                 h.write_f32(t.vel[r].x);
                 h.write_f32(t.vel[r].y);
             }
+            if l.mask & SPINE_MASK != 0 {
+                t.spine_row(l.mask, r).append_hash(&mut FnvSink(&mut h));
+            }
         }
         h.finish()
     }
 }
+#[path = "world_snapshot.rs"]
+mod world_snapshot;
+pub use world_snapshot::{WorldSnapshotError, WORLD_SNAPSHOT_VERSION};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1406,5 +1848,326 @@ mod tests {
         std::println!("sparse_add_ns_op={}", sadd.as_nanos() / ops);
         std::println!("sparse_remove_ns_op={}", srem.as_nanos() / ops);
         assert_eq!((n, w.marker_count()), (10_000, 0));
+    }
+
+    /// One spine row with every column set from `k`.
+    fn full_row(k: i64) -> SpineRow {
+        SpineRow {
+            transform: Some(FixedTransform {
+                pos: [
+                    Fixed::from_int(k),
+                    Fixed::from_bits(k * 7),
+                    Fixed::from_int(-k),
+                ],
+                yaw: Fixed::from_bits(k * 3),
+            }),
+            body: Some(Body {
+                vel: [Fixed::from_bits(k), Fixed::from_bits(-k)],
+                radius: Fixed::from_bits(26_214),
+                height: Fixed::from_bits(117_965),
+            }),
+            vitals: Some(Vitals {
+                hp_permille: 1000 - k as u16,
+                stamina: 100,
+                poise: 0,
+                state: Vitals::ATTACKING,
+            }),
+            ai: Some(AiState {
+                intent: Intent {
+                    mx: k as i8,
+                    mz: -5,
+                    facing: 900,
+                    buttons: 1,
+                },
+                clock: k as u32,
+                source: AiState::FROM_BRAIN,
+            }),
+            anim: Some(FixedAnim {
+                loco: 2,
+                phase: Fixed::from_bits(k * 11),
+                facing: [Fixed::from_int(0), Fixed::from_int(1)],
+                airborne: k % 2 == 0,
+                interrupt: false,
+                pose_ref: k as u32 + 1,
+            }),
+        }
+    }
+
+    /// A row with only the columns named by `mask`.
+    fn row_of(k: i64, mask: u8) -> SpineRow {
+        let f = full_row(k);
+        SpineRow {
+            transform: f.transform.filter(|_| mask & TRANSFORM_BIT != 0),
+            body: f.body.filter(|_| mask & BODY_BIT != 0),
+            vitals: f.vitals.filter(|_| mask & VITALS_BIT != 0),
+            ai: f.ai.filter(|_| mask & AI_BIT != 0),
+            anim: f.anim.filter(|_| mask & ANIM_BIT != 0),
+        }
+    }
+
+    /// A churned mixed world: pure, P, P+V, spine-only and P+V+spine rows,
+    /// a despawn, a staged kill, an attach, a detach and a stamped write.
+    fn spine_world() -> (World, Vec<Entity>) {
+        let mut w = World::new();
+        w.reserve(16);
+        let mut ids = Vec::new();
+        let (p, v) = pv(1.0);
+        ids.push(w.spawn_with(p, v, full_row(1)));
+        ids.push(w.spawn_with(None, None, row_of(2, TRANSFORM_BIT | VITALS_BIT)));
+        let (p, v) = pv(3.0);
+        ids.push(w.spawn(p, v));
+        ids.push(w.spawn_with(Some(Position { x: 4.0, y: -4.0 }), None, full_row(4)));
+        ids.push(w.spawn_with(None, None, row_of(5, AI_BIT | ANIM_BIT)));
+        assert!(w.despawn(ids[2]));
+        w.advance();
+        assert!(w.set_pos(ids[0], Position { x: 9.0, y: 9.0 }));
+        assert!(w.add_spine(ids[1], row_of(6, AI_BIT)));
+        assert!(w.remove_spine(ids[0], ComponentId::BODY));
+        assert!(w.kill(ids[4]));
+        (w, ids)
+    }
+
+    #[test]
+    fn spine_columns_snapshot_restore_roundtrip_byte_identical_twice() {
+        let (a, ids) = spine_world();
+        let (b, _) = spine_world();
+        let bytes = a.snapshot();
+        assert_eq!(bytes, b.snapshot(), "same build, same bytes");
+        let back = World::restore(&bytes).expect("roundtrip decodes");
+        assert_eq!(back.snapshot(), bytes, "re-snapshot is byte-identical");
+        assert_eq!(back.state_hash(), a.state_hash());
+        assert_eq!((back.count(), back.pending()), (a.count(), a.pending()));
+        for e in &ids {
+            assert_eq!(back.get_spine(*e), a.get_spine(*e), "{e:?}");
+            assert_eq!(back.get_pos(*e), a.get_pos(*e));
+        }
+        // Row order, stamps and the free list survive: iteration and the
+        // next spawn match the original.
+        let (mut ra, mut rb) = (Vec::new(), Vec::new());
+        a.for_each_pv(|e, p, _| ra.push((e, p.x.to_bits())));
+        back.for_each_pv(|e, p, _| rb.push((e, p.x.to_bits())));
+        assert_eq!(ra, rb);
+        let (mut a, mut back) = (a, back);
+        let (p, v) = pv(0.0);
+        assert_eq!(a.spawn(p, v), back.spawn(p, v));
+        // Not vacuous: one spine field moves the bytes and the hash.
+        let (mut moved, ids) = spine_world();
+        let mut row = moved.get_spine(ids[3]).expect("live");
+        row.transform.as_mut().expect("carried").yaw = Fixed::from_bits(12_345);
+        assert!(moved.set_spine(ids[3], &row));
+        assert_ne!(moved.snapshot(), bytes);
+        let original = World::restore(&bytes).expect("ok");
+        assert_ne!(moved.state_hash(), original.state_hash());
+    }
+
+    #[test]
+    fn world_restore_refuses_bad_bytes_loudly() {
+        let (w, _) = spine_world();
+        let good = w.snapshot();
+        assert_eq!(
+            World::restore(&[]).err(),
+            Some(WorldSnapshotError::TooShort)
+        );
+        let mut bad = good.clone();
+        bad[0] = 0xff;
+        assert!(matches!(
+            World::restore(&bad),
+            Err(WorldSnapshotError::BadVersion(_))
+        ));
+        assert_eq!(
+            World::restore(&good[..good.len() - 1]).err(),
+            Some(WorldSnapshotError::TooShort)
+        );
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert_eq!(
+            World::restore(&trailing).err(),
+            Some(WorldSnapshotError::Trailing(1))
+        );
+        // Header is version 2 + tick 4 + scan 4 + slots 4; slot 0 is gen 4
+        // then the alive flag.
+        let mut flag = good.clone();
+        flag[18] = 7;
+        assert_eq!(
+            World::restore(&flag).err(),
+            Some(WorldSnapshotError::BadFlag(7))
+        );
+        let mut dead = good.clone();
+        dead[18] = 0;
+        assert_eq!(
+            World::restore(&dead).err(),
+            Some(WorldSnapshotError::BadLink)
+        );
+    }
+
+    #[test]
+    fn spine_fill_attach_detach_keep_other_columns() {
+        let mut w = World::new();
+        let (p, v) = pv(2.0);
+        let e = w.spawn_with(p, v, row_of(1, TRANSFORM_BIT));
+        // Fill refuses a column the entity lacks and writes nothing.
+        assert!(!w.set_spine(e, &row_of(2, TRANSFORM_BIT | AI_BIT)));
+        assert_eq!(w.get_spine(e), Some(row_of(1, TRANSFORM_BIT)));
+        assert!(w.set_spine(e, &row_of(3, TRANSFORM_BIT)));
+        assert_eq!(w.get_spine(e), Some(row_of(3, TRANSFORM_BIT)));
+        // Attach moves tables, keeps what was there and P/V.
+        assert!(w.add_spine(e, row_of(4, VITALS_BIT | ANIM_BIT)));
+        assert_eq!(
+            w.get_spine(e),
+            Some(row_of(3, TRANSFORM_BIT).or(row_of(4, VITALS_BIT | ANIM_BIT)))
+        );
+        assert_eq!(w.get_pos(e), Some(Position { x: 2.0, y: 0.0 }));
+        assert_eq!(w.get_vel(e), Some(Velocity { x: 1.0, y: 0.0 }));
+        // Detach one column; the rest stays; non-spine bits refuse.
+        assert!(w.remove_spine(e, ComponentId::VITALS));
+        assert!(!w.remove_spine(e, ComponentId::VITALS));
+        assert!(!w.remove_spine(e, ComponentId::POS));
+        assert_eq!(
+            w.get_spine(e).map(|r| r.mask()),
+            Some(TRANSFORM_BIT | ANIM_BIT)
+        );
+        // A velocity change after spine columns keeps them (move_to carries).
+        assert!(w.remove_vel(e));
+        assert!(w.add_vel(e, Velocity { x: 5.0, y: 5.0 }));
+        assert_eq!(
+            w.get_spine(e).map(|r| r.mask()),
+            Some(TRANSFORM_BIT | ANIM_BIT)
+        );
+        assert!(w.despawn(e));
+        assert_eq!(w.get_spine(e), None);
+        assert!(!w.set_spine(e, &row_of(1, TRANSFORM_BIT)));
+        assert!(!w.add_spine(e, row_of(1, TRANSFORM_BIT)));
+    }
+
+    #[test]
+    fn spine_bits_resolve_through_the_registry() {
+        let mut r = Registry::new();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.bit::<Body>(), Some(ComponentId::BODY));
+        assert_eq!(r.bit::<FixedAnim>(), Some(ComponentId::ANIM));
+        assert_eq!(r.register::<Vitals>("vitals"), Some(ComponentId::VITALS));
+        assert_eq!(
+            r.register::<FixedTransform>("transform"),
+            Some(ComponentId::TRANSFORM)
+        );
+        assert_eq!(r.register::<AiState>("ai"), Some(ComponentId::AI));
+        assert_eq!(r.len(), 5);
+        assert_eq!(r.register::<u32>("nope"), None);
+        let bits = [
+            ComponentId::POS,
+            ComponentId::VEL,
+            ComponentId::TRANSFORM,
+            ComponentId::BODY,
+            ComponentId::VITALS,
+            ComponentId::AI,
+            ComponentId::ANIM,
+        ]
+        .map(ComponentId::bit);
+        assert_eq!(bits, [1, 2, 4, 8, 16, 32, 64]);
+    }
+
+    #[test]
+    fn spine_hash_and_checkpoint_agree_and_cover_every_column() {
+        let (w, _) = spine_world();
+        let mut arena = PhaseArena::with_capacity(32, 1024);
+        let digest = w.checkpoint_with(&mut arena).expect("fits");
+        assert_eq!(digest, w.state_hash(), "checkpoint equals state hash");
+        // P+V keeps its 21 bytes per entity with no spine bit.
+        let mut plain = World::new();
+        let (p, v) = pv(1.0);
+        plain.spawn(p, v);
+        plain.checkpoint_with(&mut arena).expect("fits");
+        assert_eq!(arena.byte_len(), 21);
+        // Each column of a spine entity moves the hash.
+        let base = w.state_hash();
+        for bit in SPINE_BITS {
+            let (mut moved, ids) = spine_world();
+            let mut row = moved.get_spine(ids[3]).expect("live");
+            match bit {
+                TRANSFORM_BIT => row.transform.as_mut().expect("t").pos[0] = Fixed::from_int(77),
+                BODY_BIT => row.body.as_mut().expect("b").radius = Fixed::from_int(77),
+                VITALS_BIT => row.vitals.as_mut().expect("v").stamina = 77,
+                AI_BIT => row.ai.as_mut().expect("a").clock = 77,
+                _ => row.anim.as_mut().expect("n").pose_ref = 77,
+            }
+            assert!(moved.set_spine(ids[3], &row));
+            assert_ne!(moved.state_hash(), base, "column bit {bit}");
+        }
+    }
+
+    #[test]
+    fn spine_canonical_lengths_match_the_checkpoint_constants() {
+        let row = full_row(3);
+        let mut all = Vec::new();
+        for bit in SPINE_BITS {
+            let mut bytes = Vec::new();
+            row_of(3, bit).append_canonical(&mut bytes);
+            assert_eq!(bytes.len(), spine_len(bit), "bit {bit}");
+            all.extend(bytes);
+        }
+        let mut full = Vec::new();
+        row.append_canonical(&mut full);
+        assert_eq!(full, all, "row bytes are the columns in bit order");
+        assert_eq!(full.len(), SpineRow::canonical_len(SPINE_MASK));
+        assert_eq!(row.canonical_hash(), hash_bytes(&full));
+    }
+
+    #[test]
+    fn integrate_and_iterators_reach_tables_with_spine_columns() {
+        let mut w = World::new();
+        let plain = w.spawn(
+            Some(Position { x: 0.0, y: 0.0 }),
+            Some(Velocity { x: 1.0, y: 0.0 }),
+        );
+        let carrying = w.spawn_with(
+            Some(Position { x: 0.0, y: 0.0 }),
+            Some(Velocity { x: 1.0, y: 0.0 }),
+            row_of(1, TRANSFORM_BIT),
+        );
+        let only_p = w.spawn_with(Some(Position { x: 5.0, y: 5.0 }), None, row_of(2, AI_BIT));
+        w.advance();
+        w.integrate(0.5);
+        assert_eq!(w.get_pos(plain), Some(Position { x: 0.5, y: 0.0 }));
+        assert_eq!(w.get_pos(carrying), Some(Position { x: 0.5, y: 0.0 }));
+        assert_eq!(w.get_pos(only_p), Some(Position { x: 5.0, y: 5.0 }));
+        let mut order = Vec::new();
+        w.for_each_pv(|e, _, _| order.push(e));
+        assert_eq!(order, [plain, carrying], "pure P+V table first");
+        let mut seen_p = 0;
+        w.for_each_p(|_, _| seen_p += 1);
+        assert_eq!(seen_p, 3);
+        let mut changed = Vec::new();
+        w.for_each_pv_changed(0, |e, _, _| changed.push(e));
+        assert_eq!(changed, [plain, carrying]);
+    }
+
+    #[test]
+    fn spine_columns_hold_no_float() {
+        use crate::spine::quarantine::float_sites;
+        let src = include_str!("archetype.rs");
+        let begin = src.find("// spine columns: begin").expect("begin marker");
+        let end = begin
+            + src[begin..]
+                .find("// spine columns: end")
+                .expect("end marker");
+        let region = &src[begin..end];
+        assert!(
+            region.contains("pub struct FixedAnim"),
+            "region is the columns"
+        );
+        assert!(
+            float_sites(region).is_empty(),
+            "spine columns must stay integer"
+        );
+        // A seeded f32 field, a seeded f64 and a seeded literal each fail.
+        for (from, to) in [
+            ("pub yaw: Fixed,", "pub yaw: Fixed,\n    pub drift: f32,"),
+            ("pub phase: Fixed,", "pub phase: Fixed,\n    pub w: f64,"),
+            ("=> 32,", "=> 3.2,"),
+        ] {
+            let seeded = region.replace(from, to);
+            assert_ne!(seeded, region, "seed {to:?} must land");
+            assert_eq!(float_sites(&seeded).len(), 1, "seed {to:?}");
+        }
     }
 }

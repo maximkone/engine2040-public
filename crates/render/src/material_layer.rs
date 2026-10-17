@@ -577,6 +577,7 @@ impl LayerSubmitter {
     /// the 32-byte look uniform buffer. Chart storage sizes on the first
     /// submit (the chart shape is fixed, so exactly once).
     pub fn new(device: &wgpu::Device) -> Self {
+        use crate::pipeline_warmup::CountedPipelines as _;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rl6-layer-bind"),
             source: wgpu::ShaderSource::Wgsl(LAYER_BIND_WGSL.into()),
@@ -594,7 +595,7 @@ impl LayerSubmitter {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
             label: Some("rl6-layer-pipeline"),
             layout: Some(&pipe_layout),
             module: &shader,

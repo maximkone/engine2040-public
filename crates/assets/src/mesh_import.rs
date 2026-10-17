@@ -289,6 +289,21 @@ fn import_document(
             {
                 out.images.entry(id).or_insert_with(|| slice.to_vec());
             }
+            // The normal and metallic-roughness images ride along the same way
+            // (the arena kit decodes them as its normal and ORM maps).
+            let gltf_material = primitive.material();
+            let extra = [
+                gltf_material.normal_texture().map(|info| info.texture()),
+                gltf_material
+                    .pbr_metallic_roughness()
+                    .metallic_roughness_texture()
+                    .map(|info| info.texture()),
+            ];
+            for texture in extra.iter().flatten() {
+                if let Some((id, slice)) = texture_image_slice(document, &buffers, texture) {
+                    out.images.entry(id).or_insert_with(|| slice.to_vec());
+                }
+            }
             out.meshes.push(cooked);
             out.materials.push(material);
         }
@@ -524,7 +539,15 @@ fn base_color_image_slice<'a>(
     material: &gltf::Material<'_>,
 ) -> Option<(u64, &'a [u8])> {
     let info = material.pbr_metallic_roughness().base_color_texture()?;
-    let texture = info.texture();
+    texture_image_slice(document, buffers, &info.texture())
+}
+
+/// Id plus encoded bytes of a texture's buffer-view image (`None` for a URI image).
+fn texture_image_slice<'a>(
+    document: &gltf::Document,
+    buffers: &'a [gltf::buffer::Data],
+    texture: &gltf::Texture<'_>,
+) -> Option<(u64, &'a [u8])> {
     let wanted = texture.source().index();
     let image = document.images().nth(wanted)?;
     match image.source() {
@@ -954,9 +977,18 @@ mod tests {
         assert_eq!(stored, &vec![1u8, 2, 3, 4]);
         assert_eq!(texture_asset_id(stored), base_id);
         assert_eq!(content_hash(stored), base_id);
-        // Only the base-color image is exposed: metallic-roughness bytes
-        // stay as ids only, and reimport keeps the map.
-        assert_eq!(imported.images.len(), 1);
+        // The base-color, normal and metallic-roughness images are exposed
+        // (here the normal shares the base image): two distinct, and reimport
+        // keeps the map.
+        assert_eq!(imported.images.len(), 2);
+        assert_eq!(
+            imported
+                .images
+                .get(&texture_asset_id(&[5u8, 6, 7, 8]))
+                .map(Vec::as_slice),
+            Some(&[5u8, 6, 7, 8][..]),
+            "metallic-roughness bytes ride along"
+        );
         let again = import_gltf_bytes(bytes).expect("reimport");
         assert_eq!(imported, again);
         // Untextured fixtures expose no bytes.

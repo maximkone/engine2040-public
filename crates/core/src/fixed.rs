@@ -1,4 +1,5 @@
 //! fixed: Q47.16 deterministic math, CORDIC atan2 + LUT trig, LE digest.
+use crate::checked::wrap_i128_to_i64;
 use core::cmp::Ordering;
 
 /// Signed Q47.16 fixed-point number: the raw `i64` counts 1/65536 units.
@@ -73,19 +74,13 @@ impl Fixed {
     pub fn wrapping_sub(self, o: Self) -> Self {
         Self(self.0.wrapping_sub(o.0))
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "wrapping_mul keeps low 64 bits by contract; checked_mul refuses instead"
-    )]
     /// Product rounded toward negative infinity, wrapping on overflow
     /// (the `*` operator).
     pub fn wrapping_mul(self, o: Self) -> Self {
-        Self(((self.0 as i128 * o.0 as i128) >> 16) as i64)
+        Self(wrap_i128_to_i64(
+            (i128::from(self.0) * i128::from(o.0)) >> 16,
+        ))
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "wrapping_div keeps low 64 bits by contract; checked_div refuses instead"
-    )]
     /// Quotient truncated toward zero, wrapping on overflow (the `/`
     /// operator).
     ///
@@ -93,7 +88,9 @@ impl Fixed {
     /// When `o` is zero; use [`Fixed::checked_div`] on untrusted input.
     pub fn wrapping_div(self, o: Self) -> Self {
         assert!(o.0 != 0, "fixed div by zero");
-        Self((((self.0 as i128) << 16) / (o.0 as i128)) as i64)
+        Self(wrap_i128_to_i64(
+            (i128::from(self.0) << 16) / i128::from(o.0),
+        ))
     }
     /// Sum, `None` on overflow.
     pub fn checked_add(self, o: Self) -> Option<Self> {
@@ -105,28 +102,18 @@ impl Fixed {
     }
     /// Product rounded toward negative infinity, `None` on overflow.
     pub fn checked_mul(self, o: Self) -> Option<Self> {
-        let p = (self.0 as i128 * o.0 as i128) >> 16;
-        if p > i64::MAX as i128 || p < i64::MIN as i128 {
-            None
-        } else {
-            // Guard above proves the range; a failed narrow refuses
-            // instead of panicking, so tick callers stay total.
-            i64::try_from(p).ok().map(Self)
-        }
+        i64::try_from((i128::from(self.0) * i128::from(o.0)) >> 16)
+            .ok()
+            .map(Self)
     }
     /// Quotient truncated toward zero, `None` on a zero divisor or overflow.
     pub fn checked_div(self, o: Self) -> Option<Self> {
         if o.0 == 0 {
             return None;
         }
-        let q = ((self.0 as i128) << 16) / (o.0 as i128);
-        if q > i64::MAX as i128 || q < i64::MIN as i128 {
-            None
-        } else {
-            // Guard above proves the range; a failed narrow refuses
-            // instead of panicking, so tick callers stay total.
-            i64::try_from(q).ok().map(Self)
-        }
+        i64::try_from((i128::from(self.0) << 16) / i128::from(o.0))
+            .ok()
+            .map(Self)
     }
     /// Sum clamped to [`Fixed::MIN`]..=[`Fixed::MAX`].
     pub fn saturating_add(self, o: Self) -> Self {

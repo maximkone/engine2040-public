@@ -765,3 +765,46 @@ fn ws_transport_says_goodbye_to_open_sessions_on_shutdown() {
         .expect("with a close frame");
     assert_eq!(frame.code, CloseCode::Away);
 }
+
+/// WEB9 + WEB12: the whole scripted duel over real sockets. The host is the
+/// `net_serve` state machine on [`WsServer`], the client is the page's
+/// [`DuelClient`] on a WebSocket; the hash they end on is the one the offline
+/// reference computes, and the departure of the client is reported.
+#[test]
+fn ws_duel_plays_600_ticks_over_a_socket_and_ends_on_the_reference_hash() {
+    use crate::webduel::{
+        duel_spec, net_line, reference_hash, DuelClient, DuelHost, DUEL_TICKS,
+    };
+
+    let mut server = WsServer::bind(loopback()).expect("bind the server");
+    let addr = server.local_addr();
+    let mut client_end = WsTestClient::connect(addr);
+    let mut host = DuelHost::new(duel_spec().expect("spec")).expect("host");
+    let mut client = DuelClient::new(0xD0E1).expect("client");
+    let at = PeerId(addr);
+    let mut rounds = 0u32;
+    while !client.poll(&mut client_end, at) {
+        host.pump(&mut [&mut server]);
+        host.tick(&mut [&mut server], false).expect("tick");
+        rounds += 1;
+        assert!(rounds < POLL_ROUNDS * 4, "the duel stalled at tick {}", host.tick_now());
+        thread::sleep(Duration::from_micros(200));
+    }
+    let outcome = client.outcome().expect("ended");
+    let reference = reference_hash(0).expect("reference");
+    let done = outcome.as_ref().expect("the duel converged");
+    assert_eq!((done.ticks, done.hash), (DUEL_TICKS, reference));
+    assert_eq!(host.final_hash(), Some(reference));
+    assert_eq!(
+        net_line("websocket", outcome),
+        format!("net: transport=websocket ticks=600 hash={reference:016x} peers=1")
+    );
+
+    drop(client_end);
+    let mut departures = Vec::new();
+    wait_for("the client's hang-up is reported", || {
+        departures.extend(server.take_departures());
+        !departures.is_empty()
+    });
+    assert_eq!(departures.len(), 1);
+}

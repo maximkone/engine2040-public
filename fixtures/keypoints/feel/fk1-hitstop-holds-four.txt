@@ -1,0 +1,1 @@
+id=fk1-hitstop-holds-four;claim=a landed hit holds the presented clock at a tenth for exactly four ticks;kind=hitstop;hold_ticks=4;scale_permille=100

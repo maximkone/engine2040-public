@@ -412,4 +412,4 @@ fn event_slots(event: FightCue) -> (u8, u8) {
 
 #[cfg(test)]
 #[path = "window_audio_space_tests.rs"]
-mod tests;
+mod window_audio_space_tests;

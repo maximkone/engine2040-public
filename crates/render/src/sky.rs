@@ -1050,6 +1050,7 @@ impl SkySubmitter {
     /// the 32-byte look uniform buffer. No capture-size state yet: storage
     /// buffers size on the first submit and resize only on shape change.
     pub fn new(device: &wgpu::Device) -> Self {
+        use crate::pipeline_warmup::CountedPipelines as _;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rl4-sky-bind"),
             source: wgpu::ShaderSource::Wgsl(SKY_BIND_WGSL.into()),
@@ -1067,7 +1068,7 @@ impl SkySubmitter {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
             label: Some("rl4-sky-pipeline"),
             layout: Some(&pipe_layout),
             module: &shader,

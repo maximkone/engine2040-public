@@ -360,6 +360,29 @@ impl MemoryStore {
     /// evict the oldest entry at cap). Needs no provider; empty or unknown
     /// sides report [`MindError::NothingToReflect`].
     pub fn reflect(&mut self, npc: NpcId, tick: u64) -> Result<(), MindError> {
+        self.reflect_scored(npc, tick, false)
+    }
+
+    /// Fixed-cadence reflection, the store twin of [`Mind::reflect_due`]: on a
+    /// [`crate::reflect::due`] tick with no `Felt` at or after it, reflect
+    /// with capped surprise. Returns whether it reflected.
+    pub fn reflect_due(&mut self, npc: NpcId, tick: u64) -> Result<bool, MindError> {
+        let reflected_now = self.slot(npc).is_some_and(|s| {
+            s.records
+                .iter()
+                .any(|r| r.kind == MemoryKind::Felt && r.tick >= tick)
+        });
+        if !crate::reflect::due(tick) || reflected_now {
+            return Ok(false);
+        }
+        match self.reflect_scored(npc, tick, true) {
+            Ok(()) => Ok(true),
+            Err(MindError::NothingToReflect) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn reflect_scored(&mut self, npc: NpcId, tick: u64, cadence: bool) -> Result<(), MindError> {
         let (text, salience) = {
             let slot = self.slot(npc).ok_or(MindError::NothingToReflect)?;
             if slot.records.is_empty() {
@@ -381,7 +404,17 @@ impl MemoryStore {
                 top.text
             );
             let bounded: String = line.chars().take(MAX_TEXT).collect();
-            (bounded, top.salience.to_mind())
+            let last_felt = slot
+                .records
+                .iter()
+                .rev()
+                .find(|r| cadence && r.kind == MemoryKind::Felt)
+                .map(|r| r.salience.to_mind());
+            let top_salience = top.salience.to_mind();
+            (
+                bounded,
+                crate::reflect::importance(top_salience, top_salience, last_felt),
+            )
         };
         self.observe(npc, tick, MemoryKind::Felt, &text, salience)
     }
@@ -1334,5 +1367,86 @@ mod tests {
         out.extend_from_slice(&(provenance.len() as u64).to_le_bytes());
         out.extend_from_slice(&provenance);
         out
+    }
+
+    /// LW12: 64 minds each remember one event a tick, recall their top 8 into
+    /// a caller buffer (zero allocations) and drain a recorded `Say` through
+    /// `apply_at` at the tick boundary. Caps hold, bytes match across runs;
+    /// the p95 times print for the record and are never asserted.
+    #[test]
+    fn soak_64_minds_recall_and_drain_hold_caps() {
+        use super::super::apply::{apply_at, Applied};
+        use super::super::mind::{ActionKind, ActionLog, MindAction};
+        use std::time::Instant;
+        const MINDS: u32 = 64;
+        const TICKS: u64 = 600;
+        let p95 = |mut us: Vec<u128>| {
+            us.sort_unstable();
+            us[us.len() * 95 / 100]
+        };
+        let run = || {
+            let mut store = MemoryStore::new();
+            let mut log = ActionLog::new();
+            let mut fold = engine_core::Fnv64::new();
+            let (mut recall_us, mut drain_us) = (Vec::new(), Vec::new());
+            let mut presented = 0usize;
+            for tick in 1..=TICKS {
+                for id in 0..MINDS {
+                    let salience = ((tick * 31 + u64::from(id) * 17) % 1001) as u32;
+                    let kind = kinds()[(tick as usize + id as usize) % kinds().len()];
+                    store
+                        .observe(npc(id), tick, kind, &format!("n{id} t{tick}"), salience)
+                        .expect("soak observes");
+                    log.push(MindAction {
+                        tick_apply: tick,
+                        npc: npc(id),
+                        kind: ActionKind::Say,
+                        text: format!("line {id} {tick}"),
+                        source: ActionSource::Scripted,
+                        request: tick * 100 + u64::from(id),
+                    })
+                    .expect("line records");
+                }
+                let mut top = [0usize; MAX_RECALL];
+                let started = Instant::now();
+                let ((), allocs) = engine_core::alloc_probe::measure(|| {
+                    for id in 0..MINDS {
+                        let found = store.recall_into(npc(id), tick, &mut top);
+                        assert_eq!(found, store.len(npc(id)).min(MAX_RECALL));
+                        for slot in &top[..found] {
+                            fold.write_u64(*slot as u64);
+                        }
+                    }
+                });
+                recall_us.push(started.elapsed().as_micros());
+                assert_eq!(allocs.calls, 0, "recall allocates nothing at tick {tick}");
+                let started = Instant::now();
+                for action in log.drain_due(tick) {
+                    match apply_at(&action, tick, tick) {
+                        Ok(Applied::Presented(event)) => {
+                            presented += 1;
+                            fold.write_u64(event.request);
+                        }
+                        other => panic!("say must present at its tick: {other:?}"),
+                    }
+                }
+                drain_us.push(started.elapsed().as_micros());
+                assert!(log.is_empty(), "drain leaves nothing due");
+            }
+            store.audit_caps().expect("caps hold");
+            assert_eq!(store.npc_count(), MINDS as usize);
+            for id in 0..MINDS {
+                assert_eq!(store.len(npc(id)), MAX_STORED_PER_NPC);
+            }
+            println!(
+                "lw12-soak minds={MINDS} ticks={TICKS} recall64_p95_us={} drain64_p95_us={}",
+                p95(recall_us),
+                p95(drain_us)
+            );
+            (store.memory_bytes(), fold.finish(), presented)
+        };
+        let first = run();
+        assert_eq!(first.2, (MINDS as usize) * (TICKS as usize));
+        assert_eq!(first, run(), "bytes and drain fold equal x2");
     }
 }

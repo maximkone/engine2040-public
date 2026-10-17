@@ -13,7 +13,7 @@
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
-use engine_arena::{ArenaConfig, Checkpoint};
+use engine_arena::{ArenaConfig, Checkpoint, MatchSpec};
 use engine_input::{FighterInput, MAX_PARTICIPANTS};
 
 use crate::heal::{DesyncPlan, NetHeal, NetHealError, QuarantineNotice, ReconnectPlan};
@@ -222,10 +222,19 @@ impl HeadlessServer {
     /// Validate `config` and open a match with every slot empty (AI-filled
     /// until clients connect).
     pub fn new(config: ArenaConfig) -> Result<Self, ServerError> {
+        Self::from_spec(MatchSpec::v1(config))
+    }
+
+    /// [`HeadlessServer::new`] for any match: the server authors the match
+    /// `spec` names (config, rules and world), the one a window or a browser
+    /// client builds from the same spec. The match-end theater is built for
+    /// the frozen v1 rules only, so on another spec it stays absent.
+    pub fn from_spec(spec: MatchSpec) -> Result<Self, ServerError> {
+        let config = spec.config;
         if config.validate().is_err() {
             return Err(ServerError::BadConfig);
         }
-        let inner = crate::session::Server::new(config).map_err(|_| ServerError::BadConfig)?;
+        let inner = crate::session::Server::from_spec(spec).map_err(|_| ServerError::BadConfig)?;
         let slots = vec![
             Slot {
                 token: None,

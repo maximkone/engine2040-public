@@ -4,6 +4,7 @@
 //! never hashed. Errors: `TimeError`, no unwrap on input.
 //! Budget: O(1) per push (at most 5 steps), 24 bytes state, zero heap alloc.
 
+use crate::checked::{f32_from_f64, f64_from_u64};
 use crate::tick::MAX_STEPS;
 use std::fmt;
 use std::time::Duration;
@@ -15,7 +16,11 @@ pub const STEP_NS: u64 = 16_666_666;
 /// Carried fractional remainder of the exact 60Hz step, in thirds of a ns.
 pub const STEP_REM_THIRDS: u8 = 2;
 /// Exact 60Hz step in thirds of a ns: 16_666_666*3 + 2 = 50_000_000.
-pub const STEP_THIRDS: u64 = STEP_NS * 3 + STEP_REM_THIRDS as u64;
+pub const STEP_THIRDS: u64 = STEP_NS * 3 + 2;
+const _: () = assert!(
+    STEP_REM_THIRDS == 2,
+    "STEP_THIRDS folds the 2/3 ns remainder"
+);
 /// Max accepted frame dt in ns (0.1s, matches `tick::MAX_FRAME_DT`).
 pub const MAX_FRAME_NS: u64 = 100_000_000;
 
@@ -87,8 +92,8 @@ impl IntAcc {
     /// Blend factor for render interpolation in [0, 1].
     /// Presentation only: it must never enter a simulation hash.
     pub fn alpha(&self) -> f32 {
-        let num = self.acc_ns as f64 * 3.0 + f64::from(self.rem_thirds);
-        (num / STEP_THIRDS as f64).clamp(0.0, 1.0) as f32
+        let num = f64_from_u64(self.acc_ns) * 3.0 + f64::from(self.rem_thirds);
+        f32_from_f64((num / f64_from_u64(STEP_THIRDS)).clamp(0.0, 1.0))
     }
 
     /// Push already-quantized nanoseconds, return steps due.
@@ -146,7 +151,7 @@ impl Default for IntAcc {
 /// Takes the `to_bits` of the wall value so the warm tick+hash path stays integer-only.
 /// Rejects non-finite and negative input; overflow past u64 fails.
 /// Bit decode keeps every in-range integer exact without a cast.
-fn f64_to_u64_checked(bits: u64) -> Result<u64, TimeError> {
+pub(crate) fn f64_to_u64_checked(bits: u64) -> Result<u64, TimeError> {
     let exp_raw = (bits >> 52) & 0x7ff;
     if exp_raw == 0x7ff {
         return Err(TimeError::NonFiniteDt);

@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url"; import { lex, testLines } from "./rust-quality.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url)); const DEFAULT_ROOT = resolve(HERE, ".."); const BASELINE_NAME = "docs-coverage.baseline.json"; const EPS = 1e-9;
 const PUB_ITEM = /^\s*pub\s+(?:(?:const|async|unsafe|extern\s+"[^"]*")\s+)*(?:fn|struct|enum|trait|type|const|static|union|mod)\b/;
-const DOC_EMPTY = /^\s*#\[\s*doc\s*=\s*"\s*"\s*\]\s*$/; const DOC_ATTR = /^\s*#\[\s*doc\b/; const ATTR_LINE = /^\s*#\[.*\]?\s*$/;
+const MOD_DECL = /^\s*pub\s+mod\s+(\w+)\s*;/; const DOC_EMPTY =/^\s*#\[\s*doc\s*=\s*"\s*"\s*\]\s*$/; const DOC_ATTR = /^\s*#\[\s*doc\b/; const ATTR_LINE = /^\s*#\[.*\]?\s*$/;
 export function isDocumented(raw, l) {
   let b = l - 1;
   while (b >= 0 && ATTR_LINE.test(raw[b] ?? "")) { const a = raw[b] ?? ""; if (DOC_EMPTY.test(a)) { b--; continue; } if (DOC_ATTR.test(a)) return true; b--; }
@@ -42,14 +42,29 @@ export function isDocumented(raw, l) {
   }
   return false;
 }
-export function analyzeText(text) {
+// A `pub mod x;` is documented when x's own file opens with prose `//!` (or `/*!`) lines: rustc counts those as the module's docs.
+export function innerDocumented(text) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n"); let i = 0;
+  while (i < lines.length && (!lines[i].trim() || /^\s*#!\[/.test(lines[i]))) i++;
+  if ((lines[i] ?? "").trim().startsWith("/*!")) return /\/\*!\s*\S/.test(lines[i]) || Boolean((lines[i + 1] ?? "").replace(/^\s*\*?/, "").trim());
+  for (; i < lines.length && lines[i].trim().startsWith("//!"); i++) if (lines[i].trim().slice(3).trim()) return true;
+  return false;
+}
+// Does `pub mod name;` in `file` name a module whose own file carries inner docs? (`lib.rs`/`mod.rs`/`main.rs` look beside themselves, `a.rs` looks in `a/`.)
+function modHasDocs(file, name) {
+  if (!name) return false;
+  const base = /(?:^|[\\/])(?:lib|mod|main)\.rs$/.test(file) ? dirname(file) : file.replace(/\.rs$/, "");
+  const own = [join(base, `${name}.rs`), join(base, name, "mod.rs")].find((p) => existsSync(p));
+  return own !== undefined && innerDocumented(readFileSync(own, "utf8"));
+}
+export function analyzeText(text, modDoc = () => false) {
   const norm = text.replace(/\r\n/g, "\n"); const { code } = lex(norm);
   const lines = code.split("\n"); const raw = norm.split("\n"); const masked = testLines(code);
   let total = 0; let documented = 0; const missing = [];
   for (let l = 0; l < lines.length; l++) {
     if (masked[l] || !PUB_ITEM.test(lines[l])) continue;
     total++;
-    if (isDocumented(raw, l)) documented++;
+    if (isDocumented(raw, l) || modDoc(MOD_DECL.exec(lines[l])?.[1])) documented++;
     else missing.push({ line: l + 1, text: (raw[l] ?? "").trim().slice(0, 120) });
   }
   return { total, documented, undocumented: total - documented, missing };
@@ -77,7 +92,7 @@ export function measure(root) {
     const c = { name: pkg.name, total: 0, documented: 0, undocumented: 0, missing: [], files: 0 };
     const files = walk(join(pkg.dir, "src")); c.files = files.length;
     for (const file of files) {
-      const a = analyzeText(readFileSync(file, "utf8"));
+      const a = analyzeText(readFileSync(file, "utf8"), (name) => modHasDocs(file, name));
       c.total += a.total; c.documented += a.documented; c.undocumented += a.undocumented;
       const rel = relative(root, file).split("\\").join("/");
       for (const m of a.missing) c.missing.push(`${rel}:${m.line}: ${m.text}`);

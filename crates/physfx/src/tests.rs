@@ -1,6 +1,7 @@
 //! tests: caps, recycling, determinism, refusals, sleeping, interpolation and the budget.
 
 mod blast;
+mod contacts;
 mod impact;
 mod ladder;
 mod materials;

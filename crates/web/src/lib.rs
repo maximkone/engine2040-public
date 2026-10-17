@@ -14,7 +14,11 @@
 //! `engine-input` records, [`audio`] decides when the WebAudio context may start; `browser` (wasm only)
 //! wires both to the page and prints `input: kb=.. mouse=.. pad=..` and `audio: state=..`.
 //!
-//! The pure parts ([`anim`], [`audio`], [`golden`], [`input`], [`limits`], [`recovery`], [`report`]) build and
+//! Net duel (WEB9, WEB12): `?server=ws://host:port` makes the page join a native dedicated server
+//! through the connect race (`netplay`, wasm only), play a scripted 600-tick duel and print
+//! `net: transport=<webtransport|websocket> ticks=<n> hash=<hex> peers=<n>`; [`netquery`] reads the address.
+//!
+//! The pure parts ([`anim`], [`audio`], [`golden`], [`input`], [`limits`], [`netquery`], [`recovery`], [`report`]) build and
 //! test on every target. The browser glue (`shell`) exists on `wasm32` only, so the native
 //! workspace builds this crate as a library with no web dependencies. It depends on
 //! `engine-proof` (std-only) for the golden check. On `wasm32` it also draws the arena frame
@@ -28,13 +32,17 @@ pub mod audio;
 pub mod golden;
 pub mod input;
 pub mod limits;
+pub mod netquery;
 pub mod recovery;
 pub mod report;
+pub mod tier_view;
 
 #[cfg(target_arch = "wasm32")]
 mod arena;
 #[cfg(target_arch = "wasm32")]
 mod browser;
+#[cfg(target_arch = "wasm32")]
+mod netplay;
 #[cfg(target_arch = "wasm32")]
 mod shell;
 

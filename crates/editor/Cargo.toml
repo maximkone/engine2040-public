@@ -27,6 +27,9 @@ required-features = ["ui"]
 [dependencies]
 # Pose stamps hash through the engine-core FNV owner (one hash owner).
 engine-core.workspace = true
+# ARC6: the spine inspector reads spine snapshots through the RC2 extraction
+# bridge (one direction only; ecs depends on core alone).
+engine-ecs.workspace = true
 engine-scene.workspace = true
 # SP2 findings panel and the asset browser's drop solver consume spatial's
 # public API (one direction only); spatial depends on core alone.
@@ -54,3 +57,9 @@ transform-gizmo-egui = { workspace = true, optional = true }
 # never enter the headless default graph.
 [dev-dependencies]
 engine-scene = { workspace = true, features = ["json"] }
+
+# ED17: per-panel frame budget table; needs the dock, so `ui` only.
+[[bench]]
+name = "panels"
+harness = false
+required-features = ["ui"]

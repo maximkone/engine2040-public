@@ -24,9 +24,12 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
-use super::session::{decode_snapshot, encode_snapshot, NetError};
+use super::session::{
+    decode_snapshot, encode_snapshot, encode_state_delta, NetError, MAX_PACKET_BYTES,
+};
 use crate::delay::{clamp_delay, DEFAULT_DELAY};
-use crate::delta::{FighterSnap, FullSnap};
+use crate::delta::{encode_delta, FighterSnap, FullSnap};
+use engine_arena::Checkpoint;
 use engine_core::fixed::Fixed;
 
 /// Encode one full snapshot to its canonical wire bytes.
@@ -750,9 +753,176 @@ pub fn classify_query(oldest: u32, newest: u32, t: Fixed) -> Option<QueryKind> {
     }
 }
 
+/// Snapshots sent past the acked baseline before the sender stops trusting it
+/// and sends full: 30 ticks of silence (the starve bar) at 10 Hz.
+pub const ACK_STALE_SNAPSHOTS: usize =
+    (crate::interest::STARVE_TICKS / crate::interest::SNAPSHOT_EVERY_TICKS) as usize;
+
+/// One wire-ready snapshot packet from [`SnapshotSender::encode`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SnapshotPacket {
+    /// State-delta datagram against the acked baseline ([`encode_state_delta`]).
+    Delta(Vec<u8>),
+    /// Full fighter snapshot ([`encode_snapshot`]): needs no baseline.
+    Full(Vec<u8>),
+}
+
+/// Per-client snapshot sender: codes a delta only against a snapshot the
+/// receiver acknowledged, and falls back to a full snapshot when there is
+/// no ack yet, [`ACK_STALE_SNAPSHOTS`] snapshots went unacknowledged, or the
+/// roster changed. A delta is never coded against an unacknowledged baseline,
+/// so a lost ack costs bytes, never a wrong rebuild.
+#[derive(Default)]
+pub struct SnapshotSender {
+    acked: Option<FullSnap>,
+    sent: VecDeque<FullSnap>,
+}
+
+impl SnapshotSender {
+    /// A sender with no baseline: the first packet is full.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Tick of the acknowledged baseline, if any.
+    #[must_use]
+    pub fn baseline_tick(&self) -> Option<u32> {
+        self.acked.as_ref().map(|base| base.tick)
+    }
+
+    /// Encode `full` (checkpoint hash `hash`) as a delta or full packet and
+    /// remember it so a later [`Self::ack`] can promote it to the baseline.
+    ///
+    /// # Errors
+    ///
+    /// [`NetError`] when `full` does not validate or a packet exceeds
+    /// [`MAX_PACKET_BYTES`].
+    pub fn encode(&mut self, full: &FullSnap, hash: u64) -> Result<SnapshotPacket, NetError> {
+        let delta = self.acked.as_ref().and_then(|base| {
+            let stale = self.sent.iter().filter(|s| s.tick > base.tick).count();
+            (stale < ACK_STALE_SNAPSHOTS)
+                .then(|| encode_delta(full, base).ok())
+                .flatten()
+        });
+        let packet = match delta {
+            Some(delta) => {
+                let checkpoint = Checkpoint {
+                    tick: full.tick,
+                    hash,
+                };
+                SnapshotPacket::Delta(encode_state_delta(checkpoint, &delta)?)
+            }
+            None => SnapshotPacket::Full(encode_snapshot(full)?),
+        };
+        self.sent.retain(|s| s.tick != full.tick);
+        self.sent.push_back(full.clone());
+        while self.sent.len() > 2 * ACK_STALE_SNAPSHOTS {
+            self.sent.pop_front();
+        }
+        Ok(packet)
+    }
+
+    /// The receiver confirmed the snapshot of `tick`: it becomes the delta
+    /// baseline. Returns `false` (and changes nothing) for a tick that is
+    /// unknown, evicted, or not newer than the current baseline.
+    pub fn ack(&mut self, tick: u32) -> bool {
+        if self.baseline_tick().is_some_and(|base| tick <= base) {
+            return false;
+        }
+        let Some(snap) = self.sent.iter().find(|s| s.tick == tick) else {
+            return false;
+        };
+        self.acked = Some(snap.clone());
+        self.sent.retain(|s| s.tick >= tick);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn moved_snap(tick: u32) -> FullSnap {
+        let mut snap = sample_snapshot(tick);
+        for fighter in &mut snap.fighters {
+            fighter.x_mm += tick as i32 * 10;
+        }
+        snap
+    }
+
+    #[test]
+    fn sender_falls_back_to_full_when_no_ack_for_ten_snapshots() {
+        let mut sender = SnapshotSender::new();
+        let first = moved_snap(100);
+        // No ack yet: nothing to delta against, so the first packet is full.
+        let SnapshotPacket::Full(bytes) = sender.encode(&first, 1).expect("first") else {
+            panic!("a sender with no acked baseline must send full");
+        };
+        assert_eq!(bytes, encode_snapshot(&first).expect("full"));
+        assert!(!sender.ack(999), "an ack for a tick never sent is ignored");
+        assert!(sender.ack(100));
+        assert!(!sender.ack(100), "a repeated ack changes nothing");
+        // Ten snapshots go out and every ack is lost.
+        for k in 1..=10u32 {
+            let snap = moved_snap(100 + 6 * k);
+            let packet = sender.encode(&snap, u64::from(k)).expect("encode");
+            match packet {
+                SnapshotPacket::Delta(bytes) => {
+                    assert!(
+                        k as usize <= ACK_STALE_SNAPSHOTS,
+                        "snapshot {k}: stale delta"
+                    );
+                    let delta = crate::session::decode_state(&bytes)
+                        .expect("delta")
+                        .delta
+                        .expect("delta body");
+                    assert_eq!(delta.base_tick, 100, "only the acked baseline is used");
+                    assert_eq!(
+                        crate::delta::decode_delta(&delta, &first).expect("rebuild"),
+                        snap
+                    );
+                    assert!(bytes.len() < encode_snapshot(&snap).expect("full").len());
+                }
+                SnapshotPacket::Full(bytes) => {
+                    assert!(
+                        k as usize > ACK_STALE_SNAPSHOTS,
+                        "snapshot {k}: fell back early"
+                    );
+                    assert_eq!(bytes, encode_snapshot(&snap).expect("full"));
+                }
+            }
+        }
+        // The late ack of a full snapshot re-bases the next delta on it.
+        assert!(sender.ack(160));
+        assert_eq!(sender.baseline_tick(), Some(160));
+        let snap = moved_snap(166);
+        let SnapshotPacket::Delta(bytes) = sender.encode(&snap, 11).expect("rebased") else {
+            panic!("an acked baseline allows a delta again");
+        };
+        assert_eq!(
+            crate::session::decode_state(&bytes)
+                .expect("state")
+                .delta
+                .expect("delta")
+                .base_tick,
+            160
+        );
+        assert!(bytes.len() <= MAX_PACKET_BYTES);
+    }
+
+    #[test]
+    fn sender_sends_full_when_the_roster_changes() {
+        let mut sender = SnapshotSender::new();
+        sender.encode(&sample_snapshot(10), 1).expect("first");
+        assert!(sender.ack(10));
+        let mut fewer = sample_snapshot(16);
+        fewer.fighters.pop();
+        assert!(matches!(
+            sender.encode(&fewer, 2).expect("encode"),
+            SnapshotPacket::Full(_)
+        ));
+    }
 
     #[test]
     fn roundtrip_equals() {

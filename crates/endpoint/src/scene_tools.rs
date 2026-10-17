@@ -38,7 +38,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use engine_editor::capability::{apply_gated, approve};
 use engine_editor::commands::{self, Batch, Document, Op, ProvenanceStamp};
+use engine_scene::codec::Scene;
 use engine_scene::ids::ObjectId;
+use engine_scene::pin::{PinError, ScenePin};
 use engine_scene::transform::Transform;
 use engine_spatial::{Intent, ObjectRef, Relation, Target, Wall};
 
@@ -255,6 +257,39 @@ pub(crate) fn try_scene_apply_guard() -> Result<MutexGuard<'static, ()>, McpTool
             "scene apply lock poisoned by a failed call; restart the server",
         ),
     })
+}
+
+/// Pin the scene a `play.run` start plays, or refuse before any simulation.
+///
+/// `revision` is what the caller offered (`scene_rev`); the live pin is the
+/// document's current revision plus the canonical-bytes digest. An empty
+/// arena (revision 0) never pins, an absent revision is `unpinned_run` and a
+/// moved revision is `stale_scene_rev`. The returned live pin is what the run
+/// manifest carries. Pure; the document is only read.
+pub(crate) fn run_pin(doc: &Document, revision: Option<u64>) -> Result<ScenePin, McpToolError> {
+    let live = Scene::encode(&doc.hierarchy)
+        .pin(doc.revision)
+        .map_err(pin_refusal)?;
+    let offered = ScenePin::require(revision.map(|revision| ScenePin {
+        revision,
+        ..live.clone()
+    }))
+    .map_err(pin_refusal)?;
+    offered
+        .check(live.revision, &live.digest)
+        .map_err(pin_refusal)?;
+    Ok(live)
+}
+
+/// Door code for each pin refusal; the message is the pin's own recovery.
+fn pin_refusal(error: PinError) -> McpToolError {
+    let code = match error {
+        PinError::MissingPin => "unpinned_run",
+        PinError::EmptyArena => "empty_arena",
+        PinError::StalePin { .. } => "stale_scene_rev",
+        PinError::DigestMismatch => "scene_digest_drift",
+    };
+    McpToolError::new(code, error.to_string())
 }
 
 /// Arguments for `scene.brief`: optional brief-text budget in bytes.
@@ -1279,32 +1314,9 @@ impl ToolBase for ScenePlaceTool {
     }
 }
 
-/// Serialize one audited `scene.place` payload fail-closed: a serialization
-/// failure refuses `bad_args` instead of screening an empty string past the
-/// hostile-text gate. The caller seals the refusal through the dispatch seam
-/// so it still chains exactly one `Refused` audit record.
-fn audit_payload_text<T: Serialize>(tool: &'static str, param: &T) -> Result<String, McpToolError> {
-    rmcp::serde_json::to_string(param).map_err(|error| {
-        McpToolError::new(
-            "bad_args",
-            format!(
-                "args for `{tool}` do not serialize ({error}); re-run after api.describe `{tool}` for the schema"
-            ),
-        )
-    })
-}
-
 impl SyncTool<McpServer> for ScenePlaceTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        let payload = match audit_payload_text(TOOL_SCENE_PLACE, &param) {
-            Ok(payload) => payload,
-            Err(refusal) => {
-                return service.dispatch(TOOL_SCENE_PLACE, |_| Err::<ScenePlaceOutput, _>(refusal));
-            }
-        };
-        service.dispatch_with_payload(TOOL_SCENE_PLACE, &payload, |state| {
-            state.scene_place(&param)
-        })
+        service.dispatch_screened(TOOL_SCENE_PLACE, &param, |state| state.scene_place(&param))
     }
 }
 
@@ -1364,6 +1376,7 @@ mod tests {
     #[test]
     fn place_payload_serializes_valid_args_and_refuses_failures_audited() {
         use super::super::audit::{code_hash, AuditOutcome};
+        use super::super::door_dispatch::audit_payload_text;
 
         // Valid args serialize to a payload that carries the call's own
         // fields into the hostile-text screen.
@@ -2348,6 +2361,7 @@ mod tests {
         assert_eq!(revision(&room.server), rev, "refused flight writes nothing");
         // play.run never takes the scene guard: start, progress and result
         // all land while the flight is held.
+        let pinned = revision(&room.server);
         let play = |action: &str, job_id: Option<u64>| {
             PlayRunTool::invoke(
                 &room.server,
@@ -2360,7 +2374,7 @@ mod tests {
                     inputs: None,
                     ttl_polls: None,
                     job_id,
-                    scene_rev: None,
+                    scene_rev: Some(pinned),
                 },
             )
         };
@@ -2736,5 +2750,43 @@ mod tests {
             "pure-Y write keeps z at zero"
         );
         assert!((yaw_of_quat(local.rotation) - placed.yaw).abs() <= 1e-5);
+    }
+
+    /// SC2: a run pins the live revision and digest, or refuses with a named
+    /// code before any simulation starts.
+    #[test]
+    fn run_pin_pins_or_refuses_by_name() {
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let code = |result: Result<ScenePin, McpToolError>| result.expect_err("refuses").code;
+        // The empty arena never pins, offered or not.
+        assert_eq!(code(run_pin(&doc, None)), "empty_arena");
+        assert_eq!(code(run_pin(&doc, Some(0))), "empty_arena");
+        let insert = |doc: &mut Document, journal: &mut Journal, key: u64| {
+            let batch = Batch {
+                ops: vec![Op::Insert {
+                    id: ObjectId::new(),
+                    parent: ObjectId::NIL,
+                    local: Transform::identity(),
+                }],
+                base_revision: doc.revision,
+                idempotency_key: key,
+                provenance: None,
+            };
+            commands::apply(doc, journal, &batch).expect("insert applies");
+        };
+        insert(&mut doc, &mut journal, 1);
+        assert_eq!(code(run_pin(&doc, None)), "unpinned_run");
+        let first = run_pin(&doc, Some(doc.revision)).expect("current revision pins");
+        assert_eq!(first.revision, doc.revision);
+        assert_eq!(first.digest, Scene::encode(&doc.hierarchy).digest());
+        // Same bytes, same pin; an edit moves both revision and digest.
+        assert_eq!(run_pin(&doc, Some(doc.revision)), Ok(first.clone()));
+        insert(&mut doc, &mut journal, 2);
+        let stale = run_pin(&doc, Some(first.revision)).expect_err("old revision is stale");
+        assert_eq!(stale.code, "stale_scene_rev");
+        assert!(stale.message.contains("re-read"), "{}", stale.message);
+        let second = run_pin(&doc, Some(doc.revision)).expect("new revision pins");
+        assert_ne!(second.digest, first.digest);
     }
 }

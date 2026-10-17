@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 
 use engine_arena::{ArenaConfig, Checkpoint, FighterTape};
+use engine_core::diverge::first_divergence;
 use engine_core::Fnv64;
 use engine_input::FighterInput;
 
@@ -291,20 +292,6 @@ pub fn play_tape(tape: &ReplayTape, upto: u32) -> Result<Checkpoint, ReplayError
     Err(ReplayError::BadTape)
 }
 
-/// First tick where `recorded` and `fresh` checkpoints differ. Length
-/// mismatch counts as divergence at the shared prefix end.
-fn scan_divergence(recorded: &[Checkpoint], fresh: &[Checkpoint]) -> Option<u32> {
-    for (index, (left, right)) in recorded.iter().zip(fresh.iter()).enumerate() {
-        if left != right {
-            return Some(index as u32);
-        }
-    }
-    if recorded.len() != fresh.len() {
-        return Some(recorded.len().min(fresh.len()) as u32);
-    }
-    None
-}
-
 /// Attribute one probe tape against a recorded baseline under `config`:
 /// resimulate both, name the first divergent tick, then reset each differing
 /// input at or before that tick to baseline one at a time and keep the ones
@@ -321,7 +308,7 @@ pub fn attribute(
     if baseline_run.len() != config.ticks as usize || probe_run.len() != config.ticks as usize {
         return Err(ReplayError::BadTape);
     }
-    let Some(divergent_tick) = scan_divergence(&baseline_run, &probe_run) else {
+    let Some(divergent_tick) = first_divergence(&baseline_run, &probe_run) else {
         return Err(ReplayError::NoFailure);
     };
     let expected = baseline_run[divergent_tick as usize].hash;

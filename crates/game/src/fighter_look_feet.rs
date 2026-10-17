@@ -341,7 +341,9 @@ impl FighterLook {
         }
         let rig = self.rigs.get(self.rig_for_slot(index))?;
         let legs = rig.legs?;
-        if !plants_feet(slot) {
+        // A slot lying as a ragdoll or rising out of one plants nothing (RZ2w): its ankles are
+        // moving by physics or by the get-up blend, not held by a clip.
+        if !plants_feet(slot) || self.ragdoll_rests(index) {
             return Some(Feet {
                 plants: [Plant::NEW; 2],
                 ..slot.feet

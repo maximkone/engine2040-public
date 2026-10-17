@@ -30,6 +30,10 @@ engine-proof.workspace = true
 engine-input.workspace = true
 engine-audio.workspace = true
 
+# WEB9/WEB12: the net duel. Default features only (std-only): the browser clients, the connect race and the duel
+# client are target-gated or plain logic, the native servers stay behind features this crate never enables.
+engine-net.workspace = true
+
 # The browser has no std clock: the shell installs the page's performance.now() here before anything
 # that reads time runs (engine-assets and engine-app panic on wasm32-unknown-unknown until it has).
 engine-clock = { version = "0.1.0", path = "../clock" }

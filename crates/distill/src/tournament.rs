@@ -1168,6 +1168,72 @@ mod tests {
         assert_eq!(tournament(&bytes, &teacher, &scripts, 5), Ok(report));
     }
 
+    /// Teacher rows the QAT trainer fits: flat features plus class ids drawn
+    /// from the same fixed teacher on a seed range apart from the tournament's.
+    fn qat_training_rows() -> (Vec<f32>, Vec<u8>) {
+        let (scripts, teacher) = fixture_scripts(0x9A7, 20, 12);
+        let features = scripts
+            .iter()
+            .flat_map(|s| s.features.iter().flatten().copied())
+            .collect();
+        (features, teacher.concat())
+    }
+
+    /// Rows where the exported net picks the recorded teacher action.
+    fn teacher_agreement(bytes: &[u8], scripts: &[MatchScript], teacher: &[Vec<u8>]) -> usize {
+        let model = engine_nn::load(bytes).expect("bytes load");
+        let mut agree = 0usize;
+        for (script, actions) in scripts.iter().zip(teacher.iter()) {
+            for (features, want) in script.features.iter().zip(actions.iter()) {
+                let quantized = quantize_input(features);
+                if student_class(&model, &quantized) == Some(*want) {
+                    agree += 1;
+                }
+            }
+        }
+        agree
+    }
+
+    #[test]
+    fn qat_student_beats_post_training_quantization_on_the_tournament() {
+        use engine_nn::{export_qat, train_student, QatConfig};
+
+        let (features, targets) = qat_training_rows();
+        let ptq = QatConfig::new(4, 3, 0x51, 600, false).expect("legal");
+        let qat = QatConfig::new(4, 3, 0x51, 600, true).expect("legal");
+        let ptq_bytes = export_qat(
+            &train_student(&features, &targets, &ptq).expect("trains"),
+            4,
+            3,
+        )
+        .expect("exports");
+        let qat_bytes = export_qat(
+            &train_student(&features, &targets, &qat).expect("trains"),
+            4,
+            3,
+        )
+        .expect("exports");
+        let (scripts, teacher) = fixture_scripts(0xD7300, DEFAULT_MATCHES as usize, 12);
+        let ptq_agree = teacher_agreement(&ptq_bytes, &scripts, &teacher);
+        let qat_agree = teacher_agreement(&qat_bytes, &scripts, &teacher);
+        let qat_report =
+            tournament(&qat_bytes, &teacher, &scripts, DEFAULT_MATCHES).expect("plays");
+        let ptq_report =
+            tournament(&ptq_bytes, &teacher, &scripts, DEFAULT_MATCHES).expect("plays");
+        // 1200 scored rows: the QAT student carries more of the teacher
+        // through the int8 export and banks more bouts than the same
+        // recipe quantized only after training.
+        assert!(
+            qat_agree > ptq_agree,
+            "qat {qat_agree} must out-agree ptq {ptq_agree} of 1200"
+        );
+        assert!(
+            qat_report.student_wins > ptq_report.student_wins,
+            "qat {qat_report:?} must out-win ptq {ptq_report:?}"
+        );
+        assert!(qat_report.student_wins >= qat_report.scripted_wins);
+    }
+
     #[test]
     fn binomial_p_matches_the_book_example() {
         // gogame 10.3.2: 53 wins in 100 fair games is p ~ 0.62.

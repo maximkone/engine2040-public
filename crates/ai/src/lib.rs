@@ -40,6 +40,8 @@ pub use curves::{
 pub mod curves_text;
 pub mod gladiator;
 pub mod goalstack;
+/// GOAP planner: A* over a 64-fact integer world state.
+pub mod goap;
 pub use gladiator::{
     compare, compare_curves, features_from, pick_intent, Brain, Comparison, Intent, MarchPolicy,
     NetPolicy, NetPolicyError, Percept, Policy, TickPolicy, FEATURE_ATTACK_ON, FEATURE_DIM,
@@ -85,6 +87,8 @@ pub mod eqs;
 mod eqs_slice;
 pub mod hearing;
 pub mod provenance;
+/// Reflection cadence and capped-surprise importance.
+pub mod reflect;
 
 #[derive(Debug)]
 pub struct Brief {
