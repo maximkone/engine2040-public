@@ -53,6 +53,9 @@ pub mod save;
 pub mod shell;
 #[cfg(feature = "ui")]
 pub mod shell_ui;
+/// Spine inspector: spine actor columns as read-only inspector nodes through
+/// the RC2 extraction bridge and the RC4 schemas (consumed by `shell_ui.rs`).
+pub mod spine_inspect;
 /// New-item templates: arena, prop, weapon and fighter starters.
 pub mod templates;
 /// Live tuning panel: combat/AI drafts as previewed batches,

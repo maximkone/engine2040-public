@@ -84,6 +84,8 @@ pub struct Counters {
     pub deferred_validation_errors: u64,
     /// Errors the device raised outside any scope (`uncapturederror`).
     pub uncaptured_errors: u64,
+    /// Pipelines built after the loader finished (WEB13); 0 on a healthy page.
+    pub late_pipelines: u64,
 }
 
 impl Counters {
@@ -94,9 +96,10 @@ impl Counters {
     }
 }
 
-/// The receipt JSON: counters, the frame time, the draw count and the first error text.
+/// The receipt JSON: the tier, counters, the frame time, the draw count and the first error text.
 #[must_use]
 pub fn receipt_line(
+    tier: &str,
     counters: &Counters,
     frame_ms: f64,
     cpu_ms: f64,
@@ -106,8 +109,11 @@ pub fn receipt_line(
     let mut o = Object::new();
     o.bool(
         "ok",
-        counters.validation_total() == 0 && counters.frame_errors == 0,
+        counters.validation_total() == 0
+            && counters.frame_errors == 0
+            && counters.late_pipelines == 0,
     )
+    .str("tier", tier)
     .uint("frames", counters.frames)
     .uint("frameErrors", counters.frame_errors)
     .uint("validationErrors", counters.validation_total())
@@ -117,6 +123,7 @@ pub fn receipt_line(
         counters.deferred_validation_errors,
     )
     .uint("uncapturedErrors", counters.uncaptured_errors)
+    .uint("latePipelines", counters.late_pipelines)
     .raw("frameMs", &format!("{frame_ms:.2}"))
     .raw("cpuMs", &format!("{cpu_ms:.2}"))
     .uint("draws", u64::from(draws));
@@ -221,9 +228,13 @@ mod tests {
             frames: 120,
             ..Counters::default()
         };
-        let line = receipt_line(&healthy, 16.7, 3.2, 13, None);
+        let line = receipt_line("web", &healthy, 16.7, 3.2, 13, None);
         assert!(
             line.contains("\"ok\":true") && line.contains("\"validationErrors\":0"),
+            "{line}"
+        );
+        assert!(
+            line.contains("\"tier\":\"web\"") && line.contains("\"latePipelines\":0"),
             "{line}"
         );
         assert!(!line.contains("firstError"), "{line}");
@@ -244,8 +255,19 @@ mod tests {
                 frame_errors: 1,
                 ..healthy
             },
+            Counters {
+                late_pipelines: 1,
+                ..healthy
+            },
         ] {
-            let line = receipt_line(&bad, 16.7, 3.2, 13, Some("bind group \"x\" is invalid"));
+            let line = receipt_line(
+                "web",
+                &bad,
+                16.7,
+                3.2,
+                13,
+                Some("bind group \"x\" is invalid"),
+            );
             assert!(line.contains("\"ok\":false"), "{line}");
             assert!(line.contains("firstError"), "{line}");
         }
@@ -255,8 +277,9 @@ mod tests {
             validation_errors: 2,
             deferred_validation_errors: 3,
             uncaptured_errors: 4,
+            late_pipelines: 0,
         };
         assert_eq!(all.validation_total(), 9, "the three kinds add up");
-        assert!(receipt_line(&all, 1.0, 1.0, 1, None).contains("\"validationErrors\":9"));
+        assert!(receipt_line("web", &all, 1.0, 1.0, 1, None).contains("\"validationErrors\":9"));
     }
 }

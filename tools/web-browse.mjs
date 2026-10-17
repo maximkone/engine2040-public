@@ -8,6 +8,11 @@
 //     the exact reason of every attempt is written down (attempts.json) and the run says NO ADAPTER.
 //  2. The no-WebGPU run. navigator.gpu is removed before the page starts; the loud message with the browser
 //     versions must show, the line must say ok:false reason no-webgpu, and nothing may throw.
+//  3. The net duel (WEB9, WEB12), only with --server: `node tools/web-browse.mjs --dir dist/web --chrome google-chrome
+//     --out out/web-net --server ws://127.0.0.1:7050 [--expect-hash <hex>] [--expect-transport websocket]
+//     [--wt https://host:port/e2040 --cert <sha256 hex>] [--net-timeout <s>]`. Loads the page at `?server=...` in a Chrome
+//     with no GPU flags (the duel needs none), waits for `net: transport=.. ticks=.. hash=.. peers=..` in #net and checks it:
+//     600 ticks, the hash you expect, the transport you expect. Nothing else runs in that mode. Exit 0 proven, 1 not.
 // Exit: 0 all proven (a missing adapter is only a failure with --require-adapter), 1 a proof failed,
 // 2 could not run (no Chrome, bad arguments), 3 no adapter and --require-adapter was given.
 // Only loopback is served and visited. The Chrome processes started here are ours and are closed here.
@@ -17,6 +22,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { crc32, deflateSync, inflateSync } from "node:zlib";
+import { loadLine } from "../crates/web/loader.js";
 
 // ---- flag sets ----
 // Every set starts from BASE. The first set is the one the plan names; the others vary the pieces that decide
@@ -48,14 +54,16 @@ export function resolveRequest(dir, urlPath) {
   return full === base || full.startsWith(base + sep) ? full : null;
 }
 
-export async function serve(dir) {
+// `wasmType` overrides the Content-Type of .wasm files: the drill for a host that types the module wrongly (QW3).
+export async function serve(dir, { wasmType = null } = {}) {
   const log = [];
   const server = createServer((req, res) => {
     const file = resolveRequest(dir, req.url ?? "/");
     const ok = file && existsSync(file) && statSync(file).isFile();
-    log.push({ path: req.url, status: ok ? 200 : 404, type: ok ? (MIME[extname(file)] ?? "application/octet-stream") : null });
+    const type = ok ? ((wasmType && extname(file) === ".wasm" ? wasmType : MIME[extname(file)]) ?? "application/octet-stream") : null;
+    log.push({ path: req.url, status: ok ? 200 : 404, type });
     if (!ok) { res.writeHead(404); res.end("not found"); return; }
-    res.writeHead(200, { "Content-Type": MIME[extname(file)] ?? "application/octet-stream", "Cache-Control": "no-store" });
+    res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store" });
     res.end(readFileSync(file));
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -160,6 +168,13 @@ export function arenaVerdict(a) {
     if (rc.validationErrors !== 0) problems.push(`validation errors ${rc.validationErrors}${rc.firstError ? `: ${rc.firstError}` : ""}`);
     if (rc.frameErrors !== 0) problems.push(`frame errors ${rc.frameErrors}${rc.firstError ? `: ${rc.firstError}` : ""}`);
     if (!(rc.frames > 0)) problems.push("the receipt counts no frame");
+    // WEB13: a pipeline built after the loader is a stutter the page names loudly; the run fails on it.
+    if (rc.latePipelines > 0) problems.push(`late_compile: ${rc.latePipelines} pipeline(s) built after the loader (${String(a.pipelinesText).slice(0, 200)})`);
+    // WEB8: the page names its tier, the ready-line tier and the receipt tier agree, and the one-second split has all four fields.
+    if (typeof rc.tier !== "string" || !rc.tier) problems.push("the receipt names no tier");
+    else if (!/^tier=[a-z]+ /.test(String(a.tierText))) problems.push(`the page prints no tier= line: ${String(a.tierText).slice(0, 120)}`);
+    else if (!String(a.tierText).startsWith(`tier=${rc.tier} `)) problems.push(`the tier line says ${String(a.tierText).split(" ")[0]}, the receipt says tier=${rc.tier}`);
+    if (!/^pipelines=\d+ ms=\d+/.test(String(a.pipelinesText))) problems.push(`the page prints no pipelines=<n> ms=<t> line: ${String(a.pipelinesText).slice(0, 120)}`);
   }
   return { ok: problems.length === 0, problems };
 }
@@ -203,6 +218,38 @@ export function noWebGpuVerdict(r) {
   if (r.exceptions.length) problems.push(`uncaught exceptions: ${r.exceptions.join(" | ")}`);
   const g = goldenVerdict(r.golden, r.goldenState);
   if (!g.ok) problems.push(g.why);
+  return { ok: problems.length === 0, problems };
+}
+
+// ---- how the module arrived (QW3, QW12) ----
+// The page publishes window.loadStats = { bundle: network|cache, bytesFetched, downloadMs, compileMs, initMs, firstFrameMs, cache, persisted }.
+// A fresh profile loads from the network, stores the copy under its hash and reports three timings; the same page loaded again in that
+// profile (`again`) reads the copy: bundle=cache and no wasm byte fetched.
+export function loadVerdict(first, again) {
+  const problems = [];
+  if (!first) return { ok: false, problems: ["the page published no load stats (window.loadStats)"] };
+  if (first.bundle !== "network") problems.push(`the first load of a fresh profile says bundle=${first.bundle}`);
+  if (!(first.bytesFetched > 0)) problems.push(`the first load fetched ${first.bytesFetched} bytes`);
+  for (const k of ["downloadMs", "compileMs", "initMs", "firstFrameMs"]) if (!(Number.isFinite(first[k]) && first[k] >= 0)) problems.push(`${k} is ${first[k]}`);
+  if (first.cache !== "stored") problems.push(`the copy was not stored: cache=${first.cache}`);
+  if (!again) problems.push("the second load in the same profile did not report");
+  else {
+    if (again.bundle !== "cache") problems.push(`the second load says bundle=${again.bundle}, not cache`);
+    if (again.bytesFetched !== 0) problems.push(`the second load fetched ${again.bytesFetched} bytes, not 0`);
+  }
+  return { ok: problems.length === 0, problems };
+}
+
+// With Cache.put forced to throw QuotaExceededError the page still loads and says so.
+export const QUOTA_SCRIPT = "Cache.prototype.put = () => Promise.reject(new DOMException('forced', 'QuotaExceededError'));";
+export const quotaVerdict = (load) => (load?.cache === "quota" ? { ok: true, problems: [] } : { ok: false, problems: [`with Cache.put refusing, the page says cache=${load?.cache ?? "nothing"}, not quota`] });
+
+// A host that types the wasm wrongly must give the fatal page with the reason, not a blank page.
+export function badMimeVerdict(r) {
+  const problems = [];
+  if (r.state !== "fatal") problems.push(`data-state is ${r.state}, expected fatal`);
+  if (r.fatalDisplay !== "block") problems.push(`the fatal message is display:${r.fatalDisplay}`);
+  for (const t of ["The engine did not start", "text/plain", "application/wasm"]) if (!String(r.fatalText).includes(t)) problems.push(`the fatal text lacks "${t}": ${String(r.fatalText).slice(0, 200)}`);
   return { ok: problems.length === 0, problems };
 }
 
@@ -268,7 +315,19 @@ export async function launchChrome(chrome, flags, logFile) {
 }
 
 // The browse receipt: what the ready line said about wasm memory plus the time to the first frame.
-export const receiptOf = (report, firstFrameMs, set) => ({ schema: 1, set, wasmMemoryBytes: report?.wasmMemoryBytes ?? null, ttffMs: firstFrameMs ?? null, commit: report?.commit ?? null });
+// WEB8/WEB13: the arena page's tier, validation count and pipeline warm-up ride along (null on the plain shell page).
+// `arena` is readArena's result: its receipt is the page's own final count, newer than the ready line.
+// QW3/QW12: `load` is the page's window.loadStats of the first load, `reload` the same page loaded again in the same profile;
+// the receipt keeps the three timings (download, compile, first frame) apart from the harness's own ttff, and the cache facts.
+export const receiptOf = (report, firstFrameMs, set, arena = null, load = null, reload = null) => ({
+  schema: 1, set, wasmMemoryBytes: report?.wasmMemoryBytes ?? null, ttffMs: firstFrameMs ?? null, commit: report?.commit ?? null,
+  load: load && { bundle: load.bundle, bytesFetched: load.bytesFetched, downloadMs: load.downloadMs, compileMs: load.compileMs, initMs: Math.round(load.initMs), firstFrameMs: Math.round(load.firstFrameMs), cache: load.cache, persisted: load.persisted },
+  reload: reload && { bundle: reload.bundle, bytesFetched: reload.bytesFetched },
+  tier: arena?.receipt?.tier ?? report?.tier ?? null,
+  validation: arena?.receipt?.validationErrors ?? report?.validation ?? null,
+  pipelines: report?.pipelines ?? null, pipelinesMs: report?.pipelinesMs ?? null,
+  latePipelines: arena?.receipt?.latePipelines ?? report?.latePipelines ?? null,
+});
 
 const parseLine =(text) => { try { const v = JSON.parse(text); return v && typeof v === "object" ? v : null; } catch { return null; } };
 
@@ -323,7 +382,7 @@ export async function readArena({ evalJs, sleep: nap }, waitMs = 150000) {
     await nap(500);
   }
   const text = (id) => evalJs(`document.getElementById('${id}')?.textContent ?? ''`);
-  const out = { capture, waitedMs: Date.now() - t0, receiptText: await text("receipt"), passes: await text("passes"), init: await text("init"), captureText: await text("capture") };
+  const out = { capture, waitedMs: Date.now() - t0, receiptText: await text("receipt"), passes: await text("passes"), init: await text("init"), captureText: await text("capture"), tierText: await text("tier"), splitText: await text("split"), pipelinesText: await text("pipelines") };
   out.receipt = parseLine(out.receiptText);
   out.captureLine = parseLine(out.captureText);
   if (capture === "ready" || capture === "blank") {
@@ -347,7 +406,8 @@ export async function readArena({ evalJs, sleep: nap }, waitMs = 150000) {
 }
 
 // Load `url` in a fresh Chrome and read the page back. `beforeLoad` is a script run before any page script.
-export async function readPage({ chrome, flags, url, logFile, beforeLoad = null, waitMs = 90000, afterReady = null, inputEvents = null }) {
+// `needGolden: false` stops waiting at the first frame or the fatal page (a page that cannot load never prints a golden line).
+export async function readPage({ chrome, flags, url, logFile, beforeLoad = null, waitMs = 90000, afterReady = null, inputEvents = null, needGolden = true }) {
   const b = await launchChrome(chrome, flags, logFile);
   const { cdp } = b;
   const consoleLines = [], exceptions = [];
@@ -374,7 +434,7 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
       // Time to first frame (WEB11): the first poll that sees the first frame on the canvas, good to one poll (250 ms).
       if (firstFrameMs === null && (state === "running" || state === "fatal")) firstFrameMs = Date.now() - t0;
       // The golden check runs after the adapter line, so wait for both.
-      if ((state === "running" || state === "fatal") && goldenState) break;
+      if ((state === "running" || state === "fatal") && (goldenState || !needGolden)) break;
     }
     const timedOut = state !== "running" && state !== "fatal";
     const read = () => evalJs(`(() => { const $ = (id) => document.getElementById(id); const c = $('canvas'); return {
@@ -384,12 +444,13 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
       fatalDisplay: getComputedStyle($('fatal')).display, fatalText: $('fatal').innerText,
       hasGpu: typeof navigator.gpu !== 'undefined', canvas: [c.width, c.height], ua: navigator.userAgent }; })()`);
     const first = await read();
+    const load = await evalJs(LOAD_STATS_JS);
     const probe = await evalJs(`(async () => { if (typeof navigator.gpu === 'undefined') return { gpu: false };
       try { const a = await navigator.gpu.requestAdapter(); if (!a) return { gpu: true, adapter: null };
         const i = a.info ?? (a.requestAdapterInfo ? await a.requestAdapterInfo() : {});
         return { gpu: true, adapter: { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description, isFallback: a.isFallbackAdapter ?? null, features: [...a.features].length } };
       } catch (e) { return { gpu: true, error: String(e) }; } })()`);
-    const out = { waitedMs: Date.now() - t0, firstFrameMs, timedOut, state: first.state, generation: first.generation, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
+    const out = { waitedMs: Date.now() - t0, firstFrameMs, timedOut, state: first.state, generation: first.generation, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, load, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
     if (!timedOut) {
       out.screenshot = Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64");
       if (state === "running") {
@@ -417,6 +478,23 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
   }
 }
 
+// The page's load stats once its cache copy is settled (null on a page without them).
+const LOAD_STATS_JS = "(async () => { await window.loadSettled; return window.loadStats ?? null; })()";
+
+// Load the same page again in the same profile (the Cache API copy from the first load is still there) and read its load stats.
+const reloadProbe = async ({ evalJs, sleep: nap }) => {
+  await evalJs("window.oldDocument = true");
+  evalJs("location.reload()").catch(() => { /* the page goes away under the call */ });
+  const t0 = Date.now();
+  while (Date.now() - t0 < 90000) {
+    await nap(500);
+    try {
+      if (await evalJs("!window.oldDocument && window.loadStats?.firstFrameMs != null")) return { reload: await evalJs(LOAD_STATS_JS) };
+    } catch { /* between documents */ }
+  }
+  return { reload: null };
+};
+
 // Destroy the device and wait for generation 2 with frames moving again.
 const recoveryProbe = async ({ evalJs, read, sleep: nap }) => {
   await evalJs("window.loseDevice()");
@@ -437,6 +515,32 @@ const recoveryProbe = async ({ evalJs, read, sleep: nap }) => {
   return { recovered: ok && moving, recoveryState: r ? { state: r.state, generation: r.generation, hud: r.hud, adapterAfterLoss: direct } : null };
 };
 
+// QW14: a forced memory.grow (16 pages) must leave the frames coming; with --soak the page then stays open for `soakSec` and every
+// 60 s reading of window.memoryLog is kept. The wasm-bindgen views refresh by themselves after a grow; the page caches none.
+const GROW_PAGES = 16;
+const memoryProbe = (soakSec) => async ({ evalJs, read, sleep: nap }) => {
+  const before = await evalJs("window.sampleMemory?.() ?? null");
+  const after = await evalJs(`window.growMemory?.(${GROW_PAGES}) ?? null`);
+  const frames = (hud) => Number(/^frame (\d+)/.exec(hud)?.[1] ?? 0);
+  const f0 = frames((await read()).hud);
+  await nap(1000);
+  const moved = frames((await read()).hud) > f0;
+  if (soakSec > 0) await nap(soakSec * 1000);
+  return { memory: { before, after, moved, log: await evalJs("window.memoryLog ?? []") } };
+};
+
+// After the first frames: the forced memory grow, the device-loss drill, then the second load of the same page in the same profile.
+const afterReadyProbes = (soakSec = 0) => async (ctx) => ({ ...(await memoryProbe(soakSec)(ctx)), ...(await recoveryProbe(ctx)), ...(await reloadProbe(ctx)) });
+
+// A forced grow adds exactly the pages asked for and the frame counter keeps moving.
+export function memoryVerdict(m) {
+  if (!m || m.before == null) return { ok: false, problems: ["the page published no memory readings (window.sampleMemory)"] };
+  const problems = [];
+  if (m.after !== m.before + GROW_PAGES) problems.push(`memory.grow(${GROW_PAGES}) took the module from ${m.before} to ${m.after} pages`);
+  if (!m.moved) problems.push("the frame counter stopped after the memory grew");
+  return { ok: problems.length === 0, problems };
+}
+
 export const NO_GPU_SCRIPT = "Object.defineProperty(Navigator.prototype, 'gpu', { get() { return undefined; }, configurable: true });";
 
 const tailOf = (file, n = 40) => { try { return readFileSync(file, "utf8").trimEnd().split(/\r?\n/).slice(-n).join("\n"); } catch { return ""; } };
@@ -450,7 +554,7 @@ export function writeArena(dir, prefix, arena) {
 }
 
 export function parseArgs(argv) {
-  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null };
+  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null, server: null, wt: null, cert: null, expectHash: null, expectTransport: null, expectFailure: [], netTimeout: 90, badMime: false, soak: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") o.dir = argv[++i];
@@ -460,17 +564,152 @@ export function parseArgs(argv) {
     else if (a === "--all") o.all = true;
     else if (a === "--only") o.only = Number(argv[++i]);
     else if (a === "--input") o.input = argv[++i] ?? null;
+    else if (a === "--server") o.server = argv[++i] ?? null;
+    else if (a === "--wt") o.wt = argv[++i] ?? null;
+    else if (a === "--cert") o.cert = argv[++i] ?? null;
+    else if (a === "--expect-hash") o.expectHash = argv[++i] ?? null;
+    else if (a === "--expect-transport") o.expectTransport = argv[++i] ?? null;
+    else if (a === "--expect-failure") o.expectFailure.push(argv[++i] ?? "");
+    else if (a === "--bad-mime") o.badMime = true;
+    else if (a === "--soak") o.soak = Number(argv[++i]);
+    else if (a === "--net-timeout") o.netTimeout = Number(argv[++i]);
     else o.error = `unknown argument ${a}`;
   }
   if (!o.chrome) o.error ??= "--chrome <path to Chrome> is required";
   if (o.only !== null && !(o.only >= 0)) o.error ??= "--only needs a flag set index";
   if (argv.includes("--input") && !o.input) o.error ??= "--input needs a JSON file of events";
+  if (argv.includes("--server") && !/^wss?:\/\/[^/\s]+/.test(o.server ?? "")) o.error ??= "--server needs ws://host:port (or wss://host)";
+  if ((o.wt || o.cert) && !o.server) o.error ??= "--wt and --cert go with --server";
+  if (o.wt && !/^https:\/\//.test(o.wt)) o.error ??= "--wt needs https://host:port/e2040";
+  if (o.cert && !/^[0-9a-f]{64}$/i.test(o.cert)) o.error ??= "--cert needs 64 hex digits (the SHA-256 of the certificate)";
+  if (o.expectHash && !/^[0-9a-f]{16}$/i.test(o.expectHash)) o.error ??= "--expect-hash needs 16 hex digits";
+  if (o.expectTransport && !["websocket", "webtransport"].includes(o.expectTransport)) o.error ??= "--expect-transport is websocket or webtransport";
+  if (o.expectFailure.some((t) => !t) || (o.expectFailure.length && (o.expectHash || o.expectTransport))) o.error ??= "--expect-failure needs text and does not go with --expect-hash or --expect-transport";
+  if (!(o.soak >= 0)) o.error ??= "--soak needs seconds (0 or more)";
+  if (!(o.netTimeout >= 1)) o.error ??= "--net-timeout needs seconds";
   return o;
+}
+
+// ---- the net duel (WEB9, WEB12) ----
+// The page joins a native dedicated server (`?server=ws://host:port`), plays 600 scripted ticks and prints one line to #net:
+//   net: transport=<webtransport|websocket> ticks=<n> hash=<16 hex> peers=<n>        or        net: failed transport=<leg|none> reason=<text>
+// `data-net` on <body> is running, ok or failed. The hash is the server's state hash of the last tick, which the page's own
+// simulation reached too; `net_serve --reference` prints the same number offline.
+export const NET_OK = /^net: transport=(webtransport|websocket) ticks=(\d+) hash=([0-9a-f]{16}) peers=(\d+)$/;
+export const NET_TICKS = 600;
+
+// The page address of a net run: the static server's origin plus the `?server=` keys.
+export function netUrl(port, { server, wt = null, cert = null }) {
+  const q = new URLSearchParams({ server });
+  if (wt) q.set("wt", wt);
+  if (cert) q.set("cert", cert);
+  return `http://127.0.0.1:${port}/index.html?${q}`;
+}
+
+// What the page's net line proved against what the run expects. `want`: { hash, transport, ticks }.
+export function netVerdict(text, state, want = {}) {
+  const line = String(text ?? "").split("\n")[0].trim();
+  if (want.failure?.length) {
+    // A run that must fail, loudly: the page says failed and names every text asked for (for example the blocked leg).
+    const problems = [];
+    if (state !== "failed") problems.push(`expected the duel to fail, it ended as ${state ?? "never finished"}: ${line.slice(0, 300)}`);
+    for (const t of want.failure) if (!line.includes(t)) problems.push(`the failure text lacks "${t}": ${line.slice(0, 400)}`);
+    return { ok: problems.length === 0, line, parsed: null, problems };
+  }
+  if (state !== "ok") return { ok: false, line, parsed: null, problems: [`the net duel ended as ${state ?? "never finished"}: ${line.slice(0, 400)}`] };
+  const m = NET_OK.exec(line);
+  if (!m) return { ok: false, line, parsed: null, problems: [`data-net is ok but the line is not the net shape: ${line.slice(0, 300)}`] };
+  const parsed = { transport: m[1], ticks: Number(m[2]), hash: m[3], peers: Number(m[4]) };
+  const problems = [];
+  if (parsed.ticks !== (want.ticks ?? NET_TICKS)) problems.push(`ticks ${parsed.ticks}, expected ${want.ticks ?? NET_TICKS}`);
+  if (want.hash && parsed.hash !== String(want.hash).toLowerCase()) problems.push(`hash ${parsed.hash}, the server's is ${String(want.hash).toLowerCase()}`);
+  if (want.transport && parsed.transport !== want.transport) problems.push(`transport ${parsed.transport}, expected ${want.transport}`);
+  if (!(parsed.peers >= 1)) problems.push(`peers ${parsed.peers}`);
+  return { ok: problems.length === 0, line, parsed, problems };
+}
+
+// Load the net page in a Chrome with the base flags only and wait for the line. Returns { text, state, console, exceptions, waitedMs }.
+export async function readNetPage({ chrome, flags = BASE_FLAGS, url, logFile, waitMs = 90000 }) {
+  const b = await launchChrome(chrome, flags, logFile);
+  const { cdp } = b;
+  const consoleLines = [], exceptions = [];
+  try {
+    cdp.on("Runtime.consoleAPICalled", (p) => consoleLines.push(`${p.type}: ${(p.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ")}`.slice(0, 600)));
+    cdp.on("Runtime.exceptionThrown", (p) => exceptions.push(String(p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text ?? "exception").slice(0, 400)));
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    const evalJs = async (expression) => {
+      const r = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+      if (r.exceptionDetails) throw new Error(`evaluate: ${r.exceptionDetails.text} ${r.exceptionDetails.exception?.description ?? ""}`);
+      return r.result.value;
+    };
+    await cdp.send("Page.navigate", { url });
+    const t0 = Date.now();
+    let state = null, text = "";
+    while (Date.now() - t0 < waitMs) {
+      await sleep(250);
+      try { [state, text] = await evalJs("[document.body?.dataset.net ?? null, document.getElementById('net')?.textContent ?? '']"); } catch { state = null; }
+      if (state === "ok" || state === "failed") break;
+    }
+    return { text, state, console: consoleLines, exceptions, waitedMs: Date.now() - t0 };
+  } finally {
+    await b.close();
+  }
+}
+
+// `--server`: only the net duel runs. Prints NET LINE and the verdict; writes net.json (and the Chrome log) to --out.
+async function netMain(a) {
+  const dir = resolve(a.dir), out = resolve(a.out);
+  if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
+  mkdirSync(out, { recursive: true });
+  const server = await serve(dir);
+  try {
+    const url = netUrl(server.port, a);
+    const logFile = join(out, "chrome-net.log");
+    writeFileSync(logFile, "");
+    let r;
+    try { r = await readNetPage({ chrome: a.chrome, url, logFile, waitMs: a.netTimeout * 1000 }); } catch (e) { console.error(`web-browse: ${e.message ?? e}`); return 2; }
+    const v = netVerdict(r.text, r.state, { hash: a.expectHash, transport: a.expectTransport, failure: a.expectFailure });
+    console.log(`NET LINE ${v.line}`);
+    console.log(`net duel: ${v.ok ? (v.parsed ? `OK (${v.parsed.transport}, ${v.parsed.ticks} ticks, hash ${v.parsed.hash}${a.expectHash ? " equals the server's" : ""})` : "OK (failed loudly, as asked)") : `FAILED - ${v.problems.join("; ")}`}`);
+    if (!v.ok) {
+      for (const l of r.console.slice(0, 12)) console.log(`    console ${l.replace(/\s+/g, " ").slice(0, 400)}`);
+      for (const l of r.exceptions.slice(0, 3)) console.log(`    exception ${l.replace(/\s+/g, " ").slice(0, 400)}`);
+    }
+    writeFileSync(join(out, "net.json"), `${JSON.stringify({ url, verdict: v, expected: { hash: a.expectHash, transport: a.expectTransport }, waitedMs: r.waitedMs, console: r.console.slice(0, 60), exceptions: r.exceptions }, null, 2)}\n`);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### net duel\n\`${v.line}\`\n${v.ok ? "ok" : `**FAILED** ${v.problems.join("; ")}`}\n`);
+    return v.ok ? 0 : 1;
+  } finally {
+    await server.close();
+  }
+}
+
+// `--bad-mime`: a host that types engine_bg.wasm as text/plain. The page must show the fatal message with the reason.
+async function badMimeMain(a) {
+  const dir = resolve(a.dir), out = resolve(a.out);
+  if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
+  mkdirSync(out, { recursive: true });
+  const server = await serve(dir, { wasmType: "text/plain" });
+  try {
+    const logFile = join(out, "chrome-bad-mime.log");
+    writeFileSync(logFile, "");
+    let r;
+    try { r = await readPage({ chrome: a.chrome, flags: BASE_FLAGS, url: `http://127.0.0.1:${server.port}/index.html`, logFile, waitMs: 40000, needGolden: false }); } catch (e) { console.error(`web-browse: ${e.message ?? e}`); return 2; }
+    const v = badMimeVerdict(r);
+    console.log(`BAD MIME fatal text: ${String(r.fatalText).replace(/\s+/g, " ").slice(0, 400)}`);
+    console.log(`wrong MIME type: ${v.ok ? "OK (fatal page with the reason, not a blank page)" : `FAILED - ${v.problems.join("; ")}`}`);
+    if (r.screenshot) writeFileSync(join(out, "bad-mime.png"), r.screenshot);
+    return v.ok ? 0 : 1;
+  } finally {
+    await server.close();
+  }
 }
 
 export async function main(argv) {
   const a = parseArgs(argv);
   if (a.error) { console.error(`web-browse: ${a.error}`); return 2; }
+  if (a.server) return netMain(a);
+  if (a.badMime) return badMimeMain(a);
   const dir = resolve(a.dir), out = resolve(a.out);
   if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
   mkdirSync(out, { recursive: true });
@@ -496,7 +735,7 @@ export async function main(argv) {
       const flags = [...BASE_FLAGS, ...set.flags];
       let r, v;
       try {
-        r = await readPage({ chrome: a.chrome, flags, url, logFile, afterReady: recoveryProbe, inputEvents });
+        r = await readPage({ chrome: a.chrome, flags, url, logFile, afterReady: afterReadyProbes(a.soak), inputEvents });
         v = verdict(r);
       } catch (e) {
         r = null; v = { ok: false, code: "run-error", why: String(e.message ?? e) };
@@ -514,12 +753,12 @@ export async function main(argv) {
         for (const l of entry.chromeLog.split("\n").filter((x) => /gpu|vulkan|webgpu|swiftshader|dawn|angle|adapter/i.test(x)).slice(-6)) console.log(`    chrome ${l.slice(0, 300)}`);
       }
       if (v.ok && !winner) {
-        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs, arena: r.arena };
+        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs, arena: r.arena, load: r.load, reload: r.reload, memory: r.memory };
         writeFileSync(join(out, "ready.png"), r.screenshot);
         writeFileSync(join(out, "report.json"), `${r.reportText}\n`);
         writeArena(out, "arena-capture", r.arena);
         // The numbers tools/web-budget.mjs gates on (WEB11).
-        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
+        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name, r.arena, r.load, r.reload), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
         if (r.inputScreenshot) writeFileSync(join(out, "input.png"), r.inputScreenshot);
         writeFileSync(join(out, "flag-line.txt"), `${a.chrome} ${flags.join(" ")}\n`);
       }
@@ -537,6 +776,9 @@ export async function main(argv) {
         console.log(`ARENA HASH page ${winner.arena.captureLine?.hash} node ${winner.arena.nodeHash} ${winner.arena.hashOk ? "EQUAL" : "DIFFERENT"}; ${winner.arena.init}`);
         console.log(`ARENA RECEIPT ${winner.arena.receiptText}`);
         console.log(`ARENA PASSES ${winner.arena.passes}`);
+        console.log(`ARENA TIER ${winner.arena.tierText}`);
+        console.log(`ARENA SPLIT ${winner.arena.splitText || "(the first second is not over yet)"}`);
+        console.log(`ARENA PIPELINES ${winner.arena.pipelinesText}`);
       }
       const gw = goldenVerdict(winner.golden, winner.goldenState);
       console.log(`GOLDEN ${gw.ok ? "" : "FAILED "}${gw.line}`);
@@ -547,7 +789,8 @@ export async function main(argv) {
     const base = [...BASE_FLAGS, ...(winner ? winner.set.flags : sets[0].flags)];
     let nogpu, nogpuV;
     try {
-      nogpu = await readPage({ chrome: a.chrome, flags: base, url, logFile: join(out, "chrome-no-webgpu.log"), beforeLoad: NO_GPU_SCRIPT, waitMs: 60000 });
+      nogpu = await readPage({ chrome: a.chrome, flags: base, url, logFile: join(out, "chrome-no-webgpu.log"), beforeLoad: `${NO_GPU_SCRIPT}
+${QUOTA_SCRIPT}`, waitMs: 60000 });
       nogpuV = noWebGpuVerdict(nogpu);
       if (nogpu.screenshot) writeFileSync(join(out, "no-webgpu.png"), nogpu.screenshot);
     } catch (e) {
@@ -556,6 +799,18 @@ export async function main(argv) {
     const gn = goldenVerdict(nogpu?.golden, nogpu?.goldenState);
     console.log(`NO-WEBGPU GOLDEN ${gn.ok ? "" : "FAILED "}${gn.line}`);
     console.log(`no-WebGPU page: ${nogpuV.ok ? "OK (loud message shown, reason no-webgpu, nothing thrown)" : `FAILED - ${nogpuV.problems.join("; ")}`}`);
+
+    // QW3/QW12: the winner's load facts (three timings, then the second load from the cache) and the forced-quota page.
+    const loadV = winner ? loadVerdict(winner.load, winner.reload) : null;
+    const quotaV = quotaVerdict(nogpu?.load);
+    const memV = winner ? memoryVerdict(winner.memory) : null;
+    if (winner) {
+      const log = winner.memory?.log ?? [];
+      const peak = Math.max(0, ...log.map((x) => x.pages));
+      console.log(`MEMORY ${memV.ok ? "" : "FAILED "}pages ${winner.memory?.before} -> ${winner.memory?.after} after a forced grow of ${GROW_PAGES}; peak ${peak} pages = ${peak * 65536} bytes (+25% = ${Math.ceil(peak * 65536 * 1.25)}); readings ${JSON.stringify(log.map((x) => x.pages))}${memV.ok ? "" : " - " + memV.problems.join("; ")}`);
+    }
+    if (winner) console.log(`LOAD ${loadV.ok ? "" : "FAILED "}${loadLine(winner.load ?? {}, winner.load?.initMs, winner.load?.firstFrameMs)} | again: ${JSON.stringify(winner.reload)}${loadV.ok ? "" : ` - ${loadV.problems.join("; ")}`}`);
+    console.log(`QUOTA PAGE ${quotaV.ok ? "OK (Cache.put refused with QuotaExceededError, the page still loaded and said cache=quota)" : `FAILED - ${quotaV.problems.join("; ")}`}`);
 
     const goldenWinner = winner ? goldenVerdict(winner.golden, winner.goldenState) : null;
     const summary = { adapter: Boolean(winner), golden: { withAdapter: goldenWinner, withoutWebGpu: gn }, winner: winner ? { name: winner.set.name, flags: winner.flags } : null, noWebGpuPage: nogpuV, attempts, served: server.log };
@@ -570,7 +825,7 @@ export async function main(argv) {
     ].join("\n");
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${md}\n`);
 
-    if (!nogpuV.ok) return 1;
+    if (!nogpuV.ok || !quotaV.ok || (loadV && !loadV.ok) || (memV && !memV.ok)) return 1;
     if (goldenWinner && !goldenWinner.ok) {
       console.log(`GOLDEN FAILED on the adapter page: ${goldenWinner.why}`);
       return 1;

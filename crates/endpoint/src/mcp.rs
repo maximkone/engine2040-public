@@ -964,14 +964,19 @@ impl ServerState {
 
     /// MCP2 headless arena match job: `start` simulates a bounded match and
     /// files a handle, `poll` walks progress to the checkpoints, `cancel`
-    /// stops a running handle. The scene document is untouched. A start with
-    /// `scene_rev` plays the current scene as the match world.
+    /// stops a running handle. The scene document is untouched. A start must
+    /// pin the scene it plays (`scene_rev`, the current revision): an
+    /// unpinned, empty (revision 0) or stale pin is refused before any
+    /// simulation, and the job manifest carries the pin's revision and digest.
     pub fn play_run(&mut self, args: &PlayRunArgs) -> Result<PlayRunOutput, McpToolError> {
-        let world = match args.scene_rev {
-            Some(rev) if args.action == "start" => {
-                Some(super::play::world_load::world_for_revision(&self.doc, rev)?)
-            }
-            _ => None,
+        let world = if args.action == "start" {
+            let pin = super::scene_tools::run_pin(&self.doc, args.scene_rev)?;
+            Some(super::play::PinnedWorld {
+                world: super::play::world_load::match_world(&self.doc)?,
+                digest: pin.digest,
+            })
+        } else {
+            None
         };
         #[cfg(feature = "rules")]
         if args.action == "start" {

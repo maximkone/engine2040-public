@@ -58,6 +58,7 @@ behind the off-by-default `spine` feature (the spine step and parity harness);
 `engine-endpoint` enables it to play a scene revision (`play.run scene_rev`).
 `engine-endpoint` depends on `engine-anim` (feature `json`) behind its `mcp` feature: the `anim` verb pack
 runs the state machine door state (`anim.graph.set`, `anim.graph.undo`, `anim.preview`); anim never imports endpoint.
+`engine-anim` depends on `engine-ecs` for the RC3 job pool (`par.rs`, AM14): per-character eval fans out in index-ordered chunks for presentation and bake; `ecs` depends on `core` only, so no cycle, and the sim tick never calls it. `engine-anim` also has a dev-only edge to `engine-nav` (the TV2 contract test ties the traversal chooser to the link registry); nav never imports anim.
 `engine-endpoint` depends on `engine-assets` (features `import`, `registry`) behind its off-by-default `intake` feature: the
 `asset.intake` verb cooks a generated GLB through `engine_assets::gen_intake` (cook-time only; no tick crate depends on it); assets never imports endpoint.
 `engine-endpoint` depends on `engine-physics` behind its `mcp` feature: the `physics` verb pack reads the std-only balance core (`engine_physics::balance::response_matrix`, `recovery_ticks`), so one tuning has one answer; physics never imports endpoint.

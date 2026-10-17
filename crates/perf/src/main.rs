@@ -573,7 +573,11 @@ fn heap_peak_peak_bytes() -> (u64, u64, u64) {
     let first = workload.run_peak_live_bytes();
     let second = workload.run_peak_live_bytes();
     let peak = PeakSnapshot::of(&[first, second]).peak_bytes;
-    debug_assert_eq!(peak, peak_of(&[first, second]), "typed snapshot matches the pure max");
+    debug_assert_eq!(
+        peak,
+        peak_of(&[first, second]),
+        "typed snapshot matches the pure max"
+    );
     (first, second, peak)
 }
 
@@ -832,6 +836,22 @@ fn run_scenario_row(name: &str, agents: usize, sprites: usize, dynamic: bool, mi
 
 fn main() {
     if poll_present_flags() {
+        return;
+    }
+    if std::env::args().any(|arg| arg == "--feel-gold") {
+        // GP6: score the three feel domains from the PQ1 fixture against the gold rows.
+        let path = format!(
+            "{}/../../fixtures/feel-gold/feel-gold.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        match engine_perf::feel::check_gold(&text) {
+            Ok(report) => print!("{report}"),
+            Err(why) => {
+                eprintln!("{why}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     if std::env::args().any(|arg| arg == "--heap-peak") {

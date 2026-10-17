@@ -694,10 +694,176 @@ fn read_fixed(bytes: &[u8], pos: &mut usize) -> Result<Fixed, SpineError> {
     Ok(Fixed::from_bits(i64::from_le_bytes(raw)))
 }
 
+/// Float quarantine scanner (ARC14, reused by ARC17): finds float tokens in
+/// production source text so a test can fail the gate on a new float.
+#[cfg(test)]
+pub(crate) mod quarantine {
+    /// One float token and the top-level item that holds it.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) struct FloatSite {
+        /// Zero-based line of the token in the scanned text.
+        pub(crate) line: usize,
+        /// Header line of the enclosing top-level item, trimmed.
+        pub(crate) item: String,
+    }
+
+    /// True when `code` (comments already cut) holds an `f32`/`f64` type or
+    /// suffix token, or a decimal float literal like `0.5`.
+    fn has_float(code: &str) -> bool {
+        let b = code.as_bytes();
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        for ty in ["f32", "f64"] {
+            for (at, _) in code.match_indices(ty) {
+                let ident_before = at
+                    .checked_sub(1)
+                    .is_some_and(|i| b[i].is_ascii_alphabetic() || b[i] == b'_');
+                let word_after = b.get(at + 3).is_some_and(|c| word(*c));
+                if !ident_before && !word_after {
+                    return true;
+                }
+            }
+        }
+        for (at, _) in code.match_indices('.') {
+            let digit_before = at.checked_sub(1).is_some_and(|i| b[i].is_ascii_digit());
+            let digit_after = b.get(at + 1).is_some_and(u8::is_ascii_digit);
+            if digit_before && digit_after {
+                let mut start = at - 1;
+                while start > 0 && b[start - 1].is_ascii_digit() {
+                    start -= 1;
+                }
+                // `t.0.1` is tuple access, not a literal.
+                let tuple_or_ident = start
+                    .checked_sub(1)
+                    .is_some_and(|i| word(b[i]) || b[i] == b'.');
+                if !tuple_or_ident {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Every float token in the production part of `src` (everything above
+    /// the first column-0 `#[cfg(test)]`), with its enclosing item. Comment
+    /// text never counts.
+    pub(crate) fn float_sites(src: &str) -> Vec<FloatSite> {
+        let mut sites = Vec::new();
+        let mut item = String::new();
+        for (line, raw) in src.lines().enumerate() {
+            if raw.starts_with("#[cfg(test)]") {
+                break;
+            }
+            let opens_item = !raw.is_empty()
+                && !raw.starts_with(char::is_whitespace)
+                && !raw.starts_with("//")
+                && !raw.starts_with("#[")
+                && !raw.starts_with(['}', ')', ']']);
+            if opens_item {
+                item = raw.trim().to_string();
+            }
+            let code = raw.split("//").next().unwrap_or_default();
+            if has_float(code) {
+                sites.push(FloatSite {
+                    line,
+                    item: item.clone(),
+                });
+            }
+        }
+        sites
+    }
+
+    #[test]
+    fn scanner_tells_floats_from_lookalikes() {
+        assert!(has_float("pub yaw: f32,"));
+        assert!(has_float("let x = 1f64;"));
+        assert!(has_float("if value == 0.0 {"));
+        assert!(has_float("let n = 12.5;"));
+        assert!(!has_float("read_f32(bytes, &mut pos)?"));
+        assert!(!has_float("let a = t.0.1;"));
+        assert!(!has_float("for i in 0..5 {"));
+        assert!(!has_float("let v: u32 = 1_000;"));
+        assert!(!has_float("type F32x4 = u8;"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::quarantine::float_sites;
     use super::*;
     use engine_core::alloc_probe::measure;
+
+    /// The only items of the spine module that may hold a float: the frozen
+    /// arena path's pose and gait, kept as raw `f32` bits for byte parity
+    /// with the golden (see the module doc). Everything else is integer or
+    /// `Fixed`. An entry that no longer holds a float must be removed.
+    const PARITY_ITEMS: [&str; 5] = [
+        "pub struct Transform {",
+        "pub struct AnimState {",
+        "fn canon_zero(value: f32) -> f32 {",
+        "fn write_f32<H: Hasher>(state: &mut H, value: f32) {",
+        "fn read_f32(bytes: &[u8], pos: &mut usize) -> Result<f32, SpineError> {",
+    ];
+
+    /// Items that hold a float in `src`, sorted and deduplicated.
+    fn float_items(src: &str) -> Vec<String> {
+        let mut items: Vec<String> = float_sites(src).into_iter().map(|s| s.item).collect();
+        items.sort();
+        items.dedup();
+        items
+    }
+
+    #[test]
+    fn spine_module_holds_floats_only_in_the_parity_items() {
+        let mut want: Vec<String> = PARITY_ITEMS.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(
+            float_items(include_str!("spine.rs")),
+            want,
+            "a float outside the parity items (or a stale allowlist entry)"
+        );
+    }
+
+    #[test]
+    fn spine_schedule_and_views_hold_no_float_at_all() {
+        // The integer-ns step (`SpineCtx::dt_ns`) lives in the schedule file.
+        assert!(float_sites(include_str!("spine_schedule.rs")).is_empty());
+        assert!(float_sites(include_str!("views.rs")).is_empty());
+    }
+
+    #[test]
+    fn a_seeded_float_fails_the_gate() {
+        // The same checks the two tests above run, on sources with one float
+        // seeded in: each must now report it.
+        let seeded_field = include_str!("spine.rs").replace(
+            "    /// Capsule height in meters.
+    pub height: Fixed,",
+            "    /// Capsule height in meters.
+    pub height: Fixed,
+    pub mass: f32,",
+        );
+        assert_ne!(seeded_field, include_str!("spine.rs"), "seed must land");
+        assert!(float_items(&seeded_field).contains(&"pub struct Body {".to_string()));
+        let seeded_dt = format!(
+            "{}
+pub struct DtF32 {{
+    pub dt: f32,
+}}
+",
+            include_str!("spine_schedule.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or_default()
+        );
+        assert_eq!(
+            float_sites(&seeded_dt).last().map(|s| s.item.as_str()),
+            Some("pub struct DtF32 {")
+        );
+        let seeded_literal = "pub fn step() {
+    let half = 0.5;
+}
+";
+        assert_eq!(float_sites(seeded_literal).len(), 1);
+    }
 
     fn body() -> Body {
         Body {

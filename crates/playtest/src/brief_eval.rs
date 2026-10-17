@@ -162,6 +162,10 @@ pub struct EvalReport {
     pub suite_digest: u64,
     /// Simulated ticks behind the keypoint suite.
     pub suite_ticks: u64,
+    /// Spine rules with a passing spec, of `rules_total` (ARC11 map).
+    pub rules_covered: usize,
+    /// Spine rules in the rule-to-spec map.
+    pub rules_total: usize,
 }
 
 impl EvalReport {
@@ -407,6 +411,7 @@ pub fn run_report_with_break(
             broken,
         ));
     }
+    let (rules_covered, rules_total) = suite.rules_covered();
     Ok(EvalReport {
         version: REPORT_VERSION,
         briefs,
@@ -414,6 +419,8 @@ pub fn run_report_with_break(
         keypoints_total: suite.results.len(),
         suite_digest: suite.digest,
         suite_ticks: suite.sim_ticks,
+        rules_covered,
+        rules_total,
     })
 }
 
@@ -466,7 +473,9 @@ mod tests {
     fn keypoint_suite_shape_matches_vk1() {
         let suite = keypoint::run_suite().expect("suite runs");
         assert_eq!(suite.results.len(), keypoint::KEYPOINT_COUNT);
-        assert_eq!(suite.results.len(), 30);
+        // The 30 VK1 fork specs stay; ARC8/ARC11 add `spine_*` specs beside them.
+        let forks = suite.results.iter().filter(|r| r.id.starts_with("kp"));
+        assert_eq!(forks.count(), 30);
     }
 
     #[test]
@@ -487,6 +496,10 @@ mod tests {
         }
         let text = report.to_text();
         assert!(text.contains("keypoints"));
+        assert!(text.contains(&format!(
+            "spine rules covered={0}/{0}",
+            keypoint::SPINE_RULES.len()
+        )));
         assert!(text.contains("vision is advisory only"));
         let tsv = report.to_tsv();
         assert!(tsv.starts_with("id\tseed"));
@@ -532,6 +545,25 @@ mod tests {
         }
         assert_eq!(report.stage_passed(4), BRIEF_COUNT - 1);
         assert_eq!(report.replay_passed(), BRIEF_COUNT - 1);
+    }
+
+    #[test]
+    fn seeded_bad_brief_delta_is_positive_and_reproduces_twice() {
+        // AB14: a seeded bad stage lowers the pass count by exactly one and
+        // the broken report is identical on a second run.
+        let clean = run_report().expect("clean eval runs");
+        let broken =
+            || run_report_with_break(Some(("b01", BreakStage::Ab3))).expect("broken eval runs");
+        let first = broken();
+        assert_eq!(first, broken(), "broken report reproduces x2");
+        assert_eq!(clean.passed() - first.passed(), 1, "delta is exactly one");
+        assert!(!first.briefs[0].ab3_ok, "b01 is the seeded bad brief");
+    }
+
+    #[test]
+    fn empty_brief_is_refused_by_ab1() {
+        assert!(!ab1_level_ok(""), "empty brief must not clear AB1");
+        assert!(!ab1_level_ok("   \n\t"), "blank brief must not clear AB1");
     }
 
     #[test]

@@ -1,0 +1,1 @@
+id=fk4-cancel-opens-on-startup;claim=the jab cancels into the cross from its first active frame and not one frame before;kind=cancel;first_frame=4

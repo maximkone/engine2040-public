@@ -5,6 +5,7 @@
 pub mod bake;
 mod cursor;
 pub mod flow;
+pub mod funnel;
 pub mod links;
 pub mod mesh;
 pub mod rebake;

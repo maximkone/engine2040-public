@@ -41,7 +41,7 @@ const MAX_CENTER_M: f32 = 10_000.0;
 const MIN_HALF_EXTENT_M: f32 = 1e-4;
 const MAX_HALF_EXTENT_M: f32 = 10_000.0;
 /// Accepted chunk mass range; mass units.
-const MIN_MASS: f32 = 1e-6;
+pub(crate) const MIN_MASS: f32 = 1e-6;
 const MAX_MASS: f32 = 1e12;
 /// Bottom-layer tolerance when the crate helper picks anchors; meters.
 const ANCHOR_EPS_M: f32 = 1e-3;

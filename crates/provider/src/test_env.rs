@@ -34,3 +34,17 @@ pub(crate) fn remove(key: &str) {
     // SAFETY: as for `set`: std-only readers and a key owned by one test.
     unsafe { std::env::remove_var(key) };
 }
+
+/// The unsafe writes above round-trip through std's reader. This is the
+/// test Miri runs for them (CQ15): the socket-backed tests that use these
+/// helpers cannot run under Miri.
+#[test]
+fn set_then_remove_round_trips_through_std() {
+    const KEY: &str = "E2040_TEST_ENV_ROUND_TRIP";
+    set(KEY, "one");
+    assert_eq!(std::env::var(KEY).as_deref(), Ok("one"));
+    set(KEY, "two");
+    assert_eq!(std::env::var(KEY).as_deref(), Ok("two"));
+    remove(KEY);
+    assert_eq!(std::env::var(KEY), Err(std::env::VarError::NotPresent));
+}

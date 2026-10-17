@@ -39,7 +39,7 @@ use engine_render::present::{
 };
 use engine_render::v1;
 use engine_scene::ids::ObjectId;
-use engine_scene::transform::Transform;
+use engine_scene::transform::{quat_normalized, quat_rotate, Transform};
 
 use crate::a2_session::encode_png_rgba8;
 use crate::commands::Document;
@@ -455,32 +455,6 @@ fn node_mesh_key(id: ObjectId, world: Transform) -> MeshKey {
     MeshKey::new(mesh_id_of(id), pose_digest(id, world))
 }
 
-/// Unit quaternion, or identity when the input is degenerate: mirrors the
-/// scene hierarchy convention (kept private in `engine-scene`), so baked
-/// normals agree with [`Transform::to_matrix`] on the same pose.
-fn quat_normalized_bake(q: [f32; 4]) -> [f32; 4] {
-    let len_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
-    if !len_sq.is_finite() || len_sq < 1e-12 {
-        return [0.0, 0.0, 0.0, 1.0];
-    }
-    let len = len_sq.sqrt();
-    [q[0] / len, q[1] / len, q[2] / len, q[3] / len]
-}
-
-/// Rotate a vector by a unit quaternion: mirrors the scene convention, so
-/// the bake needs no new math owner.
-fn quat_rotate_bake(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
-    // t = 2 * cross(q.xyz, v); v' = v + q.w * t + cross(q.xyz, t).
-    let tx = 2.0 * (q[1] * v[2] - q[2] * v[1]);
-    let ty = 2.0 * (q[2] * v[0] - q[0] * v[2]);
-    let tz = 2.0 * (q[0] * v[1] - q[1] * v[0]);
-    [
-        v[0] + q[3] * tx + (q[1] * tz - q[2] * ty),
-        v[1] + q[3] * ty + (q[2] * tx - q[0] * tz),
-        v[2] + q[3] * tz + (q[0] * ty - q[1] * tx),
-    ]
-}
-
 /// Apply a row-major `T * R * S` matrix ([`Transform::to_matrix`] layout,
 /// translation in column 3) to a point.
 fn apply_matrix_bake(matrix: &[[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
@@ -503,10 +477,10 @@ fn bake_node_mesh(base: &v1::MeshData, world: Transform) -> Result<v1::MeshData,
     let mut positions = Vec::with_capacity(base_positions);
     let mut normals = Vec::with_capacity(base.normals.len());
     let matrix = world.to_matrix();
-    let rotation = quat_normalized_bake(world.rotation);
+    let rotation = quat_normalized(world.rotation);
     for (position, normal) in base.positions.iter().zip(base.normals.iter()) {
         positions.push(apply_matrix_bake(&matrix, *position));
-        normals.push(quat_rotate_bake(rotation, *normal));
+        normals.push(quat_rotate(rotation, *normal));
     }
     v1::upload_mesh(&positions, &normals, &base.uvs, &base.indices)
         .map_err(|error| EditorAppError::ViewportFailed(format!("baked stand-in: {error}")))

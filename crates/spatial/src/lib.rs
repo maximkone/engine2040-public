@@ -25,6 +25,8 @@ pub mod repair;
 pub mod sample;
 /// Whole-scene unit-mismatch detector: median object size vs layout extent.
 pub mod scale;
+/// CPU sense verbs in plain text: view, lidar, map and one pixel ray (SP69).
+pub mod sense_text;
 /// Sight and reach: line of sight, visibility, cover, reachability.
 pub mod sight;
 /// Repair-loop eval: ten seeded scenes through the repair loop.

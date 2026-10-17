@@ -1,0 +1,1 @@
+id=fk5-melee-reads;claim=at least 80 percent of melee poses from 1 to 6 meters separate both silhouettes and every pose holds both fighters in frame;kind=readability;min_share_percent=80

@@ -1,0 +1,67 @@
+name: miri
+
+# CQ15: undefined-behaviour check of the workspace's unsafe sites. The workspace lints `unsafe_code = "deny"`, so each
+# site is a reasoned `#[expect(unsafe_code)]`; tools/miri-sites.json lists every file with sites and the `cargo miri
+# test` line that runs it (or why Miri cannot: foreign code, Windows-only). `audit` fails when the source, that list and
+# this file disagree, and on any suppression (cfg(miri), -Zmiri- flags, MIRIFLAGS, continue-on-error). Each Miri leg is
+# one line of that list, run on nightly with Miri's default checks. Runs on pushes to the mirror's main, on pull
+# requests, and on a throwaway branch named miri-* (or workflow_dispatch). The private dev repo never runs it.
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, "miri-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  audit:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: miri-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: tests of the gate
+        run: node --test tools/miri-gate.test.mjs
+      - name: unsafe sites against the map and this workflow
+        run: node tools/miri-gate.mjs --list
+
+  miri:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: engine-core alloc_probe, cmd: "cargo miri test -p engine-core --lib alloc_probe" }
+          - { name: engine-ecs pool scope, cmd: "cargo miri test -p engine-ecs --lib job_pool_threads_scope" }
+          - { name: engine-provider test_env, cmd: "cargo miri test -p engine-provider --lib test_env" }
+    steps:
+      - uses: actions/checkout@v5
+      - name: install nightly with Miri
+        run: rustup toolchain install nightly --profile minimal --component miri --component rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: ${{ matrix.cmd }}
+        run: |
+          cargo miri setup
+          ${{ matrix.cmd }}

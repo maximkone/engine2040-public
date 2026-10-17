@@ -11,8 +11,9 @@
 use std::collections::BTreeMap;
 
 use engine_arena::{ArenaConfig, Checkpoint, FighterInput, FighterTape};
+use engine_core::diverge::first_divergence;
 
-use crate::agent::{decode_tape, scan_desync, BugFile};
+use crate::agent::{decode_tape, BugFile};
 
 /// One attributed input: the failing tape's entry at `(tick, fighter)` whose
 /// reset to the baseline entry removes the divergence.
@@ -67,7 +68,7 @@ pub fn attribute(
     if baseline_run.is_empty() || failing_run.is_empty() {
         return Err(CausalError::CorruptTape);
     }
-    let Some(divergent_tick) = scan_desync(&baseline_run, &failing_run) else {
+    let Some(divergent_tick) = first_divergence(&baseline_run, &failing_run) else {
         return Err(CausalError::NoFailureReproduces);
     };
     let (expected, observed) = hashes_at(&baseline_run, &failing_run, divergent_tick);
@@ -120,9 +121,9 @@ pub fn attribute_bug(bug: &BugFile) -> Result<CausalReport, CausalError> {
 
 /// Verify a clean replay of `failing` against `baseline` under `config`:
 /// resimulate both with [`engine_arena::run`] and name the first divergent
-/// tick with [`scan_desync`]. Units: fixed ticks. Deterministic: the same
+/// tick with [`first_divergence`]. Units: fixed ticks. Deterministic: the same
 /// config plus tapes twice gives the same result (sorted resimulation, no
-/// wall clock, no float). Returns `Ok(())` when [`scan_desync`] finds no
+/// wall clock, no float). Returns `Ok(())` when [`first_divergence`] finds no
 /// divergence; returns [`CausalError::NoFailureReproduces`] when the runs
 /// diverge (no clean result to report, so callers needing the tick use
 /// [`bisect_replay`]); corrupt configs, out-of-range tapes or empty runs
@@ -138,14 +139,14 @@ pub fn verify_replay(
     if baseline_run.is_empty() || failing_run.is_empty() {
         return Err(CausalError::CorruptTape);
     }
-    match scan_desync(&baseline_run, &failing_run) {
+    match first_divergence(&baseline_run, &failing_run) {
         None => Ok(()),
         Some(_) => Err(CausalError::NoFailureReproduces),
     }
 }
 
 /// Name the first tick whose hash leaves the recorded chain: resimulate
-/// both tapes with [`engine_arena::run`] and return the [`scan_desync`]
+/// both tapes with [`engine_arena::run`] and return the [`first_divergence`]
 /// tick. Units: fixed ticks. Deterministic: the same config plus tapes
 /// twice gives the same tick (sorted resimulation, no wall clock, no
 /// float). Returns [`CausalError::NoFailureReproduces`] when the runs agree;
@@ -162,7 +163,7 @@ pub fn bisect_replay(
     if baseline_run.is_empty() || failing_run.is_empty() {
         return Err(CausalError::CorruptTape);
     }
-    scan_desync(&baseline_run, &failing_run).ok_or(CausalError::NoFailureReproduces)
+    first_divergence(&baseline_run, &failing_run).ok_or(CausalError::NoFailureReproduces)
 }
 
 /// Printable one-line `replay.verify` verdict for a baseline/failing tape
@@ -349,7 +350,7 @@ mod tests {
         // Resetting the cause to baseline removes the divergence: the full
         // baseline run equals the perturbed run by construction of the check.
         let baseline_run = engine_arena::run(&match_config, &control);
-        assert_eq!(scan_desync(&baseline_run, &baseline_run), None);
+        assert_eq!(first_divergence(&baseline_run, &baseline_run), None);
         assert_eq!(attribute(&match_config, &control, &probe), Ok(causal));
     }
 

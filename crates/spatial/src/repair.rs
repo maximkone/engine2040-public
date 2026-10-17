@@ -17,12 +17,16 @@
 //!
 //! Std-only. Never imports scene or editor types.
 
+use super::checks::relation_cycle_finding;
 use super::index::{pos_known, size_known, to_cm};
 use super::navcheck::{DOOR_DOUBLE_CM, DOOR_FRAME_CM};
 use super::place::GRID_CM;
+use super::relation::{cycle_residuals_cm, smallest_cycle, Graph, Relation, SUPPORT_GAP_CM};
 use super::staged::{check_staged, StagedActor};
 use super::{Actor, Finding, Report};
-use std::collections::BTreeMap;
+use engine_core::Fnv64;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// World half-extent in cm. Mirrors the `bounds` red line: centers past
 /// this refuse instead of nudging further out.
@@ -677,6 +681,110 @@ pub fn repair_round(
         index += 1;
     }
     None
+}
+
+/// One cycle fixed by [`repair_cycles`]: the smallest cycle named in support-up
+/// form (smallest id first), the integer-cm residual of every measurable leg,
+/// and the one leg whose claims were dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CycleStep {
+    pub cycle: Vec<u32>,
+    pub residuals_cm: Vec<(u32, u32, i32)>,
+    pub dropped: (u32, u32),
+}
+
+/// Receipt of a cycle repair: the steps in order, whether the re-check of the
+/// repaired graph found no cycle, and an FNV-1a digest over the repaired graph
+/// plus the steps, equal for equal inputs on every platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CycleReceipt {
+    pub steps: Vec<CycleStep>,
+    pub clean: bool,
+    pub digest: u64,
+}
+
+/// Refusal for a proposed graph that holds a support cycle: names the smallest
+/// cycle as `a>b>c` and carries its ids as the sorted conflict set. `None` for
+/// an acyclic graph.
+pub fn cycle_refusal(graph: &Graph) -> Option<StructuredRefusal> {
+    let cycle = smallest_cycle(graph)?;
+    let named: Vec<String> = cycle.iter().map(|id| id.to_string()).collect();
+    Some(StructuredRefusal {
+        reason: format!("relation-cycle: {}", named.join(">")),
+        conflict_set: cycle
+            .into_iter()
+            .collect::<BTreeSet<u32>>()
+            .into_iter()
+            .collect(),
+    })
+}
+
+/// How far a leg's residual sits outside its healthy band, in cm; a leg the
+/// actors cannot measure counts as fully ungrounded.
+fn leg_badness(graph: &Graph, residuals: &[(u32, u32, i32)], from: u32, to: u32) -> i32 {
+    let Some((_, _, r)) = residuals.iter().find(|(a, b, _)| *a == from && *b == to) else {
+        return i32::MAX;
+    };
+    let inside_only = !graph.edges.contains(&(from, Relation::Supports, to))
+        && !graph.edges.contains(&(to, Relation::OnTopOf, from));
+    if inside_only {
+        (-*r).max(0)
+    } else {
+        (-*r).max(*r - SUPPORT_GAP_CM).max(0)
+    }
+}
+
+/// Repair every support cycle of a proposed relation graph and re-check it.
+///
+/// Consumer: the approved-repair flow, beside SP28 detection. While a cycle
+/// remains, the smallest one is named and the leg whose measured residual is
+/// farthest outside its healthy band loses its claims (ties go to the smaller
+/// id pair); unmeasurable legs go first. Integer only; the same edge set in any
+/// order gives the same steps and digest. The caller's graph is never changed:
+/// the repaired copy comes back with the receipt, whose `clean` re-runs
+/// `smallest_cycle` on that copy.
+pub fn repair_cycles(actors: &[Actor], graph: &Graph) -> (Graph, CycleReceipt) {
+    let mut out = graph.clone();
+    let mut steps = Vec::new();
+    while let Some(cycle) = smallest_cycle(&out) {
+        let residuals_cm = cycle_residuals_cm(actors, &out, &cycle);
+        let legs = cycle
+            .iter()
+            .enumerate()
+            .map(|(i, from)| (*from, cycle[(i + 1) % cycle.len()]));
+        let (from, to) = legs
+            .max_by_key(|(f, t)| (leg_badness(&out, &residuals_cm, *f, *t), Reverse((*f, *t))))
+            .unwrap_or((cycle[0], cycle[0]));
+        out.edges.retain(|e| {
+            *e != (from, Relation::Supports, to)
+                && *e != (to, Relation::OnTopOf, from)
+                && *e != (from, Relation::Inside, to)
+        });
+        steps.push(CycleStep {
+            cycle,
+            residuals_cm,
+            dropped: (from, to),
+        });
+    }
+    let mut h = Fnv64::new();
+    h.write_u64(super::relation::digest(&out));
+    for s in &steps {
+        for id in &s.cycle {
+            h.write_u32(*id);
+        }
+        h.write_u32(s.dropped.0);
+        h.write_u32(s.dropped.1);
+    }
+    let clean = relation_cycle_finding(&out).is_none();
+    let digest = h.finish();
+    (
+        out,
+        CycleReceipt {
+            steps,
+            clean,
+            digest,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1417,5 +1525,92 @@ mod tests {
         assert!(repair_round(&cur, &report.findings, 1, 3).is_none());
         assert!(repair_round(&cur, &report.findings, 1, 4).is_none());
         assert!(!super::super::run(&cur).findings.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::super::relation::{build, seeded_sp28_actors, with_support_ring};
+    use super::*;
+
+    /// 30 clean built graphs plus 30 one-ring graphs (ring ids slide with the
+    /// seed over the floor props 3..=8).
+    fn corpus() -> Vec<(Vec<Actor>, Graph, Option<[u32; 3]>)> {
+        let mut out = Vec::new();
+        for seed in 0..30u64 {
+            let actors = seeded_sp28_actors(seed);
+            let clean = build(&actors);
+            let a = 3 + (seed % 4) as u32;
+            out.push((actors.clone(), clean.clone(), None));
+            let ring = with_support_ring(&clean, a, a + 1, a + 2);
+            out.push((actors, ring, Some([a, a + 1, a + 2])));
+        }
+        out
+    }
+
+    #[test]
+    fn sixty_graphs_refuse_name_repair_and_recheck() {
+        let (mut detected, mut fp, mut named, mut clean_after) = (0, 0, 0, 0);
+        for (actors, graph, ring) in corpus() {
+            let refusal = cycle_refusal(&graph);
+            let Some(ring) = ring else {
+                fp += u32::from(refusal.is_some());
+                let (same, receipt) = repair_cycles(&actors, &graph);
+                assert!(receipt.steps.is_empty() && receipt.clean && same == graph);
+                continue;
+            };
+            let refusal = refusal.expect("injected ring must refuse");
+            detected += 1;
+            let want: Vec<String> = ring.iter().map(|id| id.to_string()).collect();
+            named += u32::from(
+                refusal.reason == format!("relation-cycle: {}", want.join(">"))
+                    && refusal.conflict_set == ring,
+            );
+            // Any edge order names and repairs the same way.
+            let mut shuffled = graph.clone();
+            shuffled.edges.reverse();
+            assert_eq!(cycle_refusal(&shuffled), Some(refusal));
+            let (fixed, receipt) = repair_cycles(&actors, &graph);
+            let (fixed2, receipt2) = repair_cycles(&actors, &shuffled);
+            assert_eq!(receipt, receipt2);
+            assert_eq!(
+                super::super::relation::digest(&fixed),
+                super::super::relation::digest(&fixed2)
+            );
+            assert_eq!(receipt.steps.len(), 1);
+            let step = &receipt.steps[0];
+            assert_eq!(step.cycle, ring);
+            assert_eq!(step.residuals_cm.len(), 3);
+            assert!(ring.contains(&step.dropped.0) && ring.contains(&step.dropped.1));
+            clean_after += u32::from(receipt.clean && cycle_refusal(&fixed).is_none());
+            assert!(fixed.edges.len() < graph.edges.len());
+        }
+        assert_eq!((detected, fp, named, clean_after), (30, 0, 30, 30));
+    }
+
+    #[test]
+    fn receipt_digest_is_stable_and_follows_the_repair() {
+        let actors = seeded_sp28_actors(7);
+        let ring = with_support_ring(&build(&actors), 3, 4, 5);
+        let (_, first) = repair_cycles(&actors, &ring);
+        let (_, second) = repair_cycles(&actors, &ring);
+        assert_eq!(first.digest, second.digest);
+        let other = with_support_ring(&build(&actors), 4, 5, 6);
+        assert_ne!(repair_cycles(&actors, &other).1.digest, first.digest);
+    }
+
+    #[test]
+    fn unmeasurable_leg_is_dropped_first() {
+        let mut actors = seeded_sp28_actors(2);
+        let lost = Actor {
+            x: f32::NAN,
+            ..actors[5].clone()
+        };
+        actors[5] = lost;
+        let ring = with_support_ring(&build(&actors), 3, 4, 5);
+        let (fixed, receipt) = repair_cycles(&actors, &ring);
+        assert_eq!(receipt.steps[0].dropped, (4, 5));
+        assert_eq!(receipt.steps[0].residuals_cm.len(), 1);
+        assert!(receipt.clean && cycle_refusal(&fixed).is_none());
     }
 }

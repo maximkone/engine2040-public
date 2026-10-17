@@ -25,6 +25,8 @@
 //! GPU (GPU, CPU, deferred or a configured remote), and [`LocalAdapter`]
 //! applies that decision on its request path.
 
+#![warn(missing_docs)]
+
 pub mod agent_loop;
 pub mod announce;
 pub mod anthropic;

@@ -85,10 +85,8 @@ pub(crate) fn to_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
-/// The one narrowing of an f64 result to the f32 a mesh stores.
-pub(crate) fn narrow(v: f64) -> f32 {
-    v as f32
-}
+// The one narrowing of an f64 result to the f32 a mesh stores.
+pub(crate) use engine_core::checked::f32_from_f64 as narrow;
 
 /// `i / n` as f64 (`n` of 0 counts as 1).
 pub(crate) fn frac(i: usize, n: usize) -> f64 {
@@ -98,7 +96,9 @@ pub(crate) fn frac(i: usize, n: usize) -> f64 {
 /// `count * ratio` rounded down (`ratio` in 0..=1).
 #[cfg(any(feature = "lod", feature = "uv"))]
 pub(crate) fn scaled_count(count: usize, ratio: f32) -> usize {
-    (f64::from(to_u32(count)) * f64::from(ratio)) as usize
+    let floor =
+        engine_core::checked::saturating_f64_to_u64(f64::from(to_u32(count)) * f64::from(ratio));
+    usize::try_from(floor).unwrap_or(usize::MAX)
 }
 
 impl GeoMesh {

@@ -105,12 +105,7 @@ impl Receipt {
 /// bytes (same algorithm, same canon); this helper exists so the receipt
 /// module needs no crate edge at all.
 pub fn fnv_hex(bytes: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in bytes {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
+    engine_core::hash_hex(bytes)
 }
 
 /// Emit the receipt as JSON-ish text: one object with `workflow`, `fixture`,

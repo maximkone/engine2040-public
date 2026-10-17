@@ -5,6 +5,7 @@
 //! plus one `mod <name>;` line below. Run one file with
 //! `cargo test -p engine-endpoint --test it <name>::`.
 
+mod collapse_fixtures;
 mod diagnostic_render_vectors;
 mod injection_door;
 mod jsonrpc_conformance_vectors;

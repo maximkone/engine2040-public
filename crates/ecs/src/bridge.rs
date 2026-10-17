@@ -7,6 +7,7 @@
 //! ids/versions refuse loudly.
 
 use crate::snapshot::{hash_bytes, restore, SnapshotError, SNAPSHOT_VERSION};
+use crate::spine::{Spine, SpineError, SpineSnapshot, MAX_SPINE_SLOTS};
 
 /// Wire version of the caller-encoded arena layout (see [`encode_arena`]).
 pub const ARENA_WIRE_VERSION: u16 = 1;
@@ -76,8 +77,7 @@ pub enum Domain {
 }
 
 impl Domain {
-    /// Digest tag byte for the test-only extraction digest.
-    #[cfg(test)]
+    /// Digest tag byte for the extraction digest.
     fn tag(self) -> u8 {
         match self {
             Self::Arena => 0,
@@ -106,28 +106,30 @@ pub struct Row {
 }
 
 /// One extraction frame: every ingested store read once, rows in stable
-/// order. Test-only until a real extraction consumer lands (no unconsumed
-/// public surface); the spine extraction re-exposes it with that caller,
-/// and render/audio/UI read it only then.
-#[cfg(test)]
+/// order. Its first consumer is the editor spine inspector
+/// (`engine-editor::spine_inspect`): it reads rows from spine bytes and never
+/// touches sim state.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ExtractionView {
-    /// Arena tick, or zero when no arena state was ingested.
-    pub(crate) tick: u32,
-    /// Checkpoint hash when arena state is present.
-    pub(crate) arena_hash: Option<u64>,
+pub struct ExtractionView {
+    /// Arena or spine tick, or zero when none was ingested.
+    pub tick: u32,
+    /// Checkpoint hash (arena) or spine snapshot hash (spine) when present.
+    pub arena_hash: Option<u64>,
     /// Rows in [`StableId`] order, whatever order ingestion happened in.
-    pub(crate) rows: Vec<Row>,
+    pub rows: Vec<Row>,
 }
 
-#[cfg(test)]
 impl ExtractionView {
     /// Row count.
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.rows.len()
     }
+    /// True when no store was ingested.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
     /// Row by stable id, `None` for unknown ids.
-    pub(crate) fn get(&self, id: StableId) -> Option<&Row> {
+    pub fn get(&self, id: StableId) -> Option<&Row> {
         self.rows
             .binary_search_by_key(&id, |row| row.id)
             .ok()
@@ -136,7 +138,7 @@ impl ExtractionView {
     /// FNV-1a64 over the canonical view (tick, arena hash, row count, then
     /// each row's id, domain tag, position bits, yaw bits and parent). Same
     /// inputs give the same digest in any ingest order.
-    pub(crate) fn digest(&self) -> u64 {
+    pub fn digest(&self) -> u64 {
         let mut out = Vec::with_capacity(16 + self.rows.len() * 38);
         out.extend_from_slice(&self.tick.to_le_bytes());
         out.extend_from_slice(&(self.rows.len() as u64).to_le_bytes());
@@ -190,12 +192,17 @@ pub enum BridgeError {
         /// Claimed row count.
         count: usize,
     },
-    /// ECS alive flag was not 0 or 1 (holds the found flag).
+    /// ECS or spine alive flag was not 0 or 1 (holds the found flag).
     BadFlag {
-        /// Always `"ecs"`.
+        /// `"ecs"` or `"spine"`.
         domain: &'static str,
         /// Flag byte found.
         flag: u8,
+    },
+    /// Snapshot bytes do not hash to the hash the snapshot carries.
+    BadHash {
+        /// Store layout being read.
+        domain: &'static str,
     },
     /// Scene node id was nil; nil is the "no parent" slot, not a node.
     NilId,
@@ -233,6 +240,9 @@ impl core::fmt::Display for BridgeError {
             }
             Self::BadFlag { domain, flag } => {
                 write!(f, "bridge {domain} snapshot bad alive flag {flag}")
+            }
+            Self::BadHash { domain } => {
+                write!(f, "bridge {domain} snapshot bytes do not match their hash")
             }
             Self::NilId => write!(f, "bridge scene node id must not be nil"),
             Self::NonFinite { domain } => {
@@ -414,6 +424,74 @@ impl Bridge {
         self.arena_hash = Some(hash);
         Ok(())
     }
+    /// Ingest a spine snapshot at `tick`: one arena-domain row per live slot
+    /// ([`StableId::arena`] of the slot), pose and yaw from the transform
+    /// column, and the snapshot hash as the view's state hash. Reads the
+    /// versioned bytes only, so the extraction never borrows sim state. Tick
+    /// skew against an earlier arena or spine ingest fails like
+    /// [`Bridge::ingest_arena`]; the same slot ids cannot ingest twice.
+    pub fn ingest_spine(&mut self, tick: u32, snapshot: &SpineSnapshot) -> Result<(), BridgeError> {
+        const DOMAIN: &str = "spine";
+        if hash_bytes(&snapshot.bytes) != snapshot.hash {
+            return Err(BridgeError::BadHash { domain: DOMAIN });
+        }
+        let spine = Spine::restore(&snapshot.bytes).map_err(|error| match error {
+            SpineError::TooShort => BridgeError::TooShort { domain: DOMAIN },
+            SpineError::BadVersion(got) => BridgeError::BadVersion {
+                domain: DOMAIN,
+                got,
+            },
+            SpineError::TooManySlots(count) => BridgeError::TooMany {
+                domain: DOMAIN,
+                count: count as usize,
+            },
+            SpineError::BadFlag(flag) => BridgeError::BadFlag {
+                domain: DOMAIN,
+                flag,
+            },
+            SpineError::Trailing(count) => BridgeError::Trailing {
+                domain: DOMAIN,
+                count,
+            },
+            SpineError::Full => BridgeError::TooMany {
+                domain: DOMAIN,
+                count: MAX_SPINE_SLOTS,
+            },
+        })?;
+        if let Some(expected) = self.tick {
+            if tick != expected {
+                return Err(BridgeError::TickSkew {
+                    got: tick,
+                    expected,
+                });
+            }
+        }
+        let mut fresh = Vec::with_capacity(spine.live());
+        for (slot, transform) in spine.transforms().iter().enumerate() {
+            if !spine.is_alive(slot) {
+                continue;
+            }
+            let [x, y, z] = transform.pos;
+            if !(x.is_finite() && y.is_finite() && z.is_finite() && transform.yaw.is_finite()) {
+                return Err(BridgeError::NonFinite { domain: DOMAIN });
+            }
+            let slot = u8::try_from(slot).map_err(|_| BridgeError::TooMany {
+                domain: DOMAIN,
+                count: slot,
+            })?;
+            fresh.push(Row {
+                id: StableId::arena(slot),
+                domain: Domain::Arena,
+                pos: [canon_zero(x), canon_zero(y), canon_zero(z)],
+                yaw: canon_zero(transform.yaw),
+                parent: None,
+            });
+        }
+        self.commit(fresh)?;
+        self.tick = Some(tick);
+        self.arena_hash = Some(snapshot.hash);
+        Ok(())
+    }
     /// Ingest caller-encoded scene bytes (see [`encode_scene`]).
     pub fn ingest_scene(&mut self, bytes: &[u8]) -> Result<(), BridgeError> {
         let fresh = parse_scene(bytes)?;
@@ -486,11 +564,7 @@ impl Bridge {
             .ok_or(BridgeError::UnknownId(id))
     }
     /// Snapshot-consistent extraction view: rows in [`StableId`] order.
-    /// Test-only: no reader outside this module's tests yet, so it stays out
-    /// of production builds until the spine extraction re-exposes it with a
-    /// real caller.
-    #[cfg(test)]
-    pub(crate) fn view(&self) -> ExtractionView {
+    pub fn view(&self) -> ExtractionView {
         ExtractionView {
             tick: self.tick.unwrap_or(0),
             arena_hash: self.arena_hash,
@@ -540,7 +614,7 @@ instead of position-only rows. None of that is free: it rewrites state paths acr
 arena, scene and ecs against 130+ ticked tasks of evidence, so it waits until bridge \
 pain (refusal gaps, id collisions, envelope skew) shows up in a consumer receipt. \
 First consumer: ARC6 spine extraction reads ExtractionView, never sim state; \
-until then the view stays test-only (SL12 slim law).";
+ARC6 landed that consumer: the view is public and the editor spine inspector reads it.";
 
 /// Normalize signed zero so `0.0` and `-0.0` digest identically.
 fn canon_zero(value: f32) -> f32 {
@@ -826,6 +900,116 @@ mod tests {
         assert_ne!(StableId::arena(0), StableId::ecs_index(0));
         assert_ne!(StableId::arena(0), StableId::scene(&[1; 16]));
         assert_ne!(StableId::ecs_index(0), StableId::scene(&[1; 16]));
+    }
+
+    /// A three-fighter spine at tick 41: slot 1 is killed, so it extracts
+    /// nothing; the snapshot is the only thing the bridge ever sees.
+    fn sample_spine() -> SpineSnapshot {
+        use crate::spine::{Body, Transform, Vitals};
+        let mut spine = Spine::with_capacity(3);
+        for (x, yaw) in [(1.0, 0.5), (-3.0, -1.0), (6.0, 2.0)] {
+            spine
+                .spawn(
+                    Transform {
+                        pos: [x, 0.0, -x],
+                        yaw,
+                    },
+                    Body::default(),
+                    Vitals {
+                        hp_permille: 1000,
+                        ..Vitals::default()
+                    },
+                )
+                .expect("slot is free");
+        }
+        assert!(spine.kill(1));
+        spine.snapshot()
+    }
+
+    /// ARC6 acceptance: the three-state extraction read, now over spine bytes.
+    #[test]
+    fn extraction_reads_all_three_states_from_spine_bytes() {
+        let (_, scene, ecs) = sample_inputs();
+        let spine = sample_spine();
+        let mut bridge = Bridge::new();
+        bridge.ingest_spine(41, &spine).expect("spine ingests");
+        bridge.ingest_scene(&scene).expect("scene ingests");
+        bridge.ingest_ecs(&ecs).expect("ecs ingests");
+        // Two live fighters, two scene nodes, two live ECS slots.
+        assert_eq!(bridge.len(), 6);
+
+        let view = bridge.view();
+        assert_eq!(view.tick, 41);
+        assert_eq!(view.arena_hash, Some(spine.hash));
+        let first = view.get(StableId::arena(0)).expect("spine slot 0");
+        assert_eq!(first.domain, Domain::Arena);
+        assert_eq!(first.pos, [1.0, 0.0, -1.0]);
+        assert_eq!(first.yaw, 0.5);
+        let third = view.get(StableId::arena(2)).expect("spine slot 2");
+        assert_eq!(third.pos, [6.0, 0.0, -6.0]);
+        // The killed slot extracts nothing; lookup refuses it loudly.
+        assert_eq!(
+            bridge.get(StableId::arena(1)).err(),
+            Some(BridgeError::UnknownId(StableId::arena(1)))
+        );
+        // The scene and ECS rows ride the same frame beside the spine.
+        assert!(view.get(StableId::scene(&[2; 16])).is_some());
+        assert!(view.get(StableId::ecs_index(2)).is_some());
+        // The same bytes always give the same frame, in any ingest order.
+        let mut reversed = Bridge::new();
+        reversed.ingest_ecs(&ecs).expect("ecs ingests");
+        reversed.ingest_scene(&scene).expect("scene ingests");
+        reversed.ingest_spine(41, &spine).expect("spine ingests");
+        assert_eq!(reversed.view().digest(), view.digest());
+    }
+
+    #[test]
+    fn spine_ingest_refuses_bad_bytes_and_skew_and_changes_nothing() {
+        let spine = sample_spine();
+        let mut bridge = Bridge::new();
+        bridge.ingest_spine(41, &spine).expect("spine ingests");
+        let before = bridge.view().digest();
+
+        let mut forged = sample_spine();
+        forged.hash ^= 1;
+        assert_eq!(
+            Bridge::new().ingest_spine(41, &forged).err(),
+            Some(BridgeError::BadHash { domain: "spine" })
+        );
+        let mut short = sample_spine();
+        short.bytes.truncate(3);
+        short.hash = hash_bytes(&short.bytes);
+        assert_eq!(
+            Bridge::new().ingest_spine(41, &short).err(),
+            Some(BridgeError::TooShort { domain: "spine" })
+        );
+        let mut stale = sample_spine();
+        stale.bytes[0] = 9;
+        stale.hash = hash_bytes(&stale.bytes);
+        assert_eq!(
+            Bridge::new().ingest_spine(41, &stale).err(),
+            Some(BridgeError::BadVersion {
+                domain: "spine",
+                got: 9
+            })
+        );
+        // A second frame on another tick is skew; the same tick repeats ids.
+        assert_eq!(
+            bridge.ingest_spine(42, &spine).err(),
+            Some(BridgeError::TickSkew {
+                got: 42,
+                expected: 41
+            })
+        );
+        assert_eq!(
+            bridge.ingest_spine(41, &spine).err(),
+            Some(BridgeError::DuplicateId(StableId::arena(0)))
+        );
+        assert_eq!(
+            bridge.view().digest(),
+            before,
+            "failed ingests change nothing"
+        );
     }
 
     #[test]

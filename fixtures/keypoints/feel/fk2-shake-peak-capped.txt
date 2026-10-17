@@ -1,0 +1,1 @@
+id=fk2-shake-peak-capped;claim=a hit shake peaks between 2.0 and 2.5 reference pixels and is gone after its twelve ticks;kind=shake_peak;min_milli=2000;max_milli=2500;ticks=12

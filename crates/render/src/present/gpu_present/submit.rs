@@ -673,7 +673,24 @@ impl Presenter {
         .map_err(|index| PresentError::InvalidDraw {
             index,
             reason: "unknown texture key".into(),
-        })
+        })?;
+        // VR2: a draw that names a normal map picks its material set (a few
+        // sets at most, so a short scan; draws with no map cost one push).
+        let sets = &self.map_sets;
+        self.draw_sets.clear();
+        for (index, item) in list.items.iter().enumerate() {
+            let choice = match &item.normal_map {
+                None => None,
+                Some(key) => Some(sets.iter().position(|set| set.key == *key).ok_or_else(|| {
+                    PresentError::InvalidDraw {
+                        index,
+                        reason: "unknown normal map key (no material set uploaded)".into(),
+                    }
+                })?),
+            };
+            self.draw_sets.push(choice);
+        }
+        Ok(())
     }
 
     /// Index of `key` in the resident bind list. The one scan of that list;
@@ -684,6 +701,9 @@ impl Presenter {
 
     /// Bind group chosen for draw `draw` by `resolve_draw_binds`.
     fn draw_bind(&self, draw: usize) -> Option<&wgpu::BindGroup> {
+        if let Some(Some(set)) = self.draw_sets.get(draw) {
+            return self.map_sets.get(*set).map(|set| &set.bind);
+        }
         match self.draw_binds.get(draw)? {
             Some(index) => self.texture_binds.get(*index).map(|(_, bind)| bind),
             None => Some(&self.fallback_bind),
@@ -1317,8 +1337,7 @@ impl Presenter {
                             at = at.saturating_add(4);
                         }
                     }
-                    let overlay_pipeline =
-                        super::live::live_overlay_pipeline(&self.device, OUTPUT_FORMAT);
+                    let overlay_pipeline = self.overlay_pipeline_for(OUTPUT_FORMAT);
                     self.encode_overlay(
                         &mut blit_enc,
                         Some(plan),
@@ -1978,6 +1997,7 @@ fn forward_pipeline_for(
     multisample: wgpu::MultisampleState,
     skinned: bool,
 ) -> wgpu::RenderPipeline {
+    use crate::pipeline_warmup::CountedPipelines as _;
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-forward-layout"),
         bind_group_layouts: &[Some(layout)],
@@ -1994,7 +2014,7 @@ fn forward_pipeline_for(
         // Stride matches `MeshData::vertex_bytes`: pos + normal + uv + tangent.
         ("vs", FORWARD_VERTEX_STRIDE, &STATIC_VERTEX_ATTRIBUTES)
     };
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some(if skinned {
             "ra1-forward-skinned-pipeline"
         } else {
@@ -2044,13 +2064,14 @@ pub(super) fn sky_pipeline(
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
 ) -> wgpu::RenderPipeline {
+    use crate::pipeline_warmup::CountedPipelines as _;
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-sky-layout"),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
     let targets = color_target_states(formats);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some("ra1-sky-pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
@@ -2085,12 +2106,13 @@ pub(super) fn blit_pipeline(
     layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    use crate::pipeline_warmup::CountedPipelines as _;
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-blit-layout"),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some("ra1-blit-pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {

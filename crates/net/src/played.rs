@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use engine_arena::{run, run_events, ArenaConfig, Checkpoint};
+use engine_arena::{run, run_events, ArenaConfig, Checkpoint, LiveMatch};
 use engine_core::fixed::Fixed;
 use engine_core::{mix64, Fnv64};
 use engine_input::fighter::{Buttons, ATTACK, BLOCK};
@@ -29,8 +29,8 @@ use crate::relay::RelayError;
 use crate::scale::{human_dwell, human_wish, RESIM_CAP_TICKS};
 use crate::session::{
     decode_input, decode_state, encode_input, encode_state, redundancy_window, resync_packets,
-    BodyId, BodyInput, BodyTape, Client, NetError, SnapshotDelta, MAX_INPUTS_PER_PACKET,
-    REDUNDANCY, WIRE_MAGIC, WIRE_VERSION,
+    tick_slice, BodyId, BodyInput, BodyTape, Client, NetError, SnapshotDelta,
+    MAX_INPUTS_PER_PACKET, REDUNDANCY, WIRE_MAGIC, WIRE_VERSION,
 };
 
 /// Human seats in a bout: the first two lobby slots, the rest are AI fill.
@@ -62,6 +62,9 @@ pub const RESYNC_WAIT_STEPS: u32 = 60;
 pub const STATE_COVER: usize = 8;
 /// Rollback histogram buckets: one per tick, the last holds everything deeper.
 pub const ROLLBACK_BUCKETS: usize = 33;
+/// Ticks each [`BoutReport::sync_test`] window rewinds and replays (GGRS
+/// SyncTest style; the GGRS default is unverified).
+pub const SYNC_CHECK_DISTANCE: u32 = 7;
 /// Inputs for ticks this far past the server cursor are refused (flood guard).
 const MAX_AHEAD_TICKS: u32 = 64;
 
@@ -831,6 +834,19 @@ pub struct FightLedger {
     pub per_second: Vec<u32>,
 }
 
+/// What [`BoutReport::sync_test`] found.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SyncTestReport {
+    /// Ticks rewound and replayed per window.
+    pub distance: u32,
+    /// Replayed checkpoints compared with the server's.
+    pub checked: u32,
+    /// Compared checkpoints that disagreed.
+    pub mismatches: u32,
+    /// Lowest tick that disagreed; `None` when every checkpoint matched.
+    pub first_mismatch: Option<u32>,
+}
+
 /// The verdict and every posted number of one bout.
 #[derive(Clone, PartialEq, Debug)]
 pub struct BoutReport {
@@ -846,6 +862,8 @@ pub struct BoutReport {
     pub tape_len: usize,
     /// Hash of that tape's canonical bytes.
     pub tape_hash: u64,
+    /// The authoritative human inputs, `(tick, fighter)`-sorted.
+    pub tape: Vec<BodyInput>,
     /// The tape replays to the server's checkpoints, tick for tick.
     pub replay_equal: bool,
     /// Both seats.
@@ -881,6 +899,62 @@ impl BoutReport {
             && self.host.stalled_at.is_some()
             && self.host.reclaimed_at.is_some()
             && dropped.stats.granted
+    }
+
+    /// GGRS-style SyncTest over the played tape: after every tick, rewind
+    /// `distance` ticks to a snapshot, replay the authoritative inputs and
+    /// compare each replayed checkpoint with the server's. Any mismatch is a
+    /// determinism bug, never a tolerance; the report names the lowest tick.
+    ///
+    /// # Errors
+    ///
+    /// [`BoutError::BadConfig`] when `distance` is zero or the arena cannot
+    /// snapshot (the bout plays the v1 rules, which can).
+    pub fn sync_test(&self, distance: u32) -> Result<SyncTestReport, BoutError> {
+        if distance == 0 {
+            return Err(BoutError::BadConfig("distance"));
+        }
+        let arena = self.config.arena();
+        let mut main = LiveMatch::new(&arena).ok_or(BoutError::BadConfig("arena"))?;
+        let mut trail = LiveMatch::new(&arena).ok_or(BoutError::BadConfig("arena"))?;
+        let mut report = SyncTestReport {
+            distance,
+            checked: 0,
+            mismatches: 0,
+            first_mismatch: None,
+        };
+        let mut compare = |tick: u32, got: Checkpoint| {
+            report.checked += 1;
+            if self.checkpoints.get(tick as usize) != Some(&got) {
+                report.mismatches += 1;
+                report.first_mismatch = report
+                    .first_mismatch
+                    .map_or(Some(tick), |t| Some(t.min(tick)));
+            }
+        };
+        for tick in 0..self.config.ticks {
+            let step = main
+                .step(tick_slice(&self.tape, tick))
+                .ok_or(BoutError::BadConfig("tape"))?;
+            compare(tick, step.checkpoint);
+            if tick + 1 < distance {
+                continue;
+            }
+            let snapshot = trail.snapshot().ok_or(BoutError::BadConfig("snapshot"))?;
+            let mut replay =
+                LiveMatch::from_snapshot(snapshot).ok_or(BoutError::BadConfig("snapshot"))?;
+            for at in trail.tick()..=tick {
+                let step = replay
+                    .step(tick_slice(&self.tape, at))
+                    .ok_or(BoutError::BadConfig("tape"))?;
+                compare(at, step.checkpoint);
+            }
+            let at = trail.tick();
+            trail
+                .step(tick_slice(&self.tape, at))
+                .ok_or(BoutError::BadConfig("tape"))?;
+        }
+        Ok(report)
     }
 
     /// Fold every deterministic number into one digest: two runs of the same
@@ -1298,6 +1372,7 @@ fn finish(
         server_tip: truth.last().copied().unwrap_or(NO_CHECKPOINT),
         tape_len: tape.len(),
         tape_hash: engine_core::hash_bytes(&bytes),
+        tape,
         replay_equal,
         seats: [seat_report(seats[0]), seat_report(seats[1])],
         host: host.ledger,
@@ -1371,6 +1446,46 @@ mod tests {
         assert!(report.fight.before_drop > 0, "{report}");
         assert!(report.fight.after_rejoin > 0, "{report}");
         assert!(report.tape_len > 0);
+    }
+
+    #[test]
+    fn played_sync_test_at_distance_7_finds_no_mismatch_on_three_tapes() {
+        // QN11: after every tick rewind 7 ticks, replay the played tape and
+        // compare each replayed checkpoint with the server's. Three bouts
+        // over the fault profiles, each checked twice.
+        for (seed, profile) in [
+            (2040, LinkProfile::LAN),
+            (7, LinkProfile::WAN),
+            (99, LinkProfile::WAN),
+        ] {
+            let cfg = short(seed, profile);
+            let report = run_loopback(&cfg, profile, profile).expect("bout runs");
+            assert!(report.tape_len > 0 && report.tape.len() == report.tape_len);
+            let first = report.sync_test(SYNC_CHECK_DISTANCE).expect("sync test");
+            let again = report.sync_test(SYNC_CHECK_DISTANCE).expect("sync test");
+            println!("sync-test seed={seed} {first:?}");
+            assert_eq!(first, again, "same tape, same sync report");
+            assert_eq!(first.mismatches, 0, "seed {seed}: {first:?}");
+            assert_eq!(first.first_mismatch, None);
+            let windows = cfg.ticks - SYNC_CHECK_DISTANCE + 1;
+            assert_eq!(first.checked, cfg.ticks + windows * SYNC_CHECK_DISTANCE);
+        }
+    }
+
+    #[test]
+    fn played_sync_test_names_the_first_wrong_tick() {
+        let cfg = short(2040, LinkProfile::LAN);
+        let mut report = run_loopback(&cfg, LinkProfile::LAN, LinkProfile::LAN).expect("bout");
+        assert_eq!(
+            report.sync_test(0),
+            Err(BoutError::BadConfig("distance")),
+            "a zero distance checks nothing"
+        );
+        report.checkpoints[200].hash ^= 1;
+        report.checkpoints[150].hash ^= 1;
+        let found = report.sync_test(SYNC_CHECK_DISTANCE).expect("sync test");
+        assert_eq!(found.first_mismatch, Some(150));
+        assert!(found.mismatches >= 2, "{found:?}");
     }
 
     #[test]

@@ -137,9 +137,7 @@ fn invalid_params_is_error_and_forged_stale_stay_transport_err() {
     // with the INVALID_PARAMS code and a decodable machine code.
     for code in ["forged_approval", "stale_revision"] {
         let tool = McpToolError::new(code, format!("{code} refuses the probe; re-read first"));
-        let wire = RpcError::from(tool);
-        let outcome: Result<CallToolResult, ErrorData> = Err(ErrorData::from(wire.clone()));
-        let refusal = outcome.expect_err("door refusals stay transport Err");
+        let refusal = ErrorData::from(RpcError::from(tool));
         assert_eq!(
             refusal.code,
             ErrorCode::INVALID_PARAMS,
