@@ -79,7 +79,9 @@ pub fn pipeline_multisample(config: &MsaaConfig) -> wgpu::MultisampleState {
 /// (`From`, never `as`); the narrowing cast is safe because the f64 sum of 4
 /// finite f32 values divided by 4 stays within f32 range, so the result stays
 /// finite (float-to-float has no `From` to use). Same shape as the fog-feed
-/// mean in `submit.rs`.
+/// mean in `submit.rs`. Test-only: no production path resolves on the CPU
+/// (the GPU pass averages through its view/resolveTarget pair).
+#[cfg(test)]
 #[must_use]
 pub fn resolve_average(samples: [f32; 4]) -> f32 {
     let sum = f64::from(samples[0])
@@ -91,6 +93,7 @@ pub fn resolve_average(samples: [f32; 4]) -> f32 {
 
 /// Box-resolve one RGBA texel: per-channel [`resolve_average`]. Pure: same
 /// quad gives the same texel twice.
+#[cfg(test)]
 #[must_use]
 pub fn resolve_rgba(samples: [[f32; 4]; 4]) -> [f32; 4] {
     [
@@ -104,6 +107,7 @@ pub fn resolve_rgba(samples: [[f32; 4]; 4]) -> [f32; 4] {
 /// True when the resolved quad value sits strictly between 0 and 1: the edge
 /// oracle for the Accept test (on-path quads blend, off-path quads stay
 /// stepped). Pure.
+#[cfg(test)]
 #[must_use]
 pub fn resolved_is_intermediate(quad: [f32; 4]) -> bool {
     let value = resolve_average(quad);

@@ -144,8 +144,8 @@ fn all_finite_3(field: &'static str, xs: &[[f32; 3]]) -> Result<(), MeshError> {
     Ok(())
 }
 
-/// Tangents are owned by `engine-assets` (ARCHITECTURE C3): [`upload_mesh`] calls
-/// `engine_assets::import_repair::recompute_tangents`; no local mirror.
+// Tangents are owned by `engine-assets` (ARCHITECTURE C3): `upload_mesh` calls
+// `engine_assets::import_repair::recompute_tangents`; no local mirror.
 
 /// Validate and pack parallel arrays plus indices into a [`MeshData`].
 /// Rejects empty meshes, length mismatches, out-of-range indices,
@@ -1216,9 +1216,11 @@ impl Manifest {
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),
                 c if (c as u32) < 0x20 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
+                    use std::fmt::Write as _;
+                    // A write into a `String` cannot fail.
+                    let _ = write!(out, "\\u{:04x}", c as u32);
                 }
-                c => out.push({ c }),
+                c => out.push(c),
             }
         }
     }

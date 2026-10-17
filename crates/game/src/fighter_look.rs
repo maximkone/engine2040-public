@@ -22,8 +22,8 @@ use std::time::Instant;
 
 use engine_anim::contract::{skinning_matrices, LocalPose, Skeleton};
 use engine_anim::hit_react::{envelope, DIP_M, PEAK_M};
-use engine_anim::pose::{blend_poses, sample_pose_with_rots};
-use engine_anim::state_machine::FIGHTER_CROSSFADE_TICKS;
+use engine_anim::inertial::Inertial;
+use engine_anim::pose::sample_pose_with_rots;
 use engine_arena::GaitPhase;
 use engine_assets::body_import::{
     import_clip_source, import_skinned_body, ClipSource, SkinnedBody,
@@ -50,6 +50,15 @@ use crate::weapon_trail::{TrailPoint, TrailRing};
 mod fighter_look_acts;
 
 use self::fighter_look_acts::{bridge_act, bridge_slots};
+
+/// Inertialized clip switches (LF9): the per-slot offset sets, the switch
+/// fold and the frame read. Presentation only.
+#[path = "fighter_look_inertia.rs"]
+mod fighter_look_inertia;
+
+/// Real-body proofs for the sand rest and the hitstop hold (a test-only file).
+#[path = "fighter_look_proofs.rs"]
+mod fighter_look_proofs;
 
 /// Mesh id base for skinned body parts (clear of the cube, dressing, kit
 /// and staged-box keys): `base + slot * 16 + part`.
@@ -94,12 +103,11 @@ const BALANCE_FALLEN_PELVIS_M: f32 = 0.25;
 const BALANCE_CATCH_PELVIS_M: f32 = 0.45;
 /// Forward lean for a stumbling slot in meters (EG45). Presentation only.
 const BALANCE_STUMBLE_LEAN_M: f32 = 0.18;
-/// Largest sand lift in meters (LF17, view only): the fallen pelvis (EG45)
-/// puts the upright start of the death clip about 56 cm under the sand, so
-/// the cap sits above any body height and never clips a real sink.
+/// Largest sand shift in meters, up or down (LF17, view only): the fallen
+/// pelvis (EG45) puts the start of the death clip about 70 cm under the sand
+/// and its rest pose hovers about 10 cm over it, so the cap sits above both
+/// and still stops a bad pose from flying or diving.
 const SAND_LIFT_MAX_M: f32 = 1.0;
-/// Fall ticks to reach the sand (LF17, view only): 30 at 60 Hz.
-const SAND_FALL_TICKS: u32 = 30;
 /// View-only shake added per in-reach Hit, in permille (LF11, view only).
 /// Presentation only; the sim hash never reads it.
 const SHAKE_HIT_PERMILLE: u32 = 400;
@@ -212,6 +220,10 @@ struct Rig {
 struct SlotAnim {
     act: Act,
     act_start: u32,
+    /// The bridge's fade, mirrored in step with it: the leaving clip, its
+    /// frozen time and the ticks left. Since LF9 the pose reads none of it (a
+    /// clip switch rides on the `iz_age` offsets); the wire test and the
+    /// hitstop hold proof pin the mirror.
     prev_clip: usize,
     prev_time: f32,
     fade_left: u32,
@@ -225,6 +237,11 @@ struct SlotAnim {
     /// Planar meters per tick, set beside the speed pick in `fold_acts`.
     /// Presentation only; never enters the tick hash.
     run_speed: f32,
+    /// Seconds of run clip played when the run act's current tick began: a
+    /// phase summed tick by tick at each tick's own rate, so a speed change
+    /// bends the stride rate and never moves the phase. Zero outside the run
+    /// act. Presentation only; never enters the tick hash.
+    run_phase_s: f32,
     /// Integer balance gait for the look (EG45): steady reads as before,
     /// stumbling leans, fallen lies flat, catching kneels. Presentation
     /// only; the sim digest never reads this.
@@ -235,6 +252,15 @@ struct SlotAnim {
     /// World-space planar push away from the attacker at `hit_start`,
     /// unit length or zero. Presentation only.
     hit_push: [f32; 2],
+    /// True while the sim's hitstop holds this slot's pose (LF10): the clip
+    /// clock, the blend, the flinch and the facing stand still, and every
+    /// frame of the freeze samples the pose of its tick. Presentation only.
+    held: bool,
+    /// Free ticks since the last clip switch started its inertial offsets
+    /// (LF9); [`fighter_look_inertia::NO_OFFSET`] when none is in flight. The
+    /// clock runs with the clip clock, so a held slot's age stands still.
+    /// Presentation only.
+    iz_age: u32,
 }
 
 impl SlotAnim {
@@ -253,22 +279,59 @@ impl SlotAnim {
             flash_until: 0,
             seen: false,
             run_speed: 0.0,
+            run_phase_s: 0.0,
             balance: GaitPhase::Steady,
             hit_start: u32::MAX,
             hit_push: [0.0, 0.0],
+            held: false,
+            iz_age: fighter_look_inertia::NO_OFFSET,
         }
+    }
+
+    /// Carry the run clip's phase over `ticks` ticks at the rate this slot's
+    /// recorded speed gives: the speed it showed over the ticks that ended.
+    /// Any other act has no run phase to carry. Pure; no allocation.
+    fn march_run_phase(&mut self, ticks: u32) {
+        if self.act == Act::Run {
+            let ticks = f32::from(u16::try_from(ticks).unwrap_or(u16::MAX));
+            self.run_phase_s += ticks / TICK_HZ * run_phase_scale(self.run_speed);
+        }
+    }
+
+    /// Run clip seconds `alpha` ticks into this slot's tick: the carried
+    /// phase plus that share of the tick at the tick's own rate. Never
+    /// negative, so a look back from before the run began reads its first
+    /// frame.
+    fn run_clip_s(&self, alpha: f32) -> f32 {
+        (self.run_phase_s + alpha / TICK_HZ * run_phase_scale(self.run_speed)).max(0.0)
     }
 }
 
 /// Playback scale for the run clip from planar speed: speed over
 /// [`RUN_REF_M_PER_TICK`], clamped to half through double rate. Pure
-/// function of speed, so the same tick plus the same speed gives the
-/// same clip time. Non-finite speeds hold the authored rate.
+/// function of speed; the run phase sums one scale per tick
+/// ([`SlotAnim::march_run_phase`]), so a changed speed changes the stride
+/// rate and the phase stays put. Non-finite speeds hold the authored rate.
 fn run_phase_scale(speed_m_per_tick: f32) -> f32 {
     if !speed_m_per_tick.is_finite() {
         return 1.0;
     }
     (speed_m_per_tick / RUN_REF_M_PER_TICK).clamp(0.5, 2.0)
+}
+
+/// Sub-tick alpha for the clip clock (LF10): a held slot samples the end of
+/// its tick on every frame of the freeze, so no frame between two sim ticks
+/// plays on. The end of the tick is where the last free frame stopped and
+/// where the first free frame after the freeze starts, so the pose neither
+/// rewinds going in nor jumps coming out. Position and facing keep the
+/// caller's alpha; a held slot's do not move. Pure.
+#[must_use]
+fn clip_alpha(slot: &SlotAnim, alpha: f32) -> f32 {
+    if slot.held {
+        1.0
+    } else {
+        alpha
+    }
 }
 
 /// Pelvis height for one balance gait (EG45): steady and stumbling keep
@@ -300,47 +363,33 @@ fn balance_lean_m(gait: GaitPhase) -> f32 {
     }
 }
 
-/// Full below-sand depth, clamped `0.0..=SAND_LIFT_MAX_M` (LF17, view only).
-/// Pure `f32` in/out; non-finite or above sand reads as 0, never lowers.
+/// Shift that rests a body's lowest vertex on the sand (LF17, view only): the
+/// depth below the sand lifts it, a hover above the sand lowers it, clamped to
+/// `-SAND_LIFT_MAX_M..=SAND_LIFT_MAX_M`. Pure `f32` in/out; a non-finite
+/// height reads as 0.
 #[must_use]
-fn sand_lift_m(lowest_y: f32) -> f32 {
+fn sand_rest_shift_m(lowest_y: f32) -> f32 {
     if !lowest_y.is_finite() {
         return 0.0;
     }
-    (crate::view_truth::GROUND_Y - lowest_y).clamp(0.0, SAND_LIFT_MAX_M)
+    (crate::view_truth::GROUND_Y - lowest_y).clamp(-SAND_LIFT_MAX_M, SAND_LIFT_MAX_M)
 }
 
-/// Eased down lift (LF17, view only): full depth times smoothstep age over
-/// `SAND_FALL_TICKS`. Age 0 gives 0, rest gives full depth within 1 cm.
+/// Full below-sand depth, clamped `0.0..=SAND_LIFT_MAX_M` (LF17, view only).
+/// Pure `f32` in/out; non-finite or above sand reads as 0, never lowers. The
+/// joints-only pose uses it: its padded bounds sit under the true vertices,
+/// so a hover read from them would be false.
 #[must_use]
-fn sand_lift_eased(lowest_y: f32, down_age_ticks: u32) -> f32 {
-    let full = sand_lift_m(lowest_y);
-    if full <= 0.0 {
-        return 0.0;
-    }
-    if down_age_ticks >= SAND_FALL_TICKS {
-        return full;
-    }
-    let denom = f32::from(u16::try_from(SAND_FALL_TICKS).unwrap_or(u16::MAX));
-    let age = f32::from(u16::try_from(down_age_ticks).unwrap_or(u16::MAX));
-    let t = (age / denom).clamp(0.0, 1.0);
-    full * t * t * (3.0 - 2.0 * t)
+fn sand_lift_m(lowest_y: f32) -> f32 {
+    sand_rest_shift_m(lowest_y).max(0.0)
 }
 
-/// Down-only rest lift for one slot (LF17, view only): eased depth for `Down`
-/// or `Fallen`, else 0, so idle hover stays on its own law. View only.
+/// True for a body that lies on the sand: the death clip (`Down`) or the sim's
+/// `Fallen` verdict. Only these rest by their lowest vertex; a standing body
+/// keeps the height its clip gives it (LF17, view only).
 #[must_use]
-fn down_rest_lift(slot: &SlotAnim, tick: u32, lowest_y: f32, has_bounds: bool) -> f32 {
-    if !has_bounds {
-        return 0.0;
-    }
-    if slot.act == Act::Down {
-        sand_lift_eased(lowest_y, tick.saturating_sub(slot.act_start))
-    } else if slot.balance == GaitPhase::Fallen {
-        sand_lift_m(lowest_y)
-    } else {
-        0.0
-    }
+fn lies_on_sand(slot: &SlotAnim) -> bool {
+    slot.act == Act::Down || slot.balance == GaitPhase::Fallen
 }
 
 /// Whole microseconds of wall clock, saturating. Evidence only: the fighter
@@ -365,7 +414,7 @@ pub struct SkinSplit {
     /// Parts the frame's draws read this call: one per part with finite
     /// posed vertices, whether it was written or already resident.
     pub uploaded: usize,
-    /// `uploaded`'s CPU half: clip sample, skin, pose fold, the down lift and
+    /// `uploaded`'s CPU half: clip sample, skin, pose fold, the sand rest and
     /// the upload digest ([`FighterLook::pose_frame`] plus the per-part fold).
     pub pose_us: u64,
     /// `uploaded`'s GPU half: the staged value plus `Presenter::upload_mesh`
@@ -424,7 +473,7 @@ fn slot_is_gpu_skinned(presenter: &Presenter, slot_index: usize, rig: &Rig) -> b
         })
 }
 
-/// The GPU-skin frame write for one slot: its joint matrices (down lift
+/// The GPU-skin frame write for one slot: its joint matrices (sand rest
 /// folded in) into the slot's block, nothing else. The `parts` count reads
 /// as uploaded (they are resident and drawn); the single block write is the
 /// frame's whole upload half. A refusal (a non-finite matrix) is loud.
@@ -445,7 +494,7 @@ fn write_slot_skin(
     })
 }
 
-/// Upload one slot's skinned parts with the down lift applied (LF17, view
+/// Upload one slot's skinned parts with the sand rest applied (LF17, view
 /// only): lifted positions for the draw, normals ride unchanged, tangents
 /// recomputed from the lifted positions plus UVs. The GPU vertex is 48 B
 /// (pos + normal + uv + tangent, `MeshData::vertex_bytes`); the in-place
@@ -481,7 +530,7 @@ fn upload_slot_parts(
         // never change). Hashing rides the lift pass, so a changed frame pays
         // one pass over the vertices it already touches.
         let mut hasher = Fnv64::new();
-        let lifted: Vec<[f32; 3]> = if lift > 0.0 {
+        let lifted: Vec<[f32; 3]> = if lift != 0.0 {
             let mut out = Vec::with_capacity(posed.positions.len());
             for position in &posed.positions {
                 let moved = [position[0], position[1] + lift, position[2]];
@@ -533,11 +582,11 @@ fn upload_slot_parts(
     Ok(split)
 }
 
-/// Note: the authoritative read is `engine-arena` `Sim::balance` (already
-/// landed with EG34) via `LiveMatch::balance`; the window polls it each
-/// tick through [`FighterLook::observe_live_balances`]. The cue mirror
-/// (`Hit` stumbles, `Knockdown` floors) stays for the same-tick swing
-/// start, so the same blows lean the same roots.
+// Note: the authoritative read is `engine-arena` `Sim::balance` (already
+// landed with EG34) via `LiveMatch::balance`; the window polls it each
+// tick through `FighterLook::observe_live_balances`. The cue mirror
+// (`Hit` stumbles, `Knockdown` floors) stays for the same-tick swing
+// start, so the same blows lean the same roots.
 
 /// Camera shot for the fight camera.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -586,6 +635,7 @@ pub fn shot_for_frame(frame: u32, frames: Option<u32>, directed: bool) -> Shot {
 /// Whether a world point lands in `camera`'s picture: in front of the near
 /// plane and inside the field of view. False for a camera that cannot build
 /// a view.
+#[cfg(test)]
 fn in_picture(camera: &Camera, at: [f32; 3]) -> bool {
     count_in_picture(camera, std::iter::once(at)) == 1
 }
@@ -765,7 +815,7 @@ fn wide_group_camera(
     let mut whole: Option<(f32, Camera)> = None;
     let mut part: Option<(usize, Camera)> = None;
     for orbit in 0..WIDE_ORBITS {
-        let steps = f32::from((orbit + 1) / 2);
+        let steps = f32::from(orbit.div_ceil(2));
         let side = if orbit % 2 == 1 { steps } else { -steps };
         let azimuth = wanted + side * std::f32::consts::FRAC_PI_8;
         let room = pit_room(focus, azimuth, limit).min(WIDE_MAX_M);
@@ -841,6 +891,10 @@ pub struct FighterLook {
     /// re-uploads whole (48 B stride, never a 32 B refresh). Presentation
     /// only; never hashed and never drawn.
     uploaded_digest: Vec<Option<u64>>,
+    /// One inertial offset set per look slot (LF9), sized to that slot's rig
+    /// and built once at load: a clip switch writes it, every frame reads it.
+    /// Empty for a look with no rigs. Presentation only; never hashed.
+    inertia: Vec<Inertial>,
 }
 
 /// One upload-digest slot per `slot * MAX_PARTS + part`, all empty: the
@@ -848,6 +902,15 @@ pub struct FighterLook {
 /// the test literals that spell the struct out.
 fn empty_upload_digest() -> Vec<Option<u64>> {
     vec![None; MAX_LOOK_FIGHTERS * MAX_PARTS]
+}
+
+/// Variant index for a slot among `rigs` variants: the hero on variant 0,
+/// opponents cycle through the rest. The one owner of the slot-to-rig rule.
+fn rig_index(rigs: usize, slot: usize) -> usize {
+    if slot == 0 || rigs < 2 {
+        return 0;
+    }
+    1 + (slot - 1) % (rigs - 1)
 }
 
 /// Fighters content dir (`content/fighters`), resolved like the kit dir:
@@ -928,7 +991,7 @@ fn skin_radius_m(body: &SkinnedBody) -> f32 {
 /// every posed vertex plus the farthest vertex gap from it, or `None` when no
 /// finite vertex folds in. This is the bound a draw carries, so culling
 /// follows the pose and a limb the bind pose never had stays inside it
-/// (Eberly 3.2); the vertices ride the body's down-rest lift like the drawn
+/// (Eberly 3.2); the vertices ride the body's sand rest like the drawn
 /// mesh does. Meters in, meters out, no heap, and the same frames give the
 /// same bound bytes twice.
 fn posed_bound_m(body: &PosedBody) -> Option<([f32; 3], f32)> {
@@ -1174,6 +1237,8 @@ struct PosedBody {
     /// lift already in their translation row: the GPU skin path writes them
     /// as the body's one joint block, the frames above only feed the bounds.
     matrices: Vec<[[f32; 4]; 4]>,
+    /// Sand rest in meters (LF17): positive lifts a sunk dead body, negative
+    /// lowers a hovering one, zero for every standing body.
     lift: f32,
     /// Bound this draw carries in world meters: the posed-vertex bound
     /// ([`posed_bound_m`]) floored at the rig's bind radius, so a cull reads
@@ -1234,6 +1299,7 @@ impl FighterLook {
         {
             swing_ticks += 1;
         }
+        let inertia = fighter_look_inertia::slot_sets(&rigs)?;
         Ok(Self {
             rigs,
             ring: None,
@@ -1246,6 +1312,7 @@ impl FighterLook {
             truth: Vec::new(),
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
+            inertia,
         })
     }
 
@@ -1258,10 +1325,7 @@ impl FighterLook {
     /// Variant drawn for a slot: the hero on slot 0, opponents cycle after.
     #[must_use]
     pub fn rig_for_slot(&self, slot: usize) -> usize {
-        if slot == 0 || self.rigs.len() < 2 {
-            return 0;
-        }
-        1 + (slot - 1) % (self.rigs.len() - 1)
+        rig_index(self.rigs.len(), slot)
     }
 
     /// Variant name drawn for a slot.
@@ -1436,26 +1500,20 @@ impl FighterLook {
         self.bridge.get(slot).map(|b| bridge_act(b.pick().clip))
     }
 
-    /// Clip index plus clip time for an act at the frame's sub-tick `alpha`;
-    /// a finished swing falls back to idle or run (resolved here, so the
-    /// frame never shows a frozen last swing frame). The run clip scales
-    /// with planar speed through [`run_phase_scale`], so the same tick
-    /// plus the same speed gives the same time; other acts ignore speed.
-    fn clip_time(
-        &self,
-        rig: &Rig,
-        act: Act,
-        act_start: u32,
-        run_speed: f32,
-        alpha: f32,
-    ) -> (usize, f32) {
+    /// Clip index plus clip time for a slot's act at the frame's sub-tick
+    /// `alpha`; a finished swing falls back to idle or run (resolved here, so
+    /// the frame never shows a frozen last swing frame). The run clip plays
+    /// the phase the slot carried tick by tick through [`run_phase_scale`]
+    /// ([`SlotAnim::run_clip_s`]), so a speed change never jumps it; the other
+    /// acts read elapsed time and ignore speed.
+    fn clip_time(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> (usize, f32) {
         let since =
-            f32::from(u16::try_from(self.tick.saturating_sub(act_start)).unwrap_or(u16::MAX));
+            f32::from(u16::try_from(self.tick.saturating_sub(slot.act_start)).unwrap_or(u16::MAX));
         let t = (since + alpha) / TICK_HZ;
         let duration = |index: usize| rig.clips.get(index).map_or(0.0, |clip| clip.duration);
-        match act {
+        match slot.act {
             Act::Idle => (0, t),
-            Act::Run => (1, t * run_phase_scale(run_speed)),
+            Act::Run => (1, slot.run_clip_s(alpha)),
             Act::Attack(variant) => {
                 let index = 2 + usize::from(variant.min(2));
                 if t < duration(index) {
@@ -1469,9 +1527,23 @@ impl FighterLook {
         }
     }
 
-    /// Pose for one slot at sub-tick `alpha`: the current act's clip
-    /// sampled at the speed-scaled run time. Pure function of the tick
-    /// plus the recorded speed; the pelvis stays pinned in place (the
+    /// Clip index plus clip time a slot shows at sub-tick `alpha`: the act's
+    /// clip through [`clip_time`](Self::clip_time), or the flat `Down` last
+    /// frame once the sim has floored the slot (EG45). Pure.
+    fn clip_pick(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> (usize, f32) {
+        if slot.balance == GaitPhase::Fallen {
+            let duration = rig.clips.get(5).map_or(0.0, |clip| clip.duration);
+            (5, duration * 0.999)
+        } else {
+            let at = clip_alpha(slot, alpha);
+            self.clip_time(rig, slot, at)
+        }
+    }
+
+    /// Clip pose for one slot at sub-tick `alpha`: the current act's clip
+    /// sampled at the speed-scaled run time, with no switch offset (those
+    /// ride on top in [`inertial_pose`](Self::inertial_pose)). Pure function
+    /// of the tick plus the recorded speed; the pelvis stays pinned in place (the
     /// match owns travel, the clip keeps its bob). The balance gait then
     /// lowers the pelvis for a fall or a catch (EG45, presentation only):
     /// a `Fallen` gait forces the flat `Down` last frame at once, so the
@@ -1479,41 +1551,20 @@ impl FighterLook {
     /// `Stumbling` leans while keeping the act's clip; `Steady` keeps the
     /// pose byte-identical.
     /// A `Down` pose starts here at [`BALANCE_FALLEN_PELVIS_M`]; the LF17
-    /// sand rest ([`sand_lift_m`]) only adds lift after the CPU skin folds
-    /// the posed bounds, never inside this pose. Last, the additive
+    /// sand rest ([`sand_rest_shift_m`]) only shifts the body after the CPU
+    /// skin folds the posed bounds, never inside this pose. Last, the additive
     /// flinch (EG18) pushes the pelvis away from the recorded attacker
     /// side and dips it, scaled by the shared react-window
     /// [`envelope`]: full at impact, silent past the window.
     fn slot_pose(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> Result<LocalPose, LookError> {
-        let (clip_index, time) = if slot.balance == GaitPhase::Fallen {
-            let duration = rig.clips.get(5).map_or(0.0, |clip| clip.duration);
-            (5, duration * 0.999)
-        } else {
-            self.clip_time(rig, slot.act, slot.act_start, slot.run_speed, alpha)
-        };
+        let (clip_index, time) = self.clip_pick(rig, slot, alpha);
         let clip = rig
             .clips
             .get(clip_index)
             .ok_or_else(|| LookError::Skin("clip missing".to_string()))?;
-        let current: LocalPose =
+        let mut pose: LocalPose =
             sample_pose_with_rots(&rig.skeleton, &clip.positions, &clip.rotations, time)
                 .map_err(|err| LookError::Skin(format!("{err:?}")))?;
-        let mut pose = if slot.fade_left == 0 {
-            current
-        } else if let Some(prev_clip) = rig.clips.get(slot.prev_clip) {
-            let prev = sample_pose_with_rots(
-                &rig.skeleton,
-                &prev_clip.positions,
-                &prev_clip.rotations,
-                slot.prev_time,
-            )
-            .map_err(|err| LookError::Skin(format!("{err:?}")))?;
-            let left = f32::from(u16::try_from(slot.fade_left).unwrap_or(u16::MAX));
-            let total = f32::from(u16::try_from(FIGHTER_CROSSFADE_TICKS).unwrap_or(u16::MAX));
-            blend_poses(&prev, &current, 1.0 - left / total)
-        } else {
-            current
-        };
         // In-place clips: the match owns travel, the clip keeps its bob.
         pose.positions[rig.pelvis][0] = rig.bind_pelvis[0];
         pose.positions[rig.pelvis][2] = rig.bind_pelvis[2];
@@ -1601,14 +1652,15 @@ impl FighterLook {
     /// the balance lean (EG45) rides along, presentation only. A `Fallen`
     /// gait forces the flat `Down` last frame (like [`slot_pose`](Self::slot_pose)),
     /// so the floored slot draws flat within one frame.
-    fn slot_sample(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> Result<SlotSample, LookError> {
-        let (clip, time) = if slot.balance == GaitPhase::Fallen {
-            let duration = rig.clips.get(5).map_or(0.0, |clip| clip.duration);
-            (5, duration * 0.999)
-        } else {
-            self.clip_time(rig, slot.act, slot.act_start, slot.run_speed, alpha)
-        };
-        let pose = self.slot_pose(rig, slot, alpha)?;
+    fn slot_sample(
+        &self,
+        rig: &Rig,
+        index: usize,
+        slot: &SlotAnim,
+        alpha: f32,
+    ) -> Result<SlotSample, LookError> {
+        let (clip, time) = self.clip_pick(rig, slot, alpha);
+        let pose = self.inertial_pose(rig, index, slot, alpha)?;
         let world = skinning_matrices(&rig.skeleton, &pose)
             .map_err(|err| LookError::Skin(format!("{err:?}")))?;
         let mut pos: [f32; 3] =
@@ -1653,7 +1705,7 @@ impl FighterLook {
                 .rigs
                 .get(self.rig_for_slot(slot_index))
                 .ok_or_else(|| LookError::Skin("rig missing".to_string()))?;
-            let sample = self.slot_sample(rig, &slot, alpha)?;
+            let sample = self.slot_sample(rig, slot_index, &slot, alpha)?;
             let pos = sample.pos;
             let yaw = sample.yaw;
             let root = sample.root;
@@ -1694,9 +1746,15 @@ impl FighterLook {
                 }
                 frames.push(posed);
             }
-            // LF17 down rest, view only: eased lift, idle never lifts.
-            let lift = down_rest_lift(&slot, self.tick, body.min[1], body.has_bounds());
-            if lift > 0.0 {
+            // LF17 sand rest, view only: a dead body's lowest vertex sits on
+            // the sand on every frame, up from a sink and down from a hover.
+            // A standing body is never moved.
+            let lift = if lies_on_sand(&slot) && body.has_bounds() {
+                sand_rest_shift_m(body.min[1])
+            } else {
+                0.0
+            };
+            if lift != 0.0 {
                 body.root[1] += lift;
                 body.min[1] += lift;
                 body.max[1] += lift;
@@ -1748,7 +1806,7 @@ impl FighterLook {
                 .rigs
                 .get(self.rig_for_slot(slot_index))
                 .ok_or_else(|| LookError::Skin("rig missing".to_string()))?;
-            let sample = self.slot_sample(rig, &slot, alpha)?;
+            let sample = self.slot_sample(rig, slot_index, &slot, alpha)?;
             let pos = sample.pos;
             let yaw = sample.yaw;
             let root = sample.root;
@@ -1775,13 +1833,12 @@ impl FighterLook {
                 body.min = lo;
                 body.max = hi;
             }
-            // LF17 down rest, view only: same eased rule as the full pose.
-            let lift = down_rest_lift(
-                &self.slots[slot_index],
-                self.tick,
-                body.min[1],
-                body.has_bounds(),
-            );
+            // LF17 sand rest, view only: the lift half of the full pose's rule.
+            let lift = if lies_on_sand(&self.slots[slot_index]) && body.has_bounds() {
+                sand_lift_m(body.min[1])
+            } else {
+                0.0
+            };
             if lift > 0.0 {
                 body.root[1] += lift;
                 body.min[1] += lift;
@@ -2274,6 +2331,7 @@ mod tests {
             truth: Vec::new(),
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
+            inertia: Vec::new(),
         }
     }
 
@@ -2338,6 +2396,7 @@ mod tests {
             truth: Vec::new(),
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
+            inertia: Vec::new(),
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -2515,6 +2574,7 @@ mod tests {
             truth: Vec::new(),
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
+            inertia: Vec::new(),
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -2668,7 +2728,7 @@ mod tests {
         // Running: a slot that moves faster than the run floor runs.
         let moved = [view(0, -0.9, 0.0), view(1, 1.0, 0.0)];
         look.observe_tick(80, &moved, &[1000, 0], &[]);
-        assert!(matches!(look.act(0), Some(Act::Attack(_)) | Some(Act::Run)));
+        assert!(matches!(look.act(0), Some(Act::Attack(_) | Act::Run)));
     }
 
     #[test]
@@ -2760,6 +2820,7 @@ mod tests {
             truth: Vec::new(),
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
+            inertia: Vec::new(),
         }
     }
 
@@ -2823,7 +2884,7 @@ mod tests {
         let rig = &rigged.rigs[rigged.rig_for_slot(1)];
         for frame in 0..10u32 {
             let sample = look
-                .slot_sample(rig, &look.slots[1], 0.5)
+                .slot_sample(rig, 1, &look.slots[1], 0.5)
                 .expect("floored sample");
             assert_eq!(sample.clip, 5, "floored draws flat on frame {frame}");
             let pose = look
@@ -2836,7 +2897,7 @@ mod tests {
         }
         // Standing keeps the act's clip and pelvis.
         let calm_sample = look
-            .slot_sample(rig, &look.slots[0], 0.5)
+            .slot_sample(rig, 0, &look.slots[0], 0.5)
             .expect("standing sample");
         assert_ne!(calm_sample.clip, 5, "standing never draws flat");
         assert_eq!(balance_pelvis_y_m(GaitPhase::Steady, 0.9), 0.9);
@@ -3043,10 +3104,11 @@ mod tests {
     #[test]
     fn product_sunk_56cm_down_rest_reports_green() {
         // Product 05142ee3 frame 169 slot 0 down min -0.561, sunk 56.1 floor 3.
-        // Down lift eased over the fall (LF17, view only): 0 at the fall start,
-        // full depth at rest, cap 1.0. Pure positions plus view laws, no window.
-        // Caller: `FighterLook::pose_frame` plus `pose_frame_joints` (the live
-        // down-only rest lift reads this eased depth).
+        // The sand rest (LF17, view only) puts the lowest vertex of a dead body
+        // on the sand from the first frame of the fall: no ease-in, because a
+        // body 56 cm under the sand on its first frames is the bug. Pure
+        // positions plus view laws, no window. Caller: `FighterLook::pose_frame`
+        // (the live rest reads this shift).
         use crate::view_truth::{BodyTruth, ViewLaws};
         let cam = Camera::new([0.0, 1.5, 6.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], 1.0);
         let mut raw = BodyTruth::new(
@@ -3068,29 +3130,19 @@ mod tests {
             "unlifted sunk 56.1, got {}",
             before.line().unwrap()
         );
-        let start_lift = sand_lift_eased(raw.min[1], 0);
+        let shift = sand_rest_shift_m(raw.min[1]);
         assert!(
-            start_lift.abs() < 1e-6,
-            "fall start lifts nothing, got {start_lift}"
-        );
-        let mid_lift = sand_lift_eased(raw.min[1], SAND_FALL_TICKS / 2);
-        assert!(
-            mid_lift > 0.0 && mid_lift < 0.561,
-            "fall middle lifts partway, got {mid_lift}"
-        );
-        let lift = sand_lift_eased(raw.min[1], SAND_FALL_TICKS);
-        assert!(
-            (lift - 0.561).abs() < 1e-6,
-            "rest lifts full depth, got {lift}"
+            (shift - 0.561).abs() < 1e-6,
+            "the first frame lifts the full depth, got {shift}"
         );
         assert!(
-            (raw.min[1] + lift).abs() * 100.0 < 1.0,
+            (raw.min[1] + shift).abs() * 100.0 < 1.0,
             "the rested body sits within 1 cm of the sand"
         );
         let mut fixed = raw;
-        fixed.root[1] += lift;
-        fixed.min[1] += lift;
-        fixed.max[1] += lift;
+        fixed.root[1] += shift;
+        fixed.min[1] += shift;
+        fixed.max[1] += shift;
         let mut after = ViewLaws::default();
         after.note(&cam, 169.0, &[fixed]);
         assert!(
@@ -3098,6 +3150,21 @@ mod tests {
             "lifted sunk 0, got {}",
             after.line().unwrap()
         );
+    }
+
+    #[test]
+    fn sand_rest_shift_lowers_a_hover_and_caps_both_ways() {
+        // The settled death pose hovers about 9.5 cm over the sand on the
+        // real body; the rest lowers it, and a bad pose never flies or dives.
+        assert!((sand_rest_shift_m(0.095) + 0.095).abs() < 1e-6);
+        assert!((sand_rest_shift_m(-0.13) - 0.13).abs() < 1e-6);
+        assert_eq!(sand_rest_shift_m(0.0), 0.0, "on the sand needs no shift");
+        assert_eq!(sand_rest_shift_m(-5.0), SAND_LIFT_MAX_M);
+        assert_eq!(sand_rest_shift_m(5.0), -SAND_LIFT_MAX_M);
+        assert_eq!(sand_rest_shift_m(f32::NAN), 0.0, "non-finite never shifts");
+        assert_eq!(sand_rest_shift_m(f32::INFINITY), 0.0);
+        assert_eq!(sand_rest_shift_m(f32::NEG_INFINITY), 0.0);
+        assert_eq!(sand_lift_m(0.095), 0.0, "the joints path never lowers");
     }
 
     #[test]
@@ -3275,21 +3342,21 @@ mod tests {
             let outcome = app.tick_empty();
             look.observe_tick(tick, app.fighter_views(), app.hp(), &outcome.cues);
             look.observe_live_balances(app.live_match(), usize::from(fighters));
-            for slot in 0..usize::from(fighters).min(MAX_LOOK_FIGHTERS) {
-                let state = look.slots[slot];
+            let slots = usize::from(fighters).min(MAX_LOOK_FIGHTERS);
+            for (state, last) in look.slots.iter().zip(last_hit.iter_mut()).take(slots) {
                 if !state.seen {
                     continue;
                 }
                 drawn += 1;
                 if state.flash_until > 0 {
                     let at = state.flash_until - FLASH_TICKS;
-                    if last_hit[slot] != Some(at) {
-                        last_hit[slot] = Some(at);
+                    if *last != Some(at) {
+                        *last = Some(at);
                         hits += 1;
                     }
                 }
                 for (count, window) in tinted.iter_mut().zip(windows) {
-                    *count += u32::from(last_hit[slot].is_some_and(|at| tick < at + window));
+                    *count += u32::from(last.is_some_and(|at| tick < at + window));
                 }
             }
         }
@@ -3479,6 +3546,67 @@ mod tests {
     }
 
     #[test]
+    fn tint_reddens_the_victim_the_window_draws() {
+        // The hit tint is a picture, not only a flag: the same pose drawn
+        // with the flash on is redder on the victim's pixels than with it off.
+        let Some((mut look, mut presenter)) = staged_look("tint pixels", true) else {
+            return;
+        };
+        for tick in 0..=24u32 {
+            brawl_step(&mut look, tick);
+        }
+        assert_eq!(look.tinted(4), (1, 4), "slot 1 flashes at tick 24");
+        // A bigger frame: four bodies in a mid shot are small, and the
+        // flash changes only the victim's pixels.
+        presenter.resize(384, 216).expect("valid size applies");
+        let scene = engine_render::v1::default_scene(384, 216).expect("default scene is valid");
+        let frame = LookFrame {
+            fighters: 4,
+            alpha: 0.5,
+            shot: Shot::Action,
+            frame: 0,
+        };
+        let mut shoot = |look: &mut FighterLook| -> Vec<u8> {
+            let mut list = DrawList {
+                camera: scene.camera.clone(),
+                light: scene.light.clone(),
+                items: Vec::new(),
+            };
+            look.present_into(&mut presenter, &mut list, &frame)
+                .expect("frame stages");
+            let png = presenter
+                .render_offscreen(&list)
+                .expect("frame renders")
+                .png
+                .expect("capture has pixels");
+            TextureUpload::from_encoded(&png)
+                .expect("capture is a PNG")
+                .rgba
+        };
+        let tinted = shoot(&mut look);
+        look.slots[1].flash_until = 0;
+        let plain = shoot(&mut look);
+        // Redness is red over the mean of green and blue, summed on the
+        // pixels the flash changed.
+        let (mut changed, mut red_on, mut red_off) = (0u32, 0.0f64, 0.0f64);
+        for (a, b) in tinted.chunks_exact(4).zip(plain.chunks_exact(4)) {
+            if a[..3] == b[..3] {
+                continue;
+            }
+            changed += 1;
+            let redness = |p: &[u8]| f64::from(p[0]) - 0.5 * (f64::from(p[1]) + f64::from(p[2]));
+            red_on += redness(a);
+            red_off += redness(b);
+        }
+        eprintln!("tint pixels: {changed} changed, redness {red_off:.0} -> {red_on:.0}");
+        assert!(changed > 150, "the victim's body changed, got {changed}");
+        assert!(
+            red_on > red_off + f64::from(changed),
+            "the flash reddens the body: {red_off:.0} -> {red_on:.0} over {changed} pixels"
+        );
+    }
+
+    #[test]
     fn skin_window_joint_blocks_follow_the_pose_and_the_lift() {
         let Some((mut look, presenter)) = staged_look("skin window blocks", true) else {
             return;
@@ -3496,7 +3624,7 @@ mod tests {
         }
         // The matrices the frame writes carry the lift in their last row.
         // Tick 26 is where the fallen start pose sinks deepest under the
-        // sand, so the eased lift is at its largest there (about 2.7 cm).
+        // sand, so the rest lifts it a long way there.
         for tick in 0..=26u32 {
             brawl_step(&mut look, tick);
         }
@@ -3517,7 +3645,7 @@ mod tests {
         assert_eq!(upright.lift, 0.0, "an upright body is not lifted");
         let rig = &look.rigs[look.rig_for_slot(2)];
         let slot = look.slots[2];
-        let sample = look.slot_sample(rig, &slot, 0.5).expect("sample");
+        let sample = look.slot_sample(rig, 2, &slot, 0.5).expect("sample");
         for (matrix, (joint, inverse)) in downed
             .matrices
             .iter()
@@ -3685,64 +3813,92 @@ mod tests {
     }
 
     #[test]
-    fn fighter_anim_crossfade_midpoint_blends() {
-        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+    fn fighter_anim_switch_midpoint_carries_the_offset() {
+        // LF9: an idle to run switch cuts to the run clip on the switch tick
+        // and carries the old pose as a decaying offset. The switch frame
+        // shows the old pose, mid-decay differs from both clips, and past the
+        // settle age the pose is the plain run clip, bit for bit.
         let hp = [1000u16, 1000u16];
-        // Tick 0 still, then steady 0.05 m per tick: Idle flips to Run at 1.
-        for tick in 0..=5u32 {
+        let mut calm = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let mut mover = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let joints_of = |look: &FighterLook, plain: bool| -> Vec<[f32; 3]> {
+            let rig = &look.rigs[look.rig_for_slot(0)];
+            if plain {
+                let pose = look
+                    .slot_pose(rig, &look.slots[0], 0.0)
+                    .expect("plain pose");
+                let world = skinning_matrices(&rig.skeleton, &pose).expect("plain joints");
+                return world.iter().map(|m| [m[3][0], m[3][1], m[3][2]]).collect();
+            }
+            look.pose_frame_joints(2, 0.0)
+                .expect("joints pose")
+                .into_iter()
+                .find(|body| body.slot == 0)
+                .expect("slot 0 is posed")
+                .joints
+        };
+        let worst = |a: &[[f32; 3]], b: &[[f32; 3]]| -> f32 {
+            a.iter()
+                .zip(b)
+                .map(|(p, q)| {
+                    ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+                })
+                .fold(0.0f32, f32::max)
+        };
+        let step = |calm: &mut FighterLook, mover: &mut FighterLook, tick: u32| {
             let x = -1.0 + 0.05 * f32::from(u16::try_from(tick).unwrap_or(u16::MAX));
-            let views = [view(0, x, 0.0), view(1, 1.0, 0.0)];
-            look.observe_tick(tick, &views, &hp, &[]);
-        }
-        let slot = look.slots[0];
-        assert_eq!(slot.act, Act::Run, "steady motion runs");
-        assert_eq!(slot.fade_left, 5, "switch at 1 plus 4 ticks leaves 5");
-        let alpha = 0.5;
-        let rig = &look.rigs[look.rig_for_slot(0)];
-        let got = look.slot_pose(rig, &slot, alpha).expect("pose samples");
-        let left = f32::from(u16::try_from(slot.fade_left).unwrap_or(u16::MAX));
-        let total = f32::from(u16::try_from(FIGHTER_CROSSFADE_TICKS).unwrap_or(u16::MAX));
-        let w = 1.0 - left / total;
+            calm.observe_tick(tick, &[view(0, -1.0, 0.0), view(1, 1.0, 0.0)], &hp, &[]);
+            mover.observe_tick(tick, &[view(0, x, 0.0), view(1, 1.0, 0.0)], &hp, &[]);
+        };
+        step(&mut calm, &mut mover, 0);
+        step(&mut calm, &mut mover, 1);
+        assert_eq!(mover.slots[0].act, Act::Run, "steady motion runs");
+        assert_eq!(calm.slots[0].act, Act::Idle, "a still fighter idles");
+        assert_eq!(mover.slots[0].iz_age, 0, "the switch tick starts the clock");
+        let at_switch = worst(&joints_of(&mover, false), &joints_of(&calm, false));
         assert!(
-            (w - 4.0 / 9.0).abs() < 1e-6,
-            "midpoint weight is 4/9, got {w}"
+            at_switch < 1e-4,
+            "switch frame is the old pose, off {at_switch} m"
         );
-        assert_ne!(w, 0.5, "9 is odd: no exact half");
-        let (cur_clip, cur_time) =
-            look.clip_time(rig, slot.act, slot.act_start, slot.run_speed, alpha);
-        let cur = sample_pose_with_rots(
-            &rig.skeleton,
-            &rig.clips[cur_clip].positions,
-            &rig.clips[cur_clip].rotations,
-            cur_time,
-        )
-        .expect("current samples");
-        let prev_clip = rig.clips.get(slot.prev_clip).expect("prev clip");
-        let prev = sample_pose_with_rots(
-            &rig.skeleton,
-            &prev_clip.positions,
-            &prev_clip.rotations,
-            slot.prev_time,
-        )
-        .expect("prev samples");
-        let mut expect = blend_poses(&prev, &cur, w);
-        expect.positions[rig.pelvis][0] = rig.bind_pelvis[0];
-        expect.positions[rig.pelvis][2] = rig.bind_pelvis[2];
-        expect.positions[rig.pelvis][1] =
-            balance_pelvis_y_m(slot.balance, expect.positions[rig.pelvis][1]);
-        assert_eq!(got, expect, "midpoint blends bit for bit");
-        let mut cur_pinned = cur;
-        cur_pinned.positions[rig.pelvis][0] = rig.bind_pelvis[0];
-        cur_pinned.positions[rig.pelvis][2] = rig.bind_pelvis[2];
-        cur_pinned.positions[rig.pelvis][1] =
-            balance_pelvis_y_m(slot.balance, cur_pinned.positions[rig.pelvis][1]);
-        let mut prev_pinned = prev;
-        prev_pinned.positions[rig.pelvis][0] = rig.bind_pelvis[0];
-        prev_pinned.positions[rig.pelvis][2] = rig.bind_pelvis[2];
-        prev_pinned.positions[rig.pelvis][1] =
-            balance_pelvis_y_m(slot.balance, prev_pinned.positions[rig.pelvis][1]);
-        assert_ne!(got, cur_pinned, "blend differs from the new clip");
-        assert_ne!(got, prev_pinned, "blend differs from the old clip");
+        let offset = worst(&joints_of(&mover, false), &joints_of(&mover, true));
+        assert!(
+            offset > 0.05,
+            "the old pose sits {offset} m from the run clip"
+        );
+        for tick in 2..=5u32 {
+            step(&mut calm, &mut mover, tick);
+        }
+        assert_eq!(
+            mover.slots[0].fade_left, 5,
+            "the bridge fade still marches beside the offsets"
+        );
+        let mid = joints_of(&mover, false);
+        assert!(
+            worst(&mid, &joints_of(&mover, true)) > 0.01,
+            "four ticks in, the offset is still carried"
+        );
+        assert!(
+            worst(&mid, &joints_of(&calm, false)) > 0.01,
+            "four ticks in, the pose has left the idle clip"
+        );
+        let settle = fighter_look_inertia::SETTLE_TICKS;
+        for tick in 6..=(1 + 2 * settle) {
+            step(&mut calm, &mut mover, tick);
+            if tick == 1 + settle / 2 {
+                let left = worst(&joints_of(&mover, false), &joints_of(&mover, true));
+                assert!(
+                    left < offset * 0.1,
+                    "half the window on, {left} of {offset} m left"
+                );
+            }
+        }
+        let rig = &mover.rigs[mover.rig_for_slot(0)];
+        let slot = mover.slots[0];
+        assert_eq!(
+            mover.inertial_pose(rig, 0, &slot, 0.5).expect("shown pose"),
+            mover.slot_pose(rig, &slot, 0.5).expect("clip pose"),
+            "past the settle age the shown pose is the clip pose, bit for bit"
+        );
     }
 
     #[test]
@@ -3756,8 +3912,9 @@ mod tests {
                 let views = [view(0, x, 0.0), view(1, 1.0, 0.0)];
                 look.observe_tick(tick, &views, &hp, &[]);
                 let rig = &look.rigs[look.rig_for_slot(0)];
-                poses.push(look.slot_pose(rig, &look.slots[0], 0.5).expect("pose"));
-                poses.push(look.slot_pose(rig, &look.slots[0], 0.0).expect("pose"));
+                let slot = look.slots[0];
+                poses.push(look.inertial_pose(rig, 0, &slot, 0.5).expect("pose"));
+                poses.push(look.inertial_pose(rig, 0, &slot, 0.0).expect("pose"));
             }
             poses
         };
@@ -3784,40 +3941,58 @@ mod tests {
         assert!((fast_slot.run_speed - 0.10).abs() < 1e-6);
         let slow_rig = &slow.rigs[slow.rig_for_slot(0)];
         let fast_rig = &fast.rigs[fast.rig_for_slot(0)];
-        let (_, slow_t) = slow.clip_time(
-            slow_rig,
-            slow_slot.act,
-            slow_slot.act_start,
-            slow_slot.run_speed,
-            0.5,
-        );
-        let (_, fast_t) = fast.clip_time(
-            fast_rig,
-            fast_slot.act,
-            fast_slot.act_start,
-            fast_slot.run_speed,
-            0.5,
-        );
+        let (_, slow_t) = slow.clip_time(slow_rig, &slow_slot, 0.5);
+        let (_, fast_t) = fast.clip_time(fast_rig, &fast_slot, 0.5);
         assert!(
             fast_t > slow_t,
             "fast {fast_t} must lead slow {slow_t} at the same tick"
         );
-        let (_, slow_again) = slow.clip_time(
-            slow_rig,
-            slow_slot.act,
-            slow_slot.act_start,
-            slow_slot.run_speed,
-            0.5,
-        );
-        let (_, fast_again) = fast.clip_time(
-            fast_rig,
-            fast_slot.act,
-            fast_slot.act_start,
-            fast_slot.run_speed,
-            0.5,
-        );
+        let (_, slow_again) = slow.clip_time(slow_rig, &slow_slot, 0.5);
+        let (_, fast_again) = fast.clip_time(fast_rig, &fast_slot, 0.5);
         assert_eq!(slow_t, slow_again);
         assert_eq!(fast_t, fast_again);
+    }
+
+    #[test]
+    fn run_phase_marches_only_in_the_run_act_and_survives_bad_speeds() {
+        let tick_s = 1.0 / TICK_HZ;
+        let marched = |act: Act, speed: f32, ticks: u32| {
+            let mut slot = SlotAnim::new();
+            slot.act = act;
+            slot.run_speed = speed;
+            slot.march_run_phase(ticks);
+            slot.run_phase_s
+        };
+        let close = |got: f32, want: f32| (got - want).abs() < 1.0e-6;
+        let at_ref = marched(Act::Run, RUN_REF_M_PER_TICK, 6);
+        assert!(close(at_ref, 6.0 * tick_s), "authored rate: {at_ref} s");
+        assert!(close(marched(Act::Run, 0.0, 6), 3.0 * tick_s), "half rate");
+        assert!(
+            close(marched(Act::Run, 1.0, 6), 12.0 * tick_s),
+            "double rate"
+        );
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let held = marched(Act::Run, bad, 6);
+            assert!(
+                close(held, 6.0 * tick_s),
+                "speed {bad} holds the authored rate: {held}"
+            );
+        }
+        assert_eq!(
+            marched(Act::Run, RUN_REF_M_PER_TICK, 0),
+            0.0,
+            "no ticks, no phase"
+        );
+        for act in [Act::Idle, Act::Attack(1), Act::Down] {
+            assert_eq!(
+                marched(act, RUN_REF_M_PER_TICK, 6),
+                0.0,
+                "{act:?} carries no run phase"
+            );
+        }
+        let mut run = SlotAnim::new();
+        run.act = Act::Run;
+        assert_eq!(run.run_clip_s(-3.0), 0.0, "a look back never goes negative");
     }
 
     #[test]
@@ -4004,7 +4179,7 @@ mod tests {
         for (part_index, posed) in frames.into_iter().enumerate() {
             let part = &rig.parts[part_index];
             let started = Instant::now();
-            let lifted: Vec<[f32; 3]> = if lift > 0.0 {
+            let lifted: Vec<[f32; 3]> = if lift != 0.0 {
                 posed
                     .positions
                     .iter()
@@ -4846,6 +5021,7 @@ mod tests {
             truth: Vec::new(),
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
+            inertia: Vec::new(),
         };
         assert_eq!(
             empty

@@ -3,9 +3,8 @@
 // writes nothing, a tampered PNG fails the sha256 cross-check, a frameless
 // manifest fails by default but passes with --allow-unhashed, bad row IDs and
 // unsafe manifest.clip are refused, a faked-ffmpeg stitch writes mp4+gif
-// beside the PNGs, and the named consumer (tools/weekly-clip.mjs) spawns this
-// tool for its stitch leg, and a showcase set with 0 PNGs fails closed
-// naming the set.
+// beside the PNGs, a 12-frame duel clip validates, and a showcase set with 0
+// PNGs fails closed naming the set.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -24,7 +23,6 @@ import test from "node:test";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL = join(HERE, "showcase.mjs");
-const CONSUMER = join(HERE, "weekly-clip.mjs");
 
 // Minimal valid PNGs: 8x8 solid RGB with one pixel keyed by seed, so equal
 // seeds give byte-identical frames and different seeds move the picture.
@@ -205,12 +203,8 @@ test("a faked-ffmpeg stitch writes mp4+gif beside the PNGs and keeps sources", (
   assert.equal(existsSync(join(clip, "manifest.json")), true, "manifest is never deleted");
 });
 
-test("the named consumer weekly-clip spawns this tool for its stitch leg", () => {
-  assert.equal(existsSync(CONSUMER), true, "consumer tools/weekly-clip.mjs exists");
-  const consumer = readFileSync(CONSUMER, "utf8");
-  assert.match(consumer, /showcase\.mjs/, "weekly-clip names showcase.mjs");
-  assert.match(consumer, /--clip/, "weekly-clip passes --clip to the stitch leg");
-  // Same 12-frame hashed shape the consumer stitches: showcase must accept it.
+test("a 12-frame hashed duel clip validates", () => {
+  // The 12-frame hashed shape of one arena duel clip: showcase must accept it.
   const clip = join(mkdtempSync(join(tmpdir(), "showcase-")), "duel");
   fixtureClip(clip, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   const { code, out, err } = runTool(["--clip", clip, "--check-only", "--json"]);

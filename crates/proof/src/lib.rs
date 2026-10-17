@@ -35,6 +35,10 @@ pub mod m1;
 pub mod matrix;
 pub mod museum;
 pub mod online_soak;
+/// Rapier ragdoll fall tape for the golden matrix: per-tick body digests (WEB3).
+#[cfg(feature = "ragdoll")]
+pub mod ragdoll_matrix;
+pub mod soak;
 pub mod tape;
 /// Tape-decode one-harness fuzz: replay-hash oracle plus shrink (HS23).
 #[cfg(feature = "fuzz")]

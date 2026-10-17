@@ -127,7 +127,7 @@ fn twin_skinned_mesh(slot: u8) -> Result<v1::MeshData, TwinBodyError> {
     let mut joints = Vec::with_capacity(base.positions.len());
     let mut weights = Vec::with_capacity(base.positions.len());
     for p in &base.positions {
-        let joint = if p[1] > 0.0 { 1u16 } else { 0u16 };
+        let joint = u16::from(p[1] > 0.0);
         joints.push([joint, 0, 0, 0]);
         weights.push([1.0f32, 0.0, 0.0, 0.0]);
     }

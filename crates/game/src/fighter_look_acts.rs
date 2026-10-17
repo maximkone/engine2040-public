@@ -91,23 +91,68 @@ fn face_rival(
     }
 }
 
-/// Freeze one slot's clip clock for a hitstop tick: keep the act and march
-/// `act_start` with the tick, so the clip phase stays put. Fades still blend,
-/// and the bridge clock marches too, so the resume tick still maps the held
-/// act, not an expired swing. Death is decided by the caller: a `Down`
-/// mapping never reaches here.
+/// Hold one slot's pose for a hitstop tick (LF10): keep the act and march the
+/// clip clock and the flinch clock with the tick, so neither phase moves. The
+/// first held tick takes the blend the bridge set on the impact tick; later
+/// held ticks keep the blend exactly as the previous tick left it, whatever
+/// the bridge says, so the pose is the same on every held tick. The bridge
+/// clock marches too, so the resume tick still maps the held act, not an
+/// expired swing. Death is decided by the caller: a `Down` mapping never
+/// reaches here.
 fn freeze_slot(
     slot: &mut SlotAnim,
+    old: &SlotAnim,
     fade: SlotFade,
-    old_run_speed: f32,
+    fade_before: u32,
+    tick: u32,
     elapsed: u32,
     bridge_slot: &mut FighterSlot,
 ) {
-    slot.prev_clip = usize::from(fade.prev_clip);
-    slot.prev_time = bridge_prev_time(fade.prev_clip, fade.prev_phase_ticks, old_run_speed);
-    slot.fade_left = fade.fade_left;
+    if old.held {
+        slot.fade_left = fade_before;
+    } else {
+        slot.prev_clip = usize::from(fade.prev_clip);
+        slot.prev_time = bridge_prev_time(fade.prev_clip, fade.prev_phase_ticks, old.run_speed);
+        slot.fade_left = fade.fade_left;
+    }
     slot.act_start = slot.act_start.saturating_add(elapsed);
+    // The impact tick starts the flinch, so only an older flinch marches on it.
+    if slot.hit_start < tick {
+        slot.hit_start = slot.hit_start.saturating_add(elapsed);
+    }
+    slot.held = true;
     bridge_slot.march_hold(elapsed);
+}
+
+/// Follow the bridge pick on a free tick: a new act starts its clip and its
+/// blend from the frozen leaving clip, with a run phase of zero; the same act
+/// (including a restarted swing via `start_swing`) carries the bridge blend
+/// plus the frozen leaving clip, so the switch frame still shows the old clip
+/// whole, and keeps its run phase as `aged` (the slot's last tick marched on
+/// to this one) has it. Attack starts keep the landed `IMPACT_TICKS`
+/// backdate; every other pick starts on its tick. Presentation only.
+fn follow_pick(
+    slot: &mut SlotAnim,
+    mapped: Act,
+    fade: SlotFade,
+    leaving_s: f32,
+    aged: &SlotAnim,
+    tick: u32,
+) {
+    slot.prev_clip = usize::from(fade.prev_clip);
+    slot.fade_left = fade.fade_left;
+    if mapped != slot.act {
+        slot.prev_time = leaving_s;
+        slot.act = mapped;
+        slot.act_start = match mapped {
+            Act::Attack(_) => tick.saturating_sub(IMPACT_TICKS),
+            _ => tick,
+        };
+        slot.run_phase_s = 0.0;
+    } else {
+        slot.prev_time = bridge_prev_time(fade.prev_clip, fade.prev_phase_ticks, aged.run_speed);
+        slot.run_phase_s = aged.run_phase_s;
+    }
 }
 
 /// The impact's slots from one tick's fight cues: the first Hit or Parried
@@ -139,7 +184,9 @@ pub(crate) fn bridge_act(clip: BridgeClip) -> Act {
 }
 
 /// Leaving-clip seconds for one bridge fade: phase ticks over 60 Hz, scaled
-/// for the run clip through [`run_phase_scale`] like `clip_time`. Pure.
+/// for the run clip through [`run_phase_scale`] at the recorded speed. The
+/// bridge counts ticks, not rates, so this mirror stays a whole-phase guess
+/// that the pose never reads. Pure.
 fn bridge_prev_time(prev_clip: u8, prev_phase_ticks: u32, run_speed: f32) -> f32 {
     let phase = f32::from(u16::try_from(prev_phase_ticks).unwrap_or(u16::MAX));
     if prev_clip == BridgeClip::Run.index() {
@@ -165,6 +212,10 @@ impl FighterLook {
         // only, before the tick's impacts land. Same ticks give the same
         // trauma twice; presentation only, never the sim hash.
         let elapsed = tick.saturating_sub(self.tick);
+        // Each slot as the last tick left it, for the clip-switch offsets
+        // (LF9): the cue fold below may already restart a swing.
+        let before: [SlotAnim; MAX_LOOK_FIGHTERS] =
+            std::array::from_fn(|index| self.slots.get(index).copied().unwrap_or(SlotAnim::new()));
         self.shake_trauma_permille = self
             .shake_trauma_permille
             .saturating_sub(elapsed.saturating_mul(SHAKE_DECAY_PERMILLE_PER_TICK));
@@ -172,6 +223,7 @@ impl FighterLook {
         self.fold_positions(views);
         self.fold_cues(tick, cues);
         self.fold_acts(tick, views, hp, cues, elapsed);
+        self.fold_switches(&before, elapsed);
         // View-only trail feed (LF14): age once, push attacking slots and
         // clear the rest. Presentation only, never the sim hash.
         self.feed_trails();
@@ -318,28 +370,25 @@ impl FighterLook {
         slot.hit_push = push;
     }
 
-    /// Clip plus frozen time for the act being left, at the switch tick
-    /// with `alpha` 0. Presentation only; the sim hash never reads it.
-    fn prev_clip_time(
-        &self,
-        slot_index: usize,
-        act: Act,
-        act_start: u32,
-        run_speed: f32,
-    ) -> (usize, f32) {
+    /// Clip plus frozen time for the act `leaving` is being left from, at the
+    /// switch tick with `alpha` 0; `leaving` is the slot's last tick with its
+    /// run phase marched on to this one. Presentation only; the sim hash
+    /// never reads it.
+    fn prev_clip_time(&self, slot_index: usize, leaving: &SlotAnim) -> (usize, f32) {
         if let Some(rig) = self.rigs.get(self.rig_for_slot(slot_index)) {
-            self.clip_time(rig, act, act_start, run_speed, 0.0)
+            self.clip_time(rig, leaving, 0.0)
         } else {
-            let clip = match act {
+            let clip = match leaving.act {
                 Act::Idle => 0,
                 Act::Run => 1,
                 Act::Attack(variant) => 2 + usize::from(variant.min(2)),
                 Act::Down => 5,
             };
-            let since =
-                f32::from(u16::try_from(self.tick.saturating_sub(act_start)).unwrap_or(u16::MAX));
-            let time = match act {
-                Act::Run => since / TICK_HZ * run_phase_scale(run_speed),
+            let since = f32::from(
+                u16::try_from(self.tick.saturating_sub(leaving.act_start)).unwrap_or(u16::MAX),
+            );
+            let time = match leaving.act {
+                Act::Run => leaving.run_clip_s(0.0),
                 _ => since / TICK_HZ,
             };
             (clip, time)
@@ -360,8 +409,15 @@ impl FighterLook {
         cues: &[FightCue],
         elapsed: u32,
     ) {
+        let fades_before: [u32; MAX_LOOK_FIGHTERS] =
+            std::array::from_fn(|index| self.slots.get(index).map_or(0, |slot| slot.fade_left));
         for slot in &mut self.slots {
             slot.fade_left = slot.fade_left.saturating_sub(1);
+            // The switch-offset clock runs with the clip clock: a slot held
+            // last tick keeps its age (LF9).
+            if !slot.held {
+                slot.iz_age = slot.iz_age.saturating_add(elapsed);
+            }
         }
         // LF10 hitstop hold: freeze the impact pair's clip clocks while the
         // sim holds; the `hold_mask` owner decides the freeze through
@@ -384,9 +440,15 @@ impl FighterLook {
             let Some(old) = self.slots.get(index).copied() else {
                 continue;
             };
-            // Frozen leaving clip at the switch tick, read before any overwrite.
-            // Immutable borrow ends before the mutable update below.
-            let leaving = self.prev_clip_time(index, old.act, old.act_start, old.run_speed);
+            // The slot as its last tick left it, run phase marched on to this
+            // tick at the rate the last frame of that tick played at, so the
+            // phase meets the frame it follows (a held tick never reads it).
+            // Then the frozen leaving clip at the switch tick, read before any
+            // overwrite; the immutable borrow ends before the mutable update
+            // below.
+            let mut aged = old;
+            aged.march_run_phase(elapsed);
+            let leaving = self.prev_clip_time(index, &aged);
             let rival = standing
                 .iter()
                 .filter(|(other, _)| *other != index)
@@ -410,35 +472,30 @@ impl FighterLook {
             let Some(slot) = self.slots.get_mut(index) else {
                 continue;
             };
-            // Face the nearest standing rival; with none, face the motion.
-            face_rival(slot, mapped, rival, step, speed);
             let held = frozen.get(index).copied().unwrap_or(false) && mapped != Act::Down;
             if held {
-                // Hitstop hold: keep the act and march the clocks with the
-                // tick, so the clip phase stays put. Death still lands at
-                // once: a `Down` mapping is never held.
+                // Hitstop hold: the facing and the run speed stand still too,
+                // so the whole pose is the impact tick's. Death still lands
+                // at once: a `Down` mapping is never held.
+                slot.prev_yaw = slot.yaw;
                 let Some(bridge_slot) = self.bridge.get_mut(index) else {
                     continue;
                 };
-                freeze_slot(slot, fade, old.run_speed, elapsed, bridge_slot);
-            } else if mapped != slot.act {
-                slot.prev_clip = usize::from(fade.prev_clip);
-                slot.prev_time = leaving.1;
-                slot.act = mapped;
-                slot.act_start = match mapped {
-                    Act::Attack(_) => tick.saturating_sub(IMPACT_TICKS),
-                    _ => tick,
-                };
-                slot.fade_left = fade.fade_left;
-            } else {
-                // Same clip (including a restarted swing via `start_swing`):
-                // carry the bridge fade plus the frozen leaving clip so the
-                // switch frame still shows the old clip whole.
-                slot.prev_clip = usize::from(fade.prev_clip);
-                slot.prev_time =
-                    bridge_prev_time(fade.prev_clip, fade.prev_phase_ticks, old.run_speed);
-                slot.fade_left = fade.fade_left;
+                freeze_slot(
+                    slot,
+                    &old,
+                    fade,
+                    fades_before.get(index).copied().unwrap_or(0),
+                    tick,
+                    elapsed,
+                    bridge_slot,
+                );
+                continue;
             }
+            slot.held = false;
+            // Face the nearest standing rival; with none, face the motion.
+            face_rival(slot, mapped, rival, step, speed);
+            follow_pick(slot, mapped, fade, leaving.1, &aged, tick);
         }
     }
 }
@@ -473,6 +530,7 @@ mod tests {
             truth: Vec::new(),
             shake_trauma_permille: 0,
             uploaded_digest: crate::fighter_look::empty_upload_digest(),
+            inertia: Vec::new(),
         }
     }
 

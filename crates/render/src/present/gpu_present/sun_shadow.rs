@@ -2,6 +2,7 @@
 //! Owner: render lane via submit slice 2. Units: meters, texels, 0..1 depths.
 use std::fmt;
 
+#[cfg(test)]
 use crate::arena_day::ARENA_DAY_SUN_DIR;
 
 /// Sun shadow failures. Bad matrix or shape fails loudly.
@@ -19,7 +20,8 @@ impl fmt::Display for SunShadowError {
 impl std::error::Error for SunShadowError {}
 /// Sun map edge in texels: 2048 over the pit.
 pub const SUN_SHADOW_SIZE: u32 = 2048;
-/// Float edge matching [`SUN_SHADOW_SIZE`] for UV math.
+/// Float edge matching [`SUN_SHADOW_SIZE`] for UV math (test oracle only).
+#[cfg(test)]
 pub const SUN_SHADOW_SIZE_F32: f32 = 2048.0;
 /// Depth bias: `frag - BIAS <= stored` is lit.
 pub const SUN_SHADOW_BIAS: f32 = 0.002;
@@ -121,8 +123,10 @@ pub fn sun_view_proj_for_dir(sun_dir: [f32; 3]) -> Result<[[f32; 4]; 4], SunShad
     Ok(m)
 }
 /// Arena sun view-projection for this frame: ortho camera on the pit.
-/// Owner render lane; Caller `arena_sun_view_proj` test plus `submit::encode_forward` live depth.
+/// Owner render lane; Caller `arena_sun_view_proj` test (the live depth pass
+/// builds its matrix from the frame sun direction).
 /// Units matrix out. Determinism pure delegate, never hashed.
+#[cfg(test)]
 pub fn arena_sun_view_proj() -> Result<[[f32; 4]; 4], SunShadowError> {
     sun_view_proj_for_dir(ARENA_DAY_SUN_DIR)
 }
@@ -343,6 +347,9 @@ impl SunShadowSubmitter {
         u64::try_from(started.elapsed().as_micros()).ok()
     }
 }
+/// CPU oracle: sun-map UV and depth of a world point; test-only until the
+/// presenter reads the map back.
+#[cfg(test)]
 fn sun_uv_depth(
     view_proj: [[f32; 4]; 4],
     point: [f32; 3],
@@ -371,6 +378,9 @@ fn sun_uv_depth(
     }
     Ok(Some([u, v, depth]))
 }
+/// CPU oracle of the forward compare: lit when `frag - bias <= stored`;
+/// test-only, the shader holds the production copy.
+#[cfg(test)]
 fn sun_shadow_factor(stored: f32, frag: f32, bias: f32) -> Result<f32, SunShadowError> {
     if !stored.is_finite() || !frag.is_finite() || !bias.is_finite() {
         return Err(SunShadowError::Invalid("sun compare is not finite".into()));
@@ -389,7 +399,11 @@ mod tests {
         assert_eq!(SUN_SHADOW_SIZE, 2048, "sun edge stays 2048");
         assert_eq!(SUN_SHADOW_SIZE_F32, 2048.0, "float edge matches");
         assert_eq!(SUN_SHADOW_HALF_SIZE, 1024, "half edge is 1024");
-        assert!(!SUN_SHADOW_HALF_RES, "live map runs the row's 2048");
+        // `black_box`: the pin must keep running if the switch is flipped.
+        assert!(
+            !std::hint::black_box(SUN_SHADOW_HALF_RES),
+            "live map runs the row's 2048"
+        );
         assert_eq!(SUN_SHADOW_HALF_EXTENT_M, 15.0, "ortho spans 30 m");
         let desc = sun_shadow_depth_desc();
         assert_eq!(desc.size.width, SUN_SHADOW_SIZE, "desc runs the row's 2048");
@@ -414,7 +428,10 @@ mod tests {
     fn sun_half_switch_halves_texel_and_keeps_snap() {
         // Live runs the row's 2048; the half arm stays one bool away at 1024,
         // with the origin kept on its texel grid either way.
-        assert!(!SUN_SHADOW_HALF_RES, "live map runs the row's 2048");
+        assert!(
+            !std::hint::black_box(SUN_SHADOW_HALF_RES),
+            "live map runs the row's 2048"
+        );
         assert_eq!(SUN_SHADOW_HALF_SIZE, 1024, "half edge is 1024");
         let full = sun_shadow_size_for_half(false);
         let half = sun_shadow_size_for_half(true);
@@ -917,7 +934,7 @@ mod tests {
                 count: None,
             }],
         });
-        let pipeline = sun_depth_pipeline(&device, &bind_layout, &shader);
+        let pipeline = sun_depth_pipeline(device, &bind_layout, &shader);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sun-live-bind"),
             layout: &bind_layout,

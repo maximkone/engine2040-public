@@ -738,8 +738,17 @@ impl GpuSkinned {
     /// Returns [`GpuSkinError::NoAdapter`] when no GPU is present; callers
     /// testing on headless machines treat that as skip, not failure.
     pub fn init() -> Result<Self, GpuSkinError> {
+        // Test builds only: cap the GPU tests that hold a device at once.
+        #[cfg(test)]
+        crate::test_gpu::hold_gpu_slot();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            // Test builds skip the GL backend: its driver DLL loads from a
+            // helper thread and can wedge the process loader lock.
+            backends: if cfg!(test) {
+                wgpu::Backends::PRIMARY
+            } else {
+                wgpu::Backends::all()
+            },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -758,10 +767,8 @@ impl GpuSkinned {
         // Skinned capture samples the same studio bake as the live frame, so
         // the R3 fighter capture lifts with the live IBL instead of the flat
         // floor. A failed bake fails init loudly, never a silent dark frame.
-        let (ibl_bake, _) = crate::ibl::bake(include_bytes!(
-            "../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr"
-        ))
-        .map_err(|e| GpuSkinError::Device(format!("look ibl bake: {e}")))?;
+        let (ibl_bake, _) = crate::ibl::bake(crate::v1_gpu::STUDIO_HDRI_BYTES)
+            .map_err(|e| GpuSkinError::Device(format!("look ibl bake: {e}")))?;
         let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
             crate::ibl::gpu::upload_live_bake(&device, &queue, &ibl_bake)
                 .map_err(|e| GpuSkinError::Device(format!("live ibl bake: {e}")))?;

@@ -655,7 +655,8 @@ pub fn compare_classic_reference(
 /// Difference image in RGBA row-major: red where above epsilon, black elsewhere.
 /// Same inputs give the same bytes twice; integer only, heap only the image.
 /// PORT shape from the wgpu `-difference` writer; PNG encode rides the `v1` image dep.
-#[cfg(feature = "v1")]
+/// Test-only until the bundle glue calls it.
+#[cfg(all(test, feature = "v1"))]
 fn rl11_difference_rgba(classic: &[u8], reference: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(classic.len());
     for (pixel_a, pixel_b) in classic.chunks_exact(4).zip(reference.chunks_exact(4)) {
@@ -676,7 +677,7 @@ fn rl11_difference_rgba(classic: &[u8], reference: &[u8]) -> Vec<u8> {
 /// Units: RGBA bytes row-major in, PNG bytes out.
 /// Deterministic per input bytes; PNG-only via the `v1` image dep, no new package.
 /// Caller: the RL11 look test; the future bundle glue reuses the pair.
-#[cfg(feature = "v1")]
+#[cfg(all(test, feature = "v1"))]
 pub(crate) fn rl11_actual_difference_pngs(
     classic: &[u8],
     reference: &[u8],

@@ -2922,6 +2922,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-clock"
+version = "0.1.0"
+
+[[package]]
 name = "engine-combat"
 version = "0.1.0"
 dependencies = [
@@ -3107,6 +3111,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-physfx"
+version = "0.1.0"
+dependencies = [
+ "engine-anim",
+ "engine-physics",
+ "rapier3d",
+]
+
+[[package]]
 name = "engine-physics"
 version = "0.1.0"
 dependencies = [
@@ -3133,6 +3146,7 @@ dependencies = [
 name = "engine-proof"
 version = "0.1.0"
 dependencies = [
+ "engine-anim",
  "engine-arena",
  "engine-assets",
  "engine-combat",
@@ -3214,6 +3228,19 @@ version = "0.1.0"
 dependencies = [
  "engine-core",
  "engine-input",
+]
+
+[[package]]
+name = "engine-web"
+version = "0.1.0"
+dependencies = [
+ "engine-clock",
+ "engine-proof",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu 30.0.1",
 ]
 
 [[package]]

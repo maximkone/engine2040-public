@@ -52,15 +52,13 @@ and they carry no authority.
 | ROYALTY.md | Draft business terms (not an engine contract) |
 | Research rotation | Retired 2026-10-16: arXiv/steal dive schedule now rides researcher seats, no cursor file |
 | DIRECTION-LOG.md | Level 3/4 loop-direction changes with revert triggers (rows/retros live in the handoff) |
-| EMPIRE-INBOX.md | Empire Boss inbox, read every wave; tick each item with its board ID or SHA |
-| EMPIRE.md | Owner vision for the empire in 1–2 years; a plan smaller than this is wrong, not the vision |
 | plan/frontier.md | Research topics for the focus areas (render, animation, physics, hard systems, AI door) |
 | research/LADDER.md | Cards, spikes and verdicts, one ladder rung each; read the rung, not the file (199 KB) |
 | archive/ (2026-10-10 only) | No authority: license sweeps 2026-09-24 (superseded by DEPENDENCIES.md + EVIDENCE.md), `docs/archive/2026-10-03/GE1-FIXTURES.md` (fixture-genre proof receipts), done board rows in `docs/archive/SPRINT-done-2026-10-03.md`. Moved 2026-10-12: `archive/2026-10-08` to `docs/archive/2026-10-08/archive-root`, `archive/2026-10-09` to `docs/archive/2026-10-09/archive-root` |
 | REPO-SWEEP.md | GitHub corner-map cursor for the RES-REPO reader (36 KB, read the corner not the file) |
 | CAPTURE.md | Capture output: built-in dump first, OBS only for live play |
 | fixtures/ | Fixture dir: pinned test data, start at `../fixtures/README.md` |
-| one tree | One tree `C:\engine2040` on master, claims in `target/queue/claims.txt`; prune with `node tools/prune-queue.mjs --help` |
+| one tree | One tree `C:\engine2040` on master; pull first, commit by path, push (`AGENTS.md` "Work from plans") |
 | target/sprint-handoff.md | Sprint handoff: last wave lands, ticks and blockers |
 | INDEX.md | This list |
 

@@ -2,8 +2,10 @@
 //!
 //! Consumer: the fighter look reads each slot's
 //! [`ClipPick`] plus [`FighterSlot::fade`] in the look fold path
-//! (`crates/game/src/fighter_look_acts.rs`), then samples both clips in
-//! `slot_pose` and blends them while the fade runs.
+//! (`crates/game/src/fighter_look_acts.rs`) and mirrors the fade count onto
+//! its slot. The pose no longer blends the two clips while the fade runs: a
+//! clip switch rides on inertial offsets instead
+//! (`crates/game/src/fighter_look_inertia.rs`).
 //! Data owner: this module owns the act pick and the fade driver; clip files
 //! stay with the look, fade math with `engine-anim`. Units: meters per tick
 //! in, clip indices plus integer ticks plus Q8 rate out. Determinism: the
@@ -241,7 +243,11 @@ impl FighterSlot {
         if view.slot != self.slot {
             return Err(BridgeError::BadSlot(view.slot));
         }
-        self.fade.tick();
+        // A held slot's crossfade waits with its clip clock, so the blend
+        // weight on the first free tick is the one the hit froze.
+        if tick >= self.hold_until {
+            self.fade.tick();
+        }
         self.fold_position(view);
         let speed = planar_speed(self.pos_m, self.prev_pos_m);
         let down = hp_permille == 0;
@@ -494,6 +500,34 @@ mod tests {
         let weight = slot.fade().weight();
         assert!((weight - 4.0 / 9.0).abs() < 1e-6, "{weight}");
         assert_ne!(weight, 0.5);
+    }
+
+    #[test]
+    fn fighter_anim_bridge_hold_pauses_the_fade_until_it_ends() {
+        // LF10: the blend weight stands still through a hitstop hold and
+        // resumes the first free tick; an unheld twin keeps blending.
+        let run = |held: bool| {
+            let mut slot = FighterSlot::new(0);
+            tick_march(&mut slot, 0, -1.0, 1000, &[]);
+            tick_march(&mut slot, 1, -0.90, 1000, &[]);
+            assert!(slot.fade().blending(), "idle to run starts a fade");
+            let total = slot.fade().fade_left;
+            if held {
+                slot.hold_through(5);
+            }
+            let mut lefts = Vec::new();
+            for tick in 2..=5u32 {
+                let x = -0.90 + 0.10 * f32::from(u16::try_from(tick - 1).unwrap_or(u16::MAX));
+                tick_march(&mut slot, tick, x, 1000, &[]);
+                lefts.push(slot.fade().fade_left);
+            }
+            (total, lefts)
+        };
+        let (total, held) = run(true);
+        assert_eq!(&held[..3], &[total; 3], "ticks 2..=4 hold the blend");
+        assert_eq!(held[3], total - 1, "tick 5 is free and the blend moves");
+        let (_, free) = run(false);
+        assert_eq!(free, vec![total - 1, total - 2, total - 3, total - 4]);
     }
 
     #[test]

@@ -46,12 +46,13 @@ test("board is smaller than the pre-fix 608000 bytes", () => {
   assert.ok(size < 605000, `board ${size} bytes should be under 605000 (was 608000)`);
 });
 
-test("board documents the sprint-loop width cap 1..30", () => {
+test("board names no loop machinery (standalone repo, owner 2026-10-17)", () => {
   const text = readFileSync(BOARD_PATH, "utf8");
-  assert.match(text, /sprint-loop\.mjs --width 1\.\.30/, "doc names the 1..30 cap (revert this and the test goes red)");
-  assert.doesNotMatch(text, /sprint-loop\.mjs --width 1\.\.60/, "stale 1..60 cap is gone");
-  assert.match(text, /knob width \(30 now/, "doc knob width is 30 (revert this and the test goes red)");
-  assert.doesNotMatch(text, /knob width \(60 now/, "stale 60-wide knob is gone");
+  for (const word of ["sprint-loop", "sprint-lock", "keeper", "claims.txt", "land.mjs", "knob ", "/sprint", "orchestrator", "planner", "researcher"]) {
+    assert.ok(!text.includes(word), `the board index must not name ${word} (revert this and the test goes red)`);
+  }
+  assert.match(text, /## How a row works/, "the plain row rules are stated");
+  assert.match(text, /board-slice\.mjs --focus/, "rows are taken from the Now order through board-slice");
 });
 
 test("old verbose 2026-10-03 receipt bodies are archived to git history", () => {
@@ -99,7 +100,6 @@ test("board runs in one tree: lanes are retired (owner 2026-10-10)", () => {
   assert.doesNotMatch(index, /lanes\.mjs (create|prune|diff)/, "no lane tool step in the wave flow (revert this and the test goes red)");
   assert.doesNotMatch(index, /git apply --3way/, "no collected-patch landing step (revert this and the test goes red)");
   assert.match(index, /no lanes, no\s+worktrees/, "the one-tree rule is stated (revert this and the test goes red)");
-  assert.match(index, /git restore --source=HEAD -- <owned paths>/, "abandon command is stated (revert this and the test goes red)");
 });
 
 test("board index stays under 7520 after the lane-cap dedup", () => {

@@ -403,6 +403,12 @@ fn ibl_sh_basis(d: vec3<f32>) -> array<f32, 9> {
     b[8] = 0.546274 * (d.x * d.x - d.y * d.y);
     return b;
 }
+// Baked-ambient gain for the frame. `ibl_sh[0].w` is the cut word: the CPU
+// packer leaves every pad word at 0.0 (lit as baked) and the live frame
+// writes 1.0 there while the pass-truth gate renders its IBL-off frame.
+fn ibl_gain() -> f32 {
+    return 1.0 - clamp(ibl_sh[0].w, 0.0, 1.0);
+}
 fn ibl_irradiance(n: vec3<f32>) -> vec3<f32> {
     let b = ibl_sh_basis(n);
     var e = vec3<f32>(0.0, 0.0, 0.0);
@@ -415,7 +421,7 @@ fn ibl_irradiance(n: vec3<f32>) -> vec3<f32> {
     e += ibl_sh[6].xyz * b[6];
     e += ibl_sh[7].xyz * b[7];
     e += ibl_sh[8].xyz * b[8];
-    return max(e, vec3<f32>(0.0, 0.0, 0.0));
+    return max(e, vec3<f32>(0.0, 0.0, 0.0)) * ibl_gain();
 }
 fn ibl_prefilter_level(layer_base: i32, face: i32, u: f32, v: f32) -> vec3<f32> {
     let x = clamp((u + 1.0) * 0.5 * 64.0 - 0.5, 0.0, 63.0);
@@ -482,7 +488,7 @@ fn ibl_specular(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roughness: f32) -> ve
     let p1 = ibl_prefilter_level(l1 * 6, face, uu, vv);
     let pre = mix(p0, p1, t);
     let fab = ibl_brdf_pair(ndotv, roughness);
-    return pre * (f0 * fab.x + vec3<f32>(fab.y, fab.y, fab.y));
+    return pre * (f0 * fab.x + vec3<f32>(fab.y, fab.y, fab.y)) * ibl_gain();
 }
 fn ibl_sample(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roughness: f32, albedo: vec3<f32>, metallic: f32) -> vec3<f32> {
     return ibl_diffuse(n, albedo, metallic) + ibl_specular(n, v, f0, roughness);

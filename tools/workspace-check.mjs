@@ -9,8 +9,6 @@ import { fileURLToPath } from "node:url";
 import { SIM_CRATES } from "./rust-quality.mjs";
 import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
-import { breaches as researchBreaches, failLine as researchFailLine } from "./research-cap.mjs";
-import { list as presenceList } from "./presence.mjs";
 import { deriveFixedApi, genreHits, platformMathHits } from "./sim-source-scan.mjs";
 import { runWithVerdictCache } from "./wiring-scan.mjs";
 
@@ -48,12 +46,16 @@ export const allowedEdges = new Map([
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
   // step_islands runs its lanes on the ecs JobPool (persistent workers, index-ordered merge).
   ["engine-physics", ["engine-anim", "engine-ecs"]],
+  // RZ1 physical layer: float Rapier world, presentation only. It takes the ragdoll joint builder from
+  // physics and the skeleton/pose types from anim. No sim crate (arena, combat, proof) may list it.
+  ["engine-physfx", ["engine-physics", "engine-anim"]],
   ["engine-render", ["engine-observe", "engine-assets"]], // v1-only tangents (ARCHITECTURE C3); default stays std-only
   ["engine-ui", ["engine-input"]],
   ["engine-viewer", ["engine-game", "engine-arena", "engine-app", "engine-material"]],
   ["engine-geo", ["engine-assets"]],
   ["engine-perf", ["engine-core", "engine-ecs", "engine-physics", "engine-render", "engine-arena", "engine-ai", "engine-destruction", "engine-net"]],
-  ["engine-proof", ["engine-core", "engine-ecs", "engine-physics", "engine-scene", "engine-arena", "engine-observe", "engine-assets", "engine-editor", "engine-render", "engine-net", "engine-combat"]],
+  // The ragdoll tape (feature `ragdoll`) builds the skeleton and pose types of the fixture from engine-anim.
+  ["engine-proof", ["engine-core", "engine-ecs", "engine-physics", "engine-scene", "engine-arena", "engine-observe", "engine-assets", "engine-editor", "engine-render", "engine-net", "engine-combat", "engine-anim"]],
   ["engine-core", []],
   ["engine-ecs", []],
   ["engine-nn", []],
@@ -135,18 +137,6 @@ export function structuralMapViolations({ headings, paths, workspaceCrates, repo
   // Unused `paths` documents the parsed path list for callers; missing above carries the failure.
   void paths;
   return found;
-}
-
-// Presence summary (no-locks): one non-blocking line naming live sessions.
-// Missing dir or corrupt JSON prints zero, never fails the audit.
-function printPresenceSummary(repoDir) {
-  try {
-    const rows = presenceList(join(repoDir, "target", "presence"));
-    const live = rows.filter((r) => !r.stale).length;
-    console.log(`presence: ${live} live`);
-  } catch {
-    console.log("presence: 0 live");
-  }
 }
 
 // Single-grammar board check (no second parser): task rows and needs come
@@ -714,23 +704,6 @@ function audit(repoDir) {
     errors.push(`LFS size guard could not run: ${error.message}`);
   }
 
-  // Research cap (tools/research-cap.mjs): an open board row with more
-  // than CAP cards fails. A missing cards dir means no breach, never a crash.
-  let researchFound = [];
-  try {
-    const cardsDir = join(dirname(root.manifest_path), "docs", "research", "cards");
-    let cardNames = [];
-    try { cardNames = readdirSync(cardsDir).filter((n) => n.endsWith(".md")); } catch { cardNames = []; }
-    const cardTexts = new Map();
-    for (const name of cardNames) {
-      try { cardTexts.set(name, cachedRead(join(cardsDir, name))); } catch { cardTexts.set(name, ""); }
-    }
-    researchFound = researchBreaches({ cardNames, board: boardText, cardTexts });
-    for (const b of researchFound) errors.push(researchFailLine(b));
-  } catch (error) {
-    errors.push(`research cap could not run: ${error.message}`);
-  }
-
   // Test layout guard: crates that merged their tests into tests/it must not grow new test executables.
   let layoutCrates = 0;
   try {
@@ -791,7 +764,6 @@ function audit(repoDir) {
     console.log(`WARN wiring (report-only): ${wireOut}`);
   } catch (error) { console.log(`WARN wiring (report-only): check failed: ${String(error.message).split("\n")[0]}`); }
   try { const flakyOut = execFileSync(process.execPath, [join(repoDir, "tools", "flaky-quarantine.mjs"), "--self-test"], { encoding: "utf8" }).split("\n").find((l) => l.startsWith("PASS"))?.trim(); console.log(`WARN flaky (report-only): ${flakyOut ?? "no PASS line"}`); } catch (error) { console.log(`WARN flaky (report-only): check failed: ${String(error.message).split("\n")[0]}`); }
-  printPresenceSummary(repoDir);
   if (errors.length) throw new Error(errors.join("\n"));
   console.log(`PASS workspace: ${workspacePackages.length} packages share version/edition/license/rust-version`);
   console.log("PASS dependency edges and std-only engine-core");
@@ -799,7 +771,6 @@ function audit(repoDir) {
   console.log(`PASS modules: all ${sourceFiles} source files are compiled`);
   console.log(`PASS board: ${tasks.size} tasks in docs/SPRINT.md, ids unique, every needs resolves`);
   console.log("PASS lfs guard: no newly tracked non-LFS blob over 5 MB");
-  console.log(`PASS research cap: no open row over the card cap (${researchFound.length} breaches)`);
   console.log(`PASS test layout: ${layoutCrates} crates keep one integration-test binary (tests/it)`);
   console.log(`PASS maps: ${mapCrates} crates, ${mapPaths} paths match the tree`);
   console.log(mathFindings.length

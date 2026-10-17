@@ -2925,8 +2925,13 @@ mod tests {
             (staged_img.width, staged_img.height),
             (bare_img.width, bare_img.height)
         );
-        let cx = (((rect[0] + rect[2]) / 2.0) * staged_img.width as f32) as usize;
-        let cy = (((rect[1] + rect[3]) / 2.0) * staged_img.height as f32) as usize;
+        // The overlay draws the 0..1 hud rect through the shared ortho (x
+        // divided by aspect, y up), so the rect centre maps the same way.
+        let mvp = engine_render::overlay::overlay_mvp(width as f32 / height as f32);
+        let ndc_x = mvp[0][0] * ((rect[0] + rect[2]) / 2.0) + mvp[3][0];
+        let ndc_y = mvp[1][1] * ((rect[1] + rect[3]) / 2.0) + mvp[3][1];
+        let cx = ((ndc_x + 1.0) * 0.5 * width as f32) as usize;
+        let cy = ((1.0 - ndc_y) * 0.5 * height as f32) as usize;
         let cx = cx.min(width.saturating_sub(1));
         let cy = cy.min(height.saturating_sub(1));
         let at = (cy * width + cx) * 4;

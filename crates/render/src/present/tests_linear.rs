@@ -25,13 +25,14 @@ const SHADER_BUILDERS: [(&str, &str); 7] = [
 ];
 
 /// Body of the WGSL function `name`: from its signature to the closing brace
-/// at column 0.
+/// at column 0. The brace is found without its line end, so a CRLF checkout
+/// closes the function the same way an LF one does.
 #[cfg(feature = "window")]
 fn wgsl_fn_body<'a>(source: &'a str, name: &str) -> &'a str {
     let head = format!("fn {name}(");
     let start = source.find(&head).expect("function exists in the source");
     let rest = &source[start..];
-    let end = rest.find("\n}\n").expect("function closes");
+    let end = rest.find("\n}").expect("function closes");
     &rest[..end]
 }
 
@@ -101,15 +102,19 @@ mod shader_text {
 
     #[test]
     fn the_blit_does_the_one_tone_map() {
+        // The blit's one tone map is `display_tonemap` (the hue-keeping
+        // display, 4d88a021); `aces_fitted` stays in the same source for the
+        // offscreen capture entries.
         let blit = crate::present::gpu_present::BLIT_WGSL;
         let fs = wgsl_fn_body(blit, "fs");
-        assert!(fs.contains("aces_fitted") && fs.contains("linear_to_srgb_term"));
+        assert!(fs.contains("display_tonemap") && fs.contains("linear_to_srgb_term"));
         let hw = wgsl_fn_body(blit, "fs_hw_srgb");
-        assert!(hw.contains("aces_fitted"), "tone map still runs");
+        assert!(hw.contains("display_tonemap"), "tone map still runs");
         assert!(
             !hw.contains("linear_to_srgb_term"),
             "a *Srgb view encodes on write, the shader must not encode twice"
         );
+        assert_eq!(blit.matches("fn display_tonemap(").count(), 1);
         assert_eq!(blit.matches("fn aces_fitted(").count(), 1);
     }
 }
@@ -260,32 +265,56 @@ mod device {
         ]
     }
 
-    /// CPU twin of `aces_fitted` plus the sRGB transfer, 0..=255 per channel.
+    /// CPU twin of the blit's display chain on a pixel the bloom leaves
+    /// alone: `display_tonemap` (hue-keeping display, exposure anchor, knee
+    /// lift, stone drain in `tonemap.wgsl`), `blit_grade`, then the sRGB
+    /// transfer, 0..=255 per channel. The 4x4 dither is zero-mean within
+    /// half a code, inside every tolerance below.
     fn display_of(linear: [f32; 3]) -> [f32; 3] {
-        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-        let fit = |v: f32| {
-            (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081)
+        const DISPLAY_WHITE: f32 = 11.2;
+        const DISPLAY_EXPOSURE: f32 = 0.6;
+        const DISPLAY_KNEE: f32 = 0.35;
+        const DISPLAY_KNEE_GAIN: f32 = 0.80;
+        const DRAIN_KNEE: f32 = 0.55;
+        const DRAIN_SPAN: f32 = 0.20;
+        const DRAIN: f32 = 0.60;
+        const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+        let luma = |c: [f32; 3]| c[0] * LUMA[0] + c[1] * LUMA[1] + c[2] * LUMA[2];
+        let fit_one = |x: f32| {
+            let v = x.max(0.0);
+            let num = v * (2.51 * v + 0.03);
+            let den = (v * (2.43 * v + 0.59) + 0.14).max(1e-4);
+            (num / den).clamp(0.0, 1.0)
         };
-        let to_rrt = [
-            [0.59719, 0.35458, 0.04823],
-            [0.07600, 0.90834, 0.01566],
-            [0.02840, 0.13383, 0.83777],
-        ];
-        let from_rrt = [
-            [1.60475, -0.53108, -0.07367],
-            [-0.10208, 1.10813, -0.00605],
-            [-0.00327, -0.07276, 1.07602],
-        ];
-        let r = to_rrt.map(|col| fit(dot(linear, col)));
-        let mapped = from_rrt.map(|col| dot(r, col).clamp(0.0, 1.0));
-        mapped.map(|x| {
-            let enc = if x <= 0.0031308 {
-                12.92 * x
+        let capped = linear.map(|c| c.clamp(0.0, 1e6));
+        let peak = capped[0].max(capped[1]).max(capped[2]);
+        let white = fit_one(DISPLAY_WHITE).max(1e-4);
+        let toned_peak = fit_one(peak * DISPLAY_EXPOSURE) / white;
+        let lifted = toned_peak + (toned_peak - DISPLAY_KNEE).max(0.0) * DISPLAY_KNEE_GAIN;
+        let scale = lifted / peak.max(1e-6);
+        let shown = capped.map(|c| c * scale);
+        let level = shown[0].max(shown[1]).max(shown[2]);
+        let t = ((level - DRAIN_KNEE) / DRAIN_SPAN).clamp(0.0, 1.0);
+        let grey = luma(shown);
+        let drained = shown.map(|c| c + (grey - c) * DRAIN * t);
+        // blit_grade: contrast about mid grey, saturation, gain plus lift.
+        let contrasted = drained.map(|c| (c - 0.18) * 1.08 + 0.18);
+        let lum = luma(contrasted);
+        let gain = [1.03f32, 1.0, 0.98];
+        let lift = [0.004f32, 0.002, 0.0];
+        let mut out = [0.0f32; 3];
+        for c in 0..3 {
+            let saturated = lum + (contrasted[c] - lum) * 1.12;
+            let graded = (saturated * gain[c] + lift[c]).max(0.0);
+            let enc = if graded <= 0.0031308 {
+                12.92 * graded
             } else {
-                1.055 * x.powf(1.0 / 2.4) - 0.055
+                1.055 * graded.powf(1.0 / 2.4) - 0.055
             };
-            enc * 255.0
-        })
+            // The twin target is 8-bit unorm: it clamps what the encode gives.
+            out[c] = enc.clamp(0.0, 1.0) * 255.0;
+        }
+        out
     }
 
     #[test]
@@ -389,6 +418,8 @@ mod device {
                 .light,
             items: Vec::new(),
         };
+        // The live frame draws the sky in its own pass; the pixels read here
+        // are that pass's radiance.
         presenter.render_live_offscreen(&empty).expect("sky frame");
         let mut cam = camera;
         cam.aspect = 1.0;
@@ -409,7 +440,12 @@ mod device {
             );
             let world = inv * ndc;
             let dir = (world.truncate() / world.w - cam.eye).normalize();
-            let want = fog.sky_color(cam.eye.to_array(), dir.to_array());
+            // CPU twin of `fs_sky`: the bake sampled along the ray, mixed
+            // toward the fog horizon by the infinite-distance factor.
+            let base = crate::sky::sample_look_skybox(&presenter.sky_look, dir.to_array())
+                .expect("bake samples along the ray");
+            let f = fog.factor_infinite(cam.eye.to_array(), dir.to_array());
+            let want = [0, 1, 2].map(|c| base[c] + (fog.color[c] - base[c]) * f);
             let got = hdr_pixel(&presenter, x, y);
             for c in 0..3 {
                 assert!(
@@ -556,8 +592,10 @@ mod device {
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some("vs_depth"),
+                // The 48-byte forward vertex: position, normal, uv, tangent.
+                // `vs_depth` takes the whole `VIn`, so the tangent must be fed.
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 32,
+                    array_stride: 48,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
                         wgpu::VertexAttribute {
@@ -574,6 +612,11 @@ mod device {
                             format: wgpu::VertexFormat::Float32x2,
                             offset: 24,
                             shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 32,
+                            shader_location: 3,
                         },
                     ],
                 })],
@@ -598,7 +641,8 @@ mod device {
 
     /// The capture twin composites the probe fog pair on linear radiance,
     /// before the one tone map. Level camera over an empty frame: the top
-    /// rows look over the horizon (clear), the bottom rows into the haze.
+    /// rows look over the horizon (thin haze, read against the fog bake's
+    /// own factor), the bottom rows into the full haze.
     /// Fully fogged bands read the bound ramp, tone-mapped, darkened by at
     /// most the contact AO's own range. (The earlier assertion divided the
     /// ramp by the mean AO of the whole bottom half, 0.6, but the bottom
@@ -622,8 +666,13 @@ mod device {
             light: scene.light,
             items: Vec::new(),
         };
+        // The capture twin draws the sky triangle under the all-on set
+        // (EG8): its rows over the horizon would read sky, not the clear.
+        // This test isolates the fog composite, so the sky row is off.
+        let mut no_sky = crate::pass_truth::LookToggles::all_on();
+        no_sky.disable("sky");
         let on = presenter
-            .render_offscreen(&empty)
+            .render_offscreen_with_toggles(&empty, &no_sky)
             .expect("fog frame renders");
         assert_eq!(on.receipt.fog_passes, 2);
         assert!(on.manifest.is_clean());
@@ -648,13 +697,6 @@ mod device {
         // File rows run upright: row 0 is view-top.
         let top = mean(0, 8);
         let bottom = mean(56, 64);
-        let clear = [8.0f32, 9.0, 15.0];
-        for c in 0..3 {
-            assert!(
-                (top[c] - clear[c]).abs() < 6.0,
-                "over-horizon rows keep the clear: {top:?}"
-            );
-        }
         // The ramp the blit mixes is the presenter's own look-bake horizon
         // color after the sun-scatter tint the fog tranche applies for this
         // camera (eye to target is -z): rebuild it the same way.
@@ -663,6 +705,39 @@ mod device {
             .with_sun_tint(presenter.look_frame().sun_dir, [0.0, 0.0, -1.0])
             .expect("tint applies");
         let ramp = tinted.fog_color;
+        // Rows over the horizon: the haze thins with height but is not zero
+        // there, so the oracle is the fog bake's own factor over the
+        // far-plane feed of the cleared depth, mixed toward the ramp on
+        // linear radiance and sent through the blit's chain.
+        let mut cam = empty.camera.clone();
+        cam.aspect = 1.0;
+        let inv = cam
+            .view_proj()
+            .expect("camera")
+            .inverse()
+            .to_cols_array_2d();
+        let feed = decode_depth_feed(&[1.0f32; 64 * 64], 64, 64, inv, cam.eye.to_array())
+            .expect("far-plane feed decodes");
+        let (field, _) =
+            crate::fog::bake_height_fog(&feed.depth_m, &feed.height_m, &tinted, 64, 64)
+                .expect("fog field bakes");
+        let clear_hdr = [HDR_CLEAR.r as f32, HDR_CLEAR.g as f32, HDR_CLEAR.b as f32];
+        let mut want_top = [0.0f32; 3];
+        for y in 0..8u32 {
+            for x in 0..64u32 {
+                let f = field.texel(x, y).expect("fog texel");
+                let px = display_of([0, 1, 2].map(|c| clear_hdr[c] + (ramp[c] - clear_hdr[c]) * f));
+                for c in 0..3 {
+                    want_top[c] += px[c] / (8.0 * 64.0);
+                }
+            }
+        }
+        for c in 0..3 {
+            assert!(
+                (top[c] - want_top[c]).abs() < 6.0,
+                "over-horizon rows follow the fog bake over the clear: {top:?} vs {want_top:?}"
+            );
+        }
         let ao_min = presenter.fog_contact_min();
         assert!(
             (0.0..=1.0).contains(&ao_min),
@@ -681,9 +756,10 @@ mod device {
             );
         }
         // Kill switch: the same frame is the clear colour everywhere.
+        let clear = display_of(clear_hdr);
         presenter.set_fog_enabled(false);
         let off = presenter
-            .render_offscreen(&empty)
+            .render_offscreen_with_toggles(&empty, &no_sky)
             .expect("unfogged frame renders");
         assert_eq!(off.receipt.fog_passes, 0);
         let png_off = off.png.expect("pixels");
@@ -696,7 +772,14 @@ mod device {
                 worst = worst.max((f32::from(p[c]) - clear[c]).abs());
             }
         }
-        assert!(worst < 6.0, "fog off restores the clear frame: {worst}");
+        // The clear sits at black in the display chain, where the blit's
+        // dither (at most 0.469 of a code before the encode) rides the sRGB
+        // toe: 12.92 * 0.469 = 6.06 codes, plus half a code of rounding.
+        const DITHER_AT_BLACK_CODES: f32 = 6.6;
+        assert!(
+            worst < DITHER_AT_BLACK_CODES,
+            "fog off restores the clear frame: {worst}"
+        );
     }
 }
 

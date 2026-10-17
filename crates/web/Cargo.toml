@@ -1,0 +1,48 @@
+[package]
+name = "engine-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WEB4: the browser shell - a WebGPU device, a cleared canvas with a moving square, and one JSON line"
+
+[lints]
+workspace = true
+
+# cdylib is what wasm-bindgen turns into engine.js and engine_bg.wasm (tools/web-build.mjs);
+# rlib keeps the native workspace build and the unit tests of the pure modules working.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Not the workspace entry: the shell needs the WebGPU backend only. Cargo ignores
+# `default-features = false` on a `workspace = true` line, so the version is spelled out
+# (keep it equal to the workspace `wgpu`). On native this resolves to the types and limits
+# the pure modules use; on wasm32 `webgpu` selects the browser backend.
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
+
+# The golden tape and the cut corpus run inside the page (src/golden.rs). The default graph of
+# engine-proof is std-only and builds for wasm32-unknown-unknown with no imports.
+engine-proof.workspace = true
+
+# The browser has no std clock: the shell installs the page's performance.now() here before anything
+# that reads time runs (engine-assets and engine-app panic on wasm32-unknown-unknown until it has).
+engine-clock = { version = "0.1.0", path = "../clock" }
+
+# Browser glue. Target-gated, so the native workspace never builds it. Versions are the ones
+# wgpu's web backend already pulls (Cargo.lock); tools/web-build.mjs runs the wasm-bindgen CLI
+# at the locked wasm-bindgen version.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "Navigator",
+    "Performance",
+    "Window",
+    "console",
+] }

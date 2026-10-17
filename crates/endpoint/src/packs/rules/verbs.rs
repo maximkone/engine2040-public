@@ -345,6 +345,7 @@ fn rules_explain(
         ticks: args.tick + 1,
         fighters,
         half_extent_m: half,
+        table_version: 1,
     };
     let world = match args.scene_rev {
         Some(rev) => Some(server.dispatch(TOOL_RULES_EXPLAIN, |state| {

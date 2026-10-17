@@ -1115,8 +1115,9 @@ fn resolve_spacing(
 /// Parent-to-child spherical joints anchored at the rest-pose midpoint of
 /// each pair, with depth-limited swing and contacts off between joined
 /// bodies. Split from `spawn` while it is open so the constructor stays
-/// short; the math is unchanged.
-pub(crate) fn insert_joints(
+/// short; the math is unchanged. Public so the float-only physical layer
+/// (`engine-physfx`) joins its ragdoll bones the same way this ragdoll does.
+pub fn insert_joints(
     skeleton: &Skeleton,
     world_pos: &[[f32; 3]],
     world_rot: &[[f32; 4]],
@@ -1150,7 +1151,7 @@ pub(crate) fn insert_joints(
 
 /// Depth of each joint (root is 0). Parents-first order from skeleton
 /// validation means the parent depth is already known when a child is visited.
-pub(crate) fn joint_depths(skeleton: &Skeleton) -> Vec<u32> {
+pub fn joint_depths(skeleton: &Skeleton) -> Vec<u32> {
     let mut depths = vec![0u32; skeleton.len()];
     for (i, joint) in skeleton.joints.iter().enumerate() {
         if let Some(p) = joint.parent {
@@ -1382,7 +1383,7 @@ pub fn stabilize_masses(masses: &mut [f32], skeleton: &Skeleton) {
 /// Animated world transforms, parent-first: positions compose by rotated
 /// offset plus parent position, rotations by quaternion multiply. Only
 /// `+ - *` math; callers validate lengths and parent order first.
-fn world_transforms(skeleton: &Skeleton, pose: &LocalPose) -> (Vec<[f32; 3]>, Vec<[f32; 4]>) {
+pub fn world_transforms(skeleton: &Skeleton, pose: &LocalPose) -> (Vec<[f32; 3]>, Vec<[f32; 4]>) {
     let mut pos = vec![[0.0f32; 3]; skeleton.len()];
     let mut rot = vec![[0.0f32, 0.0, 0.0, 1.0]; skeleton.len()];
     for (i, joint) in skeleton.joints.iter().enumerate() {

@@ -15,7 +15,8 @@ use crate::curves::{parse_dec_u32, AiConfig};
 use crate::gladiator::{sanitize_dist_mm, Brain, Intent, Percept};
 use crate::melee::add_bias;
 use crate::personality::Personality;
-use engine_input::{FighterId, FighterInput, MAX_PARTICIPANTS};
+use crate::tier::TierPlay;
+use engine_input::{Buttons, FighterId, FighterInput, MAX_PARTICIPANTS};
 
 // Steering lives in depth/steer.rs (directory child module so the
 // workspace module gate resolves it; NOT `legion` — that name belongs to
@@ -840,6 +841,7 @@ pub struct DepthBrain {
     personality: Option<Personality>,
     threat_history: u8,
     tier: Option<TierRow>,
+    play: TierPlay,
 }
 
 impl DepthBrain {
@@ -855,6 +857,7 @@ impl DepthBrain {
             personality: None,
             threat_history: 0,
             tier: None,
+            play: TierPlay::default(),
         }
     }
 
@@ -871,6 +874,7 @@ impl DepthBrain {
             personality: None,
             threat_history: 0,
             tier: None,
+            play: TierPlay::default(),
         }
     }
 
@@ -925,9 +929,9 @@ impl DepthBrain {
     }
 
     /// Install a duel tier: its role pins the policy and its reaction plus
-    /// aggression shape the temperament. The scored decide path re-reads
-    /// both every tick into the gladiator core, so tiers climb in skill
-    /// while health stays in the narrow band. Set before the first tick.
+    /// aggression shape the temperament, while morale is pinned neutral (the
+    /// tier owns the nerve). The scored decide path re-reads these every tick,
+    /// so tiers climb in skill while health stays narrow. Set before tick one.
     pub fn set_tier(&mut self, tier: TierRow) {
         self.tier = Some(tier);
         self.policy.set_role(tier.role());
@@ -1009,18 +1013,20 @@ impl DepthBrain {
     }
 
     /// Decide one [`FighterInput`] for `percept`: track the feint release,
-    /// score through the scripted core with the depth bias, steer the emitted
-    /// wish off blocked axes and toward a far foe, then map a tier brain's
-    /// facing-relative wish into the world axes a legacy arena reads, and
-    /// charge stamina for the emitted intent. Always deterministic and always
-    /// passes [`FighterInput::validate`]. Budget: the steering post-pass plus
-    /// the tier wish map are a few dozen integer ops with zero allocation.
+    /// score with the depth bias, map a tier brain's facing-relative wish into
+    /// the world axes a legacy arena reads, steer it off blocked axes and
+    /// toward a far foe, and charge stamina. Deterministic, always passes
+    /// [`FighterInput::validate`], a few dozen integer ops with no allocation.
     ///
     /// [`FighterInput::validate`]: engine_input::FighterInput::validate
     pub fn decide(&mut self, percept: &Percept) -> FighterInput {
+        let me = [pos_mm(percept.self_pos[0]), pos_mm(percept.self_pos[2])];
+        let foe = [pos_mm(percept.foe_pos[0]), pos_mm(percept.foe_pos[2])];
         if let Some(tier) = self.tier {
             self.policy.set_role(tier.role());
             self.personality = Some(tier.personality());
+            self.inner.set_morale(Brain::MORALE_NEUTRAL);
+            self.play.seed(percept.tick, me, foe);
         }
         let dist_mm = sanitize_dist_mm(percept.dist_m);
         let seen = self.perceive(percept);
@@ -1030,41 +1036,32 @@ impl DepthBrain {
         self.foe_was_attacking = percept.foe_attacking;
         let bias = self.edge_bias(percept, dist_mm);
         let scored = self.inner.decide_with_bias(percept, bias);
-        // Steering: re-aim the scored wish only. Scores, buttons and
-        // facing pass through untouched, so the curves still decide every
-        // fight action; the wish changes solely on wall contact (a wish the
-        // clamp would eat slides off the wall) or far-foe stillness (a dead
-        // wish beyond legion range closes in).
+        // A tier brain on the legacy arena (no melee view: it reads the wish
+        // as world axes) maps its own wish into the foe frame and backs away,
+        // buttons up, when held still. A rules-v2 arena maps it itself.
+        let tiered = self.tier.is_some() && !percept.melee.is_live();
+        let away = tiered && self.play.backing_away(me);
+        let intent = [self.inner.intent(), Intent::Retreat][usize::from(away)];
+        let wish = if tiered {
+            tier_wish_to_world(scored, intent, percept, dist_mm)
+        } else {
+            scored
+        };
+        // Steering re-aims the wish only, on wall contact (slide off the
+        // wall) or far-foe stillness (a dead wish beyond range closes in).
         let (mx, mz) = steer::steer_wish(
-            pos_mm(percept.self_pos[0]),
-            pos_mm(percept.self_pos[2]),
-            pos_mm(percept.foe_pos[0]),
-            pos_mm(percept.foe_pos[2]),
-            scored.mx,
-            scored.mz,
+            me[0],
+            me[1],
+            foe[0],
+            foe[1],
+            wish.mx,
+            wish.mz,
             self.half_extent_mm,
         );
-        let input = FighterInput { mx, mz, ..scored };
-        // A tier brain is the shipped duel enemy: when its arena hands it no
-        // melee view (the legacy rules that read the wish pair as world axes,
-        // not the facing-relative scored wish), it maps its own wish into the
-        // foe frame so the rung can close and fence. A rules-v2 arena maps
-        // the same wish itself and attaches a live view, so this never doubles.
-        let input = if self.tier.is_some() && !percept.melee.is_live() {
-            let mapped = tier_wish_to_world(input, self.inner.intent(), percept, dist_mm);
-            let (mx, mz) = steer::steer_wish(
-                pos_mm(percept.self_pos[0]),
-                pos_mm(percept.self_pos[2]),
-                pos_mm(percept.foe_pos[0]),
-                pos_mm(percept.foe_pos[2]),
-                mapped.mx,
-                mapped.mz,
-                self.half_extent_mm,
-            );
-            FighterInput { mx, mz, ..mapped }
-        } else {
-            input
-        };
+        let mut input = FighterInput { mx, mz, ..wish };
+        if away {
+            input.buttons = Buttons::NONE;
+        }
         let drained = self
             .policy
             .stamina()
@@ -1097,7 +1094,7 @@ impl DepthBrain {
         let lag = u32::from(self.personality.map_or(0, |p| p.reaction_ticks()));
         let now = (self.threat_history >> lag) & 1 == 1;
         let before = (self.threat_history >> (lag + 1)) & 1 == 1;
-        if now && !before {
+        if now != before && (now || self.tier.is_some_and(crate::tier::punishes)) {
             self.inner.rearm();
         }
         Percept {
@@ -1108,7 +1105,7 @@ impl DepthBrain {
 
     /// Depth bias for this tick: the installed arena policy, the melee view
     /// (the real stamina replaces the brain's running estimate while one is
-    /// attached) and the temperament, summed with saturating adds.
+    /// attached), the temperament and a tier's lean, summed with saturating adds.
     fn edge_bias(&mut self, percept: &Percept, dist_mm: i32) -> [i32; 5] {
         if percept.melee.is_live() {
             self.policy
@@ -1118,6 +1115,11 @@ impl DepthBrain {
         add_bias(&mut bias, percept.melee.score_bias(dist_mm));
         if let Some(personality) = &self.personality {
             add_bias(&mut bias, personality.score_bias(dist_mm));
+        }
+        if let Some(tier) = self.tier {
+            let lifted = percept.foe_attacking || self.policy.is_feinting();
+            let lean = self.play.lean(tier, self.fighter.0, percept.tick, lifted);
+            bias[IDX_ATTACK] = bias[IDX_ATTACK].saturating_add(lean);
         }
         bias
     }
@@ -2678,6 +2680,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tier_brain_backs_away_the_tick_stillness_trips() {
+        let mut brain = DepthBrain::new(fighter(0), 6);
+        brain.set_tier(SHIPPED_TIERS[1]);
+        let outs: Vec<FighterInput> = (0..crate::tier::STILL_TICKS)
+            .map(|tick| brain.decide(&percept(tick, 3.0, false)))
+            .collect();
+        let (before, tripped) = (outs[outs.len() - 2], outs[outs.len() - 1]);
+        assert!(before.mx > 0, "advances on the foe to the east: {before:?}");
+        assert!(tripped.mx < 0, "backs away from the foe: {tripped:?}");
+        assert_eq!(tripped.buttons, engine_input::Buttons::NONE);
+    }
+    #[test]
+    fn tier_brain_owns_its_nerve_but_a_plain_brain_obeys_morale() {
+        let run = |tiered: bool, morale: i32| {
+            let mut brain = DepthBrain::new(fighter(0), 6);
+            if tiered {
+                brain.set_tier(SHIPPED_TIERS[1]);
+            }
+            brain.set_morale(morale);
+            let look = |tick: u32| brain.decide(&script_percept(0, tick));
+            (0..120).map(look).collect::<Vec<_>>()
+        };
+        assert_eq!(run(true, 1_000), run(true, 0), "a tier pins morale");
+        assert_ne!(run(false, 1_000), run(false, 0), "a plain brain paces");
+    }
+
+    #[test]
+    fn tier_three_replies_the_tick_the_foe_swing_ends() {
+        let after_swing = |tier: TierRow| {
+            let mut brain = DepthBrain::new(fighter(0), 600);
+            brain.set_tier(tier);
+            for tick in 0..20 {
+                brain.decide(&percept(tick, 1.0, (4..10).contains(&tick)));
+            }
+            brain.intent()
+        };
+        assert_eq!(after_swing(SHIPPED_TIERS[2]), Intent::Attack);
+        assert_ne!(after_swing(SHIPPED_TIERS[1]), Intent::Attack, "waits");
+    }
     #[test]
     fn tier_rows_refuse_bad_lines_with_the_line() {
         let good_1 = "tier_1 hp_permille=950 tell_ticks=15 stagger_permille=400 counter=1";

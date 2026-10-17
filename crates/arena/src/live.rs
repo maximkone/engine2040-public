@@ -35,9 +35,11 @@ use engine_input::{FighterInput, FighterTape};
 
 use crate::recorder::{on_fork_step, DamageLedger, Row, StepRecord};
 use crate::world::MatchWorld;
+#[cfg(not(feature = "sim"))]
+use crate::MatchSnapshot;
 use crate::{
-    ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, MatchSnapshot, Sim,
-    TickBreaks, TickEvents, MAX_SLOTS,
+    ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, Sim, TickBreaks, TickEvents,
+    MAX_SLOTS,
 };
 
 /// Dataset recorder leg: pre-step poses, fight state and damage counters
@@ -695,6 +697,7 @@ fn window_delta(a: RootSample, b: RootSample, tick: u32, single: bool) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "sim"))]
     use crate::world::Obstacle;
     use crate::{run_breaks, run_dataset, run_events, run_prefix};
     use engine_input::{fighter::ATTACK, Buttons, FighterId};
@@ -1141,6 +1144,7 @@ mod tests {
     }
     /// Every slot human and idle (or walking `+x` at full wish for slot 0
     /// when `walk`) for `config.ticks` ticks: no brains move anyone.
+    #[cfg(not(feature = "sim"))]
     fn still_tape(config: &ArenaConfig, walk: bool) -> FighterTape {
         let mut inputs = Vec::new();
         for tick in 0..config.ticks {
@@ -1179,6 +1183,9 @@ mod tests {
         sim
     }
 
+    // The default-leg collision pass never runs under `sim` (`ArenaRules::collides`),
+    // so the push-apart checks below only hold without it.
+    #[cfg(not(feature = "sim"))]
     fn min_gap_m(states: &[FighterState]) -> f32 {
         let mut best = f32::INFINITY;
         for (i, a) in states.iter().enumerate() {
@@ -1190,6 +1197,7 @@ mod tests {
         best
     }
 
+    #[cfg(not(feature = "sim"))]
     #[test]
     fn push_apart_spreads_eight_fighters_from_one_point_in_30_ticks() {
         let config = ArenaConfig::try_new(2040, 30, 8, 20.0).expect("valid config");
@@ -1209,6 +1217,7 @@ mod tests {
         assert_eq!(min_gap_m(&v1.states), 0.0);
     }
 
+    #[cfg(not(feature = "sim"))]
     #[test]
     fn push_apart_keeps_every_centre_out_of_the_pillars() {
         let pillar = crate::Pillar::new([-1_000, -1_000], [1_000, 1_000]);
@@ -1251,6 +1260,7 @@ mod tests {
     }
 
     /// Whole-match v2 over the default (brain-filled) tape, checking `each`.
+    #[cfg(not(feature = "sim"))]
     fn whole_v2_checked(
         config: &ArenaConfig,
         rules: ArenaRules,
@@ -1266,6 +1276,7 @@ mod tests {
         sim
     }
 
+    #[cfg(not(feature = "sim"))]
     #[test]
     fn push_apart_digest_twice_equal_and_tagged() {
         let config = ArenaConfig::try_new(2040, 600, 8, 20.0).expect("valid config");

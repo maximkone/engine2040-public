@@ -13,13 +13,14 @@
 //! buffers so a frame's result is read a few frames later by a
 //! non-blocking `map_async` (the frame never waits for it).
 use super::super::wait_stats::{percentiles, GpuTimingReport};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Timestamps per frame: forward begin and end, blit begin and end.
-const QUERY_COUNT: u32 = 4;
-/// Bytes one frame resolves (four u64 ticks).
-const RESOLVE_BYTES: u64 = 32;
+/// Timestamps per frame: forward begin and end, blit begin and end, then the
+/// own-pass sky begin and end (written only on frames that run that pass).
+const QUERY_COUNT: u32 = 6;
+/// Bytes one frame resolves (six u64 ticks).
+const RESOLVE_BYTES: u64 = 48;
 /// Staging buffers in flight: a result is read once its map completed.
 const SLOT_COUNT: usize = 4;
 /// Most samples kept per pass; older samples are overwritten.
@@ -33,6 +34,9 @@ const FAILED: u8 = 3;
 struct TimerSlot {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    /// The frame in flight wrote the sky timestamps (queries 4 and 5); a
+    /// frame without the own-pass sky leaves them unwritten and unread.
+    sky_written: AtomicBool,
 }
 
 #[derive(Default)]
@@ -52,14 +56,19 @@ impl Ring {
     }
 }
 
-/// Timestamp queries around the forward and blit passes.
+/// Timestamp queries around the forward, own-pass sky and blit passes.
 pub(crate) struct GpuTimer {
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
     slots: Vec<TimerSlot>,
     period_ns: f32,
     forward: Ring,
+    sky: Ring,
     blit: Ring,
+    /// Forward plus sky plus blit per resolved frame.
+    total: Ring,
+    /// Device ms of the newest resolved sky pass; 0 until one lands.
+    latest_sky_ms: f32,
 }
 
 impl GpuTimer {
@@ -93,6 +102,7 @@ impl GpuTimer {
                     mapped_at_creation: false,
                 }),
                 state: Arc::new(AtomicU8::new(FREE)),
+                sky_written: AtomicBool::new(false),
             })
             .collect();
         Some(Self {
@@ -101,7 +111,10 @@ impl GpuTimer {
             slots,
             period_ns,
             forward: Ring::default(),
+            sky: Ring::default(),
             blit: Ring::default(),
+            total: Ring::default(),
+            latest_sky_ms: 0.0,
         })
     }
 
@@ -125,10 +138,11 @@ impl GpuTimer {
             match slot.state.load(Ordering::Acquire) {
                 READY => {
                     let ticks = read_ticks(&slot.buffer);
+                    let sky_written = slot.sky_written.load(Ordering::Acquire);
                     slot.buffer.unmap();
                     slot.state.store(FREE, Ordering::Release);
                     if let Some(ticks) = ticks {
-                        self.record(ticks);
+                        self.record(ticks, sky_written);
                     }
                 }
                 FAILED => slot.state.store(FREE, Ordering::Release),
@@ -137,11 +151,26 @@ impl GpuTimer {
         }
     }
 
-    fn record(&mut self, ticks: [u64; 4]) {
+    fn record(&mut self, ticks: [u64; 6], sky_written: bool) {
         let forward = self.span_ms(ticks[0], ticks[1]);
         let blit = self.span_ms(ticks[2], ticks[3]);
         self.forward.push(forward);
         self.blit.push(blit);
+        let mut total = forward + blit;
+        if sky_written {
+            let sky = self.span_ms(ticks[4], ticks[5]);
+            self.sky.push(sky);
+            self.latest_sky_ms = sky;
+            total += sky;
+        }
+        self.total.push(total);
+    }
+
+    /// Device milliseconds of the newest resolved own-pass sky; 0.0 until one
+    /// lands (no timestamps, sky off, or the first frames still in flight).
+    /// A few frames late by construction: the read never waits.
+    pub(crate) fn latest_sky_ms(&self) -> f32 {
+        self.latest_sky_ms
     }
 
     /// Milliseconds between two device ticks (period is ns per tick). A
@@ -171,12 +200,29 @@ impl GpuTimer {
         }
     }
 
-    /// Resolve this frame's four timestamps and copy them to staging slot
-    /// `index`. Call after both passes, before the encoder finishes.
-    pub(crate) fn encode_resolve(&self, enc: &mut wgpu::CommandEncoder, index: usize) {
+    /// Timestamp writes for the own-pass sky.
+    pub(crate) fn sky_writes(&self) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.queries,
+            beginning_of_pass_write_index: Some(4),
+            end_of_pass_write_index: Some(5),
+        }
+    }
+
+    /// Resolve this frame's timestamps and copy them to staging slot
+    /// `index`. Call after every pass, before the encoder finishes.
+    /// `sky_written` says the own-pass sky wrote queries 4 and 5; otherwise
+    /// the late read ignores them.
+    pub(crate) fn encode_resolve(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        index: usize,
+        sky_written: bool,
+    ) {
         let Some(slot) = self.slots.get(index) else {
             return;
         };
+        slot.sky_written.store(sky_written, Ordering::Release);
         enc.resolve_query_set(&self.queries, 0..QUERY_COUNT, &self.resolve, 0);
         enc.copy_buffer_to_buffer(&self.resolve, 0, &slot.buffer, 0, RESOLVE_BYTES);
     }
@@ -202,24 +248,24 @@ impl GpuTimer {
     pub(crate) fn report(&self) -> Option<GpuTimingReport> {
         let mut forward = self.forward.samples.clone();
         let mut blit = self.blit.samples.clone();
-        let mut total: Vec<f32> = forward
-            .iter()
-            .zip(blit.iter())
-            .map(|(f, b)| f + b)
-            .collect();
+        let mut total = self.total.samples.clone();
+        // Frames that skipped the own-pass sky add no sky sample; a run with
+        // no sky pass at all reports a zero sky, not a missing report.
+        let mut sky = self.sky.samples.clone();
         Some(GpuTimingReport {
             frames: u64::try_from(forward.len()).unwrap_or(u64::MAX),
             total: percentiles(&mut total)?,
             forward: percentiles(&mut forward)?,
             blit: percentiles(&mut blit)?,
+            sky: percentiles(&mut sky).unwrap_or_default(),
         })
     }
 }
 
-/// Four little-endian u64 ticks from a mapped staging buffer.
-fn read_ticks(buffer: &wgpu::Buffer) -> Option<[u64; 4]> {
+/// Six little-endian u64 ticks from a mapped staging buffer.
+fn read_ticks(buffer: &wgpu::Buffer) -> Option<[u64; 6]> {
     let view = buffer.slice(..).get_mapped_range().ok()?;
-    let mut ticks = [0u64; 4];
+    let mut ticks = [0u64; 6];
     for (tick, chunk) in ticks.iter_mut().zip(view.chunks_exact(8)) {
         let mut word = [0u8; 8];
         word.copy_from_slice(chunk);

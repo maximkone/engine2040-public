@@ -17,8 +17,12 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acquireSlot, pidAlive, readKnobs, knob, releaseSlot } from "../.opencode/seat-guard.mjs";
 import { binStatus, BINS } from "./bins.mjs";
+
+// Is a process alive? EPERM means it exists but is not ours.
+const pidAlive = (pid) => {
+  try { process.kill(Number(pid), 0); return true; } catch (e) { return e?.code === "EPERM"; }
+};
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "target", "reports", "product");
@@ -26,7 +30,6 @@ const READY = join(ROOT, "target", "queue", "ready");
 const RUNNING = join(ROOT, "target", "queue", "running");
 const ARENA = join(ROOT, "target", "release", "arena.exe");
 const RUN_MS = 6 * 60_000;
-const SLOT_WAIT_MS = 20 * 60_000;
 const BUILD_MS = 45 * 60_000;
 const KEEP_RUNS = 6;
 const REFILE_MS = 6 * 3_600_000;
@@ -212,23 +215,11 @@ const build = async () => {
   const arena = BINS.find((b) => b.exe === "arena");
   const [st] = binStatus(ROOT, [arena]);
   if (st.state === "FRESH") return { ok: true, why: "fresh" };
-  const dir = join(ROOT, "target", "cargo-slots");
-  const id = `product-${process.pid}`;
-  const max = Math.max(1, knob(readKnobs(ROOT), "cargo_slots", 3));
-  const start = Date.now();
-  for (;;) {
-    if (acquireSlot({ dir, max, id, info: { seat: "product-check", cmd: arena.build, pid: process.pid } }).ok) break;
-    if (Date.now() - start > SLOT_WAIT_MS) return { ok: false, why: "no cargo slot in 20 min" };
-    await new Promise((r) => setTimeout(r, 15_000));
-  }
-  try {
-    const [cmd, ...args] = arena.build.split(" ");
-    const r = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf8", timeout: BUILD_MS, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, CARGO_BUILD_JOBS: "10", RUSTC_WRAPPER: "" }, windowsHide: true });
-    const tail = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim().split(/\r?\n/).slice(-20).join("\n");
-    return r.status === 0 ? { ok: true, why: `built (${st.state.toLowerCase()})` } : { ok: false, why: `build failed (the working tree, maybe a coder mid-edit):\n${tail}` };
-  } finally {
-    releaseSlot({ dir, id });
-  }
+  // The window build never runs on the GitHub runner (Linux, no GPU), so it runs here; cargo's own lock queues it.
+  const [cmd, ...args] = arena.build.split(" ");
+  const r = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf8", timeout: BUILD_MS, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, CARGO_BUILD_JOBS: "10", RUSTC_WRAPPER: "" }, windowsHide: true });
+  const tail = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim().split(/\r?\n/).slice(-20).join("\n");
+  return r.status === 0 ? { ok: true, why: `built (${st.state.toLowerCase()})` } : { ok: false, why: `build failed (the working tree, maybe a session mid-edit):\n${tail}` };
 };
 
 const pruneRuns = (runs) => {

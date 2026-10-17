@@ -2,46 +2,30 @@
 
 > Read slices only: `node tools/board-slice.mjs --ready` for the list, `node tools/board-slice.mjs <ID>` for one row — one line does both (paste once, replace ID): `node tools/board-slice.mjs --ready; node tools/board-slice.mjs <ID>`. Never read this file whole and never read the shards whole; the slice is byte-identical. Tools read the index plus every `docs/SPRINT-*.md` shard as one board.
 
-The live work list for `/sprint` and `node tools/sprint-loop.mjs`. The game is
+The rows file of the plans (the name stays for the tools). The game is
 `FOCUS.md`; the only order is its "## Now" (owner 2026-10-10: four Core
-proofs). `FINISH-RICH.md` holds the gates; `ROADMAP.md` and `PLAN-REVIEW.md`
-are background. Tick a task only after its acceptance passed, with a receipt
-line under the receipt log.
+proofs). A row's spec is its plan in `docs/plan/` (`node tools/plan-atlas.mjs --row <ID>`).
+`FINISH-RICH.md` holds the gates; `ROADMAP.md` and `PLAN-REVIEW.md` are background.
 
-## How the board runs
+## How a row works
 
-- A task is ready when it is open, every `needs:` task is ticked, its text
-  holds neither `BLOCKED:` nor `LATER:`, and it is not an operator task.
+- A row is ready when it is open, every `needs:` row is ticked, its text
+  holds neither `BLOCKED:` nor `LATER:`, and it is not an operator row.
   Every NEW row carries `F2P:` (fails before, passes after) and `P2P:`
   (stays passing); without both it is not ready.
-- A wave takes rows from `node tools/board-slice.mjs --focus` first: the READY
-  rows of `FOCUS.md` "## Now", in its order. Width = the number of focus rows
-  ready, never padded; the cap is knob `width`. Only when `--focus`
-  is empty may a wave take other ready rows, at most 2 per wave, smallest
-  first; never invent tasks. One tree: `C:\engine2040` on master; no lanes, no
-  worktrees (owner 2026-10-10). One coder per crate (knob `coders` is the
-  count), each on OWNED paths (its `paths:`, or a claim line in
-  `target/queue/claims.txt`; a shared contract may land in an earlier wave
-  through the integrator). Builders edit only owned paths and never commit; the
-  judge reads `git diff -- <owned paths>`; the keeper lands a PASS
-  (`tools/land.mjs`). A FAIL is fixed in place; only the lead abandons work
-  (`/sprint` §4). `PLN` rows go to `planner`, one
-  `docs/plan/` file each; `RES-ARXIV`, `RES-STEAL`,
-  `RES-DOCS` and `RES-JAN` rows go to `researcher`. The `docs/plan/` wave-packing
-  notes are packing guidance; this file wins for the loop. Order: red-gate
-  fixes first, then `--focus`; there is no other order list.
-- The orchestrator owns root `Cargo.toml`, `Cargo.lock`, `tools/`, CI and docs;
-  it writes shared type-only contracts and adds each dependency (license read,
-  `deny.toml`, `DEPENDENCIES.md` row, `cargo deny check`) before the wave that
-  needs them.
-- The orchestrator runs `node tools/proof.mjs` once per wave. Each wave
-  receipt carries the proof result plus golden x2 plus an explicit Unverified
-  list, so debt never hides. One
-  sprint per working tree: `node tools/sprint-lock.mjs`.
-- `node tools/sprint-loop.mjs` runs waves autonomously, one fresh OpenCode
-  session each, until a replan wave adds no ready work, two waves make no
-  board progress, or
-  `target/sprint.halt` exists.
+- Take rows from `node tools/board-slice.mjs --focus` first: the ready rows of
+  `FOCUS.md` "## Now", in its order. Only when `--focus` is empty take other
+  ready rows, smallest first; never invent rows. Red-gate fixes come first.
+- One tree: `C:\engine2040` on master; no lanes, no
+  worktrees. Several AIs share it: edit only the files your row needs, commit
+  by path, pull, push (`AGENTS.md` "Work from plans").
+- `PLN` rows write one `docs/plan/` file each; `RES-ARXIV`, `RES-STEAL`,
+  `RES-DOCS` and `RES-JAN` rows write research notes.
+- Root `Cargo.toml`, `Cargo.lock`, `tools/` and CI change only for a row that
+  needs it. A new dependency first gets its license read, a `deny.toml` and
+  `DEPENDENCIES.md` row and `cargo deny check`.
+- Tick a row only after its acceptance passed, with a receipt line in the
+  receipt log: `- [x] ID ... Landed <sha7>.`
 - Second identical failure ends it: `BLOCKED:` plus `BLOCKERS.md` row; never resend whole.
 
 ## Areas
@@ -62,7 +46,7 @@ line under the receipt log.
 | app | `crates/app` (composition/lifecycle) | core | `crates/core` (tick/seeds/hashes) |
 | ecs | `crates/ecs` (lifetime/storage/queries) | save | `crates/save` (versioned schemas) |
 | scene | `crates/scene` (IDs/hierarchy/codec) | world | `crates/world` (terrain/sky/blockout) |
-| plan | `docs/plan/` (planner only) | research | `RES-ARXIV`, `RES-STEAL`, `RES-DOCS`, `RES-JAN` (researcher only) |
+| plan | `docs/plan/` (plan files) | research | `RES-ARXIV`, `RES-STEAL`, `RES-DOCS`, `RES-JAN` (research notes) |
 | urban | `games/urban` (second game, UW/UC game rows) | geo | `crates/geo` (cook-time mesh tools; not a default member) |
 
 ## Board

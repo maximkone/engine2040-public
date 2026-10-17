@@ -12,19 +12,20 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadBoardText, parseBoard, ticksOf } from "./board-slice.mjs";
 
-const GATES = [
+export const GATES = [
   "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10",
   "B",
   "C1", "C2", "C3", "C4", "C5",
   "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10",
 ];
 
-// Fallback row sets for gates with no "Proven by" column in FINISH-RICH.
-// Derived from the Finish-line status parentheticals (A gates) and from the
-// C Required-demonstration text plus board prefixes (C gates). The live
-// status text is still parsed first; this map only fills gaps so stale
-// trees (no C/P tables) still print every gate honestly.
-const FALLBACK_ROWS = {
+// Gate row sets that FINISH-RICH does not spell out: the A gates (their status
+// text names rows only sometimes) and the C gates (their table has no Proven by
+// column). The live status text is parsed first and only fills gaps. Every row
+// here must resolve to the live board or the archive; finish.test.mjs fails
+// otherwise. The P entries mirror the Proven by column and are checked against
+// it, so a tree without that table still prints every gate.
+export const FALLBACK_ROWS = {
   A1: [],
   A2: ["A1", "A2", "A3", "AS1", "AS2", "CT7", "CT8"],
   A3: ["E1", "E2", "E3", "ED1", "ED2", "ED3", "SU1", "ED4", "ED5"],
@@ -55,11 +56,12 @@ const FALLBACK_ROWS = {
   P10: ["FS1"],
 };
 
-// Board-dropped rows: verdict-removed, no checkbox on the live board, never
-// open. GX5 (wave-56 verdict in docs/SPRINT.md: gtao.rs, not skinning;
-// DROP 078-gx5-r2; GX5 no longer blocks) has no board row, but the fallback
-// sets above still name it, so filter it here instead of printing it open.
-const DROPPED_ROWS = new Set(["GX5"]);
+// Verdict-dropped rows: left out of the gates while the live board does not
+// reopen them. GX5 (wave-56 verdict in docs/SPRINT-03-finish-line.md: gtao.rs,
+// not skinning; DROP 078-gx5-r2) has no live row, but the GX1-GX10 range and
+// the fallback sets still name it. If the live board reopens it, it is counted
+// again and finish.mjs warns.
+export const DROPPED_ROWS = new Set(["GX5"]);
 
 // Rows ticked-and-pruned into docs/archive/ with landed code behind them:
 // OB3 (crates/endpoint/src/log_tools.rs, endpoint lib green), DOC1 (doctor
@@ -94,7 +96,12 @@ const DROPPED_ROWS = new Set(["GX5"]);
 // SL2 (SPRINT-2026-10-05.md:1425 world+nav, engine-world 25 passed + engine-nav 93 passed),
 // UIX2 (SPRINT-done-2026-10-10.md:153 settings.rs, engine-ui replay_reads_the_same_settings_on_the_same_tick_twice),
 // FS1 (SPRINT-2026-10-05.md:449 tools/finish.mjs, node --test tools/finish.test.mjs hand-checked sample).
-const ARCHIVE_TICKED_ROWS = new Set(["OB3", "DOC1", "FX3", "LW3", "DM1", "PF4", "PF6", "PF7", "PF8", "A1", "A2", "A3", "AS1", "AS2", "CT7", "CT8", "E1", "E2", "E3", "ED1", "ED2", "ED3", "SU1", "ED4", "ED5", "AM2", "AM3", "AM5", "AM9", "LW1", "LW2", "GP2", "GP3", "PX4", "HR3", "HR4", "SL2", "UIX2", "FS1"]);
+// Extended 2026-10-17 (owner-verified green; each archive tick checked in the
+// file named): AM4, AM6, AH1, AH2, EA1a-e, FK1, BR2, PV3, QA1, CR1, GP1, GP4 in
+// docs/archive/SPRINT-done-2026-10-10.md; SL1 in docs/archive/SPRINT-2026-10-05.md.
+// PF7 and PF8 ticks sit in docs/SPRINT-ARCHIVE.md (board diet), which
+// ticksFromArchive reads. finish.test.mjs fails a member with no archive tick.
+export const ARCHIVE_TICKED_ROWS = new Set(["OB3", "DOC1", "FX3", "LW3", "DM1", "PF4", "PF6", "PF7", "PF8", "A1", "A2", "A3", "AS1", "AS2", "CT7", "CT8", "E1", "E2", "E3", "ED1", "ED2", "ED3", "SU1", "ED4", "ED5", "AM2", "AM3", "AM5", "AM9", "LW1", "LW2", "GP2", "GP3", "PX4", "HR3", "HR4", "SL2", "UIX2", "FS1", "AM4", "AM6", "AH1", "AH2", "EA1a", "EA1b", "EA1c", "EA1d", "EA1e", "FK1", "BR2", "PV3", "QA1", "CR1", "GP1", "GP4", "SL1"]);
 
 function ticksFromArchiveDir(dir) {
   const out = new Map();
@@ -111,6 +118,18 @@ function ticksFromArchiveDir(dir) {
     } catch {
       continue;
     }
+    for (const [k, v] of ticksFromBoard(md)) if (v) out.set(k, true);
+  }
+  return out;
+}
+
+// Every archived done row: docs/archive/*.md plus docs/SPRINT-ARCHIVE.md, the
+// file the board diet (F06) moved done rows into. It sits beside the archive dir.
+export function ticksFromArchive(archiveDir) {
+  const out = ticksFromArchiveDir(archiveDir);
+  const sprintArchive = join(archiveDir, "..", "SPRINT-ARCHIVE.md");
+  if (existsSync(sprintArchive)) {
+    const md = readFileSync(sprintArchive, "utf8").replace(/\r\n/g, "\n");
     for (const [k, v] of ticksFromBoard(md)) if (v) out.set(k, true);
   }
   return out;
@@ -169,7 +188,7 @@ function parseStatusTable(md) {
   return map;
 }
 
-function parseProvenBy(md) {
+export function parseProvenBy(md) {
   const map = new Map();
   const sec = section(md, "## Finish P");
   for (const row of tableRows(sec)) {
@@ -199,7 +218,7 @@ function splitId(id) {
 
 // Expand "GX1-GX10, EA1a-e, Q1" into ordered unique row ids.
 // Handles full ranges (GX1-GX10), suffix-letter ranges (EA1a-e) and singles.
-function expandIds(raw) {
+export function expandIds(raw) {
   if (!raw) return [];
   let text = dash(raw);
   const out = [];
@@ -287,51 +306,45 @@ function main() {
     : readFileSync(sprintPath, "utf8");
   const statusByGate = parseStatusTable(finishMd);
   const provenBy = parseProvenBy(finishMd);
-  const ticks = ticksFromBoard(sprintMd);
-  // Pruned rows: an archive tick plus landed code (the set above) counts as
-  // ticked, so OB3/DOC1/FX3 stop printing open once the live board drops them.
+  // liveTicks is the board as it stands. ticks adds the archived done rows that
+  // ARCHIVE_TICKED_ROWS vouches for (landed code checked by hand).
+  const liveTicks = ticksFromBoard(sprintMd);
+  const ticks = new Map(liveTicks);
   const archiveDir = argPath("--archive", join(cwd, "docs", "archive"));
-  const archiveTicks = ticksFromArchiveDir(archiveDir);
+  const archiveTicks = ticksFromArchive(archiveDir);
   for (const id of ARCHIVE_TICKED_ROWS) if (archiveTicks.get(id)) ticks.set(id, true);
+  // A dropped row leaves the gates only while the live board does not reopen it.
+  const liveOpen = (id) => liveTicks.get(id) === false;
 
-  const fallbackGates = [];
-  const droppedFiltered = [];
+  const unresolved = new Set();
+  const droppedOpen = [];
   const results = GATES.map((gate) => {
     const statusText = statusByGate.get(gate) ?? "";
     let rows;
     if (gate.startsWith("P")) {
       rows = provenBy.has(gate) ? expandIds(provenBy.get(gate)) : [];
-      if (rows.length === 0 && FALLBACK_ROWS[gate]?.length) {
-        rows = [...FALLBACK_ROWS[gate]];
-        fallbackGates.push(gate);
-      }
+      if (rows.length === 0) rows = [...(FALLBACK_ROWS[gate] ?? [])];
       // "janitor sweeps" and prose in Proven by expand to nothing; keep rows honest.
     } else {
       // Generic "see their tables" status names the tool (FS1), not rows.
       // Specific status texts list board rows; keep only ids the board knows
       // so gate cross-references (e.g. "the look (A4)") stay in the evidence
       // line instead of masquerading as rows.
-      const generic = /see their tables/i.test(statusText);
-      const fromStatus = generic
-        ? []
-        : expandIds(statusText).filter((id) => ticks.has(id));
-      const fallback = FALLBACK_ROWS[gate] ?? [];
-      rows = [...fromStatus];
-      const beforeFallback = rows.length;
-      for (const r of fallback) if (!rows.includes(r)) rows.push(r);
-      if (rows.length > beforeFallback) fallbackGates.push(gate);
+      rows = /see their tables/i.test(statusText) ? [] : expandIds(statusText).filter((id) => ticks.has(id));
+      for (const r of FALLBACK_ROWS[gate] ?? []) if (!rows.includes(r)) rows.push(r);
     }
-    const droppedHere = rows.filter((r) => DROPPED_ROWS.has(r));
-    for (const r of droppedHere) droppedFiltered.push(`${gate}:${r}`);
-    rows = rows.filter((r) => !DROPPED_ROWS.has(r));
+    for (const r of rows) if (DROPPED_ROWS.has(r) && liveOpen(r)) droppedOpen.push(`${gate}:${r}`);
+    rows = rows.filter((r) => !DROPPED_ROWS.has(r) || liveOpen(r));
+    // A row on neither the board nor the archive is counted open, and named.
+    for (const r of rows) if (!liveTicks.has(r) && !archiveTicks.get(r)) unresolved.add(r);
     return scoreGate(gate, rows, ticks, statusText);
   });
 
-  if (fallbackGates.length) {
-    console.error(`finish: warning: fallback rows used for ${fallbackGates.join(", ")} — open set may be stale; update FALLBACK_ROWS in tools/finish.mjs`);
+  if (unresolved.size) {
+    console.error(`finish: warning: rows on neither the live board nor the archive, counted open: ${[...unresolved].join(", ")} — restore their tick or update FALLBACK_ROWS in tools/finish.mjs`);
   }
-  if (droppedFiltered.length) {
-    console.error(`finish: warning: dropped rows filtered (${droppedFiltered.join(", ")}) — update DROPPED_ROWS in tools/finish.mjs if the board changed`);
+  if (droppedOpen.length) {
+    console.error(`finish: warning: dropped rows the live board reopened, counted again: ${droppedOpen.join(", ")} — update DROPPED_ROWS in tools/finish.mjs`);
   }
 
   if (asJson) {
@@ -348,4 +361,4 @@ function main() {
   console.log(`Summary: ${met} met, ${partial} partial, ${open} open (FS1 scoreboard)`);
 }
 
-main();
+if (import.meta.main) main();

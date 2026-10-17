@@ -7,6 +7,9 @@ pub mod controller;
 /// Character controller v2: steps, slopes, platforms, ledge sense, pushes.
 /// Integer-millimeter, std-only; arena locomotion walks these walkers.
 pub mod controller2;
+/// Canonical island topology plus snapshot bytes the Rapier world checkpoints
+/// through. Std-only; no sim step.
+pub mod islands;
 pub mod kcc;
 /// Severed limbs as bodies: mass from volume and density, inherited velocity
 /// plus blade impulse, stump recoil, canonical order, capped, snapshotted.

@@ -881,8 +881,8 @@ impl App {
     /// director's own hold floor.
     ///
     /// Caller: `crates/game/src/bin/arena_capture.rs` (`cut_log_audit_line`
-    /// gates the capture seal on this report). Presentation only, never
-    /// hashed. Budget: one pass over the cut log, on the seal path.
+    /// turns this report into the seal's receipt line). Presentation only,
+    /// never hashed. Budget: one pass over the cut log, on the seal path.
     #[must_use]
     pub fn director_audit(&self) -> crate::director::AuditReport {
         self.cut_director.audit()

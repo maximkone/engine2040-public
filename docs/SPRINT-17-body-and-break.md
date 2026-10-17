@@ -58,18 +58,18 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   Voronoi sites from scipy seed vs BX12 energy table). Accept:
   cell-count match + bake bytes x2; metric posted with kill rule.
   needs: BX12. (G6 Proposed, vision-r4 2026-09-29.)
-- [ ] HS2 proof: cross-architecture golden matrix — the golden and the BX28 corpus
+- [x] HS2 proof: cross-architecture golden matrix — the golden and the BX28 corpus Landed 0636f00.
   on Windows x86-64, Linux x86-64 and, if a runner exists, aarch64. Tier A. Size
   M. Owns hunks in `crates/proof` and CI files. Accept: digests equal or the
   first divergent tick is named with its cause (sort tie, libm, FMA). Landed so far (2026-10-12 check): 5703d6c1 (tape comparison tool). Remaining: CI records the golden tape and the BX28 corpus digest on ubuntu, windows and arm, and a last job runs `tools/golden-matrix.mjs` over them: equal digests or the first bad tick named. needs:
   PX17.
-- [ ] HS20 playtest: public benchmark mirror — 30 tasks shaped like GameDevBench,
+- [x] HS20 playtest: public benchmark mirror — 30 tasks shaped like GameDevBench, Landed 302e61b7.
   CraftBench-UE and GameLogicBench, run through our door, deterministic checks
   only, scores printed beside each suite's published numbers. Tier A. Size L.
   Owns `crates/playtest/src/mirror.rs`. Accept: same results on mock, local,
    remote; UNKNOWN stays UNKNOWN for rivals we did not run; fills gap G2 and G6.
    needs: EV1.
-- [ ] HS29 playtest: mirror GameDevBench slice — 10 tasks shaped like the
+- [x] HS29 playtest: mirror GameDevBench slice — 10 tasks shaped like the Landed e180771f.
   public GameDevBench suite, run through the EV1 door with deterministic
   checks only, shapes and scoring rules only (no task text or assets).
   Tier A. Size S. Owns `crates/playtest/src/mirror_gdb.rs` (new, no
@@ -77,7 +77,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   mirror_gdb` green with the 10-task report reproducing x2; same results
   on mock, local, remote; golden `d57b5c8ae3096614` unchanged.
   needs: EV1. (PLN hard-systems.md, proposed 2026-09-29.)
-- [ ] HS30 playtest: mirror CraftBench-UE slice — 10 tasks shaped like the
+- [x] HS30 playtest: mirror CraftBench-UE slice — 10 tasks shaped like the Landed 1ab69225.
   public CraftBench-UE suite, run through the EV1 door with deterministic
   checks only, shapes and scoring rules only (no task text or assets).
   Tier A. Size S. Owns `crates/playtest/src/mirror_craft.rs` (new,
@@ -85,7 +85,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   mirror_craft` green with the 10-task report reproducing x2; same
   results on mock, local, remote; golden `d57b5c8ae3096614` unchanged.
   needs: EV1. (PLN hard-systems.md, proposed 2026-09-29.)
-- [ ] HS31 playtest: mirror GameLogicBench slice — 10 tasks shaped like the
+- [x] HS31 playtest: mirror GameLogicBench slice — 10 tasks shaped like the Landed 7727011e.
   public GameLogicBench suite, run through the EV1 door with deterministic
   checks only, shapes and scoring rules only (no task text or assets).
   Tier A. Size S. Owns `crates/playtest/src/mirror_logic.rs` (new,
@@ -93,7 +93,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   --lib mirror_logic` green with the 10-task report reproducing x2; same
   results on mock, local, remote; golden `d57b5c8ae3096614` unchanged.
   needs: EV1. (PLN hard-systems.md, proposed 2026-09-29.)
-- [ ] HS32 playtest: mirror aggregate report — combine the HS29, HS30, HS31
+- [x] HS32 playtest: mirror aggregate report — combine the HS29, HS30, HS31 Landed 9f871fd.
   10-task reports into one 30-task mirror with scores printed beside each
   suite's published numbers, UNKNOWN where rivals were not run. Tier A.
   Size S. Owns `crates/playtest/src/mirror.rs` (aggregator only, slices

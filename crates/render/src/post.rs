@@ -2872,17 +2872,19 @@ pub mod gpu {
     /// size to the presentation size. Mirrors [`super::taa_upsample`].
     pub const UPSAMPLE_COMPUTE_WGSL: &str = include_str!("shaders/post/upsample_compute.wgsl");
 
-    /// Bloom extract shader: soft-knee weight times the HDR texel.
+    /// Bloom extract shader: Kino soft-knee weight times the HDR texel.
     /// Mirrors [`super::apply_bloom`] extract (`bloom_weight`).
     pub const BRIGHT_COMPUTE_WGSL: &str = include_str!("shaders/post/bright_compute.wgsl");
 
-    /// Box downsample shader: one 2x2 average step (ceil halves).
-    /// Mirrors `downsample_box` (f32 accumulation; the CPU uses f64,
-    /// inside [`GPU_PARITY_TOL_POST`]).
+    /// Downsample shader: one 2x2 average step (ceil halves), Karis-weighted
+    /// for the first mip and plain box after. Mirrors `downsample_karis` and
+    /// `downsample_box` (f32 accumulation; the CPU box uses f64, inside
+    /// [`GPU_PARITY_TOL_POST`]).
     pub const DOWNSAMPLE_COMPUTE_WGSL: &str = include_str!("shaders/post/downsample_compute.wgsl");
 
-    /// Composite shader: bilinear add-back of every bloom mip with even
-    /// intensity split, then exposure, Narkowicz ACES with white
+    /// Composite shader: bilinear add-back of every halo mip (the caller
+    /// leaves the 2x2 and 1x1 veil out) with even intensity split, then
+    /// exposure, Narkowicz ACES with white
     /// normalization, contrast/saturation grading. Mirrors
     /// [`super::apply_bloom`] add-back plus [`super::tonemap_aces`] plus
     /// [`super::apply_grade`]. All mip levels live in ONE concatenated
@@ -3402,17 +3404,25 @@ pub mod gpu {
             // (dropped before the composite), the rest are the sampled mips
             // in order. Borrows end at bind-group creation, so pushing the
             // next dst after each submit is borrow-clean.
+            let plan = super::BloomPassPlan::for_frame(present_h, &chain.bloom)?;
             let mut chain_bufs: Vec<wgpu::Buffer> = vec![bright_buf];
             let mut chain_sizes: Vec<(u32, u32)> = vec![(present_w, present_h)];
-            for _ in 0..chain.bloom.levels {
+            for level in 0..plan.depth {
                 let (lw, lh) = chain_sizes[chain_sizes.len() - 1];
                 let nw = lw.div_ceil(2).max(1);
                 let nh = lh.div_ceil(2).max(1);
-                let mut down_uni = Vec::with_capacity(16);
+                // The first downsample is Karis-weighted (mode 1), later
+                // levels are plain box averages (mode 0).
+                let karis = u32::from(level == 0);
+                let mut down_uni = Vec::with_capacity(32);
                 down_uni.extend_from_slice(&lw.to_le_bytes());
                 down_uni.extend_from_slice(&lh.to_le_bytes());
                 down_uni.extend_from_slice(&nw.to_le_bytes());
                 down_uni.extend_from_slice(&nh.to_le_bytes());
+                down_uni.extend_from_slice(&karis.to_le_bytes());
+                down_uni.extend_from_slice(&0u32.to_le_bytes());
+                down_uni.extend_from_slice(&0u32.to_le_bytes());
+                down_uni.extend_from_slice(&0u32.to_le_bytes());
                 let down_u = crate::v1_gpu::create_uniform_buffer(device, "rp1-u-down", &down_uni);
                 let dst = zero_storage(device, "rp1-mip", nw as u64 * nh as u64);
                 {
@@ -3443,6 +3453,17 @@ pub mod gpu {
             // mips only, never the extract itself.
             chain_bufs.remove(0);
             chain_sizes.remove(0);
+            // The add-back skips the veil: a mip at or below 2x2 covers the
+            // whole frame and would lift far darks, so only the halo mips
+            // (some side above 2) reach the composite, which splits the
+            // intensity over their count. Sizes only shrink along the
+            // chain, so the halo mips are a prefix.
+            let halo = chain_sizes
+                .iter()
+                .take_while(|(w, h)| *w > 2 || *h > 2)
+                .count();
+            chain_bufs.truncate(halo);
+            chain_sizes.truncate(halo);
             let mip_bufs = chain_bufs;
             let mip_sizes = chain_sizes;
             let bloom_ms = bloom_started.elapsed().as_secs_f64() * 1000.0;
@@ -4460,8 +4481,9 @@ mod tests {
     #[cfg(feature = "window")]
     #[test]
     fn history_allocates_on_llvmpipe() {
+        crate::test_gpu::hold_gpu_slot();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter =
@@ -4639,8 +4661,9 @@ mod tests {
 
     #[cfg(feature = "window")]
     fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        crate::test_gpu::hold_gpu_slot();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter =

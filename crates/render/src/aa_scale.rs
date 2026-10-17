@@ -2489,8 +2489,9 @@ mod tests {
 
     #[cfg(feature = "window")]
     fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        crate::test_gpu::hold_gpu_slot();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter =

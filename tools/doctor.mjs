@@ -2,11 +2,11 @@
 //   node tools/doctor.mjs                 report only, never mutates
 //   node tools/doctor.mjs --fix           report what --fix WOULD do, change nothing
 //   node tools/doctor.mjs --fix --consent <csv>
-//       apply only the consented scopes: toolchain, deny, lock, cache
+//       apply only the consented scopes: toolchain, deny, cache
 // Exit 0 when healthy or healed; 1 when something still needs a person.
 //
-// Safety law (board DOC1): report-only by default; a live (fresh) lease is
-// never released; lane evidence (target/lanes/*.patch) is never deleted;
+// Safety law (board DOC1): report-only by default; lane evidence
+// (target/lanes/*.patch) is never deleted;
 // installs and cache eviction need explicit --consent; unknown probes fail
 // honestly instead of reporting OK. Drills live in tools/doctor.test.mjs and
 // run against fixture trees (E2040_DOCTOR_ROOT), with simulated disk space
@@ -25,18 +25,18 @@ const consent = new Set(
 const ROOT = process.env.E2040_DOCTOR_ROOT ?? process.cwd();
 const at = (p) => join(ROOT, p);
 if (argv.includes("--help") || argv.includes("-h")) {
-  console.log("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,lock,cache]");
+  console.log("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,cache]");
   process.exit(0);
 }
 const UNKNOWN = new Set(argv.filter((a) => a !== "--fix" && !a.startsWith("--consent=")));
 if (UNKNOWN.size) {
-  console.error("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,lock,cache]");
+  console.error("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,cache]");
   process.exit(2);
 }
-const KNOWN_SCOPES = new Set(["toolchain", "deny", "lock", "cache"]);
+const KNOWN_SCOPES = new Set(["toolchain", "deny", "cache"]);
 for (const scope of consent) {
   if (!KNOWN_SCOPES.has(scope)) {
-    console.error(`unknown --consent scope "${scope}"; known: toolchain,deny,lock,cache`);
+    console.error(`unknown --consent scope "${scope}"; known: toolchain,deny,cache`);
     process.exit(2);
   }
 }
@@ -108,22 +108,6 @@ if (run("cargo", ["deny", "--version"]).ok) {
     }
     return false;
   });
-}
-
-// 4. Sprint lock: a live lease is NEVER released, with or without consent.
-// A stale lock (no refresh for 3 h, i.e. a crashed session) is released only
-// with --consent=lock, and the previous holder is named in the receipt.
-const lockOut = run(process.execPath, [at("tools/sprint-lock.mjs"), "status"]).out;
-if (lockOut.startsWith("HELD") || lockOut.startsWith("FREE")) {
-  say("OK", `sprint lock ${lockOut}`);
-} else if (lockOut.startsWith("STALE")) {
-  gated("lock", `stale sprint lock: ${lockOut}`, "release it", () => {
-    run(process.execPath, [at("tools/sprint-lock.mjs"), "release"]);
-    say("FIXED", `released stale sprint lock (was: ${lockOut})`);
-    return true;
-  });
-} else {
-  problem(`sprint lock probe returned unrecognized output: ${lockOut || "(empty)"}`, "inspect target/sprint.lock by hand");
 }
 
 // 5. Lockfile and workspace rules (read-only probes).
@@ -220,7 +204,7 @@ if (Number.isNaN(freeGb)) {
 // 7. Git state worth knowing before a sprint (read-only).
 const status = run("git", ["status", "--porcelain"]);
 const dirty = status.out ? status.out.split("\n").length : 0;
-say(dirty ? "INFO" : "OK", dirty ? `${dirty} uncommitted paths (a sprint commits green work first)` : "working tree clean");
+say(dirty ? "INFO" : "OK", dirty ? `${dirty} uncommitted paths (commit your own paths)` : "working tree clean");
 
 console.log(needsYou ? `RESULT ${needsYou} item(s) need you` : "RESULT healthy");
 process.exitCode = needsYou ? 1 : 0;

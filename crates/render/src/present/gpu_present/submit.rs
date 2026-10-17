@@ -24,16 +24,6 @@ use std::sync::Arc;
 /// Caller: `encode_forward` below stores every live frame.
 static SUN_LAST_US: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Revision over forward inputs (mesh, material, base-color, count).
-/// Delegates to `live::live_forward_revision` (no new hash owner).
-/// Units u64 out. Determinism: same list gives same revision twice.
-/// Caller: none today (the draw-aware sun skip it was staged for is gone; the
-/// forward sun switch in `encode_forward` carries the EG11 skip).
-#[must_use]
-pub(crate) fn present_frame_revision(list: &DrawList) -> u64 {
-    super::live::live_forward_revision(list)
-}
-
 /// Read the last sun depth submit wall time in us.
 /// Units us out. Determinism: wall time, evidence only, never hashed.
 /// Caller: `render_offscreen` receipt plus `sun_shadow` receipt tests.
@@ -82,60 +72,103 @@ pub(super) fn forward_sun_enabled() -> bool {
     FORWARD_SUN_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// FC3 forward sky-skip switch: on skips the far-plane sky draw in
-/// `encode_forward` (the sky is PROBE per EG8: fighter pixels stay
-/// identical, only the clear background shows), off keeps today's draw.
-/// Owner submit, consumer `encode_forward` below.
-/// Units boolean out. Determinism one relaxed atomic load, no wall clock,
-/// no allocation. Presentation only, never hashed.
-/// Caller: `encode_forward` below.
-static FORWARD_SKY_SKIP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
-
-/// Read the forward sky-skip switch. Units boolean out.
-/// Caller: `encode_forward` below.
-#[must_use]
-pub(super) fn forward_sky_skip_enabled() -> bool {
-    FORWARD_SKY_SKIP.load(core::sync::atomic::Ordering::Relaxed)
+/// How `encode_forward` draws the sky for one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SkyPlan {
+    /// No sky triangle: the clear colour shows where no draw covers.
+    Skip,
+    /// One far-plane triangle inside the forward pass (the capture twin and
+    /// the 4x path, whose resolve happens at the end of that pass).
+    InPass,
+    /// The triangle in its own pass after forward, with its own device
+    /// timestamps, reading the stored depth (the live 1x frame): the sky cost
+    /// is measured on its own and never hides inside the forward time.
+    OwnPass,
 }
 
-/// Whether `encode_forward` draws the sky triangle: true only when the
-/// caller requests it and the skip switch is off. Pure, no allocation,
-/// no device. Capture and probe callers pass false and stay skip;
-/// live callers pass true and skip while the switch stays on, so the
-/// uncovered pixels keep the clear color and the fighter pixels stay
-/// identical. Caller: `encode_forward` below.
+/// The sky plan one forward encode follows. An explicit capture decision
+/// (`Some`) wins and always draws inside the forward pass; otherwise the frame's
+/// own request stands, except that a 4x frame cannot split the pass (the
+/// resolve closes it), so an own-pass request draws in the pass there.
+/// Pure, no allocation, no device. Caller: `encode_forward` below.
 #[must_use]
-pub(super) fn forward_sky_should_draw(sky: bool, skip: bool) -> bool {
-    sky && !skip
+pub(super) fn resolve_sky_plan(
+    capture: Option<bool>,
+    requested: SkyPlan,
+    multisampled: bool,
+) -> SkyPlan {
+    match capture {
+        Some(true) => SkyPlan::InPass,
+        Some(false) => SkyPlan::Skip,
+        None if multisampled && requested == SkyPlan::OwnPass => SkyPlan::InPass,
+        None => requested,
+    }
 }
 
-/// Whether `encode_forward` stores depth: live frames discard (no reader
-/// copies live depth), capture and probe frames store (the RL9 fog feed
-/// copies depth after forward). Pure, no allocation, no device. HDR pixels
-/// stay bit-identical either way. Caller: `encode_forward` below.
+/// Whether `encode_forward` stores depth: when anything reads it after the
+/// pass (the own-pass sky, the RL9 fog feed copy on capture and probe
+/// frames), else the pass discards it. Pure, no allocation, no device. HDR
+/// pixels stay bit-identical either way. Caller: `encode_forward` below.
 #[must_use]
-pub(super) fn forward_depth_should_store(sky: bool) -> bool {
-    !sky
+pub(super) fn forward_depth_should_store(keep_depth: bool, sky: SkyPlan) -> bool {
+    keep_depth || sky == SkyPlan::OwnPass
 }
 
-/// Capture sky arm: no explicit decision, the live skip switch decides.
+/// What one forward encode does, built by the frame that calls it.
+pub(super) struct ForwardLook<'a> {
+    /// Draw the list; off leaves the cleared frame (the `graph` row off).
+    pub(super) draws: bool,
+    /// Record the sun depth map first (the `shadow_cluster` row on).
+    pub(super) sun_depth: bool,
+    /// The frame's own sky request; a capture decision overrides it.
+    pub(super) sky: SkyPlan,
+    /// Something reads depth after the pass (fog feed copy, AO).
+    pub(super) keep_depth: bool,
+    /// Device timestamps around the forward pass.
+    pub(super) timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
+    /// Device timestamps around the own-pass sky.
+    pub(super) sky_timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
+}
+
+impl ForwardLook<'_> {
+    /// A blocking frame (capture twin, probe composite): every pass on, no
+    /// sky of its own (a capture decision may add it), depth kept for the fog
+    /// feed, no device timestamps.
+    #[must_use]
+    pub(super) fn blocking() -> Self {
+        Self {
+            draws: true,
+            sun_depth: true,
+            sky: SkyPlan::Skip,
+            keep_depth: true,
+            timestamps: None,
+            sky_timestamps: None,
+        }
+    }
+}
+
+/// Capture sky arm: no explicit decision, the frame's own plan decides.
 const CAPTURE_SKY_LIVE: u8 = 0;
 /// Capture sky arm: the capture twin skips the sky triangle.
 const CAPTURE_SKY_OFF: u8 = 1;
 /// Capture sky arm: the capture twin draws the sky triangle.
 const CAPTURE_SKY_ON: u8 = 2;
 
-/// EG8 capture sky decision for the frame `encode_forward` is encoding:
-/// `None` on live and probe frames (the live switch decides), `Some(draw)`
-/// while `render_offscreen_with_toggles` renders the arena capture twin with
-/// an explicit look-toggle set. The twin stores depth under every arm, so
-/// the RL9 fog feed keeps its scaffold while the sky row can really be
-/// switched on and off for the gate's A/B frames.
-/// Units tri-state out. Determinism: one relaxed atomic load, no clock, no
-/// allocation. Presentation only, never hashed.
-/// Caller: `encode_forward` below (sky and depth decision).
-static CAPTURE_SKY: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(CAPTURE_SKY_LIVE);
+thread_local! {
+    /// EG8 capture sky decision for the frame `encode_forward` is encoding:
+    /// `None` on live and probe frames (the frame's own plan decides),
+    /// `Some(draw)` while `render_offscreen_with_toggles` renders the arena
+    /// capture twin with an explicit look-toggle set. The twin keeps its depth
+    /// under every arm, so the RL9 fog feed keeps its scaffold while the sky
+    /// row can really be switched on and off for A/B frames.
+    /// Units tri-state out. Determinism: one thread-local cell read, no
+    /// clock, no allocation. Presentation only, never hashed. The cell is
+    /// per thread: the decision lives for one capture call and
+    /// `encode_forward` reads it on that same thread, so a capture on one
+    /// thread never flips the sky of a live frame encoding on another.
+    /// Caller: `encode_forward` below (sky and depth decision).
+    static CAPTURE_SKY: core::cell::Cell<u8> = const { core::cell::Cell::new(CAPTURE_SKY_LIVE) };
+}
 
 /// Encode one capture sky decision as its stored state; pure, no IO.
 #[must_use]
@@ -147,8 +180,8 @@ fn capture_sky_state(decision: Option<bool>) -> u8 {
     }
 }
 
-/// Decode one stored capture sky state; pure, no IO. A torn value can only
-/// be one of the three named states, and anything else stays the live arm.
+/// Decode one stored capture sky state; pure, no IO. Anything that is not
+/// one of the two named explicit arms stays the live arm.
 #[must_use]
 fn capture_sky_from_state(state: u8) -> Option<bool> {
     match state {
@@ -158,23 +191,20 @@ fn capture_sky_from_state(state: u8) -> Option<bool> {
     }
 }
 
-/// Read the capture sky decision; `None` means the live switch decides.
-/// Units tri-state out. Determinism: one relaxed atomic load.
+/// Read the capture sky decision; `None` means the frame's own plan decides.
+/// Units tri-state out. Determinism: one thread-local cell read.
 /// Caller: `encode_forward` below.
 #[must_use]
 fn capture_sky_decision() -> Option<bool> {
-    capture_sky_from_state(CAPTURE_SKY.load(core::sync::atomic::Ordering::Relaxed))
+    capture_sky_from_state(CAPTURE_SKY.with(core::cell::Cell::get))
 }
 
 /// Store the capture sky decision and hand back the previous one, so the
 /// caller puts the live arm back even when the frame fails.
-/// Units tri-state in and out. Determinism: one relaxed atomic swap.
+/// Units tri-state in and out. Determinism: one thread-local cell swap.
 /// Caller: `render_offscreen_with_toggles` below.
 fn set_capture_sky(decision: Option<bool>) -> Option<bool> {
-    capture_sky_from_state(CAPTURE_SKY.swap(
-        capture_sky_state(decision),
-        core::sync::atomic::Ordering::Relaxed,
-    ))
+    capture_sky_from_state(CAPTURE_SKY.with(|cell| cell.replace(capture_sky_state(decision))))
 }
 
 /// Forward color target count: HDR plus the R32Uint id target.
@@ -596,27 +626,25 @@ impl Presenter {
     /// with `InvalidDraw`, never a caller panic; callers run this after
     /// `stage_frame`.
     pub(super) fn resolve_draw_binds(&mut self, list: &DrawList) -> Result<(), PresentError> {
-        self.draw_binds.clear();
-        for (index, item) in list.items.iter().enumerate() {
-            let choice = match &item.base_color {
-                None => None,
-                Some(key) => {
-                    let found = self
-                        .texture_binds
-                        .iter()
-                        .position(|(known, _)| known == key);
-                    if found.is_none() {
-                        return Err(PresentError::InvalidDraw {
-                            index,
-                            reason: "unknown texture key".into(),
-                        });
-                    }
-                    found
-                }
-            };
-            self.draw_binds.push(choice);
-        }
-        Ok(())
+        // One resident-list scan per distinct texture this frame; every
+        // repeat is answered by the stack memo in `bind_memo`.
+        let binds = &self.texture_binds;
+        super::bind_memo::resolve_bind_choices(
+            list.items.iter().map(|item| item.base_color.as_ref()),
+            &mut self.draw_binds,
+            |key| Self::bind_index_of(binds, key),
+        )
+        .map(|_scans| ())
+        .map_err(|index| PresentError::InvalidDraw {
+            index,
+            reason: "unknown texture key".into(),
+        })
+    }
+
+    /// Index of `key` in the resident bind list. The one scan of that list;
+    /// only a memo miss reaches it.
+    fn bind_index_of(binds: &[(TextureKey, wgpu::BindGroup)], key: &TextureKey) -> Option<usize> {
+        binds.iter().position(|(known, _)| known == key)
     }
 
     /// Bind group chosen for draw `draw` by `resolve_draw_binds`.
@@ -725,23 +753,24 @@ impl Presenter {
         (list.camera.eye - list.camera.target).length()
     }
 
-    /// Forward pass: clear, draw the list, then (live frames) the sky at
-    /// the far plane so the depth test rejects every covered pixel.
-    /// `timestamps` brackets the pass on the device clock when supported.
+    /// Forward pass: clear, draw the list, then the sky at the far plane so
+    /// the depth test rejects every covered pixel, inside the pass or in its
+    /// own pass per the [`SkyPlan`]. `look` carries the frame's pass switches
+    /// and the device timestamps. Returns true when the sky ran in its own
+    /// timed pass, so the caller resolves the sky timestamps.
     pub(super) fn encode_forward(
         &self,
         enc: &mut wgpu::CommandEncoder,
         targets: &Targets,
         list: &DrawList,
-        sky: bool,
-        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
-    ) {
+        look: ForwardLook<'_>,
+    ) -> bool {
         // EG11: the live frame records the sun depth map from the cached
         // `sun_sub` map plus pipeline before the forward draws, so the
         // per-pass shadow column measures the pass instead of a constant
         // zero. Nothing samples the map yet (forward bindings 13/14 wait on
         // slice 2), so HDR pixels stay bit-identical.
-        if forward_sun_enabled() {
+        if look.sun_depth && forward_sun_enabled() {
             let shadow_us = self.sun_sub.encode(self, enc, list).unwrap_or(0);
             sun_last_us_store(shadow_us);
         } else {
@@ -752,27 +781,27 @@ impl Presenter {
         let (_, should_resolve) =
             super::msaa::msaa_forward_choice(&self.msaa, targets.msaa.is_some());
         let msaa_pair = targets.msaa.as_ref().filter(|_| should_resolve);
-        let (color_view, depth_view, pipeline, resolve) = match msaa_pair {
+        let (color_view, depth_view, pipeline, skinned_pipeline, resolve) = match msaa_pair {
             Some(pair) => (
                 &pair.color_view,
                 &pair.depth_view,
                 &self.forward_hdr_msaa,
+                &self.forward_skinned_msaa,
                 Some(&targets.hdr_view),
             ),
             None => (
                 &targets.hdr_view,
                 &targets.depth_view,
                 &self.forward_hdr,
+                &self.forward_skinned,
                 None,
             ),
         };
-        // Live frames discard depth (no reader copies it); capture and
-        // probe frames store it for the RL9 fog feed copy below. HDR pixels
-        // stay bit-identical either way. The capture twin keeps storing depth
-        // even while its sky row is on, so its EG8 A/B frames keep the fog
-        // feed's scaffold.
-        let capture_sky = capture_sky_decision();
-        let depth_store = if capture_sky.is_some() || forward_depth_should_store(sky) {
+        // Depth is stored only while something reads it after the pass: the
+        // own-pass sky, or the RL9 fog feed copy on capture and probe frames.
+        // HDR pixels stay bit-identical either way.
+        let sky_plan = resolve_sky_plan(capture_sky_decision(), look.sky, msaa_pair.is_some());
+        let depth_store = if forward_depth_should_store(look.keep_depth, sky_plan) {
             wgpu::StoreOp::Store
         } else {
             wgpu::StoreOp::Discard
@@ -819,11 +848,15 @@ impl Presenter {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: timestamps,
+            timestamp_writes: look.timestamps,
             occlusion_query_set: None,
             multiview_mask: None,
         });
         rp.set_pipeline(pipeline);
+        // The skinned pipeline binds only while a skinned group draws: a
+        // mesh uploaded with a skin block carries 64-byte vertices and reads
+        // its joint block through the dynamic offset at binding 7.
+        let mut skinned_bound = false;
         // RL32: sorted groups over the borrowed index list; one bind plus
         // one draw serves each distinct (pipeline, material, mesh) group.
         // Duplicates share buffers plus material bytes, so one draw is
@@ -831,7 +864,13 @@ impl Presenter {
         // is opaque); distinct meshes stay one draw each until RL60
         // instancing lands.
         let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
-        let order = rl32_submit_order(list, &mut order_buf);
+        // The `graph` row off draws nothing: the pass still clears, so the
+        // frame is the empty arena the sky and the post chain show.
+        let order: &[usize] = if look.draws {
+            rl32_submit_order(list, &mut order_buf)
+        } else {
+            &[]
+        };
         let mut i = 0;
         while i < order.len() {
             let draw = order[i];
@@ -849,7 +888,17 @@ impl Presenter {
             // Material `draw` sits at one 256-byte stride in the ring; the
             // group shares material bytes, so the head slot serves it.
             let offset = u32::try_from(draw * MATERIAL_STRIDE).unwrap_or(0);
-            rp.set_bind_group(0, bind, &[offset]);
+            let skin_block = self.skin_blocks.get(&item.mesh).copied();
+            if skin_block.is_some() != skinned_bound {
+                skinned_bound = skin_block.is_some();
+                rp.set_pipeline(if skinned_bound {
+                    skinned_pipeline
+                } else {
+                    pipeline
+                });
+            }
+            let joints = skin_block.map_or(0, skin_block_offset);
+            rp.set_bind_group(0, bind, &[offset, joints]);
             rp.set_vertex_buffer(0, mesh.vertex.slice(..));
             rp.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
             // SP63: the fragment `id` output is the vertex stage's flat
@@ -861,17 +910,9 @@ impl Presenter {
             rp.draw_indexed(0..mesh.count, 0, draw_u..draw_u + 1);
             i = j;
         }
-        // The capture twin states the sky pass itself (the FC3 skip switch
-        // halves the window frame only); every other frame keeps the switch.
-        let sky_draws = match capture_sky {
-            Some(draw) => draw,
-            None => forward_sky_should_draw(sky, forward_sky_skip_enabled()),
-        };
-        if sky_draws {
+        if sky_plan == SkyPlan::InPass {
             // The sky entries read only the fog uniform; any forward bind
             // group carries it (the dynamic material offset is unused).
-            // Skipped on live while the switch stays on: fighters stay
-            // identical, the background keeps the clear color.
             // The 4x on path needs the 4x sky pipeline to match the 4x
             // attachments; the 1x path keeps today's pipeline.
             let sky_pipeline = if msaa_pair.is_some() {
@@ -880,9 +921,56 @@ impl Presenter {
                 &self.sky_pipeline
             };
             rp.set_pipeline(sky_pipeline);
-            rp.set_bind_group(0, &self.fallback_bind, &[0]);
+            rp.set_bind_group(0, &self.fallback_bind, &[0, 0]);
             rp.draw(0..3, 0..1);
         }
+        drop(rp);
+        if sky_plan == SkyPlan::OwnPass {
+            self.encode_sky_pass(enc, targets, look.sky_timestamps)
+        } else {
+            false
+        }
+    }
+
+    /// The sky as its own render pass after forward: loads the HDR and id
+    /// targets, tests against the stored depth read-only (nothing is
+    /// written), and brackets the pass with its own device timestamps, so
+    /// the sky cost is a number of its own. Returns true when the pass wrote
+    /// timestamps. Caller: `encode_forward` above (1x live frames).
+    fn encode_sky_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) -> bool {
+        fn keep(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        }
+        let timed = timestamps.is_some();
+        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ra1-sky"),
+            color_attachments: &[keep(&targets.hdr_view), keep(&targets.id_view)],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &targets.depth_view,
+                depth_ops: None,
+                stencil_ops: None,
+            }),
+            timestamp_writes: timestamps,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        rp.set_pipeline(&self.sky_pipeline);
+        rp.set_bind_group(0, &self.fallback_bind, &[0, 0]);
+        rp.draw(0..3, 0..1);
+        timed
     }
 
     pub(super) fn encode_blit(
@@ -995,11 +1083,10 @@ impl Presenter {
     }
 
     /// Render one draw list offscreen under an explicit look pass set, so a
-    /// disabled row really skips its pass and the EG8 gate can render the
-    /// arena frame with one pass on and off. The sky row is the pass this
-    /// path switches today: the FC3 skip switch halves the window frame,
-    /// never the capture twin, and the twin keeps storing depth under every
-    /// arm so the RL9 fog feed keeps its copy. Everything else is
+    /// disabled row really skips its pass. The sky row is the pass this
+    /// path switches (the live frame path switches more, see
+    /// `render_live_offscreen_with_toggles`); the twin keeps storing depth
+    /// under every arm so the RL9 fog feed keeps its copy. Everything else is
     /// [`Self::render_offscreen_capture`] verbatim.
     /// Units toggles in, PNG bytes out. Presentation only, never hashed.
     /// Caller: `render_offscreen` above (all-on arm) plus the capture
@@ -1044,7 +1131,7 @@ impl Presenter {
         self.frame_waits = FrameWaits::default();
         let look = self.encode_look_passes()?;
         self.ensure_targets(width, height);
-        self.write_frame_uniforms(&cam_bytes, &light_bytes);
+        self.write_frame_uniforms(&cam_bytes, &light_bytes, true);
         // The window twin forward path samples the landed cascaded
         // sun; the frame focus depth selects the active cascade.
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;
@@ -1075,7 +1162,7 @@ impl Presenter {
         {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
-            self.encode_forward(&mut enc, targets, list, false, None);
+            self.encode_forward(&mut enc, targets, list, ForwardLook::blocking());
             // RL9 depth-readback seam: this frame's depth feeds the fog
             // tranche below (same queue order, so the copy sees the
             // forward pass writes).
@@ -1361,15 +1448,71 @@ pub(super) fn material_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Joints one skin block holds: the length of the `skin_joints` array that
+/// `vs_skinned` indexes in `shaders/forward.wgsl`.
+pub(crate) const SKIN_BLOCK_JOINTS: usize = 64;
+/// Bytes of one skin block: 64 matrices of 64 bytes. A multiple of 256, so
+/// every block start is a legal dynamic storage offset on any device.
+pub(super) const SKIN_BLOCK_BYTES: u64 = 4096;
+/// [`SKIN_BLOCK_BYTES`] as the `u32` a dynamic offset takes.
+pub(super) const SKIN_BLOCK_STRIDE: u32 = 4096;
+/// Skin blocks the joint buffer holds: one per skinned body in the frame.
+pub(crate) const SKIN_BLOCKS: usize = 16;
+/// Bytes of the `skin_params` uniform (`SkinParams` in the shader).
+pub(super) const SKIN_PARAMS_BYTES: u64 = 16;
+/// Skinned vertex stride in bytes: pos(12) + normal(12) + uv(8) +
+/// joints(4 x u32, 16) + weights(4 x f32, 16). Matches `SIn` in the shader.
+pub(super) const SKINNED_VERTEX_STRIDE: u64 = 64;
+const _: () = assert!(SKIN_BLOCK_JOINTS * 64 == 4096);
+const _: () = assert!(SKIN_BLOCK_STRIDE.is_multiple_of(256));
+const _: () = assert!(SKIN_BLOCKS >= 8, "eight fighters each get a block");
+
+/// Layout entry of the joint palette: one block of the read-only storage
+/// buffer, picked per draw by a dynamic offset (binding 7, vertex stage).
+pub(super) fn skin_joints_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: true,
+            min_binding_size: wgpu::BufferSize::new(SKIN_BLOCK_BYTES),
+        },
+        count: None,
+    }
+}
+
+/// Layout entry of the `skin_params` uniform (binding 8, vertex stage).
+pub(super) fn skin_params_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(SKIN_PARAMS_BYTES),
+        },
+        count: None,
+    }
+}
+
+/// Dynamic offset of skin block `block` in the joint buffer. Pure.
+#[must_use]
+pub(super) fn skin_block_offset(block: u8) -> u32 {
+    u32::from(block) * SKIN_BLOCK_STRIDE
+}
+
 /// EG38 sorted submits plus CPU sphere cull over cached groups and the ring.
-/// Caller: `encode_forward` below.
+/// Caller: `eg38_submit_order` below (tests only).
+#[cfg(test)]
 pub(super) fn eg38_sort_key(item: &DrawItem) -> (u64, u64, u64) {
     let tex = item.base_color.map(|k| k.id).unwrap_or(u64::MAX);
     (item.material_id(), tex, item.mesh.id)
 }
 
 /// Sorted order over `buf` (same twice; pipeline-adjacent), culled with spheres.
-/// Caller: `encode_forward` (`None` today); tests pass spheres to prove cull.
+/// Caller: tests only; they pass spheres to prove the cull.
+#[cfg(test)]
 pub(super) fn eg38_submit_order<'a>(
     list: &DrawList,
     spheres: Option<&[[f32; 4]]>,
@@ -1438,7 +1581,8 @@ pub(super) fn rl32_submit_order<'a>(
 }
 
 /// Inward frustum planes from a v1 camera via clip-row extraction.
-/// None on a bad camera. Caller: tests; graph list hunk feeds spheres next.
+/// None on a bad camera. Caller: tests only.
+#[cfg(test)]
 pub(super) fn eg38_frustum_planes(cam: &v1::Camera) -> Option<[[f32; 4]; 6]> {
     let c = cam.view_proj().ok()?.to_cols_array();
     let row = |i: usize| [c[i], c[4 + i], c[8 + i], c[12 + i]];
@@ -1469,82 +1613,6 @@ pub(super) fn eg38_frustum_planes(cam: &v1::Camera) -> Option<[[f32; 4]; 6]> {
         out[i] = [p[0] / l, p[1] / l, p[2] / l, p[3] / l];
     }
     Some(out)
-}
-
-/// The shared buffers and sampler every forward bind group points at.
-pub(super) struct ForwardParts<'a> {
-    pub(super) layout: &'a wgpu::BindGroupLayout,
-    pub(super) cam: &'a wgpu::Buffer,
-    pub(super) light: &'a wgpu::Buffer,
-    pub(super) material: &'a wgpu::Buffer,
-    pub(super) shadow: &'a wgpu::Buffer,
-    pub(super) sampler: &'a wgpu::Sampler,
-    pub(super) fog: &'a wgpu::Buffer,
-    pub(super) normal_view: &'a wgpu::TextureView,
-}
-
-/// One forward bind group over `parts` and the base-color `view`. The
-/// material binding spans a single stride-sized window of the ring; the
-/// draw supplies the dynamic offset, so one group serves every draw that
-/// samples this texture.
-pub(super) fn forward_bind_group(
-    device: &wgpu::Device,
-    parts: &ForwardParts<'_>,
-    view: &wgpu::TextureView,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("ra1-forward-bind"),
-        layout: parts.layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: parts.cam.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: parts.light.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: parts.material,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(MATERIAL_BYTES),
-                }),
-            },
-            // The twin shadow uniform the mesh forward reads at binding 3.
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: parts.shadow.as_entire_binding(),
-            },
-            // Base-color map plus sampler (bindings 4-5).
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::Sampler(parts.sampler),
-            },
-            // Height fog uniform (binding 6).
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: parts.fog.as_entire_binding(),
-            },
-            // Tangent-space normal map plus its sampler (bindings 17-18).
-            // The `fs`/`fs_skinned` entries sample them every fragment, so a
-            // bind group without them leaves binding 17 missing in the
-            // `ra1-forward-pipeline` layout and fails pipeline create.
-            wgpu::BindGroupEntry {
-                binding: FORWARD_NORMAL_BINDING,
-                resource: wgpu::BindingResource::TextureView(parts.normal_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: FORWARD_NORMAL_SAMPLER_BINDING,
-                resource: wgpu::BindingResource::Sampler(parts.sampler),
-            },
-        ],
-    })
 }
 
 pub(super) fn uniform_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
@@ -1737,12 +1805,16 @@ pub(super) const FORWARD_TANGENT_OFFSET: u64 = 32;
 /// Group 0 binding of the tangent-space normal map sampled by `fs`/`fs_skinned`.
 /// Matches `shaders/forward.wgsl` `normal_map` at 17.
 /// Units binding index. Determinism: fixed layout, never hashed.
-/// Caller: `forward_bind_group` below binds this view for every draw.
+/// Caller: `forward_layout_tests` pin it to the shader; the presenter's
+/// `forward_bind_with_sky` binds the view at this slot.
+#[cfg(test)]
 pub(super) const FORWARD_NORMAL_BINDING: u32 = 17;
 /// Group 0 binding of the normal-map sampler at 18.
 /// Matches `shaders/forward.wgsl` `normal_smp`.
 /// Units binding index. Determinism: fixed layout, never hashed.
-/// Caller: `forward_bind_group` below binds the shared sampler here.
+/// Caller: `forward_layout_tests` pin it to the shader; the presenter's
+/// `forward_bind_with_sky` binds the sampler at this slot.
+#[cfg(test)]
 pub(super) const FORWARD_NORMAL_SAMPLER_BINDING: u32 = 18;
 
 /// Fragment color targets for `formats` in attachment order: the HDR
@@ -1769,6 +1841,62 @@ fn color_target_states(formats: &[wgpu::TextureFormat]) -> Vec<Option<wgpu::Colo
         .collect()
 }
 
+/// Vertex attributes of the static mesh entry `vs` (`VIn`): pos, normal, uv,
+/// tangent. Offsets follow `MeshData::vertex_bytes`.
+const STATIC_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 12,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 24,
+        shader_location: 2,
+    },
+    // Location 3 carries the tangent with handedness in w.
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: FORWARD_TANGENT_OFFSET,
+        shader_location: 3,
+    },
+];
+
+/// Vertex attributes of the skinned entry `vs_skinned` (`SIn`): pos, normal,
+/// uv, four joint indices and four weights, with no tangent.
+const SKINNED_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 12,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 24,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32x4,
+        offset: 32,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 48,
+        shader_location: 4,
+    },
+];
+
 pub(super) fn forward_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -1776,45 +1904,61 @@ pub(super) fn forward_pipeline(
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
 ) -> wgpu::RenderPipeline {
+    forward_pipeline_for(device, shader, layout, formats, multisample, false)
+}
+
+/// The skinned twin of [`forward_pipeline`]: same shader, layout, fragment
+/// entry, targets and depth state, with the `vs_skinned` vertex entry over
+/// the 64-byte skinned vertex. A draw reads its joint block through the
+/// dynamic offset at binding 7.
+pub(super) fn forward_skinned_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    formats: &[wgpu::TextureFormat],
+    multisample: wgpu::MultisampleState,
+) -> wgpu::RenderPipeline {
+    forward_pipeline_for(device, shader, layout, formats, multisample, true)
+}
+
+fn forward_pipeline_for(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    formats: &[wgpu::TextureFormat],
+    multisample: wgpu::MultisampleState,
+    skinned: bool,
+) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-forward-layout"),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
     let targets = color_target_states(formats);
+    let (entry, stride, attributes): (&str, u64, &[wgpu::VertexAttribute]) = if skinned {
+        (
+            "vs_skinned",
+            SKINNED_VERTEX_STRIDE,
+            &SKINNED_VERTEX_ATTRIBUTES,
+        )
+    } else {
+        // Stride matches `MeshData::vertex_bytes`: pos + normal + uv + tangent.
+        ("vs", FORWARD_VERTEX_STRIDE, &STATIC_VERTEX_ATTRIBUTES)
+    };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("ra1-forward-pipeline"),
+        label: Some(if skinned {
+            "ra1-forward-skinned-pipeline"
+        } else {
+            "ra1-forward-pipeline"
+        }),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs"),
+            entry_point: Some(entry),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                // Stride matches `MeshData::vertex_bytes`: pos + normal + uv + tangent.
-                // Location 3 carries the tangent with handedness in w.
-                array_stride: FORWARD_VERTEX_STRIDE,
+                array_stride: stride,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 12,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 24,
-                        shader_location: 2,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: FORWARD_TANGENT_OFFSET,
-                        shader_location: 3,
-                    },
-                ],
+                attributes,
             })],
             compilation_options: Default::default(),
         },
@@ -2003,10 +2147,9 @@ mod cq7_present_alloc_tests {
             light: scene.light.clone(),
             items,
         };
-        let mut scratch = Vec::with_capacity(256);
-        scratch.resize(256, 0);
+        let mut scratch = vec![0; 256];
         let warmed_cap = scratch.capacity();
-        let (_, count) = measure(|| {
+        let ((), count) = measure(|| {
             for _ in 0..120u32 {
                 let frame = effective_camera(&list, 160, 120).expect("camera builds");
                 let mut buf = [0usize; MAX_DRAWS_PER_FRAME];
@@ -2490,15 +2633,27 @@ mod eg8_capture_sky_tests {
             None,
             "an unknown state stays the live arm"
         );
-        // The capture arm states the row itself, so the sky row on draws even
-        // while the FC3 switch stays on for the window frame.
-        assert!(forward_sky_should_draw(true, false), "sky row on draws");
-        assert!(!forward_sky_should_draw(false, false), "sky row off skips");
-        assert!(
-            !forward_sky_should_draw(true, true),
-            "live switch still halves"
+        // The capture arm states the row itself: on draws inside the pass,
+        // off skips, and no decision keeps the frame's own plan.
+        assert_eq!(
+            resolve_sky_plan(Some(true), SkyPlan::Skip, false),
+            SkyPlan::InPass,
+            "sky row on draws"
         );
-        assert!(forward_depth_should_store(false), "capture stores depth");
+        assert_eq!(
+            resolve_sky_plan(Some(false), SkyPlan::OwnPass, false),
+            SkyPlan::Skip,
+            "sky row off skips"
+        );
+        assert_eq!(
+            resolve_sky_plan(None, SkyPlan::OwnPass, false),
+            SkyPlan::OwnPass,
+            "no decision keeps the live plan"
+        );
+        assert!(
+            forward_depth_should_store(true, SkyPlan::Skip),
+            "capture stores depth"
+        );
     }
 
     #[test]
@@ -2559,73 +2714,72 @@ mod eg8_capture_sky_tests {
 }
 
 #[cfg(test)]
-mod fc_forward_half_tests {
-    use super::{forward_depth_should_store, forward_sky_should_draw, forward_sky_skip_enabled};
+mod forward_sky_plan_tests {
+    use super::{forward_depth_should_store, resolve_sky_plan, SkyPlan};
 
     #[test]
-    fn sky_skip_keeps_fighters_while_halving_uncovered_cost() {
-        // Caller: `encode_forward` above (FC3 forward half switch).
-        // Behavior: live requests skip while the switch stays on;
-        // capture and probe requests stay skip; off draws.
-        assert!(
-            forward_sky_skip_enabled(),
-            "skip defaults on to halve forward"
-        );
-        assert!(
-            !forward_sky_should_draw(true, true),
-            "live plus skip stays skip"
-        );
-        assert!(
-            !forward_sky_should_draw(false, true),
-            "capture plus skip stays skip"
-        );
-        assert!(
-            !forward_sky_should_draw(false, false),
-            "capture plus off stays skip"
-        );
-        assert!(forward_sky_should_draw(true, false), "live plus off draws");
+    fn an_own_pass_sky_request_folds_into_the_pass_only_at_4x() {
+        // Caller: `encode_forward` above. Behavior: with no capture decision
+        // the live request stands on a 1x frame, so the sky is timed on its
+        // own; a 4x frame cannot split its resolve, so it draws in the pass;
+        // a capture decision always wins and always draws inside the pass.
         assert_eq!(
-            forward_sky_should_draw(true, true),
-            forward_sky_should_draw(true, true),
-            "same inputs agree twice"
+            resolve_sky_plan(None, SkyPlan::OwnPass, false),
+            SkyPlan::OwnPass
+        );
+        assert_eq!(
+            resolve_sky_plan(None, SkyPlan::OwnPass, true),
+            SkyPlan::InPass
+        );
+        assert_eq!(resolve_sky_plan(None, SkyPlan::Skip, true), SkyPlan::Skip);
+        assert_eq!(resolve_sky_plan(None, SkyPlan::Skip, false), SkyPlan::Skip);
+        assert_eq!(
+            resolve_sky_plan(Some(true), SkyPlan::Skip, false),
+            SkyPlan::InPass
+        );
+        assert_eq!(
+            resolve_sky_plan(Some(false), SkyPlan::OwnPass, true),
+            SkyPlan::Skip
         );
     }
 
     #[test]
-    fn live_discards_depth_while_capture_stores() {
-        // Caller: `encode_forward` above (FC3 forward half switch).
-        // Behavior: live discards depth (no reader), capture stores it
-        // for the RL9 fog copy; HDR pixels stay identical either way.
-        assert!(!forward_depth_should_store(true), "live discards depth");
-        assert!(forward_depth_should_store(false), "capture stores depth");
-        assert_eq!(
-            forward_depth_should_store(true),
-            forward_depth_should_store(true),
-            "same inputs agree twice"
-        );
+    fn depth_is_stored_only_while_something_reads_it() {
+        // Caller: `encode_forward` above. Behavior: the own-pass sky and the
+        // fog feed copy read depth after the pass; with no reader the pass
+        // discards it. HDR pixels stay identical either way.
+        assert!(!forward_depth_should_store(false, SkyPlan::Skip));
+        assert!(!forward_depth_should_store(false, SkyPlan::InPass));
+        assert!(forward_depth_should_store(false, SkyPlan::OwnPass));
+        assert!(forward_depth_should_store(true, SkyPlan::Skip));
+        assert!(forward_depth_should_store(true, SkyPlan::OwnPass));
     }
 
     #[test]
-    fn live_path_consults_the_half_gates() {
-        // Caller: `encode_forward` above (FC3 forward half switch).
-        // Behavior: the live forward submit consults both gates, so the
-        // half is wired, not test-only.
-        let src = include_str!("submit.rs");
-        let at = src
-            .find("fn encode_forward")
-            .expect("forward submit exists");
-        let body = &src[at..];
-        let sky_gate = body
-            .find("forward_sky_should_draw")
-            .expect("live path consults the sky gate");
-        let depth_gate = body
-            .find("forward_depth_should_store")
-            .expect("live path consults the depth gate");
+    fn the_live_frame_asks_for_the_sky_not_a_fixed_skip_switch() {
+        // Caller: `present_frame_live` in live.rs. Behavior: the live encode
+        // plans the sky from the frame's own toggle (no fixed switch hides
+        // its cost), and the pass plan is resolved before the sky draws.
+        let submit = include_str!("submit.rs");
+        let live = include_str!("live.rs");
+        let removed = concat!("FORWARD_SKY", "_SKIP");
+        assert!(!submit.contains(removed), "the fixed skip switch is gone");
+        let at = live
+            .find("fn present_frame_live")
+            .expect("live frame exists");
+        let end = live[at..]
+            .find("fn live_sky_row_us")
+            .map_or(live.len(), |i| at + i);
+        let body = &live[at..end];
+        assert!(
+            body.contains("SkyPlan::OwnPass"),
+            "live asks for its own pass"
+        );
+        assert!(body.contains("sky_draw"), "the toggle decides");
+        let fwd = submit.find("fn encode_forward").expect("encode exists");
+        let body = &submit[fwd..];
+        let plan = body.find("resolve_sky_plan").expect("plan is resolved");
         let draw = body.find("rp.draw(0..3, 0..1)").expect("sky draw exists");
-        assert!(sky_gate < draw, "sky gate runs before the sky draw");
-        assert!(
-            depth_gate < sky_gate || depth_gate < draw,
-            "depth gate runs before the draws"
-        );
+        assert!(plan < draw, "the plan is resolved before the sky draws");
     }
 }

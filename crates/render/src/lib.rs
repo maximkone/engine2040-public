@@ -323,6 +323,9 @@ pub mod ibl;
 /// and staged as a vert strip; consumer is the `crates/game` trail feed.
 pub mod trail;
 
+#[cfg(test)]
+mod webgpu_limits;
+
 /// Headless frame counter: `begin_frame` counts one frame per call and
 /// `draw_count` reports the total. Deterministic; no IO, no allocation.
 pub struct NullRenderer {

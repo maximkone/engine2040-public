@@ -35,11 +35,11 @@ failure cases. `node tools/proof.mjs --perf` runs the timing tests that are
 
 The board is the `docs/SPRINT-NN-*.md` shards (`docs/SPRINT.md` is their index).
 Slice it with `node tools/board-slice.mjs --focus`, then `--ready`, or `--find <text>`;
-never read it whole. In OpenCode, `/sprint` runs board rows in waves of up to 20
-packets (`builder` for Rust, `planner` for plans); `/sprint` takes only `wave`
-and `takeover` args.
-`node tools/sprint-loop.mjs` runs waves autonomously. One sprint per working
-tree: `node tools/sprint-lock.mjs status` shows who holds it.
+never read it whole. Work from plans (`AGENTS.md` "Work from plans"): take the next
+ready `FOCUS.md` "## Now" row, read its plan in `docs/plan/`, do it, prove it with
+`node tools/gh-check.mjs`, tick it, commit by path and push `master`. There is no
+sprint loop and no lock: several AIs share one tree, so pull first and never revert
+edits you did not make.
 
 The legacy fixture must report `final_hash=d57b5c8ae3096614`. See `docs/HASH-LAW.md`
 for what it covers and the intentional-bump protocol. The proof CLI is real:

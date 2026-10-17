@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+engine-anim = { workspace = true, optional = true }
 engine-arena = { workspace = true, optional = true }
 engine-assets = { workspace = true, features = ["import", "registry"], optional = true }
 engine-combat.workspace = true
@@ -44,6 +45,15 @@ m1 = [
     "dep:engine-render",
 ]
 seal = ["dep:hmac", "dep:sha2"]
+# WEB3 ragdoll tape (src/ragdoll_matrix.rs, bin ragdoll_line): steps a Rapier
+# ragdoll, so it needs engine-physics `rapier` and the engine-anim skeleton
+# types. Optional like the other harnesses: the headless default graph stays
+# std-only.
+ragdoll = ["engine-physics/rapier", "dep:engine-anim"]
+
+[[bin]]
+name = "ragdoll_line"
+required-features = ["ragdoll"]
 
 [[test]]
 name = "m1_workflow"

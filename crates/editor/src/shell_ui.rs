@@ -433,8 +433,8 @@ impl Viewer<'_> {
             let staged = !self.inspector_panel.is_empty();
             if ui.add_enabled(staged, egui::Button::new("Apply")).clicked() {
                 let poses = poses_for_rows(self.shell, rows);
-                let key = self.inspector_key.max(1);
-                self.inspector_key = key.wrapping_add(1).max(1);
+                let key = (*self.inspector_key).max(1);
+                *self.inspector_key = key.wrapping_add(1).max(1);
                 match self
                     .inspector_panel
                     .emit_command(grid, key, self.shell.revision(), &poses)

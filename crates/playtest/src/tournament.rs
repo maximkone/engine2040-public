@@ -2062,27 +2062,25 @@ mod tests {
         );
     }
 
-    /// The six gate rows the shipped GA13 tier rungs post today: both
-    /// out-of-band win rates plus the four stuck rows (balance-log
-    /// 2026-10-17). One table owns the strings so both pins agree.
-    fn ga3_gate_rows() -> [&'static str; 6] {
+    /// The two gate rows the shipped tier ladder posts today: even and
+    /// cauldron kill a second move byte rarely, so byte 1 holds a dominant
+    /// share of a two-move movelist. Win rates and stuck trips are clean.
+    /// One table owns the strings so both pins agree.
+    fn ga3_gate_rows() -> [&'static str; 2] {
         [
-            "difficulty even: win rate 997 permille outside [",
-            "difficulty pressure: win rate 2 permille outside [",
-            "difficulty pressure: fighter 0 stuck in 191 of 200 matches",
-            "difficulty pressure: fighter 1 stuck in 191 of 200 matches",
-            "difficulty cauldron: fighter 0 stuck in 181 of 200 matches",
-            "difficulty cauldron: fighter 1 stuck in 181 of 200 matches",
+            "difficulty even: move_byte=1 takes 895 permille of 48 kills (cap 350)",
+            "difficulty cauldron: move_byte=1 takes 833 permille of 24 kills (cap 350)",
         ]
     }
 
     #[test]
     fn proof_gate_reproduces_byte_identical_with_five_named_stuck_legs() {
         // The five named legs stay clear (see the five tests above) and the
-        // full tournament replays byte-identical x2. At the shipped GA13 tier
-        // rungs pressure posts 191+191 and cauldron 181+181 stuck trips and
-        // both outer rows leave the 400-600 band (even 997, pressure 2), so
-        // the gate reports those rows for the sim owner to clear.
+        // full tournament replays byte-identical x2. At the shipped tier
+        // ladder every difficulty sits inside the 400-600 band with zero
+        // stuck trips; the only rows the gate still posts are the two
+        // kill-share concentrations in `ga3_gate_rows`, for the move-table
+        // owner to clear.
         // The proof harness calls this entry point by name (GATE_NAME)
         // through the crate-public API only — no test hooks, no private
         // helpers. If the gate were unwired (entry removed or renamed), this
@@ -2102,7 +2100,7 @@ mod tests {
         assert_eq!(
             first.failures.len(),
             rows.len(),
-            "GA3: known stuck rows: {:?}",
+            "GA3: known kill-share rows: {:?}",
             first.failures
         );
         for needle in rows {
@@ -2230,12 +2228,13 @@ mod tests {
         // per difficulty. Determinism itself is proven by
         // `tiny_tournament_repeats_exactly`; this test posts the bars.
         // Golden receipt (same-machine scope per crate docs): at the shipped
-        // GA13 tier rungs (`run_difficulty` installs `SHIPPED_TIERS[index]`)
-        // the rates measure 997 / 2 / 507 permille, exchange answers all
-        // land, even stays clean while pressure posts 191+191 and cauldron
-        // 181+181 stuck trips (balance-log 2026-10-17 row). Both rate bands
-        // and all four stuck rows trip the gate below; STUCK_WINDOW_TICKS
-        // untouched, zero sim change here.
+        // tier ladder (`run_difficulty` installs `SHIPPED_TIERS[index]`) the
+        // rates measure 490 / 482 / 472 permille, all inside the 400-600 band,
+        // no difficulty posts a stuck trip, and the exchange answers all
+        // land. Only the two kill-share rows in `ga3_gate_rows` trip the gate;
+        // STUCK_WINDOW_TICKS untouched, zero sim change here. These numbers
+        // moved off the old 997 / 2 / 507 receipt (191+191 and 181+181 stuck)
+        // because the ladder's per-rung temperament now reaches a duel.
         let config = TournamentConfig::standard();
         let report = run(&config).expect("standard config runs");
         assert_eq!(report.per_difficulty.len(), 3);
@@ -2247,55 +2246,37 @@ mod tests {
         let even = &report.per_difficulty[0];
         let pressure = &report.per_difficulty[1];
         let cauldron = &report.per_difficulty[2];
-        assert!(
-            even.stuck_trips.is_empty(),
-            "GA3: even clean: {:?}",
-            even.stuck_trips
-        );
-        assert_eq!(
-            pressure.stuck_trips,
-            vec![(0, 191), (1, 191)],
-            "GA3: pressure known edge: {:?}",
-            pressure.stuck_trips
-        );
-        // 191 of the 200 pressure seeds trip on both slots: the whole
-        // 1_002_043..=1_002_242 range minus the nine clear seeds pinned here.
-        let clear = [
-            1_002_092, 1_002_116, 1_002_128, 1_002_152, 1_002_185, 1_002_193, 1_002_232, 1_002_234,
-            1_002_237,
-        ];
-        let expected: Vec<u64> = (1_002_043..=1_002_242)
-            .filter(|seed| !clear.contains(seed))
-            .collect();
-        assert_eq!(
-            pressure.stuck_seeds,
-            vec![(0, expected.clone()), (1, expected)],
-            "GA3: pressure known seeds: {:?}",
-            pressure.stuck_seeds
-        );
-        assert_eq!(
-            cauldron.stuck_trips,
-            vec![(0, 181), (1, 181)],
-            "GA3: cauldron known edge: {:?}",
-            cauldron.stuck_trips
-        );
-        // Golden receipt (DepthBrain + steering + GA13 tier rung, same-machine
-        // scope): rates 997/2/507, kills 0/187/0, exchange answers all land.
-        assert_eq!(even.kills_total, 0, "even kills");
-        assert_eq!(pressure.kills_total, 187, "GA3 pressure kills");
-        assert_eq!(cauldron.kills_total, 0, "GA3 cauldron kills");
+        for (row, label) in [
+            (even, "even"),
+            (pressure, "pressure"),
+            (cauldron, "cauldron"),
+        ] {
+            assert!(
+                row.stuck_trips.is_empty() && row.stuck_seeds.is_empty(),
+                "GA3: {label} clean: {:?} {:?}",
+                row.stuck_trips,
+                row.stuck_seeds
+            );
+        }
+        // Golden receipt (DepthBrain + steering + tier ladder, same-machine
+        // scope): rates 490/482/472, kills 48/22/24, exchange answers all land.
+        assert_eq!(even.rate_permille, 490, "GA3 even rate");
+        assert_eq!(pressure.rate_permille, 482, "GA3 pressure rate");
+        assert_eq!(cauldron.rate_permille, 472, "GA3 cauldron rate");
+        assert_eq!(even.kills_total, 48, "even kills");
+        assert_eq!(pressure.kills_total, 22, "GA3 pressure kills");
+        assert_eq!(cauldron.kills_total, 24, "GA3 cauldron kills");
         assert!(report.exchange.parry_seen);
         assert!(report.exchange.riposte_seen);
         assert!(report.exchange.clash_seen);
-        // Two rows trip everything the gate can: both out-of-band rates
-        // (even 997, pressure 2) plus the four stuck rows pinned above, for
-        // the sim owner to clear (byte-identical x2 below pins it).
+        // The gate posts exactly the two kill-share rows pinned in
+        // `ga3_gate_rows` (byte-identical x2 below pins it).
         let failures = check(&report, &config);
         let rows = ga3_gate_rows();
         assert_eq!(
             failures.len(),
             rows.len(),
-            "GA3: gate posts both bands plus the stuck rows: {failures:?}"
+            "GA3: gate posts only the kill-share rows: {failures:?}"
         );
         for needle in rows {
             assert!(

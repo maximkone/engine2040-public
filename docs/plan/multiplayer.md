@@ -25,15 +25,15 @@ Open board IDs: MP6 MP8 MP10 MP12 MP13 MP14 MP15 MP16 MP16a MP16b MP17 MP18 MP19
 | 8–16 hardening + priority deltas (MP2) | unit-tested, integrated, ticked |
 | Lobby browser + ready-up + AI-fill (MP3) | unit-tested, integrated, ticked |
 | Replays + theater + keyframes (MP4) | unit-tested, integrated, ticked |
-| Melee lag compensation (MP5) | unit-tested, integrated, ticked |
+| Melee lag compensation (MP5) | ticked, but `lagcomp.rs` was removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
 | Disconnect/desync heal (AH4) | unit-tested, integrated, ticked |
 | Canonical caps (GE3, GE7) | unit-tested, integrated, ticked |
 | Loopback LAN with AI fill (GM2) | unit-tested, integrated, ticked |
 | Internet seam (ON1–ON4, ON9–ON11) | unit-tested, integrated, ticked, owned by the internet-play part below |
-| Local cheat guards | unit-tested, integrated as authority feed |
-| Server-authority admission (`guard.rs`) | implemented, integrated, ON-owned |
+| Local cheat guards | `anticheat.rs` was removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
+| Server-authority admission (`guard.rs`) | removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
 | Quantized interest grid | absent as a file, owned elsewhere |
-| Steam relay transport | implemented, integrated, ON-owned |
+| Steam relay transport | `steam_relay.rs` was removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
 | Snapshot interpolation file | missing (rowed) |
 | Party / networked physics / voice net | missing (rowed, other plan) |
 | Channel hints | hint only, not a table |
@@ -75,7 +75,7 @@ are still missing.
 | Snapshot deltas + interpolation (NET2) | unit-tested, integrated |
 | Dedicated server + beacon + slot reclaim + AI fill (MP1) | unit-tested, integrated |
 | Lobby browser + ready-up + AI-fill (MP3) | unit-tested, integrated |
-| Melee lag compensation, bounded window (MP5) | unit-tested, integrated |
+| Melee lag compensation, bounded window (MP5) | ticked, but `lagcomp.rs` was removed in `3151bd46`; Status 2026-10-17 below |
 | 8–16 hardening, priority deltas, kbps caps (MP2) | unit-tested, integrated |
 | Disconnect/desync heal (AH4) | unit-tested, integrated |
 | QUIC transport (ON1) | unit-tested, integrated |
@@ -114,6 +114,16 @@ Module notes that constrain the rows below:
   not on any live path; MP13 needs a re-scope decision.
 - `steam_relay.rs` cut 2026-10-16, never wired; the feature is not on any
   live path.
+
+Status 2026-10-17 (net code removed on purpose): rot packet `0-rot-net-dead-r1` removed eight modules from `crates/net`: `lagcomp.rs` (MP5), `guard.rs` and `anticheat.rs` (ON5), `replicate.rs` (RC14), `server.rs` (`SessionServer`), `steam_relay.rs` (PLF3), `nat.rs` and `resim.rs`. It also removed eight test files and the tests-only siege and human-bout runners in `interest.rs` and `scale.rs`. All of it sits in one `auto: backup` commit, `3151bd46` (27 files, 8,306 lines deleted). It was a dead-code cut, not a sweep accident and not a decision about the features: per the packet, their only users were each other and tests. The packet closed DONE with `cargo test -p engine-net` lib 237 passed. MP5, RC14, ON5 and PLF3 are still ticked on the board, so those ticks have no code behind them. Recover with `git show 3151bd46^:crates/net/src/<file>`.
+
+Status 2026-10-17 (what is stale in this file): the table cells for MP5, local cheat guards, `guard.rs` and the Steam relay (marked above); the "Ownership" entries for `lagcomp.rs`, `guard.rs` and `server.rs`; the `LagWindow` and `HitReceipt` API sketch; the "Freeze" rule for the `lagcomp.rs` window shape; the CUT line that says `steam_relay.rs` stays; hard problem 5 (cheating) and the Steals note on lag compensation, which quotes `crates/net/src/lagcomp.rs:19-22`; and the Quality gates lines "Lag-window honesty", "`guard.rs`" and "`steam_relay.rs`, the third WAN home". Open rows that name removed code: MP12 (needs RC14), MP13 (owns `anticheat.rs`), MP20 (owns `lagcomp.rs`), UW25 (`lagcomp.rs`), BX9 (`server.rs`); ON14 and ON19 need ON5. ON9 keeps its cap constants in `interest.rs`, but the runner that charted 64 clients and 500 AI against them is gone (`siege_kbps_chart` has 0 grep hits), so that chart cannot be re-run from the tree.
+
+Status 2026-10-17 (board vs the Now list): the board has MP6, MP10, MP17 and MP24 ticked; ON30 is open; MP23 is not on the board. MP6 is ticked with a loopback Accept (fault injector, 2 humans + 6 AI; `net_bout mp6` PASS and `node tools/mp6-check.mjs` 24 pass). The Acceptance 2 line and Tier A above say real hardware; that run has not happened. Checked on the GitHub runner today: `cargo test -p engine-net --lib` 237 passed, 0 failed, 2 ignored (run 39025608102); `--lib snapshot` 38 passed (run 39024796869); `scale::` 16, `played::` 11, `replay::` 11, `lobby::` 11 (loopback only); `heal` 5 (local run).
+
+Status 2026-10-17 (MP5 lag compensation, owner call): MP5's Accept (fair hits under 80 ms scripted ping, window in receipts, replay exact) cannot be proven: no `lagcomp` file or test exists, and a `lagcomp::` filter matches 0 tests, which a gate must not take as proof. The last version (`3151bd46^`) sized the window from RTT with a hard cap of 16 ticks (`e2eab820`), so the "5 ticks" in this file was already stale. By the Steals note below, the duel is rollback and needs no rewind, but the siege needs lag compensation. `guard.rs`, its only caller by the packet's count, is gone too. Choose: (a) restore `lagcomp.rs` from git with a real caller, or (b) re-open MP5, MP20 and ON5 and say lag compensation is not built.
+
+Status 2026-10-17 (owner: multiplayer on the web too): browser clients cannot use raw UDP or QUIC. WEB9 in `docs/plan/web-and-realism.md` adds WebTransport (WebSocket fallback) to the dedicated server beside QUIC and proves one native client and one headless Chrome client end a duel on one state digest on a single GitHub runner. The snapshot codec, rollback and heal stay as they are.
 
 ## 2. Finish line
 

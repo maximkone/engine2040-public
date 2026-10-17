@@ -1,0 +1,14 @@
+[package]
+name = "engine-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies on purpose: the headless default graph (tools/workspace-check.mjs) stays free of
+# external crates, and a target-specific `web-time` here would put one in it. The browser shell
+# hands its time source to `install` instead.
+[dependencies]

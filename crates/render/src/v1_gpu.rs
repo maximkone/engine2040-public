@@ -23,9 +23,9 @@ use std::fmt;
 // transform (`shaders/tonemap.wgsl`) prepended at compile time. BRDF core
 // ported from Bevy Engine (MIT OR Apache-2.0) at `v0.15.0`; the PORT
 // markers live in those files. This offscreen capture path runs the
-// `fs_display` fragment entry (one light, exposure, ACES, sRGB written
-// straight to an 8-bit target); the window frame runs `fs` into a linear
-// HDR target and tone-maps in its blit pass.
+// `fs_display` fragment entry (one light plus the baked ambient, exposure,
+// ACES, sRGB written straight to an 8-bit target); the window frame runs
+// `fs` into a linear HDR target and tone-maps in its blit pass.
 // ---------------------------------------------------------------------------
 
 /// The forward shader source: tonemap library plus `forward.wgsl`. Entry
@@ -99,8 +99,15 @@ pub(crate) fn create_uniform_buffer(
     })
 }
 
+/// The studio HDRI behind the baked ambient of every offscreen forward
+/// capture (the window presenter bakes the same picture), embedded once.
+pub(crate) const STUDIO_HDRI_BYTES: &[u8] =
+    include_bytes!("../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr");
+
 /// Offscreen V1 forward renderer: pipeline compiled once, color/depth
-/// targets rebuilt per capture size (the recreate path).
+/// targets rebuilt per capture size (the recreate path). The `fs_display`
+/// entry lights with the baked ambient, so the studio bake lives here and
+/// binds at 9-12 on every capture.
 pub struct GpuForward {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -108,6 +115,10 @@ pub struct GpuForward {
     adapter_driver: String,
     pipeline: wgpu::RenderPipeline,
     camera_layout: wgpu::BindGroupLayout,
+    ibl_prefilter: wgpu::Texture,
+    ibl_brdf: wgpu::Texture,
+    ibl_sh_buf: wgpu::Buffer,
+    ibl_sampler: wgpu::Sampler,
 }
 
 impl GpuForward {
@@ -115,8 +126,17 @@ impl GpuForward {
     /// Returns [`GpuError::NoAdapter`] when no GPU is present; callers
     /// testing on headless machines treat that as skip, not failure.
     pub fn init() -> Result<Self, GpuError> {
+        // Test builds only: cap the GPU tests that hold a device at once.
+        #[cfg(test)]
+        crate::test_gpu::hold_gpu_slot();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            // Test builds skip the GL backend: its driver DLL loads from a
+            // helper thread and can wedge the process loader lock.
+            backends: if cfg!(test) {
+                wgpu::Backends::PRIMARY
+            } else {
+                wgpu::Backends::all()
+            },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -133,44 +153,62 @@ impl GpuForward {
         }))
         .map_err(|e| GpuError::Device(format!("request_device: {e}")))?;
 
+        // The capture entry samples the baked ambient like the window frame,
+        // so the studio bake is uploaded once here. A failed bake fails init
+        // loudly, never a silent dark frame.
+        let (ibl_bake, _) = crate::ibl::bake(STUDIO_HDRI_BYTES)
+            .map_err(|e| GpuError::Device(format!("look ibl bake: {e}")))?;
+        let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
+            crate::ibl::gpu::upload_live_bake(&device, &queue, &ibl_bake)
+                .map_err(|e| GpuError::Device(format!("live ibl bake: {e}")))?;
+        let ibl_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("r1-ibl-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("r1-forward-pbr"),
             source: wgpu::ShaderSource::Wgsl(FORWARD_PBR_WGSL.into()),
         });
+        let mut layout_entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ];
+        layout_entries.extend(crate::ibl::gpu::forward_ibl_layout_entries());
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("r1-uniforms"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+            entries: &layout_entries,
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("r1-forward-layout"),
@@ -244,6 +282,10 @@ impl GpuForward {
             adapter_driver: format!("{} {}", info.driver, info.driver_info),
             pipeline,
             camera_layout,
+            ibl_prefilter,
+            ibl_brdf,
+            ibl_sh_buf,
+            ibl_sampler,
         })
     }
 
@@ -347,6 +389,18 @@ impl GpuForward {
                 usage: wgpu::BufferUsages::INDEX,
             });
         let [cam_buf, light_buf, mat_buf] = self.capture_uniform_buffers(&cam_u, &light_u, &mat_u);
+        let ibl_prefilter_view = self
+            .ibl_prefilter
+            .create_view(&wgpu::TextureViewDescriptor {
+                label: Some("r1-ibl-prefilter-view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+        let ibl_brdf_view = self.ibl_brdf.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("r1-ibl-brdf-view"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            ..Default::default()
+        });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("r1-uniforms"),
             layout: &self.camera_layout,
@@ -362,6 +416,22 @@ impl GpuForward {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: mat_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&ibl_prefilter_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&ibl_brdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::Sampler(&self.ibl_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.ibl_sh_buf.as_entire_binding(),
                 },
             ],
         });

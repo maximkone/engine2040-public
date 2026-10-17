@@ -1056,9 +1056,7 @@ impl ArenaApp {
     /// v1, what `staged_fight.exe` builds) so the window replays its pinned
     /// fight. Reports a rebuild failure; `None` when not staged or it landed.
     fn stage_receipt_session(&mut self) -> Option<i32> {
-        if self.staged.is_none() {
-            return None;
-        }
+        self.staged?;
         match App::new(self.config) {
             Ok(session) => {
                 self.app = session;
@@ -1355,7 +1353,10 @@ impl ArenaApp {
     /// bad combat rows, unreadable) keeps its last-good generation and logs
     /// its reason; the tick never waits.
     fn poll_hot_reload(&mut self) {
-        if self.frames_presented % u32::from(HOT_RELOAD_POLL_EVERY_FRAMES) != 0 {
+        if !self
+            .frames_presented
+            .is_multiple_of(u32::from(HOT_RELOAD_POLL_EVERY_FRAMES))
+        {
             return;
         }
         let events = self.watcher.poll();

@@ -1,0 +1,25 @@
+[package]
+name = "engine-physfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "RZ1: the physical layer - a float Rapier world for ragdolls, limbs and debris, painted from authority events"
+
+[lints]
+workspace = true
+
+# Presentation only: nothing here is hashed, and arena, combat and proof never
+# depend on this crate (tools/workspace-check.mjs holds the edges; a test greps
+# their sources). Rapier, the ragdoll joint builder and the fixed step come from
+# engine-physics (feature `rapier`); engine-anim supplies only the skeleton and
+# pose types that builder takes. All of it sits behind this crate's `rapier`
+# feature, off by default, so the headless default graph stays std-only
+# (engine-physics and engine-arena do the same). Use `--features rapier`.
+[features]
+rapier = ["dep:engine-physics", "engine-physics/rapier", "dep:engine-anim", "dep:rapier3d"]
+
+[dependencies]
+engine-physics = { workspace = true, optional = true }
+engine-anim = { workspace = true, optional = true }
+rapier3d = { workspace = true, optional = true }

@@ -150,9 +150,11 @@ broken_intra_doc_links = "warn"
 
 [workspace.dependencies]
 engine-core = { version = "0.1.0", path = "crates/core" }
+engine-clock = { version = "0.1.0", path = "crates/clock" }
 engine-ecs = { version = "0.1.0", path = "crates/ecs" }
 engine-render = { version = "0.1.0", path = "crates/render" }
 engine-physics = { version = "0.1.0", path = "crates/physics" }
+engine-physfx = { version = "0.1.0", path = "crates/physfx" }
 engine-nav = { version = "0.1.0", path = "crates/nav" }
 engine-audio = { version = "0.1.0", path = "crates/audio" }
 engine-net = { version = "0.1.0", path = "crates/net" }
@@ -296,3 +298,15 @@ codegen-units = 16
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+# WEB4: the browser build (tools/web-build.mjs runs `cargo build --profile web --target
+# wasm32-unknown-unknown -p engine-web`). Size first: opt-level z, one codegen unit, fat LTO,
+# panic=abort (a wasm panic cannot unwind anyway). overflow-checks stays on, inherited from
+# release, so wasm panics where native panics instead of wrapping. Nothing but that command
+# uses this profile, so native builds are unchanged.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
