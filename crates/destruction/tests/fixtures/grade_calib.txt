@@ -1,0 +1,5 @@
+# hop bonds graded_strain measured_limit (GradeParams::SIEGE, wall seeds 1 2 3)
+0 72 3.3933 3.5837
+1 162 9.2990 9.7107
+2 66 6.7471 7.7149
+3 252 2.8829 4.2224

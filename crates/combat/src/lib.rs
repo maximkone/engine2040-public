@@ -7,6 +7,10 @@ pub mod anatomy;
 /// Match-step wiring over the exchange and sweep resolvers: the arena
 /// call-site shape, integer ticks, caller buffers, no heap. Std-only.
 pub mod arena;
+/// Third-person melee camera framing from two ground positions: boom behind
+/// the attacker's shoulder, silhouette readability, in-frame check. Pure
+/// integers, no heap, no state. Presentation only.
+pub mod camera_framing;
 /// Ludus Magnus gladiator rows as `Tables` presets: integer permille only.
 /// Caller: `crate::fight::class_tables`.
 pub mod classes;
@@ -25,10 +29,16 @@ pub mod design;
 pub mod exchange;
 /// Pichlmair feel-survey schemas: tuning/juicing/streamlining rows.
 pub mod feel;
+/// Feel effects registered against fight triggers (Game Feel Flow pattern):
+/// one slot store to register, fixed firing order, no heap. Presentation only.
+pub mod feel_flow;
 /// Impact-feel instrumentation over the feel rows: 20-scenario
 /// hit-stop + camera ablation and the balance-survey entry. Harness-only.
 pub mod feel_instrument;
 pub mod fight;
+/// Integer port of the deepnight/gamefeel presentation feel: camera shake,
+/// bump, hit-stop and slow-mo easing. Presentation only, no heap.
+pub mod gamefeel;
 pub mod gore;
 /// Hit simulation: one blade state against every severable joint over many
 /// clean hits, as a seeded distribution (the door's `hit.simulate`). Std-only.
@@ -44,6 +54,9 @@ pub mod limbloss;
 pub mod nerve;
 pub mod projectile;
 pub mod reaction;
+/// Trauma-curve shake stage: squared-trauma magnitude on the gamefeel wave
+/// pair, as permille of the shake cap. Pure integers, presentation only.
+pub mod shake_stage;
 /// Continuous swept detection: segment-vs-capsule, shield cones,
 /// reach and facing decide. Std-only.
 pub mod sweep;

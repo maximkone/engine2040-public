@@ -142,7 +142,7 @@ action or line, so replays reproduce without a provider.
   `crates/endpoint/src/scene_tools.rs`. Accept: `cargo test -p engine-spatial --lib sense` green x2:
   50 seeded camera cases make view, lidar and map match a brute-force check 50 of 50, at most 0.2 ms
   per ray (the SP8 bar), the same text twice, tokens and ms per view posted. F2P: no sense module
-  exists today. P2P: integers only in the hash; golden `d57b5c8ae3096614` x2. needs: none.
+  exists today. P2P: integers only in the hash; golden `d57b5c8ae3096614` x2. needs: none. Progress 2026-10-17: 99ef60ab sense_text.rs view/lidar/map/pixel and sight.rs ray_first_hit; 50 seeded cases match an exact brute force 50/50 over 22,800 rays, 128x96 view about 0.4 us per ray, 873 tokens; left: the door verbs in scene_tools.rs and the tool_count_pin move.
 - [ ] SP70 spatial: capture-to-symbol lift (EB-2026-10-09-S120): a capture PNG plus depth becomes
   Actor proposals in index3, std-only, integer cm, any VLM advisory and offline, no weights in git
   (ER-2 sees pixels; we read symbols only). Diff: hard. Tier B. Size M. Owns

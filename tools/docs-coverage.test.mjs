@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { analyzeText, compare, coverageOf, isDocumented, measure } from "./docs-coverage.mjs";
+import { analyzeText, compare, coverageOf, innerDocumented, isDocumented, measure } from "./docs-coverage.mjs";
 test("empty doc markers count undocumented, prose counts documented", () => {
   assert.equal(isDocumented(["/// Prose.", "pub fn a() {}"], 1), true);
   assert.equal(isDocumented(["///", "pub fn a() {}"], 1), false);
@@ -51,6 +51,37 @@ test("measure runs over a temp fixture crate", () => {
     assert.equal(m.get("engine-fake").total, 2);
     assert.equal(m.get("engine-fake").documented, 1);
     assert.equal(m.get("engine-fake").coverage, 50);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+test("a pub mod is documented by its own inner doc comment, not by an empty one", () => {
+  assert.equal(innerDocumented("//! Prose about the module.\n\nuse x;\n"), true);
+  assert.equal(innerDocumented("#![allow(dead_code)]\n\n//! Prose after an inner attribute.\n"), true);
+  assert.equal(innerDocumented("/*!\n * Block prose.\n */\n"), true);
+  assert.equal(innerDocumented("//!\n//!   \nuse x;\n"), false);
+  assert.equal(innerDocumented("use x;\n//! too late\n"), false);
+  assert.equal(innerDocumented("// plain comment\npub fn a() {}\n"), false);
+  const text = ["pub mod yes;", "pub mod no;", "/// Own prose.", "pub mod own;"].join("\n");
+  const a = analyzeText(text, (name) => name === "yes");
+  assert.equal(a.total, 3);
+  assert.equal(a.documented, 2);
+  assert.match(a.missing[0].text, /pub mod no;/);
+});
+test("measure resolves pub mod docs beside lib.rs, a.rs/b.rs and a/mod.rs", () => {
+  const root = mkdtempSync(join(tmpdir(), "docs-cov-"));
+  try {
+    const src = join(root, "crates", "fake", "src");
+    mkdirSync(join(src, "a", "deep"), { recursive: true });
+    writeFileSync(join(root, "crates", "fake", "Cargo.toml"), '[package]\nname = "engine-fake"\n');
+    writeFileSync(join(src, "lib.rs"), "pub mod a;\npub mod bare;\n");
+    writeFileSync(join(src, "a.rs"), "//! Module a.\npub mod deep;\n");
+    writeFileSync(join(src, "bare.rs"), "use x;\n");
+    writeFileSync(join(src, "a", "deep", "mod.rs"), "//! Deep.\n");
+    const c = measure(root).get("engine-fake");
+    assert.equal(c.total, 3);
+    assert.equal(c.undocumented, 1);
+    assert.match(c.missing[0], /lib\.rs:2: pub mod bare;/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

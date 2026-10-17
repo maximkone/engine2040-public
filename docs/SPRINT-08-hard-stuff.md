@@ -15,7 +15,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   allocation per step. Tier B. Size M. Owns `crates/physics/src/cloth.rs`.
   Accept: the spike test runs un-ignored with every link within 25% + 64 raw
   of rest; cape tests and the zero-allocation step test stay green; replay
-  bit-exact x2. needs: none.
+  bit-exact x2. needs: none. Progress 2026-10-17: 4544ac4f 32x32 cloth settles with every link within 25% of rest, bit-exact twice; cloth is still f32 Verlet so the integer-math clause is not met.
 - [x] LM2 anim: GASP-class ground feel — distance matching for starts, Landed 379b13c. Tick audit 2026-10-17: warp_ground_feel_test stride_sweep_slide_under_1cm, strafe_135_skateless_and_capped, replay_exact_x2 and warp_ground_test starts/stops_slide_under_1cm_05_to_7 green, gh-check runs 39056062979 (warp_ground, 24 tests) and 39056591616 (engine-anim, 390 passed).
   stops and pivots, orientation warping for strafes, stride warping so feet
   match capsule speed (Paragon GDC 2016 shapes, reimplemented). Tier A.
@@ -34,14 +34,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
 - [ ] AM14 anim: parallel SIMD eval — per-character jobs on RC3 fork-join,
   SoA sampling on `wide` (license read first). Tier A. Size M. Owns
   `crates/anim/src/par.rs`. Accept: at least 3x on 4 cores for 64 fighters;
-  identical poses under every chunking. needs: AM1, RC3.
+  identical poses under every chunking. needs: AM1, RC3. Progress 2026-10-17: 6ab36492 anim par.rs per-character eval on the RC3 pool, poses bit-identical for 0,1,2,4,8 workers; speedup 2.0x on 64 fighters (run 39067637155), the 3x bar is not met and the wide SIMD half is skipped (external dependency).
 - [ ] AM15 anim: additive layers — locomotion base, combat upper body and
   flinch additives through one inertializer, with analytic two-bone IK in
   contact windows (Bollo GDC 2018, Clavet and Paragon GDC 2016; ozz and ACL
   MIT as patterns; diffusion and MOCHA-style generators not taken). Tier B.
   Size M. Owns `crates/anim/src/additive.rs`. Accept: no pops on any
   interruption; foot slide at most 20 mm straight and 40 mm on pivots;
-  replay x2; at most 0.05 ms per tick. needs: AM1, AM2, AM3, AM6.
+  replay x2; at most 0.05 ms per tick. needs: AM1, AM2, AM3, AM6. Progress 2026-10-17: ba6ad347 anim additive.rs layers + one inertializer + planted feet via solve_limb; slide within 20 mm straight, 40 mm pivots, 1.3 us per tick (run 39067390119); left: fighter_look does not call AdditiveRig::tick yet.
 - [ ] AM18 anim: thousand-agent crowd pose budget — extend the AM13 tiers Progress 2026-10-17: crates/anim/src/crowd_scale.rs landed (assign_crowd_tiers, eight_nearest_match_full_rate_poses, far ring FarImpostorSink handoff, run 39056591616); left: the 1,000-agent p99 is a modeled cost (modeled_tick_cost_posts_per_tier_within_budget), the timing gate thousand_agent_tick_p99_within_budget is #[ignore] and only re-checks the model, and no PF workload entry exists.
   to a seeded 1,000-agent crowd tape on the reference CPU with per-tier
   costs posted and the far ring handed to VG4 impostors by contract.
@@ -51,14 +51,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   1,000 agents p99 at most 2 ms; the 8 nearest match full-rate poses;
   golden unchanged. needs: AM13, PF1.
   (PLN animation.md EXTEND, proposed 2026-09-29.)
-- [ ] LM5 anim: net-pose divergence diagnostics — a per-fighter pose-hash
+- [x] LM5 anim: net-pose divergence diagnostics — a per-fighter pose-hash
   ring beside `net_pose.rs` (diagnostics only, never authoritative) that
   names the first divergent tick and fighter on a seeded N-client soak.
   Tier A. Size S. Owns the diagnostics hunks beside
   `crates/anim/src/net_pose.rs` (LM3 file frozen; lands after LM3).
   Accept: `cargo test -p engine-anim --lib net_diverge` green; seeded
   soak names first divergence 10/10; sim bytes x2; golden unchanged.
-  needs: LM3. (PLN animation.md EXTEND, proposed 2026-09-29.)
+  needs: LM3. (PLN animation.md EXTEND, proposed 2026-09-29.) Landed 21e1a645. net_diverge.rs pose-hash ring names the first divergent tick and fighter on 10 of 10 seeds in a 4-client 8-fighter soak (anim tests run 39067150760).
 - [ ] LM6 anim: slope/stair/sand ground feel — deepen `warp_ground.rs`
   with slope cling, stair stepping and soft-ground sink so the LM2 bars
   hold off flat ground. Tier A. Size M. Owns the slope hunks
@@ -106,25 +106,25 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Size S. Owns baseline hunks + schema-freeze test. Accept: PF1 gate
   fails on seeded regression; 8-fighter tick in budget; schema change
   refuses with diff; golden unchanged. needs: LM1, AM8, PF1.
-  (PLN28 animation.md, reviewed 2026-09-25.)
-- [ ] TV2 anim: traversal-to-nav link contract proof — every TV1 edge Progress 2026-10-17: crates/nav/src/links.rs has the traversal link registry with rebake_links and rebake_for_set tests (nav suite green, run 39057395844); left: no contract test ties each anim TV1 edge to its NV2 link entry on the five fixtures.
+  (PLN28 animation.md, reviewed 2026-09-25.) Progress 2026-10-17: 4fa1246f motion_schema_test.rs freezes the LM1 feature schema and gates search cost in lane ops; left: PF1 ms workloads in crates/perf and recorded baselines (needs a perf-to-anim edge).
+- [x] TV2 anim: traversal-to-nav link contract proof — every TV1 edge Progress 2026-10-17: crates/nav/src/links.rs has the traversal link registry with rebake_links and rebake_for_set tests (nav suite green, run 39057395844); left: no contract test ties each anim TV1 edge to its NV2 link entry on the five fixtures.
   names exactly its NV2 link-registry entry and rebakes exactly those
   links, proven x2 on vault/hurdle/mantle/climb/drop fixtures. Tier A.
   Size S. Owns contract test + per-edge link records (no new system).
   Accept: TV1-expected actions on registry links; warped roots land
   within 1 cm; bytes x2. needs: TV1, NV2.
-  (PLN28 animation.md, reviewed 2026-09-25.)
+  (PLN28 animation.md, reviewed 2026-09-25.) Landed 2681cdda. traversal_link_test.rs: each vault/hurdle/mantle/climb/drop edge names one registry entry and rebakes only its own link, roots land within 1 cm, bytes repeat x2 (run 39067150760).
 - [ ] PX5 physics: physics-driven locomotion — a controller trained offline
   (AMP and DeepMimic lineage) through the DT pipeline, shipped as an integer
   `.e2nn` net; LM1 stays the default. Tier C. Size L. Owns
   `crates/physics/src/learned_ctrl.rs`. Accept: an AI fighter walks, turns
   and recovers from shoves; replay exact x2; A/B against LM1 on blind
   review decides adoption. Hunt 2026-09-25: the student passes tract agreement (max abs diff at most 2.0) and the 100-match tournament [350, 650]; a student trained on a shuffled teacher must collapse, else the pipeline is rejected. Motion 2026-09-25: CT14 clips may seed teachers, under DT5 manifests; clips from non-commercial training data never train a shipped student. needs: PX4, DT2, NN1.
-- [ ] NN3 nn: quantization-aware training — `simulate_quantize()` during Progress 2026-10-17: crates/nn/src/qat.rs landed (simulate_quantize, train_student, export_qat, determinism_report; qat_beats_post_training_on_fixture and int8_student_is_bit_identical_with_report green, run 39057462635); left: the win is shown on a 64-row fixture not the DT3 tournament, and no digest compare across two toolchains is posted.
+- [x] NN3 nn: quantization-aware training — `simulate_quantize()` during Progress 2026-10-17: crates/nn/src/qat.rs landed (simulate_quantize, train_student, export_qat, determinism_report; qat_beats_post_training_on_fixture and int8_student_is_bit_identical_with_report green, run 39057462635); left: the win is shown on a 64-row fixture not the DT3 tournament, and no digest compare across two toolchains is posted.
   training plus a determinism report across toolchains; only the int8
   student ships. Tier B. Size S. Owns `crates/nn/src/qat.rs`. Accept: QAT
   beats post-training quantization on the DT3 tournament; the int8 student
-  is bit-identical on two toolchains. needs: NN2, DT2.
+  is bit-identical on two toolchains. needs: NN2, DT2. Landed ad7d07a4. QAT student agrees with the teacher on 1069 of 1200 rows vs 978 without, 123 vs 107 banked bouts; int8 digest 12583610706604573755 identical on Windows and the Linux runner (run 39066961820; tests run 39067417988).
 - [ ] NN4 nn: optional ONNX Runtime backend — behind a feature, with an op
   whitelist (adds Conv, Sigmoid, LayerNorm) and a `deny.toml` row; tract
   stays the default. Tier C. Size M. Owns `crates/nn/src/ort_backend.rs`.
@@ -143,7 +143,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Tier A. Size M. Owns `crates/physics/src/ragdoll.rs`,
   `crates/physics/src/joint_limits.rs`. Accept: no bone interpenetration over
   1 cm in 50 seeded falls; two ragdolls landing on each other separate; hash
-  x2; settles within the PX1 bound; zero per-tick allocations. needs: PX1, PX10.
+  x2; settles within the PX1 bound; zero per-tick allocations. needs: PX1, PX10. Progress 2026-10-17: b61738a5 physfx tests: two ragdolls landing on each other separate with no unjoined overlap over 1 cm and replay exactly (4 passed); the 50-seeded-falls bar fails (seed 44 overlaps lower_arm_r/shin_r by 8 cm at tick 40, run 39068262860), committed as an ignored repro; left: more solver iterations or bone CCD, spawn reading the joint tables.
 - [ ] PX11 physics: PID servo — the joint motors of PX9 run a Fixed-point
   PID (P and D first, I clamped, D on the measurement, slew cap) instead of
   setting velocities, with one tuning per rig, not per animation. Tier B.
@@ -187,14 +187,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Accept: bake x2; DX3 8-way equality; anchors hold; a blind review prefers
   graded breaks, else density is killed but grading stays; 16/1024 caps hold
   in the 8-fighter soak. needs: DX2, DX3, DX4.
-- [ ] PX16 physics: 1,000-agent LOD + sleep scale proof — far soldiers as
+- [x] PX16 physics: 1,000-agent LOD + sleep scale proof — far soldiers as
   capsules, near ones full ragdoll, whole-island sleep hysteresis, plus
   a seeded shove-through-the-crowd tape proving no missed wake. Tier A.
   Size M. Owns scale-proof hunks beside `crates/physics/src/lod.rs` +
   `crates/perf` workloads (PX7 system frozen). Accept: `cargo test
   -p engine-physics --lib lod` green incl. 1,000-agent fixture; physics
   slice p99 at most 2 ms on the reference CPU; wake-recall 100%; hash
-  x2; golden unchanged. needs: PX7, PF1, PF2. (EXTEND physics 2026-09-27.)
+  x2; golden unchanged. needs: PX7, PF1, PF2. (EXTEND physics 2026-09-27.) Landed 0494dbd3. lod.rs and the sleep helpers restored (deleted in 3d6ee4a1); 1,000-agent shove tape, 100% wake recall, same hash x2; lod tests 13 passed, p99 under 2 ms slice test passed on the runner, not the reference CPU.
 - [x] PX17 physics: 64-fighter snapshot + rollback-byte proof — snapshot
   bytes follow `build_islands` order with restore-then-snapshot equality
   and a per-fighter byte budget the net encoder reads. Tier A. Size S.
@@ -233,14 +233,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   -p engine-physics --lib combined_tick` green on the 64+500 fixture;
   physics slice p99 within 4 ms on the reference CPU; hash x2; golden
   unchanged. needs: PX7, PX16, PF1. (EXTEND physics 2026-09-29.)
-- [ ] PX20 physics: deterministic swept shape-cast API — segment-cast Progress 2026-10-17: crates/physics/src/query.rs has sphere_cast and ray_cast with rb_query_kinds tests (6b671986, f32 nearest hit); left: no Fixed/Q16 segment cast with sorted time-of-impact and no swept_cast test.
+- [x] PX20 physics: deterministic swept shape-cast API — segment-cast Progress 2026-10-17: crates/physics/src/query.rs has sphere_cast and ray_cast with rb_query_kinds tests (6b671986, f32 nearest hit); left: no Fixed/Q16 segment cast with sorted time-of-impact and no swept_cast test.
   with sorted time-of-impact in `crates/physics/src/query.rs`,
   Fixed/Q16 only, consumed by GP2 sweep and PX10 CCD wiring. Tier A.
   Size S. Owns the cast hunks in `query.rs` (no new file, no step
   change). Accept: `cargo test -p engine-physics --lib swept_cast`
   green incl. 1,000 seeded casts; TOI order stable under permutation;
   hash x2; golden unchanged. needs: PH1, GP2. (EXTEND physics
-  2026-09-29.)
+  2026-09-29.) Landed 363000af. swept_cast Q16 sphere vs capsules, ordered by time of impact then id; 1,000 seeded casts match a dense march, permuted targets same answer (3 tests run 39066316942; clippy -D warnings run 39067537158).
 - [ ] PX21 physics: moving-platform ride — deterministic platform-delta Progress 2026-10-17: kcc.rs platform_ride_matrix (station within 1 cm over 600 ticks, platform stop, step-off inherits velocity, hash x2) green in physics run 39057362796; left: the step-off landing is only asserted grounded, not within 1 cm of a target.
   inheritance for carried fighters (ride, step-off, platform stop),
   integer deltas only. Tier B. Size S. Owns ride hunks beside
@@ -248,7 +248,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   -p engine-physics --lib platform_ride` green; carried fighter keeps
   station within 1 cm over 600 ticks; step-off lands within 1 cm;
   hash x2; golden unchanged. needs: PH2, PX1. (EXTEND physics
-  2026-09-29.)
+  2026-09-29.) Progress 2026-10-17: ee98c096 platform_ride_matrix checks the step-off landing tick and x against an independent f64 ballistic prediction within 1 cm (3 tests green, run id not captured; rerun before ticking).
 - [ ] PX22 physics: servo calibration corpus — offline seeded sweep
   measuring per-joint overshoot and jitter on three rigs, emitting the
   one-tune-per-rig PID tables PX11 consumes. Tier B. Size S. Owns

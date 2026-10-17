@@ -20,6 +20,9 @@ pub mod graph;
 
 pub mod quality;
 
+/// WEB13: a ledger of every pipeline build, so a build after the loader is a loud `late_compile`.
+pub mod pipeline_warmup;
+
 /// V1 forward-PBR receipt (R1): CPU rasterizer, behind the `v1` feature so
 /// the headless default stays std-only.
 #[cfg(feature = "v1")]

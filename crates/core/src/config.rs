@@ -93,7 +93,7 @@ impl Config {
         if self.tick_hz == 0 {
             crate::DT
         } else {
-            1.0 / self.tick_hz as f32
+            1.0 / crate::checked::f32_from_u64(self.tick_hz)
         }
     }
 }

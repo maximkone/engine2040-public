@@ -19,7 +19,10 @@ tls = ["engine-provider/tls"]
 [dependencies]
 # QA3 bout bots: the bot harness ticks the shipped pressure/guard trees.
 engine-ai.workspace = true
-engine-arena.workspace = true
+# ARC8: the keypoint spine track steps `engine_arena::spine_step` (`spine` flag).
+engine-arena = { workspace = true, features = ["spine"] }
+# GP7 feel keypoints play the presentation feel (shake, hit-stop, framing) from combat.
+engine-combat.workspace = true
 # Keyed evidence seal for the a6/a7 writers: HMAC-SHA256 over the manifest
 # under the operator key (`hmac` 0.12 + `sha2` 0.10, both MIT/Apache-2.0,
 # pure Rust). Unconditional: this crate sits outside the headless default

@@ -10,6 +10,8 @@
 //   mem           wasmMemoryBytes from the ready line
 //   ttff          ms from navigation to the first frame on the canvas (one 250 ms poll of resolution)
 // Without a receipt mem and ttff print `na` and are not gated, unless --require-receipt (then that fails).
+// WEB8/WEB13: when the receipt carries them the line ends with `tier=<name> validation=<n> pipelines=<n>`; a validation error or a
+// pipeline built after the loader (late_compile) fails the gate. An older receipt without them prints the six numbers only.
 // Exit: 0 inside every budget, 1 a number over budget (or a required number missing), 2 could not run.
 // Twiggy's top lines, when build.json holds them, are printed after the gate line for the record.
 import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
@@ -56,7 +58,13 @@ export function readReceipt(text) {
   try { r = JSON.parse(text); } catch (e) { throw new BudgetError(`the receipt is not JSON: ${e.message}`); }
   if (!r || typeof r !== "object" || Array.isArray(r)) throw new BudgetError("the receipt is not a JSON object");
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  return { mem: num(r.wasmMemoryBytes), ttff_ms: num(r.ttffMs) };
+  const out = { mem: num(r.wasmMemoryBytes), ttff_ms: num(r.ttffMs) };
+  if (typeof r.tier === "string" && r.tier) out.tier = r.tier;
+  for (const [from, to] of [["validation", "validation"], ["pipelines", "pipelines"], ["latePipelines", "late_pipelines"]]) {
+    const n = num(r[from]);
+    if (n !== null) out[to] = n;
+  }
+  return out;
 }
 
 // The budgets object of web-budget.json text; every key must be a positive number.
@@ -72,7 +80,11 @@ export function readBudgets(text) {
 }
 
 // The printed line.
-export const formatLine = (m) => `web-budget: wasm=${m.wasm} gzip=${m.gzip} brotli=${m.brotli} first_bundle=${m.first_bundle} mem=${m.mem ?? "na"} ttff=${m.ttff_ms ?? "na"}`;
+export const formatLine = (m) => {
+  const base = `web-budget: wasm=${m.wasm} gzip=${m.gzip} brotli=${m.brotli} first_bundle=${m.first_bundle} mem=${m.mem ?? "na"} ttff=${m.ttff_ms ?? "na"}`;
+  if (m.tier == null && m.validation == null && m.pipelines == null) return base;
+  return `${base} tier=${m.tier ?? "na"} validation=${m.validation ?? "na"} pipelines=${m.pipelines ?? "na"}`;
+};
 
 // Compare measured numbers to budgets. A number that is null is missing: a failure only when `requireReceipt`.
 export function check(measured, budgets, { requireReceipt = false } = {}) {
@@ -85,6 +97,8 @@ export function check(measured, budgets, { requireReceipt = false } = {}) {
     }
     if (v > budgets[k]) failures.push(`${k} ${v} is over its budget ${budgets[k]} by ${v - budgets[k]} (${(((v - budgets[k]) / budgets[k]) * 100).toFixed(1)}%)`);
   }
+  if (measured.validation > 0) failures.push(`validation ${measured.validation} errors on the page (the budget is 0)`);
+  if (measured.late_pipelines > 0) failures.push(`late_compile: ${measured.late_pipelines} pipeline(s) built after the loader (the budget is 0)`);
   return { ok: failures.length === 0, failures };
 }
 

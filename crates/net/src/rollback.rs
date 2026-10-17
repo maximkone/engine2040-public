@@ -17,6 +17,12 @@
 //! the session layer replicates, never the tape order. Budget: snapshot
 //! window holds at most `MAX_P2P_ROLLBACK + 1` states; per-player queues hold at
 //! most `INPUT_QUEUE_LEN` inputs; hash log costs 8 B per frame (documented).
+//! Input delay and first-incorrect resim (MP22, `HouraiTeahouse/backroll-rs`
+//! ISC, ideas only): `P2pSession::with_frame_delay` applies each local input
+//! `frame_delay` frames late so the peer's copy of it travels for free, and
+//! `confirm_input` only marks the earliest wrong frame (`first_incorrect_frame`)
+//! so `resolve_incorrect` resimulates once from there however many late
+//! inputs arrived this tick.
 //! License: MIT (workspace). PORT(clean-room: no vendor bytes copied;
 //! GGRS-style save/load/advance request shape used as idea-only per
 //! CODELAW 9; MIT OR Apache-2.0 compatible).
@@ -41,8 +47,16 @@ pub const WAN_ROLLBACK_CAP: usize = crate::netcode::MAX_ROLLBACK;
 pub const INPUT_QUEUE_LEN: usize = 128;
 /// Player count for the P2P tape (fixed 2-player duel).
 pub const PLAYERS: usize = 2;
+/// Production local input delay in frames (`session::INPUT_DELAY_TICKS`):
+/// pass it to [`P2pSession::with_frame_delay`]; `P2pSession::new` stays at 0.
+pub const DEFAULT_FRAME_DELAY: u32 = crate::session::INPUT_DELAY_TICKS;
 /// Narrow Lunaris-v2 resim window (8 frames, GGRS default, pattern only).
 pub const LUNARIS_WINDOW: usize = 8;
+
+/// A frame count as a window index.
+fn index(frames: u32) -> usize {
+    usize::try_from(frames).unwrap_or(usize::MAX)
+}
 
 /// One confirmed frame: state hash + compact input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +342,7 @@ pub struct P2pSession<S: SimTick> {
     last_remote: u32,
     rollbacks: u64,
     predicted: u64,
+    mispredicted: u64,
     max_rollback: usize,
     last_mismatch: Cell<Option<u32>>,
     frontier: u32,
@@ -338,6 +353,9 @@ pub struct P2pSession<S: SimTick> {
     confirmed: u32,
     anchor_frame: u32,
     anchor: Option<S>,
+    frame_delay: u32,
+    delayed: VecDeque<u32>,
+    first_incorrect: Option<u32>,
 }
 
 impl<S: SimTick> P2pSession<S> {
@@ -353,6 +371,7 @@ impl<S: SimTick> P2pSession<S> {
             last_remote: 0,
             rollbacks: 0,
             predicted: 0,
+            mispredicted: 0,
             max_rollback: 0,
             last_mismatch: Cell::new(None),
             frontier: 0,
@@ -363,7 +382,33 @@ impl<S: SimTick> P2pSession<S> {
             confirmed: 0,
             anchor_frame: 0,
             anchor: None,
+            frame_delay: 0,
+            delayed: VecDeque::new(),
+            first_incorrect: None,
         }
+    }
+
+    /// Open a session whose local input takes effect `delay` frames after it
+    /// is sampled (clamped to `delay::MAX_DELAY`); the first `delay` frames
+    /// run on neutral local input `0`. Use [`DEFAULT_FRAME_DELAY`] for the
+    /// production setting.
+    pub fn with_frame_delay(initial: S, delay: u32) -> Self {
+        let delay = crate::delay::clamp_delay(delay);
+        let mut session = Self::new(initial);
+        session.frame_delay = delay;
+        session.delayed = std::iter::repeat_n(0, index(delay)).collect();
+        session
+    }
+
+    /// Local input delay in frames (0 for [`Self::new`]).
+    pub fn frame_delay(&self) -> u32 {
+        self.frame_delay
+    }
+
+    /// Earliest frame whose remote input was confirmed different from its
+    /// prediction and not yet resimulated (`first_incorrect_frame`).
+    pub fn first_incorrect_frame(&self) -> Option<u32> {
+        self.first_incorrect
     }
 
     /// Enable sparse saving (GGRS sparse mode, idea only): the anchor holds
@@ -559,6 +604,11 @@ impl<S: SimTick> P2pSession<S> {
         self.predicted
     }
 
+    /// Predicted remote inputs the true input later contradicted.
+    pub fn mispredicted_count(&self) -> u64 {
+        self.mispredicted
+    }
+
     /// Deepest rollback distance so far (frames).
     pub fn max_rollback(&self) -> usize {
         self.max_rollback
@@ -570,9 +620,17 @@ impl<S: SimTick> P2pSession<S> {
     /// hash. Steady state is one window push plus one amortized hash push.
     /// Both per-player queues record the authored inputs (remote flagged
     /// predicted when repeated); past-cap slots evict the oldest
-    /// order-preserving.
+    /// order-preserving. With a [`Self::with_frame_delay`] session `local` is
+    /// the input sampled this tick and the frame runs the one sampled
+    /// `frame_delay` ticks ago.
     pub fn advance_frame(&mut self, local: u32, remote: Option<u32>) -> u64 {
         let f = self.frame;
+        let local = if self.frame_delay == 0 {
+            local
+        } else {
+            self.delayed.push_back(local);
+            self.delayed.pop_front().unwrap_or(0)
+        };
         let (r, predicted) = match self.pending.remove(&f).or(remote) {
             Some(v) => {
                 self.last_remote = v;
@@ -621,6 +679,15 @@ impl<S: SimTick> P2pSession<S> {
     /// (frame plus the 8 B per frame hash log); full state lives only in
     /// the window owner.
     pub fn confirm_frame(&mut self, frame: u32, remote: u32) -> Result<usize, RollbackError> {
+        self.confirm_input(frame, remote)?;
+        self.resolve_incorrect()
+    }
+
+    /// Record the late true remote input for `frame` without resimulating:
+    /// same buffering and refusals as [`Self::confirm_frame`], but a wrong
+    /// prediction only lowers [`Self::first_incorrect_frame`]. Call
+    /// [`Self::resolve_incorrect`] once after a batch of arrivals.
+    pub fn confirm_input(&mut self, frame: u32, remote: u32) -> Result<(), RollbackError> {
         if frame >= self.frame {
             if u32::try_from(MAX_P2P_ROLLBACK).is_ok_and(|cap| frame - self.frame > cap) {
                 return Err(RollbackError::FutureFrame {
@@ -629,43 +696,62 @@ impl<S: SimTick> P2pSession<S> {
                 });
             }
             self.pending.insert(frame, remote);
-            return Ok(0);
+            return Ok(());
         }
         let oldest = self.window.front().map_or(self.frame, |r| r.frame);
-        if frame < oldest {
+        if frame < oldest || index(self.frame - frame) > MAX_P2P_ROLLBACK {
             return Err(RollbackError::TooFar { frame, oldest });
         }
-        let distance = (self.frame - frame) as usize;
-        if distance > MAX_P2P_ROLLBACK {
-            return Err(RollbackError::TooFar { frame, oldest });
-        }
-        let idx = (frame - oldest) as usize;
-        let Some(record) = self.window.get_mut(idx) else {
+        let Some(record) = self.window.get_mut(index(frame - oldest)) else {
             return Err(RollbackError::TooFar { frame, oldest });
         };
-        if record.inputs[1] == remote {
-            record.predicted = false;
-            self.queues[1].confirm(frame, remote);
-            self.note_confirmed(frame);
-            return Ok(0);
-        }
+        let wrong = record.inputs[1] != remote;
         record.inputs[1] = remote;
         record.predicted = false;
         self.queues[1].confirm(frame, remote);
-        if let Some(entry) = self.log.get_mut(frame as usize) {
-            entry[1] = remote;
-        }
-        let (start_idx, start_state, resim_len) = if self.sparse {
-            match self.anchor.clone() {
-                Some(anchor) if self.anchor_frame <= frame && self.anchor_frame >= oldest => (
-                    (self.anchor_frame - oldest) as usize,
-                    anchor,
-                    (self.frame - self.anchor_frame) as usize,
-                ),
-                _ => (idx, record.before.clone(), distance),
+        if wrong {
+            self.mispredicted += 1;
+            if let Some(entry) = self.log.get_mut(index(frame)) {
+                entry[1] = remote;
             }
+            self.first_incorrect = Some(self.first_incorrect.map_or(frame, |f| f.min(frame)));
+            // The anchor refresh waits for the resim: its states are stale.
+            self.confirmed = self.confirmed.max(frame.saturating_add(1));
         } else {
-            (idx, record.before.clone(), distance)
+            self.note_confirmed(frame);
+        }
+        Ok(())
+    }
+
+    /// Restore the checkpoint at [`Self::first_incorrect_frame`] and replay
+    /// the window to the tip once, however many late inputs were recorded.
+    /// Returns the replayed frame count (`0` when nothing was wrong). The
+    /// cursor clears even on `TooFar` (the frame left the window): that is a
+    /// resync, not a resim.
+    pub fn resolve_incorrect(&mut self) -> Result<usize, RollbackError> {
+        let Some(frame) = self.first_incorrect.take() else {
+            return Ok(0);
+        };
+        let oldest = self.oldest_frame();
+        if frame < oldest {
+            return Err(RollbackError::TooFar { frame, oldest });
+        }
+        let idx = index(frame - oldest);
+        let distance = index(self.frame - frame);
+        let Some(record) = self.window.get(idx) else {
+            return Err(RollbackError::TooFar { frame, oldest });
+        };
+        let (start_idx, start_state, resim_len) = match self.anchor.clone() {
+            Some(anchor)
+                if self.sparse && self.anchor_frame <= frame && self.anchor_frame >= oldest =>
+            {
+                (
+                    index(self.anchor_frame - oldest),
+                    anchor,
+                    index(self.frame - self.anchor_frame),
+                )
+            }
+            _ => (idx, record.before.clone(), distance),
         };
         self.sim = start_state;
         let len = self.window.len();
@@ -680,7 +766,7 @@ impl<S: SimTick> P2pSession<S> {
                 break;
             };
             slot.hash = hash;
-            if let Some(entry) = self.history.get_mut(slot.frame as usize) {
+            if let Some(entry) = self.history.get_mut(index(slot.frame)) {
                 *entry = hash;
             }
             if i + 1 < len {
@@ -692,20 +778,24 @@ impl<S: SimTick> P2pSession<S> {
         }
         self.rollbacks += 1;
         self.max_rollback = self.max_rollback.max(resim_len.max(distance));
-        self.note_confirmed(frame);
+        self.refresh_anchor();
         Ok(distance)
     }
 
     fn note_confirmed(&mut self, frame: u32) {
         if frame.wrapping_add(1) > self.confirmed {
             self.confirmed = frame.wrapping_add(1);
-            if self.sparse {
-                self.anchor_frame = self.confirmed;
-                if let Some(state) = self.snapshot_before(self.confirmed) {
-                    self.anchor = Some(state);
-                } else if self.confirmed == self.frame {
-                    self.anchor = Some(self.sim.clone());
-                }
+            self.refresh_anchor();
+        }
+    }
+
+    fn refresh_anchor(&mut self) {
+        if self.sparse {
+            self.anchor_frame = self.confirmed;
+            if let Some(state) = self.snapshot_before(self.confirmed) {
+                self.anchor = Some(state);
+            } else if self.confirmed == self.frame {
+                self.anchor = Some(self.sim.clone());
             }
         }
     }
@@ -734,7 +824,9 @@ impl<S: SimTick> P2pSession<S> {
     /// survivors keep frame order and the hash tape (`history`) is untouched,
     /// so replays and `check_desync` probes stay hash-identical.
     pub fn discard_confirmed_frames(&mut self, frame: u32) -> u32 {
-        let target = frame.min(self.frame);
+        let target = frame
+            .min(self.frame)
+            .min(self.first_incorrect.unwrap_or(u32::MAX));
         let mut n = 0u32;
         while self
             .window
@@ -772,9 +864,127 @@ impl<S: SimTick> P2pSession<S> {
     }
 }
 
+/// Seeded two-endpoint loopback shared by the input-delay tests (MP22, QN2).
+#[cfg(test)]
+pub(crate) mod loopback {
+    use super::*;
+    use crate::link::{FaultLink, Frame as LinkFrame, LinkProfile};
+    use engine_core::mix64;
+
+    /// Input copies per datagram (the session's `REDUNDANCY` plus one).
+    const COPIES: u32 = 4;
+    /// Ticks a scripted button is held, human-shaped.
+    const HOLD: u32 = 4;
+
+    /// History-sensitive integer sim: any wrong input changes every later hash.
+    #[derive(Clone, Default)]
+    pub(crate) struct LoopSim {
+        acc: u64,
+    }
+
+    impl SimTick for LoopSim {
+        fn advance(&mut self, inputs: [u32; PLAYERS]) {
+            let mix = (u64::from(inputs[0]) << 8) | u64::from(inputs[1]);
+            self.acc = (self.acc ^ mix).wrapping_mul(0x0000_0100_0000_01B3);
+        }
+
+        fn state_hash(&self) -> u64 {
+            self.acc
+        }
+    }
+
+    /// What one loopback run measured.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct Receipt {
+        pub frames: u32,
+        pub predicted: u64,
+        pub mispredicted: u64,
+        pub rollbacks: u64,
+        pub max_rollback: usize,
+        pub tip_matches_truth: bool,
+    }
+
+    fn script(salt: u64, tick: u32) -> u32 {
+        (mix64(u64::from(tick / HOLD) ^ salt) % 5) as u32
+    }
+
+    /// Hand every datagram due this tick to the session, then resim once.
+    fn deliver(session: &mut P2pSession<LoopSim>, link: &mut FaultLink) {
+        for frame in link.due() {
+            let LinkFrame::Datagram(bytes) = frame else {
+                continue;
+            };
+            for pair in bytes.chunks_exact(8) {
+                let word = |at: usize| {
+                    u32::from_le_bytes([pair[at], pair[at + 1], pair[at + 2], pair[at + 3]])
+                };
+                session
+                    .confirm_input(word(0), word(4))
+                    .expect("arrival inside the window");
+            }
+        }
+        session
+            .resolve_incorrect()
+            .expect("resim inside the window");
+    }
+
+    /// Play `frames` ticks of one endpoint against a peer whose inputs cross
+    /// a seeded [`FaultLink`]. Both sides apply input `delay` frames late;
+    /// the peer repeats its last [`COPIES`] inputs in every datagram. The
+    /// counters are read once the datagrams still in flight have landed; a
+    /// frame whose every copy was lost is then caught up from the script (the
+    /// reliable lane) so the tip can be checked against the truth.
+    pub(crate) fn run(delay: u32, profile: LinkProfile, seed: u64, frames: u32) -> Receipt {
+        let (local_salt, remote_salt) = (seed ^ 0xA5A5, seed ^ 0x5A5A);
+        let mut session = P2pSession::with_frame_delay(LoopSim::default(), delay);
+        let mut link = FaultLink::new(profile, seed);
+        for t in 0..frames {
+            let mut datagram = Vec::new();
+            for k in (0..COPIES.min(t + 1)).rev() {
+                datagram.extend_from_slice(&(t - k + delay).to_le_bytes());
+                datagram.extend_from_slice(&script(remote_salt, t - k).to_le_bytes());
+            }
+            link.send_datagram(&datagram);
+            deliver(&mut session, &mut link);
+            link.tick();
+            let neutral = (t < delay).then_some(0);
+            session.advance_frame(script(local_salt, t), neutral);
+        }
+        for _ in 0..profile.worst_delay() {
+            deliver(&mut session, &mut link);
+            link.tick();
+        }
+        let receipt = (
+            session.predicted_count(),
+            session.mispredicted_count(),
+            session.rollback_count(),
+            session.max_rollback(),
+        );
+        let mut truth = LoopSim::default();
+        for f in 0..frames {
+            let at = |salt| f.checked_sub(delay).map_or(0, |s| script(salt, s));
+            let remote = at(remote_salt);
+            truth.advance([at(local_salt), remote]);
+            if session.was_predicted(f) == Some(true) {
+                session.confirm_frame(f, remote).expect("catch-up");
+            }
+        }
+        Receipt {
+            frames,
+            predicted: receipt.0,
+            mispredicted: receipt.1,
+            rollbacks: receipt.2,
+            max_rollback: receipt.3,
+            tip_matches_truth: session.sim().state_hash() == truth.state_hash()
+                && session.stream().last() == Some(&truth.state_hash()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::LinkProfile;
 
     #[test]
     fn cap_respected_at_128() {
@@ -1287,5 +1497,105 @@ mod tests {
             sparse.verify_full_window(8),
             Err(RollbackError::TooFar { .. })
         ));
+    }
+
+    #[test]
+    fn first_incorrect_batches_one_resim() {
+        // Frames 0..8 predicted; the true inputs arrive 6, 4, 5 in one tick.
+        // Confirming one by one resims three times; marking the first
+        // incorrect frame resims once, from frame 4, to the same tip.
+        let (local, remote) = duel_inputs(8);
+        let play = || {
+            let mut s = P2pSession::new(ToyDuel::default());
+            for &l in &local {
+                s.advance_frame(l, None);
+            }
+            s
+        };
+        let mut batched = play();
+        for f in [6u32, 4, 5] {
+            batched
+                .confirm_input(f, remote[f as usize])
+                .expect("in window");
+        }
+        assert_eq!(batched.first_incorrect_frame(), Some(4));
+        assert_eq!(batched.rollback_count(), 0, "marking never resims");
+        assert_eq!(batched.resolve_incorrect(), Ok(4));
+        assert_eq!(batched.first_incorrect_frame(), None);
+        assert_eq!(batched.rollback_count(), 1);
+        assert_eq!(batched.resolve_incorrect(), Ok(0), "nothing left to resim");
+        let mut single = play();
+        for f in [6u32, 4, 5] {
+            single
+                .confirm_frame(f, remote[f as usize])
+                .expect("in window");
+        }
+        assert_eq!(single.rollback_count(), 3);
+        assert_eq!(batched.stream(), single.stream());
+        assert_eq!(batched.sim().state_hash(), single.sim().state_hash());
+    }
+
+    #[test]
+    fn discard_keeps_the_unresolved_incorrect_frame() {
+        let (local, remote) = duel_inputs(8);
+        let mut s = P2pSession::new(ToyDuel::default());
+        for &l in &local {
+            s.advance_frame(l, None);
+        }
+        s.confirm_input(2, remote[2].wrapping_add(1))
+            .expect("in window");
+        assert_eq!(s.discard_confirmed_frames(8), 0, "frame 0 is predicted");
+        let predicted = s.input_at(0).map_or(0, |i| i[1]);
+        s.confirm_input(0, predicted).expect("in window");
+        s.confirm_input(1, s.input_at(1).map_or(0, |i| i[1]))
+            .expect("in window");
+        assert_eq!(
+            s.discard_confirmed_frames(8),
+            2,
+            "stops at the incorrect frame"
+        );
+        assert_eq!(s.oldest_frame(), 2);
+        assert!(s.resolve_incorrect().is_ok());
+    }
+
+    #[test]
+    fn frame_delay_applies_local_input_late() {
+        let mut s = P2pSession::with_frame_delay(ToyDuel::default(), DEFAULT_FRAME_DELAY);
+        assert_eq!(DEFAULT_FRAME_DELAY, 2);
+        assert_eq!(s.frame_delay(), 2);
+        for f in 0..5u32 {
+            s.advance_frame(10 + f, Some(1));
+        }
+        let applied: Vec<u32> = (0..5).filter_map(|f| s.input_at(f)).map(|i| i[0]).collect();
+        assert_eq!(applied, [0, 0, 10, 11, 12], "frame f runs the input of f-2");
+        assert_eq!(P2pSession::new(ToyDuel::default()).frame_delay(), 0);
+    }
+
+    #[test]
+    fn delay_cuts_predictions_and_rollbacks_on_a_lossy_link() {
+        // MP22 receipt: same seeded link (1-3 ticks one way, 2% loss), delay
+        // 0 vs the production 2. The peer's input travels for free during
+        // the delay, so fewer frames are predicted and fewer resims run.
+        let profile = LinkProfile {
+            latency: 1,
+            jitter: 2,
+            loss_pct: 2,
+            reorder_pct: 0,
+        };
+        let off = loopback::run(0, profile, 0xD31A, 300);
+        let on = loopback::run(DEFAULT_FRAME_DELAY, profile, 0xD31A, 300);
+        println!("delay-off {off:?}\ndelay-on  {on:?}");
+        for r in [off, on] {
+            assert!(r.tip_matches_truth, "tip must equal the truth hash: {r:?}");
+            assert!(r.max_rollback <= LUNARIS_WINDOW, "resim over 8: {r:?}");
+        }
+        assert!(on.predicted < off.predicted, "{on:?} vs {off:?}");
+        assert!(on.rollbacks < off.rollbacks, "{on:?} vs {off:?}");
+        let again = loopback::run(DEFAULT_FRAME_DELAY, profile, 0xD31A, 300);
+        assert_eq!(
+            (again.predicted, again.rollbacks, again.max_rollback),
+            (on.predicted, on.rollbacks, on.max_rollback),
+            "same seed, same receipt"
+        );
     }
 }

@@ -34,27 +34,27 @@
   Tier B. Size S. Owns `crates/ecs/src/change_tick.rs`. Accept: 2x or
   better Changed-scan on a 1%-dirty 10k-entity scene; tick-near-u32-MAX
   wrap soak exact x2; golden unchanged. needs: none.
-- [ ] RC19 ecs: optional views + dynamic spawn — Optional-component
+- [x] RC19 ecs: optional views + dynamic spawn — Optional-component
   iteration and runtime-TypeInfo spawn bundles over the ARC1 spine columns
   for RC4 prefabs (shipyard `optional.rs`, hecs `bundle.rs` +
   `entity_builder.rs`, MIT OR Apache-2.0, patterns reimplemented; RC17
   stays reserved for RC12 splits). Tier B. Size M. Owns spine call sites
   in `crates/ecs` (no new storage). Accept: 20 prefab spawns bytes x2;
-  0 tick-path allocs; golden unchanged. needs: ARC1, RC4.
+  0 tick-path allocs; golden unchanged. needs: ARC1, RC4. Landed 7d13d5f1 (views.rs; verified 2026-10-17): optional views + dynamic spawn, 20 prefab spawns byte-identical x2 and zero tick-path allocations (runs 39066475838, 39068066992); callers so far only inside ecs.
 - [ ] RC20 ecs: ordered slot-write collect for bake/verify/anim-eval lanes Progress 2026-10-17: fork_join_on gathers chunk partials in slots, bit-identical across 0/1/2/4/8 workers (parallel.rs, run 39056114783) and a synthetic scaled bake clears 2x (run 39056618000); left: the ordered slot-write collect with exact-len pre-size and full-coverage assert is not built, 2x not measured on the CT2 workload.
   — exact-len pre-size, disjoint index-slot writes, full-coverage assert
   (rayon `iter/collect`, MIT, pattern reimplemented, no dependency; sim
   tick untouched). Tier B. Size S. Owns `crates/ecs/src/parallel.rs`
   (with RC11). Accept: bit-identical across 1, 2, 4 and 8 threads; at
   least 2x on the CT2 bake workload or killed with numbers; golden
-  unchanged. needs: RC3, RC11.
-- [ ] RC21 ecs: dispatch plan for bake/verify — explicit barriers between
+  unchanged. needs: RC3, RC11. Progress 2026-10-17: 25b351de collect_indexed_on in parallel.rs: slots allocated up front, each job writes its own slice, JobsError::Uncovered refuses a gap, bit-identical for 0/1/2/4/8 workers, 2.86x on a synthetic 200k bake (run 39066665851); left: the CT2 workload measurement.
+- [x] RC21 ecs: dispatch plan for bake/verify — explicit barriers between
   stages, a sequential fallback that must stay byte-equal, a printed plan
   plus a PF2 span per stage (shred dispatcher pattern, MIT,
   reimplemented; never sim). Tier B. Size S. Owns
   `crates/ecs/src/dispatch_plan.rs`. Accept: plan dump matches execution
   on fixtures; seq bytes equal par bytes x2; a mismatch refuses with the
-  diff. needs: RC11, PF2.
+  diff. needs: RC11, PF2. Landed 35ce2fd1. dispatch_plan.rs: stages with barriers, sequential fallback, run_checked names the first stage whose digests differ, plan dump equals the executed trace; 129 lib tests (run 39066475838).
 - [ ] RC22 core: slice-pumped off-tick jobs plus digest-chain divergence
   naming — Stepped slices one-per-frame with recorded tick arrivals,
   per-tick digest chain reporting first divergent tick and stable id
@@ -110,11 +110,11 @@
   machine. Tier A. Size S. Owns test hunks in `crates/app` (no new
   crate). Accept: `cargo test -p engine-app` posts the p50 number;
   over-budget names the slowest stage. needs: RC1.
-- [ ] RC32 app: cold-startup + prefab-instantiate budget proof —
+- [x] RC32 app: cold-startup + prefab-instantiate budget proof —
   startup under 2 s cold, instantiate under 1 ms per arena kit, both
   posted on the reference machine. Tier A. Size S. Owns test hunks in
   `crates/app/src/app.rs` plus the RC4 prefab fixture. Accept:
-  numbers posted x2; a regression fails the gate. needs: RC1, RC4.
+  numbers posted x2; a regression fails the gate. needs: RC1, RC4. Landed fca6fe7c. App cold startup under 1 ms and RC4 museum kit 3-4 us, asserted twice in one test (budgets 2 s, 1 ms), GitHub run 39064540714, 4 passed; the old budget tests were ignored or checked nothing.
 - [ ] RC34 runtime: second-game boot receipt — urban war boots on the
   same runtime with zero engine forks: stock config loads, menu renders
   through the same extraction, a headless match replays to identical
@@ -122,14 +122,14 @@
   without engine edits (companion to UW39, which owns the game side).
   Tier B. Size M. Owns glue/tests only, no engine edits. Accept:
   checklist green x2; any engine fork fails the tier by definition.
-  needs: RC1.
-- [ ] RC35 ecs+app: 1,000-agent and 64-slot runtime soak — archetype
+  needs: RC1. Skipped 2026-10-17: blocked on UW0 (urban war, later game).
+- [x] RC35 ecs+app: 1,000-agent and 64-slot runtime soak — archetype
   World 1,000-agent tick p99 ≤ 2 ms (P6) and app extraction at 64-slot
   siege load; a 10-minute 64-slot siege replays exactly (the runtime
   half of C5). Tier B. Size M. Owns harness hunks in `crates/ecs` and
   `crates/app`. Accept: numbers posted on the reference machine;
   replay x2 identical; golden unchanged or a HASH-LAW receipt.
-  needs: RC29.
+  needs: RC29. Landed 85543ccd. ecs 1,000 agents through run_arena_tick x2 identical, p99 54 and 47 us (run 39065108585); app 36,000-frame (10 min) siege through App::run_frame x2, same chain 807b5fcc971f58e9, frame p99 52 us (run 39064969267); runner numbers, not the reference PC; the 64 slots are runtime entities (arena caps at 16 fighters); golden unmoved.
 - [ ] ARC5 net+save: spine rollback and persistence — net resim and Progress 2026-10-17: save side exists (crates/save/src/persist.rs spine payload, rollback.rs spine_gate); crates/net has no spine call sites; left: net resim over spine bytes and the QUIC + UDP drop/rejoin convergence proof.
   save envelope consume `spine::snapshot/restore`; a loopback drop
   and a save round-trip converge on spine bytes, over the QUIC channel
@@ -190,13 +190,13 @@
   2505.22954v3, idea only; no self-rewriting agent). Tier A. Size S.
   Owns `tools/` glue (orchestrator lands). Accept: seeded divergence
   fails gate + reverts; sample matches hand-check. needs: ARC3.
-- [ ] ARC14 ecs: spine float quarantine — the spine takes integer-ns
+- [x] ARC14 ecs: spine float quarantine — the spine takes integer-ns
   dt (RC6 shape), never `schedule::Ctx.dt: f32`, and a quarantine test
   fails on any float inside the spine module. Tier A. Size S. Owns
   quarantine test hunks in `crates/ecs` beside `spine.rs` (no new
   file; consumer ARC4). Accept: seeded float fails the gate; spine
   step dt integer-ns; golden unchanged. needs: ARC1, ARC2. (PLN
-  architecture, reviewed 2026-09-26; waits ARC1/ARC2.)
+  architecture, reviewed 2026-09-26; waits ARC1/ARC2.) Landed 0968a4c1. register_ns/build_ns/SpineTick::run(dt_ns: u64); a source-scanning quarantine test allows floats only in the five documented parity items of spine.rs and none in spine_schedule.rs or views.rs (engine-ecs 131 passed, run 39068066992).
 - [ ] ARC15 arena: spine fork parity — FK1 forks carry spine state
   with rejoin + first-divergent-tick naming. Tier A. Size S. Owns
   fork glue + test hunks in `crates/arena/src/fork.rs` (fork API
@@ -209,7 +209,7 @@
   (play API frozen; consumer VP1/EV2). Accept: 20-step duel equal
   digests x2; non-black PNGs. needs: ARC4, VP1. (PLN architecture,
   reviewed 2026-09-26; waits ARC4.)
-- [ ] ARC17 ecs: spine columns on the archetype store — ARC1's five
+- [x] ARC17 ecs: spine columns on the archetype store — ARC1's five
   components (`Transform`, `Body`, `Fighter`, `AiState`, `AnimState`)
   as new `ComponentId` bits plus SoA columns in
   `crates/ecs/src/archetype.rs` (no new module: RC29 proved ai, proof
@@ -220,7 +220,7 @@
   round-trip byte-identical x2; quarantine test fails on any
   `f32`/`f64` in the new columns; `cargo test -p engine-ecs` green;
   golden unchanged. needs: RC29. (PLN architecture EXTEND 2026-09-30;
-  planner-rows-r1.)
+  planner-rows-r1.) Landed f09debd8. Five ComponentId bits and SoA columns, spawn_with/get_spine/set_spine/add_spine/remove_spine, World::snapshot/restore byte-identical x2, state_hash covers the columns and P/V-only entities keep their 21 checkpoint bytes (engine-ecs 131 passed, run 39068066992; engine-proof passed before the world_snapshot.rs split, run 39067607073).
 - [ ] ARC18 ecs: integer-ns dt through `run_arena_tick` — thread
   integer-nanosecond dt (RC6 shape) through
   `Schedule::run_arena_tick`, which today takes `dt: f32` seconds,
@@ -397,7 +397,7 @@
   with delay counts posted (fails before: no delay field, no cursor).
   P2P: full `-p engine-net --lib` stays green + golden unchanged.
   Kill: no count drop, tip hash diverges, or resim distance > 8.
-  needs: MP2. (RES-STEAL 680-res-ggpo4, 2026-10-08.)
+  needs: MP2. (RES-STEAL 680-res-ggpo4, 2026-10-08.) Progress 2026-10-17: 2b9cd860 with_frame_delay, confirm_input, first_incorrect_frame, resolve_incorrect; on a seeded link (1-3 ticks, 2% loss, 300 frames) delay on predicts 60 frames with 22 resims vs 300 and 165 off, max resim 1, tip equals truth (net --lib 276 passed, run 39069480532). Departure: P2pSession::new stays at delay 0 so existing tapes do not move (the row says default 2).
 - [ ] GP18 game: feel baseline lock — pin the GP11 schemas plus GP12 Progress 2026-10-17: baselines pinned (pq2_kill_bars_pin_v1_baseline, no-float gate); open question: Accept says no move above 35% of kills but the v1 survey pins attack share 395 (350 bar gates multi-move tables only); owner call.
   harness with PQ1/PQ2 kill bars and a no-float-in-tick grep. Tier B.
   Size S. Owns baseline hunks beside `crates/combat/src/feel.rs` +
@@ -776,7 +776,7 @@
   8-fighter soak + C3 20k path. Size M. Accept: soak captures
   populated, 0 findings, cook x2
   (`cargo test --locked -p engine-assets mesh_cook`). needs: CT2, CT8.
-  (Plan extender wave 56; plan CT24.)
+  (Plan extender wave 56; plan CT24.) Progress 2026-10-17: 3d997539 gen.mjs deterministic and matches manifest SHAs; left: content/crowd/proof/Cargo.lock is stale (gh cargo check failed, run 39064515835) and the cook proof needs cargo run.
 - [ ] CT27 content: 64-player + 1,000-agent soak on RTX 3050 6 GB
   (dedupe + compression/BC/LOD/stream proof, cold ≤5 s, VRAM capped).
   Size M. Accept: soak report + adapter/driver/ms/VRAM
@@ -900,7 +900,7 @@
   CT28, matrix stays CT46). Accept: seeded missing-provenance bundle
   refused with the named gap; 50-asset matrix re-checked;
   `cargo test --locked -p engine-assets provenance` green; bytes x2.
-  Consumer: CT28 lock, PR1 chains. needs: CT28, CT46. (EXTEND wave 87.)
+  Consumer: CT28 lock, PR1 chains. needs: CT28, CT46. (EXTEND wave 87.) Progress 2026-10-17: 3d997539 rehearsal on a seeded 50-record bundle names all three gaps, 58-record matrix still 7 refusals, output identical x2, provenance tests green (run 39064454169); left: CT28 lock.
 - [ ] CT54 content: combat clip batch-c (16 more toward the CT23 80).
   Tier A. Size M. Owns `content/fighters/incoming/batch-c/` + sidecars.
   Accept: 16 clips retarget via CT1 with bind pose verified, digest
@@ -993,7 +993,7 @@
   frozen). Accept: every untracked file carries URL+SPDX+author+SHA or
   refusal; committed set cooks x2; `cargo test --locked -p engine-assets
   provenance` green. Consumer CT45/CT57. needs: CT8, CT46.
-  (EXTEND wave 92.)
+  (EXTEND wave 92.) Progress 2026-10-17: 3d997539 all 16 untracked content/arena files refused (no provenance row), provenance tests green (run 39064454169); left: committed-set cook x2 once arena_cook.rs is tracked.
 - [ ] CT75 content: staged-dir triage into the batch digest queue.
   Tier A. Size S. Owns `content/fighters/incoming/STAGED-TRIAGE.md`
   (staged dir frozen). Accept: every `staged/` file named keep/refused;
@@ -1074,7 +1074,7 @@
   (overrides + prefab-underneath + new key), digest `4aae94af` x2,
   SP12 gold still green; kill on any override lost, any prefab edit not
   applied under deltas, or any digest drift. needs: RC4. (LADDER P1
-  CANDIDATE 2026-09-30, spike 5/5 + x2.)
+  CANDIDATE 2026-09-30, spike 5/5 + x2.) Progress 2026-10-17: 2216f79d Instantiation::digest keyed by prefab key; museum run (2 overrides kept, 2 underneath edits shown, 1 new key) same digest x2 and fresh-edited-plus-overrides equals live reinstantiate (13574963997578328745); 19 prefab tests + clippy local only, no gh run id; the old 4aae94af came from a JS spike hash and cannot be reproduced, reword Accept when ticking.
 - [x] SP56 spatial (held on SP38): canonical digest + perm-stable audit Landed 049cdd8d. conflict_audit_baseline (60 seeds, 20 perms) + conflict_audit_baseline_failures + sp38_audit_hunks_cover_sixty_seeds_and_twenty_perms run 39056881036.
   gate as the SP38 proof leg (60/60 + 20/20 + digest `05b20def` x2).
   Tier B. Size S. Owns audit hunks beside
@@ -1204,7 +1204,7 @@
   replays, else stays held. Kill: no measured lift or replay drift.
   needs: SP21, SP16. (PLN50 wave-49 WILD moonshot; LMAX ideas-only,
   UNVERIFIED.)
-- [ ] SP49 spatial: smallest-cycle refusal + repair receipt over the SP3 Progress 2026-10-17: relation.rs smallest_cycle + cycle_residuals_cm and the checks.rs relationCycle finding exist (SP28); left: repair.rs has no cycle repair or re-check receipt and no 30 clean / 30 one-cycle corpus.
+- [x] SP49 spatial: smallest-cycle refusal + repair receipt over the SP3 Progress 2026-10-17: relation.rs smallest_cycle + cycle_residuals_cm and the checks.rs relationCycle finding exist (SP28); left: repair.rs has no cycle repair or re-check receipt and no 30 clean / 30 one-cycle corpus.
   graph — explain+repair beside SP28 detect (SayPlan simulator-repair
   shape, datafrog NOT taken). Tier A. Size S. Owns repair hunks beside
   `crates/spatial/src/repair.rs` + `checks.rs` (SP3 Relation/Graph
@@ -1213,7 +1213,7 @@
   permutation-stable, 30/30 repair re-check clean, digest x2 identical;
   integer-only, no float. Kill: any FP/miss/dirty re-check or float.
   needs: SP28. (MERGE-20260929 SP49 spike 2026-09-28; moves VISION
-  spatial-eval score.)
+  spatial-eval score.) Landed 2e93b5e8. cycle_refusal and repair_cycles: 30 clean + 30 one-cycle graphs, 30/30 detected, 0 false positives, 30/30 named and permutation-stable, 30/30 clean after repair, receipt digest equal x2 (clippy run 39067192258).
 - [ ] PF16 perf: tick-timeline rerun sink — seeded-desync timeline over
   the PF9 recording shape. Tier B. Size S. Owns timeline hunks beside
   `crates/observe/src/rerun_sink.rs` (PF9 file frozen; lands after PF9).

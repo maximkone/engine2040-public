@@ -45,6 +45,7 @@ engine-assets = { workspace = true, features = ["import"], optional = true }
 # RZ4 break look: debris bodies from authority break events, `app` leg only
 # (physfx is itself behind its own `rapier` feature, so the headless graph stays std-only).
 engine-physfx = { workspace = true, optional = true }
+engine-clock.workspace = true
 engine-input.workspace = true
 engine-save.workspace = true
 engine-ui.workspace = true

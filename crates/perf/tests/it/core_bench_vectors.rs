@@ -175,8 +175,9 @@ fn time_kernel_ranks_trivial_closure() {
 }
 
 /// The 10M-push soak pair stays informative: both checksums repeat and read
-/// nonzero, the jittered pattern differs from the exact-DT pattern, and the
-/// jitter detail carries steps plus a finite interpolation alpha.
+/// nonzero, the jittered pattern differs from the 10 ms pattern, and the
+/// jitter detail is exact: 9_900_000 ticks, zero ns residual (the retired f32
+/// accumulator ended 0.745 ms off).
 #[test]
 fn accum_soak_pair_stays_informative() {
     let exact = kernel_accum_soak();
@@ -186,13 +187,13 @@ fn accum_soak_pair_stays_informative() {
     let jitter = kernel_accum_jitter();
     assert_eq!(jitter, kernel_accum_jitter(), "jitter soak repeats");
     assert_ne!(jitter, 0, "jitter soak checksum is nonzero");
-    assert_ne!(exact, jitter, "jitter pattern differs from exact DT");
-
-    let (steps, residual, alpha) = accum_jitter_detail();
-    assert!(steps > 0, "jitter soak takes steps");
-    assert!(residual.is_finite(), "residual {residual} is finite");
-    assert!(
-        alpha.is_finite() && (0.0..=1.0).contains(&alpha),
-        "alpha {alpha} interpolates"
+    assert_ne!(
+        exact, jitter,
+        "jitter pattern differs from the 10 ms pattern"
     );
+
+    let (steps, residual_ns, alpha) = accum_jitter_detail();
+    assert_eq!(steps, 9_900_000, "5M x (16 + 17) ms is exactly 9.9M ticks");
+    assert_eq!(residual_ns, 0, "integer residual must be zero");
+    assert_eq!(alpha, 0.0, "nothing buffered, nothing to blend");
 }

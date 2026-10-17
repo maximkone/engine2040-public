@@ -14,6 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use engine_core::Fnv64;
+
 use super::ids::ObjectId;
 use super::schema::{SchemaError, SchemaRegistry, VersionedComponent};
 use super::transform::{Hierarchy, HierarchyError, Transform};
@@ -225,6 +227,49 @@ impl Instantiation {
     /// Instance id minted for a prefab key, if that key instantiated.
     pub fn get(&self, key: &str) -> Option<ObjectId> {
         self.map.get(key).copied()
+    }
+
+    /// Order-free FNV-1a 64 of the instance as authored, by prefab key: key,
+    /// parent key, local pose bits and components, in key order. Minted ids
+    /// never enter, so two instantiations of the same state digest alike.
+    /// Keys missing from `tree` are skipped.
+    pub fn digest(&self, tree: &Hierarchy) -> u64 {
+        let key_of: BTreeMap<ObjectId, &str> = self
+            .map
+            .iter()
+            .map(|(key, id)| (*id, key.as_str()))
+            .collect();
+        let len = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let mut hash = Fnv64::new();
+        hash.write_str("e2prefab1");
+        for (key, id) in &self.map {
+            let Some(local) = tree.local(*id) else {
+                continue;
+            };
+            let parent = tree.parent(*id).and_then(|p| key_of.get(&p).copied());
+            for text in [key.as_str(), parent.unwrap_or("")] {
+                hash.write_u64(len(text.len()));
+                hash.write_str(text);
+            }
+            for v in local
+                .position
+                .into_iter()
+                .chain(local.rotation)
+                .chain(local.scale)
+            {
+                hash.write_f32(v);
+            }
+            let components = self.components.get(*id).unwrap_or(&[]);
+            hash.write_u64(len(components.len()));
+            for c in components {
+                hash.write_u64(len(c.component.len()));
+                hash.write_str(&c.component);
+                hash.write_u32(c.version);
+                hash.write_u64(len(c.payload.len()));
+                hash.write_str(&c.payload);
+            }
+        }
+        hash.finish()
     }
 }
 
@@ -1224,5 +1269,56 @@ mod tests {
         let bank = prior.get("hall/bank").unwrap();
         assert_eq!(tree.parent(bank), Some(hall));
         assert_eq!(overrides.len(), 2);
+    }
+
+    /// Museum run: two overrides, two underneath edits and one new key, twice
+    /// from fresh trees (fresh minted ids), digest taken after each.
+    fn museum_override_run() -> (u64, u64, u64, u64) {
+        let registry = SchemaRegistry::builtin();
+        let museum: Prefab = serde_json::from_str(MUSEUM_V1_JSON).unwrap();
+        let mut tree = Hierarchy::new();
+        let mut prior = museum.instantiate(&mut tree, &registry).unwrap();
+        let before = prior.digest(&tree);
+        let mut overrides = OverrideMap::default();
+        overrides
+            .set_transform("hall/plinth".to_string(), pose([5.0, 0.0, 0.0]))
+            .unwrap();
+        overrides
+            .set_components("hall/plinth/bust".to_string(), vec![label("Kept Bust")])
+            .unwrap();
+        let mut edited = museum;
+        edited.nodes[0].transform = pose([9.0, 0.0, 0.0]);
+        edited.nodes[1].transform = pose([0.0, 2.0, 0.0]);
+        edited
+            .nodes
+            .push(node("hall/bank", Some("hall"), [3.0, 0.0, 0.0]));
+        edited
+            .reinstantiate_with_overrides(&mut tree, &registry, &mut prior, &overrides)
+            .unwrap();
+        let with_overrides = prior.digest(&tree);
+        // The same edited prefab with no deltas lands on a different state.
+        let mut plain_tree = Hierarchy::new();
+        let plain = edited.instantiate(&mut plain_tree, &registry).unwrap();
+        let plain_digest = plain.digest(&plain_tree);
+        // Fresh edited instance plus the deltas equals the live reinstantiate.
+        let mut fresh = plain;
+        overrides.apply(&mut plain_tree, &mut fresh).unwrap();
+        (
+            before,
+            with_overrides,
+            plain_digest,
+            fresh.digest(&plain_tree),
+        )
+    }
+
+    #[test]
+    fn museum_override_digest_is_stable_across_fresh_instantiations() {
+        let first = museum_override_run();
+        assert_eq!(first, museum_override_run());
+        let (before, with_overrides, plain, fresh) = first;
+        assert_ne!(before, with_overrides);
+        assert_ne!(with_overrides, plain);
+        assert_eq!(with_overrides, fresh);
+        assert_eq!(with_overrides, 13574963997578328745);
     }
 }

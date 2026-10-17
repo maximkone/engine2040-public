@@ -9,10 +9,20 @@
 //! or does not exist. Postcondition of the old systems-module deletion:
 //! this module builds only on `schedule.rs`; a `systems.rs` is never
 //! imported (pinned by a test).
+//!
+//! Float quarantine (ARC14): the spine step takes integer-nanosecond dt
+//! (`engine_core::time` shape). [`SpineSchedule::register_ns`] systems read
+//! [`SpineCtx::dt_ns`] and never `schedule::Ctx::dt`; [`SpineTick::run`]
+//! takes `dt_ns: u64`. No float appears in this file outside its tests (the
+//! quarantine test in `spine.rs` scans it); until the schedule itself takes
+//! integer dt (ARC18) the underlying `Schedule::run` is fed its default
+//! value, which no registered spine system reads.
 
 use core::fmt;
+use std::cell::Cell;
+use std::rc::Rc;
 
-use crate::schedule::{Ctx, Phase, Schedule};
+use crate::schedule::{Ctx, Phase, Schedule, Tick};
 
 /// One of the five spine systems, in run order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,9 +103,22 @@ impl std::error::Error for SpineScheduleError {}
 
 type SysFn<W> = Box<dyn FnMut(&mut W, &mut Ctx)>;
 
+/// What a spine system sees of one tick: the schedule tick, the phase and
+/// the step length in whole nanoseconds. No float field, by design.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpineCtx {
+    /// Schedule tick (1 on the first run).
+    pub tick: Tick,
+    /// Phase the system runs in.
+    pub phase: Phase,
+    /// Step length of this tick in nanoseconds.
+    pub dt_ns: u64,
+}
+
 /// Builder holding at most one closure per [`SpineSystem`].
 pub struct SpineSchedule<W> {
     slots: [Option<SysFn<W>>; 5],
+    dt_ns: Rc<Cell<u64>>,
 }
 
 impl<W: 'static> Default for SpineSchedule<W> {
@@ -109,6 +132,7 @@ impl<W: 'static> SpineSchedule<W> {
     pub fn new() -> Self {
         Self {
             slots: [None, None, None, None, None],
+            dt_ns: Rc::new(Cell::new(0)),
         }
     }
 
@@ -124,6 +148,27 @@ impl<W: 'static> SpineSchedule<W> {
         }
         *slot = Some(Box::new(f));
         Ok(self)
+    }
+
+    /// Register `system` with the integer-ns view: the closure gets a
+    /// [`SpineCtx`] whose `dt_ns` is the value passed to [`SpineTick::run`].
+    /// Same refusal rules as [`SpineSchedule::register`].
+    pub fn register_ns(
+        &mut self,
+        system: SpineSystem,
+        mut f: impl FnMut(&mut W, SpineCtx) + 'static,
+    ) -> Result<&mut Self, SpineScheduleError> {
+        let dt_ns = Rc::clone(&self.dt_ns);
+        self.register(system, move |world, cx| {
+            f(
+                world,
+                SpineCtx {
+                    tick: cx.tick,
+                    phase: cx.phase,
+                    dt_ns: dt_ns.get(),
+                },
+            );
+        })
     }
 
     /// Registered system count.
@@ -149,6 +194,41 @@ impl<W: 'static> SpineSchedule<W> {
         }
         Ok(schedule)
     }
+
+    /// Build the integer-ns runner: every system registered, one
+    /// [`SpineTick::run`] per tick.
+    pub fn build_ns(self) -> Result<SpineTick<W>, SpineScheduleError> {
+        let dt_ns = Rc::clone(&self.dt_ns);
+        Ok(SpineTick {
+            schedule: self.build()?,
+            dt_ns,
+        })
+    }
+}
+
+/// A built spine schedule stepped by integer nanoseconds.
+pub struct SpineTick<W> {
+    schedule: Schedule<W>,
+    dt_ns: Rc<Cell<u64>>,
+}
+
+impl<W> SpineTick<W> {
+    /// Run one tick of `dt_ns` nanoseconds through the five systems in
+    /// order. The step length reaches systems only as [`SpineCtx::dt_ns`].
+    pub fn run(&mut self, world: &mut W, dt_ns: u64) {
+        self.dt_ns.set(dt_ns);
+        self.schedule.run(world, Default::default());
+    }
+
+    /// Ticks run so far.
+    pub fn tick(&self) -> Tick {
+        self.schedule.tick()
+    }
+
+    /// Tick on which `system` last ran, `None` before its first run.
+    pub fn last_run(&self, system: SpineSystem) -> Option<Tick> {
+        self.schedule.last_run(system.name())
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +238,7 @@ mod tests {
     use std::rc::Rc;
 
     type Log = Rc<RefCell<Vec<(&'static str, Phase)>>>;
+    type NsLog = Rc<RefCell<Vec<(&'static str, Tick, u64)>>>;
 
     fn logged(log: &Log, system: SpineSystem) -> impl FnMut(&mut (), &mut Ctx) + 'static {
         let log = Rc::clone(log);
@@ -245,6 +326,49 @@ mod tests {
             refused.to_string(),
             "spine system spine.ai is not registered"
         );
+    }
+
+    #[test]
+    fn spine_step_takes_integer_ns_dt() {
+        let seen: NsLog = Rc::new(RefCell::new(vec![]));
+        let mut builder: SpineSchedule<()> = SpineSchedule::new();
+        for system in SpineSystem::ORDER {
+            let seen = Rc::clone(&seen);
+            builder
+                .register_ns(system, move |(), cx| {
+                    assert_eq!(cx.phase, system.phase());
+                    seen.borrow_mut().push((system.name(), cx.tick, cx.dt_ns));
+                })
+                .expect("first registration lands");
+        }
+        let mut tick = builder.build_ns().expect("five systems build");
+        // The exact 60 Hz step and a long frame: raw ns, no rounding.
+        tick.run(&mut (), 16_666_666);
+        tick.run(&mut (), 100_000_000);
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 10);
+        assert!(seen[..5].iter().all(|s| (s.1, s.2) == (1, 16_666_666)));
+        assert!(seen[5..].iter().all(|s| (s.1, s.2) == (2, 100_000_000)));
+        let names: Vec<&str> = seen[..5].iter().map(|s| s.0).collect();
+        let want: Vec<&str> = SpineSystem::ORDER.iter().map(|s| s.name()).collect();
+        assert_eq!(names, want);
+        assert_eq!(tick.tick(), 2);
+        assert_eq!(tick.last_run(SpineSystem::Extract), Some(2));
+    }
+
+    #[test]
+    fn register_ns_refuses_duplicates_and_missing_like_register() {
+        let mut builder: SpineSchedule<()> = SpineSchedule::new();
+        builder
+            .register_ns(SpineSystem::Ai, |(), _| {})
+            .expect("lands");
+        let dup = builder
+            .register_ns(SpineSystem::Ai, |(), _| {})
+            .err()
+            .expect("duplicate refuses");
+        assert_eq!(dup, SpineScheduleError::Duplicate(SpineSystem::Ai));
+        let missing = builder.build_ns().err().expect("four systems missing");
+        assert_eq!(missing, SpineScheduleError::Missing(SpineSystem::Inputs));
     }
 
     #[test]

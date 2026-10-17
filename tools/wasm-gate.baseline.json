@@ -64,7 +64,8 @@
    "fs": 3
   },
   "crates/game/src/windowed.rs": {
-   "clock": 2
+   "clock": 2,
+   "thread": 1
   },
   "crates/net/src/courier.rs": {
    "clock": 1,
@@ -106,8 +107,11 @@
    "fs": 2
   },
   "crates/render/src/aa_scale.rs": {
+   "clock": 4
+  },
+  "crates/render/src/aa_scale/gpu.rs": {
    "block": 6,
-   "clock": 6
+   "clock": 2
   },
   "crates/render/src/accel.rs": {
    "block": 2,
@@ -173,9 +177,15 @@
   "crates/render/src/pass_truth/reads.rs": {
    "fs": 2
   },
-  "crates/render/src/post.rs": {
+  "crates/render/src/post/auto_exposure.rs": {
+   "clock": 1
+  },
+  "crates/render/src/post/chain.rs": {
+   "clock": 6
+  },
+  "crates/render/src/post/gpu.rs": {
    "block": 6,
-   "clock": 13
+   "clock": 6
   },
   "crates/render/src/present/gpu_present/presenter.rs": {
    "block": 4

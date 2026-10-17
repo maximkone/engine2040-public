@@ -11,6 +11,7 @@
 use core::fmt;
 
 use engine_arena::{ArenaConfig, Checkpoint};
+use engine_core::diverge::first_divergence;
 
 use crate::agent::BodyTape;
 
@@ -67,34 +68,14 @@ pub fn verify_tape(
     if resim.is_empty() {
         return Err(ReplayError::CorruptTape);
     }
-    for (index, (left, right)) in resim.iter().zip(chain.iter()).enumerate() {
-        if left.hash != right.hash {
-            let tick = u32::try_from(index).map_err(|_| ReplayError::CorruptTape)?;
-            return Ok(Some(ReplayDivergence {
-                tick,
-                expected: right.hash,
-                observed: left.hash,
-            }));
-        }
-    }
-    if resim.len() == chain.len() {
-        return Ok(None);
-    }
-    let shared = resim.len().min(chain.len());
-    let tick = u32::try_from(shared).map_err(|_| ReplayError::CorruptTape)?;
-    Ok(Some(ReplayDivergence {
-        tick,
-        expected: hash_at(chain, shared),
-        observed: hash_at(resim.as_slice(), shared),
-    }))
+    Ok(divergence(resim.as_slice(), chain))
 }
 
 /// Name the first tick whose resimulated hash leaves the recorded chain:
-/// resimulate with [`engine_arena::run`], then binary-search over the resim
-/// checkpoints for the first divergent hash (long tapes bisect instead of
-/// scanning). Units: fixed ticks. Deterministic: the same inputs twice give
-/// the same tick (deterministic resimulation, no wall clock, only tape
-/// actions enter the run). Returns [`ReplayError::NoChain`] for a missing
+/// resimulate with [`engine_arena::run`], then name the first divergent hash
+/// (the same scan as [`verify_tape`]). Units: fixed ticks. Deterministic:
+/// the same inputs twice give the same tick (deterministic resimulation, no
+/// wall clock, only tape actions enter the run). Returns [`ReplayError::NoChain`] for a missing
 /// chain or a clean resimulation; corrupt configs, out-of-range tapes or
 /// empty runs give [`ReplayError::CorruptTape`].
 pub fn bisect_tape(
@@ -107,7 +88,7 @@ pub fn bisect_tape(
     if resim.is_empty() {
         return Err(ReplayError::CorruptTape);
     }
-    bisect_divergence(resim.as_slice(), chain).ok_or(ReplayError::NoChain)
+    divergence(resim.as_slice(), chain).ok_or(ReplayError::NoChain)
 }
 
 /// Printable one-line `replay.verify` verdict: `clean` with the tick count
@@ -174,62 +155,22 @@ fn validate_tape(
     Ok(())
 }
 
-/// Hash at `index`, or `0` past the end (length mismatch reads as divergence
+/// Hash at `tick`, or `0` past the end (length mismatch reads as divergence
 /// at the shared prefix end, mirroring the causal checkpoint rule).
-fn hash_at(points: &[Checkpoint], index: usize) -> u64 {
+fn hash_at(points: &[Checkpoint], tick: u32) -> u64 {
+    let index = usize::try_from(tick).unwrap_or(usize::MAX);
     points.get(index).map_or(0, |point| point.hash)
 }
 
-/// True when the first `len` resimulated hashes equal the recorded chain.
-/// Callers hold `len <= min(lens)`, so the slices never overrun.
-fn prefix_matches(resim: &[Checkpoint], chain: &[Checkpoint], len: usize) -> bool {
-    resim[..len]
-        .iter()
-        .zip(chain[..len].iter())
-        .all(|(left, right)| left.hash == right.hash)
-}
-
-/// Binary search for the first divergent index in `[0, shared)`: `shared`
-/// mismatches while tick `0` vacuously matches, so the answer always exists.
-/// Predicate `prefix len matches` is monotone (a matching prefix implies all
-/// shorter prefixes match), so the search stays correct even if later hashes
-/// reconverge.
-fn search_first(resim: &[Checkpoint], chain: &[Checkpoint], shared: usize) -> usize {
-    let mut lo = 0usize;
-    let mut hi = shared;
-    while lo + 1 < hi {
-        let mid = lo + (hi - lo) / 2;
-        if prefix_matches(resim, chain, mid) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
-/// First divergence between a resimulation and its recorded chain via binary
-/// search, or `None` when the two agree exactly. Length mismatch reads as
-/// divergence at the shared prefix end.
-fn bisect_divergence(resim: &[Checkpoint], chain: &[Checkpoint]) -> Option<ReplayDivergence> {
-    let shared = resim.len().min(chain.len());
-    if !prefix_matches(resim, chain, shared) {
-        let index = search_first(resim, chain, shared);
-        let tick = u32::try_from(index).ok()?;
-        return Some(ReplayDivergence {
-            tick,
-            expected: hash_at(chain, index),
-            observed: hash_at(resim, index),
-        });
-    }
-    if resim.len() == chain.len() {
-        return None;
-    }
-    let tick = u32::try_from(shared).ok()?;
+/// First divergence between a resimulation and its recorded chain, or `None`
+/// when the two agree exactly. Length mismatch reads as divergence at the
+/// shared prefix end.
+fn divergence(resim: &[Checkpoint], chain: &[Checkpoint]) -> Option<ReplayDivergence> {
+    let tick = first_divergence(resim, chain)?;
     Some(ReplayDivergence {
         tick,
-        expected: hash_at(chain, shared),
-        observed: hash_at(resim, shared),
+        expected: hash_at(chain, tick),
+        observed: hash_at(resim, tick),
     })
 }
 

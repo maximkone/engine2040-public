@@ -5,7 +5,7 @@
 // Errors: missing paths skip (no throw); bad input types throw TypeError, never silent.
 // Warm path (docs/HASH-LAW.md, crates/core/src/lib.rs): the per-tick driver and
 // hash fold stay integer-only so every machine replays bit-exact. Frozen f32
-// receipts (LegacyFixedAcc, DT), canonical bit-writer (write_f32),
+// receipts (LEGACY_DT, DT), canonical bit-writer (write_f32),
 // the wall poll boundary (push_secs, quantize_wall_secs) and render alpha stay
 // allowlisted by scope: they never enter a simulation hash.
 import assert from "node:assert/strict";
@@ -23,13 +23,8 @@ const ROOT = resolve(join(dirname(fileURLToPath(import.meta.url)), ".."));
 export const TICK_HASH_FILES = [
   {
     file: "crates/core/src/tick.rs",
-    allowFn: new Set([
-      "LegacyFixedAcc::new",
-      "LegacyFixedAcc::fixed",
-      "LegacyFixedAcc::push",
-      "LegacyFixedAcc::alpha",
-    ]),
-    allowOuter: /LEGACY|LegacyFixedAcc|FixedAcc|\bDT\b|MAX_FRAME_DT|pub\s+(acc|dt)\s*:/,
+    allowFn: new Set(),
+    allowOuter: /LEGACY|\bDT\b|MAX_FRAME_DT/,
   },
   {
     file: "crates/core/src/hash.rs",
@@ -276,20 +271,15 @@ test("scanSource passes integer-only warm code", () => {
   assert.deepEqual(scanSource("tick.rs", src, { allowFn: new Set(), allowOuter: null }), []);
 });
 
-test("scanSource allowlists the frozen receipt block", () => {
+test("scanSource allowlists the frozen receipt consts", () => {
   const src = [
     "pub const LEGACY_DT: f32 = 1.0 / 60.0;",
-    "pub struct LegacyFixedAcc {",
-    "    pub acc: f32,",
-    "}",
-    "impl LegacyFixedAcc {",
-    "    pub fn push(&mut self, frame_dt: f32) -> u32 {",
-    "        self.acc",
-    "    }",
-    "}",
+    "pub const DT: f32 = LEGACY_DT;",
   ].join("\n");
   const rule = TICK_HASH_FILES[0];
   assert.deepEqual(scanSource("crates/core/src/tick.rs", src, rule), []);
+  const clock = ["pub struct LegacyFixedAcc {", "    pub acc: f32,", "}"].join("\n");
+  assert.equal(scanSource("crates/core/src/tick.rs", clock, rule).length, 1, "an f32 clock is a violation again");
 });
 
 test("scanSource allowlists bit-writers, poll boundary and render alpha", () => {

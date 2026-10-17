@@ -25,6 +25,13 @@ pub enum JobsError {
         /// Range end that was offered.
         end: usize,
     },
+    /// A collect slot stayed empty after every job ran; holds its offset
+    /// from the range start. Impossible by construction, kept as a loud
+    /// `Err` so a coverage hole can never ship as a short or zeroed output.
+    Uncovered {
+        /// Offset of the first unwritten slot.
+        index: usize,
+    },
 }
 
 impl core::fmt::Display for JobsError {
@@ -32,6 +39,9 @@ impl core::fmt::Display for JobsError {
         match self {
             Self::EmptyRange { start, end } => {
                 write!(f, "jobs fork-join refused empty range {start}..{end}")
+            }
+            Self::Uncovered { index } => {
+                write!(f, "jobs collect left slot {index} unwritten")
             }
         }
     }
@@ -115,6 +125,66 @@ where
     // Declared-order fold on the caller: partials sit in chunk order, so
     // completion order never decides state.
     Ok(partials.into_iter().flatten().fold(init, reduce))
+}
+
+/// Ordered slot-write collect: run `f(i)` for every `i` in `range` on `pool`
+/// and return the results in index order. The output is sized to exactly
+/// `range.len()` slots up front, each job owns a disjoint index slice of it
+/// and writes slot `i` once, and the sealed result must cover every slot, so
+/// no job output is moved, appended or reordered afterwards. Equal to the
+/// serial `range.map(f).collect()` for every worker count and chunking. A
+/// panicking `f` unwinds on the caller. Bulk loops only (bake, verify,
+/// anim-eval lanes); never sim/net tick paths.
+///
+/// Caller: [`crate::dispatch_plan::DispatchPlan`] runs every stage through it.
+///
+/// Determinism: slot `i` is written only with `f(start + i)`; the pool decides
+/// where a job runs, never which slot it fills.
+pub fn collect_indexed_on<T, F>(
+    pool: &JobPool,
+    range: Range<usize>,
+    chunk: ChunkSize,
+    f: F,
+) -> Result<Vec<T>, JobsError>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync,
+{
+    let Range { start, end } = range;
+    if start >= end {
+        return Err(JobsError::EmptyRange { start, end });
+    }
+    let len = end - start;
+    let mut slots: Vec<Option<T>> = Vec::with_capacity(len);
+    slots.resize_with(len, || None);
+    let size = chunk.value();
+    if len <= size {
+        for (i, slot) in slots.iter_mut().enumerate() {
+            *slot = Some(f(start + i));
+        }
+    } else {
+        let f = &f;
+        pool.scope(|s| {
+            for (k, part) in slots.chunks_mut(size).enumerate() {
+                let base = start + k * size;
+                s.spawn(move || {
+                    for (i, slot) in part.iter_mut().enumerate() {
+                        *slot = Some(f(base + i));
+                    }
+                });
+            }
+        });
+    }
+    seal_slots(slots)
+}
+
+/// Full-coverage check: every slot written, else the first hole is named.
+fn seal_slots<T>(slots: Vec<Option<T>>) -> Result<Vec<T>, JobsError> {
+    let mut out = Vec::with_capacity(slots.len());
+    for (index, slot) in slots.into_iter().enumerate() {
+        out.push(slot.ok_or(JobsError::Uncovered { index })?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -506,6 +576,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn slot_collect_matches_serial_across_threads_and_chunks() {
+        // Slot `i` holds `work(start + i)` whatever the worker count, the
+        // chunking or the range offset; the output is exactly range-long.
+        for (start, end) in [(0, 1), (0, 1000), (37, 1100)] {
+            let serial: Vec<u64> = (start..end).map(work).collect();
+            for workers in [0, 1, 2, 4, 8] {
+                let pool = JobPool::new(workers).expect("pool starts");
+                for chunk in [0, 1, 7, 64, 333, 4096] {
+                    let got = collect_indexed_on(&pool, start..end, ChunkSize::new(chunk), work)
+                        .expect("collect runs");
+                    assert_eq!(got, serial, "{start}..{end} w{workers} c{chunk}");
+                    assert_eq!(got.len(), end - start);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn slot_collect_refuses_empty_and_names_a_hole() {
+        let pool = JobPool::new(2).expect("pool starts");
+        assert_eq!(
+            collect_indexed_on(&pool, 4..4, ChunkSize::new(2), work).err(),
+            Some(JobsError::EmptyRange { start: 4, end: 4 })
+        );
+        // A slot no job wrote is a typed error naming the slot, never a
+        // short or defaulted output.
+        let holey = vec![Some(1u64), Some(2), None, Some(4)];
+        assert_eq!(seal_slots(holey), Err(JobsError::Uncovered { index: 2 }));
+        assert!(JobsError::Uncovered { index: 2 }
+            .to_string()
+            .contains("slot 2"));
+        assert_eq!(seal_slots(vec![Some(7u64)]), Ok(vec![7]));
+    }
+
+    #[test]
+    fn a_panicking_slot_unwinds_on_the_caller() {
+        let pool = JobPool::new(2).expect("pool starts");
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            collect_indexed_on(&pool, 0..100, ChunkSize::new(10), |i| {
+                assert!(i != 55, "slot {i} blew up");
+                i
+            })
+        }));
+        let payload = run.expect_err("never a silent hole");
+        let text = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(text.contains("slot 55 blew up"), "{text:?}");
+    }
+
     /// Scaled bake throughput: parallel must clear 2x over serial, else the
     /// bake lane is killed (kept single-threaded). Timing only; the byte
     /// proof above stays the determinism gate. Run in release with `-- --ignored`.
@@ -576,13 +698,28 @@ mod tests {
         )
         .expect("scaled bake runs");
         assert_eq!(parallel, serial, "scale must not move bytes");
+        // The slot-write collect over the same workload: same bytes, and it
+        // must clear 2x too or the collect is killed in favour of fork_join_on.
+        let slots = collect_indexed_on(&pool, 0..LEN, ChunkSize::new(4096), to_word)
+            .expect("scaled collect runs");
+        assert_eq!(slots, serial, "slot collect must not move bytes");
+        let collect_ms = best_ms(|| {
+            let out = collect_indexed_on(&pool, 0..LEN, ChunkSize::new(4096), to_word)
+                .expect("scaled collect runs");
+            std::hint::black_box(out.iter().fold(0u64, |a, x| a.wrapping_add(*x)));
+        });
         let ratio = serial_ms / parallel_ms;
+        let collect_ratio = serial_ms / collect_ms;
         println!(
-            "scaled bake {LEN} items: serial {serial_ms:.1}ms parallel {parallel_ms:.1}ms ratio {ratio:.2}"
+            "scaled bake {LEN} items: serial {serial_ms:.1}ms fork_join {parallel_ms:.1}ms ratio {ratio:.2} slot_collect {collect_ms:.1}ms ratio {collect_ratio:.2}"
         );
         assert!(
             ratio >= 2.0,
             "parallel bake {parallel_ms:.1}ms must clear 2x over serial {serial_ms:.1}ms or the lane is killed"
+        );
+        assert!(
+            collect_ratio >= 2.0,
+            "slot collect {collect_ms:.1}ms must clear 2x over serial {serial_ms:.1}ms or it is killed"
         );
     }
 }
