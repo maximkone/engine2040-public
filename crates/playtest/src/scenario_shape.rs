@@ -234,13 +234,11 @@ fn split_objects(body: &str) -> Vec<String> {
                 }
                 depth += 1;
             }
-            b'}' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 0 {
-                        if let Some(s) = start.take() {
-                            rows.push(body[s..=i].to_string());
-                        }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = start.take() {
+                        rows.push(body[s..=i].to_string());
                     }
                 }
             }

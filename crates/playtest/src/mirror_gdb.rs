@@ -232,7 +232,7 @@ fn restore_symmetry(door: &mut Door, sub: Submission) -> Outcome {
 
 fn rename_unique(door: &mut Door, sub: Submission) -> Outcome {
     let mut scene = fixture_scene();
-    scene.variant.props[2].name = "torch_sw".to_owned();
+    "torch_sw".clone_into(&mut scene.variant.props[2].name);
     let label = sub.pick("torch_ne", "torch_sw");
     let delivery = land(door, &mut scene, &[set_label(21, label)]);
     let mut names: Vec<&str> = scene

@@ -31,6 +31,7 @@ import {
 // *tool* prints NO_IGPU / returns non-zero, so the tests drive the real
 // print, exit and report path with injected seams, never a live arena.
 import * as potato from "./potato-check.mjs";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
@@ -476,4 +477,115 @@ test("potato: summarize carries the run load stamp into the verdict", () => {
   assert.equal(loaded.exit, 3);
   assert.ok(loaded.line.includes("p50_ms=60.000"), loaded.line);
   assert.equal(loaded.verdicts[0].status, "FAIL", "the bar verdict still prints");
+});
+
+// GS16/G9: the gate keeps ONE long-lived working-set sampler per run instead
+// of one `tasklist` process per sample. A spawn per sample from the gate's own
+// event loop stalled the very frames it measured (interval_ms p99 93.297 ms
+// with the sampler against 14.715 ms without it, same box, 2026-10-17), so the
+// gate starts the sampler once, reads its lines, and starts it no second time.
+// A fake arena child and a fake sampler drive the real `run` and the real
+// `runLive`, so the count, the pinned bytes and the loud dead-sampler path are
+// proven on the tool, never on a live arena.
+function fakeArenaSpawn(output) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("close", 0);
+    setImmediate(() => {
+      child.stdout.emit("data", output);
+      setImmediate(() => child.emit("close", 0));
+    });
+    return child;
+  };
+}
+
+test("potato: the gate starts one sampler per run, reads its samples and warns when it dies", async () => {
+  const dir = tempReportDir();
+  try {
+    const lines = [];
+    const errors = [];
+    let started = 0;
+    let killed = 0;
+    let spawned = null;
+    // The sampler seam is a factory the gate calls once. This drives the real
+    // `startSampler` with a fake child, so the one-child script and the drain
+    // of its lines are exercised, not only the plumbing around them.
+    const sampler = () => {
+      started += 1;
+      return potato.startSampler({
+        spawnFn: (exe, args) => {
+          spawned = { exe, args };
+          const child = new EventEmitter();
+          child.stdout = new EventEmitter();
+          child.stderr = new EventEmitter();
+          child.kill = () => {
+            killed += 1;
+          };
+          setImmediate(() => child.stdout.emit("data", CANNED_TASKLIST));
+          return child;
+        },
+      });
+    };
+    const code = await potato.run([], {
+      sampler,
+      spawnArena: fakeArenaSpawn(CANNED_ARENA),
+      log: (line) => lines.push(line),
+      errorLog: (line) => errors.push(line),
+      reportDir: dir,
+      now: () => new Date("2026-10-17T00:00:00.000Z"),
+    });
+    assert.equal(started, 1, "one sampler for the whole run, not one process per sample");
+    assert.equal(killed, 1, "the sampler child is ended with the run");
+    assert.equal(spawned.exe, potato.POWERSHELL_EXE);
+    // One child that loops in-process (`Get-Process`) on the row's 250 ms
+    // cadence: no process is created between samples, so nothing else stalls
+    // the frames the gate measures.
+    const script = Buffer.from(spawned.args[spawned.args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le");
+    assert.ok(script.includes("Get-Process"), script);
+    assert.ok(script.includes("Start-Sleep -Milliseconds 250"), script);
+    assert.equal(code, 0);
+    // The same bytes the other tests pin, now fed by the sampler's own lines.
+    assert.equal(lines[0], "potato: adapter=Intel-UHD_Dx12_integrated p50_ms=42.125 p99_ms=67.500 peak_ws_mb=1280");
+    assert.deepEqual(lines.slice(1, 4), [
+      "p50_ms 42.125 <= 50 PASS",
+      "p99_ms 67.500 <= 80 PASS",
+      "peak_ws_mb 1280 <= 3072 PASS",
+    ]);
+    assert.ok(
+      lines.includes("potato load: LOADED 1 cargo + 0 rustc running (filed numbers, not a speed claim)"),
+      lines.join("\n"),
+    );
+    assert.deepEqual(errors, [], errors.join("\n"));
+
+    // A dead sampler is loud, never a silent zero: the run warns and the
+    // per-sample `tasklist` seam keeps the numbers alive meanwhile.
+    const deadLines = [];
+    const deadErrors = [];
+    const dead = await potato.run(
+      [],
+      {
+        sampler: () => ({
+          ready: Promise.resolve(false),
+          read: () => ({ text: "", error: "sampler exited 1" }),
+          stop: () => {},
+        }),
+        spawnArena: fakeArenaSpawn(CANNED_ARENA),
+        sampleFn: () => ({ text: CANNED_TASKLIST, error: null }),
+        log: (line) => deadLines.push(line),
+        errorLog: (line) => deadErrors.push(line),
+        reportDir: dir,
+        now: () => new Date("2026-10-17T00:00:00.000Z"),
+      },
+    );
+    assert.equal(dead, 0);
+    assert.ok(
+      deadErrors.some((line) => line.includes("working-set sampler failed")),
+      deadErrors.join("\n"),
+    );
+    assert.equal(deadLines[0], "potato: adapter=Intel-UHD_Dx12_integrated p50_ms=42.125 p99_ms=67.500 peak_ws_mb=1280");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

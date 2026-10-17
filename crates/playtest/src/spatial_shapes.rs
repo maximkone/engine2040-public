@@ -135,12 +135,11 @@ fn candidates() -> Vec<(u32, u8)> {
 pub fn random_order(seed: u64) -> Vec<(u32, u8)> {
     let mut order = candidates();
     let rng = CounterRng::new(seed.wrapping_add(SHUFFLE_SALT));
-    let mut counter = 0u64;
-    for index in (1..order.len()).rev() {
+    // `counter` walks the rng stream in shuffle order.
+    for (index, counter) in (1..order.len()).rev().zip(0u64..) {
         let bound = u64::try_from(index + 1).expect("candidate count fits in u64");
         let pick = usize::try_from(rng.sample(counter) % bound)
             .expect("shuffle pick fits: fewer candidates than u32::MAX");
-        counter += 1;
         order.swap(index, pick);
     }
     order

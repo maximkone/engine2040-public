@@ -91,10 +91,7 @@ pub fn bot_harness_fixture() -> bot_harness::HarnessAggregate {
         ticks_per_bout: 60,
         base_seed: 2040,
     };
-    match harness.run() {
-        Ok(report) => report,
-        Err(_) => Default::default(),
-    }
+    harness.run().unwrap_or_default()
 }
 
 /// One blocking or decorative prop in meters. Sizes are full extents.
