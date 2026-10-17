@@ -17,6 +17,9 @@ pub mod controller2;
 /// through. Std-only; no sim step.
 pub mod islands;
 pub mod kcc;
+/// Physics LOD for armies: far soldiers as capsules, near ones full detail,
+/// CCD only for fast weapons and projectiles, island sleep for rest.
+pub mod lod;
 /// The collision layer table (fighter, prop, debris, sensor, world) as plain integers.
 pub mod layers;
 /// Severed limbs as bodies: mass from volume and density, inherited velocity

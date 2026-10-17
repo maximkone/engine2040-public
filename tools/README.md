@@ -61,6 +61,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/ladder-counts.mjs` (+ `tools/ladder-counts.test.mjs`): count research-ladder rows per rung.
 - `tools/level-check.mjs` (+ `tools/level-check.test.mjs`): gate the hand-placed arena layout.
 - `tools/license-gate.mjs` (+ `tools/license-gate.test.mjs`): gate Cargo licenses.
+- `tools/miri-gate.mjs` (+ `tools/miri-gate.test.mjs`): keep the unsafe sites, `tools/miri-sites.json` and `.github/workflows/miri.yml` in step; zero Miri suppressions; prints the forbid-rollout list.
 - `tools/modmap.mjs` (+ `tools/modmap.test.mjs`): regenerate `.opencode/modmap.md` from tracked Rust files (`--write`, `--check`).
 - `tools/mcp-install.mjs` (+ `tools/mcp-install.test.mjs`): install the MCP binary.
 - `tools/mp-evidence.mjs` (+ `tools/mp-evidence.test.mjs`): node script; see its header.

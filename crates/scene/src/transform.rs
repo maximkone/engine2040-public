@@ -507,7 +507,7 @@ fn quat_conjugate(q: [f32; 4]) -> [f32; 4] {
 }
 
 /// Unit quaternion, or identity when the input is degenerate.
-fn quat_normalized(q: [f32; 4]) -> [f32; 4] {
+pub fn quat_normalized(q: [f32; 4]) -> [f32; 4] {
     let len_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
     if !len_sq.is_finite() || len_sq < 1e-12 {
         return [0.0, 0.0, 0.0, 1.0];
@@ -517,7 +517,7 @@ fn quat_normalized(q: [f32; 4]) -> [f32; 4] {
 }
 
 /// Rotate a vector by a unit quaternion.
-fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+pub fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
     // t = 2 * cross(q.xyz, v); v' = v + q.w * t + cross(q.xyz, t).
     let tx = 2.0 * (q[1] * v[2] - q[2] * v[1]);
     let ty = 2.0 * (q[2] * v[0] - q[0] * v[2]);

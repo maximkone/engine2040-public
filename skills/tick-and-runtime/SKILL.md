@@ -1,6 +1,6 @@
 ---
 name: tick-and-runtime
-description: "Use when you change the fixed-step tick, live window loop, frame budget, per-tick allocation, asset load or handle, job or worker thread, startup order, debug tool or crash hook, or claim a speedup: accumulator, no replay from tick 0, off-thread results at boundaries."
+description: "Use when you change the fixed-step tick, live window loop, frame budget, per-tick allocation, asset load or handle, worker threads, startup order or the crash hook: accumulator, no replay from tick 0, off-thread results at tick boundaries."
 ---
 
 # Tick and runtime

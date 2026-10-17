@@ -156,6 +156,33 @@ pub fn upload_mesh(
     uvs: &[[f32; 2]],
     indices: &[u32],
 ) -> Result<MeshData, MeshError> {
+    upload_mesh_checked(positions, normals, uvs, indices, true)
+}
+
+/// Largest UV magnitude a tiling mesh may carry (tiles across a surface).
+pub const MAX_TILED_UV: f32 = 1024.0;
+
+/// [`upload_mesh`] for meshes whose UVs tile a Repeat-sampled texture: the
+/// UVs may leave `0..=1` (finite, at most [`MAX_TILED_UV`]); every other rule
+/// is the same. The presenter revalidates uploads through this, so a kit with
+/// tiling UVs reaches the GPU; importers that promise unit UVs call the
+/// strict [`upload_mesh`].
+pub fn upload_mesh_tiled(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+) -> Result<MeshData, MeshError> {
+    upload_mesh_checked(positions, normals, uvs, indices, false)
+}
+
+fn upload_mesh_checked(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+    unit_uv: bool,
+) -> Result<MeshData, MeshError> {
     if positions.is_empty() {
         return Err(MeshError::EmptyMesh);
     }
@@ -203,7 +230,8 @@ pub fn upload_mesh(
                 vertex: i,
             });
         }
-        if uv.iter().any(|c| *c < 0.0 || *c > 1.0) {
+        let (low, high) = if unit_uv { (0.0, 1.0) } else { (-MAX_TILED_UV, MAX_TILED_UV) };
+        if uv.iter().any(|c| *c < low || *c > high) {
             return Err(MeshError::UvOutOfRange(i));
         }
     }

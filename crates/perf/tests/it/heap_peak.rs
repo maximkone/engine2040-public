@@ -117,7 +117,10 @@ fn heap_peak_real_64mib_buffer_in_the_match_window_trips_the_gate() {
     let (again_hash, again) = measure(|| workload.run_hash());
     assert_eq!(hash, again_hash, "the match hashes the same twice");
     assert_eq!(plain, again, "the match allocates the same twice");
-    assert!(plain.peak_live_bytes > 0, "the match holds some heap to gate");
+    assert!(
+        plain.peak_live_bytes > 0,
+        "the match holds some heap to gate"
+    );
     let (fat_hash, fat) = measure(|| {
         let buffer = vec![1u8; 64 << 20];
         let hash = workload.run_hash();
@@ -133,10 +136,16 @@ fn heap_peak_real_64mib_buffer_in_the_match_window_trips_the_gate() {
         "the held buffer lifts the live peak by exactly 64 MiB"
     );
     let peak = PeakSnapshot::of(&[plain.peak_live_bytes, fat.peak_live_bytes]);
-    assert_eq!(peak.peak_bytes, fat.peak_live_bytes, "the fat run is the peak");
+    assert_eq!(
+        peak.peak_bytes, fat.peak_live_bytes,
+        "the fat run is the peak"
+    );
     let base = plain.peak_live_bytes;
     assert!(allows(base, base), "plain run passes itself");
-    assert!(!allows(peak.peak_bytes, base), "+64 MiB trips the 10 percent rule");
+    assert!(
+        !allows(peak.peak_bytes, base),
+        "+64 MiB trips the 10 percent rule"
+    );
     let err = peak_assert(peak.peak_bytes, base).expect_err("trips");
     assert_eq!(err, peak_assert(peak.peak_bytes, base).expect_err("x2"));
     assert!(err.to_string().contains("FAIL"), "{err}");

@@ -762,7 +762,7 @@ impl Client {
 
 /// Inputs running at `tick`, in fighter order: the slice a prefix run would
 /// read from the tape cursor at that tick. `tape` is `(tick, fighter)`-sorted.
-fn tick_slice(tape: &[FighterInput], tick: u32) -> &[FighterInput] {
+pub(crate) fn tick_slice(tape: &[FighterInput], tick: u32) -> &[FighterInput] {
     let start = tape.partition_point(|input| input.tick < tick);
     let end = tape.partition_point(|input| input.tick <= tick);
     &tape[start..end]

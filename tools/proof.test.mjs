@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FRAME_P95_BAR_MS, frameCsvVerdict, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestTestCommand, packageNameOf, parseProofArgs, runsToolTests, toolTestSummary } from "./proof.mjs";
+import { FRAME_P95_BAR_MS, frameCsvVerdict, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestTestCommand, packageNameOf, parseProofArgs, runsToolTests, toolTestSummary } from "./proof.mjs";
 
 test("parseProofArgs: empty and single-flag runs pass through", () => {
   assert.deepEqual(parseProofArgs([]), []);
@@ -207,4 +207,36 @@ test("frameCsvVerdict: real timed-smoke header parses", () => {
   assert.equal(verdict.p50, 16.667);
   assert.equal(verdict.p95, 20);
   assert.match(verdict.line, /^\[PASS\]/);
+});
+
+// Parity columns as the bin prints them: the first is the clean build, the
+// second the seeded-wall canary (the same line the Rust test pins).
+const PARITY_CLEAN = "spine parity: seeds=20 ticks=600 match=20 mismatch=0 first=none";
+const PARITY_SEEDED = "spine parity: seeds=20 ticks=600 match=15 mismatch=5 first=seed 1003 tick 212 Column(Transform)";
+
+test("parseParityLine: reads the scorecard column and ignores other lines", () => {
+  const col = parseParityLine(`warning: noise
+${PARITY_SEEDED}
+`);
+  assert.deepEqual({ ...col, line: undefined }, { seeds: 20, ticks: 600, matched: 15, mismatch: 5, first: "seed 1003 tick 212 Column(Transform)", line: undefined });
+  assert.equal(parseParityLine("nothing here"), null);
+});
+
+test("parityVerdict: all 20 tapes matching passes, one divergence fails the gate", () => {
+  assert.deepEqual(parityVerdict({ status: 0, stdout: `${PARITY_CLEAN}\n` }), { ok: true, line: PARITY_CLEAN });
+  const red = parityVerdict({ status: 1, stdout: `${PARITY_SEEDED}\n` });
+  assert.equal(red.ok, false);
+  assert.match(red.line, /first=seed 1003 tick 212/);
+  // A clean-looking line with a nonzero exit is still red.
+  assert.equal(parityVerdict({ status: 1, stdout: PARITY_CLEAN }).ok, false);
+  assert.match(parityVerdict({ status: 101, stdout: "", stderr: "error: no bin" }).line, /no parity line: error: no bin/);
+});
+
+test("parityVerdict: the canary is green only when the seeded divergence is caught", () => {
+  const caught = parityVerdict({ status: 1, stdout: PARITY_SEEDED }, { canary: true });
+  assert.equal(caught.ok, true);
+  assert.match(caught.line, /^canary caught: /);
+  const missed = parityVerdict({ status: 0, stdout: PARITY_CLEAN }, { canary: true });
+  assert.equal(missed.ok, false);
+  assert.match(missed.line, /^canary NOT caught: /);
 });

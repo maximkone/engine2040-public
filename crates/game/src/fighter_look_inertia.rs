@@ -228,6 +228,22 @@ impl FighterLook {
         slot: &SlotAnim,
         alpha: f32,
     ) -> Result<LocalPose, LookError> {
+        let mut pose = self.inertial_pose_base(rig, index, slot, alpha)?;
+        // RZ2w: a slot rising out of a ragdoll carries the get-up offsets on top, as a layer
+        // of their own: a clip switch while rising starts from the pose without it.
+        self.ragdoll_getup_offsets(index, &mut pose, alpha)?;
+        Ok(pose)
+    }
+
+    /// [`inertial_pose`](Self::inertial_pose) without the get-up layer: a floored slot's
+    /// ragdoll bones, or the clip pose plus the decaying offsets of its last switch.
+    pub(super) fn inertial_pose_base(
+        &self,
+        rig: &Rig,
+        index: usize,
+        slot: &SlotAnim,
+        alpha: f32,
+    ) -> Result<LocalPose, LookError> {
         // RZ2w: a floored slot is drawn from its ragdoll bones, not from a clip.
         if let Some(pose) = self.ragdoll_pose(index, rig, slot, alpha) {
             return Ok(pose);
@@ -257,6 +273,14 @@ impl FighterLook {
                 continue;
             };
             if !slot.seen || !was.seen {
+                continue;
+            }
+            // RZ2w: a ragdoll is no clip; whatever act the sim shows under it starts no switch.
+            // The get-up layer blends it in when the body rises.
+            if self.ragdolled(index) {
+                if let Some(now) = self.slots.get_mut(index) {
+                    now.iz_age = NO_OFFSET;
+                }
                 continue;
             }
             // The previous tick's slot, read at this tick: its offset clock
@@ -314,8 +338,8 @@ impl FighterLook {
             .get(self.rig_for_slot(index))
             .ok_or_else(|| LookError::Skin("rig missing".to_string()))?;
         let (seen_now, seen_before) = self.last_seen(shown);
-        let shown_before = self.inertial_pose(rig, index, shown, seen_before)?;
-        let shown_now = self.inertial_pose(rig, index, shown, seen_now)?;
+        let shown_before = self.inertial_pose_base(rig, index, shown, seen_before)?;
+        let shown_now = self.inertial_pose_base(rig, index, shown, seen_now)?;
         let arriving_now = self.slot_pose(rig, slot, 0.0)?;
         let arriving_next = self.slot_pose(rig, slot, 1.0)?;
         let set = self

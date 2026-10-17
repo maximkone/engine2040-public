@@ -1,6 +1,6 @@
 ---
 name: repo-orientation
-description: "Use when entering an unfamiliar crate, onboarding, ranking risk before a plan, or when a root Grep dies (Ripgrep JSON record exceeded, one-line glTF): intent-first map, git-history hotspots, crate owners, bus factor, narrow chunked search."
+description: "Use when you enter an unfamiliar crate, rank risk before a plan, or a root Grep dies (Ripgrep JSON record exceeded): intent-first map, git-history hotspots, crate owners, narrow chunked search."
 ---
 
 # Repo orientation

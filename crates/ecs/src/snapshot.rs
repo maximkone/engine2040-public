@@ -2,6 +2,7 @@
 
 use std::hash::Hasher;
 
+use engine_core::digest::MerkleDigest;
 pub use engine_core::hash_bytes;
 use engine_core::Fnv64;
 
@@ -136,6 +137,72 @@ impl CanonicalBytes for World {
                 state.write(&[0]);
             }
         }
+    }
+}
+
+/// Merkle digest of a [`World`] that runs beside the full rehash (RC9
+/// experiment); it never replaces [`CanonicalBytes::canonical_hash`] or
+/// `World::state_hash`, and its root is a different value on purpose.
+///
+/// Leaf `2 * slot` hashes the alive flag and the position, leaf `2 * slot + 1`
+/// the alive flag and the velocity, so a divergence names its slot and
+/// component. A caller that changes a slot calls [`WorldDigest::update_slot`]:
+/// O(log slots) instead of rehashing every slot. A spawn past the slot count
+/// needs a new digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldDigest {
+    tree: MerkleDigest,
+    slots: usize,
+}
+
+impl WorldDigest {
+    /// Hash every slot of `world`, O(slots).
+    pub fn new(world: &World) -> Self {
+        let slots = world.alive.len();
+        let leaves: Vec<u64> = (0..slots * 2)
+            .map(|leaf| Self::leaf_hash(world, leaf))
+            .collect();
+        Self {
+            tree: MerkleDigest::from_leaves(&leaves),
+            slots,
+        }
+    }
+
+    /// The summary of every slot.
+    pub fn root(&self) -> u64 {
+        self.tree.root()
+    }
+
+    /// Rehash `slot` after its alive flag or components changed. `false`
+    /// (nothing done) when `slot` is past the slots this digest was built for.
+    pub fn update_slot(&mut self, world: &World, slot: usize) -> bool {
+        if slot >= self.slots || slot >= world.alive.len() {
+            return false;
+        }
+        for leaf in [slot * 2, slot * 2 + 1] {
+            self.tree.set_leaf(leaf, Self::leaf_hash(world, leaf));
+        }
+        true
+    }
+
+    /// First `(slot, component)` (0 position, 1 velocity) where two digests
+    /// differ, `None` when equal.
+    pub fn first_divergence(&self, other: &Self) -> Option<(usize, u8)> {
+        let leaf = self.tree.first_divergence(&other.tree)?;
+        Some((leaf / 2, u8::from(leaf % 2 == 1)))
+    }
+
+    fn leaf_hash(world: &World, leaf: usize) -> u64 {
+        let slot = leaf / 2;
+        let mut state = CanonicalHasher::new();
+        let alive = world.alive[slot];
+        state.write(&[u8::from(alive)]);
+        if alive && leaf % 2 == 0 {
+            world.pos[slot].append_hash(&mut state);
+        } else if alive {
+            world.vel[slot].append_hash(&mut state);
+        }
+        state.finish()
     }
 }
 
@@ -497,5 +564,168 @@ mod tests {
         let mut bx = World::new();
         bx.spawn(Position { x: 1.0, y: 3.0 }, Velocity::default());
         assert_eq!(super::first_div(&ax, &bx, &[], &[]), Some((0, 0)));
+    }
+
+    /// A seeded world of `slots` fighters: some dead, all with their own state.
+    fn seeded_slots(seed: u64, slots: usize) -> World {
+        use engine_core::Rng;
+        let mut rng = Rng::new(seed);
+        let mut w = World::new();
+        for _ in 0..slots {
+            let (px, py) = (rng.next_u32(), rng.next_u32());
+            let (vx, vy) = (rng.next_u32(), rng.next_u32());
+            let id = w.spawn(
+                Position {
+                    x: f32::from_bits(px),
+                    y: f32::from_bits(py),
+                },
+                Velocity {
+                    x: f32::from_bits(vx),
+                    y: f32::from_bits(vy),
+                },
+            );
+            if rng.next_u32() % 5 == 0 {
+                w.kill(id);
+            }
+        }
+        w
+    }
+
+    /// The full-rehash localization: first slot whose alive flag or position
+    /// differs (0), else whose velocity differs (1), reading raw bits.
+    fn linear_first_div(a: &World, b: &World) -> Option<(usize, u8)> {
+        (0..a.alive.len()).find_map(|i| {
+            let (la, lb) = (a.alive[i], b.alive[i]);
+            let pos = |w: &World| (w.pos[i].x.to_bits(), w.pos[i].y.to_bits());
+            let vel = |w: &World| (w.vel[i].x.to_bits(), w.vel[i].y.to_bits());
+            if la != lb || (la && pos(a) != pos(b)) {
+                Some((i, 0))
+            } else if la && vel(a) != vel(b) {
+                Some((i, 1))
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn world_digest_matches_the_full_rehash_on_20_of_20_divergences() {
+        use engine_core::Rng;
+        let mut rng = Rng::new(2040);
+        for seed in 0..20u64 {
+            let slots = 8 + usize::try_from(seed * 13 % 90).unwrap_or(0);
+            let base = seeded_slots(seed, slots);
+            let mut moved = seeded_slots(seed, slots);
+            let slot = usize::try_from(rng.next_u32()).unwrap_or(0) % slots;
+            match seed % 4 {
+                0 => moved.pos[slot].x = f32::from_bits(moved.pos[slot].x.to_bits() ^ 1),
+                1 => moved.vel[slot].y = f32::from_bits(moved.vel[slot].y.to_bits() ^ 0x8000_0000),
+                2 => moved.alive[slot] = !moved.alive[slot],
+                _ => {
+                    moved.pos[slot].y += 1.0;
+                    moved.vel[slot].x += 1.0;
+                }
+            }
+            let (da, db) = (WorldDigest::new(&base), WorldDigest::new(&moved));
+            let full_differs = base.canonical_hash() != moved.canonical_hash();
+            let want = linear_first_div(&base, &moved);
+            assert_eq!(
+                want.is_some(),
+                full_differs,
+                "seed {seed}: oracle vs rehash"
+            );
+            assert_eq!(
+                da.root() != db.root(),
+                full_differs,
+                "seed {seed}: same verdict"
+            );
+            assert_eq!(
+                da.first_divergence(&db),
+                want,
+                "seed {seed}: same slot and component"
+            );
+            let twin = WorldDigest::new(&seeded_slots(seed, slots));
+            assert_eq!((da.root(), da.first_divergence(&twin)), (twin.root(), None));
+        }
+    }
+
+    #[test]
+    fn world_digest_updates_match_a_fresh_build_and_never_allocate() {
+        let mut w = seeded_slots(7, 64);
+        let mut digest = WorldDigest::new(&w);
+        let (mut changed, mut heap_calls) = (0, 0);
+        for tick in 0..50usize {
+            // Two slots change per tick: one is hit, one drifts.
+            let (hit, drift) = (tick * 7 % 64, tick * 11 % 64);
+            w.pos[hit].x += 0.5;
+            w.vel[drift].y -= 0.25;
+            if tick % 9 == 0 {
+                w.kill(hit);
+            }
+            let ((), heap) = measure(|| {
+                assert!(digest.update_slot(&w, hit));
+                assert!(digest.update_slot(&w, drift));
+                std::hint::black_box(digest.root());
+            });
+            heap_calls += heap.calls;
+            changed += 2;
+            assert_eq!(digest, WorldDigest::new(&w), "tick {tick}");
+        }
+        assert_eq!(
+            (changed, heap_calls),
+            (100, 0),
+            "update_slot is O(log n), no heap"
+        );
+        assert!(!digest.update_slot(&w, 64), "past the slots does nothing");
+    }
+
+    /// RC9 timing: full streamed rehash against the Merkle update, both
+    /// over the same world. Run: cargo test -p engine-ecs --lib --release
+    /// world_digest_timing -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing experiment: prints ns per tick, asserts nothing about the clock"]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "the wall clock times the experiment, never the tick"
+    )]
+    fn world_digest_timing() {
+        use std::time::Instant;
+        for (slots, changed) in [
+            (8usize, 8usize),
+            (8, 1),
+            (64, 2),
+            (1_024, 10),
+            (11_000, 110),
+        ] {
+            let mut w = seeded_slots(3, slots);
+            let mut digest = WorldDigest::new(&w);
+            let reps = 2_000_000 / slots.max(8);
+            let mut sink = 0u64;
+            let t = Instant::now();
+            for r in 0..reps {
+                for k in 0..changed {
+                    w.pos[(r + k) % slots].x += 1.0;
+                }
+                sink ^= w.canonical_hash();
+            }
+            let full = t.elapsed();
+            let t = Instant::now();
+            for r in 0..reps {
+                for k in 0..changed {
+                    let slot = (r + k) % slots;
+                    w.pos[slot].x += 1.0;
+                    digest.update_slot(&w, slot);
+                }
+                sink ^= digest.root();
+            }
+            let merkle = t.elapsed();
+            let per = |d: std::time::Duration| d.as_nanos() as f64 / reps as f64;
+            println!(
+                "slots {slots:>6} changed {changed:>4}: full {:>9.0} ns/tick  merkle {:>9.0} ns/tick  ({:.2}x)  sink {sink:x}",
+                per(full),
+                per(merkle),
+                per(full) / per(merkle),
+            );
+        }
     }
 }

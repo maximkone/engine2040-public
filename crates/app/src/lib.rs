@@ -15,6 +15,8 @@ pub mod live_proof;
 pub mod platform;
 pub mod snapshot;
 #[cfg(test)]
+mod soak_tests;
+#[cfg(test)]
 mod tests;
 
 pub use app::{

@@ -1428,6 +1428,29 @@ mod tests {
         );
     }
 
+    /// A 32x32 sheet pinned along its top row, dropped crumpled and run 300 ticks.
+    fn settled_big_sheet() -> Cloth {
+        let params = ClothParams::for_tier(ClothTier::Comfort);
+        let grid = ClothGrid { cols: 32, rows: 32 };
+        let mut cloth = Cloth::new(grid, [3.1, 3.1], SHOULDERS, params).expect("32x32 sheet");
+        crumple(&mut cloth, 7);
+        run(&mut cloth, 300);
+        cloth
+    }
+
+    #[test]
+    fn a_32x32_sheet_settles_with_every_link_within_a_quarter_of_rest_and_replays_exactly() {
+        let cloth = settled_big_sheet();
+        assert!(finite(&cloth));
+        assert!(
+            cloth.max_stretch() <= 1.25,
+            "tethers must carry the long hanging chain: {}",
+            cloth.max_stretch()
+        );
+        let again = settled_big_sheet();
+        assert_eq!(cloth.positions(), again.positions(), "bit-exact replay");
+    }
+
     #[test]
     fn a_tick_is_one_sixtieth_of_a_second_for_any_substep_count() {
         for substeps in [1, 2, 4, MAX_SUBSTEPS] {

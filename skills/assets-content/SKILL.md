@@ -1,6 +1,6 @@
 ---
 name: assets-content
-description: "Use when you find, download, license-check, cook or budget content in content/ or crates/assets: CC0/CC-BY sources, PROVENANCE row, ambientCG PBR sets, LFS pointers, mesh tri counts, bones, influences, texture pixels, Caps table, cook x2 equal."
+description: "Use when you need new content or touch content/ or crates/assets: find, license-check, download, cook or budget meshes, textures, HDRIs or audio; PROVENANCE rows, ambientCG PBR sets, LFS pointers, tri counts, cook twice equal."
 ---
 
 # Content: sources, cook, budgets

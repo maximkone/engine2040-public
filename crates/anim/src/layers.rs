@@ -147,7 +147,7 @@ fn checked_gain(gain_q8: u16) -> Result<(), GraphError> {
 }
 
 /// Override one joint: mask 0 keeps base, 255 takes over, else lerp/nlerp.
-fn override_joint(
+pub(crate) fn override_joint(
     base_p: [f32; 3],
     base_r: [f32; 4],
     over_p: [f32; 3],

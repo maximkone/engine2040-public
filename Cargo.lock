@@ -2953,6 +2953,8 @@ version = "0.1.0"
 dependencies = [
  "engine-combat",
  "engine-core",
+ "engine-ecs",
+ "engine-nav",
  "engine-nn",
  "serde_json",
 ]
@@ -2966,6 +2968,7 @@ dependencies = [
  "engine-core",
  "engine-ecs",
  "engine-scene",
+ "serde_json",
 ]
 
 [[package]]
@@ -3069,6 +3072,7 @@ dependencies = [
  "engine-assets",
  "engine-combat",
  "engine-core",
+ "engine-ecs",
  "engine-render",
  "engine-scene",
  "engine-spatial",
@@ -3112,6 +3116,7 @@ dependencies = [
  "engine-arena",
  "engine-assets",
  "engine-audio",
+ "engine-clock",
  "engine-combat",
  "engine-core",
  "engine-destruction",
@@ -3237,6 +3242,7 @@ version = "0.1.0"
 dependencies = [
  "engine-ai",
  "engine-arena",
+ "engine-combat",
  "engine-core",
  "engine-provider",
  "engine-render",
@@ -3342,6 +3348,7 @@ dependencies = [
  "engine-audio",
  "engine-clock",
  "engine-input",
+ "engine-net",
  "engine-proof",
  "engine-render",
  "js-sys",

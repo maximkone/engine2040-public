@@ -42,6 +42,9 @@ pub mod divergence;
 mod door;
 pub mod eval;
 pub mod exploit;
+/// Feel keypoints: hit-stop, shake, cancel and readability claims as data,
+/// with seeded feel bugs (VK1 extended, GP7).
+pub mod feel_keypoints;
 pub mod frame_check;
 pub mod keypoint;
 pub mod living;

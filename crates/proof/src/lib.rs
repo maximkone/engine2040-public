@@ -41,6 +41,9 @@ pub mod online_soak;
 #[cfg(feature = "ragdoll")]
 pub mod ragdoll_matrix;
 pub mod soak;
+/// Spine parity column of the proof scorecard (ARC10).
+#[cfg(feature = "spine")]
+pub mod spine_parity;
 pub mod tape;
 /// Tape-decode one-harness fuzz: replay-hash oracle plus shrink (HS23).
 #[cfg(feature = "fuzz")]

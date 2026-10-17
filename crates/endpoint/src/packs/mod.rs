@@ -282,6 +282,45 @@ impl VerbSpec {
     }
 }
 
+/// One-line argument summary of a verb's input schema for `api.describe`:
+/// `name:type` per property, `!` after a required one, `none` when the verb
+/// takes no arguments. Lets an agent that never saw the verb's advertised
+/// schema build a valid `api.call`.
+fn arg_summary(schema: &JsonObject) -> String {
+    let required: BTreeSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let kind = |prop: &Value| match prop.get("type") {
+        Some(Value::String(name)) => name.clone(),
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|name| *name != "null")
+            .unwrap_or("any")
+            .to_owned(),
+        _ => "any".to_owned(),
+    };
+    let fields: Vec<String> = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(name, prop)| {
+            let mark = if required.contains(name.as_str()) { "!" } else { "" };
+            format!("{name}:{}{mark}", kind(prop))
+        })
+        .collect();
+    if fields.is_empty() {
+        "none".to_owned()
+    } else {
+        fields.join(" ")
+    }
+}
+
 /// `pack.verb` shape with no forbidden word.
 fn name_is_sane(name: &str) -> bool {
     let (head, tail) = match name.split_once('.') {
@@ -614,7 +653,11 @@ impl PackRegistry {
                         verb.card.name(),
                         if verb.readonly { "read-only" } else { "writes" }
                     ),
-                    verb.description(),
+                    &format!(
+                        "{} Args: {}",
+                        verb.description(),
+                        arg_summary(&verb.model().input_schema)
+                    ),
                     "DOOR",
                 );
             }
@@ -717,6 +760,9 @@ fn api_call(service: &McpServer, param: &ApiCallArgs) -> Result<ApiCallOutput, M
         .args
         .clone()
         .unwrap_or_else(|| Value::Object(JsonObject::new()));
+    // Screen the args before the verb stages anything: a verb reached through
+    // the router meets the same hostile-text gate as a direct call.
+    service.screen_payload(TOOL_API_CALL, &args.to_string())?;
     let outcome = verb.invoke(service, args);
     let pack = verb.pack().to_owned();
     service.dispatch(TOOL_API_CALL, |_| {
@@ -818,7 +864,7 @@ crate::e2_tool!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::insight::mcp_tools::{ApiSearchArgs, ApiSearchTool};
+    use crate::insight::mcp_tools::{ApiDescribeArgs, ApiDescribeTool, ApiSearchArgs, ApiSearchTool};
     use crate::mcp::tool_names;
     use crate::scene_tools::{SceneBriefTool, TOOL_SCENE_BRIEF};
     use engine_editor::capability::Capability;
@@ -1115,6 +1161,31 @@ mod tests {
             "scene.brief is found: {:?}",
             brief.hits
         );
+    }
+
+    #[test]
+    fn api_describe_lists_each_verb_args_with_required_marks() {
+        let server = server();
+        let describe = |path: &str| {
+            ApiDescribeTool::invoke(
+                &server,
+                ApiDescribeArgs {
+                    path: path.to_owned(),
+                },
+            )
+            .expect("verb describes")
+            .docs
+        };
+        let query = describe("scene.query");
+        assert!(query.contains("Args: "), "got: {query}");
+        assert!(query.contains("kind:string!"), "required mark, got: {query}");
+        assert!(query.contains("limit:integer "), "optional, got: {query}");
+        assert!(!query.contains("limit:integer!"), "got: {query}");
+        let brief = describe("scene.brief");
+        assert!(brief.contains("budget_bytes:integer"), "got: {brief}");
+        assert!(!brief.contains('!'), "no required arg, got: {brief}");
+        let no_args = rmcp::serde_json::json!({"type": "object", "properties": {}});
+        assert_eq!(arg_summary(no_args.as_object().expect("object")), "none");
     }
 
     #[test]

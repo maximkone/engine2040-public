@@ -1276,6 +1276,29 @@ mod tests {
         McpServer::new(7, Capability::unrestricted(7))
     }
 
+    /// A session at revision 1 whose scene plays as the empty arena (the one
+    /// node hangs above head height), so `play.run` has a revision to pin.
+    fn pinned_server() -> McpServer {
+        use engine_editor::commands::{self, Batch, Document, Journal, Op};
+        let (mut doc, mut journal) = (Document::new(), Journal::new());
+        let marker = Batch {
+            ops: vec![Op::Insert {
+                id: engine_scene::ids::ObjectId::new(),
+                parent: engine_scene::ids::ObjectId::NIL,
+                local: engine_scene::transform::Transform::new(
+                    [0.0, 10.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                ),
+            }],
+            base_revision: 0,
+            idempotency_key: 1,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &marker).expect("marker applies");
+        McpServer::with_document(doc, journal, 7, Capability::unrestricted(7))
+    }
+
     /// One duel step's inputs: fighter 0 pushes +x, fighter 1 pushes -x, and
     /// fighter 0 throws an attack every fourth step.
     fn step_inputs(base: u32, step: u32) -> Vec<PlayInputDto> {
@@ -1969,7 +1992,7 @@ mod tests {
                 inputs: Some(Vec::new()),
                 ttl_polls: None,
                 job_id: None,
-                scene_rev: None,
+                scene_rev: Some(1),
             }
         }
         fn poll_args(job_id: u64) -> PlayRunArgs {
@@ -2002,7 +2025,7 @@ mod tests {
             assert_eq!(step.tick, TICKS, "seed {seed}: receipt carries the count");
 
             // Run side: start, halfway poll, completing poll.
-            let server = server();
+            let server = pinned_server();
             let started = PlayRunTool::invoke(&server, start_args(seed)).expect("run starts");
             assert_eq!(started.tick_count, TICKS);
             let id = started.job_id;

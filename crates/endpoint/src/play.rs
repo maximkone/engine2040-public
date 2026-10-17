@@ -206,6 +206,9 @@ pub struct PlayRunOutput {
     pub seed: u64,
     pub half_extent_m: f32,
     pub scene_rev: Option<u64>,
+    // Pin digest of the scene bytes `scene_rev` named (lowercase hex), echoed
+    // on every status so a run always names the exact scene it played.
+    pub scene_digest: Option<String>,
 }
 
 /// Capture request: optional receipt width and height in pixels, plus the
@@ -276,6 +279,7 @@ struct PlayJob {
     seed: u64,
     half_extent_m: f32,
     scene_rev: Option<u64>,
+    scene_digest: Option<String>,
     ticks: u32,
     fighters: u8,
     checkpoints: Vec<Checkpoint>,
@@ -283,6 +287,15 @@ struct PlayJob {
     truncated_logs: bool,
     polls_used: u64,
     ttl_polls: u64,
+}
+
+/// The scene a started match plays: its world plus the pin digest of the scene
+/// bytes it was built from, so the job manifest names the exact scene.
+pub struct PinnedWorld {
+    /// The match world built from the pinned scene revision.
+    pub world: MatchWorld,
+    /// Pin digest of the scene bytes at that revision.
+    pub digest: String,
 }
 
 /// A host-supplied way to simulate a match, used instead of the plain arena run (the `rules`
@@ -341,7 +354,7 @@ impl PlayJobs {
     pub fn play_run_in(
         &mut self,
         args: &PlayRunArgs,
-        world: Option<MatchWorld>,
+        world: Option<PinnedWorld>,
     ) -> Result<PlayRunOutput, McpToolError> {
         self.play_run_with(args, world, None)
     }
@@ -351,7 +364,7 @@ impl PlayJobs {
     pub fn play_run_with(
         &mut self,
         args: &PlayRunArgs,
-        world: Option<MatchWorld>,
+        world: Option<PinnedWorld>,
         runner: Option<&MatchRunner<'_>>,
     ) -> Result<PlayRunOutput, McpToolError> {
         let action = PlayAction::parse(&args.action)?;
@@ -367,7 +380,7 @@ impl PlayJobs {
     fn start(
         &mut self,
         args: &PlayRunArgs,
-        world: Option<MatchWorld>,
+        world: Option<PinnedWorld>,
         runner: Option<&MatchRunner<'_>>,
     ) -> Result<PlayRunOutput, McpToolError> {
         if self.jobs.len() >= MAX_JOBS {
@@ -454,8 +467,8 @@ impl PlayJobs {
                 ),
             ));
         }
-        let world = match (args.scene_rev, world) {
-            (Some(_), Some(world)) => Some(world),
+        let (world, scene_digest) = match (args.scene_rev, world) {
+            (Some(_), Some(pinned)) => (Some(pinned.world), Some(pinned.digest)),
             (Some(rev), None) => {
                 return Err(McpToolError::new(
                     "no_scene",
@@ -464,7 +477,7 @@ impl PlayJobs {
                     ),
                 ));
             }
-            (None, _) => None,
+            (None, _) => (None, None),
         };
         let checkpoints = match (runner, &world) {
             (Some(runner), world) => (runner.run)(&config, &tape, world.as_ref())?,
@@ -485,6 +498,7 @@ impl PlayJobs {
             seed,
             half_extent_m: half,
             scene_rev: args.scene_rev,
+            scene_digest,
             ticks,
             fighters,
             checkpoints,
@@ -809,6 +823,7 @@ fn render_output(id: u64, job: &PlayJob, events: Vec<String>) -> PlayRunOutput {
         seed: job.seed,
         half_extent_m: job.half_extent_m,
         scene_rev: job.scene_rev,
+        scene_digest: job.scene_digest.clone(),
     }
 }
 
@@ -1220,8 +1235,29 @@ mod tests {
     use super::*;
     use engine_editor::capability::Capability;
 
+    /// A session at revision 1 whose scene plays as the empty arena (the one
+    /// node hangs above head height), so a start has a revision to pin.
     fn server() -> McpServer {
-        McpServer::new(7, Capability::unrestricted(7))
+        use engine_editor::commands::{self, Batch, Document, Journal, Op};
+        let (mut doc, mut journal) = (Document::new(), Journal::new());
+        let marker = Batch {
+            ops: vec![Op::Insert {
+                // A fixed id keeps the scene digest equal across sessions.
+                id: engine_scene::ids::ObjectId::parse("00000000-0000-0000-0000-000000000001")
+                    .expect("fixed marker id parses"),
+                parent: engine_scene::ids::ObjectId::NIL,
+                local: engine_scene::transform::Transform::new(
+                    [0.0, 10.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                ),
+            }],
+            base_revision: 0,
+            idempotency_key: 1,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &marker).expect("marker applies");
+        McpServer::with_document(doc, journal, 7, Capability::unrestricted(7))
     }
 
     fn start_args(ticks: u32) -> PlayRunArgs {
@@ -1234,8 +1270,55 @@ mod tests {
             inputs: Some(Vec::new()),
             ttl_polls: None,
             job_id: None,
-            scene_rev: None,
+            scene_rev: Some(1),
         }
+    }
+
+    /// SC2: a start without a live pin is refused by name before any job is
+    /// filed; a pinned start carries the scene pin in its manifest.
+    #[test]
+    fn start_pins_the_scene_or_refuses_before_any_job() {
+        let server = server();
+        let mut unpinned = start_args(8);
+        unpinned.scene_rev = None;
+        assert_eq!(
+            invoke(&server, unpinned).expect_err("unpinned").code,
+            "unpinned_run"
+        );
+        let mut stale = start_args(8);
+        stale.scene_rev = Some(7);
+        assert_eq!(
+            invoke(&server, stale).expect_err("stale").code,
+            "stale_scene_rev"
+        );
+        // A session that never authored anything is revision 0: the empty
+        // arena never plays, even when the caller names a revision.
+        let empty = McpServer::new(7, Capability::unrestricted(7));
+        for scene_rev in [None, Some(0)] {
+            let mut args = start_args(8);
+            args.scene_rev = scene_rev;
+            assert_eq!(
+                invoke(&empty, args).expect_err("empty arena").code,
+                "empty_arena"
+            );
+        }
+        // Refusals filed nothing.
+        assert_eq!(
+            invoke(&server, run_action("poll", Some(1)))
+                .expect_err("no job was filed")
+                .code,
+            "unknown_job"
+        );
+        let started = invoke(&server, start_args(8)).expect("pinned start runs");
+        assert_eq!(started.scene_rev, Some(1));
+        let digest = started.scene_digest.expect("manifest carries the digest");
+        assert_eq!(digest.len(), 64, "blake3 hex digest: {digest}");
+        let polled = invoke(&server, run_action("poll", Some(started.job_id))).expect("polls");
+        assert_eq!(
+            polled.scene_digest,
+            Some(digest),
+            "every status echoes the pin"
+        );
     }
 
     fn run_action(action: &str, job_id: Option<u64>) -> PlayRunArgs {
@@ -1862,6 +1945,18 @@ mod tests {
         );
     }
 
+    /// A finished job from the job table alone, which files no scene (the
+    /// server door always pins one).
+    fn unscened_run() -> PlayRunOutput {
+        let mut jobs = PlayJobs::new();
+        let mut args = start_args(32);
+        args.scene_rev = None;
+        let id = jobs.play_run(&args).expect("start validates").job_id;
+        let poll = run_action("poll", Some(id));
+        jobs.play_run(&poll).expect("progress poll");
+        jobs.play_run(&poll).expect("completing poll")
+    }
+
     #[test]
     fn play_manifest_round_trips_extent_and_seed_as_json() {
         let done = completed_run();
@@ -1878,7 +1973,7 @@ mod tests {
 
     #[test]
     fn cross_tool_check_passes_honestly_on_matching_composition() {
-        let done = completed_run();
+        let done = unscened_run();
         check_run_against_step(&done, &step_args(2040, 20.0, Some(32)))
             .expect("identical seed, extent and in-range step pass");
         check_run_against_step(&done, &step_args(2040, 20.0, Some(1)))
@@ -1887,7 +1982,13 @@ mod tests {
 
     #[test]
     fn cross_tool_check_fails_honestly_on_any_drift() {
-        let done = completed_run();
+        let done = unscened_run();
+
+        // A door run always pins a scene; play.step plays none, so it refuses.
+        let scened = check_run_against_step(&completed_run(), &step_args(2040, 20.0, Some(8)))
+            .expect_err("a scene run cannot replay in play.step");
+        assert_eq!(scened.code, "manifest_mismatch");
+        assert!(scened.message.contains("scene revision 1"));
 
         let seed_drift = check_run_against_step(&done, &step_args(2041, 20.0, Some(32)))
             .expect_err("a seed drift must fail");

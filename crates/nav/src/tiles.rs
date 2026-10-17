@@ -859,6 +859,11 @@ impl TiledNav {
         self.stale
     }
 
+    /// True when an in-grid cell is blocked (funnel corridors read it).
+    pub(crate) fn is_blocked(&self, x: usize, y: usize) -> bool {
+        self.blocked[y * self.w + x]
+    }
+
     /// Tile holding a cell. Errors: [`TileError::OutOfBounds`], and
     /// [`TileError::BadTile`] only if an index ever exceeds `u32` (a baked
     /// grid stays under [`MAX_TILES`], so that never happens).
@@ -1381,7 +1386,7 @@ impl TiledNav {
     /// Stamps a baked walk with the current version of every tile it
     /// crosses, sorted ascending so identical queries stamp identical
     /// bytes. Bake-time: allocates the stamp lane only.
-    fn stamp_walk(
+    pub(crate) fn stamp_walk(
         &self,
         start: (usize, usize),
         goal: (usize, usize),

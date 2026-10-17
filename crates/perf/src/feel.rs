@@ -1,10 +1,10 @@
 //! Feel quantification: three-domain measurements against the shared
 //! latency bar plus the keypoint rubric.
-//! Status: test-only (no production caller reads [`DomainVerdict::summary`]
-//! yet; exercised by the unit tests in this file and the headline check in
-//! `crates/perf/tests/it/lib_wiring_vectors.rs`). The keypoint and
-//! tournament harnesses named here do not exist yet, so counts arrive as
-//! plain numbers in tests and this crate takes no new dependency edge.
+//! Caller: `perf --feel-gold` ([`check_gold`]) replays `fixtures/feel-gold/`:
+//! the PQ1 leg is the seeded latency fixture run live through the shared
+//! ranker; the PQ2 win share and VK1 rubric counts are stored in the gold row
+//! and checked against the real balance survey and feel keypoint suite by
+//! `engine-playtest` (this crate takes no edge to either).
 //! Units: milliseconds for the latency legs, permille for shares and rates.
 //! Determinism: pure over inputs; seeded fixtures replay exactly; no wall
 //! clock, no GPU, no network. Errors: typed [`FeelError`].
@@ -243,6 +243,98 @@ pub fn fixture_rows(
 ) -> (Vec<InputEvent>, Vec<SimEffect>, Vec<FramePresent>) {
     let spread = splitmix64(seed.wrapping_add(domain_code(domain)));
     crate::latency::fixture_3f(spread, HEADLESS_SAMPLES)
+}
+
+/// Seed of the PQ1 fixture the gold rows replay.
+pub const GOLD_SEED: u64 = 7;
+
+impl FeelDomain {
+    /// The domain a gold row names, by its [`Display`] word.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        [Self::Tuning, Self::Juicing, Self::Streamlining]
+            .into_iter()
+            .find(|d| d.to_string() == word)
+    }
+}
+
+/// A gold file refusal: the 1-based line (0 for the whole file) and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoldError {
+    /// 1-based line of the offending row, or 0 for the file as a whole.
+    pub line: usize,
+    /// What was wrong.
+    pub why: String,
+}
+
+impl Display for GoldError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.line {
+            0 => write!(f, "feel-gold: {}", self.why),
+            n => write!(f, "feel-gold line {n}: {}", self.why),
+        }
+    }
+}
+
+impl std::error::Error for GoldError {}
+
+/// Replay the gold file and return its report text: for each row the PQ1
+/// latency legs come from the seeded fixture through the shared ranker, the
+/// PQ2 win share and VK1 rubric counts are the gold row's own (they are
+/// measured in `engine-playtest`, which checks them against the real runs),
+/// and the scorer's summary must equal the stored verdict.
+///
+/// Row shape: `domain win_permille rubric_passed rubric_total | summary`.
+/// Lines starting with `#` and blank lines are skipped.
+///
+/// # Errors
+///
+/// A line that does not parse, a fixture that does not join, or a summary
+/// that differs from the stored verdict; the message names the line.
+pub fn check_gold(text: &str) -> Result<String, GoldError> {
+    let mut report = String::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let at = |why: &str| GoldError {
+            line: n + 1,
+            why: why.to_owned(),
+        };
+        let (head, stored) = line.split_once('|').ok_or_else(|| at("missing `|`"))?;
+        let mut words = head.split_whitespace();
+        let mut next = |what: &str| words.next().ok_or_else(|| at(what));
+        let domain = FeelDomain::parse(next("domain")?).ok_or_else(|| at("unknown domain"))?;
+        let mut count =
+            |what: &str| -> Result<u32, GoldError> { next(what)?.parse().map_err(|_| at(what)) };
+        let (win, passed, total) = (
+            count("win_permille")?,
+            count("rubric_passed")?,
+            count("rubric_total")?,
+        );
+        let (events, effects, presents) = fixture_rows(GOLD_SEED, domain);
+        let measured = crate::latency::measure(&events, &effects, &presents)
+            .map_err(|e| at(&format!("fixture rows: {e}")))?;
+        let verdict = assess_reports(domain, &measured, &measured, win, passed, total)
+            .map_err(|e| at(&e.to_string()))?;
+        let got = verdict.summary();
+        if got.trim() != stored.trim() {
+            return Err(at(&format!(
+                "scorer says `{}`, gold says `{}`",
+                got.trim(),
+                stored.trim()
+            )));
+        }
+        report.push_str(&got);
+    }
+    if report.is_empty() {
+        return Err(GoldError {
+            line: 0,
+            why: "no rows".to_owned(),
+        });
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -534,5 +626,53 @@ mod tests {
         assert_eq!(FeelDomain::Tuning.to_string(), "tuning");
         assert_eq!(FeelDomain::Juicing.to_string(), "juicing");
         assert_eq!(FeelDomain::Streamlining.to_string(), "streamlining");
+    }
+
+    const GOLD: &str = include_str!("../../../fixtures/feel-gold/feel-gold.txt");
+
+    #[test]
+    fn gold_file_replays_through_the_scorer() {
+        let report = check_gold(GOLD).expect("gold rows match the scorer");
+        assert_eq!(report.matches("verdict=pass").count(), 3, "{report}");
+        for domain in ["tuning", "juicing", "streamlining"] {
+            assert!(report.contains(&format!("domain={domain} ")), "{report}");
+        }
+        assert_eq!(
+            report,
+            check_gold(GOLD).unwrap(),
+            "gold replays identically"
+        );
+    }
+
+    #[test]
+    fn gold_goes_red_when_an_input_or_the_verdict_moves() {
+        // A win share out of band flips win=pass to FAIL: the stored verdict no longer matches.
+        let low_win = GOLD.replacen("tuning 500", "tuning 300", 1);
+        assert!(check_gold(&low_win)
+            .unwrap_err()
+            .why
+            .contains("scorer says"));
+        // Four of five keypoints is 800 permille, under the 900 bar.
+        let weak = GOLD.replacen("juicing 500 5 5", "juicing 500 4 5", 1);
+        assert!(check_gold(&weak).unwrap_err().why.contains("rubric=FAIL"));
+        // A stored verdict that lies about the latency leg is caught too.
+        let lie = GOLD.replacen("baseline_p95=50.000ms", "baseline_p95=20.000ms", 1);
+        assert!(check_gold(&lie).is_err());
+    }
+
+    #[test]
+    fn gold_refuses_malformed_files() {
+        for (text, want) in [
+            ("", "no rows"),
+            ("# only a comment\n", "no rows"),
+            ("tuning 500 5 5 feel", "missing `|`"),
+            ("nonsense 500 5 5 | x", "unknown domain"),
+            ("tuning many 5 5 | x", "win_permille"),
+            ("tuning 500 5 | x", "rubric_total"),
+            ("tuning 500 6 5 | x", "no passing rate"),
+        ] {
+            let err = check_gold(text).unwrap_err().to_string();
+            assert!(err.contains(want), "{text:?}: {err}");
+        }
     }
 }

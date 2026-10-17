@@ -1,6 +1,6 @@
 ---
 name: render-cull-vram
-description: "Use when you add frustum, light, shadow, portal or occlusion culling, or VRAM math, a staging belt, streaming pool, residency cache or eviction rule in crates render, spatial, assets or perf: bake bounds once, integer pool math, one eviction per insert, never in the hash."
+description: "Use when you add frustum, light, shadow, portal or occlusion culling, or VRAM math, a staging belt, streaming pool or eviction rule (crates render, spatial, assets, perf): bake bounds once, integer pool math, never in the hash."
 ---
 
 # Culling and VRAM budgets

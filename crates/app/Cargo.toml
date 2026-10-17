@@ -17,3 +17,7 @@ engine-clock.workspace = true
 engine-ecs.workspace = true
 engine-scene.workspace = true
 engine-arena.workspace = true
+
+[dev-dependencies]
+# RC32: the budget gate parses the RC4 museum fixture text.
+serde_json.workspace = true
