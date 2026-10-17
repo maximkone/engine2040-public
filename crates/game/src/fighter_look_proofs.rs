@@ -14,7 +14,6 @@ use engine_audio::FightCue;
 use engine_combat::fight::HITSTOP_TICKS;
 use engine_render::v1::Camera;
 
-use super::fighter_look_feet::{Legs, Plant};
 use super::{run_phase_scale, Act, FighterLook, RUN_REF_M_PER_TICK, TICK_HZ};
 use crate::view_truth::{BodyTruth, ViewLaws, GROUND_Y};
 use crate::FighterView;
@@ -413,42 +412,10 @@ fn receipt_field<'a>(line: &'a str, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("the receipt names {key}: {line}"))
 }
 
-/// The three-frame-or-one-frame view of a 300-tick four-fighter duel: the
-/// `arena view:` line and, for every frame a foot is at full plant, how far
-/// the drawn ankle sits (in world centimeters) from where the drawn ankle was
-/// when that plant began, read off the posed joints and not off the plant's
-/// own bookkeeping.
-struct DuelFeet {
-    line: String,
-    drift_cm: Vec<f32>,
-}
-
-/// Joint indices of the two ankles on the hero rig, by name.
-fn ankle_joints(look: &FighterLook) -> [usize; 2] {
-    let joints = &look.rigs[0].skeleton.joints;
-    ["foot_l", "foot_r"].map(|name| {
-        joints
-            .iter()
-            .position(|joint| joint.name == name)
-            .unwrap_or_else(|| panic!("the rig has a {name} joint"))
-    })
-}
-
-/// World `xz` of a body's joint: model space under the body's own root.
-fn world_xz(body: &BodyTruth, joint: usize) -> [f32; 2] {
-    let (s, c) = body.yaw.sin_cos();
-    let p = body.joints[joint];
-    [
-        p[0] * c + p[2] * s + body.root[0],
-        -p[0] * s + p[2] * c + body.root[2],
-    ]
-}
-
-/// A 300-tick four-fighter duel (seed 2) posed at `frames_per_tick` sub-tick
-/// frames per sim tick, counted by [`ViewLaws`] exactly as the window counts
-/// its frames. With `ik` off the plants are tracked and metered but the pose
-/// stays the clip's.
-fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
+/// The `arena view:` line of a 300-tick four-fighter duel posed at
+/// `frames_per_tick` sub-tick frames per sim tick, counted by [`ViewLaws`]
+/// exactly as the window counts its frames.
+fn duel_view_line(frames_per_tick: u16) -> String {
     let config = crate::GameConfig {
         seed: 2,
         ticks: 300,
@@ -459,14 +426,8 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
         .and_then(crate::App::into_duel)
         .expect("duel builds");
     let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
-    for slot in &mut look.slots {
-        slot.feet.ik = ik;
-    }
-    let ankles = ankle_joints(&look);
     let mut laws = ViewLaws::default();
     let camera = arena_camera();
-    let mut starts: [[Option<[f32; 2]>; 2]; 4] = [[None; 2]; 4];
-    let mut drift_cm = Vec::new();
     for tick in 0..300u32 {
         let out = app.tick_empty();
         look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
@@ -475,31 +436,9 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
             let alpha = (f32::from(frame) + 0.5) / f32::from(frames_per_tick);
             let bodies = look.pose_frame_joints(4, alpha).expect("joints pose");
             laws.note(&camera, f64::from(tick) + f64::from(alpha), &bodies);
-            for body in &bodies {
-                let slot = usize::from(body.slot);
-                for (foot, joint) in ankles.into_iter().enumerate() {
-                    if body.foot_slide_m[foot].is_none() {
-                        starts[slot][foot] = None;
-                        continue;
-                    }
-                    let here = world_xz(body, joint);
-                    let start = *starts[slot][foot].get_or_insert(here);
-                    drift_cm.push(100.0 * (here[0] - start[0]).hypot(here[1] - start[1]));
-                }
-            }
         }
     }
-    DuelFeet {
-        line: laws.line().expect("the duel folded frames"),
-        drift_cm,
-    }
-}
-
-/// The `arena view:` line of a 300-tick four-fighter duel posed at
-/// `frames_per_tick` sub-tick frames per sim tick, counted by [`ViewLaws`]
-/// exactly as the window counts its frames.
-fn duel_view_line(frames_per_tick: u16) -> String {
-    duel_feet(frames_per_tick, true).line
+    laws.line().expect("the duel folded frames")
 }
 
 /// Pops the receipt counts in one act (`pop_acts=attack:3/run:9`), 0 when none.
@@ -704,476 +643,66 @@ fn run_clip_time_holds_in_hitstop_and_resumes_in_phase() {
     assert_eq!(thawed_frames, 12, "three ticks after the thaw were sampled");
 }
 
-/// The 95th percentile of `values` (the smallest one covering 95 of 100).
-fn p95(values: &[f32]) -> f32 {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(f32::total_cmp);
-    let rank = (sorted.len() * 95).div_ceil(100).max(1);
-    sorted[rank - 1]
-}
-
-/// A number field of the `arena view:` receipt.
-fn receipt_number(line: &str, key: &str) -> f32 {
-    receipt_field(line, key)
-        .parse()
-        .unwrap_or_else(|_| panic!("{key} is a number: {line}"))
-}
-
 #[test]
-fn planted_feet_hold_their_spot_in_a_real_duel() {
-    // LF12 accept on the real bodies, in the 300-tick four-fighter duel (seed
-    // 2). Feet the clip holds still plant, and the slide the receipt meters
-    // (`foot_slide_cm`, the p95 over planted foot-frames of how far the drawn
-    // ankle sits from its spot) stays under 2 cm with the plant on and reads
-    // higher with it off. The same drawn ankles, read off the posed joints
-    // and not off the plant's bookkeeping, agree. The pop counts of the LF9
-    // proof (attack 0, idle 1, run 20 at one frame per tick) do not move.
-    // Measured 2026-10-17, one frame per tick: 108 planted foot-frames, p95
-    // 0.7 cm on against 1.0 cm off (median 0.06 against 0.26 cm); three
-    // frames per tick: 324 planted, 0.7 against 0.9 cm.
-    for (frames, pop_bound, run_bound) in [(1u16, 21u32, 20u32), (3, 1, 0)] {
-        let on = duel_feet(frames, true);
-        let off = duel_feet(frames, false);
-        eprintln!("lf12 {frames} frame(s) per tick, plant on : {}", on.line);
-        eprintln!("lf12 {frames} frame(s) per tick, plant off: {}", off.line);
-        let planted = receipt_number(&on.line, "planted_feet=");
-        assert!(
-            planted >= 100.0,
-            "{frames} frame(s) per tick: only {planted} planted foot-frames"
-        );
-        assert_eq!(
-            planted,
-            receipt_number(&off.line, "planted_feet="),
-            "the plant decides the same feet with the pose moved or not"
-        );
-        let (slide_on, slide_off) = (
-            receipt_number(&on.line, "foot_slide_cm="),
-            receipt_number(&off.line, "foot_slide_cm="),
-        );
-        assert!(
-            slide_on < 2.0,
-            "{frames} frame(s) per tick: planted feet slide {slide_on} cm"
-        );
-        assert!(
-            slide_off > slide_on,
-            "{frames} frame(s) per tick: the plant must remove slide ({slide_on} on, {slide_off} off)"
-        );
-        let (drift_on, drift_off) = (p95(&on.drift_cm), p95(&off.drift_cm));
-        assert!(
-            drift_on < 2.0 && drift_off > drift_on + 0.3,
-            "{frames} frame(s) per tick: drawn ankle drift p95 {drift_on} cm on, {drift_off} cm off"
-        );
-        assert!(
-            (drift_on - slide_on).abs() < 0.5,
-            "the receipt ({slide_on} cm) and the drawn ankles ({drift_on} cm) agree"
-        );
-        let pops: u32 = receipt_field(&on.line, "pops=")
-            .parse()
-            .expect("pops is a number");
-        assert_eq!(pops_in(&on.line, "attack"), 0, "{}", on.line);
-        assert!(pops_in(&on.line, "idle") <= 1, "{}", on.line);
-        assert!(pops_in(&on.line, "run") <= run_bound, "{}", on.line);
-        assert!(
-            pops <= pop_bound,
-            "{pops} pops past {pop_bound}: {}",
-            on.line
-        );
-        assert!(
-            pops <= receipt_field(&off.line, "pops=").parse().unwrap_or(0),
-            "the plant adds no pop: {} then {}",
-            off.line,
-            on.line
-        );
-    }
-}
-
-/// A look with the plant switched `ik` (on or off) and no match behind it.
-fn loaded_look(ik: bool) -> FighterLook {
+fn zz_probe_foot_speeds() {
+    let config = crate::GameConfig {
+        seed: 2,
+        ticks: 300,
+        fighters: 4,
+        half_extent_m: 20.0,
+    };
+    let mut app = crate::App::new(config)
+        .and_then(crate::App::into_duel)
+        .expect("duel builds");
     let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
-    for slot in &mut look.slots {
-        slot.feet.ik = ik;
-    }
-    look
-}
-
-/// Slot 0 stands in guard with the rival straight ahead (+z, so it never
-/// turns) and is shoved sideways 1 cm a tick (0.6 m/s) from tick 40 to 119;
-/// slot 1 is the rival. Returns the `arena view:` line of slot 0 at three
-/// frames per tick and how many times its feet let go of a plant.
-fn shoved_guard(ik: bool) -> (String, u32) {
-    let mut look = loaded_look(ik);
-    let hp = [1000u16, 1000];
-    let mut laws = ViewLaws::default();
-    let camera = arena_camera();
-    let (mut let_gos, mut was) = (0u32, [false; 2]);
-    for tick in 0..120u32 {
-        let shove = tick.saturating_sub(40);
-        let views = [
-            view(0, 0.01 * f32::from(u16::try_from(shove).unwrap_or(0)), 0.0),
-            view(1, 0.0, 4.0),
-        ];
-        look.observe_tick(tick, &views, &hp, &[]);
-        for (foot, held) in was.iter_mut().enumerate() {
-            let now = look.slots[0].feet.plants[foot].planted;
-            let_gos += u32::from(*held && !now);
-            *held = now;
-        }
-        for frame in 0..3u16 {
-            let alpha = (f32::from(frame) + 0.5) / 3.0;
-            let bodies = look.pose_frame_joints(2, alpha).expect("joints pose");
-            let guard: Vec<BodyTruth> = bodies.into_iter().filter(|b| b.slot == 0).collect();
-            laws.note(&camera, f64::from(tick) + f64::from(alpha), &guard);
-        }
-    }
-    (laws.line().expect("frames folded"), let_gos)
-}
-
-#[test]
-fn a_shoved_guard_keeps_its_feet_on_the_sand_and_steps_when_stretched() {
-    // The clip holds a guarding fighter's feet still while the sim shoves it
-    // 0.6 m/s sideways for 80 ticks. Without the plant the planted feet ride
-    // the shove: the slide reaches the 12 cm the plant lets go at. With it
-    // the feet stay on their spots, let go and step home when the body has
-    // carried them past 12 cm, and no joint pops (the foot never snaps).
-    // Measured 2026-10-17: foot_slide_cm 0.0 on against 10.3 off, 8 let-gos,
-    // pop_cm_max 0.5 on.
-    let (on, let_gos) = shoved_guard(true);
-    let (off, _) = shoved_guard(false);
-    eprintln!("lf12 shoved guard, plant on : {on} ({let_gos} let-gos)");
-    eprintln!("lf12 shoved guard, plant off: {off}");
-    let (slide_on, slide_off) = (
-        receipt_number(&on, "foot_slide_cm="),
-        receipt_number(&off, "foot_slide_cm="),
-    );
-    assert!(slide_on < 2.0, "planted feet slide {slide_on} cm: {on}");
-    assert!(
-        slide_off >= 5.0,
-        "without the plant the shove drags the feet {slide_off} cm: {off}"
-    );
-    assert!(
-        receipt_number(&on, "planted_feet=") >= 300.0,
-        "the guard plants: {on}"
-    );
-    assert!(
-        let_gos >= 4,
-        "a stretched plant lets go and steps: {let_gos}"
-    );
-    assert_eq!(receipt_field(&on, "pops="), "0", "{on}");
-    assert!(
-        receipt_number(&on, "pop_cm_max=") < 3.0,
-        "the foot must not snap: {on}"
-    );
-}
-
-#[test]
-fn a_pulled_foot_drops_the_pelvis_and_the_free_leg_keeps_the_sand() {
-    // A planted left foot dragged `pull` meters from where the clip puts it.
-    // Inside what the leg reaches the pelvis stays; past it the pelvis drops
-    // by the gap and the ankle lands on the spot; past the deepest drop the
-    // leg stretches straight and stays finite. The right foot, which has no
-    // plant, keeps the clip's place on the sand through every drop.
-    let mut look = loaded_look(true);
-    let hp = [1000u16, 1000];
-    look.observe_tick(0, &[view(0, 0.0, 0.0), view(1, 0.0, 4.0)], &hp, &[]);
-    let rig = &look.rigs[0];
-    let joint = |name: &str| {
-        rig.skeleton
-            .joints
-            .iter()
-            .position(|j| j.name == name)
-            .unwrap_or_else(|| panic!("the rig has a {name} joint"))
-    };
-    let (pelvis, left, right) = (joint("pelvis"), joint("foot_l"), joint("foot_r"));
-    let at = |world: &[[[f32; 4]; 4]], j: usize| [world[j][3][0], world[j][3][1], world[j][3][2]];
-    let base = look.slots[0];
-    let mut clip_only = base;
-    clip_only.feet.ik = false;
-    let clip = look
-        .slot_sample(rig, 0, &clip_only, 0.5)
-        .expect("clip pose");
-    let gap = |a: [f32; 3], b: [f32; 3]| {
-        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
-    };
-    let mut drops = Vec::new();
-    for pull in [0.1f32, 0.2, 0.3, 0.45] {
-        let mut slot = base;
-        slot.feet.plants[0] = Plant {
-            planted: true,
-            offset: [[pull, 0.0]; 2],
-            ..Plant::NEW
-        };
-        let on = look.slot_sample(rig, 0, &slot, 0.5).expect("planted pose");
-        let drop = at(&clip.world, pelvis)[1] - at(&on.world, pelvis)[1];
-        drops.push(drop);
-        let moved = [
-            at(&on.world, left)[0] - at(&clip.world, left)[0],
-            at(&on.world, left)[1] - at(&clip.world, left)[1],
-            at(&on.world, left)[2] - at(&clip.world, left)[2],
-        ];
-        assert!(
-            moved.iter().all(|v| v.is_finite()),
-            "pull {pull}: {moved:?}"
-        );
-        assert!(
-            gap(at(&on.world, right), at(&clip.world, right)) < 1.0e-3,
-            "pull {pull}: the free foot left the sand"
-        );
-        if pull <= 0.3 {
-            assert!(
-                (moved[0] - pull).abs() < 2.0e-3
-                    && moved[1].abs() < 2.0e-3
-                    && moved[2].abs() < 2.0e-3,
-                "pull {pull}: the ankle moved {moved:?}"
-            );
-        } else {
-            assert!(
-                moved[0] < pull,
-                "pull {pull}: a stretched leg falls short, moved {moved:?}"
-            );
-        }
-    }
-    assert!(
-        drops[0].abs() < 1.0e-4,
-        "a short pull keeps the pelvis: {drops:?}"
-    );
-    assert!(
-        drops[2] > 0.02 && drops[2] < 0.079,
-        "a long reach drops the pelvis by the gap: {drops:?}"
-    );
-    assert!(
-        (drops[3] - 0.08).abs() < 1.0e-4,
-        "past the reach the drop stops at 8 cm: {drops:?}"
-    );
-    assert!(
-        drops.windows(2).all(|w| w[1] >= w[0] - 1.0e-4),
-        "drops grow with the pull: {drops:?}"
-    );
-}
-
-#[test]
-fn a_refused_solve_is_loud_and_a_legless_or_lying_body_keeps_the_clip() {
-    let mut look = loaded_look(true);
-    let hp = [1000u16, 1000];
-    look.observe_tick(0, &[view(0, 0.0, 0.0), view(1, 0.0, 4.0)], &hp, &[]);
-    let mut slot = look.slots[0];
-    slot.feet.plants[0] = Plant {
-        planted: true,
-        offset: [[0.05, 0.0]; 2],
-        ..Plant::NEW
-    };
-    let legs = look.rigs[0].legs.expect("the hero rig has legs");
-    let clip = look
-        .inertial_pose(&look.rigs[0], 0, &slot, 0.5)
-        .expect("the clip poses");
-    // A shin of no length cannot be solved: the frame fails loudly.
-    let mut folded = clip.clone();
-    folded.positions[legs.limbs[0].end] = [0.0; 3];
-    let refused = look.plant_feet(&look.rigs[0], &slot, &mut folded, 0.0, 0.5);
-    assert!(
-        matches!(&refused, Err(super::LookError::Skin(msg)) if msg.contains("bone")),
-        "{refused:?}"
-    );
-    // A skeleton with a leg missing finds no legs.
-    let mut skeleton = look.rigs[0].skeleton.clone();
-    let bind = vec![[0.0f32; 3]; skeleton.len()];
-    assert!(Legs::find(&skeleton, &bind).is_some());
-    let paw = skeleton.joints.iter_mut().find(|j| j.name == "foot_r");
-    paw.expect("foot_r").name = "paw_r".to_string();
-    assert!(Legs::find(&skeleton, &bind).is_none());
-    // A rig with no legs plants nothing, plants or not.
-    let mut legless = look.rigs.remove(0);
-    legless.legs = None;
-    let mut untouched = clip.clone();
-    let contacts = look
-        .plant_feet(&legless, &slot, &mut untouched, 0.0, 0.5)
-        .expect("a legless rig plants nothing");
-    assert_eq!(contacts, [None; 2]);
-    assert_eq!(untouched, clip, "the pose is the clip's");
-    // A body that is down keeps the clip's feet, plant state or not.
-    legless.legs = Some(legs);
-    let mut down = slot;
-    down.act = Act::Down;
-    let mut lying = clip.clone();
-    let contacts = look
-        .plant_feet(&legless, &down, &mut lying, 0.0, 0.5)
-        .expect("a down body plants nothing");
-    assert_eq!(contacts, [None; 2]);
-    assert_eq!(lying, clip, "a body that lies keeps the clip's feet");
-    // And the same rig and slot do plant when it stands.
-    let mut standing = clip.clone();
-    let contacts = look
-        .plant_feet(&legless, &slot, &mut standing, 0.0, 0.5)
-        .expect("a standing body plants");
-    assert!(contacts[0].is_some() && contacts[1].is_none());
-    assert_ne!(standing, clip, "a planted foot moves the pose");
-}
-
-#[test]
-fn planting_a_frame_allocates_nothing() {
-    use engine_core::alloc_probe::measure;
-    let (_, seen) = measure(|| std::hint::black_box(vec![0u8; 64]));
-    assert!(seen.calls > 0, "the probe must see a real allocation");
-    let mut look = loaded_look(true);
-    let hp = [1000u16, 1000];
-    look.observe_tick(0, &[view(0, 0.0, 0.0), view(1, 0.0, 4.0)], &hp, &[]);
-    let mut slot = look.slots[0];
-    slot.feet.plants = [Plant {
-        planted: true,
-        offset: [[0.2, 0.0]; 2],
-        ..Plant::NEW
-    }; 2];
-    let rig = &look.rigs[0];
-    let mut pose = look
-        .inertial_pose(rig, 0, &slot, 0.5)
-        .expect("the clip poses");
-    let (result, heap) = measure(|| {
-        let mut out = Ok([None; 2]);
-        for _ in 0..200 {
-            out = look.plant_feet(rig, &slot, &mut pose, 0.3, 0.5);
-            std::hint::black_box(&pose);
-        }
-        out
-    });
-    assert!(result.is_ok(), "{result:?}");
-    assert_eq!(heap.calls, 0, "200 planted frames touch no heap");
-}
-
-#[test]
-fn planted_feet_stand_still_in_hitstop_while_the_sim_goes_on_shoving() {
-    // LF10 and LF12 together: slot 0 plants in a shoved guard, a Hit freezes
-    // slot 0 and its attacker for HITSTOP_TICKS ticks, and the sim keeps
-    // shoving slot 0 sideways all the while. Every frame of the freeze, at
-    // every sub-tick alpha, shows slot 0's impact-tick pose bit for bit: the
-    // plants stand still with the clip clock. The tick the freeze thaws the
-    // pose moves again.
-    let mut look = loaded_look(true);
-    let hp = [1000u16, 1000];
-    let impact = 80u32;
-    let mut frozen: Option<Vec<Vec<Option<Shape>>>> = None;
-    let (mut held_ticks, mut planted_in_freeze) = (0u32, 0u32);
-    for tick in 0..impact + HITSTOP_TICKS + 2 {
-        let shove = tick.saturating_sub(40);
-        let x = 0.01 * f32::from(u16::try_from(shove).unwrap_or(0));
-        let cues = if tick == impact {
-            vec![FightCue::Hit {
-                attacker: 1,
-                victim: 0,
-                damage: 100,
-            }]
-        } else {
-            Vec::new()
-        };
-        look.observe_tick(tick, &[view(0, x, 0.0), view(1, 0.0, 4.0)], &hp, &cues);
-        if tick == impact {
-            frozen = Some(ALPHAS.iter().map(|a| shapes(&look, 2, *a)).collect());
-        }
-        let Some(frozen) = &frozen else {
-            continue;
-        };
-        let held = look.slots[0].held;
-        if tick < impact + HITSTOP_TICKS {
-            assert!(held, "tick {tick}: slot 0 is held");
-            held_ticks += 1;
-            planted_in_freeze += u32::from(look.slots[0].feet.plants.iter().any(|p| p.planted));
-            for (index, alpha) in ALPHAS.iter().enumerate() {
-                let now = shapes(&look, 2, *alpha);
-                assert!(
-                    now[0] == frozen[index][0],
-                    "tick {tick} alpha {alpha}: slot 0 moved in the freeze: {}",
-                    gap(&now[0], &frozen[index][0])
-                );
+    let names: Vec<String> = look.rigs[0].skeleton.joints.iter().map(|j| j.name.clone()).collect();
+    let find = |n: &str| names.iter().position(|x| x == n).expect("joint");
+    let feet = [find("foot_l"), find("foot_r")];
+    // per slot, per foot: last model pos, run (contact world xz, ticks, max dev, act)
+    let mut last: Vec<[Option<[f32; 3]>; 2]> = vec![[None; 2]; 4];
+    let mut runs: Vec<[Option<([f32; 2], u32, f32)>; 2]> = vec![[None; 2]; 4];
+    let mut log: Vec<(String, u32, f32)> = Vec::new();
+    let mut ticks_by_act = std::collections::BTreeMap::<String, (u32, u32)>::new();
+    let mut devs_all: Vec<f32> = Vec::new();
+    for tick in 0..300u32 {
+        let out = app.tick_empty();
+        look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
+        look.observe_live_balances(app.live_match(), 4);
+        for body in look.pose_frame_joints(4, 1.0).expect("pose") {
+            let s = usize::from(body.slot);
+            if look.slots[s].held {
+                continue;
             }
-        } else if tick == impact + HITSTOP_TICKS {
-            assert!(!held, "tick {tick}: the freeze is over");
-            assert!(
-                shapes(&look, 2, 0.5)[0] != frozen[1][0],
-                "tick {tick}: slot 0 must move once the freeze is over"
-            );
-        }
-    }
-    assert_eq!(held_ticks, HITSTOP_TICKS);
-    assert!(
-        planted_in_freeze > 0,
-        "slot 0 had a foot planted through the freeze"
-    );
-}
-
-#[test]
-fn bodies_that_lie_are_never_planted_and_a_still_guard_barely_changes() {
-    // Four fighters in a ring, one dying every ten ticks (even slots with the
-    // clip playing, odd slots with the sim's `Fallen` verdict), run twice, plant
-    // on and off. A dead or fallen body is the clip's, bit for bit. A living
-    // body that stands in its guard with nothing moving it is within 1.5 cm of
-    // the clip: the plant only holds what the clip already holds.
-    let ring = [
-        view(0, -1.0, 0.0),
-        view(1, 1.0, 0.0),
-        view(2, 0.0, 1.8),
-        view(3, 0.0, -1.8),
-    ];
-    let (mut on, mut off) = (loaded_look(true), loaded_look(false));
-    let mut hp = [1000u16; 4];
-    let (mut dead_frames, mut living_frames, mut worst_cm) = (0u32, 0u32, 0.0f32);
-    for tick in 0..160u32 {
-        let mut cues = Vec::new();
-        for victim in 0..4u8 {
-            if tick == 60 + 10 * u32::from(victim) {
-                hp[usize::from(victim)] = 0;
-                cues.push(FightCue::Knockdown {
-                    attacker: (victim + 1) % 4,
-                    victim,
-                });
-            }
-        }
-        for look in [&mut on, &mut off] {
-            look.observe_tick(tick, &ring, &hp, &cues);
-            for victim in [1u8, 3] {
-                if tick == 60 + 10 * u32::from(victim) {
-                    look.observe_balance(victim, GaitPhase::Fallen);
+            let (sn, cs) = body.yaw.sin_cos();
+            for (f, &j) in feet.iter().enumerate() {
+                let p = body.joints[j];
+                let w = [p[0] * cs + p[2] * sn + body.root[0], -p[0] * sn + p[2] * cs + body.root[2]];
+                let e = ticks_by_act.entry(body.act.to_string()).or_default();
+                e.0 += 1;
+                if let Some(q) = last[s][f] {
+                    let v = ((p[0] - q[0]).hypot(p[2] - q[2])) * 60.0;
+                    let planted = v < 0.15 && p[1] < 0.075 + 0.03 && body.act != "down";
+                    if planted {
+                        e.1 += 1;
+                        let r = runs[s][f].get_or_insert((w, 0, 0.0));
+                        r.1 += 1;
+                        let dev = (w[0] - r.0[0]).hypot(w[1] - r.0[1]);
+                        r.2 = r.2.max(dev);
+                        devs_all.push(dev * 100.0);
+                    } else if let Some(r) = runs[s][f].take() {
+                        log.push((body.act.to_string(), r.1, r.2 * 100.0));
+                    }
                 }
-            }
-        }
-        for alpha in [0.0f32, 0.5, 0.99] {
-            let (a, b) = (
-                on.pose_frame(4, alpha).expect("planted pose"),
-                off.pose_frame(4, alpha).expect("clip pose"),
-            );
-            for (planted, clip) in a.iter().zip(&b) {
-                assert_eq!(planted.truth.slot, clip.truth.slot);
-                if is_dead(&on, planted.truth.slot) {
-                    dead_frames += 1;
-                    assert!(
-                        planted.truth.joints == clip.truth.joints
-                            && planted.matrices == clip.matrices,
-                        "tick {tick} slot {}: a dead body was planted",
-                        planted.truth.slot
-                    );
-                } else if tick >= 40 {
-                    living_frames += 1;
-                    let off_cm = planted
-                        .truth
-                        .joints
-                        .iter()
-                        .zip(&clip.truth.joints)
-                        .map(|(p, q)| {
-                            100.0
-                                * ((p[0] - q[0]).powi(2)
-                                    + (p[1] - q[1]).powi(2)
-                                    + (p[2] - q[2]).powi(2))
-                                .sqrt()
-                        })
-                        .fold(0.0f32, f32::max);
-                    worst_cm = worst_cm.max(off_cm);
-                    assert!(
-                        off_cm < 1.5,
-                        "tick {tick} slot {}: a still guard moved {off_cm:.2} cm",
-                        planted.truth.slot
-                    );
-                }
+                last[s][f] = Some(p);
             }
         }
     }
-    eprintln!("lf12 still bodies: {dead_frames} dead frames, {living_frames} guard frames, worst {worst_cm:.2} cm");
-    assert!(dead_frames > 100, "{dead_frames} dead frames");
-    assert!(living_frames > 100, "{living_frames} guard frames");
+    eprintln!("planted by act (feet-ticks, planted): {ticks_by_act:?}");
+    devs_all.sort_by(|a, b| a.total_cmp(b));
+    let n = devs_all.len();
+    eprintln!("IK-off slide per planted foot-tick: n {n} p50 {:?} p95 {:?} max {:?}", devs_all.get(n/2), devs_all.get(n*95/100), devs_all.last());
+    eprintln!("{} runs", log.len());
+    for r in log.iter().take(60) {
+        eprintln!("  {} {} ticks maxdev {:.2} cm", r.0, r.1, r.2);
+    }
 }

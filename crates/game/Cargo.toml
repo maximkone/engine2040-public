@@ -14,11 +14,7 @@ workspace = true
 # `app` intentionally does NOT enable `engine-arena/sim`: both legs run the
 # same kinematic AR2 match (locomotion + combat + brains), so headless
 # checkpoints replay exactly under the window.
-#
-# RZ4: `app` also turns on the float physical layer (`engine-physfx/rapier`) that
-# paints breaks as debris. It only paints: the sim never reads it, and
-# `engine-arena`, `engine-combat` and `engine-proof` never name it.
-app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets", "dep:gilrs", "dep:engine-physfx", "engine-physfx/rapier"]
+app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets", "dep:gilrs"]
 
 # WIN1: the `arena` window binary, gated on `app` so the headless default
 # stays std-only. winit is already wired (MIT/Apache, window stack).
@@ -42,9 +38,6 @@ engine-arena.workspace = true
 # Arena kit glTF import rides the `app` leg only (the `import` feature pulls
 # `gltf`/`image`), so the headless default graph stays std-only.
 engine-assets = { workspace = true, features = ["import"], optional = true }
-# RZ4 break look: debris bodies from authority break events, `app` leg only
-# (physfx is itself behind its own `rapier` feature, so the headless graph stays std-only).
-engine-physfx = { workspace = true, optional = true }
 engine-input.workspace = true
 engine-save.workspace = true
 engine-ui.workspace = true

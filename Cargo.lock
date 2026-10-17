@@ -2962,7 +2962,6 @@ name = "engine-app"
 version = "0.1.0"
 dependencies = [
  "engine-arena",
- "engine-clock",
  "engine-core",
  "engine-ecs",
  "engine-scene",
@@ -2988,7 +2987,6 @@ name = "engine-assets"
 version = "0.1.0"
 dependencies = [
  "engine-anim",
- "engine-clock",
  "engine-core",
  "engine-scene",
  "gltf",
@@ -3116,7 +3114,6 @@ dependencies = [
  "engine-destruction",
  "engine-input",
  "engine-net",
- "engine-physfx",
  "engine-render",
  "engine-save",
  "engine-spatial",
@@ -3273,6 +3270,7 @@ name = "engine-render"
 version = "0.1.0"
 dependencies = [
  "engine-assets",
+ "engine-clock",
  "engine-core",
  "engine-observe",
  "glam 0.33.9",
@@ -3330,8 +3328,11 @@ dependencies = [
 name = "engine-web"
 version = "0.1.0"
 dependencies = [
+ "engine-audio",
  "engine-clock",
+ "engine-input",
  "engine-proof",
+ "engine-render",
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",

@@ -36,10 +36,6 @@ pub mod balance_verdict;
 /// Balance harness: falsifiable spacing experiments over
 /// the arena fork path for balance tuning. Std-only.
 pub mod bench;
-/// Break look: authority break events painted as debris through the float physical layer,
-/// the intact piece hidden on the break tick. Presentation only, never hashed. App leg only.
-#[cfg(feature = "app")]
-pub mod break_look;
 /// Arena camera director: lock-on, tick-decay trauma shake,
 /// pure framing fn, presentation only. Std-only.
 pub mod camera;

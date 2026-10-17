@@ -22,20 +22,20 @@ thread_local! {
     /// The losses so far; a storm of them ends in the fatal page, not in endless restarts.
     static LOSSES: RefCell<LossBudget> = const { RefCell::new(LossBudget::new()) };
     /// Set by [`lose_device`]; the frame loop destroys its device on the next frame.
-    static DESTROY_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    pub(crate) static DESTROY_REQUESTED: Cell<bool> = const { Cell::new(false) };
 }
 
-fn document() -> Option<web_sys::Document> {
+pub(crate) fn document() -> Option<web_sys::Document> {
     web_sys::window()?.document()
 }
 
-fn set_text(id: &str, text: &str) {
+pub(crate) fn set_text(id: &str, text: &str) {
     if let Some(el) = document().and_then(|d| d.get_element_by_id(id)) {
         el.set_text_content(Some(text));
     }
 }
 
-fn set_body_attr(name: &str, value: &str) {
+pub(crate) fn set_body_attr(name: &str, value: &str) {
     if let Some(body) = document().and_then(|d| d.body()) {
         let _ = body.set_attribute(name, value);
     }
@@ -43,27 +43,27 @@ fn set_body_attr(name: &str, value: &str) {
 
 /// `data-state` on `<body>` is how the page and the headless check see where the shell is:
 /// `starting`, `running`, `recovering` or `fatal`.
-fn set_state(state: &str) {
+pub(crate) fn set_state(state: &str) {
     set_body_attr("data-state", state);
 }
 
-fn user_agent() -> String {
+pub(crate) fn user_agent() -> String {
     web_sys::window()
         .and_then(|w| w.navigator().user_agent().ok())
         .unwrap_or_default()
 }
 
 /// 64 KiB pages of the module's linear memory right now.
-fn wasm_pages() -> u64 {
+pub(crate) fn wasm_pages() -> u64 {
     core::arch::wasm32::memory_size::<0>() as u64
 }
 
-fn log_error(text: &str) {
+pub(crate) fn log_error(text: &str) {
     web_sys::console::error_1(&JsValue::from_str(text));
 }
 
 /// Show the reason on the page, mark it fatal, print the failure line. Returns the line.
-fn fail(why: Failure, detail: &str) -> String {
+pub(crate) fn fail(why: Failure, detail: &str) -> String {
     let line = failed_line(why, detail, COMMIT, wasm_pages(), &user_agent());
     set_text("fatal-reason", &format!("{} {detail}", why.headline()));
     set_text("report", &line);
@@ -74,7 +74,7 @@ fn fail(why: Failure, detail: &str) -> String {
 
 /// `navigator.gpu`, or `None` when the browser has no WebGPU (or the page is not a secure
 /// context). Read through reflection: the browser object is not needed beyond this check.
-fn navigator_gpu() -> Option<JsValue> {
+pub(crate) fn navigator_gpu() -> Option<JsValue> {
     let nav = web_sys::window()?.navigator();
     let gpu = js_sys::Reflect::get(&nav, &JsValue::from_str("gpu")).ok()?;
     (!gpu.is_undefined() && !gpu.is_null()).then_some(gpu)
@@ -83,7 +83,7 @@ fn navigator_gpu() -> Option<JsValue> {
 /// The raw `GPUAdapterInfo` strings (vendor, architecture, device, description), which wgpu's
 /// web backend does not carry past the description. Asks the browser for an adapter a second
 /// time; empty strings if it will not say.
-async fn raw_adapter_info(gpu: &JsValue) -> [String; 4] {
+pub(crate) async fn raw_adapter_info(gpu: &JsValue) -> [String; 4] {
     async fn call(target: &JsValue, name: &str) -> Option<JsValue> {
         let f: js_sys::Function = js_sys::Reflect::get(target, &JsValue::from_str(name))
             .ok()?
@@ -119,7 +119,7 @@ async fn raw_adapter_info(gpu: &JsValue) -> [String; 4] {
 }
 
 /// Resolves after `ms` milliseconds.
-async fn pause(ms: i32) {
+pub(crate) async fn pause(ms: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         if let Some(window) = web_sys::window() {
             let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
@@ -223,10 +223,10 @@ impl Frame {
 }
 
 /// The animation-frame callback, shared with itself so it can ask for the frame after it.
-type FrameSlot = RefCell<Option<Closure<dyn FnMut(f64)>>>;
+pub(crate) type FrameSlot = RefCell<Option<Closure<dyn FnMut(f64)>>>;
 
 /// Ask the browser for its next animation frame, calling `slot`'s closure.
-fn request_frame(slot: &FrameSlot) {
+pub(crate) fn request_frame(slot: &FrameSlot) {
     if let (Some(window), Some(callback)) = (web_sys::window(), slot.borrow().as_ref()) {
         let _ = window.request_animation_frame(callback.as_ref().unchecked_ref());
     }
@@ -266,6 +266,19 @@ fn run_loop(mut frame: Frame, canvas_id: String, generation: u32) {
 
 /// Start over after a device loss, on a fresh instance, adapter and device.
 async fn recover(canvas_id: String, generation: u32) {
+    recover_with(canvas_id, generation, |id, g| async move {
+        start(&id, g).await
+    })
+    .await;
+}
+
+/// [`recover`] for any start routine (the shell's and the arena's): a few attempts with growing
+/// pauses, each on a fresh instance, then the fatal page.
+pub(crate) async fn recover_with<F, Fut>(canvas_id: String, generation: u32, start: F)
+where
+    F: Fn(String, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<String, (Failure, String)>>,
+{
     set_state("recovering");
     let mut last = None;
     for attempt in 0..ATTEMPTS {
@@ -274,7 +287,7 @@ async fn recover(canvas_id: String, generation: u32) {
             "device lost: starting device generation {generation}, attempt {}",
             attempt + 1
         ));
-        match start(&canvas_id, generation).await {
+        match start(canvas_id.clone(), generation).await {
             Ok(_) => return,
             Err(e) => last = Some(e),
         }
@@ -463,7 +476,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
 }
 
 /// The browser's millisecond clock (`performance.now()`); `std::time` traps on this target.
-fn now_ms() -> f64 {
+pub(crate) fn now_ms() -> f64 {
     web_sys::window()
         .and_then(|w| w.performance())
         .map_or(0.0, |p| p.now())
@@ -471,13 +484,13 @@ fn now_ms() -> f64 {
 
 /// The page's clock as the time source of `engine-clock`, which the asset and app crates read
 /// (they panic on this target until a source is installed).
-fn browser_clock() -> std::time::Duration {
+pub(crate) fn browser_clock() -> std::time::Duration {
     duration_from_ms(now_ms())
 }
 
 /// Run the golden tape and the cut corpus in this module and show the verdict on the page
 /// (`#golden`, `data-golden` on `<body>`) and in the console.
-fn run_golden() {
+pub(crate) fn run_golden() {
     let outcome = golden::check(&mut now_ms);
     set_text("golden", &outcome.text());
     set_body_attr("data-golden", outcome.status.word());
@@ -500,6 +513,8 @@ fn run_golden() {
 pub async fn run(canvas_id: String) -> String {
     std::panic::set_hook(Box::new(|info| log_error(&format!("panic: {info}"))));
     set_state("starting");
+    // Input and audio need the DOM only, so they start before (and without) the GPU.
+    crate::browser::install(&canvas_id);
     // First, before anything can read a clock: the page's performance.now() becomes the engine's.
     engine_clock::install(browser_clock);
     let line = match start(&canvas_id, 1).await {
