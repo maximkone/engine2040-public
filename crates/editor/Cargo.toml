@@ -54,3 +54,9 @@ transform-gizmo-egui = { workspace = true, optional = true }
 # never enter the headless default graph.
 [dev-dependencies]
 engine-scene = { workspace = true, features = ["json"] }
+
+# ED17: per-panel frame budget table; needs the dock, so `ui` only.
+[[bench]]
+name = "panels"
+harness = false
+required-features = ["ui"]

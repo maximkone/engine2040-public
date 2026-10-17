@@ -19,7 +19,7 @@ tls = ["engine-provider/tls"]
 [dependencies]
 # QA3 bout bots: the bot harness ticks the shipped pressure/guard trees.
 engine-ai.workspace = true
-engine-arena.workspace = true
+engine-arena = { workspace = true, features = ["spine"] }
 # Keyed evidence seal for the a6/a7 writers: HMAC-SHA256 over the manifest
 # under the operator key (`hmac` 0.12 + `sha2` 0.10, both MIT/Apache-2.0,
 # pure Rust). Unconditional: this crate sits outside the headless default

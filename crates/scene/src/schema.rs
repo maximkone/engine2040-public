@@ -161,7 +161,7 @@ impl SchemaRegistry {
     /// duplicate `(component, version)` pairs.
     pub fn register(&mut self, schema: Schema) -> Result<(), SchemaError> {
         check_component_name(schema.component)
-            .map_err(|reason| SchemaError::BadDescriptor { reason })?;
+            .map_err(|e| SchemaError::BadDescriptor { reason: e.reason() })?;
         if schema.version == 0 {
             return Err(SchemaError::BadDescriptor {
                 reason: "schema version is 1-based; version 0 is never valid",
@@ -249,20 +249,50 @@ impl SchemaRegistry {
     }
 }
 
+/// Why a component name was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComponentNameError {
+    /// The name is empty.
+    Empty,
+    /// The name is longer than [`MAX_COMPONENT_NAME_LEN`].
+    TooLong,
+    /// The name has a byte outside `a-z A-Z 0-9 - _ .`.
+    NotPortable,
+}
+
+impl ComponentNameError {
+    /// The fixed refusal text carried into [`SchemaError`].
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "component name must not be empty",
+            Self::TooLong => "component name exceeds the name bound",
+            Self::NotPortable => "component name must be ASCII alphanumeric plus - _ .",
+        }
+    }
+}
+
+impl fmt::Display for ComponentNameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for ComponentNameError {}
+
 /// Validate a descriptor or value component name: non-empty, bounded, and
 /// plain ASCII (`a-z A-Z 0-9 - _ .`) so names stay portable across files.
-fn check_component_name(name: &str) -> Result<(), &'static str> {
+fn check_component_name(name: &str) -> Result<(), ComponentNameError> {
     if name.is_empty() {
-        return Err("component name must not be empty");
+        return Err(ComponentNameError::Empty);
     }
     if name.len() > MAX_COMPONENT_NAME_LEN {
-        return Err("component name exceeds the name bound");
+        return Err(ComponentNameError::TooLong);
     }
     let plain = name
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
     if !plain {
-        return Err("component name must be ASCII alphanumeric plus - _ .");
+        return Err(ComponentNameError::NotPortable);
     }
     Ok(())
 }
@@ -271,7 +301,7 @@ fn check_component_name(name: &str) -> Result<(), &'static str> {
 /// bound) ahead of any migration.
 fn check_value(value: &VersionedComponent) -> Result<(), SchemaError> {
     check_component_name(&value.component)
-        .map_err(|reason| SchemaError::BadComponent { reason })?;
+        .map_err(|e| SchemaError::BadComponent { reason: e.reason() })?;
     if value.version == 0 {
         return Err(SchemaError::BadComponent {
             reason: "component version is 1-based; version 0 is never valid",

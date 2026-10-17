@@ -1,6 +1,6 @@
 ---
 name: debug-triage
-description: "Use when facing a bug, failing test, crash or panic stack, several linked errors at once, or a bug report to file: root cause before fix, 3-strikes stop, stack fingerprint, primary vs cascade clusters, report fields (steps, expected, actual, build, proof)."
+description: "Use when something is broken and you do not know why: a failing test, a panic or crash stack, several linked errors, or a bug to report. Root cause before fix, three strikes stop, primary versus cascade errors, report fields."
 ---
 
 # Debug triage

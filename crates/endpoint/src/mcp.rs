@@ -1074,7 +1074,7 @@ impl ToolBase for TxPreviewTool {
 
 impl SyncTool<McpServer> for TxPreviewTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_PREVIEW, |state| state.tx_preview(&param))
+        service.dispatch_screened(TOOL_TX_PREVIEW, &param, |state| state.tx_preview(&param))
     }
 }
 
@@ -1106,7 +1106,7 @@ impl ToolBase for TxApplyTool {
 
 impl SyncTool<McpServer> for TxApplyTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_APPLY, |state| state.tx_apply(&param))
+        service.dispatch_screened(TOOL_TX_APPLY, &param, |state| state.tx_apply(&param))
     }
 }
 

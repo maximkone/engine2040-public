@@ -838,6 +838,7 @@ struct BindProbe {
 /// validation here; the caller validated shapes before sizing anything.
 #[cfg(feature = "window")]
 fn build_bind_probe(device: &wgpu::Device, byte_len: u64) -> BindProbe {
+    use crate::pipeline_warmup::CountedPipelines as _;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gtao-ao-bind"),
         source: wgpu::ShaderSource::Wgsl(GTAO_BIND_WGSL.into()),
@@ -855,7 +856,7 @@ fn build_bind_probe(device: &wgpu::Device, byte_len: u64) -> BindProbe {
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
     });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    let pipeline = device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
         label: Some("gtao-ao-bind-pipeline"),
         layout: Some(&pipe_layout),
         module: &shader,
@@ -1594,6 +1595,7 @@ impl GtaoSubmitter {
     /// allocate the two uniform buffers. No frame-size state yet: storage
     /// buffers size on the first submit and resize only on shape change.
     pub fn new(device: &wgpu::Device) -> Self {
+        use crate::pipeline_warmup::CountedPipelines as _;
         let half_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gtao-half"),
             source: wgpu::ShaderSource::Wgsl(GTAO_HALF_WGSL.into()),
@@ -1632,22 +1634,24 @@ impl GtaoSubmitter {
             bind_group_layouts: &[Some(&up_layout)],
             immediate_size: 0,
         });
-        let half_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("gtao-half-pipeline"),
-            layout: Some(&half_pipe_layout),
-            module: &half_shader,
-            entry_point: Some("half_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let up_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("gtao-upsample-pipeline"),
-            layout: Some(&up_pipe_layout),
-            module: &up_shader,
-            entry_point: Some("up_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let half_pipeline =
+            device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
+                label: Some("gtao-half-pipeline"),
+                layout: Some(&half_pipe_layout),
+                module: &half_shader,
+                entry_point: Some("half_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let up_pipeline =
+            device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
+                label: Some("gtao-upsample-pipeline"),
+                layout: Some(&up_pipe_layout),
+                module: &up_shader,
+                entry_point: Some("up_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let cfg_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gtao-cfg-uniform"),
             size: GTAO_CFG_UNIFORM_BYTES,

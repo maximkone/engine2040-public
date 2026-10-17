@@ -1,6 +1,6 @@
 ---
 name: net-rollback
-description: "Use when you change crates/net session, snapshot, interpolation or online code, or write a rollback loop (ggrs 0.13 or GGPO style): server authority, prediction and correction, input delay, save, load and advance requests, desync detection, no extrapolation."
+description: "Use when you change net session, snapshot, interpolation or online code, or write a rollback loop (ggrs or GGPO style): server authority, prediction and correction, input delay, save/load/advance, desync detection."
 ---
 
 # Net and rollback

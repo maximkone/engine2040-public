@@ -28,6 +28,12 @@ pub use kit_load::{
     kit_actors, kit_actors_from_json, KitActor, KitAsset, KIT_ACTOR_COUNT, KIT_JSON,
 };
 
+/// VR2 material sets (cooked CC0 base, normal and ORM per kit file, tiling
+/// UVs, glTF fallback maps): the `kit_pbr` child module, `app` leg only.
+#[cfg(feature = "app")]
+#[path = "kit_pbr.rs"]
+pub mod kit_pbr;
+
 /// Hand-placed zone table (`content/design/arena-zones.rows`): the one file
 /// the design gate (`tools/level-check.mjs`) and this reader both read.
 pub const KIT_ZONE_ROWS: &str = include_str!("../../../content/design/arena-zones.rows");
@@ -247,9 +253,10 @@ fn len_u64(len: usize, file: &'static str) -> Result<u64, KitError> {
 #[cfg(feature = "app")]
 type MergedBuffers = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, u64);
 
-/// One staged source file: name, merged buffers, first material, decoded
-/// base-color texture (`None` when the file has no base-color image bytes
-/// or they do not decode; the actors then stage untextured).
+/// One staged source file: name, merged buffers, first material, base-color
+/// texture key (`None` when the file has no base-color image bytes or they do
+/// not decode; the actors then stage untextured), the cooked set it wears
+/// (tiling UVs, metallic factor) and the key of its normal-map set.
 #[cfg(feature = "app")]
 type KitSource = (
     &'static str,
@@ -258,7 +265,9 @@ type KitSource = (
     Vec<[f32; 2]>,
     Vec<u32>,
     engine_assets::cooked::CookedMaterial,
-    Option<(TextureKey, TextureUpload)>,
+    Option<TextureKey>,
+    Option<kit_pbr::KitPbr>,
+    Option<TextureKey>,
 );
 
 // Placement loading lives in the `kit_load` child module (re-exported above).
@@ -596,6 +605,9 @@ pub struct BakedKitMesh {
     /// Resident base-color texture key for this actor (`None` draws
     /// untextured against the 1x1 white fallback).
     pub texture: Option<TextureKey>,
+    /// Material-set key (the normal-map key a draw names; `None` draws with
+    /// the geometric normal and the material factors alone).
+    pub normal_map: Option<TextureKey>,
 }
 
 /// CPU-side kit import: every actor mesh fitted and validated, no GPU yet.
@@ -615,6 +627,12 @@ pub struct ImportedKit {
     /// one, in first-seen file order; [`upload_kit`] uploads each once and
     /// the baked actors reference them by key.
     pub textures: Vec<(TextureKey, TextureUpload)>,
+    /// Material sets (normal map, ORM, base they sit over): uploaded once by
+    /// [`upload_kit`], named by the baked actors' `normal_map` key.
+    pub sets: Vec<kit_pbr::KitMaterialSet>,
+    /// Cooked sets loaded from `cooked/` (5 on the shipping content). A
+    /// source without `cooked/` stages the glTF textures and reports fewer.
+    pub cooked_sets: usize,
 }
 
 /// Neutral-gray fallback factors when a source material is invalid.
@@ -942,7 +960,12 @@ fn fitted_buffers(
     params: &FitParams,
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
     let (mut pos, mut nor) = apply_fit(&source.1, &source.2, params);
-    let mut uv = source.3.clone();
+    // A file in a cooked set tiles by meters (box projection of the fitted
+    // stone); the crowd boxes appended below keep their own UVs.
+    let mut uv = match source.7 {
+        Some(pbr) if source.8.is_some() => kit_pbr::box_uvs(&pos, &nor, pbr.tile_m),
+        _ => source.3.clone(),
+    };
     let mut idx = source.4.clone();
     if crowd_is_stands(actor) {
         // A refused crowd keeps stone without crowd, never skips the actor.
@@ -970,6 +993,11 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
     // One merged source mesh plus its first material per distinct file.
     let mut sources: Vec<KitSource> = Vec::with_capacity(files.len());
     let mut triangles: u64 = 0;
+    // Decoded textures (once per distinct key) and material sets (once per
+    // set key); cooked sets load once per set however many files wear them.
+    let mut textures: Vec<(TextureKey, TextureUpload)> = Vec::new();
+    let mut sets: Vec<kit_pbr::KitMaterialSet> = Vec::new();
+    let mut cooked: Vec<(usize, Option<kit_pbr::CookedSet>)> = Vec::new();
     for (file_index, file) in files.iter().enumerate() {
         let bytes = source
             .read(&format!("src/{file}"))
@@ -979,8 +1007,50 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
         let (pos, nor, uv, idx, tris) = merge_import(file, &import)?;
         triangles += tris;
         let material = import.materials.first().cloned().unwrap_or_default();
-        let texture = kit_texture(&import, file_index);
-        sources.push((file, pos, nor, uv, idx, material, texture));
+        let pbr = kit_pbr::pbr_for_file(file);
+        let cooked_at = pbr.and_then(|wear| {
+            let at = cooked
+                .iter()
+                .position(|(set, _)| *set == wear.set)
+                .unwrap_or_else(|| {
+                    cooked.push((wear.set, kit_pbr::load_cooked_set(source, wear.set)));
+                    cooked.len() - 1
+                });
+            cooked[at].1.as_ref().map(|_| at)
+        });
+        let (texture, pbr, normal_key) = if let Some(set) = cooked_at.and_then(|at| cooked[at].1.as_ref()) {
+            // The cooked CC0 set dresses the file: base, normal and ORM.
+            let base_key = set.base.0;
+            if !textures.iter().any(|(key, _)| *key == base_key) {
+                textures.push(set.base.clone());
+                sets.push(kit_pbr::KitMaterialSet {
+                    key: set.normal.0,
+                    base: Some(base_key),
+                    normal: set.normal.1.clone(),
+                    orm: Some(set.orm.1.clone()),
+                });
+            }
+            (Some(base_key), pbr, Some(set.normal.0))
+        } else {
+            // No cooked set (the banner, or a source without `cooked/`): the
+            // glTF's own base, normal and ORM images, tiled as authored.
+            let base = kit_texture(&import, file_index);
+            let base_key = base.as_ref().map(|(key, _)| *key);
+            if let Some(entry) = base {
+                if !textures.iter().any(|(key, _)| *key == entry.0) {
+                    textures.push(entry);
+                }
+            }
+            let gltf_set = kit_pbr::gltf_maps(&import, file_index, base_key);
+            let normal_key = gltf_set.as_ref().map(|set| set.key);
+            if let Some(set) = gltf_set {
+                sets.push(set);
+            }
+            (base_key, None, normal_key)
+        };
+        sources.push((
+            file, pos, nor, uv, idx, material, texture, pbr, normal_key,
+        ));
     }
     let mut baked = Vec::with_capacity(actors.len());
     let mut skipped = Vec::new();
@@ -1009,7 +1079,7 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
         };
         // Crowd rides the stands draw, so draws stay at 11 and files at 8.
         let (fit_pos, fit_nor, fit_uv, fit_idx) = fitted_buffers(source, actor, &params);
-        let mesh = match engine_render::v1::upload_mesh(&fit_pos, &fit_nor, &fit_uv, &fit_idx) {
+        let mesh = match engine_render::v1::upload_mesh_tiled(&fit_pos, &fit_nor, &fit_uv, &fit_idx) {
             Ok(mesh) => mesh,
             Err(_) => {
                 skipped.push((actor.id, "mesh"));
@@ -1025,19 +1095,27 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
             skipped.push((actor.id, "import"));
             continue;
         };
-        let (material, fallback) = kit_material(&source_material);
+        let (mut material, fallback) = kit_material(&source_material);
         if fallback {
             material_fallbacks += 1;
         }
+        // A cooked set carries the look in its maps: factors pass the ORM
+        // through (white, rough 1) and only iron turns the metallic channel on.
+        if let (Some(wear), Some(_)) = (source.7, source.8) {
+            material.base_color = [1.0, 1.0, 1.0];
+            material.roughness = 1.0;
+            material.metallic = wear.metallic;
+        }
         // The file's base-color texture dresses all its actors; `None`
         // stages this actor untextured.
-        let texture = source.6.as_ref().map(|(key, _)| *key);
+        let texture = source.6;
         baked.push(BakedKitMesh {
             actor: *actor,
             key: kit_mesh_key(actor),
             mesh,
             material,
             texture,
+            normal_map: source.8,
         });
     }
     if !kit_meets_tris_floor(triangles) {
@@ -1046,9 +1124,7 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
     if baked.is_empty() {
         return Err(KitError::Import("no kit actor baked".to_string()));
     }
-    // One decoded upload per distinct file with base-color bytes.
-    let textures: Vec<(TextureKey, TextureUpload)> =
-        sources.iter().filter_map(|entry| entry.6.clone()).collect();
+    let cooked_sets = cooked.iter().filter(|(_, set)| set.is_some()).count();
     Ok(ImportedKit {
         baked,
         triangles,
@@ -1056,6 +1132,8 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
         skipped,
         material_fallbacks,
         textures,
+        sets,
+        cooked_sets,
     })
 }
 
@@ -1070,6 +1148,9 @@ pub struct KitDraw {
     /// Resident base-color texture key (`None` draws untextured against
     /// the 1x1 white fallback, so factors render unmodified).
     pub base_color: Option<TextureKey>,
+    /// Resident material-set key (`None` draws with the geometric normal and
+    /// the material factors alone).
+    pub normal_map: Option<TextureKey>,
 }
 
 /// Upload report for one kit staging.
@@ -1115,13 +1196,27 @@ pub fn upload_kit(
             tex_ok.push(*key);
         }
     }
+    // One material set per distinct normal map (base resident first); a
+    // refused set drops its actors back to the flat-normal draw.
+    let mut sets_ok: Vec<TextureKey> = Vec::with_capacity(kit.sets.len());
+    for set in &kit.sets {
+        let base = set.base.filter(|key| tex_ok.contains(key));
+        if presenter
+            .upload_material_set(set.key, base, &set.normal, set.orm.as_ref())
+            .is_ok()
+        {
+            sets_ok.push(set.key);
+        }
+    }
     for baked in &kit.baked {
         if presenter.upload_mesh(baked.key, &baked.mesh).is_ok() {
             let base_color = baked.texture.filter(|key| tex_ok.contains(key));
+            let normal_map = baked.normal_map.filter(|key| sets_ok.contains(key));
             draws.push(KitDraw {
                 key: baked.key,
                 material: baked.material.clone(),
                 base_color,
+                normal_map,
             });
         } else {
             refused += 1;
@@ -1202,7 +1297,9 @@ pub fn push_kit_draws(
             // `None` binds the 1x1 white fallback so factors render
             // unmodified.
             base_color: draw.base_color,
-            normal_map: None,
+            // The draw's material set: the forward pass maps the normal and
+            // scales roughness, metallic and ambient occlusion by its ORM.
+            normal_map: draw.normal_map,
         });
         pushed += 1;
     }
@@ -1648,17 +1745,19 @@ mod tests {
         assert_eq!(sorted.len(), KIT_ACTOR_COUNT, "keys distinct across actors");
     }
 
-    // Every kit file carries a decodable base-color image: one texture per
-    // file, every actor keyed, keys stable across reimports.
+    // Every kit actor draws a base-color image: one texture per distinct
+    // material (five cooked sets plus the banner cloth), every actor keyed,
+    // keys stable across reimports.
     #[cfg(feature = "app")]
     #[test]
     fn kit_import_carries_base_color_textures() {
         let root = kit_content_dir();
         let kit = import_kit(&root).expect("kit imports from content");
+        let materials = kit_pbr::COOKED_SETS.len() + 1;
         assert_eq!(
             kit.textures.len(),
-            KIT_ASSET_COUNT,
-            "one base-color texture per kit file"
+            materials,
+            "one base-color texture per distinct kit material"
         );
         for baked in &kit.baked {
             assert!(
@@ -1670,12 +1769,40 @@ mod tests {
         let mut keys: Vec<TextureKey> = kit.textures.iter().map(|(key, _)| *key).collect();
         keys.sort();
         keys.dedup();
-        assert_eq!(keys.len(), KIT_ASSET_COUNT, "texture keys distinct");
+        assert_eq!(keys.len(), materials, "texture keys distinct");
         for (key, upload) in &kit.textures {
             assert!(
                 upload.width >= 4 && upload.height >= 4,
                 "texture {key:?} is a real image, not a stub"
             );
+        }
+    }
+
+    // VR2: every arena-kit material has base, normal and ORM. The five cooked
+    // sets plus the banner cloth give six material sets, each with an ORM map
+    // and a base it sits over; every actor names one set and one base, and
+    // the cooked files supply the five CC0 sets. Skips (passes) when the
+    // content is still Git LFS pointers.
+    #[cfg(feature = "app")]
+    #[test]
+    fn kit_every_material_has_base_normal_and_orm() {
+        let kit = import_kit(&kit_content_dir()).expect("kit imports from content");
+        if kit.cooked_sets == 0 {
+            return;
+        }
+        assert_eq!(kit.cooked_sets, kit_pbr::COOKED_SETS.len(), "all five cooked sets load");
+        assert_eq!(kit.sets.len(), kit_pbr::COOKED_SETS.len() + 1, "five cooked sets plus the cloth");
+        for set in &kit.sets {
+            assert!(set.base.is_some(), "set {:?} sits over a base", set.key);
+            assert!(set.orm.is_some(), "set {:?} carries an ORM map", set.key);
+            assert!(set.normal.width >= 512, "set {:?} normal is a real map", set.key);
+        }
+        for baked in &kit.baked {
+            let set = baked
+                .normal_map
+                .and_then(|key| kit.sets.iter().find(|set| set.key == key))
+                .unwrap_or_else(|| panic!("actor {} names a material set", baked.actor.id));
+            assert_eq!(baked.texture, set.base, "actor {} base matches its set", baked.actor.id);
         }
     }
 
@@ -1694,7 +1821,7 @@ mod tests {
             pack_to(&fs, rules, &mut bytes).expect("kit packs");
             bytes
         };
-        let all_bytes = bundle_of(&PackRules::new().include("src/"));
+        let all_bytes = bundle_of(&PackRules::new().include("src/").include("cooked/"));
         let bundle = BundleSource::open(all_bytes.clone()).expect("bundle opens");
         let from_dir = import_kit(&root).expect("kit imports from content");
         let from_bundle = import_kit_from(&bundle).expect("kit imports from the bundle");
@@ -1710,6 +1837,7 @@ mod tests {
             assert_eq!(packed.texture, loose.texture);
         }
         assert_eq!(from_bundle.textures, from_dir.textures);
+        assert_eq!(from_bundle.sets, from_dir.sets);
 
         let partial = BundleSource::open(bundle_of(&PackRules::new().include("src/banner.gltf")))
             .expect("partial bundle opens");

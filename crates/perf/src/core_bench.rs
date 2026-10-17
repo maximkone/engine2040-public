@@ -12,7 +12,7 @@
 
 use crate::alloc;
 use engine_core::fixed::Fixed;
-use engine_core::{hash_bytes, LegacyFixedAcc, Rng, TickState, DT};
+use engine_core::{hash_bytes, IntAcc, Rng, TickState};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -153,53 +153,46 @@ pub fn kernel_hash_bytes() -> u64 {
     acc
 }
 
-/// 10M-push accumulator soak: push DT, count steps, fold residual.
-/// Returns a checksum over (steps, residual bits) so drift is pinned.
-/// NOTE: pushing exactly DT is drift-free by construction (DT-DT == 0 in
-/// f32), so this kernel pins the step contract; the jittered kernel below
-/// carries the informative residual.
+/// 10M-push accumulator soak: push exactly 10 ms (integer ns), count steps,
+/// fold the integer residual. 10M x 10 ms is 6_000_000 ticks with zero
+/// residual, so this kernel pins the step contract.
 pub fn kernel_accum_soak() -> u64 {
-    let mut acc = LegacyFixedAcc::fixed();
-    let mut steps = 0u64;
+    let mut acc = IntAcc::new();
     for _ in 0..ACCUM_PUSHES {
-        steps += black_box(acc.push(black_box(DT))) as u64;
+        black_box(acc.push_ns(black_box(10_000_000)).unwrap_or(0));
     }
-    let residual = acc.acc.to_le_bytes();
-    let mut checksum = steps ^ hash_bytes(&residual);
-    checksum ^= hash_bytes(&acc.alpha().to_le_bytes());
-    black_box(checksum)
+    black_box(accum_checksum(&acc))
 }
 
-/// Detail for the jittered soak: total steps plus the final f32 residual
-/// in seconds and its render-interpolation alpha. The exact-DT soak must
-/// read residual 0.0 beside a nonzero jitter residual.
-pub fn accum_jitter_detail() -> (u64, f32, f32) {
-    let mut acc = LegacyFixedAcc::fixed();
-    let mut steps = 0u64;
-    for i in 0..ACCUM_PUSHES {
-        let frame_dt = if i % 2 == 0 { 0.016 } else { 0.017 };
-        steps += acc.push(frame_dt) as u64;
-    }
-    (steps, acc.acc, acc.alpha())
+/// Detail for the jittered soak: total steps, the final integer residual in
+/// ns and its render-interpolation alpha. The retired f32 accumulator ended
+/// this pattern 0.745 ms off true (RC30 measurement); the integer one reads
+/// 0 ns.
+pub fn accum_jitter_detail() -> (u64, u64, f32) {
+    let acc = jitter_run();
+    (acc.tick(), acc.buffered_ns(), acc.alpha())
 }
 
-/// Jittered 10M-push soak: push an alternating 16ms/17ms pattern (a
-/// millisecond-quantized wall clock, the realistic poll input) so the f32
-/// residual genuinely accumulates — scaled DT multiples can cancel exactly
-/// in binary and read a misleading zero. Folds (steps, residual bits).
-/// This is the informative drift fixture; the exact-DT soak above must read
-/// exactly zero residual beside it.
+/// Jittered 10M-push soak: an alternating 16 ms / 17 ms pattern (a
+/// millisecond-quantized wall clock, the realistic poll input). Folds
+/// (steps, residual). The total is exactly 9_900_000 ticks with 0 ns left.
 pub fn kernel_accum_jitter() -> u64 {
-    let mut acc = LegacyFixedAcc::fixed();
-    let mut steps = 0u64;
+    black_box(accum_checksum(&jitter_run()))
+}
+
+fn jitter_run() -> IntAcc {
+    let mut acc = IntAcc::new();
     for i in 0..ACCUM_PUSHES {
-        let frame_dt = if i % 2 == 0 { 0.016 } else { 0.017 };
-        steps += black_box(acc.push(black_box(frame_dt))) as u64;
+        let frame_ns = if i % 2 == 0 { 16_000_000 } else { 17_000_000 };
+        black_box(acc.push_ns(black_box(frame_ns)).unwrap_or(0));
     }
-    let residual = acc.acc.to_le_bytes();
-    let mut checksum = steps ^ hash_bytes(&residual);
-    checksum ^= hash_bytes(&acc.alpha().to_le_bytes());
-    black_box(checksum)
+    acc
+}
+
+fn accum_checksum(acc: &IntAcc) -> u64 {
+    acc.tick()
+        ^ hash_bytes(&acc.buffered_ns().to_le_bytes())
+        ^ hash_bytes(&acc.alpha().to_le_bytes())
 }
 
 /// Tick loop with a per-tick RNG draw (stream-A/B comparator): 600 ticks,

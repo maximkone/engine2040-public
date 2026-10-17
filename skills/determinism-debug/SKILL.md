@@ -1,6 +1,6 @@
 ---
 name: determinism-debug
-description: "Use when a golden hash, replay checkpoint, tape or golden-matrix row diverges, or a replay, capture or perf run looks wrong: reproduce twice, bisect to the first divergent tick, read MATCH/DIVERGE/SKIP and cause=fma/libm/sort-tie, never re-pin the golden."
+description: "Use when a golden hash, replay checkpoint, tape or golden-matrix row differs, or a replay, capture or perf run looks wrong: reproduce twice, bisect to the first bad tick, read MATCH/DIVERGE/SKIP; never re-pin the golden."
 ---
 
 # Determinism debug

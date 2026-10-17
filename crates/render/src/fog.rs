@@ -1287,6 +1287,7 @@ fn submit_bind_probe(
 /// above stays under the line limit with identical behavior.
 #[cfg(feature = "window")]
 fn bind_probe_pipeline(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::ComputePipeline) {
+    use crate::pipeline_warmup::CountedPipelines as _;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("fog-bind"),
         source: wgpu::ShaderSource::Wgsl(FOG_BIND_WGSL.into()),
@@ -1304,7 +1305,7 @@ fn bind_probe_pipeline(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::C
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
     });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    let pipeline = device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
         label: Some("fog-bind-pipeline"),
         layout: Some(&pipe_layout),
         module: &shader,
@@ -1407,6 +1408,7 @@ impl FogSubmitter {
     /// allocate the three uniform buffers. No frame-size state yet: storage
     /// buffers size on the first submit and resize only on shape change.
     pub fn new(device: &wgpu::Device) -> Self {
+        use crate::pipeline_warmup::CountedPipelines as _;
         let fog_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fog-height"),
             source: wgpu::ShaderSource::Wgsl(FOG_HEIGHT_WGSL.into()),
@@ -1445,22 +1447,24 @@ impl FogSubmitter {
             bind_group_layouts: &[Some(&contact_layout)],
             immediate_size: 0,
         });
-        let fog_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("fog-height-pipeline"),
-            layout: Some(&fog_pipe_layout),
-            module: &fog_shader,
-            entry_point: Some("fog_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let contact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("fog-contact-pipeline"),
-            layout: Some(&contact_pipe_layout),
-            module: &contact_shader,
-            entry_point: Some("contact_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let fog_pipeline =
+            device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
+                label: Some("fog-height-pipeline"),
+                layout: Some(&fog_pipe_layout),
+                module: &fog_shader,
+                entry_point: Some("fog_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let contact_pipeline =
+            device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
+                label: Some("fog-contact-pipeline"),
+                layout: Some(&contact_pipe_layout),
+                module: &contact_shader,
+                entry_point: Some("contact_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let fog_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fog-params-uniform"),
             size: FOG_UNIFORM_BYTES,

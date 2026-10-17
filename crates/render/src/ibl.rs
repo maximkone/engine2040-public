@@ -1884,6 +1884,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         /// textures size on the first submit and the target resizes only
         /// when the look viewport changes.
         pub fn new(device: &wgpu::Device) -> Self {
+            use crate::pipeline_warmup::CountedPipelines as _;
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("rl2-ibl-chart"),
                 source: wgpu::ShaderSource::Wgsl(CHART_WGSL.into()),
@@ -1941,7 +1942,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
                 bind_group_layouts: &[Some(&look_layout), Some(&bake_layout)],
                 immediate_size: 0,
             });
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
                 label: Some("rl2-ibl-chart-pipeline"),
                 layout: Some(&pipe_layout),
                 vertex: wgpu::VertexState {

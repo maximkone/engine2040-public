@@ -717,6 +717,9 @@ fn api_call(service: &McpServer, param: &ApiCallArgs) -> Result<ApiCallOutput, M
         .args
         .clone()
         .unwrap_or_else(|| Value::Object(JsonObject::new()));
+    // Screen the args before the verb stages anything: a verb reached through
+    // the router meets the same hostile-text gate as a direct call.
+    service.screen_payload(TOOL_API_CALL, &args.to_string())?;
     let outcome = verb.invoke(service, args);
     let pack = verb.pack().to_owned();
     service.dispatch(TOOL_API_CALL, |_| {

@@ -199,7 +199,7 @@ fn channel_weight(byte: u8, srgb: bool) -> f32 {
 }
 
 /// Pack 8-bit RGB into RGB565, rounding to nearest.
-fn pack_rgb565(r: u8, g: u8, b: u8) -> u16 {
+pub(crate) fn pack_rgb565(r: u8, g: u8, b: u8) -> u16 {
     let r5 = (u16::from(r) * 31 + 127) / 255;
     let g6 = (u16::from(g) * 63 + 127) / 255;
     let b5 = (u16::from(b) * 31 + 127) / 255;
@@ -207,7 +207,7 @@ fn pack_rgb565(r: u8, g: u8, b: u8) -> u16 {
 }
 
 /// Unpack RGB565 to 8-bit RGB (bit replication).
-fn unpack_rgb565(packed: u16) -> [u8; 3] {
+pub(crate) fn unpack_rgb565(packed: u16) -> [u8; 3] {
     let r5 = u32::from((packed >> 11) & 31);
     let g6 = u32::from((packed >> 5) & 63);
     let b5 = u32::from(packed & 31);
@@ -218,7 +218,7 @@ fn unpack_rgb565(packed: u16) -> [u8; 3] {
 }
 
 /// Four-entry BC1 palette from unpacked endpoints (`c0 > c1` opaque path).
-fn bc1_palette(c0: [u8; 3], c1: [u8; 3]) -> [[u8; 3]; 4] {
+pub(crate) fn bc1_palette(c0: [u8; 3], c1: [u8; 3]) -> [[u8; 3]; 4] {
     let mut palette = [c0, c1, [0, 0, 0], [0, 0, 0]];
     for channel in 0..3 {
         let (a, b) = (u16::from(c0[channel]), u16::from(c1[channel]));

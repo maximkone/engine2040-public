@@ -772,7 +772,7 @@
   `cargo test --locked -p engine-assets sidecar`, CB4/LM2 fixtures
   read windows/contacts, bytes x2. needs: CT1, CT23. (Plan extender
   wave 56; plan CT23.)
-- [ ] CT25 content: crowd impostor kit (`content/crowd/` new) for
+- [ ] CT25 content: crowd impostor kit (`content/crowd/` new) for Progress 2026-10-17: 3d997539 gen.mjs deterministic and matches manifest SHAs; left: content/crowd/proof/Cargo.lock is stale (gh cargo check failed, run 39064515835) and the cook proof needs cargo run.
   8-fighter soak + C3 20k path. Size M. Accept: soak captures
   populated, 0 findings, cook x2
   (`cargo test --locked -p engine-assets mesh_cook`). needs: CT2, CT8.
@@ -895,7 +895,7 @@
   CPU/GPU ms + VRAM posted on the reference GPU with adapter+driver
   lines; cook x2 identical. Consumer: CT27 soak, CT34 card. needs:
   CT25, CT44. (EXTEND wave 87.)
-- [ ] CT52 content: provenance enforce rehearsal before the CT28 lock.
+- [ ] CT52 content: provenance enforce rehearsal before the CT28 lock. Progress 2026-10-17: 3d997539 rehearsal on a seeded 50-record bundle names all three gaps, 58-record matrix still 7 refusals, output identical x2, provenance tests green (run 39064454169); left: CT28 lock.
   Tier A. Size S. Owns `content/PROVENANCE-ENFORCE.md` (gate code stays
   CT28, matrix stays CT46). Accept: seeded missing-provenance bundle
   refused with the named gap; 50-asset matrix re-checked;
@@ -988,7 +988,7 @@
   count/byte cap with license + blake3 receipt; bake x2 identical;
   VX7 reads it or kills it; no tick bytes. Consumer VX7/C3. needs:
   CT40. (EXTEND wave 90.)
-- [ ] CT74 content: PBR/HDRI intake commit-gate for the untracked bytes.
+- [ ] CT74 content: PBR/HDRI intake commit-gate for the untracked bytes. Progress 2026-10-17: 3d997539 all 16 untracked content/arena files refused (no provenance row), provenance tests green (run 39064454169); left: committed-set cook x2 once arena_cook.rs is tracked.
   Tier A. Size S. Owns `content/arena/PBR-INTAKE.md` (intake bytes
   frozen). Accept: every untracked file carries URL+SPDX+author+SHA or
   refusal; committed set cooks x2; `cargo test --locked -p engine-assets

@@ -462,6 +462,9 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
         .and_then(crate::App::into_duel)
         .expect("duel builds");
     let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+    // The clip-switch and planted-feet laws are judged on the clip pipeline; a ragdoll's rise
+    // has its own budget in `ragdoll_look` (RZ2w).
+    look.set_ragdoll(false);
     for slot in &mut look.slots {
         slot.feet.ik = ik;
     }

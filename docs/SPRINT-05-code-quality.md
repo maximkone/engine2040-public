@@ -94,14 +94,14 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   impossible, or proof suite slows >5%, or >0 pending snapshots
   committable. needs: none. (WILD corner-23 Card 1.)
   LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] CQ-NET-API3 net: single tick-rate and codec-length owner —
+- [x] CQ-NET-API3 net: single tick-rate and codec-length owner — Landed 61dc1642. scale.rs takes `TICK_HZ` from `engine_core` and the codec lengths (`SNAPSHOT_HEADER_LEN`, `SNAPSHOT_SLOT_LEN`, `STATE_DELTA_HEADER_LEN`) from `session`; no `owned copy, no import` text left in crates/net/src; `server::TICK_HZ` went with server.rs in the net slim 3151bd46. `cargo test -p engine-net --lib` 258 passed, 2 ignored, gh run 39061111700 (scale and session filter: 39 passed, gh run 39057623054).
   `scale.rs` imports the arena tick rate and the session codec lengths
   instead of parity copies; `server::TICK_HZ` re-exports the same owner.
   Tier A. Size S. Owns `crates/net/src/scale.rs`,
   `crates/net/src/server.rs`. Accept: no "owned copy, no import" in
   `crates/net/src`; scale + server tests green; golden x2. needs: none.
   (API-REVIEW wave 54.)
-- [ ] CQ-NET-API4 net: name the three servers — rename `server::Server`
+- [x] CQ-NET-API4 net: name the three servers — rename `server::Server` Landed 3151bd46. Moot after the net slim: `server::Server` no longer exists; the one public `Server` is `session::Server`, the rest have their own names (`dedicated::HeadlessServer`, `websocket::WsServer`, `webtransport::WtServer`, `relay::RelayServer`, `relay::StunServer`). `cargo test -p engine-net --lib` 258 passed, gh run 39061111700.
   to the AOI/presence harness name with a deprecated alias for one wave;
   root docs name `session::Server` vs `dedicated::HeadlessServer` vs the
   harness. Tier B. Size S. Owns `crates/net/src/server.rs`,
@@ -116,7 +116,7 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   one documented session choice per use-case in `lib.rs`; zero "stub"
   comments in public API; tests green; golden x2. needs: CQ-NET-API2.
   (API-REVIEW wave 54.)
-- [ ] CQ-NET-API6 net: units in names — `SnapEnt::{x,y}` gain cm units,
+- [x] CQ-NET-API6 net: units in names — `SnapEnt::{x,y}` gain cm units, Landed 3151bd46. Moot after the net slim: `SnapEnt`, `Config{budget,cell,view,world}`, `DelayBuffer` and anticheat.rs no longer exist in crates/net/src. `cargo test -p engine-net --lib` 258 passed, gh run 39061111700.
   `Config::{budget,cell,view,world}` gain byte/cm units,
   `DelayBuffer.delay` gains ticks, anticheat limits gain unit suffixes.
   Tier A. Size S. Owns `crates/net/src/server.rs`,

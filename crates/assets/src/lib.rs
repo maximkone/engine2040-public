@@ -76,6 +76,9 @@ pub mod mesh_cook;
 pub mod optimize;
 /// Offline BC cook over `bc` plus KTX2 emit: picked shape, x2 identical.
 pub mod texture_cook;
+/// Arena material maps cooked to block-compressed KTX2 with mips (BC1/BC5), plus the reader that
+/// decodes a cooked file to RGBA8. Std-only; no encoder dependency.
+pub mod ktx2_cook;
 /// Offline uv2 chart pack for arena static meshes (cook-time only): chart
 /// plus pack plus hashed provenance row; planned, no caller yet (verified
 /// 2026-10-16): the bundle cook will consume `pack_uv2`.

@@ -1,6 +1,6 @@
 ---
 name: render-lighting
-description: "Use when you wire or review lights and sky in crates/render: shadow maps, point, spot or sun lights, torches, IBL, normal or gloss maps, GTAO, deferred sun tiles, sky bake, fog feed, exposure, or wound and decal paint maps; a pass counts only if on-vs-off pixels differ."
+description: "Use when you add or review lights and sky in crates/render: shadow maps, point/spot/sun lights, torches, IBL, normal or gloss maps, GTAO, sky bake, fog feed, exposure, wound or decal maps. A pass counts only if on-vs-off pixels differ."
 ---
 
 # Lighting, sky and paint maps in crates/render

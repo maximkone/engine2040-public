@@ -1279,32 +1279,9 @@ impl ToolBase for ScenePlaceTool {
     }
 }
 
-/// Serialize one audited `scene.place` payload fail-closed: a serialization
-/// failure refuses `bad_args` instead of screening an empty string past the
-/// hostile-text gate. The caller seals the refusal through the dispatch seam
-/// so it still chains exactly one `Refused` audit record.
-fn audit_payload_text<T: Serialize>(tool: &'static str, param: &T) -> Result<String, McpToolError> {
-    rmcp::serde_json::to_string(param).map_err(|error| {
-        McpToolError::new(
-            "bad_args",
-            format!(
-                "args for `{tool}` do not serialize ({error}); re-run after api.describe `{tool}` for the schema"
-            ),
-        )
-    })
-}
-
 impl SyncTool<McpServer> for ScenePlaceTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        let payload = match audit_payload_text(TOOL_SCENE_PLACE, &param) {
-            Ok(payload) => payload,
-            Err(refusal) => {
-                return service.dispatch(TOOL_SCENE_PLACE, |_| Err::<ScenePlaceOutput, _>(refusal));
-            }
-        };
-        service.dispatch_with_payload(TOOL_SCENE_PLACE, &payload, |state| {
-            state.scene_place(&param)
-        })
+        service.dispatch_screened(TOOL_SCENE_PLACE, &param, |state| state.scene_place(&param))
     }
 }
 
@@ -1364,6 +1341,7 @@ mod tests {
     #[test]
     fn place_payload_serializes_valid_args_and_refuses_failures_audited() {
         use super::super::audit::{code_hash, AuditOutcome};
+        use super::super::door_dispatch::audit_payload_text;
 
         // Valid args serialize to a payload that carries the call's own
         // fields into the hostile-text screen.

@@ -103,6 +103,18 @@ impl ShellUi {
         self.gizmo.tool()
     }
 
+    /// Bring one panel's tab to the front of its dock leaf and focus it, so
+    /// the next frame draws that panel (the panel frame bench times each in
+    /// turn). False when the dock holds no such tab yet.
+    pub fn focus_panel(&mut self, panel: Panel) -> bool {
+        let Some(path) = self.dock.find_tab(&panel) else {
+            return false;
+        };
+        let _ = self.dock.set_active_tab(path);
+        self.dock.set_focused_node_and_surface(path.node_path());
+        true
+    }
+
     /// Draw the dock area into the host's root [`egui::Ui`], without a live
     /// viewport texture (headless frames and tests). Tabs opened through
     /// [`Shell::open_panel`] are added to the first leaf; tab closes report
@@ -1163,6 +1175,19 @@ mod tests {
         assert_eq!(shell.selection, Some(id));
         assert!(shell.staged_preview().is_none());
         assert_eq!(shell.document().hierarchy.len(), 1);
+    }
+
+    /// `focus_panel` makes the named tab the active one in its leaf.
+    #[test]
+    fn focus_panel_activates_the_named_tab() {
+        let shell = Shell::new();
+        let mut ui_state = ShellUi::new(&shell);
+        for panel in Panel::all() {
+            assert!(ui_state.focus_panel(panel));
+            let path = ui_state.dock.find_tab(&panel).expect("tab is docked");
+            let leaf = ui_state.dock.leaf(path.node_path()).expect("leaf");
+            assert_eq!(leaf.tabs[leaf.active.0], panel);
+        }
     }
 
     /// Viewport, outliner and inspector agree on the identical live selection.

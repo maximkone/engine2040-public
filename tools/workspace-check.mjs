@@ -582,7 +582,7 @@ function audit(repoDir) {
     "combat/src/lib.rs", "combat/src/sweep.rs", "combat/src/tables.rs",
     "ecs/src/bridge.rs",
     "editor/src/instant.rs", "editor/src/templates.rs",
-    "endpoint/src/assistant.rs", "endpoint/src/play.rs",
+    "endpoint/src/assistant.rs", "endpoint/src/assistant/fork.rs", "endpoint/src/play.rs",
     "endpoint/src/build_level.rs", "endpoint/src/build_character.rs",
     "endpoint/src/build_encounter.rs", "endpoint/src/build_game.rs",
     "input/src/bindings.rs", "input/src/fighter.rs", "input/src/lib.rs",
