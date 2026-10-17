@@ -376,7 +376,8 @@ pub fn free_cam_step(
 ) -> Result<(), CameraError> {
     params.validate()?;
     let (yaw_rad, pitch_rad) = look;
-    if !yaw_rad.is_finite() || !(-core::f32::consts::PI..=core::f32::consts::PI).contains(&yaw_rad) {
+    if !yaw_rad.is_finite() || !(-core::f32::consts::PI..=core::f32::consts::PI).contains(&yaw_rad)
+    {
         return Err(CameraError::BadParam("free_yaw_rad"));
     }
     if !pitch_rad.is_finite() || pitch_rad.abs() > core::f32::consts::FRAC_PI_2 {

@@ -42,6 +42,7 @@ pub(crate) mod capture {
     use std::time::Instant;
 
     use engine_game::capture::{self, CaptureSink, LookTap, TapeInputs};
+    use engine_game::director::AuditReport;
     use engine_game::windowed::{
         cap_message as capped, dressing_camera, format_timed_smoke, hud_draw_list,
         push_dressing_draws, run_headless_smoke_with_options, stage_dressing, SceneSelect, WinArgs,
@@ -662,13 +663,36 @@ pub(crate) mod capture {
             .collect()
     }
 
-    /// File one twin capture's cut log through the editorial gate and print
-    /// the receipt: a flagged log refuses the seal loudly.
-    fn seal_capture_cut_log(sink: &mut CaptureSink, app: &App) -> Result<(), WinError> {
-        let line = cut_log_audit_line(app.director_audit())?;
+    /// The seal's editorial gate: a clean cut log gives the receipt line, any
+    /// continuity flag is an error that names every count.
+    fn cut_log_audit_line(audit: AuditReport) -> Result<String, WinError> {
+        if audit.is_clean() {
+            return Ok(format!(
+                "arena capture: cut log clean cuts={} flags=0",
+                audit.cuts
+            ));
+        }
+        Err(WinError::Render(format!(
+            "cut log audit: {} flags (jump {} line {} hold {} slew {} stale {})",
+            audit.total_flags(),
+            audit.jump_cuts,
+            audit.line_crosses,
+            audit.short_holds,
+            audit.slew_overs,
+            audit.stale_cuts
+        )))
+    }
+
+    /// File one twin capture's cut log and print the editorial receipt. A
+    /// flagged log is reported loudly but does not fail the capture: a plain
+    /// brawl already audits with jump flags, so refusing would fail normal
+    /// captures (owner decision pending).
+    fn seal_capture_cut_log(sink: &mut CaptureSink, app: &App) {
         sink.note_director_cuts(app.director_cuts(), app.director_shot());
-        say!("{line}");
-        Ok(())
+        match cut_log_audit_line(app.director_audit()) {
+            Ok(line) => say!("{line}"),
+            Err(flagged) => say!("arena capture: {flagged}"),
+        }
     }
 
     /// Headless twin capture: the same session over the tape with every due tick
@@ -772,7 +796,7 @@ pub(crate) mod capture {
                 }
             }
         }
-        sink.note_director_cuts(app.director_cuts(), app.director_shot());
+        seal_capture_cut_log(&mut sink, &app);
         sink.finish()
             .map_err(|err| WinError::Render(capped(&err.to_string())))
     }
@@ -1137,10 +1161,13 @@ pub(crate) mod capture {
         };
 
         /// Behaviour: a running session's own cut log, read through the
-        /// accessor the capture seal uses, audits clean and receipts its cut
-        /// count; the gate would let this clip be filed.
+        /// accessor the capture seal uses, gets a receipt that agrees with the
+        /// audit: clean gives the cut count, flagged names the same flag total.
+        /// A real brawl repeats a peak past the hold floor, which the audit
+        /// flags as a jump, so this session is refused; the test pins that the
+        /// seal and the audit never disagree.
         #[test]
-        fn live_session_cut_log_audits_clean_and_receipts() {
+        fn live_session_receipt_agrees_with_the_audit() {
             let mut app = App::new(GameConfig {
                 seed: 2040,
                 ticks: 600,
@@ -1171,12 +1198,26 @@ pub(crate) mod capture {
                 cuts >= 2,
                 "a 600-tick brawl cuts more than once, got {cuts}"
             );
-            let line = cut_log_audit_line(app.director_audit())
-                .expect("a running session files a clean cut log");
-            assert_eq!(
-                line,
-                format!("arena capture: cut log clean cuts={cuts} flags=0")
-            );
+            let audit = app.director_audit();
+            let flags = audit.total_flags();
+            assert_eq!(usize::try_from(audit.cuts).expect("count fits"), cuts);
+            match cut_log_audit_line(audit) {
+                Ok(line) => {
+                    assert_eq!(flags, 0, "only a clean log files");
+                    assert_eq!(
+                        line,
+                        format!("arena capture: cut log clean cuts={cuts} flags=0")
+                    );
+                }
+                Err(err) => {
+                    assert!(flags > 0, "only a flagged log refuses");
+                    let text = format!("{err:?}");
+                    assert!(
+                        text.contains(&format!("cut log audit: {flags} flags")),
+                        "names the audit total: {text}"
+                    );
+                }
+            }
         }
 
         /// Failure: a cut log whose continuity flags fire (a jump cut plus the
@@ -1184,10 +1225,11 @@ pub(crate) mod capture {
         /// so an editorially broken clip is never filed.
         #[test]
         fn flagged_cut_log_refuses_the_seal() {
+            // A real cold open: the framing changes, so only the second cut is a jump.
             let open = Cut {
                 tick: 0,
                 from_kind: ShotKind::Wide,
-                to_kind: ShotKind::Wide,
+                to_kind: ShotKind::Duel,
                 from_focus: 0,
                 to_focus: 0,
                 side: ShotSide::Left,

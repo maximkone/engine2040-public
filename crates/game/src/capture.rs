@@ -747,6 +747,10 @@ impl LookTap {
     }
 }
 
+/// One-shot observer of a validated frame's PNG bytes (see
+/// [`CaptureSink::write_frame_with_hook`]).
+type FrameHook<'a> = &'a mut dyn FnMut(&[u8]);
+
 /// Frame sink: created up front (bad dirs fail fast), frames appended in
 /// order, the manifest sealed by [`CaptureSink::finish`].
 #[derive(Debug)]
@@ -825,10 +829,6 @@ impl CaptureSink {
             first_size: None,
             rows: Vec::new(),
             board_rows: meta.rows.clone(),
-/// One-shot observer of a validated frame's PNG bytes (see
-/// [`CaptureSink::write_frame_with_hook`]).
-type FrameHook<'a> = &'a mut dyn FnMut(&[u8]);
-
             build_sha,
             fps: meta.fps,
             director_digest: String::new(),

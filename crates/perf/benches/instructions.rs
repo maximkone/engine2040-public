@@ -132,10 +132,8 @@ fn main() {
     // `cargo nextest run --all-targets` probes them with `--list --format terse`.
     // Both probes must exit 0 without touching the Gungraun runner, which may
     // not be installed; only `cargo bench` and the runner's re-launches measure.
-    if std::env::args().any(|arg| arg == "--list") {
-    }
     #[cfg(target_os = "linux")]
-    if std::env::args().len() > 1 {
+    if !std::env::args().any(|arg| arg == "--list") && std::env::args().len() > 1 {
         harness::run();
     }
 }

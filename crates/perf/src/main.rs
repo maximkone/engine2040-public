@@ -960,11 +960,7 @@ mod tests {
         prefix.for_each_pv(|_, p, v| {
             prefix_rows.push((p.x.to_bits(), p.y.to_bits(), v.x.to_bits(), v.y.to_bits()));
         });
-        assert_eq!(
-            &agent_rows[..1000],
-            &*prefix_rows,
-            "agent prefix drifted"
-        );
+        assert_eq!(&agent_rows[..1000], &*prefix_rows, "agent prefix drifted");
         let (mut world2, mut space2) = seed_mixed_world(1000, 10_000, 2040);
         assert_eq!(
             tick_hash(&mut world, &mut space),

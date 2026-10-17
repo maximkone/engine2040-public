@@ -11,7 +11,10 @@ use engine_world::cells;
 #[path = "../../assets/src/stream.rs"]
 mod as2;
 
-#[expect(dead_code, reason = "whole nav source compiled by path; this test uses a slice")]
+#[expect(
+    dead_code,
+    reason = "whole nav source compiled by path; this test uses a slice"
+)]
 #[path = "../../nav/src/mesh.rs"]
 mod mesh;
 
@@ -22,7 +25,10 @@ mod cursor;
 #[path = "../../nav/src/flow.rs"]
 mod flow;
 
-#[expect(dead_code, reason = "whole nav source compiled by path; this test uses a slice")]
+#[expect(
+    dead_code,
+    reason = "whole nav source compiled by path; this test uses a slice"
+)]
 #[path = "../../nav/src/tiles.rs"]
 mod tiles;
 
