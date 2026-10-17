@@ -139,6 +139,13 @@ impl SightWorld {
         self.boxes.get(&id)
     }
 
+    /// Physical boxes that do not contain `point_cm` and overlap the open
+    /// height band `(lo_y, hi_y)`: what blocks a walker standing there.
+    pub(crate) fn blockers_over(&self, point_cm: [i32; 3], lo_y: i32, hi_y: i32) -> Vec<Box3> {
+        let blocks = |b: &&Box3| !contains(b, point_cm) && b.min_y < hi_y && b.max_y > lo_y;
+        self.solids.iter().filter(blocks).copied().collect()
+    }
+
     /// Actor count with indexed boxes (degenerate rows index nothing).
     pub fn len(&self) -> usize {
         self.boxes.len()
@@ -305,6 +312,104 @@ fn strictly_inside(lo_n: i64, lo_d: i64, hi_n: i64, hi_d: i64) -> bool {
     // U = min(hi, 1): U_num/U_den.
     let (u_n, u_d) = if hi_n >= hi_d { (1, 1) } else { (hi_n, hi_d) };
     l_n * u_d < u_n * l_d
+}
+
+/// First solid struck by a ray: the actor id, the entry point and the
+/// distance from the eye, both in integer cm (rounded half away from zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RayHit {
+    pub id: u32,
+    pub point_cm: [i32; 3],
+    pub dist_cm: i32,
+}
+
+/// Entry parameter `lo_n / lo_d` (denominator positive) where the ray
+/// `e + s*d` first enters the open interior of `b`, or `None` for a miss or a
+/// grazing touch. Same integer slab math as [`seg_hits`], without the segment end.
+fn ray_entry(b: &Box3, e: [i32; 3], d: [i64; 3]) -> Option<(i64, i64)> {
+    let (mut lo_n, mut lo_d) = (0i64, 1i64);
+    let mut hi: Option<(i64, i64)> = None;
+    let spans = [
+        (b.min_x, b.max_x, e[0], d[0]),
+        (b.min_y, b.max_y, e[1], d[1]),
+        (b.min_z, b.max_z, e[2], d[2]),
+    ];
+    for (mn, mx, pe, di) in spans {
+        if di == 0 {
+            if pe <= mn || pe >= mx {
+                return None;
+            }
+            continue;
+        }
+        let (n0, n1, den) = if di > 0 {
+            (i64::from(mn - pe), i64::from(mx - pe), di)
+        } else {
+            (i64::from(pe - mx), i64::from(pe - mn), -di)
+        };
+        if n0 * lo_d > lo_n * den {
+            (lo_n, lo_d) = (n0, den);
+        }
+        if hi.is_none_or(|(hn, hd)| n1 * hd < hn * den) {
+            hi = Some((n1, den));
+        }
+    }
+    let (hn, hd) = hi?;
+    (lo_n * hd < hn * lo_d).then_some((lo_n, lo_d))
+}
+
+/// Round `v * n / den` half away from zero (`den > 0`).
+fn mul_div_round(v: i64, n: i64, den: i64) -> i64 {
+    let num = i128::from(v) * i128::from(n) * 2;
+    let den2 = i128::from(den) * 2;
+    let half = if num < 0 {
+        -i128::from(den)
+    } else {
+        i128::from(den)
+    };
+    i64::try_from((num + half) / den2).unwrap_or(i64::MAX)
+}
+
+/// First solid hit along `eye_cm + s * dir` for `s >= 0`, within `range_cm`.
+/// `dir` is any non-zero integer vector (its length scales nothing: distance
+/// is real cm). Boxes containing the eye are skipped, like the LOS ray;
+/// non-physical actors never block. Nearest entry wins, equal entries go to
+/// the smaller id. Integer only; 0 allocs, O(solids).
+pub fn ray_first_hit(
+    world: &SightWorld,
+    eye_cm: [i32; 3],
+    dir: [i32; 3],
+    range_cm: i32,
+) -> Option<RayHit> {
+    let d = dir.map(i64::from);
+    let len_sq = d.iter().map(|v| v * v).sum::<i64>();
+    if len_sq == 0 {
+        return None;
+    }
+    let len = i64::try_from(len_sq.cast_unsigned().isqrt()).ok()?;
+    let mut best: Option<(i64, i64, u32)> = None;
+    for b in &world.solids {
+        if contains(b, eye_cm) {
+            continue;
+        }
+        let Some((n, den)) = ray_entry(b, eye_cm, d) else {
+            continue;
+        };
+        if best.is_none_or(|(bn, bd, _)| n * bd < bn * den) {
+            best = Some((n, den, b.id));
+        }
+    }
+    let (n, den, id) = best?;
+    let dist = mul_div_round(len, n, den);
+    if dist > i64::from(range_cm) {
+        return None;
+    }
+    let at =
+        |axis: usize| eye_cm[axis] + i32::try_from(mul_div_round(d[axis], n, den)).unwrap_or(0);
+    Some(RayHit {
+        id,
+        point_cm: [at(0), at(1), at(2)],
+        dist_cm: i32::try_from(dist).unwrap_or(i32::MAX),
+    })
 }
 
 /// Line of sight between two arbitrary points in meters. Pure occlusion:

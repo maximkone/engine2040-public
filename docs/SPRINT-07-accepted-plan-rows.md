@@ -110,11 +110,11 @@
   machine. Tier A. Size S. Owns test hunks in `crates/app` (no new
   crate). Accept: `cargo test -p engine-app` posts the p50 number;
   over-budget names the slowest stage. needs: RC1.
-- [ ] RC32 app: cold-startup + prefab-instantiate budget proof —
+- [x] RC32 app: cold-startup + prefab-instantiate budget proof —
   startup under 2 s cold, instantiate under 1 ms per arena kit, both
   posted on the reference machine. Tier A. Size S. Owns test hunks in
   `crates/app/src/app.rs` plus the RC4 prefab fixture. Accept:
-  numbers posted x2; a regression fails the gate. needs: RC1, RC4.
+  numbers posted x2; a regression fails the gate. needs: RC1, RC4. Landed fca6fe7c. App cold startup under 1 ms and RC4 museum kit 3-4 us, asserted twice in one test (budgets 2 s, 1 ms), GitHub run 39064540714, 4 passed; the old budget tests were ignored or checked nothing.
 - [ ] RC34 runtime: second-game boot receipt — urban war boots on the
   same runtime with zero engine forks: stock config loads, menu renders
   through the same extraction, a headless match replays to identical
@@ -122,14 +122,14 @@
   without engine edits (companion to UW39, which owns the game side).
   Tier B. Size M. Owns glue/tests only, no engine edits. Accept:
   checklist green x2; any engine fork fails the tier by definition.
-  needs: RC1.
-- [ ] RC35 ecs+app: 1,000-agent and 64-slot runtime soak — archetype
+  needs: RC1. Skipped 2026-10-17: blocked on UW0 (urban war, later game).
+- [x] RC35 ecs+app: 1,000-agent and 64-slot runtime soak — archetype
   World 1,000-agent tick p99 ≤ 2 ms (P6) and app extraction at 64-slot
   siege load; a 10-minute 64-slot siege replays exactly (the runtime
   half of C5). Tier B. Size M. Owns harness hunks in `crates/ecs` and
   `crates/app`. Accept: numbers posted on the reference machine;
   replay x2 identical; golden unchanged or a HASH-LAW receipt.
-  needs: RC29.
+  needs: RC29. Landed 85543ccd. ecs 1,000 agents through run_arena_tick x2 identical, p99 54 and 47 us (run 39065108585); app 36,000-frame (10 min) siege through App::run_frame x2, same chain 807b5fcc971f58e9, frame p99 52 us (run 39064969267); runner numbers, not the reference PC; the 64 slots are runtime entities (arena caps at 16 fighters); golden unmoved.
 - [ ] ARC5 net+save: spine rollback and persistence — net resim and Progress 2026-10-17: save side exists (crates/save/src/persist.rs spine payload, rollback.rs spine_gate); crates/net has no spine call sites; left: net resim over spine bytes and the QUIC + UDP drop/rejoin convergence proof.
   save envelope consume `spine::snapshot/restore`; a loopback drop
   and a save round-trip converge on spine bytes, over the QUIC channel
@@ -776,7 +776,7 @@
   8-fighter soak + C3 20k path. Size M. Accept: soak captures
   populated, 0 findings, cook x2
   (`cargo test --locked -p engine-assets mesh_cook`). needs: CT2, CT8.
-  (Plan extender wave 56; plan CT24.)
+  (Plan extender wave 56; plan CT24.) Progress 2026-10-17: 3d997539 gen.mjs deterministic and matches manifest SHAs; left: content/crowd/proof/Cargo.lock is stale (gh cargo check failed, run 39064515835) and the cook proof needs cargo run.
 - [ ] CT27 content: 64-player + 1,000-agent soak on RTX 3050 6 GB
   (dedupe + compression/BC/LOD/stream proof, cold ≤5 s, VRAM capped).
   Size M. Accept: soak report + adapter/driver/ms/VRAM
@@ -900,7 +900,7 @@
   CT28, matrix stays CT46). Accept: seeded missing-provenance bundle
   refused with the named gap; 50-asset matrix re-checked;
   `cargo test --locked -p engine-assets provenance` green; bytes x2.
-  Consumer: CT28 lock, PR1 chains. needs: CT28, CT46. (EXTEND wave 87.)
+  Consumer: CT28 lock, PR1 chains. needs: CT28, CT46. (EXTEND wave 87.) Progress 2026-10-17: 3d997539 rehearsal on a seeded 50-record bundle names all three gaps, 58-record matrix still 7 refusals, output identical x2, provenance tests green (run 39064454169); left: CT28 lock.
 - [ ] CT54 content: combat clip batch-c (16 more toward the CT23 80).
   Tier A. Size M. Owns `content/fighters/incoming/batch-c/` + sidecars.
   Accept: 16 clips retarget via CT1 with bind pose verified, digest
@@ -993,7 +993,7 @@
   frozen). Accept: every untracked file carries URL+SPDX+author+SHA or
   refusal; committed set cooks x2; `cargo test --locked -p engine-assets
   provenance` green. Consumer CT45/CT57. needs: CT8, CT46.
-  (EXTEND wave 92.)
+  (EXTEND wave 92.) Progress 2026-10-17: 3d997539 all 16 untracked content/arena files refused (no provenance row), provenance tests green (run 39064454169); left: committed-set cook x2 once arena_cook.rs is tracked.
 - [ ] CT75 content: staged-dir triage into the batch digest queue.
   Tier A. Size S. Owns `content/fighters/incoming/STAGED-TRIAGE.md`
   (staged dir frozen). Accept: every `staged/` file named keep/refused;

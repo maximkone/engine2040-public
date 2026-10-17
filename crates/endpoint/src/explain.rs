@@ -1027,8 +1027,18 @@ mod tests {
         )
         .expect("legal batch passes EXPLAIN");
 
-        let server =
-            McpServer::with_document(seed.doc, seed.journal, 7, Capability::unrestricted(7));
+        // The run plays its own small scene (the seed scene holds more solid
+        // nodes than a match plays): one node above head height, pinned.
+        let (mut doc, mut journal) = (Document::new(), Journal::new());
+        insert(
+            &mut doc,
+            &mut journal,
+            ObjectId::new(),
+            ObjectId::NIL,
+            [0.0, 10.0, 0.0],
+        );
+        let scene_rev = doc.revision;
+        let server = McpServer::with_document(doc, journal, 7, Capability::unrestricted(7));
         let started = PlayRunTool::invoke(
             &server,
             PlayRunArgs {
@@ -1040,7 +1050,7 @@ mod tests {
                 inputs: Some(Vec::new()),
                 ttl_polls: None,
                 job_id: None,
-                scene_rev: None,
+                scene_rev: Some(scene_rev),
             },
         )
         .expect("play.run starts around an EXPLAIN check");

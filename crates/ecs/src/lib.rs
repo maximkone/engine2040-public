@@ -11,6 +11,8 @@ pub mod arena;
 pub mod bridge;
 /// Wrapping change ticks with per-column summaries.
 pub mod change_tick;
+/// Stage plan with explicit barriers for bake and verify.
+pub mod dispatch_plan;
 pub mod jobs;
 pub mod parallel;
 pub mod pool;

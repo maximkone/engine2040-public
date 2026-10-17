@@ -1,13 +1,13 @@
 //! tick: fixed 60Hz driver. Construct -> step -> hash; fixed dt in, never wall-clock.
-//! Owner: engine-core. Default accumulator is integer [`crate::time::IntAcc`];
-//! f32 `LegacyFixedAcc` (`LEGACY_DT`) is frozen for receipts only.
+//! Owner: engine-core. The only accumulator is integer [`crate::time::IntAcc`];
+//! the f32 consts here are frozen receipt bits, not a clock.
 use crate::{hash_bytes, Rng};
 /// Ticks per second.
 pub const TICK_HZ: u64 = 60;
 /// Frozen legacy step in seconds (1.0 / 60.0). Bits never change.
 pub const LEGACY_DT: f32 = 1.0 / 60.0;
 /// Fixed step in seconds (legacy alias, identical bits to `LEGACY_DT`).
-/// New code uses integer [`crate::time::IntAcc`]; this stays for receipts.
+/// Frozen bits for receipts; the sim clock is integer [`crate::time::IntAcc`].
 pub const DT: f32 = LEGACY_DT;
 /// Max fixed steps per frame (anti-spiral cap).
 pub const MAX_STEPS: u32 = 5;
@@ -18,43 +18,6 @@ pub const MAX_FRAME_DT: f32 = LEGACY_MAX_FRAME_DT;
 /// Tick index since sim start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Tick(pub u64);
-/// Frozen legacy f32 accumulator: acc += min(frame_dt, 0.1), step while acc >= dt capped at 5.
-/// Returns steps taken. Render alpha is acc / dt. Cap hit drops backlog (no spiral).
-/// Frozen: behavior and bits never change. New code uses integer [`crate::time::IntAcc`].
-#[derive(Clone, Copy, Debug)]
-pub struct LegacyFixedAcc {
-    /// Buffered time in seconds.
-    pub acc: f32,
-    /// Fixed step in seconds.
-    pub dt: f32,
-}
-impl LegacyFixedAcc {
-    /// Build with an explicit step.
-    pub fn new(dt: f32) -> Self {
-        Self { acc: 0.0, dt }
-    }
-    /// Build with the 60Hz default step.
-    pub fn fixed() -> Self {
-        Self::new(LEGACY_DT)
-    }
-    /// Push frame time (never wall-clock inside), return steps due.
-    pub fn push(&mut self, frame_dt: f32) -> u32 {
-        self.acc += frame_dt.min(LEGACY_MAX_FRAME_DT);
-        let mut n = 0;
-        while self.acc >= self.dt && n < MAX_STEPS {
-            self.acc -= self.dt;
-            n += 1;
-        }
-        n
-    }
-    /// Blend factor for render interpolation in [0, 1].
-    pub fn alpha(&self) -> f32 {
-        (self.acc / self.dt).clamp(0.0, 1.0)
-    }
-}
-/// Legacy float accumulator; new code uses [`crate::IntAcc`] for exact steps.
-#[deprecated(note = "Use `crate::IntAcc` for fixed-step accumulation.")]
-pub type FixedAcc = LegacyFixedAcc;
 /// Deterministic tick state: construct -> step -> hash.
 /// Warm steady-state path: `step` borrows nothing and allocates nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,21 +87,6 @@ mod tests {
         assert!((MAX_FRAME_DT - 0.1).abs() < f32::EPSILON);
     }
     #[test]
-    fn acc_cap5_anti_spiral() {
-        let mut a = LegacyFixedAcc::fixed();
-        assert_eq!(a.push(10.0), 5);
-        assert!(a.alpha() >= 0.0 && a.alpha() <= 1.0);
-        let mut b = LegacyFixedAcc::fixed();
-        assert_eq!(b.push(0.0), 0);
-        assert_eq!(b.alpha(), 0.0);
-    }
-    #[test]
-    fn acc_exact_steps() {
-        let mut a = LegacyFixedAcc::fixed();
-        assert_eq!(a.push(DT), 1);
-        assert_eq!(a.push(DT * 2.5), 2);
-    }
-    #[test]
     fn run_600_seed2040_deterministic_x2() {
         let h1 = run_ticks(600, 2040, |t, _| t.0);
         let h2 = run_ticks(600, 2040, |t, _| t.0);
@@ -185,21 +133,10 @@ mod tests {
         assert_eq!(state.tick, 64);
     }
     #[test]
-    #[expect(
-        deprecated,
-        reason = "alias-vs-legacy identity is the point of this test"
-    )]
     fn legacy_bits_frozen_identical() {
         assert_eq!(LEGACY_DT.to_bits(), (1.0f32 / 60.0f32).to_bits());
         assert_eq!(DT.to_bits(), LEGACY_DT.to_bits());
         assert_eq!(LEGACY_MAX_FRAME_DT.to_bits(), 0.1f32.to_bits());
         assert_eq!(MAX_FRAME_DT.to_bits(), LEGACY_MAX_FRAME_DT.to_bits());
-        let mut legacy = LegacyFixedAcc::fixed();
-        let mut alias = FixedAcc::fixed();
-        assert_eq!(legacy.acc.to_bits(), alias.acc.to_bits());
-        assert_eq!(legacy.dt.to_bits(), alias.dt.to_bits());
-        assert_eq!(legacy.push(DT), alias.push(LEGACY_DT));
-        assert_eq!(legacy.push(DT * 2.5), alias.push(LEGACY_DT * 2.5));
-        assert_eq!(legacy.alpha().to_bits(), alias.alpha().to_bits());
     }
 }

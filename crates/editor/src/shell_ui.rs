@@ -28,6 +28,7 @@ use crate::outline::{
     self, OutlinerHandles, OutlinerRow, OutlinerView, Selection as SharedSelection, SelectionBank,
 };
 use crate::shell::{Panel, Shell, ShellError};
+use crate::spine_inspect::{inspect_spine, SpineInspectError};
 use crate::templates::TemplateKind;
 use crate::tuning::CombatField;
 use crate::viewport::ViewportSize;
@@ -69,6 +70,17 @@ pub struct ShellUi {
     inspector_panel: InspectorPanel,
     /// Next idempotency key for inspector batches (never zero).
     inspector_key: u64,
+    /// Spine actors shown read-only above the document grid, when a host
+    /// attached a spine snapshot.
+    spine: Option<SpineShown>,
+}
+
+/// One attached spine frame: the extraction tick and digest plus a node per
+/// live actor (components already served by the RC4 registry).
+struct SpineShown {
+    tick: u32,
+    digest: u64,
+    nodes: Vec<NodeView>,
 }
 
 impl ShellUi {
@@ -95,12 +107,50 @@ impl ShellUi {
             set_name: String::new(),
             inspector_panel: InspectorPanel::new(),
             inspector_key: 1,
+            spine: None,
         }
+    }
+
+    /// Show a spine snapshot at the top of the Inspector tab, read-only. The
+    /// bytes pass through the RC2 extraction bridge and the RC4 `registry`
+    /// first; a refused snapshot leaves the previous frame shown. Returns the
+    /// actor count shown.
+    pub fn set_spine(
+        &mut self,
+        tick: u32,
+        snapshot: &engine_ecs::spine::SpineSnapshot,
+        registry: &engine_scene::schema::SchemaRegistry,
+    ) -> Result<usize, SpineInspectError> {
+        let (view, nodes) = inspect_spine(tick, snapshot, registry)?;
+        let shown = nodes.len();
+        self.spine = Some(SpineShown {
+            tick,
+            digest: view.digest(),
+            nodes,
+        });
+        Ok(shown)
+    }
+
+    /// Drop the shown spine frame (the match ended or was restarted).
+    pub fn clear_spine(&mut self) {
+        self.spine = None;
     }
 
     /// Current gizmo tool offered in the viewport panel.
     pub fn gizmo_tool(&self) -> GizmoTool {
         self.gizmo.tool()
+    }
+
+    /// Bring one panel's tab to the front of its dock leaf and focus it, so
+    /// the next frame draws that panel (the panel frame bench times each in
+    /// turn). False when the dock holds no such tab yet.
+    pub fn focus_panel(&mut self, panel: Panel) -> bool {
+        let Some(path) = self.dock.find_tab(&panel) else {
+            return false;
+        };
+        let _ = self.dock.set_active_tab(path);
+        self.dock.set_focused_node_and_surface(path.node_path());
+        true
     }
 
     /// Draw the dock area into the host's root [`egui::Ui`], without a live
@@ -166,6 +216,7 @@ impl ShellUi {
             &mut self.set_name,
         );
         let (inspector_panel, inspector_key) = (&mut self.inspector_panel, &mut self.inspector_key);
+        let spine = &self.spine;
         let mut viewer = Viewer {
             shell,
             gizmo,
@@ -183,6 +234,7 @@ impl ShellUi {
             set_name,
             inspector_panel,
             inspector_key,
+            spine,
         };
         DockArea::new(dock).show_inside(ui, &mut viewer);
     }
@@ -206,6 +258,7 @@ struct Viewer<'a> {
     set_name: &'a mut String,
     inspector_panel: &'a mut InspectorPanel,
     inspector_key: &'a mut u64,
+    spine: &'a Option<SpineShown>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -372,6 +425,9 @@ impl Viewer<'_> {
     /// fold into the command batch, so viewport, outliner and inspector
     /// agree on the identical live selection object.
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        if let Some(spine) = self.spine {
+            Self::spine_section(ui, spine);
+        }
         let (rows, live) = match self.outline_handles() {
             Ok(handles) => handles,
             Err(error) => {
@@ -403,6 +459,28 @@ impl Viewer<'_> {
         ));
         self.inspector_grid_rows(ui, &grid);
         self.inspector_apply_bar(ui, &grid, &rows);
+    }
+
+    /// Spine actors, read-only: one line per component at its served version.
+    fn spine_section(ui: &mut egui::Ui, spine: &SpineShown) {
+        egui::CollapsingHeader::new(format!(
+            "Spine t{} ({} actors, {:016x})",
+            spine.tick,
+            spine.nodes.len(),
+            spine.digest
+        ))
+        .default_open(true)
+        .show(ui, |ui| {
+            for node in &spine.nodes {
+                ui.label(node.key.clone().unwrap_or_default());
+                for component in &node.components {
+                    ui.label(format!(
+                        "  {} v{}: {}",
+                        component.component, component.version, component.payload
+                    ));
+                }
+            }
+        });
     }
 
     /// Grid rows with per-cell staging; read-only cells show their reason.
@@ -1163,6 +1241,67 @@ mod tests {
         assert_eq!(shell.selection, Some(id));
         assert!(shell.staged_preview().is_none());
         assert_eq!(shell.document().hierarchy.len(), 1);
+    }
+
+    /// `focus_panel` makes the named tab the active one in its leaf.
+    #[test]
+    fn focus_panel_activates_the_named_tab() {
+        let shell = Shell::new();
+        let mut ui_state = ShellUi::new(&shell);
+        for panel in Panel::all() {
+            assert!(ui_state.focus_panel(panel));
+            let path = ui_state.dock.find_tab(&panel).expect("tab is docked");
+            let leaf = ui_state.dock.leaf(path.node_path()).expect("leaf");
+            assert_eq!(leaf.tabs[leaf.active.0], panel);
+        }
+    }
+
+    /// ARC6 inspector smoke: a spine snapshot read through the extraction
+    /// bridge paints its fighters' components in the Inspector tab, a refused
+    /// snapshot keeps the last frame, and clearing removes it.
+    #[test]
+    fn inspector_paints_spine_components_from_a_snapshot() {
+        use crate::spine_inspect::{fixture::fight, spine_registry};
+
+        // Every text run egui painted this frame.
+        fn painted(output: &egui::FullOutput) -> String {
+            let mut text = String::new();
+            for clipped in &output.shapes {
+                if let egui::epaint::Shape::Text(run) = &clipped.shape {
+                    text.push_str(run.galley.text());
+                    text.push(' ');
+                }
+            }
+            text
+        }
+        let mut shell = Shell::new();
+        let mut ui_state = ShellUi::new(&shell);
+        assert!(ui_state.focus_panel(Panel::Inspector));
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let mut frame = |ui_state: &mut ShellUi, shell: &mut Shell| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..egui::RawInput::default()
+            };
+            painted(&ctx.run_ui(input, |ui| ui_state.show(shell, ui)))
+        };
+        let registry = spine_registry().expect("spine components register");
+
+        assert!(!frame(&mut ui_state, &mut shell).contains("fighter 0"));
+        assert_eq!(ui_state.set_spine(41, &fight(), &registry), Ok(2));
+        let shown = frame(&mut ui_state, &mut shell);
+        assert!(shown.contains("Spine t41 (2 actors"), "{shown}");
+        assert!(shown.contains("fighter 0"), "{shown}");
+        assert!(shown.contains("vitals v1: hp=800"), "{shown}");
+        assert!(shown.contains("fighter 1"), "{shown}");
+
+        let mut forged = fight();
+        forged.hash ^= 1;
+        assert!(ui_state.set_spine(42, &forged, &registry).is_err());
+        assert!(frame(&mut ui_state, &mut shell).contains("Spine t41"));
+        ui_state.clear_spine();
+        assert!(!frame(&mut ui_state, &mut shell).contains("Spine t41"));
     }
 
     /// Viewport, outliner and inspector agree on the identical live selection.

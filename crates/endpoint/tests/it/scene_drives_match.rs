@@ -46,12 +46,26 @@ fn wall_pose() -> PoseDto {
     }
 }
 
+/// A node hanging above head height: it blocks no fighter, so a scene holding
+/// only this plays as the empty arena yet has a revision to pin.
+fn marker_pose() -> PoseDto {
+    PoseDto {
+        pos: [0.0, 10.0, 0.0],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        scale: [1.0, 1.0, 1.0],
+    }
+}
+
 fn insert_wall(server: &McpServer, key: u64) -> u64 {
+    insert_node(server, key, wall_pose())
+}
+
+fn insert_node(server: &McpServer, key: u64, local: PoseDto) -> u64 {
     let rev = revision_of(server);
     let ops = vec![OpDto::Insert {
         id: ObjectId::new().to_string(),
         parent: ObjectId::NIL.to_string(),
-        local: wall_pose(),
+        local,
     }];
     let approval = TxPreviewTool::invoke(
         server,
@@ -106,20 +120,36 @@ fn play(
         done.scene_rev, scene_rev,
         "the receipt echoes the scene revision"
     );
+    assert!(
+        done.scene_digest.is_some(),
+        "the manifest carries the scene pin digest"
+    );
     Ok(done.checkpoints)
 }
 
 #[test]
 fn scene_drives_match() {
     let server = server();
-    let empty_rev = revision_of(&server);
 
-    // The empty scene is the legacy arena: same checkpoints with or without
-    // naming it.
-    let legacy = play(&server, 2040, None).expect("legacy plays");
+    // An unauthored arena (revision 0) never plays, pinned or not.
+    for offered in [None, Some(0)] {
+        let refused = play(&server, 2040, offered).expect_err("revision 0 refuses");
+        assert!(refused.starts_with("empty_arena"), "{refused}");
+    }
+
+    // A run must name the scene it plays.
+    let empty_rev = insert_node(&server, 40, marker_pose());
+    let unpinned = play(&server, 2040, None).expect_err("an unpinned run refuses");
+    assert!(unpinned.starts_with("unpinned_run"), "{unpinned}");
+
+    // A scene with nothing solid is the legacy arena: same checkpoints.
     let empty = play(&server, 2040, Some(empty_rev)).expect("empty scene plays");
-    assert_eq!(legacy.len(), TICKS as usize);
-    assert_eq!(empty, legacy, "an empty scene is the legacy match");
+    let config = ArenaConfig::try_new(2040, TICKS, 2, HALF).expect("config");
+    let legacy = engine_arena::run(&config, &FighterTape(Vec::new()));
+    assert_eq!(empty.len(), TICKS as usize);
+    for (dto, point) in empty.iter().zip(&legacy) {
+        assert_eq!((dto.tick, dto.hash), (point.tick, point.hash));
+    }
 
     // An AI edit: one 2 m wall through the door.
     let walled_rev = insert_wall(&server, 41);

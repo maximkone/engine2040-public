@@ -7,19 +7,37 @@
 #![cfg(feature = "rules")]
 
 use engine_editor::capability::Capability;
+use engine_editor::commands::{self, Batch, Document, Journal, Op};
 use engine_endpoint::mcp::McpServer;
 use engine_endpoint::packs::rules::{
     RulesExplainArgs, RulesExplainTool, RulesSetArgs, RulesSetTool, RulesTestArgs, RulesTestTool,
 };
 use engine_endpoint::play::{CheckpointDto, PlayRunArgs, PlayRunTool};
+use engine_scene::ids::ObjectId;
+use engine_scene::transform::Transform;
 use rmcp::handler::server::router::tool::SyncTool;
 
 const SESSION: u64 = 7;
 const TICKS: u32 = 600;
 const BASH: &str = include_str!("../../../rules/scripts/shield_bash_arena.rhai");
 
+/// A session at revision 1 whose scene plays as the empty arena: the one node
+/// hangs above head height, so it blocks no fighter but gives the run a
+/// revision to pin.
 fn server() -> McpServer {
-    McpServer::new(SESSION, Capability::unrestricted(SESSION))
+    let (mut doc, mut journal) = (Document::new(), Journal::new());
+    let marker = Batch {
+        ops: vec![Op::Insert {
+            id: ObjectId::new(),
+            parent: ObjectId::NIL,
+            local: Transform::new([0.0, 10.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+        }],
+        base_revision: 0,
+        idempotency_key: 1,
+        provenance: None,
+    };
+    commands::apply(&mut doc, &mut journal, &marker).expect("marker applies");
+    McpServer::with_document(doc, journal, SESSION, Capability::unrestricted(SESSION))
 }
 
 fn play(server: &McpServer, seed: u64) -> (Vec<CheckpointDto>, Vec<String>) {
@@ -30,6 +48,7 @@ fn play(server: &McpServer, seed: u64) -> (Vec<CheckpointDto>, Vec<String>) {
         fighters: Some(2),
         half_extent_m: Some(12.0),
         inputs: Some(Vec::new()),
+        scene_rev: Some(1),
         ..PlayRunArgs::default()
     };
     let started = PlayRunTool::invoke(server, start).expect("play.run starts");

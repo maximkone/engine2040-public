@@ -15,6 +15,13 @@
   #input, #audio { position: fixed; right: 8px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   #input { top: 8px; }
   #audio { top: 34px; }
+  /* QW3/QW12: how the module arrived (bundle, bytes fetched, download, compile, first frame). */
+  #load, #memory { position: fixed; right: 8px; top: 86px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; max-width: 60vw; white-space: pre-wrap; word-break: break-all; }
+  #memory { top: 112px; }
+  /* WEB9/WEB12: the net duel line, only when the address has ?server=. */
+  #net { display: none; position: fixed; right: 8px; top: 60px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  body[data-net] #net { display: block; }
+  body[data-net="failed"] #net { background: #b00020; color: #fff; font-weight: 700; }
   #report { position: fixed; left: 8px; right: 8px; bottom: 8px; margin: 0; padding: 6px 8px; max-height: 40vh; overflow: auto; background: rgba(0, 0, 0, 0.7); border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
   /* The arena page keeps the raw adapter line to two rows (it grows on hover) so the picture stays visible. */
   body[data-mode="arena"] #report { right: 50vw; max-height: 3.4em; opacity: 0.85; }
@@ -33,6 +40,9 @@
 <div id="hud">frame 0 | -- ms</div>
 <pre id="input">input: kb=0 mouse=0 pad=0</pre>
 <pre id="audio">audio: state=suspended</pre>
+<pre id="net">net: idle</pre>
+<pre id="load">load: fetching the engine</pre>
+<pre id="memory">memory: no reading yet</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>
 <div id="arena-info">
@@ -40,6 +50,9 @@
   <pre id="passes">passes: waiting for the first frame</pre>
   <pre id="receipt">receipt: waiting for the first frame</pre>
   <pre id="capture">capture: asked for after frame 30</pre>
+  <pre id="tier">tier: choosing</pre>
+  <pre id="pipelines">pipelines: building behind the loader</pre>
+  <pre id="split">split: the first second is not over yet</pre>
 </div>
 <div id="fatal" role="alert">
   <h1>This browser cannot run the game</h1>
@@ -57,17 +70,45 @@
   <div style="position:fixed;inset:0;z-index:11;padding:5vmin;background:#b00020;color:#fff;font:600 20px system-ui,sans-serif">This page needs JavaScript, WebAssembly and WebGPU (Chrome or Edge 113+, Safari 26+, Firefox 141+ on Windows).</div>
 </noscript>
 <script type="module">
-import init, { run, run_arena, lose_device, request_arena_capture } from "./engine.js";
+import init, { run, run_arena, lose_device, request_arena_capture, run_net } from "./engine.js";
+import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory } from "./loader.js";
 
 // For the headless check: destroys the device and waits for the shell to come back, and asks for a fresh
 // GPU copy of the canvas.
 window.loseDevice = lose_device;
 window.requestArenaCapture = request_arena_capture;
 // The arena is the page; `?square` opens the plain WebGPU shell (a cleared canvas and one moving square).
-const square = new URLSearchParams(location.search).has("square");
+const query = new URLSearchParams(location.search);
+const square = query.has("square");
 
 try {
-  await init();
+  // QW3/QW12: loader.js fetches and compiles the module (streaming, cached by hash) and times it; a wrong MIME type or a
+  // missing file throws here and lands in the fatal page below with its reason.
+  const loaded = await loadEngine(import.meta.url);
+  const stats = (window.loadStats = loaded.stats); // live: initMs, firstFrameMs and the final cache outcome are added as they happen
+  window.loadSettled = loaded.settled;
+  const show = () => { document.getElementById("load").textContent = loadLine(stats, stats.initMs, stats.firstFrameMs); };
+  const tInit = performance.now();
+  const wasm = await init({ module_or_path: loaded.module });
+  stats.initMs = performance.now() - tInit;
+  show();
+  // QW14: linear memory in 64 KiB pages at the first frame and every 60 s (window.memoryLog); growMemory is the headless check's forced grow.
+  const memoryLog = (window.memoryLog = []);
+  const mem = watchMemory(wasm.memory, memoryLog);
+  window.sampleMemory = () => { mem.sample(); document.getElementById("memory").textContent = memoryLine(memoryLog); return memoryLog.at(-1).pages; };
+  window.growMemory = (pages) => { wasm.memory.grow(pages); return window.sampleMemory(); };
+  watchFirstFrame(document.body).then((t) => {
+    stats.firstFrameMs = t;
+    window.sampleMemory();
+    return loaded.settled.then(show);
+  });
+  // WEB9/WEB12: `?server=ws://host:port` (optionally `&wt=https://host:port/e2040&cert=<sha256 hex>`) makes the page
+  // join a native dedicated server and play a scripted duel; it prints `net: transport=... ticks=... hash=... peers=...`
+  // to #net and the console and leaves the line in window.netResult. It needs no GPU, so it starts beside the arena.
+  const server = query.get("server");
+  if (server) {
+    window.netResult = run_net(server, query.get("wt"), query.get("cert")).then((line) => (window.netLine = line));
+  }
   await (square ? run("canvas") : run_arena("canvas"));
 } catch (e) {
   // The wasm module did not load or start (no WebAssembly, a missing file, a crash).

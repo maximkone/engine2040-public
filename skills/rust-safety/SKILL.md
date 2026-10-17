@@ -1,6 +1,6 @@
 ---
 name: rust-safety
-description: "Use when a diff adds unsafe code, a static, an atomic, a lock or guard, a thread, channel or Arc, a real-time callback, or a numeric `as` cast or integer or float math in sim code: safety docs, lock spans, join, id-order merge, TryFrom, overflow mode."
+description: "Use when a diff adds unsafe, a static, an atomic, a lock, a thread, channel or Arc, a real-time callback, or numeric casts and integer or float math in sim code: SAFETY docs, lock spans, join, TryFrom, overflow."
 ---
 
 # Rust safety

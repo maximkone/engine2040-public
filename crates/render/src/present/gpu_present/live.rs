@@ -818,6 +818,7 @@ pub(super) fn live_overlay_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    use crate::pipeline_warmup::CountedPipelines as _;
     let desc = crate::overlay::overlay_pipeline_desc();
     let layout = crate::overlay::overlay_vertex_layout();
     let stride = u64::try_from(layout.stride).unwrap_or(u64::MAX);
@@ -869,7 +870,7 @@ pub(super) fn live_overlay_pipeline(
     } else {
         Some(wgpu::BlendState::REPLACE)
     };
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some("ra1-overlay-pipeline"),
         layout: Some(&pipe_layout),
         vertex: wgpu::VertexState {
@@ -1324,7 +1325,7 @@ impl Presenter {
                             at = at.saturating_add(4);
                         }
                     }
-                    let overlay_pipeline = live_overlay_pipeline(&self.device, overlay_format);
+                    let overlay_pipeline = self.overlay_pipeline_for(overlay_format);
                     self.encode_overlay(
                         &mut enc,
                         Some(plan),

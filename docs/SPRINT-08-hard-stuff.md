@@ -34,14 +34,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
 - [ ] AM14 anim: parallel SIMD eval — per-character jobs on RC3 fork-join,
   SoA sampling on `wide` (license read first). Tier A. Size M. Owns
   `crates/anim/src/par.rs`. Accept: at least 3x on 4 cores for 64 fighters;
-  identical poses under every chunking. needs: AM1, RC3.
+  identical poses under every chunking. needs: AM1, RC3. Progress 2026-10-17: 6ab36492 anim par.rs per-character eval on the RC3 pool, poses bit-identical for 0,1,2,4,8 workers; speedup 2.0x on 64 fighters (run 39067637155), the 3x bar is not met and the wide SIMD half is skipped (external dependency).
 - [ ] AM15 anim: additive layers — locomotion base, combat upper body and
   flinch additives through one inertializer, with analytic two-bone IK in
   contact windows (Bollo GDC 2018, Clavet and Paragon GDC 2016; ozz and ACL
   MIT as patterns; diffusion and MOCHA-style generators not taken). Tier B.
   Size M. Owns `crates/anim/src/additive.rs`. Accept: no pops on any
   interruption; foot slide at most 20 mm straight and 40 mm on pivots;
-  replay x2; at most 0.05 ms per tick. needs: AM1, AM2, AM3, AM6.
+  replay x2; at most 0.05 ms per tick. needs: AM1, AM2, AM3, AM6. Progress 2026-10-17: ba6ad347 anim additive.rs layers + one inertializer + planted feet via solve_limb; slide within 20 mm straight, 40 mm pivots, 1.3 us per tick (run 39067390119); left: fighter_look does not call AdditiveRig::tick yet.
 - [ ] AM18 anim: thousand-agent crowd pose budget — extend the AM13 tiers Progress 2026-10-17: crates/anim/src/crowd_scale.rs landed (assign_crowd_tiers, eight_nearest_match_full_rate_poses, far ring FarImpostorSink handoff, run 39056591616); left: the 1,000-agent p99 is a modeled cost (modeled_tick_cost_posts_per_tier_within_budget), the timing gate thousand_agent_tick_p99_within_budget is #[ignore] and only re-checks the model, and no PF workload entry exists.
   to a seeded 1,000-agent crowd tape on the reference CPU with per-tier
   costs posted and the far ring handed to VG4 impostors by contract.
@@ -51,14 +51,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   1,000 agents p99 at most 2 ms; the 8 nearest match full-rate poses;
   golden unchanged. needs: AM13, PF1.
   (PLN animation.md EXTEND, proposed 2026-09-29.)
-- [ ] LM5 anim: net-pose divergence diagnostics — a per-fighter pose-hash
+- [x] LM5 anim: net-pose divergence diagnostics — a per-fighter pose-hash
   ring beside `net_pose.rs` (diagnostics only, never authoritative) that
   names the first divergent tick and fighter on a seeded N-client soak.
   Tier A. Size S. Owns the diagnostics hunks beside
   `crates/anim/src/net_pose.rs` (LM3 file frozen; lands after LM3).
   Accept: `cargo test -p engine-anim --lib net_diverge` green; seeded
   soak names first divergence 10/10; sim bytes x2; golden unchanged.
-  needs: LM3. (PLN animation.md EXTEND, proposed 2026-09-29.)
+  needs: LM3. (PLN animation.md EXTEND, proposed 2026-09-29.) Landed 21e1a645. net_diverge.rs pose-hash ring names the first divergent tick and fighter on 10 of 10 seeds in a 4-client 8-fighter soak (anim tests run 39067150760).
 - [ ] LM6 anim: slope/stair/sand ground feel — deepen `warp_ground.rs`
   with slope cling, stair stepping and soft-ground sink so the LM2 bars
   hold off flat ground. Tier A. Size M. Owns the slope hunks
@@ -106,14 +106,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Size S. Owns baseline hunks + schema-freeze test. Accept: PF1 gate
   fails on seeded regression; 8-fighter tick in budget; schema change
   refuses with diff; golden unchanged. needs: LM1, AM8, PF1.
-  (PLN28 animation.md, reviewed 2026-09-25.)
-- [ ] TV2 anim: traversal-to-nav link contract proof — every TV1 edge Progress 2026-10-17: crates/nav/src/links.rs has the traversal link registry with rebake_links and rebake_for_set tests (nav suite green, run 39057395844); left: no contract test ties each anim TV1 edge to its NV2 link entry on the five fixtures.
+  (PLN28 animation.md, reviewed 2026-09-25.) Progress 2026-10-17: 4fa1246f motion_schema_test.rs freezes the LM1 feature schema and gates search cost in lane ops; left: PF1 ms workloads in crates/perf and recorded baselines (needs a perf-to-anim edge).
+- [x] TV2 anim: traversal-to-nav link contract proof — every TV1 edge Progress 2026-10-17: crates/nav/src/links.rs has the traversal link registry with rebake_links and rebake_for_set tests (nav suite green, run 39057395844); left: no contract test ties each anim TV1 edge to its NV2 link entry on the five fixtures.
   names exactly its NV2 link-registry entry and rebakes exactly those
   links, proven x2 on vault/hurdle/mantle/climb/drop fixtures. Tier A.
   Size S. Owns contract test + per-edge link records (no new system).
   Accept: TV1-expected actions on registry links; warped roots land
   within 1 cm; bytes x2. needs: TV1, NV2.
-  (PLN28 animation.md, reviewed 2026-09-25.)
+  (PLN28 animation.md, reviewed 2026-09-25.) Landed 2681cdda. traversal_link_test.rs: each vault/hurdle/mantle/climb/drop edge names one registry entry and rebakes only its own link, roots land within 1 cm, bytes repeat x2 (run 39067150760).
 - [ ] PX5 physics: physics-driven locomotion — a controller trained offline
   (AMP and DeepMimic lineage) through the DT pipeline, shipped as an integer
   `.e2nn` net; LM1 stays the default. Tier C. Size L. Owns

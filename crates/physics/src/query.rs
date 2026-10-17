@@ -17,6 +17,7 @@
 
 use core::fmt;
 
+use engine_core::fixed::Fixed;
 use engine_core::vec3::cross3;
 
 use crate::collider::Collider;
@@ -370,6 +371,210 @@ pub fn ray_cast(
     sphere_cast(colliders, origin, dir, 0.0, max_distance, scope)
 }
 
+// ---- Q16 swept capsule casts (PX20) -------------------------------------------------
+//
+// The same query in `Fixed` (Q16.16) for the integer simulation: a swept sphere (radius
+// zero is a segment) against capsules, every hit with its time of impact as a Q16
+// fraction of the move, sorted nearest first. Integer `+ - *` and `sqrt` only, no `f32`;
+// targets are independent, so the answer does not depend on their order.
+
+type F3 = [Fixed; 3];
+
+/// Largest coordinate, in meters, that [`swept_cast`] accepts (keeps every Q16 product
+/// far from overflow).
+pub const SWEPT_RANGE_M: i64 = 256;
+/// Largest sphere or capsule radius, in meters, that [`swept_cast`] accepts.
+pub const SWEPT_RADIUS_M: i64 = 64;
+
+/// Why a Q16 cast was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweptError {
+    /// A coordinate is beyond [`SWEPT_RANGE_M`] or a radius is negative or beyond
+    /// [`SWEPT_RADIUS_M`].
+    OutOfRange,
+}
+
+impl fmt::Display for SweptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a swept cast coordinate or radius is out of range")
+    }
+}
+
+impl std::error::Error for SweptError {}
+
+/// A capsule a sweep can hit: the segment `a..b` grown by `radius` (`a == b` is a sphere).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CastCapsule {
+    /// Caller id, unique per cast; breaks ties between equal times of impact.
+    pub id: u32,
+    /// One end of the axis, meters.
+    pub a: [Fixed; 3],
+    /// The other end of the axis, meters.
+    pub b: [Fixed; 3],
+    /// Radius around the axis, meters.
+    pub radius: Fixed,
+}
+
+/// One capsule a sweep met.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SweptHit {
+    /// The [`CastCapsule::id`] that was hit.
+    pub id: u32,
+    /// Time of impact, a fraction of the move: zero when the sweep starts touching,
+    /// one when contact comes only at the end.
+    pub toi: Fixed,
+    /// Unit direction from the capsule towards the sphere centre at contact.
+    pub normal: [Fixed; 3],
+}
+
+fn fsub(a: F3, b: F3) -> F3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn fadd(a: F3, b: F3) -> F3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn fscale(a: F3, s: Fixed) -> F3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn fdot(a: F3, b: F3) -> Fixed {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn funit(a: F3) -> Option<F3> {
+    let len = fdot(a, a).sqrt();
+    (len.0 > 0).then(|| a.map(|v| v / len))
+}
+
+/// `dot / axis_sq` as a Q16 fraction, from exact Q32 products (`axis_sq` above zero).
+fn along(p: F3, e: F3, axis_sq: i128) -> Fixed {
+    let dot: i128 = p
+        .iter()
+        .zip(&e)
+        .map(|(x, y)| i128::from(x.0) * i128::from(y.0))
+        .sum();
+    Fixed(i64::try_from((dot << 16) / axis_sq).unwrap_or(i64::MAX))
+}
+
+/// Normal at a contact: away from the touched point, else against the move.
+fn contact_normal(centre: F3, touched: F3, d: F3) -> F3 {
+    let against = fscale(d, Fixed::NEG_ONE);
+    funit(fsub(centre, touched))
+        .or_else(|| funit(against))
+        .unwrap_or([Fixed::ZERO, Fixed::ONE, Fixed::ZERO])
+}
+
+/// First `t` in `0..=1` where the point `o + t d` is `r` from the point `v`.
+fn sweep_point(o: F3, d: F3, v: F3, r: Fixed) -> Option<(Fixed, F3)> {
+    let (a, m) = (fdot(d, d), fsub(o, v));
+    let (b, c) = (fdot(m, d), fdot(m, m) - r * r);
+    let disc = b * b - a * c;
+    if a.0 == 0 || b.0 >= 0 || c.0 < 0 || disc.0 < 0 {
+        return None;
+    }
+    let t = (-b - disc.sqrt()).checked_div(a)?;
+    (t.0 >= 0 && t <= Fixed::ONE).then(|| (t, contact_normal(fadd(o, fscale(d, t)), v, d)))
+}
+
+/// First `t` in `0..=1` where `o + t d` is `r` from the axis `a + u e`, `0 <= u <= 1`.
+fn sweep_side(o: F3, d: F3, (a, e, axis_sq): (F3, F3, i128), r: Fixed) -> Option<(Fixed, F3)> {
+    let m = fsub(o, a);
+    let d_off = fsub(d, fscale(e, along(d, e, axis_sq)));
+    let m_off = fsub(m, fscale(e, along(m, e, axis_sq)));
+    let (qa, b) = (fdot(d_off, d_off), fdot(m_off, d_off));
+    let c = fdot(m_off, m_off) - r * r;
+    let disc = b * b - qa * c;
+    if qa.0 == 0 || b.0 >= 0 || c.0 < 0 || disc.0 < 0 {
+        return None;
+    }
+    let t = (-b - disc.sqrt()).checked_div(qa)?;
+    let centre = fadd(o, fscale(d, t));
+    let u = along(fsub(centre, a), e, axis_sq);
+    let in_range = t.0 >= 0 && t <= Fixed::ONE && u.0 >= 0 && u <= Fixed::ONE;
+    in_range.then(|| (t, contact_normal(centre, fadd(a, fscale(e, u)), d)))
+}
+
+/// The earliest contact of the sphere path `o + t d` with one capsule grown by `radius`.
+fn sweep_capsule(o: F3, d: F3, radius: Fixed, cap: &CastCapsule) -> Option<(Fixed, F3)> {
+    let r = radius + cap.radius;
+    let e = fsub(cap.b, cap.a);
+    let axis_sq: i128 = e.iter().map(|v| i128::from(v.0) * i128::from(v.0)).sum();
+    // A capsule axis shorter than 1/256 m is a sphere: its direction is below Q16 noise.
+    let long = axis_sq >= 1 << 16;
+    let u = if long {
+        along(fsub(o, cap.a), e, axis_sq).clamp(Fixed::ZERO, Fixed::ONE)
+    } else {
+        Fixed::ZERO
+    };
+    let closest = fadd(cap.a, fscale(e, u));
+    let gap = fsub(o, closest);
+    if fdot(gap, gap) <= r * r {
+        return Some((Fixed::ZERO, contact_normal(o, closest, d)));
+    }
+    let mut best: Option<(Fixed, F3)> = None;
+    let sides = long
+        .then(|| sweep_side(o, d, (cap.a, e, axis_sq), r))
+        .flatten();
+    let ends = [Some(cap.a), long.then_some(cap.b)];
+    let found = std::iter::once(sides)
+        .chain(ends.into_iter().flatten().map(|v| sweep_point(o, d, v, r)))
+        .flatten();
+    for hit in found {
+        if best.is_none_or(|b| hit.0 < b.0) {
+            best = Some(hit);
+        }
+    }
+    best
+}
+
+fn within(points: &[F3], limit: i64) -> bool {
+    points
+        .iter()
+        .flatten()
+        .all(|v| v.0.abs() <= limit * Fixed::SCALE)
+}
+
+/// Sweep a sphere of `radius` (zero is a segment) from `from` to `to` against `targets`;
+/// `out` is cleared and filled with every capsule met, nearest time of impact first,
+/// ties by [`CastCapsule::id`]. The order of `targets` never changes `out`.
+///
+/// # Errors
+/// [`SweptError::OutOfRange`] when a point is beyond [`SWEPT_RANGE_M`] or a radius is
+/// outside `0..=`[`SWEPT_RADIUS_M`].
+pub fn swept_cast(
+    from: [Fixed; 3],
+    to: [Fixed; 3],
+    radius: Fixed,
+    targets: &[CastCapsule],
+    out: &mut Vec<SweptHit>,
+) -> Result<(), SweptError> {
+    out.clear();
+    let radius_ok = |r: Fixed| (0..=SWEPT_RADIUS_M * Fixed::SCALE).contains(&r.0);
+    if !within(&[from, to], SWEPT_RANGE_M) || !radius_ok(radius) {
+        return Err(SweptError::OutOfRange);
+    }
+    if targets
+        .iter()
+        .any(|t| !within(&[t.a, t.b], SWEPT_RANGE_M) || !radius_ok(t.radius))
+    {
+        return Err(SweptError::OutOfRange);
+    }
+    let d = fsub(to, from);
+    for cap in targets {
+        if let Some((toi, normal)) = sweep_capsule(from, d, radius, cap) {
+            out.push(SweptHit {
+                id: cap.id,
+                toi,
+                normal,
+            });
+        }
+    }
+    out.sort_unstable_by_key(|h| (h.toi.0, h.id));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,6 +840,192 @@ mod tests {
                 10.0,
                 layers::WORLD
             )
+        );
+    }
+
+    fn q(v: f32) -> Fixed {
+        Fixed((v * 65536.0).round() as i64)
+    }
+
+    fn q3(v: [f32; 3]) -> F3 {
+        v.map(q)
+    }
+
+    fn cap(id: u32, a: [f32; 3], b: [f32; 3], radius: f32) -> CastCapsule {
+        CastCapsule {
+            id,
+            a: q3(a),
+            b: q3(b),
+            radius: q(radius),
+        }
+    }
+
+    fn run(from: [f32; 3], to: [f32; 3], radius: f32, targets: &[CastCapsule]) -> Vec<SweptHit> {
+        let mut out = Vec::new();
+        swept_cast(q3(from), q3(to), q(radius), targets, &mut out).expect("in range");
+        out
+    }
+
+    fn flt(v: Fixed) -> f32 {
+        v.0 as f32 / 65536.0
+    }
+
+    #[test]
+    fn swept_cast_meets_a_sphere_a_side_and_an_end_cap() {
+        // Sphere of radius 1 at the origin, swept point radius 0.5, path x -10 -> 10:
+        // contact at x = -1.5, so t = 8.5 / 20.
+        let sphere = [cap(1, [0.0; 3], [0.0; 3], 1.0)];
+        let hit = run([-10.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5, &sphere);
+        assert_eq!(hit.len(), 1);
+        assert!(
+            (flt(hit[0].toi) - 0.425).abs() < 1.0e-3,
+            "{}",
+            flt(hit[0].toi)
+        );
+        assert!((flt(hit[0].normal[0]) + 1.0).abs() < 1.0e-2);
+        // Capsule along y from -2 to 2: a sweep at mid height meets the side at x = -1.5 ...
+        let tall = [cap(2, [0.0, -2.0, 0.0], [0.0, 2.0, 0.0], 1.0)];
+        let side = run([-10.0, 0.5, 0.0], [10.0, 0.5, 0.0], 0.5, &tall);
+        assert!((flt(side[0].toi) - 0.425).abs() < 1.0e-3);
+        assert!((flt(side[0].normal[0]) + 1.0).abs() < 1.0e-2);
+        // ... and one coming down onto the top meets the rounded end cap at y = 3.5.
+        let cap_hit = run([0.0, 10.0, 0.0], [0.0, -10.0, 0.0], 0.5, &tall);
+        assert!((flt(cap_hit[0].toi) - 0.325).abs() < 1.0e-3);
+        assert!((flt(cap_hit[0].normal[1]) - 1.0).abs() < 1.0e-2);
+        // A path that clears the radii misses; one that starts inside reports zero.
+        assert!(run([-10.0, 5.0, 0.0], [10.0, 5.0, 0.0], 0.5, &tall).is_empty());
+        let inside = run([0.5, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5, &tall);
+        assert_eq!(inside[0].toi, Fixed::ZERO);
+        assert!((flt(inside[0].normal[0]) - 1.0).abs() < 1.0e-2);
+    }
+
+    #[test]
+    fn swept_cast_sorts_by_time_of_impact_then_id_and_refuses_far_points() {
+        let row = [
+            cap(9, [6.0, 0.0, 0.0], [6.0, 0.0, 0.0], 0.5),
+            cap(4, [2.0, 0.0, 0.0], [2.0, 0.0, 0.0], 0.5),
+            cap(7, [2.0, 3.0, 0.0], [2.0, 3.0, 0.0], 0.5),
+            cap(1, [2.0, -3.0, 0.0], [2.0, -3.0, 0.0], 0.5),
+        ];
+        let hits = run([0.0; 3], [10.0, 0.0, 0.0], 0.0, &row);
+        let ids: Vec<u32> = hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids, [4, 9]);
+        // Two equal times of impact keep id order whatever the target order.
+        let twins = [row[2], row[3]];
+        let tall = run(
+            [2.0, 0.0, 0.0],
+            [2.0, 8.0, 0.0],
+            0.0,
+            &[
+                twins[1],
+                cap(2, [2.0, 3.0, 0.0], [2.0, 3.0, 0.0], 0.5),
+                twins[0],
+            ],
+        );
+        assert_eq!(tall.iter().map(|h| h.id).collect::<Vec<_>>(), [2, 7]);
+        let mut out = Vec::new();
+        let far = [q(300.0), Fixed::ZERO, Fixed::ZERO];
+        assert_eq!(
+            swept_cast([Fixed::ZERO; 3], far, Fixed::ZERO, &[], &mut out),
+            Err(SweptError::OutOfRange)
+        );
+        assert_eq!(
+            swept_cast([Fixed::ZERO; 3], [Fixed::ONE; 3], q(-1.0), &[], &mut out),
+            Err(SweptError::OutOfRange)
+        );
+    }
+
+    /// Distance from `p` to the segment `a..b`, in `f32` (the test's own reference).
+    fn dist_to_axis(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+        let (e, m) = (sub(b, a), sub(p, a));
+        let ee = dot(e, e);
+        let u = if ee > 0.0 {
+            (dot(m, e) / ee).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let gap = sub(m, scale(e, u));
+        dot(gap, gap).sqrt()
+    }
+
+    /// 1,000 seeded casts, each checked against a dense march and a permuted target list;
+    /// returns a digest of every hit.
+    fn thousand_seeded_casts() -> u64 {
+        let mut rng = engine_core::Rng::new(2040);
+        let mut pick =
+            |lo: f32, hi: f32| lo + (rng.next_u32() % 10_000) as f32 / 10_000.0 * (hi - lo);
+        let mut digest = Vec::new();
+        for _ in 0..1000 {
+            let from = [pick(-6.0, 6.0), pick(-6.0, 6.0), pick(-6.0, 6.0)];
+            let to = [pick(-6.0, 6.0), pick(-6.0, 6.0), pick(-6.0, 6.0)];
+            let radius = pick(0.0, 0.6);
+            let targets: Vec<CastCapsule> = (0..8)
+                .map(|id| {
+                    let a = [pick(-5.0, 5.0), pick(-5.0, 5.0), pick(-5.0, 5.0)];
+                    let b = if id % 3 == 0 {
+                        a
+                    } else {
+                        [
+                            a[0] + pick(-2.0, 2.0),
+                            a[1] + pick(-2.0, 2.0),
+                            a[2] + pick(-2.0, 2.0),
+                        ]
+                    };
+                    cap(id, a, b, pick(0.1, 0.8))
+                })
+                .collect();
+            let hits = run(from, to, radius, &targets);
+            // Reversed and rotated target lists give the identical answer.
+            let mut shuffled = targets.clone();
+            shuffled.reverse();
+            shuffled.rotate_left(3);
+            assert_eq!(hits, run(from, to, radius, &shuffled));
+            assert!(hits
+                .windows(2)
+                .all(|w| (w[0].toi.0, w[0].id) < (w[1].toi.0, w[1].id)));
+            for t in &targets {
+                let (a, b) = (t.a.map(flt), t.b.map(flt));
+                let reach = radius + flt(t.radius);
+                let at = |s: f32| {
+                    let p = [0, 1, 2].map(|i| from[i] + (to[i] - from[i]) * s);
+                    dist_to_axis(p, a, b) - reach
+                };
+                // Deepest approach over a dense march (1/2048 of a move up to 20 m).
+                let march = (0..=2048).map(|i| (i, at(i as f32 / 2048.0)));
+                let first_inside = march.clone().find(|(_, g)| *g < -0.02).map(|(i, _)| i);
+                match hits.iter().find(|h| h.id == t.id) {
+                    None => assert!(
+                        first_inside.is_none(),
+                        "missed a hit the march found: {t:?}"
+                    ),
+                    Some(h) => {
+                        let toi = flt(h.toi);
+                        assert!(
+                            at(toi).abs() < 0.05 || toi == 0.0,
+                            "contact off the surface: {}",
+                            at(toi)
+                        );
+                        let before = (toi * 2048.0) as i32;
+                        assert!(
+                            first_inside.is_none_or(|i| i + 4 >= before),
+                            "tunnelled before the reported hit"
+                        );
+                    }
+                }
+            }
+            digest.extend(hits.iter().flat_map(|h| [u64::from(h.id), h.toi.0 as u64]));
+        }
+        engine_core::Rng::digest(&digest)
+    }
+
+    #[test]
+    fn swept_cast_thousand_seeded_casts_match_a_dense_march_and_hash_the_same_twice() {
+        let first = thousand_seeded_casts();
+        assert_eq!(first, thousand_seeded_casts());
+        assert_ne!(
+            first,
+            engine_core::Rng::digest(&[]),
+            "the seeds must hit something"
         );
     }
 }

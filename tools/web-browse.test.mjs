@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import {
-  BASE_FLAGS, FLAG_SETS, NO_GPU_SCRIPT, analyzePixels, decodePng, flagLine, goldenVerdict, isDrawn, noWebGpuVerdict, parseArgs, readPage,
-  resolveRequest, serve, verdict,
+  BASE_FLAGS, FLAG_SETS, NO_GPU_SCRIPT, analyzePixels, badMimeVerdict, decodePng, flagLine, goldenVerdict, isDrawn, loadVerdict, noWebGpuVerdict, parseArgs, quotaVerdict,
+  memoryVerdict, readPage, receiptOf, resolveRequest, serve, verdict,
 } from "./web-browse.mjs";
 
 // ---- a PNG encoder for fixtures: every filter type, so the decoder's unfilter paths all run ----
@@ -301,7 +301,8 @@ test("arenaVerdict: a drawn, intact capture with a clean receipt passes, and eac
   const good = {
     capture: "ready", captureLine: { hash: "00ff00ff00ff00ff", blank: false }, hashOk: true, nodeHash: "00ff00ff00ff00ff",
     stats: { width: 8, height: 8, distinct: 900, dominantShare: 0.05, meanLuma: 150 },
-    receipt: { ok: true, frames: 120, frameErrors: 0, validationErrors: 0 }, receiptText: "{}",
+    receipt: { ok: true, tier: "web", frames: 120, frameErrors: 0, validationErrors: 0, latePipelines: 0 }, receiptText: "{}",
+    tierText: "tier=web why=default scale=100 shadow=1024x2", splitText: "", pipelinesText: "pipelines=24 ms=412",
   };
   assert.deepEqual(arenaVerdict(good), { ok: true, problems: [] });
   assert.deepEqual(arenaVerdict(null), { ok: true, problems: [] }, "a page without the arena is not judged here");
@@ -315,10 +316,16 @@ test("arenaVerdict: a drawn, intact capture with a clean receipt passes, and eac
   assert.match(bad({ receipt: { ...good.receipt, frameErrors: 1 } }), /frame errors 1/);
   assert.match(bad({ receipt: { ...good.receipt, frames: 0 } }), /counts no frame/);
   assert.match(bad({ receipt: null, receiptText: "garbage" }), /receipt is not JSON: garbage/);
+  // WEB13: a pipeline built after the loader fails the run loudly; WEB8: the page must name its tier.
+  assert.match(bad({ receipt: { ...good.receipt, latePipelines: 2 } }), /late_compile: 2 pipeline\(s\) built after the loader/);
+  assert.match(bad({ receipt: { ...good.receipt, tier: undefined } }), /receipt names no tier/);
+  assert.match(bad({ tierText: "arena: starting" }), /prints no tier= line/);
+  assert.match(bad({ tierText: "tier=potato why=query" }), /tier line says tier=potato, the receipt says tier=web/);
+  assert.match(bad({ pipelinesText: "pipelines: waiting" }), /no pipelines=<n> ms=<t> line/);
 });
 
 test("verdict: for the arena page the GPU copy decides, a black screenshot does not fail it", async () => {
-  const arena = { capture: "ready", captureLine: { hash: "aa", blank: false }, hashOk: true, nodeHash: "aa", stats: { width: 8, height: 8, distinct: 500, dominantShare: 0.1, meanLuma: 120 }, receipt: { ok: true, frames: 40, frameErrors: 0, validationErrors: 0 }, receiptText: "{}" };
+  const arena = { capture: "ready", captureLine: { hash: "aa", blank: false }, hashOk: true, nodeHash: "aa", stats: { width: 8, height: 8, distinct: 500, dominantShare: 0.1, meanLuma: 120 }, receipt: { ok: true, tier: "web", frames: 40, frameErrors: 0, validationErrors: 0, latePipelines: 0 }, receiptText: "{}", tierText: "tier=web why=default", pipelinesText: "pipelines=24 ms=400" };
   const run = { timedOut: false, report: { ok: true, adapter: {} }, stats: { width: 8, height: 8, distinct: 1, dominantShare: 1, meanLuma: 0 }, framesAdvanced: true, recovered: true };
   assert.equal(verdict({ ...run, arena }).ok, true, "black screenshot, drawn GPU copy");
   assert.equal(verdict(run).code, "blank-canvas", "without the arena the screenshot decides");
@@ -374,4 +381,145 @@ test("writeArena leaves the PNG and the facts side by side, and nothing for a pa
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- the net duel (WEB9, WEB12) ----
+test("parseArgs takes the net duel keys and refuses the half-given ones", () => {
+  const ok = parseArgs(["--chrome", "c", "--server", "ws://127.0.0.1:7050", "--expect-hash", "00ab00ab00ab00ab", "--expect-transport", "websocket", "--net-timeout", "30"]);
+  assert.equal(ok.error, null);
+  assert.deepEqual([ok.server, ok.expectHash, ok.expectTransport, ok.netTimeout], ["ws://127.0.0.1:7050", "00ab00ab00ab00ab", "websocket", 30]);
+  assert.match(parseArgs(["--chrome", "c", "--server", "http://h:1"]).error, /--server/);
+  assert.match(parseArgs(["--chrome", "c", "--server"]).error, /--server/);
+  assert.match(parseArgs(["--chrome", "c", "--wt", "https://h:2/e2040"]).error, /go with --server/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--wt", "ws://h:2"]).error, /--wt/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--cert", "abcd"]).error, /--cert/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-hash", "xyz"]).error, /--expect-hash/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-transport", "quic"]).error, /--expect-transport/);
+  assert.equal(parseArgs(["--chrome", "c"]).server, null, "without --server the full check runs");
+});
+
+test("netUrl puts the keys in the query, encoded", async () => {
+  const { netUrl } = await import("./web-browse.mjs");
+  const cert = "ab".repeat(32);
+  assert.equal(netUrl(8099, { server: "ws://127.0.0.1:7050" }), "http://127.0.0.1:8099/index.html?server=ws%3A%2F%2F127.0.0.1%3A7050");
+  const u = new URL(netUrl(8099, { server: "ws://h:1", wt: "https://h:2/e2040", cert }));
+  assert.deepEqual([u.searchParams.get("server"), u.searchParams.get("wt"), u.searchParams.get("cert")], ["ws://h:1", "https://h:2/e2040", cert]);
+});
+
+test("netVerdict accepts only a finished duel on the expected hash, ticks and leg", async () => {
+  const { netVerdict } = await import("./web-browse.mjs");
+  const line = "net: transport=websocket ticks=600 hash=0123456789abcdef peers=1";
+  const good = netVerdict(line, "ok", { hash: "0123456789ABCDEF", transport: "websocket" });
+  assert.equal(good.ok, true);
+  assert.deepEqual(good.parsed, { transport: "websocket", ticks: 600, hash: "0123456789abcdef", peers: 1 });
+  assert.equal(netVerdict(line, "ok").ok, true, "no expectation, only the shape");
+  const wrongHash = netVerdict(line, "ok", { hash: "fedcba9876543210" });
+  assert.equal(wrongHash.ok, false);
+  assert.match(wrongHash.problems[0], /the server's is fedcba9876543210/);
+  assert.match(netVerdict(line, "ok", { transport: "webtransport" }).problems[0], /expected webtransport/);
+  assert.match(netVerdict(line.replace("ticks=600", "ticks=599"), "ok").problems[0], /ticks 599, expected 600/);
+  assert.match(netVerdict(line.replace("peers=1", "peers=0"), "ok").problems[0], /peers 0/);
+  const failed = netVerdict("net: failed transport=none reason=no leg connected: websocket leg failed: closed", "failed");
+  assert.equal(failed.ok, false);
+  assert.match(failed.problems[0], /ended as failed.*websocket leg failed/);
+  assert.match(netVerdict("", null).problems[0], /never finished/);
+  assert.match(netVerdict("net: idle", "ok").problems[0], /not the net shape/);
+});
+
+test("readNetPage reads the line a mock page prints (real Chrome, WEB_BROWSE_CHROME)", { skip: !process.env.WEB_BROWSE_CHROME }, async () => {
+  const { readNetPage, netVerdict } = await import("./web-browse.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "net-page-"));
+  const html = `<!doctype html><body><pre id="net">net: connecting</pre><script>
+    const q = new URLSearchParams(location.search);
+    setTimeout(() => { document.getElementById('net').textContent = 'net: transport=websocket ticks=600 hash=0123456789abcdef peers=1'; document.body.dataset.net = 'ok'; }, 300);
+    document.title = q.get('server');
+  </script></body>`;
+  writeFileSync(join(dir, "index.html"), html);
+  const server = await serve(dir);
+  try {
+    const url = `http://127.0.0.1:${server.port}/index.html?server=ws%3A%2F%2Fh%3A1`;
+    const r = await readNetPage({ chrome: process.env.WEB_BROWSE_CHROME, url, logFile: join(dir, "chrome.log"), waitMs: 20000 });
+    assert.equal(r.state, "ok");
+    assert.equal(netVerdict(r.text, r.state, { hash: "0123456789abcdef" }).ok, true);
+  } finally {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("netVerdict can demand a loud failure that names the blocked leg", async () => {
+  const { netVerdict } = await import("./web-browse.mjs");
+  const text = "net: failed transport=none reason=no leg connected: webtransport leg failed: no answer within 5 s; websocket leg failed: the socket could not connect";
+  const want = { failure: ["webtransport leg failed", "websocket leg failed"] };
+  assert.equal(netVerdict(text, "failed", want).ok, true);
+  assert.match(netVerdict(text, "failed", { failure: ["quic leg failed"] }).problems[0], /lacks "quic leg failed"/);
+  assert.match(netVerdict("net: transport=websocket ticks=600 hash=0123456789abcdef peers=1", "ok", want).problems[0], /expected the duel to fail/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-failure", "x", "--expect-hash", "00ab00ab00ab00ab"]).error, /does not go with/);
+  assert.deepEqual(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--expect-failure", "a", "--expect-failure", "b"]).expectFailure, ["a", "b"]);
+});
+
+// ---- how the module arrived (QW3, QW12) ----
+test("the server can type .wasm wrongly on purpose and only .wasm", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "web-browse-mime-"));
+  writeFileSync(join(dir, "engine_bg.wasm"), Buffer.from([0, 0x61, 0x73, 0x6d]));
+  writeFileSync(join(dir, "engine.js"), "export {}");
+  const s = await serve(dir, { wasmType: "text/plain" });
+  try {
+    const base = `http://127.0.0.1:${s.port}`;
+    assert.equal((await fetch(`${base}/engine_bg.wasm`)).headers.get("content-type"), "text/plain");
+    assert.match((await fetch(`${base}/engine.js`)).headers.get("content-type"), /^text\/javascript/);
+    assert.deepEqual(s.log.map((l) => l.type), ["text/plain", "text/javascript; charset=utf-8"]);
+  } finally {
+    await s.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const LOAD = { bundle: "network", bytesFetched: 3399353, downloadMs: 812, compileMs: 95, initMs: 40.4, firstFrameMs: 4650.2, cache: "stored", persisted: true };
+
+test("loadVerdict: network first, three timings, a stored copy, then bundle=cache with 0 bytes fetched", () => {
+  assert.deepEqual(loadVerdict(LOAD, { bundle: "cache", bytesFetched: 0 }), { ok: true, problems: [] });
+  assert.match(loadVerdict(null, null).problems[0], /no load stats/);
+  assert.match(loadVerdict({ ...LOAD, bundle: "cache" }, { bundle: "cache", bytesFetched: 0 }).problems[0], /first load of a fresh profile says bundle=cache/);
+  assert.match(loadVerdict({ ...LOAD, cache: "quota" }, { bundle: "cache", bytesFetched: 0 }).problems[0], /not stored: cache=quota/);
+  assert.match(loadVerdict({ ...LOAD, compileMs: undefined }, { bundle: "cache", bytesFetched: 0 }).problems[0], /compileMs is undefined/);
+  assert.match(loadVerdict(LOAD, null).problems[0], /second load .* did not report/);
+  assert.match(loadVerdict(LOAD, { bundle: "network", bytesFetched: 3399353 }).problems.join(";"), /bundle=network, not cache.*fetched 3399353 bytes, not 0/);
+});
+
+test("quotaVerdict and badMimeVerdict name what is wrong", () => {
+  assert.equal(quotaVerdict({ cache: "quota" }).ok, true);
+  assert.match(quotaVerdict({ cache: "stored" }).problems[0], /cache=stored, not quota/);
+  assert.match(quotaVerdict(null).problems[0], /cache=nothing/);
+  const fatal = { state: "fatal", fatalDisplay: "block", fatalText: "This browser cannot run the game\nThe engine did not start: Error: engine_bg.wasm is served as \"text/plain\", not application/wasm" };
+  assert.deepEqual(badMimeVerdict(fatal), { ok: true, problems: [] });
+  assert.match(badMimeVerdict({ ...fatal, state: "starting", fatalDisplay: "none" }).problems.join(";"), /expected fatal.*display:none/);
+  assert.match(badMimeVerdict({ ...fatal, fatalText: "This browser cannot run the game" }).problems[0], /lacks "The engine did not start"/);
+});
+
+test("receiptOf carries the load timings and the reload facts, and stays null for a page without them", () => {
+  const r = receiptOf({ wasmMemoryBytes: 1, commit: "c" }, 4700, "set", null, LOAD, { bundle: "cache", bytesFetched: 0, downloadMs: 3 });
+  assert.deepEqual(r.load, { bundle: "network", bytesFetched: 3399353, downloadMs: 812, compileMs: 95, initMs: 40, firstFrameMs: 4650, cache: "stored", persisted: true });
+  assert.deepEqual(r.reload, { bundle: "cache", bytesFetched: 0 });
+  assert.equal(r.ttffMs, 4700);
+  assert.deepEqual([receiptOf({}, 1, "s").load, receiptOf({}, 1, "s").reload], [null, null]);
+});
+
+test("parseArgs takes --bad-mime", () => {
+  assert.equal(parseArgs(["--chrome", "c"]).badMime, false);
+  assert.equal(parseArgs(["--chrome", "c", "--bad-mime"]).badMime, true);
+});
+
+test("memoryVerdict: a forced grow of 16 pages is exactly 16 pages and the frames keep coming", () => {
+  assert.deepEqual(memoryVerdict({ before: 247, after: 263, moved: true }), { ok: true, problems: [] });
+  assert.match(memoryVerdict({ before: 247, after: 250, moved: true }).problems[0], /from 247 to 250 pages/);
+  assert.match(memoryVerdict({ before: 247, after: 263, moved: false }).problems[0], /frame counter stopped/);
+  assert.match(memoryVerdict(null).problems[0], /no memory readings/);
+  assert.match(memoryVerdict({ before: null }).problems[0], /no memory readings/);
+});
+
+test("parseArgs takes --soak seconds", () => {
+  assert.equal(parseArgs(["--chrome", "c"]).soak, 0);
+  assert.equal(parseArgs(["--chrome", "c", "--soak", "600"]).soak, 600);
+  assert.match(parseArgs(["--chrome", "c", "--soak", "x"]).error, /--soak/);
 });

@@ -536,6 +536,9 @@ mod tests {
         let again = determinism_report(&second, 2, 2);
         assert_eq!(report, again);
         assert_eq!(report.digest, hash_bytes(&first));
+        // Pinned from two toolchains (x86_64 Windows PC and the x86_64 Linux
+        // runner printed the same value), so a drift on either breaks this.
+        assert_eq!(report.digest, 12583610706604573755);
         assert!(!report.arch.is_empty());
         assert!(!report.os.is_empty());
         let text = report.to_string();

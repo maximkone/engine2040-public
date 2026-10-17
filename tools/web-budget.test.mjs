@@ -160,3 +160,27 @@ test("the browse receipt carries what the gate reads", async () => {
   assert.deepEqual(readReceipt(JSON.stringify(r)), { mem: 1179648, ttff_ms: 401 });
   assert.deepEqual(readReceipt(JSON.stringify(receiptOf(null, null, "x"))), { mem: null, ttff_ms: null });
 });
+
+test("the line carries tier, validation and pipelines once the receipt has them (WEB8, WEB13)", () => {
+  const f = fixture({ receipt: { wasmMemoryBytes: 1179648, ttffMs: 900, tier: "web", validation: 0, pipelines: 24, latePipelines: 0 } });
+  try {
+    const r = run(["--dir", f.dist, "--receipt", f.receipt, "--budget", f.budget, "--require-receipt"]);
+    assert.equal(r.code, 0, r.err.join("\n"));
+    assert.match(r.out[0], / mem=1179648 ttff=900 tier=web validation=0 pipelines=24$/);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test("a validation error or a late pipeline on the page fails the gate", () => {
+  const f = fixture({ receipt: { wasmMemoryBytes: 1179648, ttffMs: 900, tier: "web", validation: 2, pipelines: 24, latePipelines: 3 } });
+  try {
+    const r = run(["--dir", f.dist, "--receipt", f.receipt, "--budget", f.budget]);
+    assert.equal(r.code, 1);
+    assert.match(r.err.join("\n"), /validation 2 errors/);
+    assert.match(r.err.join("\n"), /late_compile: 3 pipeline/);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test("readReceipt keeps the new fields only when the receipt has them", () => {
+  assert.deepEqual(readReceipt(JSON.stringify({ wasmMemoryBytes: 5, ttffMs: 6, tier: "potato", validation: 0, pipelines: 9, latePipelines: 1 })), { mem: 5, ttff_ms: 6, tier: "potato", validation: 0, pipelines: 9, late_pipelines: 1 });
+  assert.deepEqual(readReceipt(JSON.stringify({ wasmMemoryBytes: 5, ttffMs: 6, tier: null, validation: null })), { mem: 5, ttff_ms: 6 });
+});

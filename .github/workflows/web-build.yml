@@ -80,7 +80,7 @@ jobs:
             cargo install twiggy --locked --root "$HOME/.local" >/dev/null 2>&1 || echo "twiggy not installed; build.json gets no top-size lines"
           fi
       - name: unit tests of the build and check tools
-        run: node --test tools/web-build.test.mjs tools/web-browse.test.mjs tools/wasm-info.test.mjs tools/web-input-check.test.mjs tools/web-budget.test.mjs
+        run: node --test tools/web-build.test.mjs tools/web-loader.test.mjs tools/web-browse.test.mjs tools/wasm-info.test.mjs tools/web-input-check.test.mjs tools/web-budget.test.mjs
       - name: "engine-web unit tests (native: limits, JSON line, animation)"
         run: cargo test --locked -p engine-web --lib
       - name: clippy for the browser target (the shell only exists on wasm32)
@@ -89,7 +89,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node tools/web-build.mjs --commit "${GITHUB_SHA::12}"
+          node tools/web-build.mjs --commit "${GITHUB_SHA::12}" --opt-ab
           ls -l dist/web
           node tools/wasm-info.mjs dist/web/engine_bg.wasm
           {
@@ -117,6 +117,45 @@ jobs:
           name: web-dist
           path: dist/web
           if-no-files-found: error
+
+  # QW1: the same web profile built at opt-level z, s and 3 (Cargo profile env, one codegen unit, fat LTO); the table of raw, gzip
+  # and brotli bytes is the receipt. The winner goes into [profile.web]; the browser job then proves the golden receipt on it.
+  sweep:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+      - name: wasm-bindgen CLI and wasm-opt, the versions the build job uses
+        shell: bash
+        env:
+          BINARYEN_TAG: version_133
+        run: |
+          set -euo pipefail
+          v="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' Cargo.lock)"
+          mkdir -p "$HOME/.local/bin"
+          if curl -fsSL --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/wasm-bindgen-$v-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C "$RUNNER_TEMP"; then
+            cp "$RUNNER_TEMP/wasm-bindgen-$v-x86_64-unknown-linux-musl/wasm-bindgen" "$HOME/.local/bin/"
+          else
+            cargo install wasm-bindgen-cli --version "$v" --locked --root "$HOME/.local"
+          fi
+          curl -fsSL --retry 3 "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_TAG/binaryen-$BINARYEN_TAG-x86_64-linux.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/binaryen-$BINARYEN_TAG/bin/wasm-opt" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: size sweep (z, s, 3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/web-build.mjs --size-sweep --commit "${GITHUB_SHA::12}" | tee sweep.txt
+          { echo '### size sweep'; echo '```'; grep -F '[size-sweep]' sweep.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   browser:
     needs: build
@@ -157,6 +196,10 @@ jobs:
       - name: headless Chrome loads dist/web (the first flag set that gives an adapter wins)
         shell: bash
         run: node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web --require-adapter
+      # QW3: a host that types engine_bg.wasm as text/plain must give the fatal page with the reason, not a blank page.
+      - name: wrong MIME type on the wasm shows the fatal reason (QW3)
+        shell: bash
+        run: node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-bad-mime --bad-mime
       # WEB5: the arena frame the page copied out of the canvas through the GPU (a headless screenshot can come out black),
       # as a PNG made from those bytes, plus the hash, the colour facts and the validation-error counts.
       - uses: actions/upload-artifact@v5
@@ -189,4 +232,135 @@ jobs:
         with:
           name: web-browse
           path: out
+          if-no-files-found: warn
+
+  # WEB9 + WEB12: the page plays a native dedicated server. `net_serve` (crates/net, features websocket + webtransport)
+  # serves the window's duel match (MatchSpec: rules v2 on the kit walls, 600 ticks); headless Chrome loads the built
+  # page at ?server=ws://127.0.0.1:7050, which races a WebTransport leg against a WebSocket leg, plays the scripted
+  # duel and prints `net: transport=.. ticks=600 hash=.. peers=..`. The proof is three numbers that must be one: the
+  # hash `net_serve --reference` computes offline, the hash the server ends on, and the hash the page prints.
+  #  1. WebSocket only, with the server started without --wt: it holds no UDP socket, so QUIC is not in the picture.
+  #  2. WEB12: the QUIC port is dropped by a firewall rule. Both legs failing names both legs in the page's error;
+  #     with the WebSocket server up the page joins over WebSocket and ends on the same hash.
+  #  3. The page over WebTransport with the firewall off and the WebSocket leg dead (on
+  #     loopback a WebSocket always wins the race, so the other leg is switched off to make WebTransport carry the duel).
+  # No GPU is needed: the duel runs beside the arena and does not read the canvas.
+  net:
+    needs: build
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-net
+      - uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: dist/web
+      - name: unit tests of the browse tool (net duel verdicts)
+        run: node --test tools/web-browse.test.mjs
+      - name: duel tests (host and client state machines, WebSocket server, WebTransport server)
+        run: cargo test --locked -p engine-net --lib --features websocket,webtransport -- webduel ws_duel
+      - name: build the dedicated server
+        run: cargo build --locked --release -p engine-net --features websocket,webtransport --bin net_serve
+      - name: Chrome stable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v google-chrome >/dev/null; then
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/chrome.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo apt-get install -y -qq "$RUNNER_TEMP/chrome.deb"
+          fi
+          google-chrome --version
+      - name: the page plays the native server over WebSocket (QUIC and UDP unused)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/net
+          bin=target/release/net_serve
+          ref="$("$bin" --reference | sed -n 's/.*hash=\([0-9a-f]\{16\}\).*/\1/p')"
+          test -n "$ref"
+          echo "offline reference hash: $ref"
+          "$bin" --ws 127.0.0.1:7050 --tick-ms 0 --linger-ms 1500 --out out/net/ws-done.txt >out/net/ws-server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 100); do grep -q 'net-serve: ready' out/net/ws-server.log && break; sleep 0.2; done
+          grep 'net-serve: ready' out/net/ws-server.log
+          if ss -H -lunp 2>/dev/null | grep -q "pid=$pid,"; then
+            ss -lunp
+            echo "the server holds a UDP socket: the QUIC path must be unused in this step"
+            exit 1
+          fi
+          echo "no UDP socket held by pid $pid"
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net \
+            --server ws://127.0.0.1:7050 --expect-hash "$ref" --expect-transport websocket
+          for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "the server did not end after the match"; exit 1; fi
+          wait "$pid"
+          cat out/net/ws-server.log
+          grep -q "net-serve: done ticks=600 hash=$ref reference=$ref match=true" out/net/ws-server.log
+          echo "page == server == offline reference == $ref"
+      - name: WEB12 - QUIC port dropped by a firewall, the page still joins over WebSocket
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/release/net_serve
+          ref="$("$bin" --reference | sed -n 's/.*hash=\([0-9a-f]\{16\}\).*/\1/p')"
+          "$bin" --ws 127.0.0.1:7054 --wt 127.0.0.1:7055 --tick-ms 0 --linger-ms 1500 >out/net/fw-server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 100); do grep -q 'net-serve: ready' out/net/fw-server.log && break; sleep 0.2; done
+          cat out/net/fw-server.log
+          cert="$(sed -n 's/.*cert-sha256=\([0-9a-f]\{64\}\).*/\1/p' out/net/fw-server.log)"
+          test -n "$cert"
+          sudo iptables -I INPUT -p udp --dport 7055 -j DROP
+          sudo iptables -L INPUT -n | grep 7055
+          # Both legs down: nothing listens on 9, UDP 7055 is dropped. The error names both legs.
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net-blocked \
+            --server ws://127.0.0.1:9 --wt https://127.0.0.1:7055/e2040 --cert "$cert" --net-timeout 40 \
+            --expect-failure "webtransport leg failed" --expect-failure "websocket leg failed"
+          # Only the WebSocket leg reachable: the page joins on it and ends on the server's hash.
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net-fallback \
+            --server ws://127.0.0.1:7054 --wt https://127.0.0.1:7055/e2040 --cert "$cert" \
+            --expect-hash "$ref" --expect-transport websocket
+          for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "the server did not end after the match"; exit 1; fi
+          wait "$pid"
+          cat out/net/fw-server.log
+          grep -q "net-serve: done ticks=600 hash=$ref reference=$ref match=true" out/net/fw-server.log
+      - name: the page over WebTransport, firewall off, WebSocket leg dead
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo iptables -D INPUT -p udp --dport 7055 -j DROP || true
+          bin=target/release/net_serve
+          ref="$("$bin" --reference | sed -n 's/.*hash=\([0-9a-f]\{16\}\).*/\1/p')"
+          "$bin" --ws 127.0.0.1:7056 --wt 127.0.0.1:7057 --tick-ms 0 --linger-ms 1500 >out/net/wt-server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 100); do grep -q 'net-serve: ready' out/net/wt-server.log && break; sleep 0.2; done
+          cert="$(sed -n 's/.*cert-sha256=\([0-9a-f]\{64\}\).*/\1/p' out/net/wt-server.log)"
+          test -n "$cert"
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net-wt \
+            --server ws://127.0.0.1:9 --wt https://127.0.0.1:7057/e2040 --cert "$cert" \
+            --expect-hash "$ref" --expect-transport webtransport || { kill "$pid" 2>/dev/null || true; exit 1; }
+          wait "$pid"
+          cat out/net/wt-server.log
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: web-net
+          path: |
+            out/net
+            out/web-net
+            out/web-net-blocked
+            out/web-net-fallback
+            out/web-net-wt
           if-no-files-found: warn

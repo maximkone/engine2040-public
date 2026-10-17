@@ -1,4 +1,6 @@
-# Skills - 26 skills in skills/ (none in .opencode/skills/)
+# Skills - 33 skills in skills/ (none in .opencode/skills/)
+
+New here? Read `skills/START-HERE.md` first (the 10 skills to read once, then a task-to-skill table).
 
 Any AI (Claude Code, OpenCode, anything) loads a skill by its trigger. `AGENTS.md` wins over every skill. One skill per job you are about to do; read the trigger, open the one that matches, and follow links between skills instead of loading many.
 
@@ -8,8 +10,13 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 
 | skill | when |
 |---|---|
-| commit-and-board | commit or push on the shared tree, write or tick a board row, plan rows, add a doc that needs an index line |
+| commit-and-board | commit or push on the shared tree, write a new board row, plan rows, add a doc that needs an index line |
+| tick-a-row | finish a board row: `[x]` plus `Landed <sha7>` and evidence, or a Progress note; the sed traps |
 | github-check | any cargo test, clippy or check proof, a red gate or CI check, a link failure, a blocked local cargo lock |
+| gh-check-playbook | which gh-check or web-run form for which job; exit 2 or 3, 0 tests, push or dispatch errors, GPU lines hang |
+| rust-quality-ratchet | the pre-commit hook refused, `rust-quality.mjs` FAIL, casts, long fns, big files; tighten or accept |
+| wiring-a-feature | code exists but nothing calls it, a wire row (`RZ4w`), or before you write something that may exist |
+| recover-deleted-code | a file a row or plan names is gone (rot cleanup 2026-10-16): find it in git, restore or rewrite |
 | repo-orientation | entering an unfamiliar crate, ranking risk before a plan, narrow search when a wide grep fails |
 | debug-triage | a bug, failing test, crash or panic stack, several linked errors, a bug report to file |
 | determinism-debug | a golden hash, replay, tape or golden-matrix row diverges; a replay, capture or perf run looks wrong |
@@ -37,6 +44,7 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 | game-shell-audio-ui | title/pause/result shell, HUD and overlays, menus, how sound plays |
 | ai-door | MCP verbs and packs in crates/endpoint, provider adapters, evals and win rates, offline search, int8 nets |
 | door-and-headless-runbook | running without a window or a person: staged fight, golden proof, capture, perf CSV, the e2040 MCP door |
+| arena-capture-and-view-line | run `arena.exe --exit`, read the `arena view:`, `arena break:` and `physfx:` lines (pops, foot slide, debris), take captures |
 | design-and-playtest | game design data, feel and fun reviews, playing through the MCP play tools, look reviews |
 
 ## Render, web, content
@@ -48,6 +56,7 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 | render-lighting | shadows, point/spot/sun lights, torches, IBL, normal and gloss maps, GTAO, sky bake, wound maps |
 | render-cull-vram | frustum, light, shadow, portal and occlusion culling; VRAM math, staging, streaming pools, eviction |
 | web-wasm | wasm32 builds, the browser shell, dist/web, headless Chrome proof, web workflows |
+| browser-test-on-this-pc | check the published Pages build in the Claude app's browser pane: golden line, frames, errors, commit match |
 | assets-content | finding, licensing, cooking and budgeting content in content/ or crates/assets |
 
 ## Old name to new home (2026-10-17 merge)

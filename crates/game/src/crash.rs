@@ -164,8 +164,7 @@ impl CrashReport {
             tape_tail,
             checkpoint,
         };
-        report.validate()?;
-        Ok(report)
+        report.validate().map(|()| report)
     }
 
     /// Check every bound; the writer runs this before touching the disk.

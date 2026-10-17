@@ -1,0 +1,57 @@
+# START HERE: the 10 skills to read first
+
+New session, any model. `AGENTS.md` wins over every skill. Read these ten once (about 15 minutes), then use the task table below. The full map is `skills/SKILLS.md`. Open a skill as `skills/<name>/SKILL.md`.
+
+## The ten
+
+| # | skill | why first |
+|---|---|---|
+| 1 | `repo-orientation` | where things are; the narrow search that does not die on the glTF |
+| 2 | `commit-and-board` | one shared tree: commit by path, never `git add -A`, how a row is written |
+| 3 | `tick-a-row` | closing a row: `Landed <sha7>`, the evidence, progress notes |
+| 4 | `github-check` | heavy cargo runs on GitHub (`node tools/gh-check.mjs ...`), never the local lock |
+| 5 | `gh-check-playbook` | which form for which job, and what exit 2 or 3 means |
+| 6 | `test-and-proof` | what counts as proof; never write DONE or green without it |
+| 7 | `debug-triage` | root cause before fix, stop after two identical failures |
+| 8 | `engine-code` | how Rust is written here: reuse first, typed errors, no stubs |
+| 9 | `rust-quality-ratchet` | the pre-commit hook and the debt counts that only go down |
+| 10 | `wiring-a-feature` | much of the plan is code that exists and nothing calls: wire before you write |
+
+## By task
+
+| you are about to | read, in this order |
+|---|---|
+| fix a bug or a red check | `debug-triage`, `github-check`, `gh-check-playbook`; a hash moved: `determinism-debug` |
+| land a row | `commit-and-board`, `test-and-proof`, `tick-a-row`; a refused commit: `rust-quality-ratchet` |
+| add a feature | `repo-orientation`, `wiring-a-feature` (does it already exist?), `engine-code`, then the area skill below |
+| work on the web build | `web-wasm`, `gh-check-playbook` (web-run), `browser-test-on-this-pc` |
+| work on physics, breaks, ragdolls | `physics-bodies`, `determinism-debug`, `arena-capture-and-view-line`, `wiring-a-feature` |
+| work on look, render, lights | `wgpu-render`, `render-pipeline-math`, `render-lighting`, `arena-capture-and-view-line` |
+| work on fighters, anim, feel | `anim-combat`, `arena-capture-and-view-line`, `design-and-playtest` |
+| add content or assets | `assets-content`, then `render-cull-vram` if it costs VRAM |
+| online play | `net-rollback`, `determinism-debug` |
+| the MCP door or AI players | `ai-door`, `door-and-headless-runbook` |
+| a file seems to be missing | `recover-deleted-code` |
+| edit docs or the board | `commit-and-board`; then the docs rules below |
+| measure speed | `perf-bench` |
+| run the game without a person | `door-and-headless-runbook`, `arena-capture-and-view-line` |
+
+## Five rules that apply to every task
+
+1. Start: `git pull --no-rebase --no-edit origin master`, then `git status --short`. Lines you did not make are another session's: never revert them.
+2. Take work from the plan: `node tools/board-slice.mjs --focus`, then `node tools/board-slice.mjs <ID>`. Never read the board whole.
+3. Iterate with `cargo check -p <crate>` only. Every test and clippy proof goes through `node tools/gh-check.mjs cargo ...`.
+4. The golden hash is `d57b5c8ae3096614`. If it moves you have a bug or a receipt to write; never re-pin it.
+5. Commit only your paths: `git commit -F <msgfile> -- <paths>` (`git add -N` for a new file). Pull, then push `master`. No rebase, amend or force-push.
+
+## Docs tasks
+
+- A new doc gets one line in the index that lists it, in the same commit: `docs/README.md` map, `docs/INDEX.md` contracts, `docs/plan/README.md` for a plan, `skills/SKILLS.md` for a skill.
+- After a board or doc edit run `node tools/workspace-check.mjs`. For skills: `node --test tools/skills-index.test.mjs`.
+- Retire a doc with `git mv` into `docs/archive/<date>/` and fix every link to it.
+- Generated files (`docs/CRATE-MAP.md`, `docs/plan/ATLAS.md`) are never hand-edited.
+- A skill: folder `skills/<name>/SKILL.md`, `name` equals the folder, `description` starts "Use when" and is a task you can match, under 300 characters, file under 250 lines, no `file:line` cites.
+
+## Report like this
+
+Changed paths, the checks you ran with exit codes and counts, the hash if sim code changed, open gates, and a commit sha only if you made one. Short plain English.

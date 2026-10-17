@@ -1,0 +1,6 @@
+# feel-gold v1: one row per feel domain: `domain win_permille rubric_passed rubric_total | scorer summary`.
+# win_permille is the PQ2 balance survey share and rubric is the GP7 feel keypoint suite (engine-playtest checks both against the real runs);
+# the summary is what engine-perf crates/perf/src/feel.rs scores from the PQ1 seeded latency fixture (engine-perf checks it: `perf --feel-gold`).
+tuning 500 5 5 | feel domain=tuning baseline_p95=50.000ms varied_p95=50.000ms rise=0.000ms latency=pass kill=pass win=pass rubric=pass verdict=pass
+juicing 500 5 5 | feel domain=juicing baseline_p95=50.000ms varied_p95=50.000ms rise=0.000ms latency=pass kill=pass win=pass rubric=pass verdict=pass
+streamlining 500 5 5 | feel domain=streamlining baseline_p95=50.000ms varied_p95=50.000ms rise=0.000ms latency=pass kill=pass win=pass rubric=pass verdict=pass

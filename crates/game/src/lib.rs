@@ -1329,7 +1329,7 @@ impl App {
         // The tick's break events move from the scratch `simulate_tick` filled; a direct
         // call that never simulated finds it empty, so nothing stale is ever replayed.
         out.breaks.clear();
-        out.breaks.extend(self.tick_breaks.drain(..));
+        out.breaks.append(&mut self.tick_breaks);
         out.audio.reserve(cues.len());
         out.reactions.reserve(cues.len());
         out.cues.reserve(cues.len());

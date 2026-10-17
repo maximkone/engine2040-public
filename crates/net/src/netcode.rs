@@ -700,6 +700,43 @@ mod tests {
     }
 
     #[test]
+    fn on40_history_flat_over_10k_frames() {
+        // ON40 accept: a 10k-frame bursty-loss run keeps its buffers flat
+        // (bytes at 1k and 10k frames printed), history <= CAP+pending, and
+        // the replay digest is identical x2.
+        fn run(frames: u32) -> (u64, usize, usize) {
+            let remote = |f: u32| (f * 3 + 1) % 4;
+            let mut s = Session::new(Toy::default());
+            for f in 0..frames {
+                let avail = if f % 5 == 4 { None } else { Some(remote(f)) };
+                s.advance((f * 7 + 1) % 4, avail);
+                if f >= 2 && (f - 2) % 5 == 4 {
+                    s.confirm(f - 2, remote(f - 2))
+                        .expect("late input inside window");
+                }
+            }
+            let bytes = s.history.capacity() * std::mem::size_of::<u64>()
+                + s.frames.capacity() * std::mem::size_of::<Rec<Toy>>();
+            let mut fold = Fnv64::new();
+            for h in s.stream() {
+                fold.write_u64(h);
+            }
+            fold.write_u64(s.rollback_count());
+            (fold.finish(), bytes, s.history_len())
+        }
+        let (_, bytes_1k, _) = run(1_000);
+        let (digest, bytes_10k, len_10k) = run(10_000);
+        let (digest_again, _, _) = run(10_000);
+        eprintln!("on40 history buffers: 1k frames {bytes_1k} B, 10k frames {bytes_10k} B");
+        assert_eq!(bytes_10k, bytes_1k, "buffers flat from 1k to 10k frames");
+        assert!(
+            len_10k <= HISTORY_CAP + 8,
+            "history {len_10k} > CAP+pending bound"
+        );
+        assert_eq!(digest, digest_again, "replay digest x2");
+    }
+
+    #[test]
     fn discard_confirmed_tail_advances_past_confirmed_prefix() {
         let mut s = Session::new(Toy::default());
         for f in 0..4u32 {

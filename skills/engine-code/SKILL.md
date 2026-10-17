@@ -1,6 +1,6 @@
 ---
 name: engine-code
-description: "Use when writing Rust in engine2040 crates: new module or crate, Cargo manifest, feature, profile or dependency, public API, rustdoc, doctest, cross-crate refactor, or porting donor code. Reuse ladder, typed errors, numbers, hot paths, area rules for sim, scene, render, audio, AI."
+description: "Use when you write Rust in an engine2040 crate: a new module or crate, Cargo manifest, feature or dependency, public API, rustdoc, cross-crate refactor, or a donor port. Reuse ladder, typed errors, hot paths, area rules."
 ---
 
 # Write engine code

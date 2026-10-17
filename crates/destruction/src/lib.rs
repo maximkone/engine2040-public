@@ -2,6 +2,14 @@
 
 pub mod bake;
 pub mod bake3d;
+/// Detail where it breaks: a bake probe that spaces lattice cuts by impact
+/// likelihood (fine at likely hits, coarse in the wake) with the same cell
+/// count and bond graph as the uniform lattice. Bake only. Std-only.
+pub mod bake_rank;
+/// Graded bonds (strain from contact area, mass and anchor distance with
+/// seeded jitter), sliver reject over the Voronoi cut and per-event break
+/// records with dirty nav tiles. Bake only. Std-only.
+pub mod bond_grade;
 pub mod bonded;
 /// Debris budgets at 8-fighter scale: per-event caps, sleep islands,
 /// distance LOD. Std-only.
@@ -13,12 +21,18 @@ pub mod cluster;
 /// reads, fixed-point spread and the integer hash state. Std-only.
 pub mod crack;
 pub mod csg;
+/// Debris distance tiers over the DX4 ledger: simplified mesh levels, merge
+/// groups of small pieces and far impostors. Std-only.
+pub mod debris_lod;
 /// Bounds-checked byte reads shared by the snapshot decoders.
 mod cursor;
 /// Runtime Voronoi fracture at an impact point with a capped cell count, break
 /// events on the bonded shape, and the cook cache that serves the same
 /// cut without the cold clip. Std-only.
 pub mod fracture;
+/// Impact-keyed fracture codebook: an offline per-shape table of fragment
+/// sets with an integer impact-to-index lookup at spawn. Std-only.
+pub mod impact_table;
 /// World material table for deterministic breaks: fourteen Q16 rows with
 /// toughness, brittleness, shard rule, sound, dust, spark, decal and burn
 /// rate, plus bond and chunk material-id validators. Std-only.

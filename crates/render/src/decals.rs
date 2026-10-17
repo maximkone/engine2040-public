@@ -1058,6 +1058,7 @@ impl DecalSubmitter {
     /// the 32-byte look uniform buffer. No pool-size state yet: word
     /// buffers size on the first submit and resize only on shape change.
     pub fn new(device: &wgpu::Device) -> Self {
+        use crate::pipeline_warmup::CountedPipelines as _;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rp3-decal-bind"),
             source: wgpu::ShaderSource::Wgsl(DECAL_BIND_WGSL.into()),
@@ -1075,7 +1076,7 @@ impl DecalSubmitter {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
             label: Some("rp3-decal-pipeline"),
             layout: Some(&pipe_layout),
             module: &shader,

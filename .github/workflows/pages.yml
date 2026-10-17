@@ -87,7 +87,7 @@ jobs:
             cat dist/web/build.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: the module is typed application/wasm by a static server (a wrong type is a slow path, not an error)
+      - name: the module is typed application/wasm by a static server (the page shows a fatal reason for any other type, QW3)
         shell: bash
         run: |
           set -euo pipefail
@@ -173,18 +173,22 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
-      - name: the published module is typed application/wasm
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # QW13: the headers the live site really sends for each file (type, encoding, length), asked with Accept-Encoding br, gzip.
+      # A wasm not typed application/wasm fails the deploy; the line `brotli=served|not-served` says whether the brotli numbers of
+      # tools/web-budget.json describe what a visitor downloads.
+      - name: the published files - real response headers, the module typed application/wasm
         shell: bash
-        run: |
-          set -euo pipefail
-          url="${{ steps.deployment.outputs.page_url }}engine_bg.wasm"
-          for i in 1 2 3 4 5 6; do
-            type="$(curl -sI "$url" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
-            echo "$url -> $type"
-            if [ "$type" = "application/wasm" ]; then exit 0; fi
-            sleep 10
-          done
-          exit 1
+        run: node tools/web-headers.mjs --url "${{ steps.deployment.outputs.page_url }}" --out out/pages-headers.json --retries 6 --wait 10
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: pages-headers
+          path: out/pages-headers.json
+          if-no-files-found: warn
       - name: the published handbook and rustdoc answer 200
         shell: bash
         run: |

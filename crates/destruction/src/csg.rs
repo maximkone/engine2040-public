@@ -15,7 +15,7 @@
 //! bonded collection.
 
 use crate::bake3d::Chunk3;
-use crate::bonded::{Bond, BondedDesc, BreakError};
+use crate::bonded::{Bond, BondedDesc, BreakError, MIN_MASS};
 use crate::shards3d::in_contact;
 
 /// Most cut planes one bake accepts; bounds the chunk search up front.
@@ -86,8 +86,8 @@ impl FractureChunk {
     }
 
     /// Bonded-collection box for this chunk: AABB center plus half extents
-    /// with slabs below `MIN_SLAB_M` inflated so every baked chunk passes the
-    /// collection's validation.
+    /// with slabs below `MIN_SLAB_M` inflated and the mass floored at the
+    /// collection's minimum, so every baked chunk passes its validation.
     pub fn to_chunk3(&self) -> Chunk3 {
         let mut half = [
             (self.max[0] - self.min[0]) * 0.5,
@@ -108,7 +108,9 @@ impl FractureChunk {
             hx: half[0],
             hy: half[1],
             hz: half[2],
-            mass: half[0] * half[1] * half[2] * 8.0,
+            // A flat patch inflated to the slab floor can fall under the
+            // collection's mass floor and refuse the whole fracture.
+            mass: (half[0] * half[1] * half[2] * 8.0).max(MIN_MASS),
         }
     }
 }
@@ -752,6 +754,18 @@ mod tests {
     use super::*;
     use crate::bake::BREAKING_THRESHOLD;
     use crate::bonded::{BondedCollection, BreakEvent};
+
+    #[test]
+    fn a_flat_sliver_patch_still_validates_as_a_chunk() {
+        let patch = FractureChunk {
+            name: frac_name(0),
+            mesh: box_mesh(),
+            min: [0.0, 0.0, 0.0],
+            max: [0.01, 0.01, 0.0],
+        };
+        let desc = to_bonded_desc(&[patch], 1.0, BREAKING_THRESHOLD).expect("flat patch validates");
+        assert!(desc.chunks[0].mass >= MIN_MASS);
+    }
 
     /// Unit cube shell centered on the origin, edge 1, 12 triangles, meters.
     fn box_mesh() -> PropMesh {

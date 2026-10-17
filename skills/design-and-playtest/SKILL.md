@@ -1,6 +1,6 @@
 ---
 name: design-and-playtest
-description: "Use when designing Rome-game data (moves, encounters, AI archetypes, modes, map flow), judging fight feel and fun, playing the build through the MCP play tools, or scoring captures against a look reference: design as data, open every frame, ranked row proposals."
+description: "Use when you design game data (moves, encounters, AI archetypes, modes, map flow), judge fight feel or fun, play the build through the MCP play tools, or score captures against a look reference: design as data, open every frame."
 ---
 
 # Design, playtest and look review

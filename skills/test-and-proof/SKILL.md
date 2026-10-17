@@ -1,6 +1,6 @@
 ---
 name: test-and-proof
-description: "Use when you write or review a test, gate, capture check, crash check or timing assert, or before you write DONE, green, a number or a score: pixels not manifests, GPU skip counts, oracle first, tests/it layout, command-exit-hash-excerpt-verdict pack."
+description: "Use when you write or review a test, gate, capture check or timing assert, or before you write DONE, green, a number or a score: pixels not manifests, GPU skip counts, oracle first, command-exit-hash-excerpt-verdict pack."
 ---
 
 # Test and proof
