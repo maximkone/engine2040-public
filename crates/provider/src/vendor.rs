@@ -1187,6 +1187,10 @@ pub(crate) struct GenericVendorAdapter {
 }
 
 #[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "the shared delegator macro also emits accessors this test-only shell never calls"
+)]
 impl GenericVendorAdapter {
     /// Shell that plays `script` against `endpoint` with `wire`.
     pub(crate) fn new(

@@ -72,12 +72,12 @@ mod tests {
         // Feel LF10: during hitstop the two impact slots' phases stay put
         // while the rest advance; afterwards all advance.
         let mut phases = [0u32; 4];
-        let frozen: [u32; 4];
+        
         let mut mask = [false; 4];
         // Tick 0: impact on slots 0 and 1, hitstop holds for 2 ticks.
         hold_mask(4, 0, 1, true, &mut mask);
         assert_eq!(mask, [true, true, false, false]);
-        frozen = phases;
+        let frozen: [u32; 4] = phases;
         for (slot, phase) in phases.iter_mut().enumerate() {
             if !mask[slot] {
                 *phase += 1;

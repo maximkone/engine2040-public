@@ -962,7 +962,7 @@ mod tests {
         });
         assert_eq!(
             &agent_rows[..1000],
-            &prefix_rows[..],
+            &*prefix_rows,
             "agent prefix drifted"
         );
         let (mut world2, mut space2) = seed_mixed_world(1000, 10_000, 2040);
@@ -1400,7 +1400,7 @@ mod tests {
             Body::new(1.25, 0.5, 0.0, 0.0, 0.5, 100_000.0),
         ] {
             let mut tail = [settled; 24];
-            tail[17 % 24] = edge;
+            tail[17] = edge;
             assert!(!remainder_all_settled_narrow(&tail));
             assert_eq!(
                 remainder_all_settled_narrow(&tail),

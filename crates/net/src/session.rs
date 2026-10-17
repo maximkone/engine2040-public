@@ -1577,13 +1577,14 @@ mod tests {
 
     #[expect(dead_code, reason = "headless spike harness for the 600-tick receipt")]
     struct LatencyProxy(u32, u64, VecDeque<(u32, usize, u32)>);
+    #[expect(dead_code, reason = "headless spike harness for the 600-tick receipt")]
     impl LatencyProxy {
         fn new(seed: u64) -> Self {
             Self(0, seed | 1, VecDeque::new())
         }
         fn send(&mut self, peer: usize, input: u32) {
             self.1 = xorshift(self.1);
-            if self.1 % 11 == 0 {
+            if self.1.is_multiple_of(11) {
                 return;
             }
             self.2

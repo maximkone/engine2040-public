@@ -376,7 +376,7 @@ pub fn free_cam_step(
 ) -> Result<(), CameraError> {
     params.validate()?;
     let (yaw_rad, pitch_rad) = look;
-    if !yaw_rad.is_finite() || yaw_rad < -core::f32::consts::PI || yaw_rad > core::f32::consts::PI {
+    if !yaw_rad.is_finite() || !(-core::f32::consts::PI..=core::f32::consts::PI).contains(&yaw_rad) {
         return Err(CameraError::BadParam("free_yaw_rad"));
     }
     if !pitch_rad.is_finite() || pitch_rad.abs() > core::f32::consts::FRAC_PI_2 {
@@ -2640,7 +2640,7 @@ mod tests {
             let full = shake_offset(1000, tick, cap);
             for component in [full.x, full.y, full.z] {
                 assert!(
-                    component >= -0.12 - 1.0e-5 && component <= 0.12 + 1.0e-5,
+                    (-0.12 - 1.0e-5..=0.12 + 1.0e-5).contains(&component),
                     "full trauma stays inside 0.12 m at tick {tick}: {full:?}"
                 );
             }

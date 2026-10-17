@@ -825,6 +825,10 @@ impl CaptureSink {
             first_size: None,
             rows: Vec::new(),
             board_rows: meta.rows.clone(),
+/// One-shot observer of a validated frame's PNG bytes (see
+/// [`CaptureSink::write_frame_with_hook`]).
+type FrameHook<'a> = &'a mut dyn FnMut(&[u8]);
+
             build_sha,
             fps: meta.fps,
             director_digest: String::new(),
@@ -876,7 +880,7 @@ impl CaptureSink {
         tick: u32,
         checkpoint_hash: u64,
         png: &[u8],
-        hook: Option<&mut dyn FnMut(&[u8])>,
+        hook: Option<FrameHook<'_>>,
     ) -> Result<(), CaptureError> {
         use sha2::{Digest, Sha256};
         let (width, height) = parse_png_dims(png)?;

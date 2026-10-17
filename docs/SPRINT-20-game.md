@@ -11,7 +11,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
 
 **Design data and combat rules (Tier A)**
 
-- [ ] GP27 combat: design rows file and validated loader — numbers live in Rust
+- [x] GP27 combat: design rows file and validated loader — numbers live in Rust Landed a8be93ea.
   consts (`crates/combat/src/tables.rs` `TABLES_V1`, `v2()` at `:100`), so no
   design seat can change a number. New `crates/combat/src/tables_text.rs` (std
   only): parse `content/design/combat.rows` (line 1 `table combat version <n>`,
@@ -61,7 +61,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   x2: heavy staggers, light does not, two lights in 60 ticks do; heavy costs
   more stamina than light; regen starts after the delay. F2P: one stagger value
   for all hits today. P2P: golden unchanged; v1 digest unchanged. needs: none.
-- [ ] GP31 combat: per-kind hit-stop, v2 only — every hit sets the same
+- [x] GP31 combat: per-kind hit-stop, v2 only — every hit sets the same Landed 624938f5.
   `hitstop_ticks` (`fight.rs:918,959`). v2 rows carry `hitstop_ticks` per kind
   (start light 3, heavy 6, parry 8); LF10 already holds the clip clocks through
   it. Diff: regular. Tier A. Size S. Owns the hit-stop hunks of

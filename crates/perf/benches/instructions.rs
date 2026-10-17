@@ -133,7 +133,6 @@ fn main() {
     // Both probes must exit 0 without touching the Gungraun runner, which may
     // not be installed; only `cargo bench` and the runner's re-launches measure.
     if std::env::args().any(|arg| arg == "--list") {
-        return;
     }
     #[cfg(target_os = "linux")]
     if std::env::args().len() > 1 {

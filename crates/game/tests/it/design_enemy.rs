@@ -228,6 +228,10 @@ fn every_row_has_readable_tell_and_allowed_counter() {
 }
 
 #[test]
+#[expect(
+    clippy::assertions_on_constants,
+    reason = "table pin: a retune must fail this test with its message"
+)]
 fn tell_tracks_v2_startup() {
     assert!(
         TABLES_V2.attack_startup_ticks >= 15,

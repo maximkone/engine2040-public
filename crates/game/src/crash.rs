@@ -650,7 +650,7 @@ pub fn set_adapter(description: &str) {
 #[used]
 #[export_name = "NvOptimusEnablement"]
 /// Optimus dGPU export (PORT(glfw/glfw@master:src/win32_init.c)); ship refuses Intel.
-/// SAFETY: plain u32 flag read only by the OS loader to pick the dGPU; never read or written by Rust.
+/// Why it is sound: a plain u32 flag read only by the OS loader to pick the dGPU; never read or written by Rust.
 pub static NV_OPTIMUS_ENABLEMENT: u32 = 1;
 #[cfg(target_os = "windows")]
 #[expect(
@@ -660,7 +660,7 @@ pub static NV_OPTIMUS_ENABLEMENT: u32 = 1;
 #[used]
 #[export_name = "AmdPowerXpressRequestHighPerformance"]
 /// AMD switchable-graphics export (same pattern); ship refuses Intel.
-/// SAFETY: plain u32 flag read only by the OS loader to pick the dGPU; never read or written by Rust.
+/// Why it is sound: a plain u32 flag read only by the OS loader to pick the dGPU; never read or written by Rust.
 pub static AMD_POWER_XPRESS_REQUEST_HIGH_PERFORMANCE: u32 = 1;
 
 /// Append one status line to the run log. The arena binary calls this for

@@ -107,6 +107,44 @@ fn heap_peak_8fighter_match_same_x2_and_gate() {
 use engine_perf::alloc::{measure, peak_assert, subsystem_peak_line};
 
 #[test]
+fn heap_peak_real_64mib_buffer_in_the_match_window_trips_the_gate() {
+    // The row's own case, with a real allocation instead of arithmetic: the
+    // 8-fighter match runs in one counted window, then again with a 64 MiB
+    // buffer made inside the same window. The extra shows up in the bytes the
+    // allocator reports, and the 10 percent rule trips on that measured
+    // number. Independent of the recorded baseline file, so it stays green
+    // while the match itself drifts.
+    const EXTRA: u64 = 64 << 20;
+    let workload = engine_perf::workloads::ScaledArenaTick::canonical_for(8).expect("8 listed");
+    let (hash, plain) = measure(|| workload.run_hash());
+    let (again_hash, again) = measure(|| workload.run_hash());
+    assert_eq!(hash, again_hash, "the match hashes the same twice");
+    assert_eq!(plain, again, "the match allocates the same twice");
+    assert!(plain.bytes > 0, "the match allocates something to gate");
+    let (fat_hash, fat) = measure(|| {
+        let hash = workload.run_hash();
+        std::hint::black_box(vec![1u8; 64 << 20]);
+        hash
+    });
+    assert_eq!(fat_hash, hash, "the extra buffer does not touch the match");
+    assert_eq!(fat.bytes, plain.bytes + EXTRA, "exactly 64 MiB more");
+    assert_eq!(fat.count, plain.count + 1, "one more allocation");
+    let peak = PeakSnapshot::of(&[plain.bytes, fat.bytes]);
+    assert_eq!(peak.peak_bytes, fat.bytes, "the fat run is the peak");
+    assert!(allows(plain.bytes, plain.bytes), "plain run passes itself");
+    assert!(
+        !allows(peak.peak_bytes, plain.bytes),
+        "+64 MiB trips the 10 percent rule"
+    );
+    let err = peak_assert(peak.peak_bytes, plain.bytes).expect_err("trips");
+    assert_eq!(
+        err,
+        peak_assert(peak.peak_bytes, plain.bytes).expect_err("x2")
+    );
+    assert!(err.to_string().contains("FAIL"), "{err}");
+}
+
+#[test]
 fn alloc_peak_assert_names_both_sides_x2() {
     const BASE: u64 = 58198;
     const OVER: u64 = BASE + (64 << 20);

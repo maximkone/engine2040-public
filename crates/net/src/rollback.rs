@@ -1199,7 +1199,7 @@ mod tests {
         // One owner: the WAN guard follows the netcode session window and
         // sits inside the P2P storage window, so it never widens by itself.
         assert_eq!(super::WAN_ROLLBACK_CAP, crate::netcode::MAX_ROLLBACK);
-        assert!(super::WAN_ROLLBACK_CAP < MAX_P2P_ROLLBACK);
+        const { assert!(super::WAN_ROLLBACK_CAP < MAX_P2P_ROLLBACK) };
     }
 
     #[test]
@@ -1209,7 +1209,7 @@ mod tests {
         // `MAX_P2P_ROLLBACK` so the two windows never confuse.
         assert_eq!(super::MAX_P2P_ROLLBACK, 128);
         assert_eq!(super::WAN_ROLLBACK_CAP, crate::netcode::MAX_ROLLBACK);
-        assert!(super::WAN_ROLLBACK_CAP < super::MAX_P2P_ROLLBACK);
+        const { assert!(super::WAN_ROLLBACK_CAP < super::MAX_P2P_ROLLBACK) };
     }
 
     #[test]

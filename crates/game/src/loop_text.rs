@@ -219,7 +219,7 @@ fn parse_row(line: &str, lineno: u32) -> Result<(u32, LoopTables), LoopRowsError
     for (index, known) in KNOWN.iter().enumerate() {
         if values[index].is_none() {
             return Err(LoopRowsError::Missing {
-                field: *known,
+                field: known,
                 line: lineno,
             });
         }

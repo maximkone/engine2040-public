@@ -519,7 +519,7 @@ mod tests {
                 .iter()
                 .find(|(r, _)| *r == rung)
                 .map(|(_, out)| *out)
-                .unwrap_or(Err(RungFailure::malformed()))
+                .unwrap_or_else(|| Err(RungFailure::malformed()))
         });
         (descent, asked)
     }

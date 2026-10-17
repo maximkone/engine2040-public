@@ -390,7 +390,7 @@ mod tests {
         let mut bouts = Vec::with_capacity(100);
         for index in 0..100 {
             let permille = match index % 5 {
-                0 | 1 | 2 => 1000,
+                0..=2 => 1000,
                 3 => 500,
                 _ => 0,
             };

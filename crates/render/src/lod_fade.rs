@@ -4,10 +4,11 @@
 //! texel coords for dither taps. Determinism: integer threshold compare in
 //! fixed order, so the same inputs give the same keep bits twice. Errors:
 //! none, non-finite distances fade out and zero band is a hard switch.
-//! Budget: O(1) per tap, no allocation. Consumer: `draw::Draw::fade`
-//! carries the share per draw and the forward pass thresholds pixels
-//! against it, so the switch dissolves instead of popping. Method follows
-//! keijiro CrossFadingLod 4x4 Bayer.
+//! Budget: O(1) per tap, no allocation. Consumer: `draw::fade_for_lod`
+//! fills `draw::Draw::fade` with the share per draw. `keep` and the WGSL
+//! mirror are the per-pixel test a forward pass binds against that share,
+//! so the switch dissolves instead of popping; no pass binds the WGSL yet.
+//! Method follows keijiro CrossFadingLod 4x4 Bayer.
 
 /// Bayer cells in y-major rows, one permutation of 0..=15.
 pub const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
@@ -136,5 +137,80 @@ mod tests {
         );
         assert!(LOD_DITHER_WGSL.contains("fn lod_keep"));
         assert!(LOD_DITHER_WGSL.contains("fn bayer4_at"));
+    }
+
+    #[test]
+    fn wgsl_threshold_and_index_match_rust() {
+        // The table alone is not enough: the shader must also round the
+        // share up to 16ths and index y-major with a 4-texel wrap.
+        assert!(LOD_DITHER_WGSL.contains("(fade + 15u) / 16u"));
+        assert!(LOD_DITHER_WGSL.contains("bayer4_table[(y & 3u) * 4u + (x & 3u)]"));
+        assert!(LOD_DITHER_WGSL.contains("bayer4_at(x, y) < threshold"));
+        let flat: Vec<u8> = BAYER4.iter().flatten().copied().collect();
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                let at = usize::try_from((y & 3) * 4 + (x & 3)).expect("index fits");
+                assert_eq!(flat[at], bayer4(x, y), "cell {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn bayer_cells_are_one_wrapping_permutation() {
+        let mut seen = [false; 16];
+        for y in 0..4 {
+            for x in 0..4 {
+                seen[usize::from(bayer4(x, y))] = true;
+            }
+        }
+        assert!(seen.iter().all(|s| *s), "all 16 cells appear once");
+        assert_eq!(bayer4(5, 6), bayer4(1, 2));
+        assert_eq!(bayer4(u32::MAX, u32::MAX), bayer4(3, 3));
+    }
+
+    #[test]
+    fn kept_masks_are_nested_as_the_share_falls() {
+        // A pixel dropped at a higher share never returns at a lower one,
+        // so a dissolving LOD never flickers.
+        for hi in 0..=255u8 {
+            for lo in 0..=hi {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        assert!(
+                            !keep(lo, x, y) || keep(hi, x, y),
+                            "lo {lo} hi {hi} at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lod_switch_dissolves_in_small_steps_not_a_pop() {
+        use crate::draw::{fade_for_lod, LodTable};
+        // Switch at 10 m, hysteresis 0.5 m, so the band is 9.5 m to 10.5 m.
+        let table = LodTable {
+            id: 1,
+            bands_m: vec![10.0, 20.0],
+            hysteresis_m: 0.5,
+            pixel_thresholds_px: None,
+        };
+        let mut seen = [false; 17];
+        let mut prev = kept_on_tile(fade_for_lod(9.0, 0, &table));
+        assert_eq!(prev, 16, "fully kept before the band");
+        seen[16] = true;
+        for step in 1..=200u16 {
+            let dist_m = 9.0 + f32::from(step) * 0.01;
+            let kept = kept_on_tile(fade_for_lod(dist_m, 0, &table));
+            assert!(kept <= prev, "share rose at {dist_m} m");
+            assert!(prev - kept <= 1, "popped {prev} -> {kept} at {dist_m} m");
+            seen[usize::try_from(kept).expect("count fits")] = true;
+            prev = kept;
+        }
+        assert_eq!(prev, 0, "fully gone after the band");
+        assert!(seen.iter().all(|s| *s), "every share 0..=16 is visited");
+        // Same inputs, same bits.
+        assert_eq!(fade_for_lod(10.2, 0, &table), fade_for_lod(10.2, 0, &table));
     }
 }

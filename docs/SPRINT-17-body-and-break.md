@@ -101,7 +101,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   mirror` green with the 30-task report reproducing x2; fills VISION
   gaps G2 and G6; golden `d57b5c8ae3096614` unchanged.
   needs: HS29, HS30, HS31. (PLN hard-systems.md, proposed 2026-09-29.)
-- [ ] HS21 endpoint: capability scopes and auth on the door — token per client,
+- [x] HS21 endpoint: capability scopes and auth on the door — token per client, Landed 6553e755.
   scoped verbs, budgets, audit log, refuse by default; rivals ship none (UE 5.8
   plugin has no auth layer). Tier A. Size M. Owns hunks in
   `crates/endpoint/src`. Accept: an unscoped call is refused with a typed

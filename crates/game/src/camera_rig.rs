@@ -331,7 +331,6 @@ pub fn shake_displacement_m(frame: &CameraFrame) -> f32 {
 /// Presentation smoothing rate, never sim state.
 /// Errors: [`CameraError::BadParam`] naming `halflife_s` for non-finite or
 /// non-positive input.
-#[must_use]
 pub fn halflife_to_damping(halflife_s: f32) -> Result<f32, CameraError> {
     if !halflife_s.is_finite() || halflife_s <= 0.0 {
         return Err(CameraError::BadParam("halflife_s"));
@@ -475,7 +474,7 @@ pub fn smooth_trauma_offset(
     alpha: f32,
     max_m: f32,
 ) -> Result<TraumaShake, CameraError> {
-    if !alpha.is_finite() || alpha < 0.0 || alpha > 1.0 {
+    if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
         return Err(CameraError::BadParam("alpha"));
     }
     if !max_m.is_finite() {
@@ -806,7 +805,6 @@ mod tests {
 
     struct DuelRun {
         yaws: Vec<f32>,
-        dists: Vec<f32>,
         looks: Vec<Vec3>,
         eyes: Vec<Vec3>,
         pairs: Vec<(Vec3, Vec3)>,
@@ -817,7 +815,6 @@ mod tests {
     fn run_duel(dt_s: f32, steps: usize, halflife_s: f32, params: &DirectorParams) -> DuelRun {
         let mut spring = FightCamSpring::new(halflife_s).expect("spring builds");
         let mut yaws = Vec::with_capacity(steps);
-        let mut dists = Vec::with_capacity(steps);
         let mut looks = Vec::with_capacity(steps);
         let mut eyes = Vec::with_capacity(steps);
         let mut pairs = Vec::with_capacity(steps);
@@ -835,16 +832,14 @@ mod tests {
                 look.y + params.boom_up * dist,
                 look.z + cos_y * dist * params.boom_back,
             ));
-            let (sy, sd, sl) = spring.step(yaw, dist, look, dt_s).expect("step");
+            let (sy, _sd, sl) = spring.step(yaw, dist, look, dt_s).expect("step");
             yaws.push(sy);
-            dists.push(sd);
             looks.push(sl);
             eyes.push(spring.eye_m(params, &[]));
             pairs.push((a, b));
         }
         DuelRun {
             yaws,
-            dists,
             looks,
             eyes,
             pairs,

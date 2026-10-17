@@ -1855,7 +1855,7 @@ mod tests {
         );
         // The new variants carry both causes with a source chain, and the
         // orphan-group refusal names the invariant instead of panicking.
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io = std::io::Error::other("boom");
         let truncate = WalError::Truncate(io);
         assert!(truncate.to_string().contains("truncate"));
         assert!(std::error::Error::source(&truncate).is_some());
@@ -1868,7 +1868,7 @@ mod tests {
     #[test]
     fn wal_batch_truncate_reports_both_causes() {
         let batch = crate::commands::BatchError::NilId;
-        let cleanup = std::io::Error::new(std::io::ErrorKind::Other, "disk gone");
+        let cleanup = std::io::Error::other("disk gone");
         let error = WalError::BatchTruncate { batch, cleanup };
         let text = error.to_string();
         assert!(text.contains("truncate"), "cleanup named, got {text}");

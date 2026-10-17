@@ -213,6 +213,11 @@ mod tests {
     /// `--ignored --nocapture`: loaded machines make timing flaky.
     #[test]
     #[ignore = "timing: run alone on a quiet machine"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "wall clock lives in this test only, never in the sim"
+    )]
     fn spine_cost_within_ten_percent_of_legacy() {
         use std::time::Instant;
         let cfg = config(2040, 2);

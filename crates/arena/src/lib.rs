@@ -2479,7 +2479,7 @@ fn run_trace(config: &ArenaConfig, tape: &FighterTape) -> Option<Vec<Vec<TickMot
 mod tests {
     use super::*;
     use engine_anim::contract::validate_pose;
-    use engine_anim::locomotion::{loco_skeleton, LocoState, Locomotion};
+    use engine_anim::locomotion::{loco_skeleton, Locomotion};
     use engine_combat::fight::ATTACK_DAMAGE;
     use engine_combat::FightEvent;
     use engine_input::fighter::Buttons;

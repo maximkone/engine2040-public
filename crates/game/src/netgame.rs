@@ -219,6 +219,10 @@ pub enum NetApplied {
 }
 
 /// Net role: the host authors ticks, the guest predicts them.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one Role per session, built once and never moved on a hot path"
+)]
 enum Role {
     /// Authoritative match plus not-yet-consumed guest inputs.
     Host {

@@ -4,6 +4,11 @@
 //! same push-both tape every env carries in `vec_parity`. Prints
 //! `N envs x M ticks = K ticks/s` for 1/8/32 envs plus the two-run per-env
 //! hash table; the two runs must agree or the bench fails.
+#![expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "bench harness times wall clock outside the sim"
+)]
 
 use std::time::Instant;
 

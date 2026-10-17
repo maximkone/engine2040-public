@@ -196,7 +196,7 @@ fn render_family_table(
     rows: &[[String; 4]],
     col_widths: [usize; 4],
 ) -> Result<String, TableError> {
-    if col_widths.iter().any(|w| *w == 0) {
+    if col_widths.contains(&0) {
         return Err(TableError::ZeroWidth);
     }
     let width = framed_width(col_widths);

@@ -192,7 +192,7 @@ fn accum_soak_pair_stays_informative() {
     assert!(steps > 0, "jitter soak takes steps");
     assert!(residual.is_finite(), "residual {residual} is finite");
     assert!(
-        alpha.is_finite() && alpha >= 0.0 && alpha <= 1.0,
+        alpha.is_finite() && (0.0..=1.0).contains(&alpha),
         "alpha {alpha} interpolates"
     );
 }

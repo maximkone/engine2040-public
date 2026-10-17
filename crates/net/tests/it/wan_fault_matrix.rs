@@ -28,7 +28,7 @@ const LATENCIES: [u32; 3] = [0, 3, 6];
 /// Sparse-snapshot cadence in ticks (GGRS-style sparse save pattern).
 const SPARSE_EVERY: u32 = 8;
 /// Base seed; each cell mixes in its loss/latency so cells differ.
-const CELL_SEED: u64 = 0x6672_7320_4D50_36;
+const CELL_SEED: u64 = 0x0066_7273_204D_5036;
 
 /// Deterministic local wish: alternates drive, attacks every 12th tick.
 fn local_input(tick: u32) -> FighterInput {
@@ -38,7 +38,7 @@ fn local_input(tick: u32) -> FighterInput {
         mx: if tick % 20 < 10 { 100 } else { -100 },
         mz: 0,
         facing: 0,
-        buttons: if tick % 12 == 0 {
+        buttons: if tick.is_multiple_of(12) {
             Buttons(ATTACK)
         } else {
             Buttons::NONE

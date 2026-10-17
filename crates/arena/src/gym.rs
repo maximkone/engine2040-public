@@ -818,8 +818,10 @@ mod tests {
         }
         // A drained fighter cannot afford attack or dodge, but block stays
         // legal while it can act; nothing is legal while staggered.
-        let mut tired = CombatFighter::default();
-        tired.stamina = ATTACK_STAMINA_COST - 1;
+        let mut tired = CombatFighter {
+            stamina: ATTACK_STAMINA_COST - 1,
+            ..CombatFighter::default()
+        };
         assert_eq!(
             legal_mask_of(&tired),
             [false, true, true],

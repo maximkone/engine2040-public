@@ -1052,7 +1052,7 @@
   Wave 54 SPIKE-SP37 ADOPT-scoped: enumeration+clearance (tops 100/80cm,
   flat SHA-match, p95 1.76ms) feeds SP16; run()-clean waits SP16 rest
   distinction.
-- [ ] SP40 spatial: integer-cm k-d tree for nearest/k-neighbor queries —
+- [x] SP40 spatial: integer-cm k-d tree for nearest/k-neighbor queries — Landed e95ecd55.
    median-split build, kNN + radius search over integer-cm points,
    ported as std-only Rust from `sdd/kiddo` tree shape (license
    Apache-2.0, reimplement only, never the crate dep; complements the

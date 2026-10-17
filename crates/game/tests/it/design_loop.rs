@@ -73,7 +73,7 @@ fn plan_round_is_600_best_of_5_first_to_3() {
         "a round is 600 ticks"
     );
     assert_eq!(
-        u64::from(Budgets::default().max_ticks),
+        Budgets::default().max_ticks,
         spec_u64("max_ticks"),
         "core budget tracks the plan round"
     );
@@ -319,7 +319,7 @@ fn matchup_types(rows: &[MatchupRow]) -> Vec<String> {
 /// directions agreeing on the winner, and every type one win and one loss.
 /// Refuses with the line or the type name, never a panic. Pure.
 fn check_matchup_cycle(rows: &[MatchupRow], types: &[String]) -> Result<(), String> {
-    if types.len() % 2 == 0 {
+    if types.len().is_multiple_of(2) {
         return Err(format!(
             "want an odd number of types (an odd cycle), got {}",
             types.len()

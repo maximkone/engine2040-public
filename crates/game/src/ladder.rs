@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(first_chart_issue(&fallen, &RUNG_NEW_ELEMENTS), Some(5));
         // Boss is last and the first bout starts within 60 s.
         assert_eq!(RUNG_ENEMY_TIER[RUNG_COUNT - 1], BOSS_TIER);
-        assert!(FIRST_BOUT_START_SECS <= FIRST_BOUT_START_LIMIT_SECS);
+        const { assert!(FIRST_BOUT_START_SECS <= FIRST_BOUT_START_LIMIT_SECS) };
         assert_eq!(FIRST_BOUT_START_LIMIT_SECS, 60);
     }
 

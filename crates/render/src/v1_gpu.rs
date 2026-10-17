@@ -251,6 +251,27 @@ impl GpuForward {
         create_uniform_buffer(&self.device, label, bytes)
     }
 
+    /// The capture's camera, light and material uniform buffers, built once
+    /// per capture (a cold, one-shot path: the byte images are small `Vec`s).
+    fn capture_uniform_buffers(
+        &self,
+        cam_u: &v1::CameraUniform,
+        light_u: &v1::LightUniform,
+        mat_u: &v1::MaterialUniform,
+    ) -> [wgpu::Buffer; 3] {
+        let cam = cam_u.to_bytes();
+        let light = light_u.to_bytes();
+        let mat = mat_u.to_bytes();
+        debug_assert_eq!(cam.len() as u64, CAMERA_UNIFORM_BYTES);
+        debug_assert_eq!(light.len() as u64, LIGHT_UNIFORM_BYTES);
+        debug_assert_eq!(mat.len() as u64, MATERIAL_UNIFORM_BYTES);
+        [
+            self.uniform_buffer("r1-u-camera", &cam),
+            self.uniform_buffer("r1-u-light", &light),
+            self.uniform_buffer("r1-u-material", &mat),
+        ]
+    }
+
     /// Render `scene` offscreen at `width` x `height`, read the frame back
     /// and return PNG bytes plus a manifest naming the real adapter/driver.
     /// A validation scope wraps the whole capture: any wgpu validation error
@@ -277,9 +298,6 @@ impl GpuForward {
                     v1::UniformError::Material(e) => GpuError::Capture(CaptureError::Material(e)),
                 },
             )?;
-        debug_assert_eq!(cam_u.to_bytes().len() as u64, CAMERA_UNIFORM_BYTES);
-        debug_assert_eq!(light_u.to_bytes().len() as u64, LIGHT_UNIFORM_BYTES);
-        debug_assert_eq!(mat_u.to_bytes().len() as u64, MATERIAL_UNIFORM_BYTES);
 
         // The whole capture runs inside one validation scope: zero tolerance.
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -328,9 +346,7 @@ impl GpuForward {
                 contents: &scene.mesh.index_bytes(),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        let cam_buf = self.uniform_buffer("r1-u-camera", &cam_u.to_bytes());
-        let light_buf = self.uniform_buffer("r1-u-light", &light_u.to_bytes());
-        let mat_buf = self.uniform_buffer("r1-u-material", &mat_u.to_bytes());
+        let [cam_buf, light_buf, mat_buf] = self.capture_uniform_buffers(&cam_u, &light_u, &mat_u);
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("r1-uniforms"),
             layout: &self.camera_layout,

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// cook-char.mjs - manifest checker for the CT37/CT23 character intake.
+// cook-char.mjs - manifest checker for the CT37/CT23 character intake, plus
+// the GS24 headless Blender cook (one blender process per clip).
 // Use: node tools/cook-char.mjs --help
 //      node tools/cook-char.mjs --check [--manifest content/manifest.json]
-// Manifest + script only: no bytes are fetched, cooked or written here.
+//      node tools/cook-char.mjs --cook <in.bvh|fbx|gltf|glb> <out.glb>
+// --check reads the manifest only: no bytes are fetched, cooked or written.
+// --cook starts one Blender process per clip and writes only the out file.
 // Large binaries stay out: real locomotion originals live in git-ignored
 // content/local/ and ship only as cooked output; combat GLBs stay under
 // content/fighters/. This tool only checks that content/manifest.json is
@@ -14,8 +17,8 @@
 // E_MANIFEST_EMPTY, E_PARSE. Check findings print as FAIL lines with
 // exit 1; a clean manifest prints one RESULT line with exit 0.
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -139,6 +142,10 @@ export function check(argv) {
 
 export const COOK_SCRIPT = resolve(REPO, "tools", "blender", "cook_char.py");
 export const BLENDER_BIN = "blender"; export const BLENDER_HINT = "install Blender 4.x and put blender on PATH (https://www.blender.org/download/)";
+export const COOK_INPUT_EXTS = [".bvh", ".fbx", ".gltf", ".glb"];
+export const COOK_OUTPUT_EXTS = [".glb", ".gltf"];
+// Tasklist per sample is not free on a weak CPU, and Blender already eats it.
+export const SAMPLE_MS = 250;
 export function buildCookArgs(s, i, o) { return ["-b", "-P", String(s), "--", String(i), String(o)]; }
 export function formatCookLine(p) { const n = Number(p); return `cook: peak_ws_mb=${p === null || p === undefined || !Number.isFinite(n) ? "UNKNOWN" : Math.round(n)}`; }
 // No Blender on PATH: hint plus exit 2. Peak MB for one pid; null when unsampled.
@@ -146,6 +153,55 @@ export function missingBlender({ stderr = process.stderr, exitFn = process.exit 
   stderr.write(`E_BLENDER_MISSING ${BLENDER_HINT}\n`);
   exitFn(2);
   return { exit: 2 };
+}
+function isRunnable(path, platform) {
+  try {
+    const st = statSync(path);
+    return st.isFile() && (platform === "win32" || (st.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
+}
+// Where `name` resolves on PATH, or null. Windows tries each PATHEXT suffix in
+// order and never matches a bare extensionless file. An explicit path (a name
+// with a separator) is checked as given.
+export function findExecutable(name, { env = process.env, platform = process.platform, exists } = {}) {
+  const win = platform === "win32";
+  const pj = (win ? win32 : posix).join; // the simulated platform decides the separator
+  const ok = exists ?? ((path) => isRunnable(path, platform));
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH");
+  const dirs = (pathKey ? String(env[pathKey]) : "").split(win ? ";" : ":").filter(Boolean);
+  const exts = win ? String(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
+  const withExt = (base) => {
+    if (!win) return [base];
+    const own = exts.some((e) => base.toUpperCase().endsWith(e.toUpperCase()));
+    return own ? [base] : exts.map((e) => base + e);
+  };
+  if (/[\\/]/.test(name)) return withExt(name).find((c) => ok(c)) ?? null;
+  for (const dir of dirs) {
+    for (const cand of withExt(pj(dir, name))) if (ok(cand)) return cand;
+  }
+  return null;
+}
+// Spawn shape for a resolved Blender. A .cmd or .bat launcher needs a shell on
+// Windows (with every argument quoted, paths may hold spaces); an .exe or a
+// unix binary is started directly so the pid we sample is Blender's own.
+export function cookSpawnPlan(exe, args, platform = process.platform) {
+  if (platform === "win32" && /\.(cmd|bat)$/i.test(exe)) {
+    const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    return { cmd: q(exe), args: args.map(q), shell: true };
+  }
+  return { cmd: exe, args, shell: false };
+}
+// Usage defects found before Blender starts; null when the call is well formed.
+export function checkCookInputs({ input, output, script }, exists = existsSync) {
+  const lower = (v) => String(v).toLowerCase();
+  if (!input || !output) return { code: "E_COOK_USAGE", detail: "need <in> and <out.glb>" };
+  if (!exists(input)) return { code: "E_COOK_INPUT", detail: `input not found: ${input}` };
+  if (!COOK_INPUT_EXTS.some((e) => lower(input).endsWith(e))) return { code: "E_COOK_FORMAT", detail: `input must end in ${COOK_INPUT_EXTS.join(", ")}: ${input}` };
+  if (!COOK_OUTPUT_EXTS.some((e) => lower(output).endsWith(e))) return { code: "E_COOK_FORMAT", detail: `output must end in ${COOK_OUTPUT_EXTS.join(", ")}: ${output}` };
+  if (!exists(script)) return { code: "E_COOK_SCRIPT", detail: `cook script not found: ${script}` };
+  return null;
 }
 // Peak working set in MB for one pid; null when unsampled. Never throws.
 export function sampleCookPeakMb(pid, execFn = execFileSync) {
@@ -167,42 +223,52 @@ export function sampleCookPeakMb(pid, execFn = execFileSync) {
   }
 }
 // One blender process per clip; heavy RAM stays out of the loop.
-export async function runCook({ input, output, script = COOK_SCRIPT, blender = BLENDER_BIN, spawnFn = spawn, sampleFn = sampleCookPeakMb, stdout = process.stdout, stderr = process.stderr } = {}) {
+// Exit: 0 cooked, 2 no Blender or a bad call, 1 Blender would not start,
+// else Blender's own code (the script exits 3 when the cook itself fails).
+export async function runCook({ input, output, script = COOK_SCRIPT, blender = BLENDER_BIN, spawnFn = spawn, sampleFn = sampleCookPeakMb, findFn = findExecutable, existsFn = existsSync, env = process.env, stdout = process.stdout, stderr = process.stderr } = {}) {
   const args = buildCookArgs(script, input, output);
-  let child;
-  try {
-    child = spawnFn(blender, args, { stdio: ["ignore", "inherit", "pipe"], shell: process.platform === "win32" });
-  } catch {
-    missingBlender({ stderr });
+  const exe = findFn(blender, { env });
+  if (!exe) {
+    missingBlender({ stderr, exitFn: () => {} });
     return { exit: 2, peakWsMb: null, args };
   }
+  const bad = checkCookInputs({ input, output, script }, existsFn);
+  if (bad) {
+    stderr.write(`${bad.code} ${bad.detail}\n`);
+    return { exit: 2, peakWsMb: null, args };
+  }
+  const plan = cookSpawnPlan(exe, args);
+  let child;
+  try {
+    child = spawnFn(plan.cmd, plan.args, { stdio: ["ignore", "inherit", "pipe"], shell: plan.shell });
+  } catch (err) {
+    stderr.write(`E_BLENDER_SPAWN ${err?.message ?? String(err)}\n`);
+    return { exit: err?.code === "ENOENT" ? 2 : 1, peakWsMb: null, args };
+  }
   if (!child || typeof child.on !== "function") {
-    missingBlender({ stderr });
+    missingBlender({ stderr, exitFn: () => {} });
     return { exit: 2, peakWsMb: null, args };
   }
   let peak = null;
   const note = (v) => {
+    if (v === null || v === undefined) return; // an unsampled pid is UNKNOWN, never 0
     const n = Number(v);
     if (Number.isFinite(n)) peak = peak === null ? Math.round(n) : Math.max(peak, Math.round(n));
   };
   try { note(sampleFn(child.pid)); } catch {}
-  const timer = setInterval(() => { try { note(sampleFn(child.pid)); } catch {} }, 50);
-  let errBuf = "";
-  child.stderr?.on("data", (d) => { const s = String(d); errBuf += s; stderr.write(s); });
-  const exit = await new Promise((resolve) => {
+  const timer = setInterval(() => { try { note(sampleFn(child.pid)); } catch {} }, SAMPLE_MS);
+  child.stderr?.on("data", (d) => stderr.write(String(d)));
+  const exit = await new Promise((done) => {
     child.on("error", (err) => {
-      if (err?.code === "ENOENT") missingBlender({ stderr });
+      if (err?.code === "ENOENT") missingBlender({ stderr, exitFn: () => {} });
       else stderr.write(`E_BLENDER_SPAWN ${err?.message ?? String(err)}\n`);
-      resolve(err?.code === "ENOENT" ? 2 : 1);
+      done(err?.code === "ENOENT" ? 2 : 1);
     });
-    child.on("close", (code) => resolve(code ?? 0));
+    // A signal kill (out of memory) reports a null code: that is a failure, not a success.
+    child.on("close", (code) => done(code ?? 1));
   });
   clearInterval(timer);
   try { note(sampleFn(child.pid)); } catch {}
-  if (exit === 2 || (exit !== 0 && /not recognized|not found/i.test(errBuf))) {
-    if (!/E_BLENDER_MISSING/.test(errBuf)) missingBlender({ stderr });
-    return { exit: 2, peakWsMb: peak, args };
-  }
   if (exit === 0) {
     stdout.write(`${formatCookLine(peak)}\n`);
     return { exit: 0, peakWsMb: peak, args };
@@ -210,23 +276,33 @@ export async function runCook({ input, output, script = COOK_SCRIPT, blender = B
   stderr.write(`E_COOK_EXIT ${exit}\n`);
   return { exit, peakWsMb: peak, args };
 }
+// Pure CLI parse for --cook: positional in/out plus --script and --blender.
+export function parseCookArgs(args, env = process.env) {
+  const i = args.indexOf("--cook");
+  const flag = (name) => {
+    const j = args.findIndex((a) => a === name || a.startsWith(`${name}=`));
+    if (j < 0) return "";
+    return args[j].includes("=") ? args[j].slice(name.length + 1) : (args[j + 1] ?? "");
+  };
+  const input = args[i + 1], output = args[i + 2];
+  if (!input || !output || input.startsWith("--") || output.startsWith("--")) return { error: "E_USAGE need --cook <in> <out.glb> [--script <path>] [--blender <exe>]" };
+  return { input, output, script: flag("--script") || COOK_SCRIPT, blender: flag("--blender") || env.E2040_BLENDER || BLENDER_BIN };
+}
 const isMain = import.meta.main;
 if (isMain) {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write(
-      "Usage: node tools/cook-char.mjs --check [--manifest content/manifest.json]\n      node tools/cook-char.mjs --cook <in> <out.glb> [--script <path>]\n\nChecks the CT37/CT23 intake manifest (licences, digest dedupe, counts, budgets, refused list).\nHeadless cook runs blender -b -P <script> -- <in> <out.glb> in one process per clip and prints cook: peak_ws_mb=.. .\n",
+      "Usage: node tools/cook-char.mjs --check [--manifest content/manifest.json]\n      node tools/cook-char.mjs --cook <in.bvh|fbx|gltf|glb> <out.glb|gltf> [--script <path>] [--blender <exe>]\n\nChecks the CT37/CT23 intake manifest (licences, digest dedupe, counts, budgets, refused list).\nHeadless cook runs blender -b -P <script> -- <in> <out.glb> in one process per clip and prints cook: peak_ws_mb=.. .\nBlender comes from PATH, or --blender, or env E2040_BLENDER. Exit 2 means no Blender or a bad call, 3 means the cook failed.\n",
     );
   } else if (args.includes("--check")) {
     check(args);
   } else if (args.includes("--cook")) {
-    const i = args.indexOf("--cook"), input = args[i + 1], output = args[i + 2];
-    const j = args.findIndex((a) => a === "--script" || a.startsWith("--script="));
-    const script = (j < 0 ? "" : args[j].includes("=") ? args[j].slice(9) : (args[j + 1] ?? "")) || COOK_SCRIPT;
-    if (!input || !output || input.startsWith("--") || output.startsWith("--")) {
-      process.stderr.write("E_USAGE need --cook <in> <out.glb> [--script <path>]\n");
+    const parsed = parseCookArgs(args);
+    if (parsed.error) {
+      process.stderr.write(`${parsed.error}\n`);
       process.exit(2);
-    } else runCook({ input, output, script }).then(({ exit }) => { process.exitCode = exit; });
+    } else runCook(parsed).then(({ exit }) => { process.exitCode = exit; });
   } else {
     process.stderr.write("E_USAGE need --check|--cook or --help\n");
     process.exit(2);

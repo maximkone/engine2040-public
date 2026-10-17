@@ -77,6 +77,144 @@ pub(super) fn announce_title_boot(boot: Flow) {
     }
 }
 
+/// One presented frame's wall split in us, kept so the frame-split receipt
+/// can name the frames that cost (the table's mean rides a minority of them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FrameRow {
+    /// 0-based presented-frame index (`frames_presented` minus one).
+    pub(super) index: u32,
+    /// Fixed ticks plus the present call: the `cpu_ms` sample of this frame.
+    pub(super) work_us: u64,
+    /// The present call alone (skin, surface frame, capture).
+    pub(super) present_us: u64,
+    /// Fighter pose plus upload share of `present_us`.
+    pub(super) fighters_us: u64,
+}
+
+/// A frame is slow when its work wall is strictly over this many times the
+/// table's work p50.
+const SLOW_FRAME_FACTOR: u64 = 2;
+/// Slowest frames named on the receipt.
+const SLOWEST_SHOWN: usize = 3;
+
+/// Slow-frame fields of the frame-split receipt: how many frames ran over
+/// twice the work p50, the index of the first one (`-` when none) and the
+/// slowest frames with their present and fighter share. A zero p50 gives no
+/// scale, so nothing counts as slow. Pure over the table: no window needed.
+pub(super) fn slow_frame_fields(rows: &[FrameRow]) -> String {
+    let mut sorted: Vec<u64> = rows.iter().map(|row| row.work_us).collect();
+    sorted.sort_unstable();
+    let p50 = percentile_us(&sorted, 50);
+    let limit = p50.saturating_mul(SLOW_FRAME_FACTOR);
+    let is_slow = |row: &&FrameRow| p50 > 0 && row.work_us > limit;
+    let count = rows.iter().filter(is_slow).count();
+    let first = rows
+        .iter()
+        .filter(is_slow)
+        .map(|row| row.index)
+        .min()
+        .map_or_else(|| "-".to_string(), |index| index.to_string());
+    let mut worst: Vec<&FrameRow> = rows.iter().collect();
+    worst.sort_by(|a, b| b.work_us.cmp(&a.work_us).then(a.index.cmp(&b.index)));
+    worst.truncate(SLOWEST_SHOWN);
+    let named = worst
+        .iter()
+        .map(|row| {
+            format!(
+                "{}:{}ms/present={}ms/fighters={}ms",
+                row.index,
+                fmt_us_as_ms(row.work_us),
+                fmt_us_as_ms(row.present_us),
+                fmt_us_as_ms(row.fighters_us),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let named = if named.is_empty() {
+        "-".to_string()
+    } else {
+        named
+    };
+    format!("slow_frames={count} first_slow_index={first} slowest={named}")
+}
+
+/// Mean us per fixed tick paid: a wall total over the tick count. The window
+/// steps one tick per wall-time step, so the same presented frames divide a
+/// 21-tick run and a 96-tick run; this is the figure that compares across
+/// runs. `-` before the first tick, never a division by zero.
+pub(super) fn per_tick_us(total_us: u64, ticks: u32) -> String {
+    match u64::from(ticks) {
+        0 => "-".to_string(),
+        ticks => (total_us / ticks).to_string(),
+    }
+}
+
+/// Tick-normalized fields of the frame-split receipt: the ticks paid and the
+/// present and fighter wall per tick in us. Pure over the totals.
+pub(super) fn tick_fields(ticks: u32, present_us: u64, fighters_us: u64) -> String {
+    format!(
+        "ticks={ticks} us_per_tick_present={} us_per_tick_fighters={}",
+        per_tick_us(present_us, ticks),
+        per_tick_us(fighters_us, ticks),
+    )
+}
+
+/// Which frame count divides per-pass column `index`: the probe columns (sky,
+/// layers, particles, decals, ibl) divide by the frames that probed, every
+/// other column and every run that probed nothing divides by all folded
+/// frames. Never 0, so a column cannot silently print a run's sum.
+pub(super) fn pass_divisor(index: usize, probes: u32, frames: u32) -> u32 {
+    if index < PROBE_PASS_COLUMNS && probes > 0 {
+        probes
+    } else {
+        frames.max(1)
+    }
+}
+
+/// Leading per-pass columns that only probe frames fill.
+const PROBE_PASS_COLUMNS: usize = 5;
+
+/// Whether a wall step skips its present under `--present-skip` (all steps)
+/// or `--present-every N`. The cadence is `engine_game::should_present` over
+/// the 0-based index of the newest tick run, so the final tick always
+/// presents. Before the first tick (title, warmup) there is nothing to
+/// throttle and the window still draws. Ticks are never skipped.
+pub(super) fn present_skipped(
+    ticks_done: u32,
+    ticks_total: u32,
+    present_every: u32,
+    present_skip: bool,
+) -> bool {
+    if present_skip {
+        return true;
+    }
+    match ticks_done.checked_sub(1) {
+        Some(newest) => !engine_game::should_present(newest, ticks_total, present_every),
+        None => false,
+    }
+}
+
+/// Whether the `--exit` run has seen enough. A staged fight leaves once the
+/// whole session ran and drew a frame; `--frames N` leaves after N presented
+/// frames. `--present-skip` presents none, so it leaves when the ticks are
+/// done instead of waiting for frames that can never come.
+pub(super) fn exit_reached(
+    staged: bool,
+    ticks_done: u32,
+    ticks_total: u32,
+    frames_presented: u32,
+    frames: Option<u32>,
+    present_skip: bool,
+) -> bool {
+    if present_skip {
+        return ticks_done >= ticks_total;
+    }
+    if staged {
+        return ticks_done >= ticks_total && frames_presented > 0;
+    }
+    frames.is_some_and(|wanted| frames_presented >= wanted)
+}
+
 impl ArenaApp {
     /// Run `steps` fixed ticks for the human slot: input, feed and mixer
     /// pumps, staged and look tallies, then the crash ring.
@@ -147,6 +285,35 @@ impl ArenaApp {
         }
     }
 
+    /// Decide this wall step's present under the throttle flags and count a
+    /// skip in `frames_skipped`. A skipped step still ran its ticks; it is not
+    /// a presented frame, so `frames_presented` and the framing tally stay put.
+    pub(super) fn take_present_skip(&mut self) -> bool {
+        let skip = present_skipped(
+            self.ticks_done,
+            self.config.ticks,
+            self.args.present_every,
+            self.args.present_skip,
+        );
+        self.frames_skipped = self.frames_skipped.saturating_add(u32::from(skip));
+        skip
+    }
+
+    /// Print the bound tape's receipt and refuse a tape the sim never obeyed:
+    /// a manifest that binds a tape must not read green when no input of it
+    /// reached the human slot, or when a tick of it was skipped. No tape, no
+    /// line. Run once at exit, before the capture slot is sealed.
+    pub(super) fn report_tape(&mut self) {
+        let Some(receipt) = self.capture.as_ref().and_then(|slot| slot.tape.receipt()) else {
+            return;
+        };
+        say!("{}", receipt.line());
+        if let Some(why) = receipt.failure() {
+            tell!("arena: {why}");
+            self.failure = Some(1);
+        }
+    }
+
     /// Fold one presented twin receipt into the per-pass means.
     /// Cold receipt path only; the first frame pins adapter/driver/size.
     pub(super) fn note_receipt(&mut self, receipt: &engine_render::present::FrameReceipt) {
@@ -175,12 +342,9 @@ impl ArenaApp {
     /// probe sample, so those columns carry the live-path value of every
     /// folded frame and divide by `pass_frames` like the rest; asking for a
     /// divisor of 0 clamps to 1 and prints the run's sum under an `ms` label.
+    /// The divisor is [`pass_divisor`], also printed on the per-pass line.
     pub(super) fn pass_mean(&self, index: usize) -> String {
-        let over = if index < 5 && self.pass_probes > 0 {
-            self.pass_probes
-        } else {
-            self.pass_frames
-        };
+        let over = pass_divisor(index, self.pass_probes, self.pass_frames);
         Self::mean_ms(self.pass_us[index], u64::from(over))
     }
 
@@ -209,14 +373,15 @@ impl ArenaApp {
 
     /// One-line per-pass means for the smoke log: adapter plus driver
     /// plus resolution plus mean ms per pass plus device forward ms plus
-    /// total validation errors. `None` until the first presented frame pins
-    /// the adapter.
+    /// total validation errors, then the two divisors behind the means:
+    /// `gpu_frames` (fog, gtao, shadow, forward) and `probe_frames` (sky
+    /// through ibl). `None` until the first presented frame pins the adapter.
     pub(super) fn per_pass_line(&self) -> Option<String> {
         if self.pass_frames == 0 || self.pass_adapter.is_empty() {
             return None;
         }
         Some(format!(
-            "arena per-pass: adapter=\"{}\" driver=\"{}\" resolution={}x{} frames={} sky={}ms layers={}ms particles={}ms decals={}ms ibl={}ms fog={}ms gtao={}ms shadow={}ms forward={}ms validation_errors={}",
+            "arena per-pass: adapter=\"{}\" driver=\"{}\" resolution={}x{} frames={} sky={}ms layers={}ms particles={}ms decals={}ms ibl={}ms fog={}ms gtao={}ms shadow={}ms forward={}ms validation_errors={} gpu_frames={} probe_frames={}",
             self.pass_adapter,
             self.pass_driver,
             self.pass_size.0,
@@ -232,6 +397,8 @@ impl ArenaApp {
             self.pass_mean(7),
             self.forward_ms(),
             self.pass_validation,
+            self.pass_frames,
+            pass_divisor(0, self.pass_probes, self.pass_frames),
         ))
     }
 
@@ -291,6 +458,11 @@ impl ArenaApp {
     /// and the present mode (a vsync-bound mode parks the CPU in acquire).
     /// `fighters_pose`/`fighters_upload` are `0.000` until a skinned tick
     /// lands, so they never read as a measurement of a frame that did work.
+    /// The line ends with the slow-frame fields ([`slow_frame_fields`]) and
+    /// the tick-normalized fields ([`tick_fields`]), then `skipped=` (wall
+    /// steps whose present the throttle skipped on purpose; 0 without
+    /// `--present-every`/`--present-skip`): new fields only append, so older
+    /// receipts still parse.
     pub(super) fn frame_split_line(&self) -> String {
         let frames = u64::from(self.frames_presented.max(1));
         let mut work = self.work_us.clone();
@@ -329,7 +501,7 @@ impl ArenaApp {
             )
         });
         format!(
-            "arena frame-split: sim={}ms present={}ms fighters={}ms fighters_pose={}ms fighters_upload={}ms per frame (mean over {} frames) cpu_ms p50={} p99={} interval_ms p50={} p99={} {} acquire={}ms present_mode={}",
+            "arena frame-split: sim={}ms present={}ms fighters={}ms fighters_pose={}ms fighters_upload={}ms per frame (mean over {} frames) cpu_ms p50={} p99={} interval_ms p50={} p99={} {} acquire={}ms present_mode={} {} {} skipped={}",
             Self::mean_ms(self.sim_us, frames),
             Self::mean_ms(self.present_us, frames),
             Self::mean_ms(self.fighters_us, frames),
@@ -343,6 +515,9 @@ impl ArenaApp {
             gpu,
             fmt_us_as_ms(acquire_us),
             mode,
+            slow_frame_fields(&self.frame_rows),
+            tick_fields(self.ticks_done, self.present_us, self.fighters_us),
+            self.frames_skipped,
         )
     }
 
@@ -410,5 +585,275 @@ mod tests {
         app.pass_probes = 2;
         app.pass_us[4] = 2_000;
         assert_eq!(app.pass_mean(4), "1.000", "probed ibl keeps its divisor");
+    }
+
+    /// Headless app over a 2-fighter 24-tick session: no window, no presenter.
+    fn headless_app() -> ArenaApp {
+        let raw: Vec<String> = ["arena", "--frames", "2", "--exit"]
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect();
+        let args = WinArgs::parse(&raw).expect("valid smoke fixture parses");
+        let config = GameConfig {
+            seed: 2040,
+            ticks: 24,
+            fighters: 2,
+            half_extent_m: 20.0,
+        };
+        ArenaApp::new(config, args, None).expect("test session builds")
+    }
+
+    fn frame_row(index: u32, work_us: u64, present_us: u64, fighters_us: u64) -> FrameRow {
+        FrameRow {
+            index,
+            work_us,
+            present_us,
+            fighters_us,
+        }
+    }
+
+    /// 300 fast frames (1 ms) with a 15 ms frame at `slow` indexes.
+    fn table_with_slow(slow: &[(u32, u64, u64)]) -> Vec<FrameRow> {
+        let mut rows: Vec<FrameRow> = (0..300).map(|i| frame_row(i, 1_000, 800, 300)).collect();
+        for &(index, present_us, fighters_us) in slow {
+            rows[index as usize] = frame_row(index, 15_000, present_us, fighters_us);
+        }
+        rows
+    }
+
+    #[test]
+    fn frame_split_slow_frames_are_named() {
+        // Failing-before: the frame-split line printed mean, p50 and p99
+        // only, so a 15 ms frame in a 1 ms table had no index and the mean
+        // (4.7 ms) could not be traced to startup, a stall or a spike.
+        let rows = table_with_slow(&[(0, 14_500, 9_000), (200, 14_000, 10_000)]);
+        let fields = slow_frame_fields(&rows);
+        assert!(
+            fields.contains("slow_frames=2 "),
+            "two frames over 2x p50: {fields}"
+        );
+        assert!(
+            fields.contains("first_slow_index=0 "),
+            "the first slow frame is index 0: {fields}"
+        );
+        // Slowest first, ties by index; the third entry is the first fast frame.
+        assert!(
+            fields.ends_with(
+                "slowest=0:15.000ms/present=14.500ms/fighters=9.000ms,\
+                 200:15.000ms/present=14.000ms/fighters=10.000ms,\
+                 1:1.000ms/present=0.800ms/fighters=0.300ms"
+            ),
+            "{fields}"
+        );
+        // Frame 0 fast, only frame 200 slow: the first slow index moves.
+        let later = slow_frame_fields(&table_with_slow(&[(200, 14_000, 10_000)]));
+        assert!(
+            later.starts_with("slow_frames=1 first_slow_index=200 slowest=200:15.000ms"),
+            "{later}"
+        );
+    }
+
+    #[test]
+    fn frame_split_slow_frames_need_a_real_gap_to_count() {
+        // No slow frame: the field is `-`, not 0 and not an empty string.
+        let flat = slow_frame_fields(&table_with_slow(&[]));
+        assert!(
+            flat.starts_with("slow_frames=0 first_slow_index=- slowest=0:1.000ms"),
+            "{flat}"
+        );
+        // Exactly 2x the p50 is not slow: the bar is strictly over.
+        let edge: Vec<FrameRow> = (0..10)
+            .map(|i| frame_row(i, if i == 4 { 2_000 } else { 1_000 }, 0, 0))
+            .collect();
+        assert!(slow_frame_fields(&edge).starts_with("slow_frames=0 first_slow_index=- "));
+        // One microsecond over is.
+        let over: Vec<FrameRow> = (0..10)
+            .map(|i| frame_row(i, if i == 4 { 2_001 } else { 1_000 }, 0, 0))
+            .collect();
+        assert!(slow_frame_fields(&over).starts_with("slow_frames=1 first_slow_index=4 "));
+        // An empty table prints `-` everywhere and never divides or indexes.
+        assert_eq!(
+            slow_frame_fields(&[]),
+            "slow_frames=0 first_slow_index=- slowest=-"
+        );
+        // A zero p50 has no scale: nothing is slow against it.
+        let zero: Vec<FrameRow> = (0..5).map(|i| frame_row(i, 0, 0, 0)).collect();
+        assert!(slow_frame_fields(&zero).starts_with("slow_frames=0 first_slow_index=- "));
+    }
+
+    #[test]
+    fn frame_split_line_appends_the_slow_fields_after_the_old_ones() {
+        let mut app = headless_app();
+        app.frames_presented = 300;
+        app.frame_rows = table_with_slow(&[(0, 14_500, 9_000), (200, 14_000, 10_000)]);
+        app.work_us = app.frame_rows.iter().map(|row| row.work_us).collect();
+        let line = app.frame_split_line();
+        let old_tail = line.find("present_mode=").expect("old field kept");
+        let new_head = line.find("slow_frames=2").expect("slow fields printed");
+        assert!(line.starts_with("arena frame-split: sim="), "{line}");
+        assert!(old_tail < new_head, "new fields only append: {line}");
+        assert!(
+            line.contains("cpu_ms p50=1.000 p99=1.000"),
+            "the p50 the slow bar reads is the printed one: {line}"
+        );
+        assert!(line.contains("first_slow_index=0 "), "{line}");
+    }
+
+    #[test]
+    fn frame_split_pass_divisor_is_explicit() {
+        // Probe columns (0..5) divide by the probed frames when any probed;
+        // a run that probed nothing, and every other column, divide by all
+        // folded frames. Never 0.
+        assert_eq!(pass_divisor(4, 0, 300), 300, "live ibl: folded frames");
+        assert_eq!(pass_divisor(4, 2, 300), 2, "probed ibl: probed frames");
+        assert_eq!(pass_divisor(5, 2, 300), 300, "fog: folded frames");
+        assert_eq!(pass_divisor(0, 0, 0), 1, "no frames clamps to 1");
+        let mut app = headless_app();
+        app.pass_adapter = "RTX".to_string();
+        app.pass_frames = 300;
+        app.pass_probes = 0;
+        let line = app.per_pass_line().expect("pinned adapter builds the line");
+        assert!(line.ends_with("gpu_frames=300 probe_frames=300"), "{line}");
+        app.pass_probes = 7;
+        let line = app.per_pass_line().expect("pinned adapter builds the line");
+        assert!(line.ends_with("gpu_frames=300 probe_frames=7"), "{line}");
+    }
+
+    #[test]
+    fn frame_split_ticks_make_three_runs_comparable() {
+        // The 2026-10-17T0447Z quiet window: same build, same 300 presented
+        // frames, 96 / 40 / 21 ticks paid. The printed means spread 5x; the
+        // per-tick figures sit together.
+        let runs = [(96u32, 5_824u64), (40, 2_090), (21, 1_116)];
+        let per_tick: Vec<String> = runs
+            .iter()
+            .map(|&(ticks, mean_us)| per_tick_us(mean_us * 300, ticks))
+            .collect();
+        assert_eq!(per_tick, ["18200", "15675", "15942"]);
+        assert_eq!(
+            tick_fields(96, 1_747_200, 955_200),
+            "ticks=96 us_per_tick_present=18200 us_per_tick_fighters=9950"
+        );
+        // No tick paid: `-`, never `inf`, NaN or a division by zero.
+        assert_eq!(per_tick_us(5_000, 0), "-");
+        assert_eq!(
+            tick_fields(0, 5_000, 2_000),
+            "ticks=0 us_per_tick_present=- us_per_tick_fighters=-"
+        );
+    }
+
+    #[test]
+    fn frame_split_line_prints_the_tick_count_and_per_tick_wall() {
+        let mut app = headless_app();
+        app.frames_presented = 300;
+        app.ticks_done = 40;
+        app.present_us = 40 * 15_000;
+        app.fighters_us = 40 * 7_000;
+        let line = app.frame_split_line();
+        assert!(
+            line.contains("ticks=40 us_per_tick_present=15000 us_per_tick_fighters=7000"),
+            "{line}"
+        );
+        // The old fields keep their name, order and unit: the mean is still
+        // per presented frame (600 ms over 300 frames).
+        assert!(
+            line.contains("sim=0.000ms present=2.000ms fighters=0.933ms"),
+            "{line}"
+        );
+        assert!(
+            line.find("present_mode=") < line.find("ticks="),
+            "tick fields append after the old ones: {line}"
+        );
+        app.ticks_done = 0;
+        let idle = app.frame_split_line();
+        assert!(
+            idle.contains("ticks=0 us_per_tick_present=- us_per_tick_fighters=-"),
+            "{idle}"
+        );
+        assert!(!idle.contains("inf") && !idle.contains("NaN"), "{idle}");
+    }
+
+    /// Run the throttle over `ticks` ticks with `steps` wall steps each, the
+    /// way the window loop calls it. Returns the `ticks_done` of each skipped
+    /// step.
+    fn skipped_steps(app: &mut ArenaApp, ticks: u32, steps: u32) -> Vec<u32> {
+        let mut skipped = Vec::new();
+        for ticks_done in 0..=ticks {
+            app.ticks_done = ticks_done;
+            for _ in 0..steps {
+                if app.take_present_skip() {
+                    skipped.push(ticks_done);
+                }
+            }
+        }
+        skipped
+    }
+
+    #[test]
+    fn present_skip_throttle_names_its_skipped_frames() {
+        // Failing-before: the window parsed `--present-every`/`--present-skip`
+        // and ignored both, and the receipt had no `skipped=` field to tell a
+        // skipped frame from a lost one.
+        let mut app = headless_app();
+        // No flag: nothing skipped, the receipt says so.
+        let none = skipped_steps(&mut app, 24, 3);
+        assert!(none.is_empty(), "default presents every step: {none:?}");
+        assert_eq!(app.frames_skipped, 0);
+        assert!(app.frame_split_line().ends_with("skipped=0"));
+        // `--present-every 2`: the odd tick counts skip, three steps each.
+        let mut app = headless_app();
+        app.args.present_every = 2;
+        let skipped = skipped_steps(&mut app, 24, 3);
+        let odd: Vec<u32> = (1..24).step_by(2).flat_map(|t| [t, t, t]).collect();
+        assert_eq!(skipped, odd, "exactly the odd ticks skip");
+        assert_eq!(app.frames_skipped, 36, "the counter counts those steps");
+        assert_eq!(app.frames_presented, 0, "a skip never counts as presented");
+        assert!(app.frame_split_line().ends_with("skipped=36"));
+        // `--present-skip`: every step skips, the first tick count too.
+        let mut app = headless_app();
+        app.args.present_skip = true;
+        let all = skipped_steps(&mut app, 4, 2);
+        assert_eq!(all.len(), 10, "5 tick counts x 2 steps all skip");
+        assert_eq!(app.frames_skipped, 10);
+    }
+
+    #[test]
+    fn should_present_cadence_keeps_the_last_tick_and_the_title_frame() {
+        // The final tick presents even when the count is not a multiple.
+        let mut app = headless_app();
+        app.config.ticks = 25;
+        app.args.present_every = 2;
+        let skipped = skipped_steps(&mut app, 25, 1);
+        assert!(
+            !skipped.contains(&25),
+            "the last tick presents: {skipped:?}"
+        );
+        assert!(!skipped.contains(&0), "no tick yet: nothing to throttle");
+        assert_eq!(skipped, (1..25).step_by(2).collect::<Vec<u32>>());
+        // The pure decision agrees with the predicate it reuses.
+        assert!(!present_skipped(0, 24, 2, false), "title/warmup draws");
+        assert!(present_skipped(1, 24, 2, false), "tick 0 of 2 skips");
+        assert!(!present_skipped(2, 24, 2, false), "tick 1 of 2 presents");
+        assert!(!present_skipped(24, 24, 7, false), "last tick presents");
+        assert!(!present_skipped(5, 24, 1, false), "every=1 presents all");
+        assert!(present_skipped(0, 24, 1, true), "--present-skip wins");
+    }
+
+    #[test]
+    fn present_skip_exit_waits_for_ticks_not_for_frames_that_cannot_come() {
+        // `--frames N` keeps meaning N presented frames.
+        assert!(!exit_reached(false, 10, 300, 299, Some(300), false));
+        assert!(exit_reached(false, 10, 300, 300, Some(300), false));
+        assert!(
+            !exit_reached(false, 300, 300, 0, None, false),
+            "no --frames"
+        );
+        // A staged fight needs the whole session and one drawn frame.
+        assert!(!exit_reached(true, 300, 300, 0, None, false));
+        assert!(exit_reached(true, 300, 300, 1, None, false));
+        // `--present-skip` presents none: leave when the ticks are done.
+        assert!(!exit_reached(false, 299, 300, 0, Some(300), true));
+        assert!(exit_reached(false, 300, 300, 0, Some(300), true));
+        assert!(exit_reached(true, 300, 300, 0, None, true));
     }
 }

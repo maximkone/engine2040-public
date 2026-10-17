@@ -37,6 +37,12 @@ pub fn measure<T>(f: impl FnOnce() -> T) -> (T, AllocSnapshot) {
 
 /// Peak heap observed over one run, in bytes.
 ///
+/// Each sample is the bytes requested inside one counted window ([`measure`]).
+/// The counting allocator records requests and not frees, so a sample is an
+/// upper bound on how far the live heap grew in that window: it never reads
+/// low, and a leak or an extra buffer moves it by exactly the bytes added.
+/// A true live-heap high-water mark needs free accounting in the shared
+/// `engine_core::alloc_probe`, which this crate does not own.
 /// Owner: this module owns only the pure math over recorded samples; it
 /// never reads a clock or the OS. Determinism: same inputs give the same
 /// peak twice. Errors: none, construction cannot fail.
@@ -44,7 +50,7 @@ pub fn measure<T>(f: impl FnOnce() -> T) -> (T, AllocSnapshot) {
 /// integration test.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeakSnapshot {
-    /// Largest live-heap sample in bytes.
+    /// Largest sample in bytes (see the type docs for what a sample counts).
     pub peak_bytes: u64,
 }
 
@@ -422,6 +428,33 @@ mod tests {
         assert!(
             !allows(BASELINE + (64 << 20), BASELINE),
             "baseline plus 64 MiB fails the 10 percent rule"
+        );
+    }
+
+    #[test]
+    fn gate_edge_is_exactly_ten_percent_and_never_wraps() {
+        assert!(allows(1_100, 1_000), "exactly +10 percent passes");
+        assert!(!allows(1_101, 1_000), "one byte over fails");
+        assert!(allows(999, 1_000), "a smaller peak passes");
+        assert!(allows(0, 1_000), "a zero peak passes a real baseline");
+        // The compare widens to u128, so u64 extremes cannot wrap.
+        assert!(allows(u64::MAX, u64::MAX));
+        assert!(!allows(u64::MAX, u64::MAX / 2));
+        let err = peak_assert(1_101, 1_000).expect_err("one byte over trips");
+        assert_eq!(
+            err,
+            PeakGateError::OverBudget {
+                peak_bytes: 1_101,
+                baseline_bytes: 1_000,
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "heap peak=1101 baseline=1000 limit=1100 verdict=FAIL"
+        );
+        assert_eq!(
+            subsystem_peak_line("heap", 1_100, 1_000),
+            "heap peak=1100 baseline=1000 limit=1100 verdict=PASS"
         );
     }
 

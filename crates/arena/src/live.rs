@@ -1105,7 +1105,7 @@ mod tests {
         assert!(hits > 0, "the duel trades blows");
         let mut v1_split = false;
         placed_run(&config, &tape, ArenaRules::V1, place, |sim| {
-            v1_split |= !mirrored(sim)
+            v1_split |= !mirrored(sim);
         });
         assert!(v1_split, "v1 favours a slot");
     }
@@ -1126,7 +1126,7 @@ mod tests {
                     slot0 += u32::from(won == 0);
                 }
                 (None, hp) => {
-                    draws += u32::from(hp.last().is_some_and(|(a, b)| *a == 0 && *b == 0))
+                    draws += u32::from(hp.last().is_some_and(|(a, b)| *a == 0 && *b == 0));
                 }
             }
         }
@@ -1523,7 +1523,7 @@ mod tests {
                 _ => 0,
             },
             facing: 0,
-            buttons: if tick % 30 == 0 {
+            buttons: if tick.is_multiple_of(30) {
                 Buttons(ATTACK)
             } else {
                 Buttons::NONE

@@ -25,12 +25,12 @@ pub fn gaussian_kernel_11() -> [[f64; WINDOW_SIDE]; WINDOW_SIDE] {
     let mut sum = 0.0_f64;
     let half: f64 = 5.0;
     let denom: f64 = 2.0 * WINDOW_SIGMA * WINDOW_SIGMA;
-    for y in 0..WINDOW_SIDE {
-        for x in 0..WINDOW_SIDE {
+    for (y, row) in kernel.iter_mut().enumerate() {
+        for (x, cell) in row.iter_mut().enumerate() {
             let dx: f64 = x as f64 - half;
             let dy: f64 = y as f64 - half;
             let value: f64 = (-(dx * dx + dy * dy) / denom).exp();
-            kernel[y][x] = value;
+            *cell = value;
             sum += value;
         }
     }

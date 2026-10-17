@@ -2400,7 +2400,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "full 200-match difficulty curve: run alone with --ignored"]
     fn full_difficulty_sweep_writes_csv() {
         // Full 200-match curve (short, standard, long fights): run
         // explicitly to refresh `target/reports/difficulty-<UTC>.csv`.

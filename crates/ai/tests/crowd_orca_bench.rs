@@ -415,7 +415,7 @@ impl Grid {
     /// Bucket every agent once (counting sort, no per-cell vector) for this
     /// step's positions.
     fn build(agents: &[Agent]) -> Self {
-        let cell_mm = i64::from(NEIGHBOUR_DIST_MM);
+        let cell_mm = NEIGHBOUR_DIST_MM;
         let cells_axis = (2 * WORLD_HALF_MM) / cell_mm + 1;
         let cells = usize::try_from(cells_axis * cells_axis).unwrap_or(0);
         let mut starts = vec![0u32; cells + 1];

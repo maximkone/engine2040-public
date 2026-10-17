@@ -16,8 +16,10 @@ fn defaults_validate() {
 
 #[test]
 fn bad_fov_rejected() {
-    let mut bad = DirectorParams::default();
-    bad.fov_y_rad = 0.0;
+    let bad = DirectorParams {
+        fov_y_rad: 0.0,
+        ..DirectorParams::default()
+    };
     assert!(bad.validate().is_err(), "zero fov fails");
     assert!(frame_pair(Vec3::new(1.0, 0.0, 0.0), None, &bad).is_err());
 }

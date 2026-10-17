@@ -186,7 +186,7 @@ pub fn should_present(tick: u32, ticks: u32, present_every: u32) -> bool {
         return true;
     }
     let one_based = tick.saturating_add(1);
-    one_based == ticks || one_based % present_every == 0
+    one_based == ticks || one_based.is_multiple_of(present_every)
 }
 
 impl GameConfig {
@@ -1656,7 +1656,7 @@ pub struct FighterView {
 fn tape_should_append(tape: &FighterTape, key: (u32, u8)) -> bool {
     tape.0
         .last()
-        .map_or(true, |last| (last.tick, last.fighter.0) <= key)
+        .is_none_or(|last| (last.tick, last.fighter.0) <= key)
 }
 
 /// The tape's inputs for one tick: the tape is `(tick, fighter)`-sorted, so
@@ -1671,7 +1671,9 @@ fn tick_inputs(tape: &FighterTape, tick: u32) -> &[FighterInput] {
 /// the full position plus yaw. `rows` starts at the tick's first row (the
 /// live match serves exactly the tick's rows). `None` on any shape mismatch
 /// (wrong tick, wrong count); the caller keeps the previous views then.
-/// Pure over the rows.
+/// Pure over the rows. Allocating form for the tests; the live path refills
+/// in place through [`fill_views_for_tick`].
+#[cfg(test)]
 fn views_for_tick(rows: &[Row], tick: u32, fighters: u8) -> Option<Vec<FighterView>> {
     let mut out = Vec::with_capacity(usize::from(fighters));
     fill_views_for_tick(rows, tick, fighters, &mut out).then_some(out)
@@ -1703,6 +1705,9 @@ fn fill_views_for_tick(rows: &[Row], tick: u32, fighters: u8, out: &mut Vec<Figh
 /// axis (`x`). Rows are tick-major with one row per fighter; `rows` starts
 /// at the tick's first row. `None` on any shape mismatch (wrong tick, wrong
 /// count); the caller keeps the previous laterals then. Pure over the rows.
+/// Allocating form for the tests; the live path refills in place through
+/// [`fill_laterals_for_tick`].
+#[cfg(test)]
 fn laterals_for_tick(rows: &[Row], tick: u32, fighters: u8) -> Option<Vec<FighterLateral>> {
     let mut out = Vec::with_capacity(usize::from(fighters));
     fill_laterals_for_tick(rows, tick, fighters, &mut out).then_some(out)
@@ -2494,7 +2499,7 @@ mod tests {
                 .iter()
                 .map(|track| track.last().cloned().expect("covered tick has a pose"))
                 .collect();
-            assert_eq!(app.pose_cursor(), &tails[..]);
+            assert_eq!(app.pose_cursor(), &*tails);
         }
         // P2P twice: a twin session serves byte-equal poses.
         let mut twin = App::new(config).unwrap();
@@ -2521,7 +2526,7 @@ mod tests {
         assert!(!rejected.input_accepted);
         assert_eq!(app.cursor(), 1);
         assert_eq!(app.presentation_len(), 1);
-        assert_eq!(app.pose_cursor(), &held[..]);
+        assert_eq!(app.pose_cursor(), &*held);
         // AI-filled ticks advance too.
         let out = app.tick_empty();
         assert!(out.input_accepted);

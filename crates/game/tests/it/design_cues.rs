@@ -31,6 +31,7 @@ struct CueRow {
     /// Mix bus code: 0 Sfx, 1 Music, 2 Dialogue.
     bus: u8,
     /// Steal rank: higher survives voice stealing.
+    #[expect(dead_code, reason = "parsed table column; no test reads the rank yet")]
     priority: u8,
     /// Milliseconds from event to audible cue, at most [`SOUND_BUDGET_MS`].
     latency_ms: u16,

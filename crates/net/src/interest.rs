@@ -1706,7 +1706,7 @@ mod tests {
         let base_fighters: Vec<BodySnap> = (0..8)
             .map(|slot| BodySnap {
                 slot,
-                x_mm: i32::try_from(slot).expect("slot fits") * 1_000,
+                x_mm: i32::from(slot) * 1_000,
                 y_mm: 0,
                 z_mm: 0,
                 yaw_ddeg: 0,

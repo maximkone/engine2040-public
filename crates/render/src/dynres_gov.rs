@@ -240,4 +240,63 @@ mod tests {
         }
         assert_eq!(a, b);
     }
+
+    #[test]
+    fn scale_dynres_panic_clears_history() {
+        let mut gov = gov();
+        for _ in 0..3 {
+            let _ = gov.step(30_000);
+        }
+        assert_eq!(gov.scale_pct(), 50);
+        // Old spike readings must not linger: exactly one cooldown window of
+        // in-budget frames raises the scale one step.
+        assert_eq!(gov.step(10_000), None);
+        assert_eq!(gov.step(10_000), None);
+        assert_eq!(gov.step(10_000), Some(55));
+    }
+
+    #[test]
+    fn scale_dynres_inside_deadband_never_moves() {
+        // 10% of 10_000 us is 1_000 us: both edges hold and the scale stays.
+        let mut hold = gov();
+        for sample in [11_000, 9_000, 10_500, 9_500, 11_000, 9_000, 10_000] {
+            assert_eq!(hold.step(sample), None, "sample {sample}");
+        }
+        assert_eq!(hold.scale_pct(), 100);
+    }
+
+    #[test]
+    fn scale_dynres_swapped_bounds_clamp() {
+        let mut gov = DynRes::new(10_000, 100, 50, 10, 3, 3);
+        assert_eq!(gov.scale_pct(), 100);
+        let mut last: Option<u8> = None;
+        for _ in 0..3 {
+            last = gov.step(30_000).or(last);
+        }
+        assert_eq!(last, Some(50));
+        assert_eq!(gov.scale_pct(), 50);
+    }
+
+    #[test]
+    fn scale_controller_spike_floors_through_the_governor() {
+        use crate::aa_scale::{ScaleController, ScalePolicy};
+        let policy = ScalePolicy::default();
+        let mut ctl = ScaleController::new(policy).expect("policy builds");
+        assert_eq!(ctl.scale(), 1.0);
+        // Steady at budget: the consumer holds full rate.
+        for _ in 0..10 {
+            ctl.update(policy.target_ms).expect("steady frame runs");
+        }
+        assert_eq!(ctl.scale(), 1.0);
+        // A 3x spike: hysteresis alone would reach only one `step` below
+        // full after `over_frames`; the governor panic drop floors it.
+        for _ in 0..policy.over_frames {
+            ctl.update(3.0 * policy.target_ms)
+                .expect("spike frame runs");
+        }
+        assert_eq!(ctl.scale(), policy.min_scale);
+        assert!(ctl.steps_down >= 1);
+        let (rw, rh) = ctl.render_size(1920, 1080).expect("size runs");
+        assert_eq!((rw, rh), (960, 540), "floor halves the render size");
+    }
 }

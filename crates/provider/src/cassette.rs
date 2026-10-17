@@ -1461,14 +1461,14 @@ mod tests {
         let mut second = [String::new(), String::new(), String::new()];
         let mut sockets = [0, 0];
         let mut transports = [0, 0];
-        let mut w = replayer(&dir, openai(&dead));
+        let mut w = replayer(dir, openai(&dead));
         for (index, ask) in suite.iter().enumerate() {
             let out = ask_via(&mut w, ask, &dead);
             first[index] = format!("{:?}", out.result);
         }
         sockets[0] = w.inner().socket_attempts();
         transports[0] = w.inner().transport_calls();
-        let mut w = replayer(&dir, openai(&dead));
+        let mut w = replayer(dir, openai(&dead));
         for (index, ask) in suite.iter().enumerate() {
             let out = ask_via(&mut w, ask, &dead);
             second[index] = format!("{:?}", out.result);

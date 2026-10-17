@@ -178,8 +178,8 @@ pub fn validate_dims(width: u32, height: u32) -> Result<(), BcError> {
 }
 
 /// sRGB byte to linear float (alpha never passes through here). The texture
-/// cook and the block encoder share this one curve.
-pub(crate) fn srgb_byte_to_linear(byte: u8) -> f32 {
+/// cook, the block encoder and the game's crowd tint share this one curve.
+pub fn srgb_byte_to_linear(byte: u8) -> f32 {
     let v = f32::from(byte) / 255.0;
     if v <= 0.04045 {
         v / 12.92

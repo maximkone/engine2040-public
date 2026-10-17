@@ -384,8 +384,8 @@ export function startSampler({ spawnFn = spawn, procs = SAMPLED_PROCESSES, inter
 // (`run` warns about it) and falls back to the per-sample `tasklist` seam,
 // slower but with the numbers intact. `sampler`, `spawnArena` and `sampleFn`
 // are the test seams; production passes nothing and gets the live ones.
-async function runLive({ sampler: makeSampler = startSampler, spawnArena = spawn, sampleFn = sampleTasklist } = {}) {
-  if (!existsSync(ARENA_EXE)) return { output: "", tasklistText: "", missing: true, timedOut: false, load: { cargo: 0, rustc: 0, loaded: false } };
+async function runLive({ sampler: makeSampler = startSampler, spawnArena = spawn, sampleFn = sampleTasklist, arenaExists = existsSync } = {}) {
+  if (!arenaExists(ARENA_EXE)) return { output: "", tasklistText: "", missing: true, timedOut: false, load: { cargo: 0, rustc: 0, loaded: false } };
   const sampler = makeSampler();
   await Promise.race([Promise.resolve(sampler.ready), new Promise((r) => setTimeout(r, 5_000))]);
   const child = spawnArena(ARENA_EXE, [...RUN_ARGS], {
@@ -486,7 +486,7 @@ export async function run(argv = [], deps = {}) {
     logError(`potato-check: ${err?.message ?? err}`);
     return 2;
   }
-  const live = await runLiveFn({ sampler: deps.sampler, spawnArena: deps.spawnArena, sampleFn: deps.sampleFn });
+  const live = await runLiveFn({ sampler: deps.sampler, spawnArena: deps.spawnArena, sampleFn: deps.sampleFn, arenaExists: deps.arenaExists });
   const s = summarize({
     output: live.output,
     tasklistText: live.tasklistText,

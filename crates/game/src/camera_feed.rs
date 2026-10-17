@@ -128,7 +128,8 @@ impl PresentationFeed {
     /// pre-sized for [`FEED_TICKS`] ticks at the construction boundary
     /// (never per tick).
     pub fn new(focus: u8, params: DirectorParams) -> Result<Self, CameraError> {
-        let capacity = FEED_WINDOW;
+        // One slot past the window: each push lands before the head-drop.
+        let capacity = FEED_WINDOW + 1;
         Ok(Self {
             rig: StagedRig::new(focus, params)?,
             frames: Vec::with_capacity(capacity),
@@ -341,7 +342,8 @@ impl SmoothedFeed {
         Ok(Self {
             inner: PresentationFeed::new(focus, params)?,
             sync: DampedSync::new(gain_permille)?,
-            smoothed: Vec::with_capacity(FEED_WINDOW),
+            // One slot past the window: each push lands before the head-drop.
+            smoothed: Vec::with_capacity(FEED_WINDOW + 1),
         })
     }
 
@@ -1494,7 +1496,7 @@ mod tests {
         for tick in 0..FEED_TICKS {
             feed.orbit_tick(tick, &[]).expect("warm-up");
         }
-        let (_, steady) = alloc_probe::measure(|| {
+        let ((), steady) = alloc_probe::measure(|| {
             for tick in FEED_TICKS..2 * FEED_TICKS {
                 feed.orbit_tick(tick, &[]).expect("frame");
             }

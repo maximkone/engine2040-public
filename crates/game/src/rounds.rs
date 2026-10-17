@@ -36,8 +36,8 @@ pub fn decide_round(hp: &[u16], fighters: u8) -> RoundWinner {
         return RoundWinner::Tie;
     }
     let mut field: u32 = 0;
-    for slot in 1..n {
-        field = field.saturating_add(u32::from(hp[slot]));
+    for health in &hp[1..n] {
+        field = field.saturating_add(u32::from(*health));
     }
     let home = u32::from(hp[0]);
     if home > field {
@@ -50,7 +50,7 @@ pub fn decide_round(hp: &[u16], fighters: u8) -> RoundWinner {
 }
 
 /// Best-of-5 fold: first to [`WINS_FOR_MATCH`]; ties replay, score nothing.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct MatchState {
     rounds: u32,
     wins0: u32,

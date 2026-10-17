@@ -367,7 +367,7 @@ mod tests {
             .expect("routed local target builds");
         let policy = local_policy();
         let caps = ProviderCapabilities::local_http();
-        let mut call = |handle: &mut AdapterHandle, id: u64| {
+        let call = |handle: &mut AdapterHandle, id: u64| {
             let mut request = crate::mock::fixtures::request(id, 3);
             request.model.adapter = AdapterKind::Local;
             handle.call(&request, &policy, &caps)

@@ -298,7 +298,7 @@ fn expected_for(index: usize) -> GameConfig {
     let (file_seed, file_ticks, file_fighters, file_extent) = file_values(index);
     let (env_seed, env_ticks, env_fighters, env_extent) = env_values(index);
     let bad = bad_slot_for(index);
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         GameConfig {
             seed: if bad == BadSlot::Seed {
                 file_seed
@@ -361,7 +361,7 @@ fn resolve_stack(index: usize) -> GameConfig {
     let env_ticks_s = env_ticks.to_string();
     let env_fighters_s = env_fighters.to_string();
     let env_extent_s = env_extent.to_string();
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         let triple = match bad {
             BadSlot::Seed => (
                 bad_text,

@@ -261,7 +261,7 @@ type KitSource = (
     Option<(TextureKey, TextureUpload)>,
 );
 
-/// Placement loading lives in the `kit_load` child module (re-exported above).
+// Placement loading lives in the `kit_load` child module (re-exported above).
 
 /// Floor-plane obstacles for the physical kit actors in slice order.
 ///
@@ -2032,6 +2032,6 @@ mod tests {
         assert!(err.to_string().contains("line 2"), "{err}");
         let short = "table arena-zones version 1\nsand_floor class=0 cx_cm=-6000 cz_cm=0 radius_cm=1500 height_cm=20 advantage=0 dominance=0 risk=0\n";
         let err = kit_zone_rows_from_text(short).expect_err("a missing actor row refuses");
-        assert!(err.to_string().contains("1 of 12"), "{err}");
+        assert!(err.to_string().contains("12 rows, saw 1"), "{err}");
     }
 }

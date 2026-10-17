@@ -100,7 +100,7 @@ Boarded 2026-10-10 from `docs/plan/ai-native.md` candidate rows 2, 4, 5 and 7
   ticks late is logged as fallback each time, and the final hash equals the
   scripted-only bout's and its provider-off replay. F2P: no deadline path.
   P2P: as AL1. needs: AL1.
-- [ ] DP1 endpoint: door packs for the Core systems — `net` (open a loopback
+- [x] DP1 endpoint: door packs for the Core systems — `net` (open a loopback Landed 92fb1962.
   session, inject loss, latency and drop, read the first divergent tick) and
   `perf` (per-scenario p50 and p99 from the newest quiet perf csv), typed,
   read-only or undoable, refused unless enabled. Tier A. Size M. Owns

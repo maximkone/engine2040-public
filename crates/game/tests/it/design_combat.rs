@@ -63,6 +63,10 @@ fn has(events: &[FightEvent], kind: &str) -> bool {
 }
 
 #[test]
+#[expect(
+    clippy::assertions_on_constants,
+    reason = "table pin: a retune must fail this test with its message"
+)]
 fn v2_startup_is_readable() {
     assert!(
         TABLES_V2.attack_startup_ticks >= 15,
@@ -72,6 +76,10 @@ fn v2_startup_is_readable() {
 }
 
 #[test]
+#[expect(
+    clippy::assertions_on_constants,
+    reason = "table pin: a retune must fail this test with its message"
+)]
 fn v2_parry_window_shorter_than_startup() {
     assert!(
         TABLES_V2.parry_window_ticks < TABLES_V2.attack_startup_ticks,
@@ -87,6 +95,10 @@ fn v2_parry_window_shorter_than_startup() {
 }
 
 #[test]
+#[expect(
+    clippy::assertions_on_constants,
+    reason = "table pin: a retune must fail this test with its message"
+)]
 fn dodge_iframes_inside_duration() {
     assert!(
         TABLES_V1.dodge_duration_ticks > 0,

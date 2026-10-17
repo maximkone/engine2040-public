@@ -530,6 +530,7 @@ test("potato: the gate starts one sampler per run, reads its samples and warns w
     };
     const code = await potato.run([], {
       sampler,
+      arenaExists: () => true,
       spawnArena: fakeArenaSpawn(CANNED_ARENA),
       log: (line) => lines.push(line),
       errorLog: (line) => errors.push(line),
@@ -571,6 +572,7 @@ test("potato: the gate starts one sampler per run, reads its samples and warns w
           read: () => ({ text: "", error: "sampler exited 1" }),
           stop: () => {},
         }),
+        arenaExists: () => true,
         spawnArena: fakeArenaSpawn(CANNED_ARENA),
         sampleFn: () => ({ text: CANNED_TASKLIST, error: null }),
         log: (line) => deadLines.push(line),

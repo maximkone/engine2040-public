@@ -72,7 +72,7 @@ impl CannaeTeam {
         } else {
             let index = Self::circle_index(slot, tick);
             let (mx, mz) = CIRCLE[index];
-            let buttons = if tick % 30 == 0 {
+            let buttons = if tick.is_multiple_of(30) {
                 Buttons(ATTACK)
             } else {
                 Buttons::NONE

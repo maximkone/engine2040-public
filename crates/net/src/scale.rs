@@ -1105,9 +1105,11 @@ mod tests {
             MP6_POSTED_WAN_DELAY_MAX + MP6_POSTED_WAN_HOLD - RESIM_CAP_TICKS,
             "WAN delay is posted worst plus hold minus the window"
         );
-        assert!(
-            MP6_POSTED_WAN_ROLLBACK_MAX > RESIM_CAP_TICKS - 1,
-            "window minus one would not cover the posted WAN max"
-        );
+        const {
+            assert!(
+                MP6_POSTED_WAN_ROLLBACK_MAX > RESIM_CAP_TICKS - 1,
+                "window minus one would not cover the posted WAN max"
+            );
+        };
     }
 }

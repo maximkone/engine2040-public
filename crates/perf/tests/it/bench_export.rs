@@ -116,7 +116,7 @@ fn parse_quoted_name(from: &str) -> Option<(String, &str)> {
 
 fn parse_number(from: &str) -> Option<(f64, &str)> {
     let end = from
-        .find(|c| c == ',' || c == '}' || c == ']')
+        .find([',', '}', ']'])
         .unwrap_or(from.len());
     let value: f64 = from[..end].trim().parse().ok()?;
     Some((value, &from[end..]))

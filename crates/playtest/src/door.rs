@@ -105,11 +105,19 @@ pub(crate) struct DoorRefusal {
 }
 
 /// Run one call through the provider contract and validate the proposal.
+#[expect(
+    clippy::result_large_err,
+    reason = "a refusal is built once per door call and returned by value"
+)]
 pub(crate) fn door_call(call: &DoorCall<'_>) -> Result<Proposal, DoorRefusal> {
     door_call_with(call, cassette_from_env().as_ref())
 }
 
 /// Run one call with explicit cassette wiring; `None` is the off path.
+#[expect(
+    clippy::result_large_err,
+    reason = "a refusal is built once per door call and returned by value"
+)]
 pub(crate) fn door_call_with(
     call: &DoorCall<'_>,
     cassette: Option<&CassetteSetup>,

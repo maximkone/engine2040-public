@@ -716,7 +716,7 @@ no-clip rule at eye level, eye-space shake, one scripted proof tape. Every row i
   byte-exact twice; zero heap bytes per call; `cargo test -p
   engine-game --lib fps_view` green. F2P: no eye function exists.
   P2P: golden unchanged. needs: none.
-- [ ] FV2 input: presentation-only look channel beside the tape. Tier
+- [x] FV2 input: presentation-only look channel beside the tape. Tier Landed 93348edc.
   A. Size S. Owns `crates/input/src/look.rs` (new file beside
   `fighter.rs`).
   Accept: yaw/pitch deltas accumulate into a validated `LookState`

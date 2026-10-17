@@ -4,12 +4,17 @@
 //! signal-plus-attack milliseconds, and checks the table reads identical
 //! twice. Default mode only reports; `TELEGRAPH_STRICT=1` turns the floor
 //! into a failure. Report only: no sim state changes, no hash input.
+//!
+//! The shipped roster is two light moves (jab, cross) and has no heavy row
+//! yet. Strict mode gates every row, so a heavy move added later is held to
+//! the same 340 ms floor the day it lands.
 
-use engine_combat::exchange::{signal_attack_ms, PHASED_V1};
+use engine_combat::exchange::{signal_attack_ms, PHASED_V1, TELEGRAPH_FLOOR_MS};
 use engine_combat::{Tables, TABLES_V1, TABLES_V2};
 
 // Readable-attack floors in milliseconds: full telegraph, bait, end pose.
-const FLOOR_MS: u32 = 340;
+// The full floor has one owner, `engine_combat::exchange`.
+const FLOOR_MS: u32 = TELEGRAPH_FLOOR_MS;
 const BAIT_MS: u32 = 240;
 const END_POSE_MS: u32 = 170;
 
@@ -26,6 +31,16 @@ fn floor_verdict(ms: u32) -> &'static str {
     } else {
         "unreadable"
     }
+}
+
+// Move ids whose signal-plus-attack time sits under the full floor. Strict
+// mode fails on any of them. Pure, no allocation beyond the result: the same
+// rows give the same ids on every run.
+fn strict_violations(rows: &[(u8, u32, u32, u32)]) -> Vec<u8> {
+    rows.iter()
+        .filter(|(_, _, _, ms)| *ms < FLOOR_MS)
+        .map(|(id, _, _, _)| *id)
+        .collect()
 }
 
 // One printed row per live move: id, startup, active, signal-plus-attack ms.
@@ -79,7 +94,9 @@ fn rules_signal_table(tables: &Tables) -> Vec<(u8, u32, u32, u32)> {
 
 // The two shipped rules versions with their label, in report order: the
 // proof scene's v1 first, then the v2 rows the window and the Rome duel play.
-fn shipped_rules_tables() -> [(&'static str, Vec<(u8, u32, u32, u32)>); 2] {
+type SignalRow = (u8, u32, u32, u32);
+
+fn shipped_rules_tables() -> [(&'static str, Vec<SignalRow>); 2] {
     [
         ("v1", rules_signal_table(&TABLES_V1)),
         ("v2", rules_signal_table(&TABLES_V2)),
@@ -121,15 +138,43 @@ fn telegraph_strict_fails_below_floor() {
     }
     let strict = std::env::var("TELEGRAPH_STRICT").unwrap_or_default() == "1";
     if strict {
+        let mut failing: Vec<String> = Vec::new();
         for (label, version_rows) in &shipped {
-            for (id, _, _, ms) in version_rows {
-                assert!(
-                    *ms >= FLOOR_MS,
-                    "strict: rules {label} move {id} at {ms} ms sits below the {FLOOR_MS} ms floor"
-                );
+            for id in strict_violations(version_rows) {
+                failing.push(format!("rules {label} move {id}"));
             }
         }
+        assert!(
+            failing.is_empty(),
+            "strict: below the {FLOOR_MS} ms floor: {}",
+            failing.join(", ")
+        );
     }
+}
+
+#[test]
+fn strict_rule_flags_sub_floor_moves_without_the_env_switch() {
+    // The env switch is process-wide, so the rule itself is proved on plain
+    // rows: the shipped tables fail it today, a row at the floor passes, and
+    // one tick under the floor fails. Failing here is what `TELEGRAPH_STRICT=1`
+    // turns into a red run.
+    for (label, rows) in &shipped_rules_tables() {
+        assert_eq!(
+            strict_violations(rows),
+            vec![0, 1],
+            "rules {label}: both shipped moves sit under the floor"
+        );
+        assert_eq!(strict_violations(rows), strict_violations(rows), "x2");
+    }
+    let row = |id: u8, startup: u32, active: u32| {
+        (id, startup, active, signal_attack_ms(startup, active))
+    };
+    // 20 ticks is 333 ms, 21 ticks is 350 ms: the floor sits between them.
+    let rows = [row(7, 18, 2), row(8, 19, 2), row(9, 40, 5)];
+    assert_eq!((rows[0].3, rows[1].3, rows[2].3), (333, 350, 750));
+    assert_eq!(strict_violations(&rows), vec![7]);
+    assert!(strict_violations(&rows[1..]).is_empty());
+    assert!(strict_violations(&[]).is_empty());
 }
 
 #[test]
@@ -228,4 +273,23 @@ fn telegraph_floors_classify_jab_cross_bait_full() {
     assert_eq!(floor_verdict(250), "bait");
     assert_eq!(floor_verdict(340), "full");
     assert_eq!(floor_verdict(500), "full");
+}
+
+#[test]
+fn floor_constants_and_boundaries_are_pinned() {
+    // The three Dark Souls 3 floors, and the exact millisecond each flips.
+    assert_eq!((FLOOR_MS, BAIT_MS, END_POSE_MS), (340, 240, 170));
+    let edges = [
+        (0, "unreadable"),
+        (169, "unreadable"),
+        (170, "end-pose"),
+        (239, "end-pose"),
+        (240, "bait"),
+        (339, "bait"),
+        (340, "full"),
+    ];
+    for (ms, want) in edges {
+        assert_eq!(floor_verdict(ms), want, "{ms} ms");
+        assert_eq!(floor_verdict(ms), floor_verdict(ms), "x2");
+    }
 }

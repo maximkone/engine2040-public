@@ -198,12 +198,14 @@ impl FighterSlot {
     /// First tick the slot runs free again (exclusive). The look records the
     /// impact pair's expiry here; `fold_acts` freezes exactly that pair.
     #[must_use]
+    #[cfg(feature = "app")]
     pub(crate) fn hold_until(&self) -> u32 {
         self.hold_until
     }
 
     /// Record a hold through `until` (exclusive). Keeps the farthest expiry,
     /// so a new impact extends the freeze but never shortens it.
+    #[cfg(any(feature = "app", test))]
     pub(crate) fn hold_through(&mut self, until: u32) {
         self.hold_until = self.hold_until.max(until);
     }
@@ -213,6 +215,7 @@ impl FighterSlot {
     /// clip instead of an expired swing. The phase stays put while held; the
     /// start marches so the resume tick recomputes the same phase.
     /// Presentation only.
+    #[cfg(any(feature = "app", test))]
     pub(crate) fn march_hold(&mut self, elapsed: u32) {
         self.pick.act_start = self.pick.act_start.saturating_add(elapsed);
     }
@@ -271,10 +274,7 @@ impl FighterSlot {
             // cancels, so a revival blends from the held last frame instead
             // of cutting (Bevy A-B-A only applies off the death clip).
             let down_swap = next == BridgeClip::Down || self.pick.clip == BridgeClip::Down;
-            if down_swap {
-                self.fade
-                    .retarget(self.pick.clip.index(), self.pick.phase_ticks);
-            } else if !retarget_cancel(&mut self.fade, next.index()) {
+            if down_swap || !retarget_cancel(&mut self.fade, next.index()) {
                 self.fade
                     .retarget(self.pick.clip.index(), self.pick.phase_ticks);
             }

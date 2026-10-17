@@ -137,7 +137,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   (2048 MB) gives Potato; an unknown discrete 8 GB gives Comfort; Basic Render Driver
   gives Refuse; x2 equal. F2P: no rules. P2P: `cargo test -p engine-render --lib`
   green. needs: GS10.
-- [ ] GS12 render: dynamic resolution control law — pure `crates/render/src/dynres_gov.rs`.
+- [x] GS12 render: dynamic resolution control law — pure `crates/render/src/dynres_gov.rs`. Landed acdd233.
   `DynRes {budget_us, min_pct, max_pct, deadband_pct, cooldown_frames,
   panic_over_budget_frames}` and `step(&mut self, gpu_us) -> Option<u8>` (donor:
   Unreal `r.DynamicRes.*`: history window average, deadband, cooldown, panic drop
@@ -187,7 +187,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   output and a fake `tasklist` give the exact potato line x2; no integrated adapter
   prints `NO_IGPU` and exits 2; `--floor` exits 1 when p50 is over. F2P: no potato
   report. P2P: `node --test tools/potato-check.test.mjs` green. needs: GS6.
-- [ ] GS17 render: LOD dither cross-fade — no pop, no alpha sort (donor: keijiro
+- [x] GS17 render: LOD dither cross-fade — no pop, no alpha sort (donor: keijiro Landed 0a4239e.
   CrossFadingLod). New `crates/render/src/lod_fade.rs`: `fade(dist, switch, band) ->
   u8`, `bayer4(x, y) -> u8`, `keep(fade, x, y) -> bool`; and `shaders/lod_dither.wgsl`
   with the same 4x4 matrix. Diff: regular. Tier A. Size S. Owns the two new files and
@@ -264,7 +264,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   regular. Tier A. Size S. Owns `content/fetch-roman.list`. Accept: `--dry-run` lists
   at least 12 rows, each CC0 or CC-BY, each CC-BY row with attribution text. F2P: no
   list. P2P: `node --test tools/` green. needs: GS21.
-- [ ] GS24 tools: headless Blender cook — `tools/cook-char.mjs` runs `blender -b -P
+- [x] GS24 tools: headless Blender cook — `tools/cook-char.mjs` runs `blender -b -P Landed f5bf4f7.
   tools/blender/cook_char.py -- <in> <out.glb>` (import BVH, FBX or glTF, export glTF),
   samples peak working set, prints `cook: peak_ws_mb=..`. Blender is heavy on RAM, so
   one process per clip. Diff: regular. Tier A. Size S. Owns `tools/cook-char.mjs`,
@@ -272,7 +272,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   on PATH receives exactly `-b -P <script> -- <in> <out>` and the runner reports the
   peak line and exits 0; no Blender on PATH exits 2 with the install hint. F2P: no
   runner. P2P: `node --test tools/cook-char.test.mjs` green.
-- [ ] GS25 tools: replay to video — `node tools/replay-to-mp4.mjs <tape> --out clip.mp4
+- [x] GS25 tools: replay to video — `node tools/replay-to-mp4.mjs <tape> --out clip.mp4 Landed f6c0bce.
   [--max-ticks N]` runs the existing capture binary (`crates/game/src/bin/arena_capture.rs`;
   read its usage for the flags) to numbered PNGs, then `ffmpeg -framerate 60 -i
   frame_%06d.png`. It uses `h264_nvenc` when `ffmpeg -hide_banner -encoders` lists it

@@ -117,9 +117,7 @@ pub fn arm_length(
                 let mut near = (lo[i] - origin) / direction;
                 let mut far = (hi[i] - origin) / direction;
                 if near > far {
-                    let swap = near;
-                    near = far;
-                    far = swap;
+                    std::mem::swap(&mut near, &mut far);
                 }
                 if near > low_t {
                     low_t = near;

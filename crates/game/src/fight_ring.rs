@@ -17,6 +17,7 @@
 
 use std::path::Path;
 
+use engine_assets::bc::srgb_byte_to_linear;
 use engine_render::draw::crowd_seats::{
     crowd_palette_index, crowd_palette_rgba, crowd_seat_pos, crowd_total, CROWD_BODY_D_M,
     CROWD_BODY_H_M, CROWD_BODY_W_M, CROWD_HEAD_M, CROWD_PALETTE_LEN, CROWD_ROWS_PER_SECTOR,
@@ -408,20 +409,10 @@ fn crowd_mesh(slot: usize, wall_m: f32) -> Result<MeshData, RingError> {
 fn crowd_tint(slot: usize) -> [f32; 3] {
     let [r, g, b, _] = crowd_palette_rgba(slot);
     [
-        srgb_u8_to_linear(r),
-        srgb_u8_to_linear(g),
-        srgb_u8_to_linear(b),
+        srgb_byte_to_linear(r),
+        srgb_byte_to_linear(g),
+        srgb_byte_to_linear(b),
     ]
-}
-
-/// sRGB byte to linear factor (the standard EOTF); cold build only.
-fn srgb_u8_to_linear(byte: u8) -> f32 {
-    let c = f32::from(byte) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 fn texture(dir: &Path, file: &str, id: u64) -> Result<(TextureKey, TextureUpload), RingError> {
@@ -635,8 +626,8 @@ mod tests {
             );
         }
         assert!(slots.iter().any(|t| *t != slots[0]), "slots must differ");
-        assert_eq!(srgb_u8_to_linear(0), 0.0);
-        assert!((srgb_u8_to_linear(255) - 1.0).abs() < 1e-6);
+        assert_eq!(srgb_byte_to_linear(0), 0.0);
+        assert!((srgb_byte_to_linear(255) - 1.0).abs() < 1e-6);
     }
 
     #[test]

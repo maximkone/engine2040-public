@@ -150,7 +150,7 @@ fn material_unbind_restores_unbound_bytes() {
     assert!(shell.material_of(node).is_none(), "unbind clears binding");
     let reopened = load_from_bytes(&save_to_bytes(shell.document())).expect("unbound save reopens");
     assert!(
-        reopened.materials.get(&node.to_string()).is_none(),
+        !reopened.materials.contains_key(&node.to_string()),
         "reopen keeps the unbind"
     );
 }

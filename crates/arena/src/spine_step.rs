@@ -602,7 +602,7 @@ mod tests {
             -1.0,
             0.0833333,
             -0.0833333,
-            3.14159,
+            core::f32::consts::PI,
             1234.5,
             1.0e-6,
             -1.0e-6,
@@ -690,9 +690,13 @@ mod tests {
 
     /// Slots that hold below the fork stuck speed for 180 consecutive
     /// pre-kill samples (the balance tournament's stuck definition).
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "slot indexes the same column of every tick row"
+    )]
     fn stuck_slots(history: &[Vec<[f32; 2]>], kill: Option<u32>, ticks: u32) -> Vec<usize> {
         let step = crate::fork::STUCK_SPEED_MPS * DT_S;
-        let last = usize::try_from(kill.unwrap_or(ticks.saturating_sub(1))).unwrap_or(0);
+        let last = usize::try_from(kill.unwrap_or_else(|| ticks.saturating_sub(1))).unwrap_or(0);
         let mut out = Vec::new();
         for slot in 0..history[0].len() {
             let mut run = 0u32;

@@ -147,6 +147,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "wall clock lives in this test only, never in the sim"
+    )]
     fn ten_games_ten_k_steps_parity_digest_x2_with_steps_per_second() {
         // E04 GW1 smallest proof: 10 games x 10k steps headless seeded,
         // steps/s plus parity digest x2 posted, golden held (this module
