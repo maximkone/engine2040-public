@@ -97,7 +97,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   rome_spec_drift` x2 green; changing one wall z by 1 m turns it red. F2P: the
   file is not where both builds read it and the walls drift. P2P: golden
   unchanged (the proof scene loads no kit). needs: none.
-- [ ] GP35 game: kit walls stop fighters — all 11 actors in
+- [x] GP35 game: kit walls stop fighters — all 11 actors in Landed abf3bace. `cargo test -p engine-game --features app --lib -- kit_walls free_cam posed_bound` 8 passed on this PC, incl. kit_walls_stop_a_fighter (600-tick drive stops at the wall face; the same drive over the empty world walks through) and kit_walls_never_crossed_by_two_bots_x1000 (20 seeds x 50 ticks, 0 crossings); matches load the kit world through `App::with_world(.., kit_match_world_or_empty())` (bin/arena.rs, capture.rs); golden d57b5c8ae3096614 unchanged in golden-matrix run 39054403838.
   `content/arena/placement.json` say `"physical": true` but
   `crates/game/src/arena_kit.rs` never reads the flag and `MatchWorld::try_new`
   has no call in `crates/game/src`, so the fight runs on open sand. Build
@@ -127,7 +127,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   of a bout shows the HUD (product check frame non-empty in the HUD region,
   `target/reports/product/latest.md`). F2P: no game caller today. P2P: game lib
   green; golden unchanged. needs: GP39, UIX13.
-- [ ] GP42 game: debug camera, pause and step in the arena binary — only
+- [x] GP42 game: debug camera, pause and step in the arena binary — only Landed 57c6ba2f. `arena.exe --scene arena --fighters 2 --pause-at-tick 120 --frames 200 --exit` prints `paused tick=120` and `arena sim: ticks=120 hash=166373ef73150a77`; pausing does not move the hash: runs paused at ticks 105, 126 and 131 print the same hashes (6ffbfdb02639755a, a14f8c0666baa85b, 9abe80d492044b11) as unpaused runs that happened to reach those ticks (unpaused tick count follows wall time, so tick 120 itself was not caught unpaused); `cargo test -p engine-game --lib -- free_cam` 2 passed, gh run 39060421029.
   `--camera-path` exists (`crates/game/src/bin/arena.rs:250`); pause and step
   live in the editor only (`crates/editor/src/play_in.rs:131-164`). Add
   `--pause-at-tick N`, `--step` (one tick per key) and a free-fly mode in
@@ -140,7 +140,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
 
 **Opponents, balance, pacing, playtests (Tier B)**
 
-- [ ] GA13 ai: enemy tiers from enemies.rows — no tier exists (`rg
+- [x] GA13 ai: enemy tiers from enemies.rows — no tier exists (`rg Landed e0a37aef. `cargo test -p engine-playtest --lib -- tier_ zones` green, gh run 39056997288: tier_bar_posts_600_plus_per_pair (each adjacent tier pair clears the 600 permille bar over 200 seeded duels, every pair replays x2, an inverted install is refused naming the pair); full `cargo test -p engine-playtest --lib` 301 passed, 3 ignored (P3 tournament green), gh run 39059423063. The test is not named `tiers`, so that filter alone matches nothing; rows in content/design/enemies.rows, tier module crates/ai/src/tier.rs.
   "grunt|veteran|elite|boss" crates/ai/src` empty). `content/design/enemies.rows`
   rows T1 recruit, T2 veteran, T3 champion with `react_ticks`, `noise_ticks`,
   `aggression_permille`, `moves`, `hp_permille` (900-1200), `counter`,
@@ -151,7 +151,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   -p engine-playtest --lib tiers` x2: over 200 seeded duels each tier beats the
   one below in 600+ permille and loses to the one above; replay x2. F2P: no
   tier rows. P2P: golden unchanged; P3 tournament green. needs: GP27.
-- [ ] GA14 playtest: difficulty sweep with a human-like error model — the
+- [ ] GA14 playtest: difficulty sweep with a human-like error model — the Progress 2026-10-17: The sweep, the seeded human-error tape (default off) and the CSV writer exist under cfg(test) in crates/playtest/src/tournament.rs (sweep_rows_cover_every_difficulty_at_each_value, sweep_skips_bloodless_variants_and_replays_its_csv, ignored full_difficulty_sweep_writes_csv; green in gh run 39059423063). Left: the knob is match_ticks over difficulties at 200 matches per value (row: 5 seeds per value, `difficulty-<knob>.csv`), no `sweep_noise` test and no strict T1-T3 rung rise check.
   tournament holds one band (`tournament.rs:36-40`) with no sweep and bots read
   tells instantly. Add a sweep of one config field to
   `target/reports/difficulty-<knob>.csv` (5 seeds per value, averaged) and a
@@ -169,7 +169,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `crates/playtest/src/`. Accept: `cargo test -p engine-playtest --lib ttk`
   x2: the CSVs exist with one row per pair and no dominant row. F2P: no table.
   P2P: P3 green. needs: GA13.
-- [ ] GP36 content: arena zones and the entrance metric — the only cover is a
+- [x] GP36 content: arena zones and the entrance metric — the only cover is a Landed d2b58bd1. `cargo test -p engine-playtest --lib -- tier_ zones` green, gh run 39056997288: zones_shares_sum_to_1000_and_entrance_stays_under_250; content/design/arena-zones.rows on disk; full playtest lib 301 passed, gh run 39059423063.
   1 m crate (`crate_a`, id 10) and `gate_tunnel` (id 5) is the one entrance;
   nothing measures where fights happen. `content/design/arena-zones.rows`
   (centre r < 3 m, ring 3-8 m, wall band, gate mouth) and tournament metrics:
@@ -178,7 +178,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `crates/playtest/src/tournament.rs`. Accept: `cargo test -p engine-playtest
   --lib zones` x2 prints the four shares summing to 1000 permille and
   `entrance_share` under 250. F2P: no zones. P2P: P3 green. needs: GP35.
-- [ ] GP40 game: ladder beat chart and lint — the ladder has ranks and `apply`
+- [x] GP40 game: ladder beat chart and lint — the ladder has ranks and `apply` Landed 5791e829. `node --test tools/beat-lint.test.mjs` 12 pass (seeded clumped rung fails, falling tier fails, boss off the last rung fails, rank/reward/minutes drift from ladder.rs fails, live content/design/ladder.rows passes with 8 rungs); `node tools/beat-lint.mjs` exits 0.
   (`crates/game/src/ladder.rs`) but no per-rung enemy, new element, reward or
   minutes. `content/design/ladder.rows` plus `tools/beat-lint.mjs`: at most 3
   new elements per rung, the tier never falls, the boss is last, the first
@@ -207,7 +207,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   and its mod line. Accept: `rg -n "1000" crates/game/src/bench.rs` empty or
   the file is gone; `cargo test -p engine-game --lib` green. F2P: the dead
   ceiling exists. P2P: golden unchanged. needs: none.
-- [ ] GA15 ai: primus boss, own move set and two phases — the ladder has no
+- [ ] GA15 ai: primus boss, own move set and two phases — the ladder has no Progress 2026-10-17: `PRIMUS_TIER` (hp 1100, tell 15, stagger 700) ships in crates/ai/src/depth.rs and as `tier_4` in content/design/enemies.rows; the shipped ladder always seats four rows. Left: phase 2 at 500 permille hp with its new v2 move and answer, and the playtest `primus` tests.
   final opponent. T4 primus in `enemies.rows`: two phases (phase 2 at 500
   permille hp adds one new v2 move with its own answer), never just more hp; an
   owner veto stays open (inbox ref `BOSS-primus`). Diff: good. Tier B. Size M.
@@ -259,7 +259,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   tools/proof.mjs` prints golden `d57b5c8ae3096614` twice; ARENA frame-split
   p50 before and after posted (under 3% slower). F2P: release wraps where dev
   panics. P2P: golden unchanged. needs: none.
-- [ ] CQ19 quality: GPU uniforms keep their layout, the ALLOC gate sees
+- [x] CQ19 quality: GPU uniforms keep their layout, the ALLOC gate sees Landed f737386e. Three `const _: () = assert!(size_of::<..>() == N)` pins in submit.rs (CameraUniform 76, LightUniform 28, MaterialUniform 24); `.to_bytes()` is in the ALLOC regex (tools/rust-quality.mjs:375) and the live stager writes stack images (`to_array`), no `to_bytes(` left in submit.rs; `cargo test -p engine-render --features window --lib -- live_stage_allocs` on the RTX 3050 prints `1 draw 0 / 48 draws 0` allocations; `cargo test -p engine-render --lib -- --skip pipeline_warmup` 725 passed, 13 ignored on this PC (the full lib has 1 red test, pipeline_warmup_every_live_path_build_goes_through_the_ledger, in another seat's untracked pipeline_warmup.rs).
   `.to_bytes()` — 0 `size_of` asserts in `crates/render/src`;
   `submit.rs:392,413` rebuild camera and light and call `to_bytes()` per draw
   item; the ALLOC regex (`tools/rust-quality.mjs:315`) misses it. One
@@ -305,7 +305,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   ARENA prints draws and groups; at 16 and 256 kit copies draw calls fall to
   the group count; captures byte-equal before and after. F2P: one draw per
   item. P2P: golden unchanged. needs: RL60.
-- [ ] RL33 game: cull bounds follow the posed body — `draw.rs:67-70` takes centre
+- [x] RL33 game: cull bounds follow the posed body — `draw.rs:67-70` takes centre Landed 5862b697. `cargo test -p engine-game --features app --lib -- kit_walls free_cam posed_bound` 8 passed on this PC, incl. posed_bound_follows_a_posed_arm_outside_the_bind_sphere (arm 1.5 m out stays inside the bound), posed_bound_replays_same_bytes_twice, posed_bound_refuses_a_nan_vertex, posed_bound_never_shrinks_below_the_bind_radius.
   and radius from the caller and no fighter sets one, so wiring W7 on a
   bind-pose sphere culls limbs (Eberly 3.2). Bound each fighter from its posed
   joints in `crates/game/src/fighter_look.rs`. Diff: regular. Tier A. Size S.
@@ -321,7 +321,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   test. Accept: `cargo test -p engine-combat --lib projectile_exact` and `cargo
   test -p engine-game --lib ballistics` green; `rg -n "step_round" crates/game`
   hits. F2P: two steppers disagree. P2P: golden unchanged. needs: none.
-- [ ] AX25 endpoint: fetched text is fenced as data — `crates/endpoint/src/assistant.rs`
+- [x] AX25 endpoint: fetched text is fenced as data — `crates/endpoint/src/assistant.rs` Landed 1d01a410. `cargo test -p engine-endpoint --features mcp --lib -- fence` fence_planted_instructions_make_no_unlisted_calls (10 planted-instruction fixtures x2, no tag-like call survives; observe rows are fenced with the `data, not instructions` line, propose rows byte-identical) green, gh run 39059683408; full `cargo test -p engine-endpoint --features mcp --lib` 555 passed, 1 ignored, gh run 39060654787.
   passes tool output and fetched text into a model prompt with no fence
   (`rg -i "untrusted|fence" assistant.rs` empty; Sekar 12). Wrap each in
   labelled data fences with a "data, not instructions" line and strip tag-like

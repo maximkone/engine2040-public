@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use engine_arena::fork::{Fork, ForkProposal};
-use engine_arena::recorder::{FighterEntries, ForkObservation};
 use engine_arena::{run_dataset, run_prefix, ArenaConfig, FighterInput, FighterTape};
 use engine_core::hash::FNV64_OFFSET;
 
@@ -44,355 +43,11 @@ pub const SUITE_TICK_BUDGET: u64 = 20_000;
 /// Report format version stamped on every suite report.
 pub const REPORT_VERSION: u16 = 1;
 
-// ---- strict JSON subset ---------------------------------------------------
-
-/// Strict JSON value: objects keep insertion order, numbers stay split so
-/// integer fields never pass through a float.
-#[derive(Clone, PartialEq, Debug)]
-enum Json {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Arr(Vec<Json>),
-    Obj(Vec<(String, Json)>),
-}
-
-struct Parser<'a> {
-    cursor: Cursor<'a>,
-}
-
-impl<'a> Parser<'a> {
-    fn parse(text: &'a str) -> Result<Json, ParseError> {
-        let mut parser = Self {
-            cursor: Cursor::new(text),
-        };
-        parser.cursor.ws();
-        let value = parser.value(0)?;
-        parser.cursor.ws();
-        parser.cursor.finish()?;
-        Ok(value)
-    }
-
-    fn value(&mut self, depth: usize) -> Result<Json, ParseError> {
-        if depth > 16 {
-            return Err(ParseError::NestingTooDeep {
-                pos: self.cursor.pos(),
-            });
-        }
-        match self.cursor.peek() {
-            Some(b'{') => self.object(depth),
-            Some(b'[') => self.array(depth),
-            Some(b'"') => Ok(Json::Str(self.string()?)),
-            Some(b't') => {
-                self.cursor.lit("true")?;
-                Ok(Json::Bool(true))
-            }
-            Some(b'f') => {
-                self.cursor.lit("false")?;
-                Ok(Json::Bool(false))
-            }
-            Some(b'n') => {
-                self.cursor.lit("null")?;
-                Ok(Json::Null)
-            }
-            Some(byte) if byte == b'-' || byte.is_ascii_digit() => self.number(),
-            Some(byte) => Err(ParseError::UnexpectedByte {
-                pos: self.cursor.pos(),
-                byte,
-            }),
-            None => Err(ParseError::EndOfInput {
-                pos: self.cursor.pos(),
-            }),
-        }
-    }
-
-    fn object(&mut self, depth: usize) -> Result<Json, ParseError> {
-        self.cursor.bump();
-        let mut entries = Vec::new();
-        self.cursor.ws();
-        if self.cursor.eat(b'}') {
-            return Ok(Json::Obj(entries));
-        }
-        loop {
-            self.cursor.ws();
-            if self.cursor.peek() != Some(b'"') {
-                return Err(ParseError::ExpectedKey {
-                    pos: self.cursor.pos(),
-                });
-            }
-            let key = self.string()?;
-            self.cursor.ws();
-            if !self.cursor.eat(b':') {
-                return Err(ParseError::MissingColon {
-                    pos: self.cursor.pos(),
-                });
-            }
-            self.cursor.ws();
-            let value = self.value(depth + 1)?;
-            if entries.iter().any(|(known, _)| *known == key) {
-                return Err(ParseError::DuplicateKey { key });
-            }
-            entries.push((key, value));
-            self.cursor.ws();
-            if self.cursor.eat(b'}') {
-                return Ok(Json::Obj(entries));
-            }
-            if !self.cursor.eat(b',') {
-                return Err(ParseError::MissingComma {
-                    pos: self.cursor.pos(),
-                });
-            }
-        }
-    }
-
-    fn array(&mut self, depth: usize) -> Result<Json, ParseError> {
-        self.cursor.bump();
-        let mut items = Vec::new();
-        self.cursor.ws();
-        if self.cursor.eat(b']') {
-            return Ok(Json::Arr(items));
-        }
-        loop {
-            self.cursor.ws();
-            items.push(self.value(depth + 1)?);
-            if items.len() > 8192 {
-                return Err(ParseError::ArrayTooLong);
-            }
-            self.cursor.ws();
-            if self.cursor.eat(b']') {
-                return Ok(Json::Arr(items));
-            }
-            if !self.cursor.eat(b',') {
-                return Err(ParseError::MissingComma {
-                    pos: self.cursor.pos(),
-                });
-            }
-        }
-    }
-
-    fn string(&mut self) -> Result<String, ParseError> {
-        self.cursor.bump();
-        let mut out = String::new();
-        loop {
-            let Some(byte) = self.cursor.peek() else {
-                return Err(ParseError::UnterminatedString {
-                    pos: self.cursor.pos(),
-                });
-            };
-            match byte {
-                b'"' => {
-                    self.cursor.bump();
-                    return Ok(out);
-                }
-                b'\\' => {
-                    self.cursor.bump();
-                    match self.cursor.peek() {
-                        Some(b'"') => out.push('"'),
-                        Some(b'\\') => out.push('\\'),
-                        Some(b'/') => out.push('/'),
-                        Some(b'b') => out.push('\u{0008}'),
-                        Some(b'f') => out.push('\u{000C}'),
-                        Some(b'n') => out.push('\n'),
-                        Some(b'r') => out.push('\r'),
-                        Some(b't') => out.push('\t'),
-                        Some(b'u') => out.push(self.unicode()?),
-                        Some(other) => {
-                            return Err(ParseError::BadEscape {
-                                pos: self.cursor.pos(),
-                                byte: Some(other),
-                            });
-                        }
-                        None => {
-                            return Err(ParseError::UnterminatedEscape {
-                                pos: self.cursor.pos(),
-                            });
-                        }
-                    }
-                    if self.cursor.peek().is_some() {
-                        self.cursor.bump();
-                    }
-                }
-                0x00..=0x1F => {
-                    return Err(ParseError::ControlByte {
-                        pos: self.cursor.pos(),
-                    });
-                }
-                _ => {
-                    let rest = self.cursor.rest();
-                    let text = core::str::from_utf8(rest).map_err(|_| ParseError::BadUtf8 {
-                        pos: self.cursor.pos(),
-                    })?;
-                    let Some(next) = text.chars().next() else {
-                        return Err(ParseError::BadUtf8 {
-                            pos: self.cursor.pos(),
-                        });
-                    };
-                    out.push(next);
-                    self.cursor.advance(next.len_utf8());
-                }
-            }
-        }
-    }
-
-    fn unicode(&mut self) -> Result<char, ParseError> {
-        self.cursor.bump();
-        if self.cursor.len() - self.cursor.pos() < 4 {
-            return Err(ParseError::ShortUnicode {
-                pos: self.cursor.pos(),
-            });
-        }
-        let mut unit: u32 = 0;
-        for offset in 0..4 {
-            let Some(digit) = self.cursor.ahead(offset) else {
-                return Err(ParseError::ShortUnicode {
-                    pos: self.cursor.pos(),
-                });
-            };
-            let nibble = match digit {
-                b'0'..=b'9' => u32::from(digit - b'0'),
-                b'a'..=b'f' => u32::from(digit - b'a') + 10,
-                b'A'..=b'F' => u32::from(digit - b'A') + 10,
-                _ => {
-                    return Err(ParseError::BadHex {
-                        pos: self.cursor.pos() + offset,
-                    });
-                }
-            };
-            unit = unit * 16 + nibble;
-        }
-        self.cursor.advance(3);
-        char::from_u32(unit).ok_or(ParseError::BadScalar { unit })
-    }
-
-    fn number(&mut self) -> Result<Json, ParseError> {
-        let start = self.cursor.pos();
-        if self.cursor.peek() == Some(b'-') {
-            self.cursor.bump();
-        }
-        let digits = self.cursor.pos();
-        while self.cursor.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-            self.cursor.bump();
-        }
-        if self.cursor.pos() == digits {
-            return Err(ParseError::BadNumber { pos: start });
-        }
-        let mut is_float = false;
-        if self.cursor.peek() == Some(b'.') {
-            is_float = true;
-            self.cursor.bump();
-            let frac = self.cursor.pos();
-            while self.cursor.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.cursor.bump();
-            }
-            if self.cursor.pos() == frac {
-                return Err(ParseError::BadFraction { pos: start });
-            }
-        }
-        if matches!(self.cursor.peek(), Some(b'e' | b'E')) {
-            is_float = true;
-            self.cursor.bump();
-            if matches!(self.cursor.peek(), Some(b'+' | b'-')) {
-                self.cursor.bump();
-            }
-            let exp = self.cursor.pos();
-            while self.cursor.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.cursor.bump();
-            }
-            if self.cursor.pos() == exp {
-                return Err(ParseError::BadExponent { pos: start });
-            }
-        }
-        let token = core::str::from_utf8(self.cursor.lexeme(start))
-            .map_err(|_| ParseError::BadNumber { pos: start })?;
-        if is_float {
-            let value: f64 = token.parse().map_err(|_| ParseError::BadToken {
-                token: token.to_owned(),
-            })?;
-            if !value.is_finite() {
-                return Err(ParseError::NonFinite {
-                    token: token.to_owned(),
-                });
-            }
-            Ok(Json::Float(value))
-        } else {
-            let value: i64 = token.parse().map_err(|_| ParseError::BadToken {
-                token: token.to_owned(),
-            })?;
-            Ok(Json::Int(value))
-        }
-    }
-}
-
-// ---- spec accessors -------------------------------------------------------
-
-fn as_obj(value: &Json) -> Result<&[(String, Json)], ParseError> {
-    match value {
-        Json::Obj(entries) => Ok(entries),
-        _ => Err(ParseError::ExpectedObject),
-    }
-}
-
-fn optional<'j>(entries: &'j [(String, Json)], key: &str) -> Result<Option<&'j Json>, ParseError> {
-    Ok(entries
-        .iter()
-        .find(|(known, _)| known == key)
-        .map(|(_, value)| value))
-}
-
-fn as_i64(value: &Json, key: &str) -> Result<i64, ParseError> {
-    match value {
-        Json::Int(number) => Ok(*number),
-        _ => Err(ParseError::WrongType {
-            field: key.to_owned(),
-            want: "an integer",
-        }),
-    }
-}
-
-fn as_u32(value: &Json, key: &str, max: u32) -> Result<u32, ParseError> {
-    let number = as_i64(value, key)?;
-    if number < 0 || u64::try_from(number).map_or(true, |wide| wide > u64::from(max)) {
-        return Err(ParseError::OutOfRange {
-            what: format!("field `{key}` out of range 0..={max}"),
-        });
-    }
-    let narrowed = u32::try_from(number).map_err(|_| ParseError::OutOfRange {
-        what: format!("field `{key}` out of range 0..={max}"),
-    })?;
-    Ok(narrowed)
-}
-
-fn as_bool(value: &Json, key: &str) -> Result<bool, ParseError> {
-    match value {
-        Json::Bool(flag) => Ok(*flag),
-        _ => Err(ParseError::WrongType {
-            field: key.to_owned(),
-            want: "a boolean",
-        }),
-    }
-}
-
-fn as_str<'j>(value: &'j Json, key: &str) -> Result<&'j str, ParseError> {
-    match value {
-        Json::Str(text) => Ok(text),
-        _ => Err(ParseError::WrongType {
-            field: key.to_owned(),
-            want: "a string",
-        }),
-    }
-}
-
-fn as_arr<'j>(value: &'j Json, key: &str) -> Result<&'j [Json], ParseError> {
-    match value {
-        Json::Arr(items) => Ok(items),
-        _ => Err(ParseError::WrongType {
-            field: key.to_owned(),
-            want: "an array",
-        }),
-    }
-}
+mod json;
+use json::*;
+mod spec_parse;
+use spec_parse::*;
+mod spine;
 
 // ---- spec types -----------------------------------------------------------
 
@@ -431,12 +86,31 @@ pub struct KeypointAsserts {
     pub damage_ticks: Option<Vec<u32>>,
     /// Fork-relative kill tick (1-based), `None` when nobody drops.
     pub ticks_to_kill: Option<Option<u32>>,
+    /// Spine track: vitals state bits per slot at the settle tick.
+    pub state: Vec<(u8, u8)>,
+    /// Spine track: stamina points per slot at the settle tick.
+    pub stamina: Vec<(u8, u16)>,
+    /// Spine track: farthest planar reach from the arena center per slot in
+    /// whole millimeters over the whole run.
+    pub reach_mm: Vec<(u8, u32)>,
+}
+
+impl KeypointAsserts {
+    /// True when any assert reads a spine column only the spine track has.
+    pub fn reads_spine(&self) -> bool {
+        !(self.state.is_empty() && self.stamina.is_empty() && self.reach_mm.is_empty())
+    }
 }
 
 /// One gameplay claim as data: a setup prefix that injects mid-match state
 /// into a fork, then a bounded scripted window with typed assertions.
 #[derive(Clone, PartialEq, Debug)]
 pub struct KeypointSpec {
+    /// True when the claim runs over the spine columns (`"track":"spine"`):
+    /// the whole script plays from tick 0 through the spine step and the
+    /// asserts read the vitals and transform columns. False runs the legacy
+    /// fork from an injected mid-match state.
+    pub spine: bool,
     /// File stem and registry id, e.g. `kp06-parry-riposte`.
     pub id: String,
     /// Human claim under test, for reasons only.
@@ -555,578 +229,6 @@ pub fn load_specs() -> Result<Vec<KeypointSpec>, KeypointError> {
         });
     }
     Ok(specs)
-}
-
-/// Scalar header of one spec: identity, seed, shape and phase lengths. Split
-/// out of [`parse_spec`] so each fn stays a named step.
-struct SpecHead {
-    id: String,
-    claim: String,
-    seed: u64,
-    fighters: u8,
-    half_extent_m: f32,
-    prefix_ticks: u32,
-    window_ticks: u32,
-}
-
-fn parse_spec_head(entries: &[(String, Json)], stem: &str) -> Result<SpecHead, ParseError> {
-    let version = field(entries, "version")
-        .and_then(|value| as_u32(value, "version", u32::from(u16::MAX)))?;
-    if version != u32::from(SPEC_VERSION) {
-        return Err(ParseError::Mismatch {
-            what: format!("unsupported spec version {version}"),
-        });
-    }
-    let id = field(entries, "id").and_then(|value| as_str(value, "id"))?;
-    if id != stem {
-        return Err(ParseError::Mismatch {
-            what: format!("id `{id}` must match file stem `{stem}`"),
-        });
-    }
-    if id.is_empty()
-        || id.len() > 64
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
-        return Err(ParseError::Mismatch {
-            what: format!("bad id `{id}`"),
-        });
-    }
-    let claim = field(entries, "claim").and_then(|value| as_str(value, "claim"))?;
-    if claim.is_empty() || claim.chars().count() > MAX_CLAIM_CHARS {
-        return Err(ParseError::OutOfRange {
-            what: "claim length out of range".to_owned(),
-        });
-    }
-    let seed = field(entries, "seed").and_then(|value| as_i64(value, "seed"))?;
-    if seed < 0 {
-        return Err(ParseError::OutOfRange {
-            what: "seed must be non-negative".to_owned(),
-        });
-    }
-    let fighters = field(entries, "fighters").and_then(|value| as_u32(value, "fighters", 255))?;
-    if fighters < 2 || fighters > u32::from(engine_arena::MAX_PARTICIPANTS) {
-        return Err(ParseError::OutOfRange {
-            what: format!("fighters {fighters} outside 2..=4"),
-        });
-    }
-    let half_extent_m = field(entries, "half_extent_m").and_then(|value| match value {
-        Json::Int(number) => {
-            i32::try_from(*number)
-                .map(f64::from)
-                .map_err(|_| ParseError::WrongType {
-                    field: "half_extent_m".to_owned(),
-                    want: "a number",
-                })
-        }
-        Json::Float(number) => Ok(*number),
-        _ => Err(ParseError::WrongType {
-            field: "half_extent_m".to_owned(),
-            want: "a number",
-        }),
-    })?;
-    if !(5.0..=100.0).contains(&half_extent_m) {
-        return Err(ParseError::OutOfRange {
-            what: "half_extent_m outside 5.0..=100.0".to_owned(),
-        });
-    }
-    let prefix_ticks = field(entries, "prefix_ticks")
-        .and_then(|value| as_u32(value, "prefix_ticks", MAX_PREFIX_TICKS))?;
-    let window_ticks = field(entries, "window_ticks")
-        .and_then(|value| as_u32(value, "window_ticks", MAX_WINDOW_TICKS))?;
-    if window_ticks == 0 {
-        return Err(ParseError::OutOfRange {
-            what: "window_ticks must be positive".to_owned(),
-        });
-    }
-    Ok(SpecHead {
-        id: id.to_owned(),
-        claim: claim.to_owned(),
-        seed: u64::try_from(seed).map_err(|_| ParseError::OutOfRange {
-            what: "seed must be non-negative".to_owned(),
-        })?,
-        fighters: u8::try_from(fighters).map_err(|_| ParseError::OutOfRange {
-            what: format!("fighters {fighters} outside 2..=4"),
-        })?,
-        // Range-checked to 5.0..=100.0 above, so the narrowing stays finite
-        // and deterministic.
-        half_extent_m: half_extent_m as f32,
-        prefix_ticks,
-        window_ticks,
-    })
-}
-
-fn parse_spec(value: &Json, stem: &str) -> Result<KeypointSpec, ParseError> {
-    let entries = as_obj(value)?;
-    let head = parse_spec_head(entries, stem)?;
-    let setup = field(entries, "setup").and_then(|value| as_arr(value, "setup"))?;
-    let setup = parse_inputs(setup, 0, head.prefix_ticks, head.fighters, "setup")
-        .map_err(|error| ParseError::context("setup", error))?;
-    let window = field(entries, "window").and_then(|value| as_arr(value, "window"))?;
-    let window = parse_inputs(
-        window,
-        head.prefix_ticks,
-        head.prefix_ticks.saturating_add(head.window_ticks),
-        head.fighters,
-        "window",
-    )
-    .map_err(|error| ParseError::context("window", error))?;
-    let freeze = match optional(entries, "freeze")? {
-        None => Vec::new(),
-        Some(value) => {
-            let items = as_arr(value, "freeze")?;
-            parse_slots(items)?
-        }
-    };
-    if freeze.iter().any(|slot| *slot >= head.fighters) {
-        return Err(ParseError::OutOfRange {
-            what: "freeze slot outside fighters".to_owned(),
-        });
-    }
-    let asserts = match optional(entries, "assert")? {
-        None => KeypointAsserts::default(),
-        Some(value) => parse_asserts(value, head.fighters, head.window_ticks)
-            .map_err(|error| ParseError::context("assert", error))?,
-    };
-    if entries.iter().any(|(key, _)| {
-        ![
-            "version",
-            "id",
-            "claim",
-            "seed",
-            "fighters",
-            "half_extent_m",
-            "prefix_ticks",
-            "window_ticks",
-            "setup",
-            "window",
-            "freeze",
-            "assert",
-        ]
-        .contains(&key.as_str())
-    }) {
-        return Err(ParseError::Unknown {
-            what: "unknown field".to_owned(),
-        });
-    }
-    Ok(KeypointSpec {
-        id: head.id,
-        claim: head.claim,
-        seed: head.seed,
-        fighters: head.fighters,
-        half_extent_m: head.half_extent_m,
-        prefix_ticks: head.prefix_ticks,
-        setup,
-        window_ticks: head.window_ticks,
-        window,
-        freeze,
-        asserts,
-    })
-}
-
-fn parse_slots(items: &[Json]) -> Result<Vec<u8>, ParseError> {
-    let mut slots = Vec::new();
-    for item in items {
-        let slot = as_u32(item, "freeze slot", 255)?;
-        let slot = u8::try_from(slot).map_err(|_| ParseError::OutOfRange {
-            what: "freeze slot out of range".to_owned(),
-        })?;
-        if slots.contains(&slot) {
-            return Err(ParseError::Mismatch {
-                what: "duplicate freeze slot".to_owned(),
-            });
-        }
-        slots.push(slot);
-    }
-    Ok(slots)
-}
-
-/// One validated script entry: fighter, wishes, facing and buttons. Split out
-/// of [`parse_inputs`] so each fn stays a named step.
-struct ScriptShape {
-    fighter: u8,
-    mx: i8,
-    mz: i8,
-    facing: i16,
-    buttons: u8,
-}
-
-fn parse_script_shape(entries: &[(String, Json)], fighters: u8) -> Result<ScriptShape, ParseError> {
-    let fighter = field(entries, "fighter").and_then(|value| as_u32(value, "fighter", 255))?;
-    if fighter >= u32::from(fighters) {
-        return Err(ParseError::OutOfRange {
-            what: format!("fighter {fighter} outside slots"),
-        });
-    }
-    let mx = field(entries, "mx").and_then(|value| as_i64(value, "mx"))?;
-    let mz = field(entries, "mz").and_then(|value| as_i64(value, "mz"))?;
-    if !(-100..=100).contains(&mx) || !(-100..=100).contains(&mz) {
-        return Err(ParseError::OutOfRange {
-            what: "wish outside -100..=100".to_owned(),
-        });
-    }
-    let facing = field(entries, "facing").and_then(|value| as_i64(value, "facing"))?;
-    if !(-18_000..=18_000).contains(&facing) {
-        return Err(ParseError::OutOfRange {
-            what: "facing outside -18000..=18000".to_owned(),
-        });
-    }
-    let buttons = field(entries, "buttons").and_then(|value| as_u32(value, "buttons", 255))?;
-    if buttons > 7 {
-        return Err(ParseError::OutOfRange {
-            what: format!("buttons {buttons} use unknown bits"),
-        });
-    }
-    let narrow_fighter = u8::try_from(fighter).map_err(|_| ParseError::OutOfRange {
-        what: format!("fighter {fighter} outside slots"),
-    })?;
-    let narrow_mx = i8::try_from(mx).map_err(|_| ParseError::OutOfRange {
-        what: "wish outside -100..=100".to_owned(),
-    })?;
-    let narrow_mz = i8::try_from(mz).map_err(|_| ParseError::OutOfRange {
-        what: "wish outside -100..=100".to_owned(),
-    })?;
-    let narrow_facing = i16::try_from(facing).map_err(|_| ParseError::OutOfRange {
-        what: "facing outside -18000..=18000".to_owned(),
-    })?;
-    let narrow_buttons = u8::try_from(buttons).map_err(|_| ParseError::OutOfRange {
-        what: format!("buttons {buttons} use unknown bits"),
-    })?;
-    Ok(ScriptShape {
-        fighter: narrow_fighter,
-        mx: narrow_mx,
-        mz: narrow_mz,
-        facing: narrow_facing,
-        buttons: narrow_buttons,
-    })
-}
-
-fn push_script_tick(
-    out: &mut Vec<ScriptInput>,
-    shape: &ScriptShape,
-    tick: u32,
-    lower: u32,
-    upper: u32,
-) -> Result<(), ParseError> {
-    if tick < lower || tick >= upper {
-        return Err(ParseError::OutOfRange {
-            what: format!("tick {tick} outside phase"),
-        });
-    }
-    out.push(ScriptInput {
-        tick,
-        fighter: shape.fighter,
-        mx: shape.mx,
-        mz: shape.mz,
-        facing: shape.facing,
-        buttons: shape.buttons,
-    });
-    if out.len() > 4096 {
-        return Err(ParseError::OutOfRange {
-            what: "too many inputs".to_owned(),
-        });
-    }
-    Ok(())
-}
-
-/// Expand one script entry: a single `tick` or an inclusive `from`/`to` hold.
-fn expand_script_entry(
-    entries: &[(String, Json)],
-    shape: &ScriptShape,
-    lower: u32,
-    upper: u32,
-    out: &mut Vec<ScriptInput>,
-) -> Result<(), ParseError> {
-    match (optional(entries, "tick")?, optional(entries, "from")?) {
-        (Some(tick), None) => {
-            let tick = as_u32(tick, "tick", u32::MAX)?;
-            push_script_tick(out, shape, tick, lower, upper)?;
-        }
-        (None, Some(from)) => {
-            let to = field(entries, "to")?;
-            let from = as_u32(from, "from", u32::MAX)?;
-            let to = as_u32(to, "to", u32::MAX)?;
-            if from > to {
-                return Err(ParseError::OutOfRange {
-                    what: format!("hold from {from} past to {to}"),
-                });
-            }
-            if to - from > 512 {
-                return Err(ParseError::OutOfRange {
-                    what: "hold over 512 ticks".to_owned(),
-                });
-            }
-            for tick in from..=to {
-                push_script_tick(out, shape, tick, lower, upper)?;
-            }
-        }
-        _ => {
-            return Err(ParseError::Mismatch {
-                what: "entry needs `tick` or `from`+`to`".to_owned(),
-            });
-        }
-    }
-    if entries.iter().any(|(key, _)| {
-        ![
-            "fighter", "mx", "mz", "facing", "buttons", "tick", "from", "to",
-        ]
-        .contains(&key.as_str())
-    }) {
-        return Err(ParseError::Unknown {
-            what: "unknown entry field".to_owned(),
-        });
-    }
-    Ok(())
-}
-
-/// Parse one script phase: single-tick entries carry `tick`, hold entries
-/// carry inclusive `from`/`to`. Bounds are phase-relative so a window entry
-/// can never name a setup tick.
-fn parse_inputs(
-    items: &[Json],
-    lower: u32,
-    upper: u32,
-    fighters: u8,
-    phase: &str,
-) -> Result<Vec<ScriptInput>, ParseError> {
-    let mut out = Vec::new();
-    for item in items {
-        let entries = as_obj(item).map_err(|error| ParseError::context(phase, error))?;
-        let shape = parse_script_shape(entries, fighters)
-            .map_err(|error| ParseError::context(phase, error))?;
-        expand_script_entry(entries, &shape, lower, upper, &mut out)
-            .map_err(|error| ParseError::context(phase, error))?;
-    }
-    out.sort_by_key(|input| (input.tick, input.fighter));
-    let mut seen = BTreeMap::new();
-    for input in &out {
-        if seen.insert((input.tick, input.fighter), true).is_some() {
-            return Err(ParseError::context(
-                phase,
-                ParseError::Mismatch {
-                    what: format!(
-                        "duplicate input at tick {} fighter {}",
-                        input.tick, input.fighter
-                    ),
-                },
-            ));
-        }
-    }
-    Ok(out)
-}
-
-fn parse_pairs(items: &[Json], key: &str, max: u32) -> Result<Vec<(u8, u32)>, ParseError> {
-    let mut out = Vec::new();
-    for item in items {
-        let pair = as_arr(item, key).map_err(|error| ParseError::context(key, error))?;
-        if pair.len() != 2 {
-            return Err(ParseError::Mismatch {
-                what: format!("{key}: pair must have two entries"),
-            });
-        }
-        let slot = as_u32(&pair[0], key, 255)?;
-        let value = as_u32(&pair[1], key, max)?;
-        let slot = u8::try_from(slot).map_err(|_| ParseError::OutOfRange {
-            what: format!("{key}: slot out of range"),
-        })?;
-        if out.iter().any(|(known, _)| *known == slot) {
-            return Err(ParseError::Mismatch {
-                what: format!("{key}: duplicate slot {slot}"),
-            });
-        }
-        out.push((slot, value));
-    }
-    out.sort_by_key(|(slot, _)| *slot);
-    Ok(out)
-}
-
-/// One checked `(slot, value)` assert list: optional field, pair shape and
-/// fighter range in one step. Split out of [`parse_asserts`].
-fn checked_pairs(
-    entries: &[(String, Json)],
-    key: &str,
-    fighters: u8,
-    max: u32,
-) -> Result<Vec<(u8, u32)>, ParseError> {
-    let Some(value) = optional(entries, key)? else {
-        return Ok(Vec::new());
-    };
-    let items = as_arr(value, key).map_err(|error| ParseError::context("assert", error))?;
-    let pairs =
-        parse_pairs(items, key, max).map_err(|error| ParseError::context("assert", error))?;
-    for (slot, _) in &pairs {
-        if *slot >= fighters {
-            return Err(ParseError::OutOfRange {
-                what: format!("assert {key} slot outside fighters"),
-            });
-        }
-    }
-    Ok(pairs)
-}
-
-/// Narrow one `(slot, value)` list to `u16` values for the report.
-fn narrow_pairs(pairs: &[(u8, u32)], key: &str) -> Result<Vec<(u8, u16)>, ParseError> {
-    let mut out = Vec::with_capacity(pairs.len());
-    for (slot, value) in pairs {
-        let narrowed = u16::try_from(*value).map_err(|_| ParseError::OutOfRange {
-            what: format!("assert {key} value {value} outside u16"),
-        })?;
-        out.push((*slot, narrowed));
-    }
-    Ok(out)
-}
-
-/// Parse the window-relative damage ticks, exact and in range.
-fn parse_damage_ticks(items: &[Json], window_ticks: u32) -> Result<Vec<u32>, ParseError> {
-    let mut list = Vec::with_capacity(items.len());
-    for item in items {
-        let tick = as_u32(item, "damage_ticks", u32::MAX)?;
-        if tick >= window_ticks {
-            return Err(ParseError::OutOfRange {
-                what: "assert damage tick outside window".to_owned(),
-            });
-        }
-        if list.contains(&tick) {
-            return Err(ParseError::Mismatch {
-                what: "assert duplicate damage tick".to_owned(),
-            });
-        }
-        list.push(tick);
-    }
-    list.sort_unstable();
-    Ok(list)
-}
-
-fn parse_asserts(
-    value: &Json,
-    fighters: u8,
-    window_ticks: u32,
-) -> Result<KeypointAsserts, ParseError> {
-    let entries = as_obj(value)?;
-    let hp = narrow_pairs(&checked_pairs(entries, "hp", fighters, 1000)?, "hp")?;
-    let damage = narrow_pairs(
-        &checked_pairs(entries, "damage", fighters, 65_535)?,
-        "damage",
-    )?;
-    let stuck = checked_pairs(entries, "stuck", fighters, u32::MAX)?;
-    let mut asserts = KeypointAsserts {
-        hp,
-        damage,
-        stuck,
-        ..KeypointAsserts::default()
-    };
-    if let Some(killed) = optional(entries, "killed")? {
-        asserts.killed = Some(as_bool(killed, "killed")?);
-    }
-    if let Some(ticks) = optional(entries, "damage_ticks")? {
-        let items = as_arr(ticks, "damage_ticks")?;
-        asserts.damage_ticks = Some(parse_damage_ticks(items, window_ticks)?);
-    }
-    if let Some(ttk) = optional(entries, "ticks_to_kill")? {
-        match ttk {
-            Json::Null => asserts.ticks_to_kill = Some(None),
-            _ => {
-                let tick = as_u32(ttk, "ticks_to_kill", u32::MAX)?;
-                if tick == 0 || tick > window_ticks + 1 {
-                    return Err(ParseError::OutOfRange {
-                        what: "assert kill tick outside window".to_owned(),
-                    });
-                }
-                asserts.ticks_to_kill = Some(Some(tick));
-            }
-        }
-    }
-    if entries.iter().any(|(key, _)| {
-        ![
-            "hp",
-            "damage",
-            "stuck",
-            "killed",
-            "damage_ticks",
-            "ticks_to_kill",
-        ]
-        .contains(&key.as_str())
-    }) {
-        return Err(ParseError::context(
-            "assert",
-            ParseError::Unknown {
-                what: "unknown field".to_owned(),
-            },
-        ));
-    }
-    Ok(asserts)
-}
-
-// ---- tape building ----------------------------------------------------------
-
-/// Canonical template input every synthetic tape derives from via
-/// struct-update syntax, so this module never mirrors button constants.
-fn template_input() -> FighterInput {
-    static TEMPLATE: OnceLock<FighterInput> = OnceLock::new();
-    *TEMPLATE.get_or_init(|| {
-        let config = ArenaConfig {
-            seed: 2040,
-            ticks: 8,
-            fighters: 2,
-            half_extent_m: 20.0,
-            table_version: 1,
-        };
-        run_dataset(&config, &FighterTape::default())
-            .and_then(|dataset| dataset.rows.into_iter().next().map(|row| row.action.input))
-            .unwrap_or_else(|| FighterInput {
-                tick: 0,
-                fighter: engine_arena::FighterId::new(0).unwrap_or(engine_arena::FighterId(0)),
-                mx: 0,
-                mz: 0,
-                facing: 0,
-                buttons: Default::default(),
-            })
-    })
-}
-
-fn make_input(
-    tick: u32,
-    fighter: u8,
-    mx: i8,
-    mz: i8,
-    facing: i16,
-    buttons: u8,
-) -> Option<FighterInput> {
-    let id = engine_arena::FighterId::new(fighter)?;
-    let template = template_input();
-    let mut input = template;
-    input.tick = tick;
-    input.fighter = id;
-    input.mx = mx;
-    input.mz = mz;
-    input.facing = facing;
-    input.buttons.0 = buttons;
-    input.validate().ok()?;
-    Some(input)
-}
-
-/// Materialize full-coverage tapes: every `(tick, slot)` runs the scripted
-/// override or idle, so brains are never consulted and the run is exact.
-fn materialize(
-    overrides: &BTreeMap<(u32, u8), ScriptInput>,
-    lower: u32,
-    upper: u32,
-    fighters: u8,
-) -> Option<FighterTape> {
-    let mut inputs = Vec::new();
-    for tick in lower..upper {
-        for slot in 0..fighters {
-            let (mx, mz, facing, buttons) = match overrides.get(&(tick, slot)) {
-                Some(entry) => (entry.mx, entry.mz, entry.facing, entry.buttons),
-                None => (0, 0, 0, 0),
-            };
-            inputs.push(make_input(tick, slot, mx, mz, facing, buttons)?);
-        }
-    }
-    let tape = FighterTape(inputs);
-    tape.validate().ok()?;
-    Some(tape)
 }
 
 // ---- seeded bugs ------------------------------------------------------------
@@ -1316,7 +418,7 @@ impl Digester {
 /// disc per fighter shaded by health with integer math only. Positions map
 /// through integer millimeters; no raw float bits are hashed (placement
 /// passes an f32-to-int cast first, same-machine scope per HASH-LAW).
-fn capture_rgba(observation: &ForkObservation, half_extent_m: f32, edge: u32) -> Vec<u8> {
+fn capture_rgba(fighters: &[(u8, [f32; 3], u16)], half_extent_m: f32, edge: u32) -> Vec<u8> {
     let edge = edge.clamp(8, 256) as usize;
     let mut pixels = vec![0u8; edge * edge * 4];
     for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
@@ -1362,14 +464,14 @@ fn capture_rgba(observation: &ForkObservation, half_extent_m: f32, edge: u32) ->
         [230, 110, 220],
         [150, 230, 120],
     ];
-    for entry in &observation.fighters {
-        let x_mm = (entry.pos[0] * 1000.0) as i32;
-        let z_mm = (entry.pos[2] * 1000.0) as i32;
+    for &(id, pos, hp) in fighters {
+        let x_mm = (pos[0] * 1000.0) as i32;
+        let z_mm = (pos[2] * 1000.0) as i32;
         let (Some(cx), Some(cy)) = (cell(x_mm, half_mm), cell(z_mm, half_mm)) else {
             continue;
         };
-        let shade = 64 + 191 * u32::from(entry.hp.min(1000)) / 1000;
-        let base = COLORS[usize::from(entry.id) % COLORS.len()];
+        let shade = 64 + 191 * u32::from(hp.min(1000)) / 1000;
+        let base = COLORS[usize::from(id) % COLORS.len()];
         let color = [
             (u32::from(base[0]) * shade / 255) as u8,
             (u32::from(base[1]) * shade / 255) as u8,
@@ -1621,74 +723,127 @@ fn run_keypoint(
     // is scripted, so brains are never consulted and the run is exact.
     let window_tape = materialize(&window_map, prefix, prefix + window + 1, spec.fighters)
         .ok_or_else(|| KeypointError::ArenaRefused(spec.id.clone()))?;
-    let mut window_full: BTreeMap<u8, Vec<FighterInput>> = BTreeMap::new();
-    for input in &window_tape.0 {
-        window_full.entry(input.fighter.0).or_default().push(*input);
-    }
-    let (snapshot, _) = run_prefix(&config, &setup_tape, prefix)
-        .ok_or_else(|| KeypointError::ArenaRefused(spec.id.clone()))?;
-    let mut fork = Fork::from_snapshot(snapshot, prefix)
-        .ok_or_else(|| KeypointError::ArenaRefused(spec.id.clone()))?;
-    for slot in &spec.freeze {
-        fork.apply_proposal(ForkProposal::FreezeFighter { fighter: *slot })
-            .map_err(|_| KeypointError::ArenaRefused(spec.id.clone()))?;
-    }
-    for slot in 0..spec.fighters {
-        let slice = window_full
-            .remove(&slot)
-            .ok_or_else(|| KeypointError::ArenaRefused(spec.id.clone()))?;
-        if fork
-            .apply_proposal(ForkProposal::SwapTape {
-                fighter: slot,
-                inputs: slice,
-            })
-            .is_err()
-        {
-            return Err(KeypointError::ArenaRefused(spec.id.clone()));
-        }
-    }
-    let metrics = fork.run_n(window);
-    let (recorded, dataset) = fork.run_recorded(window + 1);
-    let _ = recorded;
-    let failures = check_asserts(spec, prefix, window, &dataset, &metrics);
-    let settle = dataset
-        .rows
-        .iter()
-        .filter(|row| row.observation.tick == prefix + window)
-        .map(|row| row.observation.clone())
-        .next()
-        .unwrap_or(ForkObservation {
-            tick: prefix + window,
-            fighters: FighterEntries::empty(),
-        });
-    let pixels = capture_rgba(&settle, spec.half_extent_m, CAPTURE_EDGE);
+    let evidence = if spec.spine {
+        let tape = FighterTape([setup_tape.0, window_tape.0].concat());
+        spine::run(spec, &config, &tape, prefix, window)
+    } else {
+        run_fork(spec, &config, &setup_tape, &window_tape, prefix, window)
+    }?;
+    let pixels = evidence.pixels;
     let capture = digest_hex(&pixels);
-    if pixels.iter().min() == pixels.iter().max() {
-        let mut extended = failures;
-        extended.push("capture is a flat field".to_owned());
-        return Ok((
-            finish_result(
-                spec,
-                extended,
-                Vec::new(),
-                &dataset,
-                &metrics,
-                &pixels,
-                capture,
-            ),
-            total,
-        ));
-    }
+    let mut failures = evidence.failures;
     let mut causes = Vec::new();
-    if fault.is_some() && !failures.is_empty() {
+    if pixels.iter().min() == pixels.iter().max() {
+        failures.push("capture is a flat field".to_owned());
+    } else if fault.is_some() && !failures.is_empty() {
         causes = attribute_fault(spec, prefix, window, &setup_map, &window_map);
     }
+    let mut digester = evidence.digester;
+    digester.bytes(&pixels);
     Ok((
-        finish_result(spec, failures, causes, &dataset, &metrics, &pixels, capture),
+        KeypointResult {
+            id: spec.id.clone(),
+            pass: failures.is_empty(),
+            failures,
+            causes,
+            digest: digester.finish(),
+            capture,
+        },
         total,
     ))
 }
 
+/// What one track hands the shared tail: the mismatched asserts, the raster
+/// pixels of the settle tick and the digester already folded with the run's
+/// integer evidence.
+struct Evidence {
+    failures: Vec<String>,
+    pixels: Vec<u8>,
+    digester: Digester,
+}
+
+/// Digester seeded with the spec header every track folds first.
+fn spec_digester(spec: &KeypointSpec) -> Digester {
+    let mut digester = Digester::new();
+    digester.text(&spec.id);
+    digester.u64(spec.seed);
+    digester.u8(spec.fighters);
+    digester.u32(spec.prefix_ticks);
+    digester.u32(spec.window_ticks);
+    digester
+}
+
+/// Fork track: prefix the setup tape, fork there, swap in the window tape
+/// and run the bounded window with the recorder on.
+fn run_fork(
+    spec: &KeypointSpec,
+    config: &ArenaConfig,
+    setup_tape: &FighterTape,
+    window_tape: &FighterTape,
+    prefix: u32,
+    window: u32,
+) -> Result<Evidence, KeypointError> {
+    let refused = || KeypointError::ArenaRefused(spec.id.clone());
+    let mut window_full: BTreeMap<u8, Vec<FighterInput>> = BTreeMap::new();
+    for input in &window_tape.0 {
+        window_full.entry(input.fighter.0).or_default().push(*input);
+    }
+    let (snapshot, _) = run_prefix(config, setup_tape, prefix).ok_or_else(refused)?;
+    let mut fork = Fork::from_snapshot(snapshot, prefix).ok_or_else(refused)?;
+    for slot in &spec.freeze {
+        fork.apply_proposal(ForkProposal::FreezeFighter { fighter: *slot })
+            .map_err(|_| refused())?;
+    }
+    for slot in 0..spec.fighters {
+        let inputs = window_full.remove(&slot).ok_or_else(refused)?;
+        fork.apply_proposal(ForkProposal::SwapTape {
+            fighter: slot,
+            inputs,
+        })
+        .map_err(|_| refused())?;
+    }
+    let metrics = fork.run_n(window);
+    let (_, dataset) = fork.run_recorded(window + 1);
+    let failures = check_asserts(spec, prefix, window, &dataset, &metrics);
+    let settle = dataset
+        .rows
+        .iter()
+        .find(|row| row.observation.tick == prefix + window)
+        .map_or_else(Vec::new, |row| {
+            row.observation
+                .fighters
+                .iter()
+                .map(|entry| (entry.id, entry.pos, entry.hp))
+                .collect()
+        });
+    let pixels = capture_rgba(&settle, spec.half_extent_m, CAPTURE_EDGE);
+    let mut digester = spec_digester(spec);
+    for row in &dataset.rows {
+        digester.u32(row.observation.tick);
+        for entry in &row.observation.fighters {
+            digester.u8(entry.id);
+            digester.u16(entry.hp);
+        }
+        digester.u8(row.action.fighter);
+        digester.u16(row.outcome.damage_before);
+        digester.u16(row.outcome.damage_after);
+        digester.u8(u8::from(row.outcome.killed));
+    }
+    for (slot, damage) in &metrics.damage_dealt {
+        digester.u8(*slot);
+        digester.u16(*damage);
+    }
+    for (slot, stuck) in &metrics.stuck_ticks {
+        digester.u8(*slot);
+        digester.u32(*stuck);
+    }
+    digester.u32(metrics.ticks_to_kill.unwrap_or(u32::MAX));
+    Ok(Evidence {
+        failures,
+        pixels,
+        digester,
+    })
+}
 /// Rebase a fault's absolute ticks into ablation space.
 fn rebase_op(op: FaultOp, base: u32) -> FaultOp {
     match op {
@@ -1799,52 +954,6 @@ fn full_tape(
         merged.insert(*key, *entry);
     }
     materialize(&merged, lower, upper, fighters)
-}
-
-fn finish_result(
-    spec: &KeypointSpec,
-    failures: Vec<String>,
-    causes: Vec<String>,
-    dataset: &engine_arena::recorder::Dataset,
-    metrics: &engine_arena::fork::ForkMetrics,
-    pixels: &[u8],
-    capture: String,
-) -> KeypointResult {
-    let mut digester = Digester::new();
-    digester.text(&spec.id);
-    digester.u64(spec.seed);
-    digester.u8(spec.fighters);
-    digester.u32(spec.prefix_ticks);
-    digester.u32(spec.window_ticks);
-    for row in &dataset.rows {
-        digester.u32(row.observation.tick);
-        for entry in &row.observation.fighters {
-            digester.u8(entry.id);
-            digester.u16(entry.hp);
-        }
-        digester.u8(row.action.fighter);
-        digester.u16(row.outcome.damage_before);
-        digester.u16(row.outcome.damage_after);
-        digester.u8(u8::from(row.outcome.killed));
-    }
-    for (slot, damage) in &metrics.damage_dealt {
-        digester.u8(*slot);
-        digester.u16(*damage);
-    }
-    for (slot, stuck) in &metrics.stuck_ticks {
-        digester.u8(*slot);
-        digester.u32(*stuck);
-    }
-    digester.u32(metrics.ticks_to_kill.unwrap_or(u32::MAX));
-    digester.bytes(pixels);
-    KeypointResult {
-        id: spec.id.clone(),
-        pass: failures.is_empty(),
-        failures,
-        causes,
-        digest: digester.finish(),
-        capture,
-    }
 }
 
 fn check_asserts(

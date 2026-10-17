@@ -29,7 +29,7 @@ export const allowedEdges = new Map([
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx"]],
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock"]],
   ["engine-destruction", ["engine-core", "engine-nav"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
@@ -582,7 +582,7 @@ function audit(repoDir) {
     "combat/src/lib.rs", "combat/src/sweep.rs", "combat/src/tables.rs",
     "ecs/src/bridge.rs",
     "editor/src/instant.rs", "editor/src/templates.rs",
-    "endpoint/src/assistant.rs", "endpoint/src/play.rs",
+    "endpoint/src/assistant.rs", "endpoint/src/assistant/fork.rs", "endpoint/src/play.rs",
     "endpoint/src/build_level.rs", "endpoint/src/build_character.rs",
     "endpoint/src/build_encounter.rs", "endpoint/src/build_game.rs",
     "input/src/bindings.rs", "input/src/fighter.rs", "input/src/lib.rs",

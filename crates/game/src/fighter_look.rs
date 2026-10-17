@@ -68,6 +68,13 @@ use self::fighter_look_feet::{foot_slides, Feet, Legs};
 #[path = "fighter_look_proofs.rs"]
 mod fighter_look_proofs;
 
+/// Ragdoll look (RZ2w): a floored fighter is handed to the float physical layer and drawn from
+/// its bones; the get-up blends back through the inertial offsets. Presentation only.
+#[path = "ragdoll_look.rs"]
+mod ragdoll_look;
+
+use self::ragdoll_look::RagdollLook;
+
 /// Mesh id base for skinned body parts (clear of the cube, dressing, kit
 /// and staged-box keys): `base + slot * 16 + part`.
 pub const LOOK_MESH_ID_BASE: u64 = 0xF16B_0000;
@@ -909,6 +916,9 @@ pub struct FighterLook {
     /// and built once at load: a clip switch writes it, every frame reads it.
     /// Empty for a look with no rigs. Presentation only; never hashed.
     inertia: Vec<Inertial>,
+    /// The ragdoll layer (RZ2w): one float world, a body per floored slot. Presentation only;
+    /// the sim never reads it and nothing in it is hashed.
+    ragdoll: RagdollLook,
 }
 
 /// One upload-digest slot per `slot * MAX_PARTS + part`, all empty: the
@@ -1338,6 +1348,7 @@ impl FighterLook {
             swing_ticks += 1;
         }
         let inertia = fighter_look_inertia::slot_sets(&rigs)?;
+        let ragdoll = Self::ragdoll_for_rigs(&rigs);
         Ok(Self {
             rigs,
             ring: None,
@@ -1351,6 +1362,7 @@ impl FighterLook {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia,
+            ragdoll,
         })
     }
 
@@ -1425,9 +1437,15 @@ impl FighterLook {
                 continue;
             };
             if let Some(state) = live.balance(slot) {
-                self.observe_balance(slot, state.gait());
+                // RZ2w: a fall queues a ragdoll (with the standing slot, so before the floor
+                // verdict is mirrored); a recovery lets it stand up.
+                let shown = self.ragdoll_fold_gait(slot, state.gait());
+                self.observe_balance(slot, shown);
             }
         }
+        // Once per accepted tick (the window calls this right after `observe_tick`): spawn
+        // what the tick floored, step the float world one tick, stand up what recovered.
+        self.ragdoll_tick();
     }
 
     /// Fold view-only shake trauma (LF11): saturating add, clamped at
@@ -1766,6 +1784,7 @@ impl FighterLook {
             body.clip_s = sample.time;
             body.tinted = self.tick < slot.flash_until;
             body.foot_slide_m = sample.slides;
+            body.ragdolled = self.ragdolled(slot_index);
             let mut frames = Vec::with_capacity(rig.parts.len());
             for part in rig.parts.iter() {
                 let posed = rig
@@ -1781,7 +1800,13 @@ impl FighterLook {
             // LF17 sand rest, view only: a dead body's lowest vertex sits on
             // the sand on every frame, up from a sink and down from a hover.
             // A standing body is never moved.
-            let lift = if lies_on_sand(&slot) && body.has_bounds() {
+            // A ragdoll rests by its physics: only a sunk one is lifted, a flying one is
+            // never pulled down to the sand.
+            let lift = if !body.has_bounds() {
+                0.0
+            } else if self.ragdoll_rests(slot_index) {
+                sand_lift_m(body.min[1])
+            } else if lies_on_sand(&slot) {
                 sand_rest_shift_m(body.min[1])
             } else {
                 0.0
@@ -1862,12 +1887,15 @@ impl FighterLook {
             body.clip_s = sample.time;
             body.tinted = self.tick < slot.flash_until;
             body.foot_slide_m = sample.slides;
+            body.ragdolled = self.ragdolled(slot_index);
             if let Some((lo, hi)) = crate::stage_bodies::joints_bounds(&placed, rig.radius_m) {
                 body.min = lo;
                 body.max = hi;
             }
             // LF17 sand rest, view only: the lift half of the full pose's rule.
-            let lift = if lies_on_sand(&self.slots[slot_index]) && body.has_bounds() {
+            let lift = if (lies_on_sand(&self.slots[slot_index]) || self.ragdoll_rests(slot_index))
+                && body.has_bounds()
+            {
                 sand_lift_m(body.min[1])
             } else {
                 0.0
@@ -2365,6 +2393,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            ragdoll: RagdollLook::empty(),
         }
     }
 
@@ -2430,6 +2459,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            ragdoll: RagdollLook::empty(),
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -2608,6 +2638,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            ragdoll: RagdollLook::empty(),
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -2854,6 +2885,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            ragdoll: RagdollLook::empty(),
         }
     }
 
@@ -5055,6 +5087,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            ragdoll: RagdollLook::empty(),
         };
         assert_eq!(
             empty

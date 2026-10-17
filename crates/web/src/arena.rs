@@ -14,8 +14,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use engine_render::present::{PresentError, Presenter, MAX_FRAME_DIM};
+use engine_render::pipeline_warmup;
+use engine_render::present::{last_live_wall_split, PresentError, Presenter, MAX_FRAME_DIM};
 use engine_render::procedural_arena::ProceduralArena;
+use engine_render::quality::{self, Quality, WEB_CUT_ORDER};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -23,13 +25,26 @@ use crate::anim::FrameStats;
 use crate::arena_view::{frame_size, CaptureFacts, Counters, CAPTURE_AFTER_FRAMES};
 use crate::limits::{feature_names, limit_rows};
 use crate::recovery::LossBudget;
-use crate::report::{AdapterFacts, Failure, Ready};
+use crate::report::{AdapterFacts, ArenaFacts, Failure, Ready};
 use crate::shell::{
     browser_clock, document, fail, log_error, navigator_gpu, now_ms, pause, raw_adapter_info,
     recover_with, request_frame, run_golden, set_body_attr, set_state, set_text, user_agent,
     wasm_pages, FrameSlot, DESTROY_REQUESTED,
 };
+use crate::tier_view::{
+    cut_line, scale_after_cut, us_to_ms, whole_ms, Cut, Ladder, SplitWindow, TierFacts,
+};
 use crate::COMMIT;
+
+/// The frame budget the ladder holds the page to: 30 frames per second.
+const BUDGET_MS: f64 = 1000.0 / 30.0;
+/// The render scale never goes under this many percent (below it the picture is a smear).
+const SCALE_FLOOR_PCT: u32 = 60;
+/// Frames drawn behind the loading screen so every pipeline has been used once before the page
+/// says it is ready.
+const WARM_FRAMES: u32 = 3;
+/// Longest the loader waits for the GPU to finish the warm-up frames, milliseconds.
+const WARM_WAIT_MS: f64 = 60_000.0;
 
 thread_local! {
     /// The losses so far; a storm of them ends in the fatal page, not in endless restarts.
@@ -61,13 +76,24 @@ struct ArenaLoop {
     last_cpu_ms: f64,
     last_draws: u32,
     capture_asked: bool,
+    tier: Quality,
+    /// Render scale in percent: the tier's, lowered by the ladder.
+    scale_pct: u32,
+    start_scale_pct: u32,
+    window: SplitWindow,
+    /// `None` when the ladder is off (`?ladder=off`, or a software adapter that no cut helps).
+    ladder: Option<Ladder>,
+    sim_ms: f64,
+    late_reported: usize,
 }
 
 impl ArenaLoop {
     /// Keep the canvas backing store at the CSS box times the device pixel ratio, within the
     /// presenter's frame bound and the page's pixel budget.
     fn fit_canvas(&mut self) {
-        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
+        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio())
+            * f64::from(self.scale_pct)
+            / 100.0;
         let (w, h) = frame_size(
             f64::from(self.canvas.client_width()),
             f64::from(self.canvas.client_height()),
@@ -100,7 +126,9 @@ impl ArenaLoop {
         if let Err(e) = self.arena.pose(&mut self.presenter, t_s) {
             self.note_error(&format!("pose: {e}"));
         }
-        match self.arena.list_at(w, h, t_s) {
+        let listed = self.arena.list_at(w, h, t_s);
+        self.sim_ms = now_ms() - cpu_started;
+        match listed {
             Ok(list) => match self.presenter.render_surface(&list) {
                 Ok(receipt) => {
                     self.last_draws = receipt.draws;
@@ -139,11 +167,78 @@ impl ArenaLoop {
         if self.counters.frames % 15 == 1 {
             self.publish_receipt();
         }
+        self.tick_split(frame_ms);
+    }
+
+    /// Feed the frame to the one-second window; once a second print the split and let the
+    /// ladder decide, and report any pipeline built after the loader (`late_compile`).
+    fn tick_split(&mut self, now: f64) {
+        let wall = last_live_wall_split();
+        let render_ms = us_to_ms(wall.stage_us.saturating_add(wall.submit_us));
+        let present_ms = us_to_ms(wall.present_call_us);
+        self.window.add(
+            now,
+            self.stats.last_ms(),
+            self.sim_ms,
+            render_ms,
+            present_ms,
+        );
+        let Some(split) = self.window.take_if_due(now) else {
+            return;
+        };
+        let line = split.line(self.tier.name());
+        set_text("split", &line);
+        web_sys::console::log_1(&JsValue::from_str(&line));
+        let ledger = pipeline_warmup::snapshot();
+        if let Some(late) = pipeline_warmup::late_line(&ledger) {
+            if ledger.late().len() != self.late_reported {
+                self.late_reported = ledger.late().len();
+                self.counters.late_pipelines =
+                    u64::try_from(self.late_reported).unwrap_or(u64::MAX);
+                set_text(
+                    "pipelines",
+                    &format!("{} | {late}", pipeline_warmup::ready_line(&ledger, 0.0)),
+                );
+                set_body_attr("data-late-pipelines", &self.late_reported.to_string());
+                log_error(&late);
+            }
+        }
+        // A cut resizes the canvas; do not change the size under a capture that is on its way.
+        let capture_pending = self.capture_asked && self.presenter.capture_busy();
+        // A hidden tab is not a slow picture either.
+        let hidden = document().is_some_and(|d| d.hidden());
+        if capture_pending || hidden || split.frames == 0 {
+            return;
+        }
+        if let Some(cut) = self.ladder.as_mut().and_then(|l| l.observe(split.frame_ms)) {
+            self.apply_cut(cut);
+        }
+    }
+
+    /// Take one cut of the ladder. Only the knobs the page really owns change the picture
+    /// (render scale, bloom); the others are printed with `applied=no` so the order is visible.
+    fn apply_cut(&mut self, cut: Cut) {
+        let name = WEB_CUT_ORDER.get(cut.step).copied().unwrap_or("unknown");
+        let applied = match name {
+            "post_and_particles" => {
+                self.presenter.set_bloom_enabled(false);
+                true
+            }
+            "render_scale" => {
+                self.scale_pct = scale_after_cut(self.start_scale_pct, cut.repeat, SCALE_FLOOR_PCT);
+                true
+            }
+            _ => false,
+        };
+        let line = cut_line(self.tier.name(), name, cut.repeat, applied, self.scale_pct);
+        set_text("tier", &line);
+        web_sys::console::log_1(&JsValue::from_str(&line));
     }
 
     fn publish_receipt(&self) {
         let (waiting, dropped) = self.presenter.deferred_validation_waiting();
         let line = crate::arena_view::receipt_line(
+            self.tier.name(),
             &self.counters,
             self.stats.last_ms(),
             self.last_cpu_ms,
@@ -352,24 +447,26 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     let max_dim = device.limits().max_texture_dimension_2d.min(MAX_FRAME_DIM);
     let features = feature_names(device.features());
     let limits = limit_rows(&device.limits());
-    let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
-    let (w, h) = frame_size(
-        f64::from(canvas.client_width()),
-        f64::from(canvas.client_height()),
-        dpr,
-        max_dim,
-    );
-    canvas.set_width(w);
-    canvas.set_height(h);
+    let TierPick {
+        search,
+        tier,
+        why: tier_why,
+        scale_pct,
+        size: (w, h),
+    } = pick_tier(&canvas, &device, max_dim);
 
     let [vendor, architecture, web_device, description] = raw_adapter_info(&gpu).await;
     let info = adapter.get_info();
+    let software = is_software(&info, &architecture, &description);
 
     // Building the presenter bakes the sky and the image-based light on this thread: say so
     // first and let the browser paint the message.
     set_text("hud", "loading the arena: baking sky and light...");
     pause(30).await;
     let built_at = now_ms();
+    // WEB13: a new presenter, a new ledger. Every pipeline it builds from here on is counted.
+    pipeline_warmup::reset();
+    let work_queue = queue.clone();
     let presenter = Presenter::init_from_device(&instance, &adapter, device, queue, surface, w, h)
         .map_err(|e| present_failure(&e))?;
     let arena = ProceduralArena::build().map_err(|e| (Failure::NoDevice, e.to_string()))?;
@@ -388,12 +485,19 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         last_cpu_ms: 0.0,
         last_draws: 0,
         capture_asked: false,
+        tier,
+        scale_pct,
+        start_scale_pct: scale_pct,
+        window: SplitWindow::default(),
+        ladder: (!search.contains("ladder=off") && !software)
+            .then(|| Ladder::new(WEB_CUT_ORDER.len(), 2, BUDGET_MS)),
+        sim_ms: 0.0,
+        late_reported: 0,
     };
     frame
         .arena
         .stage(&mut frame.presenter)
         .map_err(|e| (Failure::NoDevice, e.to_string()))?;
-    let init_ms = now_ms() - built_at;
     frame.surface_format = frame
         .presenter
         .surface_format()
@@ -402,15 +506,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
 
     let ready = Ready {
         commit: COMMIT.to_string(),
-        adapter: AdapterFacts {
-            name: info.name.clone(),
-            backend: format!("{:?}", info.backend),
-            device_type: format!("{:?}", info.device_type),
-            web_vendor: vendor,
-            web_architecture: architecture,
-            web_device,
-            web_description: description,
-        },
+        adapter: adapter_facts(&info, [vendor, architecture, web_device, description]),
         features,
         limits,
         wasm_pages: wasm_pages(),
@@ -419,16 +515,187 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         surface_format: frame.surface_format.clone(),
         user_agent: user_agent(),
     };
-    // The first frame is drawn here, so `running` means a frame reached the canvas.
-    frame.draw(now_ms());
-    let line = ready.line();
-    set_text("report", &line);
-    set_text("init", &format!("arena ready in {init_ms:.0} ms"));
+    let (ledger, warm_ms) = warm_behind_loader(&mut frame, &work_queue, built_at).await;
+    let init_ms = now_ms() - built_at;
+    let line = publish_ready(
+        &frame,
+        &ready,
+        (tier, tier_why),
+        (&ledger, warm_ms),
+        init_ms,
+    );
     set_body_attr("data-generation", &generation.to_string());
     set_state("running");
     web_sys::console::log_1(&JsValue::from_str(&line));
     run_loop(frame, canvas_id.to_string(), generation);
     Ok(line)
+}
+
+/// The tier and the canvas size it implies.
+struct TierPick {
+    /// The page's query string (`?tier=web`).
+    search: String,
+    tier: Quality,
+    /// `query`, `limits` or `default`.
+    why: &'static str,
+    scale_pct: u32,
+    size: (u32, u32),
+}
+
+/// WEB8: the tier comes from the adapter's limits and a `?tier=` in the address; the canvas
+/// backing store is set to the tier's render scale of its CSS box.
+fn pick_tier(canvas: &HtmlCanvasElement, device: &wgpu::Device, max_dim: u32) -> TierPick {
+    let search = page_search();
+    let (tier, why) = quality::choose_web_tier(
+        quality::tier_from_query(&search),
+        device.limits().max_texture_dimension_2d,
+    );
+    let scale_pct = u32::from(quality::knobs(tier).render_scale_pct);
+    let dpr =
+        web_sys::window().map_or(1.0, |w| w.device_pixel_ratio()) * f64::from(scale_pct) / 100.0;
+    let size = frame_size(
+        f64::from(canvas.client_width()),
+        f64::from(canvas.client_height()),
+        dpr,
+        max_dim,
+    );
+    canvas.set_width(size.0);
+    canvas.set_height(size.1);
+    TierPick {
+        search,
+        tier,
+        why,
+        scale_pct,
+        size,
+    }
+}
+
+/// A software adapter (SwiftShader) is slow by nature; no cut of the ladder would help it.
+fn is_software(info: &wgpu::AdapterInfo, architecture: &str, description: &str) -> bool {
+    info.device_type == wgpu::DeviceType::Cpu
+        || [architecture, description, info.name.as_str()]
+            .iter()
+            .any(|text| text.to_ascii_lowercase().contains("swiftshader"))
+}
+
+/// What the ready line says about the adapter: wgpu's view plus the browser's raw strings
+/// (`[vendor, architecture, device, description]`).
+fn adapter_facts(info: &wgpu::AdapterInfo, raw: [String; 4]) -> AdapterFacts {
+    let [web_vendor, web_architecture, web_device, web_description] = raw;
+    AdapterFacts {
+        name: info.name.clone(),
+        backend: format!("{:?}", info.backend),
+        device_type: format!("{:?}", info.device_type),
+        web_vendor,
+        web_architecture,
+        web_device,
+        web_description,
+    }
+}
+
+/// WEB13: behind the loading screen, build what the presenter did not at creation (the HP-bar
+/// overlay), draw a few real frames so every pipeline has been used once and wait for the GPU
+/// to finish them: the browser compiles on its own threads meanwhile. wgpu 30 has no async
+/// pipeline call, so this is the closest non-blocking route. The ledger is sealed here: a build
+/// after it is a `late_compile`. The frames are real, so `running` still means a frame reached
+/// the canvas. Returns the builds and the milliseconds since `built_at`.
+async fn warm_behind_loader(
+    frame: &mut ArenaLoop,
+    queue: &wgpu::Queue,
+    built_at: f64,
+) -> (pipeline_warmup::Ledger, f64) {
+    frame.presenter.warm_pipelines();
+    for _ in 0..WARM_FRAMES {
+        frame.draw(now_ms());
+        pause(0).await;
+    }
+    wait_for_gpu(queue).await;
+    let ledger = pipeline_warmup::snapshot();
+    pipeline_warmup::seal();
+    // The scope answers of the warm frames are in by now; count them before the ready line.
+    frame.counters.deferred_validation_errors = frame.presenter.deferred_validation_errors();
+    frame.counters.uncaptured_errors = frame.uncaptured.count.load(Ordering::Relaxed);
+    (ledger, now_ms() - built_at)
+}
+
+/// The tier's knobs as the page prints them (see [`TierFacts`]).
+fn tier_facts(tier: Quality, why: &str) -> TierFacts {
+    let knobs = quality::knobs(tier);
+    TierFacts {
+        name: tier.name().to_string(),
+        why: why.to_string(),
+        scale_pct: u32::from(knobs.render_scale_pct),
+        shadow_px: u32::from(knobs.shadow_map_px),
+        cascades: u32::from(knobs.shadow_cascades),
+        gtao: match knobs.gtao {
+            quality::Gtao::Off => "off",
+            quality::Gtao::Half => "half",
+            quality::Gtao::Full => "full",
+        }
+        .to_string(),
+        taa: knobs.taa,
+        particles: knobs.particle_cap,
+        decals: knobs.decal_cap,
+        physfx_bodies: u32::from(knobs.physfx_bodies),
+        physfx_ragdolls: u32::from(knobs.physfx_ragdolls),
+        physfx_contacts: u32::from(knobs.physfx_contacts),
+        texture_px: u32::from(knobs.texture_max_px),
+        wired: "scale,bloom".to_string(),
+    }
+}
+
+/// Print the tier, the pipeline warm-up and the ready line to the page and the console; returns
+/// the ready line (JSON with the tier, the pipelines and the validation count).
+fn publish_ready(
+    frame: &ArenaLoop,
+    ready: &Ready,
+    (tier, tier_why): (Quality, &str),
+    (ledger, warm_ms): (&pipeline_warmup::Ledger, f64),
+    init_ms: f64,
+) -> String {
+    let tier_line = tier_facts(tier, tier_why).line();
+    let pipelines_line = pipeline_warmup::ready_line(ledger, warm_ms);
+    let facts = ArenaFacts {
+        tier: tier.name().to_string(),
+        tier_why: tier_why.to_string(),
+        pipelines: u64::try_from(ledger.warm()).unwrap_or(u64::MAX),
+        pipelines_ms: whole_ms(warm_ms),
+        late_pipelines: 0,
+        validation: frame.counters.validation_total(),
+    };
+    let line = ready.line_with(&facts);
+    set_text("report", &line);
+    set_text("tier", &tier_line);
+    set_text("pipelines", &pipelines_line);
+    set_body_attr("data-tier", tier.name());
+    set_body_attr("data-pipelines", &ledger.warm().to_string());
+    web_sys::console::log_1(&JsValue::from_str(&tier_line));
+    web_sys::console::log_1(&JsValue::from_str(&pipelines_line));
+    set_text("init", &format!("arena ready in {init_ms:.0} ms"));
+    line
+}
+
+/// The page's query string (`?tier=web`), empty when it cannot be read.
+fn page_search() -> String {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &"location".into()).ok())
+        .and_then(|loc| js_sys::Reflect::get(&loc, &"search".into()).ok())
+        .and_then(|s| s.as_string())
+        .unwrap_or_default()
+}
+
+/// Wait until the GPU has finished everything submitted so far (or [`WARM_WAIT_MS`] passed).
+/// The callback and a short timer poll: no blocking call.
+async fn wait_for_gpu(queue: &wgpu::Queue) {
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    queue.on_submitted_work_done(move || flag.store(true, Ordering::SeqCst));
+    let started = now_ms();
+    while !done.load(Ordering::SeqCst) && now_ms() - started < WARM_WAIT_MS {
+        pause(10).await;
+    }
+    // Error-scope answers ride the same queue; give them a moment to land.
+    pause(30).await;
 }
 
 /// Start the arena on the canvas with id `canvas_id`. Resolves with the JSON line it printed

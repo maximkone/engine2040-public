@@ -1,6 +1,6 @@
 ---
 name: spatial-perception
-description: "Use when you add tile visibility, FOV, isovist polygon, sight-gated chase, explored-map memory, AI hearing, or stacked placement on shelves and stairs in crates spatial, ai, game or render: opacity vs blocking, dirty recompute, integer cm, id order."
+description: "Use when you add tile visibility, FOV, isovist polygons, sight-gated chase, explored-map memory, AI hearing, or placement on shelves and stairs (crates spatial, ai, game, render): opacity versus blocking, integer cm, id order."
 ---
 
 # Spatial perception

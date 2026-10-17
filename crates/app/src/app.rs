@@ -744,9 +744,9 @@ mod lifecycle_refusal_tests {
 #[cfg(test)]
 mod rc32_budget_tests {
     use super::{App, VERIFY_TICKS};
-    use engine_scene::prefab::{Prefab, PrefabNode, MUSEUM_V1_JSON, PREFAB_VERSION};
-    use engine_scene::schema::{SchemaRegistry, VersionedComponent};
-    use engine_scene::transform::{Hierarchy, Transform};
+    use engine_scene::prefab::{Prefab, MUSEUM_V1_JSON};
+    use engine_scene::schema::SchemaRegistry;
+    use engine_scene::transform::Hierarchy;
     use std::time::Instant;
 
     /// Cold startup budget on the reference machine: under 2 s.
@@ -760,41 +760,9 @@ mod rc32_budget_tests {
     /// Warmup instantiates before the timed window.
     const KIT_WARMUP: usize = 10;
 
-    fn label_component(payload: &str) -> VersionedComponent {
-        VersionedComponent {
-            component: "label".to_string(),
-            version: 1,
-            payload: payload.to_string(),
-        }
-    }
-
+    /// The RC4 museum fixture is the arena kit: parsed from its fixed bytes.
     fn arena_kit() -> Prefab {
-        let hall_pose = Transform::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]);
-        let plinth_pose = Transform::new([0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]);
-        let bust_pose = Transform::new([0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]);
-        Prefab {
-            schema_version: PREFAB_VERSION,
-            nodes: vec![
-                PrefabNode {
-                    key: "hall".to_string(),
-                    parent: None,
-                    transform: hall_pose,
-                    components: vec![label_component("Grand Hall")],
-                },
-                PrefabNode {
-                    key: "hall/plinth".to_string(),
-                    parent: Some("hall".to_string()),
-                    transform: plinth_pose,
-                    components: vec![label_component("Plinth")],
-                },
-                PrefabNode {
-                    key: "hall/plinth/bust".to_string(),
-                    parent: Some("hall/plinth".to_string()),
-                    transform: bust_pose,
-                    components: vec![label_component("Bust of the Founder")],
-                },
-            ],
-        }
+        serde_json::from_str(MUSEUM_V1_JSON).expect("museum fixture parses")
     }
 
     fn check_budgets(startup_ms: u64, kit_ns: u64) -> Result<(), &'static str> {
@@ -849,8 +817,6 @@ mod rc32_budget_tests {
     fn kit_shape_matches_rc4_fixture() {
         let kit = arena_kit();
         assert_eq!(kit.nodes.len(), 3);
-        assert!(MUSEUM_V1_JSON.contains("hall/plinth/bust"));
-        assert!(MUSEUM_V1_JSON.contains("Bust of the Founder"));
         let registry = SchemaRegistry::builtin();
         kit.validate(&registry).expect("kit validates");
         let mut tree = Hierarchy::new();
@@ -878,44 +844,20 @@ mod rc32_budget_tests {
         assert_eq!(check_budgets(0, 0), Ok(()));
     }
 
+    /// The gate: both budgets hold on two back-to-back runs, numbers posted.
+    /// Debug builds are slower than release, so passing here leaves the
+    /// release margin wider still; a regression turns this red.
     #[test]
-    fn harness_posts_numbers_twice() {
-        let first_startup = cold_startup_ms();
-        let first_kit = kit_median_ns();
-        let second_startup = cold_startup_ms();
-        let second_kit = kit_median_ns();
-        eprintln!(
-            "RC32 run1: startup {first_startup}ms (budget {STARTUP_BUDGET_MS}ms), \
-             kit {}us (budget {KIT_BUDGET_US}us)",
-            first_kit / 1_000,
-        );
-        eprintln!(
-            "RC32 run2: startup {second_startup}ms (budget {STARTUP_BUDGET_MS}ms), \
-             kit {}us (budget {KIT_BUDGET_US}us)",
-            second_kit / 1_000,
-        );
-        assert_ne!(first_startup, u64::MAX);
-        assert_ne!(second_startup, u64::MAX);
-        assert_ne!(first_kit, u64::MAX);
-        assert_ne!(second_kit, u64::MAX);
-    }
-
-    #[test]
-    #[ignore = "timing: needs a quiet release box; run with --release -- --ignored --test-threads=1"]
-    fn cold_startup_under_2s() {
-        let startup = cold_startup_ms();
-        eprintln!("RC32 startup {startup}ms (budget {STARTUP_BUDGET_MS}ms)");
-        assert_eq!(check_budgets(startup, 0), Ok(()));
-    }
-
-    #[test]
-    #[ignore = "timing: needs a quiet release box; run with --release -- --ignored --test-threads=1"]
-    fn kit_instantiate_under_1ms() {
-        let median = kit_median_ns();
-        eprintln!(
-            "RC32 kit median {}us (budget {KIT_BUDGET_US}us) over {KIT_SAMPLES} samples",
-            median / 1_000,
-        );
-        assert_eq!(check_budgets(0, median), Ok(()));
+    fn budgets_hold_on_two_runs() {
+        for run in 1..=2 {
+            let startup = cold_startup_ms();
+            let kit = kit_median_ns();
+            eprintln!(
+                "RC32 run{run}: startup {startup}ms (budget {STARTUP_BUDGET_MS}ms), kit {}us \
+                 (budget {KIT_BUDGET_US}us) over {KIT_SAMPLES} samples",
+                kit / 1_000,
+            );
+            assert_eq!(check_budgets(startup, kit), Ok(()), "run {run}");
+        }
     }
 }

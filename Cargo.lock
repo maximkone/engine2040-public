@@ -2966,6 +2966,7 @@ dependencies = [
  "engine-core",
  "engine-ecs",
  "engine-scene",
+ "serde_json",
 ]
 
 [[package]]
@@ -3112,6 +3113,7 @@ dependencies = [
  "engine-arena",
  "engine-assets",
  "engine-audio",
+ "engine-clock",
  "engine-combat",
  "engine-core",
  "engine-destruction",
@@ -3342,6 +3344,7 @@ dependencies = [
  "engine-audio",
  "engine-clock",
  "engine-input",
+ "engine-net",
  "engine-proof",
  "engine-render",
  "js-sys",
