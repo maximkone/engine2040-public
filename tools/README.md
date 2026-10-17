@@ -11,7 +11,7 @@ Keep scripts small and portable; docs stay in `docs/`.
 
 ## Live tools
 
-78 live scripts. 81 dead tools (39 A-L plus 42 M-Z) were deleted 2026-10-10 and are not listed. Short lines; the script header is the full doc. The list is pinned by `tools/drift-check.test.mjs` (README lists every live `tools/*.mjs`).
+81 dead tools were deleted 2026-10-10 and are not listed. Short lines; the script header is the full doc. Keep one line here per live `tools/*.mjs`.
 
 - `tools/affected.mjs` (+ `tools/affected.test.mjs`): node script; see its header.
 - `tools/arch-fitness.mjs` (+ `tools/arch-fitness.test.mjs`): check the crate graph stays acyclic.

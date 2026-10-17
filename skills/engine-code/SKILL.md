@@ -30,13 +30,14 @@ Before any code: `node tools/board-slice.mjs <ROW>`. A ticked row, or a named fu
    Fail: `reflect_screen_for_forward` tested, never called by submit (RT19
    x2); `apply_poise_kind` callers only tests (GP30 x2). Pass: arena hit
    pipeline reads `capture_bias` after each landed blow.
-   Finish the capability in one packet; if it cannot land whole, report
+   Finish the capability in one row; if it cannot land whole, report
    exactly what remains instead of a partial.
-6. Run `rustfmt --edition 2021 --check <owned .rs>` (fix by hand, never `cargo fmt`), `cargo test -p <crate> --lib <filter>` (the filter names your new tests) and
-   `cargo clippy -p <crate> --all-targets --all-features -- -D warnings`. In a
-   wave, edit only the packet's owned paths in `C:\engine2040` (one tree,
-   master) and build only your crate; a "Blocking waiting for file lock" line
-   is another cargo build in `target/`. Never commit. Golden check:
+6. Run `rustfmt --edition 2021 --check <owned .rs>` (fix by hand, never `cargo fmt`). Iterate with `cargo check -p <crate>`; prove with
+   `node tools/gh-check.mjs cargo test -p <crate> --lib <filter>` (the filter names your new tests)
+   and `node tools/gh-check.mjs cargo clippy -p <crate> --all-targets -- -D warnings`
+   (skill `github-check`). Edit only the row's owned paths in `C:\engine2040` (one tree,
+   master); a "Blocking waiting for file lock" line is another cargo build in
+   `target/`. Commit by path (skill `commit-by-path`). Golden check:
    `cargo run -p engine2040 --release` prints `final_hash=d57b5c8ae3096614`.
 7. Obey the slim law in `docs/CODELAW.md`: one owner per type, a consumer
    outside tests, a stated budget, no steady-state allocation per tick.
@@ -74,7 +75,7 @@ deferred work `ponytail: <path>`. Never cut validation, determinism or tests.
 
 A new Cargo dependency's license must pass `deny.toml`. Donor source code from
 any repo may be ported directly (owner 2026-10-10); no EVIDENCE row. Prefer small crates without C toolchains and put heavy ones
-behind a feature. Do not edit a manifest yourself: report the dependency, and the lead adds it with its `docs/DEPENDENCIES.md` row and `cargo deny check`.
+behind a feature. Add it with its `docs/DEPENDENCIES.md` row and run `cargo deny check`.
 
 ## Area rules
 
@@ -112,4 +113,4 @@ accepted actions and never calls a model.
 If simulation code changed, run `cargo test -p engine-proof --lib golden_hash_untouched` and report it. `-p` is the package name in `crates/<dir>/Cargo.toml`.
 
 Changed paths, commands with results, the legacy hash when simulation code
-changed, changes the orchestrator must apply, and what is still unverified.
+changed, follow-up rows to add, and what is still unverified.

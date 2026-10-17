@@ -39,6 +39,6 @@ Research serves the pillars in `docs/FOCUS.md` **Now** and the five in
   format at its top); no new per-wave research file.
 - **Triage (from researcher):** code outranks docs; follow root AGENTS.md.
   Answer, path:line evidence, existing owner, missing coverage, smallest
-  actionable packet, acceptance command, unknowns.
+  actionable row, acceptance command, unknowns.
 
 Return changed paths, the cards or triage, and open questions.

@@ -7,7 +7,7 @@ author: skillworks
 
 # Refactor gates
 
-Kin: engine-proof repairs owned MAINT paths and audits read-only JAN findings, delegate-context-pack packs one dispatch, causal-triage-plan orders many live errors; this skill gates one planned cross-crate refactor — blast radius, staged batches, per-batch CI, rollback line — before any edit starts.
+Kin: engine-proof repairs owned MAINT paths and audits read-only JAN findings, causal-triage-plan orders many live errors; this skill gates one planned cross-crate refactor — blast radius, staged batches, per-batch CI, rollback line — before any edit starts.
 
 1. **Boundary map with exclusions.** List crates in play. List out of scope: generated files, vendor drops, lockfiles, local cargo config.
 2. **Fixed weights.** Rank each item: security flaws, then breaking bugs, then architecture, then performance, then style. Style stays last.

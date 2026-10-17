@@ -5,7 +5,7 @@ description: "Use when running engine2040 without a window or a person: the head
 
 # Door and headless runbook
 
-Every line below names a binary or test that exists in this repo. Run from the repo root in pwsh. Builds share `target/`: a `Blocking waiting for file lock` line means wait (AGENTS.md::Fast paths).
+Every line below names a binary or test that exists in this repo. Run from the repo root in pwsh. Builds share `target/`: a `Blocking waiting for file lock` line means wait (AGENTS.md::Shell and search).
 
 ## Golden proof
 - Full proof: `node tools/proof.mjs`. Fixtures only: `node tools/proof.mjs --skip-build`.
@@ -28,8 +28,7 @@ Every line below names a binary or test that exists in this repo. Run from the r
 
 ## MCP door (e2040-mcp)
 - Help, headless: `cargo run --locked -p engine-endpoint --features mcp --bin e2040-mcp -- --help` (docs/book/recipes-drive-from-mcp.md::1. Serve the project folder). The plain build refuses the binary without the `mcp` feature.
-- The OpenCode client runs the copy in `.opencode/bin/e2040-mcp.exe --project-dir .opencode/e2040-scratch` (opencode.jsonc::mcp.e2040).
-- Refresh that copy: `node tools/mcp-install.mjs` (copies the release binary; `--check` only verifies). Rebuild release first.
+- Run a copy so a rebuild cannot relink the binary under a running server: build `cargo build --release --locked -p engine-endpoint --features mcp --bin e2040-mcp`, copy `target/release/e2040-mcp.exe` somewhere outside `target/`, and point the client at that copy with `--project-dir <scratch dir>`.
 - A client config line: `{"command": "e2040-mcp", "args": ["--project-dir", "<dir>"]}`.
 - Tool names carry the `e2040_` prefix (for example `e2040_api_search`, `e2040_api_describe`). Search before you describe a path you have not seen.
 

@@ -23,6 +23,7 @@
 use engine_anim::contract::{LocalPose, Skeleton};
 use engine_anim::ik::{limb_positions, solve_limb, IkError, Limb};
 use engine_arena::GaitPhase;
+use engine_core::vec3::dist2;
 
 use super::{clip_alpha, slot_root, Act, FighterLook, LookError, Rig, SlotAnim, TICK_HZ};
 
@@ -197,7 +198,7 @@ fn to_model_vec(world: [f32; 2], yaw: f32) -> [f32; 2] {
 }
 
 fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    dist2(a, b).sqrt()
 }
 
 /// True for a body that stands: any act but the death clip, steady or

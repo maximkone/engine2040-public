@@ -1,0 +1,24 @@
+# engine2040 game project. `engine2040 run` and `engine2040 build` read this file from the
+# current directory (or from --manifest <path>). Flat `key = value` lines; no [tables].
+
+# Project name: a-z, 0-9, '-' and '_'. `engine2040 new` fills it from the directory name.
+name = "{{name}}"
+
+# Where the game builds: "windows", "web", or both.
+targets = ["windows", "web"]
+
+# Quality tier: minimal, low, medium, high, ultra.
+quality = "medium"
+
+# Physics layers. "authority" decides every outcome (hashed integers) and is required.
+# "physical" adds ragdolls, severed limbs and debris that only have to look right (not hashed).
+physics_layers = ["authority", "physical"]
+
+# Gore level: off, reduced, full.
+gore = "full"
+
+# Content roots, relative to this file with forward slashes. Each must be a directory.
+content = ["content"]
+
+# The seed of the headless run: a file holding one unsigned number.
+seed_file = "content/seed.txt"

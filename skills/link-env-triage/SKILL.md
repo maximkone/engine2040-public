@@ -11,13 +11,13 @@ Seven checks to stop innocent code churn. A green check plus a named link symbol
 
 1. **Fingerprint first.** Ask: is `cargo check -p <crate>` green while link names one symbol? Flag as toolchain fingerprint, not a code bug.
 2. **Hold owned code.** Ask: did anyone revert, replan, or abandon owned code on a link-red tree? Never touch owned code for env red.
-3. **One bug packet.** Ask: is exactly one bug packet filed with the fingerprint line? Code packets wait until env clears.
-4. **Quiet re-verify.** Ask: was re-verify run off-peak or after `cargo clean -p <crate>` when the tree is quiet? Clean needs owner or coder seat only.
-5. **Two fails stop.** Ask: did the same link FAIL twice? End the step per loop rules. The third try is env-fix-first, never a third code try.
+3. **One report.** Ask: is exactly one report filed (a `docs/BLOCKERS.md` row) with the fingerprint line? Code rows wait until env clears.
+4. **Quiet re-verify.** Ask: was re-verify run off-peak or after `cargo clean -p <crate>` when the tree is quiet? Clean only by exact crate (`cargo clean -p <crate>`); never delete under `target/` by hand or `git clean` it.
+5. **Two fails stop.** Ask: did the same link FAIL twice? End the step per AGENTS.md (a second identical failure becomes a BLOCKERS row). The third try is env-fix-first, never a third code try.
 6. **Heavy runner is env.** Ask: did the run exit with code 124? Count it as env under the same rule, never as code fail.
 7. **Box clock record.** Ask: does each timing bench record box versus reference clock? Re-pin or quarantine on drift, never gate a slice on another box threshold.
 
 ## Test note
 Green check plus named symbol proves toolchain env, not code.
-File one bug packet with the fingerprint line and hold code packets.
+File one BLOCKERS row with the fingerprint line and hold code rows.
 Re-verify off-peak or after clean when the tree is quiet.
