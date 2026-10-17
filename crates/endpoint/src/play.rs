@@ -914,6 +914,9 @@ pub fn capture_unsupported(args: &CaptureArgs) -> Result<CaptureOutput, McpToolE
 pub type CaptureRenderer<'a> =
     Box<dyn FnOnce(&CaptureArgs) -> Result<CaptureOutput, McpToolError> + 'a>;
 
+/// Optional per-receipt PNG notifier handed to [`capture_with_look_hook`].
+pub type LookHook<'a> = Option<&'a mut dyn FnMut(&[u8])>;
+
 /// Per-frame look hook: hands each validated capture PNG to the hook once.
 ///
 /// `None` keeps the receipt path byte-identical; a refused receipt never
@@ -923,7 +926,7 @@ pub type CaptureRenderer<'a> =
 pub fn capture_with_look_hook(
     args: &CaptureArgs,
     render: CaptureRenderer<'_>,
-    hook: Option<&mut dyn FnMut(&[u8])>,
+    hook: LookHook<'_>,
 ) -> Result<CaptureOutput, McpToolError> {
     let (width, height) = capture_size(args)?;
     // The renderer is asked for the effective size, so the `max_size` cap is
@@ -1146,10 +1149,7 @@ impl ToolBase for PlayRunTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        let mut annotations = ToolAnnotations::default();
-        annotations.read_only_hint = Some(false);
-        annotations.open_world_hint = Some(false);
-        Some(annotations)
+        crate::mcp::write_annotations(false)
     }
 }
 
@@ -1663,7 +1663,7 @@ mod tests {
     #[test]
     fn capture_image_block() {
         let mut png = PNG_MAGIC.to_vec();
-        png.extend(std::iter::repeat(0x5A_u8).take(300));
+        png.extend(std::iter::repeat_n(0x5A_u8, 300));
         let raw = rmcp::serde_json::to_value(&CaptureOutput {
             manifest: CaptureManifestDto {
                 adapter: "test-adapter".to_owned(),
@@ -1682,7 +1682,7 @@ mod tests {
         );
 
         let result = frame_call_result(raw);
-        let (image, text) = match &result.content[..] {
+        let (image, text) = match &*result.content {
             [ContentBlock::Image(image), ContentBlock::Text(text)] => (image, text),
             other => panic!("expected one image plus one caption, got {other:?}"),
         };

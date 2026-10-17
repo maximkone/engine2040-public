@@ -31,6 +31,9 @@ sha2 = { version = "0.10", optional = true }
 
 [features]
 fuzz = ["dep:engine-arena"]
+# DSN2 arena tape (src/arena_matrix.rs, bin arena_line): plays the rules-v2 kit
+# match the window and the net server play, through engine-arena's MatchSpec.
+arena = ["dep:engine-arena"]
 scene-museum = ["dep:engine-scene"]
 # MV1 harness (tests/m1_workflow.rs) runs the real workflow through the
 # assets/editor/scene/render APIs. These stay OPTIONAL normal deps (the
@@ -54,6 +57,10 @@ ragdoll = ["engine-physics/rapier", "dep:engine-anim"]
 [[bin]]
 name = "ragdoll_line"
 required-features = ["ragdoll"]
+
+[[bin]]
+name = "arena_line"
+required-features = ["arena"]
 
 [[test]]
 name = "m1_workflow"

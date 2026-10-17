@@ -23,7 +23,7 @@ export const allowedEdges = new Map([
   ["engine-audio", ["engine-observe"]],
   ["engine-save", ["engine-observe"]],
   ["engine-anim", ["engine-nn", "engine-combat"]],
-  ["engine-playtest", ["engine-arena", "engine-render", "engine-provider", "engine-spatial"]],
+  ["engine-playtest", ["engine-ai", "engine-arena", "engine-render", "engine-provider", "engine-spatial"]],
   ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle
   ["engine-assets", ["engine-scene", "engine-anim", "engine-clock"]],
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.

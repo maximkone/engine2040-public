@@ -87,15 +87,6 @@ pub fn door_profile(stages: [u32; 3], whole_us: u32) -> ProfileVerdict {
         within_5pct: within,
     }
 }
-/// File an overlay request; render owns pixels.
-pub fn file_overlay_request(png_path: &str) -> OverlayRequest {
-    OverlayRequest {
-        colliders: true,
-        velocity_arrows: true,
-        targets: true,
-        png_path: png_path.to_owned(),
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;

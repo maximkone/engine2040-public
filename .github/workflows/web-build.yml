@@ -80,7 +80,7 @@ jobs:
             cargo install twiggy --locked --root "$HOME/.local" >/dev/null 2>&1 || echo "twiggy not installed; build.json gets no top-size lines"
           fi
       - name: unit tests of the build and check tools
-        run: node --test tools/web-build.test.mjs tools/web-browse.test.mjs tools/wasm-info.test.mjs
+        run: node --test tools/web-build.test.mjs tools/web-browse.test.mjs tools/wasm-info.test.mjs tools/web-input-check.test.mjs
       - name: "engine-web unit tests (native: limits, JSON line, animation)"
         run: cargo test --locked -p engine-web --lib
       - name: clippy for the browser target (the shell only exists on wasm32)
@@ -157,6 +157,11 @@ jobs:
       - name: headless Chrome loads dist/web (the first flag set that gives an adapter wins)
         shell: bash
         run: node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web --require-adapter
+      # WEB7: real key and mouse events over CDP. No audio context before a gesture, Escape is not a gesture, a key press
+      # starts it, a click leaves it running; the page's input: and audio: lines carry the numbers.
+      - name: input and audio on the page (WEB7)
+        shell: bash
+        run: node tools/web-input-check.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-input
       # Every flag set, not only the winner, so the record says which flags matter and which do not.
       - name: every flag set, for the record
         if: always()

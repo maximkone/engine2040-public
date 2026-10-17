@@ -68,6 +68,7 @@ pub mod parity;
 pub mod probe;
 pub mod recorder;
 pub mod seed;
+pub mod spec;
 #[cfg(feature = "spine")]
 pub mod spine_step;
 pub mod sync;
@@ -90,6 +91,7 @@ pub use gym::{
     GymSnapshot, GYM_ACTION_ATTACK, GYM_ACTION_BLOCK, GYM_ACTION_DODGE, GYM_NUM_ACTIONS,
 };
 pub use live::{LiveMatch, LivePresentation, LiveTick};
+pub use spec::MatchSpec;
 
 use core::f32::consts::PI;
 

@@ -25,17 +25,17 @@ thread_local! {
     static DESTROY_REQUESTED: Cell<bool> = const { Cell::new(false) };
 }
 
-fn document() -> Option<web_sys::Document> {
+pub(crate) fn document() -> Option<web_sys::Document> {
     web_sys::window()?.document()
 }
 
-fn set_text(id: &str, text: &str) {
+pub(crate) fn set_text(id: &str, text: &str) {
     if let Some(el) = document().and_then(|d| d.get_element_by_id(id)) {
         el.set_text_content(Some(text));
     }
 }
 
-fn set_body_attr(name: &str, value: &str) {
+pub(crate) fn set_body_attr(name: &str, value: &str) {
     if let Some(body) = document().and_then(|d| d.body()) {
         let _ = body.set_attribute(name, value);
     }
@@ -463,7 +463,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
 }
 
 /// The browser's millisecond clock (`performance.now()`); `std::time` traps on this target.
-fn now_ms() -> f64 {
+pub(crate) fn now_ms() -> f64 {
     web_sys::window()
         .and_then(|w| w.performance())
         .map_or(0.0, |p| p.now())
@@ -500,6 +500,8 @@ fn run_golden() {
 pub async fn run(canvas_id: String) -> String {
     std::panic::set_hook(Box::new(|info| log_error(&format!("panic: {info}"))));
     set_state("starting");
+    // Input and audio need the DOM only, so they start before (and without) the GPU.
+    crate::browser::install(&canvas_id);
     // First, before anything can read a clock: the page's performance.now() becomes the engine's.
     engine_clock::install(browser_clock);
     let line = match start(&canvas_id, 1).await {

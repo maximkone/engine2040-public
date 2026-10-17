@@ -246,10 +246,7 @@ impl DoorAudit {
             .appended
             .checked_add(1)
             .ok_or(AuditError::SequenceExhausted)?;
-        let mut end = MAX_TOOL_NAME_LEN.min(tool.len());
-        while !tool.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = tool.floor_char_boundary(MAX_TOOL_NAME_LEN);
         let prev = self.records.last().map_or([0u8; 32], |record| record.chain);
         let bytes = entry_bytes(session, &tool[..end], revision, outcome, detail, seq);
         let entry = digest32(&[&bytes]);

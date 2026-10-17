@@ -213,10 +213,52 @@ export async function launchChrome(chrome, flags, logFile) {
   };
 }
 
-const parseLine = (text) => { try { const v = JSON.parse(text); return v && typeof v === "object" ? v : null; } catch { return null; } };
+// The browse receipt: what the ready line said about wasm memory plus the time to the first frame.
+export const receiptOf = (report, firstFrameMs, set) => ({ schema: 1, set, wasmMemoryBytes: report?.wasmMemoryBytes ?? null, ttffMs: firstFrameMs ?? null, commit: report?.commit ?? null });
+
+const parseLine =(text) => { try { const v = JSON.parse(text); return v && typeof v === "object" ? v : null; } catch { return null; } };
+
+// ---- scripted input (AIS2 browser.input): events become Chrome DevTools Input.* calls ----
+// An event is { kind, key?, x?, y?, ms? }. kind: key (down then up), key_down, key_up, mouse_move, click, wait.
+export const INPUT_KINDS = ["key", "key_down", "key_up", "mouse_move", "click", "wait"];
+const KEY_CODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Space: 32, Enter: 13, Escape: 27, Tab: 9, Shift: 16, Control: 17, Alt: 18 };
+function keyParams(name) {
+  if (name === "Space") return { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " };
+  if (/^[A-Za-z]$/.test(name)) return { key: name, code: `Key${name.toUpperCase()}`, windowsVirtualKeyCode: name.toUpperCase().charCodeAt(0), text: name };
+  if (/^[0-9]$/.test(name)) return { key: name, code: `Digit${name}`, windowsVirtualKeyCode: name.charCodeAt(0), text: name };
+  if (name in KEY_CODES) return { key: name, code: name, windowsVirtualKeyCode: KEY_CODES[name], ...(name === "Enter" ? { text: "\r" } : {}) };
+  throw new Error(`unknown key "${name}"`);
+}
+// The CDP calls (and waits) for a list of events, in order. Throws on an event it cannot map.
+export function inputCommands(events) {
+  const out = [];
+  const point = (e) => {
+    if (!Number.isInteger(e.x) || !Number.isInteger(e.y)) throw new Error(`${e.kind} needs integer x and y`);
+    return { x: e.x, y: e.y };
+  };
+  for (const e of events) {
+    if (e.kind === "key" || e.kind === "key_down" || e.kind === "key_up") {
+      const p = keyParams(e.key);
+      const { text, ...up } = p;
+      if (e.kind !== "key_up") out.push({ method: "Input.dispatchKeyEvent", params: { type: text ? "keyDown" : "rawKeyDown", ...p } });
+      if (e.kind !== "key_down") out.push({ method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...up } });
+    } else if (e.kind === "mouse_move") {
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", ...point(e) } });
+    } else if (e.kind === "click") {
+      const p = point(e);
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", ...p } });
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mousePressed", ...p, button: "left", buttons: 1, clickCount: 1 } });
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", ...p, button: "left", buttons: 0, clickCount: 1 } });
+    } else if (e.kind === "wait") {
+      if (!Number.isInteger(e.ms) || e.ms < 0 || e.ms > 2000) throw new Error("wait needs ms in 0..=2000");
+      out.push({ wait: e.ms });
+    } else throw new Error(`unknown input kind "${e.kind}" (legal: ${INPUT_KINDS.join(", ")})`);
+  }
+  return out;
+}
 
 // Load `url` in a fresh Chrome and read the page back. `beforeLoad` is a script run before any page script.
-export async function readPage({ chrome, flags, url, logFile, beforeLoad = null, waitMs = 90000, afterReady = null }) {
+export async function readPage({ chrome, flags, url, logFile, beforeLoad = null, waitMs = 90000, afterReady = null, inputEvents = null }) {
   const b = await launchChrome(chrome, flags, logFile);
   const { cdp } = b;
   const consoleLines = [], exceptions = [];
@@ -236,10 +278,12 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
     };
     await cdp.send("Page.navigate", { url });
     const t0 = Date.now();
-    let state = null, goldenState = null;
+    let state = null, goldenState = null, firstFrameMs = null;
     while (Date.now() - t0 < waitMs) {
       await sleep(250);
       try { [state, goldenState] = await evalJs("[document.body.dataset.state ?? null, document.body.dataset.golden ?? null]"); } catch { state = null; }
+      // Time to first frame (WEB11): the first poll that sees the first frame on the canvas, good to one poll (250 ms).
+      if (firstFrameMs === null && (state === "running" || state === "fatal")) firstFrameMs = Date.now() - t0;
       // The golden check runs after the adapter line, so wait for both.
       if ((state === "running" || state === "fatal") && goldenState) break;
     }
@@ -256,7 +300,7 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
         const i = a.info ?? (a.requestAdapterInfo ? await a.requestAdapterInfo() : {});
         return { gpu: true, adapter: { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description, isFallback: a.isFallbackAdapter ?? null, features: [...a.features].length } };
       } catch (e) { return { gpu: true, error: String(e) }; } })()`);
-    const out = { waitedMs: Date.now() - t0, timedOut, state: first.state, generation: first.generation, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
+    const out = { waitedMs: Date.now() - t0, firstFrameMs, timedOut, state: first.state, generation: first.generation, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
     if (!timedOut) {
       out.screenshot = Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64");
       if (state === "running") {
@@ -265,6 +309,15 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
         const before = frames((await read()).hud);
         await sleep(1000);
         out.framesAdvanced = frames((await read()).hud) > before;
+        if (inputEvents?.length) {
+          // Scripted input replays from page load, in order, then one more screenshot shows what it did.
+          for (const c of inputCommands(inputEvents)) {
+            if (c.wait !== undefined) await sleep(c.wait); else await cdp.send(c.method, c.params);
+          }
+          await sleep(300);
+          out.inputCount = inputEvents.length;
+          out.inputScreenshot = Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64");
+        }
         if (afterReady) Object.assign(out, await afterReady({ evalJs, read, sleep }));
       }
     }
@@ -299,7 +352,7 @@ export const NO_GPU_SCRIPT = "Object.defineProperty(Navigator.prototype, 'gpu', 
 const tailOf = (file, n = 40) => { try { return readFileSync(file, "utf8").trimEnd().split(/\r?\n/).slice(-n).join("\n"); } catch { return ""; } };
 
 export function parseArgs(argv) {
-  const o = { dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null };
+  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") o.dir = argv[++i];
@@ -308,10 +361,12 @@ export function parseArgs(argv) {
     else if (a === "--require-adapter") o.requireAdapter = true;
     else if (a === "--all") o.all = true;
     else if (a === "--only") o.only = Number(argv[++i]);
+    else if (a === "--input") o.input = argv[++i] ?? null;
     else o.error = `unknown argument ${a}`;
   }
   if (!o.chrome) o.error ??= "--chrome <path to Chrome> is required";
   if (o.only !== null && !(o.only >= 0)) o.error ??= "--only needs a flag set index";
+  if (argv.includes("--input") && !o.input) o.error ??= "--input needs a JSON file of events";
   return o;
 }
 
@@ -321,6 +376,14 @@ export async function main(argv) {
   const dir = resolve(a.dir), out = resolve(a.out);
   if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
   mkdirSync(out, { recursive: true });
+  let inputEvents = null;
+  if (a.input) {
+    try {
+      inputEvents = JSON.parse(readFileSync(resolve(a.input), "utf8"));
+      if (!Array.isArray(inputEvents)) throw new Error("the file is not a JSON array");
+      inputCommands(inputEvents); // refuse a bad script before any browser starts
+    } catch (e) { console.error(`web-browse: --input ${a.input}: ${e.message}`); return 2; }
+  }
   const server = await serve(dir);
   const url = `http://127.0.0.1:${server.port}/index.html`;
   const attempts = [];
@@ -335,7 +398,7 @@ export async function main(argv) {
       const flags = [...BASE_FLAGS, ...set.flags];
       let r, v;
       try {
-        r = await readPage({ chrome: a.chrome, flags, url, logFile, afterReady: recoveryProbe });
+        r = await readPage({ chrome: a.chrome, flags, url, logFile, afterReady: recoveryProbe, inputEvents });
         v = verdict(r);
       } catch (e) {
         r = null; v = { ok: false, code: "run-error", why: String(e.message ?? e) };
@@ -353,9 +416,12 @@ export async function main(argv) {
         for (const l of entry.chromeLog.split("\n").filter((x) => /gpu|vulkan|webgpu|swiftshader|dawn|angle|adapter/i.test(x)).slice(-6)) console.log(`    chrome ${l.slice(0, 300)}`);
       }
       if (v.ok && !winner) {
-        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState };
+        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs };
         writeFileSync(join(out, "ready.png"), r.screenshot);
         writeFileSync(join(out, "report.json"), `${r.reportText}\n`);
+        // The numbers tools/web-budget.mjs gates on (WEB11).
+        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
+        if (r.inputScreenshot) writeFileSync(join(out, "input.png"), r.inputScreenshot);
         writeFileSync(join(out, "flag-line.txt"), `${a.chrome} ${flags.join(" ")}\n`);
       }
       if (v.ok && !a.all) break; // --all keeps going so every flag set's outcome is on record

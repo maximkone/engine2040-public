@@ -37,7 +37,7 @@ review. This preserves subsystem/quality scope and makes recovery evidence
 testable; it does not certify the current doctor/fix drafts. DOC1 passed
 (drills 5/5 green, re-run 2026-10-05): consented `doctor --fix` repairs are
 allowed, bare `--fix` stays report-only by design. Scoped repairs
-follow `.opencode/commands/sprint.md`.
+(report first, failing package only, one retry) follow `AGENTS.md`.
 
 ## Finish B — dependable desktop engine v1 (M4–M5)
 

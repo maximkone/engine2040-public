@@ -30,6 +30,8 @@ mod imp {
     use rmcp::schemars::JsonSchema;
     use rmcp::serde::{Deserialize, Serialize};
 
+    use crate::canon::valid_name;
+    use crate::spatial_glue::{quat_of_yaw, yaw_of_quat};
     use super::super::brief::{BriefEnvelope, BriefStage};
     use super::super::build_game::{GameError, StageRecord};
     use super::super::mcp::{
@@ -58,7 +60,7 @@ mod imp {
     /// Intent bound in wants per prop (mirrors `scene.place`).
     pub const WANTS_MAX: usize = 16;
     /// Actor-name bound in chars (mirrors the spatial grammar check).
-    pub const NAME_MAX: usize = 64;
+    pub const NAME_MAX: usize = crate::canon::NAME_MAX;
     /// Solve passes over unsolved props (at most one prop settles per pass).
     pub const PASSES_MAX: usize = PROPS_MAX;
     /// Nav tile pitch in cm (mirrors the spatial nav bake).
@@ -106,21 +108,6 @@ mod imp {
 
     fn cm(value: f32) -> i32 {
         (value * 100.0).round() as i32
-    }
-
-    /// Spatial-grammar names: `[a-z0-9_]`, 1..=`NAME_MAX` chars, no leading
-    /// digit. Brief names are validated here so `run()` never flags them.
-    fn valid_name(name: &str) -> bool {
-        if name.is_empty() || name.len() > NAME_MAX {
-            return false;
-        }
-        let mut chars = name.chars();
-        let first = chars.next().unwrap_or('0');
-        if !first.is_ascii_lowercase() && first != '_' {
-            return false;
-        }
-        name.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     }
 
     fn kind_size(kind: &str) -> Option<(f32, f32, f32)> {
@@ -1165,18 +1152,6 @@ mod imp {
         (actors, unsolved)
     }
 
-    fn finding_line(finding: &Finding) -> String {
-        let peer = if finding.b == u32::MAX {
-            "-".to_owned()
-        } else {
-            finding.b.to_string()
-        };
-        format!(
-            "finding {} {} {} {} {}",
-            finding.check, finding.a, peer, finding.severity, finding.pct
-        )
-    }
-
     fn tile_of(x_cm: i32, z_cm: i32) -> (i32, i32) {
         (x_cm.div_euclid(NAV_TILE_CM), z_cm.div_euclid(NAV_TILE_CM))
     }
@@ -1713,7 +1688,7 @@ mod imp {
         if gates_clean(&report) {
             return placed(env, &plan, &actors, &report, repairs_used, solve_calls);
         }
-        let mut findings: Vec<String> = report.findings.iter().map(finding_line).collect();
+        let mut findings: Vec<String> = report.findings.iter().map(Finding::row).collect();
         for id in &report.unsolved {
             if let Some(prop) = plan.props.iter().find(|prop| &prop.id == id) {
                 findings.push(format!("conflict unsolved {} - yellow 0", prop.name));
@@ -1943,18 +1918,6 @@ mod imp {
             }
         }
         hasher.finish()
-    }
-
-    /// Y yaw extracted from a world quaternion.
-    fn yaw_of_quat(q: [f32; 4]) -> f32 {
-        let [x, y, z, w] = q;
-        (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z))
-    }
-
-    /// Pure-Y rotation quaternion for a solved yaw.
-    fn quat_of_yaw(yaw: f32) -> [f32; 4] {
-        let half = 0.5 * yaw;
-        [0.0, half.sin(), 0.0, half.cos()]
     }
 
     /// Sorted-id snapshot of the live document as fixed solver actors: every
@@ -2222,11 +2185,7 @@ mod imp {
         }
 
         fn annotations() -> Option<ToolAnnotations> {
-            let mut annotations = ToolAnnotations::default();
-            annotations.read_only_hint = Some(false);
-            annotations.idempotent_hint = Some(true);
-            annotations.open_world_hint = Some(false);
-            Some(annotations)
+            crate::mcp::write_annotations(true)
         }
     }
 

@@ -15,7 +15,7 @@
 //! instead of clamping so bad callers are loud.
 
 use super::fighter::{Buttons, FighterError, FighterId, FighterInput, ATTACK, BLOCK, DODGE};
-use super::map::{Input, Key};
+use super::map::Key;
 
 /// Count of rebindable actions (see [`BoundAction::ALL`]).
 pub const ACTION_COUNT: usize = 7;
@@ -69,24 +69,6 @@ impl PhysicalButton {
             KIND_MOUSE => Some(Self::Mouse(code)),
             KIND_PAD => Some(Self::Pad(code)),
             _ => None,
-        }
-    }
-
-    /// Convert a [`map::Input`](super::map::Input) frame reading into a button.
-    pub const fn from_input(input: Input) -> Self {
-        match input {
-            Input::Key(k) => Self::Key(k.0),
-            Input::Mouse(b) => Self::Mouse(b),
-            Input::Pad(b) => Self::Pad(b),
-        }
-    }
-
-    /// Convert back to a [`map::Input`](super::map::Input) frame reading.
-    pub const fn to_input(self) -> Input {
-        match self {
-            Self::Key(c) => Input::Key(Key(c)),
-            Self::Mouse(b) => Input::Mouse(b),
-            Self::Pad(b) => Input::Pad(b),
         }
     }
 }

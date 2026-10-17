@@ -86,6 +86,22 @@ pub struct Finding {
     pub severity: &'static str,
 }
 
+impl Finding {
+    /// Brief row `finding <check> <a> <b|-> <severity> <pct>`, no newline;
+    /// single-actor findings render `b` as `-`.
+    pub fn row(&self) -> String {
+        let b = if self.b == u32::MAX {
+            "-".to_owned()
+        } else {
+            self.b.to_string()
+        };
+        format!(
+            "finding {} {} {} {} {}",
+            self.check, self.a, b, self.severity, self.pct
+        )
+    }
+}
+
 /// Full report: frozen-order findings + FNV-1a hash over canonical bytes.
 #[derive(Debug, Clone)]
 pub struct Report {

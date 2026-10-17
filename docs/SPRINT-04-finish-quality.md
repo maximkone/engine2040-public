@@ -107,7 +107,7 @@ finish scoreboard runs every wave.
   p95 200 ms or less at 10x or better median speedup, RSS 2x or less the
   BM25 baseline, else killed with numbers. needs: API1.
   LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] PV6 provider: cancel/timeout timing-flake hardening — cancel <100ms
+- [ ] PV6 provider: cancel/timeout timing-flake hardening — cancel <100ms Progress 2026-10-17: 6c672ba4 cancel and timeout flake hardened (runs 39051091100, 39052718180); left: three consecutive green runs on a loaded box.
   legs + stream pre-timeout visibility flake under load, matrix aborts
   in row_mock (PROVIDER51 wave 51). Tier B. Size S. Owns
   `crates/provider/src/stream.rs` cancel/timeout path + 3 timing
@@ -118,7 +118,7 @@ finish scoreboard runs every wave.
    tests/matrix.rs:824 row_mock cancel_leg, observed 111ms vs 100ms
    budget under package-cache lock contention; lib 133/0 green. NOT
    fixed — same fingerprint (timing under load).
-- [ ] PV7 provider: tool-loop agent harness with budget + transcript — a
+- [x] PV7 provider: tool-loop agent harness with budget + transcript — a Landed 6c672ba4. Run 39051091100.
    bounded perceive-plan-act loop over the door (max steps, max tokens,
    stop on done/stuck), ported as std-only Rust from `0xPlaygrounds/rig`
    agent/adapter shape (license MIT, reimplement only, never the crate

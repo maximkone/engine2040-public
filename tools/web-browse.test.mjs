@@ -232,3 +232,31 @@ test("a real Chrome reads the mock page back, with and without navigator.gpu", {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- scripted input (AIS2) ----
+test("inputCommands maps events to CDP calls and waits, in order", async () => {
+  const { inputCommands } = await import("./web-browse.mjs");
+  const cmds = inputCommands([{ kind: "key", key: "a" }, { kind: "click", x: 10, y: 20 }, { kind: "wait", ms: 50 }, { kind: "key_down", key: "ArrowLeft" }, { kind: "key_up", key: "ArrowLeft" }]);
+  assert.deepEqual(cmds.map((c) => c.wait ?? `${c.method}:${c.params.type}`), [
+    "Input.dispatchKeyEvent:keyDown", "Input.dispatchKeyEvent:keyUp",
+    "Input.dispatchMouseEvent:mouseMoved", "Input.dispatchMouseEvent:mousePressed", "Input.dispatchMouseEvent:mouseReleased",
+    50, "Input.dispatchKeyEvent:rawKeyDown", "Input.dispatchKeyEvent:keyUp",
+  ]);
+  assert.equal(cmds[0].params.code, "KeyA");
+  assert.equal(cmds[0].params.text, "a");
+  assert.equal(cmds[1].params.text, undefined);
+  assert.deepEqual([cmds[3].params.x, cmds[3].params.y, cmds[3].params.button], [10, 20, "left"]);
+});
+
+test("inputCommands refuses what it cannot map", async () => {
+  const { inputCommands } = await import("./web-browse.mjs");
+  assert.throws(() => inputCommands([{ kind: "tap" }]), /unknown input kind/);
+  assert.throws(() => inputCommands([{ kind: "key", key: "NoSuchKey" }]), /unknown key/);
+  assert.throws(() => inputCommands([{ kind: "click", x: 1 }]), /integer x and y/);
+  assert.throws(() => inputCommands([{ kind: "wait", ms: 99999 }]), /0\.\.=2000/);
+});
+
+test("parseArgs takes --input and refuses it without a file", () => {
+  assert.equal(parseArgs(["--chrome", "c", "--input", "e.json"]).input, "e.json");
+  assert.match(parseArgs(["--chrome", "c", "--input"]).error, /--input needs/);
+});

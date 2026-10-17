@@ -55,23 +55,16 @@ fn alloc_peak_zero_baseline() {
 
 #[test]
 fn heap_peak_8fighter_match_same_x2_and_gate() {
-    // Consumer: the 600-tick 8-fighter headless match. Peak is the max
-    // full-run allocation bytes over two runs; the gate is the 10 percent
-    // rule against the recorded baseline file.
+    // Consumer: the 600-tick 8-fighter headless match. Peak is the max live
+    // heap over two runs; the gate is the 10 percent rule against the
+    // recorded baseline file.
     let workload = engine_perf::workloads::ScaledArenaTick::canonical_for(8).expect("8 listed");
-    let first = workload.run_report();
-    let second = workload.run_report();
-    assert_eq!(first.ticks, 600, "headless match runs 600 ticks");
-    assert_eq!(
-        first.hash, second.hash,
-        "8-fighter match hashes identically twice"
-    );
-    assert_eq!(
-        first.alloc_bytes, second.alloc_bytes,
-        "8-fighter match allocates identically twice"
-    );
-    let peak = peak_of(&[first.alloc_bytes, second.alloc_bytes]);
-    assert_eq!(peak, first.alloc_bytes, "peak is the max sample");
+    let first = workload.run_peak_live_bytes();
+    let second = workload.run_peak_live_bytes();
+    assert!(first > 0, "the match holds some heap");
+    assert_eq!(first, second, "8-fighter match peaks identically twice");
+    let peak = peak_of(&[first, second]);
+    assert_eq!(peak, first, "peak is the max sample");
     let csv = heap_peak_csv("arena_tick_8", peak);
     assert!(
         csv.starts_with(HEAP_PEAK_CSV_HEADER),
@@ -110,10 +103,10 @@ use engine_perf::alloc::{measure, peak_assert, subsystem_peak_line};
 fn heap_peak_real_64mib_buffer_in_the_match_window_trips_the_gate() {
     // The row's own case, with a real allocation instead of arithmetic: the
     // 8-fighter match runs in one counted window, then again with a 64 MiB
-    // buffer made inside the same window. The extra shows up in the bytes the
-    // allocator reports, and the 10 percent rule trips on that measured
-    // number. Independent of the recorded baseline file, so it stays green
-    // while the match itself drifts.
+    // buffer held across the match inside the same window. The extra shows up
+    // in the live peak the allocator reports, and the 10 percent rule trips
+    // on that measured number. Independent of the recorded baseline file, so
+    // it stays green while the match itself drifts.
     const EXTRA: u64 = 64 << 20;
     let workload = engine_perf::workloads::ScaledArenaTick::canonical_for(8).expect("8 listed");
     // Warm-up outside any window, so a lazily built table is not charged to
@@ -124,27 +117,28 @@ fn heap_peak_real_64mib_buffer_in_the_match_window_trips_the_gate() {
     let (again_hash, again) = measure(|| workload.run_hash());
     assert_eq!(hash, again_hash, "the match hashes the same twice");
     assert_eq!(plain, again, "the match allocates the same twice");
-    assert!(plain.bytes > 0, "the match allocates something to gate");
+    assert!(plain.peak_live_bytes > 0, "the match holds some heap to gate");
     let (fat_hash, fat) = measure(|| {
+        let buffer = vec![1u8; 64 << 20];
         let hash = workload.run_hash();
-        std::hint::black_box(vec![1u8; 64 << 20]);
+        std::hint::black_box(&buffer);
         hash
     });
     assert_eq!(fat_hash, hash, "the extra buffer does not touch the match");
     assert_eq!(fat.bytes, plain.bytes + EXTRA, "exactly 64 MiB more");
     assert_eq!(fat.count, plain.count + 1, "one more allocation");
-    let peak = PeakSnapshot::of(&[plain.bytes, fat.bytes]);
-    assert_eq!(peak.peak_bytes, fat.bytes, "the fat run is the peak");
-    assert!(allows(plain.bytes, plain.bytes), "plain run passes itself");
-    assert!(
-        !allows(peak.peak_bytes, plain.bytes),
-        "+64 MiB trips the 10 percent rule"
-    );
-    let err = peak_assert(peak.peak_bytes, plain.bytes).expect_err("trips");
     assert_eq!(
-        err,
-        peak_assert(peak.peak_bytes, plain.bytes).expect_err("x2")
+        fat.peak_live_bytes,
+        plain.peak_live_bytes + EXTRA,
+        "the held buffer lifts the live peak by exactly 64 MiB"
     );
+    let peak = PeakSnapshot::of(&[plain.peak_live_bytes, fat.peak_live_bytes]);
+    assert_eq!(peak.peak_bytes, fat.peak_live_bytes, "the fat run is the peak");
+    let base = plain.peak_live_bytes;
+    assert!(allows(base, base), "plain run passes itself");
+    assert!(!allows(peak.peak_bytes, base), "+64 MiB trips the 10 percent rule");
+    let err = peak_assert(peak.peak_bytes, base).expect_err("trips");
+    assert_eq!(err, peak_assert(peak.peak_bytes, base).expect_err("x2"));
     assert!(err.to_string().contains("FAIL"), "{err}");
 }
 

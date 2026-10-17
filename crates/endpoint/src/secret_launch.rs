@@ -662,22 +662,6 @@ pub fn audit_for(spec: &LaunchSpec, launch: u64) -> AuditRecord {
     }
 }
 
-fn escape_json_into(out: &mut String, text: &str) {
-    for next in text.chars() {
-        match next {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            next if (next as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", next as u32));
-            }
-            next => out.push(next),
-        }
-    }
-}
-
 /// Render one audit record as a single JSON line with key names only.
 ///
 /// Units: one JSON line per call; key names only, never secret values or the
@@ -702,14 +686,14 @@ pub fn audit_json(record: &AuditRecord) -> String {
     let mut out = String::from("{\"launch\":");
     out.push_str(&record.launch.to_string());
     out.push_str(",\"program\":\"");
-    escape_json_into(&mut out, &record.program);
+    engine_core::json::escape_into(&mut out, &record.program);
     out.push_str("\",\"keys\":[");
     for (index, key) in record.keys.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
         out.push('"');
-        escape_json_into(&mut out, key);
+        engine_core::json::escape_into(&mut out, key);
         out.push('"');
     }
     out.push_str("]}");

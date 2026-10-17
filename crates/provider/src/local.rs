@@ -406,6 +406,41 @@ mod tests {
         assert!(!outcome.mutated);
     }
 
+    /// The adapter retries a server fault inside the request deadline and
+    /// answers a refused shape once; a spend cap with no known cost refuses
+    /// before any dial.
+    #[test]
+    fn retries_follow_the_status_map_through_the_adapter() {
+        let ok = crate::stub::chat_ok(
+            r#"{"actions": [{"noop": true}], "diagnostics": ["retry"]}"#,
+            None,
+        );
+        let flaky = StubServer::spawn_script(vec![(503, String::new()), (200, ok.clone())]);
+        let (policy, caps) = (policy(), ProviderCapabilities::local_http());
+        let mut adapter = adapter_for(&flaky.url(), vec![MockStep::Succeed]);
+        let served = adapter.call(&request(31, 3), &policy, &caps);
+        assert!(served.result.is_ok(), "the retry reached the 200");
+        assert_eq!(flaky.hits(), 2);
+
+        let refused = StubServer::spawn_raw(404, String::new());
+        let mut adapter = adapter_for(&refused.url(), vec![MockStep::Succeed]);
+        let outcome = adapter.call(&request(32, 3), &policy, &caps);
+        assert_eq!(outcome.result, Err(AiError::UnsupportedCapability));
+        assert_eq!(refused.hits(), 1, "a refused shape is asked once");
+
+        let idle = StubServer::spawn_completion(ok);
+        let mut capped = policy.clone();
+        capped.spend_limit = Some(100);
+        let mut adapter = adapter_for(&idle.url(), vec![MockStep::Succeed]);
+        let outcome = adapter.call(&request(33, 3), &capped, &caps);
+        assert_eq!(
+            outcome.result,
+            Err(AiError::QuotaAuth),
+            "unknown cost under a cap"
+        );
+        assert_eq!(idle.hits(), 0, "refused before any dial");
+    }
+
     #[test]
     fn non_loopback_url_is_rejected_before_any_request() {
         let endpoint = transport::parse_endpoint("http://203.0.113.7:8080/v1/chat/completions")

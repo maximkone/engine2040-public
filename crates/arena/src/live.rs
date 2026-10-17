@@ -38,8 +38,8 @@ use crate::world::MatchWorld;
 #[cfg(not(feature = "sim"))]
 use crate::MatchSnapshot;
 use crate::{
-    ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, Sim, TickBreaks, TickEvents,
-    MAX_SLOTS,
+    ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, MatchSpec, Sim, TickBreaks,
+    TickEvents, MAX_SLOTS,
 };
 
 /// Dataset recorder leg: pre-step poses, fight state and damage counters
@@ -217,6 +217,14 @@ impl LiveMatch {
         })
     }
 
+    /// Fresh match at tick 0 from one [`MatchSpec`]: its config, rules and
+    /// world. The one constructor the window, the net server and the net
+    /// client share; [`MatchSpec::v1`] gives [`LiveMatch::new`] byte for byte.
+    #[must_use]
+    pub fn from_spec(spec: &MatchSpec) -> Option<Self> {
+        Self::with_rules_world(&spec.config, spec.rules, spec.world.clone())
+    }
+
     /// Match configuration.
     #[must_use]
     pub const fn config(&self) -> ArenaConfig {
@@ -390,9 +398,11 @@ impl LiveMatch {
     /// Non-consuming snapshot of the running match at its current tick: the
     /// same bytes [`run_prefix`](crate::run_prefix) would capture there,
     /// taken from the held sim without disturbing it. `None` when the match
-    /// runs a non-empty obstacle world: [`MatchSnapshot`] carries no world,
-    /// so a resume would silently drop it (the world digest rides every
-    /// checkpoint).
+    /// runs a non-empty obstacle world or rules other than v1:
+    /// [`MatchSnapshot`] carries neither the world nor the v2 balance,
+    /// stagger and limb state, so a resume would silently drop them (both
+    /// ride every checkpoint). Callers rebuild such a match from its
+    /// [`MatchSpec`] and the tape.
     ///
     /// Pair with [`LiveMatch::from_snapshot`] to continue a second leg from
     /// the same tick while the original keeps stepping. Consumer: the net
@@ -400,7 +410,7 @@ impl LiveMatch {
     #[cfg(not(feature = "sim"))]
     #[must_use]
     pub fn snapshot(&self) -> Option<MatchSnapshot> {
-        if !self.sim.world.is_empty() {
+        if !self.sim.world.is_empty() || self.sim.rules != ArenaRules::V1 {
             return None;
         }
         Some(MatchSnapshot {
@@ -833,6 +843,11 @@ mod tests {
         let armed =
             LiveMatch::with_rules_world(&config, ArenaRules::V1, world).expect("world match");
         assert!(armed.snapshot().is_none(), "the world would be dropped");
+        // A rules-v2 match refuses too: the snapshot has no balance state.
+        let duel = MatchSpec::duel(config, MatchWorld::empty())
+            .live()
+            .expect("duel match");
+        assert!(duel.snapshot().is_none(), "v2 state would be dropped");
     }
 
     #[test]

@@ -1097,11 +1097,7 @@ impl ToolBase for TxApplyTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        let mut annotations = ToolAnnotations::default();
-        annotations.read_only_hint = Some(false);
-        annotations.idempotent_hint = Some(true);
-        annotations.open_world_hint = Some(false);
-        Some(annotations)
+        write_annotations(true)
     }
 }
 
@@ -1132,10 +1128,7 @@ impl ToolBase for TxUndoTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        let mut annotations = ToolAnnotations::default();
-        annotations.read_only_hint = Some(false);
-        annotations.open_world_hint = Some(false);
-        Some(annotations)
+        write_annotations(false)
     }
 }
 
@@ -1547,8 +1540,7 @@ impl McpServer {
     /// provides the async runtime (tokio): `server.run_stdio().await`.
     pub async fn run_stdio(self) -> Result<String, String> {
         use rmcp::{transport::io::stdio, ServiceExt};
-        let running = self
-            .serve(stdio())
+        let running = Box::pin(self.serve(stdio()))
             .await
             .map_err(|error| format!("serve failed: {error:?}"))?;
         let reason = running
@@ -1638,6 +1630,25 @@ impl McpServer {
         info.protocol_version = negotiate_version(requested)?;
         Ok(info)
     }
+}
+
+/// Annotations for read-only MCP tools: read-only on, open world off.
+/// Owner of the pair every read-only tool's `annotations()` returns.
+pub(crate) fn read_only_annotations() -> Option<ToolAnnotations> {
+    let mut annotations = ToolAnnotations::default();
+    annotations.read_only_hint = Some(true);
+    annotations.open_world_hint = Some(false);
+    Some(annotations)
+}
+
+/// Annotations for state-changing MCP tools: read-only off, open world off,
+/// idempotent hint set only when a repeated call is a no-op.
+pub(crate) fn write_annotations(idempotent: bool) -> Option<ToolAnnotations> {
+    let mut annotations = ToolAnnotations::default();
+    annotations.read_only_hint = Some(false);
+    annotations.idempotent_hint = idempotent.then_some(true);
+    annotations.open_world_hint = Some(false);
+    Some(annotations)
 }
 
 #[cfg(test)]
@@ -2909,13 +2920,4 @@ mod tests {
             assert_eq!(back.data, Some(culprit));
         }
     }
-}
-
-/// Annotations for read-only MCP tools: read-only on, open world off.
-/// Owner of the pair every read-only tool's `annotations()` returns.
-pub(crate) fn read_only_annotations() -> Option<ToolAnnotations> {
-    let mut annotations = ToolAnnotations::default();
-    annotations.read_only_hint = Some(true);
-    annotations.open_world_hint = Some(false);
-    Some(annotations)
 }

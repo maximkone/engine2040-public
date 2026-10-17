@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::material::{Material, GROUND};
 use engine_core::Fnv64;
 
 /// Ticks per second; every rate below divides by this with truncation.
@@ -106,20 +107,43 @@ pub struct Config {
     pub max_wish_mm_s: i32,
     /// Jump takeoff speed, millimeters per second.
     pub jump_v_mm_s: i32,
+    /// Grip of the ground underfoot, thousandths: ground acceleration scales with it against
+    /// the [`GROUND`] row, so the default ground changes nothing.
+    pub friction_pm: i32,
 }
 
-impl Default for Config {
-    /// Default tune: 0.5 m steps, 45-degree slopes, Tnua-style timers.
-    fn default() -> Self {
+impl Config {
+    /// The tune for a walker standing on `ground`: its step height and its grip come straight
+    /// from the material table, the one source `engine-physfx` reads its contact friction from.
+    pub fn on(ground: Material) -> Self {
+        let row = ground.props();
         Self {
-            step_height_mm: STEP_HEIGHT_MM,
+            step_height_mm: i32::from(row.step_mm),
             snap_mm: SNAP_MM,
             max_slope_grade_q: MAX_SLOPE_GRADE_Q,
             accel_ground_mm_s2: ACCEL_GROUND_MM_S2,
             accel_air_mm_s2: ACCEL_AIR_MM_S2,
             max_wish_mm_s: MAX_WISH_MM_S,
             jump_v_mm_s: JUMP_V_MM_S,
+            friction_pm: i32::from(row.friction_pm),
         }
+    }
+
+    /// Horizontal acceleration while grounded, millimeters per second squared: the base lane
+    /// scaled by this ground's grip over the [`GROUND`] row's (integers, truncating).
+    pub fn grip_accel_mm_s2(&self) -> i32 {
+        let reference = i64::from(GROUND.props().friction_pm);
+        let scaled = i64::from(self.accel_ground_mm_s2.max(0)) * i64::from(self.friction_pm.max(0))
+            / reference;
+        i32::try_from(scaled).unwrap_or(i32::MAX)
+    }
+}
+
+impl Default for Config {
+    /// Default tune: the [`GROUND`] row (0.5 m steps, the base grip), 45-degree slopes,
+    /// Tnua-style timers.
+    fn default() -> Self {
+        Self::on(GROUND)
     }
 }
 
@@ -614,7 +638,7 @@ fn steer(walker: &mut Walker, wish_mm_s: [i32; 2], cfg: &Config) {
         wish_mm_s[1].clamp(-clamp_wish, clamp_wish),
     ];
     let accel = if walker.grounded {
-        cfg.accel_ground_mm_s2.max(0)
+        cfg.grip_accel_mm_s2()
     } else {
         cfg.accel_air_mm_s2.max(0)
     };
@@ -931,6 +955,67 @@ mod tests {
         assert!(w.pos_mm[0] > 5_000, "walker stuck at {:?}", w.pos_mm);
         assert_eq!(w.pos_mm[1], 450);
         assert!(w.grounded);
+    }
+
+    #[test]
+    fn material_table_default_ground_is_todays_constants() {
+        // The default ground is the table's GROUND row, and that row reproduces the legacy
+        // constants exactly: nothing a hashed run reads moved.
+        let legacy = Config {
+            step_height_mm: STEP_HEIGHT_MM,
+            snap_mm: SNAP_MM,
+            max_slope_grade_q: MAX_SLOPE_GRADE_Q,
+            accel_ground_mm_s2: ACCEL_GROUND_MM_S2,
+            accel_air_mm_s2: ACCEL_AIR_MM_S2,
+            max_wish_mm_s: MAX_WISH_MM_S,
+            jump_v_mm_s: JUMP_V_MM_S,
+            friction_pm: 800,
+        };
+        assert_eq!(Config::default(), legacy);
+        assert_eq!(Config::default().grip_accel_mm_s2(), ACCEL_GROUND_MM_S2);
+        assert_eq!(Config::on(GROUND), legacy);
+    }
+
+    #[test]
+    fn material_table_grip_sets_how_fast_a_walker_gets_going() {
+        let blocks = slab();
+        let world = world_with(&blocks, &[], &[]);
+        let first_tick_speed = |ground: Material| {
+            let cfg = Config::on(ground);
+            assert_eq!(cfg.friction_pm, i32::from(ground.props().friction_pm));
+            // One idle tick lands the spawned walker; the next tick is a grounded one.
+            let mut w = Walker::spawn(7, [0, 0, 0]);
+            step_walker(&mut w, &TickInput::idle(), &world, &cfg);
+            assert!(w.grounded, "{ground:?}");
+            let input = TickInput {
+                wish_mm_s: [3_000, 0],
+                jump_pressed: false,
+            };
+            step_walker(&mut w, &input, &world, &cfg);
+            w.vel_mm_s[0]
+        };
+        // One tick of the base 60000 mm/s^2 is 1000 mm/s on the 800 row; the others scale.
+        assert_eq!(first_tick_speed(Material::Stone), 1_000);
+        assert_eq!(first_tick_speed(Material::Metal), 500);
+        assert_eq!(first_tick_speed(Material::Sand), 1_250);
+        let mut by_grip: Vec<(i32, i32)> = Material::ALL
+            .iter()
+            .map(|m| (i32::from(m.props().friction_pm), first_tick_speed(*m)))
+            .collect();
+        by_grip.sort_unstable();
+        assert!(by_grip.windows(2).all(|p| p[0].1 <= p[1].1), "{by_grip:?}");
+    }
+
+    #[test]
+    fn material_table_soft_ground_gives_a_lower_step() {
+        let mut blocks = slab();
+        blocks.push(Block::new([2_000, 0, -2_000], [12_000, 450, 2_000]));
+        let world = world_with(&blocks, &[], &[]);
+        let on_stone = walk_forward(&world, &Config::on(Material::Stone), [0, 0, 0], 160);
+        assert_eq!(on_stone.pos_mm[1], 450, "stone steps a 450 mm rise");
+        let on_sand = walk_forward(&world, &Config::on(Material::Sand), [0, 0, 0], 160);
+        assert_eq!(on_sand.pos_mm[1], 0, "sand gives way under a 450 mm rise");
+        assert!(on_sand.pos_mm[0] < 2_000, "{:?}", on_sand.pos_mm);
     }
 
     #[test]

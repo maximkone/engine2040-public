@@ -10,18 +10,26 @@
 //! Either way the shell then runs the golden tape and the cut corpus in the wasm module and
 //! prints one `golden ... OK` (or `MISMATCH`) line: the engine runs here, not only the GPU.
 //!
-//! The pure parts ([`anim`], [`golden`], [`limits`], [`recovery`], [`report`]) build and
+//! Input and audio (WEB7): [`input`] maps keyboard, mouse with pointer lock and the Gamepad API onto
+//! `engine-input` records, [`audio`] decides when the WebAudio context may start; `browser` (wasm only)
+//! wires both to the page and prints `input: kb=.. mouse=.. pad=..` and `audio: state=..`.
+//!
+//! The pure parts ([`anim`], [`audio`], [`golden`], [`input`], [`limits`], [`recovery`], [`report`]) build and
 //! test on every target. The browser glue (`shell`) exists on `wasm32` only, so the native
 //! workspace builds this crate as a library with no web dependencies. It depends on
 //! `engine-proof` (std-only) for the golden check and on no render code yet: it must build
 //! before the render crate itself does for the browser.
 
 pub mod anim;
+pub mod audio;
 pub mod golden;
+pub mod input;
 pub mod limits;
 pub mod recovery;
 pub mod report;
 
+#[cfg(target_arch = "wasm32")]
+mod browser;
 #[cfg(target_arch = "wasm32")]
 mod shell;
 

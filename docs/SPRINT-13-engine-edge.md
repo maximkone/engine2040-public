@@ -122,20 +122,20 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   `crates/provider/src/ladder.rs`. Accept: every backend reports its rung;
   malformed output never applies; rung drops are logged events. needs:
   PV5, AX1.
-- [ ] OPT26 provider: scorecard router — per task class (bark, dialogue,
+- [x] OPT26 provider: scorecard router — per task class (bark, dialogue, Landed aa644693. Run 39052718180; router has no caller beyond Ask::for_request yet.
   level brief, encounter, review) pick a model from the eval scorecard
   (quality, p95 latency, cost) under budget caps, falling back local →
   remote → scripted; every decision recorded. Tier B. Size M. Owns
   `crates/provider/src/router.rs`. Accept: a seeded outage of the top
   model reroutes within the deadline; decisions replay from the record;
   a cost cap refuses loudly. needs: OPT24, EV1.
-- [ ] OPT27 provider: inference arbiter — local models and the game
+- [ ] OPT27 provider: inference arbiter — local models and the game Progress 2026-10-17: provider side done (arbiter, serving adapter); left: feed live frame p95 and read_vram, window-build budget check on a GPU.
   share one 6 GB GPU: under frame pressure local inference moves to CPU,
   defers or routes remote; VRAM use reported; the tick never waits.
   Tier B. Size M. Owns `crates/provider/src/arbiter.rs`. Accept: with a
   local model loaded the window build holds the P6 frame budget; requests
   degrade with typed notices. needs: PV2, RA4.
-- [ ] OPT28 provider: prompts as versioned assets — every prompt and
+- [x] OPT28 provider: prompts as versioned assets — every prompt and Landed aa644693. Run 39052718180.
   brief template is a content-addressed asset with version, provenance
   and an eval set; an edit re-runs its evals and may not lower the score.
   Tier B. Size S. Owns `crates/provider/src/prompt.rs`. Accept: a seeded

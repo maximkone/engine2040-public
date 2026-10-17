@@ -1,3 +1,4 @@
+use crate::project;
 use engine_proof::{record, replay, Config, Input, Tape};
 use std::ffi::OsString;
 use std::fmt;
@@ -30,7 +31,7 @@ fn flag_bit(flag: &str) -> Option<u16> {
     }
 }
 
-const HELP: &str = "engine2040 deterministic proof
+pub(crate) const HELP: &str = "engine2040 deterministic proof
   --seed <u64>                Initialization seed (default 2040)
   --ticks <1..100000>          Fixed 60 Hz steps (default 600)
   --input <tick:body:vx:vy>    Repeatable velocity assignment, before zero-based tick
@@ -42,18 +43,29 @@ const HELP: &str = "engine2040 deterministic proof
   --backend <null>            Supported proof backend; others fail explicitly
   --help                     Show this help
 Replay owns its seed/ticks/inputs and cannot be combined with record or overrides.
-This fixture covers 2D ECS/physics, not GPU images or a complete game snapshot.";
+This fixture covers 2D ECS/physics, not GPU images or a complete game snapshot.
 
+Game projects (a directory with a game.toml; templates: arena-duel, siege):
+  new <template> <dir>        Create a project from a template; never overwrites a non-empty dir
+  run --headless [--ticks <1..100000>] [--manifest <path>]
+                             Run the project's seeded proof headless and print its receipt
+  build --target <windows|web> [--manifest <path>]
+                             Build the game for one target and print where it is
+--manifest defaults to ./game.toml.";
+
+#[derive(Debug)]
 pub enum Error {
     Usage(String),
     Runtime(Box<dyn std::error::Error>),
+    /// A project verb (`new`, `run`, `build`) could not finish; the message says what to fix.
+    Project(String),
 }
 
 impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Usage(_) => 2,
-            Self::Runtime(_) => 1,
+            Self::Runtime(_) | Self::Project(_) => 1,
         }
     }
 }
@@ -63,7 +75,14 @@ impl fmt::Display for Error {
         match self {
             Self::Usage(message) => write!(f, "argument error: {message}; use --help"),
             Self::Runtime(error) => write!(f, "proof failed: {error}"),
+            Self::Project(message) => f.write_str(message),
         }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::Project(format!("cannot write output: {error}"))
     }
 }
 
@@ -78,7 +97,7 @@ struct Options {
     help: bool,
 }
 
-fn usage(message: impl Into<String>) -> Error {
+pub(crate) fn usage(message: impl Into<String>) -> Error {
     Error::Usage(message.into())
 }
 
@@ -243,22 +262,50 @@ fn execute(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             tape.config.seed, tape.config.ticks, tape.inputs.len(), last.legacy, last.state
         );
     } else {
-        println!("engine2040 headless proof:");
-        println!(
-            "  ticks={} final_hash={:016x}",
-            tape.config.ticks, last.legacy
-        );
-        println!(
-            "  seed={} inputs={} state_hash={:016x} backend=null mode={mode} verified={verified}",
-            tape.config.seed,
-            tape.inputs.len(),
-            last.state
-        );
+        write_text_receipt(&mut std::io::stdout(), &tape, mode, verified)?;
     }
     Ok(())
 }
 
+/// The three text receipt lines of a finished tape. The golden recorder and `run --headless`
+/// both print through here, so a project run and a golden run read the same.
+pub(crate) fn write_text_receipt(
+    out: &mut dyn Write,
+    tape: &Tape,
+    mode: &str,
+    verified: bool,
+) -> std::io::Result<()> {
+    let Some(last) = tape.checkpoints.last() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "tape has no checkpoint",
+        ));
+    };
+    writeln!(out, "engine2040 headless proof:")?;
+    writeln!(
+        out,
+        "  ticks={} final_hash={:016x}",
+        tape.config.ticks, last.legacy
+    )?;
+    writeln!(
+        out,
+        "  seed={} inputs={} state_hash={:016x} backend=null mode={mode} verified={verified}",
+        tape.config.seed,
+        tape.inputs.len(),
+        last.state
+    )
+}
+
 pub fn run(args: impl Iterator<Item = OsString>) -> Result<(), Error> {
+    let mut args = args.peekable();
+    let verb = args
+        .peek()
+        .and_then(|word| word.to_str())
+        .and_then(project::Verb::from_word);
+    if let Some(verb) = verb {
+        args.next();
+        return project::execute(verb, args, &mut std::io::stdout());
+    }
     let options = parse(args)?;
     if options.help {
         println!("{HELP}");

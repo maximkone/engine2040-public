@@ -36,6 +36,18 @@ pub const KEY_RESUME: &str = "resume";
 pub const KEY_QUIT_TO_MAIN: &str = "quit-to-main";
 /// Menu key for the back label.
 pub const KEY_BACK: &str = "back";
+/// Menu key for the master volume row.
+pub const KEY_VOLUME_MASTER: &str = "volume-master";
+/// Menu key for the music volume row.
+pub const KEY_VOLUME_MUSIC: &str = "volume-music";
+/// Menu key for the effects volume row.
+pub const KEY_VOLUME_EFFECTS: &str = "volume-effects";
+/// Menu key for the graphics quality row.
+pub const KEY_QUALITY: &str = "quality";
+/// Menu key for the render scale row.
+pub const KEY_RENDER_SCALE: &str = "render-scale";
+/// Menu key for the vsync row.
+pub const KEY_VSYNC: &str = "vsync";
 /// Static lookup with en fallback; unknown keys return the key. Pure, no allocation.
 #[must_use]
 pub fn lookup(key: &str, locale: LocaleId) -> &str {
@@ -46,6 +58,12 @@ pub fn lookup(key: &str, locale: LocaleId) -> &str {
         "resume" => "Resume",
         "quit-to-main" => "Quit to Main",
         "back" => "Back",
+        "volume-master" => "Master Volume",
+        "volume-music" => "Music Volume",
+        "volume-effects" => "Effects Volume",
+        "quality" => "Quality",
+        "render-scale" => "Render Scale",
+        "vsync" => "VSync",
         _ => return key,
     };
     match locale {
@@ -57,6 +75,12 @@ pub fn lookup(key: &str, locale: LocaleId) -> &str {
             "resume" => "Fortsetzen",
             "quit-to-main" => "Zum Hauptmenue",
             "back" => "Zurueck",
+            "volume-master" => "Gesamtlautstaerke",
+            "volume-music" => "Musiklautstaerke",
+            "volume-effects" => "Effektlautstaerke",
+            "quality" => "Qualitaet",
+            "render-scale" => "Renderaufloesung",
+            "vsync" => "VSync",
             _ => en,
         },
     }

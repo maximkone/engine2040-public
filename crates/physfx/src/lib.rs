@@ -29,6 +29,9 @@
 //! - A `Blast` (integers, as the sim holds it) shoves every body inside its radius straight
 //!   away from the center, weaker with distance. `spawn_thrown` flies an arrow or a thrown
 //!   object along the drag-free arc that reaches the authority's hit point on the hit tick.
+//!   An `Impact` (the hit itself, integers) shoves the bodies around the hit point along the
+//!   projectile's heading with a real impulse, so heavy bodies move less. Blasts and impacts
+//!   shove only the nearest `Caps::blast_bodies` and `Caps::impact_bodies` bodies of the tier.
 //! - Bodies sleep. A sleeping body costs no solver work and reads back the same transform every
 //!   frame.
 //! - Bad input (NaN, infinity, out of range) is refused with a typed `Error` before anything
@@ -68,7 +71,7 @@ pub use fx::PhysFx;
 #[cfg(feature = "rapier")]
 pub use rig::Rig;
 #[cfg(feature = "rapier")]
-pub use types::{Batch, Blast, Flight, Key, Placed, Shard, Stats, Transform};
+pub use types::{Batch, Blast, Flight, Impact, Key, Placed, Shard, Stats, Transform};
 
 #[cfg(all(test, feature = "rapier"))]
 mod tests;

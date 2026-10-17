@@ -1,4 +1,4 @@
-// golden-matrix.mjs - compare input/checkpoint tapes, corpus rows and ragdoll rows across machines, no cargo.
+// golden-matrix.mjs - compare input/checkpoint tapes, corpus rows, ragdoll rows and arena rows across machines, no cargo.
 // Reads tapes from `engine2040 --seed <s> --ticks <n> --record <path>`:
 // 8 bytes magic `E2040RP\0`, u16 format (1), u16 fixture (1), u64 seed,
 // u32 ticks, u32 input count, then 16 bytes per input (u32 tick, u32 body,
@@ -311,12 +311,93 @@ export function formatRagdoll(entries, results) {
   lines.push(results.every(function (r) { return r.equal; }) ? 'RAGDOLL RESULT PASS' : 'RAGDOLL RESULT FAIL');
   return lines.join('\n');
 }
-const USAGE = 'usage: node tools/golden-matrix.mjs <a.e2040> <b.e2040> [c.e2040 ...] [--rows <a.txt> <b.txt> [c.txt ...]] [--ragdoll <a.txt> <b.txt> [c.txt ...]]';
-const GROUP_FLAGS = { '--rows': 'rows', '--ragdoll': 'ragdoll' };
-// Tape files first, then the corpus row files after `--rows` and the ragdoll row files after
-// `--ragdoll` (either order); each group needs two or more files.
+// Arena rows: what `arena_line` prints on one machine. Line one is
+// `<host> arena=<16hex> ticks=<n> fighters=<n> spec=<16hex> world=<16hex> hits=<n> blocks=<n>
+// parries=<n> dodges=<n> knockdowns=<n> breaks=<n>`, then one line per tick, counted from 0:
+// `<host> tick=<t> hash=<16hex>`, the checkpoint hash of the real rules-v2 kit match (DSN2).
+export function parseArena(text) {
+  const lines = String(text).replace(/^\uFEFF/, '').split(/\r?\n/).filter(function (l) { return l.length > 0; });
+  if (lines.length < 2) {
+    throw new Error('not an arena row: want a summary line and a line per tick, got ' + lines.length + ' lines');
+  }
+  const sum = /^(\S+) arena=([0-9a-f]{16}) ticks=(\d+) fighters=(\d+) spec=([0-9a-f]{16}) world=([0-9a-f]{16}) hits=(\d+) blocks=(\d+) parries=(\d+) dodges=(\d+) knockdowns=(\d+) breaks=(\d+)$/.exec(lines[0]);
+  if (!sum) {
+    throw new Error('not an arena row: bad summary line "' + lines[0] + '"');
+  }
+  const host = sum[1];
+  const ticks = Number(sum[3]);
+  if (!(ticks >= 1)) {
+    throw new Error('not an arena row: ticks must be at least 1, got ' + sum[3]);
+  }
+  if (lines.length !== 1 + ticks) {
+    throw new Error('not an arena row: ticks=' + ticks + ' but ' + (lines.length - 1) + ' tick lines');
+  }
+  const hashes = [];
+  for (let t = 0; t < ticks; t += 1) {
+    const m = /^(\S+) tick=(\d+) hash=([0-9a-f]{16})$/.exec(lines[t + 1]);
+    if (!m) {
+      throw new Error('not an arena row: bad tick line "' + lines[t + 1] + '"');
+    }
+    if (m[1] !== host) {
+      throw new Error('not an arena row: host ' + host + ' on the summary line but ' + m[1] + ' on tick line ' + t);
+    }
+    if (Number(m[2]) !== t) {
+      throw new Error('not an arena row: tick line ' + t + ' says tick=' + m[2]);
+    }
+    hashes.push(BigInt('0x' + m[3]));
+  }
+  const events = { hits: Number(sum[7]), blocks: Number(sum[8]), parries: Number(sum[9]), dodges: Number(sum[10]), knockdowns: Number(sum[11]), breaks: Number(sum[12]) };
+  return { host: host, digest: BigInt('0x' + sum[2]), ticks: ticks, fighters: Number(sum[4]), spec: BigInt('0x' + sum[5]), world: BigInt('0x' + sum[6]), events: events, hashes: hashes };
+}
+// The match identity first (rows of two different matches are not comparable), then the tick
+// hashes (they name the first tick), then the digest over them.
+export function compareArena(base, other) {
+  if (base.ticks !== other.ticks || base.fighters !== other.fighters) {
+    return { equal: false, comparable: false, firstTick: null, cause: null, note: 'arena shape differs: ticks ' + base.ticks + '/' + other.ticks + ' fighters ' + base.fighters + '/' + other.fighters };
+  }
+  if (base.spec !== other.spec || base.world !== other.world) {
+    return { equal: false, comparable: false, firstTick: null, cause: null, note: 'arena match differs: spec ' + hex16(base.spec) + '/' + hex16(other.spec) + ' world ' + hex16(base.world) + '/' + hex16(other.world) };
+  }
+  for (let t = 0; t < base.ticks; t += 1) {
+    if (base.hashes[t] !== other.hashes[t]) {
+      const cause = classifyCause(base.hashes[t], other.hashes[t]);
+      const after = t === 0 ? 'the start state differs' : t + ' ticks matched';
+      return { equal: false, comparable: true, firstTick: t, cause: cause, note: 'first bad tick ' + t + ' (' + after + ') [cause=' + cause + ']: bisect that tick of the rules-v2 kit match for libm calls, fused multiply-add, or an order that depends on the machine' };
+    }
+  }
+  if (base.digest !== other.digest) {
+    return { equal: false, comparable: true, firstTick: null, cause: null, note: 'every tick hash matches but the arena digest differs: ' + hex16(base.digest) + ' vs ' + hex16(other.digest) };
+  }
+  return { equal: true, comparable: true, firstTick: null, cause: null, note: '' };
+}
+export function formatArena(entries, results) {
+  const lines = [];
+  lines.push('golden-matrix: ' + entries.length + ' arena rows');
+  for (const e of entries) {
+    const ev = e.row.events;
+    lines.push(e.name + ' host=' + e.row.host + ' arena=' + hex16(e.row.digest) + ' ticks=' + e.row.ticks + ' fighters=' + e.row.fighters + ' spec=' + hex16(e.row.spec) + ' world=' + hex16(e.row.world) + ' hits=' + ev.hits + ' blocks=' + ev.blocks + ' parries=' + ev.parries + ' dodges=' + ev.dodges + ' knockdowns=' + ev.knockdowns + ' breaks=' + ev.breaks);
+  }
+  const first = entries.length > 0 ? entries[0].name : '';
+  for (let i = 1; i < entries.length; i += 1) {
+    const r = results[i - 1];
+    const name = entries[i].name;
+    if (!r.comparable) {
+      lines.push('SKIP ' + name + ': ' + r.note);
+    } else if (r.equal) {
+      lines.push('MATCH ' + name + ' vs ' + first);
+    } else {
+      lines.push('DIVERGE ' + name + ' vs ' + first + ' (' + entries[i].row.host + ' vs ' + entries[0].row.host + '): ' + r.note);
+    }
+  }
+  lines.push(results.every(function (r) { return r.equal; }) ? 'ARENA RESULT PASS' : 'ARENA RESULT FAIL');
+  return lines.join('\n');
+}
+const USAGE = 'usage: node tools/golden-matrix.mjs <a.e2040> <b.e2040> [c.e2040 ...] [--rows <a.txt> <b.txt> [c.txt ...]] [--ragdoll <a.txt> <b.txt> [c.txt ...]] [--arena <a.txt> <b.txt> [c.txt ...]]';
+const GROUP_FLAGS = { '--rows': 'rows', '--ragdoll': 'ragdoll', '--arena': 'arena' };
+// Tape files first, then the corpus row files after `--rows`, the ragdoll row files after
+// `--ragdoll` and the arena row files after `--arena` (any order); each group needs two or more files.
 export function parseArgs(argv) {
-  const groups = { tapes: [], rows: [], ragdoll: [] };
+  const groups = { tapes: [], rows: [], ragdoll: [], arena: [] };
   const seen = new Set();
   let current = 'tapes';
   for (const a of argv) {
@@ -326,37 +407,38 @@ export function parseArgs(argv) {
     }
     const group = GROUP_FLAGS[a];
     if (group === undefined) {
-      return { tapes: [], rows: [], ragdoll: [], error: 'unknown flag ' + a + '\n' + USAGE };
+      return { tapes: [], rows: [], ragdoll: [], arena: [], error: 'unknown flag ' + a + '\n' + USAGE };
     }
     if (seen.has(a)) {
-      return { tapes: [], rows: [], ragdoll: [], error: 'only one ' + a + ' group is allowed\n' + USAGE };
+      return { tapes: [], rows: [], ragdoll: [], arena: [], error: 'only one ' + a + ' group is allowed\n' + USAGE };
     }
     seen.add(a);
     current = group;
   }
-  const sizes = [groups.tapes.length, groups.rows.length, groups.ragdoll.length];
+  const sizes = [groups.tapes.length, groups.rows.length, groups.ragdoll.length, groups.arena.length];
   if (sizes.every(function (n) { return n === 0; }) || sizes.some(function (n) { return n === 1; })) {
-    return { tapes: [], rows: [], ragdoll: [], error: USAGE };
+    return { tapes: [], rows: [], ragdoll: [], arena: [], error: USAGE };
   }
-  return { tapes: groups.tapes, rows: groups.rows, ragdoll: groups.ragdoll, error: null };
+  return { tapes: groups.tapes, rows: groups.rows, ragdoll: groups.ragdoll, arena: groups.arena, error: null };
 }
 function readNamed(p, kind, parse) {
+  const not = 'not ' + (/^[aeiou]/.test(kind) ? 'an ' : 'a ') + kind;
   let text = null;
   try {
     text = readFileSync(p);
   } catch (err) {
-    throw new Error('not a ' + kind + ': cannot read ' + p + ': ' + (err && err.message ? err.message : String(err)));
+    throw new Error(not + ': cannot read ' + p + ': ' + (err && err.message ? err.message : String(err)));
   }
   try {
     return parse(text);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
-    const head = msg.indexOf('not a ' + kind) === 0 ? msg : 'not a ' + kind + ': ' + msg;
+    const head = msg.indexOf(not) === 0 ? msg : not + ': ' + msg;
     throw new Error(head + ' (' + p + ')');
   }
 }
 // Exit code 0 = every file agrees, 1 = a divergence or a skipped pair, 2 = usage or an unreadable file.
-// Each file group (tapes, corpus rows, ragdoll rows) is compared against its own first file.
+// Each file group (tapes, corpus rows, ragdoll rows, arena rows) is compared against its own first file.
 export function run(argv) {
   const args = parseArgs(argv);
   if (args.error) {
@@ -381,6 +463,12 @@ export function run(argv) {
       const entries = args.ragdoll.map(function (p) { return { name: p, row: readNamed(p, 'ragdoll row', function (b) { return parseRagdoll(b.toString('utf8')); }) }; });
       const results = entries.slice(1).map(function (e) { return compareRagdoll(entries[0].row, e.row); });
       sections.push(formatRagdoll(entries, results));
+      pass = pass && results.every(function (r) { return r.equal; });
+    }
+    if (args.arena.length > 0) {
+      const entries = args.arena.map(function (p) { return { name: p, row: readNamed(p, 'arena row', function (b) { return parseArena(b.toString('utf8')); }) }; });
+      const results = entries.slice(1).map(function (e) { return compareArena(entries[0].row, e.row); });
+      sections.push(formatArena(entries, results));
       pass = pass && results.every(function (r) { return r.equal; });
     }
     return { code: pass ? 0 : 1, out: sections.join('\n') + '\n', err: '' };

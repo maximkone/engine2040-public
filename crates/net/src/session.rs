@@ -517,11 +517,6 @@ impl Client {
         Ok(receipt.hash)
     }
 
-    /// Bitmask of held cells (16 bits for the 4x4 fixture).
-    pub fn cell_have(&self) -> u32 {
-        self.cells.have
-    }
-
     /// Held cell count for the streamed fixture.
     pub fn cell_count(&self) -> u32 {
         self.cells.count()

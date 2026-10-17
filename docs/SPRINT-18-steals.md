@@ -147,7 +147,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   3x spike drops to the floor within K frames; after the spike it returns to 100 in
   at most 40 cooldown periods; x2 equal. F2P: no governor fn. P2P: `cargo test -p
   engine-render --lib` green.
-- [ ] GS13 perf: VRAM budget math — `crates/perf/src/vram.rs`, pure, from Dawn
+- [x] GS13 perf: VRAM budget math — `crates/perf/src/vram.rs`, pure, from Dawn Landed 3513a7e7. Proof: cargo test -p engine-perf, run 39051586513.
   `UpdateVideoMemoryInfo`: `reservation = min(budget / 2, requested)`,
   `budget = (budget - reservation) * 95 / 100`, `usage = current - reservation`
   (saturating), plus `pressure_pct()`. The Windows `QueryVideoMemoryInfo` call that
@@ -156,7 +156,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   usage 2 GiB, requested 1 GiB gives reservation 1 GiB, budget 4.75 GiB, usage 1 GiB;
   usage above budget gives pressure over 100; x2 equal. F2P: no vram module. P2P:
   `cargo test -p engine-perf --lib` green.
-- [ ] GS14 perf: peak heap gate — extend `crates/perf/src/alloc.rs` with `peak_bytes`
+- [x] GS14 perf: peak heap gate — extend `crates/perf/src/alloc.rs` with `peak_bytes` Landed 334b5700. peak_live_bytes in alloc_probe; runs 39051586513, 39051586814.
   if absent, and add `crates/perf/tests/heap_peak.rs`: run the 600-tick 8-fighter
   headless match and record peak live heap to `target/reports/heap-peak.csv`. The
   first run writes `crates/perf/baselines/heap_peak.txt`; later runs fail when peak

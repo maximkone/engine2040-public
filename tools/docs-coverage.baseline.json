@@ -3,40 +3,46 @@
  "note": "Ratchet for tools/docs-coverage.mjs: per-crate doc coverage never drops; --update-baseline re-records after a deliberate docs change.",
  "crates": {
   "engine-ai": {
-   "total": 514,
-   "documented": 493,
-   "undocumented": 21,
-   "coverage": 95.91439688715953
+   "total": 764,
+   "documented": 739,
+   "undocumented": 25,
+   "coverage": 96.72774869109948
   },
   "engine-anim": {
-   "total": 546,
-   "documented": 497,
-   "undocumented": 49,
-   "coverage": 91.02564102564102
+   "total": 950,
+   "documented": 895,
+   "undocumented": 55,
+   "coverage": 94.21052631578948
   },
   "engine-app": {
-   "total": 67,
-   "documented": 62,
-   "undocumented": 5,
-   "coverage": 92.53731343283582
+   "total": 111,
+   "documented": 104,
+   "undocumented": 7,
+   "coverage": 93.69369369369369
   },
   "engine-arena": {
-   "total": 68,
-   "documented": 64,
-   "undocumented": 4,
-   "coverage": 94.11764705882354
+   "total": 283,
+   "documented": 266,
+   "undocumented": 17,
+   "coverage": 93.99293286219081
   },
   "engine-assets": {
-   "total": 499,
-   "documented": 475,
-   "undocumented": 24,
-   "coverage": 95.19038076152304
+   "total": 789,
+   "documented": 766,
+   "undocumented": 23,
+   "coverage": 97.08491761723701
   },
   "engine-audio": {
-   "total": 388,
-   "documented": 372,
+   "total": 638,
+   "documented": 622,
    "undocumented": 16,
-   "coverage": 95.87628865979381
+   "coverage": 97.4921630094044
+  },
+  "engine-chaos": {
+   "total": 5,
+   "documented": 5,
+   "undocumented": 0,
+   "coverage": 100
   },
   "engine-clock": {
    "total": 7,
@@ -45,154 +51,190 @@
    "coverage": 100
   },
   "engine-combat": {
-   "total": 362,
-   "documented": 356,
-   "undocumented": 6,
-   "coverage": 98.34254143646409
+   "total": 667,
+   "documented": 660,
+   "undocumented": 7,
+   "coverage": 98.95052473763118
   },
   "engine-core": {
-   "total": 144,
-   "documented": 136,
-   "undocumented": 8,
-   "coverage": 94.44444444444444
+   "total": 198,
+   "documented": 180,
+   "undocumented": 18,
+   "coverage": 90.9090909090909
   },
   "engine-destruction": {
-   "total": 244,
-   "documented": 187,
-   "undocumented": 57,
-   "coverage": 76.63934426229508
+   "total": 390,
+   "documented": 352,
+   "undocumented": 38,
+   "coverage": 90.25641025641026
   },
   "engine-distill": {
-   "total": 44,
-   "documented": 44,
+   "total": 131,
+   "documented": 130,
+   "undocumented": 1,
+   "coverage": 99.23664122137404
+  },
+  "engine-ecs": {
+   "total": 292,
+   "documented": 264,
+   "undocumented": 28,
+   "coverage": 90.41095890410959
+  },
+  "engine-editor": {
+   "total": 822,
+   "documented": 811,
+   "undocumented": 11,
+   "coverage": 98.661800486618
+  },
+  "engine-endpoint": {
+   "total": 1485,
+   "documented": 1419,
+   "undocumented": 66,
+   "coverage": 95.55555555555556
+  },
+  "engine-game": {
+   "total": 1187,
+   "documented": 1182,
+   "undocumented": 5,
+   "coverage": 99.5787700084246
+  },
+  "engine-geo": {
+   "total": 76,
+   "documented": 68,
+   "undocumented": 8,
+   "coverage": 89.47368421052632
+  },
+  "engine-input": {
+   "total": 168,
+   "documented": 162,
+   "undocumented": 6,
+   "coverage": 96.42857142857143
+  },
+  "engine-material": {
+   "total": 169,
+   "documented": 158,
+   "undocumented": 11,
+   "coverage": 93.49112426035504
+  },
+  "engine-nav": {
+   "total": 158,
+   "documented": 152,
+   "undocumented": 6,
+   "coverage": 96.20253164556962
+  },
+  "engine-net": {
+   "total": 1041,
+   "documented": 1023,
+   "undocumented": 18,
+   "coverage": 98.27089337175792
+  },
+  "engine-nn": {
+   "total": 71,
+   "documented": 71,
    "undocumented": 0,
    "coverage": 100
   },
-  "engine-ecs": {
-   "total": 116,
-   "documented": 91,
-   "undocumented": 25,
-   "coverage": 78.44827586206897
-  },
-  "engine-editor": {
-   "total": 789,
-   "documented": 777,
-   "undocumented": 12,
-   "coverage": 98.47908745247149
-  },
-  "engine-endpoint": {
-   "total": 929,
-   "documented": 860,
-   "undocumented": 69,
-   "coverage": 92.57265877287406
-  },
-  "engine-game": {
-   "total": 762,
-   "documented": 756,
-   "undocumented": 6,
-   "coverage": 99.21259842519684
-  },
-  "engine-input": {
-   "total": 100,
-   "documented": 97,
-   "undocumented": 3,
-   "coverage": 97
-  },
-  "engine-nav": {
-   "total": 192,
-   "documented": 181,
-   "undocumented": 11,
-   "coverage": 94.27083333333333
-  },
-  "engine-net": {
-   "total": 767,
-   "documented": 704,
-   "undocumented": 63,
-   "coverage": 91.78617992177314
-  },
-  "engine-nn": {
-   "total": 63,
-   "documented": 62,
-   "undocumented": 1,
-   "coverage": 98.41269841269842
-  },
   "engine-observe": {
-   "total": 98,
-   "documented": 96,
+   "total": 223,
+   "documented": 221,
    "undocumented": 2,
-   "coverage": 97.95918367346938
+   "coverage": 99.10313901345292
   },
   "engine-perf": {
-   "total": 197,
-   "documented": 189,
-   "undocumented": 8,
-   "coverage": 95.93908629441624
+   "total": 315,
+   "documented": 315,
+   "undocumented": 0,
+   "coverage": 100
+  },
+  "engine-physfx": {
+   "total": 37,
+   "documented": 37,
+   "undocumented": 0,
+   "coverage": 100
   },
   "engine-physics": {
-   "total": 275,
-   "documented": 239,
-   "undocumented": 36,
-   "coverage": 86.9090909090909
+   "total": 514,
+   "documented": 499,
+   "undocumented": 15,
+   "coverage": 97.08171206225681
   },
   "engine-playtest": {
-   "total": 392,
-   "documented": 378,
-   "undocumented": 14,
-   "coverage": 96.42857142857143
+   "total": 659,
+   "documented": 629,
+   "undocumented": 30,
+   "coverage": 95.44764795144158
   },
   "engine-proof": {
-   "total": 164,
-   "documented": 155,
-   "undocumented": 9,
-   "coverage": 94.51219512195122
+   "total": 319,
+   "documented": 305,
+   "undocumented": 14,
+   "coverage": 95.61128526645768
   },
   "engine-provider": {
-   "total": 324,
-   "documented": 308,
-   "undocumented": 16,
-   "coverage": 95.06172839506173
+   "total": 461,
+   "documented": 438,
+   "undocumented": 23,
+   "coverage": 95.01084598698482
   },
   "engine-render": {
-   "total": 1602,
-   "documented": 1519,
-   "undocumented": 83,
-   "coverage": 94.81897627965044
+   "total": 2474,
+   "documented": 2402,
+   "undocumented": 72,
+   "coverage": 97.08973322554567
+  },
+  "engine-rules": {
+   "total": 132,
+   "documented": 125,
+   "undocumented": 7,
+   "coverage": 94.6969696969697
   },
   "engine-save": {
-   "total": 22,
-   "documented": 22,
+   "total": 55,
+   "documented": 55,
    "undocumented": 0,
    "coverage": 100
   },
   "engine-scene": {
-   "total": 102,
-   "documented": 96,
-   "undocumented": 6,
-   "coverage": 94.11764705882354
+   "total": 154,
+   "documented": 147,
+   "undocumented": 7,
+   "coverage": 95.45454545454545
   },
   "engine-spatial": {
-   "total": 196,
-   "documented": 171,
-   "undocumented": 25,
-   "coverage": 87.24489795918367
+   "total": 468,
+   "documented": 453,
+   "undocumented": 15,
+   "coverage": 96.7948717948718
   },
   "engine-ui": {
-   "total": 153,
-   "documented": 151,
-   "undocumented": 2,
-   "coverage": 98.69281045751634
+   "total": 377,
+   "documented": 374,
+   "undocumented": 3,
+   "coverage": 99.20424403183024
+  },
+  "engine-web": {
+   "total": 124,
+   "documented": 106,
+   "undocumented": 18,
+   "coverage": 85.48387096774194
+  },
+  "engine-workspace-hack": {
+   "total": 0,
+   "documented": 0,
+   "undocumented": 0,
+   "coverage": 100
   },
   "engine-world": {
-   "total": 79,
-   "documented": 61,
-   "undocumented": 18,
-   "coverage": 77.21518987341773
+   "total": 90,
+   "documented": 78,
+   "undocumented": 12,
+   "coverage": 86.66666666666667
   },
   "engine2040": {
-   "total": 3,
-   "documented": 0,
+   "total": 29,
+   "documented": 26,
    "undocumented": 3,
-   "coverage": 0
+   "coverage": 89.65517241379311
   }
  }
 }

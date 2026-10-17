@@ -9,6 +9,7 @@
 
 #![cfg(feature = "mcp")]
 
+use engine_core::{adler::adler32, crc32::crc32};
 use engine_endpoint::play::play_session::PlaySession;
 use engine_endpoint::play::{PlayInputDto, PNG_MAGIC};
 
@@ -18,33 +19,6 @@ const W: u32 = 96;
 const H: u32 = 64;
 /// Test seed: fixed so the duel replays.
 const SEED: u64 = 2040;
-
-/// CRC-32 (IEEE) over a PNG chunk tag plus body.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            if crc & 1 == 1 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
-}
-
-/// Adler-32 over the inflated scanlines, as the zlib trailer carries it.
-fn adler32(data: &[u8]) -> u32 {
-    let mut a = 1u32;
-    let mut b = 0u32;
-    for byte in data {
-        a = (a + u32::from(*byte)) % 65_521;
-        b = (b + a) % 65_521;
-    }
-    (b << 16) | a
-}
 
 /// Walk a receipt PNG's chunks: IHDR dimensions (RGB8 only) plus the
 /// concatenated IDAT. Anything else fails, never passes.
@@ -182,7 +156,7 @@ fn decode_receipt_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
 /// Pixel-variance gate: mean luma plus variance over per-pixel luma. Black
 /// frames and flat fills fail, never pass.
 fn variance_gate(rgb: &[u8]) -> Result<(u64, u64), String> {
-    if rgb.len() % 3 != 0 || rgb.is_empty() {
+    if !rgb.len().is_multiple_of(3) || rgb.is_empty() {
         return Err("capture holds no pixels; a step receipt must be non-black".to_owned());
     }
     let n = (rgb.len() / 3) as u64;
@@ -214,7 +188,7 @@ fn step_inputs(base: u32, step: u32) -> Vec<PlayInputDto> {
             mx: 60,
             mz: 0,
             facing: 0,
-            buttons: u8::from(step % 4 == 0),
+            buttons: u8::from(step.is_multiple_of(4)),
         });
         out.push(PlayInputDto {
             tick,

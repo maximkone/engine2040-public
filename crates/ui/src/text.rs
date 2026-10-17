@@ -118,12 +118,7 @@ impl TextEntry {
     /// Move the cursor to `byte` (clamped to the length, snapped back to a
     /// char boundary). Pure.
     pub fn set_cursor(&mut self, byte: usize) {
-        let clamped = byte.min(self.text.len());
-        let mut at = clamped;
-        while at > 0 && !self.text.is_char_boundary(at) {
-            at -= 1;
-        }
-        self.cursor = at;
+        self.cursor = self.text.floor_char_boundary(byte);
     }
 
     /// Insert `commit` at the cursor, dropping control chars and clipping to

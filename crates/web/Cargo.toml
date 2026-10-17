@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "WEB4: the browser shell - a WebGPU device, a cleared canvas with a moving square, and one JSON line"
+description = "WEB4/WEB7: the browser shell - a WebGPU device, a cleared canvas, one JSON line, and input and audio on the web"
 
 [lints]
 workspace = true
@@ -25,6 +25,11 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"
 # engine-proof is std-only and builds for wasm32-unknown-unknown with no imports.
 engine-proof.workspace = true
 
+# WEB7: input records (Bindings, FighterInput, the look deltas) and the FrameSource the audio sink pulls.
+# engine-audio without its `device` feature is std-only, so it builds for the browser (no cpal).
+engine-input.workspace = true
+engine-audio.workspace = true
+
 # The browser has no std clock: the shell installs the page's performance.now() here before anything
 # that reads time runs (engine-assets and engine-app panic on wasm32-unknown-unknown until it has).
 engine-clock = { version = "0.1.0", path = "../clock" }
@@ -37,12 +42,24 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
+    "AudioBuffer",
+    "AudioContext",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioProcessingEvent",
     "Document",
     "Element",
+    "Event",
+    "EventTarget",
+    "Gamepad",
+    "GamepadButton",
     "HtmlCanvasElement",
     "HtmlElement",
+    "KeyboardEvent",
+    "MouseEvent",
     "Navigator",
     "Performance",
+    "ScriptProcessorNode",
     "Window",
     "console",
 ] }

@@ -53,7 +53,7 @@ use std::fmt;
 
 use engine_arena::gym::{GymEvent, GymLive};
 use engine_arena::{ArenaConfig, BoutTape, MAX_PARTICIPANTS};
-use engine_core::{hash::GOLDEN_GAMMA, splitmix64};
+use engine_core::{adler::adler32, crc32::crc32, hash::GOLDEN_GAMMA, splitmix64};
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::model::ToolAnnotations;
 use rmcp::schemars::JsonSchema;
@@ -833,10 +833,7 @@ impl ToolBase for PlayStepTool {
     }
 
     fn annotations() -> Option<ToolAnnotations> {
-        let mut annotations = ToolAnnotations::default();
-        annotations.read_only_hint = Some(false);
-        annotations.open_world_hint = Some(false);
-        Some(annotations)
+        crate::mcp::write_annotations(false)
     }
 }
 
@@ -933,7 +930,7 @@ fn render_step_pixels(
     let mut rgb = vec![0u8; w * h * 3];
     paint_backdrop(&mut rgb, w, h);
     if w >= 16 && h >= 16 {
-        paint_fighter_discs(&mut rgb, w, h, tick, digest, seed, fighters, events);
+        paint_fighter_discs(&mut rgb, (w, h), tick, digest, seed, fighters, events);
     }
     paint_hud(&mut rgb, w, h, tick, digest, seed, fighters);
     rgb
@@ -964,8 +961,7 @@ fn paint_backdrop(rgb: &mut [u8], w: usize, h: usize) {
 /// the disc and a fallen fighter dims it.
 fn paint_fighter_discs(
     rgb: &mut [u8],
-    w: usize,
-    h: usize,
+    (w, h): (usize, usize),
     tick: u32,
     digest: u64,
     seed: u64,
@@ -1065,31 +1061,6 @@ fn paint_hud(
             rgb[at + 2] = 10;
         }
     }
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            if crc & 1 == 1 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let mut a = 1u32;
-    let mut b = 0u32;
-    for byte in data {
-        a = (a + u32::from(*byte)) % 65_521;
-        b = (b + a) % 65_521;
-    }
-    (b << 16) | a
 }
 
 fn push_chunk(out: &mut Vec<u8>, tag: &[u8; 4], body: &[u8]) {

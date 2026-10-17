@@ -963,7 +963,7 @@ mod tests {
         );
         assert_eq!(registry.verb_names(), vec![TOOL_SCENE_BRIEF]);
         assert_eq!(
-            registry.models_for(&["view"].into_iter().collect()).len(),
+            registry.models_for(&std::iter::once("view").collect()).len(),
             0,
             "the losing duplicate advertises nothing"
         );
@@ -993,7 +993,7 @@ mod tests {
         // Shipped verbs all carry schemas, so none hit the fallback.
         for verb in PackRegistry::shipped().verb_names() {
             let model = PackRegistry::shipped()
-                .verb(&verb)
+                .verb(verb)
                 .expect("verb lists")
                 .model();
             let schema = &model.input_schema;

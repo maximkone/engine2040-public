@@ -44,6 +44,12 @@ impl StubServer {
         Self::spawn_with(script, 0, String::new())
     }
 
+    /// [`StubServer::spawn_script`] with `headers` (each line ending in CR LF)
+    /// on every response, e.g. `Retry-After: 1`.
+    pub fn spawn_script_headers(script: Vec<(u16, String)>, headers: &str) -> Self {
+        Self::spawn_with(script, 0, headers.to_owned())
+    }
+
     /// Full endpoint URL for this stub.
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}/v1/chat/completions", self.port)

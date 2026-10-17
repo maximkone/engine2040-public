@@ -7,7 +7,7 @@ author: skillworks
 
 # Causal triage plan
 
-Kin: delegate-context-pack packs one dispatch, crash-stack-triage maps one stack, systematic-debug gates one bug; this skill orders many errors by cause then delegates before any fix.
+Kin: crash-stack-triage maps one stack, systematic-debug gates one bug; this skill orders many errors by cause then delegates before any fix.
 
 1. **Cluster by boundary.** Group errors by time, subsystem, recent-change surface. One cluster per cause, never per message text.
 2. **Split primary vs cascade.** A primary explains the rest. A cascade clears when its primary lands. Cite evidence past same text: file line, log, rebuild.

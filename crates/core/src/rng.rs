@@ -69,10 +69,6 @@ impl Rng {
     pub fn digest(vals: &[u64]) -> u64 {
         hash_u64s(vals)
     }
-    /// Alias of [`Rng::digest`] for state-hash call sites.
-    pub fn hash_state(vals: &[u64]) -> u64 {
-        Self::digest(vals)
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -166,7 +162,6 @@ mod tests {
     fn digest_golden() {
         let v = [4794064739117914115u64, 16082742265117291817u64];
         assert_eq!(Rng::digest(&v), 1231717912943920180);
-        assert_eq!(Rng::hash_state(&v), Rng::digest(&v));
         assert_eq!(Rng::digest(&v), Rng::digest(&v));
         assert_ne!(Rng::digest(&v), Rng::digest(&v[1..]));
     }

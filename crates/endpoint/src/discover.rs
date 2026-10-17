@@ -1439,7 +1439,7 @@ pub fn gesture_sealable(items: &[PreviewItem]) -> bool {
     if items.is_empty() {
         return false;
     }
-    let (first_id, first_kind) = match &items[0].ops[..] {
+    let (first_id, first_kind) = match &*items[0].ops {
         [OpDto::SetLocal { id, .. }] => (id, 0u8),
         [OpDto::SetMaterial { id, .. }] => (id, 1u8),
         _ => return false,
@@ -1448,7 +1448,7 @@ pub fn gesture_sealable(items: &[PreviewItem]) -> bool {
         if map_method(&item.method).is_err() {
             return false;
         }
-        match &item.ops[..] {
+        match &*item.ops {
             [OpDto::SetLocal { id, .. }] if id == first_id && first_kind == 0 => {}
             [OpDto::SetMaterial { id, .. }] if id == first_id && first_kind == 1 => {}
             _ => return false,

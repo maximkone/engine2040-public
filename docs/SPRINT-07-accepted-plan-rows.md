@@ -601,7 +601,7 @@
   `crates/combat/src/move_intake.rs`. Accept: 5 generated moves either land
   as valid HR3 entries or are refused with a reason; replay x2. needs: CT14,
   HR3, VK1, PQ2.
-- [ ] EV15 research: the research ladder. Tier A. Size S. Owns
+- [ ] EV15 research: the research ladder. Tier A. Size S. Owns Progress 2026-10-17: 20aea8ee tools/ladder-counts.mjs; left: the RES packet rule (skill gone).
   `docs/research/LADDER.md` and the RES packet format in
   `skills/engine-orchestrate/SKILL.md`. Accept: every research return adds
   LADDER lines; the retro prints counts per rung from the file. needs:
@@ -614,18 +614,18 @@
   checksum hunks beside the EV2 rebuild path (tape format frozen). Accept:
   20/20 planted corruptions located to the tick; memory <= half full-state;
   rerun x2 identical. needs: EV2, QA1. (PLN48 STEAL dive14 Card 4 remap.)
-- [ ] QA3 ai: deterministic BT bot brains for playtest bouts — sequence /
+- [x] QA3 ai: deterministic BT bot brains for playtest bouts — sequence / Landed 20aea8ee. Run 39052941210; Brain::Trees in bot_harness.
   selector / blackboard ticks over integer state, serializable trees.
   Tier A. Size M. Owns brain hunks beside `crates/ai/src/` (bot tables
   frozen). Accept: 200 bouts rerun-identical x2 from tapes; VK1 pass >=
   baseline -2%; 0 stuck; decision <= 0.1 ms; 0 float/alloc in tick. needs:
   QA1, PQ2. (PLN48 STEAL dive14 Card 1 remap.)
-- [ ] PQ9 proof: skill-rating scorer for the balance tournament — Elo /
+- [x] PQ9 proof: skill-rating scorer for the balance tournament — Elo / Landed 20aea8ee. Elo line per difficulty in the tournament report; run 39052941210.
   Glicko-2 over bout records, offline only. Tier B. Size S. Owns scoring
   hunks beside the PQ2 harness (bout records frozen). Accept: planted OP
   move detected <= 100 bouts; 0 false alarms on balanced records; scoring
   <= 10 ms. needs: PQ2. (PLN48 STEAL dive14 Card 2.)
-- [ ] CR2 net: structured divergence capture for replay tapes — fixed
+- [x] CR2 net: structured divergence capture for replay tapes — fixed Landed 20aea8ee. 48-byte divergence record; run 39052941210.
   schema (tick + input + subsystem + digests) at first divergence. Tier B.
   Size S. Owns capture hunks beside `crates/net/src/replay.rs` (tape
   format frozen). Accept: 10/10 seeded bugs attribute to exact tick+input
@@ -787,11 +787,11 @@
   credited) into LM1. Tier A. Size M. Owns `content/locomotion/` expansion.
   Accept: bake x2 + typed refusals. needs: CT1, CT3. (PLAN-CONTENT wave 58;
   plan §7 CT30 boarded as CT31.)
-- [ ] CT32 content: 14-canonical-clip dedupe manifest + before/after MB
+- [x] CT32 content: 14-canonical-clip dedupe manifest + before/after MB Landed b5cdaf64. 14 clips share one cook digest across 56 slots.
   through AS1 bundles. Tier A. Size S. Owns the dedupe manifest. Accept:
   bundle loads, `fighter_bind` green, bytes x2. needs: CT7.
   (PLAN-CONTENT wave 58; plan §7 CT31 boarded as CT32.)
-- [ ] CT33 content: sidecar consumer schema + conformance test (CB4 reads
+- [x] CT33 content: sidecar consumer schema + conformance test (CB4 reads Landed b5cdaf64. Run 39052948713 (sidecar 5 passed).
   windows, LM2 reads contacts; traversal schema for board CT24). Tier A.
   Size S. Owns the sidecar schema. Accept: `cargo test --locked
   -p engine-assets sidecar`. needs: CT1, CT7. (PLAN-CONTENT wave 58;
@@ -832,7 +832,7 @@
   provenance per file names generator, model and prompt digest;
   license gate refuses unreadable model terms. needs: CT4. (EXTEND
   wave 85.)
-- [ ] CT41 content: LOD ms/VRAM table over the CT35 bake. Tier A.
+- [ ] CT41 content: LOD ms/VRAM table over the CT35 bake. Tier A. Progress 2026-10-17: b5cdaf64 LOD table from hero.json with tris and VRAM; left: GPU ms and the PF13 join.
   Size S. Owns `content/fighters/LOD-REPORT.md` (CT35 `lod/` frozen).
   Accept: `cargo test --locked -p engine-assets lod_swap` + `mesh_cook`
   green; per-LOD tris/ms/VRAM posted on the reference GPU with
@@ -857,13 +857,13 @@
   identical; budgets hold; front/side/top previews against the 1.8 m
   figure; 8-fighter soak capture shows populated stands with 0 findings.
   Consumer: CT27 soak, CT34 card. needs: CT25, CT8. (EXTEND wave 86.)
-- [ ] CT45 content: PBR 2k + HDRI provenance report with VRAM caps.
+- [ ] CT45 content: PBR 2k + HDRI provenance report with VRAM caps. Progress 2026-10-17: f2effc78 per-map table generated, bound set 213 MiB under the 256 MiB cap; left: measured VRAM on the reference GPU.
   Tier B. Size M. Owns `content/arena/pbr/REPORT.md` (CT26 pass frozen;
   `content/arena/hdri/` untouched). Accept: 0 findings; Q1/RA14 read PBR
   (no noise); cook x2 identical; provenance per file; per-map bytes +
   VRAM posted on the reference GPU. Consumer: Q1 captures, RA14. needs:
   CT26, CT8. (EXTEND wave 86.)
-- [ ] CT46 content: provenance audit dry-run for the CT28 gate (50-asset
+- [x] CT46 content: provenance audit dry-run for the CT28 gate (50-asset Landed 124fcf36. tools/provenance-audit.mjs: 58 rows, 7 refusals named; run 39053389819.
   matrix). Tier A. Size S. Owns `content/PROVENANCE-AUDIT.md` (gate code
   stays CT28). Accept: matrix lists URL+SPDX+author+SHA or
   generator+model+prompt digest per asset; release-refusal dry-run names
@@ -946,7 +946,7 @@
   frozen; no pass code). Accept: RA14/WIN6 shows sand, stands, fighters,
   0 findings, log==pixels (UI4 pattern); `fighter_bind` green; golden
   unchanged. Consumer RA14/Q1. needs: CT22, CT29. (EXTEND wave 89.)
-- [ ] CT61 content: empty-stands P6 baseline for the CT27 soak.
+- [ ] CT61 content: empty-stands P6 baseline for the CT27 soak. Progress 2026-10-17: f2effc78 SOAK-BASELINE.md payload estimate 236 MiB; left: 8-fighter day capture ms on the GPU.
   Tier A. Size S. Owns `content/arena/SOAK-BASELINE.md` (CT7 + CT8 bundles
   frozen). Accept: 8-fighter day capture, 0 findings; CPU/GPU ms + VRAM
   posted on the reference GPU with adapter+driver lines; cook x2
@@ -958,7 +958,7 @@
   bytes + VRAM + hitch count on the reference GPU with the adapter
   line; cook x2 identical; golden unchanged. Consumer C5/WD. needs:
   CT9. (EXTEND wave 90.)
-- [ ] CT63 content: combat sound list with provenance (Tier A sound list).
+- [ ] CT63 content: combat sound list with provenance (Tier A sound list). Progress 2026-10-17: b29e14b0 content/sound/HIT-LIST.md maps every FightCue to a CC0 file or silent; left: the SN10 bridge (parked).
   Tier A. Size S. Owns `content/sound/HIT-LIST.md` + per-file rows
   (new dir; no audio code). Accept: every hit/knockdown in the staged
   fight names a CC0 source with URL+SPDX+author+SHA; SN10 log bridge
@@ -1004,7 +1004,7 @@
   frozen). Accept: 2 motions-only clips via CT1 with sidecars +
   EVIDENCE; Geno/LAFAN1/QAL refusals green; LM1 reads scout bake; x2.
   Consumer CT37/CT31. needs: CT1. (EXTEND wave 92.)
-- [ ] CT77 content: arena src commit-gate (crate + torch pair).
+- [x] CT77 content: arena src commit-gate (crate + torch pair). Landed f2effc78. SRC-RECEIPT.md gate.
   Tier A. Size S. Owns `content/arena/SRC-RECEIPT.md` (pair frozen).
   Accept: pair committed only with cook x2 + SP5 0 findings; SHAs +
   budgets named; golden unchanged. Consumer CT53/CT57. needs: CT8.
@@ -1027,7 +1027,7 @@
   committed set cooks x2 identical; `cargo test --locked -p
   engine-assets provenance` green; Q1/RA14 read it with 0 findings.
   Consumer Q1 captures, RA14 presenter, WIN9 bin proof. needs: CT8.
-- [ ] CT82 content: manifest single truth (delete the stale pre-kit
+- [ ] CT82 content: manifest single truth (delete the stale pre-kit Progress 2026-10-17: f2effc78 tools/arena-report.mjs checks manifest.json against disk; left: regenerate manifest.json (sand_floor, stands, banner gltf and placement.json drifted today).
   manifest). Tier A. Size S. Owns `content/arena/manifest_before.json`
   deletion (`manifest.json` + `report.json` frozen; no new bytes).
   Accept: stale file removed; `manifest.json` sole truth with 2k maps +

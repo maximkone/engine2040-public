@@ -1,14 +1,14 @@
 ---
 name: bug-report-writing
-description: Use when a runner, perf, or walker seat files or reviews a bug queue packet before a builder starts; it gates steps, expected, actual, build and proof.
+description: Use when you file or review a bug report (a `docs/BLOCKERS.md` row or a bug row on the board) before someone starts the fix; it gates steps, expected, actual, build and proof.
 ---
 # Bug report writing
 
-Nine packet gates. Each names its queue field. Fail one field, send the packet back.
+Nine report gates. Each names its field. Fail one field, fix the report before filing.
 
 1. **Title (title).** Ask: does one line name platform, area, symptom? Flag: vague "broken" or "does not work". Crate: playtest.
 2. **Row (row).** Ask: is the board row id named and open? Flag: no row, closed row. Crate: arena.
-3. **Paths (paths).** Ask: are owned files listed, none outside the packet? Flag: whole crate, missing file. Crate: render.
+3. **Paths (paths).** Ask: are owned files listed, none outside the report? Flag: whole crate, missing file. Crate: render.
 4. **Test (test).** Ask: is the failing command named with crate and filter? Flag: "run tests" with no command. Crate: proof.
 5. **Build (source).** Ask: are build hash, date, device and OS named? Flag: "latest" with no version. Crate: perf.
 6. **Goal (Goal).** Ask: are expected and actual stated in one line each? Flag: only actual, no expected. Crate: physics.

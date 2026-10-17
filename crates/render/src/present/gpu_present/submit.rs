@@ -1042,9 +1042,23 @@ impl Presenter {
         rp.draw(0..3, 0..1);
     }
 
-    pub(super) fn pop_scope(&self, scope: wgpu::ErrorScopeGuard) -> Result<(), PresentError> {
-        if let Some(err) = pollster::block_on(scope.pop()) {
-            return Err(PresentError::Validation(format!("{err:?}")));
+    /// Close a validation scope. Natively the answer is ready at once and a validation error fails
+    /// the frame. A browser answers `popErrorScope` from its event loop, which a frame cannot wait
+    /// for, so there the answer goes to the scope ledger and the frame succeeds; the error shows up
+    /// in [`Presenter::deferred_validation_errors`] a frame or two later.
+    pub(super) fn pop_scope(&mut self, scope: wgpu::ErrorScopeGuard) -> Result<(), PresentError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(err) = pollster::block_on(scope.pop()) {
+                return Err(PresentError::Validation(format!("{err:?}")));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let answer = scope.pop();
+            self.scopes.defer(Box::pin(async move {
+                answer.await.map(|err| format!("{err:?}"))
+            }));
         }
         Ok(())
     }
@@ -1380,14 +1394,14 @@ impl Presenter {
         // The acquire owns its frame, so the surface borrow ends here and
         // the arms below may reconfigure (mutable) freely. Its wall time
         // is kept apart: a vsync-bound present mode parks the CPU here.
-        let acquire_started = std::time::Instant::now();
+        let acquire_started = engine_clock::now();
         let current = self
             .surface
             .as_ref()
             .expect("checked above")
             .get_current_texture();
         self.acquire_us = self.acquire_us.saturating_add(
-            u64::try_from(acquire_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            u64::try_from(engine_clock::since(acquire_started).as_micros()).unwrap_or(u64::MAX),
         );
         self.acquire_frames = self.acquire_frames.saturating_add(1);
         let (width, height) = self.swap.size();

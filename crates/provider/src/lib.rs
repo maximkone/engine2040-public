@@ -15,6 +15,12 @@
 //! or CI run replays them offline. Every layer ends in the one strict
 //! proposal grammar.
 //!
+//! [`prompt`] makes each system prompt a versioned, content-addressed asset
+//! with an eval gate, and its digest rides every exchange record.
+//!
+//! [`router`] picks a model per task class from the eval scorecard under
+//! deadline and cost caps, and records every decision so it replays.
+//!
 //! [`arbiter`] decides where local inference runs while the game shares the
 //! GPU (GPU, CPU, deferred or a configured remote), and [`LocalAdapter`]
 //! applies that decision on its request path.
@@ -35,8 +41,11 @@ pub mod ollama;
 pub mod openai;
 pub mod pins;
 pub mod policy;
+pub mod prompt;
 pub mod protocol;
 pub mod remote;
+pub mod retry;
+pub mod router;
 mod serving;
 pub mod stream;
 pub mod transport;
@@ -87,10 +96,17 @@ pub use fallback::{
     fallback_for, FallbackCause, FallbackErr, FallbackNotice, ScriptedFallback, MAX_NOTICE_LEN,
 };
 pub use policy::{AiSessionPolicy, CancelReason, Fallback, JobState, ProviderCapabilities};
+pub use prompt::{
+    gate_edit, score_permille, text_digest, EditReport, EvalModel, PromptAsset, PromptError,
+    PromptEval, BUILTIN_KINDS, MAX_EVALS,
+};
 pub use protocol::{
     AdapterKind, AiError, AiEvent, AiRequest, AiResult, Budget, ContextRef, DataClass, EventKind,
     FinishReason, JobId, ModelSelector, PrivacyMode, Proposal, ProposalAction, ProtocolError,
     RequestId, TaskKind, Usage,
+};
+pub use router::{
+    replay, Ask, Choice, Decision, Router, RouterError, ScoreRow, Skip, TaskClass, Tier,
 };
 
 /// Contract version every type in this crate speaks.

@@ -1,10 +1,9 @@
 //! adler: Adler-32 (the zlib trailer checksum), one of several local copies.
-//! PNG writers in game and editor share this one so every zlib stream they
-//! emit carries the same bits. Sibling copies live at
-//! `game/staged_fight_frames.rs`, `game/camera_feed.rs`,
-//! `game/bin/arena_capture.rs`, `endpoint/src/play/play_session.rs`, and
-//! `endpoint/tests/it/step20x2.rs`; keep them bit-identical when touching
-//! this routine.
+//! PNG writers in game, editor and endpoint share this one so every zlib
+//! stream they emit carries the same bits. Sibling copies live at
+//! `game/staged_fight_frames.rs`, `game/camera_feed.rs` and
+//! `game/bin/arena_capture.rs`; keep them bit-identical when touching this
+//! routine.
 //! Units: bytes in, 32-bit checksum out. Determinism: pure integer math,
 //! no allocation.
 

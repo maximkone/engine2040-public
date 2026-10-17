@@ -9,7 +9,16 @@
 //! [`MenuInput`]; item tables are fixed order, no floats, no clock, no IO.
 //! Failure mode: out-of-range picks and unbound hooks return [`MenuError`].
 //! Budget: O(1) per input, no allocation in [`Menu::step`] or [`dispatch`].
+//!
+//! Settings hand-off: the settings screen rows step one value each, and
+//! [`dispatch_settings`] stages that edit on the [`SettingsPanel`] draft.
+//! Closing the screen applies the staged batch at the caller's next fixed-step
+//! boundary, so a change goes live on a tick, never mid-frame.
 
+use crate::settings::{
+    Quality, SettingChange, Settings, SettingsError, SettingsPanel, SettingsReceipt, VolumeBus,
+    RENDER_SCALE_MAX, RENDER_SCALE_MIN, VOLUME_MAX,
+};
 use engine_input::MAX_PARTICIPANTS;
 
 #[path = "locale.rs"]
@@ -67,6 +76,67 @@ pub enum MenuItemId {
     QuitToMain,
     /// Settings: disarm and return to the arming screen.
     Back,
+    /// Settings: step one value on the staged draft.
+    Setting(SettingRow),
+}
+
+/// One value the settings screen steps. Each confirm stages the next value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SettingRow {
+    /// Volume of one bus: +100 permille per step, wraps to 0 past the top.
+    Volume(VolumeBus),
+    /// Graphics preset: low, medium, high, then low again.
+    Quality,
+    /// Render scale: -10 percent per step, wraps to the top at the floor.
+    RenderScale,
+    /// Vertical sync on or off.
+    Vsync,
+}
+
+impl SettingRow {
+    /// Locale key for this row. Pure.
+    #[must_use]
+    pub const fn locale_key(self) -> &'static str {
+        match self {
+            Self::Volume(VolumeBus::Master) => locale::KEY_VOLUME_MASTER,
+            Self::Volume(VolumeBus::Music) => locale::KEY_VOLUME_MUSIC,
+            Self::Volume(VolumeBus::Effects) => locale::KEY_VOLUME_EFFECTS,
+            Self::Quality => locale::KEY_QUALITY,
+            Self::RenderScale => locale::KEY_RENDER_SCALE,
+            Self::Vsync => locale::KEY_VSYNC,
+        }
+    }
+
+    /// The edit one confirm stages on top of the draft `now`. Always inside
+    /// the legal range, so staging it cannot be refused for range. Pure.
+    #[must_use]
+    pub fn next(self, now: &Settings) -> SettingChange {
+        match self {
+            Self::Volume(bus) => {
+                let volume = now.volume(bus);
+                let permille = if volume >= VOLUME_MAX {
+                    0
+                } else {
+                    (volume + 100).min(VOLUME_MAX)
+                };
+                SettingChange::Volume { bus, permille }
+            }
+            Self::Quality => SettingChange::Quality(match now.quality {
+                Quality::Low => Quality::Medium,
+                Quality::Medium => Quality::High,
+                Quality::High => Quality::Low,
+            }),
+            Self::RenderScale => {
+                let pct = now.render_scale_pct;
+                SettingChange::RenderScale(if pct <= RENDER_SCALE_MIN {
+                    RENDER_SCALE_MAX
+                } else {
+                    (pct - 10).max(RENDER_SCALE_MIN)
+                })
+            }
+            Self::Vsync => SettingChange::Vsync(!now.vsync),
+        }
+    }
 }
 
 /// One selectable row: id plus the label the renderer draws. Pure data.
@@ -91,6 +161,7 @@ impl MenuItemId {
             Self::Resume => locale::KEY_RESUME,
             Self::QuitToMain => locale::KEY_QUIT_TO_MAIN,
             Self::Back => locale::KEY_BACK,
+            Self::Setting(row) => row.locale_key(),
         }
     }
 }
@@ -235,6 +306,8 @@ pub enum MenuCommand {
     OpenSettings,
     /// Settings screen disarmed.
     CloseSettings,
+    /// Settings screen: stage the next value of this row.
+    StepSetting(SettingRow),
     /// Drop the fight and show the main menu.
     QuitToMain,
     /// Leave the application.
@@ -248,8 +321,12 @@ pub enum MenuEffect {
     Nothing,
     /// Settings screen armed.
     SettingsOpened,
-    /// Settings screen disarmed.
+    /// Settings screen disarmed with nothing staged.
     SettingsClosed,
+    /// One settings row staged its next value on the draft.
+    SettingStaged,
+    /// Settings screen disarmed; the staged batch is on the tape for its tick.
+    SettingsApplied(SettingsReceipt),
     /// The mode table started this match.
     FightStarted(FightStarted),
     /// The match resumed.
@@ -293,6 +370,8 @@ pub fn dispatch(cmd: MenuCommand, hooks: &ModeHooks) -> Result<MenuEffect, MenuE
         MenuCommand::None => Ok(MenuEffect::Nothing),
         MenuCommand::OpenSettings => Ok(MenuEffect::SettingsOpened),
         MenuCommand::CloseSettings => Ok(MenuEffect::SettingsClosed),
+        // Settings values change only through `dispatch_settings`.
+        MenuCommand::StepSetting(_) => Ok(MenuEffect::Nothing),
         MenuCommand::StartFight(request) => {
             request.validate()?;
             match hooks.start_fight {
@@ -321,6 +400,33 @@ pub fn dispatch(cmd: MenuCommand, hooks: &ModeHooks) -> Result<MenuEffect, MenuE
             }
             None => Err(MenuError::MissingHook("quit_app")),
         },
+    }
+}
+
+/// Run a settings command against the panel: the UIX7 hand-off into UIX2
+/// staging. A step stages the row's next value on the draft; closing applies
+/// the staged batch at `boundary_tick` (the caller's next fixed step), which
+/// is when the tuning swap goes live. Every other command is a no-op here.
+///
+/// # Errors
+/// [`SettingsError`] when staging or applying is refused; the staged batch is
+/// kept so the caller can retry on a later boundary.
+pub fn dispatch_settings(
+    cmd: MenuCommand,
+    panel: &mut SettingsPanel,
+    boundary_tick: u32,
+) -> Result<MenuEffect, SettingsError> {
+    match cmd {
+        MenuCommand::OpenSettings => Ok(MenuEffect::SettingsOpened),
+        MenuCommand::StepSetting(row) => {
+            panel.stage(row.next(panel.draft()))?;
+            Ok(MenuEffect::SettingStaged)
+        }
+        MenuCommand::CloseSettings if panel.staged_len() > 0 => {
+            panel.apply(boundary_tick).map(MenuEffect::SettingsApplied)
+        }
+        MenuCommand::CloseSettings => Ok(MenuEffect::SettingsClosed),
+        _ => Ok(MenuEffect::Nothing),
     }
 }
 
@@ -362,12 +468,30 @@ const PAUSE_ITEMS: [MenuItem; 3] = [
     },
 ];
 
-/// Settings rows in fixed order: disarm only; the values live outside this module.
-const SETTINGS_ITEMS: [MenuItem; 1] = [MenuItem {
-    id: MenuItemId::Back,
-    label: "Back",
-    enabled: true,
-}];
+/// One enabled settings row stepping `row`.
+const fn setting(row: SettingRow, label: &'static str) -> MenuItem {
+    MenuItem {
+        id: MenuItemId::Setting(row),
+        label,
+        enabled: true,
+    }
+}
+
+/// Settings rows in fixed order: one per value, then Back. The values live in
+/// the [`SettingsPanel`]; [`dispatch_settings`] stages them.
+const SETTINGS_ITEMS: [MenuItem; 7] = [
+    setting(SettingRow::Volume(VolumeBus::Master), "Master Volume"),
+    setting(SettingRow::Volume(VolumeBus::Music), "Music Volume"),
+    setting(SettingRow::Volume(VolumeBus::Effects), "Effects Volume"),
+    setting(SettingRow::Quality, "Quality"),
+    setting(SettingRow::RenderScale, "Render Scale"),
+    setting(SettingRow::Vsync, "VSync"),
+    MenuItem {
+        id: MenuItemId::Back,
+        label: "Back",
+        enabled: true,
+    },
+];
 
 /// UI-kit-v3 scroll list; same windowing as lobby `visible_slots`. Pure.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -534,6 +658,7 @@ impl Menu {
                 MenuCommand::OpenSettings
             }
             (Screen::Settings { from }, MenuItemId::Back) => self.close_settings(from),
+            (Screen::Settings { .. }, MenuItemId::Setting(row)) => MenuCommand::StepSetting(row),
             // Rows that never sit on this screen stay put and emit nothing.
             _ => MenuCommand::None,
         })
@@ -729,7 +854,7 @@ mod tests {
         let mut menu = Menu::main();
         menu.step(MenuInput::Choose(1)).unwrap();
         assert_eq!(
-            menu.step(MenuInput::Confirm).unwrap(),
+            menu.step(MenuInput::Choose(6)).unwrap(),
             MenuCommand::CloseSettings
         );
         assert_eq!(menu.screen(), Screen::Main);
@@ -759,12 +884,126 @@ mod tests {
     }
 
     #[test]
-    fn settings_moves_are_noops_on_single_row() {
+    fn settings_highlight_wraps_over_the_rows() {
         let mut menu = Menu::main();
         menu.step(MenuInput::Choose(1)).unwrap();
         assert_eq!(menu.step(MenuInput::Up).unwrap(), MenuCommand::None);
+        assert_eq!(menu.current().unwrap().id, MenuItemId::Back);
         assert_eq!(menu.step(MenuInput::Down).unwrap(), MenuCommand::None);
         assert_eq!(menu.selected(), 0);
+    }
+
+    #[test]
+    fn settings_rows_stage_then_swap_on_the_boundary() {
+        let mut panel = SettingsPanel::new();
+        let mut menu = Menu::main();
+        menu.step(MenuInput::Choose(1)).unwrap();
+        let cmd = menu.step(MenuInput::Choose(2)).unwrap();
+        assert_eq!(
+            cmd,
+            MenuCommand::StepSetting(SettingRow::Volume(VolumeBus::Effects))
+        );
+        // Effects 800 -> 900 -> 1000.
+        for _ in 0..2 {
+            assert_eq!(
+                dispatch_settings(cmd, &mut panel, 5).unwrap(),
+                MenuEffect::SettingStaged
+            );
+        }
+        let quality = menu.step(MenuInput::Choose(3)).unwrap();
+        dispatch_settings(quality, &mut panel, 5).unwrap();
+        // Staged only: the live view and the tape are untouched.
+        assert_eq!(panel.draft().volume(VolumeBus::Effects), 1000);
+        assert_eq!(panel.draft().quality, Quality::Low);
+        assert_eq!(panel.live().volume(VolumeBus::Effects), 800);
+        assert!(panel.tape().is_empty());
+        let close = menu.step(MenuInput::Back).unwrap();
+        let MenuEffect::SettingsApplied(receipt) =
+            dispatch_settings(close, &mut panel, 12).unwrap()
+        else {
+            panic!("closing with staged edits must apply them");
+        };
+        assert_eq!((receipt.at_tick, receipt.changes), (12, 3));
+        panel.advance(11).unwrap();
+        assert_eq!(panel.live().volume(VolumeBus::Effects), 800);
+        panel.advance(12).unwrap();
+        assert_eq!(panel.live().volume(VolumeBus::Effects), 1000);
+        assert_eq!(panel.live().quality, Quality::Low);
+        // A replay of the tape reads the same settings on the same tick.
+        assert_eq!(panel.tape().settings_at(12), *panel.live());
+        assert_eq!(panel.tape().settings_at(11), Settings::default());
+    }
+
+    #[test]
+    fn settings_close_with_nothing_staged_is_plain() {
+        let mut panel = SettingsPanel::new();
+        assert_eq!(
+            dispatch_settings(MenuCommand::OpenSettings, &mut panel, 3).unwrap(),
+            MenuEffect::SettingsOpened
+        );
+        assert_eq!(
+            dispatch_settings(MenuCommand::CloseSettings, &mut panel, 3).unwrap(),
+            MenuEffect::SettingsClosed
+        );
+        assert!(panel.tape().is_empty());
+    }
+
+    #[test]
+    fn settings_apply_in_the_past_keeps_the_batch() {
+        let mut panel = SettingsPanel::new();
+        panel.advance(10).unwrap();
+        let step = MenuCommand::StepSetting(SettingRow::Vsync);
+        dispatch_settings(step, &mut panel, 10).unwrap();
+        let late = dispatch_settings(MenuCommand::CloseSettings, &mut panel, 4);
+        assert_eq!(
+            late,
+            Err(SettingsError::BoundaryInPast {
+                at_tick: 4,
+                earliest: 10
+            })
+        );
+        assert_eq!(panel.staged_len(), 1);
+        let retry = dispatch_settings(MenuCommand::CloseSettings, &mut panel, 10).unwrap();
+        assert!(matches!(retry, MenuEffect::SettingsApplied(_)));
+        assert!(!panel.draft().vsync);
+    }
+
+    #[test]
+    fn setting_rows_wrap_and_stay_legal() {
+        let mut now = Settings::default();
+        for row in [
+            SettingRow::Volume(VolumeBus::Master),
+            SettingRow::Quality,
+            SettingRow::RenderScale,
+            SettingRow::Vsync,
+        ] {
+            // Far more steps than any cycle is long; none may be refused.
+            for _ in 0..40 {
+                let change = row.next(&now);
+                now.check(change).unwrap();
+                now.set(change);
+            }
+        }
+        // 40 steps over the 6-value scale cycle 100,90..50 land on 60.
+        assert_eq!(now.render_scale_pct, 60);
+        assert_eq!(
+            SettingRow::RenderScale.next(&Settings::default()),
+            SettingChange::RenderScale(90)
+        );
+    }
+
+    #[test]
+    fn dispatch_ignores_setting_steps_without_a_panel() {
+        let step = MenuCommand::StepSetting(SettingRow::Vsync);
+        assert_eq!(
+            dispatch(step, &ModeHooks::empty()).unwrap(),
+            MenuEffect::Nothing
+        );
+        let mut panel = SettingsPanel::new();
+        assert_eq!(
+            dispatch_settings(MenuCommand::Resume, &mut panel, 0).unwrap(),
+            MenuEffect::Nothing
+        );
     }
 
     #[test]

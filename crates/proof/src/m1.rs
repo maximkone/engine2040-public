@@ -121,9 +121,9 @@ pub fn fnv_hex(bytes: &[u8]) -> String {
 /// (`"`, `\`, controls) and every field was already bounded at record time.
 pub fn emit_receipt(receipt: &Receipt) -> String {
     let mut out = String::from("{\"workflow\":\"");
-    escape_into(&mut out, &receipt.workflow);
+    engine_core::json::escape_into(&mut out, &receipt.workflow);
     out.push_str("\",\"fixture\":\"");
-    escape_into(&mut out, &receipt.fixture);
+    engine_core::json::escape_into(&mut out, &receipt.fixture);
     out.push_str("\",\"all_pass\":");
     out.push_str(if receipt.all_pass() { "true" } else { "false" });
     out.push_str(",\"steps\":[");
@@ -132,11 +132,11 @@ pub fn emit_receipt(receipt: &Receipt) -> String {
             out.push(',');
         }
         out.push_str("{\"name\":\"");
-        escape_into(&mut out, &step.name);
+        engine_core::json::escape_into(&mut out, &step.name);
         out.push_str("\",\"pass\":");
         out.push_str(if step.pass { "true" } else { "false" });
         out.push_str(",\"detail\":\"");
-        escape_into(&mut out, &step.detail);
+        engine_core::json::escape_into(&mut out, &step.detail);
         out.push_str("\"}");
     }
     out.push_str("],\"digests\":[");
@@ -145,9 +145,9 @@ pub fn emit_receipt(receipt: &Receipt) -> String {
             out.push(',');
         }
         out.push_str("{\"label\":\"");
-        escape_into(&mut out, &digest.label);
+        engine_core::json::escape_into(&mut out, &digest.label);
         out.push_str("\",\"hex\":\"");
-        escape_into(&mut out, &digest.hex);
+        engine_core::json::escape_into(&mut out, &digest.hex);
         out.push_str("\"}");
     }
     out.push_str("]}");
@@ -160,23 +160,6 @@ fn bound_text(text: &str, max: usize) -> String {
         text.to_string()
     } else {
         text.chars().take(max).collect()
-    }
-}
-
-/// Append `text` with JSON string escaping.
-fn escape_into(out: &mut String, text: &str) {
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
     }
 }
 

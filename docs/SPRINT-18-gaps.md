@@ -394,7 +394,7 @@ Same source and routing as the frame section above.
   fork shows as CRASHED in the sweep. F2P: it shows as zero metrics today.
   P2P: `cargo test -p engine-arena --lib fork` green; golden unchanged.
   Review: rust-craft.md G4.
-- [ ] EG17 provider: pinned requests and TLS — every request body is `{model,
+- [x] EG17 provider: pinned requests and TLS — every request body is `{model, Landed 18df0498. https_stub_roundtrip and pinned_request_body_is_byte_stable pass.
   one user message, max_tokens}` (`crates/provider/src/openai.rs:54`,
   `anthropic.rs:51`, `transport.rs:523`). Send a fixed system prompt,
   temperature 0, a seed where offered, and tool defs; turn `tls` on in endpoint
@@ -1047,7 +1047,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   test callers only. P2P: `cargo test -p engine-spatial --lib` green; golden
   unchanged. SP16 should follow AD18. Plan: `docs/plan/forge-adoption.md`
   AD-18. needs: none.
-- [ ] AD19 provider: status map and rate-limit gate — 400, 404 and 422 do not
+- [x] AD19 provider: status map and rate-limit gate — 400, 404 and 422 do not Landed aa644693. Run 39052718180.
   retry; 5xx, 408 and socket errors retry with capped seeded jitter inside the
   request deadline; 429 waits for Retry-After once behind one shared gate per
   provider; a spend cap refuses. May add one `AiError` variant (protocol call
@@ -1524,7 +1524,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   fighter_look camera hunk. Accept: one hit gives a nonzero offset that is
   zero again within 1.0 s; the same ticks give the same offsets; the product
   check keeps framing empty 0. F2P: no shake. P2P: game lib green. needs: none.
-- [ ] LF12 anim: feet planted and the sword in hand — two-bone IK (ozz
+- [ ] LF12 anim: feet planted and the sword in hand — two-bone IK (ozz Progress 2026-10-17 (3065d34): feet half landed — `solve_limb` two-bone IK plus planted feet in the fighter look; shoved-guard slide 10.3 cm to 0.0, duel p95 1.0 to 0.7 cm; left: the weapon hand (no grip socket yet).
   `ik_two_bone_job.h`, orangeduck Motion-Matching `controller.cpp`
   `ik_two_bone`): a foot slower than 0.15 m/s locks to its contact point, the
   pelvis drops by the largest gap; the weapon hand reaches the grip socket.

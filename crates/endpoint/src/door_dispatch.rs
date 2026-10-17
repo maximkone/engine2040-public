@@ -354,10 +354,8 @@ fn witness_authority_tier(cap: &Capability) -> u8 {
         3
     } else if cap.ops.contains(OpMask::EDIT) {
         2
-    } else if cap.ops.contains(OpMask::INSERT) || cap.ops.contains(OpMask::MOVE) {
-        1
     } else {
-        0
+        u8::from(cap.ops.contains(OpMask::INSERT) || cap.ops.contains(OpMask::MOVE))
     }
 }
 
@@ -839,7 +837,7 @@ mod tests {
             log.iter().all(|record| record.tool != "test.run"),
             "unrouted harvest seals no test.run record"
         );
-        assert!(log.len() >= 1);
+        assert!(!log.is_empty());
     }
 
     #[test]
