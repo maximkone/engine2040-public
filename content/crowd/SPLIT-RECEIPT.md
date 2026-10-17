@@ -257,3 +257,9 @@ Run the `--features import mesh_cook` gate on a warm cache (workspace
 `target/` now holds the compiled `import` graph from this run's green proof
 build), then stage soak (CT50), variety (CT38) and eyes (CT44). Row Accept
 (soak captures populated, 0 findings, cook x2) is NOT met — do not tick CT25.
+
+## Re-check 2026-10-17 (scaffold only, row stays open)
+
+- `node content/crowd/tools/gen.mjs` run twice: both specimen files keep the manifest SHA-256 (`21295d44...` and `bd59050f...`). Deterministic.
+- GitHub `cargo check --locked --manifest-path content/crowd/proof/Cargo.toml`: FAIL, run 39064515835. `--locked` refused because `content/crowd/proof/Cargo.lock` does not match the crate. Not fixed in this pass.
+- The cook proof (`cargo run` of the proof binary) is not on the gh-check allow-list (check, test, clippy only), so `report-split1.json` is still not produced. CT25 Accept (soak captures, cook x2) is not claimed.

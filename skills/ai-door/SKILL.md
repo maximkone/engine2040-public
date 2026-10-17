@@ -1,6 +1,6 @@
 ---
 name: ai-door
-description: "Use when you change an AI door verb, MCP verb or pack in crates/endpoint, a provider adapter or model call, an eval or win-rate claim, an offline search or int8 net in crates ai, provider, nn, endpoint or playtest: record actions, idempotent verbs, frozen baseline, conformance matrix."
+description: "Use when you add or change an MCP verb or pack (crates/endpoint), a provider or model adapter, an eval or win-rate number, or an offline search or int8 net. Verbs record actions and stay idempotent."
 ---
 
 # AI door

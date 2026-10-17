@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BuildError, DIST_FILES, SIZE_LIMIT_BYTES, TARGET, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
-  listFiles, lockedVersion, parseArgs, realDeps, renderHtml,
+  BuildError, DIST_FILES, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
+  listFiles, lockedVersion, parseArgs, realDeps, renderHtml, sizeSweep,
 } from "./web-build.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -30,7 +30,7 @@ function scratch(lock = LOCK) {
 }
 
 // The fake machine. `wasmBytes` is what cargo "compiles"; `has` says which tools exist.
-function toolchain(rootDir, { wasmBytes = 1000, bindgen = "0.2.128", has = ["wasm-bindgen", "wasm-opt"], cargoFails = false, optFactor = 0.5, twiggy = false } = {}) {
+function toolchain(rootDir, { wasmBytes = 1000, bindgen = "0.2.128", has = ["wasm-bindgen", "wasm-opt"], cargoFails = false, optFactor = 0.5, twiggy = false, levelBytes = {}, flagFactor = {} } = {}) {
   const calls = [];
   const wasm = (n) => Buffer.alloc(n, 7);
   const run = (cmd, args, o = {}) => {
@@ -43,7 +43,7 @@ function toolchain(rootDir, { wasmBytes = 1000, bindgen = "0.2.128", has = ["was
     if (key === "cargo build") {
       if (cargoFails) return { status: 101, out: "error[E0599]: no variant named Wgsl\nerror: could not compile `engine-web`\n" };
       mkdirSync(dirname(builtWasmPath(rootDir)), { recursive: true });
-      writeFileSync(builtWasmPath(rootDir), wasm(wasmBytes));
+      writeFileSync(builtWasmPath(rootDir), wasm(levelBytes[o.env?.CARGO_PROFILE_WEB_OPT_LEVEL] ?? wasmBytes));
       return { status: 0, out: "" };
     }
     if (cmd === "wasm-bindgen") {
@@ -55,8 +55,8 @@ function toolchain(rootDir, { wasmBytes = 1000, bindgen = "0.2.128", has = ["was
       return { status: 0, out: "" };
     }
     if (cmd === "wasm-opt") {
-      const file = args[0];
-      writeFileSync(file, wasm(Math.floor(readFileSync(file).length * optFactor)));
+      const flag = args.find((a) => /^-O[a-z0-9]$/.test(a));
+      writeFileSync(args[args.indexOf("-o") + 1], wasm(Math.floor(readFileSync(args[0]).length * (flagFactor[flag] ?? optFactor))));
       return { status: 0, out: "" };
     }
     return { status: 127, out: `unexpected ${cmd} ${args.join(" ")}` };
@@ -165,7 +165,51 @@ test("twiggy's top lines are kept when it is installed", () => {
     const t = toolchain(s.dir, { twiggy: true });
     const info = build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run));
     assert.equal(info.twiggy.length, 2);
+    assert.deepEqual(t.calls.find((c) => c.cmd === "twiggy").args.slice(0, 3), ["top", "-n", "20"], "the receipt names the top 20 items");
     assert.match(info.twiggy[1], /data\[0\]/);
+  } finally {
+    s.done();
+  }
+});
+
+test("QW2: --opt-ab runs -Oz, -Os and -O3 on the same module, ships the smallest and keeps the table", () => {
+  const s = scratch();
+  try {
+    const t = toolchain(s.dir, { wasmBytes: 1000, flagFactor: { "-Oz": 0.7, "-Os": 0.5, "-O3": 0.9 } });
+    const lines = [];
+    const info = build({ rootDir: s.dir, outDir: s.out, commit: "c", ab: true }, { ...realDeps(), run: t.run, say: (l) => lines.push(l) });
+    const opts = t.calls.filter((c) => c.cmd === "wasm-opt" && c.args[0] !== "--version");
+    assert.equal(opts.length, 3);
+    for (const o of opts) for (const f of WASM_OPT_FEATURES) assert.ok(o.args.includes(f), f);
+    assert.deepEqual(info.wasmOptAb.map((r) => [r.flag, r.bytes]), [["-Oz", 700], ["-Os", 500], ["-O3", 900]]);
+    assert.ok(info.wasmOptAb.every((r) => r.gzipBytes > 0));
+    assert.equal(info.files["engine_bg.wasm"].bytes, 500, "the smallest raw module ships");
+    assert.deepEqual(info.wasmOptFlags, ["-Os", ...WASM_OPT_FEATURES]);
+    assert.ok(lines.some((l) => /^\[wasm-opt-ab\] -Os raw=500 gzip=\d+$/.test(l)));
+    assert.deepEqual(listFiles(s.out), [...DIST_FILES].sort(), "no candidate file leaks into dist/web");
+    assert.equal(build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(toolchain(s.dir).run)).wasmOptAb, null, "off by default");
+  } finally {
+    s.done();
+  }
+});
+
+test("QW1: --size-sweep builds each opt-level with the profile env, prints a table and names the smallest raw wasm", () => {
+  const s = scratch();
+  try {
+    const t = toolchain(s.dir, { levelBytes: { z: 1000, s: 800, 3: 2000 }, optFactor: 0.5 });
+    const lines = [];
+    const out = sizeSweep({ rootDir: s.dir, commit: "c" }, { ...realDeps(), run: t.run, say: (l) => lines.push(l) });
+    const cargos = t.calls.filter((c) => c.cmd === "cargo");
+    assert.deepEqual(cargos.map((c) => c.env.CARGO_PROFILE_WEB_OPT_LEVEL), SWEEP_LEVELS);
+    for (const c of cargos) assert.deepEqual(c.args, cargoArgs(), "the same profile and package at every level");
+    assert.deepEqual(out.rows.map((r) => [r.level, r.bytes, r.preOptBytes]), [["z", 500, 1000], ["s", 400, 800], ["3", 1000, 2000]]);
+    assert.ok(out.rows.every((r) => r.gzipBytes > 0 && r.brotliBytes > 0));
+    assert.equal(out.best, "s");
+    assert.equal(lines.filter((l) => /^\[size-sweep\] opt-level=\S raw=\d+ pre-opt=\d+ gzip=\d+ brotli=\d+$/.test(l)).length, 3);
+    assert.match(lines.at(-1), /smallest raw wasm: opt-level s \(400 bytes\)/);
+    assert.ok(!existsSync(s.out), "the sweep writes no dist/web");
+    const tie = sizeSweep({ rootDir: s.dir, commit: "c", levels: ["z", "s"] }, quiet(toolchain(s.dir).run));
+    assert.equal(tie.best, "z", "a tie keeps the first level");
   } finally {
     s.done();
   }
@@ -272,8 +316,11 @@ test("the real inputs build() reads exist: lock, template, crate manifest, web p
 });
 
 test("parseArgs", () => {
-  assert.deepEqual(parseArgs([]), { out: null, commit: null, optimize: true, error: null });
-  assert.deepEqual(parseArgs(["--out", "x", "--commit", "abc", "--no-opt"]), { out: "x", commit: "abc", optimize: false, error: null });
+  assert.deepEqual(parseArgs([]), { out: null, commit: null, optimize: true, ab: false, sweep: null, error: null });
+  assert.deepEqual(parseArgs(["--out", "x", "--commit", "abc", "--no-opt", "--opt-ab"]), { out: "x", commit: "abc", optimize: false, ab: true, sweep: null, error: null });
+  assert.deepEqual(parseArgs(["--size-sweep"]).sweep, ["z", "s", "3"]);
+  assert.deepEqual(parseArgs(["--size-sweep", "s,2", "--commit", "a"]).sweep, ["s", "2"]);
+  assert.match(parseArgs(["--size-sweep", "fast"]).error, /opt-levels/);
   assert.match(parseArgs(["--wat"]).error, /unknown argument/);
   assert.match(parseArgs(["--out"]).error, /need a value/);
 });

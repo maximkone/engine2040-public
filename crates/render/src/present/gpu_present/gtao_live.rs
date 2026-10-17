@@ -264,6 +264,7 @@ fn live_ao_uniform_bytes(
 impl GtaoGpu {
     /// Compile both kernels and their layouts. Cold path, once per presenter.
     pub(crate) fn new(device: &wgpu::Device) -> Self {
+        use crate::pipeline_warmup::CountedPipelines as _;
         let module = |label: &'static str, body: &str| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -305,7 +306,7 @@ impl GtaoGpu {
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipe_layout),
                 module,

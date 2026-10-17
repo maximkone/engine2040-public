@@ -1,6 +1,6 @@
 ---
 name: web-wasm
-description: "Use when a crate must build or run for wasm32 or the browser: cfg(target_arch) patterns, engine_clock::install, FsSource, wasm-gate baseline, wasm-check legs, dist/web build, headless Chrome proof, web-build and pages workflows, wasm-opt pin."
+description: "Use when a crate must build or run for wasm32 or the browser: cfg(target_arch) patterns, clock and file shims, wasm-gate, wasm-check legs, dist/web build, headless Chrome proof, web workflows. Real-browser check: browser-test-on-this-pc."
 ---
 
 # Web and wasm32
@@ -56,6 +56,8 @@ Patterns used here:
 5. Look at it yourself: `python -m http.server 8080 --bind 127.0.0.1 -d dist/web`, then open `http://localhost:8080/`. WebGPU needs https or localhost. `.wasm` must be served as `application/wasm`.
 
 ## 5. Headless Chrome proof
+
+On real hardware, in the Claude app's browser pane, against the published Pages URL: skill `browser-test-on-this-pc`.
 
 - `node tools/web-browse.mjs --dir dist/web --chrome <chrome path> --out out/web [--require-adapter] [--only <n>] [--all]`.
 - It serves loopback only. It tries software-adapter flag sets (`FLAG_SETS` in the tool) until one gives an adapter. It screenshots the canvas (must not be blank), checks frames keep coming, and checks the page survives `device.destroy()`. Then it reruns with `navigator.gpu` removed: the page must show the loud message and `ok:false reason no-webgpu`.

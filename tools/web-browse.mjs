@@ -8,6 +8,11 @@
 //     the exact reason of every attempt is written down (attempts.json) and the run says NO ADAPTER.
 //  2. The no-WebGPU run. navigator.gpu is removed before the page starts; the loud message with the browser
 //     versions must show, the line must say ok:false reason no-webgpu, and nothing may throw.
+//  3. The net duel (WEB9, WEB12), only with --server: `node tools/web-browse.mjs --dir dist/web --chrome google-chrome
+//     --out out/web-net --server ws://127.0.0.1:7050 [--expect-hash <hex>] [--expect-transport websocket]
+//     [--wt https://host:port/e2040 --cert <sha256 hex>] [--net-timeout <s>]`. Loads the page at `?server=...` in a Chrome
+//     with no GPU flags (the duel needs none), waits for `net: transport=.. ticks=.. hash=.. peers=..` in #net and checks it:
+//     600 ticks, the hash you expect, the transport you expect. Nothing else runs in that mode. Exit 0 proven, 1 not.
 // Exit: 0 all proven (a missing adapter is only a failure with --require-adapter), 1 a proof failed,
 // 2 could not run (no Chrome, bad arguments), 3 no adapter and --require-adapter was given.
 // Only loopback is served and visited. The Chrome processes started here are ours and are closed here.
@@ -160,6 +165,13 @@ export function arenaVerdict(a) {
     if (rc.validationErrors !== 0) problems.push(`validation errors ${rc.validationErrors}${rc.firstError ? `: ${rc.firstError}` : ""}`);
     if (rc.frameErrors !== 0) problems.push(`frame errors ${rc.frameErrors}${rc.firstError ? `: ${rc.firstError}` : ""}`);
     if (!(rc.frames > 0)) problems.push("the receipt counts no frame");
+    // WEB13: a pipeline built after the loader is a stutter the page names loudly; the run fails on it.
+    if (rc.latePipelines > 0) problems.push(`late_compile: ${rc.latePipelines} pipeline(s) built after the loader (${String(a.pipelinesText).slice(0, 200)})`);
+    // WEB8: the page names its tier, the ready-line tier and the receipt tier agree, and the one-second split has all four fields.
+    if (typeof rc.tier !== "string" || !rc.tier) problems.push("the receipt names no tier");
+    else if (!/^tier=[a-z]+ /.test(String(a.tierText))) problems.push(`the page prints no tier= line: ${String(a.tierText).slice(0, 120)}`);
+    else if (!String(a.tierText).startsWith(`tier=${rc.tier} `)) problems.push(`the tier line says ${String(a.tierText).split(" ")[0]}, the receipt says tier=${rc.tier}`);
+    if (!/^pipelines=\d+ ms=\d+/.test(String(a.pipelinesText))) problems.push(`the page prints no pipelines=<n> ms=<t> line: ${String(a.pipelinesText).slice(0, 120)}`);
   }
   return { ok: problems.length === 0, problems };
 }
@@ -268,7 +280,15 @@ export async function launchChrome(chrome, flags, logFile) {
 }
 
 // The browse receipt: what the ready line said about wasm memory plus the time to the first frame.
-export const receiptOf = (report, firstFrameMs, set) => ({ schema: 1, set, wasmMemoryBytes: report?.wasmMemoryBytes ?? null, ttffMs: firstFrameMs ?? null, commit: report?.commit ?? null });
+// WEB8/WEB13: the arena page's tier, validation count and pipeline warm-up ride along (null on the plain shell page).
+// `arena` is readArena's result: its receipt is the page's own final count, newer than the ready line.
+export const receiptOf = (report, firstFrameMs, set, arena = null) => ({
+  schema: 1, set, wasmMemoryBytes: report?.wasmMemoryBytes ?? null, ttffMs: firstFrameMs ?? null, commit: report?.commit ?? null,
+  tier: arena?.receipt?.tier ?? report?.tier ?? null,
+  validation: arena?.receipt?.validationErrors ?? report?.validation ?? null,
+  pipelines: report?.pipelines ?? null, pipelinesMs: report?.pipelinesMs ?? null,
+  latePipelines: arena?.receipt?.latePipelines ?? report?.latePipelines ?? null,
+});
 
 const parseLine =(text) => { try { const v = JSON.parse(text); return v && typeof v === "object" ? v : null; } catch { return null; } };
 
@@ -323,7 +343,7 @@ export async function readArena({ evalJs, sleep: nap }, waitMs = 150000) {
     await nap(500);
   }
   const text = (id) => evalJs(`document.getElementById('${id}')?.textContent ?? ''`);
-  const out = { capture, waitedMs: Date.now() - t0, receiptText: await text("receipt"), passes: await text("passes"), init: await text("init"), captureText: await text("capture") };
+  const out = { capture, waitedMs: Date.now() - t0, receiptText: await text("receipt"), passes: await text("passes"), init: await text("init"), captureText: await text("capture"), tierText: await text("tier"), splitText: await text("split"), pipelinesText: await text("pipelines") };
   out.receipt = parseLine(out.receiptText);
   out.captureLine = parseLine(out.captureText);
   if (capture === "ready" || capture === "blank") {
@@ -450,7 +470,7 @@ export function writeArena(dir, prefix, arena) {
 }
 
 export function parseArgs(argv) {
-  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null };
+  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null, server: null, wt: null, cert: null, expectHash: null, expectTransport: null, expectFailure: [], netTimeout: 90 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") o.dir = argv[++i];
@@ -460,17 +480,127 @@ export function parseArgs(argv) {
     else if (a === "--all") o.all = true;
     else if (a === "--only") o.only = Number(argv[++i]);
     else if (a === "--input") o.input = argv[++i] ?? null;
+    else if (a === "--server") o.server = argv[++i] ?? null;
+    else if (a === "--wt") o.wt = argv[++i] ?? null;
+    else if (a === "--cert") o.cert = argv[++i] ?? null;
+    else if (a === "--expect-hash") o.expectHash = argv[++i] ?? null;
+    else if (a === "--expect-transport") o.expectTransport = argv[++i] ?? null;
+    else if (a === "--expect-failure") o.expectFailure.push(argv[++i] ?? "");
+    else if (a === "--net-timeout") o.netTimeout = Number(argv[++i]);
     else o.error = `unknown argument ${a}`;
   }
   if (!o.chrome) o.error ??= "--chrome <path to Chrome> is required";
   if (o.only !== null && !(o.only >= 0)) o.error ??= "--only needs a flag set index";
   if (argv.includes("--input") && !o.input) o.error ??= "--input needs a JSON file of events";
+  if (argv.includes("--server") && !/^wss?:\/\/[^/\s]+/.test(o.server ?? "")) o.error ??= "--server needs ws://host:port (or wss://host)";
+  if ((o.wt || o.cert) && !o.server) o.error ??= "--wt and --cert go with --server";
+  if (o.wt && !/^https:\/\//.test(o.wt)) o.error ??= "--wt needs https://host:port/e2040";
+  if (o.cert && !/^[0-9a-f]{64}$/i.test(o.cert)) o.error ??= "--cert needs 64 hex digits (the SHA-256 of the certificate)";
+  if (o.expectHash && !/^[0-9a-f]{16}$/i.test(o.expectHash)) o.error ??= "--expect-hash needs 16 hex digits";
+  if (o.expectTransport && !["websocket", "webtransport"].includes(o.expectTransport)) o.error ??= "--expect-transport is websocket or webtransport";
+  if (o.expectFailure.some((t) => !t) || (o.expectFailure.length && (o.expectHash || o.expectTransport))) o.error ??= "--expect-failure needs text and does not go with --expect-hash or --expect-transport";
+  if (!(o.netTimeout >= 1)) o.error ??= "--net-timeout needs seconds";
   return o;
+}
+
+// ---- the net duel (WEB9, WEB12) ----
+// The page joins a native dedicated server (`?server=ws://host:port`), plays 600 scripted ticks and prints one line to #net:
+//   net: transport=<webtransport|websocket> ticks=<n> hash=<16 hex> peers=<n>        or        net: failed transport=<leg|none> reason=<text>
+// `data-net` on <body> is running, ok or failed. The hash is the server's state hash of the last tick, which the page's own
+// simulation reached too; `net_serve --reference` prints the same number offline.
+export const NET_OK = /^net: transport=(webtransport|websocket) ticks=(\d+) hash=([0-9a-f]{16}) peers=(\d+)$/;
+export const NET_TICKS = 600;
+
+// The page address of a net run: the static server's origin plus the `?server=` keys.
+export function netUrl(port, { server, wt = null, cert = null }) {
+  const q = new URLSearchParams({ server });
+  if (wt) q.set("wt", wt);
+  if (cert) q.set("cert", cert);
+  return `http://127.0.0.1:${port}/index.html?${q}`;
+}
+
+// What the page's net line proved against what the run expects. `want`: { hash, transport, ticks }.
+export function netVerdict(text, state, want = {}) {
+  const line = String(text ?? "").split("\n")[0].trim();
+  if (want.failure?.length) {
+    // A run that must fail, loudly: the page says failed and names every text asked for (for example the blocked leg).
+    const problems = [];
+    if (state !== "failed") problems.push(`expected the duel to fail, it ended as ${state ?? "never finished"}: ${line.slice(0, 300)}`);
+    for (const t of want.failure) if (!line.includes(t)) problems.push(`the failure text lacks "${t}": ${line.slice(0, 400)}`);
+    return { ok: problems.length === 0, line, parsed: null, problems };
+  }
+  if (state !== "ok") return { ok: false, line, parsed: null, problems: [`the net duel ended as ${state ?? "never finished"}: ${line.slice(0, 400)}`] };
+  const m = NET_OK.exec(line);
+  if (!m) return { ok: false, line, parsed: null, problems: [`data-net is ok but the line is not the net shape: ${line.slice(0, 300)}`] };
+  const parsed = { transport: m[1], ticks: Number(m[2]), hash: m[3], peers: Number(m[4]) };
+  const problems = [];
+  if (parsed.ticks !== (want.ticks ?? NET_TICKS)) problems.push(`ticks ${parsed.ticks}, expected ${want.ticks ?? NET_TICKS}`);
+  if (want.hash && parsed.hash !== String(want.hash).toLowerCase()) problems.push(`hash ${parsed.hash}, the server's is ${String(want.hash).toLowerCase()}`);
+  if (want.transport && parsed.transport !== want.transport) problems.push(`transport ${parsed.transport}, expected ${want.transport}`);
+  if (!(parsed.peers >= 1)) problems.push(`peers ${parsed.peers}`);
+  return { ok: problems.length === 0, line, parsed, problems };
+}
+
+// Load the net page in a Chrome with the base flags only and wait for the line. Returns { text, state, console, exceptions, waitedMs }.
+export async function readNetPage({ chrome, flags = BASE_FLAGS, url, logFile, waitMs = 90000 }) {
+  const b = await launchChrome(chrome, flags, logFile);
+  const { cdp } = b;
+  const consoleLines = [], exceptions = [];
+  try {
+    cdp.on("Runtime.consoleAPICalled", (p) => consoleLines.push(`${p.type}: ${(p.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ")}`.slice(0, 600)));
+    cdp.on("Runtime.exceptionThrown", (p) => exceptions.push(String(p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text ?? "exception").slice(0, 400)));
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    const evalJs = async (expression) => {
+      const r = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+      if (r.exceptionDetails) throw new Error(`evaluate: ${r.exceptionDetails.text} ${r.exceptionDetails.exception?.description ?? ""}`);
+      return r.result.value;
+    };
+    await cdp.send("Page.navigate", { url });
+    const t0 = Date.now();
+    let state = null, text = "";
+    while (Date.now() - t0 < waitMs) {
+      await sleep(250);
+      try { [state, text] = await evalJs("[document.body?.dataset.net ?? null, document.getElementById('net')?.textContent ?? '']"); } catch { state = null; }
+      if (state === "ok" || state === "failed") break;
+    }
+    return { text, state, console: consoleLines, exceptions, waitedMs: Date.now() - t0 };
+  } finally {
+    await b.close();
+  }
+}
+
+// `--server`: only the net duel runs. Prints NET LINE and the verdict; writes net.json (and the Chrome log) to --out.
+async function netMain(a) {
+  const dir = resolve(a.dir), out = resolve(a.out);
+  if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
+  mkdirSync(out, { recursive: true });
+  const server = await serve(dir);
+  try {
+    const url = netUrl(server.port, a);
+    const logFile = join(out, "chrome-net.log");
+    writeFileSync(logFile, "");
+    let r;
+    try { r = await readNetPage({ chrome: a.chrome, url, logFile, waitMs: a.netTimeout * 1000 }); } catch (e) { console.error(`web-browse: ${e.message ?? e}`); return 2; }
+    const v = netVerdict(r.text, r.state, { hash: a.expectHash, transport: a.expectTransport, failure: a.expectFailure });
+    console.log(`NET LINE ${v.line}`);
+    console.log(`net duel: ${v.ok ? (v.parsed ? `OK (${v.parsed.transport}, ${v.parsed.ticks} ticks, hash ${v.parsed.hash}${a.expectHash ? " equals the server's" : ""})` : "OK (failed loudly, as asked)") : `FAILED - ${v.problems.join("; ")}`}`);
+    if (!v.ok) {
+      for (const l of r.console.slice(0, 12)) console.log(`    console ${l.replace(/\s+/g, " ").slice(0, 400)}`);
+      for (const l of r.exceptions.slice(0, 3)) console.log(`    exception ${l.replace(/\s+/g, " ").slice(0, 400)}`);
+    }
+    writeFileSync(join(out, "net.json"), `${JSON.stringify({ url, verdict: v, expected: { hash: a.expectHash, transport: a.expectTransport }, waitedMs: r.waitedMs, console: r.console.slice(0, 60), exceptions: r.exceptions }, null, 2)}\n`);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### net duel\n\`${v.line}\`\n${v.ok ? "ok" : `**FAILED** ${v.problems.join("; ")}`}\n`);
+    return v.ok ? 0 : 1;
+  } finally {
+    await server.close();
+  }
 }
 
 export async function main(argv) {
   const a = parseArgs(argv);
   if (a.error) { console.error(`web-browse: ${a.error}`); return 2; }
+  if (a.server) return netMain(a);
   const dir = resolve(a.dir), out = resolve(a.out);
   if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
   mkdirSync(out, { recursive: true });
@@ -519,7 +649,7 @@ export async function main(argv) {
         writeFileSync(join(out, "report.json"), `${r.reportText}\n`);
         writeArena(out, "arena-capture", r.arena);
         // The numbers tools/web-budget.mjs gates on (WEB11).
-        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
+        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name, r.arena), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
         if (r.inputScreenshot) writeFileSync(join(out, "input.png"), r.inputScreenshot);
         writeFileSync(join(out, "flag-line.txt"), `${a.chrome} ${flags.join(" ")}\n`);
       }
@@ -537,6 +667,9 @@ export async function main(argv) {
         console.log(`ARENA HASH page ${winner.arena.captureLine?.hash} node ${winner.arena.nodeHash} ${winner.arena.hashOk ? "EQUAL" : "DIFFERENT"}; ${winner.arena.init}`);
         console.log(`ARENA RECEIPT ${winner.arena.receiptText}`);
         console.log(`ARENA PASSES ${winner.arena.passes}`);
+        console.log(`ARENA TIER ${winner.arena.tierText}`);
+        console.log(`ARENA SPLIT ${winner.arena.splitText || "(the first second is not over yet)"}`);
+        console.log(`ARENA PIPELINES ${winner.arena.pipelinesText}`);
       }
       const gw = goldenVerdict(winner.golden, winner.goldenState);
       console.log(`GOLDEN ${gw.ok ? "" : "FAILED "}${gw.line}`);

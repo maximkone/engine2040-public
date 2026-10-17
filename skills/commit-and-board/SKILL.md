@@ -1,6 +1,6 @@
 ---
 name: commit-and-board
-description: "Use when you commit or push on the shared master tree, tick or write a board row (docs/SPRINT-*.md, plan section 7), plan new rows, or add a doc that needs an index line: commit by path, temp GIT_INDEX_FILE, Landed sha, Accept, F2P, P2P, needs."
+description: "Use when you commit or push on the shared master tree, write a new board row, or add a doc that needs an index line: commit by path, temp index when others edit the same file, Accept, F2P, P2P, needs. To close a row use tick-a-row."
 ---
 
 # Commit and board
@@ -112,6 +112,9 @@ Fields, in this order:
 - One row, one outcome, small enough for one session (about 3 files or 200 lines). Bigger work splits into rows with disjoint paths.
 
 ## Tick the row
+
+Step by step, with the evidence and the sed traps: skill `tick-a-row`. A refused commit (ratchet): skill `rust-quality-ratchet`.
+
 
 - Tick only after the row's Accept passed.
 - Format at the end of the row's first line: `- [x] ID area: title ... Landed <sha7>.` Change `[ ]` to `[x]` and append ` Landed <sha7>.` Example: `... needs: none. Landed 979bc54.`

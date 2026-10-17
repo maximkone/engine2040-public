@@ -1,6 +1,6 @@
 ---
 name: render-pipeline-math
-description: "Use when you add or change a render pass, readback, fog, cascade, draw order, MSAA, TAA, WGSL shader, or do matrix, quaternion, normal, tangent, depth, shadow-bias or color math, or a frame shows mirrored, dark, flickering or vanishing geometry."
+description: "Use when you add or change a render pass, readback, fog, cascade, draw order, MSAA/TAA or WGSL shader, do matrix, quaternion, normal, depth or color math, or a frame shows mirrored, dark, flickering or missing geometry."
 ---
 
 # Render pipeline rules and math checks

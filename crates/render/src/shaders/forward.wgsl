@@ -126,12 +126,19 @@ struct SkinParams {
 // for slice-c maps). Staged per frame in `submit.rs`, zeroed for clears.
 @group(0) @binding(16) var<uniform> torches: TorchBlock;
 // EG12 slice c: tangent-space normal map plus its Repeat sampler at 17/18
-// (19 reserved for the ORM slice). Data maps stay linear; the CPU
+// (19 is the VR2 ORM map). Data maps stay linear; the CPU
 // `decode_normal`/`world_normal` mirrors in `forward_bind.rs` pin the math.
 // The `fs` perturbation plus the layout entries land with the bind slice;
 // until then no entry samples them, so pipelines stay validation-clean.
 @group(0) @binding(17) var normal_map: texture_2d<f32>;
 @group(0) @binding(18) var normal_smp: sampler;
+// VR2: packed ORM map (R occlusion, G perceptual roughness, B metallic, linear)
+// at 19, sampled with the normal map's Repeat sampler. The texel scales the
+// material factors; a draw with no set binds a 1x1 white texel (identity).
+// `orm_scale` carries it into the BRDF helpers below; `fs` writes it once,
+// every other entry keeps the identity default.
+@group(0) @binding(19) var orm_map: texture_2d<f32>;
+var<private> orm_scale: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 fn sky_view_uv(d: vec3<f32>) -> vec2<f32> {
     let elev = asin(clamp(d.y, -1.0, 1.0));
     let v = (1.5707963267948966 - elev) / 3.141592653589793;
@@ -677,14 +684,16 @@ fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>) -> 
     let ndot_h = clamp(dot(n, h), 0.0, 1.0);
     let ldot_h = clamp(dot(l, h), 0.0, 1.0);
 
-    let roughness = perceptual_roughness_to_roughness(mat.roughness);
-    let diffuse = diffuse_color_term(albedo, mat.metallic)
+    let perceptual = clamp(mat.roughness * orm_scale.y, 0.0, 1.0);
+    let metallic = clamp(mat.metallic * orm_scale.z, 0.0, 1.0);
+    let roughness = perceptual_roughness_to_roughness(perceptual);
+    let diffuse = diffuse_color_term(albedo, metallic)
         * fd_burley(roughness, ndot_v, ndot_l, ldot_h);
-    let f0 = f0_term(albedo, mat.metallic);
+    let f0 = f0_term(albedo, metallic);
     let f = fresnel_term(f0, ldot_h);
     let d = d_ggx(roughness, ndot_h);
     let vv = v_smith_ggx_correlated(roughness, ndot_v, ndot_l);
-    let fab = f_ab_term(mat.roughness, ndot_v);
+    let fab = f_ab_term(perceptual, ndot_v);
     let spec = specular_term(d, vv, f, f0, fab);
     let sun_shadow = sun_contact_factor(world_pos);
     return (diffuse + spec) * ndot_l * light.light_color * sun_shadow;
@@ -709,8 +718,8 @@ fn torch_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>, torc
     let h = normalize(l + v);
     let ndot_v = max(dot(n, v), 0.0001);
     let ldot_h = clamp(dot(l, h), 0.0, 1.0);
-    let roughness = perceptual_roughness_to_roughness(mat.roughness);
-    let diffuse = diffuse_color_term(albedo, mat.metallic)
+    let roughness = perceptual_roughness_to_roughness(clamp(mat.roughness * orm_scale.y, 0.0, 1.0));
+    let diffuse = diffuse_color_term(albedo, clamp(mat.metallic * orm_scale.z, 0.0, 1.0))
         * fd_burley(roughness, ndot_v, ndot_l, ldot_h);
     let att = 1.0 / (1.0 + dist * dist);
     let edge = 1.0 - dist / torch.range;
@@ -826,15 +835,21 @@ fn fs(in: VOut) -> FsOut {
     let mapped_n = eg12_world_normal(normalize(in.world_n), in.tangent, map_n);
     let n_ibl = normalize(mapped_n);
     let v_ibl = normalize(cam.camera_pos - in.world_pos);
-    let f0_ibl = f0_term(albedo, mat.metallic);
+    // VR2: the ORM texel scales the roughness and metallic factors and
+    // carries the baked occlusion (R) that dims the ambient diffuse below.
+    let orm = textureSample(orm_map, normal_smp, in.uv).rgb;
+    orm_scale = orm;
+    let rough_eff = clamp(mat.roughness * orm.y, 0.0, 1.0);
+    let metal_eff = clamp(mat.metallic * orm.z, 0.0, 1.0);
+    let f0_ibl = f0_term(albedo, metal_eff);
     // EG12: AO scales the baked diffuse only; specular stays open
     // (pipeline rule 4, mirrors CPU `shade_ibl_occluded`).
-    let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, mat.metallic);
-    let ibl_spec_term = ibl_specular(n_ibl, v_ibl, f0_ibl, mat.roughness);
+    let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, metal_eff);
+    let ibl_spec_term = ibl_specular(n_ibl, v_ibl, f0_ibl, rough_eff);
     // Contact darkens the baked ambient so feet ground in IBL wash; direct
     // sun keeps its own contact shade inside direct_light.
     let occlusion: f32 = sun_contact_factor(in.world_pos);
-    let lit = direct_light(in.world_pos, mapped_n, albedo) * shade + ibl_diffuse_term * occlusion + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
+    let lit = direct_light(in.world_pos, mapped_n, albedo) * shade + ibl_diffuse_term * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
     let radiance = max(lit * mat.exposure, vec3<f32>(0.0));
     let fog_f = fog_factor_finite(fog_fwd, cam.camera_pos, in.world_pos);
     var out: FsOut;

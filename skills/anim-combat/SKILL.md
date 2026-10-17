@@ -1,6 +1,6 @@
 ---
 name: anim-combat
-description: "Use when you change clip playback, pose blending, root motion, foot IK, character movement, camera boom, fight timing or parry windows, combat rows files, hit pause or shake, or fix a down pose sunk in the sand, in crates anim, combat or game."
+description: "Use when you change animation clips, blending, root motion, foot IK, character movement, the camera boom, fight timing or parry windows, combat rows, hit pause or shake, or a fighter sunk in the sand (crates anim, combat, game)."
 ---
 
 # Animation, combat and body feel

@@ -198,12 +198,13 @@ fn sun_depth_pipeline(
     bind_layout: &wgpu::BindGroupLayout,
     shader: &wgpu::ShaderModule,
 ) -> wgpu::RenderPipeline {
+    use crate::pipeline_warmup::CountedPipelines as _;
     let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("eg11-sun-pipe-layout"),
         bind_group_layouts: &[Some(bind_layout)],
         immediate_size: 0,
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some("eg11-sun-pipeline"),
         layout: Some(&pipe_layout),
         vertex: wgpu::VertexState {
