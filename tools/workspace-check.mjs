@@ -23,7 +23,7 @@ export const allowedEdges = new Map([
   ["engine-audio", ["engine-observe"]],
   ["engine-save", ["engine-observe"]],
   ["engine-anim", ["engine-nn", "engine-combat", "engine-ecs", "engine-nav"]],
-  ["engine-playtest", ["engine-ai", "engine-arena", "engine-render", "engine-provider", "engine-spatial"]],
+  ["engine-playtest", ["engine-ai", "engine-arena", "engine-combat", "engine-render", "engine-provider", "engine-spatial"]],
   ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle
   ["engine-assets", ["engine-scene", "engine-anim", "engine-clock"]],
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
@@ -34,7 +34,7 @@ export const allowedEdges = new Map([
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
   ["engine-material", ["engine-destruction"]],
-  ["engine-editor", ["engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app"]],
+  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app"]],
   // The duel teacher and strength gate run arena bouts through the public controller seam.
   ["engine-distill", ["engine-nn", "engine-ai", "engine-arena", "engine-input"]],
   // The squad pack reads legion formations from engine-ai (feature `mcp` only).

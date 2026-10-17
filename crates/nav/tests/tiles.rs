@@ -251,3 +251,272 @@ fn obstacle_requests_refuse_loudly() {
     let full = cache.add_box_obstacle(&nav, [1, 1, 1, 1]);
     assert_eq!(full, Err(TileError::QueueFull));
 }
+
+/// Sorted tile indexes a request touches, for readable asserts.
+fn tile_numbers(tiles: &[TileId]) -> Vec<u32> {
+    tiles.iter().map(|t| t.0).collect()
+}
+
+/// Settled 32x32 edge-8 grid with a rubble box over the middle crossing, the
+/// state the NV13 breach starts from.
+fn settled_rubble() -> (
+    TiledNav,
+    engine_nav::tiles::ObstacleCache,
+    engine_nav::tiles::ObstacleRef,
+) {
+    use engine_nav::tiles::ObstacleCache;
+    let mut nav = TiledNav::bake(&vec![false; 32 * 32], 32, 32, 8).expect("grid bakes");
+    let mut cache = ObstacleCache::default();
+    let rubble = cache
+        .add_box_obstacle(&nav, [14, 14, 17, 17])
+        .expect("rubble queues");
+    assert!(!nav.up_to_date(&cache), "a queued request is not converged");
+    nav.update_budget(&mut cache, usize::MAX);
+    assert!(nav.up_to_date(&cache), "settled before the breach");
+    (nav, cache, rubble)
+}
+
+/// The NV13 breach: two cylinder adds plus one box removal, each touching 4
+/// tiles (cap 8), rebuilt `budget` tiles per tick. Returns the rebuilds per
+/// tick, the stale walks after each tick, and the final digest.
+fn run_breach(budget: usize) -> (Vec<usize>, Vec<Vec<usize>>, u64) {
+    use engine_nav::tiles::MAX_TOUCHED_TILES;
+    let (mut nav, mut cache, rubble) = settled_rubble();
+    // One resting walk per tile the breach will dirty.
+    let dirty = [0u32, 1, 4, 5, 6, 9, 10, 11, 14, 15];
+    let walks: Vec<_> = dirty
+        .iter()
+        .map(|t| {
+            let cell = ((*t as usize % 4) * 8 + 3, (*t as usize / 4) * 8 + 3);
+            nav.find_path(cell, cell)
+                .expect("cell is free")
+                .expect("walk")
+        })
+        .collect();
+    let west = cache
+        .add_cylinder_obstacle(&nav, (8, 8), 2)
+        .expect("queues");
+    let east = cache
+        .add_cylinder_obstacle(&nav, (24, 24), 2)
+        .expect("queues");
+    let touched = [west, east, rubble].map(|r| cache.touched(&nav, r).expect("live"));
+    assert_eq!(
+        touched.each_ref().map(|t| t.len()),
+        [4, 4, 4],
+        "touched 4/4/4"
+    );
+    assert!(
+        touched.iter().all(|t| t.len() <= MAX_TOUCHED_TILES),
+        "cap 8"
+    );
+    assert_eq!(tile_numbers(&touched[0]), [0, 1, 4, 5]);
+    assert_eq!(tile_numbers(&touched[1]), [10, 11, 14, 15]);
+    assert_eq!(tile_numbers(&touched[2]), [5, 6, 9, 10]);
+    cache.remove_obstacle(rubble).expect("removal queues");
+    assert_eq!(cache.pending_count(), 3);
+    assert_eq!(nav.dirty_count(), 0, "requests only queue");
+
+    let (mut rebuilt, mut stale) = (Vec::new(), Vec::new());
+    while !nav.up_to_date(&cache) {
+        rebuilt.push(nav.update_budget(&mut cache, budget));
+        stale.push(nav.stale_paths(&walks));
+    }
+    assert_eq!(cache.pending_count(), 0);
+    assert_eq!(
+        nav.update_budget(&mut cache, budget),
+        0,
+        "converged is idle"
+    );
+    (rebuilt, stale, nav.digest())
+}
+
+#[test]
+fn four_tile_breach_rebuilds_one_tile_per_tick_and_converges() {
+    let (rebuilt, stale, digest) = run_breach(1);
+    assert_eq!(rebuilt, [1; 10], "1 rebuild per tick over 10 ticks");
+    for (tick, now) in stale.iter().enumerate() {
+        assert_eq!(
+            *now,
+            (0..=tick).collect::<Vec<_>>(),
+            "stale exact at tick {tick}"
+        );
+    }
+    assert_eq!(stale.last().map(Vec::len), Some(10), "stale exact 10/10");
+    assert_eq!(digest, run_breach(1).2, "digest x2");
+    assert_eq!(
+        digest, 8_032_266_843_827_844_966,
+        "pinned digest of the converged breach"
+    );
+}
+
+/// Ablation: draining the whole burst in one tick breaks the per-tick bound
+/// the budget keeps, yet lands on the same converged grid.
+#[test]
+fn burst_rebuild_breaks_the_per_tick_budget() {
+    let (rebuilt, _, digest) = run_breach(usize::MAX);
+    assert_eq!(rebuilt, [10], "burst rebuilds all 10 in one tick");
+    assert!(
+        rebuilt.iter().any(|n| *n > 1),
+        "the 1-per-tick gate catches it"
+    );
+    assert_eq!(digest, run_breach(1).2, "same grid once converged");
+}
+
+#[test]
+fn cylinder_obstacles_refuse_loudly_and_block_only_the_disc() {
+    use engine_nav::tiles::ObstacleCache;
+    let mut nav = TiledNav::bake(&vec![false; 32 * 32], 32, 32, 8).expect("grid bakes");
+    let mut cache = ObstacleCache::default();
+    assert_eq!(
+        cache.add_cylinder_obstacle(&nav, (32, 0), 1),
+        Err(TileError::BadBounds)
+    );
+    assert!(matches!(
+        cache.add_cylinder_obstacle(&nav, (16, 16), 20),
+        Err(TileError::TooManyTiles { .. })
+    ));
+    let disc = cache
+        .add_cylinder_obstacle(&nav, (8, 8), 2)
+        .expect("queues");
+    nav.update_budget(&mut cache, usize::MAX);
+    assert!(nav.find_path((8, 8), (8, 8)).is_err(), "centre is blocked");
+    assert!(
+        nav.find_path((10, 8), (10, 8)).is_err(),
+        "edge cell is blocked"
+    );
+    assert!(
+        nav.find_path((10, 10), (10, 10)).is_ok(),
+        "box corner stays open"
+    );
+    cache.remove_obstacle(disc).expect("removal queues");
+    nav.update_budget(&mut cache, usize::MAX);
+    assert!(nav.up_to_date(&cache));
+    assert!(
+        nav.find_path((8, 8), (8, 8)).is_ok(),
+        "removal clears the disc"
+    );
+}
+
+/// Arena-shaped 48x48 floor: a round wall with an east gate, four pillars,
+/// and one 2x2 plug at the corner where four 8-cell tiles meet.
+fn arena_floor() -> Vec<bool> {
+    let (w, h) = (48usize, 48usize);
+    let mut blocked = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = (x as i32 - 24, y as i32 - 24);
+            let d2 = dx * dx + dy * dy;
+            let gate = dx > 0 && dy.abs() <= 1;
+            let pillar = [(-8, -8), (8, -8), (-8, 8), (8, 8)]
+                .iter()
+                .any(|(px, py)| (dx - px).abs() <= 1 && (dy - py).abs() <= 1);
+            blocked[y * w + x] = d2 > 22 * 22 || (d2 >= 20 * 20 && !gate) || pillar;
+        }
+    }
+    for (x, y) in [(15, 15), (16, 15), (15, 16), (16, 16)] {
+        blocked[y * w + x] = true;
+    }
+    blocked
+}
+
+fn cell_bytes(cells: &[(usize, usize)]) -> Vec<u8> {
+    cells
+        .iter()
+        .flat_map(|(x, y)| [*x as u32, *y as u32])
+        .flat_map(u32::to_le_bytes)
+        .collect()
+}
+
+/// Diffs the whole-arena bake against the tiled bake on seeded cross-tile
+/// queries: grid walks, smooth paths and flow steps must match byte for
+/// byte. Returns the tiled side's bytes so a rerun can be compared.
+fn stitch_diff(whole: &TiledNav, tiled: &TiledNav) -> Vec<u8> {
+    let free: Vec<(usize, usize)> = (0..48)
+        .flat_map(|y| (0..48).map(move |x| (x, y)))
+        .filter(|cell| whole.find_path(*cell, *cell).is_ok())
+        .collect();
+    let mut state = 0x2040_u64;
+    let mut pick = || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        free[(state >> 33) as usize % free.len()]
+    };
+    let (mut report, mut crossing) = (Vec::new(), 0);
+    for _ in 0..150 {
+        let (start, goal) = (pick(), pick());
+        let want = whole.find_path(start, goal).expect("whole query");
+        let got = tiled.find_path(start, goal).expect("tiled query");
+        assert_eq!(
+            want.as_ref().map(|p| cell_bytes(p.cells())),
+            got.as_ref().map(|p| cell_bytes(p.cells())),
+            "walk {start:?}->{goal:?}"
+        );
+        let smooth_want = engine_nav::funnel::smooth_path(whole, start, goal).expect("whole");
+        let smooth_got = engine_nav::funnel::smooth_path(tiled, start, goal).expect("tiled");
+        assert_eq!(
+            smooth_want.as_ref().map(|p| p.points().to_vec()),
+            smooth_got.as_ref().map(|p| p.points().to_vec()),
+            "smooth {start:?}->{goal:?}"
+        );
+        crossing += usize::from(tiled.tile_of(start.0, start.1) != tiled.tile_of(goal.0, goal.1));
+        if let Some(p) = got {
+            report.extend(cell_bytes(p.cells()));
+        }
+    }
+    assert!(
+        crossing > 100,
+        "only {crossing} of 150 queries cross a tile"
+    );
+    let goal = (24, 24);
+    for (x, y) in &free {
+        assert_eq!(
+            whole.direction(goal, (*x, *y)),
+            tiled.direction(goal, (*x, *y)),
+            "flow step at ({x}, {y})"
+        );
+    }
+    report
+}
+
+#[test]
+fn stitched_tiles_match_the_whole_arena_before_and_after_a_breach() {
+    let run = || {
+        let floor = arena_floor();
+        let mut whole = TiledNav::bake(&floor, 48, 48, 64).expect("whole bakes");
+        let mut tiled = TiledNav::bake(&floor, 48, 48, 8).expect("tiled bakes");
+        assert_eq!((whole.tile_count(), tiled.tile_count()), (1, 36));
+        whole.bake_goal((24, 24)).expect("goal");
+        tiled.bake_goal((24, 24)).expect("goal");
+        let mut report = stitch_diff(&whole, &tiled);
+
+        // A walk across the plug, stamped before the breach.
+        let across = ((8, 24), (40, 24));
+        let held = tiled
+            .find_path(across.0, across.1)
+            .expect("query")
+            .expect("open");
+        for (x, y) in [(15, 15), (16, 15), (15, 16), (16, 16)] {
+            whole.set_blocked(x, y, false).expect("breach flips");
+            tiled.set_blocked(x, y, false).expect("breach flips");
+        }
+        assert_eq!(
+            whole.rebake_budget(usize::MAX),
+            1,
+            "one tile on the whole bake"
+        );
+        assert_eq!(
+            tiled.rebake_budget(usize::MAX),
+            4,
+            "the plug touches 4 tiles"
+        );
+        whole.bake_goal((24, 24)).expect("refresh");
+        tiled.bake_goal((24, 24)).expect("refresh");
+        report.extend(stitch_diff(&whole, &tiled));
+        assert_eq!(tiled.path_is_stale(&held), Ok(false), "a far walk survives");
+        report
+    };
+    let first = run();
+    assert!(!first.is_empty());
+    assert_eq!(first, run(), "stitch diff bytes x2");
+}

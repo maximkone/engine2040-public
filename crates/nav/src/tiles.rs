@@ -128,16 +128,31 @@ impl BreakSet {
 /// Salt-versioned obstacle handle; high 16 bits salt, low 16 slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObstacleRef(pub u32);
-/// Bounded box-obstacle queue; add/remove enqueue, drain applies touched tiles only.
+/// Bounded box/cylinder obstacle queue; add/remove enqueue, drain applies touched tiles only.
 /// Caller: `TiledNav::update_budget`. PORT(recastnavigation/recastnavigation@9f4ce64:DetourTileCache).
 #[derive(Clone, Debug, Default)]
 pub struct ObstacleCache {
     slots: Vec<ObstacleSlot>,
     pending: Vec<(bool, usize)>,
 }
-/// One box slot: clamped bounds, reuse salt, live flag.
+/// One obstacle slot: clamped bounds, optional disc, reuse salt, live flag.
 #[derive(Clone, Copy, Debug)]
-struct ObstacleSlot([usize; 4], u16, bool);
+struct ObstacleSlot {
+    bounds: [usize; 4],
+    /// Cylinder centre and radius in cells; `None` fills the whole box.
+    disc: Option<([usize; 2], usize)>,
+    salt: u16,
+    live: bool,
+}
+impl ObstacleSlot {
+    /// True when the slot blocks cell `(x, y)` inside its bounds.
+    fn covers(&self, x: usize, y: usize) -> bool {
+        self.disc.is_none_or(|([cx, cy], r)| {
+            let (dx, dy) = (x.abs_diff(cx), y.abs_diff(cy));
+            dx * dx + dy * dy <= r * r
+        })
+    }
+}
 impl ObstacleCache {
     /// Queues a rubble box over cells `b`; cells flip on drain.
     /// Errors: [`TileError::BadBounds`], [`TileError::TooManyTiles`], [`TileError::QueueFull`].
@@ -146,52 +161,112 @@ impl ObstacleCache {
         nav: &TiledNav,
         b: [usize; 4],
     ) -> Result<ObstacleRef, TileError> {
-        let bounds = clamp_box(nav, b)?;
+        self.enqueue(clamp_box(nav, b)?, None)
+    }
+    /// Queues a cylinder (a disc of cells) at `center` with `radius` cells;
+    /// cells flip on drain. The disc bounds obey the same tile cap as a box.
+    /// Errors: [`TileError::BadBounds`], [`TileError::TooManyTiles`], [`TileError::QueueFull`].
+    pub fn add_cylinder_obstacle(
+        &mut self,
+        nav: &TiledNav,
+        center: (usize, usize),
+        radius: usize,
+    ) -> Result<ObstacleRef, TileError> {
+        let (cx, cy) = center;
+        let bounds = clamp_box(
+            nav,
+            [
+                cx.saturating_sub(radius),
+                cy.saturating_sub(radius),
+                cx.saturating_add(radius),
+                cy.saturating_add(radius),
+            ],
+        )?;
+        if cx >= nav.width() || cy >= nav.height() {
+            return Err(TileError::BadBounds);
+        }
+        self.enqueue(bounds, Some(([cx, cy], radius)))
+    }
+    /// Queues a slot over `bounds`, reusing the lowest dead slot.
+    fn enqueue(
+        &mut self,
+        bounds: [usize; 4],
+        disc: Option<([usize; 2], usize)>,
+    ) -> Result<ObstacleRef, TileError> {
         if self.pending.len() >= MAX_OBSTACLE_REQUESTS {
             return Err(TileError::QueueFull);
         }
         let mut slot = self.slots.len();
-        if let Some(i) = self.slots.iter().position(|s| !s.2) {
+        if let Some(i) = self.slots.iter().position(|s| !s.live) {
             slot = i;
         } else {
             if slot >= 0xFFFF {
                 return Err(TileError::QueueFull);
             }
-            self.slots.push(ObstacleSlot(bounds, 1, false));
+            self.slots.push(ObstacleSlot {
+                bounds,
+                disc,
+                salt: 1,
+                live: false,
+            });
         }
-        self.slots[slot].0 = bounds;
-        self.slots[slot].2 = true;
+        self.slots[slot].bounds = bounds;
+        self.slots[slot].disc = disc;
+        self.slots[slot].live = true;
         self.pending.push((true, slot));
-        let salt = u32::from(self.slots[slot].1);
+        let salt = u32::from(self.slots[slot].salt);
         let low = u32::try_from(slot).map_err(|_| TileError::QueueFull)?;
         Ok(ObstacleRef((salt << 16) | low))
     }
-    /// Queues removal of a live box; cells clear on drain.
+    /// Queues removal of a live obstacle; cells clear on drain.
     /// Errors: [`TileError::UnknownObstacle`], [`TileError::QueueFull`].
     pub fn remove_obstacle(&mut self, obstacle: ObstacleRef) -> Result<(), TileError> {
-        let slot = usize::try_from(obstacle.0 & 0xFFFF)
-            .map_err(|_| TileError::UnknownObstacle(obstacle.0))?;
-        let salt =
-            u16::try_from(obstacle.0 >> 16).map_err(|_| TileError::UnknownObstacle(obstacle.0))?;
-        let known = matches!(self.slots.get(slot), Some(s) if s.2 && s.1 == salt);
-        if !known {
-            return Err(TileError::UnknownObstacle(obstacle.0));
-        }
+        let slot = self.live_slot(obstacle)?;
         if self.pending.len() >= MAX_OBSTACLE_REQUESTS {
             return Err(TileError::QueueFull);
         }
-        self.slots[slot].2 = false;
-        self.slots[slot].1 = self.slots[slot].1.wrapping_add(1).max(1);
+        self.slots[slot].live = false;
+        self.slots[slot].salt = self.slots[slot].salt.wrapping_add(1).max(1);
         self.pending.push((false, slot));
         Ok(())
+    }
+    /// Slot index of a live obstacle whose salt still matches.
+    fn live_slot(&self, obstacle: ObstacleRef) -> Result<usize, TileError> {
+        let unknown = TileError::UnknownObstacle(obstacle.0);
+        let slot = usize::try_from(obstacle.0 & 0xFFFF).map_err(|_| unknown)?;
+        let salt = u16::try_from(obstacle.0 >> 16).map_err(|_| unknown)?;
+        match self.slots.get(slot) {
+            Some(s) if s.live && s.salt == salt => Ok(slot),
+            _ => Err(unknown),
+        }
+    }
+    /// Tiles a live obstacle's bounds touch, ascending: the set its drain can
+    /// dirty (at most [`MAX_TOUCHED_TILES`]).
+    /// Errors: [`TileError::UnknownObstacle`], [`TileError::OutOfBounds`].
+    pub fn touched(&self, nav: &TiledNav, obstacle: ObstacleRef) -> Result<Vec<TileId>, TileError> {
+        let [x0, y0, x1, y1] = self.slots[self.live_slot(obstacle)?].bounds;
+        let mut tiles = Vec::new();
+        for y in (y0 / nav.edge()..=y1 / nav.edge()).map(|row| row * nav.edge()) {
+            for x in (x0 / nav.edge()..=x1 / nav.edge()).map(|col| col * nav.edge()) {
+                tiles.push(nav.tile_of(x, y)?);
+            }
+        }
+        Ok(tiles)
+    }
+    /// Requests queued and not yet drained.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
     /// Applies queued flips in order; rebake happens in `TiledNav::update_budget`.
     pub(crate) fn drain(&mut self, nav: &mut TiledNav) {
         for (add, slot) in std::mem::take(&mut self.pending) {
-            let [x0, y0, x1, y1] = self.slots[slot].0;
+            let obstacle = self.slots[slot];
+            let [x0, y0, x1, y1] = obstacle.bounds;
             for y in y0..=y1 {
                 for x in x0..=x1 {
-                    let _ = nav.set_blocked(x, y, add);
+                    if obstacle.covers(x, y) {
+                        let _ = nav.set_blocked(x, y, add);
+                    }
                 }
             }
         }
@@ -1071,6 +1146,12 @@ impl TiledNav {
             done += 1;
         }
         done
+    }
+
+    /// True when nothing is left to converge: no request waits in `cache` and
+    /// no tile waits for a rebake. Units: counts. Never allocates.
+    pub fn up_to_date(&self, cache: &ObstacleCache) -> bool {
+        cache.pending_count() == 0 && self.dirty_count() == 0
     }
 
     /// Applies queued obstacle flips, then rebakes up to `max_tiles` dirty

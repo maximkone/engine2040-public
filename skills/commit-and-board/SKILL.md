@@ -18,7 +18,7 @@ Never `git clean` under `target/`: it is one unit, `-X` on a subfolder wipes all
 - `git status --short`. Lines you did not make are someone else's.
 - Staged lines (`D `, `M `) in the real index are theirs too. A bare `git commit` would ship them.
 - Re-read a file right before you edit it. Never revert what you did not write.
-- An `auto: backup ...` commit lands every few minutes, so HEAD moves while you work. Rebuild any HEAD-based text just before you commit.
+- An `auto: backup ...` commit lands every few minutes for non-Rust files, so HEAD moves while you work. Rust files are no longer swept (auto-push farm mode off, 2026-10-18): commit every file of a row (the `mod x;` line and `x.rs` together) in one commit by path, or the mirror export and the Pages build break. Rebuild any HEAD-based text just before you commit.
 
 ## Case A: the paths are wholly yours
 

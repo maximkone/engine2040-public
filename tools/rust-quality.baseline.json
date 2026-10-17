@@ -215,7 +215,7 @@
   "engine-ecs": {
    "unwrap": 0,
    "panic_sites": 0,
-   "casts": 17,
+   "casts": 18,
    "allow_no_reason": 0,
    "dead_code_allows": 0,
    "print_in_lib": 0,
@@ -231,7 +231,7 @@
    "waivers": 0,
    "undoc_pub": 18,
    "unsafe": 1,
-   "tests": 80
+   "tests": 142
   },
   "engine-editor": {
    "unwrap": 0,
@@ -3381,6 +3381,53 @@
     "tests": 428
    },
    "reason": "VR2 ktx2_cook: BC block codec and mip filter arithmetic (u8/u32/f32 casts on texel data) and the arena_cook bin's single run(); no new dependency"
+  },
+  {
+   "date": "2026-10-17",
+   "crate": "engine-ecs",
+   "from": {
+    "unwrap": 0,
+    "panic_sites": 0,
+    "casts": 17,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 0,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 0,
+    "dup_fns": 0,
+    "passthrough": 0,
+    "long_fns": 0,
+    "big_files": 0,
+    "hot_alloc": 0,
+    "nondet": 0,
+    "waivers": 0,
+    "undoc_pub": 18,
+    "unsafe": 1,
+    "tests": 80
+   },
+   "to": {
+    "unwrap": 0,
+    "panic_sites": 0,
+    "casts": 18,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 0,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 0,
+    "dup_fns": 0,
+    "passthrough": 0,
+    "long_fns": 0,
+    "big_files": 0,
+    "hot_alloc": 0,
+    "nondet": 0,
+    "waivers": 0,
+    "undoc_pub": 18,
+    "unsafe": 1,
+    "tests": 142
+   },
+   "reason": "ARC17 spine columns and the RC9 snapshot code index u32 slots into usize tables (8 archetype.rs, 3 snapshot.rs); a slot id is u32 by design, narrowing is checked at spawn"
   }
  ]
 }
