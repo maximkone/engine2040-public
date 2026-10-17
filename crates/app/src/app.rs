@@ -5,8 +5,6 @@
 //! frame, which reads arena checkpoints through the public `run` entry.
 //! Ordering and extraction never enter sim hashes; they are receipts.
 
-use std::time::Instant;
-
 use engine_arena::{ArenaConfig, FighterTape};
 use engine_core::{hash_bytes, IntAcc, TickState};
 use engine_ecs::archetype::{Position, Registry, Velocity};
@@ -481,7 +479,7 @@ impl App {
         if self.lifecycle != Lifecycle::Unstarted {
             return Err(AppError::AlreadyStarted { what: "startup" });
         }
-        let wall = Instant::now();
+        let wall = engine_clock::now();
         self.journal.record(
             "startup.config",
             format!(
@@ -527,7 +525,7 @@ impl App {
             format!("{VERIFY_TICKS} ticks agree twice, hash {verify_hash:016x}"),
         )?;
 
-        let startup_ms = u64::try_from(wall.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let startup_ms = u64::try_from(engine_clock::since(wall).as_millis()).unwrap_or(u64::MAX);
         let receipt = StartupReceipt {
             startup_ms,
             verify_hash,

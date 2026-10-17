@@ -38,6 +38,12 @@
    "undocumented": 16,
    "coverage": 95.87628865979381
   },
+  "engine-clock": {
+   "total": 7,
+   "documented": 7,
+   "undocumented": 0,
+   "coverage": 100
+  },
   "engine-combat": {
    "total": 362,
    "documented": 356,

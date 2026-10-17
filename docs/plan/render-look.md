@@ -10,6 +10,18 @@ Tag NOW (Look). Prefixes: RL, RP, RA, GX, Q1; merged `VS` (arena wiring) and `WI
 
 Status 2026-10-17: disk shows the row S5 false half still holds. `rg -n encode_post crates/render` returns 0 hits (exit 1), so the `:9` "submits forward, shadow, post, sky, material, particle and decal passes" line still overstates the graph; the live frame runs `crates/render/src/present/gpu_present/live.rs:1172` `encode_forward` then `:1221` `encode_blit` with no post pass between (also `:1352` then `:1430`); the only `run_frame` caller outside `post.rs` is `crates/render/src/aa_scale.rs:2603`, inside `#[cfg(test)] mod tests` opened at `:1833`, so post has no live caller; particles and decals stay bind probes (`crates/render/src/particles_gpu.rs:764` "The bind probe below still owns the submit; this slice stages math only." and `crates/render/src/decals.rs:979` "Bind probe over the decal uploads"), so the S5 gap still holds.
 
+Status 2026-10-17 (render code removed on purpose): the render dead-code cut removed 16 source files and 2 test files in `f737386e`, whose subject is "render wip sweep": `live.rs`, `tunnel_mouth.rs`, `clip_hold.rs`, `v1_vfx.rs`, `clouds.rs`, `restir_gi.rs`, `splat.rs`, `stream.rs`, `uploads.rs`, `skin.rs`, `fog_vol.rs`, `gi_dyn.rs`, `baked_halton.rs`, `tonemap.rs`, `draw_id_reduce.rs`, `wound_queue.rs`. This was a cut, not a sweep accident: rot packets `0-rot-render-orphans` and `0-rot-render-dead-r2` list them as modules with no production user; the first cites the owner's 2026-10-16 rule "delete the code, keep the row, note the recover path". Their `mod` lines and tests left with them. Recover with `git show f737386e^:crates/render/src/<file>`. Rows still ticked with no code behind them: HR2 (live shader and material swap with last good), RL20 (`tunnel_mouth.rs`), RP9 (`clip_hold.rs`). Open rows that still name removed files: RA16, CQ23, RT4, VX2, VX7, OPT17, PQ21. (`present/gpu_present/live.rs`, the live frame, is a different file and exists.)
+
+Status 2026-10-17 (HR2, owner call): nothing in `crates/` names `LiveSet` or `apply_notice` now (0 grep hits); the removed `live.rs` had 1,389 lines. Open row NS31c3 copies its last-good pattern and finish gate A10 lists HR2. Choose: restore `live.rs` with a real caller, or re-open HR2.
+
+Status 2026-10-17 (board vs this plan): WIN6 is ticked on the board (staged-fight raster frames, commit `3697e065`), but the list in section 7 still shows it open. RL21, RL26, VS1, VS3, VS4, RA14, GX13, Q1, GM3 and the chain EG8 LF1 LF2 EG11 EG12 LF3 LF4 EG13 EG14 are open. Checked today on the GitHub runner: `cargo test -p engine-render --lib` 704 passed, 0 failed, 13 ignored (run 39025228340). Not checked: any capture on the RTX 3050.
+
+Status 2026-10-17 (capture seal, owner call): `seal_capture_cut_log` in `crates/game/src/bin/arena_capture.rs` prints a flagged director cut log (jump, line cross, short hold, slew, stale) and still seals the capture. A plain 600-tick brawl already shows jump flags, so refusing would fail normal captures. The doc on `App::director_audit` ("gates the capture seal") and a test comment ("this session is refused") say refuse; the code reports. Choose refuse or report, then fix the other text.
+
+Status 2026-10-17 (potato mip bias, owner call): `crates/render/src/quality.rs` (GS10; no caller yet, PLF10 is unbuilt) holds `mip_bias_x100` 100 on Potato, Comfort and High, so its "potato <= comfort <= high" test passes flat. The GS10 row asked for +1.0 on Potato only. That is larger than the other tiers, so the test would have to run the other way for this knob. Choose: keep it flat, or Potato +100 with Comfort and High lower and the test reversed.
+
+Status 2026-10-17 (owner: the arena looked meh, and the game must run in a browser): the web build needs `engine-render` split into `gpu` and `window` (WEB5), our compute shaders checked against WebGPU default limits (VR3), a web quality tier (WEB8) and KTX2 textures (VR2). VR1 is the join of LF1 LF2 LF3 EG11 EG12 EG13 into one pass-truth table that must read LIVE on native and web. One render writer at a time still holds. Plan: `docs/plan/web-and-realism.md`.
+
 Merged 2026-10-10 (batch A of the plans review): `docs/archive/2026-10-10/plans/arena-slice.md` as `### arena wiring`, `docs/archive/2026-10-10/plans/shipping.md` as `### window and packaged run`, `docs/archive/2026-10-10/plans/deepdive-Q1-2026-10-08.md` and `docs/archive/2026-10-10/plans/deepdive-RL5-2026-10-07.md` as notes under section 7. Dated status lines, the donor table and the deep-dives are in `docs/archive/2026-10-10/plans/render-look-cut.md`.
 
 Pre-merge text: `git show d96091cd:docs/plan/render-look.md`; also `docs/archive/2026-10-10/plans/arena-slice.md`, `docs/archive/2026-10-10/plans/shipping.md`, `docs/archive/2026-10-10/plans/deepdive-Q1-2026-10-08.md`, `docs/archive/2026-10-10/plans/deepdive-RL5-2026-10-07.md` (each `git show d96091cd:docs/plan/<name>`; the four are archived under `docs/archive/2026-10-10/plans/`).
@@ -43,7 +55,7 @@ only; sky/IBL binds staged, GTAO/bloom/MSAA-targets/overlay-draw open.
 | One hue-keeping tonemap (RL34) | missing (rowed, Tier A) | boarded open; six ACES copies today |
 | Compiled material in forward (RL46) | missing (rowed, Tier A) | boarded open; needs RL46a interface |
 | V1-V3 reference captures (Q1) | open | zero reference PNGs on disk per 2026-09-25 truth note; P1 hero look 0/10 until it lands |
-| CPU-twin retirement (SL3) | open, owns look oracles | `v1_ibl_shadow.rs`, `v1_lighting.rs`, `v1_vfx.rs`, `gi.rs`, `shadow_post.rs` still reachable from non-test builds |
+| CPU-twin retirement (SL3) | open, owns look oracles | `v1_ibl_shadow.rs`, `v1_lighting.rs`, `v1_vfx.rs`, `gi.rs`, `shadow_post.rs` still reachable from non-test builds; Status 2026-10-17: `v1_vfx.rs` was removed in `f737386e`, the other four are used by production code (checked today), so SL3 stays open |
 | Live-frame wiring (code-checked 2026-10-13) | 9 boarded rows, all open | chain EG8 LF1 LF2 EG11 EG12 LF3 LF4 EG13 EG14; one-line states below, order in section 7 |
 | EG8 pass-truth gate | open, table tests landed | `6ea9df22`, `d8b80809`; masked on/off diff + report still open |
 | LF1 live sky | bind landed, proof open | `forward.wgsl:565` `fs_sky` samples the bake; sky-view at forward 15 (`presenter.rs:95`) |
@@ -100,6 +112,8 @@ Module note: GM3 stays OPEN and BLOCKED until the 18000-frame clean-machine
 run (A8). Scale cap, read in code: `MAX_PARTICIPANTS: u8 = 16`
 (`crates/input/src/fighter.rs:17`); every WIN row proves at 16 and names
 what 64 needs.
+
+Status 2026-10-17 (window and packaged run): the game dead-code cut (`d89bd98e`, an `auto: backup` commit; rot packet `0-rot-game-dead-r1`) removed `package.rs` and its test (the GM3 packaging check, row SL39), `modes.rs` (display-mode manager: WIN2 and GP17 are ticked, WIN8 is open and owns it) and `window_bind.rs` (CT29a). Section 2 text that says `package.rs` checks framing and records digests describes removed code. GM3 is still BLOCKED and open; no packaged run exists.
 
 ## 2. Finish line
 

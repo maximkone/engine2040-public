@@ -3991,8 +3991,9 @@ mod tests {
         // Cook bytes upload verbatim and read back bit-identical: the GPU
         // bake matches the CPU reference texel-for-texel (max diff 0.0).
         let lut = brdf_lut_build(16).expect("small lut builds");
+        crate::test_gpu::hold_gpu_slot();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter =

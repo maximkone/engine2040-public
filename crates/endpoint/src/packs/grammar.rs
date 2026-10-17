@@ -102,7 +102,7 @@ mod tests {
             assert!(check_verbs(tape).is_err());
             let quoted = rmcp::serde_json::to_string(tape).expect("tape quotes");
             let typed = "{\"actions\":[{\"set_label\":{\"object\":1,\"label\":".to_owned()
-                + &quoted
+                + quoted.as_str()
                 + "}}],\"diagnostics\":[\"constrained\"]}";
             assert!(check_verbs(&typed).is_ok());
         }

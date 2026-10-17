@@ -1,0 +1,724 @@
+name: wasm-probe
+
+# Feasibility probe for a WebAssembly build (owner 2026-10-17: the games should also run in a browser).
+# Nothing here ships; every job only asks the compiler or runs a tiny program, on throwaway runs. Jobs:
+#   check         `cargo check --target wasm32-unknown-unknown` (the browser target), one crate per job. Part 1 is the
+#                 headless side (no GPU, window or OS device by default), part 2 the GPU, window, sound-device and
+#                 QUIC side. Every job keeps the first real error and the list of units the compiler really checked.
+#                 A crate that stops on a missing randomness source is rerun with the fix the compiler names
+#                 (uuid feature `js`, patched in the runner checkout only), then with the getrandom wasm_js cfg if
+#                 the compiler asks for that too, so the log shows each step.
+#   wasi-golden   the golden tape and the corpus row printer built for wasm32-wasip1 and run under Node's WASI (a
+#                 32-bit, no-threads machine running the same simulation); wall time against native; the same again
+#                 built with wasm SIMD128 (same tape expected). Compare its tape with the native tapes with
+#                 tools/golden-matrix.mjs.
+#   wasi-tests    the lib unit tests of the sim crates run the same way (libtest, one thread). A test that panics or
+#                 spawns a thread kills a wasm module (no unwinding), so it is named, skipped and explained; the
+#                 rapier leg also prints the ragdoll tape digest and time in wasm, with SIMD128 and native.
+#   unknown-run   a tiny cdylib shim generated in the runner (never committed) around engine-proof, built for the real
+#                 browser target and run under plain Node (no WASI): the golden tape and the corpus row from
+#                 wasm32-unknown-unknown, and what std::time, std::thread and std::fs do on that target.
+#   wasm-size     the windowed game binary (`arena`, feature `app`) linked for the browser target: size, compressed size.
+#   webgpu-adapter headless Chrome on the runner: does it get a (software) WebGPU adapter, with which flags and limits.
+#   table         one summary page over all of the above.
+# Start it by pushing a throwaway branch named wasm-probe-* of the public mirror (or workflow_dispatch once
+# this file is on the mirror's main). The private dev repo never runs it.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["wasm-probe-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_CACHE_SIZE: "5G"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Part 1: the headless crates, default features unless the name says otherwise.
+          - { name: engine-core, args: "-p engine-core" }
+          - { name: engine-ecs, args: "-p engine-ecs" }
+          - { name: engine-geo, args: "-p engine-geo" }
+          - { name: engine-spatial, args: "-p engine-spatial" }
+          - { name: engine-rules, args: "-p engine-rules" }
+          - { name: engine-input, args: "-p engine-input" }
+          - { name: engine-combat, args: "-p engine-combat" }
+          - { name: engine-anim, args: "-p engine-anim" }
+          - { name: engine-ai, args: "-p engine-ai" }
+          - { name: engine-nn, args: "-p engine-nn" }
+          - { name: engine-physics, args: "-p engine-physics" }
+          - { name: engine-physics-rapier, args: "-p engine-physics --features rapier" }
+          - { name: engine-arena, args: "-p engine-arena" }
+          - { name: engine-arena-sim, args: "-p engine-arena --features sim" }
+          - { name: engine-destruction, args: "-p engine-destruction" }
+          - { name: engine-nav, args: "-p engine-nav" }
+          - { name: engine-scene, args: "-p engine-scene" }
+          - { name: engine-material, args: "-p engine-material" }
+          - { name: engine-world, args: "-p engine-world" }
+          - { name: engine-save, args: "-p engine-save" }
+          - { name: engine-game, args: "-p engine-game" }
+          - { name: engine-proof, args: "-p engine-proof" }
+          - { name: engine-observe, args: "-p engine-observe" }
+          - { name: engine-assets, args: "-p engine-assets" }
+          - { name: engine-ui, args: "-p engine-ui" }
+          - { name: engine-audio, args: "-p engine-audio" }
+          - { name: engine-net, args: "-p engine-net" }
+          # Also headless, and what a browser build would actually link: the app lifecycle, the golden-tape
+          # binary, the glTF/image import side of assets, the CPU side of the renderer, the collision geometry.
+          - { name: engine-app, args: "-p engine-app" }
+          - { name: engine2040-bin, args: "-p engine2040" }
+          - { name: engine-assets-import, args: "-p engine-assets --features import" }
+          - { name: engine-render, args: "-p engine-render" }
+          - { name: engine-render-v1, args: "-p engine-render --features v1" }
+          - { name: engine-geo-collision, args: "-p engine-geo --features collision" }
+          # Part 2: GPU, window, sound device and QUIC.
+          - { name: engine-render-window, args: "-p engine-render --features window" }
+          - { name: engine-game-app, args: "-p engine-game --features app" }
+          - { name: engine-audio-device, args: "-p engine-audio --features device" }
+          - { name: engine-net-quic, args: "-p engine-net --features quic" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-probe
+          save-if: ${{ matrix.name == 'engine-core' }}
+      - name: cargo check for wasm32
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          base="cargo check --locked --keep-going --target wasm32-unknown-unknown ${{ matrix.args }}"
+          # attempt <label> <env assignments and the cargo line>: stdout (JSON) and stderr (cargo's text) are kept apart.
+          attempt() {
+            label="$1"; shift
+            echo "+ [$label] $*"
+            "$@" --message-format=json-render-diagnostics > "out/messages-$label.jsonl" 2> "out/check-$label.log"
+            rc=$?
+            cat "out/check-$label.log"
+            echo "$rc" > "out/exit-$label.txt"
+            jq -r 'select(.reason=="compiler-artifact") | [(.package_id | split("#")[-1]), (.target.kind | join(",")), (.fresh | tostring)] | @tsv' \
+              "out/messages-$label.jsonl" 2>/dev/null | sort -u > "out/artifacts-$label.tsv"
+            return $rc
+          }
+          attempt plain env $base
+          last=plain
+          if [ "$(cat out/exit-plain.txt)" != 0 ] && grep -q 'specify a source of randomness' out/check-plain.log; then
+            # The compiler asks for a randomness source: uuid names its `js` feature (wasm-bindgen + crypto.getRandomValues).
+            sed -i -E '/^uuid = /s/features = \[/features = ["js", /' Cargo.toml crates/*/Cargo.toml
+            git diff -U0 -- Cargo.toml 'crates/*/Cargo.toml' > out/uuid-js.patch
+            attempt uuid-js env $base
+            last=uuid-js
+            if grep -q 'lock file.*needs to be updated\|cannot update the lock file' out/check-uuid-js.log; then
+              attempt uuid-js-unlocked env ${base/--locked /}
+              last=uuid-js-unlocked
+            fi
+          fi
+          if [ "$(cat out/exit-$last.txt)" != 0 ] && grep -q 'wasm_js' "out/check-$last.log"; then
+            # getrandom names its backend cfg in the error: this is the only case where the compiler asks for it.
+            attempt wasm-js env RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $base
+            last=wasm-js
+          fi
+          echo "$last" > out/last-attempt.txt
+          cargo tree --locked --target wasm32-unknown-unknown -e normal --prefix none ${{ matrix.args }} 2>/dev/null | sed -E 's/ \(\*\)//' | sort -u > out/tree.txt
+          {
+            echo "### ${{ matrix.name }}: \`${{ matrix.args }}\`"
+            for f in out/exit-*.txt; do
+              l="${f#out/exit-}"; l="${l%.txt}"
+              if [ "$(cat "$f")" = 0 ]; then echo "- $l: COMPILES for wasm32-unknown-unknown"; else echo "- $l: DOES NOT COMPILE (exit $(cat "$f"))"; fi
+            done
+            echo '```'
+            grep -h -E '^error: could not compile' "out/check-$last.log" | sort -u | head -20
+            echo '--- first error of the last attempt ---'
+            awk '/^error/ && !/could not compile/ && !/aborting due/ { f = 1 } f { print; n++ } n >= 30 { exit }' "out/check-$last.log"
+            echo '```'
+            echo "type-checked here: $(awk -F'\t' '$3=="false"' "out/artifacts-$last.tsv" | wc -l) units, $(wc -l < out/tree.txt) crates in the wasm32 graph"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: probe-${{ matrix.name }}
+          path: out/
+          if-no-files-found: warn
+
+  wasi-golden:
+    # The golden tape (seed 2040, 600 ticks) and the corpus row printer, built for wasm32-wasip1 and run under
+    # Node's WASI. Not a browser (no JS glue, no canvas): a 32-bit usize, no SIMD, no threads, software libm.
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasi target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-wasip1
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-probe-wasi
+          save-if: "false"
+      - name: write the WASI runner
+        shell: bash
+        run: |
+          cat > wasi-run.mjs <<'EOF'
+          // node wasi-run.mjs <module.wasm> [args...]: run a wasm32-wasip1 program with the working directory and /tmp.
+          import { WASI } from "node:wasi";
+          import { readFile } from "node:fs/promises";
+          import { tmpdir } from "node:os";
+          const [wasmPath, ...args] = process.argv.slice(2);
+          const ws = process.env.GITHUB_WORKSPACE ?? process.cwd();
+          const wasi = new WASI({
+            version: "preview1",
+            args: [wasmPath.split("/").pop().replace(/\.wasm$/, ""), ...args],
+            env: { ...process.env },
+            preopens: { ".": process.cwd(), [ws]: ws, "/tmp": tmpdir() },
+            returnOnExit: true,
+          });
+          const module = await WebAssembly.compile(await readFile(wasmPath));
+          const instance = await WebAssembly.instantiate(module, wasi.getImportObject());
+          process.exit(wasi.start(instance));
+          EOF
+      - name: build for wasm32-wasip1 (release, like the golden matrix)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --locked --release --target wasm32-wasip1 -p engine2040 2>&1 | tee build-engine2040.log
+          cargo build --locked --release --target wasm32-wasip1 -p engine-proof --bin matrix_line 2>&1 | tee build-matrix-line.log
+          ls -l target/wasm32-wasip1/release/*.wasm
+      - name: record the golden tape in wasm
+        shell: bash
+        run: |
+          mkdir out
+          set +e
+          node wasi-run.mjs target/wasm32-wasip1/release/engine2040.wasm --record out/golden.e2040 --verify 2>&1 | tee out/golden.log
+          echo "exit ${PIPESTATUS[0]}" | tee -a out/golden.log
+          node wasi-run.mjs target/wasm32-wasip1/release/engine2040.wasm --verify --format json 2>&1 | tee out/golden-json.log
+          exit 0
+      - name: print the corpus rows in wasm
+        shell: bash
+        run: |
+          set +e
+          node wasi-run.mjs target/wasm32-wasip1/release/matrix_line.wasm 2>&1 | tee out/matrix-row.txt
+          echo "exit ${PIPESTATUS[0]}" | tee -a out/matrix-row.log
+          exit 0
+      - name: wall time, native and wasm (100000 ticks, release, same hash expected)
+        shell: bash
+        run: |
+          set +e
+          cargo build --locked --release -p engine2040 2>&1 | tail -2
+          now() { date +%s.%N; }
+          for i in 1 2 3; do
+            a=$(now); n=$(target/release/engine2040 --ticks 100000 --format json 2>&1 | grep -o '"final_hash":"[0-9a-f]*"'); b=$(now)
+            c=$(now); w=$(node wasi-run.mjs target/wasm32-wasip1/release/engine2040.wasm --ticks 100000 --format json 2>&1 | grep -o '"final_hash":"[0-9a-f]*"'); d=$(now)
+            echo "run $i: native $(awk -v a=$a -v b=$b 'BEGIN{printf "%.2f", b-a}')s $n | wasm $(awk -v c=$c -v d=$d 'BEGIN{printf "%.2f", d-c}')s $w"
+          done | tee out/perf.txt
+          exit 0
+      - name: simd128 build, same tape and corpus expected, wall time
+        shell: bash
+        run: |
+          set +e
+          export RUSTFLAGS="-C target-feature=+simd128"
+          cargo build --locked --release --target wasm32-wasip1 --target-dir target/simd -p engine2040 2>&1 | tail -2
+          cargo build --locked --release --target wasm32-wasip1 --target-dir target/simd -p engine-proof --bin matrix_line 2>&1 | tail -2
+          unset RUSTFLAGS
+          now() { date +%s.%N; }
+          {
+            node wasi-run.mjs target/simd/wasm32-wasip1/release/engine2040.wasm --record out/golden-simd.e2040 --verify 2>&1 | grep -E 'final_hash|state_hash'
+            if cmp out/golden.e2040 out/golden-simd.e2040; then echo "simd128 tape: byte-identical to the scalar wasm tape"; else echo "simd128 tape: DIFFERENT"; fi
+            node wasi-run.mjs target/simd/wasm32-wasip1/release/matrix_line.wasm 2>&1 | grep -E 'golden=' | head -1
+            for i in 1 2 3; do
+              c=$(now); w=$(node wasi-run.mjs target/simd/wasm32-wasip1/release/engine2040.wasm --ticks 100000 --format json 2>&1 | grep -o '"final_hash":"[0-9a-f]*"'); d=$(now)
+              echo "run $i: simd128 wasm $(awk -v c=$c -v d=$d 'BEGIN{printf "%.2f", d-c}')s $w"
+            done
+            ls -l target/wasm32-wasip1/release/*.wasm target/simd/wasm32-wasip1/release/*.wasm
+          } 2>&1 | tee out/simd.txt
+          exit 0
+      - name: summary
+        shell: bash
+        run: |
+          {
+            echo '### wasm32-wasip1 under Node WASI'
+            echo '```'
+            cat out/golden.log out/golden-json.log
+            head -n 3 out/matrix-row.txt
+            cat out/perf.txt out/simd.txt
+            echo '```'
+            ls -l out
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: wasi-golden
+          path: |
+            out/
+            build-*.log
+          if-no-files-found: warn
+
+  wasi-tests:
+    # Unit tests of the sim crates on wasm32-wasip1: libtest on one thread, run under Node's WASI.
+    if: github.repository == 'maximkone/engine2040-public'
+    name: wasi-test ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: engine-core, args: "-p engine-core" }
+          - { name: engine-ecs, args: "-p engine-ecs" }
+          - { name: engine-physics, args: "-p engine-physics" }
+          - { name: engine-physics-rapier, args: "-p engine-physics --features rapier" }
+          - { name: engine-physics-rapier-simd, args: "-p engine-physics --features rapier", rustflags: "-C target-feature=+simd128" }
+          - { name: engine-combat, args: "-p engine-combat" }
+          - { name: engine-anim, args: "-p engine-anim" }
+          - { name: engine-ai, args: "-p engine-ai" }
+          - { name: engine-nn, args: "-p engine-nn" }
+          - { name: engine-destruction, args: "-p engine-destruction" }
+          - { name: engine-input, args: "-p engine-input" }
+          - { name: engine-nav, args: "-p engine-nav" }
+          - { name: engine-spatial, args: "-p engine-spatial" }
+          - { name: engine-world, args: "-p engine-world" }
+          - { name: engine-proof, args: "-p engine-proof" }
+          - { name: engine-arena-sim, args: "-p engine-arena --features sim" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasi target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-wasip1
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-probe-wasi-tests
+          save-if: ${{ matrix.name == 'engine-core' }}
+      - name: write the WASI runner
+        shell: bash
+        run: |
+          cat > "$GITHUB_WORKSPACE/wasi-run.mjs" <<'EOF'
+          // node wasi-run.mjs <module.wasm> [args...]: run a wasm32-wasip1 program with the working directory and /tmp.
+          import { WASI } from "node:wasi";
+          import { readFile } from "node:fs/promises";
+          import { tmpdir } from "node:os";
+          const [wasmPath, ...args] = process.argv.slice(2);
+          const ws = process.env.GITHUB_WORKSPACE ?? process.cwd();
+          const wasi = new WASI({
+            version: "preview1",
+            args: [wasmPath.split("/").pop().replace(/\.wasm$/, ""), ...args],
+            env: { ...process.env },
+            preopens: { ".": process.cwd(), [ws]: ws, "/tmp": tmpdir() },
+            returnOnExit: true,
+          });
+          const module = await WebAssembly.compile(await readFile(wasmPath));
+          const instance = await WebAssembly.instantiate(module, wasi.getImportObject());
+          process.exit(wasi.start(instance));
+          EOF
+      - name: cargo test --lib for wasm32-wasip1
+        shell: bash
+        run: |
+          mkdir -p out
+          set +e
+          export CARGO_TARGET_WASM32_WASIP1_RUNNER="node $GITHUB_WORKSPACE/wasi-run.mjs"
+          t="cargo test --locked --no-fail-fast --target wasm32-wasip1 ${{ matrix.args }} --lib"
+          # wasm32 has no unwinding: a test that panics (also on purpose, also inside catch_unwind) or spawns a thread
+          # kills the whole module. The test line left unfinished names it; skip it, run again, list every such test.
+          skips=()
+          rc=0
+          # RUSTFLAGS (wasm SIMD128 for the simd leg) reach the wasm builds only, never the native baseline.
+          wasm_env=(env); [ -n "${{ matrix.rustflags }}" ] && wasm_env=(env RUSTFLAGS="${{ matrix.rustflags }}")
+          for round in $(seq 1 40); do
+            sa=(); for s in "${skips[@]}"; do sa+=(--skip "$s"); done
+            echo "+ round $round: $t -- --test-threads=1 ${sa[*]}"
+            timeout 300 "${wasm_env[@]}" $t -- --test-threads=1 "${sa[@]}" > out/test.log 2>&1
+            rc=$?
+            grep -q '^test result:' out/test.log && break
+            victim="$(grep -E '^test [^ ]+ \.\.\. ' out/test.log | grep -vE ' \.\.\. (ok|FAILED|ignored)' | tail -1 | awk '{print $2}')"
+            [ -z "$victim" ] && break
+            skips+=("$victim"); echo "$victim" >> out/aborting-tests.txt
+          done
+          echo "$rc" > out/exit-code.txt
+          # Why each one died: run it alone with output capture off, keep the panic line.
+          if [ -f out/aborting-tests.txt ]; then
+            while read -r v; do
+              echo "=== $v"
+              timeout 120 "${wasm_env[@]}" $t -- --exact "$v" --nocapture --test-threads=1 2>&1 | grep -vE '^\s*(Finished|Running|Compiling|warning)' | head -8 | cut -c1-300
+            done < out/aborting-tests.txt > out/aborting-detail.log
+          fi
+          case "${{ matrix.name }}" in engine-physics-rapier*)
+            # The ragdoll tape (50 seeded falls plus a clinch, three passes) in wasm and native: same report, how long.
+            timeout 300 "${wasm_env[@]}" $t ragdoll_gap -- --test-threads=1 --nocapture > out/ragdoll-wasm.log 2>&1
+            cargo test --locked ${{ matrix.args }} --lib ragdoll_gap -- --test-threads=1 --nocapture > out/ragdoll-native.log 2>&1
+            cargo test --locked ${{ matrix.args }} --lib -- --test-threads=1 > out/test-native.log 2>&1
+            ;;
+          esac
+          {
+            echo "### wasi-test ${{ matrix.name }}: \`${{ matrix.args }}\` (last exit $(cat out/exit-code.txt))"
+            echo '```'
+            grep -E '^test result:|^error' out/test.log | head -20
+            grep -E '^test .* \.\.\. FAILED' out/test.log | head -40
+            echo "failed tests: $(grep -cE '^test .* \.\.\. FAILED' out/test.log)"
+            echo "tests that kill the wasm module (panic=abort or threads): $(wc -l < out/aborting-tests.txt 2>/dev/null || echo 0)"
+            head -80 out/aborting-detail.log 2>/dev/null
+            if [ -f out/ragdoll-wasm.log ]; then
+              echo '--- ragdoll tape, wasm ---'; sed -n '/^running/,/^test result/p' out/ragdoll-wasm.log
+              echo '--- ragdoll tape, native ---'; sed -n '/^running/,/^test result/p' out/ragdoll-native.log
+              echo '--- whole lib, native ---'; grep '^test result' out/test-native.log
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: wasi-test-${{ matrix.name }}
+          path: out/
+          if-no-files-found: warn
+
+  unknown-run:
+    # The real browser target, wasm32-unknown-unknown, run for real under plain Node (no WASI, no imports): a cdylib
+    # shim generated here (never committed) calls engine-proof, so the golden tape and the corpus row come from the
+    # same target a browser build uses. The probes show what std does on it: the clock and threads are not there.
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-probe-unknown-run
+          save-if: "false"
+      - name: generate the shim crate (runner checkout only)
+        shell: bash
+        run: |
+          mkdir -p crates/wasm-probe-shim/src
+          cat > crates/wasm-probe-shim/Cargo.toml <<'EOF'
+          [package]
+          name = "wasm-probe-shim"
+          version = "0.1.0"
+          edition = "2021"
+          [lib]
+          crate-type = ["cdylib"]
+          [dependencies]
+          engine-proof = { path = "../proof" }
+          EOF
+          cat > crates/wasm-probe-shim/src/lib.rs <<'EOF'
+          //! Probe exports for plain Node: results are text in a buffer the host reads back.
+          use std::cell::RefCell;
+          thread_local! { static OUT: RefCell<String> = const { RefCell::new(String::new()) }; }
+          fn put(s: &str) -> usize {
+              OUT.with(|o| {
+                  let mut o = o.borrow_mut();
+                  o.clear();
+                  o.push_str(s);
+                  o.len()
+              })
+          }
+          #[no_mangle]
+          pub extern "C" fn out_ptr() -> *const u8 {
+              OUT.with(|o| o.borrow().as_ptr())
+          }
+          #[no_mangle]
+          pub extern "C" fn golden_tape() -> usize {
+              match engine_proof::record(engine_proof::Config::default(), &[]) {
+                  Ok(t) => {
+                      let last = t.checkpoints.last();
+                      put(&format!(
+                          "ticks={} final_hash={:016x} state_hash={:016x}",
+                          t.config.ticks,
+                          last.map_or(0, |c| c.legacy),
+                          last.map_or(0, |c| c.state)
+                      ))
+                  }
+                  Err(e) => put(&format!("error: {e}")),
+              }
+          }
+          #[no_mangle]
+          pub extern "C" fn golden_row() -> usize {
+              match engine_proof::matrix::collect_local_entry() {
+                  Ok(e) => put(&format!(
+                      "{}\n{}",
+                      engine_proof::matrix::matrix_digest_line(&e),
+                      engine_proof::matrix::matrix_blocks_line(&e)
+                  )),
+                  Err(e) => put(&format!("error: {e}")),
+              }
+          }
+          #[no_mangle]
+          pub extern "C" fn probe_instant() -> u32 {
+              std::time::Instant::now().elapsed().subsec_nanos()
+          }
+          #[no_mangle]
+          pub extern "C" fn probe_systemtime() -> u32 {
+              std::time::SystemTime::now()
+                  .duration_since(std::time::UNIX_EPOCH)
+                  .map_or(1, |d| d.subsec_nanos())
+          }
+          #[no_mangle]
+          pub extern "C" fn probe_thread_spawn_fails() -> u32 {
+              u32::from(std::thread::Builder::new().spawn(|| ()).is_err())
+          }
+          #[no_mangle]
+          pub extern "C" fn probe_fs_read_fails() -> u32 {
+              u32::from(std::fs::read("Cargo.toml").is_err())
+          }
+          #[no_mangle]
+          pub extern "C" fn probe_available_parallelism() -> u32 {
+              std::thread::available_parallelism().map_or(0, |n| n.get() as u32)
+          }
+          EOF
+      - name: build the shim for wasm32-unknown-unknown (release; the new member adds one lock entry, so no --locked)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --target wasm32-unknown-unknown -p wasm-probe-shim 2>&1 | tee build-shim.log
+          ls -l target/wasm32-unknown-unknown/release/*.wasm
+      - name: run it under Node
+        shell: bash
+        run: |
+          mkdir -p out
+          cat > run-shim.mjs <<'EOF'
+          import { readFile } from "node:fs/promises";
+          const bytes = await readFile(process.argv[2]);
+          const lines = [];
+          let imports = [];
+          try { imports = WebAssembly.Module.imports(await WebAssembly.compile(bytes)); } catch (e) { lines.push(`compile: ${e.message}`); }
+          lines.push(`module imports: ${imports.length}${imports.length ? " " + JSON.stringify(imports.slice(0, 12)) : ""}`);
+          const fresh = async () => (await WebAssembly.instantiate(bytes, {})).instance.exports;
+          const text = (e, len) => new TextDecoder().decode(new Uint8Array(e.memory.buffer, e.out_ptr(), len));
+          const run = async (name, f) => {
+            try { lines.push(`${name}: ${await f(await fresh())}`); }
+            catch (err) { lines.push(`${name}: TRAP ${err.constructor.name}: ${err.message}`); }
+          };
+          await run("golden_tape", (e) => text(e, e.golden_tape()));
+          await run("golden_row", (e) => text(e, e.golden_row()));
+          for (const n of ["probe_instant", "probe_systemtime", "probe_thread_spawn_fails", "probe_fs_read_fails", "probe_available_parallelism"]) {
+            await run(n, (e) => e[n]());
+          }
+          console.log(lines.join("\n"));
+          EOF
+          node run-shim.mjs target/wasm32-unknown-unknown/release/wasm_probe_shim.wasm 2>&1 | tee out/unknown-run.txt
+          {
+            echo '### wasm32-unknown-unknown under plain Node'
+            echo '```'
+            cat out/unknown-run.txt
+            ls -l target/wasm32-unknown-unknown/release/wasm_probe_shim.wasm
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: unknown-run
+          path: |
+            out/
+            build-shim.log
+          if-no-files-found: warn
+
+  wasm-size:
+    # The windowed game binary (`arena`, feature `app`: winit, wgpu, cpal, gilrs) built and linked for the browser
+    # target: it must link, and how big it is before and after compression. It does not run (no JS glue, no canvas).
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-probe-size
+          save-if: "false"
+      - name: build and link the arena game for wasm32-unknown-unknown (release)
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          cmd="cargo build --locked --release --target wasm32-unknown-unknown -p engine-game --features app --bin arena"
+          echo "+ $cmd"
+          start=$(date +%s)
+          $cmd 2>&1 | tee out/build-arena.log
+          echo "${PIPESTATUS[0]}" > out/exit-arena.txt
+          echo "build seconds: $(( $(date +%s) - start ))" | tee -a out/size.txt
+          f=target/wasm32-unknown-unknown/release/arena.wasm
+          if [ -f "$f" ]; then
+            cat > size.mjs <<'EOF'
+          import { readFileSync } from "node:fs";
+          import { gzipSync, brotliCompressSync, constants } from "node:zlib";
+          const b = readFileSync(process.argv[2]);
+          const q = { params: { [constants.BROTLI_PARAM_QUALITY]: 11 } };
+          const m = await WebAssembly.compile(b);
+          const imports = WebAssembly.Module.imports(m);
+          const byModule = {};
+          for (const i of imports) byModule[i.module] = (byModule[i.module] ?? 0) + 1;
+          console.log(`arena.wasm: ${b.length} bytes, gzip -9 ${gzipSync(b, { level: 9 }).length}, brotli -q11 ${brotliCompressSync(b, q).length}`);
+          console.log(`imports: ${imports.length} ${JSON.stringify(byModule)}`);
+          console.log(`exports: ${WebAssembly.Module.exports(m).length}`);
+          EOF
+            node size.mjs "$f" 2>&1 | tee -a out/size.txt
+          fi
+          { echo '### arena.wasm (wasm32-unknown-unknown, release, no wasm-opt)'; echo '```'; cat out/size.txt; echo "build exit: $(cat out/exit-arena.txt)"; grep -E -m1 -A12 '^error' out/build-arena.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: wasm-size
+          path: out/
+          if-no-files-found: warn
+
+  webgpu-adapter:
+    # Does headless Chrome on a runner get a WebGPU adapter (software, via SwiftShader), and with which limits?
+    # Informational: the answer decides how a browser frame can be proven without a GPU. Never fails the run.
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: probe navigator.gpu in headless Chrome
+        shell: bash
+        run: |
+          mkdir -p site out
+          cat > site/index.html <<'EOF'
+          <!doctype html><meta charset="utf-8"><title>webgpu probe</title><body>probing</body>
+          <script>
+          (async () => {
+            const out = { secure: isSecureContext, hasGpu: !!navigator.gpu };
+            try {
+              const a = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
+              out.adapter = a === null ? null : { info: a.info ? { vendor: a.info.vendor, architecture: a.info.architecture, device: a.info.device, description: a.info.description } : "no info", fallback: a.isFallbackAdapter ?? a.info?.isFallbackAdapter };
+              if (a) {
+                out.features = [...a.features].sort();
+                const l = a.limits;
+                out.limits = { maxTextureDimension2D: l.maxTextureDimension2D, maxBindGroups: l.maxBindGroups, maxStorageBuffersPerShaderStage: l.maxStorageBuffersPerShaderStage, maxStorageTexturesPerShaderStage: l.maxStorageTexturesPerShaderStage, maxComputeInvocationsPerWorkgroup: l.maxComputeInvocationsPerWorkgroup, maxComputeWorkgroupSizeX: l.maxComputeWorkgroupSizeX, maxBufferSize: l.maxBufferSize, maxStorageBufferBindingSize: l.maxStorageBufferBindingSize };
+                const d = await a.requestDevice();
+                out.device = "ok";
+              }
+            } catch (e) { out.error = String(e); }
+            document.body.textContent = "RESULT " + JSON.stringify(out);
+          })();
+          </script>
+          EOF
+          (cd site && python3 -m http.server 8123 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 2
+          chrome="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          echo "chrome: $chrome $("$chrome" --version 2>&1)" | tee out/webgpu.txt
+          run_variant() {
+            label="$1"; shift
+            echo "--- $label: $*" | tee -a out/webgpu.txt
+            timeout 90 "$chrome" --headless=new --no-sandbox --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom "$@" http://127.0.0.1:8123/index.html 2>/dev/null | grep -o 'RESULT.*' | head -1 | tee -a out/webgpu.txt
+          }
+          run_variant plain
+          run_variant swiftshader --enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --disable-vulkan-surface
+          run_variant angle-swiftshader --enable-unsafe-webgpu --enable-features=Vulkan --use-angle=swiftshader --use-webgpu-adapter=swiftshader --ignore-gpu-blocklist
+          { echo '### headless Chrome WebGPU'; echo '```'; cat out/webgpu.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: webgpu-adapter
+          path: out/
+          if-no-files-found: warn
+
+  table:
+    needs: [check, wasi-golden, wasi-tests, unknown-run, wasm-size, webgpu-adapter]
+    if: ${{ !cancelled() && github.repository == 'maximkone/engine2040-public' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: all
+      - name: wasm32-wasip1 unit tests, unknown-run and golden, one block
+        shell: bash
+        run: |
+          {
+            echo '### wasm32-wasip1 unit tests (lib, one thread)'
+            echo '```'
+            for d in all/wasi-test-*; do
+              n="${d#all/wasi-test-}"
+              res="$(grep -h '^test result:' "$d/test.log" 2>/dev/null | tail -1 | sed -E 's/; 0 measured; [0-9]+ filtered out//')"
+              ab="$(wc -l < "$d/aborting-tests.txt" 2>/dev/null || echo 0)"
+              echo "$n | killed-by-wasm-limits=$ab | ${res:-NO RESULT}"
+            done | sort
+            echo '```'
+            echo '### golden under WASI'
+            echo '```'
+            head -n 4 all/wasi-golden/out/golden.log 2>/dev/null | grep -v -i warning
+            cat all/wasi-golden/out/perf.txt all/wasi-golden/out/simd.txt 2>/dev/null
+            echo '```'
+            echo '### wasm32-unknown-unknown under plain Node'
+            echo '```'
+            cat all/unknown-run/out/unknown-run.txt 2>/dev/null
+            echo '```'
+            echo '### arena game linked for wasm32-unknown-unknown'
+            echo '```'
+            cat all/wasm-size/size.txt 2>/dev/null
+            echo "build exit: $(cat all/wasm-size/exit-arena.txt 2>/dev/null)"
+            echo '```'
+            echo '### headless Chrome WebGPU'
+            echo '```'
+            cat all/webgpu-adapter/webgpu.txt 2>/dev/null
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: one line per crate
+        shell: bash
+        run: |
+          {
+            echo '### wasm32-unknown-unknown, one line per crate'
+            echo '```'
+            for d in all/probe-*; do
+              n="${d#all/probe-}"
+              last="$(cat "$d/last-attempt.txt" 2>/dev/null || echo plain)"
+              rc="$(cat "$d/exit-plain.txt" 2>/dev/null || echo '?')"
+              if [ "$rc" = 0 ]; then echo "COMPILES  $n"; else
+                bad="$(grep -h -E '^error: could not compile' "$d/check-plain.log" 2>/dev/null | sed -E 's/error: could not compile `([^`]+)`.*/\1/' | sort -u | tr '\n' ' ')"
+                after="$(cat "$d/exit-$last.txt" 2>/dev/null || echo '?')"
+                echo "FAILS     $n  (stopped in: ${bad:-?}; last attempt $last exit $after)"
+              fi
+            done | sort
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

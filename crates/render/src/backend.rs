@@ -989,6 +989,7 @@ mod tests {
     #[cfg(feature = "window")]
     #[test]
     fn adapter_probe_skips_headless_never_fakes() {
+        crate::test_gpu::hold_gpu_slot();
         let (choice, _) = resolve_from_env(None);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu_backends(choice),

@@ -21,7 +21,6 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL = join(HERE, "plan-atlas.mjs");
 const SLICE = join(HERE, "board-slice.mjs");
-const GUARD = join(HERE, "steal-next.mjs");
 const ARGV = join(HERE, "argv.mjs");
 
 const VISION_SNIP = [
@@ -66,7 +65,6 @@ function sandbox() {
   mkdirSync(join(root, "docs", "plan"), { recursive: true });
   copyFileSync(TOOL, join(root, "tools", "plan-atlas.mjs"));
   copyFileSync(SLICE, join(root, "tools", "board-slice.mjs"));
-  copyFileSync(GUARD, join(root, "tools", "steal-next.mjs"));
   copyFileSync(ARGV, join(root, "tools", "argv.mjs"));
   writeFileSync(join(root, "docs", "SPRINT.md"), BOARD_SNIP);
   writeFileSync(join(root, "docs", "VISION.md"), VISION_SNIP);

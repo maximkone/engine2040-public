@@ -20,6 +20,7 @@ import = ["dep:gltf", "dep:image", "dep:engine-anim"]
 
 [dependencies]
 engine-core.workspace = true
+engine-clock.workspace = true
 engine-scene = { version = "0.1.0", path = "../scene", optional = true }
 engine-anim = { workspace = true, optional = true }
 gltf = { workspace = true, optional = true }

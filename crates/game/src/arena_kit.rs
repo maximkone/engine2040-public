@@ -957,14 +957,22 @@ fn fitted_buffers(
 /// loudly so a missing kit never renders as nothing.
 #[cfg(feature = "app")]
 pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
+    import_kit_from(&engine_assets::FsSource::new(root))
+}
+
+/// [`import_kit`] over any content source: the files are read as
+/// `src/<asset>.gltf` by logical path, so a browser build hands in a fetched
+/// bundle and gets the same kit as the native directory read.
+#[cfg(feature = "app")]
+pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<ImportedKit, KitError> {
     let actors = kit_actors()?;
     let files = kit_asset_files(&actors);
     // One merged source mesh plus its first material per distinct file.
     let mut sources: Vec<KitSource> = Vec::with_capacity(files.len());
     let mut triangles: u64 = 0;
     for (file_index, file) in files.iter().enumerate() {
-        let path = root.join("src").join(file);
-        let bytes = std::fs::read(&path)
+        let bytes = source
+            .read(&format!("src/{file}"))
             .map_err(|err| KitError::Io(bound_diag(&format!("{file}: {err}"))))?;
         let import = engine_assets::mesh_import::import_gltf_path(file, &bytes)
             .map_err(|err| KitError::Import(bound_diag(&format!("{file}: {err}"))))?;
@@ -1135,7 +1143,16 @@ pub fn stage_kit(
     presenter: &mut engine_render::present::Presenter,
     root: &Path,
 ) -> Result<KitReport, KitError> {
-    let kit = import_kit(root)?;
+    stage_kit_from(presenter, &engine_assets::FsSource::new(root))
+}
+
+/// [`stage_kit`] over any content source (a fetched bundle in the browser).
+#[cfg(feature = "app")]
+pub fn stage_kit_from(
+    presenter: &mut engine_render::present::Presenter,
+    source: &dyn engine_assets::AssetSource,
+) -> Result<KitReport, KitError> {
+    let kit = import_kit_from(source)?;
     Ok(upload_kit(presenter, &kit))
 }
 
@@ -1659,6 +1676,71 @@ mod tests {
                 upload.width >= 4 && upload.height >= 4,
                 "texture {key:?} is a real image, not a stub"
             );
+        }
+    }
+
+    // The kit loads the same from a packed bundle as from the directory
+    // (meshes, materials and textures of every actor), and a bundle that lost
+    // or damaged a kit file fails with that file's name.
+    #[cfg(feature = "app")]
+    #[test]
+    fn kit_import_from_a_bundle_matches_the_directory() {
+        use engine_assets::asset_source::{pack_to, PackRules};
+        use engine_assets::{BundleSource, FsSource};
+        let root = kit_content_dir();
+        let fs = FsSource::new(&root);
+        let bundle_of = |rules: &PackRules| {
+            let mut bytes = Vec::new();
+            pack_to(&fs, rules, &mut bytes).expect("kit packs");
+            bytes
+        };
+        let all_bytes = bundle_of(&PackRules::new().include("src/"));
+        let bundle = BundleSource::open(all_bytes.clone()).expect("bundle opens");
+        let from_dir = import_kit(&root).expect("kit imports from content");
+        let from_bundle = import_kit_from(&bundle).expect("kit imports from the bundle");
+        assert_eq!(from_bundle.files, from_dir.files);
+        assert_eq!(from_bundle.triangles, from_dir.triangles);
+        assert_eq!(from_bundle.skipped, from_dir.skipped);
+        assert_eq!(from_bundle.baked.len(), from_dir.baked.len());
+        for (packed, loose) in from_bundle.baked.iter().zip(&from_dir.baked) {
+            assert_eq!(packed.actor.id, loose.actor.id);
+            assert_eq!(packed.key, loose.key);
+            assert_eq!(packed.mesh, loose.mesh, "actor {} mesh", loose.actor.id);
+            assert_eq!(packed.material, loose.material);
+            assert_eq!(packed.texture, loose.texture);
+        }
+        assert_eq!(from_bundle.textures, from_dir.textures);
+
+        let partial = BundleSource::open(bundle_of(&PackRules::new().include("src/banner.gltf")))
+            .expect("partial bundle opens");
+        match import_kit_from(&partial) {
+            Err(KitError::Io(text)) => {
+                assert!(
+                    text.contains("not found") && text.contains(".gltf"),
+                    "{text}"
+                );
+            }
+            other => panic!(
+                "a bundle without kit files must fail by name, got {:?}",
+                other.err()
+            ),
+        }
+
+        let mut damaged = all_bytes;
+        let crate_blob = bundle
+            .entries_in_file_order()
+            .find(|entry| entry.path == "src/crate.gltf")
+            .expect("crate.gltf packed");
+        damaged[crate_blob.offset + crate_blob.len / 2] ^= 0xFF;
+        let damaged = BundleSource::open(damaged).expect("framing intact");
+        match import_kit_from(&damaged) {
+            Err(KitError::Io(text)) => {
+                assert!(
+                    text.contains("crate.gltf") && text.contains("hash mismatch"),
+                    "{text}"
+                );
+            }
+            other => panic!("a damaged blob must fail by name, got {:?}", other.err()),
         }
     }
 

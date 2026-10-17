@@ -48,7 +48,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   `bug:product-pass-bloom`; the same log with every required pass above 0 ms is
   green; `pending` entries never turn it red. F2P: a missing pass is ignored today.
   P2P: `node --test tools/product-check.test.mjs` green.
-- [ ] GS4 tools: fake-pass guard in `packet-gate` — a diff that edits or removes
+- [x] GS4 tools: fake-pass guard in `packet-gate` — a diff that edits or removes Landed 6d889933.
   existing assertion lines (`assert*!(`, expected-value literals under `tests/` or
   in `#[cfg(test)]`) while code outside tests also changes prints
   `FAKE-PASS-RISK: n assertion lines edited` and exits 1, unless the packet row

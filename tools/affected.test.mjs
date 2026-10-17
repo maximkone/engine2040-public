@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { okCmd } from "./gh-check.mjs";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { mkdtempSync } from "node:fs";
-import { affectedToolTests, buildSnapshot, computeAffected, diffSnapshots, greenRecordPath, hashChangedFiles, laneCommand, manifestFingerprint, metadataCachePath, parseArgs, readCachedMetadata, readLastGreen, shouldSkip, toolCommand, writeCachedMetadata, writeLastGreen } from "./affected.mjs";
+import { affectedToolTests, buildSnapshot, computeAffected, diffSnapshots, greenRecordPath, hashChangedFiles, laneCommand, laneCommandOnGithub, manifestFingerprint, metadataCachePath, parseArgs, readCachedMetadata, readLastGreen, shouldSkip, toolCommand, writeCachedMetadata, writeLastGreen } from "./affected.mjs";
 
 // Synthetic cargo-metadata shape: gamma <- beta <- alpha (beta deps gamma,
 // alpha deps beta), manifests under /ws/crates/<name>/.
@@ -99,6 +100,12 @@ test("laneCommand carries -j 2, --locked and every affected crate, never --relea
   const cmd = laneCommand(["engine-alpha", "engine-beta"]);
   assert.equal(cmd, "cargo test -j 2 --locked -p engine-alpha -p engine-beta --all-targets");
   assert.ok(!cmd.includes("--release"));
+});
+
+test("laneCommandOnGithub is the lane gate wrapped for the GitHub runner, and the runner accepts it", () => {
+  const cmd = laneCommandOnGithub(["engine-alpha", "engine-beta"]);
+  assert.equal(cmd, "node tools/gh-check.mjs cargo test -j 2 --locked -p engine-alpha -p engine-beta --all-targets");
+  assert.ok(okCmd(cmd.slice("node tools/gh-check.mjs ".length)), "gh-check refuses a lane gate it cannot send");
 });
 
 test("parseArgs: base/files/json forms", () => {

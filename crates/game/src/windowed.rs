@@ -2724,6 +2724,81 @@ mod tests {
     }
 
     #[test]
+    fn pass_truth_gates_the_real_arena_kit_frame() {
+        // EG8: the live frame of the staged arena kit (the glTF files fitted
+        // to the placement boxes, the establishing camera) is rendered with
+        // each look pass on and off through `gate_live_scene`; a pass reads
+        // LIVE only from pixels in its own region. The dated artifact lists
+        // every pass; no adapter skips, like the other twin tests.
+        use engine_render::pass_truth::harness::gate_live_scene;
+        let Some((mut presenter, key, kit)) = smoke_presenter().expect("twin opens or skips")
+        else {
+            return;
+        };
+        // Same 4:3 aspect as the smoke list's camera, big enough to judge.
+        presenter.resize(512, 384).expect("size applies");
+        let list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("twin list builds");
+        let first = gate_live_scene(&mut presenter, &list).expect("arena frame gates");
+        let second = gate_live_scene(&mut presenter, &list).expect("arena frame gates again");
+        assert_eq!(first.rows, second.rows, "the gate run twice, same table");
+        assert_eq!(first.noise_px, 0, "the all-on frame repeats exactly");
+        let live = |name: &str| first.row(name).expect("every pass has a row").verdict.live;
+        assert!(live("graph"), "the kit draws pixels");
+        assert!(live("ibl"), "the baked ambient lights the kit");
+        for row in &first.rows {
+            // A pass reads LIVE only with pixels behind it.
+            assert_eq!(row.verdict.live, row.verdict.diff_pixels > 0);
+        }
+        let report = first.report(
+            &std::env::var("PASS_TRUTH_DATE").unwrap_or_else(|_| "arena".into()),
+            "arena kit (content/arena placement), establishing camera",
+        );
+        eprintln!("{report}");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let date = std::env::var("PASS_TRUTH_DATE").unwrap_or_else(|_| "arena".into());
+        engine_render::pass_truth::live_gate::write_live_gate_report(&root, &date, &report)
+            .expect("report writes");
+    }
+
+    #[test]
+    fn look_pass_cost_on_the_real_arena_kit_frame_is_measured() {
+        // The cost of the two passes the live frame gained or lit (EG8, LF1,
+        // LF2) on the staged arena kit at 1280x720: device time of the frame
+        // with every pass on, with the sky off and with the IBL off. The sky
+        // reads above zero with it on and no sample with it off; the totals
+        // are printed, so what drawing the sky costs is a number. No adapter
+        // or no timestamp queries skips.
+        use engine_render::pass_truth::{harness::live_gpu_cost, LookToggles};
+        let Some((mut presenter, key, kit)) = smoke_presenter().expect("twin opens or skips")
+        else {
+            return;
+        };
+        presenter.resize(1280, 720).expect("size applies");
+        let mut list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("twin list builds");
+        list.camera.aspect = 1280.0 / 720.0;
+        let cost = |presenter: &mut Presenter, off: Option<&str>| {
+            let mut toggles = LookToggles::all_on();
+            if let Some(row) = off {
+                toggles.disable(row);
+            }
+            live_gpu_cost(presenter, &list, &toggles, 80).expect("cost runs")
+        };
+        let Some(on) = cost(&mut presenter, None) else {
+            return;
+        };
+        let sky_off = cost(&mut presenter, Some("sky")).expect("same adapter");
+        let ibl_off = cost(&mut presenter, Some("ibl")).expect("same adapter");
+        for (label, report) in [("all on", on), ("sky off", sky_off), ("ibl off", ibl_off)] {
+            eprintln!(
+                "arena kit 1280x720 {label}: total p50 {:.4} ms (forward {:.4}, sky {:.4}, blit {:.4}) over {} frames",
+                report.total.p50, report.forward.p50, report.sky.p50, report.blit.p50, report.frames
+            );
+        }
+        assert!(on.sky.p50 > 0.0, "the own-pass sky is timed on the kit");
+        assert_eq!(sky_off.sky.p50, 0.0, "no sky pass, no sky sample");
+    }
+
+    #[test]
     fn kit_collision_lockstep_keeps_draws_when_world_collides() {
         // Behavior: the embedded placement's 6 physical actors collide as one
         // `MatchWorld` (11 staged actors, dressing skipped), so the twin frame
@@ -2925,8 +3000,13 @@ mod tests {
             (staged_img.width, staged_img.height),
             (bare_img.width, bare_img.height)
         );
-        let cx = (((rect[0] + rect[2]) / 2.0) * staged_img.width as f32) as usize;
-        let cy = (((rect[1] + rect[3]) / 2.0) * staged_img.height as f32) as usize;
+        // The overlay draws the 0..1 hud rect through the shared ortho (x
+        // divided by aspect, y up), so the rect centre maps the same way.
+        let mvp = engine_render::overlay::overlay_mvp(width as f32 / height as f32);
+        let ndc_x = mvp[0][0] * ((rect[0] + rect[2]) / 2.0) + mvp[3][0];
+        let ndc_y = mvp[1][1] * ((rect[1] + rect[3]) / 2.0) + mvp[3][1];
+        let cx = ((ndc_x + 1.0) * 0.5 * width as f32) as usize;
+        let cy = ((1.0 - ndc_y) * 0.5 * height as f32) as usize;
         let cx = cx.min(width.saturating_sub(1));
         let cy = cy.min(height.saturating_sub(1));
         let at = (cy * width + cx) * 4;

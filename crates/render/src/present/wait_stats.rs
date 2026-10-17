@@ -253,12 +253,16 @@ pub fn percentiles(samples: &mut [f32]) -> Option<Percentiles> {
 pub struct GpuTimingReport {
     /// Frames with a resolved sample.
     pub frames: u64,
-    /// Forward pass plus blit per frame.
+    /// Forward pass plus own-pass sky plus blit per frame.
     pub total: Percentiles,
     /// Forward pass alone.
     pub forward: Percentiles,
     /// Blit alone.
     pub blit: Percentiles,
+    /// Own-pass sky alone over the frames that ran it; zero when none did.
+    pub sky: Percentiles,
+    /// GTAO compute pass alone over the frames that ran it; zero when none did.
+    pub gtao: Percentiles,
 }
 
 #[cfg(test)]

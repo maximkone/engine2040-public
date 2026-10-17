@@ -15,6 +15,8 @@ use engine_input::Buttons;
 const STANDOFF_MM: i32 = 2_000;
 /// Travel budget from the querier, millimetres.
 const MAX_DIST_MM: i32 = 80_000;
+/// Hold radius around the ranked spot, millimetres (1 m).
+const HOLD_MM: i64 = 1_000;
 
 /// Nearest other fighter on the ground plane, millimetres.
 ///
@@ -59,6 +61,10 @@ pub struct EqsCoverController {
     first_winner: Option<Vec3Mm>,
     first_steer: Option<(i8, i8)>,
     last_self: Option<Vec3Mm>,
+    /// Squared gap (mm squared) from self to the ranked spot on the last ranked tick.
+    gap_sq_mm: i64,
+    /// Consecutive ranked ticks inside [`HOLD_MM`] of the spot; resets on a miss.
+    hold_run: u32,
 }
 
 impl EqsCoverController {
@@ -74,6 +80,8 @@ impl EqsCoverController {
             first_winner: None,
             first_steer: None,
             last_self: None,
+            gap_sq_mm: 0,
+            hold_run: 0,
         }
     }
 
@@ -129,6 +137,14 @@ impl SlotController for EqsCoverController {
         if self.first_winner.is_none() {
             self.first_winner = Some(winner.pos);
         }
+        let gx = i64::from(winner.pos.x) - i64::from(self_pos.x);
+        let gz = i64::from(winner.pos.z) - i64::from(self_pos.z);
+        self.gap_sq_mm = gx * gx + gz * gz;
+        self.hold_run = if self.gap_sq_mm <= HOLD_MM * HOLD_MM {
+            self.hold_run.saturating_add(1)
+        } else {
+            0
+        };
         let Some(applied) = Tactics::bound_cover_input(
             winner,
             self_pos,
@@ -196,6 +212,40 @@ mod tests {
         assert!(
             fdx * fdx + fdz * fdz <= init,
             "moves toward the ranked spot"
+        );
+    }
+
+    #[test]
+    fn eqs_bind_reaches_cover_and_holds_with_idle_foe() {
+        // Live proof: slot 1 stands still on a tape, so the ranked spot stays
+        // put. Slot 0 must reach it and stay inside HOLD_MM for 30 ticks. The
+        // round is the 600-tick arena round; the walk alone takes about 220.
+        let config = ArenaConfig::try_new(7, 600, 2, 20.0).expect("valid config");
+        let idle = (0..600u32).map(|tick| FighterInput {
+            tick,
+            fighter: FighterId::new(1).expect("slot 1 is legal"),
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        });
+        let tape = FighterTape(idle.collect());
+        let mut first = EqsCoverController::new(0, covers());
+        let driven = run_controlled(&config, &tape, &mut first);
+        let mut second = EqsCoverController::new(0, covers());
+        let again = run_controlled(&config, &tape, &mut second);
+        assert_eq!(driven.len(), 600);
+        assert_eq!(driven, again, "replay x2 identical");
+        assert_eq!(first.calls, 600);
+        assert!(
+            first.gap_sq_mm <= HOLD_MM * HOLD_MM,
+            "last ranked gap {} mm^2 is outside the hold radius",
+            first.gap_sq_mm
+        );
+        assert!(
+            first.hold_run >= 30,
+            "held the ranked spot for {} ticks, want 30",
+            first.hold_run
         );
     }
 

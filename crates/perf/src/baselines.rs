@@ -9,7 +9,9 @@
 //! The scaled matrix rows (arena_tick_4/8/16 plus per-track `_sim` twins)
 //! come from the same machine; the 16-fighter rows repeat the default-track
 //! shape beside the `arena_tick` default (same config, same fold, identical
-//! hash and allocations by construction).
+//! hash and allocations by construction). The non-sim arena rows hold 36 bytes
+//! per fighter for the per-brain tier state (`DepthBrain` is 168 bytes at
+//! align 8, was 132 at align 4); hashes and counts did not move.
 
 use crate::workloads::ScaledArenaTick;
 use engine_core::seal_key::{self, SealKeyError, MIN_SEAL_KEY_BYTES};
@@ -38,7 +40,7 @@ pub const BASELINES: &[Baseline] = &[
         workload: "arena_tick",
         ticks: 600,
         hash: 12857399269765116608,
-        alloc_bytes: 62963,
+        alloc_bytes: 63539,
         alloc_count: 151,
     },
     Baseline {
@@ -87,21 +89,21 @@ pub const BASELINES: &[Baseline] = &[
         workload: ScaledArenaTick::NAME_4,
         ticks: 600,
         hash: 8938032063638970347,
-        alloc_bytes: 56958,
+        alloc_bytes: 57102,
         alloc_count: 60,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_8,
         ticks: 600,
         hash: 6433453695639145363,
-        alloc_bytes: 58756,
+        alloc_bytes: 59044,
         alloc_count: 65,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_16,
         ticks: 600,
         hash: 12857399269765116608,
-        alloc_bytes: 62963,
+        alloc_bytes: 63539,
         alloc_count: 151,
     },
     Baseline {

@@ -18,7 +18,9 @@ use std::sync::{
     OnceLock,
 };
 
-use engine_core::{hash_bytes, hash_hex};
+use engine_core::hash_bytes;
+#[cfg(not(feature = "seal"))]
+use engine_core::hash_hex;
 use engine_observe::EventCode;
 #[cfg(feature = "seal")]
 use hmac::{Hmac, Mac};
@@ -291,6 +293,7 @@ fn fuzz_corpus_cases() -> Vec<(engine_arena::ArenaConfig, engine_arena::BoutTape
                 ticks: 32,
                 fighters: 2,
                 half_extent_m: 20.0,
+                table_version: 1,
             },
             gen_tape(seed, 32, 2),
         ));
@@ -299,6 +302,7 @@ fn fuzz_corpus_cases() -> Vec<(engine_arena::ArenaConfig, engine_arena::BoutTape
             ticks: ADVERSARIAL_TICKS,
             fighters: ADVERSARIAL_FIGHTERS,
             half_extent_m: 10.0,
+            table_version: 1,
         };
         for tape in adversarial(seed) {
             cases.push((arena, tape));
@@ -876,6 +880,7 @@ mod tests {
             ticks: crate::fuzz::ADVERSARIAL_TICKS,
             fighters: crate::fuzz::ADVERSARIAL_FIGHTERS,
             half_extent_m: 10.0,
+            table_version: 1,
         };
         let baseline = engine_arena::run(&config, &engine_arena::BoutTape::default());
         let fails = check_invariants(&config, &adversarial(13)[0], &baseline);
@@ -888,6 +893,7 @@ mod tests {
             ticks: 24,
             fighters: 2,
             half_extent_m: 20.0,
+            table_version: 1,
         };
         let tape = gen_tape(21, 24, 2);
         let path = save_repro(&dir, &config, &tape).expect("repro saves");

@@ -39,6 +39,10 @@ pub mod graph;
 /// Procedural additive hit reactions over body layers.
 pub mod hit_react;
 pub mod ik;
+/// Inertialized clip switches: the shown joint's offset and offset velocity
+/// from the arriving clip decay on a critically damped spring, so a cut keeps
+/// position and speed continuous. Std-only; the fighter look drives it.
+pub mod inertial;
 pub mod inertialize;
 /// Single-loss joint masks plus support polygon after limb loss: rebuilt
 /// [`MaskTable`](layers::MaskTable) weights feed the layers apply path.

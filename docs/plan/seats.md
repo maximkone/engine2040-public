@@ -51,7 +51,7 @@ Planned and underused, now owned (no numbers; counts were not checked today):
 | open steal lines, some already in code; `steal-land --gate` fails today | `docs/plan/steals.md` | porter lands lines, rot-hunter closes done ones |
 | rot scans: stubs, unwired modules, leftovers, bad doc refs | `target/rot/` | rot-hunter |
 | lane patches worth harvesting | `target/rot/lanes-game.csv` | rot-hunter, coder |
-| book skills and loop skills in skillworks, none in this repo | `C:/empire/skillworks/skills`, `work/b1-*` | skill-hunter, miner |
+| book skills and loop skills in skillworks, none in this repo | `C:/empire/lab/skillworks/skills`, `work/b1-*` | skill-hunter, miner |
 | paused seats: sentinel, bench, janitor, evolve, future, vision | `center/crews/engine2040/standing-paused/` | folded into the other seats |
 | idle tools: `affected` `bench-compare` `desync-diff` `frame-triage` `mp-evidence` `part-score` `plan-atlas` `research-cap` `steal-land` `steal-next` `showcase-gate` `q1-check` `secret-gate` `flaky-quarantine` | `tools/` | judge, perf, runner, walker, planner, porter |
 | Lead 2 journeys J1 to J5, walked by one seat | `center/crews/engine2040/lead2/journeys.md` | walker |

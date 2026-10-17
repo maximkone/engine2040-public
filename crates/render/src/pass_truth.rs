@@ -5,15 +5,14 @@
 //! Errors: [`PassTruthError`] names every ragged input. Budget: nine small
 //! frames on a cold path, never per tick; caller-owned buffers, no heap use.
 //!
-//! Shape: [`capture_pair`] renders one arena frame per look pass with the
-//! pass on and off; [`gate_table`] diff-gates each pair through
-//! [`frame_diff_count`] with [`PASS_EPSILON`] and [`PASS_LIVE_FLOOR`].
-//! Today's tree (forward submits, sky and decals are staged probes) ships as
-//! synth pairs: forward differs, sky and decals match, the other six differ.
-//! Every flag still derives from the masked diff, never from the name. The
-//! device leg swaps [`capture_pair`] for window reads with no API change.
-//! Production caller: [`crate::window::WindowShell::look_pass_live`] gates
-//! window-read pairs through [`verdict_for_frames`].
+//! Shape: the verdict on the window's own frame comes from the live-frame arm
+//! ([`live_gate`], rendered by [`harness`] under `window`): the live frame is
+//! drawn with each look pass on and off and a pass is LIVE only when pixels in
+//! the region it paints moved above [`PASS_EPSILON`]. [`gate_table`] and
+//! [`capture_pair`] are the diff machinery's self-test fixture: synth frames
+//! built from [`PassSpec::live_today`], never a verdict on any real frame.
+//! Window-read pairs a caller captured itself gate through [`verdict_for_frames`]
+//! ([`crate::window::WindowShell::look_pass_live`]).
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +22,18 @@ use std::fmt;
 /// per look pass, mark the passes with no pair, and publish the dated artifact
 /// from those rows. Consumer: `crate::window::WindowShell`.
 pub mod reads;
+
+/// Live-frame arm of the gate: on/off frames of the window's own frame path,
+/// each pass judged on the pixels it paints (a draw-id region mask), and the
+/// dated report built from those rows. Std-only pure core; the device leg
+/// that renders the pairs is [`harness`].
+pub mod live_gate;
+
+/// Device leg of the live-frame arm: renders a draw list through the window
+/// frame path with every look pass on and then with each pass off, reads the
+/// pixels back and gates them through [`live_gate`].
+#[cfg(feature = "window")]
+pub mod harness;
 
 /// Diff epsilon in 0..=255 levels: a pixel counts only above it.
 pub const PASS_EPSILON: u8 = 5;
@@ -35,14 +46,43 @@ pub const PASS_FRAME_H: usize = 2;
 /// Harness frame length in bytes (RGBA).
 pub const PASS_FRAME_LEN: usize = PASS_FRAME_W * PASS_FRAME_H * 4;
 
-/// One look pass: registry row, submit entry, and whether it moves pixels today.
+/// Where in a frame a look pass paints. The live-frame gate counts only
+/// these pixels, so a pass cannot read LIVE from a change it has no part in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassRegion {
+    /// Every pixel of the frame.
+    Frame,
+    /// Pixels no draw covers: the sky.
+    Sky,
+    /// Pixels a draw covers: lit surfaces.
+    Geometry,
+}
+
+impl PassRegion {
+    /// Lower-case name for the report column.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Frame => "frame",
+            Self::Sky => "sky",
+            Self::Geometry => "geometry",
+        }
+    }
+}
+
+/// One look pass: registry row, submit entry, the pixels it paints, and the
+/// synth fixture's stand-in for whether it moves pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassSpec {
     /// Board row the pass proves (proof-registry order).
     pub row: &'static str,
     /// GPU submit entry the gate watches.
     pub pass: &'static str,
-    /// True while the pass moves pixels on the current tree.
+    /// The pixels this pass paints; the live-frame gate counts only these.
+    pub region: PassRegion,
+    /// Self-test fixture only ([`capture_pair`] builds its synth frames from
+    /// it): never a verdict on the frame the window draws. The live-frame
+    /// arm in [`live_gate`] ignores it and reads pixels.
     pub live_today: bool,
 }
 
@@ -51,46 +91,55 @@ pub const LOOK_PASSES: [PassSpec; 9] = [
     PassSpec {
         row: "graph",
         pass: "submit_gpu",
+        region: PassRegion::Frame,
         live_today: true,
     },
     PassSpec {
         row: "shadow_cluster",
         pass: "submit_gpu",
+        region: PassRegion::Geometry,
         live_today: true,
     },
     PassSpec {
         row: "ibl",
         pass: "submit_gpu",
+        region: PassRegion::Geometry,
         live_today: true,
     },
     PassSpec {
         row: "post",
         pass: "submit_gpu",
+        region: PassRegion::Frame,
         live_today: true,
     },
     PassSpec {
         row: "gtao",
         pass: "submit_gpu",
+        region: PassRegion::Geometry,
         live_today: true,
     },
     PassSpec {
         row: "sky",
         pass: "submit_gpu_sky",
+        region: PassRegion::Sky,
         live_today: false,
     },
     PassSpec {
         row: "material_layer",
         pass: "submit_gpu",
+        region: PassRegion::Geometry,
         live_today: true,
     },
     PassSpec {
         row: "particles_gpu",
         pass: "submit_gpu",
+        region: PassRegion::Frame,
         live_today: true,
     },
     PassSpec {
         row: "decals",
         pass: "submit_gpu",
+        region: PassRegion::Geometry,
         live_today: false,
     },
 ];
@@ -547,7 +596,7 @@ fn report_footer(table: &[PassVerdict]) -> String {
     let live = table.iter().filter(|verdict| verdict.live).count();
     let probe = table.len().saturating_sub(live);
     format!(
-        "\nGate: EG8 (crates/render/src/pass_truth.rs). A pass is live only when its\non/off frames differ in the counted region above epsilon {} with floor {}.\nRun x2 gives the same table; {} LIVE, {} PROBE.\nForward (graph row) is LIVE, sky and decals are PROBE today; sky and decals stay PROBE only while their diff sits at 0.\nProduction entry: `WindowShell::look_pass_live` (crates/render/src/window.rs) gates window-read pairs through the same masked diff; synth harness pairs take the same arm.\nPixels decide; no manifest count.\n",
+        "\nGate: EG8 (crates/render/src/pass_truth.rs). A pass is live only when its\non/off frames differ in the counted region above epsilon {} with floor {}.\nRun x2 gives the same table; {} LIVE, {} PROBE.\nForward (graph row) is LIVE, sky and decals are PROBE today; sky and decals stay PROBE only while their diff sits at 0.\nProduction entry: `WindowShell::look_pass_live` (crates/render/src/window.rs) gates window-read pairs through the same masked diff; synth harness pairs take the same arm.\nSelf-test fixture: these frames are built from the registry, not rendered. The verdict on the window's frame is the live-frame arm's report (pass_truth/live_gate.rs).\nPixels decide; no manifest count.\n",
         PASS_EPSILON, PASS_LIVE_FLOOR, live, probe
     )
 }
@@ -655,7 +704,8 @@ pub fn compare_classic_reference(
 /// Difference image in RGBA row-major: red where above epsilon, black elsewhere.
 /// Same inputs give the same bytes twice; integer only, heap only the image.
 /// PORT shape from the wgpu `-difference` writer; PNG encode rides the `v1` image dep.
-#[cfg(feature = "v1")]
+/// Test-only until the bundle glue calls it.
+#[cfg(all(test, feature = "v1"))]
 fn rl11_difference_rgba(classic: &[u8], reference: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(classic.len());
     for (pixel_a, pixel_b) in classic.chunks_exact(4).zip(reference.chunks_exact(4)) {
@@ -676,7 +726,7 @@ fn rl11_difference_rgba(classic: &[u8], reference: &[u8]) -> Vec<u8> {
 /// Units: RGBA bytes row-major in, PNG bytes out.
 /// Deterministic per input bytes; PNG-only via the `v1` image dep, no new package.
 /// Caller: the RL11 look test; the future bundle glue reuses the pair.
-#[cfg(feature = "v1")]
+#[cfg(all(test, feature = "v1"))]
 pub(crate) fn rl11_actual_difference_pngs(
     classic: &[u8],
     reference: &[u8],
@@ -1008,9 +1058,11 @@ mod tests {
 
     #[test]
     fn dated_artifact_lists_every_look_pass_twice() {
-        let date = "2026-10-17";
+        // The synth fixture's artifact carries its own tag: the dated
+        // `pass-truth-<date>.md` is the live-frame arm's, never this stand-in's.
+        let date = "synth-selftest";
         let path = write_gate_report(date).expect("dated artifact writes");
-        assert_eq!(path, "target/reports/pass-truth-2026-10-17.md");
+        assert_eq!(path, "target/reports/pass-truth-synth-selftest.md");
         assert_eq!(path, pass_truth_filename(date), "writer uses the gate path");
         let first = std::fs::read(&path).expect("dated artifact reads back");
         let composed = gate_dated_report(date);
@@ -1020,7 +1072,7 @@ mod tests {
             "artifact bytes are the composed gate run"
         );
         let text = String::from_utf8(first.clone()).expect("artifact is utf8");
-        assert!(text.starts_with("# pass truth 2026-10-17\n\n"));
+        assert!(text.starts_with("# pass truth synth-selftest\n\n"));
         for spec in LOOK_PASSES.iter() {
             let needle = format!("| {} |", spec.row);
             assert_eq!(

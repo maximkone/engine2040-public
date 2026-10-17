@@ -2,16 +2,25 @@
 
 /// Center-of-mass balance core plus stagger response.
 pub mod balance;
+/// Presentation cloth for fighter capes and arena banners: CPU Verlet in floats at the fixed
+/// 60 Hz step, per-tier cost table, sleeping when still. Never hashed, never read by the sim.
+pub mod cloth;
 #[cfg(feature = "rapier")]
 pub mod controller;
 /// Character controller v2: steps, slopes, platforms, ledge sense, pushes.
 /// Integer-millimeter, std-only; arena locomotion walks these walkers.
 pub mod controller2;
+/// Canonical island topology plus snapshot bytes the Rapier world checkpoints
+/// through. Std-only; no sim step.
+pub mod islands;
 pub mod kcc;
 /// Severed limbs as bodies: mass from volume and density, inherited velocity
 /// plus blade impulse, stump recoil, canonical order, capped, snapshotted.
 /// Integer, std-only.
 pub mod limb;
+/// One table of density, friction, bounce and damping per material (wood, stone,
+/// flesh, metal, sand, cloth). Integer rows, std-only.
+pub mod material;
 pub mod overlap;
 /// PD velocity-servo drive law for the powered ragdoll: D-damped servo
 /// axes, magnitude clamp, dt fallback to P-only. Std-only.

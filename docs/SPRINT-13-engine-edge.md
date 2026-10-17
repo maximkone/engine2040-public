@@ -108,7 +108,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   first) on every public engine crate against the last tagged release.
   Tier C. Size S. Owns the check leg. Accept: a seeded breaking change
   fails; a doc-only change passes. needs: API2.
-- [ ] OPT24 provider: response cassettes — a content-addressed store
+- [x] OPT24 provider: response cassettes — a content-addressed store Landed e04071b6.
   keyed by (adapter, model, request digest, schema version); live runs
   record, evals and CI replay offline with no keys; a stale entry is
   refused with its reason, never reused silently. Tier B. Size M. Owns

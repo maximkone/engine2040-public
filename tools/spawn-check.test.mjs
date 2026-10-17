@@ -25,7 +25,6 @@ const NEW_FILES = [
   "tools/knobs-check.test.mjs",
   "tools/pool-queue.mjs",
   "tools/pool-queue.test.mjs",
-  "tools/presence.mjs",
   "tools/q1-check.mjs",
   "tools/q1-check.test.mjs",
   "tools/sky-preset.test.mjs",

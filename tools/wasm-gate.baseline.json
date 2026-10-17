@@ -1,0 +1,224 @@
+{
+ "version": 1,
+ "note": "Ratchet for tools/wasm-gate.mjs: per file and hazard, the count of calls that break in a browser. Counts only go down (--tighten); a file that is not listed must have none.",
+ "files": {
+  "crates/arena/src/fork.rs": {
+   "thread": 2
+  },
+  "crates/arena/src/gym.rs": {
+   "thread": 1
+  },
+  "crates/assets/src/archive.rs": {
+   "fs": 1
+  },
+  "crates/assets/src/bundle_cook.rs": {
+   "fs": 4
+  },
+  "crates/assets/src/gen_intake.rs": {
+   "fs": 7
+  },
+  "crates/assets/src/recook.rs": {
+   "fs": 1
+  },
+  "crates/assets/src/watcher.rs": {
+   "fs": 1
+  },
+  "crates/audio/src/decode.rs": {
+   "fs": 1
+  },
+  "crates/ecs/src/pool.rs": {
+   "thread": 1
+  },
+  "crates/game/src/arena_kit.rs": {
+   "exe": 1,
+   "fs": 1
+  },
+  "crates/game/src/capture.rs": {
+   "fs": 6
+  },
+  "crates/game/src/crash.rs": {
+   "clock": 2,
+   "fs": 4
+  },
+  "crates/game/src/dev_hotpatch.rs": {
+   "fs": 1
+  },
+  "crates/game/src/fighter_bind.rs": {
+   "fs": 2
+  },
+  "crates/game/src/fighter_look.rs": {
+   "clock": 4,
+   "exe": 1,
+   "fs": 2
+  },
+  "crates/game/src/lib.rs": {
+   "fs": 1
+  },
+  "crates/game/src/netgame.rs": {
+   "socket": 4
+  },
+  "crates/game/src/reload.rs": {
+   "fs": 1
+  },
+  "crates/game/src/steam.rs": {
+   "fs": 3
+  },
+  "crates/game/src/windowed.rs": {
+   "clock": 2
+  },
+  "crates/net/src/courier.rs": {
+   "clock": 1,
+   "socket": 5
+  },
+  "crates/net/src/dedicated.rs": {
+   "socket": 3
+  },
+  "crates/net/src/quic.rs": {
+   "clock": 5,
+   "socket": 13,
+   "thread": 4
+  },
+  "crates/net/src/session.rs": {
+   "socket": 4
+  },
+  "crates/net/src/snapshot.rs": {
+   "fs": 2
+  },
+  "crates/net/src/tick_budget.rs": {
+   "clock": 5
+  },
+  "crates/net/src/wan_soak.rs": {
+   "clock": 1
+  },
+  "crates/net/src/webtransport/server.rs": {
+   "thread": 1
+  },
+  "crates/proof/src/a9.rs": {
+   "fs": 8
+  },
+  "crates/proof/src/fb_versions.rs": {
+   "fs": 1
+  },
+  "crates/proof/src/fuzz.rs": {
+   "fs": 4
+  },
+  "crates/proof/src/gpu_live.rs": {
+   "fs": 2
+  },
+  "crates/render/src/aa_scale.rs": {
+   "block": 6,
+   "clock": 6
+  },
+  "crates/render/src/accel.rs": {
+   "block": 2,
+   "clock": 3
+  },
+  "crates/render/src/baked_bake.rs": {
+   "clock": 1
+  },
+  "crates/render/src/baked_gi.rs": {
+   "block": 2,
+   "clock": 2
+  },
+  "crates/render/src/cache.rs": {
+   "fs": 1
+  },
+  "crates/render/src/decals.rs": {
+   "block": 1,
+   "clock": 2
+  },
+  "crates/render/src/executor.rs": {
+   "clock": 1
+  },
+  "crates/render/src/fluids_gpu.rs": {
+   "clock": 1
+  },
+  "crates/render/src/fog.rs": {
+   "block": 2,
+   "clock": 5
+  },
+  "crates/render/src/gpu.rs": {
+   "block": 2,
+   "clock": 2
+  },
+  "crates/render/src/gpu_cull.rs": {
+   "block": 3
+  },
+  "crates/render/src/graph.rs": {
+   "block": 2,
+   "clock": 2
+  },
+  "crates/render/src/gtao.rs": {
+   "block": 3,
+   "clock": 5
+  },
+  "crates/render/src/ibl.rs": {
+   "block": 2,
+   "clock": 2
+  },
+  "crates/render/src/material_layer.rs": {
+   "block": 1,
+   "clock": 1
+  },
+  "crates/render/src/particles_gpu.rs": {
+   "block": 1,
+   "clock": 2
+  },
+  "crates/render/src/pass_truth.rs": {
+   "fs": 2
+  },
+  "crates/render/src/pass_truth/live_gate.rs": {
+   "fs": 2
+  },
+  "crates/render/src/pass_truth/reads.rs": {
+   "fs": 2
+  },
+  "crates/render/src/post.rs": {
+   "block": 6,
+   "clock": 13
+  },
+  "crates/render/src/present/gpu_present/live.rs": {
+   "clock": 5
+  },
+  "crates/render/src/present/gpu_present/presenter.rs": {
+   "block": 4
+  },
+  "crates/render/src/present/gpu_present/submit.rs": {
+   "block": 3,
+   "clock": 1
+  },
+  "crates/render/src/present/gpu_present/sun_shadow.rs": {
+   "clock": 1
+  },
+  "crates/render/src/restir_di.rs": {
+   "clock": 2
+  },
+  "crates/render/src/shadow_cluster.rs": {
+   "block": 2,
+   "clock": 2
+  },
+  "crates/render/src/shadow_cluster/torch_cluster.rs": {
+   "clock": 2
+  },
+  "crates/render/src/sky.rs": {
+   "block": 1,
+   "clock": 3,
+   "thread": 1
+  },
+  "crates/render/src/upscale_easu.rs": {
+   "clock": 1
+  },
+  "crates/render/src/v1_gpu.rs": {
+   "block": 4
+  },
+  "crates/render/src/v1_skin.rs": {
+   "block": 4
+  },
+  "crates/save/src/fallback.rs": {
+   "fs": 3
+  },
+  "crates/save/src/lib.rs": {
+   "fs": 3
+  }
+ }
+}

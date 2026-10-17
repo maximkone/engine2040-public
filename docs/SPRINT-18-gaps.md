@@ -52,7 +52,7 @@ FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
 Decided 2026-10-10 by the Claude session the owner delegated to ("u decide on
 all"): the rollback window stays 8 ticks; QUIC through the relay waits.
 
-- [ ] MP24 net: adaptive input delay keeps every resim inside
+- [x] MP24 net: adaptive input delay keeps every resim inside Landed 440c6bbb.
   `RESIM_CAP_TICKS` (8) — no deeper window. When the simulated round trip
   exceeds the window, the client delays its own input by ceil(rtt_ticks) - 8
   so prediction never runs deeper than 8 ticks (rollback fighting-game
@@ -165,7 +165,7 @@ seat guard refuses their edits, so take the next row. Search the books first:
   tools/proof.mjs` RESULT names the skipped count. F2P: the require_or_skip test
   fails before (no helper module). P2P: `cargo test -p engine-render --lib`
   green; golden `d57b5c8ae3096614` unchanged. Review: testing.md G4. needs: EG2.
-- [ ] EG8 render: a pass is live only if pixels change — the GX6 truth gate
+- [x] EG8 render: a pass is live only if pixels change — the GX6 truth gate Landed 1bb6097.
   counts a pass live when it does not return Unsupported, so bind probes pass
   (`sky.rs` copies a buffer, the cascade "shadow" is a distance dim). New
   gate: render the arena frame with the pass on and off; live only if a
@@ -408,7 +408,7 @@ Same source and routing as the frame section above.
   --lib https_stub` connects over TLS. F2P: the pinned_request test fails before
   (no system prompt or temperature). P2P: `cargo test -p engine-provider --lib`
   green; golden unchanged. Review: ai.md G3 (dushkin 21.1).
-- [ ] EG18 game: animation from sim state, slice 1 (narrowed to the caller) — the
+- [x] EG18 game: animation from sim state, slice 1 (narrowed to the caller) — the Landed 1d01a41.
   bridge module sits caller-less (`pub mod` only); wire it as the production
   owner in the look fold path, sampling stays put. Owns the `anim_bridge.rs`
   caller hunk. Accept: new `fighter_anim_bridge_drives_look_pick` green x2
@@ -436,7 +436,7 @@ Same source and routing as the frame section above.
   digest is equal x2. F2P: the startup-range test fails before (v1 startup is
   4). P2P: golden `d57b5c8ae3096614` unchanged. Review: bodies.md G4 (geaen
   11.11.2.2). needs: EG3.
-- [ ] EG19b combat: an `AttackStarted` cue on the press tick under tables v2
+- [x] EG19b combat: an `AttackStarted` cue on the press tick under tables v2 Landed fee2dce.
   — the fight emits it when an attack begins (v2 only; the v1 event stream
   stays frozen) and the game receives it as a `FightCue`. Diff: good (hash
   law). Tier A. Size S. Owns the `crates/combat/src/fight.rs` event hunk and
@@ -702,7 +702,7 @@ Same source and routing as the frame section above.
   on v2; the window arena run x2 gives equal v2 hashes. F2P: no rules version on
   the wire today. P2P: `cargo test -p engine-net --lib` green; golden
   unchanged with a HASH-LAW note. Review: bodies.md G2. needs: EG43.
-- [ ] EG45 game: the window shows balance verdicts — EG34 steps an integer
+- [x] EG45 game: the window shows balance verdicts — EG34 steps an integer Landed 1d01a41.
   `BalanceState` per slot under rules v2, but it is a private `Sim` field
   (`crates/arena/src/lib.rs`, `balance: Vec<BalanceState>`), so the window never
   shows a stumble or a fall. Add a read-only `Sim::balance(slot) ->
@@ -1385,7 +1385,7 @@ the EG8 on vs off test shows the island is wrong. Every look row ends with
 passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0.24 of a
 60 ms frame), so wiring spends headroom FC3 has; FC1 measures each landing.
 
-- [ ] LF1 render: the window draws the `sky.rs` Hillaire bake — `forward.wgsl`
+- [x] LF1 render: the window draws the `sky.rs` Hillaire bake — `forward.wgsl` Landed 1bb6097.
   `fs_sky` draws an analytic fog-form sky; `sky.rs` (physical sky bake plus
   EV100 exposure) is already baked on the CPU at presenter start
   (`presenter.rs:365-373`) but the live frame only reads two colours from it
@@ -1398,7 +1398,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   x2 equal; `arena per-pass` sky above 0 ms on live frames. F2P: a live-sky
   test fails before (`fs_sky` reads no texture). P2P: `cargo test -p
   engine-render --lib` green; golden unchanged. needs: EG9.
-- [ ] LF2 render: the window lights with `ibl.rs` — `fs` adds a constant
+- [ ] LF2 render: the window lights with `ibl.rs` — `fs` adds a constant Landed so far (2026-10-17): 1bb6097 (ibl LIVE: armor 1074/1074 and sand 36511/36511 pixels change, capture equal twice). Remaining: a separate ibl ms in arena per-pass (it runs inside forward).
   `AMBIENT_FLOOR`; `ibl.rs` bakes a prefiltered cubemap and BRDF LUT on the
   CPU at presenter start from the embedded
   `content/incoming/studio_small_09_1k.hdr` (`gpu_present.rs:15`,
@@ -1412,7 +1412,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   regions differ on vs off; capture x2 equal; ibl above 0 ms live. F2P: on vs
   off frames are identical today. P2P: render lib green; golden unchanged.
   needs: EG9.
-- [ ] LF3 render: GTAO in the live frame — the blit multiplies `ao_tex`
+- [ ] LF3 render: GTAO in the live frame — the blit multiplies `ao_tex` Landed so far (2026-10-17): 1bb6097 (landing 1: GTAO on the device writes ao_tex, 0.165 ms at 720p, feet 0.9907 and wall base 0.9877 vs open sand 1.0000). Remaining: landing 2, the depth-only prepass so AO scales ambient only; GTAO under MSAA.
   (`shaders/blit.wgsl:49`), which stays 1.0; `gtao.rs` computes half-res GTAO
   on the GPU only under `--look-probes`. There is no depth prepass: the
   forward pass clears and stores depth once (`submit.rs:410-419`). First
@@ -1424,7 +1424,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   regions darker on vs off, open sand within 2%; gtao above 0 ms live. F2P:
   `ao_tex` is constant 1 today. P2P: render lib green; golden unchanged.
   needs: EG2.
-- [ ] LF4 render: bloom and grade from `post.rs` — the RP1 chain (soft-knee
+- [x] LF4 render: bloom and grade from `post.rs` — the RP1 chain (soft-knee Landed 99e624b.
   bloom extract, blur, add, exposure, ACES, grade) is not wired at all: no
   `Presenter` field holds it and `aa_choice`/`compile_taa_off` have no game
   caller; the blit does ACES alone. Put bloom and grade between forward and the blit's
@@ -1490,7 +1490,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   Size M. Owns forward shader BRDF hunks, the render material kind field, the
   fighter_look kind map. Accept: per kind the part's region differs on vs off;
   stone unchanged. F2P: no kind field. P2P: render lib green. needs: LF2.
-- [ ] LF9 anim: inertialized clip switches — after EG18's crossfade, a switch
+- [x] LF9 anim: inertialized clip switches — after EG18's crossfade, a sw Landed aa42e4d.itch
   stores per-joint offsets (source minus destination, shortest-arc for
   rotations) that a critically damped spring decays (orangeduck Spring-It-On
   `common.h` `halflife_to_damping`, `critical_spring_damper_exact`,
@@ -1503,7 +1503,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   1e-4; the product check's `arena view:` pops drop to 0 at attack and idle
   switches. F2P: no inertial module. P2P: anim lib and game `--features app` lib
   green; golden unchanged. needs: EG18.
-- [ ] LF10 game: poses hold through the sim's hitstop — combat sets
+- [x] LF10 game: poses hold through the sim's hitstop — combat sets Landed b34c6f8.
   `state.hitstop = tables.hitstop_ticks` on impact (`crates/combat/src/fight.rs`,
   about line 912) and freezes the fight, but the look's clip clocks keep
   running, so no hit lands visibly. Expose the count read-only on the app;
@@ -1513,7 +1513,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   --lib hitstop_hold`: during hitstop the two slots' phases stay put while the
   others advance; afterwards all advance. F2P: phases advance through hitstop
   today. P2P: game lib green; golden unchanged. needs: none.
-- [ ] LF11 game: impact shake — one trauma value (add 0.4 per `Hit` within
+- [x] LF11 game: impact shake — one trauma value (add 0.4 per `Hit` within Landed c7e6c66.
   reach, 0.7 per `Knockdown`, clamp 1, decay 1.0 per s) offsets the fight
   camera eye and target by trauma squared times tick-seeded noise (at most
   0.12 m and 2 degrees roll), view only. Reuse `crates/game/src/camera.rs`
@@ -1553,7 +1553,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   `look.rs` FLIP fns. Accept: `look_metric` tests: identical frames 0, a 1 px
   shift small, a 20% brighter sand region larger than the shift, x2 equal.
   F2P: none. P2P: playtest lib green. needs: EG30.
-- [ ] LF16 endpoint: the playtest verbs other engines' doors have —
+- [x] LF16 endpoint: the playtest verbs other engines' doors have — Landed 2124db13.
   `play.step_until` (a condition over `sim.observe` fields, tick cap),
   `input.inject` (a named action held N ticks), `state.digest` (hash of the
   live bout), beside EG16's `play.step` (satelliteoflove godot-mcp
@@ -1575,7 +1575,7 @@ ticks shown), `--view-brief` writes one JSON line per frame (about 2 KB against 
 it: no window, the door, the GPU's own numbers, props and light, questions. A
 model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
 
-- [ ] SP61 game: the view truth with no GPU — split `FighterLook::stage_bodies`
+- [x] SP61 game: the view truth with no GPU — split `FighterLook::stage_bodies` Landed 1d01a41.
   into a CPU pose step (clip sample, skin, `BodyTruth`) and the upload, so
   `FighterLook::load`, `observe_tick` and a new `pose_frame(fighters, alpha)`
   run with no `Presenter`; add a joints-only mode (bounds from joints padded by
@@ -1627,7 +1627,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   green; on a 2-fighter fixture each body's px is within 15% of the CPU
   projection's area. F2P: no `arena pixels:` line. P2P: game lib and `node
   --test tools/product-check.test.mjs` green. needs: SP63b.
-- [ ] SP64 game: props and light in the view truth — every arena-kit and ring
+- [x] SP64 game: props and light in the view truth — every arena-kit and ring Landed 1d01a41.
   draw adds a row (kind, bounds, screen rect, cover); the frame adds sun
   direction and elevation, exposure, fog density and the passes that ran
   (`arena per-pass` ms above 0). Laws: sun below the horizon, exposure outside

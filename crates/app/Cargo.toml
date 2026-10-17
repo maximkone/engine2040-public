@@ -13,6 +13,7 @@ workspace = true
 # never steps combat or physics itself.
 [dependencies]
 engine-core.workspace = true
+engine-clock.workspace = true
 engine-ecs.workspace = true
 engine-scene.workspace = true
 engine-arena.workspace = true

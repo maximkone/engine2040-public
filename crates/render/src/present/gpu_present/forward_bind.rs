@@ -5,15 +5,21 @@
 //! today). Units: meters for torch pos and range, linear radiance for color.
 //! Determinism: fixed slot order; same inputs give same bytes. Normal and
 //! ORM sampling hooks stay in the chunk for slice c; the live bind of these
-//! bytes into the frame lands after this slice.
+//! bytes into the frame lands after this slice. The map-hook mirrors (the
+//! error type, ORM split, normal decode and world normal) compile under
+//! `cfg(test)` only: they pin the shader terms until the bind slice calls
+//! them, then they lose the gate.
 
+#[cfg(test)]
 use std::fmt;
 
 /// Staged EG12 WGSL chunk: torch uniform array plus map hooks.
+#[cfg(test)]
 pub(crate) const FORWARD_MAPS_WGSL: &str = include_str!("../../shaders/forward_maps.wgsl");
 
 /// Markers the staged chunk must contain: the torch block plus its fill,
 /// read-back and shade helpers. The slice-2 pipeline bind gates on these.
+#[cfg(test)]
 pub(crate) const FORWARD_MAPS_MARKERS: [&str; 6] = [
     "Eg12Torch",
     "Eg12TorchBlock",
@@ -37,6 +43,7 @@ const TORCH_COLOR: [f32; 3] = [1.0, 0.55, 0.22];
 const TORCH_RANGE_M: f32 = 12.0;
 
 /// Staged bind failures: every refusal names its cause.
+#[cfg(test)]
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum ForwardMapsError {
     /// Caller input is unusable; reason carried.
@@ -45,6 +52,7 @@ pub(crate) enum ForwardMapsError {
     BadIndex(u32),
 }
 
+#[cfg(test)]
 impl fmt::Display for ForwardMapsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -54,10 +62,12 @@ impl fmt::Display for ForwardMapsError {
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for ForwardMapsError {}
 
 /// Assert the staged chunk carries every torch marker. The window-only
 /// wiring gate calls this before the slice-2 layout lands.
+#[cfg(test)]
 pub(crate) fn assert_forward_maps_chunk(chunk: &str) -> Result<(), ForwardMapsError> {
     for marker in FORWARD_MAPS_MARKERS {
         if !chunk.contains(marker) {
@@ -90,6 +100,7 @@ impl TorchSlot {
     };
 
     /// Check finiteness and ranges before the slot reaches the frame.
+    #[cfg(test)]
     fn validate(&self) -> Result<(), ForwardMapsError> {
         if !self.pos.iter().all(|c| c.is_finite()) {
             return Err(ForwardMapsError::Invalid(
@@ -146,6 +157,7 @@ impl TorchFrame {
     /// Build a frame from an explicit slot list: the first `slots.len()`
     /// entries burn, the rest stay dark. Refuses more than [`TORCH_MAX`]
     /// entries and any non-finite slot. Sizes nothing.
+    #[cfg(test)]
     pub(crate) fn from_list(slots: &[TorchSlot]) -> Result<Self, ForwardMapsError> {
         if slots.len() > TORCH_MAX {
             return Err(ForwardMapsError::Invalid(format!(
@@ -169,11 +181,13 @@ impl TorchFrame {
     }
 
     /// Live torch count: two when draws exist, zero for clears.
+    #[cfg(test)]
     pub(crate) fn count(&self) -> u32 {
         self.count
     }
 
     /// Borrow slot `index`; refuses past the live count.
+    #[cfg(test)]
     pub(crate) fn slot(&self, index: usize) -> Result<TorchSlot, ForwardMapsError> {
         if index >= TORCH_MAX {
             return Err(ForwardMapsError::BadIndex(
@@ -216,6 +230,7 @@ impl TorchFrame {
     /// Read slot `index` back from a packed block image: the inverse of
     /// [`TorchFrame::pack_into`]. Refuses wild indices and corrupt counts
     /// loudly; validates the decoded slot before returning it. Sizes nothing.
+    #[cfg(test)]
     pub(crate) fn unpack_slot(
         bytes: &[u8; TORCH_BLOCK_BYTES],
         index: usize,
@@ -270,6 +285,7 @@ impl TorchFrame {
 /// Packed ORM split in 0..=1: occlusion, perceptual roughness, metalness.
 /// Mirrors `Eg12Orm` in the staged chunk field for field. Units: unitless
 /// ratios. Determinism: same texel gives same split.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct OrmSplit {
     /// Ambient opening, 1 open and 0 shut.
@@ -283,6 +299,7 @@ pub(crate) struct OrmSplit {
 /// Split one ORM texel with R occlusion, G roughness and B metallic,
 /// clamping each lane 0..=1 like `eg12_split_orm`. Refuses non-finite
 /// texels. Allocates nothing, no clock, deterministic.
+#[cfg(test)]
 pub(crate) fn split_orm(texel: [f32; 3]) -> Result<OrmSplit, ForwardMapsError> {
     if !texel.iter().all(|c| c.is_finite()) {
         return Err(ForwardMapsError::Invalid("orm texel is not finite".into()));
@@ -295,6 +312,7 @@ pub(crate) fn split_orm(texel: [f32; 3]) -> Result<OrmSplit, ForwardMapsError> {
 }
 
 /// Normalize or keep the input when degenerate so no NaN escapes.
+#[cfg(test)]
 fn normalize_or_input(v: [f32; 3]) -> Result<[f32; 3], ForwardMapsError> {
     let l2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     if l2 < 1e-12 {
@@ -308,6 +326,7 @@ fn normalize_or_input(v: [f32; 3]) -> Result<[f32; 3], ForwardMapsError> {
 /// guarded normalize like `eg12_decode_normal`: a zero-length decode
 /// falls back to the geometric normal. Refuses non-finite inputs.
 /// Allocates nothing, no clock, deterministic.
+#[cfg(test)]
 pub(crate) fn decode_normal(
     texel: [f32; 3],
     geom_n: [f32; 3],
@@ -340,6 +359,7 @@ pub(crate) fn decode_normal(
 /// normal, handedness from `tangent.w`, bitangent `w * (n x t)`.
 /// Degenerate tangents or outputs keep `n`. Refuses non-finite inputs.
 /// Allocates nothing, no clock, deterministic.
+#[cfg(test)]
 pub(crate) fn world_normal(
     geom_n: [f32; 3],
     tangent: [f32; 4],
@@ -484,7 +504,7 @@ mod forward_maps_tests {
     #[test]
     fn pack_into_allocates_nothing() {
         let frame = TorchFrame::for_draws(true);
-        let (_, heap) = engine_core::alloc_probe::measure(|| {
+        let ((), heap) = engine_core::alloc_probe::measure(|| {
             let mut out = [0u8; TORCH_BLOCK_BYTES];
             frame.pack_into(&mut out);
             core::hint::black_box(out);
@@ -684,8 +704,8 @@ mod forward_maps_tests {
                 masked += 1;
                 let world = [18.0 + x as f32 * 0.5, 0.0, -4.0 + y as f32 * 0.5];
                 let on = shade(world);
-                for c in 0..3 {
-                    max_gap = max_gap.max(on[c].abs());
+                for lane in on {
+                    max_gap = max_gap.max(lane.abs());
                 }
             }
         }

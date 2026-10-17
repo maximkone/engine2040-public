@@ -7,11 +7,13 @@
 //! 1 ch 9.6, 11.3: never wait on the GPU inside a frame).
 use super::super::*;
 use super::frame::{FrameReceipt, LookPassReceipt};
+use super::gate::{ibl_cut_word, LiveLook, IBL_CUT_OFFSET};
 use super::presenter::Presenter;
 use super::submit::{
-    effective_camera, inverse_view_proj_cols, map_readback_f32, padded_depth_row, FrameCamera,
-    MATERIAL_STRIDE,
+    effective_camera, inverse_view_proj_cols, map_readback_f32, padded_depth_row, ForwardLook,
+    FrameCamera, MATERIAL_STRIDE,
 };
+use super::timing::PassesTimed;
 
 /// Fog tranche rows in receipt order: fog passes, fog validation errors,
 /// fog submit us, gtao passes, gtao validation errors, gtao submit us.
@@ -24,6 +26,12 @@ pub(super) enum LiveSink<'a> {
     Surface(&'a wgpu::TextureView),
     /// The LDR twin target; the live path never reads it back.
     Twin,
+}
+
+/// Whole microseconds since `started`, saturating. Wall clock, evidence
+/// only, never hashed.
+fn micros_since(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Live half-res present switch: off keeps full-res pixels (default),
@@ -70,16 +78,22 @@ pub(super) fn live_bloom_should_run(max_luma: f32, threshold: f32, knee: f32) ->
 /// test. Units boolean. Presentation only, never hashed.
 pub(super) const LIVE_BLOOM_DEFAULT_ON: bool = true;
 
-/// Live bloom on/off switch: ships at [`LIVE_BLOOM_DEFAULT_ON`], so the
-/// window frame consults the gate below and runs the halo; off keeps the
-/// frame bit-identical and is reached through
-/// `Presenter::set_bloom_enabled(false)`. Owner live, consumer
-/// `present_frame_live`. Units boolean out. Determinism one relaxed atomic
-/// load, no wall clock, no allocation. Presentation only, never hashed.
+/// Process-wide mirror of the bloom switch: ships at
+/// [`LIVE_BLOOM_DEFAULT_ON`] and follows `Presenter::set_bloom_enabled`.
+/// The live frame gates on its own presenter's `bloom.enabled`; this mirror
+/// only reads back what the last call set. Owner live. Units boolean out.
+/// Determinism one relaxed atomic. Presentation only, never hashed.
 static LIVE_BLOOM_ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(LIVE_BLOOM_DEFAULT_ON);
 
-/// Read the live bloom switch. Units boolean out.
+/// Read the process-wide live bloom switch mirror that
+/// `Presenter::set_bloom_enabled` writes. The live frame reads its own
+/// presenter's switch instead; this mirror is what the gate tests read back.
+/// Units boolean out.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read back by the bloom gate tests only")
+)]
 #[must_use]
 pub(super) fn live_bloom_enabled() -> bool {
     LIVE_BLOOM_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
@@ -228,14 +242,21 @@ pub(crate) fn live_ibl_for_frame(
 /// Presentation only, never hashed.
 /// Caller: `present_frame_live` receipt (timing lands next; this slice names the rule only).
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the receipt caller lands next; tests pin the rule"
+    )
+)]
 pub(crate) fn live_ibl_should_count(forward_binds: bool, lit: bool, ibl_ms: f64, gap: f32) -> bool {
     if !crate::ibl::live_ibl_should_sample(forward_binds, lit) {
         return false;
     }
-    if !(ibl_ms > 0.0) {
+    if ibl_ms.is_nan() || ibl_ms <= 0.0 {
         return false;
     }
-    if !(gap > 0.002) {
+    if gap.is_nan() || gap <= 0.002 {
         return false;
     }
     true
@@ -249,10 +270,10 @@ pub(crate) fn live_ibl_should_count(forward_binds: bool, lit: bool, ibl_ms: f64,
 /// at-or-below EG8 epsilon stays skip. Presentation only, never hashed.
 #[must_use]
 pub(crate) fn live_sky_should_count(sky_ms: f64, gap: f32) -> bool {
-    if !(sky_ms > 0.0) {
+    if sky_ms.is_nan() || sky_ms <= 0.0 {
         return false;
     }
-    if !(gap > 0.01) {
+    if gap.is_nan() || gap <= 0.01 {
         return false;
     }
     true
@@ -300,6 +321,13 @@ pub(crate) fn live_sky_feed_for_frame(
 /// Fail-closed: non-finite inputs refuse. Presentation only, never hashed.
 /// Caller: future quiet-perf gate reading the windowed arena run.
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the perf gate reader lands later; tests pin the rule"
+    )
+)]
 pub(crate) fn frame_meets_30fps_gate(p50_ms: f64, p99_ms: f64) -> bool {
     p50_ms <= 33.3 && p99_ms <= 50.0
 }
@@ -678,7 +706,7 @@ impl Presenter {
 /// Revision over forward inputs (mesh, material, base-color, count).
 /// Same list gives same revision; any id, digest, material or count
 /// change moves it. Pure, no allocation. Owner live, consumer
-/// `present_frame_revision` in `submit` (unchanged skip). Units u64 out.
+/// `present_frame_live` (the bind reuse skip). Units u64 out.
 #[must_use]
 pub(super) fn live_forward_revision(list: &DrawList) -> u64 {
     let mut h = engine_core::Fnv64::new();
@@ -726,6 +754,10 @@ pub(crate) fn live_bind_skip_enabled() -> bool {
 }
 
 /// Set the live bind-reuse skip switch. Units boolean in.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the skip ships off; only tests flip it")
+)]
 pub(crate) fn set_live_bind_skip_enabled(enabled: bool) {
     LIVE_BIND_SKIP_ENABLED.store(enabled, core::sync::atomic::Ordering::Relaxed);
 }
@@ -887,9 +919,16 @@ impl Presenter {
     /// Refresh the per-frame uniforms: camera, light and every draw's
     /// material in one write to the ring (`stage_frame` packed them).
     /// Three buffer writes per frame, however many draws.
-    pub(super) fn write_frame_uniforms(&self, cam: &[u8], light: &[u8]) {
+    pub(super) fn write_frame_uniforms(&self, cam: &[u8], light: &[u8], ibl_on: bool) {
         self.queue.write_buffer(&self.cam_buf, 0, cam);
         self.queue.write_buffer(&self.light_buf, 0, light);
+        // The IBL cut word rides every frame, so a frame that cuts the baked
+        // ambient never leaks the cut into the next frame.
+        self.queue.write_buffer(
+            &self.ibl_sh_buf,
+            IBL_CUT_OFFSET,
+            &ibl_cut_word(ibl_on).to_le_bytes(),
+        );
         if !self.material_scratch.is_empty() {
             self.queue
                 .write_buffer(&self.material_ring, 0, &self.material_scratch);
@@ -1091,7 +1130,9 @@ impl Presenter {
             height,
             &crate::pass_truth::LookToggles::all_on(),
         )?;
+        let present_started = std::time::Instant::now();
         self.queue.present(frame);
+        super::frame::record_present_call_us(micros_since(present_started));
         self.frames_presented += 1;
         Ok(receipt)
     }
@@ -1110,6 +1151,7 @@ impl Presenter {
         height: u32,
         toggles: &crate::pass_truth::LookToggles,
     ) -> Result<FrameReceipt, PresentError> {
+        let stage_started = std::time::Instant::now();
         let (render_w, render_h) = live_present_size(width, height, live_half_res_enabled());
         let frame = effective_camera(list, render_w, render_h)?;
         let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
@@ -1118,7 +1160,9 @@ impl Presenter {
             self.stage_frame_with_camera(list, &frame, frame.built_view_proj, order)?;
         self.frame_waits = FrameWaits::default();
         self.ensure_targets(render_w, render_h);
-        self.write_frame_uniforms(&cam_bytes, &light_bytes);
+        let look = LiveLook::from_toggles(toggles);
+        self.write_frame_uniforms(&cam_bytes, &light_bytes, look.ibl);
+        let gtao_run = self.gtao_live_plan(look.gtao, render_w, render_h);
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;
         self.write_fog_forward(&frame, true)?;
         if self.neutral_fog_pending {
@@ -1143,6 +1187,8 @@ impl Presenter {
             self.resolve_draw_binds(list)?;
             live_bind_last_store(live_current);
         }
+        let stage_us = micros_since(stage_started);
+        let submit_started = std::time::Instant::now();
         let timer_slot = self
             .gpu_timer
             .as_mut()
@@ -1153,7 +1199,12 @@ impl Presenter {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ra1-live-frame"),
             });
+        // EG8 sky row: consult the pure gate so the sky row disabled skips the
+        // sky pass; all-on draws it (LF1: the live frame shows the sky bake).
+        // Caller: `live_sky_should_draw` above over `submit_skips_for`.
+        let sky_draw = live_sky_should_draw(toggles);
         let stale_us: u64;
+        let gtao_timed: bool;
         // The `ibl` cell is the forward IBL-bound encode and nothing else, as
         // `ibl::live_ibl_receipt` documents it: the clock below opens on that
         // one pass and closes on it, so the AO upload, blit and overlay never
@@ -1166,10 +1217,6 @@ impl Presenter {
                 .ok_or_else(|| PresentError::Validation("live frame has no targets".into()))?;
             let (blit_view, blit_pipeline) = self.sink_target(sink)?;
             let timer = self.gpu_timer.as_ref().zip(timer_slot);
-            // EG8 sky slice: consult the pure gate so the sky row disabled
-            // skips the sky bind; all-on stays true, bit-identical to today.
-            // Caller: `live_sky_should_draw` above over `submit_skips_for`.
-            let sky_draw = live_sky_should_draw(toggles);
             // LF1: re-read bake pair before forward; `None` keeps off identical.
             if let Some((sky_horizon, sky_exposure)) = live_sky_feed_for_frame(
                 toggles,
@@ -1180,14 +1227,22 @@ impl Presenter {
                 debug_assert_eq!(sky_exposure, self.sky_exposure);
             }
             let forward_ibl_started = std::time::Instant::now();
-            self.encode_forward(
+            let sky_timed = self.encode_forward(
                 &mut enc,
                 targets,
                 list,
-                sky_draw,
-                timer.map(|(timer, _)| timer.forward_writes()),
+                ForwardLook::live(&look, sky_draw, gtao_run, timer.map(|(timer, _)| timer)),
             );
             forward_ibl_ms = forward_ibl_started.elapsed().as_secs_f64() * 1000.0;
+            // LF3: GTAO on the stored forward depth, on the device, writing
+            // `ao_tex` for the blit below (no readback, no wait).
+            gtao_timed = gtao_run
+                && self.encode_gtao(
+                    &mut enc,
+                    targets,
+                    &frame,
+                    timer.map(|(timer, _)| timer.gtao_writes()),
+                )?;
             // LF3 first landing: fresh GTAO after forward, before the blit,
             // wired through the live helper (`live_ao_upload_for_frame`:
             // bake via `gtao_live_full_for_forward`, guard via
@@ -1201,12 +1256,12 @@ impl Presenter {
             let normals: &[[f32; 3]] = &[];
             let fresh_us = if live_ao_should_bind(render_w, render_h, depth.len(), normals.len()) {
                 self.live_ao_upload_for_frame(render_w, render_h, depth, normals)
-                    .map(|ms| Self::ms_to_us(ms))
+                    .map(Self::ms_to_us)
                     .unwrap_or(0)
             } else {
                 0
             };
-            let fallback_us = if fresh_us == 0 {
+            let fallback_us = if fresh_us == 0 && look.gtao && !gtao_run {
                 self.stale_ao_reuse_upload(render_w, render_h)
             } else {
                 0
@@ -1214,16 +1269,19 @@ impl Presenter {
             stale_us = fresh_us.max(fallback_us);
             // LF4 bloom gate: CPU mirror of the forward HDR peak feeds the
             // post oracle; the flag rides `FogU::_pad0` (0.0 off keeps
-            // today's frame bit-identical, 1.0 on lets the 4-tap halo lift).
-            // Bad feed or switch off stays off. Caller `live_bloom_for_frame`.
-            let bloom_on = live_bloom_max_luma(list).is_some_and(|peak| {
-                live_bloom_for_frame(
-                    live_bloom_enabled(),
-                    peak,
-                    LIVE_BLOOM_THRESHOLD,
-                    LIVE_BLOOM_KNEE,
-                )
-            });
+            // today's frame bit-identical, 1.0 on lets the blit halo lift).
+            // Bad feed or switch off stays off. The switch is this
+            // presenter's own, so two presenters never share one flag.
+            // Caller `live_bloom_for_frame`.
+            let bloom_on = look.bloom
+                && live_bloom_max_luma(list).is_some_and(|peak| {
+                    live_bloom_for_frame(
+                        self.bloom.enabled,
+                        peak,
+                        LIVE_BLOOM_THRESHOLD,
+                        LIVE_BLOOM_KNEE,
+                    )
+                });
             let bloom_flag: f32 = if bloom_on { 1.0 } else { 0.0 };
             self.queue.write_buffer(
                 &targets.fog_col_buf,
@@ -1272,7 +1330,11 @@ impl Presenter {
                 }
             }
             if let Some((timer, slot)) = timer {
-                timer.encode_resolve(&mut enc, slot);
+                let timed = PassesTimed {
+                    sky: sky_timed,
+                    gtao: gtao_timed,
+                };
+                timer.encode_resolve(&mut enc, slot, timed);
             }
         }
         // The shipped forward layout carries the bake binds and `fs` samples,
@@ -1280,19 +1342,37 @@ impl Presenter {
         let bake_lit = crate::ibl::bake_has_light(&self.ibl_bake);
         let ibl = live_ibl_for_frame(true, bake_lit, forward_ibl_ms, render_w, render_h);
         self.queue.submit(Some(enc.finish()));
+        // The present call is patched in by `present_frame` on the surface
+        // path; the twin never makes one.
+        super::frame::record_live_wall_split(super::frame::LiveWallSplit {
+            stage_us,
+            submit_us: micros_since(submit_started),
+            present_call_us: 0,
+        });
         if let (Some(timer), Some(slot)) = (self.gpu_timer.as_ref(), timer_slot) {
             timer.arm(slot);
         }
         self.pop_scope(scope)?;
         self.finish_frame(FrameKind::Live);
-        self.gtao_submit_us = stale_us;
-        let gtao_passes: u32 = if stale_us > 0 { 1 } else { 0 };
-        Ok(self.frame_receipt(
+        let gtao_us = if gtao_timed {
+            self.live_gtao_row_us()
+        } else {
+            stale_us
+        };
+        self.gtao_submit_us = gtao_us;
+        // The count tallies the blocking probe tranche and the stale reuse; the
+        // live device pass reports its time in the cell alone.
+        let gtao_passes = u32::from(stale_us > 0);
+        let mut receipt = self.frame_receipt(
             list.items.len(),
             &LookPassReceipt::skipped(),
             ibl,
-            (0, 0, 0, gtao_passes, 0, stale_us),
-        ))
+            (0, 0, 0, gtao_passes, 0, gtao_us),
+        );
+        if sky_draw {
+            receipt.sky_submit_us = self.live_sky_row_us();
+        }
+        Ok(receipt)
     }
 
     /// The opt-in probe frame (`set_look_probes`): the earlier window
@@ -1330,7 +1410,7 @@ impl Presenter {
             .as_ref()
             .is_none_or(|t| t.width != width || t.height != height);
         self.ensure_targets(width, height);
-        self.write_frame_uniforms(&cam_bytes, &light_bytes);
+        self.write_frame_uniforms(&cam_bytes, &light_bytes, true);
         // The surface twin samples the same cascaded sun as the
         // offscreen twin; the frame focus depth selects the band.
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;
@@ -1360,7 +1440,7 @@ impl Presenter {
         {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
-            self.encode_forward(&mut enc, targets, list, false, None);
+            self.encode_forward(&mut enc, targets, list, ForwardLook::blocking());
             if fog_now {
                 enc.copy_texture_to_buffer(
                     wgpu::TexelCopyTextureInfo {
@@ -1458,9 +1538,15 @@ impl Presenter {
     }
 }
 
+/// Held by every test that flips the process-wide half-res switch and by
+/// the GPU tests that compare frames, so a frame never renders at half size
+/// because another test raised the switch for a moment. Test only.
+#[cfg(test)]
+static HALF_RES_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod live_half_res_tests {
-    use super::{live_half_res_enabled, live_present_size, LIVE_HALF_RES};
+    use super::{live_half_res_enabled, live_present_size, HALF_RES_TEST_LOCK, LIVE_HALF_RES};
 
     fn set_half(on: bool) {
         LIVE_HALF_RES.store(on, core::sync::atomic::Ordering::Relaxed);
@@ -1468,6 +1554,9 @@ mod live_half_res_tests {
 
     #[test]
     fn off_keeps_full_pixels_on_halves_them() {
+        let _held = HALF_RES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         set_half(false);
         assert!(!live_half_res_enabled(), "switch defaults off");
         assert_eq!(live_present_size(1280, 720, false), (1280, 720));
@@ -1634,10 +1723,12 @@ mod live_bloom_gate_tests {
         // mirrors the presenter's `BloomState::on()` default, so a bright
         // arena frame runs the halo in the window; a dark frame and the off
         // leg stay unchanged.
-        assert!(
-            super::LIVE_BLOOM_DEFAULT_ON,
-            "the window frame ships blooming"
-        );
+        const {
+            assert!(
+                super::LIVE_BLOOM_DEFAULT_ON,
+                "the window frame ships blooming"
+            );
+        }
         assert!(
             include_str!("presenter.rs").contains("bloom: BloomState::on()"),
             "the presenter default is the window frame's bloom state"
@@ -1664,6 +1755,334 @@ mod live_bloom_gate_tests {
             !live_bloom_for_frame(false, 2.4, 1.0, 0.5),
             "the off leg stays off"
         );
+    }
+}
+
+#[cfg(test)]
+mod live_bloom_glint_tests {
+    use super::*;
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+
+    const SIDE: u32 = 128;
+    /// Bright enough to pass the knee, dim enough that no edge texel's
+    /// four-neighbour average does (an average-then-threshold halo misses it).
+    const GLINT_EXPOSURE: f32 = 6.0;
+
+    fn glint_key() -> MeshKey {
+        MeshKey::new(0x6C1A, [0x6C; 32])
+    }
+
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        require_or_skip(test, probe)
+    }
+
+    /// A unit cube 40 m out: a few pixels wide on a 128 px frame, lit to
+    /// `exposure` times the default light.
+    fn glint_list(exposure: f32) -> DrawList {
+        let scene = crate::v1::default_scene(SIDE, SIDE).expect("default scene is valid");
+        DrawList {
+            camera: crate::v1::Camera::new(
+                [0.0, 0.0, 40.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                40.0f32.to_radians(),
+            ),
+            light: scene.light,
+            items: vec![DrawItem {
+                mesh: glint_key(),
+                material: crate::v1::PbrMaterial {
+                    base_color: [1.0, 1.0, 1.0],
+                    metallic: 0.0,
+                    roughness: 0.8,
+                    exposure,
+                },
+                base_color: None,
+                normal_map: None,
+            }],
+        }
+    }
+
+    /// Copy the LDR twin to the CPU as tight RGBA8 rows. Test only: waits
+    /// on the GPU.
+    fn read_twin(presenter: &Presenter) -> Vec<u8> {
+        let targets = presenter.targets.as_ref().expect("twin targets exist");
+        let (w, h) = (targets.width, targets.height);
+        let padded = (w * 4).div_ceil(256) * 256;
+        let buffer = presenter.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test-glint-readback"),
+            size: u64::from(padded) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = presenter
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &targets.out_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        presenter.queue.submit(Some(enc.finish()));
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| {
+            r.expect("test readback maps");
+        });
+        presenter
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("test readback polls");
+        let row = (w * 4) as usize;
+        let mut rgba = vec![0u8; row * h as usize];
+        {
+            let mapped = buffer.slice(..).get_mapped_range().expect("mapped");
+            for (y, dst) in rgba.chunks_exact_mut(row).enumerate() {
+                let off = y * padded as usize;
+                dst.copy_from_slice(&mapped[off..off + row]);
+            }
+        }
+        buffer.unmap();
+        rgba
+    }
+
+    fn render(presenter: &mut Presenter, list: &DrawList) -> Vec<u8> {
+        let receipt = presenter
+            .render_live_offscreen(list)
+            .expect("glint frame renders");
+        assert!(receipt.presented && receipt.is_clean());
+        assert_eq!(receipt.validation_errors, 0, "glint frame stays clean");
+        read_twin(presenter)
+    }
+
+    fn differs(a: &[u8], b: &[u8], texel: usize, min: u8) -> bool {
+        (0..3).any(|c| a[texel * 4 + c].abs_diff(b[texel * 4 + c]) >= min)
+    }
+
+    /// Texels within `reach` (Chebyshev) of a set texel of `mask`.
+    fn near(mask: &[bool], reach: usize) -> Vec<bool> {
+        let side = SIDE as usize;
+        let mut out = vec![false; mask.len()];
+        for y in 0..side {
+            for x in 0..side {
+                if !mask[y * side + x] {
+                    continue;
+                }
+                for ny in y.saturating_sub(reach)..=(y + reach).min(side - 1) {
+                    for nx in x.saturating_sub(reach)..=(x + reach).min(side - 1) {
+                        out[ny * side + nx] = true;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn glint_haloes_beyond_its_own_pixels_and_dark_corner_stays() {
+        // Caller: `present_frame_live` flag write into the blit bloom.
+        // Behavior: a glint a few pixels wide, whose 4-neighbour average
+        // stays under the knee, still throws a halo past its own footprint
+        // (extract before blur); the far corner and the replay do not move.
+        let Some(mut presenter) =
+            init_or_skip("glint_haloes_beyond_its_own_pixels_and_dark_corner_stays")
+        else {
+            return;
+        };
+        let _held = super::HALF_RES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        presenter
+            .upload_mesh(glint_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(SIDE, SIDE).expect("valid size applies");
+        // The dim frame (same cube, exposure near zero) marks the glint's
+        // own texels: whatever the lit frame changes against it.
+        presenter.set_bloom_enabled(false);
+        let dim = render(&mut presenter, &glint_list(0.02));
+        let lit = glint_list(GLINT_EXPOSURE);
+        let off = render(&mut presenter, &lit);
+        presenter.set_bloom_enabled(true);
+        let on = render(&mut presenter, &lit);
+        let replay = render(&mut presenter, &lit);
+        assert_eq!(on, replay, "the same glint replays byte-identical");
+        let texels = (SIDE * SIDE) as usize;
+        let body: Vec<bool> = (0..texels).map(|t| differs(&off, &dim, t, 24)).collect();
+        let body_count = body.iter().filter(|b| **b).count();
+        assert!(
+            (4..=64).contains(&body_count),
+            "the glint is a few pixels wide, got {body_count}"
+        );
+        // Texels two or more away from any glint texel: only a halo that
+        // spills past the glint's own neighbours reaches them.
+        let reach = near(&body, 1);
+        let spill = (0..texels)
+            .filter(|t| !reach[*t] && differs(&off, &on, *t, 3))
+            .count();
+        assert!(
+            spill >= 12,
+            "the glint's halo reaches past its neighbours: {spill} texels"
+        );
+        let side = SIDE as usize;
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let t = y * side + x;
+                assert!(
+                    !differs(&off, &on, t, 1),
+                    "a texel far from the glint is unchanged at ({x}, {y})"
+                );
+            }
+        }
+        presenter.set_bloom_enabled(false);
+    }
+}
+
+#[cfg(test)]
+mod live_wall_split_tests {
+    use super::super::frame::{last_live_wall_split, LiveWallSplit};
+    use super::*;
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+
+    #[test]
+    fn live_wall_split_sums_and_prints_the_three_spans() {
+        // Behavior: the total is the saturating sum and the summary names
+        // each span in report order with three decimals.
+        let split = LiveWallSplit {
+            stage_us: 1_250,
+            submit_us: 2_005,
+            present_call_us: 40,
+        };
+        assert_eq!(split.total_us(), 3_295);
+        assert_eq!(
+            split.summary(),
+            "stage=1.250ms submit=2.005ms present=0.040ms"
+        );
+        assert_eq!(LiveWallSplit::default().total_us(), 0, "zero by default");
+        let huge = LiveWallSplit {
+            stage_us: u64::MAX,
+            submit_us: 1,
+            present_call_us: 1,
+        };
+        assert_eq!(huge.total_us(), u64::MAX, "the sum saturates");
+    }
+
+    #[test]
+    fn live_wall_split_spans_sit_where_the_packet_names_them() {
+        // Source pin: the stage clock opens at entry and closes before the
+        // encoder opens, the submit clock covers the encoder through
+        // `queue.submit`, and the surface path times `queue.present` alone.
+        let src = include_str!("live.rs");
+        let live = src
+            .find("fn present_frame_live")
+            .expect("live frame exists");
+        let probed = src
+            .find("fn present_frame_probed")
+            .expect("probe frame exists");
+        let body = &src[live..probed];
+        let at = |needle: &str| at_in(body, needle);
+        assert!(at("let stage_started") < at("self.stage_frame_with_camera("));
+        assert!(at("self.resolve_draw_binds(list)") < at("let stage_us = micros_since"));
+        assert!(at("let stage_us = micros_since") < at("let submit_started"));
+        assert!(at("let submit_started") < at("create_command_encoder"));
+        assert!(at("self.queue.submit(") < at("submit_us: micros_since(submit_started)"));
+        let from = src
+            .find("pub(super) fn present_frame(")
+            .expect("present_frame exists");
+        let present = &src[from..live];
+        let opens = at_in(present, "let present_started");
+        let calls = at_in(present, "self.queue.present(frame)");
+        let closes = at_in(
+            present,
+            "record_present_call_us(micros_since(present_started))",
+        );
+        assert!(
+            opens < calls && calls < closes,
+            "only the present call sits inside the third span"
+        );
+    }
+
+    fn at_in(text: &str, needle: &str) -> usize {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("missing {needle}"))
+    }
+
+    #[test]
+    fn live_stage_split_counts_each_half() {
+        // Caller: `present_frame_live`. Behavior: a window-path frame
+        // reports a stage span and a submit span, both above zero, and the
+        // three together fit inside the wall of the call. The offscreen twin
+        // has no swapchain image, so its present span is zero.
+        let probe = match Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        let Some(mut presenter) = require_or_skip("live_stage_split_counts_each_half", probe)
+        else {
+            return;
+        };
+        let _held = HALF_RES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = MeshKey::new(0x57A6, [0x57; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(128, 128).expect("valid size applies");
+        let scene = crate::v1::default_scene(128, 128).expect("default scene is valid");
+        let list = DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+                normal_map: None,
+            }],
+        };
+        for frame in 0..3 {
+            let started = std::time::Instant::now();
+            let receipt = presenter
+                .render_live_offscreen(&list)
+                .expect("live frame renders");
+            let wall_us = micros_since(started);
+            assert!(receipt.presented && receipt.is_clean());
+            let split = last_live_wall_split();
+            eprintln!("live wall split frame {frame}: {}", split.summary());
+            assert!(split.stage_us > 0, "frame {frame}: staging is timed");
+            assert!(
+                split.submit_us > 0,
+                "frame {frame}: encode and submit are timed"
+            );
+            assert_eq!(split.present_call_us, 0, "the twin makes no present call");
+            assert!(
+                split.total_us() <= wall_us,
+                "frame {frame}: spans {} fit the call wall {wall_us}",
+                split.total_us()
+            );
+        }
     }
 }
 
@@ -1834,8 +2253,10 @@ mod frame_camera_once_tests {
             src.contains("stage_frame_with_camera"),
             "staging reuses the shared camera"
         );
+        // Built in two halves so this pin never matches its own text.
+        let rebuild_call = ["stage_frame(", "list,"].concat();
         assert!(
-            !src.contains("stage_frame(list,"),
+            !src.contains(&rebuild_call),
             "live paths no longer rebuild via stage_frame"
         );
         let scene = crate::v1::default_scene(64, 64).expect("default scene is valid");

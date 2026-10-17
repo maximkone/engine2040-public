@@ -1,0 +1,115 @@
+name: wasm-check
+
+# WEB2: the browser-target gate. Every leg of `check` is `cargo check --locked --target wasm32-unknown-unknown`
+# for one crate (and feature set) of the web path, one job per leg. A leg that does not compile fails its job:
+# there is no continue-on-error and nothing is retried with a patched manifest, so a crate that stops type-checking
+# for the browser turns this workflow red. `engine-net --features quic` is deliberately not a leg: quinn needs mio,
+# which has no wasm backend, so QUIC stays native and the browser reaches a server over WebTransport.
+# `gate` is the part `cargo check` cannot see: tools/wasm-gate.mjs lists calls that type-check for wasm32 but fail
+# or trap in a browser (std::fs, Instant::now, threads, raw sockets, blocking on the GPU) and fails when a file has
+# more of them than tools/wasm-gate.baseline.json allows; its tests run with it.
+# The golden tape, the corpus and the Rapier ragdoll on wasm32 are recorded by golden-matrix.yml, not here.
+# Runs on pushes to the mirror's main, on pull requests, and on a throwaway branch named wasm-check-* (or
+# workflow_dispatch). The private dev repo never runs it.
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, "wasm-check-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_CACHE_SIZE: "5G"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The headless crates, default features unless the name says otherwise.
+          - { name: engine-core, args: "-p engine-core" }
+          - { name: engine-clock, args: "-p engine-clock" }
+          - { name: engine-ecs, args: "-p engine-ecs" }
+          - { name: engine-geo, args: "-p engine-geo" }
+          - { name: engine-spatial, args: "-p engine-spatial" }
+          - { name: engine-rules, args: "-p engine-rules" }
+          - { name: engine-input, args: "-p engine-input" }
+          - { name: engine-combat, args: "-p engine-combat" }
+          - { name: engine-anim, args: "-p engine-anim" }
+          - { name: engine-ai, args: "-p engine-ai" }
+          - { name: engine-nn, args: "-p engine-nn" }
+          - { name: engine-physics, args: "-p engine-physics" }
+          - { name: engine-physics-rapier, args: "-p engine-physics --features rapier" }
+          - { name: engine-physfx-rapier, args: "-p engine-physfx --features rapier" }
+          - { name: engine-arena, args: "-p engine-arena" }
+          - { name: engine-arena-sim, args: "-p engine-arena --features sim" }
+          - { name: engine-destruction, args: "-p engine-destruction" }
+          - { name: engine-nav, args: "-p engine-nav" }
+          - { name: engine-scene, args: "-p engine-scene" }
+          - { name: engine-material, args: "-p engine-material" }
+          - { name: engine-world, args: "-p engine-world" }
+          - { name: engine-save, args: "-p engine-save" }
+          - { name: engine-game, args: "-p engine-game" }
+          - { name: engine-proof, args: "-p engine-proof" }
+          - { name: engine-observe, args: "-p engine-observe" }
+          - { name: engine-assets, args: "-p engine-assets" }
+          - { name: engine-ui, args: "-p engine-ui" }
+          - { name: engine-audio, args: "-p engine-audio" }
+          - { name: engine-net, args: "-p engine-net" }
+          # What a browser build links besides: the app lifecycle, the golden-tape binary, the glTF and image
+          # import side of assets, the CPU side of the renderer, the collision geometry.
+          - { name: engine-app, args: "-p engine-app" }
+          - { name: engine2040-bin, args: "-p engine2040" }
+          - { name: engine-assets-import, args: "-p engine-assets --features import" }
+          - { name: engine-render, args: "-p engine-render" }
+          - { name: engine-render-v1, args: "-p engine-render --features v1" }
+          - { name: engine-geo-collision, args: "-p engine-geo --features collision" }
+          # GPU, window and sound device: wgpu on the browser's WebGPU backend, winit on the web, cpal webaudio.
+          - { name: engine-render-window, args: "-p engine-render --features window" }
+          - { name: engine-game-app, args: "-p engine-game --features app" }
+          - { name: engine-audio-device, args: "-p engine-audio --features device" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-check
+          # The widest leg carries the most dependencies, so its cache serves the others.
+          save-if: ${{ matrix.name == 'engine-game-app' && github.ref == 'refs/heads/main' }}
+      - name: cargo check for wasm32-unknown-unknown
+        run: cargo check --locked --keep-going --target wasm32-unknown-unknown ${{ matrix.args }}
+
+  gate:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: wasm-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: tests of the gate
+        run: node --test tools/wasm-gate.test.mjs
+      - name: hazards in the web-path crates against the baseline
+        run: node tools/wasm-gate.mjs --list

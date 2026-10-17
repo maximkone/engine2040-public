@@ -1,7 +1,10 @@
 // golden-matrix.test.mjs - unit tests for golden-matrix.mjs, no cargo.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { causeNote, compareTapes, formatMatrix, parseTape } from './golden-matrix.mjs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { causeNote, compareRagdoll, compareRows, compareTapes, formatMatrix, formatRagdoll, formatRows, parseArgs, parseRagdoll, parseRows, parseTape, run } from './golden-matrix.mjs';
 function makeTape(opts) {
   const o = opts || {};
   const seed = o.seed !== undefined ? BigInt(o.seed) : 19n;
@@ -166,4 +169,306 @@ test('arch digest diverge names tick plus cause class', function () {
   assert.equal(compareTapes(parseTape(a), parseTape(libm)).cause, 'libm');
   const tie = makeTape({ seed: 19n, ticks: ticks, state: function (t) { return t < 5 ? BigInt(5000 + t) : BigInt(5000 + t + 2654435769); } });
   assert.equal(compareTapes(parseTape(a), parseTape(tie)).cause, 'sort-tie');
+});
+function hex(v) {
+  return BigInt(v).toString(16).padStart(16, '0');
+}
+// The two lines `matrix_line` prints: digest row, then block row.
+function makeRows(opts) {
+  const o = opts || {};
+  const host = o.host !== undefined ? o.host : 'linux-x86_64';
+  const every = o.every !== undefined ? o.every : 500;
+  const blocks = o.blocks !== undefined ? o.blocks : [11n, 22n, 33n, 44n];
+  const golden = o.golden !== undefined ? o.golden : 0xd57b5c8ae3096614n;
+  const corpus = o.corpus !== undefined ? o.corpus : 0xb37fc6d66df2d417n;
+  return host + ' golden=' + hex(golden) + ' corpus=' + hex(corpus) + ' blocks=' + blocks.length + '\n'
+    + host + ' every=' + every + ' cut_checkpoints=' + blocks.map(hex).join(',') + '\n';
+}
+function rowEntries(texts, names) {
+  const entries = texts.map(function (t, i) { return { name: names[i], row: parseRows(t) }; });
+  const results = entries.slice(1).map(function (e) { return compareRows(entries[0].row, e.row); });
+  return { entries: entries, results: results };
+}
+test('parseRows reads both lines, a BOM and CRLF', function () {
+  const row = parseRows(makeRows({ host: 'windows-x86_64', blocks: [1n, 2n, 3n] }));
+  assert.equal(row.host, 'windows-x86_64');
+  assert.equal(row.golden, 0xd57b5c8ae3096614n);
+  assert.equal(row.corpus, 0xb37fc6d66df2d417n);
+  assert.equal(row.every, 500);
+  assert.deepEqual(row.checkpoints, [1n, 2n, 3n]);
+  const crlf = '﻿' + makeRows({ blocks: [7n] }).replace(/\n/g, '\r\n');
+  assert.deepEqual(parseRows(crlf).checkpoints, [7n]);
+});
+test('parseRows refuses a row that is not what matrix_line prints', function () {
+  const good = makeRows();
+  const bad = function (text) {
+    assert.throws(function () { parseRows(text); }, function (err) { return err instanceof Error && err.message.indexOf('not a matrix row') === 0; });
+  };
+  bad('');
+  bad(good.split('\n')[0] + '\n');
+  bad(good.replace('golden=d57b5c8ae3096614', 'golden=D57B5C8AE3096614'));
+  bad(good.replace('golden=d57b5c8ae3096614', 'golden=d57b5c8a'));
+  bad(good.replace('blocks=4', 'blocks=5'));
+  bad(good.replace('every=500', 'every=0'));
+  bad(good.replace('every=500', 'every=x'));
+  bad(good.replace('linux-x86_64 every', 'linux-aarch64 every'));
+  bad(good + good);
+});
+test('equal rows match and the rows verdict is PASS', function () {
+  const g = rowEntries([makeRows(), makeRows(), makeRows({ host: 'windows-x86_64' })], ['a.txt', 'b.txt', 'c.txt']);
+  assert.ok(g.results.every(function (r) { return r.equal && r.comparable; }));
+  const out = formatRows(g.entries, g.results);
+  assert.match(out, /MATCH b\.txt vs a\.txt/);
+  assert.match(out, /MATCH c\.txt vs a\.txt/);
+  assert.ok(out.endsWith('CORPUS RESULT PASS'));
+});
+test('a moved corpus block names the block, its cases and a cause', function () {
+  const moved = makeRows({ host: 'linux-aarch64', blocks: [11n, 22n, 34n, 45n] });
+  const r = compareRows(parseRows(makeRows()), parseRows(moved));
+  assert.equal(r.equal, false);
+  assert.equal(r.firstDivergentBlock, 2);
+  assert.equal(r.firstCase, 1000);
+  assert.equal(r.cause, 'fma');
+  assert.match(r.note, /first bad corpus block 2 \(cases 1000\.\.=1499\) \[cause=fma\]/);
+  const far = makeRows({ blocks: [11n, 22n, 33n ^ 0x8000000000000000n, 44n] });
+  assert.equal(compareRows(parseRows(makeRows()), parseRows(far)).cause, 'sort-tie');
+  const g = rowEntries([makeRows(), moved], ['linux.txt', 'arm.txt']);
+  const out = formatRows(g.entries, g.results);
+  assert.match(out, /DIVERGE arm\.txt vs linux\.txt \(linux-aarch64 vs linux-x86_64\): first bad corpus block 2/);
+  assert.ok(out.endsWith('CORPUS RESULT FAIL'));
+});
+test('equal blocks with a moved digest still fail and name the digest', function () {
+  const base = parseRows(makeRows());
+  const corpus = compareRows(base, parseRows(makeRows({ corpus: 0xb37fc6d66df2d418n })));
+  assert.equal(corpus.equal, false);
+  assert.equal(corpus.firstDivergentBlock, null);
+  assert.match(corpus.note, /corpus digest differs: b37fc6d66df2d417 vs b37fc6d66df2d418/);
+  const golden = compareRows(base, parseRows(makeRows({ golden: 1n })));
+  assert.equal(golden.equal, false);
+  assert.match(golden.note, /golden digest differs: d57b5c8ae3096614 vs 0000000000000001/);
+});
+test('rows with another block count or width are SKIP, not a block', function () {
+  const base = parseRows(makeRows());
+  const fewer = compareRows(base, parseRows(makeRows({ blocks: [11n, 22n] })));
+  assert.equal(fewer.comparable, false);
+  assert.equal(fewer.equal, false);
+  assert.match(fewer.note, /corpus shape differs/);
+  const wider = compareRows(base, parseRows(makeRows({ every: 250 })));
+  assert.equal(wider.comparable, false);
+  const g = rowEntries([makeRows(), makeRows({ blocks: [11n] })], ['a.txt', 'b.txt']);
+  const out = formatRows(g.entries, g.results);
+  assert.match(out, /SKIP b\.txt:/);
+  assert.doesNotMatch(out, /first bad corpus block/);
+  assert.ok(out.endsWith('CORPUS RESULT FAIL'));
+});
+test('parseArgs splits tapes from rows and refuses one-file groups', function () {
+  assert.deepEqual(parseArgs(['a', 'b']), { tapes: ['a', 'b'], rows: [], ragdoll: [], error: null });
+  assert.deepEqual(parseArgs(['a', 'b', '--rows', 'x', 'y', 'z']), { tapes: ['a', 'b'], rows: ['x', 'y', 'z'], ragdoll: [], error: null });
+  assert.deepEqual(parseArgs(['--rows', 'x', 'y']), { tapes: [], rows: ['x', 'y'], ragdoll: [], error: null });
+  assert.match(parseArgs([]).error, /^usage:/);
+  assert.match(parseArgs(['a']).error, /^usage:/);
+  assert.match(parseArgs(['a', 'b', '--rows', 'x']).error, /^usage:/);
+  assert.match(parseArgs(['a', 'b', '--rows', 'x', '--rows', 'y']).error, /only one --rows group/);
+  assert.match(parseArgs(['a', 'b', '--frob']).error, /unknown flag --frob/);
+});
+test('run compares tapes and rows over files and sets the exit code', function () {
+  const dir = mkdtempSync(join(tmpdir(), 'golden-matrix-'));
+  try {
+    const put = function (name, data) {
+      const p = join(dir, name);
+      writeFileSync(p, data);
+      return p;
+    };
+    const tapeA = put('a.e2040', makeTape({ seed: 2040n, ticks: 40 }));
+    const tapeB = put('b.e2040', makeTape({ seed: 2040n, ticks: 40 }));
+    const tapeC = put('c.e2040', makeTape({ seed: 2040n, ticks: 40, state: function (t) { return t < 17 ? BigInt(2000 + t * 13) : BigInt(7000 + t); } }));
+    const rowA = put('a.txt', makeRows());
+    const rowB = put('b.txt', makeRows({ host: 'windows-x86_64' }));
+    const rowC = put('c.txt', makeRows({ host: 'linux-aarch64', blocks: [11n, 22n, 33n, 99n] }));
+    const same = run([tapeA, tapeB, '--rows', rowA, rowB]);
+    assert.equal(same.code, 0, same.err + same.out);
+    assert.match(same.out, /RESULT PASS/);
+    assert.match(same.out, /CORPUS RESULT PASS/);
+    const tapeOnly = run([tapeA, tapeB]);
+    assert.equal(tapeOnly.code, 0);
+    assert.doesNotMatch(tapeOnly.out, /CORPUS/);
+    const badTape = run([tapeA, tapeB, tapeC, '--rows', rowA, rowB]);
+    assert.equal(badTape.code, 1);
+    assert.match(badTape.out, /first bad tick 17 \(state lane\)/);
+    assert.match(badTape.out, /CORPUS RESULT PASS/);
+    const badRows = run([tapeA, tapeB, '--rows', rowA, rowB, rowC]);
+    assert.equal(badRows.code, 1);
+    assert.match(badRows.out, /first bad corpus block 3 \(cases 1500\.\.=1999\)/);
+    assert.match(badRows.out, /\nRESULT PASS\n/);
+    const missing = run([tapeA, join(dir, 'gone.e2040')]);
+    assert.equal(missing.code, 2);
+    assert.match(missing.err, /not a tape: cannot read .*gone\.e2040/);
+    const notRow = run(['--rows', rowA, tapeA]);
+    assert.equal(notRow.code, 2);
+    assert.match(notRow.err, /not a matrix row/);
+    assert.equal(run([tapeA]).code, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// The text `ragdoll_line` prints: a summary line, then one line of body digests per tick.
+// `digest(tick, body)` gives each body digest; a tweak function moves chosen ones.
+function makeRagdoll(opts) {
+  const o = opts || {};
+  const host = o.host !== undefined ? o.host : 'linux-x86_64';
+  const ticks = o.ticks !== undefined ? o.ticks : 6;
+  const bodies = o.bodies !== undefined ? o.bodies : 4;
+  const digest = o.digest !== undefined ? o.digest : function (t, b) { return BigInt(1000 + t * 100 + b); };
+  const contacts = o.contacts !== undefined ? o.contacts : 12;
+  const finalState = o.finalState !== undefined ? o.finalState : 0xabcdef0123456789n;
+  const overall = o.overall !== undefined ? o.overall : 0x1122334455667788n;
+  const lines = [host + ' ragdoll=' + hex(overall) + ' ticks=' + ticks + ' bodies=' + bodies + ' contacts=' + contacts + ' final_state=' + hex(finalState)];
+  for (let t = 0; t < ticks; t += 1) {
+    const list = [];
+    for (let b = 0; b < bodies; b += 1) {
+      list.push(hex(digest(t, b)));
+    }
+    lines.push(host + ' tick=' + t + ' bodies=' + list.join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+function ragdollEntries(texts, names) {
+  const entries = texts.map(function (t, i) { return { name: names[i], row: parseRagdoll(t) }; });
+  const results = entries.slice(1).map(function (e) { return compareRagdoll(entries[0].row, e.row); });
+  return { entries: entries, results: results };
+}
+test('parseRagdoll reads the summary, every tick line, a BOM and CRLF', function () {
+  const row = parseRagdoll(makeRagdoll({ host: 'wasi-wasm32', ticks: 3, bodies: 2 }));
+  assert.equal(row.host, 'wasi-wasm32');
+  assert.equal(row.digest, 0x1122334455667788n);
+  assert.equal(row.ticks, 3);
+  assert.equal(row.bodies, 2);
+  assert.equal(row.contacts, 12n);
+  assert.equal(row.finalState, 0xabcdef0123456789n);
+  assert.equal(row.perTick.length, 3);
+  assert.deepEqual(row.perTick[2], [1200n, 1201n]);
+  const crlf = '﻿' + makeRagdoll({ ticks: 2, bodies: 1 }).replace(/\n/g, '\r\n');
+  assert.deepEqual(parseRagdoll(crlf).perTick, [[1000n], [1100n]]);
+});
+test('parseRagdoll refuses a row that is not what ragdoll_line prints', function () {
+  const good = makeRagdoll();
+  const bad = function (text) {
+    assert.throws(function () { parseRagdoll(text); }, function (err) { return err instanceof Error && err.message.indexOf('not a ragdoll row') === 0; });
+  };
+  bad('');
+  bad(good.split('\n')[0] + '\n');
+  bad(good.replace('ragdoll=1122334455667788', 'ragdoll=1122334455'));
+  bad(good.replace('ticks=6', 'ticks=7'));
+  bad(good.replace('ticks=6', 'ticks=0'));
+  bad(good.replace('bodies=4 contacts', 'bodies=5 contacts'));
+  bad(good.replace('tick=2 ', 'tick=3 '));
+  bad(good.replace('linux-x86_64 tick=1', 'linux-aarch64 tick=1'));
+  bad(good.replace(hex(1100n), hex(1100n).toUpperCase().replace('0', 'G')));
+  bad(good + good);
+});
+test('equal ragdoll rows match and the ragdoll verdict is PASS', function () {
+  const g = ragdollEntries([makeRagdoll(), makeRagdoll(), makeRagdoll({ host: 'wasi-wasm32' })], ['a.txt', 'b.txt', 'c.txt']);
+  assert.ok(g.results.every(function (r) { return r.equal && r.comparable; }));
+  const out = formatRagdoll(g.entries, g.results);
+  assert.match(out, /MATCH b\.txt vs a\.txt/);
+  assert.match(out, /MATCH c\.txt vs a\.txt/);
+  assert.match(out, /c\.txt host=wasi-wasm32 ragdoll=1122334455667788 ticks=6 bodies=4 contacts=12 final_state=abcdef0123456789/);
+  assert.ok(out.endsWith('RAGDOLL RESULT PASS'));
+});
+test('a moved body names the first tick and the first body that differ', function () {
+  // From tick 3 on, body 2 differs; from tick 4 on, body 0 differs as well.
+  const moved = makeRagdoll({
+    host: 'wasi-wasm32',
+    digest: function (t, b) {
+      if (b === 2 && t >= 3) { return BigInt(9000 + t); }
+      if (b === 0 && t >= 4) { return BigInt(8000 + t); }
+      return BigInt(1000 + t * 100 + b);
+    }
+  });
+  const r = compareRagdoll(parseRagdoll(makeRagdoll()), parseRagdoll(moved));
+  assert.equal(r.equal, false);
+  assert.equal(r.comparable, true);
+  assert.equal(r.firstTick, 3);
+  assert.equal(r.firstBody, 2);
+  assert.match(r.note, /first bad tick 3 body 2 \(skeleton order; 1 of 4 bodies differ on that tick\)/);
+  const same = compareRagdoll(parseRagdoll(makeRagdoll()), parseRagdoll(makeRagdoll()));
+  assert.equal(same.equal, true);
+  const g = ragdollEntries([makeRagdoll(), moved], ['linux.txt', 'wasm.txt']);
+  const out = formatRagdoll(g.entries, g.results);
+  assert.match(out, /DIVERGE wasm\.txt vs linux\.txt \(wasi-wasm32 vs linux-x86_64\): first bad tick 3 body 2/);
+  assert.ok(out.endsWith('RAGDOLL RESULT FAIL'));
+  // Two bodies moved on the same first tick: the lowest index is named and both are counted.
+  const two = makeRagdoll({ digest: function (t, b) { return (t >= 1 && (b === 1 || b === 3)) ? BigInt(7000 + t) : BigInt(1000 + t * 100 + b); } });
+  const rt = compareRagdoll(parseRagdoll(makeRagdoll()), parseRagdoll(two));
+  assert.equal(rt.firstTick, 1);
+  assert.equal(rt.firstBody, 1);
+  assert.match(rt.note, /2 of 4 bodies differ/);
+});
+test('equal transforms with other contacts or a moved state still fail and say so', function () {
+  const base = parseRagdoll(makeRagdoll());
+  const contacts = compareRagdoll(base, parseRagdoll(makeRagdoll({ contacts: 13 })));
+  assert.equal(contacts.equal, false);
+  assert.equal(contacts.firstTick, null);
+  assert.match(contacts.note, /every transform matches but contacts differ: 12 vs 13/);
+  const state = compareRagdoll(base, parseRagdoll(makeRagdoll({ finalState: 0xabcdef0123456788n })));
+  assert.equal(state.equal, false);
+  assert.match(state.note, /final state hash differs: abcdef0123456789 vs abcdef0123456788/);
+  const overall = compareRagdoll(base, parseRagdoll(makeRagdoll({ overall: 1n })));
+  assert.equal(overall.equal, false);
+  assert.match(overall.note, /ragdoll digest differs: 1122334455667788 vs 0000000000000001/);
+});
+test('ragdoll rows with another tick or body count are SKIP, not a tick', function () {
+  const base = parseRagdoll(makeRagdoll());
+  const shorter = compareRagdoll(base, parseRagdoll(makeRagdoll({ ticks: 5 })));
+  assert.equal(shorter.comparable, false);
+  assert.equal(shorter.equal, false);
+  assert.match(shorter.note, /ragdoll shape differs/);
+  const wider = compareRagdoll(base, parseRagdoll(makeRagdoll({ bodies: 5 })));
+  assert.equal(wider.comparable, false);
+  const g = ragdollEntries([makeRagdoll(), makeRagdoll({ bodies: 5 })], ['a.txt', 'b.txt']);
+  const out = formatRagdoll(g.entries, g.results);
+  assert.match(out, /SKIP b\.txt:/);
+  assert.doesNotMatch(out, /first bad tick/);
+  assert.ok(out.endsWith('RAGDOLL RESULT FAIL'));
+});
+test('parseArgs reads the ragdoll group beside tapes and rows in any order', function () {
+  assert.deepEqual(parseArgs(['--ragdoll', 'x', 'y']), { tapes: [], rows: [], ragdoll: ['x', 'y'], error: null });
+  assert.deepEqual(parseArgs(['a', 'b', '--rows', 'r', 's', '--ragdoll', 'x', 'y', 'z']), { tapes: ['a', 'b'], rows: ['r', 's'], ragdoll: ['x', 'y', 'z'], error: null });
+  assert.deepEqual(parseArgs(['a', 'b', '--ragdoll', 'x', 'y', '--rows', 'r', 's']), { tapes: ['a', 'b'], rows: ['r', 's'], ragdoll: ['x', 'y'], error: null });
+  assert.match(parseArgs(['--ragdoll', 'x']).error, /^usage:/);
+  assert.match(parseArgs(['a', 'b', '--ragdoll', 'x', 'y', '--ragdoll', 'z', 'w']).error, /only one --ragdoll group/);
+  assert.match(parseArgs(['a', 'b', '--rows', 'x', 'y', '--ragdoll', 'p', 'q', '--rows', 'z', 'w']).error, /only one --rows group/);
+});
+test('run compares ragdoll rows over files and sets the exit code', function () {
+  const dir = mkdtempSync(join(tmpdir(), 'golden-matrix-ragdoll-'));
+  try {
+    const put = function (name, data) {
+      const p = join(dir, name);
+      writeFileSync(p, data);
+      return p;
+    };
+    const tapeA = put('a.e2040', makeTape({ seed: 2040n, ticks: 40 }));
+    const tapeB = put('b.e2040', makeTape({ seed: 2040n, ticks: 40 }));
+    const ragA = put('ra.txt', makeRagdoll());
+    const ragB = put('rb.txt', makeRagdoll({ host: 'wasi-wasm32' }));
+    const ragC = put('rc.txt', makeRagdoll({ host: 'linux-aarch64', digest: function (t, b) { return (t >= 4 && b === 3) ? 5n : BigInt(1000 + t * 100 + b); } }));
+    const same = run([tapeA, tapeB, '--ragdoll', ragA, ragB]);
+    assert.equal(same.code, 0, same.err + same.out);
+    assert.match(same.out, /\nRESULT PASS\n/);
+    assert.match(same.out, /RAGDOLL RESULT PASS/);
+    assert.doesNotMatch(same.out, /CORPUS/);
+    const bad = run([tapeA, tapeB, '--ragdoll', ragA, ragB, ragC]);
+    assert.equal(bad.code, 1);
+    assert.match(bad.out, /first bad tick 4 body 3/);
+    assert.match(bad.out, /\nRESULT PASS\n/);
+    assert.match(bad.out, /RAGDOLL RESULT FAIL/);
+    const notRow = run(['--ragdoll', ragA, tapeA]);
+    assert.equal(notRow.code, 2);
+    assert.match(notRow.err, /not a ragdoll row/);
+    const missing = run(['--ragdoll', ragA, join(dir, 'gone.txt')]);
+    assert.equal(missing.code, 2);
+    assert.match(missing.err, /not a ragdoll row: cannot read .*gone\.txt/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

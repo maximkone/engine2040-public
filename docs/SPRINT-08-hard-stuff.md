@@ -362,7 +362,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   PQ2 win-rate 40–60%, no float in tick. Kill: float in tick,
   diversity < 3, win-rate outside band. needs: PQ2, BR2.
   (RES-ARXIV wave 32, reviewed 2026-09-26; remapped from colliding GA2.)
-- [ ] GA8 brain: EQS arena bind — the first live call path: an arena
+- [x] GA8 brain: EQS arena bind — the first live call path: an arena Landed 948cbe1.
   fixture aims the GA1 `DepthBrain` wish at the GA6 `Tactics` ranked
   spot, quantized once into a recorded `FighterInput` applied at the
   tick boundary with a request id. Tier A. Size M. Owns

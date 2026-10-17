@@ -610,6 +610,215 @@ pub fn gtao_live_full_for_forward(
     Ok((full, ms))
 }
 
+/// Occluder elevation floor of the live kernel, as a sine over the tangent
+/// plane: a neighbor whose direction sits below it never occludes, so open
+/// flat ground reads exactly 1.0 at any view angle (a depth-difference
+/// kernel darkens a floor seen at a grazing angle against itself).
+pub const GTAO_LIVE_SIN_BIAS: f32 = 0.1;
+
+/// Taps per slice side as the signed step count the live kernel loops over.
+const GTAO_LIVE_TAPS: i32 = 3;
+const _: () = assert!(GTAO_TAPS == 3, "the live loop counts the same taps");
+
+/// The one narrowing of the live oracle's f64 accumulation to the f32 field
+/// it stores.
+fn narrow(v: f64) -> f32 {
+    v as f32
+}
+
+/// The occlusion normalizer as the f32 the live device uniform carries.
+#[cfg(feature = "window")]
+pub(crate) fn gtao_weight_sum_f32() -> f32 {
+    narrow(gtao_weight_sum())
+}
+
+/// A pixel coordinate as an index; the validated frame bound keeps it small.
+fn index_of(v: u32) -> usize {
+    usize::try_from(v).unwrap_or(usize::MAX)
+}
+
+/// Unproject every depth texel to a world point (f64, row-major). Errors on a
+/// depth outside `0..=1` or a degenerate unprojection. Used by the live
+/// oracle only; the device shaders redo this per tap from the depth texture.
+fn live_world_points(
+    raw_depth: &[f32],
+    config: &GtaoConfig,
+    inv_cols: [[f32; 4]; 4],
+) -> Result<Vec<[f64; 3]>, LookError> {
+    let (w, h) = (config.width_px, config.height_px);
+    let mut world = vec![[0.0f64; 3]; index_of(w) * index_of(h)];
+    for y in 0..h {
+        for x in 0..w {
+            let i = index_of(y) * index_of(w) + index_of(x);
+            let d = raw_depth[i];
+            if !d.is_finite() || !(0.0..=1.0).contains(&d) {
+                return Err(LookError::Invalid(format!(
+                    "gtao live depth[{i}] {d} outside 0..=1"
+                )));
+            }
+            let clip = [
+                2.0 * (f64::from(x) + 0.5) / f64::from(w) - 1.0,
+                1.0 - 2.0 * (f64::from(y) + 0.5) / f64::from(h),
+                f64::from(d),
+                1.0,
+            ];
+            let mut q = [0.0f64; 4];
+            for (r, slot) in q.iter_mut().enumerate() {
+                *slot = (0..4).map(|c| f64::from(inv_cols[c][r]) * clip[c]).sum();
+            }
+            if !q.iter().all(|v| v.is_finite()) || q[3] <= 0.0 {
+                return Err(LookError::Invalid(format!(
+                    "gtao live depth[{i}] unprojects degenerately"
+                )));
+            }
+            world[i] = [q[0] / q[3], q[1] / q[3], q[2] / q[3]];
+        }
+    }
+    Ok(world)
+}
+
+/// Facing normal of texel `(x, y)` from central differences of the world
+/// grid (neighbors clamped at the frame edge), oriented toward the eye; a
+/// degenerate neighborhood falls back to the view ray.
+fn live_facing_normal(
+    world: &[[f64; 3]],
+    (w, h): (u32, u32),
+    (x, y): (u32, u32),
+    eye: [f64; 3],
+) -> [f64; 3] {
+    let at = |px: u32, py: u32| world[index_of(py) * index_of(w) + index_of(px)];
+    let (xl, xr) = (x.saturating_sub(1), (x + 1).min(w - 1));
+    let (yt, yb) = (y.saturating_sub(1), (y + 1).min(h - 1));
+    let (a, b, c, e) = (at(xr, y), at(xl, y), at(x, yb), at(x, yt));
+    let tx = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let ty = [c[0] - e[0], c[1] - e[1], c[2] - e[2]];
+    let mut n = [
+        tx[1] * ty[2] - tx[2] * ty[1],
+        tx[2] * ty[0] - tx[0] * ty[2],
+        tx[0] * ty[1] - tx[1] * ty[0],
+    ];
+    let here = at(x, y);
+    let to_eye = [eye[0] - here[0], eye[1] - here[1], eye[2] - here[2]];
+    if n[0] * to_eye[0] + n[1] * to_eye[1] + n[2] * to_eye[2] < 0.0 {
+        n = [-n[0], -n[1], -n[2]];
+    }
+    let len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+    let (v, len) = if len2 < 1e-24 {
+        (
+            to_eye,
+            (to_eye[0] * to_eye[0] + to_eye[1] * to_eye[1] + to_eye[2] * to_eye[2]).sqrt(),
+        )
+    } else {
+        (n, len2.sqrt())
+    };
+    [v[0] / len, v[1] / len, v[2] / len]
+}
+
+/// CPU oracle of the live GTAO frame: the plane-aware kernel the device runs
+/// on the forward-stored depth. Half-res centers sit on the top-left pixel of
+/// each 2x2 block; four slices times three taps times two sides sample the
+/// world point of each tap and count it as an occluder by its elevation over
+/// the center's tangent plane (sine above [`GTAO_LIVE_SIN_BIAS`], scaled to
+/// 0..1) faded linearly to nothing at `falloff_m` of world distance; sky
+/// texels (depth exactly 1.0) never occlude and read 1.0. The half result is
+/// upsampled with [`upsample_bilateral`] over eye distance. Units: depth is
+/// raw `0..=1` forward depth, `inv_view_proj_cols` the column-major inverse
+/// of the frame's view-projection, `eye` and falloff in meters. Determinism:
+/// fixed integer order, f64 accumulation. Errors: [`LookError::Invalid`] on a
+/// bad config, a length mismatch or depth outside `0..=1`.
+pub fn gtao_live_oracle(
+    raw_depth: &[f32],
+    inv_view_proj_cols: [[f32; 4]; 4],
+    eye: [f32; 3],
+    config: &GtaoConfig,
+) -> Result<Vec<f32>, LookError> {
+    config.validate()?;
+    let (w, h) = (config.width_px, config.height_px);
+    let wu = index_of(w);
+    if raw_depth.len() != wu * index_of(h) {
+        return Err(LookError::Invalid(format!(
+            "gtao live depth length {} mismatches frame {}",
+            raw_depth.len(),
+            wu * index_of(h)
+        )));
+    }
+    let world = live_world_points(raw_depth, config, inv_view_proj_cols)?;
+    let eye64 = eye.map(f64::from);
+    let dist: Vec<f32> = world
+        .iter()
+        .map(|p| {
+            let d = [p[0] - eye64[0], p[1] - eye64[1], p[2] - eye64[2]];
+            narrow((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt())
+        })
+        .collect();
+    let (hw, hh) = (w.div_ceil(GTAO_HALF_DIV), h.div_ceil(GTAO_HALF_DIV));
+    let (wi, hi) = (
+        i32::try_from(w).unwrap_or(i32::MAX),
+        i32::try_from(h).unwrap_or(i32::MAX),
+    );
+    let step = config.tap_step_px();
+    let falloff = f64::from(config.falloff_m);
+    let bias = f64::from(GTAO_LIVE_SIN_BIAS);
+    let weight_sum = gtao_weight_sum();
+    let mut values = vec![1.0f32; index_of(hw) * index_of(hh)];
+    for hy in 0..hh {
+        for hx in 0..hw {
+            let cx = (hx * GTAO_HALF_DIV).min(w - 1);
+            let cy = (hy * GTAO_HALF_DIV).min(h - 1);
+            let ci = index_of(cy) * wu + index_of(cx);
+            if raw_depth[ci] >= 1.0 {
+                continue;
+            }
+            let pc = world[ci];
+            let nc = live_facing_normal(&world, (w, h), (cx, cy), eye64);
+            let (cxi, cyi) = (
+                i32::try_from(cx).unwrap_or(0),
+                i32::try_from(cy).unwrap_or(0),
+            );
+            let mut occ = 0.0f64;
+            for (dx, dy) in SLICE_DIRS {
+                for t in 1..=GTAO_LIVE_TAPS {
+                    let off = t * step;
+                    let w_tap = 1.0 / (1.0 + f64::from(t));
+                    for side in [1i32, -1i32] {
+                        let nx = (cxi + dx * off * side).clamp(0, wi - 1);
+                        let ny = (cyi + dy * off * side).clamp(0, hi - 1);
+                        let ni = index_of(u32::try_from(ny).unwrap_or(0)) * wu
+                            + index_of(u32::try_from(nx).unwrap_or(0));
+                        if raw_depth[ni] >= 1.0 {
+                            continue;
+                        }
+                        let p = world[ni];
+                        let v = [p[0] - pc[0], p[1] - pc[1], p[2] - pc[2]];
+                        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                        if len < 1e-5 {
+                            continue;
+                        }
+                        let sine = (v[0] * nc[0] + v[1] * nc[1] + v[2] * nc[2]) / len;
+                        let elevation = ((sine - bias) / (1.0 - bias)).clamp(0.0, 1.0);
+                        let fade = (1.0 - len / falloff).clamp(0.0, 1.0);
+                        occ += elevation * fade * w_tap;
+                    }
+                }
+            }
+            let ao = 1.0 - f64::from(config.intensity) * occ / weight_sum;
+            values[index_of(hy) * index_of(hw) + index_of(hx)] = narrow(ao.clamp(0.0, 1.0));
+        }
+    }
+    let half = GtaoAo {
+        width_half: index_of(hw),
+        height_half: index_of(hh),
+        values,
+    };
+    let mut full = upsample_bilateral(&half, &dist, config)?;
+    for (ao, d) in full.iter_mut().zip(raw_depth) {
+        if *d >= 1.0 {
+            *ao = 1.0;
+        }
+    }
+    Ok(full)
+}
+
 /// Device resources for the baked-AO bind probe: one compute pipeline plus
 /// its four buffers and bind group. Built per `submit_gpu` call; the caller
 /// owns the resources for exactly one probe dispatch.
@@ -3084,6 +3293,190 @@ mod tests {
         assert!(
             fwd_at < helper_at && helper_at < blit_at,
             "fresh bake runs after forward and before the blit"
+        );
+    }
+}
+
+/// Live-kernel oracle fixtures: a pinhole camera over analytic planes, so the
+/// depth the oracle reads is exact and no device or mesh is involved.
+#[cfg(test)]
+mod live_oracle_tests {
+    use super::*;
+
+    const W: u32 = 96;
+    const H: u32 = 72;
+    const EYE: [f32; 3] = [0.0, 1.7, 0.0];
+    const FOV_Y: f32 = 0.9;
+    const NEAR: f32 = 0.1;
+    const FAR: f32 = 100.0;
+
+    fn config() -> GtaoConfig {
+        GtaoConfig {
+            width_px: W,
+            height_px: H,
+            radius_px: 8.0,
+            falloff_m: 2.0,
+            intensity: 1.0,
+        }
+    }
+
+    fn aspect() -> f32 {
+        W as f32 / H as f32
+    }
+
+    /// Column-major inverse view-projection of a pinhole at `EYE` looking
+    /// down -Z with the DirectX depth range: the unprojection of one NDC
+    /// point is `inv_proj * clip` then a translation by the eye.
+    fn inv_cols() -> [[f32; 4]; 4] {
+        let f = 1.0 / (FOV_Y * 0.5).tan();
+        let a = FAR / (NEAR - FAR);
+        let b = NEAR * FAR / (NEAR - FAR);
+        [
+            [aspect() / f, 0.0, 0.0, 0.0],
+            [0.0, 1.0 / f, 0.0, 0.0],
+            [EYE[0] / b, EYE[1] / b, EYE[2] / b, 1.0 / b],
+            [EYE[0] * a / b, EYE[1] * a / b, -1.0 + EYE[2] * a / b, a / b],
+        ]
+    }
+
+    /// What one pixel's ray hits.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Hit {
+        Floor([f32; 3]),
+        Wall([f32; 3]),
+        Sky,
+    }
+
+    /// Ray-cast the floor `y = 0` and, when `wall` is set, a wall at
+    /// `z = -6` that stands 3 m tall; the nearest hit wins.
+    fn cast(wall: bool) -> Vec<(Hit, f32)> {
+        let tan = (FOV_Y * 0.5).tan();
+        let a = FAR / (NEAR - FAR);
+        let b = NEAR * FAR / (NEAR - FAR);
+        let mut out = Vec::new();
+        for y in 0..H {
+            for x in 0..W {
+                let nx = 2.0 * (x as f32 + 0.5) / W as f32 - 1.0;
+                let ny = 1.0 - 2.0 * (y as f32 + 0.5) / H as f32;
+                let dir = [nx * aspect() * tan, ny * tan, -1.0];
+                let mut best: Option<(f32, Hit)> = None;
+                if dir[1] < 0.0 {
+                    let t = -EYE[1] / dir[1];
+                    let p = [EYE[0] + t * dir[0], 0.0, EYE[2] - t];
+                    best = Some((t, Hit::Floor(p)));
+                }
+                if wall {
+                    let t = EYE[2] + 6.0;
+                    let p = [EYE[0] + t * dir[0], EYE[1] + t * dir[1], -6.0];
+                    let nearer = best.is_none_or(|(tb, _)| t < tb);
+                    if (0.0..=3.0).contains(&p[1]) && nearer {
+                        best = Some((t, Hit::Wall(p)));
+                    }
+                }
+                out.push(match best {
+                    // Past the far plane the rasterizer clips: that is sky.
+                    Some((t, hit)) if (a * -t + b) / t <= 1.0 => (hit, (a * -t + b) / t),
+                    _ => (Hit::Sky, 1.0),
+                });
+            }
+        }
+        out
+    }
+
+    fn depth_of(scene: &[(Hit, f32)]) -> Vec<f32> {
+        scene.iter().map(|(_, d)| *d).collect()
+    }
+
+    fn run(scene: &[(Hit, f32)]) -> Vec<f32> {
+        gtao_live_oracle(&depth_of(scene), inv_cols(), EYE, &config()).expect("oracle runs")
+    }
+
+    #[test]
+    fn open_floor_and_sky_read_exactly_open() {
+        // A floor seen at a grazing angle is flat: no tap sits above its
+        // tangent plane, so every texel is 1.0 (a depth-difference kernel
+        // darkened it against itself).
+        let scene = cast(false);
+        assert!(scene.iter().any(|(h, _)| matches!(h, Hit::Floor(_))));
+        assert!(scene.iter().any(|(h, _)| *h == Hit::Sky), "sky is in view");
+        let ao = run(&scene);
+        for (i, v) in ao.iter().enumerate() {
+            assert!(
+                (*v - 1.0).abs() < 1e-6,
+                "texel {i} reads {v}, an open floor never occludes itself"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wall_base_darkens_both_surfaces_and_leaves_open_ground_alone() {
+        let scene = cast(true);
+        let ao = run(&scene);
+        let mut base_floor = Vec::new();
+        let mut base_wall = Vec::new();
+        for (i, (hit, _)) in scene.iter().enumerate() {
+            match hit {
+                Hit::Floor(p) if p[2] < -5.65 => base_floor.push(ao[i]),
+                Hit::Wall(p) if p[1] < 0.35 => base_wall.push(ao[i]),
+                Hit::Floor(p) if p[2] > -4.0 => assert!(
+                    (ao[i] - 1.0).abs() < 1e-6,
+                    "open floor at z {} reads {}",
+                    p[2],
+                    ao[i]
+                ),
+                Hit::Floor(_) => {}
+                Hit::Wall(p) if p[1] > 2.0 => {
+                    assert!((ao[i] - 1.0).abs() < 1e-6, "high wall reads {}", ao[i]);
+                }
+                Hit::Wall(_) => {}
+                Hit::Sky => assert_eq!(ao[i], 1.0, "sky never occludes"),
+            }
+        }
+        assert!(
+            base_floor.len() > 20 && base_wall.len() > 10,
+            "both sides of the corner are in view: {} / {}",
+            base_floor.len(),
+            base_wall.len()
+        );
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        assert!(
+            mean(&base_floor) < 0.85,
+            "floor at the base: {}",
+            mean(&base_floor)
+        );
+        assert!(
+            mean(&base_wall) < 0.85,
+            "wall at the base: {}",
+            mean(&base_wall)
+        );
+        assert!(ao.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    #[test]
+    fn the_oracle_repeats_and_refuses_bad_input() {
+        let scene = cast(true);
+        let depth = depth_of(&scene);
+        let first = gtao_live_oracle(&depth, inv_cols(), EYE, &config()).expect("runs");
+        let second = gtao_live_oracle(&depth, inv_cols(), EYE, &config()).expect("runs again");
+        assert_eq!(first, second, "same depth, same field");
+        let short = &depth[..depth.len() - 1];
+        assert!(gtao_live_oracle(short, inv_cols(), EYE, &config()).is_err());
+        let mut bad = depth.clone();
+        bad[5] = 1.5;
+        assert!(gtao_live_oracle(&bad, inv_cols(), EYE, &config()).is_err());
+        bad[5] = f32::NAN;
+        assert!(gtao_live_oracle(&bad, inv_cols(), EYE, &config()).is_err());
+        let zero = GtaoConfig {
+            width_px: 0,
+            ..config()
+        };
+        assert!(gtao_live_oracle(&depth, inv_cols(), EYE, &zero).is_err());
+        let mut singular = inv_cols();
+        singular[3][3] = 0.0;
+        singular[2][3] = 0.0;
+        assert!(
+            gtao_live_oracle(&depth, singular, EYE, &config()).is_err(),
+            "a degenerate unprojection fails loudly"
         );
     }
 }

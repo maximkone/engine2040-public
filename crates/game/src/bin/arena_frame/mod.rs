@@ -486,10 +486,11 @@ impl ArenaApp {
             .and_then(Presenter::gpu_timing_report)
             .map_or(missing, |report| {
                 format!(
-                    "gpu_ms p50={:.3} p99={:.3} (forward p50={:.3} blit p50={:.3}; {} frames)",
+                    "gpu_ms p50={:.3} p99={:.3} (forward p50={:.3} sky p50={:.3} blit p50={:.3}; {} frames)",
                     report.total.p50,
                     report.total.p99,
                     report.forward.p50,
+                    report.sky.p50,
                     report.blit.p50,
                     report.frames,
                 )

@@ -309,6 +309,11 @@ export function laneCommand(affected) {
   return `cargo test -j 2 --locked ${affected.map((p) => `-p ${p}`).join(" ")} --all-targets`;
 }
 
+// The same lane gate on a GitHub runner (owner 2026-10-17: heavy cargo goes to GitHub, the PC has one build lock).
+export function laneCommandOnGithub(affected) {
+  return `node tools/gh-check.mjs ${laneCommand(affected)}`;
+}
+
 // Tool-test closure (OPT7 speed fix): a tools/ edit gates only its own
 // stem test, never all tool tests and never the crate closure. A
 // workspace-wide file still gates every tool test; crates-only or
@@ -567,6 +572,7 @@ function main() {
   console.log(`  ${affected.join(" ") || "(none)"}`);
   if (unmapped.length > 0) console.log(`unmapped files (no crate gate): ${unmapped.join(" ")}`);
   console.log(`lane gate (closure only, dev, -j 2, no --release):\n  ${result.laneGate}`);
+  if (affected.length > 0) console.log(`  on GitHub, no local build lock (AGENTS.md Fast paths):\n  ${laneCommandOnGithub(affected)}`);
   console.log(`required tier (affected plus build inputs, ${tiersOut.required.length} of ${total}):\n  ${tiersOut.required.join(" ") || "(none)"}`);
   console.log(green.skip
     ? `green-skip: SKIP (identical to last green run, files hash ${green.filesHash})`

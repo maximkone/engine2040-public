@@ -20,7 +20,6 @@ use super::wire::{bound_chars, push_u16, push_u32, push_u64, Cursor, Short};
 use engine_anim::contract::MAX_JOINTS;
 use engine_scene::ids::content_digest;
 use std::fmt;
-use std::time::Instant;
 
 /// Bundle schema version written by [`BundleWriter::finish`].
 pub const BUNDLE_VERSION: u32 = 1;
@@ -365,12 +364,12 @@ impl BundleLoader {
 
     /// Parse plus verify `bytes` into a [`LoadedBundle`].
     pub fn load(&self, bytes: &[u8]) -> Result<LoadedBundle, BundleError> {
-        let started = Instant::now();
+        let started = engine_clock::now();
         let entries = parse(bytes)?;
         let ship_ready = verify_ship_entries(&entries).is_ok();
         Ok(LoadedBundle {
             entries,
-            load_time_ms: started.elapsed().as_millis() as u64,
+            load_time_ms: engine_clock::since(started).as_millis() as u64,
             bytes: bytes.len(),
             ship_ready,
         })

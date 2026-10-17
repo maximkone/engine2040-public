@@ -56,7 +56,14 @@ impl std::error::Error for MatrixError {}
 /// Runner label for this machine, such as `windows-x86_64`.
 #[must_use]
 pub fn host_label() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+    label_of(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// `os-arch`, with `wasi` standing in for the empty OS string that
+/// `wasm32-wasip1` reports, so a WebAssembly runner never prints `-wasm32`.
+fn label_of(os: &str, arch: &str) -> String {
+    let os = if os.is_empty() { "wasi" } else { os };
+    format!("{os}-{arch}")
 }
 
 /// Collect this machine's matrix row: record the default tape, replay it,
@@ -341,6 +348,29 @@ impl fmt::Display for MatrixEntry {
     }
 }
 
+/// Stable CI block row for one collected entry: host, the corpus block width
+/// and the stream digest after every block in order, lower-hex padded to 16
+/// and comma separated. When two machines' corpus digests differ, the first
+/// unequal entry names the block of cases where they diverged; the compare
+/// job (`tools/golden-matrix.mjs --rows`) reads it beside the digest row.
+/// Owner: engine-proof; consumer: CI stores it under [`matrix_digest_line`].
+/// Caller: the `matrix_line` bin prints it as the second line of a row file.
+/// Units: hex digests and a case count; determinism: pure over the entry
+/// with no clock, float, or IO; heap only the returned string.
+#[must_use]
+pub fn matrix_blocks_line(entry: &MatrixEntry) -> String {
+    let blocks: Vec<String> = entry
+        .cut_checkpoints
+        .iter()
+        .map(|digest| format!("{digest:016x}"))
+        .collect();
+    format!(
+        "{} every={CHECKPOINT_EVERY} cut_checkpoints={}",
+        entry.host,
+        blocks.join(",")
+    )
+}
+
 /// Parsed CI row: the fields of one [`matrix_digest_line`] line.
 /// Owner: engine-proof; consumer: a later compare job reads stored rows.
 /// Units: hex digests plus block count.
@@ -509,6 +539,22 @@ mod tests {
     use crate::GOLDEN_600;
 
     #[test]
+    fn host_label_names_a_wasm_runner_that_reports_no_os() {
+        // wasm32-wasip1 prints an empty OS string; the label must still carry a system name.
+        assert_eq!(label_of("", "wasm32"), "wasi-wasm32");
+        assert_eq!(label_of("linux", "x86_64"), "linux-x86_64");
+        assert_eq!(label_of("windows", "aarch64"), "windows-aarch64");
+        let parsed = parse_matrix_digest_line(&format!(
+            "{} golden={:016x} corpus={:016x} blocks=1",
+            label_of("", "wasm32"),
+            GOLDEN_600,
+            GOLDEN_600
+        ))
+        .expect("the wasm row parses back");
+        assert_eq!(parsed.host, "wasi-wasm32");
+    }
+
+    #[test]
     fn matrix_local_row_matches_pinned_digests_x2() {
         let first = collect_local_entry().expect("local row collects");
         let second = collect_local_entry().expect("local row replays");
@@ -559,6 +605,32 @@ mod tests {
         assert!(
             json.starts_with("{\"schema_version\":2"),
             "envelope {json} leads with version"
+        );
+    }
+
+    #[test]
+    fn matrix_blocks_line_lists_every_block_digest_in_order() {
+        let entry = MatrixEntry {
+            host: "linux-aarch64".to_owned(),
+            golden_last: GOLDEN_600,
+            checkpoints: Vec::new(),
+            cut_digest: 7,
+            cut_checkpoints: vec![0x1, 0xfeed_beef_0000_0002],
+        };
+        let line = matrix_blocks_line(&entry);
+        assert_eq!(
+            line,
+            format!(
+                "linux-aarch64 every={CHECKPOINT_EVERY} \
+                 cut_checkpoints=0000000000000001,feedbeef00000002"
+            )
+        );
+        let mut moved = entry.clone();
+        moved.cut_checkpoints[1] ^= 1;
+        assert_ne!(
+            matrix_blocks_line(&moved),
+            line,
+            "a moved block must show in the line"
         );
     }
 

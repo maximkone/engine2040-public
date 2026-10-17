@@ -51,6 +51,12 @@ pub mod snapshot;
 pub mod split;
 pub mod tick_budget;
 pub mod wan_soak;
+/// WebTransport server transport for browser clients: datagrams carry the
+/// snapshots, one bidirectional stream carries reliable events, and the
+/// pinned self-signed certificate helper feeds `serverCertificateHashes`.
+/// Feature-gated (`webtransport`); the headless default stays std-only.
+#[cfg(feature = "webtransport")]
+pub mod webtransport;
 
 /// Test-binary allocator: lets `engine_core::alloc_probe::measure` count heap
 /// calls on the measuring thread only, so parallel tests never interfere.

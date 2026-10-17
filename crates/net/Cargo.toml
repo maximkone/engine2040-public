@@ -18,10 +18,17 @@ engine-input.workspace = true
 engine-observe.workspace = true
 # QUIC transport (optional; the headless default stays std-only).
 quinn = { version = "0.11", optional = true }
+# WebTransport server (optional): browsers join the dedicated server through
+# it. It runs on its own tokio I/O thread; the tick loop never awaits.
+wtransport = { version = "0.7", optional = true }
+tokio = { workspace = true, optional = true, features = ["net", "sync", "time"] }
 
 [features]
 # `--features quic` builds the quinn transport behind Transport.
 quic = ["dep:quinn"]
+# `--features webtransport` adds the WebTransport server beside QUIC: the
+# same Transport trait and wire codec, plus the pinned-certificate helper.
+webtransport = ["quic", "dep:wtransport", "dep:tokio"]
 
 [dev-dependencies]
 engine-core = { workspace = true, features = ["test-util"] }

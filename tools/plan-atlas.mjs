@@ -17,7 +17,6 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isMainModule } from './steal-next.mjs';
 import { archivedDoneRows, loadBoardText, parseBoard, rowReady } from "./board-slice.mjs";
 import { cliArgs } from "./argv.mjs";
 
@@ -398,6 +397,9 @@ function main(argv) {
     process.exit(hits ? 0 : 1);
   }
 }
+
+// True when this file is the invoked script.
+const isMainModule = (metaUrl, argv1 = process.argv[1]) => Boolean(argv1) && resolve(argv1) === fileURLToPath(metaUrl);
 
 if (isMainModule(import.meta.url)) {
   main(cliArgs());

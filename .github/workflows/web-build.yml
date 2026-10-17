@@ -1,0 +1,171 @@
+name: web-build
+
+# WEB4: the browser shell. `build` compiles crates/web for wasm32-unknown-unknown, runs the wasm-bindgen CLI at the
+# version Cargo.lock locks and wasm-opt, and uploads dist/web (index.html, engine.js, engine_bg.wasm, build.json).
+# `browser` loads that artifact in headless Chrome served from 127.0.0.1 and reads back the JSON line, a screenshot
+# and the no-WebGPU page (tools/web-browse.mjs); it tries software-adapter flag sets until one gives an adapter and
+# writes down the exact reason for every one that does not (attempts.json).
+# Start it by pushing a throwaway branch named web-build-* of the public mirror (or workflow_dispatch once this
+# file is on the mirror's main). The private dev repo never runs it.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["web-build-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_CACHE_SIZE: "5G"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-build
+      - name: wasm-bindgen CLI at the version Cargo.lock locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' Cargo.lock)"
+          echo "Cargo.lock locks wasm-bindgen $v"
+          mkdir -p "$HOME/.local/bin"
+          if curl -fsSL --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/wasm-bindgen-$v-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C "$RUNNER_TEMP"; then
+            cp "$RUNNER_TEMP/wasm-bindgen-$v-x86_64-unknown-linux-musl/wasm-bindgen" "$HOME/.local/bin/"
+          else
+            echo "no prebuilt CLI for $v; building it"
+            cargo install wasm-bindgen-cli --version "$v" --locked --root "$HOME/.local"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/wasm-bindgen" --version
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/twiggy
+          key: twiggy-bin-v1
+      # Pinned: the apt package is binaryen 108, whose output the browser rejects (an exported table loses its room
+      # to grow: "WebAssembly.Table.grow(): failed to grow table by 4"). 133 is what the first green run used.
+      - name: wasm-opt (binaryen release) and twiggy
+        shell: bash
+        env:
+          BINARYEN_TAG: version_133
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_TAG/binaryen-$BINARYEN_TAG-x86_64-linux.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/binaryen-$BINARYEN_TAG/bin/wasm-opt" "$HOME/.local/bin/"
+          wasm-opt --version
+          if [ ! -x "$HOME/.local/bin/twiggy" ]; then
+            cargo install twiggy --locked --root "$HOME/.local" >/dev/null 2>&1 || echo "twiggy not installed; build.json gets no top-size lines"
+          fi
+      - name: unit tests of the build and check tools
+        run: node --test tools/web-build.test.mjs tools/web-browse.test.mjs tools/wasm-info.test.mjs
+      - name: "engine-web unit tests (native: limits, JSON line, animation)"
+        run: cargo test --locked -p engine-web --lib
+      - name: clippy for the browser target (the shell only exists on wasm32)
+        run: cargo clippy --locked --target wasm32-unknown-unknown -p engine-web -- -D warnings
+      - name: build dist/web
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/web-build.mjs --commit "${GITHUB_SHA::12}"
+          ls -l dist/web
+          node tools/wasm-info.mjs dist/web/engine_bg.wasm
+          {
+            echo '### dist/web'
+            echo '```json'
+            cat dist/web/build.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: dist/web is under 8 MB and a static server types the module as application/wasm
+        shell: bash
+        run: |
+          set -euo pipefail
+          bytes="$(du -sb dist/web | cut -f1)"
+          echo "dist/web is $bytes bytes"
+          test "$bytes" -lt 8388608
+          python3 -m http.server 8099 --bind 127.0.0.1 -d dist/web >/dev/null 2>&1 &
+          server=$!
+          sleep 2
+          type="$(curl -sI http://127.0.0.1:8099/engine_bg.wasm | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
+          kill "$server"
+          echo "engine_bg.wasm is served as: $type"
+          test "$type" = "application/wasm"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: web-dist
+          path: dist/web
+          if-no-files-found: error
+
+  browser:
+    needs: build
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: dist/web
+      - name: Chrome stable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v google-chrome >/dev/null; then
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/chrome.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo apt-get install -y -qq "$RUNNER_TEMP/chrome.deb"
+          fi
+          google-chrome --version
+      # The record of what the runner lacks out of the box: with Chrome's bundled SwiftShader alone the adapter
+      # exists but the canvas never presents (shared-image errors in the Chrome log), so a frame is blank.
+      - name: before the Vulkan packages (expected to show the missing piece, never fails the job)
+        continue-on-error: true
+        shell: bash
+        run: node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-before --only 0
+      - name: Vulkan loader and Mesa software driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
+          ls /usr/share/vulkan/icd.d
+      - name: headless Chrome loads dist/web (the first flag set that gives an adapter wins)
+        shell: bash
+        run: node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web --require-adapter
+      # Every flag set, not only the winner, so the record says which flags matter and which do not.
+      - name: every flag set, for the record
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-all --all
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: web-browse
+          path: out
+          if-no-files-found: warn

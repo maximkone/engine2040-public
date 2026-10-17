@@ -11,8 +11,10 @@ use super::msaa::{
     pipeline_multisample, MsaaConfig, MsaaSupport, MSAA_SAMPLE_COUNT,
 };
 use super::submit::{
-    blit_pipeline, forward_pipeline, material_entry, padded_depth_row, sky_pipeline,
-    uniform_buffer, uniform_entry, MATERIAL_RING_BYTES, MATERIAL_RING_LEN,
+    blit_pipeline, forward_pipeline, forward_skinned_pipeline, material_entry, padded_depth_row,
+    skin_joints_entry, skin_params_entry, sky_pipeline, uniform_buffer, uniform_entry,
+    MATERIAL_RING_BYTES, MATERIAL_RING_LEN, SKIN_BLOCKS, SKIN_BLOCK_BYTES, SKIN_BLOCK_JOINTS,
+    SKIN_PARAMS_BYTES,
 };
 use super::timing::GpuTimer;
 use super::{BLIT_WGSL, DEPTH_FORMAT, HDR_FORMAT, IBL_STUDIO_HDRI_BYTES, OUTPUT_FORMAT};
@@ -43,19 +45,6 @@ impl BloomState {
             config: crate::post::BloomConfig::default(),
         }
     }
-
-    /// Flag for `max_luma`: `1.0` when enabled and the oracle gate runs,
-    /// else `0.0` (bit-identical off). Fail-closed by delegation.
-    #[must_use]
-    pub fn flag(&self, max_luma: f32) -> f32 {
-        if self.enabled
-            && crate::post::bloom_should_run(max_luma, self.config.threshold, self.config.knee)
-        {
-            1.0
-        } else {
-            0.0
-        }
-    }
 }
 
 /// Windowed presenter: surface/swapchain plus HDR, depth and LDR-twin
@@ -77,6 +66,23 @@ pub struct Presenter {
     /// 4x MSAA forward pipeline for the on path: same shader plus layout
     /// as `forward_hdr` with count 4; bound when `targets.msaa` is `Some`.
     pub(crate) forward_hdr_msaa: wgpu::RenderPipeline,
+    /// `forward_hdr` with the `vs_skinned` vertex entry over the 64-byte
+    /// skinned vertex: bound for a group whose mesh has a skin block.
+    pub(crate) forward_skinned: wgpu::RenderPipeline,
+    /// 4x MSAA twin of `forward_skinned` (one HDR target, like the static one).
+    pub(crate) forward_skinned_msaa: wgpu::RenderPipeline,
+    /// Joint palette: `SKIN_BLOCKS` blocks of 64 matrices, read by
+    /// `vs_skinned` at forward binding 7 through a per-draw dynamic offset.
+    /// One `write_skin_block` per skinned body per tick fills a block.
+    pub(crate) skin_joint_buf: wgpu::Buffer,
+    /// `SkinParams` uniform (forward binding 8): `has_skin` is 1, written
+    /// once at build, so `vs_skinned` always blends.
+    pub(crate) skin_params_buf: wgpu::Buffer,
+    /// Skin block of every resident mesh uploaded through
+    /// `upload_skinned_mesh`. A mesh key listed here holds 64-byte skinned
+    /// vertices and draws through `forward_skinned`; every other key holds
+    /// the 48-byte static vertex.
+    pub(crate) skin_blocks: BTreeMap<MeshKey, u8>,
     pub(crate) blit_layout: wgpu::BindGroupLayout,
     pub(crate) blit_shader: wgpu::ShaderModule,
     pub(crate) blit_sampler: wgpu::Sampler,
@@ -119,11 +125,6 @@ pub struct Presenter {
     /// same topology rewrite vertices in place with no new buffers.
     pub(crate) mesh_index_hash: BTreeMap<MeshKey, u64>,
     pub(crate) textures: CpuCache<TextureKey, GpuTexture>,
-    /// Arena crowd mesh and palette, packed by `ensure_crowd`. They sit
-    /// beside the caches, not in them, so the receipt's cache rows count
-    /// only user uploads. The palette's bind group lives in `texture_binds`.
-    pub(crate) crowd_mesh: Option<GpuMesh>,
-    pub(crate) crowd_palette: Option<GpuTexture>,
     pub(crate) device_lost: Option<String>,
     pub(crate) frames_presented: u64,
     /// Surface frames between look-probe rounds (sky, layer, particle and
@@ -145,8 +146,9 @@ pub struct Presenter {
     pub(crate) sky_look: sky::SkyLookBake,
     /// LF1 live sky: the one init-time sky-view texture (64x32 Rgba32Float,
     /// row 0 at the zenith) sampled by `fs_sky`. Uploaded once, never per
-    /// frame, same backing the fog horizon reads.
-    pub(crate) sky_view: wgpu::Texture,
+    /// frame, same backing the fog horizon reads. Held for its lifetime: the
+    /// bound view is the only reader.
+    pub(crate) _sky_view: wgpu::Texture,
     /// View over `sky_view` bound at forward 15 for the sky pass.
     pub(crate) sky_view_view: wgpu::TextureView,
     /// LF1 live exposure: EV100 scale from the one `sky_forward_feed`
@@ -170,6 +172,9 @@ pub struct Presenter {
     /// GTAO bind state (steady-state submits size nothing; the
     /// reuse test in `gtao.rs` proves it).
     pub(crate) gtao_sub: gtao::GtaoSubmitter,
+    /// Live GTAO on the forward-stored depth (LF3): both compute kernels
+    /// plus the neutral-reset flag; the frame-size resources ride the targets.
+    pub(crate) gtao_gpu: super::gtao_live::GtaoGpu,
     /// IBL chart bind state (steady-state submits size nothing;
     /// the reuse test in `ibl.rs` proves it).
     pub(crate) ibl_sub: ibl::gpu::IblSubmitter,
@@ -283,10 +288,6 @@ pub struct Presenter {
     pub(crate) bloom: BloomState,
 }
 
-/// Staged frame uniforms: camera bytes and light bytes (the per-draw
-/// materials go straight into `Presenter::material_scratch`).
-pub(crate) type StagedUniforms = (Vec<u8>, Vec<u8>);
-
 /// Neutral normal-map texel in 0..=255: 128,128,255 decodes to (0,0,1)
 /// via `eg12_decode_normal`, so the TBN keeps the geometric normal.
 /// Owner presenter, consumer the forward 17 fallback bind.
@@ -322,6 +323,31 @@ fn forward_normal_layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
     ]
 }
 
+/// Every shared resource a forward bind group points at, besides the
+/// per-texture base-color view. Borrowed, built where the bind is created.
+#[cfg(feature = "window")]
+#[derive(Clone, Copy)]
+struct ForwardBindSources<'a> {
+    layout: &'a wgpu::BindGroupLayout,
+    cam: &'a wgpu::Buffer,
+    light: &'a wgpu::Buffer,
+    material: &'a wgpu::Buffer,
+    material_bytes: u64,
+    shadow: &'a wgpu::Buffer,
+    sampler: &'a wgpu::Sampler,
+    fog: &'a wgpu::Buffer,
+    torch: &'a wgpu::Buffer,
+    pre_view: &'a wgpu::TextureView,
+    brdf_view: &'a wgpu::TextureView,
+    sh_buf: &'a wgpu::Buffer,
+    sky_view: &'a wgpu::TextureView,
+    normal_view: &'a wgpu::TextureView,
+    /// Joint palette storage buffer (binding 7, one block per draw offset).
+    skin_joints: &'a wgpu::Buffer,
+    /// `SkinParams` uniform (binding 8).
+    skin_params: &'a wgpu::Buffer,
+}
+
 /// LF1 live sky bind: the forward group plus the init-time sky-view
 /// texture at 15. Same buffers the IBL live bind carries, plus the sky
 /// view; cold bind creation only, never per frame. Keeps the binary
@@ -329,34 +355,49 @@ fn forward_normal_layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
 #[cfg(feature = "window")]
 fn forward_bind_with_sky(
     device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    cam: &wgpu::Buffer,
-    light: &wgpu::Buffer,
-    material: &wgpu::Buffer,
-    material_bytes: u64,
-    shadow: &wgpu::Buffer,
+    sources: &ForwardBindSources<'_>,
     base_view: &wgpu::TextureView,
-    sampler: &wgpu::Sampler,
-    fog: &wgpu::Buffer,
-    torch: &wgpu::Buffer,
-    pre_view: &wgpu::TextureView,
-    brdf_view: &wgpu::TextureView,
-    sh_buf: &wgpu::Buffer,
-    sky_view: &wgpu::TextureView,
-    normal_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
+    let ForwardBindSources {
+        layout,
+        cam,
+        light,
+        material,
+        material_bytes,
+        shadow,
+        sampler,
+        fog,
+        torch,
+        pre_view,
+        brdf_view,
+        sh_buf,
+        sky_view,
+        normal_view,
+        skin_joints,
+        skin_params,
+    } = *sources;
+    fn whole(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry {
+            binding,
+            resource: buffer.as_entire_binding(),
+        }
+    }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ra1-forward-bind-sky"),
         layout,
         entries: &[
+            // One joint block window; the draw's dynamic offset moves it.
             wgpu::BindGroupEntry {
-                binding: 0,
-                resource: cam.as_entire_binding(),
+                binding: 7,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: skin_joints,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(SKIN_BLOCK_BYTES),
+                }),
             },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: light.as_entire_binding(),
-            },
+            whole(8, skin_params),
+            whole(0, cam),
+            whole(1, light),
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -365,10 +406,7 @@ fn forward_bind_with_sky(
                     size: wgpu::BufferSize::new(material_bytes),
                 }),
             },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: shadow.as_entire_binding(),
-            },
+            whole(3, shadow),
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::TextureView(base_view),
@@ -377,10 +415,7 @@ fn forward_bind_with_sky(
                 binding: 5,
                 resource: wgpu::BindingResource::Sampler(sampler),
             },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: fog.as_entire_binding(),
-            },
+            whole(6, fog),
             wgpu::BindGroupEntry {
                 binding: 9,
                 resource: wgpu::BindingResource::TextureView(pre_view),
@@ -393,18 +428,12 @@ fn forward_bind_with_sky(
                 binding: 11,
                 resource: wgpu::BindingResource::Sampler(sampler),
             },
-            wgpu::BindGroupEntry {
-                binding: 12,
-                resource: sh_buf.as_entire_binding(),
-            },
+            whole(12, sh_buf),
             wgpu::BindGroupEntry {
                 binding: 15,
                 resource: wgpu::BindingResource::TextureView(sky_view),
             },
-            wgpu::BindGroupEntry {
-                binding: 16,
-                resource: torch.as_entire_binding(),
-            },
+            whole(16, torch),
             wgpu::BindGroupEntry {
                 binding: 17,
                 resource: wgpu::BindingResource::TextureView(normal_view),
@@ -555,6 +584,10 @@ impl Presenter {
                 count: None,
             },
             uniform_entry(6, wgpu::ShaderStages::FRAGMENT),
+            // Joint palette block (dynamic offset) plus skin params, read
+            // by `vs_skinned` only; the static `vs` ignores both.
+            skin_joints_entry(7),
+            skin_params_entry(8),
             // LF1 live sky: the init-time sky-view texture (Rgba32Float,
             // unfilterable, manual bilinear in `fs_sky`). Free binding:
             // 9-12 owned by IBL, 13-14 dead sun shadow, 7-8 skin.
@@ -595,6 +628,36 @@ impl Presenter {
             &[HDR_FORMAT],
             pipeline_multisample(&MsaaConfig { enabled: true }),
         );
+        // The skinned twins: the same shader and layout, `vs_skinned` over
+        // the 64-byte vertex, so a body draws from bind-pose vertices plus
+        // one joint block instead of freshly CPU-skinned buffers.
+        let forward_skinned = forward_skinned_pipeline(
+            &device,
+            &forward_shader,
+            &forward_layout,
+            &super::submit::forward_color_target_formats(),
+            pipeline_multisample(&MsaaConfig::default()),
+        );
+        let forward_skinned_msaa = forward_skinned_pipeline(
+            &device,
+            &forward_shader,
+            &forward_layout,
+            &[HDR_FORMAT],
+            pipeline_multisample(&MsaaConfig { enabled: true }),
+        );
+        let skin_joint_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fc2b-skin-joints"),
+            size: SKIN_BLOCK_BYTES * u64::try_from(SKIN_BLOCKS).unwrap_or(1),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // `SkinParams { joint_count, has_skin, pad, pad }`: always skin.
+        let skin_params_buf = uniform_buffer(&device, "fc2b-skin-params", SKIN_PARAMS_BYTES);
+        let mut skin_params = [0u8; 16];
+        skin_params[0..4]
+            .copy_from_slice(&u32::try_from(SKIN_BLOCK_JOINTS).unwrap_or(0).to_le_bytes());
+        skin_params[4..8].copy_from_slice(&1u32.to_le_bytes());
+        queue.write_buffer(&skin_params_buf, 0, &skin_params);
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ra1-blit"),
             source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
@@ -834,21 +897,25 @@ impl Presenter {
         });
         let fallback_bind = forward_bind_with_sky(
             &device,
-            &forward_layout,
-            &cam_buf,
-            &light_buf,
-            &material_ring,
-            super::submit::MATERIAL_BYTES,
-            &twin_shadow_buf,
+            &ForwardBindSources {
+                layout: &forward_layout,
+                cam: &cam_buf,
+                light: &light_buf,
+                material: &material_ring,
+                material_bytes: super::submit::MATERIAL_BYTES,
+                shadow: &twin_shadow_buf,
+                sampler: &base_sampler,
+                fog: &fog_fwd_buf,
+                torch: &torch_buf,
+                pre_view: &ibl_prefilter_view,
+                brdf_view: &ibl_brdf_view,
+                sh_buf: &ibl_sh_buf,
+                sky_view: &sky_view_view,
+                normal_view: &normal_fallback.view,
+                skin_joints: &skin_joint_buf,
+                skin_params: &skin_params_buf,
+            },
             &base_fallback.view,
-            &base_sampler,
-            &fog_fwd_buf,
-            &torch_buf,
-            &ibl_prefilter_view,
-            &ibl_brdf_view,
-            &ibl_sh_buf,
-            &sky_view_view,
-            &normal_fallback.view,
         );
         let gpu_timer = GpuTimer::new(&device, &queue);
         // EG13: the MSAA on/off switch. Off (default) keeps today's 1x HDR
@@ -898,6 +965,7 @@ impl Presenter {
             decal_sub: decals::DecalSubmitter::new(&device),
             fog_sub: fog::FogSubmitter::new(&device),
             gtao_sub: gtao::GtaoSubmitter::new(&device),
+            gtao_gpu: super::gtao_live::GtaoGpu::new(&device),
             ibl_sub: ibl::gpu::IblSubmitter::new(&device),
             ibl_bake,
             ibl_prefilter,
@@ -929,6 +997,11 @@ impl Presenter {
             forward_layout,
             forward_hdr,
             forward_hdr_msaa,
+            forward_skinned,
+            forward_skinned_msaa,
+            skin_joint_buf,
+            skin_params_buf,
+            skin_blocks: BTreeMap::new(),
             blit_layout,
             blit_shader,
             blit_sampler,
@@ -944,15 +1017,13 @@ impl Presenter {
             meshes: CpuCache::new(MAX_CACHED_MESHES),
             mesh_index_hash: BTreeMap::new(),
             textures: CpuCache::new(MAX_CACHED_TEXTURES),
-            crowd_mesh: None,
-            crowd_palette: None,
             device_lost: None,
             frames_presented: 0,
             probe_every: 1,
             fog_every: 1,
             sky_capture,
             sky_look,
-            sky_view,
+            _sky_view: sky_view,
             sky_view_view,
             sky_exposure,
         })
@@ -962,6 +1033,9 @@ impl Presenter {
     /// forward plus blit pipelines. `NoAdapter` on headless machines is
     /// skip-not-green for callers, never a fake pass.
     pub fn init_offscreen() -> Result<Self, PresentError> {
+        // Test builds only: cap the GPU tests that hold a device at once.
+        #[cfg(test)]
+        crate::test_gpu::hold_gpu_slot();
         // Backend pick is resolved here for the wgpu instance; the binary
         // logs `pick.startup_line()`. No stdout in lib.
         let (choice, _) = crate::backend::resolve_from_env(None);
@@ -1235,6 +1309,9 @@ impl Presenter {
         // place (one write, no new buffers); bytes pack into `vertex_scratch`
         // with the hash first, so a moved topology skips validation.
         let reuse_hit = match self.meshes.get(&key) {
+            // A skinned key holds 64-byte vertices: never rewrite it in
+            // place with the 48-byte static image.
+            Some(_) if self.skin_blocks.contains_key(&key) => false,
             Some(resident) => {
                 let want_vertices = u32::try_from(mesh.positions.len()).unwrap_or(u32::MAX);
                 let want_count = u32::try_from(mesh.indices.len()).unwrap_or(u32::MAX);
@@ -1282,9 +1359,162 @@ impl Presenter {
         if let Some(evicted) = self.meshes.insert(key, gpu) {
             debug_assert_ne!(evicted, key, "reinsert never evicts itself");
             self.mesh_index_hash.remove(&evicted);
+            self.skin_blocks.remove(&evicted);
         }
+        // The new buffers hold the static vertex: the key leaves the skin set.
+        self.skin_blocks.remove(&key);
         self.mesh_index_hash.insert(key, incoming);
         Ok(())
+    }
+
+    /// Upload a skinned body part under `key`: the bind-pose `mesh` plus its
+    /// `skin` rows packed as 64-byte vertices (pos, normal, uv, four joint
+    /// indices, four weights). A draw of `key` blends the joint matrices that
+    /// [`Self::write_skin_block`] last wrote to `block`, so a posed body costs
+    /// one 45-matrix write per tick and no vertex upload. Revalidated like
+    /// [`Self::upload_mesh`]; a skin row count that differs from the vertex
+    /// count, a joint index past [`Self::SKIN_BLOCK_JOINTS`] or a block past
+    /// [`Self::SKIN_BLOCKS`] is refused and changes nothing. A re-upload
+    /// replaces the buffers. Cold path: call it once per part, not per frame.
+    pub fn upload_skinned_mesh(
+        &mut self,
+        key: MeshKey,
+        mesh: &v1::MeshData,
+        skin: &crate::v1_skin::SkinWeights,
+        block: usize,
+    ) -> Result<(), PresentError> {
+        use wgpu::util::DeviceExt;
+        let block_id = u8::try_from(block)
+            .ok()
+            .filter(|_| block < SKIN_BLOCKS)
+            .ok_or_else(|| {
+                PresentError::InvalidMesh(format!(
+                    "skinned mesh {}: block {block} past the {SKIN_BLOCKS} blocks",
+                    key.id
+                ))
+            })?;
+        let mesh = v1::upload_mesh(&mesh.positions, &mesh.normals, &mesh.uvs, &mesh.indices)
+            .map_err(|e| PresentError::InvalidMesh(format!("{e}")))?;
+        if skin.joints.len() != mesh.positions.len() || skin.weights.len() != mesh.positions.len() {
+            return Err(PresentError::InvalidMesh(format!(
+                "skinned mesh {}: {} vertices but {} joint rows and {} weight rows",
+                key.id,
+                mesh.positions.len(),
+                skin.joints.len(),
+                skin.weights.len()
+            )));
+        }
+        let stride = usize::try_from(super::submit::SKINNED_VERTEX_STRIDE).unwrap_or(64);
+        let mut bytes = Vec::with_capacity(mesh.positions.len() * stride);
+        for (index, row) in skin.joints.iter().enumerate() {
+            if row
+                .iter()
+                .any(|joint| usize::from(*joint) >= SKIN_BLOCK_JOINTS)
+            {
+                return Err(PresentError::InvalidMesh(format!(
+                    "skinned mesh {}: vertex {index} names a joint past {SKIN_BLOCK_JOINTS}",
+                    key.id
+                )));
+            }
+            let floats = mesh.positions[index]
+                .iter()
+                .chain(&mesh.normals[index])
+                .chain(&mesh.uvs[index]);
+            for value in floats {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for joint in row {
+                bytes.extend_from_slice(&u32::from(*joint).to_le_bytes());
+            }
+            for weight in &skin.weights[index] {
+                bytes.extend_from_slice(&weight.to_le_bytes());
+            }
+        }
+        let vertex = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fc2b-skinned-vb"),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fc2b-skinned-ib"),
+                contents: &mesh.index_bytes(),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.creates.buffer();
+        self.creates.buffer();
+        let gpu = GpuMesh {
+            vertex,
+            index,
+            count: u32::try_from(mesh.indices.len()).unwrap_or(u32::MAX),
+            vertices: u32::try_from(mesh.positions.len()).unwrap_or(u32::MAX),
+            indices: Vec::new(),
+        };
+        if let Some(evicted) = self.meshes.insert(key, gpu) {
+            debug_assert_ne!(evicted, key, "reinsert never evicts itself");
+            self.mesh_index_hash.remove(&evicted);
+            self.skin_blocks.remove(&evicted);
+        }
+        // No index fingerprint: a skinned key never takes the in-place path.
+        self.mesh_index_hash.remove(&key);
+        self.skin_blocks.insert(key, block_id);
+        Ok(())
+    }
+
+    /// Joints per skin block: the palette length `vs_skinned` indexes.
+    pub const SKIN_BLOCK_JOINTS: usize = SKIN_BLOCK_JOINTS;
+    /// Skin blocks the joint buffer holds: skinned bodies drawn per frame.
+    pub const SKIN_BLOCKS: usize = SKIN_BLOCKS;
+
+    /// Write one skinned body's joint matrices into `block`: AN1 row-major
+    /// matrices (`inverse bind * joint * root`, translation in the last row),
+    /// uploaded verbatim as the shader's columns, exactly as
+    /// `SkinningUniform::to_bytes` lays them out. One `queue.write_buffer`
+    /// of `matrices.len() * 64` bytes; no buffer or bind group is created.
+    /// Every skinned draw of a mesh uploaded with this `block` reads it, and
+    /// the next submit sees the latest write. A block past
+    /// [`Self::SKIN_BLOCKS`], more than [`Self::SKIN_BLOCK_JOINTS`] matrices
+    /// or a non-finite component is refused loudly and writes nothing.
+    pub fn write_skin_block(
+        &mut self,
+        block: usize,
+        matrices: &[[[f32; 4]; 4]],
+    ) -> Result<(), PresentError> {
+        if block >= SKIN_BLOCKS || matrices.len() > SKIN_BLOCK_JOINTS {
+            return Err(PresentError::InvalidMesh(format!(
+                "skin block {block} with {} matrices: the buffer holds {SKIN_BLOCKS} blocks of {SKIN_BLOCK_JOINTS}",
+                matrices.len()
+            )));
+        }
+        let mut bytes = [0u8; SKIN_BLOCK_JOINTS * 64];
+        let mut at = 0usize;
+        for (joint, matrix) in matrices.iter().enumerate() {
+            for value in matrix.iter().flatten() {
+                if !value.is_finite() {
+                    return Err(PresentError::InvalidMesh(format!(
+                        "skin block {block}: joint {joint} matrix is not finite"
+                    )));
+                }
+                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                at += 4;
+            }
+        }
+        if at > 0 {
+            let offset = u64::try_from(block).unwrap_or(0) * SKIN_BLOCK_BYTES;
+            self.queue
+                .write_buffer(&self.skin_joint_buf, offset, &bytes[..at]);
+        }
+        Ok(())
+    }
+
+    /// Skin block the resident mesh `key` draws through, `None` for a static
+    /// mesh or an absent key.
+    #[must_use]
+    pub fn skin_block_of(&self, key: &MeshKey) -> Option<usize> {
+        self.skin_blocks.get(key).map(|block| usize::from(*block))
     }
 
     /// Pack a mesh into GPU buffers without caching it: `upload_mesh`
@@ -1301,7 +1531,14 @@ impl Presenter {
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("ra1-mesh-vb"),
                 contents: &mesh.vertex_bytes(),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                // Test builds add `COPY_SRC` so a test reads the bytes back.
+                usage: if cfg!(test) {
+                    wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC
+                } else {
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST
+                },
             });
         let ib = self
             .device
@@ -1319,6 +1556,7 @@ impl Presenter {
             index: ib,
             count,
             vertices,
+            indices: mesh.indices,
         })
     }
 
@@ -1472,34 +1710,42 @@ impl Presenter {
         });
         forward_bind_with_sky(
             &self.device,
-            &self.forward_layout,
-            &self.cam_buf,
-            &self.light_buf,
-            &self.material_ring,
-            super::submit::MATERIAL_BYTES,
-            &self.twin_shadow_buf,
+            &ForwardBindSources {
+                layout: &self.forward_layout,
+                cam: &self.cam_buf,
+                light: &self.light_buf,
+                material: &self.material_ring,
+                material_bytes: super::submit::MATERIAL_BYTES,
+                shadow: &self.twin_shadow_buf,
+                sampler: &self.base_sampler,
+                fog: &self.fog_fwd_buf,
+                torch: &self.torch_buf,
+                pre_view: &pre_view,
+                brdf_view: &brdf_view,
+                sh_buf: &self.ibl_sh_buf,
+                sky_view: &self.sky_view_view,
+                normal_view: &self.normal_fallback.view,
+                skin_joints: &self.skin_joint_buf,
+                skin_params: &self.skin_params_buf,
+            },
             view,
-            &self.base_sampler,
-            &self.fog_fwd_buf,
-            &self.torch_buf,
-            &pre_view,
-            &brdf_view,
-            &self.ibl_sh_buf,
-            &self.sky_view_view,
-            &self.normal_fallback.view,
         )
     }
 
     /// Rewrite the vertices of the resident mesh `key` in place: pack
-    /// position, normal and uv into the mesh's own vertex buffer with one
-    /// `queue.write_buffer`, no new buffer, no revalidation of the index
-    /// list. This is the per-frame path of a CPU-skinned body: create the
-    /// mesh once with [`Presenter::upload_mesh`], refresh it every frame.
+    /// position, normal, uv and tangent into the mesh's own 48-byte vertex
+    /// buffer with one `queue.write_buffer`, no new buffer, no revalidation
+    /// of the index list. The tangents are recomputed from the new
+    /// positions, the uvs and the resident triangle list by the rule
+    /// [`Presenter::upload_mesh`] uses, so a refresh leaves the same bytes a
+    /// fresh upload of the same mesh would. This is the per-frame path of a
+    /// CPU-skinned body: create the mesh once with
+    /// [`Presenter::upload_mesh`], refresh it every frame.
     /// Returns `Ok(false)` when `key` is not resident (the caller makes
     /// the one-time upload), `Ok(true)` once written. The vertex count is
     /// fixed for the buffer's life; a different count, a non-finite
-    /// component or a degenerate normal is refused loudly and writes
-    /// nothing.
+    /// component, a degenerate normal or a skinned key (64-byte vertices)
+    /// is refused loudly and writes nothing.
     pub fn refresh_mesh_vertices(
         &mut self,
         key: MeshKey,
@@ -1510,6 +1756,12 @@ impl Presenter {
         let Some(resident) = self.meshes.get(&key) else {
             return Ok(false);
         };
+        if self.skin_blocks.contains_key(&key) {
+            return Err(PresentError::InvalidMesh(format!(
+                "refresh mesh {}: a skinned mesh holds 64-byte vertices, upload it again instead",
+                key.id
+            )));
+        }
         let expected = usize::try_from(resident.vertices).unwrap_or(usize::MAX);
         if positions.len() != expected || normals.len() != expected || uvs.len() != expected {
             return Err(PresentError::InvalidMesh(format!(
@@ -1520,7 +1772,6 @@ impl Presenter {
                 uvs.len()
             )));
         }
-        self.vertex_scratch.clear();
         for (index, ((p, n), uv)) in positions.iter().zip(normals).zip(uvs).enumerate() {
             let finite = p
                 .iter()
@@ -1534,10 +1785,26 @@ impl Presenter {
                     key.id
                 )));
             }
-            for c in p.iter().chain(n.iter()).chain(uv.iter()) {
+        }
+        // CODELAW one-owner: tangents come from the import lane, as in
+        // `v1::upload_mesh`; every input is validated above.
+        let proxy = engine_assets::CookedMesh {
+            positions: positions.to_vec(),
+            normals: normals.to_vec(),
+            uv0: uvs.to_vec(),
+            tangents: Vec::new(),
+            indices: resident.indices.clone(),
+        };
+        let tangents = engine_assets::import_repair::recompute_tangents(&proxy);
+        self.vertex_scratch.clear();
+        self.vertex_scratch.reserve(expected * 48);
+        let rows = positions.iter().zip(normals).zip(uvs).zip(&tangents);
+        for (((p, n), uv), t) in rows {
+            for c in p.iter().chain(n.iter()).chain(uv.iter()).chain(t.iter()) {
                 self.vertex_scratch.extend_from_slice(&c.to_le_bytes());
             }
         }
+        debug_assert_eq!(self.vertex_scratch.len(), expected * 48);
         let Some(resident) = self.meshes.get(&key) else {
             return Ok(false);
         };
@@ -1711,6 +1978,24 @@ impl Presenter {
     /// True when pass timestamps were requested and the device grants them.
     pub fn gpu_timing_supported(&self) -> bool {
         self.gpu_timer.is_some()
+    }
+
+    /// Drop every timing sample gathered so far, so the next report covers
+    /// only the frames rendered after this call (A/B cost runs).
+    pub fn reset_gpu_timing(&mut self) {
+        if let Some(timer) = self.gpu_timer.as_mut() {
+            timer.clear_samples();
+        }
+    }
+
+    /// Block until the device has finished every submitted frame, so the
+    /// late timestamp reads land. For cost measurement only: a window run
+    /// never calls it, and it counts as no frame.
+    pub fn settle_gpu_timing(&self) -> Result<(), PresentError> {
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map(|_status| ())
+            .map_err(|e| PresentError::Readback(format!("settle poll: {e}")))
     }
 
     /// Mean wall time of the swapchain acquire in us over acquired frames:
@@ -2281,5 +2566,332 @@ mod mesh_upload_reuse_tests {
             presenter.upload_mesh(key, &bad).is_err(),
             "non-finite refuses"
         );
+    }
+}
+
+#[cfg(test)]
+mod skin_window_tests {
+    use super::super::submit::{
+        skin_block_offset, SKINNED_VERTEX_STRIDE, SKIN_BLOCKS, SKIN_BLOCK_BYTES, SKIN_BLOCK_JOINTS,
+        SKIN_BLOCK_STRIDE,
+    };
+    use crate::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter};
+    use crate::v1::{self, MeshData};
+    use crate::v1_skin::{SkinPipeline, SkinWeights};
+
+    type Mat = [[f32; 4]; 4];
+
+    const IDENTITY: Mat = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    /// AN1 row-vector turn about +Z by `angle`, then a move by `t`.
+    fn turn_z(angle: f32, t: [f32; 3]) -> Mat {
+        let (s, c) = angle.sin_cos();
+        [
+            [c, s, 0.0, 0.0],
+            [-s, c, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [t[0], t[1], t[2], 1.0],
+        ]
+    }
+
+    /// The unit cube bound to two joints: weight on joint 1 grows with
+    /// height and a little with x, so the top follows joint 1, the bottom
+    /// stays on joint 0 and the middle band blends.
+    fn two_joint_cube() -> (MeshData, SkinWeights) {
+        let mesh = v1::cube();
+        let mut joints = Vec::new();
+        let mut weights = Vec::new();
+        for p in &mesh.positions {
+            let w1 = (0.5 + p[1] + 0.4 * p[0]).clamp(0.0, 1.0);
+            joints.push([0u16, 1, 0, 0]);
+            weights.push([1.0 - w1, w1, 0.0, 0.0]);
+        }
+        let mut pipe = SkinPipeline::new();
+        pipe.upload_skeleton(2).expect("two joints");
+        let skin = pipe.upload_weights(&joints, &weights).expect("rows valid");
+        (mesh, skin)
+    }
+
+    /// The CPU skin the old window path uploaded: posed positions and
+    /// normals over the bind uvs and indices.
+    fn cpu_posed(mesh: &MeshData, skin: &SkinWeights, matrices: &[Mat]) -> MeshData {
+        let mut pipe = SkinPipeline::new();
+        pipe.upload_skeleton(matrices.len()).expect("joints");
+        let uniform = pipe.skinning_uniform(matrices).expect("matrices");
+        let posed = pipe
+            .render_skinned(mesh, Some(skin), &uniform)
+            .expect("skins");
+        v1::upload_mesh(&posed.positions, &posed.normals, &mesh.uvs, &mesh.indices)
+            .expect("posed mesh is valid")
+    }
+
+    fn presenter_or_skip(test: &str) -> Option<Presenter> {
+        match Presenter::init_offscreen() {
+            Ok(mut presenter) => {
+                presenter.resize(128, 128).expect("valid size applies");
+                Some(presenter)
+            }
+            Err(PresentError::NoAdapter) => {
+                eprintln!("SKIPPED {test}: no wgpu adapter on this machine");
+                None
+            }
+            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        }
+    }
+
+    fn list_of(keys: &[MeshKey]) -> DrawList {
+        let scene = v1::default_scene(128, 128).expect("default scene is valid");
+        DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: keys
+                .iter()
+                .map(|key| DrawItem {
+                    mesh: *key,
+                    material: scene.material.clone(),
+                    base_color: None,
+                    normal_map: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn pixels(presenter: &mut Presenter, list: &DrawList) -> Vec<u8> {
+        let out = presenter.render_offscreen(list).expect("frame renders");
+        assert!(
+            out.receipt.is_clean(),
+            "no validation errors: {:?}",
+            out.receipt
+        );
+        let png = out.png.expect("capture has pixels");
+        image::load_from_memory(&png)
+            .expect("capture is a PNG")
+            .to_rgba8()
+            .into_raw()
+    }
+
+    /// (largest channel difference, pixels differing by more than `slack`).
+    fn compare(a: &[u8], b: &[u8], slack: u8) -> (u8, usize) {
+        assert_eq!(a.len(), b.len(), "same frame size");
+        let mut worst = 0u8;
+        let mut over = 0usize;
+        for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+            let d = pa
+                .iter()
+                .zip(pb)
+                .map(|(x, y)| x.abs_diff(*y))
+                .max()
+                .unwrap_or(0);
+            worst = worst.max(d);
+            over += usize::from(d > slack);
+        }
+        (worst, over)
+    }
+
+    /// Pixels that left the background color.
+    fn covered(rgba: &[u8]) -> usize {
+        rgba.chunks_exact(4)
+            .filter(|p| {
+                let off = (f32::from(p[0]) - 7.0)
+                    .abs()
+                    .max((f32::from(p[1]) - 8.0).abs())
+                    .max((f32::from(p[2]) - 15.0).abs());
+                off > 5.0
+            })
+            .count()
+    }
+
+    #[test]
+    fn skin_block_layout_matches_the_shader_palette() {
+        let wgsl = crate::v1_gpu::FORWARD_PBR_WGSL;
+        assert!(
+            wgsl.contains(
+                "@group(0) @binding(7) var<storage, read> skin_joints: array<mat4x4<f32>, 64>"
+            ),
+            "the shader palette is 64 matrices at binding 7"
+        );
+        assert!(wgsl.contains("@location(3) joints: vec4<u32>"));
+        assert!(wgsl.contains("@location(4) weights: vec4<f32>"));
+        assert_eq!(SKIN_BLOCK_JOINTS, 64);
+        assert_eq!(SKIN_BLOCK_BYTES, 64 * 64, "one mat4 is 64 bytes");
+        assert_eq!(u64::from(SKIN_BLOCK_STRIDE), SKIN_BLOCK_BYTES);
+        assert_eq!(SKINNED_VERTEX_STRIDE, 12 + 12 + 8 + 16 + 16);
+        for block in 0..SKIN_BLOCKS {
+            let offset = skin_block_offset(u8::try_from(block).expect("block fits u8"));
+            assert_eq!(offset % 256, 0, "block {block} is a legal storage offset");
+            assert_eq!(
+                u64::from(offset),
+                SKIN_BLOCK_BYTES * u64::try_from(block).expect("block fits u64")
+            );
+        }
+    }
+
+    #[test]
+    fn skin_window_draw_matches_the_cpu_skinned_mesh() {
+        let Some(mut presenter) = presenter_or_skip("skin window draw") else {
+            return;
+        };
+        let (mesh, skin) = two_joint_cube();
+        let matrices = [IDENTITY, turn_z(0.55, [0.25, 0.1, 0.0])];
+        let cpu_key = MeshKey::new(0x5C00_0001, [0x11; 32]);
+        let gpu_key = MeshKey::new(0x5C00_0002, [0x22; 32]);
+        presenter
+            .upload_mesh(cpu_key, &cpu_posed(&mesh, &skin, &matrices))
+            .expect("cpu skinned mesh uploads");
+        presenter
+            .upload_skinned_mesh(gpu_key, &mesh, &skin, 0)
+            .expect("bind mesh uploads");
+        presenter
+            .write_skin_block(0, &matrices)
+            .expect("block writes");
+        assert_eq!(presenter.skin_block_of(&gpu_key), Some(0));
+        assert_eq!(presenter.skin_block_of(&cpu_key), None);
+        let cpu = pixels(&mut presenter, &list_of(&[cpu_key]));
+        let gpu = pixels(&mut presenter, &list_of(&[gpu_key]));
+        assert!(covered(&cpu) > 400, "the posed cube is on screen");
+        assert!(covered(&gpu) > 400, "the GPU-skinned cube is on screen");
+        let (worst, over) = compare(&cpu, &gpu, 3);
+        eprintln!("skin window vs cpu: worst channel diff {worst}, pixels over 3: {over}");
+        assert!(
+            over * 200 <= cpu.len() / 4,
+            "under 0.5% of pixels differ by more than 3 levels, got {over} (worst {worst})"
+        );
+        assert!(worst <= 40, "no pixel is far off, got {worst}");
+        // The joints drive the picture: identity matrices draw the bind
+        // pose, which must differ from the posed frame on many pixels.
+        presenter
+            .write_skin_block(0, &[IDENTITY, IDENTITY])
+            .expect("bind pose writes");
+        let bind = pixels(&mut presenter, &list_of(&[gpu_key]));
+        let (_, moved) = compare(&bind, &gpu, 3);
+        assert!(
+            moved > 150,
+            "the pose changes the frame, got {moved} pixels"
+        );
+    }
+
+    #[test]
+    fn skin_blocks_pose_two_bodies_independently_in_one_frame() {
+        let Some(mut presenter) = presenter_or_skip("skin two bodies") else {
+            return;
+        };
+        let (mesh, skin) = two_joint_cube();
+        let a = MeshKey::new(0x5C00_0010, [0x31; 32]);
+        let b = MeshKey::new(0x5C00_0011, [0x32; 32]);
+        let plain = MeshKey::new(0x5C00_0012, [0x33; 32]);
+        presenter
+            .upload_skinned_mesh(a, &mesh, &skin, 0)
+            .expect("a");
+        presenter
+            .upload_skinned_mesh(b, &mesh, &skin, 3)
+            .expect("b");
+        presenter.upload_mesh(plain, &v1::cube()).expect("plain");
+        let pose_a = [IDENTITY, turn_z(0.5, [0.2, 0.0, 0.0])];
+        let pose_b = [IDENTITY, turn_z(-0.5, [-0.2, 0.0, 0.0])];
+        presenter.write_skin_block(0, &pose_a).expect("block 0");
+        presenter.write_skin_block(3, &pose_b).expect("block 3");
+        // Mixed order: static and skinned groups interleave in the list.
+        let list = list_of(&[a, plain, b]);
+        let frame = pixels(&mut presenter, &list);
+        // Each body alone reads its own block: the two-body frame holds
+        // at least the pixels either body covers.
+        let only_a = pixels(&mut presenter, &list_of(&[a]));
+        let only_b = pixels(&mut presenter, &list_of(&[b]));
+        assert!(covered(&only_a) > 300 && covered(&only_b) > 300);
+        let (_, apart) = compare(&only_a, &only_b, 3);
+        assert!(
+            apart > 100,
+            "two blocks pose two shapes, got {apart} pixels"
+        );
+        assert!(covered(&frame) >= covered(&only_a).max(covered(&only_b)));
+        // The live window frame takes the same draws without a validation error.
+        let receipt = presenter
+            .render_live_offscreen(&list)
+            .expect("live frame renders");
+        assert!(receipt.is_clean(), "{receipt:?}");
+        assert_eq!(receipt.draws, 3);
+        // And so does the 4x path (the plain 1x frame stands in when the
+        // adapter cannot build the multisample pair).
+        presenter.set_msaa_enabled(true);
+        let receipt = presenter
+            .render_live_offscreen(&list)
+            .expect("4x live frame renders");
+        assert!(receipt.is_clean(), "{receipt:?}");
+    }
+
+    #[test]
+    fn skin_uploads_and_blocks_refuse_bad_input() {
+        let Some(mut presenter) = presenter_or_skip("skin refusals") else {
+            return;
+        };
+        let (mesh, skin) = two_joint_cube();
+        let key = MeshKey::new(0x5C00_0020, [0x41; 32]);
+        let before = presenter.mesh_count();
+        // A block past the buffer.
+        assert!(matches!(
+            presenter.upload_skinned_mesh(key, &mesh, &skin, SKIN_BLOCKS),
+            Err(PresentError::InvalidMesh(_))
+        ));
+        // A skin row count that differs from the vertex count.
+        let mut short = skin.clone();
+        short.joints.pop();
+        short.weights.pop();
+        assert!(matches!(
+            presenter.upload_skinned_mesh(key, &mesh, &short, 0),
+            Err(PresentError::InvalidMesh(_))
+        ));
+        // A joint index past the palette.
+        let mut wild = skin.clone();
+        wild.joints[0][0] = u16::try_from(SKIN_BLOCK_JOINTS).expect("fits");
+        assert!(matches!(
+            presenter.upload_skinned_mesh(key, &mesh, &wild, 0),
+            Err(PresentError::InvalidMesh(_))
+        ));
+        assert_eq!(presenter.mesh_count(), before, "a refusal changes nothing");
+        assert_eq!(presenter.skin_block_of(&key), None);
+        // Block writes: past the buffer, too many matrices, a NaN component.
+        assert!(presenter
+            .write_skin_block(SKIN_BLOCKS, &[IDENTITY])
+            .is_err());
+        let too_many = vec![IDENTITY; SKIN_BLOCK_JOINTS + 1];
+        assert!(presenter.write_skin_block(0, &too_many).is_err());
+        let mut nan = IDENTITY;
+        nan[3][1] = f32::NAN;
+        assert!(presenter.write_skin_block(0, &[IDENTITY, nan]).is_err());
+        presenter
+            .write_skin_block(SKIN_BLOCKS - 1, &vec![IDENTITY; SKIN_BLOCK_JOINTS])
+            .expect("the last block takes a full palette");
+        presenter
+            .write_skin_block(0, &[])
+            .expect("empty write is a no-op");
+    }
+
+    #[test]
+    fn skin_key_reuploaded_static_leaves_the_skin_path() {
+        let Some(mut presenter) = presenter_or_skip("skin key replaced") else {
+            return;
+        };
+        let (mesh, skin) = two_joint_cube();
+        let key = MeshKey::new(0x5C00_0030, [0x51; 32]);
+        presenter
+            .upload_skinned_mesh(key, &mesh, &skin, 1)
+            .expect("skinned");
+        assert_eq!(presenter.skin_block_of(&key), Some(1));
+        // The same key as a 48-byte static mesh: the 64-byte buffer is
+        // replaced, never rewritten in place, and the draw uses `vs`.
+        presenter.upload_mesh(key, &v1::cube()).expect("static");
+        assert_eq!(presenter.skin_block_of(&key), None);
+        let frame = pixels(&mut presenter, &list_of(&[key]));
+        assert!(covered(&frame) > 400, "the replaced cube draws");
+        // And back: a skinned re-upload takes the key over again.
+        presenter
+            .upload_skinned_mesh(key, &mesh, &skin, 2)
+            .expect("skinned again");
+        assert_eq!(presenter.skin_block_of(&key), Some(2));
     }
 }

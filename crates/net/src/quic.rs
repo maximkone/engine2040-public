@@ -204,7 +204,7 @@ pub trait Transport {
 
 /// Reject oversize frames before they touch any socket: 1200 B wins
 /// everywhere, streams included; the transport never fragments.
-fn check_budget(bytes: &[u8]) -> Result<(), NetError> {
+pub(crate) fn check_budget(bytes: &[u8]) -> Result<(), NetError> {
     if bytes.len() > MAX_PACKET_BYTES {
         return Err(NetError::TooLarge);
     }

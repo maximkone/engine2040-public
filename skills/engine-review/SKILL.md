@@ -21,7 +21,7 @@ with path:line:
 4. No `Unsupported`, `GpuUnsupported`, `todo!`, `unimplemented!`, empty
    handlers, placeholder returns or TODO without a board ID in the new lines.
 5. Render/GPU rows: the submit path records real passes, not a refusal.
-6. Rust quality: owned by `engine-rust-quality` — require its packet-gate
+6. Rust quality: owned by `engine-rust-quality` — require its `rust-quality`
    RESULT PASS and RUST 3+/5 before judging depth; its rules are not
    repeated here.
 

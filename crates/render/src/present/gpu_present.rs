@@ -51,6 +51,8 @@ mod bind_memo;
 mod fog_tranche;
 mod forward_bind;
 mod frame;
+mod gate;
+mod gtao_live;
 mod live;
 mod msaa;
 mod presenter;
@@ -58,7 +60,9 @@ mod submit;
 mod sun_shadow;
 mod timing;
 
-pub use frame::{last_live_wall_split, FrameOutput, FrameReceipt, LiveWallSplit, LookPassReceipt};
+pub use frame::{
+    last_live_wall_split, FrameOutput, FrameReceipt, LivePixels, LiveWallSplit, LookPassReceipt,
+};
 pub use msaa::{
     edge_has_intermediate, msaa_enabled, msaa_sample_count, msaa_target_desc, MsaaConfig,
     MsaaTargetDesc, MSAA_SAMPLE_COUNT,

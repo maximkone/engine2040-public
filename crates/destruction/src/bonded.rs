@@ -542,6 +542,10 @@ impl BondedCollection {
     pub fn chunks(&self) -> &[Chunk3] {
         &self.chunks
     }
+    /// Bond list in descriptor order: the `bond` of a [`BreakEvent::BondBroken`] indexes it.
+    pub fn bonds(&self) -> &[Bond] {
+        &self.bonds
+    }
     /// Per-chunk velocities in index order; m/s.
     pub fn velocities(&self) -> &[[f32; 3]] {
         &self.vel

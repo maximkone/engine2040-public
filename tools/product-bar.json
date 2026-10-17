@@ -21,7 +21,7 @@
     "live_passes": "sky, IBL, sun shadow, GTAO, bloom, TAA, particles, decals (each changes pixels when on, EG8; rows LF1-LF7, EG11)",
     "look_score": "machine look score vs references (LJ1, EG30) at or above the bar Q1 sets",
     "strobe": "tinted_share under 0.10 in an 8-fighter brawl",
-    "pops": "0 joint pops per 300 frames (view line `pops`; 35-55 today, up to 1 m, at attack and idle switches): EG18 crossfade, then LF9",
-    "sunk_cm": "under 2 cm (the death clip sinks 12-15 cm into the sand today)"
+    "pops": "0 joint pops per 300 frames (view line `pops`; LF9 took the attack and idle clip switches to 0; 20-37 remain in a 4-fighter duel, all in the run act, from the run clip speed scale jumping the clip phase)",
+    "sunk_cm": "under 2 cm (dead bodies rest on the sand at 0 cm since LF17; living bodies still dip 5-14 cm into it at clip crossfades and the run stride: LF9, LF12)"
   }
 }

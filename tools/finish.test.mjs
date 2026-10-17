@@ -4,9 +4,19 @@
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadBoardText, parseBoard, ticksOf } from "./board-slice.mjs";
+import {
+  ARCHIVE_TICKED_ROWS,
+  DROPPED_ROWS,
+  FALLBACK_ROWS,
+  GATES,
+  expandIds,
+  parseProvenBy,
+  ticksFromArchive,
+} from "./finish.mjs";
 
 const REPO = process.cwd();
 const FINISH = join(REPO, "tools", "finish.mjs");
@@ -180,30 +190,123 @@ test("archive ticks close pruned rows (E7: OB3/DOC1/FX3), GX5 stays dropped", ()
   }
 });
 
-test("fallback use prints a warning on stderr, stdout stays JSON", () => {
-  const dir = join(tmpdir(), `finish-warn-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+test("a row on neither the board nor the archive counts open and is named on stderr", () => {
+  const dir = join(tmpdir(), `finish-missing-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
   mkdirSync(dir, { recursive: true });
   try {
     const f = join(dir, "FINISH-RICH.md");
     const s = join(dir, "SPRINT.md");
-    writeFileSync(f, FINISH_MD);
+    const empty = join(dir, "empty-archive");
+    mkdirSync(empty, { recursive: true });
+    // ZZ9 is named by P5's Proven by column and exists nowhere.
+    writeFileSync(f, FINISH_MD.replace("| P5: stability | One-hour soak clean | AH1, PQ3 |", "| P5: stability | One-hour soak clean | AH1, PQ3, ZZ9 |"));
     writeFileSync(s, SPRINT_MD);
-    const r = spawnSync(process.execPath, [FINISH, "--finish", f, "--sprint", s, "--json"], {
+    const r = spawnSync(process.execPath, [FINISH, "--finish", f, "--sprint", s, "--archive", empty, "--json"], {
       encoding: "utf8",
     });
     assert.equal(r.status, 0, `finish.mjs failed: ${r.stderr}${r.stdout}`);
-    // Stdout stays pure JSON even with the warning.
     assert.doesNotThrow(() => JSON.parse(r.stdout), "stdout stays JSON");
-    // Fallback rows back P1 (no Proven by row) so the warning must fire,
-    // never silently wrong about the open set.
-    assert.match(r.stderr, /warning/i, "warning fires when fallback is used");
-    assert.match(r.stderr, /fallback/i, "warning names the fallback");
-    assert.match(r.stderr, /FALLBACK_ROWS/, "warning points at FALLBACK_ROWS");
-    // P1 fallback names GX5, which DROPPED_ROWS filters: that filtering warns too.
-    assert.match(r.stderr, /dropped/i, "dropped-row filtering warns");
-    assert.match(r.stderr, /GX5/, "dropped warning names GX5");
+    const p5 = JSON.parse(r.stdout).find((g) => g.gate === "P5");
+    assert.deepEqual(p5.openRows, ["PQ3", "ZZ9"], "missing row is counted open, never hidden");
+    assert.match(r.stderr, /neither the live board nor the archive/, "warning names the unresolved rows");
+    assert.match(r.stderr, /ZZ9/, "warning names ZZ9");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a dropped row the live board reopens is counted, not hidden", () => {
+  const dir = join(tmpdir(), `finish-reopen-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const f = join(dir, "FINISH-RICH.md");
+    const s = join(dir, "SPRINT.md");
+    const empty = join(dir, "empty-archive");
+    mkdirSync(empty, { recursive: true });
+    writeFileSync(f, FINISH_MD);
+    writeFileSync(s, `${SPRINT_MD}- [ ] GX5 render: gtao reopened by a new verdict.\n`);
+    const r = spawnSync(process.execPath, [FINISH, "--finish", f, "--sprint", s, "--archive", empty, "--json"], {
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 0, `finish.mjs failed: ${r.stderr}${r.stdout}`);
+    // A4 names GX5 through its fallback set; the open board row keeps it.
+    const a4 = JSON.parse(r.stdout).find((g) => g.gate === "A4");
+    assert.ok(a4.openRows.includes("GX5"), "reopened GX5 is open, not filtered");
+    assert.match(r.stderr, /dropped rows the live board reopened/, "reopened drop warns");
+    assert.match(r.stderr, /GX5/, "reopened drop names GX5");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Live-tree checks: the scoreboard must agree with the board shards, the
+// archive (docs/archive plus docs/SPRINT-ARCHIVE.md) and FINISH-RICH as they
+// stand in this repo. They assert invariants, not counts, so a normal board
+// edit does not break them, but a stale row does.
+function liveBoard() {
+  return ticksOf(parseBoard(loadBoardText().replace(/\r\n/g, "\n")).tasks);
+}
+
+function liveScoreboard() {
+  const r = spawnSync(process.execPath, [FINISH, "--json"], { cwd: REPO, encoding: "utf8" });
+  assert.equal(r.status, 0, `finish.mjs failed on the live tree: ${r.stderr}`);
+  return { rows: JSON.parse(r.stdout), stderr: r.stderr };
+}
+
+test("live tree: the scoreboard prints no warning", () => {
+  const { stderr } = liveScoreboard();
+  assert.equal(stderr, "", `unexpected warning on the live tree: ${stderr}`);
+});
+
+test("live tree: every gate row is on the live board or in the archive", () => {
+  const { rows } = liveScoreboard();
+  const live = liveBoard();
+  const archive = ticksFromArchive(join(REPO, "docs", "archive"));
+  for (const g of rows) {
+    for (const r of g.rows) {
+      assert.ok(live.has(r) || archive.get(r), `${g.gate} row ${r} is on neither the board nor the archive`);
+    }
+  }
+});
+
+test("live tree: a row the live board ticks never prints open", () => {
+  const { rows } = liveScoreboard();
+  const live = liveBoard();
+  for (const g of rows) {
+    for (const r of g.openRows) {
+      assert.notEqual(live.get(r), true, `${g.gate} prints ${r} open but the board ticks it`);
+    }
+  }
+});
+
+test("live tree: every ARCHIVE_TICKED_ROWS member has an archive tick and is not open on the board", () => {
+  const live = liveBoard();
+  const archive = ticksFromArchive(join(REPO, "docs", "archive"));
+  for (const id of ARCHIVE_TICKED_ROWS) {
+    assert.ok(archive.get(id), `${id} is in ARCHIVE_TICKED_ROWS but no archive tick names it`);
+    assert.notEqual(live.get(id), false, `${id} is in ARCHIVE_TICKED_ROWS but open on the live board`);
+  }
+});
+
+test("live tree: DROPPED_ROWS never print open while the board leaves them unreopened", () => {
+  const { rows } = liveScoreboard();
+  const live = liveBoard();
+  for (const id of DROPPED_ROWS) {
+    assert.notEqual(live.get(id), false, `${id} is open on the live board; update DROPPED_ROWS`);
+    for (const g of rows) assert.ok(!g.openRows.includes(id), `${g.gate} prints dropped ${id} open`);
+  }
+});
+
+test("live tree: each P fallback set mirrors its Proven by column", () => {
+  const md = readFileSync(join(REPO, "docs", "FINISH-RICH.md"), "utf8").replace(/\r\n/g, "\n");
+  const provenBy = parseProvenBy(md);
+  for (const gate of GATES.filter((g) => g.startsWith("P"))) {
+    const proven = provenBy.has(gate) ? expandIds(provenBy.get(gate)) : [];
+    assert.deepEqual(
+      [...(FALLBACK_ROWS[gate] ?? [])].sort(),
+      [...proven].sort(),
+      `${gate} FALLBACK_ROWS differ from its Proven by column`,
+    );
   }
 });
 

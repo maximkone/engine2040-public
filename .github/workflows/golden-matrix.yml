@@ -1,0 +1,352 @@
+name: golden-matrix
+
+# Finish-line gate G6 "same hash" (board HS2, WEB1): the golden tape (seed 2040, 600 ticks) and the
+# BX28 cut corpus must give the same digests on every architecture. Each runner records the tape
+# with `engine2040 --record` and its corpus rows with `matrix_line`, uploads both, and the last job
+# runs tools/golden-matrix.mjs over all of them: equal, or the first divergent tick (tape) or case
+# block (corpus) named with its likely cause. Three rows are native (x86-64 Linux, x86-64 Windows,
+# aarch64 Linux); two are wasm32-wasip1 run under wasmtime, plain and with simd128 on
+# (wasm32-wasip1-simd128).
+# WEB3 adds the Rapier claim: a ragdoll fall (`ragdoll_line`, 300 ticks, a digest of every body
+# transform per tick) is recorded on the same five machines and compared with `--ragdoll`, which
+# names the first tick and body that differ; and the lib tests of engine-physics (feature rapier)
+# run natively and as wasm32-wasip1 under wasmtime, where the same tests must pass.
+# Start it from the Actions tab (workflow_dispatch) or by pushing a throwaway branch named
+# golden-matrix-* of the public mirror. The private dev repo never runs it.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["golden-matrix-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: golden-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_CACHE_SIZE: "5G"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  record:
+    # One row per architecture: x86-64 Linux, x86-64 Windows, aarch64 Linux. `host` is the label
+    # matrix_line must print (std::env::consts OS-ARCH): a runner that is not what its label claims
+    # fails here instead of filling a matrix slot with the wrong machine.
+    if: github.repository == 'maximkone/engine2040-public'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            host: linux-x86_64
+          - os: windows-latest
+            host: windows-x86_64
+          - os: ubuntu-24.04-arm
+            host: linux-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: golden-matrix
+      # Release is what ships, and what the golden hash is proven in elsewhere (ci.yml release-proof).
+      - name: build the tape recorder and the row printer
+        shell: bash
+        run: cargo build --locked --release -p engine2040 -p engine-proof
+      - name: record the golden tape
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir out
+          cargo run -p engine2040 --locked --release --quiet -- --record out/golden.e2040 --verify | tee out/golden.log
+      - name: record the corpus rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p engine-proof --bin matrix_line --locked --release --quiet > out/matrix-row.txt
+          cat out/matrix-row.txt
+          got="$(head -n 1 out/matrix-row.txt | cut -d' ' -f1)"
+          test "$got" = "${{ matrix.host }}" || { echo "this runner is $got, the matrix slot says ${{ matrix.host }}"; exit 1; }
+      # WEB3: one fixed fall of a Rapier ragdoll, a digest of every body transform per tick.
+      - name: record the ragdoll rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p engine-proof --features ragdoll --bin ragdoll_line --locked --release --quiet > out/ragdoll-row.txt
+          head -n 1 out/ragdoll-row.txt
+          got="$(head -n 1 out/ragdoll-row.txt | cut -d' ' -f1)"
+          test "$got" = "${{ matrix.host }}" || { echo "this runner is $got, the matrix slot says ${{ matrix.host }}"; exit 1; }
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: golden-${{ matrix.host }}
+          path: out/
+          if-no-files-found: error
+
+  record-wasm:
+    # The fourth and fifth recorders: the same sources built for wasm32-wasip1 (32-bit usize, no threads,
+    # software libm) and run under wasmtime, a WebAssembly runtime with no browser around it. The tape
+    # and the corpus rows it writes are compared with the three native rows like any other machine's.
+    # Two legs: the plain build (no SIMD) and wasm32-wasip1-simd128, the same build with
+    # `-C target-feature=+simd128` (wasmtime has SIMD on by default), where the `wide` crate under
+    # Rapier takes its wasm SIMD paths. Relaxed SIMD stays off: its fused multiply-add may round once or
+    # twice depending on the engine. Each leg has its own cache key, so the plain build is not redone.
+    if: github.repository == 'maximkone/engine2040-public'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: wasm32-wasip1
+            rustflags: ""
+            cache: golden-matrix-wasi
+          - label: wasm32-wasip1-simd128
+            rustflags: "-C target-feature=+simd128"
+            cache: golden-matrix-wasi-simd128
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WASMTIME_VERSION: v49.0.2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasi target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-wasip1
+          rustup show active-toolchain
+      # Only the SIMD leg sets RUSTFLAGS; the plain leg's environment stays what it was. With --target
+      # given, cargo applies RUSTFLAGS to the wasm artifacts and not to build scripts or proc macros.
+      - name: build flags for this leg
+        if: matrix.rustflags != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
+          # The flag must reach the compiler: simd128 has to show up in the target's cfg.
+          rustc --print cfg --target wasm32-wasip1 ${{ matrix.rustflags }} | grep -x 'target_feature="simd128"'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.cache }}
+      - name: install wasmtime ${{ env.WASMTIME_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="wasmtime-${WASMTIME_VERSION}-x86_64-linux"
+          curl -fsSL --retry 3 "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${dir}.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/$dir/wasmtime" --version
+      - name: build the tape recorder and the row printer for wasm32-wasip1
+        shell: bash
+        run: cargo build --locked --release --target wasm32-wasip1 -p engine2040 -p engine-proof
+      # `--dir .` maps the working directory into the guest: the recorder writes out/golden.e2040 through it.
+      - name: record the golden tape
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir out
+          wasmtime run --dir . target/wasm32-wasip1/release/engine2040.wasm --record out/golden.e2040 --verify | tee out/golden.log
+      - name: record the corpus rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          wasmtime run --dir . target/wasm32-wasip1/release/matrix_line.wasm > out/matrix-row.txt
+          cat out/matrix-row.txt
+          got="$(head -n 1 out/matrix-row.txt | cut -d' ' -f1)"
+          test "$got" = "wasi-wasm32" || { echo "this runner is $got, the matrix slot says wasi-wasm32"; exit 1; }
+      # WEB3: the ragdoll fall, built apart so its Rapier features stay out of the two builds above.
+      - name: record the ragdoll rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target wasm32-wasip1 -p engine-proof --features ragdoll --bin ragdoll_line
+          wasmtime run --dir . target/wasm32-wasip1/release/ragdoll_line.wasm > out/ragdoll-row.txt
+          head -n 1 out/ragdoll-row.txt
+          got="$(head -n 1 out/ragdoll-row.txt | cut -d' ' -f1)"
+          test "$got" = "wasi-wasm32" || { echo "this runner is $got, the matrix slot says wasi-wasm32"; exit 1; }
+      # Size of each wasm file, and how many SIMD instructions the build really holds (wabt's
+      # wasm-objdump): a SIMD leg that holds none proves nothing about SIMD. The count is a note, not a gate.
+      - name: wasm sizes and SIMD instruction counts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          sudo apt-get update -qq > /dev/null 2>&1
+          sudo apt-get install -y -qq wabt > /dev/null 2>&1
+          : > out/wasm-sizes.txt
+          for f in engine2040 matrix_line ragdoll_line; do
+            p="target/wasm32-wasip1/release/$f.wasm"
+            if [ ! -f "$p" ]; then echo "${{ matrix.label }} $f.wasm missing" >> out/wasm-sizes.txt; continue; fi
+            n=na
+            if command -v wasm-objdump > /dev/null && wasm-objdump -d "$p" > "$RUNNER_TEMP/$f.dis" 2> /dev/null; then
+              n="$(grep -cE '(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.' "$RUNNER_TEMP/$f.dis")"
+            fi
+            echo "${{ matrix.label }} $f.wasm bytes=$(stat -c %s "$p") simd_instructions=$n" >> out/wasm-sizes.txt
+          done
+          cat out/wasm-sizes.txt
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: golden-${{ matrix.label }}
+          path: out/
+          if-no-files-found: error
+
+  physics-tests:
+    # WEB3: the lib tests of engine-physics with Rapier on, once natively and once as wasm32-wasip1 under
+    # wasmtime. The legs never fail the job on a red test: the compare job reads both logs and names the
+    # tests that differ.
+    if: github.repository == 'maximkone/engine2040-public'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            target: ""
+          - label: wasm32-wasip1
+            target: wasm32-wasip1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WASMTIME_VERSION: v49.0.2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          if [ -n "${{ matrix.target }}" ]; then rustup target add "${{ matrix.target }}"; fi
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: golden-matrix-physics-${{ matrix.label }}
+      - name: install wasmtime ${{ env.WASMTIME_VERSION }}
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="wasmtime-${WASMTIME_VERSION}-x86_64-linux"
+          curl -fsSL --retry 3 "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${dir}.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/$dir/wasmtime" --version
+      - name: cargo test --lib, native
+        if: matrix.target == ''
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          cargo test --locked -p engine-physics --features rapier --lib 2>&1 | tee out/test.log
+          echo "${PIPESTATUS[0]}" > out/exit-code.txt
+      # libtest has no threads on wasi, so one test thread; `--dir` hands the guest the working directory and /tmp.
+      - name: cargo test --lib, wasm32-wasip1 under wasmtime
+        if: matrix.target != ''
+        shell: bash
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: "wasmtime run --dir . --dir /tmp::/tmp"
+        run: |
+          set +e
+          mkdir -p out
+          cargo test --locked --target wasm32-wasip1 -p engine-physics --features rapier --lib -- --test-threads=1 2>&1 | tee out/test.log
+          echo "${PIPESTATUS[0]}" > out/exit-code.txt
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: physics-tests-${{ matrix.label }}
+          path: out/
+          if-no-files-found: error
+
+  compare:
+    # Runs even when a recorder failed: a missing artifact then fails this job by name.
+    needs: [record, record-wasm, physics-tests]
+    if: ${{ !cancelled() && github.repository == 'maximkone/engine2040-public' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: golden-*
+          path: matrix
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: physics-tests-*
+          path: physics
+      - name: compare every architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for host in linux-x86_64 windows-x86_64 linux-aarch64 wasm32-wasip1 wasm32-wasip1-simd128; do
+            for file in golden.e2040 matrix-row.txt ragdoll-row.txt; do
+              if [ ! -f "matrix/golden-$host/$file" ]; then
+                echo "MISSING matrix/golden-$host/$file: that runner recorded nothing, so the matrix is incomplete"
+                missing=1
+              fi
+            done
+          done
+          test "$missing" = 0
+          m=matrix
+          # The Linux x86-64 row is the base every other row is compared with. Exit 1 = a divergence
+          # (the verdict names the tick, the block, or the tick and body); the verdict is shown and kept
+          # before the step fails.
+          status=0
+          node tools/golden-matrix.mjs \
+            $m/golden-linux-x86_64/golden.e2040 $m/golden-windows-x86_64/golden.e2040 $m/golden-linux-aarch64/golden.e2040 $m/golden-wasm32-wasip1/golden.e2040 $m/golden-wasm32-wasip1-simd128/golden.e2040 \
+            --rows $m/golden-linux-x86_64/matrix-row.txt $m/golden-windows-x86_64/matrix-row.txt $m/golden-linux-aarch64/matrix-row.txt $m/golden-wasm32-wasip1/matrix-row.txt $m/golden-wasm32-wasip1-simd128/matrix-row.txt \
+            --ragdoll $m/golden-linux-x86_64/ragdoll-row.txt $m/golden-windows-x86_64/ragdoll-row.txt $m/golden-linux-aarch64/ragdoll-row.txt $m/golden-wasm32-wasip1/ragdoll-row.txt $m/golden-wasm32-wasip1-simd128/ragdoll-row.txt \
+            > verdict.txt || status=$?
+          # The physics lib tests, native against wasm32-wasip1: the same tests must pass, by name.
+          p=physics/physics-tests
+          if [ -f "$p-linux-x86_64/test.log" ] && [ -f "$p-wasm32-wasip1/test.log" ]; then
+            passed() { sed -nE 's/^test (.+) \.\.\. ok$/\1/p' "$1" | sort; }
+            passed "$p-linux-x86_64/test.log" > native-tests.txt
+            passed "$p-wasm32-wasip1/test.log" > wasm-tests.txt
+            nc="$(wc -l < native-tests.txt)"
+            wc_="$(wc -l < wasm-tests.txt)"
+            native_only="$(comm -23 native-tests.txt wasm-tests.txt)"
+            wasm_only="$(comm -13 native-tests.txt wasm-tests.txt)"
+            wasm_failed="$(grep -E '^test .* \.\.\. FAILED$' "$p-wasm32-wasip1/test.log" || true)"
+            {
+              echo "golden-matrix: physics lib tests (engine-physics, feature rapier)"
+              echo "linux-x86_64 $nc passed (cargo exit $(cat "$p-linux-x86_64/exit-code.txt"))"
+              echo "wasm32-wasip1 $wc_ passed (cargo exit $(cat "$p-wasm32-wasip1/exit-code.txt"))"
+              if [ -n "$native_only" ]; then echo "passing only natively:"; echo "$native_only" | sed 's/^/  /'; fi
+              if [ -n "$wasm_only" ]; then echo "passing only on wasm:"; echo "$wasm_only" | sed 's/^/  /'; fi
+              if [ -n "$wasm_failed" ]; then echo "failing on wasm:"; echo "$wasm_failed" | sed 's/^/  /'; fi
+              if [ "$nc" -gt 0 ] && [ "$nc" = "$wc_" ] && [ -z "$native_only$wasm_only" ] && [ "$(cat "$p-linux-x86_64/exit-code.txt")" = 0 ] && [ "$(cat "$p-wasm32-wasip1/exit-code.txt")" = 0 ]; then
+                echo "PHYSICS RESULT PASS"
+              else
+                echo "PHYSICS RESULT FAIL"
+              fi
+            } >> verdict.txt
+          else
+            echo "MISSING $p-linux-x86_64/test.log or $p-wasm32-wasip1/test.log: a physics leg recorded nothing" >> verdict.txt
+          fi
+          # Size of each wasm file in both wasm rows, and the SIMD instructions each build holds (a note, not a gate).
+          {
+            echo "wasm files, release build (bytes, SIMD instructions in the disassembly)"
+            for host in wasm32-wasip1 wasm32-wasip1-simd128; do
+              if [ -f "matrix/golden-$host/wasm-sizes.txt" ]; then cat "matrix/golden-$host/wasm-sizes.txt"; else echo "$host: no wasm-sizes.txt in its artifact"; fi
+            done
+          } >> verdict.txt
+          if grep -qE '^PHYSICS RESULT FAIL$|^MISSING ' verdict.txt; then status=1; fi
+          cat verdict.txt
+          { echo '```'; cat verdict.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: verdict-golden-matrix
+          path: verdict.txt
+          if-no-files-found: ignore

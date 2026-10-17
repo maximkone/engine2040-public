@@ -11,7 +11,7 @@ use crate::{decals, gtao, ibl, material_layer, particles_gpu, sky};
 /// the target exists and stays clear.
 pub(crate) const ID_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 /// Clear value for the id target: no draw claims this texel.
-pub(crate) const ID_CLEAR: u32 = u32::MAX;
+pub(crate) const ID_CLEAR: u32 = crate::pass_truth::live_gate::NO_DRAW_ID;
 
 /// Clear bytes for the id target: `width * height` copies of
 /// [`ID_CLEAR`] in little-endian row-major order. Returns empty on
@@ -100,11 +100,14 @@ pub struct FrameReceipt {
     pub fog_submit_us: u64,
     /// GTAO passes recorded after the forward pass from this
     /// frame's depth feed (2 live: half-res plus bilateral upsample;
-    /// 0 held, off or over-budget).
+    /// 0 held, off or over-budget). The blocking probe tranche and the
+    /// stale reuse count here; the live frame's device pass (LF3) reports
+    /// its time in `gtao_submit_us` alone, so a live frame reads 0 passes.
     pub gtao_passes: u32,
     /// GTAO validation errors over both passes; green is 0.
     pub gtao_validation_errors: u32,
-    /// GTAO submit wall time in us (evidence vs the 0.8 ms bar).
+    /// GTAO submit wall time in us (evidence vs the 0.8 ms bar). On a live
+    /// frame: the device time of the newest resolved GTAO pass.
     pub gtao_submit_us: u64,
     /// Reporting seam: per-pass wall-clock evidence in us.
     /// The look tranche (sky, layers, particles, decals) plus the chart
@@ -290,6 +293,24 @@ pub struct FrameOutput {
     pub receipt: FrameReceipt,
 }
 
+/// Pixels of one window-path frame read back for the pass-truth gate: the
+/// LDR twin as the blit wrote it plus the draw id of every pixel. A blocking
+/// readback by design (a capture frame in the wait tally), never on the live
+/// path. Evidence only, never hashed.
+#[derive(Debug)]
+pub struct LivePixels {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// RGBA8 row-major, `width * height * 4` bytes.
+    pub rgba: Vec<u8>,
+    /// Draw id per pixel, row-major; `NO_DRAW_ID` where no draw covers.
+    pub ids: Vec<u32>,
+    /// The receipt of the frame these pixels came from.
+    pub receipt: FrameReceipt,
+}
+
 pub(crate) struct GpuMesh {
     /// Interleaved vertex buffer (`COPY_DST`: a dynamic mesh rewrites it
     /// in place every frame instead of making a new one).
@@ -299,6 +320,10 @@ pub(crate) struct GpuMesh {
     pub(crate) count: u32,
     /// Vertex count the buffer holds (fixed for the buffer's life).
     pub(crate) vertices: u32,
+    /// CPU copy of the triangle list the index buffer holds: an in-place
+    /// vertex refresh recomputes the tangents from it. Empty for a skinned
+    /// mesh, which never refreshes in place.
+    pub(crate) indices: Vec<u32>,
 }
 
 pub(crate) struct GpuTexture {
@@ -325,13 +350,19 @@ pub(crate) struct Targets {
     pub(crate) fog_texture: wgpu::Texture,
     /// RL9 contact-AO texture the blit multiplies (R32 float).
     pub(crate) ao_texture: wgpu::Texture,
-    /// Draw-id attachment (`R32Uint`): cleared to [`ID_CLEAR`], stays
-    /// clear until the shader slice writes it.
+    /// Live GTAO resources over this frame size (`None` when the kernel
+    /// cannot size the frame): the half-res buffer, the uniform and the two
+    /// bind groups over this target's depth and `ao_texture`.
+    pub(crate) gtao: Option<super::gtao_live::GtaoSized>,
+    /// Draw-id attachment (`R32Uint`): cleared to [`ID_CLEAR`] at target
+    /// build; the forward pass loads it and writes each covered pixel's draw
+    /// id. The pass-truth gate reads it back for its sky and geometry
+    /// regions.
     pub(crate) id_texture: wgpu::Texture,
-    /// View over `id_texture` for the next slice's forward attachment.
+    /// View over `id_texture` for the forward and sky attachments.
     pub(crate) id_view: wgpu::TextureView,
-    /// CPU image of the id clear (`ID_CLEAR` bytes), reused to refresh
-    /// the target per frame without a float-clear round trip.
+    /// CPU image of the id clear (`ID_CLEAR` bytes), written back into the
+    /// target before a pass-truth capture so its ids describe one frame.
     pub(crate) id_clear: Vec<u8>,
     /// RL9 fog composite color (sRGB) plus frame size for texel lookup.
     pub(crate) fog_col_buf: wgpu::Buffer,
@@ -346,12 +377,18 @@ pub(crate) struct Targets {
 /// path. `samples` comes from the plan (4 on), color is HDR, depth is DEPTH.
 pub(crate) struct MsaaTargets {
     /// Samples per pixel from the plan (4 when on).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the plan's sample count; only tests read it")
+    )]
     pub(crate) samples: u32,
     /// Multisampled HDR color (RENDER_ATTACHMENT only).
+    #[expect(dead_code, reason = "owns the texture behind `color_view`")]
     pub(crate) color: wgpu::Texture,
     /// View over `color` for the resolve slice.
     pub(crate) color_view: wgpu::TextureView,
     /// Multisampled depth (RENDER_ATTACHMENT only).
+    #[expect(dead_code, reason = "owns the texture behind `depth_view`")]
     pub(crate) depth: wgpu::Texture,
     /// View over `depth` for the resolve slice.
     pub(crate) depth_view: wgpu::TextureView,

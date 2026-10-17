@@ -18,6 +18,7 @@
 use std::path::Path;
 
 use engine_assets::bc::srgb_byte_to_linear;
+use engine_assets::{AssetSource, FsSource};
 use engine_render::draw::crowd_seats::{
     crowd_palette_index, crowd_palette_rgba, crowd_seat_pos, crowd_total, CROWD_BODY_D_M,
     CROWD_BODY_H_M, CROWD_BODY_W_M, CROWD_HEAD_M, CROWD_PALETTE_LEN, CROWD_ROWS_PER_SECTOR,
@@ -415,8 +416,13 @@ fn crowd_tint(slot: usize) -> [f32; 3] {
     ]
 }
 
-fn texture(dir: &Path, file: &str, id: u64) -> Result<(TextureKey, TextureUpload), RingError> {
-    let bytes = std::fs::read(dir.join(file))
+fn texture(
+    source: &dyn AssetSource,
+    file: &str,
+    id: u64,
+) -> Result<(TextureKey, TextureUpload), RingError> {
+    let bytes = source
+        .read(&format!("textures/{file}"))
         .map_err(|err| RingError::Texture(format!("{file}: {err}")))?;
     let upload = TextureUpload::from_encoded(&bytes)
         .map_err(|err| RingError::Texture(format!("{file}: {err}")))?;
@@ -430,11 +436,16 @@ impl FightRing {
     /// Build the ring for a match clamped at `half_extent_m`, with albedo
     /// maps from `arena_dir/textures`. Loud on a bad extent or texture.
     pub fn load(arena_dir: &Path, half_extent_m: f32) -> Result<Self, RingError> {
+        Self::load_from(&FsSource::new(arena_dir), half_extent_m)
+    }
+
+    /// [`FightRing::load`] over any content source: the albedo maps are read
+    /// as `textures/<name>`, so a browser build hands in a fetched bundle.
+    pub fn load_from(source: &dyn AssetSource, half_extent_m: f32) -> Result<Self, RingError> {
         if !(1.0..=200.0).contains(&half_extent_m) {
             return Err(RingError::Extent);
         }
         let wall_m = half_extent_m + WALL_GAP_M;
-        let dir = arena_dir.join("textures");
         let mut crowd = Vec::with_capacity(CROWD_PALETTE_LEN);
         for slot in 0..CROWD_PALETTE_LEN {
             crowd.push(crowd_mesh(slot, wall_m)?);
@@ -446,8 +457,8 @@ impl FightRing {
             floor: floor_mesh(wall_m)?,
             tiers: tiers_mesh(wall_m)?,
             crowd,
-            sand: texture(&dir, "sand_albedo_2k.jpg", RING_SAND_TEX_ID)?,
-            stone: texture(&dir, "stone_albedo_2k.jpg", RING_STONE_TEX_ID)?,
+            sand: texture(source, "sand_albedo_2k.jpg", RING_SAND_TEX_ID)?,
+            stone: texture(source, "stone_albedo_2k.jpg", RING_STONE_TEX_ID)?,
             wall_m,
         })
     }
@@ -780,5 +791,37 @@ mod tests {
         assert!(ring.sand.1.width >= 1024 && ring.stone.1.width >= 1024);
         assert!(FightRing::load(&arena, f32::NAN).is_err());
         assert!(FightRing::load(&arena.join("missing"), 20.0).is_err());
+    }
+
+    // The ring loads the same from a packed bundle as from the directory, and
+    // a bundle without a map fails with that map's name.
+    #[test]
+    fn ring_from_a_bundle_matches_the_directory_and_names_a_missing_map() {
+        use engine_assets::asset_source::{pack_to, PackRules};
+        let arena =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/arena");
+        let fs = FsSource::new(&arena);
+        let bundle_of = |rules: &PackRules| {
+            let mut bytes = Vec::new();
+            pack_to(&fs, rules, &mut bytes).expect("textures pack");
+            engine_assets::BundleSource::open(bytes).expect("bundle opens")
+        };
+        let sand = "textures/sand_albedo_2k.jpg";
+        let both = bundle_of(
+            &PackRules::new()
+                .include(sand)
+                .include("textures/stone_albedo_2k.jpg"),
+        );
+        let from_dir = FightRing::load(&arena, 20.0).expect("ring loads");
+        let from_bundle = FightRing::load_from(&both, 20.0).expect("ring loads from the bundle");
+        assert_eq!(from_bundle.sand, from_dir.sand);
+        assert_eq!(from_bundle.stone, from_dir.stone);
+        assert_eq!(from_bundle.wall_m, from_dir.wall_m);
+        let sand_only = bundle_of(&PackRules::new().include(sand));
+        let err = FightRing::load_from(&sand_only, 20.0).err();
+        assert!(
+            matches!(&err, Some(RingError::Texture(text)) if text.contains("stone_albedo_2k.jpg")),
+            "a missing map fails by name, got {err:?}"
+        );
     }
 }

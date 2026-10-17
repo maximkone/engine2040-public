@@ -36,6 +36,10 @@ pub mod balance_verdict;
 /// Balance harness: falsifiable spacing experiments over
 /// the arena fork path for balance tuning. Std-only.
 pub mod bench;
+/// Break look: authority break events painted as debris through the float physical layer,
+/// the intact piece hidden on the break tick. Presentation only, never hashed. App leg only.
+#[cfg(feature = "app")]
+pub mod break_look;
 /// Arena camera director: lock-on, tick-decay trauma shake,
 /// pure framing fn, presentation only. Std-only.
 pub mod camera;
@@ -881,8 +885,8 @@ impl App {
     /// director's own hold floor.
     ///
     /// Caller: `crates/game/src/bin/arena_capture.rs` (`cut_log_audit_line`
-    /// gates the capture seal on this report). Presentation only, never
-    /// hashed. Budget: one pass over the cut log, on the seal path.
+    /// turns this report into the seal's receipt line). Presentation only,
+    /// never hashed. Budget: one pass over the cut log, on the seal path.
     #[must_use]
     pub fn director_audit(&self) -> crate::director::AuditReport {
         self.cut_director.audit()

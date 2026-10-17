@@ -1513,6 +1513,126 @@ mod live_frame_tests {
         );
     }
 
+    /// Copy a resident mesh's 48-byte-per-vertex buffer to the CPU. Test
+    /// only: this waits on the GPU.
+    fn read_vertex_bytes(presenter: &Presenter, key: &MeshKey) -> Vec<u8> {
+        let mesh = presenter.meshes.get(key).expect("mesh is resident");
+        let size = u64::from(mesh.vertices) * 48;
+        let buffer = presenter.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test-vertex-readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = presenter
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&mesh.vertex, 0, &buffer, 0, size);
+        presenter.queue.submit(Some(enc.finish()));
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| {
+            r.expect("test readback maps");
+        });
+        presenter
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("test readback polls");
+        let bytes = buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped")
+            .to_vec();
+        buffer.unmap();
+        bytes
+    }
+
+    /// The cube turned `angle` about +Y, then moved `dx` along +X: new
+    /// positions and normals over the same uvs and triangles.
+    fn turned_cube(angle: f32, dx: f32) -> crate::v1::MeshData {
+        let (s, c) = angle.sin_cos();
+        let mut cube = crate::v1::cube();
+        for p in &mut cube.positions {
+            *p = [c * p[0] + s * p[2] + dx, p[1], -s * p[0] + c * p[2]];
+        }
+        for n in &mut cube.normals {
+            *n = [c * n[0] + s * n[2], n[1], -s * n[0] + c * n[2]];
+        }
+        cube
+    }
+
+    #[test]
+    fn refresh_leaves_the_bytes_a_fresh_upload_would() {
+        let Some(mut presenter) = init_or_skip("refresh_leaves_the_bytes_a_fresh_upload_would")
+        else {
+            return;
+        };
+        let key = cube_key();
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        let before = read_vertex_bytes(&presenter, &key);
+        assert_eq!(
+            before,
+            crate::v1::cube().vertex_bytes(),
+            "the upload is the 48-byte vertex image"
+        );
+        // A turn changes the tangents, not just the positions, so a refresh
+        // that leaves them stale or packs a shorter vertex cannot match.
+        let turned = turned_cube(0.6, 0.4);
+        let wrote = presenter
+            .refresh_mesh_vertices(key, &turned.positions, &turned.normals, &turned.uvs)
+            .expect("refresh succeeds");
+        assert!(wrote, "a resident mesh is rewritten in place");
+        let fresh = crate::v1::upload_mesh(
+            &turned.positions,
+            &turned.normals,
+            &turned.uvs,
+            &turned.indices,
+        )
+        .expect("turned cube is valid")
+        .vertex_bytes();
+        let after = read_vertex_bytes(&presenter, &key);
+        assert_eq!(after.len(), 24 * 48, "the buffer keeps its size");
+        assert_ne!(after, before, "the refresh moved the vertices");
+        let tangent_bytes = |bytes: &[u8]| -> Vec<u8> {
+            bytes
+                .chunks_exact(48)
+                .flat_map(|vertex| vertex[32..48].to_vec())
+                .collect()
+        };
+        assert_ne!(
+            tangent_bytes(&after),
+            tangent_bytes(&before),
+            "the turn moved the tangents"
+        );
+        assert_eq!(after, fresh, "refresh equals a fresh upload, byte for byte");
+    }
+
+    #[test]
+    fn refresh_refuses_a_skinned_mesh_and_writes_nothing() {
+        let Some(mut presenter) = init_or_skip("refresh_refuses_a_skinned_mesh_and_writes_nothing")
+        else {
+            return;
+        };
+        let mesh = crate::v1::cube();
+        let mut pipe = crate::v1_skin::SkinPipeline::new();
+        pipe.upload_skeleton(1).expect("one joint");
+        let rows = mesh.positions.len();
+        let skin = pipe
+            .upload_weights(&vec![[0u16; 4]; rows], &vec![[1.0, 0.0, 0.0, 0.0]; rows])
+            .expect("rows are valid");
+        let key = cube_key();
+        presenter
+            .upload_skinned_mesh(key, &mesh, &skin, 0)
+            .expect("skinned cube uploads");
+        let moved = shifted_cube(1.5);
+        let refused =
+            presenter.refresh_mesh_vertices(key, &moved.positions, &moved.normals, &moved.uvs);
+        assert!(
+            matches!(refused, Err(PresentError::InvalidMesh(_))),
+            "a 64-byte vertex buffer is not refreshed with 48-byte vertices: {refused:?}"
+        );
+    }
+
     #[test]
     fn steady_live_frames_create_no_buffers_or_bind_groups() {
         let Some(mut presenter) =

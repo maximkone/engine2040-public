@@ -5,14 +5,12 @@ description: Use when scoring engine2040 Rust quality as a reviewer - packet-gat
 
 # Engine rust quality (from judge)
 
-The orchestrator hands you the packet-gate RESULT and WARN lines and the
-crate's `rust-quality` line; the judge reruns both targeted (never a
-full-workspace suite). A `rust-*` FAIL or a ratchet regression is FAIL
+You get the crate's `rust-quality` line; the reviewer reruns it targeted
+(never a full-workspace suite). A `rust-*` FAIL or a ratchet regression is FAIL
 before you read further.
 
 Commands:
 
-- `git diff -- <owned path> | node tools/packet-gate.mjs --patch - --owned <owned path>` must print RESULT PASS.
 - `node tools/rust-quality.mjs --crate <crate>` must print RESULT PASS
   with 0 ratchet regressions.
 

@@ -498,6 +498,7 @@ fn decode_repro(bytes: &[u8]) -> Result<(ArenaConfig, FighterTape), FuzzError> {
         ticks,
         fighters,
         half_extent_m,
+        table_version: 1,
     };
     if config.validate().is_err() {
         return Err(FuzzError::Invalid("invalid arena config"));
@@ -599,6 +600,7 @@ mod tests {
             ticks: 32,
             fighters: 2,
             half_extent_m: 20.0,
+            table_version: 1,
         }
     }
 
@@ -608,6 +610,7 @@ mod tests {
             ticks: ADVERSARIAL_TICKS,
             fighters: ADVERSARIAL_FIGHTERS,
             half_extent_m: 10.0,
+            table_version: 1,
         }
     }
 

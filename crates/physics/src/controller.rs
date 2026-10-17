@@ -348,8 +348,10 @@ impl Controller {
     /// Resolve ONE tick with explicit Rapier `move_shape` params. Horizontal
     /// axes resolve x-then-z; `slide=false` stops dead on a wall, `slide=true`
     /// keeps the tangential part. Autostep needs grounded-before-step plus
-    /// `min_width` tread; snap resolves from [`SnapLength`]; slip reports both
-    /// `slipped` and `sliding_down_slope` from `min_slide_grade`.
+    /// `min_width` tread, and lifts only once the ground probe reaches the
+    /// tread (a step tick always ends grounded on it); snap resolves from
+    /// [`SnapLength`]; slip reports both `slipped` and `sliding_down_slope`
+    /// from `min_slide_grade`.
     pub fn move_and_slide_with(
         &mut self,
         wish_dp: [f32; 2],
@@ -434,8 +436,10 @@ impl Controller {
                         && self.tread_holds(nx, self.pos[2], top, 0, s, min_width, max_step) =>
                 {
                     self.pos[0] = nx;
-                    self.pos[1] = top + half;
-                    stepped = true;
+                    if self.tread_supported(nx, self.pos[2], feet, top, max_step) {
+                        self.pos[1] = top + half;
+                        stepped = true;
+                    }
                 }
                 _ => {
                     if !shape.slide {
@@ -459,8 +463,10 @@ impl Controller {
                         && self.tread_holds(self.pos[0], nz, top, 2, s, min_width, max_step) =>
                 {
                     self.pos[2] = nz;
-                    self.pos[1] = top + half;
-                    stepped = true;
+                    if self.tread_supported(self.pos[0], nz, feet, top, max_step) {
+                        self.pos[1] = top + half;
+                        stepped = true;
+                    }
                 }
                 _ => {
                     if !shape.slide {
@@ -535,6 +541,16 @@ impl Controller {
             Some(g) => (g - top).abs() <= 0.05,
             None => false,
         }
+    }
+
+    /// True when the ground probe under `(x, z)` reaches the step `top`, so
+    /// the vertical pass would keep a capsule lifted onto it grounded. The
+    /// body footprint (full radius) touches a ledge before the probe (half
+    /// radius) does: until then the capsule keeps walking at its height, and
+    /// the lift happens once the tread can carry it.
+    fn tread_supported(&self, x: f32, z: f32, feet: f32, top: f32, max_step: f32) -> bool {
+        self.ground_height(x, z, feet, max_step)
+            .is_some_and(|g| g >= top - EPS)
     }
 
     /// Land, snap down, or clamp against the ceiling from `dy` this tick.
@@ -1229,7 +1245,8 @@ mod tests {
         c.add_static_box([1.0, 0.25, 3.0], [3.0, 0.25, 0.0])
             .expect("step");
         c.move_and_slide([0.0, 0.0], FIXED_DT);
-        let trace = walk(&mut c, [0.15, 0.0], 40);
+        // 30 ticks end at x = 3.5, mid-ledge (it spans x 2..4).
+        let trace = walk(&mut c, [0.15, 0.0], 30);
         assert!(trace.iter().any(|r| r.stepped), "0.5 m face must step");
         let p = c.position();
         assert!(
@@ -1250,6 +1267,100 @@ mod tests {
             "0.6 m face must never step"
         );
         assert!(tall.position()[0] < 2.0, "0.6 m face must block");
+    }
+
+    // Arena-sized capsule (radius 0.4, cylinder 1.0): its footprint touches a
+    // ledge well before its support probe (half the radius) can reach it.
+    const FAT_RADIUS: f32 = 0.4;
+    const FAT_HEIGHT: f32 = 1.0;
+    const FAT_HALF: f32 = FAT_HEIGHT * 0.5 + FAT_RADIUS;
+
+    /// Floor top y=0 plus a ledge `x` in `[4, 5]` with top `ledge_top`,
+    /// optionally preceded by a ramp rising 0 -> `ramp_rise` over `x` in
+    /// `[2, 4]`. The capsule starts on the floor at `x = 1`, settled.
+    fn fat_course(ledge_top: f32, ramp_rise: Option<f32>) -> Controller {
+        let mut c = Controller::spawn([1.0, FAT_HALF, 0.0], FAT_RADIUS, FAT_HEIGHT).expect("spawn");
+        c.add_static_box([10.0, 0.5, 3.0], [0.0, -0.5, 0.0])
+            .expect("floor");
+        if let Some(rise) = ramp_rise {
+            c.add_ramp(2.0, 4.0, 0.0, rise, 3.0, 0.0).expect("ramp");
+        }
+        c.add_static_box([0.5, ledge_top * 0.5, 3.0], [4.5, ledge_top * 0.5, 0.0])
+            .expect("ledge");
+        c.move_and_slide([0.0, 0.0], FIXED_DT);
+        c
+    }
+
+    /// Walk the course at 0.05 m per tick (x = 1 to 4.5): grounded on every
+    /// tick (no hop), at least one step, and the capsule finishes standing
+    /// exactly on the ledge.
+    fn assert_walks_up_without_hop(mut c: Controller, ledge_top: f32) {
+        let trace = walk(&mut c, [0.05, 0.0], 70);
+        for (tick, r) in trace.iter().enumerate() {
+            assert!(r.grounded, "hop: airborne at tick {tick}: {r:?}");
+        }
+        assert!(trace.iter().any(|r| r.stepped), "course must autostep once");
+        let p = c.position();
+        assert!(p[0] > 4.0, "must be over the ledge, x={}", p[0]);
+        assert!(
+            (p[1] - (ledge_top + FAT_HALF)).abs() < 1e-4,
+            "must stand on the ledge, y={}",
+            p[1]
+        );
+    }
+
+    #[test]
+    fn step_up_from_flat_floor_stays_grounded() {
+        // 0.45 m ledge: above the 0.4 m snap, so a step that ends without
+        // ground under the support probe falls and hops.
+        assert_walks_up_without_hop(fat_course(0.45, None), 0.45);
+    }
+
+    #[test]
+    fn step_up_from_ramp_stays_grounded() {
+        // The ramp lifts the feet to 0.63 at first ledge contact; the
+        // 1.1 m top is then 0.47 above them, inside the 0.5 m gate.
+        assert_walks_up_without_hop(fat_course(1.1, Some(0.8)), 1.1);
+    }
+
+    #[test]
+    fn ledge_above_step_height_blocks_fat_capsule() {
+        // 0.55 m from the floor and 0.6 m above the ramp exit: both refuse.
+        for (top, rise) in [(0.55, None), (1.4, Some(0.8))] {
+            let mut c = fat_course(top, rise);
+            let trace = walk(&mut c, [0.05, 0.0], 70);
+            let p = c.position();
+            assert!(
+                p[1] - FAT_HALF < top - STEP_HEIGHT,
+                "ledge {top} must not be climbed, y={}",
+                p[1]
+            );
+            assert!(
+                p[0] <= 4.0 - FAT_RADIUS,
+                "ledge {top} stops the body at the face, x={}",
+                p[0]
+            );
+            assert!(
+                trace.iter().any(|r| r.wall_normal.is_some()),
+                "ledge {top} reports a wall"
+            );
+        }
+    }
+
+    #[test]
+    fn airborne_capsule_is_stopped_by_a_low_ledge() {
+        // Fresh spawn is airborne with its feet 0.2 m up, below the 0.45 m
+        // ledge top: no autostep and no walking into the rim.
+        let mut c =
+            Controller::spawn([2.65, FAT_HALF + 0.2, 0.0], FAT_RADIUS, FAT_HEIGHT).expect("spawn");
+        c.add_static_box([10.0, 0.5, 3.0], [0.0, -0.5, 0.0])
+            .expect("floor");
+        c.add_static_box([0.5, 0.225, 3.0], [3.5, 0.225, 0.0])
+            .expect("ledge");
+        let r = c.move_and_slide([0.03, 0.0], FIXED_DT);
+        assert!(!r.grounded && !r.stepped, "{r:?}");
+        assert!(r.displacement[0].abs() < 1e-6, "airborne is blocked: {r:?}");
+        assert!(r.wall_normal.is_some(), "{r:?}");
     }
 
     #[test]

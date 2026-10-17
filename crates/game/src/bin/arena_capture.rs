@@ -663,8 +663,9 @@ pub(crate) mod capture {
             .collect()
     }
 
-    /// The seal's editorial gate: a clean cut log gives the receipt line, any
-    /// continuity flag is an error that names every count.
+    /// The seal's editorial verdict: a clean cut log gives the receipt line, any
+    /// continuity flag is an error that names every count. The seal prints
+    /// either and files the capture regardless (`seal_capture_cut_log`).
     fn cut_log_audit_line(audit: AuditReport) -> Result<String, WinError> {
         if audit.is_clean() {
             return Ok(format!(
@@ -686,7 +687,7 @@ pub(crate) mod capture {
     /// File one twin capture's cut log and print the editorial receipt. A
     /// flagged log is reported loudly but does not fail the capture: a plain
     /// brawl already audits with jump flags, so refusing would fail normal
-    /// captures (owner decision pending).
+    /// captures.
     fn seal_capture_cut_log(sink: &mut CaptureSink, app: &App) {
         sink.note_director_cuts(app.director_cuts(), app.director_shot());
         match cut_log_audit_line(app.director_audit()) {
@@ -1210,7 +1211,7 @@ pub(crate) mod capture {
                     );
                 }
                 Err(err) => {
-                    assert!(flags > 0, "only a flagged log refuses");
+                    assert!(flags > 0, "only a flagged log is an error");
                     let text = format!("{err:?}");
                     assert!(
                         text.contains(&format!("cut log audit: {flags} flags")),
@@ -1221,10 +1222,10 @@ pub(crate) mod capture {
         }
 
         /// Failure: a cut log whose continuity flags fire (a jump cut plus the
-        /// short hold under it) refuses the seal loudly and names the counts,
-        /// so an editorially broken clip is never filed.
+        /// short hold under it) gives an error that names every count, so the
+        /// seal can print what is wrong with the clip.
         #[test]
-        fn flagged_cut_log_refuses_the_seal() {
+        fn flagged_cut_log_names_every_flag() {
             // A real cold open: the framing changes, so only the second cut is a jump.
             let open = Cut {
                 tick: 0,
@@ -1252,7 +1253,7 @@ pub(crate) mod capture {
             assert!(!audit.is_clean(), "a jump under the hold floor flags");
             assert_eq!(audit.jump_cuts, 1, "same framing and focus is a jump");
             assert_eq!(audit.short_holds, 1, "30 ticks is under the 60 hold");
-            let err = cut_log_audit_line(audit).expect_err("a flagged log refuses");
+            let err = cut_log_audit_line(audit).expect_err("a flagged log is an error");
             let text = format!("{err:?}");
             assert!(text.contains("cut log audit: 2 flags"), "loud: {text}");
             assert!(

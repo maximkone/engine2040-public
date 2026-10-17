@@ -1,0 +1,123 @@
+name: pages
+
+# WEB10: the browser build on a URL the work PC opens (owner 2026-10-17: public is fine). Builds crates/web for
+# wasm32-unknown-unknown exactly like web-build.yml, then deploys dist/web to GitHub Pages from the Actions flow.
+# Runs on every push of the public mirror's main (each snapshot export) and on demand; the private dev repo never
+# runs it. GitHub Pages cannot set COOP/COEP headers, so the page is single-threaded (WEB14 adds a service worker
+# when threads are wanted). The page prints the commit and the golden hash; a wrong MIME for the module is checked
+# here before anything is published.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_CACHE_SIZE: "5G"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-build
+      - name: wasm-bindgen CLI at the version Cargo.lock locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' Cargo.lock)"
+          echo "Cargo.lock locks wasm-bindgen $v"
+          mkdir -p "$HOME/.local/bin"
+          if curl -fsSL --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/wasm-bindgen-$v-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C "$RUNNER_TEMP"; then
+            cp "$RUNNER_TEMP/wasm-bindgen-$v-x86_64-unknown-linux-musl/wasm-bindgen" "$HOME/.local/bin/"
+          else
+            cargo install wasm-bindgen-cli --version "$v" --locked --root "$HOME/.local"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Pinned: the apt package is binaryen 108, whose output the browser rejects (see web-build.yml).
+      - name: wasm-opt (binaryen release)
+        shell: bash
+        env:
+          BINARYEN_TAG: version_133
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_TAG/binaryen-$BINARYEN_TAG-x86_64-linux.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/binaryen-$BINARYEN_TAG/bin/wasm-opt" "$HOME/.local/bin/"
+          wasm-opt --version
+      - name: build dist/web
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/web-build.mjs --commit "${GITHUB_SHA::12}"
+          ls -l dist/web
+          {
+            echo '### dist/web'
+            echo '```json'
+            cat dist/web/build.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: the module is typed application/wasm by a static server (a wrong type is a slow path, not an error)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8099 --bind 127.0.0.1 -d dist/web >/dev/null 2>&1 &
+          server=$!
+          sleep 2
+          type="$(curl -sI http://127.0.0.1:8099/engine_bg.wasm | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
+          kill "$server"
+          echo "engine_bg.wasm is served as: $type"
+          test "$type" = "application/wasm"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist/web
+
+  deploy:
+    needs: build
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+      - name: the published module is typed application/wasm
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="${{ steps.deployment.outputs.page_url }}engine_bg.wasm"
+          for i in 1 2 3 4 5 6; do
+            type="$(curl -sI "$url" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
+            echo "$url -> $type"
+            if [ "$type" = "application/wasm" ]; then exit 0; fi
+            sleep 10
+          done
+          exit 1

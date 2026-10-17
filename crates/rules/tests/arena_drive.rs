@@ -27,6 +27,7 @@ fn config(seed: u64) -> ArenaConfig {
         ticks: 600,
         fighters: 2,
         half_extent_m: 12.0,
+        table_version: 1,
     }
 }
 
@@ -148,6 +149,7 @@ fn approach_tape() -> (ArenaConfig, FighterTape) {
         ticks: 600,
         fighters: 2,
         half_extent_m: 5.0,
+        table_version: 1,
     };
     let spawns = initial_state(2040, 2, 5.0).expect("valid spawn");
     let dx = spawns[1].pos[0] - spawns[0].pos[0];

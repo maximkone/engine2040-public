@@ -1544,8 +1544,9 @@ pub(crate) fn gx1_test_device() -> Option<(
     &'static wgpu::AdapterInfo,
 )> {
     let slot = GX1_DEVICE.get_or_init(|| {
+        crate::test_gpu::hold_gpu_slot();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

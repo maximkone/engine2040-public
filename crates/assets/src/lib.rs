@@ -1,5 +1,9 @@
 //! assets: manifest entry + 7-gate checklist. Refs store id, never path.
 
+/// Content by logical path through a source: files natively, a packed
+/// `.e2bundle` in the browser. Std-only.
+pub mod asset_source;
+pub use asset_source::{AssetSource, BundleSource, FsSource, SourceError};
 pub mod budget;
 pub mod datanode;
 pub use datanode::{parse, DataNodeError, Node};

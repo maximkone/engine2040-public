@@ -2606,15 +2606,16 @@ mod tests {
         // band at this boundary. Mirrors `isPassthrough` in
         // tools/rust-quality.mjs, scoped to this entry's body.
         let src = include_str!("twin_shadow.rs");
-        let prod = src
-            .split("#[cfg(test)]")
-            .next()
-            .expect("test module marker");
+        // Production source is everything above the test module; the
+        // `cfg(test)` oracle consts above the entry make that attribute a
+        // wrong cut point. The entry body ends at the first column-0 brace,
+        // read without its line end so CRLF checkouts close it too.
+        let prod = src.split("mod tests {").next().expect("test module marker");
         let tail = prod
             .split("pub fn twin_shadow_uniform")
             .nth(1)
             .expect("twin uniform entry");
-        let body = tail.split("\n}\n").next().expect("entry body close");
+        let body = tail.split("\n}").next().expect("entry body close");
         assert!(
             body.contains(".min("),
             "twin uniform entry must clamp its band explicitly, got: {body}"

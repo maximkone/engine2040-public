@@ -309,14 +309,9 @@ test("parseBoard open set agrees with the old drift-check.mjs §15 regex", () =>
   );
 });
 
-test("drift-check.mjs reads the board once via the shared parser (no double 460KB read)", () => {
-  const src = readFileSync(join(HERE, "drift-check.mjs"), "utf8");
-  assert.match(src, /from "\.\/board-slice\.mjs"/, "drift-check imports the shared parser");  const reads = src.match(/loadBoardText\(ROOT\)/g) ?? [];
-  assert.equal(reads.length, 1, `expected 1 shared board read, found ${reads.length}`);
-  for (const f of ["finish.mjs", "sprint-loop.mjs"]) {
-    const s = readFileSync(join(HERE, f), "utf8");
-    assert.match(s, /from "\.\/board-slice\.mjs"/, `${f} imports the shared parser`);
-  }
+test("finish.mjs reads the board through the shared parser", () => {
+  const s = readFileSync(join(HERE, "finish.mjs"), "utf8");
+  assert.match(s, /from "\.\/board-slice\.mjs"/, "finish.mjs imports the shared parser");
 });
 
 // Done rows moved to docs/archive/SPRINT-done-*.md: needs: resolution and the ticked count only.

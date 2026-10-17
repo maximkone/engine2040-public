@@ -13,8 +13,83 @@
 //! Errors: only a missing adapter is a skip; any other probe failure stays
 //! the caller's panic.
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, PoisonError};
+
+/// Most tests that hold a GPU device at once. On the dev PC (Intel plus
+/// NVIDIA, DX12 and Vulkan in one process) twelve test threads opening and
+/// closing devices together stall inside the vendor drivers: every thread
+/// waits on a driver lock and the run never ends, CPU-only tests included.
+/// Two at a time finished every full run; twelve stalled most of them.
+pub const GPU_TEST_SLOTS: usize = 2;
+
+/// A counting gate: `take` waits for a free slot, `give` frees one.
+struct Gate {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl Gate {
+    const fn new(slots: usize) -> Self {
+        Self {
+            free: Mutex::new(slots),
+            freed: Condvar::new(),
+        }
+    }
+
+    fn take(&self) {
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        while *free == 0 {
+            free = self
+                .freed
+                .wait(free)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *free -= 1;
+    }
+
+    fn give(&self) {
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        *free += 1;
+        self.freed.notify_one();
+    }
+}
+
+/// The process-wide device gate behind [`hold_gpu_slot`].
+static GATE: Gate = Gate::new(GPU_TEST_SLOTS);
+
+/// One held device slot; dropping it frees the slot for the next test.
+struct HeldSlot;
+
+impl Drop for HeldSlot {
+    fn drop(&mut self) {
+        GATE.give();
+    }
+}
+
+thread_local! {
+    /// The slot this test thread holds. libtest gives each test its own
+    /// thread, so the slot frees when the test thread exits, after the
+    /// test's device has dropped; a panicking test frees it too.
+    static HELD: RefCell<Option<HeldSlot>> = const { RefCell::new(None) };
+}
+
+/// Take a device slot for the rest of this test, waiting while
+/// [`GPU_TEST_SLOTS`] other tests hold one. Call it before the first
+/// `wgpu::Instance::new` of a test. Idempotent per thread, so a test that
+/// opens two devices still holds one slot. Units: none. Determinism: none,
+/// it only orders tests in time.
+pub fn hold_gpu_slot() {
+    HELD.with(|held| {
+        if held.borrow().is_some() {
+            return;
+        }
+        GATE.take();
+        *held.borrow_mut() = Some(HeldSlot);
+    });
+}
 
 /// Environment switch: `1` makes a missing adapter a failure, but only
 /// where the test routes through `require_or_skip`.
@@ -97,6 +172,34 @@ mod tests {
             false,
         );
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn the_gate_makes_a_full_house_wait_until_a_slot_frees() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let gate = Gate::new(1);
+        gate.take();
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                gate.take();
+                tx.send(()).expect("receiver is alive");
+                gate.give();
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_millis(150)).is_err(),
+                "the second taker waits while the only slot is held"
+            );
+            gate.give();
+            assert!(
+                rx.recv_timeout(Duration::from_secs(30)).is_ok(),
+                "the second taker runs once the slot frees"
+            );
+        });
+        // The slot came back: the gate is whole again.
+        gate.take();
+        gate.give();
     }
 
     #[test]

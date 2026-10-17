@@ -353,7 +353,9 @@ mod tests {
         const WGSL: &str = include_str!("../shaders/forward.wgsl");
         let at = WGSL.find("fn fs_sky").expect("fs_sky exists");
         let body = &WGSL[at..];
-        let end = body.find("\n}\n").expect("fs_sky closes");
+        // Column-0 brace without its line end: a CRLF checkout of the
+        // shader closes the entry the same way an LF one does.
+        let end = body.find("\n}").expect("fs_sky closes");
         let sky = &body[..end];
         assert!(sky.contains("sky_on"), "{sky}");
         assert!(sky.contains("sky_view_sample"), "{sky}");

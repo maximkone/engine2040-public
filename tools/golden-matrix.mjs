@@ -1,4 +1,4 @@
-// golden-matrix.mjs - compare input/checkpoint tapes across machines, no cargo.
+// golden-matrix.mjs - compare input/checkpoint tapes, corpus rows and ragdoll rows across machines, no cargo.
 // Reads tapes from `engine2040 --seed <s> --ticks <n> --record <path>`:
 // 8 bytes magic `E2040RP\0`, u16 format (1), u16 fixture (1), u64 seed,
 // u32 ticks, u32 input count, then 16 bytes per input (u32 tick, u32 body,
@@ -142,36 +142,256 @@ export function formatMatrix(entries, results) {
   lines.push(pass ? 'RESULT PASS' : 'RESULT FAIL');
   return lines.join('\n');
 }
-const isMain = import.meta.main;
-if (isMain) {
-  const args = process.argv.slice(2);
-  if (args.length < 2) {
-    process.stderr.write('usage: node tools/golden-matrix.mjs <a.e2040> <b.e2040> [c.e2040 ...]\n');
-    process.exitCode = 2;
-  } else {
-    try {
-      const entries = args.map(function (p) {
-        let buf = null;
-        try {
-          buf = readFileSync(p);
-        } catch (err) {
-          throw new Error('not a tape: cannot read ' + p + ': ' + (err && err.message ? err.message : String(err)));
-        }
-        try {
-          return { name: p, tape: parseTape(buf) };
-        } catch (err) {
-          const msg = err && err.message ? err.message : String(err);
-          const head = msg.indexOf('not a tape') === 0 ? msg : 'not a tape: ' + msg;
-          throw new Error(head + ' (' + p + ')');
-        }
-      });
-      const base = entries[0].tape;
-      const results = entries.slice(1).map(function (e) { return compareTapes(base, e.tape); });
-      process.stdout.write(formatMatrix(entries, results) + '\n');
-      process.exitCode = results.every(function (r) { return r.equal; }) ? 0 : 1;
-    } catch (err) {
-      process.stderr.write((err && err.message ? err.message : String(err)) + '\n');
-      process.exitCode = 2;
+// Corpus rows: the two lines `matrix_line` prints on one machine. Line one is
+// `<host> golden=<16hex> corpus=<16hex> blocks=<n>`, line two is
+// `<host> every=<cases> cut_checkpoints=<16hex>,<16hex>,...` with n digests.
+export function parseRows(text) {
+  const lines = String(text).replace(/^﻿/, '').split(/\r?\n/).filter(function (l) { return l.length > 0; });
+  if (lines.length !== 2) {
+    throw new Error('not a matrix row: want 2 lines (digest row, block row), got ' + lines.length);
+  }
+  const digest = /^(\S+) golden=([0-9a-f]{16}) corpus=([0-9a-f]{16}) blocks=(\d+)$/.exec(lines[0]);
+  if (!digest) {
+    throw new Error('not a matrix row: bad digest row "' + lines[0] + '"');
+  }
+  const blocks = /^(\S+) every=(\d+) cut_checkpoints=([0-9a-f]{16}(?:,[0-9a-f]{16})*)$/.exec(lines[1]);
+  if (!blocks) {
+    throw new Error('not a matrix row: bad block row "' + lines[1] + '"');
+  }
+  if (digest[1] !== blocks[1]) {
+    throw new Error('not a matrix row: host ' + digest[1] + ' on the digest row but ' + blocks[1] + ' on the block row');
+  }
+  const every = Number(blocks[2]);
+  if (!(every >= 1)) {
+    throw new Error('not a matrix row: every must be at least 1, got ' + blocks[2]);
+  }
+  const checkpoints = blocks[3].split(',').map(function (h) { return BigInt('0x' + h); });
+  if (checkpoints.length !== Number(digest[4])) {
+    throw new Error('not a matrix row: blocks=' + digest[4] + ' but the block row lists ' + checkpoints.length);
+  }
+  return { host: digest[1], golden: BigInt('0x' + digest[2]), corpus: BigInt('0x' + digest[3]), every: every, checkpoints: checkpoints };
+}
+function hex16(v) {
+  return v.toString(16).padStart(16, '0');
+}
+// Block digests first (they name the case range), then the two pinned digests.
+export function compareRows(base, other) {
+  if (base.every !== other.every || base.checkpoints.length !== other.checkpoints.length) {
+    return { equal: false, comparable: false, firstDivergentBlock: null, firstCase: null, cause: null, note: 'corpus shape differs: every ' + base.every + '/' + other.every + ' blocks ' + base.checkpoints.length + '/' + other.checkpoints.length };
+  }
+  for (let b = 0; b < base.checkpoints.length; b += 1) {
+    if (base.checkpoints[b] !== other.checkpoints[b]) {
+      const cause = classifyCause(base.checkpoints[b], other.checkpoints[b]);
+      const first = b * base.every;
+      const last = first + base.every - 1;
+      return { equal: false, comparable: true, firstDivergentBlock: b, firstCase: first, cause: cause, note: 'first bad corpus block ' + b + ' (cases ' + first + '..=' + last + ') [cause=' + cause + ']: bisect that block for sort ties, libm calls, or fused multiply-add' };
     }
   }
+  if (base.golden !== other.golden) {
+    return { equal: false, comparable: true, firstDivergentBlock: null, firstCase: null, cause: null, note: 'golden digest differs: ' + hex16(base.golden) + ' vs ' + hex16(other.golden) };
+  }
+  if (base.corpus !== other.corpus) {
+    return { equal: false, comparable: true, firstDivergentBlock: null, firstCase: null, cause: null, note: 'corpus digest differs: ' + hex16(base.corpus) + ' vs ' + hex16(other.corpus) };
+  }
+  return { equal: true, comparable: true, firstDivergentBlock: null, firstCase: null, cause: null, note: '' };
+}
+export function formatRows(entries, results) {
+  const lines = [];
+  lines.push('golden-matrix: ' + entries.length + ' corpus rows');
+  for (const e of entries) {
+    lines.push(e.name + ' host=' + e.row.host + ' golden=' + hex16(e.row.golden) + ' corpus=' + hex16(e.row.corpus) + ' blocks=' + e.row.checkpoints.length);
+  }
+  const first = entries.length > 0 ? entries[0].name : '';
+  for (let i = 1; i < entries.length; i += 1) {
+    const r = results[i - 1];
+    const name = entries[i].name;
+    if (!r.comparable) {
+      lines.push('SKIP ' + name + ': ' + r.note);
+    } else if (r.equal) {
+      lines.push('MATCH ' + name + ' vs ' + first);
+    } else {
+      lines.push('DIVERGE ' + name + ' vs ' + first + ' (' + entries[i].row.host + ' vs ' + entries[0].row.host + '): ' + r.note);
+    }
+  }
+  lines.push(results.every(function (r) { return r.equal; }) ? 'CORPUS RESULT PASS' : 'CORPUS RESULT FAIL');
+  return lines.join('\n');
+}
+// Ragdoll rows: what `ragdoll_line` prints on one machine. Line one is
+// `<host> ragdoll=<16hex> ticks=<n> bodies=<n> contacts=<n> final_state=<16hex>`,
+// then one line per tick, counted from 0: `<host> tick=<t> bodies=<16hex>,<16hex>,...`
+// with one digest per body in skeleton order.
+export function parseRagdoll(text) {
+  const lines = String(text).replace(/^﻿/, '').split(/\r?\n/).filter(function (l) { return l.length > 0; });
+  if (lines.length < 2) {
+    throw new Error('not a ragdoll row: want a summary line and a line per tick, got ' + lines.length + ' lines');
+  }
+  const sum = /^(\S+) ragdoll=([0-9a-f]{16}) ticks=(\d+) bodies=(\d+) contacts=(\d+) final_state=([0-9a-f]{16})$/.exec(lines[0]);
+  if (!sum) {
+    throw new Error('not a ragdoll row: bad summary line "' + lines[0] + '"');
+  }
+  const host = sum[1];
+  const ticks = Number(sum[3]);
+  const bodies = Number(sum[4]);
+  if (!(ticks >= 1) || !(bodies >= 1)) {
+    throw new Error('not a ragdoll row: ticks and bodies must be at least 1, got ticks=' + sum[3] + ' bodies=' + sum[4]);
+  }
+  if (lines.length !== 1 + ticks) {
+    throw new Error('not a ragdoll row: ticks=' + ticks + ' but ' + (lines.length - 1) + ' tick lines');
+  }
+  const perTick = [];
+  for (let t = 0; t < ticks; t += 1) {
+    const m = /^(\S+) tick=(\d+) bodies=([0-9a-f]{16}(?:,[0-9a-f]{16})*)$/.exec(lines[t + 1]);
+    if (!m) {
+      throw new Error('not a ragdoll row: bad tick line "' + lines[t + 1] + '"');
+    }
+    if (m[1] !== host) {
+      throw new Error('not a ragdoll row: host ' + host + ' on the summary line but ' + m[1] + ' on tick line ' + t);
+    }
+    if (Number(m[2]) !== t) {
+      throw new Error('not a ragdoll row: tick line ' + t + ' says tick=' + m[2]);
+    }
+    const digests = m[3].split(',').map(function (h) { return BigInt('0x' + h); });
+    if (digests.length !== bodies) {
+      throw new Error('not a ragdoll row: bodies=' + bodies + ' but tick ' + t + ' lists ' + digests.length);
+    }
+    perTick.push(digests);
+  }
+  return { host: host, digest: BigInt('0x' + sum[2]), ticks: ticks, bodies: bodies, contacts: BigInt(sum[5]), finalState: BigInt('0x' + sum[6]), perTick: perTick };
+}
+// Body digests first (they name the tick and the body), then what the transforms do not carry.
+export function compareRagdoll(base, other) {
+  if (base.ticks !== other.ticks || base.bodies !== other.bodies) {
+    return { equal: false, comparable: false, firstTick: null, firstBody: null, note: 'ragdoll shape differs: ticks ' + base.ticks + '/' + other.ticks + ' bodies ' + base.bodies + '/' + other.bodies };
+  }
+  for (let t = 0; t < base.ticks; t += 1) {
+    let first = -1;
+    let count = 0;
+    for (let b = 0; b < base.bodies; b += 1) {
+      if (base.perTick[t][b] !== other.perTick[t][b]) {
+        count += 1;
+        if (first < 0) {
+          first = b;
+        }
+      }
+    }
+    if (first >= 0) {
+      const note = 'first bad tick ' + t + ' body ' + first + ' (skeleton order; ' + count + ' of ' + base.bodies + ' bodies differ on that tick): Rapier stepped differently here, look for fused multiply-add, SIMD, or a contact/joint order that depends on the machine';
+      return { equal: false, comparable: true, firstTick: t, firstBody: first, note: note };
+    }
+  }
+  if (base.contacts !== other.contacts) {
+    return { equal: false, comparable: true, firstTick: null, firstBody: null, note: 'every transform matches but contacts differ: ' + base.contacts + ' vs ' + other.contacts };
+  }
+  if (base.finalState !== other.finalState) {
+    return { equal: false, comparable: true, firstTick: null, firstBody: null, note: 'every transform matches but the final state hash differs: ' + hex16(base.finalState) + ' vs ' + hex16(other.finalState) + ' (velocities or solver counters)' };
+  }
+  if (base.digest !== other.digest) {
+    return { equal: false, comparable: true, firstTick: null, firstBody: null, note: 'ragdoll digest differs: ' + hex16(base.digest) + ' vs ' + hex16(other.digest) };
+  }
+  return { equal: true, comparable: true, firstTick: null, firstBody: null, note: '' };
+}
+export function formatRagdoll(entries, results) {
+  const lines = [];
+  lines.push('golden-matrix: ' + entries.length + ' ragdoll rows');
+  for (const e of entries) {
+    lines.push(e.name + ' host=' + e.row.host + ' ragdoll=' + hex16(e.row.digest) + ' ticks=' + e.row.ticks + ' bodies=' + e.row.bodies + ' contacts=' + e.row.contacts + ' final_state=' + hex16(e.row.finalState));
+  }
+  const first = entries.length > 0 ? entries[0].name : '';
+  for (let i = 1; i < entries.length; i += 1) {
+    const r = results[i - 1];
+    const name = entries[i].name;
+    if (!r.comparable) {
+      lines.push('SKIP ' + name + ': ' + r.note);
+    } else if (r.equal) {
+      lines.push('MATCH ' + name + ' vs ' + first);
+    } else {
+      lines.push('DIVERGE ' + name + ' vs ' + first + ' (' + entries[i].row.host + ' vs ' + entries[0].row.host + '): ' + r.note);
+    }
+  }
+  lines.push(results.every(function (r) { return r.equal; }) ? 'RAGDOLL RESULT PASS' : 'RAGDOLL RESULT FAIL');
+  return lines.join('\n');
+}
+const USAGE = 'usage: node tools/golden-matrix.mjs <a.e2040> <b.e2040> [c.e2040 ...] [--rows <a.txt> <b.txt> [c.txt ...]] [--ragdoll <a.txt> <b.txt> [c.txt ...]]';
+const GROUP_FLAGS = { '--rows': 'rows', '--ragdoll': 'ragdoll' };
+// Tape files first, then the corpus row files after `--rows` and the ragdoll row files after
+// `--ragdoll` (either order); each group needs two or more files.
+export function parseArgs(argv) {
+  const groups = { tapes: [], rows: [], ragdoll: [] };
+  const seen = new Set();
+  let current = 'tapes';
+  for (const a of argv) {
+    if (a.indexOf('--') !== 0) {
+      groups[current].push(a);
+      continue;
+    }
+    const group = GROUP_FLAGS[a];
+    if (group === undefined) {
+      return { tapes: [], rows: [], ragdoll: [], error: 'unknown flag ' + a + '\n' + USAGE };
+    }
+    if (seen.has(a)) {
+      return { tapes: [], rows: [], ragdoll: [], error: 'only one ' + a + ' group is allowed\n' + USAGE };
+    }
+    seen.add(a);
+    current = group;
+  }
+  const sizes = [groups.tapes.length, groups.rows.length, groups.ragdoll.length];
+  if (sizes.every(function (n) { return n === 0; }) || sizes.some(function (n) { return n === 1; })) {
+    return { tapes: [], rows: [], ragdoll: [], error: USAGE };
+  }
+  return { tapes: groups.tapes, rows: groups.rows, ragdoll: groups.ragdoll, error: null };
+}
+function readNamed(p, kind, parse) {
+  let text = null;
+  try {
+    text = readFileSync(p);
+  } catch (err) {
+    throw new Error('not a ' + kind + ': cannot read ' + p + ': ' + (err && err.message ? err.message : String(err)));
+  }
+  try {
+    return parse(text);
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    const head = msg.indexOf('not a ' + kind) === 0 ? msg : 'not a ' + kind + ': ' + msg;
+    throw new Error(head + ' (' + p + ')');
+  }
+}
+// Exit code 0 = every file agrees, 1 = a divergence or a skipped pair, 2 = usage or an unreadable file.
+// Each file group (tapes, corpus rows, ragdoll rows) is compared against its own first file.
+export function run(argv) {
+  const args = parseArgs(argv);
+  if (args.error) {
+    return { code: 2, out: '', err: args.error + '\n' };
+  }
+  try {
+    const sections = [];
+    let pass = true;
+    if (args.tapes.length > 0) {
+      const entries = args.tapes.map(function (p) { return { name: p, tape: readNamed(p, 'tape', parseTape) }; });
+      const results = entries.slice(1).map(function (e) { return compareTapes(entries[0].tape, e.tape); });
+      sections.push(formatMatrix(entries, results));
+      pass = pass && results.every(function (r) { return r.equal; });
+    }
+    if (args.rows.length > 0) {
+      const entries = args.rows.map(function (p) { return { name: p, row: readNamed(p, 'matrix row', function (b) { return parseRows(b.toString('utf8')); }) }; });
+      const results = entries.slice(1).map(function (e) { return compareRows(entries[0].row, e.row); });
+      sections.push(formatRows(entries, results));
+      pass = pass && results.every(function (r) { return r.equal; });
+    }
+    if (args.ragdoll.length > 0) {
+      const entries = args.ragdoll.map(function (p) { return { name: p, row: readNamed(p, 'ragdoll row', function (b) { return parseRagdoll(b.toString('utf8')); }) }; });
+      const results = entries.slice(1).map(function (e) { return compareRagdoll(entries[0].row, e.row); });
+      sections.push(formatRagdoll(entries, results));
+      pass = pass && results.every(function (r) { return r.equal; });
+    }
+    return { code: pass ? 0 : 1, out: sections.join('\n') + '\n', err: '' };
+  } catch (err) {
+    return { code: 2, out: '', err: (err && err.message ? err.message : String(err)) + '\n' };
+  }
+}
+const isMain = import.meta.main;
+if (isMain) {
+  const done = run(process.argv.slice(2));
+  process.stdout.write(done.out);
+  process.stderr.write(done.err);
+  process.exitCode = done.code;
 }

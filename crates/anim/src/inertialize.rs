@@ -1,5 +1,4 @@
-//! inertialize: inertial blend + foot-lock. Damped offset decay, per-foot pin + slide meter.
-use engine_core::Fnv64;
+//! inertialize: foot-lock + angular limiter. Per-foot pin + slide meter, capped joint turn rate.
 
 fn san(v: f32) -> f32 {
     if v.is_finite() {
@@ -18,107 +17,6 @@ fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
         san(a[2]) - san(b[2]),
     );
     (dx * dx + dy * dy + dz * dz).sqrt()
-}
-
-/// Inertial blend state: per-joint offset + velocity decaying to target.
-#[derive(Clone, Debug)]
-pub struct Inertializer {
-    /// Positional offsets (src-dst at switch).
-    pub off: Vec<[f32; 3]>,
-    /// Offset velocities.
-    pub vel: Vec<[f32; 3]>,
-    /// Spring frequency (default 12).
-    pub freq: f32,
-    /// Settle epsilon (default 1e-4).
-    pub eps: f32,
-}
-
-impl Inertializer {
-    /// New zero state for `n` joints.
-    pub fn new(n: usize) -> Self {
-        Self {
-            off: vec![[0.0; 3]; n],
-            vel: vec![[0.0; 3]; n],
-            freq: 12.0,
-            eps: 1e-4,
-        }
-    }
-    /// Joint count.
-    pub fn len(&self) -> usize {
-        self.off.len()
-    }
-    /// True when empty.
-    pub fn is_empty(&self) -> bool {
-        self.off.is_empty()
-    }
-    /// Capture switch offset src-dst, velocity reset. Truncates to min len.
-    pub fn capture(&mut self, src: &[[f32; 3]], dst: &[[f32; 3]]) {
-        let m = self.len().min(src.len()).min(dst.len());
-        for i in 0..m {
-            let (s, d) = (san3(src[i]), san3(dst[i]));
-            self.off[i] = [s[0] - d[0], s[1] - d[1], s[2] - d[2]];
-            self.vel[i] = [0.0; 3];
-        }
-        for i in m..self.len() {
-            self.off[i] = [0.0; 3];
-            self.vel[i] = [0.0; 3];
-        }
-    }
-    /// Step toward `target` by `dt`; writes `out`. Non-finite dt copies target.
-    pub fn update(&mut self, target: &[[f32; 3]], dt: f32, out: &mut [[f32; 3]]) {
-        let m = self.len().min(target.len()).min(out.len());
-        if !dt.is_finite() || dt <= 0.0 {
-            for i in 0..m {
-                out[i] = san3(target[i]);
-            }
-            return;
-        }
-        let w = if self.freq.is_finite() && self.freq > 0.0 {
-            self.freq
-        } else {
-            12.0
-        };
-        let d = 1.0 / (1.0 + w * dt);
-        for i in 0..m {
-            let t = san3(target[i]);
-            let (mut o, mut v) = (self.off[i], self.vel[i]);
-            for k in 0..3 {
-                let no = d * (o[k] + (v[k] + o[k] * w) * dt);
-                let nv = d * (v[k] - (v[k] + o[k] * w) * w * dt);
-                o[k] = san(no);
-                v[k] = san(nv);
-                out[i][k] = san(t[k] + o[k]);
-            }
-            self.off[i] = o;
-            self.vel[i] = v;
-        }
-    }
-    /// True when every |off|,|vel| < eps.
-    pub fn settled(&self) -> bool {
-        self.off
-            .iter()
-            .zip(self.vel.iter())
-            .all(|(o, v)| o.iter().chain(v.iter()).all(|x| x.abs() < self.eps))
-    }
-    /// Max |offset| over joints (settle meter).
-    pub fn max_offset(&self) -> f32 {
-        self.off
-            .iter()
-            .flat_map(|o| o.iter())
-            .map(|x| x.abs())
-            .fold(0.0, f32::max)
-    }
-    /// FNV-1a64 over off/vel bits + freq.
-    pub fn state_hash(&self) -> u64 {
-        let mut h = Fnv64::new();
-        h.write_f32(self.freq);
-        for (o, v) in self.off.iter().zip(self.vel.iter()) {
-            for x in o.iter().chain(v.iter()) {
-                h.write_f32(*x);
-            }
-        }
-        h.finish()
-    }
 }
 
 /// ALS contact test: planted when low and slow.
@@ -440,35 +338,6 @@ impl AngularLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn offset_decays_and_settles() {
-        let (mut iz, dt) = (Inertializer::new(2), 1.0 / 60.0);
-        iz.capture(&[[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], &[[0.0; 3], [0.0; 3]]);
-        let (tgt, mut out) = ([[0.0; 3], [0.0; 3]], [[0.0; 3], [0.0; 3]]);
-        iz.update(&tgt, dt, &mut out);
-        assert!((out[0][0] - 1.0).abs() < 1e-6);
-        for _ in 0..120 {
-            iz.update(&tgt, dt, &mut out);
-        }
-        assert!(
-            iz.max_offset() < 1e-3 && iz.settled(),
-            "max={}",
-            iz.max_offset()
-        );
-        assert!(dist(out[0], [0.0; 3]) < 1e-3);
-        let (mut a, mut b) = (iz.clone(), iz.clone());
-        a.update(&tgt, dt, &mut out);
-        b.update(&tgt, dt, &mut out);
-        assert_eq!(a.state_hash(), b.state_hash());
-    }
-    #[test]
-    fn nan_guards_copy_target() {
-        let (mut iz, mut out) = (Inertializer::new(1), [[9.0; 3]]);
-        iz.capture(&[[f32::NAN, 0.0, 0.0]], &[[0.0; 3]]);
-        assert!(iz.max_offset() < 1e-6);
-        iz.update(&[[1.0, 2.0, 3.0]], f32::NAN, &mut out);
-        assert_eq!(out[0], [1.0, 2.0, 3.0]);
-    }
     #[test]
     fn footlock_slide_under_2cm() {
         let mut fl = FootLock::new(0.15);

@@ -600,6 +600,7 @@ pub fn build_draw_list(shell: &Shell, width: u32, height: u32) -> Result<DrawLis
                 ..scene.material.clone()
             },
             base_color: None,
+            normal_map: None,
         });
     }
     let list = DrawList {
