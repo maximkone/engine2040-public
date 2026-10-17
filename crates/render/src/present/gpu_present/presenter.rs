@@ -286,6 +286,12 @@ pub struct Presenter {
     /// LF4 slice 1 bloom state: enable flag plus pass thresholds, default
     /// on. Init only, no per-frame allocation; reuses the HDR target.
     pub(crate) bloom: BloomState,
+    /// A frame capture asked for: waiting for its frame, or for its map (see `capture`).
+    pub(crate) capture: super::capture::CaptureSlot,
+    /// Validation-scope answers still on their way from the browser (browser build only; a
+    /// native device answers at once and `pop_scope` blocks on it).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) scopes: super::scope_ledger::ScopeLedger,
 }
 
 /// Neutral normal-map texel in 0..=255: 128,128,255 decodes to (0,0,1)
@@ -957,6 +963,9 @@ impl Presenter {
             neutral_fog_pending: false,
             overlay: overlay::OverlayRing::new(),
             bloom: BloomState::on(),
+            capture: super::capture::CaptureSlot::default(),
+            #[cfg(target_arch = "wasm32")]
+            scopes: super::scope_ledger::ScopeLedger::default(),
             sky_sub: sky::SkySubmitter::new(&device),
             layer_sub: material_layer::LayerSubmitter::new(&device),
             particles: particles_gpu::ParticlePool::new(2040),
@@ -1055,25 +1064,69 @@ impl Presenter {
             &want,
         ))
         .map_err(|_| PresentError::NoAdapter)?;
-        let info = adapter.get_info();
         let (device, queue) = Self::request_device(&adapter)?;
-        // EG13: the adapter owns the MSAA count; read its 4x support once.
-        let support = Self::msaa_support_for(&adapter);
-        Self::build(device, queue, info, support)
+        Self::init_offscreen_from_device(&adapter, device, queue)
     }
 
-    /// Open the device and queue on `adapter`, asking for pass timestamps
-    /// when the adapter supports them (the GPU timing rows stay
-    /// `unsupported` otherwise and nothing else changes).
-    fn request_device(
+    /// Build the headless presenter on an adapter, device and queue the caller opened itself
+    /// (see [`Self::device_descriptor`]). No window, no surface and no blocking call: the
+    /// browser opens its device with `await`s and the native tests open one to prove both
+    /// routes give the same presenter. [`Self::init_offscreen`] ends here too.
+    pub fn init_offscreen_from_device(
         adapter: &wgpu::Adapter,
-    ) -> Result<(wgpu::Device, wgpu::Queue), PresentError> {
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Result<Self, PresentError> {
+        // EG13: the adapter owns the MSAA count; read its 4x support once.
+        let support = Self::msaa_support_for(adapter);
+        Self::build(device, queue, adapter.get_info(), support)
+    }
+
+    /// What every presenter device is opened with: pass timestamps when the
+    /// adapter supports them (the GPU timing rows stay `unsupported`
+    /// otherwise and nothing else changes) and the default limits, which
+    /// every WebGPU adapter grants. The one descriptor for the blocking
+    /// native request below and for a caller that opens its device
+    /// asynchronously (the browser shell) before `init_from_device`.
+    #[must_use]
+    pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+        wgpu::DeviceDescriptor {
             label: Some("engine2040-ra1-present"),
             required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             ..Default::default()
-        }))
-        .map_err(|e| PresentError::Device(format!("request_device: {e}")))
+        }
+    }
+
+    /// Open the device and queue on `adapter` (see [`Self::device_descriptor`]).
+    /// Blocks: native callers only.
+    fn request_device(
+        adapter: &wgpu::Adapter,
+    ) -> Result<(wgpu::Device, wgpu::Queue), PresentError> {
+        pollster::block_on(adapter.request_device(&Self::device_descriptor(adapter)))
+            .map_err(|e| PresentError::Device(format!("request_device: {e}")))
+    }
+
+    /// Build the visible presenter on a device the caller already opened,
+    /// without a single blocking call: the browser creates its surface,
+    /// adapter and device asynchronously and hands the results here. `adapter`
+    /// is the one `device` came from, `instance` the one that created
+    /// `surface` (kept alive by the presenter). The native constructors above
+    /// are unchanged. Zero area fails loudly like `init_windowed`.
+    pub fn init_from_device(
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, PresentError> {
+        if SizeClass::classify(width, height) != SizeClass::Sizes {
+            return Err(PresentError::InvalidSize { width, height });
+        }
+        let mut presenter = Self::init_offscreen_from_device(adapter, device, queue)?;
+        presenter.attach_surface_for(instance, adapter, surface, width, height)?;
+        Ok(presenter)
     }
 
     /// Bring up an adapter compatible with `surface`, configure the
@@ -1167,7 +1220,23 @@ impl Presenter {
             return Err(PresentError::InvalidSize { width, height });
         }
         let adapter = Self::compatible_adapter(instance, &surface)?;
-        let caps = surface.get_capabilities(&adapter);
+        self.attach_surface_for(instance, &adapter, surface, width, height)
+    }
+
+    /// [`Self::attach_surface`] for a caller that already holds the adapter
+    /// that supports `surface`: nothing is enumerated, so nothing blocks.
+    pub fn attach_surface_for(
+        &mut self,
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<(), PresentError> {
+        if SizeClass::classify(width, height) != SizeClass::Sizes {
+            return Err(PresentError::InvalidSize { width, height });
+        }
+        let caps = surface.get_capabilities(adapter);
         let Some(first_format) = caps.formats.first().copied() else {
             return Err(PresentError::Device("surface reports no formats".into()));
         };
@@ -1275,6 +1344,50 @@ impl Presenter {
                 );
                 Ok(outcome)
             }
+        }
+    }
+
+    /// Validation errors the device reported after the frame that caused them returned. A browser
+    /// answers its error scopes late, so its frames cannot fail on them; this count (and
+    /// [`Self::deferred_validation_first`]) is where they show up. Always 0 natively, where a
+    /// frame fails at once with `PresentError::Validation`.
+    #[must_use]
+    pub fn deferred_validation_errors(&self) -> u64 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.scopes.errors()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0
+        }
+    }
+
+    /// Scope answers still on their way and waits dropped because the device stopped answering
+    /// (browser build; always `(0, 0)` natively). A page that prints this shows a frozen device
+    /// at a glance.
+    #[must_use]
+    pub fn deferred_validation_waiting(&self) -> (usize, u64) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            (self.scopes.pending(), self.scopes.dropped())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            (0, 0)
+        }
+    }
+
+    /// Text of the first late validation error, if one arrived.
+    #[must_use]
+    pub fn deferred_validation_first(&self) -> Option<&str> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.scopes.first_error()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            None
         }
     }
 
@@ -2005,6 +2118,19 @@ impl Presenter {
         self.acquire_us / self.acquire_frames.max(1)
     }
 
+    /// The device this presenter draws on, for a caller that owns its lifetime (the browser shell
+    /// destroys it to prove the page survives a lost device).
+    #[must_use]
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// Format of the attached swapchain, `None` before a surface is attached.
+    #[must_use]
+    pub fn surface_format(&self) -> Option<wgpu::TextureFormat> {
+        self.surface_config.as_ref().map(|config| config.format)
+    }
+
     /// Present mode the surface was configured with (`None` without a
     /// surface).
     pub fn present_mode_name(&self) -> Option<String> {
@@ -2704,6 +2830,62 @@ mod skin_window_tests {
                 off > 5.0
             })
             .count()
+    }
+
+    #[test]
+    fn a_presenter_on_a_caller_opened_device_draws_the_frame_init_offscreen_draws() {
+        let Some(mut classic) = presenter_or_skip("from-device parity") else {
+            return;
+        };
+        // The route the browser takes: the caller picks the adapter and opens the device with
+        // the shared descriptor, then hands all three over.
+        let (choice, _) = crate::backend::resolve_from_env(None);
+        let pick = crate::backend::pick_backend(choice, None);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: crate::backend::wgpu_backends(pick.primary),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(crate::presenter_pick::pick_adapter(
+            &instance,
+            crate::backend::wgpu_backends(pick.primary),
+            &crate::adapter::choice_from_env(),
+        ))
+        .expect("the adapter init_offscreen found is found again");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Presenter::device_descriptor(&adapter)))
+                .expect("the shared descriptor opens a device");
+        let mut parts = Presenter::init_offscreen_from_device(&adapter, device, queue)
+            .expect("a caller-opened device builds a presenter");
+        parts.resize(128, 128).expect("valid size applies");
+        assert_eq!(parts.adapter_name(), classic.adapter_name());
+        let key = MeshKey::new(0x5C00_0100, [0x44; 32]);
+        for presenter in [&mut classic, &mut parts] {
+            presenter
+                .upload_mesh(key, &v1::cube())
+                .expect("cube uploads");
+        }
+        let list = list_of(&[key]);
+        let toggles = crate::pass_truth::LookToggles::all_on();
+        let a = classic
+            .capture_live_pixels(&list, &toggles)
+            .expect("classic live frame");
+        let b = parts
+            .capture_live_pixels(&list, &toggles)
+            .expect("caller-device live frame");
+        assert!(a.receipt.is_clean() && b.receipt.is_clean());
+        assert!(
+            a.rgba.chunks_exact(4).any(|px| px[0] > 40),
+            "the cube is lit"
+        );
+        assert_eq!(
+            a.rgba, b.rgba,
+            "both routes draw the same live frame, byte for byte"
+        );
+        assert_eq!(
+            pixels(&mut classic, &list),
+            pixels(&mut parts, &list),
+            "and the same capture frame"
+        );
     }
 
     #[test]

@@ -7,10 +7,9 @@
 //! ([`BodyTruth`]), projects them through the frame camera
 //! ([`screen_rect`]), and folds a run into laws ([`ViewLaws`]) that a script
 //! or a model reads with no image: bodies off screen, sunk into the sand or
-//! floating, joints that pop between frames (clip snaps), planted feet that
-//! slide off their spot on the sand (`foot_slide_cm`, the p95 over
-//! `planted_feet` foot-frames), non-finite vertices, the skin error material,
-//! the camera inside a body or under the ground.
+//! floating, joints that pop between frames (clip snaps), non-finite
+//! vertices, the skin error material, the camera inside a body or under the
+//! ground.
 //!
 //! Consumer: the arena's `arena view:` receipt line and its `--view-brief`
 //! JSONL (one line per presented frame), which `tools/product-check.mjs`
@@ -32,9 +31,6 @@ pub const GROUND_Y: f32 = 0.0;
 /// in one presented frame popped: a clip snap, not motion (a swinging hand
 /// misses by well under a centimeter at 60 frames a second).
 pub const POP_M: f64 = 0.10;
-/// Bins of the foot-slide histogram, one per millimeter: the last bin holds a
-/// slide of a meter or more.
-const SLIDE_BINS: usize = 1001;
 
 /// One drawn body in one frame.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,10 +59,6 @@ pub struct BodyTruth {
     pub nonfinite: u32,
     /// Body parts drawn with the skin error material.
     pub error_parts: u32,
-    /// Per foot (left, right): how far the drawn ankle sits from the spot it
-    /// is planted on, in meters, while the foot is at full plant; `None` while
-    /// the foot is free. The slide the `foot_slide_cm` receipt meters.
-    pub foot_slide_m: [Option<f32>; 2],
 }
 
 impl BodyTruth {
@@ -97,7 +89,6 @@ impl BodyTruth {
             joints,
             nonfinite: u32::try_from(nonfinite).unwrap_or(u32::MAX),
             error_parts: 0,
-            foot_slide_m: [None; 2],
         }
     }
 
@@ -262,9 +253,6 @@ pub struct ViewLaws {
     pop_m: f64,
     closest_m: Option<f32>,
     cover_max: f32,
-    /// Foot-frames at full plant by how far the drawn ankle sat from the spot
-    /// it is planted on, one bin per millimeter; empty until the first one.
-    slide_bins: Vec<u32>,
     tracks: Vec<Option<Track>>,
 }
 
@@ -300,9 +288,6 @@ impl ViewLaws {
                     self.idle_float_m = self.idle_float_m.max(body.min[1] - GROUND_Y);
                 }
             }
-            for slide in body.foot_slide_m.into_iter().flatten() {
-                self.note_slide(slide);
-            }
             self.track(t, body);
             let index = usize::from(body.slot);
             if drawn.len() <= index {
@@ -323,45 +308,6 @@ impl ViewLaws {
                 }
             }
         }
-    }
-
-    /// Count one planted foot-frame by its slide in meters. A slide that is
-    /// not finite counts as a `nonfinite` breach and stays out of the bins.
-    fn note_slide(&mut self, slide_m: f32) {
-        if !slide_m.is_finite() {
-            self.nonfinite = self.nonfinite.saturating_add(1);
-            return;
-        }
-        if self.slide_bins.is_empty() {
-            self.slide_bins.resize(SLIDE_BINS, 0);
-        }
-        let bin = (slide_m * 1000.0).round().max(0.0) as usize;
-        let bin = bin.min(SLIDE_BINS - 1);
-        self.slide_bins[bin] = self.slide_bins[bin].saturating_add(1);
-    }
-
-    /// Foot-frames folded at full plant.
-    #[must_use]
-    pub fn planted_feet(&self) -> u32 {
-        self.slide_bins
-            .iter()
-            .fold(0u32, |sum, n| sum.saturating_add(*n))
-    }
-
-    /// The slide, in meters, that 95 of 100 planted foot-frames stayed within
-    /// (the smallest millimeter that covers them); zero with none folded.
-    #[must_use]
-    pub fn foot_slide_p95_m(&self) -> f32 {
-        let total = u64::from(self.planted_feet());
-        let rank = (total * 95).div_ceil(100);
-        let mut seen = 0u64;
-        for (bin, n) in self.slide_bins.iter().enumerate() {
-            seen += u64::from(*n);
-            if seen >= rank && seen > 0 {
-                return bin as f32 / 1000.0;
-            }
-        }
-        0.0
     }
 
     /// Predict each joint from the slot's last velocity; the worst miss
@@ -446,7 +392,7 @@ impl ViewLaws {
             parts.join("/")
         };
         Some(format!(
-            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2} foot_slide_cm={:.1} planted_feet={}",
+            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2}",
             self.frames,
             self.first_t.unwrap_or(0.0),
             self.last_t,
@@ -461,8 +407,6 @@ impl ViewLaws {
             self.eye_in_body,
             self.eye_below_ground,
             self.cover_max,
-            self.foot_slide_p95_m() * 100.0,
-            self.planted_feet(),
         ))
     }
 }
@@ -788,49 +732,9 @@ mod tests {
         assert_eq!(
             laws.line().as_deref(),
             Some(
-                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0"
+                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02"
             )
         );
-    }
-
-    #[test]
-    fn foot_slide_p95_reads_the_planted_frames_and_nothing_else() {
-        let cam = camera();
-        let mut laws = ViewLaws::default();
-        assert_eq!(laws.foot_slide_p95_m(), 0.0, "nothing planted reads zero");
-        assert_eq!(laws.planted_feet(), 0);
-        // 100 planted foot-frames slide 1 mm, 2 mm, ... 100 mm; the other foot
-        // is free, so it adds nothing.
-        for mm in 1..=100u16 {
-            let mut planted = body(0, "idle", [0.0; 3], vec![[0.0, 1.0, 0.0]]);
-            planted.foot_slide_m = [Some(f32::from(mm) / 1000.0), None];
-            laws.note(&cam, f64::from(mm), &[planted]);
-        }
-        assert_eq!(laws.planted_feet(), 100);
-        assert!(
-            (laws.foot_slide_p95_m() - 0.095).abs() < 1e-6,
-            "p95 of 1..=100 mm is 95 mm, got {}",
-            laws.foot_slide_p95_m()
-        );
-        let line = laws.line().expect("frames folded");
-        assert!(
-            line.ends_with(" foot_slide_cm=9.5 planted_feet=100"),
-            "{line}"
-        );
-        // One slide of five meters lands in the last bin and moves p95 by one
-        // rank; a NaN slide is a `nonfinite` breach and is not a planted frame.
-        let mut wild = body(0, "idle", [0.0; 3], vec![[0.0, 1.0, 0.0]]);
-        wild.foot_slide_m = [Some(f32::NAN), Some(5.0)];
-        laws.note(&cam, 101.0, &[wild]);
-        assert_eq!(laws.planted_feet(), 101);
-        assert!(
-            (laws.foot_slide_p95_m() - 0.096).abs() < 1e-6,
-            "{}",
-            laws.foot_slide_p95_m()
-        );
-        let line = laws.line().expect("frames folded");
-        assert!(line.contains(" nonfinite=1 "), "{line}");
-        assert!(line.ends_with(" planted_feet=101"), "{line}");
     }
 
     #[test]

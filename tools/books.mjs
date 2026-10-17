@@ -8,14 +8,14 @@
 //   node tools/books.mjs toc <id>              detected headings (max 200 lines)
 // The index caches at target/books/index.json. It rebuilds when a full_text.txt is
 // newer than the cache, or the folder or the book list changed.
-// BOOKS_DIR overrides the work folder (default C:/empire/lab/skillworks/work).
+// BOOKS_DIR overrides the work folder (default C:/empire/skillworks/work).
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const INDEX_PATH = join(ROOT, "target", "books", "index.json");
-export const DEFAULT_DIR = "C:/empire/lab/skillworks/work";
+export const DEFAULT_DIR = "C:/empire/skillworks/work";
 // Bump when chunking, headings or tokens change: the cache checks file times, not code.
 export const INDEX_VERSION = 1;
 export const CHUNK_CHARS = 1200;

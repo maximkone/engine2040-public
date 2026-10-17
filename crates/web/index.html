@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>engine2040 web shell</title>
+<title>engine2040 arena</title>
 <link rel="icon" href="data:,">
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #e8e8e8; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
@@ -12,7 +12,16 @@
   #golden { position: fixed; left: 8px; top: 40px; z-index: 20; margin: 0; padding: 4px 8px; background: rgba(0, 0, 0, 0.75); border-left: 4px solid #888; border-radius: 3px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
   body[data-golden="ok"] #golden { border-left-color: #2fbf4a; }
   body[data-golden="mismatch"] #golden, body[data-golden="error"] #golden { border-left-color: #ff3b30; background: #b00020; color: #fff; font-size: 16px; font-weight: 700; }
+  #input, #audio { position: fixed; right: 8px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  #input { top: 8px; }
+  #audio { top: 34px; }
   #report { position: fixed; left: 8px; right: 8px; bottom: 8px; margin: 0; padding: 6px 8px; max-height: 40vh; overflow: auto; background: rgba(0, 0, 0, 0.7); border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+  /* The arena page keeps the raw adapter line to two rows (it grows on hover) so the picture stays visible. */
+  body[data-mode="arena"] #report { right: 50vw; max-height: 3.4em; opacity: 0.85; }
+  body[data-mode="arena"] #report:hover { max-height: 40vh; opacity: 1; }
+  #arena-info { display: none; position: fixed; right: 8px; bottom: 8px; width: calc(50vw - 16px); flex-direction: column; gap: 3px; }
+  body[data-mode="arena"] #arena-info { display: flex; }
+  #arena-info pre { margin: 0; padding: 3px 8px; max-height: 5.6em; overflow: auto; background: rgba(0, 0, 0, 0.7); border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
   #fatal { display: none; position: fixed; inset: 0; z-index: 10; overflow: auto; padding: 5vmin; background: #b00020; color: #fff; font: 600 clamp(16px, 2.4vmin, 26px)/1.5 system-ui, sans-serif; }
   #fatal h1 { margin: 0 0 0.5em; font-size: 1.6em; }
   #fatal ul { margin: 0.4em 0 0.8em; padding-left: 1.2em; }
@@ -22,8 +31,16 @@
 <body data-state="starting" data-commit="{{COMMIT}}">
 <canvas id="canvas"></canvas>
 <div id="hud">frame 0 | -- ms</div>
+<pre id="input">input: kb=0 mouse=0 pad=0</pre>
+<pre id="audio">audio: state=suspended</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>
+<div id="arena-info">
+  <pre id="init">arena: starting</pre>
+  <pre id="passes">passes: waiting for the first frame</pre>
+  <pre id="receipt">receipt: waiting for the first frame</pre>
+  <pre id="capture">capture: asked for after frame 30</pre>
+</div>
 <div id="fatal" role="alert">
   <h1>This browser cannot run the game</h1>
   <p id="fatal-reason"></p>
@@ -40,17 +57,21 @@
   <div style="position:fixed;inset:0;z-index:11;padding:5vmin;background:#b00020;color:#fff;font:600 20px system-ui,sans-serif">This page needs JavaScript, WebAssembly and WebGPU (Chrome or Edge 113+, Safari 26+, Firefox 141+ on Windows).</div>
 </noscript>
 <script type="module">
-import init, { run, lose_device } from "./engine.js";
+import init, { run, run_arena, lose_device, request_arena_capture } from "./engine.js";
 
-// For the headless check: destroys the device and waits for the shell to come back.
+// For the headless check: destroys the device and waits for the shell to come back, and asks for a fresh
+// GPU copy of the canvas.
 window.loseDevice = lose_device;
+window.requestArenaCapture = request_arena_capture;
+// The arena is the page; `?square` opens the plain WebGPU shell (a cleared canvas and one moving square).
+const square = new URLSearchParams(location.search).has("square");
 
 try {
   await init();
-  await run("canvas");
+  await (square ? run("canvas") : run_arena("canvas"));
 } catch (e) {
   // The wasm module did not load or start (no WebAssembly, a missing file, a crash).
-  // A missing WebGPU is not this path: `run` reports that itself.
+  // A missing WebGPU is not this path: `run` and `run_arena` report that themselves.
   console.error(e);
   document.getElementById("fatal-reason").textContent = "The engine did not start: " + e;
   document.getElementById("report").textContent = JSON.stringify({

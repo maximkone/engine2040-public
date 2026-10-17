@@ -15,11 +15,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 
-# A browser has no OS random source: uuid v4 reads crypto.getRandomValues through `js`.
-# Only the real browser target gets it, so native and wasi builds stay as they were.
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-uuid = { version = "1", features = ["js"] }
-
 [dev-dependencies]
 serde_json = "1"
 

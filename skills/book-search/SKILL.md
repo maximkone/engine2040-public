@@ -43,7 +43,7 @@ Rules:
 
 - Quote at most 2 short lines from a hit; cite the rest as `[id | heading]`.
 - `(no heading)` means no heading was detected above that text; cite the book id only.
-- geaen lost word spaces in about a quarter of its long lines ("Onecommonoptimization"). If a hit is missing, Grep `C:\empire\lab\skillworks\work\b1-<id>\full_text.txt` for the word with spaces removed.
+- geaen lost word spaces in about a quarter of its long lines ("Onecommonoptimization"). If a hit is missing, Grep `C:\empire\skillworks\work\b1-<id>\full_text.txt` for the word with spaces removed.
 - No stemming: a Russian query needs the word form the text uses.
 
-source: tools/books.mjs; books in C:\empire\lab\skillworks\work
+source: tools/books.mjs; books in C:\empire\skillworks\work

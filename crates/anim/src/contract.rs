@@ -227,8 +227,7 @@ pub fn validate_contacts(table: &ContactTable) -> Result<(), AnimError> {
     Ok(())
 }
 
-/// Rotate `point` by the unit quaternion `quat` (`q * p * conj(q)`).
-pub(crate) fn rotate(point: &[f32; 3], quat: &[f32; 4]) -> [f32; 3] {
+fn rotate(point: &[f32; 3], quat: &[f32; 4]) -> [f32; 3] {
     let q = quat_mul(*quat, [point[0], point[1], point[2], 0.0]);
     let conj = [-quat[0], -quat[1], -quat[2], quat[3]];
     let r = quat_mul(q, conj);

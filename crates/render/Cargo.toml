@@ -26,6 +26,9 @@ engine-observe.workspace = true
 # Hash constants (FNV offset/prime, golden gamma): engine-core is the one
 # hash owner, the streaming digests name its constants (same values).
 engine-core.workspace = true
+# The one wall clock (std-only): `std::time::Instant::now` traps in a browser tab, so the
+# frame-path timers read this and the web shell installs the page's `performance.now()` into it.
+engine-clock.workspace = true
 # v1-only tangent owner (ARCHITECTURE C3): v1 calls import_repair::recompute_tangents; default stays std-only.
 engine-assets = { workspace = true, features = ["import"], optional = true }
 glam = { workspace = true, optional = true }

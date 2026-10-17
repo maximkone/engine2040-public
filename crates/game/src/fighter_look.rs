@@ -56,13 +56,6 @@ use self::fighter_look_acts::{bridge_act, bridge_slots};
 #[path = "fighter_look_inertia.rs"]
 mod fighter_look_inertia;
 
-/// Planted feet (LF12): the per-slot plants, the tick fold that steps them and
-/// the frame step that holds them on the sand. Presentation only.
-#[path = "fighter_look_feet.rs"]
-mod fighter_look_feet;
-
-use self::fighter_look_feet::{foot_slides, Feet, Legs};
-
 /// Real-body proofs for the sand rest and the hitstop hold (a test-only file).
 #[path = "fighter_look_proofs.rs"]
 mod fighter_look_proofs;
@@ -220,8 +213,6 @@ struct Rig {
     parts: Vec<RigPart>,
     /// Clips in [`CLIP_FILES`] order, on this rig's skeleton.
     clips: Vec<ImportedClip>,
-    /// Both legs by joint name; `None` plants no feet (LF12).
-    legs: Option<Legs>,
 }
 
 /// Presentation state for one slot.
@@ -270,9 +261,6 @@ struct SlotAnim {
     /// clock runs with the clip clock, so a held slot's age stands still.
     /// Presentation only.
     iz_age: u32,
-    /// The slot's planted feet (LF12): where each foot is held on the sand.
-    /// They stand still with the clip clock in hitstop. Presentation only.
-    feet: Feet,
 }
 
 impl SlotAnim {
@@ -297,7 +285,6 @@ impl SlotAnim {
             hit_push: [0.0, 0.0],
             held: false,
             iz_age: fighter_look_inertia::NO_OFFSET,
-            feet: Feet::new(),
         }
     }
 
@@ -1147,7 +1134,6 @@ fn load_rig(
     let clips = retarget_clips(sources, &body)?;
     Ok(Rig {
         radius_m: skin_radius_m(&body),
-        legs: Legs::find(&body.skeleton, &body.bind.positions),
         variant: binding.variant.clone(),
         bind_pelvis: body.bind.positions[pelvis],
         skeleton: body.skeleton,
@@ -1168,26 +1154,6 @@ fn mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
         }
     }
     out
-}
-
-/// A slot's root at sub-tick `alpha`: the position lerped from the last tick
-/// to this one, with the balance lean (EG45) stepped along the facing, and the
-/// facing lerped the short way. Pure; presentation only.
-fn slot_root(slot: &SlotAnim, alpha: f32) -> ([f32; 3], f32) {
-    let mut pos: [f32; 3] =
-        std::array::from_fn(|i| slot.prev_pos[i] + (slot.pos[i] - slot.prev_pos[i]) * alpha);
-    let yaw = slot.prev_yaw + angle_delta(slot.prev_yaw, slot.yaw) * alpha;
-    // Balance lean (EG45): a stumbling root steps forward along its
-    // facing; every other gait holds. Presentation only.
-    let lean = balance_lean_m(slot.balance);
-    if lean != 0.0 && yaw.is_finite() {
-        let (s, c) = yaw.sin_cos();
-        if s.is_finite() && c.is_finite() {
-            pos[0] += lean * s;
-            pos[2] += lean * c;
-        }
-    }
-    (pos, yaw)
 }
 
 /// Root placement in the AN1 row-vector layout: turn about +Y by `yaw`
@@ -1299,9 +1265,6 @@ struct SlotSample {
     pos: [f32; 3],
     yaw: f32,
     root: [[f32; 4]; 4],
-    /// How far each fully planted foot is drawn from its held spot, in
-    /// meters (LF12); `None` for a foot that is not at full plant.
-    slides: [Option<f32>; 2],
 }
 
 impl FighterLook {
@@ -1697,14 +1660,22 @@ impl FighterLook {
         alpha: f32,
     ) -> Result<SlotSample, LookError> {
         let (clip, time) = self.clip_pick(rig, slot, alpha);
-        let mut pose = self.inertial_pose(rig, index, slot, alpha)?;
-        let (pos, yaw) = slot_root(slot, alpha);
-        // LF12: plant the feet last, on top of the inertial offsets, so a clip
-        // switch stays continuous and the feet hold their spot on the sand.
-        let contacts = self.plant_feet(rig, slot, &mut pose, yaw, alpha)?;
+        let pose = self.inertial_pose(rig, index, slot, alpha)?;
         let world = skinning_matrices(&rig.skeleton, &pose)
             .map_err(|err| LookError::Skin(format!("{err:?}")))?;
-        let slides = foot_slides(rig.legs, &world, &contacts, (pos, yaw));
+        let mut pos: [f32; 3] =
+            std::array::from_fn(|i| slot.prev_pos[i] + (slot.pos[i] - slot.prev_pos[i]) * alpha);
+        let yaw = slot.prev_yaw + angle_delta(slot.prev_yaw, slot.yaw) * alpha;
+        // Balance lean (EG45): a stumbling root steps forward along its
+        // facing; every other gait holds. Presentation only.
+        let lean = balance_lean_m(slot.balance);
+        if lean != 0.0 && yaw.is_finite() {
+            let (s, c) = yaw.sin_cos();
+            if s.is_finite() && c.is_finite() {
+                pos[0] += lean * s;
+                pos[2] += lean * c;
+            }
+        }
         let root = root_matrix(pos, yaw);
         Ok(SlotSample {
             clip,
@@ -1713,7 +1684,6 @@ impl FighterLook {
             pos,
             yaw,
             root,
-            slides,
         })
     }
 
@@ -1764,7 +1734,6 @@ impl FighterLook {
             body.clip = u8::try_from(sample.clip).unwrap_or(u8::MAX);
             body.clip_s = sample.time;
             body.tinted = self.tick < slot.flash_until;
-            body.foot_slide_m = sample.slides;
             let mut frames = Vec::with_capacity(rig.parts.len());
             for part in rig.parts.iter() {
                 let posed = rig
@@ -1860,7 +1829,6 @@ impl FighterLook {
             body.clip = u8::try_from(sample.clip).unwrap_or(u8::MAX);
             body.clip_s = sample.time;
             body.tinted = self.tick < slot.flash_until;
-            body.foot_slide_m = sample.slides;
             if let Some((lo, hi)) = crate::stage_bodies::joints_bounds(&placed, rig.radius_m) {
                 body.min = lo;
                 body.max = hi;

@@ -17,6 +17,7 @@ use super::wire::{bound_chars, push_u16, push_u32, push_u64, Cursor, Short};
 use engine_core::hash_bytes;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Archive schema version written by [`ArchiveWriter::finish`].
 pub const ARCHIVE_VERSION: u32 = 1;
@@ -365,14 +366,14 @@ impl ArchivedBundle {
     /// Parse plus verify `buffer` into an open bundle. Corrupt, truncated
     /// and future-version input is refused; payloads are never copied.
     pub fn open(buffer: Arc<[u8]>) -> Result<Self, ArchiveError> {
-        let started = engine_clock::now();
+        let started = Instant::now();
         let index = parse(&buffer)?;
         let lookup = build_lookup(&index);
         Ok(Self {
             buffer,
             index,
             lookup,
-            open_ms: engine_clock::since(started).as_millis() as u64,
+            open_ms: started.elapsed().as_millis() as u64,
         })
     }
 
@@ -1183,7 +1184,6 @@ mod bridge_tests {
     use super::*;
     use engine_anim::pose::QuatTrack;
     use engine_anim::{Clip, Track};
-    use std::time::Instant;
 
     fn triangle(offset: f32) -> CookedMesh {
         CookedMesh {

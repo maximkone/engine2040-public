@@ -16,7 +16,7 @@ import { createServer } from "node:http";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
-import { inflateSync } from "node:zlib";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
 
 // ---- flag sets ----
 // Every set starts from BASE. The first set is the one the plan names; the others vary the pieces that decide
@@ -114,6 +114,56 @@ export function analyzePixels({ width, height, channels, data }) {
 // and two text boxes over it, so a working frame is bright on average and holds several colours.
 export const isDrawn = (s) => s.meanLuma >= 20 && s.distinct >= 4 && s.dominantShare < 0.98;
 
+// ---- the arena frame (WEB5) ----
+// A headless canvas screenshot can come out black, so the arena page asks the GPU for the pixels itself: it copies the
+// swapchain image into a buffer, maps it, and leaves window.arenaCapture = { line, rgba }. The check below takes those
+// bytes, proves they are the ones the page hashed, tests that they are not blank and turns them into a PNG.
+
+// FNV-1a 64 over bytes as 16 lowercase hex digits: the digest the render crate prints for a capture.
+export function fnv1a64(buf) {
+  const prime = 0x100000001b3n, mask = (1n << 64n) - 1n;
+  let h = 0xcbf29ce484222325n;
+  for (let i = 0; i < buf.length; i++) h = ((h ^ BigInt(buf[i])) * prime) & mask;
+  return h.toString(16).padStart(16, "0");
+}
+
+// A PNG (8-bit RGBA, no interlace, filter 0) of tight RGBA rows.
+export function encodePng(width, height, rgba) {
+  const stride = width * 4;
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || rgba.length !== stride * height) throw new Error(`encodePng: ${rgba.length} bytes are not a ${width}x${height} RGBA image`);
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) Buffer.from(rgba.buffer, rgba.byteOffset + y * stride, stride).copy(raw, y * (stride + 1) + 1);
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4), crc = Buffer.alloc(4), t = Buffer.from(type, "latin1");
+    len.writeUInt32BE(data.length);
+    crc.writeUInt32BE(crc32(Buffer.concat([t, data])) >>> 0);
+    return Buffer.concat([len, t, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level: 6 })), chunk("IEND", Buffer.alloc(0))]);
+}
+
+// What the arena page proved: the GPU copy arrived intact and shows a drawn frame, and the page's own receipt counts
+// no validation error of any kind and at least one frame. `a` is readArena's result; null (not an arena page) is fine.
+export function arenaVerdict(a) {
+  if (!a) return { ok: true, problems: [] };
+  const problems = [];
+  if (a.capture !== "ready") problems.push(`the GPU copy of the canvas ended as ${a.capture ?? "never finished"}${a.captureLine?.blank ? " (blank)" : ""}`);
+  else {
+    if (!a.hashOk) problems.push(`the bytes that arrived hash to ${a.nodeHash}, the page said ${a.captureLine?.hash}`);
+    if (!a.stats || !isDrawn(a.stats)) problems.push(`the copied canvas is blank (${JSON.stringify(a.stats)})`);
+  }
+  const rc = a.receipt;
+  if (!rc) problems.push(`the page's receipt is not JSON: ${String(a.receiptText).slice(0, 160)}`);
+  else {
+    if (rc.validationErrors !== 0) problems.push(`validation errors ${rc.validationErrors}${rc.firstError ? `: ${rc.firstError}` : ""}`);
+    if (rc.frameErrors !== 0) problems.push(`frame errors ${rc.frameErrors}${rc.firstError ? `: ${rc.firstError}` : ""}`);
+    if (!(rc.frames > 0)) problems.push("the receipt counts no frame");
+  }
+  return { ok: problems.length === 0, problems };
+}
+
 // ---- what a run proved ----
 export function verdict(r) {
   if (r.timedOut) return { ok: false, code: "timeout", why: `the page never left data-state=starting within ${r.waitedMs} ms` };
@@ -121,7 +171,11 @@ export function verdict(r) {
   if (!line) return { ok: false, code: "no-report", why: `#report is not JSON: ${String(r.reportText).slice(0, 200)}` };
   if (line.ok === false) return { ok: false, code: line.reason ?? "failed", why: `${line.message ?? ""} ${line.detail ?? ""}`.trim() };
   if (line.ok !== true) return { ok: false, code: "bad-line", why: "the line has no ok field" };
-  if (!r.stats || !isDrawn(r.stats)) return { ok: false, code: "blank-canvas", why: `adapter ok but the screenshot is blank (${JSON.stringify(r.stats)})` };
+  if (r.arena) {
+    // The arena page checks its own pixels through the GPU; a headless screenshot of its canvas may be black.
+    const av = arenaVerdict(r.arena);
+    if (!av.ok) return { ok: false, code: "arena", why: av.problems.join("; ") };
+  } else if (!r.stats || !isDrawn(r.stats)) return { ok: false, code: "blank-canvas", why: `adapter ok but the screenshot is blank (${JSON.stringify(r.stats)})` };
   if (!r.framesAdvanced) return { ok: false, code: "frozen", why: "adapter ok but the frame counter does not move" };
   if (r.recovered === false) return { ok: false, code: "no-recovery", why: "the page did not come back after the device was destroyed" };
   return { ok: true, code: "adapter-ok", why: `${line.adapter?.vendor || "?"} ${line.adapter?.architecture || ""} ${line.adapter?.description || line.adapter?.name || ""}`.trim() };
@@ -213,10 +267,87 @@ export async function launchChrome(chrome, flags, logFile) {
   };
 }
 
-const parseLine = (text) => { try { const v = JSON.parse(text); return v && typeof v === "object" ? v : null; } catch { return null; } };
+// The browse receipt: what the ready line said about wasm memory plus the time to the first frame.
+export const receiptOf = (report, firstFrameMs, set) => ({ schema: 1, set, wasmMemoryBytes: report?.wasmMemoryBytes ?? null, ttffMs: firstFrameMs ?? null, commit: report?.commit ?? null });
+
+const parseLine =(text) => { try { const v = JSON.parse(text); return v && typeof v === "object" ? v : null; } catch { return null; } };
+
+// ---- scripted input (AIS2 browser.input): events become Chrome DevTools Input.* calls ----
+// An event is { kind, key?, x?, y?, ms? }. kind: key (down then up), key_down, key_up, mouse_move, click, wait.
+export const INPUT_KINDS = ["key", "key_down", "key_up", "mouse_move", "click", "wait"];
+const KEY_CODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Space: 32, Enter: 13, Escape: 27, Tab: 9, Shift: 16, Control: 17, Alt: 18 };
+function keyParams(name) {
+  if (name === "Space") return { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " };
+  if (/^[A-Za-z]$/.test(name)) return { key: name, code: `Key${name.toUpperCase()}`, windowsVirtualKeyCode: name.toUpperCase().charCodeAt(0), text: name };
+  if (/^[0-9]$/.test(name)) return { key: name, code: `Digit${name}`, windowsVirtualKeyCode: name.charCodeAt(0), text: name };
+  if (name in KEY_CODES) return { key: name, code: name, windowsVirtualKeyCode: KEY_CODES[name], ...(name === "Enter" ? { text: "\r" } : {}) };
+  throw new Error(`unknown key "${name}"`);
+}
+// The CDP calls (and waits) for a list of events, in order. Throws on an event it cannot map.
+export function inputCommands(events) {
+  const out = [];
+  const point = (e) => {
+    if (!Number.isInteger(e.x) || !Number.isInteger(e.y)) throw new Error(`${e.kind} needs integer x and y`);
+    return { x: e.x, y: e.y };
+  };
+  for (const e of events) {
+    if (e.kind === "key" || e.kind === "key_down" || e.kind === "key_up") {
+      const p = keyParams(e.key);
+      const { text, ...up } = p;
+      if (e.kind !== "key_up") out.push({ method: "Input.dispatchKeyEvent", params: { type: text ? "keyDown" : "rawKeyDown", ...p } });
+      if (e.kind !== "key_down") out.push({ method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...up } });
+    } else if (e.kind === "mouse_move") {
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", ...point(e) } });
+    } else if (e.kind === "click") {
+      const p = point(e);
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", ...p } });
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mousePressed", ...p, button: "left", buttons: 1, clickCount: 1 } });
+      out.push({ method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", ...p, button: "left", buttons: 0, clickCount: 1 } });
+    } else if (e.kind === "wait") {
+      if (!Number.isInteger(e.ms) || e.ms < 0 || e.ms > 2000) throw new Error("wait needs ms in 0..=2000");
+      out.push({ wait: e.ms });
+    } else throw new Error(`unknown input kind "${e.kind}" (legal: ${INPUT_KINDS.join(", ")})`);
+  }
+  return out;
+}
+
+// The arena page's own proof, read after the first frames: wait for the page's GPU copy of the canvas, bring the bytes over,
+// check them against the page's hash and make the PNG. null on a page that is not the arena (no data-mode=arena).
+export async function readArena({ evalJs, sleep: nap }, waitMs = 150000) {
+  if (!(await evalJs("document.body.dataset.mode === 'arena'"))) return null;
+  const t0 = Date.now();
+  let capture = null;
+  while (Date.now() - t0 < waitMs) {
+    capture = await evalJs("document.body.dataset.capture ?? null");
+    if (capture) break;
+    await nap(500);
+  }
+  const text = (id) => evalJs(`document.getElementById('${id}')?.textContent ?? ''`);
+  const out = { capture, waitedMs: Date.now() - t0, receiptText: await text("receipt"), passes: await text("passes"), init: await text("init"), captureText: await text("capture") };
+  out.receipt = parseLine(out.receiptText);
+  out.captureLine = parseLine(out.captureText);
+  if (capture === "ready" || capture === "blank") {
+    const packed = await evalJs(`(async () => { const c = window.arenaCapture; if (!c) return null;
+      const url = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(new Blob([c.rgba])); });
+      return url.slice(url.indexOf(',') + 1); })()`);
+    const line = out.captureLine;
+    if (packed && line) {
+      const rgba = Buffer.from(packed, "base64");
+      out.bytes = rgba.length;
+      out.width = line.width; out.height = line.height;
+      if (rgba.length === line.width * line.height * 4) {
+        out.nodeHash = fnv1a64(rgba);
+        out.hashOk = out.nodeHash === line.hash;
+        out.stats = analyzePixels({ width: line.width, height: line.height, channels: 4, data: rgba });
+        out.png = encodePng(line.width, line.height, rgba);
+      } else out.hashOk = false;
+    }
+  }
+  return out;
+}
 
 // Load `url` in a fresh Chrome and read the page back. `beforeLoad` is a script run before any page script.
-export async function readPage({ chrome, flags, url, logFile, beforeLoad = null, waitMs = 90000, afterReady = null }) {
+export async function readPage({ chrome, flags, url, logFile, beforeLoad = null, waitMs = 90000, afterReady = null, inputEvents = null }) {
   const b = await launchChrome(chrome, flags, logFile);
   const { cdp } = b;
   const consoleLines = [], exceptions = [];
@@ -236,10 +367,12 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
     };
     await cdp.send("Page.navigate", { url });
     const t0 = Date.now();
-    let state = null, goldenState = null;
+    let state = null, goldenState = null, firstFrameMs = null;
     while (Date.now() - t0 < waitMs) {
       await sleep(250);
       try { [state, goldenState] = await evalJs("[document.body.dataset.state ?? null, document.body.dataset.golden ?? null]"); } catch { state = null; }
+      // Time to first frame (WEB11): the first poll that sees the first frame on the canvas, good to one poll (250 ms).
+      if (firstFrameMs === null && (state === "running" || state === "fatal")) firstFrameMs = Date.now() - t0;
       // The golden check runs after the adapter line, so wait for both.
       if ((state === "running" || state === "fatal") && goldenState) break;
     }
@@ -256,7 +389,7 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
         const i = a.info ?? (a.requestAdapterInfo ? await a.requestAdapterInfo() : {});
         return { gpu: true, adapter: { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description, isFallback: a.isFallbackAdapter ?? null, features: [...a.features].length } };
       } catch (e) { return { gpu: true, error: String(e) }; } })()`);
-    const out = { waitedMs: Date.now() - t0, timedOut, state: first.state, generation: first.generation, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
+    const out = { waitedMs: Date.now() - t0, firstFrameMs, timedOut, state: first.state, generation: first.generation, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
     if (!timedOut) {
       out.screenshot = Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64");
       if (state === "running") {
@@ -265,6 +398,16 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
         const before = frames((await read()).hud);
         await sleep(1000);
         out.framesAdvanced = frames((await read()).hud) > before;
+        out.arena = await readArena({ evalJs, sleep });
+        if (inputEvents?.length) {
+          // Scripted input replays from page load, in order, then one more screenshot shows what it did.
+          for (const c of inputCommands(inputEvents)) {
+            if (c.wait !== undefined) await sleep(c.wait); else await cdp.send(c.method, c.params);
+          }
+          await sleep(300);
+          out.inputCount = inputEvents.length;
+          out.inputScreenshot = Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64");
+        }
         if (afterReady) Object.assign(out, await afterReady({ evalJs, read, sleep }));
       }
     }
@@ -298,8 +441,16 @@ export const NO_GPU_SCRIPT = "Object.defineProperty(Navigator.prototype, 'gpu', 
 
 const tailOf = (file, n = 40) => { try { return readFileSync(file, "utf8").trimEnd().split(/\r?\n/).slice(-n).join("\n"); } catch { return ""; } };
 
+// The arena page's GPU copy as `<prefix>.png` (made from the bytes the page handed over) and its facts as `<prefix>.json`.
+export function writeArena(dir, prefix, arena) {
+  if (!arena) return;
+  if (arena.png) writeFileSync(join(dir, `${prefix}.png`), arena.png);
+  const { png, ...facts } = arena;
+  writeFileSync(join(dir, `${prefix}.json`), `${JSON.stringify(facts, null, 2)}\n`);
+}
+
 export function parseArgs(argv) {
-  const o = { dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null };
+  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") o.dir = argv[++i];
@@ -308,10 +459,12 @@ export function parseArgs(argv) {
     else if (a === "--require-adapter") o.requireAdapter = true;
     else if (a === "--all") o.all = true;
     else if (a === "--only") o.only = Number(argv[++i]);
+    else if (a === "--input") o.input = argv[++i] ?? null;
     else o.error = `unknown argument ${a}`;
   }
   if (!o.chrome) o.error ??= "--chrome <path to Chrome> is required";
   if (o.only !== null && !(o.only >= 0)) o.error ??= "--only needs a flag set index";
+  if (argv.includes("--input") && !o.input) o.error ??= "--input needs a JSON file of events";
   return o;
 }
 
@@ -321,6 +474,14 @@ export async function main(argv) {
   const dir = resolve(a.dir), out = resolve(a.out);
   if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
   mkdirSync(out, { recursive: true });
+  let inputEvents = null;
+  if (a.input) {
+    try {
+      inputEvents = JSON.parse(readFileSync(resolve(a.input), "utf8"));
+      if (!Array.isArray(inputEvents)) throw new Error("the file is not a JSON array");
+      inputCommands(inputEvents); // refuse a bad script before any browser starts
+    } catch (e) { console.error(`web-browse: --input ${a.input}: ${e.message}`); return 2; }
+  }
   const server = await serve(dir);
   const url = `http://127.0.0.1:${server.port}/index.html`;
   const attempts = [];
@@ -335,7 +496,7 @@ export async function main(argv) {
       const flags = [...BASE_FLAGS, ...set.flags];
       let r, v;
       try {
-        r = await readPage({ chrome: a.chrome, flags, url, logFile, afterReady: recoveryProbe });
+        r = await readPage({ chrome: a.chrome, flags, url, logFile, afterReady: recoveryProbe, inputEvents });
         v = verdict(r);
       } catch (e) {
         r = null; v = { ok: false, code: "run-error", why: String(e.message ?? e) };
@@ -353,11 +514,16 @@ export async function main(argv) {
         for (const l of entry.chromeLog.split("\n").filter((x) => /gpu|vulkan|webgpu|swiftshader|dawn|angle|adapter/i.test(x)).slice(-6)) console.log(`    chrome ${l.slice(0, 300)}`);
       }
       if (v.ok && !winner) {
-        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState };
+        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs, arena: r.arena };
         writeFileSync(join(out, "ready.png"), r.screenshot);
         writeFileSync(join(out, "report.json"), `${r.reportText}\n`);
+        writeArena(out, "arena-capture", r.arena);
+        // The numbers tools/web-budget.mjs gates on (WEB11).
+        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
+        if (r.inputScreenshot) writeFileSync(join(out, "input.png"), r.inputScreenshot);
         writeFileSync(join(out, "flag-line.txt"), `${a.chrome} ${flags.join(" ")}\n`);
       }
+      if (!v.ok) writeArena(out, `attempt-${set.name}-arena`, r?.arena);
       if (v.ok && !a.all) break; // --all keeps going so every flag set's outcome is on record
       if (r?.screenshot) writeFileSync(join(out, `attempt-${set.name}.png`), r.screenshot);
     }
@@ -366,6 +532,12 @@ export async function main(argv) {
       console.log(`FLAG LINE ${a.chrome} ${winner.flags}`);
       console.log(`READY LINE ${winner.reportText}`);
       console.log(`CANVAS ${JSON.stringify(winner.stats)}`);
+      if (winner.arena) {
+        console.log(`ARENA CAPTURE ${winner.arena.captureText}`);
+        console.log(`ARENA HASH page ${winner.arena.captureLine?.hash} node ${winner.arena.nodeHash} ${winner.arena.hashOk ? "EQUAL" : "DIFFERENT"}; ${winner.arena.init}`);
+        console.log(`ARENA RECEIPT ${winner.arena.receiptText}`);
+        console.log(`ARENA PASSES ${winner.arena.passes}`);
+      }
       const gw = goldenVerdict(winner.golden, winner.goldenState);
       console.log(`GOLDEN ${gw.ok ? "" : "FAILED "}${gw.line}`);
       if (gw.tickLine) console.log(`WASM TICK ${gw.tickLine}`);

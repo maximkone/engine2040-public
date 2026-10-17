@@ -1,5 +1,0 @@
-Source: https://ambientcg.com/a/Bricks097
-Licence: Creative Commons CC0 1.0 Universal (https://docs.ambientcg.com/license/ ; https://creativecommons.org/publicdomain/zero/1.0/)
-Downloaded: 2026-10-17 from https://ambientcg.com/get?file=Bricks097_1K-JPG.zip
-Normal map kept: NormalGL (OpenGL, +Y up). The DirectX variant was dropped; DX = GL with the green channel inverted.
-The zip also held .blend/.usdc/.mtlx/.tres and a preview png; those were not kept.

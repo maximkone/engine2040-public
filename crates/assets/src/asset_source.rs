@@ -228,51 +228,8 @@ impl ContentDigest {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use fs_source::FsSource;
-
-/// The browser has no file system: the same type exists so callers compile on
-/// every target, and every read says so by name (`Unsupported`). A browser
-/// build reads through [`BundleSource`] instead.
-#[cfg(target_arch = "wasm32")]
-mod fs_source {
-    use super::{bound_chars, AssetSource, SourceError, ECHO_CHARS};
-    use std::borrow::Cow;
-    use std::path::PathBuf;
-
-    /// A directory root that cannot be read on this target.
-    #[derive(Clone, Debug)]
-    pub struct FsSource {
-        _root: PathBuf,
-    }
-
-    impl FsSource {
-        /// Source rooted at `root`; every read on this target is refused.
-        pub fn new(root: impl Into<PathBuf>) -> Self {
-            Self { _root: root.into() }
-        }
-    }
-
-    fn unsupported(path: &str) -> SourceError {
-        SourceError::Io {
-            path: bound_chars(path, ECHO_CHARS),
-            kind: std::io::ErrorKind::Unsupported,
-        }
-    }
-
-    impl AssetSource for FsSource {
-        fn read(&self, path: &str) -> Result<Cow<'_, [u8]>, SourceError> {
-            Err(unsupported(path))
-        }
-
-        fn exists(&self, _path: &str) -> bool {
-            false
-        }
-
-        fn list(&self, dir: &str) -> Result<Vec<String>, SourceError> {
-            Err(unsupported(if dir.is_empty() { "(root)" } else { dir }))
-        }
-    }
-}
 
 /// Directory-backed source: today's native file reads, byte for byte.
 #[cfg(not(target_arch = "wasm32"))]
