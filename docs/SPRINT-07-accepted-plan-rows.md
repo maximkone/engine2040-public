@@ -1108,11 +1108,11 @@
   --lib spatial_answer_agreement` green; 50/50 at identical bytes + 0
   drift + panel win, else stays held. needs: SP58, SP20, SP12.
   (PLN future-spatial 2026-09-30.)
-- [ ] RA16 render: belt + cache pressure drill — 64-player storm with
+- [x] RA16 render: belt + cache pressure drill — 64-player storm with
   64 MiB live and eviction telemetry. Size S. Owns
   `crates/render/src/uploads.rs`. Accept: `cargo test -p
   engine-render --lib uploads` green. needs: RA4, RA6.
-  (PLN render-frame.md EXTEND, proposed 2026-09-29.)
+  (PLN render-frame.md EXTEND, proposed 2026-09-29.) Landed 9f217d81. uploads.rs restored from f737386e^; cargo test -p engine-render --lib uploads green on this PC (10 passed, 0 failed: 9 donor tests + uploads_sixty_four_player_storm_holds_64_mib_with_eviction_telemetry — 64 players x 256 KiB/frame, live never over 64 MiB cap, peak == high_water 67108864, over-cap spike refuses 32 loud OverCapacity demands with live_bytes unchanged, invalidate_all drains to 0). Note: the belt still has no GPU-path caller; the heal/AH2 wiring remains (L).
 - [x] RA17 render: pipeline-cache variant storm — 4096-entry +
   32-variant gate, second-run 0 compiles, last-good drill. Size S.
   Owns `crates/render/src/cache.rs`. Accept: `cargo test -p
@@ -1142,11 +1142,11 @@
   `cargo test -p engine-game --lib pad` green. needs: WIN3.
   (PLN shipping.md EXTEND, proposed 2026-09-29.)
   LATER: parked 2026-10-03 (circus verdict 2: docs/plan/shipping.md parks shipping (rows stay, no writers unless a bar needs them) and only WIN9 is the bar's exception; this window polish changes no pixel, hash or timing); unpark by deleting this line.
-- [ ] WIN8 game: mode-switch last-good drill at lobby load — swaps
+- [x] WIN8 game: mode-switch last-good drill at lobby load — swaps
   during a 16-slot MP3 lobby keep last-good within one frame.
   Tier A. Size S. Owns drill hunks in `crates/game/src/modes.rs`.
   Accept: `cargo test -p engine-game --lib modes` green. needs:
-   WIN2, MP3. (PLN shipping.md EXTEND, proposed 2026-09-29.)
+   WIN2, MP3. (PLN shipping.md EXTEND, proposed 2026-09-29.) Landed 072e79ba. modes.rs restored from d89bd98e^; cargo test -p engine-game --lib modes green on this PC (20 passed, 0 failed: 9 modes incl. failed_device_swap_keeps_last_good_loudly and staged_swap_applies_only_at_its_frame, plus 11 modes_world); caller: bin/arena.rs resumed validates the windowed mode before window creation (refusal -> WinError::NoDisplay); cargo clippy -p engine-game --all-targets --features app -D warnings clean.
 - [ ] WIN12 game: crash-plus-settings repro bundle — the WIN4 report
   carries the settings digest plus display mode beside
   version/adapter/tape-tail/checkpoint. Tier B. Size S. Owns digest

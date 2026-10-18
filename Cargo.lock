@@ -3102,6 +3102,7 @@ dependencies = [
  "engine-net",
  "engine-observe",
  "engine-physics",
+ "engine-playtest",
  "engine-provider",
  "engine-rules",
  "engine-scene",

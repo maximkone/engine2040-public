@@ -36,6 +36,15 @@ async fn run(args: &[String]) -> i32 {
             return error.exit_code();
         }
     };
+    // AD8: the door hosts the real look judge. One registration, at start:
+    // the slot is process-wide, so a later `look.judge` call reaches this
+    // judge and nothing swaps it out. A refused slot is a start failure.
+    if let Err(error) = engine_endpoint::packs::view::register_look_judge(
+        engine_endpoint::look_host::host_look_judge,
+    ) {
+        eprintln!("e2040-mcp: {error}");
+        return 1;
+    }
     eprintln!(
         "e2040-mcp: serving `{dir}` over stdio",
         dir = config.project_dir.display()

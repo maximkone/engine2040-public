@@ -313,6 +313,25 @@ pub fn fog_blit_uniform_bytes(color: [f32; 3], width_px: u32, height_px: u32) ->
     out
 }
 
+// ---------------------------------------------------------------------------
+// Hero motion-hold clip: the twin establishing-view preset (`clip_hold`).
+//
+// Owner: render lane; consumer WIN1/ED1 establishing-view captures through
+// the presenter. The clip is pure data over the frozen temporal resolve:
+// this adds no pass, it only runs the preset and files its ghost/shimmer
+// receipt for reference captures. Std-only; no GPU work happens here.
+// ---------------------------------------------------------------------------
+
+/// Run the hero motion-hold clip for the twin establishing view: the fixed
+/// 120-frame push-in through the frozen temporal resolve, returns the
+/// ghost/shimmer receipt the reference captures quote. No pass is added.
+pub fn hold_clip_for_establishing_view() -> Result<crate::clip_hold::HoldReceipt, PresentError> {
+    crate::clip_hold::run_hold_clip().map_err(|e| PresentError::InvalidDraw {
+        index: 0,
+        reason: format!("hold clip: {e}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

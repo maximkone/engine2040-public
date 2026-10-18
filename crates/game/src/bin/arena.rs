@@ -45,6 +45,7 @@ use engine_game::fighter_look::{look_down_deg, shot_for_frame, CamFollow, Fighte
 use engine_game::flow::{Flow, FlowEvent};
 use engine_game::input::{map_key, map_mouse};
 use engine_game::lock_on::nearest_rival_facing;
+use engine_game::modes::{rank_modes, validate_request, AdapterMode, DisplayMode, SwapRequest};
 use engine_game::practice::PracticeSwap;
 use engine_game::reload::{settle_paths, HotReload};
 use engine_game::spear_window::{demo_input, SpearMode, SpearScene};
@@ -2244,6 +2245,25 @@ impl ApplicationHandler for ArenaApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
+        }
+        // Display gate before the window exists: `modes` owns the startup
+        // mode's validation, so an out-of-range size refuses loudly here
+        // instead of opening a window no adapter can fill. Adapter
+        // enumeration stays operator-side, so the ranked list is seeded with
+        // the requested mode and the check is a range check.
+        let startup = SwapRequest {
+            mode: DisplayMode::Windowed {
+                w_px: WINDOW_SIZE.0,
+                h_px: WINDOW_SIZE.1,
+            },
+        };
+        let ranked = rank_modes(&[AdapterMode {
+            w_px: WINDOW_SIZE.0,
+            h_px: WINDOW_SIZE.1,
+            refresh_hz: engine_core::TICK_HZ_U32,
+        }]);
+        if let Err(err) = validate_request(&startup, &ranked) {
+            return self.fail(event_loop, WinError::NoDisplay(capped(&err.to_string())), 3);
         }
         let attrs = Window::default_attributes()
             .with_title(arena_frame::window_title(None))

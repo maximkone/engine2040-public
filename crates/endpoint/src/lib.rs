@@ -31,6 +31,8 @@ pub mod intents;
 #[cfg(feature = "mcp")]
 pub mod log_tools;
 #[cfg(feature = "mcp")]
+pub mod look_host;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 #[cfg(all(test, feature = "mcp"))]
 mod mcp_transcript_tests;

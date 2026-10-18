@@ -41,7 +41,9 @@ export const allowedEdges = new Map([
   // The net verb pack runs loopback bouts through engine-net (feature `mcp` only).
   // The physics pack (door verb) reads the std-only balance core: no rapier feature (PX40).
   // AD20: scene.query reachable reads polygons from a baked engine-nav mesh (feature `mcp`).
-  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-nav", "engine-input"]],
+  // AD8: the door hosts the real look judge from engine-playtest and answers
+  // `look.judge` with it (feature `mcp` only).
+  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-nav", "engine-input", "engine-playtest"]],
   ["engine-input", ["engine-core"]],
   ["engine-net", ["engine-arena", "engine-input", "engine-observe"]],
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
@@ -99,6 +101,7 @@ export function largeBlobViolations(entries, limit = LFS_SIZE_LIMIT) {
 export const OWN_TEST_BINARY = {
   "assets/vfetch_vectors": "its import leg does not compile at HEAD; merge it into tests/it once it builds",
   "endpoint/look_judge_hook": "registers a process-wide one-shot hook",
+  "endpoint/look_judge_real": "the look judge hook is process-wide and one-shot",
   "game/crash_hook": "installs the crash hook and re-runs its own executable",
   "perf/profiler": "flips the process-wide ENABLED switch",
   "perf/w1_pf9a_paired": "flips the process-wide ENABLED switch",

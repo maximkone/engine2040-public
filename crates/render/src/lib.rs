@@ -92,6 +92,12 @@ pub mod pass_truth;
 /// `SimulatedSurface` forced-loss tests are the first consumer.
 pub mod heal;
 
+/// Generational staging-belt uploads (RA6): ring of in-flight frame
+/// generations, retire-after-submit discipline, `invalidate_all` for the
+/// AH2 resize/loss hook. Std-only; consumers are the RA2 executor and the
+/// WIN1/ED1 frame loops.
+pub mod uploads;
+
 /// Persisted pipeline cache with async compile and last-good fallback
 /// (RA5): versioned on-disk blobs keyed by shader hash + define set +
 /// layout id. Std-only; consumer is the RA2 executor's pipeline path.
@@ -170,6 +176,10 @@ pub mod baked_bake;
 /// Baked lightmaps with validity mask + SH probes reusing the ibl SH path
 /// (RL5): bake identical bytes x2; consumer is the WIN1/ED1 arena + Q1.
 pub mod baked_gi;
+/// Hero motion-hold clip: fixed 120-frame slow push-in over the twin
+/// establishing view through the frozen temporal resolve. Std-only;
+/// consumer is the twin establishing view through `present::look`.
+pub mod clip_hold;
 /// Deferred blood decals with depth reject (RP3): sand-not-air fixtures,
 /// roughness drying curve. Std-only; consumer is WIN1 CB2 gore mapping.
 pub mod decals;

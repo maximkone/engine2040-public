@@ -238,7 +238,7 @@ pub fn parse_search(search: &str) -> Result<Option<NetQuery>, QueryError> {
         Some(n) => u32::try_from(n)
             .ok()
             .filter(|&n| n <= MAX_TICKS)
-            .ok_or(QueryError {
+            .ok_or_else(|| QueryError {
                 key: "ticks",
                 value: n.to_string(),
                 expected: long,

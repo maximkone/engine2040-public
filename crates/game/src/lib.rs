@@ -108,6 +108,9 @@ pub mod loop_text;
 /// Living ludus voices — trainer, blacksmith and crowd: fight memories
 /// with goals over the district yard, scripted fallback offline. Std-only.
 pub mod ludus_npcs;
+/// Display mode list plus validated swap keeping last-good: adapter modes
+/// in, one staged swap out at a frame boundary. Std-only, presentation only.
+pub mod modes;
 /// Mode framework: arena, siege and district free-roam over the
 /// ladder. Std-only.
 pub mod modes_world;

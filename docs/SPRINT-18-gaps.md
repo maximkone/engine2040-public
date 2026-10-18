@@ -890,7 +890,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   depends on `engine-playtest`; `register_look_judge` has no caller outside a
   test. P2P: `cargo test -p engine-endpoint --lib` green; default build gains
   no dependency; golden unchanged. Plan: `docs/plan/forge-adoption.md` AD-8.
-  Owner Decision 2: yes (the `verify` feature edge). needs: RB1.
+  Owner Decision 2: yes (the `verify` feature edge). needs: RB1. Progress 2026-10-18: the host half lands - engine-endpoint gains the workspace `engine-playtest` edge under `mcp`, `look_host::host_look_judge` bridges the capture/preview/q1 args through `look::judge` (codes look_capture/look_manifest), and `e2040-mcp` registers it at start so `look.judge` no longer answers unsupported; tests look_judge_real (own process) and look_judge_hook green, full endpoint mcp suite 57 lib + 2 hook + 9 doc green (gh run 39121967253). Left: the `verify` feature with engine-proof, the verify pack verbs (bug.replay, trace.summary, replay.verify, replay.bisect) and tests/door_parity.rs.
 - [ ] AD9 endpoint: door session ring with a real writer and a `door.status`
   verb — `door_dispatch` pushes one typed event per refusal and failed
   handler; play jobs push their end state; new codes go in the one observe

@@ -75,7 +75,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   version to the match config: default v1 (the proof scene and the golden),
   the window build and the Rome duel mode pass v2. Diff: good (hash law: the
   default stays v1). Tier A. Size S. Owns the table-choice hunk of
-  `crates/arena/src/lib.rs` and the mode hunk in `crates/game/src/modes.rs`.
+  `crates/arena/src/lib.rs`.
   Accept: `cargo test -p engine-arena --lib table_version` x2: a v2 match logs
   startup 12-18 and a v1 match 4; `node tools/proof.mjs --skip-build` prints
   golden `d57b5c8ae3096614` twice. F2P: no table choice exists. P2P: golden

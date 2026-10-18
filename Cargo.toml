@@ -165,6 +165,7 @@ engine-destruction = { version = "0.1.0", path = "crates/destruction" }
 engine-material = { version = "0.1.0", path = "crates/material" }
 engine-ai = { version = "0.1.0", path = "crates/ai" }
 engine-proof = { version = "0.1.0", path = "crates/proof" }
+engine-playtest = { version = "0.1.0", path = "crates/playtest" }
 engine-scene = { version = "0.1.0", path = "crates/scene" }
 engine-input = { version = "0.1.0", path = "crates/input" }
 engine-arena = { version = "0.1.0", path = "crates/arena" }
