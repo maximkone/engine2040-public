@@ -190,16 +190,6 @@ fn overlaps(a: &Rect, b: &Rect) -> bool {
     a.min_x < b.max_x && b.min_x < a.max_x && a.min_z < b.max_z && b.min_z < a.max_z
 }
 
-/// Expand a rect by `pad` cm on every side.
-fn expand(r: &Rect, pad: i32) -> Rect {
-    Rect {
-        min_x: r.min_x - pad,
-        max_x: r.max_x + pad,
-        min_z: r.min_z - pad,
-        max_z: r.max_z + pad,
-    }
-}
-
 /// Footprint rect of the object centered at (cx, cz) in cm.
 fn footprint(cx: i32, cz: i32, hx: i32, hz: i32) -> Rect {
     Rect {
@@ -294,7 +284,7 @@ fn fits(room: &Room, cx: i32, cz: i32, hx: i32, hz: i32, capsule: i32) -> bool {
     {
         return false;
     }
-    let padded = expand(&footprint(cx, cz, hx, hz), capsule);
+    let padded = footprint(cx, cz, hx + capsule, hz + capsule);
     !room.rects.iter().any(|b| overlaps(&padded, b))
 }
 

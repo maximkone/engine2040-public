@@ -30,6 +30,8 @@ use crate::agent::Backend;
 use crate::door::{door_call, DoorCall};
 use crate::frame_check::{check_scripted, Script as FrameScript, Thresholds};
 
+mod utility;
+
 /// Backends every task executes against, in report order.
 pub const BACKENDS: [Backend; 3] = [Backend::Mock, Backend::Local, Backend::Remote];
 /// Authoring task count required by the packet.

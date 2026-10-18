@@ -206,7 +206,11 @@ mod tests {
             let pbr = pbr_for_file(file).expect("mapped");
             assert!(pbr.set < COOKED_SETS.len() && pbr.tile_m > 0.0, "{file}");
         }
-        assert_eq!(pbr_for_file("banner.gltf"), None, "cloth keeps its glTF maps");
+        assert_eq!(
+            pbr_for_file("banner.gltf"),
+            None,
+            "cloth keeps its glTF maps"
+        );
         assert_eq!(pbr_for_file("torch.gltf").map(|p| p.metallic), Some(1.0));
     }
 
@@ -244,8 +248,9 @@ mod tests {
         ];
         let normals = [[0.0, 0.0, 1.0]; 4];
         let uvs = box_uvs(&positions, &normals, 1.0);
-        let mesh = engine_render::v1::upload_mesh_tiled(&positions, &normals, &uvs, &[0, 1, 2, 0, 2, 3])
-            .expect("quad uploads");
+        let mesh =
+            engine_render::v1::upload_mesh_tiled(&positions, &normals, &uvs, &[0, 1, 2, 0, 2, 3])
+                .expect("quad uploads");
         let tangent = mesh.tangents[0];
         // GL texel: x neutral, y fully up (255), z = 1: decodes to (0, ~0.7, ~0.7).
         let mut texel = TextureUpload {
@@ -269,7 +274,10 @@ mod tests {
         ];
         let world_y = t[1] * v[0] + b[1] * v[1] + n[1] * v[2];
         let world_x = t[0] * v[0] + b[0] * v[1] + n[0] * v[2];
-        assert!(world_y > 0.5, "green up must tilt toward world +y, got {world_y}");
+        assert!(
+            world_y > 0.5,
+            "green up must tilt toward world +y, got {world_y}"
+        );
         assert!(world_x.abs() < 0.05, "no sideways tilt, got {world_x}");
     }
 
@@ -287,11 +295,20 @@ mod tests {
                 );
                 return;
             };
-            assert_eq!(cooked.base.1.width, cooked.normal.1.width, "set {set} sizes agree");
-            assert_eq!(cooked.normal.1.width, cooked.orm.1.width, "set {set} sizes agree");
+            assert_eq!(
+                cooked.base.1.width, cooked.normal.1.width,
+                "set {set} sizes agree"
+            );
+            assert_eq!(
+                cooked.normal.1.width, cooked.orm.1.width,
+                "set {set} sizes agree"
+            );
             let mut keys = [cooked.base.0, cooked.normal.0, cooked.orm.0];
             keys.sort();
-            assert!(keys[0] != keys[1] && keys[1] != keys[2], "set {set} keys distinct");
+            assert!(
+                keys[0] != keys[1] && keys[1] != keys[2],
+                "set {set} keys distinct"
+            );
         }
     }
 
@@ -304,7 +321,11 @@ mod tests {
             for b in bytes {
                 c ^= u32::from(*b);
                 for _ in 0..8 {
-                    c = if c & 1 == 1 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                    c = if c & 1 == 1 {
+                        0xEDB8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
                 }
             }
             !c
@@ -367,7 +388,11 @@ mod tests {
         let (w, h) = (640u32, 480u32);
         presenter.resize(w, h).expect("size applies");
         let report = super::super::upload_kit(&mut presenter, &kit);
-        let wall = kit.baked.iter().find(|b| b.actor.id == 3).expect("north wall");
+        let wall = kit
+            .baked
+            .iter()
+            .find(|b| b.actor.id == 3)
+            .expect("north wall");
         let set = kit
             .sets
             .iter()
@@ -390,22 +415,27 @@ mod tests {
             60.0f32.to_radians(),
         );
         camera.aspect = w as f32 / h as f32;
-        let draw = report.draws.iter().find(|d| d.key == wall.key).expect("wall draw");
-        let frame = |presenter: &mut Presenter, base: Option<TextureKey>, normal: Option<TextureKey>| {
-            let list = DrawList {
-                camera: camera.clone(),
-                light: scene.light.clone(),
-                items: vec![DrawItem {
-                    mesh: draw.key,
-                    material: draw.material.clone(),
-                    base_color: base,
-                    normal_map: normal,
-                }],
+        let draw = report
+            .draws
+            .iter()
+            .find(|d| d.key == wall.key)
+            .expect("wall draw");
+        let frame =
+            |presenter: &mut Presenter, base: Option<TextureKey>, normal: Option<TextureKey>| {
+                let list = DrawList {
+                    camera: camera.clone(),
+                    light: scene.light.clone(),
+                    items: vec![DrawItem {
+                        mesh: draw.key,
+                        material: draw.material.clone(),
+                        base_color: base,
+                        normal_map: normal,
+                    }],
+                };
+                presenter
+                    .capture_live_pixels(&list, &LookToggles::all_on())
+                    .expect("live wall frame")
             };
-            presenter
-                .capture_live_pixels(&list, &LookToggles::all_on())
-                .expect("live wall frame")
-        };
         let on = frame(&mut presenter, draw.base_color, draw.normal_map);
         let on_again = frame(&mut presenter, draw.base_color, draw.normal_map);
         let off = frame(&mut presenter, draw.base_color, Some(flat_key));
@@ -426,11 +456,19 @@ mod tests {
                 changed += usize::from(d > 3);
             }
         }
-        eprintln!("VR2 normal map: wall mask {masked} px, {changed} changed, {outside} changed outside");
+        eprintln!(
+            "VR2 normal map: wall mask {masked} px, {changed} changed, {outside} changed outside"
+        );
         assert!(masked > 20_000, "the wall fills the frame, got {masked} px");
         // Bloom bleeds a thin fringe past the wall edge; nothing else moves.
-        assert!(outside * 100 < masked, "the map moves almost nothing outside the wall: {outside} px");
-        assert!(changed * 5 > masked, "normal map LIVE: {changed} of {masked} wall pixels differ");
+        assert!(
+            outside * 100 < masked,
+            "the map moves almost nothing outside the wall: {outside} px"
+        );
+        assert!(
+            changed * 5 > masked,
+            "normal map LIVE: {changed} of {masked} wall pixels differ"
+        );
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/vr2");
         std::fs::create_dir_all(&dir).expect("target/vr2");
         for (name, px) in [
@@ -438,7 +476,8 @@ mod tests {
             ("wall_normal_off.png", &off),
             ("wall_before_flat_colour.png", &flat_colour),
         ] {
-            std::fs::write(dir.join(name), png_bytes(&px.rgba, px.width, px.height)).expect("png writes");
+            std::fs::write(dir.join(name), png_bytes(&px.rgba, px.width, px.height))
+                .expect("png writes");
         }
         // Whole-arena before/after: the kit flat-coloured (no maps) vs VR2.
         let establishing = |presenter: &mut Presenter, maps: bool| {
@@ -469,7 +508,15 @@ mod tests {
         let before = establishing(&mut presenter, false);
         let after = establishing(&mut presenter, true);
         assert_ne!(before.rgba, after.rgba, "the maps change the arena frame");
-        std::fs::write(dir.join("arena_before_flat_colour.png"), png_bytes(&before.rgba, w, h)).expect("png");
-        std::fs::write(dir.join("arena_after_vr2.png"), png_bytes(&after.rgba, w, h)).expect("png");
+        std::fs::write(
+            dir.join("arena_before_flat_colour.png"),
+            png_bytes(&before.rgba, w, h),
+        )
+        .expect("png");
+        std::fs::write(
+            dir.join("arena_after_vr2.png"),
+            png_bytes(&after.rgba, w, h),
+        )
+        .expect("png");
     }
 }

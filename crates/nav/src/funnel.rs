@@ -17,6 +17,8 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use engine_core::vec3::orient2;
+
 use crate::tiles::{StampedPath, TileError, TiledNav};
 
 /// One lattice point `(x, y)` in half-cell units.
@@ -175,12 +177,6 @@ fn corridor(
     Some(cells)
 }
 
-/// `(b - o) x (c - o)`, exact in i64: positive when `c` lies left of `o -> b`.
-fn cross(o: Point, b: Point, c: Point) -> i64 {
-    (i64::from(b.0) - i64::from(o.0)) * (i64::from(c.1) - i64::from(o.1))
-        - (i64::from(b.1) - i64::from(o.1)) * (i64::from(c.0) - i64::from(o.0))
-}
-
 /// Portal `(left, right)` for the step `from -> to` across their shared edge,
 /// seen from the walker; left is the counter-clockwise side.
 fn portal(from: (usize, usize), to: (usize, usize)) -> (Point, Point) {
@@ -208,8 +204,8 @@ fn pull(cells: &[(usize, usize)]) -> Vec<Point> {
     let mut i = 1;
     while i < portals.len() {
         let (new_left, new_right) = portals[i];
-        if cross(apex, right, new_right) >= 0 {
-            if apex == right || cross(apex, left, new_right) < 0 {
+        if orient2(apex, right, new_right) >= 0 {
+            if apex == right || orient2(apex, left, new_right) < 0 {
                 (right, right_i) = (new_right, i);
             } else {
                 out.push(left);
@@ -218,8 +214,8 @@ fn pull(cells: &[(usize, usize)]) -> Vec<Point> {
                 continue;
             }
         }
-        if cross(apex, left, new_left) <= 0 {
-            if apex == left || cross(apex, right, new_left) > 0 {
+        if orient2(apex, left, new_left) <= 0 {
+            if apex == left || orient2(apex, right, new_left) > 0 {
                 (left, left_i) = (new_left, i);
             } else {
                 out.push(right);
@@ -241,7 +237,7 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
         if out.last() == Some(&point) {
             continue;
         }
-        while out.len() >= 2 && cross(out[out.len() - 2], out[out.len() - 1], point) == 0 {
+        while out.len() >= 2 && orient2(out[out.len() - 2], out[out.len() - 1], point) == 0 {
             out.pop();
         }
         out.push(point);

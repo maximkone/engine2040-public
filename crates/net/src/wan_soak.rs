@@ -12,7 +12,7 @@ use super::netcode::MAX_ROLLBACK;
 use super::scale::TICK_HZ;
 use super::session::INPUT_DELAY_TICKS;
 use super::tick_budget::{
-    record_tape, SiegeTickWorld, TickBudgetError, ENTITIES, MAX_TICKS, PLAYERS,
+    record_tape_world, DesyncSite, SiegeTickWorld, TickBudgetError, ENTITIES, MAX_TICKS, PLAYERS,
 };
 use engine_core::{
     hash::{FNV64_OFFSET, GOLDEN_GAMMA},
@@ -157,6 +157,15 @@ pub enum WanError {
         /// What carried the bad timing.
         what: &'static str,
     },
+    /// The live run's full state hash disagrees with the clean tape's at the
+    /// last tick; `site` names the first divergent entity and component.
+    Desync {
+        /// Tick both hashes were taken at.
+        tick: u32,
+        /// First divergent entity and component (`None` only if the two
+        /// worlds compare equal yet the hashes differ).
+        site: Option<DesyncSite>,
+    },
     /// The siege tick harness refused (budget, order or config).
     Tick(TickBudgetError),
 }
@@ -187,6 +196,14 @@ impl Display for WanError {
             Self::NonFiniteSample { what } => {
                 write!(f, "{what} sample is not finite non-negative ms")
             }
+            Self::Desync { tick, site } => match site {
+                Some(site) => write!(
+                    f,
+                    "wan desync at tick {tick}: first divergence entity {} component {:?}",
+                    site.entity, site.component
+                ),
+                None => write!(f, "wan desync at tick {tick}: state hashes differ"),
+            },
             Self::Tick(err) => write!(f, "wan siege harness refused ({err})"),
         }
     }
@@ -395,13 +412,24 @@ fn p99_ms(samples: &mut [f64]) -> Result<f64, WanError> {
 /// pin them against the clean tape checkpoint, then run the deterministic
 /// 64-client delivery and fold the per-fault report.
 pub fn run_fault(seed: u64, fault: Fault, ticks: u32) -> Result<FaultReport, WanError> {
+    run_fault_with(seed, fault, ticks, |_, _| {})
+}
+
+/// [`run_fault`] with `after_tick` called on the live world after every step,
+/// so a test can play a desynced peer.
+fn run_fault_with(
+    seed: u64,
+    fault: Fault,
+    ticks: u32,
+    mut after_tick: impl FnMut(u32, &mut SiegeTickWorld),
+) -> Result<FaultReport, WanError> {
     if ticks == 0 || ticks > MAX_TICKS {
         return Err(WanError::BadTicks { got: ticks });
     }
     // Authoritative checkpoint: the clean siege tape. The fault harness below
     // never perturbs server state; delivery only decides when each client
     // sees a generation the server already hashed.
-    let tape = record_tape(seed, ticks)?;
+    let (tape, clean_world) = record_tape_world(seed, ticks)?;
     // Drive the same siege world once more so the report carries the live
     // interest bytes and starve ledger, not a copy of the tape struct: the
     // byte totals must match the checkpoint exactly.
@@ -409,9 +437,19 @@ pub fn run_fault(seed: u64, fault: Fault, ticks: u32) -> Result<FaultReport, Wan
     let mut live_bytes = 0u64;
     for tick in 0..ticks {
         live_bytes += world.step_tick(tick)?;
+        after_tick(tick, &mut world);
     }
     if live_bytes != tape.snapshot_bytes {
         return Err(WanError::Tick(TickBudgetError::BadTicks { got: ticks }));
+    }
+    // Peers compare the cheap full hash; only a mismatch pays for the Merkle
+    // descent that names the first divergent entity and component.
+    let last = ticks - 1;
+    if world.state_hash(last) != clean_world.state_hash(last) {
+        return Err(WanError::Desync {
+            tick: last,
+            site: world.first_divergence(&clean_world),
+        });
     }
 
     let disc_start = ticks / 3;
@@ -607,10 +645,32 @@ pub fn run_matrix(seed: u64, ticks: u32) -> Result<[FaultReport; 5], WanError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tick_budget::{record_tape, SIEGE_TICKS};
+    use super::super::tick_budget::{record_tape, SiegeComponent, SIEGE_TICKS};
     use super::*;
 
     const TEST_TICKS: u32 = 240;
+
+    #[test]
+    fn wan_desync_names_the_first_divergent_entity_and_component() {
+        let desynced = run_fault_with(7, Fault::Latency, TEST_TICKS, |tick, world| {
+            if tick == 100 {
+                world.nudge_x(450);
+                world.nudge_x(300);
+            }
+        });
+        let site = DesyncSite {
+            entity: 300,
+            component: SiegeComponent::X,
+        };
+        assert_eq!(
+            desynced.unwrap_err(),
+            WanError::Desync {
+                tick: TEST_TICKS - 1,
+                site: Some(site),
+            }
+        );
+        run_fault(7, Fault::Latency, TEST_TICKS).expect("without the nudge the peers agree");
+    }
 
     #[test]
     fn wan_soak_latency_converges_with_clean_checkpoint() {

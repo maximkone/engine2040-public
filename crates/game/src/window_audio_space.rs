@@ -29,6 +29,7 @@
 //! golden `d57b5c8ae3096614` cannot move. Budget: a handful of feed writes
 //! per tick, no heap.
 
+use engine_arena::{EndWhy, SpearEvent};
 use engine_audio::combat_cues::{cue_for_event, footstep, Surface};
 use engine_audio::{cue_names, FeedError, FeedTx, FightCue, Tension, TensionTracker};
 use engine_spatial::to_cm;
@@ -102,6 +103,8 @@ pub struct SpaceStats {
     /// Tension levels sent to a bank that carries no music: the bed cannot
     /// play them, so the level is spoken to nobody (loud, not silent).
     pub tension_unheard: u64,
+    /// Spear grapple cues played.
+    pub spear: u64,
 }
 
 /// Window-side audio presentation state: where the listener is, what the
@@ -250,6 +253,26 @@ impl AudioSpace {
         }
     }
 
+    /// Plays the cues of one tick's spear events (throw, thunk, rope creak) where they happen:
+    /// at the fighter the cue names, chest high.
+    pub fn feed_spear(
+        &mut self,
+        tx: &mut FeedTx,
+        tick: u32,
+        events: &[SpearEvent],
+        views: &[FighterView],
+    ) {
+        for &event in events {
+            let Some((name, gain, slot)) = spear_cue(event) else {
+                continue;
+            };
+            let pos = position_of(views, slot);
+            let sent = tx.play(tick, name, gain, pos);
+            self.note(sent);
+            self.stats.spear += 1;
+        }
+    }
+
     fn feed_events(
         &mut self,
         tx: &mut FeedTx,
@@ -384,6 +407,44 @@ fn feet_cm(view: &FighterView) -> [i32; 3] {
         to_cm(view.pos_m[1]),
         to_cm(view.pos_m[2]),
     ]
+}
+
+/// The cue of the audio bank an authority event plays, its gain and the slot it sounds at.
+#[must_use]
+pub fn spear_cue(event: SpearEvent) -> Option<(&'static str, f32, u8)> {
+    match event {
+        SpearEvent::Thrown { thrower, .. } => Some((cue_names::SWING, 0.9, thrower)),
+        SpearEvent::Hit {
+            victim: Some(victim),
+            ..
+        } => Some((cue_names::HIT, 1.0, victim)),
+        SpearEvent::Hit { thrower, .. } => Some((cue_names::IMPACT_STONE, 0.9, thrower)),
+        SpearEvent::Deflected {
+            victim, parried, ..
+        } => Some(if parried {
+            (cue_names::PARRY, 0.9, victim)
+        } else {
+            (cue_names::BLOCK, 0.8, victim)
+        }),
+        SpearEvent::TetherPull { thrower, speed, .. } => {
+            let strain = (f32::from(speed) / 500.0).clamp(0.0, 1.0);
+            Some((cue_names::FOOTSTEP_WOOD, 0.3 + 0.4 * strain, thrower))
+        }
+        SpearEvent::TetherEnd {
+            thrower,
+            victim,
+            why,
+            ..
+        } => {
+            let at = victim.unwrap_or(thrower);
+            match why {
+                EndWhy::Wall => Some((cue_names::IMPACT_STONE, 1.0, at)),
+                EndWhy::Arrived => Some((cue_names::HIT, 0.8, at)),
+                _ => None,
+            }
+        }
+        SpearEvent::Missed { .. } => None,
+    }
 }
 
 /// Where a blow on `slot` lands: its chest.

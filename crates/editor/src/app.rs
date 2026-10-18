@@ -1262,10 +1262,7 @@ impl Holder {
             self.init_error = Some(EditorAppError::WindowFailed(reason));
             event_loop.exit();
         };
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = engine_render::backend::new_instance(wgpu::Backends::all());
         let surface = match instance.create_surface(Arc::clone(&window)) {
             Ok(surface) => surface,
             Err(error) => {

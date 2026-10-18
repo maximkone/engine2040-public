@@ -356,6 +356,12 @@ impl SpacePlayer {
         self.weights.len()
     }
 
+    /// Integer weights from the last [`SpacePlayer::tick`]: one per prepared
+    /// sample in canonical order, summing to [`WEIGHT_SCALE`] after a tick.
+    pub fn weights(&self) -> &[u32] {
+        &self.weights
+    }
+
     /// True when every inertial offset lane reached zero.
     pub fn settled(&self) -> bool {
         self.off.iter().flatten().all(|lane| *lane == 0)

@@ -100,7 +100,13 @@ pub struct SightWorld {
 impl SightWorld {
     /// Build from an actor snapshot. Input order never affects the result.
     pub fn build(actors: &[Actor]) -> Self {
-        let mut ordered: Vec<&Actor> = actors.iter().collect();
+        Self::from_refs(actors.iter())
+    }
+
+    /// Same as [`SightWorld::build`] over borrowed actors, so a caller that
+    /// already filtered a snapshot need not clone it.
+    pub(crate) fn from_refs<'a>(actors: impl Iterator<Item = &'a Actor>) -> Self {
+        let mut ordered: Vec<&Actor> = actors.collect();
         ordered.sort_by_key(|a| a.id);
         let mut solids = Vec::new();
         let mut boxes = BTreeMap::new();
@@ -132,6 +138,11 @@ impl SightWorld {
             }
         }
         Self { solids, boxes }
+    }
+
+    /// Physical (ray-blocking) boxes, id ascending.
+    pub(crate) fn solids(&self) -> &[Box3] {
+        &self.solids
     }
 
     /// Box by actor id, for endpoint lookups.
@@ -215,7 +226,7 @@ fn quantize(p: [f32; 3]) -> Result<[i32; 3], SightError> {
 }
 
 /// Inclusive containment: endpoint volumes never block their own ray.
-fn contains(b: &Box3, p: [i32; 3]) -> bool {
+pub(crate) fn contains(b: &Box3, p: [i32; 3]) -> bool {
     b.min_x <= p[0]
         && p[0] <= b.max_x
         && b.min_y <= p[1]
@@ -248,7 +259,7 @@ fn blocked(world: &SightWorld, e: [i32; 3], t: [i32; 3]) -> bool {
 
 /// Integer slab test for one box: segment `e + s*d`, `s in [0,1]`, hits the
 /// open interior with positive length. Zero-length face touches pass clear.
-fn seg_hits(b: Box3, e: [i32; 3], d: [i64; 3]) -> bool {
+pub(crate) fn seg_hits(b: Box3, e: [i32; 3], d: [i64; 3]) -> bool {
     let (mut lo_n, mut lo_d) = (0i64, 1i64);
     let (mut hi_n, mut hi_d) = (1i64, 1i64);
     let slabs = [
@@ -326,7 +337,7 @@ pub struct RayHit {
 /// Entry parameter `lo_n / lo_d` (denominator positive) where the ray
 /// `e + s*d` first enters the open interior of `b`, or `None` for a miss or a
 /// grazing touch. Same integer slab math as [`seg_hits`], without the segment end.
-fn ray_entry(b: &Box3, e: [i32; 3], d: [i64; 3]) -> Option<(i64, i64)> {
+pub(crate) fn ray_entry(b: &Box3, e: [i32; 3], d: [i64; 3]) -> Option<(i64, i64)> {
     let (mut lo_n, mut lo_d) = (0i64, 1i64);
     let mut hi: Option<(i64, i64)> = None;
     let spans = [
@@ -358,7 +369,7 @@ fn ray_entry(b: &Box3, e: [i32; 3], d: [i64; 3]) -> Option<(i64, i64)> {
 }
 
 /// Round `v * n / den` half away from zero (`den > 0`).
-fn mul_div_round(v: i64, n: i64, den: i64) -> i64 {
+pub(crate) fn mul_div_round(v: i64, n: i64, den: i64) -> i64 {
     let num = i128::from(v) * i128::from(n) * 2;
     let den2 = i128::from(den) * 2;
     let half = if num < 0 {

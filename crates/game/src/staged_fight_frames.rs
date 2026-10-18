@@ -613,7 +613,7 @@ pub fn staged_fight_frame_rgba(
         // HP bar above the body: filled width tracks health in permille,
         // so full health fills more green than low health. Empty for
         // knocked-down bodies. Same dots give the same bar twice.
-        let filled = (usize::from(dot.hp) * HP_BAR_W + 999) / 1000;
+        let filled = (usize::from(dot.hp) * HP_BAR_W).div_ceil(1000);
         let filled = filled.min(HP_BAR_W);
         let bar_x0 = center_x.saturating_sub(HP_BAR_W / 2);
         let bar_y0 = y0.saturating_sub(HP_BAR_H + 2);

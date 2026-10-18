@@ -69,6 +69,11 @@ const GETUP_TICKS: u32 = 150;
 const NO_GETUP: u32 = u32::MAX;
 /// A `Hit` this many ticks old or newer explains a fall that has no cue of its own.
 const HIT_EXPLAINS_TICKS: u32 = 30;
+/// Ticks a body keeps following the sim's slide, level, after its tether ended: the sim lets
+/// the momentum drift out while the body falls and lands.
+const LAND_CARRY_TICKS: u32 = 40;
+/// A body that was towed may get up once its root is slower than this, m/s.
+const LANDED_MS: f32 = 1.2;
 
 /// One physical bone: the CT7 joint it follows, its physical parent (an index of this table,
 /// parent first), the CT7 joint at its tip (the capsule centers halfway there) or a fixed length
@@ -288,6 +293,8 @@ struct Body {
     center: [f32; BONE_COUNT],
     /// Ticks stepped since the spawn.
     age: u32,
+    /// Height of the root capsule at the spawn, meters: where a tether holds the body up from.
+    hold_y: f32,
 }
 
 /// The ragdoll layer of a [`FighterLook`]: one float world, one body per fallen slot.
@@ -310,6 +317,12 @@ pub(super) struct RagdollLook {
     getup: Vec<Inertial>,
     /// Ticks since each slot's get-up began, [`NO_GETUP`] when none is in flight.
     getup_age: [u32; MAX_LOOK_FIGHTERS],
+    /// The body of the slot was made by a tether, not by a fall: it gets up once it has landed.
+    flight: [bool; MAX_LOOK_FIGHTERS],
+    /// A tether carries the slot's body this tick.
+    towed: [bool; MAX_LOOK_FIGHTERS],
+    /// Ticks of level carry left after the tether ended.
+    landing: [u32; MAX_LOOK_FIGHTERS],
     stepped: Option<u32>,
     spawned: u32,
     refused: u32,
@@ -330,6 +343,9 @@ impl RagdollLook {
             stand: [false; MAX_LOOK_FIGHTERS],
             getup,
             getup_age: [NO_GETUP; MAX_LOOK_FIGHTERS],
+            flight: [false; MAX_LOOK_FIGHTERS],
+            towed: [false; MAX_LOOK_FIGHTERS],
+            landing: [0; MAX_LOOK_FIGHTERS],
             stepped: None,
             spawned: 0,
             refused: 0,
@@ -358,7 +374,33 @@ impl RagdollLook {
         self.latched = [false; MAX_LOOK_FIGHTERS];
         self.stand = [false; MAX_LOOK_FIGHTERS];
         self.getup_age = [NO_GETUP; MAX_LOOK_FIGHTERS];
+        self.flight = [false; MAX_LOOK_FIGHTERS];
+        self.towed = [false; MAX_LOOK_FIGHTERS];
+        self.landing = [0; MAX_LOOK_FIGHTERS];
         self.stepped = None;
+    }
+
+    /// True when the slot's body may stand up as far as a tether is concerned: no tether holds
+    /// it, its level carry is over and, for a body a tether made, its root has slowed down.
+    fn landed(&self, slot: usize) -> bool {
+        if self.towed[slot] || self.landing[slot] > 0 {
+            return false;
+        }
+        if !self.flight[slot] {
+            return true;
+        }
+        let speed = u8::try_from(slot)
+            .ok()
+            .and_then(|slot| self.fx.as_ref()?.ragdoll_speed(slot));
+        speed.is_none_or(|speed| speed < LANDED_MS)
+    }
+
+    /// Drags the slot's root toward `to` at `velocity`; `lift` holds it up, else it may fall.
+    fn carry(&mut self, slot: usize, to: [f32; 3], velocity: [f32; 3], lift: bool) {
+        if let (Ok(slot), Some(fx)) = (u8::try_from(slot), self.fx.as_mut()) {
+            // A refusal (non-finite track) leaves the body free; the next tick tries again.
+            let _ = fx.carry_ragdoll(slot, to, velocity, lift);
+        }
     }
 
     /// The world, made on first use: the sand slab and nothing else.
@@ -536,6 +578,7 @@ impl RagdollLook {
             seed: pose.clone(),
             center,
             age: 0,
+            hold_y: place[0].pos[1],
         });
         self.spawned = self.spawned.saturating_add(1);
         Ok(())
@@ -770,7 +813,8 @@ impl FighterLook {
         let lying = self.ragdoll.bodies[index]
             .as_ref()
             .is_some_and(|body| body.age >= MIN_LYING_TICKS);
-        self.ragdoll.stand[index] = lying && self.slots[index].act != Act::Down;
+        self.ragdoll.stand[index] =
+            lying && self.slots[index].act != Act::Down && self.ragdoll.landed(index);
         if self.ragdoll.stand[index] {
             self.slots[index].balance = GaitPhase::Steady;
         }
@@ -909,6 +953,7 @@ impl FighterLook {
         });
         // The ragdoll is gone from the next frame on, whatever the blend does.
         self.ragdoll.bodies[index] = None;
+        self.ragdoll.flight[index] = false;
         let Some((before, now)) = shown else {
             return;
         };
@@ -949,6 +994,76 @@ impl FighterLook {
         let ticks = f32::from(u16::try_from(age).unwrap_or(u16::MAX));
         apply_offsets(set, pose, (ticks + alpha).max(0.0) / TICK_HZ)
             .map_err(|err| super::LookError::Skin(err.to_string()))
+    }
+
+    /// A tether carries these bodies this tick (`Some(lift)`, meters the arc holds the body above
+    /// its standing height) and lets go of the rest. A carried slot with no ragdoll gets one at
+    /// the next tick (it keeps the pose the viewer saw); a ragdoll follows the sim's own track
+    /// with a soft spring, so the limbs trail and swing; when the tether lets go the body keeps
+    /// following the slide, level, for [`LAND_CARRY_TICKS`], falls, lands, and stands up through
+    /// the usual get-up. Call it once per accepted tick before [`Self::observe_live_balances`].
+    /// Presentation only: the sim never reads this.
+    pub fn observe_carries(&mut self, tows: &[Option<f32>; MAX_LOOK_FIGHTERS]) {
+        if !self.ragdoll.on {
+            return;
+        }
+        for (index, tow) in tows.iter().enumerate() {
+            let slot = self.slots[index];
+            if !slot.seen {
+                continue;
+            }
+            let track = [slot.pos[0], 0.0, slot.pos[2]];
+            let speed = [
+                (slot.pos[0] - slot.prev_pos[0]) * TICK_HZ,
+                0.0,
+                (slot.pos[2] - slot.prev_pos[2]) * TICK_HZ,
+            ];
+            match *tow {
+                Some(lift) => {
+                    self.ragdoll.towed[index] = true;
+                    if !self.ragdoll.has(index) {
+                        if self.ragdoll.pending[index].is_none() {
+                            self.ragdoll.pending[index] = Some(Kick {
+                                dir: [0.0, 0.0],
+                                damage: 0,
+                                standing: slot,
+                            });
+                            self.ragdoll.flight[index] = true;
+                        }
+                        continue;
+                    }
+                    let hold = self.ragdoll.bodies[index]
+                        .as_ref()
+                        .map_or(0.0, |b| b.hold_y);
+                    let up = if self.ragdoll.flight[index] {
+                        lift
+                    } else {
+                        0.0
+                    };
+                    self.ragdoll
+                        .carry(index, [track[0], hold + up, track[2]], speed, true);
+                }
+                None => {
+                    if std::mem::take(&mut self.ragdoll.towed[index]) {
+                        self.ragdoll.landing[index] = LAND_CARRY_TICKS;
+                    }
+                    if self.ragdoll.landing[index] > 0 {
+                        self.ragdoll.landing[index] -= 1;
+                        self.ragdoll.carry(index, track, speed, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where each ragdolled slot's root bone is now, meters: what a rope ties to.
+    #[must_use]
+    pub fn ragdoll_roots(&self) -> [Option<[f32; 3]>; MAX_LOOK_FIGHTERS] {
+        std::array::from_fn(|index| {
+            let slot = u8::try_from(index).ok()?;
+            self.ragdoll.has(index).then_some(())?;
+            self.ragdoll.fx.as_ref()?.ragdoll_root(slot)
+        })
     }
 
     /// The bones of a ragdolled `slot` at `alpha` in its root frame, or `None`.
@@ -1461,5 +1576,44 @@ mod tests {
             line.is_some_and(|l| l.contains(" ragdolls=") && !l.ends_with(" ragdolls=0")),
             "the arena view line counts the ragdolls drawn"
         );
+    }
+
+    #[test]
+    fn ragdoll_look_tow_lifts_a_body_along_the_track_then_it_lands_and_gets_up() {
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let mut views = ring(2);
+        let hp = [1000u16; 2];
+        let mut peak_m = 0.0f32;
+        let mut gap_m = 0.0f32;
+        let mut up_at = None;
+        for t in 0..420u32 {
+            let towed = (5..40).contains(&t);
+            if towed {
+                views[1].pos_m[0] += 0.1;
+            }
+            look.observe_tick(t, &views, &hp, &[]);
+            let mut tows = [None; MAX_LOOK_FIGHTERS];
+            tows[1] = towed.then_some(0.6);
+            look.observe_carries(&tows);
+            let shown = look.ragdoll_fold_gait(1, GaitPhase::Steady);
+            assert_eq!(shown, GaitPhase::Steady);
+            look.ragdoll_tick();
+            if let Some(root) = look.ragdoll_roots()[1] {
+                if towed && t > 25 {
+                    peak_m = peak_m.max(root[1]);
+                    gap_m = gap_m.max((root[0] - views[1].pos_m[0]).abs());
+                }
+            } else if t > 40 && up_at.is_none() {
+                up_at = Some(t);
+            }
+            assert!(look.ragdolls() <= 1);
+        }
+        assert_eq!(look.ragdoll_refused(), 0);
+        assert_eq!(look.ragdoll_spawns(), 1, "one body for the whole flight");
+        assert!(peak_m > 1.4, "the arc holds the body up: {peak_m}");
+        assert!(gap_m < 0.8, "and it follows the sim's track: {gap_m}");
+        let up = up_at.expect("the body landed and got up");
+        assert!(up >= 80, "not before the level carry ran out: {up}");
+        assert!(look.ragdolls() == 0 && !look.ragdolled(1));
     }
 }

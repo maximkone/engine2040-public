@@ -17,7 +17,7 @@ use super::submit::{
     SKIN_PARAMS_BYTES,
 };
 use super::timing::GpuTimer;
-use super::{BLIT_WGSL, DEPTH_FORMAT, HDR_FORMAT, IBL_STUDIO_HDRI_BYTES, OUTPUT_FORMAT};
+use super::{BLIT_WGSL, DEPTH_FORMAT, HDR_FORMAT, OUTPUT_FORMAT};
 use crate::v1::{self};
 use crate::v1_gpu::FORWARD_PBR_WGSL;
 use crate::{decals, fog, gtao, ibl, material_layer, overlay, particles_gpu, sky};
@@ -242,11 +242,17 @@ pub struct Presenter {
     /// Twin shadow uniform (32 bytes under `twin_forward_wgsl`):
     /// the per-frame bind refreshes the active cascade here.
     pub(crate) twin_shadow_buf: wgpu::Buffer,
+    /// Packed live contact feet (`contact_feet_bytes`), written behind the sun
+    /// splits of `twin_shadow_buf` every frame. All zero until the game feeds it.
+    pub(crate) contact_feet: [u8; crate::contact_feet::CONTACT_FEET_BYTES],
     /// EG11 live sun depth map: one cached texture plus pipeline pair the
     /// live forward submit records before the forward draws, so a live frame
     /// pays the depth pass, never a texture plus pipeline build.
     /// Presentation only, never hashed.
     pub(crate) sun_sub: super::sun_shadow::SunShadowSubmitter,
+    /// The quality tier applied by `apply_quality`; the live frame reads its cascade, AO and
+    /// texture knobs here. Starts at the top tier, which changes nothing.
+    pub(crate) quality: crate::quality::Knobs,
     /// Warmed pipeline variants for the scene key set (pipeline-cache
     /// residency; load allocates, per-frame borrows).
     pub(crate) pipelines: crate::cache::PipelineCache,
@@ -880,7 +886,13 @@ impl Presenter {
         // shape fails init loudly, never a silent unlit twin.
         let twin_sun = crate::twin_shadow::twin_sun_pass()
             .map_err(|e| PresentError::Device(format!("rl19 twin sun: {e}")))?;
-        let twin_shadow_buf = uniform_buffer(&device, "rl19-twin-shadow", 32);
+        // 32 bytes of sun splits, then the live contact feet block the forward
+        // shader reads for the grounding shade (`contact_live`).
+        let twin_shadow_buf = uniform_buffer(
+            &device,
+            "rl19-twin-shadow",
+            super::contact_live::TWIN_SHADOW_BUF_BYTES,
+        );
         // The day capture is the arena day rig (one sun preset feeding
         // the look bake and the capture bundle from one bake);
         // per-frame time-of-day bakes ride the same submit shape, so this
@@ -965,12 +977,13 @@ impl Presenter {
             label: Some("ra1-sky-view-view"),
             ..Default::default()
         });
-        // The studio HDRI bakes once here (same fixture bytes the
-        // cook reference bakes); per-frame charts sample this bake, so the
-        // steady-state path never cooks. A failed bake fails init loudly:
-        // the fixture bytes are fixed valid inputs, so this is
-        // unreachable unless the IBL contract itself changed.
-        let (ibl_bake, _) = ibl::bake(IBL_STUDIO_HDRI_BYTES)
+        // The arena day sky bakes once here (the same sky the look and the fog
+        // read; the photo-studio HDRI it replaces put softboxes and a white
+        // cyclorama into the sand's reflections); per-frame charts sample this
+        // bake, so the steady-state path never cooks. A failed bake fails init
+        // loudly: the sky parameters are fixed valid inputs, so this is
+        // unreachable unless the sky contract itself changed.
+        let (ibl_bake, _) = crate::ibl_arena_env::bake_arena_day()
             .map_err(|e| PresentError::Device(format!("look ibl bake: {e}")))?;
         // Live forward bake upload once through the bake owner.
         let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
@@ -1095,7 +1108,7 @@ impl Presenter {
             scopes: super::scope_ledger::ScopeLedger::default(),
             sky_sub: sky::SkySubmitter::new(&device),
             layer_sub: material_layer::LayerSubmitter::new(&device),
-            particles: particles_gpu::ParticlePool::new(2040),
+            particles: particles_gpu::ParticlePool::new(super::quality_apply::POOL_SEED),
             particle_sub: particles_gpu::ParticleSubmitter::new(&device),
             decal_pool: decals::DecalPool::new(),
             decal_sub: decals::DecalSubmitter::new(&device),
@@ -1122,7 +1135,9 @@ impl Presenter {
             gtao_submit_us: 0,
             twin_sun,
             twin_shadow_buf,
+            contact_feet: [0u8; crate::contact_feet::CONTACT_FEET_BYTES],
             sun_sub: super::sun_shadow::SunShadowSubmitter::build(&device),
+            quality: crate::quality::knobs(crate::quality::Quality::High),
             pipelines,
             pipeline_keys,
             device,
@@ -1178,10 +1193,7 @@ impl Presenter {
         // logs `pick.startup_line()`. No stdout in lib.
         let (choice, _) = crate::backend::resolve_from_env(None);
         let pick = crate::backend::pick_backend(choice, None);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: crate::backend::wgpu_backends(pick.primary),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
         // GS6: enumerate and rank-pick the env choice instead of trusting
         // the driver's power-preference hint, so an Optimus laptop never
         // lands on the Intel adapter and the CPU rasterizer fails loudly
@@ -1257,10 +1269,7 @@ impl Presenter {
         }
         let (choice, _) = crate::backend::resolve_from_env(None);
         let pick = crate::backend::pick_backend(choice, None);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: crate::backend::wgpu_backends(pick.primary),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
         let surface = create_surface(&instance, window)?;
         Self::init_windowed(&instance, surface, width, height)
     }
@@ -1731,6 +1740,8 @@ impl Presenter {
         upload: &TextureUpload,
     ) -> Result<(GpuTexture, wgpu::BindGroup), PresentError> {
         upload.validate()?;
+        let capped = upload.capped_to(u32::from(self.quality.texture_max_px));
+        let upload = capped.as_ref().unwrap_or(upload);
         let size = wgpu::Extent3d {
             width: upload.width,
             height: upload.height,
@@ -1845,6 +1856,8 @@ impl Presenter {
         label: &'static str,
     ) -> Result<GpuTexture, PresentError> {
         upload.validate()?;
+        let capped = upload.capped_to(u32::from(self.quality.texture_max_px));
+        let upload = capped.as_ref().unwrap_or(upload);
         let size = wgpu::Extent3d {
             width: upload.width,
             height: upload.height,
@@ -1862,7 +1875,8 @@ impl Presenter {
             view_formats: &[],
         });
         let base = (upload.width, upload.height, upload.rgba.as_slice());
-        let levels = std::iter::once(base).chain(mips.iter().map(|(w, h, d)| (*w, *h, d.as_slice())));
+        let levels =
+            std::iter::once(base).chain(mips.iter().map(|(w, h, d)| (*w, *h, d.as_slice())));
         for (level, (width, height, rgba)) in (0u32..).zip(levels) {
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -1912,7 +1926,12 @@ impl Presenter {
         let normal_gpu = self.pack_linear_texture(normal, "ra1-set-normal")?;
         let orm_gpu = match orm {
             Some(upload) => self.pack_linear_texture(upload, "ra1-set-orm")?,
-            None => Self::linear_texel(&self.device, &self.queue, "ra1-set-orm", orm_fallback_rgba()),
+            None => Self::linear_texel(
+                &self.device,
+                &self.queue,
+                "ra1-set-orm",
+                orm_fallback_rgba(),
+            ),
         };
         let white;
         let base_view = match &base {
@@ -2993,10 +3012,7 @@ mod skin_window_tests {
         // the shared descriptor, then hands all three over.
         let (choice, _) = crate::backend::resolve_from_env(None);
         let pick = crate::backend::pick_backend(choice, None);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: crate::backend::wgpu_backends(pick.primary),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
         let adapter = pollster::block_on(crate::presenter_pick::pick_adapter(
             &instance,
             crate::backend::wgpu_backends(pick.primary),

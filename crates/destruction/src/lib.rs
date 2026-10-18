@@ -21,11 +21,11 @@ pub mod cluster;
 /// reads, fixed-point spread and the integer hash state. Std-only.
 pub mod crack;
 pub mod csg;
+/// Bounds-checked byte reads shared by the snapshot decoders.
+mod cursor;
 /// Debris distance tiers over the DX4 ledger: simplified mesh levels, merge
 /// groups of small pieces and far impostors. Std-only.
 pub mod debris_lod;
-/// Bounds-checked byte reads shared by the snapshot decoders.
-mod cursor;
 /// Runtime Voronoi fracture at an impact point with a capped cell count, break
 /// events on the bonded shape, and the cook cache that serves the same
 /// cut without the cold clip. Std-only.

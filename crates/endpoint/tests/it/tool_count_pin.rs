@@ -13,7 +13,7 @@ use engine_endpoint::{
     tools::TOOLS,
 };
 
-/// Reachable tools under `--features mcp`: 13 core + 48 pack verbs (the web pack adds
+/// Reachable tools under `--features mcp`: 13 core + 49 pack verbs (the web pack adds
 /// `build.web`, `serve.web`, `browser.capture` and `browser.input`; the physics
 /// pack adds `physics.read`, `physics.raycast` and `physics.shapecast`; the play
 /// pack adds `play.step_until`, `input.inject` and `state.digest`). The `rules` feature adds 3 (`rules.set`,
@@ -24,14 +24,15 @@ use engine_endpoint::{
 /// the pin by two, so this corrects the inherited two-verb drift; the physics
 /// pack's own +1 was already counted. The two cast verbs
 /// (`physics.raycast`, `physics.shapecast`) then moved every arm up by two.
+/// `scene.next` (SPX4, the scene pack's seventh verb) moved every arm up by one.
 #[cfg(not(any(feature = "rules", feature = "intake")))]
-const EXPECTED_ROUTER: usize = 61;
-#[cfg(all(feature = "rules", not(feature = "intake")))]
-const EXPECTED_ROUTER: usize = 64;
-#[cfg(all(feature = "intake", not(feature = "rules")))]
 const EXPECTED_ROUTER: usize = 62;
-#[cfg(all(feature = "rules", feature = "intake"))]
+#[cfg(all(feature = "rules", not(feature = "intake")))]
 const EXPECTED_ROUTER: usize = 65;
+#[cfg(all(feature = "intake", not(feature = "rules")))]
+const EXPECTED_ROUTER: usize = 63;
+#[cfg(all(feature = "rules", feature = "intake"))]
+const EXPECTED_ROUTER: usize = 66;
 
 #[test]
 fn frozen_registry_pins_26_and_router_is_pinned() {

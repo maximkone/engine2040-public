@@ -21,6 +21,7 @@ use engine_core::fixed::Fixed;
 use engine_core::{mix64, Fnv64};
 use engine_input::fighter::{Buttons, ATTACK, BLOCK};
 
+use crate::ack::input::{DeliveryStats, InputDelivery};
 use crate::dedicated::{HeadlessServer, ServerError};
 use crate::heal::NetHealError;
 use crate::link::{wire_len, Frame, LinkProfile, LinkReport, LinkStats, LoopbackWire, Peer, Wire};
@@ -529,6 +530,10 @@ pub struct SeatStats {
     pub gap_resyncs: u32,
     /// Whether the rejoin grant arrived.
     pub granted: bool,
+    /// Packet delivery measured from acks: how many of this seat's input
+    /// ticks the server counted, and the loss of the live state datagrams.
+    /// Logged, never hashed, like `input_delay`.
+    pub delivery: DeliveryStats,
 }
 
 impl SeatStats {
@@ -545,6 +550,7 @@ impl SeatStats {
             last_catchup_step: None,
             gap_resyncs: 0,
             granted: false,
+            delivery: DeliveryStats::EMPTY,
         }
     }
 
@@ -601,6 +607,7 @@ struct Seat {
     seat: u8,
     token: u64,
     client: Client,
+    delivery: InputDelivery,
     script: Script,
     predicted: Vec<BodyInput>,
     known: BTreeMap<(u32, u8), BodyInput>,
@@ -629,6 +636,7 @@ impl Seat {
             seat,
             token,
             client: Client::new(arena, id)?,
+            delivery: InputDelivery::new(id),
             script: Script::new(arena.seed, seat, id),
             predicted: Vec::new(),
             known: BTreeMap::new(),
@@ -660,6 +668,9 @@ impl Seat {
         if step < self.ticks {
             let input = self.script.next(step);
             self.predicted.push(input);
+            // Steps rise by one, so the record cannot be refused; were it
+            // refused the counters would only miss a tick, never the bout.
+            let _ = self.delivery.on_input_sent(step);
             if self.rejoin_at == Some(step) {
                 self.ask_to_join(step, wire)?;
                 self.burst_left = REJOIN_BURST_STEPS;
@@ -737,6 +748,14 @@ impl Seat {
         let Ok(packet) = decode_state(bytes) else {
             return;
         };
+        if !is_stream {
+            // A live window names the inputs the server took for its last
+            // STATE_COVER ticks, the ack of this seat's input stream. A
+            // checkpoint from the future is refused and changes nothing.
+            let _ = self
+                .delivery
+                .on_state(packet.checkpoint.tick, &packet.inputs, STATE_COVER);
+        }
         for input in packet.inputs {
             self.known.insert((input.tick, input.fighter.get()), input);
         }
@@ -1066,7 +1085,7 @@ impl std::fmt::Display for BoutReport {
             f,
             "BOUT seed={} fighters={} ({}h+{}ai) ticks={} tip={:016x} tape={}in/{:016x} replay={} \
              seats={}/{} drop={}..{} stalled={:?} reclaimed={:?} ai_cover={} catchup={}pk/{}B \
-             fight={}/{}/{} up_loss={}bp down_loss={}bp rollback_max={}/{} delay={}/{} digest={:016x} converged={}",
+             fight={}/{}/{} up_loss={}bp down_loss={}bp in_loss={}/{}pm rollback_max={}/{} delay={}/{} digest={:016x} converged={}",
             self.config.seed,
             self.config.fighters,
             self.humans,
@@ -1090,6 +1109,8 @@ impl std::fmt::Display for BoutReport {
             self.fight.after_rejoin,
             up.loss_bp(),
             down.loss_bp(),
+            self.seats[0].stats.delivery.input_loss_permille,
+            self.seats[1].stats.delivery.input_loss_permille,
             self.seats[0].stats.rollback_max,
             self.seats[1].stats.rollback_max,
             self.seats[0].stats.input_delay,
@@ -1259,7 +1280,10 @@ impl BoutPart {
                 slot: seat.client.local().get(),
                 checkpoints: seat.client.checkpoints().to_vec(),
                 mispredict_ticks: seat.client.total_mispredicts(),
-                stats: seat.stats,
+                stats: SeatStats {
+                    delivery: seat.delivery.stats(),
+                    ..seat.stats
+                },
             })
             .collect()
     }

@@ -38,6 +38,10 @@ pub struct Caps {
     pub blast_bodies: usize,
     /// Bodies one projectile impact may shove: the nearest to the hit point.
     pub impact_bodies: usize,
+    /// Ropes (spear tethers) alive at once; a new one recycles the oldest.
+    pub tethers: usize,
+    /// Nodes in one rope: the longer the chain, the smoother the sag and the more it costs.
+    pub tether_nodes: usize,
 }
 
 impl Tier {
@@ -57,6 +61,8 @@ impl Tier {
                 ccd_substeps: 0,
                 blast_bodies: 24,
                 impact_bodies: 3,
+                tethers: 2,
+                tether_nodes: 8,
             },
             Tier::Web => Caps {
                 bodies: 192,
@@ -67,6 +73,8 @@ impl Tier {
                 ccd_substeps: 1,
                 blast_bodies: 48,
                 impact_bodies: 4,
+                tethers: 3,
+                tether_nodes: 12,
             },
             Tier::Comfort => Caps {
                 bodies: 384,
@@ -77,6 +85,8 @@ impl Tier {
                 ccd_substeps: 1,
                 blast_bodies: 96,
                 impact_bodies: 6,
+                tethers: 6,
+                tether_nodes: 20,
             },
             Tier::High => Caps {
                 bodies: 768,
@@ -87,6 +97,8 @@ impl Tier {
                 ccd_substeps: 2,
                 blast_bodies: 192,
                 impact_bodies: 8,
+                tethers: 12,
+                tether_nodes: 32,
             },
         }
     }
@@ -109,7 +121,8 @@ impl Tier {
 }
 
 impl Caps {
-    /// A cap table is usable when every limit but the CCD substeps is above zero.
+    /// A cap table is usable when every limit but the CCD substeps is above zero (a rope needs two
+    /// nodes at least).
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let positive = [
             self.bodies,
@@ -119,8 +132,10 @@ impl Caps {
             self.solver_iterations,
             self.blast_bodies,
             self.impact_bodies,
+            self.tethers,
+            self.tether_nodes,
         ];
-        if positive.contains(&0) {
+        if positive.contains(&0) || self.tether_nodes < 2 {
             return Err(Error::BadCaps);
         }
         Ok(())

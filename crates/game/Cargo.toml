@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+# Only the two [[bin]] entries below are targets: src/bin/arena_capture.rs is a helper module of
+# the arena bin, and autodiscovery would build it a second time with every helper unused.
+autobins = false
 
 [lints]
 workspace = true

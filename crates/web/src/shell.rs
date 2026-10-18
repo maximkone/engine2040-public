@@ -266,9 +266,11 @@ fn run_loop(mut frame: Frame, canvas_id: String, generation: u32) {
 
 /// Start over after a device loss, on a fresh instance, adapter and device.
 async fn recover(canvas_id: String, generation: u32) {
-    recover_with(canvas_id, generation, |id, g| async move {
-        start(&id, g).await
-    })
+    recover_with(
+        canvas_id,
+        generation,
+        |id, g| async move { start(&id, g).await },
+    )
     .await;
 }
 

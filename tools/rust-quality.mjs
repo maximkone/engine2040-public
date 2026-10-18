@@ -432,7 +432,23 @@ export function analyzeFile(text, kind, ids = new Set()) {
     if (PUB_ITEM.test(c)) {
       m.pub_items++;
       let b = l - 1;
-      while (b >= 0 && /^\s*#\[/.test(raw[b] ?? "")) b--;
+      // Walk up over attribute lines, including a multi-line `#[x(` ... `)]` (rustfmt wraps long ones).
+      for (let n = 0; b >= 0 && n < 64; n++) {
+        const t = raw[b] ?? "";
+        if (/^\s*#\[/.test(t)) {
+          b--;
+          continue;
+        }
+        if (/^\s*\)+\]\s*$/.test(t)) {
+          let s = b - 1;
+          while (s >= 0 && b - s <= 16 && !/^\s*#\[/.test(raw[s] ?? "")) s--;
+          if (s >= 0 && /^\s*#\[/.test(raw[s] ?? "")) {
+            b = s - 1;
+            continue;
+          }
+        }
+        break;
+      }
       if (!/^\s*(?:\/\/\/|\/\*\*|#\[doc)/.test(raw[b] ?? "")) hit("undoc_pub", l);
     }
   }

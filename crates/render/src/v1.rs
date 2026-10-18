@@ -230,7 +230,11 @@ fn upload_mesh_checked(
                 vertex: i,
             });
         }
-        let (low, high) = if unit_uv { (0.0, 1.0) } else { (-MAX_TILED_UV, MAX_TILED_UV) };
+        let (low, high) = if unit_uv {
+            (0.0, 1.0)
+        } else {
+            (-MAX_TILED_UV, MAX_TILED_UV)
+        };
         if uv.iter().any(|c| *c < low || *c > high) {
             return Err(MeshError::UvOutOfRange(i));
         }

@@ -186,7 +186,6 @@ pub struct FighterView {
 }
 
 impl FighterView {
-
     /// True when combat state (hp or stamina) changed since the baseline.
     #[must_use]
     pub const fn combat_changed(self, base: Self) -> bool {

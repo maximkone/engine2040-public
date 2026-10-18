@@ -760,6 +760,7 @@ fn geo_apply(
             idempotency_key: args.idempotency_key,
             ops,
             approval: preview.approval,
+            delta: Some(false),
         })
     })?;
     Ok(GeoApplyOutput {
@@ -1058,6 +1059,7 @@ mod tests {
                 idempotency_key: 1,
                 ops,
                 approval: drafted.approval,
+                delta: None,
             },
         )
         .expect("insert lands");

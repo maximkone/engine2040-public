@@ -318,13 +318,20 @@ fn encode_bc1_fitted(block: &[[u8; 4]; BLOCK_TEXELS], w: Rgb) -> [u8; 8] {
     }
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
     for t in &texels {
-        let p = (t[0] - mean[0]) * axis[0] + (t[1] - mean[1]) * axis[1] + (t[2] - mean[2]) * axis[2];
+        let p =
+            (t[0] - mean[0]) * axis[0] + (t[1] - mean[1]) * axis[1] + (t[2] - mean[2]) * axis[2];
         lo = lo.min(p);
         hi = hi.max(p);
     }
     // Inset by 1/16 of the span: palette ends sit just inside the extremes.
     let inset = (hi - lo) / 16.0;
-    let at = |p: f32| [mean[0] + axis[0] * p, mean[1] + axis[1] * p, mean[2] + axis[2] * p];
+    let at = |p: f32| {
+        [
+            mean[0] + axis[0] * p,
+            mean[1] + axis[1] * p,
+            mean[2] + axis[2] * p,
+        ]
+    };
     let (mut best, mut best_err) = bc1_finish(&texels, at(hi - inset), at(lo + inset), w);
     for _ in 0..2 {
         let Some((e0, e1)) = bc1_refit(&texels, &best) else {
@@ -358,7 +365,8 @@ fn encode_level(rgba: &[u8], width: u32, height: u32, kind: MapKind) -> Result<V
         let mut buf = vec![0u8; pw * ph * 4];
         for y in 0..ph {
             for x in 0..pw {
-                let s = (y.min(height as usize - 1) * width as usize + x.min(width as usize - 1)) * 4;
+                let s =
+                    (y.min(height as usize - 1) * width as usize + x.min(width as usize - 1)) * 4;
                 buf[(y * pw + x) * 4..][..4].copy_from_slice(&rgba[s..s + 4]);
             }
         }
@@ -391,8 +399,14 @@ fn encode_level(rgba: &[u8], width: u32, height: u32, kind: MapKind) -> Result<V
 }
 
 /// Decode one cooked level to RGBA8 (`width * height * 4`). Normals rebuild Z from XY.
-pub fn decode_level_rgba(tex: &Ktx2Texture, level: usize) -> Result<(u32, u32, Vec<u8>), Ktx2Error> {
-    let data = tex.levels.get(level).ok_or(Ktx2Error::Malformed("level out of range"))?;
+pub fn decode_level_rgba(
+    tex: &Ktx2Texture,
+    level: usize,
+) -> Result<(u32, u32, Vec<u8>), Ktx2Error> {
+    let data = tex
+        .levels
+        .get(level)
+        .ok_or(Ktx2Error::Malformed("level out of range"))?;
     let (w, h) = level_dims(tex.width, tex.height, level);
     if data.len() != level_bytes(tex.kind, w, h) {
         return Err(Ktx2Error::Malformed("level length"));
@@ -545,7 +559,9 @@ fn rd32(b: &[u8], o: usize) -> Result<u32, Ktx2Error> {
 }
 
 fn rd64(b: &[u8], o: usize) -> Result<usize, Ktx2Error> {
-    let s = b.get(o..o + 8).ok_or(Ktx2Error::Malformed("level index cut short"))?;
+    let s = b
+        .get(o..o + 8)
+        .ok_or(Ktx2Error::Malformed("level index cut short"))?;
     let v = u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
     usize::try_from(v).map_err(|_| Ktx2Error::Malformed("level offset"))
 }
@@ -578,7 +594,9 @@ pub fn parse_ktx2(bytes: &[u8]) -> Result<Ktx2Texture, Ktx2Error> {
         if len != level_bytes(kind, lw, lh) {
             return Err(Ktx2Error::Malformed("level length"));
         }
-        let end = offset.checked_add(len).ok_or(Ktx2Error::Malformed("level end"))?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(Ktx2Error::Malformed("level end"))?;
         levels.push(
             bytes
                 .get(offset..end)
@@ -627,7 +645,8 @@ mod tests {
             for x in 0..w {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 let n = ((state >> 24) as i32 - 128) / 16;
-                let base = 110 + ((x as f32 * 0.11).sin() * 40.0 + (y as f32 * 0.07).cos() * 30.0) as i32;
+                let base =
+                    110 + ((x as f32 * 0.11).sin() * 40.0 + (y as f32 * 0.07).cos() * 30.0) as i32;
                 let c = |k: i32| (base + k + n).clamp(0, 255) as u8;
                 out.extend_from_slice(&[c(20), c(0), c(-25), 255]);
             }
@@ -730,7 +749,10 @@ mod tests {
             let at = HEADER_LEN + level * LEVEL_ENTRY_LEN;
             let offset = rd64(&file, at).expect("index");
             assert_eq!(offset % LEVEL_ALIGN, 0, "level {level} aligned");
-            assert!(offset < last_offset, "smaller levels sit earlier in the file");
+            assert!(
+                offset < last_offset,
+                "smaller levels sit earlier in the file"
+            );
             last_offset = offset;
             let (lw, lh) = level_dims(w, h, level);
             let (dw, dh, px) = decode_level_rgba(&tex, level).expect("every level decodes");
@@ -739,7 +761,11 @@ mod tests {
         // The 1x1 tail is near the mean colour of the source.
         let (_, _, tail) = decode_level_rgba(&tex, 6).expect("1x1");
         let mean: f32 = src.chunks_exact(4).map(|p| f32::from(p[0])).sum::<f32>() / (w * h) as f32;
-        assert!((f32::from(tail[0]) - mean).abs() < 8.0, "tail {} mean {mean}", tail[0]);
+        assert!(
+            (f32::from(tail[0]) - mean).abs() < 8.0,
+            "tail {} mean {mean}",
+            tail[0]
+        );
     }
 
     #[test]
@@ -765,7 +791,10 @@ mod tests {
             cooked * 4 <= rgba_set,
             "set {cooked} B (with full mips) vs {rgba_set} B of RGBA8 base levels"
         );
-        assert!(base.len() * 4 <= (w * h * 4) as usize, "colour map alone is under a quarter");
+        assert!(
+            base.len() * 4 <= (w * h * 4) as usize,
+            "colour map alone is under a quarter"
+        );
     }
 
     #[test]
@@ -778,7 +807,10 @@ mod tests {
             cook_ktx2(&[], 0, 4, MapKind::Orm, 0),
             Err(Ktx2Error::Dimensions { .. })
         ));
-        assert!(matches!(parse_ktx2(b"not a ktx2 file at all, but long enough to read a header from"), Err(Ktx2Error::Malformed(_))));
+        assert!(matches!(
+            parse_ktx2(b"not a ktx2 file at all, but long enough to read a header from"),
+            Err(Ktx2Error::Malformed(_))
+        ));
         let file = cook_ktx2(&natural_fixture(16, 16), 16, 16, MapKind::Orm, 0).expect("cooks");
         assert!(matches!(
             parse_ktx2(&file[..file.len() - 8]),

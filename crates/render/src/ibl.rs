@@ -760,10 +760,22 @@ pub fn bake(hdri_bytes: &[u8]) -> Result<(IblBake, f64), IblError> {
     }
     let started = engine_clock::now();
     let env = crate::v1_ibl_shadow::load_hdri(hdri_bytes).map_err(IblError::from)?;
-    let cube = bake_cube(&env)?;
-    let sh = project_sh(&env);
+    let (bake, _) = bake_env(&env)?;
+    let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
+    Ok((bake, ms))
+}
+
+/// Bake the full IBL set from an already built environment: [`bake`] after
+/// its decode, and the arena day sky (`ibl_arena_env`) which has no file. The
+/// same map gives a bit-identical bake on every run. Returns the bake plus the
+/// wall ms (evidence only).
+#[cfg(feature = "v1")]
+pub fn bake_env(env: &crate::v1_ibl_shadow::EnvMap) -> Result<(IblBake, f64), IblError> {
+    let started = engine_clock::now();
+    let cube = bake_cube(env)?;
+    let sh = project_sh(env);
     let brdf = brdf_lut_build(BRDF_LUT_SIZE)?;
-    let source_average = crate::v1_ibl_shadow::env_average(&env);
+    let source_average = crate::v1_ibl_shadow::env_average(env);
     let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
     Ok((
         IblBake {
@@ -3991,10 +4003,7 @@ mod tests {
         // bake matches the CPU reference texel-for-texel (max diff 0.0).
         let lut = brdf_lut_build(16).expect("small lut builds");
         crate::test_gpu::hold_gpu_slot();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
         let adapter =
             match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,

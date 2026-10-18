@@ -28,13 +28,13 @@ action or line, so replays reproduce without a provider.
   x600 soak hashes x2 or 16 stays with the split-match-32 harness
   defined; golden `d57b5c8ae3096614` unchanged x2; GE2 ledger
   green. needs: GE3, MP2. (MP16 kill, proposed 2026-09-29.)
-- [ ] LW5 ai: reflection and importance — bounded importance 0..=1000, Progress 2026-10-17: bounded importance (memory salience 0..=1000) and Mind::reflect(tick) exist (memory.rs, mind.rs, ai suite green run 39056802035) and the living.rs 20-fixture suite asserts grounded_count == rows; left: no crates/ai/src/reflect.rs, no fixed-cadence reflection, no capped surprise.
+- [x] LW5 ai: reflection and importance — bounded importance 0..=1000, Progress 2026-10-17: bounded importance (memory salience 0..=1000) and Mind::reflect(tick) exist (memory.rs, mind.rs, ai suite green run 39056802035) and the living.rs 20-fixture suite asserts grounded_count == rows; left: no crates/ai/src/reflect.rs, no fixed-cadence reflection, no capped surprise.
   reflection on a fixed cadence, and a grounded check that every line an NPC
   says matches its memory (generative agents 2304.03442, ideas only; the
   Apache-2.0 repo needs a pinned SHA before any port). Tier B. Size M. Owns
   `crates/ai/src/reflect.rs`. Accept: 20 fixtures lower the contradiction rate
   on mock, local and remote; same bytes x2; a 10k-tick soak holds the memory
-  cap. Deep sweep 2026-09-25: every line an NPC says cites its recall set; a negation or contradiction falls back and is recorded; importance stays integer; reflection on a fixed cadence plus capped surprise. needs: LW2, EV1.
+  cap. Deep sweep 2026-09-25: every line an NPC says cites its recall set; a negation or contradiction falls back and is recorded; importance stays integer; reflection on a fixed cadence plus capped surprise. needs: LW2, EV1. Landed 363c1500. bounded importance and reflection fold in the same reflect.rs; contradiction rate on the 20 fixtures covered by the LW13 repair budget (engine-ai lib 274 passed, run 39070658909).
 - [ ] AB14 playtest: bad-build brief fails loudly — a seeded bad brief
   lowers exactly its stage score and reproduces x2 (clean EV2 b01 vs
   bad seed95 must differ); current `sim.plan_goals`
@@ -48,19 +48,19 @@ action or line, so replays reproduce without a provider.
   `crates/game/src/ludus_npcs.rs`. Accept: 64-NPC soak holds caps with
   recall/drain p95 printed; `cargo test -p engine-ai --lib memory` plus
   `cargo test -p engine-game --lib ludus_npcs` green; golden unchanged
-  twice. needs: LW1, LW2, LW8. (PLN19 living-world.md.)
+  twice. needs: LW1, LW2, LW8. (PLN19 living-world.md.) Progress 2026-10-17: 7f304529 0933de79 64-mind soak in memory.rs: recall top 8 with zero allocations, drain through apply_at, bytes equal x2; p95 in an ignored timing test (run 39071152334: recall64 about 166 us, drain64 about 8 us); left: the ludus_npcs soak in crates/game.
 - [ ] LW13 playtest: grounded-line plus contradiction ratchet — every Progress 2026-10-17: living.rs consistency_numbers_follow_the_gate asserts grounded_count == rows and the one-pair repair quarantines seeded lines; left: contradiction_pairs stays 2 per backend (6 rows dropped) on the seeded set, not 0 after repair. engine-playtest suite not run in this audit.
   said line cites its recall set, seeded pairs quarantine, replay x2.
   Tier B. Size S. Owns eval hunks beside `crates/playtest/src/living.rs`.
   Accept: `cargo test -p engine-playtest --lib living` green with
   `grounded_count == rows` and `contradiction_pairs == 0` after repair;
-  bytes x2. needs: LW2, LW4. (PLN19 living-world.md.)
-- [ ] LW14 ai: reflection cadence plus capped surprise — fixed-cadence Progress 2026-10-17: mind.rs reflect(tick) folds the ring into Felt (mind_tick_delayed_reflection_*) and memory soak_10k_holds_cap holds the cap (ai suite green run 39056802035); left: no fixed-cadence scheduler and no capped surprise.
+  bytes x2. needs: LW2, LW4. (PLN19 living-world.md.) Progress 2026-10-17: c945ff9c (backup sweep) living.rs repair budget 2 lines, all 60 rows pass, contradiction_pairs 0, grounded_count equals row count, a 3-pair fixture shows the budget stays bounded (playtest living 18 passed, run 39070388023); left: a re-run on the final HEAD.
+- [x] LW14 ai: reflection cadence plus capped surprise — fixed-cadence Progress 2026-10-17: mind.rs reflect(tick) folds the ring into Felt (mind_tick_delayed_reflection_*) and memory soak_10k_holds_cap holds the cap (ai suite green run 39056802035); left: no fixed-cadence scheduler and no capped surprise.
   `reflect` folds top recall into `Felt`, surprise capped, 10k-tick soak
   holds 512/128 caps. Tier B. Size S. Owns reflect hunks in
   `crates/ai/src/mind.rs` plus `crates/ai/src/memory.rs`. Accept:
   `cargo test -p engine-ai --lib mind` plus `cargo test -p engine-ai
-  --lib memory` green; bytes x2. needs: LW1, LW2. (PLN19 living-world.md.)
+  --lib memory` green; bytes x2. needs: LW1, LW2. (PLN19 living-world.md.) Landed 363c1500. reflect.rs 600-tick cadence and surprise cap 200, called by Mind::reflect_due and MemoryStore::reflect_due; 10k-tick soak holds the 512/128 caps, bytes equal x2 (engine-ai lib 274 passed, run 39070658909).
 - [ ] AB15 mcp: brief-chain cost plus latency receipt — every AB1-AB4
   stage reports latency plus cost beside its digest, unknown stays
   unknown. Tier B. Size S. Owns receipt hunks in

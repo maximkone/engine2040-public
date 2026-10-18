@@ -222,7 +222,11 @@ impl LiveMatch {
     /// client share; [`MatchSpec::v1`] gives [`LiveMatch::new`] byte for byte.
     #[must_use]
     pub fn from_spec(spec: &MatchSpec) -> Option<Self> {
-        Self::with_rules_world(&spec.config, spec.rules, spec.world.clone())
+        let mut live = Self::with_rules_world(&spec.config, spec.rules, spec.world.clone())?;
+        if spec.spear && !live.sim.set_spear() {
+            return None;
+        }
+        Some(live)
     }
 
     /// Match configuration.
@@ -286,6 +290,25 @@ impl LiveMatch {
     #[must_use]
     pub fn cues(&self) -> &[engine_combat::fight::AttackStarted] {
         self.sim.cues()
+    }
+
+    /// What the spear grapple did on the last stepped tick, in emission order
+    /// (throws, hits, misses, deflections, tether pulls and ends). Empty for a
+    /// match without `MatchSpec::spear`. Presentation only: map these onto
+    /// cues and effects; the digest path never reads them.
+    #[must_use]
+    pub fn spear_events(&self) -> &[crate::SpearEvent] {
+        self.sim.spear.as_ref().map_or(&[], |spear| spear.events())
+    }
+
+    /// Per-slot spear state after the last stepped tick: the flying spear
+    /// (position, velocity), the tether (victim, goal, age, speed), the
+    /// cooldown and body momentum. Empty for a match without
+    /// `MatchSpec::spear`. Presentation only; fighter poses come from the
+    /// normal path because the sim moves the bodies.
+    #[must_use]
+    pub fn spear_view(&self) -> &[crate::SpearSlot] {
+        self.sim.spear.as_ref().map_or(&[], |spear| spear.slots())
     }
 
     /// Step tick [`LiveMatch::tick`] with `inputs`: the human inputs for that
@@ -410,7 +433,10 @@ impl LiveMatch {
     #[cfg(not(feature = "sim"))]
     #[must_use]
     pub fn snapshot(&self) -> Option<MatchSnapshot> {
-        if !self.sim.world.is_empty() || self.sim.rules != ArenaRules::V1 {
+        if !self.sim.world.is_empty()
+            || self.sim.rules != ArenaRules::V1
+            || self.sim.spear.is_some()
+        {
             return None;
         }
         Some(MatchSnapshot {
@@ -591,6 +617,16 @@ impl LivePresentation {
             steps: 0,
             poisoned: false,
         })
+    }
+
+    /// Fresh recording sim for one [`MatchSpec`]: its rules, world and spear
+    /// flag, so the drawn poses follow the authority (a tether moves bodies).
+    /// `None` when the spec does not build.
+    #[must_use]
+    pub fn from_spec(spec: &MatchSpec) -> Option<Self> {
+        let mut live = Self::with_rules_world(&spec.config, spec.rules, spec.world.clone())?;
+        let armed = !spec.spear || live.sim.set_spear();
+        armed.then_some(live)
     }
 
     /// Next tick [`LivePresentation::step_into`] simulates.
@@ -1765,5 +1801,137 @@ mod tests {
             first, scripted_checks,
             "replay equals the scripted-only bout"
         );
+    }
+}
+
+/// The spear grapple through the live match: determinism, replay and the
+/// inert-when-off promise. Scenario tests live in `crate::spear`.
+#[cfg(all(test, not(feature = "sim")))]
+mod spear_tests {
+    use super::*;
+    use engine_core::fixed::Fixed;
+    use engine_input::fighter::THROW_SPEAR;
+    use engine_input::{Buttons, FighterId};
+
+    const TICKS: u32 = 600;
+
+    fn spec(spear: bool) -> MatchSpec {
+        let config = ArenaConfig {
+            seed: 0x5EA2,
+            ticks: TICKS,
+            fighters: 2,
+            half_extent_m: 12.0,
+            table_version: 2,
+        };
+        let spec = MatchSpec::duel(config, MatchWorld::empty());
+        if spear {
+            spec.with_spear()
+        } else {
+            spec
+        }
+    }
+
+    /// Facing in centidegrees (0 is +z, 9000 is +x) from `me` toward `foe`,
+    /// through the integer `Fixed::atan2` (no platform trig).
+    fn aim(me: [f32; 3], foe: [f32; 3]) -> i16 {
+        let q16 = |v: f32| Fixed::from_bits((v * 65_536.0) as i64);
+        let angle = Fixed::atan2(q16(foe[0] - me[0]), q16(foe[2] - me[2]));
+        i16::try_from(angle.to_bits() * 18_000 / Fixed::PI.to_bits()).unwrap_or(0)
+    }
+
+    /// Both fighters stand still, face each other and throw every 50 ticks
+    /// (slot 1 half a period later); slot 1 guards on a cycle. Aimed from the
+    /// live poses; returns the hashes, the recorded tape and every spear event.
+    fn duel(spec: &MatchSpec, throw: bool) -> (Vec<u64>, FighterTape, Vec<crate::SpearEvent>) {
+        let mut live = spec.live().expect("spec builds");
+        let (mut hashes, mut seen) = (Vec::new(), Vec::new());
+        for tick in 0..TICKS {
+            let poses = [live.sim.states[0].pos, live.sim.states[1].pos];
+            let inputs: Vec<FighterInput> = (0..2u8)
+                .map(|slot| {
+                    let me = usize::from(slot);
+                    let phase = tick + u32::from(slot) * 25;
+                    let mut buttons = 0;
+                    if throw && phase % 50 == 0 {
+                        buttons |= THROW_SPEAR;
+                    }
+                    if slot == 1 && (tick / 40) % 3 == 2 {
+                        buttons |= engine_input::fighter::BLOCK;
+                    }
+                    FighterInput {
+                        tick,
+                        fighter: FighterId(slot),
+                        mx: 0,
+                        mz: 0,
+                        facing: aim(poses[me], poses[1 - me]),
+                        buttons: Buttons(buttons),
+                    }
+                })
+                .collect();
+            hashes.push(live.step(&inputs).expect("step").checkpoint.hash);
+            seen.extend_from_slice(live.spear_events());
+        }
+        (hashes, live.recorded_tape(), seen)
+    }
+
+    #[test]
+    fn spear_duel_600_ticks_digest_identical_twice_and_across_tape_replay() {
+        let spec = spec(true);
+        let (first, tape, events) = duel(&spec, true);
+        let (second, _, _) = duel(&spec, true);
+        assert_eq!(first, second, "x2 identical");
+        let thrown = |e: &&crate::SpearEvent| matches!(e, crate::SpearEvent::Thrown { .. });
+        let tethers = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::SpearEvent::Hit {
+                        victim: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(events.iter().filter(thrown).count() >= 4, "spears flew");
+        assert!(tethers >= 2, "the spear was in play: {tethers} tethers");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            crate::SpearEvent::TetherEnd {
+                damage_permille: 1..,
+                ..
+            }
+        )));
+        let mut replay = spec.live().expect("replay");
+        let mut again = Vec::new();
+        for tick in 0..TICKS {
+            let row: Vec<FighterInput> =
+                tape.0.iter().filter(|i| i.tick == tick).copied().collect();
+            again.push(replay.step(&row).expect("replay step").checkpoint.hash);
+        }
+        assert_eq!(first, again, "tape replay reproduces the digest");
+    }
+
+    #[test]
+    fn spear_off_ignores_the_button_and_keeps_the_old_digest() {
+        let off = spec(false);
+        assert!(off.live().expect("builds").spear_view().is_empty());
+        let (pressed, ..) = duel(&off, true);
+        let (quiet, ..) = duel(&off, false);
+        assert_eq!(
+            pressed, quiet,
+            "the bit changes nothing when the spear is off"
+        );
+        let (armed, ..) = duel(&spec(true), true);
+        assert_ne!(pressed, armed, "switching it on plays another match");
+    }
+
+    #[test]
+    fn spear_matches_have_no_snapshot_and_report_their_view() {
+        let mut live = spec(true).live().expect("builds");
+        assert!(live.snapshot().is_none(), "rollback rebuilds from the spec");
+        assert_eq!(live.spear_view().len(), 2);
+        live.step(&[]).expect("step");
+        assert!(live.spear_events().is_empty());
     }
 }

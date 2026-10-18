@@ -37,11 +37,10 @@ pub const NAV_CHECKS: [&str; 4] = ["navConnect", "flowPath", "accessFront", "doo
 /// repair seeded-count test and the endpoint legal-list goldens. The
 /// whole-catalog `run()` therefore never asks for them, so existing
 /// goldens stay byte-identical whether or not a cycle exists.
-pub const OPT_IN_CHECKS: [&str; 1] = ["relationCycle"];
+pub const OPT_IN_CHECKS: [&str; 3] = ["relationCycle", "seatedJoint", "supportChain"];
 
 const WORLD_BOUND_CM: i32 = 10_000; // +-100 m, red
 const OOB99_CM: i32 = 9_900; // +-99 m, yellow
-const GIANT_CM: i32 = 5_000; // 50 m max dimension
 const FLOAT_EPS_CM: i32 = 1; // min_y above this = floating
 const SUPPORT_GAP_CM: i32 = 5; // supporter top within this below min_y
 const DUPE_MAX: usize = 10; // same-name headcount limit
@@ -191,6 +190,12 @@ pub fn run_spatial(
         }
     }
 
+    let giants = if wanted.contains("giantObject") {
+        giant_ids(&good)
+    } else {
+        BTreeSet::new()
+    };
+
     // Per-actor fused pass: one loop, many checks.
     for a in &good {
         let cx = to_cm(a.x);
@@ -266,14 +271,8 @@ pub fn run_spatial(
                 }
             }
         }
-        if wanted.contains("giantObject") && size_known(a) {
-            let m = to_cm(a.sx)
-                .abs()
-                .max(to_cm(a.sy).abs())
-                .max(to_cm(a.sz).abs());
-            if m > GIANT_CM {
-                push("giantObject", a.id, u32::MAX, 0.0);
-            }
+        if giants.contains(&a.id) {
+            push("giantObject", a.id, u32::MAX, 0.0);
         }
     }
 
@@ -340,11 +339,20 @@ pub fn run_spatial(
     // finding names a real inconsistency. One finding per report, naming
     // the cycle's first edge in canonical rotation; the full cycle is one
     // `smallest_cycle` call away for SP49 repair.
-    if wanted.iter().any(|w| OPT_IN_CHECKS.contains(w)) {
+    if wanted.contains("relationCycle") {
         let graph = super::relation::build(actors);
         if let Some(finding) = relation_cycle_finding(&graph) {
             findings.push(finding);
         }
+    }
+
+    // SPX2 seatedJoint / supportChain (opt-in): seats, embeds and floating bases.
+    if wanted.contains("seatedJoint") || wanted.contains("supportChain") {
+        findings.extend(
+            super::support::support_findings(&good)
+                .into_iter()
+                .filter(|f| wanted.contains(f.check)),
+        );
     }
 
     // Phase-2 nav checks (bake view only).
@@ -355,6 +363,115 @@ pub fn run_spatial(
     findings.sort_by_key(|f| (check_index(f.check), f.a, f.b));
     let hash = hash_findings(&findings);
     Ok(Report { findings, hash })
+}
+
+/// Ground plate: a flat slab (height at most 50 cm, both sides at most 50
+/// m). Plates are the floor of the layout, never a giant and never counted
+/// when measuring the layout they carry.
+const PLATE_H_CM: i32 = 50;
+const PLATE_SIDE_CM: i32 = 5_000;
+
+/// Solid boxes of the layout as `(id, min, max, largest side)` in cm: known,
+/// positive-size, physical actors that are not ground plates, id ascending.
+fn solid_extents(actors: &[Actor]) -> Vec<(u32, [i32; 3], [i32; 3], i32)> {
+    let mut out = Vec::new();
+    for a in actors {
+        if !(a.physical && pos_known(a) && size_known(a) && a.sx > 0.0 && a.sy > 0.0 && a.sz > 0.0)
+        {
+            continue;
+        }
+        let size = [to_cm(a.sx).abs(), to_cm(a.sy).abs(), to_cm(a.sz).abs()];
+        if size[1] <= PLATE_H_CM && size[0] <= PLATE_SIDE_CM && size[2] <= PLATE_SIDE_CM {
+            continue;
+        }
+        let c = [to_cm(a.x), to_cm(a.y), to_cm(a.z)];
+        let lo = [c[0] - size[0] / 2, c[1] - size[1] / 2, c[2] - size[2] / 2];
+        let hi = [c[0] + size[0] / 2, c[1] + size[1] / 2, c[2] + size[2] / 2];
+        out.push((a.id, lo, hi, size[0].max(size[1]).max(size[2])));
+    }
+    out.sort_by_key(|e| e.0);
+    out
+}
+
+/// Corner pair of a box in cm, or the union of several.
+type Bounds = Option<([i32; 3], [i32; 3])>;
+
+fn union(a: Bounds, lo: [i32; 3], hi: [i32; 3]) -> Bounds {
+    Some(match a {
+        None => (lo, hi),
+        Some((l, h)) => (
+            [l[0].min(lo[0]), l[1].min(lo[1]), l[2].min(lo[2])],
+            [h[0].max(hi[0]), h[1].max(hi[1]), h[2].max(hi[2])],
+        ),
+    })
+}
+
+/// Largest side of a bounds box.
+fn span_of(b: Bounds) -> Option<i32> {
+    b.map(|(l, h)| (h[0] - l[0]).max(h[1] - l[1]).max(h[2] - l[2]))
+}
+
+/// Per solid, the bounds of every other solid (prefix and suffix unions, so a
+/// whole layout costs one pass).
+fn rest_bounds(solids: &[(u32, [i32; 3], [i32; 3], i32)]) -> Vec<Bounds> {
+    let mut before: Vec<Bounds> = Vec::with_capacity(solids.len() + 1);
+    before.push(None);
+    for s in solids {
+        let last = before.last().copied().flatten();
+        before.push(union(last, s.1, s.2));
+    }
+    let mut after: Bounds = None;
+    let mut out: Vec<Bounds> = vec![None; solids.len()];
+    for i in (0..solids.len()).rev() {
+        let mut rest = before[i];
+        if let Some((lo, hi)) = after {
+            rest = union(rest, lo, hi);
+        }
+        out[i] = rest;
+        after = union(after, solids[i].1, solids[i].2);
+    }
+    out
+}
+
+/// SPF5 giantObject: a solid is giant when its largest side exceeds the span
+/// of every other solid, so a wall that is the edge of the layout is never
+/// giant while a 50 m crate beside a 4 m room is. A shell that encloses the
+/// rest of the layout in plan snugly (the rest spans at least a quarter of it) is the
+/// edge too, so an arena box around its props stays quiet. Ground plates and
+/// non-physical boxes neither count nor flag; fewer than two solids stay silent.
+fn giant_ids(actors: &[Actor]) -> BTreeSet<u32> {
+    let solids = solid_extents(actors);
+    if solids.len() < 2 {
+        return BTreeSet::new();
+    }
+    let rests = rest_bounds(&solids);
+    solids
+        .iter()
+        .zip(rests)
+        .filter(|(s, rest)| {
+            let Some(span) = span_of(*rest) else {
+                return false;
+            };
+            let encloses = rest.is_some_and(|(lo, hi)| {
+                [0, 2]
+                    .into_iter()
+                    .all(|k| s.1[k] <= lo[k] && hi[k] <= s.2[k])
+            });
+            s.3 > span && !(encloses && span * 4 >= s.3)
+        })
+        .map(|(s, _)| s.0)
+        .collect()
+}
+
+/// Span in cm of the layout without actor `id` (largest side of the box
+/// around every other solid), or `None` when no other solid exists. Repair
+/// reads it to size a giant back down to the layout it lives in.
+pub(crate) fn layout_span_without(actors: &[Actor], id: u32) -> Option<i32> {
+    let mut bounds: Bounds = None;
+    for s in solid_extents(actors).iter().filter(|s| s.0 != id) {
+        bounds = union(bounds, s.1, s.2);
+    }
+    span_of(bounds)
 }
 
 /// Opt-in SP28 refusal over an explicit relation graph: the smallest
@@ -521,7 +638,10 @@ mod sp28_tests {
         // endpoint legal-list goldens pin it); the whole-catalog run on a
         // consistent scene carries no cycle finding.
         assert_eq!(SPATIAL_CHECKS.len(), 18);
-        assert_eq!(OPT_IN_CHECKS, ["relationCycle"]);
+        assert_eq!(
+            OPT_IN_CHECKS,
+            ["relationCycle", "seatedJoint", "supportChain"]
+        );
         let actors = seeded_sp28_actors(7);
         let full = super::super::run(&actors);
         assert_eq!(full.count("relationCycle"), 0);
@@ -607,5 +727,168 @@ mod sp28_tests {
             "caught {caught}/60 injected rings, need >= 54"
         );
         assert_eq!(caught, 60, "caught {caught}/60 injected rings, need 60/60");
+    }
+}
+
+/// SPF5: giantObject against the layout it lives in.
+#[cfg(test)]
+mod giant_tests {
+    use super::*;
+
+    fn solid(id: u32, x: f32, y: f32, z: f32, sx: f32, sy: f32, sz: f32) -> Actor {
+        Actor {
+            id,
+            name: format!("solid_{id}"),
+            x,
+            y,
+            z,
+            sx,
+            sy,
+            sz,
+            parent: None,
+            physical: true,
+            vx: 0.0,
+            vz: 0.0,
+            yaw: 0.0,
+        }
+    }
+
+    /// Four walls of a square room with the given inner half-side in meters.
+    fn walls(first: u32, half: f32, long: f32) -> Vec<Actor> {
+        vec![
+            solid(first, 0.0, 1.5, -half, long, 3.0, 0.3),
+            solid(first + 1, 0.0, 1.5, half, long, 3.0, 0.3),
+            solid(first + 2, -half, 1.5, 0.0, 0.3, 3.0, long),
+            solid(first + 3, half, 1.5, 0.0, 0.3, 3.0, long),
+        ]
+    }
+
+    fn giants_of(actors: &[Actor]) -> Vec<u32> {
+        let report = run_checks(actors, &["giantObject"]).expect("legal");
+        report.findings.iter().map(|f| f.a).collect()
+    }
+
+    #[test]
+    fn giant_layout_reads_the_layout_not_a_fixed_line() {
+        // Four 20.6 m boundary walls around two props: the walls are the edge.
+        let mut room = walls(1, 10.0, 20.6);
+        room.push(solid(10, -2.0, 0.5, 0.0, 1.0, 1.0, 1.0));
+        room.push(solid(11, 3.0, 0.5, 2.0, 1.0, 1.0, 1.0));
+        assert_eq!(giants_of(&room), Vec::<u32>::new());
+        // A 50 m crate dropped into a 4 m room is the one giant.
+        let mut small = walls(1, 2.0, 4.0);
+        small.push(solid(20, 30.0, 25.0, 0.0, 50.0, 50.0, 50.0));
+        assert_eq!(giants_of(&small), vec![20]);
+        // A 60 m wall inside a 100 m arena is no giant (old line said red).
+        let mut arena = walls(1, 50.0, 100.0);
+        arena.push(solid(30, 0.0, 1.5, 0.0, 60.0, 3.0, 0.3));
+        assert_eq!(giants_of(&arena), Vec::<u32>::new());
+        // Ground plates and non-physical boxes neither flag nor count.
+        let mut plated = walls(1, 2.0, 4.0);
+        plated.push(solid(40, 0.0, 0.1, 0.0, 40.0, 0.2, 40.0));
+        let mut zone = solid(41, 30.0, 25.0, 0.0, 60.0, 60.0, 60.0);
+        zone.physical = false;
+        plated.push(zone);
+        assert_eq!(giants_of(&plated), Vec::<u32>::new());
+        // One solid alone has no layout to be bigger than.
+        assert_eq!(
+            giants_of(&[solid(1, 0.0, 30.0, 0.0, 60.0, 60.0, 60.0)]),
+            Vec::<u32>::new()
+        );
+    }
+
+    /// Brute force: union every other solid per candidate, no prefix tricks.
+    fn brute_giants(actors: &[Actor]) -> Vec<u32> {
+        let solids: Vec<&Actor> = actors
+            .iter()
+            .filter(|a| a.physical && a.sx > 0.0 && a.sy > 0.0 && a.sz > 0.0)
+            .filter(|a| !(to_cm(a.sy) <= 50 && to_cm(a.sx) <= 5000 && to_cm(a.sz) <= 5000))
+            .collect();
+        let lo = |a: &Actor, k: usize| match k {
+            0 => to_cm(a.x) - to_cm(a.sx) / 2,
+            1 => to_cm(a.y) - to_cm(a.sy) / 2,
+            _ => to_cm(a.z) - to_cm(a.sz) / 2,
+        };
+        let hi = |a: &Actor, k: usize| match k {
+            0 => to_cm(a.x) + to_cm(a.sx) / 2,
+            1 => to_cm(a.y) + to_cm(a.sy) / 2,
+            _ => to_cm(a.z) + to_cm(a.sz) / 2,
+        };
+        let mut out = Vec::new();
+        for c in &solids {
+            let rest: Vec<&&Actor> = solids.iter().filter(|o| o.id != c.id).collect();
+            if solids.len() < 2 {
+                continue;
+            }
+            let span = (0..3)
+                .map(|k| {
+                    rest.iter().map(|o| hi(o, k)).max().unwrap_or(0)
+                        - rest.iter().map(|o| lo(o, k)).min().unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0);
+            let side = to_cm(c.sx).max(to_cm(c.sy)).max(to_cm(c.sz));
+            let encloses = [0, 2].into_iter().all(|k| {
+                lo(c, k) <= rest.iter().map(|o| lo(o, k)).min().unwrap_or(0)
+                    && rest.iter().map(|o| hi(o, k)).max().unwrap_or(0) <= hi(c, k)
+            });
+            if side > span && !(encloses && span * 4 >= side) {
+                out.push(c.id);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn giant_layout_matches_brute_force_on_seeded_scenes() {
+        use engine_core::Rng;
+        let mut rng = Rng::new(0x61a7);
+        let mut fired = 0;
+        for scene in 0..200u32 {
+            let n = 2 + (rng.next_u32() % 12);
+            let mut actors: Vec<Actor> = (0..n)
+                .map(|i| {
+                    let pick =
+                        |r: &mut Rng, lo: u32, span: u32| (lo + r.next_u32() % span) as f32 / 10.0;
+                    let big = rng.next_u32().is_multiple_of(6);
+                    let (sx, sy, sz) = if big {
+                        (
+                            pick(&mut rng, 100, 900),
+                            pick(&mut rng, 10, 300),
+                            pick(&mut rng, 10, 900),
+                        )
+                    } else {
+                        (
+                            pick(&mut rng, 5, 40),
+                            pick(&mut rng, 2, 40),
+                            pick(&mut rng, 5, 40),
+                        )
+                    };
+                    let mut a = solid(
+                        i + 1,
+                        pick(&mut rng, 0, 400) - 20.0,
+                        sy / 2.0,
+                        pick(&mut rng, 0, 400) - 20.0,
+                        sx,
+                        sy,
+                        sz,
+                    );
+                    a.physical = !rng.next_u32().is_multiple_of(8);
+                    a
+                })
+                .collect();
+            let want = brute_giants(&actors);
+            fired += usize::from(!want.is_empty());
+            assert_eq!(giants_of(&actors), want, "scene {scene}");
+            // Input order never moves the answer; the replay is byte-equal.
+            actors.reverse();
+            assert_eq!(giants_of(&actors), want, "scene {scene} reversed");
+            assert_eq!(giants_of(&actors), giants_of(&actors), "scene {scene} x2");
+        }
+        assert!(
+            fired > 20,
+            "the seeded scenes must exercise the check: {fired}"
+        );
     }
 }

@@ -118,6 +118,7 @@ A GPU test with no adapter returns early and passes, so a green run can test not
 
 - No GPU needed: `cargo test -p engine-render --lib every_error_names_its_recovery`, `surface_events_map_to_recovery_actions`, `size_class_covers_minimize_and_reject`. For the heal check use `verified_recovery_restores_full_quality_and_resets` (in `crates/render/src/heal.rs`).
 - With a GPU, fail on a missing adapter: `$env:E2040_REQUIRE_GPU = "1"; cargo test --locked -p engine-render --all-features --lib resize_and_minimize_survive_with_last_good`. Repeat with `device_loss_fails_loudly_until_rebuilt`. `crates/render/src/test_gpu.rs::require_or_skip` reads the variable.
+- Strict WebGPU: `E2040_STRICT_WEBGPU=1` opens every native instance with `InstanceFlags::STRICT_WEBGPU_COMPLIANCE` (WebGPU features and limits only, `LoadOp::DontCare` refused), so a pass a browser would reject fails on this PC. Make new instances with `crate::backend::new_instance(backends)`, never `Instance::new`. Proof: `cargo test -p engine-render --features window --lib strict_webgpu`.
 - Module then crate: `cargo test -p engine-render --lib <filter>`, then `cargo test -p engine-render --lib`. Green means `is_clean()` with `validation_errors == 0`.
 - `node tools/proof.mjs`: the engine-render GPU skip count it prints must be 0 on a GPU machine.
 - Heavy test lines go to GitHub: skill `github-check`. GPU and window lines run on the PC by themselves.

@@ -485,6 +485,11 @@ impl ParticlePool {
         Ok(pool)
     }
 
+    /// Slots the pool holds at most.
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
     /// Check the pool before a submit trusts it.
     pub fn validate(&self) -> Result<(), ParticleError> {
         if self.cap == 0 || self.cap > POOL_CAP_HARD {

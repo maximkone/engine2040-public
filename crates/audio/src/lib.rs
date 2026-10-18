@@ -20,6 +20,8 @@ pub mod coherence;
 pub mod combat_cues;
 pub mod crowd;
 pub mod cue;
+/// Click-free gain ramps that reverse from the gain reached. Integer only.
+mod declick;
 #[cfg(feature = "device")]
 pub mod decode;
 #[cfg(feature = "device")]
@@ -55,6 +57,7 @@ static TEST_ALLOCATOR: engine_core::alloc_probe::CountingAlloc =
 
 use std::sync::Arc;
 
+use declick::{dry_wet, Declicker};
 use dsp::Bus;
 
 pub use bank::{Bank, BankSound, Synth};
@@ -263,23 +266,12 @@ struct Voice {
     gain_r: f32,
     fold_mono: bool,
     route: Option<VoiceRoute>,
-    /// Q24 level applied on top of the gains: [`LEVEL_ONE`] unless fading.
-    level: u32,
-    fade: Fade,
+    /// Click-free level ramp on top of the gains: at rest at unity for a
+    /// plain start, ramped in on a fade-in and out on a steal or a stop.
+    gate: Declicker,
     /// Live multiplier set by [`Mixer::set_cue_trim`] (`1.0` untouched): how
     /// the game rides a looped bed up and down without restarting it.
     trim: f32,
-}
-
-/// A voice's level ramp, in Q24 steps per frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fade {
-    /// Full level.
-    Hold,
-    /// Rising to full level.
-    In(u32),
-    /// Falling to silence; the voice is dropped on reaching zero.
-    Out(u32),
 }
 
 impl Voice {
@@ -287,22 +279,20 @@ impl Voice {
         self.data.len() / usize::from(self.channels.max(1))
     }
 
-    /// Fading out after a steal: already gone as far as limits are concerned.
+    /// Fading out after a steal or a stop: already gone as far as limits
+    /// are concerned.
     fn retiring(&self) -> bool {
-        matches!(self.fade, Fade::Out(_))
+        self.gate.trending_towards_zero()
     }
 
     /// Out of samples, or faded to silence.
     fn finished(&self) -> bool {
-        self.cursor >= self.frames() || (self.retiring() && self.level == 0)
+        self.cursor >= self.frames() || (self.retiring() && self.gate.level() == 0)
     }
 
-    /// Ramp multiplier for this frame (exactly 1.0 when not fading).
+    /// Ramp multiplier for this frame (exactly 1.0 at rest at unity).
     fn fade_gain(&self) -> f32 {
-        match self.fade {
-            Fade::Hold => 1.0,
-            Fade::In(_) | Fade::Out(_) => q24_gain(self.level),
-        }
+        q24_gain(self.gate.level())
     }
 
     fn priority(&self) -> u8 {
@@ -331,7 +321,7 @@ pub const DUCK_ATTACK_MS: u32 = 40;
 /// Time for the music duck to recover once dialogue ends.
 pub const DUCK_RELEASE_MS: u32 = 600;
 /// Fixed-point one (Q24) for duck and fade levels.
-const LEVEL_ONE: u32 = 1 << 24;
+const LEVEL_ONE: u32 = declick::UNITY_Q24;
 /// Voices that may fade out after a steal at the same time; past this a
 /// steal cuts the victim instead, so voice storage never grows.
 pub const FADE_RESERVE: usize = 16;
@@ -345,20 +335,15 @@ fn ms_to_frames(sample_rate: u32, ms: u32) -> u32 {
         .max(1)
 }
 
-/// Per-frame Q24 step that ramps a full level to zero within `frames`.
-fn fade_step(frames: u32) -> u32 {
-    LEVEL_ONE.div_ceil(frames.max(1)).max(1)
-}
-
 /// Linear gain of a Q24 `level`, exact through Q15.
 fn q24_gain(level: u32) -> f32 {
     f32::from(u16::try_from(level >> 9).unwrap_or(u16::MAX)) / 32_768.0
 }
 
 /// Integer linear tween over frames (Kira `Tween` pattern, std-only).
-/// Consumer: [`Duck::step`] (duck attack/release) plus
-/// [`music::Player::gains`](crate::music::Player::gains) (1-bar crossfade);
-/// Caller: `Duck` in this file and `Player` in `music.rs`. Units: Q24
+/// Consumer: [`music::Player::gains`](crate::music::Player::gains) (1-bar
+/// crossfade). Ramps that may reverse mid-way use [`Declicker`] instead.
+/// Units: Q24
 /// levels for `from`/`to`/`value`, frames for `frames`/`pos`. Determinism:
 /// integer math only (a `u64` multiply then divide, no float time, no heap);
 /// the same inputs give the same levels on every platform. Never panics
@@ -444,46 +429,45 @@ impl Tween {
     }
 }
 
-/// Music duck: an integer-ramped gain that falls while a dialogue voice is
-/// live and recovers after, so the ramp is exact and platform independent.
+/// Music duck: a [`Declicker`] ramp (0 released, 1 ducked) mixed between the
+/// unity path and the floor path by the dry/wet law. A dialogue line that
+/// ends mid-attack resumes the release from the gain reached, without a jump.
 struct Duck {
-    level: u32,
+    gate: Declicker,
     floor: u32,
     attack_frames: u32,
     release_frames: u32,
-    ramp: Tween,
 }
 
 impl Duck {
     fn new(sample_rate: u32) -> Self {
         let floor = LEVEL_ONE / 100 * DUCK_FLOOR_PERCENT;
         Self {
-            level: LEVEL_ONE,
+            gate: Declicker::settled(false),
             floor,
             attack_frames: ms_to_frames(sample_rate, DUCK_ATTACK_MS),
             release_frames: ms_to_frames(sample_rate, DUCK_RELEASE_MS),
-            ramp: Tween::new(LEVEL_ONE, LEVEL_ONE, 1),
         }
     }
 
-    /// Advance one frame toward the floor (`dialogue`) or back to one.
+    /// Advance one frame toward the floor (`dialogue`) or back to unity.
     fn step(&mut self, dialogue: bool) -> f32 {
-        let target = if dialogue { self.floor } else { LEVEL_ONE };
-        if self.ramp.target() != target {
-            let dur = if dialogue {
-                self.attack_frames
-            } else {
-                self.release_frames
-            };
-            self.ramp = Tween::new(self.level, target, dur);
-        }
-        self.level = self.ramp.step();
+        let frames = if dialogue {
+            self.attack_frames
+        } else {
+            self.release_frames
+        };
+        self.gate.fade_to(dialogue, frames);
+        self.gate.advance();
         self.gain()
     }
 
-    /// Linear gain `floor..=1.0`.
+    /// Linear gain `floor..=1.0`: the unity path is dry, the floor path wet.
     fn gain(&self) -> f32 {
-        q24_gain(self.level)
+        let (dry, wet) = dry_wet(self.gate.level());
+        let floored = u32::try_from(u64::from(wet) * u64::from(self.floor) / u64::from(LEVEL_ONE))
+            .unwrap_or(0);
+        q24_gain(dry + floored)
     }
 }
 
@@ -644,7 +628,7 @@ impl Mixer {
             return false;
         };
         if self.fading_voices() < FADE_RESERVE {
-            self.voices[idx].fade = Fade::Out(fade_step(frames));
+            self.voices[idx].gate.fade_to(false, frames);
         } else {
             self.voices.remove(idx);
         }
@@ -664,11 +648,8 @@ impl Mixer {
         let id = VoiceId(self.next_voice);
         self.next_voice = self.next_voice.wrapping_add(1).max(1);
         let frames = data.len() / usize::from(channels.max(1));
-        let (level, fade) = if start.fade_in_frames > 0 {
-            (0, Fade::In(fade_step(start.fade_in_frames)))
-        } else {
-            (LEVEL_ONE, Fade::Hold)
-        };
+        let mut gate = Declicker::settled(false);
+        gate.fade_to(true, start.fade_in_frames);
         self.voices.push(Voice {
             id,
             data,
@@ -678,8 +659,7 @@ impl Mixer {
             gain_r: gains.1,
             fold_mono,
             route,
-            level,
-            fade,
+            gate,
             trim: 1.0,
         });
         id
@@ -729,7 +709,7 @@ impl Mixer {
     /// voices is full.
     fn retire(&mut self, idx: usize) {
         if self.fading_voices() < FADE_RESERVE {
-            self.voices[idx].fade = Fade::Out(fade_step(self.steal_fade_frames));
+            self.voices[idx].gate.fade_to(false, self.steal_fade_frames);
         } else {
             self.voices.remove(idx);
         }
@@ -868,16 +848,7 @@ impl Mixer {
             if v.cursor >= v.frames() && v.route.is_some_and(|route| route.looped) {
                 v.cursor = 0;
             }
-            match v.fade {
-                Fade::Hold => {}
-                Fade::In(step) => {
-                    v.level = v.level.saturating_add(step).min(LEVEL_ONE);
-                    if v.level == LEVEL_ONE {
-                        v.fade = Fade::Hold;
-                    }
-                }
-                Fade::Out(step) => v.level = v.level.saturating_sub(step),
-            }
+            v.gate.advance();
             ended |= v.finished();
         }
         if ended {
@@ -1499,6 +1470,53 @@ mod tests {
         }
         assert_eq!(m.duck_gain(), 1.0, "fully recovered");
         assert_eq!(next(&mut m), 0.5 * g_music);
+    }
+
+    #[test]
+    fn duck_released_mid_attack_steps_no_more_than_one_fade_step() {
+        let mut m = Mixer::new(8_000);
+        m.play_clip(
+            &clip(0.5, 20_000),
+            route(1, Bus::Music, Group::Music, 200, true),
+            BOTH,
+            false,
+        )
+        .expect("room");
+        let line = m
+            .play_clip(
+                &clip(0.1, 20_000),
+                route(2, Bus::Dialogue, Group::Dialogue, 250, false),
+                BOTH,
+                false,
+            )
+            .expect("room");
+        for _ in 0..100 {
+            m.render_frame_stereo();
+        }
+        let mid_attack = m.duck_gain();
+        assert!(
+            mid_attack < 1.0 && mid_attack > 0.36,
+            "mid-attack {mid_attack}"
+        );
+        assert!(m.stop(line), "the line ends mid-attack");
+
+        // The 40 ms attack covers (1 - floor) in 320 frames at 8 kHz; no
+        // frame of the release may move the duck by more than that step.
+        let floor = f32_of(DUCK_FLOOR_PERCENT) / 100.0;
+        let fade_step = (1.0 - floor) / 320.0;
+        let mut previous = mid_attack;
+        let mut largest = 0.0f32;
+        for _ in 0..4_900 {
+            m.render_frame_stereo();
+            let d = m.duck_gain();
+            largest = largest.max((d - previous).abs());
+            previous = d;
+        }
+        assert!(
+            largest <= fade_step + 1e-4,
+            "largest release step {largest} vs fade-step {fade_step}"
+        );
+        assert_eq!(m.duck_gain(), 1.0, "released back to unity");
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use engine_arena::Checkpoint;
 use engine_core::mix64;
 
+use crate::ack::input::DeliveryStats;
 use crate::courier::{Courier, PunchReport, Reader, Road, RunNet, SplitError};
 use crate::link::{
     Frame, LinkProfile, LinkReport, LinkStats, LoopbackWire, Peer, Wire, DELAY_BUCKETS,
@@ -292,6 +293,7 @@ fn put_seat_stats(out: &mut Vec<u8>, s: &SeatStats) {
         ],
     );
     out.push(u8::from(s.granted));
+    put_words(out, &s.delivery.to_words());
 }
 
 fn read_seat_stats(r: &mut Reader<'_>) -> Result<SeatStats, SplitError> {
@@ -312,6 +314,7 @@ fn read_seat_stats(r: &mut Reader<'_>) -> Result<SeatStats, SplitError> {
         last_catchup_step: caught.then_some(last),
         gap_resyncs,
         granted: r.flag()?,
+        delivery: DeliveryStats::from_words(r.words()?),
     })
 }
 
@@ -941,6 +944,11 @@ mod tests {
             mispredict_ticks: report.seats[1].mispredict_ticks,
             stats: report.seats[1].stats,
         };
+        assert_ne!(
+            outcome.stats.delivery,
+            DeliveryStats::EMPTY,
+            "the blob must carry real delivery counters, not zeros"
+        );
         let links: Vec<(Peer, Peer, LinkStats)> = report
             .links
             .iter()

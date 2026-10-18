@@ -109,6 +109,7 @@ fn apply(
             idempotency_key: key,
             ops,
             approval,
+            delta: Some(false),
         },
     )
     .map(|out| out.revision)
@@ -311,6 +312,7 @@ fn scene_place_race_one_winner_rest_typed() {
                         idempotency_key: key,
                         object: id.to_string(),
                         wants,
+                        delta: Some(false),
                     },
                 )
                 .map(|out| out.solved)
@@ -360,26 +362,40 @@ fn play_run_completes_beside_place_storm() {
                         idempotency_key: key,
                         object: id.to_string(),
                         wants: vec!["next_to wall:south".to_owned()],
+                        delta: Some(false),
                     },
                 );
             });
         }
         scope.spawn(move || {
-            let started = PlayRunTool::invoke(
-                shared,
-                PlayRunArgs {
-                    action: "start".to_owned(),
-                    seed: Some(2040),
-                    ticks: Some(8),
-                    fighters: Some(2),
-                    half_extent_m: Some(20.0),
-                    inputs: None,
-                    ttl_polls: None,
-                    job_id: None,
-                    scene_rev: None,
-                },
-            )
-            .expect("play starts beside a place storm");
+            // The storm moves the scene under the run: pin the revision just
+            // read, and re-pin when a place landed in between.
+            let start = || {
+                PlayRunTool::invoke(
+                    shared,
+                    PlayRunArgs {
+                        action: "start".to_owned(),
+                        seed: Some(2040),
+                        ticks: Some(8),
+                        fighters: Some(2),
+                        half_extent_m: Some(20.0),
+                        inputs: None,
+                        ttl_polls: None,
+                        job_id: None,
+                        scene_rev: Some(revision_of(shared)),
+                    },
+                )
+            };
+            let mut attempt = start();
+            for _ in 0..PROPOSERS {
+                if attempt
+                    .as_ref()
+                    .is_err_and(|error| error.code == "stale_scene_rev")
+                {
+                    attempt = start();
+                }
+            }
+            let started = attempt.expect("play starts beside a place storm");
             let job = started.job_id;
             let poll = |job_id| {
                 PlayRunTool::invoke(

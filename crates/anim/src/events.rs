@@ -80,13 +80,15 @@ pub struct RecordedCall {
     pub code: u32,
 }
 
-/// Typed event-log failures; every variant names the tick at fault.
+/// Typed event-log failures; every variant names the value at fault.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum EventError {
     /// A fired cue stamped `got` arrived in a `expected`-tick collect.
     TickMismatch { expected: u32, got: u32 },
     /// Tape ran backwards: `got` arrived after `last`.
     OutOfOrder { last: u32, got: u32 },
+    /// A blend-space weight row of `weights` entries for `samples` samples.
+    WeightCount { samples: usize, weights: usize },
 }
 
 impl std::fmt::Display for EventError {
@@ -97,6 +99,9 @@ impl std::fmt::Display for EventError {
             }
             EventError::OutOfOrder { last, got } => {
                 write!(f, "events: tick {got} arrived after tick {last}")
+            }
+            EventError::WeightCount { samples, weights } => {
+                write!(f, "events: {weights} blend weights for {samples} samples")
             }
         }
     }

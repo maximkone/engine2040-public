@@ -238,6 +238,9 @@ pub struct TxApplyArgs {
     pub ops: Vec<OpDto>,
     /// Approval minted by `tx.preview` for this exact batch.
     pub approval: ApprovalDto,
+    /// `false` skips the spatial delta (default true).
+    #[serde(default)]
+    pub delta: Option<bool>,
 }
 
 /// Args for `tx.undo`.
@@ -300,6 +303,21 @@ pub struct TxPreviewOutput {
     pub approval: ApprovalDto,
 }
 
+/// Spatial findings a write changed, on the objects it touched.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SpatialDeltaDto {
+    /// Touched object ids, at most 16.
+    pub ids: Vec<String>,
+    /// New findings, red first, at most 5.
+    pub new_findings: Vec<String>,
+    /// Findings cleared, at most 5.
+    pub resolved: Vec<String>,
+    /// Findings left out by the caps.
+    pub more: u32,
+}
+
 /// `tx.apply` result: the landed receipt.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
@@ -319,6 +337,9 @@ pub struct TxApplyOutput {
     #[serde(with = "u64_text")]
     #[schemars(with = "String")]
     pub undo_token: u64,
+    /// Spatial findings this write changed; absent with `delta: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_delta: Option<SpatialDeltaDto>,
 }
 
 /// `tx.undo` result: the undo receipt.
@@ -411,6 +432,7 @@ mod tests {
             key: BIG,
             journal_index: 0,
             undo_token: BIG,
+            spatial_delta: None,
         };
         let value = rmcp::serde_json::to_value(&applied).expect("receipt serializes");
         assert_eq!(

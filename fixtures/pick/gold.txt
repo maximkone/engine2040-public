@@ -1,0 +1,112 @@
+# EV21 gold pointing eval. Written by tools/pick-gold.mjs (its own ray maths,
+# apart from crates/endpoint/src/pick.rs); do not edit by hand.
+# camera: eye in cm, angles in centidegrees. actor: id name x y z sx sy sz
+# (meters, box centered on x y z). task: pixel x, pixel y, answer (an entity
+# id or a floor point in integer cm).
+camera 0,600,-1200 0 -2500 6000 1280x720
+actor 1 crate -3.5 0.5 2 1 1 1
+actor 2 barrel 0 0.75 4 1 1.5 1
+actor 3 crate 3.5 0.5 3 1 1 1
+actor 4 pillar -6 2 8 1 4 1
+actor 5 wall 0 1 12 8 2 0.5
+actor 6 altar 6 0.5 7 2 1 2
+task 247 282 pt -1218 0 656
+task 647 300 id 2
+task 895 322 pt 668 0 319
+task 836 267 id 6
+task 775 58 pt 1920 738 8613
+task 642 270 id 2
+task 911 178 pt 1645 0 2689
+task 433 182 id 4
+task 791 106 pt 2196 111 8544
+task 642 300 id 2
+task 159 290 pt -1438 0 579
+task 826 262 id 6
+task 39 698 pt -632 0 -756
+task 818 273 id 6
+task 1199 594 pt 705 0 -613
+task 627 303 id 2
+task 823 378 pt 393 0 -7
+task 848 255 id 6
+task 447 450 pt -334 0 -285
+task 442 221 id 4
+task 1095 330 pt 1154 0 264
+task 814 275 id 6
+task 207 146 pt -3706 0 4415
+task 456 181 id 4
+task 343 122 pt -3685 0 7072
+task 447 193 id 4
+task 223 226 pt -1753 0 1417
+task 810 256 id 6
+task 615 634 pt -29 0 -674
+task 820 264 id 6
+task 239 2 pt -4868 1335 7504
+task 633 280 id 2
+task 631 154 pt -66 0 3862
+task 630 300 id 2
+task 767 546 pt 177 0 -525
+task 651 261 id 2
+task 647 554 pt 10 0 -541
+task 449 233 id 4
+task 1039 418 pt 757 0 -176
+task 651 265 id 2
+task 151 554 pt -666 0 -541
+task 450 249 id 4
+task 287 402 pt -700 0 -113
+task 832 269 id 6
+task 167 666 pt -524 0 -717
+task 840 263 id 6
+task 815 66 pt 2468 635 8491
+task 819 266 id 6
+task 1207 106 pt 6446 216 6436
+task 828 273 id 6
+task 831 594 pt 241 0 -613
+task 847 262 id 6
+task 1223 250 pt 2131 0 1033
+task 444 233 id 4
+task 591 258 pt -170 0 927
+task 432 160 id 4
+task 471 154 pt -1308 0 3862
+task 648 285 id 2
+task 863 242 pt 854 0 1149
+task 639 265 id 2
+task 743 218 id 5
+task 443 190 id 4
+task 623 674 pt -18 0 -727
+task 442 158 id 4
+task 247 74 pt -4967 540 7479
+task 813 262 id 6
+task 639 690 pt -1 0 -747
+task 449 182 id 4
+task 519 186 pt -680 0 2404
+task 852 276 id 6
+task 143 130 pt -5366 0 5955
+task 821 274 id 6
+task 535 362 pt -236 0 73
+task 451 253 id 4
+task 159 210 pt -2252 0 1745
+task 459 219 id 4
+task 295 682 pt -372 0 -737
+task 852 276 id 6
+task 1199 338 pt 1376 0 212
+task 845 254 id 6
+task 567 474 pt -118 0 -356
+task 454 192 id 4
+task 191 226 pt -1888 0 1417
+task 855 277 id 6
+task 839 218 pt 885 0 1572
+task 457 251 id 4
+task 207 146 pt -3706 0 4415
+task 651 286 id 2
+task 599 522 pt -59 0 -475
+task 648 306 id 2
+task 479 322 id 1
+task 645 282 id 2
+task 359 378 pt -600 0 -7
+task 630 300 id 2
+task 495 210 pt -677 0 1745
+task 435 181 id 4
+task 375 298 pt -764 0 507
+task 837 255 id 6
+task 767 354 pt 296 0 117
+task 450 219 id 4

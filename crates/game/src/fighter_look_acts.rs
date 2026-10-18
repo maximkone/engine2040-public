@@ -355,7 +355,7 @@ impl FighterLook {
             return [0.0, 0.0];
         }
         let len2 = dx * dx + dz * dz;
-        if !(len2 > 1e-12) {
+        if len2 <= 1e-12 {
             return [0.0, 0.0];
         }
         let len = len2.sqrt();

@@ -32,6 +32,12 @@
 //!   An `Impact` (the hit itself, integers) shoves the bodies around the hit point along the
 //!   projectile's heading with a real impulse, so heavy bodies move less. Blasts and impacts
 //!   shove only the nearest `Caps::blast_bodies` and `Caps::impact_bodies` bodies of the tier.
+//! - A spear tether is a rope: `attach_tether` ties a verlet chain between two points (the
+//!   thrower and the target, meters), `move_tether` gives its ends every tick, `tether_nodes`
+//!   reads the chain back and `tether_info` says slack, taut or loose and how hard it pulls (a
+//!   spring on the stretch plus a damper). `carry_ragdoll` drags a ragdoll's root along the
+//!   sim's own track with a soft spring-damper, so the limbs trail and swing. Rope length and
+//!   count come from the tier's caps (`Caps::tethers`, `Caps::tether_nodes`).
 //! - Bodies sleep. A sleeping body costs no solver work and reads back the same transform every
 //!   frame.
 //! - Bad input (NaN, infinity, out of range) is refused with a typed `Error` before anything
@@ -56,6 +62,8 @@ mod fx;
 #[cfg(feature = "rapier")]
 mod rig;
 #[cfg(feature = "rapier")]
+mod tether;
+#[cfg(feature = "rapier")]
 mod types;
 
 #[cfg(feature = "rapier")]
@@ -67,9 +75,11 @@ pub use engine_physics::ragdoll::BoneShape;
 #[cfg(feature = "rapier")]
 pub use error::{Error, Field};
 #[cfg(feature = "rapier")]
-pub use fx::PhysFx;
+pub use fx::{PhysFx, TetherInfo};
 #[cfg(feature = "rapier")]
 pub use rig::Rig;
+#[cfg(feature = "rapier")]
+pub use tether::TetherState;
 #[cfg(feature = "rapier")]
 pub use types::{Batch, Blast, Flight, Impact, Key, Placed, Shard, Stats, Transform};
 

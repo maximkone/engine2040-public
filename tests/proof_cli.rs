@@ -222,3 +222,91 @@ fn lane_traversal_and_absolute_record_paths_are_refused_loudly() {
     }
     assert!(!PathBuf::from(&absolute).exists());
 }
+
+#[test]
+fn journal_run_matches_the_tape_and_a_torn_or_damaged_journal_refuses_by_name() {
+    let tag = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let journal = format!("engine2040-journal-{pid}-{tag}.e2040j");
+    let tape = format!("engine2040-journal-{pid}-{tag}-tape.e2040");
+    let plain = format!("engine2040-journal-{pid}-{tag}-plain.e2040");
+    let torn = format!("engine2040-journal-{pid}-{tag}-torn.e2040j");
+    let damaged = format!("engine2040-journal-{pid}-{tag}-damaged.e2040j");
+    struct Files(Vec<String>);
+    impl Drop for Files {
+        fn drop(&mut self) {
+            for name in &self.0 {
+                let _ = fs::remove_file(name);
+            }
+        }
+    }
+    let _files = Files(vec![
+        journal.clone(),
+        tape.clone(),
+        plain.clone(),
+        torn.clone(),
+        damaged.clone(),
+    ]);
+    let run_args = ["--seed", "19", "--ticks", "12", "--input", "3:0:-8:4"];
+    let with = |extra: &[&str]| {
+        let mut args = run_args.to_vec();
+        args.extend_from_slice(extra);
+        success(run(&args))
+    };
+    // One run streams the journal and writes the tape; --verify replays both.
+    let receipt = with(&[
+        "--journal",
+        &journal,
+        "--record",
+        &tape,
+        "--verify",
+        "--format",
+        "json",
+    ]);
+    assert!(receipt.contains("\"mode\":\"record\""));
+    assert!(receipt.contains("\"verified\":true"));
+    with(&["--record", &plain]);
+    assert_eq!(fs::read(&tape).unwrap(), fs::read(&plain).unwrap());
+    let bytes = fs::read(&journal).unwrap();
+    assert!(bytes.starts_with(b"E2040JN\0"));
+    // The complete journal replays to the same receipt as the tape.
+    let suffix = |text: &str| text.split("\"final_hash\":").nth(1).unwrap().to_owned();
+    let replayed = success(run(&["--replay", &journal, "--format", "json"]));
+    assert!(replayed.contains("\"mode\":\"replay\""));
+    assert_eq!(suffix(&receipt), suffix(&replayed));
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        bytes,
+        "replay mutated the journal"
+    );
+    // A journal cut inside its last record keeps no half tick: it refuses,
+    // names the file and says one tick is missing.
+    fs::write(&torn, &bytes[..bytes.len() - 5]).unwrap();
+    let bad = run(&["--replay", &torn]);
+    assert_eq!(bad.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert!(stderr.contains(&torn), "{stderr}");
+    assert!(stderr.contains("1 of 12 ticks missing"), "{stderr}");
+    assert!(stderr.contains("torn trailing record"), "{stderr}");
+    // A flipped byte inside a record is damage, never a shorter run.
+    let mut flipped = bytes.clone();
+    let middle = flipped.len() / 2;
+    flipped[middle] ^= 0xff;
+    fs::write(&damaged, &flipped).unwrap();
+    let bad = run(&["--replay", &damaged]);
+    assert_eq!(bad.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert!(stderr.contains(&damaged), "{stderr}");
+    assert!(stderr.contains("journal corrupt at tick"), "{stderr}");
+    // Journals never overwrite, never mix with replay, never escape the cwd.
+    assert!(!run(&["--journal", &journal, "--ticks", "3"])
+        .status
+        .success());
+    assert_eq!(fs::read(&journal).unwrap(), bytes);
+    assert_eq!(
+        run(&["--replay", &journal, "--journal", "x"]).status.code(),
+        Some(2)
+    );
+    let escape = run(&["--ticks", "3", "--journal", "../escape.e2040j"]);
+    assert!(String::from_utf8_lossy(&escape.stderr).contains("unsafe tape path"));
+}

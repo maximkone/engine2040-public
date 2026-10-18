@@ -11,7 +11,7 @@
 use engine_arena::spine_step::SpineMatch;
 use engine_arena::{ArenaConfig, FighterTape};
 use engine_editor::capability::Capability;
-use engine_editor::commands::Document;
+use engine_editor::commands::{self, Batch, Document, Journal, Op};
 use engine_endpoint::mcp::{
     McpServer, OpDto, PoseDto, SceneReadArgs, SceneReadTool, TxApplyArgs, TxApplyTool,
     TxPreviewArgs, TxPreviewTool, TxUndoArgs, TxUndoTool,
@@ -26,8 +26,23 @@ const SESSION: u64 = 7;
 const TICKS: u32 = 300;
 const HALF: f32 = 12.0;
 
+/// A session at revision 1 whose scene plays as the empty arena: the one node
+/// hangs above head height and away from the wall, so it blocks no fighter
+/// and overlaps nothing, but gives a run a revision to pin.
 fn server() -> McpServer {
-    McpServer::new(SESSION, Capability::unrestricted(SESSION))
+    let (mut doc, mut journal) = (Document::new(), Journal::new());
+    let marker = Batch {
+        ops: vec![Op::Insert {
+            id: ObjectId::new(),
+            parent: ObjectId::NIL,
+            local: Transform::new([30.0, 10.0, 30.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+        }],
+        base_revision: 0,
+        idempotency_key: 1,
+        provenance: None,
+    };
+    commands::apply(&mut doc, &mut journal, &marker).expect("marker applies");
+    McpServer::with_document(doc, journal, SESSION, Capability::unrestricted(SESSION))
 }
 
 fn revision_of(server: &McpServer) -> u64 {
@@ -70,6 +85,7 @@ fn insert_wall(server: &McpServer, key: u64) -> u64 {
             idempotency_key: key,
             ops,
             approval,
+            delta: Some(false),
         },
     )
     .expect("wall applies")
@@ -106,20 +122,36 @@ fn play(
         done.scene_rev, scene_rev,
         "the receipt echoes the scene revision"
     );
+    assert!(
+        done.scene_digest.is_some(),
+        "the manifest carries the scene pin digest"
+    );
     Ok(done.checkpoints)
 }
 
 #[test]
 fn scene_drives_match() {
+    // An unauthored arena (revision 0) never plays, pinned or not.
+    let blank = McpServer::new(SESSION, Capability::unrestricted(SESSION));
+    for offered in [None, Some(0)] {
+        let refused = play(&blank, 2040, offered).expect_err("revision 0 refuses");
+        assert!(refused.starts_with("empty_arena"), "{refused}");
+    }
+
+    // A run must name the scene it plays.
     let server = server();
     let empty_rev = revision_of(&server);
+    let unpinned = play(&server, 2040, None).expect_err("an unpinned run refuses");
+    assert!(unpinned.starts_with("unpinned_run"), "{unpinned}");
 
-    // The empty scene is the legacy arena: same checkpoints with or without
-    // naming it.
-    let legacy = play(&server, 2040, None).expect("legacy plays");
+    // A scene with nothing solid is the legacy arena: same checkpoints.
     let empty = play(&server, 2040, Some(empty_rev)).expect("empty scene plays");
-    assert_eq!(legacy.len(), TICKS as usize);
-    assert_eq!(empty, legacy, "an empty scene is the legacy match");
+    let config = ArenaConfig::try_new(2040, TICKS, 2, HALF).expect("config");
+    let legacy = engine_arena::run(&config, &FighterTape(Vec::new()));
+    assert_eq!(empty.len(), TICKS as usize);
+    for (dto, point) in empty.iter().zip(&legacy) {
+        assert_eq!((dto.tick, dto.hash), (point.tick, point.hash));
+    }
 
     // An AI edit: one 2 m wall through the door.
     let walled_rev = insert_wall(&server, 41);
@@ -135,7 +167,7 @@ fn scene_drives_match() {
     let stale = play(&server, 2040, Some(empty_rev)).expect_err("stale revision refuses");
     assert!(stale.starts_with("stale_scene_rev"), "{stale}");
     assert!(
-        stale.contains(&format!("current revision {walled_rev}")),
+        stale.contains(&format!("the document is at {walled_rev}")),
         "{stale}"
     );
 

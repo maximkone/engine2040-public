@@ -1073,7 +1073,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   agree on 20 seeded layouts. F2P: every staged actor shares polygon 0 and
   every pair answers reachable (`scene_query.rs:952-956`, `:1062-1070`). P2P:
   `cargo test -p engine-endpoint --lib` green; golden unchanged. Step 2 is
-  better after AD7. Plan: `docs/plan/forge-adoption.md` AD-20. needs: none.
+  better after AD7. Plan: `docs/plan/forge-adoption.md` AD-20. needs: none. Progress 2026-10-18: crates/nav/src/reach.rs landed 135bb63f (reach_view gives every actor its real nav polygon, nav_view for the bake checks, two rooms read Blocked until a doorway joins them, mesh and tiles agree on 20 seeded layouts; run 39076864508, clippy 39077965931); left: endpoint needs_nav_view refusal and replacing open_floor in scene_query.rs (lane A).
 
 Second pass (owner 2026-10-11, `docs/plan/forge-adoption.md` section J): four
 more research passes gave 43 candidate rows. These 14 are the best; the rest

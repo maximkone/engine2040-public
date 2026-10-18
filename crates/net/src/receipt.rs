@@ -279,6 +279,12 @@ pub fn distributions_json(profiles: &[(&str, &BoutReport)]) -> String {
                     .num("rollback_max_ticks", s.rollback_max)
                     .num("deeper_than_8_tick_window", s.over_cap)
                     .num("input_delay_ticks", s.input_delay)
+                    .num("input_ticks_delivered", s.delivery.input_delivered)
+                    .num("input_ticks_lost", s.delivery.input_lost)
+                    .num("input_loss_permille", s.delivery.input_loss_permille)
+                    .num("state_loss_permille", s.delivery.state_loss_permille)
+                    .num("state_ack_latest", s.delivery.state_latest)
+                    .num("state_ack_bits", s.delivery.state_bits)
                     .num("catchup_resync_depth_ticks", s.resync_depth)
                     .raw("rollback_hist_per_tick", numbers(&s.rollback));
                 r.inline()

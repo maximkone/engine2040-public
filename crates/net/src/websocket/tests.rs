@@ -772,9 +772,7 @@ fn ws_transport_says_goodbye_to_open_sessions_on_shutdown() {
 /// reference computes, and the departure of the client is reported.
 #[test]
 fn ws_duel_plays_600_ticks_over_a_socket_and_ends_on_the_reference_hash() {
-    use crate::webduel::{
-        duel_spec, net_line, reference_hash, DuelClient, DuelHost, DUEL_TICKS,
-    };
+    use crate::webduel::{duel_spec, net_line, reference_hash, DuelClient, DuelHost, DUEL_TICKS};
 
     let mut server = WsServer::bind(loopback()).expect("bind the server");
     let addr = server.local_addr();
@@ -787,7 +785,11 @@ fn ws_duel_plays_600_ticks_over_a_socket_and_ends_on_the_reference_hash() {
         host.pump(&mut [&mut server]);
         host.tick(&mut [&mut server], false).expect("tick");
         rounds += 1;
-        assert!(rounds < POLL_ROUNDS * 4, "the duel stalled at tick {}", host.tick_now());
+        assert!(
+            rounds < POLL_ROUNDS * 4,
+            "the duel stalled at tick {}",
+            host.tick_now()
+        );
         thread::sleep(Duration::from_micros(200));
     }
     let outcome = client.outcome().expect("ended");

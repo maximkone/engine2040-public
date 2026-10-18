@@ -44,7 +44,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
             CALLS.set(CALLS.get().saturating_add(1));
             let size = u64::try_from(layout.size()).unwrap_or(u64::MAX);
             BYTES.set(BYTES.get().saturating_add(size));
-            let live = LIVE.get().saturating_add(i64::try_from(size).unwrap_or(i64::MAX));
+            let live = LIVE
+                .get()
+                .saturating_add(i64::try_from(size).unwrap_or(i64::MAX));
             LIVE.set(live);
             PEAK.set(PEAK.get().max(live));
         }

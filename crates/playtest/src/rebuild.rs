@@ -16,7 +16,7 @@
 //! reproducibility, like the arena hashes the checksums are. Errors: `None`
 //! for an invalid config, tape or record, never a partial answer.
 
-use engine_arena::{resume, run_prefix, ArenaConfig, FighterTape, MatchSnapshot};
+use engine_arena::{resume, run_prefix, ArenaConfig, BodyTape, MatchSnapshot};
 
 /// Ticks between two sparse snapshots.
 pub const STRIDE: u32 = 8;
@@ -32,7 +32,7 @@ pub struct Keyframes {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Claim {
     /// Tape the match ran.
-    pub tape: FighterTape,
+    pub tape: BodyTape,
     /// Checkpoint hash after each tick, `config.ticks` entries.
     pub checksums: Vec<u64>,
 }
@@ -51,7 +51,7 @@ pub struct Audit {
 
 /// Play `tape` once, keep a snapshot every `stride` ticks and the checksum of
 /// every tick. `None` for an invalid config or tape or a zero stride.
-pub fn take(config: &ArenaConfig, tape: &FighterTape, stride: u32) -> Option<(Keyframes, Claim)> {
+pub fn take(config: &ArenaConfig, tape: &BodyTape, stride: u32) -> Option<(Keyframes, Claim)> {
     if stride == 0 {
         return None;
     }
@@ -146,17 +146,17 @@ pub fn audit(keys: Keyframes, claim: &Claim) -> Option<Audit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_arena::{run, FighterId, FighterInput};
+    use engine_arena::{run, BodyId, BodyInput};
 
     fn config(seed: u64) -> ArenaConfig {
         ArenaConfig::try_new(seed, 120, 2, 20.0).expect("valid config")
     }
 
     /// A one-tick walk order the brains did not plan: moves a fighter at once.
-    fn nudge(tick: u32) -> FighterInput {
-        FighterInput {
+    fn nudge(tick: u32) -> BodyInput {
+        BodyInput {
             tick,
-            fighter: FighterId(0),
+            fighter: BodyId(0),
             mx: 100,
             mz: 0,
             facing: 0,
@@ -165,7 +165,7 @@ mod tests {
     }
 
     /// First tick where a from-zero run of `tape` differs from `checksums`.
-    fn oracle(config: &ArenaConfig, tape: &FighterTape, checksums: &[u64]) -> Option<u32> {
+    fn oracle(config: &ArenaConfig, tape: &BodyTape, checksums: &[u64]) -> Option<u32> {
         let rebuilt = run(config, tape);
         assert_eq!(rebuilt.len(), checksums.len());
         rebuilt
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn a_clean_record_audits_clean_in_two_probes_on_half_the_memory() {
         let config = config(5000);
-        let (keys, claim) = take(&config, &FighterTape::default(), STRIDE).expect("recorded");
+        let (keys, claim) = take(&config, &BodyTape::default(), STRIDE).expect("recorded");
         assert_eq!(keys.len(), 15);
         assert!(keys.memory_permille() <= 500, "{}", keys.memory_permille());
         let audit = audit(keys, &claim).expect("audited");
@@ -192,12 +192,11 @@ mod tests {
         for plant in 0..20u32 {
             let config = config(5000 + u64::from(plant));
             let at = 3 + 5 * plant;
-            let (keys, mut claim) =
-                take(&config, &FighterTape::default(), STRIDE).expect("recorded");
+            let (keys, mut claim) = take(&config, &BodyTape::default(), STRIDE).expect("recorded");
             let truth = claim.clone();
             let expected = if plant % 2 == 0 {
                 // A tape nobody recorded: the nudge moves the fighter at `at`.
-                claim.tape = FighterTape(vec![nudge(at)]);
+                claim.tape = BodyTape(vec![nudge(at)]);
                 oracle(&config, &claim.tape, &truth.checksums)
             } else {
                 // A checksum that lies at exactly one tick.
@@ -218,19 +217,19 @@ mod tests {
     #[test]
     fn the_audit_reproduces_twice_and_refuses_a_short_claim() {
         let config = config(5003);
-        let planted = FighterTape(vec![nudge(41)]);
+        let planted = BodyTape(vec![nudge(41)]);
         let audits: Vec<_> = (0..2)
             .map(|_| {
                 let (keys, mut claim) =
-                    take(&config, &FighterTape::default(), STRIDE).expect("recorded");
+                    take(&config, &BodyTape::default(), STRIDE).expect("recorded");
                 claim.tape = planted.clone();
                 audit(keys, &claim).expect("audited")
             })
             .collect();
         assert_eq!(audits[0], audits[1]);
-        let (keys, mut claim) = take(&config, &FighterTape::default(), STRIDE).expect("recorded");
+        let (keys, mut claim) = take(&config, &BodyTape::default(), STRIDE).expect("recorded");
         claim.checksums.pop();
         assert_eq!(audit(keys, &claim), None);
-        assert!(take(&config, &FighterTape::default(), 0).is_none());
+        assert!(take(&config, &BodyTape::default(), 0).is_none());
     }
 }

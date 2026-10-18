@@ -1,4 +1,5 @@
 use super::*;
+use engine_core::vec3::orient2;
 
 // ---- integer helpers ---------------------------------------------------------
 
@@ -38,19 +39,13 @@ pub(super) fn inside_strict(p: (i32, i32), r: &Rect) -> bool {
     p.0 > r.min_x && p.0 < r.max_x && p.1 > r.min_z && p.1 < r.max_z
 }
 
-/// 2D cross product (b - a) x (c - a), exact in i64.
-pub(super) fn cross(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> i64 {
-    (i64::from(b.0) - i64::from(a.0)) * (i64::from(c.1) - i64::from(a.1))
-        - (i64::from(b.1) - i64::from(a.1)) * (i64::from(c.0) - i64::from(a.0))
-}
-
 /// True when segments ab and cd cross in their strict interiors; touching
 /// at endpoints or edges never counts, so grazing sightlines stay clear.
 pub(super) fn proper_cross(a: (i32, i32), b: (i32, i32), c: (i32, i32), d: (i32, i32)) -> bool {
-    let o1 = cross(a, b, c);
-    let o2 = cross(a, b, d);
-    let o3 = cross(c, d, a);
-    let o4 = cross(c, d, b);
+    let o1 = orient2(a, b, c);
+    let o2 = orient2(a, b, d);
+    let o3 = orient2(c, d, a);
+    let o4 = orient2(c, d, b);
     ((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))
 }
 

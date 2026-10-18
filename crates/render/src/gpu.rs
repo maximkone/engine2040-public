@@ -104,11 +104,7 @@ impl GpuState {
         // logs `pick.startup_line()` with `choice_reason` (no stdout in lib).
         let (choice, _) = crate::backend::resolve_from_env(None);
         let pick = crate::backend::pick_backend(choice, None);
-        let desc = wgpu::InstanceDescriptor {
-            backends: crate::backend::wgpu_backends(pick.primary),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        };
-        let instance = wgpu::Instance::new(desc);
+        let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
         let surface = instance
             .create_surface(Arc::clone(&window))
             .map_err(|e| format!("surface: {e}"))?;

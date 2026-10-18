@@ -315,6 +315,8 @@ several plans serve one part, the order in the last column is the reading order.
 | `docs/plan/fps-view.md` | Look on the RTX 3050; The three games | FV (a first-person eye on a fighter body: eye pose, look channel beside the hashed tape, camera feed, no-clip rule; consumer UW11) |
 | `docs/plan/parked.md` | Editor and tools; The three games; Spatial understanding for AI | WD, SN, ED, PLF, UIX (world, audio and editor parked; each names the proof that un-parks it) |
 | `docs/plan/urban-war.md` | The three games | UW, UC (urban-city merged in); frozen by FOCUS D7 |
+| `docs/plan/silicon-city.md` | none: a future game (LATER), no Core proof | SIL (CPU-as-city builder with a hashed truth sim, skyline, bot ladder and reference-sim gate); rows not on the board yet |
+| `docs/plan/silicon-world.md` | none: a future game (LATER), no Core proof | SIL46-SIL59 (the chip as a GTA-style city: districts, zoom chain, time dial, sound, missions, meltdown mode); read after `silicon-city.md`; rows not on the board yet |
 | `docs/plan/rome-spec.md` | The three games; Determinism and exact replay; AI in gameplay | Rome arena duel merge point with forge (map, bouts, tick rate, seed rule, AI fill); machine truth in `rome-spec.json`; open parity gaps digest |
 | `docs/plan/finish-line.md` | Look on the RTX 3050; Sim speed; Determinism and exact replay; AI builds the game; Online, 64 players; Shipping a clean build; Headless proofs and tests | gates G1-G9 product check |
 | `docs/plan/forge-adoption.md` | AI builds the game; AI in gameplay; Spatial understanding for AI; Dismemberment and wounds; Physics and destruction; Look on the RTX 3050; Determinism and exact replay; Headless proofs and tests; Editor and tools | AD1-AD29, PX40, AX23, EA6, PF24, SP66 |

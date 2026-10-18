@@ -107,6 +107,8 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # Native wgpu instances open in strict WebGPU mode. This runner has no GPU adapter, so GPU tests skip here and it only bites on a runner that has one.
+      E2040_STRICT_WEBGPU: "1"
     steps:
       - uses: actions/checkout@v5
       - name: free disk

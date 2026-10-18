@@ -54,6 +54,7 @@ and they carry no authority.
 | research/LADDER.md | Cards, spikes and verdicts, one ladder rung each; read the rung, not the file (199 KB) |
 | archive/ | No authority, git history made browsable: `archive/INDEX.md` lists what moved on 2026-10-17, older dated folders are listed by their date |
 | CAPTURE.md | Capture output: built-in dump first, OBS only for live play |
+| DEMO.md | How to launch and play the arena demo (exe and browser), controls, what to look for |
 | fixtures/ | Fixture dir: pinned test data, start at `../fixtures/README.md` |
 | README.md | The one-screen map of docs/: plans, rows, book, research, archive |
 | INDEX.md | This list |

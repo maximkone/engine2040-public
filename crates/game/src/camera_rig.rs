@@ -14,8 +14,8 @@
 //! `camera_feed` (`PresentationFeed`, `SmoothedFeed`) under the window loop.
 
 use super::{
-    frame_pair, select_lock_target, shake_offset, CameraError, CameraFrame, CameraPose, Director,
-    DirectorParams, FighterView, Vec3, TRAUMA_SCALE,
+    fit_pair, frame_pair, select_lock_target, shake_offset, CameraError, CameraFrame, CameraPose,
+    Director, DirectorParams, FighterView, Vec3, TRAUMA_SCALE,
 };
 use crate::camera_arm::{arm_length, Aabb, FLOOR_LEN};
 
@@ -759,7 +759,7 @@ pub fn fight_targets(
     if !focus_m.is_finite() || !other_m.is_finite() {
         return Err(CameraError::BadParam("focus_m"));
     }
-    let pose = frame_pair(focus_m, Some(other_m), params)?;
+    let pose = fit_pair(focus_m, Some(other_m), params)?;
     let look_m = pose.look_m;
     let boom_len_sq = params.boom_up * params.boom_up + params.boom_back * params.boom_back;
     let boom_len = boom_len_sq.sqrt();

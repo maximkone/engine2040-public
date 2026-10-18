@@ -8,13 +8,6 @@
 // GPU presenter behind `window`: HDR plus depth plus LDR-twin targets, mesh
 // and texture caches, surface/swapchain ownership with last-good recovery.
 // ---------------------------------------------------------------------------
-/// Studio HDRI baked once into the presenter's IBL state: the same
-/// fixture bytes the cook reference bakes, so the per-frame chart samples
-/// a fixed bake. Embedded (1.6 MB) to keep the window build
-/// self-contained and deterministic; the steady-state path never cooks.
-const IBL_STUDIO_HDRI_BYTES: &[u8] =
-    include_bytes!("../../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr");
-
 /// HDR working target: half float, LINEAR radiance. The forward pass writes
 /// exposed scene radiance (values above 1.0 survive); the blit does the
 /// frame's only tone map, ACES plus sRGB.
@@ -49,6 +42,7 @@ pub(super) const BLIT_WGSL: &str = concat!(
 
 mod bind_memo;
 mod capture;
+mod contact_live;
 mod device_init;
 mod fog_tranche;
 mod forward_bind;
@@ -58,6 +52,7 @@ mod gtao_live;
 mod live;
 mod msaa;
 mod presenter;
+mod quality_apply;
 #[cfg(any(target_arch = "wasm32", test))]
 mod scope_ledger;
 mod submit;
@@ -126,15 +121,6 @@ mod root_wiring_tests {
                 "clear {name} stays dim linear radiance, got {got}"
             );
         }
-        assert!(
-            !IBL_STUDIO_HDRI_BYTES.is_empty(),
-            "studio bake stays embedded via root"
-        );
-        assert!(
-            IBL_STUDIO_HDRI_BYTES.len() > 1_000,
-            "studio bake stays a real HDRI, got {} bytes",
-            IBL_STUDIO_HDRI_BYTES.len()
-        );
     }
 
     /// The blit carries the frame's one tone map and the root re-exports

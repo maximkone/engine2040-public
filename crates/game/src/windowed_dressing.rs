@@ -340,7 +340,7 @@ impl DressingLods {
 thread_local! {
     /// Per-thread dressing LOD state; `None` until the first pushed frame
     /// registered the actors. See [`DressingLods`].
-    static DRESSING_LODS: RefCell<Option<DressingLods>> = RefCell::new(None);
+    static DRESSING_LODS: RefCell<Option<DressingLods>> = const { RefCell::new(None) };
 }
 
 /// Resident LOD of every dressing actor for one frame at `eye_m`: poll the

@@ -741,16 +741,15 @@ impl GpuSkinned {
         // Test builds only: cap the GPU tests that hold a device at once.
         #[cfg(test)]
         crate::test_gpu::hold_gpu_slot();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = crate::backend::new_instance(
             // Test builds skip the GL backend: its driver DLL loads from a
             // helper thread and can wedge the process loader lock.
-            backends: if cfg!(test) {
+            if cfg!(test) {
                 wgpu::Backends::PRIMARY
             } else {
                 wgpu::Backends::all()
             },
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        );
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,

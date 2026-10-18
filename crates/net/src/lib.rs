@@ -1,5 +1,8 @@
 //! net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
 
+/// Packet delivery tracking: a 32-bit ack bitfield, a fixed ring of sent
+/// records and a loss rate in permille. Std-only; feeds receipts, never the sim.
+pub mod ack;
 /// Browser clients: the WebSocket and WebTransport legs of a page joining the
 /// dedicated server, behind the same `Transport` trait (wasm32 glue plus the
 /// natively tested inbox and stream framing).

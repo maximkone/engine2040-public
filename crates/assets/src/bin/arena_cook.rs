@@ -69,9 +69,13 @@ fn run() -> Result<(), String> {
         let load = |path: &std::path::Path| -> Result<(image::RgbaImage, usize), String> {
             let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
             if bytes.starts_with(b"version https://git-lfs") {
-                return Err(format!("{} is an LFS pointer: run git lfs pull", path.display()));
+                return Err(format!(
+                    "{} is an LFS pointer: run git lfs pull",
+                    path.display()
+                ));
             }
-            let img = image::load_from_memory(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+            let img =
+                image::load_from_memory(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
             Ok((img.to_rgba8(), bytes.len()))
         };
         let (color, color_bytes) = load(&file("Color"))?;
@@ -102,12 +106,19 @@ fn run() -> Result<(), String> {
         let maps: [(&str, MapKind, &[u8], usize); 3] = [
             ("base", MapKind::BaseColor, color.as_raw(), color_bytes),
             ("normal", MapKind::Normal, normal.as_raw(), normal_bytes),
-            ("orm", MapKind::Orm, &orm, rough_bytes + ao_bytes + metal_bytes),
+            (
+                "orm",
+                MapKind::Orm,
+                &orm,
+                rough_bytes + ao_bytes + metal_bytes,
+            ),
         ];
         for (suffix, kind, rgba, src_bytes) in maps {
-            let ktx2 = cook_ktx2(rgba, w, h, kind, max_dim).map_err(|e| format!("{dir} {suffix}: {e}"))?;
+            let ktx2 =
+                cook_ktx2(rgba, w, h, kind, max_dim).map_err(|e| format!("{dir} {suffix}: {e}"))?;
             let tex = parse_ktx2(&ktx2).map_err(|e| format!("{dir} {suffix}: reparse {e}"))?;
-            let (dw, dh, decoded) = decode_level_rgba(&tex, 0).map_err(|e| format!("{dir} {suffix}: {e}"))?;
+            let (dw, dh, decoded) =
+                decode_level_rgba(&tex, 0).map_err(|e| format!("{dir} {suffix}: {e}"))?;
             // PSNR of level 0 against the source (resized when the cap shrank it).
             let reference = if (dw, dh) == (w, h) {
                 rgba.to_vec()

@@ -1857,10 +1857,7 @@ mod tests {
     #[cfg(feature = "window")]
     fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         crate::test_gpu::hold_gpu_slot();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
         let adapter =
             match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,

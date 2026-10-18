@@ -181,6 +181,9 @@ fn frame_capture_names_costliest_system_and_pass() {
     // The summary names both winners in stable units for the perf report.
     let summary = report.summary();
     assert!(summary.contains("frame_capture frames=5"));
+    // The frame-time series fed by capture prints its row and smoothed ms.
+    assert!(summary.contains("frame_time value="));
+    assert!(summary.contains(&format!("smoothed={:.3}ms", report.frame_time_smoothed_ms)));
     assert!(summary.contains(report.costliest_system));
     assert!(summary.contains(report.costliest_pass));
     assert!(summary.contains("costliest_system"));

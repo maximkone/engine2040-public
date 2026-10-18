@@ -56,11 +56,9 @@ pub fn sample(trauma_permille: u32, tick: u32) -> ShakeSample {
 /// shake's cap share (`curve(small) / curve(big)`); zero when big is zero.
 #[must_use]
 pub const fn separation_permille(small_trauma: u32, big_trauma: u32) -> u32 {
-    let big = curve_permille(big_trauma);
-    if big == 0 {
-        0
-    } else {
-        curve_permille(small_trauma) * 1000 / big
+    match (curve_permille(small_trauma) * 1000).checked_div(curve_permille(big_trauma)) {
+        Some(permille) => permille,
+        None => 0,
     }
 }
 

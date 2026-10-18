@@ -1545,10 +1545,7 @@ pub(crate) fn gx1_test_device() -> Option<(
 )> {
     let slot = GX1_DEVICE.get_or_init(|| {
         crate::test_gpu::hold_gpu_slot();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,

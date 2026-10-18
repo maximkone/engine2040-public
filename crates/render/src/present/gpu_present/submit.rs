@@ -674,19 +674,26 @@ impl Presenter {
             index,
             reason: "unknown texture key".into(),
         })?;
-        // VR2: a draw that names a normal map picks its material set (a few
-        // sets at most, so a short scan; draws with no map cost one push).
+        self.pick_map_sets(list)
+    }
+
+    /// VR2: a draw that names a normal map picks its material set (a few
+    /// sets at most, so a short scan of `map_sets`, not of the resident
+    /// binds; draws with no map cost one push).
+    fn pick_map_sets(&mut self, list: &DrawList) -> Result<(), PresentError> {
         let sets = &self.map_sets;
         self.draw_sets.clear();
         for (index, item) in list.items.iter().enumerate() {
             let choice = match &item.normal_map {
                 None => None,
-                Some(key) => Some(sets.iter().position(|set| set.key == *key).ok_or_else(|| {
-                    PresentError::InvalidDraw {
-                        index,
-                        reason: "unknown normal map key (no material set uploaded)".into(),
-                    }
-                })?),
+                Some(key) => {
+                    Some(sets.iter().position(|set| set.key == *key).ok_or_else(|| {
+                        PresentError::InvalidDraw {
+                            index,
+                            reason: "unknown normal map key (no material set uploaded)".into(),
+                        }
+                    })?)
+                }
             };
             self.draw_sets.push(choice);
         }
@@ -783,20 +790,28 @@ impl Presenter {
     /// Twin sun-shadow bind: resolve the frame focus depth into the
     /// twin sun band and refresh the twin shadow uniform the window
     /// mesh forward reads at group 0 binding 3 under
-    /// `shaders/forward.wgsl` (the `fs` entry). One 32-byte uniform
-    /// write per live frame; steady-state frames allocate nothing.
+    /// `shaders/forward.wgsl` (the `fs` entry). One 32-byte sun uniform
+    /// write plus one 128-byte contact feet write per live frame;
+    /// steady-state frames allocate nothing.
     /// A non-finite depth fails the frame loudly, never a silent band.
     pub(super) fn bind_twin_shadow(&self, view_depth_m: f32) -> Result<(), PresentError> {
         let fail = |e: crate::twin_shadow::TwinShadowError| PresentError::InvalidDraw {
             index: 0,
             reason: format!("rl19 twin shadow: {e}"),
         };
-        let band =
-            crate::twin_shadow::twin_active_cascade(&self.twin_sun, view_depth_m).map_err(fail)?;
+        let band = crate::twin_shadow::twin_active_cascade(&self.twin_sun, view_depth_m)
+            .map_err(fail)?
+            .min(crate::quality::max_cascade_band(&self.quality));
         self.queue.write_buffer(
             &self.twin_shadow_buf,
             0,
             &crate::twin_shadow::twin_shadow_uniform(&self.twin_sun, band),
+        );
+        // The live contact feet ride behind the 32 sun bytes (zero until fed).
+        self.queue.write_buffer(
+            &self.twin_shadow_buf,
+            super::contact_live::CONTACT_FEET_OFFSET,
+            &self.contact_feet,
         );
         Ok(())
     }

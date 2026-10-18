@@ -72,6 +72,8 @@ struct ShadowU {
     near: f32,
     far: f32,
     size: f32,
+    // Live contact feet (see `sun_contact_factor`): x, z, radius, strength.
+    feet: array<vec4<f32>, 8>,
 };
 struct FogFwdU {
     inv_view_proj: mat4x4<f32>,
@@ -111,8 +113,9 @@ struct SkinParams {
 // Single sun shadow map: depth plus comparison sampler for the arena sun
 // pass (`sun_shadow::SunDepthMap` draws it). Bound at 13/14 so the live
 // `fs` layout stays clean (9-12 owned by IBL); the sun reader below
-// (`sun_shadow_pcf`) samples it with a 2x2 PCF, the staged contact keeps
-// the old path until the presenter binds the map. Slope bias lives in the
+// (`sun_shadow_pcf`) samples it with a 2x2 PCF once the presenter binds the
+// map; the grounding shade under the fighters (`sun_contact_factor`) is the
+// live feet block of `shadow`, not this map. Slope bias lives in the
 // depth pipeline (`SUN_SHADOW_SLOPE_SCALE`), the constant bias in the
 // compare below.
 @group(0) @binding(13) var sun_shadow_map: texture_depth_2d;
@@ -183,219 +186,36 @@ fn sun_shadow_pcf(uv: vec2<f32>, frag_depth: f32, bias: f32) -> f32 {
     lit += textureSampleCompare(sun_shadow_map, sun_shadow_sampler, base + vec2<f32>(0.5, 0.5) * texel, frag_depth - bias);
     return lit * 0.25;
 }
-// Staged single sun contact: CPU twin stages fighter-top vs sand depths
-// (`sun_shadow::sun_single_box_is_nearer_than_plane` plus
-// `fighter_grounding_shadow_darkens_near_sand`); this mirrors that
-// `sun_shadow_factor` compare without a new bind so the current forward
-// layout stays clean. The full depth-map texture sample lands with the
-// group-0 sun bind (presenter/ibl/submit, out of this packet's paths).
-// Named 1 m grounding: sand within 1 m of either staged duel foot at
-// (2, -1) and (2, 1) plus the clinch midpoint (2, 0) darkens 0.5x
-// (50 percent, satisfies the 25 percent gate), open sand stays lit
-// (far moves within 2 percent on the CPU twin).
-// 377611cb: frame_000002 and frame_000004 show no contact under either
-// fighter (white haze only) with shadow 0.772ms and forward 0.000ms;
-// these three disks ground that sand without moving bodies, camera or crowd.
-// Feet match `twin_fighters::TWIN_FIGHTER_FEET_M` slots 0 and 1 for the
-// 257c2fb4 duel captures; the midpoint reuses the legacy
-// `SUN_STAGED_FIGHTER_Z` so the 2d99218b frame_000004 clinch (fighters
-// meet mid-pit, exactly one radius from both duel feet, strict `<`
-// keeps the edge lit) grounds without moving bodies, camera or crowd.
-// Bias mirrors `sun_shadow::SUN_SHADOW_BIAS`,
-// size stays 256. `SUN_STAGED_FIGHTER_Z` is the live clinch midpoint.
-// `SUN_STAGED_FIGHTER_Z_C` is the a297882c wall disk at (2, 3) (twin slot
-// 3): frame_000002 plus frame_000004 show fighters near the right wall
-// outside the three center disks, white haze only, shadow 17.080ms.
-// `SUN_STAGED_FIGHTER_Z_I` and `SUN_STAGED_FIGHTER_Z_J` are the 600aaf55
-// corner disks at (2, 9) and (2, -9): frame_000000 plus frame_000002 plus
-// frame_000004 show no contact under either fighter, only white haze,
-// though per-pass shadow reads 1.108ms; the nine central disks miss pit
-// corner feet, so corner sand needs its own disks.
-// `SUN_STAGED_FIGHTER_X_WEST` and `SUN_STAGED_FIGHTER_Z_WEST` are the ec7928c5
-// hero-west disk at (-2, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under the west hero, only white haze
-// blobs on sand and walls, though per-pass shadow reads 3.960ms; the eleven
-// east-line disks at x 2.0 miss west feet, so west sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_EAST` and `SUN_STAGED_FIGHTER_Z_EAST` are the a7bdf85a
-// east-wall disk at (4, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under either fighter near the right
-// wall, only white haze blobs, though per-pass shadow reads 1.965ms; the
-// twelve west plus east-line disks miss wall feet east of x 3, so east sand
-// needs its own disk.
-// `SUN_STAGED_FIGHTER_X_CENTER` and `SUN_STAGED_FIGHTER_Z_CENTER` are the 92d04d4f
-// center disk at (0, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under either fighter on open center sand,
-// only white haze blobs, though per-pass shadow reads 4.152ms; the thirteen
-// west plus east-line disks at x -2, 2 and 4 leave center feet at x 0 exactly
-// two radii out, so center sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_FAR_EAST` and `SUN_STAGED_FIGHTER_Z_FAR_EAST` are the 9a1a054e
-// far-east disk at (6, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under either fighter near far-east sand,
-// only white specular haze blobs on sand and walls, though per-pass shadow
-// reads 1.785ms; the fourteen west plus center plus east-line disks at x -2,
-// 0, 2 and 4 miss far-east feet east of x 5, so far-east sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_FAR_FAR_EAST` and `SUN_STAGED_FIGHTER_Z_FAR_FAR_EAST` are the 33c5216f
-// outer-east disk at (8, 0): frame_000000 plus frame_000001 plus frame_000002 plus
-// frame_000003 plus frame_000004 re-checked with Read show no contact under any fighter,
-// only white specular haze blobs on sand and steps, per-pass reads sky 0.000ms with
-// forward 0.207ms and no shadow line at all; the fifteen disks at x -2, 0, 2, 4 and 6
-// miss outer-east feet east of x 7, so outer-east sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_WEST_FAR` and `SUN_STAGED_FIGHTER_Z_WEST_FAR` are the baeb2e4a
-// west-far disk at (-4, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under the west-far green fighter, only white
-// specular haze blobs on sand and steps, per-pass reads sky 0.000ms with forward
-// 0.207ms and no shadow line at all; the sixteen disks at x -2, 0, 2, 4, 6 and 8
-// miss west-far feet west of x -3, so west-far sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_WEST_FAR_FAR` and `SUN_STAGED_FIGHTER_Z_WEST_FAR_FAR` are the 5ff5b71a
-// far-west disk at (-6, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under any fighter, only white haze blobs,
-// though per-pass shadow reads 4.395ms with forward 0.000ms; the seventeen disks
-// miss far-west feet west of x -5, so far-west sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_FAR_FAR_WEST` and `SUN_STAGED_FIGHTER_Z_FAR_FAR_WEST` are the b5829dc6
-// outer-west disk at (-8, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under the far-left green fighter, only white haze blobs,
-// though per-pass shadow reads 3.782ms with forward 0.000ms; the eighteen disks
-// miss outer-west feet west of x -7, so outer-west sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_OUTER_EAST` and `SUN_STAGED_FIGHTER_Z_OUTER_EAST` are the 3ea49496
-// outer-east disk at (10, 0): frame_000000 plus frame_000002 plus frame_000004
-// re-checked with Read show no contact under either fighter near far-east sand,
-// only white specular haze blobs on sand and walls, though per-pass shadow reads
-// 1.590ms with forward 0.000ms; the nineteen disks at x -8, -6, -4, -2, 0, 2, 4, 6
-// and 8 miss outer-east feet east of x 9, so outer-east sand needs its own disk.
-// `SUN_STAGED_FIGHTER_X_ORBIT_EAST` and `SUN_STAGED_FIGHTER_Z_ORBIT_EAST` are the 6dcae894
-// orbit-east disk at (5, 0) plus orbit-west at (-5, 0): frame_000000 (tick 1) plus
-// frame_000001 (tick 121) re-checked with Read show no contact under either fighter,
-// only offset ovals at the bottom-left edge plus white haze, with no per-pass shadow
-// line; the twenty disks at x -8, -6, -4, -2, 0, 2, 4, 6, 8 and 10 leave the radius-5
-// orbit gap at x 5 exactly one radius from both neighbours, so tick-1 sand needs disks.
-// `SUN_STAGED_FIGHTER_X_C3431D30_EAST` and `SUN_STAGED_FIGHTER_Z_C3431D30_EAST` are the c3431d30
-// tick-300 disk at (5, -1) plus west at (-5, 1): frame_000000 (tick 1) plus frame_000002
-// (tick 155) plus frame_000004 (tick 300) re-checked with Read show no contact under either
-// fighter, only offset ovals at the bottom-left edge plus white haze, per-pass shadow 0.000ms
-// with forward 0.000ms; ticks 1 and 155 sit on the orbit disks, tick 300 orbits to
-// (4.801, -1.397) and (-4.801, 1.397), 1.41 m from both orbit disks, so tick-300 sand needs disks.
-const SUN_STAGED_FIGHTER_X: f32 = 2.0;
-const SUN_STAGED_FIGHTER_Z: f32 = 0.0;
-const SUN_STAGED_FIGHTER_Z_A: f32 = -1.0;
-const SUN_STAGED_FIGHTER_Z_B: f32 = 1.0;
-const SUN_STAGED_FIGHTER_Z_C: f32 = 3.0;
-const SUN_STAGED_FIGHTER_Z_D: f32 = -3.0;
-const SUN_STAGED_FIGHTER_Z_E: f32 = -5.0;
-const SUN_STAGED_FIGHTER_Z_F: f32 = 5.0;
-const SUN_STAGED_FIGHTER_Z_G: f32 = -7.0;
-const SUN_STAGED_FIGHTER_Z_H: f32 = 7.0;
-const SUN_STAGED_FIGHTER_Z_I: f32 = 9.0;
-const SUN_STAGED_FIGHTER_Z_J: f32 = -9.0;
-const SUN_STAGED_FIGHTER_X_WEST: f32 = -2.0;
-const SUN_STAGED_FIGHTER_Z_WEST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_EAST: f32 = 4.0;
-const SUN_STAGED_FIGHTER_Z_EAST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_CENTER: f32 = 0.0;
-const SUN_STAGED_FIGHTER_Z_CENTER: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_FAR_EAST: f32 = 6.0;
-const SUN_STAGED_FIGHTER_Z_FAR_EAST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_FAR_FAR_EAST: f32 = 8.0;
-const SUN_STAGED_FIGHTER_Z_FAR_FAR_EAST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_WEST_FAR: f32 = -4.0;
-const SUN_STAGED_FIGHTER_Z_WEST_FAR: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_WEST_FAR_FAR: f32 = -6.0;
-const SUN_STAGED_FIGHTER_Z_WEST_FAR_FAR: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_FAR_FAR_WEST: f32 = -8.0;
-const SUN_STAGED_FIGHTER_Z_FAR_FAR_WEST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_OUTER_EAST: f32 = 10.0;
-const SUN_STAGED_FIGHTER_Z_OUTER_EAST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_ORBIT_EAST: f32 = 5.0;
-const SUN_STAGED_FIGHTER_Z_ORBIT_EAST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_ORBIT_WEST: f32 = -5.0;
-const SUN_STAGED_FIGHTER_Z_ORBIT_WEST: f32 = 0.0;
-const SUN_STAGED_FIGHTER_X_C3431D30_EAST: f32 = 5.0;
-const SUN_STAGED_FIGHTER_Z_C3431D30_EAST: f32 = -1.0;
-const SUN_STAGED_FIGHTER_X_C3431D30_WEST: f32 = -5.0;
-const SUN_STAGED_FIGHTER_Z_C3431D30_WEST: f32 = 1.0;
-const SUN_STAGED_RADIUS_M: f32 = 1.0;
-const SUN_STAGED_STORED: f32 = 0.4;
-const SUN_STAGED_FRAG_FAR: f32 = 0.4;
-const SUN_STAGED_FRAG_NEAR: f32 = 0.8;
-const SUN_STAGED_BIAS: f32 = 0.002;
-const SUN_STAGED_DARKEN: f32 = 0.5;
-fn sun_shadow_factor(stored_depth: f32, frag_depth: f32, bias: f32) -> f32 {
-    if (frag_depth - bias <= stored_depth) {
+// Live contact shade (presentation only). Sand under a fighter keeps less of
+// the sun and the baked ambient so the body grounds. The feet come from the
+// CPU every frame (`shadow.feet`, one `vec4` per slot: x and z in meters,
+// radius in meters, strength; strength 0 is an off slot), written by
+// `Presenter::set_contact_feet` from where the fighters really stand. There
+// are no fixed positions: with no feet all the sand stays lit. The falloff is
+// a smoothstep of the distance, so a blob has a soft edge, and it fades out up
+// the body between 0.1 m and 0.3 m. Mirrors `contact_feet::contact_factor`
+// (the CPU oracle; its parity test pins these constants).
+// Only the window `fs` entry reads the feet block (group 0 binding 3): the
+// offscreen `fs_display` and `fs_skinned` pipelines of `v1_gpu` and `v1_skin`
+// bind no shadow uniform, so they keep the neutral 1.0 that `contact_live`
+// starts at, and every consumer reads `sun_contact_factor` the same way.
+const CONTACT_FEET_MAX: u32 = 8u;
+var<private> contact_live: f32 = 1.0;
+fn contact_from_feet(world: vec3<f32>) -> f32 {
+    let ground = 1.0 - smoothstep(0.1, 0.3, world.y);
+    if (ground <= 0.0) {
         return 1.0;
     }
-    return 0.0;
+    var keep = 1.0;
+    for (var i = 0u; i < CONTACT_FEET_MAX; i = i + 1u) {
+        let foot = shadow.feet[i];
+        let fall = smoothstep(0.0, 1.0, 1.0 - length(world.xz - foot.xy) / max(foot.z, 0.001));
+        keep = keep * (1.0 - foot.w * ground * fall);
+    }
+    return keep;
 }
 fn sun_contact_factor(world: vec3<f32>) -> f32 {
-    if (world.y > 0.3) {
-        return 1.0;
-    }
-    let dx = world.x - SUN_STAGED_FIGHTER_X;
-    let dz_a = world.z - SUN_STAGED_FIGHTER_Z_A;
-    let dz_b = world.z - SUN_STAGED_FIGHTER_Z_B;
-    let dz_mid = world.z - SUN_STAGED_FIGHTER_Z;
-    let dz_c = world.z - SUN_STAGED_FIGHTER_Z_C;
-    let dz_d = world.z - SUN_STAGED_FIGHTER_Z_D;
-    let dz_e = world.z - SUN_STAGED_FIGHTER_Z_E;
-    let dz_f = world.z - SUN_STAGED_FIGHTER_Z_F;
-    let dz_g = world.z - SUN_STAGED_FIGHTER_Z_G;
-    let dz_h = world.z - SUN_STAGED_FIGHTER_Z_H;
-    let dz_i = world.z - SUN_STAGED_FIGHTER_Z_I;
-    let dz_j = world.z - SUN_STAGED_FIGHTER_Z_J;
-    let dx_west = world.x - SUN_STAGED_FIGHTER_X_WEST;
-    let dz_west = world.z - SUN_STAGED_FIGHTER_Z_WEST;
-    let dx_east = world.x - SUN_STAGED_FIGHTER_X_EAST;
-    let dz_east = world.z - SUN_STAGED_FIGHTER_Z_EAST;
-    let dx_center = world.x - SUN_STAGED_FIGHTER_X_CENTER;
-    let dz_center = world.z - SUN_STAGED_FIGHTER_Z_CENTER;
-    let dx_far_east = world.x - SUN_STAGED_FIGHTER_X_FAR_EAST;
-    let dz_far_east = world.z - SUN_STAGED_FIGHTER_Z_FAR_EAST;
-    let dx_far_far_east = world.x - SUN_STAGED_FIGHTER_X_FAR_FAR_EAST;
-    let dz_far_far_east = world.z - SUN_STAGED_FIGHTER_Z_FAR_FAR_EAST;
-    let dx_west_far = world.x - SUN_STAGED_FIGHTER_X_WEST_FAR;
-    let dz_west_far = world.z - SUN_STAGED_FIGHTER_Z_WEST_FAR;
-    let dx_west_far_far = world.x - SUN_STAGED_FIGHTER_X_WEST_FAR_FAR;
-    let dz_west_far_far = world.z - SUN_STAGED_FIGHTER_Z_WEST_FAR_FAR;
-    let dx_far_far_west = world.x - SUN_STAGED_FIGHTER_X_FAR_FAR_WEST;
-    let dz_far_far_west = world.z - SUN_STAGED_FIGHTER_Z_FAR_FAR_WEST;
-    let dx_outer_east = world.x - SUN_STAGED_FIGHTER_X_OUTER_EAST;
-    let dz_outer_east = world.z - SUN_STAGED_FIGHTER_Z_OUTER_EAST;
-    let dx_orbit_east = world.x - SUN_STAGED_FIGHTER_X_ORBIT_EAST;
-    let dz_orbit_east = world.z - SUN_STAGED_FIGHTER_Z_ORBIT_EAST;
-    let dx_orbit_west = world.x - SUN_STAGED_FIGHTER_X_ORBIT_WEST;
-    let dz_orbit_west = world.z - SUN_STAGED_FIGHTER_Z_ORBIT_WEST;
-    let dx_c3431d30_east = world.x - SUN_STAGED_FIGHTER_X_C3431D30_EAST;
-    let dz_c3431d30_east = world.z - SUN_STAGED_FIGHTER_Z_C3431D30_EAST;
-    let dx_c3431d30_west = world.x - SUN_STAGED_FIGHTER_X_C3431D30_WEST;
-    let dz_c3431d30_west = world.z - SUN_STAGED_FIGHTER_Z_C3431D30_WEST;
-    let near_a = (dx * dx + dz_a * dz_a) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_b = (dx * dx + dz_b * dz_b) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_mid = (dx * dx + dz_mid * dz_mid) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_c = (dx * dx + dz_c * dz_c) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_d = (dx * dx + dz_d * dz_d) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_e = (dx * dx + dz_e * dz_e) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_f = (dx * dx + dz_f * dz_f) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_g = (dx * dx + dz_g * dz_g) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_h = (dx * dx + dz_h * dz_h) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_i = (dx * dx + dz_i * dz_i) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_j = (dx * dx + dz_j * dz_j) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_west = (dx_west * dx_west + dz_west * dz_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_east = (dx_east * dx_east + dz_east * dz_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_center = (dx_center * dx_center + dz_center * dz_center) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_far_east = (dx_far_east * dx_far_east + dz_far_east * dz_far_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_far_far_east = (dx_far_far_east * dx_far_far_east + dz_far_far_east * dz_far_far_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_west_far = (dx_west_far * dx_west_far + dz_west_far * dz_west_far) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_west_far_far = (dx_west_far_far * dx_west_far_far + dz_west_far_far * dz_west_far_far) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_far_far_west = (dx_far_far_west * dx_far_far_west + dz_far_far_west * dz_far_far_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_outer_east = (dx_outer_east * dx_outer_east + dz_outer_east * dz_outer_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_orbit_east = (dx_orbit_east * dx_orbit_east + dz_orbit_east * dz_orbit_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_orbit_west = (dx_orbit_west * dx_orbit_west + dz_orbit_west * dz_orbit_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_c3431d30_east = (dx_c3431d30_east * dx_c3431d30_east + dz_c3431d30_east * dz_c3431d30_east) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    let near_c3431d30_west = (dx_c3431d30_west * dx_c3431d30_west + dz_c3431d30_west * dz_c3431d30_west) < SUN_STAGED_RADIUS_M * SUN_STAGED_RADIUS_M;
-    var frag = SUN_STAGED_FRAG_FAR;
-    if (near_a || near_b || near_mid || near_c || near_d || near_e || near_f || near_g || near_h || near_i || near_j || near_west || near_east || near_center || near_far_east || near_far_far_east || near_west_far || near_west_far_far || near_far_far_west || near_outer_east || near_orbit_east || near_orbit_west || near_c3431d30_east || near_c3431d30_west) {
-        frag = SUN_STAGED_FRAG_NEAR;
-    }
-    let s = sun_shadow_factor(SUN_STAGED_STORED, frag, SUN_STAGED_BIAS);
-    return mix(SUN_STAGED_DARKEN, 1.0, s);
+    return contact_live;
 }
 fn ibl_sh_basis(d: vec3<f32>) -> array<f32, 9> {
     var b: array<f32, 9>;
@@ -816,6 +636,7 @@ fn fog_factor_infinite(fog: FogFwdU, eye: vec3<f32>, dir: vec3<f32>) -> f32 {
 // the horizon radiance. The blit tone-maps.
 @fragment
 fn fs(in: VOut) -> FsOut {
+    contact_live = contact_from_feet(in.world_pos);
     let albedo = mat.base_color * textureSample(base_map, base_smp, in.uv).rgb;
     let view_dist = length(cam.camera_pos - in.world_pos);
     var cascade = 2u;

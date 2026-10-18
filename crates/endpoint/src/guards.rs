@@ -302,6 +302,112 @@ pub fn check_policy(
     Ok(())
 }
 
+/// The call that is refused: the fifth identical read in a row.
+pub const READ_REPEAT_LIMIT: u32 = 5;
+/// Window in ms in which identical reads count (30 s).
+pub const READ_REPEAT_WINDOW_MS: u64 = 30_000;
+/// Most distinct read keys the guard remembers.
+pub const READ_REPEAT_KEYS: usize = 1000;
+
+/// What the read-repeat guard says about one read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadRepeat {
+    /// First sighting of this call (or the window restarted).
+    Fresh,
+    /// The same call again; the payload is how many times so far (2..=4).
+    Repeat(u32),
+    /// The fifth or later identical call: refuse it.
+    Refuse(u32),
+}
+
+/// Counts identical read-only calls in a row, so a stuck agent gets a signal
+/// instead of the same answer forever. Pure: the caller passes the clock in
+/// ms, so tests inject time. A different call in between restarts the count
+/// of the new call at one; a call after the window restarts it too. The
+/// table holds at most [`READ_REPEAT_KEYS`] keys: expired ones go first, then
+/// the oldest. Status and wait verbs never pass through here.
+#[derive(Debug, Default)]
+pub struct ReadRepeatGuard {
+    seen: std::collections::BTreeMap<u64, (u64, u32)>,
+    last: Option<u64>,
+}
+
+impl ReadRepeatGuard {
+    /// Empty guard.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Keys currently remembered.
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// True when no key is remembered.
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Note one read of call `key` at `now_ms` and judge it.
+    pub fn note(&mut self, key: u64, now_ms: u64) -> ReadRepeat {
+        if !self.seen.contains_key(&key) && self.seen.len() >= READ_REPEAT_KEYS {
+            self.seen
+                .retain(|_, (first, _)| now_ms.saturating_sub(*first) < READ_REPEAT_WINDOW_MS);
+            if self.seen.len() >= READ_REPEAT_KEYS {
+                if let Some(oldest) = self
+                    .seen
+                    .iter()
+                    .min_by_key(|(k, (first, _))| (*first, **k))
+                    .map(|(k, _)| *k)
+                {
+                    self.seen.remove(&oldest);
+                }
+            }
+        }
+        let in_a_row = self.last == Some(key);
+        self.last = Some(key);
+        let entry = self.seen.entry(key).or_insert((now_ms, 0));
+        if !in_a_row || now_ms.saturating_sub(entry.0) >= READ_REPEAT_WINDOW_MS {
+            *entry = (now_ms, 0);
+        }
+        entry.1 = entry.1.saturating_add(1);
+        match entry.1 {
+            1 => ReadRepeat::Fresh,
+            n if n < READ_REPEAT_LIMIT => ReadRepeat::Repeat(n),
+            n => ReadRepeat::Refuse(n),
+        }
+    }
+}
+
+/// A [`ReadRepeatGuard`] on a real session clock (ms since it was made).
+#[derive(Debug)]
+pub struct ReadClock {
+    guard: ReadRepeatGuard,
+    started: std::time::Instant,
+}
+
+impl ReadClock {
+    /// Fresh guard, clock at zero.
+    pub fn new() -> Self {
+        Self {
+            guard: ReadRepeatGuard::new(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// Note one read of call `key` now.
+    pub fn note(&mut self, key: u64) -> ReadRepeat {
+        let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.guard.note(key, now)
+    }
+}
+
+impl Default for ReadClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +489,40 @@ mod tests {
             check_intent("move the brazier"),
         ];
         assert_eq!(replay[0], replay[1], "replay without a model drifts");
+    }
+
+    /// SPF12: the fifth identical read in 30 s is refused, calls two to four
+    /// are counted, a changed call or a late call restarts the count, and the
+    /// key table stays bounded.
+    #[test]
+    fn read_repeat_counts_refuses_and_resets() {
+        let mut guard = ReadRepeatGuard::new();
+        assert_eq!(guard.note(7, 0), ReadRepeat::Fresh);
+        assert_eq!(guard.note(7, 100), ReadRepeat::Repeat(2));
+        assert_eq!(guard.note(7, 200), ReadRepeat::Repeat(3));
+        assert_eq!(guard.note(7, 300), ReadRepeat::Repeat(4));
+        assert_eq!(guard.note(7, 400), ReadRepeat::Refuse(5));
+        assert_eq!(guard.note(7, 500), ReadRepeat::Refuse(6), "stays refused");
+        // One changed argument restarts the count, for the new call and the old.
+        assert_eq!(guard.note(8, 600), ReadRepeat::Fresh);
+        assert_eq!(guard.note(7, 700), ReadRepeat::Fresh);
+        // A call after the window passes.
+        for t in 0..4 {
+            guard.note(7, 800 + t);
+        }
+        assert_eq!(
+            guard.note(7, 800 + READ_REPEAT_WINDOW_MS),
+            ReadRepeat::Fresh
+        );
+    }
+
+    /// SPF12: the table never holds more than the key cap.
+    #[test]
+    fn read_repeat_table_is_bounded() {
+        let mut guard = ReadRepeatGuard::new();
+        for key in 0..(READ_REPEAT_KEYS as u64 * 2) {
+            guard.note(key, key);
+        }
+        assert_eq!(guard.len(), READ_REPEAT_KEYS);
     }
 }

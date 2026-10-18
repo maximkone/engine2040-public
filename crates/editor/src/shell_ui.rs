@@ -33,6 +33,9 @@ use crate::templates::TemplateKind;
 use crate::tuning::CombatField;
 use crate::viewport::ViewportSize;
 
+/// Chars of each log line the Log tab draws (the ring keeps the whole line).
+const LOG_VIEW_CHARS: usize = 72;
+
 /// Dock layout plus per-frame drawing over a [`Shell`].
 /// PORT(Adanos020/egui_dock@cdcdb359af4b74f8cc7921091db7217f0759e4f7 dock_state):
 /// dock stays the layout owner; egui_tiles behavior plus simple example
@@ -443,7 +446,7 @@ impl Viewer<'_> {
         if self.inspector_panel.is_empty() {
             self.inspector_panel.rebase(self.shell.revision());
         }
-        let views = node_views_for_rows(self.shell, &rows);
+        let views = node_views_for_rows(self.shell, &rows, &self.shared_selection.ids);
         let baseline: BTreeMap<(u64, String, String), String> = BTreeMap::new();
         let grid = match inspector::build_grid(&views, self.shared_selection, &baseline) {
             Ok(grid) => grid,
@@ -995,9 +998,16 @@ impl Viewer<'_> {
                 self.shell.clear_log();
             }
         });
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for line in self.shell.log().iter() {
-                ui.label(line);
+        // Only the lines in view lay out, and each shows its first
+        // [`LOG_VIEW_CHARS`] chars: glyph count is the frame cost, and a full
+        // ring of 150-char apply lines blew the 1 ms panel budget. The ring
+        // keeps the whole line.
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        let total = self.shell.log().len();
+        egui::ScrollArea::vertical().show_rows(ui, row_height, total, |ui, range| {
+            for line in self.shell.log().iter().skip(range.start).take(range.len()) {
+                let end = line.floor_char_boundary(LOG_VIEW_CHARS);
+                ui.add(egui::Label::new(&line[..end]).selectable(false));
             }
         });
     }
@@ -1014,24 +1024,27 @@ pub(crate) fn live_outliner_rows(shell: &Shell) -> Result<Vec<OutlinerRow>, outl
     outline::build_rows(&rows, &names)
 }
 
-/// Node views for the inspector grid: one per live outliner row.
+/// Node views for the inspector grid: one per selected live outliner row, so
+/// a frame costs the selection, not the scene (2,000 rows stay under the
+/// 1 ms panel budget).
 ///
 /// Identity carries the row name as the prefab key, the pose carries the
 /// live local transform, and one `label` component at v1 current feeds the
 /// grid label and schema-current rows. Same rows give the same views.
-pub(crate) fn node_views_for_rows(shell: &Shell, rows: &[OutlinerRow]) -> Vec<NodeView> {
-    let mut by_id: HashMap<u64, &OutlinerRow> = HashMap::new();
-    for row in rows {
-        by_id.insert(row.id, row);
-    }
-    let mut views = Vec::with_capacity(rows.len());
-    for row in rows {
+pub(crate) fn node_views_for_rows(
+    shell: &Shell,
+    rows: &[OutlinerRow],
+    selected: &[u64],
+) -> Vec<NodeView> {
+    let mut views = Vec::with_capacity(selected.len());
+    for row in rows.iter().filter(|row| selected.contains(&row.id)) {
         let Some(local) = shell.document().hierarchy.local(row.source) else {
             continue;
         };
         let parent_key = row
             .parent
-            .and_then(|id| by_id.get(&id).map(|parent| parent.name.clone()));
+            .and_then(|id| rows.iter().find(|parent| parent.id == id))
+            .map(|parent| parent.name.clone());
         views.push(NodeView {
             id: row.id,
             key: Some(row.name.clone()),
@@ -1264,7 +1277,8 @@ mod tests {
         use crate::spine_inspect::{fixture::fight, spine_registry};
 
         // Every text run egui painted this frame.
-        fn painted(output: &egui::FullOutput) -> String {
+        fn painted(mut output: egui::FullOutput) -> String {
+            output.textures_delta.clear();
             let mut text = String::new();
             for clipped in &output.shapes {
                 if let egui::epaint::Shape::Text(run) = &clipped.shape {
@@ -1284,7 +1298,7 @@ mod tests {
                 screen_rect: Some(screen),
                 ..egui::RawInput::default()
             };
-            painted(&ctx.run_ui(input, |ui| ui_state.show(shell, ui)))
+            painted(ctx.run_ui(input, |ui| ui_state.show(shell, ui)))
         };
         let registry = spine_registry().expect("spine components register");
 
@@ -1355,7 +1369,7 @@ mod tests {
         bank.save("pair", shared.clone(), &live).unwrap();
         let recalled = bank.recall("pair", &SharedSelection::new()).unwrap();
         assert_eq!(recalled, shared);
-        let views = node_views_for_rows(&shell, &rows);
+        let views = node_views_for_rows(&shell, &rows, &shared.ids);
         let baseline: BTreeMap<(u64, String, String), String> = BTreeMap::new();
         let grid = inspector_mod::build_grid(&views, &shared, &baseline).unwrap();
         assert!(grid

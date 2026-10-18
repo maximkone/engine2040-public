@@ -351,7 +351,7 @@ mod tests {
         let (a, b) = (script(&mut FeelFlow::v1()), script(&mut FeelFlow::v1()));
         assert_eq!(a, b);
         let mut flow = FeelFlow::v1();
-        let (_, heap) = engine_core::alloc_probe::measure(|| {
+        let ((), heap) = engine_core::alloc_probe::measure(|| {
             std::hint::black_box(script_no_collect(&mut flow));
         });
         assert_eq!(heap.calls, 0);

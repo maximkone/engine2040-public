@@ -74,7 +74,7 @@ pub struct Camera {
 }
 
 /// `sin(deg) * 1024`, exact table lookup for any whole degree.
-fn sin_1k(deg: i32) -> i32 {
+pub(crate) fn sin_1k(deg: i32) -> i32 {
     let d = deg.rem_euclid(360);
     let idx = |v: i32| usize::try_from(v).unwrap_or(0);
     match d {
@@ -85,7 +85,8 @@ fn sin_1k(deg: i32) -> i32 {
     }
 }
 
-fn cos_1k(deg: i32) -> i32 {
+/// `cos(deg) * 1024`, exact table lookup for any whole degree.
+pub(crate) fn cos_1k(deg: i32) -> i32 {
     sin_1k(90 - deg)
 }
 

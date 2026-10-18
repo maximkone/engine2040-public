@@ -119,6 +119,9 @@ impl std::error::Error for SpatialError {}
 
 mod world;
 use world::*;
+#[cfg(test)]
+mod known_good;
+pub mod llm;
 mod tsv;
 pub use tsv::*;
 

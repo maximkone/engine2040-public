@@ -30,7 +30,7 @@ Crate root `crates/render/src/lib.rs`. "Row" is the board row that owns the modu
 | `gpu.rs` (window) | | Instance, surface and device. Device request uses `DeviceDescriptor { label, ..Default::default() }` (wgpu default limits). Blocks with `pollster::block_on`. |
 | `presenter_pick.rs` (window) | GS6 | wgpu glue over `adapter.rs`. |
 | `adapter.rs` | GS6 | Adapter choice; software adapters refused unless opted in. |
-| `backend.rs` | GS6 | Backend selector: `--backend` or `WGPU_BACKEND` over the compiled default; headless 600-frame bench. |
+| `backend.rs` | GS6 | Backend selector: `--backend` or `WGPU_BACKEND` over the compiled default; headless 600-frame bench; `new_instance`, the one native wgpu instance maker (`E2040_STRICT_WEBGPU=1` adds `STRICT_WEBGPU_COMPLIANCE`). |
 | `heal.rs` | AH2 | Surface Outdated/Lost and device-loss recovery through the observe supervisor. |
 | `cache.rs` | RA5 | Persisted pipeline cache: async compile, last-good fallback. |
 | `executor.rs` | RA2 | CPU frame-graph executor over recorded pass fns. Refuses GPU submit on the headless twin. |
@@ -134,7 +134,7 @@ Public presenter entry points (`impl Presenter`):
 | `gpu_timing_supported() -> bool`, `settle_gpu_timing()`, `gpu_timing_report() -> Option<GpuTimingReport>` | GPU timestamps (`timing.rs`). Needs the `TIMESTAMP_QUERY` feature. |
 | `present_mode_name() -> Option<String>` | Present mode label for captures. |
 
-Formats: HDR `HDR_FORMAT = Rgba16Float`; LDR twin `OUTPUT_FORMAT = Rgba8Unorm`; depth `DEPTH_FORMAT = Depth32Float`; readback rows 256-byte aligned (`ROW_ALIGN`). Forward clear `HDR_CLEAR` is linear `(0.01607, 0.01783, 0.02701, 1.0)`. The studio HDRI embedded in the window build is `content/arena/hdri/polyhaven-studio-small-09-1k.hdr` (1.6 MB, `IBL_STUDIO_HDRI_BYTES`).
+Formats: HDR `HDR_FORMAT = Rgba16Float`; LDR twin `OUTPUT_FORMAT = Rgba8Unorm`; depth `DEPTH_FORMAT = Depth32Float`; readback rows 256-byte aligned (`ROW_ALIGN`). Forward clear `HDR_CLEAR` is linear `(0.01607, 0.01783, 0.02701, 1.0)`. The window's one-time IBL bake reads the arena day sky (`crates/render/src/ibl_arena_env.rs`, `bake_arena_day`); the 1.6 MB studio HDRI it used to embed (`polyhaven-studio-small-09-1k.hdr`) put softboxes and a white cyclorama into the sand's reflections and is no longer in the window build (tests still read it).
 
 ## 3. Surface events and recovery
 

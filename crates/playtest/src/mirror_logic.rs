@@ -15,10 +15,11 @@
 use engine_arena::controller::{SlotInput, SlotTape};
 use engine_arena::recorder::Dataset;
 use engine_arena::{run_dataset, run_prefix, ArenaConfig, Checkpoint};
+use engine_core::diverge::first_divergence;
 use engine_core::vec3::dist2;
 use engine_core::Fnv64;
 
-use crate::agent::{scan_desync, scan_impossible, Trajectory};
+use crate::agent::{scan_impossible, Trajectory};
 use crate::door::Door;
 use crate::mirror_kit::{
     admit, ck, run_slice, Claim, MirrorTask, Outcome, SliceReport, Submission, SuiteInfo,
@@ -642,7 +643,7 @@ fn replay_identical(door: &mut Door, sub: Submission) -> Outcome {
     let (Some(control), Some(probe)) = (control, probe) else {
         return Outcome::from_checks(vec![admit(door, "replay")], 0, "arena refused".to_owned());
     };
-    let diverged = scan_desync(&control, &probe);
+    let diverged = first_divergence(&control, &probe);
     let hash = last_hash(&probe);
     let detail = diverged.map_or_else(
         || format!("{} checkpoints identical", control.len()),

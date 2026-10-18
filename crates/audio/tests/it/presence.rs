@@ -346,14 +346,14 @@ fn presence_all_modules_load_without_panic() {
     #[cfg(feature = "device")]
     {
         // 15: decode (bounded rejection only, no files).
-        assert!(MAX_DECODE_BYTES > 0);
-        assert!(MAX_PCM_FRAMES > 0);
+        const _: () = assert!(MAX_DECODE_BYTES > 0);
+        const _: () = assert!(MAX_PCM_FRAMES > 0);
         assert!(decode_wav(&[]).is_err());
         assert!(decode_vorbis(&[]).is_err());
         loaded += 1;
 
         // 16: device (typed errors only, no hardware).
-        assert!(engine_audio::device::MAX_BACKEND_MSG > 0);
+        const _: () = assert!(engine_audio::device::MAX_BACKEND_MSG > 0);
         let err = engine_audio::device::DeviceError::NoDevice;
         assert!(!format!("{err}").is_empty());
         assert!(!format!("{}", engine_audio::decode::DecodeError::Empty).is_empty());

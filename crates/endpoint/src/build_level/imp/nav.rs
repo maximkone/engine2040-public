@@ -274,13 +274,34 @@ pub(super) struct GateReport {
     pub(super) routes: Vec<RouteInfo>,
 }
 
+/// The 14 offline checks with `giantObject` judged against the room. The
+/// shell walls are non-physical (the nav bake skips them), and `giantObject`
+/// measures a solid against the span of the other solid boxes, so with the
+/// walls left out a 1.6 m torch beside one 0.8 m crate is a "giant" in a
+/// layout of two props. The room IS the layout: that one check reads a copy
+/// of the actors with the shell solid, so props are measured against the
+/// 10 m room and a stray oversized live-document box still flags. Findings
+/// of the other checks keep their frozen order; giants append last.
+fn offline_findings(actors: &[Actor]) -> Vec<Finding> {
+    let mut findings = engine_spatial::run(actors).findings;
+    findings.retain(|finding| finding.check != "giantObject");
+    let mut roomed = actors.to_vec();
+    for actor in roomed.iter_mut().filter(|actor| is_shell(actor.id)) {
+        actor.physical = true;
+    }
+    if let Ok(report) = engine_spatial::run_checks(&roomed, &["giantObject"]) {
+        findings.extend(report.findings);
+    }
+    findings
+}
+
 /// Full gate: the 14 offline checks plus `navConnect`, `doorClear` and
 /// `flowPath` over the baked view, plus per-prop BFS routes. `accessFront`
 /// stays out: yaw is solver-chosen, and facing gates belong to encounter
 /// staging, never level layout.
 pub(super) fn gates(actors: &[Actor], spawn_id: u32, unsolved: &BTreeSet<u32>) -> GateReport {
     let nav = bake_nav(actors, spawn_id);
-    let mut findings: Vec<Finding> = engine_spatial::run(actors).findings;
+    let mut findings = offline_findings(actors);
     if let Ok(nav_report) =
         engine_spatial::run_spatial(actors, &["navConnect", "doorClear", "flowPath"], Some(&nav))
     {

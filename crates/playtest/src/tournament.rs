@@ -11,6 +11,7 @@
 //! Errors: [`Failure`] rows; invalid configs fail before any simulation.
 
 use super::agent::template_input;
+use super::norm_score::{self, NormScore, TaskReturns};
 use super::{
     winrates::{self, apply_morale, human_tape_for, HumanError},
     BalanceConfig, Failure,
@@ -242,6 +243,9 @@ pub struct DifficultyReport {
     /// Kills whose killing-tick killer pose sat in each zone, in
     /// `[centre, ring, wall, gate]` order.
     pub kills_per_zone: [u32; 4],
+    /// Fighter 0's damage dealt in each match, in match order: the agent's
+    /// per-episode return that the norm score resamples.
+    pub agent_damage: Vec<i64>,
 }
 
 /// Full balance-tournament report: one row per difficulty plus the move
@@ -257,6 +261,9 @@ pub struct TournamentReport {
     pub discovered_moves: Vec<u8>,
     /// Scripted exchange probes (difficulty-independent scripts).
     pub exchange: ExchangeReach,
+    /// Oracle-normalized agent score over the difficulties: the agent is
+    /// fighter 0 on the ladder, the anchor is the best spam policy per task.
+    pub norm: NormScore,
 }
 
 /// PQ9 line: the difficulty tally scored as fighter 0 vs fighter 1 Elo,
@@ -329,6 +336,7 @@ impl TournamentReport {
                 out.push_str(&format!("  stuck slot={slot} seeds={seeds:?}\n"));
             }
         }
+        out.push_str(&format!("{}\n", self.norm.line()));
         out.push_str(&format!(
             "exchange parry={} riposte={} clash={} discovered_moves={:?}\n",
             self.exchange.parry_seen,
@@ -1087,6 +1095,7 @@ fn run_difficulty(
     // past the shipped table stay untiered, matching a custom ladder.
     let tier = SHIPPED_TIERS.get(index).copied();
     let mut seeds = Vec::with_capacity(config.matches as usize);
+    let mut agent_damage = Vec::with_capacity(config.matches as usize);
     let mut totals = DifficultyTotals::new();
     for i in 0..config.matches {
         let seed = base.wrapping_add(u64::from(i));
@@ -1106,6 +1115,7 @@ fn run_difficulty(
                 difficulty.name
             )));
         };
+        agent_damage.push(slot_zero_damage(&metrics));
         totals.observe(seed, &dataset, &metrics, fighters, config.match_ticks);
     }
     let kill_shares = kill_shares_of(totals.kill_counts, totals.kills_total);
@@ -1144,6 +1154,93 @@ fn run_difficulty(
         zone_permille: totals.zones.shares(),
         entrance_share: totals.zones.entrance_share(),
         kills_per_zone: totals.kills_per_zone,
+        agent_damage,
+    })
+}
+
+/// Fighter 0's damage dealt in one match: the per-episode return the norm
+/// score reads. Zero when the slot is absent (forks always carry both slots).
+fn slot_zero_damage(metrics: &ForkMetrics) -> i64 {
+    metrics
+        .damage_dealt
+        .iter()
+        .find(|(slot, _)| *slot == 0)
+        .map_or(0, |(_, dealt)| i64::from(*dealt))
+}
+
+/// One norm episode for a fixed policy: fighter 0 carries `byte` on every
+/// tick (`0` is the idle policy) while fighter 1 stays brain-driven on the
+/// difficulty's morale and tier rung. Returns fighter 0's damage dealt.
+fn scripted_return(
+    match_config: &ArenaConfig,
+    difficulty: &Difficulty,
+    tier: Option<TierRow>,
+    template: &FighterInput,
+    byte: u8,
+) -> Result<i64, Failure> {
+    let tape = spam_tape(template, 0, match_config.ticks, byte)
+        .ok_or_else(|| fail(format!("norm tape for byte {byte} refused")))?;
+    let (metrics, _) =
+        fork_recorded(match_config, &difficulty.morale, tier, &tape).ok_or_else(|| {
+            fail(format!(
+                "difficulty {} norm fork rejected seed {} (byte {byte}): internal contract break",
+                difficulty.name, match_config.seed
+            ))
+        })?;
+    Ok(slot_zero_damage(&metrics))
+}
+
+/// Norm task for one difficulty. The agent's episodes are the tournament
+/// row's per-match damage. The idle baseline and each discovered move spammed
+/// by fighter 0 run on the first `spotlight_matches` seeds of the same
+/// difficulty: one fork per seed per policy, the spotlight's own bound.
+fn norm_task(
+    config: &TournamentConfig,
+    index: usize,
+    difficulty: &Difficulty,
+    row: &DifficultyReport,
+    template: &FighterInput,
+    moves: &[u8],
+) -> Result<TaskReturns, Failure> {
+    let tier = SHIPPED_TIERS.get(index).copied();
+    let take = usize::try_from(config.spotlight_matches)
+        .unwrap_or(usize::MAX)
+        .min(row.seeds.len());
+    let mut baseline = Vec::with_capacity(take);
+    let mut scripted: Vec<(String, Vec<i64>)> = moves
+        .iter()
+        .map(|byte| (format!("spam:{byte}"), Vec::with_capacity(take)))
+        .collect();
+    for seed in row.seeds.iter().take(take) {
+        let match_config = ArenaConfig {
+            seed: *seed,
+            ticks: config.match_ticks,
+            fighters: 2,
+            half_extent_m: config.half_extent_m,
+            table_version: 1,
+        };
+        baseline.push(scripted_return(
+            &match_config,
+            difficulty,
+            tier,
+            template,
+            0,
+        )?);
+        for ((_, returns), byte) in scripted.iter_mut().zip(moves) {
+            returns.push(scripted_return(
+                &match_config,
+                difficulty,
+                tier,
+                template,
+                *byte,
+            )?);
+        }
+    }
+    Ok(TaskReturns {
+        name: difficulty.name.clone(),
+        agent: row.agent_damage.clone(),
+        baseline,
+        scripted,
     })
 }
 
@@ -1230,6 +1327,18 @@ fn run_with_error(
     for byte in &moves {
         spotlight.push(run_spotlight(config, &template, *byte)?);
     }
+    let mut tasks = Vec::with_capacity(config.difficulties.len());
+    for (index, (difficulty, row)) in config.difficulties.iter().zip(&per_difficulty).enumerate() {
+        tasks.push(norm_task(
+            config, index, difficulty, row, &template, &moves,
+        )?);
+    }
+    let norm = norm_score::score(
+        &tasks,
+        norm_score::BOOTSTRAP_RESAMPLES,
+        norm_score::BOOTSTRAP_SEED,
+    )
+    .map_err(|error| fail(format!("norm refused: {error}")))?;
     let exchange = match guard {
         Some(byte) => probe_exchange(&duel, &template, strike, byte)
             .ok_or_else(|| fail("exchange probes refused: internal contract break".to_string()))?,
@@ -1240,6 +1349,7 @@ fn run_with_error(
         spotlight,
         discovered_moves: moves,
         exchange,
+        norm,
     })
 }
 
@@ -1828,6 +1938,28 @@ mod tests {
     }
 
     #[test]
+    fn norm_line_rides_the_tournament_report() {
+        // Real path: run the tournament, read the printed report text.
+        let report = run(&tiny_config()).expect("tiny config runs");
+        let text = report.to_text();
+        let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("norm=")).collect();
+        assert_eq!(lines.len(), 1, "one norm line per agent: {text}");
+        assert_eq!(lines[0], report.norm.line());
+        let norm = &report.norm;
+        assert!(norm.ci_lo <= norm.permille && norm.permille <= norm.ci_hi);
+        assert_eq!(norm.resamples, norm_score::BOOTSTRAP_RESAMPLES);
+        assert_eq!(norm.tasks.len(), 1);
+        assert_eq!(norm.tasks[0].name, "even");
+        let anchored = report
+            .discovered_moves
+            .iter()
+            .any(|byte| norm.tasks[0].anchor == format!("spam:{byte}"));
+        assert!(anchored, "anchor must be a discovered move: {text}");
+        assert_eq!(report.per_difficulty[0].agent_damage.len(), 3);
+        assert!(lines[0].contains(" anchor=even=spam:"), "{}", lines[0]);
+    }
+
+    #[test]
     fn zones_shares_sum_to_1000_and_entrance_stays_under_250() {
         // GP36: one metric over every recorded fighter tick. The gate anchor
         // is data (content/design/arena-zones.rows, gate_tunnel at 12 m on
@@ -2170,6 +2302,7 @@ mod tests {
             zone_permille: [0; 4],
             entrance_share: 0,
             kills_per_zone: [0; 4],
+            agent_damage: vec![0; 10],
         };
         let config = tiny_config();
         let single = TournamentReport {
@@ -2184,6 +2317,13 @@ mod tests {
                 parry_seen: true,
                 riposte_seen: true,
                 clash_seen: true,
+            },
+            norm: NormScore {
+                permille: 0,
+                ci_lo: 0,
+                ci_hi: 0,
+                resamples: 0,
+                tasks: Vec::new(),
             },
         };
         assert!(
@@ -2213,6 +2353,13 @@ mod tests {
                 riposte_seen: true,
                 clash_seen: true,
             },
+            norm: NormScore {
+                permille: 0,
+                ci_lo: 0,
+                ci_hi: 0,
+                resamples: 0,
+                tasks: Vec::new(),
+            },
         };
         let flags = check(&split, &config);
         assert!(
@@ -2233,6 +2380,13 @@ mod tests {
                 parry_seen,
                 riposte_seen: false,
                 clash_seen: false,
+            },
+            norm: NormScore {
+                permille: 0,
+                ci_lo: 0,
+                ci_hi: 0,
+                resamples: 0,
+                tasks: Vec::new(),
             },
         };
         assert!(report(true)

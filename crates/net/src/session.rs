@@ -1502,6 +1502,9 @@ pub fn send_packet(sock: &UdpSocket, peer: SocketAddr, bytes: &[u8]) -> io::Resu
 }
 
 #[cfg(test)]
+mod spear_tests;
+
+#[cfg(test)]
 mod spec_tests;
 
 #[cfg(test)]

@@ -948,17 +948,17 @@ fn append_stands_crowd(
     true
 }
 
+/// Positions, normals, uvs and indices of one fitted actor.
+#[cfg(feature = "app")]
+type FittedBuffers = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>);
+
 /// Fitted buffers for one actor, with crowd merged on the stands.
 ///
 /// Pure over the source plus fit; the same inputs give the same buffers.
 /// Cold init only, zero per tick.
 /// Caller: `import_kit` in this file bakes one actor through this helper.
 #[cfg(feature = "app")]
-fn fitted_buffers(
-    source: &KitSource,
-    actor: &KitActor,
-    params: &FitParams,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+fn fitted_buffers(source: &KitSource, actor: &KitActor, params: &FitParams) -> FittedBuffers {
     let (mut pos, mut nor) = apply_fit(&source.1, &source.2, params);
     // A file in a cooked set tiles by meters (box projection of the fitted
     // stone); the crowd boxes appended below keep their own UVs.
@@ -1081,9 +1081,7 @@ fn load_kit_sources(
         triangles += tris;
         let material = import.materials.first().cloned().unwrap_or_default();
         let (texture, pbr, normal_key) = maps.stage(source, file, &import, file_index);
-        sources.push((
-            file, pos, nor, uv, idx, material, texture, pbr, normal_key,
-        ));
+        sources.push((file, pos, nor, uv, idx, material, texture, pbr, normal_key));
     }
     Ok((sources, triangles))
 }
@@ -1124,7 +1122,8 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
         };
         // Crowd rides the stands draw, so draws stay at 11 and files at 8.
         let (fit_pos, fit_nor, fit_uv, fit_idx) = fitted_buffers(source, actor, &params);
-        let mesh = match engine_render::v1::upload_mesh_tiled(&fit_pos, &fit_nor, &fit_uv, &fit_idx) {
+        let mesh = match engine_render::v1::upload_mesh_tiled(&fit_pos, &fit_nor, &fit_uv, &fit_idx)
+        {
             Ok(mesh) => mesh,
             Err(_) => {
                 skipped.push((actor.id, "mesh"));
@@ -1836,19 +1835,35 @@ mod tests {
         if kit.cooked_sets == 0 {
             return;
         }
-        assert_eq!(kit.cooked_sets, kit_pbr::COOKED_SETS.len(), "all five cooked sets load");
-        assert_eq!(kit.sets.len(), kit_pbr::COOKED_SETS.len() + 1, "five cooked sets plus the cloth");
+        assert_eq!(
+            kit.cooked_sets,
+            kit_pbr::COOKED_SETS.len(),
+            "all five cooked sets load"
+        );
+        assert_eq!(
+            kit.sets.len(),
+            kit_pbr::COOKED_SETS.len() + 1,
+            "five cooked sets plus the cloth"
+        );
         for set in &kit.sets {
             assert!(set.base.is_some(), "set {:?} sits over a base", set.key);
             assert!(set.orm.is_some(), "set {:?} carries an ORM map", set.key);
-            assert!(set.normal.width >= 512, "set {:?} normal is a real map", set.key);
+            assert!(
+                set.normal.width >= 512,
+                "set {:?} normal is a real map",
+                set.key
+            );
         }
         for baked in &kit.baked {
             let set = baked
                 .normal_map
                 .and_then(|key| kit.sets.iter().find(|set| set.key == key))
                 .unwrap_or_else(|| panic!("actor {} names a material set", baked.actor.id));
-            assert_eq!(baked.texture, set.base, "actor {} base matches its set", baked.actor.id);
+            assert_eq!(
+                baked.texture, set.base,
+                "actor {} base matches its set",
+                baked.actor.id
+            );
         }
     }
 

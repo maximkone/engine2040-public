@@ -1421,6 +1421,49 @@ mod imp {
         }
 
         #[test]
+        fn giant_object_measures_props_against_the_room_shell() {
+            // Catalog props are 0.3 to 3 m; the fixed shell is a 10 m room.
+            // Two props of different size must not make the taller one a
+            // "giant" of a layout that is only the two of them (SPF5 reads
+            // the span of the other solid boxes, and the shell is
+            // non-physical), yet an oversized live box must still flag.
+            let env =
+                envelope("prop crate crate_01\nprop torch torch_01", 4).expect("brief envelopes");
+            let plan = plan_brief(&env).expect("brief plans");
+            let mut actors = room_shell();
+            actors.extend(
+                plan.props
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, prop)| stage_actor(prop, slot)),
+            );
+            let giants = |actors: &[Actor]| -> Vec<u32> {
+                gates(actors, plan.spawn_id, &BTreeSet::new())
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.check == "giantObject")
+                    .map(|finding| finding.a)
+                    .collect()
+            };
+            assert_eq!(
+                giants(&actors),
+                Vec::<u32>::new(),
+                "a 1.6 m torch beside a 0.8 m crate in the 10 m room is no giant"
+            );
+            let mut slab = stage_actor(&plan.props[0], 0);
+            slab.id = LIVE_BASE;
+            slab.name = "slab".to_owned();
+            (slab.x, slab.y, slab.z) = (0.0, 1.0, -8.0);
+            (slab.sx, slab.sy, slab.sz) = (30.0, 2.0, 0.5);
+            actors.push(slab);
+            assert_eq!(
+                giants(&actors),
+                vec![LIVE_BASE],
+                "a 30 m slab against the 10 m room is still a giant"
+            );
+        }
+
+        #[test]
         fn repair_drops_the_last_want_and_places() {
             // Tight [0,10] wall gaps are infeasible against the 20 cm shell
             // walls, so round 0 (drop the south want) still fails and round 1

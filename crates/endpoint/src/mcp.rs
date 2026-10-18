@@ -144,10 +144,8 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// stays at 43514 so the number is comparable to the old 21-tool door, and the
 /// ledger gate now measures whatever a session advertises. The frozen
 /// [`crate::tools::TOOLS`] registry now holds 26 tools.
-/// Per-tool descriptions stay one line so discovery stays near 6k tokens.
-/// OB3's two log tools, `scene.query` and `sim.plan_goals` keep field docs
-/// off their DTOs to stay inside it.
-pub const TOOL_LIST_BUDGET_CHARS: usize = 43_514;
+/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000.
+pub const TOOL_LIST_BUDGET_CHARS: usize = 54_000;
 
 /// The thirteen core tools, in contract order. The router holds exactly these;
 /// every other verb is a pack verb.
@@ -334,8 +332,8 @@ pub fn negotiate_version(requested: &ProtocolVersion) -> Result<ProtocolVersion,
 mod mcp_dto;
 
 pub use self::mcp_dto::{
-    ApprovalDto, OpDto, PoseDto, SceneObjectDto, SceneReadArgs, SceneReadOutput, TxApplyArgs,
-    TxApplyOutput, TxPreviewArgs, TxPreviewOutput, TxUndoArgs, TxUndoOutput,
+    ApprovalDto, OpDto, PoseDto, SceneObjectDto, SceneReadArgs, SceneReadOutput, SpatialDeltaDto,
+    TxApplyArgs, TxApplyOutput, TxPreviewArgs, TxPreviewOutput, TxUndoArgs, TxUndoOutput,
 };
 
 // ---------------------------------------------------------------------------
@@ -714,6 +712,7 @@ pub struct ServerState {
     pub(crate) rules: super::packs::rules::RulesSlot,
     /// The web pack's scope, runner, builds and undo stack (refused until the host allows web).
     pub(crate) web: super::packs::web::WebSlot,
+    pub(crate) reads: super::guards::ReadClock,
 }
 
 impl ServerState {
@@ -747,6 +746,7 @@ impl ServerState {
             #[cfg(feature = "rules")]
             rules: super::packs::rules::RulesSlot::default(),
             web: super::packs::web::WebSlot::default(),
+            reads: super::guards::ReadClock::new(),
         }
     }
 
@@ -892,11 +892,9 @@ impl ServerState {
         }
         super::explain::check_batch(&self.doc, &batch, &caps)
             .map_err(|refusal| refusal.to_tool_error(&caps))?;
-        // Witnessed-plan gate: bind this batch to the observed digest plus
-        // revision before the gated apply, then seal the receipt after it
-        // lands (same lock, no interleaved write, so the pre-state gate is
-        // fresh by construction; ledger replays move no revision and keep
-        // the retained receipt).
+        // Witnessed-plan gate: bind this batch to the observed digest plus revision
+        // before the gated apply, then seal the receipt after it lands (same lock, no
+        // interleaved write, so the gate is fresh; ledger replays keep the retained receipt).
         let pre_revision = self.doc.revision;
         let proposal = super::door_dispatch::witness_proposal_for_apply(self, &batch)?;
         let approval = Approval {
@@ -906,6 +904,7 @@ impl ServerState {
             expiry_tick: args.approval.expiry_tick,
         };
         let granted = granted_ops(&self.cap);
+        let before = super::scene_tools::delta_before(&self.doc, args.delta);
         let applied = capability::apply_gated(
             &mut self.doc,
             &mut self.journal,
@@ -915,16 +914,17 @@ impl ServerState {
             &mut self.ledger,
         )
         .map_err(|error| cap_error(&error, &granted))?;
-        // A landed write is a watch event: the session-local digest cache
-        // moves, and the hub fans the digest out to live slots.
+        // A landed write is a watch event: the digest cache moves, the hub fans it out.
         self.refresh_watch();
         super::door_dispatch::witness_seal_apply(self, pre_revision, &proposal)?;
+        let spatial_delta = super::scene_tools::delta_after(before, &self.doc, &batch);
         Ok(TxApplyOutput {
             revision: applied.revision,
             effects: applied.effects,
             key: applied.key,
             journal_index: applied.journal_index as u64,
             undo_token: applied.key,
+            spatial_delta,
         })
     }
 
@@ -964,13 +964,13 @@ impl ServerState {
 
     /// MCP2 headless arena match job: `start` simulates a bounded match and
     /// files a handle, `poll` walks progress to the checkpoints, `cancel`
-    /// stops a running handle. The scene document is untouched. A start with
-    /// `scene_rev` plays the current scene as the match world.
+    /// stops a running handle. The scene document is untouched. A start must
+    /// pin the scene it plays (`scene_rev`, the current revision): an
+    /// unpinned, empty (revision 0) or stale pin is refused before any
+    /// simulation, and the job manifest carries the pin's revision and digest.
     pub fn play_run(&mut self, args: &PlayRunArgs) -> Result<PlayRunOutput, McpToolError> {
-        let world = match args.scene_rev {
-            Some(rev) if args.action == "start" => {
-                Some(super::play::world_load::world_for_revision(&self.doc, rev)?)
-            }
+        let world = match args.action.as_str() {
+            "start" => Some(super::scene_tools::pinned_world(&self.doc, args.scene_rev)?),
             _ => None,
         };
         #[cfg(feature = "rules")]
@@ -1750,6 +1750,7 @@ mod tests {
                 idempotency_key: key,
                 ops,
                 approval,
+                delta: None,
             },
         )
     }
@@ -2474,9 +2475,11 @@ mod tests {
             budget < TOOL_LIST_BUDGET_CHARS,
             "default list costs {budget} chars, the old door budgeted {TOOL_LIST_BUDGET_CHARS}"
         );
+        // 2026-10-18: the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and the two
+        // `delta` flags) took the default list to 47.4k before trimming: bound 45_500 -> 47_500.
         assert!(
-            budget < 40_514,
-            "default list {budget} is shorter than the measured 21-tool door"
+            budget < 47_500,
+            "default list {budget} stays near the measured 2026-10-18 spatial-lane door"
         );
         assert!(budget < everything, "the default list hides something");
         assert!(core_only < budget, "the scene pack adds to the core");

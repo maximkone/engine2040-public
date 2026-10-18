@@ -1,4 +1,5 @@
 use super::*;
+use engine_core::splitmix64;
 
 // ---------------------------------------------------------------------------
 // Fixture rule sets: the mode framework boots fixture rule

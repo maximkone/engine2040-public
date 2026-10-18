@@ -45,6 +45,13 @@ use super::Actor;
 use engine_core::Fnv64;
 use std::collections::BTreeMap;
 
+mod blocker;
+mod dir;
+mod outside;
+pub use blocker::{escape, overlap_depth_cm, Blocker, Escape, WantBlock};
+pub use dir::{place_dir, DirConflict, DirWant, DEFAULT_DIR_GAP_CM};
+pub use outside::{place_outside, OutsideConflict, OutsideTarget};
+
 /// Search grid pitch in centimeters.
 pub const GRID_CM: i32 = 10;
 /// Yaw candidates per position: `k * PI/4` for `k` in `0..YAW_STEPS`.
@@ -171,11 +178,18 @@ impl Eq for RepairHint {}
 /// `hints` carries solver-computed repairs beside the refusal: relaxing the
 /// hint's `dropped` want and taking its `placement` verifies clean. Empty
 /// when no single-drop repair exists or the object/bounds are unusable.
+///
+/// `blocks` (SPR6) says why each unmet want failed: one [`WantBlock`] per
+/// entry of `unmet`, in the same order, naming the blocking object or wall and
+/// the cm the nearest clean pose misses by. Empty for identity and bounds
+/// refusals, which have no geometry to blame. `reason` stays one fixed
+/// sentence of counts; names and figures live only in `blocks`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictSet {
     pub unmet: Vec<Want>,
     pub reason: String,
     pub hints: Vec<RepairHint>,
+    pub blocks: Vec<WantBlock>,
 }
 
 /// Union XZ bounds over valid actors, in integer centimeters.
@@ -743,21 +757,16 @@ fn transform_of(obj: &Placed, cx: i32, cz: i32, yaw_idx: i32) -> TransformOut {
     }
 }
 
-fn search(
-    wants: &[Want],
-    obj: &Placed,
-    ctx: &Ctx<'_>,
-    index: &Index3,
-    grid: Option<&Grid>,
-) -> Option<TransformOut> {
-    let grid = grid?;
+/// The pose height the solver uses for `wants`: the object at its grounded
+/// rest, or stacked on the first `OnTopOf` supporter (`rest_for`), with the
+/// integer-cm rest center that goes with it. `None` when the stacked rest
+/// does not fit the pose range.
+fn resting(wants: &[Want], obj: &Placed, ctx: &Ctx<'_>) -> Option<(Placed, Option<i32>)> {
     let rest_cm = rest_for(wants, obj, ctx);
-    let stacked_y_m = match rest_cm {
+    let y_m = match rest_cm {
         None => obj.y_m,
         Some(rest) => {
-            let Ok(rest_i16) = i16::try_from(rest) else {
-                return None;
-            };
+            let rest_i16 = i16::try_from(rest).ok()?;
             f32::from(rest_i16) / 100.0
         }
     };
@@ -766,8 +775,20 @@ fn search(
         sx: obj.sx,
         sy: obj.sy,
         sz: obj.sz,
-        y_m: stacked_y_m,
+        y_m,
     };
+    Some((stacked, rest_cm))
+}
+
+fn search(
+    wants: &[Want],
+    obj: &Placed,
+    ctx: &Ctx<'_>,
+    index: &Index3,
+    grid: Option<&Grid>,
+) -> Option<TransformOut> {
+    let grid = grid?;
+    let (stacked, rest_cm) = resting(wants, obj, ctx)?;
     let mut cz = grid.z_lo;
     while cz <= grid.z_hi {
         let mut cx = grid.x_lo;
@@ -1042,6 +1063,7 @@ pub fn solve(intent: &Intent, actors: &[Actor]) -> Result<Vec<TransformOut>, Con
                 unmet: unmet_all(),
                 reason: error.into_reason(),
                 hints: Vec::default(), // empty vec never allocates; conflict-only path outside the fixed tick.
+                blocks: Vec::default(),
             });
         }
     };
@@ -1050,6 +1072,7 @@ pub fn solve(intent: &Intent, actors: &[Actor]) -> Result<Vec<TransformOut>, Con
             unmet: unmet_all(),
             reason: "no-bounds: no valid actor anchors the room".to_string(),
             hints: Vec::default(), // empty vec never allocates; conflict-only path outside the fixed tick.
+            blocks: Vec::default(),
         });
     };
     let ctx = context(actors, bounds);
@@ -1105,10 +1128,12 @@ pub fn solve(intent: &Intent, actors: &[Actor]) -> Result<Vec<TransformOut>, Con
         unmet.len(),
     );
     let hints = repair_hints(intent, &conflict, &obj, &ctx, &index, grid.as_ref(), actors);
+    let blocks = blocker::block_report(&unmet, &obj, &ctx, &index, grid.as_ref());
     Err(ConflictSet {
         unmet,
         reason,
         hints,
+        blocks,
     })
 }
 

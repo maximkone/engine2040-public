@@ -22,8 +22,14 @@
 //! the pile sleeps.
 
 use crate::break_look::{BreakLook, BreakProp, LookError, BREAK_MESH_ID_BASE};
+use crate::camera::to_mm;
 use crate::TickOutcome;
 use engine_arena::{crate_rest, ArenaConfig};
+use engine_destruction::budget::{
+    BudgetError, DebrisBudget, DebrisLedger, ShardSeed, MAX_BUDGET_SHARDS, MAX_PER_EVENT,
+    MAX_POS_MM,
+};
+use engine_destruction::debris_lod::{plan_lod, LodConfig, LodError, Tier as LodTier};
 use engine_physfx::{Material, Stats, Tier};
 use engine_render::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter};
 use engine_render::v1::{cube, upload_mesh, MeshData, MeshError, PbrMaterial};
@@ -52,6 +58,10 @@ pub enum SceneError {
     Mesh(MeshError),
     /// The renderer refused an upload.
     Upload(PresentError),
+    /// The transient debris ledger refused the frame's pieces.
+    Budget(BudgetError),
+    /// The debris LOD bands were refused.
+    Lod(LodError),
 }
 
 impl std::fmt::Display for SceneError {
@@ -60,6 +70,8 @@ impl std::fmt::Display for SceneError {
             Self::Look(err) => write!(f, "{err}"),
             Self::Mesh(err) => write!(f, "break box is not a mesh: {err}"),
             Self::Upload(err) => write!(f, "break box upload refused: {err}"),
+            Self::Budget(err) => write!(f, "break LOD ledger refused: {err}"),
+            Self::Lod(err) => write!(f, "break LOD plan refused: {err}"),
         }
     }
 }
@@ -89,8 +101,9 @@ pub struct BreakScene {
     observed: u32,
     /// The tick of the first break event, once one came.
     broke_at: Option<u32>,
-    /// Boxes already on the GPU and the model they were baked with.
-    sent: Vec<(MeshKey, [f32; 12])>,
+    /// Boxes already on the GPU: half-extents and model they were baked with (a merged proxy
+    /// reuses its lead piece's key with a bigger box, so the half counts too).
+    sent: Vec<(MeshKey, [f32; 3], [f32; 12])>,
 }
 
 impl BreakScene {
@@ -140,30 +153,40 @@ impl BreakScene {
         Ok(())
     }
 
-    /// The boxes to draw now, `alpha` in `[0, 1]` blending the last two ticks. Before the
-    /// first break event: the whole crate. From the break tick on: the chunks still standing
-    /// and the debris, and never the whole crate.
-    pub fn draws(&self, alpha: f32) -> Result<Vec<SceneDraw>, LookError> {
-        let frame = self.look.frame(alpha)?;
+    /// The boxes to draw now, `alpha` in `[0, 1]` blending the last two ticks, seen from
+    /// `camera_m` (meters). Before the first break event: the whole crate. From the break tick
+    /// on: the chunks still standing and the debris, never the whole crate, thinned by the
+    /// debris LOD (DX6): pieces within [`LOD_DISTANCE_MM`] draw as they are, past it the
+    /// pieces of one kind (standing or flying) in one grid cell draw as one box around them,
+    /// and far out they are dropped.
+    pub fn draws(&self, alpha: f32, camera_m: [f32; 3]) -> Result<Vec<SceneDraw>, SceneError> {
+        let frame = self.look.frame(alpha).map_err(SceneError::Look)?;
         if frame.hidden.contains(&self.intact) {
-            let halves: Vec<(MeshKey, [f32; 3])> = self
+            let halves: Vec<(MeshKey, [f32; 3], u32)> = self
                 .look
                 .meshes()
                 .iter()
-                .flat_map(|m| [(m.standing.key, m.standing.half), (m.flying.key, m.flying.half)])
+                .flat_map(|m| {
+                    [
+                        (m.standing.key, m.standing.half, STANDING_ISLAND),
+                        (m.flying.key, m.flying.half, FLYING_ISLAND),
+                    ]
+                })
                 .collect();
-            return Ok(frame
+            let (draws, islands): (Vec<SceneDraw>, Vec<u32>) = frame
                 .draws
                 .iter()
                 .filter_map(|draw| {
-                    let half = halves.iter().find(|(key, _)| *key == draw.mesh)?.1;
-                    Some(SceneDraw {
+                    let (_, half, island) = halves.iter().find(|(key, ..)| *key == draw.mesh)?;
+                    let scene = SceneDraw {
                         mesh: draw.mesh,
-                        half,
+                        half: *half,
                         model: draw.model_3x4(),
-                    })
+                    };
+                    Some((scene, *island))
                 })
-                .collect());
+                .unzip();
+            return lod_draws(draws, &islands, camera_m);
         }
         let [x, y, z] = self.center_m;
         Ok(vec![SceneDraw {
@@ -173,30 +196,32 @@ impl BreakScene {
         }])
     }
 
-    /// Uploads what moved since the last frame and pushes one draw per box onto `list`.
-    /// Returns the draws pushed. An error means the picture is unusable: the caller drops the
-    /// scene (the window keeps running without the crate).
+    /// Uploads what moved since the last frame and pushes one draw per box onto `list`, as seen
+    /// from `camera_m` (see [`Self::draws`]). Returns the draws pushed. An error means the
+    /// picture is unusable: the caller drops the scene (the window keeps running without the
+    /// crate).
     pub fn push(
         &mut self,
         presenter: &mut Presenter,
         list: &mut DrawList,
         alpha: f32,
+        camera_m: [f32; 3],
     ) -> Result<usize, SceneError> {
-        let draws = self.draws(alpha).map_err(SceneError::Look)?;
+        let draws = self.draws(alpha, camera_m)?;
         for draw in &draws {
             let fresh = self
                 .sent
                 .iter()
-                .position(|(key, _)| *key == draw.mesh)
-                .map_or(true, |at| self.sent[at].1 != draw.model);
+                .position(|(key, ..)| *key == draw.mesh)
+                .is_none_or(|at| self.sent[at].1 != draw.half || self.sent[at].2 != draw.model);
             if fresh {
                 let mesh = baked_box(draw.half, &draw.model).map_err(SceneError::Mesh)?;
                 presenter
                     .upload_mesh(draw.mesh, &mesh)
                     .map_err(SceneError::Upload)?;
-                match self.sent.iter_mut().find(|(key, _)| *key == draw.mesh) {
-                    Some(entry) => entry.1 = draw.model,
-                    None => self.sent.push((draw.mesh, draw.model)),
+                match self.sent.iter_mut().find(|(key, ..)| *key == draw.mesh) {
+                    Some(entry) => (entry.1, entry.2) = (draw.half, draw.model),
+                    None => self.sent.push((draw.mesh, draw.half, draw.model)),
                 }
             }
             list.items.push(DrawItem {
@@ -251,6 +276,95 @@ impl BreakScene {
     }
 }
 
+/// Distance past which the crate's pieces merge (DX6), mm: farther than the pit's own shots, so
+/// the merge only thins a far or wide view. Impostors (dropped here) start at three times it.
+pub const LOD_DISTANCE_MM: i32 = 14_000;
+/// LOD island of the pieces still standing in the wall.
+const STANDING_ISLAND: u32 = 0;
+/// LOD island of the flying debris: merged apart from the wall.
+const FLYING_ISLAND: u32 = 1;
+
+/// The debris LOD of one frame: the boxes are the shards of a transient `DebrisLedger`
+/// (`islands[i]` is box `i`'s island), `plan_lod` tiers them by distance to `camera_m`, and the
+/// answer is drawn in the boxes' own order: Full and Simplified boxes as they are (there is no
+/// lower mesh to swap in), one box around each merge group (under its lead's mesh key), and
+/// nothing for impostor-tier pieces.
+fn lod_draws(
+    draws: Vec<SceneDraw>,
+    islands: &[u32],
+    camera_m: [f32; 3],
+) -> Result<Vec<SceneDraw>, SceneError> {
+    let mm = |m: f32| to_mm(m).clamp(-MAX_POS_MM, MAX_POS_MM);
+    let budget = DebrisBudget {
+        per_event_cap: MAX_PER_EVENT,
+        max_shards: u32::try_from(draws.len().clamp(1, MAX_BUDGET_SHARDS)).unwrap_or(1),
+        sleep_ticks: 1,
+        lod_distance_mm: LOD_DISTANCE_MM,
+        sleep_speed_mm_per_tick: 0,
+    };
+    let mut ledger = DebrisLedger::new(&budget).map_err(SceneError::Budget)?;
+    let seeds: Vec<ShardSeed> = draws
+        .iter()
+        .zip(islands)
+        .enumerate()
+        .map(|(id, (draw, island))| ShardSeed {
+            id: u32::try_from(id).unwrap_or(u32::MAX),
+            island: *island,
+            pos_mm: [mm(draw.model[3]), mm(draw.model[7]), mm(draw.model[11])],
+            vel_mm_per_tick: [0; 3],
+        })
+        .collect();
+    for batch in seeds.chunks(usize::try_from(MAX_PER_EVENT).unwrap_or(1)) {
+        ledger.admit(0, batch).map_err(SceneError::Budget)?;
+    }
+    let camera = camera_m.map(mm);
+    let plan =
+        plan_lod(&ledger, camera, &LodConfig::from_budget(&budget)).map_err(SceneError::Lod)?;
+    let mut tier_of = vec![LodTier::Full; draws.len()];
+    for (id, tier) in &plan.tiers {
+        tier_of[usize::try_from(*id).unwrap_or(usize::MAX)] = *tier;
+    }
+    let mut out = Vec::with_capacity(plan.draws());
+    for (at, tier) in tier_of.iter().enumerate() {
+        match *tier {
+            LodTier::Full | LodTier::Simplified(_) => out.push(draws[at]),
+            LodTier::Merged(lead) if usize::try_from(lead) == Ok(at) => {
+                let members = tier_of
+                    .iter()
+                    .zip(&draws)
+                    .filter(|(t, _)| **t == LodTier::Merged(lead))
+                    .map(|(_, draw)| draw);
+                out.push(merged_box(draws[at].mesh, members));
+            }
+            LodTier::Merged(_) | LodTier::Impostor(_) => {}
+        }
+    }
+    Ok(out)
+}
+
+/// One axis-aligned box around `members`, drawn under `mesh`.
+fn merged_box<'a>(mesh: MeshKey, members: impl Iterator<Item = &'a SceneDraw>) -> SceneDraw {
+    let mut low = [f32::INFINITY; 3];
+    let mut high = [f32::NEG_INFINITY; 3];
+    for draw in members {
+        for axis in 0..3 {
+            let row = &draw.model[axis * 4..axis * 4 + 3];
+            let reach: f32 = row.iter().zip(draw.half).map(|(m, h)| m.abs() * h).sum();
+            let center = draw.model[axis * 4 + 3];
+            low[axis] = low[axis].min(center - reach);
+            high[axis] = high[axis].max(center + reach);
+        }
+    }
+    let center = [0, 1, 2].map(|a| (low[a] + high[a]) * 0.5);
+    SceneDraw {
+        mesh,
+        half: [0, 1, 2].map(|a| (high[a] - low[a]) * 0.5),
+        model: [
+            1.0, 0.0, 0.0, center[0], 0.0, 1.0, 0.0, center[1], 0.0, 0.0, 1.0, center[2],
+        ],
+    }
+}
+
 /// A box of half-extents `half` placed by `model` (3 rows of 4, row-major), as a mesh in world
 /// space with outward normals: the renderer draws meshes where they were baked.
 pub fn baked_box(half: [f32; 3], model: &[f32; 12]) -> Result<MeshData, MeshError> {
@@ -266,7 +380,11 @@ pub fn baked_box(half: [f32; 3], model: &[f32; 12]) -> Result<MeshData, MeshErro
         .positions
         .iter()
         .map(|p| {
-            let r = turn([p[0] * 2.0 * half[0], p[1] * 2.0 * half[1], p[2] * 2.0 * half[2]]);
+            let r = turn([
+                p[0] * 2.0 * half[0],
+                p[1] * 2.0 * half[1],
+                p[2] * 2.0 * half[2],
+            ]);
             [r[0] + model[3], r[1] + model[7], r[2] + model[11]]
         })
         .collect();
@@ -314,6 +432,9 @@ mod tests {
             buttons,
         }
     }
+
+    /// A camera in the pit, well inside the LOD distance.
+    const NEAR_M: [f32; 3] = [0.0, 2.0, 4.0];
 
     fn scene_for(app: &App) -> BreakScene {
         BreakScene::new(&app.live_match().config()).expect("the crate bakes")
@@ -377,7 +498,7 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e, BreakEvent::ChunkFreed { .. }))
                 .count();
-            let draws = scene.draws(1.0).expect("frame");
+            let draws = scene.draws(1.0, NEAR_M).expect("frame");
             if break_tick.is_none() && !out.breaks.is_empty() {
                 break_tick = Some(tick);
             }
@@ -388,8 +509,15 @@ mod tests {
                     assert_eq!(draws[0].half, [0.5; 3]);
                 }
                 Some(_) => {
-                    assert_eq!(draws.len(), chunk_count, "tick {tick}: every chunk, no more");
-                    assert!(draws.iter().all(|d| d.mesh != intact), "tick {tick}: crate gone");
+                    assert_eq!(
+                        draws.len(),
+                        chunk_count,
+                        "tick {tick}: every chunk, no more"
+                    );
+                    assert!(
+                        draws.iter().all(|d| d.mesh != intact),
+                        "tick {tick}: crate gone"
+                    );
                 }
             }
             // A second look at the same tick is a replay: refused, and nothing changes.
@@ -403,7 +531,11 @@ mod tests {
         assert_eq!(scene.broke_at(), Some(4));
         assert_eq!(scene.breaks() as usize, events_total);
         assert!(freed_total > 0, "the script frees a chunk");
-        assert_eq!(scene.debris(), freed_total, "one debris body per freed chunk");
+        assert_eq!(
+            scene.debris(),
+            freed_total,
+            "one debris body per freed chunk"
+        );
         let line = scene.receipt_line();
         assert!(
             line.contains(&format!("breaks={events_total} debris={}", scene.debris())),
@@ -420,7 +552,10 @@ mod tests {
     /// asleep, at every alpha the same.
     #[test]
     fn break_wire_debris_falls_and_settles() {
-        let cfg = GameConfig { ticks: 400, ..config() };
+        let cfg = GameConfig {
+            ticks: 400,
+            ..config()
+        };
         let mut app = App::new(cfg).expect("app");
         let mut scene = scene_for(&app);
         let mut first: Option<Vec<SceneDraw>> = None;
@@ -429,15 +564,19 @@ mod tests {
             let out = app.tick(script(tick));
             scene.observe_outcome(&out).expect("tick");
             if tick == 4 {
-                first = Some(scene.draws(0.0).expect("frame"));
+                first = Some(scene.draws(0.0, NEAR_M).expect("frame"));
             }
             if tick > 4 && asleep_at.is_none() && scene.stats().awake == 0 {
                 asleep_at = Some(tick);
             }
         }
         let first = first.expect("break tick frame");
-        let end = scene.draws(1.0).expect("frame");
-        assert!(asleep_at.is_some(), "the pile sleeps inside {} ticks", cfg.ticks);
+        let end = scene.draws(1.0, NEAR_M).expect("frame");
+        assert!(
+            asleep_at.is_some(),
+            "the pile sleeps inside {} ticks",
+            cfg.ticks
+        );
         assert_eq!(end.len(), first.len(), "nothing was lost");
         let moved = end
             .iter()
@@ -452,7 +591,62 @@ mod tests {
             end.iter().all(|d| d.model[7] > 0.0),
             "every piece rests above the ground"
         );
-        assert_eq!(scene.draws(0.3).expect("frame"), end, "asleep is alpha independent");
+        assert_eq!(
+            scene.draws(0.3, NEAR_M).expect("frame"),
+            end,
+            "asleep is alpha independent"
+        );
+    }
+
+    /// DX6: the debris LOD is live in the draw. From the pit every chunk draws; from past the
+    /// merge distance the pieces of one kind in one cell become one box that holds them all;
+    /// from three times as far they are dropped. The whole crate is never thinned.
+    #[test]
+    fn break_wire_far_cameras_merge_then_drop_the_pieces() {
+        let cfg = config();
+        let mut app = App::new(cfg).expect("app");
+        let mut scene = scene_for(&app);
+        let far_m = [0.0, 2.0, 20.0];
+        for tick in 0..cfg.ticks {
+            let out = app.tick(script(tick));
+            scene.observe_outcome(&out).expect("tick");
+            if scene.broke_at().is_none() {
+                assert_eq!(scene.draws(1.0, far_m).expect("whole").len(), 1);
+            }
+        }
+        let near = scene.draws(1.0, NEAR_M).expect("near");
+        let far = scene.draws(1.0, far_m).expect("far");
+        assert_eq!(
+            near.len(),
+            scene.look.meshes().len(),
+            "the pit sees every chunk"
+        );
+        assert!(
+            !far.is_empty() && far.len() < near.len(),
+            "{} -> {}",
+            near.len(),
+            far.len()
+        );
+        let reach = |draw: &SceneDraw, axis: usize| -> f32 {
+            let row = &draw.model[axis * 4..axis * 4 + 3];
+            row.iter().zip(draw.half).map(|(m, h)| m.abs() * h).sum()
+        };
+        for piece in &near {
+            let held = far.iter().any(|bin| {
+                (0..3).all(|a| {
+                    let (c, b) = (piece.model[a * 4 + 3], bin.model[a * 4 + 3]);
+                    (c - b).abs() + reach(piece, a) <= reach(bin, a) + 1.0e-4
+                })
+            });
+            assert!(held, "a merged box holds {piece:?}");
+        }
+        assert!(
+            scene
+                .draws(1.0, [0.0, 2.0, 100.0])
+                .expect("gone")
+                .is_empty(),
+            "impostor-tier pieces are dropped"
+        );
     }
 
     /// F2P: the picture never touches the match. Two sessions play the same script, one with
@@ -460,7 +654,10 @@ mod tests {
     /// the hp and every tick outcome are equal.
     #[test]
     fn break_wire_hashes_with_and_without_the_picture_are_equal() {
-        let cfg = GameConfig { ticks: 600, ..config() };
+        let cfg = GameConfig {
+            ticks: 600,
+            ..config()
+        };
         let mut bare = App::new(cfg).expect("app");
         let mut painted = App::new(cfg).expect("app");
         let mut scene = scene_for(&painted);
@@ -468,7 +665,7 @@ mod tests {
             let a = bare.tick(script(tick));
             let b = painted.tick(script(tick));
             scene.observe_outcome(&b).expect("tick");
-            for draw in scene.draws(0.5).expect("frame") {
+            for draw in scene.draws(0.5, NEAR_M).expect("frame") {
                 baked_box(draw.half, &draw.model).expect("bakes");
             }
             assert_eq!(a, b, "tick {tick}: outcome");
@@ -486,8 +683,16 @@ mod tests {
         let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 3.0];
         let mesh = baked_box([0.5, 0.25, 1.0], &identity).expect("bakes");
         let span = |axis: usize| {
-            let lo = mesh.positions.iter().map(|p| p[axis]).fold(f32::MAX, f32::min);
-            let hi = mesh.positions.iter().map(|p| p[axis]).fold(f32::MIN, f32::max);
+            let lo = mesh
+                .positions
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::MAX, f32::min);
+            let hi = mesh
+                .positions
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::MIN, f32::max);
             (lo, hi)
         };
         assert_eq!(span(0), (0.5, 1.5));
@@ -496,7 +701,12 @@ mod tests {
         // A quarter turn about Y swaps the X and Z extents of the same box.
         let turned = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0];
         let mesh = baked_box([0.5, 0.25, 1.0], &turned).expect("bakes");
-        let hi = |axis: usize| mesh.positions.iter().map(|p| p[axis]).fold(f32::MIN, f32::max);
+        let hi = |axis: usize| {
+            mesh.positions
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::MIN, f32::max)
+        };
         assert!((hi(0) - 1.0).abs() < 1e-5 && (hi(2) - 0.5).abs() < 1e-5);
         for n in &mesh.normals {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
@@ -504,4 +714,3 @@ mod tests {
         }
     }
 }
-

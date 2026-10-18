@@ -1463,12 +1463,15 @@ mod live_frame_tests {
         let right_after = pixel(&after, w, 64 + 43, 64);
         let right_before = pixel(&before, w, 64 + 43, 64);
         let swing = |a: [f32; 3], b: [f32; 3]| (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>();
+        // The live IBL is the arena day sky now (not the photo studio), so the
+        // lit cube face sits closer to the sky behind it: 30 summed levels still
+        // say "the cube moved" (a static frame differs by 0 to 2).
         assert!(
-            swing(centre_before, centre_after) > 60.0,
+            swing(centre_before, centre_after) > 30.0,
             "the cube left the centre: {centre_before:?} -> {centre_after:?}"
         );
         assert!(
-            swing(right_before, right_after) > 60.0,
+            swing(right_before, right_after) > 30.0,
             "the cube arrived on the right: {right_before:?} -> {right_after:?}"
         );
 

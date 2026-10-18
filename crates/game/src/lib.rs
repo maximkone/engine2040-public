@@ -53,6 +53,9 @@ pub mod camera_arm;
 /// Presentation feed: drives the camera director from the frame
 /// loop with in-sim trauma and presentation-side shake. Std-only.
 pub mod camera_feed;
+/// WASD and the stick relative to the camera: turns the bindings' local wish
+/// into the world wish the sim takes. Input mapping only, never hashed. Std-only.
+pub mod camera_wish;
 /// Showcase clip capture: tape-bound PNG sequence plus manifest.
 /// Headless-safe: flags, tape codec, std-only PNG writer and frame sink.
 pub mod capture;
@@ -68,6 +71,10 @@ pub mod dev_hotpatch;
 /// Auto spectator camera (trailer cuts from fight beats): shot choice over
 /// fixed-tick cues with continuity rules, presentation only. Std-only.
 pub mod director;
+/// Feel flow view: hit-stop, slow-mo and camera shake from fight cues,
+/// applied by the window. Presentation only. App leg only.
+#[cfg(feature = "app")]
+pub mod feel_view;
 /// Fight ring: sand pit plus stone tiers under the fighter look. App leg.
 #[cfg(feature = "app")]
 pub mod fight_ring;
@@ -91,6 +98,10 @@ pub mod input;
 /// Ladder, glory ranks, repair-craft hooks LIGHT slice: integer
 /// fold, replayable, nothing CUT. Std-only.
 pub mod ladder;
+/// The human fighter's soft lock-on: the `facing` toward the nearest living
+/// rival that the window puts on the live input (and the spear demo script
+/// aims with). Input mapping only, never hashed. Std-only.
+pub mod lock_on;
 /// Loop rows text loader: designers edit numbers, no Rust edit.
 /// Std-only, cold path at a progression boundary.
 pub mod loop_text;
@@ -116,6 +127,15 @@ pub mod reload;
 pub mod rounds;
 /// Siege mode: 32v32 over four arena shards on a dedicated server (WD4).
 pub mod siege;
+/// Spear grapple picture: the spear in flight, stuck or dropped, the verlet rope between the
+/// two fighters and the carry the ragdoll layer follows. Presentation only, never hashed. App
+/// leg only.
+#[cfg(feature = "app")]
+pub mod spear_look;
+/// Spear grapple in the window: meshes for the spear, trail and rope, the camera follow and the
+/// scene the arena binary drives. Presentation only, never hashed. App leg only.
+#[cfg(feature = "app")]
+pub mod spear_window;
 /// CPU pose step of the fighter look: clip sample plus joint bounds, no GPU.
 pub mod stage_bodies;
 /// Steamworks backend: achievements, stats, cloud generations and presence.
@@ -595,6 +615,9 @@ pub struct App {
     /// [`App::into_duel`]. [`App::spec`] names this match for the net server
     /// and client, so LAN play can build the same one.
     rules: ArenaRules,
+    /// Spear grapple on (`docs/plan/spear-grapple.md`): set by [`App::into_spear`] before the
+    /// first tick. Every live and presentation sim of the session is built with it.
+    spear: bool,
     /// Sim steps spent by retired live matches (rebuilds), so
     /// [`App::sim_steps`] counts every step the session ever paid.
     retired_steps: u64,
@@ -702,11 +725,30 @@ impl App {
         if self.cursor != 0 || self.retired_steps != 0 || self.live.steps() != 0 {
             return Err(GameError::BadConfig("duel_tables"));
         }
-        let spec = MatchSpec::duel(self.arena, self.world.clone());
+        let mut spec = MatchSpec::duel(self.arena, self.world.clone());
+        spec.spear = self.spear;
         self.live = spec.live().ok_or(GameError::BadConfig("arena"))?;
         self.arena = spec.config;
         self.rules = spec.rules;
         Ok(self)
+    }
+
+    /// Turn the spear grapple on: the throw button throws a spear and tethers fighters (see
+    /// `docs/plan/spear-grapple.md`). Only before the first tick; later calls refuse with
+    /// `BadConfig("spear")`. The match identity changes, so a LAN peer must ask for it too.
+    pub fn into_spear(mut self) -> Result<Self, GameError> {
+        if self.cursor != 0 || self.retired_steps != 0 || self.live.steps() != 0 {
+            return Err(GameError::BadConfig("spear"));
+        }
+        self.spear = true;
+        self.live = self.spec().live().ok_or(GameError::BadConfig("arena"))?;
+        Ok(self)
+    }
+
+    /// True when the spear grapple is on for this session.
+    #[must_use]
+    pub const fn spear(&self) -> bool {
+        self.spear
     }
 
     /// The match this session plays: config, rules and world as one value.
@@ -715,7 +757,12 @@ impl App {
     /// value plays the match the window shows.
     #[must_use]
     pub fn spec(&self) -> MatchSpec {
-        MatchSpec::new(self.arena, self.rules, self.world.clone())
+        let spec = MatchSpec::new(self.arena, self.rules, self.world.clone());
+        if self.spear {
+            spec.with_spear()
+        } else {
+            spec
+        }
     }
 
     /// Start a session with an explicit local human slot (LAN guests play
@@ -763,6 +810,7 @@ impl App {
             cursor: 0,
             live,
             rules,
+            spear: false,
             retired_steps: 0,
             checkpoints: Vec::new(),
             hp: [MAX_HP_PERMILLE; MAX_PARTICIPANTS as usize],
@@ -1202,7 +1250,7 @@ impl App {
     /// the tape's first `ticks` ticks. `None` (live match untouched) when
     /// the tape no longer replays.
     fn rebuild_live(&mut self, ticks: u32) -> Option<()> {
-        let mut live = LiveMatch::with_rules_world(&self.arena, self.rules, self.world.clone())?;
+        let mut live = self.spec().live()?;
         let mut hitstop = 0u32;
         for tick in 0..ticks {
             let stepped = live.step(tick_inputs(&self.tape, tick))?;
@@ -1523,8 +1571,7 @@ impl App {
     fn rebuild_presentation(&mut self, ticks: u32) -> Option<()> {
         let fighters = usize::from(self.config.fighters);
         let session = usize::try_from(self.config.ticks).ok()?;
-        let mut sim =
-            LivePresentation::with_rules_world(&self.arena, self.live.rules(), self.world.clone())?;
+        let mut sim = LivePresentation::from_spec(&self.spec())?;
         let mut fresh = PresentationData {
             pose_tracks: (0..fighters).map(|_| Vec::with_capacity(session)).collect(),
             root_tables: (0..fighters)

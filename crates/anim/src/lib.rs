@@ -61,9 +61,9 @@ pub mod lod;
 #[cfg(test)]
 mod lod_w1_test;
 pub mod motion_match;
+pub mod motion_net;
 #[cfg(test)]
 mod motion_schema_test;
-pub mod motion_net;
 /// Per-fighter pose-hash rings naming the first divergent tick and fighter
 /// between two clients. Diagnostics only, never authoritative.
 pub mod net_diverge;
@@ -75,6 +75,12 @@ pub mod par;
 pub mod pose;
 pub mod readable;
 pub mod space;
+/// Blend-space cues: each sample's event track speaks by integer weight
+/// under an [`EventStrategy`](space_events::EventStrategy). Std-only; the
+/// footstep and hit-cue path reads it after each [`space::SpacePlayer`] tick.
+pub mod space_events;
+#[cfg(test)]
+mod space_events_test;
 pub mod springs;
 /// Animation state machine as versioned data: validated, undoable, travel,
 /// integer-tick playback. Std-only; the JSON and door layer sits behind the

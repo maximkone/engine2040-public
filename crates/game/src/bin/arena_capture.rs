@@ -6,20 +6,13 @@
 //! files the same frames plus manifest; pixels never enter the sim hash.
 //! Errors: [`WinError`](engine_game::windowed::WinError); loud, never silent.
 //!
-//! Dual role: Cargo autodiscovers this file as its own `arena_capture`
-//! target, so the app-only helpers live behind one `app` gate while a loud
-//! stub `main` covers the headless target. The real entry stays `arena`.
+//! Helper module of the `arena` binary only (`mod arena_capture;` in
+//! `arena.rs`, which builds with the `app` feature): `Cargo.toml` sets
+//! `autobins = false`, so Cargo no longer builds this file as a second target
+//! of its own, and it has no `main`. The real entry stays `arena`.
 
-/// Stub entry for the autodiscovered `arena_capture` target: this file is a
-/// helper module of the `arena` binary, never a runnable tool.
-fn main() {
-    eprintln!("arena_capture is a helper module of the arena binary, not a tool");
-    std::process::exit(2);
-}
-
-/// Headless plus chart capture helpers (app-only: presenter and windowed
-/// types ride the `app` feature, so the headless default stays std-only).
-#[cfg(feature = "app")]
+/// Headless plus chart capture helpers (the presenter and windowed types they
+/// use ride the `app` feature, which the `arena` binary requires).
 pub(crate) mod capture {
     /// Status line on stdout: `println!` output, also mirrored into the run log.
     macro_rules! say {
@@ -831,7 +824,8 @@ pub(crate) mod capture {
 
     /// Twin capture, break picture: the crate's boxes onto the frame list (RZ4w).
     fn push_crate(scene: &mut Option<BreakScene>, presenter: &mut Presenter, list: &mut DrawList) {
-        if let Some(Err(why)) = scene.as_mut().map(|s| s.push(presenter, list, 1.0)) {
+        let eye = list.camera.eye.to_array();
+        if let Some(Err(why)) = scene.as_mut().map(|s| s.push(presenter, list, 1.0, eye)) {
             tell!("arena notice: break picture dropped: {why}");
             *scene = None;
         }
@@ -954,6 +948,10 @@ pub(crate) mod capture {
         }
     }
 
+    /// One baked kit actor as the twin binds it: mesh key, material and the
+    /// texture key (`None` when the actor has none or it is not resident).
+    type KitTriple = (MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>);
+
     /// Cached kit triples for `frame_list`: the kit glTF import parsed once per
     /// process and reused on every frame. Stores the unfiltered
     /// `(key, material, texture)` per baked actor; each call filters `texture`
@@ -965,19 +963,15 @@ pub(crate) mod capture {
     ///
     /// Caller: `frame_list` (same file) keeps the twin kit bind live without
     /// re-parsing the ~45 MB kit on every frame.
-    fn cached_kit_source(
-    ) -> Result<&'static [(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)], WinError>
-    {
-        static CACHE: std::sync::OnceLock<
-            Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)>,
-        > = std::sync::OnceLock::new();
+    fn cached_kit_source() -> Result<&'static [KitTriple], WinError> {
+        static CACHE: std::sync::OnceLock<Vec<KitTriple>> = std::sync::OnceLock::new();
         if let Some(cached) = CACHE.get() {
             return Ok(cached.as_slice());
         }
         let imported =
             engine_game::arena_kit::import_kit(&engine_game::arena_kit::kit_content_dir())
                 .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
-        let triples: Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)> = imported
+        let triples: Vec<KitTriple> = imported
             .baked
             .iter()
             .map(|baked| (baked.key, baked.material.clone(), baked.texture))

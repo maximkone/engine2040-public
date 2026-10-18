@@ -272,6 +272,10 @@ pub struct ViewLaws {
     slide_bins: Vec<u32>,
     /// Most bodies drawn from a ragdoll in one folded frame.
     ragdolls_max: u32,
+    /// Most spears alive at once in a folded frame (spear grapple).
+    spears_max: u32,
+    /// Most ropes alive at once in a folded frame (spear grapple).
+    tethers_max: u32,
     tracks: Vec<Option<Track>>,
 }
 
@@ -446,6 +450,19 @@ impl ViewLaws {
         self.ragdolls_max
     }
 
+    /// Folds the spear grapple's counts for the frame just drawn: spears and ropes alive.
+    pub fn note_spear(&mut self, spears: usize, tethers: usize) {
+        let clamp = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        self.spears_max = self.spears_max.max(clamp(spears));
+        self.tethers_max = self.tethers_max.max(clamp(tethers));
+    }
+
+    /// Most spears and most ropes alive at once in a folded frame.
+    #[must_use]
+    pub fn spear_counts(&self) -> (u32, u32) {
+        (self.spears_max, self.tethers_max)
+    }
+
     /// Bodies drawn with no on-screen rect, over bodies drawn.
     #[must_use]
     pub fn offscreen_share(&self) -> f64 {
@@ -472,7 +489,7 @@ impl ViewLaws {
             parts.join("/")
         };
         Some(format!(
-            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2} foot_slide_cm={:.1} planted_feet={} ragdolls={}",
+            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2} foot_slide_cm={:.1} planted_feet={} ragdolls={} spear={} tether={}",
             self.frames,
             self.first_t.unwrap_or(0.0),
             self.last_t,
@@ -490,6 +507,8 @@ impl ViewLaws {
             self.foot_slide_p95_m() * 100.0,
             self.planted_feet(),
             self.ragdolls(),
+            self.spears_max,
+            self.tethers_max,
         ))
     }
 }
@@ -815,7 +834,7 @@ mod tests {
         assert_eq!(
             laws.line().as_deref(),
             Some(
-                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0 ragdolls=0"
+                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0 ragdolls=0 spear=0 tether=0"
             )
         );
     }
@@ -841,7 +860,7 @@ mod tests {
         );
         let line = laws.line().expect("frames folded");
         assert!(
-            line.ends_with(" foot_slide_cm=9.5 planted_feet=100 ragdolls=0"),
+            line.ends_with(" foot_slide_cm=9.5 planted_feet=100 ragdolls=0 spear=0 tether=0"),
             "{line}"
         );
         // One slide of five meters lands in the last bin and moves p95 by one
@@ -857,7 +876,10 @@ mod tests {
         );
         let line = laws.line().expect("frames folded");
         assert!(line.contains(" nonfinite=1 "), "{line}");
-        assert!(line.ends_with(" planted_feet=101 ragdolls=0"), "{line}");
+        assert!(
+            line.ends_with(" planted_feet=101 ragdolls=0 spear=0 tether=0"),
+            "{line}"
+        );
     }
 
     #[test]

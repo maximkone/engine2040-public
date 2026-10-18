@@ -18,12 +18,12 @@ use rmcp::serde_json::{self, Value};
 
 /// Bounded wait per server reply: a silent server fails the test, never hangs it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-/// What a fresh door lists: the thirteen core tools plus the six default
-/// `scene`-pack verbs (19 names), in contract order. Every other verb is callable by name and listed
+/// What a fresh door lists: the thirteen core tools plus the seven default
+/// `scene`-pack verbs (20 names), in contract order. Every other verb is callable by name and listed
 /// once its pack loads (`api.load`). The last three are the defined TOOL_
 /// consts that inbox row EB-2026-10-08-S178 (E37) registered: `game.build`,
 /// `sim.build_encounter`, `test.run`.
-const EXPECTED_TOOLS: [&str; 19] = [
+const EXPECTED_TOOLS: [&str; 20] = [
     "scene.read",
     "tx.preview",
     "tx.apply",
@@ -40,6 +40,7 @@ const EXPECTED_TOOLS: [&str; 19] = [
     "level.build",
     "scene.query",
     "scene.watch",
+    "scene.next",
     "game.build",
     "sim.build_encounter",
     "test.run",
@@ -350,7 +351,7 @@ fn scripted_client_lists_previews_applies_and_undoes_over_stdio() {
     );
     let started = structured(&client.call(
         "play.run",
-        r#"{"action":"start","seed":2040,"ticks":4,"fighters":2,"half_extent_m":20.0}"#,
+        r#"{"action":"start","seed":2040,"ticks":4,"fighters":2,"half_extent_m":20.0,"scene_rev":1}"#,
     ));
     assert_eq!(started["status"].as_str(), Some("running"));
     let job = started["job_id"].as_u64().expect("start returns a job id");

@@ -140,19 +140,15 @@ pub fn sun_shadow_depth_desc() -> wgpu::TextureDescriptor<'static> {
         edge == SUN_SHADOW_SIZE || edge == SUN_SHADOW_HALF_SIZE,
         "live sun edge is the pinned 2048 or the 1024 arm: {edge}"
     );
+    sun_shadow_depth_desc_for(edge)
+}
+/// Depth descriptor for any square `edge` in texels: the quality tier's shadow map size
+/// (`quality::shadow_edge_px`) reaches the texture here. The pit-centre snap is 0 for every
+/// edge, so the sun matrix does not depend on it.
+pub fn sun_shadow_depth_desc_for(edge: u32) -> wgpu::TextureDescriptor<'static> {
     wgpu::TextureDescriptor {
         label: Some("sun-shadow-depth"),
-        size: wgpu::Extent3d {
-            width: edge,
-            height: edge,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
+        ..crate::shadow_cluster::gpu::cascade_depth_desc(edge)
     }
 }
 /// Uniform bytes: 80 bytes, matrix first (64), then `bias` and `scale`.
@@ -248,6 +244,8 @@ pub(crate) struct SunShadowSubmitter {
     /// The map itself: a view does not keep the texture alive on its own.
     _map: wgpu::Texture,
     view: wgpu::TextureView,
+    /// Edge of the map in texels.
+    edge: u32,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
@@ -257,7 +255,9 @@ impl SunShadowSubmitter {
     /// Build the live map plus its pipeline once for one device.
     /// Units GPU handles. Presentation only, never hashed.
     pub(crate) fn build(device: &wgpu::Device) -> Self {
-        let texture = device.create_texture(&sun_shadow_depth_desc());
+        let desc = sun_shadow_depth_desc();
+        let edge = desc.size.width;
+        let texture = device.create_texture(&desc);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("eg11-sun-uniform"),
@@ -294,10 +294,28 @@ impl SunShadowSubmitter {
         Self {
             _map: texture,
             view,
+            edge,
             uniform,
             bind,
             pipeline,
         }
+    }
+
+    /// Edge of the map in texels.
+    pub(crate) fn edge(&self) -> u32 {
+        self.edge
+    }
+
+    /// Replace the map by a square one of `edge` texels (the tier's shadow size). The pipeline
+    /// and the bind do not depend on the size, so nothing else is rebuilt.
+    pub(crate) fn resize(&mut self, device: &wgpu::Device, edge: u32) {
+        if edge == self.edge {
+            return;
+        }
+        let texture = device.create_texture(&sun_shadow_depth_desc_for(edge));
+        self.view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self._map = texture;
+        self.edge = edge;
     }
 
     /// Record one sun depth map from the live draw list: ortho pass over the

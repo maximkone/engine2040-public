@@ -790,7 +790,7 @@ impl ServerState {
         if self.watch_subscription.is_none() {
             return;
         }
-        let digest = match self.scene_brief(&SceneBriefArgs { budget_bytes: None }) {
+        let digest = match self.scene_brief(&SceneBriefArgs::default()) {
             Ok(brief) => brief.digest,
             Err(_) => return,
         };
@@ -879,7 +879,7 @@ impl SyncTool<McpServer> for WatchTool {
             let subscription = hub
                 .subscribe(param.session, watch_config_of(&param))
                 .map_err(|error| McpToolError::wrap("subscribe_failed", error))?;
-            let baseline = state.scene_brief(&SceneBriefArgs { budget_bytes: None })?;
+            let baseline = state.scene_brief(&SceneBriefArgs::default())?;
             let output = WatchSubscribeOutput {
                 subscription_id: subscription.id(),
                 session: param.session,
@@ -1335,6 +1335,7 @@ fn apply_chained(server: &McpServer, items: &[PreviewItem], base: u64) -> BatchE
                 idempotency_key: item.idempotency_key,
                 ops: item.ops.clone(),
                 approval,
+                delta: Some(false),
             },
         ) {
             Ok(_) => {
@@ -2159,6 +2160,7 @@ mod tests {
                 idempotency_key: 1,
                 ops: seed_ops,
                 approval: drafted.approval,
+                delta: None,
             },
         )
         .expect("seed apply");
@@ -2354,7 +2356,7 @@ mod tests {
             .subscribe(7, WatchConfig::default_policy())
             .expect("subscribe");
         let brief_digest = || {
-            SceneBriefTool::invoke(&server, SceneBriefArgs { budget_bytes: None })
+            SceneBriefTool::invoke(&server, SceneBriefArgs::default())
                 .expect("brief reads")
                 .digest
         };
@@ -2387,6 +2389,7 @@ mod tests {
                     idempotency_key: key,
                     ops,
                     approval: drafted.approval,
+                    delta: None,
                 },
             )
             .expect("insert applies");
@@ -2569,8 +2572,8 @@ mod tests {
         .expect("watch subscribes");
         assert_ne!(out.subscription_id, 0);
         assert_eq!(out.session, 7);
-        let baseline = SceneBriefTool::invoke(&server, SceneBriefArgs { budget_bytes: None })
-            .expect("brief reads");
+        let baseline =
+            SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads");
         assert_eq!(out.revision, baseline.revision);
         assert_eq!(out.digest, baseline.digest);
         // The returned id is live: the tool adopts the handle (no
@@ -2600,8 +2603,8 @@ mod tests {
             },
         )
         .expect("watch subscribes");
-        let before = SceneBriefTool::invoke(&server, SceneBriefArgs { budget_bytes: None })
-            .expect("brief reads");
+        let before =
+            SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads");
         assert_eq!(before.watch_subscription, Some(out.subscription_id));
         assert_eq!(before.watch_digest, Some(out.digest));
 
@@ -2632,14 +2635,15 @@ mod tests {
                 idempotency_key: 6101,
                 ops,
                 approval: drafted.approval,
+                delta: None,
             },
         )
         .expect("insert applies");
 
         // The brief serves the fresh digest from the session-local cache, and
         // the id is still live on a later call.
-        let after = SceneBriefTool::invoke(&server, SceneBriefArgs { budget_bytes: None })
-            .expect("brief reads");
+        let after =
+            SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads");
         assert_eq!(after.revision, before.revision + 1);
         assert_ne!(after.digest, before.digest);
         assert_eq!(after.watch_digest, Some(after.digest));
@@ -2898,6 +2902,7 @@ mod tests {
                 idempotency_key: 9001,
                 ops: seed,
                 approval: draft.approval,
+                delta: None,
             },
         )
         .expect("seed apply");

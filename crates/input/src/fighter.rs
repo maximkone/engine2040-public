@@ -42,6 +42,12 @@ pub const BLOCK: u8 = 0x02;
 pub const DODGE: u8 = 0x04;
 /// Button bits the contract accepts; anything else is rejected.
 pub const KNOWN_BUTTONS: u8 = ATTACK | BLOCK | DODGE;
+/// Spear-throw bit in [`Buttons`]: opt-in, acted on only by a match built with
+/// `MatchSpec::spear`; any other match ignores it. Not part of
+/// [`KNOWN_BUTTONS`], so consumers that mask with that const are unchanged.
+pub const THROW_SPEAR: u8 = 0x10;
+/// Every button bit the wire accepts: [`KNOWN_BUTTONS`] plus [`THROW_SPEAR`].
+pub const ALL_BUTTONS: u8 = KNOWN_BUTTONS | THROW_SPEAR;
 
 /// Stable fighter slot in `0..MAX_PARTICIPANTS`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -63,7 +69,7 @@ impl FighterId {
     }
 }
 
-/// Button bitset; only [`KNOWN_BUTTONS`] bits are legal.
+/// Button bitset; only [`ALL_BUTTONS`] bits are legal.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Buttons(pub u8);
 
@@ -73,7 +79,7 @@ impl Buttons {
 
     /// True when no unknown bits are set.
     pub const fn is_legal(self) -> bool {
-        self.0 & !KNOWN_BUTTONS == 0
+        self.0 & !ALL_BUTTONS == 0
     }
 }
 
@@ -310,6 +316,20 @@ mod tests {
         assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x08)));
         assert!(!Buttons(0x08).is_legal());
         assert!(Buttons(ATTACK | BLOCK | DODGE).is_legal());
+    }
+
+    #[test]
+    fn throw_spear_bit_is_legal() {
+        let mut input = valid();
+        input.buttons = Buttons(ATTACK | THROW_SPEAR);
+        input.validate().expect("the spear bit is a legal button");
+        assert_eq!(KNOWN_BUTTONS & THROW_SPEAR, 0, "v1 buttons keep 3 bits");
+        let mut bytes = Vec::new();
+        input.append_bytes(&mut bytes);
+        assert_eq!(bytes.len(), 10, "the record layout is frozen");
+        assert_eq!(bytes[9], ATTACK | THROW_SPEAR);
+        input.buttons = Buttons(0x20);
+        assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x20)));
     }
 
     #[test]

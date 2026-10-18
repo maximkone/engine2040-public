@@ -146,6 +146,34 @@ pub fn boxes_of(actors: &[Actor]) -> Vec<Box3> {
     out
 }
 
+/// Volume of one actor, or none when any axis is non-finite or any size is
+/// not above zero. The one strict actor-to-box rule slide and measure share.
+pub(crate) fn actor_box(a: &Actor) -> Option<Box3> {
+    let ok = [a.x, a.y, a.z, a.sx, a.sy, a.sz]
+        .iter()
+        .all(|v| v.is_finite())
+        && a.sx > 0.0
+        && a.sy > 0.0
+        && a.sz > 0.0;
+    ok.then(|| {
+        let (hx, hy, hz) = (
+            to_cm(a.sx).abs() / 2,
+            to_cm(a.sy).abs() / 2,
+            to_cm(a.sz).abs() / 2,
+        );
+        let (cx, cy, cz) = (to_cm(a.x), to_cm(a.y), to_cm(a.z));
+        Box3 {
+            id: a.id,
+            min_x: cx - hx,
+            max_x: cx + hx,
+            min_y: cy - hy,
+            max_y: cy + hy,
+            min_z: cz - hz,
+            max_z: cz + hz,
+        }
+    })
+}
+
 /// Strict volume overlap on integer centimeters. Touching faces never hit;
 /// the one overlap test every XYZ pair path shares.
 pub(crate) fn xyz_hit(a: &Box3, b: &Box3) -> bool {

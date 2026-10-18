@@ -31,13 +31,15 @@ use self::windowed_captions::{caption_strip, push_caption_tick};
 use super::audio_mix::{Material, MixBridge, MixVoice, VoiceSeed, Wall, MAX_MIX_VOICES};
 use super::camera::DirectorParams;
 use super::camera_feed::PresentationFeed;
+#[cfg(test)]
+use super::pad::poll_gilrs_once;
+#[cfg(any(debug_assertions, test))]
+use super::pad::snapshot_from_recorded;
 use super::pad::{
     fighter_input_from_pad, fps_bindings, merge_pressed, snapshot_from_recorded as fold_pad_events,
     tick_input_with_pad, PadFrame, RecordedPadEvent,
 };
 use super::window_audio_space::AudioSpace;
-#[cfg(any(debug_assertions, test))]
-use super::pad::{poll_gilrs_once, snapshot_from_recorded};
 use super::{App, Checkpoint, FighterView, GameConfig, GameError, TickOutcome, HUMAN_SLOT};
 
 #[path = "windowed_captions.rs"]
@@ -982,7 +984,7 @@ pub fn duel_overlay_for_app(app: &App) -> DuelOverlay {
         let hp = app.hp().get(slot).copied().unwrap_or(0);
         if let Ok(byte) = u8::try_from(slot) {
             if let Some(id) = FighterId::new(byte) {
-                let _ = overlay.upsert_fighter(id, *name, hp);
+                let _ = overlay.upsert_fighter(id, name, hp);
             }
         }
     }

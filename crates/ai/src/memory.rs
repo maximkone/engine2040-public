@@ -1369,47 +1369,47 @@ mod tests {
         out
     }
 
-    /// LW12: 64 minds each remember one event a tick, recall their top 8 into
-    /// a caller buffer (zero allocations) and drain a recorded `Say` through
-    /// `apply_at` at the tick boundary. Caps hold, bytes match across runs;
-    /// the p95 times print for the record and are never asserted.
-    #[test]
-    fn soak_64_minds_recall_and_drain_hold_caps() {
+    /// Store bytes, drain fold and presented lines: what must repeat x2.
+    type SoakResult = (Vec<u8>, u64, usize);
+
+    /// LW12 soak: 64 minds each remember one event a tick, recall their top 8
+    /// into a caller buffer (zero allocations) and drain a recorded `Say`
+    /// through `apply_at` at the tick boundary. `lap` runs one phase and
+    /// returns its microseconds (0 when untimed). Returns the recall and
+    /// drain laps plus a result that must repeat byte for byte.
+    fn soak_64(
+        lap: &mut dyn FnMut(&mut dyn FnMut()) -> u128,
+    ) -> (Vec<u128>, Vec<u128>, SoakResult) {
         use super::super::apply::{apply_at, Applied};
         use super::super::mind::{ActionKind, ActionLog, MindAction};
-        use std::time::Instant;
         const MINDS: u32 = 64;
         const TICKS: u64 = 600;
-        let p95 = |mut us: Vec<u128>| {
-            us.sort_unstable();
-            us[us.len() * 95 / 100]
-        };
-        let run = || {
-            let mut store = MemoryStore::new();
-            let mut log = ActionLog::new();
-            let mut fold = engine_core::Fnv64::new();
-            let (mut recall_us, mut drain_us) = (Vec::new(), Vec::new());
-            let mut presented = 0usize;
-            for tick in 1..=TICKS {
-                for id in 0..MINDS {
-                    let salience = ((tick * 31 + u64::from(id) * 17) % 1001) as u32;
-                    let kind = kinds()[(tick as usize + id as usize) % kinds().len()];
-                    store
-                        .observe(npc(id), tick, kind, &format!("n{id} t{tick}"), salience)
-                        .expect("soak observes");
-                    log.push(MindAction {
-                        tick_apply: tick,
-                        npc: npc(id),
-                        kind: ActionKind::Say,
-                        text: format!("line {id} {tick}"),
-                        source: ActionSource::Scripted,
-                        request: tick * 100 + u64::from(id),
-                    })
-                    .expect("line records");
-                }
-                let mut top = [0usize; MAX_RECALL];
-                let started = Instant::now();
-                let ((), allocs) = engine_core::alloc_probe::measure(|| {
+        let mut store = MemoryStore::new();
+        let mut log = ActionLog::new();
+        let mut fold = engine_core::Fnv64::new();
+        let (mut recall_us, mut drain_us) = (Vec::new(), Vec::new());
+        let mut presented = 0usize;
+        for tick in 1..=TICKS {
+            for id in 0..MINDS {
+                let salience = ((tick * 31 + u64::from(id) * 17) % 1001) as u32;
+                let kind = kinds()[(tick as usize + id as usize) % kinds().len()];
+                store
+                    .observe(npc(id), tick, kind, &format!("n{id} t{tick}"), salience)
+                    .expect("soak observes");
+                log.push(MindAction {
+                    tick_apply: tick,
+                    npc: npc(id),
+                    kind: ActionKind::Say,
+                    text: format!("line {id} {tick}"),
+                    source: ActionSource::Scripted,
+                    request: tick * 100 + u64::from(id),
+                })
+                .expect("line records");
+            }
+            let mut top = [0usize; MAX_RECALL];
+            let mut allocs = 0;
+            recall_us.push(lap(&mut || {
+                let ((), count) = engine_core::alloc_probe::measure(|| {
                     for id in 0..MINDS {
                         let found = store.recall_into(npc(id), tick, &mut top);
                         assert_eq!(found, store.len(npc(id)).min(MAX_RECALL));
@@ -1418,9 +1418,10 @@ mod tests {
                         }
                     }
                 });
-                recall_us.push(started.elapsed().as_micros());
-                assert_eq!(allocs.calls, 0, "recall allocates nothing at tick {tick}");
-                let started = Instant::now();
+                allocs = count.calls;
+            }));
+            assert_eq!(allocs, 0, "recall allocates nothing at tick {tick}");
+            drain_us.push(lap(&mut || {
                 for action in log.drain_due(tick) {
                     match apply_at(&action, tick, tick) {
                         Ok(Applied::Presented(event)) => {
@@ -1430,23 +1431,55 @@ mod tests {
                         other => panic!("say must present at its tick: {other:?}"),
                     }
                 }
-                drain_us.push(started.elapsed().as_micros());
-                assert!(log.is_empty(), "drain leaves nothing due");
-            }
-            store.audit_caps().expect("caps hold");
-            assert_eq!(store.npc_count(), MINDS as usize);
-            for id in 0..MINDS {
-                assert_eq!(store.len(npc(id)), MAX_STORED_PER_NPC);
-            }
-            println!(
-                "lw12-soak minds={MINDS} ticks={TICKS} recall64_p95_us={} drain64_p95_us={}",
-                p95(recall_us),
-                p95(drain_us)
-            );
-            (store.memory_bytes(), fold.finish(), presented)
+            }));
+            assert!(log.is_empty(), "drain leaves nothing due");
+        }
+        store.audit_caps().expect("caps hold");
+        assert_eq!(store.npc_count(), MINDS as usize);
+        for id in 0..MINDS {
+            assert_eq!(store.len(npc(id)), MAX_STORED_PER_NPC);
+        }
+        (
+            recall_us,
+            drain_us,
+            (store.memory_bytes(), fold.finish(), presented),
+        )
+    }
+
+    #[test]
+    fn soak_64_minds_recall_and_drain_hold_caps() {
+        let run = || {
+            soak_64(&mut |phase| {
+                phase();
+                0
+            })
         };
-        let first = run();
-        assert_eq!(first.2, (MINDS as usize) * (TICKS as usize));
-        assert_eq!(first, run(), "bytes and drain fold equal x2");
+        let first = run().2;
+        assert_eq!(first.2, 64 * 600, "every line presents once");
+        assert_eq!(first, run().2, "bytes and drain fold equal x2");
+    }
+
+    #[ignore = "timing: prints wall-clock p95 for the 64-mind soak"]
+    #[test]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "ignored wall-clock timing test"
+    )]
+    fn soak_64_minds_prints_recall_and_drain_p95() {
+        let p95 = |mut us: Vec<u128>| {
+            us.sort_unstable();
+            us[us.len() * 95 / 100]
+        };
+        let (recall, drain, _) = soak_64(&mut |phase| {
+            let started = std::time::Instant::now();
+            phase();
+            started.elapsed().as_micros()
+        });
+        println!(
+            "lw12-soak minds=64 ticks=600 recall64_p95_us={} drain64_p95_us={}",
+            p95(recall),
+            p95(drain)
+        );
     }
 }

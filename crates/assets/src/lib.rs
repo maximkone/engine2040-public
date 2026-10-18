@@ -48,10 +48,6 @@ pub use bundle_cook::{
 /// Native BC1/BC3/BC4/BC5/BC7 block codec in-cook: identical bytes x2, encoder
 /// decision UNVERIFIED. Std-only.
 pub mod bc;
-/// Colliders cooked from the art: convex hulls for props and triangle meshes for static
-/// kit pieces, written as deterministic bytes the physics lane reads. Hull and bytes are
-/// std-only; the glTF `COL_` node reader rides the `import` feature.
-pub mod collider_cook;
 /// Skinned body plus clip-source import for render skinning (fighter look).
 #[cfg(feature = "import")]
 pub mod body_import;
@@ -63,11 +59,18 @@ pub mod clip_intake;
 pub mod clip_receipt;
 #[cfg(feature = "import")]
 mod collapse;
+/// Colliders cooked from the art: convex hulls for props and triangle meshes for static
+/// kit pieces, written as deterministic bytes the physics lane reads. Hull and bytes are
+/// std-only; the glTF `COL_` node reader rides the `import` feature.
+pub mod collider_cook;
 /// Generated mesh intake: licence gate, repair, prop cook, bundle, provenance row and cache.
 #[cfg(all(feature = "import", feature = "registry"))]
 pub mod gen_intake;
 #[cfg(feature = "import")]
 pub mod import_repair;
+/// Arena material maps cooked to block-compressed KTX2 with mips (BC1/BC5), plus the reader that
+/// decodes a cooked file to RGBA8. Std-only; no encoder dependency.
+pub mod ktx2_cook;
 #[cfg(feature = "import")]
 pub mod lod_swap;
 #[cfg(feature = "import")]
@@ -76,9 +79,6 @@ pub mod mesh_cook;
 pub mod optimize;
 /// Offline BC cook over `bc` plus KTX2 emit: picked shape, x2 identical.
 pub mod texture_cook;
-/// Arena material maps cooked to block-compressed KTX2 with mips (BC1/BC5), plus the reader that
-/// decodes a cooked file to RGBA8. Std-only; no encoder dependency.
-pub mod ktx2_cook;
 /// Offline uv2 chart pack for arena static meshes (cook-time only): chart
 /// plus pack plus hashed provenance row; planned, no caller yet (verified
 /// 2026-10-16): the bundle cook will consume `pack_uv2`.

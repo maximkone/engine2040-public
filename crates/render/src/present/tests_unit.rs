@@ -42,6 +42,24 @@ mod headless_tests {
     }
 
     #[test]
+    fn quality_texture_cap_picks_the_largest_mip_that_fits() {
+        let upload = TextureUpload {
+            width: 16,
+            height: 8,
+            rgba: vec![80; 16 * 8 * 4],
+        };
+        assert_eq!(upload.capped_to(16), None, "it fits as it is");
+        assert_eq!(upload.capped_to(0), None, "zero means no cap");
+        let half = upload.capped_to(8).expect("one mip down");
+        assert_eq!((half.width, half.height), (8, 4));
+        assert_eq!(half.rgba.len(), 8 * 4 * 4);
+        half.validate().expect("the mip is a valid upload");
+        let tiny = upload.capped_to(1).expect("down to one texel");
+        assert_eq!((tiny.width, tiny.height), (1, 1));
+        assert_eq!(upload.capped_to(5).map(|u| u.width), Some(4));
+    }
+
+    #[test]
     fn every_error_names_its_recovery() {
         let cases: Vec<(PresentError, RecoveryAction)> = vec![
             (PresentError::NoAdapter, RecoveryAction::KeepLastGood),

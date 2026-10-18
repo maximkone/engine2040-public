@@ -20,9 +20,9 @@ use std::path::Path;
 use engine_assets::bc::srgb_byte_to_linear;
 use engine_assets::{AssetSource, FsSource};
 use engine_render::draw::crowd_seats::{
-    crowd_palette_index, crowd_palette_rgba, crowd_seat_pos, crowd_total, CROWD_BODY_D_M,
-    CROWD_BODY_H_M, CROWD_BODY_W_M, CROWD_HEAD_M, CROWD_PALETTE_LEN, CROWD_ROWS_PER_SECTOR,
-    CROWD_SEATS_PER_ROW, CROWD_SECTORS, CROWD_WALL_H_M, CROWD_WALL_M,
+    crowd_palette_index, crowd_palette_rgba, crowd_seat_pos, CROWD_BODY_D_M, CROWD_BODY_H_M,
+    CROWD_BODY_W_M, CROWD_HEAD_M, CROWD_PALETTE_LEN, CROWD_ROWS_PER_SECTOR, CROWD_SEATS_PER_ROW,
+    CROWD_SECTORS, CROWD_WALL_M,
 };
 use engine_render::present::{DrawItem, DrawList, MeshKey, Presenter, TextureKey, TextureUpload};
 use engine_render::v1::{self, MeshData, PbrMaterial};
@@ -549,6 +549,7 @@ impl FightRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_render::draw::crowd_seats::{crowd_total, CROWD_WALL_H_M};
 
     #[test]
     fn crowd_seats_stand_on_the_ring_treads() {

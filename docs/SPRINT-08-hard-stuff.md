@@ -165,7 +165,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   CT2 quadric chain, impostors past the LOD distance; replaces the `low_lod`
   flag. Tier B. Size M. Owns `crates/destruction/src/debris_lod.rs`. Accept:
   1,000 debris pieces cost within the DX4 budget; merges are identical x2;
-  no pop visible in a PQ4 lookcheck. needs: DX4, CT2. Progress 2026-10-17: 4cf108a8 debris_lod.rs tiers Full/Simplified/Merged/Impostor over the DX4 ledger; 1 ms budget test is ignored and unrun, PQ4 lookcheck needs a human; left: a caller in the window and the CT2 chain.
+  no pop visible in a PQ4 lookcheck. needs: DX4, CT2. Progress 2026-10-17: 4cf108a8 debris_lod.rs tiers Full/Simplified/Merged/Impostor over the DX4 ledger; 1 ms budget test is ignored and unrun, PQ4 lookcheck needs a human; left: a caller in the window and the CT2 chain. Progress 2026-10-18: caller wired 40119424 (BreakScene::draws takes a camera, DebrisLedger plus plan_lod merge far pieces at 14 m and drop impostors; test break_wire_far_cameras_merge_then_drop_the_pieces); left: 1 ms budget test still ignored and unrun, PQ4 lookcheck needs a human.
 - [ ] DX7 editor: fracture authoring — bond paint, strength preview and a
   break-replay preview in the editor, through the command service with undo,
   so AI and humans author destructibles. Tier B. Size M. Owns
@@ -328,22 +328,22 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Accept: malicious asset names refused; out-of-scope tool calls
   blocked. Kill: float math in tick. needs: CT4, MCP8. (RES-STEAL
   wave 36 Dive 12, reviewed 2026-09-26.)
-- [ ] NV4 nav: near-field avoidance — ORCA half-planes on the XZ plane in Progress 2026-10-17: crates/ai/tests/crowd_orca_bench.rs holds an integer ORCA half-plane step with naive, kd-tree and grid neighbour feeds benched at 50, 200 and 256 agents; left: no crates/nav/src/orca.rs, no 500-agent flat-cost proof, no 1,000-seed corridor stuck drill.
+- [x] NV4 nav: near-field avoidance — ORCA half-planes on the XZ plane in Progress 2026-10-17: crates/ai/tests/crowd_orca_bench.rs holds an integer ORCA half-plane step with naive, kd-tree and grid neighbour feeds benched at 50, 200 and 256 agents; left: no crates/nav/src/orca.rs, no 500-agent flat-cost proof, no 1,000-seed corridor stuck drill.
   Fixed math for fighters within 15 m (RVO2-3D, Apache-2.0, math ported with
   a PORT row); far agents stay on flow fields and impostors. Tier B. Size M.
   Owns `crates/nav/src/orca.rs`. Accept: steering ≤ 0.1 ms per agent, flat
   from 50 to 500 agents; 0 stuck in a 1,000-seed corridor drill; replay x2.
-  needs: NV2.
+  needs: NV2. Landed c531822d c57b0e3a. orca.rs integer port of RVO2 half-planes with hard walls: 200-agent replay digest pinned x2, 1,000 corridor seeds leave nobody stuck (4 m corridor; a 3 m one stuck 3 of 1,000), 0.56/0.54/0.79 us per agent at 50/200/500 vs the 100 us bar; timing on a runner, not the reference PC (run 39070961762) (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673). The fake solver in crates/ai/tests/crowd_orca_bench.rs still duplicates this.
 - [ ] NV5 nav: legion platoons — leaders query nav, followers hold gaps in O(1)
   (idea from traffic platoons; SUMO is EPL-2.0, patterns only). Tier B.
   Size M. Owns `crates/nav/src/platoon.rs`. Accept: ≥ 5x fewer nav queries
   for a 500-soldier legion; no accordion at 60 Hz; replay x2. needs: NV4, PX7.
-- [ ] NV6 nav: smooth paths — portal funnel (string pulling) over the tiled
+- [x] NV6 nav: smooth paths — portal funnel (string pulling) over the tiled
   mesh with salted tile references so paths survive rebakes
   (recastnavigation Zlib and polyanya Apache-2.0 patterns). Tier B. Size M.
   Owns `crates/nav/src/funnel.rs`. Accept: paths never longer than the grid
   path and at least 10% shorter on 80% of queries; query at most 0.2 ms p50;
-  a breach opens a path within 1 s; bytes x2. needs: NV3, DX1.
+  a breach opens a path within 1 s; bytes x2. needs: NV3, DX1. Landed 1329f98e. funnel.rs string pulling over an A* corridor, never longer than the grid walk, >=10% shorter on >=80% of 200 seeded queries, segments inside open cells, breach opens a path in under a second of ticks, bytes equal x2, p50 under 0.2 ms (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673).
 - [ ] NV8 nav: 500-agent soak harness — 500 agents under 1 ms, 0 stuck in
   1000 corridors, bytes x2. Tier A. Size S. Owns nav/tests/soak.rs.
   Accept: 500 agents under 1 ms; 0 stuck in 1000 corridors; bytes x2.
@@ -407,7 +407,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
    executor). P2P:
    `cargo test -p engine-ai --lib gladiator` stays green. needs: BR1.
    (STEAL 2026-10-03 bonsai, https://github.com/Sollimann/bonsai.)
-- [ ] GA12 brain: GOAP planner over the utility world-state — Bevy-style
+- [x] GA12 brain: GOAP planner over the utility world-state — Bevy-style Landed 49df5811. goap.rs plans over a 64-fact integer state with A*; 20 seeded goal sets all plan and match an independent cheapest-cost search, replan after a state flip within a 256-node budget, replay x2 equal (engine-ai goap_plan 5 passed, run 39069981777). Note 363c1500 declares the module and does not build alone; HEAD builds from 49df5811.
    action graph (preconditions / effects / costs) planned with A* over
    integer world-state, ported as std-only Rust from `victorb/dogoap`
    planner shape (license MIT, reimplement only, never the crate dep).
@@ -436,14 +436,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   the query corpus; bytes x2; grid deleted, not deprecated. Proof:
   `cargo test -p engine-nav` green with grid files deleted.
   needs: NV3, NV6. (PLN EXTEND gameplay.md, proposed 2026-09-29.)
-- [ ] NV12 nav: shared-edge stitch proof — bake the arena whole and
+- [x] NV12 nav: shared-edge stitch proof — bake the arena whole and
   tiled, diff every cross-tile path byte-wise (WD8 shape). Tier A.
   Size S. Owns `crates/nav/src/tiles.rs` stitch hunks. Accept:
   cross-tile paths byte-equal to single-mesh paths on the arena kit;
   byte-equal again after a 4-tile breach plus rebake; bytes x2.
   Proof: `cargo test -p engine-nav tiles` green, stitch diff run
-  twice. needs: NV3. (PLN EXTEND gameplay.md, proposed 2026-09-29.)
-- [ ] NV13 nav: temp-obstacle request queue — touched/pending sets Progress 2026-10-17: ObstacleCache plus TiledNav::update_budget landed in tiles.rs with tests/tiles.rs obstacle_rebuild_touches_only_its_tiles and obstacle_requests_refuse_loudly (nav green, run 39057395844); left: the 4-tile breach numbers (touched 4/4/4 cap 8, up_to_date, digest afb7c5d2) are not asserted anywhere.
+  twice. needs: NV3. (PLN EXTEND gameplay.md, proposed 2026-09-29.) Landed 28d7a357. Whole and tiled arena bakes give byte-equal paths and flow steps on 150 cross-tile queries before and after a 4-tile breach; the floor is a nav-local arena-shaped grid (nav cannot depend on the game kit) (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673).
+- [x] NV13 nav: temp-obstacle request queue — touched/pending sets Progress 2026-10-17: ObstacleCache plus TiledNav::update_budget landed in tiles.rs with tests/tiles.rs obstacle_rebuild_touches_only_its_tiles and obstacle_requests_refuse_loudly (nav green, run 39057395844); left: the 4-tile breach numbers (touched 4/4/4 cap 8, up_to_date, digest afb7c5d2) are not asserted anywhere.
   plus budgeted rebuild plus `up_to_date` convergence (LADDER L517
   ADOPT-scoped spike). Tier A. Size S.
   Owns `crates/nav/src/tiles.rs` queue plus `update_budget` hunks
@@ -453,7 +453,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   4/4/4 cap-8 plus 1 rebuild per tick over 10 ticks plus
   `up_to_date` true with stale-exact 10/10 plus digest `afb7c5d2`
   x2; burst-10 ablation killed; golden unchanged. needs: NV3.
-  (PLN gameplay.md, proposed 2026-09-30.)
+  (PLN gameplay.md, proposed 2026-09-30.) Landed 28d7a357. Cylinder obstacles, touched(), pending_count(), TiledNav::up_to_date(): the 32x32 edge-8 breach touches 4/4/4 tiles (cap 8), rebuilds one tile per tick over 10 ticks with an exact stale set each tick, the burst-10 ablation trips the per-tick gate; the Rust digest 8032266843827844966 x2 replaces the spike's afb7c5d2 (different digest model) (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673).
 - [ ] NV14 nav: per-tile integer-mm rebake detail (held on NV13, feeds
   NV12 stitch proof) — border-overlap bake-lane geometry, tick keeps
   version flips only (LADDER L511, spike first). Tier A. Size M. Owns
@@ -471,7 +471,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   dangling-stamp refusal 100% plus overflow keeps staleness plus
   digest x2; kill on any dangling resolve or digest drift. needs:
   NV13, NV7. (PLN gameplay.md, proposed 2026-09-30.)
-- [ ] NV16 nav: rational-NURBS spline math + parallel-transport frames — de
+- [x] NV16 nav: rational-NURBS spline math + parallel-transport frames — de
   Casteljau / Cox-de Boor sampling, arc-length LUT, analytic tangents,
   twist-free sweep frames and ear-clip extrusion ported as integer-safe Rust
   from flax-mcp
@@ -482,7 +482,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   F2P: `cargo test -p engine-nav --lib spline_frames` (fails before: no
   NURBS math). P2P: `cargo test -p engine-nav tiles` stays green. needs:
   NV2. (FLAX-MCP HARVEST EB-2026-10-02-S93;
-  research/flax-mcp-harvest/plugins-gameplay-world.md #3.)
+  research/flax-mcp-harvest/plugins-gameplay-world.md #3.) Landed 8c6520a3. spline.rs: NURBS point/tangent, arc-length table, nearest, parallel-transport frames, ear-clip, profile sweep, no trig; 7 spline_frames tests, a 3D curve bit-identical x2; pinned reference is an exact quarter circle (the flax-mcp C# sources were not on this machine) (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673).
 - [ ] PF5 perf: SIMD pass — hot loops (culling, CPU skinning paths, spatial
   queries, audio mix) on glam SIMD or `wide` with scalar fallbacks;
   simulation code keeps its integer math. Tier A. Size M. Owns the named
@@ -505,3 +505,6 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   any viewer attached during measurement, any new dep. needs: PF2. (RES-STEAL
   672-res-tracy2, 2026-10-08; 2,000-frame + RA8/VRAM/draw legs stay Tier C
   pilot-only.)
+- [x] SG1 arena: throwable spear grapple authority - THROW_SPEAR button bit 0x10, swept tip against fighter capsules and walls, tether reels the thrower then the pair share momentum toward the spear end, wall hit zips the thrower, guard/parry/timeout/KO/release end it; opt-in `MatchSpec::spear`, off means masked and unhashed. Tier A. Size M. Owns `crates/arena/src/spear.rs`, `crates/net/src/session/spear_tests.rs`. Accept: spear scenario tests in `crate::spear::tests`, `live::spear_tests` 600-tick digest identical twice and across tape replay, net rollback and lobby refusal, golden d57b5c8ae3096614 and arena digest d29b3b17bbd3b244 unchanged. needs: none. Landed 2dedab1b. Proof: engine-arena + engine-input tests run 39074617752, engine-net spear 4 passed run 39072779205, clippy run 39075934041, golden_hash_untouched run 39073693190. Plan docs/plan/spear-grapple.md.
+- [x] SG2 game: spear grapple presentation - physfx tether rope and carry_ragdoll, spear_look.rs (flying spear, trail, stuck, dropped, rope slack and taut), ragdoll tow along the authority track then land and get up, Q throws in the arena window with `--spear`, `--spear-demo` auto-throws, feel and audio cues, `spear= tether=` on the view line. Tier A. Size M. Owns `crates/physfx/src/tether.rs`, `crates/game/src/spear_look.rs`. Accept: physfx tether tests, six spear_look tests on a real match, ragdoll_look tow test, capture shows a tethered airborne pair. needs: SG1. Landed 736bf9ea. Proof: engine-game --features app --lib 661 passed on the runner, arena bin 71 passed, physfx clippy runs 39072040021 and 39076389088, capture target/captures/spear-grapple-tether.png.
+- [ ] SG3 game: spear grapple polish and proof - throw wind-up and release animation layer as a pure masked override in crates/anim, rope and held spear tied to the real hand joint, a hand-played keyboard run, the spear in the web build, a release arena.exe rebuilt for play-arena.bat. Tier B. Size M. Owns `crates/anim` hunks, `crates/game/src/spear_look.rs`. Accept: capture of the wind-up frame, a keyboard run log with at least one tow, web page spear= tether= line. needs: SG2.

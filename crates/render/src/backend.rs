@@ -428,6 +428,64 @@ pub fn wgpu_backends(choice: BackendChoice) -> wgpu::Backends {
     }
 }
 
+/// Env switch for strict WebGPU mode: `1` opens every native instance of the
+/// render stack with `InstanceFlags::STRICT_WEBGPU_COMPLIANCE`, so wgpu hides
+/// every feature and limit the WebGPU spec does not have and rejects what a
+/// browser rejects (a color attachment loaded with `DontCare`, a bind group
+/// layout over the spec limits). Unset or any other value leaves the instance
+/// flags as they are. Read once per instance, at startup.
+pub const STRICT_WEBGPU_ENV: &str = "E2040_STRICT_WEBGPU";
+
+/// True when the raw `E2040_STRICT_WEBGPU` value asks for strict mode: exactly
+/// `1`, surrounding blanks ignored (a Windows `set X=1 &&` carries one). Pure
+/// over the value so tests drive it without touching the process env.
+#[must_use]
+pub fn strict_webgpu_from(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "1")
+}
+
+/// True when the live process env asks for strict WebGPU mode.
+#[must_use]
+pub fn strict_webgpu_from_env() -> bool {
+    strict_webgpu_from(std::env::var(STRICT_WEBGPU_ENV).ok().as_deref())
+}
+
+/// The instance flags: wgpu's build-config default (debug and validation
+/// flags in a debug build), plus `STRICT_WEBGPU_COMPLIANCE` when `strict`.
+/// With `strict` false this is exactly what `InstanceDescriptor` defaults to.
+#[cfg(feature = "window")]
+#[must_use]
+pub fn instance_flags(strict: bool) -> wgpu::InstanceFlags {
+    let mut flags = wgpu::InstanceFlags::default();
+    if strict {
+        flags |= wgpu::InstanceFlags::STRICT_WEBGPU_COMPLIANCE;
+    }
+    flags
+}
+
+/// The instance descriptor of the render stack: `backends`, the
+/// [`instance_flags`] for `strict`, everything else wgpu's default and no
+/// display handle.
+#[cfg(feature = "window")]
+#[must_use]
+pub fn instance_descriptor(backends: wgpu::Backends, strict: bool) -> wgpu::InstanceDescriptor {
+    wgpu::InstanceDescriptor {
+        backends,
+        flags: instance_flags(strict),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    }
+}
+
+/// Create the wgpu instance every native bring-up in the render stack uses,
+/// strict when `E2040_STRICT_WEBGPU=1` (see [`STRICT_WEBGPU_ENV`]). The one
+/// creation point: a new bring-up calls this instead of `Instance::new`, so
+/// the switch reaches it. Cold startup path only.
+#[cfg(feature = "window")]
+#[must_use]
+pub fn new_instance(backends: wgpu::Backends) -> wgpu::Instance {
+    wgpu::Instance::new(instance_descriptor(backends, strict_webgpu_from_env()))
+}
+
 /// Camera eye in meters for one arena600 orbit frame: one full turn over
 /// [`ARENA600_FRAMES`] frames. Presentation math (trig allowed); the same
 /// frame gives the same eye twice.
@@ -991,10 +1049,7 @@ mod tests {
     fn adapter_probe_skips_headless_never_fakes() {
         crate::test_gpu::hold_gpu_slot();
         let (choice, _) = resolve_from_env(None);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu_backends(choice),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = new_instance(wgpu_backends(choice));
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
@@ -1011,5 +1066,197 @@ mod tests {
         assert_eq!(wgpu_backends(BackendChoice::Dx12), wgpu::Backends::DX12);
         assert_eq!(wgpu_backends(BackendChoice::Vulkan), wgpu::Backends::VULKAN);
         assert_eq!(wgpu_backends(BackendChoice::Metal), wgpu::Backends::METAL);
+    }
+
+    #[test]
+    fn strict_webgpu_env_value_selects_the_mode() {
+        assert!(!strict_webgpu_from(None), "unset keeps today's behavior");
+        for off in ["", " ", "0", "true", "yes", "2", "11"] {
+            assert!(!strict_webgpu_from(Some(off)), "{off:?} must stay off");
+        }
+        assert!(strict_webgpu_from(Some("1")));
+        assert!(
+            strict_webgpu_from(Some("1 ")),
+            "cmd `set X=1 &&` leaves a trailing blank"
+        );
+    }
+
+    #[test]
+    fn strict_webgpu_env_name_is_the_documented_one() {
+        // The workflow files, the skills and the dev's shell spell it this way.
+        assert_eq!(STRICT_WEBGPU_ENV, "E2040_STRICT_WEBGPU");
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn strict_webgpu_flag_is_added_only_when_asked() {
+        let strict_bit = wgpu::InstanceFlags::STRICT_WEBGPU_COMPLIANCE;
+        let off = instance_flags(false);
+        let on = instance_flags(true);
+        assert_eq!(
+            off,
+            wgpu::InstanceFlags::default(),
+            "off is exactly what the descriptor defaulted to before the switch"
+        );
+        assert!(!off.contains(strict_bit));
+        assert!(on.contains(strict_bit));
+        assert_eq!(
+            on.difference(strict_bit),
+            off,
+            "strict adds the one bit and keeps the debug and validation flags"
+        );
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn strict_webgpu_descriptor_keeps_backends_and_has_no_display() {
+        for strict in [false, true] {
+            let desc = instance_descriptor(wgpu::Backends::VULKAN, strict);
+            assert_eq!(desc.backends, wgpu::Backends::VULKAN);
+            assert_eq!(desc.flags, instance_flags(strict));
+            assert!(desc.display.is_none());
+        }
+    }
+
+    /// A high-performance adapter from a strict WebGPU instance, or the skip.
+    /// `Backends::PRIMARY`: test builds skip GL, whose driver DLL loads from a
+    /// helper thread and can wedge the process loader lock. An adapter that the
+    /// plain instance finds and the strict one hides is not WebGPU compliant;
+    /// that is named in the skip reason (and fails under `E2040_REQUIRE_GPU=1`).
+    #[cfg(feature = "window")]
+    fn strict_adapter(test: &str) -> Option<wgpu::Adapter> {
+        use crate::test_gpu::{require_or_skip, NoAdapter};
+        crate::test_gpu::hold_gpu_slot();
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        };
+        let plain = wgpu::Instance::new(instance_descriptor(wgpu::Backends::PRIMARY, false));
+        let strict = wgpu::Instance::new(instance_descriptor(wgpu::Backends::PRIMARY, true));
+        let probe = match pollster::block_on(plain.request_adapter(&options)) {
+            Err(error) => Err(NoAdapter(format!(
+                "no wgpu adapter on this machine: {error}"
+            ))),
+            Ok(found) => pollster::block_on(strict.request_adapter(&options)).map_err(|error| {
+                NoAdapter(format!(
+                    "{} is not WebGPU compliant, strict mode hides it: {error}",
+                    found.get_info().name
+                ))
+            }),
+        };
+        require_or_skip(test, probe)
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn strict_webgpu_device_stays_inside_the_spec() {
+        use std::io::Write;
+        let Some(adapter) = strict_adapter("strict_webgpu_device_stays_inside_the_spec") else {
+            return;
+        };
+        let (device, _queue) = pollster::block_on(
+            adapter.request_device(&crate::present::Presenter::device_descriptor(&adapter)),
+        )
+        .expect("the presenter's device descriptor opens on a strict WebGPU adapter");
+        let info = adapter.get_info();
+        let limits = device.limits();
+        // A direct stderr write: libtest captures the print macros of a passing test.
+        let _ = writeln!(
+            std::io::stderr(),
+            "strict-webgpu: adapter={} max_texture_dimension_2d={} max_bind_groups={}",
+            info.name,
+            limits.max_texture_dimension_2d,
+            limits.max_bind_groups
+        );
+
+        // The spec numbers, stated independently of wgpu's table.
+        let spec = wgpu::Limits::defaults();
+        assert_eq!(
+            (
+                spec.max_bind_groups,
+                spec.max_storage_buffers_per_shader_stage,
+                spec.max_texture_dimension_2d
+            ),
+            (4, 8, 8192),
+            "wgpu's default limits are the WebGPU spec's"
+        );
+        let mut beyond = Vec::new();
+        limits.check_limits_with_fail_fn(&spec, false, |name, have, allowed| {
+            beyond.push(format!("{name}={have} (spec {allowed})"));
+        });
+        assert!(
+            beyond.is_empty(),
+            "device limits beyond the WebGPU defaults: {beyond:?}"
+        );
+        assert!(limits.max_bind_groups <= 4);
+        assert!(limits.max_storage_buffers_per_shader_stage <= 8);
+        assert!(limits.max_texture_dimension_2d <= 8192);
+
+        // The strict adapter itself: native-only limits already zero, and no
+        // feature outside the WebGPU set (wgpu exempts these four).
+        let mut native_zeroed = adapter.limits();
+        native_zeroed.zero_native_only();
+        assert_eq!(
+            adapter.limits(),
+            native_zeroed,
+            "a strict adapter reports no native-only limit"
+        );
+        let allowed = wgpu::Features::all_webgpu_mask()
+            | wgpu::Features::EXTERNAL_TEXTURE
+            | wgpu::Features::TEXTURE_FORMAT_NV12
+            | wgpu::Features::TEXTURE_FORMAT_P010
+            | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+        assert_eq!(
+            adapter.features().difference(allowed),
+            wgpu::Features::empty(),
+            "a strict adapter reports only WebGPU features"
+        );
+        assert_eq!(
+            device.features().difference(allowed),
+            wgpu::Features::empty(),
+            "a strict device holds only WebGPU features"
+        );
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn strict_webgpu_presenter_renders_a_clean_frame() {
+        use crate::present::{DrawItem, DrawList, MeshKey, Presenter};
+        let Some(adapter) = strict_adapter("strict_webgpu_presenter_renders_a_clean_frame") else {
+            return;
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Presenter::device_descriptor(&adapter)))
+                .expect("the presenter's device descriptor opens on a strict WebGPU adapter");
+        let mut presenter = Presenter::init_offscreen_from_device(&adapter, device, queue)
+            .expect("every presenter pipeline builds under strict WebGPU");
+        let key = MeshKey::new(1, [0xA1; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(160, 120).expect("valid size applies");
+        let scene = crate::v1::default_scene(160, 120).expect("default scene is valid");
+        let list = DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+                normal_map: None,
+            }],
+        };
+        let out = presenter
+            .render_offscreen(&list)
+            .expect("the forward and blit passes run under strict WebGPU");
+        assert!(
+            out.manifest.is_clean(),
+            "strict WebGPU frame had validation errors: {:?}",
+            out.manifest
+        );
+        assert!(out.receipt.is_clean() && out.receipt.presented);
+        assert_eq!(out.receipt.draws, 1);
     }
 }

@@ -25,6 +25,8 @@
 
 use super::index::{boxes_of, pos_known, size_known, Box3};
 use super::navcheck::octant;
+use super::sees::sees_pair;
+use super::sight::SightWorld;
 use super::Actor;
 use engine_core::Fnv64;
 use std::collections::{BTreeMap, BTreeSet};
@@ -755,9 +757,10 @@ pub const BETWEEN_CORRIDOR_CM: i32 = 50;
 /// nearer/farther separation, so side-by-side pairs read as neither.
 pub const VIEW_DEPTH_CM: i32 = 25;
 
-/// Reference frame for the directional predicates. World pins front to
-/// arena north; Subject uses the subject's own yaw; Viewer uses another
-/// actor's seat (position plus yaw-snapped facing).
+/// Frame for `holds(s, rel, o)` = "`s` is REL of `o`". World pins front to
+/// north (-Z; +Y up, +X east, east is right of north); Subject uses the
+/// reference `o`'s own yaw (0 faces +X, +90 deg faces +Z); Viewer uses another
+/// actor's seat. Convention pinned by `dir_gold_plain` (SPR2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Frame {
     World,
@@ -829,13 +832,15 @@ pub fn frame_name(frame: Frame) -> &'static str {
 /// Valid-only working view: id-sorted actors with boxes and centers.
 /// Unknown, degenerate and non-positive actors never enter, so they take
 /// no v2 edges and every query about them answers `false`.
-struct V2View<'a> {
+pub(crate) struct V2View<'a> {
     by_id: BTreeMap<u32, &'a Actor>,
-    boxes: BTreeMap<u32, Box3>,
-    centers: BTreeMap<u32, (i32, i32, i32)>,
+    /// Sight geometry for `visible_from`, built on first use.
+    sight: std::cell::OnceCell<SightWorld>,
+    pub(crate) boxes: BTreeMap<u32, Box3>,
+    pub(crate) centers: BTreeMap<u32, (i32, i32, i32)>,
 }
 
-fn v2view(actors: &[Actor]) -> V2View<'_> {
+pub(crate) fn v2view(actors: &[Actor]) -> V2View<'_> {
     let mut good: Vec<&Actor> = actors.iter().filter(|a| valid(a)).collect();
     good.sort_by_key(|a| a.id);
     let mut by_id = BTreeMap::new();
@@ -863,6 +868,7 @@ fn v2view(actors: &[Actor]) -> V2View<'_> {
     }
     V2View {
         by_id,
+        sight: std::cell::OnceCell::new(),
         boxes,
         centers,
     }
@@ -878,7 +884,7 @@ fn xz_hit(a: &Box3, b: &Box3) -> bool {
 }
 
 /// Squared XZ edge gap over disjoint-or-touching boxes, in cm^2.
-fn edge_gap2(a: &Box3, b: &Box3) -> i64 {
+pub(crate) fn edge_gap2(a: &Box3, b: &Box3) -> i64 {
     let gx = (i64::from(a.min_x.max(b.min_x)) - i64::from(a.max_x.min(b.max_x))).max(0);
     let gz = (i64::from(a.min_z.max(b.min_z)) - i64::from(a.max_z.min(b.max_z))).max(0);
     gx * gx + gz * gz
@@ -896,11 +902,11 @@ fn dist2xz(a: (i32, i32, i32), b: (i32, i32, i32)) -> i64 {
 /// Facing unit for a frame: world pins north, subject/viewer snap the
 /// actor yaw through the shared octant table. Non-finite yaw resolves to
 /// `None`, so yawless actors take no directional edges.
-fn frame_fwd(view: &V2View<'_>, frame: Frame, subject: u32) -> Option<(i32, i32)> {
+pub(crate) fn frame_fwd(view: &V2View<'_>, frame: Frame, reference: u32) -> Option<(i32, i32)> {
     match frame {
         Frame::World => Some((0, -1)),
         Frame::Subject => {
-            let a = view.by_id.get(&subject)?;
+            let a = view.by_id.get(&reference)?;
             if !a.yaw.is_finite() {
                 return None;
             }
@@ -1272,47 +1278,20 @@ pub fn blocking_holds(actors: &[Actor], o: u32, a: u32, b: u32) -> bool {
     blocking_in_view(&view, o, a, b)
 }
 
-/// Line of sight on the ground plane: same story with no blocking
-/// occluder on the center-to-center walk. Any third actor with
-/// [`blocking_holds`] shape (strictly between, box properly crossed,
-/// sharing the story) refuses the pair. Frame-free by design.
+/// Line of sight: same story, and the 3D center-to-center ray reaches the
+/// other box ([`sees_pair`], the one definition shared with `scene.query
+/// kind=sees`). Frame-free by design.
 fn visible_holds(view: &V2View<'_>, s: u32, o: u32) -> bool {
-    if s == o {
+    let (Some(bs), Some(bo)) = (view.boxes.get(&s), view.boxes.get(&o)) else {
+        return false;
+    };
+    if s == o || !y_overlap(bs, bo) {
         return false;
     }
-    let (bs, bo) = match (view.boxes.get(&s), view.boxes.get(&o)) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return false,
-    };
-    if !y_overlap(bs, bo) {
-        return false;
-    }
-    let (cs, co) = match (view.centers.get(&s), view.centers.get(&o)) {
-        (Some(a), Some(b)) => (*a, *b),
-        _ => return false,
-    };
-    let p1 = (i64::from(cs.0), i64::from(cs.2));
-    let p2 = (i64::from(co.0), i64::from(co.2));
-    for (id, bt) in &view.boxes {
-        let t = *id;
-        if t == s || t == o {
-            continue;
-        }
-        if !y_overlap(bt, bs) || !y_overlap(bt, bo) {
-            continue;
-        }
-        let ct = match view.centers.get(&t) {
-            Some(c) => *c,
-            None => continue,
-        };
-        if strict_between_proj(ct, cs, co).is_none() {
-            continue;
-        }
-        if seg_crosses_box(p1, p2, bt) {
-            return false;
-        }
-    }
-    true
+    let world = view
+        .sight
+        .get_or_init(|| SightWorld::from_refs(view.by_id.values().copied()));
+    sees_pair(world, s, o).is_ok_and(|r| r.visible)
 }
 
 /// Walkable ground: same story with no occluder box crossing the XZ
@@ -1356,14 +1335,15 @@ fn holds_in_view(view: &V2View<'_>, s: u32, rel: Rel, o: u32, frame: Frame) -> b
     match rel {
         Rel::Above => above_holds(view, s, o),
         Rel::Below => above_holds(view, o, s),
+        // "s is REL of o": the helpers take the reference first.
         Rel::Front | Rel::Behind | Rel::Left | Rel::Right => match frame {
-            Frame::Viewer(w) => viewer_dir(view, s, o, w, rel),
+            Frame::Viewer(w) => viewer_dir(view, o, s, w, rel),
             _ => {
-                let f = match frame_fwd(view, frame, s) {
+                let f = match frame_fwd(view, frame, o) {
                     Some(f) => f,
                     None => return false,
                 };
-                match dir_deltas(view, s, o, f) {
+                match dir_deltas(view, o, s, f) {
                     Some((fwd, lat)) => project_dir(rel, fwd, lat),
                     None => false,
                 }
@@ -1379,7 +1359,8 @@ fn holds_in_view(view: &V2View<'_>, s: u32, rel: Rel, o: u32, frame: Frame) -> b
     }
 }
 
-/// One vocabulary question: does `rel` hold from `s` to `o` in `frame`?
+/// One vocabulary question: is `s` `rel` of `o` in `frame`? `holds(a, Left,
+/// b, World)` is "a is left_of b" (a sits west of b); SPR2 fixed the mirror.
 /// Frame-free kinds (above/below, against/around/aligned, near/far,
 /// visible/reachable) ignore the frame so callers keep one call shape.
 /// Degenerate inputs answer `false`: same id, unknown id, NaN or
@@ -1815,37 +1796,37 @@ mod vocab_tests {
         let v130 = Frame::Viewer(130);
         vec![
             // --- S1 row: subject frame (yaw 0 faces +X) ---
-            q("row", 100, Rel::Front, 101, S, true),
-            q("row", 100, Rel::Behind, 101, S, false),
-            q("row", 100, Rel::Left, 101, S, false),
-            q("row", 100, Rel::Right, 101, S, false),
-            q("row", 101, Rel::Front, 100, S, false),
-            q("row", 101, Rel::Behind, 100, S, true),
-            q("row", 101, Rel::Front, 102, S, true),
-            q("row", 102, Rel::Behind, 101, S, true),
-            q("row", 100, Rel::Front, 102, S, true),
-            q("row", 102, Rel::Front, 100, S, false),
-            q("row", 102, Rel::Behind, 100, S, true),
+            q("row", 101, Rel::Front, 100, S, true),
+            q("row", 101, Rel::Behind, 100, S, false),
+            q("row", 101, Rel::Left, 100, S, false),
+            q("row", 101, Rel::Right, 100, S, false),
+            q("row", 100, Rel::Front, 101, S, false),
+            q("row", 100, Rel::Behind, 101, S, true),
+            q("row", 102, Rel::Front, 101, S, true),
+            q("row", 101, Rel::Behind, 102, S, true),
+            q("row", 102, Rel::Front, 100, S, true),
+            q("row", 100, Rel::Front, 102, S, false),
+            q("row", 100, Rel::Behind, 102, S, true),
             // --- S1 row: world frame (front is north, right is +X) ---
-            q("row", 100, Rel::Front, 101, W, false),
-            q("row", 100, Rel::Behind, 101, W, false),
-            q("row", 100, Rel::Left, 101, W, false),
-            q("row", 100, Rel::Right, 101, W, true),
-            q("row", 101, Rel::Left, 100, W, true),
-            q("row", 101, Rel::Right, 100, W, false),
-            q("row", 100, Rel::Right, 102, W, true),
-            q("row", 102, Rel::Left, 100, W, true),
-            q("row", 102, Rel::Right, 100, W, false),
+            q("row", 101, Rel::Front, 100, W, false),
+            q("row", 101, Rel::Behind, 100, W, false),
+            q("row", 101, Rel::Left, 100, W, false),
+            q("row", 101, Rel::Right, 100, W, true),
+            q("row", 100, Rel::Left, 101, W, true),
+            q("row", 100, Rel::Right, 101, W, false),
+            q("row", 102, Rel::Right, 100, W, true),
+            q("row", 100, Rel::Left, 102, W, true),
+            q("row", 100, Rel::Right, 102, W, false),
             // --- S1 row: viewer frame (viewer west, nearer = in front) ---
-            q("row", 100, Rel::Front, 101, v103, false),
-            q("row", 100, Rel::Behind, 101, v103, true),
-            q("row", 101, Rel::Front, 100, v103, true),
-            q("row", 101, Rel::Behind, 100, v103, false),
-            q("row", 100, Rel::Behind, 102, v103, true),
-            q("row", 102, Rel::Front, 100, v103, true),
-            q("row", 100, Rel::Left, 101, v103, false),
-            q("row", 100, Rel::Right, 101, v103, false),
-            q("row", 101, Rel::Left, 102, v103, false),
+            q("row", 101, Rel::Front, 100, v103, false),
+            q("row", 101, Rel::Behind, 100, v103, true),
+            q("row", 100, Rel::Front, 101, v103, true),
+            q("row", 100, Rel::Behind, 101, v103, false),
+            q("row", 102, Rel::Behind, 100, v103, true),
+            q("row", 100, Rel::Front, 102, v103, true),
+            q("row", 101, Rel::Left, 100, v103, false),
+            q("row", 101, Rel::Right, 100, v103, false),
+            q("row", 102, Rel::Left, 101, v103, false),
             // --- S1 row: frame-free bands and rows ---
             q("row", 100, Rel::Near, 101, S, true),
             q("row", 101, Rel::Near, 102, S, true),
@@ -1862,12 +1843,12 @@ mod vocab_tests {
             q("row", 100, Rel::Around, 102, S, true),
             q("row", 100, Rel::Above, 101, S, false),
             q("row", 100, Rel::Below, 101, S, false),
-            q("row", 103, Rel::Front, 100, S, true),
-            q("row", 103, Rel::Behind, 100, S, false),
+            q("row", 100, Rel::Front, 103, S, true),
+            q("row", 100, Rel::Behind, 103, S, false),
             q("row", 103, Rel::Near, 100, S, true),
             q("row", 103, Rel::Far, 100, S, false),
-            q("row", 103, Rel::Front, 102, S, true),
-            q("row", 102, Rel::Behind, 103, S, true),
+            q("row", 102, Rel::Front, 103, S, true),
+            q("row", 103, Rel::Behind, 102, S, true),
             // --- S2 stack: vertical pins ---
             q("stack", 111, Rel::Above, 110, S, false),
             q("stack", 110, Rel::Below, 111, S, false),
@@ -1880,26 +1861,26 @@ mod vocab_tests {
             q("stack", 110, Rel::Aligned, 112, S, true),
             q("stack", 110, Rel::Against, 111, S, false),
             q("stack", 112, Rel::Around, 110, S, false),
-            q("stack", 110, Rel::Front, 112, S, false),
-            q("stack", 110, Rel::Behind, 112, S, false),
-            q("stack", 110, Rel::Left, 112, S, false),
-            q("stack", 112, Rel::Right, 110, W, false),
+            q("stack", 112, Rel::Front, 110, S, false),
+            q("stack", 112, Rel::Behind, 110, S, false),
+            q("stack", 112, Rel::Left, 110, S, false),
+            q("stack", 110, Rel::Right, 112, W, false),
             // --- S3 watchers: subject frame ---
-            q("watch", 120, Rel::Front, 121, S, true),
-            q("watch", 120, Rel::Behind, 121, S, false),
-            q("watch", 120, Rel::Behind, 122, S, true),
-            q("watch", 120, Rel::Front, 122, S, false),
-            q("watch", 120, Rel::Right, 123, S, true),
-            q("watch", 120, Rel::Front, 123, S, false),
-            q("watch", 120, Rel::Left, 123, S, false),
-            q("watch", 121, Rel::Behind, 120, S, true),
-            q("watch", 122, Rel::Front, 120, S, true),
+            q("watch", 121, Rel::Front, 120, S, true),
+            q("watch", 121, Rel::Behind, 120, S, false),
+            q("watch", 122, Rel::Behind, 120, S, true),
+            q("watch", 122, Rel::Front, 120, S, false),
+            q("watch", 123, Rel::Right, 120, S, true),
+            q("watch", 123, Rel::Front, 120, S, false),
+            q("watch", 123, Rel::Left, 120, S, false),
+            q("watch", 120, Rel::Behind, 121, S, true),
+            q("watch", 120, Rel::Front, 122, S, true),
             // --- S3 watchers: world frame flips the reading ---
-            q("watch", 120, Rel::Right, 121, W, true),
-            q("watch", 120, Rel::Front, 121, W, false),
-            q("watch", 120, Rel::Behind, 123, W, true),
-            q("watch", 120, Rel::Left, 122, W, true),
-            q("watch", 120, Rel::Right, 122, W, false),
+            q("watch", 121, Rel::Right, 120, W, true),
+            q("watch", 121, Rel::Front, 120, W, false),
+            q("watch", 123, Rel::Behind, 120, W, true),
+            q("watch", 122, Rel::Left, 120, W, true),
+            q("watch", 122, Rel::Right, 120, W, false),
             // --- S3 watchers: bands ---
             q("watch", 120, Rel::Near, 121, S, true),
             q("watch", 120, Rel::Near, 123, S, true),
@@ -1909,23 +1890,23 @@ mod vocab_tests {
             q("watch", 120, Rel::Aligned, 121, S, true),
             q("watch", 120, Rel::Aligned, 123, S, true),
             // --- S4 viewer: nearer occludes, farther recedes ---
-            q("viewer", 132, Rel::Front, 131, v130, true),
-            q("viewer", 131, Rel::Front, 132, v130, false),
-            q("viewer", 131, Rel::Behind, 132, v130, true),
-            q("viewer", 132, Rel::Behind, 131, v130, false),
-            q("viewer", 131, Rel::Right, 133, v130, true),
-            q("viewer", 131, Rel::Left, 133, v130, false),
-            q("viewer", 133, Rel::Left, 131, v130, true),
-            q("viewer", 131, Rel::Front, 134, v130, false),
-            q("viewer", 131, Rel::Left, 134, v130, false),
-            q("viewer", 131, Rel::Right, 134, v130, false),
-            q("viewer", 131, Rel::Behind, 134, v130, false),
-            q("viewer", 131, Rel::Front, 132, S, true),
-            q("viewer", 132, Rel::Behind, 131, S, true),
-            q("viewer", 131, Rel::Right, 133, S, true),
-            q("viewer", 131, Rel::Left, 133, S, false),
-            q("viewer", 133, Rel::Left, 131, S, true),
-            q("viewer", 130, Rel::Front, 131, S, true),
+            q("viewer", 131, Rel::Front, 132, v130, true),
+            q("viewer", 132, Rel::Front, 131, v130, false),
+            q("viewer", 132, Rel::Behind, 131, v130, true),
+            q("viewer", 131, Rel::Behind, 132, v130, false),
+            q("viewer", 133, Rel::Right, 131, v130, true),
+            q("viewer", 133, Rel::Left, 131, v130, false),
+            q("viewer", 131, Rel::Left, 133, v130, true),
+            q("viewer", 134, Rel::Front, 131, v130, false),
+            q("viewer", 134, Rel::Left, 131, v130, false),
+            q("viewer", 134, Rel::Right, 131, v130, false),
+            q("viewer", 134, Rel::Behind, 131, v130, false),
+            q("viewer", 132, Rel::Front, 131, S, true),
+            q("viewer", 131, Rel::Behind, 132, S, true),
+            q("viewer", 133, Rel::Right, 131, S, true),
+            q("viewer", 133, Rel::Left, 131, S, false),
+            q("viewer", 131, Rel::Left, 133, S, true),
+            q("viewer", 131, Rel::Front, 130, S, true),
             q("viewer", 130, Rel::Near, 131, S, false),
             q("viewer", 130, Rel::Far, 131, S, false),
             // --- S5 bands: near / mid silence / far ---
@@ -1939,8 +1920,8 @@ mod vocab_tests {
             q("bands", 140, Rel::Far, 146, S, false),
             q("bands", 140, Rel::Near, 143, S, false),
             q("bands", 141, Rel::Far, 143, S, true),
-            q("bands", 140, Rel::Front, 141, S, true),
-            q("bands", 140, Rel::Behind, 141, S, false),
+            q("bands", 141, Rel::Front, 140, S, true),
+            q("bands", 141, Rel::Behind, 140, S, false),
             q("bands", 140, Rel::Aligned, 143, S, true),
             // --- S6 against: flush vs close ---
             q("against", 150, Rel::Against, 151, S, true),
@@ -1950,8 +1931,8 @@ mod vocab_tests {
             q("against", 151, Rel::Aligned, 152, S, true),
             q("against", 150, Rel::Near, 151, S, true),
             q("against", 150, Rel::Above, 151, S, false),
-            q("against", 151, Rel::Front, 152, S, true),
-            q("against", 152, Rel::Behind, 151, S, true),
+            q("against", 152, Rel::Front, 151, S, true),
+            q("against", 151, Rel::Behind, 152, S, true),
             // --- S7 ring: vicinity, not piles, not distant ---
             q("ring", 163, Rel::Around, 160, S, true),
             q("ring", 160, Rel::Around, 163, S, true),
@@ -1965,20 +1946,20 @@ mod vocab_tests {
             q("ring", 160, Rel::Near, 166, S, false),
             q("ring", 160, Rel::Far, 166, S, true),
             q("ring", 163, Rel::Far, 164, S, false),
-            q("ring", 161, Rel::Front, 162, S, false),
-            q("ring", 163, Rel::Behind, 160, S, true),
-            q("ring", 163, Rel::Front, 160, S, false),
+            q("ring", 162, Rel::Front, 161, S, false),
+            q("ring", 160, Rel::Behind, 163, S, true),
+            q("ring", 160, Rel::Front, 163, S, false),
             q("ring", 161, Rel::Aligned, 162, S, true),
             q("ring", 163, Rel::Aligned, 164, S, true),
-            q("ring", 163, Rel::Left, 164, S, false),
+            q("ring", 164, Rel::Left, 163, S, false),
             // --- S8 aligned rows ---
             q("aligned", 170, Rel::Aligned, 171, S, true),
             q("aligned", 170, Rel::Aligned, 172, S, true),
             q("aligned", 171, Rel::Aligned, 173, S, false),
             q("aligned", 172, Rel::Aligned, 173, S, false),
-            q("aligned", 170, Rel::Front, 171, S, true),
-            q("aligned", 170, Rel::Right, 171, W, true),
-            q("aligned", 170, Rel::Left, 171, W, false),
+            q("aligned", 171, Rel::Front, 170, S, true),
+            q("aligned", 171, Rel::Right, 170, W, true),
+            q("aligned", 171, Rel::Left, 170, W, false),
             q("aligned", 170, Rel::Near, 171, S, true),
             q("aligned", 170, Rel::Against, 171, S, false),
             // --- S10 upstairs: plan-view bands span stories ---
@@ -1988,22 +1969,22 @@ mod vocab_tests {
             q("upstairs", 180, Rel::Below, 182, S, true),
             q("upstairs", 183, Rel::Near, 181, S, true),
             q("upstairs", 183, Rel::Far, 181, S, false),
-            q("upstairs", 183, Rel::Front, 181, S, false),
-            q("upstairs", 181, Rel::Behind, 183, S, false),
+            q("upstairs", 181, Rel::Front, 183, S, false),
+            q("upstairs", 183, Rel::Behind, 181, S, false),
             q("upstairs", 183, Rel::Aligned, 181, S, true),
             q("upstairs", 183, Rel::Around, 181, S, false),
             // --- S11 cone: diagonals read double, edges read single ---
-            q("cone", 190, Rel::Front, 191, S, true),
-            q("cone", 190, Rel::Right, 191, S, true),
-            q("cone", 190, Rel::Left, 191, S, false),
-            q("cone", 190, Rel::Front, 192, S, true),
-            q("cone", 190, Rel::Right, 192, S, false),
-            q("cone", 190, Rel::Right, 193, S, true),
-            q("cone", 190, Rel::Front, 193, S, false),
-            q("cone", 190, Rel::Behind, 194, S, true),
-            q("cone", 190, Rel::Left, 194, S, false),
-            q("cone", 190, Rel::Right, 194, S, false),
-            q("cone", 190, Rel::Front, 194, S, false),
+            q("cone", 191, Rel::Front, 190, S, true),
+            q("cone", 191, Rel::Right, 190, S, true),
+            q("cone", 191, Rel::Left, 190, S, false),
+            q("cone", 192, Rel::Front, 190, S, true),
+            q("cone", 192, Rel::Right, 190, S, false),
+            q("cone", 193, Rel::Right, 190, S, true),
+            q("cone", 193, Rel::Front, 190, S, false),
+            q("cone", 194, Rel::Behind, 190, S, true),
+            q("cone", 194, Rel::Left, 190, S, false),
+            q("cone", 194, Rel::Right, 190, S, false),
+            q("cone", 194, Rel::Front, 190, S, false),
             // --- S12 integer boundaries ---
             q("bounds", 195, Rel::Against, 196, S, true),
             q("bounds", 195, Rel::Against, 197, S, false),
@@ -2366,9 +2347,9 @@ mod vocab_tests {
         ];
         let mut turned = face.clone();
         turned[0].yaw = core::f32::consts::PI;
-        assert!(holds(&face, 320, Rel::Front, 321, Frame::Subject));
-        assert!(!holds(&turned, 320, Rel::Front, 321, Frame::Subject));
-        assert!(holds(&turned, 320, Rel::Behind, 321, Frame::Subject));
+        assert!(holds(&face, 321, Rel::Front, 320, Frame::Subject));
+        assert!(!holds(&turned, 321, Rel::Front, 320, Frame::Subject));
+        assert!(holds(&turned, 321, Rel::Behind, 320, Frame::Subject));
         assert_ne!(
             digest_rel(&build_rel(&face)),
             digest_rel(&build_rel(&turned))
@@ -2498,7 +2479,8 @@ mod vocab_tests {
                 );
             }
             if matches!(rel, Rel::Front | Rel::Behind | Rel::Left | Rel::Right) {
-                assert!(!holds(&actors, 402, rel, 100, Frame::Subject));
+                // A yawless reference has no facing to measure against.
+                assert!(!holds(&actors, 100, rel, 402, Frame::Subject));
             }
         }
         assert!(!between_holds(&actors, 400, 100, 101));
@@ -2556,6 +2538,107 @@ mod vocab_tests {
         assert_eq!(frame_name(Frame::World), "world");
         assert_eq!(frame_name(Frame::Subject), "subject");
         assert_eq!(frame_name(Frame::Viewer(7)), "viewer");
+    }
+
+    /// SPR2 floor plan, drawn north up (x east, z south, 1 m per column):
+    ///
+    /// ```text
+    ///            x=-3     x=0     x=3
+    ///   z=-3     chair    lamp
+    ///   z= 0     sofa     table   door
+    ///   z= 3              rug
+    ///   z= 6              player
+    /// ```
+    ///
+    /// Table faces east (yaw 0), sofa faces south (yaw pi/2), door faces west
+    /// (yaw pi), player faces north (yaw 3pi/2). Every answer below was read
+    /// off this drawing by hand, never from `holds`.
+    fn plain_plan() -> Vec<Actor> {
+        use core::f32::consts::{FRAC_PI_2, PI};
+        vec![
+            mk(1, "table", 0.0, 0.5, 0.0, 1.0, 1.0, 1.0, 0.0),
+            mk(2, "lamp", 0.0, 0.5, -3.0, 1.0, 1.0, 1.0, 0.0),
+            mk(3, "sofa", -3.0, 0.5, 0.0, 1.0, 1.0, 1.0, FRAC_PI_2),
+            mk(4, "door", 3.0, 0.5, 0.0, 1.0, 1.0, 1.0, PI),
+            mk(5, "rug", 0.0, 0.5, 3.0, 1.0, 1.0, 1.0, 0.0),
+            mk(6, "chair", -3.0, 0.5, -3.0, 1.0, 1.0, 1.0, 0.0),
+            mk(7, "player", 0.0, 0.5, 6.0, 1.0, 1.0, 1.0, 3.0 * FRAC_PI_2),
+        ]
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn dir_gold_plain() {
+        use Frame::{Subject as S, World as W};
+        let p = Frame::Viewer(7); // the player, looking north
+        let d = Frame::Viewer(4); // the door, looking west
+                                  // (sentence, thing, word, reference, frame, answer)
+        let gold: Vec<(&str, u32, Rel, u32, Frame, bool)> = vec![
+            // World frame: looking north, west is left, east is right.
+            ("the sofa is left of the table", 3, Rel::Left, 1, W, true),
+            ("the table is left of the sofa", 1, Rel::Left, 3, W, false),
+            ("the door is right of the table", 4, Rel::Right, 1, W, true),
+            ("the table is right of the door", 1, Rel::Right, 4, W, false),
+            ("the sofa is left of the door", 3, Rel::Left, 4, W, true),
+            ("the door is left of the sofa", 4, Rel::Left, 3, W, false),
+            ("the door is right of the sofa", 4, Rel::Right, 3, W, true),
+            ("the sofa is right of the door", 3, Rel::Right, 4, W, false),
+                        ("the lamp is in front of the table (north)", 2, Rel::Front, 1, W, true),
+            ("the lamp is behind the table", 2, Rel::Behind, 1, W, false),
+                        ("the rug is behind the table (south)", 5, Rel::Behind, 1, W, true),
+                        ("the rug is in front of the table", 5, Rel::Front, 1, W, false),
+                        ("the chair is in front of the sofa", 6, Rel::Front, 3, W, true),
+            ("the chair is behind the sofa", 6, Rel::Behind, 3, W, false),
+            ("the sofa is behind the chair", 3, Rel::Behind, 6, W, true),
+            ("the lamp is right of the chair", 2, Rel::Right, 6, W, true),
+            ("the lamp is left of the chair", 2, Rel::Left, 6, W, false),
+            ("the chair is left of the lamp", 6, Rel::Left, 2, W, true),
+                        ("the rug is left of the table (dead south)", 5, Rel::Left, 1, W, false),
+            // Subject frame: the reference object's own facing.
+                        ("table faces east: the door is in front of it", 4, Rel::Front, 1, S, true),
+                        ("table faces east: the sofa is behind it", 3, Rel::Behind, 1, S, true),
+                        ("table faces east: the lamp is on its left", 2, Rel::Left, 1, S, true),
+                        ("table faces east: the rug is on its right", 5, Rel::Right, 1, S, true),
+                        ("table faces east: the lamp is on its right", 2, Rel::Right, 1, S, false),
+                        ("table faces east: the rug is on its left", 5, Rel::Left, 1, S, false),
+                        ("table faces east: the sofa is in front of it", 3, Rel::Front, 1, S, false),
+                        ("table faces east: the door is behind it", 4, Rel::Behind, 1, S, false),
+                        ("sofa faces south: the table is on its left", 1, Rel::Left, 3, S, true),
+                        ("sofa faces south: the table is on its right", 1, Rel::Right, 3, S, false),
+                        ("sofa faces south: the chair is behind it", 6, Rel::Behind, 3, S, true),
+            // Viewer frame: the viewer's facing, nearer means in front.
+                        ("player looks north: the rug is in front of the table", 5, Rel::Front, 1, p, true),
+                        ("player looks north: the table is behind the rug", 1, Rel::Behind, 5, p, true),
+                        ("player looks north: the lamp is behind the table", 2, Rel::Behind, 1, p, true),
+                        ("player looks north: the sofa is left of the table", 3, Rel::Left, 1, p, true),
+                        ("player looks north: the door is right of the table", 4, Rel::Right, 1, p, true),
+                        ("player looks north: the door is left of the table", 4, Rel::Left, 1, p, false),
+                        ("door looks west: the table is in front of the sofa", 1, Rel::Front, 3, d, true),
+                        ("door looks west: the rug is left of the lamp", 5, Rel::Left, 2, d, true),
+                        ("door looks west: the lamp is left of the rug", 2, Rel::Left, 5, d, false),
+                        ("door looks west: the lamp is right of the rug", 2, Rel::Right, 5, d, true),
+        ];
+        assert_eq!(gold.len(), 40);
+        let actors = plain_plan();
+        let mut miss = Vec::new();
+        for _ in 0..2 {
+            for (said, s, rel, o, frame, want) in &gold {
+                if holds(&actors, *s, *rel, *o, *frame) != *want {
+                    miss.push(format!("{said}: want {want}"));
+                }
+            }
+        }
+        assert!(
+            miss.is_empty(),
+            "40 plain questions, misses:\n{}",
+            miss.join("\n")
+        );
+        // "What is left of the table?" lists the things on its west side; the
+        // chair at the north-west diagonal reads both in front and left.
+        assert_eq!(subjects_of(&actors, Rel::Left, 1, W), vec![3, 6]);
+        assert_eq!(subjects_of(&actors, Rel::Right, 1, W), vec![4]);
+        assert_eq!(subjects_of(&actors, Rel::Front, 1, W), vec![2, 6]);
+        assert_eq!(subjects_of(&actors, Rel::Behind, 1, W), vec![5, 7]);
     }
 }
 
@@ -3087,11 +3170,14 @@ mod sp20_qa50 {
         out
     }
 
+    /// Re-pinned by SPR2 (left/behind answered the mirror question before):
+    /// indices 0, 14, 15, 19, 20, 24, 25, 30, 44, 45 flipped, hand-checked
+    /// against the floor plan, receipt in `docs/plan/spatial-entry-points.md`.
     const QA_EXPECTED: [bool; 50] = [
-        false, true, false, false, false, false, false, false, true, false, false, true, true,
-        true, true, false, false, true, true, true, true, false, false, false, true, true, true,
-        false, false, false, false, true, false, false, false, false, false, false, true, false,
-        false, true, true, true, true, false, false, true, true, false,
+        true, true, false, false, false, false, false, false, true, false, false, true, true, true,
+        false, true, false, true, true, false, false, false, false, false, false, false, true,
+        false, false, false, true, true, false, false, false, false, false, false, true, false,
+        false, true, true, true, false, true, false, true, true, false,
     ];
 
     #[test]

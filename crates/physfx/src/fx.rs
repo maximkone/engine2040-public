@@ -1,11 +1,15 @@
 //! fx: the Rapier world, its spawn order, the caps and the transform read-back.
 
 mod blast;
+mod tether;
+
+pub use tether::TetherInfo;
 
 use crate::caps::{Caps, Tier};
 use crate::check::{self, MAX_IMPULSE, MAX_SPEED};
 use crate::error::{Error, Field};
 use crate::rig::Rig;
+use crate::tether::Tether;
 use crate::types::{Batch, Key, Placed, Shard, Stats, Transform};
 use engine_anim::contract::{validate_pose, LocalPose};
 use engine_physics::material::{Material, Props};
@@ -76,6 +80,8 @@ pub struct PhysFx {
     /// Records the last step read as awake.
     awake: Vec<u32>,
     scratch: Vec<u32>,
+    /// Ropes, oldest first.
+    tethers: Vec<Tether>,
     live: usize,
     statics: usize,
     next_batch: u32,
@@ -122,6 +128,7 @@ impl PhysFx {
             groups: Vec::new(),
             awake: Vec::with_capacity(caps.bodies),
             scratch: Vec::with_capacity(caps.bodies),
+            tethers: Vec::new(),
             live: 0,
             statics: 0,
             next_batch: 0,
@@ -334,6 +341,7 @@ impl PhysFx {
     pub fn step(&mut self) {
         let started = (self.clock)();
         self.world.step();
+        self.step_tethers();
         self.steps += 1;
         self.capture();
         self.shed_contacts();

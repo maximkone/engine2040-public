@@ -74,6 +74,21 @@ test("test modules, #[test] fns and tests.rs files are not production code", () 
   assert.equal(analyzeFile(src, { ...lib, testFile: true }).metrics.unwrap, 0);
 });
 
+test("undoc_pub sees a doc comment above a multi-line attribute", () => {
+  const wrapped = [
+    "/// Documented.",
+    "#[derive(Debug)]",
+    "#[expect(",
+    "    clippy::empty_structs_with_brackets,",
+    '    reason = "wire shape"',
+    ")]",
+    "pub struct A {}",
+  ].join("\n");
+  assert.equal(analyzeFile(wrapped, lib).metrics.undoc_pub, 0);
+  const bare = wrapped.replace("/// Documented.\n", "");
+  assert.equal(analyzeFile(bare, lib).metrics.undoc_pub, 1);
+});
+
 test("production debt metrics each catch their defect and pass the clean form", () => {
   const ids = new Set(["GP19"]);
   const bad = [

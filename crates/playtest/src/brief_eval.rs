@@ -10,10 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
-use engine_arena::{run_prefix, ArenaConfig, BoutTape};
+use engine_arena::{ArenaConfig, BoutTape};
 
 use crate::frame_check::{check_scripted, Script, Thresholds};
 use crate::keypoint;
+use crate::rebuild;
 
 /// Briefs scored in one eval run.
 pub const BRIEF_COUNT: usize = 20;
@@ -229,6 +230,10 @@ impl EvalReport {
             self.suite_digest,
             self.suite_ticks,
         ));
+        out.push_str(&format!(
+            "spine rules covered={}/{}\n",
+            self.rules_covered, self.rules_total,
+        ));
         out.push_str("vision is advisory only and never gates pass\n");
         out.push_str(
             "id seed ab1 ab2 ab3 ab4 keypoint replay pass vision_score vision_digest play_digest\n",
@@ -312,12 +317,12 @@ fn match_digests(seed: u64) -> Option<(u64, u64)> {
         half_extent_m: HALF_EXTENT_M,
         table_version: 1,
     };
-    let tape = BoutTape::default();
-    let (_, first) = run_prefix(&config, &tape, MATCH_TICKS)?;
-    let (_, second) = run_prefix(&config, &tape, MATCH_TICKS)?;
-    let play = first.last().map(|point| point.hash)?;
-    let replay = second.last().map(|point| point.hash)?;
-    Some((play, replay))
+    // EV16: the replay is a sparse rebuild (snapshots every few ticks, a
+    // checksum per tick) and a bad tick anywhere refuses the whole replay.
+    let (keys, claim) = rebuild::take(&config, &BoutTape::default(), rebuild::STRIDE)?;
+    let play = *claim.checksums.last()?;
+    let audit = rebuild::audit(keys, &claim)?;
+    audit.first_bad.is_none().then_some((play, audit.last))
 }
 
 fn vision_for(seed: u64) -> (u32, String, String) {

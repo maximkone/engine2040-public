@@ -16,6 +16,7 @@ use super::interest::{
     SNAPSHOT_EVERY_TICKS,
 };
 use super::scale::TICK_HZ;
+use engine_core::digest::MerkleDigest;
 use engine_core::hash::FNV64_OFFSET;
 use std::fmt::{self, Display, Formatter};
 use std::hint::black_box;
@@ -33,6 +34,10 @@ pub const PLAYERS: usize = 64;
 pub const SOLDIERS: usize = 500;
 /// Every authored entity: fighters plus soldiers.
 pub const ENTITIES: usize = PLAYERS + SOLDIERS;
+/// Slot count from which a hash mismatch is located by Merkle descent (RC9):
+/// below it the full hash and a linear scan are cheaper; the siege is far above.
+pub const LOCATE_MIN_SLOTS: usize = 256;
+const _: () = assert!(ENTITIES >= LOCATE_MIN_SLOTS);
 /// Canonical siege tape seed (matches the interest soak seed).
 pub const SIEGE_SEED: u64 = 7;
 /// Canonical short tape in ticks: 10 s at 60 Hz (the posted report's tape).
@@ -190,6 +195,26 @@ const fn seed_pos(index: usize, seed: u64) -> (i32, i32) {
     let x = (lane % extent as u64) as i64 - half;
     let z = ((lane >> 21) % extent as u64) as i64 - half;
     (x as i32, z as i32)
+}
+
+/// A component of one siege entity, in leaf order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiegeComponent {
+    /// East-west position in millimetres.
+    X,
+    /// North-south position in millimetres.
+    Z,
+    /// Combat hit points.
+    Hp,
+}
+
+/// Where two siege worlds first differ: the lowest entity and its component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DesyncSite {
+    /// Entity index (fighters first, then soldiers).
+    pub entity: usize,
+    /// Component that differs on that entity.
+    pub component: SiegeComponent,
 }
 
 /// Server-authoritative siege world: 64 fighters plus 500 AI soldiers with
@@ -391,6 +416,47 @@ impl SiegeTickWorld {
         Ok(bytes)
     }
 
+    /// Full state hash after `tick`: the cheap check two peers compare first.
+    #[must_use]
+    pub fn state_hash(&self, tick: u32) -> u64 {
+        self.fold_state(tick, FNV64_OFFSET)
+    }
+
+    /// First entity and component where `peer` differs from this world, found
+    /// by Merkle descent over one leaf per component (RC9), `None` when equal.
+    /// Builds both trees, O(entities): call it only after [`Self::state_hash`]
+    /// disagreed, never per tick. Diagnostics only, nothing here feeds a hash.
+    #[must_use]
+    pub fn first_divergence(&self, peer: &Self) -> Option<DesyncSite> {
+        let leaf = self.digest().first_divergence(&peer.digest())?;
+        let component = match leaf % 3 {
+            0 => SiegeComponent::X,
+            1 => SiegeComponent::Z,
+            _ => SiegeComponent::Hp,
+        };
+        Some(DesyncSite {
+            entity: leaf / 3,
+            component,
+        })
+    }
+
+    /// Merkle tree with leaves `3 * entity + {x, z, hp}`.
+    fn digest(&self) -> MerkleDigest {
+        let mut leaves = Vec::with_capacity(ENTITIES * 3);
+        for index in 0..ENTITIES {
+            leaves.push(self.x_mm[index] as u64);
+            leaves.push(self.z_mm[index] as u64);
+            leaves.push(u64::from(self.hp[index]));
+        }
+        MerkleDigest::from_leaves(&leaves)
+    }
+
+    /// Test seam: move one entity one millimetre, as a desynced peer would.
+    #[cfg(test)]
+    pub(crate) fn nudge_x(&mut self, entity: usize) {
+        self.x_mm[entity] += 1;
+    }
+
     /// Canonical hash over the simulation state after `tick`: FNV-1a over
     /// every entity's words plus the tick. Integer ops only.
     fn fold_state(&self, tick: u32, mut hash: u64) -> u64 {
@@ -450,6 +516,15 @@ const fn fold_ai_byte(hash: u64, word: u64) -> u64 {
 /// full AI plus simulate plus siege-interest path and hash the simulation
 /// state and the AI bytes. Same inputs give the same digest on every run.
 pub fn record_tape(seed: u64, ticks: u32) -> Result<TickDigest, TickBudgetError> {
+    record_tape_world(seed, ticks).map(|(digest, _)| digest)
+}
+
+/// [`record_tape`] that also hands back the world at the tape's last tick, so
+/// a peer's run can be compared against it.
+pub fn record_tape_world(
+    seed: u64,
+    ticks: u32,
+) -> Result<(TickDigest, SiegeTickWorld), TickBudgetError> {
     if ticks == 0 || ticks > MAX_TICKS {
         return Err(TickBudgetError::BadTicks { got: ticks });
     }
@@ -467,7 +542,7 @@ pub fn record_tape(seed: u64, ticks: u32) -> Result<TickDigest, TickBudgetError>
             ai_hash = fold_ai_byte(ai_hash, packed);
         }
     }
-    Ok(TickDigest {
+    let digest = TickDigest {
         seed,
         ticks,
         entities: ENTITIES,
@@ -475,7 +550,8 @@ pub fn record_tape(seed: u64, ticks: u32) -> Result<TickDigest, TickBudgetError>
         ai_hash,
         snapshot_bytes,
         starve_max: world.starve_max(),
-    })
+    };
+    Ok((digest, world))
 }
 
 /// Canonical tape: seed 7, 600 ticks (the posted budget report's tape).
@@ -712,6 +788,25 @@ mod tests {
         MAX_CONNECTIONS, MAX_INTEREST_ENTITIES, ON9_CAP_BPS, STARVE_TICKS,
     };
     use super::*;
+
+    #[test]
+    fn first_divergence_names_the_lowest_entity_and_its_component() {
+        let a = SiegeTickWorld::new(3).expect("world builds");
+        let mut b = SiegeTickWorld::new(3).expect("world builds");
+        assert_eq!(a.first_divergence(&b), None);
+        assert_eq!(a.state_hash(0), b.state_hash(0));
+        b.hp[ENTITIES - 1] -= 1;
+        b.z_mm[41] += 7;
+        b.x_mm[ENTITIES - 2] -= 1;
+        assert_ne!(a.state_hash(0), b.state_hash(0));
+        let at = |entity, component| Some(DesyncSite { entity, component });
+        assert_eq!(a.first_divergence(&b), at(41, SiegeComponent::Z));
+        assert_eq!(b.first_divergence(&a), at(41, SiegeComponent::Z));
+        b.z_mm[41] -= 7;
+        assert_eq!(a.first_divergence(&b), at(ENTITIES - 2, SiegeComponent::X));
+        b.x_mm[ENTITIES - 2] += 1;
+        assert_eq!(a.first_divergence(&b), at(ENTITIES - 1, SiegeComponent::Hp));
+    }
 
     #[test]
     fn on9_contract_pins_without_mirroring() {

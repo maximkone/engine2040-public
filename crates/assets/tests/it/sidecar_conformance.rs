@@ -21,7 +21,11 @@ fn shipped() -> Vec<(String, ClipTags)> {
     for entry in fs::read_dir(sidecar_dir()).expect("sidecars dir") {
         let path = entry.expect("dir entry").path();
         if path.extension().is_some_and(|ext| ext == "json") {
-            let stem = path.file_stem().expect("stem").to_string_lossy().into_owned();
+            let stem = path
+                .file_stem()
+                .expect("stem")
+                .to_string_lossy()
+                .into_owned();
             let text = fs::read_to_string(&path).expect("read sidecar");
             let tags = parse_sidecar(&text).unwrap_or_else(|err| panic!("{stem}: {err:?}"));
             out.push((stem, tags));
@@ -44,10 +48,17 @@ fn sidecar_shipped_files_parse_and_name_their_clip() {
 fn sidecar_attack_clips_carry_cb4_windows() {
     for (stem, tags) in shipped() {
         if tags.tags.iter().any(|tag| tag == "attack") {
-            assert!(!tags.hit_windows.is_empty(), "{stem}: attack without a window");
+            assert!(
+                !tags.hit_windows.is_empty(),
+                "{stem}: attack without a window"
+            );
         }
         for window in &tags.hit_windows {
-            assert!(window.socket.starts_with("SOCKET_"), "{stem}: {}", window.socket);
+            assert!(
+                window.socket.starts_with("SOCKET_"),
+                "{stem}: {}",
+                window.socket
+            );
         }
     }
 }
@@ -55,8 +66,15 @@ fn sidecar_attack_clips_carry_cb4_windows() {
 #[test]
 fn sidecar_every_clip_carries_lm2_contacts() {
     for (stem, tags) in shipped() {
-        let feet = tags.feet.as_ref().unwrap_or_else(|| panic!("{stem}: no feet"));
-        assert_eq!(feet, &("foot_l".to_string(), "foot_r".to_string()), "{stem}");
+        let feet = tags
+            .feet
+            .as_ref()
+            .unwrap_or_else(|| panic!("{stem}: no feet"));
+        assert_eq!(
+            feet,
+            &("foot_l".to_string(), "foot_r".to_string()),
+            "{stem}"
+        );
         assert!(tags.ground_y.is_some_and(|y| y > 0.0), "{stem}: ground_y");
         if tags.tags.iter().any(|tag| tag == "idle" || tag == "run") {
             assert!(tags.looped, "{stem}: idle and run tile");
@@ -77,14 +95,26 @@ fn sidecar_traversal_schema_for_ct24_takes_the_closed_edge_list() {
         r#"{"traversal":[{"edge":"vault","time_s":-0.1}]}"#,
         r#"{"traversal":[{"edge":"vault"}]}"#,
     ] {
-        assert!(matches!(parse_sidecar(bad), Err(RetargetError::BadSidecar { .. })), "{bad}");
+        assert!(
+            matches!(parse_sidecar(bad), Err(RetargetError::BadSidecar { .. })),
+            "{bad}"
+        );
     }
 }
 
 #[test]
 fn sidecar_schema_page_names_every_field_and_limit() {
     let page = fs::read_to_string(sidecar_dir().join("SCHEMA.md")).expect("SCHEMA.md");
-    for field in ["clip", "loop", "root_motion", "tags", "ground_y", "feet", "hit_windows", "traversal"] {
+    for field in [
+        "clip",
+        "loop",
+        "root_motion",
+        "tags",
+        "ground_y",
+        "feet",
+        "hit_windows",
+        "traversal",
+    ] {
         assert!(page.contains(&format!("| `{field}` |")), "field {field}");
     }
     for edge in TRAVERSAL_EDGES {
@@ -99,6 +129,9 @@ fn sidecar_schema_page_names_every_field_and_limit() {
         ("MAX_JSON_DEPTH", MAX_JSON_DEPTH as usize),
     ];
     for (name, value) in limits {
-        assert!(page.contains(&format!("| `{name}` | {value} |")), "limit {name} = {value}");
+        assert!(
+            page.contains(&format!("| `{name}` | {value} |")),
+            "limit {name} = {value}"
+        );
     }
 }

@@ -18,8 +18,9 @@
 //! mode framework boots [`FixtureMode`] from rule-set text.
 
 use crate::camera_arm::Aabb;
+use engine_combat::camera_framing::{frame_melee, Shoulder, EYE_HEIGHT_MM, LOOK_HEIGHT_MM};
 use engine_core::hash::{FNV64_OFFSET, GOLDEN_GAMMA};
-use engine_core::{mix64, splitmix64};
+use engine_core::mix64;
 
 /// Fixed byte length of [`CameraFrame::to_bytes`].
 pub const FRAME_BYTES: usize = 46;
@@ -578,11 +579,76 @@ pub fn select_lock_target(
     Ok(best.map(|(id, _)| id))
 }
 
-/// Frame a focus fighter plus an optional second fighter: the look point is
-/// their midpoint and the distance fits their separation inside the vertical
-/// fov with the configured margin, clamped to `[min_dist_m, max_dist_m]`.
-/// The eye sits above and behind the look point along the fixed boom shape.
+/// Frame a focus fighter plus an optional second fighter. With a second
+/// fighter the focus is the attacker of a GP14 melee shot: the eye sits behind
+/// the focus's shoulder (see [`melee_pose`]). Alone, the focus is framed by the
+/// plain boom fit ([`fit_pair`]).
 pub fn frame_pair(
+    focus_m: Vec3,
+    other_m: Option<Vec3>,
+    params: &DirectorParams,
+) -> Result<CameraPose, CameraError> {
+    match other_m {
+        Some(other) => {
+            params.validate()?;
+            if !focus_m.is_finite() {
+                return Err(CameraError::BadParam("focus_m"));
+            }
+            if !other.is_finite() {
+                return Err(CameraError::BadParam("other_m"));
+            }
+            Ok(melee_pose(focus_m, other, params))
+        }
+        None => fit_pair(focus_m, None, params),
+    }
+}
+
+/// Meters to whole millimeters, saturating (a NaN is 0): the integer framing's unit.
+pub(crate) fn to_mm(m: f32) -> i32 {
+    (m * 1000.0) as i32
+}
+
+/// GP14 melee shot of `attacker_m` against `defender_m`: the integer
+/// [`frame_melee`] shoulder camera (millimeters on the ground plane) turned
+/// back into meters. Heights follow the fighters: the look point sits at the
+/// fighters' mean height and the eye the framing's eye-over-look rise above
+/// it, so the shot does not care whether `pos_m.y` is feet or chest. The
+/// shoulder is always the right one, so the shot never flips side. The cone
+/// handed to the framing is the vertical one, the conservative bound for any
+/// wider viewport. Pure and total over finite positions.
+fn melee_pose(attacker_m: Vec3, defender_m: Vec3, params: &DirectorParams) -> CameraPose {
+    let ground_mm = |p: Vec3| [to_mm(p.x), to_mm(p.z)];
+    let half_fov_tan_permille = to_mm((params.fov_y_rad * 0.5).tan()).unsigned_abs();
+    let framing = frame_melee(
+        ground_mm(attacker_m),
+        ground_mm(defender_m),
+        Shoulder::Right,
+        half_fov_tan_permille,
+    );
+    let meters = |mm: i32| mm as f32 / 1000.0;
+    let mid_y = (attacker_m.y + defender_m.y) * 0.5;
+    let rise_m = meters(EYE_HEIGHT_MM - LOOK_HEIGHT_MM);
+    CameraPose {
+        eye_m: Vec3::new(
+            meters(framing.eye_mm[0]),
+            mid_y + rise_m,
+            meters(framing.eye_mm[2]),
+        ),
+        look_m: Vec3::new(
+            meters(framing.look_mm[0]),
+            mid_y,
+            meters(framing.look_mm[2]),
+        ),
+    }
+}
+
+/// Boom fit of a focus fighter plus an optional second fighter: the look
+/// point is their midpoint and the distance fits their separation inside the
+/// vertical fov with the configured margin, clamped to
+/// `[min_dist_m, max_dist_m]`. The eye sits above and behind the look point
+/// along the fixed boom shape. The solo framing, and the fight spring's raw
+/// targets (`camera_rig::fight_targets`), which need a side-on pair fit.
+pub(crate) fn fit_pair(
     focus_m: Vec3,
     other_m: Option<Vec3>,
     params: &DirectorParams,
@@ -652,6 +718,17 @@ pub fn frame_group(
         if !fighter.pos_m.is_finite() {
             return Err(CameraError::BadPosition(fighter.id));
         }
+    }
+    if let [a, b] = fighters {
+        // Two fighters are a duel: the lower slot id is the attacker, so the
+        // shot is the same for either slice order and never flips sides.
+        let order =
+            a.id.cmp(&b.id)
+                .then_with(|| a.pos_m.x.total_cmp(&b.pos_m.x))
+                .then_with(|| a.pos_m.y.total_cmp(&b.pos_m.y))
+                .then_with(|| a.pos_m.z.total_cmp(&b.pos_m.z));
+        let (attacker, defender) = if order.is_gt() { (b, a) } else { (a, b) };
+        return Ok(melee_pose(attacker.pos_m, defender.pos_m, params));
     }
     let mut scratch = [Vec3::ZERO; FRAMING_MAX_FIGHTERS];
     for (slot, fighter) in fighters.iter().enumerate() {
@@ -830,38 +907,26 @@ pub fn off_screen_arrows(
     Ok(count)
 }
 
-// Shake sampling hashes through the core owner `splitmix64`: integer-only
-// and deterministic, so the same tick gives the same direction twice.
-
-/// Map a hash to `[-1.0, 1.0]` from its top 53 bits.
-fn unit_from_hash(hash: u64) -> f32 {
-    const SCALE: f32 = 1.0 / 9_007_199_000_000_000.0;
-    ((hash >> 11) as f32) * SCALE * 2.0 - 1.0
-}
-
 /// Shake offset in meters as a pure function of (`trauma_permille`, `tick`):
-/// magnitude follows the squared trauma curve (`trauma^2 * max`), direction
-/// comes from integer hashes of the tick. Zero trauma (or a non-positive or
-/// non-finite cap) gives exactly [`Vec3::ZERO`]. Presentation only: the
-/// offset moves the presented eye, never simulation state.
+/// the GP21 trauma-curve stage ([`engine_combat::shake_stage::sample`]) scaled
+/// to `max_m` per axis. Magnitude follows the squared trauma curve
+/// (`trauma^2 * max`) and direction follows the gamefeel wave pair. The stage
+/// is a screen-plane pair:
+/// x is sideways and y vertical in world axes (the default boom looks down
+/// -z), and z stays put. Zero trauma (or a non-positive or non-finite cap)
+/// gives exactly [`Vec3::ZERO`]. Presentation only: the offset moves the
+/// presented eye, never simulation state.
 #[must_use]
 pub fn shake_offset(trauma_permille: u32, tick: u32, max_m: f32) -> Vec3 {
-    let clamped = trauma_permille.min(TRAUMA_SCALE);
-    if clamped == 0 || !max_m.is_finite() || max_m <= 0.0 {
+    if !max_m.is_finite() || max_m <= 0.0 {
         return Vec3::ZERO;
     }
-    let t = clamped as f32 / TRAUMA_SCALE as f32;
-    let mag_m = t * t * max_m;
-    const AXIS_XOR: [u64; 3] = [
-        0x243F_6A88_85A3_08D3,
-        0x4528_21E6_38D0_1377,
-        0x2B05_2E46_2FB8_8C9E,
-    ];
-    let tick64 = u64::from(tick);
+    let sample = engine_combat::shake_stage::sample(trauma_permille, tick);
+    let per_permille_m = max_m / 1000.0;
     Vec3::new(
-        mag_m * unit_from_hash(splitmix64(tick64.wrapping_add(AXIS_XOR[0]))),
-        mag_m * unit_from_hash(splitmix64(tick64.wrapping_add(AXIS_XOR[1]))),
-        mag_m * unit_from_hash(splitmix64(tick64.wrapping_add(AXIS_XOR[2]))),
+        f32::from(i16::try_from(sample.x_permille).unwrap_or(0)) * per_permille_m,
+        f32::from(i16::try_from(sample.y_permille).unwrap_or(0)) * per_permille_m,
+        0.0,
     )
 }
 
@@ -1312,6 +1377,58 @@ mod tests {
     }
 
     #[test]
+    fn shake_rides_the_gp21_stage_sample() {
+        // GP21: the offset is the engine-combat stage sample scaled to the
+        // cap: x and y match it exactly and z stays put (the stage is a
+        // screen-plane pair, the old hashed offset moved all three axes).
+        let cap = 0.4;
+        for tick in [0u32, 5, 99, 1234] {
+            let stage = engine_combat::shake_stage::sample(900, tick);
+            let got = shake_offset(900, tick, cap);
+            assert_eq!(
+                got.x,
+                stage.x_permille as f32 * (cap / 1000.0),
+                "x at {tick}"
+            );
+            assert_eq!(
+                got.y,
+                stage.y_permille as f32 * (cap / 1000.0),
+                "y at {tick}"
+            );
+            assert_eq!(got.z, 0.0, "the stage is a screen-plane pair");
+        }
+    }
+
+    #[test]
+    fn two_fighter_group_is_the_gp14_shoulder_shot_for_either_order() {
+        let params = DirectorParams::default();
+        let view = |id: u8, x: f32| FighterView {
+            id,
+            pos_m: Vec3::new(x, 1.0, 0.0),
+            alive: true,
+        };
+        let (low, high) = (view(0, -3.0), view(1, 3.0));
+        let fit = frame_group(&[low, high], &params).expect("duel fits");
+        assert_eq!(fit, frame_group(&[high, low], &params).expect("flipped"));
+        // The lower id attacks: the group fit is the pair shot of that slot,
+        // not the centroid boom (which would look at x = 0).
+        let pair = frame_pair(low.pos_m, Some(high.pos_m), &params).expect("pair");
+        assert_eq!(fit, pair);
+        assert!((fit.look_m.x - 0.6 * 6.0 + 3.0).abs() < 1.0e-3, "{fit:?}");
+        let framing = engine_combat::camera_framing::frame_melee(
+            [-3000, 0],
+            [3000, 0],
+            engine_combat::camera_framing::Shoulder::Right,
+            ((params.fov_y_rad * 0.5).tan() * 1000.0) as u32,
+        );
+        assert!(framing.both_in_frame, "the shot holds both fighters");
+        assert!(
+            framing.readability_permille >= engine_combat::camera_framing::READABLE_PERMILLE,
+            "and reads: {framing:?}"
+        );
+    }
+
+    #[test]
     fn fight_shake_cap_matches_lf11_row() {
         // LF11 row: fight-camera shake at most 0.12 m; one hit is nonzero
         // and settles within 60 ticks (1.0 s); same ticks repeat.
@@ -1341,22 +1458,27 @@ mod tests {
     }
 
     #[test]
-    fn framing_centers_pair_and_clamps() {
+    fn framing_holds_the_pair_at_the_attackers_shoulder_and_clamps() {
         let params = DirectorParams::default();
         let focus = Vec3::new(0.0, 1.0, 0.0);
         let other = Vec3::new(10.0, 1.0, 0.0);
+        // GP14: the focus is the attacker; the eye sits behind it (x < 0) and
+        // to one side, the look point 60% of the way to the defender.
         let pose = frame_pair(focus, Some(other), &params).expect("frame");
-        assert_eq!(pose.look_m, Vec3::new(5.0, 1.0, 0.0));
-        assert!(pose.eye_m.y > pose.look_m.y, "boom sits above");
-        assert!(pose.eye_m.z > pose.look_m.z, "boom sits behind");
-        // A continent-wide pair clamps to the far rail instead of chasing.
+        assert_eq!(pose.look_m, Vec3::new(6.0, 1.0, 0.0));
+        assert!(pose.eye_m.x < focus.x, "eye behind the attacker");
+        assert!(pose.eye_m.z.abs() >= 0.8, "eye off to the shoulder");
+        assert!(
+            pose.eye_m.y > pose.look_m.y,
+            "eye sits above the look point"
+        );
+        // A continent-wide pair keeps the shoulder boom instead of chasing.
         let boom_len =
             (params.boom_up * params.boom_up + params.boom_back * params.boom_back).sqrt();
         let far = frame_pair(focus, Some(Vec3::new(1.0e6, 1.0, 0.0)), &params).expect("frame");
-        let dist = (far.eye_m - far.look_m).len();
         assert!(
-            (dist - params.max_dist_m * boom_len).abs() <= 1.0e-2,
-            "distance clamps at the far rail"
+            (far.eye_m - focus).len() < 6.0,
+            "far defender leaves the eye at the attacker: {far:?}"
         );
         // Solo focus frames at base plus the margin fit (headroom stays).
         let solo = frame_pair(focus, None, &params).expect("frame");

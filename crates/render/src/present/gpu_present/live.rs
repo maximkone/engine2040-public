@@ -1167,7 +1167,8 @@ impl Presenter {
             self.stage_frame_with_camera(list, &frame, frame.built_view_proj, order)?;
         self.frame_waits = FrameWaits::default();
         self.ensure_targets(render_w, render_h);
-        let look = LiveLook::from_toggles(toggles);
+        let mut look = LiveLook::from_toggles(toggles);
+        look.gtao = crate::quality::gtao_runs(&self.quality, look.gtao);
         self.write_frame_uniforms(&cam_bytes, &light_bytes, look.ibl);
         let gtao_run = self.gtao_live_plan(look.gtao, render_w, render_h);
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;

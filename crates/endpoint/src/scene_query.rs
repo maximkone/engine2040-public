@@ -11,7 +11,6 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use engine_core::Fnv64;
-use engine_editor::commands::Document;
 use engine_scene::ids::ObjectId;
 use engine_spatial::diff::{diff_graph, SemanticDiff};
 use engine_spatial::navcheck::octant;
@@ -33,7 +32,7 @@ use rmcp::serde::{Deserialize, Serialize};
 
 use super::mcp::{McpServer, McpToolError};
 use super::scene_tools::{
-    object_label, parse_object_ref, SCENE_BRIEF_DEFAULT_BUDGET, SCENE_BRIEF_MAX_BUDGET,
+    object_label, parse_object_ref, snapshot, SCENE_BRIEF_DEFAULT_BUDGET, SCENE_BRIEF_MAX_BUDGET,
 };
 
 /// Door tool name for spatial questions.
@@ -87,6 +86,16 @@ pub enum QueryKind {
     /// Actors for which a relation word (`left_of`, `visible_from`, ...)
     /// holds toward the anchor, optionally seen from a viewer actor.
     Relation = 8,
+    /// Whether `anchor` sees `other`, with the blocker when it does not.
+    Sees = 9,
+    /// Why `anchor` is not on screen from `eye_m` facing `yaw`.
+    WhyHidden = 10,
+    /// Room around `anchor`: gap to the nearest neighbour and which way to push.
+    Clearance = 11,
+    /// How far `anchor` can slide along `dir` before it hits something.
+    Slide = 12,
+    /// The floor under the plan point of `eye_m`.
+    Ground = 13,
 }
 
 impl QueryKind {
@@ -102,6 +111,11 @@ impl QueryKind {
             Self::FreeSpace => "free_space",
             Self::Cone => "cone",
             Self::Relation => "relation",
+            Self::Sees => "sees",
+            Self::WhyHidden => "why_hidden",
+            Self::Clearance => "clearance",
+            Self::Slide => "slide",
+            Self::Ground => "ground",
         }
     }
 
@@ -117,13 +131,115 @@ impl QueryKind {
             "free_space" => Ok(Self::FreeSpace),
             "cone" => Ok(Self::Cone),
             "relation" => Ok(Self::Relation),
+            "sees" => Ok(Self::Sees),
+            "why_hidden" => Ok(Self::WhyHidden),
+            "clearance" => Ok(Self::Clearance),
+            "slide" => Ok(Self::Slide),
+            "ground" => Ok(Self::Ground),
             _ => Err(QueryError::new(
                 "bad_kind",
                 format!("query kind `{text}` is unknown"),
                 "legal kinds: near, between, visible, reachable, cover_near, \
-                 largest_open, free_space, cone, relation (re-read scene.brief for ids first)",
+                 largest_open, free_space, cone, relation, sees, why_hidden, clearance, slide, ground \
+                 (re-read scene.brief for ids first)",
             )),
         }
+    }
+}
+
+/// One question kind as the door teaches it: the fields it needs (`a|b`
+/// means one of them) and a working call. The schema text, the `missing_arg`
+/// refusal and the `api.describe` entries all read this one table.
+pub struct KindCard {
+    /// The kind.
+    pub kind: QueryKind,
+    /// Required fields, comma separated; `-` when none.
+    pub needs: &'static str,
+    /// A complete working `scene.query` argument object for this kind.
+    pub example: &'static str,
+}
+
+/// One card per kind, in discriminant order.
+pub const KIND_CARDS: [KindCard; 14] = [
+    KindCard {
+        kind: QueryKind::Near,
+        needs: "anchor",
+        example: r#"{"kind":"near","anchor":"lamp_1 [<uuid>]","radius_cm":300}"#,
+    },
+    KindCard {
+        kind: QueryKind::Between,
+        needs: "anchor, other",
+        example: r#"{"kind":"between","anchor":"lamp_1 [<uuid>]","other":"crate_1 [<uuid>]"}"#,
+    },
+    KindCard {
+        kind: QueryKind::Visible,
+        needs: "eye_m",
+        example: r#"{"kind":"visible","eye_m":[0.0,1.6,0.0],"yaw":0.0}"#,
+    },
+    KindCard {
+        kind: QueryKind::Reachable,
+        needs: "anchor",
+        example: r#"{"kind":"reachable","anchor":"lamp_1 [<uuid>]"}"#,
+    },
+    KindCard {
+        kind: QueryKind::CoverNear,
+        needs: "anchor, eye_m",
+        example: r#"{"kind":"cover_near","anchor":"lamp_1 [<uuid>]","eye_m":[0.0,1.6,0.0],"radius_cm":500}"#,
+    },
+    KindCard {
+        kind: QueryKind::LargestOpen,
+        needs: "-",
+        example: r#"{"kind":"largest_open","capsule_radius_cm":30}"#,
+    },
+    KindCard {
+        kind: QueryKind::FreeSpace,
+        needs: "-",
+        example: r#"{"kind":"free_space","max_samples":4,"min_gap_cm":100}"#,
+    },
+    KindCard {
+        kind: QueryKind::Cone,
+        needs: "half_angle_deg, anchor|eye_m",
+        example: r#"{"kind":"cone","anchor":"lamp_1 [<uuid>]","half_angle_deg":45,"radius_cm":500}"#,
+    },
+    KindCard {
+        kind: QueryKind::Relation,
+        needs: "anchor, relation",
+        example: r#"{"kind":"relation","anchor":"lamp_1 [<uuid>]","relation":"left_of"}"#,
+    },
+    KindCard {
+        kind: QueryKind::Sees,
+        needs: "anchor, other",
+        example: r#"{"kind":"sees","anchor":"lamp_1 [<uuid>]","other":"crate_1 [<uuid>]"}"#,
+    },
+    KindCard {
+        kind: QueryKind::WhyHidden,
+        needs: "anchor, eye_m",
+        example: r#"{"kind":"why_hidden","anchor":"crate_1 [<uuid>]","eye_m":[0.0,1.6,0.0],"yaw":0.0}"#,
+    },
+    KindCard {
+        kind: QueryKind::Clearance,
+        needs: "anchor",
+        example: r#"{"kind":"clearance","anchor":"crate_1 [<uuid>]","radius_cm":80}"#,
+    },
+    KindCard {
+        kind: QueryKind::Slide,
+        needs: "anchor, dir",
+        example: r#"{"kind":"slide","anchor":"crate_1 [<uuid>]","dir":"+x","radius_cm":500}"#,
+    },
+    KindCard {
+        kind: QueryKind::Ground,
+        needs: "eye_m",
+        example: r#"{"kind":"ground","eye_m":[2.0,3.0,1.0]}"#,
+    },
+];
+
+impl KindCard {
+    /// The card for `kind`.
+    pub fn of(kind: QueryKind) -> &'static KindCard {
+        KIND_CARDS
+            .iter()
+            .find(|card| card.kind == kind)
+            .unwrap_or(&KIND_CARDS[0])
     }
 }
 
@@ -195,6 +311,8 @@ pub struct QueryArgs {
     pub filter: Option<String>,
     /// Relation word for `relation` queries.
     pub rel: Option<Rel>,
+    /// Slide direction word for `slide` queries.
+    pub dir: Option<String>,
 }
 
 impl QueryArgs {
@@ -216,6 +334,7 @@ impl QueryArgs {
             half_angle_deg: None,
             filter: None,
             rel: None,
+            dir: None,
         }
     }
 
@@ -549,233 +668,6 @@ fn cover_name(c: Cover) -> &'static str {
     }
 }
 
-/// Integer tangent table: `round(tan(d deg) * 1e6)` for `d` in 0..90. Cone and
-/// bearing tests compare integers only, so the answer never touches libm.
-const TAN_E6: [i64; 90] = [
-    0, 17455, 34921, 52408, 69927, 87489, 105104, 122785, 140541, 158384, 176327, 194380, 212557,
-    230868, 249328, 267949, 286745, 305731, 324920, 344328, 363970, 383864, 404026, 424475, 445229,
-    466308, 487733, 509525, 531709, 554309, 577350, 600861, 624869, 649408, 674509, 700208, 726543,
-    753554, 781286, 809784, 839100, 869287, 900404, 932515, 965689, 1000000, 1035530, 1072369,
-    1110613, 1150368, 1191754, 1234897, 1279942, 1327045, 1376382, 1428148, 1482561, 1539865,
-    1600335, 1664279, 1732051, 1804048, 1880726, 1962611, 2050304, 2144507, 2246037, 2355852,
-    2475087, 2605089, 2747477, 2904211, 3077684, 3270853, 3487414, 3732051, 4010781, 4331476,
-    4704630, 5144554, 5671282, 6313752, 7115370, 8144346, 9514364, 11430052, 14300666, 19081137,
-    28636253, 57289962,
-];
-/// Scale of `TAN_E6`: one unit of tangent is 1e6.
-const TAN_SCALE: i64 = 1_000_000;
-/// Widest cone half-angle in whole degrees: the full circle.
-const CONE_MAX_HALF_DEG: usize = 180;
-/// Front and rear arcs: within this many degrees of the facing reads ahead,
-/// within it of the reverse reads behind, and the arcs between read left or
-/// right by the sign of the lateral offset (right is positive).
-const CONE_SIDE_DEG: usize = 45;
-
-/// Side of a cone row relative to the observer's facing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    /// Within `CONE_SIDE_DEG` of the facing.
-    Ahead,
-    /// Left of the facing, outside the front and rear arcs.
-    Left,
-    /// Right of the facing, outside the front and rear arcs.
-    Right,
-    /// Within `CONE_SIDE_DEG` of the reverse facing.
-    Behind,
-}
-
-impl Side {
-    /// Door word for this side.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Ahead => "ahead",
-            Self::Left => "left",
-            Self::Right => "right",
-            Self::Behind => "behind",
-        }
-    }
-}
-
-/// One cone row: the actor id, plan-view distance in cm, side, and bearing in
-/// whole degrees (floored, 0..=180) from the facing. Integers only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConeRow {
-    pub id: u32,
-    pub distance_cm: i64,
-    pub side: Side,
-    pub bearing_deg: u32,
-}
-
-/// Target inside `half` degrees of the facing, exact: on the front side
-/// `|lat| / dot <= tan(half)`, on the rear side `>= tan(180 - half)`.
-fn within_cone(dot: i64, lat: i64, half: usize) -> bool {
-    let off = lat.abs() * TAN_SCALE;
-    if half >= CONE_MAX_HALF_DEG {
-        true
-    } else if half > 90 {
-        dot >= 0 || off >= -dot * TAN_E6[180 - half]
-    } else if half == 90 {
-        dot >= 0
-    } else {
-        dot > 0 && off <= dot * TAN_E6[half]
-    }
-}
-
-/// Angle from the facing is at least `d` degrees, for `d` in 0..=180.
-fn angle_at_least(dot: i64, lat: i64, d: usize) -> bool {
-    let off = lat.abs() * TAN_SCALE;
-    match d {
-        0 => true,
-        1..=89 => dot <= 0 || off >= dot * TAN_E6[d],
-        90 => dot <= 0,
-        91..=180 => dot < 0 && off <= -dot * TAN_E6[180 - d],
-        _ => false,
-    }
-}
-
-/// Floor of the bearing in whole degrees, 0..=180: the largest `d` the angle
-/// reaches, by binary search over the monotone `angle_at_least`.
-fn bearing_deg(dot: i64, lat: i64) -> u32 {
-    let (mut lo, mut hi) = (0usize, 181usize);
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        if angle_at_least(dot, lat, mid) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    u32::try_from(lo).unwrap_or(180)
-}
-
-/// Side from the integer tests: ahead in the front arc, behind in the rear
-/// arc, else left or right by the lateral sign.
-fn side_of(dot: i64, lat: i64) -> Side {
-    if within_cone(dot, lat, CONE_SIDE_DEG) {
-        Side::Ahead
-    } else if angle_at_least(dot, lat, 180 - CONE_SIDE_DEG) {
-        Side::Behind
-    } else if lat < 0 {
-        Side::Left
-    } else {
-        Side::Right
-    }
-}
-
-/// Recovery line for a refused cone: the exact call to repeat, observer named.
-fn cone_retry(observer: &str) -> String {
-    format!(
-        "retry scene.query {{\"kind\":\"cone\",{observer},\"radius_cm\":500,\"half_angle_deg\":45}}"
-    )
-}
-
-/// Observer argument for an anchor retry.
-const CONE_ANCHOR_ARG: &str = "\"anchor\":\"<label from scene.brief>\"";
-/// Observer argument for an eye-point retry.
-const CONE_EYE_ARG: &str = "\"eye_m\":[0.0,1.6,0.0],\"yaw\":0.0";
-
-fn check_cone_half(half: Option<i32>) -> Result<usize, QueryError> {
-    let refuse =
-        |message: String| QueryError::new("bad_limit", message, cone_retry(CONE_ANCHOR_ARG));
-    let Some(h) = half else {
-        return Err(refuse(format!(
-            "cone needs half_angle_deg, the half-width in whole degrees 1..={CONE_MAX_HALF_DEG}"
-        )));
-    };
-    match usize::try_from(h) {
-        Ok(v) if (1..=CONE_MAX_HALF_DEG).contains(&v) => Ok(v),
-        _ => Err(refuse(format!(
-            "half_angle_deg {h} is outside 1..={CONE_MAX_HALF_DEG}"
-        ))),
-    }
-}
-
-/// Cone observer: plan point in cm, facing yaw, and the anchor id to leave out.
-type ConeObserver = ((i32, i32), f32, Option<u32>);
-
-/// Observer for a cone: its plan point in cm, its facing yaw, and the anchor
-/// id to leave out of the rows. An anchor faces its own yaw; an eye point
-/// faces `yaw` (default 0). Exactly one of `anchor` and `eye_m`.
-fn cone_observer(actors: &[Actor], args: &QueryArgs) -> Result<ConeObserver, QueryError> {
-    match (args.anchor, args.eye_m) {
-        (Some(id), None) => {
-            let refuse = |code: &'static str, message: String| {
-                QueryError::new(code, message, cone_retry(CONE_ANCHOR_ARG))
-            };
-            let anchor = actor_by_id(actors, id).ok_or_else(|| {
-                refuse("unknown_actor", format!("anchor {id} names no scene actor"))
-            })?;
-            let (cx, _, cz) = center_cm(anchor).ok_or_else(|| {
-                refuse("unknown_actor", format!("anchor {id} has no finite center"))
-            })?;
-            Ok(((cx, cz), anchor.yaw, Some(id)))
-        }
-        (None, Some(_)) => {
-            let refuse =
-                |message: String| QueryError::new("bad_point", message, cone_retry(CONE_EYE_ARG));
-            let eye = check_eye(args.eye_m).map_err(|e| refuse(e.message))?;
-            let yaw = args.yaw.unwrap_or(0.0);
-            if !yaw.is_finite() {
-                return Err(refuse("yaw must be finite radians".to_owned()));
-            }
-            Ok(((to_cm(eye[0]), to_cm(eye[2])), yaw, None))
-        }
-        _ => Err(QueryError::new(
-            "bad_point",
-            "cone needs one observer: anchor, or eye_m with yaw, not both or neither",
-            cone_retry(CONE_ANCHOR_ARG),
-        )),
-    }
-}
-
-/// Cone rows for one observer, in id order: every actor within `radius_cm`
-/// (plan view) and within `half_angle_deg` of the facing. The facing snaps to
-/// the solver's 45-degree octant. `filter` keeps actors whose name contains
-/// it. Integer math only; an actor on the observer reads ahead at 0 cm.
-pub fn cone_rows(actors: &[Actor], args: &QueryArgs) -> Result<Vec<ConeRow>, QueryError> {
-    let half = check_cone_half(args.half_angle_deg)?;
-    let radius = check_radius(args.radius_cm.unwrap_or(500))
-        .map_err(|e| QueryError::new(e.code, e.message, cone_retry(CONE_ANCHOR_ARG)))?;
-    let (origin, yaw, observer) = cone_observer(actors, args)?;
-    let (fx, fz) = octant(yaw);
-    let (fx, fz) = (i64::from(fx), i64::from(fz));
-    let range2 = i128::from(radius) * i128::from(radius);
-    let mut ordered: Vec<&Actor> = actors.iter().collect();
-    ordered.sort_by_key(|a| a.id);
-    let mut rows = Vec::new();
-    for a in ordered {
-        if observer == Some(a.id) {
-            continue;
-        }
-        if args.filter.as_deref().is_some_and(|f| !a.name.contains(f)) {
-            continue;
-        }
-        let Some(c) = center_cm(a) else { continue };
-        let dx = i64::from(c.0) - i64::from(origin.0);
-        let dz = i64::from(c.2) - i64::from(origin.1);
-        let d2 = i128::from(dx) * i128::from(dx) + i128::from(dz) * i128::from(dz);
-        if d2 > range2 {
-            continue;
-        }
-        let dot = fx * dx + fz * dz;
-        let lat = fx * dz - fz * dx;
-        let (side, deg) = if dot == 0 && lat == 0 {
-            (Side::Ahead, 0)
-        } else if within_cone(dot, lat, half) {
-            (side_of(dot, lat), bearing_deg(dot, lat))
-        } else {
-            continue;
-        };
-        rows.push(ConeRow {
-            id: a.id,
-            distance_cm: isqrt(i64::try_from(d2).unwrap_or(i64::MAX)),
-            side,
-            bearing_deg: deg,
-        });
-    }
-    Ok(rows)
-}
-
 /// Answer one spatial question over an actor snapshot plus the caller-owned
 /// nav reachability view. Pure: same inputs give the same answer text.
 pub fn run_query(
@@ -1086,6 +978,11 @@ pub fn run_query(
                 .collect();
             Ok(render(args.kind, &anchors, hits, vec![], budget))
         }
+        QueryKind::Sees
+        | QueryKind::WhyHidden
+        | QueryKind::Clearance
+        | QueryKind::Slide
+        | QueryKind::Ground => pairs::run_pair_kind(actors, args, budget),
         QueryKind::Relation => {
             let anchor = check_anchor(actors, args.anchor)?;
             let rel = args.rel.ok_or_else(|| {
@@ -1113,13 +1010,21 @@ pub fn run_query(
                 .take(limit)
                 .filter_map(|id| {
                     let a = actor_by_id(actors, id)?;
+                    let numbers = engine_spatial::pair::pair_numbers(actors, anchor.id, id, frame)
+                        .map(|n| {
+                            format!(
+                                "; {} cm, bearing {} deg, gap {} cm",
+                                n.dist_cm, n.bearing_deg, n.gap_cm
+                            )
+                        })
+                        .unwrap_or_default();
                     Some(Hit {
                         id,
                         x: a.x,
                         y: a.y,
                         z: a.z,
                         matched: true,
-                        reason: format!("{}: {} frame", rel_name(rel), frame_name(frame)),
+                        reason: format!("{}: {} frame{numbers}", rel_name(rel), frame_name(frame)),
                     })
                 })
                 .collect();
@@ -1276,34 +1181,64 @@ impl Hit {
 // Door tool: scene.query over the staged document.
 // ---------------------------------------------------------------------------
 //
-// The staging map mirrors scene.place (index ids over the id-text sort, unit
-// cubes), so query answers agree with brief geometry. The door carries no
+// The staging map is scene.place's (`scene_tools::snapshot`: index ids over the
+// id-text sort, collider-sized boxes), so query answers agree with brief geometry. The door carries no
 // baked nav view, so reachability reads one open floor: every staged actor
 // shares polygon 0 and every staged pair answers reachable. Library callers
 // with a real NV1-derived view pass it to `run_query` directly.
-// DTO structs and fields carry no doc comments on purpose: every doc line
-// inflates the discovery schemas, and the nineteen-tool list is a gate.
+// Field docs are short on purpose: every doc line is discovery cost (the
+// tool-list ledger gate). Units ride in the text, one kind line per question.
 
+/// Arguments of `scene.query`. Send `kind` plus the fields that kind needs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneQueryArgs {
+    /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m. a|b means either.
+    #[schemars(schema_with = "kind_schema")]
     pub kind: String,
+    /// Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID: the subject.
     pub anchor: Option<String>,
+    /// Second object label: far end for between, viewer for relation.
     pub other: Option<String>,
+    /// Radius in cm, 1..=10000: search radius (default 500), slide range (500), clearance width needed (60).
     pub radius_cm: Option<i32>,
+    /// Point [x, y, z] in meters: the eye for visible and cone, the threat for cover_near.
     pub eye_m: Option<[f32; 3]>,
+    /// Facing in radians, 0 = +X (visible, cone from eye_m); default 0.
     pub yaw: Option<f32>,
+    /// True to test crouched cover (cover_near).
     pub crouch: Option<bool>,
+    /// Clearance radius in cm, 0..=10000, default 30 (largest_open, free_space).
     pub capsule_radius_cm: Option<i32>,
+    /// Smallest gap between samples in cm, default 100 (free_space).
     pub min_gap_cm: Option<i32>,
+    /// Spots to sample, default 8 (free_space).
     pub max_samples: Option<u32>,
+    /// Sampler seed, default 7 (free_space).
     pub seed: Option<u64>,
+    /// Most hits, 1..=64, default 64.
     pub limit: Option<u32>,
+    /// Answer budget in bytes, 1..=16384, default 4096.
     pub budget_bytes: Option<u32>,
+    /// Cone half-width in whole degrees, 1..=180 (cone).
     pub half_angle_deg: Option<i32>,
+    /// Keep cone rows whose label contains this text.
     pub filter: Option<String>,
+    /// Relation word: above, below, in_front_of, behind, left_of, right_of, against, around, aligned, near, far, visible_from, reachable_from.
     pub relation: Option<String>,
+    /// Answer shape: rows (default, one row per hit), ids (labels of matched hits only), count (matched count only).
+    pub format: Option<String>,
+    /// Drop unmatched rows. Default true for visible (pass false for blocked rows), false otherwise.
+    pub matched_only: Option<bool>,
+    /// Slide direction: +x, -x, +z, -z, up, down, +x+z, +x-z, -x+z, -x-z (slide).
+    pub dir: Option<String>,
+}
+
+/// Schema of `kind`: a string enum of the kind words.
+fn kind_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    let words: Vec<&str> = KIND_CARDS.iter().map(|card| card.kind.name()).collect();
+    rmcp::schemars::json_schema!({ "type": "string", "enum": words })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1335,57 +1270,13 @@ pub struct SceneQueryOutput {
     pub digest: u64,
     pub bytes: u64,
     pub truncated: bool,
+    pub count: u32,
+    #[serde(default, skip_serializing_if = "super::scene_tools::no_repeat")]
+    pub repeat_count: u32,
     pub hits: Vec<SceneQueryHit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<String>,
     pub conflicts: Vec<SceneQueryConflict>,
-}
-
-// Document snapshot mirroring the scene.place staging map: index ids over
-// the id-text sort, unit cubes, only nodes with a finite world position.
-fn snapshot(doc: &Document) -> (Vec<Actor>, Vec<ObjectId>) {
-    let mut order: Vec<ObjectId> = Vec::new();
-    let mut stack = doc.hierarchy.roots();
-    while let Some(id) = stack.pop() {
-        order.push(id);
-        stack.extend(doc.hierarchy.children(id));
-    }
-    order.sort_by_key(|id| id.to_string());
-    let mut actors = Vec::new();
-    let mut ids = Vec::new();
-    for id in order {
-        let Some(world) = doc.hierarchy.world(id) else {
-            continue;
-        };
-        if !world.position.iter().all(|lane| lane.is_finite()) {
-            continue;
-        }
-        let yaw = if world.rotation.iter().all(|lane| lane.is_finite()) {
-            let [x, y, z, w] = world.rotation;
-            (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z))
-        } else {
-            0.0
-        };
-        let index = u32::try_from(actors.len()).unwrap_or(u32::MAX);
-        if index == u32::MAX {
-            break;
-        }
-        ids.push(id);
-        actors.push(Actor {
-            id: index,
-            name: format!("prop_{index:04}"),
-            x: world.position[0],
-            y: world.position[1],
-            z: world.position[2],
-            sx: 1.0,
-            sy: 1.0,
-            sz: 1.0,
-            parent: None,
-            physical: true,
-            vx: 0.0,
-            vz: 0.0,
-            yaw,
-        });
-    }
-    (actors, ids)
 }
 
 // Open-floor reachability: every staged actor shares polygon 0.
@@ -1397,6 +1288,64 @@ fn open_floor(actors: &[Actor]) -> ReachView {
     let mut adj = BTreeMap::new();
     adj.insert(0u32, Vec::new());
     ReachView { adj, at }
+}
+
+/// True when the door request carries `field` (`a|b` holds when either does).
+fn has_field(args: &SceneQueryArgs, field: &str) -> bool {
+    field.split('|').any(|one| match one {
+        "anchor" => args.anchor.is_some(),
+        "other" => args.other.is_some(),
+        "eye_m" => args.eye_m.is_some(),
+        "half_angle_deg" => args.half_angle_deg.is_some(),
+        "relation" => args.relation.is_some(),
+        "dir" => args.dir.is_some(),
+        _ => true,
+    })
+}
+
+/// Refuse a request that lacks a field its kind needs: `missing_arg` names
+/// the kind, the field and a complete working call. `relation` keeps its own
+/// `bad_relation` refusal, which lists the legal words.
+fn require_fields(kind: QueryKind, args: &SceneQueryArgs) -> Result<(), McpToolError> {
+    let card = KindCard::of(kind);
+    let missing = card
+        .needs
+        .split(", ")
+        .find(|field| *field != "relation" && *field != "-" && !has_field(args, field));
+    match missing {
+        None => Ok(()),
+        Some(field) => Err(McpToolError::new(
+            "missing_arg",
+            format!(
+                "scene.query kind `{}` needs `{field}`; working call: {}",
+                kind.name(),
+                card.example
+            ),
+        )),
+    }
+}
+
+/// Answer shape asked through `format` (`scene.query` and `scene.spatial`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryFormat {
+    Rows,
+    Ids,
+    Count,
+}
+
+impl QueryFormat {
+    /// Parse the `format` word; absent reads `rows`, unknown refuses `bad_format`.
+    pub(crate) fn parse(word: Option<&str>) -> Result<Self, McpToolError> {
+        match word {
+            None | Some("rows") => Ok(Self::Rows),
+            Some("ids") => Ok(Self::Ids),
+            Some("count") => Ok(Self::Count),
+            Some(other) => Err(McpToolError::new(
+                "bad_format",
+                format!("format `{other}` is unknown; pass rows, ids or count"),
+            )),
+        }
+    }
 }
 
 fn query_error(error: QueryError) -> McpToolError {
@@ -1429,11 +1378,70 @@ fn resolve_actor(field: &str, text: &str, uuids: &[ObjectId]) -> Result<u32, Mcp
         })
 }
 
-fn label_of(id: u32, uuids: &[ObjectId]) -> String {
-    match uuids.get(id as usize) {
-        Some(uuid) => object_label(id, uuid),
-        None => format!("sample_{:04}", id.wrapping_sub(SAMPLE_ACTOR_BASE)),
+fn label_of(id: u32, actors: &[Actor], uuids: &[ObjectId]) -> String {
+    let at = usize::try_from(id).unwrap_or(usize::MAX);
+    match (actors.get(at), uuids.get(at)) {
+        (Some(actor), Some(uuid)) => object_label(&actor.name, uuid),
+        _ => format!("sample_{:04}", id.wrapping_sub(SAMPLE_ACTOR_BASE)),
     }
+}
+
+/// The door reply for an answer: rows, matched labels or the count only,
+/// with the digest and sizes of the full answer.
+fn shape_output(
+    answer: &QueryAnswer,
+    format: QueryFormat,
+    matched_only: bool,
+    actors: &[Actor],
+    uuids: &[ObjectId],
+) -> SceneQueryOutput {
+    let kept = answer
+        .hits
+        .iter()
+        .filter(|hit| hit.matched || !matched_only)
+        .map(|hit| (hit, label_of(hit.id, actors, uuids)));
+    let (hits, ids) = match format {
+        QueryFormat::Rows => (
+            kept.map(|(hit, object)| SceneQueryHit {
+                object,
+                x: hit.x,
+                y: hit.y,
+                z: hit.z,
+                matched: hit.matched,
+                reason: hit.reason.clone(),
+            })
+            .collect(),
+            Vec::new(),
+        ),
+        QueryFormat::Ids => (
+            Vec::new(),
+            kept.filter(|(hit, _)| hit.matched)
+                .map(|(_, object)| object)
+                .collect(),
+        ),
+        QueryFormat::Count => (Vec::new(), Vec::new()),
+    };
+    let output = SceneQueryOutput {
+        kind: answer.kind.name().to_owned(),
+        digest: answer.digest,
+        bytes: answer.bytes as u64,
+        truncated: answer.truncated,
+        count: u32::try_from(answer.hits.iter().filter(|hit| hit.matched).count())
+            .unwrap_or(u32::MAX),
+        repeat_count: 0,
+        hits,
+        ids,
+        conflicts: answer
+            .conflicts
+            .iter()
+            .map(|conflict| SceneQueryConflict {
+                code: conflict.code.to_owned(),
+                message: conflict.message.clone(),
+                hint: conflict.hint.clone(),
+            })
+            .collect(),
+    };
+    output
 }
 
 impl super::mcp::ServerState {
@@ -1441,7 +1449,10 @@ impl super::mcp::ServerState {
     /// the document, journal, budget and ledger never move.
     pub fn scene_query(&self, args: &SceneQueryArgs) -> Result<SceneQueryOutput, McpToolError> {
         let kind = QueryKind::parse(&args.kind).map_err(query_error)?;
-        let (actors, uuids) = snapshot(&self.doc);
+        require_fields(kind, args)?;
+        let format = QueryFormat::parse(args.format.as_deref())?;
+        let snap = snapshot(&self.doc);
+        let (actors, uuids) = (snap.actors, snap.ids);
         let anchor = args
             .anchor
             .as_deref()
@@ -1483,36 +1494,14 @@ impl super::mcp::ServerState {
             half_angle_deg: args.half_angle_deg,
             filter: args.filter.clone(),
             rel,
+            dir: args.dir.clone(),
         };
         let answer = run_query(&actors, &reach, &query).map_err(query_error)?;
-        super::watch_ledger::note_door_answer(kind, request_chars(args), &answer);
-        Ok(SceneQueryOutput {
-            kind: answer.kind.name().to_owned(),
-            digest: answer.digest,
-            bytes: answer.bytes as u64,
-            truncated: answer.truncated,
-            hits: answer
-                .hits
-                .iter()
-                .map(|hit| SceneQueryHit {
-                    object: label_of(hit.id, &uuids),
-                    x: hit.x,
-                    y: hit.y,
-                    z: hit.z,
-                    matched: hit.matched,
-                    reason: hit.reason.clone(),
-                })
-                .collect(),
-            conflicts: answer
-                .conflicts
-                .iter()
-                .map(|conflict| SceneQueryConflict {
-                    code: conflict.code.to_owned(),
-                    message: conflict.message.clone(),
-                    hint: conflict.hint.clone(),
-                })
-                .collect(),
-        })
+        let matched_only = args.matched_only.unwrap_or(kind == QueryKind::Visible);
+        let output = shape_output(&answer, format, matched_only, &actors, &uuids);
+        let wire = rmcp::serde_json::to_string(&output).map_or(0, |text| text.len());
+        super::watch_ledger::note_door_answer(kind, request_chars(args), &answer, wire);
+        Ok(output)
     }
 }
 
@@ -1530,7 +1519,8 @@ impl ToolBase for SceneQueryTool {
     fn description() -> Option<Cow<'static, str>> {
         Some(
             "Spatial questions with reasons: near, between, visible, reachable, \
-             cover, open space, cone, relation. Read-only."
+             cover_near, largest_open, free_space, cone, relation. Read-only; \
+             api.describe query:<kind> gives a working call."
                 .into(),
         )
     }
@@ -1542,9 +1532,25 @@ impl ToolBase for SceneQueryTool {
 
 impl SyncTool<McpServer> for SceneQueryTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_QUERY, |state| state.scene_query(&param))
+        service.dispatch(TOOL_SCENE_QUERY, |state| {
+            let repeat = state.note_read(TOOL_SCENE_QUERY, &param)?;
+            let mut out = state.scene_query(&param)?;
+            out.repeat_count = repeat;
+            Ok(out)
+        })
     }
 }
+
+mod cone;
+mod pairs;
+pub use cone::*;
+
+#[cfg(test)]
+mod compact_tests;
+#[cfg(test)]
+mod schema_tests;
+#[cfg(test)]
+mod space_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2283,7 +2289,7 @@ mod tests {
     fn staged_labels(server: &McpServer) -> Vec<String> {
         use crate::scene_tools::{SceneBriefArgs, SceneBriefTool};
 
-        SceneBriefTool::invoke(server, SceneBriefArgs { budget_bytes: None })
+        SceneBriefTool::invoke(server, SceneBriefArgs::default())
             .expect("brief reads")
             .objects
     }
@@ -2337,7 +2343,7 @@ mod tests {
             assert!(out
                 .hits
                 .iter()
-                .all(|hit| hit.matched && hit.reason == format!("{word}: world frame")));
+                .all(|hit| hit.matched && hit.reason.starts_with(&format!("{word}: world frame"))));
             if word == "left_of" || word == "right_of" {
                 sided += got.len();
             }
@@ -2417,6 +2423,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         );
         assert_eq!(near.kind, "near");
@@ -2451,6 +2460,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         );
         assert_eq!(near.digest, again.digest);
@@ -2475,6 +2487,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         );
         assert!(between
@@ -2502,6 +2517,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: Some(false),
+                dir: None,
             },
         );
         assert_eq!(seen.hits.len(), 4);
@@ -2527,6 +2545,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         );
         assert_eq!(reach.hits.len(), 3);
@@ -2554,6 +2575,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         );
         assert!(cover
@@ -2581,6 +2605,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         );
         assert_eq!(open.hits.len(), 1);
@@ -2604,6 +2631,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         );
         assert!(!free.hits.is_empty());
@@ -2633,6 +2663,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         )
         .expect_err("unknown anchor refuses");
@@ -2657,6 +2690,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         )
         .expect_err("unknown kind refuses");
@@ -2681,6 +2717,9 @@ mod tests {
                 half_angle_deg: None,
                 filter: None,
                 relation: None,
+                format: None,
+                matched_only: None,
+                dir: None,
             },
         )
         .expect_err("bad radius refuses");

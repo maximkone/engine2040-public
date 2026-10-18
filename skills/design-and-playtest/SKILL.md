@@ -55,7 +55,7 @@ Return a score per bar item, pass or fail, and at most five ranked fixes. Each f
 
 Bots prove the rules. You play like a person. The row gives you a built binary or the MCP play tools, a mode, a seed, a time budget and an output folder under `target/playtest/<id>/`.
 
-1. Send inputs. Use MCP `play.step` (a bout held across calls) or `play.run` (a bounded headless match job). Or use the window build. Run lines: skill `door-and-headless-runbook`.
+1. Send inputs. Use MCP `play.step` (a bout held across calls) or `play.run` (a bounded headless match job; pass `scene_rev` from the scene you built or it is refused as `unpinned_run`, `empty_arena` or `stale_scene_rev`). Or use the window build. Run lines: skill `door-and-headless-runbook`.
 2. Open every capture PNG (Eyes rule). Decide the next inputs from what you see, the way a new player would.
 3. Learn the game from the screen. Do not read its code.
 

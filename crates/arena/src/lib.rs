@@ -68,6 +68,7 @@ pub mod parity;
 pub mod probe;
 pub mod recorder;
 pub mod seed;
+pub mod spear;
 pub mod spec;
 #[cfg(feature = "spine")]
 pub mod spine_step;
@@ -91,6 +92,7 @@ pub use gym::{
     GymSnapshot, GYM_ACTION_ATTACK, GYM_ACTION_BLOCK, GYM_ACTION_DODGE, GYM_NUM_ACTIONS,
 };
 pub use live::{LiveMatch, LivePresentation, LiveTick};
+pub use spear::{EndWhy, MissWhy, SpearEvent, SpearSlot};
 pub use spec::MatchSpec;
 
 use core::f32::consts::PI;
@@ -116,14 +118,13 @@ use engine_combat::tables::{TABLES_VERSION_V1, TABLES_VERSION_V2};
 use engine_combat::{try_step_into, FightEvent, FightState, MAX_EVENTS_PER_TICK, TABLES_V1};
 use engine_core::fixed::Fixed;
 use engine_destruction::bonded::{event_bytes as break_bytes, BondedCollection, BreakEvent};
-use engine_input::fighter::{ATTACK, DODGE};
+use engine_input::fighter::{ATTACK, DODGE, THROW_SPEAR};
 use engine_physics::balance::BalanceParams;
 /// Integer balance verdicts the window reads (`Sim::balance`): re-exported so
 /// the presentation leg names the return without a physics edge.
 pub use engine_physics::balance::{BalanceState, GaitPhase};
 #[cfg(feature = "sim")]
 use engine_physics::controller::{Controller, ControllerSnapshot};
-use engine_physics::controller2::Walker;
 use engine_physics::limb::{LimbPool, MAX_LIMBS};
 #[cfg(feature = "sim")]
 use engine_physics::rapier::FIXED_DT;
@@ -1103,6 +1104,9 @@ pub struct Sim {
     /// [`ArenaRules::balance`]; empty on snapshot and fork sims (v1 only).
     /// A cut reaches the authority through [`LimbPool::state_hash`].
     limbs: LimbPool,
+    /// Spear grapple state, `Some` only for a match built with
+    /// `MatchSpec::spear`; `None` leaves every tick and hash untouched.
+    spear: Option<spear::SpearState>,
     #[cfg(test)]
     trace: Option<Vec<Vec<TickMotion>>>,
 }
@@ -1255,6 +1259,7 @@ impl Sim {
             stagger: (0..fighters).map(|_| StaggerMemory::new()).collect(),
             depth,
             limbs: LimbPool::new(limb_cap).ok()?,
+            spear: None,
             #[cfg(test)]
             trace: None,
         };
@@ -1277,6 +1282,17 @@ impl Sim {
                 brain.set_personality(Personality::seeded(self.config.seed, id));
             }
         }
+        true
+    }
+
+    /// Arm the spear grapple (`docs/plan/spear-grapple.md`) before the first
+    /// tick. Refuses (`false`) past tick 0 and on the Rapier `sim` leg, whose
+    /// controllers own the poses the tether would have to move.
+    fn set_spear(&mut self) -> bool {
+        if cfg!(feature = "sim") || self.tick != 0 {
+            return false;
+        }
+        self.spear = Some(spear::SpearState::new(self.fighters));
         true
     }
 
@@ -1484,7 +1500,13 @@ impl Sim {
         for (slot, cell) in slots.iter().enumerate().take(self.fighters) {
             let input = (*cell)?;
             self.wishes[slot] = [input.mx, input.mz];
-            self.buttons[slot] = input.buttons.0;
+            // The spear bit only exists in a spear match; elsewhere it is
+            // masked out so a stray press cannot reach the hash.
+            self.buttons[slot] = if self.spear.is_some() {
+                input.buttons.0
+            } else {
+                input.buttons.0 & !THROW_SPEAR
+            };
             if self.fight.fighters[slot].hp_permille == 0 {
                 #[cfg(test)]
                 tick_trace.push(TickMotion {
@@ -1592,6 +1614,28 @@ impl Sim {
                 });
             }
         }
+        // Spear grapple: throws, flights, tether physics and the bodies it
+        // drags, between the walking and the collision pass. Frozen with
+        // everything else while hit-stop holds.
+        if self.fight.hitstop == 0 {
+            if let Some(mut spear) = self.spear.take() {
+                let tables = if self.config.table_version == TABLES_VERSION_V2 {
+                    &TABLES_V2
+                } else {
+                    &TABLES_V1
+                };
+                spear.step(&mut spear::Env {
+                    inputs,
+                    states: &mut self.states,
+                    fight: &mut self.fight,
+                    rules: &self.rules,
+                    world: &self.world,
+                    tables,
+                    half_extent_m: self.config.half_extent_m,
+                });
+                self.spear = Some(spear);
+            }
+        }
         // EG20: one collision pass after every slot moved (default leg).
         if self.rules.collides() {
             self.collide();
@@ -1668,6 +1712,9 @@ impl Sim {
             &self.stagger,
             &self.limbs,
         );
+        // The spear state folds after the rules and before the world; a match
+        // without one leaves the hash untouched.
+        let hash = self.spear.as_ref().map_or(hash, |spear| spear.fold(hash));
         // A supplied world folds after the rules: the empty world digests to
         // zero and leaves the golden bytes untouched.
         let hash = fold_world(self.world.digest(), hash);
@@ -1798,39 +1845,14 @@ impl Sim {
         Some(())
     }
 
-    /// EG20 collision pass: every fighter as an integer-mm walker, resolved
-    /// by [`collide`] (push-apart, pillars, round wall at the square clamp's
-    /// inset), then only the integer displacement goes back onto the float
-    /// pose, so an untouched fighter keeps its exact bits.
+    /// EG20 collision pass over this sim's fighters; see [`collide_states`].
     fn collide(&mut self) {
-        let mut walkers = [Walker::spawn(0, [0; 3]); MAX_SLOTS];
-        for ((slot, walker), state) in walkers.iter_mut().enumerate().zip(&self.states) {
-            *walker = Walker::spawn(
-                u32::try_from(slot).unwrap_or(u32::MAX),
-                match_wire::pos_mm(state.pos),
-            );
-        }
-        let before = walkers;
-        let mut pillars = [Pillar::new([0, 0], [0, 0]); MAX_PILLARS];
-        let mut count = 0;
-        for pillar in self.rules.pillars.iter().flatten() {
-            pillars[count] = *pillar;
-            count += 1;
-        }
-        let limit = wall_limit(self.config.half_extent_m);
-        let radius_mm = match_wire::pos_mm([limit, 0.0, 0.0])[0];
-        let fighters = self.fighters.min(MAX_SLOTS);
-        collide::resolve(&mut walkers[..fighters], &pillars[..count], radius_mm);
-        for ((state, after), was) in self.states.iter_mut().zip(&walkers).zip(&before) {
-            for axis in [0, 2] {
-                let moved = after.pos_mm[axis] - was.pos_mm[axis];
-                if moved != 0 {
-                    let clamped = moved.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-                    let metres = f32::from(i16::try_from(clamped).unwrap_or(0)) / 1000.0;
-                    state.pos[axis] = canon_zero(state.pos[axis] + metres);
-                }
-            }
-        }
+        collide::collide_states(
+            &mut self.states,
+            &self.rules,
+            self.config.half_extent_m,
+            self.fighters,
+        );
     }
 
     /// Merged per-slot inputs from the last stepped tick. `None` slots never
@@ -2066,6 +2088,7 @@ impl Sim {
             stagger: Vec::new(),
             depth,
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
+            spear: None,
             #[cfg(test)]
             trace: None,
         })
@@ -2440,7 +2463,7 @@ fn hash_state_with_sim(
         hash = hash.wrapping_mul(PRIME);
     }
     for slot in 0..states.len() {
-        if let Some(combat) = fight.fighter(slot as u8) {
+        if let Some(combat) = fight.fighter(u8::try_from(slot).unwrap_or(u8::MAX)) {
             for byte in combat
                 .hp_permille
                 .to_le_bytes()

@@ -8,6 +8,7 @@
 use super::{PackDef, PackError, VerbSpec};
 use crate::build_level::{BuildLevelTool, TOOL_BUILD_LEVEL};
 use crate::discover::{WatchTool, TOOL_SCENE_WATCH};
+use crate::scene_next::{SceneNextTool, TOOL_SCENE_NEXT};
 use crate::scene_query::{SceneQueryTool, TOOL_SCENE_QUERY};
 use crate::scene_tools::{
     SceneBriefTool, ScenePlaceTool, SceneSpatialTool, TOOL_SCENE_BRIEF, TOOL_SCENE_PLACE,
@@ -59,12 +60,12 @@ pub fn component_doc(kind: ComponentKind) -> (&'static str, &'static str) {
     }
 }
 
-/// The scene pack: six verbs, loaded by default.
+/// The scene pack: seven verbs, loaded by default.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "layout authoring: brief, spatial findings, intent placement, brief-to-level build, \
-         spatial questions and the digest watch",
+         spatial questions, the digest watch and the next-call planner",
         true,
     );
     pack.add(VerbSpec::of::<SceneBriefTool>(
@@ -94,6 +95,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<WatchTool>(
         TOOL_SCENE_WATCH,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<SceneNextTool>(
+        TOOL_SCENE_NEXT,
         PACK,
         CapabilityCard::Observe,
     )?);

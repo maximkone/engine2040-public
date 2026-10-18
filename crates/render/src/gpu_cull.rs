@@ -486,10 +486,7 @@ mod tests {
 
     fn device_or_skip(test: &str) -> Option<(wgpu::Device, wgpu::Queue)> {
         crate::test_gpu::hold_gpu_slot();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
         let options = wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,

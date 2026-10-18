@@ -79,7 +79,8 @@ fn time_panel(shell: &mut Shell, ui_state: &mut ShellUi, panel: Panel) -> Vec<Du
             ..egui::RawInput::default()
         };
         let start = Instant::now();
-        let output = ctx.run_ui(input, |ui| ui_state.show(shell, ui));
+        let mut output = ctx.run_ui(input, |ui| ui_state.show(shell, ui));
+        output.textures_delta.clear();
         let meshes = ctx.tessellate(output.shapes, output.pixels_per_point);
         let took = start.elapsed();
         assert!(!meshes.is_empty(), "{panel} painted nothing");

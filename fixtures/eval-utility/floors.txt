@@ -1,0 +1,30 @@
+# AX11 reference floors: the fewest model turns and engine tool calls a
+# competent agent needs for the task's designed outcome. Columns: task turns
+# tools. One line per EV1 task (20 authoring a01-a20, 5 play p01-p05).
+# Authoring tasks take one model turn; play tasks take none (the harness
+# drives the engine). A designed refusal needs no tool call after the refusal.
+a01 1 1
+a02 1 1
+a03 1 0
+a04 1 1
+a05 1 1
+a06 1 1
+a07 1 0
+a08 1 1
+a09 1 1
+a10 1 0
+a11 1 0
+a12 1 1
+a13 1 1
+a14 1 1
+a15 1 0
+a16 1 1
+a17 1 0
+a18 1 2
+a19 1 1
+a20 1 0
+p01 0 1
+p02 0 2
+p03 0 1
+p04 0 1
+p05 0 1

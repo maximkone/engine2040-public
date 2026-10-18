@@ -537,6 +537,7 @@ impl ForkJob {
                 stagger: Vec::new(),
                 depth,
                 limbs: LimbPool::new(MAX_LIMBS).ok()?,
+                spear: None,
                 #[cfg(test)]
                 trace: None,
             },

@@ -306,6 +306,23 @@ impl TextureUpload {
         levels
     }
 
+    /// The largest mip level whose longest edge is at most `max_edge`, as an upload of its own
+    /// (the tier's `texture_max_px`: a bigger texture loads a smaller mip). `None` when the
+    /// texture already fits, or when `max_edge` is zero. Cold upload path only.
+    pub fn capped_to(&self, max_edge: u32) -> Option<TextureUpload> {
+        if max_edge == 0 || self.width.max(self.height) <= max_edge {
+            return None;
+        }
+        self.mip_chain()
+            .into_iter()
+            .find(|(w, h, _)| (*w).max(*h) <= max_edge)
+            .map(|(width, height, rgba)| TextureUpload {
+                width,
+                height,
+                rgba,
+            })
+    }
+
     /// Validate dimensions and byte length before any GPU upload.
     pub fn validate(&self) -> Result<(), PresentError> {
         if self.width == 0 || self.height == 0 {

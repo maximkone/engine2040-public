@@ -31,6 +31,7 @@ use engine_assets::body_import::{
 use engine_assets::retarget::{retarget_clip, BoneMap};
 use engine_assets::skin_import::ImportedClip;
 use engine_core::Fnv64;
+use engine_render::contact_feet::{ContactFoot, CONTACT_FEET_MAX};
 use engine_render::present::{DrawItem, DrawList, MeshKey, Presenter, TextureKey, TextureUpload};
 use engine_render::v1::{self, Camera, MeshData, PbrMaterial};
 use engine_render::v1_skin::{SkinPipeline, SkinWeights};
@@ -67,6 +68,11 @@ use self::fighter_look_feet::{foot_slides, Feet, Legs};
 /// planted feet (a test-only file).
 #[path = "fighter_look_proofs.rs"]
 mod fighter_look_proofs;
+
+/// The duel's over-the-shoulder shot (GP14 framing): two seen bodies fill the
+/// picture instead of backing off to two specks. Presentation only.
+#[path = "fighter_look_shoulder.rs"]
+mod fighter_look_shoulder;
 
 /// Ragdoll look (RZ2w): a floored fighter is handed to the float physical layer and drawn from
 /// its bones; the get-up blends back through the inertial offsets. Presentation only.
@@ -608,6 +614,11 @@ fn upload_slot_parts(
 // tick through `FighterLook::observe_live_balances`. The cue mirror
 // (`Hit` stumbles, `Knockdown` floors) stays for the same-tick swing
 // start, so the same blows lean the same roots.
+
+/// Contact blob radius under a standing fighter, meters.
+const CONTACT_STAND_RADIUS_M: f32 = 0.85;
+/// Contact blob radius under a floored fighter, meters.
+const CONTACT_DOWN_RADIUS_M: f32 = 1.3;
 
 /// Camera shot for the fight camera.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2109,6 +2120,8 @@ impl FighterLook {
     ) -> Result<PresentReport, LookError> {
         let (skin, truth) = self.stage_bodies(presenter, frame.fighters, frame.alpha)?;
         self.truth = truth;
+        // The grounding shade follows the bodies: one blob under every seen fighter.
+        presenter.set_contact_feet(&self.contact_feet(frame.fighters));
         let resident = presenter.mesh_keys();
         if let Some(ring) = &self.ring {
             ring.push_draws(list, &resident);
@@ -2118,6 +2131,32 @@ impl FighterLook {
             list.camera = self.fight_camera(&list.camera, frame.shot, frame.fighters, frame.frame);
         }
         Ok(PresentReport { draws, skin })
+    }
+
+    /// Contact blobs for the sand under the seen fighters, slot order; unseen
+    /// slots stay dead (radius 0). A floored fighter lies longer, so its blob
+    /// is wider. Presentation only: where bodies stand, never fixed spots.
+    #[must_use]
+    fn contact_feet(&self, fighters: usize) -> [ContactFoot; CONTACT_FEET_MAX] {
+        let dead = ContactFoot {
+            x_m: 0.0,
+            z_m: 0.0,
+            radius_m: 0.0,
+        };
+        let mut feet = [dead; CONTACT_FEET_MAX];
+        let seen = self.slots.iter().take(fighters.min(MAX_LOOK_FIGHTERS));
+        for (slot, foot) in seen.zip(feet.iter_mut()).filter(|(slot, _)| slot.seen) {
+            *foot = ContactFoot {
+                x_m: slot.pos[0],
+                z_m: slot.pos[2],
+                radius_m: if slot.act == Act::Down {
+                    CONTACT_DOWN_RADIUS_M
+                } else {
+                    CONTACT_STAND_RADIUS_M
+                },
+            };
+        }
+        feet
     }
 
     /// Seen fighters whose chest (1 m up) is in `camera`'s picture: the
@@ -2233,6 +2272,14 @@ impl FighterLook {
         for pos in &seen {
             let (dx, dz) = (pos[0] - center[0], pos[2] - center[2]);
             radius = radius.max((dx * dx + dz * dz).sqrt());
+        }
+        // The live duel: exactly two bodies in the fight shot get the shoulder
+        // shot, close and readable at any separation; the side-on fit below
+        // stays for bouts of three or more and when the pit blocks the shot.
+        if shot == Shot::Action {
+            if let Some(camera) = self.shoulder_duel(base, &seen) {
+                return camera;
+            }
         }
         let turn = f32::from(u16::try_from(frame % 3600).unwrap_or(0)) * 0.0025;
         let (focus, distance, height, look_y, azimuth) = match shot {
@@ -2521,6 +2568,69 @@ mod tests {
             [0.0, 1.0, 0.0],
             50.0f32.to_radians(),
         )
+    }
+
+    #[test]
+    fn two_fighters_in_the_fight_shot_get_the_shoulder_camera() {
+        // The 2026-10-18 demo capture: two bodies 15 m apart were two specks
+        // at the screen edges. The duel rides the hero's shoulder instead.
+        let look = look_at(&[[-8.0, 1.0], [7.0, -2.0]]);
+        let cam = look.fight_camera(&arena_base(), Shot::Action, 2, 0);
+        assert_eq!(look.fighters_in_view(&cam, 2), 2, "both bodies in picture");
+        let eye = cam.eye.to_array();
+        assert!((eye[1] - 1.9).abs() < 0.01, "shoulder-high eye: {eye:?}");
+        assert!(
+            (eye[0] + 8.0).hypot(eye[2] - 1.0) < 6.0,
+            "eye rides the hero, not the far side of the pit: {eye:?}"
+        );
+        // A third body hands the shot back to the group fit (high boom).
+        let three = look_at(&[[-8.0, 1.0], [7.0, -2.0], [0.0, 9.0]]);
+        let group = three.fight_camera(&arena_base(), Shot::Action, 3, 0);
+        assert!(
+            group.eye.y > 2.5,
+            "three bodies keep the group fit: {:?}",
+            group.eye
+        );
+        // The directed run's hero close-up never takes the duel shot.
+        let hero = look.fight_camera(&arena_base(), Shot::Hero, 2, 0);
+        assert!(
+            hero.eye.y < 1.9,
+            "the hero shot keeps its own boom: {:?}",
+            hero.eye
+        );
+    }
+
+    #[test]
+    fn contact_blobs_sit_under_the_seen_fighters_and_nowhere_else() {
+        // The live window drew dark discs at 24 fixed spots and none under the
+        // fighters. The feed is the bodies' own floor positions, slot order.
+        let mut look = look_at(&[[-8.0, 1.0], [7.0, -2.0], [0.0, 9.0]]);
+        look.slots[1].act = Act::Down;
+        let feet = look.contact_feet(2);
+        assert_eq!((feet[0].x_m, feet[0].z_m), (-8.0, 1.0), "the hero's feet");
+        assert_eq!((feet[1].x_m, feet[1].z_m), (7.0, -2.0), "the rival's feet");
+        assert_eq!(feet[0].radius_m, CONTACT_STAND_RADIUS_M);
+        assert!(
+            feet[1].radius_m > feet[0].radius_m,
+            "a floored body lies wider"
+        );
+        // A third body outside `fighters` and every unseen slot stay dead.
+        assert!(feet[2..].iter().all(|foot| foot.radius_m == 0.0));
+        let all = look.contact_feet(8);
+        assert_eq!(
+            (all[2].x_m, all[2].z_m),
+            (0.0, 9.0),
+            "three bodies, three blobs"
+        );
+        let mut gone = look_at(&[[-8.0, 1.0], [7.0, -2.0]]);
+        gone.slots[0].seen = false;
+        let feet = gone.contact_feet(8);
+        assert_eq!(feet[0].radius_m, 0.0, "an unseen fighter casts nothing");
+        assert_eq!((feet[1].x_m, feet[1].z_m), (7.0, -2.0));
+        assert_eq!(
+            CONTACT_FEET_MAX, MAX_LOOK_FIGHTERS,
+            "one blob per look slot"
+        );
     }
 
     #[test]

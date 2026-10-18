@@ -337,6 +337,10 @@ impl GameFeel {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "f64 libm sin/cos is the reference the Q16 tables are checked against"
+)]
 mod tests {
     use super::*;
 
@@ -508,7 +512,7 @@ mod tests {
         let mut feel = GameFeel::default();
         feel.shake.start(20, 1500);
         feel.time.add_slow_mo(1, 12, 300).unwrap();
-        let (_, heap) = engine_core::alloc_probe::measure(|| {
+        let ((), heap) = engine_core::alloc_probe::measure(|| {
             for t in 0..120 {
                 std::hint::black_box(feel.step(t));
             }

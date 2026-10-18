@@ -19,7 +19,7 @@
 //!
 //! Features: `mcp` opt-in; `geo`, `intake`, `rules` off by default so the
 //! default build carries no donor libs or scripting engine. Budget: tool-list
-//! [`TOOL_LIST_BUDGET_CHARS`] (43_514 chars). Entry points: [`PACK_NAMES`],
+//! [`TOOL_LIST_BUDGET_CHARS`] (51_000 chars). Entry points: [`PACK_NAMES`],
 //! [`PackRegistry::shipped`], `pack`/`verb` lookups.
 //!
 //! Adding a verb (any pack owner): write a `SyncTool<McpServer>` (the
@@ -279,6 +279,49 @@ impl VerbSpec {
     /// direct `tools/call` land identically.
     pub fn invoke(&self, server: &McpServer, args: Value) -> Result<Value, McpToolError> {
         (self.invoke)(server, args)
+    }
+}
+
+/// One-line argument summary of a verb's input schema for `api.describe`:
+/// `name:type` per property, `!` after a required one, `none` when the verb
+/// takes no arguments. Lets an agent that never saw the verb's advertised
+/// schema build a valid `api.call`.
+fn arg_summary(schema: &JsonObject) -> String {
+    let required: BTreeSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let kind = |prop: &Value| match prop.get("type") {
+        Some(Value::String(name)) => name.clone(),
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|name| *name != "null")
+            .unwrap_or("any")
+            .to_owned(),
+        _ => "any".to_owned(),
+    };
+    let fields: Vec<String> = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(name, prop)| {
+            let mark = if required.contains(name.as_str()) {
+                "!"
+            } else {
+                ""
+            };
+            format!("{name}:{}{mark}", kind(prop))
+        })
+        .collect();
+    if fields.is_empty() {
+        "none".to_owned()
+    } else {
+        fields.join(" ")
     }
 }
 
@@ -614,7 +657,11 @@ impl PackRegistry {
                         verb.card.name(),
                         if verb.readonly { "read-only" } else { "writes" }
                     ),
-                    verb.description(),
+                    &format!(
+                        "{} Args: {}",
+                        verb.description(),
+                        arg_summary(&verb.model().input_schema)
+                    ),
                     "DOOR",
                 );
             }
@@ -634,6 +681,20 @@ impl PackRegistry {
                      (ops set_component / remove_component); undoable; saves byte-identical.",
                     kind.name(),
                     engine_scene::component::SCHEMA_VERSION
+                ),
+                "DOOR",
+            );
+        }
+        // Spatial question kinds: `api.describe query:<kind>` gives the
+        // fields the kind needs and one complete working `scene.query` call.
+        for card in crate::scene_query::KIND_CARDS.iter() {
+            let kind = card.kind.name();
+            index.add_tool(
+                &format!("query:{kind}"),
+                &format!("scene.query {}", card.example),
+                &format!(
+                    "scene.query kind `{kind}` needs: {}. Working call: {}",
+                    card.needs, card.example
                 ),
                 "DOOR",
             );
@@ -717,6 +778,9 @@ fn api_call(service: &McpServer, param: &ApiCallArgs) -> Result<ApiCallOutput, M
         .args
         .clone()
         .unwrap_or_else(|| Value::Object(JsonObject::new()));
+    // Screen the args before the verb stages anything: a verb reached through
+    // the router meets the same hostile-text gate as a direct call.
+    service.screen_payload(TOOL_API_CALL, &args.to_string())?;
     let outcome = verb.invoke(service, args);
     let pack = verb.pack().to_owned();
     service.dispatch(TOOL_API_CALL, |_| {
@@ -818,7 +882,9 @@ crate::e2_tool!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::insight::mcp_tools::{ApiSearchArgs, ApiSearchTool};
+    use crate::insight::mcp_tools::{
+        ApiDescribeArgs, ApiDescribeTool, ApiSearchArgs, ApiSearchTool,
+    };
     use crate::mcp::tool_names;
     use crate::scene_tools::{SceneBriefTool, TOOL_SCENE_BRIEF};
     use engine_editor::capability::Capability;
@@ -967,7 +1033,9 @@ mod tests {
         );
         assert_eq!(registry.verb_names(), vec![TOOL_SCENE_BRIEF]);
         assert_eq!(
-            registry.models_for(&std::iter::once("view").collect()).len(),
+            registry
+                .models_for(&std::iter::once("view").collect())
+                .len(),
             0,
             "the losing duplicate advertises nothing"
         );
@@ -1118,6 +1186,34 @@ mod tests {
     }
 
     #[test]
+    fn api_describe_lists_each_verb_args_with_required_marks() {
+        let server = server();
+        let describe = |path: &str| {
+            ApiDescribeTool::invoke(
+                &server,
+                ApiDescribeArgs {
+                    path: path.to_owned(),
+                },
+            )
+            .expect("verb describes")
+            .docs
+        };
+        let query = describe("scene.query");
+        assert!(query.contains("Args: "), "got: {query}");
+        assert!(
+            query.contains("kind:string!"),
+            "required mark, got: {query}"
+        );
+        assert!(query.contains("limit:integer "), "optional, got: {query}");
+        assert!(!query.contains("limit:integer!"), "got: {query}");
+        let brief = describe("scene.brief");
+        assert!(brief.contains("budget_bytes:integer"), "got: {brief}");
+        assert!(!brief.contains('!'), "no required arg, got: {brief}");
+        let no_args = rmcp::serde_json::json!({"type": "object", "properties": {}});
+        assert_eq!(arg_summary(no_args.as_object().expect("object")), "none");
+    }
+
+    #[test]
     fn api_call_dispatches_old_tools_and_refuses_unknown_verbs() {
         let server = server();
         let called = ApiCallTool::invoke(
@@ -1133,7 +1229,12 @@ mod tests {
         assert_eq!(called.result["revision"].as_u64(), Some(0));
         // Direct and indirect calls answer the same bytes.
         let direct = SceneBriefTool::invoke(&server, Default::default()).expect("brief runs");
-        let direct_json = rmcp::serde_json::to_value(direct).expect("output serializes");
+        let mut direct_json = rmcp::serde_json::to_value(direct).expect("output serializes");
+        // The repeat counter annotates the second identical read, not the answer.
+        direct_json
+            .as_object_mut()
+            .expect("brief output is an object")
+            .remove("repeat_count");
         assert_eq!(called.result, direct_json);
         // Unknown verbs refuse with the pack list and a recovery.
         let refused = ApiCallTool::invoke(

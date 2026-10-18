@@ -5,6 +5,7 @@ mod contacts;
 mod impact;
 mod ladder;
 mod materials;
+mod tether;
 
 use super::*;
 use engine_anim::contract::{AnimError, Joint, LocalPose, Skeleton};
@@ -93,6 +94,8 @@ fn generous() -> Caps {
         ccd_substeps: 1,
         blast_bodies: 4096,
         impact_bodies: 4096,
+        tethers: 64,
+        tether_nodes: 20,
     }
 }
 

@@ -11,12 +11,15 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 /// The knobs of the chosen tier, as the page prints them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TierFacts {
     /// `potato`, `web`, `comfort` or `high`.
     pub name: String,
-    /// Why this tier: `query`, `limits` or `default`.
+    /// Why this tier: `query`, `limits`, `probe` or `default`.
     pub why: String,
+    /// Median milliseconds of the startup probe, `None` when it did not run (a `?tier=` query,
+    /// a software adapter, a tab that stalled).
+    pub probe_ms: Option<f64>,
     pub scale_pct: u32,
     pub shadow_px: u32,
     pub cascades: u32,
@@ -30,18 +33,27 @@ pub struct TierFacts {
     pub physfx_contacts: u32,
     pub texture_px: u32,
     /// The knobs the page really applies (the rest are printed so the table is visible, but
-    /// nothing draws with them yet), comma separated.
+    /// nothing draws with them), comma separated. See [`WIRED`].
     pub wired: String,
 }
+
+/// The knobs the arena page applies to what it draws: the render scale and bloom (the page),
+/// the sun shadow map size, the cascade band, the AO pass, the texture size cap and the particle
+/// and decal pool caps (`Presenter::apply_quality`). `taa` is printed but not applied: the
+/// live frame has no temporal pass. The particle and decal pools are sized, but the live frame
+/// does not draw them yet.
+pub const WIRED: &str = "scale,bloom,shadow,cascades,gtao,tex,particles,decals";
 
 impl TierFacts {
     /// The line the page prints once at start: `tier=web why=default scale=100 ...`.
     #[must_use]
     pub fn line(&self) -> String {
         format!(
-            "tier={} why={} scale={} shadow={}x{} gtao={} taa={} particles={} decals={} physfx={}/{}/{} tex={} wired={}",
+            "tier={} why={} probe={} scale={} shadow={}x{} gtao={} taa={} particles={} decals={} physfx={}/{}/{} tex={} wired={}",
             self.name,
             self.why,
+            self.probe_ms
+                .map_or_else(|| "na".to_string(), |ms| format!("{ms:.1}")),
             self.scale_pct,
             self.shadow_px,
             self.cascades,
@@ -170,7 +182,26 @@ pub struct Ladder {
     next: usize,
     repeats_used: u32,
     misses: u32,
+    /// Windows in a row with a mean under [`HEADROOM_FRACTION`] of the budget.
+    headroom: u32,
+    /// Windows since the last restore (`u32::MAX`: none yet).
+    since_restore: u32,
+    failed_restores: u32,
+    restores: u32,
 }
+
+/// A window counts as headroom when its mean frame time is under this share of the budget.
+pub const HEADROOM_FRACTION: f64 = 0.8;
+
+/// Windows of headroom in a row (ten seconds) before the ladder gives one cut back.
+pub const HEADROOM_WINDOWS: u32 = 10;
+
+/// A cut that follows a restore within this many windows (thirty seconds) means the restore
+/// missed.
+pub const RESTORE_RETRY_WINDOWS: u32 = 30;
+
+/// Restores that missed before the ladder stops trying them for the rest of the run.
+pub const MAX_FAILED_RESTORES: u32 = 2;
 
 /// Windows over budget in a row before one cut.
 pub const MISSES_BEFORE_CUT: u32 = 2;
@@ -200,7 +231,63 @@ impl Ladder {
             next: 0,
             repeats_used: 0,
             misses: 0,
+            headroom: 0,
+            since_restore: u32::MAX,
+            failed_restores: 0,
+            restores: 0,
         }
+    }
+
+    /// Book-keeping of a cut just taken: the headroom count starts over, and a cut soon after a
+    /// restore marks that restore as missed.
+    fn took_cut(&mut self) {
+        self.headroom = 0;
+        if self.since_restore < RESTORE_RETRY_WINDOWS {
+            self.failed_restores += 1;
+        }
+    }
+
+    /// The cut taken last, `None` when none stands.
+    fn last_cut(&self) -> Option<Cut> {
+        let last = self.steps.checked_sub(1)?;
+        if self.repeats_used > 0 {
+            Some(Cut {
+                step: last,
+                repeat: self.repeats_used - 1,
+            })
+        } else if self.next > 0 {
+            Some(Cut {
+                step: self.next - 1,
+                repeat: 0,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// After a window that took no cut: the cut to give back once ten windows in a row ran under
+    /// 80 percent of the budget. Two restores that missed (a cut within thirty windows of the
+    /// restore) end restoring for the run. The caller undoes the returned cut.
+    pub fn restore_due(&mut self) -> Option<Cut> {
+        if self.headroom < HEADROOM_WINDOWS || self.failed_restores >= MAX_FAILED_RESTORES {
+            return None;
+        }
+        let cut = self.last_cut()?;
+        if cut.step + 1 == self.steps && self.repeats_used > 0 {
+            self.repeats_used = cut.repeat;
+        } else {
+            self.next = cut.step;
+        }
+        self.headroom = 0;
+        self.since_restore = 0;
+        self.restores += 1;
+        Some(cut)
+    }
+
+    /// Restores given so far, for the `restore=<n>` the page prints.
+    #[must_use]
+    pub fn restores(&self) -> u32 {
+        self.restores
     }
 
     /// Feed one window's mean frame time. A cut comes back after two misses in a row; a window
@@ -208,6 +295,12 @@ impl Ladder {
     pub fn observe(&mut self, frame_ms: f64) -> Option<Cut> {
         if frame_ms > STALL_MS {
             return None;
+        }
+        self.since_restore = self.since_restore.saturating_add(1);
+        if frame_ms.is_finite() && frame_ms <= self.budget_ms * HEADROOM_FRACTION {
+            self.headroom += 1;
+        } else {
+            self.headroom = 0;
         }
         if self.steps == 0 || frame_ms.is_nan() || frame_ms <= self.budget_ms {
             self.misses = 0;
@@ -225,6 +318,7 @@ impl Ladder {
                 repeat: 0,
             };
             self.next += 1;
+            self.took_cut();
             return Some(cut);
         }
         if self.repeats_used > self.last_repeats {
@@ -236,6 +330,7 @@ impl Ladder {
         };
         self.repeats_used += 1;
         self.next = last;
+        self.took_cut();
         Some(cut)
     }
 
@@ -270,6 +365,33 @@ pub fn scale_after_cut(start_pct: u32, repeat: u32, floor_pct: u32) -> u32 {
     start_pct.saturating_sub(cut).max(floor_pct.min(start_pct))
 }
 
+/// The render scale once the `repeat`-th scale cut is given back: the scale before that cut
+/// (the tier's own for the first one).
+#[must_use]
+pub fn scale_after_restore(start_pct: u32, repeat: u32, floor_pct: u32) -> u32 {
+    match repeat.checked_sub(1) {
+        Some(before) => scale_after_cut(start_pct, before, floor_pct),
+        None => start_pct,
+    }
+}
+
+/// `tier=web restore=shadows applied=no scale=100 restores=1`: the line a given-back cut prints.
+#[must_use]
+pub fn restore_line(
+    tier: &str,
+    name: &str,
+    repeat: u32,
+    applied: bool,
+    scale_pct: u32,
+    restores: u32,
+) -> String {
+    let line = cut_line(tier, name, repeat, applied, scale_pct);
+    format!(
+        "{} restores={restores}",
+        line.replacen("cut=", "restore=", 1)
+    )
+}
+
 /// `tier=web cut=shadows scale=100`: the loud line a cut prints.
 #[must_use]
 pub fn cut_line(tier: &str, name: &str, repeat: u32, applied: bool, scale_pct: u32) -> String {
@@ -293,6 +415,7 @@ mod tests {
         TierFacts {
             name: "web".into(),
             why: "default".into(),
+            probe_ms: Some(12.34),
             scale_pct: 100,
             shadow_px: 1024,
             cascades: 2,
@@ -304,7 +427,7 @@ mod tests {
             physfx_ragdolls: 4,
             physfx_contacts: 512,
             texture_px: 1024,
-            wired: "scale,bloom".into(),
+            wired: WIRED.into(),
         }
     }
 
@@ -312,15 +435,30 @@ mod tests {
     fn the_tier_line_starts_with_tier_equals_name_and_is_one_line() {
         let line = facts().line();
         assert!(
-            line.starts_with("tier=web why=default scale=100 "),
+            line.starts_with("tier=web why=default probe=12.3 scale=100 "),
             "{line}"
         );
         assert!(line.contains("shadow=1024x2 gtao=half taa=off"), "{line}");
         assert!(
-            line.contains("physfx=192/4/512 tex=1024 wired=scale,bloom"),
+            line.contains("physfx=192/4/512 tex=1024 wired=scale,bloom,shadow,"),
             "{line}"
         );
         assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn a_probe_that_did_not_run_prints_na_and_the_wired_list_names_every_applied_knob() {
+        let mut f = facts();
+        f.probe_ms = None;
+        assert!(f.line().contains(" probe=na scale=100 "), "{}", f.line());
+        let wired: Vec<&str> = WIRED.split(',').collect();
+        for knob in ["shadow", "cascades", "gtao", "tex", "particles", "decals"] {
+            assert!(wired.contains(&knob), "{knob} is applied but not listed");
+        }
+        assert!(
+            !wired.contains(&"taa"),
+            "the live frame has no temporal pass"
+        );
     }
 
     #[test]
@@ -407,6 +545,103 @@ mod tests {
         assert_eq!(l.observe(60.0), None);
     }
 
+    /// Feed `n` windows of `ms`; the last cut or restore that came back.
+    fn windows(l: &mut Ladder, n: u32, ms: f64) -> (Option<Cut>, Option<Cut>) {
+        let mut out = (None, None);
+        for _ in 0..n {
+            match l.observe(ms) {
+                Some(cut) => out.0 = Some(cut),
+                None => {
+                    if let Some(back) = l.restore_due() {
+                        out.1 = Some(back);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn ten_windows_of_headroom_give_the_last_cut_back_and_not_before() {
+        let mut l = Ladder::new(6, 2, 33.4);
+        assert_eq!(windows(&mut l, 4, 50.0).0, Some(Cut { step: 1, repeat: 0 }));
+        assert_eq!(
+            windows(&mut l, 9, 20.0),
+            (None, None),
+            "nine windows are not ten"
+        );
+        assert_eq!(windows(&mut l, 1, 20.0).1, Some(Cut { step: 1, repeat: 0 }));
+        assert_eq!(l.restores(), 1);
+        // Not on the heels of the cut it gave back, and not with the frame inside the dead band.
+        assert_eq!(windows(&mut l, 9, 20.0).1, None);
+        assert_eq!(
+            windows(&mut l, 1, 30.0).1,
+            None,
+            "30 ms is under budget but not under 80 percent"
+        );
+        assert_eq!(
+            windows(&mut l, 10, 20.0).1,
+            Some(Cut { step: 0, repeat: 0 })
+        );
+        assert_eq!(
+            windows(&mut l, 30, 20.0).1,
+            None,
+            "nothing is left to give back"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_misses_twice_is_not_tried_again() {
+        let mut l = Ladder::new(6, 2, 33.4);
+        windows(&mut l, 2, 50.0);
+        for round in 0..2 {
+            assert!(windows(&mut l, 10, 20.0).1.is_some(), "restore {round}");
+            // Slow again right after: the cut comes back and the restore counts as missed.
+            assert!(windows(&mut l, 2, 50.0).0.is_some(), "cut {round}");
+        }
+        assert_eq!(
+            windows(&mut l, 40, 20.0).1,
+            None,
+            "two misses end restoring"
+        );
+        assert_eq!(l.restores(), 2);
+    }
+
+    #[test]
+    fn a_restore_that_holds_does_not_count_as_missed() {
+        let mut l = Ladder::new(6, 2, 33.4);
+        windows(&mut l, 2, 50.0);
+        assert!(windows(&mut l, 10, 20.0).1.is_some());
+        // A cut more than 30 windows after the restore is a new slowdown, not a missed restore.
+        assert_eq!(windows(&mut l, 35, 25.0), (None, None));
+        for round in 0..4 {
+            windows(&mut l, 2, 50.0);
+            assert!(
+                windows(&mut l, 10, 20.0).1.is_some(),
+                "restoring is still on in round {round}"
+            );
+            windows(&mut l, 35, 25.0);
+        }
+    }
+
+    #[test]
+    fn the_repeated_last_step_comes_back_in_reverse_order() {
+        let mut l = Ladder::new(2, 2, 33.4);
+        let mut taken = Vec::new();
+        while !l.spent() {
+            if let (Some(c), _) = windows(&mut l, 2, 60.0) {
+                taken.push((c.step, c.repeat));
+            }
+        }
+        assert_eq!(taken, [(0, 0), (1, 0), (1, 1), (1, 2)]);
+        let mut back = Vec::new();
+        while let (_, Some(c)) = windows(&mut l, 10, 5.0) {
+            back.push((c.step, c.repeat));
+        }
+        assert_eq!(back, [(1, 2), (1, 1), (1, 0), (0, 0)]);
+        assert_eq!(l.restores(), 4);
+    }
+
     #[test]
     fn a_stalled_window_is_ignored_not_counted() {
         let mut l = Ladder::new(6, 0, 33.4);
@@ -456,6 +691,21 @@ mod tests {
         for bad in [f64::NAN, f64::INFINITY, -5.0] {
             assert_eq!(whole_ms(bad), 0, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_given_back_scale_cut_returns_to_the_scale_before_it() {
+        assert_eq!(scale_after_restore(100, 0, 60), 100);
+        assert_eq!(scale_after_restore(100, 1, 60), 85);
+        assert_eq!(scale_after_restore(100, 2, 60), 70);
+        assert_eq!(
+            restore_line("web", "render_scale", 1, true, 85, 2),
+            "tier=web restore=render_scale repeat=1 applied=yes scale=85 restores=2"
+        );
+        assert_eq!(
+            restore_line("web", "shadows", 0, false, 100, 1),
+            "tier=web restore=shadows applied=no scale=100 restores=1"
+        );
     }
 
     #[test]

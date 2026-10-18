@@ -53,15 +53,19 @@ pub mod mirror_craft;
 pub mod mirror_gdb;
 pub mod mirror_kit;
 pub mod mirror_logic;
+mod norm_score;
 /// Shared parse errors and tokenizer core for the fixture grammars.
 pub mod parse;
 pub mod probe_sync;
 pub mod rating;
 pub mod reachability;
+/// Checksummed sparse rebuilds: per-tick checksums plus sparse snapshots (EV16).
+pub mod rebuild;
 pub mod replay;
 pub mod scenario_shape;
 pub mod seeded_bug;
 pub mod spatial_eval;
+pub mod spatial_frame;
 pub mod spatial_shapes;
 pub mod tasks;
 pub mod tournament;

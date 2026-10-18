@@ -17,7 +17,7 @@
 //!
 //! Std-only. Never imports scene or editor types.
 
-use super::checks::relation_cycle_finding;
+use super::checks::{layout_span_without, relation_cycle_finding};
 use super::index::{pos_known, size_known, to_cm};
 use super::navcheck::{DOOR_DOUBLE_CM, DOOR_FRAME_CM};
 use super::place::GRID_CM;
@@ -34,8 +34,8 @@ const WORLD_BOUND_CM: i32 = 10_000;
 /// Outer yellow line. Clamp repairs target this so one nudge clears both
 /// `bounds` and `oob99`.
 const OOB99_CM: i32 = 9_900;
-/// Largest single dimension in cm. Mirrors the `giantObject` red line and
-/// caps [`Repair::size_cm`] payloads.
+/// Largest single dimension in cm a resize payload may carry ([`Repair::size_cm`]).
+/// A giantObject resize also stays within the span of the layout around it.
 const GIANT_CM: i32 = 5_000;
 /// Fallback full-extent size in cm for unknown or degenerate dimensions.
 const DEFAULT_SIZE_CM: i32 = 100;
@@ -343,11 +343,17 @@ fn suggest_resize(
             vec![finding.a],
         );
     };
+    let cap = if finding.check == "giantObject" {
+        let flat: Vec<Actor> = actors.values().map(|a| (*a).clone()).collect();
+        layout_span_without(&flat, t.id).map_or(GIANT_CM, |s| s.clamp(1, GIANT_CM))
+    } else {
+        GIANT_CM
+    };
     let fix = |v: f32| -> i32 {
         if !v.is_finite() || v <= 0.0 {
-            DEFAULT_SIZE_CM
+            DEFAULT_SIZE_CM.min(cap)
         } else {
-            to_cm(v).abs().clamp(1, GIANT_CM)
+            to_cm(v).abs().clamp(1, cap)
         }
     };
     let size_cm = [fix(t.sx), fix(t.sy), fix(t.sz)];
@@ -936,7 +942,8 @@ mod tests {
             y: 30.0,
             ..resting(0, "hall_01", 0.0, 0.0)
         };
-        let actors = vec![giant];
+        // A crate 40 m away: the hall is giant against the layout around it.
+        let actors = vec![giant, resting(1, "crate_01", 40.0, 0.0)];
         let report = super::super::run(&actors);
         assert_eq!(report.count("giantObject"), 1);
         let finding = report

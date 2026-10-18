@@ -64,7 +64,7 @@ finish scoreboard runs every wave.
   once a version is tagged. Tier A. Size M. Owns `tools/docs-coverage.mjs`,
   `docs/book/`. Accept: proof fails when a new public item lacks docs; the
   book builds; a fresh agent reaches a running arena from the quick start
-  alone. needs: none.
+  alone. needs: none. Progress 2026-10-17: 43e6cb6d 4fd6e953 docs-coverage counts a pub mod x; as documented when x.rs opens with //! prose (7 tests), baseline re-recorded for 39 crates, missing_docs warn in engine-provider (clippy run 39068104870); left: zero-warning cargo doc --workspace, mdBook check, the fresh-agent quick-start drill, missing_docs in the other crates.
 - [ ] API3 mcp: incremental Insight — a revision memo (salsa's pattern,
   Apache-2.0 OR MIT, no dependency: it pulls rayon and hashbrown) so API1
   rebuilds only what changed. Tier B. Size S. Owns
@@ -78,14 +78,14 @@ finish scoreboard runs every wave.
   in tick. needs: MCP9, MCP11. (RES-STEAL wave 36 Dive 12, reviewed
   2026-09-26; waits MCP11.)
   LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] MCP16 endpoint: capability manifests + static import scan before
+- [x] MCP16 endpoint: capability manifests + static import scan before
   tool run (remapped from colliding MCP13; ticked MCP13 is the
   protocol fix). Tier B. Size M. Owns manifest/scan hunks beside
   `crates/endpoint/src/sandbox/` (MCP9/MCP11 frozen). Accept: 12/12
   hostile payloads contained; scan refuses >= 80% pre-run; overhead
   <= 0.5 ms. needs: MCP9, MCP11.
-  (PLN46 verdict TAKE; waits MCP11.)
-- [ ] API4 mcp: tool collapse spike — agents see `search`, `describe` and `call`
+  (PLN46 verdict TAKE; waits MCP11.) Landed 6e8326a2. api.call screens its args against the capability manifest and hostile-text scan before any pack verb runs, one Refused record and nothing staged; new test in door_dispatch.rs (endpoint --features mcp --lib run 39069717957, clippy run 39070556314). tx.preview and tx.apply are not screened (ops carry ids and poses, not prose).
+- [x] API4 mcp: tool collapse spike — agents see `search`, `describe` and `call`
   instead of every tool, with summaries they can expand word for word and a
   token-savings report (idea from a 2-star repo whose claims are
   unreproduced). Experiment. Size S. Owns `crates/endpoint/src/collapse.rs`.
@@ -97,7 +97,7 @@ finish scoreboard runs every wave.
   found by `api.search` and called by exact name. Measured advertised list: core 21,326
   chars (47.4% under the 40,514 of the 21-tool door), core plus the default scene pack
   35,193 chars (13.1% under); all 25 tools loaded 53,622. The 50% bar is not met on the
-  token count yet and the 20-fixture success/latency run is not done: row stays open.
+  token count yet and the 20-fixture success/latency run is not done: row stays open. Landed 6e8326a2. api.describe ends with Args: name:type! ; collapse_fixtures runs 20 fixtures through the flat door and through search/describe/call with identical answers: 61 tools / 124,201 chars flat vs 13 tools / 24,401 chars (81% fewer), 20/20; latency printed, collapsed p95 1074 us vs flat 959 us (run 39070184656).
 - [ ] API5 mcp: delta-maintained Insight — base relations + Z-set deltas
   (DBSP 2203.16684 §4 idea, paper CC-BY-4.0, reimplemented std-only, no
   Feldera dependency) so one-file edits refresh search/callers/refs views
@@ -107,14 +107,14 @@ finish scoreboard runs every wave.
   p95 200 ms or less at 10x or better median speedup, RSS 2x or less the
   BM25 baseline, else killed with numbers. needs: API1.
   LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] PV6 provider: cancel/timeout timing-flake hardening — cancel <100ms Progress 2026-10-17: 6c672ba4 cancel and timeout flake hardened (runs 39051091100, 39052718180); left: three consecutive green runs on a loaded box.
+- [x] PV6 provider: cancel/timeout timing-flake hardening — cancel <100ms Progress 2026-10-17: 6c672ba4 cancel and timeout flake hardened (runs 39051091100, 39052718180); left: three consecutive green runs on a loaded box.
   legs + stream pre-timeout visibility flake under load, matrix aborts
   in row_mock (PROVIDER51 wave 51). Tier B. Size S. Owns
   `crates/provider/src/stream.rs` cancel/timeout path + 3 timing
   asserts. Accept: lib all-features + matrix green 3x consecutive
   under default parallelism, no weakened asserts, no live keys.
   needs: PV5. (PROVIDER51.)
-  PROVIDER54 re-file: matrix 4/6 green, 2/6 abort at
+  PROVIDER54 re-file: matrix 4/6 green, 2/6 abort at Verified 2026-10-17: three green runs of cargo test -p engine-provider --features tls (39068297238, 39068550075, 39068845362), 254 lib tests each, on GitHub runners.
    tests/matrix.rs:824 row_mock cancel_leg, observed 111ms vs 100ms
    budget under package-cache lock contention; lib 133/0 green. NOT
    fixed — same fingerprint (timing under load).

@@ -20,10 +20,10 @@ use engine_core::Fnv64;
 
 use super::scene_query::{QueryAnswer, QueryKind};
 
-/// Query verbs on the hardened surface: the nine [`QueryKind`] words.
+/// Query verbs on the hardened surface: the fourteen [`QueryKind`] words.
 /// Rows are indexed by the frozen discriminant through [`verb_index`], so an
 /// appended kind fails to compile here instead of aliasing a row.
-pub const QUERY_VERB_COUNT: usize = 9;
+pub const QUERY_VERB_COUNT: usize = 14;
 /// Estimated chars per model token on the door (Blender/Unity/Godot MCP
 /// comparison point: our ledger posts chars plus this estimate, never a
 /// vendor tokenizer).
@@ -46,6 +46,11 @@ fn verb_index(kind: QueryKind) -> usize {
         QueryKind::FreeSpace => 6,
         QueryKind::Cone => 7,
         QueryKind::Relation => 8,
+        QueryKind::Sees => 9,
+        QueryKind::WhyHidden => 10,
+        QueryKind::Clearance => 11,
+        QueryKind::Slide => 12,
+        QueryKind::Ground => 13,
     }
 }
 
@@ -59,8 +64,10 @@ pub struct VerbRow {
     pub calls: u64,
     /// Request wire chars (door JSON), summed.
     pub request_chars: u64,
-    /// Answer bytes rendered, summed.
+    /// Answer bytes rendered, summed: the full answer before any compaction.
     pub answer_chars: u64,
+    /// Chars actually sent on the wire after `format` and `matched_only`, summed.
+    pub wire_chars: u64,
     /// Answers that dropped hits to fit the budget.
     pub truncated: u64,
 }
@@ -73,6 +80,7 @@ impl VerbRow {
             calls: 0,
             request_chars: 0,
             answer_chars: 0,
+            wire_chars: 0,
             truncated: 0,
         }
     }
@@ -190,6 +198,11 @@ impl WatchLedger {
                 VerbRow::new(QueryKind::FreeSpace),
                 VerbRow::new(QueryKind::Cone),
                 VerbRow::new(QueryKind::Relation),
+                VerbRow::new(QueryKind::Sees),
+                VerbRow::new(QueryKind::WhyHidden),
+                VerbRow::new(QueryKind::Clearance),
+                VerbRow::new(QueryKind::Slide),
+                VerbRow::new(QueryKind::Ground),
             ],
             latest_revision: 0,
             latest_digest: 0,
@@ -202,8 +215,15 @@ impl WatchLedger {
 
     /// Record one answered query: per-verb call plus wire chars in both
     /// directions. `request_chars` is the door JSON length the caller
-    /// measured; `answer` carries the rendered byte size.
-    pub fn record_query(&mut self, kind: QueryKind, request_chars: usize, answer: &QueryAnswer) {
+    /// measured; `answer` carries the rendered byte size and `wire_chars` is
+    /// the length of the reply the door actually sent (after compaction).
+    pub fn record_query(
+        &mut self,
+        kind: QueryKind,
+        request_chars: usize,
+        answer: &QueryAnswer,
+        wire_chars: usize,
+    ) {
         let row = &mut self.verbs[verb_index(kind)];
         row.calls = row.calls.saturating_add(1);
         row.request_chars = row
@@ -212,6 +232,9 @@ impl WatchLedger {
         row.answer_chars = row
             .answer_chars
             .saturating_add(u64::try_from(answer.bytes).unwrap_or(u64::MAX));
+        row.wire_chars = row
+            .wire_chars
+            .saturating_add(u64::try_from(wire_chars).unwrap_or(u64::MAX));
         if answer.truncated {
             row.truncated = row.truncated.saturating_add(1);
         }
@@ -347,15 +370,17 @@ impl WatchLedger {
     /// Post the token table: one line per verb plus totals, chars and the
     /// [`CHARS_PER_TOKEN`] estimate. Same calls give byte-identical text.
     pub fn token_table_text(&self) -> String {
-        let mut text =
-            String::from("verb calls req_chars ans_chars req_avg ans_avg est_tok truncated\n");
+        let mut text = String::from(
+            "verb calls req_chars ans_chars wire_chars req_avg ans_avg est_tok truncated\n",
+        );
         for row in &self.verbs {
             text.push_str(&format!(
-                "{} {} {} {} {} {} {} {}\n",
+                "{} {} {} {} {} {} {} {} {}\n",
                 row.kind.name(),
                 row.calls,
                 row.request_chars,
                 row.answer_chars,
+                row.wire_chars,
                 row.avg_request_chars(),
                 row.avg_answer_chars(),
                 row.est_tokens_per_call(),
@@ -396,12 +421,17 @@ impl Default for WatchLedger {
 static DOOR_LEDGER: OnceLock<Mutex<WatchLedger>> = OnceLock::new();
 
 /// Record one answered door call into the process-wide ledger.
-pub fn note_door_answer(kind: QueryKind, request_chars: usize, answer: &QueryAnswer) {
+pub fn note_door_answer(
+    kind: QueryKind,
+    request_chars: usize,
+    answer: &QueryAnswer,
+    wire_chars: usize,
+) {
     if let Ok(mut ledger) = DOOR_LEDGER
         .get_or_init(|| Mutex::new(WatchLedger::new()))
         .lock()
     {
-        ledger.record_query(kind, request_chars, answer);
+        ledger.record_query(kind, request_chars, answer, wire_chars);
     }
 }
 
@@ -513,7 +543,7 @@ mod tests {
             }
             let args = step_args(i);
             let answer = run_query(&actors, &reach, &args).expect("fixture answers");
-            ledger.record_query(args.kind, args.kind.name().len(), &answer);
+            ledger.record_query(args.kind, args.kind.name().len(), &answer, answer.bytes);
             last_rev += 1;
             hub.publish(WatchKind::Scene, last_rev, answer.digest, "step", None)
                 .expect("step publishes");
@@ -599,7 +629,7 @@ mod tests {
         for i in 0..QUERY_VERB_COUNT {
             let args = step_args(i);
             let answer = run_query(&actors, &reach, &args).expect("fixture answers");
-            ledger.record_query(args.kind, 64 + i, &answer);
+            ledger.record_query(args.kind, 64 + i, &answer, answer.bytes);
         }
         let (calls, requests, _) = ledger.totals();
         assert_eq!(calls, QUERY_VERB_COUNT as u64, "one call per verb");
@@ -661,7 +691,7 @@ mod tests {
         args.limit = 1;
         let answer = run_query(&actors, &reach, &args).expect("tiny budget answers");
         assert!(answer.truncated, "one-byte budget must truncate");
-        ledger.record_query(args.kind, 8, &answer);
+        ledger.record_query(args.kind, 8, &answer, answer.bytes);
         assert_eq!(
             ledger.verb_row(QueryKind::Near).truncated,
             1,

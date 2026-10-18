@@ -34,8 +34,8 @@ fn frame_pair_deterministic() {
     assert_eq!(a, b, "same inputs frame the same pair");
     assert_eq!(
         a.look_m,
-        Vec3::new(-0.25, 0.25, 1.0),
-        "look is the midpoint"
+        Vec3::new(-0.5, 0.25, 0.8),
+        "look is 60% of the way from the attacker to the defender, at mean height"
     );
     let solo = frame_pair(focus, None, &params).expect("solo frames");
     assert_eq!(solo.look_m, focus, "solo look is the focus");

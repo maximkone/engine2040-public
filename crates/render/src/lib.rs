@@ -300,6 +300,11 @@ pub mod shadow_cluster;
 /// consumer is the window twin forward bind and the capture bundle.
 pub mod twin_shadow;
 
+/// Live contact shade under the fighters' feet: the feet block the forward
+/// shader reads (`shadow.feet`), its pack and the CPU oracle of
+/// `sun_contact_factor`. Std-only; fed by `Presenter::set_contact_feet`.
+pub mod contact_feet;
+
 /// Twin fighter draw bind (RL26): one box body per fighter slot (the hero
 /// stand-in plus staged opponents) for the window twin's
 /// `--fighters 8 --scene arena` frame list. Bind glue over the v1 draw
@@ -326,6 +331,13 @@ pub mod twin_arena;
 /// GPU descriptors and the forward-pass sampling chunk behind `window`.
 /// Consumers: WIN1/ED1 material frame, Q1 chart.
 pub mod ibl;
+
+/// The arena's own day sky as the live image-based light (replaces the photo
+/// studio HDRI the sand used to reflect: white softbox streaks, straight-edged
+/// white patches). Behind `v1` like the bake it feeds; consumer is the window
+/// presenter's one-time IBL bake.
+#[cfg(feature = "v1")]
+pub mod ibl_arena_env;
 
 /// Sword ribbon ring (RL53 slice 1): the sim's integer sweep segments ringed
 /// and staged as a vert strip; consumer is the `crates/game` trail feed.

@@ -286,6 +286,13 @@ impl NavMesh {
     pub fn cell_size_m(&self) -> f32 {
         self.cell_mm as f32 / MM_PER_M
     }
+    /// World `[x, z]` center in meters of grid-local cell `cell` (as listed by
+    /// [`Polygon::cells`]). Cells outside the grid still map by the same
+    /// formula; callers pass cells they read from a polygon.
+    pub fn cell_center_m(&self, cell: [u32; 2]) -> [f32; 2] {
+        let c = self.cell_center((cell[0], cell[1]));
+        [c[0], c[2]]
+    }
     /// Walkable area of polygon `id` in square meters, from the shoelace
     /// formula over its boundary edges. An edge shared with a cell of the same
     /// polygon is skipped, so holes subtract with no special case. None when

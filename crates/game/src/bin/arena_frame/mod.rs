@@ -107,12 +107,12 @@ pub(super) fn open_cue_feed(cue_opt: Option<Arc<CueBank>>, muted: bool) -> CueFe
             (None, Some(output), notice)
         }
         (AudioSink::Offline(engine), Some(err)) => (
-            Some(engine),
+            Some(*engine),
             None,
             format!("audio degraded: {err}; cue engine renders offline"),
         ),
         (AudioSink::Offline(engine), None) => (
-            Some(engine),
+            Some(*engine),
             None,
             engine_game::windowed::MUTED_AUDIO_NOTICE.to_string(),
         ),
@@ -274,7 +274,71 @@ pub(super) fn exit_reached(
     frames.is_some_and(|wanted| frames_presented >= wanted)
 }
 
+/// Floor distance in meters past which the rival counts as far and the window
+/// title walks the player toward them. A melee starts well inside this.
+const RIVAL_FAR_M: f32 = 10.0;
+
+/// The window title: the controls, with the rival hint first when there is one
+/// (a narrow title bar clips the tail, and the hint is the part that matters).
+pub(super) fn window_title(hint: Option<&str>) -> String {
+    match hint {
+        Some(hint) => format!("engine2040 arena | {hint} | {CONTROLS_LINE}"),
+        None => format!("engine2040 arena | {CONTROLS_LINE}"),
+    }
+}
+
+/// The opening hint: while the nearest other fighter stands farther than
+/// [`RIVAL_FAR_M`] from the human, say how to reach them and how far they are.
+/// `None` once they are close, or when there is nobody to walk to. The spawn
+/// is 38 m across the pit, so the first seconds are a walk. Pure over the views.
+pub(super) fn rival_hint(views: &[engine_game::FighterView], human: u8) -> Option<String> {
+    let me = views.iter().find(|view| view.slot == human)?;
+    let near = views
+        .iter()
+        .filter(|view| view.slot != human)
+        .map(|view| (view.pos_m[0] - me.pos_m[0]).hypot(view.pos_m[2] - me.pos_m[2]))
+        .min_by(f32::total_cmp)?;
+    (near.is_finite() && near > RIVAL_FAR_M)
+        .then(|| format!("walk toward the rival with W ({near:.0} m away)"))
+}
+
 impl ArenaApp {
+    /// The human slot's input for `tick`. A bound capture tape owns the slot
+    /// first, then the staged fight script and the `--spear-demo` script (all
+    /// three speak world axes and are used as they are). Otherwise it is the
+    /// keyboard, merged with the pad when one is held, made camera-relative so
+    /// W walks where the camera looks and aimed at the nearest living rival so
+    /// a standing swing and the spear go at them. The spear key rides last.
+    fn human_input(&mut self, tick: u32, human: FighterId) -> FighterInput {
+        let staged = self
+            .capture
+            .as_mut()
+            .and_then(|slot| slot.tape.input_for_tick(tick));
+        let input = match staged {
+            // Tape-bound capture: the tape owns the human slot this tick.
+            Some(input) => input,
+            None if self.staged.is_some() => staged_fight_input(tick, human),
+            None if self.spear.demo => self.spear_demo_input(tick, human),
+            // No pad held: the keyboard path exactly as before. A held pad
+            // or deflected stick merges into the same single input.
+            None if self.pad.is_idle() => self.aim_at_rival(self.camera_relative(
+                fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings),
+            )),
+            None => {
+                let held = self
+                    .pad
+                    .fighter_input(tick, human, &self.pressed, &self.bindings)
+                    // The slot is the session's own human, so the table cannot
+                    // refuse; the keyboard input is the safe answer if it ever did.
+                    .unwrap_or_else(|_| {
+                        fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings)
+                    });
+                self.aim_at_rival(self.camera_relative(held))
+            }
+        };
+        self.with_spear_key(input)
+    }
+
     /// Run `steps` fixed ticks for the human slot: input, feed and mixer
     /// pumps, staged and look tallies, then the crash ring.
     pub(super) fn run_sim_ticks(&mut self, steps: u32, human: FighterId) {
@@ -283,28 +347,7 @@ impl ArenaApp {
                 break;
             }
             let tick = self.app.cursor();
-            let staged = self
-                .capture
-                .as_mut()
-                .and_then(|slot| slot.tape.input_for_tick(tick));
-            let input = match staged {
-                // Tape-bound capture: the tape owns the human slot this tick.
-                Some(input) => input,
-                None if self.staged.is_some() => staged_fight_input(tick, human),
-                // No pad held: the keyboard path exactly as before. A held pad
-                // or deflected stick merges into the same single input.
-                None if self.pad.is_idle() => {
-                    fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings)
-                }
-                None => self
-                    .pad
-                    .fighter_input(tick, human, &self.pressed, &self.bindings)
-                    // The slot is the session's own human, so the table cannot
-                    // refuse; the keyboard input is the safe answer if it ever did.
-                    .unwrap_or_else(|_| {
-                        fighter_input_from_pressed(tick, human, &self.pressed, &self.bindings)
-                    }),
-            };
+            let input = self.human_input(tick, human);
             self.check_forced_tick(tick);
             let outcome = {
                 self.app.tick_into(input, &mut self.tick_scratch);
@@ -348,9 +391,14 @@ impl ArenaApp {
             if let Some(tally) = self.staged.as_mut() {
                 tally.observe(&self.tick_scratch.cues);
             }
+            self.feel.observe(&self.tick_scratch.cues);
+            self.observe_spear_events(tick);
             if let Some(look) = self.look.as_mut() {
                 let (views, hp) = (self.app.fighter_views(), self.app.hp());
                 observe_tick_with_sim(look, tick, views, hp, &self.tick_scratch.cues, None);
+                if let Some(scene) = self.spear.scene.as_mut() {
+                    scene.observe_tick(look, self.app.live_match(), views);
+                }
                 // EG45: poll authoritative balance gaits into the pose (presentation only).
                 look.observe_live_balances(
                     self.app.live_match(),

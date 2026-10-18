@@ -32,6 +32,7 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use crate::diagnostics::{DiagnosticsError, DiagnosticsStore};
 use crate::workloads::{AiDecide, ArenaTick, DestructionStep, PhysicsStep};
 
 // ---------------------------------------------------------------------------
@@ -125,6 +126,11 @@ pub enum ProfileError {
     },
     /// Paired rerun diverged; any hash mismatch kills the receipt.
     DivergedPair { hash_a: u64, hash_b: u64 },
+    /// The frame-time diagnostics series refused a sample or its setup.
+    Diagnostics {
+        /// Rendered diagnostics error.
+        reason: String,
+    },
 }
 
 impl Display for ProfileError {
@@ -160,11 +166,20 @@ impl Display for ProfileError {
             Self::DivergedPair { hash_a, hash_b } => {
                 write!(f, "paired rerun diverged: {hash_a:016x} != {hash_b:016x}")
             }
+            Self::Diagnostics { reason } => write!(f, "diagnostics refused: {reason}"),
         }
     }
 }
 
 impl std::error::Error for ProfileError {}
+
+impl From<DiagnosticsError> for ProfileError {
+    fn from(err: DiagnosticsError) -> Self {
+        Self::Diagnostics {
+            reason: err.to_string(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Scopes: one puffin scope per canonical workload, compiled out without `profile`.
@@ -524,9 +539,15 @@ pub struct PassStats {
     pub quantiles: Quantiles,
 }
 
+/// Diagnostics series the capture feeds once per frame (see `crate::diagnostics`).
+pub const FRAME_TIME_SERIES: &str = "frame_time";
+/// Smoothing time for [`FRAME_TIME_SERIES`] in micros: about six 60 Hz frames.
+pub const FRAME_TIME_SMOOTHING_US: u64 = 100_000;
+
 /// Frame-capture report: quantiles per system and per pass, naming the
-/// costliest of each by p50. Numbers are this machine's wall clock;
-/// `gpu_ms` everywhere is `None` until the operator's reference-GPU run.
+/// costliest of each by p50, plus the smoothed frame time. Numbers are this
+/// machine's wall clock; `gpu_ms` everywhere is `None` until the operator's
+/// reference-GPU run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrameReport {
     /// Frames captured.
@@ -543,15 +564,20 @@ pub struct FrameReport {
     pub costliest_pass: &'static str,
     /// Its CPU p50 in ms.
     pub costliest_pass_p50_ms: f64,
+    /// Row text of the `frame_time` series: latest, smoothed and mean ms.
+    pub frame_time_row: String,
+    /// Smoothed frame time over the capture, ms (time-aware average).
+    pub frame_time_smoothed_ms: f64,
 }
 
 impl FrameReport {
-    /// Human-readable lines for the perf report: one row per system and
-    /// pass plus the two costliest verdicts. Numbers vary per machine; names
-    /// and units (`ms`, span/pass keys) are stable.
+    /// Human-readable lines for the perf report: the frame-time row, one row
+    /// per system and pass, plus the two costliest verdicts. Numbers vary per
+    /// machine; names and units (`ms`, span/pass keys) are stable.
     #[must_use]
     pub fn summary(&self) -> String {
         let mut out = format!("frame_capture frames={}\n", self.frames);
+        out.push_str(&format!("{}\n", self.frame_time_row));
         for row in &self.systems {
             out.push_str(&format!(
                 "system {} p50={:.3}ms p95={:.3}ms p99={:.3}ms\n",
@@ -1172,8 +1198,10 @@ pub fn capture(frames: u32) -> Result<FrameReport, ProfileError> {
     let mut rl2_ms = Vec::with_capacity(capacity);
     let mut rp1_taa_ms = Vec::with_capacity(capacity);
     let mut rp1_post_ms = Vec::with_capacity(capacity);
+    let mut diagnostics = DiagnosticsStore::new(&[(FRAME_TIME_SERIES, FRAME_TIME_SMOOTHING_US)])?;
 
     for _ in 0..frames {
+        let frame_started = Instant::now();
         begin_frame();
         scope!("perf.arena_tick");
         let started = Instant::now();
@@ -1233,6 +1261,10 @@ pub fn capture(frames: u32) -> Result<FrameReport, ProfileError> {
         let started = Instant::now();
         std::hint::black_box(probe_rp1_post(&probes)?);
         rp1_post_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+
+        // The frame's own duration is also its time step to the next frame.
+        let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
+        let _accepted = diagnostics.push_ms(FRAME_TIME_SERIES, frame_ms, frame_ms)?;
     }
 
     let system_rows = [
@@ -1263,6 +1295,24 @@ pub fn capture(frames: u32) -> Result<FrameReport, ProfileError> {
             quantiles: Quantiles::of(pass.name(), samples)?,
         });
     }
+    assemble_report(frames, systems, passes, &diagnostics)
+}
+
+/// Builds the frame report from the per-system and per-pass rows and the
+/// capture's diagnostics store. The one owner of the costliest verdicts and
+/// of the frame-time line, so the printed report always reads the store.
+/// Fails with [`ProfileError::EmptySamples`] when a row set is empty or the
+/// frame-time series holds no sample.
+fn assemble_report(
+    frames: u32,
+    systems: Vec<SystemStats>,
+    passes: Vec<PassStats>,
+    diagnostics: &DiagnosticsStore,
+) -> Result<FrameReport, ProfileError> {
+    let frame_time = diagnostics.series(FRAME_TIME_SERIES)?;
+    let smoothed = frame_time.smoothed().ok_or(ProfileError::EmptySamples {
+        what: FRAME_TIME_SERIES,
+    })?;
     // Costliest by p50; ties keep report order, so the verdict is stable.
     // Names and p50s copy out first so the rows below can move into the report.
     let top_system = systems
@@ -1284,12 +1334,54 @@ pub fn capture(frames: u32) -> Result<FrameReport, ProfileError> {
         costliest_system_p50_ms,
         costliest_pass,
         costliest_pass_p50_ms,
+        frame_time_row: frame_time.row(),
+        frame_time_smoothed_ms: smoothed.as_secs_f64() * 1000.0,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_report_reads_the_frame_time_series() {
+        // The report's frame-time line and smoothed ms must come from the store
+        // the capture fed: a bare report with no samples is refused, not zeroed.
+        let rows = || {
+            let systems = vec![SystemStats {
+                span: SPAN_ARENA_TICK,
+                quantiles: Quantiles::of(SPAN_ARENA_TICK, &[1.0, 2.0]).expect("samples present"),
+            }];
+            let passes = vec![PassStats {
+                pass: GpuPass::Ra1Forward,
+                quantiles: Quantiles::of(GpuPass::Ra1Forward.name(), &[0.5])
+                    .expect("samples present"),
+            }];
+            (systems, passes)
+        };
+        let mut diagnostics =
+            DiagnosticsStore::new(&[(FRAME_TIME_SERIES, FRAME_TIME_SMOOTHING_US)])
+                .expect("series builds");
+        for ms in [16.0, 17.0, 33.0] {
+            assert!(diagnostics
+                .push_ms(FRAME_TIME_SERIES, ms, ms)
+                .expect("known series"));
+        }
+        let (systems, passes) = rows();
+        let report = assemble_report(3, systems, passes, &diagnostics).expect("report builds");
+        let series = diagnostics.series(FRAME_TIME_SERIES).expect("known series");
+        assert_eq!(report.frame_time_row, series.row());
+        let smoothed_ms = series.smoothed().expect("samples present").as_secs_f64() * 1000.0;
+        assert!((report.frame_time_smoothed_ms - smoothed_ms).abs() < 1e-9);
+        assert!(report.summary().contains(&format!("{}\n", series.row())));
+        let (systems, passes) = rows();
+        let empty = DiagnosticsStore::new(&[(FRAME_TIME_SERIES, FRAME_TIME_SMOOTHING_US)])
+            .expect("series builds");
+        assert!(matches!(
+            assemble_report(3, systems, passes, &empty),
+            Err(ProfileError::EmptySamples { .. })
+        ));
+    }
 
     #[test]
     fn off_by_default_without_touching_the_flag() {

@@ -7,33 +7,52 @@ pub mod compose;
 pub mod diff;
 /// Cover exposure per tile: threat-ray fans over sight geometry.
 pub mod exposure;
+/// Stray-robust scene extent (SPX8).
+pub mod extent;
+/// Brief hygiene: fold look-alikes, state the extent, say the problems (SPF10).
+pub mod fold;
 /// FPS visibility: per-viewer FOV plus occlusion sets with interest digests.
 pub mod fps_visibility;
 /// Deterministic fuzz harness: seeded op streams with first-divergence receipts.
 pub mod fuzz;
 mod index;
 pub mod index3;
+mod intmath;
 pub mod isovist;
 /// Integer-cm 3D k-d tree: median-split nearest and k-neighbor queries.
 pub mod kdtree;
+/// Surface gap, push direction and pairwise measure (SPF4, SPX11).
+pub mod measure;
 pub mod navcheck;
+/// Distance, bearing and gap behind a directional answer (SPR2).
+pub mod pair;
 pub mod place;
 pub mod probe;
 pub mod relation;
 pub mod repair;
+/// Rooms as flood-filled regions of the wall boxes, with exits (SPR9).
+pub mod rooms;
 /// Free-space sampler: Poisson-disc placements, largest open spot.
 pub mod sample;
 /// Whole-scene unit-mismatch detector: median object size vs layout extent.
 pub mod scale;
+/// Pair sight with the occluder (SPR7) and why a thing is hidden (SPX6).
+pub mod sees;
 /// CPU sense verbs in plain text: view, lidar, map and one pixel ray (SP69).
 pub mod sense_text;
 /// Sight and reach: line of sight, visibility, cover, reachability.
 pub mod sight;
+/// Slide sweep (SPF6) and ground under a point (SPX5).
+pub mod slide;
 /// Repair-loop eval: ten seeded scenes through the repair loop.
 pub mod spatial_eval;
 pub mod staged;
+/// Seated joints and the support chain (SPX2).
+pub mod support;
 /// Offline open-vocabulary label lift into node tag proposals (SP46).
 pub mod tag_lift;
+/// Finding triage by component role and z-fight ranking (SPF8).
+pub mod triage;
 
 pub use brief::{brief, brief_stats, brief_text, estimate_tokens, Brief, BriefStats, Group};
 pub use checks::{run_checks, run_spatial, OPT_IN_CHECKS, SPATIAL_CHECKS};

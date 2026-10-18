@@ -379,7 +379,7 @@
   lands the WIN1 consumer UI3's tick requires). Accept: log counts equal
   painted counts on twin + play-step PNGs; HP/facing/bounds readable;
   bytes round-trip x2. needs: UI2, UI3, WIN1. (PLN49 R5; checker wave-48:
-  tick only with WIN1 consumer wired and stub removed.)
+  tick only with WIN1 consumer wired and stub removed.) Progress 2026-10-18: skipped, needs crates/render edits and real GPU captures.
 - [ ] UI5 ui: play HUD — `play.step` PNGs show HP bars + names + button Progress 2026-10-17: ui side landed (play_hud.rs, raster test); left: draw it into play.step PNGs (endpoint paint_hud, new endpoint-to-ui edge).
   echo + tick + fighter-you arrow; 4F palette passes a colorblind check.
   Tier A. Size S. Owns HUD hunks beside `crates/ui/` (UI4 wiring

@@ -26,6 +26,8 @@ pub mod fb_versions;
 #[cfg(feature = "fuzz")]
 pub mod fuzz;
 pub mod gpu_live;
+/// Crash-safe append-only tick journal beside the whole-blob tape codec.
+pub mod journal;
 /// Headless pixel-truth gate over the ticked render rows (sky/decals PROBE).
 pub use gpu_live::live_gate_report;
 /// MV1 workflow receipt shape plus its hand-rolled text encoding (std-only).
@@ -435,9 +437,21 @@ fn execute(
     inputs: &[Input],
     expected: Option<&[Checkpoint]>,
 ) -> Result<Vec<Checkpoint>, Error> {
+    execute_with(config, inputs, expected, |_, _| Ok(()))
+}
+
+/// [`execute`] with `on_tick` called after every step with that tick's inputs
+/// and checkpoint, so a recorder can stream ticks (the journal writer) while
+/// the run is still going. An observer error stops the run at that tick.
+pub(crate) fn execute_with<E: From<Error>>(
+    config: Config,
+    inputs: &[Input],
+    expected: Option<&[Checkpoint]>,
+    mut on_tick: impl FnMut(&[Input], Checkpoint) -> Result<(), E>,
+) -> Result<Vec<Checkpoint>, E> {
     validate(config, inputs)?;
     if expected.is_some_and(|values| values.len() != config.ticks as usize) {
-        return Err(Error::Invalid("checkpoint count does not match ticks"));
+        return Err(Error::Invalid("checkpoint count does not match ticks").into());
     }
     let mut sim = Simulation::new(config, inputs);
     let mut checkpoints = Vec::with_capacity(config.ticks as usize);
@@ -449,6 +463,7 @@ fn execute(
             cursor += 1;
         }
         let actual = sim.step(&inputs[start..cursor])?;
+        on_tick(&inputs[start..cursor], actual)?;
         if let Some(values) = expected {
             let wanted = values[tick as usize];
             if actual != wanted {
@@ -465,7 +480,8 @@ fn execute(
                         system: "legacy",
                         expected: wanted,
                         actual,
-                    });
+                    }
+                    .into());
                 }
                 state_only.get_or_insert(Error::Divergence {
                     tick,
@@ -478,12 +494,13 @@ fn execute(
         checkpoints.push(actual);
     }
     if let Some(error) = state_only {
-        return Err(error);
+        return Err(error.into());
     }
     if config == Config::default() && inputs.is_empty() && sim.clock.hash() != GOLDEN_600 {
         return Err(Error::Golden {
             actual: sim.clock.hash(),
-        });
+        }
+        .into());
     }
     Ok(checkpoints)
 }

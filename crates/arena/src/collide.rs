@@ -115,6 +115,47 @@ fn hold_inside(walker: &mut Walker, wall_radius_mm: i32) {
     walker.pos_mm[2] = i32::try_from(z * radius / dist).unwrap_or(walker.pos_mm[2]);
 }
 
+/// EG20 collision pass: every fighter as an integer-mm walker, resolved by
+/// [`resolve`] (push-apart, pillars, round wall at the square clamp's inset),
+/// then only the integer displacement goes back onto the float pose, so an
+/// untouched fighter keeps its exact bits. Shared by the tick and the spear
+/// step, which runs it again after dragging bodies.
+pub(crate) fn collide_states(
+    states: &mut [crate::FighterState],
+    rules: &crate::ArenaRules,
+    half_extent_m: f32,
+    fighters: usize,
+) {
+    let mut walkers = [Walker::spawn(0, [0; 3]); crate::MAX_SLOTS];
+    for ((slot, walker), state) in walkers.iter_mut().enumerate().zip(states.iter()) {
+        *walker = Walker::spawn(
+            u32::try_from(slot).unwrap_or(u32::MAX),
+            crate::match_wire::pos_mm(state.pos),
+        );
+    }
+    let before = walkers;
+    let mut pillars = [Pillar::new([0, 0], [0, 0]); MAX_PILLARS];
+    let mut count = 0;
+    for pillar in rules.pillars.iter().flatten() {
+        pillars[count] = *pillar;
+        count += 1;
+    }
+    let limit = crate::wall_limit(half_extent_m);
+    let radius_mm = crate::match_wire::pos_mm([limit, 0.0, 0.0])[0];
+    let fighters = fighters.min(crate::MAX_SLOTS);
+    resolve(&mut walkers[..fighters], &pillars[..count], radius_mm);
+    for ((state, after), was) in states.iter_mut().zip(&walkers).zip(&before) {
+        for axis in [0, 2] {
+            let moved = after.pos_mm[axis] - was.pos_mm[axis];
+            if moved != 0 {
+                let clamped = moved.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+                let metres = f32::from(i16::try_from(clamped).unwrap_or(0)) / 1000.0;
+                state.pos[axis] = crate::canon_zero(state.pos[axis] + metres);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

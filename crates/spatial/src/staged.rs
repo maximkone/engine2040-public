@@ -12,8 +12,10 @@
 //! Std-only. Never imports editor or engine-scene types.
 
 use super::checks::hash_findings;
-use super::{Actor, Report};
-use std::collections::BTreeSet;
+use super::index::{pos_known, size_known, to_cm, Box3};
+use super::place::{escape, overlap_depth_cm};
+use super::{Actor, Finding, Report};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One plain snapshot row: `(id, name, x, y, z, sx, sy, sz, physical)`.
 /// Positions and full-extent sizes are in meters.
@@ -117,23 +119,230 @@ pub fn actors_from_snapshot(rows: &[SnapshotRow<'_>]) -> Vec<Actor> {
 /// (verdict `clean`) means staged adds nothing new, even if `before`
 /// was already dirty. Order-invariant: same sets any order, same hash.
 pub fn check_staged(before: &[Actor], staged: &[Actor]) -> Report {
-    let before_rep = super::run(before);
-    let staged_rep = super::run(staged);
-    let keys: BTreeSet<(&str, u32, u32)> = before_rep
-        .findings
-        .iter()
-        .map(|f| (f.check, f.a, f.b))
-        .collect();
-    // staged_rep.findings is already frozen-order; filtering keeps it so.
-    let delta: Vec<super::Finding> = staged_rep
-        .findings
-        .into_iter()
-        .filter(|f| !keys.contains(&(f.check, f.a, f.b)))
-        .collect();
+    let (delta, _) = split_reports(before, staged);
     let hash = hash_findings(&delta);
     Report {
         findings: delta,
         hash,
+    }
+}
+
+/// Findings only in `staged` (new) and only in `before` (resolved), both in
+/// the frozen order of their own report. A finding is the same finding when
+/// check name and both ids match; its percent may move.
+fn split_reports(before: &[Actor], staged: &[Actor]) -> (Vec<Finding>, Vec<Finding>) {
+    split_with(super::run(before), super::run(staged))
+}
+
+fn split_with(before_rep: Report, staged_rep: Report) -> (Vec<Finding>, Vec<Finding>) {
+    let key = |f: &Finding| (f.check, f.a, f.b);
+    let before_keys: BTreeSet<_> = before_rep.findings.iter().map(key).collect();
+    let staged_keys: BTreeSet<_> = staged_rep.findings.iter().map(key).collect();
+    let new = staged_rep
+        .findings
+        .into_iter()
+        .filter(|f| !before_keys.contains(&key(f)))
+        .collect();
+    let resolved = before_rep
+        .findings
+        .into_iter()
+        .filter(|f| !staged_keys.contains(&key(f)))
+        .collect();
+    (new, resolved)
+}
+
+/// The one move that clears a finding (SPX3): which object, which way, how far.
+///
+/// `mover` is the object to move. `other` is the second object of a pair
+/// finding (`u32::MAX` when the finding names one object). `dir` is a door word
+/// (`-x`, `+x`, `-z`, `+z`, `up`, `down`) and `cm` the distance along it.
+/// `depth_cm` is how deep a pair overlaps in plan view, 0 for single findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fix {
+    pub mover: u32,
+    pub other: u32,
+    pub dir: &'static str,
+    pub cm: i32,
+    pub depth_cm: i32,
+}
+
+/// One finding a write added or cleared, with its fix when one exists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeltaFinding {
+    pub finding: Finding,
+    pub fix: Option<Fix>,
+}
+
+/// What one write changed in the spatial report, scoped to the objects it
+/// touched (SPX3). `touched` is sorted and deduplicated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedDelta {
+    pub touched: Vec<u32>,
+    pub new_findings: Vec<DeltaFinding>,
+    pub resolved: Vec<DeltaFinding>,
+}
+
+fn same_row(a: &Actor, b: &Actor) -> bool {
+    let lanes = |r: &Actor| [r.x, r.y, r.z, r.sx, r.sy, r.sz, r.vx, r.vz, r.yaw].map(f32::to_bits);
+    a.name == b.name && a.physical == b.physical && a.parent == b.parent && lanes(a) == lanes(b)
+}
+
+/// Ids whose row differs between the two snapshots, or exists on one side only.
+/// A moved parent's children change without being named by any edit, so this
+/// finds them. Sorted, deduplicated.
+pub fn changed_ids(before: &[Actor], staged: &[Actor]) -> Vec<u32> {
+    let old_rows: BTreeMap<u32, &Actor> = before.iter().map(|a| (a.id, a)).collect();
+    let new_ids: BTreeSet<u32> = staged.iter().map(|a| a.id).collect();
+    let mut out: Vec<u32> = Vec::new();
+    for row in staged {
+        match old_rows.get(&row.id) {
+            Some(old) if same_row(old, row) => {}
+            _ => out.push(row.id),
+        }
+    }
+    out.extend(
+        before
+            .iter()
+            .map(|a| a.id)
+            .filter(|id| !new_ids.contains(id)),
+    );
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn involves(finding: &Finding, touched: &[u32]) -> bool {
+    touched.binary_search(&finding.a).is_ok()
+        || (finding.b != u32::MAX && touched.binary_search(&finding.b).is_ok())
+}
+
+fn plan_box(a: &Actor) -> Option<Box3> {
+    if !pos_known(a) || !size_known(a) {
+        return None;
+    }
+    let (hx, hy, hz) = (
+        to_cm(a.sx).abs() / 2,
+        to_cm(a.sy).abs() / 2,
+        to_cm(a.sz).abs() / 2,
+    );
+    let (cx, cy, cz) = (to_cm(a.x), to_cm(a.y), to_cm(a.z));
+    Some(Box3 {
+        id: a.id,
+        min_x: cx - hx,
+        max_x: cx + hx,
+        min_y: cy - hy,
+        max_y: cy + hy,
+        min_z: cz - hz,
+        max_z: cz + hz,
+    })
+}
+
+/// The one-move fix for `finding` over `actors`, preferring to move a touched
+/// object. `overlap` pairs push along the shortest plan axis; `floating`,
+/// `support` and `sunken` move straight down or up to the floor; every other
+/// check has no single-move fix and reads `None`.
+pub fn fix_for(finding: &Finding, actors: &[Actor], touched: &[u32]) -> Option<Fix> {
+    let find = |id: u32| actors.iter().find(|a| a.id == id);
+    match finding.check {
+        "overlap" => {
+            let a_touched = touched.binary_search(&finding.a).is_ok();
+            let b_touched = touched.binary_search(&finding.b).is_ok();
+            let (mover, other) = if !a_touched && b_touched {
+                (finding.b, finding.a)
+            } else {
+                (finding.a, finding.b)
+            };
+            let moving = plan_box(find(mover)?)?;
+            let fixed = plan_box(find(other)?)?;
+            let push = escape(&moving, &fixed, false);
+            Some(Fix {
+                mover,
+                other,
+                dir: push.dir,
+                cm: push.cm,
+                depth_cm: overlap_depth_cm(&moving, &fixed, false),
+            })
+        }
+        "floating" | "support" => {
+            let b = plan_box(find(finding.a)?)?;
+            (b.min_y > 0).then_some(Fix {
+                mover: finding.a,
+                other: u32::MAX,
+                dir: "down",
+                cm: b.min_y,
+                depth_cm: 0,
+            })
+        }
+        "sunken" => {
+            let b = plan_box(find(finding.a)?)?;
+            (b.min_y < 0).then_some(Fix {
+                mover: finding.a,
+                other: u32::MAX,
+                dir: "up",
+                cm: -b.min_y,
+                depth_cm: 0,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Staged gate scoped to the objects a write touched: new findings and cleared
+/// findings that involve `touched` (plus every row the write changed, such as
+/// the children of a moved parent), each new one with its one-move fix.
+///
+/// Runs the same full offline catalog as [`check_staged`] on both sets and
+/// filters by id, so a pre-existing overlap elsewhere never shows and a clean
+/// move reads empty. Order-invariant: same sets in any order, same delta.
+pub fn check_staged_ids(before: &[Actor], staged: &[Actor], touched: &[u32]) -> StagedDelta {
+    let (new, resolved) = split_reports(before, staged);
+    scoped(new, resolved, staged, touched, before)
+}
+
+/// [`check_staged_ids`] over a named subset of the catalog, for callers whose
+/// snapshot cannot drive every check (the door withholds the ones that need
+/// real sizes or names). Unknown names come back as the legal list.
+pub fn check_staged_with(
+    before: &[Actor],
+    staged: &[Actor],
+    touched: &[u32],
+    checks: &[&str],
+) -> Result<StagedDelta, Vec<&'static str>> {
+    let (new, resolved) = split_with(
+        super::run_checks(before, checks)?,
+        super::run_checks(staged, checks)?,
+    );
+    Ok(scoped(new, resolved, staged, touched, before))
+}
+
+fn scoped(
+    new: Vec<Finding>,
+    resolved: Vec<Finding>,
+    staged: &[Actor],
+    touched: &[u32],
+    before: &[Actor],
+) -> StagedDelta {
+    let mut ids: Vec<u32> = touched.to_vec();
+    ids.extend(changed_ids(before, staged));
+    ids.sort_unstable();
+    ids.dedup();
+    let new_findings = new
+        .into_iter()
+        .filter(|f| involves(f, &ids))
+        .map(|finding| DeltaFinding {
+            fix: fix_for(&finding, staged, &ids),
+            finding,
+        })
+        .collect();
+    let resolved = resolved
+        .into_iter()
+        .filter(|f| involves(f, &ids))
+        .map(|finding| DeltaFinding { finding, fix: None })
+        .collect();
+    StagedDelta {
+        new_findings,
+        resolved,
+        touched: ids,
     }
 }
 
@@ -966,5 +1175,108 @@ mod tests {
         assert_eq!((actors[0].x, actors[0].z), (0.0, 0.0));
         assert_eq!(sanitize_staged_name(""), "_");
         assert!(sanitize_staged_name("9lives").starts_with('_'));
+    }
+    /// A thin wall slab (20 cm across x) that nothing else touches.
+    fn slab(id: u32) -> Actor {
+        Actor {
+            sx: 0.2,
+            sy: 2.0,
+            sz: 10.0,
+            y: 1.0,
+            ..resting(id, "wall", 0.0, 0.0)
+        }
+    }
+
+    fn scene_with_crate_at(crate_x: f32) -> Vec<Actor> {
+        // A pre-existing overlap far away (ids 8, 9) rides every scene.
+        vec![
+            slab(1),
+            resting(2, "crate", crate_x, 0.0),
+            resting(8, "old_a", 20.0, 20.0),
+            resting(9, "old_b", 20.4, 20.0),
+        ]
+    }
+
+    #[test]
+    fn spatial_delta_names_both_ids_and_the_axis_fix() {
+        let before = scene_with_crate_at(5.0);
+        let after = scene_with_crate_at(0.0);
+        let delta = check_staged_ids(&before, &after, &[2]);
+        assert_eq!(delta.touched, vec![2]);
+        assert_eq!(delta.new_findings.len(), 1, "{:?}", delta.new_findings);
+        let found = &delta.new_findings[0];
+        assert_eq!(
+            (found.finding.check, found.finding.a, found.finding.b),
+            ("overlap", 1, 2)
+        );
+        // The crate (100 cm) straddles the 20 cm slab: 60 cm out either side.
+        assert_eq!(
+            found.fix,
+            Some(Fix {
+                mover: 2,
+                other: 1,
+                dir: "-x",
+                cm: 60,
+                depth_cm: 20,
+            })
+        );
+        assert!(delta.resolved.is_empty());
+    }
+
+    #[test]
+    fn spatial_delta_hides_old_overlaps_and_clean_moves_read_empty() {
+        let before = scene_with_crate_at(5.0);
+        // Pre-existing overlap (8, 9) stays out of the delta even when asked about it.
+        let clean = scene_with_crate_at(6.0);
+        let delta = check_staged_ids(&before, &clean, &[2]);
+        assert!(delta.new_findings.is_empty() && delta.resolved.is_empty());
+        let named = check_staged_ids(&before, &clean, &[8, 9]);
+        assert!(named.new_findings.is_empty(), "old overlap is not new");
+        assert_eq!(named.touched, vec![2, 8, 9]);
+        // A crate already inside the wall that moves out resolves the overlap.
+        let inside = scene_with_crate_at(0.0);
+        let out = check_staged_ids(&inside, &before, &[2]);
+        assert!(out.new_findings.is_empty());
+        assert_eq!(out.resolved.len(), 1);
+        assert_eq!(out.resolved[0].finding.check, "overlap");
+        assert!(out.resolved[0].fix.is_none());
+    }
+
+    #[test]
+    fn spatial_delta_finds_moved_children_and_ignores_input_order() {
+        let before = scene_with_crate_at(5.0);
+        let mut after = scene_with_crate_at(0.0);
+        // The caller names nothing: the changed row alone scopes the delta.
+        let delta = check_staged_ids(&before, &after, &[]);
+        assert_eq!(delta.touched, vec![2]);
+        assert_eq!(delta.new_findings.len(), 1);
+        let mut before_rev = before.clone();
+        before_rev.reverse();
+        after.reverse();
+        assert_eq!(delta, check_staged_ids(&before_rev, &after, &[]));
+        // Removing the crate clears its overlap; its id is touched by absence.
+        let gone: Vec<Actor> = scene_with_crate_at(0.0)
+            .into_iter()
+            .filter(|a| a.id != 2)
+            .collect();
+        let removed = check_staged_ids(&scene_with_crate_at(0.0), &gone, &[2]);
+        assert_eq!(removed.resolved.len(), 1);
+        assert!(removed.new_findings.is_empty());
+    }
+
+    #[test]
+    fn spatial_delta_floating_fix_lowers_to_the_floor() {
+        let before = vec![resting(1, "lamp", 0.0, 0.0)];
+        let mut lamp = before[0].clone();
+        lamp.y = 2.5;
+        let delta = check_staged_ids(&before, &[lamp], &[1]);
+        let fix = delta
+            .new_findings
+            .iter()
+            .find(|f| f.finding.check == "floating")
+            .and_then(|f| f.fix)
+            .expect("floating carries a fix");
+        // Bottom at 2.0 m: lower 200 cm to rest on the floor.
+        assert_eq!((fix.mover, fix.dir, fix.cm), (1, "down", 200));
     }
 }

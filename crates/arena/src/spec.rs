@@ -33,6 +33,10 @@ pub struct MatchSpec {
     pub rules: ArenaRules,
     /// Static obstacles the fighters collide with.
     pub world: MatchWorld,
+    /// Spear grapple on (`docs/plan/spear-grapple.md`): the `THROW_SPEAR`
+    /// button throws a spear and tethers fighters. Off by default; off leaves
+    /// the match, its hash and its identity exactly as before.
+    pub spear: bool,
 }
 
 impl MatchSpec {
@@ -43,7 +47,15 @@ impl MatchSpec {
             config,
             rules,
             world,
+            spear: false,
         }
+    }
+
+    /// This spec with the spear grapple on.
+    #[must_use]
+    pub fn with_spear(mut self) -> Self {
+        self.spear = true;
+        self
     }
 
     /// The frozen default: rules v1 on open sand, exactly what
@@ -109,6 +121,10 @@ impl MatchSpec {
         hash.write_u32(config.table_version);
         hash.write_u64(self.rules_digest());
         hash.write_u64(self.world_digest());
+        // Mixed in only when on, so every spear-less identity is unchanged.
+        if self.spear {
+            hash.write_u8(0x5A);
+        }
         hash.finish()
     }
 
@@ -185,6 +201,30 @@ mod tests {
         );
         assert_ne!(v1, duel, "rules v2 is not rules v1");
         assert_ne!(duel, kit, "the kit walls are part of the match");
+    }
+
+    #[test]
+    fn spear_spec_identity_moves_only_when_on() {
+        let base = MatchSpec::duel(config(), MatchWorld::empty());
+        let armed = base.clone().with_spear();
+        assert!(armed.spear && !base.spear);
+        assert_ne!(
+            base.identity(),
+            armed.identity(),
+            "a peer without it is refused"
+        );
+        assert_eq!(armed.identity(), armed.clone().identity());
+        // A spear-less spec digests exactly as it did before the flag existed.
+        let c = base.config;
+        let mut old = Fnv64::new();
+        old.write_u64(c.seed);
+        old.write_u32(c.ticks);
+        old.write_u8(c.fighters);
+        old.write_u32(c.half_extent_m.to_bits());
+        old.write_u32(c.table_version);
+        old.write_u64(base.rules_digest());
+        old.write_u64(base.world_digest());
+        assert_eq!(base.identity(), old.finish());
     }
 
     #[test]

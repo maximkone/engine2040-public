@@ -365,7 +365,7 @@ fn relation_word(relation: Relation) -> &'static str {
     }
 }
 
-fn wall_word(wall: Wall) -> &'static str {
+pub(crate) fn wall_word(wall: Wall) -> &'static str {
     match wall {
         Wall::North => "north",
         Wall::South => "south",
@@ -1503,7 +1503,11 @@ mod tests {
                 "clean",
                 "brief {}: {:?}",
                 case.name,
-                report.findings.iter().map(engine_spatial::Finding::row).collect::<Vec<_>>()
+                report
+                    .findings
+                    .iter()
+                    .map(engine_spatial::Finding::row)
+                    .collect::<Vec<_>>()
             );
             // Exactly one journal entry: one undo reverts the brief.
             assert_eq!(journal.past_len(), pre_past + 1, "brief {}", case.name);

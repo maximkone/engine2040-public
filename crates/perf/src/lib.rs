@@ -19,6 +19,8 @@ pub mod baselines;
 pub mod budget;
 /// Core tick, hash and RNG baseline kernels.
 pub mod core_bench;
+/// Named perf series: bounded history, O(1) mean, time-aware smoothing.
+pub mod diagnostics;
 /// Feel quantification: three-domain runs against the latency bar.
 pub mod feel;
 /// Frame-cost percentiles behind the fight frame gate.

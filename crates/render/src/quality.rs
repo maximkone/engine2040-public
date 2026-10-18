@@ -286,6 +286,93 @@ pub fn tier_from_query(search: &str) -> Option<&str> {
         .find_map(|pair| pair.strip_prefix("tier="))
 }
 
+/// Smallest shadow map edge the live frame builds, texels.
+pub const MIN_SHADOW_EDGE: u32 = 256;
+
+/// Edge of the sun shadow map the tier asks for: `shadow_map_px`, within what the adapter can
+/// hold (`max_texture_2d`, the device's `maxTextureDimension2D`) and not under
+/// [`MIN_SHADOW_EDGE`]. The presenter builds its depth texture at this size.
+#[must_use]
+pub fn shadow_edge_px(k: &Knobs, max_texture_2d: u32) -> u32 {
+    u32::from(k.shadow_map_px)
+        .min(max_texture_2d)
+        .max(MIN_SHADOW_EDGE)
+}
+
+/// Highest cascade band the live frame shades with: the tier's cascade count less one (the
+/// last cascade covers everything beyond it). At least band 0.
+#[must_use]
+pub fn max_cascade_band(k: &Knobs) -> usize {
+    usize::from(k.shadow_cascades.max(1)) - 1
+}
+
+/// True when the live GTAO pass runs: the look toggle is on and the tier has ambient occlusion.
+/// The live kernel is half resolution, so `Half` and `Full` both run it.
+#[must_use]
+pub fn gtao_runs(k: &Knobs, row_on: bool) -> bool {
+    row_on && k.gtao != Gtao::Off
+}
+
+/// Slots of the particle pool the tier allows, within the pool's hard bound.
+#[must_use]
+pub fn particle_pool_slots(k: &Knobs) -> usize {
+    usize::try_from(k.particle_cap)
+        .unwrap_or(usize::MAX)
+        .clamp(1, crate::particles_gpu::POOL_CAP_HARD)
+}
+
+/// Slots of the decal pool the tier allows, within the pool's hard bound.
+#[must_use]
+pub fn decal_pool_slots(k: &Knobs) -> usize {
+    usize::try_from(k.decal_cap)
+        .unwrap_or(usize::MAX)
+        .clamp(1, crate::decals::MAX_DECALS)
+}
+
+/// Frames the startup probe draws (WEB8): enough for a stable median, few enough to be done
+/// before the page says it is ready.
+pub const PROBE_FRAMES: usize = 30;
+/// The probe stops after this many milliseconds even when fewer than [`PROBE_FRAMES`] frames
+/// were drawn (a very slow adapter must not stall the loader).
+pub const PROBE_MAX_MS: f64 = 4000.0;
+/// A probe median over this (under 30 frames per second) drops the page to `Potato`.
+pub const PROBE_SLOW_MS: f64 = 1000.0 / 30.0;
+
+/// Median of the finite, positive samples (mean of the two middle ones for an even count),
+/// `None` when there is none.
+#[must_use]
+pub fn probe_median_ms(samples: &[f64]) -> Option<f64> {
+    let mut v: Vec<f64> = samples
+        .iter()
+        .copied()
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .collect();
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    match n {
+        0 => None,
+        _ if n % 2 == 1 => Some(v[n / 2]),
+        _ => Some((v[n / 2 - 1] + v[n / 2]) / 2.0),
+    }
+}
+
+/// [`choose_web_tier`] with the startup probe's median frame time (`None`: no probe ran). A
+/// `?tier=` query and the limits keep their say; only the default pick (`Web`) steps down to
+/// `Potato` with reason `"probe"` when the median is over [`PROBE_SLOW_MS`]. The fps-miss ladder
+/// on the page stays on top of this.
+#[must_use]
+pub fn choose_web_tier_probed(
+    query: Option<&str>,
+    max_texture_2d: u32,
+    probe_p50_ms: Option<f64>,
+) -> (Quality, &'static str) {
+    let (tier, why) = choose_web_tier(query, max_texture_2d);
+    if why == "default" && probe_p50_ms.is_some_and(|ms| ms > PROBE_SLOW_MS) {
+        return (Quality::Potato, "probe");
+    }
+    (tier, why)
+}
+
 /// FNV-1a over the 17 knob fields in struct order (bools as 0/1, gtao as
 /// its level byte, integers little-endian). Same tier twice gives the same
 /// hash; no map order involved.
@@ -594,6 +681,149 @@ mod tests {
                 "render_scale"
             ]
         );
+    }
+
+    #[test]
+    fn quality_shadow_edge_follows_the_tier_within_the_adapter() {
+        let edges: Vec<u32> = Quality::ALL
+            .iter()
+            .map(|q| shadow_edge_px(&knobs(*q), 16384))
+            .collect();
+        assert_eq!(edges, [1024, 1024, 2048, 4096]);
+        assert_eq!(shadow_edge_px(&knobs(Quality::High), 2048), 2048);
+        assert_eq!(shadow_edge_px(&knobs(Quality::Web), 0), MIN_SHADOW_EDGE);
+    }
+
+    #[test]
+    fn quality_cascade_band_cap_is_the_count_less_one() {
+        let caps: Vec<usize> = Quality::ALL
+            .iter()
+            .map(|q| max_cascade_band(&knobs(*q)))
+            .collect();
+        assert_eq!(caps, [0, 1, 2, 3]);
+        let mut none = knobs(Quality::Potato);
+        none.shadow_cascades = 0;
+        assert_eq!(
+            max_cascade_band(&none),
+            0,
+            "a zero count still shades band 0"
+        );
+    }
+
+    #[test]
+    fn quality_gtao_runs_only_when_the_tier_has_it_and_the_toggle_is_on() {
+        for q in Quality::ALL {
+            let k = knobs(q);
+            assert_eq!(gtao_runs(&k, true), q != Quality::Potato, "{q:?}");
+            assert!(!gtao_runs(&k, false), "{q:?} with the toggle off");
+        }
+    }
+
+    #[test]
+    fn quality_pool_slots_follow_the_tier_within_the_pool_bounds() {
+        let particles: Vec<usize> = Quality::ALL
+            .iter()
+            .map(|q| particle_pool_slots(&knobs(*q)))
+            .collect();
+        assert_eq!(particles, [512, 2048, 4096, 8192]);
+        let decals: Vec<usize> = Quality::ALL
+            .iter()
+            .map(|q| decal_pool_slots(&knobs(*q)))
+            .collect();
+        assert_eq!(
+            decals,
+            [64, 128, 256, crate::decals::MAX_DECALS],
+            "the high tier asks for 512 and the pool holds 256"
+        );
+    }
+
+    #[test]
+    fn quality_probe_median_ignores_bad_samples() {
+        assert_eq!(probe_median_ms(&[]), None);
+        assert_eq!(probe_median_ms(&[f64::NAN, -1.0, 0.0]), None);
+        assert_eq!(probe_median_ms(&[9.0, 1.0, 5.0]), Some(5.0));
+        assert_eq!(probe_median_ms(&[4.0, f64::NAN, 2.0, 8.0, 6.0]), Some(5.0));
+        assert_eq!(PROBE_FRAMES, 30);
+    }
+
+    #[test]
+    fn quality_probe_steps_only_the_default_pick_down() {
+        let slow = Some(PROBE_SLOW_MS + 1.0);
+        let fast = Some(8.0);
+        assert_eq!(
+            choose_web_tier_probed(None, 8192, slow),
+            (Quality::Potato, "probe")
+        );
+        assert_eq!(
+            choose_web_tier_probed(None, 8192, fast),
+            (Quality::Web, "default")
+        );
+        assert_eq!(
+            choose_web_tier_probed(None, 8192, Some(PROBE_SLOW_MS)),
+            (Quality::Web, "default"),
+            "on the budget is not over it"
+        );
+        assert_eq!(
+            choose_web_tier_probed(None, 8192, None),
+            (Quality::Web, "default")
+        );
+        // A query and a weak adapter keep their own reason.
+        assert_eq!(
+            choose_web_tier_probed(Some("high"), 8192, slow),
+            (Quality::High, "query")
+        );
+        assert_eq!(
+            choose_web_tier_probed(None, 2048, slow),
+            (Quality::Potato, "limits")
+        );
+    }
+
+    /// The number after `field:` in the `Tier::<name> => Caps { ... }` arm of the physfx table.
+    fn physfx_cap(table: &str, tier: &str, field: &str) -> usize {
+        let arm = table
+            .split(&format!("Tier::{tier} => Caps {{"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no Tier::{tier} arm in physfx caps.rs"));
+        let arm = arm.split('}').next().unwrap_or(arm);
+        let after = arm
+            .split(&format!("{field}:"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no {field} in the {tier} arm"));
+        after
+            .trim_start()
+            .split(',')
+            .next()
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or_else(|| panic!("{field} of {tier} is not a number"))
+    }
+
+    #[test]
+    fn quality_physfx_caps_repeat_the_physfx_table() {
+        let table = include_str!("../../physfx/src/caps.rs");
+        for q in Quality::ALL {
+            let name = match q {
+                Quality::Potato => "Potato",
+                Quality::Web => "Web",
+                Quality::Comfort => "Comfort",
+                Quality::High => "High",
+            };
+            let k = knobs(q);
+            assert_eq!(
+                usize::from(k.physfx_bodies),
+                physfx_cap(table, name, "bodies"),
+                "{name} bodies"
+            );
+            assert_eq!(
+                usize::from(k.physfx_ragdolls),
+                physfx_cap(table, name, "ragdolls"),
+                "{name} ragdolls"
+            );
+            assert_eq!(
+                usize::from(k.physfx_contacts),
+                physfx_cap(table, name, "contacts"),
+                "{name} contacts"
+            );
+        }
     }
 
     #[test]

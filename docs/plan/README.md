@@ -28,10 +28,14 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `potato.md` — NOW — all four — every game looks great and runs on a weak PC: wiring gates, the potato tier (gate G9), content fetch and small steals (rows GS1-GS33)
 - `landscape-ideas.md` — LATER — none — the idea backlog from 74 scouts (not rows yet); a planner run promotes one cluster at a time
 - `frontier.md` — NEXT — Look, AI door — every research idea earns a spike (one test, one baseline, a kill rule) before it becomes a row
+- `spear-grapple.md` — NOW — Multiplayer — a throwable spear tethers to an enemy or a wall and drags the fighters with integer physics; opt-in `MatchSpec::spear`, old digests unchanged
+- `2026-10-17-obsolete-rows.md` — LATER — all four — seven board rows (E4 E6 E12 E17 E21 E22 E26) that no longer match the tree, listed for the owner to close
 - `gameplay.md` — NOW — AI door — the duel feels right and AI fills empty slots fairly
 - `living-world.md` — NOW — AI door — NPC minds and live AI lines run off-tick; only validated, tick-stamped actions enter the tick
 - `runtime.md` — LATER — none — one runtime and one world model under the hash law
 - `urban-war.md` — LATER — none — a second, different game proves the engine is general (frozen by FOCUS D7)
+- `silicon-city.md` — LATER — none — a future game: build a CPU like a city and a factory, ride one instruction in first person, compete on a performance/power/area skyline with humans and bots, and check the best designs in real open simulators (rows SIL1..SIL45, not on the board yet)
+- `silicon-world.md` — LATER — none — the look and world half of Silicon City: the chip as a walkable, drivable GTA-style city (RAM harbor, ghost town, subway), zoom with no load screen, time dial, radio stations as workloads, missions, every visual tied to a sim counter (rows SIL46..SIL59, not on the board yet)
 - `parked.md` — LATER — none — parked areas (world, audio, editor, shipping UI) stay small; each names the Core proof that un-parks it
 - `forge-adoption.md` — NEXT — AI door, Bodies, Look — what the engine takes from Forge and the old Flax plugin: 34 board rows (AD1..AD29, PX40, AX23, EA6, PF24, SP66), 30 next items, 26 engine defects, 14 owner decisions, a 90-line ranked second-pass catalog
 - `steals.md` — LATER — none — open donor steals per bar, at most 3 per bar (data, not a plan)

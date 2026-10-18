@@ -37,12 +37,14 @@ engine2040 deterministic proof
   --input <tick:body:vx:vy>    Repeatable velocity assignment, before zero-based tick
                              Inputs must be unique and ordered by (tick, body)
   --record <path>             Create a new versioned input/checkpoint tape
+  --journal <path>            Stream a crash-safe journal tick by tick while running
   --replay <path>             Replay saved inputs and compare every checkpoint
+                             (reads a tape or a complete journal; a torn journal names its missing ticks)
   --verify                    Repeat this run from fresh initial state
   --format <text|json>        Receipt format (default text)
   --backend <null>            Supported proof backend; others fail explicitly
   --help                     Show this help
-Replay owns its seed/ticks/inputs and cannot be combined with record or overrides.
+Replay owns its seed/ticks/inputs and cannot be combined with record, journal or overrides.
 This fixture covers 2D ECS/physics, not GPU images or a complete game snapshot.
 ```
 

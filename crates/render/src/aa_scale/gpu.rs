@@ -1,4 +1,3 @@
-
 use super::AaScaleError;
 
 /// SMAA compute shader: luma edge detect over the 4-neighborhood,

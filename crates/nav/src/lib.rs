@@ -9,6 +9,7 @@ pub mod funnel;
 pub mod links;
 pub mod mesh;
 pub mod orca;
+pub mod reach;
 pub mod rebake;
 pub mod spline;
 pub mod tiles;

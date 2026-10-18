@@ -10,15 +10,17 @@
 //! apply), never through direct scene writes.
 //!
 //! Mapping convention (shared with the CAP1 staged gate): every document
-//! node with a finite world position becomes one spatial actor, a unit cube
-//! centered on its world position. Node order is the id-text sort, so the
+//! node with a finite world position becomes one spatial actor, a box
+//! centered on its world position (sized from its collider component, else a
+//! 1 m cube). Node order is the id-text sort, so the
 //! same scene always maps to the same actor ids; the wire carries the
 //! index-to-UUID table alongside every numeric finding, plus one
-//! `name [id]` label per object (`prop_0007 [<uuid>]`, blender-mcp style)
+//! `name [id]` label per object (`lamp_2 [<uuid>]`, blender-mcp style)
 //! so duplicate display names never mis-place: the bracketed id is the only
 //! resolution key and `scene.place` accepts either the bare UUID or the full
-//! label. Actor names stay synthetic (`prop_0007`) so the grammar check stays
-//! quiet; stable identity travels in the id table, not the name. Yaw
+//! label. Actor names are `<mesh asset>_<n>` (`prop_<n>` without a mesh) with
+//! `n` counted per name, so an unrelated insert never relabels a node; stable
+//! identity still travels in the id table, not the name. Yaw
 //! round-trips through the world quaternion: snapshot extracts the Y yaw,
 //! place writes a pure-Y rotation. `scene.place` moves roots only: without a
 //! public world-to-local helper in the scene crate the endpoint cannot
@@ -33,12 +35,14 @@
 //! violated invariant plus one recovery.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard};
 
 use engine_editor::capability::{apply_gated, approve};
 use engine_editor::commands::{self, Batch, Document, Op, ProvenanceStamp};
+use engine_scene::codec::Scene;
 use engine_scene::ids::ObjectId;
+use engine_scene::pin::{PinError, ScenePin};
 use engine_scene::transform::Transform;
 use engine_spatial::{Intent, ObjectRef, Relation, Target, Wall};
 
@@ -49,12 +53,29 @@ use rmcp::serde::{Deserialize, Serialize};
 
 use super::injection::score::import_screen;
 use super::injection::Category;
-use super::mcp::{batch_error, cap_error, granted_ops, McpServer, McpToolError, ServerState};
+use super::mcp::{
+    batch_error, cap_error, granted_ops, McpServer, McpToolError, ServerState, SpatialDeltaDto,
+};
+use super::play::world_load::match_world;
+use super::play::PinnedWorld;
+use super::scene_query::QueryFormat;
 
+#[cfg(test)]
+mod handle_tests;
+mod place_blocks;
+mod read_guard;
 mod spatial_checks;
+mod spatial_delta;
 use crate::spatial_glue::{conflict_texts, finding_line, quat_of_yaw, yaw_of_quat, ParsedWant};
-use spatial_checks::{id_table, label_table, partition, staged_sizes};
-pub use spatial_checks::{SizeSource, SkippedCheck};
+use place_blocks::block_output;
+pub use place_blocks::WantBlockDto;
+pub(crate) use read_guard::no_repeat;
+pub use read_guard::BriefSpatial;
+use spatial_checks::{
+    index_of, partition, staged_names_sizes, table_allowance, table_page, wide, worst_actors,
+};
+pub use spatial_checks::{SizeSource, SkippedCheck, SpatialCounts, WorstActor};
+pub(crate) use spatial_delta::{delta_after, delta_before, spatial_delta};
 
 /// MCP tool name for the bounded scene brief (read-only).
 pub const TOOL_SCENE_BRIEF: &str = "scene.brief";
@@ -84,14 +105,13 @@ pub const MAX_WANT_CHARS: usize = 256;
 // Unreal_mcp, reimplemented here, never vendored).
 // ---------------------------------------------------------------------------
 
-/// Display label for one staged object: synthetic name plus bracketed id,
-/// `prop_0007 [<uuid>]`. The bracketed id is the only resolution key; the
+/// Display label for one staged object: its name plus bracketed id,
+/// `lamp_2 [<uuid>]`. The bracketed id is the only resolution key; the
 /// name part is display-only and never decides placement, so two objects
 /// sharing a display name still resolve to different nodes.
 ///
-/// Units: `index` is the position in the `ids` table. Ownership: pure
-/// function, caller owns the returned label. Determinism: same index and id
-/// always render the same label.
+/// Ownership: pure function, caller owns the returned label. Determinism:
+/// same name and id always render the same label.
 ///
 /// # Example
 ///
@@ -102,15 +122,15 @@ pub const MAX_WANT_CHARS: usize = 256;
 /// assert!(check_scene_op("insert").is_err());
 /// let id = parse_object_ref("object", "00000000-0000-0000-0000-000000000007")
 ///     .expect("bare UUID parses");
-/// let label = object_label(7, &id);
-/// assert_eq!(label, format!("prop_0007 [{id}]"));
+/// let label = object_label("lamp_2", &id);
+/// assert_eq!(label, format!("lamp_2 [{id}]"));
 /// assert_eq!(
 ///     parse_object_ref("object", &label).expect("label parses by id"),
 ///     id
 /// );
 /// ```
-pub fn object_label(index: u32, id: &ObjectId) -> String {
-    format!("prop_{index:04} [{id}]")
+pub fn object_label(name: &str, id: &ObjectId) -> String {
+    format!("{name} [{id}]")
 }
 
 /// Split a `name [id]` label back to its id. Accepts a bare UUID too, so
@@ -257,6 +277,52 @@ pub(crate) fn try_scene_apply_guard() -> Result<MutexGuard<'static, ()>, McpTool
     })
 }
 
+/// Pin the scene a `play.run` start plays, or refuse before any simulation.
+///
+/// `revision` is what the caller offered (`scene_rev`); the live pin is the
+/// document's current revision plus the canonical-bytes digest. An empty
+/// arena (revision 0) never pins, an absent revision is `unpinned_run` and a
+/// moved revision is `stale_scene_rev`. The returned live pin is what the run
+/// manifest carries. Pure; the document is only read.
+pub(crate) fn run_pin(doc: &Document, revision: Option<u64>) -> Result<ScenePin, McpToolError> {
+    let live = Scene::encode(&doc.hierarchy)
+        .pin(doc.revision)
+        .map_err(pin_refusal)?;
+    let offered = ScenePin::require(revision.map(|revision| ScenePin {
+        revision,
+        ..live.clone()
+    }))
+    .map_err(pin_refusal)?;
+    offered
+        .check(live.revision, &live.digest)
+        .map_err(pin_refusal)?;
+    Ok(live)
+}
+
+/// The match world a `play.run` start plays: the pinned scene (see
+/// [`run_pin`]) built into a world, with the pin digest for the manifest.
+pub(crate) fn pinned_world(
+    doc: &Document,
+    revision: Option<u64>,
+) -> Result<PinnedWorld, McpToolError> {
+    let pin = run_pin(doc, revision)?;
+    Ok(PinnedWorld {
+        world: match_world(doc)?,
+        digest: pin.digest,
+    })
+}
+
+/// Door code for each pin refusal; the message is the pin's own recovery.
+fn pin_refusal(error: PinError) -> McpToolError {
+    let code = match error {
+        PinError::MissingPin => "unpinned_run",
+        PinError::EmptyArena => "empty_arena",
+        PinError::StalePin { .. } => "stale_scene_rev",
+        PinError::DigestMismatch => "scene_digest_drift",
+    };
+    McpToolError::new(code, error.to_string())
+}
+
 /// Arguments for `scene.brief`: optional brief-text budget in bytes.
 /// `None` selects [`SCENE_BRIEF_DEFAULT_BUDGET`]; `0` or above
 /// [`SCENE_BRIEF_MAX_BUDGET`] fails with `bad_budget`. Read-only.
@@ -266,11 +332,19 @@ pub(crate) fn try_scene_apply_guard() -> Result<MutexGuard<'static, ()>, McpTool
 pub struct SceneBriefArgs {
     /// Brief-text budget in bytes (1..=[`SCENE_BRIEF_MAX_BUDGET`]).
     pub budget_bytes: Option<u32>,
+    /// First object index of the `ids`/`objects`/`poses` page (default 0);
+    /// pass the previous reply's `next_cursor` to read on.
+    pub cursor: Option<u32>,
+    /// True adds `spatial`: the verdict, finding count and hash of a
+    /// default `scene.spatial` call, plus the findings the text left out.
+    pub include_spatial: Option<bool>,
 }
 
 /// Output of `scene.brief`: document revision, spatial digest, bounded text rows,
-/// and the index-to-UUID table plus index-aligned `name [id]` labels.
-/// Read-only: nothing is staged, applied or locked.
+/// and one page of the index-to-UUID table, the index-aligned `name [id]`
+/// labels and the pose rows. The page holds about a quarter of the text
+/// budget in bytes; `next_cursor` continues it. Read-only: nothing is staged,
+/// applied or locked.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -283,11 +357,23 @@ pub struct SceneBriefOutput {
     pub text: String,
     /// True when groups, relations or findings were cut to fit the budget.
     pub truncated: bool,
-    /// Index-to-UUID table: bare UUID text per staged object, id-text sorted.
+    /// Index-to-UUID table page: bare UUID text per staged object, id-text sorted.
     pub ids: Vec<String>,
-    /// MCP8 `name [id]` labels (`prop_0007 [<uuid>]`), index-aligned with
+    /// MCP8 `name [id]` labels (`lamp_2 [<uuid>]`), index-aligned with
     /// `ids`: the bracketed id resolves, the name never does.
     pub objects: Vec<String>,
+    /// One pose row per object, aligned with `ids`:
+    /// `name [index] x y z sx sy sz dir`, whole cm and a compass facing.
+    pub poses: Vec<String>,
+    /// First object index of the next page; absent on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u32>,
+    /// Spatial summary, when `include_spatial` was true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial: Option<BriefSpatial>,
+    /// How many times in a row this exact call was made (2..=4); absent on a first call.
+    #[serde(default, skip_serializing_if = "no_repeat")]
+    pub repeat_count: u32,
     /// Session-local latest watch digest, when a `scene.watch` is live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_digest: Option<u64>,
@@ -310,6 +396,13 @@ pub struct SceneSpatialArgs {
     pub checks: Option<Vec<String>>,
     /// Findings rows per page, 1..=[`SCENE_SPATIAL_MAX_FINDINGS`].
     pub limit: Option<u32>,
+    /// First object index of the `ids`/`objects` page (default 0).
+    pub cursor: Option<u32>,
+    /// Answer shape: rows (default), ids (only the objects that carry a
+    /// finding, no finding rows), count (verdict and counts only).
+    pub format: Option<String>,
+    /// True keeps only red findings (rows, total and ids).
+    pub matched_only: Option<bool>,
 }
 
 /// Output of `scene.spatial`: verdict, spatial hash, paged brief-style finding
@@ -332,16 +425,73 @@ pub struct SceneSpatialOutput {
     pub truncated: bool,
     /// Finding lines, `finding <check> <a> <b|-> <severity> <pct>`.
     pub findings: Vec<String>,
-    /// Bare UUID text per staged object, id-text sorted.
+    /// One page of bare UUID text per staged object, id-text sorted.
     pub ids: Vec<String>,
     /// `name [id]` labels, index-aligned with `ids`.
     pub objects: Vec<String>,
+    /// First object index of the next `ids`/`objects` page; absent on the last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u32>,
+    /// How many times in a row this exact call was made (2..=4); absent on a first call.
+    #[serde(default, skip_serializing_if = "no_repeat")]
+    pub repeat_count: u32,
+    /// Finding counts: total, returned in this reply, suppressed.
+    pub counts: SpatialCounts,
+    /// The ten actors with the most findings, across all pages.
+    pub worst_actors: Vec<WorstActor>,
     /// Checks that ran, catalog order.
     pub checks_run: Vec<String>,
     /// Catalog checks that did not run, each with one reason.
     pub skipped: Vec<SkippedCheck>,
     /// Where each staged node's size came from.
     pub size_source: SizeSource,
+}
+
+/// `scene.spatial` limit gate: `bad_limit` outside 1..=`SCENE_SPATIAL_MAX_FINDINGS`.
+fn check_spatial_limit(limit: u32) -> Result<(), McpToolError> {
+    if limit == 0 || limit > SCENE_SPATIAL_MAX_FINDINGS {
+        return Err(McpToolError::new(
+            "bad_limit",
+            format!(
+                "limit {limit} is outside 1..={SCENE_SPATIAL_MAX_FINDINGS} \
+                 (default {SCENE_SPATIAL_DEFAULT_LIMIT})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The `checks` filter of a `scene.spatial` call, validated: `None` runs every
+/// offline check; too many names refuse `too_many_checks`, unknown ones `bad_check`.
+fn selected_checks(args: &SceneSpatialArgs) -> Result<Option<Vec<&str>>, McpToolError> {
+    Ok(match &args.checks {
+        None => None,
+        Some(names) => {
+            if names.len() > SCENE_SPATIAL_MAX_CHECKS {
+                return Err(McpToolError::new(
+                    "too_many_checks",
+                    format!(
+                        "checks holds {} entries; at most {SCENE_SPATIAL_MAX_CHECKS}",
+                        names.len()
+                    ),
+                ));
+            }
+            for name in names {
+                if !engine_spatial::SPATIAL_CHECKS.contains(&name.as_str())
+                    && !engine_spatial::OPT_IN_CHECKS.contains(&name.as_str())
+                {
+                    return Err(McpToolError::new(
+                        "bad_check",
+                        format!(
+                            "check `{name}` is unknown; submit any of {}",
+                            engine_spatial::SPATIAL_CHECKS.join(", ")
+                        ),
+                    ));
+                }
+            }
+            Some(names.iter().map(String::as_str).collect())
+        }
+    })
 }
 
 /// Arguments for `scene.place`: the revision the intent was built against, an
@@ -364,6 +514,9 @@ pub struct ScenePlaceArgs {
     pub object: String,
     /// Want lines, at most [`MAX_PLACE_WANTS`], each at most [`MAX_WANT_CHARS`] chars.
     pub wants: Vec<String>,
+    /// `false` skips the spatial delta (default true).
+    #[serde(default)]
+    pub delta: Option<bool>,
 }
 
 /// One solved placement: the staged node id plus its grounded world pose in
@@ -473,20 +626,27 @@ pub struct ScenePlaceOutput {
     /// without touching the scene. Applying the hint replays the same
     /// move, so the rows equal the applied diff. Empty when solved.
     pub dry_run: Vec<String>,
+    /// Why each unmet want failed (SPR6); empty when solved or without geometry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<WantBlockDto>,
+    /// Spatial findings this move changed (SPX3); absent with `delta: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_delta: Option<SpatialDeltaDto>,
 }
 
 // Document snapshot: actors, the id table and the count of unresolved poses.
-struct Snapshot {
-    actors: Vec<engine_spatial::Actor>,
-    ids: Vec<ObjectId>,
+pub(crate) struct Snapshot {
+    pub(crate) actors: Vec<engine_spatial::Actor>,
+    pub(crate) ids: Vec<ObjectId>,
     missing_pose: u64,
+    sizes: SizeSource,
 }
 
 // Sorted-id snapshot of every reachable node plus the count of nodes whose
 // world pose (position or rotation) was missing or non-finite: those post a
 // NaN actor, never a drop and never a flattened yaw, so `unknown-position`
 // fires with the id still in the table.
-fn snapshot(doc: &Document) -> Snapshot {
+pub(crate) fn snapshot(doc: &Document) -> Snapshot {
     let mut order: Vec<ObjectId> = Vec::new();
     let mut stack = doc.hierarchy.roots();
     while let Some(id) = stack.pop() {
@@ -496,6 +656,7 @@ fn snapshot(doc: &Document) -> Snapshot {
     order.sort_by_key(|id| id.to_string());
     let mut actors = Vec::new();
     let mut ids = Vec::new();
+    let mut scales = Vec::new();
     let mut missing_pose = 0u64;
     for id in order {
         let world = doc.hierarchy.world(id).filter(|w| {
@@ -514,9 +675,10 @@ fn snapshot(doc: &Document) -> Snapshot {
         }
         let yaw = yaw_of_quat(world.rotation);
         ids.push(id);
+        scales.push(world.scale);
         actors.push(engine_spatial::Actor {
             id: index,
-            name: format!("prop_{index:04}"),
+            name: String::new(),
             x: world.position[0],
             y: world.position[1],
             z: world.position[2],
@@ -530,10 +692,16 @@ fn snapshot(doc: &Document) -> Snapshot {
             yaw,
         });
     }
+    let (names, sizes, source) = staged_names_sizes(doc, &ids, &scales);
+    for ((actor, name), size) in actors.iter_mut().zip(names).zip(sizes) {
+        actor.name = name;
+        [actor.sx, actor.sy, actor.sz] = size;
+    }
     Snapshot {
         actors,
         ids,
         missing_pose,
+        sizes: source,
     }
 }
 
@@ -780,6 +948,8 @@ fn conflict_output(
         reason,
         hints,
         dry_run,
+        blocked_by: Vec::new(),
+        spatial_delta: None,
     }
 }
 
@@ -850,6 +1020,7 @@ fn apply_placement(
     node: ObjectId,
     placed: &engine_spatial::TransformOut,
     idempotency_key: u64,
+    before: Option<&Snapshot>,
 ) -> Result<ScenePlaceOutput, McpToolError> {
     // Refuse a non-finite or out-of-range pose before anything is staged.
     let placement = PlacedDto::checked(node.to_string(), placed.x, placed.y, placed.z, placed.yaw)?;
@@ -910,6 +1081,7 @@ fn apply_placement(
     .map_err(|error| cap_error(&error, &granted))?;
     // A solved placement is a watch event: move the session-local cache.
     state.refresh_watch();
+    let spatial_delta = before.map(|before| spatial_delta(before, &snapshot(&state.doc), &[node]));
     Ok(ScenePlaceOutput {
         revision: applied.revision,
         solved: true,
@@ -920,6 +1092,8 @@ fn apply_placement(
         reason: String::new(),
         hints: Vec::new(),
         dry_run: Vec::new(),
+        blocked_by: Vec::new(),
+        spatial_delta,
     })
 }
 
@@ -964,13 +1138,38 @@ impl ServerState {
             || kept.relations.len() != full.relations.len()
             || kept.findings.len() != full.findings.len()
             || afford_dropped;
+        let page = table_page(
+            &snap.ids,
+            &snap.actors,
+            args.cursor.unwrap_or(0),
+            table_allowance(budget),
+            None,
+        );
+        let spatial = if args.include_spatial.unwrap_or(false) {
+            let counts = self.scene_spatial(&SceneSpatialArgs {
+                format: Some("count".to_owned()),
+                ..Default::default()
+            })?;
+            Some(BriefSpatial {
+                verdict: counts.verdict,
+                total: counts.total,
+                hash: counts.hash,
+                focus_gap: wide(full.findings.len() - kept.findings.len()),
+            })
+        } else {
+            None
+        };
         Ok(SceneBriefOutput {
             revision: self.doc.revision,
             digest: kept.digest,
             text,
             truncated,
-            ids: id_table(&snap.ids),
-            objects: label_table(&snap.ids),
+            ids: page.ids,
+            objects: page.objects,
+            poses: page.poses,
+            next_cursor: page.next_cursor,
+            spatial,
+            repeat_count: 0,
             watch_digest: self.watch_digest,
             watch_subscription: self.watch_subscription,
         })
@@ -990,43 +1189,8 @@ impl ServerState {
         args: &SceneSpatialArgs,
     ) -> Result<SceneSpatialOutput, McpToolError> {
         let limit = args.limit.unwrap_or(SCENE_SPATIAL_DEFAULT_LIMIT);
-        if limit == 0 || limit > SCENE_SPATIAL_MAX_FINDINGS {
-            return Err(McpToolError::new(
-                "bad_limit",
-                format!(
-                    "limit {limit} is outside 1..={SCENE_SPATIAL_MAX_FINDINGS} \
-                     (default {SCENE_SPATIAL_DEFAULT_LIMIT})"
-                ),
-            ));
-        }
-        let selected: Option<Vec<&str>> = match &args.checks {
-            None => None,
-            Some(names) => {
-                if names.len() > SCENE_SPATIAL_MAX_CHECKS {
-                    return Err(McpToolError::new(
-                        "too_many_checks",
-                        format!(
-                            "checks holds {} entries; at most {SCENE_SPATIAL_MAX_CHECKS}",
-                            names.len()
-                        ),
-                    ));
-                }
-                for name in names {
-                    if !engine_spatial::SPATIAL_CHECKS.contains(&name.as_str())
-                        && !engine_spatial::OPT_IN_CHECKS.contains(&name.as_str())
-                    {
-                        return Err(McpToolError::new(
-                            "bad_check",
-                            format!(
-                                "check `{name}` is unknown; submit any of {}",
-                                engine_spatial::SPATIAL_CHECKS.join(", ")
-                            ),
-                        ));
-                    }
-                }
-                Some(names.iter().map(String::as_str).collect())
-            }
-        };
+        check_spatial_limit(limit)?;
+        let selected = selected_checks(args)?;
         // Read-only over the live document: staging a proposed batch is
         // tx.preview's job, and the CAP1 gate replays the spatial delta on
         // every apply, so findings here can never drift from the gate.
@@ -1047,21 +1211,63 @@ impl ServerState {
                 )
             }
         })?;
-        let total = report.findings.len() as u64;
-        let end = (limit as usize).min(report.findings.len());
-        let findings: Vec<String> = report.findings[..end].iter().map(finding_line).collect();
+        let format = QueryFormat::parse(args.format.as_deref())?;
+        let shown: Vec<&engine_spatial::Finding> = report
+            .findings
+            .iter()
+            .filter(|finding| !args.matched_only.unwrap_or(false) || finding.severity == "red")
+            .collect();
+        let total = wide(shown.len());
+        let end = if format == QueryFormat::Rows {
+            index_of(limit).min(shown.len())
+        } else {
+            0
+        };
+        let findings: Vec<String> = shown[..end].iter().map(|f| finding_line(f)).collect();
+        let findings_len = wide(findings.len());
+        let involved: BTreeSet<usize> = shown
+            .iter()
+            .flat_map(|finding| [finding.a, finding.b])
+            .filter_map(|index| usize::try_from(index).ok())
+            .filter(|index| *index < snap.actors.len())
+            .collect();
+        let page = match format {
+            QueryFormat::Rows => table_page(
+                &snap.ids,
+                &snap.actors,
+                args.cursor.unwrap_or(0),
+                table_allowance(SCENE_BRIEF_DEFAULT_BUDGET),
+                None,
+            ),
+            QueryFormat::Ids => table_page(
+                &snap.ids,
+                &snap.actors,
+                args.cursor.unwrap_or(0),
+                table_allowance(SCENE_BRIEF_MAX_BUDGET),
+                Some(&involved),
+            ),
+            QueryFormat::Count => table_page(&[], &[], 0, 0, None),
+        };
         Ok(SceneSpatialOutput {
             revision: self.doc.revision,
             verdict: report.verdict().to_string(),
             hash: report.hash,
             total,
-            truncated: end < report.findings.len(),
+            truncated: format == QueryFormat::Rows && end < shown.len(),
             findings,
-            ids: id_table(&snap.ids),
-            objects: label_table(&snap.ids),
+            ids: page.ids,
+            objects: page.objects,
+            next_cursor: page.next_cursor,
+            repeat_count: 0,
+            counts: SpatialCounts {
+                total,
+                returned: findings_len,
+                suppressed: total - findings_len,
+            },
+            worst_actors: worst_actors(&shown, &snap.ids, &snap.actors),
             checks_run,
             skipped,
-            size_source: staged_sizes(snap.actors.len()),
+            size_source: snap.sizes,
         })
     }
 
@@ -1174,13 +1380,12 @@ impl ServerState {
             Ok(out) => out,
             Err(conflict) => {
                 let (hints, dry_run) = hint_output(&snap, node, spatial_id, &parsed, &conflict)?;
-                return Ok(conflict_output(
-                    self.doc.revision,
-                    conflict_texts(&parsed, &conflict.unmet),
-                    conflict.reason,
-                    hints,
-                    dry_run,
-                ));
+                let texts = conflict_texts(&parsed, &conflict.unmet);
+                let blocked_by = block_output(&snap, &conflict);
+                let mut out =
+                    conflict_output(self.doc.revision, texts, conflict.reason, hints, dry_run);
+                out.blocked_by = blocked_by;
+                return Ok(out);
             }
         };
         let sources: Vec<String> = parsed.iter().map(|entry| entry.source.clone()).collect();
@@ -1195,7 +1400,10 @@ impl ServerState {
             ));
         };
         debug_assert_eq!(placed.id, spatial_id);
-        apply_placement(self, node, placed, args.idempotency_key)
+        // SPX3: the snapshot the solve ran on is the scene as it was; `delta:
+        // false` skips the second snapshot and the catalog runs.
+        let before = (args.delta != Some(false)).then_some(&snap);
+        apply_placement(self, node, placed, args.idempotency_key, before)
     }
 }
 
@@ -1222,7 +1430,12 @@ impl ToolBase for SceneBriefTool {
 
 impl SyncTool<McpServer> for SceneBriefTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_BRIEF, |state| state.scene_brief(&param))
+        service.dispatch(TOOL_SCENE_BRIEF, |state| {
+            let repeat = state.note_read(TOOL_SCENE_BRIEF, &param)?;
+            let mut out = state.scene_brief(&param)?;
+            out.repeat_count = repeat;
+            Ok(out)
+        })
     }
 }
 
@@ -1249,7 +1462,12 @@ impl ToolBase for SceneSpatialTool {
 
 impl SyncTool<McpServer> for SceneSpatialTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_SPATIAL, |state| state.scene_spatial(&param))
+        service.dispatch(TOOL_SCENE_SPATIAL, |state| {
+            let repeat = state.note_read(TOOL_SCENE_SPATIAL, &param)?;
+            let mut out = state.scene_spatial(&param)?;
+            out.repeat_count = repeat;
+            Ok(out)
+        })
     }
 }
 
@@ -1279,32 +1497,9 @@ impl ToolBase for ScenePlaceTool {
     }
 }
 
-/// Serialize one audited `scene.place` payload fail-closed: a serialization
-/// failure refuses `bad_args` instead of screening an empty string past the
-/// hostile-text gate. The caller seals the refusal through the dispatch seam
-/// so it still chains exactly one `Refused` audit record.
-fn audit_payload_text<T: Serialize>(tool: &'static str, param: &T) -> Result<String, McpToolError> {
-    rmcp::serde_json::to_string(param).map_err(|error| {
-        McpToolError::new(
-            "bad_args",
-            format!(
-                "args for `{tool}` do not serialize ({error}); re-run after api.describe `{tool}` for the schema"
-            ),
-        )
-    })
-}
-
 impl SyncTool<McpServer> for ScenePlaceTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        let payload = match audit_payload_text(TOOL_SCENE_PLACE, &param) {
-            Ok(payload) => payload,
-            Err(refusal) => {
-                return service.dispatch(TOOL_SCENE_PLACE, |_| Err::<ScenePlaceOutput, _>(refusal));
-            }
-        };
-        service.dispatch_with_payload(TOOL_SCENE_PLACE, &payload, |state| {
-            state.scene_place(&param)
-        })
+        service.dispatch_screened(TOOL_SCENE_PLACE, &param, |state| state.scene_place(&param))
     }
 }
 
@@ -1364,6 +1559,7 @@ mod tests {
     #[test]
     fn place_payload_serializes_valid_args_and_refuses_failures_audited() {
         use super::super::audit::{code_hash, AuditOutcome};
+        use super::super::door_dispatch::audit_payload_text;
 
         // Valid args serialize to a payload that carries the call's own
         // fields into the hostile-text screen.
@@ -1372,6 +1568,7 @@ mod tests {
             idempotency_key: 77,
             object: "brazier".to_owned(),
             wants: vec!["next_to wall:north [0,60]".to_owned()],
+            delta: None,
         };
         let payload = audit_payload_text(TOOL_SCENE_PLACE, &args).expect("valid args serialize");
         assert!(payload.contains("brazier"), "got: {payload}");
@@ -1528,16 +1725,17 @@ mod tests {
                 format!("next_to object:{wall}"),
                 format!("next_to object:{gate} [150,250]"),
             ],
+            delta: None,
         }
     }
 
     #[test]
     fn brief_returns_digest_stable_text() {
         let (server, _, _) = overlap_scene();
-        let first = SceneBriefTool::invoke(&server, SceneBriefArgs { budget_bytes: None })
-            .expect("brief reads");
-        let second = SceneBriefTool::invoke(&server, SceneBriefArgs { budget_bytes: None })
-            .expect("brief reads again");
+        let first =
+            SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads");
+        let second =
+            SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads again");
         assert_eq!(first.text, second.text, "same scene twice, same text");
         assert_eq!(first.digest, second.digest);
         assert!(first.text.starts_with(&format!("digest {}", first.digest)));
@@ -1557,6 +1755,7 @@ mod tests {
             &server,
             SceneBriefArgs {
                 budget_bytes: Some(64),
+                ..Default::default()
             },
         )
         .expect("tight brief reads");
@@ -1574,6 +1773,7 @@ mod tests {
                 &server,
                 SceneBriefArgs {
                     budget_bytes: budget,
+                    ..Default::default()
                 },
             )
             .expect_err("bad budget must fail");
@@ -1590,6 +1790,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: None,
                 limit: None,
+                ..Default::default()
             },
         )
         .expect("spatial reads");
@@ -1638,6 +1839,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: Some(vec!["overlap".to_string()]),
                 limit: Some(4),
+                ..Default::default()
             },
         )
         .expect("bounded check reads");
@@ -1663,6 +1865,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: Some(vec!["overlap".to_string()]),
                 limit: Some(1),
+                ..Default::default()
             },
         )
         .expect("filtered check reads");
@@ -1677,6 +1880,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: Some(vec!["teleport".to_string()]),
                 limit: None,
+                ..Default::default()
             },
         )
         .expect_err("unknown check must fail");
@@ -1687,6 +1891,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: Some(vec!["navConnect".to_string()]),
                 limit: None,
+                ..Default::default()
             },
         )
         .expect_err("nav check without a view must fail");
@@ -1696,6 +1901,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: None,
                 limit: Some(SCENE_SPATIAL_MAX_FINDINGS + 1),
+                ..Default::default()
             },
         )
         .expect_err("over-limit page must fail");
@@ -1710,6 +1916,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: Some(vec!["relationCycle".to_string()]),
                 limit: None,
+                ..Default::default()
             },
         )
         .expect("opt-in check is legal when listed");
@@ -1722,6 +1929,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: Some(vec!["teleport".to_string()]),
                 limit: None,
+                ..Default::default()
             },
         )
         .expect_err("unknown check must fail");
@@ -1775,6 +1983,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: None,
                 limit: Some(SCENE_SPATIAL_MAX_FINDINGS),
+                ..Default::default()
             },
         )
         .expect("read")
@@ -1837,6 +2046,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: Some(vec!["overlap".to_string()]),
                 limit: None,
+                ..Default::default()
             },
         )
         .expect("filtered read");
@@ -1901,11 +2111,12 @@ mod tests {
             SceneSpatialArgs {
                 checks: None,
                 limit: None,
+                ..Default::default()
             },
         )
         .expect("post-place check reads");
         assert_eq!(after.verdict, "clean", "solved scene runs clean");
-        let brief = SceneBriefTool::invoke(&room.server, SceneBriefArgs { budget_bytes: None })
+        let brief = SceneBriefTool::invoke(&room.server, SceneBriefArgs::default())
             .expect("post-place brief reads");
         assert_eq!(brief.revision, rev + 1);
     }
@@ -1921,6 +2132,7 @@ mod tests {
             idempotency_key: 302,
             object: room.brazier.to_string(),
             wants: vec![against("north"), against("south")],
+            delta: None,
         };
         let out = ScenePlaceTool::invoke(&room.server, args).expect("conflicts answer");
         assert!(!out.solved);
@@ -1944,6 +2156,7 @@ mod tests {
                 idempotency_key: 303 + u64::from(name == "south"),
                 object: room.brazier.to_string(),
                 wants: vec![against(name)],
+                delta: None,
             };
             let solo = ScenePlaceTool::invoke(&room.server, single).expect("single solves");
             assert!(solo.solved, "{name} alone must solve: {}", solo.reason);
@@ -1968,6 +2181,7 @@ mod tests {
                 idempotency_key: 340,
                 object: ids.brazier.to_string(),
                 wants: vec!["next_to wall:north".to_string()],
+                delta: None,
             },
         )
         .expect_err("exhausted budget must fail before applying");
@@ -1985,6 +2199,7 @@ mod tests {
             idempotency_key: 304,
             object: room.brazier.to_string(),
             wants: vec![format!("next_to object:{}", ObjectId::new())],
+            delta: None,
         };
         let out = ScenePlaceTool::invoke(&room.server, args).expect("conflicts answer");
         assert!(!out.solved);
@@ -2018,6 +2233,7 @@ mod tests {
                     idempotency_key: 305 + index as u64,
                     object: room.brazier.to_string(),
                     wants: vec![(*want).to_string()],
+                    delta: None,
                 },
             )
             .expect_err("malformed want must fail");
@@ -2030,6 +2246,7 @@ mod tests {
                 idempotency_key: 320,
                 object: room.brazier.to_string(),
                 wants: vec!["next_to wall:north".to_string(); MAX_PLACE_WANTS + 1],
+                delta: None,
             },
         )
         .expect_err("oversize intent must fail");
@@ -2069,6 +2286,7 @@ mod tests {
                 idempotency_key: 332,
                 object: child.to_string(),
                 wants: vec!["next_to wall:north".to_string()],
+                delta: None,
             },
         )
         .expect_err("parented object must fail");
@@ -2078,6 +2296,7 @@ mod tests {
             idempotency_key: 306,
             object: room.brazier.to_string(),
             wants: Vec::new(),
+            delta: None,
         };
         let stale_refused =
             ScenePlaceTool::invoke(&room.server, stale).expect_err("stale intent must fail");
@@ -2112,13 +2331,13 @@ mod tests {
     #[test]
     fn brief_labels_every_object_as_name_bracket_id() {
         let (server, _, _) = overlap_scene();
-        let brief = SceneBriefTool::invoke(&server, SceneBriefArgs { budget_bytes: None })
-            .expect("brief reads");
+        let brief =
+            SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads");
         assert_eq!(brief.objects.len(), brief.ids.len());
         assert_eq!(brief.objects.len(), 4);
         for (index, (label, id)) in brief.objects.iter().zip(brief.ids.iter()).enumerate() {
             let id = ObjectId::parse(id).expect("ids table stays bare UUID text");
-            assert_eq!(*label, object_label(index as u32, &id));
+            assert_eq!(*label, object_label(&format!("prop_{}", index + 1), &id));
             assert!(
                 label.ends_with(&format!("[{id}]")),
                 "label carries its id: {label}"
@@ -2129,6 +2348,7 @@ mod tests {
             SceneSpatialArgs {
                 checks: None,
                 limit: None,
+                ..Default::default()
             },
         )
         .expect("spatial reads");
@@ -2171,6 +2391,7 @@ mod tests {
                     idempotency_key: 410 + index as u64,
                     object: label.clone(),
                     wants: vec![want.to_string()],
+                    delta: None,
                 },
             )
             .expect("label form places");
@@ -2196,6 +2417,7 @@ mod tests {
                 idempotency_key: 412,
                 object: format!("not-a-crate [{}]", room.brazier),
                 wants: vec!["next_to wall:east".to_string()],
+                delta: None,
             },
         )
         .expect("mismatched name still places by id");
@@ -2214,6 +2436,7 @@ mod tests {
                 idempotency_key: 413,
                 object: "crate [not-a-uuid]".to_string(),
                 wants: vec!["next_to wall:north".to_string()],
+                delta: None,
             },
         )
         .expect_err("bracketed garbage must fail");
@@ -2348,6 +2571,7 @@ mod tests {
         assert_eq!(revision(&room.server), rev, "refused flight writes nothing");
         // play.run never takes the scene guard: start, progress and result
         // all land while the flight is held.
+        let pinned = revision(&room.server);
         let play = |action: &str, job_id: Option<u64>| {
             PlayRunTool::invoke(
                 &room.server,
@@ -2360,7 +2584,7 @@ mod tests {
                     inputs: None,
                     ttl_polls: None,
                     job_id,
-                    scene_rev: None,
+                    scene_rev: Some(pinned),
                 },
             )
         };
@@ -2415,6 +2639,7 @@ mod tests {
                     idempotency_key: 1000 + u64::from(seed),
                     object: mover.to_string(),
                     wants: wants.clone(),
+                    delta: None,
                 },
             )
             .expect("conflicts answer");
@@ -2446,6 +2671,7 @@ mod tests {
                         idempotency_key: 2000 + u64::from(seed),
                         object: fresh_mover.to_string(),
                         wants: repair,
+                        delta: None,
                     },
                 )
                 .expect("hint repair places");
@@ -2499,6 +2725,7 @@ mod tests {
                     idempotency_key: 3000 + u64::from(seed),
                     object: mover.to_string(),
                     wants: wants.clone(),
+                    delta: None,
                 },
             )
             .expect("conflicts answer");
@@ -2522,6 +2749,7 @@ mod tests {
                     idempotency_key: 3100 + u64::from(seed),
                     object: mover.to_string(),
                     wants: repair,
+                    delta: None,
                 },
             )
             .expect("hint applies");
@@ -2549,8 +2777,8 @@ mod tests {
         let _serial = PLACE_TEST_SERIAL.lock().expect("place tests serialize");
         let room = room_scene();
         let rev = revision(&room.server);
-        let before = SceneBriefTool::invoke(&room.server, SceneBriefArgs { budget_bytes: None })
-            .expect("brief reads");
+        let before =
+            SceneBriefTool::invoke(&room.server, SceneBriefArgs::default()).expect("brief reads");
         let out = ScenePlaceTool::invoke(
             &room.server,
             ScenePlaceArgs {
@@ -2561,6 +2789,7 @@ mod tests {
                     "next_to wall:north [0,50]".to_string(),
                     "next_to wall:south [0,50]".to_string(),
                 ],
+                delta: None,
             },
         )
         .expect("conflicts answer");
@@ -2570,7 +2799,7 @@ mod tests {
             !out.dry_run.is_empty(),
             "solver conflicts carry dry-run rows"
         );
-        let after = SceneBriefTool::invoke(&room.server, SceneBriefArgs { budget_bytes: None })
+        let after = SceneBriefTool::invoke(&room.server, SceneBriefArgs::default())
             .expect("brief reads again");
         assert_eq!(after.revision, rev, "conflicts write nothing");
         assert_eq!(after.text, before.text, "brief text unchanged");
@@ -2582,6 +2811,7 @@ mod tests {
                 idempotency_key: 3201,
                 object: room.brazier.to_string(),
                 wants: vec![format!("next_to object:{}", ObjectId::new())],
+                delta: None,
             },
         )
         .expect("unknown target answers");
@@ -2691,6 +2921,7 @@ mod tests {
                 idempotency_key: 503,
                 object: child.to_string(),
                 wants: vec!["next_to wall:north".to_string()],
+                delta: None,
             },
         )
         .expect_err("parented object must fail loudly");
@@ -2715,6 +2946,7 @@ mod tests {
                 idempotency_key: 504,
                 object: room.brazier.to_string(),
                 wants: vec!["next_to wall:north".to_string()],
+                delta: None,
             },
         )
         .expect("root place solves");
@@ -2736,5 +2968,376 @@ mod tests {
             "pure-Y write keeps z at zero"
         );
         assert!((yaw_of_quat(local.rotation) - placed.yaw).abs() <= 1e-5);
+    }
+
+    /// SC2: a run pins the live revision and digest, or refuses with a named
+    /// code before any simulation starts.
+    #[test]
+    fn run_pin_pins_or_refuses_by_name() {
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let code = |result: Result<ScenePin, McpToolError>| result.expect_err("refuses").code;
+        // The empty arena never pins, offered or not.
+        assert_eq!(code(run_pin(&doc, None)), "empty_arena");
+        assert_eq!(code(run_pin(&doc, Some(0))), "empty_arena");
+        let insert = |doc: &mut Document, journal: &mut Journal, key: u64| {
+            let batch = Batch {
+                ops: vec![Op::Insert {
+                    id: ObjectId::new(),
+                    parent: ObjectId::NIL,
+                    local: Transform::identity(),
+                }],
+                base_revision: doc.revision,
+                idempotency_key: key,
+                provenance: None,
+            };
+            commands::apply(doc, journal, &batch).expect("insert applies");
+        };
+        insert(&mut doc, &mut journal, 1);
+        assert_eq!(code(run_pin(&doc, None)), "unpinned_run");
+        let first = run_pin(&doc, Some(doc.revision)).expect("current revision pins");
+        assert_eq!(first.revision, doc.revision);
+        assert_eq!(first.digest, Scene::encode(&doc.hierarchy).digest());
+        // Same bytes, same pin; an edit moves both revision and digest.
+        assert_eq!(run_pin(&doc, Some(doc.revision)), Ok(first.clone()));
+        insert(&mut doc, &mut journal, 2);
+        let stale = run_pin(&doc, Some(first.revision)).expect_err("old revision is stale");
+        assert_eq!(stale.code, "stale_scene_rev");
+        assert!(stale.message.contains("re-read"), "{}", stale.message);
+        let second = run_pin(&doc, Some(doc.revision)).expect("new revision pins");
+        assert_ne!(second.digest, first.digest);
+    }
+
+    struct Yard {
+        server: McpServer,
+        wall: ObjectId,
+        crate_: ObjectId,
+        old_a: ObjectId,
+        old_b: ObjectId,
+        lamp: ObjectId,
+    }
+
+    // A 10 m x 2 m x 20 cm wall collider at the origin, a free crate south of
+    // it, two crates already stacked on one footprint far away (a pre-existing
+    // overlap), and a free lamp, seeded through the command service. The tx
+    // gate sees only 1 m cubes on poses, so a crate 3 m from the wall's center
+    // passes it while the collider-sized staged check finds the overlap.
+    fn yard() -> Yard {
+        use engine_scene::component::{Collider, ColliderShape, Component};
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let (wall, crate_, old_a, old_b, lamp) = (
+            ObjectId::new(),
+            ObjectId::new(),
+            ObjectId::new(),
+            ObjectId::new(),
+            ObjectId::new(),
+        );
+        let spots = [
+            (wall, [0.0, 0.0, 0.0]),
+            (crate_, [0.0, 0.0, 6.0]),
+            (old_a, [20.0, 0.0, 20.0]),
+            (old_b, [20.0, 0.0, 20.0]),
+            (lamp, [-20.0, 0.0, -20.0]),
+        ];
+        let mut ops = Vec::new();
+        for (id, pos) in spots {
+            ops.push(Op::Insert {
+                id,
+                parent: ObjectId::NIL,
+                local: Transform::new(pos, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            });
+        }
+        ops.push(Op::SetComponent {
+            id: wall,
+            component: Component::Collider(Collider {
+                shape: ColliderShape::Box,
+                half: [5.0, 1.0, 0.1],
+                sensor: false,
+            }),
+        });
+        let batch = Batch {
+            ops,
+            base_revision: doc.revision,
+            idempotency_key: 700,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &batch).expect("yard seed applies");
+        Yard {
+            server: McpServer::with_document(doc, journal, 7, Capability::unrestricted(7)),
+            wall,
+            crate_,
+            old_a,
+            old_b,
+            lamp,
+        }
+    }
+
+    // One root move through the tx door: preview, then apply with the approval.
+    fn tx_move(
+        server: &McpServer,
+        id: &ObjectId,
+        pos: [f32; 3],
+        key: u64,
+        delta: Option<bool>,
+    ) -> crate::mcp::TxApplyOutput {
+        use crate::mcp::{OpDto, PoseDto, TxApplyArgs, TxApplyTool, TxPreviewArgs, TxPreviewTool};
+        let rev = revision(server);
+        let ops = vec![OpDto::SetLocal {
+            id: id.to_string(),
+            local: PoseDto {
+                pos,
+                rot: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+        }];
+        let preview = TxPreviewTool::invoke(
+            server,
+            TxPreviewArgs {
+                expected_revision: rev,
+                idempotency_key: key,
+                ops: ops.clone(),
+            },
+        )
+        .expect("move previews");
+        TxApplyTool::invoke(
+            server,
+            TxApplyArgs {
+                expected_revision: rev,
+                idempotency_key: key,
+                ops,
+                approval: preview.approval,
+                delta,
+            },
+        )
+        .expect("move applies")
+    }
+
+    #[test]
+    fn spatial_delta_names_both_ids_and_the_axis_fix() {
+        let yard = yard();
+        // The crate walks into the wall's collider; the 1 m cube gate lets it by.
+        let out = tx_move(&yard.server, &yard.crate_, [3.0, 0.0, 0.0], 810, None);
+        let delta = out.spatial_delta.expect("delta rides on the write");
+        assert_eq!(delta.ids, vec![yard.crate_.to_string()]);
+        assert_eq!(delta.new_findings.len(), 1, "{:?}", delta.new_findings);
+        assert_eq!(delta.more, 0);
+        let line = &delta.new_findings[0];
+        assert!(line.contains(&yard.crate_.to_string()), "mover id: {line}");
+        assert!(line.contains(&yard.wall.to_string()), "wall id: {line}");
+        // Crate z -50..50 against the wall's -10..10: 20 cm deep in plan; the
+        // short way out is 60 cm along -z (850 along -x, 250 along +x).
+        assert!(line.starts_with("overlap (red)"), "{line}");
+        assert!(line.contains("by 20 cm in plan"), "{line}");
+        assert!(line.contains("fix: move"), "{line}");
+        assert!(line.ends_with("60 cm -z"), "{line}");
+        assert!(delta.resolved.is_empty());
+    }
+
+    #[test]
+    fn spatial_delta_hides_old_overlaps_and_clean_moves_read_empty() {
+        let yard = yard();
+        let (server, lamp) = (&yard.server, &yard.lamp);
+        // A clean move of a free lamp: empty lists, touched ids only. The old
+        // stacked pair elsewhere stays out.
+        let clean = tx_move(server, lamp, [-22.0, 0.0, -20.0], 820, None)
+            .spatial_delta
+            .expect("delta rides on the write");
+        assert_eq!(clean.ids, vec![lamp.to_string()]);
+        assert!(clean.new_findings.is_empty() && clean.resolved.is_empty());
+        assert_eq!(clean.more, 0);
+        // Walking the crate into the wall: one new overlap; the old pair stays out.
+        let hit = tx_move(server, &yard.crate_, [3.0, 0.0, 0.0], 821, None)
+            .spatial_delta
+            .expect("delta rides on the write");
+        assert_eq!(hit.new_findings.len(), 1, "{:?}", hit.new_findings);
+        let line = &hit.new_findings[0];
+        assert!(
+            !line.contains(&yard.old_a.to_string()) && !line.contains(&yard.old_b.to_string()),
+            "old overlap stays out: {line}"
+        );
+        // Moving one stacked crate away clears the old overlap: one resolved line.
+        let freed = tx_move(server, &yard.old_a, [20.0, 0.0, 26.0], 822, None)
+            .spatial_delta
+            .expect("delta rides on the write");
+        assert!(freed.new_findings.is_empty());
+        assert_eq!(freed.resolved.len(), 1, "{:?}", freed.resolved);
+        assert!(
+            freed.resolved[0].contains(&yard.old_a.to_string())
+                && freed.resolved[0].contains(&yard.old_b.to_string())
+        );
+        // `delta: false` skips the check: no field at all.
+        let skipped = tx_move(server, lamp, [-24.0, 0.0, -20.0], 823, Some(false));
+        assert!(skipped.spatial_delta.is_none());
+    }
+
+    #[test]
+    fn spatial_delta_rides_on_scene_place_and_the_flag_skips_it() {
+        let _serial = PLACE_TEST_SERIAL.lock().expect("place tests serialize");
+        for (skip, key) in [(false, 830u64), (true, 831)] {
+            let room = room_scene();
+            let mut args = brazier_intent(&room.brazier, &room.wall_north, &room.gate);
+            args.expected_revision = revision(&room.server);
+            args.idempotency_key = key;
+            args.delta = skip.then_some(false);
+            let out = ScenePlaceTool::invoke(&room.server, args).expect("place solves");
+            assert!(out.solved, "{}", out.reason);
+            if skip {
+                assert!(out.spatial_delta.is_none());
+            } else {
+                let delta = out.spatial_delta.expect("delta rides on the placement");
+                assert_eq!(delta.ids, vec![room.brazier.to_string()]);
+                assert!(delta.new_findings.is_empty() && delta.resolved.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn spatial_delta_stays_cheap_on_a_200_object_scene() {
+        use engine_scene::component::{Collider, ColliderShape, Component};
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let ids: Vec<ObjectId> = (0..200).map(|_| ObjectId::new()).collect();
+        let ops = ids
+            .iter()
+            .enumerate()
+            .map(|(n, id)| Op::Insert {
+                id: *id,
+                parent: ObjectId::NIL,
+                local: Transform::new(
+                    [(n % 20) as f32 * 3.0, 0.0, (n / 20) as f32 * 3.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                ),
+            })
+            .collect();
+        let seed = Batch {
+            ops,
+            base_revision: doc.revision,
+            idempotency_key: 900,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &seed).expect("200 cubes apply");
+        let before = snapshot(&doc);
+        // Widen cube 0 to 6 m: it now overlaps its east neighbour (3 m away).
+        let widen = Batch {
+            ops: vec![Op::SetComponent {
+                id: ids[0],
+                component: Component::Collider(Collider {
+                    shape: ColliderShape::Box,
+                    half: [3.0, 0.5, 0.5],
+                    sensor: false,
+                }),
+            }],
+            base_revision: doc.revision,
+            idempotency_key: 901,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &widen).expect("collider applies");
+        // What the write adds: the second snapshot plus the staged check (the
+        // before snapshot is paid the same way), median of 15 runs.
+        let mut micros = Vec::new();
+        let mut last = None;
+        for _ in 0..15 {
+            let start = std::time::Instant::now();
+            let _prior = snapshot(&doc);
+            let after = snapshot(&doc);
+            last = Some(spatial_delta(&before, &after, &[ids[0]]));
+            micros.push(start.elapsed().as_micros());
+        }
+        micros.sort_unstable();
+        let median = micros[7];
+        eprintln!("spatial_delta 200 objects: median {median} us (two snapshots + staged check)");
+        let delta = last.expect("ran");
+        assert_eq!(delta.new_findings.len(), 1, "{:?}", delta.new_findings);
+        assert!(median < 5_000, "delta added {median} us, bar is 5000");
+    }
+
+    #[test]
+    fn place_conflict_blockers_name_the_taken_spot() {
+        let _serial = PLACE_TEST_SERIAL.lock().expect("place tests serialize");
+        let room = room_scene();
+        let rev = revision(&room.server);
+        // The point sits exactly on the gate cube (4, -4): the only pose that
+        // meets the want is taken.
+        let args = ScenePlaceArgs {
+            expected_revision: rev,
+            idempotency_key: 840,
+            object: room.brazier.to_string(),
+            wants: vec!["next_to point:400,-400 [0,0]".to_string()],
+            delta: None,
+        };
+        let out = ScenePlaceTool::invoke(&room.server, args.clone()).expect("conflicts answer");
+        assert!(!out.solved);
+        assert_eq!(out.revision, rev, "conflicts write nothing");
+        assert!(out.reason.contains("minimal conflict"), "{}", out.reason);
+        assert!(
+            !out.reason.contains(&room.gate.to_string()),
+            "reason stays one fixed sentence of counts: {}",
+            out.reason
+        );
+        assert_eq!(out.blocked_by.len(), out.conflicts.len());
+        let block = &out.blocked_by[0];
+        assert_eq!(out.conflicts[block.want], "next_to point:400,-400 [0,0]");
+        assert!(
+            block.blocker.ends_with(&format!("[{}]", room.gate)),
+            "label names the gate: {}",
+            block.blocker
+        );
+        assert_eq!(block.overlap_cm, 100, "a unit cube on a unit cube");
+        assert_eq!(block.miss_cm, 100, "nearest clean pose is one cube away");
+        let [x, z] = block.near_miss_cm;
+        assert_eq!((x - 400).pow(2) + (z + 400).pow(2), 100 * 100);
+        assert!(block.fix.contains("100 cm -x"), "{}", block.fix);
+        let again = ScenePlaceTool::invoke(&room.server, args).expect("conflicts answer again");
+        assert_eq!(again.blocked_by, out.blocked_by, "x2 identical");
+        assert_eq!(revision(&room.server), rev);
+    }
+
+    #[test]
+    fn place_conflict_blockers_name_a_wall_and_a_miss_on_twenty_seeds() {
+        let _serial = PLACE_TEST_SERIAL.lock().expect("place tests serialize");
+        for seed in 0..20u32 {
+            let room = room_scene();
+            let rev = revision(&room.server);
+            let (first, second) = if (seed / 2) % 2 == 0 {
+                ("north", "south")
+            } else {
+                ("east", "west")
+            };
+            let hi = 10 + 10 * (seed / 4);
+            let mover = if seed % 2 == 0 {
+                room.brazier
+            } else {
+                room.gate
+            };
+            let against = |name: &str| format!("next_to wall:{name} [0,{hi}]");
+            let wants = vec![against(first), against(second)];
+            let out = ScenePlaceTool::invoke(
+                &room.server,
+                ScenePlaceArgs {
+                    expected_revision: rev,
+                    idempotency_key: 4000 + u64::from(seed),
+                    object: mover.to_string(),
+                    wants: wants.clone(),
+                    delta: None,
+                },
+            )
+            .expect("conflicts answer");
+            assert!(!out.solved, "seed {seed}");
+            assert_eq!(out.blocked_by.len(), 2, "seed {seed}: one per unmet want");
+            for (n, block) in out.blocked_by.iter().enumerate() {
+                assert_eq!(block.want, n, "seed {seed}");
+                assert_eq!(out.conflicts[block.want], wants[n], "seed {seed}");
+                assert_eq!(
+                    block.overlap_cm, 0,
+                    "seed {seed}: opposite walls contradict"
+                );
+                let word = if n == 0 { first } else { second };
+                assert_eq!(block.blocker, format!("wall {word}"), "seed {seed}");
+                assert!(block.miss_cm > 0, "seed {seed}: a miss in cm");
+                assert!(block.fix.contains("cm"), "seed {seed}: {}", block.fix);
+            }
+        }
     }
 }

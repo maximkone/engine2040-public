@@ -715,10 +715,10 @@ mod tests {
         assert_eq!(out, [[7, 7]]);
     }
 
-    /// Seeded crossing world: agents scattered over the arena, each wanting
-    /// the mirrored point.
-    fn crossing_world(n: usize, seed: u64) -> Vec<Agent> {
-        let lane = |h: u64| ((h % 40_001) as i32) - 20_000;
+    /// Seeded crossing world: agents scattered over a square arena of
+    /// half-width `half` mm, each wanting the mirrored point.
+    fn crossing_world(n: usize, seed: u64, half: i32) -> Vec<Agent> {
+        let lane = |h: u64| (h % (2 * half as u64 + 1)) as i32 - half;
         (0..n as u64)
             .map(|i| {
                 let h = engine_core::splitmix64(seed ^ i.wrapping_mul(0x9E37_79B9_7F4A_7C15));
@@ -733,7 +733,7 @@ mod tests {
     fn grid_neighbours_equal_a_brute_force_scan() {
         let mut orca = Orca::new();
         for seed in 0..50 {
-            let agents = crossing_world(120, seed);
+            let agents = crossing_world(120, seed, 20_000);
             let grid = orca
                 .build_grid(&agents, P.neighbor_mm)
                 .expect("grid builds");
@@ -756,7 +756,7 @@ mod tests {
     }
 
     fn run_crossing(n: usize, seed: u64, steps: usize) -> Vec<Agent> {
-        let mut agents = crossing_world(n, seed);
+        let mut agents = crossing_world(n, seed, 20_000);
         let mut orca = Orca::new();
         let mut out = vec![[0; 2]; n];
         for _ in 0..steps {
@@ -857,9 +857,10 @@ mod tests {
         reason = "timing test reads the wall clock; it never enters the tick"
     )]
     fn steering_cost_per_agent_stays_flat_to_500_agents() {
+        // Half-widths keep the crowd density constant (area grows with n).
         let mut per_agent_ns = Vec::new();
-        for n in [50usize, 200, 500] {
-            let agents = crossing_world(n, 7);
+        for (n, half) in [(50usize, 10_000), (200, 20_000), (500, 31_623)] {
+            let agents = crossing_world(n, 7, half);
             let mut orca = Orca::new();
             let mut out = vec![[0; 2]; n];
             orca.step(&agents, &[], &P, &mut out).expect("warm step");
@@ -879,7 +880,7 @@ mod tests {
             "{per_agent_ns:?}"
         );
         assert!(
-            per_agent_ns[2] <= per_agent_ns[0] * 3,
+            per_agent_ns[2] <= per_agent_ns[0] * 2,
             "cost grew with the crowd: {per_agent_ns:?}"
         );
     }

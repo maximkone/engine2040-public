@@ -1647,7 +1647,12 @@ mod tests {
         hit_out: Pose,
         hit_scratch: Pose,
         warp: Vec<[f32; 2]>,
+        space_events: EventBank,
+        space_fired: Vec<FiredEvent>,
     }
+
+    /// Node id the blend space reports its cues under in the eval world.
+    const AM16_SPACE_NODE: NodeId = NodeId(6);
 
     /// Fresh world with all scratch prepared and the traversal warp baked.
     /// The warped end lands exactly on the edge; that assert is the
@@ -1779,6 +1784,17 @@ mod tests {
             crate::traversal::warp_error_mm(*warp.last().expect("warped nonempty"), edge),
             0.0
         );
+        // Both gait clips step on tick 12; the script holds the walk at full weight there.
+        let mut space_events = EventBank::new();
+        for clip in [10, 11] {
+            space_events.insert(
+                clip,
+                vec![TimedEvent {
+                    tick: 12,
+                    code: crate::events::FOOTSTEP_CODE,
+                }],
+            );
+        }
         Am16World {
             clips,
             tracks,
@@ -1808,6 +1824,8 @@ mod tests {
             hit_out: Pose::zero(6),
             hit_scratch: Pose::zero(6),
             warp,
+            space_events,
+            space_fired: Vec::with_capacity(8),
         }
     }
 
@@ -1851,6 +1869,20 @@ mod tests {
                 &mut world.space_out,
             )
             .expect("space tick");
+        let cues = crate::space_events::SpaceCues::footstep_hit(
+            AM16_SPACE_NODE,
+            &world.space_events,
+            &world.router,
+        );
+        crate::space_events::collect_space_cues(
+            &mut world.log,
+            tick,
+            &cues,
+            &world.space,
+            world.player.weights(),
+            &mut world.space_fired,
+        )
+        .expect("space cue tick");
         crate::layers::compose(
             &world.layers_base,
             &world.layers_arms,
@@ -1964,12 +1996,21 @@ mod tests {
         let second = run();
         assert_eq!(first, second, "eval path must replay x2");
         assert_ne!(first[0], first[63], "scripted tape must move");
-        // Routed-cue receipt: ticks 5, 6 (x2) and 20 each land in the log.
+        // Routed-cue receipt: ticks 5, 6 (x2) and 20 from the graph track, plus
+        // one walk step on tick 12 from the blend space: both clips step there,
+        // the walk holds full weight, so MaxWeight keeps only its cue.
         let mut wired = am16_world();
         for tick in 0..32u32 {
             am16_tick(&mut wired, tick);
         }
-        assert_eq!(wired.log.len(), 4);
+        assert_eq!(wired.log.len(), 5);
+        let space_calls = wired
+            .log
+            .calls()
+            .iter()
+            .filter(|call| call.node == AM16_SPACE_NODE)
+            .count();
+        assert_eq!(space_calls, 1, "space footstep must fire once on tick 12");
         // Snapshot mid-tape, run out, restore, run out again.
         let mut world = am16_world();
         for tick in 0..16u32 {

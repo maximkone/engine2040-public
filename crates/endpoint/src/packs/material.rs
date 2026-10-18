@@ -598,6 +598,7 @@ fn material_set(
             idempotency_key: args.idempotency_key,
             ops,
             approval: preview.approval,
+            delta: Some(false),
         })
     })?;
     Ok(MaterialSetOutput {
@@ -923,6 +924,7 @@ mod tests {
                 idempotency_key: 1,
                 ops,
                 approval: drafted.approval,
+                delta: None,
             },
         )
         .expect("insert lands");
@@ -955,6 +957,7 @@ mod tests {
                 idempotency_key: 2,
                 ops: seed_ops,
                 approval: drafted.approval,
+                delta: None,
             },
         )
         .expect("destructible lands");

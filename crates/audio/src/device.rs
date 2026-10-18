@@ -308,7 +308,7 @@ pub enum AudioSink {
     /// A live stream owns the engine and pulls frames itself.
     Device(DeviceOutput),
     /// The caller owns the engine and renders it with [`Self::pump_offline`].
-    Offline(AudioEngine),
+    Offline(Box<AudioEngine>),
 }
 
 impl AudioSink {
@@ -335,7 +335,7 @@ impl AudioSink {
             }
         }
         let (tx, engine) = AudioEngine::with_feed(Arc::clone(bank), capacity, sample_rate, seed);
-        (tx, Self::Offline(engine), refusal)
+        (tx, Self::Offline(Box::new(engine)), refusal)
     }
 
     /// True when a device stream is playing.
@@ -456,7 +456,7 @@ impl FrameSource for Arc<Mutex<Mixer>> {
 /// buffer still land on the cap). Bit math only, so no numeric cast. Never
 /// panics.
 fn ceil_to_usize_saturating(x: f32) -> usize {
-    if !(x > 0.0) {
+    if x.is_nan() || x <= 0.0 {
         return 0;
     }
     if x >= 16_777_216.0 {

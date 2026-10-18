@@ -1,4 +1,5 @@
 use crate::project;
+use engine_proof::journal;
 use engine_proof::{record, replay, Config, Input, Tape};
 use std::ffi::OsString;
 use std::fmt;
@@ -16,6 +17,7 @@ const SEEN_RECORD: u16 = 1 << 4;
 const SEEN_REPLAY: u16 = 1 << 5;
 const SEEN_FORMAT: u16 = 1 << 6;
 const SEEN_BACKEND: u16 = 1 << 7;
+const SEEN_JOURNAL: u16 = 1 << 8;
 
 fn flag_bit(flag: &str) -> Option<u16> {
     match flag {
@@ -27,6 +29,7 @@ fn flag_bit(flag: &str) -> Option<u16> {
         "--replay" => Some(SEEN_REPLAY),
         "--format" => Some(SEEN_FORMAT),
         "--backend" => Some(SEEN_BACKEND),
+        "--journal" => Some(SEEN_JOURNAL),
         _ => None,
     }
 }
@@ -37,12 +40,14 @@ pub(crate) const HELP: &str = "engine2040 deterministic proof
   --input <tick:body:vx:vy>    Repeatable velocity assignment, before zero-based tick
                              Inputs must be unique and ordered by (tick, body)
   --record <path>             Create a new versioned input/checkpoint tape
+  --journal <path>            Stream a crash-safe journal tick by tick while running
   --replay <path>             Replay saved inputs and compare every checkpoint
+                             (reads a tape or a complete journal; a torn journal names its missing ticks)
   --verify                    Repeat this run from fresh initial state
   --format <text|json>        Receipt format (default text)
   --backend <null>            Supported proof backend; others fail explicitly
   --help                     Show this help
-Replay owns its seed/ticks/inputs and cannot be combined with record or overrides.
+Replay owns its seed/ticks/inputs and cannot be combined with record, journal or overrides.
 This fixture covers 2D ECS/physics, not GPU images or a complete game snapshot.
 
 Game projects (a directory with a game.toml; templates: arena-duel, siege):
@@ -91,6 +96,7 @@ struct Options {
     config: Config,
     inputs: Vec<Input>,
     record: Option<PathBuf>,
+    journal: Option<PathBuf>,
     replay: Option<PathBuf>,
     verify: bool,
     json: bool,
@@ -123,13 +129,14 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Options, Error> {
         match flag {
             "--help" => options.help = true,
             "--verify" => options.verify = true,
-            "--seed" | "--ticks" | "--input" | "--record" | "--replay" | "--format"
-            | "--backend" => {
+            "--seed" | "--ticks" | "--input" | "--record" | "--journal" | "--replay"
+            | "--format" | "--backend" => {
                 let value = args
                     .next()
                     .ok_or_else(|| usage(format!("missing value for {flag}")))?;
                 match flag {
                     "--record" => options.record = Some(PathBuf::from(value)),
+                    "--journal" => options.journal = Some(PathBuf::from(value)),
                     "--replay" => options.replay = Some(PathBuf::from(value)),
                     "--seed" => {
                         options.config.seed = text(&value)?
@@ -169,6 +176,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Options, Error> {
     }
     if options.replay.is_some()
         && (options.record.is_some()
+            || options.journal.is_some()
             || seen & (SEEN_SEED | SEEN_TICKS) != 0
             || !options.inputs.is_empty())
     {
@@ -205,20 +213,45 @@ fn parse_input(value: &str) -> Result<Input, Error> {
 fn read_tape(path: &Path) -> Result<Tape, Box<dyn std::error::Error>> {
     engine_proof::check_tape_path(path)?;
     let file = File::open(path)?;
-    let limit = u64::try_from(engine_proof::tape::MAX_TAPE_BYTES)? + 1;
+    let widest = engine_proof::tape::MAX_TAPE_BYTES.max(journal::max_journal_bytes());
+    let limit = u64::try_from(widest)? + 1;
     // Single reserve from file size (capped): avoids ~21 reallocs growing to ~1.7 MB.
     let hint = usize::try_from(file.metadata().map(|m| m.len()).unwrap_or(0).min(limit))?;
     let mut bytes = Vec::with_capacity(hint);
     let mut capped = file.take(limit);
     capped.read_to_end(&mut bytes)?;
+    // A journal replays once every planned tick is present; a torn one refuses
+    // and says how many ticks are missing.
+    let decoded = if bytes.starts_with(&journal::MAGIC) {
+        journal::read_journal(&bytes)
+            .and_then(journal::JournalRead::into_tape)
+            .map_err(|error| error.to_string())
+    } else {
+        Tape::decode(&bytes).map_err(|error| error.to_string())
+    };
     // Name the partial file on decode failure so a kill -9 truncated copy
     // refuses verify with the path as the reason (standalone EV19.b leg).
-    Tape::decode(&bytes).map_err(|error| {
+    decoded.map_err(|reason| {
         Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("{}: {error}", path.display()),
+            format!("{}: {reason}", path.display()),
         )) as Box<dyn std::error::Error>
     })
+}
+
+/// Run the fixture and stream every tick into a new journal file as it
+/// finishes, so a crash keeps the finished ticks. The final sync covers power
+/// loss for a run that completes.
+fn record_journal_file(
+    path: &Path,
+    config: Config,
+    inputs: &[Input],
+) -> Result<Tape, Box<dyn std::error::Error>> {
+    engine_proof::check_tape_path(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let tape = journal::record_journal(config, inputs, &mut file)?;
+    file.sync_all()?;
+    Ok(tape)
 }
 
 fn write_tape(path: &Path, tape: &Tape) -> Result<(), Box<dyn std::error::Error>> {
@@ -235,14 +268,20 @@ fn execute(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         let tape = read_tape(path)?;
         replay(&tape)?;
         (tape, "replay", true)
-    } else if let Some(path) = &options.record {
-        let tape = record(options.config, &options.inputs)?;
-        write_tape(path, &tape)?;
+    } else if options.record.is_some() || options.journal.is_some() {
+        let tape = match &options.journal {
+            Some(path) => record_journal_file(path, options.config, &options.inputs)?,
+            None => record(options.config, &options.inputs)?,
+        };
+        if let Some(path) = &options.record {
+            write_tape(path, &tape)?;
+        }
         if options.verify {
             // Verify-after-record replays the bytes actually written, so a
             // kill -9 truncated file never verifies.
-            let stored = read_tape(path)?;
-            replay(&stored)?;
+            for path in options.record.iter().chain(&options.journal) {
+                replay(&read_tape(path)?)?;
+            }
         }
         (tape, "record", options.verify)
     } else {

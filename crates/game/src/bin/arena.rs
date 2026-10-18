@@ -36,21 +36,25 @@ use engine_game::arena_kit::{
 };
 use engine_game::break_window::BreakScene;
 use engine_game::camera::{free_cam_step, CameraMode, DirectorParams};
+use engine_game::camera_wish::{ground_forward, world_wish};
 use engine_game::capture;
 use engine_game::crash;
+use engine_game::feel_view::FeelView;
 use engine_game::fight_ring::{ring_prop_row, ring_wall_row};
 use engine_game::fighter_look::{look_down_deg, shot_for_frame, FighterLook, LookFrame};
 use engine_game::flow::{Flow, FlowEvent};
 use engine_game::input::{map_key, map_mouse};
+use engine_game::lock_on::nearest_rival_facing;
 use engine_game::practice::PracticeSwap;
 use engine_game::reload::{settle_paths, HotReload};
+use engine_game::spear_window::{demo_input, SpearMode, SpearScene};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
 use engine_game::window_audio_space::AudioSpace;
 use engine_game::windowed::{
     apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
     feed_tick_audio, fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row,
-    hud_cells_quads, hud_draw_list, msaa_setting, push_fight_draws, smoke_muted,
-    split_staged_flag, stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
+    hud_cells_quads, hud_draw_list, msaa_setting, push_fight_draws, smoke_muted, split_staged_flag,
+    stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
     staged_session_config, surface_frame_action, StagedFighterDot, StagedTally, SurfaceFrameAction,
     TickAccumulator, WinArgs, WinError, WindowPad, FRAME_TIMES_CSV_HEADER, MSAA_ENV,
     WINDOWED_SAMPLE_RATE, WINDOW_SIZE,
@@ -98,6 +102,22 @@ const DEFAULT_TICKS: u32 = 600;
 /// bind probes, the IBL chart and the fog plus GTAO readback tranche, each a
 /// blocking GPU readback that feeds no pixel.
 const LOOK_PROBES_FLAG: &str = "--look-probes";
+/// `--play`: boot straight into the bout instead of waiting at Title for
+/// Enter, so a double-click launcher shows a fight at once. Presentation only.
+const PLAY_FLAG: &str = "--play";
+/// `--spear`: the spear grapple on (`docs/plan/spear-grapple.md`): Q throws a spear that tethers
+/// a fighter or a wall, and the pair flies as ragdolls. Changes the match identity.
+const SPEAR_FLAG: &str = "--spear";
+/// `--spear-demo`: `--spear` plus a script for the human slot that walks at the nearest
+/// fighter and throws whenever the spear is ready (captures, trying the grapple hands-off).
+const SPEAR_DEMO_FLAG: &str = "--spear-demo";
+/// `--hold <KEYS>`: keys held down from the first tick, as if pressed by hand (`W`, `W,F`; the
+/// names are W A S D F Q SPACE SHIFT). A dev flag for receipts and smoke runs: the keys take the
+/// keyboard's own road (bindings, camera-relative wish, spear key), so a capture can show W
+/// walking toward the rival. Presentation and input only.
+const HOLD_FLAG: &str = "--hold";
+/// Keys the window answers, shown in the window title and printed at boot.
+const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | R rematch | T title | C free cam";
 /// Surface frames between look-probe rounds under `--look-probes`.
 const LOOK_PROBE_EVERY: u32 = 120;
 /// Surface frames between fog plus contact refreshes under `--look-probes`.
@@ -143,6 +163,38 @@ fn split_view_brief(raw: &[String]) -> Result<(Option<PathBuf>, Vec<String>), St
     let mut rest = raw.to_vec();
     rest.drain(at..=at + 1);
     Ok((Some(PathBuf::from(path)), rest))
+}
+
+/// Pull `--hold <KEYS>` out of the argument list: the held buttons (a
+/// comma list of W A S D F Q SPACE SHIFT, any case) and the rest in order. A
+/// flag with no list, or a key it does not know, is an error.
+fn split_hold(raw: &[String]) -> Result<(Vec<PhysicalButton>, Vec<String>), String> {
+    use engine_input::map::Key;
+    let Some(at) = raw.iter().position(|arg| arg == HOLD_FLAG) else {
+        return Ok((Vec::new(), raw.to_vec()));
+    };
+    let list = raw
+        .get(at + 1)
+        .filter(|value| !value.starts_with("--"))
+        .ok_or_else(|| format!("{HOLD_FLAG} needs keys, for example W"))?;
+    let mut held = Vec::new();
+    for name in list.split(',') {
+        let key = match name.trim().to_ascii_uppercase().as_str() {
+            "W" => Key::W,
+            "A" => Key::A,
+            "S" => Key::S,
+            "D" => Key::D,
+            "F" => Key::F,
+            "Q" => Key::Q,
+            "SPACE" => Key::SPACE,
+            "SHIFT" => Key::SHIFT,
+            other => return Err(format!("{HOLD_FLAG} {other}: use W A S D F Q SPACE SHIFT")),
+        };
+        held.push(PhysicalButton::Key(key.0));
+    }
+    let mut rest = raw.to_vec();
+    rest.drain(at..=at + 1);
+    Ok((held, rest))
 }
 
 /// Pull one bare `flag` (`--look-probes`, `--require-framing`) out of the
@@ -595,6 +647,9 @@ fn run(raw: &[String]) -> i32 {
     let (look_probes, raw) = split_flag(&raw, LOOK_PROBES_FLAG);
     let (require_framing, raw) = split_flag(&raw, REQUIRE_FRAMING_FLAG);
     let (no_break_look, raw) = split_flag(&raw, NO_BREAK_LOOK_FLAG);
+    let (play, raw) = split_flag(&raw, PLAY_FLAG);
+    let (spear, raw) = split_flag(&raw, SPEAR_FLAG);
+    let (spear_demo, raw) = split_flag(&raw, SPEAR_DEMO_FLAG);
     let (view_brief, raw) = match split_view_brief(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -603,6 +658,13 @@ fn run(raw: &[String]) -> i32 {
         }
     };
     let (pause_at_tick, step_mode, raw) = match split_pause_flags(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
+    let (held_keys, raw) = match split_hold(&raw) {
         Ok(split) => split,
         Err(err) => {
             tell!("arena: {err}");
@@ -689,11 +751,23 @@ fn run(raw: &[String]) -> i32 {
     app.staged = staged.then(StagedTally::default);
     app.pause_at_tick = pause_at_tick;
     app.step_mode = step_mode;
+    for key in held_keys {
+        app.set_pressed(key, true);
+    }
     if let Some(code) = app.stage_receipt_session() {
         return code;
     }
     app.look_probes = Presenter::look_probes_for_capture(look_probes, app.capture.is_some());
     app.require_framing = require_framing;
+    if play && app.flow == Flow::Title {
+        app.flow = app.flow.on(FlowEvent::Start);
+        app.last = Instant::now();
+    }
+    if let Err(err) = app.enable_spear(spear, spear_demo) {
+        tell!("arena: {SPEAR_FLAG}: {err}");
+        return 2;
+    }
+    say!("arena controls: {CONTROLS_LINE}");
     if no_break_look {
         app.break_scene = None;
     }
@@ -955,13 +1029,26 @@ struct ArenaApp {
     practice: PracticeSwap,
     /// Bout-tape lines for applied tuning generations (presentation log only).
     bout_tape: Vec<String>,
+    /// Feel flow (GF2/GF3): hit-stop, slow-mo and camera shake from the
+    /// tick cues, stepped once per presented frame (presentation only).
+    feel: FeelView,
+    /// The spear grapple: on or off, scripted or not, and its picture.
+    spear: SpearMode,
+    /// Which way the live camera looks on the floor (unit `[x, z]`), as the last presented frame
+    /// left it: W walks along it ([`engine_game::camera_wish`]). `None` before the first frame,
+    /// so the keys keep their world axes until a camera exists. View-side only: the sim sees
+    /// just the integer wish that comes out.
+    view_forward: Option<[f32; 2]>,
+    /// The rival hint the window title carries now (`None` is the plain controls title).
+    title_hint: Option<String>,
 }
 
 /// Build the live session's match over the arena kit's physical placement:
 /// the kit walls collide instead of being pictures. A bad placement falls
 /// back to the empty world (open sand) instead of failing the window.
-fn live_session(config: GameConfig) -> Result<App, WinError> {
-    Ok(App::with_world(config, kit_match_world_or_empty())?.into_duel()?)
+fn live_session(config: GameConfig, spear: bool) -> Result<App, WinError> {
+    let app = App::with_world(config, kit_match_world_or_empty())?.into_duel()?;
+    Ok(if spear { app.into_spear()? } else { app })
 }
 
 impl ArenaApp {
@@ -971,7 +1058,7 @@ impl ArenaApp {
         capture: Option<CaptureSlot>,
     ) -> Result<Self, WinError> {
         let test_panic_at = arena_frame::test_panic_tick()?;
-        let app = live_session(config)?;
+        let app = live_session(config, false)?;
         let break_scene = BreakScene::new(&app.live_match().config());
         let mixer = Arc::new(Mutex::new(Mixer::new(WINDOWED_SAMPLE_RATE)));
         // Automated smoke never opens a device: `--mute` mutes explicitly and
@@ -1067,6 +1154,10 @@ impl ArenaApp {
             reload: HotReload::new(),
             practice: PracticeSwap::new(),
             bout_tape: Vec::new(),
+            feel: FeelView::new(),
+            spear: SpearMode::default(),
+            view_forward: None,
+            title_hint: None,
         };
         // Title boot: the stranger sees the start key before the bout, and
         // the accumulator holds at zero ticks until `FlowEvent::Start`.
@@ -1077,6 +1168,47 @@ impl ArenaApp {
 
     fn human(&self) -> Result<FighterId, WinError> {
         FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))
+    }
+
+    /// Turn the spear grapple on for `--spear` or `--spear-demo` (a fresh match with it and the
+    /// scene that draws it); nothing when neither flag is given.
+    fn enable_spear(&mut self, spear: bool, demo: bool) -> Result<(), WinError> {
+        if !(spear || demo) {
+            return Ok(());
+        }
+        self.spear.on = true;
+        self.spear.demo = demo;
+        self.app = live_session(self.config, true)?;
+        self.spear.scene = Some(SpearScene::new());
+        Ok(())
+    }
+
+    /// The `--spear-demo` script for the human slot this tick.
+    fn spear_demo_input(&self, tick: u32, human: FighterId) -> FighterInput {
+        let live = self.app.live_match();
+        demo_input(tick, human, self.app.fighter_views(), live.spear_view())
+    }
+
+    /// One tick's spear events reach the feel flow (shake, hit-stop) and the audio feed (throw,
+    /// thunk, rope creak). Quiet when the grapple is off: the events are empty.
+    fn observe_spear_events(&mut self, tick: u32) {
+        let events = self.app.live_match().spear_events();
+        self.feel.observe_spear(events);
+        if let Some(tx) = self.feed_tx.as_mut() {
+            let views = self.app.fighter_views();
+            self.audio_space.feed_spear(tx, tick, events, views);
+        }
+    }
+
+    /// The input with the throw bit set while Q is held and the spear is on. The sim masks the
+    /// bit when the match was built without a spear, so this never changes an old match.
+    fn with_spear_key(&self, mut input: FighterInput) -> FighterInput {
+        let q = PhysicalButton::Key(engine_input::map::Key::Q.0);
+        if self.spear.on && self.pressed.contains(&q) {
+            input.buttons =
+                engine_input::Buttons(input.buttons.0 | engine_input::fighter::THROW_SPEAR);
+        }
+        input
     }
 
     /// Swap the staged leg onto its receipt session (empty world under rules
@@ -1102,11 +1234,13 @@ impl ArenaApp {
     /// outcome. The staged tally restarts too; the look keeps painting
     /// (presentation only, never hashed). Loud on a refused rebuild.
     fn reset_bout(&mut self) -> Result<(), WinError> {
-        self.app = live_session(self.config)?;
+        self.app = live_session(self.config, self.spear.on)?;
         self.break_scene = BreakScene::new(&self.app.live_match().config());
+        self.spear.scene = self.spear.on.then(SpearScene::new);
         self.ticks_done = 0;
         self.acc = TickAccumulator::new();
         self.tick_scratch = TickOutcome::default();
+        self.feel = FeelView::new();
         self.last_alpha = 0.0;
         self.result_announced = false;
         self.fighter_cache_tick = None;
@@ -1140,7 +1274,11 @@ impl ArenaApp {
         if !shown {
             return 0;
         }
-        let steps = self.acc.push_elapsed_ms(elapsed_ms);
+        // Hit-stop and slow-mo scale the wall time the accumulator sees, so
+        // the sim owes fewer ticks; what a tick computes never changes.
+        let steps = self
+            .acc
+            .push_elapsed_ms(self.feel.scale_elapsed_ms(elapsed_ms));
         warmup_steps(steps, self.ticks_done, self.config.ticks, true)
     }
 
@@ -1205,6 +1343,8 @@ impl ArenaApp {
         };
         self.pad.poll();
         self.run_sim_ticks(steps, human);
+        self.feel.step();
+        self.refresh_title_hint();
         if self.ticks_done >= self.config.ticks {
             self.flow = self.flow.on(FlowEvent::MatchOver);
             // Minimal Result: winner plus ticks through the HUD text path
@@ -1308,11 +1448,15 @@ impl ArenaApp {
             }
         }
         say!("{}", self.frame_split_line());
+        say!("{}", self.feel.line());
         if let Some(line) = self.framing.line() {
             say!("{line}");
         }
         if let Some(line) = self.view.line() {
             say!("{line}");
+        }
+        if let Some(scene) = self.spear.scene.as_ref() {
+            say!("{}", scene.look().receipt_line());
         }
         if let Some(scene) = self.break_scene.as_ref() {
             say!("{}", scene.receipt_line());
@@ -1485,12 +1629,21 @@ impl ArenaApp {
             return self.fail(event_loop, err, 1);
         }
         self.push_break(&mut list);
+        self.push_spear(&mut list);
         self.fighters_us = self
             .fighters_us
             .saturating_add(duration_us(fighters_started.elapsed()));
         // Free-fly overrides the fight camera while the mode is on: the look
         // clears and re-aims `list.camera`, so this must run after it. View
         // only; the default director run leaves the camera untouched.
+        if let Some(scene) = self.spear.scene.as_ref() {
+            scene.frame(&mut list.camera);
+        }
+        self.feel.shake_camera(&mut list.camera);
+        // WASD walk where the camera looks: the heading of the shot the player
+        // sees, read before the free-fly override (that one inspects, it does
+        // not steer).
+        self.note_view_forward(list.camera.eye.to_array(), list.camera.target.to_array());
         if self.cam_mode == CameraMode::Free {
             self.aim_free_cam(&mut list);
         }
@@ -1507,6 +1660,9 @@ impl ArenaApp {
                 );
                 return;
             };
+            // One health bar per fighter (the capture path already stages them).
+            let overlay = engine_game::windowed::duel_overlay_for_app(&self.app);
+            engine_game::windowed::stage_hp_bars(presenter, &overlay);
             match presenter.render_surface(&list) {
                 Ok(receipt) => {
                     if receipt.total_validation_errors() > 0 {
@@ -1620,6 +1776,10 @@ impl ArenaApp {
             }
             let t = look.sim_time(frame.alpha);
             self.view.note(&list.camera, t, look.view_truth());
+            if let Some(scene) = self.spear.scene.as_ref() {
+                let (spears, ropes) = scene.counts();
+                self.view.note_spear(spears, ropes);
+            }
             if let Some(out) = self.view_brief.as_mut() {
                 // Props and light ride the brief only: kit plus ring draws as
                 // one row each, with a law-holding noon light until the sun
@@ -1653,9 +1813,23 @@ impl ArenaApp {
         else {
             return;
         };
-        if let Err(why) = scene.push(presenter, list, self.last_alpha) {
+        let eye = list.camera.eye.to_array();
+        if let Err(why) = scene.push(presenter, list, self.last_alpha, eye) {
             tell!("arena notice: break picture dropped: {why}");
             self.break_scene = None;
+        }
+    }
+
+    /// The spear, its trail and the rope over the frame list (spear grapple). Presentation
+    /// only. A refused upload drops the picture loudly and the window keeps running.
+    fn push_spear(&mut self, list: &mut DrawList) {
+        let (Some(scene), Some(presenter)) = (self.spear.scene.as_mut(), self.presenter.as_mut())
+        else {
+            return;
+        };
+        if let Err(why) = scene.push(presenter, list, self.last_alpha) {
+            tell!("arena notice: spear picture dropped: {why}");
+            self.spear.scene = None;
         }
     }
 
@@ -1764,6 +1938,60 @@ impl ArenaApp {
             .last()
             .map(|point| (point.tick, point.hash));
         crash::record_fight_tick(self.app.cursor(), &self.crash_bytes, checkpoint);
+    }
+
+    /// Remember which way the live camera looks on the floor, so WASD and the
+    /// stick walk camera-relative. A camera with no heading (straight down)
+    /// keeps the last one. View side only: the sim never reads it.
+    fn note_view_forward(&mut self, eye: [f32; 3], target: [f32; 3]) {
+        if let Some(forward) = ground_forward(eye, target) {
+            self.view_forward = Some(forward);
+        }
+    }
+
+    /// The live keyboard or pad input made camera-relative: the bindings'
+    /// local wish (forward, right) turned onto the world axes the sim reads,
+    /// by the camera's heading. Buttons, facing, tick and slot pass through,
+    /// and with no heading yet the whole input does.
+    fn camera_relative(&self, input: FighterInput) -> FighterInput {
+        let Some(forward) = self.view_forward else {
+            return input;
+        };
+        let (mx, mz) = world_wish(forward, (input.mx, input.mz));
+        FighterInput { mx, mz, ..input }
+    }
+
+    /// The live keyboard or pad input aimed at the nearest living rival (soft
+    /// lock-on, [`engine_game::lock_on`]): the bindings and the pad emit
+    /// `facing = 0`, so a standing swing and the spear went along world +z.
+    /// Wish, buttons, tick and slot pass through. With no living rival, or
+    /// while the free camera is flown, the input keeps the facing it came
+    /// with. Input mapping only: the sim reads the integer and nothing else.
+    fn aim_at_rival(&self, input: FighterInput) -> FighterInput {
+        if self.cam_mode == CameraMode::Free {
+            return input;
+        }
+        let views = self.app.fighter_views();
+        match nearest_rival_facing(input.fighter.0, views, self.app.hp()) {
+            Some(facing) => FighterInput { facing, ..input },
+            None => input,
+        }
+    }
+
+    /// Keep the window title's rival hint current: the title is set only when
+    /// the text changes (about once per walked meter), never per frame. Off
+    /// outside the running bout.
+    fn refresh_title_hint(&mut self) {
+        let hint = (self.flow == Flow::Match)
+            .then(|| arena_frame::rival_hint(self.app.fighter_views(), HUMAN_SLOT))
+            .flatten();
+        if hint == self.title_hint {
+            return;
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.set_title(&arena_frame::window_title(hint.as_deref()));
+        }
+        self.title_hint = hint;
     }
 
     fn set_pressed(&mut self, button: PhysicalButton, down: bool) {
@@ -1921,7 +2149,7 @@ impl ApplicationHandler for ArenaApp {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("engine2040 arena")
+            .with_title(arena_frame::window_title(None))
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(WINDOW_SIZE.0),
                 f64::from(WINDOW_SIZE.1),
@@ -1973,10 +2201,10 @@ impl ApplicationHandler for ArenaApp {
                     {
                         self.step_requested = true;
                     }
-                    // Free-fly: one key toggles the presentation camera; while
-                    // it is on, WASD/arrows fly the eye one step per press.
-                    // Never touches the sim (presentation only).
-                    if struck && code == winit::keyboard::KeyCode::KeyF {
+                    // Free-fly: C toggles the presentation camera (F is the
+                    // attack key); while it is on, WASD/arrows fly the eye one
+                    // step per press. Never touches the sim (presentation only).
+                    if struck && code == winit::keyboard::KeyCode::KeyC {
                         self.toggle_free_cam();
                     }
                     if struck && self.cam_mode == CameraMode::Free {
@@ -2372,6 +2600,30 @@ mod tests {
         let tally = app.staged.expect("staged tally");
         assert_eq!(tally.hits, STAGED_FIGHT_HITS);
         assert_eq!(tally.knockdowns, STAGED_FIGHT_KNOCKDOWNS);
+    }
+
+    #[test]
+    fn staged_fight_cues_reach_the_window_feel_flow() {
+        // GF2/GF3: the tick loop hands every tick's cues to the feel view, and
+        // one presented-frame step turns the staged fight's hits into a frozen
+        // clock and a shaken camera. Red when `run_sim_ticks` stops observing.
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "600", "--exit"]))
+            .expect("smoke args parse");
+        let mut app = ArenaApp::new(staged_session_config(), args, None).expect("session builds");
+        app.staged = Some(StagedTally::default());
+        assert!(app.stage_receipt_session().is_none(), "the swap lands");
+        app.run_sim_ticks(app.config.ticks, app.human().expect("human slot"));
+        app.feel.step();
+        let stats = app.feel.stats();
+        assert!(
+            stats.triggers > 0,
+            "the fight's cues reached the flow: {stats:?}"
+        );
+        assert!(stats.shaken > 0 && stats.stopped > 0, "{stats:?}");
+        assert!(
+            app.feel.scale_elapsed_ms(1000.0) < 1000.0,
+            "the clock slowed"
+        );
     }
 
     #[test]
@@ -2797,7 +3049,8 @@ mod tests {
         keys.run_sim_ticks(ticks, keys.human().expect("human slot"));
 
         let mut pad = session();
-        pad.pad.apply(&[RecordedPadEvent::Axis { lx: 1.0, ly: 0.0 }]);
+        pad.pad
+            .apply(&[RecordedPadEvent::Axis { lx: 1.0, ly: 0.0 }]);
         assert!(!pad.pad.is_idle(), "a deflected stick is not idle");
         pad.run_sim_ticks(ticks, pad.human().expect("human slot"));
 
@@ -2810,7 +3063,10 @@ mod tests {
         assert_ne!(sim_hash(&pad), sim_hash(&idle), "the stick moved the slot");
         let at = |app: &ArenaApp| app.app.fighter_views()[usize::from(HUMAN_SLOT)].pos_m;
         let walked = (at(&pad)[0] - at(&idle)[0]).hypot(at(&pad)[2] - at(&idle)[2]);
-        assert!(walked > 0.1, "slot 0 walked {walked} m from where idle stands");
+        assert!(
+            walked > 0.1,
+            "slot 0 walked {walked} m from where idle stands"
+        );
         assert_eq!(at(&pad), at(&keys));
 
         // A held pad button stays held between polls until it is released.
@@ -2820,6 +3076,379 @@ mod tests {
         assert!(!held.is_idle(), "the button is still down");
         held.apply(&[RecordedPadEvent::ButtonUp(2)]);
         assert!(held.is_idle(), "released");
+    }
+
+    /// The live arena session (seed 2040, two fighters, the kit world) with
+    /// the host's pad out of the picture, room for a few seconds of play and
+    /// tick 0 already run idle (the fighters' places exist after a tick).
+    fn walking_session() -> ArenaApp {
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "400", "--exit"]))
+            .expect("smoke args parse");
+        let config = GameConfig {
+            seed: 2040,
+            ticks: 400,
+            fighters: 2,
+            half_extent_m: engine_game::windowed::ARENA_HALF_EXTENT_M,
+        };
+        let mut app = ArenaApp::new(config, args, None).expect("session builds");
+        app.pad = WindowPad::absent();
+        app.run_sim_ticks(1, app.human().expect("human slot"));
+        app
+    }
+
+    fn standing(app: &ArenaApp, slot: u8) -> [f32; 3] {
+        app.app.fighter_views()[usize::from(slot)].pos_m
+    }
+
+    fn key(code: engine_input::map::Key) -> PhysicalButton {
+        PhysicalButton::Key(code.0)
+    }
+
+    #[test]
+    fn w_walks_where_the_camera_looks_on_the_real_input_path() {
+        // Keys held on the window's own road (pressed -> bindings -> camera
+        // heading -> App::tick). The old mapping ran W along world +x whatever
+        // the picture showed.
+        use engine_input::map::Key;
+        let walk = |eye: [f32; 3], target: [f32; 3], held: Key| {
+            let mut app = walking_session();
+            app.note_view_forward(eye, target);
+            let start = standing(&app, HUMAN_SLOT);
+            app.set_pressed(key(held), true);
+            app.run_sim_ticks(60, app.human().expect("human slot"));
+            let end = standing(&app, HUMAN_SLOT);
+            [end[0] - start[0], end[2] - start[2]]
+        };
+        // The body turns from its spawn facing before it is up to speed, so a
+        // walk arcs a little: the move is judged by its main axis, not a line.
+        let mostly = |moved: [f32; 2], axis: usize, sign: f32, least: f32| {
+            let (main, other) = (sign * moved[axis], moved[1 - axis].abs());
+            main > least && main > 2.0 * other
+        };
+        // Camera looking down +z: W goes +z, S -z; D (to its right) -x, A +x.
+        let (eye, ahead) = ([0.0, 1.8, 0.0], [0.0, 1.0, 10.0]);
+        let w = walk(eye, ahead, Key::W);
+        assert!(mostly(w, 1, 1.0, 1.5), "W looking +z moved {w:?}");
+        let s = walk(eye, ahead, Key::S);
+        assert!(mostly(s, 1, -1.0, 1.5), "S looking +z moved {s:?}");
+        let d = walk(eye, ahead, Key::D);
+        assert!(mostly(d, 0, -1.0, 1.5), "D looking +z moved {d:?}");
+        // Camera looking down -z, whose left hand is -x (away from the +x wall
+        // the hero starts 1.2 m from): A goes -x, D would go into the wall.
+        let a = walk([0.0, 1.8, 0.0], [0.0, 1.0, -10.0], Key::A);
+        assert!(mostly(a, 0, -1.0, 1.5), "A looking -z moved {a:?}");
+        // Camera looking down -x: W goes -x, off the wall.
+        let w = walk([0.0, 1.8, 0.0], [-10.0, 1.0, 0.0], Key::W);
+        assert!(mostly(w, 0, -1.0, 1.5), "W looking -x moved {w:?}");
+    }
+
+    #[test]
+    fn at_the_live_spawn_w_closes_on_the_rival_instead_of_running_into_the_wall() {
+        // The owner's report: the hero is pinned to the +x wall, the rival 38 m
+        // away across the pit, and W (world +x) walked into the wall. With the
+        // camera looking at the rival W closes the distance.
+        use engine_input::map::Key;
+        let mut app = walking_session();
+        let (hero, rival) = (standing(&app, HUMAN_SLOT), standing(&app, 1));
+        let gap = |app: &ArenaApp| {
+            let (h, r) = (standing(app, HUMAN_SLOT), standing(app, 1));
+            (h[0] - r[0]).hypot(h[2] - r[2])
+        };
+        let before = gap(&app);
+        assert!(before > 30.0, "the spawn is across the pit: {before} m");
+        // Eye behind the hero on the far side from the rival, looking at them.
+        let toward = [rival[0] - hero[0], rival[2] - hero[2]];
+        let span = toward[0].hypot(toward[1]);
+        let eye = [
+            hero[0] - toward[0] / span * 4.0,
+            1.9,
+            hero[2] - toward[1] / span * 4.0,
+        ];
+        app.note_view_forward(eye, [rival[0], 1.0, rival[2]]);
+        app.set_pressed(key(Key::W), true);
+        app.run_sim_ticks(120, app.human().expect("human slot"));
+        let after = gap(&app);
+        assert!(
+            before - after > 6.0,
+            "W for 2 s should close in: {before} m -> {after} m"
+        );
+        assert!(
+            standing(&app, HUMAN_SLOT)[0] < hero[0] - 3.0,
+            "W left the +x wall behind"
+        );
+    }
+
+    #[test]
+    fn the_stick_walks_camera_relative_exactly_like_the_key() {
+        use engine_game::pad::RecordedPadEvent;
+        use engine_input::map::Key;
+        let (eye, ahead) = ([0.0, 1.8, 0.0], [0.0, 1.0, 10.0]);
+        let mut keys = walking_session();
+        keys.note_view_forward(eye, ahead);
+        let start = standing(&keys, HUMAN_SLOT);
+        keys.set_pressed(key(Key::W), true);
+        keys.run_sim_ticks(40, keys.human().expect("human slot"));
+        let mut stick = walking_session();
+        stick.note_view_forward(eye, ahead);
+        stick
+            .pad
+            .apply(&[RecordedPadEvent::Axis { lx: 0.0, ly: 1.0 }]);
+        assert!(!stick.pad.is_idle(), "a deflected stick is not idle");
+        stick.run_sim_ticks(40, stick.human().expect("human slot"));
+        let (k, s) = (standing(&keys, HUMAN_SLOT), standing(&stick, HUMAN_SLOT));
+        assert_eq!(k, s, "stick forward is the W key");
+        assert!(k[2] > start[2] + 1.0, "both went +z: {start:?} -> {k:?}");
+    }
+
+    /// What one bout of [`walk_up_and_hold_q`] saw.
+    struct HeldQ {
+        /// The velocity the spear left with, mm per tick.
+        velocity: Option<[i32; 3]>,
+        /// Whom the spear stuck in, first hit first (`None` is a wall).
+        stuck: Vec<Option<u8>>,
+        /// Whom the thrower's tether held when the spear stuck (`None`: nobody or a wall).
+        tethered: Option<u8>,
+        /// Where the rival stood from the thrower at the throw, `[dx, dz]` meters.
+        offset: [f32; 2],
+    }
+
+    /// One bout on the window's own input road (pressed keys -> bindings -> camera heading ->
+    /// lock-on -> tick), spear on: hold W with the camera on the rival until they stand inside
+    /// spear reach, let go of W, hold Q. `free_cam` flies the free camera, which keeps the old
+    /// facing of 0.
+    fn walk_up_and_hold_q(free_cam: bool) -> HeldQ {
+        use engine_arena::spear::{Phase, SpearEvent};
+        use engine_input::map::Key;
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "900", "--exit"]))
+            .expect("smoke args parse");
+        let config = GameConfig {
+            seed: 2040,
+            ticks: 900,
+            fighters: 2,
+            half_extent_m: engine_game::windowed::ARENA_HALF_EXTENT_M,
+        };
+        let mut app = ArenaApp::new(config, args, None).expect("session builds");
+        app.pad = WindowPad::absent();
+        app.enable_spear(true, false).expect("the grapple turns on");
+        if free_cam {
+            app.cam_mode = CameraMode::Free;
+        }
+        let human = app.human().expect("human slot");
+        app.run_sim_ticks(1, human);
+        let offset = |app: &ArenaApp| {
+            let (hero, rival) = (standing(app, HUMAN_SLOT), standing(app, 1));
+            [rival[0] - hero[0], rival[2] - hero[2]]
+        };
+        // Walk up with the camera behind the hero, looking at the rival (the shoulder shot
+        // re-aims every frame; the key press stays the same).
+        app.set_pressed(key(Key::W), true);
+        while app.ticks_done < 600 {
+            let (hero, rival) = (standing(&app, HUMAN_SLOT), standing(&app, 1));
+            app.note_view_forward(hero, [rival[0], 1.0, rival[2]]);
+            let [dx, dz] = offset(&app);
+            if dx.hypot(dz) < 8.0 {
+                break;
+            }
+            app.run_sim_ticks(1, human);
+        }
+        app.set_pressed(key(Key::W), false);
+        let at_throw = offset(&app);
+        assert!(
+            at_throw[0].hypot(at_throw[1]) < 8.0,
+            "the walk reached spear range: {at_throw:?}"
+        );
+        app.set_pressed(key(Key::Q), true);
+        let mut seen = HeldQ {
+            velocity: None,
+            stuck: Vec::new(),
+            tethered: None,
+            offset: at_throw,
+        };
+        for _ in 0..60 {
+            app.run_sim_ticks(1, human);
+            let live = app.app.live_match();
+            for event in live.spear_events() {
+                match *event {
+                    SpearEvent::Thrown {
+                        thrower: 0, vel_mm, ..
+                    } => seen.velocity = seen.velocity.or(Some(vel_mm)),
+                    SpearEvent::Hit {
+                        thrower: 0, victim, ..
+                    } => seen.stuck.push(victim),
+                    _ => {}
+                }
+            }
+            if let Some(Phase::Tether(tether)) = live.spear_view().first().map(|slot| slot.phase) {
+                seen.tethered = tether.victim;
+            }
+            if !seen.stuck.is_empty() {
+                break;
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn a_held_q_throws_at_the_rival_and_the_tether_forms_with_them() {
+        // The owner's report: the window pinned the input's facing to 0, so Q threw along world
+        // +z whatever the picture showed. Now the throw leaves along the bearing to the rival.
+        let aimed = walk_up_and_hold_q(false);
+        let velocity = aimed.velocity.expect("holding Q threw the spear");
+        let range = aimed.offset[0].hypot(aimed.offset[1]);
+        assert!(
+            aimed.offset[0].abs() > 0.5 * range,
+            "the rival stands off the +z axis, so the aim shows: {:?}",
+            aimed.offset
+        );
+        // The flight direction (x, z) lines up with the rival's bearing.
+        let (vx, vz) = (f64::from(velocity[0]), f64::from(velocity[2]));
+        let (ox, oz) = (f64::from(aimed.offset[0]), f64::from(aimed.offset[1]));
+        let along = (vx * ox + vz * oz) / (vx.hypot(vz).max(1.0) * ox.hypot(oz));
+        assert!(along > 0.99, "the spear left toward the rival: {along}");
+        assert_eq!(
+            aimed.stuck.first(),
+            Some(&Some(1)),
+            "the spear stuck in the rival"
+        );
+        assert_eq!(
+            aimed.tethered,
+            Some(1),
+            "and the tether formed with the rival"
+        );
+
+        // The same bout with the free camera out keeps facing 0: the spear flies along +z.
+        let old = walk_up_and_hold_q(true);
+        let velocity = old.velocity.expect("the old road threw too");
+        assert_eq!(velocity[0], 0, "facing 0 is world +z: {velocity:?}");
+        assert!(velocity[2] > 0, "{velocity:?}");
+        assert_ne!(old.stuck.first(), Some(&Some(1)), "and it misses the rival");
+        assert_eq!(old.tethered, None, "so no tether forms with them");
+    }
+    #[test]
+    fn the_lock_on_sets_only_the_facing_and_the_free_camera_leaves_it_alone() {
+        let mut app = walking_session();
+        let human = app.human().expect("human slot");
+        let (hero, rival) = (standing(&app, HUMAN_SLOT), standing(&app, 1));
+        let input = FighterInput {
+            tick: 5,
+            fighter: human,
+            mx: 40,
+            mz: -60,
+            facing: 321,
+            buttons: engine_input::Buttons(
+                engine_input::fighter::ATTACK | engine_input::fighter::THROW_SPEAR,
+            ),
+        };
+        let want = engine_game::lock_on::bearing_cdeg(rival[0] - hero[0], rival[2] - hero[2])
+            .expect("the rival stands elsewhere");
+        let out = app.aim_at_rival(input);
+        assert_eq!(out.facing, want, "facing is the bearing to the rival");
+        assert_eq!(
+            (out.tick, out.fighter, out.mx, out.mz, out.buttons),
+            (input.tick, input.fighter, input.mx, input.mz, input.buttons),
+            "everything else passes through"
+        );
+        // The free camera is view only: the input keeps the facing it came with.
+        app.cam_mode = CameraMode::Free;
+        assert_eq!(app.aim_at_rival(input), input);
+        // Back on the director shot the lock-on is on again.
+        app.cam_mode = CameraMode::Director;
+        assert_eq!(app.aim_at_rival(input).facing, want);
+    }
+
+    #[test]
+    fn camera_relative_turns_only_the_wish() {
+        // Attack, block, dodge and spear bits, facing, tick and slot all pass
+        // through; the sim keeps deciding facing and the swing.
+        let mut app = walking_session();
+        let human = app.human().expect("human slot");
+        let input = FighterInput {
+            tick: 5,
+            fighter: human,
+            mx: 100,
+            mz: 0,
+            facing: 321,
+            buttons: engine_input::Buttons(
+                engine_input::fighter::ATTACK | engine_input::fighter::BLOCK,
+            ),
+        };
+        // No camera yet: the input passes untouched (the keys keep world axes).
+        assert_eq!(app.camera_relative(input), input);
+        app.note_view_forward([0.0, 1.8, 0.0], [0.0, 1.0, 10.0]);
+        let out = app.camera_relative(input);
+        assert_eq!((out.mx, out.mz), (0, 100), "W looking +z is world +z");
+        assert_eq!(
+            (out.tick, out.fighter, out.facing, out.buttons),
+            (input.tick, input.fighter, input.facing, input.buttons)
+        );
+        // A camera with no heading (straight down) keeps the last good one.
+        app.note_view_forward([1.0, 9.0, 1.0], [1.0, 0.0, 1.0]);
+        assert_eq!(app.view_forward, Some([0.0, 1.0]));
+    }
+
+    #[test]
+    fn scripts_and_the_hand_off_tape_keep_their_world_axes_under_a_camera() {
+        // The staged fight is a pinned receipt in world axes; a camera heading
+        // must never turn it (only the live keyboard and pad road does).
+        use engine_game::windowed::{STAGED_FIGHT_HITS, STAGED_FIGHT_KNOCKDOWNS};
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "600", "--exit"]))
+            .expect("smoke args parse");
+        let mut app = ArenaApp::new(staged_session_config(), args, None).expect("session builds");
+        app.pad = WindowPad::absent();
+        app.staged = Some(StagedTally::default());
+        assert!(app.stage_receipt_session().is_none(), "the swap lands");
+        app.note_view_forward([0.0, 1.8, 0.0], [-10.0, 1.0, 3.0]);
+        app.run_sim_ticks(app.config.ticks, app.human().expect("human slot"));
+        let tally = app.staged.expect("staged tally");
+        assert_eq!(tally.hits, STAGED_FIGHT_HITS);
+        assert_eq!(tally.knockdowns, STAGED_FIGHT_KNOCKDOWNS);
+    }
+
+    #[test]
+    fn hold_flag_splits_off_and_names_its_keys() {
+        use engine_input::map::Key;
+        let (held, rest) =
+            split_hold(&strings(&["arena", "--hold", "w,Shift", "--exit"])).expect("valid keys");
+        assert_eq!(held, vec![key(Key::W), key(Key::SHIFT)]);
+        assert_eq!(rest, strings(&["arena", "--exit"]));
+        let (none, same) = split_hold(&strings(&["arena", "--exit"])).expect("no flag");
+        assert!(none.is_empty() && same == strings(&["arena", "--exit"]));
+        // A missing list or an unknown key fails loudly, never silently.
+        assert!(split_hold(&strings(&["arena", "--hold"])).is_err());
+        assert!(split_hold(&strings(&["arena", "--hold", "--exit"])).is_err());
+        assert!(split_hold(&strings(&["arena", "--hold", "W,Z"])).is_err());
+        // The strict parser still refuses the flag if it were not split.
+        assert!(WinArgs::parse(&strings(&["arena", "--hold", "W"])).is_err());
+    }
+
+    #[test]
+    fn the_title_tells_a_far_player_to_walk_and_goes_quiet_up_close() {
+        let view = |slot: u8, x: f32, z: f32| engine_game::FighterView {
+            slot,
+            pos_m: [x, 0.0, z],
+            yaw: 0.0,
+        };
+        // The live spawn: 38 m across the pit.
+        let spawn = [view(0, 19.185, 3.438), view(1, -16.6, -11.156)];
+        let hint = arena_frame::rival_hint(&spawn, HUMAN_SLOT).expect("far rival gets a hint");
+        assert!(hint.contains("walk toward the rival with W"), "{hint}");
+        assert!(hint.contains("39 m"), "the distance rides along: {hint}");
+        // The nearest of several counts: a bot at 4 m silences the hint.
+        let crowd = [view(0, 0.0, 0.0), view(1, 30.0, 0.0), view(2, 3.0, 3.0)];
+        assert_eq!(arena_frame::rival_hint(&crowd, HUMAN_SLOT), None);
+        // Nobody else, no human, or a broken position: no hint, no panic.
+        assert_eq!(arena_frame::rival_hint(&spawn[..1], HUMAN_SLOT), None);
+        assert_eq!(arena_frame::rival_hint(&spawn[1..], HUMAN_SLOT), None);
+        let broken = [view(0, 0.0, 0.0), view(1, f32::NAN, 0.0)];
+        assert_eq!(arena_frame::rival_hint(&broken, HUMAN_SLOT), None);
+        // The title carries the hint first, then the controls.
+        let plain = arena_frame::window_title(None);
+        assert!(plain.starts_with("engine2040 arena | WASD move (camera-relative)"));
+        let hinted = arena_frame::window_title(Some(&hint));
+        assert!(
+            hinted.starts_with(&format!("engine2040 arena | {hint} | WASD")),
+            "{hinted}"
+        );
     }
 
     #[test]

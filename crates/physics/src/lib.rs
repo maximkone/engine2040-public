@@ -17,15 +17,15 @@ pub mod controller2;
 /// through. Std-only; no sim step.
 pub mod islands;
 pub mod kcc;
-/// Physics LOD for armies: far soldiers as capsules, near ones full detail,
-/// CCD only for fast weapons and projectiles, island sleep for rest.
-pub mod lod;
 /// The collision layer table (fighter, prop, debris, sensor, world) as plain integers.
 pub mod layers;
 /// Severed limbs as bodies: mass from volume and density, inherited velocity
 /// plus blade impulse, stump recoil, canonical order, capped, snapshotted.
 /// Integer, std-only.
 pub mod limb;
+/// Physics LOD for armies: far soldiers as capsules, near ones full detail,
+/// CCD only for fast weapons and projectiles, island sleep for rest.
+pub mod lod;
 /// One table of density, friction, bounce and damping per material (wood, stone,
 /// flesh, metal, sand, cloth). Integer rows, std-only.
 pub mod material;
@@ -33,11 +33,11 @@ pub mod overlap;
 /// PD velocity-servo drive law for the powered ragdoll: D-damped servo
 /// axes, magnitude clamp, dt fallback to P-only. Std-only.
 pub mod pd;
+#[cfg(feature = "rapier")]
+pub mod powered;
 /// Ray casts and swept-sphere casts against cooked static colliders (the door's
 /// `physics.raycast` and `physics.shapecast`). Std-only.
 pub mod query;
-#[cfg(feature = "rapier")]
-pub mod powered;
 #[cfg(feature = "rapier")]
 pub mod ragdoll;
 /// Frozen-baseline fall/clinch measurement tape: seeded scripts beside

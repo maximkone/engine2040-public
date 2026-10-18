@@ -12,7 +12,7 @@ RL6, RP2 and RP3 with `Unsupported` still in `sky.rs`, `material_layer.rs`,
 `particles_gpu.rs` and `decals.rs` (operator caught it 2026-09-24); GX7–GX10
 make those live, and every row built on them waits.
 
-- [ ] GX13 render: IBL release-capture close — pilot only, no lane, no
+- [x] GX13 render: IBL release-capture close — pilot only, no lane, no
   code. Re-run the wave-51 `chart_target_size` fix proof on the
   reference GPU: release window build (arena scene, boosted clocks),
   1600x900 viewport downscales with no `exceeds edge 256` exit,
@@ -22,7 +22,7 @@ make those live, and every row built on them waits.
   errors; reference-GPU chart beside the RL6 chart within tol; per-pass
   ms posted; Q1 V1-V3 consume the same set. needs: GX1, GX3, GX12,
   RL6, PF2. (GX3 VERDICT wave 56.) (Owner 2026-10-10: Q1 dropped
-  from needs, a cycle; GX13 feeds Q1.)
+  from needs, a cycle; GX13 feeds Q1.) Landed 4e51bd7a (docs/receipts/2026-10-18-gpu-pilot-gx13-gx14-rl30-pf19.md). Chart at 1600x900 down to 256x144 with no edge-256 exit, max diff 1.2e-7 vs 1e-5, 0 validation errors in a 300-frame window on the RTX 3050 6GB Laptop GPU, RA8 manifest generated (target/pilot-gx13/).
 - [ ] GX14 render: GTAO boosted-release proof — pilot-measurement only,
   no pass code: pinned release window build, arena 1080p, PF2 per-pass
   GPU stamps (gtao probe via PF2), table + RA8 manifest + llvmpipe note;
@@ -32,7 +32,7 @@ make those live, and every row built on them waits.
   or posted FAIL; 0 validation errors; `node tools/proof.mjs` PASS
   golden x2. needs: GX1, PF2, RL12. (GX5 VERDICT wave 56: GX5 is
   gtao.rs, not skinning; DROP 078-gx5-r2; wave-105 split: GX5 no
-  longer blocks this row.)
+  longer blocks this row.) Progress 2026-10-18: 4e51bd7a not measured: the arena prints gtao only as a per-pass mean (0.19-0.31 ms at 720p) and the window cannot run at 1080p, so there is no p95 stamp.
 
 - [ ] RL5 render: baked lightmaps with validity mask + SH probes for
   fighters reusing the `ibl.rs` SH path. Tier B. Size L. Owns
@@ -227,13 +227,13 @@ make those live, and every row built on them waits.
   GPU. F2P: 8-fighter capture set absent before. P2P: 3 PNGs posted,
   manifests + ms rows posted, bake bytes x2 identical. needs: RL5, RL28,
   PF2.
-- [ ] RL30 render: RL27 day-sweep parity pilot — evidence only under
+- [x] RL30 render: RL27 day-sweep parity pilot — evidence only under
   `target/rl30/` (code owns new `crates/render/src/shadow_cascade.rs`,
   absent on master; `SUN_CASCADES = 3` + `CASCADE_LAMBDA = 0.5` at
   `crates/render/src/shadow_cluster.rs:20-23`). Tier B. Size S. Owns
   `target/rl30/` (pilot outputs only). Accept: day-sweep A/B x2
   identical; llvmpipe parity in tol; 0 errors; golden held; 3 splits
-  posted. F2P: cascade day-sweep set absent before. P2P: A/B x2
+  posted. F2P: cascade day-sweep set absent before. P2P: A/B x2 Landed 4e51bd7a. Day sweep byte-identical twice (sha256 80297F11), splits 21.72/49.74/120.00 m, day rows 10/34.64/120 m, same row for all five sun elevations; Linux runner 13 shadow_cascade tests passed (run 39066373935); no llvmpipe adapter on this PC.
    identical posted, parity in tol. needs: RL27, RL2.
 - [ ] RL31 render: Bevy-atmosphere Bruneton LUT bake beside the analytic
   sky - port the transmittance plus multiscattering plus sky-view plus
