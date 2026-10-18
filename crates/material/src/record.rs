@@ -447,31 +447,34 @@ impl RecordError {
     }
 }
 
-impl fmt::Display for RecordError {
+impl fmt::Display for RecordErrorKind {
+    /// The reason alone, without the path: callers that carry the path in
+    /// their own field (the editor's `BatchError`) read it from here.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: ", self.path)?;
-        match &self.kind {
-            RecordErrorKind::Json(err) => write!(f, "{err}"),
-            RecordErrorKind::Missing => f.write_str("missing"),
-            RecordErrorKind::Expected(kind) => write!(f, "expected {kind}"),
-            RecordErrorKind::NotFinite => f.write_str("not a finite number"),
-            RecordErrorKind::OutOfRange { min, max, got } => {
-                write!(f, "{got} outside {min}..={max}")
-            }
-            RecordErrorKind::BadDecimal => f.write_str("not a plain decimal (digits.digits)"),
-            RecordErrorKind::UnknownName { what, got } => write!(f, "unknown {what} {got:?}"),
-            RecordErrorKind::UnknownKey => f.write_str("unknown key"),
-            RecordErrorKind::Duplicate(name) => write!(f, "duplicate material {name:?}"),
-            RecordErrorKind::VersionTooNew(version) => {
+        match self {
+            Self::Json(err) => write!(f, "{err}"),
+            Self::Missing => f.write_str("missing"),
+            Self::Expected(kind) => write!(f, "expected {kind}"),
+            Self::NotFinite => f.write_str("not a finite number"),
+            Self::OutOfRange { min, max, got } => write!(f, "{got} outside {min}..={max}"),
+            Self::BadDecimal => f.write_str("not a plain decimal (digits.digits)"),
+            Self::UnknownName { what, got } => write!(f, "unknown {what} {got:?}"),
+            Self::UnknownKey => f.write_str("unknown key"),
+            Self::Duplicate(name) => write!(f, "duplicate material {name:?}"),
+            Self::VersionTooNew(version) => {
                 write!(f, "version {version} is newer than {RECORD_VERSION}")
             }
-            RecordErrorKind::TooMany { max } => write!(f, "more than {max} entries"),
-            RecordErrorKind::BadName { at } => {
-                write!(f, "byte {at} is outside 0-9 A-Z a-z - _ .")
-            }
-            RecordErrorKind::TooLong { len } => write!(f, "{len} bytes is too long"),
-            RecordErrorKind::UnknownParent(name) => write!(f, "extends unknown material {name:?}"),
+            Self::TooMany { max } => write!(f, "more than {max} entries"),
+            Self::BadName { at } => write!(f, "byte {at} is outside 0-9 A-Z a-z - _ ."),
+            Self::TooLong { len } => write!(f, "{len} bytes is too long"),
+            Self::UnknownParent(name) => write!(f, "extends unknown material {name:?}"),
         }
+    }
+}
+
+impl fmt::Display for RecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.path, self.kind)
     }
 }
 

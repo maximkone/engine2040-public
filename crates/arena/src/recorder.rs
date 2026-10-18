@@ -187,7 +187,7 @@ pub struct Dataset {
 }
 
 /// Codec failures: bounded diagnostics, never panics.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum DecodeError {
     /// First four bytes are not `EDT1`.
     BadMagic,

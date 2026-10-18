@@ -203,7 +203,7 @@ its queues), moderation tooling.
 
 ## 3. Target design
 
-This plan replaces `docs/systems/netcode.md` after review. What it
+This plan replaces `docs/archive/2026-10-03/systems-netcode.md` after review. What it
 carries over unchanged: the server-authoritative model (the server
 runs the same `arena` code as clients, no second sim), prediction
 with repeat-last-input plus resimulation capped at 8 ticks, deltas

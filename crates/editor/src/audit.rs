@@ -19,6 +19,7 @@ use std::fmt;
 
 use engine_core::hash::{FNV64_OFFSET, GOLDEN_GAMMA};
 
+use crate::commands::digest::push_text;
 use crate::commands::{Applied, Batch, CommandMeta, Document, Journal, Op};
 use crate::wal::{wal_apply, Wal, WalError};
 
@@ -180,7 +181,7 @@ fn encode_ops(ops: &[Op]) -> Result<Vec<u8>, AuditError> {
     }
     let mut out = Vec::new();
     for op in ops {
-        match *op {
+        match op {
             Op::Insert { id, parent, local } => {
                 out.push(0);
                 out.extend_from_slice(id.as_uuid().as_bytes());
@@ -241,6 +242,21 @@ fn encode_ops(ops: &[Op]) -> Result<Vec<u8>, AuditError> {
                 out.extend_from_slice(id.as_uuid().as_bytes());
                 out.push(kind.tag());
             }
+            Op::PutMaterial { text } => {
+                out.push(7);
+                push_text(&mut out, text);
+            }
+            Op::SetMaterialParam {
+                material,
+                path,
+                value,
+            } => {
+                out.push(8);
+                push_text(&mut out, material);
+                push_text(&mut out, path);
+                push_text(&mut out, value);
+            }
+            Op::RemoveLastMaterial => out.push(9),
         }
         if out.len() > MAX_AUDIT_OP_BYTES {
             return Err(AuditError::TooLarge);
@@ -248,6 +264,9 @@ fn encode_ops(ops: &[Op]) -> Result<Vec<u8>, AuditError> {
     }
     Ok(out)
 }
+
+/// Length-prefixed op text (`u64` length first) into the canonical encoding.
+/// One owner: the batch digest module writes the same prefix.
 
 /// Link digest: `digest(prev || entry_digest || seq)`.
 fn link(prev: &[u8; 32], entry_digest: &[u8; 32], seq: u64) -> [u8; 32] {

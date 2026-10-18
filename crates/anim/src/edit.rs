@@ -1,15 +1,16 @@
-//! edit: clip edit verbs trim, retime, cleanup over [`QClip`]/[`QTrack`].
+//! edit: clip edit verbs trim, retime, cleanup, strip and mirror over
+//! [`QClip`]/[`QTrack`].
 //!
 //! Owner: `engine-anim`; consumer: the crate root wires the module
-//! (`pub mod edit` in `lib.rs`; a follow-up leg extends this file with
-//! strip and mirror). Data owner `clip.rs` lends its quantized types
-//! read-only; this module never edits them in place. Units: ticks at
+//! (`pub mod edit` in `lib.rs`). Data owner `clip.rs` lends its quantized
+//! types read-only; this module never edits them in place. Units: ticks at
 //! 60 Hz for windows, seconds for key times, meters for values.
 //! Determinism: `sample_track` reads plus `+ - * /`, `round` and `sqrt`
 //! only, stable track order; same clip and args give same bytes x2.
 //! Errors: `None` for empty, reversed or out-of-range windows and ratios;
-//! `cleanup` never fails (bad tolerance reads 0). Budget: each verb
-//! allocates one new clip (authoring-time only, never the tick).
+//! `cleanup` never fails (bad tolerance reads 0); `strip` drops indices the
+//! clip does not have; `mirror` never fails. Budget: each verb allocates one
+//! new clip (authoring-time only, never the tick).
 
 use engine_core::vec3::dist2;
 
@@ -188,6 +189,55 @@ fn simplify(tr: &QTrack, tol2: f32) -> QTrack {
     }
 }
 
+/// Keep only the tracks listed by `used`, in that order; timing is kept.
+///
+/// `used` holds the track indices a skeleton still reads. Out-of-range indices
+/// are dropped, a repeated index keeps its first slot, and `dur` stays so a
+/// strip never retimes the clip.
+pub fn strip(clip: &QClip, used: &[usize]) -> QClip {
+    let mut kept: Vec<QTrack> = Vec::with_capacity(used.len());
+    let mut seen: Vec<usize> = Vec::with_capacity(used.len());
+    for &i in used {
+        if i < clip.tracks.len() && !seen.contains(&i) {
+            seen.push(i);
+            kept.push(clip.tracks[i].clone());
+        }
+    }
+    QClip {
+        tracks: kept,
+        dur: clip.dur,
+    }
+}
+
+/// Mirror across the sagittal (YZ) plane: the lateral `x` axis flips sign.
+///
+/// Left and right key values swap, `y`/`z` stay, and every track is rebaked so
+/// its `min`/`max` still bracket its keys. A ragged track (times and keys of
+/// different length) and an empty one clone unchanged, matching [`cleanup`].
+pub fn mirror(clip: &QClip) -> QClip {
+    let mut tracks = Vec::with_capacity(clip.tracks.len());
+    for tr in &clip.tracks {
+        if tr.times.len() != tr.keys.len() || tr.times.is_empty() {
+            tracks.push(tr.clone());
+            continue;
+        }
+        let mut hint = 0usize;
+        let values: Vec<[f32; 3]> = tr
+            .times
+            .iter()
+            .map(|t| {
+                let v = sample_track(tr, *t, &mut hint);
+                [-v[0], v[1], v[2]]
+            })
+            .collect();
+        tracks.push(bake_track(tr.times.clone(), values));
+    }
+    QClip {
+        tracks,
+        dur: clip.dur,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::clip::{bake_clip, bake_track, qclip_hash, sample_track};
@@ -268,6 +318,86 @@ mod tests {
     }
 
     #[test]
+    fn strip_keeps_used_keys() {
+        let times: Vec<f32> = (0..=10).map(|k| u32_to_f32(k) * TICK_DT).collect();
+        let vals = |f: fn(u32) -> f32, axis: usize| -> Vec<[f32; 3]> {
+            (0..=10)
+                .map(|k| {
+                    let mut v = [0.0; 3];
+                    v[axis] = f(k);
+                    v
+                })
+                .collect()
+        };
+        let clip = bake_clip(vec![
+            bake_track(times.clone(), vals(|k| u32_to_f32(k) * 0.1, 0)),
+            bake_track(times.clone(), vals(|k| u32_to_f32(k) * 0.2, 1)),
+            bake_track(times.clone(), vals(|k| u32_to_f32(k) * 0.3, 2)),
+        ]);
+        // Order follows `used`; the repeat and the out-of-range index drop.
+        let kept = strip(&clip, &[2, 0, 2, 9]);
+        assert_eq!(kept.tracks.len(), 2);
+        let (z, x) = (
+            probe(&kept, 0, 5.0 * TICK_DT),
+            probe(&kept, 1, 5.0 * TICK_DT),
+        );
+        assert!((z[2] - 1.5).abs() < 1e-3, "{z:?}");
+        assert!((x[0] - 0.5).abs() < 1e-3, "{x:?}");
+        assert_eq!(kept.dur, clip.dur);
+        let none = strip(&clip, &[]);
+        assert!(none.tracks.is_empty());
+        assert_eq!(none.dur, clip.dur);
+        // A second strip of the same selection is byte-equal.
+        assert_eq!(
+            qclip_hash(&strip(&clip, &[2, 0])),
+            qclip_hash(&strip(&clip, &[2, 0]))
+        );
+    }
+
+    #[test]
+    fn mirror_swaps_left_right() {
+        let times: Vec<f32> = (0..=4).map(|k| u32_to_f32(k) * TICK_DT).collect();
+        let left: Vec<[f32; 3]> = (0..=4)
+            .map(|k| [1.0 + u32_to_f32(k) * 0.1, 0.5, -2.0])
+            .collect();
+        let right: Vec<[f32; 3]> = (0..=4)
+            .map(|k| [-1.0 - u32_to_f32(k) * 0.1, 0.5, -2.0])
+            .collect();
+        let clip = bake_clip(vec![
+            bake_track(times.clone(), left),
+            bake_track(times, right),
+        ]);
+        let m = mirror(&clip);
+        for k in 0..=4u32 {
+            let t = u32_to_f32(k) * TICK_DT;
+            let (a, b) = (probe(&m, 0, t), probe(&clip, 1, t));
+            for i in 0..3 {
+                assert!(
+                    (a[i] - b[i]).abs() < 1e-3,
+                    "key {k} axis {i}: {a:?} vs {b:?}"
+                );
+            }
+        }
+        // y and z are untouched, and mirroring twice returns the original keys.
+        let v = probe(&m, 0, 0.0);
+        assert!(
+            (v[1] - 0.5).abs() < 1e-3 && (v[2] + 2.0).abs() < 1e-3,
+            "{v:?}"
+        );
+        let back = mirror(&m);
+        for k in 0..=4u32 {
+            let t = u32_to_f32(k) * TICK_DT;
+            let (a, b) = (probe(&back, 0, t), probe(&clip, 0, t));
+            for i in 0..3 {
+                assert!(
+                    (a[i] - b[i]).abs() < 2e-3,
+                    "key {k} axis {i}: {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn edits_repeat() {
         let c = straight();
         let (a, b) = (
@@ -284,6 +414,10 @@ mod tests {
             qclip_hash(&cleanup(&c, 0.01)),
             qclip_hash(&cleanup(&c, 0.01))
         );
+        let (a, b) = (qclip_hash(&strip(&c, &[0])), qclip_hash(&strip(&c, &[0])));
+        assert_eq!(a, b);
+        let (a, b) = (qclip_hash(&mirror(&c)), qclip_hash(&mirror(&c)));
+        assert_eq!(a, b);
     }
 
     #[test]

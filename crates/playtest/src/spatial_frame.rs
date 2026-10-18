@@ -12,8 +12,6 @@
 //! Determinism: same inputs give the same bytes; box order never matters.
 //! Failure mode: bad boxes or ranges return a typed [`FrameError`].
 
-use std::fmt;
-
 /// Smallest eye distance in cm (a tiny box never puts the eye inside it).
 pub const MIN_DISTANCE_CM: i32 = 50;
 /// Coverage grid side: 32 x 32 = 1,024 rays.
@@ -270,25 +268,9 @@ fn basis(yaw_deg: i32, pitch_deg: i32) -> (V3, V3, V3) {
     (forward, unit(cross(up, forward)), up)
 }
 
-/// Typed refusal of a frame or coverage request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FrameError {
-    /// `max` is below `min` on some axis.
-    EmptyBox,
-    /// A number is outside its legal range; names the field and the range.
-    OutOfRange(&'static str),
-}
-
-impl fmt::Display for FrameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyBox => write!(f, "frame: box max is below min; pass min and max in cm"),
-            Self::OutOfRange(what) => write!(f, "frame: {what}"),
-        }
-    }
-}
-
-impl std::error::Error for FrameError {}
+/// Typed refusal of a frame or coverage request. Owner:
+/// [`engine_spatial::frame`], re-exported so both frame fits refuse alike.
+pub use engine_spatial::frame::FrameError;
 
 /// Axis-aligned box in integer cm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,68 +298,16 @@ impl Box3 {
     }
 }
 
-/// Named view; the angle pairs are Forge's `CameraShot` table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    /// Eye yaw 35, pitch 30.
-    ThreeQuarter,
-    /// Eye yaw 0, pitch 10.
-    Front,
-    /// Eye yaw 180, pitch 10.
-    Back,
-    /// Eye yaw 90, pitch 10.
-    Side,
-    /// Eye yaw 0, pitch 89.
-    TopDown,
-    /// Behind the target's facing yaw (`FrameSpec::yaw_deg`), pitch 20.
-    ThirdPerson,
-    /// Eye yaw and pitch from the spec.
-    Orbit,
-}
+/// Named view; the angle pairs are the shared `CameraShot` table. Owner:
+/// [`engine_spatial::frame`], so the float fit here reads the same seven views
+/// and the same door words as the integer fit.
+pub use engine_spatial::frame::View;
 
-impl View {
-    /// Every view, in report order.
-    pub const ALL: [Self; 7] = [
-        Self::ThreeQuarter,
-        Self::Front,
-        Self::Back,
-        Self::Side,
-        Self::TopDown,
-        Self::ThirdPerson,
-        Self::Orbit,
-    ];
-
-    /// Door word.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ThreeQuarter => "three_quarter",
-            Self::Front => "front",
-            Self::Back => "back",
-            Self::Side => "side",
-            Self::TopDown => "top_down",
-            Self::ThirdPerson => "third_person",
-            Self::Orbit => "orbit",
-        }
-    }
-
-    /// Default fill in percent (third person keeps the subject small).
-    pub const fn default_fill_pct(self) -> i32 {
-        match self {
-            Self::ThirdPerson => 40,
-            _ => 85,
-        }
-    }
-
-    fn eye_angles(self, spec: &FrameSpec) -> (i32, i32) {
-        match self {
-            Self::ThreeQuarter => (35, 30),
-            Self::Front => (0, 10),
-            Self::Back => (180, 10),
-            Self::Side => (90, 10),
-            Self::TopDown => (0, 89),
-            Self::ThirdPerson => (spec.yaw_deg + 180, 20),
-            Self::Orbit => (spec.yaw_deg, spec.pitch_deg),
-        }
+/// Default fill in percent for a view (third person keeps the subject small).
+pub const fn default_fill_pct(view: View) -> i32 {
+    match view {
+        View::ThirdPerson => 40,
+        _ => 85,
     }
 }
 
@@ -443,7 +373,7 @@ pub fn frame_fit(subject: &Box3, spec: &FrameSpec) -> Result<FrameFit, FrameErro
         return Err(FrameError::EmptyBox);
     }
     check_spec(spec)?;
-    let (eye_yaw, eye_pitch) = spec.view.eye_angles(spec);
+    let (eye_yaw, eye_pitch) = spec.view.eye_angles(spec.yaw_deg, spec.pitch_deg);
     let (forward, right, up) = basis(eye_yaw + 180, -eye_pitch);
     let ty = tan_half_fov(spec.fov_deg) * f64::from(spec.fill_pct) / 100.0;
     let tx = ty * f64::from(spec.aspect_pct) / 100.0;

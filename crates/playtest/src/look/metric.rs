@@ -78,6 +78,13 @@ pub enum MetricError {
     },
     /// The region holds no pixel (or no whole SSIM window, or an empty histogram).
     EmptyRegion,
+    /// A clip holds fewer frames than one consecutive pair.
+    TooFewFrames {
+        /// Frames offered.
+        got: usize,
+        /// Frames one pair needs.
+        need: usize,
+    },
     /// The PNG did not decode within the capture bounds.
     BadPng(String),
 }
@@ -109,6 +116,10 @@ impl fmt::Display for MetricError {
             Self::EmptyRegion => write!(
                 f,
                 "region holds no scorable pixels: widen the rect or mask (SSIM needs a whole 8x8 window)"
+            ),
+            Self::TooFewFrames { got, need } => write!(
+                f,
+                "clip holds {got} frames but flicker needs at least {need}: score one consecutive pair"
             ),
             Self::BadPng(reason) => write!(f, "png did not decode: {reason}"),
         }
@@ -667,6 +678,174 @@ pub fn histogram_distance(a: &Histogram, b: &Histogram) -> Result<HistDistance, 
 }
 
 // ---------------------------------------------------------------------------
+// Flicker (edge-weighted visibility)
+// ---------------------------------------------------------------------------
+
+/// Bar in permille: a clip at or above this reads as visible flicker.
+pub const FLICKER_BAR_PERMILLE: u32 = 100;
+/// Largest motion-compensation shift searched on each axis, in pixels.
+pub const FLICKER_SHIFT_MAX: i32 = 2;
+/// Sobel gradient below this is flat and never weighs into the score.
+const FLICKER_EDGE_FLOOR: u64 = 12;
+/// Largest edge weight, so one hard edge cannot drown the rest of a frame.
+const FLICKER_EDGE_CAP: u64 = 255;
+
+/// Flicker visibility of a clip: the edge-weighted residual the eye would see.
+///
+/// Model (idea only, no transplanted bytes): consecutive frames are motion
+/// compensated by a small integer shift, and the leftover luma residual is
+/// weighted by local edge energy. Flat areas that change brightness are
+/// invisible and weigh zero; hard edges that alternate frame to frame weigh
+/// the most. Integer only, so the same clip scores the same twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Flicker {
+    /// Mean pair score in permille, `0..=1000` ([`FLICKER_BAR_PERMILLE`] is
+    /// the visible bar).
+    pub permille: u32,
+    /// Worst consecutive pair in permille, `0..=1000`.
+    pub worst_permille: u32,
+    /// Consecutive pairs scored.
+    pub pairs: u32,
+}
+
+/// Edge energy of one luma plane: integer Sobel magnitude per pixel, less the
+/// flat floor and capped at [`FLICKER_EDGE_CAP`]. Zero on a flat area.
+fn flicker_edge_weights(luma: &[u8], width: usize, height: usize) -> Vec<u16> {
+    let mut weights = vec![0u16; width * height];
+    if width < 3 || height < 3 {
+        return weights;
+    }
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let at = |dx: usize, dy: usize| i64::from(luma[(y + dy - 1) * width + (x + dx - 1)]);
+            let gx = (at(2, 0) + 2 * at(2, 1) + at(2, 2)) - (at(0, 0) + 2 * at(0, 1) + at(0, 2));
+            let gy = (at(0, 2) + 2 * at(1, 2) + at(2, 2)) - (at(0, 0) + 2 * at(1, 0) + at(2, 0));
+            let magnitude = gx.unsigned_abs() + gy.unsigned_abs();
+            let weight = magnitude
+                .saturating_sub(FLICKER_EDGE_FLOOR)
+                .min(FLICKER_EDGE_CAP);
+            weights[y * width + x] = u16::try_from(weight).unwrap_or(0);
+        }
+    }
+    weights
+}
+
+/// Weighted residual in permille of full scale, rounded; zero without weight.
+fn residual_permille(numerator: u64, weight: u64) -> u32 {
+    if weight == 0 {
+        return 0;
+    }
+    let scaled =
+        (u128::from(numerator) * 1000 + u128::from(weight) * 255 / 2) / (u128::from(weight) * 255);
+    u32::try_from(scaled.min(1000)).unwrap_or(1000)
+}
+
+/// Flicker score of one consecutive pair in permille.
+///
+/// The pair is compensated by the best shift within
+/// [`FLICKER_SHIFT_MAX`] pixels (smallest weighted residual; the zero shift
+/// wins a tie), then the residual is weighted by local edge energy from the
+/// first frame. A flat region scores zero however far its brightness moves.
+///
+/// # Errors
+///
+/// [`MetricError::SizeMismatch`], a bad rectangle or mask,
+/// [`MetricError::EmptyRegion`] when the region holds no pixel with room for
+/// the shift search.
+pub fn flicker_pair(a: &Frame, b: &Frame, region: Region<'_>) -> Result<u32, MetricError> {
+    a.same_size(b)?;
+    let area = Resolved::new(region, a.width, a.height)?;
+    let (w, h) = (a.width, a.height);
+    let (la, lb) = (a.luma_plane(), b.luma_plane());
+    let weights = flicker_edge_weights(&la, w, h);
+    let margin = 1 + usize::try_from(FLICKER_SHIFT_MAX).unwrap_or(0);
+    if w <= 2 * margin || h <= 2 * margin {
+        return Err(MetricError::EmptyRegion);
+    }
+    let (x0, x1) = (margin, w - margin);
+    let (y0, y1) = (margin, h - margin);
+    let mut weight_total = 0u64;
+    let mut visited = 0usize;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if area.contains(x, y) {
+                visited += 1;
+                weight_total += u64::from(weights[y * w + x]);
+            }
+        }
+    }
+    if visited == 0 {
+        return Err(MetricError::EmptyRegion);
+    }
+    if weight_total == 0 {
+        return Ok(0);
+    }
+    let shift_max = FLICKER_SHIFT_MAX;
+    let mut shifts: Vec<(i32, i32)> = Vec::with_capacity(25);
+    shifts.push((0, 0));
+    for dy in -shift_max..=shift_max {
+        for dx in -shift_max..=shift_max {
+            if dx != 0 || dy != 0 {
+                shifts.push((dx, dy));
+            }
+        }
+    }
+    let mut best = u64::MAX;
+    for &(dx, dy) in &shifts {
+        let (dx, dy) = (i64::from(dx), i64::from(dy));
+        let mut residual = 0u64;
+        for y in y0..y1 {
+            let by = usize::try_from(i64::try_from(y).unwrap_or(0) + dy).unwrap_or(0);
+            for x in x0..x1 {
+                if !area.contains(x, y) {
+                    continue;
+                }
+                let bx = usize::try_from(i64::try_from(x).unwrap_or(0) + dx).unwrap_or(0);
+                let weight = u64::from(weights[y * w + x]);
+                if weight == 0 {
+                    continue;
+                }
+                let diff = u64::from(la[y * w + x].abs_diff(lb[by * w + bx]));
+                residual += diff * weight;
+            }
+        }
+        if residual < best {
+            best = residual;
+        }
+    }
+    Ok(residual_permille(best, weight_total))
+}
+
+/// Flicker visibility of a whole clip over a region (see [`Flicker`]).
+///
+/// # Errors
+///
+/// [`MetricError::TooFewFrames`] under two frames, plus every error
+/// [`flicker_pair`] raises for a pair.
+pub fn flicker_hvei(frames: &[Frame], region: Region<'_>) -> Result<Flicker, MetricError> {
+    if frames.len() < 2 {
+        return Err(MetricError::TooFewFrames {
+            got: frames.len(),
+            need: 2,
+        });
+    }
+    let mut sum = 0u64;
+    let mut worst = 0u32;
+    for pair in frames.windows(2) {
+        let score = flicker_pair(&pair[0], &pair[1], region)?;
+        sum += u64::from(score);
+        worst = worst.max(score);
+    }
+    let pairs = to_u32(frames.len() - 1);
+    let mean = u32::try_from((sum + u64::from(pairs) / 2) / u64::from(pairs)).unwrap_or(u32::MAX);
+    Ok(Flicker {
+        permille: mean,
+        worst_permille: worst,
+        pairs,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // One-shot comparison
 // ---------------------------------------------------------------------------
 
@@ -768,6 +947,116 @@ mod tests {
             )
             .expect("png encodes");
         out
+    }
+
+    #[test]
+    fn look_flicker_clean_clip_scores_below_the_bar() {
+        // A clean pan: one integer pixel per frame. Motion compensation makes
+        // the residual zero, so the clip reads as no flicker.
+        let pan = |offset: u32| build(W, H, |x, y| sand_at((x + offset).min(W - 1), y));
+        let clip = vec![pan(0), pan(1), pan(2), pan(3)];
+        let score = flicker_hvei(&clip, Region::Full).expect("clean clip scores");
+        assert_eq!(score.pairs, 3);
+        assert!(
+            score.permille < FLICKER_BAR_PERMILLE,
+            "clean pan scored {} permille, worst {}",
+            score.permille,
+            score.worst_permille
+        );
+        // Moving fighter on still sand: a small body travels across the frame.
+        let body = |at: u32| {
+            build(W, H, |x, y| {
+                let inside = (at..at + 8).contains(&x) && (20..28).contains(&y);
+                if inside {
+                    [235, 235, 235]
+                } else {
+                    sand_at(x, y)
+                }
+            })
+        };
+        let moving = vec![body(8), body(9), body(10)];
+        let fighter = flicker_hvei(&moving, Region::Full).expect("fighter clip scores");
+        assert!(
+            fighter.permille < FLICKER_BAR_PERMILLE,
+            "moving fighter scored {} permille",
+            fighter.permille
+        );
+    }
+
+    #[test]
+    fn look_flicker_alternating_shimmer_clip_scores_above_the_bar() {
+        // The same scene, alternating 40 luma steps every frame: visible
+        // shimmer on every textured edge.
+        let shimmer = |up: bool| {
+            build(W, H, |x, y| {
+                let step = if up { 40i32 } else { -40i32 };
+                sand_at(x, y)
+                    .map(|c| u8::try_from((i32::from(c) + step).clamp(0, 255)).expect("clamped"))
+            })
+        };
+        let clip = vec![shimmer(true), shimmer(false), shimmer(true), shimmer(false)];
+        let score = flicker_hvei(&clip, Region::Full).expect("shimmer clip scores");
+        assert_eq!(score.pairs, 3);
+        assert!(
+            score.permille > FLICKER_BAR_PERMILLE,
+            "shimmer scored {} permille, bar {}",
+            score.permille,
+            FLICKER_BAR_PERMILLE
+        );
+        assert!(score.worst_permille >= score.permille);
+    }
+
+    #[test]
+    fn look_flicker_flat_region_never_trips_the_guard() {
+        // Two flat frames far apart in brightness: no edge energy, no flicker.
+        let flat = |luma: u8| build(W, H, move |_, _| [luma, luma, luma]);
+        let score = flicker_hvei(&[flat(40), flat(220)], Region::Full).expect("flat pair scores");
+        assert_eq!((score.permille, score.worst_permille), (0, 0));
+        // A gentle one-step ramp is under the edge floor, same answer.
+        let ramp = |offset: u32| {
+            build(W, H, move |x, _| {
+                let v = u8::try_from((x + offset).min(255)).expect("byte");
+                [v, v, v]
+            })
+        };
+        let soft = flicker_hvei(&[ramp(0), ramp(100)], Region::Full).expect("ramp pair scores");
+        assert_eq!(soft.permille, 0);
+        // The same brightness step on textured sand does score: the guard is
+        // about edges, not about the amount of change.
+        let textured = flicker_hvei(
+            &[sand(), build(W, H, |x, y| brighten20(sand_at(x, y)))],
+            Region::Full,
+        )
+        .expect("textured pair scores");
+        assert!(textured.permille > 0);
+    }
+
+    #[test]
+    fn look_flicker_same_inputs_give_identical_results_twice() {
+        let clip = || vec![sand(), brightened_sand(), sand()];
+        let first = flicker_hvei(&clip(), Region::Full).expect("first");
+        let second = flicker_hvei(&clip(), Region::Full).expect("second");
+        assert_eq!(first, second);
+        assert!(first.worst_permille >= first.permille);
+        // Typed errors, never a panic: too few frames, and a size mismatch.
+        assert_eq!(
+            flicker_hvei(&[sand()], Region::Full).unwrap_err(),
+            MetricError::TooFewFrames { got: 1, need: 2 }
+        );
+        let small = build(16, 16, |_, _| [9, 9, 9]);
+        assert_eq!(
+            flicker_pair(&sand(), &small, Region::Full).unwrap_err(),
+            MetricError::SizeMismatch {
+                left: (64, 48),
+                right: (16, 16)
+            }
+        );
+        // A frame too thin for the shift search has no scorable pixel.
+        let thin = build(5, 5, |_, _| [9, 9, 9]);
+        assert_eq!(
+            flicker_hvei(&[thin.clone(), thin], Region::Full).unwrap_err(),
+            MetricError::EmptyRegion
+        );
     }
 
     #[test]

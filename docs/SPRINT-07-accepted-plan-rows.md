@@ -190,6 +190,8 @@
   2505.22954v3, idea only; no self-rewriting agent). Tier A. Size S.
   Owns `tools/` glue (orchestrator lands). Accept: seeded divergence
   fails gate + reverts; sample matches hand-check. needs: ARC3.
+  Progress 2026-10-19: owner: report-only receipt instead of auto-revert?
+  Answer in `docs/plan/2026-10-19-owner-queue.md`.
 - [x] ARC14 ecs: spine float quarantine — the spine takes integer-ns
   dt (RC6 shape), never `schedule::Ctx.dt: f32`, and a quarantine test
   fails on any float inside the spine module. Tier A. Size S. Owns
@@ -650,7 +652,8 @@
   offline interaction probes baked to tags, never in tick, never weights
   in git. Tier C. Size M. Accept: +10% tag accuracy with byte-identical
   replays, else stays held. Kill: tick touch, unlicensed data/weights, or
-  no measured lift. needs: SP22, SP24. (PLN48 reader P1 moonshot.)
+  no measured lift. needs: SP22. (PLN48 reader P1 moonshot; 2026-10-18:
+  SP24 landed, dropped from needs.)
 - [x] AX11 mcp/playtest: EV1 efficiency-utility report column —
   success-gated, turn-vs-tool split, reference floors in fixture; reported,
   never gated. Tier B. Size S. Owns eval-report hunks only (EV1 frozen).
@@ -698,16 +701,17 @@
    needs: MCP9, MCP10. (PLN20 ai-native.)
 - [ ] BET-AX13 playtest (MOONSHOT, HELD): offline efficiency-penalty refit
   from versioned traces, advisory only. Tier C. Size M. Accept: advisory
-  report only; two-green-exports rule to graduate. needs: EV1, AX16,
+  report only; two-green-exports rule to graduate. needs: EV1,
   AX11. (PLN48 reader P2 moonshot; PLN20: AX5 never boarded, corrected
-  from EV1, AX5, AX11.)
+  from EV1, AX5, AX11; 2026-10-18: AX16 landed, dropped from needs.)
 - [ ] BET-AX14 playtest (MOONSHOT, HELD): offline GEPA-style prompt
   evolution from versioned traces, advisory only. Tier C. Size M. Owns
   advisory-diff hunks beside `crates/playtest` (trace format frozen;
   no tuner in the repo). Accept: advisory report only; +pass with 0
   success loss to graduate; two-green-exports rule (AX17) to graduate
   or stays held. Kill: auto-apply, any success loss, format drift,
-  weights in git. needs: AX16, AX17. (PLN20 ai-native.)
+  weights in git. needs: none. (PLN20 ai-native; 2026-10-18: AX16, AX17
+  landed, dropped from needs.)
 - [ ] API6 mcp: protocol-pinned collapse guardrail — retain-list +
   adaptive budget beside the API4 collapse (protocol-aware trimming
   reimplemented, never model summarization). Tier C. Size S. Owns
@@ -862,7 +866,8 @@
   `content/arena/hdri/` untouched). Accept: 0 findings; Q1/RA14 read PBR
   (no noise); cook x2 identical; provenance per file; per-map bytes +
   VRAM posted on the reference GPU. Consumer: Q1 captures, RA14. needs:
-  CT26, CT8. (EXTEND wave 86.)
+  CT26, CT8. (EXTEND wave 86.) Progress 2026-10-19: operator: measured VRAM
+  on the reference GPU; line in `docs/plan/2026-10-19-owner-queue.md`.
 - [x] CT46 content: provenance audit dry-run for the CT28 gate (50-asset Landed 124fcf36. tools/provenance-audit.mjs: 58 rows, 7 refusals named; run 39053389819.
   matrix). Tier A. Size S. Owns `content/PROVENANCE-AUDIT.md` (gate code
   stays CT28). Accept: matrix lists URL+SPDX+author+SHA or
@@ -1074,7 +1079,7 @@
   (overrides + prefab-underneath + new key), digest `4aae94af` x2,
   SP12 gold still green; kill on any override lost, any prefab edit not
   applied under deltas, or any digest drift. needs: RC4. (LADDER P1
-  CANDIDATE 2026-09-30, spike 5/5 + x2.) Progress 2026-10-17: 2216f79d Instantiation::digest keyed by prefab key; museum run (2 overrides kept, 2 underneath edits shown, 1 new key) same digest x2 and fresh-edited-plus-overrides equals live reinstantiate (13574963997578328745); 19 prefab tests + clippy local only, no gh run id; the old 4aae94af came from a JS spike hash and cannot be reproduced, reword Accept when ticking.
+  CANDIDATE 2026-09-30, spike 5/5 + x2.) Progress 2026-10-17: 2216f79d Instantiation::digest keyed by prefab key; museum run (2 overrides kept, 2 underneath edits shown, 1 new key) same digest x2 and fresh-edited-plus-overrides equals live reinstantiate (13574963997578328745); 19 prefab tests + clippy local only, no gh run id; the old 4aae94af came from a JS spike hash and cannot be reproduced, reword Accept when ticking. Progress 2026-10-19: owner: reword the Accept line (drop digest 4aae94af) or drop the row; question in `docs/plan/2026-10-19-owner-queue.md`. Progress 2026-10-19: owner: reword the Accept line (drop digest 4aae94af) or drop the row; question in `docs/plan/2026-10-19-owner-queue.md`.
 - [x] SP56 spatial (held on SP38): canonical digest + perm-stable audit Landed 049cdd8d. conflict_audit_baseline (60 seeds, 20 perms) + conflict_audit_baseline_failures + sp38_audit_hunks_cover_sixty_seeds_and_twenty_perms run 39056881036.
   gate as the SP38 proof leg (60/60 + 20/20 + digest `05b20def` x2).
   Tier B. Size S. Owns audit hunks beside
@@ -1085,8 +1090,8 @@
   predictor, advisory only, never in tick. Tier B. Size S. Owns offline
   preset only. Accept: `cargo test -p engine-spatial --lib
   conflict_predictor_agreement` green; 60/60 + 10/10 at identical
-  bytes, else stays held. needs: SP38, SP12. (PLN future-spatial
-  2026-09-30.)
+  bytes, else stays held. needs: SP38. (PLN future-spatial
+  2026-09-30; 2026-10-18: SP12 landed, dropped from needs.)
 - [x] SP60 spatial: frame-aware verb baseline tape — 50 seeded Qs Landed ea34de95. digest c65a8802bf9e5249, run 39054437372.
   measured read-only on the frozen v2 substrate. Tier B. Size S. Owns
   fixture hunks beside `crates/spatial/src/relation.rs`. Accept:
@@ -1106,8 +1111,8 @@
   policy, advisory only, never a dep, never in tick. Tier B. Size S.
   Owns offline preset only. Accept: `cargo test -p engine-spatial
   --lib spatial_answer_agreement` green; 50/50 at identical bytes + 0
-  drift + panel win, else stays held. needs: SP58, SP20, SP12.
-  (PLN future-spatial 2026-09-30.)
+  drift + panel win, else stays held. needs: SP58, SP20.
+  (PLN future-spatial 2026-09-30; 2026-10-18: SP12 landed, dropped.)
 - [x] RA16 render: belt + cache pressure drill — 64-player storm with
   64 MiB live and eviction telemetry. Size S. Owns
   `crates/render/src/uploads.rs`. Accept: `cargo test -p
@@ -1309,7 +1314,7 @@
   (spearman >= 0.7), same bytes twice. F2P: compose scores a shot but never proposes one; no door verb. P2P:
   golden d57b5c8ae3096614 unchanged. needs: SPR7. Progress 2026-10-18: shot ranking by coverage landed d8f483de (spatial_frame.rs), compose::score_shot not applied yet; left: the endpoint verb (lane A).
 - [x] SPF1 spatial: known-good scene gate with controls - run the full check catalog over every shipped scene (`content/arena/placement.json` + `dressing.json`, `fixtures/games/*`) and pin zero red findings plus the exact list of true yellow ones; each check gets a one-edit mutant of the same scene that must make it fire (a non-physical box under a crate gives no sunken, flipped to physical it does; 52 props x100 give one unit finding). Source: Forge `SpatialRomeLiveTests.cs`, `spatial-train.mjs`. Diff: regular. Tier A. Size S. Owns `crates/spatial/tests/it/main.rs` and `known_good.rs` (new; one integration binary per crate). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --test it known_good` x2 green with identical finding lists; each mutant fires its check and the clean scene does not. F2P: no test runs the catalog over a shipped scene or proves a check still fires on a real one. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 85e29752. spatial_eval/known_good.rs runs all 18 checks over 6 shipped scenes at zero findings, each check fires on a one-edit mutant of the dressed arena scene, boundary near-misses stay silent; runs 39073877167, 39075958087, clippy 39074196530 green.
-- [ ] SPF2 spatial: closed-form frame fit - `frame_fit(box_cm, view, fov_deg, aspect_pct, fill_pct, yaw_deg, pitch_deg)` returns eye, look_at, distance, yaw, pitch for seven named views (three_quarter, front, back, side, top_down, third_person, orbit) with integer degree tables and no libm; SPR10's verb will call it. Source: Forge `CaptureFraming.cs` CameraShot. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/frame.rs` (new), one `lib.rs` export line. Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib frame_fit` x2: for 7 views x fov 55/60/65 x aspect 16:9 and 4:3 all 8 corners project inside the frame and the larger axis use is within 1 percent of fill; look_at is the box centre; top_down eye is above and pitch 89; third_person eye sits behind the target yaw; same bytes twice. F2P: nothing proposes a camera pose (`compose.rs` only scores one). P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: frame fit for seven views landed d8f483de (playtest spatial_frame.rs, 6 tests run 39077256919); left: the endpoint verb (lane A). Progress 2026-10-18 (wave 2): frame_fit still lives in playtest spatial_frame.rs in f64; moving it into engine-spatial breaks the sim-crate float ratchet and the Accept names -p engine-spatial --lib frame_fit, so what is left is an integer frame_fit in crates/spatial/src/frame.rs (sin_1k and cos_1k tables, no libm) with the same 7 views x fov x aspect corner test.
+- [x] SPF2 spatial: closed-form frame fit - `frame_fit(box_cm, view, fov_deg, aspect_pct, fill_pct, yaw_deg, pitch_deg)` returns eye, look_at, distance, yaw, pitch for seven named views (three_quarter, front, back, side, top_down, third_person, orbit) with integer degree tables and no libm; SPR10's verb will call it. Source: Forge `CaptureFraming.cs` CameraShot. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/frame.rs` (new), one `lib.rs` export line. Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib frame_fit` x2: for 7 views x fov 55/60/65 x aspect 16:9 and 4:3 all 8 corners project inside the frame and the larger axis use is within 1 percent of fill; look_at is the box centre; top_down eye is above and pitch 89; third_person eye sits behind the target yaw; same bytes twice. F2P: nothing proposes a camera pose (`compose.rs` only scores one). P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: frame fit for seven views landed d8f483de (playtest spatial_frame.rs, 6 tests run 39077256919); left: the endpoint verb (lane A). Progress 2026-10-18 (wave 2): frame_fit still lives in playtest spatial_frame.rs in f64; moving it into engine-spatial breaks the sim-crate float ratchet and the Accept names -p engine-spatial --lib frame_fit, so what is left is an integer frame_fit in crates/spatial/src/frame.rs (sin_1k and cos_1k tables, no libm) with the same 7 views x fov x aspect corner test. Landed 3f1a2695. frame_fit 3 passed x2 (gh runs 39142666564, 39142828318); clippy green 39142840019; engine-spatial --lib 387 passed 39142846862.
 - [x] SPF3 spatial: facing-relative wants - `scene.place` accepts `in_front`, `behind`, `left`, `right` with a `[lo,hi]` edge gap in cm against an object's own facing, plus `against_wall` and `on_ground`, solved on the existing 10 cm x 8 yaw grid and checked by the same relation predicate the query uses. Source: Forge `SceneOps.Geometry.cs` PlaceBox. Diff: good. Tier A. Size M. Owns `crates/spatial/src/place.rs`, `crates/endpoint/src/scene_tools.rs` (want grammar). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib place_facing` x2: for 8 anchor yaw octants x 4 words the solved box sits in the named half-plane with edge gap inside the range and `holds(mover, word, anchor)` is true; an impossible gap returns a conflict set; endpoint test places a crate `in_front` of a fixture player in one call. F2P: wants cover supports/on_top_of/inside/next_to/facing only, so "in front of" needs a multi-call guess. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 2026-10-18 755cd907 (engine-spatial --lib 354 passed run 39079745728, clippy -D warnings run 39080141395): place/dir.rs place_dir (named place_ not solve_ for the hot-alloc ratchet) for in_front_of/behind/left_of/right_of with an edge gap range, confirmed by relation::holds, 8 octants x 4 words and an exhaustive scan on 20 seeded rooms; left: scene.place want grammar (lane A); against_wall is the existing NextTo wall want, on_ground not added. Landed 39b0e28a. place_facing_* x3 (8 yaw octants x 4 words land in the named half-plane with the gap in range and holds true, an impossible gap returns a conflict set, exhaustive scan on 20 seeded rooms) in engine-spatial run 39106576997; door scene.place in_front_of|behind|left_of|right_of object:<uuid> [lo,hi] places a crate in front of a fixture player in one call: place_facing_puts_a_crate_in_front_of_the_player_in_one_call (engine-endpoint --lib 607 passed run 39107175761). Left: an on_ground want (against_wall is the existing next_to wall).
 - [x] SPF4 spatial: clearance probe with push gradient - `scene.query kind=clearance anchor=<id> need_cm=<n>` returns the nearest surface gap in cm (negative when boxes overlap), the neighbour id, the unit push direction that opens it, the axis and a kind of exact, upper_bound or narrow, with a holds or fails verdict against need_cm (default 90). Source: Forge `SceneClearanceOps.cs` SurfaceGapDetail. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/index.rs` (surface_gap), `crates/endpoint/src/scene_query.rs` (kind). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib surface_gap` and `-p engine-endpoint --features mcp --lib query_clearance` x2: apart 30 cm on x gives gap 30 push +x; touching gives 0 exact; 12 cm overlap on the shallowest axis gives -12 with push toward the anchor's side; a 30/40 cm corner gap gives 50; moving the anchor by push x (need - gap) makes the same query hold. F2P: `near` returns centre distance only, so a long wall reads far while touching. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); measure.rs surface_gap/clearance/measure vs a brute-force oracle on 40 seeded pairs; left: the scene.query kind=clearance arm in scene_query.rs. Endpoint 2026-10-18 (lane A, 5cc241ed): scene.query kind=clearance (anchor, radius_cm as the width needed) answers kind, gap cm and push_pm; query_space_clearance_slide_ground_and_why_hidden passed. Landed a2dba030 (surface_gap, clearance), 5cc241ed (door kind=clearance), 39b0e28a (door proof). surface_gap_pins_the_four_forge_cases and surface_gap_push_makes_the_clearance_hold in engine-spatial run 39106576997; query_clearance_reads_the_gap_the_push_and_holds_after_the_move (30 cm apart gap 30 push +x, touching 0 exact, 12 cm overlap -12, 30/40 corner 50, moved by the push holds; engine-endpoint --lib 607 passed run 39107175761).
 - [x] SPF5 spatial: giantObject relative to the layout - replace the fixed 50 m test with size over the span of the other solid boxes (ground plates and non-physical boxes exempt, fewer than 2 solids silent), keeping the check name and the frozen catalog length 18. Source: Forge `Verbs.Spatial.cs` SpatialRunGiantObject, `SpatialRomeLiveTests.cs`. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/checks.rs` (giantObject block). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib giant_layout` x2: four 2060 cm boundary walls around two props give none; a 50x crate in a 4 m room gives one; a 60 m wall in a 100 m arena gives none; digests of fixtures that held giantObject re-pin with a named receipt. F2P: any element over 50 m is red and an oversized prop under 50 m is never red. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); giantObject is relative to the layout (giant_layout_* tests, plus an enclosure exemption beyond the row); left: endpoint check wiring if any. Landed a2dba030. giant_layout_reads_the_layout_not_a_fixed_line and giant_layout_matches_brute_force_on_seeded_scenes in engine-spatial run 39106576997 (four 2060 cm walls around two props none, a 50x crate in a 4 m room one, a 60 m wall in a 100 m arena none); SPATIAL_CHECKS stays 18.

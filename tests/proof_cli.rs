@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod common;
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 struct Temp(PathBuf);
@@ -68,6 +70,12 @@ fn default_and_max_seed_have_real_machine_readable_receipts() {
         maximum.split("\"final_hash\":").nth(1).unwrap(),
         changed.split("\"final_hash\":").nth(1).unwrap()
     );
+    // The stable text receipt is the reviewed snapshot: no version or platform
+    // field, so it reads the same on every runner. A later drift leaves
+    // `default-text-receipt.snap.new` and names it until someone reviews it and
+    // reruns with E2040_ACCEPT_SNAPSHOTS=1.
+    let text = success(run(&["--verify"]));
+    common::assert_snapshot("proof-cli/default-text-receipt", &text);
 }
 
 #[test]

@@ -144,16 +144,22 @@ mod hash_owner_equiv {
 
     #[test]
     fn replay_tape_hash_matches_pre_swap_digest() {
+        let config = ArenaConfig {
+            seed: 7,
+            ticks: 3,
+            fighters: 2,
+            half_extent_m: 20.0,
+            // TABLES_VERSION_V1 keeps the golden frozen on v1 rules.
+            table_version: 1,
+        };
+        // The header also pins the world identity and the tick logic version;
+        // `tape_hash` folds version, config, inputs and checkpoints only, so
+        // the pre-swap digest below is unchanged by the header growth.
         let tape = ReplayTape {
             version: REPLAY_VERSION,
-            config: ArenaConfig {
-                seed: 7,
-                ticks: 3,
-                fighters: 2,
-                half_extent_m: 20.0,
-                // TABLES_VERSION_V1 keeps the golden frozen on v1 rules.
-                table_version: 1,
-            },
+            config,
+            spec_digest: engine_arena::MatchSpec::v1(config).identity(),
+            logic_version: crate::replay::SIM_LOGIC_VERSION,
             inputs: vec![tape_input(0, 0, 100, -50), tape_input(1, 1, -100, 50)],
             checkpoints: vec![
                 Checkpoint {

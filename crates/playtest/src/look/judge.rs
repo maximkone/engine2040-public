@@ -342,6 +342,10 @@ pub struct Sequence {
     /// SSIM between each frame and its predecessor (none across a size
     /// change or an undecodable frame); one entry per frame after the first.
     pub motion_ssim_x10000: Vec<Option<i32>>,
+    /// Mean HVEI flicker visibility over the consecutive decoded pairs,
+    /// permille (`0` when no pair scored); [`super::metric::FLICKER_BAR_PERMILLE`]
+    /// is the visible bar.
+    pub flicker_permille: u32,
 }
 
 /// The typed result of `look.judge`.
@@ -1078,16 +1082,26 @@ pub fn judge(
     let mut frames = Vec::with_capacity(set.frames.len());
     let mut motion = Vec::new();
     let mut digests = Vec::new();
+    let mut flicker_sum = 0u64;
+    let mut flicker_pairs = 0u32;
     let mut previous: Option<Frame> = None;
     for (index, (item, row)) in set.frames.iter().zip(&rows).enumerate() {
         let (report, decoded) = judge_frame(&ctx, index, item, *row);
         if index > 0 {
-            motion.push(match (&previous, &decoded) {
-                (Some(a), Some(b)) => metric::ssim(b, a, Region::Full)
-                    .ok()
-                    .map(|s| s.score_x10000),
-                _ => None,
-            });
+            match (&previous, &decoded) {
+                (Some(a), Some(b)) => {
+                    motion.push(
+                        metric::ssim(b, a, Region::Full)
+                            .ok()
+                            .map(|s| s.score_x10000),
+                    );
+                    if let Ok(score) = metric::flicker_pair(b, a, Region::Full) {
+                        flicker_sum += u64::from(score);
+                        flicker_pairs += 1;
+                    }
+                }
+                _ => motion.push(None),
+            }
         }
         digests.push(if report.pixel_fnv.is_empty() {
             report.png_fnv.clone()
@@ -1100,11 +1114,18 @@ pub fn judge(
     let mut distinct = digests.clone();
     distinct.sort();
     distinct.dedup();
+    let flicker_permille = if flicker_pairs == 0 {
+        0
+    } else {
+        u32::try_from((flicker_sum + u64::from(flicker_pairs) / 2) / u64::from(flicker_pairs))
+            .unwrap_or(u32::MAX)
+    };
     let sequence = Sequence {
         frames: u32_of(frames.len()),
         distinct: u32_of(distinct.len()),
         frozen: check_digest_window(&digests).is_err(),
         motion_ssim_x10000: motion,
+        flicker_permille,
     };
     let integrity_ok = integrity && frames.iter().all(|f| f.manifest_png_ok != Some(false));
     let rubric = build_rubric(&frames, cfg);
@@ -1238,11 +1259,11 @@ fn write_frame(out: &mut String, f: &FrameReport) {
     });
     out.push_str(",\"manifest_slots\":");
     json_list(out, &f.fighters.manifest_slots, |o, s| {
-        o.push_str(&s.to_string())
+        o.push_str(&s.to_string());
     });
     out.push_str(",\"manifest_unseen\":");
     json_list(out, &f.fighters.manifest_unseen, |o, s| {
-        o.push_str(&s.to_string())
+        o.push_str(&s.to_string());
     });
     out.push_str("},\"preview\":");
     match &f.preview {
@@ -1281,15 +1302,18 @@ impl LookJudgement {
             "\"pass\":{},\"score\":{},\"integrity_ok\":{},\"rubric\":",
             self.pass, self.score_permille, self.integrity_ok
         );
-        json_list(&mut out, &self.rubric, |o, i| write_item(o, i));
+        json_list(&mut out, &self.rubric, write_item);
         let s = &self.sequence;
         out.push_str(&format!(
             ",\"sequence\":{{\"frames\":{},\"distinct\":{},\"frozen\":{},\"motion_ssim\":",
             s.frames, s.distinct, s.frozen
         ));
         json_list(&mut out, &s.motion_ssim_x10000, |o, m| json_opt(o, *m));
-        out.push_str("},\"frames\":");
-        json_list(&mut out, &self.frames, |o, f| write_frame(o, f));
+        out.push_str(&format!(
+            ",\"flicker\":{}}},\"frames\":",
+            s.flicker_permille
+        ));
+        json_list(&mut out, &self.frames, write_frame);
         out.push_str(",\"notes\":");
         json_list(&mut out, &self.notes, |o, n| json_str(o, n));
         out
@@ -1579,7 +1603,9 @@ mod tests {
                 sand_at(x, y)
             }
         });
-        dots.iter().for_each(|dot| draw_body(&mut rgba, dot));
+        for dot in dots {
+            draw_body(&mut rgba, dot);
+        }
         rgba
     }
 
@@ -1968,6 +1994,36 @@ mod tests {
             .iter()
             .flatten()
             .all(|&s| s < SSIM_ONE));
+    }
+
+    #[test]
+    fn look_judge_sequence_reports_flicker_over_pairs() {
+        let step = |up: bool, x: u32, y: u32| {
+            let delta = if up { 40i32 } else { -40i32 };
+            sand_at(x, y)
+                .map(|c| u8::try_from((i32::from(c) + delta).clamp(0, 255)).expect("clamped"))
+        };
+        let still = judged(vec![
+            named("a.png", W, H, &rgba_of(W, H, sand_at)),
+            named("b.png", W, H, &rgba_of(W, H, sand_at)),
+        ]);
+        assert_eq!(still.sequence.flicker_permille, 0);
+        let shimmer = judged(vec![
+            named("s0.png", W, H, &rgba_of(W, H, |x, y| step(true, x, y))),
+            named("s1.png", W, H, &rgba_of(W, H, |x, y| step(false, x, y))),
+            named("s2.png", W, H, &rgba_of(W, H, |x, y| step(true, x, y))),
+        ]);
+        assert!(
+            shimmer.sequence.flicker_permille >= metric::FLICKER_BAR_PERMILLE,
+            "judge reported {} permille",
+            shimmer.sequence.flicker_permille
+        );
+        // The score reaches the JSON body the digest covers.
+        let json = shimmer.to_json();
+        assert!(json.contains(&format!(
+            "\"flicker\":{}",
+            shimmer.sequence.flicker_permille
+        )));
     }
 
     #[test]

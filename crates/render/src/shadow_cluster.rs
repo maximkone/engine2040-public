@@ -207,7 +207,7 @@ impl SunShadowConfig {
 
 /// One practical split (Persson): `lambda` blends the logarithmic and uniform
 /// placements at fraction `t` of `[near, far]`. The one owner of this formula:
-/// `cascade_splits` here, `shadow_cascade`, `shadow_post` and `v1_lighting` call it.
+/// `sun_splits` here, `shadow_cascade`, `shadow_post` and `v1_lighting` call it.
 #[must_use]
 pub fn practical_split(near: f32, far: f32, t: f32, lambda: f32) -> f32 {
     let log = near * (far / near).powf(t);
@@ -215,10 +215,11 @@ pub fn practical_split(near: f32, far: f32, t: f32, lambda: f32) -> f32 {
     lambda * log + (1.0 - lambda) * uni
 }
 
-/// Practical split distances over `[near, far]`: `splits[0] == near`,
-/// `splits[3] == far`, strictly increasing. Same blend as the cascade reference
-/// (`CASCADE_LAMBDA` log plus uniform); the `v1` parity test pins equality.
-pub fn cascade_splits(near: f32, far: f32) -> Result<[f32; 4], LightError> {
+/// Split distances for the sun pass: `splits[0] == near`, unused lanes hold
+/// `far`, strictly increasing. A thin wrapper over
+/// [`crate::shadow_post::cascade_splits`], the one owner of the blend, so the
+/// `v1` parity test still pins equality.
+pub fn sun_splits(near: f32, far: f32) -> Result<[f32; 4], LightError> {
     if !near.is_finite() || !far.is_finite() {
         return Err(LightError::Invalid("cascade range is not finite".into()));
     }
@@ -227,9 +228,11 @@ pub fn cascade_splits(near: f32, far: f32) -> Result<[f32; 4], LightError> {
             "cascade range {near}..{far} is not 0 < near < far"
         )));
     }
-    let mut splits = [near, 0.0, 0.0, far];
-    for (i, slot) in splits.iter_mut().enumerate().take(SUN_CASCADES).skip(1) {
-        *slot = practical_split(near, far, i as f32 / SUN_CASCADES as f32, CASCADE_LAMBDA);
+    let edges = crate::shadow_post::cascade_splits(near, far, SUN_CASCADES as u8, CASCADE_LAMBDA);
+    let mut splits = [far; 4];
+    splits[0] = near;
+    for (slot, edge) in splits.iter_mut().take(SUN_CASCADES).skip(1).zip(edges) {
+        *slot = edge;
     }
     Ok(splits)
 }
@@ -269,7 +272,7 @@ impl SunShadowPass {
         let (size, degraded) = SunShadowConfig::degrade_size(config.size);
         let config = SunShadowConfig { size, ..config };
         config.validate()?;
-        let splits = cascade_splits(config.near_m, config.far_m)?;
+        let splits = sun_splits(config.near_m, config.far_m)?;
         Ok(Self {
             config,
             splits,
@@ -1321,11 +1324,11 @@ mod tests {
     }
 
     #[test]
-    fn cascade_splits_tile_without_gaps() {
+    fn sun_splits_tile_without_gaps() {
         // Endpoints reproduce the inputs, interiors strictly increase, so
         // the three half-open intervals tile [near, far) with no gap a
         // sample could fall through.
-        let splits = cascade_splits(0.5, 60.0).expect("valid range splits");
+        let splits = sun_splits(0.5, 60.0).expect("valid range splits");
         assert_eq!(splits[0], 0.5, "first split is the camera near");
         assert_eq!(splits[3], 60.0, "last split is the camera far");
         for pair in splits.windows(2) {
@@ -1363,12 +1366,9 @@ mod tests {
 
     #[test]
     fn sun_invalid_inputs_fail_loudly() {
+        assert!(matches!(sun_splits(60.0, 0.5), Err(LightError::Invalid(_))));
         assert!(matches!(
-            cascade_splits(60.0, 0.5),
-            Err(LightError::Invalid(_))
-        ));
-        assert!(matches!(
-            cascade_splits(f32::NAN, 60.0),
+            sun_splits(f32::NAN, 60.0),
             Err(LightError::Invalid(_))
         ));
         let mut bad = sun_config();
@@ -1948,7 +1948,7 @@ mod tests {
     #[cfg(feature = "v1")]
     #[test]
     fn sun_splits_match_r4_practical_splits() {
-        let ours = cascade_splits(0.5, 60.0).expect("splits build");
+        let ours = sun_splits(0.5, 60.0).expect("splits build");
         let theirs = crate::v1_lighting::practical_splits(0.5, 60.0).expect("R4 splits build");
         let mut max_diff = 0.0f32;
         for (a, b) in ours.iter().zip(theirs.iter()) {
@@ -2461,7 +2461,7 @@ mod tests {
 #[cfg(test)]
 mod sun_shadow_regression {
     use super::{
-        cascade_splits, practical_split, LightError, SunShadowConfig, CASCADE_LAMBDA, SUN_CASCADES,
+        practical_split, sun_splits, LightError, SunShadowConfig, CASCADE_LAMBDA, SUN_CASCADES,
     };
 
     fn valid_sun_config() -> SunShadowConfig {
@@ -2476,7 +2476,7 @@ mod sun_shadow_regression {
 
     #[test]
     fn cascade_endpoints_strictly_increase() {
-        let splits = cascade_splits(0.5, 60.0).expect("valid range splits");
+        let splits = sun_splits(0.5, 60.0).expect("valid range splits");
         assert_eq!(splits[0], 0.5, "first split is near");
         assert_eq!(splits[3], 60.0, "last split is far");
         assert_eq!(
@@ -2492,7 +2492,7 @@ mod sun_shadow_regression {
     #[test]
     fn cascade_interiors_match_practical_split() {
         let (near, far) = (0.5_f32, 60.0_f32);
-        let splits = cascade_splits(near, far).expect("valid range splits");
+        let splits = sun_splits(near, far).expect("valid range splits");
         assert_eq!(SUN_CASCADES, 3, "three cascades pin two interiors");
         assert_eq!(CASCADE_LAMBDA, 0.5, "reference half-log half-uniform blend");
         for (i, split) in splits.iter().enumerate().skip(1) {
@@ -2513,11 +2513,11 @@ mod sun_shadow_regression {
 
     #[test]
     fn cascade_rejects_inverted_range() {
-        match cascade_splits(10.0, 5.0) {
+        match sun_splits(10.0, 5.0) {
             Err(LightError::Invalid(_)) => {}
             other => panic!("inverted range must fail Invalid, got {other:?}"),
         }
-        match cascade_splits(0.0, 10.0) {
+        match sun_splits(0.0, 10.0) {
             Err(LightError::Invalid(_)) => {}
             other => panic!("zero near must fail Invalid, got {other:?}"),
         }

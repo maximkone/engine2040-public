@@ -67,6 +67,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/mp-evidence.mjs` (+ `tools/mp-evidence.test.mjs`): node script; see its header.
 - `tools/mp6-check.mjs` (+ `tools/mp6-check.test.mjs`): multiplayer check.
 - `tools/mutants.mjs` (+ `tools/mutants.test.mjs`): node script; see its header.
+- `tools/nonstop.mjs` (+ `tools/nonstop.test.mjs`): run a weak OpenCode model over the ready board rows, one fresh session per row, until none is left (stops on a red tree).
 - `tools/p4-netsim.mjs` (+ `tools/p4-netsim.test.mjs`): model 64 clients online.
 - `tools/part-score.mjs` (+ `tools/part-score.test.mjs`): score board parts.
 - `tools/pe-exports.mjs` (+ `tools/pe-exports.test.mjs`): read a Windows PE export table.

@@ -2057,6 +2057,47 @@ mod tests {
         ));
     }
 
+    /// EG44: the window plays rules v2 through `into_duel`
+    /// (`windowed.rs::run_windowed`), never through `GameConfig`, so
+    /// `App::new` stays v1 by design; both constructors must agree on that v1
+    /// start and on the v2 duel they then select.
+    #[test]
+    fn app_new_equals_new_for_slot_on_rules_v2() {
+        use engine_combat::fight::{FIGHT_RULES_V1, FIGHT_RULES_V2};
+        use engine_combat::tables::TABLES_VERSION_V1;
+        let plain = App::new(small_config()).unwrap();
+        let slotted = App::new_for_slot(small_config(), HUMAN_SLOT).unwrap();
+        assert_eq!(
+            plain.rules.version, FIGHT_RULES_V1,
+            "App::new stays v1 by design"
+        );
+        assert_eq!(plain.arena.table_version, TABLES_VERSION_V1);
+        assert_eq!(plain.rules, slotted.rules);
+        assert_eq!(plain.human_slot(), slotted.human_slot());
+        assert_eq!(plain.spec(), slotted.spec(), "one v1 identity");
+        // The v2 match the window builds: the same `into_duel` step.
+        let mut plain = plain.into_duel().unwrap();
+        let mut slotted = slotted.into_duel().unwrap();
+        assert_eq!(plain.rules.version, FIGHT_RULES_V2);
+        assert_eq!(plain.rules, slotted.rules);
+        assert_eq!(plain.spec(), slotted.spec(), "one v2 identity");
+        let mut plain_hashes = Vec::new();
+        let mut slotted_hashes = Vec::new();
+        for tick in 0..8 {
+            let a = plain.tick(script(tick)).checkpoint.expect("duel tick");
+            let b = slotted.tick(script(tick)).checkpoint.expect("duel tick");
+            assert_eq!(a, b, "tick {tick}");
+            plain_hashes.push(a.hash);
+            slotted_hashes.push(b.hash);
+        }
+        assert_eq!(plain_hashes, slotted_hashes, "the same v2 hashes");
+        assert_eq!(
+            plain.checkpoints(),
+            slotted.checkpoints(),
+            "the same v2 checkpoints"
+        );
+    }
+
     /// DSN1: the window session and the net server and client, all built from
     /// one spec, play the same match: equal state hash on every tick of a
     /// scripted 300-tick duel on the kit walls.

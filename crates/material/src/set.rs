@@ -108,9 +108,10 @@ impl MaterialSet {
         Ok(())
     }
 
-    /// Parse `text` against this set (its `extends` parent must already be
-    /// here) and append it. Returns the record's wire id.
-    pub fn parse_push(&mut self, text: &str) -> Result<u8, RecordError> {
+    /// Parse `text` against this set without inserting: the `extends` parent
+    /// it names must already be here. This is the one parent resolution
+    /// [`MaterialSet::parse_push`] and the editor's put path both take.
+    pub fn parse_against(&self, text: &str) -> Result<MaterialRecord, RecordError> {
         let parent_name = parent_name(text)?;
         let parent = match &parent_name {
             Some(name) => Some(self.get(name).ok_or_else(|| RecordError {
@@ -119,12 +120,26 @@ impl MaterialSet {
             })?),
             None => None,
         };
-        let record = MaterialRecord::parse_with(text, parent)?;
+        MaterialRecord::parse_with(text, parent)
+    }
+
+    /// Parse `text` against this set (its `extends` parent must already be
+    /// here) and append it. Returns the record's wire id.
+    pub fn parse_push(&mut self, text: &str) -> Result<u8, RecordError> {
+        let record = self.parse_against(text)?;
         self.push(record)?;
         u8::try_from(self.records.len() - 1).map_err(|_| RecordError {
             path: "$".to_string(),
             kind: RecordErrorKind::TooMany { max: MAX_RECORDS },
         })
+    }
+
+    /// Drop the newest record and return it; `None` when the set is empty.
+    ///
+    /// This is the inverse of an append: the editor's put of a new record
+    /// undoes with this, and the returned record rebuilds the forward op.
+    pub fn remove_last(&mut self) -> Option<MaterialRecord> {
+        self.records.pop()
     }
 
     /// Replace the record of the same name, or append. Returns the record

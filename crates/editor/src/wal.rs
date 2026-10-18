@@ -276,30 +276,30 @@ fn push_text(out: &mut Vec<u8>, text: &str) {
 }
 
 fn push_op(out: &mut Vec<u8>, op: &Op) {
-    match *op {
+    match op {
         Op::Insert { id, parent, local } => {
             push_u8(out, 0);
-            push_id(out, id);
-            push_id(out, parent);
-            push_transform(out, local);
+            push_id(out, *id);
+            push_id(out, *parent);
+            push_transform(out, *local);
         }
         Op::Remove { id } => {
             push_u8(out, 1);
-            push_id(out, id);
+            push_id(out, *id);
         }
         Op::SetLocal { id, local } => {
             push_u8(out, 2);
-            push_id(out, id);
-            push_transform(out, local);
+            push_id(out, *id);
+            push_transform(out, *local);
         }
         Op::Reparent { id, new_parent } => {
             push_u8(out, 3);
-            push_id(out, id);
-            push_id(out, new_parent);
+            push_id(out, *id);
+            push_id(out, *new_parent);
         }
         Op::SetMaterial { id, material } => {
             push_u8(out, 4);
-            push_id(out, id);
+            push_id(out, *id);
             match material {
                 Some(name) => push_text(out, name.as_str()),
                 None => push_u32(out, 0),
@@ -307,7 +307,7 @@ fn push_op(out: &mut Vec<u8>, op: &Op) {
         }
         Op::SetComponent { id, component } => {
             push_u8(out, 5);
-            push_id(out, id);
+            push_id(out, *id);
             let bytes = component.to_bytes();
             // Canonical component bytes are under 200; the saturating form
             // keeps the encoder total (the reader bounds the length anyway).
@@ -316,9 +316,24 @@ fn push_op(out: &mut Vec<u8>, op: &Op) {
         }
         Op::RemoveComponent { id, kind } => {
             push_u8(out, 6);
-            push_id(out, id);
+            push_id(out, *id);
             push_u8(out, kind.tag());
         }
+        Op::PutMaterial { text } => {
+            push_u8(out, 7);
+            push_text(out, text);
+        }
+        Op::SetMaterialParam {
+            material,
+            path,
+            value,
+        } => {
+            push_u8(out, 8);
+            push_text(out, material);
+            push_text(out, path);
+            push_text(out, value);
+        }
+        Op::RemoveLastMaterial => push_u8(out, 9),
     }
 }
 
@@ -368,6 +383,15 @@ fn read_op(cursor: &mut Cursor<'_>) -> Result<Op, WalError> {
                 .ok_or(WalError::Corrupt)?;
             Ok(Op::RemoveComponent { id, kind })
         }
+        7 => Ok(Op::PutMaterial {
+            text: cursor.effect_text()?,
+        }),
+        8 => Ok(Op::SetMaterialParam {
+            material: cursor.effect_text()?,
+            path: cursor.effect_text()?,
+            value: cursor.effect_text()?,
+        }),
+        9 => Ok(Op::RemoveLastMaterial),
         _ => Err(WalError::Corrupt),
     }
 }
@@ -521,7 +545,7 @@ fn read_entry(cursor: &mut Cursor<'_>) -> Result<JournalEntry, WalError> {
     }
     // The flattened inverse is exactly the reversed flatten of the groups
     // (see `stage` and `end_group` in the command service).
-    let inverse: Vec<Op> = inverse_groups.iter().rev().flatten().copied().collect();
+    let inverse: Vec<Op> = inverse_groups.iter().rev().flatten().cloned().collect();
     let effects_len = cursor.u32()? as usize;
     if effects_len > MAX_OPS {
         return Err(WalError::Corrupt);
@@ -1245,7 +1269,7 @@ pub fn wal_apply(
             wal.forget_last(payload.len())
                 .map_err(|cleanup| match cleanup {
                     WalError::Io(io) => WalError::BatchTruncate {
-                        batch: error,
+                        batch: error.clone(),
                         cleanup: io,
                     },
                     other => other,

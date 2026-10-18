@@ -197,6 +197,53 @@ export function toolTestSummary(output) {
   return `${output ?? ""}`.split("\n").filter((l) => /^# (pass|fail)/.test(l)).join(", ");
 }
 
+// Snapshot pending gate (CQ16, insta discipline without the dependency): the
+// std-only Rust helper in tests/common/mod.rs compares text with `<name>.snap`,
+// writes `<name>.snap.new` on a mismatch and fails with that path. A tree that
+// still holds a pending file holds an unreviewed change, so this check fails
+// with every pending path named. Accepting is a review: rerun the failing test
+// with E2040_ACCEPT_SNAPSHOTS=1, which rewrites the `.snap` file in the same
+// commit.
+export const PENDING_SNAPSHOT_SUFFIX = ".snap.new";
+const SNAPSHOT_SCAN_SKIP = new Set([".git", ".venv", "node_modules", "target"]);
+
+export function pendingSnapshotVerdict(paths) {
+  const pending = [...new Set(paths ?? [])].filter((p) => `${p}`.endsWith(PENDING_SNAPSHOT_SUFFIX)).sort();
+  const ok = pending.length === 0;
+  return {
+    ok,
+    pending,
+    line: ok
+      ? `no pending ${PENDING_SNAPSHOT_SUFFIX} in the tree`
+      : `${pending.length} pending ${PENDING_SNAPSHOT_SUFFIX} (review the diff, rerun the test with E2040_ACCEPT_SNAPSHOTS=1): ${pending.join(", ")}`,
+  };
+}
+
+// Every `<name>.snap.new` under root, as repo-relative slash paths (exported
+// for tests). Build and cache directories are skipped; nothing is read.
+export function findPendingSnapshots(root = ".", skip = SNAPSHOT_SCAN_SKIP) {
+  const found = [];
+  const walk = (dir, prefix) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.name.endsWith(PENDING_SNAPSHOT_SUFFIX)) {
+        found.push(rel);
+        continue;
+      }
+      if (!entry.isDirectory() || skip.has(entry.name)) continue;
+      walk(join(dir, entry.name), rel);
+    }
+  };
+  walk(root, "");
+  return found.sort();
+}
+
 // Nextest profile discipline (STEAL-speed OPT6, donor nextest-rs/nextest
 // @d643f89 .config/nextest.toml, MIT, reimplemented, no donor bytes).
 // `.config/nextest.toml` holds `[profile.proof]` (fail-fast=false,
@@ -723,6 +770,13 @@ try {
   check("generality ratchet: engine diff empty (GP5)", ok, ok ? "" : dirty.length ? `crates/ dirty: ${dirty.slice(0, 5).join(", ")}${dirty.length > 5 ? ` (+${dirty.length - 5} more)` : ""}` : "git gate did not execute");
 } catch (error) {
   check("generality ratchet: engine diff empty (GP5)", false, error.message);
+}
+// Snapshot pending gate (CQ16): a `.snap.new` in the tree is a review that did
+// not happen, so it fails with the path named. Static and cheap, so it runs in
+// both full and --skip-build modes. Golden bytes themselves stay untouched.
+{
+  const verdict = pendingSnapshotVerdict(findPendingSnapshots("."));
+  check("pending snapshots", verdict.ok, verdict.ok ? "" : verdict.line);
 }
 // Rust quality ratchet (docs/RUST-QUALITY.md, layer 3): static, about 2 s,
 // so it runs in both modes. No crate's debt count may rise over the

@@ -321,6 +321,10 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<Document, SaveError> {
             .collect(),
         components: table,
         graph,
+        // The material table has no save section yet: a reopened document
+        // starts from the shipped table again, which is what every existing
+        // save was authored against.
+        material_set: engine_material::MaterialSet::siege_kit(),
     })
 }
 

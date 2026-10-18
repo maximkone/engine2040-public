@@ -154,15 +154,21 @@ fn bad_ticks(message: String) -> McpToolError {
     McpToolError::new("bad_ticks", message)
 }
 
-fn no_chain() -> McpToolError {
+/// Refusal for a missing recorded chain; the verify pack reuses it so both
+/// owners of the verb name refuse with one message.
+pub(crate) fn no_chain() -> McpToolError {
     McpToolError::new(
         "no_chain",
         "chain holds 0 hashes; submit the recorded per-tick chain in tick order, then re-run",
     )
 }
 
-/// Validate one request into its arena config, tape and chain.
-fn replay_inputs(args: &ReplayArgs) -> Result<(ArenaConfig, BodySnap, Vec<u64>), McpToolError> {
+/// Validate one request into its arena config, tape and chain. Crate-visible:
+/// the `verify` pack's replay verbs reuse this validation, so the two owners of
+/// the name keep one range and refusal contract.
+pub(crate) fn replay_inputs(
+    args: &ReplayArgs,
+) -> Result<(ArenaConfig, BodySnap, Vec<u64>), McpToolError> {
     let seed = args.seed.unwrap_or(0);
     let participants = args.participants.unwrap_or(2);
     if !(2..=MAX_PARTICIPANTS).contains(&participants) {
@@ -421,26 +427,40 @@ pub struct ReplayBisectReport {
     pub ticks: u32,
 }
 
-fn replay_bisect_verb(
-    service: &McpServer,
-    args: &ReplayBisectArgs,
-) -> Result<ReplayBisectReport, McpToolError> {
-    service.dispatch(TOOL_REPLAY_BISECT, |_| {
-        bisect_report(&ReplayArgs {
-            seed: args.seed,
-            ticks: args.ticks,
-            participants: args.participants,
-            half_extent_m: args.half_extent_m,
-            inputs: args.inputs.clone(),
-            chain: args.chain.clone(),
-        })
-        .map(|report| ReplayBisectReport {
+impl ReplayBisectArgs {
+    /// The same request seen as the verify shape: one owner for the field
+    /// copy, so a new field is added once.
+    pub(crate) fn as_replay(&self) -> ReplayArgs {
+        ReplayArgs {
+            seed: self.seed,
+            ticks: self.ticks,
+            participants: self.participants,
+            half_extent_m: self.half_extent_m,
+            inputs: self.inputs.clone(),
+            chain: self.chain.clone(),
+        }
+    }
+}
+
+impl From<ReplayReport> for ReplayBisectReport {
+    /// Same report, bisect's own schema name.
+    fn from(report: ReplayReport) -> Self {
+        Self {
             clean: report.clean,
             tick: report.tick,
             expected: report.expected,
             observed: report.observed,
             ticks: report.ticks,
-        })
+        }
+    }
+}
+
+fn replay_bisect_verb(
+    service: &McpServer,
+    args: &ReplayBisectArgs,
+) -> Result<ReplayBisectReport, McpToolError> {
+    service.dispatch(TOOL_REPLAY_BISECT, |_| {
+        bisect_report(&args.as_replay()).map(ReplayBisectReport::from)
     })
 }
 

@@ -224,7 +224,7 @@ pub(super) fn conflict_text(conflict: &ProposalConflict) -> String {
 }
 
 pub(super) fn batch_error(error: &BatchError) -> ProposeError {
-    let code = match *error {
+    let code = match error {
         BatchError::StaleRevision { .. } => "stale_revision",
         BatchError::DuplicateKey { .. } => "duplicate_key",
         BatchError::UndoneKey { .. } => "undone_key",

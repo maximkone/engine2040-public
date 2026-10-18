@@ -12,40 +12,96 @@
 //! renumbered over the union of their ids before the check.
 //! Units: centimeters in the lines. Determinism: same document and batch give
 //! the same lines in the same order (red before yellow, then check and id
-//! order). Budget: two snapshots plus two catalog runs; `delta=false` skips it.
+//! order). Budget: one before snapshot per write (shared with the change
+//! list), plus the after snapshot and two catalog runs when a delta is asked;
+//! `delta: false` skips only the catalog runs.
 
 use std::collections::BTreeMap;
 
-use engine_editor::commands::{Batch, Document, Op};
+use engine_editor::commands::{Batch, Op};
 use engine_scene::ids::ObjectId;
 use engine_spatial::staged::{check_staged_ids, check_staged_with, DeltaFinding};
 use engine_spatial::Actor;
 
-use super::{object_label, partition, snapshot, Snapshot};
+use super::{object_label, partition, Snapshot};
 use crate::mcp::SpatialDeltaDto;
+use crate::receipts::ChangeList;
 
 /// Most findings, new or cleared, a delta lists; the rest read as a total.
 pub const DELTA_MAX_FINDINGS: usize = 5;
 /// Most touched ids a delta lists; the rest read as a total.
 pub const DELTA_MAX_IDS: usize = 16;
 
-/// SPX3: the scene as it was, taken only when the call wants a delta
-/// (`delta: false` skips both snapshots and the catalog runs).
-pub(crate) fn delta_before(doc: &Document, flag: Option<bool>) -> Option<Snapshot> {
-    (flag != Some(false)).then(|| snapshot(doc))
+/// Bounded "what changed" summary between the before and after snapshots:
+/// objects added, removed and moved (world position, yaw or scale differs),
+/// one row per change in id order, clipped to [`ChangeList::bounded`].
+///
+/// Reuses the door's own snapshots, so no second diff engine. Determinism:
+/// the same pair gives the same counts and the same row order (added then
+/// moved in after-id order, then removed in before-id order).
+pub(crate) fn change_list(
+    pre: &Snapshot,
+    post: &Snapshot,
+    revision_before: u64,
+    revision_after: u64,
+) -> ChangeList {
+    let pre_by_id: BTreeMap<String, &Actor> = pre
+        .ids
+        .iter()
+        .zip(&pre.actors)
+        .map(|(id, actor)| (id.to_string(), actor))
+        .collect();
+    let post_ids: BTreeMap<String, ()> = post.ids.iter().map(|id| (id.to_string(), ())).collect();
+    let mut rows: Vec<String> = Vec::new();
+    let mut added = 0usize;
+    let mut moved = 0usize;
+    let mut removed = 0usize;
+    // Added and moved in after-id order, then removed in before-id order.
+    for (id, actor) in post.ids.iter().zip(&post.actors) {
+        let key = id.to_string();
+        match pre_by_id.get(&key) {
+            None => {
+                added += 1;
+                rows.push(format!("added {key}"));
+            }
+            Some(before) if pose_moved(before, actor) => {
+                moved += 1;
+                rows.push(format!("moved {key}"));
+            }
+            Some(_) => {}
+        }
+    }
+    for id in &pre.ids {
+        let key = id.to_string();
+        if !post_ids.contains_key(&key) {
+            removed += 1;
+            rows.push(format!("removed {key}"));
+        }
+    }
+    ChangeList::bounded(
+        revision_before,
+        revision_after,
+        count(added),
+        count(removed),
+        count(moved),
+        rows,
+    )
 }
 
-/// The delta of the batch that just landed on `doc`, when `before` was taken.
-pub(crate) fn delta_after(
-    before: Option<Snapshot>,
-    doc: &Document,
-    batch: &Batch,
-) -> Option<SpatialDeltaDto> {
-    before.map(|before| spatial_delta(&before, &snapshot(doc), &op_ids(batch)))
+/// True when the world pose moved: position, yaw or scale differs. A NaN
+/// lane (an unresolved pose) counts as moved, never as unchanged.
+fn pose_moved(before: &Actor, after: &Actor) -> bool {
+    before.x != after.x
+        || before.y != after.y
+        || before.z != after.z
+        || before.yaw != after.yaw
+        || before.sx != after.sx
+        || before.sy != after.sy
+        || before.sz != after.sz
 }
 
 /// Every node a batch names, in op order, deduplicated.
-fn op_ids(batch: &Batch) -> Vec<ObjectId> {
+pub(crate) fn op_ids(batch: &Batch) -> Vec<ObjectId> {
     let mut out: Vec<ObjectId> = Vec::new();
     for op in &batch.ops {
         let id = match op {
@@ -56,6 +112,10 @@ fn op_ids(batch: &Batch) -> Vec<ObjectId> {
             | Op::SetMaterial { id, .. }
             | Op::SetComponent { id, .. }
             | Op::RemoveComponent { id, .. } => *id,
+            // The material-table ops name no node.
+            Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
+                continue
+            }
         };
         if !out.contains(&id) {
             out.push(id);

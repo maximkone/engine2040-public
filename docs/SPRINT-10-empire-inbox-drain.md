@@ -309,14 +309,14 @@
 - [ ] E54 deps: drop 9 unused root deps (EB-2026-10-08-S258). Size S. Owns root `Cargo.toml` only. F2P `rg -n engine- src/` shows only engine-proof + `cargo check -p engine2040` green; P2P `node tools/workspace-check.mjs` PASS. needs: none.
 - [x] E55 game: split windowed_dressing out (EB-2026-10-08-S259). Size S. Owns `crates/game/src/windowed.rs` + new `windowed_dressing.rs` only. F2P windowed.rs drops ~300 lines + `cargo check -p engine-game` green; P2P `node tools/workspace-check.mjs` PASS. needs: none. Landed 1d01a410. windowed_dressing.rs (548 lines, dressing_* fns) split out of windowed.rs and re-exported; engine-game builds and `--test it lobby_ui_flow` passes, gh run 39056624992.
 - [x] E56 arena: split match_observer out (EB-2026-10-08-S260). Size S. Owns `crates/arena/src/lib.rs` + new `match_observer.rs` only. F2P lib.rs drops ~145 lines + `cargo check -p engine-arena` green; P2P `node tools/workspace-check.mjs` PASS. needs: none. Landed 0d7fb9c0. TickMatchEvents, run_match_events{,_v1,_versioned}, run_match_bytes{,_v1,_versioned} and match_bytes_rows moved to crates/arena/src/match_observer.rs, lib.rs 4,831 -> 4,648 lines (-183, the row said ~145), public paths kept by pub use, no signature change. Tests: `cargo test -p engine-arena --no-fail-fast` 0 failed (214 lib + 7 + doctests), gh run 39102832094; clippy --all-targets -D warnings green, gh run 39102912771; `cargo check -p engine-arena --all-targets` clean. workspace-check shows no FAIL from this change; its current FAIL lines are other sessions' uncommitted files (physics clinch.rs, ragdoll_tape.rs, playtest highlights.rs).
-- [ ] E57 render: one cascade_splits owner — shadow_post.rs line 54 and shadow_cluster.rs
+- [x] E57 render: one cascade_splits owner — shadow_post.rs line 54 and shadow_cluster.rs
   line 221 both define `cascade_splits` with different signatures (EB-2026-10-08-S232; the ACES
   half of that item is RL34 and the dead apply_desat is already gone). Fold them into one
   function plus a thin 4-cascade wrapper, no output change. Diff: good. Tier B. Size S. Owns
   `crates/render/src/shadow_post.rs`, `crates/render/src/shadow_cluster.rs`. Accept:
   `cargo test -p engine-render --lib shadow` green and `rg -c "fn cascade_splits" crates/render/src`
   lists one definition. F2P: the rg lists 2 definitions today. P2P: golden `d57b5c8ae3096614` x2 and
-  `cargo test -p engine-render --lib` green. needs: none.
+  `cargo test -p engine-render --lib` green. needs: none. Landed 197b4110. shadow_post::cascade_splits(near,far,n,lambda) is the one definition; shadow_cluster's four-lane table is the thin wrapper sun_splits (same practical_split values, no output change) and the stale v1_lighting test name was renamed. engine-render --lib shadow 51 passed, with --features v1 59 (parity test green; gh-check routes engine-render to this PC); full --lib 787 passed (gh run 39143814028); rg "fn cascade_splits" crates/render/src lists one definition; clippy -p engine-render --all-targets is still red on a foreign pre-existing lint (crates/render/src/quality.rs:868 type_complexity), no new lint from this change.
 - [ ] E58 proof: fold the engine-chaos facade into engine-proof (EB-2026-10-08-S232) — the 96-line
   crate only calls `engine_proof::chaos::run` at the A9 seed. Move `healed_codes`,
   `quarantined_codes` and `a9_counts` into the engine-proof a9 module, `git rm` the crate, drop
@@ -478,7 +478,7 @@
   `cargo test -p engine-observe --test it circuit_vectors::` and `hedge_vectors::` still pass. F2P:
   supervisor.rs holds no breaker or hedge call today. P2P: golden `d57b5c8ae3096614` x2 (diagnostics
   only). needs: none.
-- [ ] E76 research: four NVIDIA cards, research only, zero bytes vendored (EB-2026-10-09-S73,
+- [x] E76 research: four NVIDIA cards, research only, zero bytes vendored (EB-2026-10-09-S73,
   Maxim yes): DLSS 5 (neural last pass, RTX 50 only, SDK terms unknown), RTX Mega Geometry (cluster
   BVH for the VG meshlets), SHARC (hashed radiance cache for the RT4 world cache), RTX Character
   Rendering (skin and hair for V5), in the LADDER card format (or its split part once E45 lands).
@@ -487,7 +487,7 @@
   Tier B. Size S. Owns `docs/research/LADDER.md`. Accept: `node --test docs/research/LADDER.test.mjs`
   passes and `rg -c "DLSS 5|Mega Geometry|SHARC|Character Rendering" docs/research/LADDER.md` prints
   4 or more. F2P: that rg prints 0 today. P2P: `node tools/workspace-check.mjs` adds no FAIL.
-  needs: none.
+  needs: none. Landed 3389d4b4. Four cards appended to docs/research/LADDER.md (DLSS 5, RTX Mega Geometry, SHARC, RTX Character Rendering): each names its source URL, the licence read live 2026-10-18 (all four are the proprietary NVIDIA RTX SDKs LICENSE, so research-only with zero bytes vendored) and a kill rule. `node --test docs/research/LADDER.test.mjs` 5 pass / 0 fail; rg -c prints 4; ladder 245 lines / 205390 bytes under the 399-line and 429783-byte caps; workspace-check no FAIL.
 - [ ] E77 render: optional DLSS Super Resolution adapter (EB-2026-10-09-S74, Maxim yes; it runs on
   his RTX 3050): loaded at run time from NVIDIA's own redistributable DLL, nothing linked or
   vendored, behind a cargo feature, off by default, presentation only. The engine's own TAAU stays

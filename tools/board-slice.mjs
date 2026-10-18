@@ -78,11 +78,21 @@ export function archiveDoneFiles(root = ROOT) {
   }
 }
 
+// Older board snapshots whose moved done rows must still tick a `needs:`: the
+// 2026-10-05 size-cap prune and the 2026-10-02 board diet (F06), the two the
+// ticked-rows audit also reads. Each file's header promises its moved ids keep
+// every needs: target resolving. Ticks only, exactly like the SPRINT-done-*
+// files: boardShardFiles never lists them, so no archived row joins `order`
+// and a live row of the same id always wins (parseBoard's first-wins rule).
+const HISTORY_DONE_FILES = ["docs/archive/SPRINT-2026-10-05.md", "docs/SPRINT-ARCHIVE.md"];
+const historyDoneFiles = (root) => HISTORY_DONE_FILES.map((p) => join(root, p));
+
 export function archivedDoneRows(root = ROOT) {
   const done = new Map();
-  for (const file of archiveDoneFiles(root)) {
+  for (const file of [...archiveDoneFiles(root), ...historyDoneFiles(root)]) {
+    if (!existsSync(file)) continue;
     for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
-      const m = /^- \[x\] ([A-Z][A-Z0-9]*\d[a-z]?\d?)\b/.exec(line);
+      const m = ARCHIVE_HEAD.exec(line);
       if (m && !done.has(m[1])) done.set(m[1], line);
     }
   }
@@ -124,7 +134,16 @@ Options:
 Exit codes: 0 ok - 1 unknown row or self-check FAIL - 2 usage.
 `;
 
-const HEAD = /^- \[( |x)\] ([A-Z][A-Z0-9]*\d[a-z]?\d?)\b(.*)$/;
+// Row id grammar, one definition for every reader below: plain ids
+// (A1, GX13, RL26) or hyphenated segments (E-GAP112, E-STUCKDG, BET-AX13,
+// CQ-NET-API3). A hyphenated id starts with a letters-only segment, so prose
+// like the `Rows:` note's "gates G1-G11" is never read as an id. The plain
+// branch keeps the old shape (A1a2). Build the patterns from it so a
+// hyphenated id is never dropped by one reader only.
+const ID_PATTERN = "[A-Z]+(?:-[A-Z0-9]+)+|[A-Z][A-Z0-9]*\\d[a-z]?\\d?";
+const HEAD = new RegExp(`^- \\[( |x)\\] (${ID_PATTERN})\\b(.*)$`);
+const ARCHIVE_HEAD = new RegExp(`^- \\[x\\] (${ID_PATTERN})\\b`);
+const FOCUS_ID = new RegExp(`^(?:${ID_PATTERN})$`);
 const FOCUS = join(ROOT, "docs", "FOCUS.md");
 
 // Row ids of the owner's focus list: every id after "Rows:" on a line of the
@@ -140,7 +159,7 @@ export function focusNowIds(focusText) {
     if (!m) continue;
     for (const tok of m[1].split(/[\s,;]+/)) {
       const id = tok.replace(/[.)]+$/, "");
-      if (/^[A-Z][A-Z0-9]*\d[a-z]?\d?$/.test(id) && !ids.includes(id)) ids.push(id);
+      if (FOCUS_ID.test(id) && !ids.includes(id)) ids.push(id);
     }
   }
   return ids;

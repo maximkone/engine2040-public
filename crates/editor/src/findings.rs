@@ -439,32 +439,37 @@ fn snapshot_actors(tree: &Hierarchy, order: &[ObjectId]) -> Vec<Actor> {
 fn stage_tree(tree: &Hierarchy, ops: &[Op]) -> Result<Hierarchy, BatchError> {
     let mut staged = tree.clone();
     for op in ops {
-        let result = match *op {
-            Op::Insert { id, parent, local } => staged.insert(id, parent, local),
-            Op::Remove { id } => staged.remove(id),
-            Op::SetLocal { id, local } => staged.set_local(id, local),
-            Op::Reparent { id, new_parent } => staged.reparent(id, new_parent),
+        let result = match op {
+            Op::Insert { id, parent, local } => staged.insert(*id, *parent, *local),
+            Op::Remove { id } => staged.remove(*id),
+            Op::SetLocal { id, local } => staged.set_local(*id, *local),
+            Op::Reparent { id, new_parent } => staged.reparent(*id, *new_parent),
             // Bindings leave poses alone; the node must still exist.
             Op::SetMaterial { id, .. }
             | Op::SetComponent { id, .. }
             | Op::RemoveComponent { id, .. } => {
-                if staged.contains(id) {
+                if staged.contains(*id) {
                     Ok(())
                 } else {
                     Err(engine_scene::transform::HierarchyError::UnknownNode)
                 }
             }
+            // Material-table ops touch no node: no pose moves.
+            Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => Ok(()),
         };
         result.map_err(|error| {
-            let id = op_target(*op);
-            let parent = match *op {
-                Op::Insert { parent, .. } => parent,
-                Op::Reparent { new_parent, .. } => new_parent,
+            let id = op_target(op);
+            let parent = match op {
+                Op::Insert { parent, .. } => *parent,
+                Op::Reparent { new_parent, .. } => *new_parent,
                 Op::Remove { .. }
                 | Op::SetLocal { .. }
                 | Op::SetMaterial { .. }
                 | Op::SetComponent { .. }
-                | Op::RemoveComponent { .. } => ObjectId::NIL,
+                | Op::RemoveComponent { .. }
+                | Op::PutMaterial { .. }
+                | Op::SetMaterialParam { .. }
+                | Op::RemoveLastMaterial => ObjectId::NIL,
             };
             match error {
                 HierarchyError::UnknownNode => BatchError::UnknownNode { id },

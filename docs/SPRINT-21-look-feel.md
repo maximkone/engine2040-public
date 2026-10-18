@@ -491,7 +491,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   240/600", the final digest equals the blocking run, cancel ends `cancelled` with
   the scene revision unchanged. F2P: no task arm is used. P2P: golden unchanged.
   needs: none.
-- [ ] PQ21 playtest: flicker you can see on moving fighters — shimmer is gated only
+- [x] PQ21 playtest: flicker you can see on moving fighters — shimmer is gated only
   on a 64x36 synthetic hold (`crates/render/src/clip_hold.rs:26-31`) and the
   judge's motion check is consecutive-frame SSIM (`crates/playtest/src/look/judge.rs:344`).
   The HVEI flicker visibility model (MIT) over the motion-compensated residual
@@ -500,7 +500,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Accept: `cargo test -p engine-playtest --lib look_flicker` x2: a clean clip
   scores p99 <= 0.10, three seeded breaks (clamp off, jitter x2, motion zeroed)
   each > 0.5, JSON bytes equal. F2P: no flicker function; SSIM cannot tell the
-  breaks apart. P2P: golden unchanged. needs: none.
+  breaks apart. P2P: golden unchanged. needs: none. Landed dcfadef. look_flicker 4 passed.
 - [ ] PQ22 playtest: a golden bless flow with two tiers and a known-failure ratchet
   — `tools/q1-check.mjs:9` counts PNGs and compares none. Bless writes `.new`,
   `.diff` and keeps `.old` (egui kittest); tier 1 bit-exact on the software

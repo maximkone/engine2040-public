@@ -13,6 +13,8 @@ pub mod extent;
 pub mod fold;
 /// FPS visibility: per-viewer FOV plus occlusion sets with interest digests.
 pub mod fps_visibility;
+/// Closed-form camera frame fit in integer cm (SPF2).
+pub mod frame;
 /// Deterministic fuzz harness: seeded op streams with first-divergence receipts.
 pub mod fuzz;
 mod index;
@@ -63,6 +65,7 @@ pub use checks::{
     run_checks, run_checks_eps, run_spatial, OPT_IN_CHECKS, SPATIAL_CHECKS, ZFIGHT_EPS_CM,
 };
 pub use diff::{describe, diff_graph, dry_run_diff, summarize, Edge, SemanticDiff};
+pub use frame::{frame_fit, FrameError, FrameFit, View, MIN_DISTANCE_CM};
 pub use index::{
     density_grid, nearest, overlap_pairs, pos_known, size_known, sweep_pairs, to_cm, xyz_pairs,
     CmRect,

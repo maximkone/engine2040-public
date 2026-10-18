@@ -2,8 +2,10 @@
 //!
 //! Owner: render lane; consumer is the RA1 presenter (RA7 variants next).
 //! Units: bytes (blob, file and diagnostic sizes all count bytes).
-//! Determinism: keys order by (shader hash, layout, defines) and saves
-//! write map order, so identical inputs give identical files on any host.
+//! Determinism: keys order by (shader hash, layout, defines, toolchain) and
+//! saves write map order, so identical inputs give identical files; the
+//! toolchain identity makes a compiler bump miss instead of serving stale
+//! bytes.
 //! Errors: typed [`CacheError`]; future or unknown versions refuse loudly.
 //! Blocking file IO runs at startup/shutdown; the per-frame path only
 //! borrows through [`PipelineCache::get`] and [`PipelineCache::poll_ready`].
@@ -16,7 +18,9 @@ use std::sync::{Condvar, Mutex, PoisonError};
 
 /// On-disk format version this module writes. Loads accept exactly this
 /// version; anything else fails as [`CacheError::UnsupportedVersion`].
-pub const CACHE_VERSION: u32 = 1;
+/// Version 2: the entry carries the toolchain identity word, so a version 1
+/// file (no toolchain) is refused instead of misread.
+pub const CACHE_VERSION: u32 = 2;
 /// File magic: 8 bytes `E204PC01` at offset 0.
 pub const CACHE_MAGIC: &[u8; 8] = b"E204PC01";
 /// Most pipelines kept in memory. The map never evicts silently: inserts
@@ -34,6 +38,44 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_DIAGNOSTICS: usize = 64;
 /// Most chars kept per diagnostic message; longer text is truncated.
 pub const MAX_DIAG_CHARS: usize = 256;
+
+// ---------------------------------------------------------------------------
+// Toolchain identity: the compiler that built an artifact belongs in the key.
+// ---------------------------------------------------------------------------
+
+/// rustc that built this binary, folded into every [`PipelineKey`]. Cargo
+/// exports no real rustc version to a crate, so a build may pass `RUSTC_VERSION`
+/// (CI and tools can); without it the pinned MSRV stands in. Never empty: an
+/// empty or default identity would make every stale artifact look valid again.
+pub const RUSTC_VERSION: &str = match option_env!("RUSTC_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_RUST_VERSION"),
+};
+
+/// Shader compiler the renderer uses, folded into every [`PipelineKey`]: wgpu's
+/// WGSL front end (naga) at the workspace `wgpu` pin. A wgpu bump can change
+/// the pipeline bytes it emits for unchanged WGSL, so the pin is part of the
+/// identity; test `shader_compiler_identity_tracks_the_wgpu_pin` holds the two
+/// together, so a bump cannot leave this string behind.
+pub const SHADER_COMPILER: &str = "naga/wgpu-30.0.1";
+
+/// FNV-1a hash of the toolchain identity: a domain tag, then `rustc` and the
+/// shader compiler, each length-prefixed so two adjacent parts cannot collide
+/// (`ab`+`c` against `a`+`bc`). A compiler or flag change on unchanged source
+/// lands on a fresh key, so the cache rebuilds instead of serving an artifact
+/// the new compiler would not have produced. Build artifact only: never sim
+/// state, never the golden hash.
+#[must_use]
+pub fn toolchain_hash() -> u64 {
+    let mut bytes = Vec::with_capacity(64);
+    bytes.extend_from_slice(b"e2040-pipeline-toolchain-v1");
+    for part in [RUSTC_VERSION, SHADER_COMPILER] {
+        let len = u32::try_from(part.len()).unwrap_or(u32::MAX);
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    engine_core::hash_bytes(&bytes)
+}
 
 // ---------------------------------------------------------------------------
 // Error: every corrupt input refuses loudly with its site named.
@@ -93,11 +135,12 @@ impl From<std::io::Error> for CacheError {
 }
 
 // ---------------------------------------------------------------------------
-// Key: shader hash + sorted defines + layout id, deterministically ordered.
+// Key: shader hash + sorted defines + layout id + toolchain, deterministic.
 // ---------------------------------------------------------------------------
 
 /// Cache key: `engine_core::hash_bytes` (FNV-1a) hash of the full shader
-/// bytes, the caller's opaque layout id, and the sorted static define set.
+/// bytes, the caller's opaque layout id, the sorted static define set, and the
+/// [`toolchain_hash`] identity of the compiler that will build the pipeline.
 /// Derives `Ord` so the map (and therefore every save) iterates in one
 /// deterministic order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -108,12 +151,17 @@ pub struct PipelineKey {
     pub layout: u64,
     /// Sorted, deduplicated `(name, value)` static defines.
     pub defines: Vec<(String, String)>,
+    /// Toolchain identity hash of this build: [`toolchain_hash`]. Two builds on
+    /// different toolchains key apart, so a compiler bump misses instead of
+    /// serving bytes the new compiler would not have produced.
+    pub toolchain: u64,
 }
 
 impl PipelineKey {
     /// Fold shader bytes, a define set and a layout id into one key.
     /// Define order never matters: pairs sort here, so callers may pass
-    /// any order and still hit the same entry.
+    /// any order and still hit the same entry. The toolchain identity is the
+    /// build's own [`toolchain_hash`].
     pub fn new(shader_bytes: &[u8], defines: &[(&str, &str)], layout: u64) -> Self {
         let mut owned: Vec<(String, String)> = defines
             .iter()
@@ -125,6 +173,7 @@ impl PipelineKey {
             shader_hash: engine_core::hash_bytes(shader_bytes),
             layout,
             defines: owned,
+            toolchain: toolchain_hash(),
         }
     }
 
@@ -842,6 +891,7 @@ impl PipelineCache {
             check_blob(blob)?;
             out.extend_from_slice(&key.shader_hash.to_le_bytes());
             out.extend_from_slice(&key.layout.to_le_bytes());
+            out.extend_from_slice(&key.toolchain.to_le_bytes());
             let defines = u32::try_from(key.defines.len())
                 .map_err(|_| CacheError::TooLarge("define count"))?;
             out.extend_from_slice(&defines.to_le_bytes());
@@ -859,6 +909,10 @@ impl PipelineCache {
 
     /// Parse bytes produced by [`PipelineCache::save_to_bytes`]. Define
     /// order is canonicalized so hand-ordered input never splits a key.
+    /// An entry whose toolchain identity is not this build's is dropped:
+    /// a cache written by another compiler cannot serve this one, so a bump
+    /// starts a fresh map (0 hits) instead of filling the cap with keys
+    /// nothing will look up.
     pub fn load_from_bytes(bytes: &[u8]) -> Result<Self, CacheError> {
         if bytes.len() > MAX_FILE_BYTES {
             return Err(CacheError::TooLarge("file bytes"));
@@ -882,9 +936,11 @@ impl PipelineCache {
             return Err(CacheError::TooLarge("entry count"));
         }
         let mut cache = Self::new();
+        let here = toolchain_hash();
         for _ in 0..count {
             let shader_hash = cursor.take_u64("shader hash")?;
             let layout = cursor.take_u64("layout")?;
+            let toolchain = cursor.take_u64("toolchain")?;
             let defines_len = cursor.take_u32("define count")? as usize;
             if defines_len > MAX_DEFINES_PER_KEY {
                 return Err(CacheError::TooLarge("define count"));
@@ -900,10 +956,16 @@ impl PipelineCache {
             let blob_len = cursor.take_u32("blob bytes")? as usize;
             check_blob_len(blob_len)?;
             let blob = cursor.take(blob_len, "blob bytes")?.to_vec();
+            if toolchain != here {
+                // Built by another compiler: not ours to serve. The blob is
+                // read above so the cursor still walks the whole file.
+                continue;
+            }
             let key = PipelineKey {
                 shader_hash,
                 layout,
                 defines,
+                toolchain,
             };
             if cache.entries.contains_key(&key) {
                 return Err(CacheError::DuplicateKey);
@@ -1045,6 +1107,77 @@ mod tests {
         assert_ne!(base, PipelineKey::new(b"s", &[("A", "2")], 0));
         assert_ne!(base, PipelineKey::new(b"s", &[("A", "1")], 1));
         assert_ne!(base, PipelineKey::new(b"s", &[], 0));
+    }
+
+    #[test]
+    fn toolchain_identity_is_real_and_folded_into_every_key() {
+        // The kill rule: a default or empty identity makes every stale
+        // artifact look valid again, so both parts must be real and the fold
+        // must actually mix them behind the domain tag.
+        assert!(!RUSTC_VERSION.is_empty(), "rustc identity is never empty");
+        assert!(
+            !SHADER_COMPILER.is_empty(),
+            "shader compiler identity is never empty"
+        );
+        assert_eq!(PipelineKey::new(b"s", &[], 0).toolchain, toolchain_hash());
+        assert_ne!(
+            toolchain_hash(),
+            engine_core::hash_bytes(b"e2040-pipeline-toolchain-v1"),
+            "the identity parts are folded, not just tagged"
+        );
+    }
+
+    #[test]
+    fn toolchain_identity_change_invalidates_the_key_and_hits_nothing() {
+        // Same source, defines and layout on two toolchains key apart.
+        let here = PipelineKey::new(b"forward-pbr-shader", &[("IBL", "1")], 7);
+        let mut other = here.clone();
+        other.toolchain ^= 0x9e37_79b9_7f4a_7c15;
+        assert_ne!(here, other, "a toolchain bump lands on a fresh key");
+
+        // A cache warmed on the other toolchain, persisted and loaded in this
+        // build, serves nothing: the foreign entry is dropped on load and the
+        // walk compiles instead of hitting (0 hits, 1 compile).
+        let mut cold = PipelineCache::new();
+        cold.insert(other, vec![1, 2, 3]).expect("insert");
+        let bytes = cold.save_to_bytes().expect("save");
+        let mut warm = PipelineCache::load_from_bytes(&bytes).expect("load");
+        assert!(
+            warm.is_empty(),
+            "a foreign-toolchain entry is dropped on load"
+        );
+        let compiles = Cell::new(0u32);
+        let summary = warm.warm_keys(std::slice::from_ref(&here), |_| {
+            compiles.set(compiles.get() + 1);
+            Ok(vec![9u8; 4])
+        });
+        assert_eq!(
+            summary,
+            WarmSummary {
+                compiled: 1,
+                hits: 0,
+                failed: 0
+            }
+        );
+        assert_eq!(compiles.get(), 1);
+        assert_eq!(warm.get(&here), Some(&[9u8; 4][..]));
+    }
+
+    #[test]
+    fn shader_compiler_identity_tracks_the_wgpu_pin() {
+        // The identity must name the workspace `wgpu` pin, so a wgpu bump that
+        // changes naga's output cannot leave the key behind.
+        const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
+        let pin = WORKSPACE_MANIFEST
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("wgpu = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("the workspace manifest pins wgpu");
+        assert!(
+            SHADER_COMPILER.contains(pin),
+            "SHADER_COMPILER {SHADER_COMPILER} must carry the wgpu pin {pin}"
+        );
     }
 
     #[test]
@@ -1319,6 +1452,7 @@ mod tests {
             shader_hash: 1,
             layout: 0,
             defines: vec![(long, "1".to_string())],
+            toolchain: toolchain_hash(),
         };
         assert_eq!(
             cache.insert(big_key, vec![1]),

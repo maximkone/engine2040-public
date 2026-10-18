@@ -76,7 +76,10 @@ impl OpMask {
             Op::SetLocal { .. }
             | Op::SetMaterial { .. }
             | Op::SetComponent { .. }
-            | Op::RemoveComponent { .. } => Self::EDIT,
+            | Op::RemoveComponent { .. }
+            | Op::PutMaterial { .. }
+            | Op::SetMaterialParam { .. }
+            | Op::RemoveLastMaterial => Self::EDIT,
             Op::Remove { .. } => Self::DELETE,
         }
     }
@@ -87,7 +90,10 @@ impl OpMask {
             Op::Insert { .. } => "insert",
             Op::Reparent { .. } => "move",
             Op::SetLocal { .. } => "edit",
-            Op::SetMaterial { .. } => "material",
+            Op::SetMaterial { .. }
+            | Op::PutMaterial { .. }
+            | Op::SetMaterialParam { .. }
+            | Op::RemoveLastMaterial => "material",
             Op::SetComponent { .. } | Op::RemoveComponent { .. } => "component",
             Op::Remove { .. } => "delete",
         }
@@ -178,7 +184,7 @@ pub fn approve(session: u64, batch: &Batch, revision: u64, expiry_tick: u64) -> 
 
 /// What refused a token-bearing batch. Stale, forged, reused and expired
 /// approvals change nothing; neither do scope, budget or spatial failures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CapError {
     /// The approval names another session or another batch hash.
     ForgedApproval,
@@ -277,12 +283,12 @@ pub fn canonical_action_hash(batch: &Batch) -> u64 {
     let op_count = u64::try_from(batch.ops.len()).unwrap_or(u64::MAX);
     hash.write(&op_count.to_le_bytes());
     for op in &batch.ops {
-        match *op {
+        match op {
             Op::Insert { id, parent, local } => {
                 hash.write_u8(0);
                 hash.write(id.as_uuid().as_bytes());
                 hash.write(parent.as_uuid().as_bytes());
-                hash_transform(&mut hash, &local);
+                hash_transform(&mut hash, local);
             }
             Op::Remove { id } => {
                 hash.write_u8(1);
@@ -291,7 +297,7 @@ pub fn canonical_action_hash(batch: &Batch) -> u64 {
             Op::SetLocal { id, local } => {
                 hash.write_u8(2);
                 hash.write(id.as_uuid().as_bytes());
-                hash_transform(&mut hash, &local);
+                hash_transform(&mut hash, local);
             }
             Op::Reparent { id, new_parent } => {
                 hash.write_u8(3);
@@ -315,6 +321,21 @@ pub fn canonical_action_hash(batch: &Batch) -> u64 {
                 hash.write(id.as_uuid().as_bytes());
                 hash.write_u8(kind.tag());
             }
+            Op::PutMaterial { text } => {
+                hash.write_u8(7);
+                hash.write_str(text);
+            }
+            Op::SetMaterialParam {
+                material,
+                path,
+                value,
+            } => {
+                hash.write_u8(8);
+                hash.write_str(material);
+                hash.write_str(path);
+                hash.write_str(value);
+            }
+            Op::RemoveLastMaterial => hash.write_u8(9),
         }
     }
     hash.finish()
@@ -378,7 +399,7 @@ pub fn authorize(
         }
     }
     for op in &batch.ops {
-        let id = op_target(*op);
+        let id = op_target(op);
         if !cap.object_in_scope(id) {
             return Err(CapError::OutOfScope { id });
         }
@@ -400,7 +421,7 @@ pub fn authorize(
 }
 
 /// The node an op reads or writes (the culprit when it fails scope).
-pub(crate) fn op_target(op: Op) -> ObjectId {
+pub(crate) fn op_target(op: &Op) -> ObjectId {
     match op {
         Op::Insert { id, .. }
         | Op::Remove { id }
@@ -408,7 +429,11 @@ pub(crate) fn op_target(op: Op) -> ObjectId {
         | Op::SetMaterial { id, .. }
         | Op::SetComponent { id, .. }
         | Op::RemoveComponent { id, .. }
-        | Op::Reparent { id, .. } => id,
+        | Op::Reparent { id, .. } => *id,
+        // The material-table ops touch no node.
+        Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
+            ObjectId::NIL
+        }
     }
 }
 
@@ -605,33 +630,39 @@ fn stage_tree(tree: &Hierarchy, ops: &[Op]) -> Result<Hierarchy, BatchError> {
 /// One op against a staging copy, with culprit-naming errors like the
 /// command service.
 fn apply_to_tree(tree: &mut Hierarchy, op: &Op) -> Result<(), BatchError> {
-    let id = op_target(*op);
-    let parent = match *op {
-        Op::Insert { parent, .. } => parent,
-        Op::Reparent { new_parent, .. } => new_parent,
+    let id = op_target(op);
+    let parent = match op {
+        Op::Insert { parent, .. } => *parent,
+        Op::Reparent { new_parent, .. } => *new_parent,
         Op::Remove { .. }
         | Op::SetLocal { .. }
         | Op::SetMaterial { .. }
         | Op::SetComponent { .. }
-        | Op::RemoveComponent { .. } => ObjectId::NIL,
+        | Op::RemoveComponent { .. }
+        | Op::PutMaterial { .. }
+        | Op::SetMaterialParam { .. }
+        | Op::RemoveLastMaterial => ObjectId::NIL,
     };
-    let result = match *op {
-        Op::Insert { id, parent, local } => tree.insert(id, parent, local),
-        Op::Remove { id } => tree.remove(id),
-        Op::SetLocal { id, local } => tree.set_local(id, local),
-        Op::Reparent { id, new_parent } => tree.reparent(id, new_parent),
+    let result = match op {
+        Op::Insert { id, parent, local } => tree.insert(*id, *parent, *local),
+        Op::Remove { id } => tree.remove(*id),
+        Op::SetLocal { id, local } => tree.set_local(*id, *local),
+        Op::Reparent { id, new_parent } => tree.reparent(*id, *new_parent),
         // Bindings and components ride the document beside the tree: no pose
         // moves, so the spatial delta is empty, but the node must exist like
         // the service.
         Op::SetMaterial { id, .. }
         | Op::SetComponent { id, .. }
         | Op::RemoveComponent { id, .. } => {
-            if tree.contains(id) {
+            if tree.contains(*id) {
                 Ok(())
             } else {
                 Err(engine_scene::transform::HierarchyError::UnknownNode)
             }
         }
+        // Material-table ops change no pose: the spatial delta over a batch
+        // that only edits records is empty.
+        Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => Ok(()),
     };
     result.map_err(|error| match error {
         HierarchyError::UnknownNode => BatchError::UnknownNode { id },

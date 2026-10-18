@@ -12,19 +12,34 @@
 //! wall clock). Errors: [`ReplayError`]; bad input rejects loudly and
 //! changes nothing.
 //!
+//! Header identity: a tape pins the world it was recorded against.
+//! [`ReplayTape::spec_digest`] is the [`engine_arena::MatchSpec::identity`] of
+//! the config, rules and world that produced its checkpoints, and
+//! [`ReplayTape::logic_version`] is [`SIM_LOGIC_VERSION`]. Playback refuses a
+//! tape from another world or another tick logic by name
+//! ([`ReplayError::SpecMismatch`], [`ReplayError::LogicMismatch`], both values
+//! carried) instead of surfacing as a bare hash mismatch on a later tick.
+//!
 //! Budgets: record costs one arena run plus 12 bytes per tick of checkpoints
 //! and one 12-byte keyframe per [`KEYFRAME_EVERY`] ticks. Theater
 //! frame-step is O(1) with no allocation (counting-allocator test below).
 
 use std::collections::BTreeMap;
 
-use engine_arena::{ArenaConfig, Checkpoint, FighterTape};
+use engine_arena::world::MatchWorld;
+use engine_arena::{ArenaConfig, Checkpoint, FighterTape, MatchSpec};
 use engine_core::diverge::first_divergence;
 use engine_core::Fnv64;
 use engine_input::FighterInput;
 
 /// Replay envelope version; anything else refuses loudly.
 pub const REPLAY_VERSION: u8 = 1;
+/// Tick logic version of the arena step the recorded checkpoints came from.
+/// Bump it when the step stops reproducing old checkpoints, so a tape made by
+/// the old logic refuses as [`ReplayError::LogicMismatch`] instead of
+/// diverging mid-playback. Like the envelope, it rides the header and is
+/// checked before any tick runs.
+pub const SIM_LOGIC_VERSION: u8 = 1;
 /// Ticks between keyframes: tick 0, every multiple of this, plus the final
 /// tick. Matches the multiplayer plan so theater seeks share one grid.
 pub const KEYFRAME_EVERY: u32 = 600;
@@ -45,12 +60,24 @@ pub struct Keyframe {
 
 /// Recorded replay: validated inputs plus one checkpoint per tick and the
 /// keyframe grid over them.
+///
+/// The two identity fields below are the header of the steal: a tape says
+/// which world and which tick logic its checkpoints belong to. They are not
+/// folded into [`ReplayTape::tape_hash`], so every pre-existing recording and
+/// the frozen tape digest stay byte-identical.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ReplayTape {
     /// Must equal [`REPLAY_VERSION`].
     pub version: u8,
     /// Match configuration the checkpoints were recorded under.
     pub config: ArenaConfig,
+    /// [`engine_arena::MatchSpec::identity`] of the config, rules and world
+    /// the checkpoints were recorded against. `0` marks a tape that carries
+    /// no identity (pre-header bytes): [`ReplayTape::check_against`] refuses
+    /// it for every spec.
+    pub spec_digest: u64,
+    /// Must equal [`SIM_LOGIC_VERSION`].
+    pub logic_version: u8,
     /// `(tick, fighter)`-sorted human inputs; empty slots were AI-filled.
     pub inputs: Vec<FighterInput>,
     /// One authoritative checkpoint per tick, `config.ticks` long.
@@ -143,6 +170,29 @@ pub enum ReplayError {
         /// Replayed hash.
         observed: u64,
     },
+    /// The tape names another match world: `recorded` is the identity in the
+    /// header, `expected` the identity of the spec playback was asked for.
+    /// `tick` is `0` for the header gate (before any tick runs) and the
+    /// playhead tick when the gate is reached mid-playback.
+    SpecMismatch {
+        /// Identity in the tape header.
+        recorded: u64,
+        /// Identity of the spec playback was asked for.
+        expected: u64,
+        /// Tick the refusal was raised at.
+        tick: u32,
+    },
+    /// The tape's checkpoints came from another tick logic: `recorded` is the
+    /// tape's version, `expected` this build's [`SIM_LOGIC_VERSION`]. `tick`
+    /// is `0` for the header gate and the playhead tick mid-playback.
+    LogicMismatch {
+        /// Logic version in the tape header.
+        recorded: u8,
+        /// This build's [`SIM_LOGIC_VERSION`].
+        expected: u8,
+        /// Tick the refusal was raised at.
+        tick: u32,
+    },
     /// Baseline and probe runs agree: nothing to attribute.
     NoFailure,
 }
@@ -166,6 +216,22 @@ impl std::fmt::Display for ReplayError {
             } => write!(
                 f,
                 "replay diverged at tick {tick}: expected {expected:016x}, got {observed:016x}"
+            ),
+            Self::SpecMismatch {
+                recorded,
+                expected,
+                tick,
+            } => write!(
+                f,
+                "replay spec mismatch at tick {tick}: recorded {recorded:016x}, expected {expected:016x}"
+            ),
+            Self::LogicMismatch {
+                recorded,
+                expected,
+                tick,
+            } => write!(
+                f,
+                "replay logic version mismatch at tick {tick}: recorded {recorded}, expected {expected}"
             ),
             Self::NoFailure => write!(f, "probe matches the recording"),
         }
@@ -208,19 +274,48 @@ fn keyframe_ticks(ticks: u32) -> Vec<u32> {
     out
 }
 
-/// Record one replay: run the authoritative match over `inputs`, keep every
-/// checkpoint, and lay the keyframe grid over them. Same config plus inputs
-/// twice gives the identical tape.
-pub fn record_tape(
-    config: ArenaConfig,
-    inputs: &[FighterInput],
-) -> Result<ReplayTape, ReplayError> {
-    validate_inputs(&config, inputs)?;
-    let tape = FighterTape(inputs.to_vec());
-    let checkpoints = engine_arena::run(&config, &tape);
-    if checkpoints.len() != config.ticks as usize {
-        return Err(ReplayError::BadConfig);
+/// The match [`record_tape`] resimulates under: the config plus the rules it
+/// selects on open sand, exactly what [`engine_arena::run`] builds. Its
+/// identity is the world digest every recorded tape pins.
+fn recorded_spec(config: ArenaConfig) -> MatchSpec {
+    MatchSpec::new(config, config.rules(), MatchWorld::empty())
+}
+
+/// Resimulate `inputs` under `spec`'s config, rules and world; `None` when the
+/// spec cannot build its live match. The frozen arena (`spec.rules` equal to
+/// the rules its config selects, open sand, no spear) takes the
+/// [`engine_arena::run`] path every existing tape used; any other rules or
+/// world steps a [`MatchSpec::live`] match tick by tick.
+fn run_under_spec(spec: &MatchSpec, inputs: &[FighterInput]) -> Option<Vec<Checkpoint>> {
+    if spec.rules == spec.config.rules() && spec.world_digest() == 0 && !spec.spear {
+        return Some(engine_arena::run(
+            &spec.config,
+            &FighterTape(inputs.to_vec()),
+        ));
     }
+    let mut live = spec.live()?;
+    let mut checkpoints = Vec::new();
+    let mut tick = 0u32;
+    while tick < spec.config.ticks {
+        let tick_inputs: Vec<FighterInput> = inputs
+            .iter()
+            .copied()
+            .filter(|input| input.tick == tick)
+            .collect();
+        checkpoints.push(live.step(&tick_inputs)?.checkpoint);
+        tick += 1;
+    }
+    Some(checkpoints)
+}
+
+/// Assemble one tape: checkpoints plus the keyframe grid over them, stamped
+/// with the envelope version, the world identity and the tick logic version.
+fn assemble(
+    config: ArenaConfig,
+    spec_digest: u64,
+    inputs: &[FighterInput],
+    checkpoints: Vec<Checkpoint>,
+) -> ReplayTape {
     let keyframes = keyframe_ticks(config.ticks)
         .into_iter()
         .map(|tick| Keyframe {
@@ -228,21 +323,52 @@ pub fn record_tape(
             hash: checkpoints[tick as usize].hash,
         })
         .collect();
-    Ok(ReplayTape {
+    ReplayTape {
         version: REPLAY_VERSION,
         config,
+        spec_digest,
+        logic_version: SIM_LOGIC_VERSION,
         inputs: inputs.to_vec(),
         checkpoints,
         keyframes,
-    })
+    }
 }
 
-/// Check one stored tape without resimulating: version, input validity and
-/// bounds, checkpoint count, and the keyframe grid (ticks plus hashes).
+/// Record one replay: run the authoritative match over `inputs`, keep every
+/// checkpoint, and lay the keyframe grid over them. The tape pins the identity
+/// of the frozen arena the checkpoints come from, so a later playback under
+/// another world refuses by name. Same config plus inputs twice gives the
+/// identical tape.
+pub fn record_tape(
+    config: ArenaConfig,
+    inputs: &[FighterInput],
+) -> Result<ReplayTape, ReplayError> {
+    record_tape_under(&recorded_spec(config), inputs)
+}
+
+/// [`record_tape`] under an explicit match `spec`: same shape, but the tape is
+/// resimulated through the spec's rules and world and pins that identity.
+/// Replaying it later needs the same spec ([`play_tape_under`]).
+pub fn record_tape_under(
+    spec: &MatchSpec,
+    inputs: &[FighterInput],
+) -> Result<ReplayTape, ReplayError> {
+    validate_inputs(&spec.config, inputs)?;
+    let checkpoints = run_under_spec(spec, inputs).ok_or(ReplayError::BadConfig)?;
+    if checkpoints.len() != spec.config.ticks as usize {
+        return Err(ReplayError::BadConfig);
+    }
+    Ok(assemble(spec.config, spec.identity(), inputs, checkpoints))
+}
+
+/// Check one stored tape without resimulating: version, tick logic version,
+/// input validity and bounds, checkpoint count, and the keyframe grid (ticks
+/// plus hashes).
 fn check_consistency(tape: &ReplayTape) -> Result<(), ReplayError> {
     if tape.version != REPLAY_VERSION {
         return Err(ReplayError::BadTape);
     }
+    tape.check_logic(0)?;
     validate_inputs(&tape.config, &tape.inputs)?;
     if tape.checkpoints.len() != tape.config.ticks as usize {
         return Err(ReplayError::BadTape);
@@ -262,18 +388,14 @@ fn check_consistency(tape: &ReplayTape) -> Result<(), ReplayError> {
     Ok(())
 }
 
-/// Play one stored tape up to and including `upto`: resimulate the match,
-/// compare every checkpoint on the prefix, and return the checkpoint at
-/// `upto`. The first mismatch fails as [`ReplayError::Diverged`].
-pub fn play_tape(tape: &ReplayTape, upto: u32) -> Result<Checkpoint, ReplayError> {
-    check_consistency(tape)?;
-    if upto >= tape.config.ticks {
-        return Err(ReplayError::BeyondEnd {
-            upto,
-            ticks: tape.config.ticks,
-        });
-    }
-    let fresh = engine_arena::run(&tape.config, &FighterTape(tape.inputs.clone()));
+/// Compare `fresh` against the stored checkpoints on the prefix through
+/// `upto` and return the recorded checkpoint at `upto`. The first mismatch
+/// refuses as [`ReplayError::Diverged`], carrying its tick.
+fn compare_prefix(
+    tape: &ReplayTape,
+    fresh: &[Checkpoint],
+    upto: u32,
+) -> Result<Checkpoint, ReplayError> {
     if fresh.len() != tape.checkpoints.len() {
         return Err(ReplayError::BadTape);
     }
@@ -290,6 +412,46 @@ pub fn play_tape(tape: &ReplayTape, upto: u32) -> Result<Checkpoint, ReplayError
         }
     }
     Err(ReplayError::BadTape)
+}
+
+/// Play one stored tape up to and including `upto`: resimulate the match,
+/// compare every checkpoint on the prefix, and return the checkpoint at
+/// `upto`. The frozen arena only: a tape recorded under another world refuses
+/// as [`ReplayError::SpecMismatch`], play it with [`play_tape_under`]. The
+/// first hash mismatch fails as [`ReplayError::Diverged`].
+pub fn play_tape(tape: &ReplayTape, upto: u32) -> Result<Checkpoint, ReplayError> {
+    check_consistency(tape)?;
+    tape.check_frozen()?;
+    if upto >= tape.config.ticks {
+        return Err(ReplayError::BeyondEnd {
+            upto,
+            ticks: tape.config.ticks,
+        });
+    }
+    let fresh = engine_arena::run(&tape.config, &FighterTape(tape.inputs.clone()));
+    compare_prefix(tape, &fresh, upto)
+}
+
+/// [`play_tape`] under an explicit match `spec`: first the world and logic
+/// identity gate (a tape from another world refuses as
+/// [`ReplayError::SpecMismatch`] before tick 0), then the tape is resimulated
+/// through the spec's own rules and world. A hash that moved mid-playback
+/// still refuses as [`ReplayError::Diverged`] with its tick.
+pub fn play_tape_under(
+    spec: &MatchSpec,
+    tape: &ReplayTape,
+    upto: u32,
+) -> Result<Checkpoint, ReplayError> {
+    check_consistency(tape)?;
+    tape.check_against(spec)?;
+    if upto >= tape.config.ticks {
+        return Err(ReplayError::BeyondEnd {
+            upto,
+            ticks: tape.config.ticks,
+        });
+    }
+    let fresh = run_under_spec(spec, &tape.inputs).ok_or(ReplayError::BadTape)?;
+    compare_prefix(tape, &fresh, upto)
 }
 
 /// Attribute one probe tape against a recorded baseline under `config`:
@@ -362,10 +524,61 @@ pub fn attribute(
 }
 
 impl ReplayTape {
-    /// Re-check this tape without resimulating (version, inputs, checkpoint
-    /// count, keyframe grid).
+    /// Re-check this tape without resimulating (version, tick logic version,
+    /// inputs, checkpoint count, keyframe grid).
     pub fn check(&self) -> Result<(), ReplayError> {
         check_consistency(self)
+    }
+
+    /// Refuse this tape unless its checkpoints came from this build's tick
+    /// logic. `recorded` is the tape's version, `expected` this build's
+    /// [`SIM_LOGIC_VERSION`]; a header refusal names tick `0`. Every playback
+    /// path runs it through [`check_consistency`].
+    fn check_logic(&self, tick: u32) -> Result<(), ReplayError> {
+        if self.logic_version != SIM_LOGIC_VERSION {
+            return Err(ReplayError::LogicMismatch {
+                recorded: self.logic_version,
+                expected: SIM_LOGIC_VERSION,
+                tick,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse this tape unless it was recorded against `spec`'s world. The
+    /// tape's identity is `recorded`, the spec's [`engine_arena::MatchSpec::identity`]
+    /// is `expected`; a tape that carries no identity (`spec_digest` `0`)
+    /// refuses for every spec. Pairs with [`play_tape_under`] and
+    /// [`Theater::new_under`], which run it before the first tick.
+    pub fn check_against(&self, spec: &MatchSpec) -> Result<(), ReplayError> {
+        self.check_logic(0)?;
+        let expected = spec.identity();
+        if self.spec_digest != expected {
+            return Err(ReplayError::SpecMismatch {
+                recorded: self.spec_digest,
+                expected,
+                tick: 0,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse this tape unless its world is the frozen arena this module
+    /// resimulates with ([`engine_arena::run`] over `config`, open sand and
+    /// the rules the config selects). Every helper that cannot take a spec —
+    /// [`play_tape`], [`ReplayTape::suffix_from_keyframe`],
+    /// [`ReplayTape::attribute_probe`] — gates on it, so a tape from another
+    /// world stops by name instead of diverging late.
+    fn check_frozen(&self) -> Result<(), ReplayError> {
+        let expected = recorded_spec(self.config).identity();
+        if self.spec_digest != expected {
+            return Err(ReplayError::SpecMismatch {
+                recorded: self.spec_digest,
+                expected,
+                tick: 0,
+            });
+        }
+        Ok(())
     }
 
     /// Deterministic FNV-1a hash over version, config, inputs and
@@ -393,9 +606,12 @@ impl ReplayTape {
 
     /// Resimulate from the keyframe at `index` through the arena snapshot
     /// path and return the suffix checkpoints from that tick on. The suffix
-    /// must equal the stored tail exactly, or the tape fails loudly.
+    /// must equal the stored tail exactly, or the tape fails loudly. The
+    /// snapshot path is the frozen arena, so a tape from another world refuses
+    /// as [`ReplayError::SpecMismatch`] (use [`play_tape_under`] for those).
     pub fn suffix_from_keyframe(&self, index: usize) -> Result<Vec<Checkpoint>, ReplayError> {
         check_consistency(self)?;
+        self.check_frozen()?;
         let Some(keyframe) = self.keyframes.get(index) else {
             return Err(ReplayError::UnknownKeyframe {
                 index,
@@ -423,9 +639,12 @@ impl ReplayTape {
     }
 
     /// Attribute one probe tape against this recording (first divergent tick
-    /// plus the minimal input cause set).
+    /// plus the minimal input cause set). Attribution resimulates the frozen
+    /// arena, so a tape from another world refuses as
+    /// [`ReplayError::SpecMismatch`].
     pub fn attribute_probe(&self, probe: &[FighterInput]) -> Result<DivergenceReport, ReplayError> {
         check_consistency(self)?;
+        self.check_frozen()?;
         attribute(&self.config, &self.inputs, probe)
     }
 }
@@ -437,16 +656,40 @@ pub struct Theater {
     tape: ReplayTape,
     cursor: u32,
     playing: bool,
+    /// The match the theater was opened under, when one was named: every
+    /// resimulating step then plays that spec's rules and world instead of
+    /// the frozen default.
+    spec: Option<MatchSpec>,
 }
 
 impl Theater {
-    /// Open one recording; inconsistent tapes refuse loudly and hold nothing.
+    /// Open one recording of the frozen arena; inconsistent tapes and tapes
+    /// from another world refuse loudly and hold nothing. A tape recorded
+    /// under another world opens with [`Theater::new_under`].
     pub fn new(tape: ReplayTape) -> Result<Self, ReplayError> {
+        Self::open(tape, None)
+    }
+
+    /// [`Theater::new`] under an explicit match `spec`: the tape must carry
+    /// that spec's identity ([`ReplayTape::check_against`]) and every
+    /// resimulating step ([`Theater::play_to`], [`Theater::verify`]) plays the
+    /// spec's own rules and world.
+    pub fn new_under(spec: &MatchSpec, tape: ReplayTape) -> Result<Self, ReplayError> {
+        Self::open(tape, Some(spec.clone()))
+    }
+
+    /// Shared open: consistency, then the identity gate when a spec is named.
+    fn open(tape: ReplayTape, spec: Option<MatchSpec>) -> Result<Self, ReplayError> {
         check_consistency(&tape)?;
+        match spec.as_ref() {
+            Some(spec) => tape.check_against(spec)?,
+            None => tape.check_frozen()?,
+        }
         Ok(Self {
             tape,
             cursor: 0,
             playing: false,
+            spec,
         })
     }
 
@@ -520,10 +763,19 @@ impl Theater {
     /// move the playhead. The first mismatch fails as
     /// [`ReplayError::Diverged`] and the playhead does not move.
     pub fn play_to(&mut self, tick: u32) -> Result<Checkpoint, ReplayError> {
-        let point = play_tape(&self.tape, tick)?;
+        let point = self.resimulate(tick)?;
         self.cursor = tick;
         self.playing = true;
         Ok(point)
+    }
+
+    /// Resimulate the prefix through the open spec (or the frozen arena when
+    /// none was named).
+    fn resimulate(&self, tick: u32) -> Result<Checkpoint, ReplayError> {
+        match self.spec.as_ref() {
+            Some(spec) => play_tape_under(spec, &self.tape, tick),
+            None => play_tape(&self.tape, tick),
+        }
     }
 
     /// Jump the playhead to the keyframe at `index` (no resimulation; the
@@ -548,7 +800,7 @@ impl Theater {
     /// Full verification: resimulate the whole match and compare every
     /// checkpoint. `Ok` means the recording replays exactly.
     pub fn verify(&self) -> Result<(), ReplayError> {
-        play_tape(&self.tape, self.len() - 1)?;
+        self.resimulate(self.len() - 1)?;
         Ok(())
     }
 
@@ -661,6 +913,137 @@ mod tests {
                 keyframes: 4
             })
         );
+    }
+
+    #[test]
+    fn recorded_tape_pins_the_world_identity_and_round_trips_under_it() {
+        let cfg = config(64);
+        let inputs: Vec<FighterInput> = (0..64).map(|tick| wish(tick, 0, 100)).collect();
+        let tape = record_tape(cfg, &inputs).expect("record");
+        let spec = recorded_spec(cfg);
+        // The header names the world and the tick logic the checkpoints came
+        // from.
+        assert_eq!(tape.spec_digest, spec.identity());
+        assert_ne!(tape.spec_digest, 0);
+        assert_eq!(tape.logic_version, SIM_LOGIC_VERSION);
+        assert_eq!(tape.check_against(&spec), Ok(()));
+        // Under its own spec the tape plays exactly the plain frozen path.
+        for upto in [0, 1, 31, 63] {
+            assert_eq!(play_tape_under(&spec, &tape, upto), play_tape(&tape, upto));
+        }
+        let mut theater = Theater::new_under(&spec, tape.clone()).expect("open");
+        assert_eq!(theater.play_to(63), Ok(tape.checkpoints[63]));
+        assert_eq!(theater.verify(), Ok(()));
+    }
+
+    #[test]
+    fn another_world_refuses_by_name_naming_both_digests() {
+        let cfg = config(32);
+        let tape = record_tape(cfg, &[]).expect("record");
+        // The kit duel is another world (rules v2 on the kit walls) for the
+        // same config: the tape does not belong to it.
+        let other = MatchSpec::kit_duel(cfg).expect("kit duel");
+        let recorded = tape.spec_digest;
+        let expected = other.identity();
+        assert_ne!(recorded, expected);
+        let refuse = ReplayError::SpecMismatch {
+            recorded,
+            expected,
+            tick: 0,
+        };
+        assert_eq!(play_tape_under(&other, &tape, 31), Err(refuse));
+        assert_eq!(tape.check_against(&other), Err(refuse));
+        assert_eq!(Theater::new_under(&other, tape.clone()).err(), Some(refuse));
+        // The refusal names both digests in its text.
+        let text = refuse.to_string();
+        assert!(text.contains(&format!("{recorded:016x}")), "{text}");
+        assert!(text.contains(&format!("{expected:016x}")), "{text}");
+    }
+
+    #[test]
+    fn tape_recorded_under_a_wall_world_replays_only_under_that_spec() {
+        let cfg = config(64);
+        let kit = MatchSpec::kit_duel(cfg).expect("kit duel");
+        let tape = record_tape_under(&kit, &[]).expect("record under the walls");
+        assert_eq!(tape.spec_digest, kit.identity());
+        assert_ne!(
+            tape.checkpoints,
+            record_tape(cfg, &[]).expect("frozen").checkpoints,
+            "the kit walls move the bout"
+        );
+        // Recorded under the walls, it replays through the wall world only.
+        assert_eq!(play_tape_under(&kit, &tape, 63), Ok(tape.checkpoints[63]));
+        assert_eq!(
+            Theater::new_under(&kit, tape.clone())
+                .expect("open")
+                .verify(),
+            Ok(())
+        );
+        // The frozen helpers cannot play another world: they refuse by name
+        // instead of diverging on a later tick.
+        match play_tape(&tape, 63) {
+            Err(ReplayError::SpecMismatch {
+                recorded,
+                expected,
+                tick,
+            }) => {
+                assert_eq!((recorded, tick), (kit.identity(), 0));
+                assert_ne!(expected, recorded);
+            }
+            other => panic!("the frozen path must refuse another world: {other:?}"),
+        }
+        assert!(tape.suffix_from_keyframe(0).is_err());
+        assert!(Theater::new(tape.clone()).is_err());
+        assert!(play_tape_under(&recorded_spec(cfg), &tape, 63).is_err());
+    }
+
+    #[test]
+    fn another_tick_logic_refuses_by_name_naming_both_versions() {
+        let cfg = config(16);
+        let tape = record_tape(cfg, &[]).expect("record");
+        let mut old = tape.clone();
+        old.logic_version = SIM_LOGIC_VERSION.wrapping_add(1);
+        let refuse = ReplayError::LogicMismatch {
+            recorded: old.logic_version,
+            expected: SIM_LOGIC_VERSION,
+            tick: 0,
+        };
+        assert_eq!(old.check(), Err(refuse));
+        assert_eq!(play_tape(&old, 15), Err(refuse));
+        assert_eq!(old.check_against(&recorded_spec(cfg)), Err(refuse));
+        assert!(Theater::new(old.clone()).is_err());
+        assert!(Theater::new_under(&recorded_spec(cfg), old.clone()).is_err());
+        let text = refuse.to_string();
+        assert!(
+            text.contains(&format!("recorded {}", old.logic_version)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("expected {}", SIM_LOGIC_VERSION)),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn mid_playback_refusals_carry_their_tick() {
+        let cfg = config(32);
+        let mut tape = record_tape(cfg, &[]).expect("record");
+        // Tick 7 is off the keyframe grid, so the cheap check passes and the
+        // resimulating paths name the forged tick.
+        tape.checkpoints[7].hash ^= 1;
+        let spec = recorded_spec(cfg);
+        let diverged = ReplayError::Diverged {
+            tick: 7,
+            expected: tape.checkpoints[7].hash,
+            observed: tape.checkpoints[7].hash ^ 1,
+        };
+        assert_eq!(play_tape(&tape, 31), Err(diverged));
+        assert_eq!(play_tape_under(&spec, &tape, 31), Err(diverged));
+        // The header gate passes (the world and logic match), so the refusal
+        // comes only when the playhead resimulates, and it carries the tick.
+        let mut theater = Theater::new_under(&spec, tape).expect("the header opens");
+        assert_eq!(theater.play_to(31), Err(diverged));
+        assert_eq!(theater.verify(), Err(diverged));
     }
 
     #[test]

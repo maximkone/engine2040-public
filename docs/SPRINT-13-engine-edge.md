@@ -157,7 +157,8 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   report under `target/evidence/build/`. Tier A. Size S. Owns the
   report. Accept: numbers x2 name adapter and driver; blocked until the
   BLOCKERS window-path entry closes. needs: OPT3, WIN1. (OPT3 VERDICT
-  wave 84.)
+  wave 84.) Progress 2026-10-19: operator: reference-GPU frame report x2;
+  line in `docs/plan/2026-10-19-owner-queue.md`.
 - [ ] OPT32 ops: build-baseline promotion on the quiet box — rerun the
   OPT1 matrix back-to-back x2 (clean plus 4-crate touches x 3 profiles),
   single cargo, lanes halted, load <10%, root `target/`.
@@ -173,4 +174,6 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   `target/evidence/backend/` names adapter and driver with CPU and GPU
   p50/p95/p99 per pass, VRAM, draws and validation errors; HELD for the
   OPERATOR quiet-box window (shared with OPT32/PF18b/Q1); Q1 reuses the
-  harness. needs: OPT2. (OPT2 VERDICT wave 84.)
+  harness. needs: OPT2. (OPT2 VERDICT wave 84.) Progress 2026-10-19:
+  operator: reference-GPU DX12 vs Vulkan A/B; line in
+  `docs/plan/2026-10-19-owner-queue.md`.

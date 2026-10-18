@@ -39,6 +39,9 @@ engine-spatial.workspace = true
 engine-assets.workspace = true
 # TU1 live tuning reads combat/brain validated-swap schemas (data only).
 engine-combat = { workspace = true, optional = true }
+# NS31a2: the document holds the material table and edits it with undo, so the
+# editor reads the record/set API (the three op encoders below stay in-crate).
+engine-material.workspace = true
 engine-ai = { workspace = true, optional = true }
 # ED4 play-in-editor hosts the tick driver through the RC1 lifecycle (one
 # direction only: editor -> app -> arena; headless default graph unchanged).

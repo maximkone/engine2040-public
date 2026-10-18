@@ -614,40 +614,42 @@ fn push_ops(out: &mut Vec<u8>, ops: &[Op]) -> std::io::Result<()> {
         u32::try_from(ops.len()).map_err(|_| invalid("journal op vec exceeds its bound"))?;
     out.extend_from_slice(&count.to_le_bytes());
     for op in ops {
-        push_op(out, *op);
+        push_op(out, op);
     }
     Ok(())
 }
 
 /// Push one op with the same tags as the command-service artifact digest (0
-/// insert, 1 remove, 2 set-local, 3 reparent, 4 set-material): ids ride
-/// hyphenated (36 bytes, like the save codec, so no new id conversion),
-/// poses ride as ten little-endian f32 values.
-fn push_op(out: &mut Vec<u8>, op: Op) {
+/// insert, 1 remove, 2 set-local, 3 reparent, 4 set-material, 5 set-component,
+/// 6 remove-component, 7 put-material, 8 set-material-param, 9
+/// remove-last-material): ids ride hyphenated (36 bytes, like the save codec,
+/// so no new id conversion), poses ride as ten little-endian f32 values and
+/// material record texts as length-prefixed bytes.
+fn push_op(out: &mut Vec<u8>, op: &Op) {
     match op {
         Op::Insert { id, parent, local } => {
             out.push(0);
-            push_id(out, id);
-            push_id(out, parent);
-            push_transform(out, local);
+            push_id(out, *id);
+            push_id(out, *parent);
+            push_transform(out, *local);
         }
         Op::Remove { id } => {
             out.push(1);
-            push_id(out, id);
+            push_id(out, *id);
         }
         Op::SetLocal { id, local } => {
             out.push(2);
-            push_id(out, id);
-            push_transform(out, local);
+            push_id(out, *id);
+            push_transform(out, *local);
         }
         Op::Reparent { id, new_parent } => {
             out.push(3);
-            push_id(out, id);
-            push_id(out, new_parent);
+            push_id(out, *id);
+            push_id(out, *new_parent);
         }
         Op::SetMaterial { id, material } => {
             out.push(4);
-            push_id(out, id);
+            push_id(out, *id);
             match material {
                 Some(name) => {
                     out.push(1);
@@ -658,14 +660,29 @@ fn push_op(out: &mut Vec<u8>, op: Op) {
         }
         Op::SetComponent { id, component } => {
             out.push(5);
-            push_id(out, id);
+            push_id(out, *id);
             push_text(out, &component.to_bytes());
         }
         Op::RemoveComponent { id, kind } => {
             out.push(6);
-            push_id(out, id);
+            push_id(out, *id);
             out.push(kind.tag());
         }
+        Op::PutMaterial { text } => {
+            out.push(7);
+            push_text(out, text.as_bytes());
+        }
+        Op::SetMaterialParam {
+            material,
+            path,
+            value,
+        } => {
+            out.push(8);
+            push_text(out, material.as_bytes());
+            push_text(out, path.as_bytes());
+            push_text(out, value.as_bytes());
+        }
+        Op::RemoveLastMaterial => out.push(9),
     }
 }
 
@@ -798,8 +815,26 @@ impl<'a> Cursor<'a> {
                     .ok_or(FrameError::BadJournal)?;
                 Ok(Op::RemoveComponent { id, kind })
             }
+            7 => Ok(Op::PutMaterial {
+                text: self.op_text(MAX_SEALED_TEXT)?,
+            }),
+            8 => Ok(Op::SetMaterialParam {
+                material: self.op_text(MAX_SEALED_TEXT)?,
+                path: self.op_text(MAX_SEALED_TEXT)?,
+                value: self.op_text(MAX_SEALED_TEXT)?,
+            }),
+            9 => Ok(Op::RemoveLastMaterial),
             _ => Err(FrameError::BadJournal),
         }
+    }
+
+    /// Length-prefixed UTF-8 text capped at `cap`, owned for op fields. Bad
+    /// bytes or an over-cap length fail bounded.
+    fn op_text(&mut self, cap: usize) -> Result<String, FrameError> {
+        let raw = self.text(cap)?;
+        core::str::from_utf8(raw)
+            .map(str::to_owned)
+            .map_err(|_| FrameError::BadJournal)
     }
 
     /// One op vec; over-cap counts fail bounded without pre-allocating.

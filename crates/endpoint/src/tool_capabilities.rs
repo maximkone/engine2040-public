@@ -409,14 +409,18 @@ pub fn message_carries_recovery(message: &str) -> bool {
 
 /// Target node of one op: the id the capability scope checks.
 fn op_target_id(op: &Op) -> ObjectId {
-    match *op {
-        Op::Insert { id, .. } => id,
-        Op::Remove { id } => id,
-        Op::SetLocal { id, .. } => id,
-        Op::Reparent { id, .. } => id,
-        Op::SetMaterial { id, .. } => id,
-        Op::SetComponent { id, .. } => id,
-        Op::RemoveComponent { id, .. } => id,
+    match op {
+        Op::Insert { id, .. } => *id,
+        Op::Remove { id } => *id,
+        Op::SetLocal { id, .. } => *id,
+        Op::Reparent { id, .. } => *id,
+        Op::SetMaterial { id, .. } => *id,
+        Op::SetComponent { id, .. } => *id,
+        Op::RemoveComponent { id, .. } => *id,
+        // The material-table ops name no node.
+        Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
+            ObjectId::NIL
+        }
     }
 }
 

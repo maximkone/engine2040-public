@@ -74,6 +74,24 @@ all"): the rollback window stays 8 ticks; QUIC through the relay waits.
   checkpoint equality over the relay; digest equals the one-process twin x2.
   F2P: `--quic` is refused today. P2P: ON30 receipts unchanged; `cargo test
   -p engine-net --features quic --lib` green. needs: ON30.
+- [x] MP28 net: replay header pins the world and the tick logic — a tape Landed bffca14a. cargo test -p engine-net --lib replay 20 passed (gh run 39150021689, the mismatched spec digest refuses as SpecMismatch naming both digests, mid-playback Diverged carries the tick); clippy clean (gh run 39150040441); golden d57b5c8ae3096614 unchanged.
+  records the match identity its checkpoints came from (`spec_digest`, the
+  `MatchSpec::identity` of the config, rules and world) and the tick logic
+  version (`logic_version`, `SIM_LOGIC_VERSION`) beside `REPLAY_VERSION`, so
+  every playback refusal is named: `ReplayError::SpecMismatch`/
+  `LogicMismatch` carry both values, and a refusal raised mid-playback carries
+  the tick. `record_tape_under`, `play_tape_under` and `Theater::new_under`
+  play an explicit spec; the spec-less helpers gate on the frozen arena. The
+  two fields are not folded into `tape_hash`, so existing tape bytes and the
+  pinned tape digest stay unchanged, and the envelope version stays 1 (no
+  serialized tape breaks). Diff: regular. Tier B. Size S. Owns hunks in
+  `crates/net/src/replay.rs` and the `ReplayTape` literal in
+  `crates/net/src/lib.rs`. Accept: `cargo test -p engine-net --lib replay`
+  green, with a mismatched spec digest refused by the named variant naming
+  both digests. F2P: a tape carries no world identity today, so a replay
+  against a changed world only fails on a later tick. P2P: the frozen tape pin
+  `0x3092_6e49_6049_04ce` and `engine-net` consumers unchanged; golden
+  `d57b5c8ae3096614` unchanged. needs: none.
 
 ### AI-native door (owner 2026-10-10, `docs/plan/ai-native.md`)
 
@@ -127,6 +145,38 @@ Boarded 2026-10-10 from `docs/plan/ai-native.md` candidate rows 2, 4, 5 and 7
   results gives the same table twice; a fixture with a lower pass rate prints
   RED. F2P: no scorecard command today. P2P: `cargo test -p engine-playtest
   --lib` green. needs: HS20. Landed 4aef2869. eval/scorecard.rs: one card per day at target/reports/scorecard-<date>.md with pass rate and tokens per task for EV1, mirror and spatial_eval by tier (mock replay, local free, remote strong), BreakBench prints unbuilt (BX25), a drop against the newest earlier card prints RED. Command: SCORECARD_DATE=YYYY-MM-DD cargo test -p engine-playtest --lib scorecard_command -- --ignored --nocapture. Tests scorecard_table_is_the_same_twice_on_fixture_results, scorecard_lower_pass_rate_prints_red, scorecard_lost_lines_are_red_and_new_lines_are_new, scorecard_reads_back_what_it_wrote, scorecard_collects_every_suite_green_and_unbuilt_breakbench, scorecard_command_writes_the_card_and_compares_with_the_last. Tokens print unknown for replayed suites (a live recording supplies the figure). gh run 39105225319 (engine-playtest --lib highlights brief_eval trajectory scorecard frame_stale: 36 passed, 1 ignored) and full engine-playtest --lib 373 passed, run 39103617132.
+
+- [x] AX24 endpoint: the receipt says what changed — the `tx.apply` receipt
+  carries a bounded, read-only change list: the document revision before and
+  after, the added, removed and moved counts (a world pose differs) and one row
+  per change, clipped to `MAX_CHANGES` (60) with `truncated: true` when rows
+  drop, so a count never lies. Built from the door's own before/after snapshots
+  (the SPX3 pair already taken for the spatial delta), so no second diff engine.
+  Donor: `larelgit/shards-engine` `crates/ai_core/src/tools.rs` (digest pair plus
+  `clip_changes`, `MAX_CHANGES = 60`), read 2026-10-18. Diff: good. Tier A.
+  Size S. Owns `crates/endpoint/src/receipts.rs` (`ChangeList` plus
+  `MAX_CHANGES`), the `changes` field on `TxApplyOutput` and `ChangeListDto` in
+  `crates/endpoint/src/mcp_dto.rs`, and the snapshot pair in
+  `crates/endpoint/src/scene_tools/spatial_delta.rs`. Accept: `cargo test -p
+  engine-endpoint --features mcp --lib receipt`: a one-op insert reports exactly
+  one added with revision 0 -> 1 and no truncation; a one-op move reports one
+  moved and a one-op remove reports one removed; `MAX_CHANGES + 7` rows set
+  `truncated` true while `moved` stays the full total. F2P: `TxApplyOutput`
+  carries no change list (effects, key and undo token only; `ChangeList` does not
+  exist). P2P: `cargo test -p engine-endpoint --features mcp --lib` green (both
+  tool-list bounds raised with dated reasons: the proximity bound to 53,000 at
+  52,348 measured; `TOOL_LIST_BUDGET_CHARS` 57,500 -> 59,000 after the loaded
+  list measured 56,513, 988 headroom under the 2,048 minimum);
+  `cargo clippy -p engine-endpoint --features mcp --all-targets -- -D warnings`
+  clean; golden hash unchanged. Consumer: an
+  agent reads `changes` instead of re-reading the scene. needs: none.
+  Landed 67ae5139 (reached HEAD in the auto-backup commit). `cargo test -p
+  engine-endpoint --features mcp --lib receipt` 18 passed 0 failed; full `cargo
+  test -p engine-endpoint --features mcp --lib` 628 passed 0 failed 1 ignored,
+  gh run 39152299530; `cargo clippy -p engine-endpoint --features mcp
+  --all-targets -- -D warnings` clean; `node tools/rust-quality.mjs --owned
+  crates/endpoint/src` PASS; `node tools/workspace-check.mjs` PASS; golden
+  d57b5c8ae3096614 unchanged.
 
 ### Engine review: frame and look (owner 2026-10-10, `docs/plan/render-look.md`)
 
@@ -691,7 +741,7 @@ Same source and routing as the frame section above.
   double knockouts under 20%, and slot 0's share of wins between 40% and 60%.
   F2P: today 0 decisive. P2P: `cargo test -p engine-arena --lib` green; golden
   `d57b5c8ae3096614` unchanged. Review: bodies.md G2 (EG3 receipt). needs: EG33.
-- [ ] EG44 net: rules version on the wire, window plays v2 — the window game Progress 2026-10-17: the rules version rides the lobby identity (`BuildId::of_spec` folds `MatchSpec::identity`; net `spec_lobby_refuses_other_rules_or_another_world_naming_both_digests`, 36083b4) and the window plays v2 (`into_duel` in windowed.rs and bin/arena.rs). Left: a v2 `App::new` equals `new_for_slot` test, window run x2 equal v2 hashes, the HASH-LAW note; `App::new` default stays v1 by design.
+- [x] EG44 net: rules version on the wire, window plays v2 — the window game Progress 2026-10-17: the rules version rides the lobby identity (`BuildId::of_spec` folds `MatchSpec::identity`; net `spec_lobby_refuses_other_rules_or_another_world_naming_both_digests`, 36083b4) and the window plays v2 (`into_duel` in windowed.rs and bin/arena.rs). Left: a v2 `App::new` equals `new_for_slot` test, window run x2 equal v2 hashes, the HASH-LAW note; `App::new` default stays v1 by design.
   stays on rules v1 because the LAN host replays v1 through `run_prefix`, so a
   v2 client would desync. Carry the rules version in the net session hello and
   in `run_prefix`; refuse a peer on another version with a typed error; then
@@ -701,7 +751,7 @@ Same source and routing as the frame section above.
   the typed refusal; the netgame `App::new` equals `new_for_slot` test passes
   on v2; the window arena run x2 gives equal v2 hashes. F2P: no rules version on
   the wire today. P2P: `cargo test -p engine-net --lib` green; golden
-  unchanged with a HASH-LAW note. Review: bodies.md G2. needs: EG43.
+  unchanged with a HASH-LAW note. Review: bodies.md G2. needs: EG43. Progress 2026-10-18: the constructor half lands 9e624736 - `GameConfig` cannot select v2 (both constructors pin `TABLES_VERSION_V1`), so the test `app_new_equals_new_for_slot_on_rules_v2` states it: App::new stays v1 by design, both constructors agree before the duel, and after the window's own `into_duel` step both are `FIGHT_RULES_V2` with equal spec and tick 0..8 checkpoints/hashes; HASH-LAW note added; engine-game --lib 457 passed (gh runs 39127556745, 39127861274). Left: the window arena run x2 with equal v2 hashes (real window on this PC). Landed 9e624736. window v2 run x2 equal hash ef25059b432c9193 (commands: target\release\arena.exe --staged-fight --exit / target\release\arena.exe --staged-fight --exit).
 - [x] EG45 game: the window shows balance verdicts — EG34 steps an integer Landed 1d01a41.
   `BalanceState` per slot under rules v2, but it is a private `Sim` field
   (`crates/arena/src/lib.rs`, `balance: Vec<BalanceState>`), so the window never
@@ -874,7 +924,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `capability.rs:486-489` size every node as a unit cube. P2P: `cargo test -p
   engine-editor --lib` and `-p engine-endpoint --lib` green; golden unchanged.
   Plan: `docs/plan/forge-adoption.md` AD-7. needs: none.
-- [ ] AD8 endpoint: a door for the verifiers — optional dependency on
+- [x] AD8 endpoint: a door for the verifiers — optional dependency on
   `engine-playtest` (and `engine-proof`) behind feature `verify`; a `verify`
   pack with read-only verbs `bug.replay`, `trace.summary`, `replay.verify`,
   `replay.bisect` (bodies from RB1), and a door-parity test: the same 20
@@ -890,7 +940,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   depends on `engine-playtest`; `register_look_judge` has no caller outside a
   test. P2P: `cargo test -p engine-endpoint --lib` green; default build gains
   no dependency; golden unchanged. Plan: `docs/plan/forge-adoption.md` AD-8.
-  Owner Decision 2: yes (the `verify` feature edge). needs: RB1. Progress 2026-10-18: the host half lands - engine-endpoint gains the workspace `engine-playtest` edge under `mcp`, `look_host::host_look_judge` bridges the capture/preview/q1 args through `look::judge` (codes look_capture/look_manifest), and `e2040-mcp` registers it at start so `look.judge` no longer answers unsupported; tests look_judge_real (own process) and look_judge_hook green, full endpoint mcp suite 57 lib + 2 hook + 9 doc green (gh run 39121967253). Left: the `verify` feature with engine-proof, the verify pack verbs (bug.replay, trace.summary, replay.verify, replay.bisect) and tests/door_parity.rs.
+  Owner Decision 2: yes (the `verify` feature edge). needs: RB1. Progress 2026-10-18: the host half lands - engine-endpoint gains the workspace `engine-playtest` edge under `mcp`, `look_host::host_look_judge` bridges the capture/preview/q1 args through `look::judge` (codes look_capture/look_manifest), and `e2040-mcp` registers it at start so `look.judge` no longer answers unsupported; tests look_judge_real (own process) and look_judge_hook green, full endpoint mcp suite 57 lib + 2 hook + 9 doc green (gh run 39121967253). Left: the `verify` feature with engine-proof, the verify pack verbs (bug.replay, trace.summary, replay.verify, replay.bisect) and tests/door_parity.rs. Landed acdde37e. door_parity x2 equal digests (gh runs 39139680891, 39139686099): the first 20 mirror tasks digest equal through the playtest door and the spawned e2040-mcp, and the A7 seeded tape bisects to tick 8 through stdio; feature `verify = ["mcp", "dep:engine-proof"]` (playtest already rides mcp), `packs/verify.rs` serves replay.verify/replay.bisect (playtest RB1 bodies) + bug.replay + trace.summary + verify.proof and takes the replay contract slot so each name has one owner, tool pin gains a `verify` term; endpoint --features mcp,verify lib 630 + it 57 green (39139056420, 39139056482), --features mcp suite green (39139056422), workspace-check and rust-quality PASS. The ARCHITECTURE edge and the workspace-check edge/OWN_TEST_BINARY entries ride commit 99e49fd8.
 - [ ] AD9 endpoint: door session ring with a real writer and a `door.status`
   verb — `door_dispatch` pushes one typed event per refusal and failed
   handler; play jobs push their end state; new codes go in the one observe

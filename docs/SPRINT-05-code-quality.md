@@ -82,7 +82,7 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   secret_launch.rs:164) (READER-WILD wave 51, Miri MIT). Tier B.
   Size S. Accept: Miri green scoped (core alloc_probe + site audit),
   forbid-rollout list, 0 suppressions. needs: none. (WILD.) Landed 3c5d3641. tools/miri-gate.mjs (12 node tests), tools/miri-sites.json, .github/workflows/miri.yml; mirror run 39066930973 all four jobs green; Miri covers alloc_probe, ecs Scope::spawn (2 tests) and provider test_env; the xatlas C++ and DXGI sites are mapped as skipped.
-- [ ] CQ16 ops: std-only file-snapshot + redaction helper for goldens
+- [x] CQ16 ops: std-only file-snapshot + redaction helper for goldens
   with a pending-gate (insta snapshot/redaction discipline
   reimplemented, Apache-2.0; no insta dependency, no vendored bytes).
   Tier A. Size S. Owns snapshot helper hunks in `tests/` + the proof
@@ -92,8 +92,7 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   suite slows at most 5% vs baseline with the delta printed; 0 pending
   snapshots committable. Kill: dev-dep-free std-only helper
   impossible, or proof suite slows >5%, or >0 pending snapshots
-  committable. needs: none. (WILD corner-23 Card 1.)
-  LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
+  committable. needs: none. (WILD corner-23 Card 1.) Landed f740c1aa. tests/common/mod.rs + proof_cli snapshot `proof-cli/default-text-receipt` (default_and_max_seed_have_real_machine_readable_receipts green x2 identical local, whole binary 13 passed on the runner gh 39136969584); pending case red names `.snap.new` (common::tests::mismatch_writes_the_pending_path_and_names_it, accept_rewrites_the_snapshot_and_clears_the_pending_file); tools/proof.mjs fails on any pending `.snap.new` with its path (node tests 34 pass, real file demo named tests/snapshots/proof-cli/pending-demo.snap.new); clippy -D warnings gh 39137405142; golden bytes untouched.
 - [x] CQ-NET-API3 net: single tick-rate and codec-length owner — Landed 61dc1642. scale.rs takes `TICK_HZ` from `engine_core` and the codec lengths (`SNAPSHOT_HEADER_LEN`, `SNAPSHOT_SLOT_LEN`, `STATE_DELTA_HEADER_LEN`) from `session`; no `owned copy, no import` text left in crates/net/src; `server::TICK_HZ` went with server.rs in the net slim 3151bd46. `cargo test -p engine-net --lib` 258 passed, 2 ignored, gh run 39061111700 (scale and session filter: 39 passed, gh run 39057623054).
   `scale.rs` imports the arena tick rate and the session codec lengths
   instead of parity copies; `server::TICK_HZ` re-exports the same owner.

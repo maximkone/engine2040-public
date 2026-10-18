@@ -110,6 +110,12 @@ root motion, `net` state):
   match seed, so v2 digests now include the per-slot temperaments and moved
   with that commit; v1 checkpoints and `GOLDEN_600=d57b5c8ae3096614` are
   unchanged.
+- EG44 (test + note only): `App::new` stays rules v1 by design
+  (`GameConfig::arena_config` pins `TABLES_VERSION_V1`); the window build
+  plays v2 through `into_duel` (`windowed.rs::run_windowed`,
+  `MatchSpec::duel`), so `GOLDEN_600` and the v1 arena checkpoints are
+  unchanged. Proof:
+  `cargo test -p engine-game --lib app_new_equals_new_for_slot_on_rules_v2`.
 - DSN1/DSN2 (2026-10-17): a match is one `MatchSpec` (config, rules, world;
   `crates/arena/src/spec.rs`) that the window (`App::spec`), `Server::from_spec`
   and `Client::from_spec` all build from; `MatchSpec::v1` is `LiveMatch::new`

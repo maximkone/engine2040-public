@@ -26,6 +26,11 @@ intake = ["mcp", "dep:engine-assets"]
 # Off by default: the default build carries no scripting engine (no rhai).
 rules = ["mcp", "dep:engine-rules"]
 
+# AD8 verify: the door serves the playtest and proof verifiers (replay.verify,
+# replay.bisect, bug.replay, trace.summary, verify.proof). Off by default so a
+# plain `mcp` build carries no proof crate; playtest already rides `mcp`.
+verify = ["mcp", "dep:engine-proof"]
+
 # Opt-in HTTPS for cloud LLMs: forwards to engine-provider `tls`
 # (rustls/ring plus platform roots). Default stays plain HTTP.
 tls = ["dep:engine-provider", "engine-provider/tls"]
@@ -68,6 +73,8 @@ engine-nav = { workspace = true, optional = true }
 engine-input = { workspace = true, optional = true }
 # AD8: the door hosts the real look judge (`look::judge`) under the `mcp` feature.
 engine-playtest = { workspace = true, optional = true }
+# AD8 verify: the proof crate's tape, bug and trace verifiers (feature `verify`).
+engine-proof = { workspace = true, optional = true }
 # Cook-time geometry (feature `geo`); never in the tick graph.
 engine-geo = { workspace = true, optional = true }
 # The intake verb cooks generated meshes (cook-time only).

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, bookBuildVerdict, driftVerdict, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, ranAtLeastOneTest, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestTestCommand, packageNameOf, parseProofArgs, runsToolTests, toolTestSummary } from "./proof.mjs";
+import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, bookBuildVerdict, driftVerdict, findPendingSnapshots, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, ranAtLeastOneTest, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestTestCommand, packageNameOf, parseProofArgs, PENDING_SNAPSHOT_SUFFIX, pendingSnapshotVerdict, runsToolTests, toolTestSummary } from "./proof.mjs";
 
 test("parseProofArgs: empty and single-flag runs pass through", () => {
   assert.deepEqual(parseProofArgs([]), []);
@@ -346,4 +346,34 @@ test("parityVerdict: the canary is green only when the seeded divergence is caug
   const missed = parityVerdict({ status: 0, stdout: PARITY_CLEAN }, { canary: true });
   assert.equal(missed.ok, false);
   assert.match(missed.line, /^canary NOT caught: /);
+});
+
+test("pendingSnapshotVerdict: any .snap.new is RED and every pending path is named", () => {
+  assert.equal(PENDING_SNAPSHOT_SUFFIX, ".snap.new");
+  const clean = pendingSnapshotVerdict(["tests/snapshots/a.snap", "tests/snapshots/b.snap"]);
+  assert.equal(clean.ok, true);
+  assert.deepEqual(clean.pending, []);
+  const red = pendingSnapshotVerdict(["tests/snapshots/z.snap.new", "tests/snapshots/a.snap.new", "tests/snapshots/z.snap.new"]);
+  assert.equal(red.ok, false);
+  assert.deepEqual(red.pending, ["tests/snapshots/a.snap.new", "tests/snapshots/z.snap.new"]);
+  assert.match(red.line, /tests\/snapshots\/a\.snap\.new, tests\/snapshots\/z\.snap\.new/);
+  assert.match(red.line, /E2040_ACCEPT_SNAPSHOTS=1/);
+  assert.equal(pendingSnapshotVerdict([]).ok, true);
+});
+
+test("findPendingSnapshots: nested pending files are found, target and .git are not scanned", () => {
+  const dir = mkdtempSync(join(tmpdir(), "engine2040-snap-gate-"));
+  try {
+    mkdirSync(join(dir, "tests", "snapshots", "proof-cli"), { recursive: true });
+    mkdirSync(join(dir, "crates", "game", "tests", "it"), { recursive: true });
+    mkdirSync(join(dir, "target", "x"), { recursive: true });
+    writeFileSync(join(dir, "tests", "snapshots", "proof-cli", "ok.snap"), "kept\n");
+    writeFileSync(join(dir, "tests", "snapshots", "proof-cli", "ok.snap.new"), "pending\n");
+    writeFileSync(join(dir, "crates", "game", "tests", "it", "b.snap.new"), "pending\n");
+    writeFileSync(join(dir, "target", "x", "ignored.snap.new"), "pending\n");
+    assert.deepEqual(findPendingSnapshots(dir), ["crates/game/tests/it/b.snap.new", "tests/snapshots/proof-cli/ok.snap.new"]);
+    assert.equal(findPendingSnapshots(join(dir, "nothing-here")).length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

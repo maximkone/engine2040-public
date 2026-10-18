@@ -147,7 +147,7 @@
   fixing Bevy Solari in the viewer (Maxim decides); slower means the measured gap is written down and the RT rows stay
   as they are. needs: BV2.
   LATER: parked 2026-10-08 (viewer dropped 2026-10-06, crates/viewer gone, rot02 PARK; unpark by deleting this line).
-- [ ] NS31a2 material: the editor document holds the material table and edits it with undo — add to `Document` in
+- [x] NS31a2 material: the editor document holds the material table and edits it with undo — add to `Document` in
   `crates/editor/src/commands.rs` a `materials: engine_material::MaterialSet` (default `MaterialSet::siege_kit()`;
   `crates/editor/Cargo.toml` takes `engine-material`, add the edge `engine-editor -> engine-material` to
   `allowedEdges` in `tools/workspace-check.mjs`), and two ops `Op::PutMaterial { text }` and `Op::SetMaterialParam
@@ -159,7 +159,14 @@
   and `sim_digest` exactly; `SetMaterialParam look.specular_roughness 0.08` then undo gives the old digests;
   `SetMaterialParam body.toughness 9` moves `sim_digest` only; a bad value is refused with the record path and the
   document revision does not change); P2P `cargo test -p engine-editor --lib` green, golden `d57b5c8ae3096614`
-  unchanged. needs: none.
+  unchanged. needs: none. Landed 781b094. `cargo test -p engine-editor` PASS on the runner, run 39176088089:
+  tests/material_ops.rs 7 passed (put_then_undo_restores_both_digests_and_the_table,
+  set_material_param_look_edit_undoes_to_the_old_digests,
+  set_material_param_body_edit_moves_the_sim_digest_only,
+  a_bad_value_is_refused_with_the_record_path_and_holds_the_revision, remove_last_*), lib suite green. The
+  batch digest moved to `crates/editor/src/commands/digest.rs` and the WAL/audit copies were dropped, so
+  rust-quality engine-editor PASS (big_files 0, dup 0, casts 141). Golden not on this path (editor/material
+  only); `golden_hash_untouched` green at run 39175013886.
 - [x] NS31b1 assets: cook the two missing texture slots — in `crates/assets/src/cooked.rs` add `TextureSlot::Occlusion` Progress 2026-10-17: TextureSlot::Occlusion and Emissive cook (cooked.rs, texture.rs, five_slots_round_trip passes in gh-check run 39057512389 engine-assets --lib); left: the same run has 1 red test, archive::tests::stage_refuses_an_archive_past_the_offset_limit (archive_fits(usize::MAX, usize::MAX, usize::MAX)), so the P2P engine-assets green bar fails; the bundle digest check was not seen.
   (linear, red channel) and `TextureSlot::Emissive` (sRGB, linearized on cook like `BaseColor`; see
   `TextureEncoding`), handle both in `cook_texture` (`crates/assets/src/texture.rs`, line 96) and in every
@@ -187,7 +194,10 @@
   it). Tier A. Size M. Owns `crates/material/src/compile.rs`. Accept: F2P `cargo test -p engine-material --lib
   compile` (all 21 records of `MaterialSet::shipped()` compile to non-empty WGSL, keys equal x2, a coated record
   has a different key and strictly more bindings than the same record uncoated); P2P `cargo test -p engine-material`
-  green, golden unchanged. needs: NS31b1.
+  green, golden unchanged. needs: NS31b1. Progress 2026-10-19: owner: the
+  Accept line says a coated record has "strictly more bindings" but coat adds
+  no texture slot; keep the wording or change it to what the code does?
+  Question in `docs/plan/2026-10-19-owner-queue.md`.
 - [x] NS31c2 render: a pipeline from the generated WGSL — new file `crates/render/src/material_pipeline.rs` (window Progress 2026-10-17: crates/render/src/material_pipeline.rs landed as a std-only pipeline binning module (lobe plus slot key, MAX_MATERIAL_PIPELINES 12, bins_come_back_in_stable_order); left: no pipeline_for, no wgpu pipeline from generated WGSL, no 21-record GPU build test.
   feature) with `pub fn pipeline_for(device, compiled: &engine_material::compile::Compiled) ->
   Result<wgpu::RenderPipeline, MaterialPipelineError>` that creates the shader module from `compiled.wgsl`,

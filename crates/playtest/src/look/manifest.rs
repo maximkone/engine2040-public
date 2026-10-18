@@ -272,7 +272,7 @@ fn read_text(cursor: &mut Cursor<'_>) -> Result<String, ParseError> {
                 let ch = text
                     .chars()
                     .next()
-                    .ok_or(ParseError::EndOfInput { pos: cursor.pos() })?;
+                    .ok_or_else(|| ParseError::EndOfInput { pos: cursor.pos() })?;
                 out.push(ch);
                 cursor.advance(ch.len_utf8());
             }
@@ -299,7 +299,7 @@ fn read_escape(cursor: &mut Cursor<'_>) -> Result<char, ParseError> {
                 let digit = cursor
                     .peek()
                     .and_then(|b| char::from(b).to_digit(16))
-                    .ok_or(ParseError::BadHex { pos: cursor.pos() })?;
+                    .ok_or_else(|| ParseError::BadHex { pos: cursor.pos() })?;
                 code = code * 16 + digit;
                 cursor.bump();
             }

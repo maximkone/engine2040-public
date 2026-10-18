@@ -72,7 +72,7 @@ fn foldable(journal: &Journal, doc: &Document, key: u64, batch: &Batch) -> bool 
     if !journal.groups.is_empty() || batch.ops.len() != 1 {
         return false;
     }
-    let op = batch.ops[0];
+    let op = &batch.ops[0];
     if !matches!(op, Op::SetLocal { .. } | Op::SetMaterial { .. }) {
         return false;
     }
@@ -92,8 +92,8 @@ fn foldable(journal: &Journal, doc: &Document, key: u64, batch: &Batch) -> bool 
     {
         return false;
     }
-    let first = entry.forward[0];
-    if first.id() != op.id() || std::mem::discriminant(&first) != std::mem::discriminant(&op) {
+    let first = &entry.forward[0];
+    if first.id() != op.id() || std::mem::discriminant(first) != std::mem::discriminant(op) {
         return false;
     }
     doc.revision.saturating_sub(entry.result_revision) <= COALESCE_WINDOW
@@ -161,6 +161,7 @@ fn fold_tick(
     doc.hierarchy = staged.tree;
     doc.materials = staged.materials;
     doc.components = staged.components;
+    doc.material_set = staged.material_set;
     doc.revision = result_revision;
     let mut keys = top.keys;
     if !keys.contains(&batch.idempotency_key) {
@@ -206,6 +207,7 @@ fn commit_staged(
     doc.hierarchy = staged.tree;
     doc.materials = staged.materials;
     doc.components = staged.components;
+    doc.material_set = staged.material_set;
     doc.revision = result_revision;
     let group = journal
         .groups

@@ -906,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn cascade_splits_cover_range_without_gaps() {
+    fn practical_splits_cover_range_without_gaps() {
         // Exact assertion: endpoints reproduce the inputs, every interior
         // split is strictly inside its neighbors, so [near, far) tiles with
         // no gap a sample could fall through and no overlap double-covering.

@@ -995,8 +995,8 @@ impl Presenter {
         // Warm every scene variant before the first frame over
         // the real forward shader bytes, so the camera walk never
         // compiles mid-frame. Blobs are cache-residency markers keyed
-        // by (shader, defines, layout); device variant pipelines ride
-        // their own pass rows. Load-path only: allocates the warm set.
+        // by (shader, defines, layout, toolchain); device variant pipelines
+        // ride their own pass rows. Load-path only: allocates the warm set.
         let pipeline_keys = super::super::scene_variant_keys_for(
             crate::v1_gpu::FORWARD_PBR_WGSL.as_bytes(),
             super::super::OPT19_PIPELINE_LAYOUT,

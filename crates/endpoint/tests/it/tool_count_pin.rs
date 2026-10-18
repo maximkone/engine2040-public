@@ -17,8 +17,11 @@ use engine_endpoint::{
 /// `build.web`, `serve.web`, `browser.capture` and `browser.input`; the physics
 /// pack adds `physics.read`, `physics.raycast` and `physics.shapecast`; the play
 /// pack adds `play.step_until`, `input.inject` and `state.digest`). The `rules` feature adds 3 (`rules.set`,
-/// `rules.test`, `rules.explain`), the `intake` feature adds 1 (`asset.intake`);
-/// one arm per combination keeps the pin exact under every feature set.
+/// `rules.test`, `rules.explain`), the `intake` feature adds 1 (`asset.intake`),
+/// and the `verify` feature adds 3 (`bug.replay`, `trace.summary`,
+/// `verify.proof`; it also moves `replay.verify`/`replay.bisect` into the
+/// verify pack, so the count itself does not move for those two). One arm per
+/// combination keeps the pin exact under every feature set.
 /// Measured 2026-10-17 with the door probe (`api.load` per pack): 42 pack
 /// verbs. The `b2f8a5cf` replay/play-ext landing added four verbs and bumped
 /// the pin by two, so this corrects the inherited two-verb drift; the physics
@@ -28,14 +31,10 @@ use engine_endpoint::{
 /// `wound.table.get` (BX39, the break pack's fourth verb) moved every arm up by one.
 /// `scene.pick` (EV21, the scene pack's eighth verb) moved every arm up by one.
 /// `play.sweep` (GS33, the play pack's fourth verb) moved every arm up by one.
-#[cfg(not(any(feature = "rules", feature = "intake")))]
-const EXPECTED_ROUTER: usize = 65;
-#[cfg(all(feature = "rules", not(feature = "intake")))]
-const EXPECTED_ROUTER: usize = 68;
-#[cfg(all(feature = "intake", not(feature = "rules")))]
-const EXPECTED_ROUTER: usize = 66;
-#[cfg(all(feature = "rules", feature = "intake"))]
-const EXPECTED_ROUTER: usize = 69;
+const EXPECTED_ROUTER: usize = 65
+    + if cfg!(feature = "rules") { 3 } else { 0 }
+    + if cfg!(feature = "intake") { 1 } else { 0 }
+    + if cfg!(feature = "verify") { 3 } else { 0 };
 
 #[test]
 fn frozen_registry_pins_26_and_router_is_pinned() {

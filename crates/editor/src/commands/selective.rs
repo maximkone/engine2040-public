@@ -30,7 +30,7 @@ pub enum ConflictReason {
 
 /// One selected op left in place plus why. The selective-undo panel shows these;
 /// [`apply_selective_undo`] never rewrites them.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Conflict {
     /// The selected forward op that cannot be reverted alone.
     pub op: Op,
@@ -51,7 +51,7 @@ pub struct UndoPreview {
 
 /// What rejected a selective undo. Unknown receipts write nothing; a failed
 /// revert batch also writes nothing (the underlying [`apply`] is atomic).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UndoError {
     /// No applied batch carries this receipt id.
     UnknownReceipt {
@@ -130,13 +130,13 @@ pub fn undo_select(journal: &Journal, receipt_ids: &[u64]) -> Result<UndoPreview
             if let Some(reason) = direct[i] {
                 keep[i] = false;
                 preview.conflicts.push(Conflict {
-                    op: entry.forward[i],
+                    op: entry.forward[i].clone(),
                     reason,
                 });
             } else if !after_ok {
                 keep[i] = false;
                 preview.conflicts.push(Conflict {
-                    op: entry.forward[i],
+                    op: entry.forward[i].clone(),
                     reason: ConflictReason::DependsOnLater,
                 });
             }
@@ -151,7 +151,7 @@ pub fn undo_select(journal: &Journal, receipt_ids: &[u64]) -> Result<UndoPreview
             if keep[i] {
                 preview
                     .reverted_ops
-                    .extend(entry.inverse_groups[i].iter().copied());
+                    .extend(entry.inverse_groups[i].iter().cloned());
             }
         }
     }
@@ -168,8 +168,8 @@ fn direct_conflicts(
     let entry = &journal.past[index];
     let mut kids_per_op: Vec<Vec<ObjectId>> = vec![Vec::new(); entry.forward.len()];
     for (i, op) in entry.forward.iter().enumerate() {
-        if let Op::Remove { id } = *op {
-            kids_per_op[i] = removed_kids(entry, i, id);
+        if let Op::Remove { id } = op {
+            kids_per_op[i] = removed_kids(entry, i, *id);
         }
     }
     let mut out = vec![None; entry.forward.len()];
@@ -179,7 +179,7 @@ fn direct_conflicts(
         }
         for later_op in &later.1.forward {
             for (i, op) in entry.forward.iter().enumerate() {
-                if let Some(reason) = classify_pair(*op, *later_op, &kids_per_op[i]) {
+                if let Some(reason) = classify_pair(op, later_op, &kids_per_op[i]) {
                     out[i] = Some(match out[i] {
                         Some(ConflictReason::DependsOnLater) => ConflictReason::DependsOnLater,
                         Some(ConflictReason::OverwrittenByLater) => match reason {
@@ -203,9 +203,9 @@ fn removed_kids(entry: &JournalEntry, group: usize, removed: ObjectId) -> Vec<Ob
     let mut kids = Vec::new();
     if let Some(inverses) = entry.inverse_groups.get(group) {
         for op in inverses {
-            if let Op::Reparent { id, new_parent } = *op {
-                if new_parent == removed && !kids.contains(&id) {
-                    kids.push(id);
+            if let Op::Reparent { id, new_parent } = op {
+                if *new_parent == removed && !kids.contains(id) {
+                    kids.push(*id);
                 }
             }
         }
@@ -215,8 +215,8 @@ fn removed_kids(entry: &JournalEntry, group: usize, removed: ObjectId) -> Vec<Ob
 
 /// One later op's hazard over one selected op, if any.
 fn classify_pair(
-    selected_op: Op,
-    later_op: Op,
+    selected_op: &Op,
+    later_op: &Op,
     selected_kids: &[ObjectId],
 ) -> Option<ConflictReason> {
     // A later batch parenting under the selected node assumed it where it is.
@@ -262,6 +262,13 @@ fn classify_pair(
             | Op::RemoveComponent { .. },
             Op::Insert { .. },
         ) => Some(ConflictReason::DependsOnLater),
+        // Material-table ops touch no node (their target id is nil), so only
+        // two table ops reach this arm. A later table edit supersedes an
+        // earlier one: pin the earlier edit instead of reverting it blind.
+        (Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial, _)
+        | (_, Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial) => {
+            Some(ConflictReason::OverwrittenByLater)
+        }
     }
 }
 

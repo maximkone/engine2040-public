@@ -81,7 +81,7 @@ use spatial_checks::{
     index_of, partition, staged_names_sizes, table_allowance, table_page, wide, worst_actors,
 };
 pub use spatial_checks::{SizeSource, SkippedCheck, SpatialCounts, WorstActor};
-pub(crate) use spatial_delta::{delta_after, delta_before, spatial_delta};
+pub(crate) use spatial_delta::{change_list, op_ids, spatial_delta};
 use spatial_verdicts::{check_epsilon, staged_roles, view, Asks};
 
 /// MCP tool name for the bounded scene brief (read-only).
@@ -250,6 +250,17 @@ fn check_batch_allowed(batch: &Batch) -> Result<(), McpToolError> {
                         "scene op `component` for node {id} is denied; allowed scene ops: [{}] \
                          (scene.place moves roots only and edits no components; \
                          edit components through tx.preview, then place again)",
+                        SCENE_ALLOWED_OPS.join(", ")
+                    ),
+                ));
+            }
+            Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
+                return Err(McpToolError::new(
+                    "denied_op",
+                    format!(
+                        "scene op `material_table` is denied; allowed scene ops: [{}] \
+                         (scene.place moves roots only and edits no material records; \
+                         edit records through tx.preview, then place again)",
                         SCENE_ALLOWED_OPS.join(", ")
                     ),
                 ));

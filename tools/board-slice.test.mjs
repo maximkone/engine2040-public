@@ -539,3 +539,91 @@ test("--next --json prints the picked slice as JSON; --next runs alone", () => {
   assert.equal(clash.code, 2);
   assert.match(clash.err, /--next runs alone/);
 });
+
+// 2026-10-18: the head regex required a digit right after the letters, so
+// E-* (E-4, E-STUCKDG), BET-* (BET-AX13) and CQ-NET-* rows were invisible to
+// every list mode. One grammar now reads plain and hyphenated ids alike.
+const HYPHEN_BOARD = [
+  "# SPRINT",
+  "## Board",
+  "### Finish line",
+  "- [x] A1 core: done.",
+  "- [ ] E-4 render: short hyphenated id, needs: A1.",
+  "- [ ] BET-AX13 playtest: two hyphens, needs: E-4.",
+  "- [ ] CQ-NET-API5 net: three segments, needs: none.",
+  "- [ ] E-STUCKDG research: hyphenated and digit-free, needs: A1.",
+  "",
+].join("\n");
+// A list line starts with the padded id, then open/done, then the title.
+const ID_LINE = /^[A-Z][A-Z0-9-]*\s+(?:open|done)\s/;
+const listIds = (out) => out.split("\n").filter((l) => ID_LINE.test(l)).map((l) => l.split(/\s+/)[0]);
+
+test("parseBoard/needsOf/rowReady read hyphenated ids first-class", () => {
+  const { tasks, order } = parseBoard(HYPHEN_BOARD);
+  assert.deepEqual(order, ["A1", "E-4", "BET-AX13", "CQ-NET-API5", "E-STUCKDG"], "no hyphenated id is dropped");
+  assert.equal(tasks.size, 5, "no id merged or duplicated");
+  assert.deepEqual(needsOf(tasks.get("BET-AX13")), ["E-4"], "a needs: on a hyphenated id resolves");
+  assert.deepEqual(needsOf(tasks.get("E-STUCKDG")), ["A1"], "a digit-free hyphenated id parses too");
+  const ready = order.map((id) => tasks.get(id)).filter((t) => rowReady(tasks, t)).map((t) => t.id);
+  assert.deepEqual(ready, ["E-4", "CQ-NET-API5", "E-STUCKDG"], "E-4 is ready; BET-AX13 waits on it");
+  assert.equal(blockedBy(tasks, tasks.get("BET-AX13")), "E-4");
+});
+
+test("--ready/--ready --open/--find and the <ID> slice see hyphenated rows", () => {
+  const root = boardRoot(HYPHEN_BOARD);
+  const ready = runIn(root, ["--ready"]);
+  assert.equal(ready.code, 0);
+  assert.deepEqual(listIds(ready.out), ["E-4", "CQ-NET-API5", "E-STUCKDG"]);
+  assert.match(ready.out, /^3 row\(s\)$/m);
+  const open = runIn(root, ["--ready", "--open"]);
+  assert.deepEqual(listIds(open.out), ["E-4", "BET-AX13", "CQ-NET-API5", "E-STUCKDG"]);
+  assert.match(open.out, /^BET-AX13 +open .*\[waits: E-4\]$/m);
+  const found = runIn(root, ["--find", "cq-net-api5"]);
+  assert.deepEqual(listIds(found.out), ["CQ-NET-API5"], "case-insensitive");
+  const slice = runIn(root, ["BET-AX13"]);
+  assert.equal(slice.code, 0, `unknown row would exit 1: ${slice.err}`);
+  assert.match(slice.out, /^# BET-AX13 slice$/m);
+  assert.match(slice.out, /- \[ \] BET-AX13 playtest: two hyphens, needs: E-4\./, "row verbatim");
+});
+
+test("--focus and the archive reader take hyphenated ids too", () => {
+  const root = boardRoot(HYPHEN_BOARD);
+  writeFileSync(join(root, "docs", "FOCUS.md"), "## Now\n\nRows: BET-AX13, E-4; CQ-NET-API5.\n");
+  assert.deepEqual(focusNowIds("## Now\n\nRows: BET-AX13, E-4; CQ-NET-API5.\n"), ["BET-AX13", "E-4", "CQ-NET-API5"]);
+  const focus = runIn(root, ["--focus"]);
+  assert.equal(focus.code, 0);
+  assert.deepEqual(listIds(focus.out), ["E-4", "CQ-NET-API5"], "BET-AX13 waits; E-4 also stands as a Now row");
+  assert.equal(focus.err, "", "every Now id is on the board");
+  const archive = ["## SPRINT-01-rome-first.md", "", "- [x] E-DOGFOOD206 dispatch: done and moved.", "- [ ] E-ZOO18 dispatch: still open, never counts.", ""].join("\n");
+  const index = ["# SPRINT", "## Board", "### Finish line", "- [ ] E-DIRT83 dispatch: needs an archived hyphenated row, needs: E-DOGFOOD206.", ""].join("\n");
+  const moved = boardRoot(index, archive);
+  const archived = archivedDoneRows(moved);
+  assert.deepEqual([...archived.keys()], ["E-DOGFOOD206"], "only the [x] hyphenated row counts");
+  const { tasks } = parseBoard(loadBoardText(moved), archived);
+  assert.equal(tasks.get("E-DOGFOOD206").done, true);
+  assert.equal(rowReady(tasks, tasks.get("E-DIRT83")), true);
+});
+
+// The 2026-10-05 size-cap prune and the 2026-10-02 board diet (F06) moved done
+// rows out of the board whole; each file's header promises its moved ids keep
+// every needs: target resolving. Both are read for ticks only.
+test("done rows in the older board snapshots still tick a needs:", () => {
+  const root = boardRoot([
+    "# SPRINT",
+    "## Board",
+    "### Finish line",
+    "- [ ] L1 net: needs a diet-archived row, needs: OLD1.",
+    "- [ ] L2 net: needs a prune-archived row, needs: E-DOGFOOD206.",
+    "",
+  ].join("\n"));
+  writeFileSync(join(root, "docs", "SPRINT-ARCHIVE.md"), "- [x] OLD1 net: moved whole by the diet.\n");
+  writeFileSync(join(root, "docs", "archive", "SPRINT-2026-10-05.md"), "- [x] E-DOGFOOD206 dispatch: moved by the size-cap prune.\n  second line of E-DOGFOOD206.\n");
+  const archived = archivedDoneRows(root);
+  assert.deepEqual([...archived.keys()].sort(), ["E-DOGFOOD206", "OLD1"]);
+  const { tasks, order } = parseBoard(loadBoardText(root), archived);
+  assert.equal(rowReady(tasks, tasks.get("L1")), true, "a diet-archived done row ticks its dependent");
+  assert.equal(rowReady(tasks, tasks.get("L2")), true, "a prune-archived hyphenated done row does too");
+  assert.deepEqual(order, ["L1", "L2"], "the archived rows never join the order");
+  const ready = runIn(root, ["--ready"]);
+  assert.deepEqual(listIds(ready.out), ["L1", "L2"], "and are never listed");
+});

@@ -103,7 +103,7 @@ pub enum ForkProposal {
 }
 
 /// Typed fork failures: bounded diagnostics, never panics.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ForkError {
     /// Fighter slot outside `0..config.fighters`, culprit carried.
     UnknownFighter(u8),

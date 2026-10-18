@@ -222,7 +222,7 @@ pub enum TuneLane {
 }
 
 /// What rejected a shell edit. Command failures name the culprit node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellError {
     /// An inspector edit needs a selected node first.
     NoSelection,

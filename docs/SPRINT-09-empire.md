@@ -450,11 +450,16 @@ action or line, so replays reproduce without a provider.
   parsing only; perf `seal_row` HMAC deferred). Accept: proof/playtest/perf
   forgery suites green + `node tools/rust-quality.mjs --crate engine-proof`
   PASS (dup 0 on seal helpers) + golden x2 unchanged. needs: ADV55a.
-- [ ] AQ2 arena-errors: derive `Eq` (+`Hash` where `Copy`) on Progress 2026-10-17: ForkError and DecodeError already derive Eq; ArenaError (integer variants only) still derives PartialEq without Eq and none of the three derive Hash.
+- [x] AQ2 arena-errors: derive `Eq` (+`Hash` where `Copy`) on Progress 2026-10-17: ForkError and DecodeError already derive Eq; ArenaError (integer variants only) still derives PartialEq without Eq and none of the three derive Hash.
   `ArenaError`/`ForkError`/`DecodeError` to match the combat error
   convention. Tier C. Size XS. Owns the three enum headers only.
   Accept: arena suite green + no other file touched + quality PASS.
-  needs: none. (API-REVIEW wave 53.)
+  needs: none. (API-REVIEW wave 53.) Landed 562bf43. `ArenaError` now derives
+  Eq + Hash, `ForkError` and `DecodeError` gain Hash; three enum headers only,
+  no other file touched. `cargo test -p engine-arena` PASS on the runner, run
+  39175085159 (216 lib passed, 2 ignored, 7 doctests); rust-quality scoped to the
+  three files PASS (39 crates, 0 regressions; another session's engine-editor WIP
+  warns as foreign debt).
 - [x] FB2 proof: version/cook receipt — stable prefab/scene/asset Landed 386ee01a.
   versions, migration fixtures, typed failed-import refusals,
   incremental cook bytes x2, reimport + project move with no

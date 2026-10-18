@@ -143,8 +143,8 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// stays at 43514 so the number is comparable to the old 21-tool door, and the
 /// ledger gate now measures whatever a session advertises. The frozen
 /// [`crate::tools::TOOLS`] registry now holds 26 tools.
-/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500.
-pub const TOOL_LIST_BUDGET_CHARS: usize = 57_500;
+/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000.
+pub const TOOL_LIST_BUDGET_CHARS: usize = 59_000;
 
 /// The thirteen core tools, in contract order. The router holds exactly these;
 /// every other verb is a pack verb.
@@ -331,8 +331,9 @@ pub fn negotiate_version(requested: &ProtocolVersion) -> Result<ProtocolVersion,
 mod mcp_dto;
 
 pub use self::mcp_dto::{
-    ApprovalDto, OpDto, PoseDto, SceneObjectDto, SceneReadArgs, SceneReadOutput, SpatialDeltaDto,
-    TxApplyArgs, TxApplyOutput, TxPreviewArgs, TxPreviewOutput, TxUndoArgs, TxUndoOutput,
+    ApprovalDto, ChangeListDto, OpDto, PoseDto, SceneObjectDto, SceneReadArgs, SceneReadOutput,
+    SpatialDeltaDto, TxApplyArgs, TxApplyOutput, TxPreviewArgs, TxPreviewOutput, TxUndoArgs,
+    TxUndoOutput,
 };
 
 // ---------------------------------------------------------------------------
@@ -571,7 +572,7 @@ pub(crate) fn build_batch(
 /// Map a command refusal to a tool error with the legal values attached.
 /// Crate-visible: the scene tools map staging failures the same way.
 pub(crate) fn batch_error(error: &commands::BatchError) -> McpToolError {
-    match *error {
+    match error {
         commands::BatchError::StaleRevision { expected, got } => McpToolError::new(
             "stale_revision",
             format!(
@@ -601,7 +602,7 @@ pub(crate) fn batch_error(error: &commands::BatchError) -> McpToolError {
 /// snapshotted before the gated apply, so denials name what is allowed.
 /// Crate-visible: `scene.place` applies through the same gate.
 pub(crate) fn cap_error(error: &CapError, granted: &[&str]) -> McpToolError {
-    match *error {
+    match error {
         CapError::ForgedApproval => McpToolError::new(
             "forged_approval",
             "approval does not match this session and batch; \
@@ -647,7 +648,7 @@ pub(crate) fn cap_error(error: &CapError, granted: &[&str]) -> McpToolError {
                  document unchanged"
             ),
         ),
-        CapError::Command(inner) => batch_error(&inner),
+        CapError::Command(inner) => batch_error(inner),
     }
 }
 
@@ -899,6 +900,9 @@ impl ServerState {
         // before the gated apply, then seal the receipt after it lands (same lock, no
         // interleaved write, so the gate is fresh; ledger replays keep the retained receipt).
         let pre_revision = self.doc.revision;
+        // One before snapshot serves the change list and, when asked, the
+        // spatial delta: a landed write takes one pair.
+        let before = super::scene_tools::snapshot(&self.doc);
         let proposal = super::door_dispatch::witness_proposal_for_apply(self, &batch)?;
         let approval = Approval {
             session: self.session,
@@ -907,7 +911,6 @@ impl ServerState {
             expiry_tick: args.approval.expiry_tick,
         };
         let granted = granted_ops(&self.cap);
-        let before = super::scene_tools::delta_before(&self.doc, args.delta);
         let applied = capability::apply_gated(
             &mut self.doc,
             &mut self.journal,
@@ -920,13 +923,19 @@ impl ServerState {
         // A landed write is a watch event: the digest cache moves, the hub fans it out.
         self.refresh_watch();
         super::door_dispatch::witness_seal_apply(self, pre_revision, &proposal)?;
-        let spatial_delta = super::scene_tools::delta_after(before, &self.doc, &batch);
+        let after = super::scene_tools::snapshot(&self.doc);
+        let changes =
+            super::scene_tools::change_list(&before, &after, pre_revision, applied.revision);
+        let spatial_delta = (args.delta != Some(false)).then(|| {
+            super::scene_tools::spatial_delta(&before, &after, &super::scene_tools::op_ids(&batch))
+        });
         Ok(TxApplyOutput {
             revision: applied.revision,
             effects: applied.effects,
             key: applied.key,
             journal_index: applied.journal_index as u64,
             undo_token: applied.key,
+            changes: changes.into(),
             spatial_delta,
         })
     }
@@ -1474,10 +1483,22 @@ mod tests {
         assert_eq!(page.objects[0].parent, None);
         assert_eq!(page.objects[0].local, pose(1.0));
 
-        // Same key plus same payload replays the recorded receipt.
+        // Same key plus same payload replays the recorded receipt; the
+        // change list is honest that the replay moved no new revision.
         let replayed =
             apply(&server, 0, 1, ops.clone(), drafted.approval.clone()).expect("idempotent replay");
-        assert_eq!(replayed, landed);
+        assert_eq!(replayed.revision, landed.revision);
+        assert_eq!(replayed.effects, landed.effects);
+        assert_eq!(replayed.key, landed.key);
+        assert_eq!(replayed.undo_token, landed.undo_token);
+        assert_eq!(replayed.spatial_delta, landed.spatial_delta);
+        assert!(
+            replayed.changes.added == 0
+                && replayed.changes.removed == 0
+                && replayed.changes.moved == 0
+                && replayed.changes.rows.is_empty(),
+            "a replay moves no revision, got {replayed:?}"
+        );
         assert_eq!(read(&server, None, None).revision, 1);
 
         // Undo reverts the hierarchy as a new revision, keeping a token link.
@@ -1494,6 +1515,76 @@ mod tests {
         assert_eq!(back.revision, 2);
         assert_eq!(back.total, 0);
         assert_eq!(back.objects, empty.objects);
+    }
+
+    #[test]
+    fn tx_apply_receipt_reports_exactly_one_change() {
+        let server = test_server();
+        let id = ObjectId::new();
+        let ops = vec![insert_dto(&id, &nil_id(), 1.0)];
+        let drafted = preview(&server, 0, 71, ops.clone()).expect("preview inserts");
+        let landed = apply(&server, 0, 71, ops, drafted.approval).expect("apply inserts");
+        assert_eq!(landed.revision, 1);
+        // One insert is exactly one change: no phantom row, counts exact.
+        let changes = &landed.changes;
+        assert_eq!(changes.revision_before, 0);
+        assert_eq!(changes.revision_after, 1);
+        assert_eq!(
+            (changes.added, changes.removed, changes.moved),
+            (1, 0, 0),
+            "one insert adds exactly one object"
+        );
+        assert_eq!(changes.rows, vec![format!("added {id}")]);
+        assert!(!changes.truncated, "one change is under the cap");
+    }
+
+    #[test]
+    fn tx_apply_receipt_counts_a_move_and_a_remove() {
+        let server = test_server();
+        let a = ObjectId::new();
+        let b = ObjectId::new();
+        let seed = vec![
+            insert_dto(&a, &nil_id(), 1.0),
+            insert_dto(&b, &nil_id(), 5.0),
+        ];
+        let drafted = preview(&server, 0, 72, seed.clone()).expect("seed previews");
+        let seeded = apply(&server, 0, 72, seed, drafted.approval).expect("seed lands");
+        assert_eq!((seeded.changes.added, seeded.changes.removed), (2, 0));
+
+        // A move of `a` by itself: exactly one moved, no add or remove.
+        let move_ops = vec![OpDto::SetLocal {
+            id: a.to_string(),
+            local: pose(2.0),
+        }];
+        let drafted = preview(&server, 1, 73, move_ops.clone()).expect("move previews");
+        let moved = apply(&server, 1, 73, move_ops, drafted.approval).expect("move lands");
+        assert_eq!(moved.changes.revision_before, 1);
+        assert_eq!(moved.changes.revision_after, 2);
+        assert_eq!(
+            (
+                moved.changes.added,
+                moved.changes.removed,
+                moved.changes.moved
+            ),
+            (0, 0, 1),
+            "one move is exactly one moved object"
+        );
+        assert_eq!(moved.changes.rows, vec![format!("moved {a}")]);
+
+        // A remove of `b`: exactly one removed.
+        let remove_ops = vec![OpDto::Remove { id: b.to_string() }];
+        let drafted = preview(&server, 2, 74, remove_ops.clone()).expect("remove previews");
+        let removed = apply(&server, 2, 74, remove_ops, drafted.approval).expect("remove lands");
+        assert_eq!(
+            (
+                removed.changes.added,
+                removed.changes.removed,
+                removed.changes.moved
+            ),
+            (0, 1, 0),
+            "one remove is exactly one removed object"
+        );
+        assert_eq!(removed.changes.rows, vec![format!("removed {b}")]);
     }
 
     #[test]
@@ -1824,6 +1915,11 @@ mod tests {
                 Op::SetMaterial { .. } => "set_material",
                 Op::SetComponent { .. } => "set_component",
                 Op::RemoveComponent { .. } => "remove_component",
+                // The door's DTOs cover the node ops; the material-table ops
+                // are not on the wire yet.
+                Op::PutMaterial { .. } => "put_material",
+                Op::SetMaterialParam { .. } => "set_material_param",
+                Op::RemoveLastMaterial => "remove_last_material",
             };
             let tag = match dto {
                 OpDto::Insert { .. } => "insert",
@@ -2155,8 +2251,10 @@ mod tests {
         // `delta` flags) took the default list to 47.4k before trimming: bound 45_500 -> 47_500.
         // 2026-10-18 (backlog wave 2): five query kinds, role triage and verdict rows: 47_500 -> 48_500.
         // 2026-10-18 (endpoint wave): `scene.pick` took the default list to 50.9k: bound 48_500 -> 51_500.
+        // 2026-10-18 (AX24): the `tx.apply` change list (AX24 `ChangeListDto`, revisions,
+        // counts and rows) took the default list to 52.3k: bound 51_500 -> 53_000.
         assert!(
-            budget < 51_500,
+            budget < 53_000,
             "default list {budget} stays near the measured 2026-10-18 spatial-lane door"
         );
         assert!(budget < everything, "the default list hides something");

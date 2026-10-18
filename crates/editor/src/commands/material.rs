@@ -13,10 +13,10 @@ pub const MAX_MATERIAL_NAME_LEN: usize = 64;
 
 /// A validated material asset name: short ASCII (`0-9 A-Z a-z - _ .`).
 ///
-/// Copy-sized so the op enum stays `Copy`: names validate once at the
-/// boundary ([`TryFrom`], the shell browser check, the save codec) and every
-/// later use is infallible. Empty is unrepresentable: clearing a binding is
-/// `None` on the set-material op.
+/// Copy-sized: names validate once at the boundary ([`TryFrom`], the shell
+/// browser check, the save codec) and every later use is infallible, so a
+/// binding rides inside an op without allocating. Empty is
+/// unrepresentable: clearing a binding is `None` on the set-material op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MaterialName {
     /// Name length in bytes (always `1..=MAX_MATERIAL_NAME_LEN`).

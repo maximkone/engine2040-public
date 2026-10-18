@@ -607,7 +607,7 @@ impl MatchSnapshot {
 }
 
 /// Arena contract failures: bounded diagnostics, never panics.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ArenaError {
     /// Tick count `0` or above `MAX_TICKS`, culprit carried.
     BadTicks(u32),

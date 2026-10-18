@@ -52,6 +52,10 @@ pub const EXPLAIN_SET_MATERIAL_BYTES: u64 = 80;
 /// `SetComponent` / `RemoveComponent`: id (16) + kind tag (1) + worst-case
 /// canonical bytes (two 64-byte names plus a few fields, under 160).
 pub const EXPLAIN_COMPONENT_BYTES: u64 = 176;
+/// `PutMaterial` / `SetMaterialParam` / `RemoveLastMaterial`: one record or
+/// value text, conservatively bounded by the record schema (a few KB). The
+/// material-table ops touch no object and move no pose.
+pub const EXPLAIN_MATERIAL_OP_BYTES: u64 = 4_096;
 /// Nav tiles dirtied by a reparent: the world pose is kept by construction,
 /// so only the hierarchy edge counts, conservatively one tile.
 pub const EXPLAIN_REPARENT_NAV_TILES: u64 = 1;
@@ -278,48 +282,53 @@ fn scan_ops(batch: &Batch) -> OpScan {
     };
     let move_tiles = tiles_per_move();
     for op in &batch.ops {
-        match *op {
+        match op {
             Op::Insert { id, parent, .. } => {
-                scan.touched.insert(id);
-                if parent != ObjectId::NIL {
-                    scan.touched.insert(parent);
+                scan.touched.insert(*id);
+                if *parent != ObjectId::NIL {
+                    scan.touched.insert(*parent);
                 }
-                scan.primary.push(id);
+                scan.primary.push(*id);
                 scan.bytes = scan.bytes.saturating_add(EXPLAIN_INSERT_BYTES);
                 scan.nav_tiles = scan.nav_tiles.saturating_add(move_tiles);
             }
             Op::Remove { id } => {
-                scan.touched.insert(id);
-                scan.primary.push(id);
+                scan.touched.insert(*id);
+                scan.primary.push(*id);
                 scan.bytes = scan.bytes.saturating_add(EXPLAIN_REMOVE_BYTES);
                 scan.nav_tiles = scan.nav_tiles.saturating_add(move_tiles);
             }
             Op::SetLocal { id, .. } => {
-                scan.touched.insert(id);
-                scan.primary.push(id);
+                scan.touched.insert(*id);
+                scan.primary.push(*id);
                 scan.bytes = scan.bytes.saturating_add(EXPLAIN_SET_LOCAL_BYTES);
                 scan.nav_tiles = scan.nav_tiles.saturating_add(move_tiles);
             }
             Op::Reparent { id, new_parent } => {
-                scan.touched.insert(id);
-                if new_parent != ObjectId::NIL {
-                    scan.touched.insert(new_parent);
+                scan.touched.insert(*id);
+                if *new_parent != ObjectId::NIL {
+                    scan.touched.insert(*new_parent);
                 }
-                scan.primary.push(id);
+                scan.primary.push(*id);
                 scan.bytes = scan.bytes.saturating_add(EXPLAIN_REPARENT_BYTES);
                 scan.nav_tiles = scan.nav_tiles.saturating_add(EXPLAIN_REPARENT_NAV_TILES);
             }
             Op::SetMaterial { id, .. } => {
-                scan.touched.insert(id);
-                scan.primary.push(id);
+                scan.touched.insert(*id);
+                scan.primary.push(*id);
                 scan.bytes = scan.bytes.saturating_add(EXPLAIN_SET_MATERIAL_BYTES);
                 // Material binds move nothing: no nav tiles dirtied.
             }
             Op::SetComponent { id, .. } | Op::RemoveComponent { id, .. } => {
-                scan.touched.insert(id);
-                scan.primary.push(id);
+                scan.touched.insert(*id);
+                scan.primary.push(*id);
                 scan.bytes = scan.bytes.saturating_add(EXPLAIN_COMPONENT_BYTES);
                 // Components move nothing in the nav grid at preview time.
+            }
+            // The material-table ops touch no object and move no pose: only
+            // journal bytes, conservatively bounded per op.
+            Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
+                scan.bytes = scan.bytes.saturating_add(EXPLAIN_MATERIAL_OP_BYTES);
             }
         }
     }

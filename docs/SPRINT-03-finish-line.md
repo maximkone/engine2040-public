@@ -41,7 +41,7 @@ make those live, and every row built on them waits.
   Deep 3D pass 2026-09-25: lightmap UV unwrap and packing happen in the cook (no overlapping charts, bake identical x2); Base tier only. needs: GX1, RL2, AS1.
   Wave 44 progress (stays open): --scene/--fps flags, 120-frame ARENA
   capture @ 0.4 fps debug (not 60), bake x2 green; honest gap: 5-tick cap
-   repeats checkpoints past frame 24 — needs fixed-step capture pacing.
+   repeats checkpoints past frame 24 — needs fixed-step capture pacing. Progress 2026-10-19: operator/owner: every code leg in the row's own file is landed and green (`cargo test -p engine-render --lib baked_gi`: 25 passed, 2 ignored: bake_identical_bytes_twice, rl5_8fighter_capture_receipt_x2, rl5_ra1_receipt_consumes_the_bind, validity mask, sealed tunnel, forward-GI markers). Close still needs the reference-GPU 60 fps arena + 8 fighters receipt (RL29 boosted-release pilot) and the RL14 pacing log; the pacing fix itself sits in the game crate (`windowed.rs` WIN_MAX_STEPS_PER_FRAME, `bin/arena_frame`), which neither RL5 nor RL14 lists as an owned path, so the owner must say which row lands it.
 - [ ] RL14 render: fixed-step capture pacing + release receipt for RL5 —
   frame-accurate checkpoint pacing past frame 24 plus a release-build
   capture receipt (adapter/driver/power + fps). Tier B. Size S. Owns
@@ -86,6 +86,7 @@ make those live, and every row built on them waits.
   <15% or flicker >0.5 EV/frame or ms +>5% or tick hash drifts.
    Consumer WIN1 match, Q1 captures. needs: GX4, GX7, PF2.
    (DO NOT DISPATCH 2026-10-05: CPU legs PASS in-lane; headless writers skip. Take RL18a pilot GPU-ms + Q1-capture closeout only, per 510 deep-dive.)
+   Progress 2026-10-19: RL18a pilot GPU half run on the reference GPU (RTX 3050 6GB Laptop GPU, driver 32.0.16.1062). `cargo test -p engine-render --features window --lib auto_ -- --nocapture` through gh-check (local: the window feature never builds on the Linux runner) = 12 passed 0 failed 1 ignored, incl. `gpu_auto_chain_matches_cpu_chain` PASS parity 0.000000 (tol 0.005), adapted -4.986 stops; same filter without `window` = 11 passed 0 failed 1 ignored. Kill metrics in lane: day-sweep fixed clip 0.727 -> adapted 0.000 (improve 1.000, gate 0.15), torch grid 1.8698 -> 1.7365 stops (0.133 EV), blink and match-clip worst step 0.0500 stops (gate 0.5). No crate code touched, so the golden is untouched (presentation only). Left, not producible here: (1) per-pass ms with an adapter line - the live frame runs forward+blit only, post/exposure is probe-only, `arena per-pass` has no post column, and the device path splits bloom/exposure/tonemap into thirds, so no honest exposure ms exists (owner: RL21/RL26/RA14 or a PF2 presenter stamp); (2) llvmpipe parity - no llvmpipe adapter on this PC and the runner cannot build the window feature; (3) Q1 captures - Q1 is open on RL21, RL26, RA14. The live match also still rides fixed 1.0 (`FrameLight` in `crates/game/src/view_truth.rs`), so the WIN1 consumer is not on the adapted EV.
 - [ ] RP8b render: variance-clip re-spike, ONLY if the lead overturns
   the RP8a REJECT — re-run ghost + shimmer fixtures with the named
   delta beside `crates/render/src/post.rs` (resolve frozen).

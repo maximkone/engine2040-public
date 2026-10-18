@@ -14,6 +14,8 @@ use rmcp::schemars::JsonSchema;
 use rmcp::serde::{self, Deserialize, Serialize};
 use rmcp::serde_json::Value;
 
+use crate::receipts::ChangeList;
+
 /// `#[serde(with = "u64_text")]` for a `u64` hash, digest or id. JS and LLM
 /// clients parse JSON numbers as f64 and round anything above 2^53 (a real
 /// run got `forged_approval` from one such rounding), so the wire carries the
@@ -337,9 +339,52 @@ pub struct TxApplyOutput {
     #[serde(with = "u64_text")]
     #[schemars(with = "String")]
     pub undo_token: u64,
+    /// Bounded "what changed" summary: revisions, counts and clipped rows.
+    #[serde(default)]
+    pub changes: ChangeListDto,
     /// Spatial findings this write changed; absent with `delta: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_delta: Option<SpatialDeltaDto>,
+}
+
+/// Bounded "what changed" summary for one landed write, on the receipt.
+///
+/// Consumer: an agent reads which objects the call added, removed or moved
+/// instead of re-reading the scene. The counts are the full totals; `rows`
+/// keeps at most `MAX_CHANGES` of them and `truncated` says when it clipped,
+/// so a count never lies.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ChangeListDto {
+    /// Document revision before the write.
+    pub revision_before: u64,
+    /// Document revision after the write.
+    pub revision_after: u64,
+    /// Objects present after only.
+    pub added: u32,
+    /// Objects present before only.
+    pub removed: u32,
+    /// Objects on both sides whose world pose moved.
+    pub moved: u32,
+    /// One row per change, clipped to the cap.
+    pub rows: Vec<String>,
+    /// True when `rows` dropped entries; counts stay the full totals.
+    pub truncated: bool,
+}
+
+impl From<ChangeList> for ChangeListDto {
+    fn from(list: ChangeList) -> Self {
+        Self {
+            revision_before: list.revision_before,
+            revision_after: list.revision_after,
+            added: list.added,
+            removed: list.removed,
+            moved: list.moved,
+            rows: list.rows,
+            truncated: list.truncated,
+        }
+    }
 }
 
 /// `tx.undo` result: the undo receipt.
@@ -432,6 +477,7 @@ mod tests {
             key: BIG,
             journal_index: 0,
             undo_token: BIG,
+            changes: ChangeListDto::default(),
             spatial_delta: None,
         };
         let value = rmcp::serde_json::to_value(&applied).expect("receipt serializes");

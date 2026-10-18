@@ -163,6 +163,10 @@ const REQUIRE_FRAMING_FLAG: &str = "--require-framing";
 /// The sim breaks it either way; presentation only (RZ4w).
 const NO_BREAK_LOOK_FLAG: &str = "--no-break-look";
 
+/// `--no-ragdoll`: a floored fighter keeps the flat death clip, no `physfx` body behind it.
+/// The sim floors it either way; presentation only (RZ2), the off half of a capture pair.
+const NO_RAGDOLL_FLAG: &str = "--no-ragdoll";
+
 /// `--view-brief <path>`: write the view truth of every presented frame as
 /// one JSON line (camera, then each drawn body's act, clip, tint, bounds and
 /// screen rect), so a script or a model reads the scene with no screenshot.
@@ -676,6 +680,7 @@ fn run(raw: &[String]) -> i32 {
     let (look_probes, raw) = split_flag(&raw, LOOK_PROBES_FLAG);
     let (require_framing, raw) = split_flag(&raw, REQUIRE_FRAMING_FLAG);
     let (no_break_look, raw) = split_flag(&raw, NO_BREAK_LOOK_FLAG);
+    let (no_ragdoll, raw) = split_flag(&raw, NO_RAGDOLL_FLAG);
     let (play, raw) = split_flag(&raw, PLAY_FLAG);
     let (spear, raw) = split_flag(&raw, SPEAR_FLAG);
     let (spear_demo, raw) = split_flag(&raw, SPEAR_DEMO_FLAG);
@@ -830,6 +835,7 @@ fn run(raw: &[String]) -> i32 {
     if no_break_look {
         app.break_scene = None;
     }
+    app.ragdoll_off = no_ragdoll;
     if let Some(path) = view_brief {
         match File::create(&path) {
             Ok(file) => app.view_brief = Some(BufWriter::new(file)),
@@ -976,6 +982,9 @@ struct ArenaApp {
     /// The center crate: whole until a sword hit breaks it, then debris (RZ4w).
     /// Presentation only, never hashed; `None` after a refused build or upload.
     break_scene: Option<BreakScene>,
+    /// `--no-ragdoll`: the floored-fighter ragdoll layer (RZ2) stays off, so the
+    /// slot keeps the flat death clip. Presentation only, never hashed.
+    ragdoll_off: bool,
     /// The fight camera's smoothing state (GP43): springs on yaw, distance and look point.
     cam_follow: CamFollow,
     /// Seconds the camera smooths over on this present: the wall time since the last present,
@@ -1171,6 +1180,7 @@ impl ArenaApp {
             cam_follow: new_cam_follow()?,
             cam_dt_s: 0.0,
             break_scene,
+            ragdoll_off: false,
             fighter_cache_tick: None,
             fighter_cache_fighters: 0,
             fighter_cache_draws: 0,
@@ -2216,6 +2226,14 @@ impl ArenaApp {
                             look.bundle_shas().len()
                         );
                         look.set_hero(self.app.human_slot());
+                        // `--no-ragdoll` (RZ2): the floored-fighter layer stays off, so the
+                        // off half of a capture pair shows the flat death clip.
+                        look.set_ragdoll(!self.ragdoll_off);
+                        if self.ragdoll_off {
+                            tell!(
+                                "arena: {NO_RAGDOLL_FLAG}: a floored fighter keeps the death clip"
+                            );
+                        }
                         self.look = Some(look);
                         // The look poses from views: the loco pose cursor
                         // (two whole-prefix replays per tick) is unused.
@@ -2506,6 +2524,8 @@ mod tests {
                 },
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }
         }
         let mut first = hud_draw_list(1280, 720).expect("HUD list builds for the order probe");

@@ -168,7 +168,9 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   others. Diff: regular. Tier B. Size S. Owns a ttk module in
   `crates/playtest/src/`. Accept: `cargo test -p engine-playtest --lib ttk`
   x2: the CSVs exist with one row per pair and no dominant row. F2P: no table.
-  P2P: P3 green. needs: GA13.
+  P2P: P3 green. needs: GA13. Progress 2026-10-19: owner: this row says Tier B
+  while the tier ladder puts it elsewhere; which one wins? Question in
+  `docs/plan/2026-10-19-owner-queue.md`.
 - [x] GP36 content: arena zones and the entrance metric — the only cover is a Landed d2b58bd1. `cargo test -p engine-playtest --lib -- tier_ zones` green, gh run 39056997288: zones_shares_sum_to_1000_and_entrance_stays_under_250; content/design/arena-zones.rows on disk; full playtest lib 301 passed, gh run 39059423063.
   1 m crate (`crate_a`, id 10) and `gate_tunnel` (id 5) is the one entrance;
   nothing measures where fights happen. `content/design/arena-zones.rows`

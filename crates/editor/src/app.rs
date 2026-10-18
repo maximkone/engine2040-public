@@ -575,6 +575,8 @@ pub fn build_draw_list(shell: &Shell, width: u32, height: u32) -> Result<DrawLis
             },
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         });
     }
     let list = DrawList {

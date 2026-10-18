@@ -24,14 +24,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use engine_core::hash::{FNV64_OFFSET, GOLDEN_GAMMA};
 use engine_core::Fnv64;
+use engine_material::{MaterialSet, RecordError};
 use engine_scene::component::{Component, ComponentKind};
 use engine_scene::ids::ObjectId;
 use engine_scene::provenance::{Provenance, Source, MAX_PARENTS, MAX_TEXT_LEN, PROVENANCE_VERSION};
 use engine_scene::transform::{Hierarchy, HierarchyError, Transform};
-
-use crate::save::push_transform;
 
 /// Kept journal entries per stack; the oldest entry is forgotten first.
 pub const JOURNAL_CAP: usize = 100;
@@ -44,7 +42,12 @@ pub const JOURNAL_CAP: usize = 100;
 /// bindings ride alongside the hierarchy: the same staging, journal and
 /// save path covers them, so a bound material survives undo, redo, save and
 /// reopen exactly like a pose.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// [`Document::material_set`] is the other half of materials: the table of
+/// records ([`MaterialSet`]) the bindings name. It starts as
+/// [`MaterialSet::siege_kit`] and is edited through [`Op::PutMaterial`] and
+/// [`Op::SetMaterialParam`], which journal their own inverses like every op.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     /// Parent links plus local poses, keyed by persistent [`ObjectId`].
     pub hierarchy: Hierarchy,
@@ -62,14 +65,40 @@ pub struct Document {
     pub components: ComponentTable,
     /// Node graph for material and VFX authoring; saved in the v4 section.
     pub graph: crate::graph::Graph,
+    /// The material table: records in wire order, edited by
+    /// [`Op::PutMaterial`] and [`Op::SetMaterialParam`]. Undo, redo and the
+    /// journal cover it exactly like the hierarchy. Not in the scene bytes
+    /// yet (a later save section owns that): a reopen starts from
+    /// [`MaterialSet::siege_kit`] again.
+    pub material_set: MaterialSet,
+}
+
+impl Default for Document {
+    /// Empty hierarchy at revision zero with the shipped material table.
+    ///
+    /// The table defaults to [`MaterialSet::siege_kit`], the fourteen shipped
+    /// records a fresh document binds against; the plain [`MaterialSet`]
+    /// default (empty) would leave a document with nothing to bind.
+    fn default() -> Self {
+        Self {
+            hierarchy: Hierarchy::default(),
+            revision: 0,
+            materials: BTreeMap::new(),
+            components: ComponentTable::new(),
+            graph: crate::graph::Graph::default(),
+            material_set: MaterialSet::siege_kit(),
+        }
+    }
 }
 
 /// Components per node (id text) and kind, in key order.
 pub type ComponentTable = BTreeMap<String, BTreeMap<ComponentKind, Component>>;
 
 mod component;
+pub(crate) mod digest;
 mod selective;
 use component::{stage_remove_component, stage_set_component};
+use digest::artifact_digest;
 pub use selective::{
     apply_selective_undo, apply_selective_undo_with_meta, undo_select, Conflict, ConflictReason,
     UndoError, UndoPreview,
@@ -85,7 +114,11 @@ impl Document {
 }
 
 /// One schema-typed edit inside a [`Batch`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Not `Copy`: the material-table ops ([`Op::PutMaterial`],
+/// [`Op::SetMaterialParam`]) carry record text, which is owned. Every other
+/// op is a small value type.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     /// Add a fresh node under `parent` (`nil` for a root) with `local` pose.
     Insert {
@@ -143,11 +176,39 @@ pub enum Op {
         /// Kind to remove.
         kind: ComponentKind,
     },
+    /// Add or replace one material record in [`Document::material_set`] from
+    /// its JSON text (see `engine_material::MaterialRecord`).
+    ///
+    /// A name the table already holds is replaced, and the inverse re-puts
+    /// the previous record's text; a fresh name is appended, and the inverse
+    /// is [`Op::RemoveLastMaterial`]. A bad text is refused with the record
+    /// path and leaves the document (and its revision) untouched.
+    PutMaterial {
+        /// Record JSON text; its `material` key is the name.
+        text: String,
+    },
+    /// Change one value of one material record: the table's
+    /// `set_param` path, which re-validates the whole record.
+    ///
+    /// The inverse is the same op with the value `set_param` reported as
+    /// `before`, so undo restores the pre-edit value exactly.
+    SetMaterialParam {
+        /// Record name (`MaterialRecord::name`).
+        material: String,
+        /// Dotted parameter path (`look.specular_roughness`,
+        /// `layers[0].darken`).
+        path: String,
+        /// JSON text of the new value.
+        value: String,
+    },
+    /// Drop the newest material record from [`Document::material_set`]; the
+    /// inverse of appending a fresh record through [`Op::PutMaterial`].
+    RemoveLastMaterial,
 }
 
 impl Op {
     /// The node this op reads or writes (the culprit when it fails).
-    fn id(self) -> ObjectId {
+    fn id(&self) -> ObjectId {
         match self {
             Op::Insert { id, .. }
             | Op::Remove { id }
@@ -155,20 +216,27 @@ impl Op {
             | Op::SetMaterial { id, .. }
             | Op::SetComponent { id, .. }
             | Op::RemoveComponent { id, .. }
-            | Op::Reparent { id, .. } => id,
+            | Op::Reparent { id, .. } => *id,
+            // The material-table ops touch no node.
+            Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
+                ObjectId::NIL
+            }
         }
     }
 
     /// The linked parent for ops that carry one, else nil.
-    fn linked_parent(self) -> ObjectId {
+    fn linked_parent(&self) -> ObjectId {
         match self {
-            Op::Insert { parent, .. } => parent,
-            Op::Reparent { new_parent, .. } => new_parent,
+            Op::Insert { parent, .. } => *parent,
+            Op::Reparent { new_parent, .. } => *new_parent,
             Op::Remove { .. }
             | Op::SetLocal { .. }
             | Op::SetMaterial { .. }
             | Op::SetComponent { .. }
-            | Op::RemoveComponent { .. } => ObjectId::NIL,
+            | Op::RemoveComponent { .. }
+            | Op::PutMaterial { .. }
+            | Op::SetMaterialParam { .. }
+            | Op::RemoveLastMaterial => ObjectId::NIL,
         }
     }
 }
@@ -323,7 +391,7 @@ impl Applied {
 }
 
 /// What rejected a batch. Hierarchy failures name the culprit node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BatchError {
     /// No node has this id.
     UnknownNode {
@@ -400,6 +468,18 @@ pub enum BatchError {
         /// The key of the undone batch.
         key: u64,
     },
+    /// A material-table edit was refused: the record text or the value did
+    /// not parse, or the edit itself failed its check. Nothing ran.
+    ///
+    /// `path` is the record path the refusal names (`look.specular_roughness`,
+    /// `body.toughness`, `material`); `detail` carries the reason. The table
+    /// is left exactly as it was, which is why the document revision holds.
+    BadMaterialRecord {
+        /// Record path the refusal named.
+        path: String,
+        /// Reason below that path.
+        detail: String,
+    },
 }
 
 impl fmt::Display for BatchError {
@@ -445,6 +525,9 @@ impl fmt::Display for BatchError {
                 f,
                 "idempotency key {key} belongs to an undone batch; submit a new batch to reapply"
             ),
+            Self::BadMaterialRecord { path, detail } => {
+                write!(f, "material record refused at `{path}`: {detail}")
+            }
         }
     }
 }
@@ -689,7 +772,7 @@ pub fn end_group(journal: &mut Journal) -> Option<Applied> {
     let mut effects: Vec<String> = Vec::new();
     let mut keys: Vec<u64> = Vec::new();
     for member in &members {
-        forward.extend(member.forward.iter().copied());
+        forward.extend(member.forward.iter().cloned());
         inverse_groups.extend(member.inverse_groups.iter().cloned());
         effects.extend(member.effects.iter().cloned());
         for key in &member.keys {
@@ -705,7 +788,7 @@ pub fn end_group(journal: &mut Journal) -> Option<Applied> {
     // first, so reversing member order restores the pre-group state exactly.
     let mut inverse = Vec::new();
     for member in members.iter().rev() {
-        inverse.extend(member.inverse.iter().copied());
+        inverse.extend(member.inverse.iter().cloned());
     }
     let base_revision = members[0].base_revision;
     let last = &members[members.len() - 1];
@@ -870,13 +953,23 @@ pub fn undo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     let mut tree = doc.hierarchy.clone();
     let mut materials = doc.materials.clone();
     let mut components = doc.components.clone();
-    if apply_ops(&mut tree, &mut materials, &mut components, &entry.inverse).is_err() {
+    let mut material_set = doc.material_set.clone();
+    if apply_ops(
+        &mut tree,
+        &mut materials,
+        &mut components,
+        &mut material_set,
+        &entry.inverse,
+    )
+    .is_err()
+    {
         journal.past.push(entry);
         return None;
     }
     doc.hierarchy = tree;
     doc.materials = materials;
     doc.components = components;
+    doc.material_set = material_set;
     doc.revision += 1;
     journal.future.push(entry);
     if journal.future.len() > JOURNAL_CAP {
@@ -907,13 +1000,23 @@ pub fn redo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     let mut tree = doc.hierarchy.clone();
     let mut materials = doc.materials.clone();
     let mut components = doc.components.clone();
-    if apply_ops(&mut tree, &mut materials, &mut components, &entry.forward).is_err() {
+    let mut material_set = doc.material_set.clone();
+    if apply_ops(
+        &mut tree,
+        &mut materials,
+        &mut components,
+        &mut material_set,
+        &entry.forward,
+    )
+    .is_err()
+    {
         journal.future.push(entry);
         return None;
     }
     doc.hierarchy = tree;
     doc.materials = materials;
     doc.components = components;
+    doc.material_set = material_set;
     doc.revision += 1;
     journal.past.push(entry);
     if journal.past.len() > JOURNAL_CAP {
@@ -1014,90 +1117,6 @@ fn parent_receipts(journal: &Journal, touched: &[ObjectId]) -> Vec<u64> {
     parents
 }
 
-/// Deterministic artifact digest over the batch content: key, revisions, op
-/// count, then per op a tag plus node/parent IDs plus raw transform bits.
-/// Four FNV-1a passes with distinct seeds fill 32 bytes. Fixed op order,
-/// little-endian integers, no maps or pointers: same batch, same digest.
-fn artifact_digest(ops: &[Op], key: u64, base_revision: u64, result_revision: u64) -> [u8; 32] {
-    let mut input = Vec::new();
-    input.extend_from_slice(&key.to_le_bytes());
-    input.extend_from_slice(&base_revision.to_le_bytes());
-    input.extend_from_slice(&result_revision.to_le_bytes());
-    input.extend_from_slice(&(ops.len() as u64).to_le_bytes());
-    for op in ops {
-        match *op {
-            Op::Insert { id, parent, local } => {
-                input.push(0);
-                push_id(&mut input, id);
-                push_id(&mut input, parent);
-                push_transform(&mut input, local);
-            }
-            Op::Remove { id } => {
-                input.push(1);
-                push_id(&mut input, id);
-            }
-            Op::SetLocal { id, local } => {
-                input.push(2);
-                push_id(&mut input, id);
-                push_transform(&mut input, local);
-            }
-            Op::Reparent { id, new_parent } => {
-                input.push(3);
-                push_id(&mut input, id);
-                push_id(&mut input, new_parent);
-            }
-            Op::SetMaterial { id, material } => {
-                input.push(4);
-                push_id(&mut input, id);
-                match material {
-                    Some(name) => {
-                        let text = name.as_str();
-                        let len = name.len_bytes();
-                        input.extend_from_slice(&len.to_le_bytes());
-                        input.extend_from_slice(text.as_bytes());
-                    }
-                    None => input.extend_from_slice(&0u64.to_le_bytes()),
-                }
-            }
-            Op::SetComponent { id, component } => {
-                input.push(5);
-                push_id(&mut input, id);
-                let bytes = component.to_bytes();
-                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                input.extend_from_slice(&len.to_le_bytes());
-                input.extend_from_slice(&bytes);
-            }
-            Op::RemoveComponent { id, kind } => {
-                input.push(6);
-                push_id(&mut input, id);
-                input.push(kind.tag());
-            }
-        }
-    }
-    digest32(&[&input])
-}
-
-/// 32-byte digest over concatenated byte parts: four FNV-1a passes whose
-/// start states differ by pass number, one little-endian word per pass. Same
-/// parts, same digest on every machine. Not collision-resistant against an
-/// adversary; no new crypto.
-fn digest32(parts: &[&[u8]]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (pass, slot) in (1u64..).zip(out.chunks_mut(8)) {
-        let mut hash = Fnv64::with_state(FNV64_OFFSET ^ GOLDEN_GAMMA.wrapping_mul(pass));
-        for part in parts {
-            hash.write(part);
-        }
-        slot.copy_from_slice(&hash.finish().to_le_bytes());
-    }
-    out
-}
-
-/// Raw UUID bytes of an object ID into the digest input.
-fn push_id(input: &mut Vec<u8>, id: ObjectId) {
-    input.extend_from_slice(id.as_uuid().as_bytes());
-}
-
 /// `text` cut to at most `max` bytes at a character boundary; shorter text
 /// comes back whole. Display bounds (provenance names, panel echoes, cell
 /// texts) must never reject an otherwise-valid edit, so overlong text
@@ -1120,6 +1139,8 @@ struct Staged {
     materials: BTreeMap<String, MaterialName>,
     /// Resulting components (staged beside the tree, committed with it).
     components: ComponentTable,
+    /// Resulting material table (staged beside the tree, committed with it).
+    material_set: MaterialSet,
     inverse: Vec<Op>,
     /// Per-forward-op inverse groups in forward order; flattened (reversed)
     /// into `inverse` above. Stored on the journal entry for selective undo.
@@ -1139,19 +1160,27 @@ fn stage(doc: &Document, batch: &Batch) -> Result<Staged, BatchError> {
     let mut tree = doc.hierarchy.clone();
     let mut materials = doc.materials.clone();
     let mut components = doc.components.clone();
+    let mut material_set = doc.material_set.clone();
     let mut per_op_inverse = Vec::with_capacity(batch.ops.len());
     let mut effects = Vec::with_capacity(batch.ops.len());
     for op in &batch.ops {
-        let (inverse, line) = apply_one(&mut tree, &mut materials, &mut components, op)?;
+        let (inverse, line) = apply_one(
+            &mut tree,
+            &mut materials,
+            &mut components,
+            &mut material_set,
+            op,
+        )?;
         per_op_inverse.push(inverse);
         effects.push(line);
     }
     // Undo runs last op first, so reverse the per-op inverses.
-    let inverse = per_op_inverse.iter().rev().flatten().copied().collect();
+    let inverse = per_op_inverse.iter().rev().flatten().cloned().collect();
     Ok(Staged {
         tree,
         materials,
         components,
+        material_set,
         inverse,
         per_op: per_op_inverse,
         effects,
@@ -1164,40 +1193,51 @@ fn apply_ops(
     tree: &mut Hierarchy,
     materials: &mut BTreeMap<String, MaterialName>,
     components: &mut ComponentTable,
+    material_set: &mut MaterialSet,
     ops: &[Op],
 ) -> Result<(), BatchError> {
     for op in ops {
-        apply_one(tree, materials, components, op).map(|_| ())?;
+        apply_one(tree, materials, components, material_set, op).map(|_| ())?;
     }
     Ok(())
 }
 
 /// Stage one op, returning its inverse ops plus its preview line.
 ///
-/// Inverses capture pre-op state so undo restores parents, locals and
-/// material bindings exactly (bit-for-bit), even though reparent/remove
-/// recompute poses in flight.
+/// Inverses capture pre-op state so undo restores parents, locals, material
+/// bindings and material records exactly (bit-for-bit), even though
+/// reparent/remove recompute poses in flight.
 fn apply_one(
     tree: &mut Hierarchy,
     materials: &mut BTreeMap<String, MaterialName>,
     components: &mut ComponentTable,
+    material_set: &mut MaterialSet,
     op: &Op,
 ) -> Result<(Vec<Op>, String), BatchError> {
-    match *op {
-        Op::Insert { id, parent, local } => stage_insert(tree, *op, id, parent, local),
-        Op::Remove { id } => stage_remove(tree, materials, components, *op, id),
-        Op::SetComponent { id, component } => stage_set_component(tree, components, id, component),
-        Op::RemoveComponent { id, kind } => stage_remove_component(tree, components, id, kind),
-        Op::SetLocal { id, local } => stage_set_local(tree, *op, id, local),
-        Op::Reparent { id, new_parent } => stage_reparent(tree, *op, id, new_parent),
-        Op::SetMaterial { id, material } => stage_set_material(tree, materials, id, material),
+    match op {
+        Op::Insert { id, parent, local } => stage_insert(tree, op, *id, *parent, *local),
+        Op::Remove { id } => stage_remove(tree, materials, components, op, *id),
+        Op::SetComponent { id, component } => {
+            stage_set_component(tree, components, *id, component.clone())
+        }
+        Op::RemoveComponent { id, kind } => stage_remove_component(tree, components, *id, *kind),
+        Op::SetLocal { id, local } => stage_set_local(tree, op, *id, *local),
+        Op::Reparent { id, new_parent } => stage_reparent(tree, op, *id, *new_parent),
+        Op::SetMaterial { id, material } => stage_set_material(tree, materials, *id, *material),
+        Op::PutMaterial { text } => stage_put_material(material_set, text),
+        Op::SetMaterialParam {
+            material,
+            path,
+            value,
+        } => stage_set_material_param(material_set, material, path, value),
+        Op::RemoveLastMaterial => stage_remove_last_material(material_set),
     }
 }
 
 /// Stage an insert. Fresh ids have no children yet, so a plain remove inverts.
 fn stage_insert(
     tree: &mut Hierarchy,
-    op: Op,
+    op: &Op,
     id: ObjectId,
     parent: ObjectId,
     local: Transform,
@@ -1214,7 +1254,7 @@ fn stage_remove(
     tree: &mut Hierarchy,
     materials: &mut BTreeMap<String, MaterialName>,
     components: &mut ComponentTable,
-    op: Op,
+    op: &Op,
     id: ObjectId,
 ) -> Result<(Vec<Op>, String), BatchError> {
     let parent = tree.parent(id).ok_or(BatchError::UnknownNode { id })?;
@@ -1264,7 +1304,7 @@ fn stage_remove(
 /// Stage a pose replacement; the inverse restores the captured pose.
 fn stage_set_local(
     tree: &mut Hierarchy,
-    op: Op,
+    op: &Op,
     id: ObjectId,
     local: Transform,
 ) -> Result<(Vec<Op>, String), BatchError> {
@@ -1282,7 +1322,7 @@ fn stage_set_local(
 /// Stage a reparent; a move to the current parent is a no-op with no inverse.
 fn stage_reparent(
     tree: &mut Hierarchy,
-    op: Op,
+    op: &Op,
     id: ObjectId,
     new_parent: ObjectId,
 ) -> Result<(Vec<Op>, String), BatchError> {
@@ -1345,9 +1385,87 @@ fn stage_set_material(
     Ok((vec![Op::SetMaterial { id, material: old }], line))
 }
 
+/// Stage a material record put: replace the record of the same name, or
+/// append a fresh one.
+///
+/// A replaced record inverts to a `put` of the previous text; an appended
+/// one inverts to [`Op::RemoveLastMaterial`]. The text parses against the
+/// live table, so `extends` resolves exactly as the door's push does.
+fn stage_put_material(
+    material_set: &mut MaterialSet,
+    text: &str,
+) -> Result<(Vec<Op>, String), BatchError> {
+    let record = material_set.parse_against(text).map_err(map_record_error)?;
+    let name = record.name.clone();
+    match material_set.put(record).map_err(map_record_error)? {
+        Some(previous) => {
+            let line = format!("put-material `{name}` (replaced)");
+            Ok((
+                vec![Op::PutMaterial {
+                    text: previous.to_text(),
+                }],
+                line,
+            ))
+        }
+        None => {
+            let line = format!("put-material `{name}` (added)");
+            Ok((vec![Op::RemoveLastMaterial], line))
+        }
+    }
+}
+
+/// Stage one parameter edit; the inverse carries the old value text, so undo
+/// restores the pre-edit value exactly.
+fn stage_set_material_param(
+    material_set: &mut MaterialSet,
+    material: &str,
+    path: &str,
+    value: &str,
+) -> Result<(Vec<Op>, String), BatchError> {
+    let edit = material_set
+        .set_param(material, path, value)
+        .map_err(map_record_error)?;
+    let line = format!(
+        "set-material-param `{material}` {path} from {} to {}",
+        edit.before, edit.after
+    );
+    let inverse = vec![Op::SetMaterialParam {
+        material: edit.material,
+        path: edit.path,
+        value: edit.before,
+    }];
+    Ok((inverse, line))
+}
+
+/// Stage a drop of the newest material record; the inverse re-puts it.
+fn stage_remove_last_material(
+    material_set: &mut MaterialSet,
+) -> Result<(Vec<Op>, String), BatchError> {
+    let removed = material_set
+        .remove_last()
+        .ok_or(BatchError::BadMaterialRecord {
+            path: "$".to_string(),
+            detail: "material table is empty; nothing to remove".to_string(),
+        })?;
+    let line = format!("remove-last-material `{}`", removed.name);
+    let inverse = vec![Op::PutMaterial {
+        text: removed.to_text(),
+    }];
+    Ok((inverse, line))
+}
+
+/// Translate a record refusal into the matching batch error, keeping the
+/// record path the caller asked about and the reason under it.
+fn map_record_error(error: RecordError) -> BatchError {
+    BatchError::BadMaterialRecord {
+        path: error.path,
+        detail: error.kind.to_string(),
+    }
+}
+
 /// Translate a hierarchy failure into the matching batch error, naming the
 /// op's node (and linked parent where the op carries one).
-fn map_error(error: HierarchyError, op: Op) -> BatchError {
+fn map_error(error: HierarchyError, op: &Op) -> BatchError {
     let id = op.id();
     let parent = op.linked_parent();
     match error {
@@ -1416,9 +1534,13 @@ mod tests {
         let name = MaterialName::try_from("hero-mat_01.glb").unwrap();
         assert_eq!(name.as_str(), "hero-mat_01.glb");
         assert_eq!(name.to_string(), "hero-mat_01.glb");
-        // Copy-sized: the op enum stays Copy with bindings inside.
+        // Copy-sized name: the binding rides inside an op without allocating.
         fn is_copy<T: Copy>() {}
-        is_copy::<Op>();
+        is_copy::<MaterialName>();
+        // Ops travel by value through the journal, so they clone; the
+        // material-table ops own their record text, so they are not `Copy`.
+        fn is_clone<T: Clone>() {}
+        is_clone::<Op>();
     }
 
     #[test]
