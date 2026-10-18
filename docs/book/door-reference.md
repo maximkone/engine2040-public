@@ -208,7 +208,7 @@ These are always advertised.
 | `ticks` | `Option<u32>` | no |  | `1..=3600` |
 | `fighters` | `Option<u8>` | no |  |  |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
-| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
+| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`, `-100..=100`, `-18000..=18000` |
 | `ttl_polls` | `Option<u64>` | no |  |  |
 | `job_id` | `Option<u64>` | no |  |  |
 | `scene_rev` | `Option<u64>` | no |  |  |
@@ -236,9 +236,9 @@ These are always advertised.
 | `job_not_running` | job {id} is {}; only running jobs cancel (action=`start` opens one) |
 | `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
 | `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
-| `invalid_tape` | inputs[{index}].mx {} is outside -{WISH_RANGE}..={WISH_RANGE} |
-| `invalid_tape` | inputs[{index}].mz {} is outside -{WISH_RANGE}..={WISH_RANGE} |
-| `invalid_tape` | inputs[{index}].facing {} is outside -{FACING_RANGE}..={FACING_RANGE} |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
 | `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
 | `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
 | `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
@@ -376,7 +376,7 @@ These are always advertised.
 | Code | Message |
 |---|---|
 | `unknown_check` | check `{name}` is unknown; legal checks: [{}] |
-| `over_budget` | list costs {chars} chars, budget is 54000 |
+| `over_budget` | list costs {chars} chars, budget is 57500 |
 | `empty_checks` | checks holds 0 entries; submit 1..=16 of [{}] |
 | `too_many_checks` | checks holds {} entries; at most 16 per run |
 | `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
@@ -480,7 +480,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 - **Scope:** `observe` · read-only
 - **Undo:** none: read-only
 - **Source:** `crates/endpoint/src/scene_tools.rs`
-- **Returns:** `SceneSpatialOutput` with `revision`, `verdict`, `hash`, `total`, `truncated`, `findings`, `ids`, `objects`, `next_cursor`, `repeat_count`, `counts`, `worst_actors`, `checks_run`, `skipped`, `size_source`, `suppressed`, `learned`
+- **Returns:** `SceneSpatialOutput` with `revision`, `verdict`, `hash`, `total`, `truncated`, `findings`, `ids`, `objects`, `next_cursor`, `repeat_count`, `counts`, `worst_actors`, `checks_run`, `skipped`, `size_source`, `suppressed`
 
 **Arguments** (`SceneSpatialArgs`):
 
@@ -492,8 +492,8 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `format` | `Option<String>` | no |  | Answer shape: rows (default), ids (only the objects that carry a finding, no finding rows), count (verdict and counts only). |
 | `matched_only` | `Option<bool>` | no |  | True keeps only red findings (rows, total and ids). |
 | `epsilon_cm` | `Option<i32>` | no |  | Z-fight tolerance in cm, 0..=50, default 1 (zfight). |
-| `triage` | `Option<bool>` | no |  | True triages by component role: a collider on its mesh reads intentional, a light or spawner deferred; non-errors drop to info and errors that stop play lead. |
-| `allow` | `Option<Vec<AllowRow>>` | no |  | Verdicts on findings, at most 256: they stay listed as suppressed with the reason and leave the counts. |
+| `triage` | `Option<bool>` | no |  | True judges overlaps by component role (collider on its mesh is intentional). |
+| `allow` | `Option<Vec<String>>` | no |  | Verdict rows, max 256: `check a b\|- verdict rev expiry reason` (uuids, 0 = none). Matched findings move to `suppressed`. |
 
 **Typed refusals:**
 
@@ -525,7 +525,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `wants` | `Vec<String>` | yes |  | `at most 16`; Want lines, at most `MAX_PLACE_WANTS` (16), each at most `MAX_WANT_CHARS` (256) chars. |
 | `delta` | `Option<bool>` | no |  | `false` skips the spatial delta (default true). |
 
-<details><summary>19 typed refusals</summary>
+<details><summary>26 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -542,7 +542,14 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `lock_poisoned` | scene apply lock poisoned by a failed call; restart the server |
 | `bad_pose` | placement {lane} {value} m is not a finite value within                          +-{PLACED_LIMIT_M} m; re-run with a pose inside the world bound |
 | `bad_pose` | placement yaw {yaw} rad is not a finite angle within +-2\*pi;                      re-run with a yaw in radians |
+| `bad_relation` | relation `{other}` is unknown; submit supports, on_top_of, inside, next_to or facing (or in_front_of, behind, left_of, right_of, outside) |
+| `bad_wall` | wall `{other}` is unknown; submit north, south, east or west |
 | `bad_id` | {field} `{text}` is not an object id (expected UUID text) |
+| `bad_want` | want `{source}` has a bad {what} `{value}`; want grammar is `<relation> <target> [<lo>,<hi>]?` with target `wall:<north\|south\|east\|west>`, `object:<uuid>` or `point:<x_cm>,<z_cm>` |
+| `bad_want` | want `{source}` is malformed ({detail}); want grammar is `<relation> <target> [<lo>,<hi>]?` with target `wall:<north\|south\|east\|west>`, `object:<uuid>` or `point:<x_cm>,<z_cm>` |
+| `bad_relation` | want `{source}`: {} |
+| `bad_wall` | want `{source}`: {} |
+| `bad_id` | want `{source}`: {} |
 | `too_many_wants` | wants holds {} entries; at most 16 per placement |
 | `stale_revision` | document is at revision {revision}, intent expects {}; re-read scene.brief, then place again |
 | `unknown_tool` | tool `scene.place` is not a classified Mutating write; re-run through scene.place or tx.preview |
@@ -588,10 +595,10 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
-| `kind` | `String` | yes |  | Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor\|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor\|room; glance eye_m. a\|b means either. |
+| `kind` | `String` | yes |  | Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor\|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor\|room; glance eye_m; coverage anchor, eye_m. a\|b means either. |
 | `anchor` | `Option<String>` | no |  | Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID: the subject. |
 | `other` | `Option<String>` | no |  | Second object label: far end for between, viewer for relation. |
-| `radius_cm` | `Option<i32>` | no |  | Radius in cm, 1..=10000: search radius (default 500), slide range (500), clearance width needed (60). |
+| `radius_cm` | `Option<i32>` | no |  | Radius in cm, 1..=10000: search radius (default 500), slide range (500), clearance width needed (60), measure gap needed. |
 | `eye_m` | `Option<[f32; 3]>` | no |  | Point [x, y, z] in meters: the eye for visible and cone, the threat for cover_near. |
 | `yaw` | `Option<f32>` | no |  | Facing in radians, 0 = +X (visible, cone from eye_m); default 0. |
 | `crouch` | `Option<bool>` | no |  | True to test crouched cover (cover_near). |
@@ -601,20 +608,15 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `seed` | `Option<u64>` | no |  | Sampler seed, default 7 (free_space). |
 | `limit` | `Option<u32>` | no |  | Most hits, 1..=64, default 64. |
 | `budget_bytes` | `Option<u32>` | no |  | Answer budget in bytes, 1..=16384, default 4096. |
-| `half_angle_deg` | `Option<i32>` | no |  | Cone half-width in whole degrees, 1..=180 (cone). |
+| `half_angle_deg` | `Option<i32>` | no |  | Cone half-width in whole degrees, 1..=180 (cone); half the field of view (glance, coverage). |
 | `filter` | `Option<String>` | no |  | Keep cone rows whose label contains this text. |
 | `relation` | `Option<String>` | no |  | Relation word: above, below, in_front_of, behind, left_of, right_of, against, around, aligned, near, far, visible_from, reachable_from. |
 | `format` | `Option<String>` | no |  | Answer shape: rows (default, one row per hit), ids (labels of matched hits only), count (matched count only). |
 | `matched_only` | `Option<bool>` | no |  | Drop unmatched rows. Default true for visible (pass false for blocked rows), false otherwise. |
 | `dir` | `Option<String>` | no |  | Slide direction: +x, -x, +z, -z, up, down, +x+z, +x-z, -x+z, -x-z (slide). |
 | `what` | `Option<String>` | no |  | gap (default), overlap, align or contain (measure). |
-| `tolerance_cm` | `Option<i32>` | no |  | Contact and align tolerance in cm, default 1 (measure). |
-| `axes` | `Option<String>` | no |  | Axes read, letters from xyz, default all (measure). |
-| `reference` | `Option<String>` | no |  | center (default), min or max: the align point (measure). |
-| `min_clearance_cm` | `Option<i32>` | no |  | Required gap or margin in cm (measure). |
-| `room` | `Option<u32>` | no |  | Room number from room_of, 1.. (in_room, exits_of). |
-| `fov_deg` | `Option<i32>` | no |  | Full field of view in degrees, 2..=170, default 90 (glance). |
-| `grid` | `Option<i32>` | no |  | Rays per grid edge, 1..=64, default 24 (glance). |
+| `room` | `Option<u32>` | no |  | Room number from room_of (in_room, exits_of). |
+| `pitch` | `Option<f32>` | no |  | Camera pitch in radians, up is positive (coverage). |
 
 **Typed refusals:**
 
@@ -1257,7 +1259,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire; Match seed (a decimal string or a number); same seed plus same tape replays the same digest. |
-| `participants` | `Option<u8>` | no |  | alias `fighters`; Participant count, 2..=`MAX_PARTICIPANTS`. |
+| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters`; Participant count, 2..=`MAX_PARTICIPANTS`. |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half-extent in meters, 5.0..=100.0, explicit (never defaulted across tools when comparing receipts). |
 | `upto_tick` | `Option<u32>` | no |  | `0..N`, `1..=3600`; Ticks to simulate as the 1-indexed count N of the 0-indexed prefix `0..N` (1..=`MAX_PLAY_TICKS`); the digest is the checkpoint `N - 1` hash. See the module legend. |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`; Tape inputs with 0-indexed tick ids inside `0..upto_tick`. |
@@ -1270,7 +1272,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 |---|---|
 | `invalid_tape` | arena refused the inputs of tick {tick}; they passed MCP range checks, so report the tape verbatim |
 | `bad_ticks` | play.step needs upto_tick; submit 1..=3600 |
-| `bad_participants` | participants {participants} is outside 2..={MAX_PARTICIPANTS} |
+| `bad_participants` | participants {participants} is outside 2..=16 |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters |
 | `bad_ticks` | upto_tick {upto} is outside 1..=3600 (MCP play.step bound) |
 | `too_many_inputs` | inputs holds {} entries; at most 2048 per match |
@@ -1304,7 +1306,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | Code | Message |
 |---|---|
 | `rules_worker_down` | the OS refused to start a rules worker |
-| `bad_slots` | slot {bad} is outside 0..{MAX_PARTICIPANTS}; submit slots in that range |
+| `bad_slots` | slot {bad} is outside 0..16; submit slots in that range |
 | `rules_refused` | {error}; {kept_text} |
 
 ### `rules.test`
@@ -1343,7 +1345,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 |---|---|---|---|---|
 | `tick` | `u32` | yes |  | `0..3600`; Tick to explain, `0..3600`. |
 | `seed` | `Option<u64>` | no |  | Match seed (default 0), as in play.run. |
-| `fighters` | `Option<u8>` | no |  | Players, `2..=16` (default 2). |
+| `fighters` | `Option<u8>` | no |  | `2..=16`; Players, `2..=16` (default 2). |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half extent in meters, `5.0..=100.0` (default 12). |
 | `scene_rev` | `Option<u64>` | no |  | Scene revision to play on, as in play.run. |
 
@@ -1353,7 +1355,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 |---|---|
 | `rules_worker_down` | the OS refused to start a rules worker |
 | `bad_ticks` | tick {} is outside 0..3600 |
-| `bad_fighters` | fighters {fighters} is outside 2..={MAX_PARTICIPANTS} |
+| `bad_fighters` | fighters {fighters} is outside 2..=16 |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters |
 | `no_script` | no rule script drives any slot; call rules.set first |
 | `invalid_config` | arena refused this seed, fighters and extent |
@@ -1488,7 +1490,7 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..={MAX_PARTICIPANTS}; re-run with a headcount in that range |
+| `bad_fighters` | participants {participants} is outside 2..=16; re-run with a headcount in that range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters; re-run in range |
 | `bad_config` | spawn for seed {seed} with {participants} fighters at {half}m holds nothing; ranges already check 2..=16 and 5.0..=100.0m, so re-run in range and report the seed |
 
@@ -1506,7 +1508,7 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire; Match seed (a decimal string or a number); the same seed plus tape replays the same digest. |
-| `participants` | `Option<u8>` | no |  | alias `fighters`; Participant count, 2..=16. |
+| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters`; Participant count, 2..=16. |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half-extent in meters, 5.0..=100.0. |
 | `ticks` | `Option<u32>` | no |  | `1..=3600`, `2..=16`, `5.0..=100.0m`; Ticks to simulate as the 1-indexed count N (1..=3600). |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`; Tape inputs with 0-indexed tick ids inside `0..ticks`. |
@@ -1518,7 +1520,7 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 |---|---|
 | `bad_events` | events {count} is outside 0..=64 (default 16); re-run with a count in that range |
 | `bad_ticks` | ticks is missing; submit 1..=3600 (MCP sim.step bound); re-run with a tick count |
-| `bad_fighters` | participants {participants} is outside 2..={MAX_PARTICIPANTS}; re-run with a headcount in that range |
+| `bad_fighters` | participants {participants} is outside 2..=16; re-run with a headcount in that range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters; re-run in range |
 | `bad_ticks` | ticks {ticks} is outside 1..=3600 (MCP sim.step bound); re-run in range |
 | `too_many_inputs` | inputs holds {} entries; at most 2048 per step; re-run with a shorter tape |
@@ -1745,7 +1747,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `participants` | `Option<u8>` | no |  | alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
 | `tick_cap` | `Option<u32>` | no |  | `1..=3600` |
@@ -1756,7 +1758,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..={MAX_PARTICIPANTS}; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_ticks` | tick_cap missing; submit 1..=3600; re-run with a cap |
 | `bad_ticks` | tick_cap {cap} is outside 1..=3600; re-run in range |
@@ -1782,7 +1784,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `participants` | `Option<u8>` | no |  | alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `fighter` | `Option<u8>` | no |  |  |
 | `action` | `Option<String>` | no |  |  |
@@ -1793,7 +1795,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..={MAX_PARTICIPANTS}; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_args` | action `{action}` is unknown; submit attack, block or dodge; re-run |
 | `bad_fighters` | fighter {fighter} is outside 0..{participants}; re-run with a live slot |
@@ -1820,7 +1822,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `participants` | `Option<u8>` | no |  | alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `ticks` | `Option<u32>` | no |  | `1..=3600` |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
@@ -1829,7 +1831,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..={MAX_PARTICIPANTS}; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_ticks` | ticks missing; submit 1..=3600; re-run with a count |
 | `bad_ticks` | ticks {ticks} is outside 1..=3600; re-run in range |
@@ -1851,7 +1853,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
 | `bouts` | `Option<u32>` | no |  | `1..=20` |
 | `ticks` | `Option<u32>` | no |  | `60..=3600` |
-| `fighters` | `Option<u8>` | no |  | alias `participants` |
+| `fighters` | `Option<u8>` | no |  | `2..=16`; alias `participants` |
 
 **Typed refusals:**
 
@@ -1859,7 +1861,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 |---|---|
 | `bad_args` | bouts {bouts} is outside 1..=20; re-run with a bout count in range |
 | `bad_args` | ticks {ticks} is outside 60..=3600; re-run with a bout length in range |
-| `bad_args` | fighters {fighters} is outside 2..={MAX_PARTICIPANTS}; re-run with a headcount in range |
+| `bad_args` | fighters {fighters} is outside 2..=16; re-run with a headcount in range |
 | `evidence_unwritten` | could not write {rel} ({why}); re-run after freeing target/reports |
 
 ## Pack `replay`
@@ -1888,7 +1890,7 @@ Listed in a fresh session: no, call `api.load` with `replay`. Source: `crates/en
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
 | `ticks` | `Option<u32>` | no |  | `1..=3600` |
-| `participants` | `Option<u8>` | no |  | alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
 | `chain` | `Vec<u64>` | no |  | `at most 3600`; decimal string on the wire |
@@ -1898,7 +1900,7 @@ Listed in a fresh session: no, call `api.load` with `replay`. Source: `crates/en
 | Code | Message |
 |---|---|
 | `no_chain` | chain holds 0 hashes; submit the recorded per-tick chain in tick order, then re-run |
-| `bad_fighters` | participants {participants} is outside 2..={MAX_PARTICIPANTS}; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_ticks` | ticks missing; submit 1..=3600; re-run with a tick count |
 | `bad_ticks` | ticks {ticks} is outside 1..=3600; re-run in range |
@@ -1924,7 +1926,7 @@ Listed in a fresh session: no, call `api.load` with `replay`. Source: `crates/en
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
 | `ticks` | `Option<u32>` | no |  | `1..=3600` |
-| `participants` | `Option<u8>` | no |  | alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
 | `chain` | `Vec<u64>` | no |  | `at most 3600`; decimal string on the wire |
@@ -1934,7 +1936,7 @@ Listed in a fresh session: no, call `api.load` with `replay`. Source: `crates/en
 | Code | Message |
 |---|---|
 | `no_chain` | chain holds 0 hashes; submit the recorded per-tick chain in tick order, then re-run |
-| `bad_fighters` | participants {participants} is outside 2..={MAX_PARTICIPANTS}; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_ticks` | ticks missing; submit 1..=3600; re-run with a tick count |
 | `bad_ticks` | ticks {ticks} is outside 1..=3600; re-run in range |
@@ -2176,7 +2178,7 @@ Listed in a fresh session: no, call `api.load` with `web`. Source: `crates/endpo
 
 ## Coverage
 
-69 tools parsed, 366 refusal rows printed, 0 declarations the parser could not read.
+69 tools parsed, 373 refusal rows printed, 0 declarations the parser could not read.
 A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return; the tests next to its source are the full list.
 
 Tools with no refusal site found: `capture`, `scene.next`, `wound.table.get`, `material.list`, `asset.generate`, `sim.plan_goals`, `log.digest`, `log.query`, `rpc.discover`.
