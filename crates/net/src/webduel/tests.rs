@@ -10,6 +10,7 @@ use std::rc::Rc;
 use engine_core::mix64;
 
 use super::*;
+use crate::guard::{Refusal, MAX_AHEAD_TICKS};
 use crate::quic::check_budget;
 
 type Queue = Rc<RefCell<VecDeque<Inbound>>>;
@@ -24,6 +25,8 @@ struct End {
     loss: u64,
     draws: u64,
     dropped: u64,
+    /// From this tick on, the state datagrams this end sends carry a wrong hash.
+    lie_from: Option<u32>,
 }
 
 fn pair() -> (End, End) {
@@ -39,6 +42,7 @@ fn pair() -> (End, End) {
             loss: 0,
             draws: 0,
             dropped: 0,
+            lie_from: None,
         },
         End {
             me: client,
@@ -48,6 +52,7 @@ fn pair() -> (End, End) {
             loss: 0,
             draws: 0,
             dropped: 0,
+            lie_from: None,
         },
     )
 }
@@ -61,9 +66,10 @@ impl Transport for End {
             self.dropped += 1;
             return Ok(());
         }
+        let bytes = self.lie(bytes);
         self.outbox.borrow_mut().push_back(Inbound {
             from: self.me,
-            frame: InboundFrame::Datagram(bytes.to_vec()),
+            frame: InboundFrame::Datagram(bytes),
         });
         Ok(())
     }
@@ -88,6 +94,22 @@ impl Transport for End {
 
     fn recv(&mut self) -> Vec<Inbound> {
         self.inbox.borrow_mut().drain(..).collect()
+    }
+}
+
+impl End {
+    /// A state datagram from the lying tick on, with its hash flipped; anything else as sent.
+    fn lie(&self, bytes: &[u8]) -> Vec<u8> {
+        let Some(from) = self.lie_from else {
+            return bytes.to_vec();
+        };
+        match decode_state(bytes) {
+            Ok(mut packet) if packet.checkpoint.tick >= from => {
+                packet.checkpoint.hash ^= 1;
+                encode_state(packet.checkpoint, &packet.inputs).expect("re-encodes")
+            }
+            _ => bytes.to_vec(),
+        }
     }
 }
 
@@ -247,6 +269,11 @@ fn webduel_ai_fills_a_seat_that_leaves_and_catches_it_up_when_it_returns() {
         reference_hash(0).expect("reference"),
         "the AI played the gap, so this is not the scripted hash"
     );
+    // The returning page predicted its way back from tick 0 to the tip, 150 ticks ahead, but
+    // sent the server only the ticks it still needed: the guard saw no flood.
+    let receipt = host.admission()[0];
+    assert_eq!(receipt.count(Refusal::Rate), 0, "{receipt:?}");
+    assert_eq!(receipt.count(Refusal::Future), 0, "{receipt:?}");
     let events = host.take_events();
     assert!(events
         .iter()
@@ -350,4 +377,317 @@ fn webduel_headless_server_on_a_spec_equals_the_plain_server() {
         let (b, _) = plain.tick(&[input]).expect("tick");
         assert_eq!(a, b, "tick {tick}");
     }
+}
+
+/// A pilot that is not the script: walk forward, swing every tenth tick, face one way.
+struct Walker;
+
+impl Pilot for Walker {
+    fn input(&mut self, tick: u32, slot: u8) -> BodyInput {
+        BodyInput {
+            tick,
+            fighter: BodyId::new(slot).expect("slot"),
+            mx: 100,
+            mz: 0,
+            facing: 9_000,
+            buttons: if tick % 10 == 9 {
+                Buttons(ATTACK)
+            } else {
+                Buttons::NONE
+            },
+        }
+    }
+}
+
+#[test]
+fn webduel_ticks_are_part_of_the_build_and_a_pilot_other_than_the_script_drives_the_seat() {
+    let ticks = 120;
+    let (mut server, mut wire) = pair();
+    let spec = duel_spec_for(ticks).expect("spec");
+    let mut host = DuelHost::new(spec).expect("host");
+    let mut client = DuelClient::playing(21, ticks, Box::new(Walker)).expect("client");
+    play(&mut host, &mut server, &mut client, &mut wire);
+    let done = client
+        .outcome()
+        .expect("ended")
+        .as_ref()
+        .expect("converged");
+    assert_eq!(done.ticks, ticks);
+    // The plain server over the same spec and the walker's inputs ends on the same hash.
+    let mut plain = Server::from_spec(duel_spec_for(ticks).expect("spec")).expect("server");
+    let mut walker = Walker;
+    let mut hash = 0;
+    for tick in 0..ticks {
+        hash = plain.tick(&[walker.input(tick, 0)]).expect("tick").0.hash;
+    }
+    assert_eq!(done.hash, hash);
+    assert_ne!(done.hash, reference_hash_for(ticks, &[0]).expect("script"));
+    // A page that asks for another length is another match: refused, both builds named.
+    let (mut server2, mut wire2) = pair();
+    let mut other = DuelClient::playing(22, ticks + 1, Box::new(Script)).expect("client");
+    let mut host2 = DuelHost::new(duel_spec_for(ticks).expect("spec")).expect("host");
+    play(&mut host2, &mut server2, &mut other, &mut wire2);
+    let failure = other
+        .outcome()
+        .expect("ended")
+        .as_ref()
+        .expect_err("refused");
+    assert!(failure.0.contains("refused the join"), "{failure}");
+    assert!(duel_spec_for(0).is_err() && duel_spec_for(100_001).is_err());
+}
+
+#[test]
+fn webduel_two_seats_start_together_and_all_three_end_on_the_two_seat_hash() {
+    let (mut server_a, mut wire_a) = pair();
+    let (mut server_b, mut wire_b) = pair();
+    let mut host = DuelHost::with_seats(duel_spec().expect("spec"), 2).expect("host");
+    let (mut first, mut second) = (
+        DuelClient::new(0xA1).expect("client"),
+        DuelClient::new(0xB2).expect("client"),
+    );
+    let (at_a, at_b) = (server_a.me, server_b.me);
+    // The first seat alone does not start the match, however long the host ticks.
+    first.poll(&mut wire_a, at_a);
+    for _ in 0..50 {
+        host.pump(&mut [&mut server_a, &mut server_b]);
+        assert_eq!(
+            host.tick(&mut [&mut server_a, &mut server_b], true)
+                .expect("tick"),
+            None
+        );
+        first.poll(&mut wire_a, at_a);
+    }
+    assert!(
+        !host.started() && host.tick_now() == 0,
+        "waiting for the second seat"
+    );
+    for _ in 0..ROUNDS {
+        host.pump(&mut [&mut server_a, &mut server_b]);
+        host.tick(&mut [&mut server_a, &mut server_b], false)
+            .expect("tick");
+        let done_a = first.poll(&mut wire_a, at_a);
+        let done_b = second.poll(&mut wire_b, at_b);
+        if done_a && done_b {
+            break;
+        }
+    }
+    let reference = reference_hash_for(DUEL_TICKS, &[0, 1]).expect("reference");
+    let (a, b) = (
+        first.outcome().expect("ended").as_ref().expect("converged"),
+        second
+            .outcome()
+            .expect("ended")
+            .as_ref()
+            .expect("converged"),
+    );
+    assert_eq!((a.slot, b.slot), (0, 1));
+    assert_eq!((a.hash, b.hash), (reference, reference));
+    assert_eq!(host.final_hash(), Some(reference));
+    assert_ne!(
+        reference,
+        reference_hash(0).expect("one seat"),
+        "a second human is a different match"
+    );
+    // Each client predicted the other seat as AI, so the server corrected it.
+    assert!(a.rollback_max > 0 && b.rollback_max > 0, "{a:?} {b:?}");
+    assert!(DuelHost::with_seats(duel_spec().expect("spec"), 0).is_err());
+    assert!(DuelHost::with_seats(duel_spec().expect("spec"), 3).is_err());
+}
+
+#[test]
+fn webduel_against_the_ai_never_rolls_back() {
+    let (mut server, mut wire) = pair();
+    let (mut host, mut client) = (host(), DuelClient::new(31).expect("client"));
+    play(&mut host, &mut server, &mut client, &mut wire);
+    let done = client
+        .outcome()
+        .expect("ended")
+        .as_ref()
+        .expect("converged");
+    assert_eq!((done.mispredicts, done.rollback_max), (0, 0));
+}
+
+#[test]
+fn webduel_times_the_join_and_the_ping_on_the_callers_clock() {
+    let (mut server, mut wire) = pair();
+    let (mut host, mut client) = (host(), DuelClient::new(41).expect("client"));
+    let at = server.me;
+    // The join leaves at 100 ms and the grant is read at 145: the handshake is the first round trip.
+    client.poll_at(&mut wire, at, 100);
+    host.pump(&mut [&mut server]);
+    client.poll_at(&mut wire, at, 145);
+    assert!(client.seated());
+    assert_eq!(client.stats().rtt_ms, Some(45));
+    // The first Ready ping left in that same round (at 145); its echo is read at 182.
+    host.pump(&mut [&mut server]);
+    client.poll_at(&mut wire, at, 182);
+    assert_eq!(client.stats().rtt_ms, Some(37));
+    // No second ping until a second has passed since the first.
+    client.poll_at(&mut wire, at, 500);
+    host.pump(&mut [&mut server]);
+    client.poll_at(&mut wire, at, 520);
+    assert_eq!(client.stats().rtt_ms, Some(37));
+    client.poll_at(&mut wire, at, 1_200);
+    host.pump(&mut [&mut server]);
+    client.poll_at(&mut wire, at, 1_290);
+    assert_eq!(client.stats().rtt_ms, Some(90));
+}
+
+#[test]
+fn webduel_ready_from_a_stranger_gets_no_echo() {
+    let (mut server, mut wire) = pair();
+    let mut host = host();
+    let at = server.me;
+    send_lobby(
+        &mut wire,
+        at,
+        Msg::Ready {
+            token: 99,
+            ready: true,
+        },
+    )
+    .expect("send");
+    host.pump(&mut [&mut server]);
+    assert!(wire.recv().is_empty(), "no seat, no echo");
+}
+
+#[test]
+fn webduel_join_is_sent_again_when_it_went_unanswered() {
+    let (mut server, mut wire) = pair();
+    let mut client = DuelClient::new(51).expect("client");
+    let at = server.me;
+    client.poll_at(&mut wire, at, 0);
+    assert_eq!(server.recv().len(), 1, "the first join");
+    client.poll_at(&mut wire, at, 500);
+    assert!(server.recv().is_empty(), "too early to ask again");
+    client.poll_at(&mut wire, at, 1_000);
+    assert_eq!(
+        server.recv().len(),
+        1,
+        "the join is sent again after a second"
+    );
+}
+
+#[test]
+fn webduel_names_the_first_divergent_tick_while_the_duel_is_still_on() {
+    let (mut server, mut wire) = pair();
+    server.lie_from = Some(200);
+    let (mut host, mut client) = (host(), DuelClient::new(61).expect("client"));
+    play(&mut host, &mut server, &mut client, &mut wire);
+    let failure = client
+        .outcome()
+        .expect("ended")
+        .as_ref()
+        .expect_err("the hashes part");
+    assert!(
+        failure.0.starts_with("desync at tick 200:"),
+        "the first tick the server lied about: {failure}"
+    );
+    assert!(host.tick_now() < DUEL_TICKS, "named before the last tick");
+}
+
+#[test]
+fn webduel_playing_line_shows_state_ping_and_rollback() {
+    let waiting = DuelStats {
+        tick: 0,
+        server_tick: None,
+        rtt_ms: Some(12),
+        rollback_last: 0,
+        rollback_max: 0,
+        mispredicts: 0,
+        quiet_ms: 0,
+        rejected: 0,
+    };
+    assert_eq!(
+        playing_line("websocket", &waiting, 600),
+        "net: seated transport=websocket rtt=12ms, waiting for the match to start"
+    );
+    let running = DuelStats {
+        server_tick: Some(122),
+        rtt_ms: None,
+        rollback_last: 3,
+        rollback_max: 9,
+        quiet_ms: 16,
+        ..waiting
+    };
+    assert_eq!(
+        playing_line("webtransport", &running, 3600),
+        "net: playing transport=webtransport tick=123/3600 rtt=? rollback=3 max=9 quiet=16ms"
+    );
+}
+
+#[test]
+fn webduel_a_cheating_seat_is_refused_and_counted_and_the_honest_hash_is_unchanged() {
+    let (mut server, mut wire) = pair();
+    let (mut host, mut client) = (host(), DuelClient::new(71).expect("client"));
+    let at = server.me;
+    // Join, let the honest inputs of the first ticks in, then start cheating.
+    client.poll(&mut wire, at);
+    host.pump(&mut [&mut server]);
+    client.poll(&mut wire, at);
+    host.pump(&mut [&mut server]);
+    let mut rounds = 0;
+    while !client.poll(&mut wire, at) {
+        rounds += 1;
+        assert!(
+            rounds < ROUNDS,
+            "the duel stalled at host tick {}",
+            host.tick_now()
+        );
+        let now = host.tick_now();
+        if rounds % 25 == 1 {
+            // A seat can only speak for its own slot.
+            wire.send_unreliable(at, &input_bytes(now + 3, 1))
+                .expect("send");
+            // Far past the window.
+            wire.send_unreliable(at, &input_bytes(now + 200, 0))
+                .expect("send");
+            // Not an input packet at all.
+            wire.send_unreliable(at, &[1, 2, 3]).expect("send");
+            // A different input for a tick already admitted.
+            let mut rewrite = scripted_input(now + 3, 0);
+            rewrite.mx = -100;
+            let bytes = crate::session::encode_input(rewrite.tick, &[rewrite]).expect("encode");
+            wire.send_unreliable(at, &bytes).expect("send");
+        }
+        if rounds == 40 {
+            // A flood on one arrival tick.
+            for _ in 0..30 {
+                wire.send_unreliable(at, &input_bytes(now + 3, 0))
+                    .expect("send");
+            }
+        }
+        host.pump(&mut [&mut server]);
+        host.tick(&mut [&mut server], false).expect("tick");
+    }
+    let done = client
+        .outcome()
+        .expect("ended")
+        .as_ref()
+        .expect("converged");
+    assert_eq!(
+        done.hash,
+        reference_hash(0).expect("reference"),
+        "the cheats changed nothing"
+    );
+    assert_eq!(host.final_hash(), Some(done.hash));
+    let receipt = host.admission()[0];
+    for kind in [
+        Refusal::WrongSlot,
+        Refusal::Future,
+        Refusal::Malformed,
+        Refusal::Rewrite,
+        Refusal::Rate,
+    ] {
+        assert!(
+            receipt.count(kind) > 0,
+            "{} refusals counted: {receipt:?}",
+            kind.name()
+        );
+    }
+    assert!(receipt.cheats() >= 5);
+    assert_eq!(
+        receipt.accepted, DUEL_TICKS,
+        "every honest input was admitted once"
+    );
 }

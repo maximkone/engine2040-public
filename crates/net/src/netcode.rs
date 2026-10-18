@@ -15,7 +15,6 @@
 /// One implementation lives with the rollback tape; this re-export lets the
 /// small-window session share it instead of mirroring the type.
 pub use crate::rollback::InputQueue;
-use crate::Rollback;
 use std::collections::{BTreeMap, VecDeque};
 
 /// Max rollback window (9: 150 ms at 60 Hz). Resims beyond this refuse `TooFar`.
@@ -159,7 +158,6 @@ pub struct Session<S: Sim> {
     pending: BTreeMap<u32, u32>,
     history: VecDeque<u64>,
     history_base: u32,
-    ring: Rollback,
     last_remote: u32,
     remote_queue: InputQueue,
     max_rollback: usize,
@@ -178,7 +176,6 @@ impl<S: Sim> Session<S> {
             pending: BTreeMap::new(),
             history: VecDeque::new(),
             history_base: 0,
-            ring: Rollback::new(MAX_ROLLBACK),
             last_remote: 0,
             remote_queue: InputQueue::new(),
             max_rollback: 0,
@@ -290,10 +287,6 @@ impl<S: Sim> Session<S> {
             .find(|r| r.frame == frame)
             .map(|r| r.predicted)
     }
-    /// Ring passthrough (reused crate::Rollback).
-    pub fn resim_from(&self, i: usize) -> Option<u64> {
-        self.ring.resim_from(i)
-    }
     /// Build an outbound packet shape; the caller transports it.
     pub fn packet(frame: u32, input: u32, ch: Channel) -> Packet {
         // Pin the hint to the table so route and shed order cannot split.
@@ -335,7 +328,6 @@ impl<S: Sim> Session<S> {
             hash: h,
         });
         self.history.push_back(h);
-        self.ring.advance(h, local ^ r);
         self.remote_queue.push_input(f, r, !pred);
         if self.frames.len() > MAX_ROLLBACK + 1 {
             self.frames.pop_front();
@@ -414,18 +406,9 @@ impl<S: Sim> Session<S> {
                 self.frames[i + 1].before = cur;
             }
         }
-        self.rebuild_ring();
         self.rollbacks += 1;
         self.max_rollback = self.max_rollback.max(dist);
         Ok(dist)
-    }
-    fn rebuild_ring(&mut self) {
-        let mut ring = Rollback::new(MAX_ROLLBACK);
-        let n = self.frames.len().min(MAX_ROLLBACK);
-        for r in self.frames.iter().skip(self.frames.len() - n) {
-            ring.advance(r.hash, r.local ^ r.remote);
-        }
-        self.ring = ring;
     }
 }
 

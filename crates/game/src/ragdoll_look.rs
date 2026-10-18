@@ -1413,6 +1413,46 @@ mod tests {
     }
 
     #[test]
+    fn ragdoll_look_standing_pose_overlaps_nothing_on_the_15_bone_rig() {
+        // Every CT7 variant is floored out of its standing pose: no two unjoined capsules start
+        // inside each other, so the solver has nothing to blast apart and the spawn filters no
+        // pair. The receipt also carries one mass ratio per joint (QR2, QR4, QR5).
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let views = ring(8);
+        let mut hp = [1000u16; 8];
+        for t in 0..20u32 {
+            let mut cues = Vec::new();
+            if t == 10 {
+                for victim in 0..8u8 {
+                    hp[usize::from(victim)] = 0;
+                    cues.push(knock((victim + 1) % 8, victim));
+                }
+            }
+            tick(&mut look, t, &views, &hp, &cues);
+        }
+        let fx = look
+            .ragdoll
+            .fx
+            .as_ref()
+            .expect("the knockouts built the world");
+        for slot in 0..8u8 {
+            let receipt = fx.ragdoll_receipt(slot).expect("every fighter fell");
+            println!("ragdoll_look: slot {slot} {}", receipt.receipt_line());
+            assert_eq!(
+                receipt.overlaps, 0,
+                "slot {slot}: the standing pose overlaps"
+            );
+            assert_eq!(receipt.filtered, 0, "slot {slot}");
+            assert_eq!(
+                receipt.mass_ratio.len(),
+                BONE_COUNT - 1,
+                "one ratio per joint"
+            );
+            assert!(receipt.mass_ratio.iter().all(|r| r.is_finite() && *r > 0.0));
+        }
+    }
+
+    #[test]
     fn ragdoll_look_off_keeps_the_flat_death_pose() {
         let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
         look.set_ragdoll(false);
@@ -1502,6 +1542,79 @@ mod tests {
         let body = truth.iter().find(|b| b.slot == 1).expect("drawn");
         let top = body.joints.iter().map(|j| j[1]).fold(f32::MIN, f32::max);
         assert!(top > 1.2, "stands again, head at {top:.2} m");
+    }
+
+    /// The scripted get-up of the test above, sampled at alpha 0 and 0.5 of every tick: for each
+    /// sample, whether slot 1 was still a ragdoll and where its joints were.
+    fn get_up_samples() -> Vec<(bool, Vec<[f32; 3]>)> {
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let views = ring(2);
+        let hp = [1000u16; 2];
+        let mut samples = Vec::new();
+        for t in 0..420u32 {
+            let cues = if t == 10 {
+                vec![hit(0, 1), knock(0, 1)]
+            } else {
+                Vec::new()
+            };
+            look.observe_tick(t, &views, &hp, &cues);
+            let gait = match t {
+                10..=39 => GaitPhase::Fallen,
+                40..=54 => GaitPhase::Catching,
+                _ => GaitPhase::Steady,
+            };
+            let shown = look.ragdoll_fold_gait(1, gait);
+            look.observe_balance(1, shown);
+            look.ragdoll_tick();
+            for alpha in [0.0f32, 0.5] {
+                let truth = joints(&look, 2, alpha);
+                let body = truth.iter().find(|b| b.slot == 1).expect("drawn");
+                samples.push((body.ragdolled, body.joints.clone()));
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn ragdoll_look_get_up_first_frame_is_within_the_pop_law_of_the_ragdoll_it_leaves() {
+        // The view law skips the first frame out of a ragdoll (physics moved the joints, so it
+        // has no velocity to predict from). The prediction is made here from the ragdoll's own
+        // last two frames: with the 0.25 s halflife the first get-up frame must land within
+        // POP_M of it, the 10 cm the halflife's doc comment states.
+        let samples = get_up_samples();
+        let lying = samples
+            .iter()
+            .position(|s| s.0)
+            .expect("the fall spawned a ragdoll");
+        let up = lying
+            + samples[lying..]
+                .iter()
+                .position(|s| !s.0)
+                .expect("it stood up");
+        assert!(up >= lying + 2, "two ragdoll frames to predict from");
+        let miss = |at: usize| -> f64 {
+            let (now, a, b) = (&samples[at].1, &samples[at - 1].1, &samples[at - 2].1);
+            (0..now.len())
+                .map(|j| {
+                    (0..3)
+                        .map(|k| f64::from(now[j][k]) - f64::from(2.0 * a[j][k] - b[j][k]))
+                        .map(|d| d * d)
+                        .sum::<f64>()
+                        .sqrt()
+                })
+                .fold(0.0, f64::max)
+        };
+        let first = miss(up);
+        println!(
+            "ragdoll_look: get-up halflife {GETUP_HALFLIFE_S} s, first frame {:.1} cm off its prediction, second {:.1} cm",
+            first * 100.0,
+            miss(up + 1) * 100.0
+        );
+        assert!(
+            first < crate::view_truth::POP_M,
+            "the first get-up frame is {:.1} cm off the ragdoll's own prediction",
+            first * 100.0
+        );
     }
 
     #[test]

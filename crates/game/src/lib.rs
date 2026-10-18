@@ -111,6 +111,9 @@ pub mod ludus_npcs;
 /// Mode framework: arena, siege and district free-roam over the
 /// ladder. Std-only.
 pub mod modes_world;
+/// One seat of a two-human match over UDP (LAN or relay), driven per frame by
+/// the window or the headless proof loop. Std-only.
+pub mod net_seat;
 pub mod netgame;
 /// Gamepad sticks plus buttons through the shared bindings table. Std-only.
 pub mod pad;
@@ -145,6 +148,11 @@ pub mod steam;
 /// `app` only, beside the look that fills it.
 #[cfg(feature = "app")]
 pub mod view_truth;
+/// Virtual time: a speed that eases toward a target and scales the wall
+/// milliseconds the tick accumulator sees; locked at real time in a net
+/// match. Presentation only, never hashed. App leg only.
+#[cfg(feature = "app")]
+pub mod virt;
 /// Weapon trail: per-slot blade base-plus-tip ring, view only.
 /// Holds the last 12 pairs per slot; idle slots stay empty.
 /// Age ticks fade alpha from 1 at age 0 to 0 at age 11.
@@ -443,6 +451,14 @@ pub enum GameError {
     /// LAN transport/session failure from `engine-net` (version mismatch,
     /// bad wire bytes, late input); nothing was applied.
     Net(engine_net::session::NetError),
+    /// The host and the guest would play different matches (rules, spear,
+    /// world or config): both match identities carried, nothing was paired.
+    SpecMismatch {
+        /// The host's match identity.
+        host: u64,
+        /// The guest's match identity.
+        guest: u64,
+    },
 }
 
 impl core::fmt::Display for GameError {
@@ -459,6 +475,11 @@ impl core::fmt::Display for GameError {
             ),
             Self::BadRemote(row) => write!(f, "bad remote input ({row})"),
             Self::Net(err) => write!(f, "net error ({err:?})"),
+            Self::SpecMismatch { host, guest } => write!(
+                f,
+                "the host plays another match (host identity {host:016x}, this code {guest:016x}): \
+                 use the host's fresh code on the same build"
+            ),
         }
     }
 }

@@ -159,6 +159,14 @@ impl Camera {
         Some(([x, y], depth))
     }
 
+    /// [`Camera::project`] in whole numbers: the frame pixel `[x, y]` a world
+    /// point in centimeters lands in (it may lie outside the frame) and its
+    /// depth in centimeters; `None` when the point is not in front of the eye.
+    pub fn project_px(&self, point_cm: [f64; 3]) -> Option<([i32; 2], i32)> {
+        let ([x, y], depth) = self.project(point_cm)?;
+        Some(([cm(x.floor()), cm(y.floor())], cm(depth)))
+    }
+
     /// The world point in centimeters at `depth` along the view axis through
     /// frame pixel `pixel`: the inverse of [`Camera::project`].
     pub fn unproject(&self, pixel: [f64; 2], depth: f64) -> [f64; 3] {

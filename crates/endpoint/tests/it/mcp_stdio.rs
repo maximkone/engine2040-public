@@ -18,12 +18,12 @@ use rmcp::serde_json::{self, Value};
 
 /// Bounded wait per server reply: a silent server fails the test, never hangs it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-/// What a fresh door lists: the thirteen core tools plus the seven default
-/// `scene`-pack verbs (20 names), in contract order. Every other verb is callable by name and listed
+/// What a fresh door lists: the thirteen core tools plus the eight default
+/// `scene`-pack verbs (21 names), in contract order. Every other verb is callable by name and listed
 /// once its pack loads (`api.load`). The last three are the defined TOOL_
 /// consts that inbox row EB-2026-10-08-S178 (E37) registered: `game.build`,
 /// `sim.build_encounter`, `test.run`.
-const EXPECTED_TOOLS: [&str; 20] = [
+const EXPECTED_TOOLS: [&str; 21] = [
     "scene.read",
     "tx.preview",
     "tx.apply",
@@ -41,6 +41,7 @@ const EXPECTED_TOOLS: [&str; 20] = [
     "scene.query",
     "scene.watch",
     "scene.next",
+    "scene.pick",
     "game.build",
     "sim.build_encounter",
     "test.run",

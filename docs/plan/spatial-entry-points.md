@@ -22,7 +22,7 @@ yaw (yaw 0 faces +X, +90 deg faces +Z); `Frame::Viewer(w)` uses `w`'s yaw, neare
 |---|---|---|
 | "What is left of X?" with numbers | `relation::subjects_of(actors, Rel::Left, x, frame)` + `pair::pair_numbers(actors, x, s, frame)` | `dist_cm`, `bearing_deg` (0 ahead, 90 right, 180 behind, 270 left), `gap_cm` |
 | "Can A see B? What is in the way?" | `sees::sees_pair(&world, a, b)` | `visible`, `fraction_pct` (5-ray fan), `blocker{id, entry_cm, dist_cm}` |
-| "Why is B not on screen?" | `sees::why_hidden(&actors, Draw{has_mesh,has_material}, b, eye_m, yaw)` | verdict word via `Hidden::word()`, one evidence number |
+| "Why is B not on screen?" | `why_hidden::why_hidden(&actors, Draw{has_mesh,has_material}, b, eye_m, yaw)` | verdict word via `Hidden::word()`, one evidence number |
 | "How much room around X? Which way do I push it?" | `measure::clearance(&actors, x, need_cm)` | `gap`, `push_pm`, `kind` exact/upper_bound/narrow, `holds` |
 | "Gap / overlap / align / contain between A and B" | `measure::measure(&box_a, &box_b, &MeasureArgs)` | `shortfall_cm` is the number to act on |
 | "How far can X slide?" | `slide::slide(&actors, x, Dir::parse("+x")?, max_range_cm)` | `free_cm`, `blocker`, `capped`, `already_blocked`; words in `Dir::words()` |
@@ -57,3 +57,17 @@ After: it returns things EAST. Digests that moved: relation v2 edge digests (Lef
 owner); no hashed simulation path reads them. Golden `d57b5c8ae3096614` untouched (spatial is not in the sim hash).
 
 SPX3/visible_from: `relation::holds(.., Rel::Visible, ..)` now delegates to `sees::sees_pair` (same story + 3D center ray), so the two never disagree (`relation_visible_from_and_sees_never_disagree`).
+
+## Wired at the door (backlog wave 2, 2026-10-18)
+
+| Call | Door |
+|---|---|
+| `fold::fold_lookalikes` + `fold::extent_text` + `fold::problems_in_words` | `scene.brief` text: `extent` row, `problem:` rows, one counted `object <stem> x<n> WxHxD cm [ids]` row per look-alike set (`brief::brief_folded`; roles from the node components) |
+| `run_checks(.., ["zfight"])`, `["stray"]`, `["seatedJoint","supportChain"]` | `scene.spatial checks=[..]`; `epsilon_cm` is the z-fight tolerance (default 1); zfight rows end with the axis and the one move that fixes them |
+| `triage::triage` | `scene.spatial triage=true`: each finding reads `error`, `intentional`, `false_positive` or `deferred`; non-errors read severity `info` |
+| `verdict::judge` | `scene.spatial allow=["check a b\|- verdict rev expiry reason"]`: matched findings move to `suppressed` with the reason; the learner lines `learned <check> x <family>: level N` follow |
+| `place::place_dir`, `place::place_outside` | `scene.place` wants `in_front_of\|behind\|left_of\|right_of object:<uuid> [lo,hi]` (against the anchor's facing) and `outside object:<uuid>` or `outside region:x0,z0,x1,z1` (cm) |
+| `measure::measure_pair` | `scene.query kind=measure anchor other what=gap\|overlap\|align\|contain` (`radius_cm` is the gap or margin to meet) |
+| `rooms::find_rooms` | `scene.query kind=room_of anchor`, `kind=in_room room`, `kind=exits_of room\|anchor` |
+| `sense_text::glance` | `scene.query kind=glance eye_m yaw [half_angle_deg]`: coverage per object in permille, occluded ids, background, depth |
+| `sense_text::coverage` | `scene.query kind=coverage anchor eye_m yaw pitch [half_angle_deg]`: share of the frame, looks_away, flipped, next call |

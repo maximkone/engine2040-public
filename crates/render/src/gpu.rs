@@ -1,5 +1,6 @@
 //! gpu: winit + wgpu sprite lane behind `window` feature. Headless builds skip it.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -66,18 +67,63 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Why the sprite window run failed. `source` is the winit or wgpu error.
+#[derive(Debug)]
+pub enum SpriteError {
+    /// The winit event loop could not start or run.
+    EventLoop(winit::error::EventLoopError),
+    /// The OS refused the window.
+    Window(winit::error::OsError),
+    /// The window surface could not be created.
+    Surface(wgpu::CreateSurfaceError),
+    /// No adapter can present to the surface.
+    Adapter(wgpu::RequestAdapterError),
+    /// The adapter refused the device.
+    Device(wgpu::RequestDeviceError),
+    /// The window closed before one frame was submitted and presented.
+    NoFrame,
+}
+
+impl fmt::Display for SpriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EventLoop(e) => write!(f, "{e}"),
+            Self::Window(e) => write!(f, "window: {e}"),
+            Self::Surface(e) => write!(f, "gpu init failed: surface: {e}"),
+            Self::Adapter(e) => write!(f, "gpu init failed: adapter: {e}"),
+            Self::Device(e) => write!(f, "gpu init failed: device: {e}"),
+            Self::NoFrame => write!(f, "no frame was submitted and presented"),
+        }
+    }
+}
+
+impl std::error::Error for SpriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EventLoop(e) => Some(e),
+            Self::Window(e) => Some(e),
+            Self::Surface(e) => Some(e),
+            Self::Adapter(e) => Some(e),
+            Self::Device(e) => Some(e),
+            Self::NoFrame => None,
+        }
+    }
+}
+
 /// Open a window, draw `sprite_count` procedural quads, print fps each second,
 /// exit after `seconds`. Errors when window/GPU setup fails or no frame was
 /// submitted, so a smoke run cannot pass without real GPU work.
-pub fn run_window(sprite_count: u32, seconds: u64) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+pub fn run_window(sprite_count: u32, seconds: u64) -> Result<(), SpriteError> {
+    let event_loop = EventLoop::new().map_err(SpriteError::EventLoop)?;
     let mut app = App::new(sprite_count, seconds);
-    event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
+    event_loop
+        .run_app(&mut app)
+        .map_err(SpriteError::EventLoop)?;
     if let Some(failure) = app.failure {
         return Err(failure);
     }
     if app.frames == 0 {
-        return Err("no frame was submitted and presented".into());
+        return Err(SpriteError::NoFrame);
     }
     Ok(())
 }
@@ -95,7 +141,7 @@ struct GpuState {
 }
 
 impl GpuState {
-    fn new(window: Arc<Window>, sprite_count: u32) -> Result<Self, String> {
+    fn new(window: Arc<Window>, sprite_count: u32) -> Result<Self, SpriteError> {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -107,19 +153,19 @@ impl GpuState {
         let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
         let surface = instance
             .create_surface(Arc::clone(&window))
-            .map_err(|e| format!("surface: {e}"))?;
+            .map_err(SpriteError::Surface)?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }))
-        .map_err(|e| format!("adapter: {e}"))?;
+        .map_err(SpriteError::Adapter)?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("engine2040-render"),
             ..Default::default()
         }))
-        .map_err(|e| format!("device: {e}"))?;
+        .map_err(SpriteError::Device)?;
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -300,7 +346,7 @@ struct App {
     last_report: Instant,
     /// Frames actually submitted and presented.
     frames: u64,
-    failure: Option<String>,
+    failure: Option<SpriteError>,
 }
 
 impl App {
@@ -317,7 +363,7 @@ impl App {
         }
     }
 
-    fn fail(&mut self, event_loop: &ActiveEventLoop, failure: String) {
+    fn fail(&mut self, event_loop: &ActiveEventLoop, failure: SpriteError) {
         eprintln!("{failure}");
         self.failure = Some(failure);
         event_loop.exit();
@@ -334,7 +380,7 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
-            Err(e) => return self.fail(event_loop, format!("window: {e}")),
+            Err(e) => return self.fail(event_loop, SpriteError::Window(e)),
         };
         match GpuState::new(Arc::clone(&window), self.sprite_count) {
             Ok(state) => {
@@ -351,7 +397,7 @@ impl ApplicationHandler for App {
                 self.state = Some(state);
                 window.request_redraw();
             }
-            Err(e) => self.fail(event_loop, format!("gpu init failed: {e}")),
+            Err(e) => self.fail(event_loop, e),
         }
     }
 
@@ -437,5 +483,14 @@ mod shader_contract {
             SHADER.contains("@location(0) vec4<f32>"),
             "fragment stage keeps its color target"
         );
+    }
+
+    #[test]
+    fn sprite_error_keeps_the_old_text() {
+        use super::SpriteError;
+        use std::error::Error;
+        let none = SpriteError::NoFrame;
+        assert_eq!(none.to_string(), "no frame was submitted and presented");
+        assert!(none.source().is_none());
     }
 }

@@ -263,3 +263,15 @@ build), then stage soak (CT50), variety (CT38) and eyes (CT44). Row Accept
 - `node content/crowd/tools/gen.mjs` run twice: both specimen files keep the manifest SHA-256 (`21295d44...` and `bd59050f...`). Deterministic.
 - GitHub `cargo check --locked --manifest-path content/crowd/proof/Cargo.toml`: FAIL, run 39064515835. `--locked` refused because `content/crowd/proof/Cargo.lock` does not match the crate. Not fixed in this pass.
 - The cook proof (`cargo run` of the proof binary) is not on the gh-check allow-list (check, test, clippy only), so `report-split1.json` is still not produced. CT25 Accept (soak captures, cook x2) is not claimed.
+
+## Re-check 2026-10-18 (cook proof is a test now, row stays open)
+
+- New test `crowd_impostors_cook_twice_within_the_prop_budget_and_match_the_report`
+  (`crates/assets/tests/it/crowd_cook.rs`) cooks both specimens through
+  `cook_gltf_bytes` (Prop class) twice: identical, 2 meshes each, 4 non-empty falling LODs per
+  mesh, every hull holds its LOD, and the digests and triangle counts equal
+  `report-split1.json`. Command: `cargo test --locked -p engine-assets --features import,registry
+  --test it -- crowd_cook`. Result on the runner: PASS, run 39105798540. This replaces the stale
+  standalone proof crate as the proof (its `Cargo.lock` still fails `--locked`).
+- Still open, so CT25 is not ticked: the soak captures with the crowd populated (a GPU capture
+  on the reference machine) and the 0-finding read of them.

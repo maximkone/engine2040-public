@@ -89,6 +89,9 @@ pub use uv2_chart::{
 };
 #[cfg(feature = "import")]
 pub mod mesh_import;
+/// glTF morph targets (blend shapes) as plain delta arrays; skin import still rejects them.
+#[cfg(feature = "import")]
+pub mod morph_import;
 pub mod meshlet;
 pub mod recook;
 #[cfg(feature = "import")]

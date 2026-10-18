@@ -3,6 +3,9 @@
 
 pub mod cells;
 pub mod ground;
+/// Seeded spawn rosters over tagged spawn points: min/max per group, matching-based so a
+/// greedy pick never strands a later group.
+pub mod roster;
 pub mod scatter;
 pub mod terrain;
 

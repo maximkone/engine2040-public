@@ -15,6 +15,11 @@ pub struct TaaParams {
     /// Drop history entirely past this motion length in pixels (velocity
     /// rejection for fast movers). Nonnegative and finite.
     pub motion_threshold_px: f32,
+    /// The history belongs to the scene being drawn. False on a first use,
+    /// a resize, a dyn-res step or a camera cut (see
+    /// [`crate::temporal::TemporalRegistry`]): the resolve then follows the
+    /// current frame and reads no history.
+    pub history_valid: bool,
 }
 
 impl Default for TaaParams {
@@ -23,11 +28,31 @@ impl Default for TaaParams {
             history_blend: DEFAULT_HISTORY_BLEND,
             use_clamp: true,
             motion_threshold_px: 32.0,
+            history_valid: true,
         }
     }
 }
 
 impl TaaParams {
+    /// These parameters with the history flag set from the temporal registry.
+    #[must_use]
+    pub fn with_history(self, history_valid: bool) -> Self {
+        Self {
+            history_valid,
+            ..self
+        }
+    }
+
+    /// History weight actually applied: zero while the history is invalid.
+    #[must_use]
+    pub fn effective_blend(&self) -> f32 {
+        if self.history_valid {
+            self.history_blend
+        } else {
+            0.0
+        }
+    }
+
     /// Validate ranges before the resolve runs.
     pub fn validate(&self) -> Result<(), PostError> {
         if !self.history_blend.is_finite() || !(0.0..=1.0).contains(&self.history_blend) {
@@ -143,7 +168,7 @@ pub fn taa_resolve(
             let blend = if speed > params.motion_threshold_px {
                 0.0
             } else {
-                params.history_blend
+                params.effective_blend()
             };
             let sample = sample_bilinear(history, width, height, x as f32 - mx, y as f32 - my);
             let kept = if params.use_clamp {
@@ -210,7 +235,7 @@ pub fn taa_resolve_jittered(
             let blend = if speed > params.motion_threshold_px {
                 0.0
             } else {
-                params.history_blend
+                params.effective_blend()
             };
             let sample = sample_bilinear(
                 history,

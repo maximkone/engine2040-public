@@ -32,11 +32,13 @@ pub mod intents;
 pub mod log_tools;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(all(test, feature = "mcp"))]
+mod mcp_transcript_tests;
 /// Door v2 verb packs: core tools plus packs loaded on demand, one guarded
 /// registration API for every verb.
 #[cfg(feature = "mcp")]
 pub mod packs;
-/// BRP-shaped loopback shim over the verb table (in-process, no socket).
+/// Pick manifest: a capture pixel to an exact object or floor point (EV21).
 #[cfg(feature = "mcp")]
 pub mod pick;
 #[cfg(feature = "mcp")]
@@ -44,11 +46,14 @@ pub mod plan_goals;
 #[cfg(feature = "mcp")]
 pub mod play;
 pub mod receipts;
+/// BRP-shaped loopback shim over the verb table (in-process, no socket).
 #[cfg(feature = "mcp")]
 pub mod remote_shim;
 pub mod sandbox;
 #[cfg(feature = "mcp")]
 pub mod scene_next;
+#[cfg(feature = "mcp")]
+pub mod scene_pick;
 #[cfg(feature = "mcp")]
 pub mod scene_query;
 #[cfg(feature = "mcp")]

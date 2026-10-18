@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import {
-  BASE_FLAGS, FLAG_SETS, NO_GPU_SCRIPT, analyzePixels, badMimeVerdict, decodePng, flagLine, goldenVerdict, isDrawn, loadVerdict, noWebGpuVerdict, parseArgs, quotaVerdict,
-  memoryVerdict, readPage, receiptOf, resolveRequest, serve, verdict,
+  BASE_FLAGS, FLAG_SETS, NO_GPU_SCRIPT, analyzePixels, badMimeVerdict, decodePng, destroyVerdict, flagLine, goldenVerdict, growHashVerdict, isDrawn, loadVerdict, lossVerdict, noWebGpuVerdict, parseArgs, quotaVerdict,
+  memoryVerdict, readPage, receiptOf, resolveRequest, serve, verdict, visibilityVerdict,
 } from "./web-browse.mjs";
 
 // ---- a PNG encoder for fixtures: every filter type, so the decoder's unfilter paths all run ----
@@ -130,6 +130,50 @@ test("verdict: an adapter run is ok only when drawn, moving and recovered", () =
   assert.equal(verdict(ran({ recovered: false })).code, "no-recovery");
 });
 
+const lossReceipt = (over = {}) => ({ ok: true, frames: 40, losses: 1, lastLoss: { reason: "destroyed", cause: "forced", message: "device destroyed" }, ...over });
+
+test("lossVerdict: one forced loss, the browser's reason, the cause and a frame counter that moves", () => {
+  assert.deepEqual(lossVerdict(lossReceipt()), { ok: true, problems: [] });
+  assert.match(lossVerdict(null).problems[0], /no receipt JSON/);
+  assert.match(lossVerdict(lossReceipt({ losses: 0 })).problems[0], /counts 0 losses/);
+  assert.match(lossVerdict(lossReceipt({ lastLoss: undefined })).problems.join(), /no lastLoss/);
+  assert.match(lossVerdict(lossReceipt({ lastLoss: { reason: "", cause: "forced" } })).problems.join(), /no GPUDeviceLostInfo reason/);
+  assert.match(lossVerdict(lossReceipt({ lastLoss: { reason: "unknown", cause: "browser" } })).problems.join(), /cause is browser, expected forced/);
+  assert.match(lossVerdict(lossReceipt({ frames: 0 })).problems.join(), /counts no frame/);
+});
+
+test("destroyVerdict: a requested destroy stops the page and starts no new generation", () => {
+  assert.deepEqual(destroyVerdict({ generationBefore: "1", state: "stopped", generation: "1" }), { ok: true, problems: [] });
+  assert.match(destroyVerdict({ generationBefore: "1", state: "running", generation: "1" }).problems[0], /expected stopped/);
+  assert.match(destroyVerdict({ generationBefore: "1", state: "stopped", generation: "2" }).problems[0], /must not retry/);
+  assert.match(destroyVerdict(undefined).problems[0], /did not report/);
+});
+
+test("visibilityVerdict: one visibilitychange is exactly one skipped frame", () => {
+  assert.deepEqual(visibilityVerdict({ before: 0, after: 1 }), { ok: true, problems: [] });
+  assert.match(visibilityVerdict({ before: 0, after: 0 }).problems[0], /from 0 to 0, expected 1/);
+  assert.match(visibilityVerdict({ before: 2, after: 5 }).problems[0], /from 2 to 5, expected 3/);
+  assert.match(visibilityVerdict({ before: -1, after: -1 }).problems[0], /never showed hidden_skips/);
+  assert.match(visibilityVerdict(undefined).problems[0], /did not report/);
+});
+
+test("growHashVerdict: a still frozen frame, and a memory grow that leaves its hash alone", () => {
+  const cap = (hash, over = {}) => ({ ok: true, frame: 40, hash, blank: false, ...over });
+  assert.deepEqual(growHashVerdict({ still: [cap("aa"), cap("aa")], afterGrow: cap("aa") }), { ok: true, problems: [] });
+  assert.match(growHashVerdict({ still: [cap("aa"), cap("aa")], afterGrow: cap("bb") }).problems[0], /changed the frame hash: aa before, bb after/);
+  assert.match(growHashVerdict({ still: [cap("aa"), cap("cc")], afterGrow: cap("cc") }).problems[0], /not still.*prove nothing/);
+  assert.match(growHashVerdict({ still: [cap("aa"), cap("aa", { blank: true })], afterGrow: cap("aa") }).problems[0], /blank/);
+  assert.match(growHashVerdict({ still: [cap("aa"), null], afterGrow: cap("aa") }).problems[0], /fewer than three/);
+  assert.match(growHashVerdict(undefined).problems[0], /fewer than three/);
+});
+
+test("verdict: the requested destroy is part of the run, the loss receipt only of an arena run", () => {
+  // A page without the arena (the square shell) has no receipt to read.
+  assert.equal(verdict(ran({ loss: null })).ok, true);
+  assert.equal(verdict(ran({ destroyed: { generationBefore: "1", state: "stopped", generation: "1" } })).ok, true);
+  assert.equal(verdict(ran({ destroyed: { generationBefore: "1", state: "running", generation: "2" } })).code, "requested-destroy");
+});
+
 test("verdict: a refusal carries the page's own reason, a dead page says timeout", () => {
   const refused = { ok: false, reason: "no-adapter", message: "WebGPU is here but the browser gave no graphics adapter.", detail: "No suitable adapter" };
   const v = verdict(ran({ report: refused, reportText: JSON.stringify(refused) }));
@@ -147,8 +191,8 @@ tape 600 ticks in 41.3 ms, 0.0688 ms per tick`;
 
 const fatalRun = (over = {}) => ({
   timedOut: false, state: "fatal", fatalDisplay: "block",
-  fatalText: "This browser cannot run the game\nChrome 113 or newer\nEdge 113 or newer\nSafari 26 or newer\nFirefox 141 or newer on Windows",
-  report: { ok: false, reason: "no-webgpu" }, reportText: '{"ok":false,"reason":"no-webgpu"}', exceptions: [],
+  fatalText: "This browser cannot run the game\nThis browser has no WebGPU (navigator.gpu is missing). navigator.gpu is undefined. (fallback=no-webgpu)\nChrome 113 or newer\nEdge 113 or newer\nSafari 26 or newer\nFirefox 141 or newer on Windows",
+  report: { ok: false, reason: "no-webgpu", fallback: "no-webgpu" }, reportText: '{"ok":false,"reason":"no-webgpu","fallback":"no-webgpu"}', exceptions: [],
   golden: GOLDEN_TEXT, goldenState: "ok", ...over,
 });
 
@@ -179,6 +223,9 @@ test("noWebGpuVerdict: each broken piece is named", () => {
   assert.match(noWebGpuVerdict(fatalRun({ fatalText: "Chrome 113 Edge 113 Safari 26" })).problems.join(), /lacks Firefox 141/);
   assert.match(noWebGpuVerdict(fatalRun({ state: "running" })).problems.join(), /expected fatal/);
   assert.match(noWebGpuVerdict(fatalRun({ report: { ok: false, reason: "no-adapter" } })).problems.join(), /reason no-webgpu/);
+  // QT11: the page and the line name the fallback, not only the reason.
+  assert.match(noWebGpuVerdict(fatalRun({ fatalText: "Chrome 113 Edge 113 Safari 26 Firefox 141" })).problems.join(), /does not say fallback=no-webgpu/);
+  assert.match(noWebGpuVerdict(fatalRun({ report: { ok: false, reason: "no-webgpu" } })).problems.join(), /no "fallback":"no-webgpu"/);
   assert.match(noWebGpuVerdict(fatalRun({ exceptions: ["TypeError: x"] })).problems.join(), /uncaught exceptions: TypeError/);
   assert.equal(noWebGpuVerdict(fatalRun({ timedOut: true })).ok, false);
 });
@@ -200,7 +247,7 @@ const MOCK = `<!doctype html><body data-state="starting"><canvas id="canvas" wid
 const c = document.getElementById('canvas').getContext('2d'); let n = 0;
 document.getElementById('golden').textContent = 'golden d57b5c8ae3096614 state 2aca9338670aa0cb corpus b37fc6d66df2d417 OK 412 ms'; document.body.dataset.golden = 'ok';
 if (typeof navigator.gpu === 'undefined') {
-  document.getElementById('fatal').style.display = 'block'; document.getElementById('report').textContent = JSON.stringify({ ok: false, reason: 'no-webgpu' }); document.body.dataset.state = 'fatal';
+  document.getElementById('fatal').style.display = 'block'; document.getElementById('report').textContent = JSON.stringify({ ok: false, reason: 'no-webgpu', fallback: 'no-webgpu' }); document.getElementById('fatal').textContent += ' (fallback=no-webgpu)'; document.body.dataset.state = 'fatal';
 } else {
   document.body.dataset.generation = '1';
   window.loseDevice = () => { document.body.dataset.generation = '2'; };
@@ -326,8 +373,14 @@ test("arenaVerdict: a drawn, intact capture with a clean receipt passes, and eac
 
 test("verdict: for the arena page the GPU copy decides, a black screenshot does not fail it", async () => {
   const arena = { capture: "ready", captureLine: { hash: "aa", blank: false }, hashOk: true, nodeHash: "aa", stats: { width: 8, height: 8, distinct: 500, dominantShare: 0.1, meanLuma: 120 }, receipt: { ok: true, tier: "web", frames: 40, frameErrors: 0, validationErrors: 0, latePipelines: 0 }, receiptText: "{}", tierText: "tier=web why=default", pipelinesText: "pipelines=24 ms=400" };
-  const run = { timedOut: false, report: { ok: true, adapter: {} }, stats: { width: 8, height: 8, distinct: 1, dominantShare: 1, meanLuma: 0 }, framesAdvanced: true, recovered: true };
+  const run = { timedOut: false, report: { ok: true, adapter: {} }, stats: { width: 8, height: 8, distinct: 1, dominantShare: 1, meanLuma: 0 }, framesAdvanced: true, recovered: true, loss: lossReceipt() };
   assert.equal(verdict({ ...run, arena }).ok, true, "black screenshot, drawn GPU copy");
+  // QT7: the visibility drill is part of an arena run.
+  assert.equal(verdict({ ...run, arena, visibility: { before: 0, after: 0 } }).code, "visibility");
+  assert.equal(verdict({ ...run, arena, visibility: { before: 0, after: 1 } }).ok, true);
+  // QW8: the arena run that recovered must also show the loss in the rebuilt page's receipt.
+  assert.equal(verdict({ ...run, arena, loss: lossReceipt({ losses: 0 }) }).code, "loss-receipt");
+  assert.equal(verdict({ ...run, arena, loss: null }).code, "loss-receipt");
   assert.equal(verdict(run).code, "blank-canvas", "without the arena the screenshot decides");
   const failed = verdict({ ...run, arena: { ...arena, receipt: { ...arena.receipt, validationErrors: 3 } } });
   assert.equal(failed.ok, false);
@@ -441,6 +494,71 @@ test("readNetPage reads the line a mock page prints (real Chrome, WEB_BROWSE_CHR
     const r = await readNetPage({ chrome: process.env.WEB_BROWSE_CHROME, url, logFile: join(dir, "chrome.log"), waitMs: 20000 });
     assert.equal(r.state, "ok");
     assert.equal(netVerdict(r.text, r.state, { hash: "0123456789abcdef" }).ok, true);
+  } finally {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parseArgs takes the one-port join and the live seat keys, and refuses the odd ones", () => {
+  const ok = parseArgs(["--chrome", "c", "--join", "127.0.0.1:7060", "--cert", "ab".repeat(32), "--play", "--ticks", "3600", "--token", "424242", "--drop-at-tick", "150"]);
+  assert.equal(ok.error, null);
+  assert.deepEqual([ok.join, ok.server, ok.play, ok.liveKeys, ok.ticks, ok.token, ok.dropAtTick], ["127.0.0.1:7060", null, true, false, 3600, 424242, 150]);
+  const keys = parseArgs(["--chrome", "c", "--server", "ws://h:1", "--live-keys"]);
+  assert.deepEqual([keys.play, keys.liveKeys, keys.error], [true, true, null], "--live-keys is a live seat");
+  assert.equal(parseArgs(["--chrome", "c", "--join", "[::1]:7050"]).error, null);
+  assert.match(parseArgs(["--chrome", "c", "--join", "nohost"]).error, /--join needs host:port/);
+  assert.match(parseArgs(["--chrome", "c", "--join", "h:1", "--server", "ws://h:1"]).error, /not both/);
+  assert.match(parseArgs(["--chrome", "c", "--join", "h:1", "--wt", "https://h:1/e2040"]).error, /one port/);
+  assert.match(parseArgs(["--chrome", "c", "--play"]).error, /go with --server or --join/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--ticks", "0"]).error, /--ticks/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--token", "0"]).error, /--token/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--drop-at-tick", "x"]).error, /--drop-at-tick/);
+  assert.match(parseArgs(["--chrome", "c", "--server", "ws://h:1", "--drop-at-tick", "9", "--expect-hash", "00ab00ab00ab00ab"]).error, /ends the page early/);
+});
+
+test("netUrl carries the one-port join, the match length, the token and the live flag", async () => {
+  const { netUrl } = await import("./web-browse.mjs");
+  const cert = "ab".repeat(32);
+  const u = new URL(netUrl(8099, { join: "127.0.0.1:7060", cert, ticks: 3600, token: 424242, play: true }));
+  assert.deepEqual([u.searchParams.get("join"), u.searchParams.get("server"), u.searchParams.get("cert"), u.searchParams.get("ticks"), u.searchParams.get("token")], ["127.0.0.1:7060", null, cert, "3600", "424242"]);
+  assert.equal(u.searchParams.has("play"), true);
+  assert.equal(new URL(netUrl(8099, { server: "ws://h:1" })).searchParams.has("play"), false, "the proof script is the default");
+});
+
+test("liveKeyPlan holds W throughout, presses a fight's worth of keys and releases W at the end", async () => {
+  const { liveKeyPlan } = await import("./web-browse.mjs");
+  const plan = liveKeyPlan(5000);
+  assert.deepEqual(plan.map((s) => s.atMs), [...plan.map((s) => s.atMs)].sort((x, y) => x - y), "in time order");
+  assert.equal(plan.filter((s) => s.key === "w" && s.kind === "key_down").length, 1, "W goes down once");
+  assert.deepEqual(plan.at(-1), { atMs: 5000, kind: "key_up", key: "w" });
+  for (const key of ["f", "e", "q", "Space"]) assert.ok(plan.some((s) => s.key === key && s.kind === "key_down"), key);
+  const downs = new Map();
+  for (const s of plan) downs.set(s.key, (downs.get(s.key) ?? 0) + (s.kind === "key_down" ? 1 : -1));
+  assert.ok([...downs.values()].every((n) => n === 0), "every key that goes down comes up");
+  assert.ok(plan.every((s) => s.atMs <= 5000));
+});
+
+test("readNetPage presses the plan and drops the page at the tick (real Chrome, WEB_BROWSE_CHROME)", { skip: !process.env.WEB_BROWSE_CHROME }, async () => {
+  const { readNetPage, liveKeyPlan } = await import("./web-browse.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "net-keys-"));
+  const html = `<!doctype html><body><pre id="net">net: seated</pre><script>
+    document.body.dataset.net = 'running';
+    const seen = new Set();
+    addEventListener('keydown', (e) => { seen.add(e.code); document.title = [...seen].sort().join(','); });
+    let tick = 0;
+    setInterval(() => { tick += 5; document.body.dataset.netTick = String(tick); if (['KeyW', 'KeyF', 'KeyE', 'KeyQ', 'Space'].every((c) => seen.has(c))) { document.getElementById('net').textContent = 'keys ' + document.title; document.body.dataset.net = 'ok'; } }, 50);
+  </script></body>`;
+  writeFileSync(join(dir, "index.html"), html);
+  const server = await serve(dir);
+  const run = (extra) => readNetPage({ chrome: process.env.WEB_BROWSE_CHROME, url: `http://127.0.0.1:${server.port}/index.html`, logFile: join(dir, "chrome.log"), waitMs: 20000, ...extra });
+  try {
+    const pressed = await run({ keys: liveKeyPlan(4000) });
+    assert.equal(pressed.state, "ok", pressed.text);
+    assert.match(pressed.text, /KeyE.*KeyF.*KeyQ.*KeyW|Space/, "the page heard the real key events");
+    const left = await run({ dropAtTick: 60 });
+    assert.ok(left.dropped && left.dropped.tick >= 60, JSON.stringify(left.dropped));
+    assert.notEqual(left.state, "ok");
   } finally {
     await server.close();
     rmSync(dir, { recursive: true, force: true });

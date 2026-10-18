@@ -22,6 +22,10 @@ pub enum Field {
     Ticks,
     /// A heading with no direction in it (all zeros).
     Direction,
+    /// A joint range or an angle, radians.
+    Angle,
+    /// A bone index the rig does not have, or the root where a joint is needed.
+    Bone,
 }
 
 impl Field {
@@ -35,6 +39,8 @@ impl Field {
             Field::Alpha => "alpha",
             Field::Ticks => "ticks",
             Field::Direction => "direction",
+            Field::Angle => "angle",
+            Field::Bone => "bone",
         }
     }
 }

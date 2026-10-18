@@ -21,7 +21,9 @@
 //!
 //! Std-only. Never imports scene or editor types.
 
+use super::fold::{extent_text, fold_lookalikes, fold_text, problems_in_words};
 use super::relation::{Graph, Layer, Relation};
+use super::triage::Role;
 use super::{Actor, Report};
 use engine_core::Fnv64;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,6 +37,9 @@ pub struct Group {
     pub name: String,
     pub member_ids: Vec<u32>,
 }
+
+/// Problems named in words at the top of a folded brief.
+const PROBLEM_LINES: usize = 5;
 
 /// Longest kept actor name in an object row, in chars.
 ///
@@ -295,9 +300,48 @@ fn expand_room_text(
 /// identity and is always emitted, even under a pathological budget below
 /// its own size.
 pub fn brief(actors: &[Actor], graph: &Graph, report: &Report, budget_bytes: usize) -> Brief {
+    let objects = object_labels(actors);
+    let object_lines: Vec<String> = objects.iter().map(object_line).collect();
+    let tiers = fit_tiers(actors, graph, report, budget_bytes, 0, &object_lines, false);
+    Brief {
+        groups: tiers.groups,
+        relations: tiers.relations,
+        findings: tiers.findings,
+        digest: tiers.digest,
+        objects: objects.into_iter().take(tiers.keep_objects).collect(),
+    }
+}
+
+/// Rows kept per tier by [`fit_tiers`], objects as a count of the caller's lines.
+struct Tiers {
+    digest: u64,
+    groups: Vec<Group>,
+    relations: Vec<(u32, Relation, u32)>,
+    findings: Vec<super::Finding>,
+    keep_objects: usize,
+    /// Relations, findings or groups that did not fit.
+    cut: bool,
+    /// Findings that did not fit.
+    findings_cut: usize,
+}
+
+/// The priority fill behind [`brief`] and [`brief_folded`]: reds, relations,
+/// yellows, then `object_lines`, then groups, each row kept only if the whole
+/// text still fits. `objects_first` moves the object tier ahead of the
+/// relations (a folded brief has a handful of object rows and thousands of
+/// relation rows). `header` is the bytes the caller already spends after the
+/// digest row.
+fn fit_tiers(
+    actors: &[Actor],
+    graph: &Graph,
+    report: &Report,
+    budget_bytes: usize,
+    header: usize,
+    object_lines: &[String],
+    objects_first: bool,
+) -> Tiers {
     let digest = super::relation::digest(graph);
     let groups = layer_groups(actors, graph);
-    let objects = object_labels(actors);
     let relations: Vec<(u32, Relation, u32)> = {
         let mut edges = graph.edges.clone();
         edges.sort_by_key(|(a, r, b)| (*a, *r, *b));
@@ -314,13 +358,12 @@ pub fn brief(actors: &[Actor], graph: &Graph, report: &Report, budget_bytes: usi
     }
 
     let group_lines: Vec<String> = groups.iter().map(group_line).collect();
-    let object_lines: Vec<String> = objects.iter().map(object_line).collect();
     let relation_lines: Vec<String> = relations.iter().map(relation_line).collect();
     let red_lines: Vec<String> = reds.iter().map(finding_line).collect();
     let yellow_lines: Vec<String> = yellows.iter().map(finding_line).collect();
 
     // Fill in priority order; each row joins only if the running total fits.
-    let mut used = digest_line(digest).len();
+    let mut used = digest_line(digest).len() + header;
     let mut fit = |lines: &[String]| -> usize {
         let mut kept = 0;
         for line in lines {
@@ -334,12 +377,19 @@ pub fn brief(actors: &[Actor], graph: &Graph, report: &Report, budget_bytes: usi
         kept
     };
     let keep_reds = fit(&red_lines);
+    let early_objects = if objects_first { fit(object_lines) } else { 0 };
     let keep_relations = fit(&relation_lines);
     let keep_yellows = fit(&yellow_lines);
-    let keep_objects = fit(&object_lines);
+    let keep_objects = early_objects + if objects_first { 0 } else { fit(object_lines) };
     let keep_groups = fit(&group_lines);
 
-    Brief {
+    let findings_cut = (red_lines.len() - keep_reds) + (yellow_lines.len() - keep_yellows);
+    Tiers {
+        cut: findings_cut > 0
+            || keep_relations < relation_lines.len()
+            || keep_groups < group_lines.len(),
+        findings_cut,
+        keep_objects,
         groups: groups.into_iter().take(keep_groups).collect(),
         relations: relations.into_iter().take(keep_relations).collect(),
         findings: reds
@@ -348,7 +398,69 @@ pub fn brief(actors: &[Actor], graph: &Graph, report: &Report, budget_bytes: usi
             .chain(yellows.into_iter().take(keep_yellows))
             .collect(),
         digest,
-        objects: objects.into_iter().take(keep_objects).collect(),
+    }
+}
+
+/// The door brief (SPF10): look-alike objects folded into counted rows, the
+/// stated extent without its strays and the top five problems in words,
+/// ahead of the usual group, relation and finding rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldedBrief {
+    /// Brief text; within the budget unless the digest row alone is longer.
+    pub text: String,
+    /// True when relations, findings or groups were cut to fit the budget.
+    pub truncated: bool,
+    /// Findings that did not fit.
+    pub findings_cut: usize,
+}
+
+/// [`brief_text`] for the door: `object <stem> x<count> <w>x<h>x<d> cm [ids]`
+/// rows replace one row per object, `extent` and `problem` rows follow the
+/// digest. `roles` maps the caller's component kinds, so a collider that wraps
+/// its mesh folds into the mesh row. Rows join in priority order (extent,
+/// problems, findings, objects, relations, groups) while the whole text fits
+/// `budget_bytes`; the digest row is always emitted. Same actors in any order
+/// give the same bytes.
+pub fn brief_folded(
+    actors: &[Actor],
+    graph: &Graph,
+    report: &Report,
+    roles: &BTreeMap<u32, Role>,
+    budget_bytes: usize,
+) -> FoldedBrief {
+    let digest_len = digest_line(super::relation::digest(graph)).len();
+    let said = extent_text(actors).into_iter().chain(
+        problems_in_words(actors, report, PROBLEM_LINES)
+            .into_iter()
+            .map(|p| format!("problem: {p}")),
+    );
+    let mut head = String::new();
+    for line in said {
+        if digest_len + head.len() + line.len() + 1 > budget_bytes {
+            break;
+        }
+        head.push_str(&line);
+        head.push('\n');
+    }
+    let rows: Vec<String> = fold_text(&fold_lookalikes(actors, roles))
+        .lines()
+        .map(|row| format!("object {row}\n"))
+        .collect();
+    let tiers = fit_tiers(actors, graph, report, budget_bytes, head.len(), &rows, true);
+    let tail = Brief {
+        groups: tiers.groups,
+        relations: tiers.relations,
+        findings: tiers.findings,
+        digest: tiers.digest,
+        objects: Vec::new(),
+    };
+    let body = brief_text(&tail);
+    let (digest_row, rest) = body.split_at(digest_len);
+    let kept: String = rows.into_iter().take(tiers.keep_objects).collect();
+    FoldedBrief {
+        text: format!("{digest_row}{head}{kept}{rest}"),
+        truncated: tiers.cut,
+        findings_cut: tiers.findings_cut,
     }
 }
 

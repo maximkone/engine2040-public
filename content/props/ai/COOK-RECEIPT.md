@@ -46,11 +46,16 @@ components `ZhengPeng7/BiRefNet` (MIT) and `facebook/dinov2-large`
   (empty, source-less and unknown tags), `FORBIDDEN_LICENSE`
   (CC-BY-NC-4.0, CC-BY-ND-4.0, CC-BY-NC-SA-4.0, Fab-UE-Only,
   NonCommercial) and `INFECTING_LICENSE` (GPL-3.0, AGPL-3.0).
-- Engine gate cites (not re-run here; import-feature build exceeds this
-  run's slot): `crates/assets/src/gen_intake.rs:408 check_license`
-  (`license_refused` / `license_not_spdx`) and `:459 check_model`
+- Engine gate: `crates/assets/src/gen_intake.rs` `check_license`
+  (`license_refused` / `license_not_spdx`) and `check_model`
   (`model_restricted` for Hunyuan3D, BRIA RMBG, diso and the other
-  restricted prefixes at `:50`).
+  restricted prefixes). Re-run 2026-10-18 on the three props with the
+  provenance each file declares:
+  `cargo test --locked -p engine-assets --features import,registry --test it -- ai_props`
+  PASS on the runner, run 39105798540. Each prop cooks through
+  `gen_intake::intake` under 5,000 tris and byte-identical twice; a model
+  licence of prose, empty text or `CC-BY-NC-4.0` is refused before any cook.
+  `node --test tools/ai-props.test.mjs` checks the files themselves.
 
 ## Dedupe
 

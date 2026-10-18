@@ -6,8 +6,9 @@
 //! diffs one full snapshot against an acked baseline into a [`Delta`] that
 //! omits unchanged slots; [`decode_delta`] rebuilds the full snapshot
 //! roundtrip-exact. [`Interpolator`] holds a bounded buffer of timestamped
-//! snapshots and answers constant-delay (100 ms) interpolation queries with
-//! integer-only math, clamping — never extrapolating — past the newest sample.
+//! snapshots and answers constant-delay (default 300 ms) interpolation queries
+//! with integer-only math, clamping — never extrapolating — past the newest
+//! sample.
 //!
 //! Wire: the version byte stays [`WIRE_VERSION`](super::session::WIRE_VERSION)
 //! on every message. Delta state packets reuse [`KIND_STATE`](super::session::KIND_STATE)
@@ -42,8 +43,17 @@ pub const MASK_STAMINA: u8 = 0x20;
 /// All field mask bits; any other bit in a mask rejects the delta.
 pub const MASK_ALL: u8 = MASK_X | MASK_Y | MASK_Z | MASK_YAW | MASK_HP | MASK_STAMINA;
 
-/// Default remote-interpolation delay in milliseconds (100 ms at 60 Hz is 6 ticks).
-pub const DEFAULT_INTERP_DELAY_MS: u64 = 100;
+/// Default remote-interpolation delay in milliseconds (300 ms is 18 ticks at 60 Hz).
+///
+/// The smallest of 100, 150, 200 and 300 ms with no render missing its
+/// bracketing snapshots over a 60 s soak at 2% loss (10 snapshots per second,
+/// 33 to 67 ms one way). Receipt: `interp.rs` test
+/// `interp_delay_default_is_the_smallest_with_no_miss_at_2_percent_loss`.
+/// A render needs the snapshot interval, the slowest transit and one lost
+/// snapshot to fit inside the delay. At 5% loss the share of misses is 37%
+/// at 100 ms, 4.9% at 150, 1.9% at 200 and 0.03% at 300. Two lost snapshots
+/// in a row still miss.
+pub const DEFAULT_INTERP_DELAY_MS: u64 = 300;
 /// Upper bound on buffered interpolation samples per [`Interpolator`].
 pub const MAX_INTERP_SAMPLES: usize = 32;
 
@@ -497,7 +507,8 @@ pub struct Interpolator {
 }
 
 impl Interpolator {
-    /// Open a buffer with [`DEFAULT_INTERP_DELAY_MS`] and [`MAX_INTERP_SAMPLES`].
+    /// Open a buffer delaying `delay_ms` (see [`DEFAULT_INTERP_DELAY_MS`]) and
+    /// holding [`MAX_INTERP_SAMPLES`].
     pub fn new(delay_ms: u64) -> Self {
         Self::with_cap(delay_ms, MAX_INTERP_SAMPLES)
     }
@@ -826,7 +837,7 @@ mod tests {
 
     #[test]
     fn interpolation_midpoint_exact_on_scripted_samples() {
-        let mut interp = Interpolator::new(DEFAULT_INTERP_DELAY_MS);
+        let mut interp = Interpolator::new(100);
         assert!(interp.is_empty());
         let a = snap(30, &[(0, [0.0, 0.0, 0.0], 0.0, 1000, 100)]);
         let b = snap(36, &[(0, [1.0, 0.0, 0.0], 1.0, 880, 40)]);

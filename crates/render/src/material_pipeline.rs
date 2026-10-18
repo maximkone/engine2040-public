@@ -2,9 +2,16 @@
 //!
 //! One draw names one material plus four texture slots. The forward pass
 //! builds one pipeline per distinct compiled structure; draws that share
-//! a structure share a pipeline. Std-only: no GPU, no file, no clock.
+//! a structure share a pipeline. The binning is std-only: no GPU, no file,
+//! no clock. The window leg adds [`pipeline_for`], which builds the pipeline
+//! of one compiled material (NS31c2).
 
 use engine_core::Fnv64;
+
+#[cfg(feature = "window")]
+mod gpu;
+#[cfg(feature = "window")]
+pub use gpu::{pipeline_for, MaterialPipelineError, MaterialPipelines, COLOR_FORMAT, DEPTH_FORMAT};
 
 /// Most pipelines one frame may need: 21 records share at most 12.
 pub const MAX_MATERIAL_PIPELINES: usize = 12;

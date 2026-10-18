@@ -6,8 +6,8 @@ Plan: `docs/plan/frontier.md`. Owner 2026-09-27: research must make the engine
 futuristic, AI-agnostic, fast, good-looking and spatially smart, and every idea
 has to earn its place. Readers add `CARD` lines; the experimentalist or the
 benchmark-engineer adds the spike numbers; the orchestrator moves a line to
-`ROW`, `LANDED` and `BAR`. The retro counts lines per rung and reports research
-tokens per landed row. Per-wave research files (`arxiv-wave*.md`,
+`ROW`, `LANDED` and `BAR`. The retro counts lines per rung
+(`node tools/ladder-counts.mjs`) and reports research tokens per landed row. Per-wave research files (`arxiv-wave*.md`,
 `steal-wave*.md`) stop here: history stays, new work is a line.
 
 Rungs: `CARD` -> `SPIKE` -> `ROW` -> `LANDED` -> `BAR`, or `REJECTED` (reason and

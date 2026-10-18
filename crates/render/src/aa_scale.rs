@@ -698,6 +698,21 @@ fn pct_to_scale(pct: u8) -> f32 {
     f32::from(pct) / 100.0
 }
 
+/// Most resolution changes a controller remembers; the newest are kept.
+pub const MAX_SCALE_CHANGES: usize = 256;
+
+/// One logged resolution change: the frame it took effect on and the
+/// render scale before and after it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ScaleChange {
+    /// Frame count (from 1) of the `update` call that changed the scale.
+    pub frame: u64,
+    /// Scale before the change.
+    pub from: f32,
+    /// Scale after the change.
+    pub to: f32,
+}
+
 /// Live dynamic-resolution state for the WIN1 viewport loop: feeds PF2
 /// frame ms per present, reads the render scale (and render size) for the
 /// next frame. Starts at full rate; presentation only, never sim state.
@@ -708,6 +723,7 @@ pub struct ScaleController {
     over_count: u32,
     under_count: u32,
     gov: DynRes,
+    changes: Vec<ScaleChange>,
     /// Frames observed (evidence for the frame report).
     pub frames: u64,
     /// Scale steps taken down (evidence for the frame report).
@@ -738,6 +754,7 @@ impl ScaleController {
             steps_down: 0,
             steps_up: 0,
             gov,
+            changes: Vec::new(),
         })
     }
 
@@ -749,6 +766,12 @@ impl ScaleController {
     /// Policy this controller follows.
     pub fn policy(&self) -> ScalePolicy {
         self.policy
+    }
+
+    /// Every resolution change so far, oldest first, at most
+    /// [`MAX_SCALE_CHANGES`] (the newest). Feed for the frame report.
+    pub fn changes(&self) -> &[ScaleChange] {
+        &self.changes
     }
 
     /// Feed one PF2 frame time and return the scale for the next frame.
@@ -764,6 +787,7 @@ impl ScaleController {
             )));
         }
         self.frames += 1;
+        let before = self.scale;
         if frame_ms > self.policy.target_ms {
             self.under_count = 0;
             self.over_count += 1;
@@ -800,6 +824,16 @@ impl ScaleController {
         if bounded < self.scale {
             self.steps_down += 1;
             self.scale = bounded;
+        }
+        if self.scale.to_bits() != before.to_bits() {
+            if self.changes.len() == MAX_SCALE_CHANGES {
+                self.changes.remove(0);
+            }
+            self.changes.push(ScaleChange {
+                frame: self.frames,
+                from: before,
+                to: self.scale,
+            });
         }
         Ok(self.scale)
     }

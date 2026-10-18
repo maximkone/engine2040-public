@@ -1177,8 +1177,18 @@ fn contact_uniform_bytes(config: &ContactConfig) -> [u8; 32] {
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `fog` error prefix kept.
 #[cfg(feature = "window")]
-fn fog_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
+fn fog_map_and_wait(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<(), crate::accel::ReadbackError> {
     crate::accel::map_readback(device, buffer, "fog")
+}
+
+#[cfg(feature = "window")]
+impl From<crate::accel::ReadbackError> for FogError {
+    fn from(error: crate::accel::ReadbackError) -> Self {
+        Self::Device(error.to_string())
+    }
 }
 
 /// Run the bind probe over one baked buffer: upload, copy on the device,
@@ -1256,8 +1266,8 @@ fn submit_bind_probe(
     }
     encoder.copy_buffer_to_buffer(&dst_buf, 0, &readback, 0, byte_len);
     queue.submit(Some(encoder.finish()));
-    fog_map_and_wait(device, &readback).map_err(FogError::Device)?;
-    let back = crate::accel::readback_f32(&readback, texels, "fog").map_err(FogError::Device)?;
+    fog_map_and_wait(device, &readback)?;
+    let back = crate::accel::readback_f32(&readback, texels, "fog")?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(FogError::Validation(format!(
@@ -1737,11 +1747,10 @@ impl FogSubmitter {
         encoder.copy_buffer_to_buffer(fog_buf_out, 0, fog_rb, 0, bytes);
         encoder.copy_buffer_to_buffer(contact_buf_out, 0, contact_rb, 0, bytes);
         queue.submit(Some(encoder.finish()));
-        fog_map_and_wait(device, fog_rb).map_err(FogError::Device)?;
-        fog_map_and_wait(device, contact_rb).map_err(FogError::Device)?;
-        let fog_values = crate::accel::readback_f32(fog_rb, n, "fog").map_err(FogError::Device)?;
-        let contact_values =
-            crate::accel::readback_f32(contact_rb, n, "fog").map_err(FogError::Device)?;
+        fog_map_and_wait(device, fog_rb)?;
+        fog_map_and_wait(device, contact_rb)?;
+        let fog_values = crate::accel::readback_f32(fog_rb, n, "fog")?;
+        let contact_values = crate::accel::readback_f32(contact_rb, n, "fog")?;
         fog_rb.unmap();
         contact_rb.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {

@@ -9,7 +9,7 @@ action or line, so replays reproduce without a provider.
   quads. Tier A. Size S. Owns `crates/ui/src/lib.rs` plus the new game HUD
   model. Accept: HUD tests green; ui builds with no `engine-input` fighter
   import. needs: GE2.
-- [ ] GE11 proof: ledger refresh for post-GE2 files — re-audit crates for
+- [x] GE11 proof: ledger refresh for post-GE2 files — re-audit crates for
   `Fighter|Gladiator|Arena` names and caps added since the GE2 ledger
   (`ai/src/legion.rs`, `game/src/siege.rs` shards,
   `game/src/ludus_npcs.rs` slots and any newer files), extend the
@@ -18,7 +18,7 @@ action or line, so replays reproduce without a provider.
   `tools/workspace-check.mjs` plus the ledger table. Accept: zero
   unlisted genre names; a seeded new assumption fails the gate; proof
    generality gates green. needs: GE2. (PLN18 runtime.md, reviewed
-   2026-09-26.)
+   2026-09-26.) Landed b69c228. node --test tools/sim-source-scan.test.mjs tools/workspace-check.test.mjs 43 pass (genreHits UPPER_SNAKE caps, genreFindings seeded new file and cap refused, stale entry reported); workspace-check: PASS genre ledger 85 files, none unlisted, none stale.
 - [ ] GE12 input: canonical participant-cap decision — rule whether
   `MAX_PARTICIPANTS` stays 16 or moves to 32 across
   `crates/input/src/fighter.rs`, arena slots, net scale/select/soak
@@ -35,26 +35,26 @@ action or line, so replays reproduce without a provider.
   `crates/ai/src/reflect.rs`. Accept: 20 fixtures lower the contradiction rate
   on mock, local and remote; same bytes x2; a 10k-tick soak holds the memory
   cap. Deep sweep 2026-09-25: every line an NPC says cites its recall set; a negation or contradiction falls back and is recorded; importance stays integer; reflection on a fixed cadence plus capped surprise. needs: LW2, EV1. Landed 363c1500. bounded importance and reflection fold in the same reflect.rs; contradiction rate on the 20 fixtures covered by the LW13 repair budget (engine-ai lib 274 passed, run 39070658909).
-- [ ] AB14 playtest: bad-build brief fails loudly — a seeded bad brief
+- [x] AB14 playtest: bad-build brief fails loudly — a seeded bad brief
   lowers exactly its stage score and reproduces x2 (clean EV2 b01 vs
   bad seed95 must differ); current `sim.plan_goals`
   bad-brief-still-solved fixed. Tier A. Size S. Owns eval hunks beside
   `crates/playtest/src/brief_eval.rs`. Accept: bad brief deltas >0 and
   x2 identical; empty brief still refused. needs: EV2, AB4. (PLAYTEST56
-  bet1 delta-0 fail-to-fail wave 56.)
-- [ ] LW12 ai: multi-NPC recall/drain budget soak — 64 minds recall
+  bet1 delta-0 fail-to-fail wave 56.) Landed 885aab83. brief_eval seeded_bad_brief_delta_is_positive_and_reproduces_twice (bad b01 AB3 break lowers the pass count by exactly 1, broken report equal x2), seeded_broken_ab1/ab4_lowers_exactly_its_brief, empty_brief_is_refused_by_ab1; endpoint plan_goals bad_briefs_refuse_before_any_attempt; engine-playtest --lib brief_eval living 28 passed on HEAD 2a249ac1 (gh-check wip-mvded5g03b5, 2026-10-18).
+- [x] LW12 ai: multi-NPC recall/drain budget soak — 64 minds recall
   top-8 and drain through `apply_at` at the tick boundary, 0-per-tick.
   Tier B. Size S. Owns soak hunks in `crates/ai/src/memory.rs` plus
   `crates/game/src/ludus_npcs.rs`. Accept: 64-NPC soak holds caps with
   recall/drain p95 printed; `cargo test -p engine-ai --lib memory` plus
   `cargo test -p engine-game --lib ludus_npcs` green; golden unchanged
-  twice. needs: LW1, LW2, LW8. (PLN19 living-world.md.) Progress 2026-10-17: 7f304529 0933de79 64-mind soak in memory.rs: recall top 8 with zero allocations, drain through apply_at, bytes equal x2; p95 in an ignored timing test (run 39071152334: recall64 about 166 us, drain64 about 8 us); left: the ludus_npcs soak in crates/game.
-- [ ] LW13 playtest: grounded-line plus contradiction ratchet — every Progress 2026-10-17: living.rs consistency_numbers_follow_the_gate asserts grounded_count == rows and the one-pair repair quarantines seeded lines; left: contradiction_pairs stays 2 per backend (6 rows dropped) on the seeded set, not 0 after repair. engine-playtest suite not run in this audit.
+  twice. needs: LW1, LW2, LW8. (PLN19 living-world.md.) Progress 2026-10-17: 7f304529 0933de79 64-mind soak in memory.rs: recall top 8 with zero allocations, drain through apply_at, bytes equal x2; p95 in an ignored timing test (run 39071152334: recall64 about 166 us, drain64 about 8 us); left: the ludus_npcs soak in crates/game. Landed 7f304529 0933de79 b01c6337. memory.rs soak_64_minds_recall_and_drain_hold_caps (64 minds recall top 8 with zero allocations, drain through apply_at, bytes equal x2; ignored timing test prints p95) and the ludus half in crates/game ludus_npcs.rs: ludus_soak_64_sessions_hold_caps_and_drain_clean_twice (64 sessions x 160 bouts x 3 voices = 30,720 lines, each voice pulls top-8 recall and every line drains through apply_at at the tick boundary, memory stays inside 128 a voice, none refused, nothing left logged, replays x2; printed recall_p95_ns=8833 drain_p95_ns=401, runner). cargo test -p engine-ai --lib memory 15 passed, run 39106529206; cargo test -p engine-game --lib ludus_npcs 13 passed, run 39106398594. Test-only hunks, no simulation code, golden unchanged.
+- [x] LW13 playtest: grounded-line plus contradiction ratchet — every Progress 2026-10-17: living.rs consistency_numbers_follow_the_gate asserts grounded_count == rows and the one-pair repair quarantines seeded lines; left: contradiction_pairs stays 2 per backend (6 rows dropped) on the seeded set, not 0 after repair. engine-playtest suite not run in this audit.
   said line cites its recall set, seeded pairs quarantine, replay x2.
   Tier B. Size S. Owns eval hunks beside `crates/playtest/src/living.rs`.
   Accept: `cargo test -p engine-playtest --lib living` green with
   `grounded_count == rows` and `contradiction_pairs == 0` after repair;
-  bytes x2. needs: LW2, LW4. (PLN19 living-world.md.) Progress 2026-10-17: c945ff9c (backup sweep) living.rs repair budget 2 lines, all 60 rows pass, contradiction_pairs 0, grounded_count equals row count, a 3-pair fixture shows the budget stays bounded (playtest living 18 passed, run 39070388023); left: a re-run on the final HEAD.
+  bytes x2. needs: LW2, LW4. (PLN19 living-world.md.) Progress 2026-10-17: c945ff9c (backup sweep) living.rs repair budget 2 lines, all 60 rows pass, contradiction_pairs 0, grounded_count equals row count, a 3-pair fixture shows the budget stays bounded (playtest living 18 passed, run 39070388023); left: a re-run on the final HEAD. Landed c945ff9c. Re-run on HEAD 2a249ac1: engine-playtest --lib living 18 passed incl. consistency_numbers_follow_the_gate (contradiction_pairs 0, grounded_count == rows), one_command_reproduces_the_report and providers_off_replays_exactly (bytes x2) (gh-check wip-mvded5g03b5, 2026-10-18).
 - [x] LW14 ai: reflection cadence plus capped surprise — fixed-cadence Progress 2026-10-17: mind.rs reflect(tick) folds the ring into Felt (mind_tick_delayed_reflection_*) and memory soak_10k_holds_cap holds the cap (ai suite green run 39056802035); left: no fixed-cadence scheduler and no capped surprise.
   `reflect` folds top recall into `Felt`, surprise capped, 10k-tick soak
   holds 512/128 caps. Tier B. Size S. Owns reflect hunks in
@@ -142,7 +142,7 @@ action or line, so replays reproduce without a provider.
   `crates/endpoint/src/scene_tools.rs`. Accept: `cargo test -p engine-spatial --lib sense` green x2:
   50 seeded camera cases make view, lidar and map match a brute-force check 50 of 50, at most 0.2 ms
   per ray (the SP8 bar), the same text twice, tokens and ms per view posted. F2P: no sense module
-  exists today. P2P: integers only in the hash; golden `d57b5c8ae3096614` x2. needs: none. Progress 2026-10-17: 99ef60ab sense_text.rs view/lidar/map/pixel and sight.rs ray_first_hit; 50 seeded cases match an exact brute force 50/50 over 22,800 rays, 128x96 view about 0.4 us per ray, 873 tokens; left: the door verbs in scene_tools.rs and the tool_count_pin move.
+  exists today. P2P: integers only in the hash; golden `d57b5c8ae3096614` x2. needs: none. Progress 2026-10-17: 99ef60ab sense_text.rs view/lidar/map/pixel and sight.rs ray_first_hit; 50 seeded cases match an exact brute force 50/50 over 22,800 rays, 128x96 view about 0.4 us per ray, 873 tokens; left: the door verbs in scene_tools.rs and the tool_count_pin move. Progress 2026-10-18 (wave 2): sense_text::glance and coverage reach the door as scene.query kinds glance and coverage (39b0e28a). The view, lidar, map and pixel door verbs are not added: they are new tools, which move tool_count_pin (another session edits it) and cost tool-list chars (the budget is 55000 now).
 - [ ] SP70 spatial: capture-to-symbol lift (EB-2026-10-09-S120): a capture PNG plus depth becomes
   Actor proposals in index3, std-only, integer cm, any VLM advisory and offline, no weights in git
   (ER-2 sees pixels; we read symbols only). Diff: hard. Tier B. Size M. Owns
@@ -329,23 +329,23 @@ action or line, so replays reproduce without a provider.
   rerun. needs: none. (JAN51.)
   Wave 52: TICK f4adec1 (same commit as SL28).
   LATER: parked 2026-10-03 (circus verdict 2: its own wave note says TICK with a commit that exists, but the box was never ticked, so builders re-verify finished work; the lead ticks it with its receipt); unpark by deleting this line.
-- [ ] SHOW3 playtest: highlight reel — rank moments in tournament tapes (PQ2)
+- [x] SHOW3 playtest: highlight reel — rank moments in tournament tapes (PQ2)
   by event metadata (KO, clutch parry, comeback, long combo) and cut a reel
   within a length budget (knapsack over moments, VASTSum-style, arXiv
   2605.09507), deterministic; vision scoring only as an advisory note. Feeds
   devlogs and trailers. Tier B. Size S. Owns `crates/playtest/src/highlights.rs`.
   Accept: 200 tapes give the same reel twice; a seeded best moment is picked.
-  needs: SHOW1, PQ2.
+  needs: SHOW1, PQ2. Landed 5ff21701. highlights.rs reads the PQ2 seeds through run_events, finds knockout, comeback, clutch parry and long combo, fuses overlaps, cuts the reel with a 0/1 knapsack under a tick budget. Tests two_hundred_tapes_give_the_same_reel_twice_and_the_seeded_moment_wins (199 PQ2 tapes plus one seeded swing tape: same reel x2, seeded moment 2350 is the best shot, a 201-tick budget picks only it, removing its knockout drops it), the_knapsack_beats_taking_the_best_score_first, moments_find_the_clutch_parry_and_fuse_the_comeback_with_the_knockout, a_long_combo_needs_three_close_hits_by_one_attacker, the_reel_text_is_a_shot_list_and_writes_to_disk. Vision is an advisory line only. gh run 39105225319 (engine-playtest --lib highlights brief_eval trajectory scorecard frame_stale: 36 passed, 1 ignored) and full engine-playtest --lib 373 passed, run 39103617132.
 - [ ] PB51 playtest: play.step digest audit — 2-fighter digests drifted
   low digits vs wave 48 while staged hash holds (PLAYTEST51 wave 51).
   Tier B. Size S. Owns `crates/endpoint/src/play.rs` digest hunk.
   Accept: same seed+inputs byte-identical x2 + cross-build policy;
   t10 pinned, t30/t60 delta explained. needs: VP1, QA1. (PLAYTEST51.)
-- [ ] PB52 game: staged exchange — hero-vs-dummies shutout
+- [x] PB52 game: staged exchange — hero-vs-dummies shutout
   (`final_hp=[1000,0,0,0]`, PLAYTEST51 wave 51). Tier B. Size S. Owns
   `crates/game/src/bin/staged_fight.rs` script hunk. Accept: hits land
   both ways or receipt declares hero-vs-dummies. needs: CT15, GA1.
-  (PLAYTEST51.)
+  (PLAYTEST51.) Landed 86e2f48d. staged_fight receipt gains an exchange row (hero-vs-dummies / both-ways / hero-hit-only / no-damage) from the final hp: cargo test -p engine-game --features app --bin staged_fight 15 passed incl. staged_receipt_declares_who_landed_damage (the filed fight declares hero-vs-dummies, final_hp [1000,0,0,0]) and staged_600_tick_receipt_replays_byte_identical.
 - [ ] PB53 game: captures bracket the fight — 600-tick fight captured Progress 2026-10-17: staged_fight_frames.rs capture_ticks picks the first, third-way and last hit ticks of the staged run; left: no frame brackets each knockdown and no sequence_fnv x2 check.
   only 0/30/60/90, knockdowns invisible (PLAYTEST51 wave 51). Tier B.
   Size S. Owns staged capture request. Accept: frames bracket first
@@ -357,11 +357,11 @@ action or line, so replays reproduce without a provider.
   hunk. Accept: 600-tick fight captures bracket first hit + each
   knockdown, bodies/hits readable, `sequence_fnv` x2. needs: CT15, WIN1.
   (PLAYTEST54.)
-- [ ] PB57 game: camera loses fight (PLAYTEST54 t60 edge clip, t120 Progress 2026-10-17: camera.rs scripted_orbit_keeps_both_fighters_framed_600_ticks proves framing on a scripted pair; left: not run on the real 6800/6900 arena tape that clipped.
+- [x] PB57 game: camera loses fight (PLAYTEST54 t60 edge clip, t120 Progress 2026-10-17: camera.rs scripted_orbit_keeps_both_fighters_framed_600_ticks proves framing on a scripted pair; left: not run on the real 6800/6900 arena tape that clipped.
   opposite corners). Tier B. Size S. Owns `crates/game/src/camera.rs`
   framing hunk. Accept: 600-tick 2-fighter tape keeps both in frame
   600/600, no edge clip. needs: GP3. (PLAYTEST54. PLAYTEST68: 6800 repro
-  spawn plus post-move clipping; PLAYTEST69: 6900 drift exits frame.)
+  spawn plus post-move clipping; PLAYTEST69: 6900 drift exits frame.) Landed 033aaca3. fighter_look_cam::tests::aim_camera_keeps_both_fighters_in_frame_on_the_real_arena_tapes: seeds 6800 and 6900 x idle, square and diagonal walks, 600 ticks each, both chests in the live fight camera's picture 600/600 (sim, FighterLook, aim_camera at 60 fps); engine-game --features app --lib 2026-10-18 711 passed (the 2 reds are another session's ragdoll_look WIP). The Director in camera.rs is not the window's camera and cannot frame the 38 m spawn (max_dist_m 30).
 - [ ] PB58 combat: missing hit layers on contact (PLAYTEST54 t30/t180
   overlap only). Tier B. Size M. Owns `crates/combat/src/feel.rs`
   presentation hunk. Accept: one event gives hit-stop + reaction +
@@ -385,14 +385,14 @@ action or line, so replays reproduce without a provider.
   bridge hunk. Accept: per-hit loudness/clipping/hit-sync delta in
   smoke/staged logs, 10 scenarios synced. needs: AU1. (PLAYTEST54.)
   LATER: parked 2026-10-03 (circus verdict 2: FOCUS.md parks audio, UI, modding, platform and shipping, living world, and no open finish bar lists this row); unpark by deleting this line.
-- [ ] PB62 mcp: index play_run/play_step for api.search/describe
+- [x] PB62 mcp: index play_run/play_step for api.search/describe
   (PLAYTEST62 bug 4: search 0 hits, describe unknown_path).
   Tier B. Size S. Owns registry hunks in
   `crates/endpoint/src/insight/index.rs` (play-tool entries beside
   the existing MCP tool schemas). Accept: api.search finds both
    paths, api.describe returns full schemas; `cargo test -p
    engine-endpoint --lib insight` green. needs: API1. (PLAYTEST62.
-  PLAYTEST68: 0-hits confirmed this run.)
+  PLAYTEST68: 0-hits confirmed this run.) Landed d28b7a88. play_run_and_play_step_are_found_and_described_under_client_names green: core tools are indexed beside pack verbs and api.describe resolves play_run and e2040_play_step_until; insight tests, api_search_finds_at_least_six_packs and collapse_fixtures stay green (run 39109659487).
 - [ ] PB63 playtest: resend-divergence 3-seed re-probe — seed 6500 resend
   was idempotent (identical digest+frame), contradicting seeds 61/62/64.
   Tier B. Size S. Owns re-probe hunks beside `crates/endpoint/src/play.rs`

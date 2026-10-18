@@ -489,3 +489,8 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 ### 2026-10-10, fix4 render plus scene hygiene (no board row, UNLOCKS Fnv64 single-owner)
 
 - fix4 landed from lane `fix4` (6 files 143+/74-: fog bind-probe extract plus zero-alloc roundtrip, graph hash via engine-core Fnv64, shadow cascade hygiene, shadow cluster Instant cfg, torch TemporalPick plus PriorRhs split, scene VersionedComponent cfg-gated). Tests (lead re-ran on applied tree): engine-render lib 401/12 ignored, engine-scene lib 59/0, golden_hash_untouched x2 PASS d57b5c8ae3096614, packet-gate PASS 6 paths, quality render 69 D plus scene 90 A 0 regress, workspace-check PASS. Judge VERDICT PASS (837, RUST 4/5 DEPTH 3/5). Hygiene refactor moves no pixel/hash by design (MOVED hash identical plus UNLOCKS named).
+
+### 2026-10-18, PX10 receipt gap closed (E69)
+
+- PX10 CCD weapons+limbs reached HEAD in auto-backup 2345f203 (2026-10-08 21:58: crates/physics/src/powered.rs +375, ragdoll.rs +468). The commit 1ce87a77 that names PX10 changes no crate file (docs and baseline only), so this block is the receipt that names the landing commit. The files live in crates/physics, not combat.
+- Proof: gh run 39101816259 `cargo test -p engine-physics --features rapier --lib powered` 17 passed; gh run 39101816876 `cargo test -p engine-physics --features rapier --lib ragdoll` 28 passed (both need `--features rapier`: without it the filter matches 0 tests). `node tools/rust-quality.mjs --crate physics` prints 100 A. No code changed in this receipt, so the golden line above holds.

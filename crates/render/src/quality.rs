@@ -8,8 +8,8 @@
 //! single thread, wasm speed, WebGPU default limits), its pick from adapter limits and a
 //! `?tier=` query ([`choose_web_tier`]) and Babylon's degrade order ([`WEB_CUT_ORDER`]).
 
-/// Render quality tier, lowest to highest.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Render quality tier, lowest to highest (the derived order is the declaration order).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Quality {
     /// Low tier: smallest scale, one cascade, tightest caps.
     Potato,
@@ -265,6 +265,12 @@ pub const WEB_MIN_TEXTURE_2D: u32 = 4096;
 /// (the adapter's texture limit is under [`WEB_MIN_TEXTURE_2D`]) or `"default"` (the web tier).
 /// An unknown `?tier=` value is ignored (`"default"` or `"limits"` decides) so a typo never
 /// breaks the page. Pure: the page reads the query string and the device limits and passes them.
+///
+/// The limits are bucketed: Chrome rounds what an adapter reports so that it cannot tell two cards
+/// apart, and one bucket holds weak and strong cards alike. So a limit is a floor and never a
+/// measurement: it can only LOWER the tier (an adapter under [`WEB_MIN_TEXTURE_2D`] gets
+/// `Potato`), no limit raises it, and the startup probe ([`choose_web_tier_probed`]) can lower it
+/// further but never lift it above what the limits allow.
 #[must_use]
 pub fn choose_web_tier(query: Option<&str>, max_texture_2d: u32) -> (Quality, &'static str) {
     if let Some(tier) = query.and_then(Quality::from_name) {
@@ -274,6 +280,33 @@ pub fn choose_web_tier(query: Option<&str>, max_texture_2d: u32) -> (Quality, &'
         return (Quality::Potato, "limits");
     }
     (Quality::Web, "default")
+}
+
+/// Adapter text fragments (lowercase) whose match sends the page to `Potato` with the reason
+/// `"denylist"` (see [`apply_denylist`]). Empty on purpose: an entry goes in only for an adapter
+/// that was measured or reported unusable, and the comment above it names that source (a run id
+/// or a bug report). The text is what the page prints as `adapter=`.
+pub const WEB_DENYLIST: &[&str] = &[];
+
+/// `pick` (from [`choose_web_tier`]) unless the adapter text contains a fragment of `denylist`
+/// (case-insensitive): then `Potato` with the reason `"denylist"`. A `?tier=` query keeps its say,
+/// it is the owner asking. An empty fragment matches nothing. An empty list changes nothing.
+#[must_use]
+pub fn apply_denylist(
+    pick: (Quality, &'static str),
+    adapter: &str,
+    denylist: &[&str],
+) -> (Quality, &'static str) {
+    let adapter = adapter.to_ascii_lowercase();
+    let listed = pick.1 != "query"
+        && denylist
+            .iter()
+            .any(|f| !f.is_empty() && adapter.contains(&f.to_ascii_lowercase()));
+    if listed {
+        (Quality::Potato, "denylist")
+    } else {
+        pick
+    }
 }
 
 /// The value of `tier` in a URL query string (`?a=1&tier=web` or `a=1&tier=web`), `None` when
@@ -776,6 +809,105 @@ mod tests {
             choose_web_tier_probed(None, 2048, slow),
             (Quality::Potato, "limits")
         );
+    }
+
+    #[test]
+    fn quality_probe_never_lifts_the_tier_above_the_limit_floor() {
+        let probes = [
+            None,
+            Some(1.0),
+            Some(PROBE_SLOW_MS),
+            Some(PROBE_SLOW_MS + 0.1),
+            Some(500.0),
+        ];
+        for query in [
+            None,
+            Some("web"),
+            Some("high"),
+            Some("potato"),
+            Some("webb"),
+        ] {
+            for limit in [
+                1024,
+                WEB_MIN_TEXTURE_2D - 1,
+                WEB_MIN_TEXTURE_2D,
+                8192,
+                16384,
+            ] {
+                let floor = choose_web_tier(query, limit).0;
+                for probe in probes {
+                    let (tier, why) = choose_web_tier_probed(query, limit, probe);
+                    assert!(
+                        tier <= floor,
+                        "{query:?} {limit} {probe:?}: {tier:?} ({why})"
+                    );
+                }
+            }
+        }
+        // A fast probe above the floor: a weak adapter stays on the floor, a good one on the web tier.
+        assert_eq!(
+            choose_web_tier_probed(None, 2048, Some(1.0)),
+            (Quality::Potato, "limits")
+        );
+        assert_eq!(
+            choose_web_tier_probed(None, 8192, Some(1.0)),
+            (Quality::Web, "default")
+        );
+        // A slow probe below the floor lowers it, and says why.
+        assert_eq!(
+            choose_web_tier_probed(None, 8192, Some(PROBE_SLOW_MS + 1.0)),
+            (Quality::Potato, "probe")
+        );
+    }
+
+    #[test]
+    fn quality_tier_pick_takes_no_adapter_name() {
+        // The pick reads the query and the limits and nothing else. The adapter text is a hint
+        // for the receipt; only the denylist, a separate step, reads it.
+        let pick: fn(Option<&str>, u32) -> (Quality, &'static str) = choose_web_tier;
+        let probed: fn(Option<&str>, u32, Option<f64>) -> (Quality, &'static str) =
+            choose_web_tier_probed;
+        assert_eq!(pick(None, 8192), (Quality::Web, "default"));
+        assert_eq!(probed(None, 8192, None), (Quality::Web, "default"));
+    }
+
+    #[test]
+    fn quality_tiers_order_from_potato_up() {
+        assert!(Quality::Potato < Quality::Web && Quality::Web < Quality::Comfort);
+        assert!(Quality::Comfort < Quality::High);
+        assert!(Quality::ALL.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn quality_denylist_sends_a_listed_adapter_to_potato_and_an_empty_list_changes_nothing() {
+        let web = (Quality::Web, "default");
+        assert_eq!(apply_denylist(web, "nvidia/ampere", &[]), web);
+        assert_eq!(
+            apply_denylist(web, "Vendor/Old_Card_9000", &["old_card"]),
+            (Quality::Potato, "denylist"),
+            "the match ignores case"
+        );
+        assert_eq!(apply_denylist(web, "intel/gen-12", &["old_card"]), web);
+        assert_eq!(
+            apply_denylist(web, "anything", &[""]),
+            web,
+            "an empty fragment matches nothing"
+        );
+        // The owner's ?tier= keeps its say; the limits' Potato just gets the denylist reason.
+        let asked = (Quality::High, "query");
+        assert_eq!(apply_denylist(asked, "old_card", &["old_card"]), asked);
+        assert_eq!(
+            apply_denylist((Quality::Potato, "limits"), "old_card", &["old_card"]),
+            (Quality::Potato, "denylist")
+        );
+        // The shipped list: lowercase, no empty entry, and every entry really sends its adapter down.
+        for fragment in WEB_DENYLIST {
+            assert!(!fragment.is_empty() && *fragment == fragment.to_ascii_lowercase());
+            assert_eq!(
+                apply_denylist(web, fragment, WEB_DENYLIST),
+                (Quality::Potato, "denylist")
+            );
+        }
     }
 
     /// The number after `field:` in the `Tier::<name> => Caps { ... }` arm of the physfx table.

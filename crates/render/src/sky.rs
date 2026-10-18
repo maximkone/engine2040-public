@@ -1105,8 +1105,18 @@ impl SkySubmitter {
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `sky` error prefix kept.
 #[cfg(feature = "window")]
-fn sky_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
+fn sky_map_and_wait(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<(), crate::accel::ReadbackError> {
     crate::accel::map_readback(device, buffer, "sky")
+}
+
+#[cfg(feature = "window")]
+impl From<crate::accel::ReadbackError> for SkyError {
+    fn from(error: crate::accel::ReadbackError) -> Self {
+        Self::Device(error.to_string())
+    }
 }
 
 /// Window submit over the day capture (RL4 live): bind the capture texels
@@ -1227,9 +1237,8 @@ pub fn submit_gpu_sky(
     }
     encoder.copy_buffer_to_buffer(dst_buf, 0, readback, 0, byte_len);
     queue.submit(Some(encoder.finish()));
-    sky_map_and_wait(device, readback).map_err(SkyError::Device)?;
-    let back =
-        crate::accel::readback_f32(readback, words as usize, "sky").map_err(SkyError::Device)?;
+    sky_map_and_wait(device, readback)?;
+    let back = crate::accel::readback_f32(readback, words as usize, "sky")?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(SkyError::Validation(format!(

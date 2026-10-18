@@ -60,13 +60,19 @@ use super::play::world_load::match_world;
 use super::play::PinnedWorld;
 use super::scene_query::QueryFormat;
 
+mod facing_wants;
 #[cfg(test)]
 mod handle_tests;
 mod place_blocks;
+#[cfg(test)]
+mod place_facing_tests;
 mod read_guard;
 mod spatial_checks;
 mod spatial_delta;
-use crate::spatial_glue::{conflict_texts, finding_line, quat_of_yaw, yaw_of_quat, ParsedWant};
+#[cfg(test)]
+pub(crate) mod spatial_verdict_tests;
+mod spatial_verdicts;
+use crate::spatial_glue::{conflict_texts, quat_of_yaw, yaw_of_quat, ParsedWant};
 use place_blocks::block_output;
 pub use place_blocks::WantBlockDto;
 pub(crate) use read_guard::no_repeat;
@@ -76,6 +82,7 @@ use spatial_checks::{
 };
 pub use spatial_checks::{SizeSource, SkippedCheck, SpatialCounts, WorstActor};
 pub(crate) use spatial_delta::{delta_after, delta_before, spatial_delta};
+use spatial_verdicts::{check_epsilon, staged_roles, view, Asks};
 
 /// MCP tool name for the bounded scene brief (read-only).
 pub const TOOL_SCENE_BRIEF: &str = "scene.brief";
@@ -403,6 +410,12 @@ pub struct SceneSpatialArgs {
     pub format: Option<String>,
     /// True keeps only red findings (rows, total and ids).
     pub matched_only: Option<bool>,
+    /// Z-fight tolerance in cm, 0..=50, default 1 (zfight).
+    pub epsilon_cm: Option<i32>,
+    /// True judges overlaps by component role (collider on its mesh is intentional).
+    pub triage: Option<bool>,
+    /// Verdict rows, max 256: `check a b|- verdict rev expiry reason` (uuids, 0 = none). Matched findings move to `suppressed`.
+    pub allow: Option<Vec<String>>,
 }
 
 /// Output of `scene.spatial`: verdict, spatial hash, paged brief-style finding
@@ -445,6 +458,9 @@ pub struct SceneSpatialOutput {
     pub skipped: Vec<SkippedCheck>,
     /// Where each staged node's size came from.
     pub size_source: SizeSource,
+    /// Findings set aside by an allow row or the learner, with the reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suppressed: Vec<String>,
 }
 
 /// `scene.spatial` limit gate: `bad_limit` outside 1..=`SCENE_SPATIAL_MAX_FINDINGS`.
@@ -716,7 +732,7 @@ fn parse_relation(text: &str) -> Result<Relation, McpToolError> {
             "bad_relation",
             format!(
                 "relation `{other}` is unknown; \
-                 submit supports, on_top_of, inside, next_to or facing"
+                 submit supports, on_top_of, inside, next_to or facing (or in_front_of, behind, left_of, right_of, outside)"
             ),
         )),
     }
@@ -742,6 +758,43 @@ fn parse_object_id(field: &str, text: &str) -> Result<ObjectId, McpToolError> {
             format!("{field} `{text}` is not an object id (expected UUID text)"),
         )
     })
+}
+
+/// The want lines of one call, parsed: the classic wants and the facing and
+/// outside ones with their source lines, both in call order; or the conflict
+/// answer when a want names an object that is not staged.
+type Wired = Result<(Vec<ParsedWant>, Vec<(facing_wants::Extra, String)>), ScenePlaceOutput>;
+
+/// Parse the want lines of a `scene.place` call. A want that names an unknown
+/// target id cannot reach the solver: it answers the conflict shape directly,
+/// naming that one line.
+fn wire_wants(
+    revision: u64,
+    wants: &[String],
+    index_of: &BTreeMap<String, u32>,
+) -> Result<Wired, McpToolError> {
+    let (mut parsed, mut extras) = (Vec::with_capacity(wants.len()), Vec::new());
+    for source in wants {
+        let missing = match facing_wants::parse(source, index_of)? {
+            Some(facing_wants::Parsed::Extra(extra)) => {
+                extras.push((extra, source.clone()));
+                continue;
+            }
+            Some(facing_wants::Parsed::Missing { reason }) => reason,
+            None => match parse_want(source, index_of)? {
+                WantOutcome::Ready(want) => {
+                    let source = source.clone();
+                    parsed.push(ParsedWant { want, source });
+                    continue;
+                }
+                WantOutcome::MissingTarget { reason } => reason,
+            },
+        };
+        let culprit = vec![source.clone()];
+        let conflict = conflict_output(revision, culprit, missing, Vec::new(), Vec::new());
+        return Ok(Err(conflict));
+    }
+    Ok(Ok((parsed, extras)))
 }
 
 // Want grammar, one line per want: `<relation> <target> [<lo>,<hi>]?` where
@@ -1118,10 +1171,16 @@ impl ServerState {
         let snap = snapshot(&self.doc);
         let graph = engine_spatial::build(&snap.actors);
         let report = engine_spatial::run(&snap.actors);
-        let full = engine_spatial::brief(&snap.actors, &graph, &report, usize::MAX);
         let budget_bytes = budget as usize;
-        let kept = engine_spatial::brief(&snap.actors, &graph, &report, budget_bytes);
-        let mut text = engine_spatial::brief_text(&kept);
+        let roles = staged_roles(&self.doc, &snap.ids);
+        let kept = engine_spatial::brief::brief_folded(
+            &snap.actors,
+            &graph,
+            &report,
+            &roles,
+            budget_bytes,
+        );
+        let mut text = kept.text;
         // Affordance rows ride along with the brief: geometry-derived tags per
         // actor, id-ordered, whole rows only within the same byte budget.
         let (tags, _) = engine_spatial::afford::derive_all(&snap.actors, &[], None);
@@ -1134,10 +1193,7 @@ impl ServerState {
                 break;
             }
         }
-        let truncated = kept.groups.len() != full.groups.len()
-            || kept.relations.len() != full.relations.len()
-            || kept.findings.len() != full.findings.len()
-            || afford_dropped;
+        let truncated = kept.truncated || afford_dropped;
         let page = table_page(
             &snap.ids,
             &snap.actors,
@@ -1154,14 +1210,14 @@ impl ServerState {
                 verdict: counts.verdict,
                 total: counts.total,
                 hash: counts.hash,
-                focus_gap: wide(full.findings.len() - kept.findings.len()),
+                focus_gap: wide(kept.findings_cut),
             })
         } else {
             None
         };
         Ok(SceneBriefOutput {
             revision: self.doc.revision,
-            digest: kept.digest,
+            digest: engine_spatial::digest(&graph),
             text,
             truncated,
             ids: page.ids,
@@ -1197,23 +1253,33 @@ impl ServerState {
         let snap = snapshot(&self.doc);
         let (run, skipped) = partition(selected.as_deref(), snap.missing_pose > 0);
         let checks_run: Vec<String> = run.iter().map(|name| (*name).to_string()).collect();
-        let report = engine_spatial::run_checks(&snap.actors, &run).map_err(|legal| {
-            if legal == ["needs-nav-view"] {
-                McpToolError::new(
-                    "needs_nav_view",
-                    "nav checks need a baked nav view which this tool has no access to; \
+        let epsilon_cm = check_epsilon(args.epsilon_cm)?;
+        let report =
+            engine_spatial::run_checks_eps(&snap.actors, &run, epsilon_cm).map_err(|legal| {
+                if legal == ["needs-nav-view"] {
+                    McpToolError::new(
+                        "needs_nav_view",
+                        "nav checks need a baked nav view which this tool has no access to; \
                      submit offline checks only",
-                )
-            } else {
-                McpToolError::new(
-                    "bad_check",
-                    format!("check refused; submit any of {}", legal.join(", ")),
-                )
-            }
-        })?;
+                    )
+                } else {
+                    McpToolError::new(
+                        "bad_check",
+                        format!("check refused; submit any of {}", legal.join(", ")),
+                    )
+                }
+            })?;
         let format = QueryFormat::parse(args.format.as_deref())?;
-        let shown: Vec<&engine_spatial::Finding> = report
-            .findings
+        let asks = Asks {
+            triage: args.triage.unwrap_or(false),
+            allow: args.allow.as_deref().unwrap_or_default(),
+            run: &run,
+            epsilon_cm,
+            revision: self.doc.revision,
+        };
+        let seen = view(&snap.actors, &snap.ids, &self.doc, &report, &asks)?;
+        let shown: Vec<&engine_spatial::Finding> = seen
+            .kept
             .iter()
             .filter(|finding| !args.matched_only.unwrap_or(false) || finding.severity == "red")
             .collect();
@@ -1223,7 +1289,7 @@ impl ServerState {
         } else {
             0
         };
-        let findings: Vec<String> = shown[..end].iter().map(|f| finding_line(f)).collect();
+        let findings: Vec<String> = shown[..end].iter().map(|f| seen.line(f)).collect();
         let findings_len = wide(findings.len());
         let involved: BTreeSet<usize> = shown
             .iter()
@@ -1250,7 +1316,7 @@ impl ServerState {
         };
         Ok(SceneSpatialOutput {
             revision: self.doc.revision,
-            verdict: report.verdict().to_string(),
+            verdict: seen.verdict().to_string(),
             hash: report.hash,
             total,
             truncated: format == QueryFormat::Rows && end < shown.len(),
@@ -1268,6 +1334,7 @@ impl ServerState {
             checks_run,
             skipped,
             size_source: snap.sizes,
+            suppressed: seen.suppressed,
         })
     }
 
@@ -1354,28 +1421,25 @@ impl ServerState {
         // Wire wants to solver wants. A want that names an unknown target id
         // cannot reach the solver, so it returns the conflict shape directly
         // with the single culprit want.
-        let mut parsed = Vec::with_capacity(args.wants.len());
-        for source in &args.wants {
-            match parse_want(source, &index_of)? {
-                WantOutcome::Ready(want) => parsed.push(ParsedWant {
-                    want,
-                    source: source.clone(),
-                }),
-                WantOutcome::MissingTarget { reason } => {
-                    return Ok(conflict_output(
-                        self.doc.revision,
-                        vec![source.clone()],
-                        reason,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
-                }
-            }
-        }
+        let (parsed, extras) = match wire_wants(self.doc.revision, &args.wants, &index_of)? {
+            Ok(wired) => wired,
+            Err(conflict) => return Ok(conflict),
+        };
         let intent = Intent {
             object: ObjectRef::Id(spatial_id),
             wants: parsed.iter().map(|entry| entry.want).collect(),
         };
+        if !extras.is_empty() {
+            let solved =
+                facing_wants::solve(self.doc.revision, &intent, &parsed, &extras, &snap.actors)?;
+            return match solved {
+                Ok(placed) => {
+                    let before = (args.delta != Some(false)).then_some(&snap);
+                    apply_placement(self, node, &placed, args.idempotency_key, before)
+                }
+                Err(conflict) => Ok(conflict),
+            };
+        }
         let solved = match engine_spatial::solve(&intent, &snap.actors) {
             Ok(out) => out,
             Err(conflict) => {

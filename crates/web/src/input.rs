@@ -175,6 +175,33 @@ impl LookAccum {
     }
 }
 
+/// Centidegrees the seat turns per tick while a turn key is held: 90 degrees a second.
+pub const TURN_CDEG_PER_TICK: i32 = 150;
+/// Millidegrees of turn per pixel of pointer-lock movement.
+pub const MILLI_DEG_PER_PX: f64 = 150.0;
+
+/// The seat's absolute facing for the net duel, in centidegrees, turned by the mouse look and
+/// the turn keys. The tape stores an absolute facing and WASD walk relative to it, so a seat
+/// with no mouse needs keys to turn: Q turns left, E turns right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Facing {
+    cdeg: i32,
+}
+
+impl Facing {
+    /// Turn by `look_yaw_mdeg` (millidegrees, right positive) plus a tick of the turn keys and
+    /// return the facing for this tick, wrapped into the contract range.
+    pub fn turn(&mut self, look_yaw_mdeg: i32, left: bool, right: bool) -> i16 {
+        let keys = TURN_CDEG_PER_TICK * (i32::from(right) - i32::from(left));
+        let turned = self
+            .cdeg
+            .saturating_add(look_yaw_mdeg / 10)
+            .saturating_add(keys);
+        self.cdeg = (turned + 18_000).rem_euclid(36_000) - 18_000;
+        i16::try_from(self.cdeg).unwrap_or(0)
+    }
+}
+
 /// How many input events of each device the engine has taken in. These are the numbers of the
 /// `input:` line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -414,6 +441,20 @@ impl InputState {
         input.buttons = Buttons(input.buttons.0 | self.default_bits());
         input.validate()?;
         Ok(input)
+    }
+
+    /// The tape record of slot 0 facing 0 at `tick`: what the input tape samples (WEB7).
+    ///
+    /// # Errors
+    /// Never for slot 0 and facing 0; the type is [`Self::fighter_input`]'s.
+    pub fn slot0_record(&self, tick: u32) -> Result<FighterInput, FighterError> {
+        self.fighter_input(tick, FighterId(0), 0)
+    }
+
+    /// Whether `key` is held right now.
+    #[must_use]
+    pub fn held(&self, key: Key) -> bool {
+        self.keys[key.code()]
     }
 
     /// Take the pending look as millidegrees (see [`LookAccum::take_milli_deg`]).
@@ -826,5 +867,35 @@ mod tests {
             "input: kb=3 mouse=2 pad=0"
         );
         assert_eq!(input_line(Counts::default()), "input: kb=0 mouse=0 pad=0");
+    }
+
+    #[test]
+    fn the_seat_turns_with_the_mouse_and_the_turn_keys_and_wraps() {
+        let mut facing = Facing::default();
+        assert_eq!(facing.turn(0, false, false), 0);
+        // 20 degrees of mouse look (20000 millidegrees) is 2000 centidegrees.
+        assert_eq!(facing.turn(20_000, false, false), 2_000);
+        // E turns right and Q turns left by the same step per tick.
+        assert_eq!(facing.turn(0, false, true), 2_150);
+        assert_eq!(facing.turn(0, true, false), 2_000);
+        assert_eq!(facing.turn(0, true, true), 2_000, "both keys cancel");
+        // Past half a turn the facing wraps to the other side, always inside the contract.
+        let mut wrap = Facing::default();
+        assert_eq!(wrap.turn(170_000, false, false), 17_000);
+        assert_eq!(wrap.turn(30_000, false, false), -16_000);
+        for _ in 0..1_000 {
+            let value = i32::from(wrap.turn(MAX_DELTA_MILLI_DEG, false, true));
+            assert!((-18_000..=18_000).contains(&value));
+        }
+    }
+
+    #[test]
+    fn a_held_turn_key_is_visible_and_released_with_the_rest() {
+        let mut state = InputState::default();
+        assert!(!state.held(Key::E));
+        state.key_event("KeyE", true);
+        assert!(state.held(Key::E) && !state.held(Key::Q));
+        state.release_all();
+        assert!(!state.held(Key::E));
     }
 }

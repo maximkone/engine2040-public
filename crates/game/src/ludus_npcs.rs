@@ -1190,4 +1190,107 @@ mod tests {
         let replay = ludus.drain_at(1_000);
         assert!(replay.is_empty() && replay.refused.is_empty());
     }
+
+    /// NS14: a visit recorded with the provider on replays with the provider
+    /// off, twice, and the talk log comes back byte for byte.
+    #[test]
+    fn roman_visit_talk_log_replays_twice_with_the_provider_off() {
+        let mut ludus = LudusNpcs::new(SEED);
+        let mut mock = MockAdapter::new(Vec::new());
+        twenty_visits(&mut ludus, &mut mock);
+        let talk = ludus.recorded_entries();
+        assert_eq!(talk.len(), 60, "20 visits x 3 voices talk");
+        assert!(talk
+            .iter()
+            .all(|line| line.source == ActionSource::Provider));
+
+        let replay = || {
+            let (log, checkpoint) = MindRuntime::replay_offline(&talk).expect("replays offline");
+            (log.entries().to_vec(), checkpoint)
+        };
+        let (first, first_checkpoint) = replay();
+        let (second, second_checkpoint) = replay();
+        assert_eq!(first, talk, "talk log identical with the provider off");
+        assert_eq!(second, talk, "and identical again");
+        assert_eq!(first_checkpoint, ludus.log_checkpoint());
+        assert_eq!(second_checkpoint, first_checkpoint);
+
+        // Negative control: one changed byte of one line changes the checkpoint.
+        let mut tampered = talk.clone();
+        tampered[7].text.push('!');
+        let (_, other) = MindRuntime::replay_offline(&tampered).expect("replays offline");
+        assert_ne!(
+            other, first_checkpoint,
+            "a changed line shows in the checkpoint"
+        );
+    }
+
+    const SOAK_SESSIONS: u64 = 64;
+    const SOAK_BOUTS: u64 = 160;
+    /// Sessions x bouts x three voices, one line each.
+    const SOAK_LINES: usize = 64 * 160 * 3;
+
+    /// One LW12 pass: 64 ludus sessions, each three voices over 160 bouts. At
+    /// every tick boundary each voice pulls its top-8 recall and every line
+    /// due drains through `apply_at`. Returns the folded checkpoint, the lines
+    /// presented and the recall and drain timings in nanoseconds (timings
+    /// are printed, never hashed).
+    fn soak_pass() -> (u64, usize, Vec<u128>, Vec<u128>) {
+        use engine_ai::memory::{MAX_RECALL, MAX_STORED_PER_NPC};
+        let mut fold = Fnv64::new();
+        let mut presented = 0;
+        let (mut recall_ns, mut drain_ns) = (Vec::new(), Vec::new());
+        for session in 0..SOAK_SESSIONS {
+            let mut ludus = LudusNpcs::new(SEED + session);
+            for bout in 0..SOAK_BOUTS {
+                ludus
+                    .observe_fight(&fight(bout))
+                    .expect("fixture remembers");
+                let tick = bout * 10 + 5;
+                ludus.visit_offline(tick);
+                let started = std::time::Instant::now();
+                for role in NpcRole::ALL {
+                    let recall = ludus.recall(role, tick, MAX_RECALL);
+                    assert!(recall.len() <= MAX_RECALL, "recall stays inside top 8");
+                    if bout >= 8 {
+                        assert_eq!(recall.len(), MAX_RECALL, "a full store fills the top 8");
+                    }
+                }
+                recall_ns.push(started.elapsed().as_nanos());
+                let started = std::time::Instant::now();
+                let batch = ludus.drain_at(tick + VISIT_DEADLINE_TICKS);
+                drain_ns.push(started.elapsed().as_nanos());
+                assert!(batch.refused.is_empty(), "in-window lines never refuse");
+                assert!(batch.intended.is_empty(), "voices speak, never steer");
+                presented += batch.presented.len();
+            }
+            assert!(
+                ludus.total_records() <= NpcRole::ALL.len() * MAX_STORED_PER_NPC,
+                "memory caps hold"
+            );
+            assert!(ludus.recorded_entries().is_empty(), "every line drained");
+            fold.write(&ludus.checkpoint().to_le_bytes());
+        }
+        (fold.finish(), presented, recall_ns, drain_ns)
+    }
+
+    fn p95(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() * 95 / 100]
+    }
+
+    #[test]
+    fn ludus_soak_64_sessions_hold_caps_and_drain_clean_twice() {
+        let (first, presented, mut recall_ns, mut drain_ns) = soak_pass();
+        let (second, again, _, _) = soak_pass();
+        assert_eq!(first, second, "the soak replays x2");
+        assert_eq!(presented, again);
+        assert_eq!(presented, SOAK_LINES, "every voice's line presented once");
+        println!(
+            "ludus_npcs soak sessions={SOAK_SESSIONS} bouts={SOAK_BOUTS} lines={presented} \
+             recall_p95_ns={} drain_p95_ns={} checkpoint={first:016x}",
+            p95(&mut recall_ns),
+            p95(&mut drain_ns),
+        );
+    }
 }

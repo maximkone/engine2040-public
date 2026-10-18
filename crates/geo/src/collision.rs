@@ -10,7 +10,7 @@ use parry3d::math::Vector;
 use parry3d::transformation::try_convex_hull;
 use parry3d::transformation::vhacd::{VHACDParameters, VHACD};
 
-use crate::mesh::{ix, to_u64, GeoError, GeoMesh};
+use crate::mesh::{ix, narrow, to_u64, GeoError, GeoMesh};
 
 /// Options for one decomposition.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,6 +132,50 @@ pub fn decompose(mesh: &GeoMesh, options: &HullOptions) -> Result<Vec<GeoMesh>, 
     Ok(parts)
 }
 
+/// True when `p` is inside the convex `part` or on its surface: no outward face plane has it
+/// farther out than a micrometer (the signed distance to every face plane is at most zero).
+fn inside_convex(part: &GeoMesh, p: [f64; 3]) -> bool {
+    part.indices.chunks_exact(3).all(|t| {
+        let [a, b, c] = [0, 1, 2].map(|k| part.positions[ix(t[k])].map(f64::from));
+        let (u, v) = (
+            [0, 1, 2].map(|k| b[k] - a[k]),
+            [0, 1, 2].map(|k| c[k] - a[k]),
+        );
+        let normal = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let length = normal.iter().map(|n| n * n).sum::<f64>().sqrt();
+        let out: f64 = (0..3).map(|k| normal[k] * (p[k] - a[k])).sum();
+        length == 0.0 || out / length <= 1e-6
+    })
+}
+
+/// How much of `mesh` the convex `parts` miss: for every vertex of `mesh` the distance to the
+/// nearest part (0 when it is inside one), the largest of them over the bounding-box diagonal
+/// of `mesh`. 0.0 means the parts cover every vertex; infinity when there are no parts. It
+/// sees a part that was lost or cut away, not a hull that is too fat: a single hull holds
+/// every vertex of its mesh and scores 0.0.
+#[must_use]
+pub fn concavity(mesh: &GeoMesh, parts: &[GeoMesh]) -> f32 {
+    let distance = |p: [f64; 3]| {
+        if parts.iter().any(|part| inside_convex(part, p)) {
+            return 0.0;
+        }
+        parts
+            .iter()
+            .map(|part| part.surface_distance(p))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let worst = mesh
+        .positions
+        .iter()
+        .map(|p| distance(p.map(f64::from)))
+        .fold(0.0, f64::max);
+    narrow(worst / mesh.diagonal().max(f64::MIN_POSITIVE))
+}
+
 /// Digest of a whole decomposition (part count, then each part's digest), the cook receipt.
 #[must_use]
 pub fn digest(parts: &[GeoMesh]) -> u64 {
@@ -181,6 +225,39 @@ mod tests {
         for p in &parts {
             assert_part_ok(p, 64);
         }
+    }
+
+    #[test]
+    fn l_prism_parts_cover_every_vertex_and_a_lost_part_shows() {
+        let l = l_prism(2.0, 1.0, 1.0);
+        let parts = decompose(&l, &HullOptions::default()).unwrap();
+        let split = concavity(&l, &parts);
+        assert!(split <= 0.02, "parts concavity {split}");
+        // Lose one part and the vertices only it held are left out.
+        let lost = concavity(&l, &parts[1..]);
+        assert!(lost >= 0.10, "one part lost: {lost}");
+    }
+
+    #[test]
+    fn a_single_hull_scores_zero_because_it_holds_every_vertex() {
+        // The row asked for one hull to score at least 0.10 on the L; by the vertex-to-part
+        // definition it cannot: the hull contains all of them, notch corner included.
+        let l = l_prism(2.0, 1.0, 1.0);
+        assert_eq!(concavity(&l, &[single_hull(&l, 64).unwrap()]), 0.0);
+    }
+
+    #[test]
+    fn concavity_is_zero_inside_and_grows_outside() {
+        let cube = cuboid([2.0; 3]);
+        // The mesh against itself, and against a part that swallows it: every vertex is inside.
+        assert_eq!(concavity(&cube, std::slice::from_ref(&cube)), 0.0);
+        assert_eq!(concavity(&cube, &[cube.placed([1.5; 3], 0, [0.0; 3])]), 0.0);
+        // The same cube moved 0.5 along X: the far vertices are 0.5 outside the part.
+        let moved = cube.placed([1.0; 3], 0, [0.5, 0.0, 0.0]);
+        let c = concavity(&cube, &[moved]);
+        assert!((c - 0.5 / (2.0 * 3.0_f32.sqrt())).abs() < 1e-4, "moved {c}");
+        // No parts: nothing covers the vertices.
+        assert!(concavity(&cube, &[]).is_infinite());
     }
 
     #[test]

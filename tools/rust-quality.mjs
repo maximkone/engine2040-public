@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { OWN_MATH_FILES, deriveFixedApi, platformMathHits } from "./sim-source-scan.mjs";
 
 // Authoritative simulation crates: determinism rules apply (HASH-LAW.md).
 export const SIM_CRATES = ["engine-core", "engine-ecs", "engine-physics", "engine-combat", "engine-ai", "engine-nav", "engine-destruction", "engine-net", "engine-scene", "engine-anim", "engine-spatial", "engine-rules", "engine-arena"];
@@ -45,9 +46,10 @@ function cachePath(root, rel) {
   return join(root, CACHE_DIR, `${encodeURIComponent(rel)}.json`);
 }
 
-function configString(ids) {
+function configString(ids, fixedApi) {
   return JSON.stringify({
     v: CACHE_VERSION,
+    fixed: Object.values(fixedApi).map((set) => [...set].sort()),
     metrics: METRICS,
     simClippy: SIM_CLIPPY,
     longFn: LONG_FN_LINES,
@@ -57,7 +59,7 @@ function configString(ids) {
 }
 
 function kindTag(kind) {
-  return `${kind.crate}|${kind.lib ? 1 : 0}${kind.bin ? 1 : 0}${kind.sim ? 1 : 0}${kind.hot ? 1 : 0}${kind.core ? 1 : 0}${kind.testFile ? 1 : 0}`;
+  return `${kind.crate}|${kind.lib ? 1 : 0}${kind.bin ? 1 : 0}${kind.sim ? 1 : 0}${kind.hot ? 1 : 0}${kind.core ? 1 : 0}${kind.testFile ? 1 : 0}${kind.ownMath ? 1 : 0}`;
 }
 
 function fileKey(text, tag, config) {
@@ -108,13 +110,14 @@ const METRICS = {
   big_files: { weight: 4, target: 0, zeroAt: 3, bad: true, perCrate: true, what: `files over ${BIG_FILE_LINES} production lines` },
   hot_alloc: { weight: 8, target: 0, zeroAt: 3, bad: true, what: "allocations inside step/tick/update/render/mix functions of hot crates" },
   nondet: { weight: 7, target: 0, zeroAt: 2, bad: true, what: "HashMap/HashSet/Instant/SystemTime/thread_rng in simulation crates" },
+  float_math: { weight: 0, target: 0, zeroAt: 1, bad: true, what: "platform float math (sin, cos, exp, powf...) in simulation crates, the type-blind twin of tools/sim-clippy.toml" },
   waivers: { weight: 0, target: 0, zeroAt: 1, bad: true, what: "`det-ok:`/`alloc-ok:` waivers (budgeted, reviewed)" },
   undoc_pub: { weight: 4, target: 5, zeroAt: 50, bad: true, ratio: true, what: "public items without a doc comment (percent)" },
   unsafe: { weight: 0, target: 0, zeroAt: 1, bad: true, what: "`unsafe` uses (each needs SAFETY and a test)" },
   tests: { weight: 8, target: 10, zeroAt: 0, bad: false, what: "`#[test]` functions per 1,000 production code lines (higher is better)" },
 };
 // Metrics a crate entering the baseline must already have at zero.
-const STRICT_NEW = ["unwrap", "allow_no_reason", "dead_code_allows", "print_in_lib", "string_errors", "board_ids", "hash_reimpl", "dup_fns", "nondet"];
+const STRICT_NEW = ["unwrap", "allow_no_reason", "dead_code_allows", "print_in_lib", "string_errors", "board_ids", "hash_reimpl", "dup_fns", "nondet", "float_math"];
 
 export const HELP = `rust-quality.mjs - Rust quality scorecard and ratchet for every workspace crate
 
@@ -388,7 +391,8 @@ export function boardIds(root = ".") {
 
 const count = (s, re) => (s.match(re) ?? []).length;
 
-// Analyze one file. `kind`: { crate, lib, sim, hot, core, testFile, bin }.
+// Analyze one file. `kind`: { crate, lib, sim, hot, core, testFile, bin, fixedApi, ownMath }.
+// `fixedApi` (deriveFixedApi of engine-core's fixed.rs) lets `Fixed` sin/cos pass the float scan.
 export function analyzeFile(text, kind, ids = new Set()) {
   const { code, comments } = lex(text.replace(/\r\n/g, "\n"));
   const lines = code.split("\n");
@@ -450,6 +454,11 @@ export function analyzeFile(text, kind, ids = new Set()) {
         break;
       }
       if (!/^\s*(?:\/\/\/|\/\*\*|#\[doc)/.test(raw[b] ?? "")) hit("undoc_pub", l);
+    }
+  }
+  if (kind.sim && !kind.testFile && !kind.ownMath) {
+    for (const h of platformMathHits(raw.join("\n"), kind.fixedApi ?? deriveFixedApi(""))) {
+      if (!test[h.line - 1]) hit("float_math", h.line - 1);
     }
   }
   if (m.lines > BIG_FILE_LINES) hit("big_files", 0);
@@ -531,7 +540,9 @@ export function measure(root = ".", filter = null, useCache = true) {
   const crates = new Map();
   const cloneIndex = new Map();
   const cacheRoot = useCache ? join(root, CACHE_DIR) : null;
-  const config = useCache ? configString(ids) : "";
+  const fixedPath = join(root, "crates", "core", "src", "fixed.rs");
+  const fixedApi = deriveFixedApi(existsSync(fixedPath) ? readFileSync(fixedPath, "utf8") : "");
+  const config = useCache ? configString(ids, fixedApi) : "";
   if (cacheRoot) {
     try { mkdirSync(cacheRoot, { recursive: true }); } catch { /* cache is best-effort */ }
   }
@@ -558,6 +569,8 @@ export function measure(root = ".", filter = null, useCache = true) {
         sim: SIM_CRATES.includes(pkg.name),
         hot: HOT_CRATES.includes(pkg.name),
         core: pkg.name === "engine-core",
+        fixedApi,
+        ownMath: OWN_MATH_FILES.includes(rel.slice("crates/".length)),
         testFile: testPath(inPkg) || declaredTest || testOnlyFile(text),
       };
       let cacheFile = null;
@@ -661,6 +674,12 @@ export function compare(baseline, crates) {
   return { regressions, improvements };
 }
 
+// Baseline rows whose crate is gone pin nothing and hide a rename: the names
+// in the baseline that no workspace package carries.
+export function onlyBase(baseline, names) {
+  return Object.keys(baseline.crates ?? {}).filter((name) => !names.has(name));
+}
+
 // Land scope: foreign staged debt never refuses an owned-clean packet.
 // A hit is "crates/.../file.rs:line: snippet"; owned holds repo paths of
 // the landing packet. Exact or dir-prefix match counts; empty owned means
@@ -727,8 +746,8 @@ function snapshot(crates) {
 }
 
 function table(crates) {
-  const cols = ["unwrap", "panic_sites", "casts", "allow_no_reason", "print_in_lib", "string_errors", "board_ids", "hash_reimpl", "dup_fns", "long_fns", "big_files", "hot_alloc", "nondet", "undoc_pub", "tests"];
-  const short = { unwrap: "unwrap", panic_sites: "panic", casts: "casts", allow_no_reason: "allow", print_in_lib: "print", string_errors: "strErr", board_ids: "ids", hash_reimpl: "hash", dup_fns: "dup", long_fns: "longFn", big_files: "bigF", hot_alloc: "hotAl", nondet: "nondet", undoc_pub: "undoc", tests: "tests" };
+  const cols = ["unwrap", "panic_sites", "casts", "allow_no_reason", "print_in_lib", "string_errors", "board_ids", "hash_reimpl", "dup_fns", "long_fns", "big_files", "hot_alloc", "nondet", "float_math", "undoc_pub", "tests"];
+  const short = { unwrap: "unwrap", panic_sites: "panic", casts: "casts", allow_no_reason: "allow", print_in_lib: "print", string_errors: "strErr", board_ids: "ids", hash_reimpl: "hash", dup_fns: "dup", long_fns: "longFn", big_files: "bigF", hot_alloc: "hotAl", nondet: "nondet", float_math: "float", undoc_pub: "undoc", tests: "tests" };
   const rows = [["crate", "kloc", "score", "gr", ...cols.map((c) => short[c])]];
   let loc = 0;
   let weighted = 0;
@@ -794,6 +813,7 @@ function main(argv) {
   }
 
   let { regressions, improvements } = compare(baseline, shown);
+  const orphans = onlyBase(baseline, new Set(packages(".").map((p) => p.name)));
   if (!opts.crates.length) regressions.push(...simClippyFindings(".", crates).map((f) => `sim config ${f}`));
   // Land scope: foreign staged debt warns, owned debt still fails.
   let foreign = [];
@@ -834,7 +854,7 @@ function main(argv) {
   if (opts.json) {
     const out = {};
     for (const [name, c] of shown) out[name] = { ...c.metrics, ...score(c.metrics), grade: grade(score(c.metrics).score) };
-    console.log(JSON.stringify({ crates: out, cloneGroups: groups.length, regressions, foreign, improvements: improvements.length }, null, 1));
+    console.log(JSON.stringify({ crates: out, cloneGroups: groups.length, regressions, foreign, onlyBase: orphans, improvements: improvements.length }, null, 1));
     return regressions.length ? 1 : 0;
   }
   const t = table(shown);
@@ -843,6 +863,7 @@ function main(argv) {
   console.log(`clone groups (duplicated fn bodies, workspace): ${groups.length}`);
   for (const r of regressions) console.log(`[FAIL] ratchet ${r}`);
   for (const r of foreign) console.log(`[WARN] foreign ratchet ${r}`);
+  for (const name of orphans) console.log(`[WARN] baseline row for a crate that does not exist: ${name}`);
   // Only lower-is-better counts lock in; a rising test density stays informational.
   const lockable = improvements.filter(({ k }) => METRICS[k].bad).length;
   if (lockable) console.log(`[INFO] ${lockable} metric(s) improved below baseline: run --tighten with the landing`);

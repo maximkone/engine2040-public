@@ -3,8 +3,9 @@
 //!
 //! The authority (`engine-arena`, integers, hashed) decides when a spear leaves a hand, what it
 //! hits, who is tethered to whom and where both bodies go. This module reads only what the match
-//! exposes (`LiveMatch::spear_events`, `LiveMatch::spear_view`) plus the fighters' drawn places,
-//! and keeps floats: the spear's pose and spin, a trail behind it, a verlet rope from
+//! exposes (`LiveMatch::spear_events`, `LiveMatch::spear_view`) plus the fighters' drawn places
+//! and, through [`Ties`], where each body is drawn (a ragdolled pelvis, a standing thrower's right
+//! palm, which the rope's thrower end ties to), and keeps floats: the spear's pose and spin, a trail behind it, a verlet rope from
 //! `engine-physfx` that sags while slack and straightens when taut, and for each tethered body
 //! a [`Carry`] that tells the ragdoll layer where the authority is taking it and how high the
 //! arc lifts it. It never feeds the sim: the golden `d57b5c8ae3096614` cannot move.
@@ -56,6 +57,23 @@ const ARC_RISE_TICKS: f32 = 14.0;
 const ARC_SPEED_REF_M_S: f32 = 8.0;
 /// Millimeters per meter.
 const MM: f32 = 1000.0;
+
+/// Where the drawn bodies are this tick: what the rope ends tie to.
+#[derive(Clone, Copy, Debug)]
+pub struct Ties<'a> {
+    /// A ragdolled body's pelvis, meters; `None` for a body on its feet.
+    pub pelvis: &'a [Option<[f32; 3]>; MAX_LOOK_FIGHTERS],
+    /// A body's right palm as drawn, meters; `None` when the look cannot say.
+    pub palms: &'a [Option<[f32; 3]>; MAX_LOOK_FIGHTERS],
+}
+
+impl Ties<'static> {
+    /// No body is placed: every rope end falls back to the authority place.
+    pub const NONE: Self = Self {
+        pelvis: &[None; MAX_LOOK_FIGHTERS],
+        palms: &[None; MAX_LOOK_FIGHTERS],
+    };
+}
 
 /// Which end of the tether a body is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,14 +270,14 @@ impl SpearLook {
     }
 
     /// Takes one accepted tick: the match's spear events and per-slot view, the fighters' drawn
-    /// places and, for a ragdolled body, where its pelvis is (the rope ties to it). Steps the
-    /// rope world once.
+    /// places and where the bodies are drawn (`ties`): a ragdolled body's pelvis, else a
+    /// standing thrower's palm, is where the rope ties. Steps the rope world once.
     pub fn observe(
         &mut self,
         events: &[SpearEvent],
         view: &[SpearSlot],
         fighters: &[FighterView],
-        pelvis: &[Option<[f32; 3]>; MAX_LOOK_FIGHTERS],
+        ties: Ties<'_>,
     ) {
         let feet = |slot: u8| {
             fighters
@@ -275,7 +293,7 @@ impl SpearLook {
             let Ok(thrower) = u8::try_from(index) else {
                 continue;
             };
-            self.fold_slot(thrower, slot, &feet, pelvis);
+            self.fold_slot(thrower, slot, &feet, ties);
         }
         self.fx.step();
         let spears = u32::try_from(self.spears()).unwrap_or(u32::MAX);
@@ -344,13 +362,13 @@ impl SpearLook {
         thrower: u8,
         slot: &SpearSlot,
         feet: &dyn Fn(u8) -> Option<([f32; 3], f32)>,
-        pelvis: &[Option<[f32; 3]>; MAX_LOOK_FIGHTERS],
+        ties: Ties<'_>,
     ) {
         let index = usize::from(thrower);
         let Some((pos, yaw)) = feet(thrower) else {
             return;
         };
-        let hand = self.anchor(thrower, pos, yaw, pelvis, true);
+        let hand = self.anchor(thrower, pos, yaw, ties, true);
         match slot.phase {
             Phase::Idle => {
                 if self.lanes[index].rope {
@@ -387,7 +405,7 @@ impl SpearLook {
                             *slot = Some(carry(Role::Victim));
                         }
                         feet(victim)
-                            .map(|(vpos, vyaw)| self.anchor(victim, vpos, vyaw, pelvis, false))
+                            .map(|(vpos, vyaw)| self.anchor(victim, vpos, vyaw, ties, false))
                     }
                     None => self.lanes[index].spear.map(|s| s.tip),
                 };
@@ -409,19 +427,17 @@ impl SpearLook {
     }
 
     /// Where a rope ties to a body: its ragdoll pelvis lifted to the chest, else the
-    /// authority place at chest height; the thrower's end is the hand in front of it.
-    fn anchor(
-        &self,
-        slot: u8,
-        pos: [f32; 3],
-        yaw: f32,
-        pelvis: &[Option<[f32; 3]>; MAX_LOOK_FIGHTERS],
-        hand: bool,
-    ) -> [f32; 3] {
-        if let Some(Some(root)) = pelvis.get(usize::from(slot)) {
+    /// authority place at chest height; the thrower's end is its drawn palm, else the hand in
+    /// front of the authority place.
+    fn anchor(&self, slot: u8, pos: [f32; 3], yaw: f32, ties: Ties<'_>, hand: bool) -> [f32; 3] {
+        let at = usize::from(slot);
+        if let Some(Some(root)) = ties.pelvis.get(at) {
             return add(*root, [0.0, PELVIS_TO_CHEST_M, 0.0]);
         }
         if hand {
+            if let Some(Some(palm)) = ties.palms.get(at) {
+                return *palm;
+            }
             let (s, c) = yaw.sin_cos();
             add(pos, [s * HAND_FORWARD_M, HAND_Y_M, c * HAND_FORWARD_M])
         } else {
@@ -556,8 +572,6 @@ mod tests {
     use engine_input::fighter::THROW_SPEAR;
     use engine_input::{Buttons, FighterId, FighterInput};
 
-    const NO_PELVIS: [Option<[f32; 3]>; MAX_LOOK_FIGHTERS] = [None; MAX_LOOK_FIGHTERS];
-
     fn config() -> GameConfig {
         GameConfig {
             seed: 2040,
@@ -596,7 +610,7 @@ mod tests {
                 live.spear_events(),
                 live.spear_view(),
                 app.fighter_views(),
-                &NO_PELVIS,
+                Ties::NONE,
             );
             carries.push(*look.carries());
         }
@@ -651,7 +665,7 @@ mod tests {
                 live.spear_events(),
                 live.spear_view(),
                 app.fighter_views(),
-                &NO_PELVIS,
+                Ties::NONE,
             );
             if let Some(nodes) = look.rope(0, 1.0) {
                 assert_eq!(nodes.len(), Tier::Potato.caps().tether_nodes);
@@ -682,7 +696,7 @@ mod tests {
                 live.spear_events(),
                 live.spear_view(),
                 app.fighter_views(),
-                &NO_PELVIS,
+                Ties::NONE,
             );
         }
         let (early, late) = (look.draws(0.0), look.draws(1.0));
@@ -697,6 +711,46 @@ mod tests {
         assert!((norm(sub(mid[0].tip, a.tip)) - moved * 0.5).abs() < 0.02);
         assert!(look.trail(0).len() >= 3, "a flying spear trails");
         assert!((norm(b.dir) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn spear_look_ties_the_thrower_end_of_the_rope_to_the_drawn_palm() {
+        let mut app = App::new(config())
+            .expect("session")
+            .into_spear()
+            .expect("spear");
+        let mut look = SpearLook::new(DEFAULT_TIER);
+        let mut out = TickOutcome::default();
+        let mut palms = [None; MAX_LOOK_FIGHTERS];
+        let mut tied = 0;
+        for tick in 0..12 {
+            let buttons = if tick == 1 { THROW_SPEAR } else { 0 };
+            app.tick_into(input(tick, buttons, facing_to_other(&app)), &mut out);
+            let live = app.live_match();
+            // A palm well off the authority place's guess (0.3 m ahead at 1.3 m up).
+            palms[0] = app
+                .fighter_views()
+                .first()
+                .map(|f| add(f.pos_m, [0.5, 1.6, -0.4]));
+            look.observe(
+                live.spear_events(),
+                live.spear_view(),
+                app.fighter_views(),
+                Ties {
+                    pelvis: &[None; MAX_LOOK_FIGHTERS],
+                    palms: &palms,
+                },
+            );
+            if let (Some(nodes), Some(palm)) = (look.rope(0, 1.0), palms[0]) {
+                let end = nodes.first().expect("a rope has nodes");
+                assert!(
+                    norm(sub(*end, palm)) < 0.03,
+                    "tick {tick}: rope end {end:?} vs palm {palm:?}"
+                );
+                tied += 1;
+            }
+        }
+        assert!(tied >= 3, "the rope was tied for {tied} ticks");
     }
 
     #[test]
@@ -720,7 +774,7 @@ mod tests {
                 live.spear_events(),
                 live.spear_view(),
                 app.fighter_views(),
-                &NO_PELVIS,
+                Ties::NONE,
             );
         }
         assert!(look.draws(1.0).is_empty());

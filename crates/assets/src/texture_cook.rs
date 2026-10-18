@@ -17,7 +17,7 @@ pub struct CookedImage {
     pub width: u32,
     /// Height in texels.
     pub height: u32,
-    /// Picked BC shape.
+    /// BC shape of the slot.
     pub format: BcFormat,
     /// Block bytes in row-major order.
     pub blocks: Vec<u8>,
@@ -27,14 +27,12 @@ pub struct CookedImage {
     pub digest: u64,
 }
 
-/// Pick the BC shape for slots whose shape never depends on alpha:
-/// normals to BC5, metallic-roughness to BC4. BaseColor returns `None`
-/// so the caller fuses its alpha scan into the BC1 encode attempt.
-fn pick_format(slot: BcSlot) -> Option<BcFormat> {
+/// The BC shape of a slot: normals to BC5 (two channels, Z rebuilt in the shader), colour and
+/// metallic-roughness to BC7 (RGBA, one block shape for opaque and transparent texels alike).
+fn pick_format(slot: BcSlot) -> BcFormat {
     match slot {
-        BcSlot::BaseColor => None,
-        BcSlot::Normal => Some(BcFormat::Bc5),
-        BcSlot::MetallicRoughness => Some(BcFormat::Bc4),
+        BcSlot::Normal => BcFormat::Bc5,
+        BcSlot::BaseColor | BcSlot::MetallicRoughness => BcFormat::Bc7,
     }
 }
 
@@ -51,11 +49,7 @@ fn emit_ktx2(width: u32, height: u32, blocks: &[u8]) -> Vec<u8> {
 }
 
 /// Cook RGBA (`width * height * 4`, row-major) by slot into blocks plus KTX2.
-/// Loud on empty, bad dims, length mismatch, oversize, or BC1 alpha.
-/// BaseColor picks its shape with a fused scan: try BC1 first (its
-/// per-block alpha check is the scan), fall back to BC7 only on
-/// transparent texels, so opaque images encode once with byte-identical
-/// bytes to the old pre-scan pick.
+/// Loud on empty, bad dims, length mismatch or oversize.
 pub fn cook_image(
     rgba: &[u8],
     width: u32,
@@ -65,45 +59,16 @@ pub fn cook_image(
     if rgba.is_empty() {
         return Err(BcError::EmptyImage);
     }
-    if let Some(format) = pick_format(slot) {
-        let encoded = encode_image(rgba, width, height, format, slot)?;
-        let ktx2 = emit_ktx2(width, height, &encoded.bytes);
-        let digest = content_hash(&ktx2);
-        return Ok(CookedImage {
-            width,
-            height,
-            format,
-            blocks: encoded.bytes,
-            ktx2,
-            digest,
-        });
-    }
-    match encode_image(rgba, width, height, BcFormat::Bc1, slot) {
-        Ok(encoded) => {
-            let ktx2 = emit_ktx2(width, height, &encoded.bytes);
-            let digest = content_hash(&ktx2);
-            Ok(CookedImage {
-                width,
-                height,
-                format: BcFormat::Bc1,
-                blocks: encoded.bytes,
-                ktx2,
-                digest,
-            })
-        }
-        Err(BcError::AlphaInBc1 { .. }) => {
-            let encoded = encode_image(rgba, width, height, BcFormat::Bc7, slot)?;
-            let ktx2 = emit_ktx2(width, height, &encoded.bytes);
-            let digest = content_hash(&ktx2);
-            Ok(CookedImage {
-                width,
-                height,
-                format: BcFormat::Bc7,
-                blocks: encoded.bytes,
-                ktx2,
-                digest,
-            })
-        }
-        Err(other) => Err(other),
-    }
+    let format = pick_format(slot);
+    let encoded = encode_image(rgba, width, height, format, slot)?;
+    let ktx2 = emit_ktx2(width, height, &encoded.bytes);
+    let digest = content_hash(&ktx2);
+    Ok(CookedImage {
+        width,
+        height,
+        format,
+        blocks: encoded.bytes,
+        ktx2,
+        digest,
+    })
 }

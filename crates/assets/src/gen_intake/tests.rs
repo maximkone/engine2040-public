@@ -398,11 +398,55 @@ fn the_folder_cache_survives_a_new_process() {
     assert_eq!(hit.cook_digest, made.cook_digest);
     // A bundle damaged on disk is a miss, never a wrong answer.
     let key = cache_key(&request(&[], &p, &[]));
-    std::fs::write(dir.join(format!("{key}.bundle")), b"damaged").expect("damage");
+    std::fs::write(dir.join(&key).join("bundle"), b"damaged").expect("damage");
     assert!(IntakeCache::open(&dir)
         .expect("reopen")
         .lookup(&request(&[], &p, &[]))
         .is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cook_full_hash_a_kill_between_files_leaves_exactly_one_entry_to_redo() {
+    let dir = temp_dir("kill");
+    let glb = generated_glb(false);
+    let (p, mut other) = (provenance(), provenance());
+    other.seed += 1;
+    let (keep, kill) = (request(&glb, &p, &[]), request(&glb, &other, &[]));
+    let mut cache = IntakeCache::open(&dir).expect("open");
+    intake(&keep, &mut cache).expect("cook");
+    let made = intake(&kill, &mut cache).expect("cook");
+    // A process killed after the first file of the second entry: its staging
+    // folder holds the bundle alone and nothing was committed.
+    let (entry, staging) = (
+        dir.join(&made.cache_key),
+        dir.join(format!("{}.tmp", made.cache_key)),
+    );
+    std::fs::remove_dir_all(&entry).expect("uncommit");
+    std::fs::create_dir(&staging).expect("staging");
+    std::fs::write(staging.join("bundle"), &made.bundle).expect("file 1");
+
+    let cache = IntakeCache::open(&dir).expect("reopen");
+    assert!(
+        cache.lookup(&keep).is_some(),
+        "the finished entry stays a hit"
+    );
+    assert!(
+        cache.lookup(&kill).is_none(),
+        "the half-written entry is a miss"
+    );
+    let mut cache = cache;
+    let redone = intake(&kill, &mut cache).expect("redo");
+    assert!(!redone.cache_hit, "exactly that entry is cooked again");
+    assert_eq!(redone.bundle, made.bundle, "bundle bytes x2");
+    assert!(
+        !staging.exists(),
+        "the commit rename consumed the staging folder"
+    );
+    assert!(IntakeCache::open(&dir)
+        .expect("reopen")
+        .lookup(&kill)
+        .is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

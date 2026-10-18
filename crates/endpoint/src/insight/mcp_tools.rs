@@ -10,7 +10,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
 use super::graph::{asset_refs, callers_of};
-use super::index::{error_code, InsightError};
+use super::index::{error_code, ApiItem, InsightError};
 use super::search::{self, SEARCH_DEFAULT_LIMIT};
 use crate::mcp::{McpServer, McpToolError, ServerState};
 
@@ -159,18 +159,20 @@ impl ServerState {
     /// Full entry for one path: signature, docs, units, file owner and
     /// callers. Unknown paths fail typed with a search-first recovery.
     /// Rival-door aliases (`godot_game_time` etc.) resolve to their
-    /// play-pack verb first, so another engine's door names still land.
+    /// play-pack verb first, so another engine's door names still land;
+    /// client-shaped tool names (`play_run`, `e2040_play_step`) resolve to
+    /// the door name.
     pub fn api_describe(&self, args: &ApiDescribeArgs) -> Result<ApiDescribeOutput, McpToolError> {
         // LF16 rival-door parity: resolve through the play-pack table before
         // the index lookup. Unknown rivals fall through to the typed refusal.
         let lookup: &str =
             crate::packs::play::verb_for_rival(&args.path).unwrap_or(args.path.as_str());
-        let item = self.insight.get(lookup).ok_or_else(|| {
+        let item = self.item_for(lookup).ok_or_else(|| {
             tool_error(&InsightError::UnknownPath {
                 path: args.path.clone(),
             })
         })?;
-        let callers = callers_of(&self.insight, lookup).map_err(|error| tool_error(&error))?;
+        let callers = callers_of(&self.insight, &item.path).map_err(|error| tool_error(&error))?;
         Ok(ApiDescribeOutput {
             path: item.path.clone(),
             kind: item.kind.as_str().to_owned(),
@@ -181,6 +183,17 @@ impl ServerState {
             owner: item.owner.clone(),
             callers,
         })
+    }
+
+    /// The indexed item for `path`, else for the door name a client shows it
+    /// under: clients list `play.run` as `play_run` or `e2040_play_run`, and a
+    /// dotted name such as `wound.table.get` may carry its dots as underscores.
+    fn item_for(&self, path: &str) -> Option<&ApiItem> {
+        let bare = path.strip_prefix("e2040_").unwrap_or(path);
+        let first = bare.replacen('_', ".", 1);
+        let every = bare.replace('_', ".");
+        let names = [path, bare, first.as_str(), every.as_str()];
+        names.iter().find_map(|name| self.insight.get(name))
     }
 
     /// Reverse lookup: items whose file mentions the path's name.
@@ -475,5 +488,53 @@ mod tests {
         )
         .expect_err("unknown rival must fail");
         assert_eq!(unknown.code, "unknown_path");
+    }
+
+    /// PB62 (PLAYTEST62 bug 4): a client that shows the play tools as
+    /// `play_run` and `play_step` searches and describes them by those names.
+    #[test]
+    fn play_run_and_play_step_are_found_and_described_under_client_names() {
+        let server = McpServer::new(7, Capability::unrestricted(7));
+        let describe = |path: &str| {
+            ApiDescribeTool::invoke(
+                &server,
+                ApiDescribeArgs {
+                    path: path.to_owned(),
+                },
+            )
+        };
+        for (client, door, arg) in [
+            ("play_run", "play.run", "action:string!"),
+            ("play_step", "play.step", "upto_tick:integer"),
+        ] {
+            let found = ApiSearchTool::invoke(
+                &server,
+                ApiSearchArgs {
+                    query: client.to_owned(),
+                    limit: None,
+                },
+            )
+            .expect("search serves");
+            assert!(
+                found.hits.iter().any(|hit| hit.path == door),
+                "{client}: {:?}",
+                found.hits
+            );
+            let entry = describe(door).expect("the door name describes");
+            assert!(entry.docs.contains(arg), "{door}: {}", entry.docs);
+            for alias in [client.to_owned(), format!("e2040_{client}")] {
+                let same = describe(&alias).unwrap_or_else(|error| panic!("{alias}: {error}"));
+                assert_eq!(same, entry, "{alias} reads as {door}");
+            }
+        }
+        // A dotted door name with an underscore in it still resolves by its underscore form.
+        assert_eq!(
+            describe("e2040_play_step_until").expect("resolves").path,
+            "play.step_until"
+        );
+        assert_eq!(
+            describe("play_nothing").expect_err("unknown").code,
+            "unknown_path"
+        );
     }
 }

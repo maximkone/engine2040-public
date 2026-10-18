@@ -1145,6 +1145,12 @@ impl World {
             }
         }
     }
+    /// [`World::integrate`] for a step given in whole nanoseconds, the
+    /// integer truth of the ns schedule path: the step turns into float
+    /// seconds here, once, through [`step_secs`](crate::schedule::step_secs).
+    pub fn integrate_ns(&mut self, dt_ns: u64) {
+        self.integrate(crate::schedule::step_secs(dt_ns));
+    }
     /// [`World::integrate`] over one P+V table.
     fn integrate_table(t: &mut Table, tick: Tick, dt: f32) {
         let n = t.entities.len();

@@ -377,6 +377,18 @@ pub(crate) fn cost_capped(
 /// replacement keeps the lowest index on ties, so the pick equals a full
 /// brute-force scan while the receipt records the skipped work.
 pub fn search(db: &MotionDb, query: &Query) -> Result<(MatchResult, SearchReceipt), MatchError> {
+    search_penalized(db, query, |_| 0)
+}
+
+/// [`search`] with `penalty` added to the cost of every entry (style and
+/// terrain dials, see `motion_style`). Same scan order, same bound and the
+/// same ties: a penalty of zero everywhere is `search` exactly. Penalties are
+/// non-negative and at most [`PENALTY_MAX`].
+pub(crate) fn search_penalized(
+    db: &MotionDb,
+    query: &Query,
+    penalty: impl Fn(&Entry) -> i64,
+) -> Result<(MatchResult, SearchReceipt), MatchError> {
     if db.entries.is_empty() {
         return Err(MatchError::EmptyDatabase);
     }
@@ -387,34 +399,34 @@ pub fn search(db: &MotionDb, query: &Query) -> Result<(MatchResult, SearchReceip
     };
     let mut best = i64::MAX;
     let mut best_index = 0usize;
-    for &packed in &db.buckets[usize::from(query.contact)] {
-        let to = packed as usize;
-        match cost_capped(db, &db.entries[to], to, query, best, &mut receipt) {
+    let mut consider = |to: usize, entry: &Entry, receipt: &mut SearchReceipt| {
+        let extra = penalty(entry);
+        let capped = if extra >= best {
+            None
+        } else {
+            cost_capped(db, entry, to, query, best - extra, receipt)
+        };
+        match capped {
             Some(cost) => {
-                if cost < best {
-                    best = cost;
+                if cost + extra < best {
+                    best = cost + extra;
                     best_index = to;
                 }
                 receipt.full_evals += 1;
             }
             None => receipt.early_cuts += 1,
         }
+    };
+    for &packed in &db.buckets[usize::from(query.contact)] {
+        let to = packed as usize;
+        consider(to, &db.entries[to], &mut receipt);
     }
     for (to, entry) in db.entries.iter().enumerate() {
         if entry.contact == query.contact {
             receipt.reuse_skips += 1;
             continue;
         }
-        match cost_capped(db, entry, to, query, best, &mut receipt) {
-            Some(cost) => {
-                if cost < best {
-                    best = cost;
-                    best_index = to;
-                }
-                receipt.full_evals += 1;
-            }
-            None => receipt.early_cuts += 1,
-        }
+        consider(to, entry, &mut receipt);
     }
     let winner = &db.entries[best_index];
     Ok((

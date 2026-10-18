@@ -538,6 +538,7 @@ mod tests {
             uploaded_digest: crate::fighter_look::empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: crate::fighter_look::ragdoll_look::RagdollLook::empty(),
+            hero: 0,
         }
     }
 

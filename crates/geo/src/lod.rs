@@ -8,9 +8,11 @@
 
 use std::collections::BTreeMap;
 
+use engine_core::checked::f64_from_u64;
+use engine_core::Rng;
 use meshopt::{simplify_with_attributes_and_locks, SimplifyOptions, VertexDataAdapter};
 
-use crate::mesh::{ix, scaled_count, to_u32, GeoError, GeoMesh};
+use crate::mesh::{ix, narrow, scaled_count, to_u32, triangle_area, GeoError, GeoMesh};
 
 /// Options for one simplification.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -274,6 +276,47 @@ pub fn chain(
         .collect()
 }
 
+/// A draw in `0.0..1.0` from the top 53 bits of the stream.
+fn unit_draw(rng: &mut Rng) -> f64 {
+    f64_from_u64(rng.next_u64() >> 11) / 9_007_199_254_740_992.0
+}
+
+/// How far a reduced mesh strays from its original: `samples` deterministic points on
+/// `reduced` (triangle chosen by area, uniform barycentric draw, `Rng::new(2040)`), each
+/// measured to the nearest point of `original` by brute force. Returns the largest distance
+/// over the bounding-box diagonal of `original`; 0.0 when `reduced` has no area to sample.
+#[must_use]
+pub fn sampled_error(original: &GeoMesh, reduced: &GeoMesh, samples: usize) -> f32 {
+    let corner = |i: u32| reduced.positions[ix(i)].map(f64::from);
+    let mut cumulative = Vec::new();
+    let mut total = 0.0_f64;
+    for t in reduced.indices.chunks_exact(3) {
+        let (a, b, c) = (corner(t[0]), corner(t[1]), corner(t[2]));
+        total += triangle_area(a, b, c);
+        cumulative.push(total);
+    }
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let mut rng = Rng::new(2040);
+    let mut worst = 0.0_f64;
+    for _ in 0..samples {
+        let pick = unit_draw(&mut rng) * total;
+        let tri = cumulative
+            .partition_point(|&c| c <= pick)
+            .min(cumulative.len() - 1);
+        let (mut s, mut t) = (unit_draw(&mut rng), unit_draw(&mut rng));
+        if s + t > 1.0 {
+            (s, t) = (1.0 - s, 1.0 - t);
+        }
+        let ids = &reduced.indices[3 * tri..3 * tri + 3];
+        let (a, b, c) = (corner(ids[0]), corner(ids[1]), corner(ids[2]));
+        let p = [0, 1, 2].map(|k| a[k] + s * (b[k] - a[k]) + t * (c[k] - a[k]));
+        worst = worst.max(original.surface_distance(p));
+    }
+    narrow(worst / original.diagonal().max(f64::MIN_POSITIVE))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +406,31 @@ mod tests {
         let r2 = simplify(&sphere, &extra, 4, 2.0, &LodOptions::default()).unwrap();
         assert_eq!(r1, r2);
         assert!(r1.triangles_after < r1.triangles_before);
+    }
+
+    #[test]
+    fn sampled_error_of_a_mesh_against_itself_is_zero() {
+        let sphere = uv_sphere(1.0, 12, 16);
+        let e = sampled_error(&sphere, &sphere, 500);
+        assert!(e < 1e-6, "self error {e}");
+        // No area to sample, or no samples asked: nothing to measure.
+        assert_eq!(sampled_error(&sphere, &GeoMesh::default(), 500), 0.0);
+        assert_eq!(sampled_error(&sphere, &sphere, 0), 0.0);
+    }
+
+    #[test]
+    fn sampled_error_sees_a_shift_and_a_cut_and_repeats() {
+        let sphere = uv_sphere(1.0, 24, 32);
+        let diagonal = sphere.diagonal();
+        // The same sphere moved 0.1 along X: nearest-point error is just under 0.1.
+        let moved = sphere.placed([1.0; 3], 0, [0.1, 0.0, 0.0]);
+        let shift = f64::from(sampled_error(&sphere, &moved, 2000)) * diagonal;
+        assert!((0.08..=0.1001).contains(&shift), "shift error {shift}");
+        // A halved sphere strays by something small but not nothing, and the number repeats.
+        let half = simplify(&sphere, &[], 0, 0.0, &LodOptions::default()).unwrap();
+        let cut = sampled_error(&sphere, &half.mesh, 2000);
+        assert!(cut > 0.0 && cut < 0.05, "cut error {cut}");
+        assert_eq!(cut, sampled_error(&sphere, &half.mesh, 2000));
     }
 
     #[test]

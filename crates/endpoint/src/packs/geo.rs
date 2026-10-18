@@ -9,7 +9,8 @@
 //! scene records which recipe produced the mesh and undo removes it.
 //!
 //! Scope: the source is a `cube` or `plane`; `scale` and `select` are plain
-//! Rust here. The modeling ops (`boolean`, `unwrap`, `lod`, `collision`) call
+//! Rust here. The modeling ops (`boolean`, `unwrap`, `lod`, `collision`,
+//! `mirror`, `array`, `weld`, `flip`) call
 //! the cook-time `engine-geo` crate through the `kernel` module, which exists
 //! only when engine-endpoint is built with its off-by-default `geo` feature;
 //! the default build has no geo crate and no C++ compiler step, and without
@@ -54,6 +55,10 @@ pub const MAX_SOURCE_SIZE_M: f32 = 1000.0;
 pub const MAX_MODEL_TRIS: usize = 50_000;
 /// Most V-HACD parts one `collision` op may ask for.
 pub const MAX_COLLISION_PARTS: u32 = 32;
+/// Most copies one `array` op may ask for.
+pub const MAX_ARRAY_COPIES: u32 = 64;
+/// Largest `weld` distance in meters.
+pub const MAX_WELD_M: f32 = 0.1;
 
 /// Source shape of a recipe.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -195,6 +200,29 @@ pub enum GeoOp {
         /// Most parts, 1..=32.
         max_hulls: u32,
     },
+    /// Add the mirror image through the origin plane of one axis. Needs the `geo` feature;
+    /// before any select.
+    Mirror {
+        /// `x`, `y` or `z`.
+        axis: String,
+    },
+    /// Repeat the mesh, copy `k` moved by `k` times `offset`. Needs the `geo` feature; before
+    /// any select.
+    Array {
+        /// Copies, 1..=64 (the result stays within the triangle cap).
+        count: u32,
+        /// Step between copies `[x, y, z]` in meters, each within 1000.
+        offset: [f32; 3],
+    },
+    /// Merge vertices closer than `epsilon`; triangles that collapse are dropped. Needs the
+    /// `geo` feature; before any select.
+    Weld {
+        /// Distance in meters, in (0, 0.1].
+        epsilon: f32,
+    },
+    /// Reverse every winding, so inside becomes outside. Needs the `geo` feature; before any
+    /// select.
+    Flip,
 }
 
 /// A typed recipe: seed, source, ops.
@@ -380,6 +408,27 @@ mod kernel {
         _: u32,
         index: usize,
     ) -> Result<CollisionFacts, McpToolError> {
+        Err(feature_off(index))
+    }
+
+    pub(super) fn mirror(_: &mut Mesh, _: &str, index: usize) -> Result<(), McpToolError> {
+        Err(feature_off(index))
+    }
+
+    pub(super) fn array(
+        _: &mut Mesh,
+        _: u32,
+        _: [f32; 3],
+        index: usize,
+    ) -> Result<(), McpToolError> {
+        Err(feature_off(index))
+    }
+
+    pub(super) fn weld(_: &mut Mesh, _: f32, index: usize) -> Result<(), McpToolError> {
+        Err(feature_off(index))
+    }
+
+    pub(super) fn flip(_: &mut Mesh, index: usize) -> Result<(), McpToolError> {
         Err(feature_off(index))
     }
 }
@@ -640,7 +689,16 @@ struct CollisionFacts {
 impl GeoOp {
     /// Ops that rebuild the faces, so earlier selections would name the wrong ones.
     fn changes_topology(&self) -> bool {
-        matches!(self, Self::Boolean { .. } | Self::Unwrap | Self::Lod { .. })
+        matches!(
+            self,
+            Self::Boolean { .. }
+                | Self::Unwrap
+                | Self::Lod { .. }
+                | Self::Mirror { .. }
+                | Self::Array { .. }
+                | Self::Weld { .. }
+                | Self::Flip
+        )
     }
 }
 
@@ -694,6 +752,10 @@ pub fn evaluate(recipe: &GeoRecipe) -> Result<GeoPreviewOutput, McpToolError> {
             GeoOp::Collision { max_hulls } => {
                 facts.collision = Some(kernel::collision(&mesh, *max_hulls, index)?);
             }
+            GeoOp::Mirror { axis } => kernel::mirror(&mut mesh, axis, index)?,
+            GeoOp::Array { count, offset } => kernel::array(&mut mesh, *count, *offset, index)?,
+            GeoOp::Weld { epsilon } => kernel::weld(&mut mesh, *epsilon, index)?,
+            GeoOp::Flip => kernel::flip(&mut mesh, index)?,
         }
     }
     let (lo, hi) = bounds_of(&mesh);
@@ -798,8 +860,8 @@ pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "geometry recipes: preview and apply a typed op list plus seed with predicate face \
-         picks; ops scale and select, plus boolean, unwrap, lod and collision when the \
-         build has the geo feature",
+         picks; ops scale and select, plus boolean, unwrap, lod, collision, mirror, array, \
+         weld and flip when the build has the geo feature",
         false,
     );
     pack.add(VerbSpec::of::<GeoPreviewTool>(
@@ -1160,6 +1222,44 @@ mod tests {
         assert!(unknown.is_err());
     }
 
+    #[test]
+    fn json_parses_mirror_array_weld_and_flip() {
+        let recipe: GeoRecipe = rmcp::serde_json::from_value(json!({
+            "source": {"primitive": "cube", "size": [2, 2, 2]},
+            "ops": [
+                {"op": "mirror", "axis": "x"},
+                {"op": "array", "count": 3, "offset": [3, 0, 0]},
+                {"op": "weld", "epsilon": 0.25},
+                {"op": "flip"}
+            ]
+        }))
+        .expect("plain JSON parses");
+        assert_eq!(
+            recipe.ops,
+            vec![
+                GeoOp::Mirror {
+                    axis: "x".to_owned()
+                },
+                GeoOp::Array {
+                    count: 3,
+                    offset: [3.0, 0.0, 0.0]
+                },
+                GeoOp::Weld { epsilon: 0.25 },
+                GeoOp::Flip,
+            ]
+        );
+        // Each one changes the faces, so a select in front of it is refused in any build.
+        for op in recipe.ops {
+            let error = evaluate(&cube([2.0; 3], vec![top(), op])).expect_err("refused");
+            assert_eq!(error.code, "bad_recipe");
+            assert!(
+                error.message.contains("move every select"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
     fn hole() -> GeoOp {
         GeoOp::Boolean {
             cutter: GeoCutter {
@@ -1182,6 +1282,10 @@ mod tests {
             GeoOp::Unwrap,
             GeoOp::Lod { keep: 0.5 },
             GeoOp::Collision { max_hulls: 4 },
+            mirror("x"),
+            array(2),
+            GeoOp::Weld { epsilon: 0.001 },
+            GeoOp::Flip,
         ] {
             let error = evaluate(&tower(vec![op])).expect_err("refused");
             assert_eq!(error.code, "feature_off");
@@ -1289,6 +1393,87 @@ mod tests {
             kind: BoolKind::Difference,
         }]);
         assert!(nothing.message.contains("no faces"), "{}", nothing.message);
+    }
+
+    fn array(count: u32) -> GeoOp {
+        GeoOp::Array {
+            count,
+            offset: [3.0, 0.0, 0.0],
+        }
+    }
+
+    fn mirror(axis: &str) -> GeoOp {
+        GeoOp::Mirror {
+            axis: axis.to_owned(),
+        }
+    }
+
+    /// Two cubes 3 m apart, mirrored through x = 0: four cubes, no shared corners.
+    #[cfg(feature = "geo")]
+    #[test]
+    fn array_then_mirror_numbers() {
+        let out = evaluate(&tower(vec![array(2), mirror("x")])).expect("evaluates");
+        assert_eq!((out.faces, out.vertices), (48, 32));
+        assert_eq!(out.bounds_min, [-4.0, -1.0, -1.0]);
+        assert_eq!(out.bounds_max, [4.0, 1.0, 1.0]);
+        assert_eq!(
+            out,
+            evaluate(&tower(vec![array(2), mirror("x")])).expect("again")
+        );
+    }
+
+    /// Three cubes with a 1 m gap: a 1 mm weld has nothing to merge.
+    #[cfg(feature = "geo")]
+    #[test]
+    fn weld_after_array_keeps_distinct_corners() {
+        let welded =
+            evaluate(&tower(vec![array(3), GeoOp::Weld { epsilon: 0.001 }])).expect("evaluates");
+        assert_eq!((welded.vertices, welded.faces), (24, 36));
+        // The widest legal weld still keeps them: the corners sit 2 m or more apart.
+        let wide = evaluate(&tower(vec![array(3), GeoOp::Weld { epsilon: 0.1 }])).expect("wide");
+        assert_eq!(wide.vertices, 24);
+    }
+
+    #[cfg(feature = "geo")]
+    #[test]
+    fn flip_moves_the_digest_and_twice_restores_it() {
+        let plain = evaluate(&tower(vec![])).expect("plain");
+        let once = evaluate(&tower(vec![GeoOp::Flip])).expect("once");
+        let twice = evaluate(&tower(vec![GeoOp::Flip, GeoOp::Flip])).expect("twice");
+        assert_ne!(once.digest, plain.digest);
+        assert_eq!(twice.digest, plain.digest);
+        assert_eq!((once.vertices, once.faces), (plain.vertices, plain.faces));
+    }
+
+    #[cfg(feature = "geo")]
+    #[test]
+    fn bad_numbers_name_the_legal_values() {
+        let refuse_all = |ops| evaluate(&tower(ops)).expect_err("refused");
+        let refuse = |op| refuse_all(vec![op]);
+        for count in [0, 65] {
+            let error = refuse(array(count));
+            assert_eq!(error.code, "bad_recipe");
+            assert!(error.message.contains("1..=64"), "{}", error.message);
+        }
+        for epsilon in [0.0, 0.5, f32::NAN] {
+            let error = refuse(GeoOp::Weld { epsilon });
+            assert_eq!(error.code, "bad_recipe");
+            assert!(error.message.contains("(0, 0.1]"), "{}", error.message);
+        }
+        let axis = refuse(mirror("w"));
+        assert_eq!(axis.code, "bad_recipe");
+        assert!(axis.message.contains("x, y, z"), "{}", axis.message);
+        let offset = refuse(GeoOp::Array {
+            count: 2,
+            offset: [f32::INFINITY, 0.0, 0.0],
+        });
+        assert!(offset.message.contains("offset"), "{}", offset.message);
+        // 64 x 64 cubes is 49152 triangles and fits; one more doubling passes the cap.
+        let fits = evaluate(&tower(vec![array(64), array(64)])).expect("49152 triangles fit");
+        assert_eq!(fits.faces, 64 * 64 * 12);
+        let big = refuse_all(vec![array(64), array(64), array(2)]);
+        assert_eq!(big.code, "too_big");
+        assert!(big.message.contains("50000"), "{}", big.message);
     }
 
     #[cfg(feature = "geo")]

@@ -350,4 +350,102 @@ mod tests {
             assert_eq!(ground_below(&actors, x, z, from), want, "case {case}");
         }
     }
+
+    /// SPX5: travel to the stop, then read the floor under the mover there.
+    #[test]
+    fn travel_ground_follow_a_mover_to_its_stop_and_down() {
+        let mut rng = Rng::new(0x7a6e);
+        for case in 0..50 {
+            let mut actors: Vec<Actor> = (0..6)
+                .map(|i| {
+                    let mut r = |m: u32| (rng.next_u32() % m) as i32;
+                    let size = [(2 + r(8)) * 2, (2 + r(8)) * 2, (2 + r(8)) * 2];
+                    actor(i + 1, [r(50) - 10, r(70), r(50) - 10], size)
+                })
+                .collect();
+            actors[0] = actor(1, [-10, 60, 20], [20, 20, 20]);
+            let range = 20 + (rng.next_u32() % 60) as i32;
+            let east = Dir::parse("+x").unwrap();
+            let got = slide(&actors, 1, east, range).unwrap();
+            let (free, blocker, already) = march(&actors, 1, east, range);
+            assert_eq!(
+                (got.free_cm, got.capped),
+                (free, blocker.is_none()),
+                "case {case}"
+            );
+            assert_eq!(got.already_blocked, already, "case {case}");
+            // Move the mover to its stop; the floor under its centre is the
+            // highest top at or below its bottom, found by a 1 cm descent.
+            let stop = actors[0].x + got.free_cm as f32 / 100.0;
+            let (cx, cz) = (crate::to_cm(stop), crate::to_cm(actors[0].z));
+            let bottom = 60;
+            let want = (-1..=bottom).rev().find_map(|y| {
+                actors
+                    .iter()
+                    .skip(1)
+                    .filter(|a| a.physical)
+                    .filter_map(actor_box)
+                    .find(|b| {
+                        b.max_y == y
+                            && b.min_x <= cx
+                            && cx <= b.max_x
+                            && b.min_z <= cz
+                            && cz <= b.max_z
+                    })
+                    .map(|b| (y, b.id))
+            });
+            assert_eq!(
+                ground_below(&actors[1..], cx, cz, bottom),
+                want,
+                "case {case}"
+            );
+        }
+        // A face touch is not a hit and a child of the mover never blocks.
+        let mover = actor(1, [0, 0, 0], [100, 100, 100]);
+        let mut child = actor(3, [150, 0, 0], [100, 100, 100]);
+        child.parent = Some(1);
+        let flush = actor(2, [100, 0, 100], [100, 100, 100]);
+        let east = Dir::parse("+x").unwrap();
+        let clear = slide(&[mover, flush, child], 1, east, 400).unwrap();
+        assert!(clear.capped && clear.free_cm == 400 && clear.blocker.is_none());
+    }
+
+    #[test]
+    #[ignore = "timing: run under --perf in release"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "test-only timing, never the tick"
+    )]
+    fn travel_ground_budget_under_a_fifth_of_a_ms() {
+        let mut rng = Rng::new(0x7a6f);
+        let actors: Vec<Actor> = (0..40)
+            .map(|i| {
+                let mut r = |m: u32| (rng.next_u32() % m) as i32;
+                actor(
+                    i + 1,
+                    [r(80), r(30), r(80)],
+                    [(1 + r(8)) * 2, (1 + r(8)) * 2, (1 + r(8)) * 2],
+                )
+            })
+            .collect();
+        let east = Dir::parse("+x").unwrap();
+        let queries = 2_000u32;
+        let start = std::time::Instant::now();
+        let mut free = 0i64;
+        for n in 0..queries {
+            free += i64::from(slide(&actors, 1 + n % 40, east, 300).unwrap().free_cm);
+            let (x, z) = (
+                i32::try_from(n % 80).unwrap(),
+                i32::try_from(n * 7 % 80).unwrap(),
+            );
+            free += ground_below(&actors, x, z, 40).map_or(0, |(y, _)| i64::from(y));
+        }
+        let per_query_us = start.elapsed().as_secs_f64() / f64::from(2 * queries) * 1e6;
+        println!("travel_ground: {per_query_us:.3} us per query (checksum {free})");
+        assert!(
+            per_query_us <= 200.0,
+            "query budget 0.2 ms, got {per_query_us:.3} us"
+        );
+    }
 }

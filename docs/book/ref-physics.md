@@ -9,7 +9,7 @@ seconds, Y-up and unit quaternions `[x, y, z, w]`, unless a name says `_mm` (int
 | Item | Value |
 |---|---|
 | Default build | std-only. |
-| Feature `rapier` | adds `rapier3d` and `engine-anim`; gates `controller`, `powered`, `ragdoll`, `ragdoll_tape`, `rapier`, and the servo half of `balance`. |
+| Feature `rapier` | adds `rapier3d` and `engine-anim`; gates `controller`, `powered`, `ragdoll`, `ragdoll_tape`, `clinch`, `rapier`, and the servo half of `balance`. |
 | rapier3d | `default-features = false`, `["dim3", "f32", "std", "enhanced-determinism"]` (root `Cargo.toml:193`). No SIMD, no parallel. |
 | Test (default) | `node tools/gh-check.mjs cargo test -p engine-physics --lib` |
 | Test (rapier) | `node tools/gh-check.mjs cargo test -p engine-physics --features rapier --lib` |
@@ -25,6 +25,8 @@ seconds, Y-up and unit quaternions `[x, y, z, w]`, unless a name says `_mm` (int
 | `material` | none | integer thousandths | no (table) | `engine-physfx` |
 | `collider`, `query`, `layers` | none | `f32` in, `f64` math | no | `engine-arena` `kit_zone.rs`; `engine-endpoint` `packs/physics.rs` |
 | `cloth` | none | `f32` | never | none under `crates/` |
+| `clinch` | `rapier` | `f32` | never (client side) | `ragdoll_tape` clinch leg |
+| `articulated`, `door`, `stance` | none | integer (Q8 mm, decidegrees, mm) | yes once wired | none yet |
 | `islands` | none | `f32` words as bytes | via `rapier::World` | rapier snapshot |
 | `rapier`, `ragdoll`, `powered`, `pd`, `ragdoll_tape` | `rapier` | `f32`, quantized hash | yes, except `ragdoll_tape` (digest only) | `engine-proof` `ragdoll_matrix.rs`; `engine-physfx` (`insert_joints`, `world_transforms`) |
 
@@ -395,6 +397,7 @@ Every refusal is typed and changes nothing: `rapier::Error`, `ragdoll::Error`, `
 | `controller2.rs`, `controller.rs`, `kcc.rs` | integer walker; Rapier capsule with autostep and tread gates (rapier); float KCC (no consumer) |
 | `balance.rs`, `stagger_memory.rs`, `limb.rs` | balance and gait (servo under rapier); pain, fatigue, injury; severed-limb pool |
 | `material.rs`, `collider.rs`, `query.rs`, `layers.rs`, `cloth.rs` | material table; `E2CC` reader; casts; layer table; presentation cloth |
+| `clinch.rs`, `articulated.rs`, `door.rs`, `stance.rs` | ragdoll parting pass (rapier); winch, rope and load graph; door states and outcome table; stance capsules, lean and weapon raise |
 | `rapier.rs`, `ragdoll.rs`, `powered.rs`, `pd.rs`, `ragdoll_tape.rs`, `islands.rs` | Rapier world, ragdoll, powered ragdoll, PD law, tape, island snapshot (all rapier except `pd` and `islands`) |
-| `tests/`, `tests/it/` | integration legs: `balance_matrix`, `stagger_memory`, `ragdoll_tape`, `pd_drive`, `trace_snapshot` |
+| `tests/`, `tests/it/` | integration legs: `balance_matrix`, `stagger_memory`, `ragdoll_tape`, `pd_drive`, `oracle` (50-pose servo, contact and limit report), `trace_snapshot` |
 | `Cargo.toml` | `rapier` feature |

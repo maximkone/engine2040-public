@@ -61,6 +61,9 @@ pub struct Presenter {
     pub(crate) instance: Option<wgpu::Instance>,
     pub(crate) adapter_name: String,
     pub(crate) adapter_driver: String,
+    /// How this adapter was picked and whether that was a fallback. A caller
+    /// that opened the device itself reports source `caller`.
+    pub(crate) backend_selection: crate::adapter::BackendSelection,
     pub(crate) forward_layout: wgpu::BindGroupLayout,
     pub(crate) forward_hdr: wgpu::RenderPipeline,
     /// 4x MSAA forward pipeline for the on path: same shader plus layout
@@ -1145,6 +1148,9 @@ impl Presenter {
             instance: None,
             adapter_name: info.name.clone(),
             adapter_driver: format!("{} {}", info.driver, info.driver_info),
+            backend_selection: crate::adapter::BackendSelection::caller_opened(
+                crate::presenter_pick::summary_of(&info),
+            ),
             forward_layout,
             forward_hdr,
             forward_hdr_msaa,
@@ -1198,15 +1204,16 @@ impl Presenter {
         // the driver's power-preference hint, so an Optimus laptop never
         // lands on the Intel adapter and the CPU rasterizer fails loudly
         // (NoAdapter) unless E2040_ALLOW_SOFTWARE=1.
-        let want = crate::adapter::choice_from_env();
-        let adapter = pollster::block_on(crate::presenter_pick::pick_adapter(
+        let (adapter, selection) = pollster::block_on(crate::presenter_pick::pick_adapter(
             &instance,
             crate::backend::wgpu_backends(pick.primary),
-            &want,
+            &crate::adapter::SelectionRequest::from_env(),
         ))
         .map_err(|_| PresentError::NoAdapter)?;
         let (device, queue) = Self::request_device(&adapter)?;
-        Self::init_offscreen_from_device(&adapter, device, queue)
+        let mut presenter = Self::init_offscreen_from_device(&adapter, device, queue)?;
+        presenter.backend_selection = selection;
+        Ok(presenter)
     }
 
     /// Open the device and queue on `adapter` (see [`Self::device_descriptor`]).
@@ -1237,7 +1244,7 @@ impl Presenter {
         // adapters so the env choice wins over the driver's hint.
         let (bchoice, _) = crate::backend::resolve_from_env(None);
         let bp = crate::backend::pick_backend(bchoice, None);
-        let adapter = Self::pick_surface_adapter(
+        let (adapter, selection) = Self::pick_surface_adapter(
             instance,
             &surface,
             crate::backend::wgpu_backends(bp.primary),
@@ -1247,6 +1254,7 @@ impl Presenter {
         // EG13: the adapter owns the MSAA count; read its 4x support once.
         let support = Self::msaa_support_for(&adapter);
         let mut presenter = Self::build(device, queue, info, support)?;
+        presenter.backend_selection = selection;
         presenter.attach_surface(instance, surface, width, height)?;
         Ok(presenter)
     }
@@ -1365,21 +1373,22 @@ impl Presenter {
         let (bchoice, _) = crate::backend::resolve_from_env(None);
         let bp = crate::backend::pick_backend(bchoice, None);
         Self::pick_surface_adapter(instance, surface, crate::backend::wgpu_backends(bp.primary))
+            .map(|(adapter, _)| adapter)
     }
 
     /// Enumerate `instance`, keep the surface-compatible adapters and
     /// rank-pick the `E2040_ADAPTER` choice through
-    /// [`crate::adapter::choose_compatible`]. Cold path only; the pick
-    /// never falls back silently: an empty enumerate, a software-only
-    /// list without opt-in, or no compatible adapter is `NoAdapter`.
+    /// [`crate::adapter::select`], which also reports how it was picked.
+    /// Cold path only; the pick never falls back silently: an empty
+    /// enumerate, a software-only list without opt-in, no compatible
+    /// adapter, or a fallback under `E2040_REQUIRE_GPU=1` is `NoAdapter`.
     /// Caller: `init_windowed` plus `compatible_adapter` (the GS6 surface
     /// sites); `init_offscreen` uses `pick_adapter` (no surface to test).
     fn pick_surface_adapter(
         instance: &wgpu::Instance,
         surface: &wgpu::Surface<'_>,
         backends: wgpu::Backends,
-    ) -> Result<wgpu::Adapter, PresentError> {
-        let want = crate::adapter::choice_from_env();
+    ) -> Result<(wgpu::Adapter, crate::adapter::BackendSelection), PresentError> {
         let adapters = pollster::block_on(instance.enumerate_adapters(backends));
         let list: Vec<crate::adapter::AdapterSummary> = adapters
             .iter()
@@ -1389,17 +1398,17 @@ impl Presenter {
             .iter()
             .map(|found| found.is_surface_supported(surface))
             .collect();
-        let index = crate::adapter::choose_compatible(
+        let (index, selection) = crate::adapter::select(
             &list,
-            &compat,
-            &want,
-            crate::adapter::allow_software(),
+            Some(&compat),
+            &crate::adapter::SelectionRequest::from_env(),
         )
         .map_err(|_| PresentError::NoAdapter)?;
-        adapters
+        let adapter = adapters
             .into_iter()
             .nth(index)
-            .ok_or(PresentError::NoAdapter)
+            .ok_or(PresentError::NoAdapter)?;
+        Ok((adapter, selection))
     }
 
     /// Resize the backing targets. Zero area suspends (minimize path) and
@@ -3013,10 +3022,10 @@ mod skin_window_tests {
         let (choice, _) = crate::backend::resolve_from_env(None);
         let pick = crate::backend::pick_backend(choice, None);
         let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
-        let adapter = pollster::block_on(crate::presenter_pick::pick_adapter(
+        let (adapter, _) = pollster::block_on(crate::presenter_pick::pick_adapter(
             &instance,
             crate::backend::wgpu_backends(pick.primary),
-            &crate::adapter::choice_from_env(),
+            &crate::adapter::SelectionRequest::from_env(),
         ))
         .expect("the adapter init_offscreen found is found again");
         let (device, queue) =
@@ -3026,6 +3035,16 @@ mod skin_window_tests {
             .expect("a caller-opened device builds a presenter");
         parts.resize(128, 128).expect("valid size applies");
         assert_eq!(parts.adapter_name(), classic.adapter_name());
+        assert_eq!(
+            parts.backend_selection().source,
+            crate::adapter::SelectionSource::Caller,
+            "a caller-opened device reports that the caller picked it"
+        );
+        assert_eq!(
+            parts.backend_selection().selected,
+            classic.backend_selection().selected,
+            "both routes name the same adapter"
+        );
         let key = MeshKey::new(0x5C00_0100, [0x44; 32]);
         for presenter in [&mut classic, &mut parts] {
             presenter
@@ -3105,13 +3124,25 @@ mod skin_window_tests {
         let gpu = pixels(&mut presenter, &list_of(&[gpu_key]));
         assert!(covered(&cpu) > 400, "the posed cube is on screen");
         assert!(covered(&gpu) > 400, "the GPU-skinned cube is on screen");
-        let (worst, over) = compare(&cpu, &gpu, 3);
-        eprintln!("skin window vs cpu: worst channel diff {worst}, pixels over 3: {over}");
+        // The golden rule (mean error and far-off share), with the far-off
+        // level this test always held: 3 levels, tighter than the default 12.
+        let rule = crate::pass_truth::frame_tolerance::FrameTolerance {
+            over_level: 3,
+            ..crate::pass_truth::frame_tolerance::FrameTolerance::GOLDEN
+        };
+        let verdict = crate::pass_truth::frame_tolerance::frames_match(&cpu, &gpu, &rule)
+            .expect("same-size RGBA frames compare");
+        eprintln!("skin window vs cpu: {}", verdict.describe());
         assert!(
-            over * 200 <= cpu.len() / 4,
-            "under 0.5% of pixels differ by more than 3 levels, got {over} (worst {worst})"
+            verdict.matches(),
+            "GPU skin drifts from the CPU skin: {}",
+            verdict.describe()
         );
-        assert!(worst <= 40, "no pixel is far off, got {worst}");
+        assert!(
+            verdict.worst <= 40,
+            "no pixel is far off, got {}",
+            verdict.worst
+        );
         // The joints drive the picture: identity matrices draw the bind
         // pose, which must differ from the posed frame on many pixels.
         presenter

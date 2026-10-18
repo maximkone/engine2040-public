@@ -234,7 +234,7 @@ mod tests {
     ];
 
     #[test]
-    fn eight_facings_by_four_words_land_in_the_named_half_plane() {
+    fn place_facing_eight_facings_by_four_words_land_in_the_named_half_plane() {
         for (k, f) in FACING.iter().enumerate() {
             let yaw = k as f32 * core::f32::consts::FRAC_PI_4;
             let actors = room(yaw);
@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn world_frame_front_means_north_and_an_impossible_gap_is_a_conflict() {
+    fn place_facing_world_frame_front_means_north_and_an_impossible_gap_is_a_conflict() {
         let actors = room(0.0);
         let north = DirWant {
             word: Rel::Front,
@@ -317,7 +317,7 @@ mod tests {
 
     /// Brute force: every grid cell through the exact predicate, first wins.
     #[test]
-    fn place_dir_equals_an_exhaustive_scan_on_seeded_rooms() {
+    fn place_facing_equals_an_exhaustive_scan_on_seeded_rooms() {
         let mut rng = Rng::new(0xd1a);
         let words = [Rel::Front, Rel::Behind, Rel::Left, Rel::Right];
         let frames = [Frame::World, Frame::Subject];

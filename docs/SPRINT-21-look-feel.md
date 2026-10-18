@@ -196,14 +196,14 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   of blood mass at tick 3600; map 1024x1024x4 = 4194304 B; <= 16 stamps per frame;
   bytes x2. F2P: the pool holds 0 decals after 10 s. P2P: golden unchanged.
   needs: RL46a.
-- [ ] RL50 material: skin that is not plastic — the skin lobe is one wrap and one
+- [x] RL50 material: skin that is not plastic — the skin lobe is one wrap and one
   tint (`compile.rs:532-545`). Thin transmittance plus a terminator LUT built from
   the Gaussian-sum profile (Filament, O3DE, separable-sss constants with their
   credit line). Diff: good. Tier B. Size M. Owns `crates/material/src/skin.rs`
   (new), the skin chunk of `compile.rs`. Accept: `cargo test -p engine-material
   --lib skin_lut`: LUT 16384 B, bytes x2; red terminator >= 1.5x blue at
   curvature 0.5; furnace bar 1.02 holds. F2P: no skin.rs; red and blue equal.
-  P2P: golden unchanged. needs: RL46a.
+  P2P: golden unchanged. needs: RL46a. Landed 8502207. skin.rs: skin_lut_is_16384_bytes_and_the_same_twice, skin_lut_red_terminator_is_at_least_one_and_a_half_times_blue_at_curvature_half, skin_lut_every_column_keeps_the_cosine_integral, skin_transmittance_is_one_when_thin_and_goes_red_when_thick green; furnace skin cases (curvature 0, 0.5 on r g b, 1) hold the 1.02 bar over the whole sphere in white_furnace_holds_for_the_base_and_every_lobe; every_shipped_record_validates (naga) green, engine-material --features validate 116 passed run 39106950779. The old wrap and one tint are gone: the diffuse cosine reads the LUT, the backlit term is added after the cosine (it used to be multiplied by n.l and never showed).
 - [ ] RL51 render: sand and walls without repeat — one sand tap shows its period;
   kit meshes carry size_m that can stretch UVs. Hex-tiling for the floor
   (mmikk/hextile), biplanar for kit walls (Babylon). Diff: regular. Tier B. Size
@@ -306,7 +306,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   head yaw <= 0.5 deg/tick^2 over a 0..180 deg sweep, a target swap eases in 12
   ticks, the head never leaves 70 deg. F2P: the clamp steps velocity. P2P:
   golden unchanged. needs: LF12.
-- [ ] GP43 game: one stateful fight camera — `present_into` overwrites the director Progress 2026-10-17: FightCamSpring landed in camera_rig.rs with fight_cam_spring_smooths_duel_at_both_rates (yaw p99 <= 60 deg/s, eye step <= 25 cm, 30 vs 144 fps within 1 cm) and trauma tests; left: nothing outside tests calls it, fighter_look present_into still uses the stateless fight_camera.
+- [x] GP43 game: one stateful fight camera — `present_into` overwrites the director Progress 2026-10-17: FightCamSpring landed in camera_rig.rs with fight_cam_spring_smooths_duel_at_both_rates (yaw p99 <= 60 deg/s, eye step <= 25 cm, 30 vs 144 fps within 1 cm) and trauma tests; left: nothing outside tests calls it, fighter_look present_into still uses the stateless fight_camera.
   camera with a stateless fight_camera (`fighter_look.rs:1089,1133-1218`), trauma
   never shows, DampedSync is frame-rate dependent (`camera.rs:2487-2552`). Exact
   halflife springs on yaw, distance and look point, a timed FOV punch on Hit,
@@ -316,7 +316,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   -p engine-game --lib fight_cam_spring` x2: yaw rate p99 <= 60 deg/s, eye step
   <= 25 cm per frame over 300 frames, 30 fps and 144 fps stepping end within 1
   cm. F2P: no spring state; two step rates differ. P2P: golden unchanged;
-  framing_empty 0. needs: none.
+  framing_empty 0. needs: none. Landed 033aaca3 (fighter_look_cam.rs) + 19bb5ef5 (the window aims every present through it). engine-game --features app --lib 2026-10-18: 711 passed (the 2 reds are another session's ragdoll_look WIP); fight_cam_spring 3 tests ok x2 runs; aim_camera 8 tests ok: first frame is the stateless shot bit for bit, a cut glides, 30 vs 144 fps end on one camera, a 120 deg/s circling pair stays in the picture, shake exact and unsmoothed, roll and lens settle level, a bad dt shows the stateless shot, real arena tapes 6800 and 6900 keep both fighters in frame 600/600. Window: debug arena.exe --play --frames 240 --exit prints framing empty=0 fewest_in_view=2 steepest_down_deg=1.1 validation_errors=0 (before: empty=0 fewest_in_view=2 0.9). Lens punch (8 percent at full trauma) and roll (<= 0.1 rad) ride the trauma after the smoothing. Presentation only: engine-proof does not depend on engine-game, golden d57b5c8ae3096614 untouched.
 - [ ] GP44 game: phase-warped attack with a telegraph meter — the swing starts at
   the outcome cue back-dated 12 ticks, so 0 ticks of windup show before impact
   (`fighter_look.rs:50,786-801`). Clip time from the sim's attack age through
@@ -326,14 +326,14 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Accept: `cargo test -p engine-game --features app --lib telegraph_warp` x2: the
   hand is >= 25 cm from guard by impact minus 3 ticks, impact phase error <= 1
   tick. F2P: windup is 0 ticks. P2P: golden unchanged. needs: EG19c.
-- [ ] GP45 game: kill slow-mo through a virtual-time scale — the tick accumulator
+- [x] GP45 game: kill slow-mo through a virtual-time scale — the tick accumulator
   takes raw wall ms (`crates/game/src/windowed.rs:906`). Scale the wall delta,
   ramp it, local and replay only, netgame forces 1.0 (Bevy `virt.rs`). Diff:
   regular. Tier A. Size S. Owns the accumulator hunk of `windowed.rs`, the cue
   hook in `fighter_look.rs`. Accept: `cargo test -p engine-game --lib time_scale`
   x2: 120 wall frames at 0.25 give 30 ticks +-1 and an equal state digest at tick
   30. F2P: no scale input. P2P: `node tools/proof.mjs --skip-build` prints golden
-  d57b5c8ae3096614 twice. needs: none.
+  d57b5c8ae3096614 twice. needs: none. Landed 033aaca3 (virt.rs VirtualClock) + 19bb5ef5 (the window: [ and ] ease it, the title shows speed N%, the clock sits between the feel flow and the accumulator). time_scale 6 tests ok x2 runs in engine-game --features app --lib: time_scale_quarter_speed_gives_30_ticks_and_the_same_digest (120 wall frames at 0.25 give 30 ticks, every checkpoint equal to a real-speed run and a second scaled run), the ease covers the same virtual time at 30, 60 and 144 fps, a net match locks 1.0, bad speeds refused, key presets, fast-forward held by the 2-ticks-a-frame guard. The kill slow-mo itself is the existing GF3 knockdown slow-mo through the feel flow, which this clock multiplies; no cue code was added in fighter_look.rs. Presentation only: engine-proof does not depend on engine-game, golden d57b5c8ae3096614 untouched.
 
 **Bodies, cuts and net (body-and-break.md, multiplayer.md)**
 
@@ -381,14 +381,14 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `node tools/mp6-check.mjs`: over_cap 0 on every WAN profile, < 3 rollbacks per
   1000 ticks at 2-frame delay, max slew <= 5 percent, 0 skipped frames. F2P: no
   slew data posted. P2P: golden unchanged, tape bytes equal. needs: MP24.
-- [ ] MP27 proof: sync test at every tick and confirmed-only peer compare — Progress 2026-10-17: arena sync.rs sync_heavy_mode_clean_reports_zero_false_positives verifies rollback at every tick of the test config; left: no 600 split points at depth 8, no deliberately unsnapshotted LimbPool counter caught test, check_remote confirmed-only compare unchanged.
+- [x] MP27 proof: sync test at every tick and confirmed-only peer compare — Progress 2026-10-17: arena sync.rs sync_heavy_mode_clean_reports_zero_false_positives verifies rollback at every tick of the test config; left: no 600 split points at depth 8, no deliberately unsnapshotted LimbPool counter caught test, check_remote confirmed-only compare unchanged.
   `verify_rollback` tests one split point (`crates/arena/src/sync.rs:141-179`);
   `check_remote` (`crates/net/src/netcode.rs:211`) compares predicted frames and
   would report a false desync. ggrs sync-test shape. SIM test only. Diff:
   regular. Tier B. Size S. Owns the test hunks of `sync.rs` and `netcode.rs`.
   Accept: `cargo test -p engine-arena --lib sync` x2: 600 split points at d=8
   equal; a deliberately unsnapshotted LimbPool counter is caught with tick and
-  system. F2P: that omission passes today. P2P: golden unchanged. needs: none.
+  system. F2P: that omission passes today. P2P: golden unchanged. needs: none. Landed faafa21e. sync_test_every_tick_at_depth_8_agrees (600 split points, depth 8, busy tape, all equal) and sync_test_catches_a_limb_counter_the_snapshot_forgot (caught at tick 100, system space; the same run passes without the pool fold); engine-arena --no-fail-fast run 39109015367 (216 passed, golden and match digest tests green), playtest divergence run 39109015259; local sync x2 green. check_remote confirmed-only already covered in netcode.rs.
 
 **GPU speed and the live frame (render-look.md, potato.md, quality.md)**
 
@@ -456,7 +456,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   20 and FOV 60 pick different LODs; a 1080p -> 540p step switches one LOD sooner;
   0 pops in the 120-frame orbit capture. F2P: FOV does not change the pick. P2P:
   golden unchanged. needs: none.
-- [ ] RL62 render: one temporal registry with a history-valid flag — `v1_temporal.rs`
+- [x] RL62 render: one temporal registry with a history-valid flag — `v1_temporal.rs`
   has 0 history-reset paths (`docs/plan/steals.md:12`). History textures live by
   name across frames (kajiya `temporal.rs` states: take, export, inert); a resize,
   camera cut or dyn-res step recreates and sets history_valid=false, read by TAA,
@@ -464,7 +464,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   temporal map, the history read in `post.rs`. Accept: `cargo test -p engine-render
   --lib temporal` x2: resize flips the flag, a double take is refused; ghost pixels
   in a camera-cut fixture 0. F2P: no reset path. P2P: golden unchanged. needs:
-  none.
+  none. Landed 7e660839. temporal_resize_flips_the_flag, temporal_dyn_res_step_recreates_the_history, temporal_double_take_is_refused, temporal_camera_cut_invalidates_every_texture, temporal_camera_cut_fixture_has_zero_ghost_pixels (stale history ghosts, cut history 0 ghost pixels); green x2: runs 39103216237 and 39104351445 (full engine-render suite). Only TAA reads the flag (TaaParams::history_valid): gtao.rs and fog.rs keep no history yet. Golden unchanged (presentation only).
 
 **AI door, machine eyes and replay (ai-native.md, quality.md)**
 
@@ -512,7 +512,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   stills compared, a blessed change keeps `.old`, a missing golden fails, a stale
   known-failure fails. F2P: 0 pixel compares. P2P: golden unchanged. needs:
   none.
-- [ ] PF26 observe: replay export as MCAP — `replay_verbose` emits sim.tick only
+- [x] PF26 observe: replay export as MCAP — `replay_verbose` emits sim.tick only
   (`crates/proof/src/trace.rs:34-35`) and the sink is a 120-row (tick, hash) ring
   (`crates/observe/src/rerun_sink.rs:19`). A std-only MCAP writer (header,
   channels, messages, footer) with /tick/hash, /fighters/N/pose, /events and
@@ -521,7 +521,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `rerun_sink.rs`, `trace.rs`. Accept: `cargo test -p engine-observe --lib
   mcap_roundtrip` x2: a 600-tick 2-fighter bout writes <= 400 KB, bytes equal, our
   reader returns every message, a seeded desync first differs at its tick. F2P: no
-  MCAP writer. P2P: golden unchanged; no new dependency. needs: none.
+  MCAP writer. P2P: golden unchanged; no new dependency. needs: none. Landed 946c14a4. crates/observe/src/mcap.rs std-only writer and reader (magic, header, schemas, channels, messages, data end, summary with statistics, footer; JSON payloads from integers and hex), ReplayRecording with /tick/hash, /fighters/N/pose, /events, /debug/lines, first_divergent_tick; RerunSink::to_mcap and proof TraceReport::to_mcap are the callers. mcap_roundtrip_* x6 green (a 600-tick 2-fighter bout under 400 KB, bytes equal across two runs, all 1,872 messages read back, a seeded desync at ticks 0, 1, 321 and 599 first differs at its tick): engine-observe --lib mcap run 39102446324, full engine-observe 39104005600, trace::mcap_export_names_the_first_divergent_tick in engine-proof run 39102427469, full engine-proof incl. golden d57b5c8ae3096614 run 39103988897, clippy -D warnings run 39106155401. No dependency added. Opening the file in Foxglove or Rerun was not tried here (format follows the MCAP spec).
 
 **HUD, sound and input (gameplay.md, parked.md; the UI and audio parks lift for the duel only, lead 2026-10-12)**
 
@@ -547,22 +547,22 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   --lib hit_matrix`: distinct clips >= 12, the same clip never twice in a row, 8 of
   8 event kinds have a cue; audio-thread allocations 0. F2P: distinct clips = 1.
   P2P: golden unchanged. needs: none.
-- [ ] SN13 audio: occlusion lowpass and air absorption — `crates/audio/src/occlude.rs:159`
+- [x] SN13 audio: occlusion lowpass and air absorption — `crates/audio/src/occlude.rs:159`
   returns a gain only and the mixer has no filter; reverb is one preset switched at
   a 20 m circle. Occlusion returns gain and cutoff per material, distance adds air
   absorption, the reverb send blends three zone presets (Steam Audio direct-path
   math studied, never linked). Diff: regular. Tier B. Size S. Owns `occlude.rs`,
   the filter hunk of `crates/audio/src/lib.rs`. Accept: `cargo test -p engine-audio
   --lib muffle_band`: behind stone the high band drops >= 15 dB and the low band <= 8
-  dB, allocations 0. F2P: high-band drop 0 dB. P2P: golden unchanged. needs: none.
-- [ ] SN14 audio: output-latency probe — `crates/audio/src/device.rs:307` drops the
+  dB, allocations 0. F2P: high-band drop 0 dB. P2P: golden unchanged. needs: none. Landed b3d72d3b. occlude::tests::muffle_band_behind_stone_drops_the_highs_and_keeps_the_lows green (stone: high band -20 dB, low band -7.98 dB, 0 heap calls), engine-audio --lib 264 passed gh run 39106108843, engine-game --lib audio_mix 10 passed gh run 39106771218; open voices mix bit-identical. Left: the reverb send is still one preset at the 20 m circle (three zone presets not blended).
+- [x] SN14 audio: output-latency probe — `crates/audio/src/device.rs:307` drops the
   callback timestamp, so hit-to-speaker latency is unknown while the UX budget is 40
   ms. Read OutputCallbackInfo, print p50 and p95; past 40 ms schedule cues early by
   a sample offset. Diff: regular. Tier B. Size S. Owns `device.rs`,
   `crates/audio/src/engine.rs`. Accept: `cargo test -p engine-audio --features device
   --lib latency_probe` prints audio_latency_ms p50 and p95 (skips loudly without a
   device); p95 <= 40 or the early offset is set. F2P: no latency line. P2P: golden
-  unchanged. needs: none.
+  unchanged. needs: none. Landed 876a5a63. device::tests::latency_probe_reads_the_default_device_and_prints_p50_p95 printed audio_latency_ms p50=31.9 p95=31.9 early_frames=0 on the RTX 3050 laptop PC (p95 within 40 ms), latency_probe_* (4) and engine::tests::a_late_device_starts_one_shot_cues_early green, engine-audio --features device --lib 299 passed (local private target dir), default --lib 265 passed, clippy --features device --all-targets -D warnings clean.
 - [ ] UIX14 input: live gamepad, hot-plug, rumble and last-device prompts (deepens
   EG27) — `crates/input/src/bindings.rs:43` leaves live polling for later, the pad
   is plain data, 0 haptic code. gilrs polling, a rumble table mapping cue to (low,
@@ -599,7 +599,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   the texture hunk of the cooker. Accept: `cargo test -p engine-assets --lib bc7`
   x2: bytes equal, PSNR >= 40 dB on the albedo fixture, the arena texture set fits
   <= 50 percent of today's VRAM bytes. F2P: no BC7 or BC5 path. P2P: golden
-  unchanged. needs: none.
+  unchanged. needs: none. Progress 2026-10-18: real BC7 mode 6 (bc.rs, 93a57a82) and BC5 with a 1024 mip cook exist; bc::tests::bc7_albedo_1024_reaches_40_db_is_4x_smaller_and_threads_agree 42.51 dB (bar 40), bytes equal x2, run 39108657201. Left: BC7 into the KTX2 container (ktx2_cook still writes BC1 colour and the committed arena maps stay BC1), mips for BC7, and the arena set <= 50 percent of today's VRAM bytes is not measured.
 
 **Dev loop: GPU timing, shader checks, debug views, cook (quality.md, render-look.md, runtime.md)**
 
@@ -680,7 +680,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   tools/feature-unify.test.mjs` passes and fails on a seeded extra feature. F2P:
   the third run recompiles shared dependencies. P2P: golden unchanged. needs:
   none.
-- [ ] FB8 assets: cook key with dependency hashes and a begin/end log —
+- [x] FB8 assets: cook key with dependency hashes and a begin/end log —
   `crates/assets/src/cooker.rs:216-219` hits on the source digest alone, so a
   dependent is served stale; `gen_intake.rs:756-765` writes 3 files non-atomically.
   Key = blake3(source, settings, cook version, dependency keys in order), one
@@ -689,8 +689,8 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Accept: `cargo test -p engine-assets --lib cook_full_hash` x2: a dependency edit
   makes the dependent fresh, a cook-version bump recooks 100 percent, a kill
   between file 1 and 2 leaves exactly 1 entry to redo, bundle bytes x2. F2P: the
-  dependent is served stale. P2P: golden unchanged. needs: none.
-- [ ] RC38 ecs: declared access, a conflict check and a seeded order shuffle — Progress 2026-10-17: schedule.rs access sets, conflict refusal naming both systems and set_shuffle_seed landed (sched_shuffle_keeps_hash_across_50_seeds, ecs green run 39057318550); left: the 50 shuffles run a toy ArchetypeWorld, not the match that yields d57b5c8ae3096614.
+  dependent is served stale. P2P: golden unchanged. needs: none. Landed 46c5b4a8. cooker::tests::cook_full_hash_* (dependency edit makes the dependent fresh, dependency order in the key, version bump and settings change recook 3 of 3, keys and payload bytes x2) and gen_intake::tests::cook_full_hash_a_kill_between_files_leaves_exactly_one_entry_to_redo green, engine-assets --features import,registry --lib 365 passed gh run 39106601712.
+- [x] RC38 ecs: declared access, a conflict check and a seeded order shuffle — Progress 2026-10-17: schedule.rs access sets, conflict refusal naming both systems and set_shuffle_seed landed (sched_shuffle_keeps_hash_across_50_seeds, ecs green run 39057318550); left: the 50 shuffles run a toy ArchetypeWorld, not the match that yields d57b5c8ae3096614.
   systems run in registration order with no read or write sets
   (`crates/ecs/src/schedule.rs:36-47,97`). Each system declares its columns; the
   build refuses an unordered conflicting pair; the golden runs under 50 seeded
@@ -699,7 +699,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Size M. Owns `crates/ecs/src/schedule.rs` and a shuffle test. Accept: `cargo
   test -p engine-ecs --lib sched_shuffle` x2: 50 shuffles give d57b5c8ae3096614; a
   seeded missing edge fails naming both systems. F2P: no access sets, no shuffle.
-  P2P: golden unchanged. needs: none.
+  P2P: golden unchanged. needs: none. Landed a9b8ce6d. The 50 shuffles now run the golden fixture itself (engine-proof Simulation, seed 2040, 600 ticks; the toy world stays in engine-ecs): tests::sched_shuffle_keeps_the_golden_across_50_seeded_orders (integrate declares reads velocity / writes position beside two column-free probes, 50 seeds reach at least 4 of the 6 orders, every seed ends on the plain tape's last checkpoint, legacy d57b5c8ae3096614) and tests::sched_shuffle_refuses_a_missing_edge_naming_both_systems (ScheduleError::Conflict integrate/probe_a, text names both). Green x2: engine-proof --lib sched_shuffle run 39106723705 and full engine-proof 160 passed run 39103988897; engine-ecs sched_shuffle_keeps_hash_across_50_seeds in engine-ecs --no-fail-fast run 39103985481. The test lives in engine-proof, not engine-ecs --lib, because Simulation is private there.
 
 ### First-person view (owner plan 2026-10-14, `docs/plan/fps-view.md`)
 

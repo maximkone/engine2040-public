@@ -574,7 +574,7 @@ fn steel() -> Seed {
     }
 }
 
-/// Skin: wrapped subsurface, tears in sheets, takes blood.
+/// Skin: terminator-LUT subsurface, tears in sheets, takes blood.
 fn skin() -> Seed {
     let mut look = base([0.8, 0.56, 0.47], 0.5, 0.0);
     look.subsurface = Some(Subsurface {

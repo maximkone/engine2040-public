@@ -85,6 +85,19 @@ jobs:
         run: cargo test --locked -p engine-web --lib
       - name: clippy for the browser target (the shell only exists on wasm32)
         run: cargo clippy --locked --target wasm32-unknown-unknown -p engine-web -- -D warnings
+      # WEB7: the tape the native side makes of tools/fixtures/input-tape.script; the browser job replays the same file as real key
+      # and mouse events and must get the same bytes.
+      - name: native input tape of the script (WEB7)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/native
+          cargo run --locked -q -p engine-web --bin input_tape -- tools/fixtures/input-tape.script | tee out/native/input-tape.txt
+      - uses: actions/upload-artifact@v5
+        with:
+          name: input-tape
+          path: out/native/input-tape.txt
+          if-no-files-found: error
       - name: build dist/web
         shell: bash
         run: |
@@ -98,6 +111,9 @@ jobs:
             cat dist/web/build.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # WEB10: the build holds only files on the public list (the Pages site is public).
+      - name: dist/web holds only public files
+        run: node tools/web-build.mjs --check-public dist/web
       - name: dist/web is under 8 MB and a static server types the module as application/wasm
         shell: bash
         run: |
@@ -171,6 +187,10 @@ jobs:
         with:
           name: web-dist
           path: dist/web
+      - uses: actions/download-artifact@v5
+        with:
+          name: input-tape
+          path: out/native
       - name: Chrome stable
         shell: bash
         run: |
@@ -216,10 +236,11 @@ jobs:
         shell: bash
         run: node tools/web-budget.mjs --dir dist/web --receipt out/web/receipt.json --require-receipt
       # WEB7: real key and mouse events over CDP. No audio context before a gesture, Escape is not a gesture, a key press
-      # starts it, a click leaves it running; the page's input: and audio: lines carry the numbers.
+      # starts it, a click leaves it running; the page's input: and audio: lines carry the numbers. The scripted events then
+      # give the same input tape as the native input_tape bin made in the build job.
       - name: input and audio on the page (WEB7)
         shell: bash
-        run: node tools/web-input-check.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-input
+        run: node tools/web-input-check.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-input --native-tape out/native/input-tape.txt
       # Every flag set, not only the winner, so the record says which flags matter and which do not.
       - name: every flag set, for the record
         if: always()
@@ -269,10 +290,12 @@ jobs:
           path: dist/web
       - name: unit tests of the browse tool (net duel verdicts)
         run: node --test tools/web-browse.test.mjs
-      - name: duel tests (host and client state machines, WebSocket server, WebTransport server)
-        run: cargo test --locked -p engine-net --lib --features websocket,webtransport -- webduel ws_duel
-      - name: build the dedicated server
-        run: cargo build --locked --release -p engine-net --features websocket,webtransport --bin net_serve
+      - name: duel tests (host and client state machines, WebSocket server, WebTransport server, the gates)
+        run: cargo test --locked -p engine-net --lib --features websocket,webtransport -- webduel ws_duel browser_gate webtransport_cert
+      - name: build the dedicated server and the native client
+        run: |
+          cargo build --locked --release -p engine-net --features websocket,webtransport --bin net_serve
+          cargo build --locked --release -p engine-web --bin net_join
       - name: Chrome stable
         shell: bash
         run: |
@@ -353,6 +376,88 @@ jobs:
             --expect-hash "$ref" --expect-transport webtransport || { kill "$pid" 2>/dev/null || true; exit 1; }
           wait "$pid"
           cat out/net/wt-server.log
+      # WEB9: one match, three ends. A native client (net_join, plain UDP) and headless Chrome (WebSocket) take the
+      # two seats of one duel; the server, the native client and the page all print the hash of the two-seat script.
+      - name: two seats, one match - a native client and Chrome end on the server's hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          serve=target/release/net_serve; join=target/release/net_join
+          ref="$("$serve" --reference --seats 2 | sed -n 's/.*hash=\([0-9a-f]\{16\}\).*/\1/p')"
+          test -n "$ref"
+          echo "offline two-seat reference hash: $ref"
+          "$serve" --ws 127.0.0.1:7060 --udp 127.0.0.1:7061 --seats 2 --tick-ms 0 --linger-ms 1500 --out out/net/two-done.txt >out/net/two-server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 100); do grep -q 'net-serve: ready' out/net/two-server.log && break; sleep 0.2; done
+          grep 'net-serve: ready' out/net/two-server.log
+          # The native client takes the first seat and waits for the second.
+          "$join" --server 127.0.0.1:7061 --quiet >out/net/two-native.txt 2>out/net/two-native.err &
+          native=$!
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net-two \
+            --server ws://127.0.0.1:7060 --expect-hash "$ref" --expect-transport websocket
+          wait "$native"
+          cat out/net/two-native.txt
+          grep -q "net: transport=udp ticks=600 hash=$ref peers=1" out/net/two-native.txt
+          for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "the server did not end after the match"; exit 1; fi
+          wait "$pid"
+          cat out/net/two-server.log
+          test "$(grep -c 'net-serve: joined' out/net/two-server.log)" = 2
+          grep -q 'via=udp' out/net/two-server.log
+          grep -q 'via=websocket' out/net/two-server.log
+          grep -q "net-serve: done ticks=600 hash=$ref reference=$ref match=true" out/net/two-server.log
+          echo "server == native client == Chrome == $ref"
+      # WEB9: killing the page mid-duel. The server sees the seat go (dropped), AI-fills it and plays on; a second page with the
+      # same token takes the seat back, is caught up and ends on the server's hash. That hash is not the script's: the AI played the gap.
+      - name: the page is killed mid-duel and a second page takes the seat back
+        shell: bash
+        run: |
+          set -euo pipefail
+          serve=target/release/net_serve
+          "$serve" --ws 127.0.0.1:7062 --ticks 3000 --tick-ms 10 --linger-ms 1500 --out out/net/kill-done.txt >out/net/kill-server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 100); do grep -q 'net-serve: ready' out/net/kill-server.log && break; sleep 0.2; done
+          ref="$("$serve" --reference --ticks 3000 | sed -n 's/.*hash=\([0-9a-f]\{16\}\).*/\1/p')"
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net-kill \
+            --server ws://127.0.0.1:7062 --ticks 3000 --token 424242 --drop-at-tick 150 --net-timeout 60 | tee out/net/kill-first.txt
+          grep -q 'DROPPED the page' out/net/kill-first.txt
+          for _ in $(seq 1 50); do grep -q 'net-serve: dropped slot=0' out/net/kill-server.log && break; sleep 0.2; done
+          grep 'net-serve: dropped slot=0' out/net/kill-server.log
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net-back \
+            --server ws://127.0.0.1:7062 --ticks 3000 --token 424242 --net-timeout 120 | tee out/net/kill-second.txt
+          page="$(sed -n 's/^NET LINE .* hash=\([0-9a-f]\{16\}\).*/\1/p' out/net/kill-second.txt)"
+          test -n "$page"
+          for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "the server did not end after the match"; exit 1; fi
+          wait "$pid"
+          cat out/net/kill-server.log
+          grep -q '(rejoin)' out/net/kill-server.log
+          grep -q "net-serve: done ticks=3000 hash=$page reference=$ref match=false" out/net/kill-server.log
+          test "$page" != "$ref"
+          echo "the second page ended on the server's hash $page (the scripted one is $ref)"
+      # WEB9/QN7: a live seat. Real key events (walk, swing, turn, dodge) drive the page's seat through the keyboard path, the page is
+      # opened by the one-port ?join= shorthand, and the page and the server end on one hash that is not the script's.
+      - name: a live seat - real key events drive the match, the page and the server end on one hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          serve=target/release/net_serve
+          ref="$("$serve" --reference | sed -n 's/.*hash=\([0-9a-f]\{16\}\).*/\1/p')"
+          "$serve" --ws 127.0.0.1:7063 --live --tick-ms 8 --linger-ms 1500 --out out/net/live-done.txt >out/net/live-server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 100); do grep -q 'net-serve: ready' out/net/live-server.log && break; sleep 0.2; done
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-net-live \
+            --join 127.0.0.1:7063 --play --live-keys --net-timeout 90 | tee out/net/live-page.txt
+          page="$(sed -n 's/^NET LINE .* hash=\([0-9a-f]\{16\}\).*/\1/p' out/net/live-page.txt)"
+          test -n "$page"
+          for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "the server did not end after the match"; exit 1; fi
+          wait "$pid"
+          cat out/net/live-server.log
+          grep -q "net-serve: done ticks=600 hash=$page reference=none match=n/a" out/net/live-server.log
+          grep -q 'net-serve: admission slot=0 .* cheats=0 refused=none' out/net/live-server.log
+          test "$page" != "$ref"
+          echo "a live seat: page == server == $page, not the script's $ref"
       - uses: actions/upload-artifact@v5
         if: always()
         with:
@@ -363,4 +468,8 @@ jobs:
             out/web-net-blocked
             out/web-net-fallback
             out/web-net-wt
+            out/web-net-two
+            out/web-net-kill
+            out/web-net-back
+            out/web-net-live
           if-no-files-found: warn

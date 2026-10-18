@@ -6,7 +6,7 @@ fixed-point, sorted order, x2 hashes); presentation-only rows say so. Donors
 come from the Rust sweep in `RESEARCH-VERDICT.md` (licenses re-read at port
 time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
 
-- [ ] PX35 physics: long-range attachments for cloth and soft sheets — the Progress 2026-10-17: per-node tethers landed (6f871bb5: cloth.rs rebuild_tethers and solve_tethers, test the_tether_pulls_an_overstretched_particle_back_to_its_reach); left: cloth is f32 Verlet not integer math, and the 32x32 fu30_soft_settle_offline_baseline spike test no longer exists, so the 25% + 64 raw link bar is not measured.
+- [x] PX35 physics: long-range attachments for cloth and soft sheets — the Progress 2026-10-17: per-node tethers landed (6f871bb5: cloth.rs rebuild_tethers and solve_tethers, test the_tether_pulls_an_overstretched_particle_back_to_its_reach); left: cloth is f32 Verlet not integer math, and the 32x32 fu30_soft_settle_offline_baseline spike test no longer exists, so the 25% + 64 raw link bar is not measured.
   32x32 soft-settle spike (`cloth.rs` `fu30_soft_settle_offline_baseline`,
   ignored) stretches its top links about 2x under the cape tune because
   position-based constraints cannot carry a long hanging chain in a few
@@ -15,7 +15,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   allocation per step. Tier B. Size M. Owns `crates/physics/src/cloth.rs`.
   Accept: the spike test runs un-ignored with every link within 25% + 64 raw
   of rest; cape tests and the zero-allocation step test stay green; replay
-  bit-exact x2. needs: none. Progress 2026-10-17: 4544ac4f 32x32 cloth settles with every link within 25% of rest, bit-exact twice; cloth is still f32 Verlet so the integer-math clause is not met.
+  bit-exact x2. needs: none. Progress 2026-10-17: 4544ac4f 32x32 cloth settles with every link within 25% of rest, bit-exact twice; cloth is still f32 Verlet so the integer-math clause is not met. Landed 9638504. a_32x32_sheet_settles_with_every_link_within_a_quarter_of_rest_and_replays_exactly (max stretch <= 1.25, un-ignored, bit-exact x2), the_awake_step_with_pin_moves_wind_and_a_body_never_touches_the_heap (0 heap calls, 4 tiers), cape tests green; engine-physics lib 147 passed 2 ignored (run 39101540373), heap test run 39101672637. Cloth is f32 Verlet by RZ7 decision (presentation only, never hashed), so the integer-math clause of the description does not apply.
 - [x] LM2 anim: GASP-class ground feel — distance matching for starts, Landed 379b13c. Tick audit 2026-10-17: warp_ground_feel_test stride_sweep_slide_under_1cm, strafe_135_skateless_and_capped, replay_exact_x2 and warp_ground_test starts/stops_slide_under_1cm_05_to_7 green, gh-check runs 39056062979 (warp_ground, 24 tests) and 39056591616 (engine-anim, 390 passed).
   stops and pivots, orientation warping for strafes, stride warping so feet
   match capsule speed (Paragon GDC 2016 shapes, reimplemented). Tier A.
@@ -66,13 +66,13 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   LM2; never a second warp). Accept: foot slide bars hold on 20-degree
   slopes plus stair fixtures; replay exact x2. needs: LM2, AM6.
   (PLN animation.md EXTEND, proposed 2026-09-29.)
-- [ ] TV3 anim: siege traversal set — ladder, rampart vault and rubble
+- [x] TV3 anim: siege traversal set — ladder, rampart vault and rubble
   scramble edges on integer-mm warp for the C5 siege map, with nav links
   rebaked exactly like TV2. Tier B. Size M. Owns the
   siege-edge hunks beside `crates/anim/src/traversal.rs` (TV1 file
   frozen) plus siege fixtures. Accept: siege fixtures pick expected
    actions; warped roots land within 1 cm; sim bytes x2. needs: TV1, TV2.
-   (PLN animation.md EXTEND, proposed 2026-09-29.)
+   (PLN animation.md EXTEND, proposed 2026-09-29.) Landed 7196f6fa. engine-anim --no-fail-fast 443 lib + 8 it passed (run 39106084274), clippy run 39106954469: traversal_siege_test siege_fixtures_pick_the_expected_actions, a_broken_ladder_and_a_wide_breach_are_refused_never_faked, every_siege_edge_names_one_link_and_a_breach_rebakes_exactly_the_scattered_ones, warped_roots_land_within_1cm_and_bytes_repeat_x2. Set is data on the TV1 chooser (no new move kinds); rubble variance sweeps stay TV4.
 - [ ] AM21 anim: LOD strobing vs warp contract — warp-window ticks never
   strobe so TV1 landings hold under AM13 tiers. Tier A. Size S. Owns
   eval-pin hunks beside `crates/anim/src/graph.rs` (AM1 order frozen).
@@ -225,14 +225,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   pass code). Accept: `cargo test -p engine-destruction --lib handoff`
   green; poses match the CPU within posted tol; merges x2; golden
   unchanged. needs: DX4, DX6, RP2. (EXTEND physics 2026-09-27.)
-- [ ] PX19 physics: combined 64-fighter + 500-agent tick proof — the P6
+- [x] PX19 physics: combined 64-fighter + 500-agent tick proof — the P6
   physics slice of the server tick, LOD capsules far plus full ragdoll
   near, cloth excluded by rule. Tier A. Size M. Owns the combined-tick
   workload beside `crates/perf` + scale-proof hunks beside the future
   `crates/physics/src/lod.rs` (PX7 system frozen). Accept: `cargo test
   -p engine-physics --lib combined_tick` green on the 64+500 fixture;
   physics slice p99 within 4 ms on the reference CPU; hash x2; golden
-  unchanged. needs: PX7, PX16, PF1. (EXTEND physics 2026-09-29.)
+  unchanged. needs: PX7, PX16, PF1. (EXTEND physics 2026-09-29.) Landed 8b02a0cf. crates/physics/src/lod.rs tests: combined_tick_64_fighters_500_agents_hash_x2 (LodWorld 64 fighters + 500 agents, 600 ticks, near/far halves swap every 100 ticks, rows of ten as islands, a seeded shove every 20 ticks; same seed twice gives the same digest) engine-physics --lib combined_tick run 39103012579; combined_tick_physics_slice_p99_under_4ms (ignored, timing) passed with --release --ignored run 39103012514 on the GitHub runner, NOT the reference CPU. Test-only hunks, golden unchanged (engine-proof run 39103988897). Clippy -D warnings on engine-physics is red only in other sessions files (door.rs wildcard import, stance.rs sin/cos), none in lod.rs.
 - [x] PX20 physics: deterministic swept shape-cast API — segment-cast Progress 2026-10-17: crates/physics/src/query.rs has sphere_cast and ray_cast with rb_query_kinds tests (6b671986, f32 nearest hit); left: no Fixed/Q16 segment cast with sorted time-of-impact and no swept_cast test.
   with sorted time-of-impact in `crates/physics/src/query.rs`,
   Fixed/Q16 only, consumed by GP2 sweep and PX10 CCD wiring. Tier A.
@@ -241,14 +241,14 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   green incl. 1,000 seeded casts; TOI order stable under permutation;
   hash x2; golden unchanged. needs: PH1, GP2. (EXTEND physics
   2026-09-29.) Landed 363000af. swept_cast Q16 sphere vs capsules, ordered by time of impact then id; 1,000 seeded casts match a dense march, permuted targets same answer (3 tests run 39066316942; clippy -D warnings run 39067537158).
-- [ ] PX21 physics: moving-platform ride — deterministic platform-delta Progress 2026-10-17: kcc.rs platform_ride_matrix (station within 1 cm over 600 ticks, platform stop, step-off inherits velocity, hash x2) green in physics run 39057362796; left: the step-off landing is only asserted grounded, not within 1 cm of a target.
+- [x] PX21 physics: moving-platform ride — deterministic platform-delta Progress 2026-10-17: kcc.rs platform_ride_matrix (station within 1 cm over 600 ticks, platform stop, step-off inherits velocity, hash x2) green in physics run 39057362796; left: the step-off landing is only asserted grounded, not within 1 cm of a target.
   inheritance for carried fighters (ride, step-off, platform stop),
   integer deltas only. Tier B. Size S. Owns ride hunks beside
   `crates/physics/src/kcc.rs` (PH2 frozen). Accept: `cargo test
   -p engine-physics --lib platform_ride` green; carried fighter keeps
   station within 1 cm over 600 ticks; step-off lands within 1 cm;
   hash x2; golden unchanged. needs: PH2, PX1. (EXTEND physics
-  2026-09-29.) Progress 2026-10-17: ee98c096 platform_ride_matrix checks the step-off landing tick and x against an independent f64 ballistic prediction within 1 cm (3 tests green, run id not captured; rerun before ticking).
+  2026-09-29.) Progress 2026-10-17: ee98c096 platform_ride_matrix checks the step-off landing tick and x against an independent f64 ballistic prediction within 1 cm (3 tests green, run id not captured; rerun before ticking). Landed ee98c096. cargo test -p engine-physics --lib platform_ride: controller2::tests::platform_ride_keeps_station and kcc::tests::platform_ride_matrix ok (station within 1 cm over 600 ticks, step-off landing tick and x within 1 cm of the f64 ballistic prediction, hash x2), run 39101688073.
 - [ ] PX22 physics: servo calibration corpus — offline seeded sweep
   measuring per-joint overshoot and jitter on three rigs, emitting the
   one-tune-per-rig PID tables PX11 consumes. Tier B. Size S. Owns
@@ -418,7 +418,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
    planner). P2P:
    `cargo test -p engine-ai --lib gladiator` stays green. needs: GA11.
    (STEAL 2026-10-03 dogoap, https://github.com/victorb/dogoap.)
-- [ ] NV10 nav: broadphase plus 1,000-agent P6 bar — integer Progress 2026-10-17: the grid and kd-tree neighbour feeds exist in crates/ai/tests/crowd_orca_bench.rs against the scan referee; left: no crates/nav/src/crowd.rs, no byte-equal check on the NV8 corpus, no p50/p95/p99 at 1,000 agents.
+- [x] NV10 nav: broadphase plus 1,000-agent P6 bar — integer Progress 2026-10-17: the grid and kd-tree neighbour feeds exist in crates/ai/tests/crowd_orca_bench.rs against the scan referee; left: no crates/nav/src/crowd.rs, no byte-equal check on the NV8 corpus, no p50/p95/p99 at 1,000 agents.
   uniform-grid (or R* split shape, georust/rstar pattern only)
   contender against the id-sorted scan referee; byte-equal neighbor
   sets on every seed, then p50/p95/p99 at 50/500/1000 agents. Tier A.
@@ -427,15 +427,15 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   NV8 corridor corpus; 1,000-agent sim p99 within the P6 2 ms bar;
   replay x2. Proof: `cargo test -p engine-nav crowd` green plus the
   p50/p95/p99 bench table at 50/500/1000 agents. needs: NV4. (PLN EXTEND gameplay.md, proposed
-  2026-09-29; NV9 id retired, frontier TileCache proposal REJECTED.)
-- [ ] NV11 nav: grid-retirement proof — NV3 tiles plus NV6 funnel cover
+  2026-09-29; NV9 id retired, frontier TileCache proposal REJECTED.) Landed f32f2e25. The broadphase is the counting-sort grid in orca.rs (the old crowd.rs went in the 2026-10-16 rot cleanup); test hunks added there: crowd_corridor_corpus_neighbours_equal_the_scan (grid sets equal the id-sorted scan referee, entry for entry, on the 1,000-seed corridor-swap corpus the NV4 drill and NV8 share, crowd seen every 12th step), crowd_of_1000_replays_to_the_same_digest_twice, grid_neighbours_equal_a_brute_force_scan, crowd_replays_to_the_same_digest_twice, and the ignored timing gate crowd_step_percentiles_hold_the_p6_bar_to_1000_agents. Bench table (us, runner not the reference PC, gh run 39105710580): 50 agents p50 40 p95 51 p99 134; 500 agents p50 579 p95 842 p99 1404; 1000 agents p50 875 p95 952 p99 1411, so 1,000-agent p99 1.41 ms is inside the P6 2 ms bar. Full engine-nav --no-fail-fast green: 93 lib + 9 integration, run 39107075357; clippy -D warnings clean, run 39106089664.
+- [x] NV11 nav: grid-retirement proof — NV3 tiles plus NV6 funnel cover
   every arena query the legacy `Grid` serves, then the grid goes.
   Tier A. Size S. Owns
   `crates/nav/src/{lib,astar,bake,flow}.rs` removal hunks. Accept:
   funnel-shorter proof reruns green with zero grid fallbacks across
   the query corpus; bytes x2; grid deleted, not deprecated. Proof:
   `cargo test -p engine-nav` green with grid files deleted.
-  needs: NV3, NV6. (PLN EXTEND gameplay.md, proposed 2026-09-29.)
+  needs: NV3, NV6. (PLN EXTEND gameplay.md, proposed 2026-09-29.) Landed 3ed325c8 (the 8-dir grid A* astar.rs, the legacy grid, was deleted in the 2026-10-16 rot cleanup; crates/nav has no astar module and no Grid query type, lib.rs lists bake, flow, funnel, links, mesh, orca, reach, rebake, spline, tiles). Every arena path query now answers from the tiled nav plus the funnel: smooth_paths_beat_the_grid_walk (200 seeded arena queries, never longer than the tiled walk, 80%+ at least 10% shorter, each answered by smooth_path with no fallback to compare against) and same_query_gives_the_same_bytes_twice (bytes x2). cargo test -p engine-nav --no-fail-fast green with no grid files, 91 lib + 9 integration, gh run 39103483221 (93 lib + 9 after the NV10 tests, run 39107075357).
 - [x] NV12 nav: shared-edge stitch proof — bake the arena whole and
   tiled, diff every cross-tile path byte-wise (WD8 shape). Tier A.
   Size S. Owns `crates/nav/src/tiles.rs` stitch hunks. Accept:
@@ -491,7 +491,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
 - [ ] PF9 perf: replay visual debugger — tracy spans plus a rerun recording Progress 2026-10-17: crates/observe/src/rerun_sink.rs landed (names_first_mismatched_hash, tracy zone names; observe green run 39057303818) and PF9a paired reruns name the first divergent hash; left: the GPU timestamp, 2,000-frame and RA8 manifest legs of the hunt are not done.
   of simulation state per tick for desync hunts (licenses read first).
   Tier B. Size M. Owns `crates/observe/src/rerun_sink.rs`. Accept: a seeded
-  desync shows its first divergent tick in the recording. GitHub hunt 2026-09-25: GPU timestamp queries (two per pass) resolved behind the GX truth gate give `gpu_ms` next to CPU spans; a free-list buffer arena keeps allocations flat over 120 frames (wgpu, rend3 patterns). Deep 3D pass: raise capture to 2,000 frames (120 today), cover every GPU pass (6 today), and write tier, VRAM and draw counts into the RA8 manifest; this harness comes before any GPU budget    claim. needs: PF2.
+  desync shows its first divergent tick in the recording. GitHub hunt 2026-09-25: GPU timestamp queries (two per pass) resolved behind the GX truth gate give `gpu_ms` next to CPU spans; a free-list buffer arena keeps allocations flat over 120 frames (wgpu, rend3 patterns). Deep 3D pass: raise capture to 2,000 frames (120 today), cover every GPU pass (6 today), and write tier, VRAM and draw counts into the RA8 manifest; this harness comes before any GPU budget    claim. needs: PF2. Progress 2026-10-18: 946c14a4 MCAP recording (observe mcap.rs): ReplayRecording is not bound to the 120-row ring, so a 2,000-frame capture fits (a 600-tick 2-fighter bout is under 400 KB), and first_divergent_tick names a seeded desync's first tick in the file (mcap_roundtrip_seeded_desync_first_differs_at_its_tick). Left: GPU timestamp queries behind the GX truth gate, every GPU pass in the capture, tier/VRAM/draw counts in the RA8 manifest (need a GPU).
 - [x] PF9a perf: headless paired-rerun harness (Tracy offline-capture shape, Landed 90eb08c. Tick audit 2026-10-17: crates/perf/tests/w1_pf9a_paired.rs (tick_frame_paired_small_runs_share_one_hash, _receipt_kills_divergence, _600_runs_share_one_hash) and profiler.rs paired receipt tests green in gh-check run 39057250493 (engine-perf).
   zero Tracy bytes; method reference `wolfpld/tracy@afb16f68` BSD-3-Clause,
   `capture/`+`csvexport/` pattern only). Tier B. Size S. Owns
@@ -507,4 +507,4 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   pilot-only.)
 - [x] SG1 arena: throwable spear grapple authority - THROW_SPEAR button bit 0x10, swept tip against fighter capsules and walls, tether reels the thrower then the pair share momentum toward the spear end, wall hit zips the thrower, guard/parry/timeout/KO/release end it; opt-in `MatchSpec::spear`, off means masked and unhashed. Tier A. Size M. Owns `crates/arena/src/spear.rs`, `crates/net/src/session/spear_tests.rs`. Accept: spear scenario tests in `crate::spear::tests`, `live::spear_tests` 600-tick digest identical twice and across tape replay, net rollback and lobby refusal, golden d57b5c8ae3096614 and arena digest d29b3b17bbd3b244 unchanged. needs: none. Landed 2dedab1b. Proof: engine-arena + engine-input tests run 39074617752, engine-net spear 4 passed run 39072779205, clippy run 39075934041, golden_hash_untouched run 39073693190. Plan docs/plan/spear-grapple.md.
 - [x] SG2 game: spear grapple presentation - physfx tether rope and carry_ragdoll, spear_look.rs (flying spear, trail, stuck, dropped, rope slack and taut), ragdoll tow along the authority track then land and get up, Q throws in the arena window with `--spear`, `--spear-demo` auto-throws, feel and audio cues, `spear= tether=` on the view line. Tier A. Size M. Owns `crates/physfx/src/tether.rs`, `crates/game/src/spear_look.rs`. Accept: physfx tether tests, six spear_look tests on a real match, ragdoll_look tow test, capture shows a tethered airborne pair. needs: SG1. Landed 736bf9ea. Proof: engine-game --features app --lib 661 passed on the runner, arena bin 71 passed, physfx clippy runs 39072040021 and 39076389088, capture target/captures/spear-grapple-tether.png.
-- [ ] SG3 game: spear grapple polish and proof - throw wind-up and release animation layer as a pure masked override in crates/anim, rope and held spear tied to the real hand joint, a hand-played keyboard run, the spear in the web build, a release arena.exe rebuilt for play-arena.bat. Tier B. Size M. Owns `crates/anim` hunks, `crates/game/src/spear_look.rs`. Accept: capture of the wind-up frame, a keyboard run log with at least one tow, web page spear= tether= line. needs: SG2.
+- [ ] SG3 game: spear grapple polish and proof - throw wind-up and release animation layer as a pure masked override in crates/anim, rope and held spear tied to the real hand joint, a hand-played keyboard run, the spear in the web build, a release arena.exe rebuilt for play-arena.bat. Tier B. Size M. Owns `crates/anim` hunks, `crates/game/src/spear_look.rs`. Accept: capture of the wind-up frame, a keyboard run log with at least one tow, web page spear= tether= line. needs: SG2. Progress 2026-10-18: game half committed 6b9bf722 (fighter_look_throw.rs plus hunks in fighter_look.rs, spear_look.rs, spear_window.rs); the app lib tests for fighter_look, spear_look, spear_window pass locally (146 passed, with ragdoll_look). Left: wind-up capture, keyboard run, web line, release arena.exe check.

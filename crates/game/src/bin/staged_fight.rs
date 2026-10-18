@@ -196,6 +196,21 @@ struct FightReport {
     sequence_fnv: String,
 }
 
+/// Who landed damage in the bout, from the final hp alone (PB52): the hero
+/// (slot 0) untouched while the others took damage is a shutout. The receipt
+/// names it, so a reader never mistakes a one-sided staged fight for a duel.
+fn exchange_kind(hp: &[u16]) -> &'static str {
+    let full = engine_combat::fight::MAX_HP_PERMILLE;
+    let hero_hurt = hp.first().is_some_and(|hp| *hp < full);
+    let others_hurt = hp.iter().skip(1).any(|hp| *hp < full);
+    match (hero_hurt, others_hurt) {
+        (false, true) => "hero-vs-dummies",
+        (true, true) => "both-ways",
+        (true, false) => "hero-hit-only",
+        (false, false) => "no-damage",
+    }
+}
+
 /// Receipt JSON: fixed field order, file names only (no absolute paths), so
 /// the same fight gives byte-identical receipts twice.
 fn receipt_json(bindings: &[FighterBinding], config: GameConfig, report: &FightReport) -> String {
@@ -238,7 +253,11 @@ fn receipt_json(bindings: &[FighterBinding], config: GameConfig, report: &FightR
         }
         out.push_str(&hp.to_string());
     }
-    out.push_str(&format!("],\"final_hash\":\"{:016x}\"", report.final_hash));
+    out.push_str(&format!(
+        "],\"exchange\":\"{}\",\"final_hash\":\"{:016x}\"",
+        exchange_kind(&report.hp),
+        report.final_hash
+    ));
     out.push_str(&format!(
         ",\"captures\":{{\"dir\":\"{CAPTURES_DIR}\",\"frames\":{},\"manifest\":\"{}\",\"sequence_fnv\":\"{}\",\"renderer\":\"{STAGED_RENDERER}\"}}",
         report.capture_frames, report.capture_manifest, report.sequence_fnv
@@ -786,6 +805,36 @@ mod tests {
         rest[..end]
             .parse()
             .unwrap_or_else(|_| panic!("{key} is not a number:\n{receipt}"))
+    }
+
+    /// PB52: the staged bout is a shutout (the hero ends at full hp, the three
+    /// others at zero), and the receipt says so instead of reading as a duel.
+    #[test]
+    fn staged_receipt_declares_who_landed_damage() {
+        assert_eq!(exchange_kind(&[1000, 0, 0, 0]), "hero-vs-dummies");
+        assert_eq!(exchange_kind(&[600, 0, 1000, 0]), "both-ways");
+        assert_eq!(exchange_kind(&[300, 1000, 1000, 1000]), "hero-hit-only");
+        assert_eq!(exchange_kind(&[1000; 4]), "no-damage");
+        assert_eq!(exchange_kind(&[]), "no-damage");
+        let (stats, hp, hash) = run_full_fight();
+        let bindings = fighter_bind::bind_all(&fighters_content_dir()).expect("CT7 manifest binds");
+        let receipt = receipt_json(
+            &bindings,
+            four_fighter_config(DEFAULT_TICKS),
+            &FightReport {
+                stats,
+                hp,
+                final_hash: hash,
+                capture_frames: 4,
+                capture_manifest: FRAMES_MANIFEST_NAME.to_string(),
+                sequence_fnv: "0".repeat(16),
+            },
+        );
+        assert!(
+            receipt.contains("\"final_hp\":[1000,0,0,0],\"exchange\":\"hero-vs-dummies\""),
+            "the filed fight is a declared shutout:
+{receipt}"
+        );
     }
 
     /// The receipt names every cue kind the fold counts, so `cues` closes

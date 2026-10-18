@@ -25,14 +25,17 @@ use engine_endpoint::{
 /// pack's own +1 was already counted. The two cast verbs
 /// (`physics.raycast`, `physics.shapecast`) then moved every arm up by two.
 /// `scene.next` (SPX4, the scene pack's seventh verb) moved every arm up by one.
+/// `wound.table.get` (BX39, the break pack's fourth verb) moved every arm up by one.
+/// `scene.pick` (EV21, the scene pack's eighth verb) moved every arm up by one.
+/// `play.sweep` (GS33, the play pack's fourth verb) moved every arm up by one.
 #[cfg(not(any(feature = "rules", feature = "intake")))]
-const EXPECTED_ROUTER: usize = 62;
-#[cfg(all(feature = "rules", not(feature = "intake")))]
 const EXPECTED_ROUTER: usize = 65;
+#[cfg(all(feature = "rules", not(feature = "intake")))]
+const EXPECTED_ROUTER: usize = 68;
 #[cfg(all(feature = "intake", not(feature = "rules")))]
-const EXPECTED_ROUTER: usize = 63;
-#[cfg(all(feature = "rules", feature = "intake"))]
 const EXPECTED_ROUTER: usize = 66;
+#[cfg(all(feature = "rules", feature = "intake"))]
+const EXPECTED_ROUTER: usize = 69;
 
 #[test]
 fn frozen_registry_pins_26_and_router_is_pinned() {

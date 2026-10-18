@@ -1,6 +1,8 @@
 //! schedule: fixed-order phases. std-only, deterministic.
 use crate::archetype::World as ArchetypeWorld;
 use crate::arena::{ArenaError, PhaseArena};
+use engine_core::checked::{f32_from_f64, f64_from_u64};
+use engine_core::time::quantize_wall_secs;
 use engine_core::Rng;
 /// Column mask for read/write sets: bit 1 is Position, bit 2 is Velocity.
 /// Zero touches no hashed column and keeps existing callers building.
@@ -32,10 +34,26 @@ pub fn changed_since(stamp: Tick, since: Tick) -> bool {
     let d = stamp.wrapping_sub(since);
     d != 0 && d < Tick::MAX / 2
 }
+/// What a system sees of one tick.
 pub struct Ctx {
     pub tick: Tick,
+    /// Step in seconds for the float systems. NaN on the integer-ns path
+    /// ([`Schedule::run_ns`]), so a system that reads it there corrupts its
+    /// own checkpoint instead of drifting quietly.
     pub dt: f32,
+    /// Step in whole nanoseconds: the truth on the ns path, the quantized
+    /// `dt` on the f32 path (0 when `dt` is negative or not finite).
+    pub dt_ns: u64,
     pub phase: Phase,
+}
+/// Whole nanoseconds of an f32 step, 0 for a step that cannot be one.
+fn step_ns_of(dt: f32) -> u64 {
+    quantize_wall_secs(dt).unwrap_or(0)
+}
+/// f32 seconds of a nanosecond step, the one place the ns step turns into
+/// float seconds (for the float columns of the legacy world).
+pub fn step_secs(dt_ns: u64) -> f32 {
+    f32_from_f64(f64_from_u64(dt_ns) / 1_000_000_000.0)
 }
 type SysFn<W> = Box<dyn FnMut(&mut W, &mut Ctx)>;
 struct Sys<W> {
@@ -262,6 +280,15 @@ impl<W> Schedule<W> {
         }
     }
     pub fn run(&mut self, world: &mut W, dt: f32) {
+        self.run_with(world, dt, step_ns_of(dt));
+    }
+    /// Run one tick of `dt_ns` whole nanoseconds. Systems read
+    /// [`Ctx::dt_ns`]; [`Ctx::dt`] is NaN here, so float dt in this path
+    /// fails loudly. Same phases, order and edges as [`Schedule::run`].
+    pub fn run_ns(&mut self, world: &mut W, dt_ns: u64) {
+        self.run_with(world, f32::NAN, dt_ns);
+    }
+    fn run_with(&mut self, world: &mut W, dt: f32, dt_ns: u64) {
         self.tick = self.tick.wrapping_add(1);
         let t = self.tick;
         for ph in Phase::ORDER {
@@ -276,6 +303,7 @@ impl<W> Schedule<W> {
                 let mut cx = Ctx {
                     tick: t,
                     dt,
+                    dt_ns,
                     phase: ph,
                 };
                 let sys = &mut self.systems[idx];
@@ -314,6 +342,28 @@ impl Schedule<ArchetypeWorld> {
         arena: &mut PhaseArena,
         dt: f32,
     ) -> Result<u64, ArenaError> {
+        self.arena_tick(world, arena, dt, step_ns_of(dt))
+    }
+
+    /// [`Schedule::run_arena_tick`] with the step in whole nanoseconds: the
+    /// spine path. Systems read [`Ctx::dt_ns`] ([`Ctx::dt`] is NaN), the
+    /// checkpoint is the same digest. The f32 path stays for legacy callers.
+    pub fn run_arena_tick_ns(
+        &mut self,
+        world: &mut ArchetypeWorld,
+        arena: &mut PhaseArena,
+        dt_ns: u64,
+    ) -> Result<u64, ArenaError> {
+        self.arena_tick(world, arena, f32::NAN, dt_ns)
+    }
+
+    fn arena_tick(
+        &mut self,
+        world: &mut ArchetypeWorld,
+        arena: &mut PhaseArena,
+        dt: f32,
+        dt_ns: u64,
+    ) -> Result<u64, ArenaError> {
         world.advance();
         self.tick = self.tick.wrapping_add(1);
         let t = self.tick;
@@ -328,6 +378,7 @@ impl Schedule<ArchetypeWorld> {
                 let mut cx = Ctx {
                     tick: t,
                     dt,
+                    dt_ns,
                     phase: *ph,
                 };
                 let sys = &mut self.systems[idx];
@@ -591,6 +642,84 @@ mod tests {
         }
         assert!(saw_noop_first, "shuffle never reordered the free pair");
         assert_ne!(first, 0, "script never moved the checkpoint");
+    }
+    /// Eight seeded movers and a presized arena for the ns A/B.
+    fn ns_ab_world() -> (ArchetypeWorld, crate::archetype::Entity, PhaseArena) {
+        use crate::archetype::{Position, Velocity};
+        let mut world = ArchetypeWorld::new();
+        world.reserve(16);
+        let mut first = None;
+        for i in 0..8 {
+            let f = i as f32;
+            let e = world.spawn(
+                Some(Position { x: f, y: -f }),
+                Some(Velocity { x: 0.5, y: 0.25 }),
+            );
+            first.get_or_insert(e);
+        }
+        let mut arena = PhaseArena::with_capacity(16, 2048);
+        arena.reserve(16, 2048);
+        (world, first.expect("spawned"), arena)
+    }
+    #[test]
+    fn ns_path_checkpoint_equals_the_f32_path_x2() {
+        use engine_core::time::STEP_NS;
+        for _ in 0..2 {
+            let (mut a, ea, mut arena_a) = ns_ab_world();
+            let (mut b, eb, mut arena_b) = ns_ab_world();
+            let mut legacy: Schedule<ArchetypeWorld> = Schedule::new();
+            legacy.add_system(Phase::Update, "integrate", |w, cx| w.integrate(cx.dt));
+            let mut spine: Schedule<ArchetypeWorld> = Schedule::new();
+            spine.add_system(Phase::Update, "integrate", |w, cx| w.integrate_ns(cx.dt_ns));
+            let want = legacy
+                .run_arena_tick(&mut a, &mut arena_a, step_secs(STEP_NS))
+                .expect("fits");
+            let got = spine
+                .run_arena_tick_ns(&mut b, &mut arena_b, STEP_NS)
+                .expect("fits");
+            assert_eq!(got, want, "ns path and f32 path agree on one tick");
+            assert_eq!(a.get_pos(ea), b.get_pos(eb));
+            assert!(a.get_pos(ea).expect("live").x > 0.0, "the tick moved it");
+        }
+    }
+    #[test]
+    fn float_dt_in_the_ns_path_fails_the_checkpoint() {
+        use engine_core::time::STEP_NS;
+        let (mut good, eg, mut arena_g) = ns_ab_world();
+        let (mut bad, eb, mut arena_b) = ns_ab_world();
+        let mut spine: Schedule<ArchetypeWorld> = Schedule::new();
+        spine.add_system(Phase::Update, "integrate", |w, cx| w.integrate_ns(cx.dt_ns));
+        // The same system written against the float dt: on the ns path the
+        // float is NaN, so the world breaks and the A/B names it.
+        let mut float_reader: Schedule<ArchetypeWorld> = Schedule::new();
+        float_reader.add_system(Phase::Update, "integrate", |w, cx| w.integrate(cx.dt));
+        let want = spine
+            .run_arena_tick_ns(&mut good, &mut arena_g, STEP_NS)
+            .expect("fits");
+        let got = float_reader
+            .run_arena_tick_ns(&mut bad, &mut arena_b, STEP_NS)
+            .expect("fits");
+        assert_ne!(got, want, "a float dt on the ns path moves the checkpoint");
+        assert!(bad.get_pos(eb).expect("live").x.is_nan());
+        assert!(good.get_pos(eg).expect("live").x.is_finite());
+    }
+    #[test]
+    fn systems_read_ns_on_both_paths() {
+        let seen: Rc<RefCell<Vec<(u64, bool)>>> = Rc::new(RefCell::new(vec![]));
+        let log = Rc::clone(&seen);
+        let mut s: Schedule<()> = Schedule::new();
+        s.add_system(Phase::Update, "read", move |(), cx| {
+            log.borrow_mut().push((cx.dt_ns, cx.dt.is_nan()));
+        });
+        s.run(&mut (), 0.0625);
+        s.run(&mut (), -1.0);
+        s.run(&mut (), f32::NAN);
+        s.run_ns(&mut (), 5);
+        assert_eq!(
+            *seen.borrow(),
+            vec![(62_500_000, false), (0, false), (0, true), (5, true)],
+            "f32 path quantizes, bad steps give 0 ns, the ns path poisons dt"
+        );
     }
     #[test]
     fn arena_tick_skips_settled_tail_census_when_no_kills() {

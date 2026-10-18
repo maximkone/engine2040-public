@@ -78,8 +78,10 @@ weight, `zero at` scores nothing; weights sum to 100.
 | undoc_pub | 4 | 5% | 50% | agents and users read docs (M-DESIGN-FOR-AI) |
 | tests | 8 | 10/k | 0 | behavior coverage (higher is better) |
 
-`waivers` (`// det-ok:`, `// alloc-ok:`) and `unsafe` are counted and
-ratcheted with zero weight: every one is visible and budgeted.
+`waivers` (`// det-ok:`, `// alloc-ok:`), `unsafe` and `float_math` (platform
+`sin`, `cos`, `exp`, `powf` ... in a simulation crate, scored by the same
+scanner as workspace-check; `Fixed` math passes) are counted and ratcheted
+with zero weight: every one is visible and budgeted.
 
 ## 4. The bar by layer
 

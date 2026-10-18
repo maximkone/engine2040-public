@@ -1,11 +1,13 @@
 // Arena content gates (CT82 manifest, CT45 PBR/HDRI VRAM report, CT77 src receipt).
 //   node tools/arena-report.mjs           check; exit 1 when a gate or a generated block is stale
 //   node tools/arena-report.mjs --write   rewrite the generated blocks, then check
-// content/arena/manifest.json is the one truth for the generated kit bytes.
-// This tool only reads it; refreshing the hashes is gen.mjs's job (the row
-// freezes manifest.json and report.json). The two night/sunset HDRIs live in
-// content/local/hdri (SIZE-BUDGET.md moved them out of git) and still count.
-import { existsSync, readdirSync } from "node:fs";
+//   node tools/arena-report.mjs --refresh rewrite the bytes and sha256 of drifted manifest rows, then check
+// content/arena/manifest.json is the one truth for the kit bytes. gen.mjs only
+// writes the flat fallback kit, so a hand-edited file (texture wiring, layout)
+// is re-pinned with --refresh. The two night/sunset HDRIs live in
+// content/local/hdri (SIZE-BUDGET.md moved them out of git): a fresh checkout
+// may lack them, so they are checked when present and pinned by name here.
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { lodTotals } from "./fighter-report.mjs";
@@ -28,6 +30,9 @@ export const SOAK_FIGHTERS = 8;
 /** The crate + torch pair CT77 gates. */
 export const PAIR = ["crate", "torch"];
 
+/** Kit HDRIs that live only in the git-ignored local cache, with their size. The size is pinned so the reports read the same on a fresh checkout. */
+export const LOCAL_ONLY = { "hdri/arena_sunset.hdr": { w: 4096, h: 2048 }, "hdri/arena_night.hdr": { w: 4096, h: 2048 } };
+
 /** Manifest-relative path to the file on disk: the arena tree, else the local HDRI cache. */
 export function arenaPath(rel, root = ARENA, local = LOCAL_HDRI) {
   const here = join(root, rel);
@@ -43,6 +48,7 @@ export function checkManifest(root = ARENA, local = LOCAL_HDRI) {
   const { files } = readJson(join(root, "manifest.json"));
   for (const [rel, want] of Object.entries(files)) {
     const got = fileDigest(arenaPath(rel, root, local));
+    if (!got && rel in LOCAL_ONLY) continue;
     if (!got) problems.push(`${rel}: missing on disk`);
     else if (got.bytes !== want.bytes) problems.push(`${rel}: ${got.bytes} bytes on disk, manifest says ${want.bytes}`);
     else if (got.sha256 !== want.sha256) problems.push(`${rel}: sha256 differs from the manifest`);
@@ -55,6 +61,21 @@ export function checkManifest(root = ARENA, local = LOCAL_HDRI) {
   ];
   for (const rel of onDisk) if (!files[rel]) problems.push(`${rel}: on disk but not in the manifest`);
   return problems;
+}
+
+/** Re-pin the bytes and sha256 of every manifest row whose file is on disk and differs. Keys, order and format stay; returns the rows it changed. */
+export function refreshManifest(root = ARENA, local = LOCAL_HDRI) {
+  const path = join(root, "manifest.json");
+  const manifest = readJson(path);
+  const changed = [];
+  for (const [rel, want] of Object.entries(manifest.files)) {
+    const got = fileDigest(arenaPath(rel, root, local));
+    if (!got || (got.bytes === want.bytes && got.sha256 === want.sha256)) continue;
+    manifest.files[rel] = { ...want, ...got };
+    changed.push(rel);
+  }
+  if (changed.length) writeFileSync(path, JSON.stringify(manifest, null, 2));
+  return changed;
 }
 
 /** Problems with the proof report: spatial findings and cook x2 must hold. Empty means clean. */
@@ -72,18 +93,20 @@ function boundMaps() {
   return MATERIALS.flatMap((m) => [`textures/${m}_albedo_2k.jpg`, `textures/${m}_normal_2k.jpg`, `textures/${m}_orm.png`]);
 }
 
-function vramRow(rel, root, local) {
+/** One VRAM row. A local-only HDRI takes its bytes and sha256 from the manifest and its size from LOCAL_ONLY, never from the disk. */
+function vramRow(rel, root, local, want) {
+  const pinned = LOCAL_ONLY[rel];
   const path = arenaPath(rel, root, local);
-  const d = fileDigest(path);
-  const size = d && (rel.endsWith(".hdr") ? hdrSize(path) : imageSize(path));
-  return { rel, d, size, vram: size ? rgba8MipBytes(size.w, size.h) : 0, cached: path.startsWith(local) };
+  const d = pinned ? want : fileDigest(path);
+  const size = pinned ?? (d && (rel.endsWith(".hdr") ? hdrSize(path) : imageSize(path)));
+  return { rel, d, size, vram: size ? rgba8MipBytes(size.w, size.h) : 0, cached: Boolean(pinned) };
 }
 
 /** Per-file VRAM rows plus the bound and active totals for the CT45 report. */
 export function pbrStats(root = ARENA, local = LOCAL_HDRI) {
   const manifest = readJson(join(root, "manifest.json")).files;
   const rels = Object.keys(manifest).filter((r) => /_2k\.jpg$|_orm\.png$|^hdri\/arena_/.test(r));
-  const rows = rels.map((r) => vramRow(r, root, local));
+  const rows = rels.map((r) => vramRow(r, root, local, manifest[r]));
   const bound = new Set(boundMaps());
   const boundVram = rows.filter((r) => bound.has(r.rel)).reduce((s, r) => s + r.vram, 0);
   const hdriVram = rows.find((r) => r.rel === "hdri/arena_day.hdr").vram;
@@ -224,6 +247,7 @@ export function arenaProblems(root = ARENA, local = LOCAL_HDRI) {
 
 if (import.meta.main) {
   const write = process.argv.includes("--write");
+  if (process.argv.includes("--refresh")) for (const rel of refreshManifest()) console.log(`arena-report refreshed ${rel}`);
   const stale = syncBlocks(arenaBlocks(), { write });
   const problems = arenaProblems();
   for (const s of write ? [] : stale) problems.push(`stale generated block ${s}`);

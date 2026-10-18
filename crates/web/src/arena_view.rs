@@ -2,6 +2,7 @@
 //! canvas size for a CSS box, the frame line, the JSON the headless check reads, and the
 //! verdict on a captured frame (WEB5).
 
+use crate::recovery::LossNote;
 use crate::report::Object;
 
 /// Most pixels a frame renders. A 4K tab at a high device pixel ratio would ask for three or
@@ -38,6 +39,37 @@ pub fn frame_size(css_w: f64, css_h: f64, dpr: f64, max_dim: u32) -> (u32, u32) 
         .min(1.0);
     let fit = |px: f64| -> u32 { (px * scale).round().clamp(1.0, limit) as u32 };
     (fit(w), fit(h))
+}
+
+/// [`frame_size`] for a render scale of `scale_pct` percent (QT6): the box in device pixels
+/// (CSS size times `dpr`) times the scale. The scale only lowers the size: a scale over 100 reads
+/// as 100 and one under 1 as 1, so the backing store is never bigger than the CSS box times the
+/// device pixel ratio (the pixel budget and `max_dim` still cap it, as in [`frame_size`]).
+#[must_use]
+pub fn scaled_frame_size(
+    css_w: f64,
+    css_h: f64,
+    dpr: f64,
+    scale_pct: u32,
+    max_dim: u32,
+) -> (u32, u32) {
+    let dpr = if dpr.is_finite() && dpr > 0.0 {
+        dpr
+    } else {
+        1.0
+    };
+    let scale = f64::from(scale_pct.clamp(1, 100)) / 100.0;
+    frame_size(css_w, css_h, dpr * scale, max_dim)
+}
+
+/// True when the page address asks for `name`, as `?name` or `?name=anything` among the other
+/// keys (`?tier=web&freeze`). Only whole keys count: `?freezer` is not `freeze`.
+#[must_use]
+pub fn has_flag(search: &str, name: &str) -> bool {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .any(|pair| pair.split('=').next() == Some(name))
 }
 
 /// What a captured frame showed, in plain numbers (the render crate computes them).
@@ -86,6 +118,14 @@ pub struct Counters {
     pub uncaptured_errors: u64,
     /// Pipelines built after the loader finished (WEB13); 0 on a healthy page.
     pub late_pipelines: u64,
+    /// Fixed simulation steps run (QW11).
+    pub steps: u64,
+    /// The most steps any one frame ran: 1 on a healthy page.
+    pub max_steps_per_frame: u32,
+    /// Frames dropped because they spanned a hidden stretch (QT7).
+    pub hidden_skips: u32,
+    /// Device losses so far, over every device generation (a requested destroy is not one).
+    pub losses: u32,
 }
 
 impl Counters {
@@ -96,7 +136,8 @@ impl Counters {
     }
 }
 
-/// The receipt JSON: the tier, counters, the frame time, the draw count and the first error text.
+/// The receipt JSON: the tier, counters, the frame time, the draw count, the last device loss
+/// (the browser's reason and message, and who ended the device) and the first error text.
 #[must_use]
 pub fn receipt_line(
     tier: &str,
@@ -105,6 +146,7 @@ pub fn receipt_line(
     cpu_ms: f64,
     draws: u32,
     first_error: Option<&str>,
+    last_loss: Option<&LossNote>,
 ) -> String {
     let mut o = Object::new();
     o.bool(
@@ -126,7 +168,18 @@ pub fn receipt_line(
     .uint("latePipelines", counters.late_pipelines)
     .raw("frameMs", &format!("{frame_ms:.2}"))
     .raw("cpuMs", &format!("{cpu_ms:.2}"))
-    .uint("draws", u64::from(draws));
+    .uint("draws", u64::from(draws))
+    .uint("steps", counters.steps)
+    .uint("maxStepsPerFrame", u64::from(counters.max_steps_per_frame))
+    .uint("hiddenSkips", u64::from(counters.hidden_skips))
+    .uint("losses", u64::from(counters.losses));
+    if let Some(loss) = last_loss {
+        let mut note = Object::new();
+        note.str("reason", &loss.reason)
+            .str("cause", loss.cause.word())
+            .str("message", &loss.message);
+        o.raw("lastLoss", &note.finish());
+    }
     if let Some(text) = first_error {
         o.str("firstError", text);
     }
@@ -228,7 +281,7 @@ mod tests {
             frames: 120,
             ..Counters::default()
         };
-        let line = receipt_line("web", &healthy, 16.7, 3.2, 13, None);
+        let line = receipt_line("web", &healthy, 16.7, 3.2, 13, None, None);
         assert!(
             line.contains("\"ok\":true") && line.contains("\"validationErrors\":0"),
             "{line}"
@@ -267,6 +320,7 @@ mod tests {
                 3.2,
                 13,
                 Some("bind group \"x\" is invalid"),
+                None,
             );
             assert!(line.contains("\"ok\":false"), "{line}");
             assert!(line.contains("firstError"), "{line}");
@@ -278,8 +332,99 @@ mod tests {
             deferred_validation_errors: 3,
             uncaptured_errors: 4,
             late_pipelines: 0,
+            ..Counters::default()
         };
         assert_eq!(all.validation_total(), 9, "the three kinds add up");
-        assert!(receipt_line("web", &all, 1.0, 1.0, 1, None).contains("\"validationErrors\":9"));
+        assert!(
+            receipt_line("web", &all, 1.0, 1.0, 1, None, None).contains("\"validationErrors\":9")
+        );
+    }
+
+    #[test]
+    fn the_receipt_carries_the_steps_the_skips_and_the_last_loss_with_its_reason() {
+        let counters = Counters {
+            frames: 300,
+            steps: 290,
+            max_steps_per_frame: 2,
+            hidden_skips: 1,
+            losses: 1,
+            ..Counters::default()
+        };
+        let none = receipt_line("web", &counters, 16.7, 3.2, 13, None, None);
+        for needle in [
+            "\"steps\":290",
+            "\"maxStepsPerFrame\":2",
+            "\"hiddenSkips\":1",
+            "\"losses\":1",
+        ] {
+            assert!(none.contains(needle), "{needle} missing from {none}");
+        }
+        assert!(!none.contains("lastLoss"), "{none}");
+        let loss = LossNote {
+            reason: "unknown".into(),
+            message: "the GPU process \"crashed\"".into(),
+            cause: crate::recovery::Cause::Forced,
+        };
+        let line = receipt_line("web", &counters, 16.7, 3.2, 13, None, Some(&loss));
+        assert!(
+            line.contains(
+                "\"lastLoss\":{\"reason\":\"unknown\",\"cause\":\"forced\",\"message\":\"the GPU process \\\"crashed\\\"\"}"
+            ),
+            "{line}"
+        );
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn a_flag_in_the_address_is_a_whole_key() {
+        assert!(has_flag("?freeze", "freeze"));
+        assert!(has_flag("?tier=web&freeze", "freeze"));
+        assert!(has_flag("freeze=1&tier=web", "freeze"));
+        assert!(!has_flag("?freezer", "freeze"));
+        assert!(!has_flag("?tier=freeze", "freeze"));
+        assert!(!has_flag("", "freeze"));
+    }
+
+    #[test]
+    fn the_backing_size_is_the_scale_times_the_css_box_and_never_above_it() {
+        // A 640x360 box at device pixel ratio 1 and 3.
+        for (dpr, scale, want) in [
+            (1.0, 100, (640, 360)),
+            (1.0, 67, (429, 241)),
+            (1.0, 50, (320, 180)),
+            (3.0, 100, (1920, 1080)),
+            (3.0, 67, (1286, 724)),
+            (3.0, 50, (960, 540)),
+        ] {
+            assert_eq!(
+                scaled_frame_size(640.0, 360.0, dpr, scale, 8192),
+                want,
+                "dpr {dpr} scale {scale}"
+            );
+        }
+        // Over every box, ratio and scale: never above the box in device pixels, and a scale over
+        // 100 is the same as 100.
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0), (333.0, 777.0), (1.0, 1.0)] {
+            for dpr in [1.0, 1.25, 2.0, 3.0] {
+                let full = scaled_frame_size(w, h, dpr, 100, 8192);
+                for scale in [0, 1, 10, 50, 67, 99, 100, 101, 150, 100_000] {
+                    let (fw, fh) = scaled_frame_size(w, h, dpr, scale, 8192);
+                    assert!(fw >= 1 && fh >= 1);
+                    assert!(
+                        f64::from(fw) <= (w * dpr).round().max(1.0)
+                            && f64::from(fh) <= (h * dpr).round().max(1.0),
+                        "{w}x{h}@{dpr} scale {scale}: {fw}x{fh}"
+                    );
+                    if scale >= 100 {
+                        assert_eq!((fw, fh), full, "{w}x{h}@{dpr} scale {scale}");
+                    }
+                }
+            }
+        }
+        // A bad ratio reads as 1.
+        assert_eq!(
+            scaled_frame_size(640.0, 360.0, f64::NAN, 100, 8192),
+            (640, 360)
+        );
     }
 }

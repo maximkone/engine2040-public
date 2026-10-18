@@ -10,9 +10,15 @@
 //! over (list, choice, software flag); the env is read once on the cold
 //! startup path, never per frame. Presentation only, never sim state.
 //! Consumer: `presenter_pick` lifts wgpu adapters into summaries and picks.
+//! The pick also yields a [`BackendSelection`] report (see `report`).
 
 use std::error::Error;
 use std::fmt;
+
+mod report;
+pub use report::{
+    select, BackendSelection, SelectionError, SelectionPolicy, SelectionRequest, SelectionSource,
+};
 
 /// Env override naming the wanted adapter (`auto`, `discrete`,
 /// `integrated`, or a name fragment). Unset or empty means auto.

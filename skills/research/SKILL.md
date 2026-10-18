@@ -46,7 +46,7 @@ One experiment. State up front: paper or version, hypothesis, baseline, fixture 
 - Keep negative results. They stop repeated work.
 - Return: patch, commands, baseline and candidate outputs, uncertainty, consumer, and adopt, reject or insufficient evidence.
 
-LADDER: one line per card, spike or reject in `docs/research/LADDER.md` (format at its top; never read the file whole, read one rung with `Select-String -Pattern "^- CARD"`). One dated folder per research dive (`docs/research/<topic>-<date>/`), no loose files. Spike line:
+LADDER rule: every research return (card, steal, spike, reject) adds at least one line to `docs/research/LADDER.md` in the same commit, format at its top. A return with no LADDER line is not done. Never read the file whole; read one rung with `Select-String -Pattern "^- CARD"`. The retro prints counts per rung from the file: `node tools/ladder-counts.mjs`. One dated folder per research dive (`docs/research/<topic>-<date>/`), no loose files. Spike line:
 
 `- SPIKE | P<n> | <idea> | <source> | <fixture, baseline -> candidate, numbers> | ROW proposal or REJECTED because <numbers>`
 

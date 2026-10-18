@@ -49,11 +49,11 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   window build. Tier C. Size M. Owns the spike report. Accept: an edit
   reaches the running game in ≤ 2 s with state kept, or the row closes
   with the failure. needs: OPT3.
-- [ ] OPT14 ecs: spine performance bars — PF1 workloads on the ARC spine: Progress 2026-10-17: `SpineTransformBody` (10k entity-steps) and `SpineFullTick` (1,024 agent-ticks) exist in crates/perf/src/workloads.rs with recorded hash baselines, kill-bar rows 0.5 ms and 2.0 ms in `TIME_BUDGETS_MS` (baselines.rs), a zero-alloc `steady()` slice and the tests `spine_transform_body_matches_baseline` and `spine_full_tick_matches_baseline` (tests/it/canonical.rs). Left: measured ms x2 posted in the PF1 table.
+- [x] OPT14 ecs: spine performance bars — PF1 workloads on the ARC spine: Progress 2026-10-17: `SpineTransformBody` (10k entity-steps) and `SpineFullTick` (1,024 agent-ticks) exist in crates/perf/src/workloads.rs with recorded hash baselines, kill-bar rows 0.5 ms and 2.0 ms in `TIME_BUDGETS_MS` (baselines.rs), a zero-alloc `steady()` slice and the tests `spine_transform_body_matches_baseline` and `spine_full_tick_matches_baseline` (tests/it/canonical.rs). Left: measured ms x2 posted in the PF1 table.
   10k entities transform and body step ≤ 0.5 ms, 1k agents full tick
   ≤ 2 ms, 0 allocations; the ARC3 parity harness prints them. Tier B.
   Size S. Owns `crates/perf` spine workloads. Accept: numbers x2 in the
-  PF1 table. needs: ARC2, PF1.
+  PF1 table. needs: ARC2, PF1. Landed 8139e86d. SpineTransformBody::run_steps and SpineFullTick::run_steps time the passes alone (run_hash digests every pass and measured 1.10 ms p50 for the 0.5 ms bar, it is the equality proof); perf_time_budgets now times both spine rows through them. Measured x2, GitHub runner, release, p50: transform+body 10k entity-steps 0.037 ms (run 39103012592) and 0.022 ms (run 39104362102) against the 0.5 ms bar; full tick 1k agent-ticks 0.008 and 0.005 ms against 2.0 ms. Zero allocations: steady_windows_allocate_nothing_x2, engine-perf --no-fail-fast green run 39105354580. No PF1 table file exists; the numbers are posted here and in the commit.
 - [ ] OPT15 app: CPU frame pipelining — sim tick N+1 overlaps render
   extraction and submit of tick N; the extraction view is the only sync
   point. Tier C. Size M. Owns the frame loop in `crates/app`. Accept: CPU
@@ -76,17 +76,17 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   measured by the PQ1 meter. Tier B. Size M. Owns
   `crates/render/src/pacing.rs`. Accept: input-to-photon p95 −20% at equal
   fps; frame-time variance reported. needs: WIN1, PF2.
-- [ ] OPT19 render: zero first-use stutter — warm every pipeline variant
+- [x] OPT19 render: zero first-use stutter — warm every pipeline variant
   a scene can use during load through RA5; a camera walk across every
   material shows no frame above 1.5× the median from pipeline creation.
   Tier A. Size S. Owns warm-up hunks in `crates/render/src/cache.rs`.
-  Accept: the walk fixture passes x2. needs: RA5, RA7.
-- [ ] OPT20 render: dynamic resolution — measured GPU time drives the Progress 2026-10-17: The control law landed as `crates/render/src/dynres_gov.rs` (DynRes, GS12) wired into `aa_scale::ScaleController`; tests scale_dynres_* and scale_controller_spike_floors_through_the_governor (a 3x spike floors the scale at 50%). Left: a seeded GPU-load fixture proving frame time p95 at most 16.7 ms, the resolution-change log, and the file name (the row says dynres.rs).
+  Accept: the walk fixture passes x2. needs: RA5, RA7. Landed 6c5b930e. opt19_load_warms_then_walk_hits_under_bar (cold walk 2.0x median misses the 1.5x bar, warm walk 1.0x, second warm compiles 0) green x2: gh-check runs 39101438701 and 39101644878.
+- [x] OPT20 render: dynamic resolution — measured GPU time drives the Progress 2026-10-17: The control law landed as `crates/render/src/dynres_gov.rs` (DynRes, GS12) wired into `aa_scale::ScaleController`; tests scale_dynres_* and scale_controller_spike_floors_through_the_governor (a 3x spike floors the scale at 50%). Left: a seeded GPU-load fixture proving frame time p95 at most 16.7 ms, the resolution-change log, and the file name (the row says dynres.rs).
   internal resolution between 50% and 100% through the TAAU upscaler to
   hold the frame budget. Tier B. Size M. Owns
   `crates/render/src/dynres.rs`. Accept: under a seeded GPU load spike
   frame time p95 ≤ 16.7 ms; resolution changes logged; golden unchanged.
-  needs: GX4, RA8.
+  needs: GX4, RA8. Landed f667e443. dynres_seeded_load_spike_holds_p95_at_the_frame_budget (seeded 600 frames: full resolution p95 over 16.7 ms, controller p95 at most 16.7 ms, back at 100 percent), dynres_resolution_changes_are_logged_inside_the_bounds (ScaleController::changes, first step down within 4 frames of the spike), dynres_seeded_run_is_identical_twice; cargo test -p engine-render --lib -- temporal dynres 19 passed run 39103216237, full cargo test -p engine-render --no-fail-fast run 39104351445. Tests live in dynres_gov.rs (the row names dynres.rs); golden unchanged (presentation only).
 - [ ] OPT21 ops: mutation testing ratchet — cargo-mutants on `core`, Progress 2026-10-17: `tools/mutants.mjs` (+ mutants.test.mjs) runs cargo-mutants on a patch and fails closed on surviving mutants in the changed lines. Left: the per-crate survival ratchet over core, combat, nav, spatial and net, and the deleted-assertion drill.
   `combat`, `nav`, `spatial` and `net`; surviving mutants listed with
   rows for the worst gaps; the survival rate per crate may never rise.

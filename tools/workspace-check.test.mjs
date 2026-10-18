@@ -279,7 +279,7 @@ test("GE2: playtest replay.rs names no genre identifier (neutral BodyTape)", { s
 test("workspace-check runs both gates through the shared scanner", () => {
   const gate = readFileSync(new URL("./workspace-check.mjs", import.meta.url), "utf8");
   assert.match(gate, /platformMathHits\(/);
-  assert.match(gate, /genreHits\(/);
+  assert.match(gate, /genreFindings\(/);
   assert.doesNotMatch(gate, /split\("#\[cfg\(test\)\]"\)\[0\]/, "raw cfg(test) split would bypass comment masking");
 });
 

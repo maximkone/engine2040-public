@@ -15,7 +15,7 @@ use wtransport::error::ConnectingError;
 use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, VarInt};
 
-use super::cert::{PinnedCert, MAX_VALIDITY_DAYS};
+use super::cert::{PinnedCert, MINT_VALIDITY_DAYS};
 use super::{
     decode_header, encode_message, DepartReason, Departure, WtServer, FRAME_HEADER_LEN,
     MAX_SESSIONS, RELIABLE_FRAMES, SESSION_PATH,
@@ -57,7 +57,7 @@ fn loopback() -> SocketAddr {
 }
 
 fn mint() -> PinnedCert {
-    PinnedCert::mint(["localhost", "127.0.0.1"], MAX_VALIDITY_DAYS).expect("mint a certificate")
+    PinnedCert::mint(["localhost", "127.0.0.1"], MINT_VALIDITY_DAYS).expect("mint a certificate")
 }
 
 /// Scripted snapshot of one tick: every fighter moves, some fields change on

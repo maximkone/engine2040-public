@@ -7,22 +7,22 @@ write; NS prefix verified free). Each Accept: F2P test + P2P golden
 
 Physics (extends PX1, BX4, BX12, DX5, BX13):
 
-- [ ] NS1 physics: articulated chains as one constraint graph — winch plus
+- [x] NS1 physics: articulated chains as one constraint graph — winch plus
   rope plus load (chariot trace, portcullis lift) with integer servo targets
   and canonical solve order. Size M. Owns hunks beside
   `crates/physics/src/powered.rs`. Accept: F2P `cargo test -p
   engine-physics --lib articulated` green (3-chain lift, same ticks x2
-  shuffled); P2P golden `d57b5c8ae3096614` unchanged. needs: PX1.
-- [ ] NS3 physics: ragdoll-vs-ragdoll clinch contacts — two clinching Progress 2026-10-17: `resolve_spacing` in crates/physics/src/ragdoll.rs parts clinched bone pairs and the 660-tick clinch tape runs in ragdoll_tape.rs (it reports floor penetration only). Left: a fighter-vs-fighter max-penetration under 1 cm test x2 shuffled.
+  shuffled); P2P golden `d57b5c8ae3096614` unchanged. needs: PX1. Landed 078fd79. cargo test -p engine-physics --lib articulated: articulated_three_chain_lift_raises_the_platform_the_same_way_x2_shuffled (3 chains x 3 links, 200 kg platform, replay + 8 shuffled builds give the same lift tick, height and hash) and 5 more, local run; golden untouched (std-only module, no caller yet).
+- [x] NS3 physics: ragdoll-vs-ragdoll clinch contacts — two clinching Progress 2026-10-17: `resolve_spacing` in crates/physics/src/ragdoll.rs parts clinched bone pairs and the 660-tick clinch tape runs in ragdoll_tape.rs (it reports floor penetration only). Left: a fighter-vs-fighter max-penetration under 1 cm test x2 shuffled.
   fighters separate without interpenetration under canonical (fighter, joint)
   order. Size M. Owns hunks beside `crates/physics/src/ragdoll.rs`. Accept:
   F2P clinch tape max penetration under 1 cm x2 shuffled; P2P golden
-  unchanged. needs: PX1, AR2.
+  unchanged. needs: PX1, AR2. Landed e5cfe68. Local run (GitHub mirror push failing today, see report): ragdoll_tape::tests::clinch_fighters_part_under_a_centimeter_x2_shuffled (clinch overlap 0.0020 m parted vs 0.3000 m unparted; repeat and B-then-A hand-over give the same result) and parting_pushes_two_fighters_that_start_inside_each_other_apart; engine-physics --features rapier --no-fail-fast 252 lib + 17 it passed, clippy -D warnings clean; engine-proof --features ragdoll ragdoll_matrix 5 and golden 5 passed (Ragdoll::step and state_hash untouched).
 - [ ] NS4 proof: joint and contact conformance vs Jolt/Rapier oracles —
   offline oracles only (ideas reimplemented, no bytes), our servos and limits
   inside tolerance. Size S. Owns hunks beside `crates/physics/src/verify.rs`.
   Accept: F2P 50-pose oracle report green with max deviation posted; P2P
-  golden unchanged. needs: PX1.
+  golden unchanged. needs: PX1. Progress 2026-10-18: be32861 tests/it/oracle.rs, 50-pose report printed: servo max dev 0 (Rapier PdController vs pd_raw), contact max dev 3.4e-5 m (parry capsule vs clinch overlap), joint limits 0.65 rad over the table free and 1.10 rad over on a landing (Rapier limits are soft, table is depth only), pinned as a known gap; left: limits inside a tight tolerance (PX9/AD16 joint tables), a Jolt-side oracle.
 
 Animation (extends AN1, AM2, TV1, PX4, LOC2, LMM1, PX1):
 
@@ -30,11 +30,11 @@ Animation (extends AN1, AM2, TV1, PX4, LOC2, LMM1, PX1):
   TV1 edges with balance (PX4) as the veto. Size M. Owns hunks beside
   `crates/anim/src/fbik.rs`. Accept: F2P carry fixture: hands on load, no
   joint over its limit, x2; P2P golden unchanged. needs: TV1, PX4.
-- [ ] NS7 anim: motion-matching style and terrain dials — LM1 integer search
+- [x] NS7 anim: motion-matching style and terrain dials — LM1 integer search
   over style-tagged and slope-tagged clips from the LOC2 bake. Size M. Owns
   hunks beside `crates/anim/src/motion_match.rs`. Accept: F2P style query
   returns style clips 99% of 1,000 seeded searches, byte-equal x2; P2P golden
-  unchanged. needs: LOC2, LMM1.
+  unchanged. needs: LOC2, LMM1. Landed 957936a9. engine-anim --no-fail-fast 443 lib + 8 it passed (run 39106084274), clippy run 39106954469: motion_style a_style_query_returns_style_clips_in_99_percent_of_1000_searches (styled and graded, about a third without the dial), an_off_dial_is_the_plain_search_bit_for_bit, the_same_asks_give_the_same_bytes_twice; motion_match::search is now search_penalized with zero penalty, picks unchanged. No locomotion caller yet: it asks no style.
 - [ ] NS8 anim: live motion tracker driving PX1 servos — games-style tracker
   from mocap clips to servo targets (LMM1 nets stay the offline path). Size
   L. Owns hunks beside `crates/physics/src/powered.rs`. Accept: F2P tracked
@@ -75,22 +75,22 @@ AI-native (extends EV1, MCP5, EA1e, LW5, HS21, CT4):
   `crates/endpoint/src/mcp.rs`. Accept: F2P 20/20 identical across the three
   providers with the ledger diff empty; P2P golden unchanged. needs: EV1,
   MCP5.
-- [ ] NS14 ai: LLM NPC brain with provider-off replay — recorded talk over a
+- [x] NS14 ai: LLM NPC brain with provider-off replay — recorded talk over a
   deterministic tick brain; provider off replays byte-equal. Size L. Owns
   hunks beside `crates/ai/src/mind.rs`. Accept: F2P Roman visit replays x2
   with the provider off, talk log identical; P2P golden unchanged. needs:
-  EA1e, LW5.
-- [ ] NS15 endpoint: refusal catalog growth loop — HS21's 20 adversarial
+  EA1e, LW5. Landed b01c6337 (the brain, adapters, recorded log and replay_offline were built under LW1 to LW10 and the ludus; this adds the Accept test). ludus_npcs roman_visit_talk_log_replays_twice_with_the_provider_off: 20 provider-on visits record 60 talk lines, MindRuntime::replay_offline of that log runs twice with no provider and returns the talk log byte for byte plus the live checkpoint, and one changed line changes the checkpoint; with ludus_providers_off_still_plays and drain_twenty_offline_visits_apply_identically_twice. cargo test -p engine-game --lib ludus_npcs 13 passed, gh run 39106398594. No simulation code touched, golden unchanged.
+- [x] NS15 endpoint: refusal catalog growth loop — HS21's 20 adversarial
   briefs grow from every real refusal with a dated reason; false refusals
   stay 0. Size S. Owns hunks beside `crates/endpoint/src/tool_capabilities.rs`.
   Accept: F2P catalog grows 20 to 30 with 0 legitimate false refusals; P2P
-  golden unchanged. needs: MCP8.
-- [ ] NS16 playtest: brief-to-game bundle that fails a seeded bad build — one
+  golden unchanged. needs: MCP8. Landed 94d3e419. Catalog 20 -> 30 briefs (26 refuse, 87%), ten dated FIELD_BRIEFS, one legitimate brief admitted untagged; catalog_growth_is_dated_and_adds_no_false_refusal, adversarial_suite_refuses_at_least_80pct_and_writes_nothing, refusals_carry_the_right_axis_tag_and_hint green (run 39109659487). The repo keeps no log of client refusals, so the new briefs grow from refusal classes the gate emits; brief 25 found the unbounded unknown-tool echo, now cut to 64 escaped chars.
+- [x] NS16 playtest: brief-to-game bundle that fails a seeded bad build — one
   brief, one seeded-bad variant, the bundle FAILs loud on the bad one and
   PASSes on the good one. Size M. Owns hunks beside
   `crates/playtest/src/brief_eval.rs`. Accept: F2P bad build refused with a
   typed reason, good build passes, x2; P2P golden unchanged. needs: CT4,
-  EV1.
+  EV1. Landed 2089d5bc. brief_eval run_bundle(brief, bad) returns the score or a typed BundleFault (Level, Character, Encounter, Replay{first_bad_tick}, Keypoints); seeded bad builds NoSpawn, NoProse, TamperedTick. Tests bundle_fails_loud_on_each_seeded_bad_build_and_passes_the_good_one (good build passes and is equal x2, each bad build refused with its typed reason x2), tampered_checksum_is_named_by_its_own_tick (EV16 audit names ticks 0, 8, 63, 119 exactly), empty_brief_bundle_is_refused_at_the_level_gate. No simulation code touched, golden unchanged. gh run 39105225319 (engine-playtest --lib highlights brief_eval trajectory scorecard frame_stale: 36 passed, 1 ignored) and full engine-playtest --lib 373 passed, run 39103617132.
 
 Asset generation, intake only (extends CT40, CT28, LOC2, AS1):
 
@@ -134,9 +134,9 @@ Crowds (extends CT64, AU2, NV2, CT25, GA2, AM18, PX16):
   movement under AM18 tiers, nearest-8 equality across tiers. Size M. Owns
   hunks beside `crates/anim/src/locomotion.rs`. Accept: F2P 1,000-agent march
   holds formation at far LOD x2; P2P golden unchanged. needs: GA2, AM18.
-- [ ] NS24 proof: crowd determinism harness — 20k agents, one hash, two PCs.
+- [x] NS24 proof: crowd determinism harness — 20k agents, one hash, two PCs.
   Size S. Owns hunks beside `crates/proof`. Accept: F2P 20k-agent 600-tick
-  tape hashes x2; P2P golden unchanged. needs: PX16.
+  tape hashes x2; P2P golden unchanged. needs: PX16. Landed f6f90aa5. crates/proof/src/crowd.rs: 20,000 agents, 600 ticks, seed 2040, 30 seeded shoves, wake recall 30 of 30, same report x2, one hash pinned at 0x9627a1119822c2e0 (checkpoints every 100 ticks). The pin held on the Linux runner (engine-proof --no-fail-fast 160 passed incl. golden d57b5c8ae3096614, run 39103988897; first crowd run 39103482584 printed the value) and on this Windows PC (local cargo test -p engine-proof --lib crowd, 3 passed) : two machines, one hash. Clippy -D warnings (observe, proof, perf, --no-deps) run 39106155401 because engine-physics door.rs, not mine, fails workspace clippy.
 
 Rules (extends RC5, decision D2 in `FOCUS.md`):
 

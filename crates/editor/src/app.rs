@@ -607,6 +607,9 @@ pub struct SnapshotOutput {
     pub adapter: String,
     /// Driver behind the frame.
     pub driver: String,
+    /// How the adapter was picked and whether that was a fallback (a software
+    /// adapter): the receipt quotes `backend.line()` so a proof can assert it.
+    pub backend: engine_render::adapter::BackendSelection,
     /// wgpu validation errors observed; green means 0.
     pub validation_errors: u32,
 }
@@ -688,6 +691,7 @@ impl ViewportSnapshot {
             draws: out.receipt.draws,
             adapter: out.receipt.adapter,
             driver: out.receipt.driver,
+            backend: presenter.backend_selection().clone(),
             validation_errors: out.receipt.validation_errors,
         })
     }
@@ -875,14 +879,15 @@ impl EditorApp {
                     reason: error.to_string(),
                 })?;
                 self.status = format!(
-                    "snapshot {} ({}x{}, {} draws, {} bytes, {} validation errors, {})",
+                    "snapshot {} ({}x{}, {} draws, {} bytes, {} validation errors, {}, fallback={})",
                     path.display(),
                     out.width,
                     out.height,
                     out.draws,
                     out.png.len(),
                     out.validation_errors,
-                    out.adapter
+                    out.adapter,
+                    if out.backend.fallback_used { "yes" } else { "no" }
                 );
                 Ok(())
             }
@@ -2120,6 +2125,47 @@ mod tests {
                 height: 8
             }
         );
+    }
+
+    /// The snapshot envelope carries the backend report of the presenter that
+    /// drew it, through the production entry (`ViewportSnapshot::capture`).
+    /// Skips without an adapter; `E2040_REQUIRE_GPU=1` turns the skip into a
+    /// failure.
+    #[test]
+    fn snapshot_envelope_carries_the_backend_selection() {
+        use engine_render::adapter::AdapterKind;
+        use engine_render::test_gpu::{require_or_skip, NoAdapter};
+        let mut shell = Shell::new();
+        shell
+            .insert_node(
+                ObjectId::new(),
+                ObjectId::NIL,
+                Transform::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            )
+            .unwrap();
+        let probe = match ViewportSnapshot::new().capture(&shell, 160, 120) {
+            Ok(out) => Ok(out),
+            Err(EditorAppError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".to_string()))
+            }
+            Err(other) => panic!("snapshot must render or report no adapter, got {other}"),
+        };
+        let Some(out) = require_or_skip("snapshot_envelope_carries_the_backend_selection", probe)
+        else {
+            return;
+        };
+        assert_eq!(out.backend.selected.name, out.adapter);
+        assert!(
+            out.backend.requested.is_some(),
+            "the offscreen pick records what it asked for"
+        );
+        assert_eq!(
+            out.backend.fallback_used,
+            out.backend.selected.kind == AdapterKind::Cpu,
+            "a fallback is exactly a software adapter here"
+        );
+        let line = out.backend.line();
+        assert!(line.starts_with("backend: source="), "{line}");
     }
 
     /// Headless dock frame with the live viewport texture: no window, no GPU,

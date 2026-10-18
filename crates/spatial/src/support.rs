@@ -20,7 +20,13 @@
 //!   upper solid, so a wall pipe is neither floating nor sunken.
 //! - A solid with no support, no mount and no ground is a floating base. One
 //!   `supportChain` finding names the base, never the crates stacked on it.
+//! - A solid held by no other solid whose bottom is buried deeper than 15% of
+//!   its own height is sunken: a red `supportChain` row with `b` unset and
+//!   `pct` the depth as a percent of its height. Ground plates are the floor
+//!   itself and never sunken.
 
+use super::checks::{PLATE_H_CM, PLATE_SIDE_CM};
+use super::extent::robust_extent;
 use super::index::{pos_known, size_known, to_cm};
 use super::{Actor, Finding};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +35,8 @@ use std::collections::{BTreeMap, BTreeSet};
 const REST_CM: i32 = 5;
 /// Grounded floor in cm: a bottom at or under this is on the ground.
 const GROUND_CM: i32 = 1;
+/// Burial past this percent of a solid's own height reads sunken.
+const SUNKEN_PCT: i32 = 15;
 
 #[derive(Clone, Copy)]
 struct Solid {
@@ -49,6 +57,12 @@ impl Solid {
     }
     fn area(&self) -> i64 {
         i64::from(self.hi[0] - self.lo[0]) * i64::from(self.hi[2] - self.lo[2])
+    }
+    /// A flat slab that is the floor of the layout.
+    fn is_plate(&self) -> bool {
+        self.h() <= PLATE_H_CM
+            && self.hi[0] - self.lo[0] <= PLATE_SIDE_CM
+            && self.hi[2] - self.lo[2] <= PLATE_SIDE_CM
     }
 }
 
@@ -124,24 +138,31 @@ fn pct(part: i32, whole: i32) -> f32 {
 /// is a yellow `supportChain` row with `b == u32::MAX` and `pct` the number of
 /// solids stacked on it.
 pub fn support_findings(actors: &[Actor]) -> Vec<Finding> {
-    let all = solids(actors);
+    // SPX8: a stray or a 50x backdrop is not a layout piece; it neither floats nor holds.
+    let apart: BTreeSet<u32> = robust_extent(actors)
+        .map(|e| e.excluded.iter().map(|x| x.id).collect())
+        .unwrap_or_default();
+    let all: Vec<Solid> = solids(actors)
+        .into_iter()
+        .filter(|s| !apart.contains(&s.id))
+        .collect();
     let mut out = Vec::new();
     let mut carried_by: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
     let mut bases = Vec::new();
     for up in &all {
         let grounded = up.lo[1] <= GROUND_CM.max(up.h() / 4);
         let (mut supported, mut mounted) = (grounded, false);
-        let mut seated = false;
+        let (mut seated, mut held) = (false, false);
         for low in &all {
             match hold(low, up) {
                 Hold::None => {}
                 Hold::Mount => mounted = true,
                 Hold::Rest => {
-                    supported = true;
+                    (supported, held) = (true, true);
                     carried_by.entry(low.id).or_default().insert(up.id);
                 }
                 Hold::Seat(inset) => {
-                    supported = true;
+                    (supported, held) = (true, true);
                     carried_by.entry(low.id).or_default().insert(up.id);
                     if !seated {
                         seated = true;
@@ -155,7 +176,7 @@ pub fn support_findings(actors: &[Actor]) -> Vec<Finding> {
                     }
                 }
                 Hold::Embed(inset) => {
-                    supported = true;
+                    (supported, held) = (true, true);
                     carried_by.entry(low.id).or_default().insert(up.id);
                     out.push(finding(
                         "supportChain",
@@ -169,6 +190,15 @@ pub fn support_findings(actors: &[Actor]) -> Vec<Finding> {
         }
         if !supported && !mounted {
             bases.push(up.id);
+        }
+        if !held && !mounted && !up.is_plate() && -up.lo[1] * 100 > SUNKEN_PCT * up.h() {
+            out.push(finding(
+                "supportChain",
+                up.id,
+                u32::MAX,
+                pct(-up.lo[1], up.h()),
+                "red",
+            ));
         }
     }
     for base in bases {
@@ -269,6 +299,56 @@ mod tests {
             boxed(2, [0, 100, 0], [100, 100, 100]),
         ];
         assert_eq!(run(&stack), vec![]);
+    }
+
+    #[test]
+    fn support_chain_reads_a_buried_base_as_sunken_past_15_percent() {
+        let sunk = |depth: i32| run(&[boxed(1, [0, -depth, 0], [100, 100, 100])]);
+        assert_eq!(sunk(30), vec![("supportChain", 1, u32::MAX, "red")]);
+        assert_eq!(sunk(16), vec![("supportChain", 1, u32::MAX, "red")]);
+        assert_eq!(sunk(15), vec![], "15% exactly is still on the ground");
+        assert_eq!(sunk(0), vec![]);
+        assert_eq!(
+            support_findings(&[boxed(1, [0, -30, 0], [100, 100, 100])])[0].pct,
+            30.0
+        );
+        // A ground plate is the floor: half buried is its job.
+        assert_eq!(run(&[boxed(1, [0, -5, 0], [4000, 10, 4000])]), vec![]);
+        // A crate held by a solid is judged by that solid, not by the ground.
+        let held = [
+            boxed(1, [0, -200, 0], [100, 100, 100]),
+            boxed(2, [0, -100, 0], [100, 100, 100]),
+        ];
+        assert_eq!(run(&held), vec![("supportChain", 1, u32::MAX, "red")]);
+    }
+
+    #[test]
+    fn support_chain_skips_a_stray_and_a_backdrop() {
+        // 24 crates resting on the ground in a 6 m square.
+        let mut scene: Vec<Actor> = (0..24)
+            .map(|i| {
+                boxed(
+                    i + 1,
+                    [(i as i32 % 6) * 100, 0, (i as i32 / 6) * 100],
+                    [50, 50, 50],
+                )
+            })
+            .collect();
+        assert_eq!(run(&scene), vec![]);
+        // A crate hanging 500 m up is a floating base... unless it is a stray.
+        let mut hanging = boxed(100, [0, 60_000, 0], [50, 50, 50]);
+        scene.push(hanging.clone());
+        assert_eq!(run(&scene), vec![], "a stray is not a floating base");
+        // A 600 m wide plate under the crates is a backdrop: it holds nothing and sinks nothing.
+        scene.pop();
+        scene.push(boxed(101, [-30_000, -300, -30_000], [60_000, 600, 60_000]));
+        assert_eq!(run(&scene), vec![], "a backdrop is not a sunken base");
+        // With fewer than four boxes nothing is excluded, so the same crate floats.
+        hanging.id = 1;
+        assert_eq!(
+            run(&[hanging]),
+            vec![("supportChain", 1, u32::MAX, "yellow")]
+        );
     }
 
     #[test]

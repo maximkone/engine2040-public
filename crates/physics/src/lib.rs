@@ -1,7 +1,14 @@
 //! physics: fixed-dt semi-implicit Euler bodies + AABB overlap query.
 
+/// Winch, rope and load solved as one integer constraint graph in canonical order: tension-only
+/// links, winch servos on rest length, inverse-mass position projection. Std-only.
+pub mod articulated;
 /// Center-of-mass balance core plus stagger response.
 pub mod balance;
+/// Clinch pass for ragdolls that share a place: parts the bone capsules of several fighters in
+/// fighter-id order so none sinks into another. Float, client-side, never hashed.
+#[cfg(feature = "rapier")]
+pub mod clinch;
 /// Presentation cloth for fighter capes and arena banners: CPU Verlet in floats at the fixed
 /// 60 Hz step, per-tier cost table, sleeping when still. Never hashed, never read by the sim.
 pub mod cloth;
@@ -13,6 +20,10 @@ pub mod controller;
 /// Character controller v2: steps, slopes, platforms, ledge sense, pushes.
 /// Integer-millimeter, std-only; arena locomotion walks these walkers.
 pub mod controller2;
+/// Hinged doors with integer angles and states (closed, ajar, open, locked, wedged, trapped,
+/// broken): an outcome table for push, peek, kick, ram, shotgun and charge, nav-link and audio
+/// events, and the collision layer a broken door drops to. Integer, std-only.
+pub mod door;
 /// Canonical island topology plus snapshot bytes the Rapier world checkpoints
 /// through. Std-only; no sim step.
 pub mod islands;
@@ -51,6 +62,9 @@ pub mod rigid;
 /// core: the arena hit pipeline feeds each blow here plus `balance`.
 /// Integer, std-only.
 pub mod stagger_memory;
+/// Stand, crouch and prone capsules, ceiling-blocked stance changes, lean checked against walls and
+/// the weapon raised when its length meets geometry. Integer millimeters, std-only.
+pub mod stance;
 
 pub use rigid::Body;
 

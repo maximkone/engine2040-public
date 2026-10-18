@@ -8,9 +8,13 @@
 // crates/assets/src/provenance.rs `check_record` and names EVERY refusal, not
 // just the first. The gate code itself stays in Rust (CT28); a test pins the
 // SPDX allow-list here against the Rust list. No network, no downloads.
+// The disk column reads the same on every checkout: a git-ignored or local-only
+// file is always "off-tree" (and "DRIFT" when it is present and differs).
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ARENA, arenaPath, LOCAL_HDRI } from "./arena-report.mjs";
+import { ARENA, arenaPath, LOCAL_HDRI, LOCAL_ONLY } from "./arena-report.mjs";
+import { provenanceRows } from "./arena-sources.mjs";
 import { clipRows, FIGHTERS } from "./fighter-report.mjs";
 import { fileDigest, mdTable, readJson, REPO, syncBlocks } from "./content-lib.mjs";
 
@@ -31,6 +35,10 @@ const PBR_SETS = {
   cloth: [POLY("velour_velvet"), "Rico Cilliers (+ colormass)"],
 };
 const SKY = { "arena_day.hdr": "goegap", "arena_sunset.hdr": "venice_sunset", "arena_night.hdr": "moonlit_golf" };
+/** ambientCG names no per-asset author; its pages credit the site and state CC0 (docs.ambientcg.com/license, read 2026-10-18). */
+const AMBIENTCG = "ambientCG";
+/** The vendored 1k studio HDRI; its `.provenance.json` sidecar holds URL, author, SHA and the tracked copies. */
+export const STUDIO_HDRI = "content/incoming/studio_small_09_1k.hdr";
 
 /** Who made an arena manifest file: Poly Haven downloads or the deterministic kit generator. */
 function arenaSource(rel) {
@@ -41,18 +49,34 @@ function arenaSource(rel) {
   return /_orm\.png$/.test(rel) ? ORM : GEN;
 }
 
+/** The subset of `rels` that git ignores. Without git (or with nothing ignored) it is empty. */
+function gitIgnored(repo, rels) {
+  try {
+    return new Set(execFileSync("git", ["check-ignore", "--stdin"], { cwd: repo, input: rels.join("\n"), encoding: "utf8" }).split(/\r?\n/));
+  } catch {
+    return new Set();
+  }
+}
+
 /** One record per shipped asset: {rec, disk} where disk is "match", "DRIFT" or "off-tree". */
 export function auditRecords(repo = REPO) {
   const arena = join(repo, "content", "arena");
   const fighters = join(repo, "content", "fighters");
-  const out = [];
-  const add = (name, src, sha, path) => {
-    const d = path && fileDigest(path);
-    out.push({ rec: { name, url: src.url, spdx: "CC0-1.0", author: src.author, sha }, disk: !d ? "off-tree" : d.sha256 === sha ? "match" : "DRIFT" });
-  };
+  const rows = [];
+  const add = (name, src, sha, path, local = false) => rows.push({ name, src, sha, path, local });
   for (const [rel, f] of Object.entries(readJson(join(arena, "manifest.json")).files)) {
-    add(`content/arena/${rel}`, arenaSource(rel), f.sha256, arenaPath(rel, arena, join(repo, "content", "local", "hdri")));
+    add(`content/arena/${rel}`, arenaSource(rel), f.sha256, arenaPath(rel, arena, join(repo, "content", "local", "hdri")), rel in LOCAL_ONLY);
   }
+  // The VR2 sets: each cooked KTX2 map is credited to the page of the source set it came from.
+  for (const { cells } of provenanceRows(readFileSync(join(arena, "sources", "PROVENANCE.md"), "utf8"))) {
+    for (const kind of ["base", "normal", "orm"]) {
+      const file = `${cells[6].split(" ")[0]}_${kind}.ktx2`;
+      add(`content/arena/cooked/${file}`, { url: cells[1], author: AMBIENTCG }, fileDigest(join(arena, "cooked", file))?.sha256 ?? "", join(arena, "cooked", file));
+    }
+  }
+  // CT80: the studio HDRI is pinned by the sidecar next to the Q1 copy; the arena copy is the same bytes.
+  const hdri = readJson(join(repo, "content", "incoming", "studio_small_09_1k.hdr.provenance.json"));
+  for (const name of [STUDIO_HDRI, ...hdri.copies]) add(name, hdri, hdri.sha256, join(repo, name));
   const man = readJson(join(fighters, "manifest.json"));
   const page = man.sources[0].page;
   const pack = { url: page, author: "System G6 (aka Qoma)" };
@@ -62,7 +86,17 @@ export function auditRecords(repo = REPO) {
   }
   for (const v of man.variants) add(`content/fighters/glb/${v.name}_body.glb`, pack, v.body_glb_sha256, join(fighters, "glb", `${v.name}_body.glb`));
   for (const c of clipRows(fighters)) add(`content/fighters/glb/clips/${c.action}.glb`, pack, c.glb.sha256, join(fighters, "glb", "clips", `${c.action}.glb`));
-  return out;
+  const ignored = gitIgnored(repo, rows.map((r) => r.name));
+  return rows.map(({ name, src, sha, path, local }) => ({
+    rec: { name, url: src.url, spdx: src.spdx ?? "CC0-1.0", author: src.author, sha },
+    disk: diskState(path && fileDigest(path), sha, local || ignored.has(name)),
+  }));
+}
+
+/** The disk column: "DRIFT" when the file is present and differs, "match" for a present tracked file, else "off-tree". */
+export function diskState(digest, sha, outside) {
+  if (digest && digest.sha256 !== sha) return "DRIFT";
+  return digest && !outside ? "match" : "off-tree";
 }
 
 const isDigest = (s) => s.length >= SHA_MIN_LEN && s.length <= SHA_MAX_LEN && /^[0-9a-f]+$/.test(s);
@@ -97,8 +131,9 @@ export function unlistedTrees(repo = REPO) {
   const man = readJson(join(repo, "content", "fighters", "manifest.json"));
   const ignore = readFileSync(join(repo, ".gitignore"), "utf8");
   const trees = man.incoming_files.filter((f) => !f.sha256).map((f) => ({ tree: `content/fighters/${f.path}`, why: f.change, owner: "CT58/CT75" }));
-  if (ignore.includes("content/incoming/")) trees.push({ tree: "content/incoming/", why: "git-ignored; CC0 HDRI there has no manifest SHA in the release set", owner: "CT80" });
+  if (ignore.includes("content/incoming/*")) trees.push({ tree: "content/incoming/", why: "git-ignored dropbox; only the studio HDRI is carved out and listed", owner: "CT80" });
   if (ignore.includes("content/local/")) trees.push({ tree: "content/local/", why: "git-ignored cache; raw donor bytes never ship, only cooked output with provenance", owner: "CT4 flow" });
+  if (existsSync(join(repo, "content", "arena", "sources"))) trees.push({ tree: "content/arena/sources/", why: "raw CC0 ambientCG inputs of the cooked maps; mixed-case names the gate refuses, they never ship", owner: "CT74" });
   return trees;
 }
 

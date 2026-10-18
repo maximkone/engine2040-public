@@ -18,6 +18,11 @@
 //! failing that, the panic of the lowest-numbered job (a fixed choice, not
 //! the first to finish). A worker never dies from a job panic. Dropping the
 //! pool sets shutdown and joins every worker.
+//!
+//! Model check: `RUSTFLAGS="--cfg loom" cargo test -p engine-ecs --lib loom_pool`
+//! runs the scope protocol under [loom](https://docs.rs/loom), which tries
+//! every interleaving of the caller and the worker. A scope that returns
+//! before its last job ran fails it.
 
 use std::any::Any;
 use std::cell::Cell;
@@ -25,8 +30,20 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, OnceLock, PoisonError};
+use std::thread;
+
+// The lock and thread primitives the pool's protocol rests on. Under
+// `--cfg loom` they are loom's mocks, so `loom_pool` below can try every
+// interleaving of the queue, the wait counter and the workers.
+#[cfg(loom)]
+use loom::sync::{Condvar, Mutex, MutexGuard};
+#[cfg(loom)]
+use loom::thread::{Builder, JoinHandle};
+#[cfg(not(loom))]
+use std::sync::{Condvar, Mutex, MutexGuard};
+#[cfg(not(loom))]
+use std::thread::{Builder, JoinHandle};
 
 use crate::jobs::ChunkSize;
 
@@ -160,7 +177,7 @@ impl JobPool {
         pool.workers.reserve_exact(workers);
         for index in 0..workers {
             let shared = Arc::clone(&pool.shared);
-            let handle = thread::Builder::new()
+            let handle = Builder::new()
                 .name(format!("engine-job-{index}"))
                 .spawn(move || worker(&shared))
                 .map_err(|e| PoolError::Spawn {
@@ -433,7 +450,33 @@ impl<'scope, 'env> Scope<'scope, 'env> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, loom))]
+mod loom_pool {
+    use super::*;
+    use loom::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One worker and the helping caller race for two jobs. In every
+    /// interleaving the scope returns only after both jobs ran, and dropping
+    /// the pool joins the worker.
+    #[test]
+    fn loom_pool_scope_returns_after_every_job() {
+        loom::model(|| {
+            let pool = JobPool::new(1).expect("one loom worker starts");
+            let ran = AtomicUsize::new(0);
+            pool.scope(|s| {
+                s.spawn(|| {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                });
+                s.spawn(|| {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                });
+            });
+            assert_eq!(ran.load(Ordering::SeqCst), 2);
+        });
+    }
+}
+
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
     use engine_core::hash_u64s;

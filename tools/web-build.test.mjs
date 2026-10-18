@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BuildError, DIST_FILES, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
-  listFiles, lockedVersion, parseArgs, realDeps, renderHtml, sizeSweep,
+  BuildError, DIST_FILES, PUBLIC_DIRS, PUBLIC_FILES, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
+  checkPublic, listFiles, lockedVersion, nonPublicFiles, parseArgs, realDeps, renderHtml, sizeSweep,
 } from "./web-build.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -279,6 +279,59 @@ test("a wasm-bindgen run that writes the wrong files is caught", () => {
   }
 });
 
+// ---- WEB10: nothing outside the public list ships ----
+
+test("nonPublicFiles: the app files and wasm-bindgen's snippets are public, anything else is not", () => {
+  assert.deepEqual(nonPublicFiles([...DIST_FILES, "snippets/engine-1/inline0.js"]), []);
+  assert.deepEqual(nonPublicFiles(["index.html", ".env", "notes/private.md", "engine_bg.wasm.map", "snippets/a.js"]), [".env", "notes/private.md", "engine_bg.wasm.map"]);
+  // The assembled site adds the handbook and llms.txt for its own check only.
+  assert.deepEqual(nonPublicFiles(["index.html", "docs/api/x.html", "llms.txt", "docs-private.txt"], { files: ["llms.txt"], dirs: ["docs/"] }), ["docs-private.txt"]);
+  assert.deepEqual(nonPublicFiles(["llms.txt"]), ["llms.txt"], "the extras are not public by default");
+  assert.ok(PUBLIC_FILES.includes("engine_bg.wasm") && PUBLIC_DIRS.includes("snippets/"));
+});
+
+test("a fixture bundle with a non-public file is refused, and a clean one passes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "web-public-"));
+  try {
+    for (const f of DIST_FILES) writeFileSync(join(dir, f), "x");
+    assert.doesNotThrow(() => checkPublic(dir));
+    mkdirSync(join(dir, "private"));
+    writeFileSync(join(dir, "private", "key.pem"), "secret");
+    writeFileSync(join(dir, ".env"), "TOKEN=1");
+    assert.throws(() => checkPublic(dir), (e) => e instanceof BuildError && /2 file\(s\) outside the public list: \.env, private\/key\.pem/.test(e.message));
+    assert.doesNotThrow(() => checkPublic(dir, { files: [".env"], dirs: ["private/"] }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("build() refuses a file nobody listed before it touches dist/web", () => {
+  const s = scratch();
+  try {
+    const t = toolchain(s.dir);
+    // wasm-bindgen also writes a source map: not on the public list.
+    const run = (cmd, args, o) => {
+      const r = t.run(cmd, args, o);
+      if (cmd === "wasm-bindgen" && args[0] === "--target") writeFileSync(join(args[args.indexOf("--out-dir") + 1], "engine_bg.wasm.map"), "{}");
+      return r;
+    };
+    mkdirSync(s.out, { recursive: true });
+    writeFileSync(join(s.out, "previous.txt"), "the last build");
+    assert.throws(() => build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(run)), /outside the public list: engine_bg\.wasm\.map/);
+    assert.ok(existsSync(join(s.out, "previous.txt")), "the last build is untouched");
+    // And the same toolchain without the stray file builds.
+    assert.doesNotThrow(() => build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run)));
+  } finally {
+    s.done();
+  }
+});
+
+test("the Pages workflow checks the assembled site for non-public files before it uploads it", () => {
+  const yml = readFileSync(join(REPO, ".github", "workflows", "pages.yml"), "utf8");
+  assert.match(yml, /node tools\/web-build\.mjs --check-public site --allow-dir docs\/ --allow-file llms\.txt/);
+  assert.ok(yml.indexOf("--check-public site") < yml.indexOf("upload-pages-artifact"), "the check runs before the upload");
+});
+
 test("the page contract: canvas, hud, report, fatal message with the browser versions, module import", () => {
   const html = renderHtml(TEMPLATE, "abc");
   assert.match(html, /<canvas id="canvas"/);
@@ -286,6 +339,8 @@ test("the page contract: canvas, hud, report, fatal message with the browser ver
   assert.match(html, /<pre id="golden"/);
   assert.match(html, /body\[data-golden="mismatch"\] #golden/);
   assert.match(html, /<pre id="report"/);
+  // WEB10: the commit the page was built from is on the page, beside the golden line.
+  assert.ok(html.includes('<pre id="build">build: commit abc</pre>'));
   assert.match(html, /id="fatal"[^>]*role="alert"/);
   assert.match(html, /id="fatal-reason"/);
   assert.ok(html.includes('<pre id="input">input: kb=0 mouse=0 pad=0</pre>'));
@@ -325,8 +380,11 @@ test("the real inputs build() reads exist: lock, template, crate manifest, web p
 });
 
 test("parseArgs", () => {
-  assert.deepEqual(parseArgs([]), { out: null, commit: null, optimize: true, ab: false, sweep: null, error: null });
-  assert.deepEqual(parseArgs(["--out", "x", "--commit", "abc", "--no-opt", "--opt-ab"]), { out: "x", commit: "abc", optimize: false, ab: true, sweep: null, error: null });
+  const none = { checkPublic: null, allowDirs: [], allowFiles: [] };
+  assert.deepEqual(parseArgs([]), { out: null, commit: null, optimize: true, ab: false, sweep: null, ...none, error: null });
+  assert.deepEqual(parseArgs(["--out", "x", "--commit", "abc", "--no-opt", "--opt-ab"]), { out: "x", commit: "abc", optimize: false, ab: true, sweep: null, ...none, error: null });
+  assert.deepEqual(parseArgs(["--check-public", "site", "--allow-dir", "docs/", "--allow-file", "llms.txt"]), { out: null, commit: null, optimize: true, ab: false, sweep: null, checkPublic: "site", allowDirs: ["docs/"], allowFiles: ["llms.txt"], error: null });
+  assert.match(parseArgs(["--check-public"]).error, /need a value/);
   assert.deepEqual(parseArgs(["--size-sweep"]).sweep, ["z", "s", "3"]);
   assert.deepEqual(parseArgs(["--size-sweep", "s,2", "--commit", "a"]).sweep, ["s", "2"]);
   assert.match(parseArgs(["--size-sweep", "fast"]).error, /opt-levels/);

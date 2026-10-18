@@ -39,16 +39,16 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   between cells. Accept: `cargo test --release -p engine-destruction --lib fracture_event_budget_one_millisecond -- --ignored --nocapture`
   prints `cells=32` with p99 at most 1000 us (change the test to assert the 32-cell row too); `cargo test -p engine-destruction --lib fracture`
   stays 7 green with the same digests (24-cell hit digest `e8370912b2c4e50a`, grid-2 cache digest `dde9247cb40b3c06`); golden unchanged. needs: DX5.
-- [ ] BX39 endpoint: `wound.table.get` read verb — `crates/endpoint/src/packs/break_.rs` only (one `e2_tool!` block plus one `pack.add(VerbSpec::of::<..>(NAME,
+- [x] BX39 endpoint: `wound.table.get` read verb — `crates/endpoint/src/packs/break_.rs` only (one `e2_tool!` block plus one `pack.add(VerbSpec::of::<..>(NAME,
   PACK, CapabilityCard::Observe)?)` line, copy `hit_simulate`). Tier B. Size S. Owns that file. Returns `engine_combat::limbloss::WoundTable::v1()` fields
   (`blood_full_q16`, `bleed_out_ticks`, per joint stump class and sever shock, thresholds) and `digest` as 16 hex chars. Accept: `cargo test -p
   engine-endpoint --features mcp --lib break_` green with a new test `wound_table_get_returns_v1_and_its_digest`: `bleed_out_ticks == [18000, 5400, 1200]`,
   digest equals `format!("{:016x}", WoundTable::v1().digest())`, the pack lists 4 verbs; `cargo test -p engine-endpoint --features mcp --lib` stays green
-  (396 today); golden unchanged. needs: BX35.
-- [ ] BX40 geo: one parry3d version — `crates/geo/Cargo.toml` line `parry3d = { version = "0.30.2", ...}` to `"0.31.1"`, then `cargo update -p parry3d
+  (396 today); golden unchanged. needs: BX35. Landed 2f2e268f. break_::tests::wound_table_get_returns_v1_and_its_digest and the_pack_registers_four_observe_verbs green, engine-endpoint --features mcp full run (lib 591, it incl. tool_count_pin at 63, doc) gh run 39101575876; no sim code touched.
+- [x] BX40 geo: one parry3d version — `crates/geo/Cargo.toml` line `parry3d = { version = "0.30.2", ...}` to `"0.31.1"`, then `cargo update -p parry3d
   --precise 0.31.1 --offline`. Tier B. Size S. Owns `crates/geo/Cargo.toml` and `Cargo.lock` (the parry3d entries). Rapier 0.36 (landed 2026-10-04) pulls parry3d
   0.31.1, so the lock holds two parry3d versions today. Accept: `cargo tree -d --manifest-path Cargo.toml` lists no `parry3d`; `cargo test -p engine-geo
-  --features collision --lib` green; the V-HACD calls compile unchanged or the renamed parry3d 0.31 calls are fixed in `crates/geo/src`; golden unchanged.
+  --features collision --lib` green; the V-HACD calls compile unchanged or the renamed parry3d 0.31 calls are fixed in `crates/geo/src`; golden unchanged. Landed 187f3d93. crates/geo/Cargo.toml parry3d 0.31.1, Cargo.lock holds one parry3d (cargo tree -d --offline --locked lists none, cargo metadata --locked --offline passes); the V-HACD, convex hull and ray cast calls compiled unchanged; cargo test -p engine-geo --features collision --lib PASS run 39111161217, --features all --no-fail-fast PASS run 39111188497 (lib 66, kit 9, bake numbers unchanged), clippy -D warnings run 39111232660. Cargo.lock edited by hand to the three parry3d hunks because cargo update also moved wgpu-hal to ordered-float 4.6.0.
 - [ ] BX25 proof: Blender-bpy fracture column for BreakBench (G6 vision
   2026-09-29: only Blender `--background --python` +
   `bpy.ops.object.add_fracture_cell_objects` and Houdini HDA are
@@ -110,7 +110,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   quantization, bond arithmetic, tape decode. Tier A. Size M. Owns
   `crates/proof/kani/`. Accept: 20 harnesses pass in CI; each names its kernel
   and bound; a found bug becomes a test row. needs: BX1.
-- [ ] GEO1a dcc: Blender pin and version gate (center note `engine-steal-blender-2026-10-04.md` section 3, rules for B 1
+- [x] GEO1a dcc: Blender pin and version gate (center note `engine-steal-blender-2026-10-04.md` section 3, rules for B 1
   and 6; this is the first leg of the note's GEO1) — new folder `tools/dcc/` with `blender.pin.json`
   (`{"version_prefix":"5.2","exe":"C:/Program Files/Blender Foundation/Blender 5.2/blender.exe","exe_sha256":"<value of
   Get-FileHash -Algorithm SHA256 on that exe>","python":"3.13"}`) and `blender-cook.mjs`. `node tools/dcc/blender-cook.mjs
@@ -122,7 +122,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   Accept: `node --test tools/dcc/blender-cook.test.mjs` 4 tests green: the real 5.2 passes (cold start printed, target
   under 5 s, write the measured value into this row), `--exe "C:/Program Files/Blender Foundation/Blender 5.0/blender.exe"`
   exits 2 with `blender.version_mismatch`, a missing path exits 3, a pin file with a wrong sha exits 2; `node
-  tools/workspace-check.mjs` PASS; golden `d57b5c8ae3096614` unchanged. needs: none. Stop: M 30 min.
+  tools/workspace-check.mjs` PASS; golden `d57b5c8ae3096614` unchanged. needs: none. Stop: M 30 min. Landed 704d8cf3. node --test tools/dcc/blender-cook.test.mjs 4 pass: the real 5.2 passes (version 5.2.0 LTS), the Blender 5.0 install exits 2 blender.version_mismatch (sha differs from the pin), a missing path exits 3 blender.missing, a pin file with a wrong sha exits 2 before Blender starts; a failed or timed-out run exits 1 blender.run_failed, --pin overrides the pin file for the wrong-sha test. Cold start measured with the PC at 98 percent CPU from 17 other agents: 18.07 s first run, 6.68 s inside the test, 5.48 to 5.65 s warm; the 5 s target is not met under that load, re-measure on a quiet PC. node tools/workspace-check.mjs currently FAILs on foreign crates/net/src/guard.rs (unlisted genre assumption FighterInput), nothing in tools/dcc is flagged.
 - [ ] GEO1b dcc: recipe runner for Blender (second leg of the note's GEO1) — `tools/dcc/blender/run_recipe.py` (first
   line a `GPL-3.0-or-later` header comment, imports no engine code, reads `<recipe.json> <out.glb>` after `--`),
   `tools/dcc/recipes/crate.json` (`{"seed":7,"ops":[{"op":"cube","size":[1,1,1]},{"op":"bevel","width":0.05,"segments":2},
@@ -146,8 +146,8 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   kit kit_unwrap_quality -- --nocapture` prints the three numbers per kit primitive (38 lines) and asserts on all 38: fill
   at least 0.55, density_spread at most 0.35, min_gap_texels at least 2.0; if a bound fails, tune `UnwrapOptions::default()`
   (padding, max_cost, brute_force) once, and if it still fails write the measured values into this row and BLOCKERS and
-  stop; `cargo clippy -p engine-geo --all-targets --features all -- -D warnings` clean; golden unchanged. needs: none.
-- [ ] GEO4b geo: LOD error against the engine chain (center note GEO4 accept, the part GEO4 did not measure) — in
+  stop; `cargo clippy -p engine-geo --all-targets --features all -- -D warnings` clean; golden unchanged. needs: none. Progress 2026-10-18 da7a0ae9: UvQuality and quality(unwrap, source) landed with 3 unit tests (uv.rs); kit_unwrap_quality prints the 38 lines: 32 inside fill 0.55 / spread 0.35 / gap 2.0 (worst gap 2.76 banner/0); outside: debris/0 fill 0.453 spread 1.208, debris/1 fill 0.410, debris/2 fill 0.513, debris/3 fill 0.396 spread 0.786, debris/4 fill 0.484, stands/4 fill 0.331. Tuned once as the row says (max_cost 1, 0.5, 0.25, brute_force, padding left at 4; runs 39108371421 and 39108328102): still 4 to 6 outside (brute force best: debris/0 fill 0.501, debris/1 0.433, debris/3 0.425 spread 0.786, debris/4 0.509; max_cost 0.5 made debris/2 spread 5.07), so stopped per this row. The test names the six so a fix or a new miss fails it. BLOCKERS row added.
+- [x] GEO4b geo: LOD error against the engine chain (center note GEO4 accept, the part GEO4 did not measure) — in
   `crates/geo/src/lod.rs` add `pub fn sampled_error(original: &GeoMesh, reduced: &GeoMesh, samples: usize) -> f32`:
   deterministic points (`engine_core::Rng::new(2040)`, triangle chosen by area, barycentric draw) on `reduced`, each
   measured to the nearest point on `original` triangles by brute force, returns the largest distance divided by the
@@ -156,7 +156,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   -- --nocapture` compares `simplify` at 50 percent with `engine_assets::mesh_cook::simplify(mesh, tris / 2)` on the 5 kit
   primitives `crate/0`, `walls/0`, `stands/0`, `torch/0`, `debris/0` (samples 2000 each): geo error at most the engine
   chain's on at least 4 of 5, all 10 numbers printed; unit test `sampled_error_of_a_mesh_against_itself_is_zero`; golden
-  unchanged. needs: none.
+  unchanged. needs: none. Landed da7a0ae9. lod::tests::sampled_error_of_a_mesh_against_itself_is_zero and sampled_error_sees_a_shift_and_a_cut_and_repeats green; kit_lod_error_vs_engine_chain prints all 10 numbers: crate/0 7.96e-17 vs 7.96e-17, walls/0 1.69e-15 vs 1.51e-15, stands/0 9.91e-16 vs 6.78e-16, torch/0 1.24e-15 vs 1.45e-15 (box faces, equal up to float noise, compared with 1e-5 slack), debris/0 0.0547 (100 tris) vs 0.0458 (96 tris) loses: geo at most the engine chain on 4 of 5; run 39110514480, clippy 39110541848.
 - [ ] GEO5b geo: collision concavity metric (center note GEO5 accept, the part GEO5 did not measure) — in
   `crates/geo/src/collision.rs` add `pub fn concavity(mesh: &GeoMesh, parts: &[GeoMesh]) -> f32`: for every vertex of `mesh`
   the distance to the nearest part (0 when inside a part, by the signed volume test against each convex part's planes),
@@ -165,7 +165,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   engine-geo --features all --test kit kit_collision_concavity -- --nocapture` prints one number per kit primitive (38) and
   asserts at most 0.02 on each; the unit test `l_prism_concavity_beats_single_hull` asserts parts of `l_prism(2.0, 1.0, 1.0)`
   score at most 0.02 and its `single_hull` at least 0.10; if a kit mesh fails, lower `HullOptions::default().concavity`
-   once, then write the measured values into this row and stop; golden unchanged. needs: none.
+   once, then write the measured values into this row and stop; golden unchanged. needs: none. Progress 2026-10-18 da7a0ae9: concavity(mesh, parts) landed with unit tests (collision.rs); kit_collision_concavity prints the 38 numbers: 36 at 0.0000, stands/5 and stands/6 at 0.4734 (bar 0.02); the test names those two. Lowering HullOptions concavity to 0.01 once left them at 0.4734 and put 10 more primitives over (sweep run 39109149746), so stopped per this row. Cause: V-HACD at resolution 64 cuts the 0.4 m slab into 16 clusters and loses the thin ones; resolution 128 gives 1 part and 0.0 on both (not run on the other 36 with this metric). The row's l_prism_concavity_beats_single_hull cannot hold as written: one hull contains every vertex of its mesh, so by the vertex-to-part definition it scores 0.0 (pinned by a_single_hull_scores_zero_because_it_holds_every_vertex); a fat hull needs the other direction (part surface to mesh). BLOCKERS row added.
 - [ ] GEO5c geo: visibility-plane convex-decomposition bake beside V-HACD
   (VisACD 2604.04244v1 shape, CPU-only std reimplementation, zero donor
   bytes, OptiX/CUDA ideas only; CuACD LGPL ideas-only, never linked) —
@@ -197,7 +197,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   `char_`, shuffled order with 30 extra finger and twist joints) map all 22 bones to the expected joint on 20 of 20; a
   skeleton with no leg joints returns only the bones it has (no guess, no panic); no duplicate joint index in a result;
   `cargo clippy -p engine-geo --all-targets -- -D warnings` clean; golden unchanged. needs: none.
-- [ ] GEO6b geo: automatic skin weights from bone segments (center note GEO6; a simple, exact base before any heat or
+- [x] GEO6b geo: automatic skin weights from bone segments (center note GEO6; a simple, exact base before any heat or
   geodesic method) — new `crates/geo/src/weights.rs` (std only) with `pub struct BoneSegment { pub head: [f32; 3], pub tail:
   [f32; 3] }` and `pub fn bind_weights(mesh: &GeoMesh, bones: &[BoneSegment]) -> Result<Vec<[(u16, f32); 4]>, GeoError>`: per
   vertex the distance d to each bone segment (closest point on the segment), keep the 4 nearest bones, weight w = 1 / (d +
@@ -206,8 +206,8 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   engine-geo --lib weights` — on `cylinder(0.3, 3.0, 24)` with 3 bones stacked along y: every vertex weight sum within 1e-6
   of 1, at most 4 non-zero influences, 0 unweighted vertices; the vertex nearest bone 1's middle has bone 1 weight at least
   0.9; a vertex at the joint of bone 1 and 2 has both weights between 0.4 and 0.6; result digest equal x2; empty `bones`
-  returns `GeoError::Malformed`; clippy clean; golden unchanged. needs: none.
-- [ ] GEO7a geo: object-space normal baker (center note GEO7, first leg) — new `crates/geo/src/bake.rs` behind feature `bake = Progress 2026-10-17: `crates/geo/src/bake.rs` (`bake_normals`, feature `bake`) exists with 4 unit tests (bad inputs, texel uv, texel dir, dilate). Left: the 256 px sphere accept test (90% coverage, mean angle at most 3 degrees, digest x2) and clippy with `--features bake`.
+  returns `GeoError::Malformed`; clippy clean; golden unchanged. needs: none. Landed da7a0ae9. cargo test -p engine-geo --lib weights: 6 tests on cylinder(0.3, 3.0, 24) with 3 stacked bones (every vertex sums to 1 within 1e-6, at most 4 influences, 0 unweighted, the vertex on bone 1's middle weighs 0.99, the vertex on the joint of bones 1 and 2 splits 0.4965 each, digest equal x2, empty bones is Malformed, equal distances go to the lower bone, NaN bone typed), gh run 39110514480, clippy 39110541848. The cylinder primitive has rings only at its two caps, so the test adds rim rings and two axis vertices; the 0.9 bar holds ON the axis, a rim vertex at the same height gets 0.63 by this formula.
+- [x] GEO7a geo: object-space normal baker (center note GEO7, first leg) — new `crates/geo/src/bake.rs` behind feature `bake = Progress 2026-10-17: `crates/geo/src/bake.rs` (`bake_normals`, feature `bake`) exists with 4 unit tests (bad inputs, texel uv, texel dir, dilate). Left: the 256 px sphere accept test (90% coverage, mean angle at most 3 degrees, digest x2) and clippy with `--features bake`.
   ["collision"]` in `crates/geo/Cargo.toml` (add it to `all`): `pub fn bake_normals(low: &GeoMesh, high: &GeoMesh, size: u32,
   cage: f32) -> Result<NormalMap, GeoError>` with `pub struct NormalMap { pub size: u32, pub rgb: Vec<[u8; 3]>, pub covered:
   Vec<bool> }`: for every texel centre inside a UV triangle of `low` (barycentric from `low.uvs`), take the interpolated
@@ -219,7 +219,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   `size` 256, `cage` 0.2: at least 90 percent of the texels inside UV triangles covered; mean angle between each covered
   texel's decoded normal and the analytic sphere normal (normalized position) at most 3 degrees; digest of `rgb` equal x2;
   at most 5 s in the test profile; if the 3 degrees fail after one cage change (0.1 or 0.3), write the measured angle into
-  this row and stop; clippy clean with `--features bake`; golden unchanged. needs: GEO3.
+  this row and stop; clippy clean with `--features bake`; golden unchanged. needs: GEO3. Landed da7a0ae9. cargo test -p engine-geo --features bake --lib bake PASS run 39109685316 (5 tests): 256 px sphere bake on the sphere's own uvs covers 1.0000 of 57344 texels inside uv triangles, mean angle 1.498 degrees, 0.06 s, rgb digest equal x2; the same on uv::unwrap(&uv_sphere(1.0, 8, 12)) (feature uv, run 39110514480): 49276 texels, 1.0000, 1.578 degrees; cage 0.2 first try; clippy -D warnings --features bake run 39109730725 (texel_dir cut from 9 arguments to 3).
 - [x] GEO8a anim: clip edit verbs trim, retime, cleanup (center note GEO8, first leg; strips and mirror stay open) — new Landed 818b576e. `cargo test -p engine-anim --lib -- edit` 8 passed (trim_keeps_boundary_values, retime_half_gives_exact_ticks, cleanup_drops_collinear_keys, edits_repeat), gh run 39056803048; full `cargo test -p engine-anim` green (390 lib, 1 ignored, doctests 8), gh run 39059034454.
   `crates/anim/src/edit.rs` plus one `pub mod edit;` line in `crates/anim/src/lib.rs` (Motion owns `graph.rs` and
   `state_machine.rs`, do not touch them): over `QClip`/`QTrack` of `clip.rs`, `pub fn trim(clip: &QClip, start_tick: u32,
@@ -247,7 +247,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   imported, triangle counts equal to the JSON on both, bounds of the cube within 1e-4 of 1 m, digest equal x2; 1,000
   seeded mutations of the fixture (`Rng::new(2040)`, flip 1 to 8 random bytes) give 0 panics and 0 results above 20 s in
   total, every failure a typed `GeoError`; clippy clean; golden unchanged. needs: GEO1a (only to run the fixture script once).
-- [ ] GEO10a assets: morph target import (center note GEO10, first leg; skin import keeps rejecting morph channels) — new
+- [x] GEO10a assets: morph target import (center note GEO10, first leg; skin import keeps rejecting morph channels) — new
   `crates/assets/src/morph_import.rs` (under the existing `import` feature) plus one `pub mod morph_import;` line in
   `crates/assets/src/lib.rs`: `pub struct MorphTarget { pub name: String, pub position_deltas: Vec<[f32; 3]> }`, `pub struct
   MorphMesh { pub positions: Vec<[f32; 3]>, pub indices: Vec<u32>, pub targets: Vec<MorphTarget>, pub default_weights:
@@ -258,7 +258,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   [0,1,0]`, 2 targets named `smile` and `wide` with deltas `[0,0,0.1]` x3 and `[0.2,0,0]` x3, `weights` `[0.0, 0.5]`, buffer
   as a base64 data URI built by a 20-line helper in the test) and checks both targets, names, exact deltas and default
   weights; sparse accessor, delta count mismatch and NaN each give their own typed error; `skin_import` tests still green;
-  golden unchanged. needs: none.
+  golden unchanged. needs: none. Landed e38aa73f. morph_import::tests (7): two targets smile and wide with exact deltas, names and weights [0.0, 0.5], fallbacks target_{i} and zeros, plain mesh skipped, sparse accessor, delta count mismatch (and weights count), NaN and bad input each typed; skin_import tests unchanged; gltf takes the extras feature; run 39108657201 (lib 307 incl. morph_import, it 96), clippy 39107698018.
 - [x] GEO12 geo: native mesh ops weld, mirror, array, flip, normals (center note GEO2 second half) — new Landed 0b43f1d9. `cargo test -p engine-geo --lib -- bonemap ops` 10 passed, the 6 ops tests weld_merges_split_cube, mirror_doubles_volume, array_three_cubes, flip_twice_is_identity, normals_unit_and_outward, ops_repeat, gh run 39056587122; default-feature clippy -D warnings clean, gh run 39059227974; rust-quality geo 100 A.
   `crates/geo/src/ops.rs` (std only, no feature) with `pub fn weld_by_distance(m: &GeoMesh, epsilon: f32) -> GeoMesh` (vertices
   closer than `epsilon` on a quantized grid merge to the lowest index, degenerate triangles dropped, normals and UVs of the
@@ -275,7 +275,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   normal has length within 1e-5 of 1 and dot with its position at least 0.98), `ops_repeat` (digests equal x2); default-feature
   `cargo clippy -p engine-geo --all-targets -- -D warnings` clean; `node tools/rust-quality.mjs --crate geo` grade A; golden
   unchanged. needs: none.
-- [ ] GEO13 mcp: door ops mirror, array, weld, flip in the geo pack (center note section 4) — in
+- [x] GEO13 mcp: door ops mirror, array, weld, flip in the geo pack (center note section 4) — in
   `crates/endpoint/src/packs/geo.rs` add to `GeoOp` the variants `Mirror { axis: String }` (`x`, `y`, `z`), `Array { count:
   u32, offset: [f32; 3] }`, `Weld { epsilon: f32 }`, `Flip`; every one is in `GeoOp::changes_topology`, runs through new
   functions in `crates/endpoint/src/packs/geo/kernel.rs` (the `geo` feature) that convert with `to_geo`/`from_geo` and call
@@ -285,4 +285,4 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   Accept: `cargo test -p engine-endpoint --features geo --lib packs::geo` and the same with `--features mcp` (the off-build
   refusal tests) green with these new tests: `array_then_mirror_numbers` (cube `[2,2,2]`, ops array count 2 offset `[3,0,0]`
   then mirror `x`: faces 48, vertices 32, bounds_min `[-4,-1,-1]`, bounds_max `[4,1,1]`), `weld_after_array_keeps_distinct_corners` (array count 3 offset `[3,0,0]` then weld 0.001: vertices 24), `flip_moves_the_digest_and_twice_restores_it`, `bad_numbers_name_the_legal_values` (count 0 and 65, epsilon 0 and 0.5, axis `w`), JSON parse of the 4 ops; clippy with
-  `--features geo` clean; golden unchanged. needs: GEO12, GEO11.
+  `--features geo` clean; golden unchanged. needs: GEO12, GEO11. Landed 52f66252. cargo test -p engine-endpoint --features geo --lib packs::geo 17 passed incl. array_then_mirror_numbers, weld_after_array_keeps_distinct_corners, flip_moves_the_digest_and_twice_restores_it, bad_numbers_name_the_legal_values (gh run 39107853193); the mcp suite holds json_parses_mirror_array_weld_and_flip and modeling_ops_refuse_typed_without_the_geo_feature green (run 39109659487); clippy --features geo --all-targets -D warnings clean (run 39108371106).

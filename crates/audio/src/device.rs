@@ -11,8 +11,9 @@
 //! stream errors are counted ([`DeviceOutput::stream_errors`]), never
 //! swallowed.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::{clip_sample, AudioEngine, CueBank, FeedTx, FrameSource, Mixer};
 
@@ -21,6 +22,100 @@ pub const MAX_BACKEND_MSG: usize = 256;
 /// Frames the callback renders per [`FrameSource`] call; larger device
 /// buffers are filled in chunks of this size.
 pub const CALLBACK_CHUNK_FRAMES: usize = 1_024;
+
+/// Callback latencies the probe keeps for its percentiles.
+pub const LATENCY_WINDOW: usize = 128;
+/// Hit-to-speaker budget in microseconds (the 40 ms UX bar); a p95 past it
+/// starts cues early.
+pub const LATENCY_BUDGET_US: u32 = 40_000;
+/// Most a cue starts early, in microseconds: past this the skipped head
+/// would eat the attack.
+pub const EARLY_MAX_US: u32 = 20_000;
+/// Callbacks between two refreshes of the early offset.
+const LATENCY_REFRESH_CALLBACKS: u64 = 32;
+
+/// The last [`LATENCY_WINDOW`] callback-to-speaker latencies (the gap cpal
+/// reports between a callback and the predicted playback instant of the
+/// buffer it fills), in microseconds, plus the early offset they imply.
+///
+/// Consumer: the device callback writes ([`Self::record`]) and refreshes the
+/// offset; the game thread reads ([`DeviceOutput::latency_ms`]). Lock-free
+/// relaxed atomics: a read may mix in a few samples of the previous lap,
+/// never garbage. Allocates nothing after `new`.
+pub struct LatencyProbe {
+    samples: [AtomicU32; LATENCY_WINDOW],
+    written: AtomicU64,
+    early_frames: AtomicU32,
+}
+
+impl Default for LatencyProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LatencyProbe {
+    /// Empty probe: no samples, no early offset.
+    pub fn new() -> Self {
+        Self {
+            samples: std::array::from_fn(|_| AtomicU32::new(0)),
+            written: AtomicU64::new(0),
+            early_frames: AtomicU32::new(0),
+        }
+    }
+
+    /// Record one callback's latency. True every
+    /// [`LATENCY_REFRESH_CALLBACKS`]th call, when the caller should
+    /// [`Self::refresh_early`].
+    pub fn record(&self, latency: Duration) -> bool {
+        let us = u32::try_from(latency.as_micros()).unwrap_or(u32::MAX);
+        let n = self.written.fetch_add(1, Ordering::Relaxed);
+        let slot = usize::try_from(n).unwrap_or(0) % LATENCY_WINDOW;
+        self.samples[slot].store(us, Ordering::Relaxed);
+        (n + 1).is_multiple_of(LATENCY_REFRESH_CALLBACKS)
+    }
+
+    /// Median and 95th percentile of the window in microseconds; `None`
+    /// before the first sample.
+    pub fn percentiles_us(&self) -> Option<(u32, u32)> {
+        let filled = usize::try_from(self.written.load(Ordering::Relaxed))
+            .unwrap_or(LATENCY_WINDOW)
+            .min(LATENCY_WINDOW);
+        if filled == 0 {
+            return None;
+        }
+        let mut sorted = [0u32; LATENCY_WINDOW];
+        for (dst, src) in sorted.iter_mut().zip(&self.samples).take(filled) {
+            *dst = src.load(Ordering::Relaxed);
+        }
+        let live = &mut sorted[..filled];
+        live.sort_unstable();
+        let at = |pct: usize| live[(filled * pct).div_ceil(100).saturating_sub(1)];
+        Some((at(50), at(95)))
+    }
+
+    /// Recompute the early offset from the p95 for a device at `sample_rate`
+    /// and store it; returns the frames.
+    pub fn refresh_early(&self, sample_rate: u32) -> u32 {
+        let frames = self
+            .percentiles_us()
+            .map_or(0, |(_, p95)| early_frames_for(p95, sample_rate));
+        self.early_frames.store(frames, Ordering::Relaxed);
+        frames
+    }
+
+    /// The early offset in frames the last refresh set (`0` is on time).
+    pub fn early_frames(&self) -> u32 {
+        self.early_frames.load(Ordering::Relaxed)
+    }
+}
+
+/// Frames to start a cue early for a p95 latency of `p95_us`: the part
+/// past the 40 ms budget, at most [`EARLY_MAX_US`] worth. Zero within budget.
+pub fn early_frames_for(p95_us: u32, sample_rate: u32) -> u32 {
+    let over_us = p95_us.saturating_sub(LATENCY_BUDGET_US).min(EARLY_MAX_US);
+    u32::try_from(u64::from(over_us) * u64::from(sample_rate) / 1_000_000).unwrap_or(0)
+}
 
 /// Typed device-open failure; every variant is a clean rejection, never a
 /// panic. `Open`/`Play` carry a length-capped backend message.
@@ -211,6 +306,7 @@ pub struct DeviceOutput {
     channels: u16,
     sample_rate: u32,
     errors: Arc<AtomicU64>,
+    latency: Arc<LatencyProbe>,
 }
 
 impl DeviceOutput {
@@ -260,15 +356,16 @@ impl DeviceOutput {
             return Err(DeviceError::NoConfig);
         }
         let errors = Arc::new(AtomicU64::new(0));
+        let latency = Arc::new(LatencyProbe::new());
         let stream = match format {
             cpal::SampleFormat::F32 => {
-                build_stream::<f32, S>(&device, &config, source, Arc::clone(&errors))
+                build_stream::<f32, S>(&device, &config, source, &errors, &latency)
             }
             cpal::SampleFormat::I16 => {
-                build_stream::<i16, S>(&device, &config, source, Arc::clone(&errors))
+                build_stream::<i16, S>(&device, &config, source, &errors, &latency)
             }
             cpal::SampleFormat::U16 => {
-                build_stream::<u16, S>(&device, &config, source, Arc::clone(&errors))
+                build_stream::<u16, S>(&device, &config, source, &errors, &latency)
             }
             other => Err(DeviceError::UnsupportedFormat {
                 format: other.to_string(),
@@ -282,6 +379,7 @@ impl DeviceOutput {
             channels: config.channels,
             sample_rate: config.sample_rate,
             errors,
+            latency,
         })
     }
 
@@ -299,6 +397,20 @@ impl DeviceOutput {
     /// rising count means the stream needs reopening.
     pub fn stream_errors(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
+    }
+
+    /// Callback-to-speaker latency `(p50, p95)` in milliseconds over the
+    /// last callbacks; `None` before the first one.
+    pub fn latency_ms(&self) -> Option<(f32, f32)> {
+        let (p50, p95) = self.latency.percentiles_us()?;
+        let ms = |us: u32| crate::f32_of(us) / 1_000.0;
+        Some((ms(p50), ms(p95)))
+    }
+
+    /// Frames the callback has the source start one-shot cues early by
+    /// (`0` while the p95 latency is within the 40 ms budget).
+    pub fn early_frames(&self) -> u32 {
+        self.latency.early_frames()
     }
 }
 
@@ -368,7 +480,8 @@ fn build_stream<T, S>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut source: S,
-    errors: Arc<AtomicU64>,
+    errors: &Arc<AtomicU64>,
+    latency: &Arc<LatencyProbe>,
 ) -> Result<cpal::Stream, DeviceError>
 where
     T: cpal::SizedSample + ToDeviceSample,
@@ -376,11 +489,19 @@ where
 {
     use cpal::traits::DeviceTrait;
     let channels = usize::from(config.channels.max(1));
+    let sample_rate = config.sample_rate;
     let mut scratch = vec![0.0f32; CALLBACK_CHUNK_FRAMES * 2];
+    let (errors, latency) = (Arc::clone(errors), Arc::clone(latency));
     device
         .build_output_stream(
             *config,
-            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                // Hit-to-speaker: the buffer this callback fills reaches the
+                // DAC `playback - callback` from now.
+                let stamp = info.timestamp();
+                if latency.record(stamp.playback.duration_since(stamp.callback)) {
+                    source.set_early_frames(latency.refresh_early(sample_rate));
+                }
                 fill_device_buffer(&mut source, &mut scratch, data, channels);
             },
             move |_| {
@@ -439,7 +560,9 @@ impl FrameSource for crate::Mixer {
 /// callers that still hand the device an `Arc<Mutex<Mixer>>`: the callback
 /// renders silence for a chunk whenever the game thread holds the lock,
 /// which is exactly the lossy hand-off the feed replaces. New code uses
-/// [`AudioEngine`]; this stays only for the shared mixer.
+/// [`AudioEngine`]; a caller that must keep the shared mixer wraps it in
+/// [`HoldLastMixer`](crate::HoldLastMixer) to repeat the last frame over a
+/// gap instead of dropping to silence.
 impl FrameSource for Arc<Mutex<Mixer>> {
     fn render_stereo_into(&mut self, out: &mut [f32]) {
         match self.try_lock() {
@@ -1037,5 +1160,83 @@ mod tests {
             "every queued command applied in order"
         );
         assert_eq!(stats.dropped_full, 0, "no command lost");
+    }
+
+    #[test]
+    fn latency_probe_percentiles_and_early_offset_follow_the_window() {
+        let probe = LatencyProbe::new();
+        assert_eq!(probe.percentiles_us(), None, "no sample yet");
+        assert_eq!(probe.refresh_early(48_000), 0);
+        let ms = Duration::from_millis;
+        // 90 callbacks at 10 ms and 10 at 60 ms: the median is 10 ms, the
+        // 95th percentile lands in the slow tail.
+        for i in 0..100u32 {
+            probe.record(if i < 90 { ms(10) } else { ms(60) });
+        }
+        assert_eq!(probe.percentiles_us(), Some((10_000, 60_000)));
+        // 20 ms over the budget at 48 kHz is 960 frames.
+        assert_eq!(probe.refresh_early(48_000), 960);
+        assert_eq!(probe.early_frames(), 960);
+        // A full window of fast callbacks pushes the tail out and the
+        // offset back to zero.
+        for _ in 0..LATENCY_WINDOW {
+            probe.record(ms(5));
+        }
+        assert_eq!(probe.percentiles_us(), Some((5_000, 5_000)));
+        assert_eq!(probe.refresh_early(48_000), 0);
+    }
+
+    #[test]
+    fn latency_probe_asks_for_a_refresh_every_32_callbacks() {
+        let probe = LatencyProbe::new();
+        let due: Vec<u32> = (1..=96u32)
+            .filter(|_| probe.record(Duration::from_millis(1)))
+            .collect();
+        assert_eq!(due.len(), 3, "callbacks 32, 64 and 96: {due:?}");
+    }
+
+    #[test]
+    fn latency_probe_early_frames_are_zero_in_budget_and_capped_over_it() {
+        assert_eq!(early_frames_for(39_999, 48_000), 0);
+        assert_eq!(early_frames_for(LATENCY_BUDGET_US, 48_000), 0);
+        assert_eq!(early_frames_for(50_000, 48_000), 480, "10 ms over");
+        assert_eq!(early_frames_for(500_000, 48_000), 960, "capped at 20 ms");
+        assert_eq!(early_frames_for(500_000, 44_100), 882);
+    }
+
+    /// A source that only keeps the callback running.
+    struct Silence;
+
+    impl FrameSource for Silence {
+        fn render_stereo_into(&mut self, out: &mut [f32]) {
+            out.fill(0.0);
+        }
+    }
+
+    #[test]
+    fn latency_probe_reads_the_default_device_and_prints_p50_p95() {
+        let Ok(output) = DeviceOutput::open_default(Silence) else {
+            eprintln!("SKIPPED latency_probe: no audio output device on this machine");
+            return;
+        };
+        let mut read = None;
+        for _ in 0..60 {
+            std::thread::sleep(Duration::from_millis(50));
+            if output.latency.written.load(Ordering::Relaxed) >= 64 {
+                read = output.latency_ms();
+                break;
+            }
+        }
+        let Some((p50, p95)) = read else {
+            panic!("the device stream ran for 3 s and stamped no callbacks");
+        };
+        println!(
+            "audio_latency_ms p50={p50:.1} p95={p95:.1} early_frames={}",
+            output.early_frames()
+        );
+        assert!(
+            p95 <= 40.0 || output.early_frames() > 0,
+            "p95 {p95:.1} ms is past the 40 ms budget and no early offset is set"
+        );
     }
 }

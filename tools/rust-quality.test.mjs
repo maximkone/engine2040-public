@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, functions, hitIsOwned, isPassthrough, lex, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
+import { deriveFixedApi } from "./sim-source-scan.mjs";
+import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, functions, hitIsOwned, isPassthrough, lex, measure, onlyBase, packages, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
 
 const lib = { crate: "engine-x", lib: true, bin: false, sim: false, hot: false, core: false, testFile: false };
 const sim = { ...lib, crate: "engine-physics", sim: true, hot: true };
@@ -135,6 +138,41 @@ test("simulation crates flag nondeterminism and hot-path allocation unless waive
   assert.equal(analyzeFile(src, lib).metrics.nondet, 0, "presentation crates may use HashMap");
 });
 
+test("simulation crates count platform float math, but not Fixed sin/cos, tests or presentation crates", () => {
+  const planted = "pub fn step(x: f32) -> f32 {\n    x.sin() + x.powf(2.0)\n}\n";
+  assert.equal(analyzeFile(planted, sim).metrics.float_math, 2);
+  assert.deepEqual(analyzeFile(planted, sim).hits.float_math, [1, 1]);
+  assert.equal(analyzeFile(planted, lib).metrics.float_math, 0, "presentation crates may use libm");
+  assert.equal(analyzeFile(planted, { ...sim, ownMath: true }).metrics.float_math, 0, "Fixed's own file is exempt");
+  assert.equal(analyzeFile(planted, { ...sim, testFile: true }).metrics.float_math, 0);
+  assert.equal(analyzeFile(`fn a() {}\n#[cfg(test)]\nmod t {\n    fn b(x: f32) -> f32 { x.sin() }\n}\n`, sim).metrics.float_math, 0);
+  const fixedApi = deriveFixedApi("impl Fixed { pub fn sin(self) -> Fixed { self } }\n");
+  const proven = "use engine_core::fixed::Fixed;\npub fn turn(a: Fixed) -> Fixed { a.sin() }\n";
+  assert.equal(analyzeFile(proven, { ...sim, fixedApi }).metrics.float_math, 0, "a receiver proven Fixed passes");
+  assert.equal(analyzeFile(proven, sim).metrics.float_math, 1, "without the Fixed source nothing is proven");
+});
+
+test("a planted f32 sin() in the arena step fails the ratchet and a clean arena passes", () => {
+  const root = mkdtempSync(join(tmpdir(), "rq-arena-"));
+  try {
+    mkdirSync(join(root, "crates", "arena", "src"), { recursive: true });
+    writeFileSync(join(root, "crates", "arena", "Cargo.toml"), '[package]\nname = "engine-arena"\n');
+    const lib_rs = join(root, "crates", "arena", "src", "lib.rs");
+    const baseline = { crates: { "engine-arena": { float_math: 0 } } };
+    writeFileSync(lib_rs, "pub fn step(x: i32) -> i32 { x + 1 }\n");
+    const clean = measure(root, null, false).crates;
+    assert.equal(clean.get("engine-arena").metrics.float_math, 0);
+    assert.deepEqual(compare(baseline, clean).regressions, []);
+    writeFileSync(lib_rs, "pub fn step(x: f32) -> f32 { x.sin() }\n");
+    const dirty = measure(root, null, false).crates;
+    assert.equal(dirty.get("engine-arena").metrics.float_math, 1);
+    assert.match(dirty.get("engine-arena").hits.float_math[0], /lib\.rs:1:/);
+    assert.deepEqual(compare(baseline, dirty).regressions.map((r) => r.replace(/ \(.*$/, "")), ["engine-arena: float_math 0 -> 1"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("pass-through relays and long functions are measured, delegation and idiom are not", () => {
   const code = lex([
     "pub fn follow_stage(a: Vec3, b: &Params) -> Pose { frame_pair(a, b) }",
@@ -222,4 +260,13 @@ test("land scope: clean tree passes", () => {
   const scoped = scopeRatchetToOwned(regressions, crates, ["crates/physics/src/lib.rs"]);
   assert.equal(scoped.blockers.length, 0);
   assert.equal(scoped.foreign.length, 0);
+});
+
+test("onlyBase names baseline rows with no crate, and the real baseline has none", () => {
+  const base = { crates: { "engine-core": {}, "engine-viewer": {} } };
+  assert.deepEqual(onlyBase(base, new Set(["engine-core"])), ["engine-viewer"]);
+  assert.deepEqual(onlyBase({}, new Set()), []);
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const real = JSON.parse(readFileSync(join(root, "tools", "rust-quality.baseline.json"), "utf8"));
+  assert.deepEqual(onlyBase(real, new Set(packages(root).map((p) => p.name))), [], "a baseline row names a crate that is gone");
 });

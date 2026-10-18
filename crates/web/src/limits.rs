@@ -19,6 +19,33 @@ pub fn wanted_features(adapter: Features) -> Features {
     adapter & Features::TIMESTAMP_QUERY
 }
 
+/// Longest `adapter=` text the page prints.
+const ADAPTER_HINT_MAX: usize = 64;
+
+/// The adapter as the page prints it, `adapter=<text>` (QT3): the browser's vendor, architecture,
+/// device and description (`raw`, in that order) joined with `/`, blanks left out, spaces turned
+/// into `_` so the text stays one word of a `key=value` line, cut at 64 characters. `none` when
+/// the browser gives nothing (it may blank them so a card cannot be told from another). This is
+/// a hint for a person reading the receipt: no tier is picked from it, except that the denylist
+/// (`engine_render::quality::apply_denylist`) matches fragments against this same text.
+#[must_use]
+pub fn adapter_hint(raw: &[String; 4]) -> String {
+    let parts: Vec<String> = raw
+        .iter()
+        .map(|part| part.split_whitespace().collect::<Vec<_>>().join("_"))
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return "none".to_string();
+    }
+    parts
+        .join("/")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(ADAPTER_HINT_MAX)
+        .collect()
+}
+
 /// A feature name the way WebGPU spells it (`TIMESTAMP_QUERY` is `timestamp-query`).
 #[must_use]
 pub fn feature_name(rust_name: &str) -> String {
@@ -194,6 +221,31 @@ mod tests {
         assert!(names
             .iter()
             .all(|n| n.starts_with("max") || n.starts_with("min")));
+    }
+
+    fn raw(vendor: &str, architecture: &str, device: &str, description: &str) -> [String; 4] {
+        [vendor, architecture, device, description].map(str::to_string)
+    }
+
+    #[test]
+    fn a_blanked_adapter_prints_none() {
+        assert_eq!(adapter_hint(&raw("", "", "", "")), "none");
+        assert_eq!(adapter_hint(&raw("  ", "\t", "", "\n")), "none");
+        assert_eq!(adapter_hint(&Default::default()), "none");
+    }
+
+    #[test]
+    fn the_adapter_hint_is_one_word_of_the_receipt_line() {
+        assert_eq!(
+            adapter_hint(&raw("google", "swiftshader", "", "SwiftShader Device")),
+            "google/swiftshader/SwiftShader_Device"
+        );
+        assert_eq!(adapter_hint(&raw("nvidia", "", "", "")), "nvidia");
+        let hint = adapter_hint(&raw("a  b", "c\td", "", "e\u{0}f"));
+        assert_eq!(hint, "a_b/c_d/ef");
+        assert!(!hint.contains(char::is_whitespace));
+        let long = adapter_hint(&raw("", "", "", &"x".repeat(500)));
+        assert_eq!(long.chars().count(), ADAPTER_HINT_MAX);
     }
 
     #[test]

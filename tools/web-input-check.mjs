@@ -1,6 +1,6 @@
 // Headless Chrome check of input and audio on dist/web (WEB7): serve it on 127.0.0.1, load it, send real (trusted) key and
 // mouse events over CDP and read back the two lines the page prints.
-//   node tools/web-input-check.mjs --dir dist/web --chrome google-chrome [--out out/web-input]
+//   node tools/web-input-check.mjs --dir dist/web --chrome google-chrome [--out out/web-input] [--script tools/fixtures/input-tape.script] [--native-tape <file>]
 // What it proves, in one browser:
 //  1. Before any gesture: `input: kb=0 mouse=0 pad=0`, `audio: state=suspended`, and no AudioContext exists
 //     (body data-audio-context=none).
@@ -8,11 +8,16 @@
 //     start the audio context.
 //  3. A real key press (W down and up) raises kb and creates the context inside the gesture.
 //  4. A mouse click raises mouse and the page ends on `audio: state=running` within the wait.
+//  5. The input tape (WEB7): the events of --script are sent as real key and mouse events, the page samples one record at each
+//     `tick` line (window.inputSample), and the tape it gives must equal, byte for byte and in digest, the one the native
+//     `input_tape` bin printed for the same script (--native-tape names its output). Without --native-tape the browser tape is
+//     printed and the run says it was NOT COMPARED.
 // The pad count is not driven here (Chrome cannot fake a gamepad over CDP); crates/web/src/input.rs tests it.
 // Only loopback is served and visited. The Chrome process started here is ours and is closed here.
 // Exit: 0 proven, 1 a proof failed, 2 could not run (no Chrome, bad arguments, no page).
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { fnv1a64Hex } from "./fnv1a64.mjs";
 import { BASE_FLAGS, FLAG_SETS, launchChrome, serve } from "./web-browse.mjs";
 
 export const INPUT_LINE = /^input: kb=(\d+) mouse=(\d+) pad=(\d+)$/;
@@ -34,16 +39,27 @@ export function parseAudio(text) {
 export const KEYS = {
   Escape: { key: "Escape", vk: 27 },
   KeyW: { key: "w", vk: 87, text: "w" },
+  KeyA: { key: "a", vk: 65, text: "a" },
+  KeyS: { key: "s", vk: 83, text: "s" },
   KeyD: { key: "d", vk: 68, text: "d" },
+  KeyE: { key: "e", vk: 69, text: "e" },
+  KeyF: { key: "f", vk: 70, text: "f" },
+  KeyQ: { key: "q", vk: 81, text: "q" },
+  ShiftLeft: { key: "Shift", vk: 16, modifiers: 8, location: 1 },
+  ControlLeft: { key: "Control", vk: 17, modifiers: 2, location: 1 },
+  Space: { key: " ", vk: 32, text: " " },
+  Enter: { key: "Enter", vk: 13, text: "\r" },
 };
-export function keyCommands(code) {
+// One key event of the table: `down` true for the press, false for the release.
+export function keyCommand(code, down) {
   const k = KEYS[code];
   if (!k) throw new Error(`no key table row for ${code}`);
-  const base = { key: k.key, code, windowsVirtualKeyCode: k.vk, nativeVirtualKeyCode: k.vk };
-  return [
-    { method: "Input.dispatchKeyEvent", params: { type: k.text ? "keyDown" : "rawKeyDown", ...base, ...(k.text ? { text: k.text } : {}) } },
-    { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } },
-  ];
+  const base = { key: k.key, code, windowsVirtualKeyCode: k.vk, nativeVirtualKeyCode: k.vk, ...(k.location ? { location: k.location } : {}) };
+  if (!down) return { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } };
+  return { method: "Input.dispatchKeyEvent", params: { type: k.text ? "keyDown" : "rawKeyDown", ...base, ...(k.text ? { text: k.text } : {}), ...(k.modifiers ? { modifiers: k.modifiers } : {}) } };
+}
+export function keyCommands(code) {
+  return [keyCommand(code, true), keyCommand(code, false)];
 }
 // A left click at (x, y): move, press, release.
 export function clickCommands(x, y) {
@@ -53,6 +69,58 @@ export function clickCommands(x, y) {
     { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", ...p, button: "left", buttons: 1, clickCount: 1 } },
     { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", ...p, button: "left", buttons: 0, clickCount: 1 } },
   ];
+}
+
+// ---- the input tape (WEB7) ----
+// A script is one command per line, # starts a comment: `key <code> down|up`, `mouse <button> down|up`, `tick`. The same file is read
+// by crates/web/src/input_tape.rs (the input_tape bin), which also refuses anything else.
+export function parseScript(text) {
+  const steps = [];
+  String(text).split(/\r?\n/).forEach((raw, i) => {
+    const words = raw.split("#")[0].trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    const fail = (why) => { throw new Error(`script line ${i + 1}: ${why}`); };
+    const upDown = (w) => (w === "down" ? true : w === "up" ? false : fail(`expected down or up, got ${w}`));
+    if (words[0] === "tick" && words.length === 1) steps.push({ type: "tick" });
+    else if (words[0] === "key" && words.length === 3) steps.push({ type: "key", code: words[1], down: upDown(words[2]) });
+    else if (words[0] === "mouse" && words.length === 3 && /^\d+$/.test(words[1])) steps.push({ type: "mouse", button: Number(words[1]), down: upDown(words[2]) });
+    else fail(`not a command: ${words.join(" ")}`);
+  });
+  return steps;
+}
+
+const MOUSE_BUTTONS = [{ name: "left", bit: 1 }, { name: "middle", bit: 4 }, { name: "right", bit: 2 }];
+
+// The CDP calls for one key or mouse step; `held` ({ mask }) is the mouse buttons down so far, updated here. A tick has none.
+export function stepCommands(step, held = { mask: 0 }, x = 640, y = 360) {
+  if (step.type === "key") return [keyCommand(step.code, step.down)];
+  if (step.type !== "mouse") return [];
+  const b = MOUSE_BUTTONS[step.button];
+  if (!b) throw new Error(`no mouse button ${step.button}`);
+  held.mask = step.down ? held.mask | b.bit : held.mask & ~b.bit;
+  const p = { x, y, modifiers: 0, pointerType: "mouse", button: b.name, buttons: held.mask, clickCount: 1 };
+  return [{ method: "Input.dispatchMouseEvent", params: { type: step.down ? "mousePressed" : "mouseReleased", ...p } }];
+}
+
+export const TAPE_LINE = /^input-tape: ticks=(\d+) bytes=([0-9a-f]*)$/;
+// { ticks, bytes (hex), digest (FNV-1a 64 of the bytes) } of the last tape line in `text`, or null.
+export function parseTape(text) {
+  const line = String(text ?? "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("input-tape:")).pop();
+  const m = TAPE_LINE.exec(line ?? "");
+  if (!m || m[2].length % 2) return null;
+  return { ticks: Number(m[1]), bytes: m[2], digest: fnv1a64Hex(Buffer.from(m[2], "hex")) };
+}
+// The problems with the browser's tape against the native one (null native: nothing to compare with). Each record is 10 bytes.
+export function tapeVerdict(browser, native, wantTicks = null) {
+  const problems = [];
+  if (!browser) return ["the page gave no input-tape line (window.inputSample)"];
+  if (browser.bytes.length !== browser.ticks * 20) problems.push(`the page's tape has ${browser.bytes.length / 2} bytes for ${browser.ticks} ticks, not ${browser.ticks * 10}`);
+  if (wantTicks !== null && browser.ticks !== wantTicks) problems.push(`the page sampled ${browser.ticks} ticks, the script has ${wantTicks}`);
+  if (!native) return problems;
+  if (native.ticks !== browser.ticks) problems.push(`ticks: page ${browser.ticks}, native ${native.ticks}`);
+  if (native.bytes !== browser.bytes) problems.push(`tape bytes differ: page ${browser.bytes}, native ${native.bytes}`);
+  if (native.digest !== browser.digest) problems.push(`digest: page ${browser.digest}, native ${native.digest}`);
+  return problems;
 }
 
 // What a page read looks like: { input, audio, context, gestures } from #input, #audio and the body data attributes.
@@ -91,16 +159,37 @@ export function verdict({ before, escape, keys, click }) {
 }
 
 export function parseArgs(argv) {
-  const o = { dir: "dist/web", chrome: null, out: "out/web-input", error: null };
+  const o = { dir: "dist/web", chrome: null, out: "out/web-input", script: "tools/fixtures/input-tape.script", nativeTape: null, error: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") o.dir = argv[++i];
     else if (a === "--chrome") o.chrome = argv[++i];
     else if (a === "--out") o.out = argv[++i];
+    else if (a === "--script") o.script = argv[++i];
+    else if (a === "--native-tape") o.nativeTape = argv[++i];
     else o.error = `unknown argument ${a}`;
   }
   if (!o.chrome) o.error ??= "--chrome <path to Chrome> is required";
   return o;
+}
+
+// Replay the script as real events, sampling the page's tape at each tick; compare with the native tape when one is given.
+async function replayTape({ script, native, send, evalJs }) {
+  const steps = parseScript(readFileSync(resolve(script), "utf8"));
+  const held = { mask: 0 };
+  let line = null;
+  for (const step of steps) {
+    if (step.type === "tick") line = await evalJs("window.inputSample()");
+    else await send(stepCommands(step, held));
+    await sleep(40);
+  }
+  const browser = parseTape(line);
+  const nativeTape = native ? parseTape(readFileSync(resolve(native), "utf8")) : null;
+  const problems = tapeVerdict(browser, nativeTape, steps.filter((s) => s.type === "tick").length);
+  if (native && !nativeTape) problems.push(`${native} holds no input-tape line`);
+  const compared = Boolean(nativeTape) && problems.length === 0;
+  const say = `input tape: ${browser ? `${browser.ticks} ticks digest ${browser.digest}` : "none"} | ${native ? (compared ? "EQUAL to the native tape" : "DIFFERENT from the native tape") : "NOT COMPARED (no --native-tape)"}`;
+  return { problems, say, record: { script, line, browser, native: nativeTape } };
 }
 
 export async function main(argv) {
@@ -154,10 +243,14 @@ export async function main(argv) {
       if (parseAudio(click.audio) === "running") break;
     }
     const problems = verdict({ before, escape, keys, click });
+    // WEB7: the input tape of the script, against the native one.
+    const tape = await replayTape({ script: a.script, native: a.nativeTape, send, evalJs });
+    problems.push(...tape.problems);
     if (exceptions.length) problems.push(`uncaught exceptions: ${exceptions.join(" | ")}`);
-    const record = { before, escape, keys, click, exceptions, problems };
+    const record = { before, escape, keys, click, tape: tape.record, exceptions, problems };
     writeFileSync(join(out, "input-audio.json"), `${JSON.stringify(record, null, 2)}\n`);
     for (const [name, x] of Object.entries({ before, escape, keys, click })) console.log(`${name.padEnd(7)} ${x.input} | ${x.audio} | context=${x.context} gestures=${x.gestures}`);
+    console.log(tape.say);
     const summary = problems.length ? `FAILED - ${problems.join("; ")}` : "OK (no context before a gesture, Escape is not one, a key press starts it, a click leaves it running)";
     console.log(`input and audio: ${summary}`);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### web-input-check\n\`\`\`\n${click.input}\n${click.audio}\n\`\`\`\n${summary}\n`);

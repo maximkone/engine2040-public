@@ -19,8 +19,8 @@
 //!
 //! The lighting follows the Filament material model (Apache-2.0): GGX
 //! specular with the correlated Smith visibility, Burley diffuse, a
-//! clear-coat lobe over the base, Charlie sheen, anisotropic GGX, wrapped
-//! subsurface and thin transmission. The base BRDF constructs are the ones
+//! clear-coat lobe over the base, Charlie sheen, anisotropic GGX, skin
+//! subsurface (the terminator LUT of [`crate::skin`]) and thin transmission. The base BRDF constructs are the ones
 //! `render::v1_gpu` ports from Bevy; each chunk names its source. Energy is
 //! kept by construction: the diffuse takes only what the specular lobe left
 //! (baked albedo tables in [`crate::dfg`]), multiple scattering is
@@ -51,6 +51,13 @@ pub const CHANNEL_FLOATS: usize = 8;
 /// same units as the light `color * intensity`.
 pub const NITS_TO_SCENE: f32 = 0.001;
 
+/// Share of the anisotropic specular lobe that is kept. The albedo tables are isotropic and the
+/// lobe reads them at the same alpha product, which over-reports the albedo of an anisotropic
+/// lobe at grazing views by up to 4.2% (the furnace sweep over strengths 0.3 to 0.9 and both
+/// tangent rotations). Scaling the lobe by this share keeps its white furnace under the 1.03 bar
+/// with margin; the cost is a brushed metal 3% darker.
+pub const ANISO_ENERGY_KEEP: f32 = 0.97;
+
 /// Lobe bits of [`Structure::lobes`].
 pub mod lobe {
     /// Clear coat (from the record's `coat`, or a wet or blood layer).
@@ -61,7 +68,7 @@ pub mod lobe {
     pub const ANISOTROPY: u8 = 4;
     /// Thin transmission.
     pub const TRANSMISSION: u8 = 8;
-    /// Wrapped subsurface.
+    /// Skin subsurface: the terminator LUT and the thin transmittance ([`crate::skin`]).
     pub const SUBSURFACE: u8 = 16;
     /// Emission (from the record, or a burn layer).
     pub const EMISSION: u8 = 32;
@@ -448,6 +455,9 @@ pub fn wgsl_for(structure: &Structure) -> String {
     if structure.has_lobe(lobe::ANISOTROPY) {
         out.push_str(CHUNK_ANISO);
     }
+    if structure.has_lobe(lobe::SUBSURFACE) {
+        out.push_str(&crate::skin::wgsl());
+    }
     if structure.textures & slot::NORMAL != 0 {
         out.push_str(CHUNK_NORMAL_MAP);
     }
@@ -621,9 +631,11 @@ fn push_fragment(out: &mut String, structure: &Structure) {
              \x20   let a_t = min(roughness * (1.0 + material.sheen2.y), 1.0);\n\
              \x20   let a_b = max(roughness * (1.0 - material.sheen2.y), 0.002);\n\
              \x20   let rough_e = sqrt(sqrt(a_t * a_b));\n\
-             \x20   let spec_d = d_ggx_anisotropic(a_t, a_b, dot(tan_t, h), dot(tan_b, h), ndot_h);\n\
-             \x20   let vv = v_smith_ggx_anisotropic(a_t, a_b, dot(tan_t, v), dot(tan_b, v), dot(tan_t, l), dot(tan_b, l), ndot_v, ndot_l);\n",
+             \x20   let spec_d = d_ggx_anisotropic(a_t, a_b, dot(tan_t, h), dot(tan_b, h), ndot_h);\n",
         );
+        out.push_str(&format!(
+            "    let vv = v_smith_ggx_anisotropic(a_t, a_b, dot(tan_t, v), dot(tan_b, v), dot(tan_t, l), dot(tan_b, l), ndot_v, ndot_l) * {ANISO_ENERGY_KEEP:?};\n"
+        ));
     } else {
         out.push_str(
             "    let rough_e = clamp(rough, 0.089, 1.0);\n\
@@ -643,23 +655,32 @@ fn push_fragment(out: &mut String, structure: &Structure) {
         "    var diffuse = diffuse_albedo * fd_burley(roughness, ndot_v, ndot_l, ldot_h);\n",
     );
     if has(lobe::SUBSURFACE) {
-        out.push_str(
-            "    {\n\
+        // RL50: the diffuse cosine becomes the skin terminator LUT (red keeps light past the
+        // terminator, blue stops at it), and light from behind passes a thin slab per channel.
+        // `skin_extra` is added after the cosine, so the dark side can light up.
+        out.push_str(&format!(
+            "    var skin_extra = vec3<f32>(0.0);\n\
+             \x20   {{\n\
              \x20       let w = material.sss.w;\n\
-             \x20       let wrap = (dot(n, l) + 0.5 * w) / (1.0 + 0.5 * w);\n\
-             \x20       let wrapped = clamp(wrap, 0.0, 1.0);\n\
+             \x20       let geo_n = normalize(in.world_n);\n\
+             \x20       let curvature = clamp(length(fwidth(geo_n)) / max(length(fwidth(in.world_pos)), 0.00001) * {curv}, 0.0, 1.0);\n\
+             \x20       let blurred = skin_terminator(dot(n, l), curvature);\n\
+             \x20       skin_extra = diffuse * (mix(vec3<f32>(ndot_l), blurred, w) - vec3<f32>(ndot_l));\n\
              \x20       let back = pow(clamp(dot(v, -(l + n * 0.5)), 0.0, 1.0), 3.0);\n\
              \x20       let spread = (material.sss_radius.r + material.sss_radius.g + material.sss_radius.b) * (1.0 / 3.0);\n\
-             \x20       let scatter = mix(vec3<f32>(1.0), material.sss.rgb, w);\n\
-             \x20       diffuse = diffuse * scatter * mix(1.0, wrapped / max(ndot_l, 0.05), w * 0.5);\n\
-             \x20       diffuse = diffuse + diffuse_albedo * material.sss.rgb * (w * back * clamp(spread * 40.0, 0.0, 1.0) / 3.141592653589793);\n\
-             \x20   }\n",
-        );
+             \x20       let thin = skin_transmit(spread * 250.0);\n\
+             \x20       skin_extra = skin_extra + diffuse_albedo * material.sss.rgb * thin * (w * back * clamp(spread * 40.0, 0.0, 1.0) / 3.141592653589793);\n\
+             \x20   }}\n",
+            curv = crate::skin::CURVATURE_PER_INVERSE_METER
+        ));
     }
     out.push_str(
         "    var spec = specular_term(spec_d, vv, f, f0, fab);\n\
          \x20   var lit = (diffuse + spec) * ndot_l;\n",
     );
+    if has(lobe::SUBSURFACE) {
+        out.push_str("    lit = lit + skin_extra;\n");
+    }
     if has(lobe::SHEEN) {
         out.push_str(
             "    {\n\
@@ -797,13 +818,13 @@ fn v_neubelt(ndot_v: f32, ndot_l: f32) -> f32 {
 const CHUNK_ANISO: &str = r#"
 // Filament D_GGX_Anisotropic and V_SmithGGXCorrelated_Anisotropic. The
 // tangent frame is built from the normal in the fragment (no vertex tangent
-// is needed); `rotation` in turns turns it about the normal.
+// is needed); `rotation` in turns turns it about the normal. Filament's
+// a2^3 / d2^2 underflows in f32 at low roughness (a guard on d2 flattened the
+// peak and the lobe went dark); the same value is 1 / (PI a2 s^2) with
+// s = th^2/at^2 + bh^2/ab^2 + nh^2, and s is never below 1.
 fn d_ggx_anisotropic(at: f32, ab: f32, th: f32, bh: f32, nh: f32) -> f32 {
-    let a2 = at * ab;
-    let d = vec3<f32>(ab * th, at * bh, a2 * nh);
-    let d2 = dot(d, d);
-    let w2 = a2 / max(d2, 0.00001);
-    return a2 * w2 * w2 * (1.0 / PI);
+    let s = (th * th) / (at * at) + (bh * bh) / (ab * ab) + nh * nh;
+    return 1.0 / (PI * at * ab * s * s);
 }
 fn v_smith_ggx_anisotropic(at: f32, ab: f32, tv: f32, bv: f32, tl: f32, bl: f32, nv: f32, nl: f32) -> f32 {
     let lambda_v = nl * length(vec3<f32>(at * tv, ab * bv, nv));
@@ -1125,6 +1146,9 @@ mod tests {
             layers: Vec::new(),
         });
         assert!(aniso.contains("d_ggx_anisotropic"));
+        // The anisotropic D has no clamp on the squared length: that guard flattened the peak
+        // below roughness 0.25 (see the furnace twin).
+        assert!(!aniso.contains("max(d2"));
         // A shipped record routes the same way: marble layers imply a coat.
         let marble = MaterialSet::siege_kit()
             .get("marble")

@@ -121,6 +121,12 @@ impl FrameStats {
         self.last_now = Some(now_ms);
     }
 
+    /// The tab was hidden and came back: the next frame has no duration (as the first frame has
+    /// none), so the gap is not read as one long frame.
+    pub fn skip_gap(&mut self) {
+        self.last_now = None;
+    }
+
     #[must_use]
     pub fn frames(&self) -> u64 {
         self.frames
@@ -143,6 +149,92 @@ impl FrameStats {
             self.last_ms,
             1000.0 / self.smooth_ms
         )
+    }
+}
+
+/// Simulation steps per second of animation-frame time.
+pub const STEP_HZ: u128 = 60;
+
+/// Most steps one frame runs. A frame later than this many steps (a hidden tab that came back,
+/// a long stall) drops the rest instead of running them: the sim pauses and does not catch up.
+pub const MAX_STEPS_PER_FRAME: u32 = 10;
+
+/// Slack (nanoseconds) added to the elapsed time before it is cut into steps, so a timestamp
+/// that lands on a step edge by a rounding error of the float clock still counts the step.
+const EDGE_SLACK_NS: u128 = 1_000;
+
+const NS_PER_SEC: u128 = 1_000_000_000;
+
+/// The 60 Hz simulation clock, fed from the animation-frame timestamp (QW11). Each frame asks
+/// [`StepClock::advance`] how many fixed steps are due: at 144 Hz most frames run none or one,
+/// at 60 Hz one, and exactly 60 per second of timestamp either way. A tab the browser stops
+/// drawing (hidden, in the background) calls nothing, so a single-player sim pauses with it; the
+/// first frame after the gap runs at most [`MAX_STEPS_PER_FRAME`] steps and the clock moves on.
+#[derive(Clone, Copy, Debug)]
+pub struct StepClock {
+    origin_ms: Option<f64>,
+    /// Steps due at the last timestamp, counted from the origin (run or dropped).
+    due: u128,
+    /// Fraction of the next step already elapsed at the last timestamp, in 0..1.
+    alpha: f64,
+    /// Steps actually run.
+    run: u64,
+    max_per_frame: u32,
+    cap: u32,
+}
+
+impl StepClock {
+    /// A clock that runs at most `cap` steps in a frame.
+    #[must_use]
+    pub fn new(cap: u32) -> Self {
+        Self {
+            origin_ms: None,
+            due: 0,
+            alpha: 0.0,
+            run: 0,
+            max_per_frame: 0,
+            cap: cap.max(1),
+        }
+    }
+
+    /// The steps to run for the frame that began at `now_ms` on the animation clock. The first
+    /// timestamp is the origin and runs none; a bad or backwards timestamp runs none.
+    pub fn advance(&mut self, now_ms: f64) -> u32 {
+        if !now_ms.is_finite() {
+            return 0;
+        }
+        let origin = *self.origin_ms.get_or_insert(now_ms);
+        let elapsed_s = ((now_ms - origin) / 1000.0).clamp(0.0, 1.0e9);
+        let ns = Duration::from_secs_f64(elapsed_s).as_nanos();
+        let due = (ns + EDGE_SLACK_NS) * STEP_HZ / NS_PER_SEC;
+        let rest = (ns * STEP_HZ % NS_PER_SEC).min(NS_PER_SEC - 1);
+        self.alpha = Duration::from_nanos(u64::try_from(rest).unwrap_or(0)).as_secs_f64();
+        let behind = due.saturating_sub(self.due);
+        self.due = self.due.max(due);
+        let steps = u32::try_from(behind.min(u128::from(self.cap))).unwrap_or(self.cap);
+        self.run += u64::from(steps);
+        self.max_per_frame = self.max_per_frame.max(steps);
+        steps
+    }
+
+    /// Steps run so far.
+    #[must_use]
+    pub fn steps(&self) -> u64 {
+        self.run
+    }
+
+    /// The most steps any one frame ran: 1 on a healthy 60 Hz page, more after a stall.
+    #[must_use]
+    pub fn max_per_frame(&self) -> u32 {
+        self.max_per_frame
+    }
+
+    /// Simulation time in seconds at the last frame: the steps run plus the part of the next
+    /// step the frame is already into, so a 144 Hz display moves smoothly between two steps.
+    #[must_use]
+    pub fn time_s(&self) -> f64 {
+        let whole = f64::from(u32::try_from(self.run).unwrap_or(u32::MAX));
+        (whole + self.alpha) / 60.0
     }
 }
 
@@ -297,6 +389,121 @@ mod tests {
         s.tick(t - 500.0);
         assert_eq!(s.last_ms(), 0.0);
         assert_eq!(s.frames(), 121);
+    }
+
+    /// Steps run after `secs` seconds of frames at `hz` on a clock that starts at `origin_ms`;
+    /// the steps after each whole second, and the most any frame ran.
+    fn run_clock(hz: u32, secs: u32, origin_ms: f64) -> (Vec<u64>, u32) {
+        let mut clock = StepClock::new(MAX_STEPS_PER_FRAME);
+        assert_eq!(
+            clock.advance(origin_ms),
+            0,
+            "the first timestamp is the origin"
+        );
+        let mut per_second = Vec::new();
+        for frame in 1..=hz * secs {
+            let t = origin_ms + f64::from(frame) * 1000.0 / f64::from(hz);
+            clock.advance(t);
+            if frame % hz == 0 {
+                per_second.push(clock.steps());
+            }
+        }
+        (per_second, clock.max_per_frame())
+    }
+
+    #[test]
+    fn sixty_steps_per_second_of_timestamp_at_144_hz_and_at_60_hz() {
+        for (hz, origin) in [
+            (144, 0.0),
+            (144, 4321.987),
+            (60, 0.0),
+            (60, 17.5),
+            (75, 2.0),
+        ] {
+            let (per_second, most) = run_clock(hz, 10, origin);
+            let want: Vec<u64> = (1..=10).map(|s| 60 * s).collect();
+            assert_eq!(per_second, want, "{hz} Hz from {origin}");
+            // A frame at 144 Hz runs none or one step; at 60 Hz one; jitter-free, never a burst.
+            assert!(most <= 1, "{hz} Hz ran {most} steps in one frame");
+        }
+    }
+
+    #[test]
+    fn a_slow_display_runs_the_steps_in_bursts_and_still_totals_sixty() {
+        let (per_second, most) = run_clock(20, 5, 100.0);
+        assert_eq!(per_second, [60, 120, 180, 240, 300]);
+        assert_eq!(most, 3, "20 Hz is three steps a frame");
+    }
+
+    #[test]
+    fn a_tab_that_draws_nothing_runs_no_steps_and_the_gap_is_dropped_not_replayed() {
+        let mut clock = StepClock::new(MAX_STEPS_PER_FRAME);
+        clock.advance(0.0);
+        for k in 1..=60 {
+            clock.advance(f64::from(k) * 1000.0 / 60.0);
+        }
+        assert_eq!(clock.steps(), 60);
+        // Hidden for 30 s: no frame, so nothing is asked and nothing runs.
+        assert_eq!(clock.steps(), 60);
+        // The first frame back runs the cap and no more; the next one is an ordinary frame.
+        let back = 1000.0 + 30_000.0;
+        assert_eq!(clock.advance(back), MAX_STEPS_PER_FRAME);
+        assert_eq!(clock.advance(back + 1000.0 / 60.0), 1);
+        assert_eq!(clock.steps(), 60 + u64::from(MAX_STEPS_PER_FRAME) + 1);
+        assert_eq!(clock.max_per_frame(), MAX_STEPS_PER_FRAME);
+        // And from there on it is 60 a second again.
+        let before = clock.steps();
+        for k in 2..=61 {
+            clock.advance(back + f64::from(k) * 1000.0 / 60.0);
+        }
+        assert_eq!(clock.steps() - before, 60);
+    }
+
+    #[test]
+    fn bad_and_backwards_timestamps_run_no_step() {
+        let mut clock = StepClock::new(MAX_STEPS_PER_FRAME);
+        clock.advance(500.0);
+        assert_eq!(clock.advance(f64::NAN), 0);
+        assert_eq!(clock.advance(f64::INFINITY), 0);
+        assert_eq!(
+            clock.advance(100.0),
+            0,
+            "a clock that steps back runs nothing"
+        );
+        assert_eq!(clock.advance(500.0 + 1000.0 / 60.0), 1);
+        assert_eq!(StepClock::new(0).advance(0.0), 0);
+    }
+
+    #[test]
+    fn sim_time_moves_smoothly_between_steps() {
+        let mut clock = StepClock::new(MAX_STEPS_PER_FRAME);
+        clock.advance(0.0);
+        assert_eq!(clock.time_s(), 0.0);
+        // Half a step in: no step yet, half a step of time.
+        clock.advance(1000.0 / 120.0);
+        assert_eq!(clock.steps(), 0);
+        assert!(
+            (clock.time_s() - 1.0 / 120.0).abs() < 1e-6,
+            "{}",
+            clock.time_s()
+        );
+        for k in 1..=60 {
+            clock.advance(f64::from(k) * 1000.0 / 60.0);
+        }
+        assert!((clock.time_s() - 1.0).abs() < 1e-6, "{}", clock.time_s());
+    }
+
+    #[test]
+    fn a_gap_is_not_a_long_frame() {
+        let mut s = FrameStats::default();
+        s.tick(0.0);
+        s.tick(16.0);
+        s.skip_gap();
+        s.tick(30_000.0);
+        assert!((s.last_ms() - 16.0).abs() < 1e-9, "{}", s.last_ms());
+        assert_eq!(s.frames(), 3);
+        s.tick(30_016.0);
+        assert!((s.last_ms() - 16.0).abs() < 1e-9);
     }
 
     #[test]

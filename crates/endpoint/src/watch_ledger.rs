@@ -20,10 +20,10 @@ use engine_core::Fnv64;
 
 use super::scene_query::{QueryAnswer, QueryKind};
 
-/// Query verbs on the hardened surface: the fourteen [`QueryKind`] words.
+/// Query verbs on the hardened surface: the twenty [`QueryKind`] words.
 /// Rows are indexed by the frozen discriminant through [`verb_index`], so an
 /// appended kind fails to compile here instead of aliasing a row.
-pub const QUERY_VERB_COUNT: usize = 14;
+pub const QUERY_VERB_COUNT: usize = 20;
 /// Estimated chars per model token on the door (Blender/Unity/Godot MCP
 /// comparison point: our ledger posts chars plus this estimate, never a
 /// vendor tokenizer).
@@ -51,6 +51,12 @@ fn verb_index(kind: QueryKind) -> usize {
         QueryKind::Clearance => 11,
         QueryKind::Slide => 12,
         QueryKind::Ground => 13,
+        QueryKind::Measure => 14,
+        QueryKind::RoomOf => 15,
+        QueryKind::InRoom => 16,
+        QueryKind::ExitsOf => 17,
+        QueryKind::Glance => 18,
+        QueryKind::Coverage => 19,
     }
 }
 
@@ -203,6 +209,12 @@ impl WatchLedger {
                 VerbRow::new(QueryKind::Clearance),
                 VerbRow::new(QueryKind::Slide),
                 VerbRow::new(QueryKind::Ground),
+                VerbRow::new(QueryKind::Measure),
+                VerbRow::new(QueryKind::RoomOf),
+                VerbRow::new(QueryKind::InRoom),
+                VerbRow::new(QueryKind::ExitsOf),
+                VerbRow::new(QueryKind::Glance),
+                VerbRow::new(QueryKind::Coverage),
             ],
             latest_revision: 0,
             latest_digest: 0,

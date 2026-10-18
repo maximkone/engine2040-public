@@ -20,6 +20,8 @@ pub mod arena_matrix;
 pub mod break_corpus;
 pub mod bug;
 pub mod chaos;
+/// 20,000-agent crowd determinism harness: one hash per machine.
+pub mod crowd;
 pub mod dataset;
 pub mod fb_ship;
 pub mod fb_versions;
@@ -691,6 +693,69 @@ mod tests {
 
     #[test]
     fn frozen_default_and_distinct_seed_proofs() {
+    #[test]
+    fn sched_shuffle_keeps_the_golden_across_50_seeded_orders() {
+        use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
+        let config = Config::default();
+        let want = *record(config, &[]).unwrap().checkpoints.last().unwrap();
+        assert_eq!(want.legacy, GOLDEN_600);
+        let mut orders = BTreeSet::new();
+        for seed in 0..50u64 {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let mut schedule: Schedule<World> = Schedule::new();
+            // Position is column bit 1, velocity bit 2: integrate reads
+            // velocity and writes position. The probes touch no column, so
+            // all six orders of the three systems are free.
+            let integrate_log = Rc::clone(&log);
+            schedule.add_system_with_access(Phase::Update, "integrate", 2, 1, move |world, ctx| {
+                integrate_log.borrow_mut().push("integrate");
+                world.integrate(ctx.dt);
+            });
+            for name in ["probe_a", "probe_b"] {
+                let log = Rc::clone(&log);
+                schedule.add_system(Phase::Update, name, move |_, _| log.borrow_mut().push(name));
+            }
+            schedule.set_shuffle_seed(seed);
+            assert!(schedule.validate().is_ok());
+            let mut sim = Simulation::new(config, &[]);
+            sim.schedule = schedule;
+            let mut last = None;
+            for _ in 0..config.ticks {
+                last = Some(sim.step(&[]).unwrap());
+            }
+            assert_eq!(last, Some(want), "seed {seed} moved the golden");
+            orders.insert(log.borrow()[..3].to_vec());
+        }
+        assert!(
+            orders.len() >= 4,
+            "50 seeds reached only {} orders",
+            orders.len()
+        );
+    }
+
+    #[test]
+    fn sched_shuffle_refuses_a_missing_edge_naming_both_systems() {
+        use engine_ecs::schedule::ScheduleError;
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.add_system_with_access(Phase::Update, "integrate", 2, 1, |world, ctx| {
+            world.integrate(ctx.dt);
+        });
+        // A reader of Position with no order edge to the writer.
+        schedule.add_system_with_access(Phase::Update, "probe_a", 1, 0, |_, _| {});
+        let err = schedule.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ScheduleError::Conflict("integrate", "probe_a", Phase::Update)
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("integrate") && text.contains("probe_a"),
+            "{text}"
+        );
+        schedule.add_order("integrate", "probe_a");
+        assert!(schedule.validate().is_ok());
+    }
+
         let tape = record(Config::default(), &[]).unwrap();
         assert_eq!(tape.checkpoints.last().unwrap().legacy, GOLDEN_600);
         replay(&tape).unwrap();

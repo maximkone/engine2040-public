@@ -27,19 +27,20 @@
 //! Errors: [`DuelError`] for setup and server faults, [`DuelFailure`] for a
 //! client that cannot finish, with the reason as text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 use engine_arena::{ArenaConfig, Checkpoint, MatchSpec};
 use engine_input::fighter::{Buttons, ATTACK, BLOCK};
 
 use crate::dedicated::{HeadlessServer, ServerError};
+use crate::guard::SlotReceipt;
 use crate::lobby::{BuildId, Msg, RefuseReason, LOBBY_MAGIC};
 use crate::played::STATE_COVER;
 use crate::quic::{send_input, send_lobby, ControlKind, Inbound, InboundFrame, PeerId, Transport};
 use crate::session::{
-    decode_input, decode_state, encode_state, redundancy_window, resync_packets, BodyId, BodyInput,
-    Client, NetError, Server, SnapshotDelta, REDUNDANCY, WIRE_MAGIC, WIRE_VERSION,
+    decode_state, encode_state, redundancy_window, resync_packets, BodyId, BodyInput, Client,
+    NetError, Server, SnapshotDelta, REDUNDANCY, WIRE_MAGIC, WIRE_VERSION,
 };
 
 /// Match seed of the scripted duel (the game's canonical seed).
@@ -54,10 +55,13 @@ pub const DUEL_EXTENT_M: f32 = 20.0;
 pub const DUEL_BUILD_VERSION: u16 = 1;
 /// Ticks the client sends ahead of the newest state it holds.
 pub const LEAD_TICKS: u32 = 8;
-/// Inputs for ticks this far past the server cursor are refused (flood guard).
-pub const MAX_AHEAD_TICKS: u32 = 64;
 /// Ticks a seat may stay silent past the host's patience before it is dropped.
 pub const STALL_LIMIT: u32 = 3;
+/// Reliable packets the host sends a seat per round from its backlog.
+pub const BACKLOG_PER_ROUND: usize = 16;
+/// Rounds a finished client waits, with the tape no longer growing, for the closing history
+/// before it calls a mismatch a desync.
+pub const SETTLE_ROUNDS: u32 = 2_000;
 
 /// Setup and server faults.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -100,14 +104,26 @@ impl From<NetError> for DuelError {
 ///
 /// [`DuelError::Spec`] when the embedded kit placement does not build a world.
 pub fn duel_spec() -> Result<MatchSpec, DuelError> {
-    MatchSpec::kit_duel(ArenaConfig {
+    duel_spec_for(DUEL_TICKS)
+}
+
+/// [`duel_spec`] with a match of `ticks` fixed ticks (a live seat plays longer than the
+/// scripted proof). The length is part of the build identity, so a page and a server that
+/// disagree on it are refused at the join with both builds named.
+///
+/// # Errors
+///
+/// [`DuelError::Spec`] when `ticks` is outside the arena's range or the kit world does not build.
+pub fn duel_spec_for(ticks: u32) -> Result<MatchSpec, DuelError> {
+    let config = ArenaConfig {
         seed: DUEL_SEED,
-        ticks: DUEL_TICKS,
+        ticks,
         fighters: DUEL_FIGHTERS,
         half_extent_m: DUEL_EXTENT_M,
         table_version: 1,
-    })
-    .map_err(|_| DuelError::Spec)
+    };
+    config.validate().map_err(|_| DuelError::Spec)?;
+    MatchSpec::kit_duel(config).map_err(|_| DuelError::Spec)
 }
 
 /// The build identity of `spec`: refused at the join when the peers differ.
@@ -150,6 +166,22 @@ pub fn scripted_input(tick: u32, slot: u8) -> BodyInput {
     }
 }
 
+/// Where a seat's input for a tick comes from. The scripted proof uses [`Script`]; the page
+/// plugs the keyboard in. Called once per tick, in tick order, when the client predicts it.
+pub trait Pilot {
+    /// The input of `slot` for `tick`.
+    fn input(&mut self, tick: u32, slot: u8) -> BodyInput;
+}
+
+/// The pilot of the scripted duel: [`scripted_input`].
+pub struct Script;
+
+impl Pilot for Script {
+    fn input(&mut self, tick: u32, slot: u8) -> BodyInput {
+        scripted_input(tick, slot)
+    }
+}
+
 /// The hash the duel ends on when `slot` plays the script without a stall:
 /// the plain [`Server`] over the same spec and tape, no transport involved.
 ///
@@ -157,10 +189,24 @@ pub fn scripted_input(tick: u32, slot: u8) -> BodyInput {
 ///
 /// [`DuelError`] when the spec or a tick is refused.
 pub fn reference_hash(slot: u8) -> Result<u64, DuelError> {
-    let mut server = Server::from_spec(duel_spec()?)?;
+    reference_hash_for(DUEL_TICKS, &[slot])
+}
+
+/// [`reference_hash`] for a match of `ticks` ticks in which every slot in `slots` plays
+/// the script (two seats: a page and a native client).
+///
+/// # Errors
+///
+/// [`DuelError`] when the spec or a tick is refused.
+pub fn reference_hash_for(ticks: u32, slots: &[u8]) -> Result<u64, DuelError> {
+    let mut server = Server::from_spec(duel_spec_for(ticks)?)?;
     let mut hash = 0;
-    for tick in 0..DUEL_TICKS {
-        hash = server.tick(&[scripted_input(tick, slot)])?.0.hash;
+    for tick in 0..ticks {
+        let inputs: Vec<BodyInput> = slots
+            .iter()
+            .map(|&slot| scripted_input(tick, slot))
+            .collect();
+        hash = server.tick(&inputs)?.0.hash;
     }
     Ok(hash)
 }
@@ -215,6 +261,9 @@ struct Seat {
     link: SeatLink,
     live: bool,
     quiet: u32,
+    /// Reliable packets still owed to this seat (a rejoin's catch-up, the closing history),
+    /// sent a few per round so a long match never overruns the transport's reliable queue.
+    backlog: VecDeque<Vec<u8>>,
 }
 
 /// The dedicated server's side of the duel over any number of transports.
@@ -222,6 +271,8 @@ pub struct DuelHost {
     server: HeadlessServer,
     build: BuildId,
     seats: Vec<Seat>,
+    /// Seats that must have joined before the first tick is authored.
+    need: usize,
     inputs: BTreeMap<(u32, u8), BodyInput>,
     tip: Option<Vec<u8>>,
     events: Vec<HostEvent>,
@@ -229,17 +280,32 @@ pub struct DuelHost {
 }
 
 impl DuelHost {
-    /// A host for `spec` at tick zero with no seat.
+    /// A host for `spec` at tick zero with no seat; the match starts with the first join.
     ///
     /// # Errors
     ///
     /// [`DuelError::Server`] when the spec does not build a match.
     pub fn new(spec: MatchSpec) -> Result<Self, DuelError> {
+        Self::with_seats(spec, 1)
+    }
+
+    /// A host that starts the match once `seats` different tokens have joined (a human
+    /// duel waits for the second human; an empty seat is AI-filled only after the start).
+    ///
+    /// # Errors
+    ///
+    /// [`DuelError::Server`] when the spec does not build a match or `seats` is zero or
+    /// more than the spec has fighters.
+    pub fn with_seats(spec: MatchSpec, seats: u8) -> Result<Self, DuelError> {
+        if seats == 0 || seats > spec.config.fighters {
+            return Err(DuelError::Server(ServerError::BadInput));
+        }
         let build = duel_build(&spec);
         Ok(Self {
             server: HeadlessServer::from_spec(spec)?,
             build,
             seats: Vec::new(),
+            need: usize::from(seats),
             inputs: BTreeMap::new(),
             tip: None,
             events: Vec::new(),
@@ -310,6 +376,29 @@ impl DuelHost {
                 }
             }
         }
+        self.flush_backlogs(transports);
+    }
+
+    /// Send each live seat the next few packets it is owed. A refused send (the transport's
+    /// reliable queue is full) keeps the packet for the next round.
+    fn flush_backlogs(&mut self, transports: &mut [&mut dyn Transport]) {
+        for seat in self.seats.iter_mut().filter(|seat| seat.live) {
+            let Some(transport) = transports.get_mut(seat.link.via) else {
+                continue;
+            };
+            for _ in 0..BACKLOG_PER_ROUND {
+                let Some(packet) = seat.backlog.front() else {
+                    break;
+                };
+                if transport
+                    .send_reliable(seat.link.peer, ControlKind::Lobby, packet)
+                    .is_err()
+                {
+                    break;
+                }
+                seat.backlog.pop_front();
+            }
+        }
     }
 
     fn on_lobby(&mut self, link: SeatLink, bytes: &[u8], transport: &mut dyn Transport) {
@@ -320,8 +409,21 @@ impl DuelHost {
         {
             return;
         }
-        let Ok(Msg::JoinRequest { token, build }) = Msg::decode(bytes) else {
-            return;
+        let (token, build) = match Msg::decode(bytes) {
+            Ok(Msg::JoinRequest { token, build }) => (token, build),
+            // A seat's Ready is its ping: the host echoes it so the page can time the round trip.
+            Ok(Msg::Ready { token, ready }) => {
+                if self
+                    .seats
+                    .iter()
+                    .any(|seat| seat.token == token && seat.link == link)
+                {
+                    // A lost echo is a lost ping sample.
+                    let _ = send_lobby(transport, link.peer, Msg::Ready { token, ready });
+                }
+                return;
+            }
+            _ => return,
         };
         let refuse = |host: &mut Self, transport: &mut dyn Transport, reason| {
             host.events.push(HostEvent::Refused { link, reason });
@@ -365,9 +467,10 @@ impl DuelHost {
                 link,
                 live: true,
                 quiet: 0,
+                backlog: VecDeque::new(),
             }),
         }
-        self.started = true;
+        self.started = self.started || self.seats.len() >= self.need;
         self.events.push(HostEvent::Joined { slot, link, rejoin });
         let grant = Msg::JoinGrant {
             token,
@@ -379,20 +482,19 @@ impl DuelHost {
             return;
         }
         // A seat that comes back mid-match is caught up over the reliable lane.
-        if let Some(snapshot) = self.server.snapshot() {
-            if let Ok(packets) = resync_packets(&snapshot, self.server.checkpoints()) {
-                for packet in packets {
-                    if transport
-                        .send_reliable(link.peer, ControlKind::Lobby, &packet)
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
+        let Some(snapshot) = self.server.snapshot() else {
+            return;
+        };
+        if let Ok(packets) = resync_packets(&snapshot, self.server.checkpoints()) {
+            if let Some(seat) = self.seats.iter_mut().find(|seat| seat.token == token) {
+                seat.backlog = packets.into();
             }
         }
     }
 
+    /// A seat's input datagram enters the server through its guard: malformed packets, other
+    /// slots' inputs, far-future, stale, rewritten and flooded inputs are refused and counted
+    /// per slot ([`DuelHost::admission`]); the rest wait for their tick.
     fn on_input(&mut self, link: SeatLink, bytes: &[u8]) {
         let Some(seat) = self
             .seats
@@ -401,18 +503,22 @@ impl DuelHost {
         else {
             return;
         };
-        let Ok(packet) = decode_input(bytes) else {
+        let now = self.server.tick_now();
+        let Ok(admitted) = self.server.offer(seat.token, bytes, now) else {
             return;
         };
-        let now = self.server.tick_now();
-        for input in packet.inputs {
-            if input.fighter.0 == seat.slot
-                && input.tick >= now
-                && input.tick <= now.saturating_add(MAX_AHEAD_TICKS)
-            {
-                self.inputs.entry((input.tick, seat.slot)).or_insert(input);
-            }
+        for input in admitted {
+            self.inputs
+                .entry((input.tick, input.fighter.0))
+                .or_insert(input);
         }
+    }
+
+    /// What the server's input guard did with each slot's traffic: packets, inputs admitted,
+    /// and every refusal by kind.
+    #[must_use]
+    pub fn admission(&self) -> &[SlotReceipt] {
+        self.server.admission()
     }
 
     /// A seat's transport reported it gone: AI-fill it from now on.
@@ -483,7 +589,7 @@ impl DuelHost {
         self.send_all(transports, &bytes);
         self.tip = Some(bytes);
         if self.is_finished() {
-            self.send_history(transports, &delta);
+            self.queue_history(&delta);
         }
         Ok(Some(checkpoint))
     }
@@ -526,22 +632,12 @@ impl DuelHost {
 
     /// The whole authoritative tape on the reliable lane, so a lossy datagram
     /// path still ends on the server's state.
-    fn send_history(&self, transports: &mut [&mut dyn Transport], delta: &SnapshotDelta) {
+    fn queue_history(&mut self, delta: &SnapshotDelta) {
         let Ok(packets) = resync_packets(delta, self.server.checkpoints()) else {
             return;
         };
-        for seat in self.seats.iter().filter(|seat| seat.live) {
-            let Some(transport) = transports.get_mut(seat.link.via) else {
-                continue;
-            };
-            for packet in &packets {
-                if transport
-                    .send_reliable(seat.link.peer, ControlKind::Lobby, packet)
-                    .is_err()
-                {
-                    break;
-                }
-            }
+        for seat in self.seats.iter_mut().filter(|seat| seat.live) {
+            seat.backlog = packets.iter().cloned().collect();
         }
     }
 }
@@ -561,6 +657,10 @@ pub struct DuelOutcome {
     pub mispredicts: u64,
     /// True when the end needed the full-tape rebuild (datagrams were lost).
     pub rebuilt: bool,
+    /// Deepest rollback of the match: ticks replayed after the server disagreed.
+    pub rollback_max: u32,
+    /// The last ping round trip, when one was measured.
+    pub rtt_ms: Option<u32>,
 }
 
 /// Why the client could not finish.
@@ -582,44 +682,116 @@ enum Phase {
     Done(Result<DuelOutcome, DuelFailure>),
 }
 
+/// How often a seat pings the host, and how long it waits for the echo.
+const PING_EVERY_MS: u64 = 1_000;
+const PING_LOST_MS: u64 = 3_000;
+/// How long a join may go unanswered before it is sent again (a lossy path).
+const JOIN_RETRY_MS: u64 = 1_000;
+
+/// How the session is going right now: what the page prints while the duel runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DuelStats {
+    /// Next tick this client predicts.
+    pub tick: u32,
+    /// Newest authoritative tick held, once a state arrived.
+    pub server_tick: Option<u32>,
+    /// The last ping round trip (the join handshake counts as the first).
+    pub rtt_ms: Option<u32>,
+    /// Ticks replayed by the newest rollback (zero when the prediction held).
+    pub rollback_last: u32,
+    /// Deepest rollback so far.
+    pub rollback_max: u32,
+    /// Predicted ticks the server corrected.
+    pub mispredicts: u64,
+    /// Milliseconds since the newest state arrived (zero before the first, or unclocked).
+    pub quiet_ms: u64,
+    /// State packets that did not decode.
+    pub rejected: u32,
+}
+
+/// The server's hash of each tick whose state reached this client.
+#[derive(Default)]
+struct Attested {
+    hashes: BTreeMap<u32, u64>,
+    /// Ticks `0..contiguous` all have a hash, so every input of them reached the client too.
+    contiguous: u32,
+    /// Ticks below this already agree with the client's own run.
+    checked: u32,
+}
+
+impl Attested {
+    fn note(&mut self, checkpoint: Checkpoint) {
+        self.hashes.insert(checkpoint.tick, checkpoint.hash);
+        while self.hashes.contains_key(&self.contiguous) {
+            self.contiguous += 1;
+        }
+    }
+
+    /// The first tick of `held` whose hash is not the server's.
+    fn first_divergence(&self, held: &[Checkpoint]) -> Option<u32> {
+        held.iter()
+            .find(|cp| {
+                self.hashes
+                    .get(&cp.tick)
+                    .is_some_and(|&server| server != cp.hash)
+            })
+            .map(|cp| cp.tick)
+    }
+}
+
 /// The page's side of the duel.
 pub struct DuelClient {
     spec: MatchSpec,
+    ticks: u32,
     build: BuildId,
     token: u64,
     slot: u8,
     phase: Phase,
+    pilot: Box<dyn Pilot>,
     known: BTreeMap<(u32, u8), BodyInput>,
     sent: Vec<BodyInput>,
     top: Option<Checkpoint>,
+    attested: Attested,
     mispredicts: u64,
+    rollback_last: u32,
+    rollback_max: u32,
     rejected: u32,
+    /// The caller's clock, set by [`DuelClient::poll_at`]; `None` for an unclocked client.
+    now_ms: Option<u64>,
+    last_state_ms: Option<u64>,
+    join_sent_ms: Option<u64>,
+    ping_sent_ms: Option<u64>,
+    ping_next_ms: u64,
+    rtt_ms: Option<u32>,
+    /// Inputs known when the end last looked wrong, and the rounds since the tape grew.
+    settled_at: usize,
+    settle: u32,
 }
 
 impl DuelClient {
-    /// A client for the duel with a nonzero seat `token` (the same token
+    /// A client for the scripted duel with a nonzero seat `token` (the same token
     /// reclaims the same seat).
     ///
     /// # Errors
     ///
     /// [`DuelError`] for a zero token or a spec that does not build.
     pub fn new(token: u64) -> Result<Self, DuelError> {
+        Self::playing(token, DUEL_TICKS, Box::new(Script))
+    }
+
+    /// A client whose inputs come from `pilot`, in a match of `ticks` ticks (the server
+    /// must serve the same length, or the join is refused).
+    ///
+    /// # Errors
+    ///
+    /// [`DuelError`] for a zero token or a length the arena does not allow.
+    pub fn playing(token: u64, ticks: u32, pilot: Box<dyn Pilot>) -> Result<Self, DuelError> {
         if token == 0 {
             return Err(DuelError::Net(NetError::BadInput));
         }
-        let spec = duel_spec()?;
-        Ok(Self {
-            build: duel_build(&spec),
-            spec,
-            token,
-            slot: 0,
-            phase: Phase::Start,
-            known: BTreeMap::new(),
-            sent: Vec::new(),
-            top: None,
-            mispredicts: 0,
-            rejected: 0,
-        })
+        let mut client = Self::with_spec(token, duel_spec_for(ticks)?);
+        client.pilot = pilot;
+        Ok(client)
     }
 
     /// [`DuelClient::new`] on a spec of the caller's (a build mismatch proof).
@@ -627,15 +799,28 @@ impl DuelClient {
     pub fn with_spec(token: u64, spec: MatchSpec) -> Self {
         Self {
             build: duel_build(&spec),
+            ticks: spec.config.ticks,
             spec,
             token,
             slot: 0,
             phase: Phase::Start,
+            pilot: Box::new(Script),
             known: BTreeMap::new(),
             sent: Vec::new(),
             top: None,
+            attested: Attested::default(),
             mispredicts: 0,
+            rollback_last: 0,
+            rollback_max: 0,
             rejected: 0,
+            now_ms: None,
+            last_state_ms: None,
+            join_sent_ms: None,
+            ping_sent_ms: None,
+            ping_next_ms: 0,
+            rtt_ms: None,
+            settled_at: 0,
+            settle: 0,
         }
     }
 
@@ -664,19 +849,62 @@ impl DuelClient {
         }
     }
 
-    /// Run one round: send the join, read the transport, apply the newest
-    /// state, send the next inputs. Returns true once the duel ended.
-    pub fn poll<T: Transport + ?Sized>(&mut self, transport: &mut T, server: PeerId) -> bool {
-        if matches!(self.phase, Phase::Start) {
-            let join = Msg::JoinRequest {
-                token: self.token,
-                build: self.build,
-            };
-            match send_lobby(transport, server, join) {
-                Ok(()) => self.phase = Phase::Joining,
-                Err(error) => self.fail(format!("the join could not be sent: {error}")),
-            }
+    /// Length of the match this client plays, in ticks.
+    #[must_use]
+    pub fn ticks(&self) -> u32 {
+        self.ticks
+    }
+
+    /// True once the server granted a seat.
+    #[must_use]
+    pub fn seated(&self) -> bool {
+        matches!(self.phase, Phase::Playing(_))
+    }
+
+    /// How the session is going at the caller's last clock reading.
+    #[must_use]
+    pub fn stats(&self) -> DuelStats {
+        let (tick, server_tick) = match &self.phase {
+            Phase::Playing(client) => (client.tick_now(), client.server_tick()),
+            _ => (0, None),
+        };
+        DuelStats {
+            tick,
+            server_tick,
+            rtt_ms: self.rtt_ms,
+            rollback_last: self.rollback_last,
+            rollback_max: self.rollback_max,
+            mispredicts: self.mispredicts,
+            quiet_ms: match (self.now_ms, self.last_state_ms) {
+                (Some(now), Some(last)) => now.saturating_sub(last),
+                _ => 0,
+            },
+            rejected: self.rejected,
         }
+    }
+
+    /// Run one round without a clock: no ping, no join retry (the in-memory tests).
+    pub fn poll<T: Transport + ?Sized>(&mut self, transport: &mut T, server: PeerId) -> bool {
+        self.round(transport, server)
+    }
+
+    /// Run one round at `now_ms` on the caller's clock: the same as [`DuelClient::poll`]
+    /// plus the ping, the join retry and the quiet time of [`DuelStats`].
+    pub fn poll_at<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        server: PeerId,
+        now_ms: u64,
+    ) -> bool {
+        self.now_ms = Some(now_ms);
+        self.round(transport, server)
+    }
+
+    /// One round: send the join, read the transport, apply the newest state,
+    /// check it against the server's hashes, send the next inputs. Returns true
+    /// once the duel ended.
+    fn round<T: Transport + ?Sized>(&mut self, transport: &mut T, server: PeerId) -> bool {
+        self.join(transport, server);
         for inbound in transport.recv() {
             if inbound.from != server {
                 continue;
@@ -687,9 +915,62 @@ impl DuelClient {
             self.on_bytes(&bytes);
         }
         self.apply();
+        self.verify();
+        self.ping(transport, server);
         self.send_inputs(transport, server);
         self.finish();
         matches!(self.phase, Phase::Done(_))
+    }
+
+    /// Send the join, and again when a clocked client has heard nothing for a second.
+    fn join<T: Transport + ?Sized>(&mut self, transport: &mut T, server: PeerId) {
+        let overdue = matches!((self.now_ms, self.join_sent_ms), (Some(now), Some(sent))
+            if now.saturating_sub(sent) >= JOIN_RETRY_MS);
+        if !(matches!(self.phase, Phase::Start) || matches!(self.phase, Phase::Joining) && overdue)
+        {
+            return;
+        }
+        let join = Msg::JoinRequest {
+            token: self.token,
+            build: self.build,
+        };
+        match send_lobby(transport, server, join) {
+            Ok(()) => {
+                self.phase = Phase::Joining;
+                self.join_sent_ms = self.now_ms;
+            }
+            Err(error) => self.fail(format!("the join could not be sent: {error}")),
+        }
+    }
+
+    /// Send a Ready ping when one is due; the host echoes it and [`DuelClient::on_lobby`] times it.
+    fn ping<T: Transport + ?Sized>(&mut self, transport: &mut T, server: PeerId) {
+        let (Phase::Playing(_), Some(now)) = (&self.phase, self.now_ms) else {
+            return;
+        };
+        if self
+            .ping_sent_ms
+            .is_some_and(|sent| now.saturating_sub(sent) >= PING_LOST_MS)
+        {
+            self.ping_sent_ms = None;
+        }
+        if self.ping_sent_ms.is_some() || now < self.ping_next_ms {
+            return;
+        }
+        let ping = Msg::Ready {
+            token: self.token,
+            ready: true,
+        };
+        if send_lobby(transport, server, ping).is_ok() {
+            self.ping_sent_ms = Some(now);
+            self.ping_next_ms = now + PING_EVERY_MS;
+        }
+    }
+
+    fn take_rtt(&mut self, sent: Option<u64>) {
+        if let (Some(now), Some(sent)) = (self.now_ms, sent) {
+            self.rtt_ms = Some(u32::try_from(now.saturating_sub(sent)).unwrap_or(u32::MAX));
+        }
     }
 
     fn on_bytes(&mut self, bytes: &[u8]) {
@@ -713,6 +994,8 @@ impl DuelClient {
                     Ok(client) => {
                         self.slot = slot;
                         self.phase = Phase::Playing(Box::new(client));
+                        // The handshake is the first round trip.
+                        self.take_rtt(self.join_sent_ms);
                     }
                     Err(error) => self.fail(format!("the granted seat does not build: {error}")),
                 }
@@ -728,6 +1011,10 @@ impl DuelClient {
                     want.version, want.rules, got.version, got.rules
                 ));
             }
+            Ok(Msg::Ready { token, .. }) if token == self.token => {
+                let sent = self.ping_sent_ms.take();
+                self.take_rtt(sent);
+            }
             _ => {}
         }
     }
@@ -737,6 +1024,8 @@ impl DuelClient {
             self.rejected += 1;
             return;
         };
+        self.last_state_ms = self.now_ms;
+        self.attested.note(packet.checkpoint);
         for input in packet.inputs {
             self.known.insert((input.tick, input.fighter.0), input);
         }
@@ -773,10 +1062,64 @@ impl DuelClient {
         match client.on_server_state(checkpoint, &delta) {
             Ok(mispredicts) => {
                 self.mispredicts += u64::try_from(mispredicts.len()).unwrap_or(u64::MAX);
+                // The replay reaches from the first corrected tick to the newest prediction.
+                self.rollback_last = mispredicts
+                    .first()
+                    .map_or(0, |&first| client.tick_now().saturating_sub(first));
+                self.rollback_max = self.rollback_max.max(self.rollback_last);
                 client.resimulate();
             }
             Err(_) => self.rejected += 1,
         }
+    }
+
+    /// Check the client's own run against the hashes the server attested while the duel
+    /// is on, so a desync is named when it happens and not at the last tick. A tape with a
+    /// hole (late datagrams) looks like a divergence until the whole known tape is
+    /// replayed, so only a divergence the replay keeps ends the duel.
+    fn verify(&mut self) {
+        let Phase::Playing(client) = &self.phase else {
+            return;
+        };
+        let upto = client
+            .server_tick()
+            .map_or(0, |tick| tick + 1)
+            .min(self.attested.contiguous);
+        let from = self.attested.checked;
+        let disagreed = (from..upto).any(|tick| {
+            let held = usize::try_from(tick)
+                .ok()
+                .and_then(|index| client.checkpoints().get(index));
+            held.map(|cp| cp.hash) != self.attested.hashes.get(&tick).copied()
+        });
+        self.attested.checked = from.max(upto);
+        if !disagreed {
+            return;
+        }
+        let tip = upto.checked_sub(1).and_then(|tick| {
+            self.attested
+                .hashes
+                .get(&tick)
+                .map(|&hash| Checkpoint { tick, hash })
+        });
+        let Some(replay) = tip.and_then(|tip| self.replay_to(tip)) else {
+            return;
+        };
+        if let Some(first) = self.attested.first_divergence(&replay) {
+            self.fail(self.desync_text(first, &replay));
+        }
+    }
+
+    /// The desync message: the first tick the two runs part at and both hashes.
+    fn desync_text(&self, first: u32, replay: &[Checkpoint]) -> String {
+        let held = usize::try_from(first)
+            .ok()
+            .and_then(|index| replay.get(index));
+        format!(
+            "desync at tick {first}: the server says {:016x}, this client computed {}",
+            self.attested.hashes.get(&first).copied().unwrap_or(0),
+            held.map_or_else(|| "nothing".to_owned(), |cp| format!("{:016x}", cp.hash)),
+        )
     }
 
     /// Predict and send every input up to the lead past the newest state.
@@ -787,16 +1130,21 @@ impl DuelClient {
         let limit = client
             .server_tick()
             .map_or(LEAD_TICKS, |tick| tick.saturating_add(1 + LEAD_TICKS))
-            .min(DUEL_TICKS - 1);
+            .min(self.ticks - 1);
         let mut failure = None;
         while client.tick_now() <= limit {
-            let input = scripted_input(client.tick_now(), self.slot);
+            let input = self.pilot.input(client.tick_now(), self.slot);
             if let Err(error) = client.predict(input) {
                 failure = Some(format!(
                     "the prediction refused tick {}: {error}",
                     input.tick
                 ));
                 break;
+            }
+            // A tick the server already authored needs no input (a returning seat predicts
+            // its way back to the tip without flooding the server's guard with old ones).
+            if client.server_tick().is_some_and(|done| input.tick <= done) {
+                continue;
             }
             self.sent.push(input);
             let from = self.sent.len().saturating_sub(REDUNDANCY);
@@ -818,58 +1166,83 @@ impl DuelClient {
         let Phase::Playing(client) = &self.phase else {
             return;
         };
-        if client.server_tick() != Some(DUEL_TICKS - 1) {
+        let end = self.ticks - 1;
+        if client.server_tick() != Some(end) {
             return;
         }
-        let Some(last) = self.top.filter(|cp| cp.tick == DUEL_TICKS - 1) else {
+        let Some(last) = self.top.filter(|cp| cp.tick == end) else {
             return;
         };
         let mut rebuilt = false;
+        let mut diverged = None;
         let mut held = client
             .checkpoints()
             .last()
             .copied()
-            .filter(|cp| cp.tick == DUEL_TICKS - 1);
+            .filter(|cp| cp.tick == end);
         if held.map(|cp| cp.hash) != Some(last.hash) {
-            // Datagrams went missing: replay once over everything the server
-            // ever attested, the way a rejoin does.
+            // Datagrams went missing: replay over everything the server ever attested,
+            // the way a rejoin does. The closing history may still be arriving, so a
+            // replay that still disagrees waits for the tape to stop growing before it
+            // is called a desync, and replays again only when the tape grew.
             rebuilt = true;
-            held = self.replay_known(last);
+            let grew = self.known.len() != self.settled_at;
+            if !grew && self.settle < SETTLE_ROUNDS {
+                self.settle += 1;
+                return;
+            }
+            let replay = self.replay_to(last);
+            diverged = replay
+                .as_deref()
+                .and_then(|cps| self.attested.first_divergence(cps));
+            held = replay
+                .and_then(|cps| cps.last().copied())
+                .filter(|cp| cp.tick == end);
+            if held.map(|cp| cp.hash) != Some(last.hash) && self.settle < SETTLE_ROUNDS {
+                self.settled_at = self.known.len();
+                self.settle = 0;
+                return;
+            }
         }
         let result = match held {
             Some(cp) if cp.hash == last.hash => Ok(DuelOutcome {
-                ticks: DUEL_TICKS,
+                ticks: self.ticks,
                 hash: last.hash,
                 peers: 1,
                 slot: self.slot,
                 mispredicts: self.mispredicts,
                 rebuilt,
+                rollback_max: self.rollback_max,
+                rtt_ms: self.rtt_ms,
             }),
             other => Err(DuelFailure(format!(
-                "desync at tick {}: the server says {:016x}, this client computed {}",
+                "desync at tick {}: the server says {:016x}, this client computed {}{}",
                 last.tick,
                 last.hash,
                 other.map_or_else(|| "nothing".to_owned(), |cp| format!("{:016x}", cp.hash)),
+                diverged.map_or_else(String::new, |tick| format!(
+                    " (first divergent tick {tick})"
+                )),
             ))),
         };
         self.phase = Phase::Done(result);
     }
 
-    /// The checkpoint at the last tick of a fresh client fed the whole known tape.
-    fn replay_known(&self, last: Checkpoint) -> Option<Checkpoint> {
+    /// The checkpoints of a fresh client fed the whole known tape up to `last`.
+    fn replay_to(&self, last: Checkpoint) -> Option<Vec<Checkpoint>> {
         let mut fresh = Client::from_spec(self.spec.clone(), BodyId(self.slot)).ok()?;
         let delta = SnapshotDelta {
             version: WIRE_VERSION,
             tick: last.tick,
             hash: last.hash,
-            tape: self.known.values().copied().collect(),
+            tape: self
+                .known
+                .range(..=(last.tick, u8::MAX))
+                .map(|(_, input)| *input)
+                .collect(),
         };
         fresh.on_server_state(last, &delta).ok()?;
-        fresh
-            .resimulate()
-            .last()
-            .copied()
-            .filter(|cp| cp.tick == last.tick)
+        Some(fresh.resimulate())
     }
 }
 
@@ -883,6 +1256,25 @@ pub fn net_line(transport: &str, outcome: &Result<DuelOutcome, DuelFailure>) -> 
             done.ticks, done.hash, done.peers
         ),
         Err(failure) => format!("net: failed transport={transport} reason={failure}"),
+    }
+}
+
+/// The line the page prints while the duel runs: the leg, the tick against the match length,
+/// the ping, the rollback depth (newest and deepest) and how long the newest state is old.
+#[must_use]
+pub fn playing_line(transport: &str, stats: &DuelStats, ticks: u32) -> String {
+    let rtt = stats
+        .rtt_ms
+        .map_or_else(|| "?".to_owned(), |ms| format!("{ms}ms"));
+    match stats.server_tick {
+        None => format!("net: seated transport={transport} rtt={rtt}, waiting for the match to start"),
+        Some(tick) => format!(
+            "net: playing transport={transport} tick={}/{ticks} rtt={rtt} rollback={} max={} quiet={}ms",
+            tick + 1,
+            stats.rollback_last,
+            stats.rollback_max,
+            stats.quiet_ms,
+        ),
     }
 }
 

@@ -61,22 +61,13 @@ fn texel_uv(x: usize, y: usize, inv: f64) -> [f64; 2] {
     ]
 }
 
-/// Shot direction for one texel: blended vertex normals when the low mesh
-/// carries them, else the triangle face normal; `None` when the triangle
-/// is degenerate and the texel must be skipped.
+/// Shot direction for one texel of triangle `tri` (three vertex indices) at barycentric `w`:
+/// blended vertex normals when the low mesh carries them, else the triangle face normal;
+/// `None` when the triangle is degenerate and the texel must be skipped.
 /// Caller: [`bake_normals`] (same file) casts one parry ray per texel.
-fn texel_dir(
-    low: &GeoMesh,
-    ia: usize,
-    ib: usize,
-    ic: usize,
-    w: [f64; 3],
-    has_n: bool,
-    pa: [f32; 3],
-    pb: [f32; 3],
-    pc: [f32; 3],
-) -> Option<[f32; 3]> {
-    if has_n {
+fn texel_dir(low: &GeoMesh, tri: [usize; 3], w: [f64; 3]) -> Option<[f32; 3]> {
+    let [ia, ib, ic] = tri;
+    if low.normals.len() == low.positions.len() {
         let (na, nb, nc) = (low.normals[ia], low.normals[ib], low.normals[ic]);
         let v = [
             narrow(w[0] * f64::from(na[0]) + w[1] * f64::from(nb[0]) + w[2] * f64::from(nc[0])),
@@ -85,6 +76,7 @@ fn texel_dir(
         ];
         unit(v)
     } else {
+        let (pa, pb, pc) = (low.positions[ia], low.positions[ib], low.positions[ic]);
         let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
         let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
         unit([
@@ -173,7 +165,6 @@ pub fn bake_normals(
         .collect::<Vec<_>>();
     let mesh =
         TriMesh::new(verts, idxs).map_err(|_| GeoError::Donor("trimesh build".to_string()))?;
-    let has_n = low.normals.len() == low.positions.len();
     let tris = low.indices.len() / 3;
     let mut rgb = vec![[0u8; 3]; total];
     let mut covered = vec![false; total];
@@ -206,7 +197,7 @@ pub fn bake_normals(
                         w[0] * f64::from(pa[2]) + w[1] * f64::from(pb[2]) + w[2] * f64::from(pc[2]),
                     ),
                 ];
-                let Some(dir) = texel_dir(low, ia, ib, ic, w, has_n, pa, pb, pc) else {
+                let Some(dir) = texel_dir(low, [ia, ib, ic], w) else {
                     break;
                 };
                 let o = Vector::new(
@@ -265,17 +256,7 @@ mod tests {
         };
         let w = [0.25, 0.25, 0.5];
         assert_eq!(
-            texel_dir(
-                &mesh,
-                0,
-                1,
-                2,
-                w,
-                false,
-                mesh.positions[0],
-                mesh.positions[1],
-                mesh.positions[2]
-            ),
+            texel_dir(&mesh, [0, 1, 2], w),
             Some([0.0, 0.0, 1.0]),
             "face normal of an XY triangle points +z"
         );
@@ -284,17 +265,7 @@ mod tests {
             ..mesh.clone()
         };
         assert_eq!(
-            texel_dir(
-                &with_n,
-                0,
-                1,
-                2,
-                w,
-                true,
-                with_n.positions[0],
-                with_n.positions[1],
-                with_n.positions[2]
-            ),
+            texel_dir(&with_n, [0, 1, 2], w),
             Some([0.0, 0.0, 1.0]),
             "blended vertex normals point +z"
         );
@@ -303,17 +274,7 @@ mod tests {
             ..mesh.clone()
         };
         assert_eq!(
-            texel_dir(
-                &flat,
-                0,
-                1,
-                2,
-                w,
-                false,
-                flat.positions[0],
-                flat.positions[1],
-                flat.positions[2]
-            ),
+            texel_dir(&flat, [0, 1, 2], w),
             None,
             "a degenerate triangle has no direction"
         );
@@ -353,5 +314,71 @@ mod tests {
             "a corner 5px out of reach must stay uncovered"
         );
         assert_eq!(rgb2[0], [0, 0, 0]);
+    }
+
+    /// Bake a 48 x 64 unit sphere into `low` at 256 px and check the sphere accept: at least
+    /// 90 percent of the texels inside a UV triangle are covered, the covered texels' normals
+    /// are within 3 degrees (mean) of the analytic sphere normal at the texel's surface
+    /// point, the bytes repeat, and the bake takes at most 5 s.
+    fn check_sphere_bake(low: &GeoMesh) {
+        const SIZE: usize = 256;
+        let high = uv_sphere(1.0, 48, 64);
+        let start = std::time::Instant::now();
+        let map = bake_normals(low, &high, 256, 0.2).unwrap();
+        let seconds = start.elapsed().as_secs_f64();
+        assert!(seconds <= 5.0, "bake took {seconds} s");
+        let bytes = |m: &NormalMap| m.rgb.iter().flatten().copied().collect::<Vec<u8>>();
+        let again = bake_normals(low, &high, 256, 0.2).unwrap();
+        assert_eq!(
+            engine_core::hash_bytes(&bytes(&map)),
+            engine_core::hash_bytes(&bytes(&again)),
+            "digest of rgb equal x2"
+        );
+        let inv = 1.0 / f64::from(map.size);
+        let (mut inside, mut covered, mut angle_sum) = (0_u32, 0_u32, 0.0_f64);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let p = texel_uv(x, y, inv);
+                let found = low.indices.chunks_exact(3).find_map(|t| {
+                    let uv = |k: usize| low.uvs[ix(t[k])].map(f64::from);
+                    bary(p, uv(0), uv(1), uv(2)).map(|w| (t, w))
+                });
+                let Some((tri, w)) = found else { continue };
+                inside += 1;
+                if !map.covered[y * SIZE + x] {
+                    continue;
+                }
+                covered += 1;
+                let pos: [f64; 3] = std::array::from_fn(|k| {
+                    (0..3)
+                        .map(|j| w[j] * f64::from(low.positions[ix(tri[j])][k]))
+                        .sum()
+                });
+                let len = pos.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let got = map.rgb[y * SIZE + x].map(|b| f64::from(b) / 255.0 * 2.0 - 1.0);
+                let got_len = got.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let cos = (0..3).map(|k| pos[k] / len * got[k] / got_len).sum::<f64>();
+                angle_sum += cos.clamp(-1.0, 1.0).acos().to_degrees();
+            }
+        }
+        let coverage = f64::from(covered) / f64::from(inside);
+        let mean = angle_sum / f64::from(covered);
+        println!("bake: {inside} texels in UV triangles, coverage {coverage:.4}, mean angle {mean:.3} deg, {seconds:.2} s");
+        assert!(inside > 10_000, "the low sphere fills the atlas: {inside}");
+        assert!(coverage >= 0.9, "coverage {coverage}");
+        assert!(mean <= 3.0, "mean angle {mean} degrees");
+    }
+
+    #[test]
+    fn a_sphere_bakes_onto_its_own_lat_long_uvs() {
+        check_sphere_bake(&uv_sphere(1.0, 8, 12));
+    }
+
+    #[cfg(feature = "uv")]
+    #[test]
+    fn a_sphere_bakes_onto_an_unwrapped_low_mesh() {
+        use crate::uv::{unwrap, UnwrapOptions};
+        let low = unwrap(&uv_sphere(1.0, 8, 12), &UnwrapOptions::default()).unwrap();
+        check_sphere_bake(&low.mesh);
     }
 }

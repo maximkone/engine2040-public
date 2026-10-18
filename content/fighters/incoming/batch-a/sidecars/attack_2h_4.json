@@ -1,0 +1,1 @@
+{"clip":"attack_2h_4","feet":{"left":"foot_l","right":"foot_r"},"ground_y":0.02,"hit_windows":[{"end_s":0.3,"socket":"SOCKET_wep_R","start_s":0.1}],"loop":false,"root_motion":false,"tags":["attack","melee"]}

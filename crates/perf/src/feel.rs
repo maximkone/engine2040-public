@@ -647,13 +647,13 @@ mod tests {
     #[test]
     fn gold_goes_red_when_an_input_or_the_verdict_moves() {
         // A win share out of band flips win=pass to FAIL: the stored verdict no longer matches.
-        let low_win = GOLD.replacen("tuning 500", "tuning 300", 1);
+        let low_win = GOLD.replacen("tuning 510", "tuning 300", 1);
         assert!(check_gold(&low_win)
             .unwrap_err()
             .why
             .contains("scorer says"));
         // Four of five keypoints is 800 permille, under the 900 bar.
-        let weak = GOLD.replacen("juicing 500 5 5", "juicing 500 4 5", 1);
+        let weak = GOLD.replacen("juicing 510 5 5", "juicing 510 4 5", 1);
         assert!(check_gold(&weak).unwrap_err().why.contains("rubric=FAIL"));
         // A stored verdict that lies about the latency leg is caught too.
         let lie = GOLD.replacen("baseline_p95=50.000ms", "baseline_p95=20.000ms", 1);

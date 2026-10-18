@@ -1,12 +1,12 @@
 {
   "files": {
     "src/sand_floor.gltf": {
-      "sha256": "6814d73a28e3882eaa978b401d01d63cc6fa81b454b975515948da3794023f74",
-      "bytes": 1791278
+      "sha256": "92d6d7528a6fac21cb62fb387d0416a0927a26d791367de5bcc8fcf809f6bebc",
+      "bytes": 1791200
     },
     "src/stands.gltf": {
-      "sha256": "66167f3522d0b84becdcdd9572d9118690823b7a1beb8f2d02f5c241ae50d98e",
-      "bytes": 5763553
+      "sha256": "4d69b3b788607382377e685b287a9396d444565a08037270b0e7a35bbff4bf5d",
+      "bytes": 5763717
     },
     "src/walls.gltf": {
       "sha256": "4f5ae00ad614e44b3b10e273844669504aa398e888bc578fccc700ea9d413936",
@@ -21,8 +21,8 @@
       "bytes": 6821759
     },
     "src/banner.gltf": {
-      "sha256": "40046652694c2976be5443f4d2462ff24eeb3fb7d662e68fbb75a5667abf5226",
-      "bytes": 7837265
+      "sha256": "6a73057134fdb0446c67d323c7719b1740c0cd8b5ed87421fd661d573fe7fa70",
+      "bytes": 7841365
     },
     "src/crate.gltf": {
       "sha256": "322d4cf3a807ab572ce6d9af25b0707c7793752238fd0eeaa27d5436fd84b1b7",
@@ -69,8 +69,8 @@
       "bytes": 27968841
     },
     "placement.json": {
-      "sha256": "c310b0697c5230da33da047632940505ee543e4cb589e1f993d483cd155ca167",
-      "bytes": 2935
+      "sha256": "16913e041b2438b6accaf4a8e3de912e83748bbfcb266c0000d060d31dae14f6",
+      "bytes": 2939
     },
     "textures/sand_albedo_2k.jpg": {
       "sha256": "1803d7e2861b304bea6d2e124dcd4c657fcb93843b84c17bb2db98ce48a87e4e",

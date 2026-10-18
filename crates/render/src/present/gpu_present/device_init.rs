@@ -112,6 +112,17 @@ impl Presenter {
         &self.device
     }
 
+    /// Which adapter this presenter draws on, who asked for it, and whether
+    /// that was a fallback (a software adapter, or a surface that hides the
+    /// best one). [`Self::init_offscreen`] and [`Self::init_windowed`] carry
+    /// the report of their own pick; a presenter built on a device the caller
+    /// opened reports source `caller`. Receipts quote
+    /// [`BackendSelection::line`](crate::adapter::BackendSelection::line).
+    #[must_use]
+    pub fn backend_selection(&self) -> &crate::adapter::BackendSelection {
+        &self.backend_selection
+    }
+
     /// Format of the attached swapchain, `None` before a surface is attached.
     #[must_use]
     pub fn surface_format(&self) -> Option<wgpu::TextureFormat> {

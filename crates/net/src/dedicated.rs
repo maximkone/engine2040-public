@@ -16,7 +16,10 @@ use std::net::{SocketAddr, UdpSocket};
 use engine_arena::{ArenaConfig, Checkpoint, MatchSpec};
 use engine_input::{FighterInput, MAX_PARTICIPANTS};
 
+use crate::anticheat::Flagged;
+use crate::guard::{InputGuard, SlotReceipt};
 use crate::heal::{DesyncPlan, NetHeal, NetHealError, QuarantineNotice, ReconnectPlan};
+use crate::lagcomp::{LagTape, LagWindow, MAX_WINDOW_TICKS};
 use crate::replay::{record_tape, DivergenceReport, ReplayError, ReplayTape, Theater};
 use crate::session::{SnapshotDelta, WIRE_VERSION};
 use engine_observe::supervisor::AppliedHeal;
@@ -202,9 +205,16 @@ impl Beacon {
 /// and dropped slots need no extra code here. The server never rolls back:
 /// a late or mis-stamped input loses as [`ServerError::StaleClient`] and the
 /// client resimulates to server truth from [`Self::resync`].
+///
+/// Client datagrams enter through [`Self::offer`]: the [`InputGuard`]
+/// refuses and counts forged or abusive input per slot, and the lag window
+/// ([`Self::hold_ticks`]) says how long a caller holds each tick open so a
+/// remote player's input still lands on its own tick.
 pub struct HeadlessServer {
     config: ArenaConfig,
     inner: crate::session::Server,
+    guard: InputGuard,
+    hold_floor: u8,
     slots: Vec<Slot>,
     pending: Vec<FighterInput>,
     tape: Vec<FighterInput>,
@@ -234,6 +244,7 @@ impl HeadlessServer {
         if config.validate().is_err() {
             return Err(ServerError::BadConfig);
         }
+        let guard = InputGuard::new(config.fighters, spec.spear);
         let inner = crate::session::Server::from_spec(spec).map_err(|_| ServerError::BadConfig)?;
         let slots = vec![
             Slot {
@@ -246,6 +257,8 @@ impl HeadlessServer {
         Ok(Self {
             config,
             inner,
+            guard,
+            hold_floor: 1,
             slots,
             pending: Vec::new(),
             tape: Vec::new(),
@@ -365,6 +378,84 @@ impl HeadlessServer {
         Ok(())
     }
 
+    /// Screen one input datagram from `token` that arrived on the caller's
+    /// clock tick `arrival` (lockstep callers pass [`Self::tick_now`]). The
+    /// [`InputGuard`] refuses and counts malformed or impossible datagrams,
+    /// foreign slots, far-future, stale, late and rewritten inputs and
+    /// packet floods; the rest come back sanitized for the caller's inbox,
+    /// to [`Self::submit`] when their tick is authored. Attack presses get a
+    /// lag receipt ([`Self::hit_receipts`]).
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::StaleClient`] for a token that never held a slot.
+    pub fn offer(
+        &mut self,
+        token: u64,
+        bytes: &[u8],
+        arrival: u32,
+    ) -> Result<Vec<FighterInput>, ServerError> {
+        let Some(slot) = self.slot_of(token) else {
+            return Err(ServerError::StaleClient { token });
+        };
+        let open = self.tick_now();
+        let mut admitted = Vec::new();
+        if let Some(packet) = self.guard.open(slot, open, arrival, bytes) {
+            let hold = self.hold_window();
+            self.guard
+                .admit(slot, open, arrival, hold, &packet, &mut admitted);
+        }
+        Ok(admitted)
+    }
+
+    /// Hold every tick open at least `ticks` (the operator's floor, capped
+    /// at the lag window bound); the lag window only widens it.
+    pub fn set_hold_floor(&mut self, ticks: u32) {
+        let capped = ticks.min(u32::from(MAX_WINDOW_TICKS));
+        self.hold_floor = u8::try_from(capped).unwrap_or(MAX_WINDOW_TICKS);
+    }
+
+    /// Ticks a caller holds each tick open past its stamp before authoring
+    /// it: the widest lag window of the connected slots (measured lag or
+    /// reported round trip), never below the floor, never above 16.
+    pub fn hold_ticks(&self) -> u32 {
+        u32::from(self.hold_window().ticks)
+    }
+
+    fn hold_window(&self) -> LagWindow {
+        let widest = self
+            .slots
+            .iter()
+            .zip(self.guard.receipts())
+            .filter(|(slot, _)| slot.connected)
+            .map(|(_, receipt)| receipt.window().ticks)
+            .max()
+            .unwrap_or(0);
+        LagWindow {
+            ticks: widest.max(self.hold_floor),
+        }
+    }
+
+    /// Per-slot admission receipts in slot order.
+    pub fn admission(&self) -> &[SlotReceipt] {
+        self.guard.receipts()
+    }
+
+    /// Admitted inputs the sanitize rule changed, with their ticks.
+    pub fn flagged_inputs(&self) -> &[Flagged] {
+        self.guard.flagged()
+    }
+
+    /// Lag receipts of every attack press offered, in arrival order.
+    pub fn hit_receipts(&self) -> &LagTape {
+        self.guard.hits()
+    }
+
+    /// Deterministic digest of the admission receipts, flags and lag tape.
+    pub fn admission_digest(&self) -> u64 {
+        self.guard.digest()
+    }
+
     /// True when the match authored `config.ticks` ticks and the auto-theater is available.
     pub fn is_finished(&self) -> bool {
         self.tick_now() >= self.config.ticks
@@ -411,6 +502,7 @@ impl HeadlessServer {
             .map_err(|_| ServerError::BadInput)?;
         self.tape.extend_from_slice(&submitted);
         self.checkpoints.push(checkpoint);
+        self.guard.forget_before(self.tick_now());
         self.last_ai_filled = self.slots.len().saturating_sub(submitted.len());
         self.write_auto_theater();
         self.cell_packets.clear();
@@ -539,7 +631,8 @@ impl HeadlessServer {
     }
 
     /// Record one round-trip latency sample in milliseconds for a connected
-    /// client; samples above [`MAX_LATENCY_MS`] reject.
+    /// client (the transport's measurement); it also sizes the slot's lag
+    /// window. Samples above [`MAX_LATENCY_MS`] reject.
     pub fn report_latency(&mut self, token: u64, ms: u64) -> Result<(), ServerError> {
         let Some(slot) = self.slot_of(token) else {
             return Err(ServerError::StaleClient { token });
@@ -551,6 +644,7 @@ impl HeadlessServer {
             return Err(ServerError::BadInput);
         }
         self.slots[usize::from(slot)].latency_ms = ms;
+        self.guard.set_rtt(slot, ms);
         Ok(())
     }
 

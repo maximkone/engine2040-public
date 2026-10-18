@@ -62,6 +62,8 @@ runs the state machine door state (`anim.graph.set`, `anim.graph.undo`, `anim.pr
 `engine-endpoint` depends on `engine-assets` (features `import`, `registry`) behind its off-by-default `intake` feature: the
 `asset.intake` verb cooks a generated GLB through `engine_assets::gen_intake` (cook-time only; no tick crate depends on it); assets never imports endpoint.
 `engine-endpoint` depends on `engine-physics` behind its `mcp` feature: the `physics` verb pack reads the std-only balance core (`engine_physics::balance::response_matrix`, `recovery_ticks`), so one tuning has one answer; physics never imports endpoint.
+`engine-endpoint` depends on `engine-nav` behind its `mcp` feature: `scene.query reachable` reads each staged actor's polygon from a baked nav mesh through `engine_nav::reach::reach_view` (and refuses `needs_nav_view` when the session holds none), so reach has one owner; nav never imports endpoint.
+`engine-endpoint` depends on `engine-input` behind its `mcp` feature: `play.run` validates tape inputs against the fighter contract ranges (`WISH_RANGE`, `FACING_RANGE`, `KNOWN_BUTTONS`) that `engine_input::fighter` owns, instead of mirroring them; input never imports endpoint.
 `engine-proof` depends on `engine-combat` (default features): `break_corpus.rs` feeds 10,000 seeded swings to the cut resolver and pins one digest; combat never imports proof.
 
 ### Crate integration status (2026-10-01)

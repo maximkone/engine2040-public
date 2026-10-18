@@ -1,6 +1,7 @@
 // Build the browser shell into dist/web (WEB4).
 //   node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt] [--opt-ab]
 //   node tools/web-build.mjs --size-sweep [z,s,3] [--commit <hash>]
+//   node tools/web-build.mjs --check-public <dir> [--allow-dir docs/] [--allow-file llms.txt]
 // cargo builds crates/web for wasm32-unknown-unknown with the size-tuned `web` profile (root
 // Cargo.toml), the wasm-bindgen CLI at the version Cargo.lock locks turns the module into
 // engine.js + engine_bg.wasm, wasm-opt -Oz shrinks it when it is installed, and the page
@@ -12,6 +13,8 @@
 // [profile.web]; the browser job of the next run proves the golden receipt on it.
 // QW2: --opt-ab runs wasm-opt at -Oz, -Os and -O3 on the same module, prints the three sizes and ships the smallest;
 // build.json keeps the table (wasmOptAb) and twiggy's top 20 items.
+// WEB10: the site is public (the mirror is public), so a bundle that holds a file nobody listed does not ship: build() refuses it
+// before it touches dist/web, and --check-public <dir> (the Pages workflow runs it on the assembled site) lists the strays and exits 1.
 // Every step goes through `deps` (run a command, read and write files), so the test drives
 // the whole build with a fake toolchain.
 import { createHash } from "node:crypto";
@@ -38,6 +41,10 @@ export const SWEEP_LEVELS = ["z", "s", "3"]; // the opt-levels --size-sweep buil
 export const TWIGGY_ITEMS = 20;
 // The files the page needs, in the order build.json lists them. Anything else wasm-bindgen writes (snippets/) is copied too.
 export const DIST_FILES = ["index.html", "loader.js", "engine.js", "engine_bg.wasm", "build.json"];
+// What a published bundle may hold: the files above and wasm-bindgen's snippets/ folder. A content bundle (WEB6) adds its own name
+// here when it lands; the Pages workflow adds the handbook (docs/) and llms.txt for the assembled site.
+export const PUBLIC_FILES = [...DIST_FILES];
+export const PUBLIC_DIRS = ["snippets/"];
 
 export class BuildError extends Error {}
 
@@ -69,6 +76,20 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 const gzipBytes = (buf) => gzipSync(buf, { level: 9 }).length;
 
 const tail = (text, n = 25) => String(text).trimEnd().split(/\r?\n/).slice(-n).join("\n");
+
+// The files of `files` (relative, forward slashes) that are not on the public list: not a listed file and not under a listed folder.
+// `allow` adds files and folders for one check.
+export function nonPublicFiles(files, { files: more = [], dirs = [] } = {}) {
+  const names = new Set([...PUBLIC_FILES, ...more]);
+  const folders = [...PUBLIC_DIRS, ...dirs];
+  return files.filter((f) => !names.has(f) && !folders.some((d) => f.startsWith(d)));
+}
+
+// Throws a BuildError naming the files of `dir` that are not public.
+export function checkPublic(dir, allow = {}) {
+  const stray = nonPublicFiles(listFiles(dir), allow);
+  if (stray.length) throw new BuildError(`${dir} holds ${stray.length} file(s) outside the public list: ${stray.slice(0, 10).join(", ")}${stray.length > 10 ? ", ..." : ""}`);
+}
 
 // Every file under `dir`, relative with forward slashes.
 export function listFiles(dir, base = dir) {
@@ -196,6 +217,11 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
 
     const page = renderHtml(deps.readText(join(rootDir, "crates", "web", "index.html")), hash);
 
+    // WEB10: a file nobody listed is refused before outDir is touched.
+    const shipped = [...listFiles(work).filter((rel) => !rel.endsWith(".d.ts")), "index.html", "loader.js", "build.json"];
+    const stray = nonPublicFiles(shipped);
+    if (stray.length) throw new BuildError(`the build holds ${stray.length} file(s) outside the public list: ${stray.join(", ")}`);
+
     // Everything is ready: only now touch outDir.
     rmSync(outDir, { recursive: true, force: true });
     mkdirSync(outDir, { recursive: true });
@@ -244,17 +270,21 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
 }
 
 export function parseArgs(argv) {
-  const o = { out: null, commit: null, optimize: true, ab: false, sweep: null, error: null };
+  const o = { out: null, commit: null, optimize: true, ab: false, sweep: null, checkPublic: null, allowDirs: [], allowFiles: [], error: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--out") o.out = argv[++i] ?? null;
     else if (a === "--commit") o.commit = argv[++i] ?? null;
     else if (a === "--no-opt") o.optimize = false;
     else if (a === "--opt-ab") o.ab = true;
+    else if (a === "--check-public") o.checkPublic = argv[++i] ?? null;
+    else if (a === "--allow-dir") o.allowDirs.push(argv[++i] ?? "");
+    else if (a === "--allow-file") o.allowFiles.push(argv[++i] ?? "");
     else if (a === "--size-sweep") o.sweep = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i].split(",") : SWEEP_LEVELS;
     else o.error = `unknown argument ${a}`;
   }
   if ((argv.includes("--out") && !o.out) || (argv.includes("--commit") && !o.commit)) o.error = "--out and --commit need a value";
+  if ((argv.includes("--check-public") && !o.checkPublic) || o.allowDirs.includes("") || o.allowFiles.includes("")) o.error = "--check-public, --allow-dir and --allow-file need a value";
   if (o.sweep && !o.sweep.every((l) => /^[0-3sz]$/.test(l))) o.error = "--size-sweep takes opt-levels from 0 1 2 3 s z, comma separated";
   return o;
 }
@@ -262,11 +292,14 @@ export function parseArgs(argv) {
 if (import.meta.main) {
   const a = parseArgs(process.argv.slice(2));
   if (a.error) {
-    console.error(`web-build: ${a.error}\nusage: node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt] [--opt-ab] | --size-sweep [z,s,3]`);
+    console.error(`web-build: ${a.error}\nusage: node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt] [--opt-ab] | --size-sweep [z,s,3] | --check-public <dir> [--allow-dir d/] [--allow-file f]`);
     process.exit(2);
   }
   try {
-    if (a.sweep) sizeSweep({ commit: a.commit, levels: a.sweep, optimize: a.optimize });
+    if (a.checkPublic) {
+      checkPublic(resolve(a.checkPublic), { files: a.allowFiles, dirs: a.allowDirs });
+      console.log(`web-build: ${a.checkPublic} holds only public files`);
+    } else if (a.sweep) sizeSweep({ commit: a.commit, levels: a.sweep, optimize: a.optimize });
     else build({ outDir: a.out ? resolve(a.out) : join(root, "dist", "web"), commit: a.commit, optimize: a.optimize, ab: a.ab });
   } catch (e) {
     if (!(e instanceof BuildError)) throw e;

@@ -3057,6 +3057,7 @@ name = "engine-ecs"
 version = "0.1.0"
 dependencies = [
  "engine-core",
+ "loom",
 ]
 
 [[package]]
@@ -3095,7 +3096,9 @@ dependencies = [
  "engine-editor",
  "engine-game",
  "engine-geo",
+ "engine-input",
  "engine-material",
+ "engine-nav",
  "engine-net",
  "engine-observe",
  "engine-physics",
@@ -3142,7 +3145,7 @@ dependencies = [
  "engine-core",
  "manifold-rust",
  "meshopt",
- "parry3d 0.30.2",
+ "parry3d",
 ]
 
 [[package]]
@@ -3289,6 +3292,7 @@ dependencies = [
  "engine-assets",
  "engine-clock",
  "engine-core",
+ "engine-material",
  "engine-observe",
  "glam 0.33.9",
  "image",
@@ -4005,6 +4009,21 @@ dependencies = [
  "paste",
  "raw-cpuid",
  "seq-macro",
+]
+
+[[package]]
+name = "generator"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1be81b31c9ce4caf7f3178eeb90662bb1864d3ad363ec6bdada3201adff19c37"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link",
+ "windows-result",
 ]
 
 [[package]]
@@ -5305,6 +5324,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "loop9"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6563,35 +6595,6 @@ dependencies = [
 
 [[package]]
 name = "parry3d"
-version = "0.30.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01b00bf3ea4e0961a3f44aeb666b7dc3b0e87027b629561bd8283a7f6b2e2ed1"
-dependencies = [
- "approx",
- "arrayvec",
- "bitflags 2.13.2",
- "downcast-rs 2.0.2",
- "either",
- "ena",
- "foldhash 0.2.0",
- "glamx",
- "hashbrown 0.17.1",
- "indexmap",
- "log",
- "num-derive 0.4.2",
- "num-traits",
- "ordered-float 5.5.0",
- "rstar",
- "simba",
- "slab",
- "smallvec",
- "spade",
- "static_assertions",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "parry3d"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b626edc0b497dba4bdf6e1e0797895294ed9f61dac2bd28cb5d34d37ad2ca7e"
@@ -7304,7 +7307,7 @@ dependencies = [
  "log",
  "nalgebra",
  "num-traits",
- "parry3d 0.31.1",
+ "parry3d",
  "profiling",
  "serde",
  "simba",

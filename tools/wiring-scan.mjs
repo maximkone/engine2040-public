@@ -329,15 +329,89 @@ export function formatReport(islands) {
   return out;
 }
 
+// AD5 diff gate: a pub item added in the diff needs a production user in
+// another file, or the caller names the open board row that will consume it.
+
+const DIFF_KINDS = new Set(['fn', 'struct', 'enum']);
+
+/** New-side line numbers per file in `git diff -U0` text. */
+export function parseAddedLines(diffText) {
+  const added = new Map();
+  let file = null;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('+++ ')) {
+      file = line.startsWith('+++ b/') ? line.slice(6) : null;
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!hunk || file === null) continue;
+    const lines = added.get(file) ?? new Set();
+    const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    for (let i = 0; i < count; i += 1) lines.add(Number(hunk[1]) + i);
+    added.set(file, lines);
+  }
+  return added;
+}
+
+/** The fn, struct and enum islands defined on added lines (consts and traits
+ * are API shape, the report lists them). `fresh` holds untracked files (every
+ * line is new); `prefix` turns a crates-relative path into a repo path. */
+export function newIslands(islands, added, fresh, prefix) {
+  return islands.filter(function (it) {
+    const path = prefix + it.file;
+    return DIFF_KINDS.has(it.kind) && (fresh.has(path) || added.get(path)?.has(it.line) === true);
+  });
+}
+
+/** Ids of the rows still open (`- [ ] ID`) on the board index and its shards. */
+export function openBoardRows(docsDir) {
+  const rows = new Set();
+  for (const name of readdirSync(docsDir)) {
+    if (!/^SPRINT(-.*)?\.md$/.test(name)) continue;
+    for (const m of readFileSync(join(docsDir, name), 'utf8').matchAll(/^- \[ \] ([A-Z][A-Z0-9]*\d+[a-z]?)\b/gm)) rows.add(m[1]);
+  }
+  return rows;
+}
+
+/** Verdict over the new islands: `unlocks` (open row ids) exempts them all. */
+export function diffVerdict(items, unlocks, openRows) {
+  const unknown = unlocks.filter(function (row) { return !openRows.has(row); });
+  if (unknown.length > 0) {
+    return { code: 1, text: 'FAIL wiring-scan --diff: --unlocks names a row that is not open on the board: ' + unknown.join(', ') + '\n' };
+  }
+  const lines = items.map(function (it) { return it.crate + ' ' + it.file + ':' + it.line + ' ' + it.kind + ' ' + it.name; });
+  if (items.length === 0) return { code: 0, text: 'PASS wiring-scan --diff: every new pub item has a production user in another file\n' };
+  if (unlocks.length > 0) {
+    return { code: 0, text: lines.map(function (l) { return 'unlocked ' + l + '\n'; }).join('') + 'PASS wiring-scan --diff: ' + items.length + ' new pub item(s) wait for ' + unlocks.join(', ') + '\n' };
+  }
+  return { code: 1, text: lines.map(function (l) { return 'unwired ' + l + '\n'; }).join('') + 'FAIL wiring-scan --diff: ' + items.length + ' new pub item(s) with no production user outside their own file; wire a caller or pass --unlocks=<open row id>\n' };
+}
+
+function runDiffGate(root, islands, base, unlocks) {
+  const git = function (args) { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); };
+  const top = git(['rev-parse', '--show-toplevel']).trim();
+  const where = relative(top, root).split('\\').join('/');
+  const prefix = where === '' ? '' : where + '/';
+  const added = parseAddedLines(git(['diff', '-U0', '--no-color', base, '--', root]));
+  const fresh = new Set(git(['ls-files', '--others', '--exclude-standard', '--full-name', '--', root]).split('\n').filter(Boolean));
+  const openRows = unlocks.length > 0 ? openBoardRows(join(top, 'docs')) : new Set();
+  return diffVerdict(newIslands(islands, added, fresh, prefix), unlocks, openRows);
+}
+
 export function helpText() {
   return [
     'wiring-scan.mjs - list pub items with no production user.',
-    'usage: node tools/wiring-scan.mjs [root] [--json] [--baseline] [--check] [--help]',
+    'usage: node tools/wiring-scan.mjs [root] [--json] [--baseline] [--check] [--diff[=REV]] [--unlocks=ROW[,ROW]] [--orphans] [--help]',
     '  root        crates root to scan (default: crates).',
     '  --json      print islands as one JSON line; byte-equal x2 for same input.',
     '  --baseline  write tools/wiring-scan.baseline.json on first run,',
     '              else exit 1 when any crate island count rises.',
     '  --check     compare current scan to the baseline pin, exit 1 on rise.',
+    '  --diff[=REV] exit 1 when a pub item added since REV (default HEAD, working tree',
+    '              and untracked files included) has no production user in another file.',
+    '  --unlocks=ROW[,ROW]  with --diff: the new items wait for these open board rows.',
+    '  --orphans   the default report: every existing pub item with no production',
+    '              user, report only, nothing is deleted.',
     '  --help      print this help and exit 0.',
     'report: prints island lines, top ten crates, writes target/reports/wiring-scan.json.',
     'nightly: run `node tools/wiring-scan.mjs --check` and attach the report.',
@@ -352,6 +426,9 @@ if (isMain) {
   let wantBaseline = false;
   let wantCheck = false;
   let wantHelp = false;
+  let wantDiff = false;
+  let diffBase = 'HEAD';
+  let unlocks = [];
   let arg = 'crates';
   let picked = false;
   for (const a of raw) {
@@ -361,6 +438,11 @@ if (isMain) {
       wantBaseline = true;
     } else if (a === '--check') {
       wantCheck = true;
+    } else if (a === '--diff' || a.startsWith('--diff=')) {
+      wantDiff = true;
+      if (a.length > 6) diffBase = a.slice(7);
+    } else if (a.startsWith('--unlocks=')) {
+      unlocks = a.slice(10).split(',').filter(Boolean);
     } else if (a === '--help' || a === '-h') {
       wantHelp = true;
     } else if (a.startsWith('--')) {
@@ -376,12 +458,16 @@ if (isMain) {
   } else {
   const root = resolve(arg);
   const toolDir = dirname(fileURLToPath(import.meta.url));
-  const mode = wantCheck ? 'check' : wantBaseline ? 'baseline' : wantJson ? 'json' : 'report';
+  const mode = wantDiff ? 'diff' : wantCheck ? 'check' : wantBaseline ? 'baseline' : wantJson ? 'json' : 'report';
   runWithVerdictCache({ repoDir: dirname(toolDir), name: 'wiring-scan', extra: mode + '|' + root,
-    enabled: mode !== 'baseline', // --baseline writes files: never replay it
+    enabled: mode !== 'baseline' && mode !== 'diff', // --baseline writes files and --diff reads git: never replay them
     run: function () {
   const islands = scanIslands(root);
-  if (wantCheck) {
+  if (wantDiff) {
+    const verdict = runDiffGate(root, islands, diffBase, unlocks);
+    process.stdout.write(verdict.text);
+    process.exitCode = verdict.code;
+  } else if (wantCheck) {
     const found = readBaselineFile(toolDir);
     if (!found.baseline) {
       process.stdout.write('FAIL wiring-scan: missing baseline ' + found.path + ' islands: ' + islands.length + '\n');

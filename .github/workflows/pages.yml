@@ -157,6 +157,11 @@ jobs:
             echo
             echo "Rustdoc warnings: $RUSTDOC_WARNINGS"
           } >> "$GITHUB_STEP_SUMMARY"
+      # WEB10: the site is public by design, so it holds only what the public list names (tools/web-build.mjs): the game's own
+      # files, the handbook and rustdoc under docs/, and llms.txt. Anything else fails the build before the upload.
+      - name: the site holds only public files
+        shell: bash
+        run: node tools/web-build.mjs --check-public site --allow-dir docs/ --allow-file llms.txt
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

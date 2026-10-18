@@ -237,14 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn a_free_preferred_pose_comes_back_exact() {
+    fn place_outside_a_free_preferred_pose_comes_back_exact() {
         let actors = room((3.2, 3.2));
         let out = place_outside(&intent(vec![]), &[OutsideTarget::Object(5)], &actors).unwrap();
         assert_eq!((out.x, out.y, out.z, out.yaw), (3.2, 0.5, 3.2, 0.0));
     }
 
     #[test]
-    fn a_spawn_inside_the_zone_is_moved_outside_and_hugs_it() {
+    fn place_outside_a_spawn_inside_the_zone_is_moved_outside_and_hugs_it() {
         let actors = room((0.0, 0.0));
         let next = Want {
             relation: Relation::NextTo,
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn failures_name_their_kind() {
+    fn place_outside_failures_name_their_kind() {
         let actors = room((3.2, 3.2));
         // The whole room is the region: crowded.
         let whole = OutsideTarget::Region {

@@ -2,6 +2,7 @@
 
 Short records. One file per decision.
 Status is Proposed until the lead accepts.
+Every record names a Compliance check path that exists; `node --test docs/adr/adr.test.mjs` enforces it.
 
 ## Template
 
@@ -23,4 +24,8 @@ Status is Proposed until the lead accepts.
 | 0004 | Handles and residency | Proposed |
 | 0005 | Physics bodies off in the shipped app | Proposed |
 | 0006 | Single-threaded sim until RC36 parity | Proposed |
+| 0007 | No Bevy viewer and no Bevy dependency | Proposed |
+| 0008 | Frozen scope until the first real frame | Proposed |
+| 0009 | Donor code may be ported, deny.toml is Cargo only | Proposed |
+| 0010 | Parry window | Accepted |
 | 0011 | Audio parked, no owner | Proposed |

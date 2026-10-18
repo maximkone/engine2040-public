@@ -15,8 +15,8 @@
 //! block by edge clamp. Levels are stored smallest first, aligned to 16 bytes,
 //! as the KTX2 spec asks; the level index lists the base level first.
 //!
-//! Not real BC7: the `bc` module's `Bc7` is BC3 with swapped halves, which no GPU
-//! decodes, so the cook never emits it.
+//! BC7 (mode 6) lives in `bc` and is cooked by `texture_cook`; this container does not write
+//! it yet, so the committed arena colour maps stay BC1.
 
 use crate::bc::{self, BcError, BcFormat, BcSlot, BLOCK_EDGE, BLOCK_TEXELS};
 use crate::import::KTX2_MAGIC;
@@ -795,6 +795,77 @@ mod tests {
             base.len() * 4 <= (w * h * 4) as usize,
             "colour map alone is under a quarter"
         );
+    }
+
+    /// A seeded tangent-space normal map: three sine hills with slopes up to about 0.5 each,
+    /// plus fine noise of +-0.03 on the slope, so every 4x4 block holds real detail. RGBA8
+    /// with Z in blue, the way an artist's file stores it.
+    fn normal_fixture(w: u32, h: u32) -> Vec<u8> {
+        let mut state = 0x2040_beefu32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / 16_777_216.0
+        };
+        let waves: Vec<[f32; 4]> = (0..3)
+            .map(|_| {
+                [
+                    0.03 + 0.07 * next(),
+                    0.03 + 0.07 * next(),
+                    std::f32::consts::TAU * next(),
+                    2.0 + 3.0 * next(),
+                ]
+            })
+            .collect();
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let (mut sx, mut sy) = (0.0f32, 0.0f32);
+                for [fx, fy, phase, amp] in &waves {
+                    let c = amp * (fx * x as f32 + fy * y as f32 + phase).cos();
+                    sx += c * fx;
+                    sy += c * fy;
+                }
+                sx += (next() - 0.5) * 0.06;
+                sy += (next() - 0.5) * 0.06;
+                let len = (sx * sx + sy * sy + 1.0).sqrt();
+                let byte = |v: f32| ((v / len * 0.5 + 0.5) * 255.0 + 0.5) as u8;
+                out.extend_from_slice(&[byte(-sx), byte(-sy), byte(1.0), 255]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn bc5_normal_map_1024_cooks_to_one_mib_plus_mips_within_one_and_a_half_degrees() {
+        let (w, h) = (1024, 1024);
+        let src = normal_fixture(w, h);
+        let file = cook_ktx2(&src, w, h, MapKind::Normal, 0).expect("cooks");
+        assert_eq!(
+            file,
+            cook_ktx2(&src, w, h, MapKind::Normal, 0).expect("recooks"),
+            "cook bytes equal x2"
+        );
+        let tex = parse_ktx2(&file).expect("parses");
+        // BC5 is 16 bytes per 4x4 block: 1 MiB at 1024x1024, then the chain down to 1x1.
+        assert_eq!(tex.levels.len(), 11);
+        assert_eq!(tex.levels[0].len(), 1 << 20);
+        let mips: usize = tex.levels[1..].iter().map(Vec::len).sum();
+        assert_eq!(mips, 349_552, "512x512 down to one block per tiny level");
+        let (_, _, rgba) = decode_level_rgba(&tex, 0).expect("decodes");
+        let unit = |t: &[u8]| {
+            let d = [0, 1, 2].map(|k| f64::from(t[k]) / 127.5 - 1.0);
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            d.map(|v| v / l)
+        };
+        let mut sum = 0.0f64;
+        for (p, q) in src.chunks_exact(4).zip(rgba.chunks_exact(4)) {
+            let (a, b) = (unit(p), unit(q));
+            let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).clamp(-1.0, 1.0);
+            sum += dot.acos().to_degrees();
+        }
+        let mean = sum / f64::from(w * h);
+        println!("bc5 normal map {w}x{h}: mean angular error {mean:.3} degrees");
+        assert!(mean <= 1.5, "mean angular error {mean} degrees");
     }
 
     #[test]

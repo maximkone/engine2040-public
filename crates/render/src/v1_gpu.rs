@@ -74,13 +74,13 @@ impl std::error::Error for GpuError {}
 // ---------------------------------------------------------------------------
 
 /// Byte size of the camera uniform (64 B view-proj + 16 B pos/pad).
-const CAMERA_UNIFORM_BYTES: u64 = 80;
+pub(crate) const CAMERA_UNIFORM_BYTES: u64 = 80;
 /// Byte size of the light uniform (16 B dir/pad + 16 B color/intensity).
-const LIGHT_UNIFORM_BYTES: u64 = 32;
+pub(crate) const LIGHT_UNIFORM_BYTES: u64 = 32;
 /// Byte size of the material uniform (16 B base/metallic + 16 B factors).
 const MATERIAL_UNIFORM_BYTES: u64 = 32;
 /// Interleaved vertex stride: pos(3) + normal(3) + uv(2) + tangent(4) f32.
-const VERTEX_STRIDE: u64 = 48;
+pub(crate) const VERTEX_STRIDE: u64 = 48;
 /// `copy_texture_to_buffer` rows must be 256-byte aligned.
 const ROW_ALIGN: u32 = 256;
 

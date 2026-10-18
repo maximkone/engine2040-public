@@ -74,7 +74,9 @@ pub use decode::{
 pub use device::{AudioSink, DeviceError, DeviceOutput};
 pub use engine::{AudioEngine, FrameSource, DRAIN_LIMIT};
 pub use feed::{AudioCommand, Command, FeedError, FeedRx, FeedStats, FeedTx, FEED_CAPACITY};
-pub use heal::{AudioHealError, DeviceHeal, DeviceState, HealReport, DEVICE_FAULT_CODE};
+pub use heal::{
+    AudioHealError, DeviceHeal, DeviceState, HealReport, HoldLastMixer, DEVICE_FAULT_CODE,
+};
 pub use music::{Tension, TensionTracker};
 pub use playlist::{MusicBank, MusicBed, MusicError, MusicState};
 pub use spatial::{attenuation, falloff_gain, isqrt, pan_for, MixCmd, Pos2, SpatialMixer, NEAR_CM};
@@ -272,6 +274,12 @@ struct Voice {
     /// Live multiplier set by [`Mixer::set_cue_trim`] (`1.0` untouched): how
     /// the game rides a looped bed up and down without restarting it.
     trim: f32,
+    /// One-pole lowpass coefficient set by [`Mixer::set_voice_lowpass`]:
+    /// `1.0` is open (bypass), smaller darkens.
+    lp_coeff: f32,
+    /// Filter memory (left, right): the last output, or the last source frame
+    /// while open, so closing the filter starts from the sound playing.
+    lp_state: (f32, f32),
 }
 
 impl Voice {
@@ -303,6 +311,18 @@ impl Voice {
         self.route.is_some_and(|route| route.group == group)
     }
 
+    /// Run the voice lowpass over one source frame. Open returns the frame
+    /// untouched.
+    fn lowpass(&mut self, (l, r): (f32, f32)) -> (f32, f32) {
+        if self.lp_coeff >= 1.0 {
+            self.lp_state = (l, r);
+        } else {
+            self.lp_state.0 += self.lp_coeff * (l - self.lp_state.0);
+            self.lp_state.1 += self.lp_coeff * (r - self.lp_state.1);
+        }
+        self.lp_state
+    }
+
     /// Current `(left, right)` source frame, mono-folded when asked.
     fn stereo(&self) -> (f32, f32) {
         if self.fold_mono {
@@ -312,6 +332,16 @@ impl Voice {
             stereo_in(&self.data, self.channels, self.cursor)
         }
     }
+}
+
+/// One-pole lowpass coefficient `1 - e^(-2 pi fc / fs)` for `cutoff_hz`; `1.0`
+/// (open, bypass) at or above [`occlude::OPEN_CUTOFF_HZ`] or the Nyquist rate.
+fn lowpass_coeff(cutoff_hz: u32, sample_rate: u32) -> f32 {
+    if cutoff_hz >= occlude::OPEN_CUTOFF_HZ || u64::from(cutoff_hz) * 2 >= u64::from(sample_rate) {
+        return 1.0;
+    }
+    let x = std::f32::consts::TAU * f32_of(cutoff_hz) / f32_of(sample_rate);
+    1.0 - (-x).exp()
 }
 
 /// Music level while dialogue plays, percent of full.
@@ -661,6 +691,8 @@ impl Mixer {
             route,
             gate,
             trim: 1.0,
+            lp_coeff: 1.0,
+            lp_state: (0.0, 0.0),
         });
         id
     }
@@ -774,6 +806,32 @@ impl Mixer {
         touched
     }
 
+    /// Darken voice `id` with a one-pole lowpass at `cutoff_hz` (the wall
+    /// muffle of [`occlude::Muffle`]). Absolute, not cumulative: a cutoff at
+    /// or above [`occlude::OPEN_CUTOFF_HZ`] opens the voice again. True when
+    /// the voice is live. Never allocates.
+    pub fn set_voice_lowpass(&mut self, id: VoiceId, cutoff_hz: u32) -> bool {
+        let coeff = lowpass_coeff(cutoff_hz, self.sample_rate);
+        let Some(voice) = self.voices.iter_mut().find(|v| v.id == id) else {
+            return false;
+        };
+        voice.lp_coeff = coeff;
+        true
+    }
+
+    /// Start voice `id` `frames` into its clip: the head is skipped, never
+    /// more than half the clip so a short hit keeps its body. True when the
+    /// voice is live. Never allocates.
+    pub fn skip_voice(&mut self, id: VoiceId, frames: u32) -> bool {
+        let Some(voice) = self.voices.iter_mut().find(|v| v.id == id) else {
+            return false;
+        };
+        let skip = usize::try_from(frames).unwrap_or(usize::MAX);
+        let target = voice.cursor.saturating_add(skip).min(voice.frames() / 2);
+        voice.cursor = voice.cursor.max(target);
+        true
+    }
+
     /// Music duck gain right now (`1.0` untouched, falling toward
     /// [`DUCK_FLOOR_PERCENT`] percent while dialogue plays).
     pub fn duck_gain(&self) -> f32 {
@@ -798,19 +856,21 @@ impl Mixer {
 
     /// Sum the current frame of every voice, mono or stereo, into the master
     /// and bus accumulators.
-    fn accumulate(&self, mono: bool) -> FrameMix {
+    fn accumulate(&mut self, mono: bool) -> FrameMix {
         let mut mix = FrameMix {
             raw: (0.0, 0.0),
             bus: [(0.0, 0.0); 3],
             duck: false,
         };
-        for v in &self.voices {
+        for v in &mut self.voices {
             let ramp = v.fade_gain() * v.trim;
             let (l, r) = if mono {
                 let gain = 0.5 * (v.gain_l + v.gain_r) * ramp;
-                (mono_in(&v.data, v.channels, v.cursor) * gain, 0.0)
+                let m = mono_in(&v.data, v.channels, v.cursor);
+                (v.lowpass((m, m)).0 * gain, 0.0)
             } else {
                 let (sl, sr) = v.stereo();
+                let (sl, sr) = v.lowpass((sl, sr));
                 (sl * v.gain_l * ramp, sr * v.gain_r * ramp)
             };
             let slot = match v.route {
@@ -1043,6 +1103,35 @@ mod tests {
         let out = m.render(64);
         assert_eq!(out.len(), 64);
         assert!(m.is_idle(), "all voices consumed after their frames");
+    }
+
+    #[test]
+    fn open_lowpass_leaves_the_mix_bit_identical_and_dead_ids_refuse() {
+        let s = mono(
+            48_000,
+            &(0..256u32)
+                .map(|i| (f32_of(i) * 0.37).sin())
+                .collect::<Vec<_>>(),
+        );
+        let mut plain = Mixer::new(48_000);
+        plain.play(&s, 0.8);
+        let want = plain.render(256);
+        let mut opened = Mixer::new(48_000);
+        let id = opened.play(&s, 0.8);
+        assert!(opened.set_voice_lowpass(id, occlude::OPEN_CUTOFF_HZ));
+        assert_eq!(
+            opened.render(256),
+            want,
+            "open is a bypass, not a near-flat filter"
+        );
+        let mut dark = Mixer::new(48_000);
+        let id = dark.play(&s, 0.8);
+        assert!(dark.set_voice_lowpass(id, 500));
+        assert_ne!(dark.render(256), want, "a closed filter changes the mix");
+        assert!(
+            !dark.set_voice_lowpass(id, 500),
+            "the voice ran out of frames"
+        );
     }
 
     /// Run one render call under the probe and require zero heap calls.

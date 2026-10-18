@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex};
 
 use engine_arena::GaitPhase;
-use engine_audio::{device::DeviceOutput, Bank, CueBank, FeedTx, Mixer};
+use engine_audio::{device::DeviceOutput, Bank, CueBank, FeedTx, HoldLastMixer, Mixer};
 use engine_input::{Bindings, FighterError, FighterId, FighterInput, PhysicalButton};
 use engine_render::{
     backend::{BackendChoice, BackendError},
@@ -715,7 +715,7 @@ pub fn open_audio(mixer: Arc<Mutex<Mixer>>, muted: bool) -> (Option<DeviceOutput
     if muted {
         return (None, MUTED_AUDIO_NOTICE.to_string());
     }
-    match DeviceOutput::open_default(mixer) {
+    match DeviceOutput::open_default(HoldLastMixer::new(mixer)) {
         Ok(output) => {
             let notice = format!(
                 "audio live: {}ch {}Hz",
@@ -758,7 +758,8 @@ pub struct TickMixStats {
 
 /// Play one tick's voices through the mix bridge on the game thread: query
 /// the walls per voice, slew each slot, floor the sfx path at full muffle
-/// and stamp the tunnel send, then hand the occluded gains to the mixer.
+/// and stamp the tunnel send, then hand the occluded gains and lowpass
+/// cutoffs to the mixer.
 /// Borrows plus stack buffers only, no heap per call. A refused query (only
 /// an over-cap wall set, never the single charted wall here) plays the tick
 /// dry; voices past [`MAX_MIX_VOICES`] play dry rather than dropping.
@@ -803,8 +804,11 @@ pub fn mix_tick_audio(
         )
         .unwrap_or_default();
     let mut send_sum = 0f64;
-    for (command, voice) in outcome.audio.iter().take(got).zip(mixed.iter()) {
-        mixer.play(bank.get(command.sound), command.gain * voice.gain);
+    for (index, (command, voice)) in outcome.audio.iter().take(got).zip(mixed.iter()).enumerate() {
+        let id = mixer.play(bank.get(command.sound), command.gain * voice.gain);
+        if let Some(cutoff) = bridge.cutoff_hz(index) {
+            mixer.set_voice_lowpass(id, cutoff);
+        }
         send_sum += f64::from(voice.send);
     }
     for command in outcome.audio.iter().skip(got) {

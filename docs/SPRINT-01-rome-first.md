@@ -159,8 +159,8 @@
   and `sim_digest` exactly; `SetMaterialParam look.specular_roughness 0.08` then undo gives the old digests;
   `SetMaterialParam body.toughness 9` moves `sim_digest` only; a bad value is refused with the record path and the
   document revision does not change); P2P `cargo test -p engine-editor --lib` green, golden `d57b5c8ae3096614`
-  unchanged. needs: NS31a.
-- [ ] NS31b1 assets: cook the two missing texture slots — in `crates/assets/src/cooked.rs` add `TextureSlot::Occlusion` Progress 2026-10-17: TextureSlot::Occlusion and Emissive cook (cooked.rs, texture.rs, five_slots_round_trip passes in gh-check run 39057512389 engine-assets --lib); left: the same run has 1 red test, archive::tests::stage_refuses_an_archive_past_the_offset_limit (archive_fits(usize::MAX, usize::MAX, usize::MAX)), so the P2P engine-assets green bar fails; the bundle digest check was not seen.
+  unchanged. needs: none.
+- [x] NS31b1 assets: cook the two missing texture slots — in `crates/assets/src/cooked.rs` add `TextureSlot::Occlusion` Progress 2026-10-17: TextureSlot::Occlusion and Emissive cook (cooked.rs, texture.rs, five_slots_round_trip passes in gh-check run 39057512389 engine-assets --lib); left: the same run has 1 red test, archive::tests::stage_refuses_an_archive_past_the_offset_limit (archive_fits(usize::MAX, usize::MAX, usize::MAX)), so the P2P engine-assets green bar fails; the bundle digest check was not seen.
   (linear, red channel) and `TextureSlot::Emissive` (sRGB, linearized on cook like `BaseColor`; see
   `TextureEncoding`), handle both in `cook_texture` (`crates/assets/src/texture.rs`, line 96) and in every
   `match` on `TextureSlot` the compiler flags. Tier A. Size S. Owns `crates/assets/src/cooked.rs` and
@@ -168,7 +168,7 @@
   `five_slots_round_trip` cooks one 4x4 image per slot and the bytes are equal x2; Emissive texels are
   linearized and Occlusion texels are not; a duplicate slot in one material is still refused); P2P `cargo test
   -p engine-assets` green and the cooked bundle digest of the existing assets is unchanged (the existing digest
-  tests stay green), golden unchanged. needs: none.
+  tests stay green), golden unchanged. needs: none. Landed 61dc1642 (cook) and 4ef89132 (archive offset fix). texture::tests::five_slots_round_trip (4x4 image per slot cooks bytes equal x2, Emissive linearized, Occlusion not, duplicate slot refused) and archive::tests::stage_refuses_an_archive_past_the_offset_limit green; cargo test -p engine-assets --features import --no-fail-fast PASS gh run 39108657201 (lib 307, it 96, bundle and collider digest tests unchanged), default features run 39101415354.
 - [ ] NS31b2 render: a draw can carry the four texture slots — in `crates/render/src/present.rs` extend `DrawItem` Progress 2026-10-17: DrawItem carries normal_map and texture_slots() reserves 4 slots (RL46a material_interface tests); left: no orm or emissive field, no unknown_orm/normal/emissive_key_is_invalid_draw tests.
   (line 360) with `orm: Option<TextureKey>`, `normal: Option<TextureKey>`, `emissive: Option<TextureKey>` next
   to `base_color`; an unknown key fails the frame with `InvalidDraw` exactly like `base_color` does; every
@@ -188,7 +188,7 @@
   compile` (all 21 records of `MaterialSet::shipped()` compile to non-empty WGSL, keys equal x2, a coated record
   has a different key and strictly more bindings than the same record uncoated); P2P `cargo test -p engine-material`
   green, golden unchanged. needs: NS31b1.
-- [ ] NS31c2 render: a pipeline from the generated WGSL — new file `crates/render/src/material_pipeline.rs` (window Progress 2026-10-17: crates/render/src/material_pipeline.rs landed as a std-only pipeline binning module (lobe plus slot key, MAX_MATERIAL_PIPELINES 12, bins_come_back_in_stable_order); left: no pipeline_for, no wgpu pipeline from generated WGSL, no 21-record GPU build test.
+- [x] NS31c2 render: a pipeline from the generated WGSL — new file `crates/render/src/material_pipeline.rs` (window Progress 2026-10-17: crates/render/src/material_pipeline.rs landed as a std-only pipeline binning module (lobe plus slot key, MAX_MATERIAL_PIPELINES 12, bins_come_back_in_stable_order); left: no pipeline_for, no wgpu pipeline from generated WGSL, no 21-record GPU build test.
   feature) with `pub fn pipeline_for(device, compiled: &engine_material::compile::Compiled) ->
   Result<wgpu::RenderPipeline, MaterialPipelineError>` that creates the shader module from `compiled.wgsl`,
   binds group 0 (camera, light, `MaterialU` of `compiled.structure.uniform_bytes()` bytes, channel block of
@@ -200,7 +200,7 @@
   cycle). Tier A. Size M. Owns `crates/render/src/material_pipeline.rs`. Accept: F2P `cargo test -p engine-render
   --lib --features window material_pipeline` (all 21 records of `MaterialSet::shipped()` build a pipeline on the
   RTX 3050 with 0 validation errors; they share at most 12 pipelines; no adapter means the test prints SKIP and
-  passes, as the other GPU tests do); golden unchanged. needs: NS31c, NS31b2.
+  passes, as the other GPU tests do); golden unchanged. needs: none. Landed f3e4c63d. material_pipeline_all_shipped_records_build_with_zero_validation_errors on NVIDIA GeForce RTX 3050 6GB Laptop GPU: the 21 records (14 siege kit + 7 reference) build 7 pipelines, 0 validation errors; also material_pipeline_a_textured_structure_gets_its_group_one_layout, material_pipeline_a_broken_text_is_an_error_not_a_panic, material_pipeline_the_gate_refuses_the_structure_past_its_cap. cargo test -p engine-render --lib --features window material_pipeline: 16 passed, 0 skipped (local PC run, no GitHub run id: window lines run on the PC). Pipelines are cached by compiled key under the 32-variant gate (MaterialPipelines). Window-leg clippy not finished when this was ticked.
 - [ ] NS31c3 render: live swap and the 1 s bar — in `crates/render/src/material_pipeline.rs` add `pub struct
   MaterialLive` holding an `engine_material::reload::Reloader`, the current pipeline and the uniform buffer:
   `apply_text(&mut self, text)` runs `Reloader::apply_text`; `Reload::Values` writes the buffer; `Reload::Structure`
@@ -211,14 +211,14 @@
   a structure edit, adding a coat, in at most 1000 ms at p95 over 20 runs on the RTX 3050, numbers written to
   `target/ns31c/reload.json`; 3 of 3 broken texts refused and the capture hash of the last good frame unchanged;
   no adapter: SKIP); golden unchanged. needs: NS31c2.
-- [ ] NS31d2 material: the furnace twin below roughness 0.3 — in `crates/material/src/furnace.rs` replace the
+- [x] NS31d2 material: the furnace twin below roughness 0.3 — in `crates/material/src/furnace.rs` replace the
   l-space quadrature of the specular part by half-vector importance sampling (copy the method of
   `spec_integral` in `crates/material/src/dfg.rs` tests: GGX CDF inversion in `u`, `phi` grid, weight
   `4 * vh * V * nl / nh`) so the grid can start at perceptual roughness 0.1. Tier A. Size S. Owns
   `crates/material/src/furnace.rs`. Accept: F2P `cargo test -p engine-material --features validate furnace`
   with `ROUGHNESS_GRID = [0.1, 0.3, 0.5, 0.75, 1.0]`: the same cases and bars as today (1.02, anisotropy 1.03);
   if a case fails, fix the shader in `compile.rs` and the twin together and say so in the row; golden unchanged.
-  needs: NS31d.
+  needs: none. Landed 8502207. furnace twin integrates each specular peak over half vectors, ROUGHNESS_GRID [0.1, 0.3, 0.5, 0.75, 1.0], same bars (1.02, anisotropy 1.03): white_furnace_holds_for_the_base_and_every_lobe, half_vector_sampling_agrees_with_light_space_quadrature_where_both_resolve, a_metal_keeps_its_light_at_low_roughness, anisotropy_stays_in_the_bar_for_every_strength_and_rotation green, engine-material --features validate 116 passed run 39106950779. Two shader fixes with the twin, both in compile.rs: d_ggx_anisotropic had a 1e-5 guard on the squared length that flattened the lobe below roughness 0.25 (albedo 0.0006 at 0.1, now 1.000); the isotropic tables over-report an anisotropic lobe by up to 4.2% at grazing views, so the lobe keeps 97% (ANISO_ENERGY_KEEP).
 - [ ] NS31d3 render: GPU swatches against the twin — new test file `crates/render/tests/material_swatch.rs` (window
   feature): render a lit sphere for steel, wet marble (`marble_wet`), cloth, skin, ceramic (clear coat) and glass
   from `MaterialSet::shipped()` through `pipeline_for` (NS31c2) at 128x128 and compare the center pixel region
@@ -227,7 +227,7 @@
   functions in `furnace.rs`, keeping `furnace.rs` test-only). Tier A. Size M. Owns the test file and
   `crates/material/src/twin.rs`. Accept: F2P `cargo test -p engine-render --test material_swatch --features
   window` (6 swatches within 2/255 per channel of the twin; no adapter: SKIP); P2P furnace tests green, golden
-  unchanged. needs: NS31c2, NS31d.
+  unchanged. needs: NS31c2.
 - [ ] NS31e2 viewer: events into coverage — new file `crates/viewer/src/coverage.rs` with `pub struct CoverageTracker`
   holding one `engine_material::channels::TimedEvent` list per fighter or prop id, `push(id, tick, event)` and
   `at(id, tick) -> Coverage` (a `Coverage::replay`), fed from the hit and damage fields of the frozen frame
@@ -238,7 +238,7 @@
   (3 blood events and 1 water event from a seeded list give equal `Coverage` x2; a rolled-back list replays to
   the new timeline; `CoverageTracker::at` never reads a tick after the asked one); golden unchanged.
   needs: BV4.
-- [ ] NS31f2 material: MaterialX constants and images — new file `crates/material/src/mtlx_import.rs` with `pub fn
+- [x] NS31f2 material: MaterialX constants and images — new file `crates/material/src/mtlx_import.rs` with `pub fn
   import_mtlx(text: &str) -> Result<Import, MtlxError>` (reuse `Import`, `Warning`, `WarningKind` from
   `gltf_import.rs`): a small own XML reader (no new dependency; elements, attributes, self-closing, comments)
   that reads one `<standard_surface>` or `<open_pbr_surface>` node whose inputs are constants (`value=`) or
@@ -248,21 +248,21 @@
   `MtlxError::UnsupportedNode(name)`. Tier B. Size S. Owns `crates/material/src/mtlx_import.rs`. Accept: F2P
   `cargo test -p engine-material mtlx_import` (6 hand-written constant or image `.mtlx` strings in the module
   tests import, the records round-trip through `to_text`/`parse`; 2 procedural nodegraph strings refused with
-  `UnsupportedNode` naming the node); golden unchanged. needs: NS31f.
-- [ ] NS31g1 assets: BC5 for normal maps — in `crates/assets/src/bc.rs` add `BcFormat::Bc5`, `encode_bc5_block` and Progress 2026-10-17: bc.rs has BcFormat::Bc5, encode_bc5_block and decode_bc5_block and the cook routes Normal to BC5 (blockcomp_cook.rs); left: no 1024x1024 mean angular error <= 1.5 degrees test.
+  `UnsupportedNode` naming the node); golden unchanged. needs: none. Landed 8502207. mtlx_import::tests mtlx_import_brass_constants_are_exact, mtlx_import_lobes_map_to_the_record, mtlx_import_open_pbr_names_map_the_same_way, mtlx_import_an_image_input_becomes_a_texture_slot, mtlx_import_spec_defaults_fill_missing_inputs, mtlx_import_unknown_and_out_of_range_inputs_are_named (6 constant or image strings round-trip through to_text/parse), mtlx_import_a_nodegraph_is_refused_by_name and mtlx_import_an_input_linked_to_a_procedural_node_is_refused_by_name (UnsupportedNode names the node) green, engine-material --features validate 116 passed run 39106950779. Only base_color and emission_color take an image.
+- [x] NS31g1 assets: BC5 for normal maps — in `crates/assets/src/bc.rs` add `BcFormat::Bc5`, `encode_bc5_block` and Progress 2026-10-17: bc.rs has BcFormat::Bc5, encode_bc5_block and decode_bc5_block and the cook routes Normal to BC5 (blockcomp_cook.rs); left: no 1024x1024 mean angular error <= 1.5 degrees test.
   `decode_bc5_block` (two BC4 channels, red and green, 16 bytes per 4x4 block; the normal's blue is rebuilt in
   the shader), `block_bytes` returns 16 for it, and route `TextureSlot::Normal` to BC5 in `encode_image`. Tier A.
   Size S. Owns `crates/assets/src/bc.rs`. Accept: F2P `cargo test -p engine-assets --lib bc` (a 1024x1024
   seeded normal map cooks to 1 MiB plus mips, mean angular error at most 1.5 degrees against the source, cook
   bytes equal x2); P2P the BC1 and BC3 tests and the cooked bundle digest of existing assets unchanged, golden
-  unchanged. needs: NS31b1.
-- [ ] NS31g2 assets: BC7 for base color and ORM — in `crates/assets/src/bc.rs` add `BcFormat::Bc7` with an encoder Progress 2026-10-17: BcFormat::Bc7 exists but encode_bc7_block is the BC3 halves swapped, not a real mode 6 encoder; left: real BC7 mode 6 encode and decode, the 38 dB PSNR test on 1024x1024 base color.
+  unchanged. needs: NS31b1. Landed 93a57a82. ktx2_cook::tests::bc5_normal_map_1024_cooks_to_one_mib_plus_mips_within_one_and_a_half_degrees: seeded 1024x1024 normal map, level 0 is 1 MiB, mips 349552 B, mean angular error 0.217 degrees (bar 1.5), bytes equal x2; BC5 encode/decode and the Normal-to-BC5 route already existed (bc.rs, texture_cook.rs); run 39108657201, clippy 39107698018 and 39108371577. The test sits in ktx2_cook (cook_ktx2 is the mip cook), name holds bc5 so --lib bc picks it up.
+- [x] NS31g2 assets: BC7 for base color and ORM — in `crates/assets/src/bc.rs` add `BcFormat::Bc7` with an encoder Progress 2026-10-17: BcFormat::Bc7 exists but encode_bc7_block is the BC3 halves swapped, not a real mode 6 encoder; left: real BC7 mode 6 encode and decode, the 38 dB PSNR test on 1024x1024 base color.
   that writes mode 6 only (one subset, 7-bit endpoints plus p-bit, 4-bit indices; PORT note: the format is the
   Khronos data format spec, write it yourself, no `ctt`, no C code) and `decode_bc7_block` for mode 6; route
   `BaseColor` and `MetallicRoughness` to BC7. Tier A. Size M. Owns `crates/assets/src/bc.rs`. Accept: F2P `cargo test -p
   engine-assets --lib bc7` (1024x1024 base color PSNR at least 38 dB, bytes equal x2 with 1 and 8 threads of the
   existing cook pool; 4x smaller than RGBA8 with mips); P2P existing assets' bundle digest unchanged, golden
-  unchanged. needs: NS31g1.
+  unchanged. needs: NS31g1. Landed 93a57a82. Real BC7 mode 6 encode_bc7_block and decode_bc7_block (the old one was BC3 with swapped halves); texture_cook routes BaseColor and MetallicRoughness to BC7. bc::tests::bc7_* (5): spec bit layout pinned, only mode 6 read, solid and two-color blocks exact (one p-bit per endpoint, mixed parity within 1 code), bc7_albedo_1024_reaches_40_db_is_4x_smaller_and_threads_agree = 42.51 dB on a 1024 stone fixture (bar 38; the old stand-in scores 38.98), 1/4 of RGBA8 bytes, bytes equal x2 and at 1 and 8 scoped threads (no cook pool exists in engine-assets, every block encodes alone); run 39108657201, clippy 39107698018 and 39108371577.
 - [ ] NS31h2 playtest: the material gallery — new file `crates/playtest/src/material_gallery.rs` with `pub fn
   gallery(records: &MaterialSet, lights: [LightPreset; 3]) -> Vec<Capture>` rendering a sphere and a slab per
   record under three lights (day, torch, overcast) through `pipeline_for` (NS31c2) and `material.compare` math
@@ -270,7 +270,7 @@
   engine-playtest --lib material_gallery` (19 records x 3 lights = 57 captures in at most 120 s on the RTX 3050;
   the compare report of dry versus wet marble is identical x2, luminance ratio below 0.95, highlight peak ratio
   at least 2; no adapter: SKIP); golden unchanged. needs: NS31c2.
-- [ ] VS1 game: arena kit from glTF in the window and headless twin — parse
+- [x] VS1 game: arena kit from glTF in the window and headless twin — parse
   `content/arena/placement.json`, import each `content/arena/src/<asset>.gltf`
   through `engine_assets::mesh_import::import_gltf_path`, fit to the placement
   box, upload with `Presenter::upload_mesh`, push the draws in place of the six
@@ -282,7 +282,7 @@
   capture SHA; P2P golden `d57b5c8ae3096614` unchanged, `cargo test -p
   engine-game --lib` green, headless default builds with no `gltf` in
   `cargo tree -p engine-game -e normal`. needs: CT8.
-  progress 2026-10-10: kit tests green with `--features app` (`kit_imports_8_files_over_5000_tris`, `_x2`, `kit_twin_stages_11_draws_over_5000_tris`; 12/12 with `-- kit`); headless `cargo tree -p engine-game -e normal` has no gltf/engine-assets/image. Not ticked: default `cargo test -p engine-game --lib` not yet green (cold rebuild hit the heavy.mjs 60 s cap) and the golden not run (no sim path touched). VS4, VS3 and RA14 packets in target/queue/ready/60-62.
+  progress 2026-10-10: kit tests green with `--features app` (`kit_imports_8_files_over_5000_tris`, `_x2`, `kit_twin_stages_11_draws_over_5000_tris`; 12/12 with `-- kit`); headless `cargo tree -p engine-game -e normal` has no gltf/engine-assets/image. Not ticked: default `cargo test -p engine-game --lib` not yet green (cold rebuild hit the heavy.mjs 60 s cap) and the golden not run (no sim path touched). VS4, VS3 and RA14 packets in target/queue/ready/60-62. Landed 802ed2ce (kit import and staging, progress a42e8f82); verified 2026-10-18: cargo test -p engine-game --lib 436 passed 0 failed (runner run 39105755591); engine-game --features app --lib 711 passed incl. arena_kit::tests::kit_imports_8_files_over_5000_tris, _x2 and windowed::tests::kit_twin_stages_11_draws_over_5000_tris (8 kit meshes over 5,000 tris, frame-0 PNG differs from the cube frame, run on this RTX 3050); cargo tree -p engine-game -e normal has no gltf; no sim crate touched, golden d57b5c8ae3096614 unchanged (engine-proof does not depend on engine-game).
 - [ ] VS3 game: kit textures — VS1 meshes bind their glTF base-color images
   from `content/arena/textures` through VS2. Tier A. Size S. Owns the texture
   half of `crates/game/src/arena_kit.rs`. Accept: F2P the sand region of the

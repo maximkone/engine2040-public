@@ -96,8 +96,13 @@ struct Fall {
     rest: f32,
 }
 
-/// One seeded fall: height, launch speed and hit all come from `seed`; 300 ticks.
+/// One seeded fall on the Comfort tier: see [`fall_in`].
 fn seeded_fall(seed: u64) -> Fall {
+    fall_in(seed, arena(Tier::Comfort))
+}
+
+/// One seeded fall in `fx`: height, launch speed and hit all come from `seed`; 300 ticks.
+fn fall_in(seed: u64, mut fx: PhysFx) -> Fall {
     // xorshift64*: a seeded stream in -1..=1, no dependency beyond the crate under test.
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut unit = move || {
@@ -107,7 +112,6 @@ fn seeded_fall(seed: u64) -> Fall {
         (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32 / 8_388_608.0 - 1.0
     };
     let (rig, pose) = humanoid();
-    let mut fx = arena(Tier::Comfort);
     let start = moved(&pose, [0.0, 0.3 + unit().abs() * 1.2, 0.0]);
     let speed = [unit() * 3.0, 0.0, unit() * 3.0];
     let hit = [unit() * 120.0, unit().abs() * 60.0, unit() * 120.0];
@@ -147,6 +151,36 @@ fn fifty_seeded_falls_leave_no_bone_pair_overlapping_over_a_centimeter() {
         name(i),
         name(j)
     );
+}
+
+/// Seed 44 is the worst known fall of the fifty above (8 cm at 4 solver iterations).
+const WORST_SEED: u64 = 44;
+
+#[test]
+fn penetration_per_tier_is_measured_from_one_fixed_drop() {
+    // The same drop on every tier's solver and CCD budget (2/3/4/6 iterations, CCD 0/1/1/2): the
+    // probe is the deepest overlap of two unjoined bones. The receipt reads, per tier, how much
+    // that budget buys. Nothing is tuned from it here.
+    for tier in Tier::ALL {
+        let caps = tier.caps();
+        let fx = on_floor(PhysFx::with_caps(caps).expect("tier caps"));
+        let fall = fall_in(WORST_SEED, fx);
+        let (depth, a, b, tick) = fall.peak;
+        println!(
+            "physfx penetration {tier:?}: solver={} ccd={} peak={:.1} cm ({} / {}) at tick {tick}, settled={:.1} cm",
+            caps.solver_iterations,
+            caps.ccd_substeps,
+            depth * 100.0,
+            BONES[a].0,
+            BONES[b].0,
+            fall.rest * 100.0
+        );
+        assert!(depth.is_finite() && fall.rest.is_finite(), "{tier:?}");
+        assert!(
+            depth > -1.0 && depth < 1.0,
+            "{tier:?}: a probe in meters, got {depth}"
+        );
+    }
 }
 
 /// A fighter on the floor and a second one dropped on top of it, 400 ticks.

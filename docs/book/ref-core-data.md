@@ -391,7 +391,7 @@ Test: `node tools/gh-check.mjs cargo test -p engine-app --lib` (`post_update_ext
 - `crates/spatial/src/brief.rs`, `relation.rs`, `diff.rs`, `staged.rs`, `place.rs`, `repair.rs`, and the query modules (`sight`, `exposure`, `isovist`, `fps_visibility`, `afford`, `navcheck`, `index`, `kdtree`, `sample`, `scale`, `tag_lift`, `fuzz`).
 - `crates/scene/src/codec.rs`, `ids.rs`, `transform.rs`: `Scene` codec, `ObjectId`, `Transform`, `Hierarchy`.
 - `crates/scene/src/component.rs`, `schema.rs`, `pin.rs`, `prefab.rs`, `provenance.rs`: component kinds, schema registry, pins, prefabs, provenance.
-- `crates/world/src/terrain.rs`, `ground/`, `scatter.rs`, `cells.rs`: terrain and ground bakes, Poisson placement, cell streaming.
+- `crates/world/src/terrain.rs`, `ground/`, `scatter.rs`, `cells.rs`, `roster.rs`: terrain and ground bakes, Poisson placement, cell streaming, seeded spawn rosters.
 - `crates/save/src/lib.rs`, `fallback.rs`, `persist.rs`, `rollback.rs`: envelope and slots, previous-generation fallback, spine payload, spine ring.
 - `crates/observe/src/lib.rs`, `event_queue.rs`, `heal.rs`, `supervisor.rs`, `fps.rs`, `rerun_sink.rs`: events, banded queue, heal, supervisor, FPS records.
 - `crates/ui/src/lib.rs`, `menus.rs`, `settings.rs`, `lobby_ui.rs`, `text.rs`, `locale.rs`, `access.rs`, `tutorial.rs`, `play_hud.rs`: HUD data, screens, accessibility.

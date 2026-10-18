@@ -1,7 +1,7 @@
 # Landscape ideas — the backlog from 74 scouts
 
-Plain summary: 74 Haiku scouts (2026-10-11) read other engines and tools on GitHub at any star count. 33 ideas became rows (`potato.md`, `docs/SPRINT-18-steals.md`). This file keeps the rest, so a planner run can promote them. Nothing here is a row yet. The rule from `frontier.md` applies: every idea earns a spike (one test, one baseline, a kill rule) before it becomes a row.
-Tag LATER. Prefix for promoted rows: GS (continue after the highest ID in `docs/SPRINT-18-steals.md`). Full sources: `docs/research/steals-2026-10-11/engine-landscape.md`.
+Plain summary: 74 Haiku scouts (2026-10-11) read other engines and tools on GitHub at any star count. 36 ideas became rows (`potato.md`, `docs/SPRINT-18-steals.md`; PLN30 cluster E took LI141, LI142 and LI145 as GS39 to GS42). This file keeps the rest, so a planner run can promote them. Nothing here is a row yet. The rule from `frontier.md` applies: every idea earns a spike (one test, one baseline, a kill rule) before it becomes a row.
+Tag LATER. Prefix for promoted rows: GS (continue after the highest GS ID on the board; the next free one is GS43, because GS34 to GS38 sit in `docs/SPRINT-21-look-feel.md`). Full sources: `docs/research/steals-2026-10-11/engine-landscape.md`.
 Tier: P = potato fit, C = comfortable only. Size: S under 1 day, M days, L a week or more. Verified items were opened by a scout; U = search result only.
 
 How a planner run promotes an idea: read the donor file, check `.opencode/modmap.md` for an existing module, write one row (one crate, at most 200 changed lines, a named donor file, a test that fails before), append it to the shard, add the ID to FOCUS group 7, delete the line here. Kill rule for every cluster: if the spike shows no change in the number it targets, or costs more than 1 ms / 50 MB on the potato tier, delete the idea.
@@ -141,11 +141,8 @@ How a planner run promotes an idea: read the donor file, check `.opencode/modmap
 | LI138 | Steam page items: achievements, cloud, Input (`steamworks` crate behind the `steam` feature) | Noxime/steamworks-rs | ship | P, M |
 | LI139 | Installer and delta updates | velopack/velopack | ship | P, M |
 | LI140 | Crash dumps from a monitor process | EmbarkStudios/crash-handling `minidumper` | ship | P, S |
-| LI141 | Borderless flip-model default, DPI manifest, battery poll | Microsoft DXGI and HiDPI docs | ship | P, S |
-| LI142 | Raw mouse from `DeviceEvent::MouseMotion` | winit docs | ship | P, S |
 | LI143 | Small text model: LFM2-350M GGUF 229 MB for NPC lines | huggingface.co/LiquidAI/LFM2-350M-GGUF | AI door | P, S |
 | LI144 | Grammar-constrained output at 6.37 ms per token | guidance-ai/llguidance | AI door | P, S |
-| LI145 | Announcer authored once as data with triggers and a last-played throttle | abadugu13/football_llm_commentary | AI door | P, S |
 | LI146 | Offline look judge | Qwen3-VL-2B GGUF (1.11 GB) ; SmolVLM-256M (under 1 GB) | G4 | P, M |
 | LI147 | STT for voice commands | UsefulSensors/moonshine-streaming-tiny | later | P, M |
 | LI148 | Class and matchup table shape for a ludus loop | todorivanov/ludus-magnus `combat.ts` | design | P, S |
@@ -153,4 +150,4 @@ How a planner run promotes an idea: read the donor file, check `.opencode/modmap
 
 ## F. Do not take (kept so nobody re-researches them)
 
-Solari full path, SDFGI, Blade, DirectStorage, XeSS (binary), TressFX, Slint, RmlUi, ASE and AMASS clips for shipping (non-commercial), Hunyuan3D 2.1 and HY-Motion (too big), RTX neural shaders (tensor hardware), Practical-RIFE, GlitchTip, Steam Datagram Relay, Agones, Nakama, SpacetimeDB, cargo-mutants as a wiring gate, Cranelift dev builds on Windows, `-Zthreads`.
+A DPI-awareness manifest and a flip-model swap chain (LI141 leftovers: winit already makes the process per-monitor DPI aware and wgpu's DX12 surface already presents flip-model), Solari full path, SDFGI, Blade, DirectStorage, XeSS (binary), TressFX, Slint, RmlUi, ASE and AMASS clips for shipping (non-commercial), Hunyuan3D 2.1 and HY-Motion (too big), RTX neural shaders (tensor hardware), Practical-RIFE, GlitchTip, Steam Datagram Relay, Agones, Nakama, SpacetimeDB, cargo-mutants as a wiring gate, Cranelift dev builds on Windows, `-Zthreads`.

@@ -336,7 +336,9 @@ fn saturating_i128_to_i64(v: i128) -> i64 {
     let windowed = v.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
     i64::try_from(windowed).unwrap_or(0)
 }
-fn isqrt(n: u128) -> u128 {
+/// Integer square root of `n`, rounded down: the largest `r` with `r * r <= n`. Exact on every
+/// platform, no float.
+pub fn isqrt(n: u128) -> u128 {
     if n < 2 {
         return n;
     }

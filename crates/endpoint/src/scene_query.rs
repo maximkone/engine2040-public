@@ -8,7 +8,6 @@
 //! carries a repair hint.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 
 use engine_core::Fnv64;
 use engine_scene::ids::ObjectId;
@@ -96,6 +95,18 @@ pub enum QueryKind {
     Slide = 12,
     /// The floor under the plan point of `eye_m`.
     Ground = 13,
+    /// Gap, overlap, alignment or containment of `anchor` against `other`.
+    Measure = 14,
+    /// The room number holding `anchor`, with its exits.
+    RoomOf = 15,
+    /// The objects inside one room.
+    InRoom = 16,
+    /// The doorways of one room.
+    ExitsOf = 17,
+    /// Per-object coverage of the view from `eye_m` facing `yaw`.
+    Glance = 18,
+    /// Share of the frame `anchor` fills from `eye_m` facing `yaw` and `pitch`.
+    Coverage = 19,
 }
 
 impl QueryKind {
@@ -116,6 +127,12 @@ impl QueryKind {
             Self::Clearance => "clearance",
             Self::Slide => "slide",
             Self::Ground => "ground",
+            Self::Measure => "measure",
+            Self::RoomOf => "room_of",
+            Self::InRoom => "in_room",
+            Self::ExitsOf => "exits_of",
+            Self::Glance => "glance",
+            Self::Coverage => "coverage",
         }
     }
 
@@ -136,112 +153,26 @@ impl QueryKind {
             "clearance" => Ok(Self::Clearance),
             "slide" => Ok(Self::Slide),
             "ground" => Ok(Self::Ground),
+            "measure" => Ok(Self::Measure),
+            "room_of" => Ok(Self::RoomOf),
+            "in_room" => Ok(Self::InRoom),
+            "exits_of" => Ok(Self::ExitsOf),
+            "glance" => Ok(Self::Glance),
+            "coverage" => Ok(Self::Coverage),
             _ => Err(QueryError::new(
                 "bad_kind",
                 format!("query kind `{text}` is unknown"),
                 "legal kinds: near, between, visible, reachable, cover_near, \
-                 largest_open, free_space, cone, relation, sees, why_hidden, clearance, slide, ground \
+                 largest_open, free_space, cone, relation, sees, why_hidden, clearance, slide, ground, \
+                 measure, room_of, in_room, exits_of, glance, coverage \
                  (re-read scene.brief for ids first)",
             )),
         }
     }
 }
 
-/// One question kind as the door teaches it: the fields it needs (`a|b`
-/// means one of them) and a working call. The schema text, the `missing_arg`
-/// refusal and the `api.describe` entries all read this one table.
-pub struct KindCard {
-    /// The kind.
-    pub kind: QueryKind,
-    /// Required fields, comma separated; `-` when none.
-    pub needs: &'static str,
-    /// A complete working `scene.query` argument object for this kind.
-    pub example: &'static str,
-}
-
-/// One card per kind, in discriminant order.
-pub const KIND_CARDS: [KindCard; 14] = [
-    KindCard {
-        kind: QueryKind::Near,
-        needs: "anchor",
-        example: r#"{"kind":"near","anchor":"lamp_1 [<uuid>]","radius_cm":300}"#,
-    },
-    KindCard {
-        kind: QueryKind::Between,
-        needs: "anchor, other",
-        example: r#"{"kind":"between","anchor":"lamp_1 [<uuid>]","other":"crate_1 [<uuid>]"}"#,
-    },
-    KindCard {
-        kind: QueryKind::Visible,
-        needs: "eye_m",
-        example: r#"{"kind":"visible","eye_m":[0.0,1.6,0.0],"yaw":0.0}"#,
-    },
-    KindCard {
-        kind: QueryKind::Reachable,
-        needs: "anchor",
-        example: r#"{"kind":"reachable","anchor":"lamp_1 [<uuid>]"}"#,
-    },
-    KindCard {
-        kind: QueryKind::CoverNear,
-        needs: "anchor, eye_m",
-        example: r#"{"kind":"cover_near","anchor":"lamp_1 [<uuid>]","eye_m":[0.0,1.6,0.0],"radius_cm":500}"#,
-    },
-    KindCard {
-        kind: QueryKind::LargestOpen,
-        needs: "-",
-        example: r#"{"kind":"largest_open","capsule_radius_cm":30}"#,
-    },
-    KindCard {
-        kind: QueryKind::FreeSpace,
-        needs: "-",
-        example: r#"{"kind":"free_space","max_samples":4,"min_gap_cm":100}"#,
-    },
-    KindCard {
-        kind: QueryKind::Cone,
-        needs: "half_angle_deg, anchor|eye_m",
-        example: r#"{"kind":"cone","anchor":"lamp_1 [<uuid>]","half_angle_deg":45,"radius_cm":500}"#,
-    },
-    KindCard {
-        kind: QueryKind::Relation,
-        needs: "anchor, relation",
-        example: r#"{"kind":"relation","anchor":"lamp_1 [<uuid>]","relation":"left_of"}"#,
-    },
-    KindCard {
-        kind: QueryKind::Sees,
-        needs: "anchor, other",
-        example: r#"{"kind":"sees","anchor":"lamp_1 [<uuid>]","other":"crate_1 [<uuid>]"}"#,
-    },
-    KindCard {
-        kind: QueryKind::WhyHidden,
-        needs: "anchor, eye_m",
-        example: r#"{"kind":"why_hidden","anchor":"crate_1 [<uuid>]","eye_m":[0.0,1.6,0.0],"yaw":0.0}"#,
-    },
-    KindCard {
-        kind: QueryKind::Clearance,
-        needs: "anchor",
-        example: r#"{"kind":"clearance","anchor":"crate_1 [<uuid>]","radius_cm":80}"#,
-    },
-    KindCard {
-        kind: QueryKind::Slide,
-        needs: "anchor, dir",
-        example: r#"{"kind":"slide","anchor":"crate_1 [<uuid>]","dir":"+x","radius_cm":500}"#,
-    },
-    KindCard {
-        kind: QueryKind::Ground,
-        needs: "eye_m",
-        example: r#"{"kind":"ground","eye_m":[2.0,3.0,1.0]}"#,
-    },
-];
-
-impl KindCard {
-    /// The card for `kind`.
-    pub fn of(kind: QueryKind) -> &'static KindCard {
-        KIND_CARDS
-            .iter()
-            .find(|card| card.kind == kind)
-            .unwrap_or(&KIND_CARDS[0])
-    }
-}
+mod cards;
+pub use cards::{KindCard, KIND_CARDS};
 
 /// Typed query failure. `hint` always names the legal values plus one
 /// recovery, so every refusal is actionable.
@@ -313,6 +244,8 @@ pub struct QueryArgs {
     pub rel: Option<Rel>,
     /// Slide direction word for `slide` queries.
     pub dir: Option<String>,
+    /// Fields of the measure, room and glance kinds.
+    pub space: SpaceArgs,
 }
 
 impl QueryArgs {
@@ -335,6 +268,7 @@ impl QueryArgs {
             filter: None,
             rel: None,
             dir: None,
+            space: SpaceArgs::default(),
         }
     }
 
@@ -983,6 +917,12 @@ pub fn run_query(
         | QueryKind::Clearance
         | QueryKind::Slide
         | QueryKind::Ground => pairs::run_pair_kind(actors, args, budget),
+        QueryKind::Measure
+        | QueryKind::RoomOf
+        | QueryKind::InRoom
+        | QueryKind::ExitsOf
+        | QueryKind::Glance
+        | QueryKind::Coverage => space_kinds::run_space_kind(actors, args, budget),
         QueryKind::Relation => {
             let anchor = check_anchor(actors, args.anchor)?;
             let rel = args.rel.ok_or_else(|| {
@@ -1182,10 +1122,12 @@ impl Hit {
 // ---------------------------------------------------------------------------
 //
 // The staging map is scene.place's (`scene_tools::snapshot`: index ids over the
-// id-text sort, collider-sized boxes), so query answers agree with brief geometry. The door carries no
-// baked nav view, so reachability reads one open floor: every staged actor
-// shares polygon 0 and every staged pair answers reachable. Library callers
-// with a real NV1-derived view pass it to `run_query` directly.
+// id-text sort, collider-sized boxes), so query answers agree with brief geometry. Reachability reads the
+// baked nav mesh the host handed the session (`ServerState::with_nav`): each
+// staged actor gets its real polygon, an actor off the mesh answers
+// `blocked:off_mesh`, and with no mesh held `reachable` refuses
+// `needs_nav_view` rather than answer yes to every pair. Library callers with
+// their own view pass it to `run_query` directly.
 // Field docs are short on purpose: every doc line is discovery cost (the
 // tool-list ledger gate). Units ride in the text, one kind line per question.
 
@@ -1194,14 +1136,14 @@ impl Hit {
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneQueryArgs {
-    /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m. a|b means either.
+    /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor|room; glance eye_m; coverage anchor, eye_m. a|b means either.
     #[schemars(schema_with = "kind_schema")]
     pub kind: String,
     /// Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID: the subject.
     pub anchor: Option<String>,
     /// Second object label: far end for between, viewer for relation.
     pub other: Option<String>,
-    /// Radius in cm, 1..=10000: search radius (default 500), slide range (500), clearance width needed (60).
+    /// Radius in cm, 1..=10000: search radius (default 500), slide range (500), clearance width needed (60), measure gap needed.
     pub radius_cm: Option<i32>,
     /// Point [x, y, z] in meters: the eye for visible and cone, the threat for cover_near.
     pub eye_m: Option<[f32; 3]>,
@@ -1221,7 +1163,7 @@ pub struct SceneQueryArgs {
     pub limit: Option<u32>,
     /// Answer budget in bytes, 1..=16384, default 4096.
     pub budget_bytes: Option<u32>,
-    /// Cone half-width in whole degrees, 1..=180 (cone).
+    /// Cone half-width in whole degrees, 1..=180 (cone); half the field of view (glance, coverage).
     pub half_angle_deg: Option<i32>,
     /// Keep cone rows whose label contains this text.
     pub filter: Option<String>,
@@ -1233,6 +1175,12 @@ pub struct SceneQueryArgs {
     pub matched_only: Option<bool>,
     /// Slide direction: +x, -x, +z, -z, up, down, +x+z, +x-z, -x+z, -x-z (slide).
     pub dir: Option<String>,
+    /// gap (default), overlap, align or contain (measure).
+    pub what: Option<String>,
+    /// Room number from room_of (in_room, exits_of).
+    pub room: Option<u32>,
+    /// Camera pitch in radians, up is positive (coverage).
+    pub pitch: Option<f32>,
 }
 
 /// Schema of `kind`: a string enum of the kind words.
@@ -1279,17 +1227,6 @@ pub struct SceneQueryOutput {
     pub conflicts: Vec<SceneQueryConflict>,
 }
 
-// Open-floor reachability: every staged actor shares polygon 0.
-fn open_floor(actors: &[Actor]) -> ReachView {
-    let mut at = BTreeMap::new();
-    for actor in actors {
-        at.insert(actor.id, 0u32);
-    }
-    let mut adj = BTreeMap::new();
-    adj.insert(0u32, Vec::new());
-    ReachView { adj, at }
-}
-
 /// True when the door request carries `field` (`a|b` holds when either does).
 fn has_field(args: &SceneQueryArgs, field: &str) -> bool {
     field.split('|').any(|one| match one {
@@ -1299,6 +1236,7 @@ fn has_field(args: &SceneQueryArgs, field: &str) -> bool {
         "half_angle_deg" => args.half_angle_deg.is_some(),
         "relation" => args.relation.is_some(),
         "dir" => args.dir.is_some(),
+        "room" => args.room.is_some(),
         _ => true,
     })
 }
@@ -1378,7 +1316,7 @@ fn resolve_actor(field: &str, text: &str, uuids: &[ObjectId]) -> Result<u32, Mcp
         })
 }
 
-fn label_of(id: u32, actors: &[Actor], uuids: &[ObjectId]) -> String {
+pub(crate) fn label_of(id: u32, actors: &[Actor], uuids: &[ObjectId]) -> String {
     let at = usize::try_from(id).unwrap_or(usize::MAX);
     match (actors.get(at), uuids.get(at)) {
         (Some(actor), Some(uuid)) => object_label(&actor.name, uuid),
@@ -1476,7 +1414,11 @@ impl super::mcp::ServerState {
                 })
             })
             .transpose()?;
-        let reach = open_floor(&actors);
+        let reach = match (&self.nav, kind) {
+            (Some(mesh), _) => staged_reach(mesh, &actors),
+            (None, QueryKind::Reachable) => return Err(needs_nav_view()),
+            (None, _) => ReachView::default(),
+        };
         let query = QueryArgs {
             kind,
             anchor,
@@ -1495,6 +1437,11 @@ impl super::mcp::ServerState {
             filter: args.filter.clone(),
             rel,
             dir: args.dir.clone(),
+            space: SpaceArgs {
+                what: args.what.clone(),
+                room: args.room,
+                pitch_deg: args.pitch.map(engine_spatial::sense_text::whole_deg),
+            },
         };
         let answer = run_query(&actors, &reach, &query).map_err(query_error)?;
         let matched_only = args.matched_only.unwrap_or(kind == QueryKind::Visible);
@@ -1543,12 +1490,20 @@ impl SyncTool<McpServer> for SceneQueryTool {
 
 mod cone;
 mod pairs;
+mod reach;
+mod space_kinds;
 pub use cone::*;
+use reach::{needs_nav_view, staged_reach};
+use space_kinds::SpaceArgs;
 
 #[cfg(test)]
 mod compact_tests;
 #[cfg(test)]
+mod reach_door_tests;
+#[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod space_kind_tests;
 #[cfg(test)]
 mod space_tests;
 
@@ -2426,6 +2381,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         );
         assert_eq!(near.kind, "near");
@@ -2463,6 +2419,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         );
         assert_eq!(near.digest, again.digest);
@@ -2490,6 +2447,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         );
         assert!(between
@@ -2520,39 +2478,23 @@ mod tests {
                 format: None,
                 matched_only: Some(false),
                 dir: None,
+                ..Default::default()
             },
         );
         assert_eq!(seen.hits.len(), 4);
 
-        // Reachable on the open floor: the door shares one polygon, so every
-        // staged pair reaches.
-        let reach = query(
+        // Reachable needs a baked mesh: this door holds none, so it refuses
+        // (`reach_door_*` answers it from a mesh).
+        let reach = SceneQueryTool::invoke(
             &server,
             SceneQueryArgs {
                 kind: "reachable".to_owned(),
                 anchor: Some(west.clone()),
-                other: None,
-                radius_cm: None,
-                eye_m: None,
-                yaw: None,
-                crouch: None,
-                capsule_radius_cm: None,
-                min_gap_cm: None,
-                max_samples: None,
-                seed: None,
-                limit: None,
-                budget_bytes: None,
-                half_angle_deg: None,
-                filter: None,
-                relation: None,
-                format: None,
-                matched_only: None,
-                dir: None,
+                ..Default::default()
             },
-        );
-        assert_eq!(reach.hits.len(), 3);
-        assert!(reach.hits.iter().all(|hit| hit.matched));
-        assert!(reach.hits.iter().all(|hit| hit.reason == "reachable"));
+        )
+        .expect_err("no nav mesh, no answer");
+        assert_eq!(reach.code, "needs_nav_view");
 
         // Cover from the east threat: open ground takes no cover, but every
         // row still carries its cover reason.
@@ -2578,6 +2520,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         );
         assert!(cover
@@ -2608,6 +2551,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         );
         assert_eq!(open.hits.len(), 1);
@@ -2634,6 +2578,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         );
         assert!(!free.hits.is_empty());
@@ -2666,6 +2611,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         )
         .expect_err("unknown anchor refuses");
@@ -2693,6 +2639,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         )
         .expect_err("unknown kind refuses");
@@ -2720,6 +2667,7 @@ mod tests {
                 format: None,
                 matched_only: None,
                 dir: None,
+                ..Default::default()
             },
         )
         .expect_err("bad radius refuses");

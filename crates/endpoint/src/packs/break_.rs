@@ -1,11 +1,12 @@
 //! `break` pack: destruction an AI can author and test.
 //!
-//! Three read-only verbs over the destruction and combat crates:
+//! Four read-only verbs over the destruction and combat crates:
 //! `structure.analyze` (load paths, weakest link, predicted collapse of a
 //! seeded frame building), `break.fracture` (seeded Voronoi fracture of a
-//! siege wall at a hit point, with its break events) and `hit.simulate` (one
-//! blade state against every severable joint over many clean hits). All
-//! three take `CapabilityCard::Observe`: they compute and return numbers and
+//! siege wall at a hit point, with its break events), `hit.simulate` (one
+//! blade state against every severable joint over many clean hits) and
+//! `wound.table.get` (the shipped wound table and its digest). All
+//! four take `CapabilityCard::Observe`: they compute and return numbers and
 //! digests, never touching the document. Units: meters for geometry, Q16
 //! (`1.0 == 65536`) for energy, loads and odds, counts for samples. Errors:
 //! `bad_args` with the legal range named. Determinism: pure integer or
@@ -36,6 +37,8 @@ pub const TOOL_STRUCTURE_ANALYZE: &str = "structure.analyze";
 pub const TOOL_BREAK_FRACTURE: &str = "break.fracture";
 /// Verb: a blade against every severable joint over many clean hits.
 pub const TOOL_HIT_SIMULATE: &str = "hit.simulate";
+/// Verb: the shipped V1 wound table and its digest.
+pub const TOOL_WOUND_TABLE_GET: &str = "wound.table.get";
 
 /// Most fallen element ids echoed by `structure.analyze`.
 pub const MAX_ECHOED_IDS: usize = 64;
@@ -344,6 +347,11 @@ pub struct HitSimulateOutput {
     pub rows: Vec<HitRowOut>,
 }
 
+/// Joint name for a canonical joint byte; the byte itself when unknown.
+fn joint_name(joint: u8) -> String {
+    engine_combat::JointId::from_u8(joint).map_or_else(|| joint.to_string(), |j| format!("{j:?}"))
+}
+
 fn hit_simulate(
     _server: &McpServer,
     args: &HitSimulateArgs,
@@ -363,8 +371,7 @@ fn hit_simulate(
         .rows
         .iter()
         .map(|row| HitRowOut {
-            joint: engine_combat::JointId::from_u8(row.joint)
-                .map_or_else(|| row.joint.to_string(), |j| format!("{j:?}")),
+            joint: joint_name(row.joint),
             protection_q16: row.protection_q16,
             odds_q16: row.odds_q16,
             severed: row.severed,
@@ -393,7 +400,89 @@ crate::e2_tool!(
     invoke = hit_simulate
 );
 
-/// The break pack: three read-only verbs, loaded on demand.
+// ---------------------------------------------------------------------------
+// wound.table.get
+// ---------------------------------------------------------------------------
+
+/// No arguments: the shipped table is the only one.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "serde reads the wire shape `{}`; a unit struct reads null"
+)]
+pub struct WoundTableGetArgs {}
+
+/// One joint: stump class, sever shock and the wound and disable thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct WoundJointOut {
+    pub joint: String,
+    pub stump_class: String,
+    pub sever_shock_q16: u32,
+    pub wound_at_q16: u32,
+    pub disable_at_q16: u32,
+}
+
+/// The V1 wound table fields in canonical order, and its digest.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct WoundTableGetOutput {
+    pub version: u32,
+    pub blood_full_q16: u32,
+    pub bleed_out_ticks: [u32; 3],
+    pub joints: Vec<WoundJointOut>,
+    pub shock_decay_q16: u32,
+    pub bleed_shock_q16: [u32; 3],
+    pub surrender_shock_q16: u32,
+    pub surrender_blood_q16: u32,
+    pub faint_blood_q16: u32,
+    pub digest: String,
+}
+
+fn wound_table_get(
+    _server: &McpServer,
+    _args: &WoundTableGetArgs,
+) -> Result<WoundTableGetOutput, McpToolError> {
+    let table = WoundTable::v1();
+    let joints = (0..engine_combat::JOINT_TOTAL)
+        .map(|i| WoundJointOut {
+            joint: joint_name(u8::try_from(i).unwrap_or(u8::MAX)),
+            stump_class: format!("{:?}", table.stump_class[i]),
+            sever_shock_q16: table.sever_shock_q16[i],
+            wound_at_q16: table.wound_at_q16[i],
+            disable_at_q16: table.disable_at_q16[i],
+        })
+        .collect();
+    Ok(WoundTableGetOutput {
+        version: table.version,
+        blood_full_q16: table.blood_full_q16,
+        bleed_out_ticks: table.bleed_out_ticks,
+        joints,
+        shock_decay_q16: table.shock_decay_q16,
+        bleed_shock_q16: table.bleed_shock_q16,
+        surrender_shock_q16: table.surrender_shock_q16,
+        surrender_blood_q16: table.surrender_blood_q16,
+        faint_blood_q16: table.faint_blood_q16,
+        digest: format!("{:016x}", table.digest()),
+    })
+}
+
+crate::e2_tool!(
+    /// `wound.table.get`: the shipped V1 wound table and its digest.
+    WoundTableGetTool,
+    name = TOOL_WOUND_TABLE_GET,
+    description = "Read the shipped V1 wound table: blood, bleed-out ticks per class, per-joint stump class, sever shock and wound and disable thresholds, surrender lines, and its digest. Read-only.",
+    readonly = true,
+    args = WoundTableGetArgs,
+    output = WoundTableGetOutput,
+    invoke = wound_table_get
+);
+
+/// The break pack: four read-only verbs, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
@@ -413,6 +502,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<HitSimulateTool>(
         TOOL_HIT_SIMULATE,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<WoundTableGetTool>(
+        TOOL_WOUND_TABLE_GET,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -557,14 +651,35 @@ mod tests {
     }
 
     #[test]
-    fn the_pack_registers_three_observe_verbs() {
+    fn wound_table_get_returns_v1_and_its_digest() {
+        let server = server();
+        let a = WoundTableGetTool::invoke(&server, WoundTableGetArgs {}).expect("reads");
+        let b = WoundTableGetTool::invoke(&server, WoundTableGetArgs {}).expect("reads");
+        assert_eq!(a, b);
+        assert_eq!(a.bleed_out_ticks, [18_000, 5_400, 1_200]);
+        assert_eq!(a.digest, format!("{:016x}", WoundTable::v1().digest()));
+        assert_eq!(a.version, WoundTable::v1().version);
+        assert_eq!(a.joints.len(), engine_combat::JOINT_TOTAL);
+        let neck = a
+            .joints
+            .iter()
+            .find(|j| j.joint == "Neck")
+            .expect("neck row");
+        assert_eq!(neck.stump_class, "Arterial");
+        assert_eq!(neck.sever_shock_q16, 80 << 16);
+        assert!(neck.wound_at_q16 < neck.disable_at_q16);
+    }
+
+    #[test]
+    fn the_pack_registers_four_observe_verbs() {
         let pack = pack().expect("pack builds");
         assert_eq!(
             pack.verb_names(),
             vec![
                 TOOL_STRUCTURE_ANALYZE,
                 TOOL_BREAK_FRACTURE,
-                TOOL_HIT_SIMULATE
+                TOOL_HIT_SIMULATE,
+                TOOL_WOUND_TABLE_GET
             ]
         );
         for verb in pack.verbs() {

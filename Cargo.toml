@@ -46,6 +46,8 @@ rust-version = "1.97.1"
 # engine-geo's xatlas FFI wrapper, and engine-render's Windows DXGI VRAM read (`backend.rs`).
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
+# `loom` is set by `RUSTFLAGS="--cfg loom"` for the job-pool model in engine-ecs.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 rust_2018_idioms = { level = "warn", priority = -1 }
 trivial_numeric_casts = "warn"
 unused_lifetimes = "warn"

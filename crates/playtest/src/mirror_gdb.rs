@@ -308,6 +308,7 @@ fn fault_name(fault: &FrameFault) -> &'static str {
         FrameFault::MissingMesh(_) => "missing-mesh",
         FrameFault::Clipping(_) => "clipping",
         FrameFault::Frozen(_) => "frozen",
+        FrameFault::Stale(_) => "stale",
         FrameFault::BadCapture(_) => "bad-capture",
     }
 }
@@ -319,7 +320,7 @@ fn repair_for(fault: &FrameFault) -> Option<Script> {
         | FrameFault::WhiteScreen(_)
         | FrameFault::MissingMesh(_)
         | FrameFault::Clipping(_) => Some(Script::Clean),
-        FrameFault::Frozen(_) | FrameFault::BadCapture(_) => None,
+        FrameFault::Frozen(_) | FrameFault::Stale(_) | FrameFault::BadCapture(_) => None,
     }
 }
 

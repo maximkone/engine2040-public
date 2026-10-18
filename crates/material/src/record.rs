@@ -121,7 +121,7 @@ pub struct Transmission {
     pub attenuation_color: [f32; 3],
 }
 
-/// Wrapped subsurface scattering (skin, marble, wax).
+/// Subsurface scattering (skin, marble, wax): the terminator LUT of `crate::skin`.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Subsurface {
     /// Lobe weight in `0..=1`.

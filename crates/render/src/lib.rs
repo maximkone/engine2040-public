@@ -18,6 +18,11 @@ pub mod window;
 
 pub mod graph;
 
+/// Named history textures across frames with a validity flag (RL62): take,
+/// export, inert; a resize, dyn-res step or camera cut clears the flag.
+/// Std-only; consumer is the TAA resolve through `post::TaaParams`.
+pub mod temporal;
+
 pub mod quality;
 
 /// WEB13: a ledger of every pipeline build, so a build after the loader is a loud `late_compile`.
@@ -190,9 +195,10 @@ pub mod manifest;
 /// by composition, no mirrored types. Std-only.
 pub mod material_layer;
 /// Render-side bins from draws to compiled materials (RL46 slice 1):
-/// bin keys, frame bin sets and the 12-pipeline budget. Std-only;
-/// consumer is the forward-pass bind, which looks compiled pipelines
-/// up by bin key once the orchestrator wires the material dependency.
+/// bin keys, frame bin sets and the 12-pipeline budget (std-only), plus on
+/// the window leg `pipeline_for` (NS31c2): one wgpu pipeline per compiled
+/// material structure. Consumer is the forward-pass bind (RL46), which
+/// looks pipelines up by structure key.
 pub mod material_pipeline;
 /// Seeded GPU particle pool (RP2): dust/flame/sparks, CPU-sim parity
 /// bytes. Std-only; consumer is the arena match through WIN1.
@@ -211,6 +217,9 @@ pub mod test_gpu;
 /// accel read, forced tiers refused loudly, tier stamped into RA8 manifests.
 /// Std-only; consumer is RT9 tier-aware graph wiring (WIN1 match).
 pub mod tier;
+/// GPU facts to a quality tier through a first-match rule table in the Chromium
+/// `gpu_control_list` shape (GS11). Std-only; consumer is the adapter pick (GS6).
+pub mod tier_rules;
 
 /// Pure integer dynres governor (GS12): GPU microseconds to scale percent.
 pub mod dynres_gov;

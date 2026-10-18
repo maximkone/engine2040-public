@@ -6,13 +6,13 @@
 //! back; a tool refusal becomes a typed `bad_recipe` error that names the op index and the fix.
 
 use engine_geo::{
-    boolean as geo_boolean, collision as geo_collision, lod as geo_lod, primitives, uv as geo_uv,
-    GeoError, GeoMesh,
+    boolean as geo_boolean, collision as geo_collision, lod as geo_lod, ops as geo_ops, primitives,
+    uv as geo_uv, GeoError, GeoMesh,
 };
 
 use super::{
     bad, check_extent, BoolKind, CollisionFacts, CollisionOut, GeoCutter, GeoSolid, LodOut, Mesh,
-    UvOut, MAX_COLLISION_PARTS, MAX_MODEL_TRIS,
+    UvOut, MAX_ARRAY_COPIES, MAX_COLLISION_PARTS, MAX_MODEL_TRIS, MAX_WELD_M,
 };
 use crate::mcp::McpToolError;
 
@@ -75,14 +75,19 @@ fn segments_ok(index: usize, label: &str, value: u32, lo: u32) -> Result<usize, 
     }
 }
 
-fn cutter_mesh(index: usize, cutter: &GeoCutter) -> Result<GeoMesh, McpToolError> {
-    for (axis, value) in cutter.offset.iter().enumerate() {
+fn offset_ok(index: usize, label: &str, offset: &[f32; 3]) -> Result<(), McpToolError> {
+    for (axis, value) in offset.iter().enumerate() {
         if !value.is_finite() || value.abs() > super::MAX_SOURCE_SIZE_M {
             return Err(bad(format!(
-                "ops[{index}].cutter.offset[{axis}] is {value}; send meters within 1000"
+                "ops[{index}].{label}[{axis}] is {value}; send meters within 1000"
             )));
         }
     }
+    Ok(())
+}
+
+fn cutter_mesh(index: usize, cutter: &GeoCutter) -> Result<GeoMesh, McpToolError> {
+    offset_ok(index, "cutter.offset", &cutter.offset)?;
     let solid = match &cutter.solid {
         GeoSolid::Cube { size } => {
             for (label, value) in ["x", "y", "z"].into_iter().zip(size) {
@@ -209,4 +214,71 @@ pub(super) fn collision(
         },
         digest_bits,
     })
+}
+
+/// `mirror`: add the reflection through the origin plane of `axis`.
+pub(super) fn mirror(mesh: &mut Mesh, axis: &str, index: usize) -> Result<(), McpToolError> {
+    let axis = match axis {
+        "x" => geo_ops::Axis::X,
+        "y" => geo_ops::Axis::Y,
+        "z" => geo_ops::Axis::Z,
+        other => {
+            return Err(bad(format!(
+                "ops[{index}].axis `{other}` is not an axis; send one of x, y, z"
+            )))
+        }
+    };
+    too_big(index, mesh.tris.len())?;
+    let result = geo_ops::mirror(&to_geo(mesh), axis);
+    too_big(index, result.triangle_count())?;
+    *mesh = from_geo(result);
+    Ok(())
+}
+
+/// `array`: `count` copies, copy `k` moved by `k` times `offset`.
+pub(super) fn array(
+    mesh: &mut Mesh,
+    count: u32,
+    offset: [f32; 3],
+    index: usize,
+) -> Result<(), McpToolError> {
+    if !(1..=MAX_ARRAY_COPIES).contains(&count) {
+        return Err(bad(format!(
+            "ops[{index}].count {count} is outside 1..={MAX_ARRAY_COPIES}; send a copy count in range"
+        )));
+    }
+    offset_ok(index, "offset", &offset)?;
+    let tris = mesh
+        .tris
+        .len()
+        .saturating_mul(usize::try_from(count).unwrap_or(usize::MAX));
+    if tris > MAX_MODEL_TRIS {
+        return Err(McpToolError::new(
+            "too_big",
+            format!(
+                "ops[{index}] would make {tris} triangles; at most {MAX_MODEL_TRIS}; send a smaller count"
+            ),
+        ));
+    }
+    *mesh = from_geo(geo_ops::array(&to_geo(mesh), count, offset));
+    Ok(())
+}
+
+/// `weld`: merge vertices closer than `epsilon`; collapsed triangles go.
+pub(super) fn weld(mesh: &mut Mesh, epsilon: f32, index: usize) -> Result<(), McpToolError> {
+    if !epsilon.is_finite() || epsilon <= 0.0 || epsilon > MAX_WELD_M {
+        return Err(bad(format!(
+            "ops[{index}].epsilon {epsilon} is outside (0, {MAX_WELD_M}]; send a weld distance in meters"
+        )));
+    }
+    too_big(index, mesh.tris.len())?;
+    *mesh = from_geo(geo_ops::weld_by_distance(&to_geo(mesh), epsilon));
+    Ok(())
+}
+
+/// `flip`: reverse every winding.
+pub(super) fn flip(mesh: &mut Mesh, index: usize) -> Result<(), McpToolError> {
+    too_big(index, mesh.tris.len())?;
+    *mesh = from_geo(geo_ops::flip(&to_geo(mesh)));
+    Ok(())
 }

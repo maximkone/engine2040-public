@@ -831,6 +831,78 @@ mod tests {
         );
     }
 
+    /// Ticks of the combined tape: ten server seconds at 60 Hz.
+    const COMBINED_TICKS: u32 = 600;
+
+    /// The combined server tick: 64 fighters of bones plus the 500 agents,
+    /// the near half swapping with the far half every 100 ticks (so tier
+    /// flips run), rows of ten agents as contact islands, and a shove on a
+    /// seeded capsule every 20 ticks so sleep and wake both run. Returns the
+    /// digest after every 100 ticks folded with the final state, and the
+    /// nanoseconds each tick (tiers plus step) took.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "timing bounds the test slice only, never sim state"
+    )]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "timing bounds the test slice only, never sim state"
+    )]
+    fn combined_run() -> (u64, Vec<u128>) {
+        let mut w = LodWorld::new_army(2_040, LodConfig::default());
+        let pairs: Vec<(usize, usize)> = (0..SOLDIERS - 1)
+            .filter(|i| i % ROW != ROW - 1)
+            .map(|i| (i, i + 1))
+            .collect();
+        let mut rng = Rng::new(2_040);
+        let mut dist = vec![DIST_UNKNOWN_MM; SOLDIERS];
+        let mut ns = Vec::new();
+        let mut h = Fnv64::new();
+        for tick in 0..COMBINED_TICKS {
+            let near_first = (tick / 100) % 2 == 0;
+            for (i, d) in dist.iter_mut().enumerate() {
+                *d = if (i < SOLDIERS / 2) == near_first {
+                    1_000
+                } else {
+                    DIST_UNKNOWN_MM
+                };
+            }
+            if tick % 20 == 10 {
+                let k = usize::try_from(rng.next_u64() % 500).unwrap_or(0);
+                w.capsules[k].vx = 3.0;
+            }
+            let start = std::time::Instant::now();
+            w.update_tiers(&dist).expect("tiers");
+            w.step(FIXED_DT, &pairs).expect("step");
+            ns.push(start.elapsed().as_nanos());
+            if (tick + 1) % 100 == 0 {
+                h.write_u64(w.state_hash());
+            }
+        }
+        h.write_u64(w.state_hash());
+        (h.finish(), ns)
+    }
+
+    #[test]
+    fn combined_tick_64_fighters_500_agents_hash_x2() {
+        let (first, _) = combined_run();
+        let (second, _) = combined_run();
+        assert_eq!(first, second, "same seed, same combined tape");
+        assert_ne!(first, 0);
+    }
+
+    #[test]
+    #[ignore = "timing: run under proof --perf"]
+    fn combined_tick_physics_slice_p99_under_4ms() {
+        let (_, mut ns) = combined_run();
+        ns.sort_unstable();
+        let p99 = ns[ns.len() * 99 / 100];
+        assert!(
+            p99 < 4_000_000,
+            "64 + 500 combined physics slice p99 {p99}ns > 4ms"
+        );
+    }
+
     #[test]
     fn lod_fixture_seed_separates_substreams() {
         let a = LodWorld::new_army(2_040, LodConfig::default());

@@ -39,11 +39,15 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = process.cwd();
 
+const HELP = [
+  "Usage: node tools/affected.mjs [--base <ref>] [--files <paths...>] [--json] [--mark-green]",
+  "  Maps the diff to workspace packages + reverse deps (cargo metadata).",
+  "  Lane gate runs the closure; the full proof stays once per wave.",
+  "  --mark-green records this diff as green (run only after a green gate).",
+  "  -h, --help prints this text and exits 0; a bad argument prints it to stderr and exits 2.",
+].join("\n");
 const usage = () => {
-  console.error("Usage: node tools/affected.mjs [--base <ref>] [--files <paths...>] [--json] [--mark-green]");
-  console.error("  Maps the diff to workspace packages + reverse deps (cargo metadata).");
-  console.error("  Lane gate runs the closure; the full proof stays once per wave.");
-  console.error("  --mark-green records this diff as green (run only after a green gate).");
+  console.error(HELP);
   process.exit(2);
 };
 
@@ -77,7 +81,10 @@ function parseArgs(argv) {
     else if (a.startsWith("--snapshot-write=")) out.snapshotWrite = a.slice("--snapshot-write=".length);
     else if (a === "--snapshot-diff") out.snapshotDiff = argv[++i] ?? usage();
     else if (a.startsWith("--snapshot-diff=")) out.snapshotDiff = a.slice("--snapshot-diff=".length);
-    else usage();
+    else if (a === "--help" || a === "-h") {
+      console.log(HELP);
+      process.exit(0);
+    } else usage();
   }
   return out;
 }

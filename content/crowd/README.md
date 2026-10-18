@@ -36,12 +36,12 @@ downloaded, no third-party license to read.
 ## Reproduce
 
 - `node content/crowd/tools/gen.mjs` — regenerates byte-identical files.
-- `cargo run --offline --manifest-path content/crowd/proof/Cargo.toml` —
-  cooks through the engine CT2 lane twice (budgets, LOD monotonicity, hull
-  containment) and writes `report-split1.json`. NOT YET GREEN: the fresh
-  proof crate's cold compile exceeds the 5-minute machine-slot limit (two
-  timed-out runs, incremental cache kept in `proof/target/`); see
-  `SPLIT-RECEIPT.md`.
+- `cargo test --locked -p engine-assets --features import --test it crowd_cook` —
+  cooks both specimens through the engine CT2 lane twice (budgets, LOD
+  monotonicity, hull containment) and compares the digests and triangle
+  counts with `report-split1.json`. This runs on a GitHub runner. The
+  standalone `proof/` crate wrote that report once by `cargo run`; its
+  `Cargo.lock` is stale (`--locked` refuses it), so the test is the proof now.
 
 ## Remainder (not this piece)
 

@@ -128,7 +128,7 @@ fn query_compact_ledger_prints_chars_before_and_after() {
         })
         .collect();
     let args = QueryArgs::near(0, 800);
-    let answer = run_query(&actors, &open_floor(&actors), &args).expect("near answers");
+    let answer = run_query(&actors, &ReachView::default(), &args).expect("near answers");
     let mut ledger = WatchLedger::new();
     ledger.record_query(QueryKind::Near, 40, &answer, answer.bytes / 4);
     let row = ledger.verb_row(QueryKind::Near);

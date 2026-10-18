@@ -47,6 +47,14 @@ pub enum SenseError {
     OutOfImage,
     /// A map radius is outside `MAP_CELL_CM..=MAX_MAP_RADIUS_CM`.
     BadRadius,
+    /// A glance grid edge is outside `1..=MAX_GLANCE_GRID`.
+    BadGrid,
+    /// A glance field of view is outside 2..=170 degrees.
+    BadFov,
+    /// A coverage pitch is outside -180..=180 degrees.
+    BadPitch,
+    /// The coverage subject has no box.
+    NoSubject,
 }
 
 impl core::fmt::Display for SenseError {
@@ -60,6 +68,10 @@ impl core::fmt::Display for SenseError {
                     "sense: radius outside {MAP_CELL_CM}..={MAX_MAP_RADIUS_CM} cm"
                 )
             }
+            Self::BadGrid => write!(f, "sense: glance grid outside 1..={MAX_GLANCE_GRID}"),
+            Self::BadFov => write!(f, "sense: glance fov outside 2..=170 degrees"),
+            Self::BadPitch => write!(f, "sense: pitch outside -180..=180 degrees"),
+            Self::NoSubject => write!(f, "sense: the subject has no box in this scene"),
         }
     }
 }
@@ -257,6 +269,348 @@ pub fn map(world: &SightWorld, center_cm: [i32; 3], radius_cm: i32) -> Result<St
         let _ = writeln!(out, "{glyph}={id} top={top}cm");
     }
     Ok(out)
+}
+
+/// The sense camera's yaw (whole degrees, 0 faces +z) for a door yaw in
+/// radians (0 faces +x, a quarter turn faces +z).
+pub fn camera_yaw_deg(door_yaw_rad: f32) -> i32 {
+    (90 - whole_deg(door_yaw_rad)).rem_euclid(360)
+}
+
+/// Largest glance grid edge in rays.
+pub const MAX_GLANCE_GRID: i32 = 64;
+/// Grid edge a glance uses when the caller names none.
+pub const DEFAULT_GLANCE_GRID: i32 = 24;
+/// Objects a glance lists; the rest fold into `more_pm`.
+pub const GLANCE_VISIBLE_CAP: usize = 25;
+
+/// One object a glance saw, with its share of the view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    pub id: u32,
+    /// Share of the grid whose first hit is this object, permille.
+    pub coverage_pm: i32,
+    /// Nearest and farthest hit distance in cm.
+    pub near_cm: i32,
+    pub far_cm: i32,
+}
+
+/// What one camera sees, as numbers (SPX1). `coverage_pm` of every object
+/// plus `more_pm` plus `background_pm` is exactly 1000.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glance {
+    pub grid: i32,
+    /// Largest share first, ties to the lower id, at most [`GLANCE_VISIBLE_CAP`].
+    pub visible: Vec<Seen>,
+    /// Share of the objects that did not fit the cap, permille.
+    pub more_pm: i32,
+    /// In the frustum but behind another solid, id ascending.
+    pub occluded: Vec<u32>,
+    /// Share of the grid that hit nothing within range, permille.
+    pub background_pm: i32,
+    /// Smallest, largest and mean hit distance in cm; `None` when nothing was hit.
+    pub depth_cm: Option<[i32; 3]>,
+}
+
+/// Ray direction through cell `(x, y)` of a `g` by `g` grid for a camera with
+/// a horizontal and vertical field of view of `fov_deg` (halved to whole
+/// degrees). Integer table math, any scale.
+fn glance_dir(cam: &Camera, fov_deg: i32, g: i32, x: i32, y: i32) -> [i32; 3] {
+    let (s, c) = (sin_1k(cam.yaw_deg), cos_1k(cam.yaw_deg));
+    let (sn, cs) = (sin_1k(fov_deg / 2), cos_1k(fov_deg / 2));
+    let (right, up) = (2 * x + 1 - g, g - 2 * y - 1);
+    [
+        s * g * cs + c * right * sn,
+        1024 * up * sn,
+        c * g * cs - s * right * sn,
+    ]
+}
+
+/// Share each count of `total` rays gets in permille, summing to exactly 1000:
+/// floors first, the leftover permille to the largest remainders (ties to the
+/// earlier entry).
+fn permille(counts: &[i64], total: i64) -> Vec<i32> {
+    let mut shares: Vec<i64> = counts.iter().map(|n| n * 1000 / total).collect();
+    let mut order: Vec<usize> = (0..counts.len()).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(counts[i] * 1000 % total), i));
+    let left = 1000 - shares.iter().sum::<i64>();
+    for &i in order.iter().take(usize::try_from(left).unwrap_or(0)) {
+        shares[i] += 1;
+    }
+    shares
+        .into_iter()
+        .map(|v| i32::try_from(v).unwrap_or(0))
+        .collect()
+}
+
+/// Cast a `grid` by `grid` fan of rays through `cam` and tally what each hits:
+/// per-object coverage, the objects the view holds but a solid hides, the
+/// background share and the depth range. `fov_deg` is the full angle.
+///
+/// Errors: [`SenseError::BadGrid`] outside `1..=MAX_GLANCE_GRID`,
+/// [`SenseError::BadFov`] outside `2..=170`.
+pub fn glance(
+    world: &SightWorld,
+    cam: &Camera,
+    fov_deg: i32,
+    grid: i32,
+) -> Result<Glance, SenseError> {
+    if !(1..=MAX_GLANCE_GRID).contains(&grid) {
+        return Err(SenseError::BadGrid);
+    }
+    if !(2..=170).contains(&fov_deg) {
+        return Err(SenseError::BadFov);
+    }
+    // Per object: rays, nearest, farthest.
+    let mut seen: BTreeMap<u32, (i64, i32, i32)> = BTreeMap::new();
+    let (mut misses, mut depth_sum, mut hits) = (0i64, 0i64, 0i64);
+    for y in 0..grid {
+        for x in 0..grid {
+            match cast(world, cam.eye_cm, glance_dir(cam, fov_deg, grid, x, y)) {
+                None => misses += 1,
+                Some(h) => {
+                    let e = seen.entry(h.id).or_insert((0, h.dist_cm, h.dist_cm));
+                    *e = (e.0 + 1, e.1.min(h.dist_cm), e.2.max(h.dist_cm));
+                    depth_sum += i64::from(h.dist_cm);
+                    hits += 1;
+                }
+            }
+        }
+    }
+    let mut counts: Vec<i64> = seen.values().map(|e| e.0).collect();
+    counts.push(misses);
+    let shares = permille(&counts, i64::from(grid) * i64::from(grid));
+    let mut rows: Vec<Seen> = seen
+        .iter()
+        .zip(&shares)
+        .map(|((id, e), pm)| Seen {
+            id: *id,
+            coverage_pm: *pm,
+            near_cm: e.1,
+            far_cm: e.2,
+        })
+        .collect();
+    let background_pm = shares[shares.len() - 1];
+    // Objects the grid missed: a center ray tells hidden from merely small.
+    let (mut occluded, mut tiny) = (Vec::new(), Vec::new());
+    for b in world.solids() {
+        let dir = [
+            (b.min_x + b.max_x) / 2 - cam.eye_cm[0],
+            (b.min_y + b.max_y) / 2 - cam.eye_cm[1],
+            (b.min_z + b.max_z) / 2 - cam.eye_cm[2],
+        ];
+        if seen.contains_key(&b.id) || !in_frustum(cam, fov_deg, dir) {
+            continue;
+        }
+        match cast(world, cam.eye_cm, dir) {
+            Some(h) if h.id == b.id => tiny.push(Seen {
+                id: b.id,
+                coverage_pm: 0,
+                near_cm: h.dist_cm,
+                far_cm: h.dist_cm,
+            }),
+            Some(_) => occluded.push(b.id),
+            None => {}
+        }
+    }
+    rows.extend(tiny);
+    rows.sort_by_key(|r| (std::cmp::Reverse(r.coverage_pm), r.id));
+    let more_pm = rows
+        .iter()
+        .skip(GLANCE_VISIBLE_CAP)
+        .map(|r| r.coverage_pm)
+        .sum();
+    rows.truncate(GLANCE_VISIBLE_CAP);
+    Ok(Glance {
+        grid,
+        visible: rows,
+        more_pm,
+        occluded,
+        background_pm,
+        depth_cm: (hits > 0).then(|| {
+            let dists = seen.values();
+            let near = dists.clone().map(|e| e.1).min().unwrap_or(0);
+            let far = dists.map(|e| e.2).max().unwrap_or(0);
+            [
+                near,
+                far,
+                i32::try_from(depth_sum / hits).unwrap_or(i32::MAX),
+            ]
+        }),
+    })
+}
+
+/// True when the offset `d` (cm) from the eye lies inside the view cone and
+/// within range: ahead of the camera and inside the tangent of the half angle
+/// on both axes, the way [`glance_dir`] spreads its rays.
+fn in_frustum(cam: &Camera, fov_deg: i32, d: [i32; 3]) -> bool {
+    let (s, c) = (
+        i64::from(sin_1k(cam.yaw_deg)),
+        i64::from(cos_1k(cam.yaw_deg)),
+    );
+    let (sn, cs) = (
+        i64::from(sin_1k(fov_deg / 2)),
+        i64::from(cos_1k(fov_deg / 2)),
+    );
+    let d = d.map(i64::from);
+    let ahead = d[0] * s + d[2] * c;
+    let side = d[0] * c - d[2] * s;
+    let up = d[1] * 1024;
+    let range = i64::from(SENSE_RANGE_CM);
+    ahead > 0
+        && side.abs() * cs <= ahead * sn
+        && up.abs() * cs <= ahead * sn
+        && d.iter().map(|v| v * v).sum::<i64>() <= range * range
+}
+
+/// A glance as plain text: one row per visible object, then what is hidden,
+/// the background, the depth range and the token cost of the text itself.
+pub fn glance_text(g: &Glance, cam: &Camera, fov_deg: i32) -> String {
+    let [ex, ey, ez] = cam.eye_cm;
+    let mut out = String::new();
+    let (grid, yaw) = (g.grid, cam.yaw_deg);
+    let _ = writeln!(
+        out,
+        "glance {grid}x{grid} eye=({ex},{ey},{ez}) yaw={yaw} fov={fov_deg} range={SENSE_RANGE_CM}"
+    );
+    for s in &g.visible {
+        let _ = writeln!(
+            out,
+            "visible {} {}pm near={}cm far={}cm",
+            s.id, s.coverage_pm, s.near_cm, s.far_cm
+        );
+    }
+    if g.more_pm > 0 {
+        let _ = writeln!(out, "more {}pm", g.more_pm);
+    }
+    if !g.occluded.is_empty() {
+        let ids: Vec<String> = g.occluded.iter().map(u32::to_string).collect();
+        let _ = writeln!(out, "occluded {}", ids.join(","));
+    }
+    let _ = writeln!(out, "background {}pm", g.background_pm);
+    match g.depth_cm {
+        Some([near, far, mean]) => {
+            let _ = writeln!(out, "depth min={near} max={far} mean={mean}cm");
+        }
+        None => out.push_str("depth none\n"),
+    }
+    let tokens = crate::estimate_tokens(&out);
+    let _ = writeln!(out, "tokens {tokens}");
+    out
+}
+
+/// Coverage grid edge: 32 x 32 rays.
+pub const COVERAGE_GRID: i32 = 32;
+/// Coverage under this many permille earns a next-call line.
+pub const HIDDEN_PERMILLE: i32 = 5;
+
+/// What a camera pose sees of one subject (SPF11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coverage {
+    /// Share of the grid whose first hit is the subject, permille.
+    pub permille: i32,
+    /// The camera looks away from the subject.
+    pub looks_away: bool,
+    /// The camera is upside down: its pitch is past a quarter turn.
+    pub flipped: bool,
+    /// A next step when the share is under [`HIDDEN_PERMILLE`], else empty.
+    pub next: String,
+}
+
+/// Forward, right and up of a camera in 1024 x 1024 units: yaw as in
+/// [`Camera`] (0 faces +z), pitch positive looking up. Pitch past 90 degrees
+/// keeps turning over the top, so `up` points down (a flipped camera).
+fn aim(yaw_deg: i32, pitch_deg: i32) -> ([i64; 3], [i64; 3], [i64; 3]) {
+    let (s, c) = (i64::from(sin_1k(yaw_deg)), i64::from(cos_1k(yaw_deg)));
+    let (sp, cp) = (i64::from(sin_1k(pitch_deg)), i64::from(cos_1k(pitch_deg)));
+    (
+        [s * cp, 1024 * sp, c * cp],
+        [c * 1024, 0, -s * 1024],
+        [-s * sp, 1024 * cp, -c * sp],
+    )
+}
+
+/// How much of the frame `subject` fills from `cam` tipped by `pitch_deg`
+/// (positive looks up, -180..=180): the share of a 32 x 32 ray grid whose first
+/// hit is the subject, with every other solid occluding it. An eye inside the
+/// subject reads 1000; a camera that looks away from it reads 0. Rays reach
+/// [`SENSE_RANGE_CM`].
+///
+/// Errors: [`SenseError::BadFov`], [`SenseError::BadPitch`], and
+/// [`SenseError::NoSubject`] for an id that has no box.
+pub fn coverage(
+    world: &SightWorld,
+    cam: &Camera,
+    pitch_deg: i32,
+    fov_deg: i32,
+    subject: u32,
+) -> Result<Coverage, SenseError> {
+    if !(2..=170).contains(&fov_deg) {
+        return Err(SenseError::BadFov);
+    }
+    if !(-180..=180).contains(&pitch_deg) {
+        return Err(SenseError::BadPitch);
+    }
+    let target = world.box_of(subject).ok_or(SenseError::NoSubject)?;
+    let (forward, right, up) = aim(cam.yaw_deg, pitch_deg);
+    let flipped = up[1] < 0;
+    let inside = [
+        (target.min_x, target.max_x),
+        (target.min_y, target.max_y),
+        (target.min_z, target.max_z),
+    ]
+    .iter()
+    .zip(cam.eye_cm)
+    .all(|((lo, hi), e)| *lo <= e && e <= *hi);
+    let to_target = [
+        (target.min_x + target.max_x) / 2 - cam.eye_cm[0],
+        (target.min_y + target.max_y) / 2 - cam.eye_cm[1],
+        (target.min_z + target.max_z) / 2 - cam.eye_cm[2],
+    ];
+    let ahead: i64 = (0..3).map(|k| forward[k] * i64::from(to_target[k])).sum();
+    let looks_away = !inside && ahead <= 0;
+    let mut hits = 0;
+    if inside {
+        hits = COVERAGE_GRID * COVERAGE_GRID;
+    } else if !looks_away {
+        let (sn, cs) = (
+            i64::from(sin_1k(fov_deg / 2)),
+            i64::from(cos_1k(fov_deg / 2)),
+        );
+        let g = i64::from(COVERAGE_GRID);
+        for y in 0..COVERAGE_GRID {
+            for x in 0..COVERAGE_GRID {
+                let (u, v) = (
+                    i64::from(2 * x + 1 - COVERAGE_GRID),
+                    i64::from(COVERAGE_GRID - 2 * y - 1),
+                );
+                let dir: [i32; 3] = std::array::from_fn(|k| {
+                    let along = forward[k] * g * cs + (right[k] * u + up[k] * v) * sn;
+                    i32::try_from(along / 1024).unwrap_or(0)
+                });
+                hits += i32::from(cast(world, cam.eye_cm, dir).is_some_and(|h| h.id == subject));
+            }
+        }
+    }
+    let permille = hits * 1000 / (COVERAGE_GRID * COVERAGE_GRID);
+    let next = if permille < HIDDEN_PERMILLE {
+        "Next call: scene.query kind=why_hidden with the same anchor and eye_m to see what hides it"
+            .to_owned()
+    } else {
+        String::new()
+    };
+    Ok(Coverage {
+        permille,
+        looks_away,
+        flipped,
+        next,
+    })
+}
+
+/// Whole degrees of an angle in radians (0.5 degree rounds away from zero).
+pub fn whole_deg(rad: f32) -> i32 {
+    // `to_cm` rounds a value times 100, so a hundredth of the degrees comes back whole.
+    crate::to_cm(rad.to_degrees() / 100.0)
 }
 
 /// Legend letters in id-first-seen order: `A..Z`, `a..z`, then `#`.
@@ -565,6 +919,227 @@ mod sense_tests {
         println!(
             "sense: view 128x96 {per_ray_us:.3} us per ray, {} tokens",
             crate::estimate_tokens(&text)
+        );
+        assert!(
+            per_ray_us <= 200.0,
+            "ray budget 0.2 ms, got {per_ray_us:.3} us"
+        );
+    }
+
+    /// A 2 m crate 6 m ahead of the origin and, optionally, a tall thin pillar
+    /// 3 m ahead that hides exactly the right half of it from the eye at x = 0.
+    fn coverage_scene(pillar: bool) -> SightWorld {
+        let mut actors = vec![crate_at(1, 0.0, 1.0, 6.0, [2.0, 2.0, 1.0])];
+        if pillar {
+            actors.push(crate_at(2, 0.3, 1.0, 3.0, [0.6, 3.0, 0.2]));
+        }
+        SightWorld::build(&actors)
+    }
+
+    fn eye(yaw_deg: i32) -> Camera {
+        Camera {
+            eye_cm: [0, 100, 0],
+            yaw_deg,
+        }
+    }
+
+    #[test]
+    fn coverage_inside_behind_flipped_and_stable() {
+        let world = coverage_scene(false);
+        // Facing the crate: it fills part of the frame.
+        let ahead = coverage(&world, &eye(0), 0, 30, 1).expect("legal camera");
+        assert!(
+            ahead.permille > 100 && !ahead.looks_away && !ahead.flipped,
+            "{ahead:?}"
+        );
+        assert!(ahead.next.is_empty());
+        // Inside the crate reads the whole frame.
+        let inside = Camera {
+            eye_cm: [0, 100, 600],
+            yaw_deg: 0,
+        };
+        assert_eq!(coverage(&world, &inside, 0, 30, 1).unwrap().permille, 1000);
+        // Turned around it reads 0, looks away and names the next call.
+        let behind = coverage(&world, &eye(180), 0, 30, 1).unwrap();
+        assert_eq!((behind.permille, behind.looks_away), (0, true));
+        assert!(
+            behind
+                .next
+                .starts_with("Next call: scene.query kind=why_hidden"),
+            "{}",
+            behind.next
+        );
+        // Pitched over the top the camera is upside down; a quarter turn is not.
+        assert!(coverage(&world, &eye(0), 150, 30, 1).unwrap().flipped);
+        assert!(!coverage(&world, &eye(0), 90, 30, 1).unwrap().flipped);
+        // Same bytes twice; bad input refuses.
+        assert_eq!(ahead, coverage(&world, &eye(0), 0, 30, 1).unwrap());
+        assert_eq!(
+            coverage(&world, &eye(0), 181, 30, 1),
+            Err(SenseError::BadPitch)
+        );
+        assert_eq!(coverage(&world, &eye(0), 0, 1, 1), Err(SenseError::BadFov));
+        assert_eq!(
+            coverage(&world, &eye(0), 0, 30, 9),
+            Err(SenseError::NoSubject)
+        );
+    }
+
+    #[test]
+    fn coverage_pillar_over_half_the_view_halves_the_share() {
+        let open = coverage(&coverage_scene(false), &eye(0), 0, 30, 1)
+            .unwrap()
+            .permille;
+        let blocked = coverage(&coverage_scene(true), &eye(0), 0, 30, 1)
+            .unwrap()
+            .permille;
+        assert!(open > 100, "{open}");
+        assert!(
+            (2 * blocked - open).abs() <= open / 10,
+            "open {open} blocked {blocked}"
+        );
+    }
+
+    fn crate_at(id: u32, x: f32, y: f32, z: f32, size: [f32; 3]) -> Actor {
+        Actor {
+            id,
+            name: "crate".into(),
+            x,
+            y,
+            z,
+            sx: size[0],
+            sy: size[1],
+            sz: size[2],
+            parent: None,
+            physical: true,
+            vx: 0.0,
+            vz: 0.0,
+            yaw: 0.0,
+        }
+    }
+
+    #[test]
+    fn glance_matches_a_brute_force_first_hit_count_on_50_seeded_cameras() {
+        let (grid, fov) = (DEFAULT_GLANCE_GRID, 90);
+        let mut listed = 0;
+        for seed in 0..50u64 {
+            let actors = scene(seed);
+            let world = SightWorld::build(&actors);
+            let cam = camera(seed);
+            let boxes = cm_boxes(&actors);
+            // The independent tally: every ray against the six face planes.
+            let mut by_id: BTreeMap<u32, i64> = BTreeMap::new();
+            let mut misses = 0i64;
+            for y in 0..grid {
+                for x in 0..grid {
+                    let dir = glance_dir(&cam, fov, grid, x, y);
+                    let (fast, slow) = (
+                        cast(&world, cam.eye_cm, dir),
+                        brute(&boxes, cam.eye_cm, dir),
+                    );
+                    assert!(agrees(fast, slow), "seed {seed} ({x},{y})");
+                    // A ray at the range edge may fall either way: take the fast answer.
+                    let id = if fast.is_some() == slow.is_some() {
+                        slow.map(|(id, _)| id)
+                    } else {
+                        fast.map(|h| h.id)
+                    };
+                    match id {
+                        Some(id) => *by_id.entry(id).or_insert(0) += 1,
+                        None => misses += 1,
+                    }
+                }
+            }
+            let mut counts: Vec<i64> = by_id.values().copied().collect();
+            counts.push(misses);
+            let want = permille(&counts, i64::from(grid * grid));
+            let got = glance(&world, &cam, fov, grid).expect("legal glance");
+            for (row, share) in by_id.keys().zip(&want) {
+                let seen = got.visible.iter().find(|s| s.id == *row);
+                assert_eq!(
+                    seen.map(|s| s.coverage_pm),
+                    Some(*share),
+                    "seed {seed} id {row}"
+                );
+                listed += 1;
+            }
+            assert_eq!(got.background_pm, want[want.len() - 1], "seed {seed}");
+            let total: i32 = got.visible.iter().map(|s| s.coverage_pm).sum::<i32>()
+                + got.more_pm
+                + got.background_pm;
+            assert_eq!(total, 1000, "seed {seed}: coverage plus background is 1000");
+            assert_eq!(
+                got,
+                glance(&world, &cam, fov, grid).unwrap(),
+                "seed {seed} x2"
+            );
+        }
+        assert!(listed > 100, "{listed} objects compared");
+    }
+
+    #[test]
+    fn glance_puts_a_crate_behind_a_pillar_in_occluded_not_visible() {
+        let actors = [
+            crate_at(1, 0.0, 1.0, 3.0, [1.0, 2.0, 1.0]),
+            crate_at(2, 0.0, 1.0, 6.0, [1.0, 1.0, 1.0]),
+            crate_at(3, 4.0, 1.0, 6.0, [1.0, 1.0, 1.0]),
+        ];
+        let world = SightWorld::build(&actors);
+        let cam = Camera {
+            eye_cm: [0, 100, 0],
+            yaw_deg: 0,
+        };
+        let g = glance(&world, &cam, 90, DEFAULT_GLANCE_GRID).expect("legal glance");
+        let ids: Vec<u32> = g.visible.iter().map(|s| s.id).collect();
+        assert!(ids.contains(&1) && ids.contains(&3), "{ids:?}");
+        assert!(
+            !ids.contains(&2),
+            "the hidden crate is not visible: {ids:?}"
+        );
+        assert_eq!(g.occluded, vec![2]);
+        assert!(g.background_pm > 0 && g.depth_cm.is_some());
+        let text = glance_text(&g, &cam, 90);
+        assert!(
+            text.contains("occluded 2\n") && text.contains("\ntokens "),
+            "{text}"
+        );
+        // Bad shapes refuse.
+        assert_eq!(glance(&world, &cam, 90, 0), Err(SenseError::BadGrid));
+        assert_eq!(glance(&world, &cam, 90, 65), Err(SenseError::BadGrid));
+        assert_eq!(glance(&world, &cam, 1, 24), Err(SenseError::BadFov));
+        assert_eq!(glance(&world, &cam, 171, 24), Err(SenseError::BadFov));
+        // Door yaw 0 faces +x; the camera faces 0 at +z.
+        let quarter = std::f32::consts::FRAC_PI_2;
+        assert_eq!(
+            [
+                camera_yaw_deg(0.0),
+                camera_yaw_deg(quarter),
+                camera_yaw_deg(-quarter)
+            ],
+            [90, 0, 180]
+        );
+        // An empty room is all background.
+        let empty = glance(&SightWorld::build(&[]), &cam, 90, 8).unwrap();
+        assert_eq!((empty.background_pm, empty.depth_cm), (1000, None));
+    }
+
+    #[test]
+    #[ignore = "timing: ray budget, run under --perf in release"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "test-only timing, never the tick"
+    )]
+    fn glance_ray_budget_under_a_fifth_of_a_ms() {
+        let actors = scene(9);
+        let world = SightWorld::build(&actors);
+        let cam = camera(9);
+        let start = std::time::Instant::now();
+        let g = glance(&world, &cam, 90, MAX_GLANCE_GRID).expect("legal glance");
+        let per_ray_us = start.elapsed().as_secs_f64() / f64::from(MAX_GLANCE_GRID.pow(2)) * 1e6;
+        println!(
+            "sense: glance {MAX_GLANCE_GRID}x{MAX_GLANCE_GRID} {per_ray_us:.3} us per ray, {} tokens",
+            crate::estimate_tokens(&glance_text(&g, &cam, 90))
         );
         assert!(
             per_ray_us <= 200.0,

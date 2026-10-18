@@ -4,7 +4,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
@@ -14,15 +13,36 @@ use web_sys::HtmlCanvasElement;
 use crate::anim::{backing_size, clear_colour, duration_from_ms, FrameStats, Square};
 use crate::golden::{self, Status};
 use crate::limits::{feature_names, limit_rows, required_limits, wanted_features};
-use crate::recovery::{LossBudget, ATTEMPTS, PAUSE_MS};
-use crate::report::{failed_line, AdapterFacts, Failure, Ready};
+use crate::recovery::{
+    reason_word, Cause, LossBudget, LossNote, LostBox, Verdict, ATTEMPTS, PAUSE_MS,
+};
+use crate::report::{failed_line, fatal_text, AdapterFacts, Failure, Ready};
 use crate::{COMMIT, SHADER_WGSL};
 
 thread_local! {
     /// The losses so far; a storm of them ends in the fatal page, not in endless restarts.
-    static LOSSES: RefCell<LossBudget> = const { RefCell::new(LossBudget::new()) };
-    /// Set by [`lose_device`]; the frame loop destroys its device on the next frame.
-    pub(crate) static DESTROY_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    pub(crate) static LOSSES: RefCell<LossBudget> = const { RefCell::new(LossBudget::new()) };
+    /// Set by [`lose_device`] and [`destroy_device`]; the frame loop destroys its device on the
+    /// next frame and remembers who asked.
+    static DESTROY_ASKED: Cell<Option<Cause>> = const { Cell::new(None) };
+    /// How many times the page was hidden or shown (`visibilitychange`), for the frames that span
+    /// a gap (QT7).
+    pub(crate) static VISIBILITY_CHANGES: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Count every `visibilitychange` of the page. A frame loop that sees the count move between two
+/// frames knows the tab was hidden in between: that frame spans a gap and is not a slow frame.
+pub(crate) fn watch_visibility() {
+    let Some(doc) = document() else {
+        return;
+    };
+    let on_change = Closure::<dyn FnMut()>::new(|| {
+        VISIBILITY_CHANGES.with(|count| count.set(count.get().wrapping_add(1)));
+    });
+    let _ = doc
+        .add_event_listener_with_callback("visibilitychange", on_change.as_ref().unchecked_ref());
+    // The listener lives as long as the page.
+    on_change.forget();
 }
 
 pub(crate) fn document() -> Option<web_sys::Document> {
@@ -42,7 +62,7 @@ pub(crate) fn set_body_attr(name: &str, value: &str) {
 }
 
 /// `data-state` on `<body>` is how the page and the headless check see where the shell is:
-/// `starting`, `running`, `recovering` or `fatal`.
+/// `starting`, `running`, `recovering`, `stopped` (the page ended its device on purpose) or `fatal`.
 pub(crate) fn set_state(state: &str) {
     set_body_attr("data-state", state);
 }
@@ -65,8 +85,9 @@ pub(crate) fn log_error(text: &str) {
 /// Show the reason on the page, mark it fatal, print the failure line. Returns the line.
 pub(crate) fn fail(why: Failure, detail: &str) -> String {
     let line = failed_line(why, detail, COMMIT, wasm_pages(), &user_agent());
-    set_text("fatal-reason", &format!("{} {detail}", why.headline()));
+    set_text("fatal-reason", &fatal_text(why, detail));
     set_text("report", &line);
+    set_body_attr("data-fallback", why.code());
     set_state("fatal");
     log_error(&line);
     line
@@ -130,9 +151,9 @@ pub(crate) async fn pause(ms: i32) {
 
 /// One frame's worth of GPU objects and the counters.
 struct Frame {
-    /// Set by this device's own lost callback. One flag per device: dropping an old device
+    /// Filled by this device's own lost callback. One box per device: dropping an old device
     /// reports it lost again, and that must not end the loop of the device that replaced it.
-    lost: Arc<AtomicBool>,
+    lost: Arc<LostBox>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -232,32 +253,85 @@ pub(crate) fn request_frame(slot: &FrameSlot) {
     }
 }
 
+/// What a frame loop does after it looked at its device (see [`check_device`]).
+pub(crate) enum Check {
+    /// The device is fine: draw.
+    Draw,
+    /// The page just destroyed the device; the browser reports it lost a moment later.
+    Wait,
+    /// The device was lost and the page starts over: end this loop and call the recovery.
+    Recover,
+    /// The loop is over for good (the fatal page or the stopped page is already shown).
+    Over,
+}
+
+/// The frame loop's look at its device before each frame (QW8). It carries out a destroy the page
+/// asked for and remembers who asked (`ended_by`). When the browser reports the device lost, the
+/// loss budget judges it: a forced or real loss starts over, a storm gives up with the browser's
+/// reason on the fatal page, and a requested destroy stops without a retry.
+pub(crate) fn check_device(
+    device: &wgpu::Device,
+    lost: &LostBox,
+    ended_by: &mut Option<Cause>,
+    now: f64,
+) -> Check {
+    if let Some(cause) = DESTROY_ASKED.with(Cell::take) {
+        device.destroy();
+        *ended_by = Some(cause);
+        return Check::Wait;
+    }
+    let Some((reason, message)) = lost.get() else {
+        return Check::Draw;
+    };
+    let note = LossNote {
+        reason,
+        message,
+        cause: ended_by.unwrap_or(Cause::Browser),
+    };
+    match LOSSES.with(|losses| losses.borrow_mut().judge(now, note.clone())) {
+        Verdict::Retry => Check::Recover,
+        Verdict::GiveUp => {
+            let detail = LOSSES.with(|losses| losses.borrow().give_up_detail());
+            fail(Failure::NoDevice, &detail);
+            Check::Over
+        }
+        Verdict::Stop => {
+            set_state("stopped");
+            set_text(
+                "hud",
+                &format!(
+                    "stopped: the page destroyed its graphics device (reason={}). Reload to play again.",
+                    note.reason
+                ),
+            );
+            Check::Over
+        }
+    }
+}
+
 /// Run `frame` on every animation frame until its device is lost. A lost device ends the
 /// loop and starts [`recover`]: Chrome refuses a second device on the same adapter, so the
 /// next one comes from a fresh instance and adapter.
 fn run_loop(mut frame: Frame, canvas_id: String, generation: u32) {
     let slot: Rc<FrameSlot> = Rc::new(RefCell::new(None));
     let again = Rc::clone(&slot);
+    let mut ended_by = None;
     *slot.borrow_mut() = Some(Closure::new(move |now: f64| {
-        let destroyed = DESTROY_REQUESTED.with(Cell::take);
-        if destroyed {
-            frame.device.destroy();
-        }
-        if frame.lost.load(Ordering::SeqCst) {
-            // Dropping the closure ends this loop; wasm-bindgen frees it after this call returns.
-            drop(again.borrow_mut().take());
-            if LOSSES.with(|losses| losses.borrow_mut().record(now)) {
-                wasm_bindgen_futures::spawn_local(recover(canvas_id.clone(), generation + 1));
-            } else {
-                fail(
-                    Failure::NoDevice,
-                    "the device was lost again and again; the browser cannot keep one.",
-                );
+        match check_device(&frame.device, &frame.lost, &mut ended_by, now) {
+            Check::Draw => {
+                frame.draw(now);
             }
-            return;
-        }
-        if !destroyed {
-            frame.draw(now);
+            Check::Wait => {}
+            Check::Recover => {
+                // Dropping the closure ends this loop; wasm-bindgen frees it after this call returns.
+                drop(again.borrow_mut().take());
+                wasm_bindgen_futures::spawn_local(recover(canvas_id.clone(), generation + 1));
+                return;
+            }
+            Check::Over => {
+                drop(again.borrow_mut().take());
+                return;
+            }
         }
         request_frame(&again);
     }));
@@ -343,11 +417,11 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         .await
         .map_err(|e| (Failure::NoDevice, e.to_string()))?;
     device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log_error(&format!("wgpu: {e}"))));
-    let lost = Arc::new(AtomicBool::new(false));
+    let lost = Arc::new(LostBox::default());
     let lost_by_callback = Arc::clone(&lost);
     device.set_device_lost_callback(move |reason, message| {
         log_error(&format!("wgpu device lost ({reason:?}): {message}"));
-        lost_by_callback.store(true, Ordering::SeqCst);
+        lost_by_callback.set(reason_word(reason), &message);
     });
 
     let max_dim = device.limits().max_texture_dimension_2d;
@@ -527,9 +601,18 @@ pub async fn run(canvas_id: String) -> String {
     line
 }
 
-/// Destroy the current device on the next frame. For the headless check: it proves the page
-/// survives a lost device by coming back with `data-generation` one higher.
+/// Destroy the current device on the next frame and treat it as a loss (a forced loss, QW8). For
+/// the headless check: it proves the page survives a lost device by coming back with
+/// `data-generation` one higher, the frame counter moving, and the loss in the receipt.
 #[wasm_bindgen]
 pub fn lose_device() {
-    DESTROY_REQUESTED.with(|d| d.set(true));
+    DESTROY_ASKED.with(|d| d.set(Some(Cause::Forced)));
+}
+
+/// Destroy the current device on the next frame, on purpose and for good (a requested destroy,
+/// QW8): the page is going away. It is not a loss and nothing starts over; the page ends in
+/// `data-state="stopped"`. The page calls it from `pagehide`.
+#[wasm_bindgen]
+pub fn destroy_device() {
+    DESTROY_ASKED.with(|d| d.set(Some(Cause::Requested)));
 }

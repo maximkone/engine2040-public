@@ -156,6 +156,19 @@ pub struct BoneShape {
     pub half_height: f32,
 }
 
+/// One bone capsule in world space, as [`Ragdoll::bone_capsule`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoneCapsule {
+    /// Low end of the capsule axis, meters.
+    pub a: [f32; 3],
+    /// High end of the capsule axis, meters.
+    pub b: [f32; 3],
+    /// Capsule radius, meters.
+    pub radius: f32,
+    /// One over the body mass, 1/kg.
+    pub inv_mass: f32,
+}
+
 /// Plain hit event the caller maps from combat data. This type is
 /// local on purpose: the physics lane never imports combat.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -315,6 +328,9 @@ pub struct Ragdoll {
     coupling_stats: CouplingStats,
     /// Capsule radius per bone, skeleton order: the floor probe's yardstick.
     radii: Vec<f32>,
+    /// Capsule cylinder half-height per bone, skeleton order: with the radius it fixes the
+    /// capsule axis the clinch pass parts.
+    half_heights: Vec<f32>,
     /// Per-bone continuous collision: `true` rides the CCD solver so fast
     /// weapons and limbs stop at thin shields instead of tunneling. On at
     /// spawn for every bone; folded into the hash, carried by snapshots.
@@ -427,6 +443,7 @@ impl Ragdoll {
             coupling: CouplingParams::default_coupling(),
             coupling_stats: CouplingStats::default(),
             radii: capsule_dims.iter().map(|d| d.radius).collect(),
+            half_heights: capsule_dims.iter().map(|d| d.half_height).collect(),
             ccd_flags: vec![true; skeleton.len()],
             pending: Vec::with_capacity(32),
             contact_events: 0,
@@ -747,6 +764,45 @@ impl Ragdoll {
     /// Linear velocity of one bone by index.
     pub fn bone_linvel(&self, bone: usize) -> Option<[f32; 3]> {
         ordered_linvel(&self.bodies, &self.order, bone)
+    }
+
+    /// World capsule of one bone: the two ends of its axis, its radius and its inverse mass.
+    /// `None` past the end or for a body with a non-finite pose.
+    pub fn bone_capsule(&self, bone: usize) -> Option<BoneCapsule> {
+        let body = self.bodies.get(*self.order.get(bone)?)?;
+        let t = body.translation();
+        let r = body.rotation();
+        let up = rotate_vec(
+            &[0.0, *self.half_heights.get(bone)?, 0.0],
+            &normalize_quat(&[r.x, r.y, r.z, r.w]),
+        );
+        let (c, radius) = ([t.x, t.y, t.z], *self.radii.get(bone)?);
+        let capsule = BoneCapsule {
+            a: [c[0] - up[0], c[1] - up[1], c[2] - up[2]],
+            b: [c[0] + up[0], c[1] + up[1], c[2] + up[2]],
+            radius,
+            inv_mass: body.mass().recip(),
+        };
+        let finite = capsule.a.iter().chain(&capsule.b).all(|v| v.is_finite());
+        (finite && capsule.inv_mass.is_finite()).then_some(capsule)
+    }
+
+    /// Move one bone by `shift` meters and change its velocity by `dv`, the two halves of
+    /// parting it from another fighter. Bones never sleep, so nothing is woken: the pass stays
+    /// out of Rapier's user-change lists like the floor and spacing passes.
+    pub fn part_bone(&mut self, bone: usize, shift: [f32; 3], dv: [f32; 3]) -> Result<(), Error> {
+        if shift.iter().chain(&dv).any(|c| !c.is_finite()) {
+            return Err(Error::NonFinitePosition);
+        }
+        let handle = *self.order.get(bone).ok_or(Error::BadBone(bone))?;
+        let body = self.bodies.get_mut(handle).ok_or(Error::BadBone(bone))?;
+        let (t, v) = (body.translation(), body.linvel());
+        body.set_translation(
+            Vector::new(t.x + shift[0], t.y + shift[1], t.z + shift[2]),
+            false,
+        );
+        body.set_linvel(Vector::new(v.x + dv[0], v.y + dv[1], v.z + dv[2]), false);
+        Ok(())
     }
 
     /// Canonical hash over bones in skeleton order plus blend extras, hit

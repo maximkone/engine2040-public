@@ -3,6 +3,7 @@ import { okCmd } from "./gh-check.mjs";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { mkdtempSync } from "node:fs";
 import { affectedToolTests, buildSnapshot, computeAffected, diffSnapshots, greenRecordPath, hashChangedFiles, laneCommand, laneCommandOnGithub, manifestFingerprint, metadataCachePath, parseArgs, readCachedMetadata, readLastGreen, shouldSkip, toolCommand, writeCachedMetadata, writeLastGreen } from "./affected.mjs";
@@ -235,4 +236,14 @@ test("snapshot round-trips tiers and diffs run-over-run", () => {
   assert.deepEqual(d.removedFiles, []);
   assert.equal(d.same, false);
   assert.equal(diffSnapshots(a, a).same, true);
+});
+
+test("--help prints the usage on stdout and exits 0; a bad flag exits 2", () => {
+  const tool = join(import.meta.dirname, "affected.mjs");
+  const help = spawnSync(process.execPath, [tool, "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /^Usage: node tools\/affected\.mjs/);
+  const bad = spawnSync(process.execPath, [tool, "--no-such-flag"], { encoding: "utf8" });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /Usage:/);
 });

@@ -91,7 +91,8 @@ pub struct Evidence {
 }
 
 /// Frame-grounded detections in check order (black, white, missing, clipping,
-/// then the sequence-level frozen window, which never fires per frame).
+/// then the sequence-level frozen window and stale pose check, which never
+/// fire per frame).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FrameFault {
     /// Every pixel at or below `black_max`.
@@ -105,6 +106,10 @@ pub enum FrameFault {
     /// Three or more consecutive captures share one digest: the capture path
     /// re-emits identical bytes (frozen window; sequence-level only).
     Frozen(Evidence),
+    /// The camera moved but the frame did not: two consecutive captures share
+    /// one digest while their poses are further apart than [`STALE_MOVE_CM`]
+    /// (the capture path served an old frame).
+    Stale(Evidence),
     /// Malformed capture (zero area, over bound, byte-length mismatch).
     BadCapture(String),
 }
@@ -117,6 +122,7 @@ impl fmt::Display for FrameFault {
             Self::MissingMesh(e) => write!(f, "missing mesh {}: {}", e.digest, e.detail),
             Self::Clipping(e) => write!(f, "clipping {}: {}", e.digest, e.detail),
             Self::Frozen(e) => write!(f, "frozen sequence {}: {}", e.digest, e.detail),
+            Self::Stale(e) => write!(f, "stale capture {}: {}", e.digest, e.detail),
             Self::BadCapture(reason) => write!(f, "bad capture: {reason}"),
         }
     }
@@ -698,6 +704,104 @@ pub fn frozen_gate() -> Result<FrozenGateOutcome, FrameFault> {
     })
 }
 
+/// Camera move in centimeters above which an unchanged frame digest is a
+/// stale capture: a camera that stepped a metre must show a different frame.
+pub const STALE_MOVE_CM: u64 = 100;
+
+/// One captured frame in a pose-aware sequence: where the camera stood and
+/// the [`digest_hex`] of what it captured.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PosedFrame {
+    /// Camera position in integer centimeters.
+    pub eye_cm: [i32; 3],
+    /// Frame digest.
+    pub digest: String,
+}
+
+/// What one capture attempt gave back.
+#[derive(Clone, PartialEq, Debug)]
+pub enum CaptureTry {
+    /// A frame with its camera pose.
+    Frame(PosedFrame),
+    /// The capture or judge did not answer in time.
+    TimedOut,
+    /// The capture came back with no frame to judge.
+    Void,
+}
+
+/// Why a sequence check refused to judge: the attempt it stopped at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AbstainReason {
+    /// The attempt at this index timed out.
+    TimedOut(usize),
+    /// The attempt at this index came back void.
+    Void(usize),
+}
+
+impl fmt::Display for AbstainReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimedOut(attempt) => write!(f, "capture {attempt} timed out"),
+            Self::Void(attempt) => write!(f, "capture {attempt} came back void"),
+        }
+    }
+}
+
+/// Verdict of a pose-aware sequence check. A result nobody could judge is
+/// `Abstain`, never `Pass`.
+#[derive(Clone, PartialEq, Debug)]
+pub enum SequenceVerdict {
+    /// Every consecutive pair is consistent.
+    Pass,
+    /// A definite fault in the frames that did arrive.
+    Fault(FrameFault),
+    /// A timed-out or void capture left the sequence unjudged.
+    Abstain(AbstainReason),
+}
+
+/// Straight-line distance between two camera positions in centimeters,
+/// rounded down; integer math, so the same poses always give the same answer.
+fn distance_cm(a: [i32; 3], b: [i32; 3]) -> u64 {
+    let squared = (0..3).fold(0u64, |sum, axis| {
+        let delta = u64::from(a[axis].abs_diff(b[axis]));
+        sum.saturating_add(delta.saturating_mul(delta))
+    });
+    squared.isqrt()
+}
+
+/// Check a capture sequence against its camera poses: consecutive frames
+/// with an equal digest while the camera moved more than [`STALE_MOVE_CM`]
+/// are [`FrameFault::Stale`]. A fault found in the frames that arrived
+/// wins; otherwise the first timed-out or void attempt is an
+/// [`SequenceVerdict::Abstain`]; only a full, consistent sequence passes.
+pub fn check_pose_sequence(captures: &[CaptureTry]) -> SequenceVerdict {
+    for (index, pair) in captures.windows(2).enumerate() {
+        let [CaptureTry::Frame(a), CaptureTry::Frame(b)] = pair else {
+            continue;
+        };
+        let moved_cm = distance_cm(a.eye_cm, b.eye_cm);
+        if a.digest == b.digest && moved_cm > STALE_MOVE_CM {
+            return SequenceVerdict::Fault(FrameFault::Stale(Evidence {
+                digest: a.digest.clone(),
+                metric: moved_cm,
+                detail: format!(
+                    "frames {index} and {} share one digest while the camera moved {moved_cm} cm (limit {STALE_MOVE_CM} cm)",
+                    index + 1,
+                ),
+            }));
+        }
+    }
+    let unjudged = captures
+        .iter()
+        .enumerate()
+        .find_map(|(index, attempt)| match attempt {
+            CaptureTry::Frame(_) => None,
+            CaptureTry::TimedOut => Some(AbstainReason::TimedOut(index)),
+            CaptureTry::Void => Some(AbstainReason::Void(index)),
+        });
+    unjudged.map_or(SequenceVerdict::Pass, SequenceVerdict::Abstain)
+}
+
 /// Real offscreen scenes behind the `capture` feature: scripted variants of
 /// the render default scene run through the CPU offscreen capture, sharing
 /// [`count_near_slices`] and [`digest_hex`] with the synthetic path.
@@ -1196,6 +1300,80 @@ mod tests {
         // per-frame gate must pass it (only the window may fault).
         let metrics = check_scripted(Script::Clean, W, H, 7, &thresholds());
         assert!(metrics.is_ok(), "single frozen frame passes: {metrics:?}");
+    }
+
+    fn posed(x_cm: i32, digest: &str) -> CaptureTry {
+        CaptureTry::Frame(PosedFrame {
+            eye_cm: [x_cm, 170, 0],
+            digest: digest.to_string(),
+        })
+    }
+
+    #[test]
+    fn frame_stale_poses_26_m_apart_with_equal_digests_fault() {
+        let seq = [posed(0, "aaaa"), posed(2600, "aaaa")];
+        match check_pose_sequence(&seq) {
+            SequenceVerdict::Fault(FrameFault::Stale(evidence)) => {
+                assert_eq!(evidence.digest, "aaaa");
+                assert_eq!(evidence.metric, 2600, "moved 26 m in cm");
+                let text = FrameFault::Stale(evidence).to_string();
+                assert!(text.starts_with("stale capture aaaa"), "{text}");
+            }
+            other => panic!("a 26 m move with one digest must be stale, got {other:?}"),
+        }
+        assert_eq!(check_pose_sequence(&seq), check_pose_sequence(&seq), "x2");
+    }
+
+    #[test]
+    fn frame_stale_same_poses_with_different_digests_pass() {
+        let seq = [posed(0, "aaaa"), posed(2600, "aaab")];
+        assert_eq!(check_pose_sequence(&seq), SequenceVerdict::Pass);
+    }
+
+    #[test]
+    fn frame_stale_negative_control_one_digest_byte_flips_the_result() {
+        let first = digest_hex(b"capture");
+        let mut bytes = first.clone().into_bytes();
+        bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
+        let second = String::from_utf8(bytes).expect("hex is ascii");
+        let same = [posed(0, &first), posed(2600, &first)];
+        assert!(matches!(
+            check_pose_sequence(&same),
+            SequenceVerdict::Fault(FrameFault::Stale(_))
+        ));
+        let flipped = [posed(0, &first), posed(2600, &second)];
+        assert_eq!(check_pose_sequence(&flipped), SequenceVerdict::Pass);
+    }
+
+    #[test]
+    fn frame_stale_a_still_camera_may_repeat_a_frame() {
+        let seq = [posed(0, "aa"), posed(50, "aa"), posed(50, "aa")];
+        assert_eq!(check_pose_sequence(&seq), SequenceVerdict::Pass);
+    }
+
+    #[test]
+    fn frame_stale_timeout_and_void_abstain_never_pass() {
+        let timed_out = [posed(0, "aa"), CaptureTry::TimedOut, posed(900, "bb")];
+        assert_eq!(
+            check_pose_sequence(&timed_out),
+            SequenceVerdict::Abstain(AbstainReason::TimedOut(1))
+        );
+        let void = [posed(0, "aa"), posed(900, "bb"), CaptureTry::Void];
+        assert_eq!(
+            check_pose_sequence(&void),
+            SequenceVerdict::Abstain(AbstainReason::Void(2))
+        );
+        assert_eq!(
+            AbstainReason::Void(2).to_string(),
+            "capture 2 came back void"
+        );
+        // A definite fault among the arrived frames still wins over an abstain.
+        let both = [posed(0, "aa"), posed(3000, "aa"), CaptureTry::TimedOut];
+        assert!(matches!(
+            check_pose_sequence(&both),
+            SequenceVerdict::Fault(FrameFault::Stale(_))
+        ));
+        assert_eq!(check_pose_sequence(&[]), SequenceVerdict::Pass);
     }
 }
 

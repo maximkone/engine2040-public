@@ -1,0 +1,6 @@
+{
+  "version_prefix": "5.2",
+  "exe": "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe",
+  "exe_sha256": "e27fbfea8564aa645d4463cb0949695fd85562b9de6df9561b06859a1074adf7",
+  "python": "3.13"
+}

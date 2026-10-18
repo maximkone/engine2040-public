@@ -228,7 +228,7 @@ Board IDs in `engine-proposed-rows.md` are AD1..AD20 (same number).
 ### AD-20  Reach honesty at the door, then one nav adapter   [score 10.0]
 - WHY: "can the guard reach the gate?" must never default to yes.
 - Evidence [V]: scene_query.rs:952-956, :1062-1070. `scene.spatial` already refuses nav checks with `needs_nav_view` (checks.rs `run_spatial` returns it) [V]. Six reach/BFS homes (nav tiles/flow/mesh, spatial sight.rs and navcheck.rs, playtest reachability.rs, build_level.rs:1319; A). Root cause I found: playtest has no dependents, so endpoint rebuilt its own BFS (see AD-08).
-- Status: PARTIAL.
+- Status: PARTIAL. 2026-10-18: `engine_nav::reach` (mesh to `ReachView`/`NavView`) and the door half landed: `scene.query reachable` reads each actor's mesh polygon from `ServerState::with_nav` and refuses `needs_nav_view` without one (tests `reach_door_*`); left: a host that bakes and hands in a mesh, and `build_level` reading the same view.
 - ADAPT: step 1 (S): `reachable` refuses `needs_nav_view` when no bake exists. Step 2 (M): one adapter nav mesh/tiles -> `ReachView`/`NavView` in endpoint (spatial stays nav-free); build_level reads the same view.
 - Home: `endpoint/src/scene_query.rs`, `nav/src/mesh.rs` as source.
 - Proof: two rooms, one door: blocked across the wall with a view, refusal without; mesh and tiles agree on 20 seeded layouts.

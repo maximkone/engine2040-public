@@ -16,8 +16,8 @@
 //!
 //! Budgets: 64 recipe ops, 200_000 triangles, 32 name chars
 //! (`crates/geo/src/recipe.rs:18-22`). Entry points: [`GeoMesh`], [`GeoError`], [`EdgeReport`],
-//! [`mesh`], [`ops`], [`primitives`], [`recipe`], and one module per feature (`boolean`, `uv`,
-//! `lod`, `collision`).
+//! [`mesh`], [`ops`], [`primitives`], [`recipe`], [`weights`], and one module per feature
+//! (`boolean`, `uv`, `lod`, `collision`, `bake`).
 //!
 //! Donors (licenses read from each crate's own file on 2026-10-04, all on the `deny.toml` list):
 //! `manifold-rust` (Apache-2.0, port of Manifold), `xatlas` (MIT, vendored source behind the
@@ -30,6 +30,8 @@ pub mod mesh;
 pub mod ops;
 pub mod primitives;
 pub mod recipe;
+/// Automatic skin weights from bone segments: the four nearest bones, inverse-square, std only.
+pub mod weights;
 
 #[cfg(feature = "bake")]
 pub mod bake;

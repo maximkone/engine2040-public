@@ -16,6 +16,9 @@ use wtransport::tls::{Certificate, Identity};
 
 /// Longest validity period a browser accepts for a pinned certificate.
 pub const MAX_VALIDITY_DAYS: u32 = 14;
+/// Longest validity [`PinnedCert::mint`] makes: a day under the browser limit, so a clock
+/// or rounding difference never puts a fresh certificate on the 14-day boundary.
+pub const MINT_VALIDITY_DAYS: u32 = MAX_VALIDITY_DAYS - 1;
 /// The same limit in seconds.
 const MAX_VALIDITY_SECS: i64 = 14 * 86_400;
 /// `notBefore` sits this far in the past so a client clock that runs a little
@@ -38,7 +41,7 @@ const OID_PRIME256V1: [u8; 8] = [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]
 /// Why a certificate cannot be pinned or could not be made.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CertError {
-    /// The requested validity is zero days or over [`MAX_VALIDITY_DAYS`].
+    /// The requested validity is zero days or over [`MINT_VALIDITY_DAYS`].
     BadValidityDays(u32),
     /// A subject alternative name is not a valid ASN.1 string.
     BadSan,
@@ -65,7 +68,7 @@ impl fmt::Display for CertError {
             Self::BadValidityDays(days) => {
                 write!(
                     f,
-                    "validity of {days} days is outside 1..={MAX_VALIDITY_DAYS}"
+                    "validity of {days} days is outside 1..={MINT_VALIDITY_DAYS}"
                 )
             }
             Self::BadSan => write!(f, "invalid subject alternative name"),
@@ -104,14 +107,16 @@ pub struct PinnedCert {
 
 impl PinnedCert {
     /// Mint a fresh ECDSA P-256 self-signed certificate for `subject_alt_names`
-    /// valid for `valid_days` (1 to [`MAX_VALIDITY_DAYS`]). Zero or longer is
-    /// refused before any key is made.
+    /// valid for `valid_days` (1 to [`MINT_VALIDITY_DAYS`], 13). Zero or longer,
+    /// 14 days included, is refused before any key is made and counted in
+    /// [`GateReceipt`](crate::browser::GateReceipt).
     pub fn mint<I, S>(subject_alt_names: I, valid_days: u32) -> Result<Self, CertError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        if valid_days == 0 || valid_days > MAX_VALIDITY_DAYS {
+        if valid_days == 0 || valid_days > MINT_VALIDITY_DAYS {
+            crate::browser::note_cert_refused();
             return Err(CertError::BadValidityDays(valid_days));
         }
         let now = OffsetDateTime::now_utc();
@@ -223,6 +228,7 @@ pub fn check_pinnable(der: &[u8], now_unix: i64) -> Result<Validity, CertError> 
         return Err(CertError::Malformed);
     }
     if seconds > MAX_VALIDITY_SECS {
+        crate::browser::note_cert_refused();
         return Err(CertError::ValidityTooLong { seconds });
     }
     if now_unix < validity.not_before {
@@ -558,18 +564,36 @@ mod tests {
 
     #[test]
     fn webtransport_cert_mint_refuses_bad_validity_before_making_a_key() {
-        for days in [0, MAX_VALIDITY_DAYS + 1, u32::MAX] {
+        let before = crate::browser::GateReceipt::read().cert_refused;
+        let bad = [0, MAX_VALIDITY_DAYS, MAX_VALIDITY_DAYS + 1, u32::MAX];
+        for days in bad {
             assert!(matches!(
                 PinnedCert::mint(["localhost"], days),
                 Err(CertError::BadValidityDays(refused)) if refused == days
             ));
         }
+        // The receipt counts every refusal (other tests may add to it meanwhile).
+        let counted = crate::browser::GateReceipt::read().cert_refused - before;
+        assert!(counted >= 4, "four refusals counted, saw {counted}");
+    }
+
+    #[test]
+    fn webtransport_cert_mint_refuses_14_days_and_accepts_13() {
+        assert_eq!(MINT_VALIDITY_DAYS, 13);
+        assert!(PinnedCert::mint(["localhost"], 14).is_err());
+        let minted = PinnedCert::mint(["localhost"], 13).expect("13 days is allowed");
+        let span = minted.validity().not_after - minted.validity().not_before;
+        assert_eq!(
+            span,
+            13 * 86_400,
+            "the period is exactly the days asked for"
+        );
     }
 
     #[test]
     fn webtransport_cert_mint_makes_a_pinnable_fresh_certificate() {
-        let first = PinnedCert::mint(["localhost", "127.0.0.1"], MAX_VALIDITY_DAYS)
-            .expect("14 days is the longest allowed");
+        let first = PinnedCert::mint(["localhost", "127.0.0.1"], MINT_VALIDITY_DAYS)
+            .expect("13 days is the longest allowed");
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let validity = check_pinnable(first.leaf_der(), now).expect("minted cert passes the rules");
         assert_eq!(validity, first.validity());
@@ -596,7 +620,7 @@ mod tests {
 
     #[test]
     fn webtransport_cert_verdicts_match_the_wtransport_client_verifier() {
-        let minted = PinnedCert::mint(["localhost"], MAX_VALIDITY_DAYS).expect("mint");
+        let minted = PinnedCert::mint(["localhost"], MINT_VALIDITY_DAYS).expect("mint");
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let cases: [(&[u8], i64); 8] = [
             (P256_14D, FIXTURE_MID),

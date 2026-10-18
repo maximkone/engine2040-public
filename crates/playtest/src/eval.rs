@@ -30,6 +30,8 @@ use crate::agent::Backend;
 use crate::door::{door_call, DoorCall};
 use crate::frame_check::{check_scripted, Script as FrameScript, Thresholds};
 
+pub mod scorecard;
+mod trajectory;
 mod utility;
 
 /// Backends every task executes against, in report order.
@@ -896,6 +898,11 @@ fn run_authoring_row(task: &EvalTask, index: u64, backend: Backend) -> EvalRow {
         }
         TaskScript::Clean | TaskScript::PrivacyProbe => {
             let mut row = base;
+            if let Err(fault) = trajectory::task_trajectory(task, index, backend) {
+                row.rejected = true;
+                row.detail = bound_detail(format!("trajectory refused: {fault}"));
+                return row;
+            }
             row.completed = true;
             row.detail = bound_detail(match task.flow {
                 Flow::Brief => "brief ok: bounded summary recorded".to_owned(),
@@ -1240,6 +1247,15 @@ pub fn external_mcp_pass() -> ExternalPass {
 /// Task rows are fixture-driven and replay-identical; the external row is
 /// environment-dependent and labeled as such.
 pub fn run_eval() -> EvalReport {
+    EvalReport {
+        rows: run_rows(),
+        external: external_mcp_pass(),
+    }
+}
+
+/// The 75 backend rows: every task on every backend, authoring then play.
+/// No environment pass; the rows replay identically.
+fn run_rows() -> Vec<EvalRow> {
     let mut rows = Vec::with_capacity(AUTHORING_COUNT * 3 + PLAY_COUNT * 3);
     for (position, task) in AUTHORING_TASKS.iter().enumerate() {
         let Ok(index) = u64::try_from(position) else {
@@ -1250,10 +1266,7 @@ pub fn run_eval() -> EvalReport {
         }
     }
     let Ok(authoring) = u64::try_from(AUTHORING_TASKS.len()) else {
-        return EvalReport {
-            rows,
-            external: external_mcp_pass(),
-        };
+        return rows;
     };
     for (offset, task) in PLAY_TASKS.iter().enumerate() {
         let Ok(extra) = u64::try_from(offset) else {
@@ -1263,10 +1276,7 @@ pub fn run_eval() -> EvalReport {
             rows.push(run_play_row(task, authoring + extra, backend));
         }
     }
-    EvalReport {
-        rows,
-        external: external_mcp_pass(),
-    }
+    rows
 }
 /// Retrieval stress with and without distractor briefs; shares row shape so the graduate consumer needs no second harness.
 pub fn run_distractor_stress(distractors: usize) -> (Vec<EvalRow>, Vec<EvalRow>) {

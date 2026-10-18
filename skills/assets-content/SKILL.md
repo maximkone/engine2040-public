@@ -18,7 +18,7 @@ Plan: `docs/plan/content.md`. Take one content row: its text, its owned `content
 
 ## 2. Cook
 
-1. Download into a staging folder: `content/_incoming/` (the `fetch-content.mjs` default) and `content/incoming/` are git-ignored. `node tools/fetch-content.mjs --list <file> [--dry-run]` lists total bytes and licences first. It sends one request per second with a User-Agent, and writes an md5 and a licence sidecar to `content/_incoming/`.
+1. Download into a staging folder: `content/_incoming/` (the `fetch-content.mjs` default) and `content/incoming/` are git-ignored (two carve-outs stay vendored: the studio HDRI `content/incoming/studio_small_09_1k.hdr` with its sidecar, and `content/fighters/incoming/batch-a/`). `node tools/fetch-content.mjs --list <file> [--dry-run]` lists total bytes and licences first. It sends one request per second with a User-Agent, and writes an md5 and a licence sidecar to `content/_incoming/`.
 2. Cook through the engine's own paths: retarget, mesh cook (`crates/assets/src/mesh_cook.rs::cook_mesh`), texture cook (`crates/assets/src/texture.rs`). Stay inside the triangle and texture budgets (sections 4 and 5). Use Blender headless for fixes when it is installed.
 3. Write the source URL and SHA into the asset's cook manifest.
 4. Prove it: the consumer loads it (window build or headless import test). The cook is identical twice (x2 equal bytes). Budgets hold.

@@ -82,7 +82,7 @@ export function archivedDoneRows(root = ROOT) {
   const done = new Map();
   for (const file of archiveDoneFiles(root)) {
     for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
-      const m = /^- \[x\] ([A-Z][A-Z0-9]*\d[a-z]?)\b/.exec(line);
+      const m = /^- \[x\] ([A-Z][A-Z0-9]*\d[a-z]?\d?)\b/.exec(line);
       if (m && !done.has(m[1])) done.set(m[1], line);
     }
   }
@@ -124,7 +124,7 @@ Options:
 Exit codes: 0 ok - 1 unknown row or self-check FAIL - 2 usage.
 `;
 
-const HEAD = /^- \[( |x)\] ([A-Z][A-Z0-9]*\d[a-z]?)\b(.*)$/;
+const HEAD = /^- \[( |x)\] ([A-Z][A-Z0-9]*\d[a-z]?\d?)\b(.*)$/;
 const FOCUS = join(ROOT, "docs", "FOCUS.md");
 
 // Row ids of the owner's focus list: every id after "Rows:" on a line of the
@@ -140,7 +140,7 @@ export function focusNowIds(focusText) {
     if (!m) continue;
     for (const tok of m[1].split(/[\s,;]+/)) {
       const id = tok.replace(/[.)]+$/, "");
-      if (/^[A-Z][A-Z0-9]*\d[a-z]?$/.test(id) && !ids.includes(id)) ids.push(id);
+      if (/^[A-Z][A-Z0-9]*\d[a-z]?\d?$/.test(id) && !ids.includes(id)) ids.push(id);
     }
   }
   return ids;

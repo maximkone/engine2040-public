@@ -7,7 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::mesh::{frac, ix, narrow, scaled_count, GeoError, GeoMesh};
+use crate::mesh::{
+    frac, ix, narrow, scaled_count, segment_distance_sq, triangle_area, GeoError, GeoMesh,
+};
 
 /// Chart and pack settings (a subset of xatlas `ChartOptions` and `PackOptions`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -339,22 +341,25 @@ fn triangles_overlap(a: [[f64; 2]; 3], b: [[f64; 2]; 3]) -> bool {
     true
 }
 
-/// Number of chart pairs whose UV triangles share area, found by an exact separating-axis test
-/// over a uniform grid. 0 means every chart has its own space in the atlas.
-#[must_use]
-pub fn overlapping_chart_pairs(
+/// Cells per atlas edge of the grid both atlas checks sample on.
+const GRID: usize = 128;
+
+/// UV triangle `t` of an indexed mesh, in atlas units.
+fn uv_triangle(uvs: &[[f32; 2]], indices: &[u32], t: usize) -> [[f64; 2]; 3] {
+    [0, 1, 2].map(|k| uvs[ix(indices[3 * t + k])].map(f64::from))
+}
+
+/// Triangle numbers per grid cell: every cell the triangle's bounding box reaches, widened by
+/// `margin` cells on each side.
+fn grid_cells(
     uvs: &[[f32; 2]],
     indices: &[u32],
-    chart_of_triangle: &[u32],
-) -> usize {
-    const GRID: usize = 128;
-    let tri = |t: usize| -> [[f64; 2]; 3] {
-        [0, 1, 2].map(|k| uvs[ix(indices[3 * t + k])].map(f64::from))
-    };
+    margin: usize,
+) -> BTreeMap<(usize, usize), Vec<usize>> {
     let mut cells: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     let cell = |v: f64| scaled_count(GRID, narrow(v.clamp(0.0, 1.0))).min(GRID - 1);
     for t in 0..indices.len() / 3 {
-        let p = tri(t);
+        let p = uv_triangle(uvs, indices, t);
         let (x0, x1) = (
             cell(p.iter().map(|v| v[0]).fold(f64::INFINITY, f64::min)),
             cell(p.iter().map(|v| v[0]).fold(f64::NEG_INFINITY, f64::max)),
@@ -363,12 +368,25 @@ pub fn overlapping_chart_pairs(
             cell(p.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min)),
             cell(p.iter().map(|v| v[1]).fold(f64::NEG_INFINITY, f64::max)),
         );
-        for x in x0..=x1 {
-            for y in y0..=y1 {
+        for x in x0.saturating_sub(margin)..=(x1 + margin).min(GRID - 1) {
+            for y in y0.saturating_sub(margin)..=(y1 + margin).min(GRID - 1) {
                 cells.entry((x, y)).or_default().push(t);
             }
         }
     }
+    cells
+}
+
+/// Number of chart pairs whose UV triangles share area, found by an exact separating-axis test
+/// over a uniform grid. 0 means every chart has its own space in the atlas.
+#[must_use]
+pub fn overlapping_chart_pairs(
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+    chart_of_triangle: &[u32],
+) -> usize {
+    let tri = |t: usize| uv_triangle(uvs, indices, t);
+    let cells = grid_cells(uvs, indices, 0);
     let mut pairs: BTreeSet<(u32, u32)> = BTreeSet::new();
     let mut tested: BTreeSet<(usize, usize)> = BTreeSet::new();
     for list in cells.values() {
@@ -388,6 +406,94 @@ pub fn overlapping_chart_pairs(
         }
     }
     pairs.len()
+}
+
+/// How well an [`Unwrap`] uses its atlas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UvQuality {
+    /// Sum of the UV triangle areas over the atlas area (1.0 = no wasted texel).
+    pub fill: f32,
+    /// `(max - min) / mean` of the per-triangle texel density (UV area in texels over the 3D
+    /// area): 0.0 = every triangle gets the same texels per square meter.
+    pub density_spread: f32,
+    /// Smallest distance in texels between triangles of two different charts, seen on the
+    /// 128 x 128 grid of [`overlapping_chart_pairs`] (pairs farther apart than one cell are not
+    /// compared, so the value never exceeds one cell, `min(width, height) / 128` texels).
+    pub min_gap_texels: f32,
+}
+
+/// Distance in texels between two UV triangles: 0 when they share area or touch, else the
+/// nearest vertex-to-edge distance.
+fn triangle_gap(a: [[f64; 2]; 3], b: [[f64; 2]; 3]) -> f64 {
+    if triangles_overlap(a, b) {
+        return 0.0;
+    }
+    let flat = |p: [f64; 2]| [p[0], p[1], 0.0];
+    let mut best = f64::INFINITY;
+    for (corners, other) in [(a, b), (b, a)] {
+        for p in corners {
+            for k in 0..3 {
+                let d = segment_distance_sq(flat(p), flat(other[k]), flat(other[(k + 1) % 3]));
+                best = best.min(d);
+            }
+        }
+    }
+    best.sqrt()
+}
+
+/// Atlas fill, texel density spread and chart gap of `unwrap`, which was made from `source`
+/// (the 3D areas come from `source` through `unwrap.source_vertex`; triangles under 1e-9
+/// square meters are left out of the density).
+#[must_use]
+pub fn quality(unwrap: &Unwrap, source: &GeoMesh) -> UvQuality {
+    let [w, h] = unwrap.atlas_size.map(|n| f64::from(n.max(1)));
+    let (uvs, indices) = (&unwrap.mesh.uvs, &unwrap.mesh.indices);
+    let texel_triangle = |t: usize| uv_triangle(uvs, indices, t).map(|p| [p[0] * w, p[1] * h]);
+    let area_3d = |t: usize| {
+        let corner = |k: usize| {
+            source.positions[ix(unwrap.source_vertex[ix(indices[3 * t + k])])].map(f64::from)
+        };
+        triangle_area(corner(0), corner(1), corner(2))
+    };
+    let (mut texel_area, mut lo, mut hi, mut sum, mut counted) =
+        (0.0, f64::INFINITY, f64::NEG_INFINITY, 0.0, 0.0);
+    for t in 0..indices.len() / 3 {
+        let p = texel_triangle(t);
+        let area = 0.5
+            * ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]))
+                .abs();
+        texel_area += area;
+        let a3 = area_3d(t);
+        if a3 > 1e-9 {
+            let density = area / a3;
+            (lo, hi) = (f64::min(lo, density), f64::max(hi, density));
+            (sum, counted) = (sum + density, counted + 1.0);
+        }
+    }
+    let spread = if counted > 0.0 && sum > 0.0 {
+        (hi - lo) / (sum / counted)
+    } else {
+        0.0
+    };
+    let one_cell = w.min(h) / frac(GRID, 1);
+    let mut gap = one_cell;
+    let mut tested: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for list in grid_cells(uvs, indices, 1).values() {
+        for (i, &a) in list.iter().enumerate() {
+            for &b in &list[i + 1..] {
+                let different = unwrap.chart_of_triangle[a] != unwrap.chart_of_triangle[b];
+                if different && tested.insert((a.min(b), a.max(b))) {
+                    gap = gap.min(triangle_gap(texel_triangle(a), texel_triangle(b)));
+                }
+            }
+        }
+    }
+    UvQuality {
+        fill: narrow(texel_area / (w * h)),
+        density_spread: narrow(spread),
+        min_gap_texels: narrow(gap),
+    }
 }
 
 #[cfg(test)]
@@ -521,5 +627,94 @@ mod tests {
         );
         // A good mesh still unwraps through the public call.
         check(&m);
+    }
+
+    /// Two right triangles of 3D area 0.5 in a 1024 x 1024 atlas, one chart each. The first
+    /// has legs of 0.25 at the origin; the second starts `gap` texels to the right of its
+    /// corner and has legs of `0.25 * scale`.
+    fn pair(scale: f32, gap: f32, charts: [u32; 2]) -> (Unwrap, GeoMesh) {
+        let x = 0.25 + gap / 1024.0;
+        let leg = 0.25 * scale;
+        let source = GeoMesh::from_positions(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 5.0],
+                [1.0, 0.0, 5.0],
+                [0.0, 1.0, 5.0],
+            ],
+            vec![0, 1, 2, 3, 4, 5],
+        );
+        let mut mesh = source.clone();
+        mesh.uvs = vec![
+            [0.0, 0.0],
+            [0.25, 0.0],
+            [0.0, 0.25],
+            [x, 0.0],
+            [x + leg, 0.0],
+            [x, leg],
+        ];
+        let unwrap = Unwrap {
+            mesh,
+            source_vertex: vec![0, 1, 2, 3, 4, 5],
+            chart_of_triangle: charts.to_vec(),
+            chart_count: 2,
+            atlas_size: [1024, 1024],
+            texels_per_unit: 1.0,
+        };
+        (unwrap, source)
+    }
+
+    #[test]
+    fn quality_measures_fill_density_and_the_gap_between_charts() {
+        // Equal triangles 5 texels apart: fill 2 x 1/32 of the atlas, one density, a 5 texel gap.
+        let (u, source) = pair(1.0, 5.0, [0, 1]);
+        let q = quality(&u, &source);
+        assert!((q.fill - 0.0625).abs() < 1e-6, "fill {}", q.fill);
+        assert!(q.density_spread < 1e-6, "spread {}", q.density_spread);
+        assert!(
+            (q.min_gap_texels - 5.0).abs() < 1e-3,
+            "gap {}",
+            q.min_gap_texels
+        );
+        // The second triangle twice as big: 4x the texels for the same 3D area, so the spread is
+        // (4 - 1) / mean(1, 4) = 1.2; the gap is unchanged.
+        let (u, source) = pair(2.0, 5.0, [0, 1]);
+        let q = quality(&u, &source);
+        assert!(
+            (q.density_spread - 1.2).abs() < 1e-5,
+            "spread {}",
+            q.density_spread
+        );
+        assert!((q.min_gap_texels - 5.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn quality_gap_ignores_one_chart_and_stops_at_one_grid_cell() {
+        // One chart: touching triangles inside it are not a gap between charts.
+        let (u, source) = pair(1.0, 0.0, [0, 0]);
+        assert_eq!(quality(&u, &source).min_gap_texels, 8.0);
+        // Charts that touch have no gap at all.
+        let (u, source) = pair(1.0, 0.0, [0, 1]);
+        assert!(quality(&u, &source).min_gap_texels < 1e-3);
+        // 40 texels apart is more than one 8 texel cell: the sampling reports the cell.
+        let (u, source) = pair(1.0, 40.0, [0, 1]);
+        assert_eq!(quality(&u, &source).min_gap_texels, 8.0);
+    }
+
+    #[test]
+    fn a_real_unwrap_has_a_positive_fill_and_a_clear_gap() {
+        let source = uv_sphere(1.0, 12, 16);
+        let u = unwrap(&source, &UnwrapOptions::default()).unwrap();
+        let q = quality(&u, &source);
+        assert!(q.fill > 0.0 && q.fill <= 1.0, "fill {}", q.fill);
+        assert!(q.density_spread.is_finite() && q.density_spread >= 0.0);
+        assert!(
+            q.min_gap_texels > 0.0,
+            "charts touch: gap {}",
+            q.min_gap_texels
+        );
+        assert_eq!(q, quality(&u, &source));
     }
 }

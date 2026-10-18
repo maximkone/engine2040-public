@@ -1269,9 +1269,8 @@ impl AccelSubmitter {
         }
         encoder.copy_buffer_to_buffer(&flag_buf, 0, &readback, 0, flag_bytes);
         queue.submit(Some(encoder.finish()));
-        map_readback(device, &readback, "accel").map_err(AccelSubmitError::Device)?;
-        let flags =
-            readback_u32(&readback, total, "accel", "flags").map_err(AccelSubmitError::Device)?;
+        map_readback(device, &readback, "accel")?;
+        let flags = readback_u32(&readback, total, "accel", "flags")?;
         readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(AccelSubmitError::Validation(format!("{err:?}")));
@@ -1299,14 +1298,91 @@ impl AccelSubmitter {
     }
 }
 
+/// Why a readback map or read failed. [`fmt::Display`] keeps the text each
+/// caller had as a `String`: `<prefix> poll: ...`, `<prefix> map: ...`.
+#[cfg(feature = "window")]
+#[derive(Debug)]
+pub(crate) enum ReadbackError {
+    /// `Device::poll` failed while waiting for the map.
+    Poll {
+        prefix: &'static str,
+        source: wgpu::PollError,
+    },
+    /// The map callback dropped its sender before it reported.
+    Channel {
+        prefix: &'static str,
+        source: std::sync::mpsc::RecvError,
+    },
+    /// The device refused the map.
+    Map {
+        prefix: &'static str,
+        source: wgpu::BufferAsyncError,
+    },
+    /// The mapped range could not be taken.
+    MappedRange {
+        prefix: &'static str,
+        source: wgpu::MapRangeError,
+    },
+    /// The mapped buffer holds fewer than `count` values of `ty` (`u32`, `f32`).
+    Short {
+        prefix: &'static str,
+        bytes: usize,
+        count: usize,
+        ty: &'static str,
+        unit: &'static str,
+    },
+}
+
+#[cfg(feature = "window")]
+impl fmt::Display for ReadbackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Poll { prefix, source } => write!(f, "{prefix} poll: {source}"),
+            Self::Channel { prefix, source } => write!(f, "{prefix} map channel: {source}"),
+            Self::Map { prefix, source } => write!(f, "{prefix} map: {source}"),
+            Self::MappedRange { prefix, source } => write!(f, "{prefix} mapped range: {source}"),
+            Self::Short {
+                prefix,
+                bytes,
+                count,
+                ty,
+                unit,
+            } => write!(
+                f,
+                "{prefix} readback {bytes} bytes holds fewer than {count} {ty} {unit}"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "window")]
+impl std::error::Error for ReadbackError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Poll { source, .. } => Some(source),
+            Self::Channel { source, .. } => Some(source),
+            Self::Map { source, .. } => Some(source),
+            Self::MappedRange { source, .. } => Some(source),
+            Self::Short { .. } => None,
+        }
+    }
+}
+
+#[cfg(feature = "window")]
+impl From<crate::accel::ReadbackError> for AccelSubmitError {
+    fn from(error: crate::accel::ReadbackError) -> Self {
+        Self::Device(error.to_string())
+    }
+}
+
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// `prefix` keeps each caller's error text identical (`accel`, `decal`, ...).
 #[cfg(feature = "window")]
 pub(crate) fn map_readback(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
-    prefix: &str,
-) -> Result<(), String> {
+    prefix: &'static str,
+) -> Result<(), ReadbackError> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -1314,11 +1390,41 @@ pub(crate) fn map_readback(
     });
     device
         .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("{prefix} poll: {e}"))?;
+        .map_err(|source| ReadbackError::Poll { prefix, source })?;
     rx.recv()
-        .map_err(|e| format!("{prefix} map channel: {e}"))?
-        .map_err(|e| format!("{prefix} map: {e}"))?;
+        .map_err(|source| ReadbackError::Channel { prefix, source })?
+        .map_err(|source| ReadbackError::Map { prefix, source })?;
     Ok(())
+}
+
+/// Decode the first `count` little-endian 4-byte words of a mapped readback
+/// buffer with `word`. `ty` and `unit` name the values in the error text.
+#[cfg(feature = "window")]
+fn readback_words<T>(
+    buffer: &wgpu::Buffer,
+    count: usize,
+    prefix: &'static str,
+    ty: &'static str,
+    unit: &'static str,
+    word: impl Fn([u8; 4]) -> T,
+) -> Result<Vec<T>, ReadbackError> {
+    let mapped = buffer
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|source| ReadbackError::MappedRange { prefix, source })?;
+    if mapped.len() < count * 4 {
+        return Err(ReadbackError::Short {
+            prefix,
+            bytes: mapped.len(),
+            count,
+            ty,
+            unit,
+        });
+    }
+    Ok(mapped[..count * 4]
+        .chunks_exact(4)
+        .map(|c| word([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 /// Read `count` little-endian u32 values from a mapped readback buffer.
@@ -1328,24 +1434,10 @@ pub(crate) fn map_readback(
 pub(crate) fn readback_u32(
     buffer: &wgpu::Buffer,
     count: usize,
-    prefix: &str,
-    unit: &str,
-) -> Result<Vec<u32>, String> {
-    let mapped = buffer
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|e| format!("{prefix} mapped range: {e}"))?;
-    if mapped.len() < count * 4 {
-        return Err(format!(
-            "{prefix} readback {} bytes holds fewer than {count} u32 {unit}",
-            mapped.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for chunk in mapped[..count * 4].chunks_exact(4) {
-        out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(out)
+    prefix: &'static str,
+    unit: &'static str,
+) -> Result<Vec<u32>, ReadbackError> {
+    readback_words(buffer, count, prefix, "u32", unit, u32::from_le_bytes)
 }
 
 /// Read `count` little-endian f32 values from a mapped readback buffer.
@@ -1354,23 +1446,9 @@ pub(crate) fn readback_u32(
 pub(crate) fn readback_f32(
     buffer: &wgpu::Buffer,
     count: usize,
-    prefix: &str,
-) -> Result<Vec<f32>, String> {
-    let mapped = buffer
-        .slice(..)
-        .get_mapped_range()
-        .map_err(|e| format!("{prefix} mapped range: {e}"))?;
-    if mapped.len() < count * 4 {
-        return Err(format!(
-            "{prefix} readback {} bytes holds fewer than {count} f32 values",
-            mapped.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for chunk in mapped[..count * 4].chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(out)
+    prefix: &'static str,
+) -> Result<Vec<f32>, ReadbackError> {
+    readback_words(buffer, count, prefix, "f32", "values", f32::from_le_bytes)
 }
 
 /// Little-endian bytes of `values` in order: the one f32 byte writer for CPU
@@ -2140,5 +2218,29 @@ mod tests {
             flags[1..].iter().all(|f| *f == 1),
             "untouched records must still pass"
         );
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn readback_error_keeps_the_old_text_and_chains_its_source() {
+        use std::error::Error;
+        let short = ReadbackError::Short {
+            prefix: "decal",
+            bytes: 8,
+            count: 4,
+            ty: "u32",
+            unit: "words",
+        };
+        assert_eq!(
+            short.to_string(),
+            "decal readback 8 bytes holds fewer than 4 u32 words"
+        );
+        assert!(short.source().is_none());
+        let map = ReadbackError::Map {
+            prefix: "fog",
+            source: wgpu::BufferAsyncError,
+        };
+        assert!(map.to_string().starts_with("fog map: "), "{map}");
+        assert!(map.source().is_some());
     }
 }

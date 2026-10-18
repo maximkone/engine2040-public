@@ -541,7 +541,7 @@ golden unchanged; kill bars are gates.
   voice on/off golden identical x2; transport stays ON-owned, bake
   stays audio-owned. needs: ON1, ON8, AU1. (PLN online, reviewed
   2026-09-26; waits ON8.)
-- [ ] ON36 net: confirmed-frame discard in P2P rollback — discard Progress 2026-10-17: rollback.rs discard tests queues_hold_128_and_discard_advances_tail, discard_stops_at_predicted_and_clamps_to_frame, loopback_seeded_loss_converges_replay_empty pass in `cargo test -p engine-net --lib` 258 passed, gh run 39056801523; the 64-frame bursty tape with history <= CAP+pending lives in netcode.rs (on40_history_bounded..., e449553e), not in rollback.rs.
+- [x] ON36 net: confirmed-frame discard in P2P rollback — discard Progress 2026-10-17: rollback.rs discard tests queues_hold_128_and_discard_advances_tail, discard_stops_at_predicted_and_clamps_to_frame, loopback_seeded_loss_converges_replay_empty pass in `cargo test -p engine-net --lib` 258 passed, gh run 39056801523; the 64-frame bursty tape with history <= CAP+pending lives in netcode.rs (on40_history_bounded..., e449553e), not in rollback.rs.
   confirmed frames from the P2P session `history` behind a
   requested-frame guard, bounding memory (spike: 64→11 entries,
   512B→88B on the 64-frame bursty-loss tape, fold/tip/digest
@@ -550,7 +550,7 @@ golden unchanged; kill bars are gates.
   `cargo test -p engine-net --lib rollback` green plus the 64-frame
   bursty-loss tape with history ≤ CAP+pending and fold/tip/digest
   identical x2. Consumer: P2P duel + ON4 soak. needs: ON3.
-  (Research-merge wave 90, ON36 spike.)
+  (Research-merge wave 90, ON36 spike.) Landed e449553e. rollback discard tests queues_hold_128_and_discard_advances_tail, discard_stops_at_predicted_and_clamps_to_frame, discard_keeps_the_unresolved_incorrect_frame, loopback_seeded_loss_converges_replay_empty (net --lib rollback 25 passed run 39101475622) plus netcode on40_history_bounded_cap_plus_pending_bursty_loss (64-frame bursty-loss tape, history <= CAP+pending, fold/tip/digest identical x2) in the full net suite run 39107627991.
 - [ ] WD3 content: Rome district map — streets, rooftops and a market
   laid out for TV1 traversal fights. Tier C. Size L. Owns
   `content/maps/district/`. Accept: a traversal route crosses the map

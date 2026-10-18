@@ -101,7 +101,73 @@ pub(crate) fn scaled_count(count: usize, ratio: f32) -> usize {
     usize::try_from(floor).unwrap_or(usize::MAX)
 }
 
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Area of the triangle `a b c`.
+#[cfg(any(feature = "lod", feature = "uv"))]
+pub(crate) fn triangle_area(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
+    let (u, v) = (sub3(b, a), sub3(c, a));
+    let normal = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    0.5 * dot3(normal, normal).sqrt()
+}
+
+/// Squared distance from `p` to the closest point of the segment `a..b` (a zero-length
+/// segment is the point `a`).
+pub(crate) fn segment_distance_sq(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
+    let (ab, ap) = (sub3(b, a), sub3(p, a));
+    let len_sq = dot3(ab, ab);
+    let t = if len_sq > 0.0 {
+        (dot3(ap, ab) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (0..3).map(|k| (ap[k] - t * ab[k]).powi(2)).sum()
+}
+
+/// Squared distance from `p` to the triangle `a b c` (closest point by Voronoi region; a
+/// triangle with no area is its three edges).
+pub(crate) fn triangle_distance_sq(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
+    let (ab, ac, ap) = (sub3(b, a), sub3(c, a), sub3(p, a));
+    let (d1, d2) = (dot3(ab, ap), dot3(ac, ap));
+    let (bp, cp) = (sub3(p, b), sub3(p, c));
+    let (d3, d4) = (dot3(ab, bp), dot3(ac, bp));
+    let (d5, d6) = (dot3(ab, cp), dot3(ac, cp));
+    let (va, vb, vc) = (d3 * d6 - d5 * d4, d5 * d2 - d1 * d6, d1 * d4 - d3 * d2);
+    let sum = va + vb + vc;
+    // Inside the face: the plane distance. Everywhere else, the nearest edge covers it.
+    if va >= 0.0 && vb >= 0.0 && vc >= 0.0 && sum > 0.0 {
+        let (v, w) = (vb / sum, vc / sum);
+        let q = [0, 1, 2].map(|k| a[k] + ab[k] * v + ac[k] * w);
+        return dot3(sub3(p, q), sub3(p, q));
+    }
+    segment_distance_sq(p, a, b)
+        .min(segment_distance_sq(p, b, c))
+        .min(segment_distance_sq(p, c, a))
+}
+
 impl GeoMesh {
+    /// Distance from `p` to the nearest triangle, by brute force over every triangle; infinity
+    /// when the mesh has none. Indices must be in range (`validate`).
+    #[must_use]
+    pub fn surface_distance(&self, p: [f64; 3]) -> f64 {
+        let corner = |i: u32| self.positions[ix(i)].map(f64::from);
+        self.indices
+            .chunks_exact(3)
+            .map(|t| triangle_distance_sq(p, corner(t[0]), corner(t[1]), corner(t[2])))
+            .fold(f64::INFINITY, f64::min)
+            .sqrt()
+    }
+
     /// Positions and indices only.
     #[must_use]
     pub fn from_positions(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Self {
@@ -221,6 +287,16 @@ impl GeoMesh {
         (lo, hi)
     }
 
+    /// Length of the bounding-box diagonal in meters; 0 for an empty mesh.
+    #[must_use]
+    pub fn diagonal(&self) -> f64 {
+        let (lo, hi) = self.bounds();
+        (0..3)
+            .map(|k| (f64::from(hi[k]) - f64::from(lo[k])).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
     /// FNV-1a 64 over every array, lengths first, floats as bits: the cook receipt of a result.
     #[must_use]
     pub fn digest(&self) -> u64 {
@@ -284,5 +360,57 @@ impl GeoMesh {
             *p = [v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]];
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: [f64; 3] = [0.0, 0.0, 0.0];
+    const B: [f64; 3] = [2.0, 0.0, 0.0];
+    const C: [f64; 3] = [0.0, 2.0, 0.0];
+
+    #[test]
+    fn triangle_distance_covers_face_edge_and_corner_regions() {
+        let d = |p| triangle_distance_sq(p, A, B, C).sqrt();
+        // Above the face, and on it.
+        assert!((d([0.5, 0.5, 3.0]) - 3.0).abs() < 1e-12);
+        assert_eq!(d([0.5, 0.5, 0.0]), 0.0);
+        // Beside the hypotenuse B-C: nearest point is its middle (1, 1, 0).
+        assert!((d([2.0, 2.0, 0.0]) - 2.0_f64.sqrt()).abs() < 1e-12);
+        // Past corner A: nearest point is A itself.
+        assert!((d([-3.0, -4.0, 0.0]) - 5.0).abs() < 1e-12);
+        // Past the end of edge A-B: nearest point is B.
+        assert!((d([5.0, -4.0, 0.0]) - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_triangle_with_no_area_is_its_edges() {
+        // Three points on one line: distance to the segment from (0,0,0) to (2,0,0).
+        let line = triangle_distance_sq([1.0, 3.0, 0.0], A, [1.0, 0.0, 0.0], B);
+        assert!((line - 9.0).abs() < 1e-12);
+        let point = triangle_distance_sq([3.0, 4.0, 0.0], A, A, A);
+        assert!((point - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn surface_distance_takes_the_nearest_triangle() {
+        let two = GeoMesh::from_positions(
+            vec![
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 5.0],
+                [2.0, 0.0, 5.0],
+                [0.0, 2.0, 5.0],
+            ],
+            vec![0, 1, 2, 3, 4, 5],
+        );
+        assert!((two.surface_distance([0.5, 0.5, 1.0]) - 1.0).abs() < 1e-12);
+        assert!((two.surface_distance([0.5, 0.5, 4.0]) - 1.0).abs() < 1e-12);
+        assert!(GeoMesh::default().surface_distance([0.0; 3]).is_infinite());
+        assert!((two.diagonal() - (4.0_f64 + 4.0 + 25.0).sqrt()).abs() < 1e-12);
+        assert_eq!(GeoMesh::default().diagonal(), 0.0);
     }
 }

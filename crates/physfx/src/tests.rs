@@ -2,9 +2,12 @@
 
 mod blast;
 mod contacts;
+mod hinge;
+mod hit;
 mod impact;
 mod ladder;
 mod materials;
+mod receipt;
 mod tether;
 
 use super::*;
@@ -58,6 +61,11 @@ fn humanoid() -> (Rig, LocalPose) {
         rotations: vec![Transform::IDENTITY.rot; BONES.len()],
     };
     (Rig::new(skeleton, shapes).expect("humanoid rig"), pose)
+}
+
+/// The index of the humanoid bone called `name`.
+fn bone(name: &str) -> usize {
+    BONES.iter().position(|b| b.0 == name).expect("bone")
 }
 
 /// The humanoid's pose moved by `by` meters.

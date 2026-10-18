@@ -307,6 +307,13 @@ pub fn measure(a: &Box3, b: &Box3, args: &MeasureArgs) -> Measure {
     }
 }
 
+/// [`measure`] of actor `a` against actor `b` of a snapshot, by id. `None`
+/// for an unknown or degenerate actor.
+pub fn measure_pair(actors: &[Actor], a: u32, b: u32, args: &MeasureArgs) -> Option<Measure> {
+    let boxed = |id: u32| actor_box(actors.iter().find(|x| x.id == id)?);
+    Some(measure(&boxed(a)?, &boxed(b)?, args))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_the_anchor_by_the_push_makes_the_clearance_hold() {
+    fn surface_gap_push_makes_the_clearance_hold() {
         let mut a = Actor {
             id: 1,
             name: "a".into(),
@@ -468,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn contact_align_and_contain_read_the_poking_crate() {
+    fn measure_pair_contact_align_and_contain_read_the_poking_crate() {
         let room = bx(1, [0, 0, 0], [400, 300, 400]);
         let inside = bx(2, [50, 0, 50], [150, 100, 150]);
         let poking = bx(3, [350, 0, 50], [450, 100, 150]);
@@ -501,5 +508,35 @@ mod tests {
         assert!(measure(&inside, &next, &align).passed);
         let off = bx(5, [150, 0, 80], [250, 100, 180]);
         assert_eq!(measure(&inside, &off, &align).shortfall_cm, 30);
+    }
+    #[test]
+    fn measure_pair_by_id_reads_the_same_boxes_and_refuses_unknown_ids() {
+        let actor = |id: u32, x: f32| Actor {
+            id,
+            name: format!("a{id}"),
+            x,
+            y: 0.5,
+            z: 0.0,
+            sx: 1.0,
+            sy: 1.0,
+            sz: 1.0,
+            parent: None,
+            physical: true,
+            vx: 0.0,
+            vz: 0.0,
+            yaw: 0.0,
+        };
+        let scene = [actor(1, 0.0), actor(2, 1.3)];
+        let m = measure_pair(&scene, 1, 2, &MeasureArgs::default()).expect("both known");
+        assert_eq!((m.gap_cm, m.relation), (30, PairRelation::Apart));
+        let args = MeasureArgs {
+            min_clearance_cm: 90,
+            ..MeasureArgs::default()
+        };
+        assert_eq!(measure_pair(&scene, 1, 2, &args).unwrap().shortfall_cm, 60);
+        assert_eq!(measure_pair(&scene, 1, 9, &args), None);
+        let mut flat = scene.clone();
+        flat[1].sy = 0.0;
+        assert_eq!(measure_pair(&flat, 1, 2, &args), None, "degenerate box");
     }
 }

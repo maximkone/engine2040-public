@@ -1,44 +1,58 @@
-//! netplay (wasm32): the page plays a scripted duel against a native dedicated server.
+//! netplay (wasm32): the page plays a duel against a native dedicated server.
 //!
-//! `?server=ws://host:port` (WEB9, WEB12) starts it: the page races a WebTransport leg
-//! against a WebSocket leg ([`engine_net::connect_race`]), keeps the first that connects,
-//! joins the server's duel, plays 600 scripted ticks through the same client the native
-//! tests drive ([`engine_net::webduel::DuelClient`]: prediction, rollback onto the server's
-//! state, a rebuild when datagrams were lost) and prints one line to `#net`, the console
-//! and `data-net` on `<body>`:
+//! `?join=host:port&cert=<sha256>` or `?server=ws://host:port` (WEB9, WEB12; see [`crate::netquery`])
+//! starts it: the page races a WebTransport leg against a WebSocket leg
+//! ([`engine_net::connect_race`]), keeps the first that connects, joins the server's duel
+//! and plays it through the same client the native tests drive
+//! ([`engine_net::webduel::DuelClient`]: prediction, rollback onto the server's state, a
+//! ping, a rebuild when datagrams were lost, a desync named at its first divergent tick).
+//! Without `&play` the seat plays the 600-tick script the proofs compare; with it the
+//! keyboard, mouse and pad drive the seat ([`crate::browser::LivePilot`]). While it runs the
+//! page keeps `#net` and `#netstat` current, and at the end prints one line to `#net`, the
+//! console and `data-net` on `<body>`:
 //!
 //! - `net: transport=<webtransport|websocket> ticks=<n> hash=<hex> peers=<n>`
 //! - `net: failed transport=<leg|none> reason=<text>` when the race, the join or the
 //!   duel failed; a failed race names every leg that failed and why.
 //!
 //! The hash is the server's state hash of the last tick, which this page's own simulation
-//! computed too. The script is the tape; the live input path (WEB7) is not mixed in, so the
-//! hash is the same on every run and the native server can print the same number.
+//! computed too. For the script it is the same on every run and the native server can print
+//! the same number; for a live seat it is the number the server prints for that match.
+//! `data-net-tick` carries the newest server tick for the headless checks.
 //!
 //! The driver is a `setTimeout` loop on the page's one thread. It does not need WebGPU, so
-//! it runs on a page whose GPU failed too. Called from `index.html`, which reads the query.
+//! it runs on a page whose GPU failed too. Called from `index.html`, which hands over the
+//! page address.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use engine_net::browser::ws::WsClient;
 use engine_net::browser::wt::WtClient;
-use engine_net::browser::ClientState;
-use engine_net::connect_race::{bounded, race, BoundedError, Leg, LegError};
+use engine_net::browser::{ClientState, GateReceipt};
+use engine_net::connect_race::{bounded, race, BoundedError, Leg, LegError, RaceError};
 use engine_net::quic::{ControlKind, Inbound, PeerId, Transport};
 use engine_net::session::NetError;
-use engine_net::webduel::{net_line, DuelClient};
+use engine_net::webduel::{net_line, playing_line, DuelClient, DuelStats, Pilot, Script};
 use wasm_bindgen::prelude::*;
 
-use crate::netquery::parse_target;
-use crate::shell::{now_ms, pause, set_body_attr, set_text};
+use crate::browser::LivePilot;
+use crate::netquery::{parse_search, ws_blocked, NetTarget};
+use crate::shell::{browser_clock, pause, set_body_attr, set_text};
 
 /// How long a leg may stay silent before the race calls it failed: a firewall that drops
 /// UDP looks exactly like this on WebTransport.
 const LEG_DEADLINE_MS: i32 = 5_000;
-/// How long the whole duel may take before the page gives up and says so.
-const DUEL_DEADLINE_MS: f64 = 90_000.0;
+/// How long the duel may take before the page gives up and says so, plus this much per
+/// tick of the match (a live seat plays at the pace of the person and the link).
+const DUEL_DEADLINE: Duration = Duration::from_secs(90);
+const DEADLINE_PER_TICK: Duration = Duration::from_millis(20);
+/// A live seat may also wait this long for the other player before the match starts.
+const WAIT_FOR_PLAYER: Duration = Duration::from_secs(180);
 /// Pause between two rounds of the driver loop.
 const ROUND_MS: i32 = 2;
+/// How often the status lines are rewritten.
+const HUD: Duration = Duration::from_millis(100);
 
 /// The connected leg behind one `Transport`.
 enum Link {
@@ -51,6 +65,14 @@ impl Link {
         match self {
             Self::Ws(link) => link.state(),
             Self::Wt(link) => link.state(),
+        }
+    }
+
+    /// Datagrams this leg shed because the link could not keep up.
+    fn dropped(&self) -> u64 {
+        match self {
+            Self::Ws(link) => link.dropped_datagrams(),
+            Self::Wt(link) => link.dropped_datagrams(),
         }
     }
 }
@@ -105,6 +127,13 @@ fn reason(error: BoundedError<LegError>) -> String {
     }
 }
 
+/// Whether the page itself was loaded over https (it then may not open `ws://` elsewhere).
+fn page_is_https() -> bool {
+    web_sys::window()
+        .and_then(|window| window.location().protocol().ok())
+        .is_some_and(|protocol| protocol == "https:")
+}
+
 fn show(line: &str, state: &str) {
     set_text("net", line);
     set_body_attr("data-net", state);
@@ -121,21 +150,38 @@ fn fail(transport: &str, reason: &str) -> String {
     line
 }
 
-/// Join the dedicated server named by the page address and play the scripted duel. Resolves
-/// with the line it printed. `wt` and `cert` are the optional WebTransport leg (see
-/// `netquery`); without them only the WebSocket leg runs.
-#[wasm_bindgen]
-pub async fn run_net(server: String, wt: Option<String>, cert: Option<String>) -> String {
-    set_body_attr("data-net", "running");
-    set_text("net", "net: connecting...");
-    let target = match parse_target(&server, wt.as_deref(), cert.as_deref()) {
-        Ok(target) => target,
-        Err(error) => return fail("none", &error.to_string()),
+/// The lines of a running duel: `#net` carries the status, `#netstat` the detail a person
+/// wants (what to press, what the link is doing) and `data-net-tick` the newest server tick.
+fn show_progress(leg: &str, play: bool, stats: &DuelStats, ticks: u32, dropped: u64) {
+    set_text("net", &playing_line(leg, stats, ticks));
+    if let Some(tick) = stats.server_tick {
+        set_body_attr("data-net-tick", &tick.to_string());
+    }
+    let seat = if play {
+        "you play: WASD move, F attack, Shift block, Space dodge, Q/E turn (click the page for mouse look)"
+    } else {
+        "the seat plays the proof script"
     };
-    let peer = server_peer();
+    set_text(
+        "netstat",
+        &format!(
+            "{seat}\nmispredicted ticks={} bad packets={} shed datagrams={dropped}\n{}",
+            stats.mispredicts,
+            stats.rejected,
+            GateReceipt::read().line()
+        ),
+    );
+}
 
+/// Race the WebTransport leg against the WebSocket leg and keep the first that connects. A
+/// failure names every leg that failed and why.
+async fn connect(target: NetTarget, peer: PeerId) -> Result<(Leg, Link), RaceError> {
     let ws_url = target.ws.clone();
+    let blocked = ws_blocked(page_is_https(), &ws_url);
     let ws_leg = async move {
+        if let Some(why) = blocked {
+            return Err(why);
+        }
         bounded(
             async move { WsClient::connect(&ws_url, peer).await.map(Link::Ws) },
             pause(LEG_DEADLINE_MS),
@@ -152,7 +198,8 @@ pub async fn run_net(server: String, wt: Option<String>, cert: Option<String>) -
                     .map(Link::Wt),
                 None => Err(LegError {
                     leg: Leg::WebTransport,
-                    reason: "not offered: the page address has no wt= and cert= keys".to_owned(),
+                    reason: "not offered: the page address has no cert= key (join=host:port&cert=<sha256>)"
+                        .to_owned(),
                 }),
             }
         };
@@ -160,44 +207,103 @@ pub async fn run_net(server: String, wt: Option<String>, cert: Option<String>) -
             .await
             .map_err(reason)
     };
-    let connected = match race(wt_leg, ws_leg).await {
-        Ok(connected) => connected,
-        Err(error) => return fail("none", &error.to_string()),
-    };
-    let (leg, mut link) = (connected.leg.name(), connected.value);
+    let connected = race(wt_leg, ws_leg).await?;
+    Ok((connected.leg, connected.value))
+}
 
-    let mut duel = match DuelClient::new(random_token()) {
-        Ok(duel) => duel,
-        Err(error) => return fail(leg, &error.to_string()),
-    };
-    let started = now_ms();
+/// Drive the duel until it ends: poll, keep the status lines current, give up at the deadline
+/// or when the connection closed under it.
+async fn drive(
+    duel: &mut DuelClient,
+    link: &mut Link,
+    leg: &str,
+    peer: PeerId,
+    play: bool,
+    deadline: Duration,
+) {
+    let ticks = duel.ticks();
+    let started = browser_clock();
+    let mut last_hud: Option<Duration> = None;
     let mut closing = false;
     loop {
-        if duel.poll(&mut link, peer) {
-            break;
+        let now = browser_clock();
+        let now_ms = u64::try_from(now.as_millis()).unwrap_or(u64::MAX);
+        if duel.poll_at(link, peer, now_ms) {
+            return;
+        }
+        if last_hud.is_none_or(|last| now.saturating_sub(last) >= HUD) {
+            last_hud = Some(now);
+            show_progress(leg, play, &duel.stats(), ticks, link.dropped());
         }
         if let ClientState::Closed(why) = link.state() {
             // One more round reads whatever arrived before the close.
             if closing {
                 duel.fail(format!("the connection ended before the duel did: {why}"));
-                break;
+                return;
             }
             closing = true;
         }
-        if now_ms() - started > DUEL_DEADLINE_MS {
+        if now.saturating_sub(started) > deadline {
             duel.fail(format!(
                 "no result within {} s (server tick {:?})",
-                DUEL_DEADLINE_MS / 1000.0,
+                deadline.as_secs(),
                 duel.server_tick()
             ));
-            break;
+            return;
         }
         pause(ROUND_MS).await;
     }
+}
+
+/// Join the dedicated server named by the page address (`location.search`) and play the duel.
+/// Resolves with the line it printed.
+#[wasm_bindgen]
+pub async fn run_net(search: String) -> String {
+    set_body_attr("data-net", "running");
+    set_text("net", "net: connecting...");
+    let query = match parse_search(&search) {
+        Ok(Some(query)) => query,
+        Ok(None) => return fail("none", "the page address names no server (join=host:port)"),
+        Err(error) => return fail("none", &error.to_string()),
+    };
+    let peer = server_peer();
+    let (ticks, play) = (query.ticks, query.play);
+    let (leg, mut link) = match connect(query.target, peer).await {
+        Ok((leg, link)) => (leg.name(), link),
+        Err(error) => return fail("none", &error.to_string()),
+    };
+    let pilot: Box<dyn Pilot> = if play {
+        Box::new(LivePilot::new())
+    } else {
+        Box::new(Script)
+    };
+    let token = query.token.unwrap_or_else(random_token);
+    let mut duel = match DuelClient::playing(token, ticks, pilot) {
+        Ok(duel) => duel,
+        Err(error) => return fail(leg, &error.to_string()),
+    };
+    let mut deadline = DUEL_DEADLINE + DEADLINE_PER_TICK * ticks;
+    if play {
+        deadline += WAIT_FOR_PLAYER;
+    }
+    drive(&mut duel, &mut link, leg, peer, play, deadline).await;
     let Some(outcome) = duel.outcome() else {
         return fail(leg, "the duel ended without a verdict");
     };
     let line = net_line(leg, outcome);
     show(&line, if outcome.is_ok() { "ok" } else { "failed" });
+    let stats = duel.stats();
+    set_text(
+        "netstat",
+        &format!(
+            "ended: rollback max={} mispredicted ticks={} rtt={}\n{}",
+            stats.rollback_max,
+            stats.mispredicts,
+            stats
+                .rtt_ms
+                .map_or_else(|| "?".to_owned(), |ms| format!("{ms}ms")),
+            GateReceipt::read().line()
+        ),
+    );
     line
 }

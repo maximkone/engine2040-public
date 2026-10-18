@@ -74,3 +74,28 @@ remainder, claims no UW39 line.
 Full corner mesh re-cook via CT1/CT2, SP5 solver `run()` with 0 findings,
 AS1 bundle write + `BundleLoader` load + corrupt-refused, VRAM/bytes guess,
 UW39 evidence line.
+
+## CT56 closure (2026-10-18)
+
+- SP5 placement: the SPF1 known-good gate runs the full engine-spatial catalog over
+  `corner.json` and pins `corner actors=3 verdict=clean`
+  (`cargo test --locked -p engine-playtest --lib known_good`, PASS on the runner, run
+  39104843792). The scout page `content/maps/PILOT-SCOUT.md` carries the numbers.
+- CT2 cook and AS1 bundle: test
+  `pilot_corner_cooks_into_one_as1_bundle_twice_identical_and_corrupt_bytes_are_refused`
+  (`crates/assets/tests/it/pilot_corner.rs`) cooks the three actors' glTF with
+  `cook_gltf_bytes` (Prop class), checks LOD0 triangles against `corner-cook.json` and the 5,000
+  bar, stages every LOD of every mesh into one bundle, finishes the bundle twice to the same
+  bytes, loads it through `verify_bundle_bytes` (the AS1 loader with digest check) with every
+  entry present, and refuses it once a byte is flipped. Command:
+  `cargo test --locked -p engine-assets --features import,registry --test it -- pilot_corner`.
+  PASS on the runner, run 39107410598.
+- No engine hunk forks: the pilot adds no engine code; the one crate file is that test.
+- Provenance per file: `PROVENANCE.md` (variant.json, corner.json) and the table above
+  (`cook-corner.mjs`, `corner-cook.json`); the CT9 kit bytes are unchanged and still match
+  `../manifest.json`.
+- Finding: the digests in the frozen CT9 `../report.json` (copied into `corner-cook.json` as
+  `cook_digest`) no longer equal today's CT2 cook of the same files (insula cooks to
+  `9c78cdae8762922a`, the report says `09461689054e6bb4`); LOD0 triangle counts still equal.
+  The kit and its report are frozen, so those digests stay the CT9-era numbers and the live
+  test compares triangle counts and cook x2, not them.

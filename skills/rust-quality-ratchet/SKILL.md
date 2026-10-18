@@ -11,7 +11,7 @@ description: "Use when a commit is refused by the pre-commit hook (rust-quality 
 
 - `node tools/rust-quality.mjs --crate game --no-cache` (name or `engine-game`; repeat `--crate`). Always `--no-cache`: the per-file cache once hid a regression for hours. It takes about a second per crate.
 - Last lines: `[FAIL] ratchet <crate> <metric> <was> -> <now>` and `RESULT FAIL: n ratchet regression(s)`, exit 1. `RESULT PASS` exit 0. Exit 2 is bad flags.
-- `--list <metric> --crate <c> [--limit 40]` prints the hits (file and line), so you see which function or file raised it. Metrics: `unwrap`, `panic_sites`, `casts`, `allow_no_reason`, `dead_code_allows`, `print_in_lib`, `string_errors`, `board_ids`, `hash_reimpl`, `dup_fns`, `passthrough`, `long_fns`, `big_files`, `hot_alloc`, `nondet`, `waivers`, `undoc_pub`, `unsafe`.
+- `--list <metric> --crate <c> [--limit 40]` prints the hits (file and line), so you see which function or file raised it. Metrics: `unwrap`, `panic_sites`, `casts`, `allow_no_reason`, `dead_code_allows`, `print_in_lib`, `string_errors`, `board_ids`, `hash_reimpl`, `dup_fns`, `passthrough`, `long_fns`, `big_files`, `hot_alloc`, `nondet`, `float_math`, `waivers`, `undoc_pub`, `unsafe`.
 - `--owned <path>` limits the verdict to regressions that touch your paths (foreign debt becomes `[WARN]`). The hook uses it.
 - Sim crates also get a config check (`tools/sim-clippy.toml` must be in each): a `sim config` FAIL names the crate.
 
@@ -28,6 +28,7 @@ description: "Use when a commit is refused by the pre-commit hook (rust-quality 
 | `board_ids` | row ids or history in a comment | delete the comment text; history goes to git |
 | `allow_no_reason` | `#[allow]` or `#[expect]` with no `reason =` | `#[expect(lint, reason = "...")]` |
 | `nondet` | HashMap, Instant, SystemTime in a sim crate | BTreeMap, ticks |
+| `float_math` | `x.sin()`, `exp`, `powf` on a float in a sim crate | `Fixed` math or integer tables |
 | `undoc_pub` | pub item with no doc comment | one doc line |
 
 Run again after each fix. Do not move code to a test module to hide it.

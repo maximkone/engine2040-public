@@ -1,6 +1,7 @@
 //! `play` pack: `play.step_until` until one hp falls, plus the rival-door
 //! verbs `input.inject` (hold one named action) and `state.digest` (hash one
-//! bout prefix); see `play_ext.rs` and `rival.rs`.
+//! bout prefix), and `play.sweep` (seeded bots play N bouts, one envelope);
+//! see `play_ext.rs`, `rival.rs` and `sweep.rs`.
 //! Consumer: MCP door after `api.load`. Owner: `engine-arena` sim; DTOs here.
 //! Units: ticks, permille, meters, `u64` digests (decimal strings). Same args
 //! twice seal same bytes; no clock. Errors: typed with recovery. DTO docs off.
@@ -23,12 +24,15 @@ pub const TOOL_PLAY_STEP_UNTIL: &str = "play.step_until";
 mod play_ext;
 #[path = "rival.rs"]
 mod rival;
+#[path = "sweep.rs"]
+mod sweep;
 
 pub use play_ext::{
     InputInjectArgs, InputInjectOutput, InputInjectTool, StateDigestArgs, StateDigestOutput,
     StateDigestTool, TOOL_INPUT_INJECT, TOOL_STATE_DIGEST,
 };
 pub use rival::{rival_for, verb_for_rival, RIVAL_PARITY};
+pub use sweep::{PlaySweepArgs, PlaySweepOutput, PlaySweepTool, TOOL_PLAY_SWEEP};
 
 /// The play pack, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
@@ -43,6 +47,7 @@ pub fn pack() -> Result<PackDef, PackError> {
         CapabilityCard::Observe,
     )?);
     play_ext::add_verbs(&mut pack)?;
+    sweep::add_verb(&mut pack)?;
     Ok(pack)
 }
 /// Request: seed, bout, tape, cap and watched hp threshold.

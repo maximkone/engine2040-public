@@ -17,6 +17,7 @@ mod material;
 mod meshlet_cluster_vectors;
 mod particles_seed;
 mod post_aa_parity;
+mod post_fsr1_parity;
 mod shadow_aces;
 mod shadow_post;
 mod torch_cluster_vectors;

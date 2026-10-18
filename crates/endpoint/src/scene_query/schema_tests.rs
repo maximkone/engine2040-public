@@ -13,13 +13,13 @@ fn schema() -> rmcp::serde_json::Value {
     rmcp::serde_json::to_value(rmcp::schemars::schema_for!(SceneQueryArgs)).expect("schema")
 }
 
-/// Every field has a doc, `kind` is an enum of the nine words, and the kind
+/// Every field has a doc, `kind` is an enum of the kind words, and the kind
 /// doc lists the fields each kind needs, straight from the card table.
 #[test]
 fn query_schema_docs_cover_every_field_and_kind() {
     let value = schema();
     let props = value["properties"].as_object().expect("properties");
-    assert_eq!(props.len(), 19);
+    assert_eq!(props.len(), 22);
     for (name, prop) in props {
         let doc = prop["description"].as_str().unwrap_or("");
         assert!(!doc.is_empty(), "field `{name}` has no doc");

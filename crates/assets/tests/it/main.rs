@@ -7,7 +7,10 @@
 //! `tests/vfetch_vectors.rs` stays its own binary: its `import` leg builds
 //! under `--features import` (proven 2026-10-16: 7 passed).
 
+mod ai_props;
+mod arena_cook;
 mod blockcomp_cook;
+mod crowd_cook;
 mod extras_wiring;
 mod gltf_cc0_corpus;
 mod gltf_conformance;
@@ -17,10 +20,12 @@ mod meshlet_cull_vectors;
 mod meshlet_lod_cook;
 mod meshlet_vectors;
 mod optimize_vectors;
+mod pilot_corner;
 mod quant_vectors;
 mod quantize_grid_vectors;
 mod quantize_parity;
 mod registry_singleton_vectors;
+mod retarget_batch_a;
 mod sidecar_conformance;
 mod sparse_order_vectors;
 mod spatial_sort_vectors;

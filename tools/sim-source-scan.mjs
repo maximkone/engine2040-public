@@ -83,10 +83,11 @@ export function productionCode(src) {
 
 // ---------------------------------------------------------------- GE2 genre
 
-const GENRE_RAW = /Fighter|Gladiator|gladiator/;
+const GENRE_RAW = /Fighter|Gladiator|gladiator|FIGHTER|GLADIATOR/;
 
-/** Identifiers in production code that contain a genre word, sorted. A genre
- * word in a comment, doc line or string literal does not count. */
+/** Identifiers in production code that contain a genre word, sorted: types
+ * and fns (`Fighter`, `gladiator_hp`) and caps or ids (`MAX_FIGHTERS`). A
+ * genre word in a comment, doc line or string literal does not count. */
 export function genreHits(src) {
   if (!GENRE_RAW.test(src)) return [];
   const found = new Set();
@@ -96,7 +97,27 @@ export function genreHits(src) {
   return [...found].sort();
 }
 
+/** The GE2/GE11 ledger check over `files` (`{ rel, src }`). `unlisted` holds
+ * the files that name a genre word outside `ledger` with their names; `stale`
+ * holds the ledger entries that name none any more (prune them: the ledger only
+ * shrinks). */
+export function genreFindings(files, ledger) {
+  const unlisted = [];
+  const named = new Set();
+  for (const { rel, src } of files) {
+    const names = genreHits(src);
+    if (!names.length) continue;
+    named.add(rel);
+    if (!ledger.has(rel)) unlisted.push(`${rel} (${names.join(", ")})`);
+  }
+  return { unlisted, stale: [...ledger].filter((rel) => !named.has(rel)) };
+}
+
 // ------------------------------------------------------------- determinism
+
+/** Files (relative to crates/) that define Fixed's own integer sin/cos; the
+ * scan cannot prove `self` is Fixed there, so they are exempt. */
+export const OWN_MATH_FILES = ["core/src/fixed.rs"];
 
 export const PLATFORM_MATH_METHODS = [
   "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",

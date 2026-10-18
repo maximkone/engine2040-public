@@ -26,7 +26,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine_assets::watcher::{WatchSettings, Watcher};
 use engine_audio::{AudioEngine, Bank, FeedTx, FightCue, FrameSource, Mixer};
@@ -41,7 +41,7 @@ use engine_game::capture;
 use engine_game::crash;
 use engine_game::feel_view::FeelView;
 use engine_game::fight_ring::{ring_prop_row, ring_wall_row};
-use engine_game::fighter_look::{look_down_deg, shot_for_frame, FighterLook, LookFrame};
+use engine_game::fighter_look::{look_down_deg, shot_for_frame, CamFollow, FighterLook, LookFrame};
 use engine_game::flow::{Flow, FlowEvent};
 use engine_game::input::{map_key, map_mouse};
 use engine_game::lock_on::nearest_rival_facing;
@@ -49,6 +49,7 @@ use engine_game::practice::PracticeSwap;
 use engine_game::reload::{settle_paths, HotReload};
 use engine_game::spear_window::{demo_input, SpearMode, SpearScene};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
+use engine_game::virt::{speed_label, step_speed, VirtualClock, KEY_RAMP_MS};
 use engine_game::window_audio_space::AudioSpace;
 use engine_game::windowed::{
     apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
@@ -57,9 +58,9 @@ use engine_game::windowed::{
     stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
     staged_session_config, surface_frame_action, StagedFighterDot, StagedTally, SurfaceFrameAction,
     TickAccumulator, WinArgs, WinError, WindowPad, FRAME_TIMES_CSV_HEADER, MSAA_ENV,
-    WINDOWED_SAMPLE_RATE, WINDOW_SIZE,
+    WINDOWED_SAMPLE_RATE, WINDOW_SIZE, WIN_FIXED_DT_S,
 };
-use engine_game::{App, GameConfig, TickOutcome, HUMAN_SLOT};
+use engine_game::{App, GameConfig, TickOutcome};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
 use engine_render::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter, WaitStats};
 
@@ -86,13 +87,40 @@ macro_rules! tell {
     }};
 }
 
+/// GS7: the discrete-GPU hint of NVIDIA Optimus, read by the driver from the exe's export table
+/// (PORT(glfw/glfw@master:src/win32_init.c)). `build.rs` keeps the export; `tools/ship.mjs`
+/// refuses a run where the Intel adapter still won.
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+#[expect(
+    unsafe_code,
+    reason = "the dGPU flag must be an exported symbol, the GLFW win32_init pattern"
+)]
+#[used]
+#[export_name = "NvOptimusEnablement"]
+static NV_OPTIMUS_ENABLEMENT: u32 = 1;
+/// GS7: the same hint for AMD switchable graphics.
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+#[expect(
+    unsafe_code,
+    reason = "the dGPU flag must be an exported symbol, the GLFW win32_init pattern"
+)]
+#[used]
+#[export_name = "AmdPowerXpressRequestHighPerformance"]
+static AMD_POWER_XPRESS_REQUEST_HIGH_PERFORMANCE: u32 = 1;
+
 mod arena_capture;
 mod arena_frame;
+mod arena_net;
 mod arena_winit;
 
 use arena_capture::capture::{
     frame_list, headless_fallback, run_chart_mode, setup_capture, split_chart_args, CaptureSlot,
 };
+
+/// A fresh fight camera follower, snapping to the next shot (a new window or a new bout).
+fn new_cam_follow() -> Result<CamFollow, WinError> {
+    CamFollow::new().map_err(|err| WinError::Render(format!("fight camera: {err}")))
+}
 
 /// Default session seed for windowed play.
 const DEFAULT_SEED: u64 = 2040;
@@ -117,7 +145,7 @@ const SPEAR_DEMO_FLAG: &str = "--spear-demo";
 /// walking toward the rival. Presentation and input only.
 const HOLD_FLAG: &str = "--hold";
 /// Keys the window answers, shown in the window title and printed at boot.
-const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | R rematch | T title | C free cam";
+const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | [ ] slow-mo speed | R rematch | T title | C free cam";
 /// Surface frames between look-probe rounds under `--look-probes`.
 const LOOK_PROBE_EVERY: u32 = 120;
 /// Surface frames between fog plus contact refreshes under `--look-probes`.
@@ -650,6 +678,13 @@ fn run(raw: &[String]) -> i32 {
     let (play, raw) = split_flag(&raw, PLAY_FLAG);
     let (spear, raw) = split_flag(&raw, SPEAR_FLAG);
     let (spear_demo, raw) = split_flag(&raw, SPEAR_DEMO_FLAG);
+    let (net, raw) = match arena_net::split_net_args(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
     let (view_brief, raw) = match split_view_brief(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -708,6 +743,23 @@ fn run(raw: &[String]) -> i32 {
             return 2;
         }
     };
+    // A network seat plays the match its code names (the guest) and owns the
+    // human slot: no staged script, no spear demo, no capture tape.
+    let (config, spear) = match net.as_ref().map(|net| net.session(config, spear)) {
+        None => (config, spear),
+        Some(_) if staged || spear_demo => {
+            tell!("arena: --host/--join play live; --staged-fight and --spear-demo do not mix");
+            return 2;
+        }
+        Some(Ok(session)) => session,
+        Some(Err(err)) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
+    if let Some(net) = net.as_ref().filter(|net| net.headless) {
+        return arena_net::run_headless(config, spear, net);
+    }
     // Backend pick is resolved (and the env override stuck) before any GPU
     // work on every path, so stdout always names the picked backend.
     let pick = engine_render::backend::apply_cli_override(args.backend);
@@ -766,6 +818,12 @@ fn run(raw: &[String]) -> i32 {
     if let Err(err) = app.enable_spear(spear, spear_demo) {
         tell!("arena: {SPEAR_FLAG}: {err}");
         return 2;
+    }
+    if let Some(net) = net.as_ref() {
+        if let Err(err) = arena_net::attach(&mut app, net) {
+            tell!("arena: {err}");
+            return 2;
+        }
     }
     say!("arena controls: {CONTROLS_LINE}");
     if no_break_look {
@@ -917,6 +975,11 @@ struct ArenaApp {
     /// The center crate: whole until a sword hit breaks it, then debris (RZ4w).
     /// Presentation only, never hashed; `None` after a refused build or upload.
     break_scene: Option<BreakScene>,
+    /// The fight camera's smoothing state (GP43): springs on yaw, distance and look point.
+    cam_follow: CamFollow,
+    /// Seconds the camera smooths over on this present: the wall time since the last present,
+    /// or one fixed tick under `--pause-at-tick` so a paused capture replays exactly.
+    cam_dt_s: f32,
     /// Cached fighter draws for the last skinned tick: items plus draws,
     /// reused when the pose tick is unchanged so the 8-fighter skin runs
     /// once per tick instead of once per present. Presentation only.
@@ -934,6 +997,8 @@ struct ArenaApp {
     /// the human slot's input; idle (no device, nothing held) changes nothing.
     pad: WindowPad,
     acc: TickAccumulator,
+    /// Virtual time (GP45): the slow-mo keys ease its speed, the accumulator sees its output.
+    clock: VirtualClock,
     /// Window shell state; Title, Paused and Result hold the accumulator
     /// at zero steps while Match runs the bout.
     flow: Flow,
@@ -1041,6 +1106,8 @@ struct ArenaApp {
     view_forward: Option<[f32; 2]>,
     /// The rival hint the window title carries now (`None` is the plain controls title).
     title_hint: Option<String>,
+    /// The network seat of `--host`/`--join`; `None` plays alone against AI.
+    net: Option<arena_net::NetPlay>,
 }
 
 /// Build the live session's match over the arena kit's physical placement:
@@ -1100,6 +1167,8 @@ impl ArenaApp {
             kit: KitReport::default(),
             fight_draws: 0,
             look: None,
+            cam_follow: new_cam_follow()?,
+            cam_dt_s: 0.0,
             break_scene,
             fighter_cache_tick: None,
             fighter_cache_fighters: 0,
@@ -1111,6 +1180,7 @@ impl ArenaApp {
             pressed: Vec::new(),
             pad: WindowPad::open(),
             acc: TickAccumulator::new(),
+            clock: VirtualClock::new(),
             flow: boot,
             pause_at_tick: None,
             step_mode: false,
@@ -1158,6 +1228,7 @@ impl ArenaApp {
             spear: SpearMode::default(),
             view_forward: None,
             title_hint: None,
+            net: None,
         };
         // Title boot: the stranger sees the start key before the bout, and
         // the accumulator holds at zero ticks until `FlowEvent::Start`.
@@ -1166,8 +1237,9 @@ impl ArenaApp {
         Ok(shell)
     }
 
+    /// The window's human: slot 0 alone or hosting, slot 1 as a network guest.
     fn human(&self) -> Result<FighterId, WinError> {
-        FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))
+        FighterId::new(self.app.human_slot()).ok_or(WinError::BadConfig("fighters"))
     }
 
     /// Turn the spear grapple on for `--spear` or `--spear-demo` (a fresh match with it and the
@@ -1234,6 +1306,9 @@ impl ArenaApp {
     /// outcome. The staged tally restarts too; the look keeps painting
     /// (presentation only, never hashed). Loud on a refused rebuild.
     fn reset_bout(&mut self) -> Result<(), WinError> {
+        if self.net_refuses_rematch() {
+            return Ok(());
+        }
         self.app = live_session(self.config, self.spear.on)?;
         self.break_scene = BreakScene::new(&self.app.live_match().config());
         self.spear.scene = self.spear.on.then(SpearScene::new);
@@ -1241,6 +1316,7 @@ impl ArenaApp {
         self.acc = TickAccumulator::new();
         self.tick_scratch = TickOutcome::default();
         self.feel = FeelView::new();
+        self.cam_follow = new_cam_follow()?;
         self.last_alpha = 0.0;
         self.result_announced = false;
         self.fighter_cache_tick = None;
@@ -1275,10 +1351,11 @@ impl ArenaApp {
             return 0;
         }
         // Hit-stop and slow-mo scale the wall time the accumulator sees, so
-        // the sim owes fewer ticks; what a tick computes never changes.
+        // the sim owes fewer ticks; what a tick computes never changes. The
+        // virtual clock (slow-mo keys) scales the feel flow's output again.
         let steps = self
             .acc
-            .push_elapsed_ms(self.feel.scale_elapsed_ms(elapsed_ms));
+            .push_elapsed_ms(self.clock.advance(self.feel.scale_elapsed_ms(elapsed_ms)));
         warmup_steps(steps, self.ticks_done, self.config.ticks, true)
     }
 
@@ -1335,6 +1412,12 @@ impl ArenaApp {
         let interval = self.last.elapsed();
         let elapsed_ms = interval.as_secs_f64() * 1000.0;
         self.last = Instant::now();
+        let cam_dt = if self.pause_at_tick.is_some() {
+            Duration::from_secs_f64(WIN_FIXED_DT_S)
+        } else {
+            interval
+        };
+        self.cam_dt_s = cam_dt.as_secs_f32();
         let steps = self.pause_steps(elapsed_ms);
         let sim_started = Instant::now();
         let human = match self.human() {
@@ -1343,6 +1426,9 @@ impl ArenaApp {
         };
         self.pad.poll();
         self.run_sim_ticks(steps, human);
+        if let Some(err) = self.net_fatal() {
+            return self.fail(event_loop, err, 2);
+        }
         self.feel.step();
         self.refresh_title_hint();
         if self.ticks_done >= self.config.ticks {
@@ -1390,14 +1476,16 @@ impl ArenaApp {
         }
         // `--frames N --exit` smoke leaves after N presented frames; a staged
         // fight leaves once the whole staged session ran.
-        let finished = arena_frame::exit_reached(
-            self.staged.is_some(),
-            self.ticks_done,
-            self.config.ticks,
-            self.frames_presented,
-            self.args.frames,
-            self.args.present_skip,
-        );
+        let finished = self.net_finished().unwrap_or_else(|| {
+            arena_frame::exit_reached(
+                self.staged.is_some(),
+                self.ticks_done,
+                self.config.ticks,
+                self.frames_presented,
+                self.args.frames,
+                self.args.present_skip,
+            )
+        });
         if self.args.exit && finished {
             self.finish_exit(event_loop);
         }
@@ -1714,6 +1802,7 @@ impl ArenaApp {
     /// bound (presentation only), else the staged boxes. Loud on refusal.
     fn push_fighters(&mut self, list: &mut DrawList) -> Result<(), WinError> {
         if let (Some(look), Some(presenter)) = (self.look.as_mut(), self.presenter.as_mut()) {
+            let base = list.camera.clone();
             let frame = LookFrame {
                 fighters: usize::from(self.config.fighters),
                 alpha: self.last_alpha,
@@ -1736,11 +1825,9 @@ impl ArenaApp {
                 frame.fighters,
             ) && !self.fighter_cache_items.is_empty()
             {
-                let base = list.camera.clone();
                 list.items.clear();
                 list.items.extend(self.fighter_cache_items.iter().cloned());
                 self.fight_draws = self.fighter_cache_draws;
-                list.camera = look.fight_camera(&base, frame.shot, frame.fighters, frame.frame);
             } else {
                 // Real bodies stand in their pit: the placeholder cube, the
                 // dressing boxes and the parade kit (laid across the fight
@@ -1765,6 +1852,11 @@ impl ArenaApp {
                 self.fighter_cache_draws = self.fight_draws;
                 self.fighter_cache_items.clear();
                 self.fighter_cache_items.extend(list.items.iter().cloned());
+            }
+            // One stateful fight camera for every present, cached bodies or fresh: the shot
+            // goes through the springs, so a cut or a whipping pair glides.
+            if self.fight_draws > 0 {
+                list.camera = look.aim_camera(&mut self.cam_follow, &base, &frame, self.cam_dt_s);
             }
             let in_view = look.fighters_in_view(&list.camera, frame.fighters);
             if framing_should_tally(self.ticks_done) {
@@ -1982,9 +2074,13 @@ impl ArenaApp {
     /// the text changes (about once per walked meter), never per frame. Off
     /// outside the running bout.
     fn refresh_title_hint(&mut self) {
-        let hint = (self.flow == Flow::Match)
-            .then(|| arena_frame::rival_hint(self.app.fighter_views(), HUMAN_SLOT))
+        let rival = (self.flow == Flow::Match)
+            .then(|| arena_frame::rival_hint(self.app.fighter_views(), self.app.human_slot()))
             .flatten();
+        let hint = match (speed_label(self.clock.speed_permille()), rival) {
+            (Some(speed), Some(rival)) => Some(format!("{speed} | {rival}")),
+            (speed, rival) => speed.or(rival),
+        };
         if hint == self.title_hint {
             return;
         }
@@ -2113,11 +2209,12 @@ impl ArenaApp {
                 // CT7 fighters (bodies re-hashed against their pins); a
                 // refusal is loud and keeps the staged boxes.
                 match FighterLook::load_and_stage(&mut presenter, self.config.half_extent_m) {
-                    Ok(look) => {
+                    Ok(mut look) => {
                         tell!(
                             "arena: fighter look bound {} CT7 bodies",
                             look.bundle_shas().len()
                         );
+                        look.set_hero(self.app.human_slot());
                         self.look = Some(look);
                         // The look poses from views: the loco pose cursor
                         // (two whole-prefix replays per tick) is unused.
@@ -2201,6 +2298,20 @@ impl ApplicationHandler for ArenaApp {
                     {
                         self.step_requested = true;
                     }
+                    // Slow-mo: [ and ] ease the virtual clock one preset slower or faster.
+                    if struck
+                        && matches!(
+                            code,
+                            winit::keyboard::KeyCode::BracketLeft
+                                | winit::keyboard::KeyCode::BracketRight
+                        )
+                    {
+                        let faster = code == winit::keyboard::KeyCode::BracketRight;
+                        let next = step_speed(self.clock.speed_permille(), faster);
+                        if let Err(err) = self.clock.set_speed(next, KEY_RAMP_MS) {
+                            tell!("arena: speed {next}: {err}");
+                        }
+                    }
                     // Free-fly: C toggles the presentation camera (F is the
                     // attack key); while it is on, WASD/arrows fly the eye one
                     // step per press. Never touches the sim (presentation only).
@@ -2264,6 +2375,7 @@ mod tests {
     use super::*;
     use engine_game::capture as cap;
     use engine_game::windowed::{check_exit_deadline, fight_mesh_key, hud_draw_list, SceneSelect};
+    use engine_game::HUMAN_SLOT;
     use engine_input::FighterInput;
 
     fn strings(args: &[&str]) -> Vec<String> {

@@ -49,7 +49,10 @@ const EVEN_MORALE: u16 = 500;
 /// Duel slots: footsies is 1v1.
 const DUEL_FIGHTERS: u8 = 2;
 /// Permille scale: integer-only denominator behind every share in this file.
-pub const PERMILLE: u32 = 1000;
+/// One owner: the UI health scale, never a second literal here.
+fn permille() -> u32 {
+    u32::from(engine_ui::PERMILLE_MAX)
+}
 /// Latency bar for the seeded fixture: p95 sits at or under this.
 /// Units: milliseconds of wall clock for one fixture `run`.
 pub const PQ1_P95_MAX_MS: u64 = 50;
@@ -249,13 +252,13 @@ pub struct BenchReport {
     pub draws: u32,
     /// Matches fighter 1 won outright.
     pub wins_b: u32,
-    /// `(2 * wins_a + draws) * 1000 / (2 * matches)`, fighter-0 perspective.
+    /// `(2 * wins_a + draws)` scaled to permille over `2 * matches`, fighter-0 perspective.
     pub rate_permille: u16,
     /// Matches where fighter 0 landed the kill.
     pub kills_a: u32,
     /// Matches with any kill.
     pub kills_total: u32,
-    /// `kills_a * 1000 / matches`.
+    /// `kills_a` scaled to permille over `matches`.
     pub kill_rate_permille: u16,
     /// Fighters tripped at [`STUCK_WINDOW_TICKS`]+ still ticks, summed.
     pub stuck_trips: u32,
@@ -481,9 +484,9 @@ pub fn run(config: &BenchConfig) -> Result<BenchReport, BenchError> {
         report.rows.push(row);
     }
     let matches = u32::from(report.matches != 0);
-    let rate_raw = (2 * report.wins_a + report.draws) * PERMILLE / (2 * report.matches.max(1));
+    let rate_raw = (2 * report.wins_a + report.draws) * permille() / (2 * report.matches.max(1));
     report.rate_permille = u16::try_from(rate_raw).unwrap_or(u16::MAX);
-    let kill_raw = report.kills_a * PERMILLE / report.matches.max(1);
+    let kill_raw = report.kills_a * permille() / report.matches.max(1);
     report.kill_rate_permille = u16::try_from(kill_raw).unwrap_or(u16::MAX);
     debug_assert!(matches == 1, "validate() guarantees matches >= 1");
     Ok(report)
@@ -960,12 +963,12 @@ mod tests {
             BENCH_GATE_MAGIC
         );
         assert_eq!(
-            bench_gate_flags_for_line("    let r = n * 1000 / m;"),
+            bench_gate_flags_for_line(&format!("    let r = n * {} / m;", permille())),
             BENCH_GATE_MAGIC
         );
         // ... while named bars, integer tick math and prose pass.
         assert_eq!(
-            bench_gate_flags_for_line("pub const PERMILLE: u32 = 1000;"),
+            bench_gate_flags_for_line(&format!("const SCALE: u32 = {};", permille())),
             0
         );
         assert_eq!(
@@ -1030,8 +1033,9 @@ mod tests {
         "f32", "f64", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt", "cbrt", "powf",
         "powi", "exp", "exp2", "ln", "log", "log2", "log10", "hypot",
     ];
-    /// Methodology bars that must stay behind named `const` bars.
-    const BENCH_MAGIC_TOKENS: &[&str] = &["50", "350", "400", "600", "1000"];
+    /// Methodology bars that must stay behind named `const` bars (the permille
+    /// scale is checked beside them by value, see `bench_gate_flags_for_line`).
+    const BENCH_MAGIC_TOKENS: &[&str] = &["50", "350", "400", "600"];
     /// Tick-path functions the gate scans; config and report prose stay out.
     const BENCH_TICK_FNS: &[&str] = &[
         "p95_ms_sorted",
@@ -1060,7 +1064,8 @@ mod tests {
             if BENCH_FLOAT_TOKENS.contains(&token) {
                 flags |= BENCH_GATE_FLOAT;
             }
-            if magic_live && BENCH_MAGIC_TOKENS.contains(&token) {
+            let scale = token == permille().to_string();
+            if magic_live && (scale || BENCH_MAGIC_TOKENS.contains(&token)) {
                 flags |= BENCH_GATE_MAGIC;
             }
         }

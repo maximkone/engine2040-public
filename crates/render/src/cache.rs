@@ -608,12 +608,12 @@ impl PipelineCache {
     }
 
     /// Complete the in-flight compile for this key. `Ok` bytes publish as
-    /// the new last-good; `Err` text (or an invalid blob) keeps the old
-    /// blob and appends a capped diagnostic.
+    /// the new last-good; an `Err` (or an invalid blob) keeps the old blob
+    /// and appends a capped diagnostic holding the error's text.
     pub fn resolve_compile(
         &mut self,
         key: &PipelineKey,
-        result: Result<Vec<u8>, String>,
+        result: Result<Vec<u8>, Box<dyn std::error::Error>>,
     ) -> ResolveOutcome {
         self.pending.remove(key);
         match result {
@@ -627,8 +627,8 @@ impl PipelineCache {
                     }
                 }
             }
-            Err(message) => {
-                self.push_diagnostic(key, message);
+            Err(error) => {
+                self.push_diagnostic(key, error.to_string());
                 self.serve_old(key)
             }
         }
@@ -724,6 +724,12 @@ impl PipelineCache {
                 summary.hits += 1;
                 continue;
             }
+            if self.entries.len() >= MAX_ENTRIES {
+                // A full map cannot store the blob: refuse before paying the compile.
+                self.push_diagnostic(key, format!("cache full at {MAX_ENTRIES} entries"));
+                summary.failed += 1;
+                continue;
+            }
             let Some(_slot) = self.try_submit(key, gate) else {
                 self.push_diagnostic(key, "gate full: async submit refused".to_string());
                 summary.failed += 1;
@@ -737,7 +743,7 @@ impl PipelineCache {
                     }
                 },
                 Err(err) => {
-                    self.resolve_compile(key, Err(err.to_string()));
+                    self.resolve_compile(key, Err(err.into()));
                     summary.failed += 1;
                 }
             }
@@ -772,16 +778,14 @@ impl PipelineCache {
     /// key order, so identical key sets give identical caches. Errors: typed
     /// [`CacheError`] end to end (no `String` seam); failed keys record a
     /// capped diagnostic and count as failed without touching other entries.
+    /// Once the map holds [`MAX_ENTRIES`] blobs every further new key fails
+    /// without running `compile`.
     /// Load-path only: allocation happens here, never per frame.
     pub fn warm_keys(
         &mut self,
         keys: &[PipelineKey],
         compile: impl Fn(&PipelineKey) -> Result<Vec<u8>, CacheError>,
     ) -> WarmSummary {
-        debug_assert!(
-            keys.len() <= MAX_ENTRIES,
-            "warming at most the map cap in one load"
-        );
         self.warm_keys_for(keys, Backend::Vulkan, compile)
     }
 
@@ -1225,7 +1229,7 @@ mod tests {
         let mut cache = PipelineCache::new();
         cache.insert(key_a(), vec![1, 2, 3]).expect("insert");
         assert!(cache.submit_compile(&key_a()));
-        let outcome = cache.resolve_compile(&key_a(), Err("driver flaked".to_string()));
+        let outcome = cache.resolve_compile(&key_a(), Err("driver flaked".into()));
         assert_eq!(outcome, ResolveOutcome::KeptLastGood { bytes: 3 });
         assert_eq!(cache.get(&key_a()), Some(&[1, 2, 3][..]));
         assert_eq!(cache.poll_ready(&key_a()), PollState::Ready { bytes: 3 });
@@ -1238,7 +1242,7 @@ mod tests {
     fn failed_first_compile_reports_missing() {
         let mut cache = PipelineCache::new();
         assert!(cache.submit_compile(&key_b()));
-        let outcome = cache.resolve_compile(&key_b(), Err("no backend".to_string()));
+        let outcome = cache.resolve_compile(&key_b(), Err("no backend".into()));
         assert_eq!(outcome, ResolveOutcome::Failed);
         assert_eq!(cache.get(&key_b()), None);
         assert_eq!(cache.poll_ready(&key_b()), PollState::Missing);
@@ -1331,7 +1335,7 @@ mod tests {
             assert!(cache.submit_compile(&key));
             let message = format!("failure number {i} with extra detail");
             assert_eq!(
-                cache.resolve_compile(&key, Err(message)),
+                cache.resolve_compile(&key, Err(message.into())),
                 ResolveOutcome::Failed
             );
         }
@@ -1401,6 +1405,162 @@ mod tests {
         assert_eq!(bad.failed, 1);
         assert_eq!(cold.diagnostic_count(), 1);
         assert!(!cold.walk_ready(&keys[..1]));
+    }
+
+    /// RA17 storm set: every manifest variant (32, the gate) times 128 shader
+    /// identities is 4096 keys, exactly [`MAX_ENTRIES`].
+    fn storm_keys() -> Vec<PipelineKey> {
+        use crate::variants::{VariantManifest, MAX_VARIANTS};
+        let mut manifest = VariantManifest::new();
+        for v in 0..MAX_VARIANTS {
+            let flag = format!("V{v}");
+            manifest
+                .add_variant(&format!("storm/v{v:02}"), &[(flag.as_str(), "1")])
+                .expect("32 variants fit the gate");
+        }
+        let mut keys = Vec::with_capacity(MAX_ENTRIES);
+        for name in manifest.names() {
+            let defines: Vec<(&str, &str)> = manifest
+                .get(name)
+                .expect("listed variant")
+                .defines
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            for shader in 0..MAX_ENTRIES / MAX_VARIANTS {
+                keys.push(PipelineKey::new(
+                    format!("storm-shader-{shader}").as_bytes(),
+                    &defines,
+                    7,
+                ));
+            }
+        }
+        keys
+    }
+
+    fn storm_blob(key: &PipelineKey) -> Vec<u8> {
+        key.shader_hash.to_le_bytes().to_vec()
+    }
+
+    #[test]
+    fn variant_storm_gate_stops_at_32_variants_and_4096_entries() {
+        use crate::variants::{VariantError, VariantManifest, MAX_VARIANTS};
+        let mut manifest = VariantManifest::new();
+        for v in 0..MAX_VARIANTS {
+            manifest
+                .add_variant(&format!("storm/v{v:02}"), &[])
+                .expect("32 variants fit the gate");
+        }
+        assert_eq!(
+            manifest.add_variant("storm/extra", &[]),
+            Err(VariantError::OverCap {
+                variant: "storm/extra".to_string(),
+                cap: MAX_VARIANTS
+            })
+        );
+
+        let keys = storm_keys();
+        assert_eq!(keys.len(), MAX_ENTRIES);
+        let distinct: BTreeSet<&PipelineKey> = keys.iter().collect();
+        assert_eq!(distinct.len(), MAX_ENTRIES);
+
+        // One load of 4097 keys: the first 4096 compile, the 4097th is refused
+        // before its compile runs (it used to trip a debug assert).
+        let mut over = keys.clone();
+        over.push(PipelineKey::new(b"storm-shader-over", &[("V0", "1")], 7));
+        let compiles = Cell::new(0usize);
+        let mut cache = PipelineCache::new();
+        let summary = cache.warm_keys(&over, |key| {
+            compiles.set(compiles.get() + 1);
+            Ok(storm_blob(key))
+        });
+        assert_eq!(
+            summary,
+            WarmSummary {
+                compiled: MAX_ENTRIES,
+                hits: 0,
+                failed: 1
+            }
+        );
+        assert_eq!((compiles.get(), cache.len()), (MAX_ENTRIES, MAX_ENTRIES));
+        assert_eq!(cache.diagnostic_count(), 1);
+        assert!(cache.diagnostics()[0].message().contains("cache full"));
+        assert!(cache.walk_ready(&keys));
+        assert!(!cache.contains(&over[MAX_ENTRIES]));
+    }
+
+    #[test]
+    fn variant_storm_second_run_compiles_zero_even_after_a_restart() {
+        let keys = storm_keys();
+        let compiles = Cell::new(0usize);
+        let compile = |key: &PipelineKey| {
+            compiles.set(compiles.get() + 1);
+            Ok(storm_blob(key))
+        };
+        let mut cache = PipelineCache::new();
+        assert_eq!(cache.warm_keys(&keys, compile).compiled, MAX_ENTRIES);
+        assert_eq!(compiles.get(), MAX_ENTRIES);
+
+        // Second run in the same process: all hits, no compile.
+        let again = cache.warm_keys(&keys, compile);
+        assert_eq!(
+            again,
+            WarmSummary {
+                compiled: 0,
+                hits: MAX_ENTRIES,
+                failed: 0
+            }
+        );
+        assert_eq!(compiles.get(), MAX_ENTRIES);
+
+        // Second run after a save and load: still no compile, no counted build.
+        let bytes = cache.save_to_bytes().expect("save 4096 entries");
+        let mut restarted = PipelineCache::load_from_bytes(&bytes).expect("load 4096 entries");
+        assert_eq!(restarted.len(), MAX_ENTRIES);
+        assert_eq!(restarted.save_to_bytes().expect("save again"), bytes);
+        let warm = restarted.warm_keys(&keys, compile);
+        assert_eq!((warm.compiled, warm.hits, warm.failed), (0, MAX_ENTRIES, 0));
+        assert_eq!(compiles.get(), MAX_ENTRIES);
+        assert_eq!(restarted.creation_total(), 0);
+        assert!(restarted.walk_ready(&keys));
+    }
+
+    #[test]
+    fn variant_storm_failed_refreshes_keep_every_last_good_blob() {
+        let keys = storm_keys();
+        let mut cache = PipelineCache::new();
+        let first = cache.warm_keys(&keys, |key| Ok(storm_blob(key)));
+        assert_eq!(first.compiled, MAX_ENTRIES);
+        let before = cache.save_to_bytes().expect("save before the storm");
+
+        // A driver update refreshes 200 keys and every compile fails (half
+        // with an error, half with an empty blob): each key keeps serving.
+        for (i, key) in keys.iter().take(200).enumerate() {
+            assert!(cache.submit_compile(key));
+            let result = if i % 2 == 0 {
+                Err("driver flaked".into())
+            } else {
+                Ok(Vec::new())
+            };
+            assert_eq!(
+                cache.resolve_compile(key, result),
+                ResolveOutcome::KeptLastGood { bytes: 8 }
+            );
+        }
+        assert_eq!(cache.save_to_bytes().expect("save after the storm"), before);
+        assert_eq!(cache.diagnostic_count(), MAX_DIAGNOSTICS);
+        assert_eq!(cache.pending_count(), 0);
+        assert!(cache.walk_ready(&keys));
+
+        // A good refresh then replaces just that blob.
+        assert!(cache.submit_compile(&keys[0]));
+        assert_eq!(
+            cache.resolve_compile(&keys[0], Ok(vec![1, 2, 3])),
+            ResolveOutcome::Compiled { bytes: 3 }
+        );
+        assert_eq!(cache.get(&keys[0]), Some(&[1, 2, 3][..]));
+        assert_eq!(cache.get(&keys[1]), Some(storm_blob(&keys[1]).as_slice()));
+        assert_eq!(cache.len(), MAX_ENTRIES);
     }
 
     #[test]

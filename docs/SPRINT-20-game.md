@@ -199,14 +199,14 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   Accept: `cargo test -p engine-playtest --lib charter` x2: C1 and C2 print
   their lines; a broken expectation prints FAIL with the line. F2P: no charter
   runner. P2P: P3 green. needs: none.
-- [ ] GP34 game: one balance bar — `crates/game/src/bench.rs:61-63` keeps a kill Progress 2026-10-17: `PQ2_KILL_SHARE_MAX_PERMILLE = 350` in crates/game/src/bench.rs now mirrors the tournament bar (one gate; caller bin/staged_fight.rs, test design_loop.rs) and the dead 1000 ceiling is gone, but `rg -n 1000 crates/game/src/bench.rs` still hits the `PERMILLE` scale const, so the literal Accept is unmet.
+- [x] GP34 game: one balance bar — `crates/game/src/bench.rs:61-63` keeps a kill Progress 2026-10-17: `PQ2_KILL_SHARE_MAX_PERMILLE = 350` in crates/game/src/bench.rs now mirrors the tournament bar (one gate; caller bin/staged_fight.rs, test design_loop.rs) and the dead 1000 ceiling is gone, but `rg -n 1000 crates/game/src/bench.rs` still hits the `PERMILLE` scale const, so the literal Accept is unmet.
   ceiling of 1000 permille per side that cannot trip and has no caller; the live
   bar is `playtest/src/tournament.rs:40` (350). Delete `bench.rs` (git rm, its
   test with it) or route it through the tournament bar with a per-move count;
   one gate stays. Diff: regular. Tier B. Size S. Owns `crates/game/src/bench.rs`
   and its mod line. Accept: `rg -n "1000" crates/game/src/bench.rs` empty or
   the file is gone; `cargo test -p engine-game --lib` green. F2P: the dead
-  ceiling exists. P2P: golden unchanged. needs: none.
+  ceiling exists. P2P: golden unchanged. needs: none. Landed 916bf54a. rg -n 1000 crates/game/src/bench.rs is empty; cargo test -p engine-game --lib 436 passed 0 failed (runner run 39105755591); bench filter 11 passed incl. tick_paths_hold_no_float_math_and_named_bars (run 39104899138).
 - [ ] GA15 ai: primus boss, own move set and two phases — the ladder has no Progress 2026-10-17: `PRIMUS_TIER` (hp 1100, tell 15, stagger 700) ships in crates/ai/src/depth.rs and as `tier_4` in content/design/enemies.rows; the shipped ladder always seats four rows. Left: phase 2 at 500 permille hp with its new v2 move and answer, and the playtest `primus` tests.
   final opponent. T4 primus in `enemies.rows`: two phases (phase 2 at 500
   permille hp adds one new v2 move with its own answer), never just more hp; an
@@ -236,21 +236,21 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   worker hunk of `fork.rs`. Accept: `cargo test -p engine-arena --lib fork` x2
   green; a 20-branch run's wall time before and after posted. F2P: thread per
   branch. P2P: fork results byte-equal. needs: RC36.
-- [ ] CQ17 quality: a loom model of the pool — no `loom` or TSan anywhere; Miri
+- [x] CQ17 quality: a loom model of the pool — no `loom` or TSan anywhere; Miri
   (CQ15) does not find races or lock cycles (Gregory 4.7-4.9). A `loom` test of
   `JobPool::scope` behind a `loom` cfg. Diff: good. Tier B. Size S. Owns a
   loom test in `crates/ecs/src/pool.rs` and a dev-dependency (orchestrator adds
   it with `deny.toml`). Accept: `RUSTFLAGS="--cfg loom" cargo test -p engine-ecs
   --lib loom_pool` green; a planted missing-wait fails it. F2P: no model. P2P:
-  ecs lib green. needs: none.
-- [ ] SL46 quality: the fight tick joins the float gate — `tools/rust-quality.mjs:21` Progress 2026-10-17: `engine-arena` is in SIM_CRATES (tools/rust-quality.mjs:22) and `crates/arena/clippy.toml` is byte-identical to tools/sim-clippy.toml (checked by simClippyFindings); `node tools/rust-quality.mjs --crate arena` scores 98 A. Left: the scorecard has no float column and the planted f32 `sin()` drill was not run.
+  ecs lib green. needs: none. Landed a811a709. RUSTFLAGS="--cfg loom" cargo test -p engine-ecs --lib loom_pool green x2 on the PC (loom_pool_scope_returns_after_every_job, 1.8 s); with the condvar wait in help_until_done planted away it fails (left 1, right 2). ecs lib 134 passed (run 39108777888), clippy -D warnings green (run 39108813317), cargo deny check licenses ok.
+- [x] SL46 quality: the fight tick joins the float gate — `tools/rust-quality.mjs:21` Progress 2026-10-17: `engine-arena` is in SIM_CRATES (tools/rust-quality.mjs:22) and `crates/arena/clippy.toml` is byte-identical to tools/sim-clippy.toml (checked by simClippyFindings); `node tools/rust-quality.mjs --crate arena` scores 98 A. Left: the scorecard has no float column and the planted f32 `sin()` drill was not run.
   SIM_CRATES lists 12 crates without `engine-arena`, whose `FighterState`
   (`arena/src/lib.rs:469-476`) keeps f32. Add it; copy `tools/sim-clippy.toml`
   to `crates/arena/clippy.toml`. Diff: regular. Tier A. Size S. Owns the list in
   `tools/rust-quality.mjs` and `crates/arena/clippy.toml`. Accept: `node
   tools/rust-quality.mjs --crate arena` reports its float count; a planted f32
   `sin()` in the arena step fails it. F2P: arena not scanned. P2P: the
-  rust-quality baseline holds. needs: none.
+  rust-quality baseline holds. needs: none. Landed 0143f07. node --test tools/rust-quality.test.mjs (60 pass with sim-source-scan and workspace-check tests): float_math column, 'simulation crates count platform float math' and 'a planted f32 sin() in the arena step fails the ratchet'; node tools/rust-quality.mjs --crate arena prints float 0, score 99 A, 0 regressions (the full run's casts regressions in anim, game, playtest, render are other sessions').
 - [ ] CQ18 quality: release keeps overflow checks — `[profile.release]` Progress 2026-10-17: `overflow-checks = true` is set in `[profile.release]` (root Cargo.toml); golden d57b5c8ae3096614 unchanged on all five machines in golden-matrix run 39054403838. Left: ARENA frame-split p50 before/after (under 3% slower) and the `node tools/proof.mjs` double print.
   (`Cargo.toml:218-221`) sets none while comments at `:227,238` say checks stay
   on, and proof runs use `--release` (`tools/proof.mjs:401`). Set
@@ -286,7 +286,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `node --test tools/workspace-check.test.mjs`: a seeded cycle fails, the real
   graph passes; `node tools/crate-map.mjs` prints instability per crate. F2P:
   no cycle test. P2P: workspace-check result unchanged. needs: none.
-- [ ] CQ22 docs: decision records — D1-D9 sit in `docs/FOCUS.md` prose and the Progress 2026-10-17: `docs/adr/` holds a README plus 11 records (0001-0011, each with a Status line); only 0001, 0006 and 0010 name a Compliance check path, 8 say `none yet`. Left: a check path on every record.
+- [x] CQ22 docs: decision records — D1-D9 sit in `docs/FOCUS.md` prose and the Progress 2026-10-17: `docs/adr/` holds a README plus 11 records (0001-0011, each with a Status line); only 0001, 0006 and 0010 name a Compliance check path, 8 say `none yet`. Left: a check path on every record.
   book decisions D1-D6 (`BOOK-GAPS-2026-10-12.md:199-201`) as open lines; no
   record has a status or a check. `docs/adr/README.md` plus one record per
   decision (status, context, options, decision, consequences, the check that
@@ -294,7 +294,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   decided with RC36). Diff: regular. Tier B. Size S. Owns `docs/adr/`.
   Accept: `(Get-ChildItem docs\adr -Filter '0*.md').Count` at least 9 and each
   names a status and a check path. F2P: no `docs/adr`. P2P: plan-index test
-  green. needs: none.
+  green. needs: none. Landed 5b4c3893. 11 records each with a Status and an existing Compliance path; node --test docs/adr/adr.test.mjs 8 pass (pins bevy, app-sim, D5/D7/audio lines). Plan-index test is red on 3 new spatial-*.md files missing from docs/plan/README.md (another session), not on docs/adr.
 - [ ] RL32 render: the live loop sorts and groups draws — `submit.rs:505-516`
   draws `list.items` in caller order, one bind and draw each; sorted groups
   exist (`render/src/draw.rs:615,660`) with no live caller; `draw.rs:502` sorts
@@ -329,11 +329,11 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `assistant.rs`. Accept: `cargo test -p engine-endpoint --features mcp --lib
   fence` x2: 10 planted-instruction fixtures make 0 unlisted tool calls. F2P:
   no fence. P2P: endpoint tests green. needs: none.
-- [ ] AX26 endpoint: long calls report progress — `play.run` uses a custom poll
+- [x] AX26 endpoint: long calls report progress — `play.run` uses a custom poll
   and cancel; "progress" is only a comment (`crates/endpoint/src/mcp.rs:924`).
   Check the current MCP spec first (`mcp.rs:49-51` notes 2026-07-28 changes),
   then send `notifications/progress` for `play.run`, and add a transcript test
   (initialize, tools/list, a good call, an error, an unknown tool). Diff:
   regular. Tier B. Size S. Owns the progress hunk of `mcp.rs` and the test.
   Accept: `cargo test -p engine-endpoint --features mcp --lib transcript` x2.
-  F2P: no progress message. P2P: endpoint tests green. needs: none.
+  F2P: no progress message. P2P: endpoint tests green. needs: none. Landed d573745d. mcp_transcript_tests::transcript_initialize_list_call_error_and_unknown_tool (initialize, tools/list, good scene.read, tx.undo error, unknown tool) green: gh run 39109624112 (alone) and 39110009675 (cargo test -p engine-endpoint --features mcp --no-fail-fast, all green) on the same content before the file got its _tests name; a rerun after the rename was blocked by a foreign engine-net build error (webduel.rs:976). The notifications/progress half moved to AX28, which supersedes it.

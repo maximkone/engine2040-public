@@ -23,6 +23,12 @@ pub trait FrameSource: Send + 'static {
     /// Fill `out` with interleaved `LRLR...` frames. Runs on the audio
     /// thread: it must neither block nor allocate.
     fn render_stereo_into(&mut self, out: &mut [f32]);
+
+    /// The device callback measured a hit-to-speaker latency past the UX
+    /// budget: start one-shot cues `frames` into their clip from now on, so
+    /// the sound reaches the speaker that much sooner (`0` is on time).
+    /// Sources that do not start cues ignore it.
+    fn set_early_frames(&mut self, _frames: u32) {}
 }
 
 /// Cue mixer plus its command feed; see the module docs.
@@ -34,6 +40,7 @@ pub struct AudioEngine {
     music: Option<MusicBed>,
     applied: u64,
     last_tick: u32,
+    early_frames: u32,
 }
 
 impl AudioEngine {
@@ -63,6 +70,7 @@ impl AudioEngine {
             music,
             applied: 0,
             last_tick: 0,
+            early_frames: 0,
         };
         (tx, engine)
     }
@@ -94,8 +102,12 @@ impl AudioEngine {
                     return;
                 };
                 let variant = picker.pick(cue.variants.len());
-                self.mixer
+                let voice = self
+                    .mixer
                     .play_cue(play.cue, cue, variant, play.gain, play.pos_cm);
+                if let Some(id) = voice.filter(|_| self.early_frames > 0 && !cue.looped) {
+                    self.mixer.mixer_mut().skip_voice(id, self.early_frames);
+                }
             }
             Command::Listener {
                 pos_cm, yaw_deg, ..
@@ -136,6 +148,10 @@ impl AudioEngine {
 }
 
 impl FrameSource for AudioEngine {
+    fn set_early_frames(&mut self, frames: u32) {
+        self.early_frames = frames;
+    }
+
     fn render_stereo_into(&mut self, out: &mut [f32]) {
         self.drain();
         // Render in runs that end on the music's bar lines, so a level switch
@@ -234,6 +250,22 @@ mod tests {
         let stats = tx.stats();
         assert_eq!((stats.applied, stats.last_applied_tick), (3, 3));
         assert!(out.iter().all(|&s| s > 0.0), "two flat voices sounding");
+    }
+
+    #[test]
+    fn a_late_device_starts_one_shot_cues_early() {
+        // The flat clip is 64 frames of 0.25: count the frames it sounds.
+        let sounding = |early: u32| {
+            let (mut tx, mut engine) = AudioEngine::with_feed(test_bank(), 16, RATE, 1);
+            engine.set_early_frames(early);
+            tx.play(0, "flat", 1.0, None).expect("room");
+            let mut out = vec![0.0f32; 2 * 128];
+            engine.render_stereo_into(&mut out);
+            out.chunks_exact(2).filter(|f| f[0] > 0.0).count()
+        };
+        assert_eq!(sounding(0), 64, "on time: the whole clip");
+        assert_eq!(sounding(10), 54, "10 frames early: the head is skipped");
+        assert_eq!(sounding(500), 32, "never more than half the clip");
     }
 
     #[test]

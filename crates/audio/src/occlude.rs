@@ -1,8 +1,12 @@
-//! occlude: wall-muffle gains per voice per tick.
+//! occlude: wall-muffle gains and lowpass cutoffs per voice per tick.
 //!
 //! Owner: audio lane; consumer: the game arena mix via wall segments (the
 //! occluder set is per-tick input data). Units: integer
-//! cm for positions, Q16 (ONE = 65536) for gains, ticks at 60 Hz for time.
+//! cm for positions, Q16 (ONE = 65536) for gains, Hz for cutoffs, ticks at
+//! 60 Hz for time. A wall passes less level and darkens the sound: the cutoff
+//! is the lowest of the crossed walls' material cutoffs and the air cutoff
+//! of the path length ([`Muffle`]); the mixer applies it as a one-pole
+//! lowpass ([`crate::Mixer::set_voice_lowpass`]).
 //! Determinism: integer-only query plus slew; same inputs give the same gain
 //! curve (presentation only, never hashed; golden d57b5c8ae3096614 stands).
 //! Errors: typed OccludeError; the per-tick path clamps, setters refuse.
@@ -26,6 +30,17 @@ pub const GAIN_ONE: i32 = 65_536;
 pub const ATTACK_STEP: i32 = GAIN_ONE * (TICK_US as i32) / (ATTACK_MS as i32 * 1000);
 /// Gain rise per tick: full swing in ceil(65536 / 3640) = 19 ticks (~300 ms).
 pub const RELEASE_STEP: i32 = GAIN_ONE * (TICK_US as i32) / (RELEASE_MS as i32 * 1000);
+/// Cutoff of open air at the ears, Hz: at or above it the mixer filter is
+/// bypassed (the top of the audible band).
+pub const OPEN_CUTOFF_HZ: u32 = 20_000;
+/// Air absorption: cutoff lost per meter of path, Hz.
+pub const AIR_LOSS_HZ_PER_M: u32 = 150;
+/// Lowest cutoff air alone leaves, Hz (a path of about 107 m).
+pub const AIR_FLOOR_HZ: u32 = 4_000;
+/// Cutoff fall per tick: a full swing in 8 ticks, same as the gain attack.
+pub const CUTOFF_FALL_STEP_HZ: u32 = OPEN_CUTOFF_HZ * TICK_US / (ATTACK_MS * 1000);
+/// Cutoff rise per tick: a full swing in 19 ticks, same as the gain release.
+pub const CUTOFF_RISE_STEP_HZ: u32 = OPEN_CUTOFF_HZ * TICK_US / (RELEASE_MS * 1000);
 /// Per-voice per-tick budget in ms at 60 Hz, game thread, release profile;
 /// the timing probe runs under `--perf`, never by default.
 pub const BUDGET_MS_PER_VOICE: f32 = 0.1;
@@ -128,6 +143,27 @@ pub fn absorption_q16(material: Material) -> i32 {
     }
 }
 
+/// Lowpass cutoff in Hz a wall of `material` leaves: hard walls keep less of
+/// the high band than soft ones keep of the low band (stone 1.5 kHz, cloth
+/// 700 Hz; with the gain chart a stone wall drops 4 kHz by about 20 dB).
+pub fn cutoff_hz(material: Material) -> u32 {
+    match material {
+        Material::Sand => 8_000,
+        Material::Wood => 4_000,
+        Material::Stone => 1_500,
+        Material::Cloth => 700,
+    }
+}
+
+/// Cutoff in Hz that air alone leaves over a path of `distance_cm`.
+pub fn air_cutoff_hz(distance_cm: u64) -> u32 {
+    let loss = (distance_cm / 100).saturating_mul(u64::from(AIR_LOSS_HZ_PER_M));
+    match u32::try_from(loss) {
+        Ok(loss) => OPEN_CUTOFF_HZ.saturating_sub(loss).max(AIR_FLOOR_HZ),
+        Err(_) => AIR_FLOOR_HZ,
+    }
+}
+
 /// Q16 share a material passes: `GAIN_ONE - absorption`.
 pub fn transmission_q16(material: Material) -> i32 {
     GAIN_ONE - absorption_q16(material)
@@ -213,12 +249,52 @@ pub fn target_gain_q16(
     listener_cm: [i32; 2],
     walls: &[Wall],
 ) -> Result<i32, OccludeError> {
+    Ok(target_muffle(voice_cm, listener_cm, walls)?.gain_q16)
+}
+
+/// What the path from a voice to the listener leaves of it: level and
+/// brightness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Muffle {
+    /// Level in Q16 (`GAIN_ONE` open).
+    pub gain_q16: i32,
+    /// Lowpass cutoff in Hz ([`OPEN_CUTOFF_HZ`] open).
+    pub cutoff_hz: u32,
+}
+
+impl Muffle {
+    /// Nothing between voice and ears.
+    pub const OPEN: Self = Self {
+        gain_q16: GAIN_ONE,
+        cutoff_hz: OPEN_CUTOFF_HZ,
+    };
+}
+
+/// [`target_gain_q16`] plus the cutoff: the gain is the same product, the
+/// cutoff the lowest of the air cutoff for the path length and the cutoff of
+/// every crossed wall (the darkest wall wins; walls do not stack their
+/// filters). Same errors and the same degenerate cases as the gain query.
+///
+/// Errors: [`OccludeError::TooManyWalls`] when the set is larger than
+/// [`MAX_WALLS_PER_QUERY`].
+pub fn target_muffle(
+    voice_cm: [i32; 2],
+    listener_cm: [i32; 2],
+    walls: &[Wall],
+) -> Result<Muffle, OccludeError> {
     if walls.len() > MAX_WALLS_PER_QUERY {
         return Err(OccludeError::TooManyWalls { got: walls.len() });
     }
     if voice_cm == listener_cm {
-        return Ok(GAIN_ONE);
+        return Ok(Muffle::OPEN);
     }
+    let dx = i64::from(voice_cm[0]) - i64::from(listener_cm[0]);
+    let dz = i64::from(voice_cm[1]) - i64::from(listener_cm[1]);
+    // Saturating: a path past the i64 square (billions of cm) is far beyond
+    // the air floor anyway.
+    let squared = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
+    let distance_cm = crate::isqrt(squared.unsigned_abs());
+    let mut cutoff = air_cutoff_hz(distance_cm);
     let mut gain = GAIN_ONE;
     for wall in walls {
         if wall.ax_cm == wall.bx_cm && wall.az_cm == wall.bz_cm {
@@ -231,22 +307,27 @@ pub fn target_gain_q16(
             [wall.bx_cm, wall.bz_cm],
         ) {
             gain = apply_wall(gain, wall.material);
+            cutoff = cutoff.min(cutoff_hz(wall.material));
             if gain == 0 {
                 break;
             }
         }
     }
-    Ok(gain)
+    Ok(Muffle {
+        gain_q16: gain,
+        cutoff_hz: cutoff,
+    })
 }
 
-/// Per-voice muffle state: the query target plus the smoothed gain the
-/// mixer reads. Build one per voice on the game thread, call [`update`](Self::update)
-/// once per tick, hand [`current_gain`](Self::current_gain) to the mixer.
-/// Borrows the wall slice and keeps scalars only, so the steady-state tick
-/// uses no heap.
+/// Per-voice muffle state: the query target plus the smoothed gain and
+/// cutoff the mixer reads. Build one per voice on the game thread, call
+/// [`update_muffle`](Self::update_muffle) once per tick, hand the result to
+/// the mixer. Borrows the wall slice and keeps scalars only, so the
+/// steady-state tick uses no heap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoiceOcclusion {
     current_q16: i32,
+    cutoff_hz: u32,
 }
 
 impl VoiceOcclusion {
@@ -254,7 +335,13 @@ impl VoiceOcclusion {
     pub fn new_open() -> Self {
         Self {
             current_q16: GAIN_ONE,
+            cutoff_hz: OPEN_CUTOFF_HZ,
         }
+    }
+
+    /// Smoothed lowpass cutoff in Hz.
+    pub fn current_cutoff_hz(&self) -> u32 {
+        self.cutoff_hz
     }
 
     /// Smoothed gain in Q16.
@@ -282,6 +369,7 @@ impl VoiceOcclusion {
     /// Back to fully open without touching the heap.
     pub fn reset_open(&mut self) {
         self.current_q16 = GAIN_ONE;
+        self.cutoff_hz = OPEN_CUTOFF_HZ;
     }
 
     /// Slew toward `target_q16` one tick: falling uses [`ATTACK_STEP`]
@@ -309,8 +397,37 @@ impl VoiceOcclusion {
         listener_cm: [i32; 2],
         walls: &[Wall],
     ) -> Result<i32, OccludeError> {
-        let target = target_gain_q16(voice_cm, listener_cm, walls)?;
-        Ok(self.tick(target))
+        Ok(self.update_muffle(voice_cm, listener_cm, walls)?.gain_q16)
+    }
+
+    /// [`update`](Self::update) with the cutoff: the gain slews as there, the
+    /// cutoff falls by [`CUTOFF_FALL_STEP_HZ`] and rises by
+    /// [`CUTOFF_RISE_STEP_HZ`] per tick and arrives exactly. Returns the
+    /// smoothed pair. Borrows only; uses no heap.
+    ///
+    /// Errors: [`OccludeError::TooManyWalls`] from the query; the state is
+    /// untouched when the query refuses.
+    pub fn update_muffle(
+        &mut self,
+        voice_cm: [i32; 2],
+        listener_cm: [i32; 2],
+        walls: &[Wall],
+    ) -> Result<Muffle, OccludeError> {
+        let target = target_muffle(voice_cm, listener_cm, walls)?;
+        let gain_q16 = self.tick(target.gain_q16);
+        self.cutoff_hz = if target.cutoff_hz < self.cutoff_hz {
+            self.cutoff_hz
+                .saturating_sub(CUTOFF_FALL_STEP_HZ)
+                .max(target.cutoff_hz)
+        } else {
+            self.cutoff_hz
+                .saturating_add(CUTOFF_RISE_STEP_HZ)
+                .min(target.cutoff_hz)
+        };
+        Ok(Muffle {
+            gain_q16,
+            cutoff_hz: self.cutoff_hz,
+        })
     }
 }
 
@@ -712,5 +829,107 @@ mod tests {
             mean_ms < BUDGET_MS_PER_VOICE as f64,
             "mean {mean_ms} ms per voice tick over budget"
         );
+    }
+
+    /// RMS (second half, after the filter settles) of one second of a sine at
+    /// `hz` played at the muffle's level and cutoff, plus the heap calls the
+    /// render made. `None` plays it open: no gain change, no filter.
+    fn band_rms(hz: f32, muffle: Option<Muffle>) -> (f64, u64) {
+        const RATE: u32 = 48_000;
+        let frames = usize::try_from(RATE).expect("rate fits");
+        let samples: Vec<f32> = (0..RATE)
+            .map(|i| {
+                (std::f32::consts::TAU * hz * crate::f32_of(i) / crate::f32_of(RATE)).sin() * 0.5
+            })
+            .collect();
+        let mut mixer = crate::Mixer::new(RATE);
+        let gain = muffle.map_or(1.0, |m| q16_to_gain(m.gain_q16));
+        let id = mixer.play(&crate::Pcm::new(RATE, 1, samples), gain);
+        if let Some(m) = muffle {
+            assert!(
+                mixer.set_voice_lowpass(id, m.cutoff_hz),
+                "the voice is live"
+            );
+        }
+        let mut out = vec![0.0f32; frames];
+        let ((), heap) = engine_core::alloc_probe::measure(|| mixer.render_into(&mut out));
+        let tail = &out[frames / 2..];
+        let sum: f64 = tail.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+        (
+            (sum / f64::from(u32::try_from(tail.len()).expect("one second"))).sqrt(),
+            heap.calls,
+        )
+    }
+
+    fn drop_db(hz: f32, muffle: Muffle) -> f64 {
+        let (open, _) = band_rms(hz, None);
+        let (muffled, heap_calls) = band_rms(hz, Some(muffle));
+        assert_eq!(heap_calls, 0, "the filtered render allocates nothing");
+        20.0 * (open / muffled).log10()
+    }
+
+    #[test]
+    fn muffle_band_behind_stone_drops_the_highs_and_keeps_the_lows() {
+        let stone = target_muffle([500, 0], [0, 0], &[stone_cross_wall()]).expect("one wall");
+        assert_eq!(stone.gain_q16, 26_214);
+        assert_eq!(stone.cutoff_hz, cutoff_hz(Material::Stone));
+        let high = drop_db(6_000.0, stone);
+        let low = drop_db(100.0, stone);
+        assert!(
+            high >= 15.0,
+            "high band drops {high:.1} dB, want at least 15"
+        );
+        assert!(low <= 8.0, "low band drops {low:.1} dB, want at most 8");
+    }
+
+    #[test]
+    fn cutoff_is_the_darkest_wall_and_air_never_goes_below_the_floor() {
+        let open = target_muffle([500, 0], [0, 0], &[]).expect("empty set");
+        assert_eq!(open.gain_q16, GAIN_ONE);
+        assert_eq!(open.cutoff_hz, OPEN_CUTOFF_HZ - 5 * AIR_LOSS_HZ_PER_M);
+        let behind_both = [
+            Wall::new(150, -500, 150, 500, Material::Cloth),
+            Wall::new(250, -500, 250, 500, Material::Stone),
+        ];
+        let both = target_muffle([500, 0], [0, 0], &behind_both).expect("two walls");
+        assert_eq!(
+            both.cutoff_hz,
+            cutoff_hz(Material::Cloth),
+            "cloth is darker"
+        );
+        assert_eq!(
+            both.gain_q16,
+            target_gain_q16([500, 0], [0, 0], &behind_both).unwrap()
+        );
+        let far = target_muffle([60_000, 0], [0, 0], &[]).expect("empty set");
+        assert_eq!(far.cutoff_hz, AIR_FLOOR_HZ);
+        assert_eq!(air_cutoff_hz(0), OPEN_CUTOFF_HZ);
+        assert_eq!(
+            target_muffle([0, 0], [0, 0], &behind_both).unwrap(),
+            Muffle::OPEN
+        );
+    }
+
+    #[test]
+    fn cutoff_slews_down_and_up_and_arrives_exactly() {
+        let walls = [stone_cross_wall()];
+        let mut occ = VoiceOcclusion::new_open();
+        let first = occ.update_muffle([500, 0], [0, 0], &walls).expect("query");
+        assert_eq!(first.cutoff_hz, OPEN_CUTOFF_HZ - CUTOFF_FALL_STEP_HZ);
+        for _ in 0..16 {
+            occ.update_muffle([500, 0], [0, 0], &walls).expect("query");
+        }
+        assert_eq!(occ.current_cutoff_hz(), cutoff_hz(Material::Stone));
+        let up = occ.update_muffle([500, 0], [0, 0], &[]).expect("query");
+        assert_eq!(
+            up.cutoff_hz,
+            cutoff_hz(Material::Stone) + CUTOFF_RISE_STEP_HZ
+        );
+        for _ in 0..40 {
+            occ.update_muffle([500, 0], [0, 0], &[]).expect("query");
+        }
+        assert_eq!(occ.current_cutoff_hz(), air_cutoff_hz(500));
+        occ.reset_open();
+        assert_eq!(occ.current_cutoff_hz(), OPEN_CUTOFF_HZ);
     }
 }

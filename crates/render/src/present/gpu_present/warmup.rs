@@ -67,9 +67,24 @@ mod tests {
     /// build nothing.
     #[test]
     fn pipeline_warmup_no_build_after_the_warmup_over_100_frames() {
-        let Some(mut p) =
-            presenter_or_skip("pipeline_warmup_no_build_after_the_warmup_over_100_frames")
-        else {
+        no_build_after_the_warmup(
+            "pipeline_warmup_no_build_after_the_warmup_over_100_frames",
+            100,
+        );
+    }
+
+    /// QW7: the same bar over ten seconds of the 60 Hz loop: 600 frames, MSAA toggled every
+    /// hundred, build nothing after the seal.
+    #[test]
+    fn pipeline_warmup_no_build_after_the_warmup_over_600_frames() {
+        no_build_after_the_warmup(
+            "pipeline_warmup_no_build_after_the_warmup_over_600_frames",
+            600,
+        );
+    }
+
+    fn no_build_after_the_warmup(test: &str, frames: u32) {
+        let Some(mut p) = presenter_or_skip(test) else {
             return;
         };
         // A fresh offscreen presenter is suspended (zero area) until it has a size.
@@ -85,12 +100,12 @@ mod tests {
         let warm = ledger::seal();
         assert_eq!(warm, built, "the seal sees what the warm-up counted");
         let (w, h) = p.size();
-        for frame in 0..100u32 {
-            if frame == 40 {
-                p.set_msaa_enabled(true);
-            }
-            if frame == 70 {
-                p.set_msaa_enabled(false);
+        for frame in 0..frames {
+            // MSAA on for the stretch from 40 to 70 of every hundred frames.
+            match frame % 100 {
+                40 => p.set_msaa_enabled(true),
+                70 => p.set_msaa_enabled(false),
+                _ => {}
             }
             let t = frame as f32 / 60.0;
             arena.pose(&mut p, t).expect("pose");

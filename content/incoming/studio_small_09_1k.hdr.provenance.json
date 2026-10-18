@@ -1,0 +1,13 @@
+{
+  "name": "Studio Small 09",
+  "url": "https://polyhaven.com/a/studio_small_09",
+  "download": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/studio_small_09_1k.hdr",
+  "spdx": "CC0-1.0",
+  "license_page": "https://polyhaven.com/license",
+  "author": "Sergej Majboroda",
+  "sha256": "e7cfda5f4e98e623db12b8bfd0184e048488e4855d9c83e2751fb44a32e80c45",
+  "bytes": 1615248,
+  "md5": "d5d7eb9d26d341d6aa4d11c1a54fd97c",
+  "verified": "2026-10-18: bytes and md5 equal api.polyhaven.com/files/studio_small_09 (hdri, 1k, hdr); authors field {\"Sergej Majboroda\":\"All\"} from api.polyhaven.com/info/studio_small_09",
+  "copies": ["content/arena/hdri/polyhaven-studio-small-09-1k.hdr"]
+}

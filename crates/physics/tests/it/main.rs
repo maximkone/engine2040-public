@@ -9,6 +9,7 @@
 
 mod break_slice_vectors;
 mod idmap_fxbench;
+mod oracle;
 mod pd_drive;
 mod probe;
 mod trace_snapshot;

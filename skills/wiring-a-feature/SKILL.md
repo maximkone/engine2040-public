@@ -15,6 +15,7 @@ Owner question 2026-10-17: much of the plan is code that is written, tested and 
    - it cuts a file at its first `#[cfg(test)]`, so big files are half-read;
    - 37 percent of its items are `pub const`s.
 3. `node tools/wiring-scan.mjs --check` fails when a crate's island count rises over `tools/wiring-scan.baseline.json`. It was already red on 2026-10-17 (5554 vs 5317), so a FAIL is yours only if your crate's number rose.
+3b. Before you commit new `pub` code run `node tools/wiring-scan.mjs crates --diff`: every new `pub fn`, `struct` or `enum` needs a production caller in another file. If the consumer is a later board row, pass `--unlocks=<ROW>` (the row must be open). A FAIL on items you did not add is another session's.
 4. Check the board before you start: `node tools/board-slice.mjs --find <Name>`. A ticked row or an existing wire row (`RZ4w`, `EG14w` style) means read it first.
 5. Deleted on purpose? Then it is not unwired, it is cut: skill `recover-deleted-code`. Section 5 of the triage lists what must stay deleted.
 

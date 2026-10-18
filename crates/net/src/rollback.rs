@@ -1598,4 +1598,79 @@ mod tests {
             "same seed, same receipt"
         );
     }
+
+    /// Lines naming the retired hash-only `lib.rs` ring: the whole word, in
+    /// code (not a comment), inside `crates/net` or beside `engine_net`.
+    fn stub_callers(root: &std::path::Path, net_dir: &std::path::Path) -> Vec<String> {
+        let name = ["Roll", "back"].concat();
+        let edge = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let mut dirs = vec![root.to_path_buf()];
+        let mut hits = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            for path in std::fs::read_dir(&dir)
+                .expect("readable dir")
+                .flatten()
+                .map(|entry| entry.path())
+            {
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    for (n, line) in text.lines().enumerate() {
+                        let code = line.split("//").next().unwrap_or_default();
+                        let word = code.match_indices(&name).any(|(i, _)| {
+                            edge(code[..i].chars().next_back())
+                                && edge(code[i + name.len()..].chars().next())
+                        });
+                        if word && (path.starts_with(net_dir) || code.contains("engine_net")) {
+                            hits.push(format!("{}:{}", path.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        hits.sort();
+        hits
+    }
+
+    #[test]
+    fn stub_gate_flags_a_caller_in_net_or_through_engine_net() {
+        let root = std::env::temp_dir().join(format!("engine_net_qn1_gate_{}", std::process::id()));
+        let (net, other) = (root.join("net"), root.join("other"));
+        std::fs::create_dir_all(&net).expect("net dir");
+        std::fs::create_dir_all(&other).expect("other dir");
+        let stub = ["Roll", "back"].concat();
+        let files = [
+            (net.join("a.rs"), format!("use crate::{stub};\n")),
+            (
+                other.join("b.rs"),
+                format!("let r = engine_net::{stub}::new(3);\n"),
+            ),
+            (
+                other.join("c.rs"),
+                format!(
+                    "// {stub} in prose\nlet e = {stub}Error::TooFar;\nlet x = {stub}::new(1);\n"
+                ),
+            ),
+        ];
+        for (path, text) in &files {
+            std::fs::write(path, text).expect("write fixture");
+        }
+        let hits = stub_callers(&root, &net);
+        std::fs::remove_dir_all(&root).expect("cleanup");
+        let hits: Vec<String> = hits.iter().map(|h| h.replace('\\', "/")).collect();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits[0].ends_with("net/a.rs:1"), "{hits:?}");
+        assert!(hits[1].ends_with("other/b.rs:1"), "{hits:?}");
+    }
+
+    #[test]
+    fn one_rollback_path_no_source_names_the_retired_stub() {
+        // QN1: `P2pSession` and `netcode::Session` are the rollback paths;
+        // the hash-only ring that sat in `lib.rs` is deleted and stays so.
+        let net = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates = net.parent().expect("crates dir");
+        let hits = stub_callers(crates, net);
+        assert!(hits.is_empty(), "retired stub named again: {hits:?}");
+    }
 }

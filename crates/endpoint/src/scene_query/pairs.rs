@@ -5,13 +5,14 @@
 
 use super::*;
 use engine_spatial::measure::clearance;
-use engine_spatial::sees::{sees_pair, why_hidden, Draw, Hidden, FAN_RAYS};
+use engine_spatial::sees::{sees_pair, FAN_RAYS};
 use engine_spatial::slide::{ground_below, slide, Dir};
+use engine_spatial::why_hidden::{why_hidden, Draw, Hidden};
 
 /// Anchor ids, hits and conflicts of one pair answer.
-type Found = (Vec<u32>, Vec<Hit>, Vec<Conflict>);
+pub(super) type Found = (Vec<u32>, Vec<Hit>, Vec<Conflict>);
 
-fn row(a: &Actor, matched: bool, reason: String) -> Hit {
+pub(super) fn row(a: &Actor, matched: bool, reason: String) -> Hit {
     Hit {
         id: a.id,
         x: a.x,
@@ -22,7 +23,10 @@ fn row(a: &Actor, matched: bool, reason: String) -> Hit {
     }
 }
 
-fn other_actor<'a>(actors: &'a [Actor], args: &QueryArgs) -> Result<&'a Actor, QueryError> {
+pub(super) fn other_actor<'a>(
+    actors: &'a [Actor],
+    args: &QueryArgs,
+) -> Result<&'a Actor, QueryError> {
     args.other
         .and_then(|id| actor_by_id(actors, id))
         .ok_or_else(|| {

@@ -484,11 +484,47 @@ impl<'a> Submit<'a> {
     }
 }
 
-/// A door bound to one backend and task slot, issuing unique request ids.
+/// The kind of a logged door call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CallKind {
+    /// A read of the scene.
+    Read,
+    /// A submitted write.
+    Write,
+}
+
+/// One call the door executor saw, in order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Call {
+    /// A read of the scene; `ids` are the object ids it returned.
+    Read {
+        /// Object ids the read handed back.
+        ids: Vec<u64>,
+    },
+    /// A submitted write; `ids` are the object ids its actions named.
+    Write {
+        /// Object ids the actions named.
+        ids: Vec<u64>,
+    },
+}
+
+impl Call {
+    /// Read or write.
+    pub(crate) fn kind(&self) -> CallKind {
+        match self {
+            Self::Read { .. } => CallKind::Read,
+            Self::Write { .. } => CallKind::Write,
+        }
+    }
+}
+
+/// A door bound to one backend and task slot, issuing unique request ids and
+/// logging every call with the object ids it returned or named.
 pub(crate) struct Door {
     backend: Backend,
     index: u64,
     calls: u64,
+    log: Vec<Call>,
 }
 
 impl Door {
@@ -498,7 +534,25 @@ impl Door {
             backend,
             index,
             calls: 0,
+            log: Vec::new(),
         }
+    }
+
+    /// Read the scene: the id of every prop, logged as one read call.
+    pub(crate) fn read(&mut self, scene: &Scene) -> Vec<u64> {
+        let ids: Vec<u64> = scene
+            .variant
+            .props
+            .iter()
+            .map(|prop| u64::from(prop.id))
+            .collect();
+        self.log.push(Call::Read { ids: ids.clone() });
+        ids
+    }
+
+    /// Every call so far, in order.
+    pub(crate) fn log(&self) -> &[Call] {
+        &self.log
     }
 
     /// Call the provider contract, then apply what it admits to `scene`.
@@ -506,6 +560,16 @@ impl Door {
     /// by the contract before any apply.
     pub(crate) fn submit(&mut self, scene: &mut Scene, submit: &Submit<'_>) -> Delivery {
         self.calls += 1;
+        let ids = submit
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                ProposalAction::SetPosition { object, .. }
+                | ProposalAction::SetLabel { object, .. } => Some(*object),
+                ProposalAction::Noop => None,
+            })
+            .collect();
+        self.log.push(Call::Write { ids });
         let call = DoorCall {
             backend: self.backend,
             index: self.index,

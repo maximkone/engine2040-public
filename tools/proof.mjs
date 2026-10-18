@@ -5,7 +5,9 @@
 // #[ignore]d in the default suite because parallel load makes them flaky, and
 // on Linux the instruction-count budget. --mutants mutation-tests this tree's
 // crate changes against HEAD (tools/mutants.mjs). --help prints usage plus
-// nextest, gungraun and fuzz examples and exits 0.
+// nextest, gungraun and fuzz examples and exits 0. A GREEN run writes
+// target/proof/<gate>-latest.json; --drift FAILs a record that is 25 h old or
+// whose sha is not HEAD or an ancestor.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -14,8 +16,8 @@ import { fileURLToPath } from "node:url";
 // Pure CLI arg validation (exported for tests): throws the usage line on
 // anything but [] or one of the flags, mirroring the old exit(2).
 export function parseProofArgs(argv) {
-  if (argv.length > 1 || argv.some((arg) => !["--skip-build", "--perf", "--mutants"].includes(arg))) {
-    throw new Error("Usage: node tools/proof.mjs [--skip-build | --perf | --mutants]\nTry 'node tools/proof.mjs --help' for the gate map and copy-paste examples.");
+  if (argv.length > 1 || argv.some((arg) => !["--skip-build", "--perf", "--mutants", "--drift"].includes(arg))) {
+    throw new Error("Usage: node tools/proof.mjs [--skip-build | --perf | --mutants | --drift]\nTry 'node tools/proof.mjs --help' for the gate map and copy-paste examples.");
   }
   return argv;
 }
@@ -23,7 +25,7 @@ export function parseProofArgs(argv) {
 // Help text for `--help` (docs only; no gate logic lives here). Examples are
 // the exact commands the gates run, so copy-paste stays true.
 export const PROOF_HELP = [
-  "Usage: node tools/proof.mjs [--skip-build | --perf | --mutants]",
+  "Usage: node tools/proof.mjs [--skip-build | --perf | --mutants | --drift]",
   "       node tools/proof.mjs --help | -h",
   "",
   "Full gate (default): workspace audit, fmt/build/test/clippy/deny, proof fixtures.",
@@ -34,6 +36,8 @@ export const PROOF_HELP = [
   "  node tools/proof.mjs --perf",
   "Mutation gate for this tree's crate changes against HEAD:",
   "  node tools/proof.mjs --mutants",
+  "Drift gate over the green records a GREEN run writes (target/proof/<gate>-latest.json):",
+  "  node tools/proof.mjs --drift",
   "",
   "Examples:",
   "  nextest (proof profile; opt-in when `cargo nextest` and",
@@ -316,6 +320,67 @@ export function goldenVerdict(receipt, workspaceVersion) {
   );
 }
 
+// API2 handbook build: `mdbook build docs/book` is green only on exit 0 with no
+// WARN or ERROR line (a missing chapter file or a broken include prints one).
+export function bookBuildVerdict(run) {
+  if (run.error) return { ok: false, line: `mdbook did not run: ${run.error.message}` };
+  const bad = `${run.stdout ?? ""}${run.stderr ?? ""}`.split(/\r?\n/).find((l) => /\b(?:WARN|ERROR)\b/.test(l));
+  if (run.status !== 0) return { ok: false, line: `mdbook build exited ${run.status}${bad ? `: ${bad.trim()}` : ""}` };
+  return bad ? { ok: false, line: `mdbook build warned: ${bad.trim()}` } : { ok: true, line: "docs/book builds clean" };
+}
+
+// AD4 green record: a gate that ends GREEN writes target/proof/<gate>-latest.json
+// ({ gate, sha, time }); a red run never touches it. `--drift` reads the
+// records back and FAILs one that is GREEN_MAX_AGE_HOURS old or whose sha is
+// neither HEAD nor an ancestor, so an old green cannot pass for a fresh one.
+export const GREEN_MAX_AGE_HOURS = 25;
+export const GREEN_DIR = "target/proof";
+const GREEN_SUFFIX = "-latest.json";
+
+// Writes the record when the gate was green and returns its path; a red gate
+// returns null and leaves the previous record as it was.
+export function recordGreen(gate, { failed, sha, now = new Date(), dir = GREEN_DIR }) {
+  if (failed) return null;
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${gate}${GREEN_SUFFIX}`);
+  writeFileSync(path, `${JSON.stringify({ gate, sha, time: now.toISOString() })}\n`);
+  return path;
+}
+
+// `record` is the parsed record or null (missing, unreadable). `isAncestor`
+// says whether record.sha is an ancestor of `head`.
+export function driftVerdict(gate, record, { head, isAncestor, now = new Date() }) {
+  const fail = (why) => ({ ok: false, line: `[FAIL] drift ${gate}: ${why}` });
+  if (!record) return fail(`no green record in ${GREEN_DIR}/${gate}${GREEN_SUFFIX}`);
+  const hours = (now.getTime() - Date.parse(record.time)) / 3_600_000;
+  if (!Number.isFinite(hours) || hours < 0) return fail(`record time ${record.time} is not a past time`);
+  if (hours >= GREEN_MAX_AGE_HOURS) return fail(`green record is ${hours.toFixed(1)} h old (limit ${GREEN_MAX_AGE_HOURS} h), run the gate again`);
+  if (record.sha !== head && !isAncestor) return fail(`green sha ${String(record.sha).slice(0, 7)} is neither HEAD nor an ancestor of it`);
+  return { ok: true, line: `[PASS] drift ${gate}: green ${String(record.sha).slice(0, 7)} ${hours.toFixed(1)} h ago` };
+}
+
+// Device evidence for the gpu-live gate: the render window's live-frame leg
+// writes target/reports/pass-truth-<date>.md with a `source` column; only rows
+// read from the `live` frame count. The fixture flags of engine-proof prove
+// nothing about a device, so without such rows the gate prints `not_wired`.
+export function gpuLiveReceipt(reportText) {
+  let live = 0;
+  let probe = 0;
+  for (const line of `${reportText ?? ""}`.split(/\r?\n/)) {
+    const cols = line.split("|").map((c) => c.trim());
+    if (cols[4] !== "live") continue;
+    if (cols[2] === "LIVE") live += 1;
+    else if (cols[2] === "PROBE") probe += 1;
+  }
+  return live + probe > 0 ? { live, probe } : null;
+}
+
+export function gpuLiveLine(receipt, file, unitGate) {
+  return receipt
+    ? `[INFO] gpu-live truth gate (report-only): LIVE ${receipt.live}/PROBE ${receipt.probe} from the device report ${file}; unit gate: ${unitGate}`
+    : `[INFO] gpu-live truth gate (report-only): not_wired, no device report with live rows (target/reports/pass-truth-<date>.md), so no pass counts as LIVE; unit gate: ${unitGate}`;
+}
+
 function main() {
 const raw = process.argv.slice(2);
 if (raw.includes("--help") || raw.includes("-h")) {
@@ -328,6 +393,24 @@ try {
 } catch (error) {
   console.error(error.message);
   process.exit(2);
+}
+
+if (args.includes("--drift")) {
+  const git = (gitArgs) => spawnSync("git", gitArgs, { encoding: "utf8" });
+  const head = (git(["rev-parse", "HEAD"]).stdout ?? "").trim();
+  const gates = existsSync(GREEN_DIR) ? readdirSync(GREEN_DIR).filter((f) => f.endsWith(GREEN_SUFFIX)).map((f) => f.slice(0, -GREEN_SUFFIX.length)) : [];
+  let green = gates.length > 0;
+  if (!green) console.log(`[FAIL] drift: no green record in ${GREEN_DIR}, run the gate green once`);
+  for (const gate of gates) {
+    let record = null;
+    try { record = JSON.parse(readFileSync(join(GREEN_DIR, `${gate}${GREEN_SUFFIX}`), "utf8")); } catch { /* unreadable reads as missing */ }
+    const isAncestor = !!record?.sha && git(["merge-base", "--is-ancestor", record.sha, head]).status === 0;
+    const verdict = driftVerdict(gate, record, { head, isAncestor });
+    console.log(verdict.line);
+    green &&= verdict.ok;
+  }
+  console.log(green ? "RESULT PASS (drift)" : "RESULT FAIL (drift)");
+  process.exit(green ? 0 : 1);
 }
 
 if (args.includes("--mutants")) {
@@ -596,7 +679,10 @@ try {
   // is live; until GX2-GX5 and GX7-GX10 land it reports without failing.
   const gpuLive = cargo(["test", "--locked", "--quiet", "-p", "engine-proof", "--lib", "gpu_live"]);
   const gpuLine = gpuLive.out.split("\n").filter((line) => line.includes("test result")).join("; ");
-  console.log(`[INFO] gpu-live truth gate (report-only, 1 LIVE/8 PROBE): ${gpuLive.ok ? gpuLine : `gate did not execute: ${gpuLive.error}`}`);
+  const reports = existsSync("target/reports") ? readdirSync("target/reports").filter((f) => /^pass-truth-\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort() : [];
+  const deviceReport = reports.at(-1);
+  const receipt = deviceReport ? gpuLiveReceipt(readFileSync(join("target/reports", deviceReport), "utf8")) : null;
+  console.log(gpuLiveLine(receipt, deviceReport, gpuLive.ok ? gpuLine : `gate did not execute: ${gpuLive.error}`));
   // ARC10 spine scorecard: the parity column per build (legacy step against
   // spine step, 20 seeded 600-tick tapes). A mismatch fails the gate; the
   // canary run must fail too, or the column proves nothing.
@@ -657,6 +743,19 @@ try {
   const fails = lines.filter((l) => l.startsWith("[FAIL]") || l.startsWith("RESULT FAIL"));
   check("docs coverage ratchet (tools/docs-coverage.mjs)", !docs.error && docs.status === 0, docs.status === 0 ? (lines.find((l) => l.startsWith("RESULT")) ?? "") : fails.slice(0, 4).join(" | "));
 }
+// API2 handbook: the book builds clean. Skipped when mdbook is not installed
+// (pages.yml builds the book on GitHub); the output goes outside the book folder.
+{
+  const probe = spawnSync("mdbook", ["--version"], { encoding: "utf8" });
+  if (probe.error || probe.status !== 0) {
+    console.log("[SKIP] mdbook build docs/book: mdbook is not installed (pages.yml builds the book on GitHub)");
+  } else {
+    const dest = join("target", "book-check");
+    const verdict = bookBuildVerdict(spawnSync("mdbook", ["build", "docs/book", "--dest-dir", dest], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }));
+    rmSync(dest, { recursive: true, force: true });
+    check("mdbook build docs/book", verdict.ok, verdict.line);
+  }
+}
 // The gate tools gate themselves in CI nightly only (`node --test
 // tools/*.test.mjs` in .github/workflows/ci.yml, E2040_NIGHTLY=1); the proof
 // gate never reruns them, so per-packet proof stays fixtures only.
@@ -689,6 +788,9 @@ if (!args.includes("--skip-build")) {
 const skippedNote = renderSkipped === null ? "" : `; engine-render GPU tests SKIPPED: ${renderSkipped}`;
 console.log((failed ? "RESULT FAIL" : args.includes("--skip-build") ? "RESULT PASS (proof fixtures only)" : "RESULT PASS (all local gates)") + skippedNote);
 process.exitCode = failed ? 1 : 0;
+const gate = args.includes("--skip-build") ? "fixtures" : "full";
+const written = recordGreen(gate, { failed, sha: (spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout ?? "").trim() });
+if (written) console.log(`[INFO] green record ${written}`);
 } // main
 
 if (import.meta.main) {

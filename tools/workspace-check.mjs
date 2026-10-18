@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { SIM_CRATES } from "./rust-quality.mjs";
 import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
-import { deriveFixedApi, genreHits, platformMathHits } from "./sim-source-scan.mjs";
+import { OWN_MATH_FILES, deriveFixedApi, genreFindings, platformMathHits } from "./sim-source-scan.mjs";
 import { runWithVerdictCache } from "./wiring-scan.mjs";
 
 // engine-core is the bottom layer (ARCHITECTURE.md): any crate may use it.
@@ -40,7 +40,8 @@ export const allowedEdges = new Map([
   // The squad pack reads legion formations from engine-ai (feature `mcp` only).
   // The net verb pack runs loopback bouts through engine-net (feature `mcp` only).
   // The physics pack (door verb) reads the std-only balance core: no rapier feature (PX40).
-  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics"]],
+  // AD20: scene.query reachable reads polygons from a baked engine-nav mesh (feature `mcp`).
+  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-nav", "engine-input"]],
   ["engine-input", ["engine-core"]],
   ["engine-net", ["engine-arena", "engine-input", "engine-observe"]],
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
@@ -50,7 +51,7 @@ export const allowedEdges = new Map([
   // physics and the skeleton/pose types from anim. No sim crate (arena, combat, proof) may list it;
   // engine-game lists it as an optional dependency of its `app` leg (RZ4 break look).
   ["engine-physfx", ["engine-physics", "engine-anim"]],
-  ["engine-render", ["engine-observe", "engine-assets", "engine-clock"]], // v1-only tangents (ARCHITECTURE C3); default stays std-only; the clock seam for frame timers (a browser has no std clock)
+  ["engine-render", ["engine-observe", "engine-assets", "engine-clock", "engine-material"]], // v1-only tangents (ARCHITECTURE C3); default stays std-only; the clock seam for frame timers (a browser has no std clock); engine-material only on the window leg (NS31c2: pipeline from the compiled WGSL)
   ["engine-ui", ["engine-input"]],
   // WEB4 browser shell: the golden tape and corpus run in the page through engine-proof; the shell hands the
   // page's clock to engine-clock. WEB5: on wasm32 it also drives the render crate's presenter for the arena frame
@@ -545,7 +546,7 @@ function audit(repoDir) {
   // type-aware twin for the core methods is tools/sim-clippy.toml (CI clippy).
   const DETERMINISM_STRICT = true;
   const simCrates = new Set(SIM_CRATES);
-  const ownMath = new Set(["core/src/fixed.rs"]); // Fixed-point type with its own integer sin/cos.
+  const ownMath = new Set(OWN_MATH_FILES); // Fixed-point type with its own integer sin/cos.
   const crates = join(dirname(root.manifest_path), "crates");
   const fixedPath = join(crates, "core", "src", "fixed.rs");
   // Without the Fixed source nothing is proven Fixed, so every call counts.
@@ -564,62 +565,85 @@ function audit(repoDir) {
     errors.push(`platform float math in simulation code (a Fixed call passes only when its receiver is provably Fixed in the file: use a typed binding like \`let a: Fixed = ..\`): ${mathFindings.join(", ")}`);
   }
 
-  // GE2 genre-assumption ledger (verified 2026-09-25, 50 files): engine
-  // crates below arena/game (the viewer sits above them, like game) may name Fighter|Gladiator only in these listed
-  // files (contract sites, queued moves, harness/budget shapes). A NEW file
-  // with such a name fails the gate; moves (GE4/GE5/GE6/GE7) shrink this
-  // list, never grow it. Test-only uses live in the ledger notes in
-  // docs/plan/runtime.md (ledger); the gate walks src/ (production code). Only identifier
-  // tokens count: genre words in comments, doc lines and string literals do not
-  // (tools/sim-source-scan.mjs). New engine code that must carry a snapshot ABI type
-  // such as FighterSnap names it through a neutral alias (net `BodySnap`).
+  // GE2 genre-assumption ledger, re-audited by GE11 (2026-10-18, 85 files):
+  // engine crates below arena/game (the viewer sits above them, like game) may
+  // name Fighter|Gladiator (types, fns, and FIGHTER|GLADIATOR caps and ids) only
+  // in these listed files. Verdicts: contract site (the arena/net/input ABI
+  // carries the word), harness (Rome harnesses and bench shapes that fixtures
+  // must not import), budget-shape (a cap or size tuned for the arena), or move
+  // (queued under GE4/GE5/GE6/GE7). A NEW file with such a name fails the gate;
+  // moves shrink this list, never grow it, and a listed file that no longer
+  // names a genre word is reported stale: prune it. Test-only uses live in the
+  // ledger notes in docs/plan/runtime.md (ledger); the gate walks src/
+  // (production code). Only identifier tokens count: genre words in comments,
+  // doc lines and string literals do not (tools/sim-source-scan.mjs). New engine
+  // code that must carry a snapshot ABI type such as FighterSnap names it
+  // through a neutral alias (net `BodySnap`). `Arena` is out of scope by
+  // design (engine-arena imports are arena-the-place wiring).
   const genreLedger = new Set([
-    "ai/src/apply.rs",
-    "ai/src/curves.rs", "ai/src/depth.rs", "ai/src/gladiator.rs", "ai/src/lib.rs",
-    "anim/src/exert.rs", "anim/src/pack.rs",
+    // ai, combat, ui, net: move (GE4/GE5/GE6/GE7) or contract sites.
+    "ai/src/apply.rs", "ai/src/depth.rs", "ai/src/gladiator.rs",
+    "anim/src/pack.rs",
     "app/src/app.rs", "app/src/tests.rs",
-    "audio/src/crowd.rs",
-    "combat/src/exchange.rs", "combat/src/fight.rs", "combat/src/gore.rs",
-    "combat/src/lib.rs", "combat/src/sweep.rs", "combat/src/tables.rs",
+    "combat/src/exchange.rs", "combat/src/fight.rs", "combat/src/lib.rs",
+    "combat/src/sweep.rs", "combat/src/tables.rs",
     "ecs/src/bridge.rs",
-    "editor/src/instant.rs", "editor/src/templates.rs",
+    "editor/src/templates.rs",
     "endpoint/src/assistant.rs", "endpoint/src/assistant/fork.rs", "endpoint/src/play.rs",
-    "endpoint/src/build_level.rs", "endpoint/src/build_character.rs",
-    "endpoint/src/build_encounter.rs", "endpoint/src/build_game.rs",
+    "endpoint/src/build_game.rs",
     "input/src/bindings.rs", "input/src/fighter.rs", "input/src/lib.rs",
-    "net/src/dedicated.rs", "net/src/delta.rs", "net/src/heal.rs",
-    "net/src/lagcomp.rs", "net/src/lib.rs", "net/src/lobby.rs",
-    "net/src/replay.rs",     "net/src/scale.rs", "net/src/session.rs",
+    "net/src/dedicated.rs", "net/src/delta.rs", "net/src/quic.rs",
+    "net/src/replay.rs", "net/src/scale.rs", "net/src/session.rs",
     // The snapshot codec copies FullSnap/FighterSnap bytes (contract site).
     "net/src/snapshot.rs",
-    "net/src/quic.rs",
-    "observe/src/lib.rs",
     "perf/src/workloads.rs",
     "playtest/src/agent.rs", "playtest/src/causal.rs", "playtest/src/eval.rs",
-    "playtest/src/keypoint.rs", "playtest/src/lib.rs",
+    "playtest/src/keypoint.rs", "playtest/src/reachability.rs", "playtest/src/spatial_shapes.rs",
     // Keypoint submodules split out of keypoint.rs (listed above): the spec parser and the spine track name the arena
     // FighterTape/FighterInput contract types, the same sites keypoint.rs already carries.
     "playtest/src/keypoint/spec_parse.rs", "playtest/src/keypoint/spine.rs",
-    "playtest/src/reachability.rs", "playtest/src/spatial_shapes.rs", "playtest/src/tournament.rs",
-    "playtest/src/trigger.rs", "playtest/src/winrates.rs",
+    "playtest/src/tournament.rs", "playtest/src/winrates.rs",
     "proof/src/fuzz.rs",
-    "provider/src/announce.rs",
-    "render/src/baked_gi.rs",
-    "ui/src/lib.rs", "ui/src/menus.rs", "ui/src/text.rs",
+    // provider: the 8-observation window (budget-shape); render: the baked-GI sample budget (presentation).
+    "provider/src/announce.rs", "render/src/baked_gi.rs",
+    "ui/src/lib.rs", "ui/src/menus.rs",
     // WEB7: the browser input records wrap engine-input FighterId/FighterInput (contract site, like input/src/fighter.rs).
     "web/src/input.rs",
+    // GE11 caps and ids (FIGHTER|GLADIATOR constants), budget-shape unless noted.
+    // anim: rig joint count, crossfade tuning and the 64-body pose and IK caps.
+    "anim/src/crossfade.rs", "anim/src/fbik.rs", "anim/src/hit_react.rs", "anim/src/injured.rs",
+    "anim/src/lod.rs", "anim/src/lod_w1_test.rs",
+    "anim/src/state_machine.rs", "anim/src/state_machine/playback.rs", "anim/src/state_machine/tests.rs",
+    // editor: Rome pack manifest path (harness).
+    "editor/src/a2_session.rs", "editor/src/a3_session.rs",
+    // endpoint: Rome world loader body height (harness, like play.rs).
+    "endpoint/src/play/world_load.rs",
+    // net: bout and duel harness sizes; the websocket and webtransport tests carry the 8-slot shape.
+    "net/src/played.rs", "net/src/webduel.rs",
+    "net/src/websocket/tests.rs", "net/src/webtransport/tests.rs",
+    // observe: supervisor catalog ids that name the stuck-fighter brain case (contract site).
+    "observe/src/event_queue.rs", "observe/src/fps.rs", "observe/src/heal.rs", "observe/src/lib.rs",
+    "observe/src/supervisor.rs",
+    "perf/src/fight_cost.rs",
+    "physics/src/islands.rs", "physics/src/layers.rs", "physics/src/lod.rs",
+    "playtest/src/brief_eval.rs",
+    // proof: Rome harnesses (fixtures must not import them).
+    "proof/src/a9.rs", "proof/src/arena_matrix.rs", "proof/src/chaos.rs", "proof/src/tape_fuzz.rs",
+    // render: 8-fighter presentation shapes (a view of the arena, never fed to a hash).
+    "render/src/accel.rs", "render/src/procedural_arena.rs", "render/src/twin_fighters.rs",
+    // rules: MAX_FIGHTERS is the world's actor cap, equal to the net server player cap (contract site).
+    "rules/src/arena.rs", "rules/src/fixtures.rs", "rules/src/host.rs", "rules/src/lib.rs",
+    "rules/src/limits.rs", "rules/src/rules.rs", "rules/src/sim.rs", "rules/src/tape.rs",
   ]);
-  const genreFindings = [];
+  const genreScan = [];
   for (const pkg of workspacePackages.filter((p) => !["engine-arena", "engine-game", "engine-viewer"].includes(p.name))) {
     for (const file of crateFilesByPkg.get(pkg.name) ?? []) {
-      const rel = relative(crates, file).split("\\").join("/");
-      if (genreLedger.has(rel)) continue;
-      const names = genreHits(cachedRead(file));
-      if (names.length) genreFindings.push(`${rel} (${names.join(", ")})`);
+      genreScan.push({ rel: relative(crates, file).split("\\").join("/"), src: cachedRead(file) });
     }
   }
-  if (genreFindings.length) {
-    errors.push(`unlisted genre assumption (GE2 ledger; the ledger never grows, use a neutral name or alias such as net BodySnap): ${genreFindings.join(", ")}`);
+  const genre = genreFindings(genreScan, genreLedger);
+  if (genre.unlisted.length) {
+    errors.push(`unlisted genre assumption (GE2 ledger; the ledger never grows, use a neutral name or alias such as net BodySnap): ${genre.unlisted.join(", ")}`);
   }
 
   // PF11 append-only baseline rule (ADV1 finding 2): the exact-match gate
@@ -777,6 +801,9 @@ function audit(repoDir) {
   console.log("PASS lfs guard: no newly tracked non-LFS blob over 5 MB");
   console.log(`PASS test layout: ${layoutCrates} crates keep one integration-test binary (tests/it)`);
   console.log(`PASS maps: ${mapCrates} crates, ${mapPaths} paths match the tree`);
+  console.log(genre.stale.length
+    ? `WARN genre ledger (report-only): stale entries name no genre word any more, prune them: ${genre.stale.join(", ")}`
+    : `PASS genre ledger: ${genreLedger.size} files, none unlisted, none stale`);
   console.log(mathFindings.length
     ? `WARN determinism (report-only until board task D1): platform float math in simulation code: ${mathFindings.join(", ")}`
     : "PASS determinism: no platform float math in simulation code");

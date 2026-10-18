@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkRise, baselineCounts, baselineOf, baselineTotal, countByCrate, formatReport, helpText, scanIslands, acquireRunLock, loadVerdict, saveVerdict, treeKey } from './wiring-scan.mjs';
+import { checkRise, baselineCounts, baselineOf, baselineTotal, countByCrate, formatReport, helpText, parseAddedLines, scanIslands, acquireRunLock, loadVerdict, saveVerdict, treeKey } from './wiring-scan.mjs';
 
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), 'wiring-'));
@@ -212,4 +212,127 @@ writeFileSync(join(repo, 'held'), '1'); setTimeout(() => process.exit(0), 900);`
     assert.ok(lines.some((l) => l.startsWith('waiting for lock: demo (held by pid ')), `a wait line, got ${JSON.stringify(lines)}`);
     assert.ok(waited >= 200, `the second run waited for the live holder, waited ${waited}ms`);
   } finally { cleanup(repo); }
+});
+
+// ---- AD5 diff gate -------------------------------------------------------
+
+const TOOL = join(dirname(fileURLToPath(import.meta.url)), 'wiring-scan.mjs');
+
+test('parseAddedLines reads the new side of each hunk and skips deleted files', () => {
+  const diff = [
+    'diff --git a/crates/a/src/lib.rs b/crates/a/src/lib.rs',
+    '--- a/crates/a/src/lib.rs',
+    '+++ b/crates/a/src/lib.rs',
+    '@@ -3,0 +4,2 @@ fn x',
+    '+pub fn one() {}',
+    '+pub fn two() {}',
+    '@@ -9 +11 @@',
+    '-old',
+    '+new',
+    '@@ -20,2 +22,0 @@',
+    '--- a/crates/gone.rs',
+    '+++ /dev/null',
+    '@@ -1,3 +0,0 @@',
+  ].join('\n');
+  const added = parseAddedLines(diff);
+  assert.deepEqual([...added.get('crates/a/src/lib.rs')], [4, 5, 11]);
+  assert.equal(added.size, 1);
+});
+
+// A temp git repo with one committed crate pair, so a test edits the tree
+// after the base commit and runs the CLI on it.
+function makeRepo() {
+  const top = mkdtempSync(join(tmpdir(), 'wiring-diff-'));
+  const git = function (...args) { return execFileSync('git', ['-C', top, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args], { encoding: 'utf8' }); };
+  mkdirSync(join(top, 'crates', 'a', 'src'), { recursive: true });
+  mkdirSync(join(top, 'crates', 'b', 'src'), { recursive: true });
+  mkdirSync(join(top, 'docs'), { recursive: true });
+  writeFileSync(join(top, 'crates', 'a', 'src', 'lib.rs'), 'pub fn old_orphan() {}\n');
+  writeFileSync(join(top, 'crates', 'b', 'src', 'lib.rs'), 'fn call_it() {}\n');
+  writeFileSync(join(top, 'docs', 'SPRINT.md'), '- [ ] ZZ9 next: the consumer row\n- [x] ZZ1 done: closed\n');
+  git('init', '-q');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  const run = function (...args) {
+    const r = spawnSync(process.execPath, [TOOL, join(top, 'crates'), '--diff', ...args], { encoding: 'utf8' });
+    return { code: r.status, out: r.stdout };
+  };
+  const put = function (crate, file, text) { writeFileSync(join(top, 'crates', crate, 'src', file), text); };
+  return { top, run, put };
+}
+
+test('diff gate: an uncalled new pub fn FAILs, the same fn called from another file PASSes', () => {
+  const repo = makeRepo();
+  try {
+    repo.put('a', 'lib.rs', 'pub fn old_orphan() {}\npub fn fresh_fn() {}\n');
+    const bad = repo.run();
+    assert.equal(bad.code, 1, bad.out);
+    assert.match(bad.out, /unwired a a\/src\/lib\.rs:2 fn fresh_fn/);
+    assert.doesNotMatch(bad.out, /old_orphan/, 'an old orphan is not in the diff');
+    repo.put('b', 'lib.rs', 'fn call_it() { fresh_fn(); }\n');
+    const good = repo.run();
+    assert.equal(good.code, 0, good.out);
+    assert.match(good.out, /^PASS wiring-scan --diff/m);
+    assert.deepEqual([good.out, repo.run().out], [good.out, good.out], 'same tree, same output');
+  } finally {
+    cleanup(repo.top);
+  }
+});
+
+test('diff gate: an open UNLOCKS row exempts new items, a closed or unknown row does not', () => {
+  const repo = makeRepo();
+  try {
+    repo.put('a', 'lib.rs', 'pub fn old_orphan() {}\npub struct Waiting;\n');
+    const ok = repo.run('--unlocks=ZZ9');
+    assert.equal(ok.code, 0, ok.out);
+    assert.match(ok.out, /unlocked a a\/src\/lib\.rs:2 struct Waiting/);
+    assert.match(ok.out, /wait for ZZ9/);
+    for (const row of ['ZZ1', 'NOPE7']) {
+      const refused = repo.run('--unlocks=' + row);
+      assert.equal(refused.code, 1, refused.out);
+      assert.match(refused.out, /not open on the board: /);
+    }
+  } finally {
+    cleanup(repo.top);
+  }
+});
+
+test('diff gate: untracked files count and the four unwired shapes of BLOCKERS all FAIL', () => {
+  const repo = makeRepo();
+  try {
+    // px36: two helpers that only call each other. rt19: a helper only a test calls.
+    // fix5: a type only its own file builds. fix3c: a test-only island of fns.
+    repo.put('a', 'servo.rs', [
+      'pub fn capture_bias() { strike_gait_biased(); }',
+      'pub fn strike_gait_biased() { capture_bias(); }',
+      'pub fn reflect_screen_for_forward() {}',
+      'pub struct Runner;',
+      'fn build() -> Runner { Runner }',
+      'pub fn move_row() {}',
+      'pub fn shake_for_trauma() { move_row(); }',
+      '#[cfg(test)]',
+      'mod tests { fn t() { super::reflect_screen_for_forward(); super::shake_for_trauma(); } }',
+      '',
+    ].join('\n'));
+    const r = repo.run();
+    assert.equal(r.code, 1, r.out);
+    for (const name of ['capture_bias', 'strike_gait_biased', 'reflect_screen_for_forward', 'Runner', 'move_row', 'shake_for_trauma']) {
+      assert.match(r.out, new RegExp('unwired a a/src/servo\\.rs:\\d+ (fn|struct) ' + name + '\\n'), name);
+    }
+  } finally {
+    cleanup(repo.top);
+  }
+});
+
+test('--orphans is the default report and --help lists the diff flags', () => {
+  const root = makeFixture();
+  try {
+    const plain = execFileSync(process.execPath, [TOOL, root], { encoding: 'utf8' });
+    const orphans = execFileSync(process.execPath, [TOOL, root, '--orphans'], { encoding: 'utf8' });
+    assert.equal(orphans, plain);
+    assert.match(plain, /^islands: 2$/m);
+    for (const flag of ['--diff', '--unlocks', '--orphans']) assert.match(helpText(), new RegExp(flag));
+  } finally {
+    cleanup(root);
+  }
 });

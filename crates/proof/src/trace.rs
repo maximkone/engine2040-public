@@ -34,6 +34,11 @@
 //! A `replay_verbose` report therefore contains only `sim.tick` events; the
 //! test `covered_scope_is_sim_tick_only` locks that in.
 //!
+//! [`TraceReport::to_mcap`] writes the report as an MCAP recording
+//! (`/tick/hash` plus `/events`) that Foxglove or Rerun opens with no SDK;
+//! two exports name their first divergent tick with
+//! [`engine_observe::mcap::first_divergent_tick`].
+//!
 //! # Tracing overhead (measured, not zero-cost)
 //!
 //! Tracing is not free: [`replay_verbose`] retains one [`SimEvent`] (tick,
@@ -62,6 +67,7 @@
 //! plain replay at the cost of one extra pass.
 
 use engine_core::hash_bytes;
+use engine_observe::mcap::{McapError, ReplayRecording};
 use engine_observe::{digest, Event, EventCode};
 
 use crate::{record, replay, Checkpoint, Config, Error, Tape, FIXTURE_VERSION};
@@ -91,6 +97,8 @@ impl SimEvent {
 pub struct TraceReport {
     /// One [`EventCode::SIM_TICK`] event per tick, in tick order.
     pub events: Vec<SimEvent>,
+    /// The checkpoint behind each event, in tick order.
+    pub checkpoints: Vec<Checkpoint>,
     /// Canonical hash over fixture context plus every event; identical to
     /// what [`replay_summary`] returns for the same tape.
     pub summary_hash: u64,
@@ -107,6 +115,22 @@ impl TraceReport {
     #[must_use]
     pub fn digest(&self, budget_bytes: usize) -> String {
         digest(&self.observe_events(), budget_bytes)
+    }
+
+    /// MCAP recording of the trace: the `state` checkpoint of every tick on
+    /// `/tick/hash` and its event detail on `/events`. Same report, same bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McapError`] only for an impossible size overflow.
+    pub fn to_mcap(&self) -> Result<Vec<u8>, McapError> {
+        let mut recording = ReplayRecording::new()?;
+        for (event, checkpoint) in self.events.iter().zip(&self.checkpoints) {
+            let tick = u64::from(event.tick);
+            recording.tick_hash(tick, checkpoint.state)?;
+            recording.event(tick, &event.detail)?;
+        }
+        Ok(recording.finish())
     }
 }
 
@@ -206,6 +230,7 @@ pub fn replay_verbose(tape: &Tape) -> Result<TraceReport, Error> {
     }
     Ok(TraceReport {
         events,
+        checkpoints,
         summary_hash: hash_bytes(&canonical),
     })
 }
@@ -320,6 +345,33 @@ mod tests {
         // The digest path sees the same sim.tick rows agents consume.
         let digest_text = report.digest(1024);
         assert!(digest_text.contains("sim.tick x24"));
+    }
+
+    #[test]
+    fn mcap_export_names_the_first_divergent_tick() {
+        use engine_observe::mcap::{first_divergent_tick, read, TOPIC_EVENTS, TOPIC_HASH};
+        let config = Config { seed: 7, ticks: 24 };
+        let clean = replay_verbose(&record(config, &[]).unwrap()).unwrap();
+        let bytes = clean.to_mcap().unwrap();
+        assert_eq!(
+            bytes,
+            clean.clone().to_mcap().unwrap(),
+            "same report, same bytes"
+        );
+        let left = read(&bytes).unwrap();
+        assert_eq!(left.on_topic(TOPIC_HASH).count(), 24);
+        assert_eq!(left.on_topic(TOPIC_EVENTS).count(), 24);
+        // Seeded desync: one flipped state bit at tick 9, as a diverging build would.
+        let mut desync = clean.clone();
+        desync.checkpoints[9].state ^= 1;
+        let right = read(&desync.to_mcap().unwrap()).unwrap();
+        assert_eq!(first_divergent_tick(&left, &right), Some(9));
+        assert_eq!(first_divergent_tick(&left, &left), None);
+        // The state hash folds the input context, so a tape with another input
+        // differs from its first tick.
+        let moved = replay_verbose(&proof_tape()).unwrap();
+        let moved = read(&moved.to_mcap().unwrap()).unwrap();
+        assert_eq!(first_divergent_tick(&left, &moved), Some(0));
     }
 
     #[test]

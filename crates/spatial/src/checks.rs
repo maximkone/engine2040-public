@@ -3,6 +3,7 @@
 use super::index::{
     build_rects, density_grid, overlap_pct, pos_known, size_known, sweep_pairs, to_cm, CmRect,
 };
+use super::triage::z_fights_all;
 use super::{navcheck, Actor, Finding, Report};
 use engine_core::Fnv64;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,12 +33,23 @@ pub const SPATIAL_CHECKS: [&str; 18] = [
 /// Phase-2 checks need a bake view (`run_spatial` + `Some(NavView)`).
 pub const NAV_CHECKS: [&str; 4] = ["navConnect", "flowPath", "accessFront", "doorClear"];
 
-/// Opt-in SP28 checks: legal in `run_spatial` but deliberately absent
-/// from the frozen `SPATIAL_CHECKS` catalog, whose length pins the
+/// Opt-in checks (SP28 `relationCycle`, SPX2 `seatedJoint` and `supportChain`,
+/// SPX7 `zfight`, SPX8 `stray`): legal in `run_spatial` but deliberately
+/// absent from the frozen `SPATIAL_CHECKS` catalog, whose length pins the
 /// repair seeded-count test and the endpoint legal-list goldens. The
 /// whole-catalog `run()` therefore never asks for them, so existing
 /// goldens stay byte-identical whether or not a cycle exists.
-pub const OPT_IN_CHECKS: [&str; 3] = ["relationCycle", "seatedJoint", "supportChain"];
+pub const OPT_IN_CHECKS: [&str; 5] = [
+    "relationCycle",
+    "seatedJoint",
+    "supportChain",
+    "zfight",
+    "stray",
+];
+
+/// Default `zfight` tolerance in cm: faces this close on one axis flicker
+/// (Forge uses 0.2 cm; our boxes are integer cm).
+pub const ZFIGHT_EPS_CM: i32 = 1;
 
 const WORLD_BOUND_CM: i32 = 10_000; // +-100 m, red
 const OOB99_CM: i32 = 9_900; // +-99 m, yellow
@@ -54,6 +66,16 @@ pub fn severity_of(check: &str) -> &'static str {
     match check {
         "overlap" | "bounds" | "scale" | "dupeSpam" => "red",
         _ => "yellow",
+    }
+}
+
+fn finding(check: &'static str, a: u32, b: u32, pct: f32) -> Finding {
+    Finding {
+        check,
+        a,
+        b,
+        pct,
+        severity: severity_of(check),
     }
 }
 
@@ -82,12 +104,31 @@ pub fn run_checks(actors: &[Actor], checks: &[&str]) -> Result<Report, Vec<&'sta
     run_spatial(actors, checks, None)
 }
 
+/// [`run_checks`] with the `zfight` tolerance in cm instead of [`ZFIGHT_EPS_CM`].
+pub fn run_checks_eps(
+    actors: &[Actor],
+    checks: &[&str],
+    epsilon_cm: i32,
+) -> Result<Report, Vec<&'static str>> {
+    run_spatial_eps(actors, checks, None, epsilon_cm)
+}
+
 /// Full run with optional nav bake view. Nav checks requested without a view
 /// refuse loud (`needs-nav-view`); the offline `run()` never asks for them.
 pub fn run_spatial(
     actors: &[Actor],
     checks: &[&str],
     nav: Option<&navcheck::NavView>,
+) -> Result<Report, Vec<&'static str>> {
+    run_spatial_eps(actors, checks, nav, ZFIGHT_EPS_CM)
+}
+
+/// [`run_spatial`] with the `zfight` tolerance in cm.
+pub fn run_spatial_eps(
+    actors: &[Actor],
+    checks: &[&str],
+    nav: Option<&navcheck::NavView>,
+    epsilon_cm: i32,
 ) -> Result<Report, Vec<&'static str>> {
     let wanted: BTreeSet<&str> = checks.iter().copied().collect();
     for w in &wanted {
@@ -355,6 +396,32 @@ pub fn run_spatial(
         );
     }
 
+    // SPX7 zfight (opt-in): box pairs whose same-facing faces nearly coincide;
+    // `pct` is the share of the smaller face they cover. Spatial knows no
+    // component roles, so every box counts as a mesh here.
+    if wanted.contains("zfight") {
+        findings.extend(z_fights_all(&good, epsilon_cm).into_iter().map(|z| {
+            let pct = f32::from(u8::try_from(z.cover_pct).unwrap_or(100));
+            finding("zfight", z.a, z.b, pct)
+        }));
+    }
+
+    // SPX8 stray (opt-in): boxes far from the rest of the scene; `pct` is
+    // their distance over the median distance, in whole times.
+    if wanted.contains("stray") {
+        let strays = super::extent::robust_extent(&good).map(|e| e.excluded);
+        findings.extend(
+            strays
+                .into_iter()
+                .flatten()
+                .filter(|e| e.why == "stray")
+                .map(|e| {
+                    let pct = f32::from(u16::try_from(e.ratio).unwrap_or(u16::MAX));
+                    finding("stray", e.id, u32::MAX, pct)
+                }),
+        );
+    }
+
     // Phase-2 nav checks (bake view only).
     if let Some(nv) = nav {
         findings.extend(navcheck::run_nav(actors, nv, &wanted));
@@ -368,8 +435,8 @@ pub fn run_spatial(
 /// Ground plate: a flat slab (height at most 50 cm, both sides at most 50
 /// m). Plates are the floor of the layout, never a giant and never counted
 /// when measuring the layout they carry.
-const PLATE_H_CM: i32 = 50;
-const PLATE_SIDE_CM: i32 = 5_000;
+pub(crate) const PLATE_H_CM: i32 = 50;
+pub(crate) const PLATE_SIDE_CM: i32 = 5_000;
 
 /// Solid boxes of the layout as `(id, min, max, largest side)` in cm: known,
 /// positive-size, physical actors that are not ground plates, id ascending.
@@ -640,7 +707,13 @@ mod sp28_tests {
         assert_eq!(SPATIAL_CHECKS.len(), 18);
         assert_eq!(
             OPT_IN_CHECKS,
-            ["relationCycle", "seatedJoint", "supportChain"]
+            [
+                "relationCycle",
+                "seatedJoint",
+                "supportChain",
+                "zfight",
+                "stray"
+            ]
         );
         let actors = seeded_sp28_actors(7);
         let full = super::super::run(&actors);
@@ -890,5 +963,126 @@ mod giant_tests {
             fired > 20,
             "the seeded scenes must exercise the check: {fired}"
         );
+    }
+}
+
+#[cfg(test)]
+mod zfight_tests {
+    use super::*;
+    use engine_core::Rng;
+
+    /// Box by cm: `lo` corner and `size`, as an actor in meters.
+    fn boxed(id: u32, lo: [i32; 3], size: [i32; 3]) -> Actor {
+        let c = |k: usize| (lo[k] * 2 + size[k]) as f32 / 200.0;
+        Actor {
+            id,
+            name: format!("b{id}"),
+            x: c(0),
+            y: c(1),
+            z: c(2),
+            sx: size[0] as f32 / 100.0,
+            sy: size[1] as f32 / 100.0,
+            sz: size[2] as f32 / 100.0,
+            parent: None,
+            physical: true,
+            vx: 0.0,
+            vz: 0.0,
+            yaw: 0.0,
+        }
+    }
+
+    fn zfights(actors: &[Actor]) -> Report {
+        run_checks(actors, &["zfight"]).expect("zfight is opt-in legal")
+    }
+
+    /// A 12 m x 9 m slab with its top at y = 10 cm, and a wider plate over it
+    /// whose top sits `top` cm up: the faces share 1,080,000 cm2.
+    fn slab_and_plate(top: i32) -> Vec<Actor> {
+        vec![
+            boxed(1, [0, 0, 0], [1200, 10, 900]),
+            boxed(2, [-100, top - 5, -100], [1400, 5, 1100]),
+        ]
+    }
+
+    #[test]
+    fn zfight_two_faces_at_y_10_give_one_pair_and_2_cm_apart_none() {
+        let report = zfights(&slab_and_plate(10));
+        assert_eq!(report.findings.len(), 1);
+        let f = &report.findings[0];
+        assert_eq!(
+            (f.check, f.a, f.b, f.pct, f.severity),
+            ("zfight", 1, 2, 100.0, "yellow")
+        );
+        let z = z_fights_all(&slab_and_plate(10), ZFIGHT_EPS_CM);
+        assert_eq!((z[0].axis, z[0].area_cm2, z[0].fix_cm), (1, 1_080_000, 2));
+        assert_eq!(
+            z[0].note(),
+            "faces 0 cm apart on y, 100% shared; move b +2 cm on y"
+        );
+        assert!(
+            zfights(&slab_and_plate(12)).findings.is_empty(),
+            "2 cm apart is clear"
+        );
+        // The wider tolerance sees the 2 cm pair; moving b by the fix clears it.
+        assert_eq!(
+            run_checks_eps(&slab_and_plate(12), &["zfight"], 2)
+                .unwrap()
+                .findings
+                .len(),
+            1
+        );
+        assert!(zfights(&slab_and_plate(10 + 2)).findings.is_empty());
+    }
+
+    #[test]
+    fn zfight_twenty_permutations_give_one_digest_and_the_catalog_stays_18() {
+        let mut rng = Rng::new(0x2f17);
+        let scene: Vec<Actor> = (0..12)
+            .map(|i| {
+                let mut r = |m: u32| (rng.next_u32() % m) as i32;
+                boxed(
+                    i + 1,
+                    [r(5) * 5, r(3) * 5, r(5) * 5],
+                    [(1 + r(3)) * 10, (1 + r(2)) * 10, (1 + r(3)) * 10],
+                )
+            })
+            .collect();
+        let want = zfights(&scene);
+        assert!(!want.findings.is_empty(), "the seeded scene must fight");
+        for round in 0..20 {
+            let mut shuffled = scene.clone();
+            for i in (1..shuffled.len()).rev() {
+                shuffled.swap(i, (rng.next_u32() as usize + round) % (i + 1));
+            }
+            assert_eq!(zfights(&shuffled).hash, want.hash, "permutation {round}");
+        }
+        assert_eq!(SPATIAL_CHECKS.len(), 18);
+        assert!(!SPATIAL_CHECKS.contains(&"zfight"));
+        assert!(OPT_IN_CHECKS.contains(&"zfight"));
+        assert_eq!(
+            super::super::run(&scene).count("zfight"),
+            0,
+            "never in the catalog run"
+        );
+    }
+
+    #[test]
+    fn stray_flags_a_prop_at_500_m_and_stays_silent_without_it() {
+        let mut scene: Vec<Actor> = (1..=30)
+            .map(|i| boxed(i, [(i as i32 % 6) * 200, 0, (i as i32 / 6) * 200], [100; 3]))
+            .collect();
+        let quiet = run_checks(&scene, &["stray"]).expect("stray is opt-in legal");
+        assert!(quiet.findings.is_empty());
+        scene.push(boxed(99, [50_000, 0, 0], [100; 3]));
+        let report = run_checks(&scene, &["stray"]).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        let f = &report.findings[0];
+        assert_eq!(
+            (f.check, f.a, f.b, f.severity),
+            ("stray", 99, u32::MAX, "yellow")
+        );
+        assert!(f.pct >= 20.0, "ratio {}", f.pct);
+        scene.reverse();
+        assert_eq!(run_checks(&scene, &["stray"]).unwrap().hash, report.hash);
     }
 }

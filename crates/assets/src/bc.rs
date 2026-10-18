@@ -2,8 +2,8 @@
 //!
 //! Owner: `engine-assets`; consumer: the texture cooker binds cooked mip
 //! levels through [`encode_image`] (`texture_cook::cook_image` calls it). Units:
-//! pixels in, bytes out. Single-threaded row-major encode, so the same
-//! pixels plus format plus slot always emit identical bytes. No third-party
+//! pixels in, bytes out. Every 4x4 block encodes alone, in row-major order, so the same
+//! pixels plus format plus slot always emit identical bytes at any thread count. No third-party
 //! encoder is vendored here; this file is std-only with zero crate imports
 //! so it also compiles under standalone `rustc --test`. Refusals are typed
 //! [`BcError`], never silent fallbacks or guessed formats.
@@ -22,7 +22,7 @@ pub const BC3_BLOCK_BYTES: usize = 16;
 pub const BC4_BLOCK_BYTES: usize = 8;
 /// Encoded bytes per BC5 block (two BC4 blocks for R and G).
 pub const BC5_BLOCK_BYTES: usize = 16;
-/// Encoded bytes per BC7 block (8-byte color plus 8-byte alpha).
+/// Encoded bytes per BC7 block (128 bits: mode 6 holds both endpoints and 16 indices).
 pub const BC7_BLOCK_BYTES: usize = 16;
 /// Max width or height in texels; mirrors the texture cook bound.
 pub const MAX_BC_DIM: u32 = 4096;
@@ -40,7 +40,7 @@ pub enum BcFormat {
     Bc4,
     /// Dual-channel data, 16 bytes per block (R and G as two BC4 blocks).
     Bc5,
-    /// RGBA high quality, 16 bytes per block (color first, alpha second).
+    /// RGBA high quality, 16 bytes per block: BC7 mode 6 (one subset, 7-bit endpoints).
     Bc7,
 }
 
@@ -82,6 +82,8 @@ pub enum BcError {
         /// `width * height` texel count.
         count: usize,
     },
+    /// A BC7 block uses a mode other than 6, the only one this codec writes and reads.
+    Bc7Mode,
     /// BC1 carries no alpha: any texel with alpha below opaque was refused
     /// instead of silently dropping the channel; culprit texel carried.
     AlphaInBc1 {
@@ -106,6 +108,7 @@ impl fmt::Display for BcError {
             Self::TooLarge { count } => {
                 write!(f, "bc: image too large ({count} texels)")
             }
+            Self::Bc7Mode => write!(f, "bc: BC7 block is not mode 6"),
             Self::AlphaInBc1 { texel, alpha } => write!(
                 f,
                 "bc: transparent texel {texel} (alpha {alpha}) refused in BC1; use BC3"
@@ -460,21 +463,226 @@ pub fn decode_bc5_block(block: &[u8; 16]) -> [[u8; 4]; BLOCK_TEXELS] {
     out
 }
 
-/// Encode one 4x4 block as BC7 (16 bytes): BC3 color first, alpha second.
-pub fn encode_bc7_block(texels: &[[u8; 4]; BLOCK_TEXELS], slot: BcSlot) -> [u8; 16] {
-    let bc3 = encode_bc3_block(texels, slot);
-    let mut out = [0u8; 16];
-    out[0..8].copy_from_slice(&bc3[8..16]);
-    out[8..16].copy_from_slice(&bc3[0..8]);
-    out
+/// BC7 mode 6 weights for its 4-bit indices (Khronos data format spec, table of 16 weights).
+const BC7_WEIGHTS: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+/// Mode 6 starts with six zero bits and a one: the low byte of every block is `0x40`.
+const BC7_MODE6: u128 = 1 << 6;
+/// Refinement rounds of the endpoint fit; more rounds cost time and gain little.
+const BC7_FIT_ROUNDS: usize = 4;
+
+/// One endpoint pair as 8-bit RGBA, the value the decoder reconstructs.
+type Bc7Endpoints = [[u8; 4]; 2];
+
+/// Interpolate one channel between two 8-bit endpoint values with a BC7 weight.
+fn bc7_lerp(e0: u8, e1: u8, weight: u32) -> u8 {
+    let mixed = (64 - weight) * u32::from(e0) + weight * u32::from(e1) + 32;
+    u8::try_from(mixed >> 6).unwrap_or(u8::MAX)
 }
 
-/// Decode one BC7 block (swap halves back, then BC3).
-pub fn decode_bc7_block(block: &[u8; 16]) -> [[u8; 4]; BLOCK_TEXELS] {
-    let mut bc3 = [0u8; 16];
-    bc3[0..8].copy_from_slice(&block[8..16]);
-    bc3[8..16].copy_from_slice(&block[0..8]);
-    decode_bc3_block(&bc3)
+/// The 16 colors an endpoint pair spans, in index order.
+fn bc7_palette(endpoints: &Bc7Endpoints) -> [[u8; 4]; 16] {
+    let mut palette = [[0u8; 4]; 16];
+    for (entry, weight) in palette.iter_mut().zip(BC7_WEIGHTS) {
+        for (channel, value) in entry.iter_mut().enumerate() {
+            *value = bc7_lerp(endpoints[0][channel], endpoints[1][channel], weight);
+        }
+    }
+    palette
+}
+
+/// Squared byte-space distance between two RGBA values. BC7 is judged on the stored
+/// bytes (what PSNR measures), for every slot.
+fn bc7_distance(a: [u8; 4], b: [u8; 4]) -> u32 {
+    (0..4)
+        .map(|c| (i32::from(a[c]) - i32::from(b[c])).unsigned_abs().pow(2))
+        .sum()
+}
+
+/// Nearest palette entry per texel (ties to the lower index) and the summed error.
+fn bc7_assign(texels: &[[u8; 4]; BLOCK_TEXELS], palette: &[[u8; 4]; 16]) -> ([u8; 16], u32) {
+    let mut indices = [0u8; 16];
+    let mut total = 0u32;
+    for (slot, texel) in indices.iter_mut().zip(texels) {
+        let (mut best, mut best_distance) = (0u8, u32::MAX);
+        for (index, entry) in (0u8..).zip(palette) {
+            let distance = bc7_distance(*texel, *entry);
+            if distance < best_distance {
+                best = index;
+                best_distance = distance;
+            }
+        }
+        *slot = best;
+        total += best_distance;
+    }
+    (indices, total)
+}
+
+/// `v` rounded to the nearest integer in `0..=max` (halves up), by binary search: no cast.
+fn round_to_u8(v: f64, max: u8) -> u8 {
+    let (mut lo, mut hi) = (0u8, max);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if v < f64::from(mid) + 0.5 {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo
+}
+
+/// Quantize a float endpoint to a 7-bit value per channel plus the shared p-bit that
+/// gives the least error; returns the 7-bit values, the p-bit and the 8-bit endpoint.
+fn bc7_quantize(endpoint: [f64; 4]) -> ([u8; 4], u8, [u8; 4]) {
+    let mut best = ([0u8; 4], 0u8, [0u8; 4]);
+    let mut best_error = f64::INFINITY;
+    for pbit in 0..2u8 {
+        let (mut q7, mut full, mut error) = ([0u8; 4], [0u8; 4], 0.0f64);
+        for c in 0..4 {
+            let q = round_to_u8((endpoint[c] - f64::from(pbit)) / 2.0, 127);
+            q7[c] = q;
+            full[c] = (q << 1) | pbit;
+            error += (f64::from(full[c]) - endpoint[c]).powi(2);
+        }
+        if error < best_error {
+            best_error = error;
+            best = (q7, pbit, full);
+        }
+    }
+    best
+}
+
+/// Principal axis of the block's RGBA cloud by a fixed number of power iterations.
+fn bc7_axis(texels: &[[u8; 4]; BLOCK_TEXELS], mean: [f64; 4]) -> [f64; 4] {
+    let mut cov = [[0.0f64; 4]; 4];
+    for texel in texels {
+        let d: [f64; 4] = std::array::from_fn(|c| f64::from(texel[c]) - mean[c]);
+        for (i, row) in cov.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell += d[i] * d[j];
+            }
+        }
+    }
+    let mut axis = [0.5f64; 4];
+    for _ in 0..8 {
+        let next: [f64; 4] = std::array::from_fn(|i| (0..4).map(|j| cov[i][j] * axis[j]).sum());
+        let length = next.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if length < 1e-9 {
+            break;
+        }
+        axis = next.map(|v| v / length);
+    }
+    axis
+}
+
+/// Least-squares endpoints for the given index weights; `None` when every weight is the same
+/// (the system is singular).
+fn bc7_solve(texels: &[[u8; 4]; BLOCK_TEXELS], indices: &[u8; 16]) -> Option<([f64; 4], [f64; 4])> {
+    let (mut aa, mut ab, mut bb) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut ta, mut tb) = ([0.0f64; 4], [0.0f64; 4]);
+    for (texel, &index) in texels.iter().zip(indices) {
+        let b = f64::from(BC7_WEIGHTS[usize::from(index)]) / 64.0;
+        let a = 1.0 - b;
+        aa += a * a;
+        ab += a * b;
+        bb += b * b;
+        for c in 0..4 {
+            ta[c] += a * f64::from(texel[c]);
+            tb[c] += b * f64::from(texel[c]);
+        }
+    }
+    let det = aa * bb - ab * ab;
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let e0 = std::array::from_fn(|c| ((bb * ta[c] - ab * tb[c]) / det).clamp(0.0, 255.0));
+    let e1 = std::array::from_fn(|c| ((aa * tb[c] - ab * ta[c]) / det).clamp(0.0, 255.0));
+    Some((e0, e1))
+}
+
+/// Encode one 4x4 RGBA block as BC7 mode 6 (16 bytes): one subset, 7-bit RGBA endpoints with
+/// a p-bit each, 4-bit indices. The endpoints start at the extremes along the block's
+/// principal axis, then a few least-squares rounds move them; the round with the least
+/// error after quantization wins. Pure integer output of a fixed-order fit, so the same
+/// texels always give the same bytes. `slot` does not change the metric (stored bytes).
+pub fn encode_bc7_block(texels: &[[u8; 4]; BLOCK_TEXELS], _slot: BcSlot) -> [u8; 16] {
+    let mean: [f64; 4] =
+        std::array::from_fn(|c| texels.iter().map(|t| f64::from(t[c])).sum::<f64>() / 16.0);
+    let axis = bc7_axis(texels, mean);
+    let along = |t: &[u8; 4]| {
+        (0..4)
+            .map(|c| (f64::from(t[c]) - mean[c]) * axis[c])
+            .sum::<f64>()
+    };
+    let (mut lo, mut hi) = (0usize, 0usize);
+    for (i, texel) in texels.iter().enumerate() {
+        if along(texel) < along(&texels[lo]) {
+            lo = i;
+        }
+        if along(texel) > along(&texels[hi]) {
+            hi = i;
+        }
+    }
+    let fit = |e0: [f64; 4], e1: [f64; 4]| {
+        let ((q0, p0, f0), (q1, p1, f1)) = (bc7_quantize(e0), bc7_quantize(e1));
+        let (indices, error) = bc7_assign(texels, &bc7_palette(&[f0, f1]));
+        (error, [q0, q1], [p0, p1], indices)
+    };
+    let mut best = fit(texels[lo].map(f64::from), texels[hi].map(f64::from));
+    let mut next = bc7_solve(texels, &best.3);
+    for _ in 0..BC7_FIT_ROUNDS {
+        let Some((e0, e1)) = next else { break };
+        let candidate = fit(e0, e1);
+        next = bc7_solve(texels, &candidate.3);
+        if candidate.0 < best.0 {
+            best = candidate;
+        }
+    }
+    let (_, mut q, mut p, mut indices) = best;
+    // The first index drops its top bit: when it is set, swap the endpoints and flip all indices.
+    if indices[0] >= 8 {
+        q.swap(0, 1);
+        p.swap(0, 1);
+        indices = indices.map(|i| 15 - i);
+    }
+    let mut bits: u128 = BC7_MODE6;
+    for (c, (&a, &b)) in q[0].iter().zip(&q[1]).enumerate() {
+        bits |= u128::from(a) << (7 + 14 * c);
+        bits |= u128::from(b) << (14 + 14 * c);
+    }
+    bits |= u128::from(p[0]) << 63;
+    bits |= u128::from(p[1]) << 64;
+    bits |= u128::from(indices[0]) << 65;
+    for (i, &index) in indices.iter().enumerate().skip(1) {
+        bits |= u128::from(index) << (68 + 4 * (i - 1));
+    }
+    bits.to_le_bytes()
+}
+
+/// Decode one BC7 block. Only mode 6, the one the encoder writes, is read; any other mode
+/// returns `None` instead of a guess.
+pub fn decode_bc7_block(block: &[u8; 16]) -> Option<[[u8; 4]; BLOCK_TEXELS]> {
+    let bits = u128::from_le_bytes(*block);
+    if bits & 0x7f != BC7_MODE6 {
+        return None;
+    }
+    let field = |at: usize, width: usize| {
+        u8::try_from((bits >> at) & ((1u128 << width) - 1)).unwrap_or(u8::MAX)
+    };
+    // Endpoint e holds channel c at bit 7 + 7 e + 14 c and shares the p-bit at 63 + e.
+    let endpoints: Bc7Endpoints = [0, 1]
+        .map(|e| std::array::from_fn(|c| (field(7 + 7 * e + 14 * c, 7) << 1) | field(63 + e, 1)));
+    let palette = bc7_palette(&endpoints);
+    let mut out = [[0u8; 4]; BLOCK_TEXELS];
+    for (i, texel) in out.iter_mut().enumerate() {
+        let index = if i == 0 {
+            field(65, 3)
+        } else {
+            field(68 + 4 * (i - 1), 4)
+        };
+        *texel = palette[usize::from(index)];
+    }
+    Some(out)
 }
 
 /// Encode a full RGBA image (`width * height * 4` bytes, row-major) into
@@ -572,7 +780,7 @@ pub fn decode_image(image: &BcImage) -> Result<Vec<u8>, BcError> {
             BcFormat::Bc7 => {
                 let mut block = [0u8; 16];
                 block.copy_from_slice(chunk);
-                decode_bc7_block(&block)
+                decode_bc7_block(&block).ok_or(BcError::Bc7Mode)?
             }
         };
         for ty in 0..BLOCK_EDGE as usize {
@@ -772,5 +980,195 @@ mod tests {
         // RGB565 roundtrips its primaries through bit replication.
         assert_eq!(unpack_rgb565(pack_rgb565(255, 0, 0)), [255, 0, 0]);
         assert_eq!(unpack_rgb565(pack_rgb565(0, 255, 0)), [0, 255, 0]);
+    }
+
+    /// Hash of two lattice coordinates and a seed, well mixed.
+    fn hash2(x: u32, y: u32, seed: u32) -> u32 {
+        let mut h = x.wrapping_mul(0x9E37_79B1)
+            ^ y.wrapping_mul(0x85EB_CA6B)
+            ^ seed.wrapping_mul(0xC2B2_AE35);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        h = h.wrapping_mul(0x297A_2D39);
+        h ^ (h >> 15)
+    }
+
+    /// Smooth value noise with lattice cells of `cell` texels, in 0.0..=1.0.
+    fn value_noise(x: u32, y: u32, cell: u32, seed: u32) -> f32 {
+        let (gx, gy) = (x / cell, y / cell);
+        let (fx, fy) = (
+            (x % cell) as f32 / cell as f32,
+            (y % cell) as f32 / cell as f32,
+        );
+        let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
+        let at = |dx: u32, dy: u32| (hash2(gx + dx, gy + dy, seed) & 255) as f32 / 255.0;
+        let top = at(0, 0) + (at(1, 0) - at(0, 0)) * smooth(fx);
+        let bottom = at(0, 1) + (at(1, 1) - at(0, 1)) * smooth(fx);
+        top + (bottom - top) * smooth(fy)
+    }
+
+    /// A stone-wall albedo: running-bond bricks with mortar lines, per-brick tint, four
+    /// octaves of colour noise (cells of 64, 16, 4 and 2 texels) and a +-4 code grain, so
+    /// blocks hold real fine detail.
+    fn albedo_fixture(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let row = y / 64;
+                let shifted = x + if row % 2 == 0 { 0 } else { 64 };
+                let mortar = y % 64 < 4 || shifted % 128 < 4;
+                let tint = (hash2(shifted / 128, row, 7) & 31) as f32 - 16.0;
+                let noise = 0.45 * value_noise(x, y, 64, 1)
+                    + 0.25 * value_noise(x, y, 16, 2)
+                    + 0.15 * value_noise(x, y, 4, 3)
+                    + 0.15 * value_noise(x, y, 2, 4);
+                let base = if mortar {
+                    70.0
+                } else {
+                    120.0 + tint + 70.0 * noise
+                };
+                // Grain is independent per channel, like sensor or sculpt noise in a real map.
+                let channel = |k: f32, seed: u32| {
+                    let grain = (hash2(x, y, seed) % 9) as f32 - 4.0;
+                    (base * k + grain).clamp(0.0, 255.0) as u8
+                };
+                out.extend_from_slice(&[channel(1.0, 9), channel(0.85, 10), channel(0.7, 11), 255]);
+            }
+        }
+        out
+    }
+
+    fn psnr_rgb(a: &[u8], b: &[u8]) -> f64 {
+        let (mut sum, mut n) = (0.0f64, 0.0f64);
+        for (p, q) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+            for c in 0..3 {
+                let d = f64::from(p[c]) - f64::from(q[c]);
+                sum += d * d;
+                n += 1.0;
+            }
+        }
+        10.0 * (255.0f64 * 255.0 / (sum / n).max(1e-9)).log10()
+    }
+
+    #[test]
+    fn bc7_packs_mode_6_fields_where_the_spec_puts_them() {
+        // A solid white block: every 7-bit endpoint field is 127, both p-bits are 1 (127 * 2 + 1
+        // = 255), every index is 0. The field starts are the spec's: mode 7 bits, then
+        // R0 R1 G0 G1 B0 B1 A0 A1 at 7, 14, 21 ... 56, p-bits at 63 and 64, indices from 65.
+        let block = encode_bc7_block(&[[255; 4]; BLOCK_TEXELS], BcSlot::BaseColor);
+        let mut want: u128 = 1 << 6;
+        for start in [7, 14, 21, 28, 35, 42, 49, 56] {
+            want |= 127 << start;
+        }
+        want |= (1 << 63) | (1 << 64);
+        assert_eq!(u128::from_le_bytes(block), want);
+        assert_eq!(decode_bc7_block(&block), Some([[255; 4]; BLOCK_TEXELS]));
+    }
+
+    #[test]
+    fn bc7_reads_only_mode_6() {
+        let mut block = encode_bc7_block(&[[10, 20, 30, 255]; BLOCK_TEXELS], BcSlot::BaseColor);
+        block[0] = 0x01; // mode 0
+        assert_eq!(decode_bc7_block(&block), None);
+        let image = BcImage {
+            width: 4,
+            height: 4,
+            format: BcFormat::Bc7,
+            bytes: block.to_vec(),
+        };
+        assert_eq!(decode_image(&image), Err(BcError::Bc7Mode));
+    }
+
+    #[test]
+    fn bc7_keeps_solid_and_two_color_blocks_exact() {
+        // One p-bit serves all four channels of an endpoint, so a solid color is exact when its
+        // channels share a parity, and within one code per channel when they do not.
+        for solid in [
+            [0, 0, 0, 0],
+            [255, 255, 255, 255],
+            [200, 100, 50, 254],
+            [1, 3, 5, 7],
+        ] {
+            let block = encode_bc7_block(&[solid; BLOCK_TEXELS], BcSlot::BaseColor);
+            assert_eq!(
+                decode_bc7_block(&block),
+                Some([solid; BLOCK_TEXELS]),
+                "{solid:?}"
+            );
+        }
+        let mixed = [200, 100, 51, 255];
+        let block = encode_bc7_block(&[mixed; BLOCK_TEXELS], BcSlot::BaseColor);
+        let decoded = decode_bc7_block(&block).expect("mode 6");
+        assert!(decoded
+            .iter()
+            .all(|t| (0..4).all(|c| t[c].abs_diff(mixed[c]) <= 1)));
+        // Texel 0 is the bright end: the encoder must flip endpoints and indices to keep the
+        // first index under 8, and the picture must not change.
+        let (bright, dark) = ([250, 240, 230, 254], [10, 20, 30, 254]);
+        let mut texels = [dark; BLOCK_TEXELS];
+        texels[0] = bright;
+        texels[5] = bright;
+        let block = encode_bc7_block(&texels, BcSlot::BaseColor);
+        assert_eq!(decode_bc7_block(&block), Some(texels));
+    }
+
+    #[test]
+    fn bc7_gradient_block_stays_within_a_few_codes() {
+        let mut texels = [[0u8; 4]; BLOCK_TEXELS];
+        for (i, t) in texels.iter_mut().enumerate() {
+            let v = (i * 16) as u8;
+            *t = [v, 255 - v, v / 2 + 40, 255];
+        }
+        let decoded = decode_bc7_block(&encode_bc7_block(&texels, BcSlot::BaseColor)).unwrap();
+        for (a, b) in texels.iter().zip(&decoded) {
+            for c in 0..4 {
+                assert!(a[c].abs_diff(b[c]) <= 6, "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// Encode with `threads` scoped threads, each taking a band of block rows, and join the
+    /// bands in order.
+    fn encode_bands(rgba: &[u8], width: u32, height: u32, threads: u32) -> Vec<u8> {
+        let rows = height / BLOCK_EDGE;
+        let band = rows.div_ceil(threads);
+        let stride = width as usize * 4;
+        std::thread::scope(|scope| {
+            let mut jobs = Vec::new();
+            for first in (0..rows).step_by(band as usize) {
+                let last = (first + band).min(rows);
+                let part = &rgba[first as usize * 4 * stride..last as usize * 4 * stride];
+                let h = (last - first) * BLOCK_EDGE;
+                jobs.push(scope.spawn(move || {
+                    encode_image(part, width, h, BcFormat::Bc7, BcSlot::BaseColor)
+                        .expect("band encodes")
+                        .bytes
+                }));
+            }
+            jobs.into_iter()
+                .flat_map(|j| j.join().expect("band thread"))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn bc7_albedo_1024_reaches_40_db_is_4x_smaller_and_threads_agree() {
+        let (w, h) = (1024, 1024);
+        let rgba = albedo_fixture(w, h);
+        let image = encode_image(&rgba, w, h, BcFormat::Bc7, BcSlot::BaseColor).expect("encodes");
+        // 8 bits per texel: a quarter of RGBA8.
+        assert_eq!(image.bytes.len() * 4, rgba.len());
+        assert_eq!(image.bytes.len(), encoded_len(w, h, BcFormat::Bc7));
+        let decoded = decode_image(&image).expect("decodes");
+        let db = psnr_rgb(&rgba, &decoded);
+        println!("bc7 albedo {w}x{h}: {db:.2} dB");
+        // The old stand-in (BC3 with swapped halves) scores 38.98 dB on this fixture.
+        assert!(db >= 40.0, "PSNR {db:.2} dB");
+        // Bytes equal twice, and equal at 1 and 8 threads.
+        let again = encode_image(&rgba, w, h, BcFormat::Bc7, BcSlot::BaseColor).expect("again");
+        assert_eq!(image.bytes, again.bytes);
+        assert_eq!(image.bytes, encode_bands(&rgba, w, h, 1));
+        assert_eq!(image.bytes, encode_bands(&rgba, w, h, 8));
     }
 }

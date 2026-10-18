@@ -1,0 +1,21 @@
+# WEB7 input tape script. The browser check (tools/web-input-check.mjs) replays these events as real key and
+# mouse events and the input_tape bin replays them on the PC; both must give the same tape bytes.
+# Keys are KeyboardEvent.code, mouse buttons are MouseEvent.button, `tick` samples one record.
+key KeyW down
+tick
+key KeyD down
+key KeyF down
+tick
+key KeyF up
+mouse 2 down
+tick
+mouse 2 up
+key KeyW up
+tick
+key ShiftLeft down
+mouse 0 down
+tick
+mouse 0 up
+key ShiftLeft up
+key KeyD up
+tick

@@ -13,7 +13,7 @@ Order: MP6, MP10, MP17, ON30 (Now, in that order), then the table below in ID or
 
 Owner crates: `net` (`crates/net`), `arena`, `game`, `proof`. Prefixes: MP (LAN), ON (internet).
 
-Open board IDs: MP6 MP8 MP10 MP12 MP13 MP14 MP15 MP16 MP16a MP16b MP17 MP18 MP19 MP20 MP21 MP22 ON6 ON7 ON8 ON12 ON13 ON14 ON15 ON16 ON17 ON18 ON19 ON20 ON21 ON22 ON23 ON24 ON25 ON26 ON27 ON28 ON29 ON30 ON31 ON36
+Open board IDs: MP6 MP8 MP10 MP12 MP14 MP15 MP16 MP16a MP16b MP17 MP18 MP19 MP21 MP22 ON6 ON7 ON8 ON12 ON13 ON14 ON15 ON16 ON17 ON18 ON19 ON20 ON21 ON22 ON23 ON24 ON25 ON26 ON27 ON28 ON29 ON30 ON31 ON36
 
 ## 1. Where it stands
 
@@ -25,13 +25,13 @@ Open board IDs: MP6 MP8 MP10 MP12 MP13 MP14 MP15 MP16 MP16a MP16b MP17 MP18 MP19
 | 8–16 hardening + priority deltas (MP2) | unit-tested, integrated, ticked |
 | Lobby browser + ready-up + AI-fill (MP3) | unit-tested, integrated, ticked |
 | Replays + theater + keyframes (MP4) | unit-tested, integrated, ticked |
-| Melee lag compensation (MP5) | ticked, but `lagcomp.rs` was removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
+| Lag window on the dedicated server (MP5, QN12) | `lagcomp.rs` restored 2026-10-18 as the input-arrival window (per-slot, sized from measured lag or reported round trip, capped at 16 ticks); `HeadlessServer::hold_ticks` holds ticks open, a `HitReceipt` per attack press; caller `played.rs`. View rewind for snapshot clients is not built. Status 2026-10-18 below |
 | Disconnect/desync heal (AH4) | unit-tested, integrated, ticked |
 | Canonical caps (GE3, GE7) | unit-tested, integrated, ticked |
 | Loopback LAN with AI fill (GM2) | unit-tested, integrated, ticked |
 | Internet seam (ON1–ON4, ON9–ON11) | unit-tested, integrated, ticked, owned by the internet-play part below |
-| Local cheat guards | `anticheat.rs` was removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
-| Server-authority admission (`guard.rs`) | removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
+| Input sanitize (MP13) | `anticheat.rs` restored 2026-10-18 as the integer sanitize rule (spear bit masked in a match without the spear, `F_SPEAR`, a bounded log naming each tick); the float speed/teleport, Merkle and killcam code stays deleted |
+| Server-authority admission (`guard.rs`) | restored 2026-10-18, called from `HeadlessServer::offer` (caller `played.rs`): malformed, bad-field, wrong-slot, future, stale, late, rewrite and rate refusals counted per slot in a `SlotReceipt`. `webduel.rs` (browser duel host) does not route through it yet |
 | Quantized interest grid | absent as a file, owned elsewhere |
 | Steam relay transport | `steam_relay.rs` was removed in `3151bd46` (it had no production caller); Status 2026-10-17 below |
 | Snapshot interpolation file | missing (rowed) |
@@ -75,7 +75,7 @@ are still missing.
 | Snapshot deltas + interpolation (NET2) | unit-tested, integrated |
 | Dedicated server + beacon + slot reclaim + AI fill (MP1) | unit-tested, integrated |
 | Lobby browser + ready-up + AI-fill (MP3) | unit-tested, integrated |
-| Melee lag compensation, bounded window (MP5) | ticked, but `lagcomp.rs` was removed in `3151bd46`; Status 2026-10-17 below |
+| Lag window, bounded (MP5, QN12) | `lagcomp.rs` restored 2026-10-18 (input-arrival window, cap 16 ticks); Status 2026-10-18 below |
 | 8–16 hardening, priority deltas, kbps caps (MP2) | unit-tested, integrated |
 | Disconnect/desync heal (AH4) | unit-tested, integrated |
 | QUIC transport (ON1) | unit-tested, integrated |
@@ -86,9 +86,9 @@ are still missing.
 | Siege tick budget (ON10) | unit-tested, integrated |
 | Hour-long online soak (ON11) | unit-tested, integrated |
 | Quantized interest grid | implemented in `interest.rs`, no standalone `aoi.rs` |
-| Local cheat guards (sanitize + speed/teleport) | modules cut 2026-10-16, never wired; the feature is not on any live path; MP13 needs a re-scope decision |
+| Local cheat guards (sanitize + speed/teleport) | sanitize restored 2026-10-18 in `anticheat.rs` on the dedicated admission path; speed/teleport checks are not rebuilt (the server authors movement from inputs, so a client cannot claim a position) |
 | Channel hints (reliable/unreliable/sequenced) | implemented as hint only |
-| Server-authority cheat checks + tapes (ON5) | modules cut 2026-10-16, never wired; the feature is not on any live path; MP13 needs a re-scope decision |
+| Server-authority cheat checks + tapes (ON5) | `guard.rs` restored 2026-10-18 on `HeadlessServer::offer`; refusals counted per slot and folded into the bout digest; Status 2026-10-18 below |
 | Steam overlay relay fabric | modules cut 2026-10-16, never wired; the feature is not on any live path |
 | Netcode P2P history | implemented, unbounded history |
 | Party + server list + matchmaking-lite (ON6) | missing (board owns `session.rs` text) |
@@ -110,18 +110,21 @@ Module notes that constrain the rows below:
   consumer is real encode/decode, but `session.rs`/`scale.rs` do not call
   `ConnectionInterest::select` yet (grep 2026-10-01: zero hits in either
   file); ON29 closes exactly that seam.
-- `guard.rs` and `anticheat.rs` cut 2026-10-16, never wired; the feature is
-  not on any live path; MP13 needs a re-scope decision.
+- `guard.rs` and `anticheat.rs` restored 2026-10-18 with a production
+  caller (`HeadlessServer::offer`, driven by `played.rs`); see Status
+  2026-10-18.
 - `steam_relay.rs` cut 2026-10-16, never wired; the feature is not on any
   live path.
 
-Status 2026-10-17 (net code removed on purpose): rot packet `0-rot-net-dead-r1` removed eight modules from `crates/net`: `lagcomp.rs` (MP5), `guard.rs` and `anticheat.rs` (ON5), `replicate.rs` (RC14), `server.rs` (`SessionServer`), `steam_relay.rs` (PLF3), `nat.rs` and `resim.rs`. It also removed eight test files and the tests-only siege and human-bout runners in `interest.rs` and `scale.rs`. All of it sits in one `auto: backup` commit, `3151bd46` (27 files, 8,306 lines deleted). It was a dead-code cut, not a sweep accident and not a decision about the features: per the packet, their only users were each other and tests. The packet closed DONE with `cargo test -p engine-net` lib 237 passed. MP5, RC14, ON5 and PLF3 are still ticked on the board, so those ticks have no code behind them. Recover with `git show 3151bd46^:crates/net/src/<file>`.
+Status 2026-10-17 (net code removed on purpose): rot packet `0-rot-net-dead-r1` removed eight modules from `crates/net`: `lagcomp.rs` (MP5), `guard.rs` and `anticheat.rs` (ON5), `replicate.rs` (RC14), `server.rs` (`SessionServer`), `steam_relay.rs` (PLF3), `nat.rs` and `resim.rs`. It also removed eight test files and the tests-only siege and human-bout runners in `interest.rs` and `scale.rs`. All of it sits in one `auto: backup` commit, `3151bd46` (27 files, 8,306 lines deleted). It was a dead-code cut, not a sweep accident and not a decision about the features: per the packet, their only users were each other and tests. The packet closed DONE with `cargo test -p engine-net` lib 237 passed. MP5, RC14, ON5 and PLF3 are still ticked on the board, so those ticks have no code behind them. Recover with `git show 3151bd46^:crates/net/src/<file>`. Update 2026-10-18: `guard.rs`, `anticheat.rs` (integer port) and `lagcomp.rs` are back with a production caller (Status 2026-10-18); `replicate.rs`, `server.rs`, `steam_relay.rs`, `nat.rs` and `resim.rs` stay deleted (nothing calls them), so RC14 and PLF3 still have no code.
 
-Status 2026-10-17 (what is stale in this file): the table cells for MP5, local cheat guards, `guard.rs` and the Steam relay (marked above); the "Ownership" entries for `lagcomp.rs`, `guard.rs` and `server.rs`; the `LagWindow` and `HitReceipt` API sketch; the "Freeze" rule for the `lagcomp.rs` window shape; the CUT line that says `steam_relay.rs` stays; hard problem 5 (cheating) and the Steals note on lag compensation, which quotes `crates/net/src/lagcomp.rs:19-22`; and the Quality gates lines "Lag-window honesty", "`guard.rs`" and "`steam_relay.rs`, the third WAN home". Open rows that name removed code: MP12 (needs RC14), MP13 (owns `anticheat.rs`), MP20 (owns `lagcomp.rs`), UW25 (`lagcomp.rs`), BX9 (`server.rs`); ON14 and ON19 need ON5. ON9 keeps its cap constants in `interest.rs`, but the runner that charted 64 clients and 500 AI against them is gone (`siege_kbps_chart` has 0 grep hits), so that chart cannot be re-run from the tree.
+Status 2026-10-17 (what is stale in this file), updated 2026-10-18: still stale are the Steam relay table cell, the "Ownership" entry for `server.rs`, the CUT line that says `steam_relay.rs` stays, and the Quality gates line "`steam_relay.rs`, the third WAN home" (that file is deleted). The lag-window and cheat-guard cells, the `LagWindow`/`HitReceipt` sketch, the Freeze rule, hard problem 5, the Steals note and the "Lag-window honesty" gate now say what the restored code does. Open rows that name removed code: MP12 (needs RC14), BX9 (`server.rs`); UW25 names `lagcomp.rs`, which is back, but its ranged view rewind is not built. ON9 keeps its cap constants in `interest.rs`, but the runner that charted 64 clients and 500 AI against them is gone (`siege_kbps_chart` has 0 grep hits), so that chart cannot be re-run from the tree.
 
 Status 2026-10-17 (board vs the Now list): the board has MP6, MP10, MP17 and MP24 ticked; ON30 is open; MP23 is not on the board. MP6 is ticked with a loopback Accept (fault injector, 2 humans + 6 AI; `net_bout mp6` PASS and `node tools/mp6-check.mjs` 24 pass). The Acceptance 2 line and Tier A above say real hardware; that run has not happened. Checked on the GitHub runner today: `cargo test -p engine-net --lib` 237 passed, 0 failed, 2 ignored (run 39025608102); `--lib snapshot` 38 passed (run 39024796869); `scale::` 16, `played::` 11, `replay::` 11, `lobby::` 11 (loopback only); `heal` 5 (local run).
 
-Status 2026-10-17 (MP5 lag compensation, owner call): MP5's Accept (fair hits under 80 ms scripted ping, window in receipts, replay exact) cannot be proven: no `lagcomp` file or test exists, and a `lagcomp::` filter matches 0 tests, which a gate must not take as proof. The last version (`3151bd46^`) sized the window from RTT with a hard cap of 16 ticks (`e2eab820`), so the "5 ticks" in this file was already stale. By the Steals note below, the duel is rollback and needs no rewind, but the siege needs lag compensation. `guard.rs`, its only caller by the packet's count, is gone too. Choose: (a) restore `lagcomp.rs` from git with a real caller, or (b) re-open MP5, MP20 and ON5 and say lag compensation is not built.
+Status 2026-10-17 (MP5 lag compensation, owner call), resolved 2026-10-18: choice (a) was taken; `lagcomp.rs` is restored with a real caller (Status 2026-10-18).
+
+Status 2026-10-18 (server authority restored): client input datagrams now enter the dedicated server through `HeadlessServer::offer(token, bytes, arrival_tick)`. `guard.rs` screens each one (rate per arrival tick, the wire codec, then slot, future, stale, late and rewrite checks per input) and counts every refusal per slot in a `SlotReceipt`; `anticheat.rs` sanitizes admitted inputs (a spear press in a match without the spear is masked, `F_SPEAR`) and logs each changed input with its tick; `lagcomp.rs` sizes each connected slot's window from its measured one-way lag (or a reported round trip), one tick more, capped at 16, and `HeadlessServer::hold_ticks` holds every tick open for the widest one; every attack or spear press gets a `HitReceipt` (window in ticks and ms, fair or refused) that re-adjudicates exactly. The production caller is the played bout's host in `played.rs` (`net_bout`); `BoutReport` carries the receipts and folds them into its digest. Measured on the runner: a cheating seat tried every kind 4 times (malformed, impossible field, wrong slot, far future, stale replay, rewrite, plus a flood: 28 rate refusals) and the server tip, tape and checkpoints equalled the clean bout x2; honest seats show 0 cheat refusals (the rejoining seat shows 90 late copies of its backlog). A seat 80 ms away (2 to 3 ticks each way) behind a one-tick floor measured lag 3, the hold grew to 4 and all 12 of its presses landed on their own ticks: its tape equals the tape it plays beside the server, x2. A seat past the cap (18 ticks one way) has every press refused with window 16 and is stalled out to the AI. On the canonical MP6 bouts the measured window equals the configured hold (LAN 3, WAN 10). Not built: the browser duel host (`webduel.rs`, `net_serve`) does not route through `offer` yet; view rewind for snapshot-interpolated clients; RC14 replication and interest on the live send path (ON29). Landed `cc91744a`; MP13, MP20 and QN12 ticked on it (runs 39111873633, 39111897900, golden 39112424935).
 
 Status 2026-10-17 (owner: multiplayer on the web too): browser clients cannot use raw UDP or QUIC. WEB9 in `docs/plan/web-and-realism.md` adds WebTransport (WebSocket fallback) to the dedicated server beside QUIC and proves one native client and one headless Chrome client end a duel on one state digest on a single GitHub runner. The snapshot codec, rollback and heal stay as they are.
 
@@ -225,10 +228,12 @@ plus a checkpoint hash every snapshot (`SNAPSHOT_EVERY_TICKS=6`,
 owned by `interest.rs`, read — never redefined — here). Clients
 predict with repeat-last-input and resimulate at most 8 ticks on
 authority arrival; deeper divergence triggers AH4 resync from the
-authoritative snapshot (counted, never ignored). Melee hits evaluate
-against the attacker's view time inside `LagWindow` (≤5 ticks) and
-join the accepted-action record with their `HitReceipt`, so replays
-stay exact under HASH-LAW. Lobby: beacon browser at 4 Hz, ready-up
+authoritative snapshot (counted, never ignored). On the dedicated
+server a remote press counts when it arrives before its tick is
+authored: the server holds each tick open for the widest connected
+`LagWindow` (one-way lag plus one tick, at most 16 ticks) and every
+attack press gets a `HitReceipt` naming that window, so replays stay
+exact under HASH-LAW. Lobby: beacon browser at 4 Hz, ready-up
 with version plus rules-digest match, AI-fill slots as ordinary
 fighters, all messages typed structs with fixed wire lengths, never
 JSON. Replays: input tapes plus a keyframe every 600 ticks (proven
@@ -262,8 +267,9 @@ keeps its 100 ms clamp-never-extrapolate meaning; the session path
 calls both and never forks either. API sketch (landed, frozen shapes):
 
 ```rust
-pub struct LagWindow { pub ticks: u8 } // ≤ MAX_WINDOW_TICKS, in every HitReceipt
-pub struct HitReceipt { pub window: LagWindow, pub verdict: HitVerdict, /* + claim ids */ }
+pub struct LagWindow { pub ticks: u8 } // ≤ MAX_WINDOW_TICKS (16)
+pub struct HitReceipt { pub claim: HitClaim, pub window_ticks: u8, pub window_ms: u64, pub accepted: bool }
+// HeadlessServer::offer(token, datagram, arrival_tick) -> admitted inputs; hold_ticks() -> u32
 pub fn record_tape(session: &Session) -> Tape;
 pub fn play_tape(tape: &Tape, upto: Tick) -> Checkpoint;
 ```
@@ -378,7 +384,10 @@ pub fn guard_report(tick: Tick, why: GuardHit) -> Tape; // ON5, replay-backed
    checks, hits only through MP5 lag compensation, refusals logged with replay
    tapes; why: kernel drivers are out, authority plus evidence is the product;
    reference: Valve Source lag-compensation notes (reimplement) + GNS cert
-   model (patterns); no donor dep.
+   model (patterns); no donor dep. Status 2026-10-18: built for the
+   dedicated input path (`guard.rs` refusals per slot, `anticheat.rs`
+   sanitize flags, `lagcomp.rs` arrival window); hit claims against a
+   rewound view are not built, because no client sends one.
 6. Networked physics that converges → server-authoritative break/contact events,
    clients predict debris presentation but resim authoritative events; joint
    rollback snapshots bodies + XPBD lambdas + substep cursor (PORT-AV-JOINT);
@@ -397,7 +406,7 @@ pub fn guard_report(tick: Tick, why: GuardHit) -> Tape; // ON5, replay-backed
    table (patterns) + ggrs confirmed-frame discard (idea, reimplemented
    std-only); donors: lightyear, ggrs (patterns only, no dep).
 
-**Steals 2026-10-12, hard problem.** Lag compensation: the duel is rollback, so hits are sim events inside resimulated ticks and need no rewind. The siege uses snapshots plus lagcomp: window = render cursor (8 ticks) + one-way latency (about 4.5 ticks at 150 ms RTT), about 12.5 ticks, so the 5-tick cap (`crates/net/src/lagcomp.rs:19-22`) would refuse every claim from a default client; MP20 sizes it with data.
+**Steals 2026-10-12, hard problem.** Lag compensation: the duel is rollback, so hits are sim events inside resimulated ticks and need no rewind. The siege uses snapshots plus lagcomp: window = render cursor (8 ticks) + one-way latency (about 4.5 ticks at 150 ms RTT), about 12.5 ticks, so the 5-tick cap (`crates/net/src/lagcomp.rs:19-22`) would refuse every claim from a default client; MP20 sizes it with data. Status 2026-10-18: the restored `lagcomp.rs` is the arrival window of the input-authoritative dedicated server (cap 16 ticks, sized per slot from measured lag); a snapshot-view rewind for interpolated siege clients is still not built (the siege has no network client yet).
 
 ## 6. Slim
 
@@ -410,8 +419,9 @@ pub fn guard_report(tick: Tick, why: GuardHit) -> Tape; // ON5, replay-backed
   row first, and this plan does not invent one.)
 - Freeze: `session.rs` codec shape (`WIRE_VERSION=1`,
   `MAX_PACKET_BYTES=1200`, `REDUNDANCY=3`), `delta.rs` quanta
-  (mm positions, ddeg yaw), `lagcomp.rs` window shape (≤5 ticks in
-  every receipt), `replay.rs` keyframe grid (every 600 ticks).
+  (mm positions, ddeg yaw), `lagcomp.rs` window shape (≤16 ticks,
+  `MAX_WINDOW_TICKS`, in every receipt), `replay.rs` keyframe grid
+  (every 600 ticks).
   Changes bump versions and refuse loudly; silent widening fails
   the gate.
 - What we will not build: relay, WAN transport, hole punching,
@@ -459,7 +469,6 @@ Ticked rows are dropped. Rows never boarded are not listed (git keeps them). Now
 |---|---|---|---|
 | MP8 | channel table + priority mapping | B | MP2 |
 | MP12 | replication-over-LAN proof | B | MP2, RC14 |
-| MP13 | sanitize-flag receipts | B | MP4, NET1 |
 | MP14 | resim auto-tune | A | MP6 |
 | MP15 | dedicated auto-theater | A | MP1, MP4, CR1 |
 | MP16 | 32-fighter LAN soak | B | MP2 |
@@ -467,7 +476,6 @@ Ticked rows are dropped. Rows never boarded are not listed (git keeps them). Now
 | MP16b | 32-fighter LAN soak revival after the GE12 canonical-cap decision | B | MP2, GE12 |
 | MP18 | channel + compression flood chart | B | MP8, MP9, MP16 |
 | MP19 | every-match theater receipt | A | MP7, MP15 |
-| MP20 | lag-window sizing receipt | A | MP6, MP11 |
 | MP21 | 64-player interest-handoff spike | C | MP16, ON3 |
 | MP22 | backroll-style input-delay + first-incorrect resim | B | MP2 |
 | ON6 | sessions | C | ON2, MP3 |
@@ -506,9 +514,10 @@ Ticked rows are dropped. Rows never boarded are not listed (git keeps them). Now
   with machine IDs swapped; shuffled inputs give identical bytes.
 - No-fragment assert on every encode path (`<= 1200`); `OverBudget`
   refuses and counts, never fragments past the cap.
-- Lag-window honesty: MP5 posts the window per hit in receipts; a
-  hit outside its window is a test failure, not a shrug; MP6 sizes
-  the window by measured distributions.
+- Lag-window honesty: every attack press posts its window in a
+  `HitReceipt`; a press outside its window is refused and counted,
+  and a receipt that does not re-adjudicate is a test failure; the
+  window is sized per slot from the measured lag.
 - Lobby without typing: MP3 acceptance runs on two real machines
   with zero manual addresses and zero pasted IPs; versions match by
   digest or refuse loudly with the pair posted.

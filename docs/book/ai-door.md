@@ -1,23 +1,34 @@
-# The AI door: twenty MCP tools
+# The AI door: a core of tools plus verb packs
 
 The engine's AI door is a stdio MCP server (`crates/endpoint/src/bin/e2040-mcp.rs`)
-that exposes exactly twenty tools — no shell, no file writes, no code
+that exposes a small core of tools plus verb packs — no shell, no file writes, no code
 execution. Every mutating call goes through the editor command service
 (validate → preview → atomic apply → journal → undo), so a denied, stale, or
 spatially-rejected call writes nothing.
 
-The router holds exactly the tools named by
-`pub fn tool_names() -> [&'static str; 20]` in `crates/endpoint/src/mcp.rs`,
-and the discovery surface (names, descriptions, input/output schemas) must
-stay under `TOOL_LIST_BUDGET_CHARS: usize = 32_768` characters. That budget is
-why transport DTOs carry no field docs: the schemas generate from the types,
+The router holds exactly the tools named by `pub fn tool_names()` in
+`crates/endpoint/src/mcp.rs`: the core set (`CORE_TOOL_NAMES`, what a fresh
+session advertises) plus every pack verb (a pack loads with `api.load`; each
+verb is callable by exact name whether or not it is advertised). This page
+quotes no total on purpose: the reachable count is pinned per feature set in
+`crates/endpoint/tests/it/tool_count_pin.rs`, and the discovery surface
+(names, descriptions, input/output schemas) must stay under
+`TOOL_LIST_BUDGET_CHARS` in `mcp.rs`, held by
+`crates/endpoint/tests/it/tool_budget_exhaustion.rs`. Read those two files
+for the numbers; a new verb moves the pin, not this page. The budget is why
+transport DTOs carry no field docs: the schemas generate from the types,
 never hand-written twice.
 
 Errors are one shape: a machine `code` plus a `message` that always names the
 legal values (`pub struct McpToolError` in `crates/endpoint/src/mcp.rs`).
 There is no stringly-typed failure anywhere on the door.
 
-## The twenty tools
+## The tools the recipes call
+
+These twenty are the tools the recipes below use. `scene.read`, `tx.preview`,
+`tx.apply`, `tx.undo`, `play.run`, `capture`, `api.search` and `api.describe`
+are core; the other twelve are pack verbs. The router holds more than this
+table (see the pin test above).
 
 | Tool | Read-only | What it does |
 |---|---|---|

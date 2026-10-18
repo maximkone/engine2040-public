@@ -118,7 +118,7 @@ Boarded 2026-10-10 from `docs/plan/ai-native.md` candidate rows 2, 4, 5 and 7
   replay_bisect` x2: a seeded_bug tape bisects to the seeded tick; a clean
   tape verifies with no divergence. F2P: no bisect verb today. P2P: `cargo
   test -p engine-playtest --lib` green; golden unchanged. Landed 4c6d8177; accept 2026-10-15: `replay_bisect` 5 passed x2, playtest lib 345 passed, `cargo run -p engine2040 --release` final_hash=d57b5c8ae3096614.
-- [ ] AG1 playtest: agent scorecard — one command prints pass rate and
+- [x] AG1 playtest: agent scorecard — one command prints pass rate and
   tokens per task for EV1, spatial_eval, the mirrors (HS29-HS32) and
   BreakBench by model tier (free, strong, replay), written to
   `target/reports/scorecard-<date>.md`; a drop against the last card is a red
@@ -126,7 +126,7 @@ Boarded 2026-10-10 from `docs/plan/ai-native.md` candidate rows 2, 4, 5 and 7
   Accept: `cargo test -p engine-playtest --lib scorecard` x2 on fixture
   results gives the same table twice; a fixture with a lower pass rate prints
   RED. F2P: no scorecard command today. P2P: `cargo test -p engine-playtest
-  --lib` green. needs: HS20.
+  --lib` green. needs: HS20. Landed 4aef2869. eval/scorecard.rs: one card per day at target/reports/scorecard-<date>.md with pass rate and tokens per task for EV1, mirror and spatial_eval by tier (mock replay, local free, remote strong), BreakBench prints unbuilt (BX25), a drop against the newest earlier card prints RED. Command: SCORECARD_DATE=YYYY-MM-DD cargo test -p engine-playtest --lib scorecard_command -- --ignored --nocapture. Tests scorecard_table_is_the_same_twice_on_fixture_results, scorecard_lower_pass_rate_prints_red, scorecard_lost_lines_are_red_and_new_lines_are_new, scorecard_reads_back_what_it_wrote, scorecard_collects_every_suite_green_and_unbuilt_breakbench, scorecard_command_writes_the_card_and_compares_with_the_last. Tokens print unknown for replayed suites (a live recording supplies the figure). gh run 39105225319 (engine-playtest --lib highlights brief_eval trajectory scorecard frame_stale: 36 passed, 1 ignored) and full engine-playtest --lib 373 passed, run 39103617132.
 
 ### Engine review: frame and look (owner 2026-10-10, `docs/plan/render-look.md`)
 
@@ -504,7 +504,7 @@ Same source and routing as the frame section above.
   tick; `slow 0.5` makes two frames give one tick; `hash` at tick 600 equals
   `d57b5c8ae3096614`. F2P: no console verb today. P2P: golden unchanged; `cargo
   test -p engine-render --lib` green. Review: runtime.md G6, testing.md G12
-  (geaen 9.2-9.6). needs: EG25.
+  (geaen 9.2-9.6). needs: EG25. Progress 2026-10-18: not built (no console.rs). The time half now exists: crates/game/src/virt.rs VirtualClock (GP45, 033aaca3) is the thing a `slow` verb sets and pause/step already sit in bin/arena.rs (--pause-at-tick, --step). Left: (1) the window cannot print a console line: render has OverlayRing::push_text (crates/render/src/overlay.rs:131) but Presenter forwards only push_hp_bar and clear_overlay (present/gpu_present/presenter.rs, another session's file); (2) hash and stats are door verbs and engine-game cannot call engine-endpoint (the endpoint depends on game), so they need a small trait in game that the endpoint implements.
 - [x] EG27 game: a gamepad backend — `crates/game/src/pad.rs` Landed 03a45f91. pad.rs poll_gilrs_once; same run.
   (`PadFrame::snapshot`, line 59) is data only: no device crate is in any
   Cargo.toml and nothing polls a pad, so a fighter on Windows has no pad. Add
@@ -770,7 +770,7 @@ the plan file until a row is needed. Endpoint rows serialize (one builder per
 crate): AD3, AD9, AD20 step 1, AD7, AD2, AD12, AD13, AD8, then the second
 pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
 
-- [ ] AD1 playtest: stale-capture guard and typed ABSTAIN — the frozen check
+- [x] AD1 playtest: stale-capture guard and typed ABSTAIN — the frozen check
   sees identical runs only. Add a pose-aware check: a camera pose digest that
   moved while the frame digest stayed the same is `FrameFault::Stale`; a
   timed-out or void judge result is `Abstain(reason)`, never Pass. Source:
@@ -785,7 +785,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `check_digest_window` takes digests only and no pose, and `grep -ri abstain
   crates` finds nothing. P2P: `cargo test -p engine-playtest --lib
   frame_check` green; golden unchanged. Plan: `docs/plan/forge-adoption.md`
-  AD-1. needs: none.
+  AD-1. needs: none. Landed 33263e14. frame_check check_pose_sequence: consecutive captures with an equal digest while the camera moved over 100 cm are FrameFault::Stale; a timed-out or void capture is SequenceVerdict::Abstain(reason), never Pass (a fault in the arrived frames wins). Integer cm poses. Tests frame_stale_poses_26_m_apart_with_equal_digests_fault (2600 cm), frame_stale_same_poses_with_different_digests_pass, frame_stale_negative_control_one_digest_byte_flips_the_result, frame_stale_timeout_and_void_abstain_never_pass, frame_stale_a_still_camera_may_repeat_a_frame; frame_check suite green. Left: the look/judge.rs hunk, the judge module was removed in f1a4f9d7 (restore is LF15/PQ21 territory), and the pose field in game capture.rs manifest. gh run 39105225319 (engine-playtest --lib highlights brief_eval trajectory scorecard frame_stale: 36 passed, 1 ignored) and full engine-playtest --lib 373 passed, run 39103617132.
 - [ ] AD2 editor: landed-digest read-back on every door write — `Applied`
   carries before, staged and after digests; the service refuses
   `landed_mismatch` when the landed digest differs from the staged one; a save
@@ -813,7 +813,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   and 7 of 14 offline checks cannot fire through the door. P2P: `cargo test -p
   engine-endpoint --lib` green; golden unchanged. Completes with AD7. Plan:
   `docs/plan/forge-adoption.md` AD-3. needs: none.
-- [ ] AD4 tools: no hollow green — `Verdict` gets `checks_run` and passes only Progress 2026-10-17: `Verdict.checks_run` and the NoChecks failure are in (022cf59, playtest `zero_checks_is_never_a_pass`, `verify_counts_three_checks_and_prints_them`) and `proof.mjs` turns a zero-test cargo leg into RED ("zero tests ran"). Left: the `target/proof/<gate>-latest.json` green record with 25 h drift FAIL, the gpu_live `not_wired` print, and the node tests for them; no test is named `verdict_checks_run`.
+- [x] AD4 tools: no hollow green — `Verdict` gets `checks_run` and passes only Progress 2026-10-17: `Verdict.checks_run` and the NoChecks failure are in (022cf59, playtest `zero_checks_is_never_a_pass`, `verify_counts_three_checks_and_prints_them`) and `proof.mjs` turns a zero-test cargo leg into RED ("zero tests ran"). Left: the `target/proof/<gate>-latest.json` green record with 25 h drift FAIL, the gpu_live `not_wired` print, and the node tests for them; no test is named `verdict_checks_run`.
   above 0; `proof.mjs` turns "running 0 tests" and a zero-test filter into
   RED; a green record `target/proof/<gate>-latest.json` (sha, time) is written
   on GREEN only and drift FAILs a stale one; gpu_live `live` comes from a
@@ -826,8 +826,8 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `pass=false`. F2P: `pass = failures.is_empty()` and no zero-test rule exist
   today. P2P: `node --test tools/` green; `cargo test -p engine-playtest
   --lib` green; golden unchanged. Plan: `docs/plan/forge-adoption.md` AD-4.
-  needs: none.
-- [ ] AD5 tools: unwired-code gate — `packet-gate` fails a new `pub` fn,
+  needs: none. Landed 870231e1. node --test tools/proof.test.mjs x2 31 pass (ranAtLeastOneTest zero-test RED, driftVerdict 25 h FAIL, recordGreen red run leaves the record, gpuLiveReceipt not_wired); cargo test -p engine-playtest --lib verdict_checks_run 4 passed (run 39102360668). Full playtest --lib currently fails to compile on another session's eval.rs door.submit borrow (run 39102750013), not on the four renamed tests.
+- [x] AD5 tools: unwired-code gate — `packet-gate` fails a new `pub` fn,
   struct or enum in the diff that has no non-test caller outside its own file
   unless the packet names a consumer row (UNLOCKS); `--orphans` prints a
   report-only list of existing orphans (no deletes). Source: E09#9, E12#10,
@@ -837,7 +837,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   called from another module PASSes; an UNLOCKS row exempts it; fixtures
   shaped like px36, rt19, fix5 and fix3c FAIL. F2P: no caller rule exists in
   packet-gate (BLOCKERS holds four "unwired" fingerprints x2-3). P2P: `node
-  --test tools/` green. Plan: `docs/plan/forge-adoption.md` AD-5. needs: none.
+  --test tools/` green. Plan: `docs/plan/forge-adoption.md` AD-5. needs: none. Landed 84fe99f. The packet-gate tool and test were cut with the packet loop, so the rule lives in tools/wiring-scan.mjs --diff[=REV] --unlocks=ROW --orphans. node --test tools/wiring-scan.test.mjs 17 pass: uncalled new pub fn FAILs, called from another file PASSes, open UNLOCKS row exempts (closed row refused), fixtures shaped like px36, rt19, fix5 and fix3c FAIL.
 - [ ] AD6 assets: one licence table with duties, weights out of git, licence
   filter in search — `provenance.rs` holds the one table (SPDX, may_ship,
   duties); `check_release` refuses CC-BY without credit text and marks
@@ -1073,7 +1073,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   agree on 20 seeded layouts. F2P: every staged actor shares polygon 0 and
   every pair answers reachable (`scene_query.rs:952-956`, `:1062-1070`). P2P:
   `cargo test -p engine-endpoint --lib` green; golden unchanged. Step 2 is
-  better after AD7. Plan: `docs/plan/forge-adoption.md` AD-20. needs: none. Progress 2026-10-18: crates/nav/src/reach.rs landed 135bb63f (reach_view gives every actor its real nav polygon, nav_view for the bake checks, two rooms read Blocked until a doorway joins them, mesh and tiles agree on 20 seeded layouts; run 39076864508, clippy 39077965931); left: endpoint needs_nav_view refusal and replacing open_floor in scene_query.rs (lane A).
+  better after AD7. Plan: `docs/plan/forge-adoption.md` AD-20. needs: none. Progress 2026-10-18: crates/nav/src/reach.rs landed 135bb63f (reach_view gives every actor its real nav polygon, nav_view for the bake checks, two rooms read Blocked until a doorway joins them, mesh and tiles agree on 20 seeded layouts; run 39076864508, clippy 39077965931); left: endpoint needs_nav_view refusal and replacing open_floor in scene_query.rs (lane A). Progress 2026-10-18: endpoint half landed dc6710ae: scene.query reachable reads each staged actor's engine_nav mesh polygon from ServerState::with_nav and refuses needs_nav_view without a mesh, open_floor is gone; reach_door_refuses_needs_nav_view_when_no_mesh_is_held and reach_door_two_rooms_are_blocked_across_the_wall_until_a_door_joins_them green (run 39109659487); mesh and tiles on 20 layouts is engine-nav's reach_door test (135bb63f). Left: a host that bakes and hands the door a mesh (none does yet), and build_level reading the same view.
 
 Second pass (owner 2026-10-11, `docs/plan/forge-adoption.md` section J): four
 more research passes gave 43 candidate rows. These 14 are the best; the rest
@@ -1119,7 +1119,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   no playable verdict (`grep -n playable tools/proof.mjs` finds none). P2P:
   `node --test tools/` green; golden hash unchanged. Plan:
   `docs/plan/forge-adoption.md` section J (A29). needs: AD4.
-- [ ] AD23 playtest: trajectory checks — an eval task can require a call order
+- [x] AD23 playtest: trajectory checks — an eval task can require a call order
   (`scene.read` before `tx.apply`), and a write that names an object id no
   earlier read returned fails with `ungrounded: <id>`. One check in the eval
   harness; the door executor logs each call and each id a read returned.
@@ -1134,7 +1134,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   `crates/playtest/src` (the `trajectory` in `agent.rs` is a fighter pose
   path). P2P: `cargo test -p engine-playtest --lib` green; the 75-row eval
   report bytes unchanged; golden hash unchanged. Plan:
-  `docs/plan/forge-adoption.md` section J (A22). needs: none.
+  `docs/plan/forge-adoption.md` section J (A22). needs: none. Landed 4aef2869. door.rs Door logs each call and the ids a read returned or a write named; eval/trajectory.rs check_trajectory judges order first then grounding (ungrounded: <id>); EvalTask::required_calls makes the clean apply rows (a13, a14) read then write on the fixture scene, row bytes unchanged. Tests trajectory_ghost_id_fails_ungrounded, trajectory_skipped_read_fails_the_order_check, trajectory_read_then_write_passes, trajectory_one_flipped_id_bit_flips_the_result, trajectory_apply_rows_hold_the_order_and_replay_equal; the EV1 suite stays green. gh run 39105225319 (engine-playtest --lib highlights brief_eval trajectory scorecard frame_stale: 36 passed, 1 ignored) and full engine-playtest --lib 373 passed, run 39103617132.
 - [ ] AD24 playtest: capture visibility — each capture receipt names its focus
   subject's state, read from the same frame's view truth (SP62 `view.observe`:
   a body with a null screen rect is `not_in_view`; a body with a rect and

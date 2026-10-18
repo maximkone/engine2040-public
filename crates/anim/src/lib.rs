@@ -62,6 +62,9 @@ pub mod lod;
 mod lod_w1_test;
 pub mod motion_match;
 pub mod motion_net;
+/// Style and terrain dials for the motion-matching search: style and grade tags
+/// from the LOC2 bake steer the integer scan. Integer-only (NS7).
+pub mod motion_style;
 #[cfg(test)]
 mod motion_schema_test;
 /// Per-fighter pose-hash rings naming the first divergent tick and fighter
@@ -86,6 +89,9 @@ pub mod springs;
 /// integer-tick playback. Std-only; the JSON and door layer sits behind the
 /// `json` feature.
 pub mod state_machine;
+/// The spear throw as a masked override on the final pose: the arm loads back,
+/// sweeps to point, holds and lets go. Std-only presentation (SG3).
+pub mod throw_layer;
 /// Weapon-trail rings plus the FPS viewmodel pose that feeds them.
 /// Std-only presentation; the fighter look draws each attacking slot's ring
 /// as a view-only strip, the render forward pass reads the strip vertices.
@@ -93,6 +99,8 @@ pub mod trails;
 pub mod traversal;
 #[cfg(test)]
 mod traversal_link_test;
+#[cfg(test)]
+mod traversal_siege_test;
 pub mod viseme;
 /// GASP-class ground feel: distance matching, orientation warping and
 /// stride warping over locomotion output. Std-only; arena presentation

@@ -64,6 +64,15 @@ mod fighter_look_feet;
 
 use self::fighter_look_feet::{foot_slides, Feet, Legs};
 
+/// The throwing arm of the spear grapple (SG3): the per-slot throw clock, the
+/// layer over the last pose and the palm positions a held spear ties to.
+/// Presentation only.
+#[path = "fighter_look_throw.rs"]
+mod fighter_look_throw;
+
+pub use self::fighter_look_throw::ArmState;
+use self::fighter_look_throw::{throw_arm, Throw};
+
 /// Real-body proofs for the sand rest, the hitstop hold, clip switches and
 /// planted feet (a test-only file).
 #[path = "fighter_look_proofs.rs"]
@@ -73,6 +82,13 @@ mod fighter_look_proofs;
 /// picture instead of backing off to two specks. Presentation only.
 #[path = "fighter_look_shoulder.rs"]
 mod fighter_look_shoulder;
+
+/// The window's stateful fight camera (GP43): the shot through the halflife
+/// springs, the shake, roll and lens punch added after. Presentation only.
+#[path = "fighter_look_cam.rs"]
+mod fighter_look_cam;
+
+pub use self::fighter_look_cam::CamFollow;
 
 /// Ragdoll look (RZ2w): a floored fighter is handed to the float physical layer and drawn from
 /// its bones; the get-up blends back through the inertial offsets. Presentation only.
@@ -236,6 +252,8 @@ struct Rig {
     clips: Vec<ImportedClip>,
     /// Both legs by joint name; `None` plants no feet (LF12).
     legs: Option<Legs>,
+    /// The right arm by joint name; `None` throws nothing (SG3).
+    throw_arm: Option<engine_anim::ik::Limb>,
 }
 
 /// Presentation state for one slot.
@@ -287,6 +305,9 @@ struct SlotAnim {
     /// The slot's planted feet (LF12): where each foot is held on the sand.
     /// They stand still with the clip clock in hitstop. Presentation only.
     feet: Feet,
+    /// The spear throw's clock (SG3): ticks since the spear left the hand.
+    /// Presentation only.
+    throw: Throw,
 }
 
 impl SlotAnim {
@@ -312,6 +333,7 @@ impl SlotAnim {
             held: false,
             iz_age: fighter_look_inertia::NO_OFFSET,
             feet: Feet::new(),
+            throw: Throw::NONE,
         }
     }
 
@@ -930,6 +952,9 @@ pub struct FighterLook {
     /// The ragdoll layer (RZ2w): one float world, a body per floored slot. Presentation only;
     /// the sim never reads it and nothing in it is hashed.
     ragdoll: RagdollLook,
+    /// The slot the fight camera rides behind: the window's human (0, or 1 for
+    /// a network guest). View only.
+    hero: usize,
 }
 
 /// One upload-digest slot per `slot * MAX_PARTS + part`, all empty: the
@@ -1170,6 +1195,7 @@ fn load_rig(
     Ok(Rig {
         radius_m: skin_radius_m(&body),
         legs: Legs::find(&body.skeleton, &body.bind.positions),
+        throw_arm: throw_arm(&body.skeleton),
         variant: binding.variant.clone(),
         bind_pelvis: body.bind.positions[pelvis],
         skeleton: body.skeleton,
@@ -1374,7 +1400,17 @@ impl FighterLook {
             uploaded_digest: empty_upload_digest(),
             inertia,
             ragdoll,
+            hero: 0,
         })
+    }
+
+    /// Ride the fight camera behind `slot` (the window's human) instead of
+    /// slot 0: the shoulder shot, the hero close-up and the duel framing all
+    /// follow it. A slot past the look's range keeps the last one. View only.
+    pub fn set_hero(&mut self, slot: u8) {
+        if usize::from(slot) < MAX_LOOK_FIGHTERS {
+            self.hero = usize::from(slot);
+        }
     }
 
     /// Pinned bundle SHAs of the bound variants, manifest order.
@@ -1732,6 +1768,8 @@ impl FighterLook {
         // LF12: plant the feet last, on top of the inertial offsets, so a clip
         // switch stays continuous and the feet hold their spot on the sand.
         let contacts = self.plant_feet(rig, slot, &mut pose, yaw, alpha)?;
+        // SG3: the spear throw is a masked override on the final pose, last of all.
+        self.lay_throw(rig, index, slot, &mut pose, alpha)?;
         let world = skinning_matrices(&rig.skeleton, &pose)
             .map_err(|err| LookError::Skin(format!("{err:?}")))?;
         let slides = foot_slides(rig.legs, &world, &contacts, (pos, yaw));
@@ -2187,13 +2225,14 @@ impl FighterLook {
     /// nearest other fighter (standing rivals first). `None` without a
     /// seen hero plus rival.
     fn duel(&self, fighters: usize) -> Option<([f32; 3], f32, f32)> {
-        let hero = self.slots.first().filter(|slot| slot.seen)?;
+        let hero = self.slots.get(self.hero).filter(|slot| slot.seen)?;
         let rival = self
             .slots
             .iter()
             .take(fighters.min(MAX_LOOK_FIGHTERS))
-            .skip(1)
-            .filter(|slot| slot.seen)
+            .enumerate()
+            .filter(|(index, slot)| *index != self.hero && slot.seen)
+            .map(|(_, slot)| slot)
             .min_by(|a, b| {
                 let key = |slot: &SlotAnim| {
                     let (dx, dz) = (slot.pos[0] - hero.pos[0], slot.pos[2] - hero.pos[2]);
@@ -2208,6 +2247,14 @@ impl FighterLook {
         Some((mid, half, dx.atan2(dz)))
     }
 
+    /// Farthest the camera eye may sit from the pit center on either floor
+    /// axis, meters: the pit wall less a 0.6 m margin; unbounded without a ring.
+    fn pit_limit_m(&self) -> f32 {
+        self.ring
+            .as_ref()
+            .map_or(f32::MAX, |ring| ring.wall_m - 0.6)
+    }
+
     /// View-only shake sample for the fight camera (LF11): one
     /// [`crate::camera::shake_offset`] sample for this tick's trauma, as an
     /// `[x, y, z]` vector added to both eye and target. Pure; zero trauma
@@ -2217,11 +2264,9 @@ impl FighterLook {
         [shake.x, shake.y, shake.z]
     }
 
-    /// Wide establishing camera aimed at `center` (LF11 shake included):
-    /// keeps the base eye, aims at the fight, then moves both by the shake
-    /// sample before validate. Pure presentation.
-    fn wide_camera(&self, base: &Camera, center: [f32; 3]) -> Camera {
-        let shake = self.fight_shake_vec();
+    /// Wide establishing camera aimed at `center`: keeps the base eye, aims at
+    /// the fight, then moves both by `shake` before validate. Pure presentation.
+    fn wide_camera(base: &Camera, center: [f32; 3], shake: [f32; 3]) -> Camera {
         let mut camera = base.clone();
         camera.target = [center[0], 1.0, center[2]].into();
         let eye_arr = camera.eye.to_array();
@@ -2252,10 +2297,27 @@ impl FighterLook {
     /// view direction holds; zero trauma leaves the shot untouched.
     #[must_use]
     pub fn fight_camera(&self, base: &Camera, shot: Shot, fighters: usize, frame: u32) -> Camera {
-        let seen: Vec<[f32; 3]> = self
-            .slots
-            .iter()
-            .take(fighters.min(MAX_LOOK_FIGHTERS))
+        self.fight_camera_with(base, shot, fighters, frame, self.fight_shake_vec())
+    }
+
+    /// The shot of [`Self::fight_camera`] with `shake` moving eye and target
+    /// together; `[0.0; 3]` is the calm shot the stateful follower smooths
+    /// (`fighter_look_cam`) before it adds the shake back.
+    #[must_use]
+    fn fight_camera_with(
+        &self,
+        base: &Camera,
+        shot: Shot,
+        fighters: usize,
+        frame: u32,
+        shake: [f32; 3],
+    ) -> Camera {
+        // The hero first (the shoulder shot rides the first body), then the rest in slot order.
+        let fighters = fighters.min(MAX_LOOK_FIGHTERS);
+        let seen: Vec<[f32; 3]> = std::iter::once(self.hero)
+            .filter(|hero| *hero < fighters)
+            .chain((0..fighters).filter(|index| *index != self.hero))
+            .filter_map(|index| self.slots.get(index))
             .filter(|slot| slot.seen)
             .map(|slot| slot.pos)
             .collect();
@@ -2277,14 +2339,14 @@ impl FighterLook {
         // shot, close and readable at any separation; the side-on fit below
         // stays for bouts of three or more and when the pit blocks the shot.
         if shot == Shot::Action {
-            if let Some(camera) = self.shoulder_duel(base, &seen) {
+            if let Some(camera) = self.shoulder_duel(base, &seen, shake) {
                 return camera;
             }
         }
         let turn = f32::from(u16::try_from(frame % 3600).unwrap_or(0)) * 0.0025;
         let (focus, distance, height, look_y, azimuth) = match shot {
             Shot::Hero => {
-                let hero = self.slots[0];
+                let hero = self.slots[self.hero];
                 let at = if hero.seen { hero.pos } else { first };
                 (at, 3.4, 1.55, 1.15, hero.yaw + 0.55 + turn * 0.2)
             }
@@ -2307,17 +2369,13 @@ impl FighterLook {
                 ),
             },
             Shot::Wide => {
-                return self.wide_camera(base, center);
+                return Self::wide_camera(base, center, shake);
             }
         };
         // Keep the eye inside the pit so the wall never blocks the shot.
-        let limit = self
-            .ring
-            .as_ref()
-            .map_or(f32::MAX, |ring| ring.wall_m - 0.6);
+        let limit = self.pit_limit_m();
         // View-only shake (LF11): one sample moves both eye and target
         // before validate, so the same ticks give the same offsets.
-        let shake = self.fight_shake_vec();
         let spec = ShotSpec {
             focus,
             distance,
@@ -2441,6 +2499,7 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            hero: 0,
         }
     }
 
@@ -2507,6 +2566,7 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            hero: 0,
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -2597,6 +2657,32 @@ mod tests {
             hero.eye.y < 1.9,
             "the hero shot keeps its own boom: {:?}",
             hero.eye
+        );
+    }
+
+    #[test]
+    fn a_network_guest_gets_the_shoulder_of_its_own_slot() {
+        // The guest plays slot 1: the camera rides behind slot 1, so W walks
+        // at the rival instead of away from it.
+        let mut look = look_at(&[[-8.0, 1.0], [7.0, -2.0]]);
+        look.set_hero(1);
+        let cam = look.fight_camera(&arena_base(), Shot::Action, 2, 0);
+        assert_eq!(look.fighters_in_view(&cam, 2), 2, "both bodies in picture");
+        let eye = cam.eye.to_array();
+        assert!(
+            (eye[0] - 7.0).hypot(eye[2] + 2.0) < 6.0,
+            "eye rides slot 1: {eye:?}"
+        );
+        assert!(
+            (eye[0] + 8.0).hypot(eye[2] - 1.0) > 9.0,
+            "not slot 0: {eye:?}"
+        );
+        look.set_hero(99);
+        let kept = look.fight_camera(&arena_base(), Shot::Action, 2, 0);
+        assert_eq!(
+            kept.eye.to_array(),
+            eye,
+            "an out-of-range slot keeps the hero"
         );
     }
 
@@ -2749,6 +2835,7 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            hero: 0,
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -2975,7 +3062,7 @@ mod tests {
         assert_eq!(since(&again, 2), since(&look, 2), "bystander replays");
     }
 
-    fn balance_look_two() -> FighterLook {
+    pub(super) fn balance_look_two() -> FighterLook {
         let mut slots = vec![SlotAnim::new(); MAX_LOOK_FIGHTERS];
         for (s, x) in slots.iter_mut().take(2).zip([-1.0, 1.0]) {
             s.seen = true;
@@ -2996,6 +3083,7 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            hero: 0,
         }
     }
 
@@ -5198,6 +5286,7 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            hero: 0,
         };
         assert_eq!(
             empty

@@ -741,9 +741,8 @@ pub fn submit_chart_gpu(
     }
     encoder.copy_buffer_to_buffer(dst_buf, 0, readback, 0, byte_len);
     queue.submit(Some(encoder.finish()));
-    layer_map_and_wait(device, readback).map_err(MaterialError::Device)?;
-    let back = crate::accel::readback_f32(readback, words as usize, "layer")
-        .map_err(MaterialError::Device)?;
+    layer_map_and_wait(device, readback)?;
+    let back = crate::accel::readback_f32(readback, words as usize, "layer")?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(MaterialError::Validation(format!(
@@ -775,8 +774,18 @@ pub fn submit_chart_gpu(
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `layer` error prefix kept.
 #[cfg(feature = "window")]
-fn layer_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
+fn layer_map_and_wait(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<(), crate::accel::ReadbackError> {
     crate::accel::map_readback(device, buffer, "layer")
+}
+
+#[cfg(feature = "window")]
+impl From<crate::accel::ReadbackError> for MaterialError {
+    fn from(error: crate::accel::ReadbackError) -> Self {
+        Self::Device(error.to_string())
+    }
 }
 
 #[cfg(test)]

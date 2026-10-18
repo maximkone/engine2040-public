@@ -10,7 +10,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 |---|---|---|---|
 | `gh-check.mjs` | One cargo check, test or clippy line on a GitHub runner | `gh-check.test.mjs` | 0 pass, 1 fail, 2 could not run, 3 still running |
 | `workspace-check.mjs` | Workspace audit before landing | `workspace-check.test.mjs` | 0 pass, 1 audit FAIL |
-| `proof.mjs` | Local gate runner: fmt, build, tests, clippy, fixtures, `--perf`, `--mutants` | `proof.test.mjs` | 0 green, 1 fail, 2 bad arguments |
+| `proof.mjs` | Local gate runner: fmt, build, tests, clippy, fixtures, `--perf`, `--mutants`, `--drift` | `proof.test.mjs` | 0 green, 1 fail, 2 bad arguments |
 | `rust-quality.mjs` | Rust quality scorecard and ratchet | `rust-quality.test.mjs` | 0 pass, 1 regression, 2 error |
 | `docs-coverage.mjs` | Public-item doc coverage ratchet | `docs-coverage.test.mjs` | 0 pass, 1 regression, 2 error |
 | `wasm-gate.mjs` | Std calls on the web path that fail in a browser | `wasm-gate.test.mjs` | 0 pass, 1 regression, 2 error |
@@ -56,7 +56,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `mcp-install.mjs` | Copies `e2040-mcp` to `.opencode/bin/` | `mcp-install.test.mjs` | 0 help, 1 failed, 2 bad arguments |
 | `level-check.mjs` | Rome arena layout gate | `level-check.test.mjs` | 0 ok, 1 FAIL, 2 usage or missing input |
 | `beat-lint.mjs` | Ladder beat chart gate | `beat-lint.test.mjs` | 0 pass, 1 fail, 2 usage |
-| `wiring-scan.mjs` | Pub items with no production user | `wiring-scan.test.mjs` | 0, 1 with `--check` when count rises |
+| `wiring-scan.mjs` | Pub items with no production user | `wiring-scan.test.mjs` | 0, 1 with `--check` when count rises, 1 with `--diff` on a new unwired item |
 | `wiring-cov.mjs` | Zero-hit functions from cargo-llvm-cov | `wiring-cov.test.mjs` | 0 report, 1 cargo step failed, 2 tool missing or flags |
 | `bench-compare.mjs` | Warm-up, compare, export for benches | `bench-compare.test.mjs` | 0 pass, 1 fail, 2 usage |
 | `tape-checksum.mjs` | Per-tick FNV-1a64 chain, first divergence | `tape-checksum.test.mjs` | 0 printed, 2 usage or error |
@@ -111,7 +111,10 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 
 ### proof.mjs
 
-- Run: `node tools/proof.mjs` (full); `--skip-build` (fixtures only); `--perf` (timing tests, release, one thread, plus instruction counts on Linux); `--mutants` (cargo-mutants against HEAD); `--help` or `-h`.
+- Run: `node tools/proof.mjs` (full); `--skip-build` (fixtures only); `--perf` (timing tests, release, one thread, plus instruction counts on Linux); `--mutants` (cargo-mutants against HEAD); `--drift` (reads the green records); `--help` or `-h`.
+- A run that ends GREEN writes `target/proof/full-latest.json` (`fixtures-latest.json` for `--skip-build`) with the sha and time; a red run leaves the old record alone. `--drift` FAILs a record that is 25 h old or whose sha is neither HEAD nor an ancestor, and FAILs when no record exists.
+- Static legs in both modes: the rust quality ratchet, the docs coverage ratchet and `mdbook build docs/book` (green only with no WARN or ERROR line; a `[SKIP]` line when mdbook is not installed).
+- A cargo leg whose filter matches no test is RED (`zero tests ran`). The gpu-live line prints `not_wired` unless a `target/reports/pass-truth-<date>.md` device report carries live rows.
 - Other arguments print the usage line and exit 2.
 - Output: `RESULT PASS (all local gates)` or `RESULT PASS (proof fixtures only)` or `RESULT FAIL`. Perf: `RESULT PASS (timing tests, release, one thread)`, `RESULT FAIL (PQ1 input latency)`, `RESULT FAIL (frame times)`, `RESULT FAIL (instruction counts)`. Mutants: `RESULT PASS (mutants: ...)` or `RESULT FAIL (mutants)`.
 - Exit: 0 green, 1 fail, 2 bad arguments.
@@ -458,7 +461,8 @@ Mirror workflows (`.github/workflows/`): `check.yml` (dispatch, one cargo line),
 ### wiring-scan.mjs
 
 - Lists `pub fn|struct|enum|trait|const` items with no production user. Test code skipped.
-- Run: `node tools/wiring-scan.mjs [crates] [--json] [--baseline] [--check] [--help]`. Writes `target/reports/wiring-scan.json`.
+- Run: `node tools/wiring-scan.mjs [crates] [--json] [--baseline] [--check] [--diff[=REV]] [--unlocks=ROW[,ROW]] [--orphans] [--help]`. Writes `target/reports/wiring-scan.json`.
+- `--diff[=REV]` is the unwired-code gate (AD5): a `pub fn`, `struct` or `enum` added since REV (default HEAD; working tree and untracked files count) needs a production user in another file, else exit 1. `--unlocks=ROW` names an open board row that will consume the new items and exempts them (a closed or unknown row is refused). `--orphans` is the default report, the list of existing orphans; nothing is deleted.
 - `--check` exits 1 when the count rises above the pinned baseline. `workspace-check.mjs` reuses its verdict cache.
 - Baselines: `tools/wiring-scan.baseline.json`, `tools/wiring-baseline.json`. Run lock in `target/locks/`.
 

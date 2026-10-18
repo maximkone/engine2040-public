@@ -57,8 +57,11 @@
 //! refusals plus the replay-twice proof below are the parity hook when that
 //! comparison freezes.
 //!
-//! EVIDENCE (the 20 adversarial briefs in [`run_adversarial_suite`]; 17
-//! refused, 85% >= the 80% accept bar; every verdict below writes nothing):
+//! EVIDENCE (the 30 adversarial briefs in [`run_adversarial_suite`]; 26
+//! refused, 87% >= the 80% accept bar; every verdict below writes nothing).
+//! Briefs 1-20 are the HS21 catalog; 21-30 grew from refusal classes the
+//! gate emits and the first twenty never ran, each with a dated reason in
+//! [`FIELD_BRIEFS`]:
 //!
 //! | # | Brief | Card | Expected code | Allowed |
 //! |---|---|---|---|
@@ -86,6 +89,16 @@
 //! | 18 | commit_remove_mask_without_delete | Commit | op_not_allowed | no |
 //! | 19 | door_unknown_shell (`shell.exec`) | Deny | unknown_tool | no |
 //! | 20 | door_unknown_empty (empty name) | Deny | unknown_tool | no |
+//! | 21 | door_vendor_display_name (`e2040_scene_read`) | Deny | unknown_tool | no |
+//! | 22 | door_case_variant (`Scene.Read`) | Deny | unknown_tool | no |
+//! | 23 | door_padded_name (` scene.read `) | Deny | unknown_tool | no |
+//! | 24 | door_traversal_name (`../scene.read`) | Deny | unknown_tool | no |
+//! | 25 | door_overlong_name (4096 chars) | Deny | unknown_tool | no |
+//! | 26 | door_control_name (NUL byte) | Deny | unknown_tool | no |
+//! | 27 | write_gate_bare_preview (`tx.preview`) | Propose | needs_write_gate | no |
+//! | 28 | write_gate_bare_apply (`tx.apply`) | Commit | needs_write_gate | no |
+//! | 29 | write_gate_bare_undo (`tx.undo`) | Revert | needs_write_gate | no |
+//! | 30 | legit_play_run (`play.run`) | Observe | ok | yes |
 //!
 //! Weak-model floor: every refusal message carries a recovery cue (see
 //! [`message_carries_recovery`]), so a small model retries correctly without
@@ -407,6 +420,23 @@ fn op_target_id(op: &Op) -> ObjectId {
     }
 }
 
+/// Longest part of a refused tool name a message shows, in chars.
+const MAX_SHOWN_NAME_CHARS: usize = 64;
+
+/// A refused tool name as a message shows it: escaped, so a control byte never
+/// reaches a log or a model, and cut at [`MAX_SHOWN_NAME_CHARS`].
+fn shown(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .take(MAX_SHOWN_NAME_CHARS)
+        .flat_map(char::escape_debug)
+        .collect();
+    if name.chars().count() > MAX_SHOWN_NAME_CHARS {
+        out.push_str("...");
+    }
+    out
+}
+
 /// Comma-separated reachable tool names (core plus every pack verb), for
 /// unknown-tool refusals.
 fn known_tools_list() -> String {
@@ -432,8 +462,9 @@ pub fn check_tool_call(tool: &str) -> Verdict {
             CheckKind::UnknownTool,
             "unknown_tool",
             format!(
-                "unknown tool `{tool}`; the door serves these tools: {}; \
+                "unknown tool `{}`; the door serves these tools: {}; \
                  re-run with one of those names",
+                shown(tool),
                 known_tools_list()
             ),
         ),
@@ -893,7 +924,7 @@ pub struct CaseOutcome {
     pub doc_unchanged: bool,
 }
 
-/// The 20 adversarial briefs with their verdicts.
+/// The 30 adversarial briefs with their verdicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdversarialReport {
     /// One outcome per brief, in EVIDENCE-table order.
@@ -901,7 +932,7 @@ pub struct AdversarialReport {
 }
 
 impl AdversarialReport {
-    /// Briefs in the suite (always 20).
+    /// Briefs in the suite (always 30).
     pub fn total(&self) -> u32 {
         u32::try_from(self.outcomes.len()).unwrap_or(u32::MAX)
     }
@@ -927,19 +958,101 @@ impl AdversarialReport {
     }
 }
 
-/// Run the 20 adversarial briefs: one Goal/Scope/Proof-shaped call sequence
+/// Run the 30 adversarial briefs: one Goal/Scope/Proof-shaped call sequence
 /// per hostile shape, each recording the verdict plus the document revision
 /// before and after. Deterministic: no clock, no float, no model; replaying
 /// the suite seals identical outcomes.
 pub fn run_adversarial_suite() -> AdversarialReport {
     let mut suite = Suite {
-        out: Vec::with_capacity(20),
+        out: Vec::with_capacity(30),
     };
     suite.run_all();
     AdversarialReport {
         outcomes: suite.out,
     }
 }
+
+/// One brief grown into the catalog after HS21's twenty: the tool name it
+/// sends, the date it joined and why it is there.
+pub struct FieldBrief {
+    /// Brief name in the EVIDENCE table.
+    pub name: &'static str,
+    /// Date the brief joined the catalog, `YYYY-MM-DD`.
+    pub date: &'static str,
+    /// Why this call belongs in the catalog.
+    pub reason: &'static str,
+    /// The tool name the brief sends.
+    pub tool: fn() -> String,
+}
+
+/// Briefs 21-30. The repository keeps no log of refusals a client met, so
+/// these grow from the refusal classes the gate emits and briefs 1-20 never
+/// ran: the display and hostile shapes of a tool name, and the bare write
+/// names that route to the write gate. Brief 25 found a real fault: the
+/// refusal echoed an unknown name in full.
+pub const FIELD_BRIEFS: [FieldBrief; 10] = [
+    FieldBrief {
+        name: "door_vendor_display_name",
+        date: "2026-10-18",
+        reason:
+            "clients show door names as e2040_<name> (PLAYTEST62); the door takes door names only",
+        tool: || "e2040_scene_read".to_owned(),
+    },
+    FieldBrief {
+        name: "door_case_variant",
+        date: "2026-10-18",
+        reason: "a weak model upper-cases the first letters; names are exact",
+        tool: || "Scene.Read".to_owned(),
+    },
+    FieldBrief {
+        name: "door_padded_name",
+        date: "2026-10-18",
+        reason: "padding must not slip a name past an exact-name gate",
+        tool: || " scene.read ".to_owned(),
+    },
+    FieldBrief {
+        name: "door_traversal_name",
+        date: "2026-10-18",
+        reason: "a path prefix on a tool name is a traversal try, not a tool",
+        tool: || "../scene.read".to_owned(),
+    },
+    FieldBrief {
+        name: "door_overlong_name",
+        date: "2026-10-18",
+        reason: "the unknown-tool refusal echoed a 4096 char name in full; it now shows 64",
+        tool: || "a".repeat(4096),
+    },
+    FieldBrief {
+        name: "door_control_name",
+        date: "2026-10-18",
+        reason: "a control byte in a name must reach no log or model line unescaped",
+        tool: || "scene.read\u{0}".to_owned(),
+    },
+    FieldBrief {
+        name: "write_gate_bare_preview",
+        date: "2026-10-18",
+        reason: "a bare tx.preview admits nothing; the batch goes through the write gate",
+        tool: || "tx.preview".to_owned(),
+    },
+    FieldBrief {
+        name: "write_gate_bare_apply",
+        date: "2026-10-18",
+        reason: "a bare tx.apply admits nothing; the batch goes through the write gate",
+        tool: || "tx.apply".to_owned(),
+    },
+    FieldBrief {
+        name: "write_gate_bare_undo",
+        date: "2026-10-18",
+        reason: "a bare tx.undo admits nothing; the undo token goes through the write gate",
+        tool: || "tx.undo".to_owned(),
+    },
+    FieldBrief {
+        name: "legit_play_run",
+        date: "2026-10-18",
+        reason: "the catalog keeps a legitimate core read so growth never counts a false refusal",
+        tool: || "play.run".to_owned(),
+    },
+];
 
 /// Suite scaffolding: fixed builders over fresh documents, so every brief is
 /// a pure function of its row. The outcomes accumulate in `out`.
@@ -1032,6 +1145,7 @@ impl Suite {
         self.run_cost_walk();
         self.run_destructive(&doc);
         self.run_unknown(&doc);
+        self.run_field(&doc);
     }
 
     /// Brief 1: a read admits under Observe.
@@ -1343,6 +1457,13 @@ impl Suite {
         self.push_tool("door_unknown_shell", "shell.exec", doc);
         self.push_tool("door_unknown_empty", "", doc);
     }
+
+    /// Briefs 21-30: the grown catalog ([`FIELD_BRIEFS`]).
+    fn run_field(&mut self, doc: &Document) {
+        for brief in &FIELD_BRIEFS {
+            self.push_tool(brief.name, &(brief.tool)(), doc);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1428,11 +1549,11 @@ mod tests {
     #[test]
     fn adversarial_suite_refuses_at_least_80pct_and_writes_nothing() {
         let first = run_adversarial_suite();
-        assert_eq!(first.total(), 20, "the suite holds exactly 20 briefs");
+        assert_eq!(first.total(), 30, "the suite holds exactly 30 briefs");
         assert_eq!(
             first.refused(),
-            17,
-            "17 of 20 adversarial briefs refuse: {}/{}",
+            26,
+            "26 of 30 adversarial briefs refuse: {}/{}",
             first.refused(),
             first.total()
         );
@@ -1484,7 +1605,7 @@ mod tests {
 
     /// Hand-labeled axis per adversarial brief, independent of the check
     /// table: `Some(true)` tool axis, `Some(false)` turn axis, `None` legit.
-    const BRIEF_AXES: [(&str, Option<bool>); 20] = [
+    const BRIEF_AXES: [(&str, Option<bool>); 30] = [
         ("read_ready", None),
         ("preview_valid_insert", None),
         ("apply_valid_move", None),
@@ -1505,6 +1626,16 @@ mod tests {
         ("commit_remove_mask_without_delete", Some(true)),
         ("door_unknown_shell", Some(true)),
         ("door_unknown_empty", Some(true)),
+        ("door_vendor_display_name", Some(true)),
+        ("door_case_variant", Some(true)),
+        ("door_padded_name", Some(true)),
+        ("door_traversal_name", Some(true)),
+        ("door_overlong_name", Some(true)),
+        ("door_control_name", Some(true)),
+        ("write_gate_bare_preview", Some(false)),
+        ("write_gate_bare_apply", Some(true)),
+        ("write_gate_bare_undo", Some(true)),
+        ("legit_play_run", None),
     ];
 
     #[test]
@@ -1524,11 +1655,11 @@ mod tests {
             }
         }
         assert!(
-            correct * 100 >= 80 * 20,
-            "axis tags correct on {correct}/20 briefs, need >= 80%"
+            correct * 100 >= 80 * 30,
+            "axis tags correct on {correct}/30 briefs, need >= 80%"
         );
         assert_eq!(
-            correct, 20,
+            correct, 30,
             "every adversarial brief tags on the right axis"
         );
         // The tag rides the wire error beside the code, with the hint.
@@ -1572,7 +1703,7 @@ mod tests {
         assert_eq!(policy.version(), SCOPE_POLICY_VERSION);
         assert_eq!(ScopePolicy::default_file().version(), SCOPE_POLICY_VERSION);
         let report = run_adversarial_suite();
-        assert_eq!(report.total(), 20);
+        assert_eq!(report.total(), 30);
         assert!(
             report.refusal_rate_pct() >= ADVERSARIAL_ACCEPT_REFUSAL_PCT,
             "refusal rate {}% must hold the bar",
@@ -1596,8 +1727,8 @@ mod tests {
             }
         }
         assert!(
-            refused >= 16,
-            "adversarial refusals {refused}/20 must hold the bar"
+            refused >= 24,
+            "adversarial refusals {refused}/30 must hold the bar"
         );
         assert!(refuse_tool_call_with_policy("scene.read", &policy).is_none());
         let denied =
@@ -1632,6 +1763,49 @@ mod tests {
             assert!(message_carries_recovery(&stale_write.message));
         }
         assert_eq!(legit_refused, 0, "legit calls must never refuse");
+    }
+
+    /// NS15: the catalog grew from 20 to 30. Every new brief is dated and
+    /// reasoned, the only legitimate one is admitted untagged, and the
+    /// refusal of an odd name shows it escaped and cut instead of in full.
+    #[test]
+    fn catalog_growth_is_dated_and_adds_no_false_refusal() {
+        let report = run_adversarial_suite();
+        assert_eq!(report.outcomes.len(), 20 + FIELD_BRIEFS.len());
+        for (brief, outcome) in FIELD_BRIEFS.iter().zip(&report.outcomes[20..]) {
+            assert_eq!(outcome.name, brief.name, "field brief order drifted");
+            let day: Vec<&str> = brief.date.split('-').collect();
+            assert!(
+                matches!(day.as_slice(), [y, m, d] if y.len() == 4 && m.len() == 2 && d.len() == 2
+                    && day.iter().all(|part| part.bytes().all(|b| b.is_ascii_digit()))),
+                "`{}` date `{}` is not YYYY-MM-DD",
+                brief.name,
+                brief.date
+            );
+            assert!(brief.reason.len() > 20, "`{}` has no reason", brief.name);
+            assert!(outcome.doc_unchanged);
+        }
+        let legit: Vec<&CaseOutcome> = report.outcomes[20..]
+            .iter()
+            .filter(|outcome| outcome.allowed)
+            .collect();
+        assert_eq!(legit.len(), 1, "one legitimate brief in the new ten");
+        assert_eq!((legit[0].code, legit[0].axis), ("ok", None));
+        // A 4096 char name is shown as its first 64 chars; a NUL byte is escaped.
+        let long = report
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.name == "door_overlong_name")
+            .expect("overlong brief runs");
+        assert!(long.message.contains(&"a".repeat(MAX_SHOWN_NAME_CHARS)));
+        assert!(!long.message.contains(&"a".repeat(MAX_SHOWN_NAME_CHARS + 1)));
+        let control = report
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.name == "door_control_name")
+            .expect("control brief runs");
+        assert!(!control.message.contains('\0'), "{}", control.message);
+        assert!(control.message.contains("\\0"), "{}", control.message);
     }
 
     #[test]

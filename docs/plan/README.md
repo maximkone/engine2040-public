@@ -12,6 +12,8 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `status-2026-10-17.md` — NOW — all four — one-screen truth check: what is verified green this week, what code was cut, which rows are unbuilt, and the owner's open decisions; read it before trusting a status cell in any plan
 - `web-and-realism.md` — NOW — Look, Bodies, Multiplayer — heavy realistic games on Windows and in the browser: the wasm build, the physical layer (ragdoll, severed limbs, debris), the lit and textured arena, browser multiplayer, and an AI-driven project setup (rows WEB, RZ, VR, AIS)
 - `wiring-triage-2026-10-17.md` — NEXT — all four — what exists but nothing calls: the cut verdicts, 29 unwired features with their missing call sites, ten wirings with paste-ready rows
+- `2026-10-18-handoff.md` — NEXT — all four — what is landed, what is unproven, the hard rules and the ordered next steps for a weaker agent after the weekly token limit
+- `2026-10-18-deleted-code-triage.md` — NEXT — Look, AI door — verdict (replaced, dead, later, restore) for each of the 54 files the rot cuts removed, the rows that name them, and the order to bring back the look judge, display modes, clip_hold and texture streaming
 - `design-review-2026-10-17.md` — NEXT — all four — 13 ranked design findings (DSN1-DSN13) with a board row each
 - `render-look.md` — NOW — Look — moving fighter captures on the RTX 3050 stand beside the references: arena kit, window build, Q1 reference captures
 - `body-and-break.md` — NOW — Bodies — cuts, limbs, ragdoll, collapse and fire give one hash on every PC and in replay (physics base inside)
@@ -24,12 +26,15 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `ai-native.md` — NOW — AI door — any model drives the engine through one typed door; every change checked, undoable, receipted
 - `ai-door.md` — NOW — AI door — the five FOCUS Now AI-door slices (AL1, DP1, RB1, LF16, HS20) plus the describe ledger (AID1)
 - `spatial.md` — NOW — AI door — the engine understands a scene as numbers before any model is asked
+- `spatial-entry-points.md` — NEXT — AI door — which `crates/spatial` function answers which agent question, for the `scene.query` and `scene.spatial` verbs
+- `spatial-llm-ab.md` — NEXT — AI door — how to get the real-model spatial number (SP20, SPR4): the cassette harness is done, no model figure exists yet
+- `spatial-names.md` — NEXT — AI door — names, tags and sizes for door actors instead of `prop_NNNN`, the smallest change that keeps the golden
 - `quality.md` — NOW — Look, Bodies, Multiplayer — the engine stays fast and honest: measured budgets, loud faults, no faked green
 - `potato.md` — NOW — all four — every game looks great and runs on a weak PC: wiring gates, the potato tier (gate G9), content fetch and small steals (rows GS1-GS33)
 - `landscape-ideas.md` — LATER — none — the idea backlog from 74 scouts (not rows yet); a planner run promotes one cluster at a time
 - `frontier.md` — NEXT — Look, AI door — every research idea earns a spike (one test, one baseline, a kill rule) before it becomes a row
 - `spear-grapple.md` — NOW — Multiplayer — a throwable spear tethers to an enemy or a wall and drags the fighters with integer physics; opt-in `MatchSpec::spear`, old digests unchanged
-- `2026-10-17-obsolete-rows.md` — LATER — all four — seven board rows (E4 E6 E12 E17 E21 E22 E26) that no longer match the tree, listed for the owner to close
+- `2026-10-17-obsolete-rows.md` — LATER — none — seven board rows (E4 E6 E12 E17 E21 E22 E26) that no longer match the tree, listed for the owner to close
 - `gameplay.md` — NOW — AI door — the duel feels right and AI fills empty slots fairly
 - `living-world.md` — NOW — AI door — NPC minds and live AI lines run off-tick; only validated, tick-stamped actions enter the tick
 - `runtime.md` — LATER — none — one runtime and one world model under the hash law

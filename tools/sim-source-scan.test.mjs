@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   PLATFORM_MATH_METHODS,
   deriveFixedApi,
+  genreFindings,
   genreHits,
   maskRust,
   platformMathHits,
@@ -37,6 +38,36 @@ test("productionCode stops at the first real cfg(test)", () => {
 test("genreHits ignores comments and strings", () => {
   const src = "// Fighter\n/* Gladiator */\nfn f() -> &'static str { \"Fighter\" }\n";
   assert.deepEqual(genreHits(src), []);
+});
+
+test("genreHits counts UPPER_SNAKE caps and ids, not lowercase words (GE11)", () => {
+  assert.deepEqual(genreHits("pub const MAX_FIGHTERS: usize = 64;\n"), ["MAX_FIGHTERS"]);
+  assert.deepEqual(genreHits("const A: u8 = BRAIN_FIGHTER_STUCK + GLADIATOR_HP;\n"), ["BRAIN_FIGHTER_STUCK", "GLADIATOR_HP"]);
+  assert.deepEqual(genreHits("const N: usize = 8; // MAX_FIGHTERS\nlet fighters = 2;\n"), []);
+});
+
+test("genreFindings refuses a seeded new genre file and passes a listed one (GE11)", () => {
+  const ledger = new Set(["net/src/listed.rs"]);
+  const files = [
+    { rel: "net/src/listed.rs", src: "pub struct FighterSnap;\n" },
+    { rel: "net/src/neutral.rs", src: "pub struct BodySnap;\n" },
+    { rel: "save/src/lib.rs", src: "pub struct Gladiator;\n" },
+    { rel: "anim/src/cap.rs", src: "pub const MAX_FIGHTERS: usize = 64;\n" },
+  ];
+  assert.deepEqual(genreFindings(files, ledger).unlisted, [
+    "save/src/lib.rs (Gladiator)",
+    "anim/src/cap.rs (MAX_FIGHTERS)",
+  ]);
+  assert.deepEqual(genreFindings(files.slice(0, 2), ledger).unlisted, []);
+});
+
+test("genreFindings reports a listed file that names no genre word as stale (GE11)", () => {
+  const ledger = new Set(["a/src/gone.rs", "a/src/clean.rs", "a/src/live.rs"]);
+  const files = [
+    { rel: "a/src/clean.rs", src: "pub struct BodySnap;\n" },
+    { rel: "a/src/live.rs", src: "pub struct FighterId;\n" },
+  ];
+  assert.deepEqual(genreFindings(files, ledger).stale, ["a/src/gone.rs", "a/src/clean.rs"]);
 });
 
 test("genreHits counts code identifiers (failure case)", () => {

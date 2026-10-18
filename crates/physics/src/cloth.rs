@@ -1452,6 +1452,32 @@ mod tests {
     }
 
     #[test]
+    fn the_awake_step_with_pin_moves_wind_and_a_body_never_touches_the_heap() {
+        for tier in ClothTier::ALL {
+            let mut cloth = cape(tier);
+            let body = [
+                ClothCollider::capsule([0.25, 0.6, -0.1], [0.25, 1.5, -0.1], 0.15).expect("body"),
+            ];
+            let rows: Vec<Vec<[f32; 3]>> = (0..120)
+                .map(|t| shoulder_row(cloth.cols, [0.3 * tri(t, 0), 0.0, 0.1 * tri(t, 12)]))
+                .collect();
+            let ((), heap) = engine_core::alloc_probe::measure(|| {
+                for (t, row) in rows.iter().enumerate() {
+                    cloth.pin_top_row(row).expect("pins in range");
+                    if t == 60 {
+                        cloth.set_wind([6.0, 0.0, 1.0]).expect("wind in range");
+                    }
+                    assert!(
+                        cloth.step(&body),
+                        "the cape must stay awake while pinned moves"
+                    );
+                }
+            });
+            assert_eq!(heap.calls, 0, "{tier:?}: cloth tick allocated: {heap:?}");
+        }
+    }
+
+    #[test]
     fn a_tick_is_one_sixtieth_of_a_second_for_any_substep_count() {
         for substeps in [1, 2, 4, MAX_SUBSTEPS] {
             let params = ClothParams {

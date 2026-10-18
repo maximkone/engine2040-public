@@ -92,7 +92,9 @@ pub fn hold_gpu_slot() {
 }
 
 /// Environment switch: `1` makes a missing adapter a failure, but only
-/// where the test routes through `require_or_skip`.
+/// where the test routes through `require_or_skip`. The presenter bring-up
+/// reads it too (`adapter::SelectionPolicy::from_env`): under `1` a fallback
+/// adapter (software, or one the surface forces) fails the bring-up.
 pub const REQUIRE_GPU_ENV: &str = "E2040_REQUIRE_GPU";
 
 /// Line prefix for a skipped GPU test; `tools/proof.mjs` counts these lines.

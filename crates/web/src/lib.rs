@@ -18,6 +18,11 @@
 //! through the connect race (`netplay`, wasm only), play a scripted 600-tick duel and print
 //! `net: transport=<webtransport|websocket> ticks=<n> hash=<hex> peers=<n>`; [`netquery`] reads the address.
 //!
+//! Device loss, time and pacing (QW8, QW11, QT2 to QT11): [`recovery`] tells a real or forced loss (start over)
+//! from a requested destroy (stop) and keeps the browser's own loss reason for the receipt; [`anim::StepClock`]
+//! turns the animation-frame timestamp into 60 fixed steps a second; [`tier_view`] holds the frame pacing
+//! (window, ladder, drift, hidden gaps) and the startup probe's bookkeeping, all as plain data.
+//!
 //! The pure parts ([`anim`], [`audio`], [`golden`], [`input`], [`limits`], [`netquery`], [`recovery`], [`report`]) build and
 //! test on every target. The browser glue (`shell`) exists on `wasm32` only, so the native
 //! workspace builds this crate as a library with no web dependencies. It depends on
@@ -31,6 +36,7 @@ pub mod arena_view;
 pub mod audio;
 pub mod golden;
 pub mod input;
+pub mod input_tape;
 pub mod limits;
 pub mod netquery;
 pub mod recovery;

@@ -46,6 +46,7 @@ pub mod exploit;
 /// with seeded feel bugs (VK1 extended, GP7).
 pub mod feel_keypoints;
 pub mod frame_check;
+pub mod highlights;
 pub mod keypoint;
 pub mod living;
 pub mod mirror;
@@ -492,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_checks_is_never_a_pass() {
+    fn verdict_checks_run_zero_is_never_a_pass() {
         let verdict = Verdict::from_checks(Vec::new(), 0);
         assert!(!verdict.pass);
         assert_eq!(verdict.checks_run, 0);
@@ -502,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn one_passing_check_is_a_pass() {
+    fn verdict_checks_run_one_is_a_pass() {
         let verdict = Verdict::from_checks(Vec::new(), 1);
         assert!(verdict.pass);
         assert!(verdict.failures.is_empty());
@@ -510,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn failing_check_still_fails() {
+    fn verdict_checks_run_failing_check_still_fails() {
         let failure = Failure {
             verifier: "Test",
             reason: "seeded failure".to_string(),
@@ -522,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_counts_three_checks_and_prints_them() {
+    fn verdict_checks_run_three_in_verify_and_printed() {
         let pass = verify(&small_reference());
         assert!(pass.pass, "{:?}", pass.failures);
         assert_eq!(pass.checks_run, 3);

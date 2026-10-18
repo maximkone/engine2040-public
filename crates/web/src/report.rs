@@ -240,7 +240,16 @@ impl Failure {
     }
 }
 
-/// The line for a shell that did not start: `"ok":false` with the reason.
+/// What the fatal page says in its reason line: the plain sentence, the browser's own words and
+/// `fallback=<code>` (QT11), the same code the receipt carries, so the page names why it is not
+/// running the game and never shows a blank canvas.
+#[must_use]
+pub fn fatal_text(why: Failure, detail: &str) -> String {
+    format!("{} {detail} (fallback={})", why.headline(), why.code())
+}
+
+/// The line for a shell that did not start: `"ok":false` with the reason, and `fallback`, the
+/// same code as a word of its own (QT11).
 #[must_use]
 pub fn failed_line(
     why: Failure,
@@ -252,6 +261,7 @@ pub fn failed_line(
     let mut line = Object::new();
     line.bool("ok", false)
         .str("reason", why.code())
+        .str("fallback", why.code())
         .str("message", why.headline())
         .str("detail", detail)
         .str("commit", commit)
@@ -390,9 +400,30 @@ mod tests {
         );
         assert!(line.contains(r#""ok":false"#), "{line}");
         assert!(line.contains(r#""reason":"no-webgpu""#), "{line}");
+        assert!(line.contains(r#""fallback":"no-webgpu""#), "{line}");
         assert!(line.contains("navigator.gpu is missing"), "{line}");
         assert!(line.contains(r#""wasmMemoryPages":17"#), "{line}");
         assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn the_fatal_page_names_the_fallback_beside_the_browsers_words() {
+        let text = fatal_text(Failure::NoWebGpu, "navigator.gpu is undefined.");
+        assert!(
+            text.starts_with("This browser has no WebGPU")
+                && text.contains("navigator.gpu is undefined.")
+                && text.ends_with("(fallback=no-webgpu)"),
+            "{text}"
+        );
+        for why in [
+            Failure::NoWebGpu,
+            Failure::NoAdapter,
+            Failure::NoDevice,
+            Failure::NoCanvas,
+            Failure::NoSurface,
+        ] {
+            assert!(fatal_text(why, "x").contains(&format!("fallback={}", why.code())));
+        }
     }
 
     #[test]

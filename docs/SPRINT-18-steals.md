@@ -95,7 +95,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   `crates/game/build.rs` and the statics hunk of `crates/game/src/bin/arena.rs`.
   Accept: after a release build `node tools/pe-exports.mjs target/release/arena.exe`
   lists both names. F2P: arena exports neither. P2P: `cargo check -p engine-game
-  --features app` green. needs: GS8.
+  --features app` green. needs: GS8. Progress 2026-10-18: landed c9115185 (build.rs /EXPORT link args for the arena bin on windows-msvc, the two statics moved from crash.rs to bin/arena.rs). node tools/pe-exports.mjs target/debug/arena.exe built from this tree lists AmdPowerXpressRequestHighPerformance and NvOptimusEnablement; the same statics plus build.rs in a scratch package listed both on a release build. Left: the literal release arena.exe proof (a release build of the whole arena was still compiling on the loaded PC); tick it with node tools/pe-exports.mjs target/release/arena.exe.
 - [x] GS8 tools: read a PE export table — `tools/pe-exports.mjs <exe|dll>` parses the Landed 2746b129.
   export directory (about 80 lines, no dependency) and prints one name per line.
   Diff: regular. Tier A. Size S. Owns `tools/pe-exports.mjs`,
@@ -127,7 +127,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   monotone Potato <= Comfort <= High; each knob has a unit string; `CUT_ORDER` is
   fixed; the table hashes x2. F2P: no quality table. P2P: `cargo test -p
   engine-render --lib` green.
-- [ ] GS11 render: GPU to tier rules — new `crates/render/src/tier_rules.rs`, a rule
+- [x] GS11 render: GPU to tier rules — new `crates/render/src/tier_rules.rs`, a rule
   table in the Chromium `gpu_control_list` shape: `vendor_id`, `device_type`, VRAM MB
   range, driver version `op`, result `Quality` plus named workarounds, first match
   wins, with `exceptions`. Defaults: integrated is Potato; discrete under 4 GB is
@@ -136,7 +136,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   integrated) gives Potato; RTX 3050 (0x10de, 6144 MB) gives Comfort; GTX 1050
   (2048 MB) gives Potato; an unknown discrete 8 GB gives Comfort; Basic Render Driver
   gives Refuse; x2 equal. F2P: no rules. P2P: `cargo test -p engine-render --lib`
-  green. needs: GS10.
+  green. needs: GS10. Landed dc517ed. tier_rules_name_the_reference_gpus (UHD 630 Potato, RTX 3050 Comfort, GTX 1050 Potato, unknown 8 GB Comfort, Basic Render Driver Refuse), tier_rules_same_facts_give_the_same_rule_twice, tier_rules_vram_line_is_four_gb_and_unknown_is_not_trusted, tier_rules_driver_op_and_exception_steer_a_custom_table green in gh-check run 39101673996; engine-render --lib 763 passed run 39101797684. Caller: the adapter pick (presenter_pick, held by another session) reads decide next.
 - [x] GS12 render: dynamic resolution control law — pure `crates/render/src/dynres_gov.rs`. Landed acdd233.
   `DynRes {budget_us, min_pct, max_pct, deadband_pct, cooldown_frames,
   panic_over_budget_frames}` and `step(&mut self, gpu_us) -> Option<u8>` (donor:
@@ -356,14 +356,14 @@ Every row is one crate, small, with a named donor and a test that fails before.
   340. Diff: regular. Tier A. Size S. Owns the new test file. Accept: the table is
   identical x2; strict mode fails while any heavy move is under 340 ms. F2P: no table.
   P2P: `cargo test -p engine-combat` green. needs: EG19.
-- [ ] GS33 endpoint: `play.sweep` verb — seeded bots play N headless bouts and return one
+- [x] GS33 endpoint: `play.sweep` verb — seeded bots play N headless bouts and return one
   JSON envelope `{bouts, crashes, hash_divergences, stuck_ticks}` with evidence in
   `target/reports/sweep-<seed>.json` (donor: echoo19/hearth `probe_sweep`). Diff: good.
   Tier A. Size M. Owns `crates/endpoint/src/packs/sweep.rs` and one registration line.
   Accept: a 5-bout sweep with seed 7 returns the same envelope x2; an injected
   divergence reports `hash_divergences` 1; the verb is listed by `api.describe`. F2P:
   the verb is unknown. P2P: `cargo test -p engine-endpoint --lib` green; golden
-  unchanged. needs: LF16.
+  unchanged. needs: LF16. Landed ef52041f. play.sweep: sweep_five_bouts_seed_7_repeats_its_envelope, an_injected_divergence_reports_one_hash_divergence, a_refused_bout_is_a_counted_crash, the_verb_is_listed_and_writes_its_evidence green, router pin 65 (run 39109659487).
 
 **Planner row (promotes the backlog)**
 
@@ -380,3 +380,62 @@ Every row is one crate, small, with a named donor and a test that fails before.
   PASS; `node --test tools/plan-index.test.mjs` green. F2P: `landscape-ideas.md` holds
   every idea and the shard ends at GS33. P2P: `node tools/workspace-check.mjs` PASS.
   needs: none.
+
+**Promoted from the landscape backlog (PLN30, cluster E ship and input)**
+
+- [ ] GS39 game: borderless fullscreen toggle on F11 — the arena window opens windowed
+  and has no way to fill the screen. Add `WindowMode { Windowed, Borderless }` with
+  `toggled()` and `is_borderless()` to `crates/game/src/bin/arena_frame/mod.rs`; F11
+  (pressed, no repeat) flips it and calls `window.set_fullscreen(...)` with `None` or
+  `Some(Fullscreen::Borderless(None))`. Donor: winit `winit/examples/application.rs`
+  `toggle_fullscreen`. Presentation only: the tape and the hash never see the mode.
+  Diff: regular. Tier A. Size S. Owns the new type in `arena_frame/mod.rs` and the F11
+  branch in `crates/game/src/bin/arena.rs`. Accept: `cargo test -p engine-game
+  --features app --bin arena window_mode` x2: two toggles return to `Windowed`,
+  `Borderless.is_borderless()` is true; golden `d57b5c8ae3096614` unchanged. F2P: no
+  `WindowMode`. P2P: `cargo test -p engine-game --features app --bin arena` green.
+  needs: none.
+- [ ] GS40 render: battery cap on the quality tier — a laptop on battery draws full
+  frames and the fan and heat show it. Add `crates/render/src/power.rs`: a Windows leaf
+  `read_power()` beside `backend::read_vram` (`GetSystemPowerStatus`: `ACLineStatus`,
+  `BatteryLifePercent`, `SystemStatusFlag` battery saver) returning `PowerReading::{Known
+  { ac_online, percent, saver }, Unknown(reason)}`, and a pure `power_cap(&PowerReading,
+  Quality) -> Quality` that steps one tier down (High to Comfort, Comfort to Potato,
+  never `Web`) when `!ac_online && (percent <= 30 || saver)`. Donor: Microsoft
+  `SYSTEM_POWER_STATUS` (`winbase.h`). Cold path, off the tick, no hash input. Diff:
+  regular. Tier A. Size S. Owns `crates/render/src/power.rs` and the
+  `Win32_System_Power` feature on the `windows` line of `crates/render/Cargo.toml`.
+  Accept: `cargo test -p engine-render --lib power` x2: AC on at 100 percent keeps
+  `High`; battery 25 percent gives `Comfort`; saver on at 80 percent gives `Comfort`;
+  `Potato` stays `Potato`; `Unknown` keeps the tier; golden unchanged. F2P: no `power`
+  module. P2P: `cargo test -p engine-render --lib quality` green. needs: none.
+- [ ] GS41 game: raw mouse turns the free camera — the arena window reads keys and
+  buttons only, and `fps_view::LookState::apply_mouse` has no mouse source. Add
+  `MouseRaw` (new `crates/game/src/mouse_raw.rs`): `push(dx, dy)` sums winit
+  `DeviceEvent::MouseMotion` deltas only while the cursor is grabbed and drops
+  non-finite values; `take()` returns the frame sum clamped to 2,000 px per axis and
+  zeroes it. The arena `device_event` pushes, the free camera (`C` key) grabs the cursor
+  (`CursorGrabMode::Locked`, else `Confined`) and each frame feeds `take()` to
+  `apply_mouse`. Donor: winit `winit/examples/application.rs` `device_event` and the
+  `DeviceEvent::MouseMotion` docs (raw, unaccelerated). Presentation only, never hashed.
+  Diff: regular. Tier A. Size S. Owns `crates/game/src/mouse_raw.rs`, its `lib.rs` line
+  and the `device_event` hunk of `crates/game/src/bin/arena.rs`. Accept: `cargo test
+  -p engine-game --lib mouse_raw` x2: two pushes of (3, -1) take (6, -2) and a second
+  take gives (0, 0); a push while not grabbed, NaN or infinity changes nothing; a 9,000
+  px spike takes 2,000; golden unchanged. F2P: no `mouse_raw` module. P2P: `cargo test
+  -p engine-game --lib fps_view` green. needs: none.
+- [ ] GS42 game: announcer lines as data with a last-played throttle — the crowd has
+  per-reaction cooldowns (`audio/src/crowd.rs`) but the bout has no voice. Add
+  `crates/game/src/announcer.rs`: a rule table `(FightCue, line name, min_gap_ticks)`
+  in list order; `Announcer::on_cue(tick, cue) -> Option<&'static str>` returns the
+  first rule that matches and whose gap since its own last play has passed, else
+  `None`, at most one line per call. Donor: `abadugu13/football_llm_commentary`
+  `commentary_pipeline.py` (`commentary_pipeline`: ordered rules, per-rule `last_step`
+  cooldown, first match wins). Names only; the clips come from a content row, a missing
+  clip falls back to the cue bank's synth take. `audio_mix.rs` queues the returned name
+  (one call). Diff: regular. Tier B. Size S. Owns `crates/game/src/announcer.rs`, its
+  `lib.rs` line and the one call in `crates/game/src/audio_mix.rs`. Accept: `cargo test
+  -p engine-game --lib announcer` x2: the same cue twice inside its gap gives one line
+  and then `None`; after the gap it speaks again; two matching rules give the first
+  listed; the same cue script gives the same lines; golden unchanged. F2P: no
+  `announcer` module. P2P: `cargo test -p engine-game --lib audio_mix` green. needs: none.

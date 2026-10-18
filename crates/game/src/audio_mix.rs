@@ -15,8 +15,8 @@
 //! no heap per tick (borrows plus fixed stack buffers only).
 
 use engine_audio::occlude::{
-    apply_floor, q16_to_gain, target_gain_q16, OccludeError, VoiceOcclusion, GAIN_ONE,
-    MAX_WALLS_PER_QUERY, VOICE_FLOOR_Q16,
+    apply_floor, q16_to_gain, OccludeError, VoiceOcclusion, GAIN_ONE, MAX_WALLS_PER_QUERY,
+    VOICE_FLOOR_Q16,
 };
 use engine_audio::reverb::{ReverbError, ReverbParams, ReverbZone, TUNNEL_WET};
 
@@ -110,6 +110,13 @@ impl MixBridge {
         self.states.get(slot).map(VoiceOcclusion::current_q16)
     }
 
+    /// Smoothed lowpass cutoff in Hz of voice slot `slot` (`None` past the
+    /// cap): hand it to `Mixer::set_voice_lowpass` with the voice's gain.
+    #[must_use]
+    pub fn cutoff_hz(&self, slot: usize) -> Option<u32> {
+        self.states.get(slot).map(VoiceOcclusion::current_cutoff_hz)
+    }
+
     /// Back to fully open without touching the heap (seek/zone teleport).
     pub fn reset_open(&mut self) {
         for state in self.states.iter_mut() {
@@ -143,8 +150,9 @@ impl MixBridge {
             .min(self.states.len());
         for index in 0..n {
             let seed = &seeds[index];
-            let target = target_gain_q16(seed.pos_cm, listener_cm, walls)?;
-            let smoothed = self.states[index].tick(target);
+            let smoothed = self.states[index]
+                .update_muffle(seed.pos_cm, listener_cm, walls)?
+                .gain_q16;
             let floored = if seed.voice_bus {
                 apply_floor(smoothed, VOICE_FLOOR_Q16)
             } else {
@@ -163,7 +171,9 @@ impl MixBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_audio::occlude::{apply_wall, ATTACK_STEP};
+    use engine_audio::occlude::{
+        apply_wall, cutoff_hz, ATTACK_STEP, CUTOFF_FALL_STEP_HZ, OPEN_CUTOFF_HZ,
+    };
 
     const RATE: u32 = 48_000;
     const LISTENER: [i32; 2] = [0, 0];
@@ -264,6 +274,11 @@ mod tests {
         // applied at once, or never) fails here.
         let first = mix_one(&mut bridge, &seed, &walls);
         assert_eq!(bridge.state_q16(0), Some(GAIN_ONE - ATTACK_STEP));
+        // The cutoff darkens with the gain, one fall step a tick.
+        assert_eq!(
+            bridge.cutoff_hz(0),
+            Some(OPEN_CUTOFF_HZ - CUTOFF_FALL_STEP_HZ)
+        );
         assert!((first.gain - q16_to_gain(GAIN_ONE - ATTACK_STEP)).abs() < 1e-6);
         assert_eq!(first.send, TUNNEL_WET);
         // Settled ticks land exactly on the charted stone pass (0.4).
@@ -272,6 +287,7 @@ mod tests {
         }
         let charted = apply_wall(GAIN_ONE, Material::Stone);
         assert_eq!(bridge.state_q16(0), Some(charted));
+        assert_eq!(bridge.cutoff_hz(0), Some(cutoff_hz(Material::Stone)));
         let settled = mix_one(&mut bridge, &seed, &walls);
         // Same conversion the bridge applies, so this is exact; the charted
         // stone pass (26214 Q16) sits at -7.96 dB, not literal 0.4.
@@ -453,6 +469,7 @@ mod tests {
         assert!(bridge.state_q16(0).expect("slot 0") < GAIN_ONE);
         bridge.reset_open();
         assert_eq!(bridge.state_q16(0), Some(GAIN_ONE));
+        assert_eq!(bridge.cutoff_hz(0), Some(OPEN_CUTOFF_HZ));
         let mixed = mix_one(&mut bridge, &sfx_at(500), &[]);
         assert_eq!(mixed.gain, 1.0);
     }

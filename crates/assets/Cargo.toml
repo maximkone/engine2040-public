@@ -23,7 +23,8 @@ engine-core.workspace = true
 engine-clock.workspace = true
 engine-scene = { version = "0.1.0", path = "../scene", optional = true }
 engine-anim = { workspace = true, optional = true }
-gltf = { workspace = true, optional = true }
+# `extras`: morph target names ride in `mesh.extras.targetNames` (morph_import).
+gltf = { workspace = true, optional = true, features = ["extras"] }
 image = { workspace = true, optional = true }
 
 [[example]]

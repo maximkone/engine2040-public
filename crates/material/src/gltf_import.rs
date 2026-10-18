@@ -202,12 +202,9 @@ fn rgb_of(value: Option<&Value>, default: [f32; 3]) -> [f32; 3] {
     out
 }
 
-/// A record name from a glTF material name: bytes outside the record rule
-/// become `_`; empty names become `material_<index>`.
-fn record_name(raw: Option<&str>, index: usize, taken: &[MaterialRecord]) -> String {
-    let mut name: String = raw
-        .unwrap_or("")
-        .bytes()
+/// `raw` with every byte outside the record name rule (`0-9 A-Z a-z - _ .`) turned into `_`.
+pub(crate) fn clean_ident(raw: &str) -> String {
+    raw.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') {
                 char::from(b)
@@ -215,7 +212,13 @@ fn record_name(raw: Option<&str>, index: usize, taken: &[MaterialRecord]) -> Str
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+/// A record name from a source material name: bytes outside the record rule
+/// become `_`; empty names become `material_<index>`.
+pub(crate) fn record_name(raw: Option<&str>, index: usize, taken: &[MaterialRecord]) -> String {
+    let mut name = clean_ident(raw.unwrap_or(""));
     if name.is_empty() {
         name = format!("material_{index}");
     }
@@ -226,13 +229,14 @@ fn record_name(raw: Option<&str>, index: usize, taken: &[MaterialRecord]) -> Str
     name
 }
 
-struct Ctx<'a> {
-    material: &'a str,
-    warnings: &'a mut Vec<Warning>,
+/// Where one material's losses are written.
+pub(crate) struct Ctx<'a> {
+    pub(crate) material: &'a str,
+    pub(crate) warnings: &'a mut Vec<Warning>,
 }
 
 impl Ctx<'_> {
-    fn warn(&mut self, field: &str, kind: WarningKind) {
+    pub(crate) fn warn(&mut self, field: &str, kind: WarningKind) {
         self.warnings.push(Warning {
             material: self.material.to_string(),
             field: field.to_string(),
@@ -240,7 +244,7 @@ impl Ctx<'_> {
         });
     }
 
-    fn unit(&mut self, field: &str, v: f32) -> f32 {
+    pub(crate) fn unit(&mut self, field: &str, v: f32) -> f32 {
         let c = v.clamp(0.0, 1.0);
         if (c - v).abs() > f32::EPSILON {
             self.warn(field, WarningKind::Clamped);
@@ -248,7 +252,7 @@ impl Ctx<'_> {
         c
     }
 
-    fn color(&mut self, field: &str, v: [f32; 3]) -> [f32; 3] {
+    pub(crate) fn color(&mut self, field: &str, v: [f32; 3]) -> [f32; 3] {
         [
             self.unit(field, v[0]),
             self.unit(field, v[1]),
@@ -283,20 +287,17 @@ fn texture_ref(doc: &Value, info: Option<&Value>) -> Option<String> {
             })
         })
         .unwrap_or_else(|| format!("image{source}"));
-    let mut name: String = raw
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') {
-                char::from(b)
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    name.truncate(MAX_TEXTURE_REF_BYTES - 4);
-    Some(format!("tex:{name}"))
+    Some(texture_ref_of(&raw))
 }
 
+/// `tex:<name>` for an image file name or stem, cut to the record's texture-ref budget.
+pub(crate) fn texture_ref_of(raw: &str) -> String {
+    let mut name = clean_ident(raw);
+    name.truncate(MAX_TEXTURE_REF_BYTES - 4);
+    format!("tex:{name}")
+}
+
+/// The sim half a source material cannot name: stone, or metal / glass by the look.
 fn default_body(look: &Look) -> MaterialRow {
     let sound = if look.base_metalness > 0.5 {
         SoundKind::Metal
@@ -630,6 +631,11 @@ fn import_material(
     }
 
     look.textures = textures;
+    plain_record(name, look)
+}
+
+/// A surface record with no gameplay layers around an imported `look`.
+pub(crate) fn plain_record(name: String, look: Look) -> MaterialRecord {
     let body = default_body(&look);
     MaterialRecord {
         name,

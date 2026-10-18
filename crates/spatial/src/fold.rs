@@ -29,7 +29,7 @@ pub struct Folded {
 }
 
 /// `crate_07` -> `crate`, `torch1` -> `torch`, `wall` -> `wall`.
-fn stem(name: &str) -> &str {
+pub(crate) fn stem(name: &str) -> &str {
     let t = name
         .trim_end_matches(|c: char| c.is_ascii_digit())
         .trim_end_matches(['_', '-', ' ']);
@@ -261,6 +261,102 @@ mod brief_fold {
         let text = fold_text(&fold_lookalikes(&scene, &BTreeMap::new()));
         assert!(text.lines().count() <= 3, "{text}");
         assert!(text.len() < 4096);
+    }
+
+    /// 100 crates on a 3 m grid, 15 tall lamps and one crate 500 m away.
+    fn scene_115() -> Vec<Actor> {
+        let mut scene: Vec<Actor> = (1..=100)
+            .map(|i| Actor {
+                z: (i / 10) as f32 * 3.0,
+                ..crate_n(i, (i % 10) as f32 * 3.0)
+            })
+            .collect();
+        for i in 101..=115 {
+            scene.push(Actor {
+                name: format!("lamp_{i}"),
+                sy: 2.0,
+                z: 40.0 + (i - 100) as f32 * 3.0,
+                ..crate_n(i, 0.0)
+            });
+        }
+        scene.push(crate_n(116, 500.0));
+        scene
+    }
+
+    fn door_brief(scene: &[Actor], budget: usize) -> crate::brief::FoldedBrief {
+        let (graph, report) = (crate::build(scene), crate::run(scene));
+        crate::brief::brief_folded(scene, &graph, &report, &BTreeMap::new(), budget)
+    }
+
+    #[test]
+    fn brief_fold_115_objects_fit_the_default_budget_in_any_order() {
+        let scene = scene_115();
+        let folded = door_brief(&scene, 4096);
+        let text = &folded.text;
+        assert!(text.len() <= 4096, "{} bytes", text.len());
+        assert!(text.starts_with("digest "), "{text}");
+        assert!(
+            text.contains("object crate x101 100x100x100 cm [1..116]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("object lamp x15 100x200x100 cm [101..115]"),
+            "{text}"
+        );
+        assert!(text.contains("excluded 116 why=stray"), "{text}");
+        assert_eq!(text.lines().filter(|l| l.starts_with("object ")).count(), 2);
+        // The unfolded brief spends one row on every object.
+        let plain = crate::brief::brief_text(&crate::brief::brief(
+            &scene,
+            &crate::build(&scene),
+            &crate::run(&scene),
+            usize::MAX,
+        ));
+        assert!(plain.lines().filter(|l| l.starts_with("object ")).count() == 116);
+        let mut reversed = scene.clone();
+        reversed.reverse();
+        assert_eq!(
+            door_brief(&reversed, 4096),
+            folded,
+            "same bytes in any order"
+        );
+    }
+
+    #[test]
+    fn brief_fold_cuts_whole_rows_and_always_keeps_the_digest() {
+        let scene = scene_115();
+        let full = door_brief(&scene, usize::MAX);
+        assert!(!full.truncated && full.findings_cut == 0);
+        let digest_row = full.text.lines().next().unwrap();
+        for budget in [0, digest_row.len(), digest_row.len() + 40, 300, 1000] {
+            let tight = door_brief(&scene, budget);
+            assert!(tight.text.starts_with(digest_row), "budget {budget}");
+            assert!(
+                tight.text.len() <= budget.max(digest_row.len() + 1),
+                "budget {budget}: {} bytes",
+                tight.text.len()
+            );
+            assert!(tight.text.ends_with('\n'));
+        }
+        assert_eq!(door_brief(&scene, 0).text, format!("{digest_row}\n"));
+        let crowded: Vec<Actor> = (1..=6).map(|i| crate_n(i, 0.0)).collect();
+        let tight = door_brief(&crowded, 200);
+        assert!(tight.truncated && tight.findings_cut > 0, "{tight:?}");
+    }
+
+    #[test]
+    fn brief_fold_names_the_problems_before_the_rows() {
+        let crowded: Vec<Actor> = (1..=3).map(|i| crate_n(i, 0.0)).collect();
+        let text = door_brief(&crowded, 4096).text;
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("digest "), "{text}");
+        let problem = lines
+            .iter()
+            .position(|l| l.starts_with("problem:"))
+            .unwrap();
+        let row = lines.iter().position(|l| l.starts_with("object ")).unwrap();
+        assert!(problem < row, "{text}");
+        assert!(lines[problem].contains("overlap") && lines[problem].contains("red"));
     }
 
     #[test]

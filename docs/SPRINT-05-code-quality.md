@@ -41,14 +41,14 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   `crates/render/src/post/jitter_motion.rs`; facade re-exports. Accept: grep for
   `pub fn halton` in the new file fails before, passes after; render lib post
   tests green; golden unchanged. needs: none.
-- [ ] CQ25 quality: split post TAA resolve plus ghost scene out — `TaaParams`,
+- [x] CQ25 quality: split post TAA resolve plus ghost scene out — `TaaParams`,
   resolve helpers, `taa_resolve`, `taa_resolve_jittered`, `GhostingScene` move
   verbatim to new `post/taa.rs`; trail under `GHOST_MAX_TRAIL`. Accept: render
-  lib post tests green; golden unchanged. needs: CQ24.
-- [ ] CQ26 quality: split post upscale plus FSR plus shimmer scene out —
+  lib post tests green; golden unchanged. needs: CQ24. Landed 781ecd67 (the CQ9 post split). post/taa.rs holds TaaParams, taa_resolve, taa_resolve_jittered and GhostingScene (grep -c 'pub fn taa_resolve' = 2); cargo test -p engine-render --lib post: 49 passed incl. neighborhood_clamp_kills_ghosting and taa_static_scene_resolves_exactly (PC run, 2026-10-18); golden unchanged per run 39063249080.
+- [x] CQ26 quality: split post upscale plus FSR plus shimmer scene out —
   `taa_upsample`, `fsr_*`, `ShimmerScene` move verbatim to new `post/upscale.rs`;
   MTF50/shimmer gates still post numbers. Accept: render lib post tests green;
-  golden unchanged. needs: CQ24.
+  golden unchanged. needs: CQ24. Landed 781ecd67 (the CQ9 post split). post/upscale.rs holds taa_upsample, fsr_* and ShimmerScene (grep -c 'pub fn fsr_upscale' = 1); cargo test -p engine-render --lib post: 49 passed incl. fsr_540p_to_1080p_posts_mtf50_shimmer_and_ms and shimmer_converges_under_the_posted_gate (PC run, 2026-10-18); golden unchanged per run 39063249080.
 - [ ] CQ27 quality: split post bloom chain (LF4 dependency) out — bloom/exposure/
   ACES/grade configs, `apply_bloom`, `run_chain`, `run_frame` move verbatim to
   new `post/chain.rs`; torch halo lifts neighbour, sub-knee field identical.
@@ -76,7 +76,7 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
 - [ ] CQ14 ops: typed errors — 93 `Result<_, String>` in library code Progress 2026-10-17: string_errors 93 -> 19 (render 13, endpoint 3, game 2, scene 1; playtest and assets at 0). Left: those 19.
   (playtest 50, render 18, assets 17) become typed enums with `Display` and
   a source. Tier B. Size S per crate. Owns one crate's error module.
-  Accept: the crate's string_errors 0; tests green. needs: none.
+  Accept: the crate's string_errors 0; tests green. needs: none. Progress 2026-10-18: render string_errors 13 -> 0 and secret_launch false hits gone, landed 3f1661f1 (window check clean, window lib tests 125 + 37 green). Left: endpoint mcp.rs run_stdio (Result<String, String>) as a StartupError::transport helper, uncommitted in mcp.rs, startup.rs and bin/e2040-mcp.rs because the endpoint big_files ratchet (mcp.rs over 1500 lines) refuses the commit.
 - [x] CQ15 ops: Miri UB gate on non-forbid unsafe sites (sim crates
   already forbid; live sites editor/app.rs:244 + endpoint/
   secret_launch.rs:164) (READER-WILD wave 51, Miri MIT). Tier B.

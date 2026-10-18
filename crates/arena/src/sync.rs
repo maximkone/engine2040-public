@@ -174,35 +174,46 @@ pub fn verify_rollback(
         return None;
     }
     let full = drive(config, tape, config.ticks)?;
+    let verdict = resume_matches(&full, config, tape, snapshot_at, config.ticks)?;
+    Some(verdict.map(|()| full.iter().map(|row| row.checkpoint).collect()))
+}
+
+/// Rebuild a run to `snapshot_at`, snapshot and resume it, step the resumed
+/// sim to `until` and compare every resumed tick with `full`, the
+/// uninterrupted run. `until - snapshot_at` is the rollback depth. `None` on
+/// invalid config/tape or a window outside `full`; otherwise the first
+/// divergence with its tick, system and inputs.
+fn resume_matches(
+    full: &[TickHashes],
+    config: &ArenaConfig,
+    tape: &FighterTape,
+    snapshot_at: u32,
+    until: u32,
+) -> Option<Result<(), SyncError>> {
     let mut sim = super::Sim::build(config, tape, false, false)?;
     while sim.tick < snapshot_at {
         sim.step(tape)?;
     }
-    let snapshot = take_snapshot(sim)?;
-    let mut resumed = resume_sim(snapshot, config, tape)?;
-    let mut rejoined: Vec<TickHashes> = full.iter().take(snapshot_at as usize).copied().collect();
-    while resumed.tick < config.ticks {
+    let mut resumed = resume_sim(take_snapshot(sim)?, config, tape)?;
+    for tick in snapshot_at..until {
         resumed.step(tape)?;
-        let checkpoint = resumed.checkpoints.last().copied()?;
-        rejoined.push(TickHashes {
-            checkpoint,
+        let row = TickHashes {
+            checkpoint: resumed.checkpoints.last().copied()?,
             systems: hashes_of(&resumed),
-        });
-    }
-    for (index, (a, b)) in full.iter().zip(rejoined.iter()).enumerate() {
-        let tick = index as u32;
-        if a.checkpoint != b.checkpoint || a.systems != b.systems {
+        };
+        let want = full.get(tick as usize)?;
+        if *want != row {
             return Some(Err(dual_save_report(
                 tick,
-                &a.systems,
-                &b.systems,
-                a.checkpoint.hash,
-                b.checkpoint.hash,
+                &want.systems,
+                &row.systems,
+                want.checkpoint.hash,
+                row.checkpoint.hash,
                 tape,
             )));
         }
     }
-    Some(Ok(full.iter().map(|row| row.checkpoint).collect()))
+    Some(Ok(()))
 }
 
 /// Dual-save envelope (Factorio idea-only): reference plus desynced plus inputs.
@@ -225,10 +236,22 @@ fn dual_save_report(
 
 /// Drive `steps` ticks from tick 0, collecting per-tick hashes.
 fn drive(config: &ArenaConfig, tape: &FighterTape, steps: u32) -> Option<Vec<TickHashes>> {
+    drive_with(config, tape, steps, |_| {})
+}
+
+/// [`drive`] with `after_step` called on the live sim after every step and
+/// before its hashes are taken, so a test can play state a snapshot loses.
+fn drive_with(
+    config: &ArenaConfig,
+    tape: &FighterTape,
+    steps: u32,
+    mut after_step: impl FnMut(&mut super::Sim),
+) -> Option<Vec<TickHashes>> {
     let mut sim = super::Sim::build(config, tape, false, false)?;
     let mut rows = Vec::with_capacity(steps as usize);
     while sim.tick < steps {
         sim.step(tape)?;
+        after_step(&mut sim);
         let checkpoint = sim.checkpoints.last().copied()?;
         rows.push(TickHashes {
             checkpoint,
@@ -363,9 +386,15 @@ fn append_world(
     }
 }
 
-/// Spatial authority bytes: destruction hash, break rows, controller hashes.
+/// Spatial authority bytes: destruction hash, limb pool counters and limbs,
+/// break rows, controller hashes. The pool rides here so a snapshot that
+/// forgets a limb counter diverges in `space` (the authority hash folds the
+/// pool on v2 only).
 fn append_space(sim: &super::Sim, out: &mut Vec<u8>) {
     out.extend_from_slice(&sim.destruction.state_hash().to_le_bytes());
+    // Skip the pool snapshot's version and cap (bytes 0..8): a built sim and
+    // a resumed one size the pool differently, and the cap is not state.
+    out.extend_from_slice(sim.limbs.snapshot().get(8..).unwrap_or(&[]));
     let breaks = sim.breaks.last().map_or(&[][..], |row| &*row.events);
     out.extend_from_slice(&(breaks.len() as u64).to_le_bytes());
     for brk in breaks {
@@ -597,5 +626,100 @@ mod tests {
             system_canonical_bytes(&config, &tape, 1, "rng"),
             "driver tag ignores wishes"
         );
+    }
+
+    /// `bits` mapped uniformly into `-span..=span`.
+    fn spread(bits: u64, span: i64) -> i64 {
+        let width = u64::try_from(2 * span + 1).expect("positive span");
+        i64::try_from(bits % width).expect("below width") - span
+    }
+
+    /// Seeded moving and swinging tape: every fighter walks a drifting wish
+    /// and swings on a staggered beat, so stamina and the combat split move.
+    fn busy_tape(config: &ArenaConfig) -> FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for fighter in 0..config.fighters {
+                let h = engine_core::mix64((u64::from(tick) << 8) | u64::from(fighter));
+                inputs.push(FighterInput {
+                    tick,
+                    fighter: FighterId::new(fighter).expect("course uses slots 0..2"),
+                    mx: i8::try_from(spread(h, 100)).expect("-100..=100"),
+                    mz: i8::try_from(spread(h >> 16, 100)).expect("-100..=100"),
+                    facing: i16::try_from(spread(h >> 32, 18_000)).expect("-18000..=18000"),
+                    buttons: if tick % 23 == u32::from(fighter) * 7 {
+                        Buttons(ATTACK)
+                    } else {
+                        Buttons::NONE
+                    },
+                });
+            }
+        }
+        FighterTape(inputs)
+    }
+
+    #[test]
+    fn sync_test_every_tick_at_depth_8_agrees() {
+        // GGRS sync-test shape: 600 split points, each rolled back 8 ticks.
+        let config = ArenaConfig {
+            ticks: 600,
+            ..config()
+        };
+        let tape = busy_tape(&config);
+        let full = drive(&config, &tape, config.ticks).expect("valid run");
+        assert!(
+            full.windows(2)
+                .any(|pair| pair[0].systems.combat != pair[1].systems.combat),
+            "the tape must move combat or the sync test proves nothing"
+        );
+        for at in 0..config.ticks {
+            let until = (at + 8).min(config.ticks);
+            assert_eq!(
+                resume_matches(&full, &config, &tape, at, until),
+                Some(Ok(())),
+                "split at {at}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_test_catches_a_limb_counter_the_snapshot_forgot() {
+        // The limb pool is not part of the match snapshot. Bump its tick
+        // counter on the uninterrupted run at tick 100, as a pool that steps
+        // would: the checkpoint cannot see it (v1 never folds the pool), the
+        // `space` split must, at the first tick that carries it.
+        let config = ArenaConfig {
+            ticks: 120,
+            ..config()
+        };
+        let tape = busy_tape(&config);
+        let full = drive_with(&config, &tape, config.ticks, |sim| {
+            if sim.tick == 101 {
+                sim.limbs.step();
+            }
+        })
+        .expect("valid run");
+        let clean = drive(&config, &tape, config.ticks).expect("valid run");
+        assert_eq!(
+            full.iter().map(|row| row.checkpoint).collect::<Vec<_>>(),
+            clean.iter().map(|row| row.checkpoint).collect::<Vec<_>>(),
+            "the checkpoint never sees the pool"
+        );
+        let caught = resume_matches(&full, &config, &tape, 96, 104)
+            .expect("valid window")
+            .expect_err("the forgotten counter must be caught");
+        assert_eq!((caught.tick, caught.system), (100, "space"));
+        assert!(format!("{caught}").contains("tick 100 (system space)"));
+        // A window that ends before the bump, or an unmodified run, agrees.
+        assert_eq!(resume_matches(&full, &config, &tape, 40, 48), Some(Ok(())));
+        assert_eq!(
+            resume_matches(&clean, &config, &tape, 96, 120),
+            Some(Ok(()))
+        );
+        // From any earlier split a full-depth check still names tick 100.
+        let early = resume_matches(&full, &config, &tape, 10, config.ticks)
+            .expect("valid window")
+            .expect_err("caught from an early split");
+        assert_eq!((early.tick, early.system), (100, "space"));
     }
 }

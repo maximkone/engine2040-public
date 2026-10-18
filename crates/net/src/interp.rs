@@ -1122,4 +1122,100 @@ mod tests {
         assert!(calm.apply_delta(&skewed).is_err());
         assert_eq!(calm.len(), 3);
     }
+
+    // ---- QN4: interpolation delay from loss data ---------------------------
+
+    use crate::delta::DEFAULT_INTERP_DELAY_MS;
+    use crate::link::{FaultLink, Frame, LinkProfile};
+
+    /// Ticks soaked: 60 s at 60 Hz, 600 snapshots at the 10 Hz cadence.
+    const SOAK_TICKS: u32 = 3600;
+    /// Render samples start after the buffer had one second to fill.
+    const SOAK_WARMUP_TICKS: u32 = 60;
+    /// Delays the receipt posts, in ms.
+    const POSTED_DELAYS_MS: [u64; 4] = [100, 150, 200, 300];
+    /// Loss rates the receipt posts, in percent.
+    const POSTED_LOSS_PCT: [u32; 2] = [2, 5];
+
+    /// Server-clock milliseconds of a tick (60 Hz).
+    fn tick_ms(tick: u32) -> u64 {
+        u64::from(tick) * 1000 / 60
+    }
+
+    /// Render misses of one soak: the server sends a snapshot every
+    /// `CADENCE` ticks over a seeded link (33 to 67 ms one way, `loss_pct`
+    /// datagram loss); the client renders every tick at `now - delay_ms` on
+    /// the server clock. A render misses when no buffered pair brackets the
+    /// query, so it clamps to one stored snapshot instead of blending.
+    fn bracket_misses(delay_ms: u64, loss_pct: u32) -> u32 {
+        let profile = LinkProfile {
+            latency: 2,
+            jitter: 2,
+            loss_pct,
+            reorder_pct: 0,
+        };
+        let mut link = FaultLink::new(profile, 0x51ED_0004);
+        let mut interp = Interpolator::new(delay_ms);
+        let mut misses = 0;
+        for tick in 0..SOAK_TICKS {
+            if tick % CADENCE == 0 {
+                link.send_datagram(&tick.to_le_bytes());
+            }
+            for frame in link.due() {
+                let Frame::Datagram(bytes) = frame else {
+                    continue;
+                };
+                let sent = u32::from_le_bytes(bytes[..4].try_into().expect("tick bytes"));
+                let x = i32::try_from(sent).expect("tick fits");
+                assert!(interp.push(tick_ms(sent), snap_at(sent, x, -x)));
+            }
+            if tick >= SOAK_WARMUP_TICKS {
+                misses += u32::from(interp.delayed(tick_ms(tick)).is_none_or(|r| r.clamped));
+            }
+            link.tick();
+        }
+        misses
+    }
+
+    #[test]
+    fn interp_delay_default_is_the_smallest_with_no_miss_at_2_percent_loss() {
+        let samples = SOAK_TICKS - SOAK_WARMUP_TICKS;
+        let table: Vec<(u32, u64, u32)> = POSTED_LOSS_PCT
+            .iter()
+            .flat_map(|&loss| POSTED_DELAYS_MS.iter().map(move |&delay| (loss, delay)))
+            .map(|(loss, delay)| (loss, delay, bracket_misses(delay, loss)))
+            .collect();
+        for (loss, delay, misses) in &table {
+            println!(
+                "qn4 loss {loss}% delay {delay} ms: {misses}/{samples} renders with no bracket ({} bp)",
+                misses * 10_000 / samples
+            );
+        }
+        let misses_at = |loss: u32, delay: u64| {
+            table
+                .iter()
+                .find(|row| (row.0, row.1) == (loss, delay))
+                .map(|row| row.2)
+                .expect("posted row")
+        };
+        for loss in POSTED_LOSS_PCT {
+            for pair in POSTED_DELAYS_MS.windows(2) {
+                assert!(
+                    misses_at(loss, pair[1]) <= misses_at(loss, pair[0]),
+                    "more delay never misses more at {loss}%"
+                );
+            }
+        }
+        let smallest = POSTED_DELAYS_MS
+            .into_iter()
+            .find(|&delay| misses_at(2, delay) == 0)
+            .expect("some posted delay has no miss at 2% loss");
+        assert_eq!(DEFAULT_INTERP_DELAY_MS, smallest);
+        // The old 100 ms default misses over a third of the renders at 5%
+        // loss; the new one holds below 1% (two lost snapshots in a row
+        // still miss).
+        assert!(misses_at(5, 100) * 3 > samples, "100 ms is too short");
+        assert!(misses_at(5, DEFAULT_INTERP_DELAY_MS) * 100 < samples);
+        assert_eq!(bracket_misses(smallest, 2), 0, "same seed, same soak");
+    }
 }

@@ -1,7 +1,10 @@
 //! cooker: deterministic cook cache over the persistent asset registry.
 //!
-//! Same content digest cooks once; a changed digest recooks and reports the
-//! transitive dependents from the registry. A failed job keeps the last-good
+//! Same cook key cooks once; a changed key recooks and reports the transitive
+//! dependents from the registry. The key is blake3 over the source digest,
+//! the cook settings, the cook version and the keys of the dependencies in
+//! the order given, so a dependency edit, a settings change or a version bump
+//! makes a dependent fresh even when its own bytes did not change. A failed job keeps the last-good
 //! cached payload and leaves the registry record untouched, so callers fall
 //! back to the previous artifact. Unknown targets and missing dependencies
 //! store nothing and never run the cook closure. Iteration is id-sorted via
@@ -21,6 +24,10 @@ use std::fmt;
 use super::registry::{AssetId, AssetRegistry, RegistryError};
 #[cfg(feature = "registry")]
 use engine_scene::ids::content_digest;
+
+/// Version of the cook recipe: part of every cook key. Bump it when a cook
+/// closure changes what it writes; every cached entry then misses once.
+pub const COOK_VERSION: u32 = 1;
 
 /// Cook failure: unknown target, missing dependency refs, or a failed job.
 ///
@@ -87,13 +94,16 @@ impl fmt::Display for CookFailure {
 #[cfg(feature = "registry")]
 impl std::error::Error for CookFailure {}
 
-/// Last-good cooked artifact for one asset: digest of the source content that
-/// produced it plus the cooked payload bytes.
+/// Last-good cooked artifact for one asset: digest of the source content and
+/// the full cook key that produced it, plus the cooked payload bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg(feature = "registry")]
 pub struct Cached {
     /// `content_digest` of the source bytes that produced `payload`.
     pub digest: String,
+    /// Cook key of the run that produced `payload`: source digest, settings,
+    /// cook version and dependency keys. A hit needs this to match.
+    pub key: String,
     /// Cooked artifact bytes; served while a recook fails.
     pub payload: Vec<u8>,
 }
@@ -113,7 +123,7 @@ pub struct CookOutcome {
 /// Deterministic cook cache: registry owns identity plus digests, `cache`
 /// owns last-good payloads, `cooks` counts cook closure runs (including
 /// failed jobs; cache hits, unknown targets and missing deps never run it).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[cfg(feature = "registry")]
 pub struct Cooker {
     /// Persistent identities, digests and dependency edges.
@@ -122,13 +132,53 @@ pub struct Cooker {
     pub cache: BTreeMap<AssetId, Cached>,
     /// Number of times the cook closure has run.
     pub cooks: u64,
+    /// Cook version in every key ([`COOK_VERSION`] at `new`): changing it
+    /// recooks every asset on its next `recook`.
+    pub version: u32,
+    /// Cook settings bytes in every key: changing them recooks every asset.
+    pub settings: Vec<u8>,
+}
+
+#[cfg(feature = "registry")]
+impl Default for Cooker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(feature = "registry")]
 impl Cooker {
     /// Empty cooker: no assets, no cached payloads, zero cooks.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            registry: AssetRegistry::default(),
+            cache: BTreeMap::new(),
+            cooks: 0,
+            version: COOK_VERSION,
+            settings: Vec::new(),
+        }
+    }
+
+    /// Cook key for `digest` (the source digest) with `deps` in order: blake3
+    /// over the cook version, the settings digest, the source digest and each
+    /// dependency's own key. A dependency with no cached payload contributes
+    /// its registry digest, so its content still moves the key.
+    fn cook_key(&self, digest: &str, deps: &[AssetId]) -> String {
+        let mut text = format!(
+            "engine2040.cook.v{}\nsettings={}\nsource={digest}\n",
+            self.version,
+            content_digest(&self.settings)
+        );
+        for dep in deps {
+            let dep_key = match self.cache.get(dep) {
+                Some(cached) => cached.key.as_str(),
+                None => self.registry.digest(*dep).unwrap_or_default(),
+            };
+            text.push_str("dep=");
+            text.push_str(dep_key);
+            text.push('\n');
+        }
+        content_digest(text.as_bytes())
     }
 
     /// Asset count (registry entries).
@@ -155,6 +205,7 @@ impl Cooker {
             return Err(CookError::Missing { missing });
         }
         let digest = content_digest(content);
+        let key = self.cook_key(&digest, deps);
         // Run the job before touching the registry so failure stores nothing.
         let payload = run_job(&mut self.cooks, content, cook_fn)?;
         let id = self
@@ -163,7 +214,14 @@ impl Cooker {
             .map_err(map_registry_error)?;
         // Digest recomputed by register matches the one above; the cache key
         // is the freshly minted id, so insertion cannot collide.
-        self.cache.insert(id, Cached { digest, payload });
+        self.cache.insert(
+            id,
+            Cached {
+                digest,
+                key,
+                payload,
+            },
+        );
         Ok(CookOutcome {
             id,
             fresh: true,
@@ -171,8 +229,9 @@ impl Cooker {
         })
     }
 
-    /// Recook a known id: cache hit (same digest plus cached payload) skips
-    /// `cook_fn` and reports `fresh: false`; otherwise run it exactly once.
+    /// Recook a known id: cache hit (same source digest and same cook key,
+    /// so the same settings, version and dependency keys) skips `cook_fn` and
+    /// reports `fresh: false`; otherwise run it exactly once.
     /// The job runs before `reimport` so failure preserves the last-good
     /// cache entry and the registry record. Success refreshes both and
     /// reports the transitive dependent closure.
@@ -191,8 +250,9 @@ impl Cooker {
             return Err(CookError::Missing { missing });
         }
         let digest = content_digest(content);
+        let key = self.cook_key(&digest, deps);
         let hit = self.registry.digest(id) == Some(digest.as_str())
-            && self.cache.get(&id).map(|entry| entry.digest.as_str()) == Some(digest.as_str());
+            && self.cache.get(&id).map(|entry| entry.key.as_str()) == Some(key.as_str());
         if hit {
             // No cook needed; still reimport to sync dep edges (a deps-only
             // change reports dependents without rerunning the job).
@@ -212,7 +272,14 @@ impl Cooker {
             .registry
             .reimport(id, content, deps)
             .map_err(map_registry_error)?;
-        self.cache.insert(id, Cached { digest, payload });
+        self.cache.insert(
+            id,
+            Cached {
+                digest,
+                key,
+                payload,
+            },
+        );
         Ok(CookOutcome {
             id,
             fresh: true,
@@ -408,5 +475,84 @@ mod tests {
         assert!(format!("{err}").contains(&ghost.to_string()));
         assert_eq!(cooker.cooks, 0);
         assert!(cooker.is_empty());
+    }
+
+    /// Cook `a` (leaf) and `b` (reads `a`) with `a` as a dependency.
+    fn pair(cooker: &mut Cooker) -> (AssetId, AssetId) {
+        let a = cooker.cook(b"a1", &[], cook_ok).unwrap().id;
+        let b = cooker.cook(b"b1", &[a], cook_ok).unwrap().id;
+        (a, b)
+    }
+
+    #[test]
+    fn cook_full_hash_dependency_edit_makes_the_dependent_fresh() {
+        let mut cooker = Cooker::new();
+        let (a, b) = pair(&mut cooker);
+        let quiet = cooker
+            .recook(b, b"b1", &[a], |_| panic!("same key"))
+            .unwrap();
+        assert!(!quiet.fresh, "nothing changed: the dependent is a hit");
+        cooker.recook(a, b"a2", &[], cook_ok).unwrap();
+        let cooks = cooker.cooks;
+        // The dependent's own bytes are the same, its dependency is not.
+        let again = cooker.recook(b, b"b1", &[a], cook_ok).unwrap();
+        assert!(again.fresh, "a dependency edit is a miss for the dependent");
+        assert_eq!(cooker.cooks, cooks + 1);
+        let settled = cooker
+            .recook(b, b"b1", &[a], |_| panic!("same key"))
+            .unwrap();
+        assert!(!settled.fresh, "the new key holds");
+    }
+
+    #[test]
+    fn cook_full_hash_dependency_order_is_part_of_the_key() {
+        let mut cooker = Cooker::new();
+        let (a, b) = pair(&mut cooker);
+        let c = cooker.cook(b"c1", &[a, b], cook_ok).unwrap().id;
+        let same = cooker
+            .recook(c, b"c1", &[a, b], |_| panic!("same key"))
+            .unwrap();
+        assert!(!same.fresh);
+        let swapped = cooker.recook(c, b"c1", &[b, a], cook_ok).unwrap();
+        assert!(swapped.fresh, "the order of the dependency keys is hashed");
+    }
+
+    #[test]
+    fn cook_full_hash_version_bump_recooks_everything() {
+        let mut cooker = Cooker::new();
+        let (a, b) = pair(&mut cooker);
+        let c = cooker.cook(b"c1", &[b], cook_ok).unwrap().id;
+        let jobs: [(AssetId, &[u8], Vec<AssetId>); 3] =
+            [(a, b"a1", vec![]), (b, b"b1", vec![a]), (c, b"c1", vec![b])];
+        let sweep = |cooker: &mut Cooker| {
+            jobs.iter()
+                .filter(|(id, bytes, deps)| cooker.recook(*id, bytes, deps, cook_ok).unwrap().fresh)
+                .count()
+        };
+        assert_eq!(sweep(&mut cooker), 0, "a settled cache is all hits");
+        cooker.version += 1;
+        assert_eq!(sweep(&mut cooker), 3, "a version bump recooks 100 percent");
+        assert_eq!(sweep(&mut cooker), 0, "and settles again");
+        cooker.settings = b"quality=high".to_vec();
+        assert_eq!(sweep(&mut cooker), 3, "new settings recook 100 percent");
+    }
+
+    #[test]
+    fn cook_full_hash_same_inputs_give_the_same_keys_and_bytes_twice() {
+        let run = || {
+            let mut cooker = Cooker::new();
+            let (a, b) = pair(&mut cooker);
+            cooker.recook(a, b"a2", &[], cook_ok).unwrap();
+            cooker.recook(b, b"b1", &[a], cook_ok).unwrap();
+            [a, b].map(|id| {
+                let entry = cooker.cache.get(&id).unwrap();
+                (entry.key.clone(), entry.payload.clone())
+            })
+        };
+        let (first, second) = (run(), run());
+        assert_eq!(first, second, "keys and payload bytes repeat x2");
+        assert_eq!(first[0].1, b"a2".to_vec());
+        assert_eq!(first[1].1, b"b1".to_vec());
+        assert_eq!(first[1].0.len(), 64, "a blake3 hex key");
     }
 }

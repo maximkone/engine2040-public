@@ -12,11 +12,12 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::courier::RelayLeg;
 use crate::lobby::{self, LobbyError, Msg};
-use crate::netcode::Channel;
+use crate::netcode::{kind_channel, Channel};
 use crate::relay::{
     decode_binding_response, encode_binding_request, RelayError, RelayMsg, MAX_RELAY_BYTES,
 };
@@ -161,6 +162,49 @@ pub fn send_on_channel<T: Transport + ?Sized>(
     }
 }
 
+/// Sends refused because the message had no channel route.
+static UNROUTED_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// Sends refused so far for lack of a channel route (process-wide count of
+/// bad headers and unmapped kinds). Metrics only: the sim never reads it.
+pub fn unrouted_refusals() -> u64 {
+    UNROUTED_REFUSALS.load(Ordering::Relaxed)
+}
+
+/// Channel of a session wire message: its own header (magic, version, kind
+/// byte) names a row of the netcode kind table, which names a
+/// [`CHANNEL_TABLE`] row.
+fn wire_channel(bytes: &[u8]) -> Result<Channel, NetError> {
+    let [magic_lo, magic_hi, _, kind, ..] = bytes else {
+        return Err(NetError::Truncated);
+    };
+    if u16::from_le_bytes([*magic_lo, *magic_hi]) != session::WIRE_MAGIC {
+        return Err(NetError::BadMagic);
+    }
+    kind_channel(*kind)
+        .map(|(ch, _)| ch)
+        .ok_or(NetError::BadKind(*kind))
+}
+
+/// Send one encoded session message on the channel its kind maps to. A
+/// message whose header is bad or whose kind has no table row is refused
+/// and counted, never sent on a default path.
+pub fn send_wire<T: Transport + ?Sized>(
+    transport: &mut T,
+    to: PeerId,
+    bytes: &[u8],
+) -> Result<(), NetError> {
+    let ch = wire_channel(bytes).inspect_err(|_| {
+        UNROUTED_REFUSALS.fetch_add(1, Ordering::Relaxed);
+    })?;
+    let kind = if channel_is_reliable(ch) {
+        ControlKind::Snapshot
+    } else {
+        ControlKind::Lobby
+    };
+    send_on_channel(transport, to, ch, kind, bytes)
+}
+
 /// One received frame with its sender.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Inbound {
@@ -205,9 +249,11 @@ pub trait Transport {
 }
 
 /// Reject oversize frames before they touch any socket: 1200 B wins
-/// everywhere, streams included; the transport never fragments.
+/// everywhere, streams included; the transport never fragments. A refusal is
+/// counted in the [`GateReceipt`](crate::browser::GateReceipt).
 pub(crate) fn check_budget(bytes: &[u8]) -> Result<(), NetError> {
     if bytes.len() > MAX_PACKET_BYTES {
+        crate::browser::note_oversize();
         return Err(NetError::TooLarge);
     }
     Ok(())
@@ -230,71 +276,47 @@ fn lobby_err(err: LobbyError) -> NetError {
     }
 }
 
-/// Send one input window as an unreliable datagram.
+/// Send one input window (a sequenced datagram, by its kind row).
 pub fn send_input<T: Transport + ?Sized>(
     transport: &mut T,
     to: PeerId,
     tick: u32,
     window: &[FighterInput],
 ) -> Result<(), NetError> {
-    let bytes = session::encode_input(tick, window)?;
-    send_on_channel(
-        transport,
-        to,
-        Channel::Unreliable,
-        ControlKind::Lobby,
-        &bytes,
-    )
+    send_wire(transport, to, &session::encode_input(tick, window)?)
 }
 
-/// Send one full state window as an unreliable datagram.
+/// Send one full state window (an unreliable datagram, by its kind row).
 pub fn send_state<T: Transport + ?Sized>(
     transport: &mut T,
     to: PeerId,
     checkpoint: Checkpoint,
     window: &[FighterInput],
 ) -> Result<(), NetError> {
-    let bytes = session::encode_state(checkpoint, window)?;
-    send_on_channel(
-        transport,
-        to,
-        Channel::Unreliable,
-        ControlKind::Lobby,
-        &bytes,
-    )
+    send_wire(transport, to, &session::encode_state(checkpoint, window)?)
 }
 
-/// Send one state delta as an unreliable datagram.
+/// Send one state delta (an unreliable datagram, by its kind row).
 pub fn send_state_delta<T: Transport + ?Sized>(
     transport: &mut T,
     to: PeerId,
     checkpoint: Checkpoint,
     delta: &Delta,
 ) -> Result<(), NetError> {
-    let bytes = session::encode_state_delta(checkpoint, delta)?;
-    send_on_channel(
+    send_wire(
         transport,
         to,
-        Channel::Unreliable,
-        ControlKind::Lobby,
-        &bytes,
+        &session::encode_state_delta(checkpoint, delta)?,
     )
 }
 
-/// Send one full snapshot as a reliable Snapshot message.
+/// Send one full snapshot (a reliable Snapshot message, by its kind row).
 pub fn send_snapshot<T: Transport + ?Sized>(
     transport: &mut T,
     to: PeerId,
     full: &FullSnap,
 ) -> Result<(), NetError> {
-    let bytes = session::encode_snapshot(full)?;
-    send_on_channel(
-        transport,
-        to,
-        Channel::Reliable,
-        ControlKind::Snapshot,
-        &bytes,
-    )
+    send_wire(transport, to, &session::encode_snapshot(full)?)
 }
 
 /// Send one lobby message as a reliable Lobby message.
@@ -922,8 +944,6 @@ use std::io::IoSliceMut;
 use std::net::IpAddr;
 #[cfg(feature = "quic")]
 use std::pin::Pin;
-#[cfg(feature = "quic")]
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "quic")]
 use std::task::{Context, Poll, Waker};
 #[cfg(feature = "quic")]
@@ -1852,6 +1872,60 @@ mod channel_route_tests {
             Err(NetError::TooLarge)
         );
         assert_eq!(fabric.delivered(), 0, "refused frames never enter the link");
+    }
+
+    /// A session header of `kind` and nothing else: magic, version, kind.
+    fn header(kind: u8) -> [u8; 4] {
+        let magic = session::WIRE_MAGIC.to_le_bytes();
+        [magic[0], magic[1], session::WIRE_VERSION, kind]
+    }
+
+    #[test]
+    fn channel_contract_sends_each_kind_on_its_table_row() {
+        for (kind, ch, _) in crate::netcode::KIND_CHANNEL {
+            let fabric = SimQuicFabric::new(1, 0xC4A2);
+            let mut from = fabric.endpoint(addr(51));
+            let to = PeerId(addr(52));
+            let mut recv = fabric.endpoint(addr(52));
+            send_wire(&mut from, to, &header(kind)).expect("mapped kind sends");
+            fabric.tick();
+            fabric.tick();
+            let got = recv.recv();
+            assert_eq!(got.len() as u64 + fabric.dropped(), 1, "kind {kind}");
+            for inbound in &got {
+                let on_stream = matches!(inbound.frame, InboundFrame::Stream { .. });
+                assert_eq!(
+                    on_stream,
+                    channel_is_reliable(ch),
+                    "kind {kind} rides {ch:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn channel_contract_refuses_an_unmapped_kind_and_counts_it() {
+        let fabric = SimQuicFabric::new(1, 0xC4A3);
+        let mut from = fabric.endpoint(addr(61));
+        let to = PeerId(addr(62));
+        let mut recv = fabric.endpoint(addr(62));
+        let unmapped = 9;
+        assert!(crate::netcode::kind_channel(unmapped).is_none());
+        let before = unrouted_refusals();
+        assert_eq!(
+            send_wire(&mut from, to, &header(unmapped)),
+            Err(NetError::BadKind(unmapped))
+        );
+        assert_eq!(
+            send_wire(&mut from, to, &[0, 0, session::WIRE_VERSION, 0]),
+            Err(NetError::BadMagic)
+        );
+        assert_eq!(send_wire(&mut from, to, &[0x4E]), Err(NetError::Truncated));
+        assert_eq!(unrouted_refusals() - before, 3, "every refusal is counted");
+        fabric.tick();
+        fabric.tick();
+        assert!(recv.recv().is_empty(), "refused frames never reach a link");
+        assert_eq!((fabric.delivered(), fabric.dropped()), (0, 0));
     }
 
     #[test]

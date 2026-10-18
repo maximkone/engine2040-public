@@ -23,15 +23,17 @@ use engine_input::fighter::{Buttons, ATTACK, BLOCK};
 
 use crate::ack::input::{DeliveryStats, InputDelivery};
 use crate::dedicated::{HeadlessServer, ServerError};
+use crate::guard::SlotReceipt;
 use crate::heal::NetHealError;
+use crate::lagcomp::LagTape;
 use crate::link::{wire_len, Frame, LinkProfile, LinkReport, LinkStats, LoopbackWire, Peer, Wire};
 use crate::lobby::{BuildId, Lobby, LobbyError, Msg, LOBBY_MAGIC};
 use crate::relay::RelayError;
 use crate::scale::{human_dwell, human_wish, RESIM_CAP_TICKS};
 use crate::session::{
-    decode_input, decode_state, encode_input, encode_state, redundancy_window, resync_packets,
-    tick_slice, BodyId, BodyInput, BodyTape, Client, NetError, SnapshotDelta,
-    MAX_INPUTS_PER_PACKET, REDUNDANCY, WIRE_MAGIC, WIRE_VERSION,
+    decode_state, encode_input, encode_state, redundancy_window, resync_packets, tick_slice,
+    BodyId, BodyInput, BodyTape, Client, NetError, SnapshotDelta, MAX_INPUTS_PER_PACKET,
+    REDUNDANCY, WIRE_MAGIC, WIRE_VERSION,
 };
 
 /// Human seats in a bout: the first two lobby slots, the rest are AI fill.
@@ -66,8 +68,6 @@ pub const ROLLBACK_BUCKETS: usize = 33;
 /// Ticks each [`BoutReport::sync_test`] window rewinds and replays (GGRS
 /// SyncTest style; the GGRS default is unverified).
 pub const SYNC_CHECK_DISTANCE: u32 = 7;
-/// Inputs for ticks this far past the server cursor are refused (flood guard).
-const MAX_AHEAD_TICKS: u32 = 64;
 
 /// Bout setup and verdict failures.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,7 +153,8 @@ pub struct BoutConfig {
     pub ticks: u32,
     /// Arena half-extent in meters.
     pub half_extent_m: f32,
-    /// Ticks the server holds a tick open for late inputs.
+    /// Ticks the server holds a tick open for late inputs at least; the
+    /// server's lag window widens it for a slower seat.
     pub hold: u32,
     /// The mid-fight drop and rejoin.
     pub drop: DropScript,
@@ -287,7 +288,6 @@ struct Host {
     tokens: [u64; SEAT_COUNT],
     inbox: BTreeMap<(u32, u8), BodyInput>,
     miss: [u32; SEAT_COUNT],
-    hold: u32,
     ticks: u32,
     ledger: HostLedger,
 }
@@ -325,6 +325,7 @@ impl Host {
         tokens: [u64; SEAT_COUNT],
     ) -> Result<Self, BoutError> {
         let mut server = HeadlessServer::new(arena)?;
+        server.set_hold_floor(hold);
         for (seat, token) in tokens.iter().enumerate() {
             let slot = server.connect(*token)?;
             if slot != slots[seat] {
@@ -337,7 +338,6 @@ impl Host {
             tokens,
             inbox: BTreeMap::new(),
             miss: [0; SEAT_COUNT],
-            hold,
             ticks: arena.ticks,
             ledger: HostLedger {
                 ai_base: usize::from(arena.fighters.saturating_sub(SEATS)),
@@ -348,26 +348,23 @@ impl Host {
 
     fn on_frame<W: Wire>(&mut self, seat: u8, frame: Frame, wire: &mut W, step: u32) {
         match frame {
-            Frame::Datagram(bytes) => self.stage_inputs(seat, &bytes),
+            Frame::Datagram(bytes) => self.stage_inputs(seat, &bytes, step),
             Frame::Stream(bytes) => self.on_control(seat, &bytes, wire, step),
         }
     }
 
-    /// Stage a client input window; foreign slots, stale ticks and far-future
-    /// ticks are dropped, repeats from the redundancy cover collapse.
-    fn stage_inputs(&mut self, seat: u8, bytes: &[u8]) {
-        let (Ok(packet), Some(slot)) = (
-            decode_input(bytes),
-            self.slots.get(usize::from(seat)).copied(),
-        ) else {
+    /// Stage a client input window: the server's guard screens it (foreign
+    /// slots, stale, late, far-future and rewritten ticks are refused and
+    /// counted per seat, repeats from the redundancy cover collapse) and the
+    /// admitted inputs wait here for their tick.
+    fn stage_inputs(&mut self, seat: u8, bytes: &[u8], step: u32) {
+        let Some(token) = self.tokens.get(usize::from(seat)).copied() else {
             return;
         };
-        let now = self.server.tick_now();
-        for input in packet.inputs {
-            if input.fighter.get() != slot || input.tick < now || input.tick > now + MAX_AHEAD_TICKS
-            {
-                continue;
-            }
+        let Ok(admitted) = self.server.offer(token, bytes, step) else {
+            return;
+        };
+        for input in admitted {
             self.inbox.entry((input.tick, seat)).or_insert(input);
         }
     }
@@ -427,8 +424,12 @@ impl Host {
     }
 
     /// Author every tick whose hold has run out, then broadcast its window.
+    /// The hold is the server's lag window: the bout's floor, widened to the
+    /// slowest connected seat's measured lag so its inputs land on time.
     fn author<W: Wire>(&mut self, wire: &mut W, step: u32) -> Result<(), BoutError> {
-        while self.server.tick_now() < self.ticks && step >= self.server.tick_now() + self.hold {
+        while self.server.tick_now() < self.ticks
+            && step >= self.server.tick_now() + self.server.hold_ticks()
+        {
             let tick = self.server.tick_now();
             for seat in 0..SEATS {
                 let token = self.tokens[usize::from(seat)];
@@ -889,6 +890,12 @@ pub struct BoutReport {
     pub seats: [SeatReport; SEAT_COUNT],
     /// Server-side drop and rejoin ledger.
     pub host: HostLedger,
+    /// The server guard's admission receipt of each seat's slot, seat order.
+    pub admission: [SlotReceipt; SEAT_COUNT],
+    /// Lag receipt of every attack press the seats sent, in arrival order.
+    pub hits: LagTape,
+    /// Ticks the server held each tick open at the end (its lag window).
+    pub hold_ticks: u32,
     /// Combat around the drop.
     pub fight: FightLedger,
     /// Every directed link, measured.
@@ -1023,6 +1030,15 @@ impl BoutReport {
             h.write_u32(word);
         }
         h.write_u64(host.catchup_bytes);
+        for receipt in &self.admission {
+            h.write_u32(receipt.accepted);
+            h.write_u32(receipt.repeats);
+            for count in receipt.refused {
+                h.write_u32(count);
+            }
+        }
+        h.write_u64(self.hits.hash());
+        h.write_u32(self.hold_ticks);
         for word in [
             self.fight.before_drop,
             self.fight.during_drop,
@@ -1400,6 +1416,11 @@ fn finish(
         replay_equal,
         seats: [seat_report(seats[0]), seat_report(seats[1])],
         host: host.ledger,
+        admission: host
+            .slots
+            .map(|slot| host.server.admission()[usize::from(slot)]),
+        hits: host.server.hit_receipts().clone(),
+        hold_ticks: host.server.hold_ticks(),
         fight,
         links,
         checkpoints: truth.to_vec(),
@@ -1408,6 +1429,9 @@ fn finish(
 
 /// Placeholder tip for an empty history.
 const NO_CHECKPOINT: Checkpoint = Checkpoint { tick: 0, hash: 0 };
+
+#[cfg(test)]
+mod admission_tests;
 
 #[cfg(test)]
 mod tests {

@@ -179,6 +179,8 @@ impl DynRes {
 #[cfg(test)]
 mod tests {
     use super::DynRes;
+    use crate::aa_scale::{ScaleController, ScalePolicy};
+    use engine_core::CounterRng;
 
     fn gov() -> DynRes {
         DynRes::new(10_000, 50, 100, 10, 3, 3)
@@ -277,9 +279,110 @@ mod tests {
         assert_eq!(gov.scale_pct(), 50);
     }
 
+    /// OPT20 fixture: frames of one seeded GPU load (jitter, one long spike,
+    /// two short ones) through the live controller. Cost model: a fixed
+    /// post/upscale part plus the scene part times the pixel share (scale
+    /// squared). `adaptive` false holds full resolution.
+    fn seeded_load_run(adaptive: bool) -> (Vec<f64>, ScaleController) {
+        const FRAMES: u64 = 600;
+        let rng = CounterRng::new(2040);
+        let unit =
+            |word: u64| f64::from(u32::try_from(word >> 32).expect("32 bits")) / 4_294_967_296.0;
+        let mut ctl = ScaleController::new(ScalePolicy::default()).expect("policy builds");
+        let mut frame_ms = Vec::new();
+        for frame in 0..FRAMES {
+            let load = match frame {
+                120..=199 => 1.9,
+                330..=335 | 450..=455 => 1.7,
+                _ => 1.0,
+            };
+            let jitter = 0.94 + 0.12 * unit(rng.sample(frame));
+            let scale = if adaptive {
+                f64::from(ctl.scale())
+            } else {
+                1.0
+            };
+            let ms = 1.0 + 11.0 * load * jitter * scale * scale;
+            frame_ms.push(ms);
+            ctl.update(ms).expect("frame runs");
+        }
+        (frame_ms, ctl)
+    }
+
+    fn p95(frame_ms: &[f64]) -> f64 {
+        let mut sorted = frame_ms.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted[(sorted.len() * 95).div_ceil(100) - 1]
+    }
+
+    #[test]
+    fn dynres_seeded_load_spike_holds_p95_at_the_frame_budget() {
+        let (fixed, _) = seeded_load_run(false);
+        assert!(
+            p95(&fixed) > 16.7,
+            "full resolution must miss the budget: p95 {:.2} ms",
+            p95(&fixed)
+        );
+        let (adaptive, ctl) = seeded_load_run(true);
+        eprintln!(
+            "OPT20 dynres: p95 {:.2} ms fixed, {:.2} ms adaptive, {} resolution changes",
+            p95(&fixed),
+            p95(&adaptive),
+            ctl.changes().len()
+        );
+        assert!(
+            p95(&adaptive) <= 16.7,
+            "p95 {:.2} ms over the 16.7 ms budget",
+            p95(&adaptive)
+        );
+        assert_eq!(
+            ctl.scale(),
+            1.0,
+            "the load cleared, full resolution is back"
+        );
+    }
+
+    #[test]
+    fn dynres_resolution_changes_are_logged_inside_the_bounds() {
+        let (_, ctl) = seeded_load_run(true);
+        let log = ctl.changes();
+        let first = log.first().expect("the spike changes the resolution");
+        assert!(
+            (121..=124).contains(&first.frame),
+            "first change on frame {}, spike starts at 121",
+            first.frame
+        );
+        assert!(first.to < first.from, "the first change is a step down");
+        let policy = ctl.policy();
+        for change in log {
+            assert!((policy.min_scale..=policy.max_scale).contains(&change.to));
+            assert!(
+                (change.to - change.from).abs() > 0.0,
+                "a logged change moves"
+            );
+        }
+        assert!(log.windows(2).all(|pair| pair[0].frame < pair[1].frame));
+        assert!(
+            log.iter().any(|change| change.to > change.from),
+            "recovery logged"
+        );
+        assert!(
+            log.len() < 40,
+            "{} changes in 600 frames is flapping",
+            log.len()
+        );
+    }
+
+    #[test]
+    fn dynres_seeded_run_is_identical_twice() {
+        let (frames_a, ctl_a) = seeded_load_run(true);
+        let (frames_b, ctl_b) = seeded_load_run(true);
+        assert_eq!(frames_a, frames_b);
+        assert_eq!(ctl_a.changes(), ctl_b.changes());
+    }
+
     #[test]
     fn scale_controller_spike_floors_through_the_governor() {
-        use crate::aa_scale::{ScaleController, ScalePolicy};
         let policy = ScalePolicy::default();
         let mut ctl = ScaleController::new(policy).expect("policy builds");
         assert_eq!(ctl.scale(), 1.0);

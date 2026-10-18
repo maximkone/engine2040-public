@@ -25,7 +25,7 @@ Status key: LANDING = implementer running, result goes in the last column when c
 | # | Steal | Why not now |
 |---|---|---|
 | T1 | Fighter outline: vertex extrusion along a cooked outline normal, one extra draw per fighter (bevy_mod_outline `outline.wgsl`, 01) | Wiring goes through `crates/game/src/fighter_look.rs`, which another session is editing today. Best G4 silhouette win per cost. |
-| T2 | Render proof honesty: `backend_selection` report in every render envelope + golden tolerance as two numbers + perturbation self-test (scena `headless-rendering.md`, minecraft-2 D3; 06) | Same files as L4 (`adapter.rs`, instance helper). Do after L4 lands. |
+| T2 | DONE 5e4d384f: `backend:` selection report (strict via `E2040_REQUIRE_GPU=1`, remedy text) in presenter + editor receipts, and `frames_match` (mean <= 1.5, <= 0.5 pct of pixels over 12) with a perturbation self-test. Open: print `presenter.backend_selection().line()` next to `presenter surface:` in the arena printers (dirty then); `frames_match` has one test caller until T5 (ssimulacra2) adds a production golden compare. |
 | T3 | Web: wgpu loop in a worker on OffscreenCanvas (webgpu-worker `worker.ts`, 06) | Needs a real browser run to prove; WEB slot, M size. |
 | T4 | Torch point glow, fragment-only (Veloren `point_glow.glsl`, 01) | Needs the EG12 torch light list in uniforms; check it exists first. |
 | T5 | `ssimulacra2` crate as the golden image metric (10-17 hunt #4; `tools/iqa-gate.mjs` still leaves it null) | Adds a dependency and a golden-bless flow; one slot after T2. |

@@ -590,9 +590,10 @@ pub fn cache_key(req: &IntakeRequest<'_>) -> String {
     content_digest(key_text(req).as_bytes())
 }
 
-/// Finished intakes by key, in memory and optionally in a folder (`<key>.bundle`,
-/// `<key>.row.json`, `<key>.meta`). A folder entry whose bundle does not match its
-/// recorded hash is a miss.
+/// Finished intakes by key, in memory and optionally in a folder: one subfolder
+/// per entry (`<key>/bundle`, `<key>/row.json`, `<key>/meta`), staged in
+/// `<key>.tmp` and committed by one rename, so an entry is whole or absent. A
+/// folder entry whose bundle does not match its recorded hash is a miss.
 #[derive(Clone, Debug, Default)]
 pub struct IntakeCache {
     dir: Option<PathBuf>,
@@ -717,6 +718,26 @@ fn parse_meta(meta: &str, key: &str, bundle: Vec<u8>, row: String) -> Option<Int
     })
 }
 
+/// Write one entry: stage its three files in `<key>.tmp`, then commit with one
+/// rename. A kill before the rename leaves only the staging folder, which
+/// `get` never reads and the next `put` of that key clears: exactly that
+/// entry is redone. A committed entry of the same key (a damaged one) goes
+/// first, so the rename lands on a free name.
+fn write_entry(dir: &Path, out: &IntakeOutput) -> Result<(), IntakeError> {
+    let staging = dir.join(format!("{}.tmp", out.cache_key));
+    let entry = dir.join(&out.cache_key);
+    for stale in [&staging, &entry] {
+        if stale.exists() {
+            std::fs::remove_dir_all(stale).map_err(cache_err)?;
+        }
+    }
+    std::fs::create_dir(&staging).map_err(cache_err)?;
+    std::fs::write(staging.join("bundle"), &out.bundle).map_err(cache_err)?;
+    std::fs::write(staging.join("row.json"), &out.row).map_err(cache_err)?;
+    std::fs::write(staging.join("meta"), meta_text(out)).map_err(cache_err)?;
+    std::fs::rename(&staging, &entry).map_err(cache_err)
+}
+
 impl IntakeCache {
     /// A cache that lives only as long as this value.
     pub fn memory() -> Self {
@@ -740,18 +761,10 @@ impl IntakeCache {
                 ..found.clone()
             });
         }
-        let dir = self.dir.as_ref()?;
-        // One base join per `get`; the key is hex so `set_extension` appends.
-        let base = dir.join(key);
-        let mut meta_path = base.clone();
-        meta_path.set_extension("meta");
-        let meta = std::fs::read_to_string(&meta_path).ok()?;
-        let mut bundle_path = base.clone();
-        bundle_path.set_extension("bundle");
-        let bundle = std::fs::read(&bundle_path).ok()?;
-        let mut row_path = base;
-        row_path.set_extension("row.json");
-        let row = std::fs::read_to_string(&row_path).ok()?;
+        let entry = self.dir.as_ref()?.join(key);
+        let meta = std::fs::read_to_string(entry.join("meta")).ok()?;
+        let bundle = std::fs::read(entry.join("bundle")).ok()?;
+        let row = std::fs::read_to_string(entry.join("row.json")).ok()?;
         parse_meta(&meta, key, bundle, row)
     }
 
@@ -764,18 +777,7 @@ impl IntakeCache {
     fn put(&mut self, out: &IntakeOutput) -> Result<(), IntakeError> {
         if let Some(dir) = &self.dir {
             // Disk holds the bundle; skip `mem` so `put` copies no bytes.
-            // One base join; the key is hex so `set_extension` appends.
-            let base = dir.join(&out.cache_key);
-            let mut bundle_path = base.clone();
-            bundle_path.set_extension("bundle");
-            std::fs::write(&bundle_path, &out.bundle).map_err(cache_err)?;
-            let mut row_path = base.clone();
-            row_path.set_extension("row.json");
-            std::fs::write(&row_path, &out.row).map_err(cache_err)?;
-            let mut meta_path = base;
-            meta_path.set_extension("meta");
-            std::fs::write(&meta_path, meta_text(out)).map_err(cache_err)?;
-            return Ok(());
+            return write_entry(dir, out);
         }
         self.mem.insert(out.cache_key.clone(), out.clone());
         Ok(())
@@ -1294,9 +1296,13 @@ pub fn intake(
     let bundle = stage_bundle(req.name, &cooked)?;
     let bundle_hash = content_digest(&bundle);
     let lod_tris: Vec<u32> = cooked.lods.iter().map(tri_count).collect();
-    let hull = cooked.hulls.first().cloned().ok_or(IntakeError::Empty {
-        detail: "the cook made no hull".to_owned(),
-    })?;
+    let hull = cooked
+        .hulls
+        .first()
+        .cloned()
+        .ok_or_else(|| IntakeError::Empty {
+            detail: "the cook made no hull".to_owned(),
+        })?;
     let row = build_row(
         req,
         &key,

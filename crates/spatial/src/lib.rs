@@ -53,9 +53,15 @@ pub mod support;
 pub mod tag_lift;
 /// Finding triage by component role and z-fight ranking (SPF8).
 pub mod triage;
+/// Verdict allow-list and the family learner (SPF9).
+pub mod verdict;
+/// Why a thing is not seen from an eye: the first failing reason (SPX6).
+pub mod why_hidden;
 
 pub use brief::{brief, brief_stats, brief_text, estimate_tokens, Brief, BriefStats, Group};
-pub use checks::{run_checks, run_spatial, OPT_IN_CHECKS, SPATIAL_CHECKS};
+pub use checks::{
+    run_checks, run_checks_eps, run_spatial, OPT_IN_CHECKS, SPATIAL_CHECKS, ZFIGHT_EPS_CM,
+};
 pub use diff::{describe, diff_graph, dry_run_diff, summarize, Edge, SemanticDiff};
 pub use index::{
     density_grid, nearest, overlap_pairs, pos_known, size_known, sweep_pairs, to_cm, xyz_pairs,

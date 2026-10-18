@@ -31,6 +31,7 @@ use engine_arena::spine_step::run_spine;
 use engine_arena::world::MatchWorld;
 use engine_arena::{run, ArenaConfig, Checkpoint, FighterId, FighterInput, FighterTape};
 use engine_core::{hash::GOLDEN_GAMMA, splitmix64};
+use engine_input::fighter::{FACING_RANGE, KNOWN_BUTTONS, WISH_RANGE};
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::model::{CallToolResult, ContentBlock, ToolAnnotations};
 use rmcp::schemars::JsonSchema;
@@ -78,13 +79,7 @@ pub const FRAME_CAPTION_MAX_CHARS: usize = 2048;
 /// for the play module plus the receipt tests (`play_session`,
 /// `requery`, `tests/it/step20x2`).
 pub const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
-// Fighter-contract ranges, mirrored from engine-input (which owns them).
-// Arena re-exports everything play.run needs except `Buttons`, so these
-// mirrors keep endpoint to its single permitted engine-arena edge; every
-// value is re-checked by tape validation below.
-const WISH_RANGE: i8 = 100;
-const FACING_RANGE: i16 = 18_000;
-const KNOWN_BUTTONS: u8 = 0x07;
+/// Fewest fighters a match runs (the arena config check owns the same bound).
 const MIN_FIGHTERS: u8 = 2;
 
 // ---------------------------------------------------------------------------

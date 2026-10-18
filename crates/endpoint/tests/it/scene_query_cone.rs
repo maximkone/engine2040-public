@@ -322,8 +322,10 @@ fn tool_list_headroom_holds_with_the_cone_op() {
     );
     assert!(ledger.headroom_chars >= TOOL_LIST_MIN_HEADROOM_CHARS);
     // 2026-10-18: SPR6 `blocked_by` and SPX3 `spatial_delta` raised the bound 45_500 -> 47_500.
+    // 2026-10-18 (backlog wave 2): five query kinds, role triage and verdict rows: 47_500 -> 48_500.
+    // 2026-10-18 (endpoint wave): `scene.pick` took the default list to 50.9k: bound 48_500 -> 51_500.
     assert!(
-        ledger.total_chars < 47_500,
+        ledger.total_chars < 51_500,
         "default list {} stays under the 2026-10-18 spatial-lane bound",
         ledger.total_chars
     );

@@ -1143,14 +1143,27 @@ pub(crate) fn compute_storage_entry(binding: u32, read_only: bool) -> wgpu::Bind
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `decal` error prefix kept.
 #[cfg(feature = "window")]
-fn decal_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
+fn decal_map_and_wait(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<(), crate::accel::ReadbackError> {
     crate::accel::map_readback(device, buffer, "decal")
+}
+
+#[cfg(feature = "window")]
+impl From<crate::accel::ReadbackError> for DecalError {
+    fn from(error: crate::accel::ReadbackError) -> Self {
+        Self::Device(error.to_string())
+    }
 }
 
 /// Read `count` little-endian u32 words from a mapped readback buffer.
 /// Shared [`crate::accel`] core with the `decal` text kept.
 #[cfg(feature = "window")]
-fn decal_readback_u32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<u32>, String> {
+fn decal_readback_u32(
+    buffer: &wgpu::Buffer,
+    count: usize,
+) -> Result<Vec<u32>, crate::accel::ReadbackError> {
     crate::accel::readback_u32(buffer, count, "decal", "words")
 }
 
@@ -1276,8 +1289,8 @@ impl DecalPool {
         }
         encoder.copy_buffer_to_buffer(dst_buf, 0, readback, 0, byte_len);
         queue.submit(Some(encoder.finish()));
-        decal_map_and_wait(device, readback).map_err(DecalError::Device)?;
-        let back = decal_readback_u32(readback, words as usize).map_err(DecalError::Device)?;
+        decal_map_and_wait(device, readback)?;
+        let back = decal_readback_u32(readback, words as usize)?;
         readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(DecalError::Validation(format!(

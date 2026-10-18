@@ -13,14 +13,11 @@
 //! Float quarantine (ARC14): the spine step takes integer-nanosecond dt
 //! (`engine_core::time` shape). [`SpineSchedule::register_ns`] systems read
 //! [`SpineCtx::dt_ns`] and never `schedule::Ctx::dt`; [`SpineTick::run`]
-//! takes `dt_ns: u64`. No float appears in this file outside its tests (the
-//! quarantine test in `spine.rs` scans it); until the schedule itself takes
-//! integer dt (ARC18) the underlying `Schedule::run` is fed its default
-//! value, which no registered spine system reads.
+//! takes `dt_ns: u64` and hands it to `Schedule::run_ns`, which fills
+//! `Ctx::dt_ns` and poisons `Ctx::dt` with NaN. No float appears in this file
+//! outside its tests (the quarantine test in `spine.rs` scans it).
 
 use core::fmt;
-use std::cell::Cell;
-use std::rc::Rc;
 
 use crate::schedule::{Ctx, Phase, Schedule, Tick};
 
@@ -118,7 +115,6 @@ pub struct SpineCtx {
 /// Builder holding at most one closure per [`SpineSystem`].
 pub struct SpineSchedule<W> {
     slots: [Option<SysFn<W>>; 5],
-    dt_ns: Rc<Cell<u64>>,
 }
 
 impl<W: 'static> Default for SpineSchedule<W> {
@@ -132,7 +128,6 @@ impl<W: 'static> SpineSchedule<W> {
     pub fn new() -> Self {
         Self {
             slots: [None, None, None, None, None],
-            dt_ns: Rc::new(Cell::new(0)),
         }
     }
 
@@ -158,14 +153,13 @@ impl<W: 'static> SpineSchedule<W> {
         system: SpineSystem,
         mut f: impl FnMut(&mut W, SpineCtx) + 'static,
     ) -> Result<&mut Self, SpineScheduleError> {
-        let dt_ns = Rc::clone(&self.dt_ns);
         self.register(system, move |world, cx| {
             f(
                 world,
                 SpineCtx {
                     tick: cx.tick,
                     phase: cx.phase,
-                    dt_ns: dt_ns.get(),
+                    dt_ns: cx.dt_ns,
                 },
             );
         })
@@ -198,10 +192,8 @@ impl<W: 'static> SpineSchedule<W> {
     /// Build the integer-ns runner: every system registered, one
     /// [`SpineTick::run`] per tick.
     pub fn build_ns(self) -> Result<SpineTick<W>, SpineScheduleError> {
-        let dt_ns = Rc::clone(&self.dt_ns);
         Ok(SpineTick {
             schedule: self.build()?,
-            dt_ns,
         })
     }
 }
@@ -209,15 +201,13 @@ impl<W: 'static> SpineSchedule<W> {
 /// A built spine schedule stepped by integer nanoseconds.
 pub struct SpineTick<W> {
     schedule: Schedule<W>,
-    dt_ns: Rc<Cell<u64>>,
 }
 
 impl<W> SpineTick<W> {
     /// Run one tick of `dt_ns` nanoseconds through the five systems in
     /// order. The step length reaches systems only as [`SpineCtx::dt_ns`].
     pub fn run(&mut self, world: &mut W, dt_ns: u64) {
-        self.dt_ns.set(dt_ns);
-        self.schedule.run(world, Default::default());
+        self.schedule.run_ns(world, dt_ns);
     }
 
     /// Ticks run so far.

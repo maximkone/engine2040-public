@@ -8,11 +8,15 @@
 //     the exact reason of every attempt is written down (attempts.json) and the run says NO ADAPTER.
 //  2. The no-WebGPU run. navigator.gpu is removed before the page starts; the loud message with the browser
 //     versions must show, the line must say ok:false reason no-webgpu, and nothing may throw.
-//  3. The net duel (WEB9, WEB12), only with --server: `node tools/web-browse.mjs --dir dist/web --chrome google-chrome
+//  3. The net duel (WEB9, WEB12), only with --server or --join: `node tools/web-browse.mjs --dir dist/web --chrome google-chrome
 //     --out out/web-net --server ws://127.0.0.1:7050 [--expect-hash <hex>] [--expect-transport websocket]
 //     [--wt https://host:port/e2040 --cert <sha256 hex>] [--net-timeout <s>]`. Loads the page at `?server=...` in a Chrome
 //     with no GPU flags (the duel needs none), waits for `net: transport=.. ticks=.. hash=.. peers=..` in #net and checks it:
-//     600 ticks, the hash you expect, the transport you expect. Nothing else runs in that mode. Exit 0 proven, 1 not.
+//     600 ticks (or --ticks N), the hash you expect, the transport you expect. Nothing else runs in that mode. Exit 0 proven, 1 not.
+//     `--join host:port [--cert ..]` opens the page by the one-port shorthand instead. `--play` makes the seat a live one and
+//     `--live-keys` presses real keys at it (a fight's worth: walk, swing, turn, dodge) so the tape is not the script;
+//     `--token N` pins the seat token and `--drop-at-tick N` takes the page away once the server tick reaches N (exit 0
+//     when it dropped, 1 when the duel ended first), so a second run with the same token can take the seat back.
 // Exit: 0 all proven (a missing adapter is only a failure with --require-adapter), 1 a proof failed,
 // 2 could not run (no Chrome, bad arguments), 3 no adapter and --require-adapter was given.
 // Only loopback is served and visited. The Chrome processes started here are ours and are closed here.
@@ -193,6 +197,18 @@ export function verdict(r) {
   } else if (!r.stats || !isDrawn(r.stats)) return { ok: false, code: "blank-canvas", why: `adapter ok but the screenshot is blank (${JSON.stringify(r.stats)})` };
   if (!r.framesAdvanced) return { ok: false, code: "frozen", why: "adapter ok but the frame counter does not move" };
   if (r.recovered === false) return { ok: false, code: "no-recovery", why: "the page did not come back after the device was destroyed" };
+  if (r.arena && r.recovered) {
+    const lv = lossVerdict(r.loss);
+    if (!lv.ok) return { ok: false, code: "loss-receipt", why: lv.problems.join("; ") };
+  }
+  if (r.arena && r.visibility) {
+    const vv = visibilityVerdict(r.visibility);
+    if (!vv.ok) return { ok: false, code: "visibility", why: vv.problems.join("; ") };
+  }
+  if (r.destroyed) {
+    const dv = destroyVerdict(r.destroyed);
+    if (!dv.ok) return { ok: false, code: "requested-destroy", why: dv.problems.join("; ") };
+  }
   return { ok: true, code: "adapter-ok", why: `${line.adapter?.vendor || "?"} ${line.adapter?.architecture || ""} ${line.adapter?.description || line.adapter?.name || ""}`.trim() };
 }
 
@@ -215,9 +231,59 @@ export function noWebGpuVerdict(r) {
   if (r.fatalDisplay !== "block") problems.push(`the message is display:${r.fatalDisplay}, not shown`);
   for (const v of ["Chrome 113", "Edge 113", "Safari 26", "Firefox 141"]) if (!String(r.fatalText).includes(v)) problems.push(`the message lacks ${v}`);
   if (!r.report || r.report.ok !== false || r.report.reason !== "no-webgpu") problems.push(`the line is not ok:false reason no-webgpu: ${String(r.reportText).slice(0, 160)}`);
+  // QT11: the reason is named on the page (not a blank canvas, not a generic error) and in the line as fallback=<reason>.
+  if (!String(r.fatalText).includes("fallback=no-webgpu")) problems.push(`the message does not say fallback=no-webgpu: ${String(r.fatalText).replace(/\s+/g, " ").slice(0, 160)}`);
+  if (r.report?.fallback !== "no-webgpu") problems.push(`the line has no "fallback":"no-webgpu": ${String(r.reportText).slice(0, 160)}`);
   if (r.exceptions.length) problems.push(`uncaught exceptions: ${r.exceptions.join(" | ")}`);
   const g = goldenVerdict(r.golden, r.goldenState);
   if (!g.ok) problems.push(g.why);
+  return { ok: problems.length === 0, problems };
+}
+
+// ---- device loss (QW8) ----
+// A forced loss (window.loseDevice) is a loss: the rebuilt page's receipt counts it and carries the browser's own GPUDeviceLostInfo
+// reason and message with who ended the device, and its frame counter moves. A requested destroy (window.destroyDevice) is not a
+// loss: the page stops (data-state=stopped) and never starts a new device generation.
+export function lossVerdict(rc) {
+  if (!rc) return { ok: false, problems: ["no receipt JSON after the forced loss"] };
+  const problems = [];
+  if (rc.losses !== 1) problems.push(`the receipt counts ${rc.losses} losses after one forced loss`);
+  const n = rc.lastLoss;
+  if (!n) problems.push("the receipt has no lastLoss");
+  else {
+    if (typeof n.reason !== "string" || !n.reason) problems.push("lastLoss carries no GPUDeviceLostInfo reason");
+    if (n.cause !== "forced") problems.push(`lastLoss cause is ${n.cause}, expected forced`);
+  }
+  if (!(rc.frames > 0)) problems.push("the rebuilt page counts no frame in its receipt");
+  return { ok: problems.length === 0, problems };
+}
+
+export function destroyVerdict(d) {
+  if (!d) return { ok: false, problems: ["the requested-destroy drill did not report"] };
+  const problems = [];
+  if (d.state !== "stopped") problems.push(`after a requested destroy data-state is ${d.state}, expected stopped`);
+  if (d.generation !== d.generationBefore) problems.push(`a requested destroy started generation ${d.generation} (was ${d.generationBefore}): it must not retry`);
+  return { ok: problems.length === 0, problems };
+}
+
+// QT7: a visibilitychange (the tab came back from hidden) makes the next frame a skipped frame, counted as hidden_skips in the split line.
+export function visibilityVerdict(v) {
+  if (!v) return { ok: false, problems: ["the visibility drill did not report"] };
+  const problems = [];
+  if (!(v.before >= 0)) problems.push("the split line never showed hidden_skips before the drill");
+  else if (v.after !== v.before + 1) problems.push(`one visibilitychange moved hidden_skips from ${v.before} to ${v.after}, expected ${v.before + 1}`);
+  return { ok: problems.length === 0, problems };
+}
+
+// QW14: with the animation frozen (?freeze) every frame is the same picture. Two captures with nothing between them must agree
+// (else the check proves nothing), and a capture after memory.grow must equal them: a grow leaves the frame hash unchanged.
+export function growHashVerdict(f) {
+  if (!f?.still?.[0] || !f.still[1] || !f.afterGrow) return { ok: false, problems: ["the frozen page gave fewer than three captures"] };
+  const [a, b] = f.still;
+  const problems = [];
+  if (a.blank || b.blank || f.afterGrow.blank) problems.push("a frozen capture is blank");
+  if (a.hash !== b.hash) problems.push(`the frozen frame is not still (${a.hash} then ${b.hash}), so a grow check would prove nothing`);
+  else if (f.afterGrow.hash !== b.hash) problems.push(`memory.grow changed the frame hash: ${b.hash} before, ${f.afterGrow.hash} after`);
   return { ok: problems.length === 0, problems };
 }
 
@@ -512,7 +578,36 @@ const recoveryProbe = async ({ evalJs, read, sleep: nap }) => {
   const frames = (hud) => Number(/^frame (\d+)/.exec(hud)?.[1] ?? 0);
   let moving = false;
   if (ok) { const a = frames(r.hud); await nap(800); moving = frames((await read()).hud) > a; }
-  return { recovered: ok && moving, recoveryState: r ? { state: r.state, generation: r.generation, hud: r.hud, adapterAfterLoss: direct } : null };
+  // QW8: the rebuilt page's receipt (published every 15 frames) counts the loss and carries the browser's reason.
+  let loss = null;
+  if (ok) {
+    for (const t1 = Date.now(); Date.now() - t1 < 20000; await nap(500)) {
+      loss = parseLine(await evalJs("document.getElementById('receipt')?.textContent ?? ''"));
+      if (loss?.losses >= 1) break;
+    }
+  }
+  return { recovered: ok && moving, loss, recoveryState: r ? { state: r.state, generation: r.generation, hud: r.hud, adapterAfterLoss: direct } : null };
+};
+
+// QT7: tell the page its tab came back (the same event a hidden tab fires) and read the skipped frame in the split line.
+const visibilityProbe = async ({ evalJs, sleep: nap }) => {
+  const skips = async () => Number(/hidden_skips=(\d+)/.exec(await evalJs("document.getElementById('split')?.textContent ?? ''"))?.[1] ?? -1);
+  let before = -1;
+  for (const t0 = Date.now(); Date.now() - t0 < 30000 && before < 0; await nap(500)) before = await skips();
+  await evalJs("document.dispatchEvent(new Event('visibilitychange'))");
+  let after = before;
+  for (const t0 = Date.now(); Date.now() - t0 < 60000 && after <= before; await nap(500)) after = await skips();
+  return { visibility: { before, after } };
+};
+
+// QW8: a requested destroy (the page ending its device on purpose) stops the page and never starts a new generation.
+const destroyProbe = async ({ evalJs, read, sleep: nap }) => {
+  const before = await read();
+  await evalJs("window.destroyDevice()");
+  for (const t0 = Date.now(); Date.now() - t0 < 10000; await nap(300)) if ((await read()).state === "stopped") break;
+  await nap(1500); // long enough for a restart to show itself, which it must not
+  const after = await read();
+  return { destroyed: { generationBefore: before.generation, state: after.state, generation: after.generation, hud: after.hud } };
 };
 
 // QW14: a forced memory.grow (16 pages) must leave the frames coming; with --soak the page then stays open for `soakSec` and every
@@ -530,7 +625,27 @@ const memoryProbe = (soakSec) => async ({ evalJs, read, sleep: nap }) => {
 };
 
 // After the first frames: the forced memory grow, the device-loss drill, then the second load of the same page in the same profile.
-const afterReadyProbes = (soakSec = 0) => async (ctx) => ({ ...(await memoryProbe(soakSec)(ctx)), ...(await recoveryProbe(ctx)), ...(await reloadProbe(ctx)) });
+const afterReadyProbes = (soakSec = 0) => async (ctx) => ({ ...(await memoryProbe(soakSec)(ctx)), ...(await visibilityProbe(ctx)), ...(await recoveryProbe(ctx)), ...(await reloadProbe(ctx)), ...(await destroyProbe(ctx)) });
+
+// QW14: on a ?freeze page, capture the canvas twice, grow the memory, capture again. The captures are the page's own GPU copies.
+const captureLine = async (evalJs) => parseLine(await evalJs("document.getElementById('capture')?.textContent ?? ''"));
+async function takeCapture({ evalJs, sleep: nap }) {
+  const was = (await captureLine(evalJs))?.frame ?? -1;
+  await evalJs("window.requestArenaCapture()");
+  for (const t0 = Date.now(); Date.now() - t0 < 90000; await nap(500)) {
+    const line = await captureLine(evalJs);
+    if (line && line.frame !== was) return line;
+  }
+  return null;
+}
+export const frozenGrowProbe = async (ctx) => {
+  for (const t0 = Date.now(); Date.now() - t0 < 120000 && !(await ctx.evalJs("document.body.dataset.capture ?? null")); await ctx.sleep(500));
+  const a = await takeCapture(ctx);
+  const b = await takeCapture(ctx);
+  const pages = await ctx.evalJs(`window.growMemory?.(${GROW_PAGES}) ?? null`);
+  const afterGrow = await takeCapture(ctx);
+  return { frozen: { still: [a, b], afterGrow, pages } };
+};
 
 // A forced grow adds exactly the pages asked for and the frame counter keeps moving.
 export function memoryVerdict(m) {
@@ -554,7 +669,7 @@ export function writeArena(dir, prefix, arena) {
 }
 
 export function parseArgs(argv) {
-  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null, server: null, wt: null, cert: null, expectHash: null, expectTransport: null, expectFailure: [], netTimeout: 90, badMime: false, soak: 0 };
+  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null, server: null, join: null, wt: null, cert: null, ticks: null, play: false, liveKeys: false, token: null, dropAtTick: null, expectHash: null, expectTransport: null, expectFailure: [], netTimeout: 90, badMime: false, soak: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") o.dir = argv[++i];
@@ -565,6 +680,12 @@ export function parseArgs(argv) {
     else if (a === "--only") o.only = Number(argv[++i]);
     else if (a === "--input") o.input = argv[++i] ?? null;
     else if (a === "--server") o.server = argv[++i] ?? null;
+    else if (a === "--join") o.join = argv[++i] ?? null;
+    else if (a === "--ticks") o.ticks = Number(argv[++i]);
+    else if (a === "--play") o.play = true;
+    else if (a === "--live-keys") { o.play = true; o.liveKeys = true; }
+    else if (a === "--token") o.token = Number(argv[++i]);
+    else if (a === "--drop-at-tick") o.dropAtTick = Number(argv[++i]);
     else if (a === "--wt") o.wt = argv[++i] ?? null;
     else if (a === "--cert") o.cert = argv[++i] ?? null;
     else if (a === "--expect-hash") o.expectHash = argv[++i] ?? null;
@@ -579,7 +700,15 @@ export function parseArgs(argv) {
   if (o.only !== null && !(o.only >= 0)) o.error ??= "--only needs a flag set index";
   if (argv.includes("--input") && !o.input) o.error ??= "--input needs a JSON file of events";
   if (argv.includes("--server") && !/^wss?:\/\/[^/\s]+/.test(o.server ?? "")) o.error ??= "--server needs ws://host:port (or wss://host)";
-  if ((o.wt || o.cert) && !o.server) o.error ??= "--wt and --cert go with --server";
+  if (argv.includes("--join") && !/^(\[[0-9a-f:.]+\]|[A-Za-z0-9.-]+):\d{1,5}$/i.test(o.join ?? "")) o.error ??= "--join needs host:port";
+  if (o.join && o.server) o.error ??= "give --server or --join, not both";
+  if ((o.wt || o.cert) && !o.server && !o.join) o.error ??= "--wt and --cert go with --server (or --join)";
+  if (o.join && o.wt) o.error ??= "--join serves both legs on its one port: --wt goes with --server";
+  if (o.ticks !== null && !(Number.isInteger(o.ticks) && o.ticks >= 1 && o.ticks <= 100000)) o.error ??= "--ticks needs a match length of 1 to 100000";
+  if (o.token !== null && !(Number.isSafeInteger(o.token) && o.token >= 1)) o.error ??= "--token needs a positive whole number";
+  if (o.dropAtTick !== null && !(Number.isInteger(o.dropAtTick) && o.dropAtTick >= 1)) o.error ??= "--drop-at-tick needs a server tick (1 or more)";
+  if ((o.play || o.token !== null || o.dropAtTick !== null || o.ticks !== null) && !o.server && !o.join) o.error ??= "--play, --live-keys, --token, --ticks and --drop-at-tick go with --server or --join";
+  if (o.dropAtTick !== null && (o.expectHash || o.expectTransport || o.expectFailure.length)) o.error ??= "--drop-at-tick ends the page early: it does not go with --expect-hash, --expect-transport or --expect-failure";
   if (o.wt && !/^https:\/\//.test(o.wt)) o.error ??= "--wt needs https://host:port/e2040";
   if (o.cert && !/^[0-9a-f]{64}$/i.test(o.cert)) o.error ??= "--cert needs 64 hex digits (the SHA-256 of the certificate)";
   if (o.expectHash && !/^[0-9a-f]{16}$/i.test(o.expectHash)) o.error ??= "--expect-hash needs 16 hex digits";
@@ -598,12 +727,29 @@ export function parseArgs(argv) {
 export const NET_OK = /^net: transport=(webtransport|websocket) ticks=(\d+) hash=([0-9a-f]{16}) peers=(\d+)$/;
 export const NET_TICKS = 600;
 
-// The page address of a net run: the static server's origin plus the `?server=` keys.
-export function netUrl(port, { server, wt = null, cert = null }) {
-  const q = new URLSearchParams({ server });
+// The page address of a net run: the static server's origin plus the `?server=` (or `?join=`) keys and the session keys.
+export function netUrl(port, { server = null, join = null, wt = null, cert = null, ticks = null, play = false, token = null }) {
+  const q = new URLSearchParams();
+  if (join) q.set("join", join); else q.set("server", server);
   if (wt) q.set("wt", wt);
   if (cert) q.set("cert", cert);
+  if (ticks !== null) q.set("ticks", String(ticks));
+  if (token !== null) q.set("token", String(token));
+  if (play) q.set("play", "");
   return `http://127.0.0.1:${port}/index.html?${q}`;
+}
+
+// What a person does in a fight, as time-stamped key events (W held throughout; a swing, a turn, a dodge, a turn the other
+// way, a swing again, every 2.4 s). The page's keyboard path turns them into the seat's input, so the tape is nobody's script.
+// No Shift: CDP names it "Shift" and the page wants the code ShiftLeft.
+export function liveKeyPlan(durationMs, period = 2400) {
+  const beat = [[0, "key_down", "w"], [300, "key_down", "f"], [380, "key_up", "f"], [600, "key_down", "e"], [900, "key_up", "e"], [1200, "key_down", "Space"], [1280, "key_up", "Space"], [1500, "key_down", "q"], [1800, "key_up", "q"], [2000, "key_down", "f"], [2080, "key_up", "f"]];
+  const plan = [];
+  for (let base = 0; base < durationMs; base += period) {
+    for (const [at, kind, key] of beat) if (base + at < durationMs && !(base > 0 && key === "w")) plan.push({ atMs: base + at, kind, key });
+  }
+  plan.push({ atMs: durationMs, kind: "key_up", key: "w" });
+  return plan.sort((x, y) => x.atMs - y.atMs);
 }
 
 // What the page's net line proved against what the run expects. `want`: { hash, transport, ticks }.
@@ -628,8 +774,10 @@ export function netVerdict(text, state, want = {}) {
   return { ok: problems.length === 0, line, parsed, problems };
 }
 
-// Load the net page in a Chrome with the base flags only and wait for the line. Returns { text, state, console, exceptions, waitedMs }.
-export async function readNetPage({ chrome, flags = BASE_FLAGS, url, logFile, waitMs = 90000 }) {
+// Load the net page in a Chrome with the base flags only and wait for the line. Returns { text, state, console, exceptions, waitedMs, dropped }.
+// `keys`: a liveKeyPlan, pressed as real key events once the match has started (data-net-tick appears). `dropAtTick`: leave the page
+// (navigate to about:blank, which closes its sockets) once the server tick reaches it; `dropped` is then { tick } and the duel was not finished.
+export async function readNetPage({ chrome, flags = BASE_FLAGS, url, logFile, waitMs = 90000, keys = null, dropAtTick = null }) {
   const b = await launchChrome(chrome, flags, logFile);
   const { cdp } = b;
   const consoleLines = [], exceptions = [];
@@ -645,16 +793,40 @@ export async function readNetPage({ chrome, flags = BASE_FLAGS, url, logFile, wa
     };
     await cdp.send("Page.navigate", { url });
     const t0 = Date.now();
-    let state = null, text = "";
+    let state = null, text = "", tick = null, dropped = null, pressing = null;
+    const stop = { done: false };
     while (Date.now() - t0 < waitMs) {
-      await sleep(250);
-      try { [state, text] = await evalJs("[document.body?.dataset.net ?? null, document.getElementById('net')?.textContent ?? '']"); } catch { state = null; }
+      await sleep(dropAtTick === null ? 250 : 50);
+      try { [state, text, tick] = await evalJs("[document.body?.dataset.net ?? null, document.getElementById('net')?.textContent ?? '', document.body?.dataset.netTick ?? null]"); } catch { state = null; }
       if (state === "ok" || state === "failed") break;
+      const live = tick === null ? null : Number(tick);
+      if (keys && !pressing && live !== null) pressing = pressKeys(cdp, keys, stop);
+      if (dropAtTick !== null && live !== null && live >= dropAtTick) {
+        dropped = { tick: live };
+        await cdp.send("Page.navigate", { url: "about:blank" });
+        await sleep(300);
+        break;
+      }
     }
-    return { text, state, console: consoleLines, exceptions, waitedMs: Date.now() - t0 };
+    stop.done = true;
+    await pressing?.catch(() => {});
+    return { text, state, console: consoleLines, exceptions, waitedMs: Date.now() - t0, dropped };
   } finally {
     await b.close();
   }
+}
+
+// Press a liveKeyPlan on the page in real time. Stops when `stop.done`; every held key is released at the end.
+async function pressKeys(cdp, plan, stop) {
+  const t0 = Date.now(), held = new Set();
+  for (const step of plan) {
+    const wait = step.atMs - (Date.now() - t0);
+    if (wait > 0) await sleep(wait);
+    if (stop.done) break;
+    for (const c of inputCommands([{ kind: step.kind, key: step.key }])) if (c.method) await cdp.send(c.method, c.params);
+    if (step.kind === "key_down") held.add(step.key); else held.delete(step.key);
+  }
+  for (const key of held) for (const c of inputCommands([{ kind: "key_up", key }])) await cdp.send(c.method, c.params).catch(() => {});
 }
 
 // `--server`: only the net duel runs. Prints NET LINE and the verdict; writes net.json (and the Chrome log) to --out.
@@ -668,8 +840,14 @@ async function netMain(a) {
     const logFile = join(out, "chrome-net.log");
     writeFileSync(logFile, "");
     let r;
-    try { r = await readNetPage({ chrome: a.chrome, url, logFile, waitMs: a.netTimeout * 1000 }); } catch (e) { console.error(`web-browse: ${e.message ?? e}`); return 2; }
-    const v = netVerdict(r.text, r.state, { hash: a.expectHash, transport: a.expectTransport, failure: a.expectFailure });
+    // A live match runs about as long as its ticks at 60 a second; the key plan covers it with a margin.
+    const keys = a.liveKeys ? liveKeyPlan((a.ticks ?? NET_TICKS) * 17 + 20000) : null;
+    try { r = await readNetPage({ chrome: a.chrome, url, logFile, waitMs: a.netTimeout * 1000, keys, dropAtTick: a.dropAtTick }); } catch (e) { console.error(`web-browse: ${e.message ?? e}`); return 2; }
+    if (a.dropAtTick !== null) {
+      console.log(r.dropped ? `net duel: DROPPED the page at server tick ${r.dropped.tick} (asked for ${a.dropAtTick})` : `net duel: FAILED - the duel ended as ${r.state ?? "never started"} before tick ${a.dropAtTick}: ${r.text.slice(0, 300)}`);
+      return r.dropped ? 0 : 1;
+    }
+    const v = netVerdict(r.text, r.state, { hash: a.expectHash, transport: a.expectTransport, failure: a.expectFailure, ticks: a.ticks ?? undefined });
     console.log(`NET LINE ${v.line}`);
     console.log(`net duel: ${v.ok ? (v.parsed ? `OK (${v.parsed.transport}, ${v.parsed.ticks} ticks, hash ${v.parsed.hash}${a.expectHash ? " equals the server's" : ""})` : "OK (failed loudly, as asked)") : `FAILED - ${v.problems.join("; ")}`}`);
     if (!v.ok) {
@@ -708,7 +886,7 @@ async function badMimeMain(a) {
 export async function main(argv) {
   const a = parseArgs(argv);
   if (a.error) { console.error(`web-browse: ${a.error}`); return 2; }
-  if (a.server) return netMain(a);
+  if (a.server || a.join) return netMain(a);
   if (a.badMime) return badMimeMain(a);
   const dir = resolve(a.dir), out = resolve(a.out);
   if (!existsSync(join(dir, "index.html"))) { console.error(`web-browse: ${dir} has no index.html (run node tools/web-build.mjs)`); return 2; }
@@ -753,7 +931,7 @@ export async function main(argv) {
         for (const l of entry.chromeLog.split("\n").filter((x) => /gpu|vulkan|webgpu|swiftshader|dawn|angle|adapter/i.test(x)).slice(-6)) console.log(`    chrome ${l.slice(0, 300)}`);
       }
       if (v.ok && !winner) {
-        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs, arena: r.arena, load: r.load, reload: r.reload, memory: r.memory };
+        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs, arena: r.arena, load: r.load, reload: r.reload, memory: r.memory, loss: r.loss, destroyed: r.destroyed, visibility: r.visibility };
         writeFileSync(join(out, "ready.png"), r.screenshot);
         writeFileSync(join(out, "report.json"), `${r.reportText}\n`);
         writeArena(out, "arena-capture", r.arena);
@@ -780,9 +958,25 @@ export async function main(argv) {
         console.log(`ARENA SPLIT ${winner.arena.splitText || "(the first second is not over yet)"}`);
         console.log(`ARENA PIPELINES ${winner.arena.pipelinesText}`);
       }
+      if (winner.loss) console.log(`LOSS RECEIPT after the forced loss: losses ${winner.loss.losses}, lastLoss ${JSON.stringify(winner.loss.lastLoss)}, frames ${winner.loss.frames}`);
+      if (winner.destroyed) console.log(`REQUESTED DESTROY ${JSON.stringify(winner.destroyed)}`);
+      if (winner.visibility) console.log(`VISIBILITY hidden_skips ${winner.visibility.before} -> ${winner.visibility.after}`);
       const gw = goldenVerdict(winner.golden, winner.goldenState);
       console.log(`GOLDEN ${gw.ok ? "" : "FAILED "}${gw.line}`);
       if (gw.tickLine) console.log(`WASM TICK ${gw.tickLine}`);
+    }
+
+    // QW14: the frozen page, with the flags of the winning set: a memory grow must leave the frame hash alone.
+    let frozenV = null;
+    if (winner?.arena) {
+      try {
+        const fr = await readPage({ chrome: a.chrome, flags: [...BASE_FLAGS, ...winner.set.flags], url: `${url}?freeze`, logFile: join(out, "chrome-frozen.log"), afterReady: frozenGrowProbe, waitMs: 120000 });
+        frozenV = growHashVerdict(fr.frozen);
+        console.log(`FROZEN GROW ${frozenV.ok ? "OK" : "FAILED"}: captures ${JSON.stringify((fr.frozen?.still ?? []).map((c) => c?.hash))} then ${fr.frozen?.afterGrow?.hash} after memory.grow to ${fr.frozen?.pages} pages${frozenV.ok ? "" : ` - ${frozenV.problems.join("; ")}`}`);
+      } catch (e) {
+        frozenV = { ok: false, problems: [String(e.message ?? e)] };
+        console.log(`FROZEN GROW FAILED: ${frozenV.problems[0]}`);
+      }
     }
 
     // The no-WebGPU page, with the flags of the winning set (or the first one when none won).
@@ -813,7 +1007,7 @@ ${QUOTA_SCRIPT}`, waitMs: 60000 });
     console.log(`QUOTA PAGE ${quotaV.ok ? "OK (Cache.put refused with QuotaExceededError, the page still loaded and said cache=quota)" : `FAILED - ${quotaV.problems.join("; ")}`}`);
 
     const goldenWinner = winner ? goldenVerdict(winner.golden, winner.goldenState) : null;
-    const summary = { adapter: Boolean(winner), golden: { withAdapter: goldenWinner, withoutWebGpu: gn }, winner: winner ? { name: winner.set.name, flags: winner.flags } : null, noWebGpuPage: nogpuV, attempts, served: server.log };
+    const summary = { adapter: Boolean(winner), frozenGrow: frozenV, golden: { withAdapter: goldenWinner, withoutWebGpu: gn }, winner: winner ? { name: winner.set.name, flags: winner.flags } : null, noWebGpuPage: nogpuV, attempts, served: server.log };
     writeFileSync(join(out, "attempts.json"), `${JSON.stringify(summary, null, 2)}\n`);
     const md = [
       "### web-browse",
@@ -825,7 +1019,7 @@ ${QUOTA_SCRIPT}`, waitMs: 60000 });
     ].join("\n");
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${md}\n`);
 
-    if (!nogpuV.ok || !quotaV.ok || (loadV && !loadV.ok) || (memV && !memV.ok)) return 1;
+    if (!nogpuV.ok || !quotaV.ok || (loadV && !loadV.ok) || (memV && !memV.ok) || (frozenV && !frozenV.ok)) return 1;
     if (goldenWinner && !goldenWinner.ok) {
       console.log(`GOLDEN FAILED on the adapter page: ${goldenWinner.why}`);
       return 1;

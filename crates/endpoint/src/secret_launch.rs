@@ -17,6 +17,9 @@ use std::fmt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
+/// Key and value pairs in key order: the vault body, then the child env.
+type Entries = BTreeMap<String, String>;
+
 /// Largest vault file accepted: keeps unlock bounded and headless fast.
 pub const MAX_VAULT_BYTES: usize = 64 * 1024;
 /// Largest keyfile accepted: keyfiles are small provisioned blobs.
@@ -122,7 +125,7 @@ pub fn is_valid_key(name: &str) -> bool {
 /// placeholder, so crash dumps and logs stay safe to ship.
 #[derive(Default)]
 pub struct VaultSecrets {
-    entries: BTreeMap<String, String>,
+    entries: Entries,
 }
 
 impl fmt::Debug for VaultSecrets {
@@ -260,7 +263,7 @@ fn validate_value(key: &str, value: &str) -> Result<(), LaunchError> {
 
 /// Parse the vault body: exactly `{"entries":{"KEY":"value", ...}}` with
 /// string-only pairs. Reasons never echo file bytes, which may be secrets.
-fn parse_vault_bytes(bytes: &[u8]) -> Result<BTreeMap<String, String>, LaunchError> {
+fn parse_vault_bytes(bytes: &[u8]) -> Result<Entries, LaunchError> {
     let text = std::str::from_utf8(bytes).map_err(|_| LaunchError::BadVault {
         reason: "vault is not valid UTF-8".to_owned(),
     })?;
@@ -324,7 +327,7 @@ impl VaultParser<'_> {
         self.bytes.get(self.pos).copied()
     }
 
-    fn parse_entries_object(&mut self) -> Result<BTreeMap<String, String>, LaunchError> {
+    fn parse_entries_object(&mut self) -> Result<Entries, LaunchError> {
         self.eat_byte(b'{')?;
         let mut entries = BTreeMap::new();
         self.skip_ws();
@@ -479,7 +482,7 @@ fn decode_code_point(point: u32, parser: &mut VaultParser<'_>) -> Result<char, L
 pub struct LaunchSpec {
     program: String,
     args: Vec<String>,
-    secrets: BTreeMap<String, String>,
+    secrets: Entries,
     inherit_allow: Vec<String>,
 }
 

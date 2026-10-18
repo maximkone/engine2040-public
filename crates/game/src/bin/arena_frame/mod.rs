@@ -309,7 +309,7 @@ impl ArenaApp {
     /// keyboard, merged with the pad when one is held, made camera-relative so
     /// W walks where the camera looks and aimed at the nearest living rival so
     /// a standing swing and the spear go at them. The spear key rides last.
-    fn human_input(&mut self, tick: u32, human: FighterId) -> FighterInput {
+    pub(super) fn human_input(&mut self, tick: u32, human: FighterId) -> FighterInput {
         let staged = self
             .capture
             .as_mut()
@@ -340,20 +340,34 @@ impl ArenaApp {
     }
 
     /// Run `steps` fixed ticks for the human slot: input, feed and mixer
-    /// pumps, staged and look tallies, then the crash ring.
+    /// pumps, staged and look tallies, then the crash ring. A network seat
+    /// (`--host`/`--join`) pumps first and flushes last; its ticks come from
+    /// the seat (the host authors once the guest's input is in, the guest
+    /// replays authority), and a tick the seat cannot run yet ends the loop.
+    /// A seat failure is kept for `tick_and_present` to end the window with.
     pub(super) fn run_sim_ticks(&mut self, steps: u32, human: FighterId) {
+        let steps = match self.net_begin(steps, human) {
+            Ok(steps) => steps,
+            Err(err) => return self.net_fail(err),
+        };
         for _ in 0..steps {
             if self.ticks_done >= self.config.ticks {
                 break;
             }
             let tick = self.app.cursor();
-            let input = self.human_input(tick, human);
-            self.check_forced_tick(tick);
-            let outcome = {
+            let input = if self.net.is_some() {
+                match self.net_tick(tick, human) {
+                    Ok(Some(input)) => input,
+                    Ok(None) => break,
+                    Err(err) => return self.net_fail(err),
+                }
+            } else {
+                let input = self.human_input(tick, human);
+                self.check_forced_tick(tick);
                 self.app.tick_into(input, &mut self.tick_scratch);
-                &self.tick_scratch
+                input
             };
-            debug_assert!(outcome.input_accepted);
+            debug_assert!(self.tick_scratch.input_accepted);
             // Lock-free feed first (tick-stamped, bounded, `dropped_full`
             // counted): a busy mixer never loses commands because the feed
             // already queued them with the camera listener.
@@ -415,6 +429,9 @@ impl ArenaApp {
             }
             self.record_crash_tick(input);
             self.ticks_done += 1;
+        }
+        if let Err(err) = self.net_end() {
+            self.net_fail(err);
         }
     }
 

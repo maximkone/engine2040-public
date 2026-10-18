@@ -670,6 +670,9 @@ export function readCrate(root = ROOT) {
     }
   };
   walk(base);
+  // The fighter contract ranges `play.run` imports from engine-input (MCP22): read so the page still quotes their numbers.
+  const contract = join(root, "crates/input/src/fighter.rs");
+  if (existsSync(contract)) files.set("../../input/src/fighter.rs", readFileSync(contract, "utf8"));
   return files;
 }
 

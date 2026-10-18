@@ -332,6 +332,11 @@ Rows from the books (2026-10-12, board shard `../SPRINT-20-game.md`; `BOOK-GAPS-
   twice; `node tools/proof.mjs` green on the landed tree.
 - GE2/GE11 gate: workspace-check fails any new genre name below
   `arena`/`game` outside the ledger; a seeded assumption must fail it.
+  GE11 re-audit 2026-10-18: the scan also counts `FIGHTER`/`GLADIATOR` caps
+  and ids (`MAX_FIGHTERS`), the ledger lists 85 files with a verdict per
+  group (contract site, harness, budget-shape, move), and an entry that
+  names no genre word any more prints `WARN genre ledger` (prune it).
+  `ai/src/legion.rs` names none; `game/` sits above the gate.
 - Fixture gates (shared with GE1/GP5): fixtures build on public APIs
   only; `git diff -- crates/` empty after a fixture lands, enforced
   in proof; each fixture hash twice.

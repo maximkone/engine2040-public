@@ -1,6 +1,7 @@
 // Run: node --test tools/ladder-counts.test.mjs
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { LADDER, countRungs, render } from "./ladder-counts.mjs";
 
@@ -35,4 +36,10 @@ test("the real ladder has open CARD and SPIKE lines and counts x2 identically", 
   assert.equal(a, render(countRungs(text)));
   const c = countRungs(text);
   assert.ok(c.get("CARD") > 0 && c.get("SPIKE") > 0, a);
+});
+
+test("the research skill carries the LADDER line rule and names the counts tool", () => {
+  const skill = readFileSync(join(dirname(LADDER), "..", "..", "skills", "research", "SKILL.md"), "utf8");
+  assert.match(skill, /LADDER rule: every research return/);
+  assert.match(skill, /node tools\/ladder-counts\.mjs/);
 });

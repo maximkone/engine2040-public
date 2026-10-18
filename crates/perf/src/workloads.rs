@@ -575,6 +575,23 @@ impl SpineTransformBody {
         measured_report(Self::NAME, self.passes, || self.run_hash())
     }
 
+    /// The cost the 0.5 ms bar names: every pass with no per-pass digest and
+    /// one fold of the two written columns at the end, so the passes stay
+    /// live. [`Self::run_hash`] is the equality proof (it digests every
+    /// pass and spends most of its time hashing); this is the time proof.
+    pub fn run_steps(&self) -> u64 {
+        let mut spine = seeded_spine(self.seed);
+        for pass in 0..self.passes {
+            step_transform_body(&mut spine, pass, self.seed);
+        }
+        let digests = spine.column_digests();
+        let mut hash = FNV64_OFFSET;
+        mix(&mut hash, u64::try_from(Self::ENTITIES).unwrap_or(u64::MAX));
+        mix(&mut hash, digests[0]);
+        mix(&mut hash, digests[1]);
+        hash
+    }
+
     /// Steady-state slice: hash plus allocations over `measure_passes`
     /// passes on a warmed spine. Allocation-free by construction (the OPT14
     /// zero-alloc bar); the test asserts it.
@@ -647,6 +664,22 @@ impl SpineFullTick {
     /// Canonical run plus its allocation totals.
     pub fn run_report(&self) -> WorkloadReport {
         measured_report(Self::NAME, self.passes, || self.run_hash())
+    }
+
+    /// The cost the 2 ms bar names: every pass with no per-pass digest and
+    /// one fold of all five columns at the end, so the passes stay live.
+    /// [`Self::run_hash`] is the equality proof; this is the time proof.
+    pub fn run_steps(&self) -> u64 {
+        let mut spine = seeded_spine(self.seed);
+        for pass in 0..self.passes {
+            step_full_tick(&mut spine, pass);
+        }
+        let mut hash = FNV64_OFFSET;
+        mix(&mut hash, u64::try_from(Self::AGENTS).unwrap_or(u64::MAX));
+        for digest in spine.column_digests() {
+            mix(&mut hash, digest);
+        }
+        hash
     }
 
     /// Steady-state slice: hash plus allocations over `measure_passes`
@@ -1313,6 +1346,27 @@ mod spine_tests {
             tick.run_report(),
             "full tick allocates identically"
         );
+    }
+
+    #[test]
+    fn step_only_runs_repeat_x2_and_follow_the_seed() {
+        let body = SpineTransformBody::canonical();
+        assert_eq!(body.run_steps(), body.run_steps(), "transform-body repeats");
+        assert_ne!(
+            body.run_steps(),
+            body.with_seed(2_040 ^ SEED_TWEAK).run_steps(),
+            "seed moves the transform-body steps"
+        );
+        let tick = SpineFullTick::canonical();
+        assert_eq!(tick.run_steps(), tick.run_steps(), "full tick repeats");
+        assert_ne!(
+            tick.run_steps(),
+            tick.with_seed(2_040 ^ SEED_TWEAK).run_steps(),
+            "seed moves the full-tick steps"
+        );
+        // The step-only fold is its own number, not the per-pass digest hash.
+        assert_ne!(body.run_steps(), body.run_hash());
+        assert_ne!(tick.run_steps(), tick.run_hash());
     }
 
     #[test]

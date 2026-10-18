@@ -368,7 +368,7 @@ impl Rp1Submitter {
         uni.extend_from_slice(&height.to_le_bytes());
         uni.extend_from_slice(&0u32.to_le_bytes());
         uni.extend_from_slice(&0u32.to_le_bytes());
-        uni.extend_from_slice(&params.history_blend.to_le_bytes());
+        uni.extend_from_slice(&params.effective_blend().to_le_bytes());
         uni.extend_from_slice(&params.motion_threshold_px.to_le_bytes());
         uni.extend_from_slice(&(if params.use_clamp { 1f32 } else { 0f32 }).to_le_bytes());
         uni.extend_from_slice(&0f32.to_le_bytes());
@@ -517,7 +517,7 @@ impl Rp1Submitter {
         taa_uni.extend_from_slice(&render_h.to_le_bytes());
         taa_uni.extend_from_slice(&0u32.to_le_bytes());
         taa_uni.extend_from_slice(&0u32.to_le_bytes());
-        taa_uni.extend_from_slice(&taa.history_blend.to_le_bytes());
+        taa_uni.extend_from_slice(&taa.effective_blend().to_le_bytes());
         taa_uni.extend_from_slice(&taa.motion_threshold_px.to_le_bytes());
         taa_uni.extend_from_slice(&(if taa.use_clamp { 1f32 } else { 0f32 }).to_le_bytes());
         taa_uni.extend_from_slice(&0f32.to_le_bytes());

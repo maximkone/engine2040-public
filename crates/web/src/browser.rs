@@ -15,6 +15,10 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use engine_input::map::Key;
+use engine_input::Buttons;
+use engine_net::session::{BodyId, BodyInput};
+use engine_net::webduel::Pilot;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
@@ -25,13 +29,18 @@ use web_sys::{
 use crate::audio::{
     keydown_is_gesture, render_planar, Act, AudioGate, Chime, CtxState, BLOCK_FRAMES,
 };
-use crate::input::{input_line, swallows_default, InputState, PadReading, PadSource};
+use crate::input::{
+    input_line, swallows_default, Facing, InputState, PadReading, PadSource, MILLI_DEG_PER_PX,
+};
+use crate::input_tape::Tape;
 use crate::shell::{document, now_ms, set_body_attr, set_text};
 
 thread_local! {
     static INPUT: RefCell<InputState> = RefCell::new(InputState::default());
     static GATE: RefCell<AudioGate> = const { RefCell::new(AudioGate::new()) };
     static SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
+    /// The records `input_sample` has taken (WEB7).
+    static TAPE: RefCell<Tape> = RefCell::new(Tape::default());
     static INSTALLED: Cell<bool> = const { Cell::new(false) };
     /// The two lines as last written, and when the console last heard the input line.
     static SHOWN: RefCell<(String, String, f64)> = const { RefCell::new((String::new(), String::new(), -1.0e9)) };
@@ -317,6 +326,64 @@ pub fn install(canvas_id: &str) {
 
     pump();
     refresh();
+}
+
+/// Sample one record of the input tape from what is held now (WEB7) and return the tape so far as
+/// `input-tape: ticks=<n> bytes=<hex>`, also kept in `data-input-tape` on `<body>`. The headless check
+/// calls it at the `tick` lines of a script it replays as real key and mouse events, and compares the
+/// result with the `input_tape` bin's.
+#[wasm_bindgen]
+pub fn input_sample() -> String {
+    let line = TAPE.with(|tape| {
+        let mut tape = tape.borrow_mut();
+        match INPUT.with(|input| tape.sample(&input.borrow())) {
+            Ok(()) => tape.line(),
+            Err(e) => format!("input-tape: failed {e:?}"),
+        }
+    });
+    set_body_attr("data-input-tape", &line);
+    line
+}
+
+/// The net duel's seat driven by the keyboard, mouse and pad the page listens to (WEB9): the
+/// keys held when the client predicts a tick are that tick's input. Q and E turn, the mouse
+/// turns too once the pointer is locked (click the canvas), the rest is the bindings table.
+pub struct LivePilot {
+    facing: Facing,
+}
+
+impl LivePilot {
+    /// A pilot facing straight ahead.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            facing: Facing::default(),
+        }
+    }
+}
+
+impl Pilot for LivePilot {
+    fn input(&mut self, tick: u32, slot: u8) -> BodyInput {
+        let fighter = BodyId(slot);
+        INPUT.with(|input| {
+            let mut input = input.borrow_mut();
+            let (yaw, _pitch) = input.take_look(MILLI_DEG_PER_PX);
+            let facing = self
+                .facing
+                .turn(yaw, input.held(Key::Q), input.held(Key::E));
+            // Every value is in range by construction; a seat that still fails idles.
+            input
+                .fighter_input(tick, fighter, facing)
+                .unwrap_or(BodyInput {
+                    tick,
+                    fighter,
+                    mx: 0,
+                    mz: 0,
+                    facing: 0,
+                    buttons: Buttons::NONE,
+                })
+        })
+    }
 }
 
 /// The pump's callback, shared with itself so it can ask for the frame after it.

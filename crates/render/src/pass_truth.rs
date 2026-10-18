@@ -29,6 +29,11 @@ pub mod reads;
 /// that renders the pairs is [`harness`].
 pub mod live_gate;
 
+/// The golden rule as two numbers (mean channel error, share of far-off
+/// pixels) with a typed verdict; the parity tests that compare a frame to a
+/// golden call [`frame_tolerance::frames_match`]. Std-only.
+pub mod frame_tolerance;
+
 /// Device leg of the live-frame arm: renders a draw list through the window
 /// frame path with every look pass on and then with each pass off, reads the
 /// pixels back and gates them through [`live_gate`].

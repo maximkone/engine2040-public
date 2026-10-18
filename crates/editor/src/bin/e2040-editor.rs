@@ -44,8 +44,12 @@ fn exe_capture(snapshot: &RefCell<ViewportSnapshot>, shell: &Shell) -> Option<(V
         Ok(out) => Some((
             out.png,
             format!(
-                "exe-gpu-offscreen {WIDTH}x{HEIGHT} {} draws adapter {} driver {} validation_errors {}",
-                out.draws, out.adapter, out.driver, out.validation_errors
+                "exe-gpu-offscreen {WIDTH}x{HEIGHT} {} draws adapter {} driver {} validation_errors {} | {}",
+                out.draws,
+                out.adapter,
+                out.driver,
+                out.validation_errors,
+                out.backend.line()
             ),
         )),
         Err(gpu_error) => match ViewportImage::render(shell, WIDTH, HEIGHT) {

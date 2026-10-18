@@ -69,6 +69,18 @@ Build scripts are operator one-offs (kept outside git with the run
 notes). Each prop re-exports byte-identical: same command twice gives
 the same sha256 (receipt pastes all three).
 
+## Tests
+
+- `node --test tools/ai-props.test.mjs`: each GLB is a triangle list under
+  5,000 tris with no image, `game_tris` in the provenance equals the real
+  count, the prompt digest is the digest of the prompt, the sidecar pins the
+  GLB bytes, and no two props share bytes.
+- `cargo test --locked -p engine-assets --features import,registry --test it ai_props`:
+  each prop runs the real `gen_intake::intake` with the provenance its own
+  file declares (licence gate, repair, prop cook, bundle, provenance row),
+  stays under `PROP_MAX_TRIS`, cooks byte-identical twice, and a model
+  licence of prose, empty text or `CC-BY-NC-4.0` is refused before any cook.
+
 ## Files
 
 - `ai_barrel.glb`, `ai_crate.glb`, `ai_amphora.glb`: the three props.

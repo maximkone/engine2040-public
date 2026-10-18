@@ -12,9 +12,15 @@ content/arena/bundle/
 # Blender / editor backups: never track (rot tracked-junk).
 *.blend1
 # History-slim 2026-10-02: external dropboxes purged from history, never track again.
-content/incoming/
+content/incoming/*
+# CT80: the 1k studio HDRI the Q1 proof reads stays vendored, with its provenance sidecar.
+!content/incoming/studio_small_09_1k.*
 content/_incoming/
-content/fighters/incoming/
+content/fighters/incoming/*
+# CT42: the 16 batch-a clips, sidecars and receipts stay vendored (the retarget test reads them); the driver crate and scratch stay local.
+!content/fighters/incoming/batch-a/
+content/fighters/incoming/batch-a/cook/
+content/fighters/incoming/batch-a/recheck/
 *.7z
 # tools/pack-clean.mjs writes its logs at the repo root: never track them.
 /pack-build.log
@@ -27,6 +33,8 @@ content/fighters/incoming/
 /Null
 chk-*.out
 .opencode/bin/
+# Node dependencies (the .opencode plugin installs here): never track them.
+node_modules/
 # Python bytecode: never track it (two .pyc files were tracked until 2026-10-03).
 __pycache__/
 *.pyc

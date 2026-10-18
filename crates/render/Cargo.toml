@@ -17,7 +17,7 @@ workspace = true
 # traverses dev-deps of reachable crates, so no reachable crate takes an
 # external dev-dep.
 v1 = ["dep:glam", "dep:image", "dep:serde_json", "dep:engine-assets"]
-window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:windows", "v1"]
+window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:windows", "dep:engine-material", "v1"]
 
 [dependencies]
 # AH2 device-loss heal runs through the observe supervisor (both std-only
@@ -32,6 +32,9 @@ engine-clock.workspace = true
 # v1-only tangent owner (ARCHITECTURE C3): v1 calls import_repair::recompute_tangents; default stays std-only.
 engine-assets = { workspace = true, features = ["import"], optional = true }
 glam = { workspace = true, optional = true }
+# NS31c2: the window leg builds one pipeline per compiled material structure
+# (`material_pipeline::pipeline_for`); the default graph stays std-only.
+engine-material = { workspace = true, optional = true }
 # Fully specified (not workspace-inherited): cargo ignores default-features
 # = false combined with `workspace = true`, which would re-enable image
 # defaults incl. the NCSA-licensed avif chain. Keep version in sync with the

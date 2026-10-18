@@ -21,37 +21,40 @@ use engine_render::quality::{self, Quality, WEB_CUT_ORDER};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
-use crate::anim::FrameStats;
-use crate::arena_view::{frame_size, CaptureFacts, Counters, CAPTURE_AFTER_FRAMES};
-use crate::limits::{feature_names, limit_rows};
-use crate::recovery::LossBudget;
+use crate::anim::{FrameStats, StepClock, MAX_STEPS_PER_FRAME};
+use crate::arena_view::{
+    has_flag, scaled_frame_size, CaptureFacts, Counters, CAPTURE_AFTER_FRAMES,
+};
+use crate::limits::{adapter_hint, feature_names, limit_rows};
+use crate::recovery::{reason_word, Cause, LostBox};
 use crate::report::{AdapterFacts, ArenaFacts, Failure, Ready};
 use crate::shell::{
-    browser_clock, document, fail, log_error, navigator_gpu, now_ms, pause, raw_adapter_info,
-    recover_with, request_frame, run_golden, set_body_attr, set_state, set_text, user_agent,
-    wasm_pages, FrameSlot, DESTROY_REQUESTED,
+    browser_clock, check_device, document, fail, log_error, navigator_gpu, now_ms, pause,
+    raw_adapter_info, recover_with, request_frame, run_golden, set_body_attr, set_state, set_text,
+    user_agent, wasm_pages, watch_visibility, Check, FrameSlot, LOSSES, VISIBILITY_CHANGES,
 };
 use crate::tier_view::{
-    cut_line, restore_line, scale_after_cut, scale_after_restore, us_to_ms, whole_ms, Cut, Ladder,
-    SplitWindow, TierFacts, WIRED,
+    cut_line, fallback_for, restore_line, scale_after_cut, scale_after_restore, us_to_ms, whole_ms,
+    Cut, Ladder, Pace, ProbeDone, ProbeRun, TierFacts, SCALE_FLOOR_PCT, WIRED,
 };
 use crate::COMMIT;
 
 /// The frame budget the ladder holds the page to: 30 frames per second.
 const BUDGET_MS: f64 = 1000.0 / 30.0;
-/// The render scale never goes under this many percent (below it the picture is a smear).
-const SCALE_FLOOR_PCT: u32 = 60;
 /// Frames drawn behind the loading screen so every pipeline has been used once before the page
 /// says it is ready.
 const WARM_FRAMES: u32 = 3;
+/// The animation time (seconds) a `?freeze` page holds: the fighters stand mid-pose and every frame
+/// is the same picture, so the headless check can compare two captures (QW14).
+const FROZEN_T_S: f32 = 1.5;
 /// Fewest probe frames that make a median worth believing.
 const PROBE_MIN_FRAMES: usize = 8;
+/// How many 250 ms waits a hidden tab gets before the startup probe gives up on an answer.
+const PROBE_HIDDEN_WAITS: u32 = 40;
 /// Longest the loader waits for the GPU to finish the warm-up frames, milliseconds.
 const WARM_WAIT_MS: f64 = 60_000.0;
 
 thread_local! {
-    /// The losses so far; a storm of them ends in the fatal page, not in endless restarts.
-    static LOSSES: RefCell<LossBudget> = const { RefCell::new(LossBudget::new()) };
     /// Set by [`request_arena_capture`]: the next frame asks the GPU for a canvas copy.
     static CAPTURE_WANTED: Cell<bool> = const { Cell::new(false) };
 }
@@ -68,11 +71,18 @@ struct ArenaLoop {
     presenter: Presenter,
     arena: ProceduralArena,
     canvas: HtmlCanvasElement,
-    lost: Arc<AtomicBool>,
+    lost: Arc<LostBox>,
     uncaptured: Arc<Uncaptured>,
     max_dim: u32,
     stats: FrameStats,
-    started_ms: f64,
+    /// The 60 Hz simulation clock the animation time comes from (QW11).
+    clock: StepClock,
+    /// The animation time of a `?freeze` page; `None` on a normal page.
+    frozen_s: Option<f32>,
+    /// The page's `visibilitychange` count at the last frame (QT7).
+    seen_visibility: u32,
+    /// `adapter=` as the tier line prints it (QT3).
+    adapter_hint: String,
     counters: Counters,
     first_error: Option<String>,
     surface_format: String,
@@ -85,9 +95,9 @@ struct ArenaLoop {
     /// Render scale in percent: the tier's, lowered by the ladder.
     scale_pct: u32,
     start_scale_pct: u32,
-    window: SplitWindow,
-    /// `None` when the ladder is off (`?ladder=off`, or a software adapter that no cut helps).
-    ladder: Option<Ladder>,
+    /// The one-second window, the ladder (off for `?ladder=off` or a software adapter that no
+    /// cut helps) and the drift check.
+    pace: Pace,
     sim_ms: f64,
     late_reported: usize,
 }
@@ -96,13 +106,11 @@ impl ArenaLoop {
     /// Keep the canvas backing store at the CSS box times the device pixel ratio, within the
     /// presenter's frame bound and the page's pixel budget.
     fn fit_canvas(&mut self) {
-        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio())
-            * f64::from(self.scale_pct)
-            / 100.0;
-        let (w, h) = frame_size(
+        let (w, h) = scaled_frame_size(
             f64::from(self.canvas.client_width()),
             f64::from(self.canvas.client_height()),
-            dpr,
+            device_pixel_ratio(),
+            self.scale_pct,
             self.max_dim,
         );
         if (w, h) != self.presenter.size() {
@@ -145,10 +153,22 @@ impl ArenaLoop {
 
     /// Draw one frame that began at `frame_ms` on the animation clock.
     fn draw(&mut self, frame_ms: f64) {
+        // A frame that comes after the tab was hidden or shown spans a gap: it is not a slow frame.
+        let changes = VISIBILITY_CHANGES.with(Cell::get);
+        let resumed = changes != self.seen_visibility;
+        self.seen_visibility = changes;
+        if resumed {
+            self.stats.skip_gap();
+            self.pace.resumed();
+            self.counters.hidden_skips = self.pace.hidden_skips();
+        }
         self.stats.tick(frame_ms);
+        self.clock.advance(frame_ms);
+        self.counters.steps = self.clock.steps();
+        self.counters.max_steps_per_frame = self.clock.max_per_frame();
         self.fit_canvas();
         self.drive_capture();
-        let t_s = ((frame_ms - self.started_ms) / 1000.0) as f32;
+        let t_s = self.frozen_s.unwrap_or_else(|| self.clock.time_s() as f32);
         let cpu_started = now_ms();
         let (w, h) = self.presenter.size();
         if let Err(e) = self.arena.pose(&mut self.presenter, t_s) {
@@ -195,26 +215,35 @@ impl ArenaLoop {
         if self.counters.frames % 15 == 1 {
             self.publish_receipt();
         }
-        self.tick_split(frame_ms);
+        self.tick_split(frame_ms, resumed);
     }
 
-    /// Feed the frame to the one-second window; once a second print the split and let the
-    /// ladder decide, and report any pipeline built after the loader (`late_compile`).
-    fn tick_split(&mut self, now: f64) {
+    /// Feed the frame to the one-second window (unless it spans a hidden gap); once a second print
+    /// the split and let the ladder and the drift check decide, and report any pipeline built
+    /// after the loader (`late_compile`).
+    fn tick_split(&mut self, now: f64, resumed: bool) {
         let wall = last_live_wall_split();
         let render_ms = us_to_ms(wall.stage_us.saturating_add(wall.submit_us));
         let present_ms = us_to_ms(wall.present_call_us);
-        self.window.add(
-            now,
-            self.stats.last_ms(),
-            self.sim_ms,
-            render_ms,
-            present_ms,
-        );
-        let Some(split) = self.window.take_if_due(now) else {
+        if !resumed {
+            self.pace.frame(
+                now,
+                self.stats.last_ms(),
+                self.sim_ms,
+                render_ms,
+                present_ms,
+            );
+        }
+        // A cut resizes the canvas; do not change the size under a capture that is on its way.
+        // A hidden tab is not a slow picture either.
+        let capture_pending = self.capture_asked && self.presenter.capture_busy();
+        let hidden = document().is_some_and(|d| d.hidden());
+        let Some(tick) = self.pace.tick(now, !(capture_pending || hidden)) else {
             return;
         };
-        let line = split.line(self.tier.name());
+        let line = tick
+            .split
+            .line(self.tier.name(), self.scale_pct, device_pixel_ratio());
         set_text("split", &line);
         web_sys::console::log_1(&JsValue::from_str(&line));
         let ledger = pipeline_warmup::snapshot();
@@ -231,23 +260,7 @@ impl ArenaLoop {
                 log_error(&late);
             }
         }
-        // A cut resizes the canvas; do not change the size under a capture that is on its way.
-        let capture_pending = self.capture_asked && self.presenter.capture_busy();
-        // A hidden tab is not a slow picture either.
-        let hidden = document().is_some_and(|d| d.hidden());
-        if capture_pending || hidden || split.frames == 0 {
-            return;
-        }
-        // A cut when the frame missed its budget; when it did not, a cut given back after ten
-        // seconds of headroom.
-        let step = self
-            .ladder
-            .as_mut()
-            .and_then(|l| match l.observe(split.frame_ms) {
-                Some(cut) => Some((cut, false)),
-                None => l.restore_due().map(|back| (back, true)),
-            });
-        if let Some((cut, undo)) = step {
+        if let Some((cut, undo)) = tick.step {
             self.apply_cut(cut, undo);
         }
     }
@@ -273,14 +286,13 @@ impl ArenaLoop {
             _ => false,
         };
         let line = if undo {
-            let restores = self.ladder.as_ref().map_or(0, Ladder::restores);
             restore_line(
                 self.tier.name(),
                 name,
                 cut.repeat,
                 applied,
                 self.scale_pct,
-                restores,
+                self.pace.restores(),
             )
         } else {
             cut_line(self.tier.name(), name, cut.repeat, applied, self.scale_pct)
@@ -298,6 +310,9 @@ impl ArenaLoop {
             self.last_cpu_ms,
             self.last_draws,
             self.first_error.as_deref(),
+            LOSSES
+                .with(|losses| losses.borrow().last().cloned())
+                .as_ref(),
         );
         set_text("receipt", &line);
         set_body_attr(
@@ -357,34 +372,30 @@ fn publish_capture(rgba: &[u8], line: &str) {
 }
 
 /// Run `frame` on every animation frame until its device is lost. A lost device ends the loop
-/// and starts [`recover`] on a fresh instance and adapter.
+/// and starts [`recover_with`] on a fresh instance and adapter; a requested destroy or too many
+/// losses end it for good (see [`check_device`]).
 fn run_loop(mut frame: ArenaLoop, canvas_id: String, generation: u32) {
     let slot: Rc<FrameSlot> = Rc::new(RefCell::new(None));
     let again = Rc::clone(&slot);
+    let mut ended_by: Option<Cause> = None;
     *slot.borrow_mut() = Some(Closure::new(move |now: f64| {
-        let destroyed = DESTROY_REQUESTED.with(Cell::take);
-        if destroyed {
-            frame.presenter.device().destroy();
-        }
-        if frame.lost.load(Ordering::SeqCst) {
-            // Dropping the closure ends this loop; wasm-bindgen frees it after this call returns.
-            drop(again.borrow_mut().take());
-            if LOSSES.with(|losses| losses.borrow_mut().record(now)) {
+        match check_device(frame.presenter.device(), &frame.lost, &mut ended_by, now) {
+            Check::Draw => frame.draw(now),
+            Check::Wait => {}
+            Check::Recover => {
+                // Dropping the closure ends this loop; wasm-bindgen frees it after this call returns.
+                drop(again.borrow_mut().take());
                 wasm_bindgen_futures::spawn_local(recover_with(
                     canvas_id.clone(),
                     generation + 1,
                     |id, g| async move { Box::pin(start(&id, g)).await },
                 ));
-            } else {
-                fail(
-                    Failure::NoDevice,
-                    "the device was lost again and again; the browser cannot keep one.",
-                );
+                return;
             }
-            return;
-        }
-        if !destroyed {
-            frame.draw(now);
+            Check::Over => {
+                drop(again.borrow_mut().take());
+                return;
+            }
         }
         request_frame(&again);
     }));
@@ -411,7 +422,7 @@ struct Gpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    lost: Arc<AtomicBool>,
+    lost: Arc<LostBox>,
     uncaptured: Arc<Uncaptured>,
 }
 
@@ -465,11 +476,11 @@ async fn open_gpu(canvas_id: &str) -> Result<Gpu, (Failure, String)> {
             first.get_or_insert(text);
         }
     }));
-    let lost = Arc::new(AtomicBool::new(false));
+    let lost = Arc::new(LostBox::default());
     let lost_by_callback = Arc::clone(&lost);
     device.set_device_lost_callback(move |reason, message| {
         log_error(&format!("wgpu device lost ({reason:?}): {message}"));
-        lost_by_callback.store(true, Ordering::SeqCst);
+        lost_by_callback.set(reason_word(reason), &message);
     });
 
     Ok(Gpu {
@@ -502,17 +513,18 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     let max_dim = max_texture_2d.min(MAX_FRAME_DIM);
     let features = feature_names(device.features());
     let limits = limit_rows(&device.limits());
+    let raw = raw_adapter_info(&gpu).await;
+    let hint = adapter_hint(&raw);
     let TierPick {
         search,
         tier,
         why: tier_why,
         scale_pct,
         size: (w, h),
-    } = pick_tier(&canvas, &device, max_dim);
+    } = pick_tier(&canvas, &device, max_dim, &hint);
 
-    let [vendor, architecture, web_device, description] = raw_adapter_info(&gpu).await;
     let info = adapter.get_info();
-    let software = is_software(&info, &architecture, &description);
+    let software = is_software(&info, &raw[1], &raw[3]);
 
     // Building the presenter bakes the sky and the image-based light on this thread: say so
     // first and let the browser paint the message.
@@ -535,8 +547,14 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         uncaptured,
         max_dim,
         stats: FrameStats::default(),
-        started_ms: now_ms(),
-        counters: Counters::default(),
+        clock: StepClock::new(MAX_STEPS_PER_FRAME),
+        frozen_s: has_flag(&search, "freeze").then_some(FROZEN_T_S),
+        seen_visibility: VISIBILITY_CHANGES.with(Cell::get),
+        adapter_hint: hint,
+        counters: Counters {
+            losses: LOSSES.with(|losses| losses.borrow().total()),
+            ..Counters::default()
+        },
         first_error: None,
         surface_format: String::new(),
         last_cpu_ms: 0.0,
@@ -546,24 +564,20 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         tier_why,
         scale_pct,
         start_scale_pct: scale_pct,
-        window: SplitWindow::default(),
-        ladder: (!search.contains("ladder=off") && !software)
-            .then(|| Ladder::new(WEB_CUT_ORDER.len(), 2, BUDGET_MS)),
+        pace: Pace::new(ladder_for(&search, software)),
         sim_ms: 0.0,
         late_reported: 0,
     };
     frame.stage()?;
 
     let ready = Ready {
-        commit: COMMIT.to_string(),
-        adapter: adapter_facts(&info, [vendor, architecture, web_device, description]),
+        adapter: adapter_facts(&info, raw),
         features,
         limits,
-        wasm_pages: wasm_pages(),
         generation,
         canvas: (w, h),
         surface_format: frame.surface_format.clone(),
-        user_agent: user_agent(),
+        ..page_facts()
     };
     // A query or a software adapter is not probed: the query is the owner's word and no tier
     // helps SwiftShader.
@@ -581,32 +595,57 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     Ok(line)
 }
 
+/// The ladder of cuts, unless `?ladder=off` or a software adapter that no cut would help.
+fn ladder_for(search: &str, software: bool) -> Option<Ladder> {
+    (!search.contains("ladder=off") && !software)
+        .then(|| Ladder::new(WEB_CUT_ORDER.len(), 2, BUDGET_MS))
+}
+
+/// The parts of the ready line that come from the page and the build, not from the device.
+fn page_facts() -> Ready {
+    Ready {
+        commit: COMMIT.to_string(),
+        wasm_pages: wasm_pages(),
+        user_agent: user_agent(),
+        ..Ready::default()
+    }
+}
+
 /// The tier and the canvas size it implies.
 struct TierPick {
     /// The page's query string (`?tier=web`).
     search: String,
     tier: Quality,
-    /// `query`, `limits` or `default`.
+    /// `query`, `limits`, `denylist` or `default`.
     why: &'static str,
     scale_pct: u32,
     size: (u32, u32),
 }
 
-/// WEB8: the tier comes from the adapter's limits and a `?tier=` in the address; the canvas
-/// backing store is set to the tier's render scale of its CSS box.
-fn pick_tier(canvas: &HtmlCanvasElement, device: &wgpu::Device, max_dim: u32) -> TierPick {
+/// WEB8: the tier comes from the adapter's limits and a `?tier=` in the address, with the denylist
+/// (QT10) matched against the `adapter=` text; the canvas backing store is set to the tier's render
+/// scale of its CSS box.
+fn pick_tier(
+    canvas: &HtmlCanvasElement,
+    device: &wgpu::Device,
+    max_dim: u32,
+    adapter: &str,
+) -> TierPick {
     let search = page_search();
-    let (tier, why) = quality::choose_web_tier(
-        quality::tier_from_query(&search),
-        device.limits().max_texture_dimension_2d,
+    let (tier, why) = quality::apply_denylist(
+        quality::choose_web_tier(
+            quality::tier_from_query(&search),
+            device.limits().max_texture_dimension_2d,
+        ),
+        adapter,
+        quality::WEB_DENYLIST,
     );
     let scale_pct = u32::from(quality::knobs(tier).render_scale_pct);
-    let dpr =
-        web_sys::window().map_or(1.0, |w| w.device_pixel_ratio()) * f64::from(scale_pct) / 100.0;
-    let size = frame_size(
+    let size = scaled_frame_size(
         f64::from(canvas.client_width()),
         f64::from(canvas.client_height()),
-        dpr,
+        device_pixel_ratio(),
+        scale_pct,
         max_dim,
     );
     canvas.set_width(size.0);
@@ -618,6 +657,11 @@ fn pick_tier(canvas: &HtmlCanvasElement, device: &wgpu::Device, max_dim: u32) ->
         scale_pct,
         size,
     }
+}
+
+/// The page's device pixel ratio (1 when it cannot be read).
+fn device_pixel_ratio() -> f64 {
+    web_sys::window().map_or(1.0, |w| w.device_pixel_ratio())
 }
 
 /// A software adapter (SwiftShader) is slow by nature; no cut of the ladder would help it.
@@ -663,8 +707,11 @@ async fn warm_behind_loader(
     wait_for_gpu(queue, 10, 30).await;
     let mut why = frame.tier_why;
     let mut probe_ms = None;
+    let mut late_compile = 0;
     if let Some(probe) = probe {
-        probe_ms = run_probe(frame, queue).await;
+        let done = run_probe(frame, queue).await;
+        late_compile = done.late_compile;
+        probe_ms = quality::probe_median_ms(&done.samples);
         let (tier, picked) =
             quality::choose_web_tier_probed(probe.query.as_deref(), probe.max_texture_2d, probe_ms);
         why = picked;
@@ -684,6 +731,7 @@ async fn warm_behind_loader(
         ledger,
         warm_ms: now_ms() - built_at,
         probe_ms,
+        late_compile,
         why,
     }
 }
@@ -701,36 +749,62 @@ struct Warmed {
     warm_ms: f64,
     /// Median of the startup probe, `None` when it did not run or stalled.
     probe_ms: Option<f64>,
+    /// Pipelines built while the probe timed frames (QT2).
+    late_compile: u32,
     /// Why the final tier: the pick's reason, or `probe` when the probe lowered it.
     why: &'static str,
 }
 
-/// WEB8 startup probe: draw up to [`quality::PROBE_FRAMES`] frames in a row, each one timed from
-/// its draw to the GPU saying it is done, and return the median. The frames are not tied to the
-/// display, so a card that keeps up with 60 Hz does not read 16.7 ms: the figure is the work
-/// itself. `None` when fewer than [`PROBE_MIN_FRAMES`] frames fit in [`quality::PROBE_MAX_MS`]
-/// (a stalled or throttled tab says nothing about the GPU).
-async fn run_probe(frame: &mut ArenaLoop, queue: &wgpu::Queue) -> Option<f64> {
-    let started = now_ms();
-    let mut samples = Vec::with_capacity(quality::PROBE_FRAMES);
-    while samples.len() < quality::PROBE_FRAMES && now_ms() - started < quality::PROBE_MAX_MS {
+/// WEB8 startup probe: draw frames in a row, each one timed from its draw to the GPU saying it is
+/// done. The frames are not tied to the display, so a card that keeps up with 60 Hz does not read
+/// 16.7 ms: the figure is the work itself. [`ProbeRun`] settles for 30 frames first, runs a
+/// window a late compile spoiled once more, and starts over when the tab was hidden or shown
+/// (QT2, QT7); the samples are empty when too few frames fit in the time (a stalled or throttled
+/// tab says nothing about the GPU).
+async fn run_probe(frame: &mut ArenaLoop, queue: &wgpu::Queue) -> ProbeDone {
+    let mut run = ProbeRun::new(
+        quality::PROBE_FRAMES,
+        PROBE_MIN_FRAMES,
+        quality::PROBE_MAX_MS,
+    );
+    let mut hidden_waits = 0;
+    loop {
+        if document().is_some_and(|d| d.hidden()) {
+            // A hidden tab runs its timers slowly: nothing it times is the GPU.
+            hidden_waits += 1;
+            if hidden_waits > PROBE_HIDDEN_WAITS {
+                return run.abandon();
+            }
+            run.restart();
+            pause(250).await;
+            continue;
+        }
+        let changes = VISIBILITY_CHANGES.with(Cell::get);
         let t0 = now_ms();
         frame.draw(t0);
         wait_for_gpu(queue, 0, 0).await;
-        samples.push(now_ms() - t0);
+        let ms = now_ms() - t0;
+        if VISIBILITY_CHANGES.with(Cell::get) != changes {
+            // The frame spans a gap.
+            run.restart();
+            continue;
+        }
+        if let Some(done) = run.frame(ms, pipeline_warmup::snapshot().total()) {
+            return done;
+        }
     }
-    (samples.len() >= PROBE_MIN_FRAMES)
-        .then(|| quality::probe_median_ms(&samples))
-        .flatten()
 }
 
 /// The tier's knobs as the page prints them (see [`TierFacts`]).
-fn tier_facts(tier: Quality, why: &str, probe_ms: Option<f64>) -> TierFacts {
+fn tier_facts(tier: Quality, why: &str, adapter: &str, probe: (Option<f64>, u32)) -> TierFacts {
     let knobs = quality::knobs(tier);
     TierFacts {
         name: tier.name().to_string(),
         why: why.to_string(),
-        probe_ms,
+        adapter: adapter.to_string(),
+        late_compile: probe.1,
+        probe_ms: probe.0,
+        dpr: device_pixel_ratio(),
         scale_pct: u32::from(knobs.render_scale_pct),
         shadow_px: u32::from(knobs.shadow_map_px),
         cascades: u32::from(knobs.shadow_cascades),
@@ -758,10 +832,17 @@ fn publish_ready(frame: &ArenaLoop, ready: &Ready, warmed: &Warmed, init_ms: f64
         ledger,
         warm_ms,
         probe_ms,
+        late_compile,
         why: tier_why,
     } = warmed;
     let (tier, warm_ms) = (frame.tier, *warm_ms);
-    let tier_line = tier_facts(tier, tier_why, *probe_ms).line();
+    let tier_line = tier_facts(
+        tier,
+        tier_why,
+        &frame.adapter_hint,
+        (*probe_ms, *late_compile),
+    )
+    .line();
     let pipelines_line = pipeline_warmup::ready_line(ledger, warm_ms);
     let facts = ArenaFacts {
         tier: tier.name().to_string(),
@@ -776,6 +857,7 @@ fn publish_ready(frame: &ArenaLoop, ready: &Ready, warmed: &Warmed, init_ms: f64
     set_text("tier", &tier_line);
     set_text("pipelines", &pipelines_line);
     set_body_attr("data-tier", tier.name());
+    set_body_attr("data-fallback", fallback_for(tier_why));
     set_body_attr("data-pipelines", &ledger.warm().to_string());
     web_sys::console::log_1(&JsValue::from_str(&tier_line));
     web_sys::console::log_1(&JsValue::from_str(&pipelines_line));
@@ -819,6 +901,7 @@ pub async fn run_arena(canvas_id: String) -> String {
     set_state("starting");
     // The headless check keys on this: the arena page has a GPU copy of its canvas to read.
     set_body_attr("data-mode", "arena");
+    watch_visibility();
     // Input and audio need the DOM only, so they start before (and without) the GPU, as in the shell.
     crate::browser::install(&canvas_id);
     // First, before anything can read a clock: the page's performance.now() becomes the engine's.

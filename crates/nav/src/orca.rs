@@ -728,30 +728,43 @@ mod tests {
             .collect()
     }
 
+    /// The id-sorted scan referee: every other agent inside the look-around,
+    /// nearest first, ties to the lower index, cut to the neighbour limit.
+    fn scan_neighbours(agents: &[Agent], i: usize) -> Vec<(u64, usize)> {
+        let mut want: Vec<(u64, usize)> = (0..agents.len())
+            .filter(|j| *j != i)
+            .map(|j| {
+                let d = sub(v(agents[j].pos), v(agents[i].pos));
+                (dot(d, d) as u64, j)
+            })
+            .filter(|(d, _)| *d <= 4_000 * 4_000)
+            .collect();
+        want.sort_unstable();
+        want.truncate(P.max_neighbors);
+        want
+    }
+
+    /// The grid feed of every agent equals the scan referee, entry for entry.
+    fn assert_grid_matches_scan(orca: &mut Orca, agents: &[Agent], label: &str) {
+        let grid = orca.build_grid(agents, P.neighbor_mm).expect("grid builds");
+        for i in 0..agents.len() {
+            let mut near = [(u64::MAX, 0); MAX_NEIGHBORS];
+            let count = orca.neighbors(agents, &grid, i, &P, &mut near);
+            assert_eq!(
+                &near[..count],
+                &*scan_neighbours(agents, i),
+                "{label} agent {i}"
+            );
+        }
+    }
+
     /// The grid feed must equal a brute-force scan on every layout.
     #[test]
     fn grid_neighbours_equal_a_brute_force_scan() {
         let mut orca = Orca::new();
         for seed in 0..50 {
             let agents = crossing_world(120, seed, 20_000);
-            let grid = orca
-                .build_grid(&agents, P.neighbor_mm)
-                .expect("grid builds");
-            for i in 0..agents.len() {
-                let mut want: Vec<(u64, usize)> = (0..agents.len())
-                    .filter(|j| *j != i)
-                    .map(|j| {
-                        let d = sub(v(agents[j].pos), v(agents[i].pos));
-                        (dot(d, d) as u64, j)
-                    })
-                    .filter(|(d, _)| *d <= 4_000 * 4_000)
-                    .collect();
-                want.sort_unstable();
-                want.truncate(P.max_neighbors);
-                let mut near = [(u64::MAX, 0); MAX_NEIGHBORS];
-                let count = orca.neighbors(&agents, &grid, i, &P, &mut near);
-                assert_eq!(&near[..count], &*want, "seed {seed} agent {i}");
-            }
+            assert_grid_matches_scan(&mut orca, &agents, &format!("seed {seed}"));
         }
     }
 
@@ -790,6 +803,16 @@ mod tests {
     /// leaves zero slack for two streams of two and jams in 3 seeds of 1,000); returns the
     /// agents after 60 s with their goals.
     fn run_corridor(seed: u64, orca: &mut Orca) -> (Vec<Agent>, Vec<[i32; 2]>) {
+        run_corridor_observed(seed, orca, |_, _| {})
+    }
+
+    /// [`run_corridor`] that shows the crowd to `observe` every 12th step,
+    /// before it moves.
+    fn run_corridor_observed(
+        seed: u64,
+        orca: &mut Orca,
+        mut observe: impl FnMut(&mut Orca, &[Agent]),
+    ) -> (Vec<Agent>, Vec<[i32; 2]>) {
         let walls = [
             Wall::new([0, -2_000], [0, 1]),
             Wall::new([0, 2_000], [0, -1]),
@@ -812,7 +835,10 @@ mod tests {
             goals.push([600, *y]);
         }
         let mut out = vec![[0; 2]; agents.len()];
-        for _ in 0..1_200 {
+        for step in 0..1_200 {
+            if step % 12 == 0 {
+                observe(orca, &agents);
+            }
             for (a, g) in agents.iter_mut().zip(&goals) {
                 a.pref = toward(a.pos, *g);
             }
@@ -882,6 +908,64 @@ mod tests {
         assert!(
             per_agent_ns[2] <= per_agent_ns[0] * 2,
             "cost grew with the crowd: {per_agent_ns:?}"
+        );
+    }
+
+    /// NV10: on the corridor corpus (1,000 seeds, the crowd seen every 12th
+    /// step of the swap) the grid neighbour sets equal the scan referee.
+    #[test]
+    fn crowd_corridor_corpus_neighbours_equal_the_scan() {
+        let mut orca = Orca::new();
+        for seed in 0..1_000u64 {
+            run_corridor_observed(seed, &mut orca, |orca, agents| {
+                assert_grid_matches_scan(orca, agents, &format!("corridor seed {seed}"));
+            });
+        }
+    }
+
+    /// NV10: a 1,000-agent crowd replays to the same digest twice, and the
+    /// grid still equals the scan at that size.
+    #[test]
+    fn crowd_of_1000_replays_to_the_same_digest_twice() {
+        let first = digest(&run_crossing(1_000, 2040, 30));
+        assert_eq!(first, digest(&run_crossing(1_000, 2040, 30)));
+        assert_ne!(first, digest(&run_crossing(1_000, 2041, 30)));
+        let agents = crossing_world(1_000, 2040, 44_721);
+        assert_grid_matches_scan(&mut Orca::new(), &agents, "1,000 agents");
+    }
+
+    /// NV10 bench: p50/p95/p99 of one warm step at 50, 500 and 1,000 agents
+    /// (constant density), and the P6 bar: 1,000-agent step p99 within 2 ms.
+    #[test]
+    #[ignore = "timing gate: run under the release perf gate"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn crowd_step_percentiles_hold_the_p6_bar_to_1000_agents() {
+        let mut p99_at_1000 = 0;
+        eprintln!("agents  p50_us  p95_us  p99_us");
+        for (n, half) in [(50usize, 10_000), (500, 31_623), (1_000, 44_721)] {
+            let agents = crossing_world(n, 7, half);
+            let mut orca = Orca::new();
+            let mut out = vec![[0; 2]; n];
+            orca.step(&agents, &[], &P, &mut out).expect("warm step");
+            let mut micros: Vec<u128> = (0..400)
+                .map(|_| {
+                    let begin = std::time::Instant::now();
+                    orca.step(&agents, &[], &P, &mut out).expect("steps");
+                    begin.elapsed().as_micros()
+                })
+                .collect();
+            micros.sort_unstable();
+            let at = |percent: usize| micros[micros.len() * percent / 100];
+            eprintln!("{n:6}  {:6}  {:6}  {:6}", at(50), at(95), at(99));
+            p99_at_1000 = at(99);
+        }
+        assert!(
+            p99_at_1000 <= 2_000,
+            "1,000-agent p99 {p99_at_1000} us over 2 ms"
         );
     }
 }

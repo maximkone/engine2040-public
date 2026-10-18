@@ -26,6 +26,7 @@
 //! not required: the zero-alloc audit is a later row's job.
 #![forbid(unsafe_code)]
 
+use super::clinch::{deepest_overlap, part_members, Member};
 use super::ragdoll::{BoneShape, Error as RagdollError, Ragdoll};
 use super::rapier::FIXED_DT;
 use engine_anim::contract::{Joint, LocalPose, Skeleton};
@@ -214,6 +215,10 @@ pub struct TapeReport {
     /// meters, over the whole clinch. Starts at [`CLINCH_GAP_M`]; the seeded
     /// hit must close it.
     pub separation_min_m: f32,
+    /// Deepest capsule-against-capsule overlap between the two clinch
+    /// fighters, meters, read after the parting pass of every tick (axis
+    /// aware, unlike the center probes above).
+    pub clinch_overlap_max_m: f32,
     /// Most heap calls in any single step (sampler-measured; `0` for the
     /// plain runner, which never counts).
     pub per_tick_alloc_calls: u64,
@@ -232,6 +237,7 @@ impl Display for TapeReport {
             digest,
             interpenetration_max_m: inter,
             separation_min_m: sep,
+            clinch_overlap_max_m: overlap,
             per_tick_alloc_calls: calls,
             per_tick_alloc_bytes: bytes,
             ticks,
@@ -239,7 +245,7 @@ impl Display for TapeReport {
         write!(
             f,
             "TAPE falls={falls} seed={seed} digest={digest:016x} \
-             inter_max={inter:.4}m sep_min={sep:.4}m \
+             inter_max={inter:.4}m sep_min={sep:.4}m overlap_max={overlap:.4}m \
              alloc_tick={calls}calls/{bytes}B ticks={ticks}"
         )
     }
@@ -286,7 +292,7 @@ pub fn run_tape_with<S: StepSampler>(
         max_bytes = max_bytes.max(sample.max_bytes);
         ticks += sample.ticks;
     }
-    let clinch = run_clinch(config, sampler)?;
+    let clinch = run_clinch(config, sampler, ClinchMode::LIVE)?;
     hashes.push(clinch.hash);
     inter_max = inter_max.max(clinch.penetration_max);
     max_calls = max_calls.max(clinch.max_calls);
@@ -298,6 +304,7 @@ pub fn run_tape_with<S: StepSampler>(
         digest: Rng::digest(&hashes),
         interpenetration_max_m: inter_max,
         separation_min_m: clinch.separation_min,
+        clinch_overlap_max_m: clinch.overlap_max,
         per_tick_alloc_calls: max_calls,
         per_tick_alloc_bytes: max_bytes,
         ticks,
@@ -305,10 +312,12 @@ pub fn run_tape_with<S: StepSampler>(
 }
 
 /// Outcome of one script leg: end hash plus folded maxima.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct LegSample {
     hash: u64,
     penetration_max: f32,
     separation_min: f32,
+    overlap_max: f32,
     max_calls: u64,
     max_bytes: u64,
     ticks: u64,
@@ -500,20 +509,40 @@ fn run_fall<S: StepSampler>(
         hash: ragdoll.state_hash(),
         penetration_max,
         separation_min: f32::INFINITY,
+        overlap_max: 0.0,
         max_calls: costs.0,
         max_bytes: costs.1,
         ticks,
     })
 }
 
+/// How the clinch leg runs. The tape always runs [`ClinchMode::LIVE`]; the tests flip the
+/// switches to show what the parting pass and its fighter order change.
+#[derive(Clone, Copy)]
+struct ClinchMode {
+    /// Run the parting pass after every tick; off, the two fighters pass through each other.
+    part: bool,
+    /// Hand the fighters to the parting pass as B then A instead of A then B.
+    shuffled: bool,
+}
+
+impl ClinchMode {
+    /// What the tape runs: fighters parted, handed over A then B.
+    const LIVE: Self = Self {
+        part: true,
+        shuffled: false,
+    };
+}
+
 /// The clinch: two fighters spawn [`CLINCH_GAP_M`] apart, fall together,
 /// fighter B takes a seeded shove toward A, then both get up. The fighters
-/// live in separate worlds (shared-world contacts are the contacts/groups
-/// fix's job), so the
-/// separation posts the closest approach of the two clouds, not a contact.
+/// live in separate worlds, so the parting pass ([`part_members`]) is the only contact
+/// between them; the separation posts the closest approach of the two clouds and the overlap
+/// the deepest capsule sink after that pass.
 fn run_clinch<S: StepSampler>(
     config: &TapeConfig,
     sampler: &mut S,
+    mode: ClinchMode,
 ) -> Result<LegSample, TapeError> {
     let mut rng = Rng::new(config.seed).fork_named("clinch");
     // Remainder below 90, so the checked narrowing is exact.
@@ -524,6 +553,7 @@ fn run_clinch<S: StepSampler>(
     let mut costs = (0u64, 0u64);
     let mut penetration_max = 0.0f32;
     let mut separation_min = f32::INFINITY;
+    let mut overlap_max = 0.0f32;
     let mut ticks = 0u64;
     for t in 0..config.clinch_steps {
         if t == hit_tick {
@@ -532,9 +562,26 @@ fn run_clinch<S: StepSampler>(
         // Fixed A-then-B order: step order never reaches a hash.
         sampled(&mut a, sampler, &mut costs)?;
         sampled(&mut b, sampler, &mut costs)?;
+        if mode.part {
+            let mut pair = [
+                Member {
+                    id: 0,
+                    ragdoll: &mut a,
+                },
+                Member {
+                    id: 1,
+                    ragdoll: &mut b,
+                },
+            ];
+            if mode.shuffled {
+                pair.swap(0, 1);
+            }
+            part_members(&mut pair);
+        }
         penetration_max = penetration_max.max(penetration(&a));
         penetration_max = penetration_max.max(penetration(&b));
         separation_min = separation_min.min(separation(&a, &b));
+        overlap_max = overlap_max.max(deepest_overlap(&a, &b));
         ticks += 2;
     }
     ticks += get_up(
@@ -555,6 +602,7 @@ fn run_clinch<S: StepSampler>(
         hash: Rng::digest(&[a.state_hash(), b.state_hash()]),
         penetration_max,
         separation_min,
+        overlap_max,
         max_calls: costs.0,
         max_bytes: costs.1,
         ticks,
@@ -563,6 +611,7 @@ fn run_clinch<S: StepSampler>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::clinch::ClinchStats;
     use super::super::powered::GETUP_BUDGET_TICKS;
     use super::*;
     use engine_core::alloc_probe;
@@ -664,5 +713,82 @@ mod tests {
             a.separation_min_m
         );
         println!("{a}");
+    }
+
+    /// NS3 acceptance: once parted, no clinch bone sinks 1 cm into a bone of the other
+    /// fighter; the clinch repeats bit for bit and hands the same result whichever fighter the
+    /// pass sees first; and the control run without the pass does sink, so the bound has teeth.
+    #[test]
+    fn clinch_fighters_part_under_a_centimeter_x2_shuffled() {
+        let config = TapeConfig::baseline();
+        let run = |part, shuffled| {
+            run_clinch(&config, &mut Plain, ClinchMode { part, shuffled }).expect("clinch runs")
+        };
+        let live = run(true, false);
+        assert_eq!(live, run(true, false), "the clinch must repeat");
+        assert_eq!(
+            live,
+            run(true, true),
+            "fighter order must not reach the result"
+        );
+        assert!(
+            live.overlap_max < 0.01,
+            "fighters sank {} m into each other",
+            live.overlap_max
+        );
+        let free = run(false, false);
+        assert!(
+            free.overlap_max > 0.01,
+            "the control must interpenetrate: {} m",
+            free.overlap_max
+        );
+        println!(
+            "clinch overlap max {:.4} m parted, {:.4} m unparted",
+            live.overlap_max, free.overlap_max
+        );
+    }
+
+    #[test]
+    fn parting_pushes_two_fighters_that_start_inside_each_other_apart() {
+        // Two chains 0.2 m apart with 0.15 m bones sink 0.1 m into each other everywhere.
+        let mut a = spawn_on_floor([-0.1, ROOT_HEIGHT, 0.0]).expect("a");
+        let mut b = spawn_on_floor([0.1, ROOT_HEIGHT, 0.0]).expect("b");
+        let before = deepest_overlap(&a, &b);
+        assert!(before > 0.09, "the fixture must overlap: {before}");
+        let mut pair = [
+            Member {
+                id: 0,
+                ragdoll: &mut a,
+            },
+            Member {
+                id: 1,
+                ragdoll: &mut b,
+            },
+        ];
+        let stats = part_members(&mut pair);
+        assert!(stats.parted > 0 && stats.deepest_m > 0.09, "{stats:?}");
+        let after = deepest_overlap(&a, &b);
+        assert!(after < 0.01, "still {after} m deep after parting");
+    }
+
+    #[test]
+    fn parting_leaves_fighters_that_do_not_touch_alone() {
+        let mut a = spawn_on_floor([-2.0, ROOT_HEIGHT, 0.0]).expect("a");
+        let mut b = spawn_on_floor([2.0, ROOT_HEIGHT, 0.0]).expect("b");
+        let before = (a.state_hash(), b.state_hash());
+        let mut pair = [
+            Member {
+                id: 1,
+                ragdoll: &mut b,
+            },
+            Member {
+                id: 0,
+                ragdoll: &mut a,
+            },
+        ];
+        assert_eq!(part_members(&mut pair), ClinchStats::default());
+        assert_eq!(pair[0].id, 0, "the pass sorts the fighters by id");
+        assert_eq!((a.state_hash(), b.state_hash()), before);
+        assert_eq!(deepest_overlap(&a, &b), 0.0);
     }
 }

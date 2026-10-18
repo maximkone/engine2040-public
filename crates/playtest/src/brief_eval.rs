@@ -127,6 +127,8 @@ pub struct BriefScore {
     pub play_digest: u64,
     /// Replay digest; must equal `play_digest`.
     pub replay_digest: u64,
+    /// First tick the replay audit named as bad; `None` for a clean replay.
+    pub first_bad_tick: Option<u32>,
     /// Advisory vision points 0..=100; never gates `pass`.
     pub vision_score: u32,
     /// Advisory capture digest.
@@ -145,6 +147,108 @@ impl BriefScore {
             && self.ab2_ok
             && self.ab3_ok
             && !(self.ab4_ok && self.keypoint_ok && self.replay_ok)
+    }
+
+    /// The first gate that refused this build, typed; `None` when it passed.
+    pub fn fault(&self) -> Option<BundleFault> {
+        if !self.ab1_ok {
+            Some(BundleFault::Level)
+        } else if !self.ab2_ok {
+            Some(BundleFault::Character)
+        } else if !self.ab3_ok {
+            Some(BundleFault::Encounter)
+        } else if !(self.ab4_ok && self.replay_ok) {
+            Some(BundleFault::Replay {
+                first_bad_tick: self.first_bad_tick,
+            })
+        } else if !self.keypoint_ok {
+            Some(BundleFault::Keypoints {
+                failed: self.keypoints_total - self.keypoints_passed,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Why a brief-to-game bundle was refused: the first gate that said no.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum BundleFault {
+    /// AB1: the level grammar found no prop, want or spawn line.
+    Level,
+    /// AB2: the character bind found nothing to bind.
+    Character,
+    /// AB3: the encounter prose stage found no prose line.
+    Encounter,
+    /// AB4: the match did not replay; the audit named the first bad tick.
+    Replay {
+        /// First tick whose checksum differs; `None` when no audit ran.
+        first_bad_tick: Option<u32>,
+    },
+    /// The keypoint suite had failing specs.
+    Keypoints {
+        /// Specs that failed.
+        failed: usize,
+    },
+    /// The keypoint suite could not run, so nothing was judged.
+    Harness(String),
+}
+
+impl std::fmt::Display for BundleFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Level => write!(
+                f,
+                "AB1 level refused: needs a prop, a want and a spawn line"
+            ),
+            Self::Character => write!(f, "AB2 character refused: nothing to bind"),
+            Self::Encounter => write!(f, "AB3 encounter refused: no prose line"),
+            Self::Replay {
+                first_bad_tick: Some(tick),
+            } => write!(f, "AB4 slice refused: replay differs from tick {tick}"),
+            Self::Replay {
+                first_bad_tick: None,
+            } => write!(f, "AB4 slice refused: no replay to audit"),
+            Self::Keypoints { failed } => write!(f, "keypoints refused: {failed} specs failed"),
+            Self::Harness(reason) => write!(f, "eval harness refused: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for BundleFault {}
+
+/// A bad build seeded into one bundle run: the same brief, one thing broken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BadBuild {
+    /// The build lost its `spawn` line.
+    NoSpawn,
+    /// The build lost its `#` prose line.
+    NoProse,
+    /// The recorded match claims one wrong checksum at this tick.
+    TamperedTick(u32),
+}
+
+impl BadBuild {
+    /// The brief text as this bad build has it.
+    fn text(self, brief: &Brief) -> String {
+        let dropped = match self {
+            Self::NoSpawn => "spawn",
+            Self::NoProse => "#",
+            Self::TamperedTick(_) => return brief.text.to_string(),
+        };
+        let kept: Vec<&str> = brief
+            .text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with(dropped))
+            .collect();
+        kept.join("\n")
+    }
+
+    fn tamper(self) -> Option<u32> {
+        match self {
+            Self::TamperedTick(tick) => Some(tick),
+            _ => None,
+        }
     }
 }
 
@@ -309,7 +413,9 @@ fn ab3_encounter_ok(text: &str) -> bool {
     text.lines().any(|line| line.trim_start().starts_with('#')) && text.chars().count() > 40
 }
 
-fn match_digests(seed: u64) -> Option<(u64, u64)> {
+/// Play one brief's match and audit its record. `tamper` flips one claimed
+/// checksum at that tick, the way a bad build leaves a record that lies.
+fn audited_match(seed: u64, tamper: Option<u32>) -> Option<(u64, rebuild::Audit)> {
     let config = ArenaConfig {
         seed,
         ticks: MATCH_TICKS,
@@ -319,10 +425,12 @@ fn match_digests(seed: u64) -> Option<(u64, u64)> {
     };
     // EV16: the replay is a sparse rebuild (snapshots every few ticks, a
     // checksum per tick) and a bad tick anywhere refuses the whole replay.
-    let (keys, claim) = rebuild::take(&config, &BoutTape::default(), rebuild::STRIDE)?;
+    let (keys, mut claim) = rebuild::take(&config, &BoutTape::default(), rebuild::STRIDE)?;
     let play = *claim.checksums.last()?;
-    let audit = rebuild::audit(keys, &claim)?;
-    audit.first_bad.is_none().then_some((play, audit.last))
+    if let Some(tick) = tamper {
+        *claim.checksums.get_mut(usize::try_from(tick).ok()?)? ^= 1;
+    }
+    Some((play, rebuild::audit(keys, &claim)?))
 }
 
 fn vision_for(seed: u64) -> (u32, String, String) {
@@ -343,19 +451,49 @@ fn vision_for(seed: u64) -> (u32, String, String) {
     }
 }
 
+/// One build under test: the brief text as built, so a bad variant can
+/// differ from its brief.
+struct Build<'a> {
+    id: &'static str,
+    text: &'a str,
+    seed: u64,
+    tamper: Option<u32>,
+}
+
+/// Suite-wide keypoint numbers every brief row carries.
+#[derive(Clone, Copy)]
+struct KeypointTally {
+    passed: usize,
+    total: usize,
+    ok: bool,
+}
+
+impl KeypointTally {
+    fn of(suite: &keypoint::SuiteReport) -> Self {
+        Self {
+            passed: suite.passed(),
+            total: suite.results.len(),
+            ok: suite.pass(),
+        }
+    }
+}
+
 fn score_brief(
-    brief: &Brief,
-    keypoints_passed: usize,
-    keypoints_total: usize,
-    keypoint_ok: bool,
+    build: &Build<'_>,
+    keypoints: KeypointTally,
     broken: Option<(&'static str, BreakStage)>,
 ) -> BriefScore {
-    let breaks_this = broken.is_some_and(|(id, _)| id == brief.id);
+    let breaks_this = broken.is_some_and(|(id, _)| id == build.id);
     let break_stage = broken.map(|(_, stage)| stage).unwrap_or(BreakStage::None);
-    let mut ab1_ok = ab1_level_ok(brief.text);
-    let mut ab2_ok = ab2_character_ok(brief.text);
-    let mut ab3_ok = ab3_encounter_ok(brief.text);
-    let (mut play, replay) = match_digests(brief.seed).unwrap_or((0, 1));
+    let mut ab1_ok = ab1_level_ok(build.text);
+    let mut ab2_ok = ab2_character_ok(build.text);
+    let mut ab3_ok = ab3_encounter_ok(build.text);
+    let audited = audited_match(build.seed, build.tamper);
+    let first_bad_tick = audited.as_ref().and_then(|(_, audit)| audit.first_bad);
+    let (mut play, replay) = match audited {
+        Some((play, audit)) if audit.first_bad.is_none() => (play, audit.last),
+        _ => (0, 1),
+    };
     let mut replay_ok = play == replay && play != 0;
     let mut ab4_ok = replay_ok;
     if breaks_this {
@@ -371,21 +509,22 @@ fn score_brief(
             BreakStage::None => {}
         }
     }
-    let (vision_score, vision_digest, vision_note) = vision_for(brief.seed);
-    let pass = ab1_ok && ab2_ok && ab3_ok && ab4_ok && keypoint_ok && replay_ok;
+    let (vision_score, vision_digest, vision_note) = vision_for(build.seed);
+    let pass = ab1_ok && ab2_ok && ab3_ok && ab4_ok && keypoints.ok && replay_ok;
     BriefScore {
-        id: brief.id,
-        seed: brief.seed,
+        id: build.id,
+        seed: build.seed,
         ab1_ok,
         ab2_ok,
         ab3_ok,
         ab4_ok,
-        keypoints_passed,
-        keypoints_total,
-        keypoint_ok,
+        keypoints_passed: keypoints.passed,
+        keypoints_total: keypoints.total,
+        keypoint_ok: keypoints.ok,
         replay_ok,
         play_digest: play,
         replay_digest: replay,
+        first_bad_tick,
         vision_score,
         vision_digest,
         vision_note,
@@ -405,16 +544,16 @@ pub fn run_report_with_break(
     broken: Option<(&'static str, BreakStage)>,
 ) -> Result<EvalReport, EvalError> {
     let suite = keypoint::run_suite().map_err(|error| EvalError::Keypoints(error.to_string()))?;
-    let keypoint_ok = suite.pass();
+    let keypoints = KeypointTally::of(&suite);
     let mut briefs = Vec::with_capacity(BRIEF_COUNT);
     for brief in &BRIEFS {
-        briefs.push(score_brief(
-            brief,
-            suite.passed(),
-            suite.results.len(),
-            keypoint_ok,
-            broken,
-        ));
+        let build = Build {
+            id: brief.id,
+            text: brief.text,
+            seed: brief.seed,
+            tamper: None,
+        };
+        briefs.push(score_brief(&build, keypoints, broken));
     }
     let (rules_covered, rules_total) = suite.rules_covered();
     Ok(EvalReport {
@@ -427,6 +566,24 @@ pub fn run_report_with_break(
         rules_covered,
         rules_total,
     })
+}
+
+/// Build one brief into a game bundle, with one seeded bad build or none.
+/// The bundle passes with its score, or fails loud with the typed reason
+/// of the first gate that refused it. The same call twice gives the same
+/// answer.
+pub fn run_bundle(brief: &Brief, bad: Option<BadBuild>) -> Result<BriefScore, BundleFault> {
+    let suite = keypoint::run_suite().map_err(|error| BundleFault::Harness(error.to_string()))?;
+    let keypoints = KeypointTally::of(&suite);
+    let text = bad.map_or_else(|| brief.text.to_string(), |bad| bad.text(brief));
+    let build = Build {
+        id: brief.id,
+        text: &text,
+        seed: brief.seed,
+        tamper: bad.and_then(BadBuild::tamper),
+    };
+    let score = score_brief(&build, keypoints, None);
+    score.fault().map_or(Ok(score), Err)
 }
 
 /// Default report directory inside the lane checkout target tree.
@@ -563,6 +720,64 @@ mod tests {
         assert_eq!(first, broken(), "broken report reproduces x2");
         assert_eq!(clean.passed() - first.passed(), 1, "delta is exactly one");
         assert!(!first.briefs[0].ab3_ok, "b01 is the seeded bad brief");
+    }
+
+    #[test]
+    fn bundle_fails_loud_on_each_seeded_bad_build_and_passes_the_good_one() {
+        // NS16: one brief, three seeded bad builds, typed reasons, x2.
+        let brief = &BRIEFS[0];
+        let good = run_bundle(brief, None).expect("the good build passes");
+        assert!(good.pass);
+        assert_eq!(Ok(good), run_bundle(brief, None), "good build equal x2");
+        let cases = [
+            (BadBuild::NoSpawn, BundleFault::Level),
+            (BadBuild::NoProse, BundleFault::Encounter),
+            (
+                BadBuild::TamperedTick(37),
+                BundleFault::Replay {
+                    first_bad_tick: Some(37),
+                },
+            ),
+        ];
+        for (bad, fault) in cases {
+            let refused = run_bundle(brief, Some(bad)).expect_err("a bad build is refused");
+            assert_eq!(refused, fault, "{bad:?} gets a typed reason");
+            assert!(
+                refused.to_string().contains("refused"),
+                "{bad:?} reads loud"
+            );
+            assert_eq!(
+                run_bundle(brief, Some(bad)).expect_err("refused x2"),
+                refused,
+                "{bad:?} refused the same way x2"
+            );
+        }
+    }
+
+    #[test]
+    fn tampered_checksum_is_named_by_its_own_tick() {
+        // Negative control: moving the lie moves the named tick.
+        let brief = &BRIEFS[1];
+        for tick in [0, 8, 63, 119] {
+            let refused = run_bundle(brief, Some(BadBuild::TamperedTick(tick)))
+                .expect_err("tampered record is refused");
+            assert_eq!(
+                refused,
+                BundleFault::Replay {
+                    first_bad_tick: Some(tick)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn empty_brief_bundle_is_refused_at_the_level_gate() {
+        let empty = Brief {
+            id: "b00",
+            text: "",
+            seed: 5000,
+        };
+        assert_eq!(run_bundle(&empty, None), Err(BundleFault::Level));
     }
 
     #[test]

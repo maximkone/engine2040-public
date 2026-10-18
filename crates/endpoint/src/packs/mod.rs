@@ -325,6 +325,24 @@ fn arg_summary(schema: &JsonObject) -> String {
     }
 }
 
+/// Index the core tools (`play.run`, `capture`, `tx.preview`, ...) beside the
+/// pack verbs, with the same `Args:` line, so `api.search` finds them and
+/// `api.describe` answers their argument list instead of `unknown_path`.
+pub(crate) fn seed_core_index(index: &mut Index, tools: &[Tool]) {
+    for tool in tools {
+        index.add_tool(
+            &tool.name,
+            &format!("{} (core tool, always listed)", tool.name),
+            &format!(
+                "{} Args: {}",
+                tool.description.as_deref().unwrap_or_default(),
+                arg_summary(&tool.input_schema)
+            ),
+            "DOOR",
+        );
+    }
+}
+
 /// `pack.verb` shape with no forbidden word.
 fn name_is_sane(name: &str) -> bool {
     let (head, tail) = match name.split_once('.') {

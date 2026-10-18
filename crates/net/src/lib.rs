@@ -3,6 +3,9 @@
 /// Packet delivery tracking: a 32-bit ack bitfield, a fixed ring of sent
 /// records and a loss rate in permille. Std-only; feeds receipts, never the sim.
 pub mod ack;
+/// The dedicated server's sanitize rule (a spear press in a match without
+/// the spear is masked) and the bounded log naming every changed input.
+pub mod anticheat;
 /// Browser clients: the WebSocket and WebTransport legs of a page joining the
 /// dedicated server, behind the same `Transport` trait (wasm32 glue plus the
 /// natively tested inbox and stream framing).
@@ -18,12 +21,19 @@ pub mod courier;
 pub mod dedicated;
 pub mod delay;
 pub mod delta;
+/// Input admission screen of the dedicated server: per-slot refusal
+/// receipts, sanitized admission, lag receipts of attack presses.
+pub mod guard;
 pub mod heal;
 /// Interest management: relevancy, per-connection priority, budgets.
 pub mod interest;
 /// Presentation snapshot interpolation: Hermite C1 positions, quaternion
 /// yaw dispatch, snapshot ring plus extrapolate guard. Render-time only.
 pub mod interp;
+/// Lag window of the dedicated server: how long a tick stays open for a
+/// remote player's input, sized from round trip, capped at 16 ticks, with a
+/// receipt per attack press that replays exactly.
+pub mod lagcomp;
 /// Seeded fault-injection wire for played bouts: loss, jitter, reorder,
 /// scripted outage and measured delay histograms. Std-only.
 pub mod link;
@@ -94,89 +104,6 @@ pub use session::{
     decode_delta, encode_delta, Client, Delta, FighterDelta, FighterSnap, FullSnap, InterpResult,
     Interpolator, NetError, Server, SnapshotDelta,
 };
-
-/// Bounded history of state hashes and inputs for resimulation; the oldest
-/// frame drops once `cap` frames are held.
-pub struct Rollback {
-    states: std::collections::VecDeque<u64>,
-    inputs: std::collections::VecDeque<u32>,
-    cap: usize,
-}
-
-impl Rollback {
-    /// Empty history keeping at most `cap` frames.
-    pub fn new(cap: usize) -> Self {
-        Self {
-            states: std::collections::VecDeque::new(),
-            inputs: std::collections::VecDeque::new(),
-            cap,
-        }
-    }
-    /// advance one frame; remote input predicted = last input (stub records only)
-    pub fn advance(&mut self, state_hash: u64, input: u32) {
-        self.states.push_back(state_hash);
-        self.inputs.push_back(input);
-        if self.states.len() > self.cap {
-            self.states.pop_front();
-            self.inputs.pop_front();
-        }
-    }
-    /// re-fetch a saved frame for resimulation
-    pub fn resim_from(&self, frame: usize) -> Option<u64> {
-        self.states.get(frame).copied()
-    }
-    /// Frames currently held.
-    pub fn len(&self) -> usize {
-        self.states.len()
-    }
-    /// True when no frame is held.
-    pub fn is_empty(&self) -> bool {
-        self.states.is_empty()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ring_cap_respected() {
-        let mut r = Rollback::new(3);
-        for i in 0..5u64 {
-            r.advance(i, i as u32);
-        }
-        assert_eq!(r.len(), 3);
-        assert_eq!(
-            (r.resim_from(0), r.resim_from(2), r.resim_from(3)),
-            (Some(2), Some(4), None)
-        );
-    }
-
-    #[test]
-    fn resim_from_returns_frames() {
-        let mut r = Rollback::new(8);
-        assert_eq!(r.resim_from(0), None);
-        r.advance(0xAAAA, 1);
-        r.advance(0xBBBB, 2);
-        assert_eq!(
-            (r.resim_from(0), r.resim_from(1), r.resim_from(2)),
-            (Some(0xAAAA), Some(0xBBBB), None)
-        );
-    }
-
-    #[test]
-    fn advance_deterministic() {
-        let seq = [(10u64, 1u32), (20, 2), (30, 3)];
-        let (mut a, mut b) = (Rollback::new(8), Rollback::new(8));
-        for (h, inp) in seq {
-            a.advance(h, inp);
-            b.advance(h, inp);
-        }
-        for (i, (h, _)) in seq.iter().enumerate() {
-            assert_eq!((a.resim_from(i), b.resim_from(i)), (Some(*h), Some(*h)));
-        }
-    }
-}
 
 /// Owner-swap pins: every net fold routes through `engine-core` hashing, and
 /// each digest below was recorded before the swap. A fold that drifts (byte

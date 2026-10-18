@@ -8,12 +8,20 @@
 //! Units: backoff in ms, silent mixer frames. Determinism: notices derive
 //! from ticks, attempts and frames only, never the clock. Errors: typed
 //! [`AudioHealError`]; over-budget faults quarantine loudly with a notice.
+//!
+//! [`HoldLastMixer`] is the callback side of the same heal: when the game
+//! thread holds the shared mixer the chunk repeats the last rendered frame
+//! (repeat-last concealment) instead of dropping to silence, so the speaker
+//! sees no step at the start of the gap. It copies one stereo frame, waits
+//! for no lock and allocates nothing.
+
+use std::sync::{Arc, Mutex};
 
 use engine_observe::heal::HealError;
 use engine_observe::supervisor::{SupervisedDecision, Supervisor};
 use engine_observe::{EventCode, RingBuffer};
 
-use crate::Mixer;
+use crate::{FrameSource, Mixer};
 
 /// Fault row audio device loss/change reports through: the catalog's
 /// device-reconnect row (reconnect, 3 attempts, 100-2000 ms backoff). The
@@ -333,6 +341,55 @@ impl Default for DeviceHeal {
     }
 }
 
+/// Device-callback source over the shared mixer that hides lock-contention
+/// gaps. An uncontended chunk renders the mixer and remembers its last
+/// stereo frame; a contended chunk (the game thread holds the lock, an XRUN
+/// gap) repeats that frame instead of writing silence, so the entry edge of
+/// the gap is zero rather than the full last sample. The callback never
+/// waits and never allocates. Replaces the bare `Arc<Mutex<Mixer>>` source
+/// for the windowed path; the bare impl still renders silence.
+pub struct HoldLastMixer {
+    mixer: Arc<Mutex<Mixer>>,
+    last: [f32; 2],
+    gaps: u64,
+}
+
+impl HoldLastMixer {
+    /// Wrap the shared mixer; the first gap before any render holds silence.
+    #[must_use]
+    pub fn new(mixer: Arc<Mutex<Mixer>>) -> Self {
+        Self {
+            mixer,
+            last: [0.0; 2],
+            gaps: 0,
+        }
+    }
+
+    /// Chunks concealed so far. Monotonic.
+    #[must_use]
+    pub fn gaps(&self) -> u64 {
+        self.gaps
+    }
+}
+
+impl FrameSource for HoldLastMixer {
+    fn render_stereo_into(&mut self, out: &mut [f32]) {
+        if let Ok(mut mixer) = self.mixer.try_lock() {
+            mixer.render_stereo_into(out);
+            if let Some(frame) = out.rchunks_exact(2).next() {
+                self.last = [frame[0], frame[1]];
+            }
+            return;
+        }
+        self.gaps = self.gaps.saturating_add(1);
+        let mut frames = out.chunks_exact_mut(2);
+        for frame in frames.by_ref() {
+            frame.copy_from_slice(&self.last);
+        }
+        frames.into_remainder().fill(0.0);
+    }
+}
+
 /// Truncate a notice to [`MAX_NOTICE_LEN`] bytes on a `char` boundary.
 fn bound_notice(text: &str) -> String {
     text[..text.floor_char_boundary(MAX_NOTICE_LEN)].to_owned()
@@ -558,5 +615,135 @@ mod tests {
             AudioHealError::Supervisor(HealError::TapeFull)
         );
         assert!(DeviceHeal::default().is_live());
+    }
+
+    /// 8 kHz, 1 kHz sine at 0.5: eight frames per period, near a peak at the
+    /// frames that precede a gap below.
+    fn sine_8k() -> Pcm {
+        let samples = (0..96)
+            .map(|k| 0.5 * (std::f32::consts::TAU * (k as f32 + 2.5) / 8.0).sin())
+            .collect();
+        Pcm::new(8_000, 1, samples)
+    }
+
+    const BLOCK: usize = 4;
+    /// Three 4-frame gaps (blocks 2, 5 and 8 of 10).
+    const GAP_BLOCKS: [usize; 3] = [2, 5, 8];
+
+    /// Render ten 4-frame blocks, holding the mixer lock on the gap blocks.
+    /// Returns the left channel and, per gap, the jump from the frame before
+    /// the gap to its first frame.
+    fn run_gapped(
+        source: &mut impl FrameSource,
+        shared: &Arc<Mutex<Mixer>>,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut left: Vec<f32> = Vec::new();
+        let mut block = [0.0f32; BLOCK * 2];
+        for index in 0..10 {
+            let guard = GAP_BLOCKS
+                .contains(&index)
+                .then(|| shared.lock().expect("lock"));
+            source.render_stereo_into(&mut block);
+            drop(guard);
+            left.extend(block.iter().step_by(2));
+        }
+        let edges = GAP_BLOCKS
+            .iter()
+            .map(|b| (left[b * BLOCK] - left[b * BLOCK - 1]).abs())
+            .collect();
+        (left, edges)
+    }
+
+    /// What the callback did before: a contended chunk writes zeros.
+    struct SilentOnGap(Arc<Mutex<Mixer>>);
+
+    impl FrameSource for SilentOnGap {
+        fn render_stereo_into(&mut self, out: &mut [f32]) {
+            match self.0.try_lock() {
+                Ok(mut mixer) => mixer.render_stereo_into(out),
+                Err(_) => out.fill(0.0),
+            }
+        }
+    }
+
+    fn shared_with_tone() -> Arc<Mutex<Mixer>> {
+        let shared = Arc::new(Mutex::new(Mixer::new(8_000)));
+        shared.lock().expect("lock").play(&sine_8k(), 1.0);
+        shared
+    }
+
+    #[test]
+    fn repeat_last_removes_the_silent_edge_of_xrun_gaps() {
+        let mean = |edges: &[f32]| edges.iter().sum::<f32>() / edges.len() as f32;
+
+        let shared = shared_with_tone();
+        let (_, silent) = run_gapped(&mut SilentOnGap(Arc::clone(&shared)), &shared);
+        let silent_edge = mean(&silent);
+        assert!(
+            silent_edge > 0.4,
+            "silence steps by the last sample: {silent_edge}"
+        );
+
+        let shared = shared_with_tone();
+        let mut held = HoldLastMixer::new(Arc::clone(&shared));
+        let (left, edges) = run_gapped(&mut held, &shared);
+        assert_eq!(mean(&edges), 0.0, "repeat-last has no entry edge");
+        assert!(
+            1.0 - mean(&edges) / silent_edge >= 0.5,
+            "bar is a 50 percent cut"
+        );
+        assert_eq!(held.gaps(), 3);
+        for b in GAP_BLOCKS {
+            let gap = &left[b * BLOCK..(b + 1) * BLOCK];
+            assert!(
+                gap.iter().all(|s| *s == left[b * BLOCK - 1]),
+                "gap {b} holds the last frame"
+            );
+        }
+    }
+
+    #[test]
+    fn repeat_last_run_twice_gives_identical_bits() {
+        let run = || {
+            let shared = shared_with_tone();
+            let mut held = HoldLastMixer::new(Arc::clone(&shared));
+            let (left, _) = run_gapped(&mut held, &shared);
+            left.iter().map(|s| s.to_bits()).collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn a_gap_before_any_frame_holds_silence_and_odd_tails_stay_zero() {
+        let shared = shared_with_tone();
+        let mut held = HoldLastMixer::new(Arc::clone(&shared));
+        let guard = shared.lock().expect("lock");
+        let mut out = [9.0f32; 5];
+        held.render_stereo_into(&mut out);
+        assert_eq!(out, [0.0; 5]);
+        drop(guard);
+        held.render_stereo_into(&mut out);
+        assert!(
+            out[0] != 0.0 && out[4] == 0.0,
+            "live chunk renders, odd tail is zero"
+        );
+        assert_eq!(held.gaps(), 1);
+    }
+
+    #[test]
+    fn hold_last_callback_allocates_nothing_on_live_or_gap_chunks() {
+        let shared = shared_with_tone();
+        let mut held = HoldLastMixer::new(Arc::clone(&shared));
+        let mut out = [0.0f32; BLOCK * 2];
+        held.render_stereo_into(&mut out);
+        let guard = shared.lock().expect("lock");
+        let ((), gap) = engine_core::alloc_probe::measure(|| held.render_stereo_into(&mut out));
+        drop(guard);
+        let ((), live) = engine_core::alloc_probe::measure(|| held.render_stereo_into(&mut out));
+        assert_eq!(
+            (gap.calls, live.calls),
+            (0, 0),
+            "no heap calls in the callback"
+        );
     }
 }

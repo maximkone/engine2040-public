@@ -39,6 +39,18 @@ pub enum Intent {
     Deferred,
 }
 
+impl Intent {
+    /// The word an answer prints for this verdict.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Intentional => "intentional",
+            Self::FalsePositive => "false_positive",
+            Self::Deferred => "deferred",
+        }
+    }
+}
+
 /// A finding with its verdict.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Triaged {
@@ -146,6 +158,21 @@ pub struct ZFight {
     pub area_cm2: i64,
     /// Rank: area over (gap + 1), higher first.
     pub score: i64,
+    /// Share of the smaller face the two faces cover together, percent.
+    pub cover_pct: i32,
+    /// Signed cm to move `b` along `axis` so the faces clear `epsilon_cm`.
+    pub fix_cm: i32,
+}
+
+impl ZFight {
+    /// One plain sentence: where the faces meet and the one move that fixes it.
+    pub fn note(&self) -> String {
+        let axis = ["x", "y", "z"][self.axis];
+        format!(
+            "faces {} cm apart on {axis}, {}% shared; move b {:+} cm on {axis}",
+            self.gap_cm, self.cover_pct, self.fix_cm
+        )
+    }
 }
 
 /// Z-fight pairs among Mesh-role actors: some face of one lies within
@@ -177,12 +204,14 @@ pub fn z_fights(
                 if area == 0 {
                     continue;
                 }
-                let gap = (ba.0[axis] - bb.0[axis])
-                    .abs()
-                    .min((ba.1[axis] - bb.1[axis]).abs());
+                let (d_lo, d_hi) = (bb.0[axis] - ba.0[axis], bb.1[axis] - ba.1[axis]);
+                let near = if d_lo.abs() <= d_hi.abs() { d_lo } else { d_hi };
+                let gap = near.abs();
                 if gap > epsilon_cm {
                     continue;
                 }
+                let face = |b: &Bounds| i64::from(b.1[u] - b.0[u]) * i64::from(b.1[v] - b.0[v]);
+                let away = if near < 0 { -1 } else { 1 };
                 let score = area * 1000 / i64::from(gap + 1);
                 let row = ZFight {
                     a: *ia,
@@ -191,6 +220,8 @@ pub fn z_fights(
                     gap_cm: gap,
                     area_cm2: area,
                     score,
+                    cover_pct: i32::try_from(area * 100 / face(ba).min(face(bb))).unwrap_or(100),
+                    fix_cm: away * (epsilon_cm + 1 - gap),
                 };
                 if best.is_none_or(|b| row.score > b.score) {
                     best = Some(row);
@@ -201,6 +232,13 @@ pub fn z_fights(
     }
     out.sort_by_key(|z| (-z.score, z.a, z.b));
     out
+}
+
+/// [`z_fights`] with every box counted as a mesh, for callers that know no
+/// component roles (the `zfight` check and its door notes).
+pub fn z_fights_all(actors: &[Actor], epsilon_cm: i32) -> Vec<ZFight> {
+    let meshes: BTreeMap<u32, Role> = actors.iter().map(|a| (a.id, Role::Mesh)).collect();
+    z_fights(actors, &meshes, epsilon_cm, None)
 }
 
 #[cfg(test)]

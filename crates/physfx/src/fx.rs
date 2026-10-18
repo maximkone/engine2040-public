@@ -1,8 +1,13 @@
 //! fx: the Rapier world, its spawn order, the caps and the transform read-back.
 
 mod blast;
+mod hit;
+mod joints;
+mod receipt;
 mod tether;
 
+pub use hit::HIT_FADE_S;
+pub use receipt::RagdollReceipt;
 pub use tether::TetherInfo;
 
 use crate::caps::{Caps, Tier};
@@ -60,6 +65,10 @@ struct Group {
     id: GroupId,
     /// Indices into `records`.
     bodies: Vec<u32>,
+    /// What the spawn of a ragdoll measured; `None` for every other group.
+    receipt: Option<RagdollReceipt>,
+    /// The joint motors of a ragdoll; `None` for every other group.
+    drive: Option<hit::Drive>,
 }
 
 /// A clock that always reads zero: the default, so the crate never touches `Instant`.
@@ -211,6 +220,7 @@ impl PhysFx {
         }
         self.make_room(need);
 
+        let overlaps = receipt::unjoined_overlaps(rig, &placed);
         let mut bodies = Vec::with_capacity(need);
         let mut handles = Vec::with_capacity(need);
         for (bone, (at, shape)) in placed.iter().zip(rig.shapes()).enumerate() {
@@ -235,9 +245,15 @@ impl PhysFx {
             &handles,
             &mut self.world.impulse_joints,
         );
+        self.make_hinges(rig, &placed, &handles);
+        let filtered = self.switch_off_overlaps(rig, &overlaps, &handles);
+        let receipt = self.measure_ragdoll(rig, &handles, overlaps.len(), filtered);
+        let drive = self.spawn_drive(rig, &placed, &handles);
         self.groups.push(Group {
             id: GroupId::Ragdoll(slot),
             bodies,
+            receipt: Some(receipt),
+            drive: Some(drive),
         });
         Ok(())
     }
@@ -332,6 +348,8 @@ impl PhysFx {
             self.groups.push(Group {
                 id: GroupId::Shard,
                 bodies: vec![index],
+                receipt: None,
+                drive: None,
             });
         }
         Ok(Batch { id, admitted })
@@ -340,6 +358,7 @@ impl PhysFx {
     /// Advances the world one tick (60 Hz). Call it once per sim tick.
     pub fn step(&mut self) {
         let started = (self.clock)();
+        self.fade_drives();
         self.world.step();
         self.step_tethers();
         self.steps += 1;
@@ -412,6 +431,8 @@ impl PhysFx {
         self.groups.push(Group {
             id,
             bodies: vec![index],
+            receipt: None,
+            drive: None,
         });
         handle
     }

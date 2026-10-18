@@ -12,9 +12,9 @@
 //! sim never reads it. Errors: [`SceneError`]; the window drops the scene on the first one and
 //! keeps running. Budget: at most one spear (two meshes), one rope and one trail per slot.
 
-use crate::fighter_look::{FighterLook, MAX_LOOK_FIGHTERS};
+use crate::fighter_look::{ArmState, FighterLook, MAX_LOOK_FIGHTERS};
 use crate::lock_on::{bearing_cdeg, whole};
-use crate::spear_look::{Carry, SpearDraw, SpearLook, DEFAULT_TIER, SPEAR_LEN_M};
+use crate::spear_look::{Carry, SpearDraw, SpearLook, Ties, DEFAULT_TIER, SPEAR_LEN_M};
 use crate::FighterView;
 use engine_arena::spear::{Phase, SpearEvent, SpearSlot};
 use engine_arena::LiveMatch;
@@ -46,9 +46,12 @@ const FIN_LEN_M: f32 = 0.22;
 const FIN_HALF_M: f32 = 0.07;
 const ROPE_R_M: f32 = 0.013;
 const TRAIL_R_M: f32 = 0.03;
-/// A spear in a hand stands this far in front of the feet, meters, tilted forward.
+/// A spear in a hand stands this far in front of the feet, meters, tilted forward, when the
+/// look cannot say where the palm is.
 const HELD_FORWARD_M: f32 = 0.45;
 const HELD_FOOT_Y_M: f32 = 0.15;
+/// How far the palm grips the shaft from its tail, meters.
+const HELD_GRIP_M: f32 = 0.6;
 /// Camera follow: share of the way the look point moves to the pair, and the pull-back.
 const FOLLOW_LOOK: f32 = 0.7;
 const FOLLOW_BACK: f32 = 0.35;
@@ -245,6 +248,15 @@ fn wish(delta_m: f32, dist_m: f32) -> i8 {
     }
 }
 
+/// What each slot's throwing arm is doing, from the match's spear phases.
+fn arm_states(view: &[SpearSlot]) -> [ArmState; MAX_LOOK_FIGHTERS] {
+    std::array::from_fn(|slot| match view.get(slot).map(|s| s.phase) {
+        Some(Phase::Flight(_)) => ArmState::Flying,
+        Some(Phase::Tether(_)) => ArmState::Tethered,
+        _ => ArmState::Free,
+    })
+}
+
 /// The input of `--spear-demo`: the human slot faces the nearest other fighter, walks at it until
 /// the throw reaches and throws whenever the spear is ready and no tether holds. A script for
 /// captures and for trying the grapple without a keyboard; it reads only drawn places.
@@ -315,6 +327,8 @@ pub struct SpearScene {
     view: Vec<SpearSlot>,
     /// Drawn places of the fighters at the last tick.
     fighters: Vec<FighterView>,
+    /// Where each right palm was drawn at the tick before the last and at the last one.
+    palms: [[Option<[f32; 3]>; MAX_LOOK_FIGHTERS]; 2],
     /// Follow envelope in `0..=1`: how much the camera has turned to the pair.
     follow: f32,
     /// Midpoint of the tethered pair at the last tick.
@@ -330,26 +344,32 @@ impl SpearScene {
             look: SpearLook::new(DEFAULT_TIER),
             view: Vec::new(),
             fighters: Vec::new(),
+            palms: [[None; MAX_LOOK_FIGHTERS]; 2],
             follow: 0.0,
             pair_m: [0.0; 3],
             draws: 0,
         }
     }
 
-    /// One accepted tick with the fighter look: the picture takes the match's spear events, then
-    /// the look tows the tethered bodies as ragdolls. Call it after `observe_tick` and before the
-    /// balance poll that steps the float world.
+    /// One accepted tick with the fighter look: the look throws with the thrower's arm, the
+    /// picture takes the match's spear events and the drawn palms, then the look tows the
+    /// tethered bodies as ragdolls. Call it after `observe_tick` and before the balance poll that
+    /// steps the float world.
     pub fn observe_tick(
         &mut self,
         look: &mut FighterLook,
         live: &LiveMatch,
         fighters: &[FighterView],
     ) {
+        look.observe_throws(&arm_states(live.spear_view()));
         self.observe(
             live.spear_events(),
             live.spear_view(),
             fighters,
-            &look.ragdoll_roots(),
+            Ties {
+                pelvis: &look.ragdoll_roots(),
+                palms: &look.palms(1.0),
+            },
         );
         look.observe_carries(&self.tows());
     }
@@ -381,9 +401,10 @@ impl SpearScene {
         events: &[SpearEvent],
         view: &[SpearSlot],
         fighters: &[FighterView],
-        roots: &[Option<[f32; 3]>; MAX_LOOK_FIGHTERS],
+        ties: Ties<'_>,
     ) {
-        self.look.observe(events, view, fighters, roots);
+        self.look.observe(events, view, fighters, ties);
+        self.palms = [self.palms[1], *ties.palms];
         self.view.clear();
         self.view.extend_from_slice(view);
         self.fighters.clear();
@@ -425,8 +446,9 @@ impl SpearScene {
         camera.target = look.into();
     }
 
-    /// Spears standing in a hand: a slot idle with no cooldown holds its spear up beside it.
-    fn held(&self) -> Vec<SpearDraw> {
+    /// Spears standing in a hand: a slot idle with no cooldown holds its spear up in its drawn
+    /// right palm (`alpha` blends the last two ticks), else beside it.
+    fn held(&self, alpha: f32) -> Vec<SpearDraw> {
         self.view
             .iter()
             .enumerate()
@@ -434,14 +456,20 @@ impl SpearScene {
             .filter_map(|(slot, _)| {
                 let fighter = self.fighters.iter().find(|f| usize::from(f.slot) == slot)?;
                 let (s, c) = fighter.yaw.sin_cos();
-                let foot = add(
-                    fighter.pos_m,
-                    [s * HELD_FORWARD_M, HELD_FOOT_Y_M, c * HELD_FORWARD_M],
-                );
                 let dir = norm([s * 0.12, 1.0, c * 0.12]);
+                let tail = match (self.palms[0][slot], self.palms[1][slot]) {
+                    (Some(was), Some(now)) => {
+                        let palm = add(was, scale(sub(now, was), alpha.clamp(0.0, 1.0)));
+                        sub(palm, scale(dir, HELD_GRIP_M))
+                    }
+                    _ => add(
+                        fighter.pos_m,
+                        [s * HELD_FORWARD_M, HELD_FOOT_Y_M, c * HELD_FORWARD_M],
+                    ),
+                };
                 Some(SpearDraw {
                     slot: u8::try_from(slot).ok()?,
-                    tip: add(foot, scale(dir, SPEAR_LEN_M)),
+                    tip: add(tail, scale(dir, SPEAR_LEN_M)),
                     dir,
                     roll: 0.0,
                     flying: false,
@@ -459,7 +487,7 @@ impl SpearScene {
         alpha: f32,
     ) -> Result<usize, SceneError> {
         let mut spears = self.look.draws(alpha);
-        spears.extend(self.held());
+        spears.extend(self.held(alpha));
         let mut pushed = 0;
         let mut put = |part: u64, slot: u8, shape: Mesh, material: PbrMaterial| {
             let key = MeshKey::new(SPEAR_MESH_ID_BASE + u64::from(slot) * 4 + part, DIGEST);
@@ -628,6 +656,48 @@ mod tests {
     }
 
     #[test]
+    fn spear_window_holds_the_spear_in_the_drawn_palm_and_follows_it_between_ticks() {
+        let mut scene = SpearScene::new();
+        let ready = [SpearSlot::default(); 2];
+        let fighters = [FighterView {
+            slot: 0,
+            pos_m: [0.0, 0.0, 0.0],
+            yaw: 0.0,
+        }];
+        let mut palms = [None; MAX_LOOK_FIGHTERS];
+        for palm in [[0.2, 1.0, 0.3], [0.4, 1.4, 0.5]] {
+            palms[0] = Some(palm);
+            scene.observe(
+                &[],
+                &ready,
+                &fighters,
+                Ties {
+                    pelvis: &[None; MAX_LOOK_FIGHTERS],
+                    palms: &palms,
+                },
+            );
+        }
+        // The shaft passes through the palm: the grip is HELD_GRIP_M from the tail.
+        let grip = |alpha: f32| {
+            let held = scene.held(alpha);
+            let spear = held.first().expect("a ready slot holds its spear");
+            sub(spear.tip, scale(spear.dir, SPEAR_LEN_M - HELD_GRIP_M))
+        };
+        for (alpha, want) in [
+            (0.0, [0.2, 1.0, 0.3]),
+            (1.0, [0.4, 1.4, 0.5]),
+            (0.5, [0.3, 1.2, 0.4]),
+        ] {
+            let at = grip(alpha);
+            let gap = sub(at, want);
+            assert!(
+                gap.iter().all(|c| c.abs() < 1.0e-4),
+                "alpha {alpha}: grip {at:?} vs palm {want:?}"
+            );
+        }
+    }
+
+    #[test]
     fn spear_window_demo_script_throws_hits_and_flies_the_pair() {
         use crate::{App, GameConfig, TickOutcome, HUMAN_SLOT};
         let cfg = GameConfig {
@@ -650,7 +720,7 @@ mod tests {
                 live.spear_events(),
                 live.spear_view(),
                 app.fighter_views(),
-                &[None; MAX_LOOK_FIGHTERS],
+                Ties::NONE,
             );
             towed += usize::from(scene.tows().iter().flatten().count() == 2);
             ropes = ropes.max(scene.counts().1);

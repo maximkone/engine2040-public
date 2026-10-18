@@ -151,15 +151,16 @@ impl FighterLook {
     /// the pit and moves with the LF11 shake. `None` for any other count or
     /// when the shot cannot hold both bodies, so the side-on fit takes over.
     #[must_use]
-    pub(super) fn shoulder_duel(&self, base: &Camera, seen: &[[f32; 3]]) -> Option<Camera> {
+    pub(super) fn shoulder_duel(
+        &self,
+        base: &Camera,
+        seen: &[[f32; 3]],
+        shake: [f32; 3],
+    ) -> Option<Camera> {
         let [hero, rival] = seen else {
             return None;
         };
-        let limit = self
-            .ring
-            .as_ref()
-            .map_or(f32::MAX, |ring| ring.wall_m - 0.6);
-        duel_shoulder(base, *hero, *rival, limit, self.fight_shake_vec())
+        duel_shoulder(base, *hero, *rival, self.pit_limit_m(), shake)
     }
 }
 

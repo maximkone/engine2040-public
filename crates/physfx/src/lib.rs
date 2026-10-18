@@ -38,6 +38,14 @@
 //!   spring on the stretch plus a damper). `carry_ragdoll` drags a ragdoll's root along the
 //!   sim's own track with a soft spring-damper, so the limbs trail and swing. Rope length and
 //!   count come from the tier's caps (`Caps::tethers`, `Caps::tether_nodes`).
+//! - A ragdoll spawn measures itself: `PhysFx::ragdoll_receipt` has the mass of every bone, the
+//!   child over parent mass ratio of every joint and the unjoined bone pairs that overlapped in
+//!   the standing pose. Grandparent pairs among them have their contacts switched off so the
+//!   solver does not blast them apart. A rig names its knees and elbows with `Rig::with_hinges`;
+//!   those joints bend about the pelvis side axis inside a flexion range, the rest are balls.
+//! - `PhysFx::hit_ragdoll` spreads a blow over the bones near it, its total unchanged, and makes
+//!   the joints brace: a PD motor holds each joint at its spawn angle with a strength that falls
+//!   from 1 to 0 over `HIT_FADE_S`.
 //! - Bodies sleep. A sleeping body costs no solver work and reads back the same transform every
 //!   frame.
 //! - Bad input (NaN, infinity, out of range) is refused with a typed `Error` before anything
@@ -75,9 +83,9 @@ pub use engine_physics::ragdoll::BoneShape;
 #[cfg(feature = "rapier")]
 pub use error::{Error, Field};
 #[cfg(feature = "rapier")]
-pub use fx::{PhysFx, TetherInfo};
+pub use fx::{PhysFx, RagdollReceipt, TetherInfo, HIT_FADE_S};
 #[cfg(feature = "rapier")]
-pub use rig::Rig;
+pub use rig::{Hinge, Rig};
 #[cfg(feature = "rapier")]
 pub use tether::TetherState;
 #[cfg(feature = "rapier")]

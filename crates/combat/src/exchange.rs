@@ -475,7 +475,6 @@ pub fn resolve_tick(
     out: &mut [ExchangeEvent; MAX_EVENTS_PER_TICK],
 ) -> usize {
     let count = usize::from(state.count.min(MAX_PARTICIPANTS));
-    let mut n: usize = 0;
 
     // Collect impacting attackers in ID order.
     let mut attackers: [usize; SLOT_COUNT] = [0; SLOT_COUNT];
@@ -493,13 +492,28 @@ pub fn resolve_tick(
 
     // Clash: every ID-sorted pair of impacting attackers binds once.
     // (Two fighters give one clash; more fighters give sorted pairs.)
-    n = resolve_clashes(state, intents, tables, &attackers, attacker_n, out, n);
+    let n = resolve_clashes(state, intents, tables, &attackers, attacker_n, out, 0);
     if attacker_n >= 2 {
         // Clash consumes the tick's attacks: parries resolve next tick.
         return n;
     }
 
-    // Parry: each attacker in ID order meets defenders in ID order.
+    resolve_parries(state, intents, tables, &attackers, attacker_n, out, n)
+}
+
+/// Parry step of [`resolve_tick`]: each attacker in ID order meets
+/// defenders in ID order and the first open block parries. Returns the
+/// updated event count.
+fn resolve_parries(
+    state: &mut ExchangeState,
+    intents: &[ExchangeIntent; SLOT_COUNT],
+    tables: &ExchangeTables,
+    attackers: &[usize; SLOT_COUNT],
+    attacker_n: usize,
+    out: &mut [ExchangeEvent; MAX_EVENTS_PER_TICK],
+    mut n: usize,
+) -> usize {
+    let count = usize::from(state.count.min(MAX_PARTICIPANTS));
     let mut ai: usize = 0;
     while ai < attacker_n {
         let a = attackers[ai];

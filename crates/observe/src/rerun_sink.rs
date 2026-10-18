@@ -12,7 +12,11 @@
 //! is no Tracy SDK dependency (licenses reviewed, nothing vendored).
 //!
 //! Pixels, GPU passes and VRAM accounting stay out: deeper capture (2,000
-//! frames, per-pass timers, manifest legs) belongs to the pilot harness.
+//! frames, per-pass timers, manifest legs) belongs to the pilot harness. A
+//! longer or richer capture goes straight into a [`ReplayRecording`]
+//! (MCAP, no ring), and [`RerunSink::to_mcap`] exports the ring the same way.
+
+use crate::mcap::{McapError, ReplayRecording};
 
 /// Maximum frames retained. The ring holds this many rows; deeper capture
 /// stays with the pilot harness and never grows this type.
@@ -125,6 +129,25 @@ impl RerunSink {
                 (None, None) => return None,
             }
         }
+    }
+}
+
+impl RerunSink {
+    /// Export the retained rows as an MCAP recording with one `/tick/hash`
+    /// message per row, oldest first; [`crate::mcap::first_divergent_tick`]
+    /// on two parsed exports names the same tick as
+    /// [`RerunSink::first_divergent`]. Rows beyond the 120-frame ring are
+    /// gone; for a longer capture feed a [`ReplayRecording`] directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McapError`] only for an impossible size overflow.
+    pub fn to_mcap(&self) -> Result<Vec<u8>, McapError> {
+        let mut recording = ReplayRecording::new()?;
+        for frame in self.iter() {
+            recording.tick_hash(frame.tick, frame.state_hash)?;
+        }
+        Ok(recording.finish())
     }
 }
 

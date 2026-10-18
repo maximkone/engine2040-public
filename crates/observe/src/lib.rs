@@ -22,6 +22,9 @@
 //! The [`rerun_sink`] module adds the bounded 120-frame rerun recording of
 //! simulation state per tick for desync hunts.
 //!
+//! The [`mcap`] module writes and reads replay recordings (tick hash, fighter
+//! poses, events, debug lines) as MCAP files with no SDK.
+//!
 //! The [`fps`] module adds std-only typed FPS view events: fighter poses,
 //! adjudicated hits and frame cost splits, read by the endpoint
 //! `check_profile` pack.
@@ -31,6 +34,8 @@ pub mod event_queue;
 /// Std-only typed FPS view events: pose, hits and frame splits.
 pub mod fps;
 pub mod heal;
+/// Std-only MCAP writer and reader for replay recordings Foxglove and Rerun open.
+pub mod mcap;
 /// Bounded 120-frame rerun recording of sim state per tick for desync hunts.
 pub mod rerun_sink;
 pub mod supervisor;

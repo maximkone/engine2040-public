@@ -52,17 +52,17 @@ content rows wait for UW0 (Finish A met). Combat never imports physics
   armor resist by table. Tier B. Size M. Owns
   `crates/combat/src/status.rs`. Accept: gas spreads only through open
   doors; durations exact; replays x2; ≤ 0.1 ms per tick. needs: UW5.
-- [ ] UW9 physics: stances and weapon collision — stand, crouch, prone
+- [x] UW9 physics: stances and weapon collision — stand, crouch, prone
   capsules, ceiling-blocked changes, lean checked against walls, the
   weapon raised when its length meets geometry. Tier B. Size M. Owns
   `crates/physics/src/stance.rs`. Accept: 1,000 seeded rooms with no
-  clipping; hashes x2. needs: PX8.
-- [ ] UW10 physics: doors — hinged doors with integer angles and states
+  clipping; hashes x2. needs: PX8. Landed e4417ba. stance::tests::a_thousand_seeded_rooms_have_no_clipping_and_replay_x2 (1,000 rooms x 60 ticks, independent sampling oracle, hashes x2, ceiling/wall/raised counts above 100) plus 7 unit tests, local run; clippy -D warnings clean.
+- [x] UW10 physics: doors — hinged doors with integer angles and states
   (closed, ajar, open, locked, wedged, trapped, broken); push, peek,
   kick, ram, shotgun and charge outcomes by table; state events feed
   nav links and audio. Tier B. Size M. Owns `crates/physics/src/door.rs`.
   Accept: every state × action fixture replays x2; a wedged door holds
-  against a push; broken doors stop blocking casts. needs: UW1.
+  against a push; broken doors stop blocking casts. needs: UW1. Landed d670c68. cargo test -p engine-physics --lib door: every_state_by_action_fixture_replays_x2 (7 states x 6 actions), a_wedged_door_holds_against_a_push, broken_doors_stop_blocking_casts (real ray_cast, layer drops to debris) and 5 more, 8 passed in a local run; clippy -D warnings clean.
 - [ ] UW11 anim: infantry layer — stance transitions, weapon upper body
   over AM15, aim through AM9 IK, reload, throw, cuff, hands-up,
   kneel-and-surrender, cower, and a true first-person view from the same
@@ -111,11 +111,11 @@ content rows wait for UW0 (Finish A met). Combat never imports physics
   recorded actions. Tier B. Size S. Owns `crates/ai/src/orders.rs`.
   Accept: order tapes replay x2; bad orders refuse typed; legion
   goldens unchanged. needs: GA2.
-- [ ] UW19 world: spawn rosters — seeded rosters over tagged spawn
+- [x] UW19 world: spawn rosters — seeded rosters over tagged spawn
   points (min/max per group, archetype, weapon, trap, evidence,
   objective); same seed, same placement. Tier B. Size S. Owns
   `crates/world/src/roster.rs`. Accept: 100 seeds place legally x2; an
-  impossible roster refuses naming the group. needs: WD1.
+  impossible roster refuses naming the group. needs: WD1. Landed 9b6ad79. engine-world roster tests, local run: a_hundred_seeds_place_legally_and_replay_exactly, an_impossible_roster_names_the_group (Short names the group), a_group_that_took_a_scarce_point_gives_it_up and 4 more; clippy -D warnings clean.
 - [ ] UW20 world: buildings from footprints — footprints plus levels
   become modular buildings from a kit table with collision, nav input
   and DX1 bond data out. Tier B. Size M. Owns

@@ -39,10 +39,12 @@ pub mod fixed;
 mod furnace;
 pub mod gltf_import;
 pub mod json;
+pub mod mtlx_import;
 pub mod record;
 pub mod reload;
 pub mod schema;
 pub mod set;
+pub mod skin;
 
 pub use record::{
     Anisotropy, Channel, Coat, Domain, Emission, Layer, LayerKind, Look, MaterialRecord,

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { genBlock, readBlock, syncBlocks } from "./content-lib.mjs";
 import {
-  ARENA, arenaBlocks, checkManifest, checkPbrCaps, checkProofReport, checkSoak, checkSrcPair, LOCAL_HDRI, MATERIALS, pbrBody, soakBody, soakStats, srcReceiptBody,
+  ARENA, arenaBlocks, checkManifest, checkPbrCaps, checkProofReport, checkSoak, checkSrcPair, LOCAL_HDRI, LOCAL_ONLY, MATERIALS, pbrBody, refreshManifest, soakBody, soakStats, srcReceiptBody,
 } from "./arena-report.mjs";
 
 function png(w, h) {
@@ -81,15 +81,53 @@ test("CT82: bytes, hash, missing, unlisted and unlisted-required rows are named"
   assert.match(out, /textures\/cloth_orm\.png: required map is not in the manifest/);
 });
 
-test("CT82: an HDRI moved to the local cache still counts, a missing one does not", () => {
-  const f = fixture();
+/** List one more HDRI in the fixture manifest, with the day HDRI's bytes; returns those bytes. */
+function listHdri(f, rel) {
   const man = JSON.parse(readFileSync(join(f.root, "manifest.json"), "utf8"));
   const bytes = readFileSync(join(f.root, "hdri", "arena_day.hdr"));
-  man.files["hdri/arena_night.hdr"] = { sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
+  man.files[rel] = { sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
   writeFileSync(join(f.root, "manifest.json"), JSON.stringify(man));
-  assert.match(checkManifest(f.root, f.local).join("\n"), /arena_night\.hdr: missing on disk/);
-  writeFileSync(join(f.local, "arena_night.hdr"), bytes);
+  return bytes;
+}
+
+test("CT82: an HDRI moved to the local cache still counts, a missing one does not", () => {
+  const f = fixture();
+  const bytes = listHdri(f, "hdri/arena_dusk.hdr");
+  assert.match(checkManifest(f.root, f.local).join("\n"), /arena_dusk\.hdr: missing on disk/);
+  writeFileSync(join(f.local, "arena_dusk.hdr"), bytes);
   assert.deepEqual(checkManifest(f.root, f.local), []);
+});
+
+test("CT82: the local-only night HDRI may be absent on a fresh checkout, and drift is named when it is present", () => {
+  assert.deepEqual(Object.keys(LOCAL_ONLY), ["hdri/arena_sunset.hdr", "hdri/arena_night.hdr"]);
+  const f = fixture();
+  const bytes = listHdri(f, "hdri/arena_night.hdr");
+  assert.deepEqual(checkManifest(f.root, f.local), []);
+  assert.deepEqual(checkPbrCaps(f.root, f.local), []);
+  const absent = pbrBody(f.root, f.local);
+  assert.match(absent, /arena_night\.hdr` \(content\/local\/hdri\) \| \d+ \| `[0-9a-f]{64}` \| 4096x2048 \|/);
+  writeFileSync(join(f.local, "arena_night.hdr"), Buffer.concat([bytes, Buffer.from("x")]));
+  assert.match(checkManifest(f.root, f.local).join("\n"), /arena_night\.hdr: \d+ bytes on disk/);
+  assert.equal(pbrBody(f.root, f.local), absent, "the VRAM report reads the same with or without the cache");
+});
+
+test("CT82: --refresh re-pins drifted rows only, keeps the format, and is stable the second time", () => {
+  const f = fixture();
+  const path = join(f.root, "manifest.json");
+  const before = JSON.parse(readFileSync(path, "utf8")).files;
+  writeFileSync(join(f.root, "src", "crate.gltf"), '{"asset":"moved"}');
+  rmSync(join(f.root, "src", "banner.gltf"));
+  assert.deepEqual(refreshManifest(f.root, f.local), ["src/crate.gltf"], "a missing file stays a check problem, it is never re-pinned");
+  const text = readFileSync(path, "utf8");
+  assert.equal(text, JSON.stringify(JSON.parse(text), null, 2));
+  const after = JSON.parse(text).files;
+  assert.deepEqual(Object.keys(after), Object.keys(before));
+  assert.deepEqual(after["src/banner.gltf"], before["src/banner.gltf"]);
+  assert.equal(after["src/crate.gltf"].bytes, 17);
+  assert.notEqual(after["src/crate.gltf"].sha256, before["src/crate.gltf"].sha256);
+  assert.deepEqual(refreshManifest(f.root, f.local), []);
+  assert.equal(readFileSync(path, "utf8"), text);
+  assert.match(checkManifest(f.root, f.local).join("\n"), /src\/banner\.gltf: missing on disk/);
 });
 
 test("CT45: the VRAM table reports dims and the bound set, and an oversize set fails the potato cap", () => {
@@ -154,6 +192,7 @@ test("real tree: stale manifest deleted, the 16 maps listed, caps met, blocks cu
   for (const m of MATERIALS) {
     for (const k of ["albedo_2k.jpg", "normal_2k.jpg", "roughness_2k.jpg", "orm.png"]) assert.ok(files[`textures/${m}_${k}`], `${m}_${k}`);
   }
+  assert.deepEqual(checkManifest(ARENA, LOCAL_HDRI), [], "manifest.json is the sole truth for the kit bytes");
   assert.deepEqual(checkPbrCaps(ARENA, LOCAL_HDRI), []);
   assert.deepEqual(syncBlocks(arenaBlocks()), []);
 });

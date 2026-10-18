@@ -14,3 +14,8 @@ engine-core.workspace = true
 [dev-dependencies]
 # Zero-allocation probe owner for tests.
 engine-core = { workspace = true, features = ["test-util"] }
+
+# Model checker for the job pool (`pool.rs` `loom_pool`): only a `--cfg loom` build
+# compiles it, so the default graph and every normal test run stay as they were.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

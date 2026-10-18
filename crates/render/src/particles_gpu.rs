@@ -1407,15 +1407,28 @@ impl ParticleDrawState {
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `particle` error prefix kept.
 #[cfg(feature = "window")]
-fn particle_map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), String> {
+fn particle_map_and_wait(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<(), crate::accel::ReadbackError> {
     crate::accel::map_readback(device, buffer, "particle")
 }
 
 /// Read `count` little-endian u32 words from a mapped readback buffer.
 /// Shared [`crate::accel`] core with the `particle` text kept.
 #[cfg(feature = "window")]
-fn particle_readback_u32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<u32>, String> {
+fn particle_readback_u32(
+    buffer: &wgpu::Buffer,
+    count: usize,
+) -> Result<Vec<u32>, crate::accel::ReadbackError> {
     crate::accel::readback_u32(buffer, count, "particle", "words")
+}
+
+#[cfg(feature = "window")]
+impl From<crate::accel::ReadbackError> for ParticleError {
+    fn from(error: crate::accel::ReadbackError) -> Self {
+        Self::Device(error.to_string())
+    }
 }
 
 #[cfg(feature = "window")]
@@ -1533,9 +1546,8 @@ impl ParticlePool {
         }
         encoder.copy_buffer_to_buffer(dst_buf, 0, readback, 0, byte_len);
         queue.submit(Some(encoder.finish()));
-        particle_map_and_wait(device, readback).map_err(ParticleError::Device)?;
-        let back =
-            particle_readback_u32(readback, words as usize).map_err(ParticleError::Device)?;
+        particle_map_and_wait(device, readback)?;
+        let back = particle_readback_u32(readback, words as usize)?;
         readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(ParticleError::Validation(format!(
