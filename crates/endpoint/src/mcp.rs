@@ -52,9 +52,10 @@
 //! and an approval minted on one engine session never authorizes another
 //! (`approvals_bind_the_engine_session_not_the_protocol_session`).
 
+use crate::startup::StartupError;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 use engine_editor::capability::{
     self, approve, canonical_action_hash, Approval, ApprovalLedger, CapError, Capability, OpMask,
@@ -67,15 +68,13 @@ use engine_scene::ids::ObjectId;
 use engine_scene::schema::{SchemaRegistry, VersionedComponent};
 use engine_scene::transform::Transform;
 
-use rmcp::handler::server::router::tool::{SyncTool, ToolBase, ToolRouter};
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, InitializeResult, JsonObject,
     ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities,
     ServerConfig, ToolAnnotations, ToolsCapability,
 };
-use rmcp::schemars::JsonSchema;
-use rmcp::serde::{Deserialize, Serialize};
 use rmcp::serde_json::Value;
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
@@ -1015,346 +1014,16 @@ impl ServerState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// rmcp tools: one SyncTool per contract tool, all sync so tests need no
-// executor. Schemas generate from the DTOs above via schemars.
-// ---------------------------------------------------------------------------
+// The rmcp tool shapes live in `mcp_tools` (structure-only split, behaviour
+// identical), beside the `mcp_dto` shapes they schematize.
+#[path = "mcp_tools.rs"]
+mod mcp_tools;
 
-/// `scene.read` tool: bounded snapshot, read-only.
-pub struct SceneReadTool;
-
-impl ToolBase for SceneReadTool {
-    type Parameter = SceneReadArgs;
-    type Output = SceneReadOutput;
-    type Error = McpToolError;
-
-    fn name() -> Cow<'static, str> {
-        TOOL_SCENE_READ.into()
-    }
-
-    fn description() -> Option<Cow<'static, str>> {
-        Some(
-            "Bounded scene snapshot: document revision plus stable-id rows \
-             (id, parent, local pose). Paged by cursor/limit; read-only, no side effects."
-                .into(),
-        )
-    }
-
-    fn annotations() -> Option<ToolAnnotations> {
-        crate::mcp::read_only_annotations()
-    }
-}
-
-impl SyncTool<McpServer> for SceneReadTool {
-    fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_READ, |state| state.scene_read(&param))
-    }
-}
-
-/// `tx.preview` tool: dry-run diff, read-only.
-pub struct TxPreviewTool;
-
-impl ToolBase for TxPreviewTool {
-    type Parameter = TxPreviewArgs;
-    type Output = TxPreviewOutput;
-    type Error = McpToolError;
-
-    fn name() -> Cow<'static, str> {
-        TOOL_TX_PREVIEW.into()
-    }
-
-    fn description() -> Option<Cow<'static, str>> {
-        Some(
-            "Dry-run a command batch: validate and diff with no side effects. \
-             Returns effects, the resulting revision and a single-use approval for tx.apply."
-                .into(),
-        )
-    }
-
-    fn annotations() -> Option<ToolAnnotations> {
-        crate::mcp::read_only_annotations()
-    }
-}
-
-impl SyncTool<McpServer> for TxPreviewTool {
-    fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_PREVIEW, |state| state.tx_preview(&param))
-    }
-}
-
-/// `tx.apply` tool: atomic capability-gated apply.
-pub struct TxApplyTool;
-
-impl ToolBase for TxApplyTool {
-    type Parameter = TxApplyArgs;
-    type Output = TxApplyOutput;
-    type Error = McpToolError;
-
-    fn name() -> Cow<'static, str> {
-        TOOL_TX_APPLY.into()
-    }
-
-    fn description() -> Option<Cow<'static, str>> {
-        Some(
-            "Atomically apply a previewed batch through the capability gate. \
-             Requires the tx.preview approval; idempotency-keyed and revision-checked. \
-             Denied, stale or duplicate calls write nothing."
-                .into(),
-        )
-    }
-
-    fn annotations() -> Option<ToolAnnotations> {
-        write_annotations(true)
-    }
-}
-
-impl SyncTool<McpServer> for TxApplyTool {
-    fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_APPLY, |state| state.tx_apply(&param))
-    }
-}
-
-/// `tx.undo` tool: revert the newest batch as a new revision.
-pub struct TxUndoTool;
-
-impl ToolBase for TxUndoTool {
-    type Parameter = TxUndoArgs;
-    type Output = TxUndoOutput;
-    type Error = McpToolError;
-
-    fn name() -> Cow<'static, str> {
-        TOOL_TX_UNDO.into()
-    }
-
-    fn description() -> Option<Cow<'static, str>> {
-        Some(
-            "Undo the newest journaled batch as a new revision. \
-             A given undo_token must match the newest batch key."
-                .into(),
-        )
-    }
-
-    fn annotations() -> Option<ToolAnnotations> {
-        write_annotations(false)
-    }
-}
-
-impl SyncTool<McpServer> for TxUndoTool {
-    fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_UNDO, |state| state.tx_undo(&param))
-    }
-}
-
-/// `sim.build_encounter` args: brief text plus seed.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
-#[serde(crate = "rmcp::serde")]
-#[schemars(crate = "rmcp::schemars")]
-pub struct SimBuildEncounterArgs {
-    pub brief: String,
-    pub seed: u64,
-}
-
-/// `sim.build_encounter` result: the landed plan or the refusal set.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
-#[serde(crate = "rmcp::serde")]
-#[schemars(crate = "rmcp::schemars")]
-pub struct SimBuildEncounterOutput {
-    pub solved: bool,
-    pub plan_id: u64,
-    pub rung: u8,
-    pub fork_id: u64,
-    pub repairs_used: u8,
-    pub reason: String,
-    pub conflicts: Vec<String>,
-}
-
-/// `sim.build_encounter` handler: brief text to validated encounter plan
-/// under the deterministic oracle. Pure and read-only: a refusal rides the
-/// output (`solved: false`), only a malformed brief errors.
-fn sim_build_encounter(
-    service: &McpServer,
-    args: &SimBuildEncounterArgs,
-) -> Result<SimBuildEncounterOutput, McpToolError> {
-    service.dispatch(TOOL_SIM_BUILD_ENCOUNTER, |_| {
-        let brief = super::build_encounter::EncounterBrief::new(&args.brief, args.seed).map_err(
-            |error| {
-                McpToolError::new(
-                    "bad_brief",
-                    format!(
-                        "brief is refused ({}); submit 1..={} chars of brief text",
-                        error,
-                        super::build_encounter::BRIEF_MAX_CHARS,
-                    ),
-                )
-            },
-        )?;
-        let oracle = super::build_encounter::DeterministicOracle;
-        match super::build_encounter::build_encounter(&brief, &oracle) {
-            Ok(built) => Ok(SimBuildEncounterOutput {
-                solved: true,
-                plan_id: built.plan_id,
-                rung: built.rung,
-                fork_id: built.fork_id,
-                repairs_used: u8::try_from(built.repairs_used.len()).unwrap_or(u8::MAX),
-                reason: String::new(),
-                conflicts: Vec::new(),
-            }),
-            Err(refusal) => Ok(SimBuildEncounterOutput {
-                solved: false,
-                plan_id: 0,
-                rung: 0,
-                fork_id: 0,
-                repairs_used: u8::try_from(refusal.repairs_used.len()).unwrap_or(u8::MAX),
-                reason: refusal.to_string(),
-                conflicts: refusal.conflicts,
-            }),
-        }
-    })
-}
-
-crate::e2_tool!(
-    /// `sim.build_encounter` tool: brief text to validated encounter plan. Read-only.
-    SimBuildEncounterTool,
-    name = TOOL_SIM_BUILD_ENCOUNTER,
-    description = super::build_encounter::MCP_TOOL_SUMMARY,
-    readonly = true,
-    args = SimBuildEncounterArgs,
-    output = SimBuildEncounterOutput,
-    invoke = sim_build_encounter
-);
-
-/// `game.build` args: brief text, seed, kit variant and bloodied flag.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
-#[serde(crate = "rmcp::serde")]
-#[schemars(crate = "rmcp::schemars")]
-pub struct GameBuildArgs {
-    pub brief: String,
-    pub seed: u64,
-    #[serde(default)]
-    pub variant: Option<String>,
-    #[serde(default)]
-    pub bloodied: Option<bool>,
-}
-
-/// `game.build` result: the packaged slice proof or the refusal reason.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
-#[serde(crate = "rmcp::serde")]
-#[schemars(crate = "rmcp::schemars")]
-pub struct GameBuildOutput {
-    pub solved: bool,
-    pub play_digest: u64,
-    pub replay_digest: u64,
-    pub ticks_played: u32,
-    pub package_bytes: u32,
-    pub verdict: String,
-    pub reason: String,
-}
-
-/// `game.build` handler: brief text to packaged playable slice (level,
-/// character, encounter, five-minute play plus exact replay). Pure and
-/// read-only: a refusal rides the output (`solved: false`), only a malformed
-/// brief or unknown variant errors.
-fn game_build(service: &McpServer, args: &GameBuildArgs) -> Result<GameBuildOutput, McpToolError> {
-    service.dispatch(TOOL_GAME_BUILD, |_| {
-        let variant_name = args.variant.as_deref().unwrap_or("hero");
-        let variant = super::build_character::VariantId::parse(variant_name).map_err(|error| {
-            McpToolError::new(
-                "bad_variant",
-                format!(
-                    "variant `{variant_name}` is refused ({error}); re-run with one of \
-                     [hero, opp_male_light, opp_female_medium, opp_female_light]",
-                ),
-            )
-        })?;
-        let slice = super::build_game::build_slice(
-            &args.brief,
-            args.seed,
-            variant,
-            args.bloodied.unwrap_or(false),
-        )
-        .map_err(|error| {
-            McpToolError::new(
-                error.code,
-                format!("slice refused ({error}); fix the brief and re-run"),
-            )
-        })?;
-        Ok(GameBuildOutput {
-            solved: true,
-            play_digest: slice.play_digest,
-            replay_digest: slice.eval.replay_digest,
-            ticks_played: slice.eval.ticks_played,
-            package_bytes: slice.eval.package_bytes,
-            verdict: slice.eval.verdict.clone(),
-            reason: String::new(),
-        })
-    })
-}
-
-crate::e2_tool!(
-    /// `game.build` tool: brief text to packaged playable slice. Read-only.
-    GameBuildTool,
-    name = TOOL_GAME_BUILD,
-    description = super::build_game::TOOL_SUMMARY,
-    readonly = true,
-    args = GameBuildArgs,
-    output = GameBuildOutput,
-    invoke = game_build
-);
-
-// ---------------------------------------------------------------------------
-// Server: negotiated protocol version, core router plus packs, stdio runner.
-// ---------------------------------------------------------------------------
-
-/// schemars emits `u64` fields as `{"type": "integer", "format": "uint64"}`;
-/// some clients log `unknown format uint64 ignored` per tool. Rewrite that
-/// emit to plain `integer` so serve.log stays quiet.
-fn sanitize_schema_value(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            // AX15 surface trim (2026-10-17): every advertised schema repeated
-            // the same 57-char `$schema` dialect key, 2622 chars on the loaded
-            // list. MCP clients read tool schemas in the protocol's own
-            // dialect, so the key carried no information a caller needs; the
-            // door drops it and spends the room on verbs instead of
-            // boilerplate. No field, verb or budget changes.
-            map.remove("$schema");
-            for (key, entry) in map.iter_mut() {
-                if (key == "format" || key == "type")
-                    && entry.as_str().is_some_and(|format| format == "uint64")
-                {
-                    *entry = Value::String("integer".to_owned());
-                } else {
-                    sanitize_schema_value(entry);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                sanitize_schema_value(item);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Trim one advertised tool's schemas to what a caller needs: the `uint64`
-/// emit becomes plain `integer`, and the repeated `$schema` dialect key is
-/// dropped (see [`sanitize_schema_value`]). Both shrink the ledger the
-/// discovery budget counts, without changing one field.
-fn sanitize_tool_schema(tool: &mut rmcp::model::Tool) {
-    let mut input = Value::Object((*tool.input_schema).clone());
-    sanitize_schema_value(&mut input);
-    if let Value::Object(map) = input {
-        tool.input_schema = Arc::new(map);
-    }
-    if let Some(output) = tool.output_schema.as_mut() {
-        let mut replacement = Value::Object((**output).clone());
-        sanitize_schema_value(&mut replacement);
-        if let Value::Object(map) = replacement {
-            *output = Arc::new(map);
-        }
-    }
-}
+use self::mcp_tools::sanitize_tool_schema;
+pub use self::mcp_tools::{
+    GameBuildArgs, GameBuildOutput, GameBuildTool, SceneReadTool, SimBuildEncounterArgs,
+    SimBuildEncounterOutput, SimBuildEncounterTool, TxApplyTool, TxPreviewTool, TxUndoTool,
+};
 
 /// MCP stdio server over one document plus its capability session.
 pub struct McpServer {
@@ -1547,15 +1216,15 @@ impl McpServer {
 
     /// Serve one stdio session until the client closes stdin. The caller
     /// provides the async runtime (tokio): `server.run_stdio().await`.
-    pub async fn run_stdio(self) -> Result<String, String> {
+    pub async fn run_stdio(self) -> Result<String, StartupError> {
         use rmcp::{transport::io::stdio, ServiceExt};
         let running = Box::pin(self.serve(stdio()))
             .await
-            .map_err(|error| format!("serve failed: {error:?}"))?;
+            .map_err(|error| StartupError::transport("serve failed", &error))?;
         let reason = running
             .waiting()
             .await
-            .map_err(|error| format!("server task failed: {error:?}"))?;
+            .map_err(|error| StartupError::transport("server task failed", &error))?;
         Ok(format!("{reason:?}"))
     }
 }
@@ -1664,6 +1333,7 @@ pub(crate) fn write_annotations(idempotent: bool) -> Option<ToolAnnotations> {
 mod tests {
     use super::*;
     use engine_editor::capability::OpMask;
+    use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 
     fn pose(x: f32) -> PoseDto {
         PoseDto {

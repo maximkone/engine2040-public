@@ -50,6 +50,13 @@ pub enum StartupError {
 }
 
 impl StartupError {
+    /// A stdio transport failure: `what` names the step, `error` is the cause.
+    pub fn transport(what: &str, error: &dyn fmt::Debug) -> Self {
+        Self::Transport {
+            detail: format!("{what}: {error:?}"),
+        }
+    }
+
     /// Process exit code: usage is 2 (CLI convention), bad dir and transport
     /// failures are 1. All nonzero by contract.
     pub fn exit_code(&self) -> i32 {

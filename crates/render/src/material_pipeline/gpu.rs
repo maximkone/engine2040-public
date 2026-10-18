@@ -218,11 +218,21 @@ pub fn pipeline_for(
     device: &wgpu::Device,
     compiled: &Compiled,
 ) -> Result<wgpu::RenderPipeline, MaterialPipelineError> {
-    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let pipeline = build(device, compiled);
-    match pollster::block_on(scope.pop()) {
-        Some(error) => Err(MaterialPipelineError::Validation(error.to_string())),
-        None => Ok(pipeline),
+    // Reading a validation error scope needs a blocked device, which a
+    // browser tab cannot do: the wasm32 build builds plainly and lets the
+    // uncaptured handler report a bad shader (QW9 owns the async path).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = build(device, compiled);
+        match pollster::block_on(scope.pop()) {
+            Some(error) => Err(MaterialPipelineError::Validation(error.to_string())),
+            None => Ok(pipeline),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(build(device, compiled))
     }
 }
 

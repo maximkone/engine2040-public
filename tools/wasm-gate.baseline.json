@@ -14,9 +14,6 @@
   "crates/assets/src/bundle_cook.rs": {
    "fs": 4
   },
-  "crates/assets/src/gen_intake.rs": {
-   "fs": 7
-  },
   "crates/assets/src/recook.rs": {
    "fs": 1
   },
@@ -53,9 +50,6 @@
   },
   "crates/game/src/lib.rs": {
    "fs": 1
-  },
-  "crates/game/src/netgame.rs": {
-   "socket": 4
   },
   "crates/game/src/reload.rs": {
    "fs": 1

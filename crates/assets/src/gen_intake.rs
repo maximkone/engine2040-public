@@ -723,6 +723,7 @@ fn parse_meta(meta: &str, key: &str, bundle: Vec<u8>, row: String) -> Option<Int
 /// `get` never reads and the next `put` of that key clears: exactly that
 /// entry is redone. A committed entry of the same key (a damaged one) goes
 /// first, so the rename lands on a free name.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_entry(dir: &Path, out: &IntakeOutput) -> Result<(), IntakeError> {
     let staging = dir.join(format!("{}.tmp", out.cache_key));
     let entry = dir.join(&out.cache_key);
@@ -738,6 +739,12 @@ fn write_entry(dir: &Path, out: &IntakeOutput) -> Result<(), IntakeError> {
     std::fs::rename(&staging, &entry).map_err(cache_err)
 }
 
+/// A browser tab has no file system: the wasm32 build refuses the disk write.
+#[cfg(target_arch = "wasm32")]
+fn write_entry(_dir: &Path, _out: &IntakeOutput) -> Result<(), IntakeError> {
+    Err(cache_err("a browser has no file system"))
+}
+
 impl IntakeCache {
     /// A cache that lives only as long as this value.
     pub fn memory() -> Self {
@@ -745,12 +752,20 @@ impl IntakeCache {
     }
 
     /// A cache backed by `dir` (created when missing).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(dir: &Path) -> Result<Self, IntakeError> {
         std::fs::create_dir_all(dir).map_err(cache_err)?;
         Ok(Self {
             dir: Some(dir.to_path_buf()),
             mem: BTreeMap::new(),
         })
+    }
+
+    /// A browser tab has no file system: opening a disk cache refuses loudly
+    /// (use [`IntakeCache::memory`] there).
+    #[cfg(target_arch = "wasm32")]
+    pub fn open(_dir: &Path) -> Result<Self, IntakeError> {
+        Err(cache_err("a browser has no file system"))
     }
 
     /// The entry for `key` (memory first, then the folder), marked as a hit.
@@ -761,11 +776,19 @@ impl IntakeCache {
                 ..found.clone()
             });
         }
-        let entry = self.dir.as_ref()?.join(key);
-        let meta = std::fs::read_to_string(entry.join("meta")).ok()?;
-        let bundle = std::fs::read(entry.join("bundle")).ok()?;
-        let row = std::fs::read_to_string(entry.join("row.json")).ok()?;
-        parse_meta(&meta, key, bundle, row)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let entry = self.dir.as_ref()?.join(key);
+            let meta = std::fs::read_to_string(entry.join("meta")).ok()?;
+            let bundle = std::fs::read(entry.join("bundle")).ok()?;
+            let row = std::fs::read_to_string(entry.join("row.json")).ok()?;
+            parse_meta(&meta, key, bundle, row)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = key;
+            None
+        }
     }
 
     /// The finished bundle for generation inputs alone (no GLB needed): what

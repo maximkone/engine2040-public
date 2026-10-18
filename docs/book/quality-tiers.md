@@ -20,6 +20,10 @@ Pure integer data; `table_hash` is a regression checksum over the fixed field or
 | `particle_cap` | count | 512 | 4096 | 8192 |
 | `decal_cap` | count | 64 | 256 | 512 |
 | `crowd_cap` | cards | 1500 | 5000 | 10000 |
+| `physfx_bodies` | bodies | 96 | 384 | 768 |
+| `physfx_ragdolls` | ragdolls | 2 | 8 | 16 |
+| `physfx_contacts` | pairs | 256 | 1024 | 2048 |
+| `texture_max_px` | px | 512 | 2048 | 4096 |
 
 When a frame is over budget, cut in this fixed order (`CUT_ORDER`): crowd, particles, aniso, motion blur, ssr, ao, shadow cascades, render scale. There is no `Web` row here yet; the web tier is board row WEB8 and, until it lands, a browser tab should pick Potato.
 
@@ -47,6 +51,8 @@ The physical layer (see [Physics layers](physics-layers.md)) has four tiers, one
 | CCD substeps | 0 | 1 | 1 | 2 |
 | blast bodies | 24 | 48 | 96 | 192 |
 | impact bodies | 3 | 4 | 6 | 8 |
+| tethers | 2 | 3 | 6 | 12 |
+| tether nodes | 8 | 12 | 20 | 32 |
 | step bar (microseconds) | 400 | 800 | 1500 | 2000 |
 
 The step bar is five times the mean measured on a GitHub runner on 2026-10-17 (72, 161, 266 and 380 microseconds) for the plan scene cut to what the tier admits: 8 ragdolls, 200 debris bodies and 6 limbs. A slowdown of that size fails the soak; runner noise does not. At the cap the oldest body is recycled first, and a whole ragdoll counts as one unit.

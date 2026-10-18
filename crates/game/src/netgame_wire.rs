@@ -6,7 +6,35 @@
 //! [`open_socket`]; integer only; no hash reads any of it. Errors:
 //! [`GameError`], every malformed code or datagram refuses loudly.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+/// A raw UDP session socket: the real one natively; a browser tab has no raw
+/// sockets, so the wasm32 build carries a stub whose calls refuse. Callers
+/// keep one name on both targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) use std::net::UdpSocket as SessionSocket;
+
+/// The wasm32 socket stub: it only has to type-check; every call refuses.
+#[cfg(target_arch = "wasm32")]
+pub(super) struct SessionSocket;
+
+#[cfg(target_arch = "wasm32")]
+impl SessionSocket {
+    /// Always refuses: a browser tab has no raw sockets.
+    pub(super) fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    /// Always refuses: a browser tab has no raw sockets.
+    pub(super) fn send_to(&self, _bytes: &[u8], _to: SocketAddr) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    /// Always refuses: a browser tab has no raw sockets.
+    pub(super) fn recv_from(&self, _buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
 
 use engine_input::FighterInput;
 use engine_net::session::{NetError, WIRE_MAGIC, WIRE_VERSION};
@@ -311,9 +339,16 @@ pub fn bind_for(target: SocketAddr, port: u16) -> SocketAddr {
 }
 
 /// A nonblocking UDP socket bound at `at`.
-pub(super) fn open_socket(at: SocketAddr) -> Result<UdpSocket, GameError> {
-    let sock = UdpSocket::bind(at).map_err(|err| GameError::Io(err.kind()))?;
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn open_socket(at: SocketAddr) -> Result<SessionSocket, GameError> {
+    let sock = SessionSocket::bind(at).map_err(|err| GameError::Io(err.kind()))?;
     sock.set_nonblocking(true)
         .map_err(|err| GameError::Io(err.kind()))?;
     Ok(sock)
+}
+
+/// A browser tab has no raw sockets: the wasm32 build refuses loudly.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn open_socket(_at: SocketAddr) -> Result<SessionSocket, GameError> {
+    Err(GameError::Io(std::io::ErrorKind::Unsupported))
 }

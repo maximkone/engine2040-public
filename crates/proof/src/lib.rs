@@ -692,8 +692,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frozen_default_and_distinct_seed_proofs() {
-    #[test]
     fn sched_shuffle_keeps_the_golden_across_50_seeded_orders() {
         use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
         let config = Config::default();
@@ -756,6 +754,8 @@ mod tests {
         assert!(schedule.validate().is_ok());
     }
 
+    #[test]
+    fn frozen_default_and_distinct_seed_proofs() {
         let tape = record(Config::default(), &[]).unwrap();
         assert_eq!(tape.checkpoints.last().unwrap().legacy, GOLDEN_600);
         replay(&tape).unwrap();

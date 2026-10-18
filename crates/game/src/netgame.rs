@@ -47,7 +47,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use engine_anim::net_pose::NetPose;
 use engine_arena::Checkpoint;
@@ -74,7 +74,9 @@ pub use self::netgame_wire::{
     KIND_PONG, KIND_WELCOME, MAX_CODE_BYTES, SESSION_CODE_DUEL, SESSION_CODE_PREFIX,
     SESSION_CODE_SPEAR,
 };
-use self::netgame_wire::{body_words, header, open_socket, peek_kind, tape_window, word_at};
+use self::netgame_wire::{
+    body_words, header, open_socket, peek_kind, tape_window, word_at, SessionSocket,
+};
 
 /// Authoritative inputs repeated in every host state packet (loss cover; the
 /// net loopback proof uses the same order of cover).
@@ -335,7 +337,7 @@ pub struct NetGame {
     local_slot: u8,
     remote_slot: u8,
     role: Role,
-    sock: UdpSocket,
+    sock: SessionSocket,
     /// Where datagrams go: the peer itself, or the relay on a relay route.
     peer: Option<SocketAddr>,
     route: Route,
@@ -509,7 +511,7 @@ impl NetGame {
         rules: NetRules,
         (local_slot, remote_slot): (u8, u8),
         role: Role,
-        sock: UdpSocket,
+        sock: SessionSocket,
         peer: Option<SocketAddr>,
         route: Route,
     ) -> Self {
@@ -1331,6 +1333,7 @@ mod tests {
     use engine_input::fighter::{Buttons, ATTACK};
     use engine_net::session::{encode_snapshot, FighterSnap, MAX_PACKET_BYTES};
     use std::collections::VecDeque;
+    use std::net::UdpSocket;
 
     const TICKS: u32 = 90;
     const LATENCY: u32 = 3;

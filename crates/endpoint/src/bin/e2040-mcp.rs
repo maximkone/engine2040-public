@@ -7,7 +7,7 @@
 //! none here. Errors print to stderr with a nonzero exit; stdout carries
 //! only MCP JSON-RPC frames.
 
-use engine_endpoint::startup::{build_server, parse_args, usage, StartupError};
+use engine_endpoint::startup::{build_server, parse_args, usage};
 
 /// Serve one project folder until the client closes stdin.
 #[tokio::main(flavor = "current_thread")]
@@ -42,8 +42,7 @@ async fn run(args: &[String]) -> i32 {
     );
     match server.run_stdio().await {
         Ok(_) => 0,
-        Err(detail) => {
-            let error = StartupError::Transport { detail };
+        Err(error) => {
             eprintln!("e2040-mcp: {error}");
             error.exit_code()
         }

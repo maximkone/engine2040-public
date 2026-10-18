@@ -73,10 +73,10 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   `cast_possible_wrap` join the crate at zero. Tier A. Size M per crate.
   Owns one crate per packet. Accept: crate casts at most 5 per 1,000 lines;
   golden x2 unchanged. needs: none. Progress 2026-10-17: f6c055fb numeric casts engine-core 19 -> 1 and engine-geo 2 -> 0 (the one left is the audited f64->f32 narrowing in checked.rs); arena lib run 39065884031, geo run 39065811433.
-- [ ] CQ14 ops: typed errors — 93 `Result<_, String>` in library code Progress 2026-10-17: string_errors 93 -> 19 (render 13, endpoint 3, game 2, scene 1; playtest and assets at 0). Left: those 19.
+- [x] CQ14 ops: typed errors — 93 `Result<_, String>` in library code Progress 2026-10-17: string_errors 93 -> 19 (render 13, endpoint 3, game 2, scene 1; playtest and assets at 0). Left: those 19.
   (playtest 50, render 18, assets 17) become typed enums with `Display` and
   a source. Tier B. Size S per crate. Owns one crate's error module.
-  Accept: the crate's string_errors 0; tests green. needs: none. Progress 2026-10-18: render string_errors 13 -> 0 and secret_launch false hits gone, landed 3f1661f1 (window check clean, window lib tests 125 + 37 green). Left: endpoint mcp.rs run_stdio (Result<String, String>) as a StartupError::transport helper, uncommitted in mcp.rs, startup.rs and bin/e2040-mcp.rs because the endpoint big_files ratchet (mcp.rs over 1500 lines) refuses the commit.
+  Accept: the crate's string_errors 0; tests green. needs: none. Progress 2026-10-18: render string_errors 13 -> 0 and secret_launch false hits gone, landed 3f1661f1 (window check clean, window lib tests 125 + 37 green). Left: endpoint mcp.rs run_stdio (Result<String, String>) as a StartupError::transport helper, uncommitted in mcp.rs, startup.rs and bin/e2040-mcp.rs because the endpoint big_files ratchet (mcp.rs over 1500 lines) refuses the commit. Landed a50ee6e6 (mcp.rs split: the rmcp tools moved to mcp_tools.rs, endpoint bigF 0) + fce5e6f2 baseline; workspace string_errors now 0; cargo test -p engine-endpoint --features mcp --no-fail-fast green (gh run 39119478907).
 - [x] CQ15 ops: Miri UB gate on non-forbid unsafe sites (sim crates
   already forbid; live sites editor/app.rs:244 + endpoint/
   secret_launch.rs:164) (READER-WILD wave 51, Miri MIT). Tier B.

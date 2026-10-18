@@ -23,8 +23,12 @@
 //! with [`GameError::SpecMismatch`] on both sides, a host that never answers
 //! times out loudly after [`JOIN_GIVE_UP_MS`].
 
-use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::time::{Duration, Instant};
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::UdpSocket;
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use engine_input::fighter::{Buttons, ATTACK, BLOCK, DODGE, THROW_SPEAR};
 use engine_input::{FighterId, FighterInput};
@@ -611,6 +615,7 @@ fn low_ms(now_ms: u64) -> u32 {
 
 /// A nonzero relay id unlike `avoid`, mixed from the wall clock and the
 /// process id (two processes on one PC never share one). Never hashed.
+#[cfg(not(target_arch = "wasm32"))]
 fn fresh_relay_id(avoid: u64) -> u64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -624,15 +629,34 @@ fn fresh_relay_id(avoid: u64) -> u64 {
     id
 }
 
+/// A nonzero relay id unlike `avoid`. A browser tab has no wall clock at
+/// this seam, so the wasm32 build mixes a fixed seed. Never hashed.
+#[cfg(target_arch = "wasm32")]
+fn fresh_relay_id(avoid: u64) -> u64 {
+    let mut id = engine_core::mix64(1);
+    while id == 0 || id == avoid {
+        id = engine_core::mix64(id.wrapping_add(1));
+    }
+    id
+}
+
 /// This PC's address on its LAN, as other machines see it: the source
 /// address the OS would route an outside datagram from (no datagram is
 /// sent). `None` when there is no route.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn lan_ip() -> Option<IpAddr> {
     let probe = UdpSocket::bind("0.0.0.0:0").ok()?;
     probe.connect("192.0.2.1:9").ok()?;
     let ip = probe.local_addr().ok()?.ip();
     (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
+}
+
+/// A browser tab has no raw sockets: no LAN address to report.
+#[must_use]
+#[cfg(target_arch = "wasm32")]
+pub fn lan_ip() -> Option<IpAddr> {
+    None
 }
 
 /// The scripted input of an automated run: a pure function of the tick and
@@ -706,6 +730,7 @@ impl NetSeat {
 /// per fixed tick of wall time. `say` hears every note as it happens. Leaves
 /// after the seat finished (a few more frames, so the last acks go out), or
 /// fails loudly at `deadline_ms`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn play_headless(
     seat: &mut NetSeat,
     deadline_ms: u64,
@@ -733,6 +758,17 @@ pub fn play_headless(
             std::thread::sleep(wait);
         }
     }
+}
+
+/// A browser tab has no blocking loop over wall time: the wasm32 build
+/// refuses instead of parking the tab.
+#[cfg(target_arch = "wasm32")]
+pub fn play_headless(
+    _seat: &mut NetSeat,
+    _deadline_ms: u64,
+    _say: impl FnMut(&SeatNote),
+) -> Result<(), GameError> {
+    Err(GameError::Io(std::io::ErrorKind::Unsupported))
 }
 
 #[cfg(test)]

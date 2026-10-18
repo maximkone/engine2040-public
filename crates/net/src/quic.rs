@@ -368,11 +368,9 @@ impl Transport for UdpTransport {
         _kind: ControlKind,
         bytes: &[u8],
     ) -> Result<(), NetError> {
-        check_budget(bytes)?;
-        self.sock
-            .send_to(bytes, to.0)
-            .map(|_| ())
-            .map_err(|_| NetError::BadInput)
+        // Reliable control rides a datagram here (documented downgrade):
+        // one send path, so budget check and error map stay identical.
+        self.send_unreliable(to, bytes)
     }
 
     fn recv(&mut self) -> Vec<Inbound> {

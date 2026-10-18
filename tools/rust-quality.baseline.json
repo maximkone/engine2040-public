@@ -42,7 +42,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 0,
-   "undoc_pub": 28,
+   "undoc_pub": 27,
    "unsafe": 0,
    "tests": 230
   },
@@ -71,7 +71,7 @@
   "engine-arena": {
    "unwrap": 0,
    "panic_sites": 0,
-   "casts": 37,
+   "casts": 36,
    "allow_no_reason": 0,
    "dead_code_allows": 0,
    "print_in_lib": 0,
@@ -196,7 +196,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 0,
-   "undoc_pub": 32,
+   "undoc_pub": 31,
    "unsafe": 0,
    "tests": 84
   },
@@ -240,7 +240,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 0,
-   "undoc_pub": 18,
+   "undoc_pub": 17,
    "unsafe": 1,
    "tests": 142
   },
@@ -273,7 +273,7 @@
    "allow_no_reason": 0,
    "dead_code_allows": 0,
    "print_in_lib": 0,
-   "string_errors": 3,
+   "string_errors": 0,
    "board_ids": 0,
    "hash_reimpl": 0,
    "dup_fns": 4,
@@ -284,7 +284,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 0,
-   "undoc_pub": 6,
+   "undoc_pub": 5,
    "unsafe": 0,
    "tests": 599
   },
@@ -372,7 +372,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 13,
-   "undoc_pub": 1,
+   "undoc_pub": 0,
    "unsafe": 0,
    "tests": 311
   },
@@ -460,7 +460,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 0,
-   "undoc_pub": 8,
+   "undoc_pub": 6,
    "unsafe": 0,
    "tests": 172
   },
@@ -537,7 +537,7 @@
    "allow_no_reason": 0,
    "dead_code_allows": 0,
    "print_in_lib": 4,
-   "string_errors": 13,
+   "string_errors": 0,
    "board_ids": 0,
    "hash_reimpl": 12,
    "dup_fns": 8,
@@ -548,7 +548,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 7,
-   "undoc_pub": 57,
+   "undoc_pub": 51,
    "unsafe": 1,
    "tests": 1161
   },
@@ -614,7 +614,7 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 0,
-   "undoc_pub": 3,
+   "undoc_pub": 2,
    "unsafe": 0,
    "tests": 126
   },

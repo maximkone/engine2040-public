@@ -19,7 +19,7 @@ Labels used below:
 
 ## 2. The 12 techniques
 
-### QA1 Pick the GPU texture format at load
+### QA15 Pick the GPU texture format at load
 - Basis Universal transcoder wiki, https://github.com/BinomialLLC/basis_universal/wiki/How-to-Use-and-Configure-the-Transcoder (snippet): modes ETC1S, UASTC LDR, UASTC HDR; UASTC LDR transcodes "particularly fast" to ASTC 4x4 and BC7 (snippet from basis_universal README, https://github.com/zeux/basis_universal).
 - WebGPU rule: an adapter must offer texture-compression-bc, or both -etc2 and -astc, https://www.w3.org/TR/webgpu/ (snippet; the MDN page was not fetched).
 - Licence: basis_universal Apache-2.0 from memory, unverified in this pass.
@@ -28,7 +28,7 @@ Labels used below:
 - Choice rule (ours): ASTC if astc, else BC7 if bc, else ETC2, else RGBA8.
 - Maps onto: `crates/assets/src/ktx2_cook.rs`, `bc.rs`, `bin/arena_cook.rs`; the adapter feature request in `crates/web` (repo: `limits.rs` requests defaults only).
 - Cost: M.
-- Row: `- [ ] QA1 look: pick the GPU texture format at load (ASTC, BC7, ETC2, RGBA8) from the adapter features and log the choice. Diff: regular. Tier B. Size S. Owns a format-choice fn in crates/assets with a test, and the feature request in crates/web. Accept: cargo test -p engine-assets --lib format_choice prints the choice for bc-only, astc-only, both and neither (neither gives RGBA8). F2P: no runtime choice today. P2P: golden d57b5c8ae3096614 unchanged. needs: VR2.`
+- Row: `- [ ] QA15 look: pick the GPU texture format at load (ASTC, BC7, ETC2, RGBA8) from the adapter features and log the choice. Diff: regular. Tier B. Size S. Owns a format-choice fn in crates/assets with a test, and the feature request in crates/web. Accept: cargo test -p engine-assets --lib format_choice prints the choice for bc-only, astc-only, both and neither (neither gives RGBA8). F2P: no runtime choice today. P2P: golden d57b5c8ae3096614 unchanged. needs: VR2.`
 
 ### QA2 Texel density and the 1K versus 2K budget
 - Polycount forum threads (snippet, low authority): 512 px/m is common; 1024 px/m is "about as high as you'll see on current consoles" for human-scale environments.

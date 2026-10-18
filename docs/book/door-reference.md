@@ -67,7 +67,7 @@ These are always advertised.
 
 - **Scope:** `observe` · read-only · always advertised
 - **Undo:** none: read-only
-- **Source:** `crates/endpoint/src/mcp.rs`
+- **Source:** `crates/endpoint/src/mcp_tools.rs`
 - **Returns:** `SceneReadOutput` with `revision`, `total`, `cursor`, `returned`, `truncated`, `objects`
 
 **Arguments** (`SceneReadArgs`):
@@ -92,7 +92,7 @@ These are always advertised.
 
 - **Scope:** `propose` · read-only · always advertised
 - **Undo:** none: read-only
-- **Source:** `crates/endpoint/src/mcp.rs`
+- **Source:** `crates/endpoint/src/mcp_tools.rs`
 - **Returns:** `TxPreviewOutput` with `effects`, `resulting_revision`, `action_hash`, `approval`
 
 **Arguments** (`TxPreviewArgs`):
@@ -128,7 +128,7 @@ These are always advertised.
 
 - **Scope:** `commit` · always advertised
 - **Undo:** journaled: the handler calls `apply_gated`, so core `tx.undo` reverts the newest batch
-- **Source:** `crates/endpoint/src/mcp.rs`
+- **Source:** `crates/endpoint/src/mcp_tools.rs`
 - **Returns:** `TxApplyOutput` with `revision`, `effects`, `key`, `journal_index`, `undo_token`, `spatial_delta`
 
 **Arguments** (`TxApplyArgs`):
@@ -174,7 +174,7 @@ These are always advertised.
 
 - **Scope:** `revert` · always advertised
 - **Undo:** this verb is the undo
-- **Source:** `crates/endpoint/src/mcp.rs`
+- **Source:** `crates/endpoint/src/mcp_tools.rs`
 - **Returns:** `TxUndoOutput` with `revision`, `undone_key`, `effects`
 
 **Arguments** (`TxUndoArgs`):
@@ -387,7 +387,7 @@ These are always advertised.
 
 - **Scope:** `observe` · read-only · always advertised
 - **Undo:** none: read-only
-- **Source:** `crates/endpoint/src/mcp.rs`
+- **Source:** `crates/endpoint/src/mcp_tools.rs`
 - **Returns:** `SimBuildEncounterOutput` with `solved`, `plan_id`, `rung`, `fork_id`, `repairs_used`, `reason`, `conflicts`
 
 **Arguments** (`SimBuildEncounterArgs`):
@@ -409,7 +409,7 @@ These are always advertised.
 
 - **Scope:** `observe` · read-only · always advertised
 - **Undo:** none: read-only
-- **Source:** `crates/endpoint/src/mcp.rs`
+- **Source:** `crates/endpoint/src/mcp_tools.rs`
 - **Returns:** `GameBuildOutput` with `solved`, `play_digest`, `replay_digest`, `ticks_played`, `package_bytes`, `verdict`, `reason`
 
 **Arguments** (`GameBuildArgs`):
