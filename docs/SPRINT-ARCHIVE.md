@@ -190,7 +190,7 @@ Move ledger: 49 rows on 2026-10-02 (F06).
 - [x] PF8 perf: 64-player server budget — dedicated server tick p99 under
   4 ms with 64 players and 500 AI on the reference CPU, per-system
   breakdown. Tier C. Size M. Owns `crates/perf/src/server_budget.rs`.
-  Accept: budget report from a recorded siege tape. needs: PF1, ON3.
+  Accept: budget report from a recorded siege tape. needs: PF1, ON3. Tick audit 2026-10-19: accepted as closed by its replacement (docs/plan/2026-10-19-owner-queue.md); the named perf `server_budget.rs` is gone.
 
 ### From: Empire (26 rows)
 
@@ -317,7 +317,7 @@ Move ledger: 49 rows on 2026-10-02 (F06).
   `crates/game/src/capture.rs` + `crates/game/src/package.rs` +
   `crates/game/src/bin/staged_fight.rs`. Accept: game suite green +
   `dup_fns` 11 down + goldens unchanged. needs: none. (JAN53-F1.)
-  Wave 54: TICK (checker PASS; single fnv_hex owner, 239 green).
+  Wave 54: TICK (checker PASS; single fnv_hex owner, 239 green). Tick audit 2026-10-19: accepted as closed by its replacement (docs/plan/2026-10-19-owner-queue.md); the named game `package.rs` is gone.
 - [x] SL40 game: unify the drifted SplitMix bodies behind the core owner
   — `camera.rs:605 splitmix64` (by-value) vs `capture.rs:561 splitmix64`
   (by-state) vs `camera.rs:1279 fixture_mix` + `1287
@@ -420,4 +420,4 @@ Move ledger: 49 rows on 2026-10-02 (F06).
   at walls through DX1–DX3 breaks under ON3 interest. Tier C.
   Size M. Owns `crates/game/src/ballistics.rs`. Accept: a scripted
   bombardment breaks the same chunks twice; wall break converges
-  on all clients; replay exact. needs: WD4, DX4.
+  on all clients; replay exact. needs: WD4, DX4. Tick audit 2026-10-19: LATER per docs/plan/2026-10-19-owner-queue.md; the named game `ballistics.rs` is gone.

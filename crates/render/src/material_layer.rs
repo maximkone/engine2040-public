@@ -489,9 +489,8 @@ pub struct LayerReceipt {
 #[cfg(not(feature = "window"))]
 pub fn submit_gpu(rows: u32) -> Result<LayerReceipt, MaterialError> {
     if rows == 0 || rows > MAX_SUBMIT_ROWS {
-        return Err(MaterialError::Invalid(format!(
-            "material-layer submit rows {rows} outside 1..={MAX_SUBMIT_ROWS}"
-        )));
+        let reason = format!("material-layer submit rows {rows} outside 1..={MAX_SUBMIT_ROWS}"); // alloc-ok: cold refusal, never a steady frame
+        return Err(MaterialError::Invalid(reason));
     }
     Err(MaterialError::NoDevice(
         "material-layer GPU bind needs the window build with a live device; CPU layer eval is the reference".into(),
@@ -645,16 +644,16 @@ pub fn submit_chart_gpu(
     use std::time::Instant;
     frame
         .validate()
-        .map_err(|e| MaterialError::Invalid(format!("material-layer look frame: {e}")))?;
+        .map_err(|e| MaterialError::Invalid(format!("material-layer look frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
     let rows = chart();
-    let mut cpu = Vec::with_capacity(rows.len() * 3);
+    let mut cpu = Vec::with_capacity(rows.len() * 3); // alloc-ok: submit_chart_gpu probe staging with readback, not the window steady frame
     for entry in &rows {
         let got = check_entry(entry)?;
         cpu.extend_from_slice(&got);
     }
     let words = cpu.len() as u64;
     let count = u32::try_from(words)
-        .map_err(|_| MaterialError::Invalid(format!("layer chart words {words} exceed u32")))?;
+        .map_err(|_| MaterialError::Invalid(format!("layer chart words {words} exceed u32")))?; // alloc-ok: cold refusal, never a steady frame
     let byte_len = words * 4;
     let started = Instant::now();
 
@@ -720,7 +719,7 @@ pub fn submit_chart_gpu(
         0,
         &crate::graph::look_frame_uniform_bytes(frame),
     );
-    let mut src_bytes = Vec::with_capacity(byte_len as usize);
+    let mut src_bytes = Vec::with_capacity(byte_len as usize); // alloc-ok: submit_chart_gpu probe staging with readback, not the window steady frame
     for v in &cpu {
         src_bytes.extend_from_slice(&v.to_le_bytes());
     }
@@ -745,9 +744,8 @@ pub fn submit_chart_gpu(
     let back = crate::accel::readback_f32(readback, words as usize, "layer")?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
-        return Err(MaterialError::Validation(format!(
-            "layer bind validation: {err:?}"
-        )));
+        let reason = format!("layer bind validation: {err:?}"); // alloc-ok: cold validation failure, never a steady frame
+        return Err(MaterialError::Validation(reason));
     }
     let mut max_abs: f32 = 0.0;
     for (i, got) in back.iter().enumerate() {
@@ -756,11 +754,10 @@ pub fn submit_chart_gpu(
             max_abs = diff;
         }
         if !got.is_finite() || diff > CHART_TOLERANCE {
-            return Err(MaterialError::Device(format!(
-                "layer bind roundtrip row {} differs: {got} vs {}",
-                i / 3,
-                cpu[i]
-            )));
+            let cpu_want = cpu[i];
+            let row = i / 3;
+            let reason = format!("layer bind roundtrip row {row} differs: {got} vs {cpu_want}"); // alloc-ok: cold device-loss
+            return Err(MaterialError::Device(reason));
         }
     }
     Ok(LayerGpuReceipt {

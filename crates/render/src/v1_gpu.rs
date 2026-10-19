@@ -511,15 +511,15 @@ impl GpuForward {
         });
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuError::Readback(format!("poll: {e}")))?;
+            .map_err(|e| GpuError::Readback(format!("poll: {e}")))?; // alloc-ok: cold readback failure, never a steady frame
         rx.recv()
-            .map_err(|e| GpuError::Readback(format!("map channel: {e}")))?
-            .map_err(|e| GpuError::Readback(format!("map: {e}")))?;
-        let mut rgba = vec![0u8; (bytes_per_row as usize) * (height as usize)];
+            .map_err(|e| GpuError::Readback(format!("map channel: {e}")))? // alloc-ok: cold readback failure, never a steady frame
+            .map_err(|e| GpuError::Readback(format!("map: {e}")))?; // alloc-ok: cold readback failure, never a steady frame
+        let mut rgba = vec![0u8; (bytes_per_row as usize) * (height as usize)]; // alloc-ok: offscreen capture staging, not the window steady frame
         {
             let mapped = slice
                 .get_mapped_range()
-                .map_err(|e| GpuError::Readback(format!("mapped range: {e}")))?;
+                .map_err(|e| GpuError::Readback(format!("mapped range: {e}")))?; // alloc-ok: cold readback failure, never a steady frame
             for (dst, src) in rgba.chunks_exact_mut(bytes_per_row as usize).enumerate() {
                 let off = dst * padded as usize;
                 src.copy_from_slice(&mapped[off..off + bytes_per_row as usize]);
@@ -530,7 +530,7 @@ impl GpuForward {
         // Pop the validation scope after all GPU work completed.
         let scope_err = pollster::block_on(scope.pop());
         if let Some(err) = scope_err {
-            return Err(GpuError::Validation(format!("{err:?}")));
+            return Err(GpuError::Validation(format!("{err:?}"))); // alloc-ok: cold validation failure, never a steady frame
         }
 
         let png = v1::encode_png_rgba8(&rgba, width, height).map_err(GpuError::Capture)?;

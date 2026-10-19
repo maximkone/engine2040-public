@@ -15,6 +15,7 @@
 use super::delta::{ioq3_encode_fields, ioq3_fields_wire_len, BodySnap, FullSnap, Ioq3SnapFields};
 use super::scale::{DELTA_HEADER_LEN, MAX_DATAGRAM_BYTES, TICK_HZ};
 use super::session::{ioq3_fragment_message, NetError};
+use engine_core::hash::Fnv64;
 
 /// Largest entity population one selection handles (64 fighters plus 500
 /// AI soldiers plus headroom for promoted directors).
@@ -50,6 +51,221 @@ pub(crate) const fn room_mask(room: u32) -> u64 {
 /// Scope view: true when `room` is in per-connection `mask`.
 pub(crate) const fn room_in_scope(room: u32, mask: u64) -> bool {
     (mask & room_mask(room)) != 0
+}
+
+/// Bits one scope-view word holds, one `u64`.
+const SCOPE_WORD_BITS: usize = 64;
+/// Rooms the room word spans: the room gate is `id % SCOPE_ROOMS`, so a
+/// connection's scope mask is a ring of this many rooms.
+pub const SCOPE_ROOMS: u32 = 8;
+/// Ids of one room inside one word: `SCOPE_WORD_BITS / SCOPE_ROOMS`. A word
+/// is a whole number of room lanes, so one room's ids sit on the same bits
+/// of every word (proven over every id by the lane test below).
+const SCOPE_LANES_PER_WORD: u32 = 8;
+/// Words one scope view spans for [`MAX_INTEREST_ENTITIES`] ids.
+const SCOPE_WORDS: usize = MAX_INTEREST_ENTITIES / SCOPE_WORD_BITS;
+
+/// Reject a scope-view span outside `1..=MAX_INTEREST_ENTITIES` loudly.
+fn check_scope_len(len: usize) -> Result<(), InterestError> {
+    if len == 0 {
+        return Err(InterestError::EmptyEntities);
+    }
+    if len > MAX_INTEREST_ENTITIES {
+        return Err(InterestError::TooManyEntities { got: len });
+    }
+    Ok(())
+}
+
+/// Bits of one room inside one view word, ascending: the `SCOPE_LANES_PER_WORD`
+/// ids `word * SCOPE_WORD_BITS + room + SCOPE_ROOMS * k` whose room word is
+/// `room`. 64 is a multiple of the room count, so this one pattern addresses
+/// that room in every word.
+const fn room_lane(room: u32) -> u64 {
+    let mut lane = 0u64;
+    let mut k = 0u32;
+    while k < SCOPE_LANES_PER_WORD {
+        lane |= 1u64 << (room + SCOPE_ROOMS * k);
+        k += 1;
+    }
+    lane
+}
+
+/// Bits of one word that address real ids: the last word of a partial span
+/// carries only `len % SCOPE_WORD_BITS` of them.
+const fn word_valid(index: usize, len: usize) -> u64 {
+    let start = index * SCOPE_WORD_BITS;
+    if len >= start + SCOPE_WORD_BITS {
+        return u64::MAX;
+    }
+    if len <= start {
+        return 0;
+    }
+    u64::MAX >> (SCOPE_WORD_BITS - (len - start))
+}
+
+/// The delta one [`ScopeView::update`] applied, as a Z-set: which room bits
+/// flipped and how many ids of each entered or left the view. Fixed size, so
+/// a per-tick update allocates nothing. Empty when the mask and span are
+/// unchanged, which is the common tick: nothing moved, nothing to send.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ScopeDelta {
+    /// Rooms whose scope bit went 0 to 1, as a room bit mask.
+    pub entered_rooms: u64,
+    /// Rooms whose scope bit went 1 to 0, as a room bit mask.
+    pub left_rooms: u64,
+    /// Ids whose view weight went 0 to 1.
+    pub entered: u32,
+    /// Ids whose view weight went 1 to 0.
+    pub left: u32,
+    /// True when the span changed (roster swap), so the whole view was
+    /// replaced: `entered` and `left` then carry the new and old weights
+    /// (a consumer refills its table rather than diffing ids).
+    pub resync: bool,
+}
+
+/// Z-set view of one connection's room/scope predicate: bit `id` holds weight
+/// 1 when `room_in_scope(entity_room(id), mask)`, else 0, so `weight` is the
+/// number of in-scope ids. [`ScopeView::update`] maintains it from the scope
+/// delta alone (incremental view maintenance, the DBSP section-4 idea,
+/// reimplemented std-only with no dependency): a flipped room bit reaches its
+/// ids through [`room_lane`], so the cost is the delta, not the roster. Fixed
+/// size, no allocation, integer ops in ascending room order, so every machine
+/// builds the same view. Callers: the siege scope proof drives it against a
+/// full rebuild each step; the session packet wires the production consumer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScopeView {
+    mask: u64,
+    len: usize,
+    weight: u32,
+    words: [u64; SCOPE_WORDS],
+}
+
+impl ScopeView {
+    /// Full rebuild from `mask` over `len` ids: the baseline every delta is
+    /// checked against, and the resync primitive after a roster swap. One
+    /// predicate call per entity, the shape the selection path pays per pass.
+    pub fn rebuild(mask: u64, len: usize) -> Result<Self, InterestError> {
+        check_scope_len(len)?;
+        let mut words = [0u64; SCOPE_WORDS];
+        let mut weight = 0u32;
+        for at in 0..len {
+            let id = u32::try_from(at).map_err(|_| InterestError::TooManyEntities { got: len })?;
+            if room_in_scope(entity_room(id), mask) {
+                words[at / SCOPE_WORD_BITS] |= 1u64 << (at % SCOPE_WORD_BITS);
+                weight += 1;
+            }
+        }
+        Ok(Self {
+            mask,
+            len,
+            weight,
+            words,
+        })
+    }
+
+    /// Maintain the view for a new `mask` (and span) from the delta alone:
+    /// only the rooms whose scope bit flipped are walked, word by word. An
+    /// unchanged mask returns an empty delta and touches nothing. A changed
+    /// span resyncs the whole view and says so; a bad span refuses.
+    pub fn update(&mut self, mask: u64, len: usize) -> Result<ScopeDelta, InterestError> {
+        check_scope_len(len)?;
+        if len != self.len {
+            let fresh = Self::rebuild(mask, len)?;
+            let delta = ScopeDelta {
+                resync: true,
+                entered: fresh.weight,
+                left: self.weight,
+                ..ScopeDelta::default()
+            };
+            *self = fresh;
+            return Ok(delta);
+        }
+        let flipped = mask ^ self.mask;
+        if flipped == 0 {
+            return Ok(ScopeDelta::default());
+        }
+        self.mask = mask;
+        let mut delta = ScopeDelta::default();
+        for room in 0..SCOPE_ROOMS {
+            let bit = room_mask(room);
+            if flipped & bit == 0 {
+                continue;
+            }
+            let entering = mask & bit != 0;
+            if entering {
+                delta.entered_rooms |= bit;
+            } else {
+                delta.left_rooms |= bit;
+            }
+            let lane = room_lane(room);
+            for (index, word) in self.words.iter_mut().enumerate() {
+                let lane_valid = lane & word_valid(index, len);
+                if entering {
+                    delta.entered += (lane_valid & !*word).count_ones();
+                    *word |= lane_valid;
+                } else {
+                    delta.left += (*word & lane_valid).count_ones();
+                    *word &= !lane_valid;
+                }
+            }
+        }
+        self.weight = self.weight + delta.entered - delta.left;
+        Ok(delta)
+    }
+
+    /// Rooms in scope: the mask the view was built or updated from.
+    #[must_use]
+    pub const fn mask(&self) -> u64 {
+        self.mask
+    }
+
+    /// Ids the view spans.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True when no id holds scope weight (an all-rooms mask is never empty).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.weight == 0
+    }
+
+    /// In-scope ids, the Z-set's total weight.
+    #[must_use]
+    pub const fn weight(&self) -> u32 {
+        self.weight
+    }
+
+    /// True when `id` holds weight 1; ids outside the span hold weight 0.
+    #[must_use]
+    pub fn contains(&self, id: u32) -> bool {
+        let Ok(at) = usize::try_from(id) else {
+            return false;
+        };
+        at < self.len && self.words[at / SCOPE_WORD_BITS] & (1u64 << (at % SCOPE_WORD_BITS)) != 0
+    }
+
+    /// Canonical digest of the view: mask, span, weight and every word, folded
+    /// through the one owner `engine_core::hash::Fnv64`. Integer order only,
+    /// no map iteration, so equal views always digest equal.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        let mut fold = Fnv64::new();
+        fold.write_u64(self.mask);
+        fold.write_len(self.len);
+        fold.write_u64(u64::from(self.weight));
+        for word in &self.words {
+            fold.write_u64(*word);
+        }
+        fold.finish()
+    }
+
+    /// View words for the delta test's set-difference check.
+    #[cfg(test)]
+    pub(crate) const fn words(&self) -> &[u64; SCOPE_WORDS] {
+        &self.words
+    }
 }
 
 /// Relevancy of one entity to one viewer: distance ring plus view hemisphere.
@@ -1912,6 +2128,326 @@ mod tests {
             "view wire {} must beat full {}",
             view.wire_len(),
             full.full_wire_len()
+        );
+    }
+
+    // ---- scope-view delta block: the seeded trace, equality and timing ----
+
+    use crate::tick_budget::{TickQuantiles, BUDGET_P99_MS};
+    use std::hint::black_box;
+    #[expect(
+        clippy::disallowed_types,
+        reason = "wall-clock perf sample in the timing proof, never hashed."
+    )]
+    use std::time::Instant;
+
+    /// The pinned seeded trace: one row per snapshot step, `step<TAB>mask`.
+    /// Owned by `fixtures/scope-delta/generate.mjs`; recut with that script.
+    const SCOPE_TRACE_TEXT: &str = include_str!("../../../fixtures/scope-delta/trace.txt");
+    /// Trace seed: `fixtures/scope-delta/trace.txt` header states it.
+    const SCOPE_TRACE_SEED: u64 = 2040;
+    /// Steps in the pinned trace (the equality proof compares all of them).
+    const SCOPE_TRACE_STEPS: usize = 100;
+    /// Steps between room crossings in the walk.
+    const SCOPE_TRACE_CROSS_EVERY: u32 = 5;
+    /// Acceptance bar: the delta arm must beat the full rebuild five times.
+    const SPEEDUP_BAR_X100: u64 = 500;
+    /// Whole-trace repeats in the timing proof.
+    const SPEEDUP_REPEATS: usize = 64;
+
+    /// Scope mask after `step`, the recipe the fixture header states: the
+    /// walker's room plus the two ahead of it round the ring of rooms.
+    fn trace_mask(seed: u64, step: u32) -> u64 {
+        let rooms = u64::from(SCOPE_ROOMS);
+        let room = ((seed % rooms) + u64::from(step / SCOPE_TRACE_CROSS_EVERY)) % rooms;
+        let mut mask = 0u64;
+        for ahead in 0..3u64 {
+            let at = u32::try_from((room + ahead) % rooms).expect("room fits u32");
+            mask |= room_mask(at);
+        }
+        mask
+    }
+
+    /// The fixture rows, in step order.
+    fn fixture_masks() -> Vec<u64> {
+        let mut masks = Vec::new();
+        for line in SCOPE_TRACE_TEXT.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (step, mask) = line.split_once('\t').expect("row is step<TAB>mask");
+            assert_eq!(
+                step.parse::<usize>().expect("step number"),
+                masks.len(),
+                "trace rows are numbered from zero with no gaps"
+            );
+            masks.push(u64::from_str_radix(mask, 16).expect("mask is hex"));
+        }
+        masks
+    }
+
+    #[test]
+    fn scope_trace_fixture_is_the_seeded_walk() {
+        // The fixture is data, not the owner: recompute the walk and refuse
+        // drift, so a hand edit or a stale generator fails here.
+        let masks = fixture_masks();
+        assert_eq!(masks.len(), SCOPE_TRACE_STEPS, "trace rows");
+        let mut crossings = 0usize;
+        for (step, mask) in masks.iter().enumerate() {
+            let at = u32::try_from(step).expect("step fits u32");
+            assert_eq!(*mask, trace_mask(SCOPE_TRACE_SEED, at), "step {step}");
+            if step > 0 && masks[step - 1] != *mask {
+                crossings += 1;
+            }
+        }
+        assert_eq!(
+            crossings,
+            SCOPE_TRACE_STEPS / SCOPE_TRACE_CROSS_EVERY as usize - 1,
+            "the walk crosses a room boundary on schedule"
+        );
+    }
+
+    #[test]
+    fn scope_view_matches_full_rebuild_100x() {
+        // 100 of 100 steps: the delta-maintained view, the ids each delta
+        // moved and the view's own digest equal the full rebuild exactly.
+        let masks = fixture_masks();
+        let len = MAX_INTEREST_ENTITIES;
+        let mut view = ScopeView::rebuild(0, len).expect("empty view");
+        let mut compared = 0usize;
+        let mut changed = 0usize;
+        for (step, mask) in masks.iter().enumerate() {
+            let before = view;
+            let delta = view.update(*mask, len).expect("delta update");
+            let rebuilt = ScopeView::rebuild(*mask, len).expect("full rebuild");
+            assert_eq!(view, rebuilt, "step {step}: delta view equals the rebuild");
+            assert_eq!(view.digest(), rebuilt.digest(), "step {step}: digest");
+            assert_eq!(view.weight(), rebuilt.weight(), "step {step}: weight");
+            assert_eq!(view.mask(), *mask, "step {step}: mask");
+            assert_eq!(view.len(), len, "step {step}: span");
+            assert!(!delta.resync, "step {step}: span never changed");
+            assert_eq!(
+                delta.entered_rooms | delta.left_rooms,
+                before.mask() ^ *mask,
+                "step {step}: exactly the flipped rooms"
+            );
+            assert_eq!(
+                delta.entered_rooms & delta.left_rooms,
+                0,
+                "step {step}: a room cannot enter and leave at once"
+            );
+            let gained: u32 = (0..SCOPE_WORDS)
+                .map(|word| (rebuilt.words()[word] & !before.words()[word]).count_ones())
+                .sum();
+            let lost: u32 = (0..SCOPE_WORDS)
+                .map(|word| (before.words()[word] & !rebuilt.words()[word]).count_ones())
+                .sum();
+            assert_eq!(delta.entered, gained, "step {step}: entered ids");
+            assert_eq!(delta.left, lost, "step {step}: left ids");
+            assert_eq!(
+                view.weight(),
+                rebuilt.words().iter().map(|w| w.count_ones()).sum()
+            );
+            if delta.entered + delta.left > 0 {
+                changed += 1;
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, SCOPE_TRACE_STEPS, "100/100 steps compared");
+        assert!(changed >= 20, "the trace must move the view: {changed}");
+    }
+
+    #[test]
+    fn scope_view_lanes_match_the_room_word() {
+        // The delta walks one room through one lane, so the lane must address
+        // exactly the ids `entity_room` puts in that room, in every word.
+        assert_eq!(
+            SCOPE_ROOMS * SCOPE_LANES_PER_WORD,
+            u32::try_from(SCOPE_WORD_BITS).expect("64 fits u32"),
+            "one word is whole room lanes"
+        );
+        assert_eq!(SCOPE_WORDS * SCOPE_WORD_BITS, MAX_INTEREST_ENTITIES);
+        for room in 0..SCOPE_ROOMS {
+            let lane = room_lane(room);
+            assert_eq!(lane.count_ones(), SCOPE_LANES_PER_WORD, "room {room} lane");
+            for id in 0..MAX_INTEREST_ENTITIES {
+                let at = u32::try_from(id).expect("id fits u32");
+                let bit = (lane >> (id % SCOPE_WORD_BITS)) & 1;
+                assert_eq!(
+                    bit,
+                    u64::from(entity_room(at) == room),
+                    "room {room} id {id} must sit on this lane"
+                );
+            }
+        }
+        for word in 0..SCOPE_WORDS {
+            assert_eq!(
+                word_valid(word, MAX_INTEREST_ENTITIES),
+                u64::MAX,
+                "a full word is all valid"
+            );
+        }
+        assert_eq!(word_valid(0, 1), 1);
+        assert_eq!(word_valid(0, SCOPE_WORD_BITS), u64::MAX);
+        assert_eq!(word_valid(1, SCOPE_WORD_BITS), 0);
+        assert_eq!(word_valid(1, SCOPE_WORD_BITS + 1), 1);
+    }
+
+    #[test]
+    fn scope_view_rejects_bad_shapes_loudly() {
+        assert_eq!(
+            ScopeView::rebuild(0, 0).map(|_| ()),
+            Err(InterestError::EmptyEntities)
+        );
+        assert_eq!(
+            ScopeView::rebuild(0, MAX_INTEREST_ENTITIES + 1).map(|_| ()),
+            Err(InterestError::TooManyEntities {
+                got: MAX_INTEREST_ENTITIES + 1
+            })
+        );
+        let mut view = ScopeView::rebuild(room_mask(1), 4).expect("view");
+        assert_eq!(
+            view.update(room_mask(1), 0),
+            Err(InterestError::EmptyEntities)
+        );
+        assert_eq!(
+            view.update(room_mask(1), MAX_INTEREST_ENTITIES + 1),
+            Err(InterestError::TooManyEntities {
+                got: MAX_INTEREST_ENTITIES + 1
+            })
+        );
+        // Unchanged mask: empty delta, view untouched.
+        let before = view;
+        assert_eq!(
+            view.update(room_mask(1), 4).expect("no-op"),
+            ScopeDelta::default()
+        );
+        assert_eq!(view, before);
+        // Roster swap: the whole view resyncs and says so.
+        let delta = view.update(room_mask(1) | room_mask(2), 8).expect("resync");
+        assert!(delta.resync, "{delta:?}");
+        assert_eq!(
+            view,
+            ScopeView::rebuild(room_mask(1) | room_mask(2), 8).expect("rebuild")
+        );
+        assert_eq!(view.weight(), 2);
+        assert!(view.contains(1) && view.contains(2) && !view.contains(0));
+        assert!(!view.contains(64), "out-of-span ids hold weight 0");
+        assert!(!view.is_empty());
+        assert_eq!(view.len(), 8);
+        assert_ne!(
+            view.digest(),
+            ScopeView::rebuild(0, 8).expect("empty").digest()
+        );
+    }
+
+    /// Acceptance proof: one-tick p95 inside the siege tick budget, and the
+    /// median speedup of the delta arm over the full rebuild on the seeded
+    /// trace. The ratio comes from clock-free block timings, because a clock
+    /// call inside a 40 ns tick would dilute the cheap arm; the per-tick
+    /// quantiles are clocked, so they are upper bounds. Ignored: wall clock.
+    #[test]
+    #[ignore = "timing: one-tick p95 and median speedup proof, run with --release -- --ignored --test-threads=1"]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "wall-clock perf sample in the timing proof, never hashed."
+    )]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "wall-clock perf sample in the timing proof, never hashed."
+    )]
+    fn scope_view_one_tick_p95_and_median_speedup() {
+        let masks = fixture_masks();
+        let len = MAX_INTEREST_ENTITIES;
+        let changed = masks.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        for mask in &masks {
+            black_box(ScopeView::rebuild(*mask, len).expect("warm rebuild"));
+        }
+        // Tail latency first: one clocked walk per arm. The clock calls sit
+        // inside the loop, so these samples are an upper bound on one tick.
+        let mut one_tick_ns = Vec::with_capacity(masks.len());
+        let mut rebuild_ns = Vec::with_capacity(masks.len());
+        let mut view = ScopeView::rebuild(0, len).expect("empty view");
+        for mask in &masks {
+            let at = Instant::now();
+            black_box(view.update(*mask, len).expect("delta update"));
+            one_tick_ns.push(u64::try_from(at.elapsed().as_nanos()).expect("ns fits u64"));
+        }
+        for mask in &masks {
+            let at = Instant::now();
+            black_box(ScopeView::rebuild(*mask, len).expect("full rebuild"));
+            rebuild_ns.push(u64::try_from(at.elapsed().as_nanos()).expect("ns fits u64"));
+        }
+        // Then the speedup itself with the clock outside the timed region, so
+        // the ratio is the work each arm does and not the sample cost.
+        let mut ratios = Vec::with_capacity(SPEEDUP_REPEATS);
+        let mut delta_totals = Vec::with_capacity(SPEEDUP_REPEATS);
+        let mut rebuild_totals = Vec::with_capacity(SPEEDUP_REPEATS);
+        for _ in 0..SPEEDUP_REPEATS {
+            let mut view = ScopeView::rebuild(0, len).expect("empty view");
+            let mut delta_fold = 0u64;
+            let started = Instant::now();
+            for mask in &masks {
+                black_box(view.update(*mask, len).expect("delta update"));
+                delta_fold = delta_fold.wrapping_add(view.digest());
+            }
+            let delta_total = u64::try_from(started.elapsed().as_nanos()).expect("ns fits u64");
+            let mut rebuild_fold = 0u64;
+            let started = Instant::now();
+            for mask in &masks {
+                let full = black_box(ScopeView::rebuild(*mask, len).expect("full rebuild"));
+                rebuild_fold = rebuild_fold.wrapping_add(full.digest());
+            }
+            let rebuild_total = u64::try_from(started.elapsed().as_nanos()).expect("ns fits u64");
+            assert_eq!(
+                delta_fold, rebuild_fold,
+                "both arms must fold the same views, or the delta is wrong"
+            );
+            ratios.push(rebuild_total * 100 / delta_total.max(1));
+            delta_totals.push(delta_total);
+            rebuild_totals.push(rebuild_total);
+        }
+        ratios.sort_unstable();
+        let median_x100 = ratios[ratios.len() / 2];
+        let ms = |samples: &[u64]| -> Vec<f64> {
+            samples.iter().map(|ns| *ns as f64 / 1_000_000.0).collect()
+        };
+        let tick = TickQuantiles::of("scope_tick", &ms(&one_tick_ns)).expect("tick quantiles");
+        let full = TickQuantiles::of("scope_rebuild", &ms(&rebuild_ns)).expect("rebuild quantiles");
+        let delta_block =
+            TickQuantiles::of("scope_delta_block", &ms(&delta_totals)).expect("delta block");
+        let rebuild_block =
+            TickQuantiles::of("scope_rebuild_block", &ms(&rebuild_totals)).expect("rebuild block");
+        let per_step_us = |whole_ms: f64| whole_ms * 1000.0 / masks.len() as f64;
+        println!(
+            "scope_view steps={} len={len} repeats={SPEEDUP_REPEATS} changed_steps={changed} \
+             one_tick_us p50={:.4} p95={:.4} rebuild_us p50={:.4} p95={:.4} \
+             delta_block_us_step={:.4} rebuild_block_us_step={:.4} \
+             median_speedup_x100={median_x100} min_x100={} max_x100={}",
+            masks.len(),
+            tick.p50_ms * 1000.0,
+            tick.p95_ms * 1000.0,
+            full.p50_ms * 1000.0,
+            full.p95_ms * 1000.0,
+            per_step_us(delta_block.p50_ms),
+            per_step_us(rebuild_block.p50_ms),
+            ratios[0],
+            ratios[ratios.len() - 1],
+        );
+        assert!(
+            tick.p95_ms <= BUDGET_P99_MS,
+            "one-tick p95 {:.4} ms over the {BUDGET_P99_MS} ms budget",
+            tick.p95_ms
+        );
+        assert!(
+            median_x100 >= SPEEDUP_BAR_X100,
+            "median speedup {median_x100} x100 under the {SPEEDUP_BAR_X100} bar: \
+             one tick p50 {:.4} us vs rebuild p50 {:.4} us (block per step {:.4} vs {:.4})",
+            tick.p50_ms * 1000.0,
+            full.p50_ms * 1000.0,
+            per_step_us(delta_block.p50_ms),
+            per_step_us(rebuild_block.p50_ms)
         );
     }
 }

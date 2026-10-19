@@ -5,6 +5,13 @@ the exact question. Everything else on the board is agent work.
 
 ## Human / machine runs
 
+Note 2026-10-19 (owner delegated the decisions; the runs below are still runs):
+the timing legs (OPT31, OPT33, RL5, RL18, OB4, RC20) need a **quiesced**
+machine. Four nonstop loops and five code agents were compiling on this PC, so a
+number taken during this pass would be meaningless; the rows stay parked until a
+quiet window. CT45 needs a VRAM measurement, not a timing run, so it can go in a
+busy window. ON30 and SG3 need people.
+
 - ON30 (docs/SPRINT-11-north-star.md): two humans + 6 AI over two real
   networks. Host: `target\release\net_relay.exe` on a reachable host, then
   `target\release\arena.exe --scene arena --fighters 8 --spear --host`; guest:
@@ -45,12 +52,18 @@ the exact question. Everything else on the board is agent work.
   reproduced in Rust. Reword the Accept or drop the digest?
 - GP33 contradicts the tier ladder (docs/SPRINT-12-tier-2040.md). Which one
   wins?
-- API2 leftovers: `missing_docs` in 38 crates, a zero-warning `cargo doc` and
-  the doctest leg. Which of the three is the bar? (Since faa2c442 the coverage
-  ratchet itself is green again: `node tools/docs-coverage.mjs` RESULT PASS, 0
-  regressions over 39 crates — the tool read a doc comment above a multi-line
-  `#[expect(` group as missing. The three legs above are still open and are
-  mechanical agent work, not a blocked question.)
+- API2: closed 2026-10-19 (delegated). The row's Accept is the bar, not the
+  three description legs, and all three clauses are verified: the coverage
+  ratchet is wired into `tools/proof.mjs` and PASSes (`node
+  tools/docs-coverage.mjs`, 0 regressions over 39 crates, F2P owned by its own
+  test), `mdbook build docs/book` is exit 0 (v0.5.4, no warning), and the fresh
+  agent drill was followed verbatim on this PC: `--verify` printed the frozen
+  `d57b5c8ae3096614`, `--example headless` printed `e8a4e9c86ae12991
+  entities=10`, and `staged_fight --ticks 600` twice gave the same
+  `a7e69394a687115d` with byte-identical `frame_000000.png` in both out-dirs.
+  The drill also caught the quick-start page quoting the 2026-10-02 staged
+  receipt, now fixed. `#![warn(missing_docs)]` in every crate and a zero-warning
+  `cargo doc --workspace --no-deps` stay wishes (the Accept does not name them).
 - ARC13: report-only receipt instead of auto-revert? Confirm.
 - 14 ticked rows whose code is gone (listed in
   `docs/plan/2026-10-18-deleted-code-triage.md`, "Ticks with no code"):
@@ -68,13 +81,14 @@ the exact question. Everything else on the board is agent work.
   wrap this row normalises (85022077, `crates/material/src/compile.rs`) and put
   the terminator LUT in its place. Nothing is left to normalise. Close it as
   superseded, or re-scope it to the LUT.
-- GX14 (docs/SPRINT-03-finish-line.md): the pilot is measured and the bar is
-  posted as FAIL (receipt `docs/receipts/2026-10-19-gx14-gtao-pilot.md`,
-  evidence `target/evidence/gx5/`). The Accept's p95-at-1080p stamp cannot be
-  produced: the PF2 ring holds p50/p99 only, the window prints the gtao mean,
-  and `WINDOW_SIZE` is a const with no `--size` flag — all three outside this
-  row's owned paths (`gtao.rs` untouched). Name the row that lands the p95
-  stamp/flag, or reword the bar to p50/p99.
+- GX14 (docs/SPRINT-03-finish-line.md): answered 2026-10-19 (delegated) — the
+  Accept already carries the escape "gtao p95 at most 0.8 ms at 1080p with
+  adapter line **or posted FAIL**", and the pilot posted the FAIL with its
+  receipt, so no new row is needed and the `--size`/p95 ring stays a separate
+  wish. What remains is the Accept's last clause (`node tools/proof.mjs` PASS,
+  golden x2), which today stops on three live sessions' in-flight files
+  (`net/src/handshake.rs`, `render/src/particles_gpu.rs:491`,
+  `material/src/compile.rs:75,380`), none of them this row's.
 
 - GEO3b, GEO5b (docs/SPRINT-17-body-and-break.md): both took the fallback the
   row itself names ("if it still fails write the measured values into this row
@@ -135,4 +149,57 @@ the exact question. Everything else on the board is agent work.
   39066665851). The remaining "at least 2x on the CT2 bake workload or killed
   with numbers" needs a quiesced cook measurement on the PC: name the command
   that is the CT2 workload in the row and paste the ±5% paired numbers.
+
+## Decided (owner chat 2026-10-19: "you decide on all")
+
+Maxim delegated every decision above. Each row carries the call on its own
+lines; this is the index.
+
+Closed on the board (row ticked, the call named in the row):
+
+- The 32 obsolete rows (`plan/2026-10-17-obsolete-rows.md`), each with its own
+  reason in the tick: the target or the premise is gone. Kept as rows, not
+  deleted, so the record stays.
+- Gone-code ticks (`plan/2026-10-18-deleted-code-triage.md`): the 9 REPLACED
+  rows are accepted as closed by their replacement (PF8, PX3, PX31, EG5, DX10,
+  SL39, CT29a, NV2, NV10, plus GP8); the 3 DEAD ones are closed as dead (AX17,
+  SP32, RL20); the 3 LATER ones are unticked and parked with a `LATER:` token so
+  nobody picks them until the file is restored (AM7, D1, WD10 — the last lives
+  in the archive, which is left as the record).
+- RESTORE rows verified back in the tree since the triage: `look/judge.rs`,
+  `look/metric.rs`, `clip_hold.rs`, `modes.rs`, `uploads.rs` are present and the
+  `look_judge` and `look_metric` filters find their tests; no board change.
+- E38: the deleted `gi_dyn` leg is dropped; the WGSL-split half is landed
+  (eb440e64). QL4: closed as superseded by RL50. PX41: closed as obsolete (its
+  `ballistics.rs` is gone and `step_round` has no caller). SP50: the Accept's
+  web-spike digest is dropped; the landed override map and the museum digest x2
+  are the bar. GEO3b and GEO5b: closed as measured-and-filed (the module's own
+  fallback, numbers in BLOCKERS), the kit meshes and the bars stay as they are.
+  RP8b: not boarded (no overturn of the RP8a REJECT). GP18: the per-move reading
+  is the Accept. DX8 and DX9: kept, not killed — the decidable legs are green
+  and the blind review is not producible here, so that one leg stays an open
+  question; DX9's caller already exists (`impact_table.rs` uses `bond_grade`).
+- WEB11: gzip is the bar for the compressed-bundle number (no new dependency,
+  every host serves it); brotli may ride along as an extra column later.
+- CT29: re-scoped to the capture pair (its bind glue is gone).
+
+Answered, row reopened as ordinary agent work (marker removed, no close):
+
+- ARC13: report-only. A seeded divergence fails the gate and writes its
+  first-divergence receipt; no auto-revert is wired.
+- GP33: the tier ladder wins on the label; the row's Accept is unchanged.
+
+Kept and implemented by the delegated call (agent work dispatched, not parked):
+
+- RC15: kept. The handshake is implemented, with the connect token authenticated
+  by HMAC-SHA256 through a new optional `crypto` feature on `engine-net`
+  (default off, so the wasm bundle does not grow); no hand-rolled crypto.
+- RC28: kept, and its Accept is rewritten to what the repo can repeat: pinned
+  upstream wyrand vectors, a statistical test we own, cross-platform equality,
+  one real caller wired, p95 kept. TestU01 is out (no C suite in the repo).
+
+Still only a person can do it (a run, not a decision), so it stays in this
+queue: ON30 (two humans, two real networks), SG3 (a hand-played tow), OPT31,
+OPT33, CT45, RL5, RL18, RL21, RL26, OB4, RC20 — and the DX8/DX9 look, which the
+delegated call answers as "kept" rather than waiting for the review.
 

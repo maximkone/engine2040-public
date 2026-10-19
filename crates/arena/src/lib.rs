@@ -94,7 +94,7 @@ pub use gym::{
 };
 pub use live::{LiveMatch, LivePresentation, LiveTick};
 pub use spear::{EndWhy, MissWhy, SpearEvent, SpearSlot};
-pub use spec::MatchSpec;
+pub use spec::{MatchSpec, DEFAULT_INPUT_DELAY_TICKS};
 
 use core::f32::consts::PI;
 

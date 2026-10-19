@@ -79,6 +79,12 @@ fn sweep(loss_pct: u32) -> Vec<super::rollback::loopback::Receipt> {
 
 #[cfg(test)]
 mod tests {
+    use engine_arena::{ArenaConfig, MatchSpec, DEFAULT_INPUT_DELAY_TICKS};
+    use engine_input::FighterId;
+
+    use crate::lobby::{BuildId, LobbyError};
+    use crate::session::{Client, NetError, Server};
+
     use super::*;
 
     #[test]
@@ -110,10 +116,11 @@ mod tests {
     fn input_delay_sweep_posts_misprediction_and_resim_per_setting() {
         // QN2 receipt: delay 0..=8 over the WAN base latency with 30 ms
         // jitter at 0, 2 and 5 percent loss. Every cell converges to the
-        // truth hash and more delay never predicts more frames. The data
-        // does not pick the default: resim depth falls one tick per delay
-        // tick and already sits under the 9-tick window at delay 0, so the
-        // default is held as safe (inside the window), not as the minimum.
+        // truth hash and more delay never predicts more frames. This static
+        // profile alone does not pick the default: its deepest resim is
+        // already inside the 9-tick window at delay 0. The default follows
+        // from the 2-percent-loss soak profile in
+        // `default_delay_is_the_smallest_with_no_resim_beyond_the_window_at_2_percent_loss`.
         for loss in [0, 2, 5] {
             let rows = sweep(loss);
             for (delay, r) in (MIN_DELAY..).zip(&rows) {
@@ -138,5 +145,84 @@ mod tests {
                 "loss {loss}: the default must resim less deep than delay 0"
             );
         }
+    }
+
+    #[test]
+    fn default_delay_is_the_smallest_with_no_resim_beyond_the_window_at_2_percent_loss() {
+        // QN2: the bar is "no resim beyond 9 ticks at 2 percent loss". The
+        // 2-percent-loss profile the net layer soaks is the WAN one: 150 ms
+        // round trip (9 ticks) plus 30 ms jitter (2 ticks), so a client's
+        // staleness can reach RTT + jitter = 11 ticks (the bound
+        // `wan_soak_jitter_stays_inside_the_rollback_window` pins) and the
+        // resim distance is that staleness minus the delay. The smallest
+        // delay that holds every resim inside the 9-tick window is
+        // 11 - 9 = 2, the shipped default.
+        let worst_staleness = crate::wan_soak::RTT_TICKS + crate::wan_soak::JITTER_TICKS;
+        let window = crate::netcode::MAX_ROLLBACK;
+        let window_ticks = u32::try_from(window).expect("the window fits u32");
+        assert_eq!(worst_staleness - window_ticks, DEFAULT_DELAY);
+        assert!(
+            worst_staleness - (DEFAULT_DELAY - 1) > window_ticks,
+            "one tick less delay resims past the window"
+        );
+        // The seeded loopback sweep at 2 percent loss agrees on the direction
+        // and on the window: the default sits inside it, shallower than no
+        // delay at all.
+        let rows = sweep(2);
+        let default_index = usize::try_from(DEFAULT_DELAY).expect("a tick count fits usize");
+        assert!(default_index < rows.len(), "the sweep covers the default");
+        let at_default = &rows[default_index];
+        assert!(at_default.max_rollback <= window);
+        assert!(at_default.max_rollback < rows[0].max_rollback);
+        println!(
+            "qn2 default delay {DEFAULT_DELAY} ticks: worst staleness {worst_staleness}, \
+             window {window_ticks}; delay {DEFAULT_DELAY} max resim {} vs delay 0 {}",
+            at_default.max_rollback, rows[0].max_rollback
+        );
+    }
+
+    #[test]
+    fn input_delay_sits_in_the_match_spec_and_bumps_the_wire_version_gate() {
+        // The delay is not a local choice: both peers must hold it, so it
+        // sits in the match spec. The version check the wire carries is the
+        // versioned build id (executable version plus the match identity), so
+        // a spec on another delay is another version of the match and its
+        // peer is refused with both digests named, before tick 0.
+        let config = ArenaConfig {
+            seed: 0x5EE9,
+            ticks: 24,
+            fighters: 2,
+            half_extent_m: 12.0,
+            table_version: 1,
+        };
+        let base = MatchSpec::v1(config);
+        assert_eq!(base.input_delay_ticks, DEFAULT_DELAY);
+        assert_eq!(DEFAULT_INPUT_DELAY_TICKS, DEFAULT_DELAY);
+        let slower = base.clone().with_input_delay(DEFAULT_DELAY + 1);
+        assert_ne!(slower.identity(), base.identity(), "another match");
+        let want = BuildId::of_spec(1, &base);
+        let got = BuildId::of_spec(1, &slower);
+        assert_eq!(
+            got.check_against(want),
+            Err(LobbyError::VersionMismatch {
+                want_version: 1,
+                got_version: 1,
+                want_rules: base.identity(),
+                got_rules: slower.identity(),
+            })
+        );
+        // The knob stays inside MIN_DELAY..=MAX_DELAY: the net layer refuses
+        // a spec outside it, and the default spec builds on both roles.
+        assert!(Server::from_spec(base.clone()).is_ok());
+        assert!(Client::from_spec(base, FighterId::new(0).expect("slot 0")).is_ok());
+        let wild = slower.with_input_delay(MAX_DELAY + 1);
+        assert!(matches!(
+            Server::from_spec(wild.clone()),
+            Err(NetError::BadConfig)
+        ));
+        assert!(matches!(
+            Client::from_spec(wild, FighterId::new(0).expect("slot 0")),
+            Err(NetError::BadConfig)
+        ));
     }
 }

@@ -853,15 +853,22 @@ impl DecalPool {
         for d in &mut self.decals {
             d.age_ticks += 1;
         }
-        let mut kept: Vec<PlacedDecal> = Vec::with_capacity(self.decals.len());
-        for d in &self.decals {
-            if d.age_ticks < BLOOD_FADE_TICKS {
-                kept.push(*d);
-            } else if self.atlas.is_used(d.atlas_slot) {
+        // Stable partition of survivors to the front in place; the culled
+        // tail keeps the order it had, and its tiles are freed after the
+        // borrow of `decals` ends. No per-tick `Vec`.
+        let mut keep = 0usize;
+        for i in 0..self.decals.len() {
+            if self.decals[i].age_ticks < BLOOD_FADE_TICKS {
+                self.decals.swap(keep, i);
+                keep += 1;
+            }
+        }
+        for d in &self.decals[keep..] {
+            if self.atlas.is_used(d.atlas_slot) {
                 let _ = self.atlas.free(d.atlas_slot);
             }
         }
-        self.decals = kept;
+        self.decals.truncate(keep);
         self.tick += 1;
     }
 
@@ -952,11 +959,10 @@ impl DecalPool {
             });
         }
         if self.decals.len() != self.atlas.used() {
-            return Err(DecalError::Invalid(format!(
-                "decal pool {} differs from atlas {}",
-                self.decals.len(),
-                self.atlas.used()
-            )));
+            let atlas_used = self.atlas.used();
+            let resident = self.decals.len();
+            let reason = format!("decal pool {resident} differs from atlas {atlas_used}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(DecalError::Invalid(reason));
         }
         Err(DecalError::NoDevice(
             "decal GPU bind needs the window build with a live device; CPU placement is the reference".into(),
@@ -1187,14 +1193,13 @@ impl DecalPool {
         use std::time::Instant;
         frame
             .validate()
-            .map_err(|e| DecalError::Invalid(format!("decal look frame: {e}")))?;
+            .map_err(|e| DecalError::Invalid(format!("decal look frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
         cam.validate()?;
         if self.decals.len() != self.atlas.used() {
-            return Err(DecalError::Invalid(format!(
-                "decal pool {} differs from atlas {}",
-                self.decals.len(),
-                self.atlas.used()
-            )));
+            let atlas_used = self.atlas.used();
+            let resident = self.decals.len();
+            let reason = format!("decal pool {resident} differs from atlas {atlas_used}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(DecalError::Invalid(reason));
         }
         let mut bytes = self.upload_instances();
         bytes.extend_from_slice(&self.upload_roughness());
@@ -1203,7 +1208,7 @@ impl DecalPool {
         }
         let words = bytes.len().div_ceil(4) as u64;
         let count = u32::try_from(words)
-            .map_err(|_| DecalError::Invalid(format!("decal words {words} exceed u32")))?;
+            .map_err(|_| DecalError::Invalid(format!("decal words {words} exceed u32")))?; // alloc-ok: cold refusal, never a steady frame
         let byte_len = words * 4;
         let started = Instant::now();
 
@@ -1270,7 +1275,7 @@ impl DecalPool {
             0,
             &crate::graph::look_frame_uniform_bytes(frame),
         );
-        let mut padded = vec![0u8; byte_len as usize];
+        let mut padded = vec![0u8; byte_len as usize]; // alloc-ok: submit_gpu probe staging with readback, not the window steady frame
         padded[..bytes.len()].copy_from_slice(&bytes);
         queue.write_buffer(src_buf, 0, &padded);
 
@@ -1293,17 +1298,15 @@ impl DecalPool {
         let back = decal_readback_u32(readback, words as usize)?;
         readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
-            return Err(DecalError::Validation(format!(
-                "decal bind validation: {err:?}"
-            )));
+            let reason = format!("decal bind validation: {err:?}"); // alloc-ok: cold validation failure, never a steady frame
+            return Err(DecalError::Validation(reason));
         }
         for (i, chunk) in padded.chunks_exact(4).enumerate() {
             let want = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             if back[i] != want {
-                return Err(DecalError::Device(format!(
-                    "decal bind roundtrip word {i} differs: {} vs {want}",
-                    back[i]
-                )));
+                let got = back[i];
+                let reason = format!("decal bind roundtrip word {i} differs: {got} vs {want}"); // alloc-ok: cold device-loss path, never a steady frame
+                return Err(DecalError::Device(reason));
             }
         }
         Ok(DecalGpuReceipt {

@@ -1,3 +1,27 @@
-# arc12-ablation v1 (ARC12 relation-diff payload vs the raw coordinate table)
+# arc12-ablation v1 (ARC12 relation-diff edit vs the raw coordinate table)
+# Both arms run the same plan and the same SP5 solve; one row per AB1 brief.
+# Columns are the numbers `ablation_numbers` returns:
+# id  props = props placed
+#     requests = relation request lines the brief asks for (one per want)
+#     changes = relation delta lines the solve produced (added+removed+relabel)
+#     raw_lanes / raw_bytes = the coordinate table the parent report carries
+#     edit_bytes = bytes of the request plus change lines
+#     solves = SP5 solve calls
+#     reachable = routes reachable (must equal props)
+#     digest_equal = 1 when the edit's spine writes carry the exact level digest
+# The units a caller authors are `requests` relation lines and reviews
+# `changes` relation lines; the raw arm would make the caller author
+# `raw_lanes` loose coordinate numbers with no relation meaning. `edit_bytes`
+# is recorded, not compared: words cost more bytes than floats, and the
+# ablation claim is losslessness plus authorable units, never a byte win.
 # id	props	requests	changes	raw_lanes	raw_bytes	edit_bytes	solves	reachable	digest_equal
-arc12-01	0	0	0	0	0	0	0	0	0
+arc12-01	1	2	6	4	16	245	1	1	1
+arc12-02	2	2	11	8	32	381	2	2	1
+arc12-03	2	3	12	8	32	452	2	2	1
+arc12-04	2	3	12	8	32	444	2	2	1
+arc12-05	1	2	3	4	16	157	1	1	1
+arc12-06	3	3	23	12	48	727	3	3	1
+arc12-07	2	3	12	8	32	440	2	2	1
+arc12-08	1	2	9	4	16	320	1	1	1
+arc12-09	4	4	27	16	64	867	4	4	1
+arc12-10	2	3	11	8	32	422	2	2	1

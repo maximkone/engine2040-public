@@ -107,7 +107,208 @@ mod apply;
 pub use apply::*;
 mod backend;
 pub use backend::*;
+/// Lock the shared server session and refuse a stale observation: the
+/// caller's `observed` revision must equal the live document revision, so a
+/// proposal recorded against an older scene never reaches the solver.
+fn observed_state<'a>(
+    server: &'a McpServer,
+    observed: u64,
+) -> Result<std::sync::MutexGuard<'a, ServerState>, ProposeError> {
+    let state = server.lock().map_err(|error| ProposeError::PreviewFailed {
+        code: error.code,
+        message: error.message.clone(),
+    })?;
+    if state.doc.revision != observed {
+        return Err(ProposeError::StaleRevision {
+            expected: state.doc.revision,
+            got: observed,
+        });
+    }
+    Ok(state)
+}
 
+/// Name-text to spatial index over the staged snapshot: the same scene always
+/// maps to the same indices, so a want names the same actor on every machine.
+fn want_index(snap: &ActorSnapshot) -> BTreeMap<String, u32> {
+    snap.ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.to_string(), u32::try_from(index).unwrap_or(u32::MAX)))
+        .collect()
+}
+
+/// Solve the parsed wants over the staged actors: the first placement, or the
+/// conflict shape the solver reported (unmet wants), or the fallback conflict
+/// when the solver answered with neither a placement nor a conflict.
+fn solve_placement(
+    parsed: &[ParsedWant],
+    snap: &ActorSnapshot,
+    spatial_id: u32,
+    sources: &[String],
+) -> Result<engine_spatial::TransformOut, ProposalConflict> {
+    let intent = Intent {
+        object: ObjectRef::Id(spatial_id),
+        wants: parsed.iter().map(|entry| entry.want).collect(),
+    };
+    let solved = match engine_spatial::solve(&intent, &snap.actors) {
+        Ok(out) => out,
+        Err(spatial_conflict) => {
+            return Err(ProposalConflict {
+                conflicts: conflict_texts(parsed, &spatial_conflict.unmet),
+                reason: spatial_conflict.reason,
+                findings: Vec::new(),
+            });
+        }
+    };
+    solved.into_iter().next().ok_or_else(|| ProposalConflict {
+        conflicts: sources.to_vec(),
+        reason: "solver returned no placement and no conflict; \
+                 report this intent verbatim"
+            .to_owned(),
+        findings: Vec::new(),
+    })
+}
+
+/// SP1 staged gate over the spatial public API: the staged scene must add no
+/// red verdict and no new overlap/floating finding. The solver self-verifies
+/// the same catalog, so this fires only on drift -- defense in depth before
+/// the EA1c fork test. `None` means the gate passed.
+fn staged_gate(
+    snap: &ActorSnapshot,
+    spatial_id: u32,
+    placed: &engine_spatial::TransformOut,
+    sources: Vec<String>,
+) -> Option<ProposalConflict> {
+    let mut staged = snap.actors.clone();
+    if let Some(actor) = staged.iter_mut().find(|actor| actor.id == spatial_id) {
+        actor.x = placed.x;
+        actor.y = placed.y;
+        actor.z = placed.z;
+        actor.yaw = placed.yaw;
+    }
+    let delta = engine_spatial::check_staged(&snap.actors, &staged);
+    if delta.verdict() == "red" || delta.count("overlap") > 0 || delta.count("floating") > 0 {
+        return Some(ProposalConflict {
+            conflicts: sources,
+            reason: format!(
+                "staged check adds {} finding(s) (verdict {}); document unchanged",
+                delta.findings.len(),
+                delta.verdict()
+            ),
+            findings: delta.findings.iter().map(finding_line).collect(),
+        });
+    }
+    None
+}
+
+/// The `tx.preview` batch for one solved placement: a single root `SetLocal`
+/// carrying the model provenance stamp. The stamp names the sourcing
+/// backend's provider and model ids plus the digest of the recorded proposal
+/// text (summary plus wants only: no prompt, credential or session secret).
+/// The canonical action hash excludes the stamp, so the same content checks
+/// identically on every backend.
+fn preview_batch(
+    proposal: &Proposal,
+    node: ObjectId,
+    placed: &engine_spatial::TransformOut,
+    scale: [f32; 3],
+    base_revision: u64,
+    idempotency_key: u64,
+    backend: BackendKind,
+) -> Batch {
+    let request_text = format!("{} | {}", proposal.summary, proposal.wants.join(" + "));
+    Batch {
+        ops: vec![Op::SetLocal {
+            id: node,
+            local: Transform::new(
+                [placed.x, placed.y, placed.z],
+                quat_of_yaw(placed.yaw),
+                scale,
+            ),
+        }],
+        base_revision,
+        idempotency_key,
+        provenance: Some(ProvenanceStamp::model(
+            backend.provider(),
+            backend.model(),
+            request_digest(&request_text),
+        )),
+    }
+}
+
+/// Gate the fork proof before any apply: the proof must replay to its metrics
+/// and must name this exact receipt (fork id over the receipt hash plus the
+/// fork input) while sitting inside every balance bound. A tampered input or
+/// a proof cut for another proposal applies nothing.
+fn verify_proof(checked: &CheckedBatch, proof: &ForkProof) -> Result<(), ApplyError> {
+    let replayed = proof.replay().ok_or_else(|| ApplyError::ForkMismatch {
+        reason: "fork proof input rejected (tampered seed, base, window or probe); \
+                 re-run fork_test over the checked receipt"
+            .to_owned(),
+    })?;
+    if replayed != proof.metrics {
+        return Err(ApplyError::ForkMismatch {
+            reason: "fork proof metrics do not replay; \
+                     re-run fork_test over the checked receipt"
+                .to_owned(),
+        });
+    }
+    let expected_id = fork_id(
+        checked.receipt.action_hash,
+        proof.seed,
+        proof.base_tick,
+        proof.ticks,
+        &proof.proposals,
+    );
+    if proof.fork_id != expected_id {
+        return Err(ApplyError::ForkMismatch {
+            reason: format!(
+                "fork proof names fork {} for another proposal (expected {expected_id}); \
+                 re-run fork_test over the checked receipt",
+                proof.fork_id
+            ),
+        });
+    }
+    if let Some(breach) = check_balance(proof) {
+        return Err(ApplyError::ForkMismatch {
+            reason: format!(
+                "fork proof breaches balance ({}); revise the proposal",
+                breach.reason
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Loop verifier rows for an apply receipt: the staged spatial gate that ran
+/// during check plus the fork balance run that passed here.
+fn proof_verifiers(
+    proof: &ForkProof,
+    backend: BackendKind,
+    latency_ms: u64,
+    cost: Option<u64>,
+) -> Vec<VerifierResult> {
+    vec![
+        VerifierResult {
+            verifier: VERIFIER_STAGED.to_owned(),
+            passed: true,
+            detail: "staged check added no findings (verdict green)".to_owned(),
+        },
+        VerifierResult {
+            verifier: VERIFIER_FORK.to_owned(),
+            passed: true,
+            detail: format!(
+                "fork {} passed {} ticks (seed {}) backend={} latency_ms={} cost={}",
+                proof.fork_id,
+                proof.ticks,
+                proof.seed,
+                backend.as_str(),
+                latency_ms,
+                cost_text(cost),
+            ),
+        },
+    ]
+}
 /// Fences one tool-output/fetched-text span as data for the model prompt.
 ///
 /// Consumer: [`AssistantLoop::transcript_text`] wraps every observe row in
@@ -423,40 +624,9 @@ impl AssistantLoop {
     ) -> Result<PreviewReceipt, ProposeError> {
         let proposal = self.proposal.clone().ok_or(ProposeError::NoProposal)?;
         let observed = self.observed_revision.ok_or(ProposeError::NoProposal)?;
-        let state = server.lock().map_err(|error| ProposeError::PreviewFailed {
-            code: error.code,
-            message: error.message.clone(),
-        })?;
-        if state.doc.revision != observed {
-            return Err(ProposeError::StaleRevision {
-                expected: state.doc.revision,
-                got: observed,
-            });
-        }
+        let state = observed_state(server, observed)?;
         let snap = snapshot_actors(&state.doc);
-        let object_id = ObjectId::parse(object).map_err(|_| ProposeError::PreviewFailed {
-            code: "bad_id",
-            message: format!("object `{object}` is not an object id (expected UUID text)"),
-        })?;
-        let Some(position) = snap.ids.iter().position(|id| *id == object_id) else {
-            let conflict = ProposalConflict {
-                conflicts: vec![format!("move object {object}")],
-                reason: format!(
-                    "unknown-object {object}: no staged node with that id; \
-                     re-read scene.brief for the staged ids"
-                ),
-                findings: Vec::new(),
-            };
-            let text = conflict_text(&conflict);
-            self.record_check(&text)?;
-            return Err(ProposeError::Conflict(conflict));
-        };
-        let spatial_id = u32::try_from(position).map_err(|_| ProposeError::PreviewFailed {
-            code: "snapshot_failed",
-            message: "staged scene holds more nodes than the spatial index; retry scene.read"
-                .to_owned(),
-        })?;
-        let node = snap.ids[position];
+        let (node, spatial_id) = self.stage_root(&snap, object)?;
         let parented = state
             .doc
             .hierarchy
@@ -471,63 +641,11 @@ impl AssistantLoop {
                 ),
             });
         }
-        let index_of: BTreeMap<String, u32> = snap
-            .ids
-            .iter()
-            .enumerate()
-            .map(|(index, id)| (id.to_string(), u32::try_from(index).unwrap_or(u32::MAX)))
-            .collect();
-        // Wire wants to solver wants. A want that names an unknown target id
-        // cannot reach the solver, so it returns the conflict shape directly
-        // with the single culprit want.
-        let mut parsed = Vec::with_capacity(proposal.wants.len());
-        for source in &proposal.wants {
-            match parse_want(source, &index_of)? {
-                WantOutcome::Ready(want) => parsed.push(ParsedWant {
-                    want,
-                    source: source.clone(),
-                }),
-                WantOutcome::MissingTarget { reason } => {
-                    let conflict = ProposalConflict {
-                        conflicts: vec![source.clone()],
-                        reason,
-                        findings: Vec::new(),
-                    };
-                    let text = conflict_text(&conflict);
-                    self.record_check(&text)?;
-                    return Err(ProposeError::Conflict(conflict));
-                }
-            }
-        }
-        let intent = Intent {
-            object: ObjectRef::Id(spatial_id),
-            wants: parsed.iter().map(|entry| entry.want).collect(),
-        };
-        let solved = match engine_spatial::solve(&intent, &snap.actors) {
-            Ok(out) => out,
-            Err(spatial_conflict) => {
-                let conflict = ProposalConflict {
-                    conflicts: conflict_texts(&parsed, &spatial_conflict.unmet),
-                    reason: spatial_conflict.reason,
-                    findings: Vec::new(),
-                };
-                let text = conflict_text(&conflict);
-                self.record_check(&text)?;
-                return Err(ProposeError::Conflict(conflict));
-            }
-        };
+        let parsed = self.parse_proposal(&proposal, &want_index(&snap))?;
         let sources: Vec<String> = parsed.iter().map(|entry| entry.source.clone()).collect();
-        let Some(placed) = solved.first() else {
-            let conflict = ProposalConflict {
-                conflicts: sources,
-                reason: "solver returned no placement and no conflict; \
-                         report this intent verbatim"
-                    .to_owned(),
-                findings: Vec::new(),
-            };
-            let text = conflict_text(&conflict);
-            self.record_check(&text)?;
-            return Err(ProposeError::Conflict(conflict));
+        let placed = match solve_placement(&parsed, &snap, spatial_id, &sources) {
+            Ok(placed) => placed,
+            Err(conflict) => return Err(self.conflict_refusal(conflict)),
         };
         // Roots carry world poses as their local pose; keep the node's scale.
         let scale = state
@@ -536,57 +654,20 @@ impl AssistantLoop {
             .local(node)
             .map(|pose| pose.scale)
             .unwrap_or([1.0, 1.0, 1.0]);
-        // Model stamp: the PR1 receipt names the sourcing backend's
-        // provider/model ids plus the digest of the recorded proposal text.
-        // No prompt, credential or session secret travels: the digest covers
-        // summary plus wants only. The canonical action hash excludes the
-        // stamp, so the same content checks identically on every backend.
-        let request_text = format!("{} | {}", proposal.summary, proposal.wants.join(" + "));
-        let batch = Batch {
-            ops: vec![Op::SetLocal {
-                id: node,
-                local: Transform::new(
-                    [placed.x, placed.y, placed.z],
-                    quat_of_yaw(placed.yaw),
-                    scale,
-                ),
-            }],
-            base_revision: state.doc.revision,
+        let batch = preview_batch(
+            &proposal,
+            node,
+            &placed,
+            scale,
+            state.doc.revision,
             idempotency_key,
-            provenance: Some(ProvenanceStamp::model(
-                self.backend.provider(),
-                self.backend.model(),
-                request_digest(&request_text),
-            )),
-        };
+            self.backend,
+        );
         // `tx.preview`: validate and diff with no side effects.
         let preview =
             commands::validate(&state.doc, &batch).map_err(|error| batch_error(&error))?;
-        // SP1 staged gate over the spatial public API: the staged scene must
-        // add no red verdict and no new overlap/floating findings. The solver
-        // self-verifies the same catalog, so this fires only on drift —
-        // defense in depth before the EA1c fork test.
-        let mut staged = snap.actors.clone();
-        if let Some(actor) = staged.iter_mut().find(|actor| actor.id == spatial_id) {
-            actor.x = placed.x;
-            actor.y = placed.y;
-            actor.z = placed.z;
-            actor.yaw = placed.yaw;
-        }
-        let delta = engine_spatial::check_staged(&snap.actors, &staged);
-        if delta.verdict() == "red" || delta.count("overlap") > 0 || delta.count("floating") > 0 {
-            let conflict = ProposalConflict {
-                conflicts: sources,
-                reason: format!(
-                    "staged check adds {} finding(s) (verdict {}); document unchanged",
-                    delta.findings.len(),
-                    delta.verdict()
-                ),
-                findings: delta.findings.iter().map(finding_line).collect(),
-            };
-            let text = conflict_text(&conflict);
-            self.record_check(&text)?;
-            return Err(ProposeError::Conflict(conflict));
+        if let Some(conflict) = staged_gate(&snap, spatial_id, &placed, sources) {
+            return Err(self.conflict_refusal(conflict));
         }
         let action_hash = canonical_action_hash(&batch);
         let mut receipt = PreviewReceipt {
@@ -607,6 +688,76 @@ impl AssistantLoop {
             receipt: receipt.clone(),
         });
         Ok(receipt)
+    }
+
+    /// Charge a conflict row and answer with that conflict: the transcript
+    /// keeps the record of what the check refused, so a live loop and a
+    /// replay show the same text. A budget refusal wins over the conflict.
+    fn conflict_refusal(&mut self, conflict: ProposalConflict) -> ProposeError {
+        match self.record_check(&conflict_text(&conflict)) {
+            Ok(_) => ProposeError::Conflict(conflict),
+            Err(error) => error,
+        }
+    }
+
+    /// Resolve the proposal's target root: its staged node plus spatial
+    /// index. A node that is absent records the `unknown-object` conflict
+    /// row and answers with that conflict.
+    fn stage_root(
+        &mut self,
+        snap: &ActorSnapshot,
+        object: &str,
+    ) -> Result<(ObjectId, u32), ProposeError> {
+        let object_id = ObjectId::parse(object).map_err(|_| ProposeError::PreviewFailed {
+            code: "bad_id",
+            message: format!("object `{object}` is not an object id (expected UUID text)"),
+        })?;
+        let Some(position) = snap.ids.iter().position(|id| *id == object_id) else {
+            let conflict = ProposalConflict {
+                conflicts: vec![format!("move object {object}")],
+                reason: format!(
+                    "unknown-object {object}: no staged node with that id; \
+                     re-read scene.brief for the staged ids"
+                ),
+                findings: Vec::new(),
+            };
+            return Err(self.conflict_refusal(conflict));
+        };
+        let spatial_id = u32::try_from(position).map_err(|_| ProposeError::PreviewFailed {
+            code: "snapshot_failed",
+            message: "staged scene holds more nodes than the spatial index; retry scene.read"
+                .to_owned(),
+        })?;
+        Ok((object_id, spatial_id))
+    }
+
+    /// Wire wants to solver wants: parse each recorded want against the
+    /// staged index. A want that names an unknown target id cannot reach the
+    /// solver, so it records the conflict row and answers with the conflict
+    /// shape carrying the single culprit want.
+    fn parse_proposal(
+        &mut self,
+        proposal: &Proposal,
+        index_of: &BTreeMap<String, u32>,
+    ) -> Result<Vec<ParsedWant>, ProposeError> {
+        let mut parsed = Vec::with_capacity(proposal.wants.len());
+        for source in &proposal.wants {
+            match parse_want(source, index_of)? {
+                WantOutcome::Ready(want) => parsed.push(ParsedWant {
+                    want,
+                    source: source.clone(),
+                }),
+                WantOutcome::MissingTarget { reason } => {
+                    let conflict = ProposalConflict {
+                        conflicts: vec![source.clone()],
+                        reason,
+                        findings: Vec::new(),
+                    };
+                    return Err(self.conflict_refusal(conflict));
+                }
+            }
+        }
+        Ok(parsed)
     }
 
     /// Charge one verify row against the budget, mapping loop errors to the
@@ -803,44 +954,7 @@ impl AssistantLoop {
         if self.quarantined {
             return Err(ApplyError::Quarantined);
         }
-        // The proof must replay and must name this receipt: a tampered input
-        // or a proof cut for another proposal applies nothing.
-        let replayed = proof.replay().ok_or_else(|| ApplyError::ForkMismatch {
-            reason: "fork proof input rejected (tampered seed, base, window or probe); \
-                     re-run fork_test over the checked receipt"
-                .to_owned(),
-        })?;
-        if replayed != proof.metrics {
-            return Err(ApplyError::ForkMismatch {
-                reason: "fork proof metrics do not replay; \
-                         re-run fork_test over the checked receipt"
-                    .to_owned(),
-            });
-        }
-        let expected_id = fork_id(
-            checked.receipt.action_hash,
-            proof.seed,
-            proof.base_tick,
-            proof.ticks,
-            &proof.proposals,
-        );
-        if proof.fork_id != expected_id {
-            return Err(ApplyError::ForkMismatch {
-                reason: format!(
-                    "fork proof names fork {} for another proposal (expected {expected_id}); \
-                     re-run fork_test over the checked receipt",
-                    proof.fork_id
-                ),
-            });
-        }
-        if let Some(breach) = check_balance(proof) {
-            return Err(ApplyError::ForkMismatch {
-                reason: format!(
-                    "fork proof breaches balance ({}); revise the proposal",
-                    breach.reason
-                ),
-            });
-        }
+        verify_proof(&checked, proof)?;
         if approval.action_hash != checked.receipt.action_hash {
             return Err(ApplyError::BadApproval {
                 reason: "approval names another batch (forged); \
@@ -870,26 +984,12 @@ impl AssistantLoop {
         let applied = capability::apply_gated(doc, journal, &checked.batch, cap, approval, ledger)
             .map_err(map_cap_error)?;
         let receipt_id = applied.provenance.receipt();
-        let verifiers = vec![
-            VerifierResult {
-                verifier: VERIFIER_STAGED.to_owned(),
-                passed: true,
-                detail: "staged check added no findings (verdict green)".to_owned(),
-            },
-            VerifierResult {
-                verifier: VERIFIER_FORK.to_owned(),
-                passed: true,
-                detail: format!(
-                    "fork {} passed {} ticks (seed {}) backend={} latency_ms={} cost={}",
-                    proof.fork_id,
-                    proof.ticks,
-                    proof.seed,
-                    self.backend.as_str(),
-                    self.backend_latency_ms,
-                    cost_text(self.backend_cost),
-                ),
-            },
-        ];
+        let verifiers = proof_verifiers(
+            proof,
+            self.backend,
+            self.backend_latency_ms,
+            self.backend_cost,
+        );
         let text = apply_text(applied.revision, applied.key, receipt_id);
         let tokens = self.record_loop_row(AssistantStep::Apply, &text)?;
         Ok(ApplyReceipt {

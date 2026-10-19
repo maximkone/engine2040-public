@@ -6,6 +6,12 @@ pub mod a2_session;
 /// Recorded editor run (session evidence): viewport, picking, hierarchy,
 /// inspector, gizmo, undo/redo, logs, isolated play and crash recovery.
 pub mod a3_session;
+/// Activity feed tagged human or agent plus a scene diff, so a person and an
+/// AI on the same scene see each other's edits. Std-only: a bounded activity
+/// ring and a total snapshot diff, consumed by the `activity` dock panel
+/// ([`shell::Panel::Activity`]) and the future door verbs `session.activity`
+/// and `scene.diff`.
+pub mod activity;
 /// Editor executable wiring (winit + egui + render snapshots + play child).
 #[cfg(feature = "ui")]
 pub mod app;
@@ -49,6 +55,11 @@ pub mod play;
 /// facade was cut 2026-10-16 (recover via `git log --follow -- crates/editor/src/app.rs`).
 #[cfg(feature = "ui")]
 pub mod play_in;
+/// Mouse-to-joint pose recorder: quantized joint targets as a bounded integer
+/// tape, validated and replayed deterministically. The UI layer solves IK in
+/// floats and hands the milli-turn angles here; this core carries no float and
+/// never touches sim state. Std-only.
+pub mod pose_tape;
 pub mod save;
 pub mod shell;
 #[cfg(feature = "ui")]

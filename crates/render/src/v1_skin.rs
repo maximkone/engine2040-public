@@ -452,14 +452,15 @@ impl SkinPipeline {
             });
         }
         let Some(skin) = skin else {
+            let missing_skin = SkinDiagnostic {
+                kind: SkinDiagKind::MissingSkin,
+                vertex: usize::MAX,
+            };
             return Ok(SkinnedFrame {
                 positions: mesh.positions.clone(),
                 normals: mesh.normals.clone(),
                 used_error_material: true,
-                diagnostics: vec![SkinDiagnostic {
-                    kind: SkinDiagKind::MissingSkin,
-                    vertex: usize::MAX,
-                }],
+                diagnostics: vec![missing_skin], // alloc-ok: offscreen capture staging
             });
         };
         if skin.len() != mesh.positions.len() {
@@ -1070,7 +1071,7 @@ impl GpuSkinned {
         // Interleaved skinned vertices: missing skin uploads joint-0/weight-1
         // rows (the shader ignores them and shades magenta instead).
         let n = scene.mesh.positions.len();
-        let mut verts = Vec::with_capacity(n * SKINNED_VERTEX_STRIDE as usize);
+        let mut verts = Vec::with_capacity(n * SKINNED_VERTEX_STRIDE as usize); // alloc-ok: offscreen capture staging, not the window steady frame
         for i in 0..n {
             for c in scene.mesh.positions[i] {
                 verts.extend_from_slice(&c.to_le_bytes());
@@ -1117,15 +1118,15 @@ impl GpuSkinned {
                 usage: wgpu::BufferUsages::INDEX,
             });
         let cam_buf =
-            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-camera", &cam_u.to_bytes());
+            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-camera", &cam_u.to_bytes()); // alloc-ok: offscreen capture encode, not the window steady frame
         let light_buf =
-            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-light", &light_u.to_bytes());
+            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-light", &light_u.to_bytes()); // alloc-ok: offscreen capture encode, not the window steady frame
         let mat_buf =
-            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-material", &mat_u.to_bytes());
-        // Storage joints: AN1 rows uploaded verbatim as WGSL columns (see
-        // `SkinningUniform::to_bytes`), zero-filled past the joint count.
-        let mut joint_bytes = vec![0u8; SKIN_STORAGE_BYTES as usize];
-        let gpu_mats = uniform.to_bytes();
+            crate::v1_gpu::create_uniform_buffer(&self.device, "r3-u-material", &mat_u.to_bytes()); // alloc-ok: offscreen capture encode, not the window steady frame
+                                                                                                    // Storage joints: AN1 rows uploaded verbatim as WGSL columns (see
+                                                                                                    // `SkinningUniform::to_bytes`), zero-filled past the joint count.
+        let mut joint_bytes = vec![0u8; SKIN_STORAGE_BYTES as usize]; // alloc-ok: offscreen capture staging, not the window steady frame
+        let gpu_mats = uniform.to_bytes(); // alloc-ok: offscreen capture encode, not the window steady frame
         joint_bytes[..gpu_mats.len()].copy_from_slice(&gpu_mats);
         let joint_buf = self
             .device
@@ -1134,7 +1135,7 @@ impl GpuSkinned {
                 contents: &joint_bytes,
                 usage: wgpu::BufferUsages::STORAGE,
             });
-        let mut params = Vec::with_capacity(16);
+        let mut params = Vec::with_capacity(16); // alloc-ok: offscreen capture staging, not the window steady frame
         params.extend_from_slice(&(uniform.joint_count as u32).to_le_bytes());
         params.extend_from_slice(&(skin.is_some() as u32).to_le_bytes());
         params.extend_from_slice(&0u32.to_le_bytes());
@@ -1282,15 +1283,15 @@ impl GpuSkinned {
         });
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuSkinError::Readback(format!("poll: {e}")))?;
+            .map_err(|e| GpuSkinError::Readback(format!("poll: {e}")))?; // alloc-ok: cold readback failure, never a steady frame
         rx.recv()
-            .map_err(|e| GpuSkinError::Readback(format!("map channel: {e}")))?
-            .map_err(|e| GpuSkinError::Readback(format!("map: {e}")))?;
-        let mut rgba = vec![0u8; (bytes_per_row as usize) * (height as usize)];
+            .map_err(|e| GpuSkinError::Readback(format!("map channel: {e}")))? // alloc-ok: cold readback failure, never a steady frame
+            .map_err(|e| GpuSkinError::Readback(format!("map: {e}")))?; // alloc-ok: cold readback failure, never a steady frame
+        let mut rgba = vec![0u8; (bytes_per_row as usize) * (height as usize)]; // alloc-ok: offscreen capture staging, not the window steady frame
         {
             let mapped = slice
                 .get_mapped_range()
-                .map_err(|e| GpuSkinError::Readback(format!("mapped range: {e}")))?;
+                .map_err(|e| GpuSkinError::Readback(format!("mapped range: {e}")))?; // alloc-ok: cold readback failure, never a steady frame
             for (dst, src) in rgba.chunks_exact_mut(bytes_per_row as usize).enumerate() {
                 let off = dst * padded as usize;
                 src.copy_from_slice(&mapped[off..off + bytes_per_row as usize]);
@@ -1300,7 +1301,7 @@ impl GpuSkinned {
 
         let scope_err = pollster::block_on(scope.pop());
         if let Some(err) = scope_err {
-            return Err(GpuSkinError::Validation(format!("{err:?}")));
+            return Err(GpuSkinError::Validation(format!("{err:?}"))); // alloc-ok: cold validation failure, never a steady frame
         }
 
         let png =

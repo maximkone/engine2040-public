@@ -424,9 +424,41 @@ fn vs_sky(@builtin(vertex_index) vi: u32) -> SkyOut {
 // BRDF: one copy for every fragment entry.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// QL5 potato guard: the one fp16 and specular-aliasing guard of every look
+// shader (this file today; a new lit file calls `look_guard` and joins the
+// `LOOK_SHADERS` list in `crate::quality`, whose gate fails otherwise).
+// ---------------------------------------------------------------------------
+// The floors are QL1's (`crates/material/src/compile.rs`): perceptual
+// roughness 0.089 and the smallest half normal 2^-14 (6.103515625e-5). Both
+// are fp16 safe: they only keep a denominator off zero. QL1's anisotropy
+// floor 0.001 guards the material BRDF's anisotropic lobe, which this file
+// does not carry.
+const LOOK_ROUGHNESS_FLOOR: f32 = 0.089;
+const LOOK_MIN_HALF_NORMAL: f32 = 6.103515625e-5;
+// The one clamp that is fp32 only: at a grazing view the Smith denominator
+// divides by a near-zero NdotV and turns a bright sun into a one-pixel
+// sparkle; 0.045 is the Frostbite floor that stops it. fp16 saturates the
+// term long before that floor, so the potato preset switches this clamp off
+// and keeps the two floors above.
+const LOOK_ANALYTIC_GRAZING: f32 = 0.045;
+// True on the potato preset (`crate::quality::look_guard_constants`).
+override POTATO_GUARD: bool = false;
+
+// One guard for every look term: raise `value` to its floor, then, when the
+// term is the analytic-light grazing dot and the preset is not potato, to
+// `LOOK_ANALYTIC_GRAZING`. No caller writes a bare clamp of its own.
+fn look_guard(value: f32, floor: f32, analytic: bool) -> f32 {
+    var out = max(value, floor);
+    if (analytic && !POTATO_GUARD) {
+        out = max(out, LOOK_ANALYTIC_GRAZING);
+    }
+    return out;
+}
+
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): perceptualRoughnessToRoughness.
 fn perceptual_roughness_to_roughness(p: f32) -> f32 {
-    let c = clamp(p, 0.089, 1.0);
+    let c = clamp(look_guard(p, LOOK_ROUGHNESS_FLOOR, false), 0.0, 1.0);
     return c * c;
 }
 
@@ -449,7 +481,7 @@ fn v_smith_ggx_correlated(roughness: f32, ndot_v: f32, ndot_l: f32) -> f32 {
 
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): F_Schlick_vec (Schlick 1994).
 fn f_schlick_vec(f0: vec3<f32>, f90: f32, vdot_h: f32) -> vec3<f32> {
-    return f0 + (f90 - f0) * pow(1.0 - vdot_h, 5.0);
+    return f0 + (f90 - f0) * pow(max(1.0 - vdot_h, LOOK_MIN_HALF_NORMAL), 5.0);
 }
 
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): fresnel (Filament occlusion f90).
@@ -500,7 +532,7 @@ fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>) -> 
     let l = normalize(light.dir_to_light);
     let h = normalize(l + v);
     let ndot_l = clamp(dot(n, l), 0.0, 1.0);
-    let ndot_v = max(dot(n, v), 0.0001);
+    let ndot_v = look_guard(max(dot(n, v), 0.0001), LOOK_MIN_HALF_NORMAL, true);
     let ndot_h = clamp(dot(n, h), 0.0, 1.0);
     let ldot_h = clamp(dot(l, h), 0.0, 1.0);
 

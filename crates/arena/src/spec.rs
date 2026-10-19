@@ -11,11 +11,18 @@
 //! Consumer: `engine-game` (`App::spec`, the window and the LAN host) and
 //! `engine-net` (`Server::from_spec`, `Client::from_spec`, the lobby build
 //! id). Data owner: this module owns the identity digest; [`MatchWorld`]
-//! owns the world digest. Units: meters, fixed ticks. Determinism: same
-//! spec, same checkpoints; the digest is FNV over integers and `to_bits`.
-//! Errors: [`MatchSpec::live`] is `None` for an invalid config, an unknown
-//! rules version or a world that blocks a spawn, like
-//! [`LiveMatch::with_rules_world`].
+//! owns the world digest. Units: meters, fixed ticks, whole input-delay
+//! ticks. Determinism: same spec, same checkpoints; the digest is FNV over
+//! integers and `to_bits`. Errors: [`MatchSpec::live`] is `None` for an
+//! invalid config, an unknown rules version or a world that blocks a spawn,
+//! like [`LiveMatch::with_rules_world`].
+//!
+//! Input delay (QN2): [`MatchSpec::input_delay_ticks`] is the local input
+//! lag both peers must share, so it rides the identity:
+//! [`MatchSpec::identity`] folds it only when it differs from
+//! [`DEFAULT_INPUT_DELAY_TICKS`], exactly like the spear flag. Every shipped
+//! spec is on the default, so every frozen digest is byte-unchanged, and a
+//! peer on another delay is refused as a build mismatch before tick 0.
 
 use engine_combat::tables::TABLES_VERSION_V2;
 use engine_core::Fnv64;
@@ -37,10 +44,23 @@ pub struct MatchSpec {
     /// button throws a spear and tethers fighters. Off by default; off leaves
     /// the match, its hash and its identity exactly as before.
     pub spear: bool,
+    /// Local input delay in ticks both peers hold their inputs for
+    /// ([`DEFAULT_INPUT_DELAY_TICKS`] by default, the net send-queue hold
+    /// `engine_net::session::INPUT_DELAY_TICKS`). A match property, not a
+    /// local choice: [`MatchSpec::identity`] folds it when it differs from
+    /// the default, so a peer on another delay is refused before tick 0.
+    pub input_delay_ticks: u32,
 }
 
+/// Default local input delay in ticks: two ticks (33 ms at 60 Hz), the
+/// production send-queue hold the net layer ships
+/// (`engine_net::session::INPUT_DELAY_TICKS`). The net test
+/// `delay::tests::input_delay_sits_in_the_match_spec_and_bumps_the_wire_version_gate`
+/// binds the two.
+pub const DEFAULT_INPUT_DELAY_TICKS: u32 = 2;
+
 impl MatchSpec {
-    /// A spec from its three parts.
+    /// A spec from its three parts, on the default input delay.
     #[must_use]
     pub fn new(config: ArenaConfig, rules: ArenaRules, world: MatchWorld) -> Self {
         Self {
@@ -48,6 +68,7 @@ impl MatchSpec {
             rules,
             world,
             spear: false,
+            input_delay_ticks: DEFAULT_INPUT_DELAY_TICKS,
         }
     }
 
@@ -55,6 +76,15 @@ impl MatchSpec {
     #[must_use]
     pub fn with_spear(mut self) -> Self {
         self.spear = true;
+        self
+    }
+
+    /// This spec with `ticks` of local input delay. Both peers must hold the
+    /// same delay, so it is part of the match identity: a spec on another
+    /// delay holds another identity and is refused as a build mismatch.
+    #[must_use]
+    pub fn with_input_delay(mut self, ticks: u32) -> Self {
+        self.input_delay_ticks = ticks;
         self
     }
 
@@ -109,7 +139,9 @@ impl MatchSpec {
     /// One digest over config, rules and world: two peers with equal
     /// identities play the same match from the same tape. The lobby build id
     /// carries it, so a peer on other rules or another world is refused
-    /// before tick 0.
+    /// before tick 0. The spear flag and a non-default input delay are mixed
+    /// in only when set, so every spec on the shipped defaults digests
+    /// exactly as it did before those fields existed.
     #[must_use]
     pub fn identity(&self) -> u64 {
         let config = &self.config;
@@ -124,6 +156,12 @@ impl MatchSpec {
         // Mixed in only when on, so every spear-less identity is unchanged.
         if self.spear {
             hash.write_u8(0x5A);
+        }
+        // Mixed in only when off the default, so the delay sits in the match
+        // without moving any shipped identity (QN2).
+        if self.input_delay_ticks != DEFAULT_INPUT_DELAY_TICKS {
+            hash.write_u8(0xD1);
+            hash.write_u32(self.input_delay_ticks);
         }
         hash.finish()
     }
@@ -215,6 +253,40 @@ mod tests {
         );
         assert_eq!(armed.identity(), armed.clone().identity());
         // A spear-less spec digests exactly as it did before the flag existed.
+        let c = base.config;
+        let mut old = Fnv64::new();
+        old.write_u64(c.seed);
+        old.write_u32(c.ticks);
+        old.write_u8(c.fighters);
+        old.write_u32(c.half_extent_m.to_bits());
+        old.write_u32(c.table_version);
+        old.write_u64(base.rules_digest());
+        old.write_u64(base.world_digest());
+        assert_eq!(base.identity(), old.finish());
+    }
+
+    #[test]
+    fn input_delay_identity_moves_only_when_changed() {
+        let base = MatchSpec::duel(config(), MatchWorld::empty());
+        assert_eq!(base.input_delay_ticks, DEFAULT_INPUT_DELAY_TICKS);
+        let slower = base.clone().with_input_delay(DEFAULT_INPUT_DELAY_TICKS + 1);
+        let faster = base.clone().with_input_delay(1);
+        assert_ne!(
+            base.identity(),
+            slower.identity(),
+            "another delay is another match"
+        );
+        assert_ne!(faster.identity(), slower.identity());
+        assert_eq!(
+            slower
+                .clone()
+                .with_input_delay(DEFAULT_INPUT_DELAY_TICKS + 1)
+                .identity(),
+            slower.identity(),
+            "stable"
+        );
+        // A spec on the default delay digests exactly as it did before the
+        // field existed.
         let c = base.config;
         let mut old = Fnv64::new();
         old.write_u64(c.seed);

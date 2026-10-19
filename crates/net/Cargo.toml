@@ -26,6 +26,12 @@ tokio = { workspace = true, optional = true, features = ["net", "sync", "time"] 
 # Handshake only (no TLS, no connect helpers): wss is terminated in front of it.
 tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "sink"] }
+# RC15: authenticated connect tokens (src/handshake.rs) seal with HMAC-SHA256,
+# the same pure-Rust pair the evidence seal uses (`hmac` 0.12 + `sha2` 0.10,
+# both MIT/Apache-2.0). Optional: the default graph, and the wasm bundle the
+# web build ships, keep the development-only plain seal shape.
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [features]
 # `--features quic` builds the quinn transport behind Transport.
@@ -36,6 +42,11 @@ webtransport = ["quic", "dep:wtransport", "dep:tokio"]
 # `--features websocket` adds the WebSocket server beside QUIC: the same Transport
 # trait and the same payload bytes, one binary message per frame.
 websocket = ["quic", "dep:tokio-tungstenite", "dep:futures-util", "dep:tokio"]
+# `--features crypto` authenticates every handshake seal with HMAC-SHA256
+# (`handshake::seal_token` / `open_token` and the challenge/response seals).
+# Off by default: the wasm bundle the web build ships stays small, and the
+# default seal is the documented development-only fold.
+crypto = ["dep:hmac", "dep:sha2"]
 
 # The dedicated server a page plays a scripted duel against (WEB9/WEB12). It needs the
 # WebSocket server, so a default build (std-only) never sees it.

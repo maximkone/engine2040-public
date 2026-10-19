@@ -36,7 +36,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   `frame_000060.png`, `frame_000090.png` and `manifest.json`; log line `bv1 tris=20496 joints=43`. The pictures were
   opened: the textured knight hero (helmet, plate, black shield, sword) stands on a sand floor in front of a wood slab
   with sky behind. Gaps, each its own row: the capture ran in the dev profile, not `--release` (BV5); golden
-  `d57b5c8ae3096614` was not re-run by Eyes, the diff touches only `crates/viewer` and docs (BV5).
+  `d57b5c8ae3096614` was not re-run by Eyes, the diff touches only `crates/viewer` and docs (BV5). Tick audit 2026-10-19: the `engine-viewer` crate was dropped on purpose (1296f273, rot); this row's crate is gone.
 - [x] BV2 viewer: the hero animates and the sim drives the picture — in `crates/viewer` the hero plays the CT7
   clips in `content/fighters/glb/clips/` (`human_male_idle_combat_main_hand_melee.glb` standing,
   `human_male_run.glb` while the sim root-motion speed is over 0.5 m/s, a `human_male_cast_*` clip on a sim
@@ -55,7 +55,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   limbs stretched; tests `a_retargeted_clip_keeps_the_hero_at_its_own_size`, `a_node_path_starts_at_the_scene_root`).
   `target/bv1/frame_000030.png` and `frame_000090.png` (opened) show the hero in two different run poses (tick 30 clip
   Run since 1, tick 90 Run since 85, legs and arms in different phases) at x 18.33 and 18.01. The 3 opponents use the hero's
-  ratio, not their own (BV6). The side-by-side with the cubes capture is left to the judge.
+  ratio, not their own (BV6). The side-by-side with the cubes capture is left to the judge. Tick audit 2026-10-19: the `engine-viewer` crate was dropped on purpose (1296f273, rot); this row's crate is gone.
 - [x] BV4 viewer: the material hook for the one material record (decision D1; the Materials Fable owns
   `crates/viewer/src/material.rs`) — Eyes creates the file with a stub trait `LookMaterial` (record name in, a Bevy
   `StandardMaterial` out), the viewer draws every kit and fighter mesh through it and ships the identity mapping now.
@@ -72,7 +72,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   `cargo test --locked -p engine-viewer --no-default-features --lib` 41 passed (material 6/6: same descriptor
   x2, unknown falls back, never panics); golden `d57b5c8ae3096614` x2; `node tools/rust-quality.mjs --crate viewer`
   PASS 97 (A); `node tools/workspace-check.mjs` PASS. The hook is wired: `LookSource(RecordLook::shipped())` in,
-  `apply_look` in Update draws known records through `to_standard_material`, the rest keep their glTF material.
+  `apply_look` in Update draws known records through `to_standard_material`, the rest keep their glTF material. Tick audit 2026-10-19: the `engine-viewer` crate was dropped on purpose (1296f273, rot); this row's crate is gone.
 - [x] VS2 render: textured draws — `DrawItem` gains `base_color:
   Option<TextureKey>`; the forward pass multiplies the material factor by the
   sampled texture when present. Tier A. Size M. Owns the `DrawItem` struct in
@@ -414,7 +414,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   `target/showcase/2026-09-28-r2/editor-viewport-rtx3050.png` vs after
   on the reference GPU scores higher by this seat on light +
   atmosphere with 0 validation errors; golden unchanged. needs: RL4,
-  RL7, CT8. (ART wave 85.)
+  RL7, CT8. (ART wave 85.) Tick audit 2026-10-19: closed as dead per docs/plan/2026-10-19-owner-queue.md; the named render `tunnel_mouth.rs` went with the render wip sweep f737386e.
 - [x] RP2 render: GPU particles (dust, torch flame, sparks) with a fixed
   seeded pool and CPU-sim parity. Tier A. Size L. Owns
   `crates/render/src/particles_gpu.rs`. Accept: identical particle bytes
@@ -802,9 +802,9 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
 - [x] RV1 provider: red-team tape — a replayed suite of prompt injections
   through briefs, asset names, scene text and tool results, out-of-scope tool
   calls and secret-exfiltration tries, run every wave (deep dive 12). Tier A.
-  Size S. Owns `fixtures/redteam/`, `crates/endpoint/tests/redteam.rs`.
+  Size S. Owns `fixtures/redteam/`, `crates/endpoint/tests/it/redteam.rs`.
   Accept: every case refused or contained with a logged reason; no secret in
-  any log; a new case is one fixture file. needs: AH5, MCP5.
+  any log; a new case is one fixture file. needs: AH5, MCP5. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-endpoint --test it redteam::` 6 passed (on this PC).
 - [x] VK1 playtest: keypoint verifier (GameGen-Verifier, arXiv 2605.07442:
   state injection + bounded play + assertions, 92% vs 59% accuracy) — a
   gameplay claim ("parry opens a riposte window", "ragdoll gets up in 2 s")
@@ -829,10 +829,10 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   summary plus a real capture PNG, so the vision playtester plays turn by
   turn; the capture callback is wired on the GPU path, so `capture` never
   answers `unsupported_capture` when a device exists. Tier A. Size M. Owns
-  `crates/endpoint/src/play.rs`, `crates/endpoint/src/play_session.rs`.
+  `crates/endpoint/src/play.rs`, `crates/endpoint/src/play/play_session.rs`.
   Accept: an agent plays 20 steps of a duel through MCP; every step returns a
   non-black PNG (pixel-variance check) and a state digest; the same inputs
-  twice give the same digests. needs: MCP2, GX1, WIN1.
+  twice give the same digests. needs: MCP2, GX1, WIN1. Tick audit 2026-10-19: path updated to `crates/endpoint/src/play/play_session.rs`.
 
 ## SPRINT-05-code-quality.md
 
@@ -943,7 +943,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   `crates/net/src/replicate.rs`. Accept: component deltas replicate;
   client/server agree x2; replay exact. needs: NET1. (RES-REPO wave 32
   corner 3, reviewed 2026-09-26; wave 38: deltas + agree x2 + replay,
-  net 165 green, judge PASS depth 3; EVIDENCE row landed.)
+  net 165 green, judge PASS depth 3; EVIDENCE row landed.) Tick audit 2026-10-19: the named net `replicate.rs` is deleted net code that stays deleted until a caller exists (docs/plan/2026-10-19-owner-queue.md).
 - [x] ARC1 ecs: spine components — `Transform` (Fixed xyz + yaw),
   `Body` (Fixed vel + radius/height), `Fighter` (hp/stamina/poise +
   state), `AiState` (intent + clock), `AnimState` (loco state + pose
@@ -1015,7 +1015,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   link traverse for TV1 vault/hurdle/mantle/climb/drop, rebake hooks
   for DX1 break sets. Owns `crates/nav/src/crowd.rs` (+ links). Size M.
   Accept: probe fixtures pick TV1-expected actions; density test flat
-  per-tick cost. needs: NV1, TV1.
+  per-tick cost. needs: NV1, TV1. Tick audit 2026-10-19: accepted as closed by its replacement — REPLACED: `nav/orca.rs` (docs/plan/2026-10-19-owner-queue.md).
 - [x] GA1 brain: gladiator depth — phases, feints, stamina-aware pacing
   on the BR1 utility core; squad roles via the director; difficulty
   tension tables. Owns `crates/ai/src/depth.rs` (+ squad). Size M.
@@ -1078,18 +1078,18 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
 - [x] PX3 physics: grapple — servo tracks the opponent ragdoll with
   torque caps and breakaway. Tier A. Size M. Owns
   `crates/physics/src/grapple.rs`. Accept: hash x2 on scripted
-  grapple tapes; breakaway within budget ticks. needs: PX1.
+  grapple tapes; breakaway within budget ticks. needs: PX1. Tick audit 2026-10-19: accepted as closed by its replacement (docs/plan/2026-10-19-owner-queue.md); the named physics `grapple.rs` is gone.
 - [x] PX27 physics: D-CLOTH-1 baseline tape — 50 seeded cape drapes over
   capsule colliders + folded-curtain set at FIXED_DT 60 Hz, seed pinned.
   Tier A spike. Size S. Owns measurement hunks beside
   `crates/physics/src/cloth.rs` + `crates/physics/tests/`. Accept:
   `cargo test -p engine-physics --lib cloth_gap` green; penetration max +
   self-penetration + ms + allocs + hash x2 posted; golden unchanged.
-  needs: PH1. (PROPOSED planner-future-r1, D-CLOTH-1.)
+  needs: PH1. (PROPOSED planner-future-r1, D-CLOTH-1.) Tick audit 2026-10-19: the `cloth_gap` filter is gone — `crates/physics/src/cloth.rs` was deleted 3d6ee4a1 and the cloth module was rewritten fresh by RZ7 (331dca1b) with other test names, so the tick stands.
 - [x] PX28 physics: one-way cloth-vs-collider coupling (held on PX27 +
   PX12). Tier B. Size S. Owns seam beside `crates/physics/src/cloth.rs`.
   Accept: `cargo test -p engine-physics --lib cloth_couple` green; 1 cm
-  in 50 drapes; 0.5 ms; hash x2. needs: PX27, PX12.
+  in 50 drapes; 0.5 ms; hash x2. needs: PX27, PX12. Tick audit 2026-10-19: the `cloth_couple` filter is gone; the rewritten `crates/physics/src/cloth.rs` covers one-way colliders in `a_capsule_keeps_the_cape_off_the_body` and `colliders_push_to_the_surface_and_leave_outside_points`, so the tick stands.
   (PROPOSED planner-future-r1, held.)
 - [x] PX29 physics: folded-curtain self-collision via intercollision sets
   (held on PX28). Tier B. Size S. Owns hunks beside
@@ -1098,7 +1098,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   needs: PX28. (PROPOSED planner-future-r1, held.)
   Landed 2026-10-05 (builder-body-r3 + repair, PASS): cloth_self 2/2,
   lib 101 passed 0 failed 2 ignored, couple 481.8 ms <2000, digests
-  bit-identical, UNLOCKS VX16. SHA follows in Receipts.
+  bit-identical, UNLOCKS VX16. SHA follows in Receipts. Tick audit 2026-10-19: the `cloth_self` filter is gone; the cloth module was rewritten fresh (RZ7 331dca1b), so the named self-collision tests no longer exist; the tick stands.
 - [x] PX30 physics: balance-COM hash quantization — `state_hash` folds the
   `BalanceState::com` `f32` triple (canonical bits today, `balance.rs:586`);
   hash integer millimetres instead so FMA or summation-order drift on
@@ -1335,14 +1335,14 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   position, join, host, ready, AI fill, start, leave; commands carry host ids
   and flags only, never an address or a string; refresh paced from the net
   lobby's own period through `LobbyLimits`). `cargo test -p engine-ui --lib
-  lobby_ui` 12 passed. `cargo test -p engine-game --test lobby_ui_flow`
+  lobby_ui` 12 passed. `cargo test -p engine-game --test it lobby_ui_flow::`
   2 passed: a host screen and a guest screen over the real `engine-net`
   lobby on loopback UDP go from the host list to one identical
   `FightRequest` (seed 777, 4 fighters, 2 humans plus 2 AI) with every address
   taken from a datagram, none typed; ten seconds of 16 ms frames ask 38-41
   refreshes and the net browser accepts every one. clippy -D warnings clean,
   rust-quality ui 99 (A) and game 94 (A), 0 regressions. The windowed loop
-  does not draw this screen yet. TICK.
+  does not draw this screen yet. TICK. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-game --test it lobby_ui_flow::` 3 passed, run 39230103927.
 - [x] PQ10 proof: offline MCTS exploit sweep beside the tournament —
   bounded search over the engine forward model, never the tick. Tier B.
   Size M. Owns sweep hunks beside the PQ2 harness (sim frozen). Accept:
@@ -1624,7 +1624,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   fixed point, no bytes copied) — D-term on the pose error, a magnitude
   clamp on the output, and a dt-guard that falls back to P-only. Tier B.
   Size S. Owns drive hunks beside `crates/physics/src/powered.rs`
-  (`DriveParams`) + `crates/physics/tests/pd_drive.rs`. Accept: F2P:
+  (`DriveParams`) + `crates/physics/tests/it/pd_drive.rs`. Accept: F2P:
   `cargo test -p engine-physics --lib pd_drive` (fails before: P-only
   velocity servo) — fallen-chain recovery settles in at least 15% fewer
   ticks than P-only at matched overshoot, a degenerate dt returns the P
@@ -1632,7 +1632,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   engine-physics --lib balance_matrix` stays green and the golden hash is
   unchanged. Kill: under 15% or any digest drift. needs: PX25.
   (Source `docs/research/steal-hunt-2026-10-03-29.md` CARD 1; focus
-  ragdoll.) Landed 2026-10-07 builder-body-r14: F2P pd_drive 6/6 + rapier 5/5, P2P lib 174 passed 0 failed + balance_matrix 3/3, golden d57b5c8ae3096614 unchanged x2, quality 100 A 0 regress, review PASS builder-body-r14-review-2.
+  ragdoll.) Landed 2026-10-07 builder-body-r14: F2P pd_drive 6/6 + rapier 5/5, P2P lib 174 passed 0 failed + balance_matrix 3/3, golden d57b5c8ae3096614 unchanged x2, quality 100 A 0 regress, review PASS builder-body-r14-review-2. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-physics --test it pd_drive::` 4 passed, run 39231145288.
 - [x] PX34 physics: stagger memory (steal, MIT: `blugart-dev/kickback@1d2c5ae`
   `addons/kickback/active_ragdoll_controller.gd:71-80` and `:347`, LICENSE
   read live 2026-10-03; GDScript, ideas only, reimplemented in integer
@@ -1722,7 +1722,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   within tol. F2P: `cargo test -p engine-physics --lib substep_order`
   (fails before: ordering only implicit). P2P:
   `cargo test -p engine-physics --lib balance_matrix` stays green. needs:
-  PX1. (STEAL 2026-10-02 engine2040.md #3; EB-2026-10-02-S93.)
+  PX1. (STEAL 2026-10-02 engine2040.md #3; EB-2026-10-02-S93.) Tick audit 2026-10-19: accepted as closed by its replacement (docs/plan/2026-10-19-owner-queue.md); the named physics `substep.rs` was deleted 3d6ee4a1.
 - [x] PX12 anim: DAT penetration-free coupling for active ragdoll — Divide
   and Truncate (arXiv 2604.15513v1, idea only, reimplemented) as a coupling
   seam for animated-vs-sim bodies. Tier B. Size M. Owns the coupling seam
@@ -1933,7 +1933,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   duplicate of `schedule.rs`, zero users outside its own file per git grep)
   and its tests; `schedule::Phase` stays (engine-app uses it). Size S. Owns
   `crates/ecs/src/systems.rs`, `crates/ecs/src/lib.rs`. Accept: `cargo test
-  -p engine-ecs -p engine-app` green; proof golden unchanged. needs: none.
+  -p engine-ecs -p engine-app` green; proof golden unchanged. needs: none. Tick audit 2026-10-19: the named ecs `systems.rs` was deleted by this row on purpose (da6b7922); the named path is the row's target, not a loss.
 - [x] SL6 arena: zero-alloc tick — `Arena::step` builds a fresh
   `Vec::with_capacity(self.fighters)` for inputs every tick
   (`crates/arena/src/lib.rs` near line 550); use a fixed array or a reused
@@ -1948,7 +1948,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   cuts (EMPIRE inbox EB-4). Tier A. Size S. Owns
   `crates/playtest/src/showcase.rs`, `tools/showcase.mjs`. Accept: the same
   tape gives byte-identical PNGs twice; a 10 s clip stitches; the manifest
-  names real rows. needs: WIN1, CR1.
+  names real rows. needs: WIN1, CR1. Tick audit 2026-10-19: `tools/showcase.mjs` is present; the named playtest `showcase.rs` was never landed as a file, so the path is stale.
 - [x] ADV55a perf: committed-key reseal forgery — widened baseline row +
   `baseline_seal` recomputed with the in-tree `SEAL_KEY` committed as a
   pair passes `verify_seal` (ADV55 wave 54; only the unkeyed recipe is
@@ -1997,7 +1997,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   500 MB. F2P: `git lfs ls-files` before (2 tracked non-LFS blobs over
   5 MB); after (0). P2P: `node tools/workspace-check.mjs` stays green.
   needs: none. (EB-AP-DG-repo-bloat-2026-10-02.)
-- [x] E52 assets: schema_compile wire or delete (EB-2026-10-09-S1). Size S. Owns `crates/assets/src/schema_compile.rs` + lib.rs mod row only. F2P `node tools/workspace-check.mjs` prints no schema_compile line; P2P assets lib green. needs: none. (done 2026-10-09: file deleted at HEAD, workspace modules PASS 580, assets lib 128+201 green.)
+- [x] E52 assets: schema_compile wire or delete (EB-2026-10-09-S1). Size S. Owns `crates/assets/src/schema_compile.rs` + lib.rs mod row only. F2P `node tools/workspace-check.mjs` prints no schema_compile line; P2P assets lib green. needs: none. (done 2026-10-09: file deleted at HEAD, workspace modules PASS 580, assets lib 128+201 green.) Tick audit 2026-10-19: the row's own purpose was to delete the named assets `schema_compile.rs`; the path is the target, not a loss.
 
 ## SPRINT-11-north-star.md
 
@@ -2057,14 +2057,14 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   `packs/rules/worker.rs` (one thread per session owns the `!Send` `Rules`), hunks in
   `crates/endpoint/src/mcp.rs` (`ServerState.rules`, `play_run`) and `crates/endpoint/src/play.rs`
   (`MatchRunner`, `play_run_with`). Size M. Accept: F2P `cargo test -p engine-endpoint --features
-  rules --test rules_door` 2 of 2 (set makes `play.run` differ from plain, same seed twice 600 of
+  rules --test it rules_door::` 2 of 2 (set makes `play.run` differ from plain, same seed twice 600 of
   600 equal, 3 bad scripts refused `rules_refused` with the last good kept, slot 16 refused
   `bad_slots`, test and explain change nothing); default `cargo test -p engine-endpoint` unchanged;
   `cargo tree -p engine-endpoint -e normal` shows no rhai; golden unchanged. needs: NS32a.
-  Done 2026-10-05: `cargo test -p engine-endpoint --features rules --test rules_door` 2 of 2 (600 of 600
+  Done 2026-10-05: `cargo test -p engine-endpoint --features rules --test it rules_door::` 2 of 2 (600 of 600
   checkpoints equal on a replay; 3 of 3 bad scripts refused `rules_refused` naming the kept hash;
   slot 16 refused; test and explain change nothing); the `rules` feature is off by default. Note: the
-  job log ring keeps 16 lines, so the "rules script ... drives slots" line shows only on short matches.
+  job log ring keeps 16 lines, so the "rules script ... drives slots" line shows only on short matches. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-endpoint --features rules --test it rules_door::` 3 passed, run 39230104016.
 - [x] NS32f rules: effect actions in the real arena — apply `damage`, `heal`, `stun`,
   `drain_stamina` of a scripted slot through a second trait method in
   `crates/arena/src/controller.rs` that edits `FightState.fighters[i]` (public fields `hp_permille`,

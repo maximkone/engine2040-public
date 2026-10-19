@@ -440,7 +440,7 @@ impl Error for ExecError {}
 pub fn gpu_submit() -> Result<(), ExecError> {
     Err(ExecError::Unsupported(
         "gpu submit needs a wgpu device plus RL1/RL2/RP1 bind groups; the CPU executor records only"
-            .to_string(),
+            .to_string(), // alloc-ok: cold headless-twin refusal, never a steady frame
     ))
 }
 
@@ -617,6 +617,22 @@ pub(crate) fn read_pass_ms(
 // `graph::GPU_SUBMIT_BUDGET_MS` plus its reuse test); this path adds no new
 // budget and no new error variant.
 
+/// Cold refusal: every transient span must lie inside the compiled pass
+/// range and be ordered (its `first`/`last` index this list directly).
+#[cfg(feature = "window")]
+fn check_transient_span(
+    row: &TransientRow,
+    count: usize,
+) -> Result<(), crate::graph::GpuSubmitError> {
+    if row.first >= count || row.last >= count || row.first > row.last {
+        let (f, l) = (row.first, row.last);
+        let name = &row.name;
+        let reason = format!("transient `{name}` span [{f}, {l}] misses the {count}-pass range"); // alloc-ok: cold refusal
+        return Err(crate::graph::GpuSubmitError::Invalid(reason));
+    }
+    Ok(())
+}
+
 /// Window submit over the executor pass list (GX1).
 #[cfg(feature = "window")]
 impl CpuExecutor {
@@ -637,37 +653,41 @@ impl CpuExecutor {
         use crate::graph::{FrameGraph, GpuSubmitError, PassDesc};
         let count = self.passes.len();
         for row in transients {
-            if row.first >= count || row.last >= count || row.first > row.last {
-                return Err(GpuSubmitError::Invalid(format!(
-                    "transient `{}` span [{}, {}] misses the {count}-pass range",
-                    row.name, row.first, row.last
-                )));
-            }
+            check_transient_span(row, count)?;
         }
         let mut graph = FrameGraph::new();
         for (index, pass) in self.passes.iter().enumerate() {
             let mut desc = PassDesc::new(&pass.name).work(pass.draws, pass.triangles);
             for row in transients {
                 if row.first == index {
-                    let first = u32::try_from(row.first).map_err(|_| {
-                        GpuSubmitError::Invalid(format!("pass id {} exceeds u32", row.first))
-                    })?;
-                    let last = u32::try_from(row.last).map_err(|_| {
-                        GpuSubmitError::Invalid(format!("pass id {} exceeds u32", row.last))
-                    })?;
+                    let first = match u32::try_from(row.first) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            let reason = format!("pass id {} exceeds u32", row.first); // alloc-ok: cold refusal, never a steady frame
+                            return Err(GpuSubmitError::Invalid(reason));
+                        }
+                    };
+                    let last = match u32::try_from(row.last) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            let reason = format!("pass id {} exceeds u32", row.last); // alloc-ok: cold refusal, never a steady frame
+                            return Err(GpuSubmitError::Invalid(reason));
+                        }
+                    };
                     desc = desc.transient_span(&row.name, row.size_bytes, first, last);
                 }
             }
             graph.add_pass(desc);
         }
         for index in 1..count {
-            graph
-                .add_edge(index - 1, index)
-                .map_err(|e| GpuSubmitError::Invalid(format!("linear chain: {e}")))?;
+            graph.add_edge(index - 1, index).map_err(|e| {
+                let reason = format!("linear chain: {e}"); // alloc-ok: cold refusal
+                GpuSubmitError::Invalid(reason)
+            })?;
         }
         let compiled = graph
             .compile()
-            .map_err(|e| GpuSubmitError::Invalid(format!("compile: {e}")))?;
+            .map_err(|e| GpuSubmitError::Invalid(format!("compile: {e}")))?; // alloc-ok: cold refusal, never a steady frame
         compiled.submit_gpu(device, queue, frame, submitter)
     }
 }

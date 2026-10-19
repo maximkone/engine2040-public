@@ -505,6 +505,55 @@ pub fn smooth_trauma_offset(
     })
 }
 
+/// Scale for the axis share in [`smooth_trauma_offset_axis`]: 1000 is all
+/// push, 0 is all noise.
+pub const AXIS_SHARE_SCALE: u32 = 1000;
+
+/// Directional trauma shake: the [`smooth_trauma_offset`] noise blended with a
+/// push along `axis`, so a knockout shakes up and a cross slash shakes along
+/// the swing. `share_permille` is the push share of the trauma-squared budget
+/// (`0` reproduces [`smooth_trauma_offset`] byte-for-byte, `AXIS_SHARE_SCALE`
+/// is pure push). The noise keeps the remaining share, so the total length
+/// stays inside the squared-trauma cap times `max_m`. Roll is untouched.
+/// Presentation-only, never sim state; same inputs give the same shake twice.
+/// Errors: [`CameraError::BadParam`] naming `alpha`, `max_shake_m` or `axis`
+/// for bad input, and `axis_share` above [`AXIS_SHARE_SCALE`]; zero trauma
+/// reports the noise branch unchanged.
+pub fn smooth_trauma_offset_axis(
+    trauma_permille: u32,
+    tick: u32,
+    alpha: f32,
+    max_m: f32,
+    axis: Vec3,
+    share_permille: u32,
+) -> Result<TraumaShake, CameraError> {
+    let base = smooth_trauma_offset(trauma_permille, tick, alpha, max_m)?;
+    if share_permille == 0 {
+        return Ok(base);
+    }
+    if share_permille > AXIS_SHARE_SCALE {
+        return Err(CameraError::BadParam("axis_share"));
+    }
+    if !axis.is_finite() {
+        return Err(CameraError::BadParam("axis"));
+    }
+    let axis_len = axis.len();
+    if !(axis_len > 0.0) {
+        return Err(CameraError::BadParam("axis"));
+    }
+    let share = f32::from(u16::try_from(share_permille).unwrap_or(1000)) / 1000.0;
+    let gain = trauma_gain(trauma_permille.min(TRAUMA_SCALE));
+    let mag = gain * max_m;
+    // Noise keeps `1 - share`, the push carries `share`, so the two add up to
+    // at most `mag` in length (triangle inequality) and the documented cap
+    // holds for every share.
+    let push_len = mag * share / axis_len;
+    Ok(TraumaShake {
+        offset_m: base.offset_m * (1.0 - share) + axis * push_len,
+        roll_rad: base.roll_rad,
+    })
+}
+
 /// Whip cap: fastest the smoothed yaw ever pans, in radians per second.
 /// The raw duel whips near 190 deg/s where the pair crosses, so an uncapped
 /// tracker replays the whip instead of damping it. 35 deg/s keeps the
@@ -1047,6 +1096,68 @@ mod tests {
         assert_eq!(
             smooth_trauma_offset(1000, 40, 0.5, f32::NAN),
             Err(CameraError::BadParam("max_shake_m"))
+        );
+    }
+
+    #[test]
+    fn trauma_axis_blends_push_with_noise_and_stays_capped() {
+        let params = DirectorParams::default();
+        let mag = params.max_shake_m;
+        let axis = Vec3::new(1.0, 0.0, 0.0);
+        // Share 0 is the noise branch, byte for byte.
+        let base = smooth_trauma_offset(1000, 40, 0.25, mag).expect("noise");
+        let blended = smooth_trauma_offset_axis(1000, 40, 0.25, mag, axis, 0).expect("share 0");
+        assert_eq!(blended, base, "share 0 must equal the noise branch");
+        // Share 1000 is pure push along the axis.
+        let pure = smooth_trauma_offset_axis(1000, 40, 0.25, mag, axis, AXIS_SHARE_SCALE)
+            .expect("pure push");
+        assert_eq!(pure.offset_m.y, 0.0, "pure push has no lateral component");
+        assert_eq!(pure.offset_m.z, 0.0, "pure push has no lateral component");
+        assert!(
+            (pure.offset_m.len() - mag).abs() <= 1.0e-5,
+            "pure push spans the cap, got {}",
+            pure.offset_m.len()
+        );
+        assert_eq!(
+            pure.roll_rad, base.roll_rad,
+            "roll follows the noise branch"
+        );
+        // Every share stays inside the cap and replays the same bytes.
+        for share in [0u32, 250, 500, 750, 1000] {
+            let a = smooth_trauma_offset_axis(1000, 40, 0.5, mag, axis, share).expect("shake");
+            let b = smooth_trauma_offset_axis(1000, 40, 0.5, mag, axis, share).expect("shake");
+            assert_eq!(
+                a, b,
+                "same inputs give the same shake twice at share {share}"
+            );
+            assert!(
+                a.offset_m.len() <= mag + 1.0e-5,
+                "over cap at share {share}: {} > {mag}",
+                a.offset_m.len()
+            );
+        }
+        // Zero trauma is zero for any share.
+        let calm =
+            smooth_trauma_offset_axis(0, 40, 0.5, mag, axis, AXIS_SHARE_SCALE).expect("calm");
+        assert_eq!(calm.offset_m, Vec3::ZERO);
+        assert_eq!(calm.roll_rad, 0.0);
+        // Bad inputs are refused by name; a zero share never looks at the axis.
+        assert_eq!(
+            smooth_trauma_offset_axis(1000, 40, 0.5, mag, Vec3::ZERO, 500),
+            Err(CameraError::BadParam("axis"))
+        );
+        assert_eq!(
+            smooth_trauma_offset_axis(1000, 40, 0.5, mag, Vec3::new(f32::NAN, 0.0, 0.0), 500),
+            Err(CameraError::BadParam("axis"))
+        );
+        assert_eq!(
+            smooth_trauma_offset_axis(1000, 40, 0.5, mag, axis, AXIS_SHARE_SCALE + 1),
+            Err(CameraError::BadParam("axis_share"))
+        );
+        let noise_a5 = smooth_trauma_offset(1000, 40, 0.5, mag).expect("noise");
+        assert_eq!(
+            smooth_trauma_offset_axis(1000, 40, 0.5, mag, Vec3::ZERO, 0),
+            Ok(noise_a5)
         );
     }
 

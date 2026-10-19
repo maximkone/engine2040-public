@@ -342,9 +342,11 @@ impl Server {
     }
 
     /// Validate `spec` and open its match at tick zero: the same match the
-    /// window plays when it builds from the same spec.
+    /// window plays when it builds from the same spec. A spec whose input
+    /// delay is outside [`crate::delay::MIN_DELAY`]`..=`[`crate::delay::MAX_DELAY`]
+    /// is refused loudly (the knob the client drives).
     pub fn from_spec(spec: MatchSpec) -> Result<Self, NetError> {
-        if spec.config.validate().is_err() {
+        if spec.config.validate().is_err() || spec.input_delay_ticks > crate::delay::MAX_DELAY {
             return Err(NetError::BadConfig);
         }
         let stepper = spec.live().ok_or(NetError::BadConfig)?;
@@ -473,9 +475,14 @@ impl Client {
 
     /// Validate `spec` and bind the local fighter slot. Prediction and
     /// authority sims both build from `spec`, so a client on the server's
-    /// spec predicts the match the server authors.
+    /// spec predicts the match the server authors. A spec whose input delay
+    /// is outside [`crate::delay::MIN_DELAY`]`..=`[`crate::delay::MAX_DELAY`]
+    /// is refused loudly.
     pub fn from_spec(spec: MatchSpec, local: FighterId) -> Result<Self, NetError> {
-        if spec.config.validate().is_err() || local.0 >= spec.config.fighters {
+        if spec.config.validate().is_err()
+            || spec.input_delay_ticks > crate::delay::MAX_DELAY
+            || local.0 >= spec.config.fighters
+        {
             return Err(NetError::BadConfig);
         }
         let stepper = spec.live().ok_or(NetError::BadConfig)?;

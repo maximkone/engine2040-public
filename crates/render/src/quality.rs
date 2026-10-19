@@ -121,6 +121,10 @@ pub struct Knobs {
     pub physfx_contacts: u16,
     /// Largest texture edge kept resident; bigger textures load a smaller mip (px).
     pub texture_max_px: u16,
+    /// The look shaders' potato guard: true switches the fp32-only grazing
+    /// clamp off and keeps the fp16 floors (bool). Presentation only, never
+    /// hashed: it picks a shader constant, not a picture budget.
+    pub look_potato_guard: bool,
 }
 
 /// Quality row for a tier. Bias stays at 100 hundredths on every tier in
@@ -146,6 +150,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 2,
             physfx_contacts: 256,
             texture_max_px: 512,
+            look_potato_guard: true,
         },
         Quality::Web => Knobs {
             render_scale_pct: 100,
@@ -165,6 +170,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 4,
             physfx_contacts: 512,
             texture_max_px: 1024,
+            look_potato_guard: false,
         },
         Quality::Comfort => Knobs {
             render_scale_pct: 100,
@@ -184,6 +190,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 8,
             physfx_contacts: 1024,
             texture_max_px: 2048,
+            look_potato_guard: false,
         },
         Quality::High => Knobs {
             render_scale_pct: 100,
@@ -203,6 +210,7 @@ pub const fn knobs(q: Quality) -> Knobs {
             physfx_ragdolls: 16,
             physfx_contacts: 2048,
             texture_max_px: 4096,
+            look_potato_guard: false,
         },
     }
 }
@@ -243,6 +251,37 @@ pub const CUT_ORDER: [&str; 8] = [
     "shadow_cascades",
     "render_scale",
 ];
+
+/// Every shader file that shades a lit look term, relative to `src/shaders`
+/// (QL5). Each one calls [`LOOK_GUARD_FN`] and declares the
+/// [`LOOK_GUARD_OVERRIDE`] the preset switches; a new lit file joins this list
+/// or `quality_look_guard...` fails. Staged files that no pipeline compiles yet
+/// (`forward_maps.wgsl`, `skin.wgsl`) stay out until they join a frame.
+pub const LOOK_SHADERS: [&str; 1] = ["forward.wgsl"];
+
+/// The one fp16 and specular-aliasing guard each look shader calls.
+pub const LOOK_GUARD_FN: &str = "look_guard";
+
+/// WGSL `override` that carries the potato preset into the look shaders: true
+/// switches the fp32-only grazing clamp off and keeps the fp16 floors.
+pub const LOOK_GUARD_OVERRIDE: &str = "POTATO_GUARD";
+
+/// True when this row turns the fp32-only clamp off: the potato preset alone,
+/// the tier an iGPU or a 2 GB card gets (`tier_rules`).
+#[must_use]
+pub const fn look_potato_guard(k: &Knobs) -> bool {
+    k.look_potato_guard
+}
+
+/// Pipeline constants for a tier's forward pipelines: one `override` value,
+/// 1.0 on the potato preset and 0.0 everywhere else (the fp32 default).
+#[must_use]
+pub fn look_guard_constants(k: &Knobs) -> [(&'static str, f64); 1] {
+    [(
+        LOOK_GUARD_OVERRIDE,
+        if look_potato_guard(k) { 1.0 } else { 0.0 },
+    )]
+}
 
 /// What the browser page cuts when the frame misses its budget, first to last: Babylon's
 /// SceneOptimizer order (cheap invisible savings first, the picture's own size last). The page
@@ -406,9 +445,10 @@ pub fn choose_web_tier_probed(
     (tier, why)
 }
 
-/// FNV-1a over the 17 knob fields in struct order (bools as 0/1, gtao as
-/// its level byte, integers little-endian). Same tier twice gives the same
-/// hash; no map order involved.
+/// FNV-1a over the 17 hashed knob fields in struct order (bools as 0/1, gtao
+/// as its level byte, integers little-endian). Same tier twice gives the same
+/// hash; no map order involved. `look_potato_guard` stays out: it picks a
+/// shader constant, not a picture budget.
 #[must_use]
 pub fn table_hash(q: Quality) -> u64 {
     let k = knobs(q);
@@ -964,5 +1004,101 @@ mod tests {
             assert_eq!(table_hash(tier), table_hash(tier));
         }
         assert_ne!(table_hash(Quality::Potato), table_hash(Quality::High));
+    }
+
+    /// The look guard a look shader must carry: the function, the preset
+    /// override, the two QL1 floors and the fp32-only grazing clamp, each read
+    /// where the literal stood. `None` when the text carries all of it;
+    /// otherwise the piece that is missing.
+    fn look_guard_gap(name: &str, source: &str) -> Option<String> {
+        let need =
+            |piece: &str| (!source.contains(piece)).then(|| format!("{name}: missing `{piece}`"));
+        need(&format!("fn {LOOK_GUARD_FN}("))
+            .or_else(|| need(&format!("override {LOOK_GUARD_OVERRIDE}: bool = false;")))
+            // The guard is applied, not just declared: one declaration plus a
+            // call from the roughness path.
+            .or_else(|| {
+                (source.matches(&format!("{LOOK_GUARD_FN}(")).count() < 2)
+                    .then(|| format!("{name}: {LOOK_GUARD_FN} is declared but never called"))
+            })
+            .or_else(|| need("const LOOK_ROUGHNESS_FLOOR: f32 = 0.089;"))
+            .or_else(|| need("const LOOK_MIN_HALF_NORMAL: f32 = 6.103515625e-5;"))
+            .or_else(|| need("const LOOK_ANALYTIC_GRAZING: f32 = 0.045;"))
+            .or_else(|| {
+                need(&format!(
+                    "clamp({LOOK_GUARD_FN}(p, LOOK_ROUGHNESS_FLOOR, false), 0.0, 1.0)"
+                ))
+            })
+            .or_else(|| {
+                need(&format!(
+                    "{LOOK_GUARD_FN}(max(dot(n, v), 0.0001), LOOK_MIN_HALF_NORMAL, true)"
+                ))
+            })
+            .or_else(|| need("pow(max(1.0 - vdot_h, LOOK_MIN_HALF_NORMAL), 5.0)"))
+    }
+
+    fn look_shader_source(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("shaders")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+    }
+
+    /// QL5: every look shader carries the one guard, the potato override and
+    /// the floors QL1 named. F2P: strip the guard call (or the override) and
+    /// this names the gap; the CQ23 naga gate then refuses the file too.
+    #[test]
+    fn look_guard_is_declared_and_applied_in_every_look_shader() {
+        assert_eq!(
+            LOOK_GUARD_FN, "look_guard",
+            "the fixed name the shader text must carry"
+        );
+        for name in LOOK_SHADERS {
+            let source = look_shader_source(name);
+            assert_eq!(look_guard_gap(name, &source), None, "{name}");
+        }
+        // The checker really fails: the shipped text with the guard call
+        // removed is a gap.
+        let stripped = look_shader_source(LOOK_SHADERS[0])
+            .replace("look_guard(p, LOOK_ROUGHNESS_FLOOR, false)", "p");
+        assert!(
+            look_guard_gap(LOOK_SHADERS[0], &stripped).is_some(),
+            "a look shader that skips the guard is a gap"
+        );
+    }
+
+    /// The preset: 1.0 (`POTATO_GUARD` on) on the potato tier alone, 0.0 (the
+    /// fp32 default) on the other three.
+    #[test]
+    fn look_guard_constants_switch_on_the_potato_tier_alone() {
+        for tier in Quality::ALL {
+            let k = knobs(tier);
+            let expected = if tier == Quality::Potato { 1.0 } else { 0.0 };
+            assert_eq!(look_potato_guard(&k), tier == Quality::Potato, "{tier:?}");
+            assert_eq!(
+                look_guard_constants(&k),
+                [(LOOK_GUARD_OVERRIDE, expected)],
+                "{tier:?}"
+            );
+        }
+    }
+
+    /// QL5 F2P over the CQ23 naga gate: a look shader that lost its guard is
+    /// refused by name, so an edit cannot quietly drop it. Needs
+    /// `shader-validate`; the text gate above is the default check.
+    #[cfg(feature = "shader-validate")]
+    #[test]
+    fn look_guard_removal_fails_the_naga_gate() {
+        let name = LOOK_SHADERS[0];
+        let source = look_shader_source(name);
+        crate::shader_gate::validate_source(name, &source).expect("the shipped guard validates");
+        // The guard's definition goes, its callers stay: no definition in
+        // scope. The gate must name the missing identifier.
+        let stripped = source.replace("fn look_guard(", "fn look_guard_dropped(");
+        let err = crate::shader_gate::validate_source(name, &stripped)
+            .expect_err("the gate refuses a look shader without the guard");
+        assert!(err.message.contains(LOOK_GUARD_FN), "{err}");
     }
 }

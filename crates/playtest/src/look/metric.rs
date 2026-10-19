@@ -5,16 +5,19 @@
 //! caller owns the pixels; [`Frame`] owns one validated, decoded copy.
 //! Units: SSIM in fixed point where [`SSIM_ONE`] (10000) is 1.0, deltaE in
 //! hundredths of a CIE76 unit, histogram distances in fixed point where
-//! 10000 is the largest possible distance, luma in `0..=255`.
+//! 10000 is the largest possible distance, FLIP visibility in ten-thousandths
+//! of the full black/white difference ([`FLIP_ONE`] is the largest mean),
+//! luma in `0..=255`.
 //! Determinism: integer and fixed-point only (one 256-entry sRGB table, one
 //! integer cube root, one integer square root), row-major order, no float
 //! anywhere, so the same inputs give the same numbers on every machine and
 //! the JSON built from them is byte-identical twice.
 //! Errors: [`MetricError`] names the bad dimension, length, region or PNG;
 //! nothing here panics on caller data.
-//! Budget: one pass over the region per metric; a 2048 x 2048 frame is a few
-//! tens of milliseconds in release. PNG decode is bounded to the capture
-//! ceiling ([`MAX_DIM`] per side) before any pixel buffer is allocated.
+//! Budget: one or a few passes over the region per metric; a 2048 x 2048
+//! frame is a few tens of milliseconds in release (FLIP adds two smoothing
+//! passes and one Sobel pass). PNG decode is bounded to the capture ceiling
+//! ([`MAX_DIM`] per side) before any pixel buffer is allocated.
 //!
 //! Alpha never counts: captures are opaque, and every metric reads the RGB
 //! channels only. Colour management is not applied: the PNG's 8-bit sRGB
@@ -709,8 +712,8 @@ pub struct Flicker {
 }
 
 /// Edge energy of one luma plane: integer Sobel magnitude per pixel, less the
-/// flat floor and capped at [`FLICKER_EDGE_CAP`]. Zero on a flat area.
-fn flicker_edge_weights(luma: &[u8], width: usize, height: usize) -> Vec<u16> {
+/// flat `floor` and capped at `cap`. Zero on a flat area.
+fn sobel_weighted(luma: &[u8], width: usize, height: usize, floor: u64, cap: u64) -> Vec<u16> {
     let mut weights = vec![0u16; width * height];
     if width < 3 || height < 3 {
         return weights;
@@ -721,13 +724,17 @@ fn flicker_edge_weights(luma: &[u8], width: usize, height: usize) -> Vec<u16> {
             let gx = (at(2, 0) + 2 * at(2, 1) + at(2, 2)) - (at(0, 0) + 2 * at(0, 1) + at(0, 2));
             let gy = (at(0, 2) + 2 * at(1, 2) + at(2, 2)) - (at(0, 0) + 2 * at(1, 0) + at(2, 0));
             let magnitude = gx.unsigned_abs() + gy.unsigned_abs();
-            let weight = magnitude
-                .saturating_sub(FLICKER_EDGE_FLOOR)
-                .min(FLICKER_EDGE_CAP);
+            let weight = magnitude.saturating_sub(floor).min(cap);
             weights[y * width + x] = u16::try_from(weight).unwrap_or(0);
         }
     }
     weights
+}
+
+/// Edge energy of one luma plane for the flicker score: Sobel magnitude less
+/// the flat floor, capped at [`FLICKER_EDGE_CAP`]. Zero on a flat area.
+fn flicker_edge_weights(luma: &[u8], width: usize, height: usize) -> Vec<u16> {
+    sobel_weighted(luma, width, height, FLICKER_EDGE_FLOOR, FLICKER_EDGE_CAP)
 }
 
 /// Weighted residual in permille of full scale, rounded; zero without weight.
@@ -846,10 +853,139 @@ pub fn flicker_hvei(frames: &[Frame], region: Region<'_>) -> Result<Flicker, Met
 }
 
 // ---------------------------------------------------------------------------
+// FLIP (feature-aware perceptual difference)
+// ---------------------------------------------------------------------------
+
+/// Fixed-point 1.0 for [`Flip`]: the largest mean a pair can reach (a full
+/// black-against-white difference at every pixel).
+pub const FLIP_ONE: u32 = 10_000;
+/// Chroma weight per 10,000 against the luma difference: chroma is the less
+/// visible half of a colour change.
+const FLIP_CHROMA_WEIGHT: u32 = 4_500;
+/// Visibility weight per 10,000 on a flat pixel: away from edges a difference
+/// counts for less.
+const FLIP_BASE_WEIGHT: u32 = 4_000;
+/// Visibility weight per 10,000 at a full-strength edge.
+const FLIP_FEATURE_WEIGHT: u32 = 14_000;
+/// Sobel magnitude that counts as a full-strength feature.
+const FLIP_FEATURE_CAP: u64 = 255;
+
+/// Feature-aware perceptual difference of one frame against one reference.
+///
+/// The FLIP shape (NVlabs, HPG 2020; idea and structure only, no transplanted
+/// bytes or weight tables): the colour difference is taken in YCxCyCz over
+/// linear light, smoothed once with a contrast-sensitivity kernel (binomial
+/// `1,4,6,4,1` over 16), then weighted up where either frame carries an edge.
+/// Integer and fixed point only, so the same pair scores the same on every
+/// machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Flip {
+    /// Mean visibility over the region in ten-thousandths of the full
+    /// black/white difference ([`FLIP_ONE`] is the largest possible mean);
+    /// `0` when the frames are identical.
+    pub mean_x10000: u32,
+    /// Worst single pixel in the same units.
+    pub max_x10000: u32,
+    /// Pixels scored.
+    pub pixels: u64,
+}
+
+/// Perceptual YCxCyCz of one sRGB pixel at scale 10^7: `[Y, Cx, Cy, Cz]`
+/// (BT.709 luma over linear light, then each linear channel minus Y).
+fn ycxcycz_e7(rgb: [u8; 3]) -> [i64; 4] {
+    let lin = rgb.map(|c| i64::from(SRGB_LINEAR_E7[usize::from(c)]));
+    let y = (2_126_560 * lin[0] + 7_151_580 * lin[1] + 721_860 * lin[2] + 5_000_000) / 10_000_000;
+    [y, lin[0] - y, lin[1] - y, lin[2] - y]
+}
+
+/// Raw colour difference of two pixels at scale 10^7: `|dY|` plus the summed
+/// chroma magnitude at [`FLIP_CHROMA_WEIGHT`], capped at the full scale.
+fn flip_raw_diff(a: [u8; 3], b: [u8; 3]) -> u32 {
+    let (ya, yb) = (ycxcycz_e7(a), ycxcycz_e7(b));
+    let luma = (ya[0] - yb[0]).unsigned_abs();
+    let chroma = (ya[1] - yb[1]).unsigned_abs()
+        + (ya[2] - yb[2]).unsigned_abs()
+        + (ya[3] - yb[3]).unsigned_abs();
+    let chroma = (chroma * u64::from(FLIP_CHROMA_WEIGHT) + 5_000) / 10_000;
+    u32::try_from((luma + chroma).min(10_000_000)).unwrap_or(10_000_000)
+}
+
+/// One contrast-sensitivity pass over `src`: the binomial `1,4,6,4,1` over 16
+/// along rows (`along_rows`) or columns, edges clamped, scale unchanged.
+fn csf_pass(src: &[u32], width: usize, height: usize, along_rows: bool) -> Vec<u32> {
+    let mut out = vec![0u32; src.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let (count, at) = if along_rows { (width, x) } else { (height, y) };
+            let mut sum = 0u64;
+            for (k, weight) in [1u64, 4, 6, 4, 1].into_iter().enumerate() {
+                let pos = (at + k).saturating_sub(2).min(count - 1);
+                let index = if along_rows {
+                    y * width + pos
+                } else {
+                    pos * width + x
+                };
+                sum += weight * u64::from(src[index]);
+            }
+            out[y * width + x] = u32::try_from((sum + 8) / 16).unwrap_or(u32::MAX);
+        }
+    }
+    out
+}
+
+/// Visibility weight per 10,000 for a pixel whose best edge strength is `s`.
+fn flip_feature_weight(s: u16) -> u64 {
+    let base = u64::from(FLIP_BASE_WEIGHT);
+    let span = u64::from(FLIP_FEATURE_WEIGHT - FLIP_BASE_WEIGHT);
+    base + span * u64::from(s) / FLIP_FEATURE_CAP
+}
+
+/// Mean and worst FLIP visibility between two equal-size frames over a region.
+///
+/// # Errors
+///
+/// [`MetricError::SizeMismatch`], a bad rectangle or mask, or
+/// [`MetricError::EmptyRegion`] when the region selects nothing.
+pub fn flip(a: &Frame, b: &Frame, region: Region<'_>) -> Result<Flip, MetricError> {
+    a.same_size(b)?;
+    let area = Resolved::new(region, a.width, a.height)?;
+    let (w, h) = (a.width, a.height);
+    let raw: Vec<u32> = (0..w * h)
+        .map(|i| flip_raw_diff(a.rgb_at(i), b.rgb_at(i)))
+        .collect();
+    let smoothed = csf_pass(&csf_pass(&raw, w, h, true), w, h, false);
+    let features: Vec<u16> = {
+        let (la, lb) = (a.luma_plane(), b.luma_plane());
+        let (wa, wb) = (
+            sobel_weighted(&la, w, h, 0, FLIP_FEATURE_CAP),
+            sobel_weighted(&lb, w, h, 0, FLIP_FEATURE_CAP),
+        );
+        wa.into_iter().zip(wb).map(|(x, y)| x.max(y)).collect()
+    };
+    let (mut sum, mut max, mut pixels) = (0u64, 0u32, 0u64);
+    area.for_each(|index| {
+        let visible = u64::from(smoothed[index]) * flip_feature_weight(features[index]) / 10_000;
+        sum += visible;
+        max = max.max(u32::try_from(visible / 1_000).unwrap_or(FLIP_ONE));
+        pixels += 1;
+    });
+    if pixels == 0 {
+        return Err(MetricError::EmptyRegion);
+    }
+    let mean = div_round(i128::from(sum) * 10_000, i128::from(pixels) * 10_000_000);
+    Ok(Flip {
+        mean_x10000: u32::try_from(mean.clamp(0, i128::from(FLIP_ONE))).unwrap_or(FLIP_ONE),
+        max_x10000: max.min(FLIP_ONE),
+        pixels,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // One-shot comparison
 // ---------------------------------------------------------------------------
 
-/// SSIM, deltaE and histogram distance of one frame against one reference.
+/// SSIM, deltaE, histogram distance and FLIP of one frame against one
+/// reference.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Comparison {
     /// SSIM, [`SSIM_ONE`] is identical.
@@ -860,13 +996,15 @@ pub struct Comparison {
     pub hist_tv_x10000: u32,
     /// Luminance histogram earth mover's distance, `0` identical.
     pub hist_emd_x10000: u32,
+    /// FLIP mean visibility, `0` identical.
+    pub flip_x10000: u32,
 }
 
 /// Score `frame` against `reference` over `region` with every metric.
 ///
 /// # Errors
 ///
-/// Any [`MetricError`] the four metrics raise.
+/// Any [`MetricError`] the five metrics raise.
 pub fn compare(
     frame: &Frame,
     reference: &Frame,
@@ -878,11 +1016,13 @@ pub fn compare(
         &luma_histogram(frame, region)?,
         &luma_histogram(reference, region)?,
     )?;
+    let visible = flip(frame, reference, region)?;
     Ok(Comparison {
         ssim_x10000: structure.score_x10000,
         mean_de_x100: colour.mean_x100,
         hist_tv_x10000: distance.tv_x10000,
         hist_emd_x10000: distance.emd_x10000,
+        flip_x10000: visible.mean_x10000,
     })
 }
 
@@ -1075,6 +1215,7 @@ mod tests {
                 mean_de_x100: 0,
                 hist_tv_x10000: 0,
                 hist_emd_x10000: 0,
+                flip_x10000: 0,
             }
         );
     }
@@ -1118,6 +1259,7 @@ mod tests {
                 mean_de_x100: 0,
                 hist_tv_x10000: 0,
                 hist_emd_x10000: 0,
+                flip_x10000: 0,
             }
         );
         let (reference, live) = (sand(), brightened_sand());
@@ -1175,6 +1317,87 @@ mod tests {
         assert_eq!(first, second);
         let again = compare(&brightened_sand(), &sand(), Region::Full).expect("rebuilt");
         assert_eq!(first, again);
+    }
+
+    #[test]
+    fn look_metric_flip_identical_frames_score_zero() {
+        let frame = sand();
+        let equal = flip(&frame, &frame, Region::Full).expect("flip");
+        assert_eq!((equal.mean_x10000, equal.max_x10000), (0, 0));
+        assert_eq!(equal.pixels, 3072);
+    }
+
+    #[test]
+    fn look_metric_flip_scores_brightened_sand_above_the_shift() {
+        let reference = sand();
+        let shifted = flip(&shifted_sand(), &reference, Region::Full).expect("shift");
+        let bright = flip(&brightened_sand(), &reference, Region::Full).expect("brighten");
+        // Pinned integers (same pair twice gives the same line): the CSF pass
+        // damps the shift's high-frequency detail, while the brightness change
+        // is broad and reads above it.
+        assert_eq!(
+            (shifted.mean_x10000, bright.mean_x10000, bright.max_x10000),
+            (321, 1268, 2270)
+        );
+        assert!(
+            shifted.mean_x10000 > 0,
+            "a one-pixel shift is visible, got {}",
+            shifted.mean_x10000
+        );
+        assert!(
+            bright.mean_x10000 > shifted.mean_x10000,
+            "brightened sand {} must read above the shift {}",
+            bright.mean_x10000,
+            shifted.mean_x10000
+        );
+        assert!(bright.mean_x10000 <= FLIP_ONE);
+        assert!(bright.max_x10000 >= bright.mean_x10000);
+        // The same pair twice gives the same numbers.
+        let again = flip(&brightened_sand(), &reference, Region::Full).expect("again");
+        assert_eq!(bright, again);
+    }
+
+    #[test]
+    fn look_metric_flip_respects_the_region_and_refuses_bad_shapes() {
+        let (reference, live) = (sand(), brightened_sand());
+        let above = Rect {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 8,
+        };
+        let untouched = flip(&live, &reference, Region::Rect(above)).expect("above");
+        assert_eq!(untouched.pixels, 512);
+        // The 5-tap smoothing bleeds two rows of the change upward: the top
+        // rows are byte-equal, so the reads are small but not zero.
+        assert_eq!(untouched.mean_x10000, 119);
+        let rows = Rect {
+            x: 0,
+            y: 8,
+            w: 64,
+            h: 40,
+        };
+        let sand_rows = flip(&live, &reference, Region::Rect(rows)).expect("sand rows");
+        assert_eq!(sand_rows.pixels, 2560);
+        assert!(
+            sand_rows.mean_x10000 > untouched.mean_x10000,
+            "the changed rows {} must read above the byte-equal rows {}",
+            sand_rows.mean_x10000,
+            untouched.mean_x10000
+        );
+        let small = build(16, 16, |_, _| [9, 9, 9]);
+        assert_eq!(
+            flip(&sand(), &small, Region::Full).unwrap_err(),
+            MetricError::SizeMismatch {
+                left: (64, 48),
+                right: (16, 16)
+            }
+        );
+        let none = vec![false; 3072];
+        assert_eq!(
+            flip(&live, &reference, Region::Mask(&none)).unwrap_err(),
+            MetricError::EmptyRegion
+        );
     }
 
     #[test]

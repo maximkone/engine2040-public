@@ -390,10 +390,10 @@ impl GtaoAo {
         frame.validate()?;
         let half = frame.half_size();
         if half[0] as usize != self.width_half || half[1] as usize != self.height_half {
-            return Err(LookError::Invalid(format!(
-                "gtao half {}x{} mismatches frame half {}x{}",
-                self.width_half, self.height_half, half[0], half[1]
-            )));
+            let (want_w, want_h) = (self.width_half, self.height_half);
+            let (fw, fh) = (half[0], half[1]);
+            let reason = format!("gtao half {want_w}x{want_h} mismatches frame half {fw}x{fh}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(LookError::Invalid(reason));
         }
         Err(LookError::NoDevice(
             "gtao GPU bind needs the RA1 forward pass bind group; the CPU bake is the reference"
@@ -415,14 +415,14 @@ impl GtaoAo {
         frame.validate()?;
         let half = frame.half_size();
         if half[0] as usize != self.width_half || half[1] as usize != self.height_half {
-            return Err(LookError::Invalid(format!(
-                "gtao half {}x{} mismatches frame half {}x{}",
-                self.width_half, self.height_half, half[0], half[1]
-            )));
+            let (want_w, want_h) = (self.width_half, self.height_half);
+            let (fw, fh) = (half[0], half[1]);
+            let reason = format!("gtao half {want_w}x{want_h} mismatches frame half {fw}x{fh}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(LookError::Invalid(reason));
         }
         let texels = self.texels();
         let count = u32::try_from(texels)
-            .map_err(|_| LookError::Invalid(format!("gtao texels {texels} exceed u32")))?;
+            .map_err(|_| LookError::Invalid(format!("gtao texels {texels} exceed u32")))?; // alloc-ok: cold refusal, never a steady frame
         let byte_len = texels as u64 * GTAO_AO_BYTES_PER_TEXEL;
         let started = Instant::now();
         let probe = build_bind_probe(device, byte_len);
@@ -431,7 +431,7 @@ impl GtaoAo {
             0,
             &crate::graph::look_frame_uniform_bytes(frame),
         );
-        let mut src_bytes = Vec::with_capacity(texels * 4);
+        let mut src_bytes = Vec::with_capacity(texels * 4); // alloc-ok: submit_gpu probe staging with readback, not the window steady frame
         for v in &self.values {
             src_bytes.extend_from_slice(&v.to_le_bytes());
         }
@@ -456,13 +456,13 @@ impl GtaoAo {
         let back = readback_f32(&probe.readback, texels)?;
         probe.readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
-            return Err(LookError::Device(format!("gtao bind validation: {err:?}")));
+            let reason = format!("gtao bind validation: {err:?}"); // alloc-ok: cold device-loss
+            return Err(LookError::Device(reason));
         }
         for (i, (got, want)) in back.iter().zip(self.values.iter()).enumerate() {
             if got.to_bits() != want.to_bits() {
-                return Err(LookError::Device(format!(
-                    "gtao bind roundtrip texel {i} differs: {got} vs {want}"
-                )));
+                let reason = format!("gtao bind roundtrip texel {i} differs: {got} vs {want}"); // alloc-ok: cold device-loss path, never a steady frame
+                return Err(LookError::Device(reason));
             }
         }
         Ok(AoReceipt {

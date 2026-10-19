@@ -285,6 +285,115 @@ fn kit_collision_concavity() {
     assert_eq!(outside, COLLISION_OUTSIDE, "primitives over 0.02");
 }
 
+/// The visibility-plane bake (`visacd`) beside the frozen V-HACD `decompose`, on the whole
+/// kit. Every mesh comes out in at most 16 closed convex parts that share no volume and bake
+/// the same bytes twice inside the 2 s bound. On every closed mesh the bake is at least as
+/// good as V-HACD on the GEO5b concavity and on the volume error (the row's volume bar is a
+/// solid's; the two open kit surfaces have no signed volume and are only held to the part
+/// bounds). At least 20 meshes are strictly better than V-HACD: fewer parts at equal
+/// concavity with volume error at most 5% (the row's twenty; measured 21).
+#[cfg(feature = "collision")]
+#[test]
+fn kit_collision_visacd() {
+    use engine_geo::collision::{
+        concavity, decompose, digest, penetration, visacd, volume_error, HullOptions, VisacdOptions,
+    };
+    let options = VisacdOptions::default();
+    let (mut lines, mut better, mut over) = (0, 0, Vec::new());
+    let (mut total_visacd, mut total_vhacd) = (0_usize, 0_usize);
+    for (name, i, m) in kit_meshes() {
+        let closed = m.welded().edge_report().is_closed();
+        let start = std::time::Instant::now();
+        let parts = visacd(&m, &options).unwrap_or_else(|e| panic!("{name}/{i}: {e}"));
+        let baked = start.elapsed();
+        let again = visacd(&m, &options).unwrap();
+        let vhacd =
+            decompose(&m, &HullOptions::default()).unwrap_or_else(|e| panic!("{name}/{i}: {e}"));
+        let ours = concavity(&m, &parts);
+        let theirs = concavity(&m, &vhacd);
+        let error = volume_error(&m, &parts);
+        let theirs_error = volume_error(&m, &vhacd);
+        let mut overlap = 0.0_f32;
+        for a in 0..parts.len() {
+            for b in (a + 1)..parts.len() {
+                overlap = overlap.max(penetration(&parts[a], &parts[b]));
+            }
+        }
+        println!(
+            "visacd {name}/{i}: {} parts (vhacd {}), closed {closed}, conc {ours:.4} \
+             (vhacd {theirs:.4}), vol_err {} (vhacd {}), overlap {overlap:.6} m, {} ms",
+            parts.len(),
+            vhacd.len(),
+            error.map_or_else(|| "n/a".to_string(), |e| format!("{e:.4}")),
+            theirs_error.map_or_else(|| "n/a".to_string(), |e| format!("{e:.4}")),
+            baked.as_millis()
+        );
+        lines += 1;
+        total_visacd += parts.len();
+        total_vhacd += vhacd.len();
+        // Cook bytes identical x2, inside the 2 s per mesh bound.
+        assert_eq!(
+            digest(&parts),
+            digest(&again),
+            "{name}/{i}: bake not repeatable"
+        );
+        assert!(baked.as_millis() <= 2000, "{name}/{i}: baked in {baked:?}");
+        // At most 16 closed convex parts, none over the vertex cap.
+        assert!(
+            !parts.is_empty() && parts.len() <= 16,
+            "{name}/{i}: {} parts",
+            parts.len()
+        );
+        for p in &parts {
+            assert_eq!(p.open_edge_count(), 0, "{name}/{i} part open");
+            assert!(p.volume() > 0.0, "{name}/{i} part not outward");
+            assert!(
+                p.positions.len() <= options.max_hull_vertices,
+                "{name}/{i} part over the vertex cap"
+            );
+        }
+        // No two parts share volume.
+        assert!(
+            overlap <= 1.0e-3,
+            "{name}/{i}: parts overlap by {overlap} m"
+        );
+        if !closed {
+            continue;
+        }
+        // Concavity and volume error at least as good as V-HACD's on every solid.
+        assert!(
+            ours <= theirs + 1e-6,
+            "{name}/{i}: concavity {ours} over vhacd's {theirs}"
+        );
+        if let (Some(ours), Some(theirs)) = (error, theirs_error) {
+            assert!(
+                ours <= theirs + 1e-6,
+                "{name}/{i}: volume error {ours} over vhacd's {theirs}"
+            );
+        }
+        if ours > 0.02 {
+            over.push(format!("{name}/{i}"));
+        }
+        // The row's twenty: fewer parts than V-HACD at equal concavity, volume error <= 5%.
+        if parts.len() < vhacd.len() && error.is_some_and(|e| e <= 0.05) {
+            better += 1;
+        }
+    }
+    println!(
+        "visacd: {lines} meshes, {better} with fewer parts than V-HACD at equal concavity and \
+         volume error <= 5% ({total_visacd} vs {total_vhacd} parts), concavity over 0.02: {over:?}"
+    );
+    assert_eq!(lines, 38, "one line per kit primitive");
+    assert!(
+        better >= 20,
+        "20 meshes with fewer parts than V-HACD at equal concavity and volume error <= 5%: {better}"
+    );
+    assert!(
+        total_visacd < total_vhacd,
+        "fewer parts in total: {total_visacd} vs {total_vhacd}"
+    );
+}
+
 #[cfg(feature = "boolean")]
 #[test]
 fn kit_closed_meshes_survive_boolean_with_a_cutter() {

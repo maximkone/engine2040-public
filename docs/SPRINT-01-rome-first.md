@@ -193,7 +193,7 @@
   engine-render --lib --features window present` (255 passed, 0 failed; the window leg runs on this PC, adapter
   NVIDIA GeForce RTX 3050 6GB, so no GitHub run id), which covers the existing capture-hash tests (P2P).
   rust-quality PASS, workspace-check PASS.
-- [ ] NS31c1 material: compile records to WGSL — new file `crates/material/src/compile.rs` with `pub struct Compiled` Progress 2026-10-17: crates/material/src/compile.rs landed (Compiled, compile, CHANNEL_FLOATS, texture_bindings, key; same_record_gives_the_same_bytes_twice, a_structure_edit_changes_the_text_and_the_key, siege_kit plus reference records share at most 12 structures; material suite green run 39057556202); left: no test that a coated record has strictly more bindings than the same record uncoated, and texture_bindings returns (slot, binding) pairs not Vec<TextureSlot>.
+- [x] NS31c1 material: compile records to WGSL — new file `crates/material/src/compile.rs` with `pub struct Compiled` Progress 2026-10-17: crates/material/src/compile.rs landed (Compiled, compile, CHANNEL_FLOATS, texture_bindings, key; same_record_gives_the_same_bytes_twice, a_structure_edit_changes_the_text_and_the_key, siege_kit plus reference records share at most 12 structures; material suite green run 39057556202); left: no test that a coated record has strictly more bindings than the same record uncoated, and texture_bindings returns (slot, binding) pairs not Vec<TextureSlot>.
   (`wgsl: String`, `key: u64`, structure accessors `uniform_bytes() -> usize` and `texture_bindings() -> Vec<TextureSlot>`)
   and `pub fn compile(record: &MaterialRecord) -> Compiled` that generates the WGSL for the record's channels
   (base color, metallic-roughness, occlusion, normal, emissive, coat, sheen) plus `pub const CHANNEL_FLOATS: usize`
@@ -204,13 +204,16 @@
   green, golden unchanged. needs: NS31b1. Progress 2026-10-19: c1b4b9b6 lands the test the Accept names for its
   two decidable clauses (`every_shipped_record_compiles_to_text_with_stable_keys`: every record of
   `MaterialSet::shipped()` compiles to non-empty WGSL that keeps `vs` and `fs`, bytes and keys x2, and a coat edit
-  on a bare shipped record moves the key and the text). F2P `cargo test -p engine-material --lib compile` 11 passed,
-  gh run 39177681648; P2P `cargo test -p engine-material` 114 passed plus 1 doctest, gh run 39177860750.
-  operator/owner: the third clause cannot pass as written — coat is a lobe, never a texture slot, so a coated record
-  keeps the same `texture_bindings()` as the same record uncoated (the new test pins that), and `shipped()` holds 19
-  records today, not the 21 the clause names (21 is the siege kit plus the reference set, whose two shared names
-  ship once). Keep the wording and give coat its own texture binding, or change the wording to what the code does?
-  Question in `docs/plan/2026-10-19-owner-queue.md`.
+  on a bare shipped record moves the key and the text), 11 passed, gh run 39177681648; P2P
+  `cargo test -p engine-material` 114 passed plus 1 doctest, gh run 39177860750. Owner chat 2026-10-19 (delegated):
+  the Accept's third clause is corrected to what the code does. The question was "the third clause cannot pass as
+  written — coat is a lobe, never a texture slot, so a coated record keeps the same `texture_bindings()` as the same
+  record uncoated (the test pins that), and `shipped()` holds 19 records today, not the 21 the clause names (21 is
+  the siege kit plus the reference set, whose two shared names ship once)". The call: drop "strictly more bindings"
+  for "a different key", and read "every shipped record" for the count. Landed c1b4b9b6. F2P
+  `cargo test -p engine-material --lib compile` 14 passed (run 39223094120), including the corrected coat clause;
+  P2P unchanged from the runs above; the golden is untouched (material text and keys only, no simulation code).
+
 - [x] NS31c2 render: a pipeline from the generated WGSL — new file `crates/render/src/material_pipeline.rs` (window Progress 2026-10-17: crates/render/src/material_pipeline.rs landed as a std-only pipeline binning module (lobe plus slot key, MAX_MATERIAL_PIPELINES 12, bins_come_back_in_stable_order); left: no pipeline_for, no wgpu pipeline from generated WGSL, no 21-record GPU build test.
   feature) with `pub fn pipeline_for(device, compiled: &engine_material::compile::Compiled) ->
   Result<wgpu::RenderPipeline, MaterialPipelineError>` that creates the shader module from `compiled.wgsl`,
@@ -228,12 +231,12 @@
   MaterialLive` holding an `engine_material::reload::Reloader`, the current pipeline and the uniform buffer:
   `apply_text(&mut self, text)` runs `Reloader::apply_text`; `Reload::Values` writes the buffer; `Reload::Structure`
   builds the new pipeline first and swaps only on success (the old one keeps drawing meanwhile, the HR2 pattern in
-  `crates/render/src/live.rs`: `LiveSet::apply_notice` keeps the last good); a refusal changes nothing. Tier A.
+  `crates/render/src/present/gpu_present/live.rs`: `LiveSet::apply_notice` keeps the last good); a refusal changes nothing. Tier A.
   Size S. Owns `MaterialLive` in `crates/render/src/material_pipeline.rs`. Accept: F2P `cargo test -p
   engine-render --lib --features window material_live` (value edit reaches a presented frame in at most 100 ms;
   a structure edit, adding a coat, in at most 1000 ms at p95 over 20 runs on the RTX 3050, numbers written to
   `target/ns31c/reload.json`; 3 of 3 broken texts refused and the capture hash of the last good frame unchanged;
-  no adapter: SKIP); golden unchanged. needs: NS31c2. Landed 03eabf91. material_live_value_and_structure_edits_reach_the_frame green on the RTX 3050 (local PC run, no GitHub run id: window lines run on the PC): a value edit reached the frame in 1.556 ms (bar 100), a structure edit (a coat) took 14.008 ms at p95 over 20 runs (bar 1000), 3 of 3 broken texts refused with the last good frame hash unchanged (1f2541e048052325), numbers in target/ns31c/reload.json; no adapter skips; golden unchanged (no simulation crate touched). MaterialLive holds the reloader, the drawing pipeline and its uniform buffer; a structure edit builds the new pipeline and buffer first and swaps only on success, so the old one keeps drawing.
+  no adapter: SKIP); golden unchanged. needs: NS31c2. Landed 03eabf91. material_live_value_and_structure_edits_reach_the_frame green on the RTX 3050 (local PC run, no GitHub run id: window lines run on the PC): a value edit reached the frame in 1.556 ms (bar 100), a structure edit (a coat) took 14.008 ms at p95 over 20 runs (bar 1000), 3 of 3 broken texts refused with the last good frame hash unchanged (1f2541e048052325), numbers in target/ns31c/reload.json; no adapter skips; golden unchanged (no simulation crate touched). MaterialLive holds the reloader, the drawing pipeline and its uniform buffer; a structure edit builds the new pipeline and buffer first and swaps only on success, so the old one keeps drawing. Tick audit 2026-10-19: HR2 path updated to `crates/render/src/present/gpu_present/live.rs`.
 - [x] NS31d2 material: the furnace twin below roughness 0.3 — in `crates/material/src/furnace.rs` replace the
   l-space quadrature of the specular part by half-vector importance sampling (copy the method of
   `spec_integral` in `crates/material/src/dfg.rs` tests: GGX CDF inversion in `u`, `phi` grid, weight
@@ -388,6 +391,7 @@
   for the reference GPU; proof: `cargo test --locked -p engine-game
   --lib window_bind` 4/4 green plus `fighter_bind` green, golden
   unchanged.)
+  Owner chat 2026-10-19 (delegated): re-scoped per docs/plan/2026-10-18-deleted-code-triage.md: the `window_bind` bind glue is gone, so this row is the capture pair only.
 - [x] UI3 ui: HUD overlay model — names, HP pips, tick and hit flash as Landed 780ad679. DuelOverlay called from windowed.rs; engine-ui 155 passed, run 39052304852.
   data with x2-identical bytes (landed `e76c0f2`, never boarded). Tier A.
   Size XS. Owns `crates/ui/src/lib.rs` overlay hunks (encode/decode/tests

@@ -314,7 +314,7 @@ action or line, so replays reproduce without a provider.
   hash.rs), wire-or-remove AoiGrid, waive or fix nondet sites, pin
   old-vs-new digests + published vectors.
   Wave 53: TICK 3ba9bfd (judge 4/4; 7 folds bit-identical, aoi.rs deleted,
-  0 waivers, 168 serial green; leftovers → SL45).
+  0 waivers, 168 serial green; leftovers → SL45). Tick audit 2026-10-19: the named net `hash.rs` never landed — it was the reverted Wave 52 R2 second-hash-owner attempt; the FNV owner is `engine_core`.
   LATER: parked 2026-10-03 (circus verdict 2: its own wave note says TICK with a commit that exists, but the box was never ticked, so builders re-verify finished work; the lead ticks it with its receipt); unpark by deleting this line.
 - [x] SL30 ops: BTree hierarchy in scene — `Hierarchy.nodes` is a Landed 26e7a6a. Tick audit 2026-10-17: rust-quality nondet 0 hits in engine-scene, scene suite green in gh-check run 39057370994.
   `HashMap` iterated in `validate` (JAN51-3). Tier A. Size S. Owns

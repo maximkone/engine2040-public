@@ -116,6 +116,16 @@ root motion, `net` state):
   `MatchSpec::duel`), so `GOLDEN_600` and the v1 arena checkpoints are
   unchanged. Proof:
   `cargo test -p engine-game --lib app_new_equals_new_for_slot_on_rules_v2`.
+- QN2 (2026-10-19, delay in the match): `MatchSpec::input_delay_ticks`
+  (default `DEFAULT_INPUT_DELAY_TICKS` 2, the net send-queue hold
+  `session::INPUT_DELAY_TICKS`) rides `MatchSpec::identity` only when it
+  differs from the default, like the spear flag, so every shipped spec and
+  every frozen digest is byte-unchanged; a peer on another delay is refused
+  as a build mismatch (`lobby::BuildId`), and the net server and client
+  refuse a spec whose delay is outside the knob `MIN_DELAY..=MAX_DELAY`.
+  Proof: `cargo test -p engine-net --lib delay` (the sweep receipt, the
+  default derivation and the spec/version-gate test) and
+  `cargo test -p engine-arena --lib spec_`.
 - DSN1/DSN2 (2026-10-17): a match is one `MatchSpec` (config, rules, world;
   `crates/arena/src/spec.rs`) that the window (`App::spec`), `Server::from_spec`
   and `Client::from_spec` all build from; `MatchSpec::v1` is `LiveMatch::new`

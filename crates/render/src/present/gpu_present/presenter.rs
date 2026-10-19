@@ -65,6 +65,10 @@ pub struct Presenter {
     /// that opened the device itself reports source `caller`.
     pub(crate) backend_selection: crate::adapter::BackendSelection,
     pub(crate) forward_layout: wgpu::BindGroupLayout,
+    /// The one forward shader module: static, skinned and sky entries plus the
+    /// look guard. Kept so a tier change can rebuild the forward pipelines at
+    /// another guard preset without re-reading the source.
+    pub(crate) forward_shader: wgpu::ShaderModule,
     pub(crate) forward_hdr: wgpu::RenderPipeline,
     /// 4x MSAA forward pipeline for the on path: same shader plus layout
     /// as `forward_hdr` with count 4; bound when `targets.msaa` is `Some`.
@@ -520,6 +524,56 @@ fn forward_bind_with_sky(
     })
 }
 
+/// The four forward pipelines at one look guard preset: 1x and 4x MSAA, static
+/// and skinned. `constants` comes from `quality::look_guard_constants`, so a
+/// tier change rebuilds them by calling this again with other constants.
+pub(super) fn forward_pipelines(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
+) -> [wgpu::RenderPipeline; 4] {
+    // EG13 on path: 4x multisample with one shading run per pixel (cost is
+    // bandwidth, not shading); off stays the 1x path. SP63: the MSAA pass
+    // keeps a single HDR attachment, so its pipeline carries one target.
+    // The skinned twins use `vs_skinned` over the 64-byte vertex, so a body
+    // draws from bind-pose vertices plus one joint block.
+    [
+        forward_pipeline(
+            device,
+            shader,
+            layout,
+            &super::submit::forward_color_target_formats(),
+            pipeline_multisample(&MsaaConfig::default()),
+            constants,
+        ),
+        forward_pipeline(
+            device,
+            shader,
+            layout,
+            &[HDR_FORMAT],
+            pipeline_multisample(&MsaaConfig { enabled: true }),
+            constants,
+        ),
+        forward_skinned_pipeline(
+            device,
+            shader,
+            layout,
+            &super::submit::forward_color_target_formats(),
+            pipeline_multisample(&MsaaConfig::default()),
+            constants,
+        ),
+        forward_skinned_pipeline(
+            device,
+            shader,
+            layout,
+            &[HDR_FORMAT],
+            pipeline_multisample(&MsaaConfig { enabled: true }),
+            constants,
+        ),
+    ]
+}
+
 impl Presenter {
     /// 1x1 white sRGB texture (samples to linear 1.0): the identity the
     /// `None` draws bind, so untextured pixels never move. Cold init path
@@ -732,41 +786,15 @@ impl Presenter {
             label: Some("ra1-uniforms"),
             entries: &forward_entries,
         });
-        let forward_hdr = forward_pipeline(
-            &device,
-            &forward_shader,
-            &forward_layout,
-            &super::submit::forward_color_target_formats(),
-            pipeline_multisample(&MsaaConfig::default()),
-        );
-        // EG13 on path: 4x multisample with one shading run per pixel
-        // (cost is bandwidth, not shading); off stays the 1x path.
-        // SP63: the MSAA pass keeps a single HDR attachment, so its
-        // pipeline carries one target.
-        let forward_hdr_msaa = forward_pipeline(
-            &device,
-            &forward_shader,
-            &forward_layout,
-            &[HDR_FORMAT],
-            pipeline_multisample(&MsaaConfig { enabled: true }),
-        );
-        // The skinned twins: the same shader and layout, `vs_skinned` over
-        // the 64-byte vertex, so a body draws from bind-pose vertices plus
-        // one joint block instead of freshly CPU-skinned buffers.
-        let forward_skinned = forward_skinned_pipeline(
-            &device,
-            &forward_shader,
-            &forward_layout,
-            &super::submit::forward_color_target_formats(),
-            pipeline_multisample(&MsaaConfig::default()),
-        );
-        let forward_skinned_msaa = forward_skinned_pipeline(
-            &device,
-            &forward_shader,
-            &forward_layout,
-            &[HDR_FORMAT],
-            pipeline_multisample(&MsaaConfig { enabled: true }),
-        );
+        let [forward_hdr, forward_hdr_msaa, forward_skinned, forward_skinned_msaa] =
+            forward_pipelines(
+                &device,
+                &forward_shader,
+                &forward_layout,
+                &crate::quality::look_guard_constants(&crate::quality::knobs(
+                    crate::quality::Quality::High,
+                )),
+            );
         let skin_joint_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fc2b-skin-joints"),
             size: SKIN_BLOCK_BYTES * u64::try_from(SKIN_BLOCKS).unwrap_or(1),
@@ -1152,6 +1180,7 @@ impl Presenter {
                 crate::presenter_pick::summary_of(&info),
             ),
             forward_layout,
+            forward_shader,
             forward_hdr,
             forward_hdr_msaa,
             forward_skinned,

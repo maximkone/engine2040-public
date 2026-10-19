@@ -8,6 +8,8 @@ pub mod ground;
 pub mod roster;
 pub mod scatter;
 pub mod terrain;
+/// Wave function collapse tile bake: kinds plus an adjacency table, bake-time only.
+pub mod wfc;
 
 /// FNV-1a 64 over bytes: the one content hash every bake and
 /// terrain gate in this crate uses.

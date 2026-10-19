@@ -22,6 +22,9 @@ pub mod hash;
 pub mod json;
 pub mod quat;
 pub mod rng;
+/// The wyrand-shape counter stream (wyhash family): a keyed `sample(counter)`
+/// word function for new bake work beside the frozen legacy stream.
+pub mod rng_wyhash;
 pub mod seal_key;
 pub mod tick;
 pub mod time;
@@ -33,6 +36,7 @@ pub use hash::{hash_bytes, hash_hex, hash_u64s, mix64, splitmix64, Fnv64};
 // One quaternion product: every crate composes rotations to the same bits.
 pub use quat::{quat_mul, quat_mul_fixed};
 pub use rng::Rng;
+pub use rng_wyhash::WyRng;
 pub use seal_key::{
     decode_seal_hex, parse_hex4, parse_seal_key, seal_key_from_env, SealKeyError,
     MIN_SEAL_KEY_BYTES,

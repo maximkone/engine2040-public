@@ -783,6 +783,65 @@ mod device {
             "fog off restores the clear frame: {worst}"
         );
     }
+
+    /// QL5: the preset reaches the pipelines. The potato tier rebuilds the four
+    /// forward pipelines and the fp32 tiers do not, and a frame draws at each
+    /// preset - so an override the driver refuses fails here (the lit pixels
+    /// of one small frame do not move: the 0.045 grazing floor only bites
+    /// inside a sub-pixel silhouette band).
+    #[test]
+    fn potato_look_guard_rebuilds_the_forward_pipelines() {
+        let Some(mut presenter) = init_or_skip() else {
+            return;
+        };
+        presenter
+            .upload_mesh(cube_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(128, 128).expect("valid size applies");
+        presenter.set_fog_enabled(false);
+        let draw = list(camera_at(6.0), 1.0);
+        let forward_builds = || {
+            crate::pipeline_warmup::snapshot()
+                .labels()
+                .iter()
+                .filter(|label| label.starts_with("ra1-forward"))
+                .count()
+        };
+        // The build-time pipelines are the fp32 preset: another High tier
+        // changes nothing.
+        presenter.apply_quality(&crate::quality::knobs(crate::quality::Quality::High));
+        let warm = forward_builds();
+        assert!(
+            !presenter.quality_knobs().look_potato_guard,
+            "High keeps the fp32 clamp"
+        );
+        assert_eq!(forward_builds(), warm, "a High tier rebuilds nothing");
+        // The potato edge rebuilds all four (1x and 4x MSAA, static and
+        // skinned) with the preset set.
+        presenter.apply_quality(&crate::quality::knobs(crate::quality::Quality::Potato));
+        presenter
+            .render_live_offscreen(&draw)
+            .expect("potato frame draws");
+        assert!(
+            presenter.quality_knobs().look_potato_guard,
+            "potato drops the fp32 clamp"
+        );
+        assert_eq!(
+            forward_builds(),
+            warm + 4,
+            "the potato edge rebuilds all four forward pipelines"
+        );
+        // And back: the fp32 edge rebuilds them again.
+        presenter.apply_quality(&crate::quality::knobs(crate::quality::Quality::High));
+        presenter
+            .render_live_offscreen(&draw)
+            .expect("fp32 frame draws");
+        assert_eq!(
+            forward_builds(),
+            warm + 8,
+            "the fp32 edge rebuilds all four forward pipelines"
+        );
+    }
 }
 
 /// LF4 slice 2: the live blit blooms linear HDR before the one tone map.

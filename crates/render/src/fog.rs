@@ -746,7 +746,7 @@ impl ContactAo {
             device,
             queue,
             frame,
-            &self.to_bytes(),
+            &self.to_bytes(), // alloc-ok: submit_gpu probe upload encode, not the window steady frame
             self.texels(),
             "contact",
         )
@@ -1203,7 +1203,7 @@ fn submit_bind_probe(
     what: &'static str,
 ) -> Result<FogReceipt, FogError> {
     let count =
-        u32::try_from(texels).map_err(|_| FogError::Invalid(format!("fog {what} exceeds u32")))?;
+        u32::try_from(texels).map_err(|_| FogError::Invalid(format!("fog {what} exceeds u32")))?; // alloc-ok: cold refusal, never a steady frame
     let byte_len = texels as u64 * FOG_BYTES_PER_TEXEL;
     let started = Instant::now();
     let (layout, pipeline) = bind_probe_pipeline(device);
@@ -1270,18 +1270,16 @@ fn submit_bind_probe(
     let back = crate::accel::readback_f32(&readback, texels, "fog")?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
-        return Err(FogError::Validation(format!(
-            "fog {what} bind validation: {err:?}"
-        )));
+        let reason = format!("fog {what} bind validation: {err:?}"); // alloc-ok: cold validation failure, never a steady frame
+        return Err(FogError::Validation(reason));
     }
     // Roundtrip check without a scratch copy: decode each source word in
     // place and compare bit for bit, so the submit path allocates nothing.
     for (i, (got, chunk)) in back.iter().zip(bytes.chunks_exact(4)).enumerate() {
         let want = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if got.to_bits() != want.to_bits() {
-            return Err(FogError::Device(format!(
-                "fog {what} bind roundtrip texel {i} differs: {got} vs {want}"
-            )));
+            let reason = format!("fog {what} bind roundtrip texel {i} differs: {got} vs {want}"); // alloc-ok: cold device-loss path, never a steady frame
+            return Err(FogError::Device(reason));
         }
     }
     Ok(FogReceipt {
@@ -1544,10 +1542,10 @@ impl FogSubmitter {
         contact.validate()?;
         frame.validate().map_err(look_err)?;
         if frame.viewport_px != [contact.width_px, contact.height_px] {
-            return Err(FogError::Invalid(format!(
-                "fog frame {}x{} mismatches contact {}x{}",
-                frame.viewport_px[0], frame.viewport_px[1], contact.width_px, contact.height_px
-            )));
+            let (fw, fh) = (frame.viewport_px[0], frame.viewport_px[1]);
+            let (cw, ch) = (contact.width_px, contact.height_px);
+            let reason = format!("fog frame {fw}x{fh} mismatches contact {cw}x{ch}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(FogError::Invalid(reason));
         }
         let n = contact.texels();
         check_depth_buffer(depth_m, n, "depth")?;
@@ -1703,17 +1701,17 @@ impl FogSubmitter {
             0,
             &crate::graph::look_frame_uniform_bytes(frame),
         );
-        let mut depth_bytes = Vec::with_capacity(n * 4);
+        let mut depth_bytes = Vec::with_capacity(n * 4); // alloc-ok: submit probe staging with readback, not the window steady frame
         for d in depth_m {
             depth_bytes.extend_from_slice(&d.to_le_bytes());
         }
         queue.write_buffer(depth_buf, 0, &depth_bytes);
-        let mut height_bytes = Vec::with_capacity(n * 4);
+        let mut height_bytes = Vec::with_capacity(n * 4); // alloc-ok: submit probe staging with readback, not the window steady frame
         for v in height_m {
             height_bytes.extend_from_slice(&v.to_le_bytes());
         }
         queue.write_buffer(height_buf, 0, &height_bytes);
-        let mut normal_bytes = Vec::with_capacity(n * 16);
+        let mut normal_bytes = Vec::with_capacity(n * 16); // alloc-ok: submit probe staging with readback, not the window steady frame
         for v in &flat_normals {
             normal_bytes.extend_from_slice(&v[0].to_le_bytes());
             normal_bytes.extend_from_slice(&v[1].to_le_bytes());
@@ -1754,9 +1752,8 @@ impl FogSubmitter {
         fog_rb.unmap();
         contact_rb.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
-            return Err(FogError::Validation(format!(
-                "fog submit validation: {err:?}"
-            )));
+            let reason = format!("fog submit validation: {err:?}"); // alloc-ok: cold validation failure, never a steady frame
+            return Err(FogError::Validation(reason));
         }
         Ok(FogGpuOutput {
             fog: FogField {
@@ -1818,12 +1815,12 @@ pub fn submit_gpu_fog(
         device,
         queue,
         frame,
-        &field.to_bytes(),
+        &field.to_bytes(), // alloc-ok: submit_gpu_fog probe upload encode, not the window steady frame
         field.texels(),
         "fog",
     )?;
     let contact_back =
-        submit_bind_probe(device, queue, frame, &ao.to_bytes(), ao.texels(), "contact")?;
+        submit_bind_probe(device, queue, frame, &ao.to_bytes(), ao.texels(), "contact")?; // alloc-ok: submit_gpu_fog probe upload encode, not the window steady frame
     let _ = (fog_back, contact_back);
     Ok(FogReceipt {
         frame_index: frame.frame_index,

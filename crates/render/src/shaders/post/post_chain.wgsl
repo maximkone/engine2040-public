@@ -1,4 +1,5 @@
 
+@group(2) @binding(4) var post_sampler: sampler; // CQ23: the chunk samples bloom, so it names its sampler
 @group(2) @binding(5) var post_bloom: texture_2d<f32>;
 @group(2) @binding(6) var<uniform> post_chain: vec4<f32>;
 @group(2) @binding(7) var<uniform> post_grade: vec4<f32>;

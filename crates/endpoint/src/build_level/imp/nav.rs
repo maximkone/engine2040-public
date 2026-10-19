@@ -62,13 +62,19 @@ pub(super) fn actor_with(actor: &Actor, solved: &engine_spatial::TransformOut) -
 
 /// Solve every planned prop against the shell plus the current positions.
 /// Passes run in name order until every prop settles or no pass makes
-/// progress; returns the actor list, the solve-call count and the still
-/// unsolved ids in ascending order.
+/// progress; returns the actor list, the still unsolved ids in ascending
+/// order and, per still-unsolved prop, the SP5 minimal conflict set from its
+/// last failed solve (the refusal's conflict-set evidence). A prop that
+/// solves on a later pass leaves no conflict entry.
 pub(super) fn solve_plan(
     plan: &RelationPlan,
     fixed: &[Actor],
     solve_calls: &mut u32,
-) -> (Vec<Actor>, BTreeSet<u32>) {
+) -> (
+    Vec<Actor>,
+    BTreeSet<u32>,
+    BTreeMap<u32, engine_spatial::ConflictSet>,
+) {
     let mut actors: Vec<Actor> = room_shell();
     actors.extend_from_slice(fixed);
     let staged: Vec<Actor> = plan
@@ -79,6 +85,7 @@ pub(super) fn solve_plan(
         .collect();
     actors.extend(staged);
     let mut solved: BTreeSet<u32> = BTreeSet::new();
+    let mut conflicts: BTreeMap<u32, engine_spatial::ConflictSet> = BTreeMap::new();
     for _ in 0..PASSES_MAX {
         let mut progress = false;
         for prop in &plan.props {
@@ -90,13 +97,20 @@ pub(super) fn solve_plan(
                 wants: prop.wants.clone(),
             };
             *solve_calls += 1;
-            if let Ok(out) = engine_spatial::solve(&intent, &actors) {
-                if let Some(first) = out.first() {
-                    if let Some(slot) = actors.iter().position(|a| a.id == prop.id) {
-                        actors[slot] = actor_with(&actors[slot], first);
+            match engine_spatial::solve(&intent, &actors) {
+                Ok(out) => {
+                    if let Some(first) = out.first() {
+                        if let Some(slot) = actors.iter().position(|a| a.id == prop.id) {
+                            actors[slot] = actor_with(&actors[slot], first);
+                        }
+                        solved.insert(prop.id);
+                        progress = true;
                     }
-                    solved.insert(prop.id);
-                    progress = true;
+                }
+                // Last failed attempt wins: the conflict set of the pose the
+                // solver finished with names the wants it could not satisfy.
+                Err(conflict) => {
+                    conflicts.insert(prop.id, conflict);
                 }
             }
         }
@@ -110,7 +124,8 @@ pub(super) fn solve_plan(
         .map(|prop| prop.id)
         .filter(|id| !solved.contains(id))
         .collect();
-    (actors, unsolved)
+    conflicts.retain(|id, _| unsolved.contains(id));
+    (actors, unsolved, conflicts)
 }
 
 pub(super) fn tile_of(x_cm: i32, z_cm: i32) -> (i32, i32) {
@@ -346,6 +361,7 @@ pub(super) fn resolve_single(
     actors: &mut [Actor],
     prop_id: u32,
     wants: &[Want],
+    conflict: &mut Option<engine_spatial::ConflictSet>,
     solve_calls: &mut u32,
 ) -> bool {
     let intent = Intent {
@@ -355,6 +371,7 @@ pub(super) fn resolve_single(
     *solve_calls += 1;
     match engine_spatial::solve(&intent, actors) {
         Ok(out) => {
+            *conflict = None;
             if let (Some(first), Some(slot)) =
                 (out.first(), actors.iter().position(|a| a.id == prop_id))
             {
@@ -363,7 +380,10 @@ pub(super) fn resolve_single(
             }
             false
         }
-        Err(_) => false,
+        Err(set) => {
+            *conflict = Some(set);
+            false
+        }
     }
 }
 
@@ -372,13 +392,15 @@ pub(super) fn resolve_single(
 /// to the first clean cell; the last prop is never removed, so a level
 /// keeps at least one prop and a stuck single-prop brief refuses instead
 /// of voiding itself. Every applied round counts, even a failed re-solve.
-/// A re-solved culprit leaves the `unsolved` set.
+/// A re-solved culprit leaves the `unsolved` set and its conflict entry; a
+/// failed re-solve refreshes the SP5 conflict set the refusal reports.
 pub(super) fn repair_round(
     plan: &mut RelationPlan,
     actors: &mut [Actor],
     round: u8,
     culprit: u32,
     unsolved: &mut BTreeSet<u32>,
+    conflicts: &mut BTreeMap<u32, engine_spatial::ConflictSet>,
     solve_calls: &mut u32,
 ) -> bool {
     let multi = plan.props.len() > 1;
@@ -393,8 +415,12 @@ pub(super) fn repair_round(
             entry.wants.pop();
             entry.sources.pop();
             let wants = entry.wants.clone();
-            if resolve_single(actors, culprit, &wants, solve_calls) {
+            let mut conflict = None;
+            if resolve_single(actors, culprit, &wants, &mut conflict, solve_calls) {
                 unsolved.remove(&culprit);
+                conflicts.remove(&culprit);
+            } else if let Some(set) = conflict {
+                conflicts.insert(culprit, set);
             }
             true
         }
@@ -403,8 +429,12 @@ pub(super) fn repair_round(
                 want.distance_cm = None;
             }
             let wants = entry.wants.clone();
-            if resolve_single(actors, culprit, &wants, solve_calls) {
+            let mut conflict = None;
+            if resolve_single(actors, culprit, &wants, &mut conflict, solve_calls) {
                 unsolved.remove(&culprit);
+                conflicts.remove(&culprit);
+            } else if let Some(set) = conflict {
+                conflicts.insert(culprit, set);
             }
             true
         }
@@ -414,8 +444,12 @@ pub(super) fn repair_round(
             }
             entry.wants.clear();
             entry.sources.clear();
-            if resolve_single(actors, culprit, &[], solve_calls) {
+            let mut conflict = None;
+            if resolve_single(actors, culprit, &[], &mut conflict, solve_calls) {
                 unsolved.remove(&culprit);
+                conflicts.remove(&culprit);
+            } else if let Some(set) = conflict {
+                conflicts.insert(culprit, set);
             }
             true
         }

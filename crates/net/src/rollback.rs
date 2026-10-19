@@ -29,6 +29,19 @@
 //! EVIDENCE: | crates/net/src/rollback.rs | clean-room P2P rollback tape,
 //! no vendor bytes | MIT OR Apache-2.0 | ADOPT - pattern, ideas
 //! reimplemented, no vendor |
+//!
+//! Link conditioner plus seat input buffer (lightyear `LinkConditionerConfig`
+//! and `InputBuffer` ideas only, MIT OR Apache-2.0, reimplemented std-only,
+//! no Bevy dependency, zero donor bytes): [`LinkConditionerConfig`] states
+//! the one-way latency and jitter each way in ticks and derives the local
+//! input delay that hides the server relay ([`LinkConditionerConfig::input_delay`]),
+//! and [`InputBuffer`] holds every seat's authored input and applies it
+//! `delay` ticks later. [`SeatSession`] runs an N-seat predicting client over
+//! them: known inputs win, a missing seat repeats its last confirmed input,
+//! and a late true input that contradicts a played frame rolls back once and
+//! resimulates the window. The 4-seat headless proof drives a server and four
+//! such clients through [`crate::link::LoopbackWire`] under the LAN
+//! conditioner.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
@@ -250,6 +263,437 @@ impl Default for InputQueue {
     }
 }
 
+/// One-way link conditioning in ticks, each way.
+///
+/// The lightyear `LinkConditionerConfig` shape (incoming and outgoing latency
+/// plus jitter), reimplemented std-only over integer ticks: no sleep, no wall
+/// clock, no Bevy. [`Self::incoming`] and [`Self::outgoing`] are the profiles
+/// a [`crate::link::FaultLink`] draws from, and [`Self::input_delay`] is the
+/// local input delay that hides the full client-to-server-to-client relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkConditionerConfig {
+    /// One-way latency server-to-client, in ticks.
+    pub incoming_latency: u32,
+    /// Extra server-to-client latency drawn from `0..=incoming_jitter`, in ticks.
+    pub incoming_jitter: u32,
+    /// One-way latency client-to-server, in ticks.
+    pub outgoing_latency: u32,
+    /// Extra client-to-server latency drawn from `0..=outgoing_jitter`, in ticks.
+    pub outgoing_jitter: u32,
+}
+
+impl LinkConditionerConfig {
+    /// State every direction in ticks.
+    #[must_use]
+    pub const fn new(
+        incoming_latency: u32,
+        incoming_jitter: u32,
+        outgoing_latency: u32,
+        outgoing_jitter: u32,
+    ) -> Self {
+        Self {
+            incoming_latency,
+            incoming_jitter,
+            outgoing_latency,
+            outgoing_jitter,
+        }
+    }
+
+    /// No delay either way (loopback in one tick).
+    #[must_use]
+    pub const fn clean() -> Self {
+        Self::new(0, 0, 0, 0)
+    }
+
+    /// LAN: one tick each way, no jitter. A two-frame input delay covers the
+    /// full relay, so a client predicts almost nothing.
+    #[must_use]
+    pub const fn lan() -> Self {
+        Self::new(1, 0, 1, 0)
+    }
+
+    /// The server-to-client loss profile this conditioner implies (no loss).
+    #[must_use]
+    pub const fn incoming(&self) -> crate::link::LinkProfile {
+        crate::link::LinkProfile {
+            latency: self.incoming_latency,
+            jitter: self.incoming_jitter,
+            loss_pct: 0,
+            reorder_pct: 0,
+        }
+    }
+
+    /// The client-to-server loss profile this conditioner implies (no loss).
+    #[must_use]
+    pub const fn outgoing(&self) -> crate::link::LinkProfile {
+        crate::link::LinkProfile {
+            latency: self.outgoing_latency,
+            jitter: self.outgoing_jitter,
+            loss_pct: 0,
+            reorder_pct: 0,
+        }
+    }
+
+    /// Slowest full relay the conditioner can draw, in ticks: out plus back.
+    #[must_use]
+    pub const fn worst_relay(&self) -> u32 {
+        self.outgoing_latency
+            .saturating_add(self.outgoing_jitter)
+            .saturating_add(self.incoming_latency)
+            .saturating_add(self.incoming_jitter)
+    }
+
+    /// Local input delay that hides the full relay, clamped to the input-delay
+    /// knob ([`crate::delay::MAX_DELAY`]). A client that samples `delay` ticks
+    /// before it plays a tick receives every peer input just in time.
+    #[must_use]
+    pub fn input_delay(&self) -> u32 {
+        crate::delay::clamp_delay(self.worst_relay())
+    }
+}
+
+/// Seat input buffer: every seat's authored input per tick, bounded to
+/// [`INPUT_QUEUE_LEN`] ticks (lightyear `InputBuffer` shape, ideas only).
+///
+/// The local seat presses with [`Self::press`], which files the input
+/// `delay` ticks ahead of the tick being played (frame delay); peers file
+/// their authored tick with [`Self::record`]. [`Self::resolve`] answers the
+/// inputs a played tick uses: a held input wins, a missing seat repeats its
+/// last confirmed input. Order-preserving: rows stay keyed by tick in a
+/// `BTreeMap`, the prune only drops the oldest. Determinism: integer ticks
+/// only, no wall clock.
+#[derive(Clone, Debug)]
+pub struct InputBuffer<const N: usize> {
+    delay: u32,
+    rows: BTreeMap<u32, [Option<u32>; N]>,
+    last: [u32; N],
+    newest: u32,
+}
+
+impl<const N: usize> InputBuffer<N> {
+    /// Empty buffer whose local presses play `delay` ticks later (clamped to
+    /// [`crate::delay::MAX_DELAY`]).
+    #[must_use]
+    pub fn new(delay: u32) -> Self {
+        Self {
+            delay: crate::delay::clamp_delay(delay),
+            rows: BTreeMap::new(),
+            last: [0; N],
+            newest: 0,
+        }
+    }
+
+    /// Local input delay in ticks.
+    #[must_use]
+    pub fn delay(&self) -> u32 {
+        self.delay
+    }
+
+    /// File one authored input for `tick`. Returns `true` when the held value
+    /// changed (a new row, or a different input); an evicted tick answers
+    /// `false` without writing.
+    pub fn record(&mut self, tick: u32, seat: usize, input: u32) -> bool {
+        if seat >= N {
+            return false;
+        }
+        let cap = u32::try_from(INPUT_QUEUE_LEN).unwrap_or(u32::MAX);
+        if tick.saturating_add(cap) < self.newest {
+            return false;
+        }
+        let row = self.rows.entry(tick).or_insert([None; N]);
+        let changed = row[seat] != Some(input);
+        row[seat] = Some(input);
+        self.newest = self.newest.max(tick);
+        while let Some((&oldest, _)) = self.rows.first_key_value() {
+            if self.newest.saturating_sub(oldest) < cap {
+                break;
+            }
+            self.rows.pop_first();
+        }
+        changed
+    }
+
+    /// File the local press for the tick being played: it plays `delay` ticks
+    /// later. Returns [`Self::record`]'s answer for that future tick.
+    pub fn press(&mut self, play_tick: u32, seat: usize, input: u32) -> bool {
+        self.record(play_tick.saturating_add(self.delay), seat, input)
+    }
+
+    /// Remember `inputs` as the last played row (the repeat-last source).
+    pub fn note_played(&mut self, inputs: [u32; N]) {
+        self.last = inputs;
+    }
+
+    /// Held input for `tick` and `seat`, or `None` when absent/evicted.
+    #[must_use]
+    pub fn get(&self, tick: u32, seat: usize) -> Option<u32> {
+        self.rows
+            .get(&tick)
+            .and_then(|row| row.get(seat).copied().flatten())
+    }
+
+    /// Last played input for `seat` (the repeat-last prediction).
+    #[must_use]
+    pub fn last(&self, seat: usize) -> u32 {
+        self.last.get(seat).copied().unwrap_or(0)
+    }
+
+    /// True when every seat holds an authored input for `tick`.
+    #[must_use]
+    pub fn complete(&self, tick: u32) -> bool {
+        self.rows
+            .get(&tick)
+            .is_some_and(|row| row.iter().all(Option::is_some))
+    }
+
+    /// Inputs a played `tick` runs: a held input wins, a missing seat repeats
+    /// its last confirmed input.
+    #[must_use]
+    pub fn resolve(&self, tick: u32) -> [u32; N] {
+        std::array::from_fn(|seat| self.get(tick, seat).unwrap_or_else(|| self.last(seat)))
+    }
+
+    /// Drop every row below `tick`; returns the dropped row count.
+    pub fn discard_before(&mut self, tick: u32) -> u32 {
+        let mut dropped = 0u32;
+        while let Some((&oldest, _)) = self.rows.first_key_value() {
+            if oldest >= tick {
+                break;
+            }
+            self.rows.pop_first();
+            dropped += 1;
+        }
+        dropped
+    }
+
+    /// Held rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// True when no row is held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// N-seat deterministic sim behind [`SeatSession`].
+///
+/// Integer-only, like [`SimTick`]: `+ - * /`, wrapping integer math and a
+/// state hash; no float transcendental calls, no wall clock.
+pub trait SeatSim<const N: usize>: Clone {
+    /// Advance one fixed tick with every seat's input.
+    fn step(&mut self, inputs: [u32; N]);
+    /// Canonical state hash after the latest tick.
+    fn hash(&self) -> u64;
+}
+
+/// One played tick of a [`SeatSession`].
+struct SeatFrame<const N: usize, S> {
+    tick: u32,
+    before: S,
+    inputs: [u32; N],
+}
+
+/// N-seat predicting client: local frame delay plus repeat-last prediction,
+/// with one rollback and resim per mispredicted tick.
+///
+/// Consumer: the 4-seat headless proof below; a seat client of the dedicated
+/// server builds the same way over [`crate::link::LoopbackWire`]. The local
+/// input is pressed `delay` ticks before it plays ([`InputBuffer::press`]);
+/// peer inputs arrive as authored ticks ([`InputBuffer::record`]). A late true
+/// input that contradicts a played frame restores that frame's checkpoint and
+/// replays the window in tick order, counted as one rollback event.
+pub struct SeatSession<const N: usize, S: SeatSim<N>> {
+    sim: S,
+    tick: u32,
+    buffer: InputBuffer<N>,
+    window: VecDeque<SeatFrame<N, S>>,
+    history: Vec<u64>,
+    local: usize,
+    rollbacks: u64,
+    predicted: u64,
+    mispredicted: u64,
+    max_rollback: usize,
+}
+
+impl<const N: usize, S: SeatSim<N>> SeatSession<N, S> {
+    /// Open a session at tick zero for `local`, with `delay` local frames.
+    pub fn new(initial: S, local: usize, delay: u32) -> Self {
+        Self {
+            sim: initial,
+            tick: 0,
+            buffer: InputBuffer::new(delay),
+            window: VecDeque::new(),
+            history: Vec::new(),
+            local,
+            rollbacks: 0,
+            predicted: 0,
+            mispredicted: 0,
+            max_rollback: 0,
+        }
+    }
+
+    /// Next tick to play.
+    pub fn tick(&self) -> u32 {
+        self.tick
+    }
+
+    /// Local input delay in ticks.
+    pub fn delay(&self) -> u32 {
+        self.buffer.delay()
+    }
+
+    /// Live sim state after the latest played tick.
+    pub fn sim(&self) -> &S {
+        &self.sim
+    }
+
+    /// Rollback events so far (one per resimulated mispredict).
+    pub fn rollbacks(&self) -> u64 {
+        self.rollbacks
+    }
+
+    /// Frames played with at least one seat still predicted.
+    pub fn predicted_count(&self) -> u64 {
+        self.predicted
+    }
+
+    /// Late true inputs that contradicted their prediction.
+    pub fn mispredicted_count(&self) -> u64 {
+        self.mispredicted
+    }
+
+    /// Deepest rollback so far, in ticks.
+    pub fn max_rollback(&self) -> usize {
+        self.max_rollback
+    }
+
+    /// Tape hash at `tick`, or `None` before/after the played range.
+    pub fn hash_at(&self, tick: u32) -> Option<u64> {
+        usize::try_from(tick)
+            .ok()
+            .and_then(|i| self.history.get(i).copied())
+    }
+
+    /// Play the next tick with this tick's local press. The press plays
+    /// `delay` ticks later; every other seat uses its held input or repeats
+    /// its last confirmed one. Returns the post-tick hash.
+    pub fn advance(&mut self, sample: u32) -> u64 {
+        let tick = self.tick;
+        self.buffer.press(tick, self.local, sample);
+        let complete = self.buffer.complete(tick);
+        let inputs = self.buffer.resolve(tick);
+        if !complete {
+            self.predicted += 1;
+        }
+        self.buffer.note_played(inputs);
+        let before = self.sim.clone();
+        self.sim.step(inputs);
+        let hash = self.sim.hash();
+        self.window.push_back(SeatFrame {
+            tick,
+            before,
+            inputs,
+        });
+        self.history.push(hash);
+        if self.window.len() > MAX_P2P_ROLLBACK + 1 {
+            self.window.pop_front();
+        }
+        self.tick += 1;
+        hash
+    }
+
+    /// File one authored peer input for `tick`. A future tick buffers
+    /// (`Ok(0)`); an already-played tick that disagrees with its prediction
+    /// rolls back and resimulates the window (`Ok(distance)`); an evicted
+    /// tick refuses with [`RollbackError::TooFar`]; an unknown seat refuses
+    /// with [`RollbackError::NoSeat`]. Any refusal changes nothing.
+    pub fn confirm(&mut self, tick: u32, seat: usize, input: u32) -> Result<usize, RollbackError> {
+        if seat >= N {
+            return Err(RollbackError::NoSeat { seat });
+        }
+        if tick >= self.tick {
+            self.buffer.record(tick, seat, input);
+            return Ok(0);
+        }
+        let oldest = self.window.front().map_or(self.tick, |frame| frame.tick);
+        let Some(since) = tick.checked_sub(oldest) else {
+            return Err(RollbackError::TooFar {
+                frame: tick,
+                oldest,
+            });
+        };
+        let Some(index) = usize::try_from(since).ok() else {
+            return Err(RollbackError::TooFar {
+                frame: tick,
+                oldest,
+            });
+        };
+        let Some(frame) = self.window.get(index) else {
+            return Err(RollbackError::TooFar {
+                frame: tick,
+                oldest,
+            });
+        };
+        let corrected = frame.inputs;
+        self.buffer.record(tick, seat, input);
+        if corrected[seat] == input {
+            return Ok(0);
+        }
+        self.mispredicted += 1;
+        self.resimulate(index)?;
+        Ok(usize::try_from(self.tick - tick).unwrap_or(usize::MAX))
+    }
+
+    /// Restore the checkpoint at window `index` and replay to the tip.
+    fn resimulate(&mut self, index: usize) -> Result<(), RollbackError> {
+        let oldest = self.window.front().map_or(self.tick, |frame| frame.tick);
+        let Some(start) = self.window.get(index) else {
+            return Err(RollbackError::TooFar {
+                frame: oldest,
+                oldest,
+            });
+        };
+        let checkpoint = start.before.clone();
+        self.sim = checkpoint;
+        let len = self.window.len();
+        let mut inputs = [0u32; N];
+        for at in index..len {
+            let Some(frame) = self.window.get(at) else {
+                break;
+            };
+            let tick = frame.tick;
+            let played = frame.inputs;
+            for (seat, slot) in inputs.iter_mut().enumerate() {
+                *slot = self.buffer.get(tick, seat).unwrap_or(played[seat]);
+            }
+            self.sim.step(inputs);
+            let hash = self.sim.hash();
+            if let Some(frame) = self.window.get_mut(at) {
+                frame.inputs = inputs;
+            }
+            if let Some(slot) = usize::try_from(tick)
+                .ok()
+                .and_then(|i| self.history.get_mut(i))
+            {
+                *slot = hash;
+            }
+            if at + 1 < len {
+                let next = self.sim.clone();
+                if let Some(frame) = self.window.get_mut(at + 1) {
+                    frame.before = next;
+                }
+            }
+        }
+        self.rollbacks += 1;
+        self.max_rollback = self.max_rollback.max(len - index);
+        Ok(())
+    }
+}
+
 /// Loud rollback failures: desync / window / history refusals change nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RollbackError {
@@ -280,6 +724,11 @@ pub enum RollbackError {
     },
     /// Seat token mismatch on a guarded confirm; state unchanged.
     BadSeat { frame: u32, want: u64, got: u64 },
+    /// Confirm names a seat outside the session's seat count; state unchanged.
+    NoSeat {
+        /// Requested seat index.
+        seat: usize,
+    },
 }
 
 impl std::fmt::Display for RollbackError {
@@ -299,6 +748,7 @@ impl std::fmt::Display for RollbackError {
             Self::BadSeat { frame, want, got } => {
                 write!(f, "bad seat {frame}: want {want:#x} got {got:#x}")
             }
+            Self::NoSeat { seat } => write!(f, "no seat {seat}"),
         }
     }
 }
@@ -805,7 +1255,11 @@ impl<S: SimTick> P2pSession<S> {
     /// WAN oldest (`frame - 9`), so a 61-tick-old correction takes the resync
     /// path, never a 61-tick resim. Storage window (`MAX_P2P_ROLLBACK` 128)
     /// still holds the frames; this is the authority rule on top of it.
-    pub fn confirm_frame_wan(&mut self, frame: u32, remote: u32) -> Result<usize, RollbackError> {
+    /// No live WAN session confirms through this guard yet, so it stays
+    /// crate-private and test-only (S28 hygiene: a pub item with no
+    /// production caller is the finding this closes).
+    #[cfg(test)]
+    fn confirm_frame_wan(&mut self, frame: u32, remote: u32) -> Result<usize, RollbackError> {
         let cap = u32::try_from(WAN_ROLLBACK_CAP).unwrap_or(u32::MAX);
         let gap = self.frame.saturating_sub(frame);
         if gap > cap {
@@ -985,6 +1439,7 @@ pub(crate) mod loopback {
 mod tests {
     use super::*;
     use crate::link::LinkProfile;
+    use crate::link::{Frame as LinkFrame, LoopbackWire, Peer, Wire};
 
     #[test]
     fn cap_respected_at_128() {
@@ -1597,6 +2052,359 @@ mod tests {
             (on.predicted, on.rollbacks, on.max_rollback),
             "same seed, same receipt"
         );
+    }
+
+    // ---- Link conditioner + 4-seat predicting client proof (ON21) ----
+
+    /// Integer-only toy squad: four seat inputs mixed into one counter.
+    #[derive(Clone, Default)]
+    struct QuadSim {
+        acc: u64,
+    }
+
+    impl SeatSim<4> for QuadSim {
+        fn step(&mut self, inputs: [u32; 4]) {
+            let mut mix = 0u64;
+            for (seat, input) in inputs.iter().enumerate() {
+                let shift = u32::try_from(seat).unwrap_or(0) * 8;
+                mix ^= u64::from(*input) << shift;
+            }
+            self.acc = engine_core::mix64(self.acc ^ mix);
+        }
+
+        fn hash(&self) -> u64 {
+            self.acc
+        }
+    }
+
+    /// Four seats, one authored tick every [`QUAD_HOLD`] ticks.
+    const QUAD_SEATS: usize = 4;
+    /// Ticks a scripted button is held.
+    const QUAD_HOLD: u32 = 3;
+
+    fn quad_script(seat: usize, tick: u32) -> u32 {
+        let lane = 0x51u64 ^ u64::try_from(seat).unwrap_or(0);
+        u32::try_from(engine_core::mix64(u64::from(tick / QUAD_HOLD) ^ lane) % 4).unwrap_or(0)
+    }
+
+    /// One authored input datagram: tick, seat, input.
+    fn quad_datagram(tick: u32, seat: usize, input: u32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(12);
+        bytes.extend_from_slice(&tick.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(seat).unwrap_or(u32::MAX).to_le_bytes());
+        bytes.extend_from_slice(&input.to_le_bytes());
+        bytes
+    }
+
+    fn quad_read(bytes: &[u8]) -> Option<(u32, usize, u32)> {
+        if bytes.len() < 12 {
+            return None;
+        }
+        let word = |at: usize| {
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        Some((
+            word(0),
+            usize::try_from(word(4)).unwrap_or(usize::MAX),
+            word(8),
+        ))
+    }
+
+    /// What one 4-seat headless run measured.
+    #[derive(Clone, Copy, Debug)]
+    struct QuadReceipt {
+        rollbacks: u64,
+        predicted: u64,
+        max_rollback: usize,
+        tips: [u64; QUAD_SEATS],
+        truth: u64,
+    }
+
+    /// Headless 4-seat bout: one authoritative sim plus four predicting
+    /// clients, every authored input crossing [`LoopbackWire`]. The server
+    /// steps its truth and relays; a client presses `delay` ticks ahead, so a
+    /// relay of `out + in` ticks is fully hidden when `delay` covers it.
+    fn run_quad(delay: u32, conditioner: LinkConditionerConfig, ticks: u32) -> QuadReceipt {
+        let seats = u8::try_from(QUAD_SEATS).expect("four seats fit a byte");
+        let mut wire = LoopbackWire::new(
+            seats,
+            conditioner.outgoing(),
+            conditioner.incoming(),
+            0x215E_u64,
+        );
+        let mut clients: [SeatSession<QUAD_SEATS, QuadSim>; QUAD_SEATS] =
+            std::array::from_fn(|seat| SeatSession::new(QuadSim::default(), seat, delay));
+        // Countdown: the inputs authored before the first play are already
+        // exchanged, so ticks `0..delay` start complete.
+        for tick in 0..delay {
+            for seat in 0..QUAD_SEATS {
+                let sample = quad_script(seat, tick);
+                for client in clients.iter_mut() {
+                    client
+                        .confirm(tick, seat, sample)
+                        .expect("countdown row inside the window");
+                }
+            }
+        }
+        for w in 0..ticks {
+            // Clients take in the peer inputs the server relayed.
+            for (seat, client) in clients.iter_mut().enumerate() {
+                let at = Peer::Client(u8::try_from(seat).unwrap_or(u8::MAX));
+                for (_, frame) in wire.recv(at) {
+                    let LinkFrame::Datagram(bytes) = frame else {
+                        continue;
+                    };
+                    if let Some((tick, from, input)) = quad_read(&bytes) {
+                        client
+                            .confirm(tick, from, input)
+                            .expect("inside the window");
+                    }
+                }
+            }
+            // The server relays every authored input it holds to every client.
+            for (_, frame) in wire.recv(Peer::Server) {
+                let LinkFrame::Datagram(bytes) = frame else {
+                    continue;
+                };
+                for to in 0..QUAD_SEATS {
+                    wire.datagram(
+                        Peer::Server,
+                        Peer::Client(u8::try_from(to).unwrap_or(u8::MAX)),
+                        &bytes,
+                    );
+                }
+            }
+            // Each client authors tick `w + delay` and plays tick `w`.
+            for (seat, client) in clients.iter_mut().enumerate() {
+                let authored = w + delay;
+                let sample = quad_script(seat, authored);
+                client.advance(sample);
+                wire.datagram(
+                    Peer::Client(u8::try_from(seat).unwrap_or(u8::MAX)),
+                    Peer::Server,
+                    &quad_datagram(authored, seat, sample),
+                );
+            }
+            wire.tick();
+        }
+        // Drain: let every datagram still in flight land, so the tail ticks are
+        // corrected before the tip is read. No tick is played.
+        for _ in 0..delay + 2 {
+            for (seat, client) in clients.iter_mut().enumerate() {
+                let at = Peer::Client(u8::try_from(seat).unwrap_or(u8::MAX));
+                for (_, frame) in wire.recv(at) {
+                    let LinkFrame::Datagram(bytes) = frame else {
+                        continue;
+                    };
+                    if let Some((tick, from, input)) = quad_read(&bytes) {
+                        client
+                            .confirm(tick, from, input)
+                            .expect("inside the window");
+                    }
+                }
+            }
+            for (_, frame) in wire.recv(Peer::Server) {
+                let LinkFrame::Datagram(bytes) = frame else {
+                    continue;
+                };
+                for to in 0..QUAD_SEATS {
+                    wire.datagram(
+                        Peer::Server,
+                        Peer::Client(u8::try_from(to).unwrap_or(u8::MAX)),
+                        &bytes,
+                    );
+                }
+            }
+            wire.tick();
+        }
+        // Ground truth: the same authored inputs, applied on time.
+        let mut truth = QuadSim::default();
+        let mut truth_tape = Vec::with_capacity(usize::try_from(ticks).unwrap_or(0));
+        for tick in 0..ticks {
+            let mut inputs = [0u32; QUAD_SEATS];
+            for (seat, slot) in inputs.iter_mut().enumerate() {
+                *slot = quad_script(seat, tick);
+            }
+            truth.step(inputs);
+            truth_tape.push(truth.hash());
+        }
+        let mut rollbacks = 0u64;
+        let mut predicted = 0u64;
+        let mut max_rollback = 0usize;
+        let mut tips = [0u64; QUAD_SEATS];
+        for (seat, client) in clients.iter().enumerate() {
+            assert_eq!(client.delay(), delay, "each seat runs the derived delay");
+            rollbacks += client.rollbacks();
+            predicted += client.predicted_count();
+            max_rollback = max_rollback.max(client.max_rollback());
+            tips[seat] = client.sim().hash();
+            for tick in 0..ticks {
+                assert_eq!(
+                    client.hash_at(tick),
+                    truth_tape.get(usize::try_from(tick).unwrap_or(0)).copied(),
+                    "seat {seat} diverged from the truth at tick {tick}"
+                );
+            }
+        }
+        QuadReceipt {
+            rollbacks,
+            predicted,
+            max_rollback,
+            tips,
+            truth: truth.hash(),
+        }
+    }
+
+    #[test]
+    fn conditioner_derives_the_delay_that_hides_the_relay() {
+        assert_eq!(LinkConditionerConfig::clean().worst_relay(), 0);
+        assert_eq!(LinkConditionerConfig::clean().input_delay(), 0);
+        let lan = LinkConditionerConfig::lan();
+        assert_eq!(lan.worst_relay(), 2, "LAN is one tick each way");
+        assert_eq!(lan.input_delay(), 2, "a two-frame delay covers the relay");
+        assert_eq!(
+            lan.outgoing(),
+            LinkProfile {
+                latency: 1,
+                jitter: 0,
+                loss_pct: 0,
+                reorder_pct: 0
+            }
+        );
+        assert_eq!(
+            lan.incoming(),
+            LinkProfile {
+                latency: 1,
+                jitter: 0,
+                loss_pct: 0,
+                reorder_pct: 0
+            }
+        );
+        let wan = LinkConditionerConfig::new(4, 2, 4, 2);
+        assert_eq!(wan.worst_relay(), 12);
+        assert_eq!(
+            wan.input_delay(),
+            crate::delay::MAX_DELAY,
+            "clamped to the knob"
+        );
+    }
+
+    #[test]
+    fn input_buffer_presses_delay_ticks_ahead_and_repeats_last() {
+        let mut buffer = InputBuffer::<QUAD_SEATS>::new(2);
+        assert_eq!(buffer.delay(), 2);
+        assert!(buffer.is_empty());
+        assert!(buffer.press(0, 0, 7), "a new row is a change");
+        assert_eq!(buffer.get(2, 0), Some(7), "play_tick 0 lands at 2");
+        assert_eq!(buffer.get(0, 0), None);
+        assert!(!buffer.press(0, 0, 7), "the same value is not a change");
+        assert!(buffer.press(0, 0, 8), "a different value is a change");
+        assert!(!buffer.complete(2), "the other seats are missing");
+        assert_eq!(buffer.resolve(2), [8, 0, 0, 0], "absent seats repeat last");
+        buffer.note_played([1, 2, 3, 4]);
+        assert_eq!(buffer.resolve(9), [1, 2, 3, 4], "repeat-last source");
+        assert!(buffer.record(9, 0, 5));
+        assert!(buffer.record(9, 1, 6));
+        assert!(buffer.record(9, 2, 7));
+        assert!(buffer.record(9, 3, 8));
+        assert!(buffer.complete(9), "every seat authored tick 9");
+        assert_eq!(buffer.resolve(9), [5, 6, 7, 8]);
+        assert!(!buffer.record(9, QUAD_SEATS, 1), "no such seat");
+    }
+
+    #[test]
+    fn input_buffer_evicts_beyond_its_capacity() {
+        let mut buffer = InputBuffer::<1>::new(0);
+        let cap = u32::try_from(INPUT_QUEUE_LEN).unwrap_or(u32::MAX);
+        for tick in 0..cap + 16 {
+            buffer.record(tick, 0, tick);
+        }
+        assert_eq!(buffer.len(), INPUT_QUEUE_LEN, "held at the queue length");
+        assert_eq!(buffer.get(0, 0), None, "the oldest rows are evicted");
+        assert_eq!(buffer.get(cap + 15, 0), Some(cap + 15));
+        assert!(!buffer.record(0, 0, 9), "an evicted tick refuses");
+        let dropped = buffer.discard_before(cap + 15);
+        assert_eq!(dropped, u32::try_from(INPUT_QUEUE_LEN - 1).unwrap_or(0));
+        assert_eq!(buffer.len(), 1, "only the newest row survives");
+        assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn seat_session_resims_one_late_mispredict_to_the_same_tip() {
+        let mut client = SeatSession::<QUAD_SEATS, QuadSim>::new(QuadSim::default(), 0, 0);
+        for tick in 0..4u32 {
+            client.advance(quad_script(0, tick));
+        }
+        assert_eq!(client.tick(), 4);
+        assert_eq!(client.predicted_count(), 4, "no peer input ever arrived");
+        assert_eq!(client.rollbacks(), 0);
+        let distance = client.confirm(1, 1, 3).expect("inside the window");
+        assert_eq!(distance, 3, "three frames replay past tick 1");
+        assert_eq!(client.rollbacks(), 1);
+        assert_eq!(client.mispredicted_count(), 1);
+        assert_eq!(client.max_rollback(), 3);
+        assert_eq!(client.confirm(1, 1, 3), Ok(0), "already true, no resim");
+        assert_eq!(client.rollbacks(), 1);
+        assert!(matches!(
+            client.confirm(1, QUAD_SEATS, 0),
+            Err(RollbackError::NoSeat { seat }) if seat == QUAD_SEATS
+        ));
+        let mut truth = QuadSim::default();
+        for tick in 0..4u32 {
+            let mut inputs = [0u32; QUAD_SEATS];
+            inputs[0] = quad_script(0, tick);
+            if tick == 1 {
+                inputs[1] = 3;
+            }
+            truth.step(inputs);
+        }
+        assert_eq!(client.sim().hash(), truth.hash(), "the corrected tip");
+    }
+
+    #[test]
+    fn seat_session_refuses_a_tick_evicted_from_its_window() {
+        let mut client = SeatSession::<QUAD_SEATS, QuadSim>::new(QuadSim::default(), 0, 0);
+        for tick in 0..u32::try_from(MAX_P2P_ROLLBACK + 8).unwrap_or(0) {
+            client.advance(quad_script(0, tick));
+        }
+        assert!(matches!(
+            client.confirm(0, 1, 1),
+            Err(RollbackError::TooFar { frame: 0, .. })
+        ));
+        assert_eq!(client.rollbacks(), 0, "a refusal changes nothing");
+    }
+
+    #[test]
+    fn four_seat_server_two_frame_delay_holds_rollbacks_under_three() {
+        // ON21 accept: 4-client headless server, 2-frame delay, fewer than 3
+        // rollback events per 1000 ticks, and every client tip is the truth.
+        let conditioner = LinkConditionerConfig::lan();
+        let delay = conditioner.input_delay();
+        assert_eq!(delay, 2);
+        let ticks = 1000;
+        let on = run_quad(delay, conditioner, ticks);
+        assert!(
+            on.rollbacks < 3,
+            "delay {delay} over a two-tick relay must hide the lag: {on:?}"
+        );
+        assert_eq!(on.predicted, 0, "the delay covers every authored tick");
+        for tip in on.tips {
+            assert_eq!(tip, on.truth, "each client tip is the server truth: {on:?}");
+        }
+        // Hash x2: the same run repeats exactly.
+        let again = run_quad(delay, conditioner, ticks);
+        assert_eq!(
+            (again.rollbacks, again.max_rollback, again.tips, again.truth),
+            (on.rollbacks, on.max_rollback, on.tips, on.truth),
+            "same seed, same receipt"
+        );
+        // Non-vacuous contrast: without the delay every late tick resims.
+        let bare = run_quad(0, conditioner, ticks);
+        assert!(
+            bare.rollbacks > u64::from(ticks) / 2,
+            "delay 0 must resim every late tick: {bare:?}"
+        );
+        println!("quad on {on:?}\nquad bare {bare:?}");
     }
 
     /// Lines naming the retired hash-only `lib.rs` ring: the whole word, in

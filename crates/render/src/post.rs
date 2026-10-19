@@ -182,8 +182,8 @@ mod chain;
 pub use chain::*;
 mod auto_exposure;
 pub use auto_exposure::*;
-mod rp1;
-pub use rp1::*;
+mod graph;
+pub use graph::*;
 
 /// Pinned 720p-to-1080p spatial upscale (FC3): EASU-shape lobe plus gradient reject.
 #[path = "upscale_easu.rs"]

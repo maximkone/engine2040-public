@@ -42,6 +42,9 @@ pub mod gladiator;
 pub mod goalstack;
 /// GOAP planner: A* over a 64-fact integer world state.
 pub mod goap;
+/// One shared scanner for designer `key=value` rows: comment strip plus field
+/// walk, so depth tier rows and ai curves rows refuse the same shapes.
+pub mod rows;
 pub use gladiator::{
     compare, compare_curves, features_from, pick_intent, Brain, Comparison, Intent, MarchPolicy,
     NetPolicy, NetPolicyError, Percept, Policy, TickPolicy, FEATURE_ATTACK_ON, FEATURE_DIM,

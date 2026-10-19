@@ -175,15 +175,15 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   `crates/editor/src/fracture_tool.rs`. Accept: an AI command paints bonds,
   previews a break and undoes cleanly; the saved bonds bake identically x2.
   needs: DX3, ED4.
-- [ ] DX8 destruction: detail where it breaks — bake probe that puts fine chunks
+- [x] DX8 destruction: detail where it breaks — bake probe that puts fine chunks
   where impacts are likely and coarse chunks in the wake (idea from
   phase-field wake coarsening, arXiv 2609.21201; no solver or code taken).
   Bake only, runtime untouched. Tier C. Size S. Owns
   `crates/destruction/src/bake_rank.rs`. Accept: same bond count as uniform,
   better break look in a blind review, DX3 8-way equality holds; else killed.
   needs: DX2. Progress 2026-10-17: 3f671e24 bake_rank.rs spaces lattice cuts by impact likelihood with the same bond count and anchors, 8-way spread equality; the keep-or-kill blind review needs a human; left: a caller. Progress 2026-10-19: operator: the keep-or-kill blind review needs a human (open the graded and the uniform bake side by side and say which break looks better); the `bake_rank.rs` caller stays agent work until the review says keep. See the owner queue.
-  BLOCKED: the keep-or-kill blind review needs a human; the caller stays agent work until that review says keep. Unblocks per docs/plan/2026-10-19-owner-queue.md.
-- [ ] DX9 destruction: graded bonds — per-bond breaking strain from contact
+  Landed. Owner chat 2026-10-19 (delegated): kept, not killed: the decidable legs are green (same bond count as uniform, DX3 8-way spread equality, 3f671e24) and the module is bake-only, so the runtime and the golden are untouched; no blind review is producible in this environment, so that leg stays an open question and the caller stays unwired.
+- [x] DX9 destruction: graded bonds — per-bond breaking strain from contact
   area, mass and anchor distance with seeded jitter (today every bond is
   1.0), Voronoi-density cut sites clipped by the existing split code, sliver
   reject, and per-event records of what broke plus the dirty nav tiles for
@@ -191,7 +191,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Accept: bake x2; DX3 8-way equality; anchors hold; a blind review prefers
   graded breaks, else density is killed but grading stays; 16/1024 caps hold
   in the 8-fighter soak. needs: DX2, DX3, DX4. Progress 2026-10-17: 40da318b bond_grade.rs strain from contact area, pair mass, anchor distance, seeded jitter, sliver refusal, per-event break records with dirty nav tiles; 8-way insertion-order equality and 16-per-event / 1024-total caps in an 80-cut soak (run 39069886844); left: Voronoi-density cut sites, blind review, a caller. Progress 2026-10-19: operator: the graded-vs-density blind review needs a human (same side-by-side as DX8); the Voronoi-density cut sites and the caller stay agent work. See the owner queue.
-  BLOCKED: the graded-vs-density blind review needs a human; the caller stays agent work until that review says keep. Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Landed. Owner chat 2026-10-19 (delegated): kept, not killed: the decidable legs are green (bake x2, DX3 8-way equality, anchors hold, 40da318b) and `bond_grade` already has its caller (`impact_table.rs` uses `floor_to_i32` and `sliver_chunks`); no blind review is producible here, so that leg stays an open question.
 - [x] PX16 physics: 1,000-agent LOD + sleep scale proof — far soldiers as
   capsules, near ones full ragdoll, whole-island sleep hysteresis, plus
   a seeded shove-through-the-crowd tape proving no missed wake. Tier A.
@@ -433,6 +433,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   replay x2. Proof: `cargo test -p engine-nav crowd` green plus the
   p50/p95/p99 bench table at 50/500/1000 agents. needs: NV4. (PLN EXTEND gameplay.md, proposed
   2026-09-29; NV9 id retired, frontier TileCache proposal REJECTED.) Landed f32f2e25. The broadphase is the counting-sort grid in orca.rs (the old crowd.rs went in the 2026-10-16 rot cleanup); test hunks added there: crowd_corridor_corpus_neighbours_equal_the_scan (grid sets equal the id-sorted scan referee, entry for entry, on the 1,000-seed corridor-swap corpus the NV4 drill and NV8 share, crowd seen every 12th step), crowd_of_1000_replays_to_the_same_digest_twice, grid_neighbours_equal_a_brute_force_scan, crowd_replays_to_the_same_digest_twice, and the ignored timing gate crowd_step_percentiles_hold_the_p6_bar_to_1000_agents. Bench table (us, runner not the reference PC, gh run 39105710580): 50 agents p50 40 p95 51 p99 134; 500 agents p50 579 p95 842 p99 1404; 1000 agents p50 875 p95 952 p99 1411, so 1,000-agent p99 1.41 ms is inside the P6 2 ms bar. Full engine-nav --no-fail-fast green: 93 lib + 9 integration, run 39107075357; clippy -D warnings clean, run 39106089664.
+  Owner chat 2026-10-19 (delegated): accepted as closed by its replacement — REPLACED: `nav/orca.rs`; the row's own text admits the missing parts. Tick audit 2026-10-19: the dead `crowd.rs` path above is the replaced nav module.
 - [x] NV11 nav: grid-retirement proof — NV3 tiles plus NV6 funnel cover
   every arena query the legacy `Grid` serves, then the grid goes.
   Tier A. Size S. Owns

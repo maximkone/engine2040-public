@@ -865,10 +865,14 @@ impl CompiledGraph {
     /// build gates this stub out and submits for real (GX1 below).
     #[cfg(not(feature = "window"))]
     pub fn submit_gpu(&self) -> Result<(), GpuUnsupported> {
-        Err(GpuUnsupported(format!(
+        use std::fmt::Write as _;
+        let mut reason = String::with_capacity(96); // alloc-ok: cold refusal, never a steady frame
+        let _ = write!(
+            reason,
             "frame holds {} passes with no device: needs wgpu plus RL1/RL2/RP1 bind groups",
             self.order.len()
-        )))
+        );
+        Err(GpuUnsupported(reason))
     }
 }
 
@@ -1197,13 +1201,13 @@ impl CompiledGraph {
     ) -> Result<GpuFrameReceipt, GpuSubmitError> {
         frame
             .validate()
-            .map_err(|e| GpuSubmitError::Invalid(format!("look frame: {e}")))?;
+            .map_err(|e| GpuSubmitError::Invalid(format!("look frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
         let (width_px, height_px) = (frame.viewport_px[0], frame.viewport_px[1]);
         if self.backing_bytes > GPU_SUBMIT_TRANSIENT_BUDGET_BYTES {
-            return Err(GpuSubmitError::Invalid(format!(
-                "transient backing {} over budget {GPU_SUBMIT_TRANSIENT_BUDGET_BYTES}",
-                self.backing_bytes
-            )));
+            let held = self.backing_bytes;
+            let reason =
+                format!("transient backing {held} over budget {GPU_SUBMIT_TRANSIENT_BUDGET_BYTES}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(GpuSubmitError::Invalid(reason));
         }
         let mut draws = 0u64;
         let mut triangles = 0u64;
@@ -1237,9 +1241,8 @@ impl CompiledGraph {
             slot_count = 1;
         }
         if slot_count > GPU_SUBMIT_MAX_SLOTS {
-            return Err(GpuSubmitError::Invalid(format!(
-                "alias slots {slot_count} over the {GPU_SUBMIT_MAX_SLOTS} cap"
-            )));
+            let reason = format!("alias slots {slot_count} over the {GPU_SUBMIT_MAX_SLOTS} cap"); // alloc-ok: cold refusal, never a steady frame
+            return Err(GpuSubmitError::Invalid(reason));
         }
         if submitter.cached_size != Some((width_px, height_px))
             || submitter.cached_slots != slot_count
@@ -1389,15 +1392,15 @@ impl CompiledGraph {
         }
         device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuSubmitError::Device(format!("poll: {e}")))?;
+            .map_err(|e| GpuSubmitError::Device(format!("poll: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
         rx.recv()
-            .map_err(|e| GpuSubmitError::Device(format!("map channel: {e}")))?
-            .map_err(|e| GpuSubmitError::Device(format!("map: {e}")))?;
+            .map_err(|e| GpuSubmitError::Device(format!("map channel: {e}")))? // alloc-ok: cold device-loss path, never a steady frame
+            .map_err(|e| GpuSubmitError::Device(format!("map: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
         let mut covered = 0u64;
         {
             let mapped = slice
                 .get_mapped_range()
-                .map_err(|e| GpuSubmitError::Device(format!("mapped range: {e}")))?;
+                .map_err(|e| GpuSubmitError::Device(format!("mapped range: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
             let height = usize::try_from(height_px).unwrap_or(usize::MAX);
             let pad = usize::try_from(padded).unwrap_or(usize::MAX);
             let row_bytes = usize::try_from(bytes_per_row).unwrap_or(usize::MAX);
@@ -1417,7 +1420,7 @@ impl CompiledGraph {
             crate::executor::read_pass_ms(ts_staging, ts_slice.as_ref(), ts_rx, pass_count, period);
         let scope_err = pollster::block_on(scope.pop());
         if let Some(err) = scope_err {
-            return Err(GpuSubmitError::Validation(format!("{err:?}")));
+            return Err(GpuSubmitError::Validation(format!("{err:?}"))); // alloc-ok: cold validation failure, never a steady frame
         }
         Ok(GpuFrameReceipt {
             frame_index: frame.frame_index,

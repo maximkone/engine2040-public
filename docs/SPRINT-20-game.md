@@ -137,6 +137,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   200 --exit` prints `paused tick=120` and the same hash as an unpaused run at
   tick 120; `cargo test -p engine-game --lib free_cam` green. F2P: the flag is
   unknown today. P2P: golden unchanged. needs: none.
+- [x] GP43 combat: the stance clash matrix and the shared string counter as data — one cursor of three stance positions advanced by every attack and by movement (a combo as a path through a shared automaton, counted per stance), and the fast/balanced/heavy/air clash matrix as a validated antisymmetric 4x4 table the parry and clash resolver reads. Diff: regular. Tier B. Size S. Owns `crates/combat/src/combo.rs`, `crates/combat/src/stance.rs`. Accept: `node tools/gh-check.mjs cargo test -p engine-combat --lib` prints 306 passed 0 failed, and every matrix pair is antisymmetric while a hand-broken cell is refused. F2P: no string cursor and no clash matrix exist today. P2P: the rest of the combat lib and the golden `d57b5c8ae3096614`. needs: -. Landed 62b344e. Golden x2 not re-readable 2026-10-19: another session's uncommitted crates/net/src/handshake.rs fails engine-net E0277, so engine-proof cannot build on the shared tree; the two modules are additive with no call site, so no hashed byte moves.
 
 **Opponents, balance, pacing, playtests (Tier B)**
 
@@ -171,7 +172,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   P2P: P3 green. needs: GA13. Progress 2026-10-19: owner: this row says Tier B
   while the tier ladder puts it elsewhere; which one wins? Question in
   `docs/plan/2026-10-19-owner-queue.md`.
-  BLOCKED: waiting on the owner's answer: this row's tier against the tier ladder. Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Owner chat 2026-10-19 (delegated): the tier ladder wins on the label and the row's Accept is unchanged; the row is ordinary agent work again.
 - [x] GP36 content: arena zones and the entrance metric — the only cover is a Landed d2b58bd1. `cargo test -p engine-playtest --lib -- tier_ zones` green, gh run 39056997288: zones_shares_sum_to_1000_and_entrance_stays_under_250; content/design/arena-zones.rows on disk; full playtest lib 301 passed, gh run 39059423063.
   1 m crate (`crate_a`, id 10) and `gate_tunnel` (id 5) is the one entrance;
   nothing measures where fights happen. `content/design/arena-zones.rows`
@@ -315,7 +316,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   Owns the bound hunk of `fighter_look.rs`. Accept: `cargo test -p engine-game
   --features app --lib posed_bound`: an arm 1.5 m outside the bind sphere stays
   inside the bound. F2P: no fighter bound. P2P: captures unchanged. needs: none.
-- [ ] PX41 game: one stepper for siege flight — `crates/game/src/ballistics.rs:634-636`
+- [x] PX41 game: one stepper for siege flight — `crates/game/src/ballistics.rs:634-636`
   is explicit Euler; the semi-implicit `crates/combat/src/projectile.rs:689-735`
   `step_round` has no game caller; the drop differs by g*dt*t (16 cm at 1 s,
   33 cm at 2 s) and the 2% test (`projectile.rs:999-1011`) hides it (Orland
@@ -328,7 +329,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `step_round` still has no game caller, so the Accept cannot run; close as
   obsolete or re-scope to a new caller row. Question in
   `docs/plan/2026-10-19-owner-queue.md`.
-  BLOCKED: waiting on the owner's answer: close as obsolete or re-scope (the named `ballistics` module is gone). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Landed. Owner chat 2026-10-19 (delegated): closed as obsolete: its named `ballistics.rs` is gone and `combat::projectile::step_round` has no game caller (same as WD10).
 - [x] AX25 endpoint: fetched text is fenced as data — `crates/endpoint/src/assistant.rs` Landed 1d01a410. `cargo test -p engine-endpoint --features mcp --lib -- fence` fence_planted_instructions_make_no_unlisted_calls (10 planted-instruction fixtures x2, no tag-like call survives; observe rows are fenced with the `data, not instructions` line, propose rows byte-identical) green, gh run 39059683408; full `cargo test -p engine-endpoint --features mcp --lib` 555 passed, 1 ignored, gh run 39060654787.
   passes tool output and fetched text into a model prompt with no fence
   (`rg -i "untrusted|fence" assistant.rs` empty; Sekar 12). Wrap each in

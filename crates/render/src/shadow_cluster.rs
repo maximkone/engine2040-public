@@ -1070,40 +1070,35 @@ pub fn submit_shadow_cluster(
 ) -> Result<ShadowClusterReceipt, LightError> {
     frame
         .validate()
-        .map_err(|e| LightError::Invalid(format!("shadow-cluster frame: {e}")))?;
+        .map_err(|e| LightError::Invalid(format!("shadow-cluster frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
     let (width_px, height_px) = (frame.viewport_px[0], frame.viewport_px[1]);
     let limits = device.limits();
     if limits.max_texture_dimension_2d < sun.config.size {
-        return Err(LightError::Device(format!(
-            "adapter max texture {} under shadow size {}",
-            limits.max_texture_dimension_2d, sun.config.size
-        )));
+        let (max_dim, size) = (limits.max_texture_dimension_2d, sun.config.size);
+        let reason = format!("adapter max texture {max_dim} under shadow size {size}"); // alloc-ok: cold device-loss path, never a steady frame
+        return Err(LightError::Device(reason));
     }
     if limits.max_texture_dimension_2d < width_px.max(height_px) {
-        return Err(LightError::Device(format!(
-            "adapter max texture {} under target {width_px}x{height_px}",
-            limits.max_texture_dimension_2d
-        )));
+        let max_dim = limits.max_texture_dimension_2d;
+        let reason = format!("adapter max texture {max_dim} under target {width_px}x{height_px}"); // alloc-ok: cold device-loss path, never a steady frame
+        return Err(LightError::Device(reason));
     }
     if limits.max_storage_buffers_per_shader_stage < 3 {
-        return Err(LightError::Device(format!(
-            "adapter reports {} storage buffers per stage, the cluster bind needs 3",
-            limits.max_storage_buffers_per_shader_stage
-        )));
+        let n = limits.max_storage_buffers_per_shader_stage;
+        let reason =
+            format!("adapter reports {n} storage buffers per stage, the cluster bind needs 3"); // alloc-ok: cold device-loss path, never a steady frame
+        return Err(LightError::Device(reason));
     }
     if cluster.config.tile_px != FORWARD_TILE_PX {
-        return Err(LightError::Invalid(format!(
-            "cluster tile {} mismatches forward tile {FORWARD_TILE_PX}",
-            cluster.config.tile_px
-        )));
+        let tile = cluster.config.tile_px;
+        let reason = format!("cluster tile {tile} mismatches forward tile {FORWARD_TILE_PX}"); // alloc-ok: cold refusal, never a steady frame
+        return Err(LightError::Invalid(reason));
     }
     let cells = cluster.config.cells();
     if cluster.counts.len() != cells || cluster.offsets.len() != cells {
-        return Err(LightError::Invalid(format!(
-            "cluster grid {} counts over {} cells",
-            cluster.counts.len(),
-            cells
-        )));
+        let counts = cluster.counts.len();
+        let reason = format!("cluster grid {counts} counts over {cells} cells"); // alloc-ok: cold refusal, never a steady frame
+        return Err(LightError::Invalid(reason));
     }
     submitter.ensure_maps(device, sun.config.size)?;
     submitter.ensure_grid(device, cells, cluster.indices.len())?;
@@ -1248,15 +1243,15 @@ pub fn submit_shadow_cluster(
     });
     device
         .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| LightError::Device(format!("readback poll: {e}")))?;
+        .map_err(|e| LightError::Device(format!("readback poll: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
     rx.recv()
-        .map_err(|e| LightError::Device(format!("readback channel: {e}")))?
-        .map_err(|e| LightError::Device(format!("readback map: {e}")))?;
+        .map_err(|e| LightError::Device(format!("readback channel: {e}")))? // alloc-ok: cold device-loss path, never a steady frame
+        .map_err(|e| LightError::Device(format!("readback map: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
     let (mut covered, mut torch) = (0u64, 0u64);
     {
         let mapped = slice
             .get_mapped_range()
-            .map_err(|e| LightError::Device(format!("readback range: {e}")))?;
+            .map_err(|e| LightError::Device(format!("readback range: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
         for row in 0..height_px as usize {
             let off = row * padded as usize;
             let bytes = &mapped[off..off + bytes_per_row as usize];
@@ -1273,7 +1268,7 @@ pub fn submit_shadow_cluster(
     readback.unmap();
     let scope_err = pollster::block_on(scope.pop());
     if let Some(err) = scope_err {
-        return Err(LightError::Validation(format!("{err:?}")));
+        return Err(LightError::Validation(format!("{err:?}"))); // alloc-ok: cold validation failure, never a steady frame
     }
     Ok(ShadowClusterReceipt {
         frame_index: frame.frame_index,

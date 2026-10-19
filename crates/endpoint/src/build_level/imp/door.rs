@@ -123,12 +123,19 @@ pub struct BuildLevelOutput {
     #[serde(default)]
     #[schemars(default)]
     pub record_line: String,
+    /// Relation changes this edit made (ARC12); empty on a refusal.
+    #[serde(default)]
+    #[schemars(default)]
+    pub relation_diff: Vec<String>,
 }
 
-/// Run the level chain against the live document: snapshot the scene as
-/// fixed actors, solve, gate, then land inserts through validate plus the
-/// CAP1-gated apply exactly like `scene.place`. Denied, stale and refused
-/// calls write nothing.
+/// Run the level chain against the live document through the relation-diff
+/// edit path (ARC12): plan the brief into relation requests, solve with SP5
+/// against the live snapshot, then land the edit's spine writes as one
+/// gated batch. Denied, stale and refused calls write nothing; a refusal
+/// answers with the SP5 conflict set beside the gate findings. The raw
+/// coordinate table stays the ablation arm (`ablation_numbers`), never the
+/// payload the caller reads.
 pub(super) fn build_level_on_state(
     state: &mut ServerState,
     args: &BuildLevelArgs,
@@ -144,44 +151,44 @@ pub(super) fn build_level_on_state(
         ));
     }
     let env = envelope(&args.brief, args.seed).map_err(bad_brief)?;
-    let plan = plan_brief(&env).map_err(bad_brief)?;
     let live = snapshot_live(&state.doc);
-    match build_on(&plan, &env, &live) {
-        BuildOutcome::Refused(refusal) => Ok(BuildLevelOutput {
-            revision: state.doc.revision,
-            solved: false,
-            placements: Vec::new(),
-            findings: refusal.findings,
-            conflicts: refusal.conflicts,
-            reason: refusal.reason,
-            repairs_used: refusal.repairs_used,
-            verdict: "refused".to_owned(),
-            next_ab4: String::new(),
-            cost_units: 0,
-            key: 0,
-            undo_token: 0,
-            record_line: env.record_line(),
-        }),
-        BuildOutcome::Placed(level) => {
-            let sizes: BTreeMap<u32, (f32, f32, f32)> = level
-                .actors
-                .iter()
-                .map(|actor| (actor.id, (actor.sx, actor.sy, actor.sz)))
-                .collect();
-            let mut ids = Vec::with_capacity(level.report.placements.len());
-            let mut ops = Vec::with_capacity(level.report.placements.len());
-            for placement in &level.report.placements {
+    match relation_edit_on(&env, &live).map_err(bad_brief)? {
+        EditOutcome::Refused(refusal) => {
+            // Conflicts keep the culprit wants first, then add the SP5
+            // minimal subset the caller must fix (deduplicated).
+            let mut conflicts = refusal.conflicts;
+            for line in refusal.conflict_set {
+                if !conflicts.contains(&line) {
+                    conflicts.push(line);
+                }
+            }
+            Ok(BuildLevelOutput {
+                revision: state.doc.revision,
+                solved: false,
+                placements: Vec::new(),
+                findings: refusal.findings,
+                conflicts,
+                reason: refusal.reason,
+                repairs_used: refusal.repairs_used,
+                verdict: "refused".to_owned(),
+                next_ab4: String::new(),
+                cost_units: 0,
+                key: 0,
+                undo_token: 0,
+                record_line: env.record_line(),
+                relation_diff: Vec::new(),
+            })
+        }
+        EditOutcome::Edited(edit) => {
+            let mut ids = Vec::with_capacity(edit.writes.len());
+            let mut ops = Vec::with_capacity(edit.writes.len());
+            for write in &edit.writes {
                 let id = ObjectId::new();
-                let (sx, sy, sz) = sizes.get(&placement.id).copied().unwrap_or((1.0, 1.0, 1.0));
-                ids.push((id, placement.name.clone()));
+                ids.push((id, write.name.clone()));
                 ops.push(Op::Insert {
                     id,
                     parent: ObjectId::NIL,
-                    local: Transform::new(
-                        [placement.x, placement.y, placement.z],
-                        quat_of_yaw(placement.yaw),
-                        [sx, sy, sz],
-                    ),
+                    local: Transform::new(write.pos, quat_of_yaw(write.yaw), write.scale),
                 });
             }
             let batch = Batch {
@@ -212,7 +219,7 @@ pub(super) fn build_level_on_state(
             state.refresh_watch();
             let placements: Vec<PlacedDto> = ids
                 .iter()
-                .zip(level.report.placements.iter())
+                .zip(edit.report.placements.iter())
                 .map(|((id, name), placement)| PlacedDto {
                     id: id.to_string(),
                     name: name.clone(),
@@ -229,13 +236,14 @@ pub(super) fn build_level_on_state(
                 findings: Vec::new(),
                 conflicts: Vec::new(),
                 reason: String::new(),
-                repairs_used: level.report.repairs_used,
+                repairs_used: edit.report.repairs_used,
                 verdict: "pass".to_owned(),
-                next_ab4: level.report.next_ab4.clone(),
-                cost_units: level.report.cost.units,
+                next_ab4: edit.report.next_ab4.clone(),
+                cost_units: edit.report.cost.units,
                 key: applied.key,
                 undo_token: applied.key,
                 record_line: env.record_line(),
+                relation_diff: edit.changes,
             })
         }
     }

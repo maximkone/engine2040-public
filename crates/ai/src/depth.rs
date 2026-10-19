@@ -15,6 +15,7 @@ use crate::curves::{parse_dec_u32, AiConfig};
 use crate::gladiator::{sanitize_dist_mm, Brain, Intent, Percept};
 use crate::melee::add_bias;
 use crate::personality::Personality;
+use crate::rows::{strip_comment, Field, FieldError, Fields};
 use crate::tier::TierPlay;
 use engine_input::{Buttons, FighterId, FighterInput, MAX_PARTICIPANTS};
 
@@ -354,14 +355,14 @@ impl TierRow {
         let mut tell: Option<u32> = None;
         let mut stagger: Option<u16> = None;
         let mut counter: Option<u8> = None;
-        for token in words {
-            let (key, val) = token
-                .split_once('=')
-                .ok_or(TierError::UnknownKey { line: line_no })?;
-            if val.contains('.') {
-                return Err(TierError::Float { line: line_no });
-            }
-            let num = parse_dec_u32(val).ok_or(TierError::BadInt { line: line_no })?;
+        for field in Fields::after_id(line) {
+            let Field { key, value: num } = field.map_err(|err| match err {
+                FieldError::Float => TierError::Float { line: line_no },
+                FieldError::EmptyValue | FieldError::BadInt => TierError::BadInt { line: line_no },
+                FieldError::NoEquals | FieldError::EmptyKey => {
+                    TierError::UnknownKey { line: line_no }
+                }
+            })?;
             if key == "hp_permille" {
                 if hp.is_some() {
                     return Err(TierError::UnknownKey { line: line_no });
@@ -589,8 +590,7 @@ pub fn parse_tiers(text: &str) -> Result<[TierRow; 4], TierError> {
     let mut slots: [Option<TierRow>; 4] = [None, None, None, None];
     for (idx, raw) in text.lines().enumerate() {
         let line_no = idx.saturating_add(1);
-        let cut = raw.find('#').map_or(raw, |i| raw.split_at(i).0);
-        let line = cut.trim();
+        let line = strip_comment(raw);
         if line.is_empty() {
             continue;
         }

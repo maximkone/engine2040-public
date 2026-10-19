@@ -28,6 +28,20 @@ impl Presenter {
         )
         .unwrap_or_else(|_| particles_gpu::ParticlePool::new(POOL_SEED));
         self.decal_pool = decals::DecalPool::with_capacity(quality::decal_pool_slots(knobs));
+        // QL5: the look guard preset is a pipeline constant, so only a tier
+        // that moves it rebuilds the four forward pipelines (the potato edge).
+        if quality::look_potato_guard(knobs) != quality::look_potato_guard(&self.quality) {
+            let [hdr, hdr_msaa, skinned, skinned_msaa] = super::presenter::forward_pipelines(
+                &self.device,
+                &self.forward_shader,
+                &self.forward_layout,
+                &quality::look_guard_constants(knobs),
+            );
+            self.forward_hdr = hdr;
+            self.forward_hdr_msaa = hdr_msaa;
+            self.forward_skinned = skinned;
+            self.forward_skinned_msaa = skinned_msaa;
+        }
         self.quality = *knobs;
     }
 

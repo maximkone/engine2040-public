@@ -171,6 +171,15 @@ Frozen hash: every file here is presentation or tool side, none touches hashed i
 
 ## Ticks with no code
 
+Resolved 2026-10-19 (owner chat, delegated): the REPLACED rows are accepted as
+closed by their replacement and the DEAD ones as dead (both noted on the row);
+the LATER rows (AM7, D1, WD10) are unticked and parked with a `LATER:` token until
+their file is restored; the RESTORE files named below are back in the tree
+(`look/judge.rs`, `look/metric.rs`, `clip_hold.rs`, `modes.rs`, `uploads.rs`), so
+their ticks stand. The live rows this table marks obsolete or re-scoped are
+closed or re-scoped the same day (PX41 obsolete; GP8 covered by `camera_rig.rs`;
+CT29 re-scoped to the capture pair).
+
 Ticked rows whose file is gone (board lies). The verdict column is the verdict of the file.
 
 | row | file | verdict | note |

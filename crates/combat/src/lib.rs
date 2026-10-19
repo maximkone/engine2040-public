@@ -14,6 +14,10 @@ pub mod camera_framing;
 /// Ludus Magnus gladiator rows as `Tables` presets: integer permille only.
 /// Caller: `crate::fight::class_tables`.
 pub mod classes;
+/// Shared string counter across the three stances: one cursor advanced by
+/// every attack and by movement, with a per-stance move count. Integer
+/// indices, no heap, `Copy`. Std-only.
+pub mod combo;
 /// Deterministic blade-vs-limb sever resolver: swept edge vs joint
 /// capsules in integers, edge sharpness and wear, one 16-byte cut per joint
 /// per swing. Std-only, no heap.
@@ -57,6 +61,9 @@ pub mod reaction;
 /// Trauma-curve shake stage: squared-trauma magnitude on the gamefeel wave
 /// pair, as permille of the shake cap. Pure integers, presentation only.
 pub mod shake_stage;
+/// Stance clash matrix as a `4x4` table: Fast/Balanced/Heavy/Air, win-draw-
+/// lose, single-sourced so players read one matrix. No heap, `Copy`.
+pub mod stance;
 /// Continuous swept detection: segment-vs-capsule, shield cones,
 /// reach and facing decide. Std-only.
 pub mod sweep;
@@ -70,6 +77,11 @@ pub use anatomy::{
     ANATOMY_VERSION_V1, ARMOR_ALL, ARMOR_GALEA, ARMOR_GREAVE, ARMOR_LORICA, ARMOR_MANICA,
     ARMOR_SCUTUM, BONE_Q16, FLESH_Q16, JOINT_TOTAL, MAX_TOUGHNESS_Q16, NO_PARENT,
     SEVERABLE_JOINT_COUNT, SKIN_Q16,
+};
+
+pub use combo::{
+    combo_table_for_version, ComboCursor, ComboError, ComboTable, Stance, COMBO_V1,
+    COMBO_VERSION_V1, MAX_STRING, STANCE_COUNT,
 };
 pub use cut::{
     chance_q16, cut_for_version, cut_one, digest_cuts, effective_q16, resolve_swing, roll_q16,
@@ -88,6 +100,10 @@ pub use fight::{
 pub use gore::{
     decal_pos_cm, gore_for_events, gore_for_events_with_tables, severity_for_damage, spray_pos_cm,
     GoreEvent, GoreKind, JITTER_CM, SLOT_SPACING_CM, SPRAY_HEIGHT_CM,
+};
+pub use stance::{
+    stance_matrix_for_version, ClashExt, ClashVerdict, StanceError, StanceMatrix, STANCE_MATRIX_V1,
+    STANCE_MATRIX_VERSION_V1,
 };
 pub use tables::{
     step_for_version, tables_for_version, try_step_for_version, validate_tables, MoveTableSet,

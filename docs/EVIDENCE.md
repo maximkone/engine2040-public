@@ -59,6 +59,7 @@ Author-written declarations with a link. These are permission, not hearsay.
 | recastnavigation/recastnavigation (NV3) | License.txt read live (Zlib) | Zlib | ADOPT — pattern, reimplemented in `crates/nav/src/tiles.rs` (voxel raster + tile rebake shapes; no C vendored) |
 | janhohenheim/rerecast (NV3) | license-apache.txt + license-mit.txt at root, both listed | Apache-2.0/MIT | ADOPT — pattern, reimplemented in `crates/nav/src/tiles.rs` (dynamic tile versioning shapes; no code vendored) |
 | MikkoParkkola/nab | https://github.com/MikkoParkkola/nab | MIT declared, file-unverified (SHA UNVERIFIED, steal-wave36:54-69) | ADOPT — pattern, reimplemented substring rules in `crates/endpoint/src/injection/mod.rs`, never vendored |
+| eldruin/wyhash-rs | `Cargo.toml` declares `MIT OR Apache-2.0` https://github.com/eldruin/wyhash-rs/blob/master/Cargo.toml (reference: wangyi-fudan/wyhash `LICENSE` = The Unlicense https://github.com/wangyi-fudan/wyhash/blob/master/LICENSE) | MIT/Apache-2.0 + Unlicense | ADOPT — pattern (RC28: the `wyrng` wyrand shape reimplemented std-only in `crates/core/src/rng_wyhash.rs`, upstream vectors pinned in the module tests; no vendor bytes, no dependency) |
 
 ## Phone grants (ideas are free)
 

@@ -782,9 +782,8 @@ impl ScaleController {
     /// scale down, so sustained load halves the render size.
     pub fn update(&mut self, frame_ms: f64) -> Result<f32, AaScaleError> {
         if !frame_ms.is_finite() || frame_ms < 0.0 {
-            return Err(AaScaleError::Invalid(format!(
-                "scale frame ms {frame_ms} is not finite non-negative"
-            )));
+            let reason = format!("scale frame ms {frame_ms} is not finite non-negative"); // alloc-ok: cold invalid-input refusal, never a steady frame
+            return Err(AaScaleError::Invalid(reason));
         }
         self.frames += 1;
         let before = self.scale;
@@ -856,9 +855,8 @@ pub fn render_size_for_scale(
 ) -> Result<(u32, u32), AaScaleError> {
     check_dims(present_w, present_h)?;
     if !scale.is_finite() || scale <= 0.0 || scale > 1.0 {
-        return Err(AaScaleError::Invalid(format!(
-            "render scale {scale} outside (0, 1]"
-        )));
+        let reason = format!("render scale {scale} outside (0, 1]"); // alloc-ok: cold invalid-input refusal, never a steady frame
+        return Err(AaScaleError::Invalid(reason));
     }
     let even = |present: u32| -> u32 {
         let scaled = (f64::from(present) * f64::from(scale)).round() as u32;

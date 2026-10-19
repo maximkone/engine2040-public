@@ -606,9 +606,8 @@ fn hammersley(i: u32, n: u32) -> [f32; 2] {
 /// Fixed Hammersley sequence, fixed tap count: bit-identical per input.
 pub fn brdf_integrate(ndotv: f32, roughness: f32) -> Result<[f32; 2], IblError> {
     if !ndotv.is_finite() || !(0.0..=1.0).contains(&ndotv) {
-        return Err(IblError::Invalid(format!(
-            "ibl NdotV {ndotv} outside 0..=1"
-        )));
+        let reason = format!("ibl NdotV {ndotv} outside 0..=1"); // alloc-ok: cold refusal at the bake seam, never a steady frame
+        return Err(IblError::Invalid(reason));
     }
     let roughness = check_roughness(roughness)?;
     let ndotv = ndotv.max(1e-4);
@@ -742,7 +741,7 @@ impl IblBake {
     pub fn submit_gpu(&self, frame: &crate::gtao::LookFrame) -> Result<IblReceipt, IblError> {
         frame
             .validate()
-            .map_err(|e| IblError::Invalid(format!("ibl look frame: {e}")))?;
+            .map_err(|e| IblError::Invalid(format!("ibl look frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
         Err(IblError::Invalid(
             "ibl gpu pass needs the window build with a live device; CPU bake is the reference"
                 .into(),

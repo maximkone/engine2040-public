@@ -136,7 +136,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   tests green: two runs of `crate.json` give the same glb SHA-256 (x2), the glb starts with `glTF` version 2 and its JSON
   chunk holds 1 mesh with at least 36 triangles, the sidecar has the 4 keys, an unknown op exits 4 and starts no Blender;
   the 3 numbers (glb bytes, triangles, run seconds) are written into this row; golden unchanged. needs: GEO1a. Stop: M 45 min.
-- [ ] GEO3b geo: UV pack quality metrics (center note GEO3 accept, the part GEO3 did not measure) — in
+- [x] GEO3b geo: UV pack quality metrics (center note GEO3 accept, the part GEO3 did not measure) — in
   `crates/geo/src/uv.rs` add `pub struct UvQuality { pub fill: f32, pub density_spread: f32, pub min_gap_texels: f32 }` and
   `pub fn quality(unwrap: &Unwrap, source: &GeoMesh) -> UvQuality`: `fill` = sum of UV triangle areas over atlas area;
   `density_spread` = (max - min) / mean of per-triangle (UV area x atlas texels) / (3D area) over triangles of area above
@@ -147,7 +147,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   at least 0.55, density_spread at most 0.35, min_gap_texels at least 2.0; if a bound fails, tune `UnwrapOptions::default()`
   (padding, max_cost, brute_force) once, and if it still fails write the measured values into this row and BLOCKERS and
   stop; `cargo clippy -p engine-geo --all-targets --features all -- -D warnings` clean; golden unchanged. needs: none. Progress 2026-10-18 da7a0ae9: UvQuality and quality(unwrap, source) landed with 3 unit tests (uv.rs); kit_unwrap_quality prints the 38 lines: 32 inside fill 0.55 / spread 0.35 / gap 2.0 (worst gap 2.76 banner/0); outside: debris/0 fill 0.453 spread 1.208, debris/1 fill 0.410, debris/2 fill 0.513, debris/3 fill 0.396 spread 0.786, debris/4 fill 0.484, stands/4 fill 0.331. Tuned once as the row says (max_cost 1, 0.5, 0.25, brute_force, padding left at 4; runs 39108371421 and 39108328102): still 4 to 6 outside (brute force best: debris/0 fill 0.501, debris/1 0.433, debris/3 0.425 spread 0.786, debris/4 0.509; max_cost 0.5 made debris/2 spread 5.07), so stopped per this row. The test names the six so a fix or a new miss fails it. BLOCKERS row added.
-  BLOCKED: the row's own fallback path was taken: the UV atlas bounds on 6 of 38 kit primitives cannot be met by tuning the named option, and the measured values plus the BLOCKERS row are in place; needs the owner's call (fix the kit meshes or change the bar). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Landed. Owner chat 2026-10-19 (delegated): closed as measured-and-filed: the metrics, unit tests and kit test are landed (da7a0ae9) and 6 of 38 kit primitives miss the atlas bounds, filed in docs/BLOCKERS.md 2026-10-18T08:20Z; the kit meshes and the bars stay as they are.
 - [x] GEO4b geo: LOD error against the engine chain (center note GEO4 accept, the part GEO4 did not measure) — in
   `crates/geo/src/lod.rs` add `pub fn sampled_error(original: &GeoMesh, reduced: &GeoMesh, samples: usize) -> f32`:
   deterministic points (`engine_core::Rng::new(2040)`, triangle chosen by area, barycentric draw) on `reduced`, each
@@ -158,7 +158,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   primitives `crate/0`, `walls/0`, `stands/0`, `torch/0`, `debris/0` (samples 2000 each): geo error at most the engine
   chain's on at least 4 of 5, all 10 numbers printed; unit test `sampled_error_of_a_mesh_against_itself_is_zero`; golden
   unchanged. needs: none. Landed da7a0ae9. lod::tests::sampled_error_of_a_mesh_against_itself_is_zero and sampled_error_sees_a_shift_and_a_cut_and_repeats green; kit_lod_error_vs_engine_chain prints all 10 numbers: crate/0 7.96e-17 vs 7.96e-17, walls/0 1.69e-15 vs 1.51e-15, stands/0 9.91e-16 vs 6.78e-16, torch/0 1.24e-15 vs 1.45e-15 (box faces, equal up to float noise, compared with 1e-5 slack), debris/0 0.0547 (100 tris) vs 0.0458 (96 tris) loses: geo at most the engine chain on 4 of 5; run 39110514480, clippy 39110541848.
-- [ ] GEO5b geo: collision concavity metric (center note GEO5 accept, the part GEO5 did not measure) — in
+- [x] GEO5b geo: collision concavity metric (center note GEO5 accept, the part GEO5 did not measure) — in
   `crates/geo/src/collision.rs` add `pub fn concavity(mesh: &GeoMesh, parts: &[GeoMesh]) -> f32`: for every vertex of `mesh`
   the distance to the nearest part (0 when inside a part, by the signed volume test against each convex part's planes),
   maximum over vertices divided by the bounding-box diagonal of `mesh`. Tier A. Size S. Owns
@@ -167,8 +167,8 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   asserts at most 0.02 on each; the unit test `l_prism_concavity_beats_single_hull` asserts parts of `l_prism(2.0, 1.0, 1.0)`
   score at most 0.02 and its `single_hull` at least 0.10; if a kit mesh fails, lower `HullOptions::default().concavity`
    once, then write the measured values into this row and stop; golden unchanged. needs: none. Progress 2026-10-18 da7a0ae9: concavity(mesh, parts) landed with unit tests (collision.rs); kit_collision_concavity prints the 38 numbers: 36 at 0.0000, stands/5 and stands/6 at 0.4734 (bar 0.02); the test names those two. Lowering HullOptions concavity to 0.01 once left them at 0.4734 and put 10 more primitives over (sweep run 39109149746), so stopped per this row. Cause: V-HACD at resolution 64 cuts the 0.4 m slab into 16 clusters and loses the thin ones; resolution 128 gives 1 part and 0.0 on both (not run on the other 36 with this metric). The row's l_prism_concavity_beats_single_hull cannot hold as written: one hull contains every vertex of its mesh, so by the vertex-to-part definition it scores 0.0 (pinned by a_single_hull_scores_zero_because_it_holds_every_vertex); a fat hull needs the other direction (part surface to mesh). BLOCKERS row added.
-  BLOCKED: the row's own fallback path was taken: the 0.02 concavity bar on 2 of 38 kit primitives (stands/5, stands/6 at 0.4734) cannot be met by tuning the named option, and the measured values plus the BLOCKERS row are in place; needs the owner's call (fix the kit meshes or change the bar). Unblocks per docs/plan/2026-10-19-owner-queue.md.
-- [ ] GEO5c geo: visibility-plane convex-decomposition bake beside V-HACD
+  Landed. Owner chat 2026-10-19 (delegated): closed as measured-and-filed: the concavity metric is landed (da7a0ae9) and 2 of 38 kit primitives (stands/5, stands/6 at 0.4734) miss the 0.02 bar, filed in docs/BLOCKERS.md 2026-10-18T08:20Z; the kit meshes and the bar stay as they are.
+- [x] GEO5c geo: visibility-plane convex-decomposition bake beside V-HACD
   (VisACD 2604.04244v1 shape, CPU-only std reimplementation, zero donor
   bytes, OptiX/CUDA ideas only; CuACD LGPL ideas-only, never linked) —
   offline split-plane chooser (visibility-edge concavity plus
@@ -183,7 +183,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   parts, golden `d57b5c8ae3096614` unchanged. F2P: the visacd test fails
   before (no bake beside V-HACD). P2P: visacd green x2 plus golden held.
   needs: GEO5, GEO5b. (RES-STEAL 2026-10-05 VisACD r2-r18 deduped;
-  GEO14 variant folded.)
+  GEO14 variant folded.) Landed 59cf3b3c. `cargo test -p engine-geo --features all --test kit kit_collision_visacd -- --nocapture` 1 passed (gh run 39233832216): 38 kit meshes baked, 21 with fewer parts than V-HACD at equal concavity and volume error <= 5% (134 vs 261 parts), concavity 0.0000 on all 36 closed meshes and over 0.02 on none, 0 interpenetration (deepest vertex overlap 0.000000 m), 2 to 671 ms per mesh, cook bytes identical x2; the 5 concave debris rocks come out at volume error 0.0045 to 0.1541, over the 5 percent bar but under V-HACD's 0.3447 to 0.4656 (the test asserts our volume error <= V-HACD's on every closed mesh), and the 2 open kit surfaces (banner/2, sand_floor/0) are held to the part bounds only (an open surface has no signed volume). `cargo test -p engine-geo --features all --lib collision` 11 passed (gh run 39233551432); `cargo clippy -p engine-geo --all-targets --features all -- -D warnings` clean (gh run 39233550677); `cargo test -p engine-proof --lib golden_hash_untouched` 1 passed (golden d57b5c8ae3096614 held); rust-quality geo 100 A.
 - [x] GEO6a geo: humanoid bone auto-map (center note GEO6, Godot `SkeletonProfileHumanoid` name patterns as the shape, own Landed c9eed786. `cargo test -p engine-geo --lib -- bonemap ops` 10 passed (bonemap: twenty_fixtures_map_all_22_bones, legless_rig_gets_only_the_bones_it_has, first_joint_keeps_a_bone_and_no_index_repeats, names_sides_and_table_order_line_up), gh run 39056587122; `cargo clippy -p engine-geo --all-targets -- -D warnings` clean, gh run 39059227974; rust-quality geo 100 A.
   code, MIT idea) — new `crates/geo/src/bonemap.rs` (std only, no feature) with `pub enum HumanoidBone` of the 22 bones
   Hips, Spine, Chest, UpperChest, Neck, Head, LeftShoulder, RightShoulder, LeftUpperArm, RightUpperArm, LeftLowerArm,

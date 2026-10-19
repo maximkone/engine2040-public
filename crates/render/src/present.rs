@@ -114,6 +114,30 @@ pub fn decode_depth_feed(
     inv_view_proj_cols: [[f32; 4]; 4],
     eye: [f32; 3],
 ) -> Result<DepthFeed, PresentError> {
+    let (w, h) =
+        check_depth_feed_inputs(raw_depth, width_px, height_px, &inv_view_proj_cols, &eye)?;
+    let eye64 = [eye[0] as f64, eye[1] as f64, eye[2] as f64];
+    let (world, depth_m, height_m) = unproject_texels(raw_depth, w, h, &inv_view_proj_cols, eye64)?;
+    let normals = facing_normals(&world, w, h, eye64);
+    Ok(DepthFeed {
+        width_px,
+        height_px,
+        depth_m,
+        height_m,
+        normals,
+    })
+}
+
+/// Validate one depth readback before any unprojection: the frame size class,
+/// the texel count against the size, and a finite camera inverse plus eye. A
+/// ragged or non-finite input never reaches the unproject loop.
+fn check_depth_feed_inputs(
+    raw_depth: &[f32],
+    width_px: u32,
+    height_px: u32,
+    inv_view_proj_cols: &[[f32; 4]; 4],
+    eye: &[f32; 3],
+) -> Result<(usize, usize), PresentError> {
     if SizeClass::classify(width_px, height_px) != SizeClass::Sizes {
         return Err(PresentError::InvalidSize {
             width: width_px,
@@ -122,14 +146,13 @@ pub fn decode_depth_feed(
     }
     let w = width_px as usize;
     let h = height_px as usize;
-    let n = w * h;
-    if raw_depth.len() != n {
+    if raw_depth.len() != w * h {
         return Err(PresentError::Readback(format!(
             "rl9 depth length {} mismatches frame {width_px}x{height_px}",
             raw_depth.len()
         )));
     }
-    for col in &inv_view_proj_cols {
+    for col in inv_view_proj_cols {
         for c in col {
             if !c.is_finite() {
                 return Err(PresentError::Readback(
@@ -138,14 +161,28 @@ pub fn decode_depth_feed(
             }
         }
     }
-    for c in &eye {
+    for c in eye {
         if !c.is_finite() {
             return Err(PresentError::Readback(
                 "rl9 camera eye is not finite".into(),
             ));
         }
     }
-    let eye64 = [eye[0] as f64, eye[1] as f64, eye[2] as f64];
+    Ok((w, h))
+}
+
+/// Unproject every texel through the inverse view-projection into world space
+/// plus its eye distance and world height. Row 0 is NDC y `+1` (top), matching
+/// the `v1` CPU rasterizer row map. A depth outside `0..=1`, a degenerate
+/// clip-space `w` or a non-positive distance fails loudly.
+fn unproject_texels(
+    raw_depth: &[f32],
+    w: usize,
+    h: usize,
+    inv_view_proj_cols: &[[f32; 4]; 4],
+    eye64: [f64; 3],
+) -> Result<(Vec<[f64; 3]>, Vec<f32>, Vec<f32>), PresentError> {
+    let n = w * h;
     let (w64, h64) = (w as f64, h as f64);
     let mut world = vec![[0.0f64; 3]; n];
     let mut depth_m = vec![0.0f32; n];
@@ -191,11 +228,15 @@ pub fn decode_depth_feed(
             height_m[i] = py as f32;
         }
     }
-    // Facing normals from central differences of the world grid, oriented
-    // toward the eye; a degenerate neighborhood falls back to the view ray
-    // (nonzero by the distance check above), so every normal the fog
-    // contact bake re-normalizes is finite and nonzero.
-    let mut normals = vec![[0.0f32; 3]; n];
+    Ok((world, depth_m, height_m))
+}
+
+/// Facing normals from central differences of the world grid, oriented toward
+/// the eye. A degenerate neighborhood falls back to the view ray (nonzero by
+/// the distance check in [`unproject_texels`]), so every normal the fog contact
+/// bake re-normalizes is finite and nonzero.
+fn facing_normals(world: &[[f64; 3]], w: usize, h: usize, eye64: [f64; 3]) -> Vec<[f32; 3]> {
+    let mut normals = vec![[0.0f32; 3]; w * h];
     for y in 0..h {
         for x in 0..w {
             let i = y * w + x;
@@ -234,13 +275,7 @@ pub fn decode_depth_feed(
             normals[i] = [unit[0] as f32, unit[1] as f32, unit[2] as f32];
         }
     }
-    Ok(DepthFeed {
-        width_px,
-        height_px,
-        depth_m,
-        height_m,
-        normals,
-    })
+    normals
 }
 
 // ---------------------------------------------------------------------------

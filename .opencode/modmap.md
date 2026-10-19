@@ -1,8 +1,8 @@
 # modmap: engine2040
-_38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
+_38 crates, 1259 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
 
-## ai (engine-ai, 32 files, 22755 lines)
-- `ai/src/lib.rs` · 337 · ai: embedded seam (brief -> patch -> run). Typed, no strings; AI never touches sim memory.
+## ai (engine-ai, 35 files, 23464 lines)
+- `ai/src/lib.rs` · 344 · ai: embedded seam (brief -> patch -> run). Typed, no strings; AI never touches sim memory.
 - `ai/src/alert.rs` · 262 · ai alert ladder: sight plus sound plus a closed door into five states.
 - `ai/src/apply.rs` · 539 · apply: tick-boundary typed effects for recorded mind actions.
 - `ai/src/behavior.rs` · 275 · behavior: behavior-tree. Stateless actions; mutation flows through ops appended to a caller buffer.
@@ -11,7 +11,7 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `ai/src/bt.rs` · 1262 · bt: serializable integer behavior trees for bout bots.
 - `ai/src/cursor.rs` · 97 · cursor: the one bounded reader over untrusted little-endian bytes.
 - `ai/src/curves.rs` · 497 · curves: validated versioned replacement AI curves.
-- `ai/src/curves_text.rs` · 272 · ai rows text: designer numbers without a Rust edit.
+- `ai/src/curves_text.rs` · 269 · ai rows text: designer numbers without a Rust edit.
 - `ai/src/depth.rs` · 2846 · depth: gladiator depth over the scripted utility core.
 - `ai/src/depth/steer.rs` · 481 · steer: foe-seeking + wall-escape steering over scored wishes.
 - `ai/src/dialogue.rs` · 1828 · dialogue: scripted talk compiled offline to validated baked tables.
@@ -20,35 +20,39 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `ai/src/eqs_slice.rs` · 382 · eqs_slice: Geqo-style chained generation plus tick-sliced scoring.
 - `ai/src/gladiator.rs` · 2414 · gladiator: scripted duel policy emitting [`FighterInput`].
 - `ai/src/goalstack.rs` · 426 · goalstack: bounded ioq3-style goal memory plus fuzzy intent weights.
+- `ai/src/goap.rs` · 343 · goap: A* action planner over a 64-fact integer world state.
 - `ai/src/guard.rs` · 256 · guard: AI validators. Three rails (input + topical + execution); runtime sees pass/fix/refuse only.
 - `ai/src/hearing.rs` · 163 · hearing: pure integer hearing table for AI listeners.
 - `ai/src/legion.rs` · 1582 · legion: squad-scale brain for hundreds of soldiers (formations,
 - `ai/src/melee.rs` · 386 · melee: quantized close-quarters perception for a brain.
-- `ai/src/memory.rs` · 1338 · memory: bounded per-NPC memory store over NPC minds.
-- `ai/src/mind.rs` · 1716 · mind: NPC mind contract — memory stream, goals, relations, async asks.
+- `ai/src/memory.rs` · 1485 · memory: bounded per-NPC memory store over NPC minds.
+- `ai/src/mind.rs` · 1745 · mind: NPC mind contract — memory stream, goals, relations, async asks.
 - `ai/src/mind/conformance.rs` · 359 · Conformance suite for the backend adapters, run by the mind tests.
 - `ai/src/personality.rs` · 252 · personality: a seeded, integer-only temperament for one brain.
 - `ai/src/provenance.rs` · 772 · provenance: one record per living-world and brief-chain write.
 - `ai/src/reaction_delay.rs` · 150 · reaction_delay: integer-only observation delay for AI brains.
+- `ai/src/reflect.rs` · 98 · reflect: the fixed reflection cadence and the capped-surprise importance.
+- `ai/src/rows.rs` · 88 · rows text: the one scanner behind every designer `key=value` row.
 - `ai/src/tier.rs` · 260 · Duel enemy tiers T1-T4: the skill-first ladder for the arena duel.
 - `ai/src/utility.rs` · 354 · utility: utility-AI scorers. Pure decision, no NN, no rand.
 - `ai/tests/crowd_orca_bench.rs` · 777 · Crowd avoidance bench: 512-agent ORCA step with three interchangeable
 - `ai/tests/general-presets.rs` · 219 · general-presets: ArenaPolicy phase/role/feint presets over the scripted core.
 
-## anim (engine-anim, 50 files, 32057 lines)
-- `anim/src/lib.rs` · 232 · anim: SoA clip sampler + blend + quant. Copies [f32;3] out as Position, never shared types.
+## anim (engine-anim, 61 files, 36229 lines)
+- `anim/src/lib.rs` · 261 · anim: SoA clip sampler + blend + quant. Copies [f32;3] out as Position, never shared types.
+- `anim/src/additive.rs` · 596 · additive: locomotion base, combat upper body and flinch additive through
 - `anim/src/blend.rs` · 511 · blend: blend graph as data + fixed-tick state machine over baked clips.
 - `anim/src/clip.rs` · 321 · clip: baked quantized clips + SoA sampler, tick-fixed. Clamp + cursor + lerp, FNV traj hash.
 - `anim/src/contract.rs` · 794 · contract: animation types that assets import into and render/arena
 - `anim/src/crossfade.rs` · 209 · crossfade: per-slot clip crossfade over integer ticks.
 - `anim/src/crowd_scale.rs` · 580 · crowd_scale: thousand-agent crowd tape over the LOD tiers.
-- `anim/src/edit.rs` · 327 · edit: clip edit verbs trim, retime, cleanup over [`QClip`]/[`QTrack`].
-- `anim/src/events.rs` · 624 · events: frame-exact combat/audio callbacks over the animation graph.
+- `anim/src/edit.rs` · 461 · edit: clip edit verbs trim, retime, cleanup, strip and mirror over
+- `anim/src/events.rs` · 629 · events: frame-exact combat/audio callbacks over the animation graph.
 - `anim/src/exert.rs` · 901 · exert: exertion/gait warp over locomotion weight slices.
 - `anim/src/face.rs` · 836 · face: GPU morph weights plus jaw, eye and brow rig over baked visemes.
-- `anim/src/fbik.rs` · 1333 · fbik: full-body IK for the combat reach/aim pipeline.
+- `anim/src/fbik.rs` · 1446 · fbik: full-body IK for the combat reach/aim pipeline.
 - `anim/src/feet.rs` · 880 · feet: planted-foot lock over analytic two-bone IK.
-- `anim/src/graph.rs` · 2010 · graph: animation graph as data — nodes compile to a flat eval order.
+- `anim/src/graph.rs` · 2051 · graph: animation graph as data — nodes compile to a flat eval order.
 - `anim/src/hit_react.rs` · 796 · hit_react: procedural additive flinch from hit direction plus impulse.
 - `anim/src/ik.rs` · 831 · ik: two-bone analytic with a pole vector, the same solve over a local
 - `anim/src/inertial.rs` · 684 · inertial: inertialized clip switches over joint positions.
@@ -61,15 +65,21 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `anim/src/locomotion.rs` · 1660 · locomotion: baseline gait state machine.
 - `anim/src/lod.rs` · 194 · lod: animation LOD update-rate tiers by distance and screen size.
 - `anim/src/lod_w1_test.rs` · 187 · AM13 wave-1 accept: the LOD tier table keeps the 8 nearest fighters
-- `anim/src/motion_match.rs` · 1189 · motion_match: motion matching v2.
+- `anim/src/motion_match.rs` · 1201 · motion_match: motion matching v2.
 - `anim/src/motion_net.rs` · 534 · motion_net: learned motion-matching pose path over integer nets.
+- `anim/src/motion_schema_test.rs` · 173 · LM4: the LM1 feature schema is frozen and the per-character search cost
+- `anim/src/motion_style.rs` · 448 · motion_style: style and terrain dials for the motion-matching search (NS7).
 - `anim/src/motiondb.rs` · 380 · motiondb: bounded motion-DB query slices for traversal approaches.
+- `anim/src/net_diverge.rs` · 231 · net_diverge: pose-hash rings that name the first divergent tick and fighter.
 - `anim/src/net_pose.rs` · 408 · net_pose: networked motion replication over pick index plus phase.
 - `anim/src/net_pose_w1_test.rs` · 104 · W1 resim-parity proof for [`super::NetPose`].
-- `anim/src/pack.rs` · 1487 · pack: quantized ACL-shape clip pack, exact decode.
+- `anim/src/pack.rs` · 2097 · pack: quantized ACL-shape clip pack, exact decode.
+- `anim/src/par.rs` · 222 · par: per-character animation eval on the RC3 job pool.
 - `anim/src/pose.rs` · 681 · pose: skeleton pose sampling, blending and root-motion extraction.
 - `anim/src/readable.rs` · 362 · readable: facing arrow plus lean for locomotion presentation.
-- `anim/src/space.rs` · 944 · space: 2D locomotion blend space over the animation graph banks.
+- `anim/src/space.rs` · 950 · space: 2D locomotion blend space over the animation graph banks.
+- `anim/src/space_events.rs` · 146 · space_events: blend-space cues chosen by integer weight.
+- `anim/src/space_events_test.rs` · 331 · space_events_test: gait-blend cue selection through the real space tick.
 - `anim/src/springs.rs` · 689 · springs: secondary motion.
 - `anim/src/state_machine.rs` · 1029 · state_machine: the animation state machine as versioned, validated data.
 - `anim/src/state_machine/anim_door.rs` · 156 · `AnimDoor`: the state behind the verbs `anim.graph.set`, `anim.graph.undo`
@@ -79,59 +89,67 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `anim/src/state_machine/playback.rs` · 565 · Run-time half of the state machine: integer tick, fade, travel.
 - `anim/src/state_machine/tests.rs` · 1099 · (no //! line)
 - `anim/src/state_machine/tests_json.rs` · 161 · (no //! line)
+- `anim/src/throw_layer.rs` · 399 · throw_layer: the spear throw as a masked override on the final pose (SG3).
 - `anim/src/trails.rs` · 1061 · trails: weapon-trail rings plus the FPS viewmodel pose that feeds them.
 - `anim/src/traversal.rs` · 1049 · traversal: authoritative traversal chooser + edge warp.
+- `anim/src/traversal_link_test.rs` · 173 · TV2 contract proof: every TV1 plan names exactly one NV2 link-registry
+- `anim/src/traversal_rubble_var_test.rs` · 294 · TV4 rubble-variance proof: the siege rubble scramble edges hold across a
+- `anim/src/traversal_siege_test.rs` · 209 · TV3 siege fixtures: the C5 siege map's ladder, rampart vault, rubble scramble
 - `anim/src/viseme.rs` · 386 · viseme: 52-weight sampler. Indices at runtime, names for tooling only.
 - `anim/src/warp_ground.rs` · 755 · warp_ground: GASP-class ground feel over the locomotion root.
 - `anim/src/warp_ground_feel_test.rs` · 585 · warp_ground ground-feel accept sweep: foot slide under 1 cm from 0.5 to
 - `anim/src/warp_ground_test.rs` · 295 · warp_ground starts/stops accept sweep: straight starts/stops at
 - `anim/tests/anim_lod_pin.rs` · 256 · Anim lod plus rebuild pin: golden tiers and digests over the public api.
 
-## app (engine-app, 9 files, 3481 lines)
-- `app/src/lib.rs` · 35 · engine-app lifecycle: builder, registration, phase order, extraction.
-- `app/src/app.rs` · 921 · Engine-app lifecycle: builder, registration, startup, frames, shutdown.
+## app (engine-app, 10 files, 3575 lines)
+- `app/src/lib.rs` · 37 · engine-app lifecycle: builder, registration, phase order, extraction.
+- `app/src/app.rs` · 863 · Engine-app lifecycle: builder, registration, startup, frames, shutdown.
 - `app/src/config.rs` · 163 · Startup config: seed, fixed tick, quality tier, worker/journal bounds.
 - `app/src/error.rs` · 264 · Typed startup/shutdown failures with a recovery hint on every variant.
 - `app/src/journal.rs` · 160 · Bounded startup/shutdown journal. Every lifecycle step appends one
 - `app/src/live_proof.rs` · 244 · Live attach proof: pid + socket + fresh file + HTTP + ready.
 - `app/src/platform.rs` · 448 · Platform contract: store achievements, stats, cloud saves, presence,
 - `app/src/snapshot.rs` · 441 · Per-frame extraction snapshots. Consumers (render, audio, UI, the Bevy
+- `app/src/soak_tests.rs` · 150 · RC35 runtime soak: a 10-minute siege through the app, twice, identical.
 - `app/src/tests.rs` · 805 · Lifecycle proofs: phase order, refusal cases, scene load, the verify
 
-## arena (engine-arena, 24 files, 16984 lines)
-- `arena/src/lib.rs` · 4808 · arena: headless deterministic match spine (contracts C1 + AR2).
+## arena (engine-arena, 26 files, 18963 lines)
+- `arena/src/lib.rs` · 4653 · arena: headless deterministic match spine (contracts C1 + AR2).
 - `arena/benches/headless_ticks.rs` · 95 · headless_ticks bench: vectorized env throughput plus per-env hashes.
 - `arena/examples/fk1_hashdump.rs` · 179 · fk1_hashdump: dump one scripted headless arena hash chain to stdout.
-- `arena/src/collide.rs` · 152 · collide: integer fighter collision for the default leg (EG20).
+- `arena/src/collide.rs` · 193 · collide: integer fighter collision for the default leg (EG20).
 - `arena/src/controller.rs` · 551 · controller: the one hook where something outside the arena writes fighter inputs.
 - `arena/src/engage.rs` · 356 · engage: who fights whom under rules v2, one plan per tick.
 - `arena/src/eqs_bind.rs` · 314 · eqs_bind: live EQS cover bind for one arena fighter.
-- `arena/src/fork.rs` · 1127 · fork: counterfactual match forks (FK1, AI-NATIVE pillar 3).
+- `arena/src/fork.rs` · 1462 · fork: counterfactual match forks (FK1, AI-NATIVE pillar 3).
 - `arena/src/gameworld.rs` · 185 · gameworld: deterministic 10-game sample-efficiency core (GW1 spike).
 - `arena/src/gym.rs` · 840 · gym: headless observer (snapshots, live stepping env, batch step).
 - `arena/src/kit.rs` · 355 · kit: FPS template slice over the arena placement table.
 - `arena/src/kit_zone.rs` · 777 · kit_zone: cooked static colliders as extra walls for the capsule controller.
 - `arena/src/limbs.rs` · 590 · limbs: severed limbs from cut events.
-- `arena/src/live.rs` · 1769 · Incremental live match (EG1) and presentation (EG1b): one `Sim` step
+- `arena/src/live.rs` · 1937 · Incremental live match (EG1) and presentation (EG1b): one `Sim` step
+- `arena/src/match_observer.rs` · 203 · match_observer: per-tick match outcomes and canonical match bytes.
 - `arena/src/match_wire.rs` · 882 · match_wire: arena call-site over the landed GP1/GP2 resolvers.
 - `arena/src/parity.rs` · 276 · parity: legacy step against spine step, tick by tick (flag `spine`).
 - `arena/src/probe.rs` · 173 · probe: exploit-sweep forward-model helpers over the public fork API.
 - `arena/src/recorder.rs` · 1087 · recorder: versioned decision datasets from any teacher (DT1).
 - `arena/src/seed.rs` · 38 · seed: fixture-v2 SplitMix64 expansion. Same seed gives the same stream on
-- `arena/src/spec.rs` · 215 · spec: the one value that names a match.
+- `arena/src/spear.rs` · 1151 · spear: the throwable spear and its grapple tether, integer authority.
+- `arena/src/spec.rs` · 327 · spec: the one value that names a match.
 - `arena/src/spine_step.rs` · 760 · spine_step: the match stepped over spine columns (flag `spine`).
-- `arena/src/sync.rs` · 601 · sync: GGRS-style rollback proof plus the per-system hash split.
+- `arena/src/sync.rs` · 725 · sync: GGRS-style rollback proof plus the per-system hash split.
 - `arena/src/world.rs` · 471 · world: the static obstacles a match is played around.
 - `arena/src/zones.rs` · 383 · Arena zones (GP36): where a fight happens, as a pure classifier.
 
-## assets (engine-assets, 68 files, 37513 lines)
-- `assets/src/lib.rs` · 267 · assets: manifest entry + 7-gate checklist. Refs store id, never path.
+## assets (engine-assets, 76 files, 40441 lines)
+- `assets/src/lib.rs` · 273 · assets: manifest entry + 7-gate checklist. Refs store id, never path.
 - `assets/examples/ct35_lod_bake.rs` · 280 · ct35_lod_bake: bake the CT35 hero LOD chain through the engine cook.
 - `assets/src/archive.rs` · 1430 · archive: zero-copy archived bundles over a shared byte mapping.
 - `assets/src/archived_cook.rs` · 180 · archived_cook: validated cook envelope borrowed in place, no decode.
 - `assets/src/asset_source.rs` · 553 · asset_source: content reaches the engine through a source, never a bare
 - `assets/src/asset_source/bundle.rs` · 931 · bundle: the `.e2bundle` file, a packed copy of a content directory that a
-- `assets/src/bc.rs` · 776 · bc: native BC1/BC3/BC4/BC5/BC7 block codec for in-cook texture compression.
+- `assets/src/bc.rs` · 1174 · bc: native BC1/BC3/BC4/BC5/BC7 block codec for in-cook texture compression.
+- `assets/src/bin/arena_cook.rs` · 176 · arena_cook bin: cook the five CC0 arena texture sets (content/arena/sources) into
 - `assets/src/bin/bundle_cook.rs` · 184 · bundle_cook bin: cook entry feeding cooked bytes into E204BNDL.
 - `assets/src/bin/e2bundle.rs` · 177 · e2bundle bin: pack a content directory into a `.e2bundle`, or check one.
 - `assets/src/body_import.rs` · 357 · body_import: one skinned glTF body (meshes, skin, binds, base-color
@@ -143,20 +161,22 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `assets/src/collapse.rs` · 390 · collapse: quadric-error mesh simplification for the mesh cook.
 - `assets/src/collider_cook.rs` · 1365 · collider_cook: colliders cooked from the art, not from hand-placed boxes.
 - `assets/src/cooked.rs` · 351 · cooked: `CookedMesh`/`CookedMaterial` types that render consumes.
-- `assets/src/cooker.rs` · 412 · cooker: deterministic cook cache over the persistent asset registry.
+- `assets/src/cooker.rs` · 558 · cooker: deterministic cook cache over the persistent asset registry.
 - `assets/src/datanode.rs` · 255 · datanode: indent-tree parser. Hierarchy = indent, tokens = whitespace split, errors carry line.
 - `assets/src/extras.rs` · 252 · extras: Blender node extras as load-time data, no name hacks.
-- `assets/src/gen_intake.rs` · 1331 · gen_intake: a generated mesh becomes a game-ready prop, with provenance.
-- `assets/src/gen_intake/tests.rs` · 470 · (no //! line)
+- `assets/src/gen_intake.rs` · 1360 · gen_intake: a generated mesh becomes a game-ready prop, with provenance.
+- `assets/src/gen_intake/tests.rs` · 514 · (no //! line)
 - `assets/src/gltf.rs` · 532 · gltf: glTF container sniffing only (bytes in, verdict out).
 - `assets/src/handle.rs` · 978 · handle: generational asset handles plus load states over the stream queue.
 - `assets/src/health.rs` · 67 · health: asset floors. Bytes>=2048, nonZero>0.90 dense / 0.50 container.
 - `assets/src/import.rs` · 356 · import: glTF-only + KTX2-only, 7-gate checklist. Decode offline, runtime looks up only.
 - `assets/src/import_repair.rs` · 1310 · import_repair: diagnostic plus setting-driven import repairs.
+- `assets/src/ktx2_cook.rs` · 894 · ktx2_cook: arena material maps cooked to block-compressed KTX2 with a full mip
 - `assets/src/lod_swap.rs` · 846 · lod_swap: runtime LOD swap over cooked LOD chains with hysteresis.
-- `assets/src/mesh_cook.rs` · 1985 · mesh_cook: engine-native mesh cook.
-- `assets/src/mesh_import.rs` · 1038 · mesh_import: glTF bytes to [`CookedMesh`]/[`CookedMaterial`].
+- `assets/src/mesh_cook.rs` · 2163 · mesh_cook: engine-native mesh cook.
+- `assets/src/mesh_import.rs` · 1070 · mesh_import: glTF bytes to [`CookedMesh`]/[`CookedMaterial`].
 - `assets/src/meshlet.rs` · 998 · meshlet: cone-weighted meshlet cook step (64 vertices, 124 triangles).
+- `assets/src/morph_import.rs` · 531 · morph_import: glTF morph targets (blend shapes) into plain delta arrays.
 - `assets/src/museum.rs` · 805 · museum: version registry plus fixture template for format releases.
 - `assets/src/optimize.rs` · 393 · optimize: glTF-Transform document pre-pass (dedup, prune, resize-record).
 - `assets/src/provenance.rs` · 578 · provenance: release gate over asset provenance rows.
@@ -167,51 +187,57 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `assets/src/skin_import.rs` · 2193 · skin_import: glTF skins, skeletons and clips into the anim contract.
 - `assets/src/stream.rs` · 883 · stream: prioritized asset-streaming queue with memory budgets.
 - `assets/src/texture.rs` · 357 · texture cook: encoded bytes to [`CookedTexture`].
-- `assets/src/texture_cook.rs` · 109 · texture_cook: offline BC cook over `bc` plus KTX2 emit.
+- `assets/src/texture_cook.rs` · 74 · texture_cook: offline BC cook over `bc` plus KTX2 emit.
 - `assets/src/traversal_cook.rs` · 728 · traversal_cook: traversal and finisher intake with edge markers.
 - `assets/src/uv2_chart.rs` · 323 · uv2_chart: offline uv2 chart pack for arena static meshes (cook-time only).
 - `assets/src/validate.rs` · 511 · validate: std-only scene/rules schema gate. Compile once, refuse with key paths, never panic.
 - `assets/src/vat.rs` · 386 · vat: vertex animation texture bake for crowd clips.
 - `assets/src/watcher.rs` · 363 · watcher: std-only poll-driven file watch over mtimes.
 - `assets/src/wire.rs` · 160 · wire: byte helpers shared by the archive and bundle formats, plus the
+- `assets/tests/it/ai_props.rs` · 114 · The three CT40 AI props run the real intake path with the provenance each file carries: licence
+- `assets/tests/it/arena_cook.rs` · 111 · The committed arena kit cooks the same twice. The real `arena_cook` bin cooks the CC0 texture
 - `assets/tests/it/blockcomp_cook.rs` · 68 · blockcomp cook spike: BC7 plus KTX2 emit, x2 identical, under budget.
+- `assets/tests/it/crowd_cook.rs` · 56 · CT25 crowd impostors: both spectator specimens cook identical twice through the CT2 prop lane,
 - `assets/tests/it/extras_wiring.rs` · 26 · (no //! line)
 - `assets/tests/it/gltf_cc0_corpus.rs` · 124 · glTF CC0-only sample corpus vectors beside inline verdicts.
 - `assets/tests/it/gltf_conformance.rs` · 534 · Manifest-driven glTF conformance vectors: Khronos shape, local verdicts.
 - `assets/tests/it/gltf_corpus_vectors.rs` · 141 · glTF malformed-corpus reject vectors: 4 fresh classes at the asset gate.
 - `assets/tests/it/import_dedup_vectors.rs` · 156 · (no //! line)
-- `assets/tests/it/main.rs` · 26 · One integration-test binary for engine-assets.
+- `assets/tests/it/main.rs` · 31 · One integration-test binary for engine-assets.
 - `assets/tests/it/meshlet_cull_vectors.rs` · 9 · (no //! line)
 - `assets/tests/it/meshlet_lod_cook.rs` · 99 · VG2 spike: the LOD DAG halves triangles within error, caps clusters,
 - `assets/tests/it/meshlet_vectors.rs` · 115 · Meshlet bound vectors: count lower bounds plus cap checks.
 - `assets/tests/it/optimize_vectors.rs` · 176 · optimize vectors: dup-heavy fixture shrinks, x2 identical, control no-op.
+- `assets/tests/it/pilot_corner.rs` · 79 · CT56 urban-war pilot corner: the three corner actors cook through the CT2 prop lane on the
 - `assets/tests/it/quant_vectors.rs` · 222 · Quantization known-answer vectors: half + unorm16.
 - `assets/tests/it/quantize_grid_vectors.rs` · 290 · N-bit grid-quantize parity vectors: cooked position bytes shrink.
 - `assets/tests/it/quantize_parity.rs` · 141 · Meshoptimizer-style half-quantize parity vectors: cooked mesh bytes shrink.
 - `assets/tests/it/registry_singleton_vectors.rs` · 222 · Registry singleton vectors: FindOrCreate holds one instance per id.
-- `assets/tests/it/sidecar_conformance.rs` · 104 · sidecar conformance: the shipped fighter sidecars parse through the engine
+- `assets/tests/it/retarget_batch_a.rs` · 131 · CT42 batch-a: the 16 combat clips retarget through CT1 onto the hero bind, dedupe against the
+- `assets/tests/it/sidecar_conformance.rs` · 137 · sidecar conformance: the shipped fighter sidecars parse through the engine
 - `assets/tests/it/sparse_order_vectors.rs` · 130 · glTF sparse order reject vectors: non-increasing indices fail.
 - `assets/tests/it/spatial_sort_vectors.rs` · 127 · Spatial-sort pre-pass vectors: morton remap + tiny Tipsify-after; deterministic integer math only.
 - `assets/tests/vfetch_vectors.rs` · 326 · vfetch vectors: vertex-cache miss-ratio + order parity vectors.
 
-## audio (engine-audio, 29 files, 17879 lines)
-- `audio/src/lib.rs` · 1744 · audio: offline synth plus headless voice mixer. Frames into stats (peak/RMS).
+## audio (engine-audio, 30 files, 18943 lines)
+- `audio/src/lib.rs` · 1851 · audio: offline synth plus headless voice mixer. Frames into stats (peak/RMS).
 - `audio/src/bank.rs` · 651 · bank: placeholder hit/footstep/crowd-bed playback samples.
 - `audio/src/coherence.rs` · 821 · coherence: hit-event-synced impact audio over the spatial mix.
 - `audio/src/combat_cues.rs` · 452 · combat_cues: fight events to named cue plays.
 - `audio/src/crowd.rs` · 512 · crowd: deterministic fight-night reactions plus the ambience sidechain.
 - `audio/src/cue.rs` · 1078 · cue: sound cues over shared clips.
+- `audio/src/declick.rs` · 318 · Click-free gain ramps. A [`Declicker`] moves a Q24 gain between silence and
 - `audio/src/decode.rs` · 585 · decode: bounded vorbis/WAV decode behind the `device` feature.
-- `audio/src/device.rs` · 1041 · device: default cpal output pulling stereo frames from a [`FrameSource`].
+- `audio/src/device.rs` · 1242 · device: default cpal output pulling stereo frames from a [`FrameSource`].
 - `audio/src/director.rs` · 1071 · director: fight-driven music/tension brain.
 - `audio/src/dsp.rs` · 582 · dsp: bus mixer (SFX/Music/Dialogue->Master) + RMS gate + seeded song. Same seed->same samples.
-- `audio/src/engine.rs` · 662 · engine: the audio callback's owner.
+- `audio/src/engine.rs` · 694 · engine: the audio callback's owner.
 - `audio/src/feed.rs` · 750 · feed: tick-stamped single-writer command queue from the game thread to
-- `audio/src/heal.rs` · 562 · heal: default-device loss/change recovery through the observe supervisor.
+- `audio/src/heal.rs` · 749 · heal: default-device loss/change recovery through the observe supervisor.
 - `audio/src/hrtf.rs` · 860 · hrtf: headphone 3D ears over mono sources (std-only HRIR sphere; a native
 - `audio/src/mix.rs` · 303 · mix: combat mix over shared clips.
 - `audio/src/music.rs` · 763 · music: seeded adaptive music (layers + bar transitions + beat bus). Same seed->same SHA.
-- `audio/src/occlude.rs` · 716 · occlude: wall-muffle gains per voice per tick.
+- `audio/src/occlude.rs` · 935 · occlude: wall-muffle gains and lowpass cutoffs per voice per tick.
 - `audio/src/playlist.rs` · 502 · playlist: the music bed, driven by an integer tension level.
 - `audio/src/reverb.rs` · 1055 · reverb: parametric zone tails for stone rooms, tunnel preset first.
 - `audio/src/spatial.rs` · 762 · spatial: headless positional mix over [`Mixer`](crate::Mixer).
@@ -230,18 +256,22 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `clock/tests/it/install.rs` · 26 · The shell's source replaces the platform clock for `now` and `since`, and only once.
 - `clock/tests/it/main.rs` · 4 · Process-wide clock, black box. This binary shares one global source, so only one test in it
 
-## combat (engine-combat, 26 files, 21920 lines)
-- `combat/src/lib.rs` · 310 · combat: frame-data combat. Timing as data (hitstop, cancel/parry windows, trauma). Never tick-coupled.
+## combat (engine-combat, 32 files, 24082 lines)
+- `combat/src/lib.rs` · 339 · combat: frame-data combat. Timing as data (hitstop, cancel/parry windows, trauma). Never tick-coupled.
 - `combat/src/anatomy.rs` · 744 · anatomy: joint graph plus tissue and armor tables for deterministic cuts.
 - `combat/src/arena.rs` · 641 · arena: match-step wiring over the exchange and sweep resolvers.
+- `combat/src/camera_framing.rs` · 220 · camera_framing: third-person melee framing as pure integer functions (GP14).
 - `combat/src/classes.rs` · 246 · Ludus Magnus gladiator rows as [`Tables`](crate::fight::Tables) presets.
+- `combat/src/combo.rs` · 412 · combo: the shared string counter — one cursor of three stance positions,
 - `combat/src/cut.rs` · 1169 · cut: deterministic blade-vs-limb sever resolver.
 - `combat/src/depth.rs` · 1151 · depth: integer combat-depth cores over the base fight table core.
 - `combat/src/design.rs` · 181 · design: duel timing patterns as data, never tick-coupled.
-- `combat/src/exchange.rs` · 1912 · exchange: timed parry answers, locked riposte, poise clash over table rows.
+- `combat/src/exchange.rs` · 1926 · exchange: timed parry answers, locked riposte, poise clash over table rows.
 - `combat/src/feel.rs` · 2726 · feel: Pichlmair game-feel survey as engine parameter schemas (ideas only).
+- `combat/src/feel_flow.rs` · 399 · feel_flow: register feel effects against fight triggers, apply them in a
 - `combat/src/feel_instrument.rs` · 1072 · feel_instrument: impact-feel instrumentation over the feel rows.
 - `combat/src/fight.rs` · 3488 · fight: data-table fight rules as a pure deterministic step.
+- `combat/src/gamefeel.rs` · 522 · gamefeel: integer port of the deepnight/gamefeel demo's presentation feel.
 - `combat/src/gore.rs` · 937 · Gore and blood events for the renderer: presentation only, never authoritative.
 - `combat/src/hitsim.rs` · 360 · hitsim: what one blade does to a body over many clean hits, as a
 - `combat/src/hitstop_kind.rs` · 91 · Per-kind hit-stop freeze rows: light taps, heavy lands, parry answers longest.
@@ -249,6 +279,8 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `combat/src/nerve.rs` · 162 · nerve: small morale meter beside the feel survey.
 - `combat/src/projectile.rs` · 1240 · projectile: fixed-point round flight over caller-owned casts.
 - `combat/src/reaction.rs` · 632 · reaction: visible hit reactions beside the fight step.
+- `combat/src/shake_stage.rs` · 134 · shake_stage: the trauma-curve shake stage as pure integer functions (GP21).
+- `combat/src/stance.rs` · 432 · stance: the stance clash matrix as data — three bits decide who wins a
 - `combat/src/sweep.rs` · 1908 · sweep: continuous segment-vs-capsule weapon solve with shield cones.
 - `combat/src/tables.rs` · 856 · Versioned replacement move tables with validation and an immutable swap input.
 - `combat/src/tables_text.rs` · 368 · Combat rows text loader: designers edit numbers, no Rust edit.
@@ -258,39 +290,43 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `combat/tests/it/p2_feel_latency.rs` · 376 · P2 feel latency over the live combat step (sim side only).
 - `combat/tests/it/telegraph_floor.rs` · 295 · Telegraph floors report: per-move signal-plus-attack time vs readable floors.
 
-## core (engine-core, 27 files, 5688 lines)
-- `core/src/lib.rs` · 60 · core: fixed tick, seeded rng, per-tick hash (FNV-1a 64).
+## core (engine-core, 29 files, 6523 lines)
+- `core/src/lib.rs` · 64 · core: fixed tick, seeded rng, per-tick hash (FNV-1a 64).
 - `core/src/adler.rs` · 45 · adler: Adler-32 (the zlib trailer checksum), one of several local copies.
-- `core/src/alloc_probe.rs` · 153 · alloc_probe: the one heap-counting allocator for zero-allocation proofs.
+- `core/src/alloc_probe.rs` · 155 · alloc_probe: the one heap-counting allocator for zero-allocation proofs.
 - `core/src/arena.rs` · 332 · Frame slice arena: presized typed scratch for per-frame words.
-- `core/src/checked.rs` · 146 · checked: named integer conversions for tick paths. Owner: engine-core.
+- `core/src/checked.rs` · 276 · checked: named integer conversions for tick paths. Owner: engine-core.
 - `core/src/config.rs` · 153 · config: typed sim config + budgets, no globals. Defaults: 60Hz, seed 2040.
 - `core/src/counter_rng.rs` · 398 · counter_rng: keyed counter streams for forks, islands and chunks.
 - `core/src/crc32.rs` · 33 · crc32: bitwise IEEE CRC-32 (the PNG chunk and save envelope checksum).
-- `core/src/det_math.rs` · 205 · det_math: integer-only trig and exp, always compiled in.
-- `core/src/digest.rs` · 35 · digest: shared fold for canonical words beside the full rehash.
-- `core/src/fixed.rs` · 580 · fixed: Q47.16 deterministic math, CORDIC atan2 + LUT trig, LE digest.
+- `core/src/det_math.rs` · 321 · det_math: integer-only trig and exp, always compiled in.
+- `core/src/digest.rs` · 227 · digest: shared fold for canonical words beside the full rehash.
+- `core/src/diverge.rs` · 40 · diverge: the one first-difference scan between two per-tick chains.
+- `core/src/fixed.rs` · 569 · fixed: Q47.16 deterministic math, CORDIC atan2 + LUT trig, LE digest.
 - `core/src/hash.rs` · 265 · hash: the engine's one owner of non-cryptographic state and content hashes.
 - `core/src/json.rs` · 39 · json: JSON string escaping shared by the hand-rolled writers.
 - `core/src/quat.rs` · 131 · quat: the one quaternion product shared by animation, physics, assets,
-- `core/src/rng.rs` · 209 · rng: xorshift64 stream + splitmix fork substreams, LE digest.
-- `core/src/seal_key.rs` · 176 · seal_key: one owner for operator-held hex seal keys.
-- `core/src/tick.rs` · 205 · tick: fixed 60Hz driver. Construct -> step -> hash; fixed dt in, never wall-clock.
-- `core/src/time.rs` · 443 · time: integer 60Hz accumulator, the only sim clock.
-- `core/src/vec3.rs` · 29 · vec3: the one 3-vector cross product and squared distance shared by
+- `core/src/rng.rs` · 237 · rng: xorshift64 stream + splitmix fork substreams, LE digest.
+- `core/src/rng_wyhash.rs` · 342 · rng_wyhash: the wyrand-shape counter stream (wyhash family).
+- `core/src/seal_key.rs` · 206 · seal_key: one owner for operator-held hex seal keys.
+- `core/src/tick.rs` · 142 · tick: fixed 60Hz driver. Construct -> step -> hash; fixed dt in, never wall-clock.
+- `core/src/time.rs` · 448 · time: integer 60Hz accumulator, the only sim clock.
+- `core/src/vec3.rs` · 63 · vec3: the one 3-vector cross product, squared distance and integer 2D
 - `core/tests/it/deterministic_replay_vectors.rs` · 286 · Seeded scheduler + replay fault-soak vectors over core `Rng`.
 - `core/tests/it/digest_fold_vectors.rs` · 108 · Digest fold vectors: the `engine_core::digest::TwinFold` a caller builds
 - `core/tests/it/fixed_property.rs` · 256 · Fixed vs scalar oracle vectors plus a deterministic seed corpus.
 - `core/tests/it/fppe_vec3_vectors.rs` · 401 · Fixed-point Vec3 collision vectors over a 2-body head-on fixture.
 - `core/tests/it/main.rs` · 16 · One integration-test binary for engine-core.
 - `core/tests/it/property_matrix.rs` · 706 · Unified property + fuzz matrix over one seed corpus and three engines,
-- `core/tests/it/root_reexport_contract.rs` · 219 · Crate-root re-export contract: the `engine_core::X` a caller writes must
+- `core/tests/it/root_reexport_contract.rs` · 205 · Crate-root re-export contract: the `engine_core::X` a caller writes must
 - `core/tests/it/turn_hash_journal.rs` · 59 · Turn-hash journal: same seed twice gives same per-turn hashes.
 
-## destruction (engine-destruction, 20 files, 12801 lines)
-- `destruction/src/lib.rs` · 121 · destruction: offline pre-fracture bake. Runtime ships chunk data only.
+## destruction (engine-destruction, 25 files, 15178 lines)
+- `destruction/src/lib.rs` · 135 · destruction: offline pre-fracture bake. Runtime ships chunk data only.
 - `destruction/src/bake.rs` · 568 · bake: offline pre-fracture bake. Seeded bisection, deterministic on (seed, pieces).
 - `destruction/src/bake3d.rs` · 206 · bake3d: offline 3D pre-fracture bake. Seeded bisection, deterministic on (seed, pieces).
+- `destruction/src/bake_rank.rs` · 372 · bake_rank: detail where it breaks, a bake probe for chunk lattices.
+- `destruction/src/bond_grade.rs` · 733 · bond_grade: graded bonds, sliver reject and per-event break records.
 - `destruction/src/bonded.rs` · 1851 · bonded: pre-fractured collections with bonds, strain and anchors.
 - `destruction/src/bonded/blast.rs` · 210 · blast: an authority explosion turned into impacts, so the existing bond rule decides what
 - `destruction/src/bonded/snapshot.rs` · 295 · snapshot: canonical bytes of a bonded collection's moving state, and the
@@ -298,9 +334,11 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `destruction/src/budget/snapshot.rs` · 221 · snapshot: canonical bytes of the debris ledger and the restore that
 - `destruction/src/cluster.rs` · 473 · cluster: sparse bond topology over a bonded descriptor.
 - `destruction/src/crack.rs` · 603 · crack: siege-wall baked fracture plus crack spread on the bonded path.
-- `destruction/src/csg.rs` · 1336 · csg: offline CSG fracture bake from blade-plane cuts.
+- `destruction/src/csg.rs` · 1350 · csg: offline CSG fracture bake from blade-plane cuts.
 - `destruction/src/cursor.rs` · 122 · cursor: bounds-checked little-endian reads over a byte slice, shared by
-- `destruction/src/fracture.rs` · 1193 · fracture: runtime Voronoi fracture at an impact point, plus the cook
+- `destruction/src/debris_lod.rs` · 452 · debris_lod: distance tiers for debris, merge groups and impostors.
+- `destruction/src/fracture.rs` · 1293 · fracture: runtime Voronoi fracture at an impact point, plus the cook
+- `destruction/src/impact_table.rs` · 515 · impact_table: impact-keyed fracture codebook over one prop shape.
 - `destruction/src/material.rs` · 1160 · material: the world material table for deterministic breaks.
 - `destruction/src/shape_match.rs` · 581 · shape_match: shape matching for bonded debris, so a cluster of chunks held
 - `destruction/src/shards.rs` · 323 · shards: runtime wake-set only. Impulse > 3xmass wakes; bitset in index order.
@@ -308,8 +346,9 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `destruction/src/snapshot.rs` · 274 · snapshot: one canonical snapshot of destruction state, so a net rollback
 - `destruction/src/spread.rs` · 909 · spread: crack spread as a sorted flood over the baked bond graph.
 - `destruction/src/structure.rs` · 1073 · structure: load-path analysis over a bonded collection plus the seeded
+- `destruction/tests/grade_calib.rs` · 177 · Bond-grade calibration corpus (DX14): seeded impacts measure the strain
 
-## distill (engine-distill, 12 files, 6195 lines)
+## distill (engine-distill, 12 files, 6261 lines)
 - `distill/src/lib.rs` · 298 · engine-distill: offline tiny-student trainer.
 - `distill/src/bin/distill_duel.rs` · 284 · distill_duel: distill the arena depth brain into an int8 `.e2nn` student
 - `distill/src/data.rs` · 552 · Training rows as plain data (std-only).
@@ -320,224 +359,293 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `distill/src/replay.rs` · 957 · Fork replay buffer: deterministic episodes feeding the offline learner.
 - `distill/src/spec.rs` · 112 · Student shape and seed contract (std-only).
 - `distill/src/student.rs` · 271 · The tiny student: one dense layer of plain floats (std-only).
-- `distill/src/tournament.rs` · 1253 · Fork tournament: student vs scripted baseline vs recorded teacher, and
+- `distill/src/tournament.rs` · 1319 · Fork tournament: student vs scripted baseline vs recorded teacher, and
 - `distill/src/train.rs` · 414 · Offline student trainer on burn (feature `train`).
 
-## ecs (engine-ecs, 16 files, 8586 lines)
-- `ecs/src/lib.rs` · 151 · ecs: two worlds with one checkout rule, plus phases and scratch.
-- `ecs/src/archetype.rs` · 1410 · archetype store: SoA columns per table, swap-remove, generational entities. Same spawns = same hash.
+## ecs (engine-ecs, 18 files, 11713 lines)
+- `ecs/src/lib.rs` · 153 · ecs: two worlds with one checkout rule, plus phases and scratch.
+- `ecs/src/archetype.rs` · 2419 · archetype store: SoA columns per table, swap-remove, generational entities. Same spawns = same hash.
 - `ecs/src/arena.rs` · 489 · arena: pre-sized per-phase scratch for tick temporaries.
-- `ecs/src/bridge.rs` · 1234 · bridge: byte-level adapters over arena/scene/ecs snapshots for extraction.
+- `ecs/src/bridge.rs` · 1418 · bridge: byte-level adapters over arena/scene/ecs snapshots for extraction.
 - `ecs/src/change_tick.rs` · 502 · Change-tick store with wrapping stamps and per-column summaries.
+- `ecs/src/dispatch_plan.rs` · 526 · dispatch_plan: an explicit stage plan for bake/verify with barriers.
 - `ecs/src/jobs.rs` · 176 · jobs: bulk-loop helpers on the crate's shared [`JobPool`](crate::pool::JobPool). Bake/import/verify only, never sim hot paths. Same input = same bytes.
-- `ecs/src/parallel.rs` · 588 · parallel: deterministic fork-join over index ranges for bake/verify/import.
-- `ecs/src/pool.rs` · 666 · pool: one persistent job pool with scoped jobs and index-ordered merges.
-- `ecs/src/schedule.rs` · 664 · schedule: fixed-order phases. std-only, deterministic.
-- `ecs/src/snapshot.rs` · 501 · snapshot: versioned canonical bytes + hash, restore. Slot order, FNV-1a64. Count is u32 LE.
+- `ecs/src/parallel.rs` · 725 · parallel: deterministic fork-join over index ranges for bake/verify/import.
+- `ecs/src/pool.rs` · 709 · pool: one persistent job pool with scoped jobs and index-ordered merges.
+- `ecs/src/schedule.rs` · 793 · schedule: fixed-order phases. std-only, deterministic.
+- `ecs/src/snapshot.rs` · 732 · snapshot: versioned canonical bytes + hash, restore. Slot order, FNV-1a64. Count is u32 LE.
 - `ecs/src/sparse.rs` · 406 · Sparse marker store: opt-in add/remove-heavy kinds stay out of tables.
-- `ecs/src/spine.rs` · 931 · spine: the five actor components as SoA columns.
-- `ecs/src/spine_schedule.rs` · 268 · spine_schedule: the five spine systems registered on the fixed phases.
+- `ecs/src/spine.rs` · 1097 · spine: the five actor components as SoA columns.
+- `ecs/src/spine_schedule.rs` · 382 · spine_schedule: the five spine systems registered on the fixed phases.
 - `ecs/src/views.rs` · 300 · views: optional iteration plus dynamic spawn bundles over spine columns.
-- `ecs/tests/arena_schedule.rs` · 111 · Schedule arena tick wiring: the production tick path plus its refusal case.
+- `ecs/src/world_snapshot.rs` · 517 · world_snapshot: byte-exact snapshot and restore of the archetype [`World`].
+- `ecs/tests/arena_schedule.rs` · 180 · Schedule arena tick wiring: the production tick path plus its refusal case.
 - `ecs/tests/restore_resimulate_reverse.rs` · 189 · (no //! line)
 
-## editor (engine-editor, 36 files, 34158 lines)
-- `editor/src/lib.rs` · 233 · editor: headless-first dock shell. Layout is data: serializes, hashes x2, viewport last.
+## editor (engine-editor, 42 files, 36715 lines)
+- `editor/src/lib.rs` · 247 · editor: headless-first dock shell. Layout is data: serializes, hashes x2, viewport last.
+- `editor/benches/panels.rs` · 133 · panels bench (ED17): CPU frame cost of every dock panel on a siege-sized
 - `editor/src/a2_session.rs` · 1174 · Recorded editable-scene session: import, place, edit, save, reopen.
 - `editor/src/a3_session.rs` · 1037 · Recorded editor run: viewport, picking, hierarchy, inspector, gizmo move,
-- `editor/src/app.rs` · 2260 · Editor executable: winit window, egui dock, render viewport, child-process play.
-- `editor/src/audit.rs` · 793 · Digest-chained audit receipts over the crash-safe journal.
-- `editor/src/bin/e2040-editor.rs` · 233 · `e2040-editor`: dock layout, viewport texture, gizmo batches,
+- `editor/src/activity.rs` · 645 · Activity feed (human or agent) plus a scene diff: a person and an AI working
+- `editor/src/app.rs` · 2279 · Editor executable: winit window, egui dock, render viewport, child-process play.
+- `editor/src/audit.rs` · 809 · Digest-chained audit receipts over the crash-safe journal.
+- `editor/src/bin/e2040-editor.rs` · 237 · `e2040-editor`: dock layout, viewport texture, gizmo batches,
 - `editor/src/browser.rs` · 1532 · Asset browser: bundle search plus drag-to-place with preview.
-- `editor/src/capability.rs` · 1282 · Capability tokens per AI session: allowed ops, object scopes, edit
-- `editor/src/commands.rs` · 3319 · Command service: validated, previewable, atomic, undoable scene edits.
+- `editor/src/capability.rs` · 1313 · Capability tokens per AI session: allowed ops, object scopes, edit
+- `editor/src/commands.rs` · 3441 · Command service: validated, previewable, atomic, undoable scene edits.
 - `editor/src/commands/component.rs` · 84 · Component staging for the command service: set and remove one typed
+- `editor/src/commands/digest.rs` · 127 · digest: the deterministic artifact digest of a staged batch, plus the
 - `editor/src/commands/material.rs` · 104 · Material names for bindings: validated once, copied everywhere.
-- `editor/src/commands/selective.rs` · 312 · Selective undo: revert chosen receipts alone, keep what later work pinned.
-- `editor/src/commands_coalesce.rs` · 327 · (no //! line)
-- `editor/src/durable.rs` · 1439 · Durable journal: sealed document generations on disk.
-- `editor/src/findings.rs` · 811 · Findings panel: spatial findings on a staged AI proposal, fixes via commands.
-- `editor/src/gizmo.rs` · 701 · Transform gizmo: drag deltas staged as command batches.
+- `editor/src/commands/selective.rs` · 319 · Selective undo: revert chosen receipts alone, keep what later work pinned.
+- `editor/src/commands_coalesce.rs` · 329 · (no //! line)
+- `editor/src/durable.rs` · 1474 · Durable journal: sealed document generations on disk.
+- `editor/src/findings.rs` · 816 · Findings panel: spatial findings on a staged AI proposal, fixes via commands.
+- `editor/src/gizmo.rs` · 691 · Transform gizmo: drag deltas staged as command batches.
 - `editor/src/graph.rs` · 388 · Node-graph substrate for material and VFX graphs.
-- `editor/src/inspector.rs` · 1906 · Schema inspector: registry-driven property grid with prefab badges.
+- `editor/src/inspector.rs` · 1907 · Schema inspector: registry-driven property grid with prefab badges.
 - `editor/src/inspector_auto.rs` · 1508 · Automatic inspector rows from registry schemas plus undoable batches.
 - `editor/src/instant.rs` · 792 · Instant play and restart: play from the editor camera, snapshot a
 - `editor/src/onboard.rs` · 431 · First-run checklist over templates and play-in-editor (tutorial-1 flow).
-- `editor/src/outline.rs` · 1449 · Outliner: filtered rows plus named selection sets over one selection.
-- `editor/src/panels.rs` · 116 · Panel inventory: self-registering dock panels over the shell.
+- `editor/src/outline.rs` · 1584 · Outliner: filtered rows plus named selection sets over one selection.
+- `editor/src/panels.rs` · 134 · Panel inventory: self-registering dock panels over the shell.
 - `editor/src/play.rs` · 250 · Play in a child process: launch the game, watch it, kill it.
 - `editor/src/play_in.rs` · 774 · Play-in-editor: the game-window-equivalent fixed-tick loop inside the viewport.
-- `editor/src/save.rs` · 969 · Document save: versioned binary snapshot of a [`Document`].
-- `editor/src/shell.rs` · 1983 · Dock shell: hierarchy, transform inspector and log panels over the command service.
-- `editor/src/shell_ui.rs` · 1581 · egui dock drawing over [`Shell`](crate::shell::Shell).
+- `editor/src/pose_tape.rs` · 386 · Mouse-to-joint pose recorder: the integer tape a dragged pose becomes.
+- `editor/src/save.rs` · 973 · Document save: versioned binary snapshot of a [`Document`].
+- `editor/src/shell.rs` · 1987 · Dock shell: hierarchy, transform inspector and log panels over the command service.
+- `editor/src/shell_ui.rs` · 1734 · egui dock drawing over [`Shell`](crate::shell::Shell).
+- `editor/src/spine_inspect.rs` · 337 · Spine inspector: the arena spine's actors as read-only inspector nodes.
 - `editor/src/templates.rs` · 1150 · New-item templates: arena, prop, weapon and fighter starters.
 - `editor/src/tuning.rs` · 1607 · Live tuning panel: combat and AI numbers as previewed batches.
 - `editor/src/viewport.rs` · 563 · Editor viewport: camera, ray-cast picking and gizmo view matrices.
 - `editor/src/viewport_image.rs` · 440 · Viewport texture: CPU-rasterized panel image validated by the renderer's texture API.
-- `editor/src/wal.rs` · 2020 · Crash-safe journal: a write-ahead log over the command service.
+- `editor/src/wal.rs` · 2044 · Crash-safe journal: a write-ahead log over the command service.
 - `editor/tests/a2_evidence.rs` · 46 · Evidence run: one recorded editable-scene session over licensed
 - `editor/tests/a2_material_roundtrip.rs` · 156 · A2 material-bind round trip: bind, save, reopen byte-identical.
 - `editor/tests/components.rs` · 388 · Typed component ops through the command service: eight kinds set, saved,
+- `editor/tests/material_ops.rs` · 345 · NS31a2: the document holds the material table and edits it with undo.
 
-## endpoint (engine-endpoint, 96 files, 66888 lines)
-- `endpoint/src/lib.rs` · 66 · endpoint: agent driving seam. Core is std-only; the `mcp` feature adds
+## endpoint (engine-endpoint, 137 files, 80056 lines)
+- `endpoint/src/lib.rs` · 77 · endpoint: agent driving seam. Core is std-only; the `mcp` feature adds
 - `endpoint/src/assert_run.rs` · 415 · Sealed assert runs over recorded tapes; harness only, never in the tick.
-- `endpoint/src/assistant.rs` · 4133 · EA1d assistant apply: fork-passed proposals land through `tx.apply` bound
+- `endpoint/src/assistant.rs` · 2772 · EA1d assistant apply: fork-passed proposals land through `tx.apply` bound
+- `endpoint/src/assistant/apply.rs` · 234 · (no //! line)
+- `endpoint/src/assistant/backend.rs` · 382 · (no //! line)
+- `endpoint/src/assistant/errors.rs` · 225 · (no //! line)
+- `endpoint/src/assistant/fork.rs` · 405 · (no //! line)
 - `endpoint/src/assistant/transcript.rs` · 68 · Transcript leaf: token cost plus proposal rows.
+- `endpoint/src/assistant/wants.rs` · 237 · (no //! line)
 - `endpoint/src/audit/mod.rs` · 685 · Door audit: tamper-evident log over every gateway call.
 - `endpoint/src/audit/verify.rs` · 366 · Streaming seal check for the door audit log.
-- `endpoint/src/bin/e2040-mcp.rs` · 51 · `e2040-mcp`: the stdio MCP door on a project folder.
+- `endpoint/src/bin/e2040-mcp.rs` · 69 · `e2040-mcp`: the stdio MCP door on a project folder.
 - `endpoint/src/brief.rs` · 648 · Shared brief envelope: one typed envelope every AB stage consumes.
 - `endpoint/src/build_character.rs` · 999 · build_character: brief to character (AB2) over the licensed CT7 kit.
 - `endpoint/src/build_encounter.rs` · 1301 · build_encounter: brief text to validated encounter plan (AB3).
-- `endpoint/src/build_game.rs` · 2771 · Brief to playable slice: one slice text chains AB1, AB2, AB3 plus the
-- `endpoint/src/build_level.rs` · 3390 · Brief to level: text brief to relation plan, SP5 placement, cell layout
-- `endpoint/src/build_level/imp/build_level_session.rs` · 259 · Level session: revision-checked preview/apply/undo over the level actor list.
+- `endpoint/src/build_game.rs` · 2101 · Brief to playable slice: one slice text chains AB1, AB2, AB3 plus the
+- `endpoint/src/build_game/replay.rs` · 675 · (no //! line)
+- `endpoint/src/build_level.rs` · 2714 · Brief to level: text brief to relation plan, SP5 placement, cell layout
+- `endpoint/src/build_level/imp/build_level_session.rs` · 302 · Level session: revision-checked preview/apply/undo over the level actor list.
+- `endpoint/src/build_level/imp/compile.rs` · 532 · (no //! line)
+- `endpoint/src/build_level/imp/door.rs` · 286 · (no //! line)
+- `endpoint/src/build_level/imp/nav.rs` · 457 · (no //! line)
+- `endpoint/src/build_level/imp/parse.rs` · 250 · (no //! line)
 - `endpoint/src/canon.rs` · 660 · canon: variant dedup for generated briefs.
-- `endpoint/src/discover.rs` · 2942 · MCP7 self-describing door: manifest, watch, one error, batch preview.
-- `endpoint/src/door_dispatch.rs` · 1002 · Audited dispatch seam for the MCP door.
-- `endpoint/src/explain.rs` · 1125 · MCP10 EXPLAIN for AI edits: dry-run cost report plus caps, refused pre-apply.
-- `endpoint/src/guards.rs` · 387 · Shared guard block for tool writes: one format gate plus one
+- `endpoint/src/discover.rs` · 2947 · MCP7 self-describing door: manifest, watch, one error, batch preview.
+- `endpoint/src/door_dispatch.rs` · 1082 · Audited dispatch seam for the MCP door.
+- `endpoint/src/explain.rs` · 1144 · MCP10 EXPLAIN for AI edits: dry-run cost report plus caps, refused pre-apply.
+- `endpoint/src/guards.rs` · 528 · Shared guard block for tool writes: one format gate plus one
 - `endpoint/src/injection/mod.rs` · 483 · injection: 5-category prompt-injection screen over asset provenance.
 - `endpoint/src/injection/score.rs` · 504 · score: jailguard-pattern import-time score gate over RV1 tape + RV2 screen.
 - `endpoint/src/insight/eval.rs` · 615 · Gold-set scoring and with/without-tools A/B for Engine Insight.
 - `endpoint/src/insight/graph.rs` · 149 · Callers graph and asset references over indexed file bodies.
-- `endpoint/src/insight/index.rs` · 988 · Insight index: parsed API items plus tools, assets and scene refs.
-- `endpoint/src/insight/mcp_tools.rs` · 479 · Insight MCP tools: `api.search`, `api.describe`, `code.callers`,
+- `endpoint/src/insight/index.rs` · 991 · Insight index: parsed API items plus tools, assets and scene refs.
+- `endpoint/src/insight/mcp_tools.rs` · 540 · Insight MCP tools: `api.search`, `api.describe`, `code.callers`,
 - `endpoint/src/insight/mod.rs` · 18 · Engine Insight: always-fresh engine index for agents.
 - `endpoint/src/insight/search.rs` · 216 · BM25 search over the Insight index, plain Rust.
-- `endpoint/src/intents.rs` · 1739 · SP11 intent macros over SP5 placements in one undoable batch.
+- `endpoint/src/intents.rs` · 1743 · SP11 intent macros over SP5 placements in one undoable batch.
 - `endpoint/src/log_tools.rs` · 720 · OB3 log tools: `log.digest` and `log.query` over observe events.
-- `endpoint/src/mcp.rs` · 2926 · MCP1: rmcp stdio server over the editor command service.
-- `endpoint/src/mcp_dto.rs` · 448 · MCP transport DTOs: serde for the wire, schemars for the advertised schemas.
-- `endpoint/src/packs/anim.rs` · 707 · `anim` pack: animation data an AI can edit.
+- `endpoint/src/look_host.rs` · 62 · The `e2040-mcp` bin hosts the real look judge: it hands [`host_look_judge`]
+- `endpoint/src/mcp.rs` · 2708 · MCP1: rmcp stdio server over the editor command service.
+- `endpoint/src/mcp_dto.rs` · 516 · MCP transport DTOs: serde for the wire, schemars for the advertised schemas.
+- `endpoint/src/mcp_tools.rs` · 362 · rmcp tool definitions: one `SyncTool` per contract tool, all sync so
+- `endpoint/src/mcp_transcript_tests.rs` · 187 · AX26 transcript: one scripted client conversation with the MCP door, as
+- `endpoint/src/packs/anim.rs` · 710 · `anim` pack: animation data an AI can edit.
 - `endpoint/src/packs/asset.rs` · 173 · `asset` pack: the engine's code and content references, and generated props.
 - `endpoint/src/packs/asset/intake_verb.rs` · 378 · `asset.intake`: a generated GLB becomes a game-ready prop.
 - `endpoint/src/packs/asset/intake_verb/tests.rs` · 334 · (no //! line)
-- `endpoint/src/packs/break_.rs` · 574 · `break` pack: destruction an AI can author and test.
+- `endpoint/src/packs/break_.rs` · 689 · `break` pack: destruction an AI can author and test.
 - `endpoint/src/packs/check_profile.rs` · 113 · Door check/profile/overlay helpers: hinted refusals plus staged costs.
-- `endpoint/src/packs/geo.rs` · 1318 · `geo` pack: geometry recipes (modeling verbs) an AI can preview and apply.
-- `endpoint/src/packs/geo/kernel.rs` · 212 · The modeling ops of the `geo` pack, backed by the cook-time `engine-geo` crate. Compiled only
+- `endpoint/src/packs/geo.rs` · 1505 · `geo` pack: geometry recipes (modeling verbs) an AI can preview and apply.
+- `endpoint/src/packs/geo/kernel.rs` · 284 · The modeling ops of the `geo` pack, backed by the cook-time `engine-geo` crate. Compiled only
 - `endpoint/src/packs/grammar.rs` · 114 · `door` grammar gate: constrained decoding stays typed. Consumer
 - `endpoint/src/packs/gym.rs` · 742 · `gym` pack: headless gym verbs over the deterministic arena.
 - `endpoint/src/packs/gym_observe.rs` · 752 · `sim.observe`: read the session's live bout as numbers.
-- `endpoint/src/packs/material.rs` · 1062 · `material` pack: the one material record an AI writes as text.
-- `endpoint/src/packs/mod.rs` · 1232 · Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, fifteen packs load on
+- `endpoint/src/packs/material.rs` · 1065 · `material` pack: the one material record an AI writes as text.
+- `endpoint/src/packs/mod.rs` · 1391 · Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, sixteen packs load on
 - `endpoint/src/packs/net.rs` · 357 · `net` pack: loopback bout with injected loss, latency and burst drop as typed integers.
 - `endpoint/src/packs/perf.rs` · 456 · `perf` pack: quiet perf runs as typed rows.
 - `endpoint/src/packs/physics.rs` · 765 · `physics` pack: what one blow does to a fighter's balance, and what a ray or a
-- `endpoint/src/packs/play.rs` · 296 · `play` pack: `play.step_until` until one hp falls, plus the rival-door
+- `endpoint/src/packs/physics_settings.rs` · 1178 · settings pack: the physics and render knobs an AI can set as typed data.
+- `endpoint/src/packs/play.rs` · 301 · `play` pack: `play.step_until` until one hp falls, plus the rival-door
 - `endpoint/src/packs/play_ext.rs` · 500 · `play` pack extension: `input.inject` and `state.digest`.
-- `endpoint/src/packs/replay.rs` · 571 · `replay` pack: verify a tape against its recorded hash chain.
+- `endpoint/src/packs/replay.rs` · 591 · `replay` pack: verify a tape against its recorded hash chain.
 - `endpoint/src/packs/rival.rs` · 96 · Rival-door parity: the playtest verbs other engines' doors have.
 - `endpoint/src/packs/rules.rs` · 71 · `rules` pack: simulation steps and game rules an AI can test.
 - `endpoint/src/packs/rules/verbs.rs` · 418 · `rules.set`, `rules.test`, `rules.explain`: scripted game rules through the door.
 - `endpoint/src/packs/rules/worker.rs` · 207 · The rules worker: one thread per door session that owns the session's [`Rules`].
-- `endpoint/src/packs/scene.rs` · 124 · `scene` pack: layout authoring beyond the core transaction tools.
-- `endpoint/src/packs/view.rs` · 500 · `view` pack: what the door sees about itself and the run.
+- `endpoint/src/packs/scene.rs` · 136 · `scene` pack: layout authoring beyond the core transaction tools.
+- `endpoint/src/packs/sweep.rs` · 364 · `play.sweep`: seeded bots play N headless bouts and answer one envelope.
+- `endpoint/src/packs/verify.rs` · 743 · `verify` pack: the playtest and proof verifiers at the door.
+- `endpoint/src/packs/view.rs` · 1191 · `view` pack: what the door sees about itself and the run.
 - `endpoint/src/packs/web.rs` · 1815 · `web` pack: build the browser shell, serve it, look at it, drive it (AIS2).
+- `endpoint/src/pick.rs` · 484 · Pick manifest (EV21): the engine side of "point at it".
 - `endpoint/src/plan_goals.rs` · 1043 · plan_goals: brief to goals in a small planning language, solved by a
-- `endpoint/src/play.rs` · 2057 · MCP2: `play.run` and `capture` tools over headless arena matches.
-- `endpoint/src/play/play_session.rs` · 2120 · MCP `play.step`: a live duel held across steps, one receipt per step.
+- `endpoint/src/play.rs` · 2153 · MCP2: `play.run` and `capture` tools over headless arena matches.
+- `endpoint/src/play/play_session.rs` · 2143 · MCP `play.step`: a live duel held across steps, one receipt per step.
 - `endpoint/src/play/requery.rs` · 379 · Bounded deterministic re-query store for `play.step`, one per session.
 - `endpoint/src/play/world_load.rs` · 349 · world_load: a scene document revision becomes the match world.
-- `endpoint/src/receipts.rs` · 119 · receipts: every mutation returns proof. ok:true only on landed.
+- `endpoint/src/receipts.rs` · 210 · receipts: every mutation returns proof. ok:true only on landed.
 - `endpoint/src/remote_shim.rs` · 46 · BRP-shaped loopback shim over the verb table (in-process, no socket).
 - `endpoint/src/sandbox.rs` · 133 · sandbox: preview-vs-live gate. Deny wins, fail closed loud.
 - `endpoint/src/sandbox/manifest.rs` · 123 · sandbox manifest: which door tools take untrusted text, and how much.
 - `endpoint/src/sandbox/scan.rs` · 230 · sandbox scan: static hostile-text scan before a tool runs.
-- `endpoint/src/scene_query.rs` · 2697 · scene.query: spatial questions with reasons, budget-fit answers, hints.
-- `endpoint/src/scene_tools.rs` · 2740 · MCP3 scene tools: `scene.brief`, `scene.spatial` and `scene.place`.
-- `endpoint/src/scene_tools/spatial_checks.rs` · 130 · `scene.spatial` read path: the wire tables and finding lines the verb
-- `endpoint/src/secret_launch.rs` · 1287 · MCP14 one-child vault injection for launched servers (kprun pattern, no dep).
+- `endpoint/src/scene_next.rs` · 259 · `scene.next`: the one next call a weak model should make.
+- `endpoint/src/scene_pick.rs` · 313 · `scene.pick`: point at a capture, get the object or the floor point.
+- `endpoint/src/scene_pick/tests.rs` · 399 · EV21 tests at the door: the 100-task gold pointing eval answered through
+- `endpoint/src/scene_query.rs` · 2752 · scene.query: spatial questions with reasons, budget-fit answers, hints.
+- `endpoint/src/scene_query/cards.rs` · 152 · The kind cards of `scene.query`: for each question kind the fields it needs
+- `endpoint/src/scene_query/compact_tests.rs` · 146 · SPR8 tests: compact `scene.query` answers keep the digest and the matched
+- `endpoint/src/scene_query/cone.rs` · 235 · Cone questions for `scene.query`: integer tangent table, side and bearing
+- `endpoint/src/scene_query/pairs.rs` · 189 · Pair and measure questions for `scene.query`: sees, why_hidden, clearance,
+- `endpoint/src/scene_query/reach.rs` · 42 · AD20 reach honesty at the door: `scene.query reachable` answers from the
+- `endpoint/src/scene_query/reach_door_tests.rs` · 139 · AD20 tests: `scene.query reachable` answers from a baked nav mesh and
+- `endpoint/src/scene_query/schema_tests.rs` · 113 · SPR3 tests: `scene.query` teaches itself through its schema, its refusals
+- `endpoint/src/scene_query/space_kind_tests.rs` · 493 · Door tests for the `measure`, `room_of`, `in_room`, `exits_of`, `glance`,
+- `endpoint/src/scene_query/space_kinds.rs` · 382 · Measure, room, glance, coverage and the sense text verbs of `scene.query`:
+- `endpoint/src/scene_query/space_tests.rs` · 205 · Door tests for the lane-B questions: a plain-language floor plan for
+- `endpoint/src/scene_tools.rs` · 3418 · MCP3 scene tools: `scene.brief`, `scene.spatial` and `scene.place`.
+- `endpoint/src/scene_tools/facing_wants.rs` · 170 · SPF3 and SPX10 at the door: the `scene.place` wants `in_front_of`, `behind`,
+- `endpoint/src/scene_tools/handle_tests.rs` · 417 · SPR1 and SPX9 tests: every staged object gets a handle (`lamp_2 [id]`)
+- `endpoint/src/scene_tools/place_blocks.rs` · 99 · SPR6: the solver's per-want blockers mapped to the `scene.place` door shape.
+- `endpoint/src/scene_tools/place_facing_tests.rs` · 120 · Door tests for SPF3 facing wants and SPX10 `outside` on `scene.place`.
+- `endpoint/src/scene_tools/read_guard.rs` · 65 · SPF12 scene-read guard: the `include_spatial` summary type and the
+- `endpoint/src/scene_tools/spatial_checks.rs` · 361 · `scene.spatial` read path: the wire tables and finding lines the verb
+- `endpoint/src/scene_tools/spatial_delta.rs` · 270 · SPX3: the spatial findings a write changed, returned on the write.
+- `endpoint/src/scene_tools/spatial_verdict_tests.rs` · 392 · Door tests for SPF8 role triage, SPF9 verdict rows, SPX7 z-fight notes and
+- `endpoint/src/scene_tools/spatial_verdicts.rs` · 241 · SPF8, SPF9 and SPX7 at the door: role triage, verdict allow rows and
+- `endpoint/src/secret_launch.rs` · 1291 · MCP14 one-child vault injection for launched servers (kprun pattern, no dep).
 - `endpoint/src/spatial_glue.rs` · 44 · Small pure helpers every spatial-facing door shares: quaternion yaw
-- `endpoint/src/startup.rs` · 398 · MCP5 stdio startup: arg parse, project-folder open, server build.
-- `endpoint/src/tool_capabilities.rs` · 1812 · Capability-scoped tool permissions: a five-card taxonomy over the door.
+- `endpoint/src/startup.rs` · 613 · MCP5 stdio startup: arg parse, project-folder open, server build.
+- `endpoint/src/tool_capabilities.rs` · 1990 · Capability-scoped tool permissions: a five-card taxonomy over the door.
 - `endpoint/src/tool_macro.rs` · 733 · MCP9 declarative tools and test harvest: `e2_tool!` plus `test.run`.
 - `endpoint/src/tools.rs` · 541 · tools: frozen registry mirroring the MCP router, plus the batch cap.
-- `endpoint/src/transport.rs` · 96 · transport: loopback-only + token + caps + timeout tiers. std-only.
-- `endpoint/src/watch_ledger.rs` · 671 · Watch resume plus the per-verb token ledger over the query surface.
+- `endpoint/src/transport.rs` · 160 · transport: loopback-only + token + caps + timeout tiers. std-only.
+- `endpoint/src/watch_ledger.rs` · 729 · Watch resume plus the per-verb token ledger over the query surface.
 - `endpoint/src/witness.rs` · 488 · Witnessed-plan gate plus evidence receipts: every mutating door proposal
+- `endpoint/tests/door_parity.rs` · 195 · AD8 door parity: the same 20 mirror tasks through the playtest door and
+- `endpoint/tests/it/collapse_fixtures.rs` · 265 · API4 tool-collapse measurement: 20 task fixtures against the flat door.
 - `endpoint/tests/it/diagnostic_render_vectors.rs` · 206 · Diagnostic render vectors: graphical refusal shape, std-only.
-- `endpoint/tests/it/injection_door.rs` · 152 · RV2 door caller: the real MCP `scene.place` entry point screens every
-- `endpoint/tests/it/jsonrpc_conformance_vectors.rs` · 172 · MCP JSON-RPC conformance vectors: 12/12 code agreement.
+- `endpoint/tests/it/injection_door.rs` · 202 · RV2 door caller: the real MCP `scene.place` entry point screens every
+- `endpoint/tests/it/jsonrpc_conformance_vectors.rs` · 170 · MCP JSON-RPC conformance vectors: 12/12 code agreement.
 - `endpoint/tests/it/lib_std_wiring.rs` · 236 · Std-only root wiring beyond `tools`/`transport`/`guards`.
 - `endpoint/tests/it/lib_wiring_vectors.rs` · 148 · Std-only lib wiring vectors: the endpoint crate root without `mcp`.
-- `endpoint/tests/it/main.rs` · 23 · One integration-test binary for engine-endpoint.
+- `endpoint/tests/it/main.rs` · 24 · One integration-test binary for engine-endpoint.
 - `endpoint/tests/it/mcp_manifest_vectors.rs` · 45 · MCP manifest pins: ListTools shape plus path gate, registry-direct.
-- `endpoint/tests/it/mcp_stdio.rs` · 487 · MCP5 scripted external client: list, preview, apply and undo over stdio.
+- `endpoint/tests/it/mcp_stdio.rs` · 497 · MCP5 scripted external client: list, preview, apply and undo over stdio.
 - `endpoint/tests/it/redteam.rs` · 612 · RV1 red-team tape suite: replayed prompt injections via briefs, asset
-- `endpoint/tests/it/rules_door.rs` · 161 · Rules through the door. A script set with `rules.set` drives fighter slots in
+- `endpoint/tests/it/rules_door.rs` · 285 · Rules through the door. A script set with `rules.set` drives fighter slots in
 - `endpoint/tests/it/rules_pack_vectors.rs` · 147 · Rules pack vectors: the `rules` pack as the door registry sees it.
-- `endpoint/tests/it/scene_drives_match.rs` · 217 · One world: an AI's scene edit changes what is played, undo restores it.
-- `endpoint/tests/it/scene_query_cone.rs` · 323 · scene.query cone vectors: the door answers exact ids over a staged
-- `endpoint/tests/it/session_chaos.rs` · 743 · Session-isolation chaos: twelve proposers, one object, one winner.
+- `endpoint/tests/it/scene_drives_match.rs` · 249 · One world: an AI's scene edit changes what is played, undo restores it.
+- `endpoint/tests/it/scene_query_cone.rs` · 335 · scene.query cone vectors: the door answers exact ids over a staged
+- `endpoint/tests/it/session_chaos.rs` · 759 · Session-isolation chaos: twelve proposers, one object, one winner.
 - `endpoint/tests/it/step20x2.rs` · 253 · `play.step` 20x2-tick PNG receipt proof: twenty live steps of two ticks.
 - `endpoint/tests/it/tool_budget_exhaustion.rs` · 147 · MCP tool-budget exhaustion vectors: the ledger refuses bloat, the floor holds.
-- `endpoint/tests/it/tool_count_pin.rs` · 52 · Registry pin: the frozen replay registry and the live router.
+- `endpoint/tests/it/tool_count_pin.rs` · 59 · Registry pin: the frozen replay registry and the live router.
 - `endpoint/tests/look_judge_hook.rs` · 88 · `look.judge` through the door once a host registers a judge.
+- `endpoint/tests/look_judge_real.rs` · 66 · `look.judge` through the door with the REAL engine-playtest judge hosted.
 
 ## engine-chaos (engine-chaos, 1 files, 96 lines)
 - `engine-chaos/src/lib.rs` · 96 · Thin A9 chaos facade over the proof suite.
 
-## game (engine-game, 77 files, 63755 lines)
-- `game/src/lib.rs` · 3205 · game: packaged arena app skeleton.
+## game (engine-game, 97 files, 78225 lines)
+- `game/src/lib.rs` · 3317 · game: packaged arena app skeleton.
+- `game/build.rs` · 25 · (no //! line)
 - `game/src/anim_bridge.rs` · 905 · anim_bridge: sim state to clip cues with a per-slot crossfade.
-- `game/src/arena_kit.rs` · 2119 · arena_kit: arena glTF kit from placement into the presenter.
+- `game/src/arena_kit.rs` · 2314 · arena_kit: arena glTF kit from placement into the presenter.
 - `game/src/audio_director.rs` · 299 · audio_director: arena-mix bridge into the tension director.
-- `game/src/audio_mix.rs` · 459 · audio_mix: window mix wiring over the frozen audio brains.
+- `game/src/audio_mix.rs` · 476 · audio_mix: window mix wiring over the frozen audio brains.
 - `game/src/balance_verdict.rs` · 213 · balance_verdict: window text for the integer balance verdicts.
-- `game/src/bench.rs` · 1078 · bench: balance experiment harness.
-- `game/src/bin/arena.rs` · 3434 · arena.exe: window binary (winit loop, fixed-tick accumulator,
-- `game/src/bin/arena_capture.rs` · 1283 · arena_capture: headless plus chart capture helpers for the arena binary.
-- `game/src/bin/arena_frame/mod.rs` · 973 · arena_frame: per-frame helpers for the arena window. Holds the boot
+- `game/src/bench.rs` · 1083 · bench: balance experiment harness.
+- `game/src/bin/arena.rs` · 4243 · arena.exe: window binary (winit loop, fixed-tick accumulator,
+- `game/src/bin/arena_capture.rs` · 1358 · arena_capture: headless plus chart capture helpers for the arena binary.
+- `game/src/bin/arena_frame/mod.rs` · 1049 · arena_frame: per-frame helpers for the arena window. Holds the boot
+- `game/src/bin/arena_net/mod.rs` · 561 · arena_net: the window's network seat. `--host` plays slot 0 and prints the
 - `game/src/bin/arena_winit/mod.rs` · 79 · arena_winit: winit edge for the `arena` binary.
-- `game/src/bin/staged_fight.rs` · 1077 · staged_fight: headless staged fight — hero + 3 opponents.
-- `game/src/break_look.rs` · 1066 · break_look: the picture of a break, painted from authority events and never fed back.
-- `game/src/break_window.rs` · 485 · break_window: the center crate in the playable window, whole until a sword hit breaks it
-- `game/src/camera.rs` · 4504 · camera: deterministic arena camera director plus data-table tuning
+- `game/src/bin/staged_fight.rs` · 1126 · staged_fight: headless staged fight — hero + 3 opponents.
+- `game/src/break_look.rs` · 1348 · break_look: the picture of a break, painted from authority events and never fed back.
+- `game/src/break_window.rs` · 727 · break_window: the center crate in the playable window, whole until a sword hit breaks it
+- `game/src/camera.rs` · 3311 · camera: deterministic arena camera director plus data-table tuning
+- `game/src/camera/course.rs` · 359 · (no //! line)
+- `game/src/camera/fixture.rs` · 968 · (no //! line)
 - `game/src/camera_arm.rs` · 206 · camera_arm: pillar-aware camera boom length, presentation only.
-- `game/src/camera_feed.rs` · 2117 · camera_feed: presentation feed over the camera director.
-- `game/src/camera_rig.rs` · 1106 · camera_rig: staged presentation rig over the frozen camera director.
+- `game/src/camera_feed.rs` · 2247 · camera_feed: presentation feed over the camera director.
+- `game/src/camera_rig.rs` · 1217 · camera_rig: staged presentation rig over the frozen camera director.
+- `game/src/camera_wish.rs` · 226 · camera_wish: WASD and the stick, relative to where the camera looks.
 - `game/src/capture.rs` · 2493 · capture: offline clip capture — tape-bound PNGs plus a manifest.
-- `game/src/crash.rs` · 1245 · Crash reports: version, adapter, tape tail and checkpoint to a file.
+- `game/src/crash.rs` · 1566 · Crash reports: version, adapter, tape tail and checkpoint to a file.
 - `game/src/crowd_gpu.rs` · 677 · crowd_gpu: reacting crowd integer sim feeding the instanced stands.
 - `game/src/dev_hotpatch.rs` · 66 · dev_hotpatch: dev-only seam for one gameplay hot point.
 - `game/src/director.rs` · 1756 · director: auto spectator camera that cuts between presentation shots.
-- `game/src/fight_ring.rs` · 827 · fight_ring: the sand pit and stone tiers the fighters stand in.
+- `game/src/feel_view.rs` · 338 · feel_view: the window's side of the GF2/GF3 feel flow.
+- `game/src/fight_ring.rs` · 832 · fight_ring: the sand pit and stone tiers the fighters stand in.
 - `game/src/fighter_bind.rs` · 331 · fighter_bind: bind of the hero + 3 opponents (content bundles) for the staged fight.
-- `game/src/fighter_look.rs` · 5176 · fighter_look: the CT7 fighters as skinned, textured bodies in the presenter.
-- `game/src/fighter_look_acts.rs` · 590 · fighter_look_acts: the per-tick fold plus bridge bulk of [`FighterLook`].
-- `game/src/fighter_look_feet.rs` · 775 · fighter_look_feet: planted feet for the fighter look (LF12).
-- `game/src/fighter_look_inertia.rs` · 517 · fighter_look_inertia: inertialized clip switches for the fighter look (LF9).
-- `game/src/fighter_look_proofs.rs` · 1182 · fighter_look_proofs: end-to-end proofs on the real CT7 bodies, no window.
+- `game/src/fighter_look.rs` · 5946 · fighter_look: the CT7 fighters as skinned, textured bodies in the presenter.
+- `game/src/fighter_look_acts.rs` · 596 · fighter_look_acts: the per-tick fold plus bridge bulk of [`FighterLook`].
+- `game/src/fighter_look_cam.rs` · 519 · fighter_look_cam: the window's stateful fight camera (GP43).
+- `game/src/fighter_look_feet.rs` · 777 · fighter_look_feet: planted feet for the fighter look (LF12).
+- `game/src/fighter_look_inertia.rs` · 525 · fighter_look_inertia: inertialized clip switches for the fighter look (LF9).
+- `game/src/fighter_look_proofs.rs` · 1185 · fighter_look_proofs: end-to-end proofs on the real CT7 bodies, no window.
+- `game/src/fighter_look_shoulder.rs` · 430 · fighter_look_shoulder: the live duel's over-the-shoulder shot.
+- `game/src/fighter_look_throw.rs` · 300 · fighter_look_throw: the throwing arm of the spear grapple on the fighter look (SG3).
 - `game/src/flow.rs` · 184 · flow: window match shell (Title, Match, Paused, Result).
 - `game/src/fps_view.rs` · 614 · fps_view: first-person eye pose, presentation side.
 - `game/src/hitstop.rs` · 82 · hitstop: read-only mirror of the sim's hitstop count for the look.
 - `game/src/input.rs` · 142 · input: engine-owned window input codes (game-agnostic).
 - `game/src/kit_load.rs` · 325 · kit_load: arena placement table loading from JSON into actors.
+- `game/src/kit_pbr.rs` · 524 · kit_pbr: PBR material sets for the arena kit (VR2): which kit file wears which
 - `game/src/ladder.rs` · 980 · ladder: arena ladder table, glory ranks, per-rung beats, repair hook (LIGHT slice).
+- `game/src/limb_look.rs` · 1113 · limb_look: limbs that come off, drawn from the authority cut event (RZ3).
+- `game/src/lock_on.rs` · 170 · lock_on: the human fighter's soft lock-on, the `facing` the window fills in.
 - `game/src/loop_text.rs` · 449 · Loop rows text loader: designers edit numbers, no Rust edit.
-- `game/src/ludus_npcs.rs` · 1193 · ludus_npcs: living ludus voices — trainer, blacksmith and crowd.
+- `game/src/ludus_npcs.rs` · 1296 · ludus_npcs: living ludus voices — trainer, blacksmith and crowd.
+- `game/src/modes.rs` · 764 · modes: display mode list plus validated swap keeping last-good.
 - `game/src/modes_world.rs` · 1204 · modes_world: arena, siege and district free-roam over the ladder.
-- `game/src/netgame.rs` · 1721 · netgame: LAN multiplayer session in the arena app.
+- `game/src/net_seat.rs` · 988 · net_seat: one seat of a two-human arena match over UDP, driven once per
+- `game/src/netgame.rs` · 2298 · netgame: LAN multiplayer session in the arena app.
+- `game/src/netgame_route.rs` · 310 · netgame_route: where a [`NetGame`](super::NetGame) peer sends and hears
+- `game/src/netgame_wire.rs` · 354 · netgame_wire: the invitation code and the game-level datagrams of a
 - `game/src/pad.rs` · 711 · Gamepad sticks and buttons through one shared bindings table.
 - `game/src/pose_hold.rs` · 149 · pose_hold: which fighter slots freeze while sim hitstop holds.
 - `game/src/practice.rs` · 279 · Practice swap: staged combat tuning applied at a tick boundary.
 - `game/src/progress.rs` · 162 · progress: versioned game-progression payload owned by `engine-game`.
-- `game/src/reload.rs` · 655 · Hot-reload gate: staged generations applied at frame boundaries.
+- `game/src/ragdoll_look.rs` · 1732 · ragdoll_look: a floored fighter falls as a ragdoll in the window (RZ2w).
+- `game/src/reload.rs` · 693 · Hot-reload gate: staged generations applied at frame boundaries.
 - `game/src/rounds.rs` · 173 · rounds: best-of-5 duel rounds over one-round arena sessions.
 - `game/src/siege.rs` · 1167 · siege: 32v32 siege mode over four 16-fighter arena shards.
+- `game/src/spear_look.rs` · 801 · spear_look: the picture of the spear grapple, a spear in flight, stuck, or dropped, and the
+- `game/src/spear_window.rs` · 745 · spear_window: the spear grapple in the playable window. It draws the spear, its trail and the
 - `game/src/stage_bodies.rs` · 207 · stage_bodies: the CPU pose step of the fighter look, with no GPU.
-- `game/src/staged_fight_frames.rs` · 1313 · staged fight frames: the staged 600-tick receipt drives arena fight frames.
+- `game/src/staged_fight_frames.rs` · 1317 · staged fight frames: the staged 600-tick receipt drives arena fight frames.
 - `game/src/steam.rs` · 353 · Steamworks backend: achievements, stats, versioned cloud generations and
-- `game/src/view_truth.rs` · 1230 · View truth: what the window draws, as numbers, before any pixel exists.
+- `game/src/view_truth.rs` · 1252 · View truth: what the window draws, as numbers, before any pixel exists.
+- `game/src/virt.rs` · 361 · virt: virtual time for the window's tick accumulator (GP45).
 - `game/src/weapon_trail.rs` · 158 · Weapon trail ring: the last 12 blade base-plus-tip pairs per slot.
-- `game/src/window_audio_space.rs` · 415 · window_audio_space: what the `arena` window tells the audio feed each tick
-- `game/src/window_audio_space_tests.rs` · 356 · Tests for `window_audio_space`: the window's audio feed hears space,
-- `game/src/windowed.rs` · 3249 · windowed: windowed play behind the `app` feature.
+- `game/src/window_audio_space.rs` · 497 · window_audio_space: what the `arena` window tells the audio feed each tick
+- `game/src/window_audio_space_tests.rs` · 377 · Tests for `window_audio_space`: the window's audio feed hears space,
+- `game/src/windowed.rs` · 3257 · windowed: windowed play behind the `app` feature.
 - `game/src/windowed_captions.rs` · 143 · windowed_captions: accessibility captions for the live windowed session.
-- `game/src/windowed_dressing.rs` · 548 · windowed dressing: torch/banner staging for the window twin.
+- `game/src/windowed_dressing.rs` · 550 · windowed dressing: torch/banner staging for the window twin.
 - `game/src/windowed_smoke.rs` · 127 · windowed smoke helpers: `--exit` deadline, surface fate, CLI parse pieces
 - `game/tests/crash_hook.rs` · 341 · EG4 crash hook: a forced panic leaves a crash report that validates, the
 - `game/tests/it/camera_smoke.rs` · 96 · Camera smoke: the public framing API validates, frames and stays deterministic.
@@ -559,62 +667,80 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `game/tests/it/rome_numbers.rs` · 129 · Rome numbers drift check for the shared numbers file.
 - `game/tests/it/rome_spec_drift.rs` · 163 · Rome numbers drift: one shared file both builds read.
 
-## geo (engine-geo, 13 files, 4285 lines)
-- `geo/src/lib.rs` · 192 · geo: cook-time mesh tools an AI can call (decision D4): booleans, UV unwrap and pack,
+## geo (engine-geo, 14 files, 5680 lines)
+- `geo/src/lib.rs` · 194 · geo: cook-time mesh tools an AI can call (decision D4): booleans, UV unwrap and pack,
 - `geo/build.rs` · 27 · (no //! line)
-- `geo/src/bake.rs` · 357 · bake: object-space normal map from low UV to high surface via parry rays.
+- `geo/src/bake.rs` · 384 · bake: object-space normal map from low UV to high surface via parry rays.
 - `geo/src/bonemap.rs` · 459 · bonemap: name the 22 humanoid bones from an imported rig's joint names (std only, no
 - `geo/src/boolean.rs` · 208 · Mesh booleans on `manifold-rust` (pure Rust port of the Manifold kernel, Apache-2.0).
-- `geo/src/collision.rs` · 235 · Collision decomposition: a concave mesh into a few closed convex parts, on the V-HACD code
-- `geo/src/lod.rs` · 375 · Attribute-aware mesh simplification with a seam lock, on `meshopt` (meshoptimizer, MIT).
-- `geo/src/mesh.rs` · 288 · The one mesh type the geo tools share: indexed triangles with optional normals and UV0.
+- `geo/src/collision.rs` · 775 · Collision decomposition: a concave mesh into a few closed convex parts, on the V-HACD code
+- `geo/src/lod.rs` · 443 · Attribute-aware mesh simplification with a seam lock, on `meshopt` (meshoptimizer, MIT).
+- `geo/src/mesh.rs` · 416 · The one mesh type the geo tools share: indexed triangles with optional normals and UV0.
 - `geo/src/ops.rs` · 391 · Native mesh ops: weld, mirror, array, flip, normals (std only, no feature).
 - `geo/src/primitives.rs` · 297 · Closed test solids, built the same way every call. Used by the seeded tests of every tool and
 - `geo/src/recipe.rs` · 710 · A recipe: a seed and a list of typed ops over named meshes, the shape the door's `geo.preview`
-- `geo/src/uv.rs` · 525 · UV unwrap and chart packing with xatlas (MIT; vendored source, see `vendor/README.md`).
-- `geo/tests/kit.rs` · 221 · The eight arena kit glTF files (`content/arena/src`) through every geo tool: the bars of
+- `geo/src/uv.rs` · 720 · UV unwrap and chart packing with xatlas (MIT; vendored source, see `vendor/README.md`).
+- `geo/src/weights.rs` · 225 · weights: automatic skin weights from bone segments (std only, no feature).
+- `geo/tests/kit.rs` · 431 · The eight arena kit glTF files (`content/arena/src`) through every geo tool: the bars of
 
-## input (engine-input, 7 files, 2724 lines)
+## input (engine-input, 7 files, 2744 lines)
 - `input/src/lib.rs` · 116 · input: deterministic action map for fixed-tick sim. Bits hash into the tick hash.
 - `input/src/action_state.rs` · 233 · action-state input map for deterministic replay.
 - `input/src/bindings.rs` · 1021 · bindings: rebindable physical-button table mapping to [`FighterInput`].
-- `input/src/fighter.rs` · 402 · fighter: acyclic fighter contract. `engine-input` owns `FighterId`
+- `input/src/fighter.rs` · 422 · fighter: acyclic fighter contract. `engine-input` owns `FighterId`
 - `input/src/gestures.rs` · 279 · gestures: tick-counted tap, double-tap and hold detector.
 - `input/src/look.rs` · 260 · look: presentation-only look channel beside the tape.
 - `input/src/map.rs` · 413 · map: action map. One action = any-of chords; one chord = all-of inputs. Missing remote ticks repeat last.
 
-## material (engine-material, 14 files, 7445 lines)
-- `material/src/lib.rs` · 205 · engine-material: one material record an AI writes as text, shared by the
+## material (engine-material, 18 files, 9987 lines)
+- `material/src/lib.rs` · 210 · engine-material: one material record an AI writes as text, shared by the
 - `material/examples/emit_seeds.rs` · 34 · Write the shipped material records as JSON files under
 - `material/src/channels.rs` · 341 · channels: per-object coverage for the gameplay layers (wet, dirt, blood,
-- `material/src/compare.rs` · 309 · compare: how two records differ, in numbers an AI can act on.
-- `material/src/compile.rs` · 1265 · compile: a material record to one WGSL module, byte-stable.
+- `material/src/compare.rs` · 310 · compare: how two records differ, in numbers an AI can act on.
+- `material/src/compile.rs` · 1578 · compile: a material record to one WGSL module, byte-stable.
+- `material/src/coverage.rs` · 194 · coverage: the per-object event tape behind the coverage channels.
 - `material/src/dfg.rs` · 310 · dfg: baked directional-albedo tables behind the energy-conserving lobes.
 - `material/src/fixed.rs` · 150 · fixed: exact decimal text to Q16 and back, in integer math.
-- `material/src/furnace.rs` · 310 · furnace: a CPU twin of the generated lighting and the white-furnace test.
-- `material/src/gltf_import.rs` · 765 · gltf_import: glTF 2.0 materials and `KHR_materials_*` to records.
+- `material/src/furnace.rs` · 202 · furnace: the white-furnace test over the lobe math in [`crate::twin`].
+- `material/src/gltf_import.rs` · 771 · gltf_import: glTF 2.0 materials and `KHR_materials_*` to records.
 - `material/src/json.rs` · 718 · json: a small deterministic JSON reader and writer for material text.
-- `material/src/record.rs` · 1660 · record: the one material record, text in, text out.
+- `material/src/mtlx_import.rs` · 890 · mtlx_import: MaterialX `standard_surface` and `open_pbr_surface` constants and images to
+- `material/src/record.rs` · 1663 · record: the one material record, text in, text out.
 - `material/src/reload.rs` · 201 · reload: live material edits that keep the last good compile.
 - `material/src/schema.rs` · 192 · schema: the JSON Schema an AI reads before writing a record.
-- `material/src/set.rs` · 985 · set: an ordered, name-unique collection of records with one sim digest.
+- `material/src/set.rs` · 1000 · set: an ordered, name-unique collection of records with one sim digest.
+- `material/src/skin.rs` · 302 · skin: the terminator LUT and the thin transmittance of the skin lobe (RL50).
+- `material/src/twin.rs` · 921 · twin: the CPU twin of the generated material shader at one surface point.
 
-## nav (engine-nav, 9 files, 5250 lines)
-- `nav/src/lib.rs` · 132 · nav: tiled dynamic tiles plus flow fields plus traversal links plus mesh bake.
+## nav (engine-nav, 14 files, 8635 lines)
+- `nav/src/lib.rs` · 150 · nav: tiled dynamic tiles plus flow fields plus traversal links plus mesh bake.
 - `nav/src/bake.rs` · 431 · bake: tiled offline nav bake + flow cache + validator. Runtime reads only, never BFS.
 - `nav/src/cursor.rs` · 94 · cursor: the one bounds-checked little-endian byte reader behind every nav
 - `nav/src/flow.rs` · 166 · flow: tile flow-field bake + follow. One BFS bake serves N agents; 1 goal = 1 field.
+- `nav/src/funnel.rs` · 480 · funnel: smooth paths over the tiled grid by portal string pulling.
 - `nav/src/links.rs` · 262 · links: traversal link registry over walkable edges plus rebake for break sets.
-- `nav/src/mesh.rs` · 1701 · mesh: navmesh bake plus point/area queries over walkable polygons.
+- `nav/src/mesh.rs` · 1708 · mesh: navmesh bake plus point/area queries over walkable polygons.
+- `nav/src/orca.rs` · 971 · orca: near-field crowd avoidance by optimal reciprocal collision
+- `nav/src/quant.rs` · 492 · quant: quantized nav runtime for floor queries (spike, 2026-10-19).
+- `nav/src/reach.rs` · 208 · AD20 adapter: a baked [`NavMesh`] to the two spatial views, so actors get
 - `nav/src/rebake.rs` · 60 · rebake: mesh-tile version bumps against the tile registry.
-- `nav/src/tiles.rs` · 2151 · tiles: versioned dynamic tiles plus flow fields over the grid.
-- `nav/tests/tiles.rs` · 253 · tiles acceptance: breach-to-path, identical bytes, legion steering.
+- `nav/src/spline.rs` · 710 · spline: rational NURBS curves, arc-length tables and twist-free sweep
+- `nav/src/tiles.rs` · 2381 · tiles: versioned dynamic tiles plus flow fields over the grid.
+- `nav/tests/tiles.rs` · 522 · tiles acceptance: breach-to-path, identical bytes, legion steering.
 
-## net (engine-net, 59 files, 37563 lines)
-- `net/src/lib.rs` · 245 · net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
+## net (engine-net, 76 files, 50980 lines)
+- `net/src/lib.rs` · 201 · net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
+- `net/src/ack.rs` · 370 · ack: packet delivery tracking with a 32-bit ack bitfield and a loss rate.
+- `net/src/ack/bout_tests.rs` · 150 · The tracker on the real played-bout path: seats send input ticks, the host
+- `net/src/ack/input.rs` · 153 · Delivery tracking for one client's input stream, built from the bytes the
+- `net/src/ack/recv.rs` · 99 · Receiver half of the ack tracker: which sequences arrived, as the header a
+- `net/src/ack/session_tests.rs` · 223 · The tracker against the sim link and the session's input types.
+- `net/src/ack/tests.rs` · 301 · Pure state-machine tests of the ack tracker: no link, no session.
+- `net/src/anticheat.rs` · 140 · anticheat: the sanitize rule of the dedicated server and its flag log.
 - `net/src/bin/net_bout.rs` · 670 · net-bout: runs the played proofs and posts their evidence.
 - `net/src/bin/net_relay.rs` · 86 · net-relay: the self-hosted relay for bouts across two networks.
-- `net/src/browser.rs` · 39 · browser: the web client side of the dedicated server's two browser legs.
+- `net/src/bin/net_serve.rs` · 457 · net-serve: the dedicated server a browser page (or a native client) plays a duel against.
+- `net/src/browser.rs` · 188 · browser: the web client side of the dedicated server's two browser legs.
 - `net/src/browser/inbox.rs` · 122 · inbox: frames received from the server, waiting for the tick loop.
 - `net/src/browser/stream.rs` · 150 · stream: the WebTransport reliable stream's framing, browser side.
 - `net/src/browser/ws.rs` · 235 · ws: the page's `WebSocket` behind the [`Transport`] trait (wasm32).
@@ -622,35 +748,44 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `net/src/cells.rs` · 491 · cells: tick-budgeted pre-cooked map-cell streaming.
 - `net/src/connect_race.rs` · 367 · connect_race: join a server over WebTransport or WebSocket, whichever
 - `net/src/courier.rs` · 1299 · courier: the real-UDP link between the two machines of a split bout.
-- `net/src/dedicated.rs` · 1352 · dedicated: headless server with LAN discovery, slot reclaim and AI fill.
-- `net/src/delay.rs` · 181 · delay: input-delay helpers driven by frame advantage.
-- `net/src/delta.rs` · 960 · delta: snapshot deltas and remote interpolation.
+- `net/src/dedicated.rs` · 1455 · dedicated: headless server with LAN discovery, slot reclaim and AI fill.
+- `net/src/delay.rs` · 228 · delay: input-delay helpers driven by frame advantage.
+- `net/src/delta.rs` · 971 · delta: snapshot deltas and remote interpolation.
+- `net/src/guard.rs` · 604 · guard: input admission screen of the dedicated server.
+- `net/src/handshake.rs` · 1137 · handshake: the session connect handshake, modeled on the netcode 1.02
 - `net/src/heal.rs` · 894 · heal: disconnect/reconnect plus desync resync through the supervisor.
-- `net/src/interest.rs` · 1767 · interest: Iris-style relevancy for siege replication.
-- `net/src/interp.rs` · 1125 · interp: presentation-time snapshot interpolation for remote fighters.
+- `net/src/interest.rs` · 2453 · interest: Iris-style relevancy for siege replication.
+- `net/src/interp.rs` · 1340 · interp: presentation-time snapshot interpolation for remote fighters.
+- `net/src/lagcomp.rs` · 389 · lagcomp: bounded lag window for remote attacks on the dedicated server.
 - `net/src/link.rs` · 649 · link: seeded fault-injection wire for played bouts.
 - `net/src/lobby.rs` · 1621 · lobby: LAN lobby — beacon browser, ready-up, AI-fill, typed messages.
-- `net/src/netcode.rs` · 863 · netcode: rollback (save/load snapshots, repeat-last predict, resim, hash stream, cap 9). Net never owns transport.
+- `net/src/netcode.rs` · 883 · netcode: rollback (save/load snapshots, repeat-last predict, resim, hash stream, cap 9). Net never owns transport.
 - `net/src/online.rs` · 733 · online: the online played bout, QUIC through the relay.
-- `net/src/played.rs` · 1618 · played: the two-machine played bout over a [`Wire`].
-- `net/src/quic.rs` · 2170 · quic: QUIC transport behind the Transport trait.
-- `net/src/receipt.rs` · 392 · receipt: the played proofs' posted evidence as JSON.
-- `net/src/relay.rs` · 2033 · relay: internet join over invite codes with hole punch plus relay fallback.
-- `net/src/replay.rs` · 1128 · Replays: record input tapes with keyframes, theater playback
-- `net/src/rollback.rs` · 1291 · rollback: P2P rollback tape over the sim tick (2 players, 128 slots).
-- `net/src/scale.rs` · 1105 · scale: 8-16 fighter hardening (bandwidth caps, priority deltas, soak).
-- `net/src/session.rs` · 2509 · session: LAN session over UDP (server-authoritative arena match).
+- `net/src/played.rs` · 1781 · played: the two-machine played bout over a [`Wire`].
+- `net/src/played/admission_tests.rs` · 296 · The server guard and the lag window on the real played-bout path: a
+- `net/src/prediction.rs` · 710 · prediction: input prediction plus checksum desync detection.
+- `net/src/quic.rs` · 2242 · quic: QUIC transport behind the Transport trait.
+- `net/src/receipt.rs` · 398 · receipt: the played proofs' posted evidence as JSON.
+- `net/src/relay.rs` · 2318 · relay: internet join over invite codes with hole punch plus relay fallback.
+- `net/src/replay.rs` · 1498 · Replays: record input tapes with keyframes, theater playback
+- `net/src/rollback.rs` · 2484 · rollback: P2P rollback tape over the sim tick (2 players, 128 slots).
+- `net/src/scale.rs` · 1104 · scale: 8-16 fighter hardening (bandwidth caps, priority deltas, soak).
+- `net/src/session.rs` · 2519 · session: LAN session over UDP (server-authoritative arena match).
+- `net/src/session/spear_tests.rs` · 174 · Spear grapple over the session: the button and the spec flag ride the
 - `net/src/session/spec_tests.rs` · 127 · DSN1: the server and the client build the match from one [`MatchSpec`].
-- `net/src/snapshot.rs` · 1004 · snapshot: save/load plus delayed confirmed history with a timeline sampler.
-- `net/src/split.rs` · 1030 · split: one played bout across two machines over real UDP.
-- `net/src/tick_budget.rs` · 1022 · tick_budget: siege server tick budget.
-- `net/src/wan_soak.rs` · 853 · wan_soak: WAN fault soak over the siege harness.
+- `net/src/snapshot.rs` · 1172 · snapshot: save/load plus delayed confirmed history with a timeline sampler.
+- `net/src/split.rs` · 1038 · split: one played bout across two machines over real UDP.
+- `net/src/tick_budget.rs` · 1119 · tick_budget: siege server tick budget.
+- `net/src/wan_discipline.rs` · 1210 · wan_discipline: datagram discipline for the WAN replication stream.
+- `net/src/wan_soak.rs` · 2255 · wan_soak: WAN fault soak over the siege harness.
+- `net/src/webduel.rs` · 1282 · webduel: the scripted duel a page plays against the native dedicated server.
+- `net/src/webduel/tests.rs` · 693 · The duel over in-memory transports: the host and the client are the same
 - `net/src/websocket.rs` · 37 · websocket: the fallback leg of browser play, over TCP.
 - `net/src/websocket/server.rs` · 517 · server: WebSocket sessions behind the [`Transport`] trait.
-- `net/src/websocket/tests.rs` · 767 · In-process WebSocket proofs: a loopback client plays a scripted exchange
+- `net/src/websocket/tests.rs` · 812 · In-process WebSocket proofs: a loopback client plays a scripted exchange
 - `net/src/websocket/wire.rs` · 108 · wire: the layout of one WebSocket message, shared by both ends.
 - `net/src/webtransport.rs` · 26 · webtransport: browser clients join the dedicated server over WebTransport.
-- `net/src/webtransport/cert.rs` · 634 · cert: the pinned self-signed certificate a browser accepts through
+- `net/src/webtransport/cert.rs` · 658 · cert: the pinned self-signed certificate a browser accepts through
 - `net/src/webtransport/frame.rs` · 97 · frame: the reliable-stream framing both ends of a session share.
 - `net/src/webtransport/server.rs` · 447 · server: WebTransport sessions behind the [`Transport`] trait.
 - `net/src/webtransport/tests.rs` · 575 · In-process WebTransport proofs: a real `wtransport` client pinned to the
@@ -671,17 +806,18 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `net/tests/it/sync_vectors.rs` · 200 · Sync-guard vectors for the netcode history window.
 - `net/tests/it/wan_fault_matrix.rs` · 289 · WAN fault matrix over the rollback session: loss/latency cells converge.
 
-## nn (engine-nn, 3 files, 2133 lines)
+## nn (engine-nn, 3 files, 2136 lines)
 - `nn/src/lib.rs` · 1448 · engine-nn: integer-only neural runtime for `.e2nn` files.
-- `nn/src/qat.rs` · 567 · Offline quantization-aware training for the tiny int8 student.
+- `nn/src/qat.rs` · 570 · Offline quantization-aware training for the tiny int8 student.
 - `nn/src/quant.rs` · 118 · The one quantization edge: `f32` percept lanes to the `i8` net inputs.
 
-## observe (engine-observe, 19 files, 6250 lines)
-- `observe/src/lib.rs` · 479 · `engine-observe`: std-only typed diagnostic events.
+## observe (engine-observe, 20 files, 7059 lines)
+- `observe/src/lib.rs` · 484 · `engine-observe`: std-only typed diagnostic events.
 - `observe/src/event_queue.rs` · 732 · Deterministic diagnostic event queue with phased delivery.
 - `observe/src/fps.rs` · 667 · FPS view typed diagnostic events: pose, hits, frame splits.
 - `observe/src/heal.rs` · 591 · Auto-heal registry (MAPE-K) over [`super`] observe types.
-- `observe/src/rerun_sink.rs` · 298 · Rerun recording of simulation state per tick for desync hunts.
+- `observe/src/mcap.rs` · 781 · mcap: std-only MCAP writer and reader for replay recordings.
+- `observe/src/rerun_sink.rs` · 321 · Rerun recording of simulation state per tick for desync hunts.
 - `observe/src/supervisor.rs` · 1665 · Supervisor over the [`heal`](super::heal) registry: fault catalog,
 - `observe/tests/it/backoff_jitter_vectors.rs` · 132 · Seeded full-jitter backoff vectors killing same-tick retry collisions.
 - `observe/tests/it/bulkhead_vectors.rs` · 213 · Supervisor bulkhead vectors capping heal storms with fast reject.
@@ -697,9 +833,9 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `observe/tests/it/tick_histogram_vectors.rs` · 166 · Tick-length owed-histogram vectors separating stall shapes.
 - `observe/tests/it/w1_pf9_rerun.rs` · 80 · (no //! line)
 
-## perf (engine-perf, 36 files, 13111 lines)
-- `perf/src/lib.rs` · 37 · perf: deterministic budget workloads plus a counting allocator.
-- `perf/src/main.rs` · 1800 · perf: stress harness -> perf.csv. Presentation only, never hashed.
+## perf (engine-perf, 37 files, 13864 lines)
+- `perf/src/lib.rs` · 39 · perf: deterministic budget workloads plus a counting allocator.
+- `perf/src/main.rs` · 1820 · perf: stress harness -> perf.csv. Presentation only, never hashed.
 - `perf/benches/instructions.rs` · 139 · Instruction-count budget for the three hot simulation loops: the arena
 - `perf/benches/off_path.rs` · 106 · Off-path bench for steal P6 (EmbarkStudios/puffin@c81e9bb, MIT).
 - `perf/src/alloc.rs` · 496 · Allocation counting for the budget gate: the shared
@@ -707,15 +843,16 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `perf/src/arena.rs` · 496 · Per-frame bump arena: presized transient scratch for render, anim and audio.
 - `perf/src/baselines.rs` · 1362 · Recorded baselines for the canonical workloads.
 - `perf/src/budget.rs` · 235 · Budget checks over measured workload reports.
-- `perf/src/core_bench.rs` · 282 · Core baseline kernels: tick/hash/RNG math on the 600-tick seed-2040
-- `perf/src/feel.rs` · 538 · Feel quantification: three-domain measurements against the shared
+- `perf/src/core_bench.rs` · 275 · Core baseline kernels: tick/hash/RNG math on the 600-tick seed-2040
+- `perf/src/diagnostics.rs` · 419 · Diagnostics store: named perf series with a bounded history ring, an
+- `perf/src/feel.rs` · 678 · Feel quantification: three-domain measurements against the shared
 - `perf/src/fight_cost.rs` · 213 · fight_cost: frame-cost percentiles behind the FC3 30 fps gate.
 - `perf/src/latency.rs` · 774 · Input latency meter: event tick to first sim effect and first present.
-- `perf/src/profiler.rs` · 1631 · Profiler: puffin scopes over the canonical workloads, GPU timestamp-query
+- `perf/src/profiler.rs` · 1723 · Profiler: puffin scopes over the canonical workloads, GPU timestamp-query
 - `perf/src/smoke.rs` · 147 · Packaged smoke: the quick pass-path check for the frame-time gate.
 - `perf/src/soak.rs` · 278 · Hour soak: the long-run stability check for the frame-time gate.
 - `perf/src/vram.rs` · 193 · Pure integer VRAM budget math (presentation pool only).
-- `perf/src/workloads.rs` · 1462 · Canonical budget workloads: arena tick, physics, AI, destruction, spine.
+- `perf/src/workloads.rs` · 1516 · Canonical budget workloads: arena tick, physics, AI, destruction, spine.
 - `perf/tests/it/alloc.rs` · 71 · Steady-state allocation proofs. Physics steps and AI decisions allocate
 - `perf/tests/it/alloc_compare.rs` · 112 · PF18 alloc-compare pin: `perf --alloc-compare` header plus 8 rows x2 identical.
 - `perf/tests/it/allocator_baseline.rs` · 107 · System-allocator baseline rows: identical hash/alloc gates as the
@@ -724,131 +861,177 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `perf/tests/it/canonical.rs` · 69 · Canonical runs match the recorded baselines: ticks, hash and full-run
 - `perf/tests/it/concurrency.rs` · 82 · Thread-independence proof: 50 concurrent canonical runs of every workload
 - `perf/tests/it/core_bench.rs` · 37 · Determinism gate for the surviving canonical workloads.
-- `perf/tests/it/core_bench_vectors.rs` · 198 · Core bench vectors: the `core_bench` kernels as their callers see them.
-- `perf/tests/it/heap_peak.rs` · 257 · Peak-plus-gate proofs for the heap budget.
+- `perf/tests/it/core_bench_vectors.rs` · 199 · Core bench vectors: the `core_bench` kernels as their callers see them.
+- `perf/tests/it/heap_peak.rs` · 266 · Peak-plus-gate proofs for the heap budget.
 - `perf/tests/it/lib_wiring_vectors.rs` · 318 · Lib wiring vectors: the perf crate root as its callers see it.
 - `perf/tests/it/main.rs` · 26 · One integration-test binary for engine-perf.
-- `perf/tests/it/perf_proof.rs` · 79 · Release-mode timing proof (`--perf`): per-workload p50 against the
+- `perf/tests/it/perf_proof.rs` · 99 · Release-mode timing proof (`--perf`): per-workload p50 against the
 - `perf/tests/it/regression.rs` · 101 · Gate-failure proofs: a seeded hash regression trips `HashMismatch` and a
 - `perf/tests/it/sparkline_vectors.rs` · 192 · Std-only ASCII/Unicode sparkline over BENCH CSV rows.
 - `perf/tests/it/w1_pf5_simd.rs` · 78 · Spatial radius A/B: scalar fallback versus the vector-shaped path.
-- `perf/tests/profiler.rs` · 349 · Profiler proofs: off-by-default with zero overhead, on-records with
+- `perf/tests/profiler.rs` · 352 · Profiler proofs: off-by-default with zero overhead, on-records with
 - `perf/tests/w1_pf9a_paired.rs` · 104 · Paired-rerun harness proof: two headless captures share one hash and the
 
-## physfx (engine-physfx, 13 files, 3616 lines)
-- `physfx/src/lib.rs` · 77 · physfx: the physical layer, a float Rapier world seeded by authority events, never hashed.
-- `physfx/src/caps.rs` · 128 · caps: the one table of per-tier limits.
+## physfx (engine-physfx, 23 files, 5724 lines)
+- `physfx/src/lib.rs` · 95 · physfx: the physical layer, a float Rapier world seeded by authority events, never hashed.
+- `physfx/src/caps.rs` · 143 · caps: the one table of per-tier limits.
 - `physfx/src/check.rs` · 138 · check: every input is validated here, before a spawn touches the world.
-- `physfx/src/error.rs` · 77 · error: typed refusals. A refused call changes nothing.
-- `physfx/src/fx.rs` · 613 · fx: the Rapier world, its spawn order, the caps and the transform read-back.
+- `physfx/src/error.rs` · 83 · error: typed refusals. A refused call changes nothing.
+- `physfx/src/fx.rs` · 642 · fx: the Rapier world, its spawn order, the caps and the transform read-back.
 - `physfx/src/fx/blast.rs` · 185 · blast: explosions that shove bodies and arrows that fly an arc to the authority's hit.
-- `physfx/src/rig.rs` · 55 · rig: a ragdoll's skeleton and bone shapes, validated once.
-- `physfx/src/tests.rs` · 984 · tests: caps, recycling, determinism, refusals, sleeping, interpolation and the budget.
+- `physfx/src/fx/hit.rs` · 241 · hit: a blow on a ragdoll spreads over the bones near it, and the joints stiffen for a moment.
+- `physfx/src/fx/joints.rs` · 88 · joints: the knees and elbows of a ragdoll are hinges.
+- `physfx/src/fx/receipt.rs` · 141 · receipt: what one ragdoll spawn measured, and the contacts it turns off.
+- `physfx/src/fx/tether.rs` · 207 · tether: ropes between two points and the soft pull that carries a ragdoll along the sim's
+- `physfx/src/rig.rs` · 98 · rig: a ragdoll's skeleton and bone shapes, validated once.
+- `physfx/src/tests.rs` · 996 · tests: caps, recycling, determinism, refusals, sleeping, interpolation and the budget.
 - `physfx/src/tests/blast.rs` · 503 · blast: an authority blast shoves bodies in its radius, nobody else; an arrow or a thrown
+- `physfx/src/tests/contacts.rs` · 219 · contacts: bones that are not joined push each other apart, inside one ragdoll and between two
+- `physfx/src/tests/hinge.rs` · 176 · hinge: knees and elbows are hinges. A knee folds far past the old swing cone and never bends
+- `physfx/src/tests/hit.rs` · 207 · hit: a blow spreads over the bones near it and adds exactly its impulse (QR11); the joints
 - `physfx/src/tests/impact.rs` · 233 · impact: an authority projectile hit shoves the bodies around the hit point along its heading
-- `physfx/src/tests/ladder.rs` · 258 · ladder: the tiers are ordered on every knob, each tier holds its caps under a soak and stays
+- `physfx/src/tests/ladder.rs` · 262 · ladder: the tiers are ordered on every knob, each tier holds its caps under a soak and stays
 - `physfx/src/tests/materials.rs` · 188 · materials: the table's rows reach the colliders: bounce, weight and the default spawns.
+- `physfx/src/tests/receipt.rs` · 102 · receipt: what a ragdoll spawn measures (QR4 mass ratios, QR5 overlaps) and the grandparent
+- `physfx/src/tests/tether.rs` · 285 · tether: the rope between two fighters holds its caps, lies straight when taut, sags when
+- `physfx/src/tether.rs` · 315 · tether: a rope between two points, a verlet chain with a spring-damper pull.
 - `physfx/src/types.rs` · 177 · types: the plain data that crosses the boundary. No arena, combat or anim type appears here.
 
-## physics (engine-physics, 29 files, 19905 lines)
-- `physics/src/lib.rs` · 129 · physics: fixed-dt semi-implicit Euler bodies + AABB overlap query.
+## physics (engine-physics, 36 files, 24761 lines)
+- `physics/src/lib.rs` · 150 · physics: fixed-dt semi-implicit Euler bodies + AABB overlap query.
+- `physics/src/articulated.rs` · 690 · articulated: winch, rope and load solved as one constraint graph (NS1).
 - `physics/src/balance.rs` · 2100 · balance: center-of-mass balance core plus stagger, stumble and fall.
-- `physics/src/cloth.rs` · 1586 · cloth: CPU Verlet cloth for fighter capes and arena banners.
+- `physics/src/clinch.rs` · 239 · clinch: ragdolls that share a place part without sinking into each other (NS3).
+- `physics/src/cloth.rs` · 1635 · cloth: CPU Verlet cloth for fighter capes and arena banners.
 - `physics/src/collider.rs` · 599 · collider: static collision shapes and the reader for cooked collider bytes.
 - `physics/src/controller.rs` · 1547 · controller: Rapier-backed character controller.
 - `physics/src/controller2.rs` · 1266 · controller2: character controller v2 — steps, slopes, moving platforms,
-- `physics/src/islands.rs` · 511 · islands: deterministic island topology plus canonical snapshot bytes.
-- `physics/src/kcc.rs` · 898 · kcc: kinematic controller (sweep+slide, slope limit, coyote/buffer, snap). Fixed-dt, std-only.
+- `physics/src/door.rs` · 544 · door: hinged doors with integer angles and states (UW10).
+- `physics/src/islands.rs` · 570 · islands: deterministic island topology plus canonical snapshot bytes.
+- `physics/src/joint_limits.rs` · 406 · joint_limits: per-bone swing and twist limits, friction motors and collision groups
+- `physics/src/kcc.rs` · 928 · kcc: kinematic controller (sweep+slide, slope limit, coyote/buffer, snap). Fixed-dt, std-only.
 - `physics/src/layers.rs` · 182 · layers: the collision layer table as plain integers.
 - `physics/src/limb.rs` · 760 · limb: a severed limb as a body: detach at the cut tick, mass from volume
+- `physics/src/lod.rs` · 1064 · lod: physics LOD for armies. Far soldiers step as one capsule, near ones
 - `physics/src/material.rs` · 415 · material: one table of what things are made of: weight, grip, bounce and drag.
 - `physics/src/overlap.rs` · 45 · overlap: AABB query home. Canon home of the AABB test.
 - `physics/src/pd.rs` · 216 · pd: PD velocity-servo drive law for the powered ragdoll.
 - `physics/src/powered.rs` · 1959 · powered: per-bone powered ragdoll with partial hit masks and get-up.
-- `physics/src/query.rs` · 640 · query: ray casts and swept-sphere casts against cooked static colliders.
-- `physics/src/ragdoll.rs` · 2740 · ragdoll: deterministic active ragdoll with hit reactions.
-- `physics/src/ragdoll_tape.rs` · 668 · ragdoll_tape: frozen-denominator baseline tape, seeded falls plus a clinch.
+- `physics/src/query.rs` · 1031 · query: ray casts and swept-sphere casts against cooked static colliders.
+- `physics/src/ragdoll.rs` · 3095 · ragdoll: deterministic active ragdoll with hit reactions.
+- `physics/src/ragdoll_tape.rs` · 794 · ragdoll_tape: frozen-denominator baseline tape, seeded falls plus a clinch.
 - `physics/src/rapier.rs` · 770 · rapier: Rapier adapter behind the opt-in `rapier` feature.
 - `physics/src/rigid.rs` · 1134 · rigid: fixed-dt semi-implicit Euler bodies + gravity + ground clamp. Same seed + steps = same hash.
 - `physics/src/stagger_memory.rs` · 421 · stagger memory: cumulative pain, servo fatigue and per-bone injury.
+- `physics/src/stance.rs` · 655 · stance: stand, crouch and prone capsules, ceiling-blocked changes, lean checked against walls,
 - `physics/tests/balance_matrix.rs` · 134 · Integration leg: the public shove-response matrix answers the five
 - `physics/tests/it/break_slice_vectors.rs` · 309 · break_slice_vectors: consecutive plane-slice tool shape with exact tri rule.
 - `physics/tests/it/idmap_fxbench.rs` · 226 · (no //! line)
-- `physics/tests/it/main.rs` · 14 · One integration-test binary for engine-physics.
+- `physics/tests/it/main.rs` · 15 · One integration-test binary for engine-physics.
+- `physics/tests/it/oracle.rs` · 226 · Joint and contact conformance against offline oracles (NS4).
 - `physics/tests/it/pd_drive.rs` · 259 · PD drive-law leg: the servo behind the powered ragdoll answers from
 - `physics/tests/it/probe.rs` · 1 · (no //! line)
 - `physics/tests/it/trace_snapshot.rs` · 106 · (no //! line)
 - `physics/tests/ragdoll_tape.rs` · 73 · Integration leg: the public tape API runs a small deterministic
 - `physics/tests/stagger_memory.rs` · 197 · Integration leg: stagger memory beside the balance core (the arena hit
 
-## playtest (engine-playtest, 36 files, 27764 lines)
-- `playtest/src/lib.rs` · 532 · playtest verifiers as content compilers (AI-NATIVE pillar 5).
-- `playtest/src/agent.rs` · 1340 · AI playtest agent: drive headless arena matches, watch metrics
+## playtest (engine-playtest, 59 files, 39668 lines)
+- `playtest/src/lib.rs` · 550 · playtest verifiers as content compilers (AI-NATIVE pillar 5).
+- `playtest/src/agent.rs` · 1327 · AI playtest agent: drive headless arena matches, watch metrics
 - `playtest/src/bench_mirror.rs` · 307 · Public-benchmark mirror report: the 30-task score table over the live HS20
 - `playtest/src/bot_harness.rs` · 316 · Bot harness: hold F, delay D, six moves, batch receipts over fixed ticks.
-- `playtest/src/brief_eval.rs` · 562 · Brief-to-game eval: 20 briefs through the four authoring gates (level,
+- `playtest/src/brief_eval.rs` · 814 · Brief-to-game eval: 20 briefs through the four authoring gates (level,
 - `playtest/src/budgets.rs` · 167 · Draw/triangle/memory budgets as pure functions of scene data.
-- `playtest/src/causal.rs` · 523 · Causal replay: attribute a failing tape to its smallest input cause.
+- `playtest/src/causal.rs` · 524 · Causal replay: attribute a failing tape to its smallest input cause.
 - `playtest/src/charter.rs` · 376 · Charter runner: one question file per bout, PASS/FAIL lines.
 - `playtest/src/divergence.rs` · 276 · CR2: structured divergence capture for replay tapes.
-- `playtest/src/door.rs` · 831 · Eval door driver: one provider-contract call, then an atomic scene apply.
-- `playtest/src/eval.rs` · 2231 · Eval harness: authoring plus play tasks across providers.
+- `playtest/src/door.rs` · 895 · Eval door driver: one provider-contract call, then an atomic scene apply.
+- `playtest/src/eval.rs` · 2243 · Eval harness: authoring plus play tasks across providers.
+- `playtest/src/eval/scorecard.rs` · 487 · AG1 agent scorecard: pass rate and tokens per task for each suite, by
+- `playtest/src/eval/trajectory.rs` · 188 · AD23 trajectory checks: an eval task can require a call order (a read
+- `playtest/src/eval/utility.rs` · 202 · Efficiency-utility column of the EV1 report (AX11).
 - `playtest/src/exploit.rs` · 528 · Offline MCTS exploit sweep beside the balance tournament.
-- `playtest/src/frame_check.rs` · 1276 · Frame-grounded checks: black/white screens, missing meshes, near-plane clipping.
-- `playtest/src/keypoint.rs` · 2157 · Keypoint verifier: gameplay claims as versioned data specs.
-- `playtest/src/living.rs` · 1881 · living: living-world eval — 20 conversation+goal fixtures over mind-shaped memory.
+- `playtest/src/feel_keypoints.rs` · 695 · Feel keypoints (GP7): VK1 extended to the presentation feel.
+- `playtest/src/fight_report.rs` · 527 · fight_report: one schema-pinned JSON report per fight tape (plan eyes E4).
+- `playtest/src/frame_check.rs` · 1454 · Frame-grounded checks: black/white screens, missing meshes, near-plane clipping.
+- `playtest/src/highlights.rs` · 676 · SHOW3 highlight reel: rank the moments of tournament tapes by event
+- `playtest/src/keypoint.rs` · 1488 · Keypoint verifier: gameplay claims as versioned data specs.
+- `playtest/src/keypoint/json.rs` · 372 · (no //! line)
+- `playtest/src/keypoint/spec_parse.rs` · 692 · (no //! line)
+- `playtest/src/keypoint/spine.rs` · 247 · Spine track of the keypoint verifier (ARC8, ARC11).
+- `playtest/src/living.rs` · 1901 · living: living-world eval — 20 conversation+goal fixtures over mind-shaped memory.
+- `playtest/src/look.rs` · 203 · Look harness over the production compose rankings.
+- `playtest/src/look/judge.rs` · 2325 · look.judge core: score a capture set by machine, from pixels.
+- `playtest/src/look/manifest.rs` · 476 · Capture manifest reader for the look judge.
+- `playtest/src/look/metric.rs` · 1622 · Machine eyes: integer image metrics over RGBA8 frames.
+- `playtest/src/look_score.rs` · 169 · Machine score of one capture against its reference, in integers.
+- `playtest/src/machine_eyes.rs` · 192 · Machine eyes: one counted machine score per captured frame.
 - `playtest/src/mirror.rs` · 223 · Public-benchmark mirror: 30 tasks in the shape of three public game-agent
 - `playtest/src/mirror_craft.rs` · 603 · Mirror slice, engine-build shape: ten tasks in the style of a public
-- `playtest/src/mirror_gdb.rs` · 532 · Mirror slice, game-development shape: ten tasks in the style of a public
+- `playtest/src/mirror_gdb.rs` · 533 · Mirror slice, game-development shape: ten tasks in the style of a public
 - `playtest/src/mirror_kit.rs` · 624 · Mirror kit: task, outcome and report types shared by the three
-- `playtest/src/mirror_logic.rs` · 1044 · Mirror slice, game-logic shape: ten tasks in the style of a public
+- `playtest/src/mirror_logic.rs` · 1045 · Mirror slice, game-logic shape: ten tasks in the style of a public
+- `playtest/src/norm_score.rs` · 411 · Oracle-normalized agent score with a deterministic bootstrap interval.
 - `playtest/src/parse.rs` · 529 · Shared parse errors and tokenizer core for the hand-rolled fixture grammars.
 - `playtest/src/probe_sync.rs` · 709 · Peg-transfer affordance gold with a sync re-probe score.
 - `playtest/src/rating.rs` · 413 · Skill-rating scorer over frozen bout records (offline only).
 - `playtest/src/reachability.rs` · 444 · Spawn/gate reachability over plain scene data.
-- `playtest/src/replay.rs` · 322 · Tape replay: verify a resimulation against its recorded hash chain.
+- `playtest/src/rebuild.rs` · 235 · Checksummed sparse rebuilds for the brief-to-game eval (EV16).
+- `playtest/src/replay.rs` · 263 · Tape replay: verify a resimulation against its recorded hash chain.
 - `playtest/src/scenario_shape.rs` · 424 · Declarative scenario fixtures.
 - `playtest/src/seeded_bug.rs` · 848 · A7 seeded-bug proof: one deterministic bug with replay + cause.
-- `playtest/src/spatial_eval.rs` · 2905 · Spatial gold eval: 100 place/query/fix tasks with gold answers.
+- `playtest/src/spatial_eval.rs` · 1686 · Spatial gold eval: 100 place/query/fix tasks with gold answers.
+- `playtest/src/spatial_eval/known_good.rs` · 467 · SPF1 known-good scene gate with negative controls.
+- `playtest/src/spatial_eval/llm.rs` · 846 · SPR4 real-model spatial A/B on cassettes (the missing SP20 number).
+- `playtest/src/spatial_eval/tsv.rs` · 620 · (no //! line)
+- `playtest/src/spatial_eval/world.rs` · 621 · (no //! line)
+- `playtest/src/spatial_frame.rs` · 813 · SPF2 closed-form camera frame fit, SPF11 subject coverage and camera
 - `playtest/src/spatial_shapes.rs` · 282 · Spatial steer shapes for the playtester (E42 leg 2).
 - `playtest/src/tasks.rs` · 126 · Public-benchmark task catalog: the 30 stable task descriptors behind the
-- `playtest/src/tournament.rs` · 2515 · Balance tournament over AI-vs-AI forks (a proof gate measured at
+- `playtest/src/tournament.rs` · 2669 · Balance tournament over AI-vs-AI forks (a proof gate measured at
 - `playtest/src/trace_export.rs` · 322 · Versioned trace export for the eval harness: one line per report row.
 - `playtest/src/trigger.rs` · 616 · Debounced change-triggered bounded cancellable forks.
 - `playtest/src/winrates.rs` · 589 · AI-vs-AI fork win rates over scripted policies.
+- `playtest/tests/crash_tape_replay.rs` · 77 · E13 leg 2: an injected crash tape replays to the same tick every time.
 - `playtest/tests/family_table_wrap_vectors.rs` · 374 · Family table preset-wrap vectors for readable playtest output.
 - `playtest/tests/spatial_steer_compare.rs` · 17 · E42b comparison run: steered-vs-random tapes to the planted divert.
 
-## proof (engine-proof, 26 files, 16597 lines)
-- `proof/src/lib.rs` · 1018 · Bounded input-tape replay of the archetype ECS/physics fixture.
-- `proof/src/a9.rs` · 1174 · Recorded A9 chaos + fuzz run: HL2 suite plus FZ1 harness, one seed.
+## proof (engine-proof, 32 files, 17987 lines)
+- `proof/src/lib.rs` · 1103 · Bounded input-tape replay of the archetype ECS/physics fixture.
+- `proof/src/a9.rs` · 1160 · Recorded A9 chaos + fuzz run: HL2 suite plus FZ1 harness, one seed.
 - `proof/src/arena_matrix.rs` · 326 · Arena tape of the golden matrix (DSN2): one fixed 8-fighter rules-v2 duel
 - `proof/src/bin/arena_line.rs` · 59 · Print this machine's arena tape rows for the golden matrix (DSN2): the
 - `proof/src/bin/matrix_line.rs` · 90 · Print this machine's HS2 matrix rows: the runner label plus the frozen
 - `proof/src/bin/ragdoll_line.rs` · 59 · Print this machine's ragdoll tape rows for the golden matrix (WEB3): the
+- `proof/src/bin/spine_parity_line.rs` · 22 · Print this build's spine parity column (ARC10): the legacy arena step and
 - `proof/src/break_corpus.rs` · 922 · break_corpus: seeded replay corpus for the blade cut resolver.
 - `proof/src/bug.rs` · 1004 · Bug bundles: a crash or failed check saves tape, build and
 - `proof/src/chaos.rs` · 833 · Seeded chaos suite over the auto-heal table in
+- `proof/src/crowd.rs` · 219 · crowd: the 20,000-agent crowd determinism harness.
 - `proof/src/dataset.rs` · 1770 · Tape-to-dataset export: action-conditioned shards from any replay.
 - `proof/src/fb_ship.rs` · 432 · FB3 ship receipt: a template boots headless with zero coaching, and the
 - `proof/src/fb_versions.rs` · 944 · FB2 version receipt: pinned asset, scene, save and tape versions, the stored
 - `proof/src/fuzz.rs` · 801 · Deterministic game fuzzing over the arena match spine.
 - `proof/src/gpu_live.rs` · 976 · GPU liveness truth gate for the ticked render rows.
+- `proof/src/journal.rs` · 289 · Crash-safe append-only tick journal, the streaming sibling of the
+- `proof/src/journal/read.rs` · 192 · Journal reader: whole records kept, a truncated tail dropped, damage fatal.
+- `proof/src/journal/tests.rs` · 375 · Journal tests: layout pins, torn tails, corruption and writer failures.
 - `proof/src/m1.rs` · 240 · MV1 workflow receipt: the M1 harness record, std-only.
 - `proof/src/matrix.rs` · 1017 · Cross-architecture golden matrix for HS2.
 - `proof/src/museum.rs` · 758 · Format museum: stored v1 fixtures still load, migrate and replay.
 - `proof/src/online_soak.rs` · 1117 · Hour-long online soak over the siege harness (ON11).
 - `proof/src/ragdoll_matrix.rs` · 306 · Ragdoll tape of the golden matrix (WEB3): one fixed fall of a 17-bone
 - `proof/src/soak.rs` · 293 · Memory leak onset for soak runs: a least-squares slope with a 95 percent
+- `proof/src/spine_parity.rs` · 170 · Spine parity column of the proof scorecard (ARC10): 20 seeded 600-tick
 - `proof/src/tape.rs` · 238 · Strict bounded little-endian input-tape codec; no native layout or IO.
 - `proof/src/tape_fuzz.rs` · 290 · Tape-decode one-harness fuzz (Bolero `check!` shape, HS23 kernel).
-- `proof/src/trace.rs` · 391 · Retroactive logging: replay a tape with verbose tracing.
+- `proof/src/trace.rs` · 443 · Retroactive logging: replay a tape with verbose tracing.
 - `proof/tests/capture_compare.rs` · 723 · Golden-capture mean-similarity compare for hero shots.
 - `proof/tests/capture_ssim_windows.rs` · 284 · Windowed SSIM scoring for captures as small grayscale frames.
 - `proof/tests/m1_workflow.rs` · 532 · MV1 workflow receipt: one licensed imported scene end to end.
 
-## provider (engine-provider, 30 files, 22231 lines)
-- `provider/src/lib.rs` · 127 · provider: provider-neutral AI service contract plus mock, local and
+## provider (engine-provider, 31 files, 22794 lines)
+- `provider/src/lib.rs` · 134 · provider: provider-neutral AI service contract plus mock, local and
 - `provider/src/agent_loop.rs` · 768 · agent_loop: bounded perceive-plan-act loop over door tools.
 - `provider/src/announce.rs` · 858 · announce: presentation-only announcer and fighter taunts.
 - `provider/src/anthropic.rs` · 670 · anthropic: Anthropic Messages vendor adapter.
@@ -867,6 +1050,7 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `provider/src/policy.rs` · 239 · policy: capability/session/job contracts. Negotiation first: adapters
 - `provider/src/prompt.rs` · 409 · prompt: system prompts as versioned, content-addressed assets with an eval
 - `provider/src/protocol.rs` · 583 · protocol: versioned provider-neutral request/event/result/error types.
+- `provider/src/reader.rs` · 542 · reader: the model-reader adapter behind the door (plan eyes E3).
 - `provider/src/remote.rs` · 330 · remote: configured-host adapter with adapter-local credentials.
 - `provider/src/retry.rs` · 354 · retry: bounded retries and one shared rate-limit gate per provider.
 - `provider/src/router.rs` · 467 · router: pick a model per task class from the eval scorecard.
@@ -874,102 +1058,130 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `provider/src/stream.rs` · 1377 · stream: tick-isolated streaming model output with backpressure.
 - `provider/src/stub.rs` · 419 · stub: loopback HTTP stub servers for adapter tests. Real TCP roundtrips
 - `provider/src/suite.rs` · 756 · suite: shared failure-mode assertions for every adapter. Local and
-- `provider/src/test_env.rs` · 36 · test_env: the one place this crate's tests write process environment
+- `provider/src/test_env.rs` · 50 · test_env: the one place this crate's tests write process environment
 - `provider/src/transport.rs` · 1011 · transport: minimal std-only HTTP/1.1 POST client plus the chat codec the
 - `provider/src/vendor.rs` · 1644 · vendor: shared wire helpers for the HTTP adapters.
 - `provider/tests/matrix.rs` · 2409 · Provider conformance matrix: every backend x nine columns.
 
-## render (engine-render, 113 files, 99039 lines)
-- `render/src/lib.rs` · 440 · render: NullRenderer (headless proof). 16x16 tiles, MAX lights/tile.
-- `render/src/aa_scale.rs` · 3089 · aa_scale: SMAA fallback plus dynamic resolution around RP1 (RP4).
-- `render/src/accel.rs` · 2144 · accel: BLAS per proxy mesh plus per-frame TLAS refit.
-- `render/src/adapter.rs` · 522 · adapter: choose the GPU adapter on purpose (GS6).
+## render (engine-render, 143 files, 107512 lines)
+- `render/src/lib.rs` · 486 · render: NullRenderer (headless proof). 16x16 tiles, MAX lights/tile.
+- `render/src/aa_scale.rs` · 2485 · aa_scale: SMAA fallback plus dynamic resolution around RP1 (RP4).
+- `render/src/aa_scale/gpu.rs` · 632 · (no //! line)
+- `render/src/accel.rs` · 2242 · accel: BLAS per proxy mesh plus per-frame TLAS refit.
+- `render/src/adapter.rs` · 528 · adapter: choose the GPU adapter on purpose (GS6).
+- `render/src/adapter/report.rs` · 317 · report: which adapter drew a frame, and whether that was a fallback.
+- `render/src/adapter/report/tests.rs` · 223 · Tests for the parent module.
 - `render/src/arena_day.rs` · 367 · arena_day: one EV100 arena day light-rig preset as data.
-- `render/src/backend.rs` · 1015 · backend: GPU backend selector plus headless 600-frame bench.
+- `render/src/backend.rs` · 1264 · backend: GPU backend selector plus headless 600-frame bench.
 - `render/src/baked_bake.rs` · 613 · baked_bake: arena bake + validity mask slice of the baked-GI pass.
-- `render/src/baked_gi.rs` · 2306 · baked_gi: arena lightmaps with a validity mask + fighter SH probes (RL5).
-- `render/src/cache.rs` · 1614 · cache: RA5 persisted pipeline cache, async compile, last-good fallback.
+- `render/src/baked_gi.rs` · 2303 · baked_gi: arena lightmaps with a validity mask + fighter SH probes (RL5).
+- `render/src/cache.rs` · 1908 · cache: RA5 persisted pipeline cache, async compile, last-good fallback.
+- `render/src/clip_hold.rs` · 392 · clip_hold: hero motion-hold clip preset as data.
+- `render/src/contact_feet.rs` · 300 · contact_feet: live contact shade under the fighters' feet.
 - `render/src/core.rs` · 167 · core: headless Forward+ (tile assign, light cull, draw build, visible hash). Borrows sim, never owns.
 - `render/src/crowd_impostor.rs` · 116 · crowd_impostor: octahedral far-row select over the staged crowd.
 - `render/src/crowd_inst.rs` · 1323 · crowd_inst: instanced reacting crowd staging (slice 1).
 - `render/src/crowd_seats.rs` · 236 · crowd_seats: spectator seat layout for the 96-seat stands ring.
 - `render/src/debug_draw.rs` · 284 · Debug line sink contract (RL58 slice 1): line groups with a depth bias, a
-- `render/src/decals.rs` · 1873 · decals: deferred blood decals with depth reject + roughness override.
+- `render/src/decals.rs` · 1890 · decals: deferred blood decals with depth reject + roughness override.
 - `render/src/draw.rs` · 1986 · draw: scene draw list with frustum culling and LOD select (RA3).
 - `render/src/draw_id.rs` · 206 · draw_id: SP63 slice 1 CPU contract for the draw-id target (std-only).
-- `render/src/dynres_gov.rs` · 302 · dynres_gov: pure integer dynamic-resolution governor.
-- `render/src/executor.rs` · 1141 · executor: CPU-side frame-graph executor over recorded pass fns.
+- `render/src/dynres_gov.rs` · 405 · dynres_gov: pure integer dynamic-resolution governor.
+- `render/src/executor.rs` · 1161 · executor: CPU-side frame-graph executor over recorded pass fns.
 - `render/src/fluids_gpu.rs` · 481 · fluids_gpu: seeded presentation fluid pool for blood and water droplets.
-- `render/src/fog.rs` · 2728 · fog: height fog plus contact shadows (Frostbite/Decima school, reimplemented).
+- `render/src/fog.rs` · 2738 · fog: height fog plus contact shadows (Frostbite/Decima school, reimplemented).
 - `render/src/frame.rs` · 383 · frame: reused draw list plus uniform and draw encode over one arena.
 - `render/src/frame_alloc.rs` · 305 · frame_alloc: one reusable byte buffer as a per-frame bump arena.
 - `render/src/gi.rs` · 634 · gi: baked GI (hemisphere lightmap + SH probes). Bake offline, runtime is lookup-only.
 - `render/src/gi_probe.rs` · 439 · gi_probe: dynamic GI probe stub over the arena slice (RL-RT slice 1).
-- `render/src/gpu.rs` · 445 · gpu: winit + wgpu sprite lane behind `window` feature. Headless builds skip it.
-- `render/src/gpu_cull.rs` · 626 · gpu_cull: GS18 slice 1 device runner for the frustum cull.
+- `render/src/gpu.rs` · 496 · gpu: winit + wgpu sprite lane behind `window` feature. Headless builds skip it.
+- `render/src/gpu_cull.rs` · 623 · gpu_cull: GS18 slice 1 device runner for the frustum cull.
 - `render/src/graph.rs` · 2413 · graph: render-graph as data. Null order == wgpu order, hashed.
-- `render/src/gtao.rs` · 3482 · gtao: half-res GTAO ambient occlusion plus the shared look bind shape.
+- `render/src/gtao.rs` · 3486 · gtao: half-res GTAO ambient occlusion plus the shared look bind shape.
 - `render/src/heal.rs` · 1090 · heal (AH2): surface Outdated/Lost plus device-loss recovery through the
-- `render/src/ibl.rs` · 4372 · ibl: GPU image-based lighting baked from the Poly Haven HDRI (RL2).
+- `render/src/ibl.rs` · 4381 · ibl: GPU image-based lighting baked from the Poly Haven HDRI (RL2).
+- `render/src/ibl_arena_env.rs` · 214 · ibl_arena_env: the arena's own day sky as the live image-based light.
 - `render/src/lod_fade.rs` · 216 · lod_fade: LOD dither cross-fade, no pop, no alpha sort.
 - `render/src/manifest.rs` · 532 · manifest: PF2 capture manifest for Q1 reference captures.
-- `render/src/material_layer.rs` · 1139 · material_layer: cloth, sand and wet-blood layers over the R1 PBR core.
-- `render/src/material_pipeline.rs` · 357 · material_pipeline: render-side bins from draws to compiled materials.
+- `render/src/material_layer.rs` · 1146 · material_layer: cloth, sand and wet-blood layers over the R1 PBR core.
+- `render/src/material_pipeline.rs` · 962 · material_pipeline: render-side bins from draws to compiled materials.
+- `render/src/material_pipeline/gpu.rs` · 401 · gpu: one wgpu render pipeline per compiled material structure (NS31c2).
 - `render/src/meshlet.rs` · 158 · meshlet: virtual-geometry cluster-cut sketch, ideas only.
 - `render/src/overlay.rs` · 701 · Overlay quad ring (EG14 slice 1): CPU staging of HUD quads.
-- `render/src/particle_draw_gpu.rs` · 281 · particle_draw_gpu: staged draw bytes and device builders for the flipbook particle draw.
+- `render/src/particle_draw_gpu.rs` · 282 · particle_draw_gpu: staged draw bytes and device builders for the flipbook particle draw.
 - `render/src/particles.rs` · 547 · particles: seeded CPU mirror of GPU FX at 60Hz. Fixed emitter order, hashed.
-- `render/src/particles_gpu.rs` · 2524 · particles_gpu: fixed seeded pool for dust, torch flame and sparks (RP2).
-- `render/src/pass_truth.rs` · 1507 · EG8 pass-truth gate (GX6 successor): a look pass is live only if pixels change.
-- `render/src/pass_truth/harness.rs` · 695 · Device leg of the EG8 live-frame arm: render a draw list through the
+- `render/src/particles_gpu.rs` · 2631 · particles_gpu: fixed seeded pool for the fight look kinds dust, sparks and
+- `render/src/pass_truth.rs` · 1512 · EG8 pass-truth gate (GX6 successor): a look pass is live only if pixels change.
+- `render/src/pass_truth/frame_tolerance.rs` · 207 · frame_tolerance: when does a frame match a golden.
+- `render/src/pass_truth/frame_tolerance/tests.rs` · 280 · Tests for the parent module.
+- `render/src/pass_truth/harness.rs` · 697 · Device leg of the EG8 live-frame arm: render a draw list through the
 - `render/src/pass_truth/live_gate.rs` · 408 · EG8 live-frame arm: gate the frames the window itself draws.
 - `render/src/pass_truth/reads.rs` · 170 · EG8 window-read arm: gate caller-owned on/off captures into one row per look
-- `render/src/post.rs` · 5815 · post: engine-owned TAA/TAAU plus the GPU post chain (RP1).
+- `render/src/pipeline_warmup.rs` · 264 · pipeline_warmup: count every GPU pipeline the presenter builds and say loudly when one is
+- `render/src/post.rs` · 2351 · post: engine-owned TAA/TAAU plus the GPU post chain (RP1).
+- `render/src/post/auto_exposure.rs` · 521 · (no //! line)
+- `render/src/post/chain.rs` · 946 · (no //! line)
+- `render/src/post/gpu.rs` · 893 · (no //! line)
+- `render/src/post/graph.rs` · 274 · (no //! line)
+- `render/src/post/taa.rs` · 337 · (no //! line)
+- `render/src/post/upscale.rs` · 559 · (no //! line)
 - `render/src/post_jitter_motion.rs` · 266 · post jitter and motion leaf: Halton-2/3 per-frame projection jitter plus
-- `render/src/present.rs` · 764 · present: windowed presenter over a draw list (RA1).
+- `render/src/present.rs` · 828 · present: windowed presenter over a draw list (RA1).
 - `render/src/present/aa.rs` · 228 · (no //! line)
-- `render/src/present/cache.rs` · 334 · (no //! line)
+- `render/src/present/cache.rs` · 351 · (no //! line)
 - `render/src/present/fog_fwd.rs` · 366 · fog_fwd: unified height fog evaluated per fragment in the forward shader.
-- `render/src/present/gpu_present.rs` · 171 · gpu_present: windowed presenter internals (RA1), behind `window`.
+- `render/src/present/gpu_present.rs` · 158 · gpu_present: windowed presenter internals (RA1), behind `window`.
 - `render/src/present/gpu_present/bind_memo.rs` · 238 · bind_memo: the per-frame draw-to-bind lookup.
+- `render/src/present/gpu_present/capture.rs` · 593 · capture: the presented image copied into a buffer and read back without waiting.
+- `render/src/present/gpu_present/contact_live.rs` · 156 · contact_live: the live contact feet reaching the forward shader.
+- `render/src/present/gpu_present/device_init.rs` · 131 · device_init: building a presenter on a device the caller opened, and the few accessors a
 - `render/src/present/gpu_present/fog_tranche.rs` · 264 · fog_tranche: per-frame fog plus GTAO passes and the neutral reset, on `Presenter`.
 - `render/src/present/gpu_present/forward_bind.rs` · 723 · forward_bind: EG12 slice b staged torch uniform array.
-- `render/src/present/gpu_present/frame.rs` · 884 · frame: presented-frame types plus look-error mappers (window build).
+- `render/src/present/gpu_present/frame.rs` · 892 · frame: presented-frame types plus look-error mappers (window build).
 - `render/src/present/gpu_present/frame_id_tests.rs` · 53 · frame_id_tests: id-target readback for frame tests (window build).
 - `render/src/present/gpu_present/gate.rs` · 317 · gate: the pass-truth gate's seams on the window's live frame.
-- `render/src/present/gpu_present/gtao_live.rs` · 672 · gtao_live: GTAO on the forward-stored depth, on the device, in the live frame (LF3).
-- `render/src/present/gpu_present/live.rs` · 3011 · live: the window-path frames (live, opt-in probe, offscreen twin sink).
+- `render/src/present/gpu_present/gtao_live.rs` · 673 · gtao_live: GTAO on the forward-stored depth, on the device, in the live frame (LF3).
+- `render/src/present/gpu_present/live.rs` · 3055 · live: the window-path frames (live, opt-in probe, offscreen twin sink).
 - `render/src/present/gpu_present/msaa.rs` · 482 · msaa: 4x MSAA on/off switch state, the edge-blend helper (EG13 slice 1)
-- `render/src/present/gpu_present/presenter.rs` · 2970 · presenter: `Presenter` assembly, lifecycle and cache accessors.
+- `render/src/present/gpu_present/presenter.rs` · 3309 · presenter: `Presenter` assembly, lifecycle and cache accessors.
+- `render/src/present/gpu_present/quality_apply.rs` · 138 · quality_apply: a quality tier's knobs reaching the live frame (WEB8 gap).
 - `render/src/present/gpu_present/resolve.rs` · 264 · resolve: 4x MSAA box-resolve math plus the multisample plan (EG13 slice 2).
-- `render/src/present/gpu_present/submit.rs` · 2837 · submit: frame encode/submit plus free GPU helpers (window build).
-- `render/src/present/gpu_present/sun_shadow.rs` · 986 · sun_shadow: single arena sun depth map from live draws.
-- `render/src/present/gpu_present/timing.rs` · 332 · timing: GPU pass timestamps resolved late and read without waiting.
-- `render/src/present/look.rs` · 397 · (no //! line)
+- `render/src/present/gpu_present/scope_ledger.rs` · 173 · scope_ledger: validation-scope answers that arrive after the frame that asked.
+- `render/src/present/gpu_present/submit.rs` · 3052 · submit: frame encode/submit plus free GPU helpers (window build).
+- `render/src/present/gpu_present/sun_shadow.rs` · 1005 · sun_shadow: single arena sun depth map from live draws.
+- `render/src/present/gpu_present/timing.rs` · 370 · timing: GPU pass timestamps resolved late and read without waiting.
+- `render/src/present/gpu_present/warmup.rs` · 154 · warmup: build every pipeline a frame can draw with before the first frame (WEB13).
+- `render/src/present/look.rs` · 416 · (no //! line)
 - `render/src/present/surface.rs` · 296 · (no //! line)
-- `render/src/present/tests_gpu.rs` · 1900 · tests_gpu: windowed presenter tests plus submit audits.
-- `render/src/present/tests_linear.rs` · 807 · tests_linear: the linear HDR frame and the one forward shader file.
-- `render/src/present/tests_unit.rs` · 1247 · tests_unit: headless presenter tests (no `window` needed).
+- `render/src/present/tests_gpu.rs` · 1987 · tests_gpu: windowed presenter tests plus submit audits.
+- `render/src/present/tests_linear.rs` · 868 · tests_linear: the linear HDR frame and the one forward shader file.
+- `render/src/present/tests_unit.rs` · 1269 · tests_unit: headless presenter tests (no `window` needed).
 - `render/src/present/wait_stats.rs` · 367 · wait_stats: blocking-wait and GPU-object-creation tally per frame kind
-- `render/src/presenter_pick.rs` · 157 · presenter_pick: wgpu glue over the `adapter` choice (GS6).
-- `render/src/quality.rs` · 320 · quality: render quality tiers as typed data (GS10 slice 1).
+- `render/src/presenter_pick.rs` · 231 · presenter_pick: wgpu glue over the `adapter` choice (GS6).
+- `render/src/procedural_arena.rs` · 761 · procedural_arena: a lit arena ring with eight skinned fighters, built from code alone (WEB5).
+- `render/src/quality.rs` · 1104 · quality: render quality tiers as typed data (GS10 slice 1).
 - `render/src/restir_di.rs` · 163 · restir_di: DI reservoir oracle plus denoise cost.
 - `render/src/rt_shadows.rs` · 528 · rt_shadows: ray-traced sun shadows over the arena sand (RL-RT slice 1).
+- `render/src/shader_gate.rs` · 204 · CPU naga gate over the shipped WGSL (CQ23): every file under `src/shaders`
 - `render/src/shadow_cascade.rs` · 1071 · shadow_cascade: cascade-split selection plus per-cascade shadow-map
-- `render/src/shadow_cluster.rs` · 2544 · shadow_cluster: cascaded sun shadows plus clustered torch lights.
+- `render/src/shadow_cluster.rs` · 2536 · shadow_cluster: cascaded sun shadows plus clustered torch lights.
 - `render/src/shadow_cluster/torch_cluster.rs` · 899 · torch_cluster: clustered torch light assignment over screen tiles.
 - `render/src/shadow_post.rs` · 290 · shadow_post: CSM params + ACES tonemap + Sunset/Noir presets. Data-first, std-only.
-- `render/src/sky.rs` · 2359 · sky: physical sky bake (Hillaire 2020 school, reimplemented) + EV100 exposure.
-- `render/src/test_gpu.rs` · 229 · Test GPU gate: a GPU test that finds no adapter says so, and
+- `render/src/sky.rs` · 2367 · sky: physical sky bake (Hillaire 2020 school, reimplemented) + EV100 exposure.
+- `render/src/stump.rs` · 324 · stump: the cap mesh that closes a severed limb on the remaining body (RZ3).
+- `render/src/temporal.rs` · 387 · temporal: named history textures that live across frames, with a
+- `render/src/test_gpu.rs` · 231 · Test GPU gate: a GPU test that finds no adapter says so, and
 - `render/src/text.rs` · 104 · Bitmap font atlas for HUD text quads.
 - `render/src/tier.rs` · 556 · tier: RT0 startup lighting-tier probe plus RA8 manifest stamp.
+- `render/src/tier_rules.rs` · 312 · tier_rules: a GPU's facts to a quality tier through a first-match rule table (GS11).
 - `render/src/trail.rs` · 342 · Sword ribbon ring (RL53 slice 1): the CPU ring the sim's integer weapon
-- `render/src/twin_arena.rs` · 898 · twin_arena: arena kit draw bind for the window twin.
-- `render/src/twin_fighters.rs` · 361 · twin_fighters: fighter draw bind for the window twin (RL26).
-- `render/src/twin_shadow.rs` · 2759 · twin_shadow: twin sun-shadow bind for the window twin.
+- `render/src/twin_arena.rs` · 904 · twin_arena: arena kit draw bind for the window twin.
+- `render/src/twin_fighters.rs` · 363 · twin_fighters: fighter draw bind for the window twin (RL26).
+- `render/src/twin_shadow.rs` · 700 · twin_shadow: twin sun-shadow bind for the window twin.
+- `render/src/uploads.rs` · 500 · uploads (RA6): generational staging-belt model of the GPU upload discipline.
 - `render/src/upscale_easu.rs` · 164 · upscale_easu: pinned 720p to 1080p spatial upscale (FC3 perf path).
-- `render/src/v1.rs` · 1965 · v1: V1 forward-PBR receipt — mesh upload, depth-tested raster, glam camera,
-- `render/src/v1_gpu.rs` · 636 · v1_gpu: wgpu offscreen V1 forward-PBR behind the `window` feature.
+- `render/src/v1.rs` · 1997 · v1: V1 forward-PBR receipt — mesh upload, depth-tested raster, glam camera,
+- `render/src/v1_gpu.rs` · 635 · v1_gpu: wgpu offscreen V1 forward-PBR behind the `window` feature.
 - `render/src/v1_ibl_shadow.rs` · 784 · v1 IBL + shadow map (R2): Poly Haven HDRI environment sampling with a
 - `render/src/v1_lighting.rs` · 1341 · v1 V2 lighting (R4): cascaded shadows, baked probe GI, bloom factors and
 - `render/src/v1_skin.rs` · 1740 · v1 GPU skinning (R3): CPU-validated joint weights plus AN1-layout joint
@@ -985,16 +1197,18 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `render/tests/it/core_hash.rs` · 140 · (no //! line)
 - `render/tests/it/gi_bake.rs` · 159 · gi_bake: rebake-identical + PALETTE match + lookup-only runtime gates.
 - `render/tests/it/lod.rs` · 131 · lod: LOD triangle-count steps (count drops, look kept).
-- `render/tests/it/main.rs` · 22 · One integration-test binary for engine-render.
+- `render/tests/it/main.rs` · 23 · One integration-test binary for engine-render.
 - `render/tests/it/material.rs` · 53 · material: RL6 layered-PBR bind-bytes determinism over the public API.
 - `render/tests/it/meshlet_cluster_vectors.rs` · 283 · meshlet_cluster_vectors: cone cluster-cull score over a meshlet fixture.
 - `render/tests/it/particles_seed.rs` · 65 · particles_seed: same seed x2 -> same stream.
 - `render/tests/it/post_aa_parity.rs` · 276 · post_aa_parity: jitter plus TAA resolve plus CAS parity vectors.
+- `render/tests/it/post_fsr1_parity.rs` · 121 · post_fsr1_parity: pin the FSR1-shape EASU constants.
 - `render/tests/it/shadow_aces.rs` · 137 · shadow_aces: CSM-stable + ACES shots, deterministic.
 - `render/tests/it/shadow_post.rs` · 135 · shadow_post as its callers see it: desat/luma for the look path,
 - `render/tests/it/torch_cluster_vectors.rs` · 397 · torch_cluster_vectors: the clustered torch assignment as its callers see it.
+- `render/tests/material_swatch.rs` · 437 · material_swatch: six shipped materials as a lit sphere, gated against the
 
-## rules (engine-rules, 14 files, 5433 lines)
+## rules (engine-rules, 14 files, 5524 lines)
 - `rules/src/lib.rs` · 242 · rules: game rules an AI writes as text, run in a sandbox, replay-exact (owner decision 2026-10-04).
 - `rules/src/arena.rs` · 309 · The arena adapter: a rules script drives chosen fighter slots of the real arena match.
 - `rules/src/error.rs` · 144 · Typed refusals: every way a rule script can be turned down or fail, with a bounded text.
@@ -1007,7 +1221,7 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `rules/src/tape.rs` · 487 · The rules tape: inputs, the script hash(es) the match ran under, and checkpoints.
 - `rules/src/tests.rs` · 770 · Rules bars: the shield bash, the refusals, determinism, old tapes, the budget.
 - `rules/tests/arena_budget.rs` · 122 · Quiet-box p99 for the arena adapter: time `RulesController::control` per tick.
-- `rules/tests/arena_drive.rs` · 271 · A rules script drives real arena fighters through the controller hook.
+- `rules/tests/arena_drive.rs` · 362 · A rules script drives real arena fighters through the controller hook.
 - `rules/tests/budget.rs` · 105 · Rules time bars. Wall-clock measurement is test-only (the tick never reads a clock), so this
 
 ## save (engine-save, 4 files, 1616 lines)
@@ -1016,45 +1230,64 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `save/src/persist.rs` · 206 · persist: versioned save payload for spine bytes.
 - `save/src/rollback.rs` · 312 · rollback: bounded spine-byte checkpoints for net resimulation.
 
-## scene (engine-scene, 11 files, 6268 lines)
+## scene (engine-scene, 11 files, 6394 lines)
 - `scene/src/lib.rs` · 17 · scene: persistent identity and content versioning for authored objects.
 - `scene/src/codec.rs` · 535 · Versioned scene codec: [`Hierarchy`] to JSON text and back.
 - `scene/src/component.rs` · 1057 · Typed, versioned scene components beyond `label`: mesh, collider,
 - `scene/src/ids.rs` · 183 · Stable scene identities and content digests.
 - `scene/src/pin.rs` · 224 · Run pins for pre-start gates: every `play.step`/`play.run` pins the
-- `scene/src/prefab.rs` · 1228 · Prefabs: authored hierarchy kits with versioned components.
+- `scene/src/prefab.rs` · 1324 · Prefabs: authored hierarchy kits with versioned components.
 - `scene/src/provenance.rs` · 574 · provenance: AI-made content records. Source (human, script, model),
-- `scene/src/schema.rs` · 651 · Versioned component schemas plus per-version migrations.
+- `scene/src/schema.rs` · 681 · Versioned component schemas plus per-version migrations.
 - `scene/src/transform.rs` · 838 · 3D transform hierarchy: parent links plus local and world poses.
 - `scene/src/wiring_tests.rs` · 312 · Crate-root wiring vectors: identity survives the save roundtrip, the
 - `scene/tests/schema_gate_vectors.rs` · 649 · Scene-component schema gate vectors: 40 JSON cases gate valid/invalid.
 
-## spatial (engine-spatial, 25 files, 26047 lines)
-- `spatial/src/lib.rs` · 392 · spatial: deterministic scene reports. Same actors, any order -> same hash. Owns no sim state.
+## spatial (engine-spatial, 44 files, 35845 lines)
+- `spatial/src/lib.rs` · 424 · spatial: deterministic scene reports. Same actors, any order -> same hash. Owns no sim state.
 - `spatial/src/afford.rs` · 2019 · Affordance tags from geometry plus authored schema tags, gated by the
-- `spatial/src/brief.rs` · 1778 · Bounded, token-budgeted scene brief: stable IDs, names, groups, relations
-- `spatial/src/checks.rs` · 611 · Table-driven checks. Frozen order; thresholds in integer cm.
+- `spatial/src/brief.rs` · 1890 · Bounded, token-budgeted scene brief: stable IDs, names, groups, relations
+- `spatial/src/checks.rs` · 1088 · Table-driven checks. Frozen order; thresholds in integer cm.
 - `spatial/src/compose.rs` · 1431 · compose: advisory hero-shot composition checks.
 - `spatial/src/diff.rs` · 397 · Semantic diff: describe a command batch as relation changes.
+- `spatial/src/embed.rs` · 460 · Tiny offline embedding model for scene queries (spike, 2026-10-19).
 - `spatial/src/exposure.rs` · 533 · exposure: continuous cover-exposure scalar per walkable tile.
+- `spatial/src/extent.rs` · 254 · SPX8: a stray-robust scene extent.
+- `spatial/src/fold.rs` · 372 · SPF10: brief hygiene. Fold look-alikes into one counted row, absorb
 - `spatial/src/fps_visibility.rs` · 339 · fps_visibility: per-viewer FPS sight sets plus interest digests.
+- `spatial/src/frame.rs` · 438 · SPF2 closed-form camera frame fit in integer cm.
 - `spatial/src/fuzz.rs` · 701 · Deterministic fuzz harness over the relation-graph ops: seeded op streams
-- `spatial/src/index.rs` · 372 · Integer-cm XZ index. Sweep-and-prune broadphase, frozen pair order.
-- `spatial/src/index3.rs` · 3348 · index3: integer-cm 3D index over scene boxes.
+- `spatial/src/index.rs` · 400 · Integer-cm XZ index. Sweep-and-prune broadphase, frozen pair order.
+- `spatial/src/index3.rs` · 2418 · index3: integer-cm 3D index over scene boxes.
+- `spatial/src/index3/rstar.rs` · 934 · (no //! line)
+- `spatial/src/intmath.rs` · 79 · Integer helpers shared by the spatial verbs: floor square root and a
 - `spatial/src/isovist.rs` · 942 · isovist: integer-cm visibility polygon plus closed-ring area.
 - `spatial/src/kdtree.rs` · 280 · Integer-cm 3D k-d tree: median-split build plus k-nearest and radius queries.
+- `spatial/src/measure.rs` · 542 · SPF4 + SPX11: surface gaps, the push that opens one, and one pairwise
 - `spatial/src/navcheck.rs` · 393 · navcheck: nav checks over a pure-data bake view. Integer math only, no nav import.
-- `spatial/src/place.rs` · 2197 · Intent placement: a model states relations, a deterministic solver
+- `spatial/src/pair.rs` · 148 · SPR2: the numbers behind a directional answer.
+- `spatial/src/place.rs` · 2594 · Intent placement: a model states relations, a deterministic solver
+- `spatial/src/place/blocker.rs` · 915 · SPR6: say why a placement failed.
+- `spatial/src/place/dir.rs` · 375 · SPF3: facing-relative placement wants (`in_front_of`, `behind`, `left_of`,
+- `spatial/src/place/outside.rs` · 370 · SPX10: the `outside` want, preferred pose first, and an honest failure reason.
 - `spatial/src/probe.rs` · 490 · Peg-transfer probe over coarse reach with a sync re-probe step.
-- `spatial/src/relation.rs` · 3164 · Scene relation graph: Supports, OnTopOf, Inside, NextTo, Facing in
-- `spatial/src/repair.rs` · 1421 · Revision-bound repair descriptions: proposals, never silent moves.
+- `spatial/src/relation.rs` · 3250 · Scene relation graph: Supports, OnTopOf, Inside, NextTo, Facing in
+- `spatial/src/repair.rs` · 1623 · Revision-bound repair descriptions: proposals, never silent moves.
+- `spatial/src/rooms.rs` · 594 · SPR9: rooms as flood-filled regions of the wall boxes, with their exits.
 - `spatial/src/rules.rs` · 1403 · Rule-derived affordances over the relation and sight vocabularies.
-- `spatial/src/sample.rs` · 769 · Free-space sampler: Poisson-disc placements with capsule clearance.
+- `spatial/src/sample.rs` · 759 · Free-space sampler: Poisson-disc placements with capsule clearance.
 - `spatial/src/scale.rs` · 183 · scale: whole-scene unit-mismatch detector.
-- `spatial/src/sight.rs` · 1198 · sight: line of sight, camera visibility, capsule cover, nav reach.
+- `spatial/src/sees.rs` · 318 · SPR7: pair sight with the occluder.
+- `spatial/src/sense_text.rs` · 1149 · sense: CPU sight verbs that answer in plain text (SP69).
+- `spatial/src/sight.rs` · 1319 · sight: line of sight, camera visibility, capsule cover, nav reach.
+- `spatial/src/slide.rs` · 451 · SPF6 + SPX5: how far can this box slide, and what is the ground under a point.
 - `spatial/src/spatial_eval.rs` · 337 · Repair-loop eval: ten seeded scenes through the engine repair loop.
-- `spatial/src/staged.rs` · 970 · Scene-to-actor adapter plus staged before/after gate.
+- `spatial/src/staged.rs` · 1282 · Scene-to-actor adapter plus staged before/after gate.
+- `spatial/src/support.rs` · 430 · SPX2: seated joints and the support chain (opt-in checks `seatedJoint`,
 - `spatial/src/tag_lift.rs` · 379 · Offline open-vocabulary label lift: a labeled capture row becomes candidate
+- `spatial/src/triage.rs` · 448 · SPF8: triage findings by component role, z-fight ranking, unplayable first.
+- `spatial/src/verdict.rs` · 480 · SPF9: verdict allow-list and the family learner.
+- `spatial/src/why_hidden.rs` · 214 · SPX6: why is this thing not on screen. The first failing reason in a fixed
 
 ## ui (engine-ui, 10 files, 10026 lines)
 - `ui/src/lib.rs` · 2159 · ui: retained HUD data lane. HUD is data; renderer draws from snapshots.
@@ -1068,28 +1301,37 @@ _38 crates, 1017 Rust files. One line per file: `crate/path` · lines · the fil
 - `ui/src/tutorial.rs` · 746 · tutorial: guided first fight for a fresh profile.
 - `ui/tests/ime_commit.rs` · 25 · IME gate: commits insert at the cursor only when allowed, controls dropped.
 
-## web (engine-web, 11 files, 3708 lines)
-- `web/src/lib.rs` · 72 · web: the browser shell, a WebGPU device, a cleared canvas and one JSON line of facts (WEB4).
-- `web/src/anim.rs` · 322 · The visible parts of a frame, as pure functions of time so they run and test without a GPU:
-- `web/src/arena_view.rs` · 262 · What the arena page shows and measures, as pure functions so they test without a GPU: the
+## web (engine-web, 18 files, 8235 lines)
+- `web/src/lib.rs` · 86 · web: the browser shell, a WebGPU device, a cleared canvas and one JSON line of facts (WEB4).
+- `web/src/anim.rs` · 529 · The visible parts of a frame, as pure functions of time so they run and test without a GPU:
+- `web/src/arena.rs` · 921 · The arena frame in the browser (WEB5): the render crate's own presenter, driven from
+- `web/src/arena_view.rs` · 430 · What the arena page shows and measures, as pure functions so they test without a GPU: the
 - `web/src/audio.rs` · 425 · Audio on the web (WEB7): when the WebAudio context may start, what the page says about it,
-- `web/src/browser.rs` · 343 · Browser glue for input and audio (WEB7). Compiled for `wasm32` only. The decisions live in
+- `web/src/bin/input_tape.rs` · 40 · `input_tape <script>`: replay an input script on the PC and print its tape (WEB7).
+- `web/src/bin/net_join.rs` · 159 · `net_join --server HOST:PORT [--ticks N] [--token N] [--deadline-s N] [--quiet]`: a native
+- `web/src/browser.rs` · 410 · Browser glue for input and audio (WEB7). Compiled for `wasm32` only. The decisions live in
 - `web/src/golden.rs` · 268 · The engine, not only the GPU: the golden tape and the break corpus, run inside the page.
-- `web/src/input.rs` · 830 · Browser input mapped onto `engine-input` (WEB7): keyboard, mouse with pointer lock, and the
-- `web/src/limits.rs` · 217 · What the shell asks the browser's GPU for, and how a device's answer is printed.
-- `web/src/recovery.rs` · 82 · How often the shell starts over after a lost device before it gives up.
-- `web/src/report.rs` · 354 · The one JSON line the page prints to itself and to the console.
-- `web/src/shell.rs` · 533 · Browser glue: the page's DOM, the WebGPU device through wgpu, and the animation loop.
+- `web/src/input.rs` · 901 · Browser input mapped onto `engine-input` (WEB7): keyboard, mouse with pointer lock, and the
+- `web/src/input_tape.rs` · 228 · The input tape of a script (WEB7): the same device events run through [`InputState`] in the
+- `web/src/limits.rs` · 269 · What the shell asks the browser's GPU for, and how a device's answer is printed.
+- `web/src/netplay.rs` · 309 · netplay (wasm32): the page plays a duel against a native dedicated server.
+- `web/src/netquery.rs` · 431 · netquery: where the page's address sends the net duel (WEB9, WEB12).
+- `web/src/recovery.rs` · 308 · How often the shell starts over after a lost device before it gives up.
+- `web/src/report.rs` · 450 · The one JSON line the page prints to itself and to the console.
+- `web/src/shell.rs` · 618 · Browser glue: the page's DOM, the WebGPU device through wgpu, and the animation loop.
+- `web/src/tier_view.rs` · 1453 · What the arena page prints about its quality tier and its frame cost, as pure functions so
 
 ## workspace-hack (engine-workspace-hack, 1 files, 2 lines)
 - `workspace-hack/src/lib.rs` · 2 · Workspace hack: union of dependency features (cargo-hakari pattern).
 
-## world (engine-world, 8 files, 3607 lines)
-- `world/src/lib.rs` · 129 · world: deterministic bake. Seed N + size M -> versioned bytes, std-only.
+## world (engine-world, 10 files, 4802 lines)
+- `world/src/lib.rs` · 134 · world: deterministic bake. Seed N + size M -> versioned bytes, std-only.
 - `world/src/cells.rs` · 1524 · cells: async cell load/unload through stream budgets, per-cell nav+physics, seamless edges.
 - `world/src/ground/bake.rs` · 420 · ground bake: ordered seeded courtyard passes, bake-time only.
 - `world/src/ground/mod.rs` · 9 · ground: staged courtyard bake beside the frozen floor.
+- `world/src/roster.rs` · 617 · roster: seeded spawn rosters over tagged spawn points (UW19).
 - `world/src/scatter.rs` · 245 · scatter: seeded Poisson-disk points for bake-time scatter.
 - `world/src/terrain.rs` · 382 · terrain: heightmap + hole bitmask + splat weights, seeded. Layout: MAGIC(4) TVER(1) seed(8LE) size(2LE) + heights + holebits + splat.
+- `world/src/wfc.rs` · 573 · wfc: wave function collapse tile bake — kinds plus an adjacency table.
 - `world/tests/cell_streaming.rs` · 815 · Acceptance: 9-cell walk with zero hitches, 30-minute memory loop,
 - `world/tests/terrain_bake.rs` · 83 · terrain_bake: bake SHA x2, layout/splat/holes, navConnect.

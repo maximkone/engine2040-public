@@ -24,6 +24,11 @@ pub mod delta;
 /// Input admission screen of the dedicated server: per-slot refusal
 /// receipts, sanitized admission, lag receipts of attack presses.
 pub mod guard;
+/// The session connect handshake, modeled on the netcode.io 1.02 shape: a
+/// sealed connect token, a challenge and a response, both ends ending on the
+/// same session keys. Std-only; the seal is HMAC-SHA256 under `--features
+/// crypto` and a documented development-only fold without it (`TAG_LEN`).
+pub mod handshake;
 pub mod heal;
 /// Interest management: relevancy, per-connection priority, budgets.
 pub mod interest;
@@ -48,6 +53,10 @@ pub mod online;
 /// The played bout: lobby-formed fight, dedicated server, predicting clients,
 /// scripted mid-fight drop and rejoin over a [`link::Wire`].
 pub mod played;
+/// Input prediction plus checksum desync detection: the `InputPredictor`
+/// trait, per-seat guess tracking with streaks, and a probe that names the
+/// first divergent tick. Std-only, integer-only, fixed rings.
+pub mod prediction;
 /// The `Transport` trait, the frame types and the std-only transports (UDP,
 /// relay, simulated QUIC). The quinn backend inside is feature-gated (`quic`);
 /// the headless default stays std-only UDP. The module compiles for the

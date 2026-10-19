@@ -72,6 +72,9 @@ pub enum Panel {
     Tuning,
     /// New-item templates: arena, prop, weapon and fighter starters.
     Templates,
+    /// Activity feed tagged human or agent, plus the scene diff, so a person
+    /// and an AI on the same scene see each other's edits.
+    Activity,
 }
 
 impl Panel {
@@ -85,6 +88,7 @@ impl Panel {
             Self::Findings => "Findings",
             Self::Tuning => "Tuning",
             Self::Templates => "Templates",
+            Self::Activity => "activity",
         }
     }
 

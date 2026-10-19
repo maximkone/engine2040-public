@@ -10,6 +10,15 @@
 //! (`BriefEnvelope`): this file consumes it as its input type and spends its
 //! repair budget, keeping only a thin `envelope()` convert at the old call
 //! site for the AB4/AB5 callers.
+//!
+//! ARC12 edit path: the landing edit is a relation diff. A brief becomes
+//! relation requests, SP5 solves them against the shell plus the live
+//! document, and the solve's spine writes (positions, yaw, scale) are what a
+//! caller lands at a tick boundary. The applied relation delta
+//! (`engine_spatial::diff`) is the payload a caller reads and reviews; the raw
+//! coordinate table the report carries stays as the ablation arm
+//! (`ablation_numbers`) and is never the edit. A solve that cannot place
+//! refuses with the SP5 conflict set (`LevelRefusal::conflict_set`).
 
 #[cfg(feature = "mcp")]
 mod imp {
@@ -36,7 +45,7 @@ mod imp {
         batch_error, cap_error, granted_ops, McpServer, McpToolError, ServerState,
     };
     use crate::canon::valid_name;
-    use crate::spatial_glue::{quat_of_yaw, yaw_of_quat};
+    use crate::spatial_glue::{conflict_texts, quat_of_yaw, yaw_of_quat, ParsedWant};
 
     mod build_level_session;
     pub use build_level_session::*;
@@ -402,6 +411,12 @@ mod imp {
         pub repairs_used: u8,
         /// Culprit want source lines (or the stuck prop line).
         pub conflicts: Vec<String>,
+        /// SP5 conflict-set evidence (ARC12): per still-unsolved prop in id
+        /// order, the solver's minimal unmet-want subset mapped back to the
+        /// exact brief lines the caller wrote. Empty when the refusal came
+        /// from gate findings alone (no solve failed) or the solver returned
+        /// no conflict set. A caller fixes placement from these first.
+        pub conflict_set: Vec<String>,
         /// Gate finding lines plus solver conflict lines.
         pub findings: Vec<String>,
         /// Why the build refused, with the fix embedded.
@@ -471,7 +486,8 @@ mod imp {
     fn build_on(plan: &RelationPlan, env: &BriefEnvelope, fixed: &[Actor]) -> BuildOutcome {
         let mut plan = plan.clone();
         let mut solve_calls = 0u32;
-        let (mut actors, mut unsolved) = solve_plan(&plan, fixed, &mut solve_calls);
+        let (mut actors, mut unsolved, mut conflicts_by_prop) =
+            solve_plan(&plan, fixed, &mut solve_calls);
         let mut repairs_used = 0u8;
         let mut conflicts: Vec<String> = Vec::new();
         for round in 0..env.repair_budget() {
@@ -488,6 +504,7 @@ mod imp {
                 round,
                 id,
                 &mut unsolved,
+                &mut conflicts_by_prop,
                 &mut solve_calls,
             ) {
                 break;
@@ -521,11 +538,13 @@ mod imp {
         }
         findings.sort();
         let budget = env.repair_budget();
+        let conflict_set = conflict_set_texts(&plan, &conflicts_by_prop, &report.unsolved);
         BuildOutcome::Refused(LevelRefusal {
             brief_id: env.brief_id(),
             stage: env.stage().as_str(),
             repairs_used,
             conflicts,
+            conflict_set,
             findings,
             reason: format!(
                 "no clean level after {repairs_used} repair round(s); \
@@ -536,6 +555,35 @@ mod imp {
                  0 <= lo <= hi; the room is a 10 m square"
             ),
         })
+    }
+
+    /// SP5 conflict-set evidence for a refusal: per still-unsolved prop in id
+    /// order, the solver's minimal unmet-want subset mapped back to the exact
+    /// brief lines the caller wrote. Empty when no solve failed (gate
+    /// findings alone) or the solver returned no conflict set.
+    fn conflict_set_texts(
+        plan: &RelationPlan,
+        conflicts: &BTreeMap<u32, engine_spatial::ConflictSet>,
+        unsolved: &BTreeSet<u32>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for id in unsolved {
+            let (Some(set), Some(prop)) = (
+                conflicts.get(id),
+                plan.props.iter().find(|prop| prop.id == *id),
+            ) else {
+                continue;
+            };
+            let parsed: Vec<ParsedWant> = prop
+                .wants
+                .iter()
+                .cloned()
+                .zip(prop.sources.iter().cloned())
+                .map(|(want, source)| ParsedWant { want, source })
+                .collect();
+            out.extend(conflict_texts(&parsed, &set.unmet));
+        }
+        out
     }
 
     fn placed(
@@ -636,6 +684,265 @@ mod imp {
         hasher = Fnv64::with_state(FNV64_OFFSET ^ digest);
         hasher.write(&cell_digest.to_le_bytes());
         hasher.finish()
+    }
+
+    // Relation-diff edit path (ARC12). Owner `engine-endpoint`, glue only:
+    // the relation algebra and the delta are `engine-spatial`, the placement
+    // is the SP5 solver, and the write list is the spine pose convention.
+    // Units: meters and radians for a pose, line and byte counts for the
+    // payload. A write is recorded for a tick boundary, never applied
+    // mid-tick, the same discipline provider and script effects follow. The
+    // raw coordinate table the parent report carries is kept as the ablation
+    // arm only; the edit a caller reads and reviews is the relation delta.
+
+    /// One spine transform write: the pose one placed prop takes when the
+    /// edit lands on a tick boundary. The write list is recorded, not
+    /// applied in place, so a consumer lands it at the boundary the way
+    /// provider and script effects land.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SpineWrite {
+        /// Prop actor id (the spine slot's source id, name-sorted).
+        pub id: u32,
+        /// Prop name from the brief.
+        pub name: String,
+        /// Feet position meters `[x, y, z]`.
+        pub pos: [f32; 3],
+        /// Facing yaw radians.
+        pub yaw: f32,
+        /// Authored box scale `[sx, sy, sz]` meters: the authored document op
+        /// needs it, the spine pose does not.
+        pub scale: [f32; 3],
+    }
+
+    /// Relation-diff edit: the relation requests a brief carries, the
+    /// relation delta the SP5 solve made on the level graph, and the spine
+    /// writes it produced, plus the parent report of the same solve.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct RelationEdit {
+        /// Envelope brief id.
+        pub brief_id: u64,
+        /// Build seed.
+        pub seed: u64,
+        /// Relation requests in prop-id then want order (`+ relation ...`):
+        /// the diff the brief asks for, before any solve.
+        pub requests: Vec<String>,
+        /// Applied relation delta lines (`engine_spatial::describe` order).
+        pub changes: Vec<String>,
+        /// Bounded counts line (`engine_spatial::summarize`).
+        pub summary: String,
+        /// Spine writes in prop-id order, one per placed prop.
+        pub writes: Vec<SpineWrite>,
+        /// Passing report of the same solve (the raw-coordinate ablation arm).
+        pub report: BuildReport,
+    }
+
+    /// Edit outcome: a relation-diff edit with its writes, or the refusal
+    /// carrying the SP5 conflict set.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum EditOutcome {
+        /// Solved: the writes are ready to land at a tick boundary.
+        Edited(RelationEdit),
+        /// Budget exhausted: the refusal with conflicts and findings.
+        Refused(LevelRefusal),
+    }
+
+    /// Ablation outcome: the numbers for a placing brief, or the refusal.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum AblationOutcome {
+        /// Numbers for one placed brief.
+        Numbers(AblationNumbers),
+        /// The brief refused; the ablation has nothing to weigh.
+        Refused(LevelRefusal),
+    }
+
+    /// Relation-diff edit payload against the raw coordinate table for one
+    /// brief. `requests` and `changes` count the relation lines a caller
+    /// reads; `raw_lanes`/`raw_bytes` count the coordinate table the parent
+    /// report carries. `digest_equal` proves the edit's spine writes
+    /// reproduce the coordinate digest bit for bit, so the smaller payload
+    /// is lossless. Both arms run the same plan and the same solve.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AblationNumbers {
+        /// Envelope brief id.
+        pub brief_id: u64,
+        /// Props placed.
+        pub props: u32,
+        /// Relation request lines.
+        pub requests: u32,
+        /// Applied relation delta lines.
+        pub changes: u32,
+        /// Coordinate lanes the raw table carries (4 per prop).
+        pub raw_lanes: u32,
+        /// Raw table bytes (one `f32` per lane).
+        pub raw_bytes: u64,
+        /// Relation payload bytes (requests plus changes, newline included).
+        pub edit_bytes: u64,
+        /// SP5 solve calls.
+        pub solves: u32,
+        /// Routes reachable, always equal to `props` on a placing brief.
+        pub reachable: u32,
+        /// True when the edit's writes carry the exact coordinate digest.
+        pub digest_equal: bool,
+    }
+
+    /// One `+ relation <prop> <relation> <target>` request line per want, in
+    /// prop-id then want order: the relation diff a brief asks for before any
+    /// solve. Pure text; no digest is taken over it.
+    fn request_lines(plan: &RelationPlan) -> Vec<String> {
+        let mut out = Vec::new();
+        for prop in &plan.props {
+            for want in &prop.wants {
+                out.push(format!(
+                    "+ relation {} {} {}",
+                    prop.name,
+                    want.relation.name(),
+                    target_label(want.target, plan)
+                ));
+            }
+        }
+        out
+    }
+
+    /// Stable target text shared by request lines: `wall:<side>`,
+    /// `object:<prop name>` or `point:<x_cm>,<z_cm>`.
+    fn target_label(target: Target, plan: &RelationPlan) -> String {
+        match target {
+            Target::Wall(wall) => wall_label(wall),
+            Target::Point { x_cm, z_cm } => format!("point:{x_cm},{z_cm}"),
+            Target::Object(id) => plan.props.iter().find(|prop| prop.id == id).map_or_else(
+                || format!("object:{id}"),
+                |prop| format!("object:{}", prop.name),
+            ),
+        }
+    }
+
+    /// Wall side text for request lines. One owner for the side match:
+    /// [`crate::intents::wall_word`] (this used to duplicate its body).
+    fn wall_label(wall: Wall) -> String {
+        format!("wall:{}", crate::intents::wall_word(wall))
+    }
+
+    /// Relation delta between two actor sets (`engine_spatial` order: added
+    /// and removed edges by `(a, relation, b)`, then layer relabels by id).
+    /// The same two actor sets give the same delta in any input order.
+    fn relation_delta(before: &[Actor], after: &[Actor]) -> engine_spatial::SemanticDiff {
+        engine_spatial::diff_graph(
+            &engine_spatial::build(before),
+            &engine_spatial::build(after),
+        )
+    }
+
+    /// Spine writes for every placed prop, in prop-id order. A prop without a
+    /// live actor is skipped (it was not placed).
+    fn writes_of(plan: &RelationPlan, actors: &[Actor]) -> Vec<SpineWrite> {
+        let mut out: Vec<SpineWrite> = plan
+            .props
+            .iter()
+            .filter_map(|prop| {
+                actors
+                    .iter()
+                    .find(|actor| actor.id == prop.id)
+                    .map(|actor| SpineWrite {
+                        id: prop.id,
+                        name: prop.name.clone(),
+                        pos: [actor.x, actor.y, actor.z],
+                        yaw: actor.yaw,
+                        scale: [actor.sx, actor.sy, actor.sz],
+                    })
+            })
+            .collect();
+        out.sort_by_key(|write| write.id);
+        out
+    }
+
+    /// Relation-diff edit path: plan the brief into relation requests, solve
+    /// with SP5 against `fixed` (the live-document actors), then report the
+    /// applied relation delta plus the spine writes. Writes nothing; no
+    /// provider is consulted.
+    pub fn relation_edit_on(
+        env: &BriefEnvelope,
+        fixed: &[Actor],
+    ) -> Result<EditOutcome, LevelError> {
+        let plan = plan_brief(env)?;
+        Ok(edit_from(&plan, env, fixed))
+    }
+
+    /// Relation-diff edit over the room shell alone (no live document).
+    pub fn relation_edit(env: &BriefEnvelope) -> Result<EditOutcome, LevelError> {
+        relation_edit_on(env, &[])
+    }
+
+    fn edit_from(plan: &RelationPlan, env: &BriefEnvelope, fixed: &[Actor]) -> EditOutcome {
+        let requests = request_lines(plan);
+        match build_on(plan, env, fixed) {
+            BuildOutcome::Refused(refusal) => EditOutcome::Refused(refusal),
+            BuildOutcome::Placed(level) => {
+                let mut before = room_shell();
+                before.extend_from_slice(fixed);
+                let delta = relation_delta(&before, &level.actors);
+                EditOutcome::Edited(RelationEdit {
+                    brief_id: level.report.brief_id,
+                    seed: level.report.seed,
+                    requests,
+                    changes: engine_spatial::describe(&delta),
+                    summary: engine_spatial::summarize(&delta),
+                    writes: writes_of(plan, &level.actors),
+                    report: level.report,
+                })
+            }
+        }
+    }
+
+    /// Ablation numbers for one brief: the relation-diff payload a caller
+    /// reads against the raw coordinate table the parent report carries, plus
+    /// the digest-equality proof that the smaller payload is lossless. Both
+    /// arms run the same plan and the same solve.
+    pub fn ablation_numbers(env: &BriefEnvelope) -> Result<AblationOutcome, LevelError> {
+        let edit = match relation_edit(env)? {
+            EditOutcome::Edited(edit) => edit,
+            EditOutcome::Refused(refusal) => return Ok(AblationOutcome::Refused(refusal)),
+        };
+        let placements: Vec<Placement> = edit
+            .writes
+            .iter()
+            .map(|write| Placement {
+                name: write.name.clone(),
+                id: write.id,
+                x: write.pos[0],
+                y: write.pos[1],
+                z: write.pos[2],
+                yaw: write.yaw,
+            })
+            .collect();
+        let raw_lanes = u32::try_from(placements.len())
+            .ok()
+            .and_then(|count| count.checked_mul(4))
+            .unwrap_or(u32::MAX);
+        let edit_bytes = edit
+            .requests
+            .iter()
+            .chain(edit.changes.iter())
+            .map(|line| u64::try_from(line.len() + 1).unwrap_or(u64::MAX))
+            .sum();
+        Ok(AblationOutcome::Numbers(AblationNumbers {
+            brief_id: edit.brief_id,
+            props: edit.report.props_placed,
+            requests: u32::try_from(edit.requests.len()).unwrap_or(u32::MAX),
+            changes: u32::try_from(edit.changes.len()).unwrap_or(u32::MAX),
+            raw_lanes,
+            raw_bytes: u64::from(raw_lanes) * 4,
+            edit_bytes,
+            solves: edit.report.cost.solve_calls,
+            reachable: u32::try_from(
+                edit.report
+                    .routes
+                    .iter()
+                    .filter(|route| route.reachable)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+            digest_equal: level_digest(&placements) == edit.report.level_digest,
+        }))
     }
 
     /// Record one brief: envelope, plan, solve and gate, then stamp the shared
@@ -1395,6 +1702,438 @@ mod imp {
                     before,
                     "brief {index} undoes cleanly"
                 );
+            }
+        }
+
+        /// Spatial-gold fixture directory, resolved from the crate root.
+        fn spatial_gold_dir() -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/spatial-gold")
+        }
+
+        /// The ARC12 brief fixture rows: `id<TAB>seed<TAB>brief`, with a
+        /// literal `\n` in the text standing for a brief newline. The column
+        /// header is the first non-comment line (the tasks.tsv convention) and
+        /// is checked before its rows parse.
+        fn arc12_brief_rows() -> Vec<(String, u64, String)> {
+            let path = spatial_gold_dir().join("arc12_briefs.tsv");
+            let text = std::fs::read_to_string(&path).expect("arc12 briefs fixture reads");
+            let mut lines = text
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'));
+            assert_eq!(
+                lines.next(),
+                Some("id\tseed\tbrief"),
+                "arc12 briefs fixture keeps its column header"
+            );
+            let mut rows = Vec::new();
+            for line in lines {
+                let mut parts = line.split('\t');
+                let id = parts.next().unwrap_or_default().trim().to_owned();
+                let seed_text = parts.next().unwrap_or_default().trim();
+                let seed = seed_text.parse::<u64>().unwrap_or_else(|error| {
+                    panic!("arc12 brief row seed `{seed_text}` in {line:?}: {error}")
+                });
+                let brief = parts.next().unwrap_or_default().replace("\\n", "\n");
+                assert_eq!(
+                    parts.count(),
+                    0,
+                    "arc12 brief row has three columns: {line:?}"
+                );
+                assert!(!id.is_empty() && !brief.is_empty(), "row fields: {line:?}");
+                rows.push((id, seed, brief));
+            }
+            rows
+        }
+
+        /// One `arc12_ablation.tsv` row: the payload counts for one brief.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct AblationRow {
+            id: String,
+            props: u32,
+            requests: u32,
+            changes: u32,
+            raw_lanes: u32,
+            raw_bytes: u64,
+            edit_bytes: u64,
+            solves: u32,
+            reachable: u32,
+            digest_equal: bool,
+        }
+
+        impl AblationRow {
+            fn tsv(&self) -> String {
+                format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    self.id,
+                    self.props,
+                    self.requests,
+                    self.changes,
+                    self.raw_lanes,
+                    self.raw_bytes,
+                    self.edit_bytes,
+                    self.solves,
+                    self.reachable,
+                    u8::from(self.digest_equal)
+                )
+            }
+
+            fn of(id: &str, numbers: &AblationNumbers) -> Self {
+                Self {
+                    id: id.to_owned(),
+                    props: numbers.props,
+                    requests: numbers.requests,
+                    changes: numbers.changes,
+                    raw_lanes: numbers.raw_lanes,
+                    raw_bytes: numbers.raw_bytes,
+                    edit_bytes: numbers.edit_bytes,
+                    solves: numbers.solves,
+                    reachable: numbers.reachable,
+                    digest_equal: numbers.digest_equal,
+                }
+            }
+        }
+
+        /// Read the checked-in ablation fixture rows.
+        fn arc12_ablation_rows() -> Vec<AblationRow> {
+            let path = spatial_gold_dir().join("arc12_ablation.tsv");
+            let text = std::fs::read_to_string(&path).expect("arc12 ablation fixture reads");
+            text.lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(|line| {
+                    let cols: Vec<&str> = line.split('\t').collect();
+                    assert_eq!(cols.len(), 10, "ablation row has ten columns: {line}");
+                    let num = |index: usize| -> u64 {
+                        cols[index].parse::<u64>().expect("numeric column")
+                    };
+                    AblationRow {
+                        id: cols[0].to_owned(),
+                        props: u32::try_from(num(1)).expect("props fit"),
+                        requests: u32::try_from(num(2)).expect("requests fit"),
+                        changes: u32::try_from(num(3)).expect("changes fit"),
+                        raw_lanes: u32::try_from(num(4)).expect("lanes fit"),
+                        raw_bytes: num(5),
+                        edit_bytes: num(6),
+                        solves: u32::try_from(num(7)).expect("solves fit"),
+                        reachable: u32::try_from(num(8)).expect("reachable fits"),
+                        digest_equal: num(9) == 1,
+                    }
+                })
+                .collect()
+        }
+
+        /// Recompute the ablation numbers for every fixture brief.
+        fn arc12_ablation_for_fixture() -> Vec<(String, AblationNumbers)> {
+            arc12_brief_rows()
+                .iter()
+                .map(|(id, seed, brief)| {
+                    let env = envelope(brief, *seed).expect("fixture brief envelopes");
+                    match ablation_numbers(&env).expect("fixture brief plans") {
+                        AblationOutcome::Numbers(numbers) => (id.clone(), numbers),
+                        AblationOutcome::Refused(refusal) => {
+                            panic!("fixture brief {id} refused: {}", refusal.reason)
+                        }
+                    }
+                })
+                .collect()
+        }
+
+        #[test]
+        fn arc12_fixture_briefs_are_the_ten_ab1_briefs() {
+            let rows = arc12_brief_rows();
+            assert_eq!(rows.len(), 10, "one fixture brief per AB1 brief");
+            let texts: Vec<&str> = rows.iter().map(|(_, _, brief)| brief.as_str()).collect();
+            assert_eq!(texts, TEN_BRIEFS, "the fixture is the gold AB1 brief set");
+        }
+
+        #[test]
+        fn arc12_relation_edit_places_ten_briefs_with_zero_findings() {
+            for (id, seed, brief) in arc12_brief_rows() {
+                let env = envelope(&brief, seed).expect("fixture brief envelopes");
+                let edit = match relation_edit(&env).expect("fixture brief plans") {
+                    EditOutcome::Edited(edit) => edit,
+                    EditOutcome::Refused(refusal) => {
+                        panic!("brief {id} refused: {}", refusal.reason)
+                    }
+                };
+                assert_eq!(edit.report.verdict, "pass", "brief {id}");
+                assert!(edit.report.props_placed > 0, "brief {id} places props");
+                assert_eq!(
+                    edit.writes.len(),
+                    edit.report.placements.len(),
+                    "brief {id} writes one pose per placement"
+                );
+                assert!(!edit.requests.is_empty(), "brief {id} asks for relations");
+                assert!(
+                    edit.requests
+                        .iter()
+                        .all(|line| line.starts_with("+ relation ")),
+                    "brief {id} requests are relation lines"
+                );
+                assert!(!edit.changes.is_empty(), "brief {id} changes relations");
+                assert!(
+                    edit.summary.starts_with("diff +"),
+                    "brief {id}: {}",
+                    edit.summary
+                );
+                assert_eq!(
+                    edit.report.routes.len(),
+                    edit.writes.len(),
+                    "brief {id} routes every prop"
+                );
+                assert!(
+                    edit.report.routes.iter().all(|route| route.reachable),
+                    "brief {id} every route reachable"
+                );
+                // The writes carry the exact poses the report solved.
+                for (write, placement) in edit.writes.iter().zip(edit.report.placements.iter()) {
+                    assert_eq!((write.id, &write.name), (placement.id, &placement.name));
+                    assert_eq!(
+                        [write.pos[0], write.pos[1], write.pos[2]],
+                        [placement.x, placement.y, placement.z]
+                    );
+                    assert_eq!(write.yaw, placement.yaw);
+                }
+            }
+        }
+
+        #[test]
+        fn arc12_ten_briefs_land_clean_and_undo_twice() {
+            for (id, seed, brief) in arc12_brief_rows() {
+                let mut session = fresh_session();
+                let shell = session.current_digest();
+                let mut key = 4000 + seed;
+                for round in 0..2u64 {
+                    let revision = session.revision();
+                    let preview = session.preview(&brief, seed).expect("brief previews");
+                    assert_eq!(preview.verdict, "pass", "brief {id} round {round}");
+                    assert!(preview.findings.is_empty(), "brief {id} zero findings");
+                    assert!(!preview.placements.is_empty(), "brief {id}");
+                    assert!(
+                        !preview.relation_diff.is_empty(),
+                        "brief {id} previews its relation edit"
+                    );
+                    assert!(preview.conflict_set.is_empty(), "brief {id} places");
+                    let outcome = session
+                        .apply(&brief, seed, revision, key)
+                        .expect("brief applies");
+                    let applied = match outcome {
+                        ApplyOutcome::Placed(applied) => applied,
+                        ApplyOutcome::Refused { refusal, .. } => {
+                            panic!("brief {id} refused: {}", refusal.reason)
+                        }
+                    };
+                    assert_eq!(applied.revision, revision + 1, "brief {id}");
+                    assert_eq!(
+                        applied.relation_diff, preview.relation_diff,
+                        "brief {id} preview equals the landed edit"
+                    );
+                    assert_eq!(applied.report.placements, preview.placements);
+                    assert_eq!(
+                        applied.report.routes.len(),
+                        applied.report.placements.len(),
+                        "brief {id} routes every prop"
+                    );
+                    assert!(
+                        applied.report.routes.iter().all(|route| route.reachable),
+                        "brief {id} 100% reachable"
+                    );
+                    let undone = session.undo(Some(key)).expect("level undoes");
+                    assert_eq!(undone.undone_key, key, "brief {id}");
+                    assert_eq!(
+                        session.current_digest(),
+                        shell,
+                        "brief {id} round {round} undoes clean"
+                    );
+                    key += 1;
+                }
+            }
+        }
+
+        #[test]
+        fn arc12_door_reports_the_relation_diff_and_refuses_with_conflicts() {
+            // The door's staged gate mirrors the spatial floating check on
+            // unit 1 m cubes (`capability::snapshot_hierarchy`), so a prop
+            // taller than 1 m reads as floating and is refused before it
+            // lands. The door accept here rides a 1 m brazier; prop sizes
+            // are the level build's business, gated by its own checks.
+            let server = McpServer::new(11, Capability::unrestricted(11));
+            let mut key = 700u64;
+            // A build lands one revision, its undo publishes the next.
+            let mut revision = 0u64;
+            for round in 0..2u64 {
+                let out = BuildLevelTool::invoke(
+                    &server,
+                    BuildLevelArgs {
+                        brief: BRIEF_BRAZIER.to_owned(),
+                        seed: 3000,
+                        expected_revision: revision,
+                        idempotency_key: key,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("round {round}: {}", error.message));
+                assert!(out.solved, "round {round}: {}", out.reason);
+                assert_eq!(out.verdict, "pass", "round {round}");
+                assert!(
+                    !out.relation_diff.is_empty(),
+                    "round {round} reports its relation edit"
+                );
+                assert!(
+                    out.relation_diff
+                        .iter()
+                        .all(|line| line.starts_with("- relation ")
+                            || line.starts_with("+ relation ")
+                            || line.starts_with("= ")),
+                    "round {round} rows are relation changes: {:?}",
+                    out.relation_diff
+                );
+                assert_eq!(
+                    out.revision,
+                    revision + 1,
+                    "round {round} lands one revision"
+                );
+                key += 1;
+                let undone = TxUndoTool::invoke(&server, TxUndoArgs { undo_token: None })
+                    .unwrap_or_else(|error| panic!("round {round} undo: {}", error.message));
+                assert_eq!(undone.undone_key, out.key, "round {round} undo key");
+                assert_eq!(undone.revision, revision + 2, "round {round} undo revision");
+                // Clean: nothing of this brief is left after the undo.
+                let page =
+                    SceneReadTool::invoke(&server, SceneReadArgs::default()).expect("scene reads");
+                assert_eq!(page.total, 0, "round {round} undo is clean");
+                revision += 2;
+            }
+            // A stuck brief refuses and the door names the SP5 conflict set.
+            let stuck_brief = "prop crate doomed\n\
+                 want doomed next_to wall:north [0,10]\n\
+                 want doomed next_to wall:south [0,10]\n\
+                 want doomed next_to wall:east [0,10]\n\
+                 want doomed next_to wall:west [0,10]";
+            let stuck = BuildLevelTool::invoke(
+                &server,
+                BuildLevelArgs {
+                    brief: stuck_brief.to_owned(),
+                    seed: 31,
+                    expected_revision: revision,
+                    idempotency_key: 900,
+                },
+            )
+            .expect("door answers refusals");
+            assert!(!stuck.solved);
+            assert_eq!(stuck.verdict, "refused");
+            assert!(!stuck.findings.is_empty(), "gate findings ride the refusal");
+            assert!(
+                stuck.conflicts.len() >= 2,
+                "the SP5 conflict set is named: {:?}",
+                stuck.conflicts
+            );
+            for line in &stuck.conflicts {
+                assert!(
+                    stuck_brief.lines().any(|want| want == line),
+                    "every conflict echoes a brief want line, got: {line}"
+                );
+            }
+            assert!(stuck.relation_diff.is_empty(), "a refusal reports no edit");
+            assert_eq!(stuck.revision, revision, "refusals write nothing");
+        }
+
+        #[test]
+        fn arc12_conflict_set_names_the_unmet_wants() {
+            // Four walls cannot be met at once on one grounded prop.
+            let text = "prop crate doomed\n\
+                 want doomed next_to wall:north [0,10]\n\
+                 want doomed next_to wall:south [0,10]\n\
+                 want doomed next_to wall:east [0,10]\n\
+                 want doomed next_to wall:west [0,10]";
+            let env = envelope(text, 23).expect("stuck brief envelopes");
+            let refusal = match relation_edit(&env).expect("stuck brief plans") {
+                EditOutcome::Refused(refusal) => refusal,
+                EditOutcome::Edited(edit) => panic!("impossible brief placed: {:?}", edit.writes),
+            };
+            assert!(!refusal.findings.is_empty(), "refusal carries findings");
+            assert_eq!(
+                refusal.conflict_set.len(),
+                2,
+                "SP5 keeps the minimal subset"
+            );
+            for line in &refusal.conflict_set {
+                assert!(
+                    text.lines().any(|want| want == line),
+                    "conflict set echoes a brief line, got: {line}"
+                );
+            }
+        }
+
+        #[test]
+        fn arc12_relation_edit_is_deterministic_and_name_sorted() {
+            let env = envelope(BRIEF_MARKET, 42).expect("brief envelopes");
+            let once = match relation_edit(&env).expect("brief plans") {
+                EditOutcome::Edited(edit) => edit,
+                EditOutcome::Refused(refusal) => panic!("market refused: {}", refusal.reason),
+            };
+            let twice = match relation_edit(&env).expect("brief plans again") {
+                EditOutcome::Edited(edit) => edit,
+                EditOutcome::Refused(refusal) => panic!("market refused: {}", refusal.reason),
+            };
+            assert_eq!(once, twice, "same brief gives the same edit twice");
+            assert!(!once.changes.is_empty(), "the edit changed relations");
+            assert_eq!(once.summary, twice.summary);
+            // The requests follow the plan (name order), so reordered brief
+            // lines ask for the same relations in the same order.
+            let reordered = "want banner_01 next_to wall:west [0,40]\n\
+                 prop banner banner_01\n\
+                 prop stand stand_01\n\
+                 prop barrel barrel_01\n\
+                 want banner_01 facing object:stand_01\n\
+                 want stand_01 next_to object:barrel_01 [30,120]";
+            let other = envelope(reordered, 42).expect("reordered envelopes");
+            let from_lines = match relation_edit(&other).expect("reordered plans") {
+                EditOutcome::Edited(edit) => edit,
+                EditOutcome::Refused(refusal) => panic!("reordered refused: {}", refusal.reason),
+            };
+            assert_eq!(
+                once.requests, from_lines.requests,
+                "brief line order never moves the request diff"
+            );
+            assert_eq!(
+                once.report.level_digest, from_lines.report.level_digest,
+                "and the level is the same level"
+            );
+        }
+
+        #[test]
+        fn arc12_ablation_matches_the_fixture_and_is_lossless() {
+            let computed: Vec<AblationRow> = arc12_ablation_for_fixture()
+                .iter()
+                .map(|(id, numbers)| AblationRow::of(id, numbers))
+                .collect();
+            for row in &computed {
+                eprintln!("arc12-ablation-row\t{}", row.tsv());
+            }
+            let expected = arc12_ablation_rows();
+            assert_eq!(
+                computed, expected,
+                "the ablation fixture drifted from the live numbers"
+            );
+            let rows = arc12_brief_rows();
+            let numbers = arc12_ablation_for_fixture();
+            for ((id, _, brief), (_, n)) in rows.iter().zip(numbers.iter()) {
+                // Lossless: the relation edit's spine writes carry the exact
+                // coordinate digest of the same solve.
+                assert!(n.digest_equal, "brief {id} edit carries the poses");
+                assert_eq!(n.reachable, n.props, "brief {id} every route reachable");
+                assert_eq!(n.raw_lanes, n.props * 4, "brief {id} four lanes per prop");
+                assert_eq!(n.solves, n.props, "brief {id} one SP5 solve per prop");
+                // The request diff is exactly the brief's relation wishes.
+                let wants = brief
+                    .lines()
+                    .filter(|line| line.starts_with("want "))
+                    .count();
+                assert_eq!(
+                    n.requests,
+                    u32::try_from(wants).expect("wants fit"),
+                    "brief {id} one request line per want"
+                );
+                assert!(n.changes > 0, "brief {id} the solve changed relations");
             }
         }
 

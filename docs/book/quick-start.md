@@ -107,12 +107,18 @@ staged_fight bind: variant=hero ...
 staged_fight bind: variant=opp_male_light ...
 staged_fight bind: variant=opp_female_medium ...
 staged_fight bind: variant=opp_female_light ...
-staged_fight done: ticks=600 cues=30 hits=27 knockdowns=3 final_hash=2935468d340b210d captures=4 manifest="target/quickstart-fight\captures\manifest.json" receipt="target/quickstart-fight\receipt.json"
+staged_fight done: ticks=600 cues=31 hits=27 knockdowns=3 blocked=0 parried=0 Parried=0 stamina_out=1 dodged=0 final_hash=a7e69394a687115d captures=4 manifest="target/quickstart-fight\captures\manifest.json" receipt="target/quickstart-fight\receipt.json"
 ```
 
 Run it twice with different `--out-dir` values: the `final_hash` repeats
-exactly (`2935468d340b210d` both times) — same manifest plus seed plus
-script gives the same fight and the same PNGs. The receipt is built for
+exactly (`a7e69394a687115d` both times) — same manifest plus seed plus
+script gives the same fight and the same PNGs. That number is this tree's:
+the fight hash moves when the animation clips, the move tables or the fight
+rules change (the 2026-10-02 value was `2935468d340b210d`, kept in
+`content/fighters/CT30-PIN-RECEIPT.md` as that day's receipt), so the check
+is that the two runs agree, not that they equal a fixed number. The canonical
+frozen hash is the one in step 2 (`d57b5c8ae3096614`) and it does not move.
+The receipt is built for
 byte-identical repeats (fixed JSON field order, file names only, no
 absolute paths).
 Flags: `--ticks` must be `600` (default 600; anything else exits 2),

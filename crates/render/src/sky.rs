@@ -1134,10 +1134,10 @@ pub fn submit_gpu_sky(
 ) -> Result<SkyGpuReceipt, SkyError> {
     frame
         .validate()
-        .map_err(|e| SkyError::Invalid(format!("sky look frame: {e}")))?;
+        .map_err(|e| SkyError::Invalid(format!("sky look frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
     capture
         .check_backing("submit")
-        .map_err(|e| SkyError::Invalid(format!("{e}")))?;
+        .map_err(|e| SkyError::Invalid(format!("{e}")))?; // alloc-ok: cold refusal, never a steady frame
     for t in &capture.texels {
         if !t.iter().all(|c| c.is_finite()) || t.iter().any(|c| *c < 0.0) {
             return Err(SkyError::Invalid(
@@ -1147,7 +1147,7 @@ pub fn submit_gpu_sky(
     }
     let words = capture.texels.len() as u64 * 3;
     let count = u32::try_from(words)
-        .map_err(|_| SkyError::Invalid(format!("sky texel words {words} exceed u32")))?;
+        .map_err(|_| SkyError::Invalid(format!("sky texel words {words} exceed u32")))?; // alloc-ok: cold refusal, never a steady frame
     let byte_len = words * 4;
     let started = engine_clock::now();
 
@@ -1214,7 +1214,7 @@ pub fn submit_gpu_sky(
         0,
         &crate::graph::look_frame_uniform_bytes(frame),
     );
-    let mut src_bytes = Vec::with_capacity(byte_len as usize);
+    let mut src_bytes = Vec::with_capacity(byte_len as usize); // alloc-ok: submit_gpu_sky probe staging with readback, not the window steady frame
     for t in &capture.texels {
         for c in t {
             src_bytes.extend_from_slice(&c.to_le_bytes());
@@ -1241,17 +1241,15 @@ pub fn submit_gpu_sky(
     let back = crate::accel::readback_f32(readback, words as usize, "sky")?;
     readback.unmap();
     if let Some(err) = pollster::block_on(scope.pop()) {
-        return Err(SkyError::Validation(format!(
-            "sky bind validation: {err:?}"
-        )));
+        let reason = format!("sky bind validation: {err:?}"); // alloc-ok: cold validation failure, never a steady frame
+        return Err(SkyError::Validation(reason));
     }
     for (i, chunk) in src_bytes.chunks_exact(4).enumerate() {
         let want = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if back[i].to_bits() != want.to_bits() {
-            return Err(SkyError::Device(format!(
-                "sky bind roundtrip word {i} differs: {} vs {want}",
-                back[i]
-            )));
+            let got = back[i];
+            let reason = format!("sky bind roundtrip word {i} differs: {got} vs {want}"); // alloc-ok: cold device-loss path, never a steady frame
+            return Err(SkyError::Device(reason));
         }
     }
     Ok(SkyGpuReceipt {

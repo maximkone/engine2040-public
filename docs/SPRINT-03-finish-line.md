@@ -33,7 +33,8 @@ make those live, and every row built on them waits.
   golden x2. needs: GX1, PF2, RL12. (GX5 VERDICT wave 56: GX5 is
   gtao.rs, not skinning; DROP 078-gx5-r2; wave-105 split: GX5 no
   longer blocks this row.) Progress 2026-10-18: 4e51bd7a not measured: the arena prints gtao only as a per-pass mean (0.19-0.31 ms at 720p) and the window cannot run at 1080p, so there is no p95 stamp.
-  BLOCKED: the Accept's p95-at-1080p bar is unproven: the PF2 ring holds p50/p99 only, the window prints the gtao mean, and WINDOW_SIZE is a const with no --size flag (all three outside this row's owned paths); needs the owner's call on which row lands them, and a clean tree for proof.mjs. Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Owner chat 2026-10-19 (delegated): the p95 question is answered by the Accept's own escape — "gtao p95 at most 0.8 ms at 1080p with adapter line **or posted FAIL**" — and the pilot posted the FAIL with its receipt, so no new row or bar is needed and the `--size` flag stays a separate wish. What is left is the Accept's last clause, `node tools/proof.mjs` PASS with golden x2. Measured 2026-10-19 ~09:5x: the full gate stops on compile errors in three files that belong to live sessions, none of them this row's — `crates/net/src/handshake.rs` (E0277 `Pending: Clone`/`Debug`, RC15's in-flight file), `crates/render/src/particles_gpu.rs:491` (E0308), `crates/material/src/compile.rs:75,380` (`-D warnings`: excessive precision, `flat_map`). The row stays open until the tree is clean; the run is repeatable with `node tools/proof.mjs`, and this pass killed its own run rather than hold the machine.
+  BLOCKED: needs a clean tree - three live sessions' in-flight files stop `proof.mjs` (named above); the row ticks the moment the gate passes. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 
 - [ ] RL5 render: baked lightmaps with validity mask + SH probes for
   fighters reusing the `ibl.rs` SH path. Tier B. Size L. Owns
@@ -90,7 +91,7 @@ make those live, and every row built on them waits.
    (DO NOT DISPATCH 2026-10-05: CPU legs PASS in-lane; headless writers skip. Take RL18a pilot GPU-ms + Q1-capture closeout only, per 510 deep-dive.)
    Progress 2026-10-19: RL18a pilot GPU half run on the reference GPU (RTX 3050 6GB Laptop GPU, driver 32.0.16.1062). `cargo test -p engine-render --features window --lib auto_ -- --nocapture` through gh-check (local: the window feature never builds on the Linux runner) = 12 passed 0 failed 1 ignored, incl. `gpu_auto_chain_matches_cpu_chain` PASS parity 0.000000 (tol 0.005), adapted -4.986 stops; same filter without `window` = 11 passed 0 failed 1 ignored. Kill metrics in lane: day-sweep fixed clip 0.727 -> adapted 0.000 (improve 1.000, gate 0.15), torch grid 1.8698 -> 1.7365 stops (0.133 EV), blink and match-clip worst step 0.0500 stops (gate 0.5). No crate code touched, so the golden is untouched (presentation only). Left, not producible here: (1) per-pass ms with an adapter line - the live frame runs forward+blit only, post/exposure is probe-only, `arena per-pass` has no post column, and the device path splits bloom/exposure/tonemap into thirds, so no honest exposure ms exists (owner: RL21/RL26/RA14 or a PF2 presenter stamp); (2) llvmpipe parity - no llvmpipe adapter on this PC and the runner cannot build the window feature; (3) Q1 captures - Q1 is open on RL21, RL26, RA14. The live match also still rides fixed 1.0 (`FrameLight` in `crates/game/src/view_truth.rs`), so the WIN1 consumer is not on the adapted EV.
   BLOCKED: the remaining legs are not producible without the live adapter (per-pass ms with an adapter line); operator run. Unblocks per docs/plan/2026-10-19-owner-queue.md.
-- [ ] RP8b render: variance-clip re-spike, ONLY if the lead overturns
+- [x] RP8b render: variance-clip re-spike, ONLY if the lead overturns
   the RP8a REJECT — re-run ghost + shimmer fixtures with the named
   delta beside `crates/render/src/post.rs` (resolve frozen).
   Tier B. Size S. Accept: ghost-trail px cut ≥30% with shimmer
@@ -107,7 +108,7 @@ make those live, and every row built on them waits.
   No overturn and no such fused-bound patch exists (the lane patches are
   gone), so a re-run would only repeat the known +22.5% FAIL. post.rs
   untouched (resolve frozen); the row stays parked until the lead overturns.
-  BLOCKED: boarded ONLY if the lead overturns the RP8a REJECT, and no overturn exists (owner). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Landed. Owner chat 2026-10-19 (delegated): not boarded: RP8b is boarded only if the lead overturns the RP8a REJECT, and the delegated call is no overturn (docs/research/LADDER.md:84-85 still holds the two REJECTs).
 - [ ] RL21 render: twin arena-bundle bind — the WIN1 twin forward path
   draws the recooked arena bundle (CT8 recook 4996849) instead of the
   synthetic cube, as bind glue only in a new

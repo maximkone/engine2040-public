@@ -6,6 +6,10 @@ Nothing here is ticked or deleted from the board: the owner closes them in one g
 
 Format: ID, why obsolete, what replaced it.
 
+Closed 2026-10-19 (owner chat, delegated): every row below is ticked on the board
+with `Landed obsolete.` and its own reason; nothing is deleted, so this file stays
+the record.
+
 - E4: target `kaggle.mjs` (center mesh step) is gone; the center pipeline was retired by the standalone-repo decision 2026-10-17. Replaced by: nothing in this repo.
 - E6: target `tools/lanes.mjs` (land/prune of lanes) is gone; lanes retired 2026-10-17. Replaced by: one worktree on master and commit-by-path (CLAUDE.md, one-worktree-main).
 - E12: target `tools/ab-bench.mjs` is gone. Replaced by: the brief chain proofs in `crates/playtest` brief_eval (EV2) and `crates/endpoint` build_game tests.

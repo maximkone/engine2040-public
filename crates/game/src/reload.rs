@@ -155,9 +155,11 @@ pub fn cook_file(path: &str) -> Result<u64, ReloadReason> {
 
 /// Check one file's bytes by kind and hash them. Every kind refuses an empty
 /// or oversize file (a half-written save); `.json` must be well-formed JSON,
-/// `.wgsl` must be UTF-8 with balanced delimiters, and the designer combat
-/// rows must parse as combat tables. Other kinds hash as they are. Pure: the
-/// same bytes give the same hash or the same refusal.
+/// `.wgsl` must be UTF-8 with balanced delimiters (and, with
+/// `shader-validate` on the `app` leg, parse and validate through the CQ23
+/// naga gate), and the designer combat rows must parse as combat tables.
+/// Other kinds hash as they are. Pure: the same bytes give the same hash or
+/// the same refusal.
 pub fn cook_bytes(path: &str, bytes: &[u8]) -> Result<u64, ReloadReason> {
     let refuse = |why: &dyn core::fmt::Display| ReloadReason::Cook(format!("{path}: {why}"));
     if bytes.is_empty() {
@@ -180,6 +182,14 @@ pub fn cook_bytes(path: &str, bytes: &[u8]) -> Result<u64, ReloadReason> {
         _ => Ok(()),
     };
     checked.map_err(|why| refuse(&why))?;
+    // CQ23: with the shader gate on, a balanced `.wgsl` edit must also parse
+    // and validate; the refusal names naga's line:col and the old generation
+    // stays live in the gate above.
+    #[cfg(feature = "shader-validate")]
+    if ext == Some("wgsl") {
+        let text = text_of(bytes).map_err(|why| refuse(&why))?;
+        engine_render::shader_gate::validate_source(path, text).map_err(|err| refuse(&err))?;
+    }
     Ok(engine_core::hash_bytes(bytes))
 }
 
@@ -571,6 +581,34 @@ mod tests {
         );
         assert!(cook_bytes("combat.rows", rows.as_bytes()).is_ok());
         assert!(cook_bytes("note.md", b"# any text").is_ok());
+    }
+
+    /// CQ23: with the shader gate on (the `app` leg), a `.wgsl` edit whose
+    /// braces balance but which does not compile is refused with naga's
+    /// reason, and the live generation keeps last-good.
+    #[cfg(feature = "shader-validate")]
+    #[test]
+    fn reload_shader_gate_refuses_a_type_broken_edit_and_keeps_last_good() {
+        let dir = scratch("wgsl-gate");
+        let path = put(&dir, "a.wgsl", "fn main() { }\n");
+        let mut gate = HotReload::new();
+        let first = settle_paths(&mut gate, [path.as_str()], 1, 5);
+        assert_eq!(first.applied.len(), 1, "{first:?}");
+        let live = gate.generation(&path);
+        assert!(live.is_some(), "a good shader applies");
+        // Balanced braces, ill-typed body: the brace shape check alone applies it.
+        put(
+            &dir,
+            "a.wgsl",
+            "fn main() { }\nfn broken() -> f32 { return vec3<f32>(1.0); }\n",
+        );
+        let bad = settle_paths(&mut gate, [path.as_str()], 2, 6);
+        assert!(bad.applied.is_empty(), "{bad:?}");
+        assert_eq!(bad.failed.len(), 1, "{bad:?}");
+        let why = format!("{:?}", bad.failed[0].1);
+        assert!(why.contains("a.wgsl"), "{why}");
+        assert_eq!(gate.generation(&path), live);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

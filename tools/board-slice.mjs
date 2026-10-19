@@ -410,13 +410,18 @@ const PARK_NOTE = /Progress \d{4}-\d{2}-\d{2}:?\s*(?:operator|owner|blocked)\b/i
 
 // The gap the ready filter cannot see: rows a loop would take next whose own
 // note says they wait on a person, because rowReady reads only BLOCKED:/LATER:
-// and the 2026-10-19 passes wrote park notes without that token. Print them,
-// add the marker (and the owner-queue line), or the loops spend sessions on
-// rows nobody can close.
+// and the 2026-10-19 passes wrote park notes without that token. A row that
+// already carries an answer (`Owner chat <date>`) is not an open park: the answer
+// either closed it or turned it into ordinary work, so it is not reported.
 export function parkedUnmarked(tasks, order) {
   return order
     .map((id) => tasks.get(id))
-    .filter((t) => t && !t.done && rowReady(tasks, t) && PARK_NOTE.test(t.lines.join(" ")));
+    .filter((t) => {
+      if (!t || t.done || !rowReady(tasks, t)) return false;
+      const text = t.lines.join(" ");
+      if (/Owner chat \d{4}-\d{2}-\d{2}/.test(text)) return false;
+      return PARK_NOTE.test(text);
+    });
 }
 
 // The open READY rows that Now rows wait on, through the needs: chain (transitively), that the Now list does not name:

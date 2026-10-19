@@ -18,6 +18,8 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `2026-10-18-cleanup-report.md` — LATER — none — conservative repo cleanup: git state and stashes, branches and the stale `origin-tags` ref, `target/` sizes, the three stale private dirs deleted by exact path, disk space before/after, and what was left with reasons
 - `2026-10-18-row-audit.md` — LATER — none — read-only board audit: 801 open rows across 23 shards (96 parked), open rows that name a gone file or test, the 30 most-blocked rows, and the owner decisions still open
 - `2026-10-18-docs-audit.md` — LATER — none — docs/plan pointer sweep: the one missing index line and one gone `systems/` path fixed, with the pinned stale refs, EMPIRE refs and future paths left and listed with reasons
+- `2026-10-19-owner-queue.md` — NOW — all four — the rows only a person can close (a run or a decision) with the exact command or question, and the record of the owner's delegated calls of 2026-10-19 (every A item decided, the 32 obsolete and the gone-code ticks resolved)
+- `2026-10-19-progress.md` — NOW — all four — the dated progress log (pass one to five): rows landed and judged with run ids, the janitor sweeps, and the two tool fixes (`nonstop` timeout classification, `docs-coverage` multi-line attributes)
 - `design-review-2026-10-17.md` — NEXT — all four — 13 ranked design findings (DSN1-DSN13) with a board row each
 - `render-look.md` — NOW — Look — moving fighter captures on the RTX 3050 stand beside the references: arena kit, window build, Q1 reference captures
 - `body-and-break.md` — NOW — Bodies — cuts, limbs, ragdoll, collapse and fire give one hash on every PC and in replay (physics base inside)

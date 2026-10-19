@@ -18,6 +18,11 @@ workspace = true
 # external dev-dep.
 v1 = ["dep:glam", "dep:image", "dep:serde_json", "dep:engine-assets"]
 window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:windows", "dep:engine-material", "v1"]
+# CQ23: CPU naga gate over every shipped WGSL, no GPU. Reuses the material
+# crate's one naga owner (`engine-material/validate`); the default graph stays
+# std-only. `engine-game`'s `app` leg turns this on, so a type-broken shader
+# edit is refused with line:col and the live generation keeps last-good.
+shader-validate = ["dep:engine-material", "engine-material/validate"]
 
 [dependencies]
 # AH2 device-loss heal runs through the observe supervisor (both std-only

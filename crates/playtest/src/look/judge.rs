@@ -1221,8 +1221,8 @@ fn write_item(out: &mut String, item: &RubricItem) {
 
 fn write_comparison(out: &mut String, c: &Comparison) {
     out.push_str(&format!(
-        "{{\"ssim\":{},\"mean_de\":{},\"hist_tv\":{},\"hist_emd\":{}}}",
-        c.ssim_x10000, c.mean_de_x100, c.hist_tv_x10000, c.hist_emd_x10000
+        "{{\"ssim\":{},\"mean_de\":{},\"hist_tv\":{},\"hist_emd\":{},\"flip\":{}}}",
+        c.ssim_x10000, c.mean_de_x100, c.hist_tv_x10000, c.hist_emd_x10000, c.flip_x10000
     ));
 }
 
@@ -2169,7 +2169,8 @@ mod tests {
                 ssim_x10000: SSIM_ONE,
                 mean_de_x100: 0,
                 hist_tv_x10000: 0,
-                hist_emd_x10000: 0
+                hist_emd_x10000: 0,
+                flip_x10000: 0
             }
         );
         let miss = run(vec![moved]);

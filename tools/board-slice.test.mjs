@@ -76,6 +76,9 @@ test("--parked finds ready rows a dated note parked without the BLOCKED marker t
     "- [ ] P3 render: parked with the marker, needs: none. BLOCKED: needs a human.",
     "- [ ] P4 render: parked at the operator's door, needs: none.",
     "  Progress 2026-10-19: blocked until the owner answers.",
+    "- [ ] P5 render: parked once, answered since, needs: none.",
+    "  Progress 2026-10-19: operator: needs the reference GPU.",
+    "  Owner chat 2026-10-19 (delegated): the bar reads p50/p99, so the row is work again.",
     "",
   ].join("\n");
   const { tasks, order } = parseBoard(board);
@@ -90,6 +93,7 @@ test("--parked finds ready rows a dated note parked without the BLOCKED marker t
   assert.match(out, /^P4\s+Progress 2026-10-19: blocked/m);
   assert.doesNotMatch(out, /^P2 /m, "P2 has agent work left");
   assert.doesNotMatch(out, /^P3 /m, "P3 carries the marker the ready filter reads");
+  assert.doesNotMatch(out, /^P5 /m, "P5 carries a recorded answer, so it is no longer an open park");
   assert.match(out, /^2 ready row\(s\) parked without a BLOCKED: marker$/m);
   const clean = run(["--parked"], null, ["# SPRINT", "## Board", "### Finish line", "- [ ] P9 render: ready, needs: none.", ""].join("\n"));
   assert.equal(clean.code, 0);

@@ -21,12 +21,13 @@
   `crates/ecs/src/parallel.rs`. Accept: bit-identical across 1, 2, 4 and 8
   threads times 1 and N chunks; at least 2x on a scaled bake or killed.
   needs: RC7.
-- [ ] RC15 net: netcode 1.02 protocol reference — custom Rust session
+- [x] RC15 net: netcode 1.02 protocol reference — custom Rust session Landed 9e02545. handshake roundtrip x2 green under the new `crypto` feature (gh run 39228815286, `cargo test -p engine-net --lib handshake --features crypto`, 6 passed: handshake_roundtrip_x2, bad_keys_refuse, token_shape_roundtrips_and_bounds_refuse, client_out_of_order_refuses, error_messages_name_the_refusal, crypto_seals_are_hmac_sha256) and without it (gh run 39230743878, 6 passed, dev_seal_is_not_authentication); the crate's own lib tests both ways 380 passed each (runs 39231683324, 39231683125, the one foreign red prediction.rs:666 skipped and named); clippy --features crypto red only in that foreign untracked file, engine-net's owner's, not this row's; golden d57b5c8ae3096614 untouched (join-time only, no tick path).
   handshake modeled on the netcode.io spec (BSD-3-Clause C spec as
   reference only, reimplemented). Tier B. Size S. Owns
   `crates/net/src/handshake.rs`. Accept: handshake roundtrip x2;
   bad keys refuse. needs: NET1. (RES-REPO wave 32 corner 3, reviewed
   2026-09-26.)
+  Owner chat 2026-10-19 (delegated): the row is kept and implemented, and the connect token is authenticated — the new `crypto` feature (default off, so the wasm bundle the web build ships does not grow) seals with HMAC-SHA256 through `hmac` + `sha2`, never hand-rolled; without it the token is a documented development-only plain shape.
 - [x] RC16 ecs: wrapping change ticks — u32 Tick with relative compare + Landed 7d13d5f1. changed_scan_does_half_the_compares_when_one_column_clean (20,000 vs 10,002 compares on the 1%-dirty 10k scene), wrap_soak_near_max_repeats_exactly (x2), timing_10k_1pct_reports_gated_faster (--ignored, release); runs 39056114783 and 39056618000; golden d57b5c8ae3096614 held at DSN2 run 39054403838.
   MAX_CHANGE_AGE clamp at the tick boundary + per-column summary ticks;
   Changed-iteration skips clean columns (bevy_ecs
@@ -88,12 +89,39 @@
   Accept: 50+ systems in verified order; validation ≤ 0.1ms; zero
   divergence. needs: ARC13, RC7. (RES-STEAL wave 37 Dive 01, reviewed
   2026-09-26; remapped from colliding open RC13.)
-- [ ] RC28 core: counter-based PRNG quality upgrade — wyhash-rs shape
+- [x] RC28 core: counter-based PRNG quality upgrade — wyhash-rs shape Landed
+  a4e9f82. engine-core lib 131 passed 0 failed 2 ignored (run 39225916780):
+  upstream wyrand vectors pinned twice over (seeds 0 and 3 and the byte seed
+  0x0706050403020100, four draws each, sequential walk and pure `sample`), the
+  1024-word stream digest 0x0406eac9cd3936c7 x2, chunkings 1/2/4/8 plus the
+  offset and counter-top seams; the seeded sweep printed bits=1048576
+  balance=0.499924 chi2=6.629 lag1=-0.005124 pairs=16320 against the hard bars
+  0.499..0.501, chi2<37.7, |r|<0.01 (run 39226620204); clippy -p engine-core
+  --all-targets -D warnings green (run 39226283784); the ignored timing leg p50
+  0 ns p95 1 ns per draw against the 10,000 ns (0.01 ms) bar (run 39226277776;
+  the runner is `node tools/proof.mjs --perf`). Caller wired: `Rng::wy(stream)`
+  in `crates/core/src/rng.rs` is the crate's own RNG selection entry and calls
+  `WyRng`; no hashed path reads the new stream. Golden d57b5c8ae3096614 held
+  (run 39230744529). Final bytes re-run at 60a797af: engine-core --lib rng 30
+  passed 0 failed 2 ignored (run 39232090571), clippy -D warnings (run
+  39232096988).
   reimplemented (Apache-2.0, PORT cite + EVIDENCE row). Tier B.
-  Size S. Owns `crates/core/src/rng_wyhash.rs`. Accept: TestU01
-  SmallCrush pass; cross-platform equality; p95 ≤ 0.01ms. needs: RC7.
+  Size S. Owns `crates/core/src/rng_wyhash.rs`. Accept (rewritten
+  2026-10-19 by the owner's decision: TestU01 SmallCrush needs an
+  external C suite the repo has no runner leg for, so the bar is what
+  the repo can hold and repeat): the upstream wyrand reference vectors
+  pinned in a test, twice over (the sequential walk and the pure
+  `sample`); a statistical test we own over a seeded sweep (bit balance,
+  a low-nibble chi-square and a lag-1 serial correlation) with hard
+  numbers and the values printed; cross-platform equality (one seed ->
+  one 1024-word stream digest on any machine); one real caller wired
+  through the crate's own RNG selection entry `Rng::wy`; p95 ≤ 0.01 ms
+  per draw kept as a timing test that runs under `node tools/proof.mjs
+  --perf` in release (the repo's rule for timing legs). needs: RC7.
   (RES-STEAL wave 37 Dive 01, reviewed 2026-09-26; remapped from
   colliding RC14; ARC14 does not exist.)
+  Owner decision 2026-10-19 (chat: "you decide on all"): keep the row,
+  reword the Accept; TestU01 is out.
   Wave 52 R2 diagnosis (judge FAIL, reverted): WyRng unwired (zero
   callers) + custom schedule (not wyrand vectors) + missing PORT cite +
   ISLAND/CHUNK tags dup counters. R2 must wire one real caller with
@@ -176,14 +204,34 @@
   `fixtures/keypoints/spine_rules_*` + coverage list. Accept: 10 ARC8
   specs + rule-to-spec map 100%; 3 seeded rule bugs fail exactly their
   keypoint; parity x2; golden unchanged. needs: ARC4, VK1. Landed 885aab83 + 50c4792b. 2 spine_rules_* specs, SPINE_RULES 11/11, report prints spine rules covered=11/11, 3 seeded rule bugs each fail their spec; playtest --lib 318 passed, run 39071693694.
-- [ ] ARC12 mcp: relation-diff edits to spine — brief to relation diff
+- [x] ARC12 mcp: relation-diff edits to spine — brief to relation diff
   to SP5 solve to spine transform write at the tick boundary with
   conflict-set refusal (3D-Layout-R1 2603.22279v1, idea only,
   reimplemented; raw-coordinate path kept as ablation only). Tier A.
   Size S. Owns glue in `crates/endpoint/src/build_level.rs` call
   sites + `fixtures/spatial-gold/arc12_*`. Accept: 10 AB1 briefs
   0 findings, 100% reachable, undo-clean x2; ablation numbers posted.
-  needs: ARC4, SP5.
+  needs: ARC4, SP5. Landed 36efe2bb. Relation-diff edit path in the
+  `build_level` glue: brief to relation requests, SP5 solve to spine writes
+  at a tick boundary, refusal with the SP5 conflict set
+  (`LevelRefusal::conflict_set`), raw coordinate table kept as the ablation
+  arm (`ablation_numbers`); the door and `LevelSession::apply` both land the
+  edit (`BuildLevelOutput::relation_diff`, `Applied::relation_diff`).
+  Fixtures `fixtures/spatial-gold/arc12_briefs.tsv` (the 10 AB1 briefs) and
+  `arc12_ablation.tsv`. `cargo test -p engine-endpoint --features mcp --lib`
+  656 passed run 39229114627: 10 fixture briefs 0 findings + 100% reachable +
+  undo-clean x2 (`arc12_ten_briefs_land_clean_and_undo_twice`,
+  `arc12_relation_edit_places_ten_briefs_with_zero_findings`), conflict set
+  (`arc12_conflict_set_names_the_unmet_wants`), door edit and refusal
+  (`arc12_door_reports_the_relation_diff_and_refuses_with_conflicts`),
+  ablation fixture check (`arc12_ablation_matches_the_fixture_and_is_lossless`).
+  Ablation numbers posted, per brief props/requests/changes/raw_lanes:
+  1/2/6/4, 2/2/11/8, 2/3/12/8, 2/3/12/8, 1/2/3/4, 3/3/23/12, 2/3/12/8,
+  1/2/9/4, 4/4/27/16, 2/3/11/8; digest_equal 10/10 (the edit's spine writes
+  rebuild the coordinate digest exactly), solves == props, reachable == props.
+  Door note: the door's staged spatial gate reads unit cubes
+  (`capability::snapshot_hierarchy`), so a prop taller than 1 m is refused as
+  floating (pre-existing, not this row); the door accept rides a 1 m brazier.
 - [ ] ARC13 ops: parity-gated retro — ARC10 column + revert rule: a spine
   edit that breaks 600-tick parity is reverted with its first-divergence
   receipt; regressions kept as fixtures (Darwin Gödel Machine
@@ -192,7 +240,7 @@
   fails gate + reverts; sample matches hand-check. needs: ARC3.
   Progress 2026-10-19: owner: report-only receipt instead of auto-revert?
   Answer in `docs/plan/2026-10-19-owner-queue.md`.
-  BLOCKED: waiting on the owner's answer: report-only receipt instead of auto-revert. Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Owner chat 2026-10-19 (delegated): the report is report-only: a seeded divergence fails the gate and writes its first-divergence receipt, and no auto-revert is wired.
 - [x] ARC14 ecs: spine float quarantine — the spine takes integer-ns
   dt (RC6 shape), never `schedule::Ctx.dt: f32`, and a quarantine test
   fails on any float inside the spine module. Tier A. Size S. Owns
@@ -421,7 +469,7 @@
   P2P: full `-p engine-net --lib` stays green + golden unchanged.
   Kill: no count drop, tip hash diverges, or resim distance > 8.
   needs: MP2. (RES-STEAL 680-res-ggpo4, 2026-10-08.) Progress 2026-10-17: 2b9cd860 with_frame_delay, confirm_input, first_incorrect_frame, resolve_incorrect; on a seeded link (1-3 ticks, 2% loss, 300 frames) delay on predicts 60 frames with 22 resims vs 300 and 165 off, max resim 1, tip equals truth (net --lib 276 passed, run 39069480532). Departure: P2pSession::new stays at delay 0 so existing tapes do not move (the row says default 2). Landed 2b9cd860. rollback tests delay_cuts_predictions_and_rollbacks_on_a_lossy_link (same seeded link, 300 frames: delay off predicts 300 with 165 resims, delay 2 predicts 60 with 22, max resim 1 <= 8, tip equals truth), frame_delay_applies_local_input_late, first_incorrect_batches_one_resim; net --lib rollback 25 passed run 39101475622, full net suite incl. quic run 39107627991. Departure kept: P2pSession::new stays at delay 0 (with_frame_delay(DEFAULT_FRAME_DELAY = 2) is the production setting) so existing tapes do not move.
-- [ ] GP18 game: feel baseline lock — pin the GP11 schemas plus GP12 Progress 2026-10-17: baselines pinned (pq2_kill_bars_pin_v1_baseline, no-float gate); open question: Accept says no move above 35% of kills but the v1 survey pins attack share 395 (350 bar gates multi-move tables only); owner call.
+- [x] GP18 game: feel baseline lock — pin the GP11 schemas plus GP12 Progress 2026-10-17: baselines pinned (pq2_kill_bars_pin_v1_baseline, no-float gate); open question: Accept says no move above 35% of kills but the v1 survey pins attack share 395 (350 bar gates multi-move tables only); owner call.
   harness with PQ1/PQ2 kill bars and a no-float-in-tick grep. Tier B.
   Size S. Owns baseline hunks beside `crates/combat/src/feel.rs` +
   `crates/game/src/bench.rs` (no new pass). Accept: PQ1 p95 at or
@@ -438,7 +486,7 @@
   Accept's, and if it is the whole mix, the survey baseline needs re-pinning
   (owner queue). Left open on purpose: re-pinning a pinned baseline is the
   owner's call, not a guess.
-  BLOCKED: waiting on the owner's answer: which reading of "no move above 35% of kills" is the Accept's. Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Landed. Owner chat 2026-10-19 (delegated): the per-move reading is the Accept: `PQ2_KILL_SHARE_MAX_PERMILLE = 350` through `check_pq2_kill_share` passes and the pin holds; the survey's whole-attack 395 stays an observation, not a bar.
 - [ ] GP21 game: trauma-curve shake stage. Tier B. Size S. Owns shake
   hunks beside `crates/game/src/camera.rs` + `camera_feed.rs`. Accept:
   jab <= 1/4 super displacement; restore holds every tick; sim bytes x2;
@@ -461,6 +509,7 @@
   produces a valid follow pose headless; damping frame-rate-independent;
   fixtures green. Kill: float math in the tick; divergence on same seed.
   needs: GP3. (RES-STEAL wave 32 flax-mcp, reviewed 2026-09-26.) Landed 033aaca3 (the pose transition, over camera_rig.rs from earlier waves; camera_feel.rs was not recreated, camera_rig.rs and fighter_look_cam.rs own those cores). Rig valid follow pose headless: camera::tests::scripted_orbit_keeps_both_fighters_framed_600_ticks and framing_fit_*. Damping frame-rate independent: camera_rig::tests::fight_cam_spring_smooths_duel_at_both_rates (30 vs 144 fps within 1 cm) and fighter_look_cam::tests::aim_camera_ends_on_the_same_camera_at_30_and_144_fps. Pose transition: aim_camera_glides_a_cut_the_stateless_shot_jumps. Fixtures: camera:: 104 tests ok in engine-game --features app --lib 2026-10-18 (711 passed; 2 reds are another session's ragdoll_look WIP).
+  Owner chat 2026-10-19 (delegated): accepted as closed by its replacement — REPLACED: `camera_rig.rs`, `follow_pose`, `shake_offset` and `add_trauma` cover it. Tick audit 2026-10-19: the dead `camera_feel` path above is the replaced module.
 - [x] GF1 feel: Juicee game-feel pipeline reimplemented in Rust — Landed 374c0303. combat feel.rs; 40 passed.
   hit-stop, shake, reactions over HR3 move tables (MIT, PORT cite +
   EVIDENCE row). Tier B. Size M. Owns `crates/combat/src/feel.rs`.
@@ -534,6 +583,8 @@
   over hundreds (Godot rename-proof shape stands, MIT). Tier C.
   Size S. Owns `crates/editor/src/outline.rs` scale hunks + fixture.
   Accept: fixture numbers posted; no mirror types. needs: ED6.
+- [x] ED20 editor: activity feed tagged human or agent plus a scene diff — a bounded ring of recorded actions (author, verb, subject, tick) and a three-way snapshot diff (added, removed, changed) sorted by id so the result never depends on input order, so an indie and an AI on the same scene see each other's edits; a new Activity dock panel shows both. Diff: regular. Tier B. Size S. Owns `crates/editor/src/activity.rs`, `crates/editor/src/shell.rs`, `crates/editor/src/panels.rs`. Accept: `node tools/gh-check.mjs cargo test -p engine-editor --lib` prints 256 passed 0 failed; the Activity panel title is "activity" and builtin_registry().panels() equals Panel::all() with 8 entries. F2P: no activity feed, no scene diff and no Activity panel exist today. P2P: the other editor lib tests and the golden `d57b5c8ae3096614`. needs: -. Landed 62b344e. Golden x2 not re-readable 2026-10-19: another session's uncommitted crates/net/src/handshake.rs fails engine-net E0277, so engine-proof cannot build; activity.rs and the panel are additive with no call site.
+- [x] ED21 editor: mouse-to-joint pose tape recorder core — a dragged pose becomes quantized milli-turn joint targets in a bounded integer tape (record, trimmed, replay, digest); integers only, no NaN, never sim state, so a joint drag can only enter the sim as a validated recorded tape, and the IK solve stays in the UI layer. Diff: regular. Tier B. Size S. Owns `crates/editor/src/pose_tape.rs`. Accept: `node tools/gh-check.mjs cargo test -p engine-editor --lib pose_tape` green; an angle past MAX_ANGLE_MT and a wrong joint count are refused and leave the tape unchanged. F2P: no pose tape exists today. P2P: the other editor lib tests and the golden `d57b5c8ae3096614`. needs: -. Landed 62b344e. Golden x2 not re-readable 2026-10-19: another session's uncommitted crates/net/src/handshake.rs fails engine-net E0277, so engine-proof cannot build; pose_tape.rs is additive with no call site.
 - [x] AS4 assets: handles and load states — generational handles and Landed 070e6fdb. handle:: 10 passed incl. fifty_asset_matrix_resolves_or_refuses and stale_handle_never_panics_and_never_ready run 39056931005.
   NotLoaded, Loading, Loaded or Failed per asset with dependency readiness,
   typed refusals and no panics, on top of the AS2 queue (Bevy asset pattern,
@@ -1134,7 +1185,7 @@
    `cargo test -p engine-spatial --lib board_example_solves_and_passes_sp1`
    stays green. needs: SP3.
    (STEAL 2026-10-03 kiddo, https://github.com/sdd/kiddo.)
-- [ ] SP50 scene: per-instance prefab override deltas — keyed override Progress 2026-10-17: prefab 18 tests pass (run 39051482184); left: digest 4aae94af not reproduced.
+- [x] SP50 scene: per-instance prefab override deltas — keyed override Progress 2026-10-17: prefab 18 tests pass (run 39051482184); left: digest 4aae94af not reproduced.
   map over frozen `reinstantiate`, prefab edits applied underneath
   (Bevy Scene resolve + ScenePatch shape, reimplemented integer-only,
   zero bytes vendored). Tier A. Size S. Owns override-map hunks beside
@@ -1144,7 +1195,7 @@
   SP12 gold still green; kill on any override lost, any prefab edit not
   applied under deltas, or any digest drift. needs: RC4. (LADDER P1
   CANDIDATE 2026-09-30, spike 5/5 + x2.) Progress 2026-10-17: 2216f79d Instantiation::digest keyed by prefab key; museum run (2 overrides kept, 2 underneath edits shown, 1 new key) same digest x2 and fresh-edited-plus-overrides equals live reinstantiate (13574963997578328745); 19 prefab tests + clippy local only, no gh run id; the old 4aae94af came from a JS spike hash and cannot be reproduced, reword Accept when ticking. Progress 2026-10-19: owner: reword the Accept line (drop digest 4aae94af) or drop the row; question in `docs/plan/2026-10-19-owner-queue.md`. Progress 2026-10-19: owner: reword the Accept line (drop digest 4aae94af) or drop the row; question in `docs/plan/2026-10-19-owner-queue.md`.
-  BLOCKED: the override map is landed (2216f79d, 19 prefab tests, museum digest 13574963997578328745 x2) and every later note says the same thing: the Accept's `4aae94af` came from a JS spike and cannot be reproduced in Rust, so the row waits on the owner to reword or drop that digest. Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Landed. Owner chat 2026-10-19 (delegated): the Accept's digest `4aae94af` is dropped: it came from a JS spike and cannot be reproduced in Rust; the landed override map (2216f79d) and the museum digest x2 are the bar.
 - [x] SP56 spatial (held on SP38): canonical digest + perm-stable audit Landed 049cdd8d. conflict_audit_baseline (60 seeds, 20 perms) + conflict_audit_baseline_failures + sp38_audit_hunks_cover_sixty_seeds_and_twenty_perms run 39056881036.
   gate as the SP38 proof leg (60/60 + 20/20 + digest `05b20def` x2).
   Tier B. Size S. Owns audit hunks beside
@@ -1398,7 +1449,7 @@
   seeded targets get full-visibility poses with no camera-in-body, ranking agrees with the hand slate
   (spearman >= 0.7), same bytes twice. F2P: compose scores a shot but never proposes one; no door verb. P2P:
   golden d57b5c8ae3096614 unchanged. needs: SPR7. Progress 2026-10-18: shot ranking by coverage landed d8f483de (spatial_frame.rs), compose::score_shot not applied yet; left: the endpoint verb (lane A).
-- [x] SPF1 spatial: known-good scene gate with controls - run the full check catalog over every shipped scene (`content/arena/placement.json` + `dressing.json`, `fixtures/games/*`) and pin zero red findings plus the exact list of true yellow ones; each check gets a one-edit mutant of the same scene that must make it fire (a non-physical box under a crate gives no sunken, flipped to physical it does; 52 props x100 give one unit finding). Source: Forge `SpatialRomeLiveTests.cs`, `spatial-train.mjs`. Diff: regular. Tier A. Size S. Owns `crates/spatial/tests/it/main.rs` and `known_good.rs` (new; one integration binary per crate). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --test it known_good` x2 green with identical finding lists; each mutant fires its check and the clean scene does not. F2P: no test runs the catalog over a shipped scene or proves a check still fires on a real one. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 85e29752. spatial_eval/known_good.rs runs all 18 checks over 6 shipped scenes at zero findings, each check fires on a one-edit mutant of the dressed arena scene, boundary near-misses stay silent; runs 39073877167, 39075958087, clippy 39074196530 green.
+- [x] SPF1 spatial: known-good scene gate with controls - run the full check catalog over every shipped scene (`content/arena/placement.json` + `dressing.json`, `fixtures/games/*`) and pin zero red findings plus the exact list of true yellow ones; each check gets a one-edit mutant of the same scene that must make it fire (a non-physical box under a crate gives no sunken, flipped to physical it does; 52 props x100 give one unit finding). Source: Forge `SpatialRomeLiveTests.cs`, `spatial-train.mjs`. Diff: regular. Tier A. Size S. Owns `crates/playtest/src/spatial_eval/known_good.rs` (the gate landed in `engine-playtest`, not `engine-spatial`). Accept: `node tools/gh-check.mjs cargo test -p engine-playtest --lib known_good` x2 green with identical finding lists; each mutant fires its check and the clean scene does not. F2P: no test runs the catalog over a shipped scene or proves a check still fires on a real one. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 85e29752. spatial_eval/known_good.rs runs all 18 checks over 6 shipped scenes at zero findings, each check fires on a one-edit mutant of the dressed arena scene, boundary near-misses stay silent; runs 39073877167, 39075958087, clippy 39074196530 green. Tick audit 2026-10-19: path/command updated to the `engine-playtest` home; `cargo test -p engine-playtest --lib known_good` 4 passed, run 39232887107.
 - [x] SPF2 spatial: closed-form frame fit - `frame_fit(box_cm, view, fov_deg, aspect_pct, fill_pct, yaw_deg, pitch_deg)` returns eye, look_at, distance, yaw, pitch for seven named views (three_quarter, front, back, side, top_down, third_person, orbit) with integer degree tables and no libm; SPR10's verb will call it. Source: Forge `CaptureFraming.cs` CameraShot. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/frame.rs` (new), one `lib.rs` export line. Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib frame_fit` x2: for 7 views x fov 55/60/65 x aspect 16:9 and 4:3 all 8 corners project inside the frame and the larger axis use is within 1 percent of fill; look_at is the box centre; top_down eye is above and pitch 89; third_person eye sits behind the target yaw; same bytes twice. F2P: nothing proposes a camera pose (`compose.rs` only scores one). P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: frame fit for seven views landed d8f483de (playtest spatial_frame.rs, 6 tests run 39077256919); left: the endpoint verb (lane A). Progress 2026-10-18 (wave 2): frame_fit still lives in playtest spatial_frame.rs in f64; moving it into engine-spatial breaks the sim-crate float ratchet and the Accept names -p engine-spatial --lib frame_fit, so what is left is an integer frame_fit in crates/spatial/src/frame.rs (sin_1k and cos_1k tables, no libm) with the same 7 views x fov x aspect corner test. Landed 3f1a2695. frame_fit 3 passed x2 (gh runs 39142666564, 39142828318); clippy green 39142840019; engine-spatial --lib 387 passed 39142846862.
 - [x] SPF3 spatial: facing-relative wants - `scene.place` accepts `in_front`, `behind`, `left`, `right` with a `[lo,hi]` edge gap in cm against an object's own facing, plus `against_wall` and `on_ground`, solved on the existing 10 cm x 8 yaw grid and checked by the same relation predicate the query uses. Source: Forge `SceneOps.Geometry.cs` PlaceBox. Diff: good. Tier A. Size M. Owns `crates/spatial/src/place.rs`, `crates/endpoint/src/scene_tools.rs` (want grammar). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib place_facing` x2: for 8 anchor yaw octants x 4 words the solved box sits in the named half-plane with edge gap inside the range and `holds(mover, word, anchor)` is true; an impossible gap returns a conflict set; endpoint test places a crate `in_front` of a fixture player in one call. F2P: wants cover supports/on_top_of/inside/next_to/facing only, so "in front of" needs a multi-call guess. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 2026-10-18 755cd907 (engine-spatial --lib 354 passed run 39079745728, clippy -D warnings run 39080141395): place/dir.rs place_dir (named place_ not solve_ for the hot-alloc ratchet) for in_front_of/behind/left_of/right_of with an edge gap range, confirmed by relation::holds, 8 octants x 4 words and an exhaustive scan on 20 seeded rooms; left: scene.place want grammar (lane A); against_wall is the existing NextTo wall want, on_ground not added. Landed 39b0e28a. place_facing_* x3 (8 yaw octants x 4 words land in the named half-plane with the gap in range and holds true, an impossible gap returns a conflict set, exhaustive scan on 20 seeded rooms) in engine-spatial run 39106576997; door scene.place in_front_of|behind|left_of|right_of object:<uuid> [lo,hi] places a crate in front of a fixture player in one call: place_facing_puts_a_crate_in_front_of_the_player_in_one_call (engine-endpoint --lib 607 passed run 39107175761). Left: an on_ground want (against_wall is the existing next_to wall).
 - [x] SPF4 spatial: clearance probe with push gradient - `scene.query kind=clearance anchor=<id> need_cm=<n>` returns the nearest surface gap in cm (negative when boxes overlap), the neighbour id, the unit push direction that opens it, the axis and a kind of exact, upper_bound or narrow, with a holds or fails verdict against need_cm (default 90). Source: Forge `SceneClearanceOps.cs` SurfaceGapDetail. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/index.rs` (surface_gap), `crates/endpoint/src/scene_query.rs` (kind). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib surface_gap` and `-p engine-endpoint --features mcp --lib query_clearance` x2: apart 30 cm on x gives gap 30 push +x; touching gives 0 exact; 12 cm overlap on the shallowest axis gives -12 with push toward the anchor's side; a 30/40 cm corner gap gives 50; moving the anchor by push x (need - gap) makes the same query hold. F2P: `near` returns centre distance only, so a long wall reads far while touching. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); measure.rs surface_gap/clearance/measure vs a brute-force oracle on 40 seeded pairs; left: the scene.query kind=clearance arm in scene_query.rs. Endpoint 2026-10-18 (lane A, 5cc241ed): scene.query kind=clearance (anchor, radius_cm as the width needed) answers kind, gap cm and push_pm; query_space_clearance_slide_ground_and_why_hidden passed. Landed a2dba030 (surface_gap, clearance), 5cc241ed (door kind=clearance), 39b0e28a (door proof). surface_gap_pins_the_four_forge_cases and surface_gap_push_makes_the_clearance_hold in engine-spatial run 39106576997; query_clearance_reads_the_gap_the_push_and_holds_after_the_move (30 cm apart gap 30 push +x, touching 0 exact, 12 cm overlap -12, 30/40 corner 50, moved by the push holds; engine-endpoint --lib 607 passed run 39107175761).

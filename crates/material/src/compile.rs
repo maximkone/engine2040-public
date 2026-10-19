@@ -70,9 +70,10 @@ pub const PERCEPTUAL_ROUGHNESS_FLOOR: f32 = 0.089;
 pub const ANISOTROPY_FLOOR: f32 = 0.001;
 
 /// Filament smallest half normal (`2^-14`, about `6.1e-5`): the fp16-safe
-/// lower bound the Schlick power base is clamped to. `2^-14` is exact in f32,
-/// so the literal is the value. The WGSL text declares it as `MIN_HALF_NORMAL`.
-pub const MIN_HALF_NORMAL: f32 = 6.103_515_625e-5;
+/// lower bound the Schlick power base is clamped to. `2^-14` is exact in f32
+/// and the shortest literal below rounds to it, so no digit is spare (clippy
+/// `excessive_precision`). The WGSL text declares it as `MIN_HALF_NORMAL`.
+pub const MIN_HALF_NORMAL: f32 = 6.103_515_6e-5;
 
 /// The perceptual-roughness clamp the generated BRDF applies:
 /// [`PERCEPTUAL_ROUGHNESS_FLOOR`] below, one above. The CPU twin
@@ -377,7 +378,7 @@ pub fn material_table() -> Vec<MaterialRow> {
         .records()
         .iter()
         .enumerate()
-        .flat_map(|(index, record)| {
+        .filter_map(|(index, record)| {
             let id = u8::try_from(index).ok()?;
             let structure = Structure::of(record);
             Some(MaterialRow {
@@ -1466,7 +1467,7 @@ mod tests {
     fn the_filament_clamps_are_named_consts_the_text_reads() {
         assert_eq!(PERCEPTUAL_ROUGHNESS_FLOOR, 0.089, "roughness floor");
         assert_eq!(ANISOTROPY_FLOOR, 0.001, "anisotropy floor");
-        assert_eq!(MIN_HALF_NORMAL, 6.103_515_625e-5, "2^-14 half normal");
+        assert_eq!(MIN_HALF_NORMAL, 6.103_515_6e-5, "2^-14 half normal");
         assert_eq!(
             MIN_HALF_NORMAL,
             2f32.powi(-14),

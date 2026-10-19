@@ -65,6 +65,14 @@ impl Rng {
     pub fn fork_named(&self, name: &str) -> Self {
         self.fork(hash_bytes(name.as_bytes()))
     }
+    /// Generator selection for new bake work: a wyrand-shape counter stream
+    /// keyed by fork `stream` of this stream. The legacy xorshift stream is
+    /// untouched, so frozen replays keep their words; a caller that wants the
+    /// upstream wyrand vectors seeds [`crate::rng_wyhash::WyRng`] directly.
+    pub fn wy(&self, stream: u64) -> crate::rng_wyhash::WyRng {
+        let m = self.0.wrapping_add(stream.wrapping_mul(GOLDEN_GAMMA));
+        crate::rng_wyhash::WyRng::new(splitmix64(m))
+    }
     /// FNV-1a 64 over each word's little-endian bytes, in order.
     pub fn digest(vals: &[u64]) -> u64 {
         hash_u64s(vals)
@@ -127,6 +135,26 @@ mod tests {
         assert_eq!(p.fork(1), p.fork(1));
         assert_ne!(p.fork(0), p.fork(1));
         assert_eq!(p.state(), Rng::new(7).state());
+    }
+    #[test]
+    fn quality_selection_is_deterministic_and_leaves_the_legacy_stream() {
+        let parent = Rng::new(2040);
+        assert_eq!(parent.wy(1), parent.wy(1));
+        assert_ne!(parent.wy(0), parent.wy(1), "streams draw apart");
+        assert_eq!(
+            parent.state(),
+            Rng::new(2040).state(),
+            "selection forks, it never advances the parent"
+        );
+        let (mut a, mut b) = (parent.wy(7), Rng::new(2040).wy(7));
+        for word in 0..8 {
+            assert_eq!(a.next_u64(), b.next_u64(), "word {word}");
+        }
+        assert_ne!(
+            parent.wy(7).next_u64(),
+            Rng::new(2040).next_u64(),
+            "the selected stream is not the legacy stream"
+        );
     }
     #[test]
     fn fork_named_golden() {

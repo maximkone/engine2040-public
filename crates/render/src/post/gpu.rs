@@ -1,5 +1,10 @@
 use super::PostError;
 
+// One owner for these two helpers: `aa_scale::gpu` holds the bodies, and the
+// public path `post::gpu::max_abs_diff` stays here as a re-export.
+use crate::aa_scale::gpu::pack_pixels;
+pub use crate::aa_scale::gpu::max_abs_diff;
+
 /// TAA resolve chunk (WGSL): bilinear history reproject, 3x3 box clamp
 /// around the current texel, velocity rejection, blend.
 pub const TAA_RESOLVE_WGSL: &str = include_str!("../shaders/post/taa_resolve.wgsl");
@@ -227,17 +232,6 @@ fn storage_layout(device: &wgpu::Device, label: &str, counts: &[u32]) -> wgpu::B
     })
 }
 
-fn pack_pixels(pixels: &[[f32; 3]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pixels.len() * 16);
-    for p in pixels {
-        out.extend_from_slice(&p[0].to_le_bytes());
-        out.extend_from_slice(&p[1].to_le_bytes());
-        out.extend_from_slice(&p[2].to_le_bytes());
-        out.extend_from_slice(&1f32.to_le_bytes());
-    }
-    out
-}
-
 fn pack_motion(flow: &[[f32; 2]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(flow.len() * 16);
     for m in flow {
@@ -258,6 +252,41 @@ fn storage_buf(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC,
     })
+}
+
+/// Fixed-size little-endian uniform packer: the RP1 uniforms are constant
+/// byte layouts, so they pack into a caller stack array instead of a heap
+/// `Vec`. Pushing past `N` drops the excess, which leaves the block short
+/// of its declared layout and fails loudly at bind.
+struct Pack<const N: usize> {
+    bytes: [u8; N],
+    at: usize,
+}
+
+impl<const N: usize> Pack<N> {
+    fn new() -> Self {
+        Self {
+            bytes: [0u8; N],
+            at: 0,
+        }
+    }
+
+    fn u32(&mut self, value: u32) {
+        for (i, byte) in value.to_le_bytes().iter().enumerate() {
+            if let Some(slot) = self.bytes.get_mut(self.at + i) {
+                *slot = *byte;
+            }
+        }
+        self.at += 4;
+    }
+
+    fn f32(&mut self, value: f32) {
+        self.u32(value.to_bits());
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.at.min(N)]
+    }
 }
 
 fn zero_storage(device: &wgpu::Device, label: &str, texels: u64) -> wgpu::Buffer {
@@ -492,18 +521,16 @@ impl Rp1Submitter {
         let compiled =
             super::compile_rp1_for_present(render_w, render_h, present_w, present_h, chain)?;
         if compiled.order().len() != 6 {
-            return Err(PostError::Invalid(format!(
-                "rp1 compiled passes {} differ from 6",
-                compiled.order().len()
-            )));
+            let passes = compiled.order().len();
+            let reason = format!("rp1 compiled passes {passes} differ from 6"); // alloc-ok: cold refusal, never a steady frame
+            return Err(PostError::Invalid(reason));
         }
         super::check_image(current, render_w, render_h, "taa current")?;
         super::check_image(history, render_w, render_h, "taa history")?;
         if motion.width != render_w || motion.height != render_h {
-            return Err(PostError::Invalid(format!(
-                "taa motion {}x{} differs from render {render_w}x{render_h}",
-                motion.width, motion.height
-            )));
+            let (mw, mh) = (motion.width, motion.height);
+            let reason = format!("taa motion {mw}x{mh} differs from render {render_w}x{render_h}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(PostError::Invalid(reason));
         }
         let mult = chain.exposure.mult()?;
         let render_n = render_w as usize * render_h as usize;
@@ -512,21 +539,21 @@ impl Rp1Submitter {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         // Stage 1 (taa): render-size resolve.
         let taa_started = std::time::Instant::now();
-        let mut taa_uni = Vec::with_capacity(48);
-        taa_uni.extend_from_slice(&render_w.to_le_bytes());
-        taa_uni.extend_from_slice(&render_h.to_le_bytes());
-        taa_uni.extend_from_slice(&0u32.to_le_bytes());
-        taa_uni.extend_from_slice(&0u32.to_le_bytes());
-        taa_uni.extend_from_slice(&taa.effective_blend().to_le_bytes());
-        taa_uni.extend_from_slice(&taa.motion_threshold_px.to_le_bytes());
-        taa_uni.extend_from_slice(&(if taa.use_clamp { 1f32 } else { 0f32 }).to_le_bytes());
-        taa_uni.extend_from_slice(&0f32.to_le_bytes());
-        taa_uni.extend_from_slice(&jitter_px[0].to_le_bytes());
-        taa_uni.extend_from_slice(&jitter_px[1].to_le_bytes());
-        taa_uni.extend_from_slice(&0f32.to_le_bytes());
-        taa_uni.extend_from_slice(&0f32.to_le_bytes());
+        let mut taa_uni = Pack::<48>::new();
+        taa_uni.u32(render_w);
+        taa_uni.u32(render_h);
+        taa_uni.u32(0);
+        taa_uni.u32(0);
+        taa_uni.f32(taa.effective_blend());
+        taa_uni.f32(taa.motion_threshold_px);
+        taa_uni.f32(if taa.use_clamp { 1.0 } else { 0.0 });
+        taa_uni.f32(0.0);
+        taa_uni.f32(jitter_px[0]);
+        taa_uni.f32(jitter_px[1]);
+        taa_uni.f32(0.0);
+        taa_uni.f32(0.0);
         let (taa_u, cur_buf, hist_buf, mot_buf, resolved_buf) = (
-            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-taa", &taa_uni),
+            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-taa", taa_uni.as_slice()),
             storage_buf(device, "rp1-cur", &pack_pixels(current)),
             storage_buf(device, "rp1-hist", &pack_pixels(history)),
             storage_buf(device, "rp1-mot", &pack_motion(&motion.flow)),
@@ -555,17 +582,17 @@ impl Rp1Submitter {
         let up_started = std::time::Instant::now();
         let sx = render_w as f32 / present_w as f32;
         let sy = render_h as f32 / present_h as f32;
-        let mut up_uni = Vec::with_capacity(32);
-        up_uni.extend_from_slice(&render_w.to_le_bytes());
-        up_uni.extend_from_slice(&render_h.to_le_bytes());
-        up_uni.extend_from_slice(&present_w.to_le_bytes());
-        up_uni.extend_from_slice(&present_h.to_le_bytes());
-        up_uni.extend_from_slice(&sx.to_le_bytes());
-        up_uni.extend_from_slice(&sy.to_le_bytes());
-        up_uni.extend_from_slice(&0f32.to_le_bytes());
-        up_uni.extend_from_slice(&0f32.to_le_bytes());
+        let mut up_uni = Pack::<32>::new();
+        up_uni.u32(render_w);
+        up_uni.u32(render_h);
+        up_uni.u32(present_w);
+        up_uni.u32(present_h);
+        up_uni.f32(sx);
+        up_uni.f32(sy);
+        up_uni.f32(0.0);
+        up_uni.f32(0.0);
         let (up_u, up_buf) = (
-            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-up", &up_uni),
+            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-up", up_uni.as_slice()),
             zero_storage(device, "rp1-upsampled", present_n as u64),
         );
         let up_bind = self.bind(device, &self.up_layout, &[&up_u, &resolved_buf, &up_buf]);
@@ -585,17 +612,17 @@ impl Rp1Submitter {
         let up_ms = up_started.elapsed().as_secs_f64() * 1000.0;
         // Stage 3 (bloom): bright extract then box-blur mip chain.
         let bloom_started = std::time::Instant::now();
-        let mut bright_uni = Vec::with_capacity(32);
-        bright_uni.extend_from_slice(&chain.bloom.threshold.to_le_bytes());
-        bright_uni.extend_from_slice(&chain.bloom.knee.to_le_bytes());
-        bright_uni.extend_from_slice(&0f32.to_le_bytes());
-        bright_uni.extend_from_slice(&0f32.to_le_bytes());
-        bright_uni.extend_from_slice(&present_w.to_le_bytes());
-        bright_uni.extend_from_slice(&present_h.to_le_bytes());
-        bright_uni.extend_from_slice(&0u32.to_le_bytes());
-        bright_uni.extend_from_slice(&0u32.to_le_bytes());
+        let mut bright_uni = Pack::<32>::new();
+        bright_uni.f32(chain.bloom.threshold);
+        bright_uni.f32(chain.bloom.knee);
+        bright_uni.f32(0.0);
+        bright_uni.f32(0.0);
+        bright_uni.u32(present_w);
+        bright_uni.u32(present_h);
+        bright_uni.u32(0);
+        bright_uni.u32(0);
         let (bright_u, bright_buf) = (
-            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-bright", &bright_uni),
+            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-bright", bright_uni.as_slice()),
             zero_storage(device, "rp1-bright", present_n as u64),
         );
         let bright_bind = self.bind(
@@ -623,8 +650,8 @@ impl Rp1Submitter {
         // in order. Borrows end at bind-group creation, so pushing the
         // next dst after each submit is borrow-clean.
         let plan = super::BloomPassPlan::for_frame(present_h, &chain.bloom)?;
-        let mut chain_bufs: Vec<wgpu::Buffer> = vec![bright_buf];
-        let mut chain_sizes: Vec<(u32, u32)> = vec![(present_w, present_h)];
+        let mut chain_bufs: Vec<wgpu::Buffer> = vec![bright_buf]; // alloc-ok: run_frame probe staging with readback, not the window steady frame
+        let mut chain_sizes: Vec<(u32, u32)> = vec![(present_w, present_h)]; // alloc-ok: run_frame probe staging with readback, not the window steady frame
         for level in 0..plan.depth {
             let (lw, lh) = chain_sizes[chain_sizes.len() - 1];
             let nw = lw.div_ceil(2).max(1);
@@ -632,16 +659,17 @@ impl Rp1Submitter {
             // The first downsample is Karis-weighted (mode 1), later
             // levels are plain box averages (mode 0).
             let karis = u32::from(level == 0);
-            let mut down_uni = Vec::with_capacity(32);
-            down_uni.extend_from_slice(&lw.to_le_bytes());
-            down_uni.extend_from_slice(&lh.to_le_bytes());
-            down_uni.extend_from_slice(&nw.to_le_bytes());
-            down_uni.extend_from_slice(&nh.to_le_bytes());
-            down_uni.extend_from_slice(&karis.to_le_bytes());
-            down_uni.extend_from_slice(&0u32.to_le_bytes());
-            down_uni.extend_from_slice(&0u32.to_le_bytes());
-            down_uni.extend_from_slice(&0u32.to_le_bytes());
-            let down_u = crate::v1_gpu::create_uniform_buffer(device, "rp1-u-down", &down_uni);
+            let mut down_uni = Pack::<32>::new();
+            down_uni.u32(lw);
+            down_uni.u32(lh);
+            down_uni.u32(nw);
+            down_uni.u32(nh);
+            down_uni.u32(karis);
+            down_uni.u32(0);
+            down_uni.u32(0);
+            down_uni.u32(0);
+            let down_u =
+                crate::v1_gpu::create_uniform_buffer(device, "rp1-u-down", down_uni.as_slice());
             let dst = zero_storage(device, "rp1-mip", nw as u64 * nh as u64);
             {
                 let src = &chain_bufs[chain_bufs.len() - 1];
@@ -691,7 +719,7 @@ impl Rp1Submitter {
         // mips, target.
         let comp_started = std::time::Instant::now();
         let mut mip_total: u64 = 0;
-        let mut mip_offs: Vec<u64> = Vec::with_capacity(mip_bufs.len());
+        let mut mip_offs: Vec<u64> = Vec::with_capacity(mip_bufs.len()); // alloc-ok: run_frame probe staging with readback, not the window steady frame
         for (w, h) in mip_sizes.iter() {
             mip_offs.push(mip_total);
             mip_total += *w as u64 * *h as u64;
@@ -702,31 +730,31 @@ impl Rp1Submitter {
             full_sizes[i] = (s.0, s.1, mip_offs[i]);
         }
         let count = mip_sizes.len().min(6) as u32;
-        let mut comp_uni = Vec::with_capacity(160);
-        comp_uni.extend_from_slice(&present_w.to_le_bytes());
-        comp_uni.extend_from_slice(&present_h.to_le_bytes());
-        comp_uni.extend_from_slice(&count.to_le_bytes());
-        comp_uni.extend_from_slice(&0u32.to_le_bytes());
+        let mut comp_uni = Pack::<160>::new();
+        comp_uni.u32(present_w);
+        comp_uni.u32(present_h);
+        comp_uni.u32(count);
+        comp_uni.u32(0);
         for (w, h, off) in full_sizes {
-            comp_uni.extend_from_slice(&w.to_le_bytes());
-            comp_uni.extend_from_slice(&h.to_le_bytes());
-            comp_uni.extend_from_slice(&(off as u32).to_le_bytes());
-            comp_uni.extend_from_slice(&0u32.to_le_bytes());
+            comp_uni.u32(w);
+            comp_uni.u32(h);
+            comp_uni.u32(off as u32);
+            comp_uni.u32(0);
         }
-        comp_uni.extend_from_slice(&chain.bloom.intensity.to_le_bytes());
-        comp_uni.extend_from_slice(&mult.to_le_bytes());
-        comp_uni.extend_from_slice(&chain.aces_white.to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.contrast.to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.saturation.to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.lift[0].to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.lift[1].to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.lift[2].to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.gain[0].to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.gain[1].to_le_bytes());
-        comp_uni.extend_from_slice(&chain.grade.gain[2].to_le_bytes());
-        comp_uni.extend_from_slice(&0f32.to_le_bytes());
+        comp_uni.f32(chain.bloom.intensity);
+        comp_uni.f32(mult);
+        comp_uni.f32(chain.aces_white);
+        comp_uni.f32(chain.grade.contrast);
+        comp_uni.f32(chain.grade.saturation);
+        comp_uni.f32(chain.grade.lift[0]);
+        comp_uni.f32(chain.grade.lift[1]);
+        comp_uni.f32(chain.grade.lift[2]);
+        comp_uni.f32(chain.grade.gain[0]);
+        comp_uni.f32(chain.grade.gain[1]);
+        comp_uni.f32(chain.grade.gain[2]);
+        comp_uni.f32(0.0);
         let (comp_u, ldr_buf) = (
-            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-comp", &comp_uni),
+            crate::v1_gpu::create_uniform_buffer(device, "rp1-u-comp", comp_uni.as_slice()),
             zero_storage(device, "rp1-ldr", present_n as u64),
         );
         let comp_bind = self.bind(
@@ -756,10 +784,10 @@ impl Rp1Submitter {
         queue.submit(Some(encoder.finish()));
         device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| PostError::Device(format!("poll: {e}")))?;
+            .map_err(|e| PostError::Device(format!("poll: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
         let scope_err = pollster::block_on(scope.pop());
         if let Some(err) = scope_err {
-            return Err(PostError::Validation(format!("{err:?}")));
+            return Err(PostError::Validation(format!("{err:?}"))); // alloc-ok: cold validation failure, never a steady frame
         }
         let comp_ms_total = comp_started.elapsed().as_secs_f64() * 1000.0;
         // Single readback of the LDR buffer.
@@ -781,15 +809,15 @@ impl Rp1Submitter {
         });
         device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| PostError::Device(format!("poll: {e}")))?;
+            .map_err(|e| PostError::Device(format!("poll: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
         rx.recv()
-            .map_err(|e| PostError::Device(format!("map channel: {e}")))?
-            .map_err(|e| PostError::Device(format!("map: {e}")))?;
-        let mut ldr = Vec::with_capacity(present_n);
+            .map_err(|e| PostError::Device(format!("map channel: {e}")))? // alloc-ok: cold device-loss path, never a steady frame
+            .map_err(|e| PostError::Device(format!("map: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
+        let mut ldr = Vec::with_capacity(present_n); // alloc-ok: run_frame probe staging with readback, not the window steady frame
         {
             let mapped = slice
                 .get_mapped_range()
-                .map_err(|e| PostError::Device(format!("mapped range: {e}")))?;
+                .map_err(|e| PostError::Device(format!("mapped range: {e}")))?; // alloc-ok: cold device-loss path, never a steady frame
             for chunk in mapped.chunks_exact(16) {
                 let x = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 let y = f32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
@@ -863,13 +891,3 @@ impl Rp1Submitter {
     }
 }
 
-/// Max per-channel abs diff between two clips (CPU/GPU parity figure).
-pub fn max_abs_diff(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
-    let mut max = 0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        for c in 0..3 {
-            max = max.max((x[c] - y[c]).abs());
-        }
-    }
-    max
-}

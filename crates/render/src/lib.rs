@@ -367,6 +367,12 @@ pub mod ibl_arena_env;
 /// and staged as a vert strip; consumer is the `crates/game` trail feed.
 pub mod trail;
 
+/// CPU naga gate over the shipped WGSL (CQ23): every file under `src/shaders`
+/// validates without a GPU, and the window's hot-reload cook refuses an edit
+/// that does not. Needs `shader-validate`; the default graph stays std-only.
+#[cfg(feature = "shader-validate")]
+pub mod shader_gate;
+
 #[cfg(test)]
 mod webgpu_limits;
 

@@ -10,9 +10,38 @@ use std::collections::{BTreeMap, BTreeSet};
 use engine_spatial::Actor;
 
 use super::{
-    actors_digest, build, envelope, room_shell, BuildOutcome, BuildReport, CostInfo, LevelError,
-    LevelRefusal, Placement,
+    actors_digest, envelope, room_shell, BuildReport, CostInfo, EditOutcome, LevelError,
+    LevelRefusal, Placement, RelationEdit, SpineWrite,
 };
+
+/// One SpineWrite back as a level actor on the shell: the exact inverse of
+/// the edit's `writes_of`, so a landed relation-diff edit reproduces the
+/// actor list the solve produced (and its digest).
+fn actor_of(write: &SpineWrite) -> Actor {
+    Actor {
+        id: write.id,
+        name: write.name.clone(),
+        x: write.pos[0],
+        y: write.pos[1],
+        z: write.pos[2],
+        sx: write.scale[0],
+        sy: write.scale[1],
+        sz: write.scale[2],
+        parent: None,
+        physical: true,
+        vx: 0.0,
+        vz: 0.0,
+        yaw: write.yaw,
+    }
+}
+
+/// The room shell plus one actor per edit write, in write order (prop-id
+/// order), the level spine a landed edit installs.
+fn actors_of(edit: &RelationEdit) -> Vec<Actor> {
+    let mut actors = room_shell();
+    actors.extend(edit.writes.iter().map(actor_of));
+    actors
+}
 
 /// Dry-run preview: the full chain with no writes.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +55,10 @@ pub struct SessionPreview {
     pub placements: Vec<Placement>,
     /// Gate finding lines (empty on a pass).
     pub findings: Vec<String>,
+    /// Relation delta lines the edit would make (ARC12).
+    pub relation_diff: Vec<String>,
+    /// SP5 conflict-set lines a refusal names (empty on a pass).
+    pub conflict_set: Vec<String>,
     /// Repair rounds consumed.
     pub repairs_used: u8,
     /// `"pass"` or `"refused"`.
@@ -52,6 +85,8 @@ pub struct Applied {
     /// Shared LW6 envelope record line (`BriefEnvelope::record_line`).
     /// Every landed write carries it so the audit traces end to end.
     pub record_line: String,
+    /// Relation delta lines this edit made (`engine_spatial::describe` order).
+    pub relation_diff: Vec<String>,
     /// Passing report.
     pub report: BuildReport,
 }
@@ -128,28 +163,34 @@ impl LevelSession {
         actors_digest(&self.current)
     }
 
-    /// Dry run: validate, solve, gate and report with no writes.
+    /// Dry run: validate, solve the relation-diff edit, gate and report with
+    /// no writes. The relation delta the edit would make rides the preview so
+    /// a caller reviews relations, not coordinates.
     pub fn preview(&self, text: &str, seed: u64) -> Result<SessionPreview, LevelError> {
         let env = envelope(text, seed)?;
         let resulting_revision = self.revision + 1;
-        match build(&env)? {
-            BuildOutcome::Placed(level) => Ok(SessionPreview {
-                brief_id: level.report.brief_id,
+        match super::relation_edit(&env)? {
+            EditOutcome::Edited(edit) => Ok(SessionPreview {
+                brief_id: edit.report.brief_id,
                 record_line: env.record_line(),
-                placements: level.report.placements.clone(),
+                placements: edit.report.placements.clone(),
                 findings: Vec::new(),
-                repairs_used: level.report.repairs_used,
+                relation_diff: edit.changes,
+                conflict_set: Vec::new(),
+                repairs_used: edit.report.repairs_used,
                 verdict: "pass".to_owned(),
                 resulting_revision,
-                level_digest: level.report.level_digest,
-                next_ab4: level.report.next_ab4.clone(),
-                cost: level.report.cost.clone(),
+                level_digest: edit.report.level_digest,
+                next_ab4: edit.report.next_ab4.clone(),
+                cost: edit.report.cost.clone(),
             }),
-            BuildOutcome::Refused(refusal) => Ok(SessionPreview {
+            EditOutcome::Refused(refusal) => Ok(SessionPreview {
                 brief_id: refusal.brief_id,
                 record_line: env.record_line(),
                 placements: Vec::new(),
                 findings: refusal.findings.clone(),
+                relation_diff: Vec::new(),
+                conflict_set: refusal.conflict_set.clone(),
                 repairs_used: refusal.repairs_used,
                 verdict: "refused".to_owned(),
                 resulting_revision,
@@ -165,10 +206,11 @@ impl LevelSession {
         }
     }
 
-    /// Atomic apply: stale revisions, duplicate keys and undone keys
-    /// write nothing; a refused build writes nothing; a placed build
-    /// lands exactly one revision. Same key plus same payload replays the
-    /// recorded receipt.
+    /// Atomic apply through the relation-diff edit path (ARC12): stale
+    /// revisions, duplicate keys and undone keys write nothing; a refused
+    /// build writes nothing; a placed build lands exactly one revision and
+    /// its writes install the level spine. Same key plus same payload
+    /// replays the recorded receipt.
     pub fn apply(
         &mut self,
         text: &str,
@@ -192,23 +234,24 @@ impl LevelSession {
             }
             return Err(LevelError::DuplicateKey { key });
         }
-        match build(&env)? {
-            BuildOutcome::Refused(refusal) => Ok(ApplyOutcome::Refused {
+        match super::relation_edit(&env)? {
+            EditOutcome::Refused(refusal) => Ok(ApplyOutcome::Refused {
                 refusal,
                 revision: self.revision,
             }),
-            BuildOutcome::Placed(level) => {
+            EditOutcome::Edited(edit) => {
                 let revision = self.revision + 1;
                 let applied = Applied {
                     revision,
                     key,
                     undo_token: key,
                     record_line: env.record_line(),
-                    report: level.report.clone(),
+                    relation_diff: edit.changes.clone(),
+                    report: edit.report.clone(),
                 };
                 self.history.push(SessionEntry {
                     key,
-                    prev: std::mem::replace(&mut self.current, level.actors),
+                    prev: std::mem::replace(&mut self.current, actors_of(&edit)),
                 });
                 self.keys.insert(key, (env.brief_id(), applied.clone()));
                 self.revision = revision;

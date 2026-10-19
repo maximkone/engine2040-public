@@ -276,7 +276,7 @@ impl SmaaSubmitter {
     }
 }
 
-fn pack_pixels(pixels: &[[f32; 3]]) -> Vec<u8> {
+pub(crate) fn pack_pixels(pixels: &[[f32; 3]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(pixels.len() * 16);
     for p in pixels {
         out.extend_from_slice(&p[0].to_le_bytes());

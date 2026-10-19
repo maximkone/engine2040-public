@@ -504,7 +504,7 @@ impl Blas {
                 requested,
                 fallback,
                 reason,
-                adapter: "headless twin".to_owned(),
+                adapter: "headless twin".to_owned(), // alloc-ok: submit_gpu result record, not the window steady frame
             },
             other => other,
         })?;
@@ -1033,7 +1033,7 @@ impl std::error::Error for AccelSubmitError {}
 /// never as a silent downgrade and never as `Unsupported`.
 #[cfg(feature = "window")]
 fn gate_submit_tier(tier: Tier) -> Result<(), AccelSubmitError> {
-    require_rt(tier).map_err(|e| AccelSubmitError::Invalid(e.to_string()))
+    require_rt(tier).map_err(|e| AccelSubmitError::Invalid(e.to_string())) // alloc-ok: cold refusal, never a steady frame
 }
 
 /// One device accel submit: record counts, the validation outcome and the
@@ -1175,10 +1175,9 @@ impl AccelSubmitter {
             ));
         }
         if blas.len() > ACCEL_MAX_BLAS {
-            return Err(AccelSubmitError::Invalid(format!(
-                "accel submit holds {} BLAS over {ACCEL_MAX_BLAS}",
-                blas.len()
-            )));
+            let held = blas.len();
+            let reason = format!("accel submit holds {held} BLAS over {ACCEL_MAX_BLAS}"); // alloc-ok: cold refusal
+            return Err(AccelSubmitError::Invalid(reason));
         }
         if tlas.instances().is_empty() {
             return Err(AccelSubmitError::Invalid(
@@ -1190,10 +1189,9 @@ impl AccelSubmitter {
         let records = device_record_words(blas, tlas);
         let expect_records = tri_count * ACCEL_TRI_WORDS + inst_count * ACCEL_INSTANCE_WORDS;
         if records.len() != expect_records {
-            return Err(AccelSubmitError::Invalid(format!(
-                "accel record image {} words mismatches {expect_records}",
-                records.len()
-            )));
+            let words = records.len();
+            let reason = format!("accel record image {words} words mismatches {expect_records}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(AccelSubmitError::Invalid(reason));
         }
         let total = tri_count + inst_count;
         let tri_u32 = u32::try_from(tri_count)
@@ -1206,7 +1204,7 @@ impl AccelSubmitter {
         let flag_bytes = total as u64 * 4;
         let started = Instant::now();
 
-        let mut rec_raw = Vec::with_capacity(records.len() * 4);
+        let mut rec_raw = Vec::with_capacity(records.len() * 4); // alloc-ok: submit probe staging with readback, not the window steady frame
         for w in &records {
             rec_raw.extend_from_slice(&w.to_le_bytes());
         }
@@ -1273,19 +1271,17 @@ impl AccelSubmitter {
         let flags = readback_u32(&readback, total, "accel", "flags")?;
         readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
-            return Err(AccelSubmitError::Validation(format!("{err:?}")));
+            return Err(AccelSubmitError::Validation(format!("{err:?}"))); // alloc-ok: cold validation failure, never a steady frame
         }
         let expected = cpu_validate_records(&records, tri_count, inst_count);
         for (i, (got, want)) in flags.iter().zip(expected.iter()).enumerate() {
             if got != want {
-                return Err(AccelSubmitError::Validation(format!(
-                    "accel record {i} device flag {got} mismatches oracle {want}"
-                )));
+                let reason = format!("accel record {i} device flag {got} mismatches oracle {want}"); // alloc-ok: cold validation failure, never a steady frame
+                return Err(AccelSubmitError::Validation(reason));
             }
             if *got != 1 {
-                return Err(AccelSubmitError::Validation(format!(
-                    "accel record {i} failed validation on device and oracle"
-                )));
+                let reason = format!("accel record {i} failed validation on device and oracle"); // alloc-ok: cold validation failure, never a steady frame
+                return Err(AccelSubmitError::Validation(reason));
             }
         }
         Ok(AccelGpuReceipt {

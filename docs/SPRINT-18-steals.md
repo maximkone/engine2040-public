@@ -157,13 +157,13 @@ Every row is one crate, small, with a named donor and a test that fails before.
   usage above budget gives pressure over 100; x2 equal. F2P: no vram module. P2P:
   `cargo test -p engine-perf --lib` green.
 - [x] GS14 perf: peak heap gate — extend `crates/perf/src/alloc.rs` with `peak_bytes` Landed 334b5700. peak_live_bytes in alloc_probe; runs 39051586513, 39051586814.
-  if absent, and add `crates/perf/tests/heap_peak.rs`: run the 600-tick 8-fighter
+  if absent, and add `crates/perf/tests/it/heap_peak.rs`: run the 600-tick 8-fighter
   headless match and record peak live heap to `target/reports/heap-peak.csv`. The
   first run writes `crates/perf/baselines/heap_peak.txt`; later runs fail when peak
   grows more than 10%. Diff: regular. Tier A. Size S. Owns `crates/perf/src/alloc.rs`
-  and `crates/perf/tests/heap_peak.rs`. Accept: peak is the same x2; a test that
+  and `crates/perf/tests/it/heap_peak.rs`. Accept: peak is the same x2; a test that
   allocates 64 MiB extra trips the 10% rule. F2P: no peak number exists. P2P:
-  `cargo test -p engine-perf` green; golden unchanged.
+  `cargo test -p engine-perf` green; golden unchanged. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-perf --test it heap_peak::` 8 passed, run 39231141286.
 - [x] GS15 assets: potato asset budget — new `crates/assets/src/budget.rs`: `Caps Landed 4c6d817.
   {max_tris, max_bones, max_influences, max_materials_per_skin, max_tex_px}` consts
   `POTATO` and `COMFORT`, and `check(&MeshStats, &Caps) -> Vec<BudgetFinding>` over a
@@ -349,13 +349,13 @@ Every row is one crate, small, with a named donor and a test that fails before.
   each; the 200-bout survey (`feel.rs` `BALANCE_BOUTS`) gives fighter-0 share between
   350 and 650 permille for every ordered pair; hash x2. F2P: no class rows. P2P:
   `cargo test -p engine-combat --lib` green; golden unchanged.
-- [x] GS32 combat: telegraph floors report — `crates/combat/tests/telegraph_floor.rs` Landed 62dd9539.
+- [x] GS32 combat: telegraph floors report — `crates/combat/tests/it/telegraph_floor.rs` Landed 62dd9539.
   prints, for every move in `TABLES_V1`, signal + attack ms (`(startup + active) * 1000
   / 60`) against the Dark Souls 3 floors (340 ms, bait 240 ms, end pose 170 ms; Jerry
   Zhang, Anatomy of an Enemy Attack). Report only; `TELEGRAPH_STRICT=1` fails below
   340. Diff: regular. Tier A. Size S. Owns the new test file. Accept: the table is
   identical x2; strict mode fails while any heavy move is under 340 ms. F2P: no table.
-  P2P: `cargo test -p engine-combat` green. needs: EG19.
+  P2P: `cargo test -p engine-combat` green. needs: EG19. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-combat --test it telegraph_floor::` 8 passed, run 39231165909.
 - [x] GS33 endpoint: `play.sweep` verb — seeded bots play N headless bouts and return one
   JSON envelope `{bouts, crashes, hash_divergences, stuck_ticks}` with evidence in
   `target/reports/sweep-<seed>.json` (donor: echoo19/hearth `probe_sweep`). Diff: good.

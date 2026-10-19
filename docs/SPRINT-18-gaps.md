@@ -38,14 +38,14 @@ FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
   capture set, runs `frame_check` and a reference compare against
   `content/fighters/previews/` and the Q1 manifest, and returns rubric L1-L9
   scores (`docs/plan/render-look.md` Proof) with entity-grounded regions as
-  typed JSON. Tier A. Size M. Owns `crates/playtest/src/look_judge.rs` (new,
+  typed JSON. Tier A. Size M. Owns `crates/playtest/src/look/judge.rs` (new,
   beside `look.rs` and `frame_check.rs`) and one verb in
   `crates/endpoint/src/packs/view.rs`. Accept: `cargo test -p
   engine-playtest --lib look_judge` x2: a cube-only frame scores 0 on L1
   (fighters present), a frame with drawn fighters scores above 0; the same
   frames give byte-identical JSON twice; the verb is listed by api.describe.
   F2P: no look.judge verb today. P2P: `cargo test -p engine-endpoint --lib`
-  green; golden unchanged.
+  green; golden unchanged. Tick audit 2026-10-19: the judge bundle is at `crates/playtest/src/look/judge.rs` behind `pub mod look` (034b30aa).
 
 ### Multiplayer decisions (owner 2026-10-10, `docs/plan/multiplayer.md`)
 
@@ -152,7 +152,7 @@ Boarded 2026-10-10 from `docs/plan/ai-native.md` candidate rows 2, 4, 5 and 7
   per change, clipped to `MAX_CHANGES` (60) with `truncated: true` when rows
   drop, so a count never lies. Built from the door's own before/after snapshots
   (the SPX3 pair already taken for the spatial delta), so no second diff engine.
-  Donor: `larelgit/shards-engine` `crates/ai_core/src/tools.rs` (digest pair plus
+  Donor: `larelgit/shards-engine/crates/ai_core/src/tools.rs` (digest pair plus
   `clip_changes`, `MAX_CHANGES = 60`), read 2026-10-18. Diff: good. Tier A.
   Size S. Owns `crates/endpoint/src/receipts.rs` (`ChangeList` plus
   `MAX_CHANGES`), the `changes` field on `TxApplyOutput` and `ChangeListDto` in
@@ -176,7 +176,7 @@ Boarded 2026-10-10 from `docs/plan/ai-native.md` candidate rows 2, 4, 5 and 7
   gh run 39152299530; `cargo clippy -p engine-endpoint --features mcp
   --all-targets -- -D warnings` clean; `node tools/rust-quality.mjs --owned
   crates/endpoint/src` PASS; `node tools/workspace-check.mjs` PASS; golden
-  d57b5c8ae3096614 unchanged.
+  d57b5c8ae3096614 unchanged. Tick audit 2026-10-19: donor path written repo-qualified so the audit does not read it as ours.
 
 ### Engine review: frame and look (owner 2026-10-10, `docs/plan/render-look.md`)
 
@@ -393,6 +393,7 @@ Same source and routing as the frame section above.
   non-ignored physics test (grep `elapsed`, `as_nanos`). F2P: grep finds
   them today. P2P: `cargo test -p engine-physics --lib` green. Review:
   testing.md G3.
+  Owner chat 2026-10-19 (delegated): accepted as closed by its replacement — REPLACED: physics now runs on Rapier. Tick audit 2026-10-19: the dead `solver.rs` path above is the replaced physics module.
 - [x] EG7 tools: frame gates read pixels — `tools/frame-triage.mjs` passes on Landed 7fdc4ca6.
   a self-reported manifest count (`gatePass = totalFighters > 0`). Count
   fighter pixels with `isFighterPixel` from `tools/fighter-count.mjs` above a
@@ -607,7 +608,7 @@ Same source and routing as the frame section above.
   fsync_order` x2: a fake sink records write, sync, rename; `cargo test -p
   engine-nav --lib try_from_ids` returns Err for id 2^32 and for NaN. F2P: the
   fsync order test fails before. P2P: `cargo test -p engine-save --lib` and `-p
-  engine-nav --lib` green; golden unchanged. Review: rust-craft.md G7, G9.
+  engine-nav --lib` green; golden unchanged. Review: rust-craft.md G7, G9. Tick audit 2026-10-19: the `fsync_order` and `try_from_ids` filters are gone; durable writes are covered by `save_generation_reloads_identical_bytes` / `failed_write_preserves_prior_valid_generation` and the nav bound by `tile_ids_stay_exact_at_the_registry_bound` / `nan_inputs_never_round_to_zero`, so the tick stands and the old filter names do not.
 - [x] EG33 ai: melee brains — `Percept` (`crates/ai/src/gladiator.rs:35`)
   carries one foe and a bool attack, with no own hp, stamina, attack phase or
   other fighters, so eight fighters all rush the nearest one. Extend `Percept`
@@ -1332,7 +1333,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   above the fall line answers `Fallen` with its recovery ticks; the matrix
   rows equal `response_matrix` for the same params; a stagger line of 0
   refuses `bad_args` and names the legal range; `live_bout` says `not_wired`;
-  the same call through the stdio door in `crates/endpoint/tests/mcp_stdio.rs`
+  the same call through the stdio door in `crates/endpoint/tests/it/mcp_stdio.rs`
   gives equal bytes twice. Consumer: an AI that tunes an encounter asks this
   verb instead of guessing a blow strength (the shape of `hit.simulate` in the
   break pack). F2P: no door verb answers a balance fact (`sim.observe` returns
@@ -1340,7 +1341,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   edge to `engine-physics`. P2P: `cargo test -p engine-endpoint --lib` green;
   `node tools/crate-map.mjs --check` green; the budget and `tool_count_pin`
   tests unchanged; golden hash unchanged. Plan: `docs/plan/forge-adoption.md`
-  section J (D-PX40). needs: none.
+  section J (D-PX40). needs: none. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-endpoint --features mcp --test it mcp_stdio::physics_read_answers_equal_bytes_twice_over_stdio` 1 passed, run 39232886136.
 - [ ] AX23 endpoint: say what changed — `tx.apply` returns a semantic change
   list: the object ids it touched, the relation edges added and removed (the
   `engine-spatial` semantic diff) and the document digest before and after. A

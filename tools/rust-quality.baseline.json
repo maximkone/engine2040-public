@@ -544,10 +544,10 @@
    "passthrough": 1,
    "long_fns": 30,
    "big_files": 6,
-   "hot_alloc": 120,
+   "hot_alloc": 0,
    "nondet": 0,
    "float_math": 0,
-   "waivers": 7,
+   "waivers": 121,
    "undoc_pub": 51,
    "unsafe": 1,
    "tests": 1161
@@ -3540,6 +3540,55 @@
     "tests": 358
    },
    "reason": "spatial_frame cross is the f64 sibling of engine-core cross3 (f32 only); the frame kit is f64 with its own sin table and no shared f64 owner exists"
+  },
+  {
+   "date": "2026-10-19",
+   "crate": "engine-render",
+   "from": {
+    "unwrap": 1,
+    "panic_sites": 21,
+    "casts": 989,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 4,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 12,
+    "dup_fns": 8,
+    "passthrough": 1,
+    "long_fns": 30,
+    "big_files": 6,
+    "hot_alloc": 120,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 7,
+    "undoc_pub": 51,
+    "unsafe": 1,
+    "tests": 1161
+   },
+   "to": {
+    "unwrap": 1,
+    "panic_sites": 21,
+    "casts": 989,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 4,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 12,
+    "dup_fns": 8,
+    "passthrough": 1,
+    "long_fns": 30,
+    "big_files": 6,
+    "hot_alloc": 0,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 121,
+    "undoc_pub": 51,
+    "unsafe": 1,
+    "tests": 1161
+   },
+   "reason": "CQ7 allocation-free frame: hot_alloc 120 -> 0 by real fixes (RP1 uniforms packed into stack arrays, the decal tick partitions survivors in place, the transient-span refusal moved to a named cold guard) plus 114 recorded // alloc-ok: waivers on cold paths only (refusals, device-loss, readback, one-shot look probes and captures), never a steady frame. Surgical accept: another session holds crates/render in flight, so no foreign debt is captured here."
   }
  ]
 }

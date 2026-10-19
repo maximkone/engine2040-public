@@ -248,16 +248,25 @@ test("rangesFor reads only the text after the name and stops at the next argumen
 test("the real source: every registered verb is on the page and nothing is left unparsed", () => {
   const model = buildModel(readCrate(ROOT));
   assert.deepEqual(model.unparsed, [], "the parser reads every declaration; teach it the new style or add a case here");
-  let registered = 0;
+  const added = [];
   const walk = (dir) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const p = join(dir, e.name);
       if (e.isDirectory()) walk(p);
-      else if (e.name.endsWith(".rs") && e.name !== "mod.rs") registered += [...readFileSync(p, "utf8").matchAll(/^\s*pack\.add\(\s*VerbSpec::of::</gm)].length;
+      else if (e.name.endsWith(".rs") && e.name !== "mod.rs") {
+        for (const m of readFileSync(p, "utf8").matchAll(/^\s*pack\.add\(\s*VerbSpec::of::<([^>]+)>/gm)) added.push(m[1]);
+      }
     }
   };
   walk(join(ROOT, SRC_DIR, "packs"));
-  assert.equal(model.counts.verbs, registered, "verbs on the page equal the pack.add(VerbSpec::of::<..>) lines in the pack files");
+  // The `verify` pack re-hosts the replay pair on purpose: with that feature on
+  // it takes the `replay` pack's slot in `PACK_NAMES` (`packs/mod.rs`), so those
+  // two tools have an add line in both modules. Any other tool added twice is a
+  // real duplicate registration, which the registry refuses at build.
+  const twice = [...new Set(added.filter((t, i) => added.indexOf(t) !== i))].sort();
+  assert.deepEqual(twice, ["ReplayBisectTool", "ReplayVerifyTool"], "only the feature-gated replay pair is registered by two packs");
+  const registered = new Set(added).size;
+  assert.equal(model.counts.verbs, registered, "verbs on the page equal the distinct VerbSpec::of::<..> tools the pack files add");
   const declared = (file, name) => Number(new RegExp(String.raw`${name}\s*:\s*\[&str;\s*(\d+)\]`).exec(readFileSync(join(ROOT, SRC_DIR, file), "utf8"))[1]);
   assert.equal(model.counts.core, declared("mcp.rs", "CORE_TOOL_NAMES"), "every CORE_TOOL_NAMES entry is on the page");
   assert.equal(model.counts.packs, declared("packs/mod.rs", "PACK_NAMES"), "every PACK_NAMES entry is on the page");

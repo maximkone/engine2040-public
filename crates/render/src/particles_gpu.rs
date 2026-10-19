@@ -708,16 +708,14 @@ impl ParticlePool {
     pub fn submit_gpu(&self, viewport_px: [u32; 2]) -> Result<ParticleReceipt, ParticleError> {
         self.validate()?;
         if viewport_px[0] == 0 || viewport_px[1] == 0 {
-            return Err(ParticleError::Invalid(format!(
-                "particle viewport {}x{} is zero",
-                viewport_px[0], viewport_px[1]
-            )));
+            let (vp_w, vp_h) = (viewport_px[0], viewport_px[1]);
+            let reason = format!("particle viewport {vp_w}x{vp_h} is zero"); // alloc-ok: cold refusal, never a steady frame
+            return Err(ParticleError::Invalid(reason));
         }
         if viewport_px[0] > MAX_VIEWPORT_PX || viewport_px[1] > MAX_VIEWPORT_PX {
-            return Err(ParticleError::Invalid(format!(
-                "particle viewport {}x{} exceeds {MAX_VIEWPORT_PX}",
-                viewport_px[0], viewport_px[1]
-            )));
+            let (vp_w, vp_h) = (viewport_px[0], viewport_px[1]);
+            let reason = format!("particle viewport {vp_w}x{vp_h} exceeds {MAX_VIEWPORT_PX}"); // alloc-ok: cold refusal, never a steady frame
+            return Err(ParticleError::Invalid(reason));
         }
         Err(ParticleError::NoDevice(
             "particles_gpu: window build with a live device binds the pool; CPU sim is the authority".into(),
@@ -1451,11 +1449,11 @@ impl ParticlePool {
         self.validate()?;
         frame
             .validate()
-            .map_err(|e| ParticleError::Invalid(format!("particle look frame: {e}")))?;
+            .map_err(|e| ParticleError::Invalid(format!("particle look frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
         let bytes = self.particle_bytes();
         let words = bytes.len().div_ceil(4) as u64;
         let count = u32::try_from(words)
-            .map_err(|_| ParticleError::Invalid(format!("particle words {words} exceed u32")))?;
+            .map_err(|_| ParticleError::Invalid(format!("particle words {words} exceed u32")))?; // alloc-ok: cold refusal, never a steady frame
         if words == 0 {
             return Err(ParticleError::Invalid(
                 "particle byte image is empty".into(),
@@ -1527,7 +1525,7 @@ impl ParticlePool {
             0,
             &crate::graph::look_frame_uniform_bytes(frame),
         );
-        let mut padded = vec![0u8; byte_len as usize];
+        let mut padded = vec![0u8; byte_len as usize]; // alloc-ok: submit_gpu probe staging with readback, not the window steady frame
         padded[..bytes.len()].copy_from_slice(&bytes);
         queue.write_buffer(src_buf, 0, &padded);
 
@@ -1550,17 +1548,15 @@ impl ParticlePool {
         let back = particle_readback_u32(readback, words as usize)?;
         readback.unmap();
         if let Some(err) = pollster::block_on(scope.pop()) {
-            return Err(ParticleError::Validation(format!(
-                "particle bind validation: {err:?}"
-            )));
+            let reason = format!("particle bind validation: {err:?}"); // alloc-ok: cold validation failure, never a steady frame
+            return Err(ParticleError::Validation(reason));
         }
         for (i, chunk) in padded.chunks_exact(4).enumerate() {
             let want = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             if back[i] != want {
-                return Err(ParticleError::Device(format!(
-                    "particle bind roundtrip word {i} differs: {} vs {want}",
-                    back[i]
-                )));
+                let got = back[i];
+                let reason = format!("particle bind roundtrip word {i} differs: {got} vs {want}"); // alloc-ok: cold device-loss path, never a steady frame
+                return Err(ParticleError::Device(reason));
             }
         }
         Ok(ParticleGpuReceipt {

@@ -586,10 +586,10 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Tap, hold, hold-and-release and chord conditions counted in integer ticks before
   the tape (bevy_enhanced_input shape), action sets stack (Duel, Menu, Pause); the
   new bits are v2 only. Diff: good. Tier A. Size M. Owns `crates/input/src/bindings.rs`,
-  `crates/input/src/conditions.rs` (new), `fighter.rs`. Accept: `cargo test -p
+  `crates/input/src/gestures.rs` (new), `fighter.rs`. Accept: `cargo test -p
   engine-input --lib conditions` x2: 4 gestures, 0 menu presses leak into the duel,
   tape bytes equal. F2P: only press exists. P2P: golden unchanged (v1 keeps 3
-  bits). needs: GP28.
+  bits). needs: GP28. Tick audit 2026-10-19: the conditions code landed as `crates/input/src/gestures.rs` (0b43f1d9).
 - [ ] PF27 perf: an in-game perf overlay and a hitch catcher — puffin, GPU timestamps
   and the counting allocator exist (`crates/perf/src/profiler.rs:1-12`) but nothing
   shows in the game. A toggle draws frame ms, the top 3 GPU passes (from PF25) and
@@ -634,7 +634,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   writes `target/reports/perf-<date>.csv` with >= 12 pass rows (p50, p99) and
   `pass-trace.json`; `cargo test -p engine-render --lib pass_timing` x2. F2P: the
   csv has no production pass row. P2P: golden unchanged. needs: none.
-- [ ] CQ23 render: CPU naga gate for every shipped WGSL — `crates/render/src/live.rs:434-478`
+- [x] CQ23 render: CPU naga gate for every shipped WGSL — `crates/render/src/live.rs:434-478` Landed 801b43cc. The cited check moved: the gate is `crates/render/src/shader_gate.rs` (naga 30 via engine-material's `validate` owner) plus the game cook (`crates/game/src/reload.rs`), both behind `shader-validate` (rides `app`). Accept adapted (the row predates the feature): `cargo test -p engine-render --lib --features shader-validate shader_validate` x2 green over all 24 shipped files in the composition the pipelines compile (`forward.wgsl`/`blit.wgsl` take the `tonemap.wgsl` prepend) + 3 inline chunks; the `window`-feature run adds 6 window chunks; game reload 6/6 under the feature (a type-broken edit keeps last-good, `reload_shader_gate_refuses_a_type_broken_edit_and_keeps_last_good`); seeded type error names line:col. F2P held: the brace check accepted both defects the gate caught — `taa_resolve.wgsl` built `vec2<f32>` from i32 loop vars, `post_chain.wgsl` sampled without declaring its sampler — fixed in `8d8c0a80`. Golden d57b5c8ae3096614 x2 unchanged. Follow-up 2026-10-19 (main pass): the committed wasm baseline counted this new file's `std::fs` walk as a hazard (`shader_gate.rs:80,86`, `fs 0 -> 2`), and `tools/wasm-gate.test.mjs` was red on it. The walk is native-only now (`#[cfg(not(target_arch = "wasm32"))]` on `shipped_files` and `walk`, with the reason in the doc comment): `node --test tools/wasm-gate.test.mjs` 20 pass, 0 fail. Behaviour on native is unchanged.
   counts braces; `crates/material/src/compile.rs:770-779` already validates with
   naga; 0 of 11 .wgsl files are checked without a GPU. Diff: regular. Tier A.
   Size S. Owns the check in `live.rs` and a test over `crates/render/src/shaders`.

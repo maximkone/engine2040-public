@@ -23,15 +23,16 @@ pub struct PanelDescriptor {
     pub panel: Panel,
 }
 
-/// The seven dock panels in default order: the single source of truth behind
+/// The eight dock panels in default order: the single source of truth behind
 /// [`builtin_registry`] and [`ensure_builtin_panels`].
-pub const BUILTIN: [(&str, Panel); 7] = [
+pub const BUILTIN: [(&str, Panel); 8] = [
     ("hierarchy", Panel::Hierarchy),
     ("inspector", Panel::Inspector),
     ("viewport", Panel::Viewport),
     ("findings", Panel::Findings),
     ("tuning", Panel::Tuning),
     ("templates", Panel::Templates),
+    ("activity", Panel::Activity),
     ("log", Panel::Log),
 ];
 
@@ -60,7 +61,7 @@ impl PanelRegistry {
     }
 }
 
-/// The seven dock panels in default order.
+/// The eight dock panels in default order.
 pub fn builtin_registry() -> PanelRegistry {
     let mut registry = PanelRegistry::new();
     for (id, panel) in BUILTIN {
@@ -100,7 +101,24 @@ mod tests {
         }
         assert!(shell.is_open(Panel::Log));
         assert_eq!(builtin_registry().panels(), Panel::all());
-        assert_eq!(builtin_registry().panels().len(), 7);
+        assert_eq!(builtin_registry().panels().len(), 8);
+    }
+
+    #[test]
+    fn activity_panel_is_registered_and_opens() {
+        // The user's "play along" panel: registered under its dock id, titled
+        // "activity" so the tab and the id agree with the activity module.
+        let mut shell = Shell::new();
+        assert!(shell.is_open(Panel::Activity));
+        assert!(shell.close_panel(Panel::Activity));
+        assert!(!shell.is_open(Panel::Activity));
+        shell.open_panel(Panel::Activity);
+        shell.open_panel(Panel::Activity);
+        assert!(shell.is_open(Panel::Activity));
+        assert_eq!(Panel::Activity.title(), "activity");
+        assert!(Panel::all().contains(&Panel::Activity));
+        assert_eq!(builtin_registry().panels(), Panel::all());
+        assert_eq!(builtin_registry().panels().len(), 8);
     }
 
     #[test]

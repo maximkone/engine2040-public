@@ -9,6 +9,7 @@
 //! Caller: `crates/ai/src/gladiator.rs` (`Brain::with_rows_text`; cold only, never tick).
 
 use crate::curves::{parse_dec_u32, AiConfig, AiCurveError, AiCurves, CURVE_LANES};
+use crate::rows::{strip_comment, Field, FieldError, Fields};
 
 /// Rows parse failure with its 1-based line number.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -131,8 +132,7 @@ pub fn parse_ai_config(text: &str) -> Result<AiConfig, AiRowsError> {
     let mut row_body: Option<&str> = None;
     for (idx, raw) in text.lines().enumerate() {
         let no = idx.saturating_add(1);
-        let cut = raw.find('#').map_or(raw, |i| &raw[..i]);
-        let line = cut.trim();
+        let line = strip_comment(raw);
         if line.is_empty() {
             continue;
         }
@@ -167,17 +167,14 @@ fn parse_row(body: &str, no: usize, version: u32) -> Result<AiConfig, AiRowsErro
     let mut seen_cau = [false; CURVE_LANES];
     let mut engage: Option<u32> = None;
     let mut morale: Option<i32> = None;
-    for token in words {
-        let (key, val) = token
-            .split_once('=')
-            .ok_or(AiRowsError::UnknownKey { line: no })?;
-        if val.contains('=') || key.is_empty() || val.is_empty() {
-            return Err(AiRowsError::BadInt { line: no });
-        }
-        if val.contains('.') {
-            return Err(AiRowsError::Float { line: no });
-        }
-        let num = parse_dec_u32(val).ok_or(AiRowsError::BadInt { line: no })?;
+    for field in Fields::after_id(body) {
+        let Field { key, value: num } = field.map_err(|err| match err {
+            FieldError::NoEquals => AiRowsError::UnknownKey { line: no },
+            FieldError::Float => AiRowsError::Float { line: no },
+            FieldError::EmptyKey | FieldError::EmptyValue | FieldError::BadInt => {
+                AiRowsError::BadInt { line: no }
+            }
+        })?;
         match slot_of(key).ok_or(AiRowsError::UnknownKey { line: no })? {
             Slot::Agg(i) => {
                 if seen_agg[i] {

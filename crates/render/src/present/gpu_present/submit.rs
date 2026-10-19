@@ -2001,14 +2001,33 @@ const SKINNED_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
     },
 ];
 
+/// Compilation options carrying the look guard preset (QL5): the shader's
+/// `override POTATO_GUARD` is set here, so one source builds the fp32 look and
+/// the potato look. An empty slice keeps wgpu's default (the shader default).
+fn guard_options<'a>(constants: &'a [(&'a str, f64)]) -> wgpu::PipelineCompilationOptions<'a> {
+    wgpu::PipelineCompilationOptions {
+        constants,
+        ..wgpu::PipelineCompilationOptions::default()
+    }
+}
+
 pub(super) fn forward_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
+    constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
-    forward_pipeline_for(device, shader, layout, formats, multisample, false)
+    forward_pipeline_for(
+        device,
+        shader,
+        layout,
+        formats,
+        multisample,
+        constants,
+        false,
+    )
 }
 
 /// The skinned twin of [`forward_pipeline`]: same shader, layout, fragment
@@ -2021,16 +2040,28 @@ pub(super) fn forward_skinned_pipeline(
     layout: &wgpu::BindGroupLayout,
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
+    constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
-    forward_pipeline_for(device, shader, layout, formats, multisample, true)
+    forward_pipeline_for(
+        device,
+        shader,
+        layout,
+        formats,
+        multisample,
+        constants,
+        true,
+    )
 }
 
+/// `constants` carries the look guard preset (`quality::look_guard_constants`):
+/// the same shader source compiles to the fp32 look or the potato one.
 fn forward_pipeline_for(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
+    constants: &[(&str, f64)],
     skinned: bool,
 ) -> wgpu::RenderPipeline {
     use crate::pipeline_warmup::CountedPipelines as _;
@@ -2065,13 +2096,13 @@ fn forward_pipeline_for(
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes,
             })],
-            compilation_options: Default::default(),
+            compilation_options: guard_options(constants),
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: Some("fs"),
             targets: &targets,
-            compilation_options: Default::default(),
+            compilation_options: guard_options(constants),
         }),
         primitive: wgpu::PrimitiveState {
             cull_mode: Some(wgpu::Face::Back),

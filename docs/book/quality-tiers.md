@@ -20,6 +20,7 @@ Pure integer data; `table_hash` is a regression checksum over the fixed field or
 | `particle_cap` | count | 512 | 4096 | 8192 |
 | `decal_cap` | count | 64 | 256 | 512 |
 | `crowd_cap` | cards | 1500 | 5000 | 10000 |
+| `look_potato_guard` | bool | true | false | false |
 | `physfx_bodies` | bodies | 96 | 384 | 768 |
 | `physfx_ragdolls` | ragdolls | 2 | 8 | 16 |
 | `physfx_contacts` | pairs | 256 | 1024 | 2048 |

@@ -164,10 +164,10 @@ Rules (extends RC5, decision D2 in `FOCUS.md`):
   (run 39216603655); rust-quality engine-rules PASS 99 (A); workspace-check PASS; no simulation code
   changed, so the golden is untouched (test and fixture only).
 - [x] NS32e rules: scripted slot on a walled scene through the door — new test
-  `rules_drive_on_a_walled_scene` in `crates/endpoint/tests/rules_door.rs` (copy `insert_wall`
+  `rules_drive_on_a_walled_scene` in `crates/endpoint/tests/it/rules_door.rs` (copy `insert_wall`
   from `tests/scene_drives_match.rs`): `rules.set`, one 2 m wall, `play.run` with `scene_rev`.
-  Size S. Accept: F2P `cargo test -p engine-endpoint --features rules --test rules_door
-  rules_drive_on_a_walled_scene` the scripted walled run differs from the plain walled run, equal
+  Size S. Accept: F2P `cargo test -p engine-endpoint --features rules --test it
+  rules_door::rules_drive_on_a_walled_scene` the scripted walled run differs from the plain walled run, equal
   x2, no fighter inside the wall in 18 of 20 seeds. needs: NS32b. Landed 5115a24.
   `rules_drive_on_a_walled_scene` in the endpoint `it` binary
   (`crates/endpoint/tests/it/rules_door.rs` — the module already existed, so no new
@@ -178,7 +178,7 @@ Rules (extends RC5, decision D2 in `FOCUS.md`):
   installs (`engine_rules::arena::RulesController` over `SpineMatch::with_controller`)
   for 20 seeds: 18 of 20 fights never put a fighter inside the wall (the assert is the
   bar). `cargo test -p engine-endpoint --features rules --test it rules_door::` 3 passed,
-  gh run 39179264813; rust-quality scoped to the file PASS; workspace-check PASS.
+  gh run 39179264813; rust-quality scoped to the file PASS; workspace-check PASS. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-endpoint --features rules --test it rules_door::rules_drive_on_a_walled_scene` 1 passed, run 39230103525.
 
 Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask for.
 

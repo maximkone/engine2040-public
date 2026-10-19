@@ -22,6 +22,8 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   Size L (planner splits it per pass). Owns `crates/render/src/`. Accept:
   render hot_alloc 0 outside reasoned `alloc-ok` resize and device-loss
   paths; frame p95 not worse. needs: none.
+  Progress 2026-10-19: operator: hot_alloc 120 -> 0 landed cd85016d (4 real fixes: RP1 uniform blocks pack into stack arrays, `DecalPool::tick` partitions survivors in place, the transient-span refusal sits behind the cold guard `check_transient_span`, the headless graph stub writes its refusal into a sized `String`; plus 114 recorded `alloc-ok:` waivers on cold refusal/device-loss/readback/capture/probe lines, every message byte-identical; baseline entry accepted in the same commit). The 120-frame window-loop probe cannot read 0: on this PC 120 live frames read 23318 calls with all look passes on and 8 draws, 14762 with every look pass off and no draws, against a wgpu floor of 2161 (error scope+encoder+submit+poll) and 5400 (4 empty passes); those calls are wgpu's own command recording, not crate buffers. The crate's own CPU slices do read 0: `present::gpu_present::submit::cq7_present_alloc_tests::steady_120_frames_read_zero_allocs` and `live_stage_alloc_tests::live_stage_allocs_do_not_grow_with_the_draw_count` 2 passed / 0 failed. Owner call needed on the Accept: rate the crate's slices (met today) or accept a documented device floor in the probe; frame p95 was not re-measured here (no reference GPU). Left: the per-pass split of the live window frame's own allocations.
+  BLOCKED: the crate's CPU slices read 0 allocations (`sq7_present_alloc_tests::steady_120_frames_read_zero_allocs` and `live_stage_alloc_tests::live_stage_allocs_do_not_grow_with_the_draw_count`, 2 passed) while the 120-frame window-loop probe reads wgpu's own command-recording floor (23318 calls against a 2161 wgpu floor on this PC), so the Accept needs the owner's reading of which number is the bar. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [x] CQ8 ops: one owner per behavior — 126 duplicated function groups Landed 15440d59. `node tools/rust-quality.mjs --no-cache` 2026-10-17: dup_fns 38 workspace-wide (was 214 bodies; bar 107), clone groups 34; golden d57b5c8ae3096614 unchanged on all five machines in golden-matrix run 39054403838.
   (214 bodies, `--list dup_fns`): byte readers (`take_u32`, `u16`...), sRGB
   conversion, digests and checkers move to one owner (engine-core for
@@ -35,12 +37,12 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   over 100 lines (largest `editor/src/a2_session.rs` `run_session`, 375)
   split by concern into modules and named steps, behavior unchanged. Tier B.
   Size M per file. Owns one file per packet. Accept: big_files and long_fns
-  fall by the split count; public API unchanged; tests green. needs: none. Progress 2026-10-17: 9 files split (post, aa_scale, assistant, build_game, build_level, camera, keypoint, spatial_eval, index3), big_files 19 -> 10, golden unchanged (run 39063249080); commits 781ecd67 6f0229da 67a1c31f 40578154; left: render fog/gtao/ibl/presenter/live/submit and game fighter_look/lib/windowed/arena (held by other agents).
+  fall by the split count; public API unchanged; tests green. needs: none. Progress 2026-10-17: 9 files split (post, aa_scale, assistant, build_game, build_level, camera, keypoint, spatial_eval, index3), big_files 19 -> 10, golden unchanged (run 39063249080); commits 781ecd67 6f0229da 67a1c31f 40578154; left: render fog/gtao/ibl/presenter/live/submit and game fighter_look/lib/windowed/arena (held by other agents). Progress 2026-10-19: present.rs `decode_depth_feed` split into `check_depth_feed_inputs` + `unproject_texels` + `facing_normals` (558 -> 590 lines, long_fns 1 -> 0); assistant.rs `check`/`apply` split into `conflict_refusal`, `stage_root`, `parse_proposal`, `verify_proof`, `proof_verifiers` plus free helpers `observed_state`, `want_index`, `solve_placement`, `staged_gate`, `preview_batch` (long_fns 2 -> 0), public API unchanged both; endpoint assistant tests 39 passed (run 39229642335), render depth_decode 3 passed (run 39232734605) and render `--lib present` 61 passed on the PC; commit c792dfe1; remaining big files still held by other agents.
 - [x] CQ24 quality: split post jitter plus motion leaf out — `halton`, `jitter_*`, Landed f737386e. The leaf is `crates/render/src/post_jitter_motion.rs` (flat file, not post/jitter_motion.rs): `pub fn halton` is there, `post.rs` re-exports it; render lib post tests green (`cargo test -p engine-render --lib -- shadow_cascade post ibl` 91 passed, PC run); golden unchanged.
   `MotionField`, `check_dims`/`check_image` move verbatim to new
-  `crates/render/src/post/jitter_motion.rs`; facade re-exports. Accept: grep for
+  `crates/render/src/post_jitter_motion.rs`; facade re-exports. Accept: grep for
   `pub fn halton` in the new file fails before, passes after; render lib post
-  tests green; golden unchanged. needs: none.
+  tests green; golden unchanged. needs: none. Tick audit 2026-10-19: the leaf's real path is `crates/render/src/post_jitter_motion.rs` (flat file).
 - [x] CQ25 quality: split post TAA resolve plus ghost scene out — `TaaParams`,
   resolve helpers, `taa_resolve`, `taa_resolve_jittered`, `GhostingScene` move
   verbatim to new `post/taa.rs`; trail under `GHOST_MAX_TRAIL`. Accept: render
@@ -49,18 +51,18 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   `taa_upsample`, `fsr_*`, `ShimmerScene` move verbatim to new `post/upscale.rs`;
   MTF50/shimmer gates still post numbers. Accept: render lib post tests green;
   golden unchanged. needs: CQ24. Landed 781ecd67 (the CQ9 post split). post/upscale.rs holds taa_upsample, fsr_* and ShimmerScene (grep -c 'pub fn fsr_upscale' = 1); cargo test -p engine-render --lib post: 49 passed incl. fsr_540p_to_1080p_posts_mtf50_shimmer_and_ms and shimmer_converges_under_the_posted_gate (PC run, 2026-10-18); golden unchanged per run 39063249080.
-- [ ] CQ27 quality: split post bloom chain (LF4 dependency) out — bloom/exposure/
+- [x] CQ27 quality: split post bloom chain (LF4 dependency) out — bloom/exposure/
   ACES/grade configs, `apply_bloom`, `run_chain`, `run_frame` move verbatim to
   new `post/chain.rs`; torch halo lifts neighbour, sub-knee field identical.
-  Accept: render lib post tests green; golden unchanged. needs: CQ25, CQ26.
-- [ ] CQ28 quality: split post auto-exposure plus exposure scene out — `AUTO_*`,
+  Accept: render lib post tests green; golden unchanged. needs: CQ25, CQ26. Landed 781ecd67 (the CQ9 post split, same commit as CQ25/CQ26). post/chain.rs holds BloomConfig, ExposureConfig, GradeConfig, PostChain, PostLights, PostOutput, apply_bloom, run_chain, run_frame and bloom_on_off_lift; each block byte-identical to post.rs at 12925e3b (block compare: 10/10 VERBATIM); grep -c 'pub fn apply_bloom' = 1. cargo test -p engine-render --lib post: 49 passed / 0 failed, 2 ignored (PC run, GPU/window crate, 2026-10-19), incl. bloom_on_off_lift_torch_halo_lifts_neighbor_but_not_dark, bloom_on_off_lift_dark_field_is_identity_and_deterministic, bloom_on_off_lift_kino_curve_torch_halo_and_subknee_identity, chain_reads_rl1_rl2_and_is_deterministic, full_frame_names_every_pass_in_ms. Golden d57b5c8ae3096614 unchanged (target/release/engine2040.exe: ticks=600 final_hash=d57b5c8ae3096614 state_hash=2aca9338670aa0cb).
+- [x] CQ28 quality: split post auto-exposure plus exposure scene out — `AUTO_*`,
   `AutoExposure`, `run_chain_auto`, `run_frame_auto`, `ExposureScene`,
   `clipped_share` move verbatim to new `post/auto_exposure.rs`. Accept: render
-  lib post tests green; golden unchanged. needs: CQ27.
-- [ ] CQ29 quality: split post RP1 graph plus scale seam out — RP1 names,
+  lib post tests green; golden unchanged. needs: CQ27. Landed 781ecd67 (the CQ9 post split, same commit as CQ25/CQ26/CQ27). post/auto_exposure.rs holds all 10 `AUTO_*` consts, the 3 private `AUTO_*` helpers, AutoExposureConfig, ExposureHistogram, hist_stride, bin_for_scaled, histogram_log_luma, trimmed_log_mean, target_ev_for_mean, AutoExposure, run_chain_auto, run_frame_auto, clipped_share and ExposureScene; 30/30 blocks byte-identical to post.rs at 12925e3b (only `pub(super)` visibility widened), and each of the row's six named items appears in exactly one file (post/auto_exposure.rs). F2P: `grep -c "pub struct AutoExposure" crates/render/src/post/auto_exposure.rs` = 2, `post.rs` = 0. P2P: `cargo test -p engine-render --lib post` 49 passed / 0 failed / 2 ignored (PC run 2026-10-19, GPU/window crate), incl. auto_exposure_beats_fixed_on_day_sweep, auto_exposure_ignores_torch_grid_and_limits_flicker, auto_frame_serves_match_clip, auto_exposure_costs_no_heap. Golden d57b5c8ae3096614 unchanged (gh run 39234721309, golden_hash_untouched).
+- [x] CQ29 quality: split post RP1 graph plus scale seam out — RP1 names,
   transient bytes, `build_rp1_graph`, `compile_rp1_for_present`, `aa_scale` seam
   move verbatim to new `post/graph.rs`; compiled order stays six RP1 names.
-  Accept: render lib post tests green; golden unchanged. needs: CQ27.
+  Accept: render lib post tests green; golden unchanged. needs: CQ27. Landed 34fae3ba. `crates/render/src/post/graph.rs` (274 lines, byte-identical to the old `post/rp1.rs`: `git show --stat --find-renames 061667e3` reports `post/{rp1.rs => graph.rs} | 0`) holds all six `RP1_PASS_*` names, `rp1_pass_names`, `RP1_HISTORY_BYTES_PER_TEXEL`/`RP1_POST_BYTES_PER_TEXEL`, `rp1_transient_bytes`, `build_rp1_graph`, `compile_rp1_for_present` and the RP5 `aa_scale` seam (`From<AaScaleError>`, `taa_off_render_size_for_scale`, `compile_taa_off_for_scale`, `tick_scale_for_present`, `run_taa_off_frame_for_scale`). Note: the rename was swept into another session's commit 061667e3 while this row was in flight; 34fae3ba adds the `mod graph; pub use graph::*;` facade that un-reds the tree (`mod rp1;` with no `rp1.rs` did not compile) and every `post::` caller path is unchanged. F2P: `grep -c "pub fn build_rp1_graph" crates/render/src/post/graph.rs` = 1 (0 before; the old name was in `post/rp1.rs`). P2P: `cargo test -p engine-render --lib post` = 49 passed / 0 failed / 2 ignored (PC run, GPU/window crate, 2026-10-19), incl. `rp1_graph_declares_six_passes_in_order`, `rp1_graph_rejects_bad_sizes_and_counts_bytes`, `rp5_scale_seam_drives_presented_size`, `rp5_scale_seam_fails_loudly`. Golden d57b5c8ae3096614 unchanged (gh run 39236977636, `cargo test -p engine-proof --lib golden_hash_untouched` PASS).
 - [ ] CQ30 quality: split post GPU submitter out, facade under the bar —
   window-only `mod gpu` (`Rp1Submitter`, resolve, frame) moves verbatim to new
   `post/gpu.rs`; `post.rs` under 1500 prod lines, `big_files` clears it; LF4
@@ -97,16 +99,16 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   `scale.rs` imports the arena tick rate and the session codec lengths
   instead of parity copies; `server::TICK_HZ` re-exports the same owner.
   Tier A. Size S. Owns `crates/net/src/scale.rs`,
-  `crates/net/src/server.rs`. Accept: no "owned copy, no import" in
+  `crates/net/src/websocket/server.rs`, `crates/net/src/webtransport/server.rs`. Accept: no "owned copy, no import" in
   `crates/net/src`; scale + server tests green; golden x2. needs: none.
-  (API-REVIEW wave 54.)
+  (API-REVIEW wave 54.) Tick audit 2026-10-19: the old `net/src/server.rs` left in the net slim 3151bd46; its content is now `crates/net/src/websocket/server.rs` and `crates/net/src/webtransport/server.rs`.
 - [x] CQ-NET-API4 net: name the three servers — rename `server::Server` Landed 3151bd46. Moot after the net slim: `server::Server` no longer exists; the one public `Server` is `session::Server`, the rest have their own names (`dedicated::HeadlessServer`, `websocket::WsServer`, `webtransport::WtServer`, `relay::RelayServer`, `relay::StunServer`). `cargo test -p engine-net --lib` 258 passed, gh run 39061111700.
   to the AOI/presence harness name with a deprecated alias for one wave;
   root docs name `session::Server` vs `dedicated::HeadlessServer` vs the
-  harness. Tier B. Size S. Owns `crates/net/src/server.rs`,
+  harness. Tier B. Size S. Owns `crates/net/src/websocket/server.rs`,
   `crates/net/src/lib.rs`. Accept: no two public `Server` types under
   different modules without qualified-doc guidance; tests green; golden
-  x2. needs: CQ-NET-API1. (API-REVIEW wave 54.)
+  x2. needs: CQ-NET-API1. (API-REVIEW wave 54.) Tick audit 2026-10-19: the named `server.rs` left in the net slim 3151bd46; the public names are `session::Server`, `websocket::WsServer`, `webtransport::WtServer`.
 - [ ] CQ-NET-API5 net: collapse the rollback families — delete or
   delegate lib-root `Rollback` stub to `rollback::FrameLog`, document
   the canonical pick per use-case in `lib.rs` docs; unify
@@ -118,10 +120,10 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
 - [x] CQ-NET-API6 net: units in names — `SnapEnt::{x,y}` gain cm units, Landed 3151bd46. Moot after the net slim: `SnapEnt`, `Config{budget,cell,view,world}`, `DelayBuffer` and anticheat.rs no longer exist in crates/net/src. `cargo test -p engine-net --lib` 258 passed, gh run 39061111700.
   `Config::{budget,cell,view,world}` gain byte/cm units,
   `DelayBuffer.delay` gains ticks, anticheat limits gain unit suffixes.
-  Tier A. Size S. Owns `crates/net/src/server.rs`,
+  Tier A. Size S. Owns `crates/net/src/websocket/server.rs`,
   `crates/net/src/lib.rs`, `crates/net/src/anticheat.rs`. Accept: bare
   unitless names gone; tests green; golden x2. needs: none.
-  (API-REVIEW wave 54.)
+  (API-REVIEW wave 54.) Tick audit 2026-10-19: the old `net/src/server.rs` left in the net slim 3151bd46; its content is now `crates/net/src/websocket/server.rs` and `crates/net/src/webtransport/server.rs`.
 - [x] CQ-NET-API7 net: Debug plus docs pass — `#[derive(Debug)]` (plus Progress 2026-10-17: net string_errors 0, undoc_pub 50 -> 2 (interest.rs:535 `select`, tick_budget.rs:635 `capture`), score 98; the stale quic.rs wire-up comment is gone. Left: those 2 docs and the tick_budget Fnv64 fold (unchecked).
   `Clone` where cheap) on the session/server/client/log types;
   document the 50 `undoc` public items; delete the stale

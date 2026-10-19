@@ -14,7 +14,9 @@ fn taa_resolve(uv: vec2<f32>, size: vec2<f32>) -> vec3<f32> {
     var hi = cur;
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
-            let t = textureSampleLevel(post_current, post_sampler, uv + vec2<f32>(dx, dy) / size, 0.0).rgb;
+            // CQ23: the loop indices are i32; WGSL takes no implicit conversion
+            // in a constructor, so each needs its own f32.
+            let t = textureSampleLevel(post_current, post_sampler, uv + vec2<f32>(f32(dx), f32(dy)) / size, 0.0).rgb;
             lo = min(lo, t);
             hi = max(hi, t);
         }
