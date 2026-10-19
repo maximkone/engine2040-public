@@ -646,6 +646,10 @@ pub struct App {
     /// Spear grapple on (`docs/plan/spear-grapple.md`): set by [`App::into_spear`] before the
     /// first tick. Every live and presentation sim of the session is built with it.
     spear: bool,
+    /// Height channel on (rows SG5/SG4): set by [`App::into_height`] before the
+    /// first tick. Every live sim of the session is built with it, so the wall
+    /// tether swings instead of zipping.
+    height: bool,
     /// Sim steps spent by retired live matches (rebuilds), so
     /// [`App::sim_steps`] counts every step the session ever paid.
     retired_steps: u64,
@@ -764,6 +768,7 @@ impl App {
         }
         let mut spec = MatchSpec::duel(self.arena, self.world.clone());
         spec.spear = self.spear;
+        spec.height = self.height;
         self.live = spec.live().ok_or(GameError::BadConfig("arena"))?;
         self.arena = spec.config;
         self.rules = spec.rules;
@@ -788,6 +793,20 @@ impl App {
         self.spear
     }
 
+    /// Arm the fighter height channel (rows SG5 and SG4): fighters fall and
+    /// land under gravity, and the wall tether swings instead of zipping.
+    /// Only before the first tick; later calls refuse with
+    /// `BadConfig("height")`. The match identity changes, so a LAN peer must
+    /// ask for it too.
+    pub fn into_height(mut self) -> Result<Self, GameError> {
+        if self.cursor != 0 || self.retired_steps != 0 || self.live.steps() != 0 {
+            return Err(GameError::BadConfig("height"));
+        }
+        self.height = true;
+        self.live = self.spec().live().ok_or(GameError::BadConfig("arena"))?;
+        Ok(self)
+    }
+
     /// The match this session plays: config, rules and world as one value.
     /// The net server and client build from the same spec
     /// (`Server::from_spec`, `Client::from_spec`), so a peer given this
@@ -795,8 +814,9 @@ impl App {
     #[must_use]
     pub fn spec(&self) -> MatchSpec {
         let spec = MatchSpec::new(self.arena, self.rules, self.world.clone());
-        if self.spear {
-            spec.with_spear()
+        let spec = if self.spear { spec.with_spear() } else { spec };
+        if self.height {
+            spec.with_height()
         } else {
             spec
         }
@@ -848,6 +868,7 @@ impl App {
             live,
             rules,
             spear: false,
+            height: false,
             retired_steps: 0,
             checkpoints: Vec::new(),
             hp: [MAX_HP_PERMILLE; MAX_PARTICIPANTS as usize],

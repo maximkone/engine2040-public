@@ -33,12 +33,12 @@ stays in `work/`.
 |---|---|---|---|---|
 | EI1 (landed d0ff9f0c) | Camera navigation: orbit, pan, zoom, focus selection | eye fixed at `[0,1.5,5]`, fov 60 (`viewport.rs:110-117`); only click-pick and gizmo | orbit changes yaw/pitch, wheel changes distance, F frames the selection bounds; two captures with different eyes | Godot orbit/F; Fyrox editor camera; Unreal RMB+WASD |
 | EI2 (landed 72b11973) | The viewport shows the scene, not a marker grid | CPU raster of 3-5 px markers (`viewport_image.rs:184-230`); GPU path is offscreen PNG only (`app.rs:16-20`) | a 2-node capture differs from the grid baseline; the texture is the GPU frame at panel size | Flax play-in-editor; Fyrox scene preview |
-| EI3 | Drag a `.glb` into the editor | `browser.rs` reads bundles, never owns them; `tools/gltf-intake.mjs` is the only intake | drag-drop a file -> N nodes placed at the cursor; a bad file keeps the scene and shows the error | Godot import dock (`.import` + reimport on change) |
+| EI3 (landed 28ef641a) | Drag a `.glb` into the editor | `browser.rs` reads bundles, never owns them; `tools/gltf-intake.mjs` is the only intake | drag-drop a file -> N nodes placed at the cursor; a bad file keeps the scene and shows the error | Godot import dock (`.import` + reimport on change) |
 | EI4 (landed aff52663) | Gizmo scale, snapping and W/E/R/T keys | `GizmoTool` had Translate and Rotate only (`gizmo.rs:37-46`); zero `Key::` shortcuts | a scale drag changes scale by snapped 0.25 m / 15 deg steps; W/E/R/T switches tool | Fyrox 1/2/3/4 + grid snap; bevy_editor_pls T/R/S |
 | EI5 (landed 09ba69e0) | Prefabs: save a selection, instantiate it | 4 hardcoded `TemplateKind`s; 0 of 10 `Op` variants are prefab-related | save -> instantiate -> edit round-trip changes one instance only | Fyrox prefabs; Godot scenes |
 | EI6 | Mission/script authoring home | PLF8 parked; KaM ships 209 `.script` missions over 248 maps | one goal HUD row authored in-editor and replayed | KaM mission scripts + goal HUD |
 
-EI1, EI2, EI4 and EI5 have landed; EI3 is next and EI6 waits on PLF8. Each row names a
+EI1-EI5 have landed; EI6 waits on PLF8. Each row names a
 file and a test, so a claim can be checked.
 
 ## What an indie needs, ranked
@@ -63,7 +63,7 @@ file and a test, so a claim can be checked.
 
 ## Board actions
 
-EI1-EI6 are in `docs/SPRINT-24-editor.md`; EI1 (d0ff9f0c), EI2 (72b11973), EI4
-(aff52663) and EI5 (09ba69e0) landed. EI3 is next. The audit's `PLAN SAYS X`
-list is corrected there (ED20 was ticked without a working panel; ED17's bench
-could not compile; PLF8/DX7 name files that do not exist).
+EI1-EI6 are in `docs/SPRINT-24-editor.md`; EI1 (d0ff9f0c), EI2 (72b11973), EI3
+(28ef641a), EI4 (aff52663) and EI5 (09ba69e0) landed. EI6 waits on PLF8. The
+audit's `PLAN SAYS X` list is corrected there (ED20 was ticked without a working
+panel; ED17's bench could not compile; PLF8/DX7 name files that do not exist).

@@ -45,10 +45,40 @@
   body[data-play] #golden, body[data-play] #report, body[data-play] #arena-info,
   body[data-play] #input, body[data-play] #audio, body[data-play] #load,
   body[data-play] #memory, body[data-play] #coi { display: none; }
+  /* WEB15: the played match's HUD. Two health bars fed from the sim, best-of-five pips, the
+     round number and the K.O./WINNER flash. It never takes the pointer: the canvas keeps it. */
+  #duel { display: none; }
+  body[data-duel="on"] #duel { position: fixed; left: 50%; top: 10px; z-index: 21; transform: translateX(-50%); width: min(680px, 94vw); display: flex; align-items: center; gap: 10px; pointer-events: none; font: 600 13px/1.2 ui-monospace, Menlo, Consolas, monospace; text-shadow: 0 1px 2px #000; }
+  .duel-side { flex: 1 1 0; display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .duel-side.duel-flip { flex-direction: row-reverse; }
+  .duel-name { letter-spacing: 0.12em; text-transform: uppercase; color: #f4efe6; }
+  .duel-bar { flex: 1 1 auto; height: 14px; background: rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 3px; overflow: hidden; }
+  .duel-bar i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #d8452c, #f0a63a); }
+  .duel-side.duel-flip .duel-bar i { margin-left: auto; background: linear-gradient(270deg, #2f6fd0, #45c6f0); }
+  .duel-pips { letter-spacing: 0.22em; color: #ffd98a; }
+  #duel-round { flex: 0 0 auto; padding: 2px 8px; background: rgba(0, 0, 0, 0.6); border-radius: 3px; color: #ffd98a; letter-spacing: 0.1em; text-transform: uppercase; }
+  #duel-banner { display: none; position: fixed; left: 50%; top: 26vh; z-index: 22; transform: translate(-50%, -50%); pointer-events: none; font: 800 clamp(48px, 12vmin, 150px)/1 system-ui, sans-serif; color: #fff; letter-spacing: 0.06em; text-shadow: 0 0 24px rgba(0, 0, 0, 0.85), 0 4px 0 #7a1410; }
+  body[data-banner="ko"] #duel-banner, body[data-banner="win"] #duel-banner { display: block; animation: duel-pop 0.35s ease-out; }
+  body[data-banner="win"] #duel-banner { color: #ffe08a; }
+  @keyframes duel-pop { from { transform: translate(-50%, -50%) scale(1.45); opacity: 0; } to { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
 </style>
 </head>
-<body data-state="starting" data-commit="9543819fabdf">
+<body data-state="starting" data-commit="e5456e06369c">
 <canvas id="canvas"></canvas>
+<div id="duel" aria-hidden="true">
+  <div class="duel-side">
+    <span class="duel-name">you</span>
+    <span class="duel-bar"><i id="duel-you-bar"></i></span>
+    <span class="duel-pips" id="duel-you-pips">○○○</span>
+  </div>
+  <div id="duel-round">round 1</div>
+  <div class="duel-side duel-flip">
+    <span class="duel-name">rival</span>
+    <span class="duel-bar"><i id="duel-rival-bar"></i></span>
+    <span class="duel-pips" id="duel-rival-pips">○○○</span>
+  </div>
+</div>
+<div id="duel-banner"></div>
 <div id="hud">frame 0 | -- ms</div>
 <pre id="input">input: kb=0 mouse=0 pad=0</pre>
 <pre id="audio">audio: state=suspended</pre>
@@ -58,7 +88,7 @@
 <pre id="keys">WASD move · mouse look · Q/E turn · F attack · Shift block · Space dodge</pre>
 <pre id="load">load: fetching the engine</pre>
 <pre id="memory">memory: no reading yet</pre>
-<pre id="build">build: commit 9543819fabdf</pre>
+<pre id="build">build: commit e5456e06369c</pre>
 <pre id="coi">coi: isolated=false reloads=0</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>

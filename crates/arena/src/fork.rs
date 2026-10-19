@@ -301,11 +301,18 @@ impl Fork {
             brains,
             locos,
             destruction,
+            rise: _,
+            height,
             #[cfg(feature = "sim")]
             controller_snaps,
             #[cfg(feature = "sim")]
                 controllers: _,
         } = snapshot;
+        // Forks run the v1 prefix rows, which are floor-plane: a height match
+        // is refused rather than forked into a sim that would drop its fall.
+        if height {
+            return None;
+        }
         let fighters = usize::from(config.fighters);
         if states.len() != fighters || brains.len() != fighters || locos.len() != fighters {
             return None;
@@ -683,6 +690,8 @@ impl ForkJob {
                 depth,
                 limbs: LimbPool::new(MAX_LIMBS).ok()?,
                 spear: None,
+                rise: Vec::new(),
+                height: false,
                 #[cfg(test)]
                 trace: None,
                 #[cfg(test)]

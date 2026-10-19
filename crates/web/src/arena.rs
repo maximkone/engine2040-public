@@ -625,8 +625,9 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
             .map_err(|e| present_failure(&e))?;
     presenter.apply_quality(&quality::knobs(tier));
     let arena = ProceduralArena::build().map_err(|e| (Failure::NoDevice, e.to_string()))?;
+    let kit_source = fetch_kit(&search).await;
     // WEB15: `?fight` plays a real match over the same scenery; nothing else changes.
-    let fight = open_fight(&search)?;
+    let fight = open_fight(&search, kit_source.as_ref(), &mut presenter)?;
     let mut frame = ArenaLoop {
         presenter,
         arena,
@@ -658,40 +659,110 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         late_reported: 0,
     };
     frame.stage()?;
-
-    let ready = Ready {
-        adapter: adapter_facts(&info, raw),
-        features,
-        limits,
-        generation,
-        canvas: (w, h),
-        surface_format: frame.surface_format.clone(),
-        ..page_facts()
-    };
-    // A query or a software adapter is not probed: the query is the owner's word and no tier
-    // helps SwiftShader.
-    let probe = (tier_why == "default" && !software).then_some(Probe {
-        query: quality::tier_from_query(&search).map(str::to_string),
-        max_texture_2d,
-    });
-    let warmed = Box::pin(warm_behind_loader(&mut frame, &work_queue, built_at, probe)).await;
-    let init_ms = now_ms() - built_at;
-    let line = publish_ready(&frame, &ready, &warmed, init_ms);
-    set_body_attr("data-generation", &generation.to_string());
-    set_state("running");
-    web_sys::console::log_1(&JsValue::from_str(&line));
-    run_loop(frame, canvas_id.to_string(), generation);
+    let surface_format = frame.surface_format.clone();
+    let line = Box::pin(publish_and_run(
+        frame,
+        Ready {
+            adapter: adapter_facts(&info, raw),
+            features,
+            limits,
+            generation,
+            canvas: (w, h),
+            surface_format,
+            ..page_facts()
+        },
+        StartupFacts::new(&search, tier_why, software, max_texture_2d),
+        &work_queue,
+        built_at,
+        canvas_id,
+    ))
+    .await;
     Ok(line)
 }
 
+/// Warm behind the loader, publish the ready line and hand the frame to the loop. Split out of
+/// [`start`] so the device and world setup stays one screen of code.
+async fn publish_and_run(
+    mut frame: ArenaLoop,
+    ready: Ready,
+    facts: StartupFacts<'_>,
+    work_queue: &wgpu::Queue,
+    built_at: f64,
+    canvas_id: &str,
+) -> String {
+    // A query or a software adapter is not probed: the query is the owner's word and no tier
+    // helps SwiftShader.
+    let probe = (facts.tier_why == "default" && !facts.software).then_some(Probe {
+        query: quality::tier_from_query(facts.search).map(str::to_string),
+        max_texture_2d: facts.max_texture_2d,
+    });
+    let warmed = Box::pin(warm_behind_loader(&mut frame, work_queue, built_at, probe)).await;
+    let init_ms = now_ms() - built_at;
+    let line = publish_ready(&frame, &ready, &warmed, init_ms);
+    set_body_attr("data-generation", &ready.generation.to_string());
+    set_state("running");
+    web_sys::console::log_1(&JsValue::from_str(&line));
+    run_loop(frame, canvas_id.to_string(), ready.generation);
+    line
+}
+
+/// The startup facts the publish step needs that are not already in [`Ready`].
+struct StartupFacts<'a> {
+    /// The page's query string.
+    search: &'a str,
+    /// Why this tier was picked.
+    tier_why: &'a str,
+    /// True on a software adapter (no probe, no cuts).
+    software: bool,
+    /// The device's largest 2D texture, for the probe.
+    max_texture_2d: u32,
+}
+
+impl<'a> StartupFacts<'a> {
+    /// Gather the facts [`start`] already holds.
+    const fn new(search: &'a str, tier_why: &'a str, software: bool, max_texture_2d: u32) -> Self {
+        Self {
+            search,
+            tier_why,
+            software,
+            max_texture_2d,
+        }
+    }
+}
+
+/// Fetch the cooked arena kit for `?fight&kit`: `Some` when the bundle downloaded and opened,
+/// `None` for every other query or a refused fetch (the HUD says why and the procedural
+/// stand-in stays). The fetch is awaited once, before the first frame, so the first picture is
+/// the real arena. Until the kit's own spawn pair and framing drive the page, this is opt-in.
+async fn fetch_kit(search: &str) -> Option<engine_assets::asset_source::BundleSource> {
+    if !has_flag(search, "fight") || !has_flag(search, "kit") {
+        return None;
+    }
+    set_text("hud", "loading the arena kit...");
+    match crate::content::fetch_bundle(crate::content::ARENA_BUNDLE_URL).await {
+        Ok(source) => Some(source),
+        Err(err) => {
+            set_text("hud", &format!("arena kit: {err} (stand-in ring)"));
+            None
+        }
+    }
+}
+
 /// Build the played match when the query asks for it (`?fight`); `None` keeps the stand-in.
-fn open_fight(search: &str) -> Result<Option<crate::fight::Match>, (Failure, String)> {
+fn open_fight(
+    search: &str,
+    kit: Option<&engine_assets::asset_source::BundleSource>,
+    presenter: &mut Presenter,
+) -> Result<Option<crate::fight::Match>, (Failure, String)> {
     if !has_flag(search, "fight") {
         return Ok(None);
     }
-    crate::fight::Match::new()
-        .map(Some)
-        .map_err(|e| (Failure::NoDevice, e.to_string()))
+    crate::fight::Match::new(
+        kit.map(|source| source as &dyn engine_assets::AssetSource),
+        presenter,
+    )
+    .map(Some)
+    .map_err(|e| (Failure::NoDevice, e.to_string()))
 }
 
 /// The ladder of cuts, unless `?ladder=off` or a software adapter that no cut would help.

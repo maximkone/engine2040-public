@@ -164,6 +164,9 @@ const SPEAR_FLAG: &str = "--spear";
 /// `--spear-demo`: `--spear` plus a script for the human slot that walks at the nearest
 /// fighter and throws whenever the spear is ready (captures, trying the grapple hands-off).
 const SPEAR_DEMO_FLAG: &str = "--spear-demo";
+/// `--height`: the fighter height channel on (rows SG5 and SG4): fighters fall
+/// and land under gravity and the wall tether swings instead of zipping.
+const HEIGHT_FLAG: &str = "--height";
 /// `--hold <KEYS>`: keys held down from the first tick, as if pressed by hand (`W`, `W,F`; the
 /// names are W A S D F Q SPACE SHIFT). A dev flag for receipts and smoke runs: the keys take the
 /// keyboard's own road (bindings, camera-relative wish, spear key), so a capture can show W
@@ -708,6 +711,7 @@ fn run(raw: &[String]) -> i32 {
     let (play, raw) = split_flag(&raw, PLAY_FLAG);
     let (spear, raw) = split_flag(&raw, SPEAR_FLAG);
     let (spear_demo, raw) = split_flag(&raw, SPEAR_DEMO_FLAG);
+    let (height, raw) = split_flag(&raw, HEIGHT_FLAG);
     let (net, raw) = match arena_net::split_net_args(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -845,8 +849,8 @@ fn run(raw: &[String]) -> i32 {
         app.flow = app.flow.on(FlowEvent::Start);
         app.last = Instant::now();
     }
-    if let Err(err) = app.enable_spear(spear, spear_demo) {
-        tell!("arena: {SPEAR_FLAG}: {err}");
+    if let Err(err) = app.enable_spear(spear, spear_demo, height) {
+        tell!("arena: {SPEAR_FLAG}/{HEIGHT_FLAG}: {err}");
         return 2;
     }
     if let Some(net) = net.as_ref() {
@@ -1109,6 +1113,8 @@ struct ArenaApp {
     feel: FeelView,
     /// The spear grapple: on or off, scripted or not, and its picture.
     spear: SpearMode,
+    /// Height channel on (`--height`): the wall tether swings (rows SG5, SG4).
+    height: bool,
     /// Which way the live camera looks on the floor (unit `[x, z]`), as the last presented frame
     /// left it: W walks along it ([`engine_game::camera_wish`]). `None` before the first frame,
     /// so the keys keep their world axes until a camera exists. View-side only: the sim sees
@@ -1123,9 +1129,12 @@ struct ArenaApp {
 /// Build the live session's match over the arena kit's physical placement:
 /// the kit walls collide instead of being pictures. A bad placement falls
 /// back to the empty world (open sand) instead of failing the window.
-fn live_session(config: GameConfig, spear: bool) -> Result<App, WinError> {
-    let app = App::with_world(config, kit_match_world_or_empty())?.into_duel()?;
-    Ok(if spear { app.into_spear()? } else { app })
+fn live_session(config: GameConfig, spear: bool, height: bool) -> Result<App, WinError> {
+    let mut app = App::with_world(config, kit_match_world_or_empty())?.into_duel()?;
+    if spear {
+        app = app.into_spear()?;
+    }
+    Ok(if height { app.into_height()? } else { app })
 }
 
 impl ArenaApp {
@@ -1135,7 +1144,7 @@ impl ArenaApp {
         capture: Option<CaptureSlot>,
     ) -> Result<Self, WinError> {
         let test_panic_at = arena_frame::test_panic_tick()?;
-        let app = live_session(config, false)?;
+        let app = live_session(config, false, false)?;
         let break_scene = BreakScene::new(&app.live_match().config());
         let mixer = Arc::new(Mutex::new(Mixer::new(WINDOWED_SAMPLE_RATE)));
         // Automated smoke never opens a device: `--mute` mutes explicitly and
@@ -1237,6 +1246,7 @@ impl ArenaApp {
             bout_tape: Vec::new(),
             feel: FeelView::new(),
             spear: SpearMode::default(),
+            height: false,
             view_forward: None,
             title_hint: None,
             net: None,
@@ -1254,15 +1264,17 @@ impl ArenaApp {
     }
 
     /// Turn the spear grapple on for `--spear` or `--spear-demo` (a fresh match with it and the
-    /// scene that draws it); nothing when neither flag is given.
-    fn enable_spear(&mut self, spear: bool, demo: bool) -> Result<(), WinError> {
-        if !(spear || demo) {
+    /// scene that draws it) and the height channel on for `--height`; nothing when no flag is
+    /// given.
+    fn enable_spear(&mut self, spear: bool, demo: bool, height: bool) -> Result<(), WinError> {
+        self.height = height;
+        if !(spear || demo || height) {
             return Ok(());
         }
-        self.spear.on = true;
+        self.spear.on = spear || demo;
         self.spear.demo = demo;
-        self.app = live_session(self.config, true)?;
-        self.spear.scene = Some(SpearScene::new());
+        self.app = live_session(self.config, self.spear.on, height)?;
+        self.spear.scene = self.spear.on.then(SpearScene::new);
         Ok(())
     }
 
@@ -1320,7 +1332,7 @@ impl ArenaApp {
         if self.net_refuses_rematch() {
             return Ok(());
         }
-        self.app = live_session(self.config, self.spear.on)?;
+        self.app = live_session(self.config, self.spear.on, self.height)?;
         self.break_scene = BreakScene::new(&self.app.live_match().config());
         self.spear.scene = self.spear.on.then(SpearScene::new);
         self.ticks_done = 0;

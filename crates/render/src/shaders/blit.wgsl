@@ -46,12 +46,11 @@ fn composite(in: BOut) -> vec4<f32> {
     let dims = vec2<f32>(fog.width_f, fog.height_f);
     let px = vec2<i32>(clamp(in.uv * dims, vec2<f32>(0.0), dims - vec2<f32>(1.0)));
     let f = clamp(textureLoad(fog_tex, px, 0).x, 0.0, 1.0);
-    let ao = clamp(textureLoad(ao_tex, px, 0).x, 0.0, 1.0);
-    // LF3 slice-1: whole-HDR AO multiply (darkens direct too). The live
-    // frame's GTAO compute pass writes `ao_tex` on the device (1.0 on sky and
-    // when the pass is off); the second landing moves this to forward
-    // ambient-only.
-    return vec4<f32>(mix(hdr.rgb, fog.color, f) * ao, hdr.a);
+    // LF3: AO does not multiply the whole frame. The forward `fs` entry
+    // already scales the baked diffuse by the ORM occlusion and contact, so
+    // multiplying here darkened direct sun too (open sand lost its sun).
+    // The live GTAO field stays declared for a later ambient-only composite.
+    return vec4<f32>(mix(hdr.rgb, fog.color, f), hdr.a);
 }
 // Single-pass bloom before the one tone map (LF4 slice 2). Every tap is
 // soft-knee extracted first, then the extracts are blurred: a glint a pixel

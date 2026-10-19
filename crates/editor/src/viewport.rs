@@ -340,6 +340,23 @@ impl Ray {
         }
         None
     }
+
+    /// Point where the ray meets the y=0 ground plane ahead of the eye.
+    /// None when the ray is parallel to the plane or points away from it.
+    pub fn hit_ground(self) -> Option<[f32; 3]> {
+        if !self.dir[1].is_finite() || self.dir[1].abs() < 1e-6 {
+            return None;
+        }
+        let t = -self.origin[1] / self.dir[1];
+        if !t.is_finite() || t <= 0.0 {
+            return None;
+        }
+        Some([
+            self.origin[0] + self.dir[0] * t,
+            0.0,
+            self.origin[2] + self.dir[2] * t,
+        ])
+    }
 }
 
 /// Viewport state: pixel size plus camera. Owned by [`Shell`](crate::shell::Shell).
@@ -387,6 +404,12 @@ impl Viewport {
             origin: self.camera.position,
             dir,
         })
+    }
+
+    /// Ground point under pixel `(x, y)`; None off-panel, on a degenerate
+    /// camera, or when the ray never meets y=0 ahead of the eye.
+    pub fn ground_at(self, x: f32, y: f32) -> Option<[f32; 3]> {
+        self.ray_for_pixel(x, y)?.hit_ground()
     }
 
     /// Nearest row hit by the pick ray, or None on a miss. Rows keep their
@@ -482,6 +505,25 @@ mod tests {
 
     fn center(view: Viewport) -> (f32, f32) {
         (view.size.width / 2.0, view.size.height / 2.0)
+    }
+
+    #[test]
+    fn ray_meets_the_ground_only_ahead() {
+        let down = Ray {
+            origin: [2.0, 3.0, -1.0],
+            dir: [0.0, -1.0, 0.0],
+        };
+        assert_eq!(down.hit_ground(), Some([2.0, 0.0, -1.0]));
+        let parallel = Ray {
+            origin: [0.0, 3.0, 0.0],
+            dir: [1.0, 0.0, 0.0],
+        };
+        assert_eq!(parallel.hit_ground(), None);
+        let up = Ray {
+            origin: [0.0, 3.0, 0.0],
+            dir: [0.0, 1.0, 0.0],
+        };
+        assert_eq!(up.hit_ground(), None);
     }
 
     #[test]

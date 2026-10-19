@@ -3,7 +3,7 @@
 /// Content by logical path through a source: files natively, a packed
 /// `.e2bundle` in the browser. Std-only.
 pub mod asset_source;
-pub use asset_source::{AssetSource, BundleSource, FsSource, SourceError};
+pub use asset_source::{AssetSource, BundleSource, FsSource, MemorySource, SourceError};
 pub mod budget;
 pub mod datanode;
 pub use datanode::{parse, DataNodeError, Node};
@@ -68,6 +68,19 @@ pub mod collider_cook;
 pub mod gen_intake;
 #[cfg(feature = "import")]
 pub mod import_repair;
+/// The packed web bundle's compact kit glTF: one mesh per file, no dead images.
+#[cfg(feature = "import")]
+pub mod kit_gltf;
+#[cfg(feature = "import")]
+pub use kit_gltf::{compact_gltf, CompactGltf};
+#[cfg(feature = "import")]
+pub mod kit_import;
+#[cfg(feature = "import")]
+pub use kit_import::{
+    cook_kit_texture, import_kit_gltf, import_kit_gltf_full, is_lfs_pointer, kit_set, kit_stem,
+    kit_texture_asset, kit_texture_name, KitImage, KitImportError, KitMap, KitPiece, KitSet,
+    KitTexture, KIT_FILES, MAX_KIT_DETAIL_CHARS,
+};
 /// Arena material maps cooked to block-compressed KTX2 with mips (BC1/BC5), plus the reader that
 /// decodes a cooked file to RGBA8. Std-only; no encoder dependency.
 pub mod ktx2_cook;

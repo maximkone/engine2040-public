@@ -4,8 +4,9 @@ Rows from the 2026-10-19 editor audits. Spec:
 `docs/plan/EDITOR-INDIE-2026-10-19.md`. The `ui` build is green again
 (2c2accdf) and the shell has a theme, an Activity panel and an empty-scene
 start band. EI1 landed d0ff9f0c (camera orbit/pan/zoom/frame), EI4 landed
-aff52663 (scale, snapping, W/E/R/T), EI5 landed 09ba69e0 (prefabs) and EI2
-landed 72b11973 (live GPU frame at panel size); EI3 is next.
+aff52663 (scale, snapping, W/E/R/T), EI5 landed 09ba69e0 (prefabs), EI2
+landed 72b11973 (live GPU frame at panel size) and EI3 landed 28ef641a
+(drag-drop glTF import); EI6 waits on PLF8.
 
 - [x] EI1 editor: the viewport camera orbits, pans, zooms and frames — Landed d0ff9f0c.
   `viewport.rs:110-117` fixes the eye at `[0,1.5,5]` and fov 60; the viewport
@@ -27,7 +28,8 @@ landed 72b11973 (live GPU frame at panel size); EI3 is next.
   baseline; the texture matches the panel size; the same revision gives the
   same hash twice. F2P: the viewport never shows geometry. P2P: headless
   captures unchanged. needs: none.
-- [ ] EI3 editor: a dragged `.glb` becomes nodes — `browser.rs` reads bundle
+- [x] EI3 editor: a dragged `.glb` becomes nodes — Landed 28ef641a.
+  `browser.rs` reads bundle
   listings and never owns intake; `tools/gltf-intake.mjs` is the only path.
   Add a drop target on the viewport that runs the intake, reports progress,
   places the result at the cursor and refuses a bad file without touching the
@@ -36,6 +38,8 @@ landed 72b11973 (live GPU frame at panel size); EI3 is next.
   Accept: a dropped fixture yields N nodes and one undo step; a corrupt file
   shows an error and leaves the document byte-equal. F2P: no drop path.
   P2P: the browser search numbers unchanged. needs: none.
+  Landed note: the editor calls `engine_assets::import_gltf_path` (the same
+  parser the intake tool feeds), so a drop opens no subprocess.
 - [x] EI4 editor: gizmo scale, snapping and W/E/R/T — Landed aff52663.
   `gizmo.rs:37-46` had Translate and Rotate only; the crate had zero `Key::` shortcuts. Add a
   Scale tool, 0.25 m / 15 deg snapping (Shift toggles) and W/E/R/T tool keys;

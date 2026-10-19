@@ -280,6 +280,8 @@ fn take_snapshot(sim: super::Sim) -> Option<MatchSnapshot> {
         brains: sim.brains,
         locos: sim.locos,
         destruction: sim.destruction,
+        rise: sim.rise,
+        height: sim.height,
         #[cfg(feature = "sim")]
         controller_snaps,
         #[cfg(feature = "sim")]

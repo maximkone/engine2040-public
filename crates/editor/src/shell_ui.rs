@@ -779,6 +779,7 @@ impl Viewer<'_> {
                 apply_viewport_pick(self.shell, self.shared_selection, pick);
             }
         }
+        self.handle_dropped_files(ui, &canvas);
 
         let Some(selected) = self.shell.selection else {
             ui.label("Click the canvas to pick a node.");
@@ -815,6 +816,43 @@ impl Viewer<'_> {
             ui.label("dragging: release to commit one undo step");
         } else {
             ui.label("drag the gizmo: one undo step per drag");
+        }
+    }
+
+    /// EI3: a file dropped on the canvas imports at the ground point under
+    /// the pointer. Read/parse failures go to the log and stage nothing.
+    fn handle_dropped_files(&mut self, ui: &egui::Ui, canvas: &egui::Response) {
+        let Some(cursor) = ui.input(|input| input.pointer.hover_pos()) else {
+            return;
+        };
+        if !canvas.rect.contains(cursor) {
+            return;
+        }
+        let files = ui.ctx().input(|input| input.raw.dropped_files.clone());
+        if files.is_empty() {
+            return;
+        }
+        let at = self
+            .shell
+            .viewport
+            .ground_at(cursor.x - canvas.rect.min.x, cursor.y - canvas.rect.min.y)
+            .unwrap_or([0.0, 0.0, 0.0]);
+        for file in files {
+            let path = file.path();
+            let name = path.display().to_string();
+            match std::fs::read(path) {
+                Ok(bytes) => match self.shell.import_glb(&name, &bytes, at) {
+                    Ok(applied) => self.shell.log_message(format!(
+                        "import {name}: r{} {} node(s)",
+                        applied.revision,
+                        applied.effects.len()
+                    )),
+                    Err(error) => self
+                        .shell
+                        .log_message(format!("ERR import {name}: {error}")),
+                },
+                Err(error) => self.shell.log_message(format!("ERR read {name}: {error}")),
+            }
         }
     }
 

@@ -3266,6 +3266,34 @@ mod tests {
         assert!(body.contains("ibl_spec"), "fs_skinned misses open specular");
     }
 
+    #[test]
+    fn forward_skinned_samples_orm_like_window() {
+        // EG12: fs_skinned had no ORM read, so rough/metal factors and the
+        // baked occlusion never reached the skinned capture. Both forward
+        // entries must sample orm_map; the row's proof is this count.
+        let wgsl = include_str!("shaders/forward.wgsl");
+        assert_eq!(
+            wgsl.matches("textureSample(orm_map").count(),
+            2,
+            "fs and fs_skinned both sample the ORM map"
+        );
+        let start = wgsl
+            .find("fn fs_skinned(in: VOut)")
+            .expect("skinned capture has fs_skinned");
+        let rest = &wgsl[start..];
+        let end = super::fs_close(rest).expect("fs_skinned closes");
+        let body = &rest[..end];
+        assert!(body.contains("orm.x"), "occlusion reads orm.x");
+        assert!(
+            body.contains("mat.roughness * orm.y"),
+            "roughness scales by orm.y"
+        );
+        assert!(
+            body.contains("mat.metallic * orm.z"),
+            "metallic scales by orm.z"
+        );
+    }
+
     #[cfg(feature = "v1")]
     fn nonzero_on_off_bake() -> IblBake {
         // Nonzero fixture: uniform prefilter radiance plus unit

@@ -161,6 +161,9 @@ pub const SIM_TRACK: bool = false;
 pub const FIGHTER_RADIUS_M: f32 = 0.4;
 /// Kinematic capsule height in meters.
 pub const FIGHTER_HEIGHT_M: f32 = 1.8;
+/// Height-channel gravity, mm per tick squared (row SG5): the source game's
+/// -40 m/s^2 at the 60 Hz fixed tick, rounded to whole mm.
+pub const FIGHTER_GRAVITY: i32 = 11;
 
 /// Perception period for AI-filled slots, in fixed ticks. The arena maps a
 /// fresh [`Percept`] every tick; each [`DepthBrain`]
@@ -588,6 +591,10 @@ pub struct MatchSnapshot {
     brains: Vec<DepthBrain>,
     locos: Vec<Locomotion>,
     destruction: BondedCollection,
+    /// Height channel vertical speeds (row SG5), empty when off.
+    rise: Vec<i32>,
+    /// True when the height channel was armed at capture.
+    height: bool,
     #[cfg(feature = "sim")]
     controller_snaps: Vec<ControllerSnapshot>,
     #[cfg(feature = "sim")]
@@ -801,6 +808,8 @@ pub fn run_prefix_versioned(
             brains: sim.brains.clone(),
             locos: sim.locos.clone(),
             destruction: sim.destruction,
+            rise: sim.rise.clone(),
+            height: sim.height,
             controller_snaps,
             controllers: sim.controllers,
         }
@@ -819,6 +828,8 @@ pub fn run_prefix_versioned(
         brains: sim.brains.clone(),
         locos: sim.locos.clone(),
         destruction: sim.destruction,
+        rise: sim.rise.clone(),
+        height: sim.height,
     };
     Some((snapshot, sim.checkpoints))
 }
@@ -929,6 +940,12 @@ pub struct Sim {
     /// Spear grapple state, `Some` only for a match built with
     /// `MatchSpec::spear`; `None` leaves every tick and hash untouched.
     spear: Option<spear::SpearState>,
+    /// Height channel (row SG5): each slot's vertical speed in mm per tick.
+    /// Empty while the channel is off, which is the golden and the floor
+    /// plane: nothing writes `pos[1]` beyond placement and nothing folds.
+    rise: Vec<i32>,
+    /// True once the height channel is armed ([`Sim::set_height`]).
+    height: bool,
     #[cfg(test)]
     trace: Option<Vec<Vec<TickMotion>>>,
     /// Test-only oracle switch: build the melee plan through the pre-hoist
@@ -1093,6 +1110,8 @@ impl Sim {
             depth,
             limbs: LimbPool::new(limb_cap).ok()?,
             spear: None,
+            rise: Vec::new(),
+            height: false,
             #[cfg(test)]
             trace: None,
             #[cfg(test)]
@@ -1131,6 +1150,40 @@ impl Sim {
         }
         self.spear = Some(spear::SpearState::new(self.fighters));
         true
+    }
+
+    /// Arm the height channel (row SG5) before the first tick: fighters then
+    /// fall under [`FIGHTER_GRAVITY`] and land on the floor. Refuses (`false`)
+    /// past tick 0, and on the Rapier `sim` leg, whose controllers own the
+    /// poses gravity would have to move.
+    fn set_height(&mut self) -> bool {
+        if cfg!(feature = "sim") || self.tick != 0 {
+            return false;
+        }
+        self.rise = vec![0; self.fighters];
+        self.height = true;
+        true
+    }
+
+    /// One tick of the height channel: gravity on every slot that is off the
+    /// floor, a landing at floor height with the vertical speed cleared.
+    /// Integer mm, so a replay lands on the same height twice.
+    fn fall(&mut self) {
+        for (slot, state) in self.states.iter_mut().enumerate().take(self.fighters) {
+            let at_mm = match_wire::pos_mm(state.pos)[1];
+            if self.rise[slot] == 0 && at_mm <= 0 {
+                continue;
+            }
+            let rise = self.rise[slot].saturating_sub(FIGHTER_GRAVITY);
+            let next = at_mm.saturating_add(rise);
+            if next <= 0 {
+                self.rise[slot] = 0;
+                state.pos[1] = 0.0;
+            } else {
+                self.rise[slot] = rise;
+                state.pos[1] = match_wire::metres(next);
+            }
+        }
     }
 
     /// Validated constructor behind the intake version flag: V0 keeps the
@@ -1460,6 +1513,12 @@ impl Sim {
                 });
             }
         }
+        // Height channel (row SG5): gravity and the landing, after the walk
+        // and before the spear, so a swing constrains a body that has already
+        // fallen this tick. Off means the floor plane, untouched.
+        if self.height {
+            self.fall();
+        }
         // Spear grapple: throws, flights, tether physics and the bodies it
         // drags, between the walking and the collision pass. Frozen with
         // everything else while hit-stop holds.
@@ -1478,6 +1537,7 @@ impl Sim {
                     world: &self.world,
                     tables,
                     half_extent_m: self.config.half_extent_m,
+                    rise: &mut self.rise,
                 });
                 self.spear = Some(spear);
             }
@@ -1561,6 +1621,13 @@ impl Sim {
         // The spear state folds after the rules and before the world; a match
         // without one leaves the hash untouched.
         let hash = self.spear.as_ref().map_or(hash, |spear| spear.fold(hash));
+        // The height channel folds only when armed, so the golden bytes stay
+        // exactly as they were on a floor-plane match.
+        let hash = if self.height {
+            fold_rise(&self.rise[..self.fighters], hash)
+        } else {
+            hash
+        };
         // A supplied world folds after the rules: the empty world digests to
         // zero and leaves the golden bytes untouched.
         let hash = fold_world(self.world.digest(), hash);
@@ -1850,6 +1917,26 @@ impl Sim {
     /// tape bounds, snapshot lengths and version, controller restore under
     /// `sim`. The sync harness steps the returned sim tick by tick to
     /// collect per-system hashes; [`resume_inner`] steps it to completion.
+    /// A snapshot must come from this config, at this fighter count, on a
+    /// known match version, with one controller per fighter under `sim`.
+    fn snapshot_fits(snapshot: &MatchSnapshot, config: &ArenaConfig, fighters: usize) -> bool {
+        if snapshot.tick > config.ticks
+            || snapshot.config != *config
+            || snapshot.states.len() != fighters
+            || snapshot.brains.len() != fighters
+            || snapshot.locos.len() != fighters
+            || (snapshot.match_version != MATCH_WIRE_VERSION_V0
+                && snapshot.match_version != MATCH_WIRE_VERSION_V1)
+        {
+            return false;
+        }
+        #[cfg(feature = "sim")]
+        if snapshot.controllers.len() != fighters || snapshot.controller_snaps.len() != fighters {
+            return false;
+        }
+        true
+    }
+
     pub(crate) fn from_snapshot_parts(
         snapshot: MatchSnapshot,
         config: &ArenaConfig,
@@ -1867,23 +1954,11 @@ impl Sim {
                 return None;
             }
         }
-        if snapshot.tick > config.ticks
-            || snapshot.config != *config
-            || snapshot.states.len() != fighters
-            || snapshot.brains.len() != fighters
-            || snapshot.locos.len() != fighters
-            || (snapshot.match_version != MATCH_WIRE_VERSION_V0
-                && snapshot.match_version != MATCH_WIRE_VERSION_V1)
-        {
+        if !Self::snapshot_fits(&snapshot, config, fighters) {
             return None;
         }
         #[cfg(feature = "sim")]
-        if snapshot.controllers.len() != fighters || snapshot.controller_snaps.len() != fighters {
-            return None;
-        }
-        #[cfg(feature = "sim")]
-        let controllers = {
-            let mut live = snapshot.controllers;
+        let controllers = {            let mut live = snapshot.controllers;
             for (controller, snap) in live.iter_mut().zip(snapshot.controller_snaps.iter()) {
                 controller.restore(snap.clone()).ok()?;
             }
@@ -1942,6 +2017,8 @@ impl Sim {
             depth,
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
             spear: None,
+            rise: snapshot.rise,
+            height: snapshot.height,
             #[cfg(test)]
             trace: None,
             #[cfg(test)]
@@ -2216,6 +2293,23 @@ fn fold_world(digest: u64, hash: u64) -> u64 {
     for byte in digest.to_le_bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// Fold the height channel's per-slot vertical speeds into a checkpoint hash,
+/// behind the tag byte `0xB4` so a height match never shares a hash with a
+/// floor-plane one. Called only while the channel is armed.
+fn fold_rise(rise: &[i32], hash: u64) -> u64 {
+    const PRIME: u64 = 0x1000_0000_01b3;
+    let mut hash = hash;
+    hash ^= 0xB4u64;
+    hash = hash.wrapping_mul(PRIME);
+    for lane in rise {
+        for byte in lane.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
     }
     hash
 }
@@ -4837,6 +4931,69 @@ mod tests {
             ticks[TICK_REPS / 2],
             config.ticks,
             warm.limbs.limbs().len()
+        );
+    }
+
+    /// A sim with the height channel optionally armed, slot 0 placed `y_m`
+    /// off the floor, both slots idling.
+    fn height_sim(armed: bool, y_m: f32) -> (Sim, FighterTape) {
+        let config = short_config();
+        let mut sim =
+            Sim::build(&config, &FighterTape::default(), false, false).expect("valid sim");
+        if armed {
+            assert!(sim.set_height(), "armed at tick 0");
+        }
+        sim.states[0].pos[1] = y_m;
+        (sim, FighterTape::default())
+    }
+
+    /// SG5: a fighter off the floor falls under gravity and lands at rest.
+    #[test]
+    fn fighter_height_falls_to_the_floor_and_rests() {
+        let (mut sim, tape) = height_sim(true, 3.0);
+        sim.step(&tape).expect("step");
+        let after_one = sim.states[0].pos[1];
+        assert!(
+            after_one < 3.0 && after_one > 2.9,
+            "gravity pulls at once: {after_one}"
+        );
+        let mut prev = after_one;
+        for _ in 0..120 {
+            sim.step(&tape).expect("step");
+            let now = sim.states[0].pos[1];
+            assert!(now <= prev, "the fall never rises: {prev} then {now}");
+            prev = now;
+        }
+        assert_eq!(sim.states[0].pos[1], 0.0, "landed on the floor");
+        assert_eq!(sim.rise[0], 0, "and rests there");
+    }
+
+    /// SG5: without the channel nothing writes the height, so a floor-plane
+    /// match behaves exactly as it always did.
+    #[test]
+    fn fighter_height_off_leaves_a_placed_fighter_where_it_is() {
+        let (mut sim, tape) = height_sim(false, 3.0);
+        for _ in 0..120 {
+            sim.step(&tape).expect("step");
+        }
+        assert_eq!(sim.states[0].pos[1], 3.0, "no gravity without the channel");
+    }
+
+    /// SG5: one digest twice on a height match, and the height fold is in it.
+    #[test]
+    fn fighter_height_digest_repeats_and_differs_from_the_floor_plane() {
+        let digest = |armed: bool| {
+            let (mut sim, tape) = height_sim(armed, 0.0);
+            for _ in 0..90 {
+                sim.step(&tape).expect("step");
+            }
+            sim.checkpoints.last().expect("a checkpoint").hash
+        };
+        assert_eq!(digest(true), digest(true), "one digest twice");
+        assert_ne!(
+            digest(true),
+            digest(false),
+            "the height fold is in the hash"
         );
     }
 }

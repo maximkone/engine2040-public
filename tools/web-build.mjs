@@ -43,9 +43,12 @@ export const TWIGGY_ITEMS = 20;
 // WEB14: coi-serviceworker.js is the cross-origin-isolation worker the page registers; without it the page is single-threaded.
 export const COI_WORKER = "coi-serviceworker.js";
 export const DIST_FILES = ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm", "build.json"];
-// What a published bundle may hold: the files above and wasm-bindgen's snippets/ folder. A content bundle (WEB6) adds its own name
-// here when it lands; the Pages workflow adds the handbook (docs/) and llms.txt for the assembled site.
-export const PUBLIC_FILES = [...DIST_FILES];
+// WEB17: the cooked arena kit the played page fetches and stages (`?fight`); cooked offline by
+// `cargo run -p engine-assets --features import --bin arena_bundle`.
+export const KIT_BUNDLE = "assets/arena.e2bundle";
+// What a published bundle may hold: the files above, the kit bundle and wasm-bindgen's snippets/ folder.
+// The Pages workflow adds the handbook (docs/) and llms.txt for the assembled site.
+export const PUBLIC_FILES = [...DIST_FILES, KIT_BUNDLE];
 export const PUBLIC_DIRS = ["snippets/"];
 
 export class BuildError extends Error {}
@@ -248,6 +251,14 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     writeFileSync(join(outDir, "index.html"), page);
     writeFileSync(join(outDir, "loader.js"), deps.readText(join(rootDir, "crates", "web", "loader.js"))); // QW3/QW12: the page imports it
     writeFileSync(join(outDir, COI_WORKER), worker); // WEB14: the page registers it; 200 on the site is one more deploy check
+    // WEB17: the cooked arena kit, copied whole so the page has one file to fetch. The cook is
+    // offline (`arena_bundle`); this step only ships what the tree holds.
+    const kitSource = join(rootDir, "content", "arena", "kit.e2bundle");
+    if (!existsSync(kitSource)) {
+      throw new BuildError(`missing ${kitSource}: cook it with cargo run -p engine-assets --features import --bin arena_bundle`);
+    }
+    mkdirSync(join(outDir, "assets"), { recursive: true });
+    cpSync(kitSource, join(outDir, KIT_BUNDLE));
 
     const files = {};
     let totalBytes = 0;

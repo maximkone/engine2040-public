@@ -6,6 +6,7 @@
 //!
 //! The `profiler` module adds the opt-in puffin scopes, GPU timestamp-query
 //! scaffolding and frame captures; profiling never enters simulation hashes.
+//! The `overlay` module builds the in-game overlay rows and the hitch report.
 
 /// Allocation counting and the heap-peak gate math.
 pub mod alloc;
@@ -27,6 +28,8 @@ pub mod feel;
 pub mod fight_cost;
 /// Input latency meter: event tick to first sim effect and present.
 pub mod latency;
+/// In-game perf overlay rows and the hitch-report writer.
+pub mod overlay;
 /// Opt-in puffin scopes, GPU timestamp scaffolding and frame captures.
 pub mod profiler;
 /// Packaged smoke: quick pass-path check for the frame-time gate.

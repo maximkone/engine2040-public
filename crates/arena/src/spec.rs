@@ -44,6 +44,11 @@ pub struct MatchSpec {
     /// button throws a spear and tethers fighters. Off by default; off leaves
     /// the match, its hash and its identity exactly as before.
     pub spear: bool,
+    /// Height channel on (row SG5): fighters fall under gravity and land on
+    /// the floor, and the spear tether may swing them through the air. Off by
+    /// default; off leaves the match, its hash and its identity exactly as
+    /// before.
+    pub height: bool,
     /// Local input delay in ticks both peers hold their inputs for
     /// ([`DEFAULT_INPUT_DELAY_TICKS`] by default, the net send-queue hold
     /// `engine_net::session::INPUT_DELAY_TICKS`). A match property, not a
@@ -68,8 +73,16 @@ impl MatchSpec {
             rules,
             world,
             spear: false,
+            height: false,
             input_delay_ticks: DEFAULT_INPUT_DELAY_TICKS,
         }
+    }
+
+    /// This spec with the height channel on.
+    #[must_use]
+    pub fn with_height(mut self) -> Self {
+        self.height = true;
+        self
     }
 
     /// This spec with the spear grapple on.
@@ -156,6 +169,10 @@ impl MatchSpec {
         // Mixed in only when on, so every spear-less identity is unchanged.
         if self.spear {
             hash.write_u8(0x5A);
+        }
+        // Same rule for the height channel: off keeps every shipped identity.
+        if self.height {
+            hash.write_u8(0x48);
         }
         // Mixed in only when off the default, so the delay sits in the match
         // without moving any shipped identity (QN2).

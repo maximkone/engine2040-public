@@ -235,11 +235,12 @@ same seed and tape with the swing on lands at least 300 mm further than the jump
 control. Golden `d57b5c8ae3096614` x2 unchanged: the fixture does not enable
 `MatchSpec::spear`, so the rope never runs in the hashed baseline.
 
-Status 2026-10-19: built three ways and none of them holds. The reel is the only force on
-a wall tether and it points at the anchor, so on a floor-plane body a taut rope has no
-tangential force to turn into an arc; the versions that do constrain the radius also stop
-the zip that `spear_hits_wall_and_zips_the_thrower` and `play-arena.bat` depend on. The
-missing part is height: a match fighter has no vertical velocity and `move_body` takes
-`[x, z]` only. Row SG5 opens that channel and SG4 follows it. Full diagnosis:
-`docs/plan/shady-knight-port.md` (section Rope swing).
+Status 2026-10-19: landed with the height channel (SG5). `MatchSpec::with_height` gives a
+fighter a vertical speed and gravity, so the wall anchor can be a rope: the hook sets the
+3D radius to the anchor, the reel takes 60 mm of rope in per tick, `settle` puts the body
+back on the sphere after the move (which is what turns the run and the take-in into an
+arc), the drift keeps only its tangential part, and the release keeps it. Enemy tethers
+and the floor-plane path (`height` off) are untouched, byte for byte. Numbers: 60 mm/tick
+take-in, damping `v -= v/64`, rope floor 400 mm, gravity `FIGHTER_GRAVITY` = 11 mm/tick^2.
+The window does not arm the channel yet (row SG7), so `play-arena.bat` still zips.
 

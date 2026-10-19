@@ -85,6 +85,12 @@ pub(crate) fn pos_mm(pos: [f32; 3]) -> [i32; 3] {
     [conv(pos[0]), conv(pos[1]), conv(pos[2])]
 }
 
+/// Floating metres from integer millimetres, for a float pose or speed. The
+/// one conversion the millimetres side of the sim writes back.
+pub(crate) fn metres(mm: i32) -> f32 {
+    mm as f32 / 1000.0
+}
+
 /// Sweep pose for one slot: arena position in mm, integer facing, the
 /// standard hurt capsule; the shield rises exactly while block is held.
 pub(crate) fn sweep_fighter(id: u8, state: &FighterState, input: &FighterInput) -> SweepFighter {

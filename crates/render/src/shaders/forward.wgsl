@@ -765,13 +765,18 @@ fn fs_skinned(in: VOut) -> @location(0) vec4<f32> {
     let mapped_n = eg12_world_normal(normalize(in.world_n), in.tangent, map_n);
     let n_ibl = normalize(mapped_n);
     let v_ibl = normalize(cam.camera_pos - in.world_pos);
-    let f0_ibl = f0_term(albedo, mat.metallic);
+    // EG12: the ORM texel scales roughness/metallic and carries the baked
+    // occlusion, exactly like the window `fs` entry.
+    let orm = textureSample(orm_map, normal_smp, in.uv).rgb;
+    let rough_eff = clamp(mat.roughness * orm.y, 0.0, 1.0);
+    let metal_eff = clamp(mat.metallic * orm.z, 0.0, 1.0);
+    let f0_ibl = f0_term(albedo, metal_eff);
     // EG12: baked diffuse scales by occlusion, specular stays open
     // (pipeline rule 4, mirrors CPU `shade_ibl_occluded` plus window `fs`).
-    let ibl = ibl_sample(n_ibl, v_ibl, f0_ibl, mat.roughness, albedo, mat.metallic);
-    let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, mat.metallic);
+    let ibl = ibl_sample(n_ibl, v_ibl, f0_ibl, rough_eff, albedo, metal_eff);
+    let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, metal_eff);
     let ibl_spec_term = ibl - ibl_diffuse_term;
-    let occlusion: f32 = sun_contact_factor(in.world_pos);
+    let occlusion: f32 = sun_contact_factor(in.world_pos) * orm.x;
     let lit = direct_light(in.world_pos, mapped_n, albedo) + ibl_diffuse_term * occlusion + ibl_spec_term;
     let mapped = aces_fitted(max(lit * mat.exposure, vec3<f32>(0.0)));
     return vec4<f32>(linear_to_srgb_term(mapped), 1.0);

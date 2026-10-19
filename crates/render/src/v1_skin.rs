@@ -731,6 +731,9 @@ pub struct GpuSkinned {
     ibl_sampler: wgpu::Sampler,
     /// Neutral 1x1 normal map bound at 17; keeps geometric normals.
     normal_map: wgpu::Texture,
+    /// White fallback ORM (occlusion 1, roughness 1, metallic 1) for the
+    /// skinned capture layout; a real ORM map binds here later (EG12).
+    orm_map: wgpu::Texture,
 }
 
 #[cfg(feature = "window")]
@@ -812,6 +815,42 @@ impl GpuSkinned {
                 depth_or_array_layers: 1,
             },
         );
+        // EG12: fs_skinned now samples binding 19. The capture path binds a
+        // neutral ORM (1,1,1) so the skinned frame keeps the same look until
+        // a real material map rides in.
+        let orm_map = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("r3-orm-fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &orm_map,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255u8, 255, 255, 255],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("r3-skinned-pbr"),
@@ -882,6 +921,16 @@ impl GpuSkinned {
                 binding: 18,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 19,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
                 count: None,
             },
         ];
@@ -970,6 +1019,7 @@ impl GpuSkinned {
             ibl_sh_buf,
             ibl_sampler,
             normal_map,
+            orm_map,
         })
     }
 
@@ -1157,6 +1207,10 @@ impl GpuSkinned {
             label: Some("r3-normal-view"),
             ..Default::default()
         });
+        let orm_view = self.orm_map.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("r3-orm-view"),
+            ..Default::default()
+        });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("r3-skin-uniforms"),
             layout: &self.layout,
@@ -1204,6 +1258,10 @@ impl GpuSkinned {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::Sampler(&self.ibl_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(&orm_view),
                 },
             ],
         });

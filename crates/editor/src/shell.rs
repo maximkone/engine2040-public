@@ -28,6 +28,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
+use engine_assets::{import_gltf_path, MeshImportError};
+use engine_scene::component::{AssetName, Component, ComponentError, Mesh};
 use engine_scene::ids::ObjectId;
 use engine_scene::schema::SchemaRegistry;
 use engine_scene::transform::{Hierarchy, Transform};
@@ -228,6 +230,57 @@ pub enum TuneLane {
     Caution,
 }
 
+/// Cap on nodes one dropped file may add; a larger file is refused whole.
+pub const MAX_IMPORT_NODES: usize = 64;
+
+/// Why a `.glb`/`.gltf` import refused. Nothing is staged on any variant, so
+/// the document stays byte-equal after a bad file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportError {
+    /// The glTF parser or one of its bounds refused the file.
+    Mesh(MeshImportError),
+    /// The file held no triangle primitive.
+    Empty,
+    /// One file would add more nodes than [`MAX_IMPORT_NODES`].
+    TooMany {
+        /// Primitive count the file asked for.
+        count: usize,
+    },
+    /// A name derived from the path failed the scene's asset-name rules.
+    Name(ComponentError),
+    /// The drop point was NaN or infinity.
+    NonFinite,
+    /// The command service refused the batch; the document is unchanged.
+    Command(BatchError),
+}
+
+impl fmt::Display for ImportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mesh(error) => write!(f, "glTF refused: {error}"),
+            Self::Empty => f.write_str("the file has no triangle primitive"),
+            Self::TooMany { count } => write!(
+                f,
+                "the file has {count} primitives; one drop adds at most {MAX_IMPORT_NODES}"
+            ),
+            Self::Name(error) => write!(f, "asset name refused: {error}"),
+            Self::NonFinite => f.write_str("drop point is not finite"),
+            Self::Command(error) => write!(f, "command refused: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Mesh(error) => Some(error),
+            Self::Name(error) => Some(error),
+            Self::Command(error) => Some(error),
+            Self::Empty | Self::TooMany { .. } | Self::NonFinite => None,
+        }
+    }
+}
+
 /// What rejected a shell edit. Command failures name the culprit node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellError {
@@ -243,6 +296,8 @@ pub enum ShellError {
     Gizmo(GizmoError),
     /// A prefab capture or placement was refused; nothing changed.
     Prefab(PrefabError),
+    /// A dropped file was refused; nothing changed.
+    Import(ImportError),
 }
 
 impl fmt::Display for ShellError {
@@ -254,6 +309,7 @@ impl fmt::Display for ShellError {
             Self::Command(error) => write!(f, "command refused: {error}"),
             Self::Gizmo(error) => write!(f, "gizmo refused: {error}"),
             Self::Prefab(error) => write!(f, "prefab refused: {error}"),
+            Self::Import(error) => write!(f, "import refused: {error}"),
         }
     }
 }
@@ -264,6 +320,7 @@ impl std::error::Error for ShellError {
             Self::Command(error) => Some(error),
             Self::Gizmo(error) => Some(error),
             Self::Prefab(error) => Some(error),
+            Self::Import(error) => Some(error),
             Self::NoSelection | Self::NothingStaged | Self::UnknownNode(_) => None,
         }
     }
@@ -1296,6 +1353,89 @@ impl Shell {
         }
     }
 
+    /// Import a `.glb`/`.gltf` file as one node per triangle primitive,
+    /// fanned around `at` (the ground point under a drop). One batch, so one
+    /// undo removes the whole import; a bad file stages nothing and the
+    /// document stays byte-equal.
+    pub fn import_glb(
+        &mut self,
+        path: &str,
+        bytes: &[u8],
+        at: [f32; 3],
+    ) -> Result<Applied, ImportError> {
+        let imported = import_gltf_path(path, bytes).map_err(ImportError::Mesh)?;
+        if imported.meshes.is_empty() {
+            return Err(ImportError::Empty);
+        }
+        if imported.meshes.len() > MAX_IMPORT_NODES {
+            return Err(ImportError::TooMany {
+                count: imported.meshes.len(),
+            });
+        }
+        if !at.iter().all(|coordinate| coordinate.is_finite()) {
+            return Err(ImportError::NonFinite);
+        }
+        let stem = import_stem(path);
+        let total = imported.meshes.len();
+        let mut ops = Vec::with_capacity(total * 2);
+        let mut first = None;
+        for (index, _mesh) in imported.meshes.iter().enumerate() {
+            let name = if total == 1 {
+                stem.clone()
+            } else {
+                format!("{stem}-{index}")
+            };
+            let asset = AssetName::try_from(name.as_str()).map_err(ImportError::Name)?;
+            let id = ObjectId::new();
+            if first.is_none() {
+                first = Some(id);
+            }
+            let [offset_x, offset_z] = import_offset(index);
+            ops.push(Op::Insert {
+                id,
+                parent: ObjectId::NIL,
+                local: Transform::new(
+                    [at[0] + offset_x, at[1], at[2] + offset_z],
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                ),
+            });
+            ops.push(Op::SetComponent {
+                id,
+                component: Component::Mesh(Mesh {
+                    asset,
+                    cast_shadows: true,
+                }),
+            });
+        }
+        let batch = Batch {
+            ops,
+            base_revision: self.doc.revision,
+            idempotency_key: self.take_key(),
+            provenance: None,
+        };
+        let meta = CommandMeta::significant(format!("import {stem}"));
+        match commands::apply_named(&mut self.doc, &mut self.journal, &batch, &meta) {
+            Ok(applied) => {
+                self.record_audit(&batch, &meta, &applied);
+                self.log_applied(&applied);
+                self.log.push(format!(
+                    "import `{path}`: {total} node(s) at [{:.1}, {:.1}]",
+                    at[0], at[2]
+                ));
+                self.note_activity(Author::Human, "import.glb", None);
+                if let Some(id) = first {
+                    self.select(id);
+                }
+                Ok(applied)
+            }
+            Err(error) => {
+                self.log.push(format!("ERR import `{path}`: {error}"));
+                Err(ImportError::Command(error))
+            }
+        }
+    }
+
     /// First free name for a kind (`arena`, `arena_2`, ...).
     pub fn template_suggest(&self, kind: TemplateKind) -> String {
         self.templates.default_name(kind)
@@ -1396,6 +1536,45 @@ impl Default for Shell {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Sanitized asset stem from a dropped file path: the file name without its
+/// `.glb`/`.gltf` extension, bytes outside the asset-name alphabet replaced
+/// by `-`, capped so a per-mesh suffix still fits the name bound.
+fn import_stem(path: &str) -> String {
+    let file = path
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .next()
+        .unwrap_or(path);
+    let stem = match file.rsplit_once('.') {
+        Some((stem, extension))
+            if extension.eq_ignore_ascii_case("glb") || extension.eq_ignore_ascii_case("gltf") =>
+        {
+            stem
+        }
+        _ => file,
+    };
+    let mut out = String::with_capacity(stem.len());
+    for ch in stem.chars() {
+        if out.len() >= 48 {
+            break;
+        }
+        let keep = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.');
+        out.push(if keep { ch } else { '-' });
+    }
+    let trimmed = out.trim_matches(|ch| ch == '-' || ch == '.').to_string();
+    if trimmed.is_empty() {
+        "import".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Grid offsets around the drop point: eight columns by eight rows, 0.6 m
+/// apart, so a large file fans out instead of stacking every mesh on a pixel.
+fn import_offset(index: usize) -> [f32; 2] {
+    const STEPS: [f32; 8] = [-2.1, -1.5, -0.9, -0.3, 0.3, 0.9, 1.5, 2.1];
+    [STEPS[index % 8], STEPS[(index / 8) % 8]]
 }
 
 #[cfg(test)]
@@ -1953,6 +2132,50 @@ mod tests {
         shell.undo().expect("one undo removes the whole copy");
         assert_eq!(shell.doc.hierarchy.len(), before);
         assert!(!shell.doc.hierarchy.contains(new_root));
+    }
+
+    /// EI3: a real glTF becomes nodes at the drop point in one batch; a bad
+    /// file leaves the document byte-equal.
+    #[test]
+    fn dropped_gltf_imports_nodes_and_a_bad_file_changes_nothing() {
+        use engine_scene::component::ComponentKind;
+
+        const TRIANGLE: &[u8] = include_bytes!("../../../fixtures/khronos/Triangle.gltf");
+        let mut shell = Shell::new();
+        let applied = shell
+            .import_glb("triangle.gltf", TRIANGLE, [3.0, 0.0, 4.0])
+            .expect("the fixture imports");
+        assert_eq!(shell.document().hierarchy.len(), 1);
+        assert_eq!(applied.revision, 1);
+        let selected = shell.selection.expect("import selects its first node");
+        let key = selected.to_string();
+        let mesh = shell
+            .document()
+            .components
+            .get(&key)
+            .and_then(|table| table.get(&ComponentKind::Mesh));
+        assert!(matches!(
+            mesh,
+            Some(Component::Mesh(mesh)) if mesh.asset.as_str() == "triangle"
+        ));
+        let local = shell
+            .document()
+            .hierarchy
+            .local(selected)
+            .expect("node pose");
+        assert_eq!(local.position[0], 3.0 + import_offset(0)[0]);
+        assert_eq!(local.position[2], 4.0 + import_offset(0)[1]);
+
+        let after_import = shell.document().clone();
+        let refused = shell.import_glb("broken.glb", b"not a gltf", [0.0, 0.0, 0.0]);
+        assert!(matches!(
+            refused,
+            Err(ImportError::Mesh(MeshImportError::Parse { .. }))
+        ));
+        assert_eq!(*shell.document(), after_import, "bad file changes nothing");
+
+        shell.undo().expect("one undo removes the import");
+        assert!(shell.document().hierarchy.is_empty());
     }
 
     /// Fixed ids so two shells can compare end digests bit-exactly: random

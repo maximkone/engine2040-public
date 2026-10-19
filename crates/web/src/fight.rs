@@ -15,12 +15,11 @@
 //! crate's own ledger lists the words it may use.
 use std::fmt;
 
+use engine_assets::AssetSource;
 use engine_audio::FightCue;
-use engine_game::arena_kit::kit_match_world_or_empty;
+use engine_game::arena_kit::{kit_match_world_or_empty, push_kit_draws, stage_kit_from, KitReport};
 use engine_game::rounds::{RoundWinner, WINS_FOR_MATCH};
-use engine_game::windowed::{
-    live_fight_dots, push_fight_draws, stage_fight_bodies, BodyDot,
-};
+use engine_game::windowed::{live_fight_dots, push_fight_draws, stage_fight_bodies, BodyDot};
 use engine_game::{App, GameConfig};
 use engine_net::session::BodyInput;
 use engine_render::present::{DrawList, Presenter};
@@ -36,8 +35,7 @@ pub const MATCH_TICKS: u32 = 36_000;
 /// Seed of the page's match; the native arena's default seed.
 pub const MATCH_SEED: u64 = 2040;
 /// Half-extent of the arena the page plays in, meters. The duel spawns at random points in a box
-/// whose limit is this extent minus a fighter radius, and the procedural ring's wall stands at
-/// 11 m, so 5.5 keeps the pair near the middle of the ring instead of spawning it at the wall.
+/// whose limit is this extent minus a fighter radius; 12 is the native arena's own default.
 pub const HALF_EXTENT_M: f32 = 12.0;
 /// Ticks a round-ending K.O. banner stays up, at the fixed 60 Hz rate: one and a quarter
 /// seconds. The match pauses for it, so the last pose and the empty bar stay on screen.
@@ -166,16 +164,27 @@ pub struct Match {
     /// Last frame's camera as `[eye xyz, target xyz]`, so the page's line can be checked
     /// against the seats it frames.
     cam: [f32; 6],
+    /// The staged arena kit (WEB17): `None` until the fetched bundle is imported, and `None`
+    /// for good when the fetch or the import was refused (the procedural ring then stands in).
+    kit: Option<KitReport>,
+    /// Kit draws resident on the last frame.
+    kit_drawn: usize,
 }
 
 impl Match {
-    /// Build the session, or say why the world or the rules refused it.
+    /// Build the session, or say why the world or the rules refused it. When `kit` is `Some`,
+    /// the arena kit is imported and staged once here (cold init); a refused import leaves the
+    /// match playable over the procedural ring instead of failing the page.
     ///
     /// # Errors
     /// [`MatchError::Session`] or [`MatchError::Scenery`] when the session or the ring refuse.
-    pub fn new() -> Result<Self, MatchError> {
+    pub fn new(
+        kit: Option<&dyn AssetSource>,
+        presenter: &mut Presenter,
+    ) -> Result<Self, MatchError> {
         let app = Self::session()?;
         let arena = ProceduralArena::build().map_err(|e| MatchError::Scenery(e.to_string()))?;
+        let kit = kit.and_then(|source| stage_kit_from(presenter, source).ok());
         Ok(Self {
             app,
             arena,
@@ -191,6 +200,8 @@ impl Match {
             staged: 0,
             drawn: 0,
             cam: [0.0; 6],
+            kit,
+            kit_drawn: 0,
         })
     }
 
@@ -374,7 +385,7 @@ impl Match {
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "match: tick={} hp={}/{} rounds={}/{} bodies={}/{} at={at} cam=({:.1},{:.1},{:.1})->({:.1},{:.1},{:.1})",
+            "match: tick={} hp={}/{} rounds={}/{} bodies={}/{} kit={}/{} at={at} cam=({:.1},{:.1},{:.1})->({:.1},{:.1},{:.1})",
             self.app.cursor(),
             hp.first().copied().unwrap_or(0),
             hp.get(1).copied().unwrap_or(0),
@@ -382,6 +393,8 @@ impl Match {
             self.wins[1],
             self.drawn,
             self.staged,
+            self.kit_drawn,
+            self.kit.as_ref().map_or(0, KitReport::draw_count),
             self.cam[0],
             self.cam[1],
             self.cam[2],
@@ -411,6 +424,12 @@ impl Match {
             .arena
             .list_scenery(width, height, t_s)
             .map_err(|e| MatchError::Scenery(e.to_string()))?;
+        // WEB17: once the cooked kit is staged, it is the arena: the procedural ring's items go
+        // and the kit's own draws take their place, under the same camera and light.
+        if let Some(kit) = &self.kit {
+            list.items.clear();
+            self.kit_drawn = push_kit_draws(&mut list, &resident, kit);
+        }
         // Third person: behind the human seat's facing, over its shoulder, at the rival.
         if let (Some(a), Some(b)) = (dots.first(), dots.get(1)) {
             let view = ShoulderView {

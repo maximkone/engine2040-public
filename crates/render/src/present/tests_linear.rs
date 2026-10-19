@@ -117,6 +117,26 @@ mod shader_text {
         assert_eq!(blit.matches("fn display_tonemap(").count(), 1);
         assert_eq!(blit.matches("fn aces_fitted(").count(), 1);
     }
+
+    #[test]
+    fn the_blit_does_not_scale_the_frame_by_ao() {
+        // LF3: AO darkening lives in forward ambient (contact * orm.x), never
+        // on the whole HDR blit, so sunlit open sand keeps its sun.
+        let blit = crate::present::gpu_present::BLIT_WGSL;
+        let composite = wgsl_fn_body(blit, "composite");
+        assert!(
+            !composite.contains("* ao"),
+            "the composite must not multiply the frame by ao"
+        );
+        assert!(
+            !composite.contains("textureLoad(ao_tex"),
+            "AO stays bound for a later ambient-only composite"
+        );
+        assert!(
+            composite.contains("mix(hdr.rgb, fog.color, f)"),
+            "fog still mixes the frame"
+        );
+    }
 }
 
 #[cfg(feature = "window")]

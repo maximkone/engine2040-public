@@ -275,7 +275,7 @@ pub(crate) mod fixtures {
 mod tests {
     use super::*;
     use crate::pass_truth::harness::fixtures::{
-        arena_like_scene, init_or_skip, ARMOR_DRAW, FLOOR_DRAW, H, W, WALL_DRAW,
+        arena_like_scene, init_or_skip, ARMOR_DRAW, FLOOR_DRAW, H, W,
     };
     use crate::pass_truth::live_gate::{diff_in_draws, NO_DRAW_ID};
     use crate::pass_truth::{PassRegion, PASS_EPSILON};
@@ -329,12 +329,15 @@ mod tests {
         let second = gate_live_scene(&mut presenter, &list).expect("scene gates again");
         assert_eq!(first.rows, second.rows, "the gate run twice, same table");
         assert_eq!(first.noise_px, 0, "the all-on frame repeats exactly");
-        for name in ["graph", "ibl", "sky", "gtao"] {
+        for name in ["graph", "ibl", "sky"] {
             let r = row(&first, name);
             assert!(r.verdict.live, "{name} moves pixels in its region: {r:?}");
             assert!(r.verdict.diff_pixels > 0 && r.counted_px > 0);
         }
         for name in [
+            // LF3: the GTAO field is bound but not composited until the
+            // ambient-only landing, so its toggle changes no pixel.
+            "gtao",
             "shadow_cluster",
             "post",
             "material_layer",
@@ -365,8 +368,9 @@ mod tests {
         );
         assert!(report.contains("| graph | LIVE |"));
         assert!(report.contains("| sky | LIVE |"));
+        assert!(report.contains("| gtao | PROBE | 0 |"));
         assert!(report.contains("| decals | PROBE | 0 |"));
-        assert!(report.contains("9 rows, 4 LIVE, 5 PROBE"));
+        assert!(report.contains("9 rows, 3 LIVE, 6 PROBE"));
         // The artifact: dated by the caller (`PASS_TRUTH_DATE`), repo-rooted.
         let date = std::env::var("PASS_TRUTH_DATE").unwrap_or_else(|_| "arena-like".into());
         let path = super::super::live_gate::write_live_gate_report(&repo_root(), &date, &report)
@@ -448,101 +452,21 @@ mod tests {
     }
 
     #[test]
-    fn gtao_darkens_the_feet_and_the_wall_base_and_leaves_open_sand_alone() {
-        // Caller: the LF3 accept ("feet and wall-base regions darker on vs
-        // off, open sand within 2%"). Behavior: with the AO pass on, sand
-        // within 8 px of the armor (the feet) and of the wall (its base) is
-        // darker than with it off, with the darkest pixels well below the
-        // rest; sand with nothing within 24 px matches the off frame within
-        // 2 percent; the capture repeats exactly.
-        let Some(mut presenter) = init_or_skip("gtao_darkens_the_feet_and_the_wall_base") else {
+    fn gtao_toggle_leaves_the_frame_byte_equal() {
+        // LF3: AO no longer multiplies the whole HDR frame at the blit (it
+        // darkened direct sun too). The GTAO field stays bound for a later
+        // ambient-only composite, so toggling the pass must not change a
+        // pixel; ambient contact darkening lives in forward and is covered
+        // by `contact_feet`.
+        let Some(mut presenter) = init_or_skip("gtao_toggle_leaves_the_frame_byte_equal") else {
             return;
         };
         presenter.resize(W, H).expect("valid size applies");
         let list = arena_like_scene(&mut presenter, W, H);
         let on = capture(&mut presenter, &list, None);
         let off = capture(&mut presenter, &list, Some("gtao"));
-        let on_again = capture(&mut presenter, &list, None);
-        assert_eq!(on.rgba, on_again.rgba, "capture x2 equal");
-        let is_sand = |i: usize| on.ids[i] == FLOOR_DRAW;
-        let feet = |i: usize| is_sand(i) && near(&on, i, 8, |id| id == ARMOR_DRAW);
-        let wall_base = |i: usize| is_sand(i) && near(&on, i, 8, |id| id == WALL_DRAW);
-        let open = |i: usize| is_sand(i) && !near(&on, i, 24, |id| id != FLOOR_DRAW);
-        let ratio = |pick: &dyn Fn(usize) -> bool| {
-            let (lit, n) = mean_luma(&on, pick);
-            let (bare, _) = mean_luma(&off, pick);
-            (lit / bare, n)
-        };
-        let (feet_ratio, feet_px) = ratio(&feet);
-        let (wall_ratio, wall_px) = ratio(&wall_base);
-        let (open_ratio, open_px) = ratio(&open);
-        eprintln!(
-            "gtao on/off luma: feet {feet_ratio:.4} ({feet_px} px), wall base {wall_ratio:.4} ({wall_px} px), open sand {open_ratio:.4} ({open_px} px)"
-        );
-        assert!(
-            feet_px > 300 && wall_px > 1000 && open_px > 5000,
-            "regions are in view"
-        );
-        assert!(feet_ratio < 0.995, "the feet are darker: {feet_ratio}");
-        assert!(wall_ratio < 0.995, "the wall base is darker: {wall_ratio}");
-        assert!(
-            (open_ratio - 1.0).abs() <= 0.02,
-            "open sand stays within 2 percent: {open_ratio}"
-        );
-        // The contact itself is much darker than the band average.
-        let darker = |pick: &dyn Fn(usize) -> bool| {
-            (0..on.rgba.len() / 4)
-                .filter(|i| pick(*i))
-                .filter(|i| {
-                    let sum = |f: &LivePixels| {
-                        u32::from(f.rgba[i * 4])
-                            + u32::from(f.rgba[i * 4 + 1])
-                            + u32::from(f.rgba[i * 4 + 2])
-                    };
-                    sum(&on) * 100 < sum(&off) * 95
-                })
-                .count()
-        };
-        assert!(darker(&feet) >= 20, "the foot contact darkens");
-        assert!(darker(&wall_base) >= 100, "the wall contact darkens");
-        assert_eq!(darker(&open), 0, "no open sand pixel darkens");
-    }
-
-    /// The mean of (r + g + b) / 3 over the pixels `pick` selects, with their
-    /// count.
-    fn mean_luma(frame: &LivePixels, pick: &dyn Fn(usize) -> bool) -> (f64, usize) {
-        let mut sum = 0.0f64;
-        let mut n = 0usize;
-        for (i, px) in frame.rgba.chunks_exact(4).enumerate() {
-            if pick(i) {
-                sum += f64::from(px[0]) + f64::from(px[1]) + f64::from(px[2]);
-                n += 1;
-            }
-        }
-        (
-            sum / (3.0 * f64::from(u32::try_from(n.max(1)).unwrap_or(u32::MAX))),
-            n,
-        )
-    }
-
-    /// Whether any pixel within `r` (Chebyshev) of pixel `i` carries a draw
-    /// id for which `other` holds.
-    fn near(frame: &LivePixels, i: usize, r: i64, other: impl Fn(u32) -> bool) -> bool {
-        let (w, h) = (i64::from(frame.width), i64::from(frame.height));
-        let at = i64::try_from(i).unwrap_or(0);
-        let (x, y) = (at % w, at / w);
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let (nx, ny) = (x + dx, y + dy);
-                if (0..w).contains(&nx) && (0..h).contains(&ny) {
-                    let j = usize::try_from(ny * w + nx).unwrap_or(0);
-                    if other(frame.ids[j]) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        eprintln!("gtao on/off: {} px byte-equal", on.rgba.len() / 4);
+        assert_eq!(on.rgba, off.rgba, "AO on/off frames are byte-equal");
     }
 
     #[test]

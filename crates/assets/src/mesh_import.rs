@@ -168,8 +168,14 @@ fn invalid(field: &'static str, detail: &str) -> MeshImportError {
     }
 }
 
-/// Import glTF bytes (`.gltf` text or `.glb` binary) into cooked data.
-pub fn import_gltf_bytes(bytes: &[u8]) -> Result<GltfImport, MeshImportError> {
+/// Parse glTF bytes into the validated document plus its binary chunk.
+///
+/// Split out of [`import_gltf_bytes`] so another cook can walk the same
+/// document (node transforms) without parsing the file twice. Same bounds and
+/// same typed refusals as the full import.
+pub(crate) fn parse_document(
+    bytes: &[u8],
+) -> Result<(gltf::Document, Option<Vec<u8>>), MeshImportError> {
     if bytes.len() > MAX_BYTES {
         return Err(MeshImportError::TooLarge { count: bytes.len() });
     }
@@ -194,7 +200,13 @@ pub fn import_gltf_bytes(bytes: &[u8]) -> Result<GltfImport, MeshImportError> {
             detail: bound_detail(&format!("{e:?}")),
         },
     })?;
-    import_document(&parsed.document, parsed.blob)
+    Ok((parsed.document, parsed.blob))
+}
+
+/// Import glTF bytes (`.gltf` text or `.glb` binary) into cooked data.
+pub fn import_gltf_bytes(bytes: &[u8]) -> Result<GltfImport, MeshImportError> {
+    let (document, blob) = parse_document(bytes)?;
+    import_document(&document, blob)
 }
 
 /// Import glTF bytes with a file-extension gate (`.gltf`/`.glb` only).
@@ -234,7 +246,10 @@ pub(crate) fn required_extension_name(
     None
 }
 
-fn import_document(
+/// Import one already-parsed document: buffers, every triangle primitive and
+/// the embedded image slices. Shared with the arena kit cook so both read the
+/// same primitive order.
+pub(crate) fn import_document(
     document: &gltf::Document,
     blob: Option<Vec<u8>>,
 ) -> Result<GltfImport, MeshImportError> {

@@ -226,6 +226,9 @@ impl LiveMatch {
         if spec.spear && !live.sim.set_spear() {
             return None;
         }
+        if spec.height && !live.sim.set_height() {
+            return None;
+        }
         Some(live)
     }
 
@@ -436,6 +439,7 @@ impl LiveMatch {
         if !self.sim.world.is_empty()
             || self.sim.rules != ArenaRules::V1
             || self.sim.spear.is_some()
+            || self.sim.height
         {
             return None;
         }
@@ -452,6 +456,8 @@ impl LiveMatch {
             brains: self.sim.brains.clone(),
             locos: self.sim.locos.clone(),
             destruction: self.sim.destruction.clone(),
+            rise: Vec::new(),
+            height: false,
         })
     }
 

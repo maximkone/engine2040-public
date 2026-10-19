@@ -5,10 +5,11 @@
 //! separated, relative, no `.` or `..`); a source maps the name to bytes.
 //! [`FsSource`] reads a directory tree (native); [`BundleSource`] reads a
 //! packed `.e2bundle` held in memory (browser: fetched; native: tools and
-//! tests). Both return the same bytes for the same name, list names in the
-//! same bytewise order and fail with the missing or damaged name in the
-//! error, so a gap never becomes a silent default. Std-only; no clock, no
-//! RNG; the browser build never compiles [`FsSource`].
+//! tests); [`MemorySource`] holds what a cook staged, so a packer never needs
+//! a staging directory. All three return the same bytes for the same name,
+//! list names in the same bytewise order and fail with the missing or damaged
+//! name in the error, so a gap never becomes a silent default. Std-only; no
+//! clock, no RNG; the browser build never compiles [`FsSource`].
 
 use super::wire::bound_chars;
 use engine_core::{hash_bytes, Fnv64};
@@ -229,6 +230,80 @@ impl ContentDigest {
 }
 
 pub use fs_source::FsSource;
+
+/// An [`AssetSource`] over files a cook already holds in memory.
+///
+/// Consumer: `arena_bundle --format packed` stages the compact kit glTF and
+/// the cooked KTX2 files here and hands the source to [`pack_to`], so the
+/// bundle is built without a staging directory and the same staged files give
+/// the same bytes on every machine. Paths are validated on insert; iteration
+/// is `BTreeMap` order, which is the bytewise order every source lists in.
+#[derive(Clone, Debug, Default)]
+pub struct MemorySource {
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+impl MemorySource {
+    /// An empty source.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add (or replace) the file at `path`; a bad logical path is refused.
+    ///
+    /// # Errors
+    /// [`SourceError::BadPath`] when `path` is not a logical path.
+    pub fn insert(&mut self, path: &str, bytes: Vec<u8>) -> Result<(), SourceError> {
+        validate_path(path)?;
+        self.files.insert(path.to_string(), bytes);
+        Ok(())
+    }
+
+    /// Files held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// True when nothing was inserted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+impl AssetSource for MemorySource {
+    fn read(&self, path: &str) -> Result<Cow<'_, [u8]>, SourceError> {
+        validate_path(path)?;
+        self.files
+            .get(path)
+            .map(|bytes| Cow::Borrowed(bytes.as_slice()))
+            .ok_or_else(|| SourceError::missing(path))
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        validate_path(path).is_ok() && self.files.contains_key(path)
+    }
+
+    fn list(&self, dir: &str) -> Result<Vec<String>, SourceError> {
+        if dir.is_empty() {
+            return Ok(self.files.keys().cloned().collect());
+        }
+        validate_path(dir)?;
+        let prefix = format!("{dir}/");
+        let found: Vec<String> = self
+            .files
+            .range(prefix.clone()..)
+            .take_while(|(path, _)| path.starts_with(prefix.as_str()))
+            .map(|(path, _)| path.clone())
+            .collect();
+        if found.is_empty() {
+            return Err(SourceError::missing(dir));
+        }
+        Ok(found)
+    }
+}
 
 /// The browser has no file system: the same type exists so callers compile on
 /// every target, and every read says so by name (`Unsupported`). A browser

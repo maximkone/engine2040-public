@@ -26,7 +26,7 @@ use engine_input::FighterInput;
 use engine_physics::query::{swept_cast, CastCapsule, SweptHit};
 
 use crate::collide::collide_states;
-use crate::match_wire::pos_mm;
+use crate::match_wire::{metres, pos_mm};
 use crate::world::MatchWorld;
 use crate::{
     canon_zero, facing_q16, wall_limit, ArenaRules, FighterState, FIGHTER_RADIUS_M, MAX_SLOTS,
@@ -74,6 +74,14 @@ const MAX_SPEED: i64 = 420;
 const WALL_REEL_ACCEL: i64 = 28;
 /// Speed cap of a wall tether.
 const WALL_MAX_SPEED: i64 = 500;
+/// Rope taken in per tick by a swinging tether, mm (row SG4): 3.6 m/s at the
+/// fixed tick, so a hook reels the thrower up its arc.
+const SWING_REEL: i32 = 60;
+/// Damping of a swinging tether: a sixty-fourth of the speed per tick, so a
+/// release still carries most of the arc.
+const SWING_DAMP_DIV: i32 = 64;
+/// Shortest rope a swing reels down to, mm.
+const MIN_ROPE_MM: i32 = 400;
 /// Goal radius that ends a pull, mm.
 const ARRIVE: i64 = 700;
 /// How far short of a wall anchor the thrower stops, mm.
@@ -206,6 +214,14 @@ pub struct Tether {
     pub victim: Option<u8>,
     /// Where the pull is headed, `[x, z]` mm.
     pub goal_mm: [i32; 2],
+    /// Pivot of a world tether, `[x, z]` mm: the point the spear stuck in. It
+    /// equals `goal_mm` on an enemy tether, where there is no rope.
+    pub anchor_mm: [i32; 2],
+    /// Height of the pivot, mm, for the swing's sphere.
+    pub anchor_y_mm: i32,
+    /// Rope length, mm. Zero on an enemy tether and until a swing's first
+    /// tethered tick; a swung thrower stays on that sphere.
+    pub rope_mm: i32,
     /// Flight direction `[x, z]` as a Q16 unit vector.
     pub dir: [i32; 2],
     /// Ticks since the spear stuck.
@@ -257,6 +273,10 @@ pub(crate) struct Env<'a> {
     pub tables: &'a Tables,
     /// Arena half-extent, metres.
     pub half_extent_m: f32,
+    /// Height channel vertical speeds (row SG5), one per fighter, mm per
+    /// tick. Empty while the channel is off, which keeps the wall tether on
+    /// its straight zip and leaves every hash as it was.
+    pub rise: &'a mut [i32],
 }
 
 /// All spear state of one match.
@@ -520,6 +540,9 @@ impl SpearState {
         self.slots[slot].phase = Phase::Tether(Tether {
             victim: Some(slot_id(victim)),
             goal_mm,
+            anchor_mm: goal_mm,
+            anchor_y_mm: at[1],
+            rope_mm: 0,
             dir: f.dir,
             age: 0,
             latched: false,
@@ -541,6 +564,9 @@ impl SpearState {
         self.slots[slot].phase = Phase::Tether(Tether {
             victim: None,
             goal_mm,
+            anchor_mm: [at[0], at[2]],
+            anchor_y_mm: at[1],
+            rope_mm: 0,
             dir: f.dir,
             age: 0,
             latched: false,
@@ -596,9 +622,14 @@ impl SpearState {
             cap(&mut mine, MAX_SPEED);
             cap(&mut theirs, MAX_SPEED);
             self.slots[v].drift_mm = theirs;
-        } else {
+        } else if env.rise.is_empty() {
+            // No height channel: the wall tether is the winch it always was.
             push(&mut mine, unit(me, t.goal_mm), WALL_REEL_ACCEL);
             cap(&mut mine, WALL_MAX_SPEED);
+        } else {
+            // Row SG4: with the height channel armed the wall anchor is a
+            // rope, not a winch (see `swing`).
+            self.swing(slot, &mut t, &mut mine, env);
         }
         self.slots[slot].drift_mm = mine;
         t.age += 1;
@@ -644,6 +675,76 @@ impl SpearState {
         }
     }
 
+    /// A wall tether with the height channel armed: the anchor is a rope. The
+    /// reel takes rope in, the sphere constraint (in `settle`, after the
+    /// bodies moved) turns that take-in into an arc, and a release carries
+    /// the arc out. Here the drift keeps only its tangential part, because a
+    /// taut rope has no radial speed.
+    fn swing(&mut self, slot: usize, t: &mut Tether, mine: &mut [i32; 2], env: &mut Env<'_>) {
+        let body = pos_mm(env.states[slot].pos);
+        let anchor = [t.anchor_mm[0], t.anchor_y_mm, t.anchor_mm[1]];
+        let off = [
+            body[0].wrapping_sub(anchor[0]),
+            body[1].wrapping_sub(anchor[1]),
+            body[2].wrapping_sub(anchor[2]),
+        ];
+        let span = isqrt(sq(off[0]) + sq(off[1]) + sq(off[2]));
+        if span <= 0 {
+            return;
+        }
+        if t.rope_mm == 0 {
+            t.rope_mm = i32::try_from(span).unwrap_or(i32::MAX).max(MIN_ROPE_MM);
+        }
+        t.rope_mm = (t.rope_mm - SWING_REEL).max(MIN_ROPE_MM);
+        // The reel keeps the old pull toward the goal; the rope decides where
+        // the body can go with it.
+        push(mine, unit([body[0], body[2]], t.goal_mm), WALL_REEL_ACCEL);
+        *mine = mine.map(|lane| lane - lane / SWING_DAMP_DIV);
+        cap(mine, WALL_MAX_SPEED);
+        // Drop the radial part of (drift, rise): what is left is the arc.
+        let unit3 = [
+            i64::from(off[0]) * 65_536 / span,
+            i64::from(off[1]) * 65_536 / span,
+            i64::from(off[2]) * 65_536 / span,
+        ];
+        let rise = i64::from(env.rise[slot]);
+        let radial =
+            (i64::from(mine[0]) * unit3[0] + rise * unit3[1] + i64::from(mine[1]) * unit3[2])
+                / 65_536;
+        if radial != 0 {
+            mine[0] -= i32::try_from(unit3[0] * radial / 65_536).unwrap_or(0);
+            mine[1] -= i32::try_from(unit3[2] * radial / 65_536).unwrap_or(0);
+            env.rise[slot] -= i32::try_from(unit3[1] * radial / 65_536).unwrap_or(0);
+        }
+    }
+
+    /// Put a swung body back on its rope after the move: the take-in lifts it
+    /// along the arc instead of dragging it straight at the wall. True when
+    /// the arc reaches the floor, which ends the tether.
+    fn project(&mut self, slot: usize, t: &Tether, env: &mut Env<'_>) -> bool {
+        let body = pos_mm(env.states[slot].pos);
+        let anchor = [t.anchor_mm[0], t.anchor_y_mm, t.anchor_mm[1]];
+        let off = [
+            body[0].wrapping_sub(anchor[0]),
+            body[1].wrapping_sub(anchor[1]),
+            body[2].wrapping_sub(anchor[2]),
+        ];
+        let span = isqrt(sq(off[0]) + sq(off[1]) + sq(off[2]));
+        if span <= 0 {
+            return false;
+        }
+        let rope = i64::from(t.rope_mm.max(MIN_ROPE_MM));
+        let at = [0, 1, 2].map(|lane| {
+            anchor[lane] + i32::try_from(i64::from(off[lane]) * rope / span).unwrap_or(off[lane])
+        });
+        let floor = at[1] <= 0;
+        env.states[slot].pos = [metres(at[0]), metres(at[1].max(0)), metres(at[2])];
+        if floor {
+            env.rise[slot] = 0;
+        }
+        floor
+    }
+
     /// Arrival and wall endings after the bodies moved.
     fn settle(&mut self, slot: usize, env: &mut Env<'_>) {
         let Phase::Tether(t) = self.slots[slot].phase else {
@@ -651,10 +752,15 @@ impl SpearState {
         };
         let (thrower_blocked, _) = self.shocks[slot];
         let Some(v) = t.victim.map(usize::from) else {
-            let me = xz(env.states[slot].pos);
-            if thrower_blocked {
+            if t.rope_mm > 0 {
+                // A swing rides the rope until the arc meets the floor; the
+                // rope, not the wall, decides where the body goes.
+                if self.project(slot, &t, env) {
+                    self.end(slot, EndWhy::Arrived, 0, env);
+                }
+            } else if thrower_blocked {
                 self.end(slot, EndWhy::Wall, 0, env);
-            } else if arrived(me, t) {
+            } else if arrived(xz(env.states[slot].pos), t) {
                 self.end(slot, EndWhy::Arrived, 0, env);
             }
             return;
@@ -694,11 +800,6 @@ impl SpearState {
 /// Slot index as the wire id (slots are below 16, so the fallback never fires).
 fn slot_id(slot: usize) -> u8 {
     u8::try_from(slot).unwrap_or(u8::MAX)
-}
-
-/// Floating metres from integer millimetres, for the float pose only.
-fn metres(mm: i32) -> f32 {
-    mm as f32 / 1000.0
 }
 
 /// Q16 metres from integer millimetres.
@@ -851,6 +952,44 @@ mod tests {
             .expect("sim builds");
         assert!(sim.set_spear());
         sim
+    }
+
+    /// A spear match with the height channel armed (rows SG1 + SG5).
+    fn sim_swing(world: MatchWorld) -> Sim {
+        let mut sim = sim_in(world);
+        assert!(sim.set_height());
+        sim
+    }
+
+    /// One tick with scripted buttons, facing and movement wishes.
+    fn tick_move(sim: &mut Sim, script: [(u8, i16, i8, i8); 2]) {
+        let at = sim.tick;
+        let tape = FighterTape(
+            script
+                .iter()
+                .enumerate()
+                .map(|(slot, &(buttons, facing, mx, mz))| FighterInput {
+                    tick: at,
+                    fighter: FighterId(slot_id(slot)),
+                    mx,
+                    mz,
+                    facing,
+                    buttons: Buttons(buttons),
+                })
+                .collect(),
+        );
+        sim.cursor = 0;
+        sim.step(&tape).expect("step");
+    }
+
+    /// Run `n` moving ticks, collecting every event.
+    fn idle_move(sim: &mut Sim, n: u32, script: [(u8, i16, i8, i8); 2]) -> Vec<SpearEvent> {
+        let mut seen = Vec::new();
+        for _ in 0..n {
+            tick_move(sim, script);
+            seen.extend(events(sim));
+        }
+        seen
     }
 
     fn place(sim: &mut Sim, thrower: [f32; 2], victim: [f32; 2]) {
@@ -1147,5 +1286,79 @@ mod tests {
         assert_eq!(off.fight.fighters[1].hp_permille, 1000);
         assert_eq!(off.buttons[0] & THROW_SPEAR, 0, "the bit is not latched");
         assert_eq!(KNOWN_BUTTONS & THROW_SPEAR, 0);
+    }
+
+    /// SG4: with the height channel armed the wall anchor is a rope. The hook
+    /// holds the thrower on a sphere around it while the run turns into an
+    /// arc, the reel takes rope in, and a release carries the arc out. The
+    /// same tape without the channel is the old zip, straight to the wall.
+    #[test]
+    fn rope_swing_holds_the_arc_and_the_release_carries_it() {
+        const RUN: i8 = 100;
+        let world =
+            || MatchWorld::try_new(vec![Obstacle::aligned([0.0, 4.0], [3.0, 0.5])]).expect("world");
+        // Throw +z into the wall while running +x along it, then 24 ticks of
+        // the run: returns the events of those ticks and the final pose.
+        fn throw_and_run(sim: &mut Sim) -> (Vec<SpearEvent>, [f32; 3]) {
+            tick_move(sim, [(THROW, 0, RUN, 0), (0, 0, 0, 0)]);
+            let mut seen = events(sim);
+            seen.extend(idle_move(sim, 24, [(0, 0, RUN, 0), (0, 0, 0, 0)]));
+            (seen, sim.states[0].pos)
+        }
+
+        let mut swing = sim_swing(world());
+        place(&mut swing, [0.0, -3.0], [8.0, -8.0]);
+        let (seen, _) = throw_and_run(&mut swing);
+        assert!(
+            seen.iter().any(|e| matches!(
+                e,
+                SpearEvent::Hit {
+                    thrower: 0,
+                    victim: None,
+                    ..
+                }
+            )),
+            "the spear sticks in the wall: {seen:?}"
+        );
+        let Phase::Tether(t) = swing.spear.as_ref().expect("armed").slots[0].phase else {
+            panic!("still on the rope after 25 ticks");
+        };
+        let body = pos_mm(swing.states[0].pos);
+        let anchor = [t.anchor_mm[0], t.anchor_y_mm, t.anchor_mm[1]];
+        let span =
+            isqrt(sq(body[0] - anchor[0]) + sq(body[1] - anchor[1]) + sq(body[2] - anchor[2]));
+        assert!(
+            (span - i64::from(t.rope_mm)).abs() < 500,
+            "the rope holds the arc: span={span} rope={}",
+            t.rope_mm
+        );
+        assert!(
+            span > 3000,
+            "the arc keeps the thrower off the wall: span={span}"
+        );
+
+        // The same tape on the floor-plane path is covered by
+        // `spear_hits_wall_and_zips_the_thrower`, which must stay green.
+
+        // Release: the arc's speed is kept, so the body keeps travelling.
+        let before = swing.states[0].pos;
+        tick_move(&mut swing, [(THROW, 0, RUN, 0), (0, 0, 0, 0)]);
+        assert!(
+            events(&swing).iter().any(|e| matches!(
+                e,
+                SpearEvent::TetherEnd {
+                    why: EndWhy::Released,
+                    ..
+                }
+            )),
+            "a second press releases the rope"
+        );
+        idle_move(&mut swing, 10, [(0, 0, RUN, 0), (0, 0, 0, 0)]);
+        let (from, to) = (pos_mm(before), pos_mm(swing.states[0].pos));
+        let carried = isqrt(sq(to[0] - from[0]) + sq(to[2] - from[2]));
+        assert!(
+            carried > 250,
+            "the release carries the arc: {carried} mm in 10 ticks"
+        );
     }
 }

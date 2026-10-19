@@ -30,3 +30,10 @@ image = { workspace = true, optional = true }
 [[example]]
 name = "ct35_lod_bake"
 required-features = ["import"]
+
+# The arena kit bundle: reads the kit glTFs (gltf) and the CC0 JPG sets
+# (image), then writes the packed E2BUNDLE of compact glTF plus KTX2 or the
+# cooked E204BNDL, so both features.
+[[bin]]
+name = "arena_bundle"
+required-features = ["import", "registry"]
