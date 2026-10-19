@@ -474,6 +474,10 @@ pub struct Client {
     agreed: usize,
     /// Sim steps the held steppers performed (the finding-4 cost proof).
     steps: u64,
+    /// Spare authority-tape buffer: the union of the known tape and one
+    /// incoming delta stages here, then swaps with `server_tape` on success,
+    /// so the per-state merge allocates only while the tape grows.
+    merge_scratch: Vec<FighterInput>,
 }
 
 impl Client {
@@ -513,6 +517,7 @@ impl Client {
             truth_cps: Vec::new(),
             agreed: 0,
             steps: 0,
+            merge_scratch: Vec::new(),
         })
     }
 
@@ -641,20 +646,25 @@ impl Client {
         if self.server_tick.is_some_and(|done| checkpoint.tick <= done) {
             return Ok(Vec::new());
         }
-        let merged = merge_tapes(&self.server_tape, &delta.tape);
-        // The merged tape only grows and a known tick never changes (merge
+        let old_known = self
+            .server_tape
+            .partition_point(|input| Some(input.tick) <= self.server_tick);
+        let mut merged = std::mem::take(&mut self.merge_scratch);
+        union_tape(&mut merged, &self.server_tape, &delta.tape);
+        // The merged tape only grows and a known tick never changes (the union
         // keeps the first entry per key), so the authority sim can step
         // forward one tick per newly received tick. A delta that adds entries
         // for already-applied ticks rewrites the authority prefix (a heal
         // snapshot can legitimately add one the windows missed); the held sim
         // cannot un-step, so rebuild it from zero over the merged tape and
         // compare the whole overlap again, exactly like the old prefix run.
-        let old_known = self
-            .server_tape
-            .partition_point(|input| Some(input.tick) <= self.server_tick);
         let new_known = merged.partition_point(|input| Some(input.tick) <= self.server_tick);
         if new_known > old_known {
-            self.truth = self.spec.live().ok_or(NetError::SimRejected)?;
+            let Some(live) = self.spec.live() else {
+                self.merge_scratch = merged;
+                return Err(NetError::SimRejected);
+            };
+            self.truth = live;
             self.truth_cps.clear();
             self.agreed = 0;
         }
@@ -662,6 +672,8 @@ impl Client {
             let tick = self.truth.tick();
             let slice = tick_slice(&merged, tick);
             let Some(stepped) = self.truth.step(slice) else {
+                // The refused state leaves the known tape untouched.
+                self.merge_scratch = merged;
                 return Err(NetError::SimRejected);
             };
             self.truth_cps.push(stepped.checkpoint);
@@ -678,7 +690,10 @@ impl Client {
             Some(&first) => first as usize,
             None => compare_to,
         };
-        self.server_tape = merged;
+        // Accepted: the staged union becomes the known tape and the old
+        // buffer becomes the spare, so only tape growth allocates.
+        std::mem::swap(&mut self.server_tape, &mut merged);
+        self.merge_scratch = merged;
         self.server_tick = Some(checkpoint.tick);
         self.server_hash = Some(checkpoint.hash);
         self.total_mispredicts += mispredicts.len() as u64;
@@ -809,7 +824,10 @@ fn validate_tape(
     Ok(())
 }
 
-/// Union two sorted tapes, keeping sort order without duplicates.
+/// Union two sorted tapes, keeping sort order without duplicates. Kept as the
+/// pre-change oracle of [`union_tape`]'s receipt: the shipping apply path no
+/// longer allocates a fresh vector per state.
+#[cfg(test)]
 fn merge_tapes(a: &[FighterInput], b: &[FighterInput]) -> Vec<FighterInput> {
     let mut merged: Vec<FighterInput> = Vec::with_capacity(a.len() + b.len());
     merged.extend_from_slice(a);
@@ -817,6 +835,27 @@ fn merge_tapes(a: &[FighterInput], b: &[FighterInput]) -> Vec<FighterInput> {
     merged.sort_by_key(|input| (input.tick, input.fighter.0));
     merged.dedup_by_key(|input| (input.tick, input.fighter.0));
     merged
+}
+
+/// Union `known` and `delta` (both `(tick, fighter)`-sorted and unique) into
+/// `dest`, which must be empty, keeping the first entry per key exactly like
+/// the allocating union it replaces.
+///
+/// The wire sends the whole authoritative tape plus a tail on every state, so
+/// `delta` normally extends `known` verbatim: that case copies the delta and
+/// skips the sort and dedup. A delta that rewrites an applied tick (a heal
+/// snapshot can) falls back to the general sorted union.
+fn union_tape(dest: &mut Vec<FighterInput>, known: &[FighterInput], delta: &[FighterInput]) {
+    dest.clear();
+    if delta.len() >= known.len() && known == &delta[..known.len()] {
+        dest.extend_from_slice(delta);
+        return;
+    }
+    dest.reserve(known.len().saturating_add(delta.len()));
+    dest.extend_from_slice(known);
+    dest.extend_from_slice(delta);
+    dest.sort_by_key(|input| (input.tick, input.fighter.0));
+    dest.dedup_by_key(|input| (input.tick, input.fighter.0));
 }
 
 /// Last-`n`-ticks input window for one wire packet (redundancy cover).
@@ -2525,5 +2564,202 @@ mod tests {
         let packets = resync_packets(&bare, server.checkpoints()).expect("tip only");
         assert_eq!(packets.len(), 1);
         assert_eq!(decode_state(&packets[0]).expect("tip").checkpoint, tip);
+    }
+
+    /// The server-side fixture both state-apply receipts share: a two-fighter
+    /// match whose every delta carries the whole authoritative tape, the way
+    /// the wire sends it.
+    fn serve_states(ticks: u32) -> Vec<(Checkpoint, SnapshotDelta)> {
+        let mut server = Server::new(test_config(ticks)).expect("server");
+        let mut states = Vec::new();
+        for tick in 0..ticks {
+            let inputs = [
+                slot_input(tick, 0, 100, 0, 0, 0),
+                slot_input(tick, 1, -100, 0, 0, 0),
+            ];
+            let (cp, delta) = server.tick(&inputs).expect("tick");
+            states.push((cp, delta));
+        }
+        states
+    }
+
+    /// The client's own wish for `tick`: it disagrees with the server every
+    /// seventh tick, so the apply path names real mispredicts.
+    fn bench_local(tick: u32) -> FighterInput {
+        if tick.is_multiple_of(7) {
+            slot_input(tick, 0, -100, 0, 0, 0)
+        } else {
+            slot_input(tick, 0, 100, 0, 0, 0)
+        }
+    }
+
+    /// Fold one u64 into the receipt digest buffer.
+    fn fold_u64(bytes: &mut Vec<u8>, value: u64) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Drive a predicting client over every server state and fold what the
+    /// desync contract reads: the named mispredicts, the predicted and
+    /// authoritative checkpoints, the accepted server tip and the merged
+    /// authority tape.
+    fn apply_states_digest(states: &[(Checkpoint, SnapshotDelta)], ticks: u32) -> u64 {
+        let mut client =
+            Client::new(test_config(ticks), FighterId::new(0).expect("slot 0")).expect("client");
+        let mut bytes = Vec::new();
+        for (cp, delta) in states {
+            let local = bench_local(cp.tick);
+            let predicted = client.predict(local).expect("predict");
+            fold_u64(&mut bytes, predicted.hash);
+            let mispredicts = client.on_server_state(*cp, delta).expect("state");
+            fold_u64(&mut bytes, u64::from(mispredicts.len().to_ne_bytes()[0]));
+            for tick in mispredicts {
+                fold_u64(&mut bytes, u64::from(tick));
+            }
+        }
+        fold_u64(
+            &mut bytes,
+            u64::from(client.server_tick.unwrap_or(u32::MAX)),
+        );
+        fold_u64(&mut bytes, client.server_hash.unwrap_or(0));
+        fold_u64(&mut bytes, client.total_mispredicts);
+        fold_u64(&mut bytes, client.steps);
+        for cp in client.checkpoints.iter().chain(client.truth_cps.iter()) {
+            fold_u64(&mut bytes, cp.hash);
+        }
+        for input in &client.server_tape {
+            fold_u64(&mut bytes, u64::from(input.tick));
+            fold_u64(&mut bytes, u64::from(input.fighter.0));
+            fold_u64(&mut bytes, u64::from(input.mx.to_ne_bytes()[0]));
+            fold_u64(&mut bytes, u64::from(input.mz.to_ne_bytes()[0]));
+            fold_u64(&mut bytes, u64::from(input.facing.to_ne_bytes()[0]));
+            fold_u64(&mut bytes, u64::from(input.facing.to_ne_bytes()[1]));
+            fold_u64(&mut bytes, u64::from(input.buttons.0));
+        }
+        engine_core::hash_bytes(&bytes)
+    }
+
+    /// States in the tape-union receipt: a 600-tick match whose every delta
+    /// carries the whole authoritative tape, the wire's normal shape.
+    const APPLY_STATES: u32 = 600;
+    /// Rounds timed per side of the union receipt.
+    const APPLY_ITERS: usize = 100;
+    /// The digest of the 600-state apply receipt frozen before the staged
+    /// union landed: the desync contract of the shipped state-apply path.
+    const APPLY_ORACLE: u64 = 0x818a_0acd_b1f9_38c7;
+
+    /// `ns` in microseconds for the receipt line.
+    fn micros(ns: u128) -> f64 {
+        engine_core::checked::f64_from_u64(u64::try_from(ns).unwrap_or(0)) / 1000.0
+    }
+
+    /// How many times slower `slow` is than `fast`.
+    fn ratio(slow: u128, fast: u128) -> f64 {
+        if fast == 0 {
+            return 0.0;
+        }
+        engine_core::checked::f64_from_u64(u64::try_from(slow).unwrap_or(0))
+            / engine_core::checked::f64_from_u64(u64::try_from(fast).unwrap_or(0))
+    }
+
+    /// One full session of `merge_tapes` unions, the pre-change path.
+    fn union_session_taking(states: &[(Checkpoint, SnapshotDelta)]) -> Vec<FighterInput> {
+        let mut known = Vec::new();
+        for (_, delta) in states {
+            known = merge_tapes(&known, &delta.tape);
+        }
+        known
+    }
+
+    /// One full session of `union_tape` unions over the reused spare buffer,
+    /// the staged path.
+    fn union_session_staged(
+        states: &[(Checkpoint, SnapshotDelta)],
+        scratch: &mut Vec<FighterInput>,
+    ) -> Vec<FighterInput> {
+        let mut known = Vec::new();
+        for (_, delta) in states {
+            union_tape(scratch, &known, &delta.tape);
+            std::mem::swap(&mut known, scratch);
+        }
+        known
+    }
+
+    /// The staged union returns the same authority tape as the shipping
+    /// allocating union at every one of 120 real wire states, and still
+    /// matches on the rewrite fallback a heal snapshot takes.
+    #[test]
+    fn union_tape_matches_merge_tapes_at_every_state() {
+        let states = serve_states(120);
+        let mut known = Vec::new();
+        let mut staged = Vec::new();
+        let mut scratch = Vec::new();
+        for (_, delta) in &states {
+            known = merge_tapes(&known, &delta.tape);
+            union_tape(&mut scratch, &staged, &delta.tape);
+            std::mem::swap(&mut staged, &mut scratch);
+            assert_eq!(staged, known, "union drifted at tick {}", delta.tick);
+        }
+        // A delta that rewrites an applied tick takes the sorted fallback.
+        let mut rewritten = states.last().expect("states").1.tape.clone();
+        rewritten[0].mx = -77;
+        let oracle = merge_tapes(&known, &rewritten);
+        union_tape(&mut scratch, &staged, &rewritten);
+        assert_eq!(scratch, oracle, "the fallback union drifted");
+        assert_eq!(scratch, known, "the first entry per key still wins");
+    }
+
+    /// The whole state-apply path over 600 real wire states still folds to the
+    /// digest frozen before the staged union: same mispredicts, same
+    /// checkpoints, same authority tape.
+    #[test]
+    fn apply_states_keeps_the_pre_change_digest() {
+        let states = serve_states(APPLY_STATES);
+        assert_eq!(apply_states_digest(&states, APPLY_STATES), APPLY_ORACLE);
+        // Not vacuous: one perturbed input byte moves the digest.
+        let mut bent = states.clone();
+        bent[300].1.tape[600].mx = -100;
+        assert_ne!(apply_states_digest(&bent, APPLY_STATES), APPLY_ORACLE);
+    }
+
+    /// Tape-union receipt: the pre-change allocating union against the staged
+    /// reusable-buffer union, one full 600-state session per round, sides
+    /// interleaved so the same machine load sits under both. Run: cargo test
+    /// -p engine-net --lib --release tape_union_bench_receipt -- --ignored
+    /// --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn tape_union_bench_receipt() {
+        let states = serve_states(APPLY_STATES);
+        let mut scratch = Vec::new();
+        for _ in 0..2 {
+            std::hint::black_box(union_session_taking(&states));
+            std::hint::black_box(union_session_staged(&states, &mut scratch));
+        }
+        let mut taking_ns = Vec::with_capacity(APPLY_ITERS);
+        let mut staged_ns = Vec::with_capacity(APPLY_ITERS);
+        for _ in 0..APPLY_ITERS {
+            let t = std::time::Instant::now();
+            let taking = union_session_taking(&states);
+            taking_ns.push(t.elapsed().as_nanos());
+            let t = std::time::Instant::now();
+            let staged = union_session_staged(&states, &mut scratch);
+            staged_ns.push(t.elapsed().as_nanos());
+            assert_eq!(taking, staged, "the two sides merged different tapes");
+        }
+        taking_ns.sort_unstable();
+        staged_ns.sort_unstable();
+        let (old, new) = (taking_ns[APPLY_ITERS / 2], staged_ns[APPLY_ITERS / 2]);
+        eprintln!(
+            "tape_union_p50_us={:.1} taking_p50_us={:.1} speedup={:.2}x states={APPLY_STATES} per_state_new_us={:.3}",
+            micros(new),
+            micros(old),
+            ratio(old, new),
+            micros(new) / engine_core::checked::f64_from_u64(u64::from(APPLY_STATES)),
+        );
     }
 }

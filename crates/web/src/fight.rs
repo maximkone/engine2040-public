@@ -65,6 +65,9 @@ pub struct Match {
     arena: ProceduralArena,
     tick: u32,
     facing: Facing,
+    /// Bodies the presenter accepted on the last frame, and bodies the list drew.
+    staged: usize,
+    drawn: usize,
 }
 
 impl Match {
@@ -80,6 +83,8 @@ impl Match {
             arena,
             tick: 0,
             facing: Facing::default(),
+            staged: 0,
+            drawn: 0,
         })
     }
 
@@ -151,10 +156,12 @@ impl Match {
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "match: tick={} hp={}/{} at={at}",
+            "match: tick={} hp={}/{} bodies={}/{} at={at}",
             self.app.cursor(),
             hp.first().copied().unwrap_or(0),
-            hp.get(1).copied().unwrap_or(0)
+            hp.get(1).copied().unwrap_or(0),
+            self.drawn,
+            self.staged,
         )
     }
 
@@ -170,7 +177,8 @@ impl Match {
         t_s: f32,
     ) -> Result<DrawList, MatchError> {
         let dots = live_fight_dots(&self.app, &[]);
-        stage_fight_bodies(presenter, &dots).map_err(|e| MatchError::Stage(e.to_string()))?;
+        self.staged =
+            stage_fight_bodies(presenter, &dots).map_err(|e| MatchError::Stage(e.to_string()))?;
         let resident = presenter.mesh_keys();
         let mut list = self
             .arena
@@ -183,7 +191,7 @@ impl Match {
                 .framing_camera(width, height, a.pos_m, b.pos_m)
                 .map_err(|e| MatchError::Camera(e.to_string()))?;
         }
-        push_fight_draws(&mut list, &resident, &dots)
+        self.drawn = push_fight_draws(&mut list, &resident, &dots)
             .map_err(|e| MatchError::Bodies(e.to_string()))?;
         Ok(list)
     }

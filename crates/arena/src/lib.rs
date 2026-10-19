@@ -936,6 +936,12 @@ pub struct Sim {
     /// a whole match through the oracle and compare events, poses and hashes.
     #[cfg(test)]
     pairwise_plan: bool,
+    /// Test-only oracle switch: resolve the EG20 collision pass through the
+    /// pre-shortcut fixed pass count (see `collide::resolve_fixed_passes`),
+    /// so a test can run a whole match through the oracle and compare
+    /// events, poses and hashes.
+    #[cfg(test)]
+    full_collide_passes: bool,
 }
 
 impl Sim {
@@ -1091,6 +1097,8 @@ impl Sim {
             trace: None,
             #[cfg(test)]
             pairwise_plan: false,
+            #[cfg(test)]
+            full_collide_passes: false,
         };
         // Table version 2 runs under rules v2; version 1 pins the legacy rules.
         sim.set_rules(config.rules()).then_some(sim)
@@ -1684,13 +1692,21 @@ impl Sim {
     }
 
     /// EG20 collision pass over this sim's fighters; see [`collide_states`].
+    /// The test-only oracle switch routes the same rows through the
+    /// pre-shortcut fixed pass count; the shipped path never sets it.
     fn collide(&mut self) {
-        collide::collide_states(
+        let (states, rules, half, fighters) = (
             &mut self.states,
             &self.rules,
             self.config.half_extent_m,
             self.fighters,
         );
+        #[cfg(test)]
+        if self.full_collide_passes {
+            collide::collide_states_fixed_passes(states, rules, half, fighters);
+            return;
+        }
+        collide::collide_states(states, rules, half, fighters);
     }
 
     /// Merged per-slot inputs from the last stepped tick. `None` slots never
@@ -1902,8 +1918,7 @@ impl Sim {
             locos: snapshot.locos,
             warps: Vec::new(),
             destruction: snapshot.destruction,
-            // Snapshots/resumes come from the v1 prefix runners, which carry
-            // no obstacle world: the empty world is the legacy match.
+            // Snapshots come from v1 prefix runners: the empty world is the match.
             world: MatchWorld::empty(),
             #[cfg(feature = "sim")]
             controllers,
@@ -1931,6 +1946,8 @@ impl Sim {
             trace: None,
             #[cfg(test)]
             pairwise_plan: false,
+            #[cfg(test)]
+            full_collide_passes: false,
         })
     }
 }
@@ -4667,5 +4684,159 @@ mod tests {
         let uncut = limb_hash_digest(false);
         let cut = limb_hash_digest(true);
         assert_ne!(cut, uncut, "a severed limb must move the digest");
+    }
+
+    /// v2 bout fixture for the timing receipts: 8 fighters, 600 ticks, v2
+    /// tables, so [`ArenaConfig::rules`] pins rules v2 at build.
+    fn v2_bout_config() -> ArenaConfig {
+        ArenaConfig {
+            seed: 2040,
+            ticks: 600,
+            fighters: 8,
+            half_extent_m: 20.0,
+            table_version: TABLES_VERSION_V2,
+        }
+    }
+
+    /// Microseconds of one `span` that covered `reps` calls.
+    fn micros_per(span: std::time::Duration, reps: usize) -> f64 {
+        span.as_secs_f64() * 1.0e6 / f64::from(u32::try_from(reps).unwrap_or(1))
+    }
+
+    /// Decomposition receipt: the p50 microseconds of one rules-v2 8-fighter
+    /// tick's whole step, then of the pieces it spends its time in
+    /// ([`engage::Plan::build`], the destruction digest, [`ArenaRules::fold`],
+    /// [`collide::collide_states`], the eight [`strike_pose`] builds, and the
+    /// fold's own sub-hashes). Every piece runs on the poses one warmed real
+    /// bout holds, interleaved so one machine load sits under each. Run:
+    /// cargo test -p engine-arena --release --lib v2_tick_decomposition_receipt
+    /// -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn v2_tick_decomposition_receipt() {
+        const SAMPLES: usize = 101;
+        const BATCH: usize = 64;
+        const TICK_REPS: usize = 11;
+        let config = v2_bout_config();
+        let tape = FighterTape::default();
+        let mut warm = Sim::build(&config, &tape, false, false).expect("warm sim");
+        for _ in 0..120 {
+            warm.step(&tape).expect("warm step");
+        }
+        let states = warm.states.clone();
+        let fight = warm.fight;
+        let teams = warm.rules.teams;
+        let count = warm.fighters;
+        let rows: [FighterInput; MAX_SLOTS] = std::array::from_fn(|slot| FighterInput {
+            tick: 0,
+            fighter: FighterId(u8::try_from(slot).unwrap_or(0)),
+            mx: 60,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons(ATTACK),
+        });
+        let mut scratch = states.clone();
+        let base = 0x9e37_79b9_7f4a_7c15;
+        let mut columns: [Vec<f64>; 8] = std::array::from_fn(|_| Vec::with_capacity(SAMPLES));
+        for _ in 0..SAMPLES {
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(engage::Plan::build(&states, &fight, &teams, count));
+            }
+            columns[0].push(micros_per(begin.elapsed(), BATCH));
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(warm.destruction.state_hash());
+            }
+            columns[1].push(micros_per(begin.elapsed(), BATCH));
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(warm.rules.fold(
+                    base,
+                    count,
+                    &warm.balance,
+                    &warm.stagger,
+                    &warm.limbs,
+                ));
+            }
+            columns[2].push(micros_per(begin.elapsed(), BATCH));
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                scratch.copy_from_slice(&states);
+                collide::collide_states(&mut scratch, &warm.rules, config.half_extent_m, count);
+                std::hint::black_box(&scratch);
+            }
+            columns[3].push(micros_per(begin.elapsed(), BATCH));
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                for slot in 0..count {
+                    std::hint::black_box(strike_pose(
+                        u8::try_from(slot).unwrap_or(0),
+                        &states[slot],
+                        &rows[slot],
+                        teams[slot],
+                    ));
+                }
+            }
+            columns[4].push(micros_per(begin.elapsed(), BATCH));
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                let mut sub = 0u64;
+                for state in &warm.balance {
+                    sub ^= state.state_hash();
+                }
+                std::hint::black_box(sub);
+            }
+            columns[5].push(micros_per(begin.elapsed(), BATCH));
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                let mut sub = 0u64;
+                for memory in &warm.stagger {
+                    sub ^= memory.state_hash();
+                }
+                std::hint::black_box(sub);
+            }
+            columns[6].push(micros_per(begin.elapsed(), BATCH));
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                std::hint::black_box(warm.limbs.state_hash());
+            }
+            columns[7].push(micros_per(begin.elapsed(), BATCH));
+        }
+        let names = [
+            "plan_build",
+            "destruction_hash",
+            "rules_fold",
+            "collide_states",
+            "strike_pose_x8",
+            "fold_balance_x8",
+            "fold_stagger_x8",
+            "fold_limbs",
+        ];
+        for (name, column) in names.iter().zip(columns.iter_mut()) {
+            column.sort_by(|a, b| a.partial_cmp(b).expect("finite samples"));
+            eprintln!("{name}_p50_us={:.4}", column[SAMPLES / 2]);
+        }
+        let mut ticks = Vec::with_capacity(TICK_REPS);
+        for _ in 0..TICK_REPS {
+            let begin = std::time::Instant::now();
+            let mut sim = Sim::build(&config, &tape, false, false).expect("timed sim");
+            while sim.tick < config.ticks {
+                sim.step(&tape).expect("timed step");
+            }
+            ticks.push(begin.elapsed().as_secs_f64() * 1.0e6 / f64::from(config.ticks));
+        }
+        ticks.sort_by(|a, b| a.partial_cmp(b).expect("finite samples"));
+        eprintln!(
+            "whole_tick_p50_us={:.4} fighters={count} ticks={} limbs={}",
+            ticks[TICK_REPS / 2],
+            config.ticks,
+            warm.limbs.limbs().len()
+        );
     }
 }
