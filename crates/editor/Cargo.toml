@@ -16,7 +16,7 @@ workspace = true
 # and serde_json are already in the workspace lock via RA1. `egui-wgpu/winit`
 # stays off: it would pull a new package into the lock.
 [features]
-ui = ["dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:egui_dock", "dep:transform-gizmo", "dep:transform-gizmo-egui", "dep:winit", "engine-render/window", "dep:engine-combat", "dep:engine-ai", "dep:engine-app"]
+ui = ["dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:egui_dock", "dep:transform-gizmo", "dep:transform-gizmo-egui", "dep:winit", "engine-render/window", "dep:engine-combat", "dep:engine-ai", "dep:engine-app", "dep:image"]
 
 # ED1: the editor executable, gated on `ui` so headless stays std-only.
 [[bin]]
@@ -54,6 +54,9 @@ egui-winit = { workspace = true, optional = true }
 egui_dock = { workspace = true, optional = true }
 transform-gizmo = { workspace = true, optional = true }
 transform-gizmo-egui = { workspace = true, optional = true }
+# EI2: the live viewport decodes the presenter's offscreen PNG into an egui
+# texture. `image` is already in the workspace lock via RA1 (no new package).
+image = { workspace = true, optional = true }
 
 # PR1 tests only: the C5 JSON codec leg for receipts and chains. No new
 # dependency (serde_json is already approved under NJ1); test-only features

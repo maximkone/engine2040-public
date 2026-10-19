@@ -4,8 +4,8 @@ Rows from the 2026-10-19 editor audits. Spec:
 `docs/plan/EDITOR-INDIE-2026-10-19.md`. The `ui` build is green again
 (2c2accdf) and the shell has a theme, an Activity panel and an empty-scene
 start band. EI1 landed d0ff9f0c (camera orbit/pan/zoom/frame), EI4 landed
-aff52663 (scale, snapping, W/E/R/T) and EI5 landed 09ba69e0 (prefabs); EI2 and
-EI3 are next.
+aff52663 (scale, snapping, W/E/R/T), EI5 landed 09ba69e0 (prefabs) and EI2
+landed 72b11973 (live GPU frame at panel size); EI3 is next.
 
 - [x] EI1 editor: the viewport camera orbits, pans, zooms and frames — Landed d0ff9f0c.
   `viewport.rs:110-117` fixes the eye at `[0,1.5,5]` and fov 60; the viewport
@@ -17,7 +17,7 @@ EI3 are next.
   move; wheel changes distance and clamps; `F` frames a selection's bounds;
   two captures with different eyes differ. F2P: the eye cannot move. P2P:
   click-pick and gizmo drag unchanged. needs: none.
-- [ ] EI2 editor: the viewport shows the scene, not a marker grid —
+- [x] EI2 editor: the viewport shows the scene, not a marker grid — Landed 72b11973.
   `viewport_image.rs:184-230` paints a grid and 3-5 px markers; the GPU
   `Presenter` path writes offscreen PNG receipts only (`app.rs:16-20`).
   Upload the presenter frame at panel size as the egui texture, keeping the

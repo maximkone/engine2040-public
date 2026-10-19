@@ -3361,6 +3361,7 @@ dependencies = [
 name = "engine-web"
 version = "0.1.0"
 dependencies = [
+ "engine-assets",
  "engine-audio",
  "engine-clock",
  "engine-game",

@@ -1363,12 +1363,12 @@
   integer-only, no float. Kill: any FP/miss/dirty re-check or float.
   needs: SP28. (MERGE-20260929 SP49 spike 2026-09-28; moves VISION
   spatial-eval score.) Landed 2e93b5e8. cycle_refusal and repair_cycles: 30 clean + 30 one-cycle graphs, 30/30 detected, 0 false positives, 30/30 named and permutation-stable, 30/30 clean after repair, receipt digest equal x2 (clippy run 39067192258).
-- [ ] PF16 perf: tick-timeline rerun sink — seeded-desync timeline over
-  the PF9 recording shape. Tier B. Size S. Owns timeline hunks beside
+- [x] PF16 perf: tick-timeline rerun sink - seeded-desync timeline over the PF9 recording shape. Landed 4b6561e.
+  Tier B. Size S. Owns timeline hunks beside
   `crates/observe/src/rerun_sink.rs` (PF9 file frozen; lands after PF9).
   Accept: seeded desync first tick named 10/10, engine hash unperturbed
   x2. needs: PF2, PF9. (PLN50 wave-49 REPO card 3 reshaped; rerun
-  time_point shape reimplemented, no dependency.)
+  time_point shape reimplemented, no dependency.) Receipt: `cargo test -p engine-observe --lib timeline` 9 passed twice (gh 39312199977, 39312225066); ten seeds name the exact perturbed tick 10/10 (109, 10, 56, 92, 12, 52, 4, 40, 63, 17) with the matching field, including two non-hash perturbations; `golden_hash_untouched` passed twice (gh 39312221483, 39312220999); engine-observe 75 passed 0 failed (gh 39312818568); clippy PASS (39311926071). `rerun_sink.rs` was not modified.
 - [ ] PF18 perf: mimalloc as the bench-harness allocator on PF1 release
   workloads, hashes and alloc counts pinned (mimalloc_rust MIT,
   harness-only). Tier B/C. Size S. Owns the `GlobalAlloc` override in

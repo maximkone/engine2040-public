@@ -749,6 +749,10 @@ pub struct EditorApp {
     window: Option<Arc<winit::window::Window>>,
     viewport_tex: Option<egui::TextureHandle>,
     viewport_px: (u32, u32),
+    /// Where the live texture came from: `"gpu"` (presenter frame), `"cpu"`
+    /// (marker grid fallback) or `"none"` before the first refresh. Evidence
+    /// only, never hashed.
+    viewport_source: &'static str,
     drawn_revision: u64,
     /// Texture deltas not yet uploaded (skipped frames keep them queued;
     /// the next presented frame drains them).
@@ -788,6 +792,7 @@ impl EditorApp {
             window: None,
             viewport_tex: None,
             viewport_px: (0, 0),
+            viewport_source: "none",
             drawn_revision: u64::MAX,
             pending: egui::TexturesDelta::default(),
             snapshot: ViewportSnapshot::new(),
@@ -963,8 +968,26 @@ impl EditorApp {
         (width.max(1), height.max(1))
     }
 
+    /// Decode one presenter PNG into an egui image at the requested size.
+    /// `None` on a decode error or a size mismatch; the caller falls back to
+    /// the CPU marker grid rather than showing a stale or mismatched frame.
+    fn png_to_color_image(png: &[u8], width: u32, height: u32) -> Option<egui::ColorImage> {
+        let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+        let rgba = decoded.to_rgba8();
+        if rgba.width() != width || rgba.height() != height {
+            return None;
+        }
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            [usize::try_from(width).ok()?, usize::try_from(height).ok()?],
+            rgba.as_raw(),
+        ))
+    }
+
     /// Refresh the live egui texture when the revision or size moved. Zero
-    /// area keeps last-good; over-bound clamps (the live cap, not the renderer's).
+    /// area keeps last-good; over-bound clamps (the live cap, not the
+    /// renderer's). The GPU presenter frame wins at panel size; a machine
+    /// without an adapter (or a refused capture) falls back to the CPU marker
+    /// grid, so the viewport never goes blank.
     fn refresh_viewport_texture(&mut self) {
         let (width, height) = self.live_viewport_px();
         if self.viewport_tex.is_some()
@@ -973,21 +996,31 @@ impl EditorApp {
         {
             return;
         }
-        match ViewportImage::render(&self.shell, width, height) {
-            Ok(image) => {
-                let handle = self.ctx.load_texture(
-                    "viewport",
-                    image.to_color_image(),
-                    egui::TextureOptions::LINEAR,
-                );
-                self.viewport_tex = Some(handle);
-                self.viewport_px = (width, height);
-                self.drawn_revision = self.shell.revision();
+        let gpu = if self.snapshot.no_adapter {
+            None
+        } else {
+            match self.snapshot.capture(&self.shell, width, height) {
+                Ok(out) => Self::png_to_color_image(&out.png, width, height),
+                Err(_) => None,
             }
-            Err(_) => {
-                // Suspended or rejected: keep the last-good texture.
-            }
-        }
+        };
+        let (image, source) = match gpu {
+            Some(image) => (image, "gpu"),
+            None => match ViewportImage::render(&self.shell, width, height) {
+                Ok(image) => (image.to_color_image(), "cpu"),
+                Err(_) => {
+                    // Suspended or rejected: keep the last-good texture.
+                    return;
+                }
+            },
+        };
+        let handle = self
+            .ctx
+            .load_texture("viewport", image, egui::TextureOptions::LINEAR);
+        self.viewport_tex = Some(handle);
+        self.viewport_px = (width, height);
+        self.viewport_source = source;
+        self.drawn_revision = self.shell.revision();
     }
 
     /// One frame: menu, dock, tessellate, paint, present. Zero-area windows
@@ -2210,6 +2243,67 @@ mod tests {
         assert_eq!(app.shell.selection, Some(id));
         assert!(app.shell.staged_preview().is_none());
         assert!(!app.play_alive());
+    }
+
+    /// EI2: a two-node scene renders through the GPU presenter at panel size,
+    /// and those pixels differ from the CPU marker-grid baseline. A machine
+    /// with no adapter reports the skip on stderr; the CPU fallback itself is
+    /// covered by the headless refresh test above.
+    #[test]
+    fn gpu_viewport_frame_differs_from_cpu_markers() {
+        let mut shell = Shell::new();
+        let root = ObjectId::new();
+        let child = ObjectId::new();
+        shell
+            .insert_node(
+                root,
+                ObjectId::NIL,
+                Transform::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            )
+            .unwrap();
+        shell
+            .insert_node(
+                child,
+                root,
+                Transform::new([1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            )
+            .unwrap();
+        let mut snapshot = ViewportSnapshot::new();
+        let out = match snapshot.capture(&shell, 320, 200) {
+            Ok(out) => out,
+            Err(EditorAppError::NoAdapter) => {
+                eprintln!("viewport: no adapter; GPU leg skipped");
+                return;
+            }
+            Err(error) => panic!("GPU capture failed: {error}"),
+        };
+        eprintln!(
+            "viewport: gpu {}x{} draws={} adapter={} driver={}",
+            out.width, out.height, out.draws, out.adapter, out.driver
+        );
+        let gpu = image::load_from_memory_with_format(&out.png, image::ImageFormat::Png)
+            .expect("presenter PNG decodes")
+            .to_rgba8();
+        assert_eq!(gpu.dimensions(), (320, 200));
+        let cpu = ViewportImage::render(&shell, 320, 200)
+            .expect("CPU baseline renders")
+            .to_color_image();
+        assert_eq!(cpu.size, [320, 200]);
+        let differ = gpu
+            .as_raw()
+            .chunks_exact(4)
+            .zip(cpu.pixels.iter())
+            .filter(|(gpu, cpu)| {
+                let cpu = [cpu.r(), cpu.g(), cpu.b(), cpu.a()];
+                gpu[..] != cpu
+            })
+            .count();
+        assert!(
+            differ > 1000,
+            "GPU frame should differ from the marker grid, differ={differ}"
+        );
+        let again = snapshot.capture(&shell, 320, 200).expect("second capture");
+        assert_eq!(again.png, out.png, "same revision must hash the same");
     }
 
     #[test]

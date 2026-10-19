@@ -25,6 +25,10 @@
 //! The [`mcap`] module writes and reads replay recordings (tick hash, fighter
 //! poses, events, debug lines) as MCAP files with no SDK.
 //!
+//! The [`timeline`] module adds the per-tick timeline over the frozen PF9
+//! recording shape: a seeded desync names its first divergent tick, field
+//! and both values, and exports NDJSON in rerun `time_point` shape.
+//!
 //! The [`fps`] module adds std-only typed FPS view events: fighter poses,
 //! adjudicated hits and frame cost splits, read by the endpoint
 //! `check_profile` pack.
@@ -39,6 +43,9 @@ pub mod mcap;
 /// Bounded 120-frame rerun recording of sim state per tick for desync hunts.
 pub mod rerun_sink;
 pub mod supervisor;
+/// Per-tick timeline over the PF9 shape: seeded desyncs name the first
+/// divergent tick, field and both values; NDJSON export in `time_point` shape.
+pub mod timeline;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
