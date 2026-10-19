@@ -2,7 +2,8 @@
 //!
 //! Owner: the editor session; reads row snapshots, never owns the scene.
 //! Units: stable row ids (`u64`), depths, query text. Budget: UI thread
-//! only, search linear in rows (<= 50 ms at [`MAX_ROWS`]), a quiet panel frame
+//! only, search linear in rows (<= 50 ms at [`MAX_ROWS`]) with a short ASCII
+//! needle scanned without per-row allocation, a quiet panel frame
 //! is O(1) through [`OutlinerView`]. Determinism:
 //! same rows plus same query give the same hits in row order. Errors:
 //! [`OutlineError`]; refusals stage nothing and mutate nothing. Consumer:
@@ -311,10 +312,145 @@ impl OutlinerHit {
     }
 }
 
+/// Longest needle, in bytes, that the allocation-free folded scan takes.
+///
+/// The byte-window scan costs O(rows x needle) while `str::contains` on the
+/// lowercased copy runs the library two-way search, so a needle longer than
+/// about this many bytes loses on the scan. At most this many ASCII bytes
+/// takes the scan; anything longer (or non-ASCII) takes the two-way search
+/// behind a first-byte gate (see [`contains_folded_long`]). Probe p50
+/// (`folded_search_probe_old_vs_new`, 201 paired runs): siege `ai 4` 3.1x to
+/// 3.9x, empty 1.00x to 1.01x, 2,000 x 128-char rows with a 120-byte miss
+/// 3.7x to 3.8x.
+const FOLD_SCAN_MAX_NEEDLE: usize = 16;
+
+/// One hit from a matching row, cloning the name for the panel.
+#[must_use]
+fn hit_of(row: &OutlinerRow) -> OutlinerHit {
+    OutlinerHit {
+        id: row.id,
+        name: row.name.clone(),
+        depth: row.depth,
+    }
+}
+
+/// True when the already-lowercased `needle` appears in `name`.
+///
+/// Both sides must be ASCII: folding a byte with `to_ascii_lowercase` leaves
+/// non-ASCII bytes alone, so a non-ASCII name or needle would disagree with
+/// the Unicode fold (Turkish dotless i, Greek final sigma) and takes the
+/// allocating `to_lowercase().contains` path instead.
+#[must_use]
+fn ascii_contains_folded(name: &str, needle: &str) -> bool {
+    let hay = name.as_bytes();
+    let pattern = needle.as_bytes();
+    let Some(head) = pattern.first() else {
+        return true;
+    };
+    // A window starts only where the first needle byte fits, so no window can
+    // index past `hay`; `checked_sub` never underflows on a needle longer
+    // than the name.
+    let Some(last) = hay.len().checked_sub(pattern.len()) else {
+        return false;
+    };
+    (0..=last).any(|start| {
+        hay.get(start)
+            .is_some_and(|byte| byte.to_ascii_lowercase() == *head)
+            && window_matches(hay, pattern, start)
+    })
+}
+
+/// True when `hay` holds `needle` at `start`, folding ASCII case.
+///
+/// The first needle byte gates every window, and `start` is re-bounded with a
+/// checked add, so no window can index past `hay`.
+#[must_use]
+fn window_matches(hay: &[u8], needle: &[u8], start: usize) -> bool {
+    let Some(end) = start.checked_add(needle.len()) else {
+        return false;
+    };
+    let Some(window) = hay.get(start..end) else {
+        return false;
+    };
+    window
+        .iter()
+        .zip(needle.iter())
+        .all(|(h, n)| h.to_ascii_lowercase() == *n)
+}
+
+/// True when an ASCII `name` cannot hold `needle`: the needle's first folded
+/// byte never occurs in it, so no occurrence can start there.
+#[must_use]
+fn head_absent(name: &str, needle: &str) -> bool {
+    match needle.as_bytes().first() {
+        Some(head) => !name.bytes().any(|byte| byte.to_ascii_lowercase() == *head),
+        None => false,
+    }
+}
+
+/// True when a long or non-ASCII `needle` sits in `name`.
+///
+/// The library substring search on the lowercased copy keeps the long case.
+/// Before it, a cheap necessary-condition gate runs: an ASCII name that never
+/// holds the needle's first folded byte cannot contain it, so lowercasing the
+/// row is skipped. A non-ASCII name skips the gate, because its fold can
+/// introduce bytes the raw name does not hold (Turkish dotted I folds to `i`
+/// plus a combining mark).
+#[must_use]
+fn contains_folded_long(name: &str, needle: &str) -> bool {
+    if name.is_ascii() && head_absent(name, needle) {
+        return false;
+    }
+    name.to_lowercase().contains(needle)
+}
+
+/// Collect the hits of the already-lowercased `needle`, in row order.
+///
+/// The loop is picked once per query, so only the substring test differs
+/// between shapes: an empty needle matches every row, a short ASCII needle
+/// scans an ASCII name without allocating, and anything else gates on the
+/// needle's first byte and then runs the library substring search.
+fn collect_hits(rows: &[OutlinerRow], needle: &str) -> Vec<OutlinerHit> {
+    if needle.is_empty() {
+        let mut hits = Vec::with_capacity(rows.len());
+        for row in rows {
+            hits.push(hit_of(row));
+        }
+        return hits;
+    }
+    let mut hits = Vec::new();
+    if needle.len() <= FOLD_SCAN_MAX_NEEDLE && needle.is_ascii() {
+        for row in rows {
+            // A non-ASCII row name cannot be scanned byte for byte; it folds
+            // through `to_lowercase`, so the scan branch still matches it.
+            let matched = if row.name.is_ascii() {
+                ascii_contains_folded(&row.name, needle)
+            } else {
+                row.name.to_lowercase().contains(needle)
+            };
+            if matched {
+                hits.push(hit_of(row));
+            }
+        }
+    } else {
+        // Long or non-ASCII needle: the library substring search on the
+        // lowercased copy keeps the long case.
+        for row in rows {
+            if contains_folded_long(&row.name, needle) {
+                hits.push(hit_of(row));
+            }
+        }
+    }
+    hits
+}
+
 /// Search the outliner: substring over names, hits in row order.
 ///
-/// Same rows plus same query always yield the same hits. Empty text
-/// matches every row.
+/// Same rows plus same query always yield the same hits. Empty text matches
+/// every row. A short ASCII needle scans the ASCII name without allocating;
+/// a longer or non-ASCII needle keeps the allocating substring search so the
+/// library's two-way search holds the long case. The result bound is checked
+/// once over the collected hits.
 pub fn search(
     rows: &[OutlinerRow],
     query: &OutlinerQuery,
@@ -324,23 +460,12 @@ pub fn search(
             reason: "search text exceeds the 128-character bound",
         });
     }
-    let needle = query.text.to_lowercase();
-    let mut hits = Vec::new();
-    for row in rows {
-        if !needle.is_empty() && !row.name.to_lowercase().contains(&needle) {
-            continue;
-        }
-        hits.push(OutlinerHit {
-            id: row.id,
-            name: row.name.clone(),
-            depth: row.depth,
+    let hits = collect_hits(rows, &query.text.to_lowercase());
+    if hits.len() > MAX_RESULTS {
+        return Err(OutlineError::TooManyResults {
+            count: hits.len(),
+            max: MAX_RESULTS,
         });
-        if hits.len() > MAX_RESULTS {
-            return Err(OutlineError::TooManyResults {
-                count: hits.len(),
-                max: MAX_RESULTS,
-            });
-        }
     }
     Ok(hits)
 }
@@ -869,6 +994,78 @@ mod tests {
         );
     }
 
+    /// Reference hit ids: the pre-change lowercase substring form, kept as
+    /// the oracle for the folded search.
+    fn reference_ids(rows: &[OutlinerRow], text: &str) -> Vec<u64> {
+        let needle = text.to_lowercase();
+        rows.iter()
+            .filter(|row| needle.is_empty() || row.name.to_lowercase().contains(&needle))
+            .map(|row| row.id)
+            .collect()
+    }
+
+    #[test]
+    fn folded_search_agrees_with_lowercase_reference() {
+        // ASCII names, non-ASCII names (Turkish dotless i, Greek capitals
+        // with final sigma, long s), plus a name long enough for a needle
+        // over the scan bound.
+        let labels = [
+            "Hall Plinth",
+            "hall/plinth",
+            "ısı Tank",
+            "ΣΟΦΟΣ",
+            "siege AI 42",
+            "props",
+            "İstanbul",
+            "ſinal",
+            "λόγος",
+            "root/children/leaf-node",
+        ];
+        let mut shell = Shell::new();
+        let mut names = HashMap::new();
+        let mut x = 0.0f32;
+        for label in labels {
+            let id = ObjectId::new();
+            shell
+                .insert_node(id, ObjectId::NIL, pose_at(x))
+                .expect("fixture inserts");
+            names.insert(id, label.to_string());
+            x += 1.0;
+        }
+        let rows = build_rows(&shell.rows(), &names).expect("fixture rows");
+        assert_eq!(rows.len(), labels.len());
+        let queries = [
+            "",
+            "plinth",                 // lowercase ASCII suffix
+            "PLINTH",                 // uppercase ASCII suffix
+            "hall",                   // ASCII prefix
+            "ai 4",                   // short ASCII inside
+            "s",                      // one ASCII byte
+            "ısı",                    // Turkish dotless i
+            "ı",                      // single dotless i
+            "İstanbul",               // Turkish dotted capital I
+            "istanbul",               // ASCII against the non-ASCII name
+            "Σ",                      // Greek capital sigma
+            "σ",                      // Greek small sigma
+            "ς",                      // Greek final sigma
+            "ſ",                      // long s: non-ASCII needle
+            "children/leaf-node",     // 18 ASCII bytes: over the scan bound
+            "CHILDREN/LEAF-NODE",     // the same, uppercased
+            "root/children/zzzzzzzz", // long head present, needle absent
+            "qqqqqqqqqqqqqqqqqqqq",   // long head absent from every name
+            "leaf-node",              // short ASCII suffix on the long name
+            "no such row",            // a miss
+        ];
+        for query in queries {
+            let got: Vec<u64> = search(&rows, &OutlinerQuery::new(query))
+                .expect("query under the bound")
+                .iter()
+                .map(|hit| hit.id)
+                .collect();
+            assert_eq!(got, reference_ids(&rows, query), "query {query:?}");
+        }
+    }
+
     #[test]
     fn overlong_search_refuses_and_stages_nothing() {
         let (_, _, _, rows, _) = outline_two();
@@ -1326,6 +1523,127 @@ mod tests {
         }
         eprintln!("ED19 siege: {SIEGE_ROWS} rows, worst search {worst:?}");
         assert!(worst < Duration::from_millis(50), "search took {worst:?}");
+    }
+
+    /// The pre-change search: the result bound is checked per push and every
+    /// row lowercases its own name before the library substring search. The
+    /// paired probe measures the whole new `search` against this whole old
+    /// form over the same rows and query.
+    fn search_allocating(rows: &[OutlinerRow], text: &str) -> Vec<OutlinerHit> {
+        if text.chars().count() > MAX_QUERY_CHARS {
+            return Vec::new();
+        }
+        let needle = text.to_lowercase();
+        let mut hits = Vec::new();
+        for row in rows {
+            if !needle.is_empty() && !row.name.to_lowercase().contains(&needle) {
+                continue;
+            }
+            hits.push(hit_of(row));
+            if hits.len() > MAX_RESULTS {
+                break;
+            }
+        }
+        hits
+    }
+
+    /// Siege-scale rows with 128-char ASCII names and a 120-byte miss: the
+    /// long-needle probe case.
+    fn long_row_fixture() -> (Vec<OutlinerRow>, String) {
+        let name = format!("prop {}", "z".repeat(123));
+        assert_eq!(name.len(), 128);
+        let rows: Vec<OutlinerRow> = (0..SIEGE_ROWS)
+            .map(|index| OutlinerRow {
+                id: u64::try_from(index).expect("index fits u64"),
+                source: ObjectId::new(),
+                name: name.clone(),
+                depth: 0,
+                parent: None,
+            })
+            .collect();
+        (rows, "q".repeat(120))
+    }
+
+    /// Median of `runs` paired timings, alternating which path runs first so
+    /// a slow patch of the machine hits both sides evenly.
+    fn paired_p50(
+        runs: usize,
+        mut old: impl FnMut(),
+        mut new: impl FnMut(),
+    ) -> (Duration, Duration) {
+        let mut olds = Vec::with_capacity(runs);
+        let mut news = Vec::with_capacity(runs);
+        for round in 0..runs {
+            if round % 2 == 0 {
+                let start = Instant::now();
+                old();
+                olds.push(start.elapsed());
+                let start = Instant::now();
+                new();
+                news.push(start.elapsed());
+            } else {
+                let start = Instant::now();
+                new();
+                news.push(start.elapsed());
+                let start = Instant::now();
+                old();
+                olds.push(start.elapsed());
+            }
+        }
+        olds.sort();
+        news.sort();
+        (olds[runs / 2], news[runs / 2])
+    }
+
+    /// Microseconds of one duration, for the probe report.
+    #[must_use]
+    fn micros(d: Duration) -> f64 {
+        d.as_secs_f64() * 1_000_000.0
+    }
+
+    #[test]
+    fn folded_search_probe_old_vs_new() {
+        const RUNS: usize = 201;
+        let (shell, names) = siege_scene();
+        let rows = build_rows(&shell.rows(), &names).expect("siege rows");
+        let (long_rows, long_miss) = long_row_fixture();
+        let q_short = OutlinerQuery::new("ai 4");
+        let q_empty = OutlinerQuery::new("");
+        let q_long = OutlinerQuery::new(&long_miss);
+        let cases: [(&str, &[OutlinerRow], &OutlinerQuery); 3] = [
+            ("short 'ai 4'", &rows, &q_short),
+            ("empty ''", &rows, &q_empty),
+            ("120-byte miss", &long_rows, &q_long),
+        ];
+        let mut ratios = [0.0f64; 3];
+        for (index, (label, case_rows, query)) in cases.iter().enumerate() {
+            let (old, new) = paired_p50(
+                RUNS,
+                || {
+                    search_allocating(case_rows, &query.text);
+                },
+                || {
+                    search(case_rows, query).expect("query under the bound");
+                },
+            );
+            ratios[index] = micros(old) / micros(new);
+            eprintln!(
+                "PF31 probe {label}: old {:.1} us -> new {:.1} us ({:.3}x) over {RUNS}",
+                micros(old),
+                micros(new),
+                ratios[index]
+            );
+        }
+        let best = ratios.iter().copied().fold(f64::MIN, f64::max);
+        eprintln!("PF31 probe best case {best:.3}x");
+        assert!(ratios[0] >= 1.0, "short query regressed: {:.3}x", ratios[0]);
+        assert!(ratios[1] >= 1.0, "empty query regressed: {:.3}x", ratios[1]);
+        assert!(
+            ratios[2] >= 1.0,
+            "long-needle query regressed: {:.3}x",
+            ratios[2]
+        );
+        assert!(best >= 1.05, "no case reached the 1.05x bar: {best:.3}x");
     }
 
     #[test]

@@ -1221,9 +1221,21 @@ fn resolve_impacts(
             state.fighters[id].attack_age = 0;
         }
     }
-    let pre = geometry.map(|_| state.fighters);
+    let symmetric = geometry.is_some();
+    // Rules v2 reads each guard from the state before the first same-tick
+    // strike; snapshot the fields it reads once, in place (no heap, no whole
+    // `FighterState` copy). Rules v1 reads live state, so `pre` stays `None`.
+    let pre = geometry.map(|_| {
+        let mut snap = [PreState::default(); SLOT_COUNT];
+        let mut i = 0;
+        while i < count {
+            snap[i] = PreState::of(&state.fighters[i]);
+            i += 1;
+        }
+        snap
+    });
     for attacker in 0..count {
-        let f = pre.map_or(state.fighters[attacker], |pre| pre[attacker]);
+        let f = pre.map_or_else(|| PreState::of(&state.fighters[attacker]), |p| p[attacker]);
         let impact = f.is_attacking
             && f.attack_age == tables.attack_startup_ticks
             && f.hp_permille > 0
@@ -1236,7 +1248,7 @@ fn resolve_impacts(
             if victim == attacker {
                 continue;
             }
-            let guard = pre.map_or(state.fighters[victim], |pre| pre[victim]);
+            let guard = pre.map_or_else(|| PreState::of(&state.fighters[victim]), |p| p[victim]);
             if guard.hp_permille == 0 {
                 continue;
             }
@@ -1251,12 +1263,66 @@ fn resolve_impacts(
                 kind: f.attack_kind,
                 covered,
                 guard,
-                symmetric: pre.is_some(),
+                symmetric,
             };
             if resolve_strike(state, tables, events, strike) {
                 break;
             }
         }
+    }
+}
+
+/// Compact pre-resolution view of the [`FighterState`] fields
+/// [`resolve_impacts`] reads before any same-tick strike lands: the attacker
+/// impact fields plus the victim guard fields. Rules v2 needs the state as it
+/// stood before the first strike, so it snapshots once per tick; this view is
+/// a quarter the size of [`FighterState`] (no stamina, buffer or clocks), so
+/// the snapshot stays cheap while every read keeps the exact pre-resolution
+/// value. Values are copied verbatim from [`FighterState`]; nothing is
+/// recomputed.
+#[derive(Clone, Copy, Default)]
+struct PreState {
+    is_attacking: bool,
+    attack_age: u32,
+    attack_kind: u8,
+    hp_permille: u16,
+    react: u32,
+    knockdown: u32,
+    is_dodging: bool,
+    dodge_age: u32,
+    is_blocking: bool,
+    block_age: u32,
+}
+
+impl PreState {
+    /// The impact and guard fields of one fighter, read in place.
+    fn of(f: &FighterState) -> Self {
+        Self {
+            is_attacking: f.is_attacking,
+            attack_age: f.attack_age,
+            attack_kind: f.attack_kind,
+            hp_permille: f.hp_permille,
+            react: f.react,
+            knockdown: f.knockdown,
+            is_dodging: f.is_dodging,
+            dodge_age: f.dodge_age,
+            is_blocking: f.is_blocking,
+            block_age: f.block_age,
+        }
+    }
+
+    /// True during dodge invulnerability frames, exactly as
+    /// [`FighterState::invulnerable_with`] reads them.
+    #[must_use]
+    fn invulnerable_with(self, tables: &Tables) -> bool {
+        self.is_dodging && self.dodge_age < tables.dodge_iframes_ticks
+    }
+
+    /// True while a held block still parries, exactly as
+    /// [`FighterState::parry_open_with`] reads it.
+    #[must_use]
+    fn parry_open_with(self, tables: &Tables) -> bool {
+        self.is_blocking && self.block_age <= tables.parry_window_ticks
     }
 }
 
@@ -1269,9 +1335,9 @@ struct Strike {
     kind: u8,
     /// Guard faces the attacker (always under v1; shield cone under v2).
     covered: bool,
-    /// Victim state the dodge, parry and block checks read: live under v1,
-    /// pre-resolution under v2.
-    guard: FighterState,
+    /// Victim guard fields the dodge, parry and block checks read: live under
+    /// v1, pre-resolution under v2.
+    guard: PreState,
     /// Rules v2: stun clocks only ever grow (`max`), so the order two
     /// same-tick strikes land in cannot change the result.
     symmetric: bool,
@@ -3484,6 +3550,261 @@ mod tests {
                 "v1 must drop a mid-recovery press"
             );
             assert_eq!(first.fighters[0].attack_age, 0);
+        }
+    }
+
+    /// The rules-v2 impact resolver as it stood before the compact snapshot:
+    /// it cloned the whole fighter array every tick and handed whole
+    /// [`FighterState`] guards to [`resolve_strike`]. Kept as the equality
+    /// oracle for [`resolve_impacts`]; it converts the cloned guard through
+    /// [`PreState::of`] only because the shared strike step reads the compact
+    /// view, so both paths read exactly the same fields.
+    fn resolve_impacts_full_clone(
+        state: &mut FightState,
+        tables: &Tables,
+        events: &mut Vec<FightEvent>,
+        count: usize,
+        geometry: Option<&[StrikePose]>,
+    ) {
+        for id in 0..count {
+            let owner_stunned = {
+                let f = state.fighters[id];
+                f.hp_permille == 0 || f.react > 0 || f.knockdown > 0
+            };
+            if owner_stunned && state.fighters[id].is_attacking {
+                state.fighters[id].is_attacking = false;
+                state.fighters[id].attack_age = 0;
+            }
+        }
+        let pre: Option<[FighterState; SLOT_COUNT]> = geometry.map(|_| state.fighters);
+        for attacker in 0..count {
+            let f: FighterState = pre.map_or(state.fighters[attacker], |p| p[attacker]);
+            let impact = f.is_attacking
+                && f.attack_age == tables.attack_startup_ticks
+                && f.hp_permille > 0
+                && f.react == 0
+                && f.knockdown == 0;
+            if !impact {
+                continue;
+            }
+            for victim in 0..count {
+                if victim == attacker {
+                    continue;
+                }
+                let guard: FighterState = pre.map_or(state.fighters[victim], |p| p[victim]);
+                if guard.hp_permille == 0 {
+                    continue;
+                }
+                let covered = match geometry.map(|poses| strike_gate(poses, attacker, victim)) {
+                    None | Some(StrikeGate::Covered) => true,
+                    Some(StrikeGate::Open) => false,
+                    Some(StrikeGate::Miss) => continue,
+                };
+                let strike = Strike {
+                    attacker,
+                    victim,
+                    kind: f.attack_kind,
+                    covered,
+                    guard: PreState::of(&guard),
+                    symmetric: pre.is_some(),
+                };
+                if resolve_strike(state, tables, events, strike) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// [`core_step_into`] with the pre-snapshot resolver: the whole-tick
+    /// equality oracle, identical in every other phase.
+    fn core_step_into_full_clone(
+        intents: &[Buttons; SLOT_COUNT],
+        state: &mut FightState,
+        tables: &Tables,
+        geometry: Option<&[StrikePose]>,
+        events: &mut Vec<FightEvent>,
+        mut cues: Option<&mut Vec<AttackStarted>>,
+    ) {
+        events.clear();
+        if let Some(cues) = cues.as_mut() {
+            cues.clear();
+        }
+        if state.hitstop > 0 {
+            state.hitstop -= 1;
+            return;
+        }
+        let count = usize::from(state.fighter_count.min(MAX_PARTICIPANTS));
+        let commit = geometry.map(|_| StreamliningParams::v1());
+        latch_block_holds(intents, state, tables, commit, count);
+        start_actions(intents, state, tables, events, cues, commit, count);
+        if *tables == TABLES_V2 {
+            for (id, intent) in intents.iter().enumerate().take(count) {
+                let f = &mut state.fighters[id];
+                if f.is_attacking && f.attack_age == 0 {
+                    if attacking(*intent) && blocking(*intent) && !dodging(*intent) {
+                        f.attack_kind = crate::depth::INPUT_HEAVY;
+                    } else if attacking(*intent) && !dodging(*intent) {
+                        f.attack_kind = crate::depth::INPUT_LIGHT;
+                    }
+                }
+            }
+        }
+        resolve_impacts_full_clone(state, tables, events, count, geometry);
+        advance_clocks(state, tables, count);
+        state.tick = state.tick.saturating_add(1);
+    }
+
+    /// Four-duelist poses with drifting reach, two teams, so the tape reaches
+    /// teammate misses, in-reach hits, blocks, parries and dodges.
+    fn brawl4_poses(t: u32) -> [StrikePose; 4] {
+        let reach = i32::try_from(t % 4).unwrap() * 900 + 400;
+        [
+            pose(0, 0, 0, (1000, 0), 0),
+            pose(1, 1_000, 0, (-1000, 0), 1),
+            pose(2, 4_000, 0, (0, 1000), 2),
+            pose(3, 4_000, reach, (0, -1000), 2),
+        ]
+    }
+
+    /// One tick of scripted presses over four duellists.
+    fn brawl4_inputs(t: u32) -> [FighterInput; 4] {
+        let mut v = [none(0), none(1), none(2), none(3)];
+        if t.is_multiple_of(24) {
+            v[0] = input(0, ATTACK);
+        }
+        if t % 24 == 4 {
+            v[1] = input(1, BLOCK);
+        }
+        if t % 30 == 7 {
+            v[2] = input(2, ATTACK);
+        }
+        if t % 30 == 12 {
+            v[3] = input(3, BLOCK);
+        }
+        if t % 37 == 3 {
+            v[1] = input(1, DODGE);
+        }
+        if t % 41 == 9 {
+            v[0] = input(0, ATTACK | BLOCK);
+        }
+        v
+    }
+
+    #[test]
+    fn compact_snapshot_matches_the_full_clone_across_a_v2_brawl() {
+        let tables = &TABLES_V2;
+        // Rules v2 (geometry on) and rules v1 (geometry off) both run the
+        // same tape; events and end state must match the pre-snapshot path.
+        for geometry_on in [true, false] {
+            let mut new_state = FightState::new(4).unwrap();
+            let mut old_state = new_state;
+            let mut new_events = Vec::with_capacity(MAX_EVENTS_PER_TICK);
+            let mut old_events = Vec::with_capacity(MAX_EVENTS_PER_TICK);
+            let mut total = 0usize;
+            for t in 0..240u32 {
+                let poses = brawl4_poses(t);
+                let inputs = brawl4_inputs(t);
+                let intents = v2_intents(&inputs, &poses, 4).unwrap();
+                let geometry = if geometry_on { Some(&poses[..]) } else { None };
+                core_step_into(
+                    &intents,
+                    &mut new_state,
+                    tables,
+                    geometry,
+                    &mut new_events,
+                    None,
+                );
+                core_step_into_full_clone(
+                    &intents,
+                    &mut old_state,
+                    tables,
+                    geometry,
+                    &mut old_events,
+                    None,
+                );
+                assert_eq!(
+                    new_events, old_events,
+                    "events differ at tick {t} (geometry {geometry_on})"
+                );
+                assert_eq!(
+                    new_state, old_state,
+                    "state differs at tick {t} (geometry {geometry_on})"
+                );
+                total += old_events.len();
+            }
+            assert_eq!(new_state, old_state, "end state (geometry {geometry_on})");
+            // The tape really resolves contacts, so the oracle is not vacuous.
+            assert!(total > 0, "the brawl tape emitted no events");
+        }
+    }
+
+    /// Timing receipt: p50 microseconds of one [`resolve_impacts`] over a
+    /// 16-fighter fixture, the compact pre-snapshot against the full-clone
+    /// oracle it replaced, interleaved so one load sits under both sides. Two
+    /// fixtures: an in-reach brawl (geometry dominates) and a teammate bout
+    /// (geometry skipped, so the snapshot and the reads show through). The
+    /// compact side stays only while the pair holds and it wins.
+    /// Run: cargo test -p engine-combat --release --lib compact_snapshot_paired -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn compact_snapshot_paired_receipt() {
+        const SAMPLES: usize = 201;
+        const BATCH: usize = 64;
+        const COUNT: u8 = 16;
+        let count = usize::from(COUNT);
+        let batch = f64::from(u32::try_from(BATCH).unwrap());
+        let tables = &TABLES_V2;
+        let mut brawl = [pose(0, 0, 0, (1000, 0), 0); 16];
+        for (i, p) in brawl.iter_mut().enumerate() {
+            *p = pose(
+                u8::try_from(i).unwrap(),
+                i32::try_from(i).unwrap() * 1_000,
+                0,
+                (1000, 0),
+                u8::try_from(i % 2).unwrap(),
+            );
+        }
+        // All one team: every pair is a one-compare Miss, isolating the
+        // per-tick snapshot and the per-slot reads from the geometry.
+        let mates = [pose(0, 0, 0, (1000, 0), 0); 16];
+        let mut template = FightState::new(COUNT).unwrap();
+        template.fighters[0].is_attacking = true;
+        template.fighters[0].attack_age = tables.attack_startup_ticks;
+
+        let mut out = Vec::with_capacity(MAX_EVENTS_PER_TICK);
+        for (name, poses) in [("brawl", &brawl[..]), ("mates", &mates[..])] {
+            let mut new_us = Vec::with_capacity(SAMPLES);
+            let mut old_us = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                let begin = std::time::Instant::now();
+                for _ in 0..BATCH {
+                    let mut s = template;
+                    resolve_impacts(&mut s, tables, &mut out, count, Some(poses));
+                }
+                new_us.push(begin.elapsed().as_secs_f64() * 1.0e6 / batch);
+                let begin = std::time::Instant::now();
+                for _ in 0..BATCH {
+                    let mut s = template;
+                    resolve_impacts_full_clone(&mut s, tables, &mut out, count, Some(poses));
+                }
+                old_us.push(begin.elapsed().as_secs_f64() * 1.0e6 / batch);
+            }
+            new_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            old_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let (new_p50, old_p50) = (new_us[SAMPLES / 2], old_us[SAMPLES / 2]);
+            eprintln!(
+                "resolve_impacts_snapshot fixture={name} full_p50_us={old_p50:.4} compact_p50_us={new_p50:.4} ratio_x={:.3} count={count}",
+                old_p50 / new_p50
+            );
+            assert!(
+                new_p50 <= old_p50,
+                "the compact snapshot must not be the slower one on {name}: {new_p50:.4} vs {old_p50:.4}"
+            );
         }
     }
 }

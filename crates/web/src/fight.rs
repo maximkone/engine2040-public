@@ -73,16 +73,7 @@ impl Match {
     /// # Errors
     /// [`MatchError::Session`] or [`MatchError::Scenery`] when the session or the ring refuse.
     pub fn new() -> Result<Self, MatchError> {
-        let config = GameConfig {
-            seed: MATCH_SEED,
-            ticks: MATCH_TICKS,
-            fighters: SEATS,
-            half_extent_m: HALF_EXTENT_M,
-        };
-        let app = App::with_world(config, kit_match_world_or_empty())
-            .map_err(|e| MatchError::Session(e.to_string()))?
-            .into_duel()
-            .map_err(|e| MatchError::Session(e.to_string()))?;
+        let app = Self::session()?;
         let arena = ProceduralArena::build().map_err(|e| MatchError::Scenery(e.to_string()))?;
         Ok(Self {
             app,
@@ -90,6 +81,23 @@ impl Match {
             tick: 0,
             facing: Facing::default(),
         })
+    }
+
+    /// One fresh session: the kit world, the duel rules, the page's own seed.
+    ///
+    /// # Errors
+    /// [`MatchError::Session`] when the config, the world or the duel rules refuse.
+    fn session() -> Result<App, MatchError> {
+        let config = GameConfig {
+            seed: MATCH_SEED,
+            ticks: MATCH_TICKS,
+            fighters: SEATS,
+            half_extent_m: HALF_EXTENT_M,
+        };
+        App::with_world(config, kit_match_world_or_empty())
+            .map_err(|e| MatchError::Session(e.to_string()))?
+            .into_duel()
+            .map_err(|e| MatchError::Session(e.to_string()))
     }
 
     /// The next tick the match will accept.
@@ -105,14 +113,30 @@ impl Match {
     }
 
     /// Step one fixed tick with the human seat's input; the brains fill every other slot. A
-    /// decided round starts the next one, so an idle seat plays on instead of freezing on a KO.
+    /// decided round closes and starts the next one, and a session at its bound starts a fresh
+    /// match, so an idle or long-running page keeps playing instead of freezing.
     pub fn step(&mut self, input: BodyInput) {
         let outcome = self.app.tick(input);
-        if outcome.input_accepted {
-            self.tick = self.tick.saturating_add(1);
+        if !outcome.input_accepted {
+            self.restart();
+            return;
+        }
+        self.tick = self.tick.saturating_add(1);
+        let hp = self.app.hp();
+        if hp.first().copied().unwrap_or(0) == 0 || hp.get(1).copied().unwrap_or(0) == 0 {
+            self.app.close_round();
+            self.app.reset_for_next_round();
             if self.app.match_winner().is_some() {
-                self.app.reset_for_next_round();
+                self.restart();
             }
+        }
+    }
+
+    /// A fresh match on the same scenery: the session is rebuilt, the ring is kept.
+    fn restart(&mut self) {
+        if let Ok(app) = Self::session() {
+            self.app = app;
+            self.tick = 0;
         }
     }
 
