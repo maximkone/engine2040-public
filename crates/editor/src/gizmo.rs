@@ -34,8 +34,14 @@ use engine_scene::transform::{quat_normalized, Transform, MIN_INVERTIBLE_SCALE};
 
 use crate::commands::Batch;
 
-/// Which gizmo tool the viewport panel offers. Translate and rotate only:
-/// scale stays in the inspector until a later task needs it.
+/// Snap step for translation drags, in meters (one quarter meter).
+pub const SNAP_DISTANCE_M: f32 = 0.25;
+/// Snap step for rotation drags, in radians (15 degrees).
+pub const SNAP_ANGLE_RAD: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// Snap step for scale drags (one quarter of the current scale).
+pub const SNAP_SCALE: f32 = 0.25;
+
+/// Which gizmo tool the viewport panel offers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GizmoTool {
     /// Arrow handles: move the selection in its parent frame.
@@ -43,6 +49,8 @@ pub enum GizmoTool {
     Translate,
     /// Ring handles: spin the selection in its parent frame.
     Rotate,
+    /// Box handles: scale the selection in its parent frame.
+    Scale,
 }
 
 impl GizmoTool {
@@ -51,6 +59,16 @@ impl GizmoTool {
         match self {
             Self::Translate => "Translate",
             Self::Rotate => "Rotate",
+            Self::Scale => "Scale",
+        }
+    }
+
+    /// Next tool in the W/E/R/T cycle.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Translate => Self::Rotate,
+            Self::Rotate => Self::Scale,
+            Self::Scale => Self::Translate,
         }
     }
 }
@@ -70,6 +88,11 @@ pub enum GizmoDrag {
         /// Spin angle in radians; must be finite.
         angle_rad: f32,
     },
+    /// Parent-frame per-axis scale factor, multiplied into the local scale.
+    Scale {
+        /// Positive factor per axis.
+        factor: [f32; 3],
+    },
 }
 
 /// What rejected a gizmo drag. Nothing is staged or applied on error.
@@ -79,6 +102,8 @@ pub enum GizmoError {
     NonFinite,
     /// The spin axis was zero-length (or not a number once measured).
     DegenerateAxis,
+    /// A scale factor was zero or negative.
+    NonPositiveScale,
     /// A world-to-local conversion crossed a near-zero scale.
     DegenerateTransform,
 }
@@ -88,6 +113,7 @@ impl std::fmt::Display for GizmoError {
         match self {
             Self::NonFinite => f.write_str("gizmo drag holds a non-finite value"),
             Self::DegenerateAxis => f.write_str("gizmo spin axis is degenerate"),
+            Self::NonPositiveScale => f.write_str("gizmo scale factor must be positive"),
             Self::DegenerateTransform => f.write_str("gizmo pose sits across a degenerate scale"),
         }
     }
@@ -141,6 +167,23 @@ pub fn drag_to_local(current: Transform, drag: &GizmoDrag) -> Result<Transform, 
                 quat_normalized(quat_mul(spin, quat_normalized(current.rotation))),
                 current.scale,
             ))
+        }
+        GizmoDrag::Scale { factor } => {
+            if !factor.iter().all(|c| c.is_finite()) {
+                return Err(GizmoError::NonFinite);
+            }
+            if factor.iter().any(|c| *c <= 0.0) {
+                return Err(GizmoError::NonPositiveScale);
+            }
+            let scale = [
+                current.scale[0] * factor[0],
+                current.scale[1] * factor[1],
+                current.scale[2] * factor[2],
+            ];
+            if !scale.iter().all(|c| c.is_finite()) {
+                return Err(GizmoError::NonFinite);
+            }
+            Ok(Transform::new(current.position, current.rotation, scale))
         }
     }
 }
@@ -401,7 +444,7 @@ fn quat_normalized_f64(q: [f64; 4]) -> Option<[f64; 4]> {
 /// core; this bridge only converts values and drives one gizmo frame.
 #[cfg(feature = "ui")]
 pub mod ui {
-    use super::GizmoTool;
+    use super::{GizmoTool, SNAP_ANGLE_RAD, SNAP_DISTANCE_M, SNAP_SCALE};
     use crate::viewport::Viewport;
     use engine_scene::transform::Transform;
 
@@ -503,13 +546,15 @@ pub mod ui {
         /// Point the gizmo cameras at the viewport. The matrices stay
         /// unverified on a real GPU until the present loop is wired; the
         /// layout here follows the gizmo crate's column-vector convention
-        /// (`projection * view * model`, OpenGL-style depth).
-        pub fn sync_camera(&mut self, viewport: &Viewport) {
+        /// (`projection * view * model`, OpenGL-style depth). `snap` turns on
+        /// the 0.25 m / 15 deg / 0.25 scale increments (hold Shift).
+        pub fn sync_camera(&mut self, viewport: &Viewport, snap: bool) {
             let aspect = f64::from(viewport.size.aspect());
             let config = *self.gizmo.config();
             let modes = match self.tool {
                 GizmoTool::Translate => transform_gizmo::config::GizmoMode::all_translate(),
                 GizmoTool::Rotate => transform_gizmo::config::GizmoMode::all_rotate(),
+                GizmoTool::Scale => transform_gizmo::config::GizmoMode::all_scale(),
             };
             self.gizmo
                 .update_config(transform_gizmo::config::GizmoConfig {
@@ -530,6 +575,10 @@ pub mod ui {
                     modes,
                     mode_override: None,
                     orientation: transform_gizmo::config::GizmoOrientation::Local,
+                    snapping: snap,
+                    snap_angle: SNAP_ANGLE_RAD,
+                    snap_distance: SNAP_DISTANCE_M,
+                    snap_scale: SNAP_SCALE,
                     ..config
                 });
         }
@@ -548,6 +597,24 @@ pub mod ui {
     impl Default for GizmoSession {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::gizmo::{SNAP_ANGLE_RAD, SNAP_DISTANCE_M, SNAP_SCALE};
+
+        #[test]
+        fn scale_tool_sets_the_scale_handles_and_snap_steps() {
+            let mut session = GizmoSession::new();
+            session.set_tool(crate::gizmo::GizmoTool::Scale);
+            session.sync_camera(&Viewport::default_panel(), true);
+            let config = *session.gizmo.config();
+            assert!(config.snapping);
+            assert_eq!(config.snap_distance, SNAP_DISTANCE_M);
+            assert_eq!(config.snap_angle, SNAP_ANGLE_RAD);
+            assert_eq!(config.snap_scale, SNAP_SCALE);
         }
     }
 }
@@ -687,5 +754,51 @@ mod tests {
             batch.ops[0],
             crate::commands::Op::SetLocal { id, local: l } if id == target && l == local
         ));
+    }
+
+    #[test]
+    fn scale_drag_multiplies_local_scale() {
+        let start = Transform::new([1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0], [2.0, 3.0, 4.0]);
+        let out = drag_to_local(
+            start,
+            &GizmoDrag::Scale {
+                factor: [0.5, 2.0, 1.0],
+            },
+        )
+        .unwrap();
+        assert!(near(&out.scale, &[1.0, 6.0, 4.0]));
+        assert_eq!(out.position, start.position);
+        assert_eq!(out.rotation, start.rotation);
+        assert_eq!(
+            drag_to_local(
+                start,
+                &GizmoDrag::Scale {
+                    factor: [0.0, 1.0, 1.0]
+                }
+            ),
+            Err(GizmoError::NonPositiveScale)
+        );
+        assert_eq!(
+            drag_to_local(
+                start,
+                &GizmoDrag::Scale {
+                    factor: [f32::NAN, 1.0, 1.0]
+                }
+            ),
+            Err(GizmoError::NonFinite)
+        );
+    }
+
+    #[test]
+    fn tool_cycle_is_w_e_r() {
+        let mut tool = GizmoTool::Translate;
+        assert_eq!(tool.title(), "Translate");
+        tool = tool.next();
+        assert_eq!(tool, GizmoTool::Rotate);
+        tool = tool.next();
+        assert_eq!(tool, GizmoTool::Scale);
+        assert_eq!(tool.title(), "Scale");
+        tool = tool.next();
+        assert_eq!(tool, GizmoTool::Translate);
     }
 }

@@ -208,3 +208,38 @@ spear`, `session::spear_tests`): `spear_resim_equals_a_single_run_and_x2_is_iden
 Frozen and re-run unchanged: golden `d57b5c8ae3096614`
 (`engine-proof --lib golden_hash_untouched`) and the `arena_line` digest
 `d29b3b17bbd3b244`.
+
+## Rope swing (row SG4)
+
+Shady Knight's wall tether is a pendulum, not a winch. A reel pulls the thrower in a
+straight line; a swing constrains the thrower to a circle of radius `REST` (1600 mm)
+around the anchor and lets gravity accelerate along the tangent. Releasing at the bottom
+of the arc then carries that tangential speed into the launch, which is the whole point
+of the mechanic. Numbers and grades: `rea-arsenal docs/findings/shady-knight-mechanics.md`
+(the source game runs 10.5 m/s run, -40 m/s² gravity, a 25 m/s throw).
+
+Rules, per tick, integer, wall tether only:
+
+1. `d` = distance from anchor to thrower, in mm. If `d > REST`, radial correction:
+   move the thrower back toward the anchor by `d - REST` along the unit direction.
+2. Gravity per tick pulls the thrower down before the correction; the correction is what
+   turns the fall into an arc. Same `SPEAR_GRAVITY` step the flight uses.
+3. Damping is a constant fraction, not a multiplier chain: `v -= v / 32` per tick, so a
+   release keeps most of the swing speed.
+4. Release (`TetherEnd(Released)`) keeps the current velocity, as SG1 already does. The
+   new part is that the velocity is now tangential, so it is worth more.
+5. Enemy tethers keep the existing reel. Only the wall tether swings.
+
+Accept: `rope_swing_release_lands_further_than_a_flat_jump` in `crate::spear::tests` - the
+same seed and tape with the swing on lands at least 300 mm further than the jump-only
+control. Golden `d57b5c8ae3096614` x2 unchanged: the fixture does not enable
+`MatchSpec::spear`, so the rope never runs in the hashed baseline.
+
+Status 2026-10-19: built three ways and none of them holds. The reel is the only force on
+a wall tether and it points at the anchor, so on a floor-plane body a taut rope has no
+tangential force to turn into an arc; the versions that do constrain the radius also stop
+the zip that `spear_hits_wall_and_zips_the_thrower` and `play-arena.bat` depend on. The
+missing part is height: a match fighter has no vertical velocity and `move_body` takes
+`[x, z]` only. Row SG5 opens that channel and SG4 follows it. Full diagnosis:
+`docs/plan/shady-knight-port.md` (section Rope swing).
+

@@ -40,6 +40,21 @@ const MIN_REACH_M: f32 = 0.05;
 /// (the pair is long since elsewhere) and a zero or negative time still steps.
 const MIN_DT_S: f32 = 1.0e-4;
 const MAX_DT_S: f32 = 0.1;
+/// Walk bob, ported from the source game's `CameraBob` (`bobSpeed = 1`,
+/// `mgtSpeed = 2`, `xAmp = 0.08`, `yAmp = 0.12`). The amplitude pair is read
+/// as metres of eye travel, the width of the walk the source is known for;
+/// the speeds are read as one bob cycle per stride and a 1/`mgtSpeed` second
+/// halflife on how fast the bob fades in. The source's units for the pair are
+/// not in its assemblies, so only these three readings can be wrong.
+const BOB_SPEED: f32 = 1.0;
+const BOB_MGT_SPEED: f32 = 2.0;
+const BOB_X_AMP_M: f32 = 0.08;
+const BOB_Y_AMP_M: f32 = 0.12;
+/// Stride the phase advances by, meters: one bob cycle per step of a walk.
+const BOB_STRIDE_M: f32 = 0.75;
+/// Shot travel that counts as a full-speed walk, m/s: the bob fades in over
+/// this and is full at the top walk speed of the demo.
+const BOB_FULL_SPEED_MS: f32 = 5.0;
 
 /// The smoothed state of the window's fight camera: the spring lanes plus the
 /// eye height and lens damped beside them. One per window; a fresh one snaps
@@ -50,6 +65,12 @@ pub struct CamFollow {
     lens_damping: f32,
     height_m: f32,
     fov_y: f32,
+    /// Walk bob phase, radians; advances with the distance the shot travels.
+    bob_phase: f32,
+    /// Walk bob amount in `0..=1`, smoothed over the hero's speed.
+    bob_gain: f32,
+    /// Damping of `bob_gain`, folded once from `BOB_MGT_SPEED`.
+    bob_damping: f32,
 }
 
 impl CamFollow {
@@ -62,15 +83,25 @@ impl CamFollow {
             lens_damping: halflife_to_damping(LENS_HALFLIFE_S)?,
             height_m: 0.0,
             fov_y: 0.0,
+            bob_phase: 0.0,
+            bob_gain: 0.0,
+            bob_damping: halflife_to_damping(1.0 / BOB_MGT_SPEED)?,
         })
     }
 
     /// Fold `shot` into the smoothed state over `dt_s` seconds and return the
     /// smoothed camera: `shot`'s clip planes, aspect and up, the spring's
     /// look point and bearing, the damped eye height and `lens_fov_y`
-    /// damped. The first shot snaps.
+    /// damped. `hero_speed_ms` is the walking hero's speed along the floor,
+    /// which drives the walk bob. The first shot snaps.
     /// Errors: [`CameraError::BadParam`] for a bad `dt_s` or non-finite shot.
-    fn follow(&mut self, shot: &Camera, lens_fov_y: f32, dt_s: f32) -> Result<Camera, CameraError> {
+    fn follow(
+        &mut self,
+        shot: &Camera,
+        lens_fov_y: f32,
+        dt_s: f32,
+        hero_speed_ms: f32,
+    ) -> Result<Camera, CameraError> {
         let offset = shot.eye - shot.target;
         let reach = offset.x.hypot(offset.z);
         if reach < MIN_REACH_M {
@@ -98,8 +129,42 @@ impl CamFollow {
             look.z + yaw.cos() * dist,
         ]
         .into();
+        self.walk_bob(&mut camera, hero_speed_ms, dt_s)?;
         camera.fov_y = self.fov_y;
         Ok(camera)
+    }
+
+    /// Walk bob (source game's `CameraBob`): the hero's own speed drives a
+    /// stride-locked phase, the eye moves side to side once per stride and up
+    /// and down twice, and a standing hero fades the bob to nothing. Distance
+    /// driven, so the same walk has the same bob at any frame rate.
+    fn walk_bob(
+        &mut self,
+        camera: &mut Camera,
+        hero_speed_ms: f32,
+        dt_s: f32,
+    ) -> Result<(), CameraError> {
+        let speed = if hero_speed_ms.is_finite() {
+            hero_speed_ms.clamp(0.0, BOB_FULL_SPEED_MS)
+        } else {
+            0.0
+        };
+        let want = speed / BOB_FULL_SPEED_MS;
+        self.bob_gain = damper_step(self.bob_gain, want, self.bob_damping, dt_s)?;
+        let stride = speed * dt_s / BOB_STRIDE_M;
+        self.bob_phase = (self.bob_phase + stride * BOB_SPEED * std::f32::consts::TAU)
+            .rem_euclid(std::f32::consts::TAU);
+        let gain = self.bob_gain;
+        if gain <= 0.0 {
+            return Ok(());
+        }
+        let lateral = BOB_X_AMP_M * gain * self.bob_phase.sin();
+        let vertical = BOB_Y_AMP_M * gain * (2.0 * self.bob_phase).sin();
+        let view = (camera.target - camera.eye).normalize_or_zero();
+        let right = view.cross(camera.up).normalize_or_zero();
+        let eye = camera.eye + right * lateral;
+        camera.eye = [eye.x, eye.y + vertical, eye.z].into();
+        Ok(())
     }
 }
 
@@ -111,6 +176,20 @@ fn hold_in_pit(camera: &mut Camera, limit: f32) {
 }
 
 impl FighterLook {
+    /// The walking hero's floor speed, m/s: slot 0 is the window's human. A
+    /// jump between ticks is clamped to the walk top speed, so a respawn or a
+    /// cut never spins the bob.
+    fn hero_speed_ms(&self, dt_s: f32) -> f32 {
+        let Some(hero) = self.slots.first() else {
+            return 0.0;
+        };
+        let (dx, dz) = (
+            hero.pos[0] - hero.prev_pos[0],
+            hero.pos[2] - hero.prev_pos[2],
+        );
+        (dx.hypot(dz) / dt_s).min(BOB_FULL_SPEED_MS)
+    }
+
     /// The fight camera for one presented frame, smoothed over `dt_s` seconds
     /// of wall time through `follow` (GP43). The calm shot of
     /// [`Self::fight_camera`] goes through the springs; then the eye is held
@@ -129,7 +208,8 @@ impl FighterLook {
         let calm = self.fight_camera_with(base, frame.shot, frame.fighters, frame.frame, [0.0; 3]);
         let lens = calm.fov_y * (1.0 - LENS_PUNCH * trauma_gain(self.shake_trauma_permille));
         let dt_s = dt_s.clamp(MIN_DT_S, MAX_DT_S);
-        let Ok(mut camera) = follow.follow(&calm, lens, dt_s) else {
+        let hero_ms = self.hero_speed_ms(dt_s);
+        let Ok(mut camera) = follow.follow(&calm, lens, dt_s, hero_ms) else {
             return self.fight_camera(base, frame.shot, frame.fighters, frame.frame);
         };
         hold_in_pit(&mut camera, self.pit_limit_m());
@@ -512,8 +592,62 @@ mod tests {
         let mut follow = follower();
         let down = Camera::new([0.0, 20.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, -1.0], 1.0);
         let out = follow
-            .follow(&down, down.fov_y, FRAME_60_S)
+            .follow(&down, down.fov_y, FRAME_60_S, 0.0)
             .expect("passes");
         assert_eq!(out, down);
+    }
+
+    /// Walk the hero to `x` this frame with `step_m` of travel behind them.
+    fn walk_hero(look: &mut FighterLook, x: f32, step_m: f32) {
+        look.slots[0].pos = [x, 0.0, 0.0];
+        look.slots[0].prev_pos = [x - step_m, 0.0, 0.0];
+    }
+
+    /// The bob comes from the hero's own walk: a standing hero holds the eye
+    /// still, a walking hero lifts and drops it inside the source amplitudes,
+    /// and it fades out when the walk stops.
+    #[test]
+    fn walk_bob_moves_the_eye_only_while_the_hero_walks() {
+        let mut look = super::super::tests::balance_look_two();
+        let mut follow = follower();
+        place(&mut look, [0.0, 0.0], [1.0, 0.5]);
+        let mut still = Vec::new();
+        for _ in 0..90 {
+            let camera = look.aim_camera(&mut follow, &base(), &frame(), FRAME_60_S);
+            still.push(camera.eye.y - (camera.target.y + follow.height_m));
+        }
+        let worst = still.iter().fold(0.0f32, |w, v| w.max(v.abs()));
+        assert!(worst < 1.0e-5, "a standing hero has no bob: {worst} m");
+
+        let step = BOB_FULL_SPEED_MS * FRAME_60_S;
+        let mut bob = Vec::new();
+        for n in 0..90 {
+            walk_hero(&mut look, n as f32 * step, step);
+            let camera = look.aim_camera(&mut follow, &base(), &frame(), FRAME_60_S);
+            bob.push(camera.eye.y - (camera.target.y + follow.height_m));
+        }
+        let (lo, hi) = bob
+            .iter()
+            .fold((0.0f32, 0.0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        assert!(
+            follow.bob_gain > 0.5,
+            "the bob fades in: {}",
+            follow.bob_gain
+        );
+        assert!(hi - lo > 0.01, "the walking eye bobs: range {} m", hi - lo);
+        assert!(
+            hi <= BOB_Y_AMP_M + 0.01 && lo >= -BOB_Y_AMP_M - 0.01,
+            "inside the source amplitude: {lo}..{hi}"
+        );
+
+        place(&mut look, [90.0 * step, 0.0], [1.0, 0.5]);
+        for _ in 0..240 {
+            let _ = look.aim_camera(&mut follow, &base(), &frame(), FRAME_60_S);
+        }
+        assert!(
+            follow.bob_gain < 0.01,
+            "the bob fades out: {}",
+            follow.bob_gain
+        );
     }
 }

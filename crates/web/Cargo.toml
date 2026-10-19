@@ -25,6 +25,11 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"
 # engine-proof is std-only and builds for wasm32-unknown-unknown with no imports.
 engine-proof.workspace = true
 
+# WEB17: the played page reads cooked arena content out of a fetched `.e2bundle`. std-only
+# default features: the bundle reader and its digests, no glTF and no image decoding (the
+# offline cook owns those).
+engine-assets.workspace = true
+
 # WEB7: input records (Bindings, FighterInput, the look deltas) and the FrameSource the audio sink pulls.
 # engine-audio without its `device` feature is std-only, so it builds for the browser (no cpal).
 engine-input.workspace = true
@@ -71,6 +76,8 @@ web-sys = { version = "0.3", features = [
     "MouseEvent",
     "Navigator",
     "Performance",
+    "Request",
+    "Response",
     "ScriptProcessorNode",
     "Window",
     "console",

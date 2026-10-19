@@ -98,6 +98,7 @@ pub use self::fighter_look_cam::CamFollow;
 mod ragdoll_look;
 
 use self::ragdoll_look::RagdollLook;
+pub use self::ragdoll_look::RagdollStump;
 
 /// Limb look (RZ3): an authority cut event hands the named joint's chain to the
 /// float physical layer and draws a stump cap where it left. Presentation only.

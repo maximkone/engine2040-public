@@ -60,6 +60,9 @@ pub mod play_in;
 /// floats and hands the milli-turn angles here; this core carries no float and
 /// never touches sim state. Std-only.
 pub mod pose_tape;
+/// Prefabs: capture a selection subtree and instantiate it as new nodes.
+/// Std-only; the shell owns the command batch and undo.
+pub mod prefab;
 pub mod save;
 pub mod shell;
 #[cfg(feature = "ui")]
@@ -69,6 +72,10 @@ pub mod shell_ui;
 pub mod spine_inspect;
 /// New-item templates: arena, prop, weapon and fighter starters.
 pub mod templates;
+/// Editor theme: dark warm palette, bronze accent, spacing and text scale.
+/// Behind `ui` with egui; headless builds stay std-only.
+#[cfg(feature = "ui")]
+pub mod theme;
 /// Live tuning panel: combat/AI drafts as previewed batches,
 /// applied at tick boundaries through the practice child seam, journaled in a tape.
 #[cfg(feature = "ui")]

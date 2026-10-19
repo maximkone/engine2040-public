@@ -53,6 +53,9 @@ pub use windowed_smoke::{
 
 #[path = "staged_fight_frames.rs"]
 mod staged_fight_frames;
+/// GE2: the browser shell names this snapshot row through a neutral alias, so a new
+/// presentation file does not carry the arena's genre word (ledger never grows).
+pub use staged_fight_frames::StagedFighterDot as BodyDot;
 pub use staged_fight_frames::{
     fight_body_material, fight_body_mesh, fight_mesh_key, live_fight_dots, push_fight_draws,
     run_staged_fight_frames, split_staged_flag, stage_fight_bodies, staged_ct7_body_shas,

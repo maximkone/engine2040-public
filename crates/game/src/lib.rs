@@ -126,6 +126,10 @@ pub mod pose_hold;
 /// Practice swap: staged combat tuning applied at a tick boundary. Std-only.
 pub mod practice;
 pub mod progress;
+/// Ragdoll stump caps: one dark-red cap draw where a go-down cue took an arm.
+/// Presentation only, never hashed. App leg only.
+#[cfg(feature = "app")]
+pub mod ragdoll_stump_draw;
 /// Hot-reload gate: staged generations applied at frame boundaries. Std-only.
 pub mod reload;
 /// Best-of-5 duel rounds over one-round arena sessions. Pure folds,
@@ -707,6 +711,15 @@ pub struct App {
     /// (one presentation sim step per tick); [`App::presentation`] then
     /// serves the full legs on demand. Presentation only, never hashed.
     present_live: bool,
+    /// When false, accepted ticks skip every presentation-only sim a
+    /// drawing caller never reads: the rolling presentation cursor above,
+    /// the reacting-crowd visual sim, the tension
+    /// director and the spectator cut director (with the laterals only that
+    /// camera reads). Set by [`App::without_presentation_extras`] before the
+    /// first tick; on by default so every existing caller keeps today's
+    /// bytes and every existing test its outcomes (cues, hp, views and the
+    /// checkpoint hash are untouched either way).
+    presentation_extras: bool,
     /// Incremental presentation (EG1b): one recording sim step per accepted
     /// tick appends to [`App::present`]. `None` until the first extension
     /// and while the cursor is dropped; rebuilt from the tape when stale.
@@ -873,6 +886,7 @@ impl App {
             present_ticks: 0,
             present_latest: Vec::new(),
             present_live: true,
+            presentation_extras: true,
             present_sim: None,
             present_retired_steps: 0,
             world,
@@ -1105,7 +1119,9 @@ impl App {
             self.rejected_into(out);
             return;
         };
-        self.checkpoints.push(checkpoint);
+        if self.presentation_extras {
+            self.checkpoints.push(checkpoint);
+        }
         self.cursor += 1;
         self.observe_into(tick, &cues, &started, checkpoint, out);
         self.extend_presentation();
@@ -1184,7 +1200,9 @@ impl App {
         let Some((checkpoint, cues, started)) = self.simulate_tick(tick) else {
             return self.rejected();
         };
-        self.checkpoints.push(checkpoint);
+        if self.presentation_extras {
+            self.checkpoints.push(checkpoint);
+        }
         self.cursor += 1;
         let out = self.observe(tick, &cues, &started, checkpoint);
         self.extend_presentation();
@@ -1239,7 +1257,11 @@ impl App {
         self.tick_cues
             .extend(stepped.events.events.iter().map(map_cue));
         let next_hitstop = hitstop::next(current, &stepped.events.events);
-        fill_laterals_for_tick(stepped.rows, tick, fighters, &mut self.laterals);
+        if self.presentation_extras {
+            // Only the spectator cut camera reads laterals; the lean session
+            // skips the scan and keeps the views the page draws from.
+            fill_laterals_for_tick(stepped.rows, tick, fighters, &mut self.laterals);
+        }
         fill_views_for_tick(stepped.rows, tick, fighters, &mut self.views);
         // The authority's break events for this tick, kept for `observe_into` to hand out.
         self.tick_breaks.clear();
@@ -1378,7 +1400,9 @@ impl App {
             }
         }
         out.reactions.push(self.crowd.on_fight_event(cue));
-        self.crowd_gpu.on_cue(cue);
+        if self.presentation_extras {
+            self.crowd_gpu.on_cue(cue);
+        }
     }
 
     /// Refill a caller-held outcome for one accepted tick: clears its buffers
@@ -1411,9 +1435,11 @@ impl App {
             self.fold_cue_into(tick, *cue, out);
         }
         self.crowd.tick();
-        self.crowd_gpu.tick();
-        self.director_layers = drive(&mut self.director, cues);
-        self.drive_cut_director(tick, cues);
+        if self.presentation_extras {
+            self.crowd_gpu.tick();
+            self.director_layers = drive(&mut self.director, cues);
+            self.drive_cut_director(tick, cues);
+        }
         self.hud.tick = u64::from(tick);
         self.hud.hp = u32::from(self.hp[HUMAN_SLOT as usize]);
         self.hud.score = u64::from(self.wins);
@@ -1498,6 +1524,40 @@ impl App {
             self.present_ticks = 0;
             self.present_latest.clear();
         }
+    }
+
+    /// Drop every presentation-only per-tick sim a caller that only draws the
+    /// match never reads: the rolling presentation cursor (one whole arena
+    /// sim step per tick, the biggest one), the reacting-crowd visual sim,
+    /// the tension director and the spectator cut camera (and the laterals
+    /// only that camera reads). Call before the first tick; native windows
+    /// and every existing caller keep them (the default).
+    ///
+    /// The match result is untouched: the authority step, its cues, hp,
+    /// [`App::fighter_views`] and every checkpoint hash stay byte-identical
+    /// (see `without_presentation_extras_keeps_the_match_bytes`). The audio
+    /// crowd clock still ticks, so the outcome's reactions and bed gain keep
+    /// their values; the outcome's visual/director fields carry their
+    /// initial values ([`App::crowd_gpu`] clock frozen,
+    /// [`App::director_layers`] the opener mix), and
+    /// [`App::checkpoints`] stays empty: a caller that needs those wants the
+    /// default instead.
+    ///
+    /// Caller: the browser page poses bodies from
+    /// [`App::fighter_views`](crate::App::fighter_views), so it may ask for
+    /// the lean session.
+    #[must_use]
+    pub fn without_presentation_extras(mut self) -> Self {
+        self.set_presentation_cursor(false);
+        self.presentation_extras = false;
+        self
+    }
+
+    /// True (default) while accepted ticks drive the presentation-only sims;
+    /// see [`App::without_presentation_extras`].
+    #[must_use]
+    pub const fn presentation_extras(&self) -> bool {
+        self.presentation_extras
     }
 
     /// Window frame entry: the window frame loop calls this once per
@@ -3313,5 +3373,177 @@ mod tests {
         assert!(tape_should_append(&app.tape, (2, 1)));
         assert!(tape_should_append(&app.tape, (3, 0)));
         assert!(!tape_should_append(&app.tape, (1, 0)));
+    }
+
+    #[test]
+    fn without_presentation_extras_keeps_the_match_bytes() {
+        // The lean session (browser page path) drops only presentation work:
+        // the authority checkpoint, cues, hp and views must equal the
+        // default session tick for tick, while the extras stay cold.
+        let mut full = App::new(small_config()).unwrap();
+        let mut lean = App::new(small_config())
+            .unwrap()
+            .without_presentation_extras();
+        assert!(full.presentation_extras());
+        assert!(!lean.presentation_extras());
+        let ticks = small_config().ticks;
+        for tick in 0..ticks {
+            let a = full.tick(script(tick));
+            let b = lean.tick(script(tick));
+            assert_eq!(a.checkpoint, b.checkpoint, "checkpoint at tick {tick}");
+            assert_eq!(a.cues, b.cues, "cues at tick {tick}");
+            assert_eq!(a.audio, b.audio, "audio at tick {tick}");
+            assert_eq!(a.reactions, b.reactions, "crowd reactions at tick {tick}");
+            assert_eq!(a.bed_gain.to_bits(), b.bed_gain.to_bits());
+        }
+        assert_eq!(full.hp(), lean.hp());
+        assert_eq!(full.fighter_views(), lean.fighter_views());
+        assert_eq!(full.checkpoints().len(), ticks as usize);
+        assert!(lean.checkpoints().is_empty(), "lean keeps no tick log");
+        assert_eq!(lean.presentation_len(), 0, "lean keeps no pose cursor");
+        assert!(lean.pose_cursor().is_empty());
+        assert_eq!(full.crowd_gpu().tick_count(), u64::from(ticks));
+        assert_eq!(lean.crowd_gpu().tick_count(), 0, "visual crowd stays cold");
+        assert_eq!(lean.director_updates(), 0, "director stays cold");
+        assert!(lean.director_cuts().is_empty(), "cut camera stays cold");
+        // Still one authority sim step per accepted tick either way.
+        assert_eq!(full.sim_steps(), u64::from(ticks));
+        assert_eq!(lean.sim_steps(), u64::from(ticks));
+    }
+
+    /// Wall-clock phase table for the page's tick path: per-phase us for one
+    /// accepted tick, then whole-`App::tick` cost with the cursor on, off and
+    /// for a lean session, at 2 and 8 fighters. Diagnostic only (never a
+    /// gate): run `cargo test -p engine-game --lib tick_phase_table_native
+    /// -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "wall-clock phase table; run with --ignored --nocapture"]
+    fn tick_phase_table_native() {
+        use engine_clock::now;
+        use std::time::Duration;
+
+        const WARM: u32 = 200;
+        const MEASURED: u32 = 2_000;
+        let cfg = GameConfig {
+            seed: 2040,
+            ticks: 20_000,
+            fighters: 2,
+            half_extent_m: 12.0,
+        };
+        let mut app = App::with_world(cfg, crate::arena_kit::kit_match_world_or_empty())
+            .unwrap()
+            .into_duel()
+            .unwrap();
+        let mut out = TickOutcome::default();
+        let mut phase = [Duration::ZERO; 6];
+        let started_all = now();
+        for tick in 0..(WARM + MEASURED) {
+            let mut stamped = script(tick);
+            stamped.tick = app.cursor;
+            let record = tick >= WARM;
+            let t = now();
+            assert!(app.cursor < app.config.ticks && stamped.validate().is_ok());
+            app.stage_input(stamped);
+            if record {
+                phase[0] += now() - t;
+            }
+            let t = now();
+            let (checkpoint, cues, started) = app.simulate_tick(tick).unwrap();
+            if record {
+                phase[1] += now() - t;
+            }
+            let t = now();
+            app.checkpoints.push(checkpoint);
+            app.cursor += 1;
+            if record {
+                phase[2] += now() - t;
+            }
+            let t = now();
+            app.observe_into(tick, &cues, &started, checkpoint, &mut out);
+            if record {
+                phase[3] += now() - t;
+            }
+            let t = now();
+            app.extend_presentation();
+            if record {
+                phase[4] += now() - t;
+            }
+            let t = now();
+            app.restore_tick_scratch(cues, started);
+            if record {
+                phase[5] += now() - t;
+            }
+        }
+        let total = now() - started_all;
+        let per = |d: Duration| d.as_secs_f64() * 1_000.0 / f64::from(MEASURED);
+        println!(
+            "phase us/tick: stage={:.1} sim={:.1} log={:.1} observe={:.1} present={:.1} restore={:.1} sum={:.1} wall={:.1}",
+            per(phase[0]) * 1000.0,
+            per(phase[1]) * 1000.0,
+            per(phase[2]) * 1000.0,
+            per(phase[3]) * 1000.0,
+            per(phase[4]) * 1000.0,
+            per(phase[5]) * 1000.0,
+            phase.iter().map(|d| per(*d)).sum::<f64>() * 1000.0,
+            per(total) * 1000.0,
+        );
+
+        // Whole owned `App::tick` path (the page's call) with the cursor on
+        // and off, plus 8 fighters (the window's seat count).
+        let whole = |fighters: u8, cursor: bool| {
+            let cfg = GameConfig {
+                seed: 2040,
+                ticks: 20_000,
+                fighters,
+                half_extent_m: 12.0,
+            };
+            let mut app = App::with_world(cfg, crate::arena_kit::kit_match_world_or_empty())
+                .unwrap()
+                .into_duel()
+                .unwrap();
+            if !cursor {
+                app.set_presentation_cursor(false);
+            }
+            for tick in 0..WARM {
+                let _ = app.tick(script(tick));
+            }
+            let t = now();
+            for tick in WARM..(WARM + MEASURED) {
+                let _ = app.tick(script(tick));
+            }
+            let d = now() - t;
+            (per(d) * 1000.0, app.sim_steps(), app.presentation_len())
+        };
+        for (fighters, cursor) in [(2u8, true), (2, false), (8, true), (8, false)] {
+            let (us, steps, presented) = whole(fighters, cursor);
+            println!(
+                "tick() fighters={fighters} cursor={cursor}: {us:.2} us/tick (sim_steps={steps} present_ticks={presented})"
+            );
+        }
+        let lean = |fighters: u8| {
+            let cfg = GameConfig {
+                seed: 2040,
+                ticks: 20_000,
+                fighters,
+                half_extent_m: 12.0,
+            };
+            let mut app = App::with_world(cfg, crate::arena_kit::kit_match_world_or_empty())
+                .unwrap()
+                .into_duel()
+                .unwrap()
+                .without_presentation_extras();
+            for tick in 0..WARM {
+                let _ = app.tick(script(tick));
+            }
+            let t = now();
+            for tick in WARM..(WARM + MEASURED) {
+                let _ = app.tick(script(tick));
+            }
+            (per(now() - t) * 1000.0, app.sim_steps())
+        };
+        for fighters in [2u8, 8] {
+            let (us, steps) = lean(fighters);
+            println!("tick() lean fighters={fighters}: {us:.2} us/tick (sim_steps={steps})");
+        }
     }
 }

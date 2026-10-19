@@ -31,10 +31,14 @@ use crate::shell::{Panel, Shell, ShellError};
 use crate::spine_inspect::{inspect_spine, SpineInspectError};
 use crate::templates::TemplateKind;
 use crate::tuning::CombatField;
-use crate::viewport::ViewportSize;
+use crate::viewport::{Camera, ViewportSize};
 
 /// Chars of each log line the Log tab draws (the ring keeps the whole line).
 const LOG_VIEW_CHARS: usize = 72;
+/// Radians of camera orbit per pixel of secondary-button drag.
+const ORBIT_RAD_PER_PX: f32 = 0.005;
+/// Zoom exponent per point of scroll: positive scroll moves the eye closer.
+const ZOOM_PER_SCROLL: f32 = 0.0015;
 
 /// Dock layout plus per-frame drawing over a [`Shell`].
 /// PORT(Adanos020/egui_dock@cdcdb359af4b74f8cc7921091db7217f0759e4f7 dock_state):
@@ -69,6 +73,8 @@ pub struct ShellUi {
     selection_sets: SelectionBank,
     /// Draft set name for save and recall.
     set_name: String,
+    /// Prefab name field in the hierarchy panel.
+    prefab_name: String,
     /// Staged inspector edits over the grid (validate then emit).
     inspector_panel: InspectorPanel,
     /// Next idempotency key for inspector batches (never zero).
@@ -108,6 +114,7 @@ impl ShellUi {
             shared_selection,
             selection_sets: SelectionBank::new(),
             set_name: String::new(),
+            prefab_name: String::new(),
             inspector_panel: InspectorPanel::new(),
             inspector_key: 1,
             spine: None,
@@ -183,9 +190,10 @@ impl ShellUi {
     }
 
     fn show_inner(&mut self, shell: &mut Shell, ui: &mut egui::Ui) {
-        crate::shell::panels::ensure_builtin_panels(shell);
         // Borrow the open list: the loop only reads it while the dock takes
-        // the missing tabs, so no per-frame Vec clone.
+        // the missing tabs, so no per-frame Vec clone. A closed tab stays
+        // closed (its id leaves `shell.open_panels`); `ensure_builtin_panels`
+        // runs once in `Shell::new`, never here, so a close is not undone.
         for panel in shell.open_panels.iter().copied() {
             let present = self.dock.iter_all_tabs().any(|(_, tab)| *tab == panel);
             if !present {
@@ -211,12 +219,13 @@ impl ShellUi {
             &mut self.template_preview,
             &mut self.template_status,
         );
-        let (outliner_query, outline, shared_selection, selection_sets, set_name) = (
+        let (outliner_query, outline, shared_selection, selection_sets, set_name, prefab_name) = (
             &mut self.outliner_query,
             &mut self.outline,
             &mut self.shared_selection,
             &mut self.selection_sets,
             &mut self.set_name,
+            &mut self.prefab_name,
         );
         let (inspector_panel, inspector_key) = (&mut self.inspector_panel, &mut self.inspector_key);
         let spine = &self.spine;
@@ -235,6 +244,7 @@ impl ShellUi {
             shared_selection,
             selection_sets,
             set_name,
+            prefab_name,
             inspector_panel,
             inspector_key,
             spine,
@@ -259,6 +269,7 @@ struct Viewer<'a> {
     shared_selection: &'a mut SharedSelection,
     selection_sets: &'a mut SelectionBank,
     set_name: &'a mut String,
+    prefab_name: &'a mut String,
     inspector_panel: &'a mut InspectorPanel,
     inspector_key: &'a mut u64,
     spine: &'a Option<SpineShown>,
@@ -283,6 +294,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Findings => self.findings_panel(ui),
             Panel::Tuning => self.tuning_panel(ui),
             Panel::Templates => self.templates_panel(ui),
+            Panel::Activity => self.activity(ui),
             Panel::Log => self.log(ui),
         }
     }
@@ -332,6 +344,7 @@ impl Viewer<'_> {
         }
         self.hierarchy_sets(ui, &rows, &live);
         self.hierarchy_add_remove(ui);
+        self.prefab_controls(ui);
         ui.separator();
         let row_height = ui.spacing().interact_size.y;
         egui::ScrollArea::vertical()
@@ -357,6 +370,42 @@ impl Viewer<'_> {
                     });
                 }
             });
+    }
+
+    /// Prefab save/place: capture the selection, then place saved prefabs
+    /// under the selected node (or the root) offset by 2 m so copies do not
+    /// overlap. One placement is one undo step.
+    fn prefab_controls(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("prefab");
+            ui.text_edit_singleline(self.prefab_name);
+            if ui.button("save selection").clicked() {
+                let name = self.prefab_name.clone();
+                if let Err(error) = self.shell.save_prefab(name) {
+                    self.shell.log_message(format!("ERR prefab: {error}"));
+                }
+            }
+        });
+        if self.shell.prefabs().is_empty() {
+            return;
+        }
+        let names: Vec<String> = self
+            .shell
+            .prefabs()
+            .iter()
+            .map(|prefab| prefab.name.clone())
+            .collect();
+        ui.horizontal_wrapped(|ui| {
+            for (index, name) in names.iter().enumerate() {
+                if ui.button(format!("place {name}")).clicked() {
+                    let prefab = self.shell.prefabs()[index].clone();
+                    if let Err(error) = self.shell.place_prefab(&prefab, [2.0, 0.0, 0.0]) {
+                        self.shell.log_message(format!("ERR prefab place: {error}"));
+                    }
+                }
+            }
+        });
     }
 
     /// Named selection sets over the shared selection; refusals land in the log.
@@ -581,7 +630,100 @@ impl Viewer<'_> {
     /// result commits a drag tick at once inside the viewport drag session
     /// (see [`tick_viewport_drag`]), and pointer release folds the ticks
     /// into one undo step, so a real drag is one journal entry.
+    /// Empty-scene first run: the four tutorial-1 hints and one button that
+    /// creates an arena, a fighter and a weapon, which is a play-ready scene.
+    fn onboarding_band(&mut self, ui: &mut egui::Ui) {
+        let list = self.shell.onboard();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.heading("New scene");
+            ui.label("One click creates a playable arena. Then press Play.");
+            for step in crate::onboard::Step::all() {
+                let mark = if list.is_done(step) { "[x]" } else { "[ ]" };
+                ui.label(format!("{mark} {}", step.hint()));
+            }
+            if ui.button("Create arena scene").clicked() {
+                let mut made = 0usize;
+                for kind in [
+                    TemplateKind::Arena,
+                    TemplateKind::Fighter,
+                    TemplateKind::Weapon,
+                ] {
+                    let name = self.shell.template_suggest(kind);
+                    match self.shell.template_apply(kind, &name) {
+                        Ok(_) => made += 1,
+                        Err(error) => self.shell.log_message(format!("start: {error}")),
+                    }
+                }
+                self.shell
+                    .log_message(format!("start: {made} starters created"));
+            }
+        });
+    }
+
+    /// Camera input on the viewport image: secondary-drag orbits, middle-drag
+    /// pans, the wheel dollies, and `F` frames the selected node. Left-drag
+    /// stays with the gizmo handles.
+    fn camera_input(&self, ui: &egui::Ui, response: &egui::Response, mut camera: Camera) -> Camera {
+        let drag = response.drag_delta();
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            camera = camera.orbit(-drag.x * ORBIT_RAD_PER_PX, -drag.y * ORBIT_RAD_PER_PX);
+        } else if response.dragged_by(egui::PointerButton::Middle) {
+            let meters_per_px =
+                2.0 * camera.distance_to_target() * (camera.fov_y_deg.to_radians() * 0.5).tan()
+                    / response.rect.height().max(1.0);
+            camera = camera.pan(-drag.x * meters_per_px, drag.y * meters_per_px);
+        }
+        if response.hovered() {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                camera = camera.zoom((-scroll * ZOOM_PER_SCROLL).exp());
+            }
+            if ui.input(|input| input.key_pressed(egui::Key::F)) {
+                if let Some(selected) = self.shell.selection {
+                    if let Some(world) = self.shell.document().hierarchy.world(selected) {
+                        let radius = 0.5
+                            * world.scale[0]
+                                .abs()
+                                .max(world.scale[1].abs())
+                                .max(world.scale[2].abs());
+                        camera = camera.frame(world.position, radius);
+                    }
+                }
+            }
+        }
+        camera
+    }
+
+    /// W/E/R select a tool and T cycles; typing in a field keeps its keys.
+    fn tool_keys(&mut self, ui: &egui::Ui) {
+        if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        let current = self.gizmo.tool();
+        let keyed = ui.input(|input| {
+            if input.key_pressed(egui::Key::W) {
+                Some(GizmoTool::Translate)
+            } else if input.key_pressed(egui::Key::E) {
+                Some(GizmoTool::Rotate)
+            } else if input.key_pressed(egui::Key::R) {
+                Some(GizmoTool::Scale)
+            } else if input.key_pressed(egui::Key::T) {
+                Some(current.next())
+            } else {
+                None
+            }
+        });
+        if let Some(tool) = keyed {
+            self.gizmo.set_tool(tool);
+        }
+    }
+
     fn viewport_panel(&mut self, ui: &mut egui::Ui) {
+        if self.shell.document().hierarchy.is_empty() {
+            self.onboarding_band(ui);
+        }
+        // W/E/R pick the tool, T cycles; typing in a field keeps its keys.
+        self.tool_keys(ui);
         let camera = self.shell.viewport.camera;
         ui.label(format!(
             "view {}x{} fov {:.0} eye [{:.1}, {:.1}, {:.1}]",
@@ -592,6 +734,7 @@ impl Viewer<'_> {
             camera.position[1],
             camera.position[2],
         ));
+        let mut camera = self.shell.viewport.camera;
         if let Some(tex) = self.viewport_tex.clone() {
             let avail = ui.available_width().max(1.0);
             let size = tex.size_vec2();
@@ -600,14 +743,21 @@ impl Viewer<'_> {
             } else {
                 16.0 / 9.0
             };
-            ui.image(egui::load::SizedTexture::new(
-                tex.id(),
-                [avail, avail / aspect],
-            ));
+            let response = ui.add(
+                egui::Image::new(egui::load::SizedTexture::new(
+                    tex.id(),
+                    [avail, avail / aspect],
+                ))
+                .sense(egui::Sense::drag()),
+            );
+            // Orbit on the secondary button, pan on the middle button: the
+            // left button stays with the gizmo handles below.
+            camera = self.camera_input(ui, &response, camera);
         }
+        self.shell.viewport.camera = camera;
         ui.horizontal(|ui| {
             ui.label("tool");
-            for tool in [GizmoTool::Translate, GizmoTool::Rotate] {
+            for tool in [GizmoTool::Translate, GizmoTool::Rotate, GizmoTool::Scale] {
                 let active = self.gizmo.tool() == tool;
                 if ui.selectable_label(active, tool.title()).clicked() {
                     self.gizmo.set_tool(tool);
@@ -643,7 +793,8 @@ impl Viewer<'_> {
             return;
         };
         ui.label(format!("node {selected}"));
-        self.gizmo.sync_camera(&self.shell.viewport);
+        let snap = ui.input(|input| input.modifiers.shift);
+        self.gizmo.sync_camera(&self.shell.viewport, snap);
         if let Some(edited_world) = self.gizmo.interact(ui, world) {
             // Live drag tick: the session opens on first movement and each
             // tick commits at once, so the node follows the pointer; release
@@ -1011,6 +1162,31 @@ impl Viewer<'_> {
             }
         });
     }
+
+    /// Activity feed: human and agent edits in one bounded ring, oldest first,
+    /// with the author counts and the ring digest so the panel is verifiable.
+    fn activity(&mut self, ui: &mut egui::Ui) {
+        let ring = self.shell.activity();
+        let human = ring.count_by(crate::activity::Author::Human);
+        let agent = ring.count_by(crate::activity::Author::Agent);
+        ui.label(format!(
+            "kept {} (human {human}, agent {agent}) digest {:016x}",
+            ring.len(),
+            ring.digest()
+        ));
+        if ring.is_empty() {
+            ui.weak("No activity yet. Create a template or apply an inspector edit.");
+            return;
+        }
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        let total = ring.len();
+        egui::ScrollArea::vertical().show_rows(ui, row_height, total, |ui, range| {
+            let rows = ring.text_rows();
+            for line in rows.iter().skip(range.start).take(range.len()) {
+                ui.monospace(line);
+            }
+        });
+    }
 }
 
 /// Live outliner rows for the hierarchy tab.
@@ -1256,6 +1432,38 @@ mod tests {
         assert_eq!(shell.document().hierarchy.len(), 1);
     }
 
+    /// First launch (empty document) paints the one-click band, not a bare
+    /// grid: the four tutorial hints and the button that creates the scene.
+    #[test]
+    fn empty_viewport_paints_the_start_band() {
+        let mut shell = Shell::new();
+        let mut ui_state = ShellUi::new(&shell);
+        assert!(ui_state.focus_panel(Panel::Viewport));
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 720.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| ui_state.show(&mut shell, ui));
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            if let egui::epaint::Shape::Text(run) = &clipped.shape {
+                text.push_str(run.galley.text());
+                text.push(' ');
+            }
+        }
+        assert!(text.contains("New scene"), "band title missing: {text}");
+        assert!(
+            text.contains("Create arena scene"),
+            "band button missing: {text}"
+        );
+        assert!(text.contains("[ ]"), "steps missing: {text}");
+    }
+
     /// `focus_panel` makes the named tab the active one in its leaf.
     #[test]
     fn focus_panel_activates_the_named_tab() {
@@ -1267,6 +1475,66 @@ mod tests {
             let leaf = ui_state.dock.leaf(path.node_path()).expect("leaf");
             assert_eq!(leaf.tabs[leaf.active.0], panel);
         }
+    }
+
+    /// A closed tab must not be reopened by the next frame: the per-frame
+    /// `ensure_builtin_panels` call that used to undo a close is gone.
+    #[test]
+    fn a_closed_panel_stays_closed_across_frames() {
+        let mut shell = Shell::new();
+        assert!(shell.is_open(Panel::Log));
+        shell.close_panel(Panel::Log);
+        // Build the dock from the shell's open set (7 tabs), then run two
+        // frames: the old per-frame `ensure_builtin_panels` used to put the
+        // closed Log tab back; it is gone.
+        let mut ui_state = ShellUi::new(&shell);
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let mut frame = |shell: &mut Shell| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| ui_state.show(shell, ui));
+            output.textures_delta.clear();
+        };
+        frame(&mut shell);
+        frame(&mut shell);
+        assert!(!shell.is_open(Panel::Log), "close did not stick");
+        assert!(
+            ui_state.dock.find_tab(&Panel::Log).is_none(),
+            "a closed tab came back after a frame"
+        );
+    }
+
+    /// The Activity panel paints the ring: the header counts and one row per
+    /// recorded edit, so an indie and an AI on the same scene see each other.
+    #[test]
+    fn activity_panel_paints_recorded_edits() {
+        let mut shell = Shell::new();
+        let mut ui_state = ShellUi::new(&shell);
+        assert!(ui_state.focus_panel(Panel::Activity));
+        shell.note_activity(crate::activity::Author::Human, "scene.place", Some(7));
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 720.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| ui_state.show(&mut shell, ui));
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            if let egui::epaint::Shape::Text(run) = &clipped.shape {
+                text.push_str(run.galley.text());
+                text.push(' ');
+            }
+        }
+        assert!(text.contains("human 1"), "header missing: {text}");
+        assert!(text.contains("scene.place"), "row missing: {text}");
+        assert!(text.contains("id=7"), "subject missing: {text}");
     }
 
     /// ARC6 inspector smoke: a spine snapshot read through the extraction
@@ -1293,7 +1561,7 @@ mod tests {
         assert!(ui_state.focus_panel(Panel::Inspector));
         let ctx = egui::Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
-        let mut frame = |ui_state: &mut ShellUi, shell: &mut Shell| {
+        let frame = |ui_state: &mut ShellUi, shell: &mut Shell| {
             let input = egui::RawInput {
                 screen_rect: Some(screen),
                 ..egui::RawInput::default()

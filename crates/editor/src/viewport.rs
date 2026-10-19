@@ -34,6 +34,12 @@ pub const VIEW_NEAR_M: f64 = 0.05;
 pub const VIEW_FAR_M: f64 = 500.0;
 /// Smallest pickable sphere radius in meters; thinner nodes are skipped.
 pub const MIN_PICK_RADIUS_M: f32 = 1e-6;
+/// Closest the orbit camera may sit to its target, in meters.
+pub const MIN_CAMERA_DISTANCE_M: f32 = 0.25;
+/// Farthest the orbit camera may sit from its target, in meters.
+pub const MAX_CAMERA_DISTANCE_M: f32 = 200.0;
+/// Pitch limit (about 83 degrees) so the view never aligns with `up`.
+pub const MAX_CAMERA_PITCH_RAD: f32 = 1.45;
 
 /// Pixel extent of the viewport panel.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -178,6 +184,118 @@ impl Camera {
             ],
             [0.0, 0.0, -1.0, 0.0],
         ])
+    }
+
+    /// Distance from the eye to the look-at target, in meters. Zero for a
+    /// degenerate camera; orbit and zoom refuse in that case.
+    pub fn distance_to_target(self) -> f32 {
+        let offset = sub(self.position, self.target);
+        dot(offset, offset).sqrt()
+    }
+
+    /// Orbit around the target by `dyaw` and `dpitch` radians. The target,
+    /// up hint and field of view stay put; pitch is clamped to
+    /// [`MAX_CAMERA_PITCH_RAD`] and the distance is preserved. Non-finite
+    /// input or a degenerate camera returns `self`.
+    pub fn orbit(self, dyaw: f32, dpitch: f32) -> Self {
+        if !dyaw.is_finite() || !dpitch.is_finite() {
+            return self;
+        }
+        let offset = sub(self.position, self.target);
+        let distance = dot(offset, offset).sqrt();
+        if !(distance > 1e-4) {
+            return self;
+        }
+        let yaw = offset[0].atan2(offset[2]) + dyaw;
+        let pitch = (offset[1] / distance).clamp(-1.0, 1.0).asin() + dpitch;
+        let pitch = pitch.clamp(-MAX_CAMERA_PITCH_RAD, MAX_CAMERA_PITCH_RAD);
+        let (sin_pitch, cos_pitch) = pitch.sin_cos();
+        Self {
+            position: [
+                self.target[0] + distance * cos_pitch * yaw.sin(),
+                self.target[1] + distance * sin_pitch,
+                self.target[2] + distance * cos_pitch * yaw.cos(),
+            ],
+            ..self
+        }
+    }
+
+    /// Pan in screen units: `right_m` along the camera right, `up_m` along
+    /// the camera up, both in meters. Eye and target move together, so the
+    /// view direction and distance do not change.
+    pub fn pan(self, right_m: f32, up_m: f32) -> Self {
+        if !right_m.is_finite() || !up_m.is_finite() {
+            return self;
+        }
+        let Some((right, up, _)) = self.basis() else {
+            return self;
+        };
+        let shift = [
+            right[0] * right_m + up[0] * up_m,
+            right[1] * right_m + up[1] * up_m,
+            right[2] * right_m + up[2] * up_m,
+        ];
+        Self {
+            position: [
+                self.position[0] + shift[0],
+                self.position[1] + shift[1],
+                self.position[2] + shift[2],
+            ],
+            target: [
+                self.target[0] + shift[0],
+                self.target[1] + shift[1],
+                self.target[2] + shift[2],
+            ],
+            ..self
+        }
+    }
+
+    /// Dolly toward or away from the target by `factor` (> 1 moves away),
+    /// clamped to [`MIN_CAMERA_DISTANCE_M`]..=[`MAX_CAMERA_DISTANCE_M`].
+    /// Bad input or a degenerate camera returns `self`.
+    pub fn zoom(self, factor: f32) -> Self {
+        if !factor.is_finite() || factor <= 0.0 {
+            return self;
+        }
+        let offset = sub(self.position, self.target);
+        let distance = dot(offset, offset).sqrt();
+        if !(distance > 1e-4) {
+            return self;
+        }
+        let new = (distance * factor).clamp(MIN_CAMERA_DISTANCE_M, MAX_CAMERA_DISTANCE_M);
+        let scale = new / distance;
+        Self {
+            position: [
+                self.target[0] + offset[0] * scale,
+                self.target[1] + offset[1] * scale,
+                self.target[2] + offset[2] * scale,
+            ],
+            ..self
+        }
+    }
+
+    /// Frame a sphere: keep the view direction, move the target to `center`
+    /// and back the eye off until a sphere of `radius` fits the vertical
+    /// field of view. A radius below 0.5 m is raised to 0.5 m so a single
+    /// node fills a sane part of the panel, not the whole screen.
+    pub fn frame(self, center: [f32; 3], radius: f32) -> Self {
+        if !center.iter().all(|c| c.is_finite()) || !radius.is_finite() {
+            return self;
+        }
+        let forward = normalize(sub(self.target, self.position)).unwrap_or([0.0, 0.0, -1.0]);
+        let radius = radius.max(0.5);
+        let half = self.fov_y_deg.to_radians() * 0.5;
+        let distance = (radius / half.sin().max(1e-3) * 1.25)
+            .clamp(MIN_CAMERA_DISTANCE_M, MAX_CAMERA_DISTANCE_M);
+        Self {
+            target: center,
+            position: [
+                center[0] - forward[0] * distance,
+                center[1] - forward[1] * distance,
+                center[2] - forward[2] * distance,
+            ],
+            ..self
+        }
     }
 }
 
@@ -559,5 +677,79 @@ mod tests {
         );
         assert!(camera.projection_matrix_rows(0.0).is_none());
         assert!(camera.projection_matrix_rows(f64::NAN).is_none());
+    }
+
+    #[test]
+    fn orbit_keeps_distance_and_clamps_pitch() {
+        let camera = Camera::default_frame();
+        let before = camera.distance_to_target();
+        let orbited = camera.orbit(0.5, 0.1);
+        assert_eq!(orbited.target, camera.target);
+        assert!((orbited.distance_to_target() - before).abs() < 1e-4);
+        assert!((orbited.position[0] - camera.position[0]).abs() > 0.1);
+        let top = camera.orbit(0.0, 10.0);
+        let offset = sub(top.position, top.target);
+        let pitch = (offset[1] / dot(offset, offset).sqrt()).asin();
+        assert!((pitch - MAX_CAMERA_PITCH_RAD).abs() < 1e-4);
+        assert!(top.is_well_formed());
+        assert_eq!(camera.orbit(f32::NAN, 0.0), camera);
+    }
+
+    #[test]
+    fn zoom_moves_the_eye_and_clamps_distance() {
+        let camera = Camera::default_frame();
+        let near = camera.zoom(0.5);
+        assert!(near.distance_to_target() < camera.distance_to_target());
+        assert!((near.distance_to_target() - camera.distance_to_target() * 0.5).abs() < 1e-4);
+        let closest = camera.zoom(1e-6);
+        assert!((closest.distance_to_target() - MIN_CAMERA_DISTANCE_M).abs() < 1e-4);
+        let farthest = camera.zoom(1e6);
+        assert!((farthest.distance_to_target() - MAX_CAMERA_DISTANCE_M).abs() < 1e-3);
+        assert_eq!(camera.zoom(0.0), camera);
+    }
+
+    #[test]
+    fn pan_moves_eye_and_target_together() {
+        let camera = Camera::default_frame();
+        let panned = camera.pan(1.0, 0.5);
+        let eye = sub(panned.position, camera.position);
+        let target = sub(panned.target, camera.target);
+        for axis in 0..3 {
+            assert!((eye[axis] - target[axis]).abs() < 1e-5);
+        }
+        assert!((panned.distance_to_target() - camera.distance_to_target()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn frame_centers_the_target_and_fits_radius() {
+        let camera = Camera::default_frame();
+        let framed = camera.frame([4.0, 2.0, -3.0], 2.0);
+        assert_eq!(framed.target, [4.0, 2.0, -3.0]);
+        assert!(framed.is_well_formed());
+        let distance = framed.distance_to_target();
+        let half = framed.fov_y_deg.to_radians() * 0.5;
+        assert!(distance >= 2.0 / half.sin());
+        assert!(distance < 2.0 / half.sin() * 1.5);
+        let before = normalize(sub(camera.target, camera.position)).expect("valid camera");
+        let after = normalize(sub(framed.target, framed.position)).expect("valid camera");
+        for axis in 0..3 {
+            assert!((before[axis] - after[axis]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn camera_controls_refuse_garbage() {
+        let camera = Camera::default_frame();
+        assert_eq!(camera.orbit(f32::NAN, 0.0), camera);
+        assert_eq!(camera.pan(f32::INFINITY, 0.0), camera);
+        assert_eq!(camera.zoom(f32::NAN), camera);
+        assert_eq!(camera.frame([f32::NAN, 0.0, 0.0], 1.0), camera);
+        let degenerate = Camera {
+            position: [1.0, 1.0, 1.0],
+            target: [1.0, 1.0, 1.0],
+            ..camera
+        };
+        assert_eq!(degenerate.orbit(0.1, 0.1), degenerate);
+        assert_eq!(degenerate.zoom(0.5), degenerate);
     }
 }

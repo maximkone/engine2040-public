@@ -365,30 +365,54 @@ impl Hierarchy {
 
     /// Every node's world pose in [`Hierarchy::propagation_order`].
     ///
+    /// One top-down pass over [`Hierarchy::child_map`]: each pose composes once
+    /// and is handed to its children, so the pass costs `O(n log n)` where one
+    /// [`Hierarchy::world`] call per node costs `O(n * depth)` plus a chain
+    /// `Vec` per node. The composition order and every operand match the
+    /// per-node walk, so the pose bits do too.
+    ///
     /// Nodes unreachable from a root (corrupt hand-built documents only)
     /// trail last in id order so no stored node is silently dropped.
     pub fn world_all(&self) -> Vec<(ObjectId, Transform)> {
+        let kids = self.child_map();
         let mut out = Vec::with_capacity(self.nodes.len());
-        for id in self.propagation_order() {
+        // Pops parent-first, left-first: one node plus its parent's world pose.
+        let mut stack: Vec<(ObjectId, Transform)> = Vec::new();
+        if let Some(roots) = kids.get(&ObjectId::NIL) {
+            stack.extend(roots.iter().rev().map(|id| (*id, Transform::IDENTITY)));
+        }
+        while let Some((id, inherited)) = stack.pop() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            let world = compose(inherited, node.local);
+            out.push((id, world));
+            if let Some(children) = kids.get(&id) {
+                stack.extend(children.iter().rev().map(|child| (*child, world)));
+            }
+        }
+        self.append_unreachable(&mut out);
+        out
+    }
+
+    /// Append the poses of nodes no root reaches, in id order. Corrupt
+    /// hand-built documents only; a valid tree adds nothing.
+    fn append_unreachable(&self, out: &mut Vec<(ObjectId, Transform)>) {
+        if out.len() >= self.nodes.len() {
+            return;
+        }
+        let mut missing: Vec<ObjectId> = self
+            .nodes
+            .keys()
+            .filter(|id| !out.iter().any(|(listed, _)| listed == *id))
+            .copied()
+            .collect();
+        missing.sort_by_key(|id: &ObjectId| id.as_uuid());
+        for id in missing {
             if let Some(pose) = self.world(id) {
                 out.push((id, pose));
             }
         }
-        if out.len() < self.nodes.len() {
-            let mut missing: Vec<ObjectId> = self
-                .nodes
-                .keys()
-                .filter(|id| !out.iter().any(|(listed, _)| listed == *id))
-                .copied()
-                .collect();
-            missing.sort_by_key(|id: &ObjectId| id.as_uuid());
-            for id in missing {
-                if let Some(pose) = self.world(id) {
-                    out.push((id, pose));
-                }
-            }
-        }
-        out
     }
 
     /// Check stored links: every parent is nil or a known node, every pose
@@ -834,5 +858,275 @@ mod tests {
             }
         }
         out
+    }
+
+    // -----------------------------------------------------------------------
+    // World-pass receipt: the whole-tree walk against the per-node walk it
+    // replaced. The old body stays here as the oracle.
+    // -----------------------------------------------------------------------
+
+    /// Frames in the fixture: one seventh of the nodes moves per frame.
+    const FRAMES: usize = 8;
+    /// Interleaved timing rounds per side; their p50 is the receipt.
+    const WORLD_ITERS: usize = 100;
+
+    /// Deterministic fixture id straight from a node index.
+    fn fixture_id(index: u16) -> ObjectId {
+        let text = format!("00000000-0000-4000-8000-{index:012x}");
+        ObjectId::parse(&text).expect("fixture id text is a uuid")
+    }
+
+    /// Next fixture id in build order.
+    fn next_id(next: &mut u16) -> ObjectId {
+        let id = fixture_id(*next);
+        *next = next.saturating_add(1);
+        id
+    }
+
+    /// Authored scene: 3 lots, 6 halls each, 5 props per hall, 2 lamps per prop.
+    /// 291 nodes deep enough to keep the ancestor chain live.
+    fn fixture_tree() -> Hierarchy {
+        let mut tree = Hierarchy::new();
+        let mut next = 0u16;
+        for lot in 0..3u16 {
+            let root = next_id(&mut next);
+            let base = f32::from(lot) * 8.0;
+            tree.insert(root, ObjectId::NIL, pose([base, 0.0, 0.0]))
+                .unwrap();
+            for _ in 0..6 {
+                let hall = next_id(&mut next);
+                tree.insert(hall, root, spun([0.0, 1.0, 0.0])).unwrap();
+                for prop in 0..5u16 {
+                    let prop_id = next_id(&mut next);
+                    tree.insert(prop_id, hall, pose([f32::from(prop), 0.5, 0.0]))
+                        .unwrap();
+                    for lamp in 0..2u16 {
+                        let lamp_id = next_id(&mut next);
+                        let at = [0.0, 0.5, f32::from(lamp) * 2.0];
+                        tree.insert(lamp_id, prop_id, pose_s(at, [1.0, 0.5, 1.0]))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        tree
+    }
+
+    /// The fixture seen over [`FRAMES`] frames of per-frame local edits.
+    fn fixture_frames() -> Vec<Hierarchy> {
+        let mut tree = fixture_tree();
+        let ids: Vec<ObjectId> = tree.nodes.keys().copied().collect();
+        let mut frames = Vec::with_capacity(FRAMES);
+        for frame in 0..FRAMES {
+            let step = f32::from(u16::try_from(frame).unwrap_or(0));
+            let moved = pose([0.25 * step, -0.5 * step, 0.125 * step]);
+            for (rank, id) in ids.iter().enumerate() {
+                if rank % 7 == frame % 7 {
+                    tree.set_local(*id, moved).unwrap();
+                }
+            }
+            frames.push(tree.clone());
+        }
+        frames
+    }
+
+    /// The per-node walk this round replaced: `propagation_order` (which scans
+    /// the whole map per node) plus one `world` call and `Vec` per node.
+    fn world_all_per_node(tree: &Hierarchy) -> Vec<(ObjectId, Transform)> {
+        let mut out = Vec::with_capacity(tree.nodes.len());
+        for id in tree.propagation_order() {
+            if let Some(pose) = tree.world(id) {
+                out.push((id, pose));
+            }
+        }
+        if out.len() < tree.nodes.len() {
+            let mut missing: Vec<ObjectId> = tree
+                .nodes
+                .keys()
+                .filter(|id| !out.iter().any(|(listed, _)| listed == *id))
+                .copied()
+                .collect();
+            missing.sort_by_key(|id: &ObjectId| id.as_uuid());
+            for id in missing {
+                if let Some(pose) = tree.world(id) {
+                    out.push((id, pose));
+                }
+            }
+        }
+        out
+    }
+
+    /// Raw bits of one pose, so `-0.0` and `0.0` cannot pass as equal.
+    fn pose_bits(pose: &Transform) -> [u32; 10] {
+        let lanes = pose
+            .position
+            .iter()
+            .chain(pose.rotation.iter())
+            .chain(pose.scale.iter());
+        let mut bits = [0u32; 10];
+        for (slot, lane) in lanes.enumerate() {
+            bits[slot] = lane.to_bits();
+        }
+        bits
+    }
+
+    /// Two world lists must hold the same ids in the same order and bits.
+    fn assert_same_worlds(
+        old: &[(ObjectId, Transform)],
+        new: &[(ObjectId, Transform)],
+        what: &str,
+    ) {
+        assert_eq!(old.len(), new.len(), "{what}: node count moved");
+        for (index, (a, b)) in old.iter().zip(new.iter()).enumerate() {
+            assert_eq!(a.0, b.0, "{what}: order moved at {index}");
+            assert_eq!(
+                pose_bits(&a.1),
+                pose_bits(&b.1),
+                "{what}: pose bits moved at {index}"
+            );
+        }
+    }
+
+    /// Order-sensitive fold of ids and pose bits over one frame.
+    fn worlds_digest(worlds: &[(ObjectId, Transform)]) -> u64 {
+        let mut digest = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |word: u64| digest = (digest ^ word).wrapping_mul(0x0000_0100_0000_01b3);
+        for (id, pose) in worlds {
+            let (high, low) = id.as_uuid().as_u64_pair();
+            mix(high);
+            mix(low);
+            for bits in pose_bits(pose) {
+                mix(u64::from(bits));
+            }
+        }
+        digest
+    }
+
+    /// Every frame: same node ids, same order, same pose bits.
+    #[test]
+    fn world_all_matches_the_per_node_walk_bit_for_bit() {
+        let frames = fixture_frames();
+        assert_eq!(frames.len(), FRAMES);
+        for (frame, tree) in frames.iter().enumerate() {
+            assert_eq!(tree.len(), 291, "frame {frame}: fixture size moved");
+            let old = world_all_per_node(tree);
+            let new = tree.world_all();
+            assert_same_worlds(&old, &new, &format!("frame {frame}"));
+            assert_eq!(
+                worlds_digest(&new),
+                worlds_digest(&old),
+                "frame {frame}: digest moved"
+            );
+        }
+    }
+
+    /// A corrupt hand-built document (dangling parent, link cycle) keeps the
+    /// same tail: unreachable nodes last, in id order, same bits.
+    #[test]
+    fn world_all_keeps_unreachable_nodes_last() {
+        let mut tree = fixture_tree();
+        let (stray, c, d) = (ObjectId::new(), ObjectId::new(), ObjectId::new());
+        let local = pose([1.0, 2.0, 3.0]);
+        // A node whose parent does not exist has no pose and is dropped.
+        tree.nodes.insert(
+            stray,
+            Node {
+                parent: ObjectId::new(),
+                local,
+            },
+        );
+        // A link cycle: a pose exists, both members must still be listed.
+        tree.nodes.insert(c, Node { parent: d, local });
+        tree.nodes.insert(d, Node { parent: c, local });
+        let old = world_all_per_node(&tree);
+        let new = tree.world_all();
+        assert_same_worlds(&old, &new, "corrupt tree");
+        assert_eq!(
+            old.len(),
+            tree.len() - 1,
+            "only the dangling parent has no pose"
+        );
+        assert_eq!(new.last(), old.last(), "the tail keeps its last pose");
+    }
+
+    /// Time one round over every fixture frame, on one side of the pair.
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing helper reads the wall clock; it never enters the tick"
+    )]
+    fn world_round_ns(frames: &[Hierarchy], per_node: bool, digest: &mut u64) -> u128 {
+        let start = std::time::Instant::now();
+        let mut folded = 0u64;
+        for tree in frames {
+            let worlds = if per_node {
+                world_all_per_node(tree)
+            } else {
+                tree.world_all()
+            };
+            folded = folded.rotate_left(7) ^ worlds_digest(&worlds);
+        }
+        let ns = start.elapsed().as_nanos();
+        *digest = folded;
+        ns
+    }
+
+    /// Receipt: the whole-tree world pass against the per-node walk, both
+    /// sides timed on the same frames in one process. Run: cargo test
+    /// -p engine-scene --lib --release world_all_bench_receipt
+    /// -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    fn world_all_bench_receipt() {
+        let frames = fixture_frames();
+        let (mut old_digest, mut new_digest, mut warm) = (0u64, 0u64, 0u64);
+        for _ in 0..2 {
+            let _ = world_round_ns(&frames, true, &mut old_digest);
+            let _ = world_round_ns(&frames, false, &mut new_digest);
+        }
+        let mut old_runs = Vec::with_capacity(WORLD_ITERS);
+        let mut new_runs = Vec::with_capacity(WORLD_ITERS);
+        for index in 0..WORLD_ITERS {
+            // One untimed round per side first: both then time on hot data, so
+            // the p50 is not a mix of cold and warm rounds. The order still
+            // alternates, because the second call reads a warmer cache.
+            if index % 2 == 0 {
+                let _ = world_round_ns(&frames, true, &mut warm);
+                let _ = world_round_ns(&frames, false, &mut warm);
+                old_runs.push(world_round_ns(&frames, true, &mut old_digest));
+                new_runs.push(world_round_ns(&frames, false, &mut new_digest));
+            } else {
+                let _ = world_round_ns(&frames, false, &mut warm);
+                let _ = world_round_ns(&frames, true, &mut warm);
+                new_runs.push(world_round_ns(&frames, false, &mut new_digest));
+                old_runs.push(world_round_ns(&frames, true, &mut old_digest));
+            }
+        }
+        old_runs.sort_unstable();
+        new_runs.sort_unstable();
+        let (old, new) = (old_runs[WORLD_ITERS / 2], new_runs[WORLD_ITERS / 2]);
+        eprintln!(
+            "world_all_p50_us={:.3} per_node_p50_us={:.3} speedup={:.2}x nodes={} frames={FRAMES}",
+            micros(new),
+            micros(old),
+            ratio(old, new),
+            frames[0].len()
+        );
+        assert_eq!(new_digest, old_digest, "both sides walk the same worlds");
+        assert!(new < old, "the whole-tree pass must not be the slower one");
+    }
+
+    /// `ns` in microseconds for the receipt line (no cast, no float method).
+    fn micros(ns: u128) -> f64 {
+        engine_core::checked::f64_from_u64(u64::try_from(ns).unwrap_or(0)) / 1000.0
+    }
+
+    /// How many times slower `slow` is than `fast`, as a receipt figure.
+    fn ratio(slow: u128, fast: u128) -> f64 {
+        if fast == 0 {
+            return 0.0;
+        }
+        engine_core::checked::f64_from_u64(u64::try_from(slow).unwrap_or(0))
+            / engine_core::checked::f64_from_u64(u64::try_from(fast).unwrap_or(0))
     }
 }

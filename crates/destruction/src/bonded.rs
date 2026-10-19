@@ -1848,4 +1848,209 @@ mod tests {
         actual.sort_unstable();
         assert_eq!(actual, predicted_rule);
     }
+
+    /// The canonical byte stream `BondedCollection::state_hash` walks, in the
+    /// exact order it writes it: length, tick, threshold, each chunk's box,
+    /// mass and velocity bits, the bond count, each bond's ends, limit, strain
+    /// and snap flag, then each chunk's three flags. This is the independent
+    /// oracle for the equality test and the baseline in the receipt below.
+    fn canonical_state_bytes(field: &BondedCollection) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&u32::try_from(field.chunks.len()).unwrap_or(0).to_le_bytes());
+        bytes.extend_from_slice(&field.tick.to_le_bytes());
+        bytes.extend_from_slice(&field.threshold.to_bits().to_le_bytes());
+        for (c, v) in field.chunks.iter().zip(field.vel.iter()) {
+            for w in [
+                c.x.to_bits(),
+                c.y.to_bits(),
+                c.z.to_bits(),
+                c.hx.to_bits(),
+                c.hy.to_bits(),
+                c.hz.to_bits(),
+                c.mass.to_bits(),
+                v[0].to_bits(),
+                v[1].to_bits(),
+                v[2].to_bits(),
+            ] {
+                bytes.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        bytes.extend_from_slice(&u32::try_from(field.bonds.len()).unwrap_or(0).to_le_bytes());
+        for ((bond, strain), broken) in field
+            .bonds
+            .iter()
+            .zip(field.strain.iter())
+            .zip(field.bond_broken.iter())
+        {
+            bytes.extend_from_slice(&bond.a.to_le_bytes());
+            bytes.extend_from_slice(&bond.b.to_le_bytes());
+            bytes.extend_from_slice(&bond.breaking_strain.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&strain.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&u32::from(*broken).to_le_bytes());
+        }
+        for ((dynamic, freed), anchored) in field
+            .dynamic
+            .iter()
+            .zip(field.freed.iter())
+            .zip(field.anchored.iter())
+        {
+            bytes.extend_from_slice(&u32::from(*dynamic).to_le_bytes());
+            bytes.extend_from_slice(&u32::from(*freed).to_le_bytes());
+            bytes.extend_from_slice(&u32::from(*anchored).to_le_bytes());
+        }
+        bytes
+    }
+
+    /// One box chunk with the shared half extents.
+    fn box_chunk(x: f32, y: f32, z: f32, mass: f32) -> Chunk3 {
+        Chunk3 {
+            x,
+            y,
+            z,
+            hx: 0.5,
+            hy: 0.5,
+            hz: 0.5,
+            mass,
+        }
+    }
+
+    /// A collection built from an explicit shape.
+    fn collection(chunks: Vec<Chunk3>, bonds: Vec<Bond>, anchors: Vec<u32>) -> BondedCollection {
+        BondedCollection::new(&BondedDesc {
+            chunks,
+            bonds,
+            anchors,
+            break_threshold: BREAKING_THRESHOLD,
+        })
+        .expect("shape builds")
+    }
+
+    /// The live-duel crate prop: 8 pieces, bottom anchored.
+    fn crate_prop(pieces: usize, seed: u64) -> BondedCollection {
+        BondedCollection::crate_prop(0.0, 0.5, 0.0, 0.5, pieces, seed).expect("crate prop builds")
+    }
+
+    /// Strike the highest chunk past the gate, then let the freed island fall:
+    /// broken bonds, broken strain and moving velocities ride the hash.
+    fn snap_top_and_step(field: &mut BondedCollection) {
+        let mut top = 0;
+        for (i, c) in field.chunks().iter().enumerate() {
+            if c.y > field.chunks()[top].y {
+                top = i;
+            }
+        }
+        let mass = field.chunk_mass(top).expect("top mass");
+        let impulse = mass * field.break_threshold() + 1.0;
+        field.apply_impact(top, impulse, 3).expect("valid impact");
+        for _ in 0..30 {
+            field.step(1.0 / 60.0);
+        }
+    }
+
+    /// Every reachable shape: a lone chunk, one bond, the chain, the live-duel
+    /// crate, a crate with a broken island and a full 64-piece crate.
+    fn hash_shapes() -> Vec<BondedCollection> {
+        let mut cracked = crate_prop(8, 7);
+        snap_top_and_step(&mut cracked);
+        vec![
+            collection(vec![box_chunk(0.0, 2.0, 0.0, 1.0)], Vec::new(), vec![0]),
+            collection(
+                vec![box_chunk(0.0, 2.0, 0.0, 1.0), box_chunk(1.0, 2.0, 0.0, 3.0)],
+                vec![Bond {
+                    a: 0,
+                    b: 1,
+                    breaking_strain: 1.0,
+                }],
+                vec![0],
+            ),
+            BondedCollection::new(&chain_desc()).expect("valid chain"),
+            crate_prop(8, 7),
+            cracked,
+            crate_prop(MAX_CRATE_PIECES, 5),
+        ]
+    }
+
+    /// The tick hash is FNV-1a over the canonical word stream on every shape:
+    /// the digest is a desync contract, so the independent byte oracle must
+    /// agree bit for bit. A chunk mutation moves the digest (non-vacuity).
+    #[test]
+    fn state_hash_is_fnv1a_over_the_canonical_word_stream() {
+        for field in hash_shapes() {
+            assert_eq!(
+                field.state_hash(),
+                engine_core::hash_bytes(&canonical_state_bytes(&field)),
+                "shape with {} chunks, {} bonds left the hash law",
+                field.len(),
+                field.bonds().len()
+            );
+        }
+        let mut field = crate_prop(8, 7);
+        let before = field.state_hash();
+        assert_eq!(
+            before,
+            engine_core::hash_bytes(&canonical_state_bytes(&field)),
+            "the receipt fixture starts on the hash law"
+        );
+        field.chunks[0].x += 0.25;
+        assert_ne!(
+            field.state_hash(),
+            before,
+            "a moved chunk must move the digest"
+        );
+    }
+
+    /// Timing receipt: the shipped per-tick hash body against the same
+    /// canonical bytes folded by `engine_core::hash_bytes`, interleaved on one
+    /// broken-crate fixture. The shipped body must not be the slower side; the
+    /// ratio is the receipt. Run: cargo test -p engine-destruction --lib
+    /// --release state_hash_bench_receipt -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn state_hash_bench_receipt() {
+        let mut field = crate_prop(8, 7);
+        snap_top_and_step(&mut field);
+        let bytes = canonical_state_bytes(&field);
+        let iters = 200usize;
+        let batch = 2000usize;
+        let mut body = Vec::with_capacity(iters);
+        let mut stream = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let t = std::time::Instant::now();
+            for _ in 0..batch {
+                std::hint::black_box(field.state_hash());
+            }
+            body.push(t.elapsed().as_nanos());
+            let t = std::time::Instant::now();
+            for _ in 0..batch {
+                std::hint::black_box(engine_core::hash_bytes(&bytes));
+            }
+            stream.push(t.elapsed().as_nanos());
+        }
+        body.sort_unstable();
+        stream.sort_unstable();
+        let per = |ns: u128| {
+            engine_core::checked::f64_from_u64(u64::try_from(ns).unwrap_or(0))
+                / engine_core::checked::f64_from_u64(u64::try_from(batch).unwrap_or(1))
+        };
+        let (body_p50, stream_p50) = (per(body[iters / 2]), per(stream[iters / 2]));
+        eprintln!(
+            "state_hash_p50_us={:.4} canonical_stream_p50_us={:.4} ratio={:.2} bytes={} chunks={} bonds={}",
+            body_p50 / 1000.0,
+            stream_p50 / 1000.0,
+            body_p50 / stream_p50,
+            bytes.len(),
+            field.len(),
+            field.bonds().len()
+        );
+        assert_eq!(field.state_hash(), engine_core::hash_bytes(&bytes));
+        assert!(
+            body_p50 < stream_p50,
+            "the shipped hash must not be the slower side"
+        );
+    }
 }

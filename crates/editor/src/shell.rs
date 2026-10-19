@@ -35,6 +35,7 @@ use engine_scene::transform::{Hierarchy, Transform};
 use crate::audit::AuditChain;
 use crate::inspector_auto::{build_grid, AutoError, AutoGrid};
 
+use crate::activity::{Activity, ActivityRing, Author};
 use crate::browser::{AssetKind, BundleView};
 use crate::capability::{apply_gated, Approval, ApprovalLedger, CapError, Capability};
 use crate::commands::{
@@ -43,6 +44,8 @@ use crate::commands::{
 #[cfg(feature = "ui")]
 use crate::findings::{FindingView, FindingsError, FindingsPanel};
 use crate::gizmo::{drag_to_local, world_to_local, GizmoDrag, GizmoError};
+use crate::onboard::{Checklist, Step};
+use crate::prefab::{Prefab, PrefabError};
 use crate::templates::{TemplateError, TemplateItem, TemplateKind, TemplateService};
 #[cfg(feature = "ui")]
 use crate::tuning::{CombatField, LoopbackChild, TuneError, TuneReceipt, TuningPanel};
@@ -238,6 +241,8 @@ pub enum ShellError {
     Command(BatchError),
     /// The gizmo drag was invalid; nothing was staged or applied.
     Gizmo(GizmoError),
+    /// A prefab capture or placement was refused; nothing changed.
+    Prefab(PrefabError),
 }
 
 impl fmt::Display for ShellError {
@@ -248,6 +253,7 @@ impl fmt::Display for ShellError {
             Self::UnknownNode(id) => write!(f, "selected node {id} is gone"),
             Self::Command(error) => write!(f, "command refused: {error}"),
             Self::Gizmo(error) => write!(f, "gizmo refused: {error}"),
+            Self::Prefab(error) => write!(f, "prefab refused: {error}"),
         }
     }
 }
@@ -257,6 +263,7 @@ impl std::error::Error for ShellError {
         match self {
             Self::Command(error) => Some(error),
             Self::Gizmo(error) => Some(error),
+            Self::Prefab(error) => Some(error),
             Self::NoSelection | Self::NothingStaged | Self::UnknownNode(_) => None,
         }
     }
@@ -312,6 +319,12 @@ pub struct Shell {
     gizmo_group: Option<u64>,
     /// Template reservations: item names, node ids and cost totals.
     templates: TemplateService,
+    /// Bounded activity ring: human and agent edits in one place (ED20).
+    activity: ActivityRing,
+    /// First-run checklist (tutorial-1): templates and first fight (ED18).
+    onboard: Checklist,
+    /// Saved prefabs in creation order (in-memory; not in the save file yet).
+    prefabs: Vec<Prefab>,
     /// Review state for one staged AI proposal (behind `ui` with spatial).
     #[cfg(feature = "ui")]
     findings: FindingsPanel,
@@ -339,6 +352,9 @@ impl Shell {
             apply_tick: 0,
             gizmo_group: None,
             templates: TemplateService::new(),
+            activity: ActivityRing::new(),
+            onboard: Checklist::new(),
+            prefabs: Vec::new(),
             #[cfg(feature = "ui")]
             findings: FindingsPanel::new(),
             #[cfg(feature = "ui")]
@@ -671,6 +687,7 @@ impl Shell {
             Ok(applied) => {
                 self.record_audit(&batch, &meta, &applied);
                 self.log_applied(&applied);
+                self.note_activity(Author::Human, "batch.apply", None);
                 self.staged = None;
                 Ok(applied)
             }
@@ -1197,6 +1214,88 @@ impl Shell {
         self.templates.len()
     }
 
+    /// Bounded activity ring (human and agent edits), oldest first.
+    pub fn activity(&self) -> &ActivityRing {
+        &self.activity
+    }
+
+    /// Record one activity row; the tick is the current acknowledged-apply
+    /// counter, so the panel orders edits without a wall clock.
+    pub fn note_activity(&mut self, author: Author, verb: &'static str, subject: Option<u64>) {
+        let tick = self.apply_tick;
+        self.activity.push(Activity {
+            author,
+            verb,
+            subject,
+            tick,
+        });
+    }
+
+    /// First-run checklist (tutorial-1), copied for the Templates and empty
+    /// viewport bands; the shell owns the live state.
+    pub fn onboard(&self) -> Checklist {
+        self.onboard
+    }
+
+    /// Record one applied template and return the step it completed.
+    pub fn note_template(&mut self, kind: TemplateKind) -> Option<Step> {
+        self.onboard.note_template(kind)
+    }
+
+    /// Record a play start; `Ok(false)` when the scene is not play-ready.
+    pub fn note_first_fight(&mut self) -> Result<bool, crate::onboard::OnboardError> {
+        self.onboard
+            .note_first_fight(TemplateService::play_ready(&self.doc))
+    }
+
+    /// Saved prefabs in creation order.
+    pub fn prefabs(&self) -> &[Prefab] {
+        &self.prefabs
+    }
+
+    /// Capture the selected node's subtree as a prefab; a same-name prefab
+    /// is replaced. Refuses with no selection or an empty name.
+    pub fn save_prefab(&mut self, name: impl Into<String>) -> Result<(), PrefabError> {
+        let root = self.selection.ok_or(PrefabError::NoSelection)?;
+        let prefab = Prefab::capture(&self.doc, root, name)?;
+        let name = prefab.name.clone();
+        let nodes = prefab.node_count();
+        match self.prefabs.iter().position(|p| p.name == prefab.name) {
+            Some(index) => self.prefabs[index] = prefab,
+            None => self.prefabs.push(prefab),
+        }
+        self.log
+            .push(format!("prefab `{name}` saved: {nodes} nodes"));
+        Ok(())
+    }
+
+    /// Place a prefab under the selected node (or the root) offset by `at`
+    /// meters. One command batch, so one undo removes the whole copy.
+    pub fn place_prefab(&mut self, prefab: &Prefab, at: [f32; 3]) -> Result<Applied, ShellError> {
+        let parent = self.selection.unwrap_or(ObjectId::NIL);
+        let made = prefab.instantiate(parent, at).map_err(ShellError::Prefab)?;
+        let batch = Batch {
+            ops: made.ops,
+            base_revision: self.doc.revision,
+            idempotency_key: self.take_key(),
+            provenance: None,
+        };
+        let meta = CommandMeta::significant(format!("prefab.instantiate {}", prefab.name));
+        match commands::apply_named(&mut self.doc, &mut self.journal, &batch, &meta) {
+            Ok(applied) => {
+                self.record_audit(&batch, &meta, &applied);
+                self.log_applied(&applied);
+                self.note_activity(Author::Human, "prefab.instantiate", None);
+                Ok(applied)
+            }
+            Err(error) => {
+                self.log
+                    .push(format!("ERR prefab `{}`: {error}", prefab.name));
+                Err(ShellError::Command(error))
+            }
+        }
+    }
+
     /// First free name for a kind (`arena`, `arena_2`, ...).
     pub fn template_suggest(&self, kind: TemplateKind) -> String {
         self.templates.default_name(kind)
@@ -1233,6 +1332,8 @@ impl Shell {
                     applied.revision
                 ));
                 self.log_applied(&applied);
+                self.note_activity(Author::Human, "template.apply", None);
+                self.onboard.note_template(kind);
                 Ok(applied)
             }
             Err(error) => {
@@ -1738,6 +1839,120 @@ mod tests {
         assert!(shell.template_reconcile().is_empty());
         shell.redo().expect("redo holds the prop batch");
         assert_eq!(shell.document().hierarchy.len(), 7);
+    }
+
+    /// The empty-scene band's one click: arena, fighter and weapon applied in
+    /// order leave a play-ready scene, tick the first three checklist steps,
+    /// and the first fight ticks the fourth.
+    #[test]
+    fn one_click_starters_reach_a_play_ready_scene() {
+        let mut shell = Shell::new();
+        assert_eq!(shell.onboard().done_count(), 0);
+        for kind in [
+            TemplateKind::Arena,
+            TemplateKind::Fighter,
+            TemplateKind::Weapon,
+        ] {
+            let name = shell.template_suggest(kind);
+            shell.template_apply(kind, &name).unwrap();
+        }
+        assert!(TemplateService::play_ready(shell.document()));
+        assert_eq!(shell.onboard().done_count(), 3);
+        assert!(!shell.onboard().is_complete());
+        assert!(shell.note_first_fight().unwrap());
+        assert!(shell.onboard().is_complete());
+    }
+
+    /// A prefab copies the subtree's poses, components and material binding;
+    /// placing it is one batch, and one undo removes the whole copy.
+    #[test]
+    fn prefab_round_trip_copies_components_and_undoes() {
+        use engine_scene::component::{Component, ComponentKind, Light, LightKind};
+
+        let mut shell = Shell::new();
+        shell.template_apply(TemplateKind::Arena, "arena").unwrap();
+        let root = shell
+            .template_items()
+            .find(|item| item.name == "arena")
+            .expect("arena reservation")
+            .nodes[0];
+        assert!(shell.select(root));
+        shell
+            .doc
+            .components
+            .entry(root.to_string())
+            .or_default()
+            .insert(
+                ComponentKind::Light,
+                Component::Light(Light {
+                    kind: LightKind::Point,
+                    color: [1.0, 0.5, 0.25],
+                    intensity: 3.0,
+                    range: 6.0,
+                }),
+            );
+        let root_local = shell.doc.hierarchy.local(root).expect("root pose");
+        shell.save_prefab("lamp").expect("captures the selection");
+        assert_eq!(shell.prefabs().len(), 1);
+        let prefab = shell.prefabs()[0].clone();
+        let nodes = prefab.node_count();
+
+        let before = shell.doc.hierarchy.len();
+        let before_ids: std::collections::BTreeSet<_> = shell
+            .doc
+            .hierarchy
+            .world_all()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        shell
+            .place_prefab(&prefab, [10.0, 0.0, 0.0])
+            .expect("places the prefab");
+        assert_eq!(shell.doc.hierarchy.len(), before + nodes);
+
+        let new_root = shell
+            .doc
+            .hierarchy
+            .world_all()
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| !before_ids.contains(id))
+            .find(|id| {
+                shell.doc.hierarchy.local(*id).is_some_and(|local| {
+                    (local.position[0] - (root_local.position[0] + 10.0)).abs() < 1e-5
+                        && (local.position[1] - root_local.position[1]).abs() < 1e-5
+                })
+            })
+            .expect("new root carries the offset");
+        let copied = shell
+            .doc
+            .components
+            .get(&new_root.to_string())
+            .and_then(|table| table.get(&ComponentKind::Light));
+        assert!(matches!(
+            copied,
+            Some(Component::Light(light)) if light.intensity == 3.0
+        ));
+
+        // Editing one copy leaves the source untouched.
+        if let Some(table) = shell.doc.components.get_mut(&new_root.to_string()) {
+            if let Some(Component::Light(light)) = table.get_mut(&ComponentKind::Light) {
+                light.intensity = 9.0;
+            }
+        }
+        let source = shell
+            .doc
+            .components
+            .get(&root.to_string())
+            .and_then(|table| table.get(&ComponentKind::Light));
+        assert!(matches!(
+            source,
+            Some(Component::Light(light)) if light.intensity == 3.0
+        ));
+
+        shell.undo().expect("one undo removes the whole copy");
+        assert_eq!(shell.doc.hierarchy.len(), before);
+        assert!(!shell.doc.hierarchy.contains(new_root));
     }
 
     /// Fixed ids so two shells can compare end digests bit-exactly: random

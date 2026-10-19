@@ -41,6 +41,10 @@ struct GeoXatlasInfo {
     float texels_per_unit;
 };
 
+// The Rust side pins the same sizes and every field offset in `src/uv.rs`.
+static_assert(sizeof(GeoXatlasParams) == 80, "GeoXatlasParams layout changed");
+static_assert(sizeof(GeoXatlasInfo) == 24, "GeoXatlasInfo layout changed");
+
 // Returns an atlas handle, or null with *error_code set (xatlas::AddMeshError value).
 void *geo_xatlas_generate(const float *positions, const float *normals, const float *uvs,
                           uint32_t vertex_count, const uint32_t *indices, uint32_t index_count,

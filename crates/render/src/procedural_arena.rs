@@ -2,11 +2,12 @@
 //!
 //! The browser has no files to read yet, so its first arena frame draws this stand-in through the
 //! same presenter the Windows window uses: a sand floor with a red fighting ring, a stone wall
-//! with a gate gap, torch pillars, and eight box-built fighters bound to two joints (legs, and
-//! the torso with head, arms and sword) that sway on the GPU skin path. The sky, sun shadow,
-//! height fog, image-based light and bloom come from the presenter, not from here. The native
-//! window and the headless twin can draw the same list, so a browser frame has a native twin of
-//! the same camera and time.
+//! with a gate gap, torch pillars, a dark backdrop band above the wall, and eight box-built
+//! fighters bound to two joints (legs, and the torso with head, arms and sword) that sway on the
+//! GPU skin path. The sky, sun shadow, height fog, image-based light and bloom come from the
+//! presenter, not from here. The native window and the headless twin can draw the same list, so a
+//! browser frame has a native twin of the same camera and time; the played page (`?fight`) uses
+//! [`ProceduralArena::shoulder_camera`] instead of the framing one.
 //!
 //! Units: meters, radians, seconds. Determinism: the same build gives the same bytes and the
 //! same time gives the same camera and pose; pixels are presentation and never enter a
@@ -33,6 +34,8 @@ pub const FIGHTER_RING_M: f32 = 3.0;
 pub const WALL_RADIUS_M: f32 = 11.0;
 /// Joints every fighter is bound to: 0 legs, 1 torso, head, arms and sword.
 pub const JOINTS: usize = 2;
+/// Static (unskinned) parts of the ring; the fighters follow them in draw order.
+pub const STATIC_PARTS: usize = 6;
 
 /// Wall boxes around the circle; the first two are left out as the gate.
 const WALL_SEGMENTS: usize = 40;
@@ -40,6 +43,53 @@ const WALL_SEGMENTS: usize = 40;
 const PILLAR_EVERY: usize = 5;
 /// Height of the hips, where the torso joint pivots.
 const HIP_Y_M: f32 = 0.88;
+
+/// The dark backdrop band: a cylinder just behind the wall, from the wall's top up. It fills
+/// the sky behind the fighters so their bodies read against it (the presenter's own sky is
+/// bright). Radius and height in meters.
+const SKY_BAND_RADIUS_M: f32 = WALL_RADIUS_M + 1.0;
+const SKY_BAND_BOTTOM_M: f32 = 3.2;
+const SKY_BAND_TOP_M: f32 = 18.0;
+/// Segments of the band: the same count as the wall, so the two line up.
+const SKY_BAND_SEGMENTS: usize = WALL_SEGMENTS;
+
+/// Third-person camera: how far behind the human seat the eye sits, meters. Far enough that the
+/// seat's own body reads as a silhouette in the lower frame instead of filling it.
+pub const SHOULDER_BACK_M: f32 = 5.2;
+/// Sideways offset of the eye (over the human's right shoulder), meters. The seats stand close
+/// (about a meter apart), so most of the offset is what keeps the human from hiding the rival:
+/// the shot is three-quarter, not straight down the pair's own line.
+pub const SHOULDER_SIDE_M: f32 = 2.4;
+/// Height of the eye, meters.
+pub const SHOULDER_EYE_M: f32 = 2.3;
+/// Seat gap above which the camera pulls back and widens so both stay framed, meters.
+pub const SHOULDER_GAP_M: f32 = 10.0;
+/// Largest shake the camera takes at full hit weight, meters.
+pub const SHOULDER_SHAKE_M: f32 = 0.085;
+/// Nearest the shoulder camera ever gets to what it looks at, meters: a seat that turns its
+/// back on the rival would otherwise put the eye past the rival, looking back at it.
+pub const SHOULDER_MIN_SHOT_M: f32 = 4.0;
+/// How far above the midpoint of the two seats the eye looks, meters: chest height, so both
+/// seats sit in frame with the floor and the wall behind them.
+pub const SHOULDER_LOOK_UP_M: f32 = 1.15;
+/// The eye never goes closer to the wall than this radius, meters.
+pub const CAMERA_RADIUS_M: f32 = WALL_RADIUS_M - 1.4;
+
+/// What the shoulder camera frames: both seats' feet, the human's heading, the hit shake weight
+/// and the clock the shake reads. Plain data, so the same view gives the same camera.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShoulderView {
+    /// Human seat's feet, meters.
+    pub human_m: [f32; 3],
+    /// Rival seat's feet, meters.
+    pub rival_m: [f32; 3],
+    /// The human seat's heading, centidegrees (0 = +Z, positive turns right).
+    pub facing_cdeg: i16,
+    /// Hit shake, `0.0..=1.0`.
+    pub shake: f32,
+    /// Clock the shake reads, seconds.
+    pub t_s: f32,
+}
 
 /// A row-major 4x4 joint matrix in the AN1 layout `Presenter::write_skin_block` takes: rows are
 /// the images of the axes, the last row is the translation.
@@ -188,6 +238,32 @@ impl MeshBuilder {
         }
     }
 
+    /// A vertical band of `segments` quads at `radius`, from `y0` up to `y1`, wound so its
+    /// face points at the centre (a backdrop seen from inside the ring).
+    fn push_inward_band(&mut self, radius: f32, y0: f32, y1: f32, segments: usize) {
+        for i in 0..segments {
+            let a0 = TAU * unit(i) / unit(segments);
+            let a1 = TAU * unit(i + 1) / unit(segments);
+            let p = |a: f32, y: f32| [radius * a.cos(), y, radius * a.sin()];
+            let (s, c) = ((a0 + a1) * 0.5).sin_cos();
+            let normal = [-c, 0.0, -s];
+            let base = u32::try_from(self.positions.len()).unwrap_or(u32::MAX);
+            for (corner, uv) in [
+                (p(a0, y0), [0.0, 0.0]),
+                (p(a1, y0), [1.0, 0.0]),
+                (p(a1, y1), [1.0, 1.0]),
+                (p(a0, y1), [0.0, 1.0]),
+            ] {
+                self.positions.push(corner);
+                self.normals.push(normal);
+                self.uvs.push(uv);
+                self.joints.push(0);
+            }
+            self.indices
+                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
     fn finish(self) -> Result<(MeshData, Vec<u16>), ArenaError> {
         let mesh = v1::upload_mesh(&self.positions, &self.normals, &self.uvs, &self.indices)
             .map_err(|e| arena_err("mesh", e))?;
@@ -259,6 +335,13 @@ fn scenery() -> Result<Vec<Scenery>, ArenaError> {
     let mut wall = MeshBuilder::default();
     let mut pillars = MeshBuilder::default();
     let mut torches = MeshBuilder::default();
+    let mut band = MeshBuilder::default();
+    band.push_inward_band(
+        SKY_BAND_RADIUS_M,
+        SKY_BAND_BOTTOM_M,
+        SKY_BAND_TOP_M,
+        SKY_BAND_SEGMENTS,
+    );
     let step = TAU / unit(WALL_SEGMENTS);
     for i in 2..WALL_SEGMENTS {
         let theta = step * unit(i);
@@ -279,12 +362,15 @@ fn scenery() -> Result<Vec<Scenery>, ArenaError> {
         }
     }
     // Warm and bright: an exposure above 1 pushes the torch heads over the bloom threshold.
+    // The floor is lit sand, the wall stays cool grey stone, and the backdrop band is darker than
+    // both so the box bodies cross in front of something quiet rather than a bright sky.
     let pieces = [
-        (floor, material([0.55, 0.45, 0.30], 0.95, 1.0)),
-        (ring, material([0.32, 0.05, 0.04], 0.8, 1.0)),
-        (wall, material([0.42, 0.40, 0.37], 0.9, 1.0)),
-        (pillars, material([0.30, 0.28, 0.26], 0.9, 1.0)),
+        (floor, material([0.66, 0.50, 0.27], 0.95, 1.0)),
+        (ring, material([0.42, 0.05, 0.04], 0.75, 1.0)),
+        (wall, material([0.34, 0.34, 0.32], 0.92, 1.0)),
+        (pillars, material([0.26, 0.24, 0.22], 0.92, 1.0)),
         (torches, material([1.0, 0.55, 0.15], 0.5, 3.0)),
+        (band, material([0.05, 0.06, 0.09], 1.0, 1.0)),
     ];
     let mut out = Vec::with_capacity(pieces.len());
     for (builder, mat) in pieces {
@@ -420,13 +506,86 @@ impl ProceduralArena {
         Ok(camera)
     }
 
-    /// The warm key light the twin scenes use.
+    /// A third-person camera for the played match: behind the human seat's own facing (a
+    /// centidegree heading, 0 = +Z, positive turns right), over its right shoulder, looking at
+    /// the chest-height midpoint of the two seats so both read in frame. A `shake` in
+    /// `0.0..=1.0` adds a small deterministic jitter at time
+    /// `t_s` (a hit). Seats farther apart than [`SHOULDER_GAP_M`] pull the eye back and widen the
+    /// lens so both stay framed; the eye is clamped inside [`CAMERA_RADIUS_M`] so it never sits
+    /// in the stone. Falls back to [`Self::framing_camera`] on bad input or a refused camera.
+    pub fn shoulder_camera(
+        &self,
+        width: u32,
+        height: u32,
+        view: ShoulderView,
+    ) -> Result<Camera, ArenaError> {
+        let ShoulderView {
+            human_m: human,
+            rival_m: rival,
+            facing_cdeg,
+            shake,
+            t_s,
+        } = view;
+        if !human.iter().chain(rival.iter()).all(|v| v.is_finite())
+            || !shake.is_finite()
+            || !t_s.is_finite()
+        {
+            return self.framing_camera(width, height, human, rival);
+        }
+        let eye_at = Vec3::from_array(human);
+        let rival_at = Vec3::from_array(rival);
+        let yaw = f32::from(facing_cdeg) * (TAU / 36_000.0);
+        let (sin, cos) = yaw.sin_cos();
+        let forward = Vec3::new(sin, 0.0, cos);
+        let right = Vec3::Y.cross(forward);
+        let gap = (rival_at - eye_at).length();
+        let far = (gap - SHOULDER_GAP_M).max(0.0);
+        let back = SHOULDER_BACK_M + far * 0.55;
+        let mut eye = eye_at + Vec3::Y * SHOULDER_EYE_M - forward * back + right * SHOULDER_SIDE_M;
+        // A hit shakes the eye on a fast incommensurate phase: deterministic in `t_s`, and it
+        // fades out as the caller lowers `shake`.
+        let amp = shake.clamp(0.0, 1.0) * SHOULDER_SHAKE_M;
+        eye += Vec3::new((61.0 * t_s).sin(), (97.0 * t_s).sin(), (53.0 * t_s).cos()) * amp;
+        // Look at the midpoint of the pair, chest height: the human sits in the lower frame
+        // under the shoulder and the rival reads past it, with the floor and the wall behind.
+        let target = (eye_at + rival_at) * 0.5 + Vec3::Y * SHOULDER_LOOK_UP_M;
+        // A seat that turned its back on the rival would put the eye past it: pull back to a
+        // readable shot along the same line instead of looking at the rival from behind it.
+        let to_eye = eye - target;
+        if to_eye.length() < SHOULDER_MIN_SHOT_M {
+            eye = target + to_eye.try_normalize().unwrap_or(-forward) * SHOULDER_MIN_SHOT_M;
+        }
+        // Keep the eye inside the wall, whatever the pair does: clamp the horizontal radius.
+        let flat = Vec3::new(eye.x, 0.0, eye.z);
+        let radius = flat.length();
+        if radius > CAMERA_RADIUS_M {
+            let k = CAMERA_RADIUS_M / radius;
+            eye = Vec3::new(flat.x * k, eye.y, flat.z * k);
+        }
+        let fov = (58.0 + far * 0.45).clamp(58.0, 74.0);
+        let mut camera = Camera::new(
+            eye.to_array(),
+            target.to_array(),
+            [0.0, 1.0, 0.0],
+            fov.to_radians(),
+        );
+        camera.aspect = unit16(width) / unit16(height);
+        camera.far = 200.0;
+        if camera.validate().is_err() {
+            return self.framing_camera(width, height, human, rival);
+        }
+        Ok(camera)
+    }
+
+    /// The warm key light the twin scenes use: low and to one side, so each box shows a lit and a
+    /// dark face and a body reads as a volume (the scene carries one light, so this is the only
+    /// fill the ring gets; the dark backdrop does the rest).
     #[must_use]
     pub fn light() -> DirectionalLight {
         DirectionalLight {
-            direction: Vec3::new(-0.45, 0.75, 0.55),
-            color: Vec3::new(1.0, 0.96, 0.90),
-            intensity: 3.0,
+            direction: Vec3::new(-0.55, 0.60, 0.58),
+            color: Vec3::new(1.0, 0.92, 0.80),
+            intensity: 3.3,
         }
     }
 
@@ -557,15 +716,15 @@ mod tests {
     }
 
     #[test]
-    fn five_static_parts_then_one_skinned_part_per_fighter() {
+    fn static_parts_then_one_skinned_part_per_fighter() {
         let arena = arena();
         let parts = arena.parts();
-        assert_eq!(parts.len(), 5 + FIGHTERS);
+        assert_eq!(parts.len(), STATIC_PARTS + FIGHTERS);
         assert!(
-            parts[..5].iter().all(|p| p.skin.is_none()),
+            parts[..STATIC_PARTS].iter().all(|p| p.skin.is_none()),
             "scenery is static"
         );
-        for (slot, part) in parts[5..].iter().enumerate() {
+        for (slot, part) in parts[STATIC_PARTS..].iter().enumerate() {
             let skin = part.skin.as_ref().expect("a fighter is skinned");
             assert_eq!(part.block, slot, "fighter {slot} owns skin block {slot}");
             assert_eq!(skin.joints.len(), part.mesh.positions.len());
@@ -607,7 +766,7 @@ mod tests {
     #[test]
     fn fighters_stand_on_the_floor_inside_the_wall_and_face_the_centre() {
         let arena = arena();
-        for (slot, part) in arena.parts()[5..].iter().enumerate() {
+        for (slot, part) in arena.parts()[STATIC_PARTS..].iter().enumerate() {
             let lowest = part
                 .mesh
                 .positions
@@ -734,6 +893,174 @@ mod tests {
     }
 
     #[test]
+    fn the_sky_band_closes_the_ring_view_from_the_inside() {
+        let arena = arena();
+        let band = &arena.parts()[STATIC_PARTS - 1].mesh;
+        let mut lowest = f32::INFINITY;
+        let mut highest = f32::NEG_INFINITY;
+        for (position, normal) in band.positions.iter().zip(band.normals.iter()) {
+            let radial = normal[0] * position[0] + normal[2] * position[2];
+            assert!(radial < 0.0, "the band faces the centre: {radial}");
+            lowest = lowest.min(position[1]);
+            highest = highest.max(position[1]);
+        }
+        assert!((lowest - SKY_BAND_BOTTOM_M).abs() < 1e-4, "{lowest}");
+        assert!((highest - SKY_BAND_TOP_M).abs() < 1e-4, "{highest}");
+    }
+
+    /// Where a world point lands in normalised device coordinates.
+    fn ndc(camera: &Camera, point: [f32; 3]) -> glam::Vec3 {
+        let vp = camera.view_proj().expect("its matrix builds");
+        let clip = vp * glam::Vec4::new(point[0], point[1], point[2], 1.0);
+        clip.truncate() / clip.w
+    }
+
+    /// Centidegrees from `from` toward `to` (forward is `(sin, 0, cos)`).
+    fn heading_cdeg(from: [f32; 3], to: [f32; 3]) -> i16 {
+        let yaw = (to[0] - from[0]).atan2(to[2] - from[2]);
+        (yaw * 18_000.0 / std::f32::consts::PI).round() as i16
+    }
+
+    /// The played page's view of the pair: the human heading at the rival, a shake weight and a
+    /// clock.
+    fn view(human: [f32; 3], rival: [f32; 3], shake: f32, t_s: f32) -> ShoulderView {
+        ShoulderView {
+            human_m: human,
+            rival_m: rival,
+            facing_cdeg: heading_cdeg(human, rival),
+            shake,
+            t_s,
+        }
+    }
+
+    #[test]
+    fn the_shoulder_camera_sits_behind_the_human_and_frames_both() {
+        let arena = arena();
+        let human = [2.0, 0.0, -3.0];
+        let rival = [-1.0, 0.0, 2.5];
+        let facing = heading_cdeg(human, rival);
+        let camera = arena
+            .shoulder_camera(1280, 720, view(human, rival, 0.0, 0.0))
+            .expect("the shoulder camera builds");
+        camera.validate().expect("the shoulder camera is valid");
+        // The eye sits behind the human's own facing, over one shoulder and above the head.
+        let yaw = f32::from(facing) * (TAU / 36_000.0);
+        let forward = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+        let flat_eye = Vec3::new(camera.eye.x, 0.0, camera.eye.z);
+        let flat_human = Vec3::new(human[0], 0.0, human[2]);
+        let behind = (flat_human - flat_eye).dot(forward);
+        assert!(behind > 2.0, "the eye is behind the seat: {behind:.2} m");
+        assert!(
+            (camera.eye.y - SHOULDER_EYE_M).abs() < 1e-4,
+            "eye height {} is the constant {SHOULDER_EYE_M} with no shake",
+            camera.eye.y
+        );
+        // The rival's head and feet stay in the frame, and so does the human's head.
+        for point in [
+            [rival[0], 1.7, rival[2]],
+            [rival[0], 0.0, rival[2]],
+            [human[0], 1.8, human[2]],
+        ] {
+            let p = ndc(&camera, point);
+            assert!(
+                p.x.abs() < 1.0 && p.y.abs() < 1.0 && p.z > 0.0 && p.z < 1.0,
+                "{point:?} left the frame: {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_pair_pulls_the_eye_back_and_a_hit_shakes_it() {
+        let arena = arena();
+        let human = [0.0, 0.0, -1.0];
+        let close = [0.0, 0.0, 3.0];
+        let wide = [0.0, 0.0, 15.0];
+        let near = arena
+            .shoulder_camera(1280, 720, view(human, close, 0.0, 0.0))
+            .expect("near pair");
+        let far = arena
+            .shoulder_camera(1280, 720, view(human, wide, 0.0, 0.0))
+            .expect("wide pair");
+        let back = |c: &Camera| {
+            (Vec3::new(human[0], 0.0, human[2]) - Vec3::new(c.eye.x, 0.0, c.eye.z)).length()
+        };
+        assert!(
+            back(&far) > back(&near) + 2.0,
+            "the wide pair pulls back: {:.2} vs {:.2} m",
+            back(&far),
+            back(&near)
+        );
+        assert!(far.fov_y > near.fov_y, "and it widens the lens");
+        for point in [[wide[0], 1.7, wide[2]], [human[0], 1.8, human[2]]] {
+            let p = ndc(&far, point);
+            assert!(
+                p.x.abs() < 1.0 && p.y.abs() < 1.0,
+                "the wide pair stays framed: {point:?} -> {p:?}"
+            );
+        }
+        // A hit shakes the eye on a deterministic phase, bounded by the shake constant.
+        let still = arena
+            .shoulder_camera(1280, 720, view(human, close, 0.0, 2.0))
+            .expect("still frame");
+        let shaken = arena
+            .shoulder_camera(1280, 720, view(human, close, 1.0, 2.0))
+            .expect("shaken frame");
+        let again = arena
+            .shoulder_camera(1280, 720, view(human, close, 1.0, 2.0))
+            .expect("same frame");
+        assert_eq!(shaken.eye, again.eye, "the same hit and time shake alike");
+        let offset = (shaken.eye - still.eye).length();
+        assert!(
+            offset > 0.0 && offset <= SHOULDER_SHAKE_M * 3.0_f32.sqrt() + 1e-4,
+            "the shake is small and real: {offset:.4} m"
+        );
+        assert_eq!(shaken.target, still.target, "the look point holds");
+    }
+
+    #[test]
+    fn the_shoulder_camera_never_enters_the_wall_or_trusts_bad_input() {
+        let arena = arena();
+        // The human stands near the wall facing outward: the eye would back into the stone.
+        let human = [9.0, 0.0, 1.0];
+        let rival = [10.0, 0.0, 0.0];
+        let camera = arena
+            .shoulder_camera(1280, 720, view(human, rival, 0.0, 0.0))
+            .expect("a pair at the wall still gives a camera");
+        let radius = (camera.eye.x * camera.eye.x + camera.eye.z * camera.eye.z).sqrt();
+        assert!(
+            radius <= CAMERA_RADIUS_M + 1e-3,
+            "the eye stays inside the wall: radius {radius:.3} m"
+        );
+        let ring = arena.camera(1280, 720, 0.0).expect("the ring camera");
+        let bad_view = ShoulderView {
+            human_m: [f32::NAN, 0.0, 0.0],
+            ..view(human, rival, 0.0, 0.0)
+        };
+        let bad = arena
+            .shoulder_camera(1280, 720, bad_view)
+            .expect("bad input still gives a camera");
+        assert_eq!(bad.eye, ring.eye, "it falls back to the ring camera");
+        let refused = arena.shoulder_camera(0, 720, view(human, rival, 0.0, 0.0));
+        assert!(refused.is_err(), "a zero width is refused, not faked");
+        // A seat that turned its back on a near rival: the eye never lands past the rival.
+        let away = ShoulderView {
+            human_m: [0.0, 0.0, 0.0],
+            rival_m: [0.0, 0.0, 1.0],
+            facing_cdeg: 18_000,
+            shake: 0.0,
+            t_s: 0.0,
+        };
+        let turned = arena
+            .shoulder_camera(1280, 720, away)
+            .expect("a turned seat still gives a camera");
+        let shot = (turned.eye - Vec3::new(0.0, SHOULDER_LOOK_UP_M, 0.5)).length();
+        assert!(
+            shot >= SHOULDER_MIN_SHOT_M - 1e-3,
+            "the shot stays readable: {shot:.2} m"
+        );
+    }
+
+    #[test]
     fn the_draw_list_has_one_valid_draw_per_part_and_a_valid_camera() {
         let arena = arena();
         for (w, h) in [(1280, 720), (640, 360), (333, 777)] {
@@ -835,7 +1162,7 @@ mod gpu_tests {
         };
         let arena = ProceduralArena::build().expect("builds");
         arena.stage(&mut presenter).expect("stages");
-        for part in arena.parts().iter().skip(5) {
+        for part in arena.parts().iter().skip(STATIC_PARTS) {
             assert_eq!(presenter.skin_block_of(&part.key), Some(part.block));
         }
         arena.pose(&mut presenter, 0.0).expect("poses");

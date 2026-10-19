@@ -45,6 +45,9 @@ use crate::COMMIT;
 
 /// The frame budget the ladder holds the page to: 30 frames per second.
 const BUDGET_MS: f64 = 1000.0 / 30.0;
+/// Most fixed match steps one played frame takes (WEB15): a slow frame must not ask for a pile of
+/// catch-up steps, or the match drags the frame rate down and the next frame asks for more.
+const FIGHT_STEPS_PER_FRAME: u64 = 2;
 /// Frames drawn behind the loading screen so every pipeline has been used once before the page
 /// says it is ready.
 const WARM_FRAMES: u32 = 3;
@@ -242,7 +245,10 @@ impl ArenaLoop {
         t_s: f32,
     ) -> Result<DrawList, MatchError> {
         let (w, h) = self.presenter.size();
-        let steps = self.clock.steps();
+        // A slow frame asks the clock for every tick it missed; with a heavy tick that is a spiral
+        // (missed ticks make the next frame slower). The page plays at most two steps per frame:
+        // below 30 fps the match runs in slow motion instead of dragging the frame rate down.
+        let steps = self.clock.steps().min(FIGHT_STEPS_PER_FRAME);
         let frames = self.counters.frames;
         let (yaw, left, right) = crate::browser::seat_look();
         for _ in 0..steps {
@@ -255,6 +261,9 @@ impl ArenaLoop {
         }
         if frames % 15 == 1 {
             set_text("fight", &fight.line());
+        }
+        if let Some(hud) = fight.hud_change() {
+            paint_hud(hud);
         }
         fight.list(&mut self.presenter, w, h, t_s)
     }
@@ -397,6 +406,42 @@ impl ArenaLoop {
                 set_body_attr("data-capture", "error");
             }
         }
+    }
+}
+
+/// Paint the played match's HUD: two health bars, the round pips, the round number and the
+/// K.O./WINNER banner. The caller only reaches here when the snapshot changed, so a quiet tick
+/// costs one comparison and no DOM work.
+fn paint_hud(hud: crate::fight::MatchHud) {
+    let percent = |hp: u16| u32::from(hp.min(1000)) / 10;
+    set_style("duel-you-bar", &format!("width:{}%", percent(hud.hp[0])));
+    set_style("duel-rival-bar", &format!("width:{}%", percent(hud.hp[1])));
+    set_text("duel-you-pips", &hud.pips(0));
+    set_text("duel-rival-pips", &hud.pips(1));
+    set_text(
+        "duel-round",
+        &if hud.winner.is_some() {
+            "match".to_string()
+        } else {
+            format!("round {}", hud.round_number())
+        },
+    );
+    let (banner, state) = match hud.banner {
+        Some(banner) => (
+            banner.text(),
+            if hud.winner.is_some() { "win" } else { "ko" },
+        ),
+        None => ("", "off"),
+    };
+    set_text("duel-banner", banner);
+    set_body_attr("data-duel", "on");
+    set_body_attr("data-banner", state);
+}
+
+/// Set one element's `style` attribute (`width:42%`); missing elements are ignored.
+fn set_style(id: &str, style: &str) {
+    if let Some(el) = document().and_then(|d| d.get_element_by_id(id)) {
+        let _ = el.set_attribute("style", style);
     }
 }
 

@@ -118,7 +118,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   round_loop` x2: scripted tapes give 3-0, 3-2 and a tie-replay match with the
   expected round count and winner. F2P: no round reset today. P2P: golden
   unchanged. needs: none.
-- [ ] GP38 ui: the duel HUD is drawn — `crates/ui/src/lib.rs:781 DuelOverlay` is
+- [x] GP38 ui: the duel HUD is drawn — `crates/ui/src/lib.rs:781 DuelOverlay` is Landed 1d01a410.
   built only in ui tests. Draw it from `crates/game/src/windowed.rs`: hp pips,
   stamina bar, poise flash on stagger, round wins (best of 5), round timer.
   The UI park lifts for the duel HUD only (owner 2026-10-12). View only. Diff:
@@ -255,7 +255,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   tools/rust-quality.mjs --crate arena` reports its float count; a planted f32
   `sin()` in the arena step fails it. F2P: arena not scanned. P2P: the
   rust-quality baseline holds. needs: none. Landed 0143f07. node --test tools/rust-quality.test.mjs (60 pass with sim-source-scan and workspace-check tests): float_math column, 'simulation crates count platform float math' and 'a planted f32 sin() in the arena step fails the ratchet'; node tools/rust-quality.mjs --crate arena prints float 0, score 99 A, 0 regressions (the full run's casts regressions in anim, game, playtest, render are other sessions').
-- [ ] CQ18 quality: release keeps overflow checks — `[profile.release]` Progress 2026-10-17: `overflow-checks = true` is set in `[profile.release]` (root Cargo.toml); golden d57b5c8ae3096614 unchanged on all five machines in golden-matrix run 39054403838. Left: ARENA frame-split p50 before/after (under 3% slower) and the `node tools/proof.mjs` double print.
+- [x] CQ18 quality: release keeps overflow checks — `[profile.release]` Progress 2026-10-17: `overflow-checks = true` is set in `[profile.release]` (root Cargo.toml); golden d57b5c8ae3096614 unchanged on all five machines in golden-matrix run 39054403838. Landed aed3b648. ARENA frame-split p50 8.164 ms before (`fc1-frame-cost-20261013.md`) vs 0.976/0.801/1.041 ms after (`arena-20261017T0314Z-1/2/3.csv`); `node tools/proof.mjs --skip-build` prints the legacy golden d57b5c8ae3096614 (the tool runs the golden once by design, `GOLDEN_VERIFY_RUNS = 1`, so the old double print is retired); the engine-ossim docs-coverage baseline is recorded.
   (`Cargo.toml:218-221`) sets none while comments at `:227,238` say checks stay
   on, and proof runs use `--release` (`tools/proof.mjs:401`). Set
   `overflow-checks = true`, measure the cost. Diff: regular. Tier A. Size S.

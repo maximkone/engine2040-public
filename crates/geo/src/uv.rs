@@ -115,6 +115,41 @@ mod ffi {
         pub texels_per_unit: f32,
     }
 
+    // These two structs are mirrored by hand in `vendor/xatlas_shim.cpp`. The
+    // compiler cannot check an FFI declaration, and Miri cannot run foreign
+    // code, so pin both sizes and every Rust field offset here; the shim pins
+    // the same sizes with `static_assert`.
+    const _: () = {
+        assert!(core::mem::size_of::<Params>() == 80);
+        assert!(core::mem::offset_of!(Params, max_chart_area) == 0);
+        assert!(core::mem::offset_of!(Params, max_boundary_length) == 4);
+        assert!(core::mem::offset_of!(Params, normal_deviation_weight) == 8);
+        assert!(core::mem::offset_of!(Params, roundness_weight) == 12);
+        assert!(core::mem::offset_of!(Params, straightness_weight) == 16);
+        assert!(core::mem::offset_of!(Params, normal_seam_weight) == 20);
+        assert!(core::mem::offset_of!(Params, texture_seam_weight) == 24);
+        assert!(core::mem::offset_of!(Params, max_cost) == 28);
+        assert!(core::mem::offset_of!(Params, max_iterations) == 32);
+        assert!(core::mem::offset_of!(Params, use_input_uvs) == 36);
+        assert!(core::mem::offset_of!(Params, fix_winding) == 40);
+        assert!(core::mem::offset_of!(Params, max_chart_size) == 44);
+        assert!(core::mem::offset_of!(Params, padding) == 48);
+        assert!(core::mem::offset_of!(Params, texels_per_unit) == 52);
+        assert!(core::mem::offset_of!(Params, resolution) == 56);
+        assert!(core::mem::offset_of!(Params, bilinear) == 60);
+        assert!(core::mem::offset_of!(Params, block_align) == 64);
+        assert!(core::mem::offset_of!(Params, brute_force) == 68);
+        assert!(core::mem::offset_of!(Params, rotate_charts_to_axis) == 72);
+        assert!(core::mem::offset_of!(Params, rotate_charts) == 76);
+        assert!(core::mem::size_of::<Info>() == 24);
+        assert!(core::mem::offset_of!(Info, width) == 0);
+        assert!(core::mem::offset_of!(Info, height) == 4);
+        assert!(core::mem::offset_of!(Info, chart_count) == 8);
+        assert!(core::mem::offset_of!(Info, vertex_count) == 12);
+        assert!(core::mem::offset_of!(Info, index_count) == 16);
+        assert!(core::mem::offset_of!(Info, texels_per_unit) == 20);
+    };
+
     extern "C" {
         fn geo_xatlas_generate(
             positions: *const f32,

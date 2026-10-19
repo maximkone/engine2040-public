@@ -137,6 +137,13 @@ impl SightWorld {
                 solids.push(b);
             }
         }
+        Self::with_parts(solids, boxes)
+    }
+
+    /// World from its solids and id map. The tests build exact integer boxes
+    /// directly (zero-size rows, a face sitting on one centimetre) that a
+    /// float actor snapshot cannot express.
+    fn with_parts(solids: Vec<Box3>, boxes: BTreeMap<u32, Box3>) -> Self {
         Self { solids, boxes }
     }
 
@@ -246,6 +253,11 @@ pub(crate) fn contains(b: &Box3, p: [i32; 3]) -> bool {
 /// neither `contains` nor the slab test can hold. The gap test is strict, so
 /// boxes that merely touch the AABB still reach the exact slab test and keep
 /// the documented touching semantics.
+///
+/// A vectorised lane form of this gap test was measured on the 404-solid,
+/// 600-ray fixture and reverted: eight-lane compares made the isolated filter
+/// 2x faster, but a median ray exits early, the exact slab tests dominate, and
+/// the paired batched ratio stayed at 1.00x (0.98-1.06x across runs).
 fn blocked(world: &SightWorld, e: [i32; 3], t: [i32; 3]) -> bool {
     let d = [
         i64::from(t[0]) - i64::from(e[0]),
@@ -1352,6 +1364,51 @@ mod tests {
             }
         }
         false
+    }
+
+    /// Touching semantics, proven literally: a box whose face sits exactly on
+    /// the segment AABB plane still reaches the exact slab test and blocks
+    /// when it spans the segment; one centimetre of strict gap clears; a
+    /// zero-size box on the segment is a zero-length touch and never blocks.
+    /// A reject using `<=`/`>=` would drop the touching box and read clear,
+    /// so this is the guard on the strict gap test.
+    #[test]
+    fn blocked_touching_face_blocks_beyond_the_filter() {
+        let (e, t) = ([500, 160, -500], [500, 160, 500]);
+        let touch = Box3 {
+            id: 1,
+            min_x: 500,
+            max_x: 700,
+            min_y: 100,
+            max_y: 200,
+            min_z: -100,
+            max_z: 100,
+        };
+        let point = Box3 {
+            id: 2,
+            min_x: 500,
+            max_x: 500,
+            min_y: 160,
+            max_y: 160,
+            min_z: 0,
+            max_z: 0,
+        };
+        for (solid, want, why) in [
+            (touch, true, "touching face spans the segment"),
+            (
+                Box3 {
+                    min_x: 501,
+                    ..touch
+                },
+                false,
+                "one cm of strict gap",
+            ),
+            (point, false, "zero-size touch"),
+        ] {
+            let world = SightWorld::with_parts(vec![solid], BTreeMap::new());
+            assert_eq!(blocked(&world, e, t), want, "{why}");
+            assert_eq!(old_blocked(&world, e, t), want, "{why} (full scan)");
+        }
     }
 
     /// Room shell plus a 5x5 pillar field and five crates: axis-aligned,

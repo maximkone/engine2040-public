@@ -1657,4 +1657,114 @@ mod tests {
         });
         assert_eq!(heap.calls, 0, "authority tick must stay allocation-free");
     }
+
+    /// Measure the steering response instead of trusting the five magic
+    /// rates. A wish past `STRAFE_CROSS` (about 40.5 deg) is a Strafe and
+    /// holds facing, so 90 and 180 degree wishes cannot settle; the turn
+    /// envelope is measured on 10-40 degree steps, where `turn_facing` runs.
+    /// Prints one row per case under `--nocapture`; no behaviour change.
+    #[test]
+    fn turn_response_is_measured() {
+        fn dot(f: [f32; 2], t: [f32; 2]) -> f32 {
+            f[0] * t[0] + f[1] * t[1]
+        }
+
+        // Fixed unit dirs: no transcendental call runs in this simulation
+        // crate, even in a test.
+        let cases: [(&str, [f32; 2], f32, f32); 8] = [
+            ("walk 10", [0.173_648, 0.984_808], 1.5, 1.5),
+            ("walk 20", [0.342_020, 0.939_693], 1.5, 1.5),
+            ("walk 30", [0.500_000, 0.866_025], 1.5, 1.5),
+            ("walk 40", [0.642_788, 0.766_044], 1.5, 1.5),
+            ("run 10", [0.173_648, 0.984_808], 4.0, 4.0),
+            ("run 20", [0.342_020, 0.939_693], 4.0, 4.0),
+            ("run 30", [0.500_000, 0.866_025], 4.0, 4.0),
+            ("run 40", [0.642_788, 0.766_044], 4.0, 4.0),
+        ];
+        for (label, target, speed, pre) in cases {
+            let fwd = [0.0, 1.0];
+            let mut m = Locomotion::new();
+            let mut tick = 0u32;
+            for _ in 0..(START_TICKS + 4) {
+                m.update(pre, fwd, tick, None).unwrap();
+                tick += 1;
+            }
+            let dot0 = dot(m.facing(), target);
+            let denom = (1.0 - dot0).max(1e-6);
+            let start_tick = tick;
+            let first = m.update(speed, target, tick, None).unwrap();
+            tick += 1;
+            let first_state = m.state;
+            let mut peak_dyaw = first.root.dyaw.abs();
+            let mut peak = (dot(m.facing(), target) - dot0) / denom;
+            let mut settle = (peak >= 0.9).then_some(0);
+            for _ in 1..120 {
+                let out = m.update(speed, target, tick, None).unwrap();
+                tick += 1;
+                let progress = (dot(m.facing(), target) - dot0) / denom;
+                peak = peak.max(progress);
+                peak_dyaw = peak_dyaw.max(out.root.dyaw.abs());
+                if settle.is_none() && progress >= 0.9 {
+                    settle = Some(tick - start_tick);
+                }
+            }
+            let overshoot = ((peak - 1.0).max(0.0) * 1000.0).round() as u32;
+            println!(
+                "turn-response {label}: settle90={settle:?} overshoot={overshoot}/1000 \
+                 peak_dyaw={peak_dyaw:.4} first={first_state:?} last={:?}",
+                m.state
+            );
+            let s = settle.expect("a step under STRAFE_CROSS turns and settles");
+            assert!((2..=18).contains(&s), "{label} settle moved: {s}");
+            assert!(overshoot <= 10, "{label} overshoot moved: {overshoot}");
+            let cap = if speed <= WALK_MAX {
+                TURN_WALK
+            } else {
+                TURN_RUN
+            };
+            assert!(peak_dyaw <= cap + 1e-6, "{label} rate moved: {peak_dyaw}");
+        }
+
+        // Hard lateral and reversal wishes: Strafe holds facing and Pivot
+        // snaps at TURN_PIVOT for its transient, so neither reaches 90%.
+        for (label, target, speed) in [
+            ("walk 90", [1.0, 0.0], 1.5),
+            ("run 90", [1.0, 0.0], 4.0),
+            ("pivot 180", [0.0, -1.0], 1.5),
+        ] {
+            let fwd = [0.0, 1.0];
+            let mut m = Locomotion::new();
+            let mut tick = 0u32;
+            for _ in 0..(START_TICKS + 4) {
+                m.update(speed, fwd, tick, None).unwrap();
+                tick += 1;
+            }
+            let facing = m.facing();
+            let first = m.update(speed, target, tick, None).unwrap();
+            tick += 1;
+            let first_state = m.state;
+            let mut peak_dyaw = first.root.dyaw.abs();
+            for _ in 1..120 {
+                let out = m.update(speed, target, tick, None).unwrap();
+                tick += 1;
+                peak_dyaw = peak_dyaw.max(out.root.dyaw.abs());
+            }
+            println!(
+                "turn-response {label}: first={first_state:?} last={:?} peak_dyaw={peak_dyaw:.4} \
+                 facing_held={}",
+                m.state,
+                m.facing() == facing
+            );
+            if label == "pivot 180" {
+                assert!(
+                    (peak_dyaw - TURN_PIVOT).abs() < 1e-6,
+                    "pivot rate moved: {peak_dyaw}"
+                );
+            } else {
+                assert_eq!(first_state, LocoState::Strafe, "{label} must strafe");
+                assert_eq!(m.facing(), facing, "{label} must hold facing");
+                assert_eq!(peak_dyaw, 0.0, "{label} must not turn");
+            }
+        }
+    }
 }

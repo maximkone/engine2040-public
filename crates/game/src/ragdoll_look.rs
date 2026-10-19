@@ -282,6 +282,41 @@ struct Kick {
     standing: SlotAnim,
 }
 
+/// One bone a live ragdoll lost (QR12): the limb group that took it and where the cap rides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SeveredBone {
+    /// Slot the ragdoll belongs to.
+    slot: u8,
+    /// Physical bone that left, and its parent, both indices of the `BONES` table.
+    bone: u16,
+    parent: u16,
+    /// Limb group id the body moved to.
+    part: u32,
+    /// Cut point in the parent bone's frame, meters.
+    local: [f32; 3],
+    /// Cap radius, meters.
+    radius_m: f32,
+}
+
+/// A stump cap on a ragdoll that lost a bone, in world meters: where the look closes the wound.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RagdollStump {
+    /// Slot that lost the bone.
+    pub slot: u8,
+    /// Physical bone that left.
+    pub bone: u16,
+    /// CT7 joint name of that bone (the `BONES` table).
+    pub joint: &'static str,
+    /// Limb group the body moved to.
+    pub part: u32,
+    /// Cap center, meters.
+    pub pos: [f32; 3],
+    /// Cap orientation, unit quaternion `[x, y, z, w]`.
+    pub rot: [f32; 4],
+    /// Cap radius, meters.
+    pub radius_m: f32,
+}
+
 /// One live ragdoll of a slot.
 #[derive(Clone, Debug)]
 struct Body {
@@ -323,6 +358,14 @@ pub(super) struct RagdollLook {
     towed: [bool; MAX_LOOK_FIGHTERS],
     /// Ticks of level carry left after the tether ended.
     landing: [u32; MAX_LOOK_FIGHTERS],
+    /// Bones a live ragdoll lost (QR12), in sever order.
+    severed: Vec<SeveredBone>,
+    /// A cue says this slot's fighter went down (QR12): its live ragdoll loses one arm.
+    arm_down: [bool; MAX_LOOK_FIGHTERS],
+    /// One arm already left this slot's ragdoll (QR12): one arm per slot, never twice.
+    arm_lost: [bool; MAX_LOOK_FIGHTERS],
+    /// Next limb group id handed to the physical layer.
+    next_part: u32,
     stepped: Option<u32>,
     spawned: u32,
     refused: u32,
@@ -346,6 +389,10 @@ impl RagdollLook {
             flight: [false; MAX_LOOK_FIGHTERS],
             towed: [false; MAX_LOOK_FIGHTERS],
             landing: [0; MAX_LOOK_FIGHTERS],
+            severed: Vec::new(),
+            arm_down: [false; MAX_LOOK_FIGHTERS],
+            arm_lost: [false; MAX_LOOK_FIGHTERS],
+            next_part: 1,
             stepped: None,
             spawned: 0,
             refused: 0,
@@ -377,6 +424,10 @@ impl RagdollLook {
         self.flight = [false; MAX_LOOK_FIGHTERS];
         self.towed = [false; MAX_LOOK_FIGHTERS];
         self.landing = [0; MAX_LOOK_FIGHTERS];
+        self.severed.clear();
+        self.arm_down = [false; MAX_LOOK_FIGHTERS];
+        self.arm_lost = [false; MAX_LOOK_FIGHTERS];
+        self.next_part = 1;
         self.stepped = None;
     }
 
@@ -456,6 +507,15 @@ fn length(v: [f32; 3]) -> f32 {
     (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
+/// The transform of `key` at `alpha`, meters, or `None` when the world does not hold it.
+fn placed(fx: &PhysFx, key: Key, alpha: f32) -> Option<Transform> {
+    fx.transforms(alpha)
+        .ok()?
+        .into_iter()
+        .find(|one| one.key == key)
+        .map(|one| one.at)
+}
+
 /// The turn about +Y by `yaw` that `root_matrix` makes: forward +Z goes to `(sin, 0, cos)`.
 fn yaw_quat(yaw: f32) -> [f32; 4] {
     let (s, c) = (yaw * 0.5).sin_cos();
@@ -503,6 +563,77 @@ struct Start<'a> {
 }
 
 impl RagdollLook {
+    /// Severs one bone of `slot`'s live ragdoll into a limb group of its own (QR12) and records
+    /// where the stump cap rides on the parent. `false` when the slot has no ragdoll. A refusal
+    /// (a bone the rig lacks, the root, a bone already gone) leaves the world unchanged.
+    fn sever(&mut self, slot: u8, bone: u16) -> Result<bool, FxError> {
+        let Some(fx) = self.fx.as_mut() else {
+            return Ok(false);
+        };
+        let part = self.next_part;
+        let Some(severed) = fx.sever(slot, bone, part)? else {
+            return Ok(false);
+        };
+        let Some(parent) = severed.parent else {
+            return Ok(false);
+        };
+        let (Some(at), Some(above)) = (
+            placed(fx, Key::Bone { slot, bone }, 1.0),
+            placed(fx, Key::Bone { slot, bone: parent }, 1.0),
+        ) else {
+            return Ok(false);
+        };
+        // A capsule sits centered on its bone, so the cut end is half a capsule back along the
+        // bone's own +Y. The cap then rides the parent, not the falling limb.
+        let half = BONES
+            .get(usize::from(bone))
+            .map_or(0.0, |row| row.half_height_m + row.radius_m);
+        let cut = sub(at.pos, rotate(at.rot, [0.0, half, 0.0]));
+        let local = rotate(conj(above.rot), sub(cut, above.pos));
+        let radius_m = BONES.get(usize::from(bone)).map_or(0.0, |row| row.radius_m);
+        self.severed.push(SeveredBone {
+            slot,
+            bone,
+            parent,
+            part,
+            local,
+            radius_m,
+        });
+        self.next_part = self.next_part.saturating_add(1);
+        Ok(true)
+    }
+
+    /// Notes that a cue says `slot`'s fighter went down (QR12): the slot's next live
+    /// ragdoll loses one arm. The lethal blow's own `Hit` travels with the same
+    /// `Knockdown` cue (the app folds hp to zero there), so one note covers both shapes.
+    /// A slot that already lost an arm keeps the note off. Plain presentation state the
+    /// sim never reads.
+    fn note_arm_down(&mut self, slot: u8) {
+        let index = usize::from(slot);
+        if index < MAX_LOOK_FIGHTERS && !self.arm_lost[index] {
+            self.arm_down[index] = true;
+        }
+    }
+
+    /// The arm bone this slot's next cut takes: the first arm still on the body, left
+    /// then right. `None` when both already left (a page cut them by hand). The rule is
+    /// fixed, so the same cues give the same bone twice. The cut is the forearm, so the
+    /// free chain is light and the body settles as fast as it did whole.
+    fn arm_bone(&self, slot: u8) -> Option<u16> {
+        for joint in ["arm_lower_l", "arm_lower_r"] {
+            let index = BONES.iter().position(|bone| bone.joint == joint)?;
+            let bone = u16::try_from(index).ok()?;
+            let gone = self
+                .severed
+                .iter()
+                .any(|one| one.slot == slot && one.bone == bone);
+            if !gone {
+                return Some(bone);
+            }
+        }
+        None
+    }
+
     /// Spawns the ragdoll of `slot` from `start`.
     fn spawn(&mut self, slot: usize, start: &Start<'_>) -> Result<(), FxError> {
         let Start {
@@ -750,7 +881,13 @@ impl FighterLook {
     /// on it, if any. Called from the cue fold.
     pub(super) fn ragdoll_note_knockdown(&mut self, attacker: u8, victim: u8, cues: &[FightCue]) {
         let index = usize::from(victim);
-        if !self.ragdoll.on || index >= MAX_LOOK_FIGHTERS || self.ragdoll.has(index) {
+        if !self.ragdoll.on || index >= MAX_LOOK_FIGHTERS {
+            return;
+        }
+        // QR12: the cue says the fighter went down, so a live ragdoll of the slot loses
+        // one arm; the cut runs in `ragdoll_tick` (see `ragdoll_sever_cued_arms`).
+        self.ragdoll.note_arm_down(victim);
+        if self.ragdoll.has(index) {
             return;
         }
         let damage = cues
@@ -868,9 +1005,44 @@ impl FighterLook {
                 self.ragdoll.step();
             }
         }
+        // QR12: a fall whose own cue says the fighter went down loses one arm of the
+        // slot, cut once the world has placed the body, so the wound is taken from a
+        // settled frame and the pose the viewer saw does not pop.
+        self.ragdoll_sever_cued_arms();
         for index in 0..MAX_LOOK_FIGHTERS {
             if std::mem::take(&mut self.ragdoll.stand[index]) {
                 self.ragdoll_stand_up(index);
+            }
+        }
+    }
+
+    /// Severs one arm of each live ragdoll whose own cue says the fighter went down (QR12):
+    /// the first arm still on the body, left then right, once per slot. A slot with no live
+    /// body yet keeps its note and waits for the next tick; a refusal leaves the body whole.
+    /// Presentation only: the sim never reads this.
+    fn ragdoll_sever_cued_arms(&mut self) {
+        for index in 0..MAX_LOOK_FIGHTERS {
+            if !self.ragdoll.arm_down[index] || self.ragdoll.arm_lost[index] {
+                continue;
+            }
+            if !self.ragdoll.has(index) {
+                continue;
+            }
+            let Ok(slot) = u8::try_from(index) else {
+                continue;
+            };
+            let Some(bone) = self.ragdoll.arm_bone(slot) else {
+                // Both arms already left: nothing this layer may cut.
+                self.ragdoll.arm_down[index] = false;
+                continue;
+            };
+            match self.sever_ragdoll(slot, bone) {
+                Ok(true) => {
+                    self.ragdoll.arm_down[index] = false;
+                    self.ragdoll.arm_lost[index] = true;
+                }
+                // No live body to cut, or a refusal: the body stays whole.
+                Ok(false) | Err(_) => self.ragdoll.arm_down[index] = false,
             }
         }
     }
@@ -1066,6 +1238,50 @@ impl FighterLook {
         })
     }
 
+    /// Severs one physical bone (`bone`, an index of the `BONES` table) from the live ragdoll of
+    /// `slot` (QR12): the bone leaves the ragdoll group as its own limb group and the stump cap
+    /// is recorded for [`Self::ragdoll_stumps`]. `false` when the slot is not a ragdoll. The
+    /// layer only paints what authority says; the sim never reads this. Errors: the physical
+    /// layer's refusal, which leaves the body joined.
+    pub fn sever_ragdoll(&mut self, slot: u8, bone: u16) -> Result<bool, super::LookError> {
+        if !self.ragdoll.on {
+            return Ok(false);
+        }
+        self.ragdoll
+            .sever(slot, bone)
+            .map_err(|err| super::LookError::Skin(err.to_string()))
+    }
+
+    /// The stump caps of every bone a live ragdoll lost (QR12), at sub-tick `alpha`: where the
+    /// look closes the wound. Empty until a sever; a parent the world recycled drops its cap.
+    /// Presentation only: never hashed.
+    #[must_use]
+    pub fn ragdoll_stumps(&self, alpha: f32) -> Vec<RagdollStump> {
+        let Some(fx) = self.ragdoll.fx.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(self.ragdoll.severed.len());
+        for one in &self.ragdoll.severed {
+            let key = Key::Bone {
+                slot: one.slot,
+                bone: one.parent,
+            };
+            let Some(above) = placed(fx, key, alpha) else {
+                continue;
+            };
+            out.push(RagdollStump {
+                slot: one.slot,
+                bone: one.bone,
+                joint: BONES.get(usize::from(one.bone)).map_or("", |row| row.joint),
+                part: one.part,
+                pos: add(above.pos, rotate(above.rot, one.local)),
+                rot: above.rot,
+                radius_m: one.radius_m,
+            });
+        }
+        out
+    }
+
     /// The bones of a ragdolled `slot` at `alpha` in its root frame, or `None`.
     pub(super) fn ragdoll_pose(
         &self,
@@ -1086,7 +1302,6 @@ impl FighterLook {
         )
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1728,5 +1943,125 @@ mod tests {
         let up = up_at.expect("the body landed and got up");
         assert!(up >= 80, "not before the level carry ran out: {up}");
         assert!(look.ragdolls() == 0 && !look.ragdolled(1));
+    }
+
+    #[test]
+    fn ragdoll_sever_takes_the_arm_and_caps_the_stump_twice_the_same() {
+        // The sim's own `Fallen` gait drops the body with no cue, so the automatic
+        // cue-driven sever (QR12) stays out of the way and this pins the manual API.
+        let run = || {
+            let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+            let views = ring(2);
+            let hp = [1000u16; 2];
+            for t in 0..40u32 {
+                look.observe_tick(t, &views, &hp, &[]);
+                let shown = look.ragdoll_fold_gait(1, GaitPhase::Fallen);
+                look.observe_balance(1, shown);
+                look.ragdoll_tick();
+            }
+            assert_eq!(look.ragdolls(), 1, "slot 1 fell as a ragdoll");
+            let arm = BONES
+                .iter()
+                .position(|row| row.joint == "arm_upper_l")
+                .expect("the table has the arm");
+            let bone = u16::try_from(arm).expect("fits");
+            assert!(look.sever_ragdoll(1, bone).expect("sever"));
+            let world = look.ragdoll.fx.as_ref().expect("the world exists");
+            assert_eq!(
+                world.ragdoll_bones(1),
+                Some(BONE_COUNT - 1),
+                "the parent keeps fourteen bones"
+            );
+            let part = look.ragdoll.severed.last().expect("record").part;
+            assert_eq!(world.limb_bodies(part), Some(1), "the arm is its own group");
+            let stumps = look.ragdoll_stumps(0.5);
+            assert_eq!(stumps.len(), 1, "one stump for the one cut");
+            assert_eq!(stumps[0].joint, "arm_upper_l");
+            assert!((0.01..=0.2).contains(&stumps[0].radius_m));
+            assert!(stumps[0].pos.iter().all(|v| v.is_finite()));
+            println!(
+                "ragdoll sever: bone={bone} part={part} cap={:?} r={:.3}",
+                stumps[0].pos, stumps[0].radius_m
+            );
+            assert!(look.ragdolled(1), "the body keeps drawing");
+            // One bone severs once.
+            assert!(
+                look.sever_ragdoll(1, bone).is_err(),
+                "a second sever refuses"
+            );
+            stumps
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "the same sever twice gives the same cap");
+    }
+
+    #[test]
+    fn ragdoll_knockdown_cue_severs_one_arm_and_draws_the_same_cap_twice() {
+        use crate::ragdoll_stump_draw::{push_stump_caps, stump_cap_mesh, stump_mesh_key};
+        use engine_render::present::{DrawList, MeshKey};
+
+        // QR12: the slot's own knockdown cue (the lethal blow) takes one arm of its live
+        // ragdoll, cut before the body's first step, so nothing new enters the sim.
+        let run = || {
+            let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+            let views = ring(2);
+            let mut hp = vec![1000u16; 2];
+            for t in 0..30u32 {
+                let cues = if t == 10 {
+                    hp[1] = 0;
+                    vec![hit(0, 1), knock(0, 1)]
+                } else {
+                    Vec::new()
+                };
+                tick(&mut look, t, &views, &hp, &cues);
+            }
+            assert_eq!(look.ragdolls(), 1, "slot 1 fell as a ragdoll");
+            let world = look.ragdoll.fx.as_ref().expect("the world exists");
+            assert_eq!(
+                world.ragdoll_bones(1),
+                Some(BONE_COUNT - 1),
+                "the parent keeps fourteen bones"
+            );
+            // One arm per slot, never twice: a second knockdown cue takes nothing.
+            look.observe_tick(31, &views, &hp, &[knock(0, 1)]);
+            look.ragdoll_tick();
+            let stumps = look.ragdoll_stumps(0.5);
+            assert_eq!(stumps.len(), 1, "one arm per slot, never twice");
+            assert_eq!(stumps[0].slot, 1);
+            assert_eq!(stumps[0].joint, "arm_lower_l", "left arm first, then right");
+            assert!(look.ragdolled(1), "the body keeps drawing");
+            // The cap mesh the draw helper builds and the draws it pushes.
+            let mesh = stump_cap_mesh(&stumps[0]).expect("the cap mesh builds");
+            let scene = engine_render::v1::default_scene(64, 64).expect("scene");
+            let mut list = DrawList {
+                camera: scene.camera,
+                light: scene.light,
+                items: Vec::new(),
+            };
+            let resident: Vec<MeshKey> = stumps
+                .iter()
+                .map(|stump| stump_mesh_key(stump.slot))
+                .collect();
+            let draws = push_stump_caps(&mut list, &resident, &stumps).expect("caps push");
+            assert_eq!((draws, list.items.len()), (1, 1), "one cap draw");
+            (stumps, mesh, list.items)
+        };
+        let (stumps, mesh, items) = run();
+        println!(
+            "ragdoll sever on cue: joint={} slot={} r={:.3} cap_verts={} draws={}",
+            stumps[0].joint,
+            stumps[0].slot,
+            stumps[0].radius_m,
+            mesh.positions.len(),
+            items.len()
+        );
+        let (again_stumps, again_mesh, again_items) = run();
+        assert_eq!(
+            stumps, again_stumps,
+            "the same cue severs the same bone twice"
+        );
+        assert_eq!(mesh, again_mesh, "the same cap mesh twice");
+        assert_eq!(items, again_items, "the same cap draws twice");
     }
 }

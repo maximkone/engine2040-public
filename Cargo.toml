@@ -303,13 +303,18 @@ lto = "fat"
 codegen-units = 1
 
 # WEB4: the browser build (tools/web-build.mjs runs `cargo build --profile web --target
-# wasm32-unknown-unknown -p engine-web`). Size first: opt-level z, one codegen unit, fat LTO,
-# panic=abort (a wasm panic cannot unwind anyway). overflow-checks stays on, inherited from
-# release, so wasm panics where native panics instead of wrapping. Nothing but that command
-# uses this profile, so native builds are unchanged.
+# wasm32-unknown-unknown -p engine-web`). Speed over size since QW15 (2026-10-19): the A/B on
+# the played page (`?fight`) measured frame CPU 5.95 ms at opt-level z against 2.64 ms at
+# opt-level 3 (the page's own split line, sim 5.56 -> 2.31 ms, render 0.39 -> 0.33 ms), with the
+# frame at 11.3 ms either way because 1280x800 presents on the display clock; the win is CPU
+# headroom on weaker machines. Size: wasm 1067194 -> 1319755 bytes (gzip 462762 -> 528682),
+# against the tools/web-budget.json wasm limit 4250000. One codegen unit, fat LTO, panic=abort
+# (a wasm panic cannot unwind anyway); overflow-checks stays on, inherited from release, so wasm
+# panics where native panics instead of wrapping. Nothing but that command uses this profile, so
+# native builds are unchanged.
 [profile.web]
 inherits = "release"
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

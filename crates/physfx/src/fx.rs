@@ -4,10 +4,12 @@ mod blast;
 mod hit;
 mod joints;
 mod receipt;
+mod sever;
 mod tether;
 
 pub use hit::HIT_FADE_S;
 pub use receipt::RagdollReceipt;
+pub use sever::Severed;
 pub use tether::TetherInfo;
 
 use crate::caps::{Caps, Tier};
@@ -69,6 +71,9 @@ struct Group {
     receipt: Option<RagdollReceipt>,
     /// The joint motors of a ragdoll; `None` for every other group.
     drive: Option<hit::Drive>,
+    /// Parent bone of every bone, in skeleton order; empty for every other group. `sever` reads
+    /// the joint this names, so the ragdoll keeps no second copy of its rig.
+    parents: Vec<Option<usize>>,
 }
 
 /// A clock that always reads zero: the default, so the crate never touches `Instant`.
@@ -249,11 +254,13 @@ impl PhysFx {
         let filtered = self.switch_off_overlaps(rig, &overlaps, &handles);
         let receipt = self.measure_ragdoll(rig, &handles, overlaps.len(), filtered);
         let drive = self.spawn_drive(rig, &placed, &handles);
+        let parents = (0..need).map(|bone| rig.parent(bone)).collect();
         self.groups.push(Group {
             id: GroupId::Ragdoll(slot),
             bodies,
             receipt: Some(receipt),
             drive: Some(drive),
+            parents,
         });
         Ok(())
     }
@@ -350,6 +357,7 @@ impl PhysFx {
                 bodies: vec![index],
                 receipt: None,
                 drive: None,
+                parents: Vec::new(),
             });
         }
         Ok(Batch { id, admitted })
@@ -433,6 +441,7 @@ impl PhysFx {
             bodies: vec![index],
             receipt: None,
             drive: None,
+            parents: Vec::new(),
         });
         handle
     }

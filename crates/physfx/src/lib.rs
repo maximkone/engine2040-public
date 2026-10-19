@@ -46,6 +46,9 @@
 //! - `PhysFx::hit_ragdoll` spreads a blow over the bones near it, its total unchanged, and makes
 //!   the joints brace: a PD motor holds each joint at its spawn angle with a strength that falls
 //!   from 1 to 0 over `HIT_FADE_S`.
+//! - `PhysFx::sever` takes one bone out of a ragdoll into a `Limb` group of its own, removes the
+//!   joint to its parent and leaves the chain below jointed to it, so the limb falls away while
+//!   the ragdoll keeps the rest of its bones. The cut is authority; this only paints it.
 //! - Bodies sleep. A sleeping body costs no solver work and reads back the same transform every
 //!   frame.
 //! - Bad input (NaN, infinity, out of range) is refused with a typed `Error` before anything
@@ -83,7 +86,7 @@ pub use engine_physics::ragdoll::BoneShape;
 #[cfg(feature = "rapier")]
 pub use error::{Error, Field};
 #[cfg(feature = "rapier")]
-pub use fx::{PhysFx, RagdollReceipt, TetherInfo, HIT_FADE_S};
+pub use fx::{PhysFx, RagdollReceipt, Severed, TetherInfo, HIT_FADE_S};
 #[cfg(feature = "rapier")]
 pub use rig::{Hinge, Rig};
 #[cfg(feature = "rapier")]

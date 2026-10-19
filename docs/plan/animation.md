@@ -26,12 +26,13 @@ skinning, AM11 springs. Their evidence paths are in git (`pack.rs`, `dq.rs`, `sp
 | GASP-class ground feel (LM2) | missing (rowed) | `crates/anim/src/warp_ground.rs` does not exist yet; needs LM1, AM6 (ticked) |
 | Networked motion (LM3) | missing (rowed) | `crates/anim/src/net_pose.rs` present on disk; needs LM1, NET2 |
 | Animation LOD (AM13) | missing (rowed) | `crates/anim/src/lod.rs` present on disk; needs AM1, LM1 |
-| Parallel SIMD eval (AM14) | missing (rowed) | no `crates/anim/src/par.rs`; needs AM1, RC3 |
-| Additive layers spine (AM15) | missing (rowed) | no `crates/anim/src/additive.rs`; hit-react rides AM3 today |
+| Parallel SIMD eval (AM14) | present, 0 live callers (rowed) | `crates/anim/src/par.rs` on disk; equality 0/1/2/4/8 workers bit-identical; 2.0x on 64 fighters, the 3x bar is open and no game caller; needs AM1, RC3 |
+| Additive layers spine (AM15) | present, 0 live callers (rowed) | `crates/anim/src/additive.rs` on disk with 7 tests and a per-tick budget; `fighter_look.rs:2078-2085` still uses a pelvis-only flinch, so `AdditiveRig::tick` has no game caller |
 | Thousand-agent crowd pose budget (AM18) | missing (rowed) | needs AM13 |
 
 - Status 2026-10-12: LM2 row above says `crates/anim/src/warp_ground.rs` does not exist yet, but `crates/anim/src/warp_ground.rs` exists on disk, so that cell is false.
 - Status 2026-10-17: disk shows the false LM2 cell still at `docs/plan/animation.md:26` ("`crates/anim/src/warp_ground.rs` does not exist yet; needs LM1, AM6 (ticked)") with the 2026-10-12 Status at `:33` already marking it false, and the same "does not exist" claim a second time in this file's LM2 note (`:220` before this line was added, now `:221`), while the code side holds: `crates/anim/src/warp_ground.rs` on disk (Test-Path True, Length 27849) plus `crates/anim/src/warp_ground_feel_test.rs` (Test-Path True), the live consumer `use engine_anim::warp_ground::GroundWarp;` at `crates/arena/src/lib.rs:102` with the warp vector at `:1047` and `:1196`, and this file's `:145` recording it "landed with no window caller", so the S7 gap still holds and only the two "does not exist" lines stay false.
+- Status 2026-10-19: Dunsky, Mastering C++ Game Animation Programming (2025), confirms the two code-side gaps: `par.rs` and `additive.rs` exist with 0 live callers, so the "no file" cells at :29-30 are false. Reader: `work/nb-gaps/nb-gaps-anim-dunsky.txt`; ledger: `BOOK-GAPS-3-2026-10-19.md`.
 
 Open tail, in one line: starts, stops and pivots must match distance; remote
 fighters must pose the same after rollback; crowds cheapen with distance; eval
@@ -143,7 +144,7 @@ pub fn search(db: &MotionDb, q: &Query) -> (MatchResult, SearchReceipt); // LM1,
 ```
 
 **Steals 2026-10-12** (board shard `../SPRINT-21-look-feel.md`, scout files `../research/steals-2026-10-12/`). Window pose stages, view only: clip sample and fade -> inertialize (deepen `inertialize.rs`; there is no `inertial.rs`) -> rotation-additive flinch (AM23) -> look-at with soft limits (AM25) -> hand and foot IK (`ik.rs` exists; LF12 wires it) -> spring chains -> angular-speed limiter (AM24) -> pelvis pin. Each stage writes slerp(current, wanted, influence) (Godot modifier pattern). Stage state advances in observe_tick at 60 Hz and is evaluated at alpha, so slot_pose stays a pure function of tick and alpha.
-- Fix: `crates/anim/src/warp_ground.rs` exists and the arena uses GroundWarp (`crates/arena/src/lib.rs:98`). Landed with no window caller: hit_react, inertialize, ik, fbik, springs, lod (Grep engine_anim in crates/game/src finds only contract and pose).
+- Fix: `crates/anim/src/warp_ground.rs` exists and the arena uses GroundWarp (`crates/arena/src/lib.rs:98`). The live view now uses inertial (`fighter_look_inertia.rs:20`), ik (`fighter_look_feet.rs:24`), throw_layer (`fighter_look_throw.rs:18`) and hit_react (`fighter_look.rs:24`); additive, fbik, springs and lod still have no live caller.
 
 ## 4. Hard problems
 

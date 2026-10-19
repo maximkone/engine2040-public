@@ -23,7 +23,7 @@
 //! turns the animation-frame timestamp into 60 fixed steps a second; [`tier_view`] holds the frame pacing
 //! (window, ladder, drift, hidden gaps) and the startup probe's bookkeeping, all as plain data.
 //!
-//! The pure parts ([`anim`], [`audio`], [`golden`], [`input`], [`limits`], [`netquery`], [`recovery`], [`report`]) build and
+//! The pure parts ([`anim`], [`audio`], [`content`], [`golden`], [`input`], [`limits`], [`netquery`], [`recovery`], [`report`]) build and
 //! test on every target. The browser glue (`shell`) exists on `wasm32` only, so the native
 //! workspace builds this crate as a library with no web dependencies. It depends on
 //! `engine-proof` (std-only) for the golden check. On `wasm32` it also draws the arena frame
@@ -34,6 +34,7 @@
 pub mod anim;
 pub mod arena_view;
 pub mod audio;
+pub mod content;
 pub mod golden;
 pub mod input;
 pub mod input_tape;

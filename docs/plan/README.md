@@ -12,6 +12,8 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `status-2026-10-17.md` — NOW — all four — one-screen truth check: what is verified green this week, what code was cut, which rows are unbuilt, and the owner's open decisions; read it before trusting a status cell in any plan
 - `web-and-realism.md` — NOW — Look, Bodies, Multiplayer — heavy realistic games on Windows and in the browser: the wasm build, the physical layer (ragdoll, severed limbs, debris), the lit and textured arena, browser multiplayer, and an AI-driven project setup (rows WEB, RZ, VR, AIS)
 - `web-plays-the-match.md` — NOW — Look, Multiplayer — the browser page runs the same match the native window runs (`App` + fixed tick + the fight draw helpers) and draws it with the procedural ring until the cooked kit assets land (row WEB15)
+- `parry-and-limb.md` — NOW — Look, Bodies — the v2 exchange (parry, riposte, clash) made readable in the page, and a lost guard costing a limb that falls into the debris layer (row WEB16 with QR12)
+- `web-real-bodies.md` — NOW — Look — the page draws the real CT7 fighters and the arena kit ring through the window's own look path (`FighterLook` + `FightRing`) from a cooked bundle instead of stand-in boxes (row WEB17)
 - `wiring-triage-2026-10-17.md` — NEXT — all four — what exists but nothing calls: the cut verdicts, 29 unwired features with their missing call sites, ten wirings with paste-ready rows
 - `2026-10-18-wiring-sweep.md` — NEXT — all four — the 20 most valuable unwired pub items in today's crates (endpoint, playtest, render, game, net, assets, web) with path:line, what each serves and its smallest real caller, the 5852 island-count context, and the scan's `#[cfg(test)]` over-reporting caveat
 - `2026-10-18-handoff.md` — NEXT — all four — what is landed, what is unproven, the hard rules and the ordered next steps for a weaker agent after the weekly token limit
@@ -21,7 +23,8 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `2026-10-18-docs-audit.md` — LATER — none — docs/plan pointer sweep: the one missing index line and one gone `systems/` path fixed, with the pinned stale refs, EMPIRE refs and future paths left and listed with reasons
 - `2026-10-19-owner-queue.md` — NOW — all four — the rows only a person can close (a run or a decision) with the exact command or question, and the record of the owner's delegated calls of 2026-10-19 (every A item decided, the 32 obsolete and the gone-code ticks resolved)
 - `2026-10-19-progress.md` — NOW — all four — the dated progress log (pass one to five): rows landed and judged with run ids, the janitor sweeps, and the two tool fixes (`nonstop` timeout classification, `docs-coverage` multi-line attributes)
-- `design-review-2026-10-17.md` — NEXT — all four — 13 ranked design findings (DSN1-DSN13) with a board row each
+- `design-review-2026-10-17.md` - NEXT - all four - 13 ranked design findings (DSN1-DSN13) with a board row each
+- `shady-knight-port.md` - NEXT - Look - the owner's own game as donor: what is ported (walk bob, SG6), the numbers each row uses, and why the rope swing (SG4) waits on a fighter height channel (SG5)
 - `render-look.md` — NOW — Look — moving fighter captures on the RTX 3050 stand beside the references: arena kit, window build, Q1 reference captures
 - `body-and-break.md` — NOW — Bodies — cuts, limbs, ragdoll, collapse and fire give one hash on every PC and in replay (physics base inside)
 - `hard-systems.md` — NOW — AI door — published, reproducible AI-door scores beside rivals, and the proofs behind them
@@ -54,7 +57,8 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `steals.md` — LATER — none — open donor steals per bar, at most 3 per bar (data, not a plan)
 - `rome-spec.md` — LATER — none — shared Rome arena spec for two engines, with the open parity gaps digest
 - `BOOK-GAPS-2026-10-12.md` — NEXT — all four — book review 1 (Gregory GEA, Lengyel, Modern Game Testing) vs code: wired-but-unused W1-W18, render order, decisions D1-D6 (a review, not rows)
-- `BOOK-GAPS-2-2026-10-12.md` — NOW — all four — book review 2 (30 books: engine, math, Rust, architecture, MCP, game design) rows N1-N40; boarded as GP27-GP42, GA13-GA15 and the engine rows in `../SPRINT-20-game.md`
+- `BOOK-GAPS-2-2026-10-12.md` - NOW - all four - book review 2 (30 books: engine, math, Rust, architecture, MCP, game design) rows N1-N40; boarded as GP27-GP42, GA13-GA15 and the engine rows in `../SPRINT-20-game.md`
+- `BOOK-GAPS-3-2026-10-19.md` - NOW - all four - book review 3 (Dunsky, Beuken, GPG8, Rust official docs, shelf) rows D1-D2 on AM14/AM15, G1-G4 as NB3-NB5/AM13, R1-R2 as NB1-NB2 in `../SPRINT-23-books.md`
 - `ATLAS.md` — LATER — none — generated plan map (`node tools/plan-atlas.mjs --write`); never hand-edited
 - `DP1-deepdive.md` — NOW — AI door — stuck-gate deep dive for DP1 endpoint door net plus perf packs
 - `EG8-deepdive.md` — NOW — Look — stuck-gate deep dive for EG8 live pass-truth leg
@@ -162,6 +166,7 @@ FAILs on a plan missing there); a new plan adds its row there in the same commit
 | PLN30 | `potato.md`, `landscape-ideas.md` | GS |
 | — | `rome-spec.md` | none (Rome arena spec; `rome-spec.json` is its machine copy) |
 | — | `steals.md` | none (scout list, not a plan) |
+| — | `EDITOR-INDIE-2026-10-19.md` | EI (SPRINT-24) |
 
 ## Facts to start from
 

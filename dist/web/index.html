@@ -10,6 +10,9 @@
   canvas { display: block; width: 100vw; height: 100vh; }
   #hud { position: fixed; left: 8px; top: 8px; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; }
   #build { position: fixed; left: 8px; bottom: 8px; z-index: 20; margin: 0; padding: 1px 6px; background: rgba(0, 0, 0, 0.55); border-radius: 3px; font-size: 11px; }
+  /* WEB14: cross-origin isolation from the service worker. The line always shows the final state and how often the page reloaded to get there. */
+  #coi { position: fixed; left: 8px; bottom: 30px; z-index: 20; margin: 0; padding: 1px 6px; background: rgba(0, 0, 0, 0.55); border-radius: 3px; font-size: 11px; }
+  body[data-coi="isolated"] #coi { border-left: 3px solid #2fbf4a; }
   #golden { position: fixed; left: 8px; top: 40px; z-index: 20; margin: 0; padding: 4px 8px; background: rgba(0, 0, 0, 0.75); border-left: 4px solid #888; border-radius: 3px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
   body[data-golden="ok"] #golden { border-left-color: #2fbf4a; }
   body[data-golden="mismatch"] #golden, body[data-golden="error"] #golden { border-left-color: #ff3b30; background: #b00020; color: #fff; font-size: 16px; font-weight: 700; }
@@ -35,9 +38,16 @@
   #fatal h1 { margin: 0 0 0.5em; font-size: 1.6em; }
   #fatal ul { margin: 0.4em 0 0.8em; padding-left: 1.2em; }
   body[data-state="fatal"] #fatal { display: block; }
+  /* WEB15: a played page keeps the picture, the frame line, the match line and the controls; the proof chrome steps aside. */
+  #keys { display: none; position: fixed; right: 8px; bottom: 8px; z-index: 20; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  body[data-play] #keys { display: block; }
+  body[data-play] #fight { position: fixed; left: 8px; top: 40px; z-index: 20; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  body[data-play] #golden, body[data-play] #report, body[data-play] #arena-info,
+  body[data-play] #input, body[data-play] #audio, body[data-play] #load,
+  body[data-play] #memory, body[data-play] #coi { display: none; }
 </style>
 </head>
-<body data-state="starting" data-commit="c48670109415">
+<body data-state="starting" data-commit="9543819fabdf">
 <canvas id="canvas"></canvas>
 <div id="hud">frame 0 | -- ms</div>
 <pre id="input">input: kb=0 mouse=0 pad=0</pre>
@@ -45,9 +55,11 @@
 <pre id="net">net: idle</pre>
 <pre id="netstat"></pre>
 <pre id="fight">fight: idle</pre>
+<pre id="keys">WASD move · mouse look · Q/E turn · F attack · Shift block · Space dodge</pre>
 <pre id="load">load: fetching the engine</pre>
 <pre id="memory">memory: no reading yet</pre>
-<pre id="build">build: commit c48670109415</pre>
+<pre id="build">build: commit 9543819fabdf</pre>
+<pre id="coi">coi: isolated=false reloads=0</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>
 <div id="arena-info">
@@ -78,6 +90,55 @@
 import init, { run, run_arena, lose_device, destroy_device, input_sample, request_arena_capture, run_net } from "./engine.js";
 import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory } from "./loader.js";
 
+// WEB14: cross-origin isolation. GitHub Pages cannot send COOP/COEP, so a small service worker
+// adds them. The page registers it only when it is not isolated, waits until the worker controls
+// the page, then reloads once; sessionStorage remembers that reload so a worker that never
+// delivers isolation cannot loop the page. Failure is never fatal: the page runs single-threaded
+// and says so on the #coi line, which exists in the HTML so it is never blank.
+const COI_RELOADED = "e2040-coi-reloaded";
+function showCoi(isolated, reloads, note) {
+  const text = `coi: isolated=${isolated} reloads=${reloads}${note ? ` (${note})` : ""}`;
+  const el = document.getElementById("coi");
+  if (el) el.textContent = text;
+  document.body.dataset.coi = isolated ? "isolated" : "single";
+  window.coi = { isolated, reloads, note: note ?? null };
+  return window.coi;
+}
+async function settleIsolation() {
+  const readReloads = () => { try { return Number(sessionStorage.getItem(COI_RELOADED)) || 0; } catch { return 0; } };
+  const reloads = readReloads();
+  if (window.crossOriginIsolated) return showCoi(true, reloads);
+  if (!window.isSecureContext || !("serviceWorker" in navigator)) return showCoi(false, reloads, "no service worker on this page");
+  if (navigator.serviceWorker.controller) return showCoi(false, reloads, "the worker is active but the page is still not isolated");
+  if (reloads >= 1) return showCoi(false, reloads, "the reload did not isolate the page");
+  try {
+    // Never let a worker that does not activate hold the page: after 4 s it runs single-threaded.
+    const active = await Promise.race([
+      navigator.serviceWorker.register("./coi-serviceworker.js").then(() => navigator.serviceWorker.ready),
+      new Promise((resolve) => setTimeout(() => resolve(null), 4000)),
+    ]);
+    if (!active) return showCoi(false, reloads, "the worker did not activate in time");
+  } catch (e) {
+    console.warn("coi: the isolation worker did not take hold", e);
+    return showCoi(false, reloads, "the worker did not register");
+  }
+  try {
+    sessionStorage.setItem(COI_RELOADED, String(reloads + 1));
+  } catch {
+    // Without the guard a reload could loop the page; stay single-threaded instead.
+    return showCoi(false, reloads, "no session storage to guard the reload");
+  }
+  showCoi(false, reloads + 1, "reloading for isolation");
+  location.reload();
+}
+// The isolation check must never stop the engine: any surprise here is a single-threaded page, not a blank one.
+try {
+  await settleIsolation();
+} catch (e) {
+  console.warn("coi: the isolation check failed", e);
+  showCoi(false, 0, "the isolation check failed");
+}
+
 // For the headless check: loseDevice destroys the device as a forced loss and the page starts over; destroyDevice is the
 // page ending its device on purpose (no retry, data-state=stopped); the check also asks for a fresh GPU copy of the canvas.
 window.loseDevice = lose_device;
@@ -90,6 +151,9 @@ addEventListener("pagehide", (e) => { if (!e.persisted) destroy_device(); });
 // The arena is the page; `?square` opens the plain WebGPU shell (a cleared canvas and one moving square).
 const query = new URLSearchParams(location.search);
 const square = query.has("square");
+// WEB15: a played page (?fight, or a joined duel with &play) keeps the arena, the frame line, the
+// match line and the controls; the proof chrome steps aside so the picture is not buried.
+if (query.has("fight") || (query.has("server") && query.has("play"))) document.body.dataset.play = "1";
 
 try {
   // QW3/QW12: loader.js fetches and compiles the module (streaming, cached by hash) and times it; a wrong MIME type or a

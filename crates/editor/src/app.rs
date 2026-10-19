@@ -775,11 +775,13 @@ impl EditorApp {
             format!("new scene ({} not found)", config.project.display())
         };
         let dock = ShellUi::new(&shell);
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         Ok(Self {
             config,
             shell,
             dock,
-            ctx: egui::Context::default(),
+            ctx,
             egui_winit: None,
             gpu: None,
             adapter: None,
@@ -821,10 +823,15 @@ impl EditorApp {
         entry
             .args
             .insert(0, self.config.project.to_string_lossy().into_owned());
+        // Play what the user sees, not the last save: a newcomer edits and
+        // presses Play expecting that edit to run. A failed save refuses to
+        // start rather than silently running stale content.
+        self.save_now()?;
         match ChildPlay::spawn(&entry) {
             Ok(play) => {
                 self.status = format!("playing: {entry}");
                 self.play = Some(play);
+                let _ = self.shell.note_first_fight();
                 Ok(())
             }
             Err(error) => Err(EditorAppError::ChildFailed {
