@@ -853,6 +853,16 @@ fn run(raw: &[String]) -> i32 {
         tell!("arena: {SPEAR_FLAG}/{HEIGHT_FLAG}: {err}");
         return 2;
     }
+    // A script that owns slot 0 must say so: the keys are read but ignored, and
+    // without the line the bout looks like a broken controller.
+    app.scripted = match (spear_demo, staged) {
+        (true, _) => Some("script plays you (--spear-demo)"),
+        (false, true) => Some("script plays you (--staged-fight)"),
+        (false, false) => None,
+    };
+    if let Some(script) = app.scripted {
+        say!("arena: {script}; the keyboard is ignored in this run");
+    }
     if let Some(net) = net.as_ref() {
         if let Err(err) = arena_net::attach(&mut app, net) {
             tell!("arena: {err}");
@@ -1115,6 +1125,9 @@ struct ArenaApp {
     spear: SpearMode,
     /// Height channel on (`--height`): the wall tether swings (rows SG5, SG4).
     height: bool,
+    /// Set when a script owns the human slot (`--spear-demo`, `--staged-fight`):
+    /// the title says so, because the keys then do nothing.
+    scripted: Option<&'static str>,
     /// Which way the live camera looks on the floor (unit `[x, z]`), as the last presented frame
     /// left it: W walks along it ([`engine_game::camera_wish`]). `None` before the first frame,
     /// so the keys keep their world axes until a camera exists. View-side only: the sim sees
@@ -1247,6 +1260,7 @@ impl ArenaApp {
             feel: FeelView::new(),
             spear: SpearMode::default(),
             height: false,
+            scripted: None,
             view_forward: None,
             title_hint: None,
             net: None,
@@ -2095,15 +2109,23 @@ impl ArenaApp {
 
     /// Keep the window title's rival hint current: the title is set only when
     /// the text changes (about once per walked meter), never per frame. Off
-    /// outside the running bout.
+    /// outside the running bout. A script that owns the human slot leads, so
+    /// nobody wonders why the keys do nothing.
     fn refresh_title_hint(&mut self) {
         let rival = (self.flow == Flow::Match)
             .then(|| arena_frame::rival_hint(self.app.fighter_views(), self.app.human_slot()))
             .flatten();
-        let hint = match (speed_label(self.clock.speed_permille()), rival) {
-            (Some(speed), Some(rival)) => Some(format!("{speed} | {rival}")),
-            (speed, rival) => speed.or(rival),
-        };
+        let mut parts = Vec::new();
+        if let Some(script) = self.scripted {
+            parts.push(script.to_string());
+        }
+        if let Some(speed) = speed_label(self.clock.speed_permille()) {
+            parts.push(speed);
+        }
+        if let Some(rival) = rival {
+            parts.push(rival);
+        }
+        let hint = (!parts.is_empty()).then(|| parts.join(" | "));
         if hint == self.title_hint {
             return;
         }

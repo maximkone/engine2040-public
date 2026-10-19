@@ -14,15 +14,19 @@ level data is copied or redistributed.
 
 | What | Source numbers | Lands in | Hash | Row |
 |---|---|---|---|---|
-| Walk bob on the fight camera | `CameraBob bobSpeed=1`, `mgtSpeed=2`, `xAmp=0.08`, `yAmp=0.12`; stride assumed 0.75 m | `crates/game/src/fighter_look_cam.rs` (`CamFollow::walk_bob`) | none, presentation only | SG6 |
+| Walk bob on the fight camera | `CameraBob bobSpeed=1`, `mgtSpeed=2`, `xAmp=0.08`, `yAmp=0.12`; stride assumed 0.75 m; eye travel 2 cm | `crates/game/src/fighter_look_cam.rs` (`CamFollow::walk_bob`) | none, presentation only | SG6 |
 | Fighter height channel | gravity -40 m/s^2 read at the 60 Hz tick = 11 mm/tick^2 | `crates/arena/src/lib.rs` (`Sim::fall`), `MatchSpec::with_height` | folds `0xB4` only when armed | SG5 |
 | Rope swing on the wall tether | take-in 60 mm/tick, damping `v -= v/64`, rope floor 400 mm (tuning, graded I) | `crates/arena/src/spear.rs` (`swing`, `project`) | folds only under `height` | SG4 |
 
-The bob is driven by the hero's own floor speed (slot 0), so a standing hero
-holds the eye still and a cut or a respawn never spins it. Phase advances with
-travelled distance, so the same walk bobs the same at 30 and 144 fps. The
-source's units for `xAmp`/`yAmp` are not in its assemblies: they are read as
-metres of eye travel, and only that reading can be wrong.
+The bob is driven by the hero's own floor step (slot 0, drawn at the frame's
+sub-tick alpha), so a standing hero holds the eye still and a cut or a respawn
+never spins it. The phase advances with the step in metres, never scaled by the
+frame time, so the same walk bobs the same at 30 and 144 fps. A hero off the
+floor (a jump, a fall, a rope swing) or one that teleports in a frame holds the
+bob still. The source's units for `xAmp`/`yAmp` are not in its assemblies: they
+are read as a normalized strength with a 2 cm eye travel at full strength. Read
+as metres the same pair shook the picture like a hit, which is how the first
+reading was caught.
 
 ## How the rope swing landed
 

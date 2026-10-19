@@ -35,8 +35,10 @@ engine-scene.workspace = true
 # public API (one direction only); spatial depends on core alone.
 engine-spatial.workspace = true
 # The asset browser reads archive/bundle entry kinds and bounds from the real
-# owner (std-only default features: core and clock).
-engine-assets.workspace = true
+# owner. `shell` (headless, not gated on `ui`) also imports a dropped `.glb`
+# through [`engine-assets`] glTF import, so the crate declares `import` itself
+# instead of relying on feature unification with a sibling crate's build.
+engine-assets = { workspace = true, features = ["import"] }
 # TU1 live tuning reads combat/brain validated-swap schemas (data only).
 engine-combat = { workspace = true, optional = true }
 # NS31a2: the document holds the material table and edits it with undo, so the
