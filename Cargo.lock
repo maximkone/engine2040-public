@@ -3078,6 +3078,7 @@ dependencies = [
  "engine-render",
  "engine-scene",
  "engine-spatial",
+ "image",
  "transform-gizmo",
  "transform-gizmo-egui",
  "winit",
