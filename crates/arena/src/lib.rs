@@ -931,6 +931,11 @@ pub struct Sim {
     spear: Option<spear::SpearState>,
     #[cfg(test)]
     trace: Option<Vec<Vec<TickMotion>>>,
+    /// Test-only oracle switch: build the melee plan through the pre-hoist
+    /// pairwise path (see `engage::Plan::build_pairwise`), so a test can run
+    /// a whole match through the oracle and compare events, poses and hashes.
+    #[cfg(test)]
+    pairwise_plan: bool,
 }
 
 impl Sim {
@@ -1084,6 +1089,8 @@ impl Sim {
             spear: None,
             #[cfg(test)]
             trace: None,
+            #[cfg(test)]
+            pairwise_plan: false,
         };
         // Table version 2 runs under rules v2; version 1 pins the legacy rules.
         sim.set_rules(config.rules()).then_some(sim)
@@ -1179,6 +1186,15 @@ impl Sim {
         // AI fills the slots without tape inputs, one fresh percept each.
         // Rules v2 plans the tick's fights first: attack tokens and views.
         let plan = (self.rules.version == FIGHT_RULES_V2).then(|| {
+            #[cfg(test)]
+            if self.pairwise_plan {
+                return engage::Plan::build_pairwise(
+                    &self.states,
+                    &self.fight,
+                    &self.rules.teams,
+                    self.fighters,
+                );
+            }
             engage::Plan::build(&self.states, &self.fight, &self.rules.teams, self.fighters)
         });
         for (slot, cell) in slots.iter_mut().enumerate().take(self.fighters) {
@@ -1913,6 +1929,8 @@ impl Sim {
             spear: None,
             #[cfg(test)]
             trace: None,
+            #[cfg(test)]
+            pairwise_plan: false,
         })
     }
 }

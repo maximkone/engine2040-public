@@ -231,7 +231,7 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 - Builds the browser shell into `dist/web`.
 - Run: `node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt]`.
 - Steps: cargo build of package `engine-web`, target `wasm32-unknown-unknown`, profile `web`; wasm-bindgen CLI at the version `Cargo.lock` locks; `wasm-opt -Oz` with bulk-memory, nontrapping float-to-int, sign-ext, multivalue, reference-types and mutable-globals enabled (skipped with `--no-opt`).
-- Output: `index.html`, `engine.js`, `engine_bg.wasm`, `build.json` (sizes, gzip sizes, SHA-256, tool versions, commit), plus wasm-bindgen's `snippets/`.
+- Output: `index.html`, `loader.js`, `coi-serviceworker.js` (WEB14 isolation worker), `engine.js`, `engine_bg.wasm`, `build.json` (sizes, gzip sizes, SHA-256, tool versions, commit), plus wasm-bindgen's `snippets/`.
 - Size limit 8 MiB for `dist/web` before content.
 - Exit: 0 complete and under limit, 1 a step failed (message names it), 2 bad call.
 - Page source: `crates/web/index.html`.

@@ -32,9 +32,10 @@ use crate::limits::{adapter_hint, feature_names, limit_rows};
 use crate::recovery::{reason_word, Cause, LostBox};
 use crate::report::{AdapterFacts, ArenaFacts, Failure, Ready};
 use crate::shell::{
-    browser_clock, check_device, document, fail, log_error, navigator_gpu, now_ms, pause,
-    raw_adapter_info, recover_with, request_frame, run_golden, set_body_attr, set_state, set_text,
-    user_agent, wasm_pages, watch_visibility, Check, FrameSlot, LOSSES, VISIBILITY_CHANGES,
+    browser_clock, check_device, cross_origin_isolated, document, fail, log_error, navigator_gpu,
+    now_ms, pause, raw_adapter_info, recover_with, request_frame, run_golden, set_body_attr,
+    set_state, set_text, user_agent, wasm_pages, watch_visibility, Check, FrameSlot, LOSSES,
+    VISIBILITY_CHANGES,
 };
 use crate::tier_view::{
     cut_line, fallback_for, restore_line, scale_after_cut, scale_after_restore, us_to_ms, whole_ms,
@@ -660,6 +661,7 @@ fn page_facts() -> Ready {
         commit: COMMIT.to_string(),
         wasm_pages: wasm_pages(),
         user_agent: user_agent(),
+        cross_origin_isolated: cross_origin_isolated(),
         ..Ready::default()
     }
 }

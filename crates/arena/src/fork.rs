@@ -685,6 +685,8 @@ impl ForkJob {
                 spear: None,
                 #[cfg(test)]
                 trace: None,
+                #[cfg(test)]
+                pairwise_plan: false,
             },
             tape,
         ))

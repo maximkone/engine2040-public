@@ -53,16 +53,50 @@ fn separation_mm(a: [i32; 3], b: [i32; 3]) -> i32 {
     i32::try_from(len).unwrap_or(i32::MAX)
 }
 
-/// One slot's quantized sightings of every living foe.
+/// Per-slot feet positions in whole millimetres, converted once per tick so
+/// the per-foe scans read integers instead of re-converting every pair.
+fn pose_mm(states: &[FighterState], count: usize) -> [[i32; 3]; MAX_SLOTS] {
+    let mut mm = [[0i32; 3]; MAX_SLOTS];
+    for (cell, state) in mm.iter_mut().zip(states.iter()).take(count) {
+        *cell = match_wire::pos_mm(state.pos);
+    }
+    mm
+}
+
+/// Planar separations in mm for every unordered pair of living foes: one
+/// integer sqrt per pair, stored at `[lower][higher]` so the reverse read
+/// reuses it. Teammates, the fallen and empty slots stay zero and are never
+/// read.
+fn separation_table(
+    mm: &[[i32; 3]; MAX_SLOTS],
+    fight: &FightState,
+    teams: &[u8; MAX_SLOTS],
+    count: usize,
+) -> [[i32; MAX_SLOTS]; MAX_SLOTS] {
+    let mut table = [[0i32; MAX_SLOTS]; MAX_SLOTS];
+    for a in 0..count {
+        if fight.fighters[a].hp_permille == 0 {
+            continue;
+        }
+        for b in (a + 1)..count {
+            if fight.fighters[b].hp_permille != 0 && teams[a] != teams[b] {
+                table[a][b] = separation_mm(mm[a], mm[b]);
+            }
+        }
+    }
+    table
+}
+
+/// One slot's quantized sightings of every living foe, in slot order, reading
+/// the tick's pair separations.
 fn sightings(
-    states: &[FighterState],
     fight: &FightState,
     teams: &[u8; MAX_SLOTS],
     count: usize,
     slot: usize,
+    sep: &[[i32; MAX_SLOTS]; MAX_SLOTS],
     out: &mut [FoeView; MAX_SLOTS],
 ) -> usize {
-    let mine = match_wire::pos_mm(states[slot].pos);
     let mut seen = 0;
     for other in 0..count {
         let fighter = &fight.fighters[other];
@@ -70,9 +104,14 @@ fn sightings(
             continue;
         }
         let (phase, frames) = strike_phase(fighter);
+        let (low, high) = if slot < other {
+            (slot, other)
+        } else {
+            (other, slot)
+        };
         out[seen] = FoeView::quantize(
             u8::try_from(other).unwrap_or(u8::MAX),
-            separation_mm(mine, match_wire::pos_mm(states[other].pos)),
+            sep[low][high],
             fighter.hp_permille,
             phase,
             frames,
@@ -83,8 +122,9 @@ fn sightings(
 }
 
 impl Plan {
-    /// Plan the tick over `count` slots: build every living fighter's view,
-    /// then hand out attack tokens nearest attacker first.
+    /// Plan the tick over `count` slots: convert every pose once, measure
+    /// each living foe pair once, build every living fighter's view, then
+    /// hand out attack tokens nearest attacker first.
     pub(crate) fn build(
         states: &[FighterState],
         fight: &FightState,
@@ -96,6 +136,8 @@ impl Plan {
         let mut targets = [usize::MAX; MAX_SLOTS];
         let mut order = [(i32::MAX, 0usize); MAX_SLOTS];
         let mut roster = [FighterId(0); MAX_SLOTS];
+        let mm = pose_mm(states, count);
+        let sep = separation_table(&mm, fight, teams, count);
         let (mut ranked, mut living) = (0usize, 0usize);
         for slot in 0..count {
             let me = &fight.fighters[slot];
@@ -105,7 +147,7 @@ impl Plan {
             roster[living] = FighterId(u8::try_from(slot).unwrap_or(u8::MAX));
             living += 1;
             let mut found = [blank; MAX_SLOTS];
-            let seen = sightings(states, fight, teams, count, slot, &mut found);
+            let seen = sightings(fight, teams, count, slot, &sep, &mut found);
             let stamina = me.stamina.saturating_mul(STAMINA_TO_PERMILLE);
             views[slot] = MeleeView::nearest(me.hp_permille, stamina, &found[..seen]);
             if let Some(nearest) = views[slot].foes().first() {
@@ -173,9 +215,262 @@ impl Plan {
 }
 
 #[cfg(test)]
+impl Plan {
+    /// The pre-hoist plan: every foe pair converts both poses again and
+    /// measures its own separation. Kept as the equality oracle for
+    /// [`Plan::build`]; the test-only `Sim::pairwise_plan` switch drives
+    /// whole matches through it, so a test can compare events, poses and
+    /// hashes.
+    pub(crate) fn build_pairwise(
+        states: &[FighterState],
+        fight: &FightState,
+        teams: &[u8; MAX_SLOTS],
+        count: usize,
+    ) -> Self {
+        let blank = FoeView::default();
+        let mut views = [MeleeView::EMPTY; MAX_SLOTS];
+        let mut targets = [usize::MAX; MAX_SLOTS];
+        let mut order = [(i32::MAX, 0usize); MAX_SLOTS];
+        let mut roster = [FighterId(0); MAX_SLOTS];
+        let (mut ranked, mut living) = (0usize, 0usize);
+        for slot in 0..count {
+            let me = &fight.fighters[slot];
+            if me.hp_permille == 0 {
+                continue;
+            }
+            roster[living] = FighterId(u8::try_from(slot).unwrap_or(u8::MAX));
+            living += 1;
+            let mut found = [blank; MAX_SLOTS];
+            let seen = sightings_pairwise(states, fight, teams, count, slot, &mut found);
+            let stamina = me.stamina.saturating_mul(STAMINA_TO_PERMILLE);
+            views[slot] = MeleeView::nearest(me.hp_permille, stamina, &found[..seen]);
+            if let Some(nearest) = views[slot].foes().first() {
+                targets[slot] = usize::from(nearest.slot);
+                order[ranked] = (nearest.dist_mm(), slot);
+                ranked += 1;
+            }
+        }
+        let mut i = 1usize;
+        while i < ranked {
+            let mut j = i;
+            while j > 0 && order[j] < order[j - 1] {
+                order.swap(j, j - 1);
+                j -= 1;
+            }
+            i += 1;
+        }
+        let mut squad = Squad::new(&roster[..living]).ok();
+        for &(_, slot) in &order[..ranked] {
+            let Some(book) = squad.as_mut() else { break };
+            let me = FighterId(u8::try_from(slot).unwrap_or(u8::MAX));
+            let granted = views[slot]
+                .foes()
+                .iter()
+                .find(|foe| book.claim_token(me, FighterId(foe.slot)).unwrap_or(true));
+            let (aim, engage) = match granted {
+                Some(foe) => (foe.slot, true),
+                None => (views[slot].target().slot, false),
+            };
+            targets[slot] = usize::from(aim);
+            views[slot] = views[slot].targeting(aim, engage);
+        }
+        Self { views, targets }
+    }
+}
+
+/// The pre-hoist sightings: both poses convert per pair, kept as the
+/// equality oracle for [`sightings`].
+#[cfg(test)]
+fn sightings_pairwise(
+    states: &[FighterState],
+    fight: &FightState,
+    teams: &[u8; MAX_SLOTS],
+    count: usize,
+    slot: usize,
+    out: &mut [FoeView; MAX_SLOTS],
+) -> usize {
+    let mine = match_wire::pos_mm(states[slot].pos);
+    let mut seen = 0;
+    for other in 0..count {
+        let fighter = &fight.fighters[other];
+        if other == slot || teams[other] == teams[slot] || fighter.hp_permille == 0 {
+            continue;
+        }
+        let (phase, frames) = strike_phase(fighter);
+        out[seen] = FoeView::quantize(
+            u8::try_from(other).unwrap_or(u8::MAX),
+            separation_mm(mine, match_wire::pos_mm(states[other].pos)),
+            fighter.hp_permille,
+            phase,
+            frames,
+        );
+        seen += 1;
+    }
+    seen
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{ArenaConfig, ArenaRules, FightEvent, FighterTape, Sim};
+    use engine_combat::tables::TABLES_VERSION_V2;
+
+    /// One 8-fighter rules-v2 config for the equality and timing receipts.
+    fn bout_config() -> ArenaConfig {
+        ArenaConfig {
+            seed: 2040,
+            ticks: 600,
+            fighters: 8,
+            half_extent_m: 20.0,
+            table_version: TABLES_VERSION_V2,
+        }
+    }
+
+    /// The hoisted plan against the pre-hoist pairwise oracle over a real
+    /// 8-fighter v2 bout: every tick both plans list the same views and
+    /// targets, and the two whole runs emit the same events in the same
+    /// order, advance to the same poses and report the same checkpoint hash.
+    #[test]
+    fn v2_match_matches_the_pairwise_plan_oracle_tick_for_tick() {
+        let config = bout_config();
+        let tape = FighterTape::default();
+        let mut shipped = Sim::build(&config, &tape, false, false).expect("shipped sim");
+        let mut oracle = Sim::build(&config, &tape, false, false).expect("oracle sim");
+        oracle.pairwise_plan = true;
+        let mut events = 0usize;
+        while shipped.tick < config.ticks {
+            let built = Plan::build(&shipped.states, &shipped.fight, &shipped.rules.teams, 8);
+            let pairwise =
+                Plan::build_pairwise(&shipped.states, &shipped.fight, &shipped.rules.teams, 8);
+            assert_eq!(
+                (built.views, built.targets),
+                (pairwise.views, pairwise.targets),
+                "plan differs at tick {}",
+                shipped.tick
+            );
+            shipped.step(&tape).expect("shipped step");
+            oracle.step(&tape).expect("oracle step");
+            assert_eq!(
+                shipped.fight, oracle.fight,
+                "fight state diverged at tick {}",
+                shipped.tick
+            );
+            assert_eq!(
+                shipped.states, oracle.states,
+                "poses diverged at tick {}",
+                shipped.tick
+            );
+            assert_eq!(
+                shipped.events.last(),
+                oracle.events.last(),
+                "events diverged at tick {}",
+                shipped.tick
+            );
+            assert_eq!(
+                shipped.checkpoints.last(),
+                oracle.checkpoints.last(),
+                "hash diverged at tick {}",
+                shipped.tick
+            );
+            events += shipped.events.last().expect("row").events.len();
+        }
+        assert!(events > 0, "the fixture must land blows, not idle");
+    }
+
+    /// Timing receipt: p50 microseconds of one [`Plan::build`] plus its eight
+    /// [`Plan::aim`] calls, the hoisted table against the pairwise oracle, on
+    /// a real 8-fighter v2 bout's poses, and the same pair end to end over
+    /// 600 ticks of that match. Both sides run interleaved so one load sits
+    /// under each. Run: cargo test -p engine-arena --release --lib
+    /// plan_paired_receipt -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn plan_paired_receipt() {
+        const SAMPLES: usize = 201;
+        const BATCH: usize = 32;
+        const TICK_REPS: usize = 21;
+        let config = bout_config();
+        let tape = FighterTape::default();
+        let mut warm = Sim::build(&config, &tape, false, false).expect("warm sim");
+        for _ in 0..120 {
+            warm.step(&tape).expect("warm step");
+        }
+        let states = warm.states;
+        let fight = warm.fight;
+        let teams = warm.rules.teams;
+        let count = warm.fighters;
+        let percept = Percept::new([0.0, 0.0, 0.0], 0.0, [1.0, 0.0, 0.0], false, 1.0, 0);
+        let mut new_us = Vec::with_capacity(SAMPLES);
+        let mut old_us = Vec::with_capacity(SAMPLES);
+        let batch = f64::from(u32::try_from(BATCH).unwrap_or(1));
+        for _ in 0..SAMPLES {
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                let plan = Plan::build(&states, &fight, &teams, count);
+                for slot in 0..count {
+                    std::hint::black_box(plan.aim(percept, slot, &states, &fight));
+                }
+            }
+            new_us.push(begin.elapsed().as_secs_f64() * 1.0e6 / batch);
+            let begin = std::time::Instant::now();
+            for _ in 0..BATCH {
+                let plan = Plan::build_pairwise(&states, &fight, &teams, count);
+                for slot in 0..count {
+                    std::hint::black_box(plan.aim(percept, slot, &states, &fight));
+                }
+            }
+            old_us.push(begin.elapsed().as_secs_f64() * 1.0e6 / batch);
+        }
+        new_us.sort_by(|a, b| a.partial_cmp(b).expect("finite samples"));
+        old_us.sort_by(|a, b| a.partial_cmp(b).expect("finite samples"));
+        let (new_p50, old_p50) = (new_us[SAMPLES / 2], old_us[SAMPLES / 2]);
+        eprintln!(
+            "plan_build fixture=v2_8f old_p50_us={old_p50:.4} table_p50_us={new_p50:.4} ratio_x={:.3}",
+            old_p50 / new_p50
+        );
+        assert!(
+            new_p50 <= old_p50,
+            "the hoisted plan must not be the slower one: {new_p50:.4} vs {old_p50:.4}"
+        );
+        let mut match_new = Vec::with_capacity(TICK_REPS);
+        let mut match_old = Vec::with_capacity(TICK_REPS);
+        for _ in 0..TICK_REPS {
+            let begin = std::time::Instant::now();
+            let mut shipped = Sim::build(&config, &tape, false, false).expect("shipped sim");
+            while shipped.tick < config.ticks {
+                shipped.step(&tape).expect("shipped step");
+            }
+            match_new.push(begin.elapsed().as_secs_f64() * 1.0e6);
+            let begin = std::time::Instant::now();
+            let mut oracle = Sim::build(&config, &tape, false, false).expect("oracle sim");
+            oracle.pairwise_plan = true;
+            while oracle.tick < config.ticks {
+                oracle.step(&tape).expect("oracle step");
+            }
+            match_old.push(begin.elapsed().as_secs_f64() * 1.0e6);
+            assert_eq!(
+                shipped.checkpoints.last(),
+                oracle.checkpoints.last(),
+                "the timed pair must agree on the final hash"
+            );
+        }
+        match_new.sort_by(|a, b| a.partial_cmp(b).expect("finite samples"));
+        match_old.sort_by(|a, b| a.partial_cmp(b).expect("finite samples"));
+        let (new_match, old_match) = (match_new[TICK_REPS / 2], match_old[TICK_REPS / 2]);
+        eprintln!(
+            "v2_match_600ticks fixture=8f old_p50_us={old_match:.1} table_p50_us={new_match:.1} ratio_x={:.3}",
+            old_match / new_match
+        );
+        assert!(
+            new_match <= old_match,
+            "the hoisted plan must not slow the match: {new_match:.1} vs {old_match:.1}"
+        );
+    }
 
     fn states(at: &[[f32; 2]]) -> Vec<FighterState> {
         at.iter()

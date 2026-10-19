@@ -16,7 +16,7 @@
 
 use engine_core::{Fnv64, Rng};
 
-use crate::islands::{self, SleepConfig};
+use crate::islands::{self, IslandsScratch, SleepConfig};
 use crate::rigid::{self, Body};
 
 /// Soldiers in the army fixture (row accept: 500 AI soldiers).
@@ -242,6 +242,8 @@ pub struct LodWorld {
     timers: Vec<u32>,
     asleep: Vec<bool>,
     scratch_v2: Vec<f32>,
+    /// Reused island buffers: the per-tick island rebuild allocates nothing.
+    islands: IslandsScratch,
 }
 
 impl LodWorld {
@@ -284,6 +286,7 @@ impl LodWorld {
             timers: vec![0; SOLDIERS],
             asleep: vec![false; SOLDIERS],
             scratch_v2: vec![0.0; SOLDIERS],
+            islands: IslandsScratch::new(),
         }
     }
 
@@ -334,15 +337,29 @@ impl LodWorld {
     /// rebuild capsule islands from `pairs`, fold sleep, integrate awake
     /// capsules, bones of full-tier soldiers, and all fighter bones.
     /// `pairs` holds soldier-slot contact pairs; canonicalization inside
-    /// [`islands::build_islands`] makes any input order hash-identical.
+    /// [`IslandsScratch::build`] (the same islands as [`islands::build_islands`])
+    /// makes any input order hash-identical.
+    /// The island rebuild reuses this world's [`IslandsScratch`], so the tick
+    /// allocates nothing; the scratch is moved out for the shared
+    /// [`Self::advance`] so that step keeps the whole world mutable.
     /// A bad `dt` (zero, negative, NaN, infinite) is a loud [`LodError::BadDt`]:
     /// silently skipping the tick would fork replay.
     pub fn step(&mut self, dt: f32, pairs: &[(usize, usize)]) -> Result<(), LodError> {
         if dt <= 0.0 || !dt.is_finite() {
             return Err(LodError::BadDt);
         }
+        let mut scratch = core::mem::take(&mut self.islands);
+        let islands = scratch.build(SOLDIERS, pairs);
+        let result = self.advance(dt, islands);
+        self.islands = scratch;
+        result
+    }
+
+    /// One tick with the island slices already built: fold motion, sleep far
+    /// still capsules, wake whole islands, then integrate awake capsules,
+    /// bones of full-tier soldiers and all fighter bones.
+    fn advance(&mut self, dt: f32, islands: &[Vec<usize>]) -> Result<(), LodError> {
         let h = dt.min(0.25);
-        let islands = islands::build_islands(SOLDIERS, pairs);
         for (i, b) in self.capsules.iter().enumerate() {
             self.scratch_v2[i] = b.vx * b.vx + b.vy * b.vy;
         }
@@ -361,7 +378,7 @@ impl LodWorld {
         )?;
         islands::update_sleep(
             SOLDIERS,
-            &islands,
+            islands,
             &self.scratch_v2,
             &mut self.timers,
             &mut self.asleep,
@@ -889,6 +906,183 @@ mod tests {
         let (second, _) = combined_run();
         assert_eq!(first, second, "same seed, same combined tape");
         assert_ne!(first, 0);
+    }
+
+    /// Pairs of the combined tape: rows of ten agents, one contact per neighbour.
+    fn combined_pairs() -> Vec<(usize, usize)> {
+        (0..SOLDIERS - 1)
+            .filter(|i| i % ROW != ROW - 1)
+            .map(|i| (i, i + 1))
+            .collect()
+    }
+
+    /// The reused island scratch and the shipped allocating build feed the
+    /// same tick: two worlds from one seed, the same 600-tick combined tape
+    /// (tier flips every 100 ticks, a shove every 20), one stepped through
+    /// `step` (reused islands) and one through `islands::build_islands` plus
+    /// the shared `advance`. Every tick must land on the same digest.
+    #[test]
+    fn combined_tick_scratch_matches_the_shipped_islands_every_tick() {
+        let pairs = combined_pairs();
+        let mut reused = LodWorld::new_army(2_040, LodConfig::default());
+        let mut shipped = LodWorld::new_army(2_040, LodConfig::default());
+        let mut rng = Rng::new(2_040);
+        let mut dist = vec![DIST_UNKNOWN_MM; SOLDIERS];
+        for tick in 0..COMBINED_TICKS {
+            let near_first = (tick / 100) % 2 == 0;
+            for (i, d) in dist.iter_mut().enumerate() {
+                *d = if (i < SOLDIERS / 2) == near_first {
+                    1_000
+                } else {
+                    DIST_UNKNOWN_MM
+                };
+            }
+            if tick % 20 == 10 {
+                let k = usize::try_from(rng.next_u64() % 500).unwrap_or(0);
+                reused.capsules[k].vx = 3.0;
+                shipped.capsules[k].vx = 3.0;
+            }
+            reused.update_tiers(&dist).expect("tiers");
+            shipped.update_tiers(&dist).expect("tiers");
+            reused.step(FIXED_DT, &pairs).expect("step");
+            let fresh = islands::build_islands(SOLDIERS, &pairs);
+            shipped.advance(FIXED_DT, &fresh).expect("advance");
+            assert_eq!(
+                reused.state_hash(),
+                shipped.state_hash(),
+                "tick {tick}: reused islands diverged from the shipped build"
+            );
+        }
+    }
+
+    /// Failure: one per-tick rebuild that allocates. The world owns every
+    /// buffer, and the island scratch is warmed once before the window.
+    #[test]
+    fn stepping_the_army_allocates_nothing() {
+        let mut army = half_near_army();
+        let pairs = combined_pairs();
+        army.step(FIXED_DT, &pairs)
+            .expect("warm the island scratch");
+        let ((), heap) = engine_core::alloc_probe::measure(|| {
+            for _ in 0..60 {
+                army.step(FIXED_DT, &pairs).expect("step");
+            }
+        });
+        assert_eq!(heap.calls, 0, "the per-tick step must not allocate");
+    }
+
+    /// Paired receipt for the per-tick island rebuild: the shipped
+    /// `islands::build_islands` (fresh root table, comparison sort and one
+    /// vector per island, every tick) against the world's reused
+    /// `IslandsScratch`, both on the combined 64 + 500 pair list, interleaved
+    /// in one process. Prints the p50 of both, their ratio and the allocation
+    /// calls each side makes per rebuild.
+    /// Run: cargo test -p engine-physics --release --lib lod_island_rebuild_paired_receipt -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn lod_island_rebuild_paired_receipt() {
+        const ITERS: u64 = 300;
+        let pairs = combined_pairs();
+        let mut scratch = IslandsScratch::new();
+        std::hint::black_box(scratch.build(SOLDIERS, &pairs));
+        let ((), reused_alloc) = engine_core::alloc_probe::measure(|| {
+            for _ in 0..ITERS {
+                std::hint::black_box(scratch.build(SOLDIERS, &pairs));
+            }
+        });
+        let ((), shipped_alloc) = engine_core::alloc_probe::measure(|| {
+            for _ in 0..ITERS {
+                std::hint::black_box(islands::build_islands(SOLDIERS, &pairs));
+            }
+        });
+        let mut shipped_ns = Vec::with_capacity(usize::try_from(ITERS).unwrap_or(0));
+        let mut reused_ns = Vec::with_capacity(usize::try_from(ITERS).unwrap_or(0));
+        for _ in 0..ITERS {
+            let start = std::time::Instant::now();
+            std::hint::black_box(islands::build_islands(SOLDIERS, &pairs));
+            shipped_ns.push(start.elapsed().as_nanos());
+            let start = std::time::Instant::now();
+            std::hint::black_box(scratch.build(SOLDIERS, &pairs));
+            reused_ns.push(start.elapsed().as_nanos());
+        }
+        shipped_ns.sort_unstable();
+        reused_ns.sort_unstable();
+        let half = usize::try_from(ITERS / 2).unwrap_or(0);
+        let (shipped_p50, reused_p50) = (shipped_ns[half], reused_ns[half]);
+        // Whole-tick pair on the same combined tape: tier assignment and the
+        // shove land outside the window, exactly as `combined_run` does.
+        let mut shipped_world = LodWorld::new_army(2_040, LodConfig::default());
+        let mut reused_world = LodWorld::new_army(2_040, LodConfig::default());
+        let mut rng = Rng::new(2_040);
+        let mut dist = vec![DIST_UNKNOWN_MM; SOLDIERS];
+        let mut tick_shipped = Vec::with_capacity(half);
+        let mut tick_reused = Vec::with_capacity(half);
+        for tick in 0..ITERS {
+            let near_first = (tick / 100) % 2 == 0;
+            for (i, d) in dist.iter_mut().enumerate() {
+                *d = if (i < SOLDIERS / 2) == near_first {
+                    1_000
+                } else {
+                    DIST_UNKNOWN_MM
+                };
+            }
+            if tick % 20 == 10 {
+                let k = usize::try_from(rng.next_u64() % 500).unwrap_or(0);
+                shipped_world.capsules[k].vx = 3.0;
+                reused_world.capsules[k].vx = 3.0;
+            }
+            shipped_world.update_tiers(&dist).expect("tiers");
+            reused_world.update_tiers(&dist).expect("tiers");
+            let start = std::time::Instant::now();
+            let fresh = islands::build_islands(SOLDIERS, &pairs);
+            shipped_world.advance(FIXED_DT, &fresh).expect("advance");
+            tick_shipped.push(start.elapsed().as_nanos());
+            let start = std::time::Instant::now();
+            reused_world.step(FIXED_DT, &pairs).expect("step");
+            tick_reused.push(start.elapsed().as_nanos());
+        }
+        assert_eq!(
+            reused_world.state_hash(),
+            shipped_world.state_hash(),
+            "the paired tick moved the world"
+        );
+        tick_shipped.sort_unstable();
+        tick_reused.sort_unstable();
+        let (tick_shipped_p50, tick_reused_p50) = (tick_shipped[half], tick_reused[half]);
+        eprintln!(
+            "lod_island_rebuild shipped_p50_us={}.{:03} reused_p50_us={}.{:03} ratio_x100={} shipped_alloc_per_rebuild={} reused_alloc_per_rebuild={} tick_shipped_p50_us={}.{:03} tick_reused_p50_us={}.{:03} tick_ratio_x100={} pairs={} islands={} iters={ITERS}",
+            shipped_p50 / 1_000,
+            shipped_p50 % 1_000,
+            reused_p50 / 1_000,
+            reused_p50 % 1_000,
+            shipped_p50.saturating_mul(100).checked_div(reused_p50).unwrap_or(0),
+            shipped_alloc.calls / ITERS,
+            reused_alloc.calls / ITERS,
+            tick_shipped_p50 / 1_000,
+            tick_shipped_p50 % 1_000,
+            tick_reused_p50 / 1_000,
+            tick_reused_p50 % 1_000,
+            tick_shipped_p50.saturating_mul(100).checked_div(tick_reused_p50).unwrap_or(0),
+            pairs.len(),
+            scratch.build(SOLDIERS, &pairs).len(),
+        );
+        assert!(
+            reused_p50 < shipped_p50,
+            "the reused path must not be the slower one: {reused_p50} ns vs {shipped_p50} ns"
+        );
+        assert!(
+            tick_reused_p50 < tick_shipped_p50,
+            "the reused tick must not be the slower one: {tick_reused_p50} ns vs {tick_shipped_p50} ns"
+        );
+        assert_eq!(
+            reused_alloc.calls, 0,
+            "a warm scratch must not allocate per rebuild"
+        );
     }
 
     #[test]

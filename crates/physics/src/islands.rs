@@ -14,7 +14,19 @@
 /// Each component root is its minimum index, so edge order and duplicates
 /// cannot change the output and no sort or dedup pass is needed.
 pub fn roots(n: usize, pairs: &[(usize, usize)]) -> Vec<usize> {
-    let mut p: Vec<usize> = (0..n).collect();
+    let mut p = Vec::with_capacity(n);
+    union_roots(&mut p, n, pairs);
+    p
+}
+
+/// Fill `p` with the [`roots`] answer on a caller-owned buffer.
+///
+/// Same edges, same union order and the same path compression as [`roots`], so
+/// the buffer holds the same roots; only the buffer is reused, which keeps a
+/// per-tick rebuild allocation-free.
+fn union_roots(p: &mut Vec<usize>, n: usize, pairs: &[(usize, usize)]) {
+    p.clear();
+    p.extend(0..n);
     for &(a, b) in pairs {
         if a == b || a >= n || b >= n {
             continue;
@@ -45,12 +57,17 @@ pub fn roots(n: usize, pairs: &[(usize, usize)]) -> Vec<usize> {
         }
         p[i] = x;
     }
-    p
 }
 
 /// Canonical islands: every body appears in exactly one island; isolated
 /// bodies yield singleton islands. Members ascend inside an island and
 /// islands ascend by first member, for any input order.
+///
+/// Reference owner: it allocates a root table, a sort and one vector per
+/// island on every call. [`IslandsScratch::build`] gives the same islands on
+/// reused buffers for a per-tick rebuild, and the island tests hold the two
+/// side by side.
+#[must_use]
 pub fn build_islands(n: usize, pairs: &[(usize, usize)]) -> Vec<Vec<usize>> {
     let r = roots(n, pairs);
     let mut order: Vec<usize> = (0..n).collect();
@@ -64,6 +81,83 @@ pub fn build_islands(n: usize, pairs: &[(usize, usize)]) -> Vec<Vec<usize>> {
     }
     out.sort_by_key(|v| v[0]);
     out
+}
+
+/// Reusable island buffers beside [`build_islands`].
+///
+/// Same islands, same member order and the same snapshot bytes as
+/// [`build_islands`], but the root table, the counting table, the flat member
+/// order and one vector per island live for the life of the scratch, so a
+/// per-tick rebuild allocates nothing after the first tick that saw that many
+/// islands. Grouping is a stable counting pass keyed by root: roots are
+/// component minimums, so ascending roots are ascending island first members
+/// and the in-order fill keeps members ascending inside an island, the same
+/// total order as sorting by `(root, index)`.
+#[derive(Clone, Debug, Default)]
+pub struct IslandsScratch {
+    roots: Vec<usize>,
+    /// Per-root island length before the fill, then its exclusive end cursor.
+    counts: Vec<usize>,
+    /// Members in canonical order, island after island.
+    order: Vec<usize>,
+    islands: Vec<Vec<usize>>,
+}
+
+impl IslandsScratch {
+    /// Empty scratch; the first [`Self::build`] allocates, later ones reuse.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Canonical islands of `n` bodies on the reused buffers, identical to
+    /// [`build_islands`] for the same `n` and `pairs`.
+    ///
+    /// The returned slice is valid until the next call on this scratch.
+    pub fn build(&mut self, n: usize, pairs: &[(usize, usize)]) -> &[Vec<usize>] {
+        let Self {
+            roots,
+            counts,
+            order,
+            islands,
+        } = self;
+        union_roots(roots, n, pairs);
+        counts.clear();
+        counts.resize(n, 0);
+        for &root in roots.iter() {
+            counts[root] += 1;
+        }
+        // Exclusive prefix sums: where each root's members start.
+        let mut start = 0usize;
+        for count in counts.iter_mut() {
+            let len = *count;
+            *count = start;
+            start += len;
+        }
+        order.clear();
+        order.resize(n, 0);
+        // Bodies ascend, so each island's members land in ascending order and
+        // each root's end cursor is its own exclusive end afterwards.
+        for (body, &root) in roots.iter().enumerate() {
+            order[counts[root]] = body;
+            counts[root] += 1;
+        }
+        let mut used = 0usize;
+        let mut begin = 0usize;
+        for &end in counts.iter() {
+            if end == begin {
+                continue;
+            }
+            if used == islands.len() {
+                islands.push(Vec::new());
+            }
+            islands[used].clear();
+            islands[used].extend_from_slice(&order[begin..end]);
+            used += 1;
+            begin = end;
+        }
+        &islands[..used]
+    }
 }
 
 /// Floats per body state: position 3, rotation `(x, y, z, w)` 4, linear
@@ -383,6 +477,70 @@ mod tests {
                 "roots are minimums"
             );
         }
+        // The shared union-find writer behind `roots` must fill a reused
+        // buffer with the same roots, whatever the buffer held before.
+        let mut buffer = vec![usize::MAX; 9];
+        for (n, pairs) in [
+            (0, vec![]),
+            (3, vec![]),
+            (6, vec![(0, 1), (3, 4), (1, 2)]),
+            (2, vec![(1, 1), (9, 9)]),
+            (5, vec![(3, 4), (4, 3), (0, 1)]),
+        ] {
+            union_roots(&mut buffer, n, &pairs);
+            assert_eq!(buffer, roots(n, &pairs), "n={n} pairs={pairs:?}");
+        }
+    }
+
+    /// The reused-buffer build must give the shipped build's islands, member
+    /// for member, on every shape: joins, reversed ends, repeats, self pairs,
+    /// out-of-range ends, empty worlds, and a smaller world after a bigger one
+    /// (so no stale member survives in a reused vector).
+    #[test]
+    fn scratch_build_matches_the_shipped_build_on_every_shape() {
+        let mut scratch = IslandsScratch::new();
+        let mut rng = engine_core::Rng::new(2040).fork_named("island-scratch");
+        for round in 0..200 {
+            let n = usize::try_from(rng.next_range(0, 40)).unwrap_or(0);
+            let count = usize::try_from(rng.next_range(0, 80)).unwrap_or(0);
+            let span = u64::try_from(n + 3).unwrap_or(3);
+            let pairs: Vec<(usize, usize)> = (0..count)
+                .map(|_| {
+                    let end = |rng: &mut engine_core::Rng| {
+                        usize::try_from(rng.next_range(0, span)).unwrap_or(0)
+                    };
+                    (end(&mut rng), end(&mut rng))
+                })
+                .collect();
+            let want = build_islands(n, &pairs);
+            assert_eq!(
+                scratch.build(n, &pairs),
+                want.as_slice(),
+                "round {round}: n={n} pairs={pairs:?}"
+            );
+            let reversed: Vec<(usize, usize)> = pairs.iter().rev().map(|&(a, b)| (b, a)).collect();
+            assert_eq!(
+                scratch.build(n, &reversed),
+                want.as_slice(),
+                "round {round}: reversed"
+            );
+        }
+        // Every body of the 64-fighter field, then a three-body world on the
+        // same scratch, then the field again: reuse never moves a member.
+        let field = build_islands(64, &field_pairs());
+        assert_eq!(scratch.build(64, &field_pairs()), field.as_slice());
+        assert_eq!(scratch.build(3, &[]), build_islands(3, &[]).as_slice());
+        assert_eq!(
+            scratch.build(64, &field_pairs()),
+            field.as_slice(),
+            "wide island come back after a narrow one"
+        );
+        assert_eq!(scratch.build(0, &[]), build_islands(0, &[]).as_slice());
+        assert_eq!(
+            scratch.build(64, &field_pairs()),
+            field.as_slice(),
+            "empty world left no island behind"
+        );
     }
 
     /// Finite states from raw bits: exponent of 0.5..1.0, random mantissa

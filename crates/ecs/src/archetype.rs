@@ -539,6 +539,33 @@ fn swap_remove_row(tables: &mut [Table], locs: &mut [Loc], mask: u8, row: usize)
     }
 }
 
+/// Fixed checkpoint head of one row: id LE plus the mask byte.
+#[must_use]
+fn stage_row_head(id: u32, mask: u8) -> [u8; 5] {
+    let mut out = [0u8; 5];
+    out[..4].copy_from_slice(&id.to_le_bytes());
+    out[4] = mask;
+    out
+}
+
+/// Head plus the position pair of one P row: id LE, mask, then
+/// `[x bits][y bits]`.
+#[must_use]
+fn stage_row_pos(id: u32, mask: u8, x: f32, y: f32) -> [u8; 13] {
+    let mut out = [0u8; 13];
+    out[..4].copy_from_slice(&id.to_le_bytes());
+    out[4] = mask;
+    out[5..].copy_from_slice(&pair_word(x, y).to_le_bytes());
+    out
+}
+
+/// Two column words as the little-endian pair `[x bits][y bits]`, so one
+/// 8-byte append stages both in [`World::state_hash`] order.
+#[must_use]
+fn pair_word(x: f32, y: f32) -> u64 {
+    u64::from(x.to_bits()) | (u64::from(y.to_bits()) << 32)
+}
+
 /// Archetype world: typed registry, SoA tables, generational entities, staged kill.
 #[derive(Debug)]
 pub struct World {
@@ -1273,7 +1300,10 @@ impl World {
     /// into the reusable byte buffer and hashed with the snapshot owner's
     /// FNV-1a64, so the digest equals [`World::state_hash`] bit for bit.
     /// Refuses with [`ArenaError::Overflow`] before staging anything when
-    /// the byte pre-size is short. Budget: O(slots) time, zero allocation.
+    /// the byte pre-size is short. The id, mask and position pair stage as
+    /// one fixed 13-byte row head and the velocity as one 8-byte pair word,
+    /// so a P+V row costs two appends instead of six; the staged byte order
+    /// is unchanged. Budget: O(slots) time, zero allocation.
     pub fn checkpoint_with(&self, arena: &mut PhaseArena) -> Result<u64, ArenaError> {
         let needed = self.checkpoint_len();
         if arena.byte_capacity() < needed {
@@ -1294,15 +1324,15 @@ impl World {
                     needed: usize::MAX,
                     capacity: usize::MAX,
                 })?;
-                arena.try_extend_bytes(&id.to_le_bytes())?;
-                arena.try_extend_bytes(&[loc.mask])?;
                 if has_bit(loc.mask, P) {
-                    arena.try_extend_bytes(&table.pos[row].x.to_bits().to_le_bytes())?;
-                    arena.try_extend_bytes(&table.pos[row].y.to_bits().to_le_bytes())?;
+                    let head = stage_row_pos(id, loc.mask, table.pos[row].x, table.pos[row].y);
+                    arena.try_extend_bytes(&head)?;
+                } else {
+                    arena.try_extend_bytes(&stage_row_head(id, loc.mask))?;
                 }
                 if has_bit(loc.mask, V) {
-                    arena.try_extend_bytes(&table.vel[row].x.to_bits().to_le_bytes())?;
-                    arena.try_extend_bytes(&table.vel[row].y.to_bits().to_le_bytes())?;
+                    let pair = pair_word(table.vel[row].x, table.vel[row].y);
+                    arena.try_extend_bytes(&pair.to_le_bytes())?;
                 }
                 if loc.mask & SPINE_MASK != 0 {
                     let mut sink = ArenaSink {
@@ -2415,5 +2445,156 @@ mod tests {
             w.flush();
         });
         assert_eq!(heap.calls, 0, "a warm flush must not allocate");
+    }
+
+    /// Rows in the checkpoint fixture; large enough that the staging change
+    /// shows above the digest step both sides share, like the arena tick.
+    const CHECK_ROWS: usize = 8_192;
+    /// Timed checkpoint calls per side.
+    const CHECK_ITERS: usize = 200;
+
+    /// The pre-change [`World::checkpoint_with`] body, kept as the A side of
+    /// the receipt: one arena append per staged field.
+    fn checkpoint_field_by_field(w: &World, arena: &mut PhaseArena) -> Result<u64, ArenaError> {
+        let needed = w.checkpoint_len();
+        if arena.byte_capacity() < needed {
+            return Err(ArenaError::Overflow {
+                needed,
+                capacity: arena.byte_capacity(),
+            });
+        }
+        arena.clear_bytes();
+        let mut id: u32 = 0;
+        for loc in &w.locs {
+            if loc.alive {
+                let table = &w.tables[usize::from(loc.mask)];
+                let row = usize::try_from(loc.row).map_err(|_| ArenaError::Overflow {
+                    needed: usize::MAX,
+                    capacity: usize::MAX,
+                })?;
+                arena.try_extend_bytes(&id.to_le_bytes())?;
+                arena.try_extend_bytes(&[loc.mask])?;
+                if has_bit(loc.mask, P) {
+                    arena.try_extend_bytes(&table.pos[row].x.to_bits().to_le_bytes())?;
+                    arena.try_extend_bytes(&table.pos[row].y.to_bits().to_le_bytes())?;
+                }
+                if has_bit(loc.mask, V) {
+                    arena.try_extend_bytes(&table.vel[row].x.to_bits().to_le_bytes())?;
+                    arena.try_extend_bytes(&table.vel[row].y.to_bits().to_le_bytes())?;
+                }
+                if loc.mask & SPINE_MASK != 0 {
+                    let mut sink = ArenaSink {
+                        arena: &mut *arena,
+                        result: Ok(()),
+                    };
+                    table.spine_row(loc.mask, row).append_hash(&mut sink);
+                    sink.result?;
+                }
+            }
+            id = id.wrapping_add(1);
+        }
+        Ok(hash_bytes(arena.bytes()))
+    }
+
+    /// P+V rows plus one P-only, one V-only and two spine rows, with one dead
+    /// slot, so every staging branch is live.
+    fn checkpoint_world() -> World {
+        let mut w = World::new();
+        w.reserve(CHECK_ROWS + 8);
+        for i in 0..CHECK_ROWS {
+            let f = coord(i);
+            let _ = w.spawn(
+                Some(Position { x: f, y: -f }),
+                Some(Velocity { x: 0.5, y: -0.25 }),
+            );
+        }
+        let _ = w.spawn(Some(Position { x: 1.0, y: 2.0 }), None);
+        let _ = w.spawn(None, Some(Velocity { x: 3.0, y: 4.0 }));
+        let k = 7i64;
+        let mut covered = full_row(7);
+        covered.anim = None;
+        let _ = w.spawn_with(Some(Position { x: 9.0, y: 8.0 }), None, full_row(k));
+        let _ = w.spawn_with(None, Some(Velocity { x: 7.0, y: 6.0 }), covered);
+        let dead = w.spawn(Some(Position { x: 5.0, y: 5.0 }), None);
+        assert!(w.despawn(dead), "the dead slot stays in the slot list");
+        w
+    }
+
+    /// The packed staging writes exactly the field-by-field bytes and the
+    /// same digest, which is still the state hash.
+    #[test]
+    fn checkpoint_buffer_matches_the_field_by_field_bytes() {
+        let mut w = checkpoint_world();
+        let mut field_arena = PhaseArena::with_capacity(0, w.checkpoint_len());
+        let mut row_arena = PhaseArena::with_capacity(0, w.checkpoint_len());
+        let field = checkpoint_field_by_field(&w, &mut field_arena).expect("field path fits");
+        let row = w.checkpoint_with(&mut row_arena).expect("row path fits");
+        assert_eq!(row, field, "the two paths digest different bytes");
+        assert_eq!(field_arena.bytes(), row_arena.bytes(), "staged bytes moved");
+        assert_eq!(row, w.state_hash(), "the checkpoint left the hash law");
+        let moved = w.spawn(Some(Position { x: 0.5, y: 0.5 }), None);
+        let mut after = PhaseArena::with_capacity(0, w.checkpoint_len());
+        assert_ne!(
+            w.checkpoint_with(&mut after).expect("row path still fits"),
+            row,
+            "a spawn must move the digest"
+        );
+        assert!(w.despawn(moved));
+    }
+
+    /// Checkpoint receipt: the packed row staging against the pre-change
+    /// field-by-field body, interleaved on the same fixture.
+    /// Run: cargo test -p engine-ecs --lib --release checkpoint_bench_receipt
+    /// -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn checkpoint_bench_receipt() {
+        let world = checkpoint_world();
+        let mut field_arena = PhaseArena::with_capacity(0, world.checkpoint_len());
+        let mut row_arena = PhaseArena::with_capacity(0, world.checkpoint_len());
+        let mut field_runs = Vec::with_capacity(CHECK_ITERS);
+        let mut row_runs = Vec::with_capacity(CHECK_ITERS);
+        let mut field_digest = 0u64;
+        let mut row_digest = 0u64;
+        let pass = |arena: &mut PhaseArena, row: bool, digest: &mut u64| -> u128 {
+            let t = std::time::Instant::now();
+            let got = if row {
+                world.checkpoint_with(arena)
+            } else {
+                checkpoint_field_by_field(&world, arena)
+            };
+            let ns = t.elapsed().as_nanos();
+            *digest = got.expect("the checkpoint fits the pre-size");
+            ns
+        };
+        // Two warmup calls per side before the timing.
+        for _ in 0..2 {
+            let _ = pass(&mut field_arena, false, &mut field_digest);
+            let _ = pass(&mut row_arena, true, &mut row_digest);
+        }
+        for _ in 0..CHECK_ITERS {
+            field_runs.push(pass(&mut field_arena, false, &mut field_digest));
+            row_runs.push(pass(&mut row_arena, true, &mut row_digest));
+        }
+        field_runs.sort_unstable();
+        row_runs.sort_unstable();
+        let (old, new) = (field_runs[CHECK_ITERS / 2], row_runs[CHECK_ITERS / 2]);
+        eprintln!(
+            "checkpoint_p50_us={:.3} field_p50_us={:.3} speedup={:.2}x rows={CHECK_ROWS}",
+            micros(new),
+            micros(old),
+            ratio(old, new)
+        );
+        assert_eq!(
+            row_digest, field_digest,
+            "the two sides digest the same rows"
+        );
+        assert_eq!(field_arena.bytes(), row_arena.bytes(), "same bytes");
+        assert!(new < old, "the packed staging must not be the slower one");
     }
 }

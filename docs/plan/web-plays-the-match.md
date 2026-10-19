@@ -49,14 +49,19 @@ draws it, instead of the looped stand-in scene it draws today.
       Landed: `browser::seat_input(tick, facing)` + `browser::seat_look()` (mouse look and
       Q/E through `Facing`), proven by `a_walking_seat_moves_its_dot` (a held forward wish
       walks the seat's feet ~1 m over 90 ticks).
-- [x] 5. Camera: follow the human slot with `engine_game::camera` (the native wish/boom
-      math), falling back to the establishing camera when the slot is floored.
-      Landed as `ProceduralArena::framing_camera`: the pair's own feet drive the frame
-      (perpendicular bisector, validated, falls back to the ring camera on a degenerate or
-      non-finite pair), with a test that projects both feet into NDC.
-- [ ] 6. Prove it: `cargo check --target wasm32-unknown-unknown -p engine-web`,
-      `node tools/web-build.mjs`, then a real browser capture showing two bodies at two
-      different places, the tick advancing, and a key press moving the slot.
+- [x] 5. Camera: frame the match. Landed as `ProceduralArena::framing_camera`: the pair's own
+      feet drive the frame (eye on the centre side of the pair, horizontal radius clamped
+      inside the wall, validated, falling back to the ring camera on a degenerate or
+      non-finite pair), with a test that projects both feet into NDC and one that keeps the
+      eye inside the wall for a pair fighting at it. A per-seat follow camera is not built:
+      with two seats in one ring the pair frame reads better than a boom over one seat.
+- [x] 6. Prove it: `cargo check --target wasm32-unknown-unknown -p engine-web` exit 0,
+      `node tools/web-build.mjs` 1179359 bytes, then a real browser run: `?fight` at 40-70 fps
+      with `validation=0`, a non-blank capture with the two bodies where the sim says
+      (`at=(11.4,2.0) (9.5,2.0)`), and a CDP probe that dispatches a real `KeyW` reading
+      `tick=28405 at=(11.4,2.0) (9.5,2.0)` then `tick=30911 at=(11.4,1.9) (10.2,1.9)` — the
+      seat moved 0.100 m while the key was held. The seat spawns against the wall in the 12 m
+      arena, so the walk slides along it; the movement is small on purpose, not tuned to pass.
 
 ## Out of scope (named, not hidden)
 

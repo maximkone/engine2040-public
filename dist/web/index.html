@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>engine2040 arena</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #e8e8e8; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 8px; top: 8px; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; }
+  #build { position: fixed; left: 8px; bottom: 8px; z-index: 20; margin: 0; padding: 1px 6px; background: rgba(0, 0, 0, 0.55); border-radius: 3px; font-size: 11px; }
+  #golden { position: fixed; left: 8px; top: 40px; z-index: 20; margin: 0; padding: 4px 8px; background: rgba(0, 0, 0, 0.75); border-left: 4px solid #888; border-radius: 3px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  body[data-golden="ok"] #golden { border-left-color: #2fbf4a; }
+  body[data-golden="mismatch"] #golden, body[data-golden="error"] #golden { border-left-color: #ff3b30; background: #b00020; color: #fff; font-size: 16px; font-weight: 700; }
+  #input, #audio { position: fixed; right: 8px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  #input { top: 8px; }
+  #audio { top: 34px; }
+  /* QW3/QW12: how the module arrived (bundle, bytes fetched, download, compile, first frame). */
+  #load, #memory { position: fixed; right: 8px; top: 86px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; max-width: 60vw; white-space: pre-wrap; word-break: break-all; }
+  #memory { top: 112px; }
+  /* WEB9/WEB12: the net duel line, only when the address has ?server= or ?join=. #netstat is the detail under it. */
+  #net { display: none; position: fixed; right: 8px; top: 60px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  #netstat { display: none; position: fixed; left: 8px; top: 120px; z-index: 20; margin: 0; padding: 2px 8px; max-width: 60vw; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; white-space: pre-wrap; }
+  body[data-net] #net, body[data-net] #netstat { display: block; }
+  body[data-net="failed"] #net { background: #b00020; color: #fff; font-weight: 700; }
+  #report { position: fixed; left: 8px; right: 8px; bottom: 8px; margin: 0; padding: 6px 8px; max-height: 40vh; overflow: auto; background: rgba(0, 0, 0, 0.7); border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+  /* The arena page keeps the raw adapter line to two rows (it grows on hover) so the picture stays visible. */
+  body[data-mode="arena"] #report { right: 50vw; max-height: 3.4em; opacity: 0.85; }
+  body[data-mode="arena"] #report:hover { max-height: 40vh; opacity: 1; }
+  #arena-info { display: none; position: fixed; right: 8px; bottom: 8px; width: calc(50vw - 16px); flex-direction: column; gap: 3px; }
+  body[data-mode="arena"] #arena-info { display: flex; }
+  #arena-info pre { margin: 0; padding: 3px 8px; max-height: 5.6em; overflow: auto; background: rgba(0, 0, 0, 0.7); border-radius: 3px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+  #fatal { display: none; position: fixed; inset: 0; z-index: 10; overflow: auto; padding: 5vmin; background: #b00020; color: #fff; font: 600 clamp(16px, 2.4vmin, 26px)/1.5 system-ui, sans-serif; }
+  #fatal h1 { margin: 0 0 0.5em; font-size: 1.6em; }
+  #fatal ul { margin: 0.4em 0 0.8em; padding-left: 1.2em; }
+  body[data-state="fatal"] #fatal { display: block; }
+</style>
+</head>
+<body data-state="starting" data-commit="c48670109415">
+<canvas id="canvas"></canvas>
+<div id="hud">frame 0 | -- ms</div>
+<pre id="input">input: kb=0 mouse=0 pad=0</pre>
+<pre id="audio">audio: state=suspended</pre>
+<pre id="net">net: idle</pre>
+<pre id="netstat"></pre>
+<pre id="fight">fight: idle</pre>
+<pre id="load">load: fetching the engine</pre>
+<pre id="memory">memory: no reading yet</pre>
+<pre id="build">build: commit c48670109415</pre>
+<pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
+<pre id="report">starting</pre>
+<div id="arena-info">
+  <pre id="init">arena: starting</pre>
+  <pre id="passes">passes: waiting for the first frame</pre>
+  <pre id="receipt">receipt: waiting for the first frame</pre>
+  <pre id="capture">capture: asked for after frame 30</pre>
+  <pre id="tier">tier: choosing</pre>
+  <pre id="pipelines">pipelines: building behind the loader</pre>
+  <pre id="split">split: the first second is not over yet</pre>
+</div>
+<div id="fatal" role="alert">
+  <h1>This browser cannot run the game</h1>
+  <p id="fatal-reason"></p>
+  <p>The game needs WebGPU. It runs in:</p>
+  <ul>
+    <li>Chrome 113 or newer</li>
+    <li>Edge 113 or newer</li>
+    <li>Safari 26 or newer</li>
+    <li>Firefox 141 or newer on Windows</li>
+  </ul>
+  <p>Open the page over https or from localhost: browsers switch WebGPU off on plain http pages.</p>
+</div>
+<noscript>
+  <div style="position:fixed;inset:0;z-index:11;padding:5vmin;background:#b00020;color:#fff;font:600 20px system-ui,sans-serif">This page needs JavaScript, WebAssembly and WebGPU (Chrome or Edge 113+, Safari 26+, Firefox 141+ on Windows).</div>
+</noscript>
+<script type="module">
+import init, { run, run_arena, lose_device, destroy_device, input_sample, request_arena_capture, run_net } from "./engine.js";
+import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory } from "./loader.js";
+
+// For the headless check: loseDevice destroys the device as a forced loss and the page starts over; destroyDevice is the
+// page ending its device on purpose (no retry, data-state=stopped); the check also asks for a fresh GPU copy of the canvas.
+window.loseDevice = lose_device;
+window.destroyDevice = destroy_device;
+// WEB7: the headless check calls this at the tick lines of an input script it replays as real key and mouse events.
+window.inputSample = input_sample;
+window.requestArenaCapture = request_arena_capture;
+// A page that is going away frees its device on purpose; a page that goes to the back/forward cache (persisted) keeps it.
+addEventListener("pagehide", (e) => { if (!e.persisted) destroy_device(); });
+// The arena is the page; `?square` opens the plain WebGPU shell (a cleared canvas and one moving square).
+const query = new URLSearchParams(location.search);
+const square = query.has("square");
+
+try {
+  // QW3/QW12: loader.js fetches and compiles the module (streaming, cached by hash) and times it; a wrong MIME type or a
+  // missing file throws here and lands in the fatal page below with its reason.
+  const loaded = await loadEngine(import.meta.url);
+  const stats = (window.loadStats = loaded.stats); // live: initMs, firstFrameMs and the final cache outcome are added as they happen
+  window.loadSettled = loaded.settled;
+  const show = () => { document.getElementById("load").textContent = loadLine(stats, stats.initMs, stats.firstFrameMs); };
+  const tInit = performance.now();
+  const wasm = await init({ module_or_path: loaded.module });
+  stats.initMs = performance.now() - tInit;
+  show();
+  // QW14: linear memory in 64 KiB pages at the first frame and every 60 s (window.memoryLog); growMemory is the headless check's forced grow.
+  const memoryLog = (window.memoryLog = []);
+  const mem = watchMemory(wasm.memory, memoryLog);
+  window.sampleMemory = () => { mem.sample(); document.getElementById("memory").textContent = memoryLine(memoryLog); return memoryLog.at(-1).pages; };
+  window.growMemory = (pages) => { wasm.memory.grow(pages); return window.sampleMemory(); };
+  watchFirstFrame(document.body).then((t) => {
+    stats.firstFrameMs = t;
+    window.sampleMemory();
+    return loaded.settled.then(show);
+  });
+  // WEB9/WEB12: `?join=host:port&cert=<sha256 hex>` (or `?server=ws://host:port`, optionally `&wt=https://host:port/e2040&cert=`)
+  // makes the page join a native dedicated server and play a duel (`&play`: with the keyboard; else the proof script, `&ticks=N`
+  // the match length); it prints `net: transport=... ticks=... hash=... peers=...` to #net and the console and leaves the line
+  // in window.netResult. It needs no GPU, so it starts beside the arena. The rest of the address is read in the wasm module.
+  if (query.has("server") || query.has("join")) {
+    window.netResult = run_net(location.search).then((line) => (window.netLine = line));
+  }
+  await (square ? run("canvas") : run_arena("canvas"));
+} catch (e) {
+  // The wasm module did not load or start (no WebAssembly, a missing file, a crash).
+  // A missing WebGPU is not this path: `run` and `run_arena` report that themselves.
+  console.error(e);
+  document.getElementById("fatal-reason").textContent = "The engine did not start: " + e + " (fallback=load-failed)";
+  document.getElementById("report").textContent = JSON.stringify({
+    ok: false,
+    reason: "load-failed",
+    fallback: "load-failed",
+    detail: String(e),
+    commit: document.body.dataset.commit,
+  });
+  document.body.dataset.fallback = "load-failed";
+  document.body.dataset.state = "fatal";
+}
+</script>
+</body>
+</html>

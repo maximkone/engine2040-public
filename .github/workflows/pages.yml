@@ -3,8 +3,8 @@ name: pages
 # WEB10: the browser build on a URL the work PC opens (owner 2026-10-17: public is fine). Builds crates/web for
 # wasm32-unknown-unknown exactly like web-build.yml, then deploys the site to GitHub Pages from the Actions flow.
 # Runs on every push of the public mirror's main (each snapshot export) and on demand; the private dev repo never
-# runs it. GitHub Pages cannot set COOP/COEP headers, so the page is single-threaded (WEB14 adds a service worker
-# when threads are wanted). The page prints the commit and the golden hash; a wrong MIME for the module is checked
+# runs it. GitHub Pages cannot set COOP/COEP headers; WEB14's coi-serviceworker.js adds them from a service worker and
+# the page reloads once, so crossOriginIsolated can be true. The Rust build still runs one thread. The page prints the commit and the golden hash; a wrong MIME for the module is checked
 # here before anything is published.
 # DOC1: the site is three parts under one URL. The game (dist/web) is the root; the handbook (docs/book, built by
 # mdBook) is /docs/; rustdoc for the crates a game author touches is /docs/api/. A broken internal link in the book

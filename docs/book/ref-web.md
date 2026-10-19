@@ -10,6 +10,7 @@ Detail for humans and AIs. Names, strings, numbers and commands were read from t
 | Rapier ragdoll on wasm32 | `engine-physics --features rapier` | Equal digest; cost 1.4 to 1.85 times native | probe section 3 |
 | Crate legs that type-check for wasm32 | `wasm-check.yml` (38 legs) | 34 of 37 in the probe; `engine-net --features quic`, `engine-app` and `engine-scene` did not (fixed by feature or by design) | probe section 2 |
 | Browser shell: WebGPU device, moving square, JSON line, golden in page | `crates/web` | Built and checked headless (WEB4) | `web-build.yml`, `tools/web-browse.mjs` |
+| Cross-origin isolation host (WEB14) | `crates/web/coi-serviceworker.js`, `index.html` | Worker stamps COOP `same-origin` and COEP `require-corp`; the page reloads once, prints `coi: isolated=<bool> reloads=<n>` and the ready line carries `crossOriginIsolated` | unit tests (`tools/web-build.test.mjs`); the live Pages proof of `crossOriginIsolated=true` is still open |
 | Clock seam | `crates/clock` | Used by shell, assets, app and parts of render | `tools/wasm-gate.mjs` ratchet |
 | Fetched-bytes asset reader | `crates/assets/src/asset_source/bundle.rs` | Library. The shell loads no content yet | unit tests |
 | WebTransport server | `crates/net/src/webtransport*` | Library. No caller, no browser client | unit tests |
@@ -49,12 +50,15 @@ Crate types `cdylib` (wasm-bindgen input) and `rlib` (native build and pure-modu
 | `src/report.rs` | Pure: hand-written JSON, `Ready::line()`, `Failure`, `failed_line` |
 | `src/shader.wgsl` | `vs`, `fs`; 32-byte uniform `square` (test checks field order) |
 | `index.html` | Canvas, HUD, golden box, report box, fatal box; `{{COMMIT}}` replaced at build |
+| `coi-serviceworker.js` | WEB14: stamps `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` on every response it controls; `install` calls `skipWaiting`, `activate` calls `clients.claim` |
 
 Page contract. `index.html` imports `engine.js`, calls `init()` then `run("canvas")`, sets `window.loseDevice = lose_device`. Any throw there sets `data-state="fatal"` and a line with `reason: "load-failed"`. Attributes the headless check reads: `<body data-state>` (`starting`, `running`, `recovering`, `fatal`), `data-generation`, `data-golden` (`ok`, `mismatch`, `error`). Elements: `#report` (JSON line), `#hud` (`frame N | X ms | Y fps`, or `frame N | -- ms`), `#golden`, `#fatal` and `#fatal-reason`. The loud box lists Chrome 113, Edge 113, Safari 26 and Firefox 141 (Windows).
 
+WEB14 isolation. When `window.crossOriginIsolated` is false the module first registers `./coi-serviceworker.js` (relative to the page, so the worker's scope is the site root), waits for `navigator.serviceWorker.ready`, then reloads once. It reloads only when the page is a secure context, the worker is not already controlling, and the `sessionStorage` key `e2040-coi-reloaded` is absent, so a worker that never delivers isolation cannot loop the page. Any failure keeps the page single-threaded. The line `#coi` always exists in the HTML and always ends as `coi: isolated=<true|false> reloads=<n>`, with a short note in parentheses when isolation did not happen; `<body data-coi>` is `isolated` or `single`, and `window.coi` holds `{ isolated, reloads, note }`.
+
 ### 3.1 Ready line (`"ok":true`)
 
-Printed to `#report`, the console, and returned from `run`. Keys in order: `ok`, `commit` (12 hex from `--commit`), `backend` (for example `BrowserWebGpu`), `adapter` (`name`, `deviceType`, `vendor`, `architecture`, `device`, `description`; the last four are raw `GPUAdapterInfo` strings read again through `requestAdapter`), `features` (WebGPU names), `limits` (every WebGPU limit by WebGPU name, for example `maxStorageBuffersPerShaderStage`), `wasmMemoryPages`, `wasmMemoryBytes`, `deviceGeneration` (1, then +1 per recovered loss), `canvas` (`width`, `height`), `surfaceFormat` (for example `bgra8unorm`), `userAgent`.
+Printed to `#report`, the console, and returned from `run`. Keys in order: `ok`, `commit` (12 hex from `--commit`), `backend` (for example `BrowserWebGpu`), `adapter` (`name`, `deviceType`, `vendor`, `architecture`, `device`, `description`; the last four are raw `GPUAdapterInfo` strings read again through `requestAdapter`), `features` (WebGPU names), `limits` (every WebGPU limit by WebGPU name, for example `maxStorageBuffersPerShaderStage`), `wasmMemoryPages`, `wasmMemoryBytes`, `deviceGeneration` (1, then +1 per recovered loss), `canvas` (`width`, `height`), `surfaceFormat` (for example `bgra8unorm`), `userAgent`, `crossOriginIsolated` (WEB14: `window.crossOriginIsolated` when the line was printed; the page's `#coi` line adds the reload count).
 
 ### 3.2 Failed line and reasons
 
@@ -102,7 +106,7 @@ Tests: `crates/web/src/{lib,anim,golden,limits,recovery,report}.rs` (1, 11, 6, 5
 
 ## 4. `tools/web-build.mjs`
 
-Usage: `node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt]`. Default commit: `ENGINE_WEB_COMMIT`, else `git rev-parse --short=12 HEAD`, else `unknown`. Exports for the test: `TARGET = wasm32-unknown-unknown`, `PROFILE = web`, `PACKAGE = engine-web`, `OUT_NAME = engine`, `SIZE_LIMIT_BYTES = 8388608`, `WASM_OPT_FLAGS`, `DIST_FILES`, `lockedVersion`, `cargoArgs`, `bindgenArgs`, `renderHtml`, `build`, `parseArgs`.
+Usage: `node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt]`. Default commit: `ENGINE_WEB_COMMIT`, else `git rev-parse --short=12 HEAD`, else `unknown`. Exports for the test: `TARGET = wasm32-unknown-unknown`, `PROFILE = web`, `PACKAGE = engine-web`, `OUT_NAME = engine`, `COI_WORKER = coi-serviceworker.js` (WEB14), `SIZE_LIMIT_BYTES = 8388608`, `WASM_OPT_FLAGS`, `DIST_FILES`, `lockedVersion`, `cargoArgs`, `bindgenArgs`, `renderHtml`, `readCoiWorker`, `build`, `parseArgs`.
 
 | Step | Command | Check |
 |---|---|---|
@@ -112,7 +116,7 @@ Usage: `node tools/web-build.mjs [--out dist/web] [--commit <hash>] [--no-opt]`.
 | 4 | `wasm-bindgen --target web --no-typescript --out-dir <tmp> --out-name engine <wasm>` | `engine.js`, `engine_bg.wasm` exist |
 | 5 | if `wasm-opt --version` works: `wasm-opt <wasm> -o <wasm> -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-multivalue --enable-reference-types --enable-mutable-globals` | absent: a message, not an error |
 | 6 | `twiggy top -n 8 <wasm>` if installed | first 12 lines go to `build.json` |
-| 7 | copy files, write `index.html` and `build.json`; total must be under the limit | else the output is removed |
+| 7 | copy files (including `coi-serviceworker.js`), write `index.html` and `build.json`; total must be under the limit | else the output is removed |
 
 Success transcript: `[web-build] cargo build --profile web --target wasm32-unknown-unknown (commit <hash>)`, `[web-build] wasm-bindgen --target web`, `[web-build] wasm-opt -Oz ...` (or `not installed`), `[web-build] dist/web <N> bytes (limit 8388608); wasm <N> bytes, <N> gzip`. Exit 0.
 
@@ -126,9 +130,10 @@ Success transcript: `[web-build] cargo build --profile web --target wasm32-unkno
 | `<label> failed (exit N): <cmd> <args>` plus the last 25 lines | cargo, wasm-bindgen or wasm-opt failed |
 | `cargo reported success but <path> does not exist` / `wasm-bindgen wrote <files>; expected engine.js and engine_bg.wasm` | unexpected output |
 | `crates/web/index.html lost its {{COMMIT}} placeholder` | template |
+| `crates/web/coi-serviceworker.js is missing (WEB14): the page would never be cross-origin isolated` | WEB14 worker file |
 | `dist/web is <N> bytes, over the 8388608 byte limit` | size |
 
-Exit 1 for these; exit 2 for usage (`web-build: unknown argument <x>`). Tests: `node --test tools/web-build.test.mjs` (17 tests).
+Exit 1 for these; exit 2 for usage (`web-build: unknown argument <x>`). Tests: `node --test tools/web-build.test.mjs` (26 tests).
 
 ## 5. `tools/web-browse.mjs`
 

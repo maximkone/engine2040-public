@@ -73,6 +73,16 @@ pub(crate) fn user_agent() -> String {
         .unwrap_or_default()
 }
 
+/// `window.crossOriginIsolated` (WEB14): true when the page got the COOP and COEP headers, which is
+/// what makes `SharedArrayBuffer` legal. Read through reflection (like `navigator.gpu`): the page's
+/// service worker supplies the headers on a host that cannot send them.
+pub(crate) fn cross_origin_isolated() -> bool {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &JsValue::from_str("crossOriginIsolated")).ok())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// 64 KiB pages of the module's linear memory right now.
 pub(crate) fn wasm_pages() -> u64 {
     core::arch::wasm32::memory_size::<0>() as u64
@@ -525,6 +535,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         canvas: (w, h),
         surface_format: format!("{:?}", config.format).to_ascii_lowercase(),
         user_agent: user_agent(),
+        cross_origin_isolated: cross_origin_isolated(),
     };
 
     let mut frame = Frame {

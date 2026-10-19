@@ -10,7 +10,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-export const FILES = ["index.html", "loader.js", "engine.js", "engine_bg.wasm", "build.json"];
+export const FILES = ["index.html", "loader.js", "coi-serviceworker.js", "engine.js", "engine_bg.wasm", "build.json"];
 export const WASM_FILE = "engine_bg.wasm";
 
 /** Ask for `file` under `base` with a HEAD request that offers br and gzip; returns the facts of the answer. */

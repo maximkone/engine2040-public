@@ -40,7 +40,9 @@ export const WASM_OPT_AB = ["-Oz", "-Os", "-O3"]; // the levels --opt-ab compare
 export const SWEEP_LEVELS = ["z", "s", "3"]; // the opt-levels --size-sweep builds; the first wins a tie
 export const TWIGGY_ITEMS = 20;
 // The files the page needs, in the order build.json lists them. Anything else wasm-bindgen writes (snippets/) is copied too.
-export const DIST_FILES = ["index.html", "loader.js", "engine.js", "engine_bg.wasm", "build.json"];
+// WEB14: coi-serviceworker.js is the cross-origin-isolation worker the page registers; without it the page is single-threaded.
+export const COI_WORKER = "coi-serviceworker.js";
+export const DIST_FILES = ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm", "build.json"];
 // What a published bundle may hold: the files above and wasm-bindgen's snippets/ folder. A content bundle (WEB6) adds its own name
 // here when it lands; the Pages workflow adds the handbook (docs/) and llms.txt for the assembled site.
 export const PUBLIC_FILES = [...DIST_FILES];
@@ -70,6 +72,17 @@ export const bindgenFix = (version) => `cargo install wasm-bindgen-cli --version
 export function renderHtml(template, commit) {
   if (!template.includes("{{COMMIT}}")) throw new BuildError("crates/web/index.html lost its {{COMMIT}} placeholder");
   return template.replaceAll("{{COMMIT}}", commit);
+}
+
+// WEB14: the text of the cross-origin-isolation worker the page registers. A missing file is refused here,
+// with the same message whether the source is gone or the copy failed, so a page never ships without it.
+export function readCoiWorker(deps, rootDir) {
+  const path = join(rootDir, "crates", "web", COI_WORKER);
+  try {
+    return deps.readText(path);
+  } catch {
+    throw new BuildError(`crates/web/${COI_WORKER} is missing (WEB14): the page would never be cross-origin isolated`);
+  }
 }
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -216,9 +229,10 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     }
 
     const page = renderHtml(deps.readText(join(rootDir, "crates", "web", "index.html")), hash);
+    const worker = readCoiWorker(deps, rootDir);
 
     // WEB10: a file nobody listed is refused before outDir is touched.
-    const shipped = [...listFiles(work).filter((rel) => !rel.endsWith(".d.ts")), "index.html", "loader.js", "build.json"];
+    const shipped = [...listFiles(work).filter((rel) => !rel.endsWith(".d.ts")), "index.html", "loader.js", COI_WORKER, "build.json"];
     const stray = nonPublicFiles(shipped);
     if (stray.length) throw new BuildError(`the build holds ${stray.length} file(s) outside the public list: ${stray.join(", ")}`);
 
@@ -233,6 +247,7 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     }
     writeFileSync(join(outDir, "index.html"), page);
     writeFileSync(join(outDir, "loader.js"), deps.readText(join(rootDir, "crates", "web", "loader.js"))); // QW3/QW12: the page imports it
+    writeFileSync(join(outDir, COI_WORKER), worker); // WEB14: the page registers it; 200 on the site is one more deploy check
 
     const files = {};
     let totalBytes = 0;

@@ -833,6 +833,13 @@ _38 crates, 1259 Rust files. One line per file: `crate/path` · lines · the fil
 - `observe/tests/it/tick_histogram_vectors.rs` · 166 · Tick-length owed-histogram vectors separating stall shapes.
 - `observe/tests/it/w1_pf9_rerun.rs` · 80 · (no //! line)
 
+## ossim (engine-ossim, 5 files, 1923 lines)
+- `ossim/src/lib.rs` · 29 · ossim: the headless core of "You're the OS", an OS puzzle game.
+- `ossim/src/model.rs` · 366 · ossim model: the integer types one screen of "You're the OS" needs.
+- `ossim/src/sim.rs` · 757 · ossim sim: one deterministic tick over four CPUs, RAM, swap and one I/O
+- `ossim/src/stages.rs` · 199 · ossim stages: twelve const rows, easy boot to a six-minute last patch.
+- `ossim/src/tests.rs` · 572 · ossim tests: timeline, refusal, swap, scoring, determinism and stage paths.
+
 ## perf (engine-perf, 37 files, 13864 lines)
 - `perf/src/lib.rs` · 39 · perf: deterministic budget workloads plus a counting allocator.
 - `perf/src/main.rs` · 1820 · perf: stress harness -> perf.csv. Presentation only, never hashed.

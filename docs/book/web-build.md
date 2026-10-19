@@ -36,7 +36,7 @@ Use binaryen release `version_133` for `wasm-opt`. Do not use the apt package (v
 node tools/web-build.mjs
 ```
 
-The tool runs `cargo build --locked --profile web --target wasm32-unknown-unknown -p engine-web`, then the wasm-bindgen CLI, then wasm-opt, and writes `dist/web`: `index.html`, `engine.js`, `engine_bg.wasm` and `build.json` (sizes, gzip sizes, SHA-256, tool versions, the commit). It exits 1 and says which step failed. Flags: `--out <dir>`, `--commit <hash>` (the page prints it) and `--no-opt` (skip wasm-opt).
+The tool runs `cargo build --locked --profile web --target wasm32-unknown-unknown -p engine-web`, then the wasm-bindgen CLI, then wasm-opt, and writes `dist/web`: `index.html`, `loader.js`, `coi-serviceworker.js` (the WEB14 isolation worker), `engine.js`, `engine_bg.wasm` and `build.json` (sizes, gzip sizes, SHA-256, tool versions, the commit). It exits 1 and says which step failed. Flags: `--out <dir>`, `--commit <hash>` (the page prints it) and `--no-opt` (skip wasm-opt).
 
 ```sh
 node tools/web-build.mjs --no-opt
@@ -96,7 +96,7 @@ curl -sI https://maximkone.github.io/engine2040-public/engine_bg.wasm
 ## Limits to plan around
 
 - WebGPU only. Our bloom, TAA, GTAO and skinning passes use compute shaders and storage buffers; WebGL2 has none. A browser without WebGPU gets the fatal page, not a crash.
-- One thread. GitHub Pages cannot set the COOP and COEP headers that threads need, so the page is single-threaded.
+- One thread today. GitHub Pages cannot set the COOP and COEP headers that threads need; `coi-serviceworker.js` (WEB14) adds them from a service worker and the page reloads once, so `crossOriginIsolated` can be true. No Rust code uses threads yet, so the build stays single-threaded.
 - wasm32 memory tops out at 4 GiB; the plan's bar for the web build is a peak under 1.5 GB.
 - Audio starts only after a user gesture.
 - Browsers with WebGPU on by default (stated by the plan, not tested here): Chrome and Edge 113, Firefox 141 on Windows, Safari 26.

@@ -113,6 +113,10 @@ pub struct Ready {
     pub canvas: (u32, u32),
     pub surface_format: String,
     pub user_agent: String,
+    /// `window.crossOriginIsolated` when the line was printed (WEB14): true means the page got the
+    /// COOP/COEP headers (from the service worker on a host that cannot send them) and may use
+    /// `SharedArrayBuffer`. The page's own `#coi` line adds how many reloads it took.
+    pub cross_origin_isolated: bool,
 }
 
 /// What the arena page adds to its ready line: the quality tier it chose (WEB8), the pipeline
@@ -183,7 +187,8 @@ impl Ready {
             .uint("deviceGeneration", u64::from(self.generation))
             .raw("canvas", &canvas.finish())
             .str("surfaceFormat", &self.surface_format)
-            .str("userAgent", &self.user_agent);
+            .str("userAgent", &self.user_agent)
+            .bool("crossOriginIsolated", self.cross_origin_isolated);
         line
     }
 }
@@ -293,6 +298,7 @@ mod tests {
             canvas: (1280, 720),
             surface_format: "bgra8unorm".into(),
             user_agent: "Mozilla/5.0 HeadlessChrome".into(),
+            cross_origin_isolated: false,
         }
     }
 
@@ -323,12 +329,34 @@ mod tests {
             r#""deviceGeneration":2"#,
             r#""canvas":{"width":1280,"height":720}"#,
             r#""surfaceFormat":"bgra8unorm""#,
+            // WEB14: the ready line carries the page's cross-origin isolation beside the other facts.
+            r#""crossOriginIsolated":false"#,
         ] {
             assert!(line.contains(needle), "{needle} missing from {line}");
         }
         // A quote or a newline inside a value must not end the line early.
         assert!(line.contains(r#"NVIDIA \"RTX\" 3050\\x"#), "{line}");
         assert!(line.contains(r#"line one\nline two"#), "{line}");
+    }
+
+    #[test]
+    fn the_ready_line_reports_cross_origin_isolation_when_it_is_true() {
+        let mut ready = sample();
+        ready.cross_origin_isolated = true;
+        let line = ready.line();
+        assert!(line.contains(r#""crossOriginIsolated":true"#), "{line}");
+        // The arena line (tier, pipelines, validation) keeps it too.
+        let facts = ArenaFacts {
+            tier: "web".into(),
+            tier_why: "default".into(),
+            pipelines: 1,
+            pipelines_ms: 2,
+            late_pipelines: 0,
+            validation: 0,
+        };
+        let arena = ready.line_with(&facts);
+        assert!(arena.contains(r#""crossOriginIsolated":true"#), "{arena}");
+        assert!(sample().line().contains(r#""crossOriginIsolated":false"#));
     }
 
     #[test]

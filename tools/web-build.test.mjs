@@ -11,13 +11,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BuildError, DIST_FILES, PUBLIC_DIRS, PUBLIC_FILES, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
-  checkPublic, listFiles, lockedVersion, nonPublicFiles, parseArgs, realDeps, renderHtml, sizeSweep,
+  BuildError, COI_WORKER, DIST_FILES, PUBLIC_DIRS, PUBLIC_FILES, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
+  checkPublic, listFiles, lockedVersion, nonPublicFiles, parseArgs, readCoiWorker, realDeps, renderHtml, sizeSweep,
 } from "./web-build.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE = readFileSync(join(REPO, "crates", "web", "index.html"), "utf8");
 const LOADER = readFileSync(join(REPO, "crates", "web", "loader.js"), "utf8");
+const WORKER = readFileSync(join(REPO, "crates", "web", COI_WORKER), "utf8");
 const LOCK = 'name = "wasm-bindgen"\nversion = "0.2.128"\nsource = "registry+x"\n\nname = "wgpu"\nversion = "30.0.1"\n';
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 
@@ -28,6 +29,7 @@ function scratch(lock = LOCK) {
   writeFileSync(join(dir, "Cargo.lock"), lock);
   writeFileSync(join(dir, "crates", "web", "index.html"), TEMPLATE);
   writeFileSync(join(dir, "crates", "web", "loader.js"), LOADER);
+  writeFileSync(join(dir, "crates", "web", COI_WORKER), WORKER);
   return { dir, out: join(dir, "dist", "web"), done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -95,7 +97,7 @@ test("build writes exactly the dist/web files, with real sizes and hashes in bui
     assert.deepEqual(listFiles(s.out), [...DIST_FILES].sort());
     const onDisk = JSON.parse(readFileSync(join(s.out, "build.json"), "utf8"));
     assert.deepEqual(onDisk, info);
-    for (const name of ["index.html", "loader.js", "engine.js", "engine_bg.wasm"]) {
+    for (const name of ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm"]) {
       const bytes = readFileSync(join(s.out, name));
       assert.equal(info.files[name].bytes, bytes.length, name);
       assert.equal(info.files[name].sha256, sha(bytes), name);
@@ -321,6 +323,56 @@ test("build() refuses a file nobody listed before it touches dist/web", () => {
     assert.ok(existsSync(join(s.out, "previous.txt")), "the last build is untouched");
     // And the same toolchain without the stray file builds.
     assert.doesNotThrow(() => build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run)));
+  } finally {
+    s.done();
+  }
+});
+
+// ---- WEB14: cross-origin isolation from a service worker ----
+
+test("WEB14: the isolation worker ships into dist/web and is listed in build.json", () => {
+  const s = scratch();
+  try {
+    const t = toolchain(s.dir);
+    const info = build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run));
+    assert.ok(DIST_FILES.includes(COI_WORKER) && PUBLIC_FILES.includes(COI_WORKER), "the worker is on the dist and public lists");
+    assert.equal(readFileSync(join(s.out, COI_WORKER), "utf8"), WORKER, "the worker ships byte for byte");
+    const bytes = readFileSync(join(s.out, COI_WORKER));
+    assert.equal(info.files[COI_WORKER].bytes, bytes.length);
+    assert.equal(info.files[COI_WORKER].sha256, sha(bytes));
+    // The worker itself stamps both headers and takes control at once, so the page's one reload is controlled.
+    for (const needle of ["Cross-Origin-Opener-Policy", '"same-origin"', "Cross-Origin-Embedder-Policy", '"require-corp"', 'addEventListener("fetch"', "skipWaiting", "clients.claim"]) {
+      assert.ok(WORKER.includes(needle), `the worker lost ${needle}`);
+    }
+    assert.equal(readCoiWorker(realDeps(), REPO), WORKER);
+  } finally {
+    s.done();
+  }
+});
+
+test("WEB14: the page registers the worker only when it is not isolated, reloads at most once, and says so on #coi", () => {
+  const html = renderHtml(TEMPLATE, "abc");
+  assert.ok(html.includes('<pre id="coi">coi: isolated=false reloads=0</pre>'), "the coi line exists before any script runs, so the page is never blank");
+  assert.match(html, /window\.crossOriginIsolated/);
+  assert.match(html, /navigator\.serviceWorker\.register\("\.\/coi-serviceworker\.js"\)/);
+  assert.match(html, /navigator\.serviceWorker\.ready/);
+  assert.match(html, /Promise\.race/);
+  assert.match(html, /sessionStorage\.getItem/);
+  assert.match(html, /sessionStorage\.setItem/);
+  assert.match(html, /location\.reload\(\)/);
+  // The reload is bounded: an isolated page registers nothing, and a page that already reloaded stops.
+  const settle = html.slice(html.indexOf("async function settleIsolation"));
+  assert.ok(settle.indexOf("if (window.crossOriginIsolated) return") < settle.indexOf("serviceWorker.register"), "an isolated page must not register the worker");
+  assert.ok(settle.indexOf("if (reloads >= 1) return") < settle.indexOf("location.reload()"), "the reload must happen at most once");
+});
+
+test("WEB14: a build with no isolation worker stops with a named message and ships nothing", () => {
+  const s = scratch();
+  try {
+    rmSync(join(s.dir, "crates", "web", COI_WORKER), { force: true });
+    const t = toolchain(s.dir);
+    assert.throws(() => build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run)), (e) => e instanceof BuildError && /coi-serviceworker\.js is missing \(WEB14\)/.test(e.message));
+    assert.ok(!existsSync(s.out), "a page without its worker is not shipped");
   } finally {
     s.done();
   }
